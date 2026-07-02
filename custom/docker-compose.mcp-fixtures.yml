@@ -1,0 +1,27 @@
+name: weknora
+
+services:
+  weknora-custom-mcp-fixtures:
+    build:
+      context: ..
+      dockerfile: custom/services/mcp-fixtures/Dockerfile
+    image: weknora-custom-mcp-fixtures:local
+    container_name: weknora-custom-mcp-fixtures
+    restart: unless-stopped
+    environment:
+      MCP_FIXTURES_ADDR: ":8092"
+      MCP_FIXTURE_FS_ROOT: /tmp/weknora-mcp-fixtures-fs
+    volumes:
+      - mcp-fixtures-fs:/tmp/weknora-mcp-fixtures-fs
+    ports:
+      - "127.0.0.1:8092:8092"
+    networks:
+      - WeKnora-network-dev
+
+networks:
+  WeKnora-network-dev:
+    name: weknora_WeKnora-network-dev
+    external: true
+
+volumes:
+  mcp-fixtures-fs:

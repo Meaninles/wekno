@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>登录中…</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: #f5f6f7;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 48px 40px;
+  text-align: center;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.06);
+  max-width: 360px;
+  width: 90%;
+}
+.icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.icon-loading { background: #e8f5e9; }
+.icon-success { background: #e8f5e9; }
+.icon-error { background: #ffeaea; }
+.icon svg { width: 28px; height: 28px; }
+#msg {
+  font-size: 16px;
+  color: #333;
+  line-height: 1.6;
+}
+.sub {
+  font-size: 13px;
+  color: #999;
+  margin-top: 8px;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spinner {
+  animation: spin 1s linear infinite;
+}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon icon-loading" id="icon">
+    <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="#07C160" stroke-width="2.5">
+      <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <div id="msg">正在完成登录…</div>
+  <div class="sub" id="sub">请稍候</div>
+</div>
+<script src="auth-callback.js"></script>
+</body>
+</html>

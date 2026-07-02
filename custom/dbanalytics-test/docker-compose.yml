@@ -1,0 +1,41 @@
+name: weknora-dbanalytics-test
+
+services:
+  weknora-custom-dbanalytics-pg:
+    image: postgres:16-alpine
+    container_name: weknora-custom-dbanalytics-pg
+    environment:
+      POSTGRES_DB: ops_warehouse
+      POSTGRES_USER: analytics_user
+      POSTGRES_PASSWORD: analytics_pwd
+    ports:
+      - "15432:5432"
+    volumes:
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics_user -d ops_warehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  weknora-custom-dbanalytics-mysql:
+    image: mysql:8.4
+    container_name: weknora-custom-dbanalytics-mysql
+    environment:
+      MYSQL_DATABASE: retail_ops
+      MYSQL_USER: analytics_user
+      MYSQL_PASSWORD: analytics_pwd
+      MYSQL_ROOT_PASSWORD: root_pwd
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+    ports:
+      - "13306:3306"
+    volumes:
+      - ./mysql-init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h127.0.0.1 -uanalytics_user -panalytics_pwd --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30

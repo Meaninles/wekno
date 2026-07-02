@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WeKnora 配置与部署指南</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --primary: #07C160;
+  --primary-dark: #06ad54;
+  --primary-06: rgba(7,193,96,0.06);
+  --bg: #f7f8fa;
+  --white: #fff;
+  --text: #1a1a1a;
+  --text2: #555;
+  --text3: #999;
+  --border-light: #f0f2f1;
+  --gray-bg: #f5f5f5;
+}
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* 顶栏 */
+.guide-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px 14px;
+  background: var(--white);
+  border-bottom: 1px solid var(--border-light);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.guide-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.guide-logo svg { width: 16px; height: 16px; color: #fff; }
+.guide-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* 主体 */
+.guide-body {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+
+/* 简介 */
+.guide-intro {
+  background: var(--white);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: var(--text2);
+  line-height: 1.8;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+.guide-intro a {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 600;
+  word-break: break-all;
+}
+.guide-intro a:hover { text-decoration: underline; }
+
+/* 步骤列表 */
+.guide-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.guide-step {
+  background: var(--white);
+  border-radius: 14px;
+  padding: 20px;
+  position: relative;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+.guide-step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.guide-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.guide-step-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.guide-step-desc {
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.8;
+  margin-top: 12px;
+  padding-left: 38px;
+}
+.guide-step-desc a {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 500;
+}
+.guide-step-desc a:hover { text-decoration: underline; }
+.guide-step-desc code {
+  background: var(--gray-bg);
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* 路径导航 */
+.guide-step-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-left: 38px;
+  font-size: 12px;
+  color: var(--text2);
+}
+.guide-step-path .path-item {
+  background: var(--gray-bg);
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-weight: 500;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.guide-step-path .path-item svg { width: 13px; height: 13px; }
+.guide-step-path .path-arrow { color: var(--text3); font-size: 15px; }
+
+/* 高亮提示 */
+.guide-step-highlight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px 12px 38px;
+  background: var(--primary-06);
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--primary);
+  font-weight: 500;
+}
+.guide-step-highlight svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+/* 底部提示 */
+.guide-tip {
+  background: #fefaf0;
+  border-radius: 14px;
+  padding: 16px 18px;
+  margin-top: 16px;
+  font-size: 13px;
+  color: #8a7340;
+  line-height: 1.7;
+  display: flex;
+  gap: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+.guide-tip svg { width: 18px; height: 18px; flex-shrink: 0; color: #c9a23c; margin-top: 1px; }
+.guide-tip code {
+  background: rgba(0,0,0,0.05);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  word-break: break-all;
+}
+</style>
+</head>
+<body>
+
+<!-- 顶栏 -->
+<div class="guide-header">
+  <div class="guide-logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+  </div>
+  <span class="guide-title">WeKnora 配置与部署指南</span>
+</div>
+
+<!-- 主体 -->
+<div class="guide-body">
+  <div class="guide-intro">
+    本插件支持连接官方托管的 WeKnora 服务，也支持连接你自己私有化部署的 WeKnora 实例。如果你还没有可用实例，建议先参考
+    <a href="https://github.com/Tencent/WeKnora" target="_blank" rel="noopener">Tencent/WeKnora</a>
+    完成部署；如果你使用官方托管服务，可直接访问
+    <a href="https://weknora.weixin.qq.com" target="_blank" rel="noopener">https://weknora.weixin.qq.com</a>。
+  </div>
+
+  <div class="guide-steps">
+    <!-- 步骤 1 -->
+    <div class="guide-step">
+      <div class="guide-step-header">
+        <span class="guide-step-num">1</span>
+        <span class="guide-step-title">准备 WeKnora 实例</span>
+      </div>
+      <div class="guide-step-desc">
+        如果你还没有可用实例，请先参考
+        <a href="https://github.com/Tencent/WeKnora" target="_blank" rel="noopener">GitHub 上的 WeKnora 项目</a>
+        完成私有化部署；如果你使用官方托管服务，可直接打开
+        <a href="https://weknora.weixin.qq.com" target="_blank" rel="noopener">https://weknora.weixin.qq.com</a>。
+      </div>
+    </div>
+
+    <!-- 步骤 2 -->
+    <div class="guide-step">
+      <div class="guide-step-header">
+        <span class="guide-step-num">2</span>
+        <span class="guide-step-title">登录你的 WeKnora 实例</span>
+      </div>
+      <div class="guide-step-desc">
+        打开你自己的 WeKnora 地址并完成注册/登录。后续在插件中填写的服务地址，应为该实例对应的 API 地址，例如
+        <code>https://your-weknora-domain/api/v1</code>。
+      </div>
+    </div>
+
+    <!-- 步骤 3 -->
+    <div class="guide-step">
+      <div class="guide-step-header">
+        <span class="guide-step-num">3</span>
+        <span class="guide-step-title">找到「全部设置」</span>
+      </div>
+      <div class="guide-step-desc">
+        登录后，在页面左下角找到并点击「全部设置」入口，进入用户设置页面。
+      </div>
+      <div class="guide-step-path">
+        <span class="path-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          全部设置
+        </span>
+      </div>
+    </div>
+
+    <!-- 步骤 4 -->
+    <div class="guide-step">
+      <div class="guide-step-header">
+        <span class="guide-step-num">4</span>
+        <span class="guide-step-title">打开「API 信息」</span>
+      </div>
+      <div class="guide-step-desc">
+        在设置页面中，找到并点击「API 信息」选项卡，进入 API 管理页面。
+      </div>
+      <div class="guide-step-path">
+        <span class="path-item">全部设置</span>
+        <span class="path-arrow">›</span>
+        <span class="path-item">API 信息</span>
+      </div>
+    </div>
+
+    <!-- 步骤 5 -->
+    <div class="guide-step">
+      <div class="guide-step-header">
+        <span class="guide-step-num">5</span>
+        <span class="guide-step-title">复制 API Key</span>
+      </div>
+      <div class="guide-step-desc">
+        在 API 信息页面中，找到 <code>API Key</code> 字段，点击旁边的复制按钮将其复制到剪贴板。
+      </div>
+      <div class="guide-step-highlight">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        请妥善保管您的 API Key，不要泄露给他人
+      </div>
+    </div>
+
+    <!-- 步骤 6 -->
+    <div class="guide-step">
+      <div class="guide-step-header">
+        <span class="guide-step-num">6</span>
+        <span class="guide-step-title">粘贴到插件中</span>
+      </div>
+      <div class="guide-step-desc">
+        返回本插件的 WeKnora 登录页面，将你的实例 API 地址粘贴到「服务地址」，将复制的 API Key 粘贴到「API Key」输入框中，点击「保存并登录」即可完成配置。
+      </div>
+    </div>
+  </div>
+
+  <div class="guide-tip">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <span>如果遇到问题，请先确认服务地址是否为你的 WeKnora 实例 API 地址，格式通常为 <code>https://your-weknora-domain/api/v1</code>；如果你使用官方托管服务，可填写 <code>https://weknora.weixin.qq.com/api/v1</code>。</span>
+  </div>
+</div>
+
+</body>
+</html>

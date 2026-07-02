@@ -1,0 +1,55 @@
+name: weknora
+
+services:
+  weknora-custom-general-agent:
+    build:
+      context: ..
+      dockerfile: custom/services/general-agent/Dockerfile
+    image: weknora-custom-general-agent:local
+    container_name: weknora-custom-general-agent
+    environment:
+      PORT: "8091"
+      CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
+      CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS:-600000}
+      CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS:-900000}
+      CUSTOM_GENERAL_AGENT_MAX_TURNS: ${CUSTOM_GENERAL_AGENT_MAX_TURNS:-30}
+      CUSTOM_GENERAL_AGENT_MAX_BUDGET_USD: ${CUSTOM_GENERAL_AGENT_MAX_BUDGET_USD:-10}
+      CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB: ${CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB:-20}
+      GENERAL_AGENT_RUN_ROOT: /tmp/weknora-general-agent-runs
+    volumes:
+      - general-agent-runs:/tmp/weknora-general-agent-runs
+    ports:
+      - "${CUSTOM_GENERAL_AGENT_PORT_BIND:-127.0.0.1:8091}:8091"
+    networks:
+      - WeKnora-network-dev
+
+  weknora-custom-document-processing-agent:
+    build:
+      context: ..
+      dockerfile: custom/services/document-processing-agent/Dockerfile
+    image: weknora-custom-document-processing-agent:local
+    container_name: weknora-custom-document-processing-agent
+    environment:
+      PORT: "8091"
+      CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
+      CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS:-600000}
+      CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS:-900000}
+      CUSTOM_GENERAL_AGENT_MAX_TURNS: ${CUSTOM_GENERAL_AGENT_MAX_TURNS:-30}
+      CUSTOM_GENERAL_AGENT_MAX_BUDGET_USD: ${CUSTOM_GENERAL_AGENT_MAX_BUDGET_USD:-10}
+      CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB: ${CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB:-20}
+      GENERAL_AGENT_RUN_ROOT: /tmp/weknora-document-processing-agent-runs
+    volumes:
+      - document-processing-agent-runs:/tmp/weknora-document-processing-agent-runs
+    ports:
+      - "${CUSTOM_DOCUMENT_PROCESSING_AGENT_PORT_BIND:-127.0.0.1:8093}:8091"
+    networks:
+      - WeKnora-network-dev
+
+volumes:
+  general-agent-runs:
+  document-processing-agent-runs:
+
+networks:
+  WeKnora-network-dev:
+    name: weknora_WeKnora-network-dev
+    external: true

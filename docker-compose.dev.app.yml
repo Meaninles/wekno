@@ -1,0 +1,58 @@
+services:
+  app-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev-app
+    image: weknora-dev-app:local
+    container_name: WeKnora-app-dev
+    working_dir: /workspace
+    env_file:
+      - .env
+    environment:
+      GIN_MODE: debug
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DOCREADER_ADDR: docreader:50051
+      DOCREADER_TRANSPORT: grpc
+      MINIO_ENDPOINT: minio:9000
+      REDIS_ADDR: redis:6379
+      MILVUS_ADDRESS: milvus:19530
+      NEO4J_URI: bolt://neo4j:7687
+      QDRANT_HOST: qdrant
+      LOCAL_STORAGE_BASE_DIR: /workspace/.local-data/files
+      DUCKDB_SKIP_EXTENSION_LOAD: "true"
+      CGO_ENABLED: "1"
+      CGO_CFLAGS: "-Wno-deprecated-declarations -Wno-gnu-folding-constant"
+      WEKNORA_SANDBOX_MODE: ${WEKNORA_SANDBOX_MODE:-local}
+      WEKNORA_SANDBOX_TIMEOUT: ${WEKNORA_SANDBOX_TIMEOUT:-300}
+      CUSTOM_GENERAL_AGENT_URL: ${CUSTOM_GENERAL_AGENT_URL:-http://weknora-custom-general-agent:8091}
+      CUSTOM_DOCUMENT_PROCESSING_AGENT_URL: ${CUSTOM_DOCUMENT_PROCESSING_AGENT_URL:-http://weknora-custom-document-processing-agent:8091}
+      CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
+      CUSTOM_GENERAL_AGENT_HTTP_TIMEOUT_SEC: ${CUSTOM_GENERAL_AGENT_HTTP_TIMEOUT_SEC:-7200}
+      CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL: ${CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL:-http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call}
+      CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT: ${CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT:-/workspace/.local-data/general-agent-artifacts}
+      CUSTOM_GENERAL_AGENT_CLAUDE_MODEL_NAME: ${CUSTOM_GENERAL_AGENT_CLAUDE_MODEL_NAME:-}
+      CUSTOM_GENERAL_AGENT_CLAUDE_BASE_URL: ${CUSTOM_GENERAL_AGENT_CLAUDE_BASE_URL:-}
+      CUSTOM_GENERAL_AGENT_CLAUDE_PROVIDER: ${CUSTOM_GENERAL_AGENT_CLAUDE_PROVIDER:-}
+      CUSTOM_GENERAL_AGENT_REGISTER_MCP_FIXTURES: ${CUSTOM_GENERAL_AGENT_REGISTER_MCP_FIXTURES:-true}
+      CUSTOM_GENERAL_AGENT_MCP_FIXTURE_URL: ${CUSTOM_GENERAL_AGENT_MCP_FIXTURE_URL:-http://weknora-custom-mcp-fixtures:8092/mcp}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - .:/workspace
+      - go-mod-cache-dev:/go/pkg/mod
+      - go-build-cache-dev:/root/.cache/go-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      docreader:
+        condition: service_healthy
+    networks:
+      - WeKnora-network-dev
+    command: ["bash", "scripts/dev_app_docker.sh"]
+
+volumes:
+  go-mod-cache-dev:
+  go-build-cache-dev:

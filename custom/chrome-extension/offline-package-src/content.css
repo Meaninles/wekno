@@ -1,0 +1,918 @@
+/* 知识管理助手 - 内容脚本样式 */
+
+/* === 截屏式区域框选 === */
+#ka-clip-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2147483646;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 暗幕遮罩（四块拼合） */
+.ka-clip-dim {
+  position: fixed;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: -1;
+  pointer-events: none;
+  transition: none;
+}
+
+/* 选区矩形 */
+.ka-clip-selection {
+  position: fixed;
+  border: 2px solid #07C160;
+  background: transparent;
+  z-index: 1;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(7, 193, 96, 0.3), 0 0 20px rgba(7, 193, 96, 0.1);
+}
+
+/* 选区角标尺寸拖拽点 */
+.ka-clip-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 2px solid #07C160;
+  border-radius: 2px;
+  z-index: 2;
+  pointer-events: auto !important;
+  cursor: pointer;
+}
+
+.ka-clip-handle-nw { top: -6px; left: -6px; cursor: nw-resize; }
+.ka-clip-handle-n  { top: -6px; left: 50%; margin-left: -5px; cursor: n-resize; }
+.ka-clip-handle-ne { top: -6px; right: -6px; cursor: ne-resize; }
+.ka-clip-handle-e  { top: 50%; margin-top: -5px; right: -6px; cursor: e-resize; }
+.ka-clip-handle-se { bottom: -6px; right: -6px; cursor: se-resize; }
+.ka-clip-handle-s  { bottom: -6px; left: 50%; margin-left: -5px; cursor: s-resize; }
+.ka-clip-handle-sw { bottom: -6px; left: -6px; cursor: sw-resize; }
+.ka-clip-handle-w  { top: 50%; margin-top: -5px; left: -6px; cursor: w-resize; }
+
+/* 提示文字 */
+.ka-clip-tip {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  padding: 14px 28px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  z-index: 2;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+  letter-spacing: 0.5px;
+}
+
+/* 确认工具栏 */
+.ka-clip-toolbar {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 3;
+  pointer-events: auto;
+  animation: ka-fade-in 0.15s ease;
+}
+
+@keyframes ka-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ka-clip-size {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.55);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-family: -apple-system, "SF Mono", "Menlo", monospace;
+  backdrop-filter: blur(4px);
+}
+
+.ka-clip-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  backdrop-filter: blur(8px);
+}
+
+.ka-clip-btn kbd {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  font-family: inherit;
+}
+
+.ka-clip-btn-cancel {
+  background: rgba(255, 255, 255, 0.9);
+  color: #555;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.ka-clip-btn-cancel:hover {
+  background: #fff;
+}
+
+.ka-clip-btn-cancel kbd {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.ka-clip-btn-confirm {
+  background: #07C160;
+  color: #fff;
+  box-shadow: 0 2px 12px rgba(7, 193, 96, 0.35);
+}
+
+.ka-clip-btn-confirm:hover {
+  background: #06ad54;
+  box-shadow: 0 4px 16px rgba(7, 193, 96, 0.4);
+}
+
+/* === 通知 === */
+.ka-notification {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  padding: 10px 20px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  z-index: 2147483647;
+  transform: translateX(120%);
+  transition: transform 0.3s ease;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  background: rgba(30, 30, 30, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ka-notification-show {
+  transform: translateX(0);
+}
+
+.ka-notification-success::before {
+  content: '✓';
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #07C160;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ka-notification-error::before {
+  content: '!';
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #e44;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ka-notification-info {
+  /* 纯文字，无图标 */
+}
+
+/* === 选中文字气泡 === */
+.ka-sel-bubble {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 0 1px rgba(0, 0, 0, 0.08);
+  z-index: 2147483645;
+  padding: 4px 6px;
+  animation: ka-bubble-in 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ka-sel-logo {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  margin-left: 4px;
+  margin-right: 2px;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+@keyframes ka-bubble-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.ka-sel-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  font-size: 12px;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #555;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+  line-height: 1;
+}
+
+.ka-sel-btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.ka-sel-btn-save svg { color: #07C160; }
+.ka-sel-btn-ask svg { color: #3b7dd8; }
+
+.ka-sel-btn-save:hover {
+  background: rgba(7, 193, 96, 0.08);
+  color: #07C160;
+}
+
+.ka-sel-btn-ask:hover {
+  background: rgba(59, 125, 216, 0.08);
+  color: #3b7dd8;
+}
+
+.ka-sel-divider {
+  width: 1px;
+  height: 16px;
+  background: #e8e8e8;
+  flex-shrink: 0;
+}
+
+/* 气泡关闭按钮 */
+.ka-sel-close-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.ka-sel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #bbb;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  padding: 0;
+}
+.ka-sel-close:hover {
+  background: #f5f5f5;
+  color: #999;
+}
+.ka-sel-close svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* 禁用下拉菜单 */
+.ka-sel-disable-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12), 0 0 1px rgba(0,0,0,0.06);
+  padding: 4px 0;
+  z-index: 2147483646;
+  min-width: 140px;
+  animation: ka-bubble-in 0.12s ease;
+}
+.ka-sel-disable-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #555;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+.ka-sel-disable-item:hover {
+  background: #f7f7f7;
+  color: #333;
+}
+.ka-sel-disable-item svg {
+  width: 13px;
+  height: 13px;
+  color: #999;
+  flex-shrink: 0;
+}
+
+/* 气泡下方小三角（默认朝下） */
+.ka-sel-arrow {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  margin-left: -6px;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  transform: rotate(45deg);
+  box-shadow: 3px 3px 4px rgba(0, 0, 0, 0.06);
+  z-index: -1;
+}
+
+/* 气泡在选区下方时，三角朝上 */
+.ka-sel-arrow.ka-sel-arrow-top {
+  bottom: auto;
+  top: -6px;
+  box-shadow: -2px -2px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* === Markdown 编辑弹窗 === */
+.ka-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: ka-editor-fade-in 0.2s ease;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+@keyframes ka-editor-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.ka-editor-panel {
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  width: 680px;
+  max-width: 92vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: ka-editor-slide-up 0.25s ease;
+}
+
+@keyframes ka-editor-slide-up {
+  from { opacity: 0; transform: translateY(20px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 头部：标题 + 关闭按钮 */
+.ka-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+
+.ka-editor-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #333;
+}
+
+.ka-editor-title span {
+  color: #999;
+  font-weight: 400;
+  margin-left: 2px;
+}
+
+.ka-editor-close {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #e8e8e8;
+  background: #fff;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #999;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.ka-editor-close:hover {
+  background: #f5f5f5;
+  color: #333;
+  border-color: #ddd;
+}
+
+.ka-editor-close svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* 编辑区 */
+.ka-editor-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+  min-height: 200px;
+}
+
+.ka-editor-textarea {
+  width: 100%;
+  min-height: 280px;
+  max-height: 55vh;
+  border: none;
+  outline: none;
+  resize: none;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #333;
+  padding: 16px 20px;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: transparent;
+  overflow-y: auto;
+}
+
+.ka-editor-textarea::placeholder {
+  color: #ccc;
+}
+
+/* 预览区域 */
+.ka-editor-preview {
+  padding: 16px 20px;
+  min-height: 280px;
+  max-height: 55vh;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #333;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.ka-editor-preview img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+.ka-editor-preview a {
+  color: #07C160;
+  text-decoration: underline;
+}
+
+.ka-editor-preview a:hover {
+  color: #06ad54;
+}
+
+.ka-editor-preview pre {
+  margin: 8px 0;
+}
+
+.ka-editor-preview pre code {
+  font-family: "SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace;
+}
+
+.ka-editor-preview blockquote {
+  margin: 8px 0;
+}
+
+.ka-editor-preview strong {
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.ka-editor-preview del {
+  color: #999;
+}
+
+/* 底部工具栏 + 操作按钮 */
+.ka-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px 14px;
+  border-top: 1px solid #f0f0f0;
+  flex-shrink: 0;
+  background: #fafbfc;
+}
+
+.ka-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ka-editor-toolbar .ka-md-sep {
+  width: 1px;
+  height: 18px;
+  background: #e5e5e5;
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+
+.ka-editor-tool-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #666;
+  transition: all 0.15s;
+}
+
+.ka-editor-tool-btn:hover {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.ka-editor-tool-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ka-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ka-editor-btn-cancel {
+  padding: 7px 20px;
+  border: 1px solid #e0e0e0;
+  background: #fff;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #666;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+
+.ka-editor-btn-cancel:hover {
+  background: #f5f5f5;
+  border-color: #ccc;
+  color: #333;
+}
+
+.ka-editor-btn-save {
+  padding: 7px 20px;
+  border: none;
+  background: #07C160;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #fff;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-weight: 500;
+  font-family: inherit;
+}
+
+.ka-editor-btn-save:hover {
+  background: #06ad54;
+  box-shadow: 0 2px 8px rgba(7, 193, 96, 0.3);
+}
+
+.ka-editor-btn-save:disabled {
+  background: #a0d8b5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* === 截图/剪藏编辑弹窗（左右分栏） === */
+.ka-clip-ed-panel {
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  width: 960px;
+  max-width: 94vw;
+  height: 80vh;
+  max-height: 720px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: ka-editor-slide-up 0.25s ease;
+}
+
+/* 头部 */
+.ka-clip-ed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px 14px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+
+.ka-clip-ed-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ka-clip-ed-icon {
+  width: 20px;
+  height: 20px;
+  color: #07C160;
+  flex-shrink: 0;
+}
+
+.ka-clip-ed-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #333;
+}
+
+/* 左右分栏主体 */
+.ka-clip-ed-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 左侧面板 */
+.ka-clip-ed-left {
+  width: 320px;
+  min-width: 280px;
+  flex-shrink: 0;
+  border-right: 1px solid #f0f0f0;
+  overflow-y: auto;
+  padding-bottom: 16px;
+  background: #fafbfc;
+}
+
+/* 右侧编辑器 */
+.ka-clip-ed-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 通用 section */
+.ka-clip-ed-section {
+  padding: 16px 20px 0;
+}
+
+.ka-clip-ed-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 8px;
+}
+
+/* 标题输入框 */
+.ka-clip-ed-title-box {
+  background: #fff;
+  border-radius: 10px;
+  border: 1.5px solid #e8e8e8;
+  padding: 2px;
+  transition: border-color 0.2s;
+}
+
+.ka-clip-ed-title-box:focus-within {
+  border-color: #07C160;
+}
+
+.ka-clip-ed-title-input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: #333;
+  outline: none;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  line-height: 1.5;
+  box-sizing: border-box;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ka-clip-ed-title-input:focus {
+  text-overflow: clip;
+  overflow: auto;
+}
+
+.ka-clip-ed-title-input::placeholder {
+  color: #bbb;
+}
+
+/* 元信息区 */
+.ka-clip-ed-meta-section {
+  padding: 16px 20px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ka-clip-ed-meta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ka-clip-ed-meta-label {
+  color: #999;
+  font-weight: 500;
+  flex-shrink: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ka-clip-ed-meta-value {
+  color: #555;
+  font-size: 13px;
+}
+
+.ka-clip-ed-meta-link {
+  color: #07C160;
+  text-decoration: none;
+  word-break: break-all;
+  font-size: 13px;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+
+.ka-clip-ed-meta-link:hover {
+  border-bottom-color: #07C160;
+}
+
+/* 截图缩略图 */
+.ka-clip-ed-screenshot {
+  padding: 16px 20px 0;
+}
+
+.ka-clip-ed-screenshot img {
+  width: 100%;
+  max-height: 200px;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid #eee;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+/* 右侧 — 内容区 header */
+.ka-clip-ed-content-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px 0;
+  flex-shrink: 0;
+}
+
+.ka-clip-ed-content-header .ka-clip-ed-label {
+  margin-bottom: 0;
+}
+
+/* 右侧 — 内容编辑框（flex 填满剩余空间） */
+.ka-clip-ed-content-box {
+  flex: 1;
+  min-height: 0;
+  margin: 8px 20px 0;
+  background: #fff;
+  border-radius: 10px;
+  border: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ka-clip-ed-content-box:focus-within {
+  /* 无边框，不需要 focus 状态 */
+}
+
+.ka-clip-ed-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #333;
+  padding: 14px 16px;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: transparent;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.ka-clip-ed-textarea::placeholder {
+  color: #ccc;
+}
+
+.ka-clip-ed-preview {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 16px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #333;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  outline: none;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.ka-clip-ed-preview:focus {
+  background: transparent;
+}
+
+/* 预览中的空行占位 */
+.ka-clip-ed-preview .ka-md-blank {
+  height: 0.8em;
+}
+
+/* 预览模式下的活跃按钮标识 */
+.ka-editor-tool-btn.ka-preview-active {
+  color: #07C160 !important;
+}
+
+/* 右侧 — 工具栏（已移入 content-box 内部） */
+.ka-clip-ed-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 12px;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+/* 底部操作栏 */
+.ka-clip-ed-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 24px 18px;
+  border-top: 1px solid #f0f0f0;
+  flex-shrink: 0;
+  background: #fff;
+}
+.ka-clip-ed-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

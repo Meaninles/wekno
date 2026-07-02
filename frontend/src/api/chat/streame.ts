@@ -1,0 +1,219 @@
+import { fetchEventSource } from '@microsoft/fetch-event-source';
+import { ref, onUnmounted } from 'vue';
+import { generateRandomString } from '@/utils/index';
+import i18n from '@/i18n';
+import { getApiBaseUrl } from '@/utils/api-base';
+import {
+  sanitizeStreamRequestBody,
+  type StreamRequestMeta,
+} from '@/utils/chatRequestDebug';
+import { normalizeUserFacingError } from '@/custom/modules/safeMessage/install';
+
+
+
+interface StreamOptions {
+  // 请求方法 (默认POST)
+  method?: 'GET' | 'POST'
+  // 请求头
+  headers?: Record<string, string>
+  // 请求体自动序列化
+  body?: Record<string, any>
+  // 流式渲染间隔 (ms)
+  chunkInterval?: number
+}
+
+export function useStream() {
+  // 响应式状态
+  const output = ref('')              // 显示内容
+  const isStreaming = ref(false)      // 流状态
+  const isLoading = ref(false)        // 初始加载
+  const error = ref<string | null>(null)// 错误信息
+  const lastStreamRequest = ref<StreamRequestMeta | null>(null)
+  let controller = new AbortController()
+  let streamGeneration = 0
+
+  // 流式渲染缓冲
+  let buffer: string[] = []
+  let renderTimer: number | null = null
+
+  // 启动流式请求
+  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; tag_ids?: string[]; skill_names?: string[]; agent_enabled?: boolean; agent_id?: string; web_search_enabled?: boolean; enable_memory?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string}>; images?: Array<{data: string}>; attachment_uploads?: Array<{data: string; file_name: string; file_size: number}>; method: string; url: string; embed_token?: string; embed_session_sig?: string; embed_visitor_id?: string }) => {
+    const myGeneration = ++streamGeneration
+    // 重置状态
+    output.value = '';
+    error.value = null;
+    isStreaming.value = true;
+    isLoading.value = true;
+
+    // 获取API配置
+    const apiUrl = getApiBaseUrl();
+    
+    const embedToken = params.embed_token;
+    const token = embedToken || localStorage.getItem('weknora_token');
+    if (!token) {
+      error.value = i18n.global.t('error.tokenNotFound');
+      stopStream();
+      return;
+    }
+
+    // 跨租户访问请求头：只要 setSelectedTenant 写过激活租户，就附
+    // X-Tenant-ID。早期版本会 short-circuit "selectedTenantId ===
+    // defaultTenantId 时不附" 来减少 header 体积，但任何把 weknora_tenant
+    // 写成激活租户的代码（OIDC 同步 / UserMenu loadUserInfo / router
+    // hydrate）都会让两者相等，使得后续流式请求悄悄丢 header、落到
+    // home 租户上，导致 SSE 接口返回 404。直接附即可——后端
+    // IsTenantAccessible 也允许 header 指向自家租户。
+    const selectedTenantId = localStorage.getItem('weknora_selected_tenant_id');
+    const tenantIdHeader: string | null = selectedTenantId || null;
+
+    const requestID = generateRandomString(12);
+
+    try {
+      let url =
+        params.method == "POST"
+          ? `${apiUrl}${params.url}/${params.session_id}`
+          : `${apiUrl}${params.url}/${params.session_id}?message_id=${params.query}`;
+      
+      // Prepare POST body with required fields for agent-chat
+      // knowledge_base_ids array and agent_enabled can update Session's SessionAgentConfig
+      const postBody: any = { 
+        query: params.query,
+        agent_enabled: params.agent_enabled !== undefined ? params.agent_enabled : true
+      };
+      // Always include knowledge_base_ids for agent-chat (already validated above)
+      if (params.knowledge_base_ids !== undefined && params.knowledge_base_ids.length > 0) {
+        postBody.knowledge_base_ids = params.knowledge_base_ids;
+      }
+      // Include knowledge_ids if provided
+      if (params.knowledge_ids !== undefined && params.knowledge_ids.length > 0) {
+        postBody.knowledge_ids = params.knowledge_ids;
+      }
+      // Include selected skills as prompt-context constraints if provided
+      if (params.skill_names !== undefined && params.skill_names.length > 0) {
+        postBody.skill_names = params.skill_names;
+      }
+      // Include agent_id if provided (backend resolves shared agent and tenant from share relation)
+      if (params.agent_id) {
+        postBody.agent_id = params.agent_id;
+      }
+      // Include web_search_enabled if provided
+      if (params.web_search_enabled !== undefined) {
+        postBody.web_search_enabled = params.web_search_enabled;
+      }
+      // Include enable_memory if provided
+      if (params.enable_memory !== undefined) {
+        postBody.enable_memory = params.enable_memory;
+      }
+      // Include summary_model_id if provided (for non-Agent mode)
+      if (params.summary_model_id) {
+        postBody.summary_model_id = params.summary_model_id;
+      }
+      // Include mcp_service_ids if provided (for Agent mode)
+      if (params.mcp_service_ids !== undefined && params.mcp_service_ids.length > 0) {
+        postBody.mcp_service_ids = params.mcp_service_ids;
+      }
+      if (params.skill_names !== undefined && params.skill_names.length > 0) {
+        postBody.skill_names = params.skill_names;
+      }
+      if (params.tag_ids !== undefined && params.tag_ids.length > 0) {
+        postBody.tag_ids = params.tag_ids;
+      }
+      // Include mentioned_items if provided (for displaying @mentions in chat)
+      if (params.mentioned_items !== undefined && params.mentioned_items.length > 0) {
+        postBody.mentioned_items = params.mentioned_items;
+      }
+      // Include images if provided (base64 data URIs for multimodal chat)
+      if (params.images !== undefined && params.images.length > 0) {
+        postBody.images = params.images;
+      }
+      // Include attachment_uploads if provided (documents, audio, etc.)
+      if (params.attachment_uploads !== undefined && params.attachment_uploads.length > 0) {
+        postBody.attachment_uploads = params.attachment_uploads;
+      }
+      postBody.channel = embedToken ? "embed" : "web";
+
+      lastStreamRequest.value = {
+        requestId: requestID,
+        url,
+        method: params.method,
+        body: params.method === 'POST' ? sanitizeStreamRequestBody(postBody) : null,
+        sentAt: Date.now(),
+      };
+      
+      await fetchEventSource(url, {
+        method: params.method,
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": embedToken ? `Embed ${embedToken}` : `Bearer ${token}`,
+          "Accept-Language": i18n.global.locale?.value || localStorage.getItem('locale') || 'zh-CN',
+          "X-Request-ID": requestID,
+          ...(!embedToken && tenantIdHeader ? { "X-Tenant-ID": tenantIdHeader } : {}),
+          ...(params.embed_session_sig ? { "X-Embed-Session": params.embed_session_sig } : {}),
+          ...(params.embed_visitor_id ? { "X-Embed-Visitor": params.embed_visitor_id } : {}),
+        },
+        body:
+          params.method == "POST"
+            ? JSON.stringify(postBody)
+            : null,
+        signal: controller.signal,
+        openWhenHidden: true,
+
+        onopen: async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          isLoading.value = false;
+        },
+
+        onmessage: (ev) => {
+          if (myGeneration !== streamGeneration) return
+          const parsed = JSON.parse(ev.data);
+          buffer.push(parsed); // 数据存入缓冲
+          // 执行自定义处理
+          if (chunkHandler) {
+            chunkHandler(parsed);
+          }
+        },
+
+        onerror: (err) => {
+          throw new Error(`${i18n.global.t('error.streamFailed')}: ${err}`);
+        },
+
+        onclose: () => {
+          stopStream();
+        },
+      });
+    } catch (err) {
+      error.value = normalizeUserFacingError(err)
+      stopStream()
+    }
+  }
+
+  let chunkHandler: ((data: any) => void) | null = null
+  // 注册块处理器
+  const onChunk = (handler: (data: any) => void) => {
+    chunkHandler = handler
+  }
+
+
+  // 停止流
+  const stopStream = () => {
+    streamGeneration++
+    controller.abort();
+    controller = new AbortController(); // 重置控制器（如需重新发起）
+    isStreaming.value = false;
+    isLoading.value = false;
+  }
+
+  // 组件卸载时自动清理
+  onUnmounted(stopStream)
+
+  return {
+    output,          // 显示内容
+    isStreaming,     // 是否在流式传输中
+    isLoading,       // 初始连接状态
+    error,
+    lastStreamRequest,
+    onChunk,
+    startStream,     // 启动流
+    stopStream       // 手动停止
+  }
+}

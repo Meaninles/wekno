@@ -5277,6 +5277,13 @@ export default {
   },
   agentEditor: {
     builtinHint: '내장 에이전트입니다. 이름과 설명은 수정할 수 없지만, 설정 매개변수는 조정할 수 있습니다.',
+    resetBuiltin: {
+      action: '기본값 복원',
+      confirmBody: '이 내장 에이전트를 시스템 기본 설정으로 복원합니다. 현재 모델, 데이터 소스, MCP 설정은 유지됩니다.',
+      confirmOk: '복원',
+      success: '기본 설정이 복원되었습니다',
+      failed: '기본 설정 복원에 실패했습니다',
+    },
     navGroups: {
       basic: '기본',
       knowledge: '지식 검색',
@@ -5338,7 +5345,7 @@ export default {
       webSearch: '활성화하면 에이전트가 인터넷에서 정보를 검색할 수 있습니다',
       webSearchProvider: '이 에이전트의 검색 엔진을 지정합니다. 비워두면 기본 검색 엔진을 사용합니다',
       webSearchMaxResults: '검색당 반환되는 최대 결과 수',
-      nativeAgentWebSearch: '범용 에이전트에만 적용됩니다. 활성화하면 기본 WebSearch/WebFetch를 범용 에이전트에 노출하고, 끄면 이 기본 도구를 활성화하지 않습니다.',
+      nativeAgentWebSearch: '데이터 분석, 범용 에이전트, 문서 처리에만 적용됩니다. 활성화하면 기본 WebSearch/WebFetch를 해당 범용 런타임에 노출하고, 끄면 이 기본 도구를 활성화하지 않습니다.',
       webFetchEnabled: 'Rerank 후 상위 웹 페이지의 전체 콘텐츠를 자동으로 가져와 답변 품질을 향상시킵니다',
       webFetchTopN: 'Rerank 후 전체 콘텐츠를 가져올 최대 웹 페이지 수',
       retrievalSection: '지식베이스 검색·순위 및 FAQ 우선 전략 설정',

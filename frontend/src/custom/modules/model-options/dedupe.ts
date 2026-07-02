@@ -6,10 +6,13 @@ export interface ModelOptionLike {
   source?: string
   description?: string
   status?: string
+  managed_by?: string
   parameters?: {
     parameter_size?: string
   }
 }
+
+const BUILTIN_AGENT_DEFAULTS_MANAGED_BY = 'builtin_agent_defaults'
 
 function normalized(value: string | undefined): string {
   return (value || '').trim().toLowerCase()
@@ -24,6 +27,19 @@ function optionIdentity(model: ModelOptionLike): string {
     normalized(model.description),
     normalized(model.parameters?.parameter_size),
   ].join('\x1f')
+}
+
+function managedCloneDisplayIdentity(model: ModelOptionLike): string {
+  return [
+    normalized(model.type),
+    normalized(model.source),
+    normalized(model.display_name),
+    normalized(model.name),
+  ].join('\x1f')
+}
+
+function isBuiltinAgentDefaultClone(model: ModelOptionLike): boolean {
+  return model.managed_by === BUILTIN_AGENT_DEFAULTS_MANAGED_BY
 }
 
 function shouldPreferCandidate<T extends ModelOptionLike>(
@@ -60,5 +76,22 @@ export function dedupeChatModelOptions<T extends ModelOptionLike>(
     }
   }
 
-  return Array.from(byIdentity.values())
+  const deduped = Array.from(byIdentity.values())
+  const selectedManagedClone = deduped.find(
+    model => normalized(model.id) === preferred && isBuiltinAgentDefaultClone(model),
+  )
+  const selectedManagedCloneKey = selectedManagedClone ? managedCloneDisplayIdentity(selectedManagedClone) : ''
+  const normalModelKeys = new Set(
+    deduped.filter(model => !isBuiltinAgentDefaultClone(model)).map(managedCloneDisplayIdentity),
+  )
+
+  return deduped.filter(model => {
+    if (!isBuiltinAgentDefaultClone(model)) {
+      return !selectedManagedCloneKey || managedCloneDisplayIdentity(model) !== selectedManagedCloneKey
+    }
+    if (preferred && normalized(model.id) === preferred) {
+      return true
+    }
+    return !normalModelKeys.has(managedCloneDisplayIdentity(model))
+  })
 }

@@ -81,8 +81,11 @@ const modelDisplayName = (model: ModelConfig) => {
   return displayName || model.name
 }
 
+const builtinAgentDefaultsManagedBy = 'builtin_agent_defaults'
 const normalizeModelKeyPart = (value?: string) => (value || '').trim().toLowerCase()
 const normalizeModelUrlKeyPart = (value?: string) => normalizeModelKeyPart(value).replace(/\/+$/, '')
+
+const isBuiltinAgentDefaultClone = (model: ModelConfig) => model.managed_by === builtinAgentDefaultsManagedBy
 
 const modelOptionKey = (model: ModelConfig) => {
   const params = model.parameters || ({} as ModelConfig['parameters'])
@@ -103,6 +106,13 @@ const modelOptionKey = (model: ModelConfig) => {
   ].join('\u001f')
 }
 
+const managedCloneDisplayKey = (model: ModelConfig) => [
+  normalizeModelKeyPart(model.type),
+  normalizeModelKeyPart(model.source),
+  normalizeModelKeyPart(model.name),
+  normalizeModelKeyPart(model.display_name),
+].join('\u001f')
+
 const dedupeModels = (list: ModelConfig[]) => {
   const keys: string[] = []
   const byKey = new Map<string, ModelConfig>()
@@ -120,7 +130,22 @@ const dedupeModels = (list: ModelConfig[]) => {
     }
   }
 
-  return keys.map(key => byKey.get(key)!).filter(Boolean)
+  const deduped = keys.map(key => byKey.get(key)!).filter(Boolean)
+  const selectedManagedClone = deduped.find(model => model.id === props.selectedModelId && isBuiltinAgentDefaultClone(model))
+  const selectedManagedCloneKey = selectedManagedClone ? managedCloneDisplayKey(selectedManagedClone) : ''
+  const normalModelKeys = new Set(
+    deduped.filter(model => !isBuiltinAgentDefaultClone(model)).map(managedCloneDisplayKey),
+  )
+
+  return deduped.filter(model => {
+    if (!isBuiltinAgentDefaultClone(model)) {
+      return !selectedManagedCloneKey || managedCloneDisplayKey(model) !== selectedManagedCloneKey
+    }
+    if (props.selectedModelId && model.id === props.selectedModelId) {
+      return true
+    }
+    return !normalModelKeys.has(managedCloneDisplayKey(model))
+  })
 }
 
 const models = computed(() => {

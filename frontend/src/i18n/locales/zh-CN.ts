@@ -5300,6 +5300,13 @@ export default {
   },
   agentEditor: {
     builtinHint: "这是内置智能体，名称和描述不可修改，但可以调整配置参数",
+    resetBuiltin: {
+      action: "恢复默认配置",
+      confirmBody: "将恢复该内置智能体的系统默认配置。当前模型、数据源和 MCP 设置会保持不变。",
+      confirmOk: "确认恢复",
+      success: "已恢复默认配置",
+      failed: "恢复默认配置失败",
+    },
     navGroups: {
       basic: "基础",
       knowledge: "知识检索",
@@ -5361,7 +5368,7 @@ export default {
       webSearch: "启用后智能体可以搜索互联网获取信息",
       webSearchProvider: "为此智能体指定搜索引擎，留空则使用默认搜索引擎",
       webSearchMaxResults: "每次搜索返回的最大结果数量",
-      nativeAgentWebSearch: "仅通用智能体生效。开启后会把原生 WebSearch/WebFetch 暴露给通用智能体；关闭时不启用这两个原生工具",
+      nativeAgentWebSearch: "仅数据分析、通用智能体和文档处理生效。开启后会把原生 WebSearch/WebFetch 暴露给对应通用运行时；关闭时不启用这两个原生工具",
       webFetchEnabled: "Rerank 后自动抓取排名靠前的网页完整内容，提升回答质量",
       webFetchTopN: "Rerank 后最多抓取几个网页的完整内容",
       retrievalSection: "配置知识库检索召回、排序与 FAQ 优先策略（ReRank 模型见「模型配置」）",

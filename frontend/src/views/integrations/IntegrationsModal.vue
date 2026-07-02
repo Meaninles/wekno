@@ -157,7 +157,7 @@ function handleClose() {
 
 watch(visible, (open) => {
   if (open) applyRouteQuery();
-});
+}, { immediate: true });
 
 watch(currentSection, () => {
   if (visible.value) syncRouteQuery();

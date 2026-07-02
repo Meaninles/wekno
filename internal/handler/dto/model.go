@@ -25,6 +25,7 @@ type ModelResponse struct {
 	Parameters  ModelParametersDTO `json:"parameters"`
 	IsDefault   bool               `json:"is_default"`
 	IsBuiltin   bool               `json:"is_builtin"`
+	ManagedBy   string             `json:"managed_by,omitempty"`
 	Status      types.ModelStatus  `json:"status"`
 	CreatedAt   time.Time          `json:"created_at"`
 	UpdatedAt   time.Time          `json:"updated_at"`
@@ -96,6 +97,7 @@ func NewModelResponse(m *types.Model) *ModelResponse {
 		Parameters:  params,
 		IsDefault:   m.IsDefault,
 		IsBuiltin:   m.IsBuiltin,
+		ManagedBy:   m.ManagedBy,
 		Status:      m.Status,
 		CreatedAt:   m.CreatedAt,
 		UpdatedAt:   m.UpdatedAt,

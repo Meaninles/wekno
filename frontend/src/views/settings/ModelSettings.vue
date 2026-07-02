@@ -130,7 +130,7 @@
     <!-- 模型编辑器抽屉 -->
     <ModelEditorDialog v-model:visible="showDialog" :model-type="currentModelType" :model-data="editingModel"
       @confirm="handleModelSave" />
-    <ModelDebugDrawer v-model:visible="showDebugDrawer" :models="allModels" />
+    <ModelDebugDrawer v-model:visible="showDebugDrawer" :models="userVisibleModels" />
 
   </div>
 </template>
@@ -159,6 +159,10 @@ const activeTypeFilter = ref<FilterType>('all')
 
 // 模型列表数据
 const allModels = ref<ModelConfig[]>([])
+const builtinAgentDefaultsManagedBy = 'builtin_agent_defaults'
+const userVisibleModels = computed(() =>
+  allModels.value.filter(model => model.managed_by !== builtinAgentDefaultsManagedBy)
+)
 
 // 后端 type → 前端分组 type 的映射
 const backendTypeToModelType: Record<string, ModelType> = {
@@ -202,7 +206,7 @@ function convertToLegacyFormat(model: ModelConfig) {
 }
 
 // 平铺 + 过滤
-const allLegacyModels = computed(() => allModels.value.map(convertToLegacyFormat))
+const allLegacyModels = computed(() => userVisibleModels.value.map(convertToLegacyFormat))
 const filteredModels = computed(() => {
   if (activeTypeFilter.value === 'all') return allLegacyModels.value
   return allLegacyModels.value.filter(m => m._modelType === activeTypeFilter.value)

@@ -94,6 +94,11 @@ func refreshBuiltinAgentMetadata(ctx context.Context, agent *types.CustomAgent, 
 	return &refreshed
 }
 
+func resolveBuiltinAgentConfig(ctx context.Context, agent *types.CustomAgent, tenantID uint64) (*types.CustomAgent, error) {
+	refreshed := refreshBuiltinAgentMetadata(ctx, agent, tenantID)
+	return applyBuiltinAgentConfigOverlays(ctx, refreshed, tenantID)
+}
+
 func refreshBuiltinAgentManagedPrompt(agent *types.CustomAgent, defaultAgent *types.CustomAgent) {
 	if agent == nil || defaultAgent == nil {
 		return
@@ -237,11 +242,11 @@ func (s *customAgentService) GetAgentByID(ctx context.Context, id string) (*type
 		agent, err := s.repo.GetAgentByID(ctx, id, tenantID)
 		if err == nil {
 			// Found in database, return with customized config
-			return refreshBuiltinAgentMetadata(ctx, agent, tenantID), nil
+			return resolveBuiltinAgentConfig(ctx, agent, tenantID)
 		}
 		// Not in database, return default built-in agent from registry (i18n-aware)
 		if builtinAgent := types.GetBuiltinAgentWithContext(ctx, id, tenantID); builtinAgent != nil {
-			return builtinAgent, nil
+			return resolveBuiltinAgentConfig(ctx, builtinAgent, tenantID)
 		}
 	}
 
@@ -310,14 +315,22 @@ func (s *customAgentService) ListAgents(ctx context.Context) ([]*types.CustomAge
 			// Use customized config from database
 			for _, agent := range allAgents {
 				if agent.ID == builtinID {
-					result = append(result, refreshBuiltinAgentMetadata(ctx, agent, tenantID))
+					resolved, err := resolveBuiltinAgentConfig(ctx, agent, tenantID)
+					if err != nil {
+						return nil, err
+					}
+					result = append(result, resolved)
 					break
 				}
 			}
 		} else {
 			// Use default built-in agent (i18n-aware)
 			if agent := types.GetBuiltinAgentWithContext(ctx, builtinID, tenantID); agent != nil {
-				result = append(result, agent)
+				resolved, err := resolveBuiltinAgentConfig(ctx, agent, tenantID)
+				if err != nil {
+					return nil, err
+				}
+				result = append(result, resolved)
 			}
 		}
 	}
@@ -429,6 +442,11 @@ func (s *customAgentService) updateBuiltinAgent(ctx context.Context, agent *type
 		if err := normalizeCustomAgentDataSourceConfig(existingAgent); err != nil {
 			return nil, err
 		}
+		resolvedAgent, err := applyBuiltinAgentConfigOverlays(ctx, existingAgent, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		existingAgent = resolvedAgent
 
 		logger.Infof(ctx, "Updating built-in agent config, ID: %s", agent.ID)
 
@@ -463,6 +481,11 @@ func (s *customAgentService) updateBuiltinAgent(ctx context.Context, agent *type
 	if err := normalizeCustomAgentDataSourceConfig(newAgent); err != nil {
 		return nil, err
 	}
+	resolvedAgent, err := applyBuiltinAgentConfigOverlays(ctx, newAgent, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	newAgent = resolvedAgent
 
 	logger.Infof(ctx, "Creating built-in agent config record, ID: %s, tenant ID: %d", agent.ID, tenantID)
 

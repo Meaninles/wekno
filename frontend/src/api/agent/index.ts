@@ -208,6 +208,11 @@ export function updateAgent(id: string, data: UpdateAgentRequest) {
   return put(`/api/v1/agents/${id}`, data) as unknown as Promise<{ data: CustomAgent }>;
 }
 
+// 恢复内置智能体默认配置。模型、数据源和 MCP 范围由后端按策略保留/跳过。
+export function resetBuiltinAgentConfig(id: string) {
+  return post(`/api/v1/custom/builtin-agent-defaults/agents/${id}/reset`) as unknown as Promise<{ data: CustomAgent }>;
+}
+
 // 删除智能体
 export function deleteAgent(id: string) {
   return del(`/api/v1/agents/${id}`) as unknown as Promise<{ success: boolean }>;

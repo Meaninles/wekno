@@ -198,6 +198,7 @@ import { useI18n } from 'vue-i18n'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import { debugModel, type ModelConfig, type ModelDebugResult } from '@/api/model'
 import { modelSupportsThinking } from '@/utils/thinkingControl'
+import { dedupeChatModelOptions } from '@/custom/modules/model-options/dedupe'
 
 const props = defineProps<{
   visible: boolean
@@ -237,8 +238,9 @@ const history = ref<Array<{
 }>>([])
 let runSequence = 0
 
-const selectedModel = computed(() => props.models.find(model => model.id === selectedModelId.value))
-const filteredModels = computed(() => props.models.filter(model => model.type === selectedModelType.value))
+const displayModels = computed(() => dedupeChatModelOptions(props.models, selectedModelId.value))
+const selectedModel = computed(() => displayModels.value.find(model => model.id === selectedModelId.value))
+const filteredModels = computed(() => displayModels.value.filter(model => model.type === selectedModelType.value))
 const isChat = computed(() => selectedModel.value?.type === 'KnowledgeQA')
 const supportsThinking = computed(() => selectedModel.value ? modelSupportsThinking(selectedModel.value) : false)
 const needsFile = computed(() => ['VLLM', 'ASR'].includes(selectedModel.value?.type || ''))
@@ -266,7 +268,7 @@ const allModelTypeOptions = computed(() => {
   }))
 })
 
-const modelCount = (type: DebugModelType) => props.models.filter(model => model.type === type).length
+const modelCount = (type: DebugModelType) => displayModels.value.filter(model => model.type === type).length
 
 const availableModelTypes = computed(() =>
   allModelTypeOptions.value.filter(option => modelCount(option.value) > 0),

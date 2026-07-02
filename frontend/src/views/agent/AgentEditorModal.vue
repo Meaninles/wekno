@@ -31,6 +31,17 @@
                   </div>
                 </template>
               </div>
+              <div v-if="canResetBuiltinAgent" class="sidebar-actions">
+                <t-popconfirm theme="warning" :content="$t('agentEditor.resetBuiltin.confirmBody')"
+                  :confirm-btn="{ content: $t('agentEditor.resetBuiltin.confirmOk'), theme: 'warning' }"
+                  :cancel-btn="{ content: $t('common.cancel') }" placement="right"
+                  @confirm="handleResetBuiltinAgent">
+                  <t-button block theme="default" variant="outline" size="small" :loading="resettingBuiltinAgent">
+                    <template #icon><t-icon name="rollback" /></template>
+                    {{ $t('agentEditor.resetBuiltin.action') }}
+                  </t-button>
+                </t-popconfirm>
+              </div>
             </div>
 
             <!-- 右侧内容区域 -->
@@ -1449,7 +1460,7 @@
                     </div>
 
                     <!-- 通用智能体原生搜索 -->
-                    <div v-if="isGeneralRuntimeAgent && formData.config.web_search_enabled" class="setting-row">
+                    <div v-if="supportsNativeAgentWebSearch && formData.config.web_search_enabled" class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agent.editor.nativeAgentWebSearch') }}</label>
                         <p class="desc">{{ $t('agentEditor.desc.nativeAgentWebSearch') }}</p>
@@ -1662,6 +1673,7 @@ import { MessagePlugin } from 'tdesign-vue-next';
 import {
   createAgent,
   updateAgent,
+  resetBuiltinAgentConfig,
   listIMChannels,
   type CustomAgent,
   type PlaceholderDefinition,
@@ -1837,6 +1849,7 @@ onBeforeUnmount(() => {
 })
 
 const saving = ref(false);
+const resettingBuiltinAgent = ref(false);
 const allModels = ref<ModelConfig[]>([]);
 const kbOptions = ref<{ label: string; value: string; type?: 'document' | 'faq'; count?: number; shared?: boolean; orgName?: string; ragEnabled?: boolean; wikiEnabled?: boolean; capabilities?: KBCapabilities }[]>([]);
 const dbSourceOptions = ref<DatabaseSource[]>([]);
@@ -2103,7 +2116,7 @@ const effectiveTools = computed(() => {
     if (formData.value.config.web_fetch_enabled) {
       items.push({ value: 'web_fetch', label: t('agentEditor.tools.webFetch'), active: true });
     }
-    if (isGeneralRuntimeAgent.value && formData.value.config.claude_sdk_web_search_enabled) {
+    if (supportsNativeAgentWebSearch.value && formData.value.config.claude_sdk_web_search_enabled) {
       items.push({ value: 'claude_sdk_web_search', label: t('agent.editor.nativeAgentWebSearch'), active: true });
     }
   }
@@ -2666,6 +2679,7 @@ const isDataAnalysisAgent = computed(() => isAgentMode.value && agentType.value 
 const isGeneralAgent = computed(() => isAgentMode.value && agentType.value === 'general-agent');
 const isDocumentProcessingAgent = computed(() => isAgentMode.value && agentType.value === 'document-processing-agent');
 const isGeneralRuntimeAgent = computed(() => isGeneralAgent.value || isDocumentProcessingAgent.value);
+const supportsNativeAgentWebSearch = computed(() => isDataAnalysisAgent.value || isGeneralRuntimeAgent.value);
 const canUseDatabaseSources = computed(() => isDataAnalysisAgent.value || isGeneralRuntimeAgent.value);
 
 const documentTemplateFormats = computed(() => [
@@ -3290,6 +3304,68 @@ const thinkingEnabled = computed({
 const isBuiltinAgent = computed(() => {
   return formData.value.is_builtin === true;
 });
+const canResetBuiltinAgent = computed(() => {
+  return editorMode.value === 'edit' && isBuiltinAgent.value && !!formData.value.id && !props.readOnly;
+});
+
+const normalizeAgentFormData = (agent: CustomAgent) => {
+  const agentData = JSON.parse(JSON.stringify(agent));
+
+  if (!agentData.config) {
+    agentData.config = JSON.parse(JSON.stringify(defaultFormData.config));
+  }
+
+  agentData.config = { ...defaultFormData.config, ...agentData.config };
+  if (agentData.config.thinking == null) {
+    agentData.config.thinking = false;
+  }
+
+  if (!agentData.config.suggested_prompts) agentData.config.suggested_prompts = [];
+  if (!agentData.config.knowledge_bases) agentData.config.knowledge_bases = [];
+  if (!agentData.config.db_data_sources) agentData.config.db_data_sources = [];
+  if (!agentData.config.allowed_tools) agentData.config.allowed_tools = [];
+  if (!agentData.config.mcp_services) agentData.config.mcp_services = [];
+  if (agentData.config.mcp_auth_wait_timeout == null || agentData.config.mcp_auth_wait_timeout <= 0) {
+    agentData.config.mcp_auth_wait_timeout = 600;
+  }
+  if (!agentData.config.selected_skills) agentData.config.selected_skills = [];
+  if (!agentData.config.selected_lightweight_skills) agentData.config.selected_lightweight_skills = [];
+  if (!agentData.config.selected_professional_skills) agentData.config.selected_professional_skills = [];
+  if (!agentData.config.lightweight_skills_selection_mode && agentData.config.skills_selection_mode) {
+    agentData.config.lightweight_skills_selection_mode = agentData.config.skills_selection_mode;
+  }
+  if (agentData.config.selected_lightweight_skills.length === 0 && agentData.config.selected_skills.length > 0) {
+    agentData.config.selected_lightweight_skills = [...agentData.config.selected_skills];
+  }
+  if (!agentData.config.supported_file_types) agentData.config.supported_file_types = [];
+
+  if (!agentData.config.agent_mode) {
+    const isAgent = agentData.config.max_iterations > 1 || (agentData.config.allowed_tools && agentData.config.allowed_tools.length > 0);
+    agentData.config.agent_mode = isAgent ? 'smart-reasoning' : 'quick-answer';
+  }
+
+  return agentData;
+};
+
+const applyAgentFormData = (agent: CustomAgent) => {
+  const agentData = normalizeAgentFormData(agent);
+  isInitializing.value = true;
+  formData.value = agentData;
+  if (isDocumentProcessingAgent.value) {
+    ensureDocumentTemplateConfig();
+  } else {
+    delete formData.value.config.document_template;
+  }
+  initKbSelectionMode();
+  initMcpSelectionMode();
+  initSkillsSelectionMode();
+  nextTick(() => {
+    isInitializing.value = false;
+  });
+  if (agentData.is_builtin) {
+    fillBuiltinAgentDefaults();
+  }
+};
 
 // 系统提示词的 placeholder
 const systemPromptPlaceholder = computed(() => {
@@ -3325,68 +3401,8 @@ watch(() => props.visible, async (val) => {
     await loadDependencies();
 
     if (props.mode === 'edit' && props.agent) {
-      // 深度复制对象以避免引用问题
-      const agentData = JSON.parse(JSON.stringify(props.agent));
-
-      // 确保 config 对象存在
-      if (!agentData.config) {
-        agentData.config = JSON.parse(JSON.stringify(defaultFormData.config));
-      }
-
-      // 补全可能缺失的字段
-      agentData.config = { ...defaultFormData.config, ...agentData.config };
-      if (agentData.config.thinking == null) {
-        agentData.config.thinking = false;
-      }
-
-      // 确保数组字段存在
-      if (!agentData.config.suggested_prompts) agentData.config.suggested_prompts = [];
-      if (!agentData.config.knowledge_bases) agentData.config.knowledge_bases = [];
-      if (!agentData.config.db_data_sources) agentData.config.db_data_sources = [];
-      if (!agentData.config.allowed_tools) agentData.config.allowed_tools = [];
-      if (!agentData.config.mcp_services) agentData.config.mcp_services = [];
-      // 授权等待超时：旧数据缺省时用默认 600 秒
-      if (agentData.config.mcp_auth_wait_timeout == null || agentData.config.mcp_auth_wait_timeout <= 0) {
-        agentData.config.mcp_auth_wait_timeout = 600;
-      }
-      if (!agentData.config.selected_skills) agentData.config.selected_skills = [];
-      if (!agentData.config.selected_lightweight_skills) agentData.config.selected_lightweight_skills = [];
-      if (!agentData.config.selected_professional_skills) agentData.config.selected_professional_skills = [];
-      if (!agentData.config.lightweight_skills_selection_mode && agentData.config.skills_selection_mode) {
-        agentData.config.lightweight_skills_selection_mode = agentData.config.skills_selection_mode;
-      }
-      if (agentData.config.selected_lightweight_skills.length === 0 && agentData.config.selected_skills.length > 0) {
-        agentData.config.selected_lightweight_skills = [...agentData.config.selected_skills];
-      }
-      if (!agentData.config.supported_file_types) agentData.config.supported_file_types = [];
-
-      // 兼容旧数据：如果没有 agent_mode 字段，根据 allowed_tools 推断
-      if (!agentData.config.agent_mode) {
-        const isAgent = agentData.config.max_iterations > 1 || (agentData.config.allowed_tools && agentData.config.allowed_tools.length > 0);
-        agentData.config.agent_mode = isAgent ? 'smart-reasoning' : 'quick-answer';
-      }
-
-      // 设置初始化标志，防止 watch 自动添加工具
-      isInitializing.value = true;
-      formData.value = agentData;
-      if (isDocumentProcessingAgent.value) {
-        ensureDocumentTemplateConfig();
-      } else {
-        delete formData.value.config.document_template;
-      }
-      // 初始化知识库选择模式
-      initKbSelectionMode();
-      initMcpSelectionMode();
-      initSkillsSelectionMode();
-      // 初始化完成后重置标志
-      nextTick(() => {
-        isInitializing.value = false;
-      });
-      // 内置智能体：如果提示词为空，填入系统默认值
-      if (agentData.is_builtin) {
-        fillBuiltinAgentDefaults();
-      }
-      void loadAgentIntegrationCounts(agentData.id);
+      applyAgentFormData(props.agent);
+      void loadAgentIntegrationCounts(props.agent.id);
     } else {
       // 创建新智能体，使用系统默认值
       const newFormData = JSON.parse(JSON.stringify(defaultFormData));
@@ -4660,6 +4676,27 @@ const hasPlaceholder = (text: string | undefined, placeholder: string): boolean 
   return text.includes(`{{${placeholder}}}`);
 };
 
+const handleResetBuiltinAgent = async () => {
+  if (!canResetBuiltinAgent.value || !formData.value.id) return;
+
+  resettingBuiltinAgent.value = true;
+  try {
+    const result = await resetBuiltinAgentConfig(formData.value.id);
+    const agent = result?.data;
+    if (!agent?.id) {
+      throw new Error(t('agentEditor.resetBuiltin.failed'));
+    }
+    savedAgent.value = agent;
+    applyAgentFormData(agent);
+    MessagePlugin.success(t('agentEditor.resetBuiltin.success'));
+    emit('success', agent);
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('agentEditor.resetBuiltin.failed'));
+  } finally {
+    resettingBuiltinAgent.value = false;
+  }
+};
+
 const handleSave = async () => {
   // 验证必填项（内置智能体不验证名称和系统提示词）
   if (!isBuiltinAgent.value) {
@@ -4878,6 +4915,17 @@ const handleSave = async () => {
   padding: 8px 8px 12px;
   overflow-y: auto;
   min-height: 0;
+}
+
+.sidebar-actions {
+  flex-shrink: 0;
+  padding: 10px 8px 12px;
+  border-top: 1px solid var(--td-component-stroke);
+  background: var(--td-bg-color-settings-modal);
+
+  :deep(.t-button) {
+    justify-content: center;
+  }
 }
 
 .nav-group-title {

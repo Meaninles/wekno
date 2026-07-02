@@ -5287,6 +5287,13 @@ export default {
   },
   agentEditor: {
     builtinHint: 'This is a built-in agent. Name and description cannot be modified, but configuration parameters can be adjusted.',
+    resetBuiltin: {
+      action: 'Restore defaults',
+      confirmBody: 'Restore this built-in agent to the system defaults. Current model, data source, and MCP settings will be kept.',
+      confirmOk: 'Restore',
+      success: 'Default configuration restored',
+      failed: 'Failed to restore default configuration',
+    },
     navGroups: {
       basic: 'Basics',
       knowledge: 'Knowledge & Retrieval',
@@ -5348,7 +5355,7 @@ export default {
       webSearch: 'When enabled, the agent can search the internet for information',
       webSearchProvider: 'Specify a search engine for this agent. Leave empty to use the default.',
       webSearchMaxResults: 'Maximum number of results returned per search',
-      nativeAgentWebSearch: 'General agent only. When enabled, exposes native WebSearch/WebFetch to the general agent; when off, those native tools are not enabled.',
+      nativeAgentWebSearch: 'Only applies to Data Analysis, General Agent, and Document Processing. When enabled, exposes native WebSearch/WebFetch to that general runtime; when off, those native tools are not enabled.',
       webFetchEnabled: 'After reranking, auto-fetch full page content from top web results for better answers',
       webFetchTopN: 'Maximum number of web pages to fetch after reranking',
       retrievalSection: 'Configure knowledge base retrieval, ranking, and FAQ priority strategy',

@@ -78,7 +78,7 @@ func (s *Service) Migrate(ctx context.Context) error {
 	if err := applyGeneralAgentMigrations(ctx, s.db); err != nil {
 		return err
 	}
-	return s.ensureDevFixtureMCP(ctx)
+	return nil
 }
 
 func (s *Service) clientForAgentType(agentType string) *Client {

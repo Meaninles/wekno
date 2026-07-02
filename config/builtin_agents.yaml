@@ -25,6 +25,7 @@ builtin_agents:
     config:
       agent_mode: "quick-answer"
       system_prompt_id: "default_kb"
+      thinking: true
       context_template_id: "default_context"
       temperature: 0.7
       max_completion_tokens: 2048
@@ -69,6 +70,7 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "rag-qa"
       system_prompt: ""
+      thinking: true
       temperature: 0.7
       max_completion_tokens: 2048
       max_iterations: 50
@@ -117,10 +119,12 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "data-analysis"
       system_prompt_id: "data_analyst"
+      thinking: true
       temperature: 0.2
       max_completion_tokens: 4096
-      max_iterations: 30
-      kb_selection_mode: "none"
+      max_iterations: 100
+      llm_call_timeout: 600
+      kb_selection_mode: "all"
       retrieve_kb_only_when_mentioned: false
       db_data_sources: []
       allowed_tools:
@@ -129,8 +133,16 @@ builtin_agents:
         - "db_catalog"
         - "db_schema"
         - "db_query"
+        - "grep_chunks"
+        - "knowledge_search"
+        - "list_knowledge_chunks"
+        - "query_knowledge_graph"
+        - "get_document_info"
+        - "database_query"
       web_search_enabled: false
       web_search_max_results: 0
+      web_fetch_enabled: true
+      web_fetch_top_n: 3
       reflection_enabled: true
       multi_turn_enabled: true
       history_turns: 10
@@ -163,9 +175,11 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "general-agent"
       system_prompt_id: "general_claude_agent"
-      temperature: 0.7
+      thinking: true
+      temperature: 0.5
       max_completion_tokens: 4096
-      max_iterations: 30
+      max_iterations: 100
+      llm_call_timeout: 600
       kb_selection_mode: "all"
       retrieve_kb_only_when_mentioned: false
       db_data_sources: []
@@ -187,6 +201,7 @@ builtin_agents:
         - "db_query"
       web_search_enabled: true
       web_search_max_results: 5
+      claude_sdk_web_search_enabled: true
       web_fetch_enabled: true
       web_fetch_top_n: 3
       enable_artifacts: true
@@ -226,6 +241,7 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "document-processing-agent"
       system_prompt_id: "document_claude_agent"
+      thinking: true
       document_template:
         word:
           requirement_file:
@@ -257,9 +273,10 @@ builtin_agents:
           template_files: []
       professional_skills_selection_mode: "none"
       selected_professional_skills: []
-      temperature: 0.7
+      temperature: 0.4
       max_completion_tokens: 4096
-      max_iterations: 30
+      max_iterations: 100
+      llm_call_timeout: 600
       kb_selection_mode: "all"
       retrieve_kb_only_when_mentioned: false
       db_data_sources: []
@@ -281,6 +298,7 @@ builtin_agents:
         - "db_query"
       web_search_enabled: true
       web_search_max_results: 5
+      claude_sdk_web_search_enabled: true
       web_fetch_enabled: true
       web_fetch_top_n: 3
       enable_artifacts: true
@@ -320,6 +338,7 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "wiki-qa"
       system_prompt_id: "wiki_researcher"
+      thinking: true
       temperature: 0.7
       max_completion_tokens: 4096
       max_iterations: 30
@@ -364,6 +383,7 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "custom"
       system_prompt_id: "wiki_fixer"
+      thinking: true
       temperature: 0.7
       max_completion_tokens: 4096
       max_iterations: 30

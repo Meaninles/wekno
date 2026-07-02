@@ -47,3 +47,29 @@ test('dedupeChatModelOptions keeps options that render differently', () => {
 
   assert.deepEqual(result.map((model) => model.id), ['remote', 'named', 'local'])
 })
+
+test('dedupeChatModelOptions hides managed builtin-agent clone behind normal model', () => {
+  const result = dedupeChatModelOptions([
+    chatModel({ id: 'normal' }),
+    chatModel({
+      id: 'managed-clone',
+      managed_by: 'builtin_agent_defaults',
+      description: 'source clone may have a different endpoint',
+    }),
+  ])
+
+  assert.deepEqual(result.map((model) => model.id), ['normal'])
+})
+
+test('dedupeChatModelOptions keeps selected managed builtin-agent clone', () => {
+  const result = dedupeChatModelOptions([
+    chatModel({ id: 'normal' }),
+    chatModel({
+      id: 'managed-clone',
+      managed_by: 'builtin_agent_defaults',
+      description: 'source clone may have a different endpoint',
+    }),
+  ], 'managed-clone')
+
+  assert.deepEqual(result.map((model) => model.id), ['managed-clone'])
+})

@@ -7,6 +7,10 @@ import { autoSetup, getCurrentUser, userInfoFromApi } from '@/api/auth'
 const LITE_LAST_PATH_KEY = 'weknora_lite_last_path'
 const AUTO_SETUP_FAILED_KEY = 'weknora_auto_setup_failed'
 
+// Modal-only platform routes still need a matched child route so direct links
+// can mount the platform shell and let the global modal render from route state.
+const EmptyRouteView = { render: () => null }
+
 function shouldTryAutoSetup() {
   return localStorage.getItem(AUTO_SETUP_FAILED_KEY) !== 'true'
 }
@@ -150,6 +154,12 @@ const router = createRouter({
           path: "scheduled-tasks",
           name: "scheduledTaskList",
           component: () => import("../custom/modules/scheduledchat/ScheduledTaskList.vue"),
+          meta: { requiresInit: true, requiresAuth: true }
+        },
+        {
+          path: "integrations",
+          name: "integrations",
+          component: EmptyRouteView,
           meta: { requiresInit: true, requiresAuth: true }
         },
         {

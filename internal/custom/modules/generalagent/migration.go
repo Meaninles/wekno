@@ -2,13 +2,7 @@ package generalagent
 
 import (
 	"context"
-	"errors"
-	"os"
-	"strings"
-	"time"
 
-	"github.com/Tencent/WeKnora/internal/logger"
-	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
 )
 
@@ -45,6 +39,10 @@ var generalAgentMigrationStatements = []string{
 		updated_at = NOW()
 		WHERE config->>'agent_type' = 'general-agent'
 		  AND (config->'allowed_artifact_formats' IS NOT NULL OR config->'max_artifacts' IS NOT NULL)`,
+	`DELETE FROM mcp_services
+		WHERE tenant_id = 0
+		  AND name = 'General Agent MCP Fixtures'
+		  AND is_builtin = TRUE`,
 }
 
 func applyGeneralAgentMigrations(ctx context.Context, db *gorm.DB) error {
@@ -54,70 +52,4 @@ func applyGeneralAgentMigrations(ctx context.Context, db *gorm.DB) error {
 		}
 	}
 	return nil
-}
-
-func (s *Service) ensureDevFixtureMCP(ctx context.Context) error {
-	if !truthyEnv("CUSTOM_GENERAL_AGENT_REGISTER_MCP_FIXTURES") {
-		return nil
-	}
-	name := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_MCP_FIXTURE_NAME"))
-	if name == "" {
-		name = "General Agent MCP Fixtures"
-	}
-	url := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_MCP_FIXTURE_URL"))
-	if url == "" {
-		url = "http://weknora-custom-mcp-fixtures:8092/mcp"
-	}
-	now := time.Now()
-	var existing types.MCPService
-	err := s.db.WithContext(ctx).
-		Where("tenant_id = ? AND name = ?", uint64(0), name).
-		First(&existing).Error
-	if err == nil {
-		existing.Description = "Development MCP fixture service for validating general-agent MCP selection and tool bridge."
-		existing.Enabled = true
-		existing.TransportType = types.MCPTransportHTTPStreamable
-		existing.URL = &url
-		existing.Headers = types.MCPHeaders{}
-		existing.AuthConfig = &types.MCPAuthConfig{AuthType: types.MCPAuthNone}
-		existing.AdvancedConfig = &types.MCPAdvancedConfig{Timeout: 30, RetryCount: 1, RetryDelay: 1}
-		existing.IsBuiltin = true
-		existing.UpdatedAt = now
-		if saveErr := s.db.WithContext(ctx).Save(&existing).Error; saveErr != nil {
-			return saveErr
-		}
-		logger.Infof(ctx, "general-agent dev MCP fixture service updated: %s", existing.ID)
-		return nil
-	}
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	svc := &types.MCPService{
-		TenantID:       0,
-		Name:           name,
-		Description:    "Development MCP fixture service for validating general-agent MCP selection and tool bridge.",
-		Enabled:        true,
-		TransportType:  types.MCPTransportHTTPStreamable,
-		URL:            &url,
-		Headers:        types.MCPHeaders{},
-		AuthConfig:     &types.MCPAuthConfig{AuthType: types.MCPAuthNone},
-		AdvancedConfig: &types.MCPAdvancedConfig{Timeout: 30, RetryCount: 1, RetryDelay: 1},
-		IsBuiltin:      true,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	if createErr := s.db.WithContext(ctx).Create(svc).Error; createErr != nil {
-		return createErr
-	}
-	logger.Infof(ctx, "general-agent dev MCP fixture service registered: %s", svc.ID)
-	return nil
-}
-
-func truthyEnv(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
 }

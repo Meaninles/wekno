@@ -11,6 +11,7 @@ import (
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
+	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
@@ -25,21 +26,23 @@ import (
 )
 
 type Handlers struct {
-	ConfigCenter   *configcenter.Handler
-	IAM            *iam.Handler
-	ScheduledChat  *scheduledchat.Handler
-	SkillHub       *skillhub.Handler
-	DBAnalytics    *dbanalytics.Handler
-	GeneralAgent   *generalagent.Handler
-	AnswerFeedback *answerfeedback.Handler
+	ConfigCenter         *configcenter.Handler
+	IAM                  *iam.Handler
+	ScheduledChat        *scheduledchat.Handler
+	SkillHub             *skillhub.Handler
+	DBAnalytics          *dbanalytics.Handler
+	GeneralAgent         *generalagent.Handler
+	AnswerFeedback       *answerfeedback.Handler
+	BuiltinAgentDefaults *builtinagentdefaults.Handler
 
-	configCenterService   *configcenter.Service
-	answerFeedbackService *answerfeedback.Service
-	dbAnalyticsService    *dbanalytics.Service
-	generalAgentService   *generalagent.Service
-	iamService            *iam.Service
-	scheduledChatService  *scheduledchat.Service
-	skillHubService       *skillhub.Service
+	configCenterService         *configcenter.Service
+	answerFeedbackService       *answerfeedback.Service
+	builtinAgentDefaultsService *builtinagentdefaults.Service
+	dbAnalyticsService          *dbanalytics.Service
+	generalAgentService         *generalagent.Service
+	iamService                  *iam.Service
+	scheduledChatService        *scheduledchat.Service
+	skillHubService             *skillhub.Service
 }
 
 func NewHandlers(
@@ -61,6 +64,7 @@ func NewHandlers(
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
+	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
 	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService)
 	iamService := iam.NewService(db, userService)
@@ -104,6 +108,7 @@ func NewHandlers(
 	appservice.RegisterRuntimeSkillConfigurer(skillHubService.ConfigureRuntimeSkills)
 	appservice.RegisterSelectedSkillContextResolver(skillHubService.SelectedSkillContext)
 	appservice.RegisterAllSkillContextResolver(skillHubService.AllSkillContext)
+	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentDefaultsService.ApplyReferenceModelDefaults)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
@@ -151,20 +156,22 @@ func NewHandlers(
 		return nil
 	})
 	return &Handlers{
-		ConfigCenter:          configcenter.NewHandler(configCenterService),
-		IAM:                   iam.NewHandler(iamService, orgService),
-		ScheduledChat:         scheduledchat.NewHandler(scheduledChatService),
-		SkillHub:              skillhub.NewHandler(skillHubService, db),
-		DBAnalytics:           dbanalytics.NewHandler(dbAnalyticsService),
-		GeneralAgent:          generalagent.NewHandler(generalAgentService),
-		AnswerFeedback:        answerfeedback.NewHandler(answerFeedbackService, messageService),
-		configCenterService:   configCenterService,
-		answerFeedbackService: answerFeedbackService,
-		dbAnalyticsService:    dbAnalyticsService,
-		generalAgentService:   generalAgentService,
-		iamService:            iamService,
-		scheduledChatService:  scheduledChatService,
-		skillHubService:       skillHubService,
+		ConfigCenter:                configcenter.NewHandler(configCenterService),
+		IAM:                         iam.NewHandler(iamService, orgService),
+		ScheduledChat:               scheduledchat.NewHandler(scheduledChatService),
+		SkillHub:                    skillhub.NewHandler(skillHubService, db),
+		DBAnalytics:                 dbanalytics.NewHandler(dbAnalyticsService),
+		GeneralAgent:                generalagent.NewHandler(generalAgentService),
+		AnswerFeedback:              answerfeedback.NewHandler(answerFeedbackService, messageService),
+		BuiltinAgentDefaults:        builtinagentdefaults.NewHandler(builtinAgentDefaultsService),
+		configCenterService:         configCenterService,
+		answerFeedbackService:       answerFeedbackService,
+		builtinAgentDefaultsService: builtinAgentDefaultsService,
+		dbAnalyticsService:          dbAnalyticsService,
+		generalAgentService:         generalAgentService,
+		iamService:                  iamService,
+		scheduledChatService:        scheduledChatService,
+		skillHubService:             skillHubService,
 	}, nil
 }
 
@@ -195,7 +202,7 @@ func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
 	embed.GET("/sessions/:session_id/artifacts/:id/download", handlers.GeneralAgent.DownloadEmbedArtifact)
 }
 
-func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.HandlerFunc) {
+func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.HandlerFunc, ownedAgentOrAdmin gin.HandlerFunc) {
 	if handlers == nil {
 		return
 	}
@@ -233,6 +240,13 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 			iamRoutes.PUT("/settings", handlers.IAM.SaveSetting)
 			iamRoutes.POST("/sync", handlers.IAM.RunSync)
 			iamRoutes.GET("/sync-runs", handlers.IAM.ListRuns)
+		}
+	}
+
+	if handlers.BuiltinAgentDefaults != nil && ownedAgentOrAdmin != nil {
+		builtinAgentDefaultRoutes := v1.Group("/custom/builtin-agent-defaults", ownedAgentOrAdmin)
+		{
+			builtinAgentDefaultRoutes.POST("/agents/:id/reset", handlers.BuiltinAgentDefaults.Reset)
 		}
 	}
 

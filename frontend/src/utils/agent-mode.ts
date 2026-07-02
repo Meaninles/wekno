@@ -1,11 +1,17 @@
 import {
   BUILTIN_QUICK_ANSWER_ID,
+  BUILTIN_SIMPLE_CHAT_ID,
   BUILTIN_SMART_REASONING_ID,
 } from '@/api/agent'
 
-/** Whether the selected agent id is the builtin quick-answer (RAG) mode. */
+const NORMAL_MODE_BUILTIN_AGENT_IDS = new Set([
+  BUILTIN_QUICK_ANSWER_ID,
+  BUILTIN_SIMPLE_CHAT_ID,
+])
+
+/** Whether the selected agent id uses the normal KnowledgeQA stream pipeline. */
 export function isQuickAnswerAgentId(agentId: string | null | undefined): boolean {
-  return (agentId || BUILTIN_QUICK_ANSWER_ID) === BUILTIN_QUICK_ANSWER_ID
+  return NORMAL_MODE_BUILTIN_AGENT_IDS.has(agentId || BUILTIN_QUICK_ANSWER_ID)
 }
 
 /** Whether requests should use the Agent stream pipeline (not quick-answer RAG). */
@@ -14,7 +20,7 @@ export function isAgentStreamAgentId(
   isAgentEnabled: boolean,
 ): boolean {
   const id = agentId || BUILTIN_QUICK_ANSWER_ID
-  if (id === BUILTIN_QUICK_ANSWER_ID) return false
+  if (NORMAL_MODE_BUILTIN_AGENT_IDS.has(id)) return false
   if (id === BUILTIN_SMART_REASONING_ID) return true
   return isAgentEnabled
 }
@@ -25,7 +31,7 @@ export function reconcileBuiltinAgentMode(settings: {
   isAgentEnabled: boolean
 }): boolean {
   const agentId = settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID
-  if (agentId === BUILTIN_QUICK_ANSWER_ID && settings.isAgentEnabled) {
+  if (NORMAL_MODE_BUILTIN_AGENT_IDS.has(agentId) && settings.isAgentEnabled) {
     settings.isAgentEnabled = false
     return true
   }

@@ -12,6 +12,8 @@ import (
 const (
 	// BuiltinQuickAnswerID is the ID for the built-in quick answer (RAG) agent
 	BuiltinQuickAnswerID = "builtin-quick-answer"
+	// BuiltinSimpleChatID is the ID for the built-in simple chat agent
+	BuiltinSimpleChatID = "builtin-simple-chat"
 	// BuiltinSmartReasoningID is the ID for the built-in smart reasoning (ReAct) agent
 	BuiltinSmartReasoningID = "builtin-smart-reasoning"
 	// BuiltinDeepResearcherID is the ID for the built-in deep researcher agent
@@ -425,6 +427,7 @@ var BuiltinAgentRegistry = map[string]func(uint64) *CustomAgent{}
 // still registers it in BuiltinAgentRegistry.
 var builtinAgentIDsOrdered = []string{
 	BuiltinQuickAnswerID,
+	BuiltinSimpleChatID,
 	BuiltinSmartReasoningID,
 	BuiltinWikiResearcherID,
 	BuiltinDeepResearcherID,

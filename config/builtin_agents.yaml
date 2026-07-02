@@ -47,6 +47,53 @@ builtin_agents:
       enable_rewrite: true
       fallback_strategy: "model"
 
+  - id: "builtin-simple-chat"
+    avatar: "💬"
+    is_builtin: true
+    i18n:
+      default:
+        name: "Simple Chat"
+        description: "General chat with web search and file upload support, without default knowledge base scope"
+      zh-CN:
+        name: "简单对话"
+        description: "不默认绑定知识库，支持网络搜索与上传文件、图片、语音的通用对话"
+      zh-TW:
+        name: "簡單對話"
+        description: "不預設綁定知識庫，支援網路搜尋與上傳文件、圖片、語音的一般對話"
+      ja-JP:
+        name: "シンプルチャット"
+        description: "既定のナレッジベースを使わず、Web検索とファイル・画像・音声アップロードに対応した汎用チャット"
+      ko-KR:
+        name: "간단한 대화"
+        description: "기본 지식 베이스 범위 없이 웹 검색과 파일, 이미지, 음성 업로드를 지원하는 일반 대화"
+    config:
+      agent_mode: "quick-answer"
+      system_prompt_id: "simple_chat"
+      thinking: true
+      context_template_id: "default_context"
+      temperature: 0.7
+      max_completion_tokens: 2048
+      web_search_enabled: true
+      web_search_max_results: 5
+      multi_turn_enabled: true
+      history_turns: 5
+      kb_selection_mode: "none"
+      retrieve_kb_only_when_mentioned: false
+      faq_priority_enabled: true
+      faq_direct_answer_threshold: 0.9
+      faq_score_boost: 1.2
+      embedding_top_k: 10
+      keyword_threshold: 0.3
+      vector_threshold: 0.5
+      rerank_top_k: 10
+      rerank_threshold: 0.3
+      enable_query_expansion: true
+      enable_rewrite: true
+      fallback_strategy: "model"
+      image_upload_enabled: true
+      audio_upload_enabled: true
+      supported_file_types: []
+
   - id: "builtin-smart-reasoning"
     avatar: ""
     is_builtin: true

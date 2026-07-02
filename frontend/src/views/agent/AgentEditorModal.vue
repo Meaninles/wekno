@@ -1272,7 +1272,7 @@
                 </div>
 
                 <!-- 知识库配置 -->
-                <div v-show="currentSection === 'knowledge'" class="section">
+                <div v-show="currentSection === 'knowledge' && canConfigureKnowledgeBase" class="section">
                   <div class="section-header">
                     <h2>{{ $t('agent.editor.knowledgeConfig') }}</h2>
                     <p class="section-description">{{ $t('agent.editor.knowledgeConfigDesc') }}</p>
@@ -1671,6 +1671,7 @@ import {
 import { useI18n } from 'vue-i18n';
 import { MessagePlugin } from 'tdesign-vue-next';
 import {
+  BUILTIN_SIMPLE_CHAT_ID,
   createAgent,
   updateAgent,
   resetBuiltinAgentConfig,
@@ -1974,9 +1975,14 @@ const toolGroups = computed(() => [
 const myKbOptions = computed(() => kbOptions.value.filter(kb => !kb.shared));
 const sharedKbOptions = computed(() => kbOptions.value.filter(kb => kb.shared));
 
+const isSimpleChatAgent = computed(() =>
+  formData.value.id === BUILTIN_SIMPLE_CHAT_ID || editorAgent.value?.id === BUILTIN_SIMPLE_CHAT_ID
+);
+const canConfigureKnowledgeBase = computed(() => !isSimpleChatAgent.value);
+
 // 根据知识库配置动态计算是否有知识库能力
 const hasKnowledgeBase = computed(() => {
-  return kbSelectionMode.value !== 'none';
+  return canConfigureKnowledgeBase.value && kbSelectionMode.value !== 'none';
 });
 
 const showRerankModelField = computed(() => {
@@ -2250,7 +2256,9 @@ const navItems = computed(() => {
     items.push({ key: 'conversation', icon: 'chat', label: t('agent.editor.conversationSettings') });
   }
   // 知识库与检索
-  items.push({ key: 'knowledge', icon: 'folder', label: t('agent.editor.knowledgeConfig') });
+  if (canConfigureKnowledgeBase.value) {
+    items.push({ key: 'knowledge', icon: 'folder', label: t('agent.editor.knowledgeConfig') });
+  }
   if (isAgentMode.value && canUseDatabaseSources.value) {
     items.push({ key: 'database', icon: 'server', label: '数据源' });
   }
@@ -2454,6 +2462,12 @@ const defaultFormData = {
 };
 
 const formData = ref(JSON.parse(JSON.stringify(defaultFormData)));
+
+watch(navItems, (items) => {
+  if (!items.some((item) => item.key === currentSection.value)) {
+    currentSection.value = 'basic';
+  }
+});
 
 const applyDefaultChatModelIfEmpty = () => {
   if (props.mode !== 'create' || !formData.value) return
@@ -3308,6 +3322,17 @@ const canResetBuiltinAgent = computed(() => {
   return editorMode.value === 'edit' && isBuiltinAgent.value && !!formData.value.id && !props.readOnly;
 });
 
+const enforceNoKnowledgeBaseConfig = () => {
+  formData.value.config.kb_selection_mode = 'none';
+  formData.value.config.knowledge_bases = [];
+  if (kbSelectionMode.value !== 'none') {
+    kbSelectionMode.value = 'none';
+  }
+  if (currentSection.value === 'knowledge' || currentSection.value === 'retrieval') {
+    currentSection.value = 'basic';
+  }
+};
+
 const normalizeAgentFormData = (agent: CustomAgent) => {
   const agentData = JSON.parse(JSON.stringify(agent));
 
@@ -3486,6 +3511,10 @@ watch(() => props.visible, async (val) => {
 
 // 初始化知识库选择模式
 const initKbSelectionMode = () => {
+  if (!canConfigureKnowledgeBase.value) {
+    enforceNoKnowledgeBaseConfig();
+    return;
+  }
   if (formData.value.config.kb_selection_mode) {
     // 如果有保存的模式，直接使用
     kbSelectionMode.value = formData.value.config.kb_selection_mode;
@@ -3570,6 +3599,10 @@ const fillBuiltinAgentDefaults = () => {
 
 // 监听知识库选择模式变化
 watch(kbSelectionMode, (mode) => {
+  if (!canConfigureKnowledgeBase.value) {
+    enforceNoKnowledgeBaseConfig();
+    return;
+  }
   formData.value.config.kb_selection_mode = mode;
   if (mode === 'none') {
     // 不使用知识库，清空相关配置
@@ -3579,6 +3612,12 @@ watch(kbSelectionMode, (mode) => {
     formData.value.config.knowledge_bases = [];
   }
   // selected 模式保持 knowledge_bases 不变
+});
+
+watch(canConfigureKnowledgeBase, (canConfigure) => {
+  if (!canConfigure) {
+    enforceNoKnowledgeBaseConfig();
+  }
 });
 
 // 监听 MCP 选择模式变化
@@ -4698,6 +4737,10 @@ const handleResetBuiltinAgent = async () => {
 };
 
 const handleSave = async () => {
+  if (!canConfigureKnowledgeBase.value) {
+    enforceNoKnowledgeBaseConfig();
+  }
+
   // 验证必填项（内置智能体不验证名称和系统提示词）
   if (!isBuiltinAgent.value) {
     if (!formData.value.name || !formData.value.name.trim()) {

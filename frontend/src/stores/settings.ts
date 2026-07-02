@@ -1,9 +1,9 @@
 import { defineStore } from "pinia";
 import { nextTick } from "vue";
-import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from "@/api/agent";
+import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SIMPLE_CHAT_ID, BUILTIN_SMART_REASONING_ID } from "@/api/agent";
 import { getApiBaseUrl } from "@/utils/api-base";
 import { updateMyPreferences, type UserPreferences } from "@/api/auth";
-import { isAgentStreamAgentId, reconcileBuiltinAgentMode } from "@/utils/agent-mode";
+import { isAgentStreamAgentId, isQuickAnswerAgentId, reconcileBuiltinAgentMode } from "@/utils/agent-mode";
 
 // 定义设置接口
 interface Settings {
@@ -142,9 +142,9 @@ export const useSettingsStore = defineStore("settings", {
     // Agent 是否启用
     isAgentEnabled: (state) => state.settings.isAgentEnabled || false,
 
-    // 当前是否为内置快速问答（优先看 selectedAgentId，避免与 isAgentEnabled 漂移）
+    // 当前是否为普通问答流内置项（优先看 selectedAgentId，避免与 isAgentEnabled 漂移）
     isQuickAnswerMode: (state) =>
-      (state.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID) === BUILTIN_QUICK_ANSWER_ID,
+      isQuickAnswerAgentId(state.settings.selectedAgentId),
 
     // 是否走 Agent 流式管线（智能推理 / 自定义 Agent）；快速问答走 RAG 管线
     isAgentStreamMode: (state) =>
@@ -541,7 +541,7 @@ export const useSettingsStore = defineStore("settings", {
       this.settings.selectedAgentId = agentId;
       this.settings.selectedAgentSourceTenantId = (sourceTenantId != null && sourceTenantId !== "") ? sourceTenantId : null;
       // 根据智能体类型自动切换 Agent 模式
-      if (agentId === BUILTIN_QUICK_ANSWER_ID) {
+      if (agentId === BUILTIN_QUICK_ANSWER_ID || agentId === BUILTIN_SIMPLE_CHAT_ID) {
         this.settings.isAgentEnabled = false;
       } else if (agentId === BUILTIN_SMART_REASONING_ID) {
         this.settings.isAgentEnabled = true;

@@ -165,6 +165,38 @@ templates:
 
       Current time: {{current_time}}
 
+  - id: "simple_chat"
+    name: "Simple Chat"
+    description: "General conversation template with optional contextual information"
+    i18n:
+      zh-CN:
+        name: "简单对话"
+        description: "简单对话使用的通用对话模板"
+      en-US:
+        name: "Simple Chat"
+        description: "General conversation template for simple chat"
+      ko-KR:
+        name: "간단한 대화"
+        description: "간단한 대화용 일반 대화 템플릿"
+    has_knowledge_base: false
+    has_web_search: true
+    content: |
+      You are WeKnora, an intelligent conversational assistant developed by Tencent. Help the user through natural, direct, and useful conversation.
+
+      ## Response Rules
+      - Understand the user's intent and answer clearly.
+      - Use the current message, conversation history, uploaded files, image descriptions, audio transcripts, and contextual information when they are relevant.
+      - For current or external information, synthesize the provided contextual information and mention sources when useful.
+      - If the request is unclear, ask a concise clarifying question.
+
+      ## CRITICAL: Language Rule
+      - ALWAYS respond in {{language}}
+
+      Current time: {{current_time}}
+
+      Contextual information that may be relevant:
+      {{contexts}}
+
   - id: "web_search_assistant"
     name: "Web Search Assistant"
     description: "Intelligent assistant template with web search capabilities"

@@ -32,6 +32,14 @@ func (s *sessionService) resolveKnowledgeBases(
 			hasExplicitMention, customAgent.Config.RetrieveKBOnlyWhenMentioned, customAgent.Config.KBSelectionMode)
 	}
 
+	if customAgent != nil && customAgent.Config.KBSelectionMode == "none" {
+		if hasExplicitMention {
+			logger.Infof(ctx, "KBSelectionMode=none: ignoring request-specified KB/file/tag targets")
+		}
+		req.TagScopes = nil
+		return nil, nil
+	}
+
 	if hasExplicitMention {
 		logger.Infof(ctx, "Using request-specified targets: kbs=%v, docs=%v", kbIDs, knowledgeIDs)
 		// When using a shared agent, restrict @mentions to the agent's allowed KB scope

@@ -2,22 +2,28 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 const BUILTIN_QUICK_ANSWER_ID = 'builtin-quick-answer'
+const BUILTIN_SIMPLE_CHAT_ID = 'builtin-simple-chat'
 const BUILTIN_SMART_REASONING_ID = 'builtin-smart-reasoning'
 
+const NORMAL_MODE_BUILTIN_AGENT_IDS = new Set([
+  BUILTIN_QUICK_ANSWER_ID,
+  BUILTIN_SIMPLE_CHAT_ID,
+])
+
 function isQuickAnswerAgentId(agentId) {
-  return (agentId || BUILTIN_QUICK_ANSWER_ID) === BUILTIN_QUICK_ANSWER_ID
+  return NORMAL_MODE_BUILTIN_AGENT_IDS.has(agentId || BUILTIN_QUICK_ANSWER_ID)
 }
 
 function isAgentStreamAgentId(agentId, isAgentEnabled) {
   const id = agentId || BUILTIN_QUICK_ANSWER_ID
-  if (id === BUILTIN_QUICK_ANSWER_ID) return false
+  if (NORMAL_MODE_BUILTIN_AGENT_IDS.has(id)) return false
   if (id === BUILTIN_SMART_REASONING_ID) return true
   return isAgentEnabled
 }
 
 function reconcileBuiltinAgentMode(settings) {
   const agentId = settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID
-  if (agentId === BUILTIN_QUICK_ANSWER_ID && settings.isAgentEnabled) {
+  if (NORMAL_MODE_BUILTIN_AGENT_IDS.has(agentId) && settings.isAgentEnabled) {
     settings.isAgentEnabled = false
     return true
   }
@@ -30,6 +36,7 @@ function reconcileBuiltinAgentMode(settings) {
 
 test('isQuickAnswerAgentId treats builtin quick-answer as RAG mode', () => {
   assert.equal(isQuickAnswerAgentId('builtin-quick-answer'), true)
+  assert.equal(isQuickAnswerAgentId('builtin-simple-chat'), true)
   assert.equal(isQuickAnswerAgentId(undefined), true)
   assert.equal(isQuickAnswerAgentId('builtin-smart-reasoning'), false)
 })
@@ -40,6 +47,11 @@ test('isAgentStreamAgentId prefers selectedAgentId for builtins', () => {
     false,
     'stale isAgentEnabled must not flip quick-answer into agent stream',
   )
+  assert.equal(
+    isAgentStreamAgentId('builtin-simple-chat', true),
+    false,
+    'simple chat must use the normal KnowledgeQA stream',
+  )
   assert.equal(isAgentStreamAgentId('builtin-smart-reasoning', false), true)
   assert.equal(isAgentStreamAgentId('custom-agent', true), true)
   assert.equal(isAgentStreamAgentId('custom-agent', false), false)
@@ -49,6 +61,10 @@ test('reconcileBuiltinAgentMode repairs drifted localStorage flags', () => {
   const quick = { selectedAgentId: 'builtin-quick-answer', isAgentEnabled: true }
   assert.equal(reconcileBuiltinAgentMode(quick), true)
   assert.equal(quick.isAgentEnabled, false)
+
+  const simple = { selectedAgentId: 'builtin-simple-chat', isAgentEnabled: true }
+  assert.equal(reconcileBuiltinAgentMode(simple), true)
+  assert.equal(simple.isAgentEnabled, false)
 
   const reasoning = { selectedAgentId: 'builtin-smart-reasoning', isAgentEnabled: false }
   assert.equal(reconcileBuiltinAgentMode(reasoning), true)

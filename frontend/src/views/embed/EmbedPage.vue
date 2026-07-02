@@ -58,6 +58,7 @@ import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import EmbedChatView from '@/views/embed/EmbedChatView.vue'
 import { useEmbedBridge } from '@/composables/useEmbedBridge'
+import { isAgentStreamAgentId } from '@/utils/agent-mode'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -148,7 +149,7 @@ const headerSubtitle = computed(() => {
 
 const headerIcon = computed(() => {
   const agentId = config.value?.agent_id || ''
-  return agentId && agentId !== 'builtin-quick-answer' ? 'control-platform' : 'chat'
+  return isAgentStreamAgentId(agentId, true) ? 'control-platform' : 'chat'
 })
 
 watch(headerTitle, (title) => {

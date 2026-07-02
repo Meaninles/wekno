@@ -164,6 +164,7 @@ export interface UpdateAgentRequest {
 
 // 内置智能体 ID（常用的保留常量，便于代码引用）
 export const BUILTIN_QUICK_ANSWER_ID = 'builtin-quick-answer';
+export const BUILTIN_SIMPLE_CHAT_ID = 'builtin-simple-chat';
 export const BUILTIN_SMART_REASONING_ID = 'builtin-smart-reasoning';
 export const BUILTIN_DATA_ANALYST_ID = 'builtin-data-analyst';
 export const BUILTIN_GENERAL_AGENT_ID = 'builtin-general-agent';

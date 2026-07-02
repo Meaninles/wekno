@@ -128,6 +128,7 @@ import { useKnowledgeBaseCreationNavigation } from '@/hooks/useKnowledgeBaseCrea
 import { useChatStreamHandler } from '@/composables/useChatStreamHandler';
 import { useStickyBottomOnResize } from '@/composables/useStickyBottomOnResize';
 import { clearCitationChunkCache } from '@/utils/citationChunkCache';
+import { isAgentStreamAgentId } from '@/utils/agent-mode';
 
 const props = defineProps({
     session_id: { type: String, default: '' },
@@ -142,7 +143,7 @@ const useSettingsStoreInstance = useSettingsStore();
 // Whether the active chat session is using the Agent pipeline (not quick-answer).
 const isAgentStreamSession = () => {
     if (props.embeddedMode) {
-        return !!(props.agentId && props.agentId !== 'builtin-quick-answer');
+        return isAgentStreamAgentId(props.agentId, true);
     }
     return useSettingsStoreInstance.isAgentStreamMode;
 };
@@ -615,7 +616,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
 
     // Get agent mode status from settings store (prefer selectedAgentId for builtins)
     const agentEnabled = props.embeddedMode
-        ? (props.agentId && props.agentId !== 'builtin-quick-answer')
+        ? isAgentStreamAgentId(props.agentId, true)
         : useSettingsStoreInstance.isAgentStreamMode;
 
     // Get web search status from settings store

@@ -21,6 +21,7 @@ import { fileToDataURI } from '@/utils/embedFile'
 import { useI18n } from 'vue-i18n'
 import { useChatStreamHandler } from '@/composables/useChatStreamHandler'
 import { useStickyBottomOnResize } from '@/composables/useStickyBottomOnResize'
+import { isAgentStreamAgentId } from '@/utils/agent-mode'
 
 type EmbedChatImage = { url?: string; data?: string }
 type EmbedChatAttachment = { file_name: string; file_size?: number }
@@ -59,7 +60,7 @@ export function useEmbedChatSession(options: {
   const { onChunk, error, startStream, stopStream } = useStream()
 
   const isAgentStreamSession = () =>
-    !!(options.agentId && options.agentId !== 'builtin-quick-answer')
+    isAgentStreamAgentId(options.agentId, true)
 
   const limit = ref(20)
   const messagesList = reactive<EmbedChatMessage[]>([])

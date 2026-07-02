@@ -3,6 +3,7 @@ import test from 'node:test'
 import { getAgentToolIconName } from './agent-tool-icons.ts'
 import {
   getKnowledgeSearchSummaryHtml,
+  getWebSearchSummaryHtml,
   getQueryText,
   getRagPipelineStepTitle,
   getWikiPageText,
@@ -15,12 +16,19 @@ const t = (key, params) => {
   if (key === 'agentStream.ragPipeline.searchingWithQuery') {
     return `searching ${params?.query}`
   }
+  if (key === 'agentStream.search.webResults') {
+    return `found ${params?.count} web results`
+  }
+  if (key === 'agentStream.toolStatus.webSearch') {
+    return 'web search'
+  }
   return key
 }
 
 test('getAgentToolIconName maps rag pipeline tools', () => {
   assert.equal(getAgentToolIconName('query_understand'), 'ai-search')
   assert.equal(getAgentToolIconName('knowledge_search'), 'data-search')
+  assert.equal(getAgentToolIconName('web_search'), 'internet')
 })
 
 test('getAgentToolIconName maps Wiki tools to semantic search and reading icons', () => {
@@ -58,6 +66,11 @@ test('getKnowledgeSearchSummaryHtml includes file count when present', () => {
   assert.match(html, /found <strong>2<\/strong> from <strong>2<\/strong> files/)
 })
 
+test('getWebSearchSummaryHtml uses web result wording', () => {
+  const html = getWebSearchSummaryHtml(t, { count: 5 })
+  assert.equal(html, 'found <strong>5</strong> web results')
+})
+
 test('getRagPipelineStepTitle uses query-aware search labels', () => {
   const title = getRagPipelineStepTitle(t, {
     tool_name: 'knowledge_search',
@@ -65,4 +78,14 @@ test('getRagPipelineStepTitle uses query-aware search labels', () => {
     arguments: { query: '讯飞开放平台' },
   })
   assert.equal(title, 'searching 讯飞开放平台')
+})
+
+test('getRagPipelineStepTitle labels web search separately', () => {
+  const title = getRagPipelineStepTitle(t, {
+    tool_name: 'web_search',
+    pending: false,
+    arguments: { query: 'latest events' },
+    success: true,
+  })
+  assert.equal(title, 'web search：「latest events」')
 })

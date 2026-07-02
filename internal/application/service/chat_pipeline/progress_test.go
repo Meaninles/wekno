@@ -101,3 +101,33 @@ func TestRetrievalProgressEmitsSingleToolCallAndResult(t *testing.T) {
 	assert.True(t, resultData.Success)
 	assert.Equal(t, 3, resultData.Data["count"])
 }
+
+func TestRetrievalProgressUsesWebSearchForWebOnlyRequest(t *testing.T) {
+	bus := &recordingEventBus{}
+	cm := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{SessionID: "sess-1", WebSearchEnabled: true},
+		PipelineContext: types.PipelineContext{EventBus: bus},
+		PipelineState: types.PipelineState{
+			SearchResult: []*types.SearchResult{
+				{ID: "https://example.com/1", KnowledgeSource: "web_search"},
+				{ID: "https://example.com/2", KnowledgeSource: "web_search"},
+			},
+		},
+	}
+
+	start := time.Now()
+	progress := BeginRetrievalProgress(context.Background(), cm)
+	require.NotNil(t, progress)
+	EndRetrievalProgress(context.Background(), cm, progress, start, nil)
+
+	require.Len(t, bus.events, 2)
+	callData, ok := bus.events[0].Data.(event.AgentToolCallData)
+	require.True(t, ok)
+	assert.Equal(t, "web_search", callData.ToolName)
+
+	resultData, ok := bus.events[1].Data.(event.AgentToolResultData)
+	require.True(t, ok)
+	assert.Equal(t, "web_search", resultData.ToolName)
+	assert.Equal(t, 2, resultData.Data["count"])
+	assert.Contains(t, resultData.Output, "网络搜索结果")
+}

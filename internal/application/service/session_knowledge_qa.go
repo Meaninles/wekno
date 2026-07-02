@@ -190,19 +190,7 @@ func (s *sessionService) KnowledgeQA(
 			AddIf(chatManage.EnableMemory, types.MEMORY_STORAGE).
 			Build()
 	} else {
-		// RAG — dynamically assemble based on feature flags.
-		pipeline = types.NewPipelineBuilder().
-			AddIf(hasHistory, types.LOAD_HISTORY).
-			Add(types.QUERY_UNDERSTAND).
-			Add(types.CHUNK_SEARCH_PARALLEL).
-			Add(types.CHUNK_RERANK).
-			AddIf(req.WebSearchEnabled, types.WEB_FETCH).
-			Add(types.CHUNK_MERGE).
-			Add(types.FILTER_TOP_K).
-			AddIf(chatManage.DataAnalysisEnabled, types.DATA_ANALYSIS).
-			Add(types.INTO_CHAT_MESSAGE).
-			Add(types.CHAT_COMPLETION_STREAM).
-			Build()
+		pipeline = buildKnowledgeQAPipeline(hasHistory, hasKB, req.WebSearchEnabled, chatManage.WebFetchEnabled, chatManage.DataAnalysisEnabled)
 	}
 
 	logger.Infof(ctx, "Assembled pipeline (%d stages), hasKB=%v, webSearch=%v, history=%v",
@@ -231,6 +219,22 @@ func (s *sessionService) KnowledgeQA(
 
 	logger.Info(ctx, "Knowledge base question answering initiated")
 	return nil
+}
+
+func buildKnowledgeQAPipeline(hasHistory, hasKB, webSearchEnabled, webFetchEnabled, dataAnalysisEnabled bool) []types.EventType {
+	webOnly := !hasKB && webSearchEnabled
+	return types.NewPipelineBuilder().
+		AddIf(hasHistory, types.LOAD_HISTORY).
+		Add(types.QUERY_UNDERSTAND).
+		Add(types.CHUNK_SEARCH_PARALLEL).
+		AddIf(!webOnly, types.CHUNK_RERANK).
+		AddIf(webSearchEnabled && webFetchEnabled, types.WEB_FETCH).
+		Add(types.CHUNK_MERGE).
+		Add(types.FILTER_TOP_K).
+		AddIf(dataAnalysisEnabled && hasKB, types.DATA_ANALYSIS).
+		Add(types.INTO_CHAT_MESSAGE).
+		Add(types.CHAT_COMPLETION_STREAM).
+		Build()
 }
 
 // selectChatModelID selects the appropriate chat model ID with priority for Remote models

@@ -79,7 +79,9 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 		"web_enabled":    chatManage.WebSearchEnabled,
 	})
 
-	// Run KB search and web search concurrently
+	// Run only the enabled branches. Web-only agents such as Simple Chat
+	// should not even enter the KB branch; the old unconditional goroutine was
+	// cheap, but it made traces and progress misleading.
 	pipelineInfo(ctx, "Search", "plan", map[string]interface{}{
 		"search_targets":    len(chatManage.SearchTargets),
 		"embedding_top_k":   chatManage.EmbeddingTopK,
@@ -90,28 +92,35 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 	var mu sync.Mutex
 	allResults := make([]*types.SearchResult, 0)
 
-	wg.Add(2)
-	// Goroutine 1: Knowledge base search using SearchTargets
-	go func() {
-		defer wg.Done()
-		kbResults := p.searchByTargets(ctx, chatManage)
-		if len(kbResults) > 0 {
-			mu.Lock()
-			allResults = append(allResults, kbResults...)
-			mu.Unlock()
-		}
-	}()
+	if hasKBTargets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			kbResults := p.searchByTargets(ctx, chatManage)
+			if len(kbResults) > 0 {
+				mu.Lock()
+				allResults = append(allResults, kbResults...)
+				mu.Unlock()
+			}
+		}()
+	} else {
+		pipelineInfo(ctx, "Search", "kb_branch_skip", map[string]interface{}{
+			"reason": "no_knowledge_targets",
+		})
+	}
 
-	// Goroutine 2: Web search (if enabled)
-	go func() {
-		defer wg.Done()
-		webResults := p.searchWebIfEnabled(ctx, chatManage)
-		if len(webResults) > 0 {
-			mu.Lock()
-			allResults = append(allResults, webResults...)
-			mu.Unlock()
-		}
-	}()
+	if chatManage.WebSearchEnabled {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			webResults := p.searchWebIfEnabled(ctx, chatManage)
+			if len(webResults) > 0 {
+				mu.Lock()
+				allResults = append(allResults, webResults...)
+				mu.Unlock()
+			}
+		}()
+	}
 
 	wg.Wait()
 

@@ -295,6 +295,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import ListSpaceSidebar from '@/components/ListSpaceSidebar.vue';
 import { useAuthStore } from '@/stores/auth';
@@ -330,6 +331,7 @@ import {
 const orgStore = useOrganizationStore();
 const authStore = useAuthStore();
 const pins = useResourcePins();
+const route = useRoute();
 const allSources = ref<DatabaseSource[]>([]);
 const spaceSources = ref<DatabaseSource[]>([]);
 const activeSourceId = ref('');
@@ -658,6 +660,23 @@ async function reconcileActiveSource() {
   }
 }
 
+function routeSourceId() {
+  const value = route.query.source_id;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+async function selectRouteSource() {
+  const id = routeSourceId();
+  if (!id) return false;
+  if (activeSourceId.value === id) return true;
+  try {
+    await selectSource(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function selectSource(id: string, markRecent = true) {
   const listItem = sourceResourceIndex.value.get(id) || sources.value.find(source => source.id === id);
   if (markRecent) pins.touchRecent('data_source', id);
@@ -943,13 +962,22 @@ watch(
   },
 );
 
+watch(
+  () => route.query.source_id,
+  () => {
+    void selectRouteSource();
+  },
+);
+
 onMounted(async () => {
   await orgStore.fetchOrganizations();
   await Promise.all([loadSources(), refreshSourceCounts()]);
   if (sourceScopeOrgId.value) {
     await loadSpaceSources(sourceScopeOrgId.value);
   }
-  await reconcileActiveSource();
+  if (!(await selectRouteSource())) {
+    await reconcileActiveSource();
+  }
 });
 </script>
 

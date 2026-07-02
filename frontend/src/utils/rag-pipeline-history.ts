@@ -1,4 +1,4 @@
-export const RAG_PIPELINE_TOOL_NAMES = new Set(['query_understand', 'knowledge_search'])
+export const RAG_PIPELINE_TOOL_NAMES = new Set(['query_understand', 'knowledge_search', 'web_search'])
 
 type RagHistoryMessage = {
   knowledge_references?: Array<{
@@ -25,12 +25,18 @@ export function synthesizeRagPipelineToolEvents(
 ): Array<Record<string, unknown>> {
   const refs = item.knowledge_references ?? []
   const kbCounts: Record<string, number> = {}
+  let webCount = 0
 
   for (const ref of refs) {
-    if (ref.chunk_type === 'web_search') continue
+    if (ref.chunk_type === 'web_search') {
+      webCount++
+      continue
+    }
     const key = ref.knowledge_id || ref.knowledge_title || 'document'
     kbCounts[key] = (kbCounts[key] || 0) + 1
   }
+  const hasKnowledgeRefs = Object.keys(kbCounts).length > 0
+  const retrievalToolName = hasKnowledgeRefs || webCount === 0 ? 'knowledge_search' : 'web_search'
 
   const events: Array<Record<string, unknown>> = [
     {
@@ -42,8 +48,8 @@ export function synthesizeRagPipelineToolEvents(
     },
     {
       type: 'tool_call',
-      tool_call_id: 'rag-history-knowledge-search',
-      tool_name: 'knowledge_search',
+      tool_call_id: `rag-history-${retrievalToolName}`,
+      tool_name: retrievalToolName,
       pending: false,
       success: true,
       tool_data: {

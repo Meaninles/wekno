@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -33,6 +34,7 @@ type activeRun struct {
 	stepSeq  int
 	steps    []types.AgentStep
 	progress map[string]progressRecord
+	refSeen  map[string]bool
 }
 
 type progressRecord struct {
@@ -196,6 +198,7 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 			Data:       result.Data,
 		},
 	})
+	run.emitSourceReferences(req.ToolName, result)
 	if err != nil {
 		logger.Warnf(run.ctx, "general-agent tool %s failed: %v", req.ToolName, err)
 	}
@@ -206,6 +209,46 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 		Data:    result.Data,
 		Images:  result.Images,
 	}, nil
+}
+
+func (r *activeRun) emitSourceReferences(toolName string, result *types.ToolResult) {
+	refs := sourcerefs.ExtractFromToolResult(toolName, result)
+	if len(refs) == 0 {
+		return
+	}
+
+	newRefs := r.filterNewSourceReferences(refs)
+	if len(newRefs) == 0 {
+		return
+	}
+
+	r.eventBus.Emit(r.ctx, event.Event{
+		Type:      event.EventAgentReferences,
+		SessionID: r.sessionID,
+		RequestID: r.requestID,
+		Data: event.AgentReferencesData{
+			References: newRefs,
+		},
+	})
+}
+
+func (r *activeRun) filterNewSourceReferences(refs []*types.SearchResult) []*types.SearchResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.refSeen == nil {
+		r.refSeen = make(map[string]bool, len(refs))
+	}
+	out := make([]*types.SearchResult, 0, len(refs))
+	for _, ref := range refs {
+		key := sourcerefs.ReferenceKey(ref)
+		if key == "" || r.refSeen[key] {
+			continue
+		}
+		r.refSeen[key] = true
+		out = append(out, ref)
+	}
+	return out
 }
 
 func (r *activeRun) toolTimeoutFor(toolName string) time.Duration {

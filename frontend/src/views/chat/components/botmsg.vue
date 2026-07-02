@@ -20,7 +20,9 @@
                     :user-query="userQuery" :rag-mode="true" />
             </div>
             <template v-else>
-                <docInfo v-if="session.knowledge_references?.length" :session="session"></docInfo>
+                <SourceReferenceTimeline v-if="shouldShowSourceReferenceTimeline" :session="session"
+                    :embedded-mode="embeddedMode" />
+                <docInfo v-else-if="session.knowledge_references?.length" :session="session"></docInfo>
                 <AgentStreamDisplay :session="session" :session-id="sessionId" :user-query="userQuery"
                     v-if="session.isAgentMode" />
             </template>
@@ -79,6 +81,7 @@ import docInfo from './docInfo.vue';
 import deepThink from './deepThink.vue';
 import AgentStreamDisplay from './AgentStreamDisplay.vue';
 import RagPipelineProgress from './RagPipelineProgress.vue';
+import SourceReferenceTimeline from '@/custom/modules/sourceReferences/SourceReferenceTimeline.vue';
 import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
 import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
@@ -162,6 +165,19 @@ const props = defineProps({
 });
 
 const showRequestInfo = computed(() => !!(props.session?.request_id || props.session?.id));
+const shouldShowSourceReferenceTimeline = computed(() => {
+    const refs = props.session?.knowledge_references;
+    if (!props.session?.isAgentMode || !Array.isArray(refs) || refs.length === 0) return false;
+    return refs.some((ref) => {
+        const sourceType = ref?.metadata?.source_type;
+        return sourceType === 'knowledge'
+            || sourceType === 'wiki'
+            || sourceType === 'web'
+            || sourceType === 'data_source'
+            || ref?.chunk_type === 'wiki_page'
+            || ref?.chunk_type === 'data_source';
+    });
+});
 
 const preview = (url) => {
     nextTick(() => {

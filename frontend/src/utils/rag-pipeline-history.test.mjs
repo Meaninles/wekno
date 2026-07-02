@@ -21,6 +21,19 @@ test('synthesizeRagPipelineToolEvents builds completed retrieval steps', () => {
   assert.equal(events[1].tool_data.count, 3)
 })
 
+test('synthesizeRagPipelineToolEvents uses web search for web-only references', () => {
+  const events = synthesizeRagPipelineToolEvents({
+    knowledge_references: [
+      { chunk_type: 'web_search' },
+      { chunk_type: 'web_search' },
+    ],
+  })
+
+  assert.equal(events.length, 2)
+  assert.equal(events[1].tool_name, 'web_search')
+  assert.equal(events[1].tool_data.count, 2)
+})
+
 test('ensureRagPipelineHistoryStream restores quick-answer history after reload', () => {
   const item = {
     is_completed: true,

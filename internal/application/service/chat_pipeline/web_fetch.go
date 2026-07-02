@@ -44,9 +44,14 @@ func (p *PluginWebFetch) OnEvent(
 		topN = 3
 	}
 
-	// Find web search results in reranked results
+	// Find web search results in reranked results, falling back to raw search
+	// results for web-only pipelines that deliberately skip rerank.
+	candidates := chatManage.RerankResult
+	if len(candidates) == 0 {
+		candidates = chatManage.SearchResult
+	}
 	var webResults []*types.SearchResult
-	for _, r := range chatManage.RerankResult {
+	for _, r := range candidates {
 		if strings.ToLower(r.KnowledgeSource) == "web_search" {
 			webResults = append(webResults, r)
 			if len(webResults) >= topN {

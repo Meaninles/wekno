@@ -12,6 +12,7 @@ import (
 
 const (
 	retrievalProgressTool       = "knowledge_search"
+	webRetrievalProgressTool    = "web_search"
 	queryUnderstandProgressTool = "query_understand"
 )
 
@@ -60,12 +61,13 @@ func LastConsolidatedRetrievalStage(eventList []types.EventType, chatManage *typ
 	return last
 }
 
-// BeginRetrievalProgress emits a single pending knowledge_search tool_call.
+// BeginRetrievalProgress emits a single pending retrieval tool_call.
 func BeginRetrievalProgress(ctx context.Context, chatManage *types.ChatManage) *StageProgress {
 	if chatManage == nil || chatManage.EventBus == nil {
 		return nil
 	}
 
+	toolName := retrievalProgressToolName(chatManage)
 	toolCallID := uuid.New().String()
 	args := map[string]any{}
 	if chatManage.RewriteQuery != "" {
@@ -79,12 +81,12 @@ func BeginRetrievalProgress(ctx context.Context, chatManage *types.ChatManage) *
 		SessionID: chatManage.SessionID,
 		Data: event.AgentToolCallData{
 			ToolCallID: toolCallID,
-			ToolName:   retrievalProgressTool,
+			ToolName:   toolName,
 			Arguments:  args,
 		},
 	})
 
-	return &StageProgress{toolCallID: toolCallID, toolName: retrievalProgressTool}
+	return &StageProgress{toolCallID: toolCallID, toolName: toolName}
 }
 
 // BeginQueryUnderstandProgress emits a pending query_understand tool_call.
@@ -169,7 +171,13 @@ func EndRetrievalProgress(
 	output := ""
 	if success {
 		if count == 0 {
-			output = "未检索到相关内容"
+			if progress.toolName == webRetrievalProgressTool {
+				output = "未找到网络搜索结果"
+			} else {
+				output = "未检索到相关内容"
+			}
+		} else if progress.toolName == webRetrievalProgressTool {
+			output = fmt.Sprintf("找到 %d 个网络搜索结果", count)
 		} else {
 			output = fmt.Sprintf("检索到 %d 条相关内容", count)
 		}
@@ -195,6 +203,19 @@ func EndRetrievalProgress(
 			},
 		},
 	})
+}
+
+func retrievalProgressToolName(chatManage *types.ChatManage) string {
+	if chatManage == nil {
+		return retrievalProgressTool
+	}
+	hasKnowledgeTargets := len(chatManage.SearchTargets) > 0 ||
+		len(chatManage.KnowledgeBaseIDs) > 0 ||
+		len(chatManage.KnowledgeIDs) > 0
+	if !hasKnowledgeTargets && chatManage.WebSearchEnabled {
+		return webRetrievalProgressTool
+	}
+	return retrievalProgressTool
 }
 
 func retrievalResultCount(chatManage *types.ChatManage) int {

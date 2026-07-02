@@ -2463,12 +2463,6 @@ const defaultFormData = {
 
 const formData = ref(JSON.parse(JSON.stringify(defaultFormData)));
 
-watch(navItems, (items) => {
-  if (!items.some((item) => item.key === currentSection.value)) {
-    currentSection.value = 'basic';
-  }
-});
-
 const applyDefaultChatModelIfEmpty = () => {
   if (props.mode !== 'create' || !formData.value) return
   const chat =
@@ -2695,6 +2689,12 @@ const isDocumentProcessingAgent = computed(() => isAgentMode.value && agentType.
 const isGeneralRuntimeAgent = computed(() => isGeneralAgent.value || isDocumentProcessingAgent.value);
 const supportsNativeAgentWebSearch = computed(() => isDataAnalysisAgent.value || isGeneralRuntimeAgent.value);
 const canUseDatabaseSources = computed(() => isDataAnalysisAgent.value || isGeneralRuntimeAgent.value);
+
+watch(navItems, (items) => {
+  if (!items.some((item) => item.key === currentSection.value)) {
+    currentSection.value = 'basic';
+  }
+});
 
 const documentTemplateFormats = computed(() => [
   {

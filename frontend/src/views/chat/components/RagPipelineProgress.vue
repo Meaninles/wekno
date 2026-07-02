@@ -212,6 +212,7 @@ import { getAgentToolIconName } from '@/utils/agent-tool-icons'
 import {
   getKnowledgeSearchSummaryHtml,
   getRagPipelineStepTitle,
+  getWebSearchSummaryHtml,
 } from '@/utils/agent-tool-display'
 import { RAG_PIPELINE_TOOL_NAMES } from '@/utils/rag-pipeline-history'
 
@@ -286,10 +287,13 @@ const steps = computed(() => {
           : null
 
       const isSearchTool = toolName === 'knowledge_search' || toolName === 'search_knowledge'
-      const summaryHtml =
-        !pending && isSearchTool && toolData
-          ? getKnowledgeSearchSummaryHtml(t, toolData)
-          : ''
+      const isWebSearchTool = toolName === 'web_search'
+      let summaryHtml = ''
+      if (!pending && isSearchTool && toolData) {
+        summaryHtml = getKnowledgeSearchSummaryHtml(t, toolData)
+      } else if (!pending && isWebSearchTool && toolData) {
+        summaryHtml = getWebSearchSummaryHtml(t, toolData)
+      }
 
       return {
         id: String(event.tool_call_id || `${toolName}-${event.timestamp || 0}`),

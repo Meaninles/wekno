@@ -7,7 +7,8 @@
         :embed-session-sig="embedSessionSig" />
     </div>
     <template v-else>
-      <DocInfo v-if="session?.knowledge_references?.length" :session="session" embedded-mode />
+      <SourceReferenceTimeline v-if="shouldShowSourceReferenceTimeline" :session="session" embedded-mode />
+      <DocInfo v-else-if="session?.knowledge_references?.length" :session="session" embedded-mode />
       <AgentStreamDisplay v-if="session?.isAgentMode" :session="session" :session-id="sessionId" :user-query="userQuery"
         :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken"
         :embed-session-sig="embedSessionSig" />
@@ -77,6 +78,9 @@ const AgentStreamDisplay = defineAsyncComponent(
 const DocInfo = defineAsyncComponent(
   () => import('@/views/chat/components/docInfo.vue'),
 )
+const SourceReferenceTimeline = defineAsyncComponent(
+  () => import('@/custom/modules/sourceReferences/SourceReferenceTimeline.vue'),
+)
 const DeepThink = defineAsyncComponent(
   () => import('@/views/chat/components/deepThink.vue'),
 )
@@ -97,7 +101,12 @@ type EmbedSession = {
   hideContent?: boolean
   is_completed?: boolean
   agentEventStream?: Array<Record<string, unknown>>
-  knowledge_references?: Array<{ chunk_type?: string; knowledge_id?: string; knowledge_title?: string }>
+  knowledge_references?: Array<{
+    chunk_type?: string
+    knowledge_id?: string
+    knowledge_title?: string
+    metadata?: Record<string, string>
+  }>
 }
 
 const props = withDefaults(
@@ -124,6 +133,19 @@ const props = withDefaults(
 )
 
 const parentMd = ref<HTMLElement | null>(null)
+const shouldShowSourceReferenceTimeline = computed(() => {
+  const refs = props.session?.knowledge_references
+  if (!props.session?.isAgentMode || !Array.isArray(refs) || refs.length === 0) return false
+  return refs.some((ref) => {
+    const sourceType = ref?.metadata?.source_type
+    return sourceType === 'knowledge'
+      || sourceType === 'wiki'
+      || sourceType === 'web'
+      || sourceType === 'data_source'
+      || ref?.chunk_type === 'wiki_page'
+      || ref?.chunk_type === 'data_source'
+  })
+})
 
 const embedChannelIdRef = computed(() => props.embedChannelId)
 const embedTokenRef = computed(() => props.embedToken)

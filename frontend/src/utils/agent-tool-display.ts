@@ -93,6 +93,19 @@ export function getKnowledgeSearchSummaryHtml(
   return t('agentStream.search.foundResults', { count: `<strong>${count}</strong>` })
 }
 
+export function getWebSearchSummaryHtml(
+  t: ComposerTranslation,
+  toolData: Record<string, unknown> | null | undefined,
+): string {
+  if (!toolData) return ''
+
+  const results = toolData.results
+  const count = (Array.isArray(results) ? results.length : 0) || Number(toolData.count) || 0
+  if (count === 0) return t('agentStream.search.noResults')
+
+  return t('agentStream.search.webResults', { count: `<strong>${count}</strong>` })
+}
+
 type RagPipelineEvent = {
   tool_name?: string
   pending?: boolean
@@ -124,6 +137,13 @@ export function getRagPipelineStepTitle(t: ComposerTranslation, event: RagPipeli
     const baseTitle = event.success === false
       ? t('agentStream.toolStatus.searchKbFailed')
       : t('agentStream.toolStatus.searchKb')
+    return query ? `${baseTitle}：「${query}」` : baseTitle
+  }
+
+  if (toolName === 'web_search') {
+    const baseTitle = event.success === false
+      ? t('agentStream.toolStatus.webSearchFailed')
+      : t('agentStream.toolStatus.webSearch')
     return query ? `${baseTitle}：「${query}」` : baseTitle
   }
 

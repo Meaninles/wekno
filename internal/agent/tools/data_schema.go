@@ -12,12 +12,12 @@ import (
 
 var dataSchemaTool = BaseTool{
 	name:        ToolDataSchema,
-	description: "Use this tool to get the schema information of a CSV or Excel file loaded into DuckDB. It returns the table name, columns, and row count.",
+	description: "使用此工具获取已加载到 DuckDB 的 CSV 或 Excel 文件的 schema 信息。它会返回表名、列和行数。",
 	schema:      utils.GenerateSchema[DataSchemaInput](),
 }
 
 type DataSchemaInput struct {
-	KnowledgeID string `json:"knowledge_id" jsonschema:"id of the knowledge to query"`
+	KnowledgeID string `json:"knowledge_id" jsonschema:"要查询的知识 ID"`
 }
 
 type DataSchemaTool struct {
@@ -45,7 +45,7 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	if err := json.Unmarshal(args, &input); err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to parse input args: %v", err),
+			Error:   fmt.Sprintf("解析输入参数失败: %v", err),
 		}, err
 	}
 
@@ -54,7 +54,7 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to get knowledge '%s': %v", input.KnowledgeID, err),
+			Error:   fmt.Sprintf("获取知识 '%s' 失败: %v", input.KnowledgeID, err),
 		}, err
 	}
 
@@ -81,7 +81,7 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to list chunks for knowledge ID '%s': %v", input.KnowledgeID, err),
+			Error:   fmt.Sprintf("列出知识 ID '%s' 的分块失败: %v", input.KnowledgeID, err),
 		}, err
 	}
 
@@ -97,7 +97,7 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	if summaryContent == "" || columnContent == "" {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("No table schema information found for knowledge ID '%s'", input.KnowledgeID),
+			Error:   fmt.Sprintf("未找到知识 ID '%s' 的表 schema 信息", input.KnowledgeID),
 		}, fmt.Errorf("no schema info found")
 	}
 

@@ -19,50 +19,50 @@ type graphConfigSummary struct {
 
 var queryKnowledgeGraphTool = BaseTool{
 	name: ToolQueryKnowledgeGraph,
-	description: `Query knowledge graph to explore entity relationships and knowledge networks.
+	description: `查询知识图谱，探索实体关系和知识网络。
 
-## Core Function
-Explores relationships between entities in knowledge bases that have graph extraction configured.
+## 核心功能
+探索已配置图谱抽取的知识库中的实体关系。
 
-## When to Use
-✅ **Use for**:
-- Understanding relationships between entities (e.g., "relationship between Docker and Kubernetes")
-- Exploring knowledge networks and concept associations
-- Finding related information about specific entities
-- Understanding technical architecture and system relationships
+## 何时使用
+✅ **适用于**：
+- 理解实体之间的关系（例如“Docker 和 Kubernetes 的关系”）
+- 探索知识网络和概念关联
+- 查找特定实体的相关信息
+- 理解技术架构和系统关系
 
-❌ **Don't use for**:
-- General text search → use knowledge_search
-- Knowledge base without graph extraction configured
-- Need exact document content → use knowledge_search
+❌ **不适用于**：
+- 通用文本搜索 → 使用 knowledge_search
+- 未配置图谱抽取的知识库
+- 需要精确文档内容 → 使用 knowledge_search
 
-## Parameters
-- **knowledge_base_ids** (required): Array of knowledge base IDs (1-10). Only KBs with graph extraction configured will be effective.
-- **query** (required): Query content - can be entity name, relationship query, or concept search.
+## 参数
+- **knowledge_base_ids**（必填）：知识库 ID 数组（1 到 10 个）。只有配置了图谱抽取的知识库才有效。
+- **query**（必填）：查询内容，可以是实体名称、关系查询或概念搜索。
 
-## Graph Configuration
-Knowledge graph must be pre-configured in knowledge bases:
-- **Entity types** (Nodes): e.g., "Technology", "Tool", "Concept"
-- **Relationship types** (Relations): e.g., "depends_on", "uses", "contains"
+## 图谱配置
+知识图谱必须预先在知识库中配置：
+- **实体类型**（Nodes）：例如 "Technology"、"Tool"、"Concept"
+- **关系类型**（Relations）：例如 "depends_on"、"uses"、"contains"
 
-If KB is not configured with graph, tool will return regular search results.
+如果知识库未配置图谱，工具会返回常规搜索结果。
 
-## Workflow
-1. **Relationship exploration**: query_knowledge_graph → list_knowledge_chunks (for detailed content)
-2. **Network analysis**: query_knowledge_graph → knowledge_search (for comprehensive understanding)
-3. **Topic research**: knowledge_search → query_knowledge_graph (for deep entity relationships)
+## 工作流
+1. **关系探索**：query_knowledge_graph → list_knowledge_chunks（获取详细内容）
+2. **网络分析**：query_knowledge_graph → knowledge_search（获得综合理解）
+3. **主题研究**：knowledge_search → query_knowledge_graph（深入实体关系）
 
-## Notes
-- Results indicate graph configuration status
-- Cross-KB results are automatically deduplicated
-- Results are sorted by relevance`,
+## 注意事项
+- 结果会标明图谱配置状态
+- 跨知识库结果会自动去重
+- 结果按相关性排序`,
 	schema: utils.GenerateSchema[QueryKnowledgeGraphInput](),
 }
 
 // QueryKnowledgeGraphInput defines the input parameters for query knowledge graph tool
 type QueryKnowledgeGraphInput struct {
-	KnowledgeBaseIDs []string `json:"knowledge_base_ids" jsonschema:"Array of knowledge base IDs to query"`
-	Query            string   `json:"query" jsonschema:"Query content (entity name or query text)"`
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids" jsonschema:"要查询的知识库 ID 数组"`
+	Query            string   `json:"query" jsonschema:"查询内容（实体名称或查询文本）"`
 }
 
 // QueryKnowledgeGraphTool queries the knowledge graph for entities and relationships
@@ -86,7 +86,7 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 	if err := json.Unmarshal(args, &input); err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to parse args: %v", err),
+			Error:   fmt.Sprintf("解析参数失败: %v", err),
 		}, err
 	}
 
@@ -94,7 +94,7 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 	if len(input.KnowledgeBaseIDs) == 0 {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "knowledge_base_ids is required and must be a non-empty array",
+			Error:   "需要提供 knowledge_base_ids，且必须是非空数组",
 		}, fmt.Errorf("knowledge_base_ids is required")
 	}
 
@@ -102,7 +102,7 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 	if len(input.KnowledgeBaseIDs) > 10 {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "knowledge_base_ids must contain at most 10 KB IDs",
+			Error:   "knowledge_base_ids 最多只能包含 10 个知识库 ID",
 		}, fmt.Errorf("too many KB IDs")
 	}
 
@@ -110,7 +110,7 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 	if query == "" {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "query is required",
+			Error:   "需要提供 query",
 		}, fmt.Errorf("invalid query")
 	}
 
@@ -208,7 +208,7 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 	if len(allResults) == 0 {
 		return &types.ToolResult{
 			Success: true,
-			Output:  "No relevant graph information found.",
+			Output:  "未找到相关图谱信息。",
 			Data: map[string]interface{}{
 				"knowledge_base_ids": input.KnowledgeBaseIDs,
 				"query":              query,
@@ -221,13 +221,13 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 	}
 
 	// Format output with enhanced graph information
-	output := "=== Knowledge Graph Query ===\n\n"
-	output += fmt.Sprintf("📊 Query: %s\n", query)
-	output += fmt.Sprintf("🎯 Target Knowledge Bases: %v\n", input.KnowledgeBaseIDs)
-	output += fmt.Sprintf("✓ Found %d relevant results (deduplicated)\n\n", len(allResults))
+	output := "=== 知识图谱查询 ===\n\n"
+	output += fmt.Sprintf("📊 查询: %s\n", query)
+	output += fmt.Sprintf("🎯 目标知识库: %v\n", input.KnowledgeBaseIDs)
+	output += fmt.Sprintf("✓ 找到 %d 条相关结果（已去重）\n\n", len(allResults))
 
 	if len(errors) > 0 {
-		output += "=== ⚠️ Partial Failures ===\n"
+		output += "=== ⚠️ 部分失败 ===\n"
 		for _, errMsg := range errors {
 			output += fmt.Sprintf("  - %s\n", errMsg)
 		}
@@ -236,45 +236,45 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 
 	// Display graph configuration status
 	hasGraphConfig := false
-	output += "=== 📈 Graph Configuration Status ===\n\n"
+	output += "=== 📈 图谱配置状态 ===\n\n"
 	for kbID, config := range graphConfigs {
 		hasGraphConfig = true
-		output += fmt.Sprintf("Knowledge Base [%s]:\n", kbID)
+		output += fmt.Sprintf("知识库 [%s]:\n", kbID)
 
 		if len(config.Nodes) > 0 {
-			output += fmt.Sprintf("  ✓ Entity Types (%d): %v\n", len(config.Nodes), config.Nodes)
+			output += fmt.Sprintf("  ✓ 实体类型 (%d): %v\n", len(config.Nodes), config.Nodes)
 		} else {
-			output += "  ⚠️ No entity types configured\n"
+			output += "  ⚠️ 未配置实体类型\n"
 		}
 
 		if len(config.Relations) > 0 {
-			output += fmt.Sprintf("  ✓ Relationship Types (%d): %v\n", len(config.Relations), config.Relations)
+			output += fmt.Sprintf("  ✓ 关系类型 (%d): %v\n", len(config.Relations), config.Relations)
 		} else {
-			output += "  ⚠️ No relationship types configured\n"
+			output += "  ⚠️ 未配置关系类型\n"
 		}
 		output += "\n"
 	}
 
 	if !hasGraphConfig {
-		output += "⚠️ None of the queried knowledge bases have graph extraction configured\n"
-		output += "💡 Hint: Configure entity and relationship types in knowledge base settings\n\n"
+		output += "⚠️ 查询的知识库均未配置图谱抽取\n"
+		output += "💡 提示：请在知识库设置中配置实体类型和关系类型\n\n"
 	}
 
 	// Display result counts by KB
 	if len(kbCounts) > 0 {
-		output += "=== 📚 Knowledge Base Coverage ===\n"
+		output += "=== 📚 知识库覆盖情况 ===\n"
 		for kbID, count := range kbCounts {
-			output += fmt.Sprintf("  - %s: %d results\n", kbID, count)
+			output += fmt.Sprintf("  - %s: %d 条结果\n", kbID, count)
 		}
 		output += "\n"
 	}
 
 	// Display search results
-	output += "=== 🔍 Query Results ===\n\n"
+	output += "=== 🔍 查询结果 ===\n\n"
 	if !hasGraphConfig {
-		output += "💡 Returning relevant document chunks (knowledge base has no graph configuration)\n\n"
+		output += "💡 返回相关文档分块（知识库没有图谱配置）\n\n"
 	} else {
-		output += "💡 Content retrieval based on graph configuration\n\n"
+		output += "💡 基于图谱配置检索内容\n\n"
 	}
 
 	formattedResults := make([]map[string]interface{}, 0, len(allResults))
@@ -287,15 +287,15 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 			if i > 0 {
 				output += "\n"
 			}
-			output += fmt.Sprintf("[Source Document: %s]\n\n", result.KnowledgeTitle)
+			output += fmt.Sprintf("[来源文档: %s]\n\n", result.KnowledgeTitle)
 		}
 
 		relevanceLevel := GetRelevanceLevel(result.Score)
 
-		output += fmt.Sprintf("Result #%d:\n", i+1)
-		output += fmt.Sprintf("  📍 Relevance: %.2f (%s)\n", result.Score, relevanceLevel)
-		output += fmt.Sprintf("  🔗 Match Type: %s\n", FormatMatchType(result.MatchType))
-		output += fmt.Sprintf("  📄 Content: %s\n", result.Content)
+		output += fmt.Sprintf("结果 #%d:\n", i+1)
+		output += fmt.Sprintf("  📍 相关性: %.2f (%s)\n", result.Score, relevanceLevel)
+		output += fmt.Sprintf("  🔗 匹配类型: %s\n", FormatMatchType(result.MatchType))
+		output += fmt.Sprintf("  📄 内容: %s\n", result.Content)
 		output += fmt.Sprintf("  🆔 chunk_id: %s\n\n", result.ID)
 
 		formattedResults = append(formattedResults, map[string]interface{}{
@@ -310,14 +310,14 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 		})
 	}
 
-	output += "=== 💡 Tips ===\n"
-	output += "- ✓ Results are deduplicated across knowledge bases and sorted by relevance\n"
-	output += "- ✓ Use get_chunk_detail to get full content\n"
-	output += "- ✓ Use list_knowledge_chunks to explore context\n"
+	output += "=== 💡 提示 ===\n"
+	output += "- ✓ 结果已跨知识库去重，并按相关性排序\n"
+	output += "- ✓ 使用 get_chunk_detail 获取完整内容\n"
+	output += "- ✓ 使用 list_knowledge_chunks 探索上下文\n"
 	if !hasGraphConfig {
-		output += "- ⚠️ Configure graph extraction for more precise entity-relationship results\n"
+		output += "- ⚠️ 配置图谱抽取后可获得更精确的实体关系结果\n"
 	}
-	output += "- ⏳ Full graph query language (Cypher) support is under development\n"
+	output += "- ⏳ 完整图查询语言（Cypher）支持仍在开发中\n"
 
 	// Build structured graph data for frontend visualization
 	graphData := buildGraphVisualizationData(allResults)
@@ -447,7 +447,7 @@ func buildGraphVisualizationData(results []*types.SearchResult) map[string]inter
 		if !seenEntities[result.ID] {
 			nodes = append(nodes, map[string]interface{}{
 				"id":       result.ID,
-				"label":    fmt.Sprintf("Chunk %d", i+1),
+				"label":    fmt.Sprintf("分块 %d", i+1),
 				"content":  result.Content,
 				"kb_id":    result.KnowledgeID,
 				"kb_title": result.KnowledgeTitle,

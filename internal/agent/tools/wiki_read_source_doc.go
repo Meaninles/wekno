@@ -22,28 +22,28 @@ func NewWikiReadSourceDocTool(knowledgeService interfaces.KnowledgeService, chun
 	return &wikiReadSourceDocTool{
 		BaseTool: NewBaseTool(
 			ToolWikiReadSourceDoc,
-			`Read or search within a specific source document to drill down for details omitted from the wiki.
-Provide the knowledge_id from the <sources> block.
-You can EITHER search using a regex query OR fetch a specific contiguous range of chunks using start_chunk_index and end_chunk_index (useful for expanding context around a known chunk).
-If neither query nor range is provided, it returns the beginning of the document.`,
+			`读取或搜索特定源文档，以深入查看 wiki 中省略的细节。
+请提供 <sources> 块中的 knowledge_id。
+你可以使用正则 query 搜索，也可以用 start_chunk_index 和 end_chunk_index 获取连续分块范围（适合扩展已知分块附近的上下文）。
+如果未提供 query 或范围，则返回文档开头。`,
 			json.RawMessage(`{
   "type": "object",
   "properties": {
     "knowledge_id": {
       "type": "string",
-      "description": "The ID of the source document to read"
+      "description": "要读取的源文档 ID"
     },
     "query": {
       "type": "string",
-      "description": "Optional: A regex query to filter the document chunks. Use this to find specific quotes or details efficiently. Remember to double-escape backslashes for JSON: write \"C\\\\+\\\\+\" (NOT \"C\\+\\+\") and \"\\\\d+\" (NOT \"\\d+\")."
+      "description": "可选：用于过滤文档分块的正则查询。用它高效查找特定引用或细节。注意 JSON 中反斜杠需要双重转义：写 \"C\\\\+\\\\+\"（不要写 \"C\\+\\+\"）和 \"\\\\d+\"（不要写 \"\\d+\"）。"
     },
     "start_chunk_index": {
       "type": "integer",
-      "description": "Optional: The starting chunk index (1-based) to read a specific range."
+      "description": "可选：要读取特定范围时的起始分块索引（从 1 开始）。"
     },
     "end_chunk_index": {
       "type": "integer",
-      "description": "Optional: The ending chunk index (1-based) to read a specific range. Must be >= start_chunk_index."
+      "description": "可选：要读取特定范围时的结束分块索引（从 1 开始）。必须 >= start_chunk_index。"
     }
   },
   "required": ["knowledge_id"]
@@ -121,17 +121,17 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 		EndChunkIndex   int    `json:"end_chunk_index"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "Invalid parameters: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "参数无效: " + err.Error()}, nil
 	}
 
 	knowledgeID := strings.TrimSpace(params.KnowledgeID)
 	if knowledgeID == "" {
-		return &types.ToolResult{Success: false, Error: "knowledge_id is required"}, nil
+		return &types.ToolResult{Success: false, Error: "需要 knowledge_id"}, nil
 	}
 
 	knowledge, err := t.knowledgeService.GetKnowledgeByIDOnly(ctx, knowledgeID)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: fmt.Sprintf("Document not found: %v", err)}, nil
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("未找到文档: %v", err)}, nil
 	}
 
 	var sb strings.Builder
@@ -153,7 +153,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 	} else if params.Query != "" {
 		compiled, err := regexp.Compile("(?i)" + params.Query)
 		if err != nil {
-			return &types.ToolResult{Success: false, Error: fmt.Sprintf("Invalid regex query '%s': %v", params.Query, err)}, nil
+			return &types.ToolResult{Success: false, Error: fmt.Sprintf("正则查询 '%s' 无效: %v", params.Query, err)}, nil
 		}
 		re = compiled
 		sb.WriteString(fmt.Sprintf("<query>%s</query>\n", params.Query))
@@ -163,7 +163,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 	pageSize := 100
 	page := 1
 	if hasRange {
-		page = (params.StartChunkIndex - 1) / pageSize + 1
+		page = (params.StartChunkIndex-1)/pageSize + 1
 	}
 
 	var chunksOutput strings.Builder
@@ -189,7 +189,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 			"", "", "", "", "",
 		)
 		if err != nil {
-			return &types.ToolResult{Success: false, Error: fmt.Sprintf("Failed to list chunks: %v", err)}, nil
+			return &types.ToolResult{Success: false, Error: fmt.Sprintf("列出分块失败: %v", err)}, nil
 		}
 
 		if page == 1 {
@@ -293,7 +293,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 	}
 
 	sb.WriteString(fmt.Sprintf("<total_chunks>%d</total_chunks>\n</metadata>\n", totalChunks))
-	
+
 	if matchCount > 0 {
 		sb.WriteString(fmt.Sprintf("<chunks count=\"%d\">\n", matchCount))
 		sb.WriteString(chunksOutput.String())
@@ -303,17 +303,17 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 	}
 
 	if reachedMax {
-		sb.WriteString("<message>Reached maximum limit for fetching chunks in a single call. Please refine your query or range if needed.</message>\n")
+		sb.WriteString("<message>已达到单次调用可获取分块的最大限制。如有需要，请细化查询或范围。</message>\n")
 	} else if matchCount == 0 {
 		if hasRange {
-			sb.WriteString("<message>No chunks found in the specified range.</message>\n")
+			sb.WriteString("<message>指定范围内未找到分块。</message>\n")
 		} else if re != nil {
-			sb.WriteString("<message>No chunks matched your query in this document.</message>\n")
+			sb.WriteString("<message>此文档中没有分块匹配你的查询。</message>\n")
 		} else {
-			sb.WriteString("<message>Document has no text chunks available.</message>\n")
+			sb.WriteString("<message>文档没有可用文本分块。</message>\n")
 		}
 	} else if !hasRange && re == nil {
-		sb.WriteString("<message>No query or range provided. Showing the first 10 chunks as a preview.</message>\n")
+		sb.WriteString("<message>未提供查询或范围。当前显示前 10 个分块作为预览。</message>\n")
 	}
 
 	sb.WriteString("</source_document>")

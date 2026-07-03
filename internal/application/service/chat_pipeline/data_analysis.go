@@ -109,15 +109,15 @@ func (p *PluginDataAnalysis) OnEvent(
 	formatSchema := utils.GenerateSchema[tools.DataAnalysisInput]()
 
 	analysisPrompt := fmt.Sprintf(`
-User Question: %s
-Knowledge ID: %s
-Table Schema: %s
+用户问题：%s
+知识 ID：%s
+表结构：%s
 
-Determine if the user's question requires data analysis (e.g., statistics, aggregation, filtering) on this table.
-If YES, generate a DuckDB SQL query to answer the user's question and fill in the knowledge_id and sql fields.
-If NO, leave the sql field empty.
+判断用户问题是否需要对该表进行数据分析（例如统计、聚合、筛选）。
+如果需要，请生成用于回答用户问题的 DuckDB SQL 查询，并填写 knowledge_id 和 sql 字段。
+如果不需要，请将 sql 字段留空。
 
-Return your response in the specified JSON format.`, chatManage.Query, knowledge.ID, schema.Description())
+请按指定的 JSON 格式返回。`, chatManage.Query, knowledge.ID, schema.Description())
 
 	response, err := chatModel.Chat(ctx, []chat.Message{
 		{Role: "user", Content: analysisPrompt},

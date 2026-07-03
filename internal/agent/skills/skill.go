@@ -68,32 +68,32 @@ type SkillFile struct {
 func (s *Skill) Validate() error {
 	// Validate name
 	if s.Name == "" {
-		return errors.New("skill name is required")
+		return errors.New("需要提供技能名称")
 	}
 	if len(s.Name) > MaxNameLength {
-		return fmt.Errorf("skill name exceeds maximum length of %d characters", MaxNameLength)
+		return fmt.Errorf("技能名称超过最大长度 %d 个字符", MaxNameLength)
 	}
 	if !namePattern.MatchString(s.Name) {
-		return errors.New("skill name must contain only lowercase letters, numbers, and hyphens")
+		return errors.New("技能名称只能包含小写字母、数字和连字符")
 	}
 	for _, reserved := range reservedWords {
 		if strings.Contains(s.Name, reserved) {
-			return fmt.Errorf("skill name cannot contain reserved word: %s", reserved)
+			return fmt.Errorf("技能名称不能包含保留词: %s", reserved)
 		}
 	}
 	if xmlTagPattern.MatchString(s.Name) {
-		return errors.New("skill name cannot contain XML tags")
+		return errors.New("技能名称不能包含 XML 标签")
 	}
 
 	// Validate description
 	if s.Description == "" {
-		return errors.New("skill description is required")
+		return errors.New("需要提供技能描述")
 	}
 	if len(s.Description) > MaxDescriptionLength {
-		return fmt.Errorf("skill description exceeds maximum length of %d characters", MaxDescriptionLength)
+		return fmt.Errorf("技能描述超过最大长度 %d 个字符", MaxDescriptionLength)
 	}
 	if xmlTagPattern.MatchString(s.Description) {
-		return errors.New("skill description cannot contain XML tags")
+		return errors.New("技能描述不能包含 XML 标签")
 	}
 
 	return nil
@@ -115,7 +115,7 @@ func ParseSkillFile(content string) (*Skill, error) {
 
 	// Check for YAML frontmatter
 	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
-		return nil, errors.New("SKILL.md must start with YAML frontmatter (---)")
+		return nil, errors.New("SKILL.md 必须以 YAML frontmatter (---) 开头")
 	}
 
 	// Find the end of frontmatter
@@ -147,17 +147,17 @@ func ParseSkillFile(content string) (*Skill, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading SKILL.md: %w", err)
+		return nil, fmt.Errorf("读取 SKILL.md 出错: %w", err)
 	}
 
 	if !frontmatterEnded {
-		return nil, errors.New("SKILL.md frontmatter is not properly closed with ---")
+		return nil, errors.New("SKILL.md frontmatter 没有用 --- 正确闭合")
 	}
 
 	// Parse YAML frontmatter
 	frontmatter := strings.Join(frontmatterLines, "\n")
 	if err := yaml.Unmarshal([]byte(frontmatter), skill); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML frontmatter: %w", err)
+		return nil, fmt.Errorf("解析 YAML frontmatter 失败: %w", err)
 	}
 
 	// Set body instructions
@@ -166,7 +166,7 @@ func ParseSkillFile(content string) (*Skill, error) {
 
 	// Validate
 	if err := skill.Validate(); err != nil {
-		return nil, fmt.Errorf("skill validation failed: %w", err)
+		return nil, fmt.Errorf("技能校验失败: %w", err)
 	}
 
 	return skill, nil

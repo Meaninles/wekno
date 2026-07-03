@@ -25,59 +25,59 @@ import (
 
 const (
 	// tableDescriptionPromptTemplate is the prompt template for generating table descriptions
-	tableDescriptionPromptTemplate = `You are a data analysis expert. Based on the following table structure information and data samples, generate a concise table metadata description (200-300 words).
+	tableDescriptionPromptTemplate = `你是数据分析专家。请基于以下表结构信息和数据样本，生成一段简洁的表元数据描述（200-300 字）。
 
-Table name: %s
-
-%s
+表名：%s
 
 %s
 
-Please describe the table from the following dimensions:
-1. **Data Subject**: What type of data does this table record? (e.g., user information, sales records, log data, etc.)
-2. **Core Fields**: List 3-5 most important fields and their meanings
-3. **Data Scale**: Total number of rows and columns
-4. **Business Scenarios**: What business analysis or application scenarios might this table be used for?
-5. **Key Characteristics**: What notable features does the data have? (e.g., contains geographic locations, has category labels, has hierarchical relationships, etc.)
+%s
 
-**Important Notes**:
-- Do not output specific data values or sample content
-- Use general descriptions so users can quickly determine if this table contains the information they need
-- Use concise and professional language for easy retrieval and understanding
-- Write the description in the same language as the data content`
+请从以下维度描述该表：
+1. **数据主题**：该表记录什么类型的数据？（例如用户信息、销售记录、日志数据等）
+2. **核心字段**：列出 3-5 个最重要字段及其含义
+3. **数据规模**：总行数和列数
+4. **业务场景**：该表可能用于哪些业务分析或应用场景？
+5. **关键特征**：数据有哪些显著特征？（例如包含地理位置、有分类标签、有层级关系等）
+
+**重要说明**：
+- 不要输出具体数据值或样本内容
+- 使用概括性描述，帮助用户快速判断该表是否包含所需信息
+- 使用简洁、专业、便于检索和理解的语言
+- 使用与数据内容相同的语言撰写描述`
 
 	// columnDescriptionsPromptTemplate is the prompt template for generating column descriptions
-	columnDescriptionsPromptTemplate = `You are a data analysis expert. Based on the following table structure information and data samples, generate structured description information for each column.
+	columnDescriptionsPromptTemplate = `你是数据分析专家。请基于以下表结构信息和数据样本，为每个字段生成结构化描述信息。
 
-Table name: %s
-
-%s
+表名：%s
 
 %s
 
-Please generate a detailed description for each column, including the following information:
-1. **Field Meaning**: What information does this column store? (e.g., user ID, order amount, creation time, etc.)
-2. **Data Type**: The type and format of the data (e.g., integer, string, datetime, boolean, etc.)
-3. **Business Purpose**: The role of this field in business (e.g., for user identification, amount calculation, time sorting, etc.)
-4. **Data Characteristics**: Notable features of the data (e.g., unique identifier, nullable, has enum values, has units, etc.)
+%s
 
-Please output in the following format (one paragraph per column):
+请为每个字段生成详细描述，包括以下信息：
+1. **字段含义**：该列存储什么信息？（例如用户 ID、订单金额、创建时间等）
+2. **数据类型**：数据的类型和格式（例如整数、字符串、日期时间、布尔值等）
+3. **业务用途**：该字段在业务中的作用（例如用于用户识别、金额计算、时间排序等）
+4. **数据特征**：数据的显著特征（例如唯一标识、可为空、有枚举值、有单位等）
 
-**Column1** (data type)
-- Field Meaning: xxx
-- Business Purpose: xxx
-- Data Characteristics: xxx
+请按以下格式输出（每列一段）：
 
-**Column2** (data type)
-- Field Meaning: xxx
-- Business Purpose: xxx
-- Data Characteristics: xxx
+**Column1**（数据类型）
+- 字段含义：xxx
+- 业务用途：xxx
+- 数据特征：xxx
 
-**Important Notes**:
-- Do not output specific data values, only describe the field metadata
-- Use clear business terms for easy user understanding and search
-- If enum value ranges can be inferred from sample data, provide a summary (e.g., status field contains pending/in-progress/completed states)
-- Write descriptions in the same language as the data content`
+**Column2**（数据类型）
+- 字段含义：xxx
+- 业务用途：xxx
+- 数据特征：xxx
+
+**重要说明**：
+- 不要输出具体数据值，只描述字段元数据
+- 使用清晰的业务术语，方便用户理解和搜索
+- 如果能从样本数据推断枚举值范围，请给出概括（例如状态字段包含 pending/in-progress/completed 状态）
+- 使用与数据内容相同的语言撰写描述`
 )
 
 // NewChunkExtractTask creates a new chunk extract task. It returns
@@ -784,7 +784,7 @@ func (s *DataTableSummaryService) generateTableDescription(ctx context.Context, 
 		return "", fmt.Errorf("failed to generate table description: %w", err)
 	}
 
-	return fmt.Sprintf("# Table Summary\n\nTable name: %s\n\n%s", tableName, response.Content), nil
+	return fmt.Sprintf("# 表摘要\n\n表名: %s\n\n%s", tableName, response.Content), nil
 }
 
 // generateColumnDescriptions generates descriptions for each column in batch
@@ -806,7 +806,7 @@ func (s *DataTableSummaryService) generateColumnDescriptions(ctx context.Context
 		return "", fmt.Errorf("failed to generate column descriptions: %w", err)
 	}
 
-	return fmt.Sprintf("# Table Column Information\n\nTable name: %s\n\n%s", tableName, response.Content), nil
+	return fmt.Sprintf("# 表列信息\n\n表名: %s\n\n%s", tableName, response.Content), nil
 }
 
 // buildSampleDataDescription builds a formatted sample data description

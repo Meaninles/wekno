@@ -216,9 +216,9 @@ func CompactToolOutputForHistory(toolName string, result *types.ToolResult) stri
 	}
 	if !result.Success {
 		if result.Error != "" {
-			return "Error: " + result.Error
+			return "错误: " + result.Error
 		}
-		return "Error: tool call failed"
+		return "错误: 工具调用失败"
 	}
 	if result.Output != "" && !ShouldOmitRawToolOutput(toolName, result.Data) {
 		return result.Output
@@ -229,9 +229,9 @@ func CompactToolOutputForHistory(toolName string, result *types.ToolResult) stri
 func compactToolSummary(success bool, errMsg string, data map[string]interface{}) string {
 	if !success {
 		if errMsg != "" {
-			return "Error: " + errMsg
+			return "错误: " + errMsg
 		}
-		return "Error: tool call failed"
+		return "错误: 工具调用失败"
 	}
 	switch stringField(data, "display_type") {
 	case "knowledge_chunks_list":
@@ -242,13 +242,13 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 		fetched := intField(data, "fetched_chunks")
 		total := intField(data, "total_chunks")
 		if q := stringField(data, "faq_question"); q != "" {
-			return fmt.Sprintf("Loaded FAQ entry: %s (content omitted from history)", q)
+			return fmt.Sprintf("已加载 FAQ 条目：%s（内容已从历史中省略）", q)
 		}
 		if title != "" && total > 0 {
-			return fmt.Sprintf("Listed %d/%d chunks from %s (content omitted from history)", fetched, total, title)
+			return fmt.Sprintf("已从 %s 列出 %d/%d 个分块（内容已从历史中省略）", title, fetched, total)
 		}
 		if title != "" {
-			return fmt.Sprintf("Listed chunks from %s (content omitted from history)", title)
+			return fmt.Sprintf("已列出 %s 的分块（内容已从历史中省略）", title)
 		}
 	case "grep_results":
 		chunks := intField(data, "total_matches")
@@ -257,7 +257,7 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 			docs = intField(data, "result_count")
 		}
 		if chunks > 0 {
-			return fmt.Sprintf("Keyword search found %d matching chunks across %d document(s) (details omitted from history)", chunks, docs)
+			return fmt.Sprintf("关键词搜索在 %d 个文档中找到 %d 个匹配分块（详情已从历史中省略）", docs, chunks)
 		}
 	case "search_results":
 		count := intField(data, "result_count")
@@ -265,22 +265,22 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 			count = intField(data, "count")
 		}
 		if count > 0 {
-			return fmt.Sprintf("Semantic search returned %d result(s) (details omitted from history)", count)
+			return fmt.Sprintf("语义搜索返回 %d 条结果（详情已从历史中省略）", count)
 		}
 	case "db_catalog":
 		count := intField(data, "count")
-		return fmt.Sprintf("Database catalog matched %d table(s)", count)
+		return fmt.Sprintf("数据库目录匹配 %d 张表", count)
 	case "db_schema":
 		count := intField(data, "count")
-		return fmt.Sprintf("Loaded database schema for %d table(s)", count)
+		return fmt.Sprintf("已加载 %d 张表的数据库 schema", count)
 	case "structured_analysis_result":
 		rows := intField(data, "row_count")
-		return fmt.Sprintf("Structured data analysis returned %d row(s)", rows)
+		return fmt.Sprintf("结构化数据分析返回 %d 行", rows)
 	}
 	if displayType := stringField(data, "display_type"); displayType != "" {
-		return fmt.Sprintf("Tool completed (%s; payload omitted from history)", displayType)
+		return fmt.Sprintf("工具已完成（%s；载荷已从历史中省略）", displayType)
 	}
-	return "Tool completed (payload omitted from history)"
+	return "工具已完成（载荷已从历史中省略）"
 }
 
 func stringField(data map[string]interface{}, key string) string {

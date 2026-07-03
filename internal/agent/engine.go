@@ -608,14 +608,14 @@ func (e *AgentEngine) runReActIteration(
 					round, *emptyRetries, maxEmptyResponseRetries)
 				*messagesPtr = append(*messagesPtr, chat.Message{
 					Role:    "user",
-					Content: "Please provide your complete answer now as plain text.",
+					Content: "请现在直接用纯文本给出完整回答。",
 				})
 				return iterOutcomeContinue, nil
 			}
 			// Retries exhausted — use fallback message rather than empty answer
 			logger.Warnf(ctx, "[Agent][Round-%d] Empty content after %d retries - using fallback",
 				round, maxEmptyResponseRetries)
-			state.FinalAnswer = "I'm sorry, I was unable to generate a response. Please try again."
+			state.FinalAnswer = "抱歉，我无法生成回答。请重试。"
 			state.IsComplete = true
 			state.RoundSteps = append(state.RoundSteps, verdict.step)
 			return iterOutcomeBreak, nil
@@ -684,9 +684,9 @@ func (o iterOutcome) String() string {
 // Tool result image VLM description helpers
 // ---------------------------------------------------------------------------
 
-const toolImageAnalysisPrompt = "Describe the content of this image in detail. " +
-	"If it contains text, extract all readable text. " +
-	"If it contains charts or diagrams, describe the data and structure."
+const toolImageAnalysisPrompt = "请详细描述这张图片的内容。" +
+	"如果图片包含文字，请提取所有可读文字。" +
+	"如果图片包含图表或示意图，请描述其中的数据和结构。"
 
 // describeImages generates text descriptions for tool result images using the
 // configured imageDescriber (VLM). Each image is decoded from a data URI and

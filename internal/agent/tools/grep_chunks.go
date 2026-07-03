@@ -18,26 +18,26 @@ import (
 
 var grepChunksTool = BaseTool{
 	name: ToolGrepChunks,
-	description: `Search knowledge base chunk content with a single POSIX regular expression, applied directly in the database (PostgreSQL ~* / MySQL/SQLite REGEXP, case-insensitive). Behaves like ` + "`grep -E -i`" + `.
-Pack multiple concepts into ONE regex using ` + "`|`" + ` alternation — do not call this tool repeatedly for synonyms.
-Returns matching chunks with hit counts and a <match_snippet> around the first match (each tagged with its knowledge_id and chunk_id).
-Examples:
-- Alternation (RECOMMENDED): "stardust|skyvault|psionic" (matches any of the words)
-- Multiple terms in order: "psionic.*engine" (matches both words in order)
-- Word boundary / anchor: "\\brag\\b" or "^chapter\\s+\\d+"
-- Plain text: "engine" (matches literal substring anywhere in chunk content)
-IMPORTANT — JSON escaping: every backslash in a regex MUST be written as \\ inside the JSON tool arguments (e.g. to search for literal "C++" write "C\\+\\+", NOT "C\+\+"; for "\d+" write "\\d+"). Plain "\+" / "\d" etc. are invalid JSON escapes and will fail to parse.
-Use this to locate candidate chunks by exact identifiers, error codes, product names, or recurring terms.
+	description: `使用单个 POSIX 正则表达式搜索知识库分块内容，直接在数据库中执行（PostgreSQL ~* / MySQL/SQLite REGEXP，不区分大小写）。行为类似 ` + "`grep -E -i`" + `。
+使用 ` + "`|`" + ` 交替把多个概念放进一个正则中，不要为了同义词反复调用此工具。
+返回匹配分块、命中次数，以及首次匹配附近的 <match_snippet>（每条都带 knowledge_id 和 chunk_id）。
+示例：
+- 交替（推荐）："stardust|skyvault|psionic"（匹配任意一个词）
+- 多个词按顺序出现："psionic.*engine"（按顺序匹配两个词）
+- 词边界 / 锚点："\\brag\\b" 或 "^chapter\\s+\\d+"
+- 普通文本："engine"（匹配分块内容中的字面子串）
+重要：JSON 转义中，正则里的每个反斜杠都必须在 JSON 工具参数中写成 \\（例如搜索字面量 "C++" 要写 "C\\+\\+"，不要写 "C\+\+"；搜索 "\d+" 要写 "\\d+"，不要写 "\d+"）。普通的 "\+" / "\d" 等是非法 JSON 转义，会解析失败。
+用于通过精确标识符、错误码、产品名或反复出现的术语定位候选分块。
 
-## Deep read after grep:
-- **FAQ hit** (chunk type faq): call list_knowledge_chunks with **faq_id** from the grep result (NOT the parent knowledge_id).
-- **Document hit**: call list_knowledge_chunks with **knowledge_id**, or get_document_info with **knowledge_ids**.`,
+## grep 后深读：
+- **FAQ 命中**（chunk type 为 faq）：用 grep 结果中的 **faq_id** 调用 list_knowledge_chunks（不要用父级 knowledge_id）。
+- **文档命中**：用 **knowledge_id** 调用 list_knowledge_chunks，或用 **knowledge_ids** 调用 get_document_info。`,
 	schema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "query": {
       "type": "string",
-      "description": "A single POSIX regex applied directly to chunk content (case-insensitive). Combine multiple concepts with \"|\" alternation in ONE regex (e.g. \"stardust|skyvault|psionic\") — do not split into multiple calls.",
+      "description": "直接应用于分块内容的单个 POSIX 正则（不区分大小写）。用 \"|\" 交替把多个概念合并到一个正则中（例如 \"stardust|skyvault|psionic\"），不要拆成多次调用。",
       "minLength": 1
     }
   },
@@ -91,7 +91,7 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		logger.Errorf(ctx, "[Tool][GrepChunks] Failed to parse args: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to parse args: %v", err),
+			Error:   fmt.Sprintf("解析参数失败: %v", err),
 		}, err
 	}
 
@@ -105,7 +105,7 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		logger.Errorf(ctx, "[Tool][GrepChunks] Missing or empty query parameter")
 		return &types.ToolResult{
 			Success: false,
-			Error:   "query parameter is required and must be a non-empty regex string",
+			Error:   "需要提供 query 参数，且必须是非空正则字符串",
 		}, fmt.Errorf("missing query parameter")
 	}
 
@@ -116,7 +116,7 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		logger.Errorf(ctx, "[Tool][GrepChunks] Invalid regex %q: %v", query, err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("invalid regex query %q: %v", query, err),
+			Error:   fmt.Sprintf("无效的正则查询 %q: %v", query, err),
 		}, err
 	}
 	queries := []string{query}
@@ -141,7 +141,7 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		logger.Errorf(ctx, "[Tool][GrepChunks] Search failed: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Search failed: %v", err),
+			Error:   fmt.Sprintf("搜索失败: %v", err),
 		}, err
 	}
 
@@ -529,7 +529,7 @@ func (t *GrepChunksTool) formatOutput(
 			}
 		}
 		if seen {
-			b.WriteString("<note>(snippet omitted, already returned in a previous grep_chunks call this session)</note>\n")
+			b.WriteString("<note>（片段已省略，本会话之前的 grep_chunks 调用已返回过）</note>\n")
 		} else if snippet != "" {
 			b.WriteString(fmt.Sprintf("<match_snippet>%s</match_snippet>\n", xmlEscape(snippet)))
 		}

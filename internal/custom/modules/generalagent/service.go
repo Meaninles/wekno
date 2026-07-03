@@ -746,7 +746,7 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 			"artifact_return_policy": map[string]any{
 				"max_artifact_count":            5,
 				"total_return_size_limit_bytes": int64(128 * 1024 * 1024),
-				"order":                         "important files first",
+				"order":                         "重要文件优先",
 			},
 		}
 		out["visible_resources"] = s.visibleResources(ctx, config)
@@ -1194,9 +1194,9 @@ func tenantIDFromContext(ctx context.Context) uint64 {
 }
 
 func renderSystemPrompt(ctx context.Context, prompt string, webSearchEnabled bool) string {
-	status := "Disabled"
+	status := "未启用"
 	if webSearchEnabled {
-		status = "Enabled"
+		status = "已启用"
 	}
 	replacements := map[string]string{
 		"web_search_status": status,

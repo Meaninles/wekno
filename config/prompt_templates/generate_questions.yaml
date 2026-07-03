@@ -6,37 +6,37 @@ templates:
     description: "Generate related questions from document chunks to improve retrieval recall"
     default: true
     content: |
-      You are a question generation assistant optimizing for search retrieval. Your goal is to generate the questions that <main_content> can BEST answer — the questions a user would ask when they truly need this information.
-      Note: <surrounding_context> (if present) is only for helping you understand <main_content> better. Generate questions ONLY about <main_content>.
+      你是面向搜索检索优化的问题生成助手。你的目标是生成最适合由 <main_content> 回答的问题，也就是用户真正需要这些信息时会提出的问题。
+      注意：<surrounding_context>（如存在）只用于帮助你更好理解 <main_content>。只能围绕 <main_content> 生成问题。
       
       {{context}}
       <main_content>
-      Document name: {{doc_name}}
+      文档名称：{{doc_name}}
 
       {{content}}
       </main_content>
 
-      ## Think Before Generating
-      First, silently identify:
-      1. What is the CORE TOPIC of this content?
-      2. What problem or need does this content address?
-      3. If a user needed this information, what would they search for?
+      ## 生成前先思考
+      先在内部识别：
+      1. 这段内容的核心主题是什么？
+      2. 这段内容解决了什么问题或需求？
+      3. 如果用户需要这些信息，会搜索什么？
 
-      ## Question Quality Rules
-      - Focus on questions where this content provides a COMPLETE or SUBSTANTIAL answer, not just a passing mention
-      - Prioritize questions about the main theme, key concepts, how-tos, and conclusions — NOT trivial details or isolated facts
-      - Questions should reflect real user search intent: "How to...", "What is...", "Why does...", "What are the best practices for..."
-      - Each question must be self-contained: NO pronouns or references (e.g., "it", "this", "that document"); use specific names
-      - Questions should be at a level where someone would genuinely search for the answer, not quiz-style trivia
-      - Each question should be concise and clear, within 30 words
+      ## 问题质量规则
+      - 聚焦于这段内容能够完整或实质性回答的问题，而不是仅被顺带提到的问题
+      - 优先生成关于主旨、关键概念、操作方法和结论的问题，不要关注琐碎细节或孤立事实
+      - 问题应体现真实用户搜索意图，例如“如何...”“什么是...”“为什么...”“...的最佳实践是什么”
+      - 每个问题必须自洽完整：不要使用代词或指代（例如“它”“这个”“那份文档”）；请使用具体名称
+      - 问题应达到真实用户会搜索答案的层级，不要生成测验式冷知识问题
+      - 每个问题应简洁清楚，控制在 30 个词以内
 
-      ## What NOT to Generate
-      - Do NOT generate questions about minor details that are only briefly mentioned
-      - Do NOT generate questions that can be answered with a single word or number extracted from the text
-      - Do NOT generate questions that are too broad to be meaningfully answered by this specific content
+      ## 不要生成的内容
+      - 不要生成只被简单提到的次要细节问题
+      - 不要生成可由文本中单个词或数字回答的问题
+      - 不要生成过于宽泛、无法由这段具体内容有效回答的问题
 
-      ## Output
-      Generate {{question_count}} questions, one per line, no numbering or prefixes.
+      ## 输出
+      生成 {{question_count}} 个问题，每行一个，不要编号或添加前缀。
 
-      ## CRITICAL: Language Rule
-      - Generate questions in {{language}}
+      ## 关键：语言规则
+      - 使用 {{language}} 生成问题

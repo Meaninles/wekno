@@ -3,6 +3,8 @@ package skills
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/sandbox"
@@ -208,10 +210,43 @@ func (m *Manager) ExecuteScript(ctx context.Context, skillName, scriptPath strin
 		Args:    args,
 		WorkDir: basePath,
 		Stdin:   stdin,
+		// 生产 sandbox docker 模式（k8s）：按环境开关放行网络 + 透传 ANTHROPIC_* 给沙箱。
+		// 开关默认关闭、无 ANTHROPIC_* 时 Env=nil，本地/原行为完全不变。
+		AllowNetwork: os.Getenv("WEKNORA_SANDBOX_ALLOW_NETWORK") == "true",
+		Env:          collectSandboxPassthroughEnv(),
 	}
 
 	// Execute in sandbox
 	return m.sandboxMgr.Execute(ctx, config)
+}
+
+// collectSandboxPassthroughEnv 收集需透传给沙箱容器的环境变量。
+// 默认透传 ANTHROPIC_*（供 Claude Agent SDK 指向内网模型，如 sglang 的 /v1/messages）；
+// 可用 WEKNORA_SANDBOX_PASSTHROUGH_ENV 追加额外前缀（逗号分隔）。无匹配返回 nil（原行为）。
+func collectSandboxPassthroughEnv() map[string]string {
+	prefixes := []string{"ANTHROPIC_"}
+	if extra := os.Getenv("WEKNORA_SANDBOX_PASSTHROUGH_ENV"); extra != "" {
+		for _, p := range strings.Split(extra, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				prefixes = append(prefixes, p)
+			}
+		}
+	}
+	var out map[string]string
+	for _, kv := range os.Environ() {
+		for _, p := range prefixes {
+			if strings.HasPrefix(kv, p) {
+				if i := strings.IndexByte(kv, '='); i > 0 {
+					if out == nil {
+						out = make(map[string]string)
+					}
+					out[kv[:i]] = kv[i+1:]
+				}
+				break
+			}
+		}
+	}
+	return out
 }
 
 // GetSkillInfo returns detailed information about a skill

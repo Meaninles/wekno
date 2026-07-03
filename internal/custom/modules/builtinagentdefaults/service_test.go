@@ -89,13 +89,6 @@ func TestApplyReferenceModelDefaultsClonesModelsForPersonalTenant(t *testing.T) 
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, targetTenantID)
 
 	requireCreate(t, db, &types.User{
-		ID:           "source-user",
-		Username:     referenceUsername,
-		PasswordHash: "x",
-		TenantID:     sourceTenantID,
-		IsActive:     true,
-	})
-	requireCreate(t, db, &types.User{
 		ID:           "target-user",
 		Username:     "target@example.com",
 		PasswordHash: "x",

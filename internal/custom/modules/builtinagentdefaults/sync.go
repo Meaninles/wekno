@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	referenceUsername   = "37430534@qq.com"
-	modelCloneManagedBy = "builtin_agent_defaults"
+	referenceTenantID   uint64 = 10000
+	modelCloneManagedBy        = "builtin_agent_defaults"
 )
 
 var modelCloneNamespace = uuid.NewSHA1(uuid.NameSpaceOID, []byte("weknora builtin agent default model clone"))
@@ -30,10 +30,6 @@ func (s *Service) ApplyReferenceModelDefaults(
 		return agent, nil
 	}
 
-	referenceTenantID, err := s.referenceTenantID(ctx)
-	if err != nil {
-		return nil, err
-	}
 	if referenceTenantID == 0 || tenantID == referenceTenantID {
 		return agent, nil
 	}
@@ -61,22 +57,6 @@ func (s *Service) ApplyReferenceModelDefaults(
 	}
 	resolved.EnsureDefaults()
 	return &resolved, nil
-}
-
-func (s *Service) referenceTenantID(ctx context.Context) (uint64, error) {
-	var user types.User
-	err := s.db.WithContext(ctx).
-		Where("username = ? AND is_active = ?", referenceUsername, true).
-		Where("deleted_at IS NULL").
-		First(&user).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			logger.Warnf(ctx, "[builtin-agent-defaults] reference user %s not found", referenceUsername)
-			return 0, nil
-		}
-		return 0, err
-	}
-	return user.TenantID, nil
 }
 
 func (s *Service) isPersonalTenant(ctx context.Context, tenantID uint64) (bool, error) {

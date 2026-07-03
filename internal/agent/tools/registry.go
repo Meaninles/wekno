@@ -12,7 +12,7 @@ import (
 )
 
 // toolErrorHint is appended to tool error messages to guide the LLM to retry with a different approach.
-const toolErrorHint = "\n\n[Analyze the error above and try a different approach.]"
+const toolErrorHint = "\n\n[请分析上方错误，并尝试另一种方法。]"
 
 func toolErrorMessage(toolName, errMsg string) string {
 	return errMsg + toolErrorHint

@@ -28,52 +28,52 @@ func NewMemoryService(repo interfaces.MemoryRepository, modelService interfaces.
 }
 
 const extractGraphPrompt = `
-You are an AI assistant that extracts knowledge graphs from conversations.
-Given the following conversation, extract entities and relationships.
-Output the result in JSON format with the following structure:
+你是从对话中抽取知识图谱的 AI 助手。
+给定以下对话，请抽取实体和关系。
+用 JSON 格式输出结果，结构如下：
 {
-  "summary": "A brief summary of the conversation",
+  "summary": "对话简要摘要",
   "entities": [
     {
-      "title": "Entity Name",
-      "type": "Entity Type (e.g., Person, Location, Concept)",
-      "description": "Description of the entity"
+      "title": "实体名称",
+      "type": "实体类型（例如 Person、Location、Concept）",
+      "description": "实体描述"
     }
   ],
   "relationships": [
     {
-      "source": "Source Entity Name",
-      "target": "Target Entity Name",
-      "description": "Description of the relationship",
+      "source": "源实体名称",
+      "target": "目标实体名称",
+      "description": "关系描述",
       "weight": 1.0
     }
   ]
 }
 
-Conversation:
+对话：
 %s
 `
 
 const extractKeywordsPrompt = `
-You are an AI assistant that extracts search keywords from a user query.
-Given the following query, extract relevant keywords for searching a knowledge graph.
-Output the result in JSON format:
+你是从用户查询中抽取搜索关键词的 AI 助手。
+给定以下查询，请抽取用于搜索知识图谱的相关关键词。
+用 JSON 格式输出结果：
 {
-  "keywords": ["keyword1", "keyword2"]
+  "keywords": ["关键词1", "关键词2"]
 }
 
-Query:
+查询：
 %s
 `
 
 type extractionResult struct {
-	Summary       string                `json:"summary" jsonschema:"a brief summary of the conversation"`
+	Summary       string                `json:"summary" jsonschema:"对话的简要摘要"`
 	Entities      []*types.Entity       `json:"entities"`
 	Relationships []*types.Relationship `json:"relationships"`
 }
 
 type keywordsResult struct {
-	Keywords []string `json:"keywords" jsonschema:"relevant keywords for searching a knowledge graph"`
+	Keywords []string `json:"keywords" jsonschema:"用于搜索知识图谱的相关关键词"`
 }
 
 func (s *MemoryService) getChatModel(ctx context.Context) (chat.Chat, error) {

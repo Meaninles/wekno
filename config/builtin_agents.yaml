@@ -28,7 +28,7 @@ builtin_agents:
       thinking: true
       context_template_id: "default_context"
       temperature: 0.7
-      max_completion_tokens: 2048
+      max_completion_tokens: 4096
       web_search_enabled: true
       web_search_max_results: 5
       multi_turn_enabled: true
@@ -72,7 +72,7 @@ builtin_agents:
       thinking: true
       context_template_id: "default_context"
       temperature: 0.7
-      max_completion_tokens: 2048
+      max_completion_tokens: 4096
       web_search_enabled: true
       web_search_max_results: 5
       multi_turn_enabled: true
@@ -119,7 +119,7 @@ builtin_agents:
       system_prompt: ""
       thinking: true
       temperature: 0.7
-      max_completion_tokens: 2048
+      max_completion_tokens: 4096
       max_iterations: 50
       kb_selection_mode: "all"
       retrieve_kb_only_when_mentioned: false
@@ -168,7 +168,7 @@ builtin_agents:
       system_prompt_id: "data_analyst"
       thinking: true
       temperature: 0.2
-      max_completion_tokens: 4096
+      max_completion_tokens: 8192
       max_iterations: 100
       llm_call_timeout: 600
       kb_selection_mode: "all"
@@ -224,7 +224,7 @@ builtin_agents:
       system_prompt_id: "general_claude_agent"
       thinking: true
       temperature: 0.5
-      max_completion_tokens: 4096
+      max_completion_tokens: 8192
       max_iterations: 100
       llm_call_timeout: 600
       kb_selection_mode: "all"
@@ -321,7 +321,7 @@ builtin_agents:
       professional_skills_selection_mode: "none"
       selected_professional_skills: []
       temperature: 0.4
-      max_completion_tokens: 4096
+      max_completion_tokens: 8192
       max_iterations: 100
       llm_call_timeout: 600
       kb_selection_mode: "all"

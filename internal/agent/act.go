@@ -127,7 +127,7 @@ var toolDisplayNames = map[string]string{
 	agenttools.ToolQueryKnowledgeGraph: "查询知识图谱",
 	agenttools.ToolGetDocumentInfo:     "获取文档信息",
 	agenttools.ToolDatabaseQuery:       "查询数据",
-	agenttools.ToolDataAnalysis:  "数据分析",
+	agenttools.ToolDataAnalysis:        "数据分析",
 	agenttools.ToolDataSchema:          "查看数据结构",
 	agenttools.ToolWebSearch:           "搜索网页",
 	agenttools.ToolWebFetch:            "获取网页",
@@ -224,7 +224,7 @@ func (e *AgentEngine) executeToolCallsParallel(
 
 		result := toolCall.Result
 		if result == nil {
-			result = &types.ToolResult{Success: false, Error: "no result"}
+			result = &types.ToolResult{Success: false, Error: "无结果"}
 		}
 
 		e.eventBus.Emit(ctx, event.Event{
@@ -271,7 +271,7 @@ func (e *AgentEngine) executeSingleToolCall(
 
 	result := toolCall.Result
 	if result == nil {
-		result = &types.ToolResult{Success: false, Error: "no result"}
+		result = &types.ToolResult{Success: false, Error: "无结果"}
 	}
 
 	e.eventBus.Emit(ctx, event.Event{
@@ -331,8 +331,8 @@ func (e *AgentEngine) runToolCall(
 				Result: &types.ToolResult{
 					Success: false,
 					Error: fmt.Sprintf(
-						"Failed to parse tool arguments: %v", err,
-					) + "\n\n[Analyze the error above and try a different approach.]",
+						"工具参数解析失败：%v", err,
+					) + "\n\n[请分析上方错误，并尝试另一种方法。]",
 				},
 			}
 		}

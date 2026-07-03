@@ -25,29 +25,29 @@ import (
 
 const (
 	vlmOCRPrompt = "<system_prompt>\n" +
-		"You are an OCR assistant. Your task is to extract all body text content from this document image and output in pure Markdown format.\n" +
+		"你是 OCR 助手。你的任务是从这张文档图片中提取所有正文文本内容，并以纯 Markdown 格式输出。\n" +
 		"</system_prompt>\n\n" +
 		"<instructions>\n" +
-		"1. Ignore headers and footers.\n" +
-		"2. Use Markdown table syntax for tables.\n" +
-		"3. Use LaTeX format for formulas (wrapped with $ or $$).\n" +
-		"4. Organize content in the original reading order.\n" +
-		"5. Output ONLY the extracted text content. Do NOT include any HTML tags, reasoning, or unrelated comments.\n" +
-		"6. If there is absolutely no recognizable text content in the image, reply ONLY with: No text content.\n" +
+		"1. 忽略页眉和页脚。\n" +
+		"2. 表格使用 Markdown 表格语法。\n" +
+		"3. 公式使用 LaTeX 格式（用 $ 或 $$ 包裹）。\n" +
+		"4. 按原始阅读顺序组织内容。\n" +
+		"5. 只输出提取出的文本内容。不要包含任何 HTML 标签、推理或无关评论。\n" +
+		"6. 如果图片中完全没有可识别文本内容，只回复：无文本内容。\n" +
 		"</instructions>"
 	vlmOCRScannedPDFPrompt = "<system_prompt>\n" +
-		"You are an OCR and document layout extraction assistant. The input image is a page from a scanned PDF document.\n" +
-		"Your task is to carefully extract all text and layout structure from the image, and output the result in pure Markdown format.\n" +
+		"你是 OCR 和文档版面抽取助手。输入图片是扫描 PDF 文档中的一页。\n" +
+		"你的任务是仔细提取图片中的所有文字和版面结构，并以纯 Markdown 格式输出结果。\n" +
 		"</system_prompt>\n\n" +
 		"<instructions>\n" +
-		"1. Ignore headers, footers, and page numbers.\n" +
-		"2. Preserve the original document's paragraph and hierarchical structure as much as possible.\n" +
-		"3. If there are tables, use Markdown table syntax to represent them.\n" +
-		"4. If there are mathematical formulas, use LaTeX format wrapped in $ or $$.\n" +
-		"5. Output ONLY the extracted text content. Do NOT include any HTML tags, reasoning, or unrelated comments.\n" +
-		"6. If there is absolutely no recognizable text content in the image, reply ONLY with: No text content.\n" +
+		"1. 忽略页眉、页脚和页码。\n" +
+		"2. 尽可能保留原文档的段落和层级结构。\n" +
+		"3. 如果有表格，使用 Markdown 表格语法表示。\n" +
+		"4. 如果有数学公式，使用 $ 或 $$ 包裹的 LaTeX 格式。\n" +
+		"5. 只输出提取出的文本内容。不要包含任何 HTML 标签、推理或无关评论。\n" +
+		"6. 如果图片中完全没有可识别文本内容，只回复：无文本内容。\n" +
 		"</instructions>"
-	vlmCaptionPrompt = "Provide a brief and concise description of the main content of the image in Chinese"
+	vlmCaptionPrompt = "请用中文简要描述图片的主要内容"
 )
 
 // ImageMultimodalService handles image:multimodal asynq tasks.

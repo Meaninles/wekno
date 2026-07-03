@@ -87,39 +87,39 @@ type PluginError struct {
 // Predefined plugin errors
 var (
 	ErrSearchNothing = &PluginError{
-		Description: "No relevant content found",
+		Description: "未找到相关内容",
 		ErrorType:   "search_nothing",
 	}
 	ErrSearch = &PluginError{
-		Description: "Failed to search knowledge base",
+		Description: "搜索知识库失败",
 		ErrorType:   "search_failed",
 	}
 	ErrRerank = &PluginError{
-		Description: "Reranking failed",
+		Description: "重排序失败",
 		ErrorType:   "rerank_failed",
 	}
 	ErrGetRerankModel = &PluginError{
-		Description: "Failed to get rerank model",
+		Description: "获取重排序模型失败",
 		ErrorType:   "get_rerank_model_failed",
 	}
 	ErrGetChatModel = &PluginError{
-		Description: "Failed to get chat model",
+		Description: "获取聊天模型失败",
 		ErrorType:   "get_chat_model_failed",
 	}
 	ErrTemplateParse = &PluginError{
-		Description: "Failed to parse context template",
+		Description: "解析上下文模板失败",
 		ErrorType:   "template_parse_failed",
 	}
 	ErrTemplateExecute = &PluginError{
-		Description: "Failed to generate search content",
+		Description: "生成搜索内容失败",
 		ErrorType:   "template_execution_failed",
 	}
 	ErrModelCall = &PluginError{
-		Description: "Failed to call model",
+		Description: "调用模型失败",
 		ErrorType:   "model_call_failed",
 	}
 	ErrGetHistory = &PluginError{
-		Description: "Failed to get conversation history",
+		Description: "获取对话历史失败",
 		ErrorType:   "get_history_failed",
 	}
 )

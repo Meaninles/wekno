@@ -63,7 +63,7 @@ func (l *Loader) discoverInDirectory(dir string) ([]*SkillMetadata, error) {
 	// Read directory entries
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read skill directory %s: %w", dir, err)
+		return nil, fmt.Errorf("读取技能目录 %s 失败: %w", dir, err)
 	}
 
 	for _, entry := range entries {
@@ -122,7 +122,7 @@ func (l *Loader) LoadSkillInstructions(skillName string) (*Skill, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("skill not found: %s", skillName)
+	return nil, fmt.Errorf("未找到技能: %s", skillName)
 }
 
 // loadSkillFromDirectory attempts to load a skill from a specific directory
@@ -170,14 +170,14 @@ func (l *Loader) loadSkillFromDirectory(dir, skillName string) (*Skill, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("skill not found in %s: %s", dir, skillName)
+	return nil, fmt.Errorf("在 %s 中未找到技能: %s", dir, skillName)
 }
 
 // loadSkillFile reads and parses a SKILL.md file
 func (l *Loader) loadSkillFile(basePath, filePath string) (*Skill, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read skill file: %w", err)
+		return nil, fmt.Errorf("读取技能文件失败: %w", err)
 	}
 
 	skill, err := ParseSkillFile(string(content))
@@ -201,7 +201,7 @@ func (l *Loader) LoadSkillFile(skillName, relativePath string) (*SkillFile, erro
 		var err error
 		skill, err = l.LoadSkillInstructions(skillName)
 		if err != nil {
-			return nil, fmt.Errorf("skill not found: %s", skillName)
+			return nil, fmt.Errorf("未找到技能: %s", skillName)
 		}
 	}
 
@@ -210,7 +210,7 @@ func (l *Loader) LoadSkillFile(skillName, relativePath string) (*SkillFile, erro
 
 	// Security: prevent path traversal
 	if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
-		return nil, fmt.Errorf("invalid file path: %s", relativePath)
+		return nil, fmt.Errorf("无效文件路径: %s", relativePath)
 	}
 
 	fullPath := filepath.Join(skill.BasePath, cleanPath)
@@ -225,13 +225,13 @@ func (l *Loader) LoadSkillFile(skillName, relativePath string) (*SkillFile, erro
 		return nil, err
 	}
 	if !strings.HasPrefix(absFilePath, absSkillPath) {
-		return nil, fmt.Errorf("file path outside skill directory: %s", relativePath)
+		return nil, fmt.Errorf("文件路径位于技能目录之外: %s", relativePath)
 	}
 
 	// Read the file
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return nil, fmt.Errorf("读取文件失败: %w", err)
 	}
 
 	return &SkillFile{
@@ -249,7 +249,7 @@ func (l *Loader) ListSkillFiles(skillName string) ([]string, error) {
 		var err error
 		skill, err = l.LoadSkillInstructions(skillName)
 		if err != nil {
-			return nil, fmt.Errorf("skill not found: %s", skillName)
+			return nil, fmt.Errorf("未找到技能: %s", skillName)
 		}
 	}
 
@@ -275,7 +275,7 @@ func (l *Loader) ListSkillFiles(skillName string) ([]string, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list skill files: %w", err)
+		return nil, fmt.Errorf("列出技能文件失败: %w", err)
 	}
 
 	return files, nil
@@ -294,7 +294,7 @@ func (l *Loader) GetSkillBasePath(skillName string) (string, error) {
 		var err error
 		skill, err = l.LoadSkillInstructions(skillName)
 		if err != nil {
-			return "", fmt.Errorf("skill not found: %s", skillName)
+			return "", fmt.Errorf("未找到技能: %s", skillName)
 		}
 	}
 	// Return absolute path for consistent sandbox execution

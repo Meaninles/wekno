@@ -19,17 +19,17 @@ templates:
         description: "친절하게 답변 및 제안을 드릴 수 없음을 알려드립니다."
     default: true
     content: |
-      Sorry, I could not find content directly related to your question in the knowledge base.
+      抱歉，我没有在知识库中找到与你的问题直接相关的内容。
 
-      You can try:
-      1. Rephrasing your question in a different way
-      2. Providing more specific information
-      3. Consulting a professional in the relevant field
+      你可以尝试：
+      1. 换一种方式描述问题
+      2. 提供更具体的信息
+      3. 咨询相关领域的专业人士
 
-      If you have other questions, I'm happy to continue helping you.
+      如果你还有其他问题，我很乐意继续帮助你。
 
-      ## CRITICAL: Language Rule
-      - ALWAYS respond in {{language}}
+      ## 关键：语言规则
+      - 始终使用 {{language}} 回答
 
   - id: "polite_fallback"
     name: "Polite Fallback"
@@ -45,19 +45,19 @@ templates:
         name: "정중한 폴백"
         description: "더 정중하고 자세한 답변 불가 프롬프트"
     content: |
-      I'm sorry, I'm currently unable to provide an accurate answer to your question. This may be because:
-      - The question is beyond my knowledge scope
-      - The knowledge base does not yet contain relevant content
+      抱歉，我当前无法为你的问题提供准确答案。可能原因包括：
+      - 该问题超出了我的知识范围
+      - 知识库尚未包含相关内容
 
-      Suggestions:
-      1. Try rephrasing with different keywords
-      2. Break down your question into more specific sub-questions
-      3. Contact customer support for assistance
+      建议：
+      1. 尝试换用不同关键词重新提问
+      2. 将问题拆分成更具体的子问题
+      3. 联系客服获取帮助
 
-      Thank you for your understanding, and I look forward to helping you with other questions!
+      感谢你的理解，期待继续帮助你解决其他问题！
 
-      ## CRITICAL: Language Rule
-      - ALWAYS respond in {{language}}
+      ## 关键：语言规则
+      - 始终使用 {{language}} 回答
 
   - id: "brief_fallback"
     name: "Brief Fallback"
@@ -72,7 +72,7 @@ templates:
       ko-KR:
         name: "간단한 폴백"
         description: "대답할 수 없는 짧은 프롬프트"
-    content: "Sorry, I'm unable to answer this question at the moment. Please try rephrasing your question, or contact customer support."
+    content: "抱歉，我暂时无法回答这个问题。请尝试换一种方式提问，或联系客服。"
 
   # --- Model fallback prompt templates (for fallback_strategy = "model") ---
   - id: "model_fallback"
@@ -90,20 +90,20 @@ templates:
         description: "일반 지식을 바탕으로 모델이 답변하도록 안내하는 프롬프트"
     mode: "model"
     content: |
-      No content directly matched the user's query via search. However, the knowledge base contains the following documents:
+      搜索没有直接匹配到用户问题的内容。不过，知识库中包含以下文档：
 
       {{kb_documents}}
 
-      Important Notes:
-      1. If the document listing above is available, use it to help answer the user's question (e.g., list relevant documents, suggest which documents may contain the information they need)
-      2. If the document listing is empty, use your general knowledge and clearly inform the user that the answer is not from the knowledge base
-      3. If the question involves specific domains or requires the latest information, suggest the user consult official resources
-      4. Maintain accuracy and objectivity in the response
+      重要说明：
+      1. 如果上方文档列表可用，请利用它帮助回答用户问题（例如列出相关文档，建议哪些文档可能包含所需信息）
+      2. 如果文档列表为空，请使用通用知识回答，并明确告知用户答案不是来自知识库
+      3. 如果问题涉及特定领域或需要最新信息，建议用户查阅官方资源
+      4. 回答时保持准确和客观
 
-      ## CRITICAL: Language Rule
-      - ALWAYS respond in {{language}}
+      ## 关键：语言规则
+      - 始终使用 {{language}} 回答
 
-      User question: {{query}}
+      用户问题：{{query}}
 
   - id: "default_fallback_prompt"
     name: "Standard Fallback Prompt"
@@ -120,19 +120,19 @@ templates:
         description: "KB에 관련 결과가 없을 때 모델에 위임하는 기본 프롬프트"
     mode: "model"
     content: |
-      You are WeKnora, a professional and friendly AI assistant developed by Tencent.
+      你是 WeKnora，由腾讯开发的专业友善 AI 助手。
 
-      No content directly matched the user's query via search. However, the knowledge base contains the following documents:
+      搜索没有直接匹配到用户问题的内容。不过，知识库中包含以下文档：
 
       {{kb_documents}}
 
-      ## Response Requirements
-      - If the document listing above is available, use it to help answer the user's question (e.g., list relevant documents, suggest which documents may contain the information they need, or summarize what is available in the knowledge base)
-      - If the document listing is empty or not relevant, answer the user's question based on your general knowledge and clearly inform the user that the answer is not from the knowledge base
-      - Be concise, clear, and substantive
-      - If real-time data or personal privacy information is involved, honestly state that it cannot be obtained
-      - Use a polite and professional tone
-      - IMPORTANT: Always respond in {{language}}
+      ## 回答要求
+      - 如果上方文档列表可用，请利用它帮助回答用户问题（例如列出相关文档，建议哪些文档可能包含所需信息，或总结知识库中已有内容）
+      - 如果文档列表为空或不相关，请基于通用知识回答用户问题，并明确告知用户答案不是来自知识库
+      - 回答要简洁、清楚、有实质内容
+      - 如果涉及实时数据或个人隐私信息，请如实说明无法获取
+      - 使用礼貌、专业的语气
+      - 重要：始终使用 {{language}} 回答
 
-      ## User's question:
+      ## 用户问题：
       {{query}}

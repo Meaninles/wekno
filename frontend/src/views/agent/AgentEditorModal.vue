@@ -750,8 +750,8 @@
                       </div>
                     </div>
 
-                    <!-- 最大生成Token数（仅普通模式） -->
-                    <div v-if="!isAgentMode" class="setting-row">
+                    <!-- 最大生成Token数 -->
+                    <div class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agent.editor.maxCompletionTokens') }}</label>
                         <p class="desc">{{ $t('agentEditor.desc.maxTokens') }}</p>
@@ -1900,7 +1900,7 @@ const defaultKeywordThreshold = ref(0.3);
 const defaultVectorThreshold = ref(0.5);
 const defaultRerankTopK = ref(5);
 const defaultRerankThreshold = ref(0.5);
-const defaultMaxCompletionTokens = ref(2048);
+const defaultMaxCompletionTokens = ref(4096);
 const defaultTemperature = ref(0.7);
 
 // 知识库相关工具列表（用于 watch(hasKnowledgeBase) 从"无"变"有"时 seed 默认工具）
@@ -2389,7 +2389,7 @@ const defaultFormData = {
     model_id: '',
     rerank_model_id: '',
     temperature: 0.7,
-    max_completion_tokens: 2048,
+    max_completion_tokens: 4096,
     thinking: false, // 默认禁用思考模式
     enable_artifacts: false,
     // Agent模式设置

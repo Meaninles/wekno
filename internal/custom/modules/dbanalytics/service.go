@@ -2433,13 +2433,13 @@ func buildChartContract(spec map[string]any, chartType string, groups chartColum
 			"series":      group,
 			"metrics":     visualMetrics,
 			"fields":      visualFields,
-			"description": "fields actually encoded by the rendered chart",
+			"description": "图表实际编码渲染的字段",
 		},
 		"evidence_scope": map[string]any{
 			"available_fields":  availableFields,
 			"visualized_fields": visualFields,
 			"non_visual_fields": differenceStrings(availableFields, visualFields),
-			"description":       "query result fields may support textual insights; do not claim non_visual_fields are visually encoded by this chart",
+			"description":       "查询结果字段可支持文本洞察；不要声称 non_visual_fields 被此图表视觉编码",
 		},
 		"display": map[string]any{
 			"title":         chartDisplayTitle(chartType, x, group, value, hints.title),

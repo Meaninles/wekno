@@ -29,29 +29,29 @@ const (
 
 var webFetchTool = BaseTool{
 	name: ToolWebFetch,
-	description: `Fetch detailed web content from previously discovered URLs and analyze it with an LLM.
+	description: `从已发现的 URL 获取详细网页内容，并用 LLM 分析。
 
-## Usage
-- Receive one or more {url, prompt} combinations
-- Fetch web page content and convert to Markdown text
-- Use prompt to call small model for analysis and summary (if model is available)
-- Return summary result and original content fragment
+## 用法
+- 接收一个或多个 {url, prompt} 组合
+- 获取网页内容并转换为 Markdown 文本
+- 使用 prompt 调用小模型进行分析和摘要（如果模型可用）
+- 返回摘要结果和原始内容片段
 
-## When to Use
-- **MANDATORY**: After web_search returns results, if content is truncated or incomplete, use web_fetch to get full page content
-- When web_search snippet is insufficient for answering the question`,
+## 何时使用
+- **强制**：web_search 返回结果后，如果内容被截断或不完整，使用 web_fetch 获取完整页面内容
+- 当 web_search 摘要片段不足以回答问题时使用`,
 	schema: utils.GenerateSchema[WebFetchInput](),
 }
 
 // WebFetchInput defines the input parameters for web fetch tool
 type WebFetchInput struct {
-	Items []WebFetchItem `json:"items" jsonschema:"Batch fetch tasks, each containing a url and prompt"`
+	Items []WebFetchItem `json:"items" jsonschema:"批量抓取任务，每项包含一个 url 和 prompt"`
 }
 
 // WebFetchItem represents a single web fetch task
 type WebFetchItem struct {
-	URL    string `json:"url" jsonschema:"URL of the web page to fetch, should come from web_search results"`
-	Prompt string `json:"prompt" jsonschema:"Prompt for analyzing the fetched web page content"`
+	URL    string `json:"url" jsonschema:"要抓取的网页 URL，应来自 web_search 结果"`
+	Prompt string `json:"prompt" jsonschema:"用于分析已抓取网页内容的提示词"`
 }
 
 // webFetchParams is the parameters for the web fetch tool
@@ -113,7 +113,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (*type
 		logger.Errorf(ctx, "[Tool][WebFetch] Failed to parse args: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to parse args: %v", err),
+			Error:   fmt.Sprintf("解析参数失败: %v", err),
 		}, err
 	}
 
@@ -121,14 +121,14 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (*type
 		logger.Errorf(ctx, "[Tool][WebFetch] 参数缺失: items")
 		return &types.ToolResult{
 			Success: false,
-			Error:   "missing required parameter: items",
+			Error:   "缺少必需参数: items",
 		}, nil
 	}
 	if t.maxItems > 0 && len(input.Items) > t.maxItems {
 		logger.Errorf(ctx, "[Tool][WebFetch] too many items: got=%d max=%d", len(input.Items), t.maxItems)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("too many web_fetch items: got %d, max %d for this agent", len(input.Items), t.maxItems),
+			Error:   fmt.Sprintf("web_fetch 条目过多：收到 %d 个，此 Agent 最多允许 %d 个", len(input.Items), t.maxItems),
 		}, nil
 	}
 
@@ -160,7 +160,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (*type
 						"prompt": p.Prompt,
 						"error":  err.Error(),
 					},
-					output: fmt.Sprintf("URL: %s\nError: %v\n\n", p.URL, err),
+					output: fmt.Sprintf("URL: %s\n错误: %v\n\n", p.URL, err),
 				}
 				return
 			}
@@ -177,7 +177,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (*type
 	wg.Wait()
 
 	var builder strings.Builder
-	builder.WriteString("=== Web Fetch Results ===\n\n")
+	builder.WriteString("=== 网页抓取结果 ===\n\n")
 
 	aggregated := make([]map[string]interface{}, 0, len(results))
 	success := true
@@ -189,7 +189,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (*type
 			if firstErr == nil {
 				firstErr = fmt.Errorf("fetch item %d returned nil", idx)
 			}
-			builder.WriteString(fmt.Sprintf("#%d: No result (internal error)\n\n", idx+1))
+			builder.WriteString(fmt.Sprintf("#%d: 无结果（内部错误）\n\n", idx+1))
 			continue
 		}
 
@@ -212,19 +212,19 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (*type
 	}
 
 	// Add guidance for next steps
-	builder.WriteString("\n=== Next Steps ===\n")
+	builder.WriteString("\n=== 下一步 ===\n")
 	if len(aggregated) > 0 {
-		builder.WriteString("- ✅ Full page content has been fetched and analyzed.\n")
-		builder.WriteString("- Evaluate if the content is sufficient to answer the question completely.\n")
-		builder.WriteString("- Synthesize information from all fetched pages for comprehensive answers.\n")
+		builder.WriteString("- ✅ 已抓取并分析完整页面内容。\n")
+		builder.WriteString("- 判断内容是否足以完整回答问题。\n")
+		builder.WriteString("- 综合所有已抓取页面的信息，生成全面回答。\n")
 		if !success {
-			builder.WriteString("- ⚠️ Some URLs failed to fetch. Use available content or try alternative sources.\n")
+			builder.WriteString("- ⚠️ 部分 URL 抓取失败。请使用可用内容，或尝试替代来源。\n")
 		}
 	} else {
-		builder.WriteString("- ❌ No content was successfully fetched. Consider:\n")
-		builder.WriteString("  - Verify URLs are accessible\n")
-		builder.WriteString("  - Try alternative sources from web_search results\n")
-		builder.WriteString("  - Check if information can be found in knowledge base instead\n")
+		builder.WriteString("- ❌ 没有成功抓取任何内容。请考虑：\n")
+		builder.WriteString("  - 确认 URL 可以访问\n")
+		builder.WriteString("  - 尝试 web_search 结果中的替代来源\n")
+		builder.WriteString("  - 检查是否可以改从知识库中找到信息\n")
 	}
 
 	data := map[string]interface{}{
@@ -266,23 +266,23 @@ func (t *WebFetchTool) parseParams(item interface{}) webFetchParams {
 // The returned PinnedIP is used for both chromedp (host-resolver-rules) and HTTP to prevent DNS rebinding.
 func (t *WebFetchTool) validateAndResolve(p webFetchParams) (*validatedParams, error) {
 	if p.URL == "" {
-		return nil, fmt.Errorf("url is required")
+		return nil, fmt.Errorf("需要提供 url")
 	}
 	if p.Prompt == "" {
-		return nil, fmt.Errorf("prompt is required")
+		return nil, fmt.Errorf("需要提供 prompt")
 	}
 	if !strings.HasPrefix(p.URL, "http://") && !strings.HasPrefix(p.URL, "https://") {
-		return nil, fmt.Errorf("invalid URL format")
+		return nil, fmt.Errorf("URL 格式无效")
 	}
 
 	// SSRF protection: validate URL is safe (uses centralised entry-point with whitelist support)
 	if err := utils.ValidateURLForSSRF(p.URL); err != nil {
-		return nil, fmt.Errorf("URL rejected for security reasons: %v", err)
+		return nil, fmt.Errorf("URL 因安全原因被拒绝: %v", err)
 	}
 
 	u, err := url.Parse(p.URL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
+		return nil, fmt.Errorf("无效 URL: %w", err)
 	}
 	hostname := u.Hostname()
 	port := u.Port()
@@ -298,7 +298,7 @@ func (t *WebFetchTool) validateAndResolve(p webFetchParams) (*validatedParams, e
 	// Whitelisted hosts may resolve to private/restricted IPs, so we allow any IP for them.
 	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", hostname)
 	if err != nil || len(ips) == 0 {
-		return nil, fmt.Errorf("DNS lookup failed for %s: %w", hostname, err)
+		return nil, fmt.Errorf("DNS 查询 %s 失败: %w", hostname, err)
 	}
 	isWhitelisted := utils.IsSSRFWhitelisted(hostname)
 	var pinnedIP net.IP
@@ -309,7 +309,7 @@ func (t *WebFetchTool) validateAndResolve(p webFetchParams) (*validatedParams, e
 		}
 	}
 	if pinnedIP == nil {
-		return nil, fmt.Errorf("no public IP available for host %s", hostname)
+		return nil, fmt.Errorf("主机 %s 没有可用公网 IP", hostname)
 	}
 
 	return &validatedParams{
@@ -332,7 +332,7 @@ func (t *WebFetchTool) executeFetch(
 	htmlContent, method, err := t.fetchHTMLContent(ctx, vp)
 	if err != nil {
 		logger.Errorf(ctx, "[Tool][WebFetch] 获取页面失败 url=%s err=%v", vp.URL, err)
-		return fmt.Sprintf("URL: %s\nError: %v\n", displayURL, err),
+		return fmt.Sprintf("URL: %s\n错误: %v\n", displayURL, err),
 			map[string]interface{}{
 				"url":    displayURL,
 				"prompt": vp.Prompt,
@@ -376,14 +376,14 @@ func (t *WebFetchTool) normalizeGitHubURL(source string) string {
 // processWithLLM processes the content with an LLM
 func (t *WebFetchTool) processWithLLM(ctx context.Context, params webFetchParams, content string) (string, error) {
 	if t.chatModel == nil {
-		return "", fmt.Errorf("chat model not available for web_fetch")
+		return "", fmt.Errorf("web_fetch 没有可用的聊天模型")
 	}
 
-	systemMessage := "You are an intelligent assistant skilled at reading web page content. Answer the user's request based on the provided web page text. Never fabricate information that does not appear in the text."
-	userTemplate := `User request:
+	systemMessage := "你是擅长阅读网页内容的智能助手。请基于提供的网页文本回答用户请求。不要编造文本中没有出现的信息。"
+	userTemplate := `用户请求：
 %s
 
-Web page content:
+网页内容：
 %s`
 
 	messages := []chat.Message{
@@ -412,14 +412,14 @@ Web page content:
 func (t *WebFetchTool) buildOutputText(params webFetchParams, content string, summary string, summaryErr error) string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("URL: %s\n", params.URL))
-	builder.WriteString(fmt.Sprintf("Prompt: %s\n", params.Prompt))
+	builder.WriteString(fmt.Sprintf("提示词: %s\n", params.Prompt))
 
 	if summaryErr == nil && summary != "" {
-		builder.WriteString("Summary:\n")
+		builder.WriteString("摘要:\n")
 		builder.WriteString(summary)
 		builder.WriteString("\n")
 	} else {
-		builder.WriteString("Content Preview:\n")
+		builder.WriteString("内容预览:\n")
 		builder.WriteString(content)
 		builder.WriteString("\n")
 	}

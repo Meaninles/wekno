@@ -46,7 +46,7 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 			toolResultCount++
 			messages = append(messages, chat.Message{
 				Role:    "user",
-				Content: fmt.Sprintf("Tool %s returned: %s", toolCall.Name, toolCall.Result.Output),
+				Content: fmt.Sprintf("工具 %s 返回：%s", toolCall.Name, toolCall.Result.Output),
 			})
 			logger.Debugf(ctx, "[Agent][FinalAnswer] Added tool result [Step-%d][Tool-%d]: %s (output: %d chars)",
 				stepIdx+1, toolIdx+1, toolCall.Name, len(toolCall.Result.Output))
@@ -57,18 +57,18 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		len(messages), toolResultCount)
 
 	// Add final answer prompt
-	finalPrompt := fmt.Sprintf(`Based on the above tool call results, generate a complete answer for the user's question.
+	finalPrompt := fmt.Sprintf(`基于以上工具调用结果，为用户问题生成完整回答。
 
-User question: %s
+用户问题：%s
 
-Requirements:
-1. Answer based on the actually retrieved content
-2. Clearly cite information sources (chunk_id, document name)
-3. Organize the answer in a structured format
-4. If information is insufficient, honestly state so
-5. IMPORTANT: Respond in the same language as the user's question
+要求：
+1. 基于实际检索到的内容回答
+2. 清楚标注信息来源（chunk_id、文档名）
+3. 用结构化格式组织回答
+4. 如果信息不足，请如实说明
+5. 重要：使用与用户问题相同的语言回答
 
-Now generate the final answer:`, query)
+现在生成最终回答：`, query)
 
 	messages = append(messages, chat.Message{
 		Role:    "user",
@@ -155,7 +155,7 @@ func (e *AgentEngine) handleMaxIterations(
 		common.PipelineError(ctx, "Agent", "final_answer_failed", map[string]interface{}{
 			"error": err.Error(),
 		})
-		state.FinalAnswer = "Sorry, I was unable to generate a complete answer."
+		state.FinalAnswer = "抱歉，我无法生成完整回答。"
 	}
 	state.IsComplete = true
 }

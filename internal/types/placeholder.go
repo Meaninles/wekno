@@ -95,7 +95,7 @@ var (
 	PlaceholderLanguage = PromptPlaceholder{
 		Name:        "language",
 		Label:       "用户语言",
-		Description: "用户界面的语言偏好，如 Chinese (Simplified)、English、Korean 等，用于控制 LLM 回答语言",
+		Description: "用户界面的语言偏好，如简体中文、English、Korean 等，用于控制 LLM 回答语言",
 	}
 
 	PlaceholderDocumentTemplateContext = PromptPlaceholder{
@@ -267,7 +267,7 @@ func PlaceholderMap() map[PromptFieldType][]PromptPlaceholder {
 // ---------------------------------------------------------------------------
 
 // PlaceholderValues is a map of placeholder names (without braces) to their
-// replacement values. Example: {"query": "How to use?", "language": "English"}
+// replacement values. Example: {"query": "How to use?", "language": "简体中文"}
 type PlaceholderValues map[string]string
 
 // RenderPromptPlaceholders replaces all {{key}} occurrences in template with

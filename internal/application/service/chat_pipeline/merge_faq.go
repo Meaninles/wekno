@@ -116,13 +116,13 @@ func buildFAQAnswerContent(meta *types.FAQChunkMetadata) string {
 
 	var builder strings.Builder
 	if question != "" {
-		builder.WriteString("Q: ")
+		builder.WriteString("问题：")
 		builder.WriteString(question)
 		builder.WriteString("\n")
 	}
 
 	if len(answers) > 0 {
-		builder.WriteString("Answer:\n")
+		builder.WriteString("答案：\n")
 		for _, ans := range answers {
 			builder.WriteString("- ")
 			builder.WriteString(ans)

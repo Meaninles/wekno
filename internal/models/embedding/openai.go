@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 
@@ -168,9 +169,11 @@ func (e *OpenAIEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 		EncodingFormat:       "float",
 		TruncatePromptTokens: e.truncatePromptTokens,
 	}
-	if e.supportsDimensionsParam() {
-		reqBody.Dimensions = e.dimensions
-	}
+	// 不向服务端发送 dimensions 参数：自建推理后端（vLLM/sglang）多数不支持服务端 matryoshka
+	// 降维（返回 400 "does not support matryoshka representation"）。改为始终请求原始维度，
+	// 由下方 applyDimension 在客户端做 MRL 截断——对支持 MRL 的模型，客户端截断与服务端降维
+	// 数学等价。supportsDimensionOverride 仍作为 UI 开关（允许配置 dimension），但不再透传服务端。
+
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -240,13 +243,36 @@ func (e *OpenAIEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 
-	// Extract embedding vectors
+	// Extract embedding vectors (apply client-side MRL truncation if configured)
 	embeddings := make([][]float32, 0, len(response.Data))
 	for _, data := range response.Data {
-		embeddings = append(embeddings, data.Embedding)
+		embeddings = append(embeddings, e.applyDimension(data.Embedding))
 	}
 
 	return embeddings, nil
+}
+
+// applyDimension 在配置了 dimensions 且服务端返回更高维度向量时，做客户端 MRL 截断 + L2 重归一化。
+// 仅当 dimensions>0 时生效；dimensions==0（默认）完全不影响原行为，保持本地/原逻辑一致。
+// 适用场景：Qwen3-Embedding 等原生支持 MRL 的模型，但服务端（如 vLLM/sglang）不支持请求级
+// dimensions 参数、固定返回原始维度（如 4096）时，按配置降维到 2048 等以节省向量库存储与检索开销。
+func (e *OpenAIEmbedder) applyDimension(vec []float32) []float32 {
+	if e.dimensions <= 0 || len(vec) <= e.dimensions {
+		return vec
+	}
+	out := make([]float32, e.dimensions)
+	var sum float64
+	for i := 0; i < e.dimensions; i++ {
+		out[i] = vec[i]
+		sum += float64(vec[i]) * float64(vec[i])
+	}
+	if sum > 0 {
+		norm := float32(1.0 / math.Sqrt(sum))
+		for i := range out {
+			out[i] *= norm
+		}
+	}
+	return out
 }
 
 // GetModelName returns the model name

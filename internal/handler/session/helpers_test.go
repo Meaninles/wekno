@@ -44,3 +44,28 @@ func TestMergeTagScopesFromRequestIDs_AmbiguousKBIgnored(t *testing.T) {
 	scopes := mergeTagScopesFromRequestIDs(nil, []string{"tag-9"}, []string{"kb-1", "kb-2"})
 	assert.Empty(t, scopes)
 }
+
+func TestExtractImageURLsAndOCRTextPrefersStoredURL(t *testing.T) {
+	urls, text := extractImageURLsAndOCRText([]ImageAttachment{
+		{
+			Data:    "data:image/jpeg;base64,very-large-payload",
+			URL:     "local://10002/chat-images/image.jpg",
+			Caption: "图片内容描述",
+		},
+	})
+
+	assert.Equal(t, []string{"local://10002/chat-images/image.jpg"}, urls)
+	assert.Equal(t, "图片内容描述", text)
+}
+
+func TestExtractImageURLsAndOCRTextFallsBackToDataWhenURLMissing(t *testing.T) {
+	urls, text := extractImageURLsAndOCRText([]ImageAttachment{
+		{
+			Data:    "data:image/png;base64,inline",
+			Caption: "inline caption",
+		},
+	})
+
+	assert.Equal(t, []string{"data:image/png;base64,inline"}, urls)
+	assert.Equal(t, "inline caption", text)
+}

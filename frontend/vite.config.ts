@@ -103,6 +103,17 @@ const DEV_PROXY_TARGET =
   process.env.FRONTEND_BACKEND_URL ||
   'http://localhost:8080'
 
+function configureForwardedHeaders(proxy: any) {
+  proxy.on('proxyReq', (proxyReq: any, req: any) => {
+    const host = req.headers?.host
+    if (host) {
+      proxyReq.setHeader('X-Forwarded-Host', host)
+    }
+    const encrypted = !!req.socket?.encrypted
+    proxyReq.setHeader('X-Forwarded-Proto', encrypted ? 'https' : 'http')
+  })
+}
+
 function resolveVueOfficePptxEntry(): string {
   try {
     const pkgDir = dirname(require.resolve('@vue-office/pptx/package.json'))
@@ -191,11 +202,13 @@ export default defineConfig({
         target: DEV_PROXY_TARGET,
         changeOrigin: true,
         secure: false,
+        configure: configureForwardedHeaders,
       },
       '/files': {
         target: DEV_PROXY_TARGET,
         changeOrigin: true,
         secure: false,
+        configure: configureForwardedHeaders,
       }
     }
   }

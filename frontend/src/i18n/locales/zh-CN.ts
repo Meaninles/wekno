@@ -2156,6 +2156,9 @@ export default {
       notReadyMissing: "缺少 {items}",
       configureAction: "去配置",
       sharedNotReadyContact: "请联系分享方管理员完成配置",
+      pinnedSection: "置顶",
+      pin: "置顶",
+      unpin: "取消置顶",
     },
     // 内置智能体信息
     builtinInfo: {

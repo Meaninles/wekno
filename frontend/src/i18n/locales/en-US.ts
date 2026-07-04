@@ -1164,6 +1164,9 @@ export default {
       notReadyMissing: 'Missing: {items}',
       configureAction: 'Configure',
       sharedNotReadyContact: 'Ask the sharing organization admin to finish setup',
+      pinnedSection: 'Pinned',
+      pin: 'Pin to top',
+      unpin: 'Unpin',
     },
     // Built-in agent information
     builtinInfo: {

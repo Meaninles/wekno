@@ -53,6 +53,7 @@ var noAuthAPI = map[string][]string{
 	"/api/v1/auth/oidc/url":           {"GET"},
 	"/api/v1/auth/oidc/callback":      {"GET"},
 	"/api/v1/custom/iam/sso/config":   {"GET"},
+	"/api/v1/custom/iam/sso/entry":    {"GET"},
 	"/api/v1/custom/iam/sso/url":      {"GET"},
 	"/api/v1/custom/iam/sso/callback": {"GET"},
 	// General-agent sidecar tool callbacks are authenticated by a dedicated

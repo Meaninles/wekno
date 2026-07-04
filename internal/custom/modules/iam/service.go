@@ -60,8 +60,9 @@ type SSOAuthURLResponse struct {
 }
 
 type ssoStatePayload struct {
-	Nonce       string `json:"nonce"`
-	RedirectURI string `json:"redirect_uri,omitempty"`
+	Nonce            string `json:"nonce"`
+	RedirectURI      string `json:"redirect_uri,omitempty"`
+	FrontendRedirect string `json:"frontend_redirect,omitempty"`
 }
 
 type ssoTokenResponse struct {
@@ -535,7 +536,7 @@ func (s *Service) GetSSOConfig(ctx context.Context) (*SSOConfigResponse, error) 
 	}, nil
 }
 
-func (s *Service) GetSSOAuthorizationURL(ctx context.Context, redirectURI string) (*SSOAuthURLResponse, error) {
+func (s *Service) GetSSOAuthorizationURL(ctx context.Context, redirectURI string, frontendRedirect ...string) (*SSOAuthURLResponse, error) {
 	setting, err := s.GetSetting(ctx)
 	if err != nil {
 		return nil, err
@@ -546,7 +547,11 @@ func (s *Service) GetSSOAuthorizationURL(ctx context.Context, redirectURI string
 	if strings.TrimSpace(redirectURI) == "" {
 		return nil, fmt.Errorf("redirect_uri is required")
 	}
-	state, err := encodeSSOState(ssoStatePayload{Nonce: uuid.NewString(), RedirectURI: redirectURI})
+	payload := ssoStatePayload{Nonce: uuid.NewString(), RedirectURI: redirectURI}
+	if len(frontendRedirect) > 0 {
+		payload.FrontendRedirect = strings.TrimSpace(frontendRedirect[0])
+	}
+	state, err := encodeSSOState(payload)
 	if err != nil {
 		return nil, err
 	}

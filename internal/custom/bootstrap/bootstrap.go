@@ -211,6 +211,7 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 		ssoRoutes := customPublic.Group("/iam/sso")
 		{
 			ssoRoutes.GET("/config", handlers.IAM.GetSSOConfig)
+			ssoRoutes.GET("/entry", handlers.IAM.SSOEntry)
 			ssoRoutes.GET("/url", handlers.IAM.GetSSOAuthorizationURL)
 			ssoRoutes.GET("/callback", handlers.IAM.SSOCallback)
 		}

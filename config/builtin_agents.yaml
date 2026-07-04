@@ -29,7 +29,7 @@ builtin_agents:
       context_template_id: "default_context"
       temperature: 0.7
       max_completion_tokens: 4096
-      web_search_enabled: true
+      web_search_enabled: false
       web_search_max_results: 5
       multi_turn_enabled: true
       history_turns: 5
@@ -73,7 +73,8 @@ builtin_agents:
       context_template_id: "default_context"
       temperature: 0.7
       max_completion_tokens: 4096
-      web_search_enabled: true
+      max_iterations: 1
+      web_search_enabled: false
       web_search_max_results: 5
       multi_turn_enabled: true
       history_turns: 5
@@ -129,9 +130,8 @@ builtin_agents:
         - "list_knowledge_chunks"
         - "query_knowledge_graph"
         - "get_document_info"
-      web_search_enabled: true
+      web_search_enabled: false
       web_search_max_results: 5
-      reflection_enabled: false
       multi_turn_enabled: true
       history_turns: 5
       faq_priority_enabled: true
@@ -246,13 +246,12 @@ builtin_agents:
         - "db_catalog"
         - "db_schema"
         - "db_query"
-      web_search_enabled: true
+      web_search_enabled: false
       web_search_max_results: 5
       claude_sdk_web_search_enabled: true
       web_fetch_enabled: true
       web_fetch_top_n: 3
       enable_artifacts: true
-      reflection_enabled: true
       multi_turn_enabled: true
       history_turns: 10
       retain_retrieval_history: true
@@ -343,13 +342,12 @@ builtin_agents:
         - "db_catalog"
         - "db_schema"
         - "db_query"
-      web_search_enabled: true
+      web_search_enabled: false
       web_search_max_results: 5
       claude_sdk_web_search_enabled: true
       web_fetch_enabled: true
       web_fetch_top_n: 3
       enable_artifacts: true
-      reflection_enabled: true
       multi_turn_enabled: true
       history_turns: 10
       retain_retrieval_history: true
@@ -427,13 +425,12 @@ builtin_agents:
         name: "위키 수정"
         description: "검사 문제를 기반으로 Wiki 페이지를 修復하고 最適化하는 전용 에이전트"
     config:
-      agent_mode: "smart-reasoning"
       agent_type: "custom"
       system_prompt_id: "wiki_fixer"
-      thinking: true
+      thinking: false
       temperature: 0.7
-      max_completion_tokens: 4096
-      max_iterations: 30
+      max_completion_tokens: 2048
+      max_iterations: 10
       kb_selection_mode: "selected"
       retrieve_kb_only_when_mentioned: false
       retain_retrieval_history: true
@@ -449,7 +446,6 @@ builtin_agents:
         - "wiki_update_issue"
       web_search_enabled: false
       web_search_max_results: 0
-      reflection_enabled: false
       multi_turn_enabled: true
       history_turns: 10
       embedding_top_k: 10

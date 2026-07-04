@@ -239,9 +239,9 @@ func (c *filter) convertParamName(field string, counter *int) string {
 }
 
 type universalFilterCondition struct {
-	Field    string `json:"field,omitempty" jsonschema:"description=要过滤的元数据字段（比较运算符必填）"`
-	Operator string `json:"operator" jsonschema:"description=要使用的运算符,enum=eq,enum=ne,enum=gt,enum=gte,enum=lt,enum=lte,enum=in,enum=not in,enum=like,enum=not like,enum=between,enum=and,enum=or"`
-	Value    any    `json:"value,omitempty" jsonschema:"description=用于比较的值（比较运算符）或子条件数组（逻辑运算符 and/or）"`
+	Field    string `json:"field,omitempty" jsonschema:"description=The metadata field to filter on (required for comparison operators)"`
+	Operator string `json:"operator" jsonschema:"description=The operator to use,enum=eq,enum=ne,enum=gt,enum=gte,enum=lt,enum=lte,enum=in,enum=not in,enum=like,enum=not like,enum=between,enum=and,enum=or"`
+	Value    any    `json:"value,omitempty" jsonschema:"description=The value to compare against (for comparison operators) or array of sub-conditions (for logical operators and/or)"`
 }
 
 func (c *universalFilterCondition) UnmarshalJSON(data []byte) error {

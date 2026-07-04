@@ -13,45 +13,45 @@ import (
 
 var listKnowledgeChunksTool = BaseTool{
 	name: ToolListKnowledgeChunks,
-	description: `检索文档或单条 FAQ 条目的完整分块内容。
+	description: `Retrieve full chunk content for a document or a single FAQ entry.
 
-## 在 grep_chunks 或 knowledge_search 之后使用：
-- **FAQ 命中**（type 为 faq）：list_knowledge_chunks(faq_id="<搜索返回的 chunk_id>")，读取该 FAQ 条目及其元数据中的答案。
-- **文档命中**：list_knowledge_chunks(knowledge_id="<document id>")，分页读取全部分块。
+## Use After grep_chunks or knowledge_search:
+- **FAQ hit** (type faq): list_knowledge_chunks(faq_id="<chunk_id from search>") — reads that one FAQ entry with answers from metadata.
+- **Document hit**: list_knowledge_chunks(knowledge_id="<document id>") — pages through all chunks.
 
-## 参数（只提供一个 ID 目标）：
-- faq_id（可选）：来自 grep_chunks / knowledge_search 的 FAQ 条目 ID。
-- chunk_id（可选）：单个非 FAQ 分块 ID（FAQ 不要用它，请用 faq_id）。
-- knowledge_id（可选）：文档/知识 ID，用于分页读取全部分块。
-- limit / offset：仅用于 knowledge_id 分页（默认 limit 20，最大 100）。
+## Parameters (provide exactly one id target):
+- faq_id (optional): FAQ entry ID from grep_chunks / knowledge_search.
+- chunk_id (optional): Single non-FAQ chunk ID (do not use for FAQ — use faq_id).
+- knowledge_id (optional): Document/knowledge ID to page through all chunks.
+- limit / offset: Only for knowledge_id paging (default limit 20, max 100).
 
-## 输出：
-完整分块内容。FAQ 条目会包含 <faq>，其中 <answer> 来自元数据。`,
+## Output:
+Full chunk content. FAQ entries include <faq> with <answer> from metadata.`,
 	schema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "faq_id": {
       "type": "string",
-      "description": "FAQ 条目 ID（与 chunk_id 相同）。FAQ 命中时使用它代替 knowledge_id。"
+      "description": "FAQ entry ID (same as chunk_id). Use for FAQ hits instead of knowledge_id."
     },
     "chunk_id": {
       "type": "string",
-      "description": "单个分块 ID（faq_id 的别名）"
+      "description": "Single chunk ID (alias of faq_id)"
     },
     "knowledge_id": {
       "type": "string",
-      "description": "要列出全部分块的文档/知识 ID"
+      "description": "Document/knowledge ID to list all chunks"
     },
     "limit": {
       "type": "integer",
-      "description": "使用 knowledge_id 时每页分块数（默认 20，最大 100）",
+      "description": "Chunks per page when using knowledge_id (default 20, max 100)",
       "default": 20,
       "minimum": 1,
       "maximum": 100
     },
     "offset": {
       "type": "integer",
-      "description": "使用 knowledge_id 时的起始位置（默认 0）",
+      "description": "Start position when using knowledge_id (default 0)",
       "default": 0,
       "minimum": 0
     }
@@ -97,7 +97,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	if err := json.Unmarshal(args, &input); err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("解析参数失败: %v", err),
+			Error:   fmt.Sprintf("Failed to parse args: %v", err),
 		}, err
 	}
 
@@ -113,7 +113,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	if knowledgeID == "" {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "需要提供 faq_id、chunk_id 或 knowledge_id 其中之一",
+			Error:   "one of faq_id, chunk_id, or knowledge_id is required",
 		}, fmt.Errorf("missing id parameter")
 	}
 
@@ -122,7 +122,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("未找到知识: %v", err),
+			Error:   fmt.Sprintf("Knowledge not found: %v", err),
 		}, err
 	}
 
@@ -130,20 +130,20 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	if !t.searchTargets.ContainsKB(knowledge.KnowledgeBaseID) {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("无法访问知识库 %s", knowledge.KnowledgeBaseID),
+			Error:   fmt.Sprintf("Knowledge base %s is not accessible", knowledge.KnowledgeBaseID),
 		}, fmt.Errorf("knowledge base not in search targets")
 	}
 	allowed, err := searchTargetsAllowKnowledgeID(ctx, t.searchTargets, knowledge.ID, knowledge.KnowledgeBaseID, t.knowledgeService)
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("校验知识范围失败: %v", err),
+			Error:   fmt.Sprintf("failed to validate knowledge scope: %v", err),
 		}, err
 	}
 	if !allowed {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("知识 %s 不在当前 @mention 范围内", knowledge.ID),
+			Error:   fmt.Sprintf("Knowledge %s is not within the current @mention scope", knowledge.ID),
 		}, fmt.Errorf("knowledge not in search target scope")
 	}
 
@@ -172,13 +172,13 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("列出分块失败: %v", err),
+			Error:   fmt.Sprintf("failed to list chunks: %v", err),
 		}, err
 	}
 	if chunks == nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "分块查询未返回数据",
+			Error:   "chunk query returned no data",
 		}, fmt.Errorf("chunk query returned no data")
 	}
 
@@ -198,7 +198,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 		return &types.ToolResult{
 			Success: false,
 			Error: fmt.Sprintf(
-				"offset %d 超出范围：文档只有 %d 个分块（有效 offset 范围：0..%d）。请用 offset=%d（或任何小于 %d 的值）重试。",
+				"offset %d is out of range: document has only %d chunks (valid offset range: 0..%d). Retry with offset=%d (or any value < %d).",
 				offset, totalChunks, totalChunks-1, suggestedOffset, totalChunks,
 			),
 			Data: map[string]interface{}{
@@ -300,26 +300,26 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 	if err != nil || chunk == nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("未找到分块: %v", err),
+			Error:   fmt.Sprintf("chunk not found: %v", err),
 		}, err
 	}
 	if !t.searchTargets.ContainsKB(chunk.KnowledgeBaseID) {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("无法访问知识库 %s", chunk.KnowledgeBaseID),
+			Error:   fmt.Sprintf("knowledge base %s is not accessible", chunk.KnowledgeBaseID),
 		}, fmt.Errorf("knowledge base not in search targets")
 	}
 	allowed, scopeErr := searchTargetsAllowKnowledgeID(ctx, t.searchTargets, chunk.KnowledgeID, chunk.KnowledgeBaseID, t.knowledgeService)
 	if scopeErr != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("校验分块范围失败: %v", scopeErr),
+			Error:   fmt.Sprintf("failed to validate chunk scope: %v", scopeErr),
 		}, scopeErr
 	}
 	if !allowed {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("分块 %s 不在当前 @mention 范围内", chunk.ID),
+			Error:   fmt.Sprintf("chunk %s is not within the current @mention scope", chunk.ID),
 		}, fmt.Errorf("chunk not in search target scope")
 	}
 
@@ -480,7 +480,7 @@ func faqStandardQuestion(c *types.Chunk) string {
 func summarizeContent(content string) string {
 	cleaned := strings.TrimSpace(content)
 	if cleaned == "" {
-		return "（空）"
+		return "(empty)"
 	}
 
 	return strings.TrimSpace(string(cleaned))

@@ -21,17 +21,17 @@ func NewWikiRenamePageTool(wikiPageService interfaces.WikiPageService, kbIDs []s
 	return &wikiRenamePageTool{
 		BaseTool: NewBaseTool(
 			ToolWikiRenamePage,
-			"重命名 Wiki 页面的 slug。会自动把新 slug 级联更新到所有链接旧 slug 的页面。",
+			"Rename a Wiki page's slug. Automatically cascades the new slug to all pages that linked to the old one.",
 			json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"slug": {
 						"type": "string",
-						"description": "Wiki 页面的当前 slug"
+						"description": "The current slug of the Wiki page"
 					},
 					"new_slug": {
 						"type": "string",
-						"description": "页面的新 slug"
+						"description": "The new slug for the page"
 					}
 				},
 				"required": ["slug", "new_slug"]
@@ -49,25 +49,25 @@ func (t *wikiRenamePageTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "解析参数失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to parse arguments: " + err.Error()}, nil
 	}
 
 	if len(t.kbIDs) == 0 {
-		return &types.ToolResult{Success: false, Error: "没有可编辑的知识库"}, nil
+		return &types.ToolResult{Success: false, Error: "No knowledge bases available for editing"}, nil
 	}
 	kbID := t.kbIDs[0]
 
 	if params.NewSlug == "" {
-		return &types.ToolResult{Success: false, Error: "需要 new_slug"}, nil
+		return &types.ToolResult{Success: false, Error: "new_slug is required"}, nil
 	}
 	if params.NewSlug == params.Slug {
-		return &types.ToolResult{Success: false, Error: "new_slug 必须不同于旧 slug"}, nil
+		return &types.ToolResult{Success: false, Error: "new_slug must be different from old slug"}, nil
 	}
 
 	// Get existing page
 	existingPage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, params.Slug)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: fmt.Sprintf("未找到页面 %s，无法重命名不存在的页面。", params.Slug)}, nil
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("Page %s not found. Cannot rename a non-existent page.", params.Slug)}, nil
 	}
 
 	inLinks := make([]string, len(existingPage.InLinks))
@@ -85,7 +85,7 @@ func (t *wikiRenamePageTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 	_, err = t.wikiPageService.CreatePage(ctx, newPage)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: "创建重命名页面失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to create renamed page: " + err.Error()}, nil
 	}
 
 	// Update incoming links in other pages
@@ -95,7 +95,7 @@ func (t *wikiRenamePageTool) Execute(ctx context.Context, args json.RawMessage) 
 		sourcePage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, sourceSlug)
 		if err == nil {
 			changed := false
-
+			
 			// Replace [[old-slug]] with [[new-slug]]
 			link1 := "[[" + params.Slug + "]]"
 			newLink1 := "[[" + params.NewSlug + "]]"
@@ -103,7 +103,7 @@ func (t *wikiRenamePageTool) Execute(ctx context.Context, args json.RawMessage) 
 				sourcePage.Content = strings.ReplaceAll(sourcePage.Content, link1, newLink1)
 				changed = true
 			}
-
+			
 			// Replace [[old-slug|text]] with [[new-slug|text]]
 			link2 := "[[" + params.Slug + "|"
 			newLink2 := "[[" + params.NewSlug + "|"
@@ -125,7 +125,7 @@ func (t *wikiRenamePageTool) Execute(ctx context.Context, args json.RawMessage) 
 	// Delete old page
 	err = t.wikiPageService.DeletePage(ctx, kbID, params.Slug)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: "已成功创建新页面并更新链接，但删除旧页面失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Successfully created new page and updated links, but failed to delete old page: " + err.Error()}, nil
 	}
 
 	// Inject cross-links so other pages know about this new slug
@@ -134,21 +134,21 @@ func (t *wikiRenamePageTool) Execute(ctx context.Context, args json.RawMessage) 
 	// Rebuild the index page to reflect the new/updated summary
 	_ = t.wikiPageService.RebuildIndexPage(ctx, kbID)
 
-	outputMsg := fmt.Sprintf("已成功将页面 [[%s]] 重命名为 [[%s]]，并更新 %d 个入站链接。", params.Slug, params.NewSlug, updatedCount)
+	outputMsg := fmt.Sprintf("Successfully renamed page [[%s]] → [[%s]] and updated %d incoming links.", params.Slug, params.NewSlug, updatedCount)
 	if updatedCount > 0 {
-		outputMsg += fmt.Sprintf("\n- 受影响页面: %s", strings.Join(updatedSlugs, ", "))
+		outputMsg += fmt.Sprintf("\n- Affected pages: %s", strings.Join(updatedSlugs, ", "))
 	}
 
 	return &types.ToolResult{
 		Success: true,
 		Output:  outputMsg,
 		Data: map[string]interface{}{
-			"display_type":   "wiki_rename_page",
-			"old_slug":       params.Slug,
-			"new_slug":       params.NewSlug,
-			"title":          existingPage.Title,
-			"updated_count":  updatedCount,
-			"affected_pages": updatedSlugs,
+			"display_type":    "wiki_rename_page",
+			"old_slug":        params.Slug,
+			"new_slug":        params.NewSlug,
+			"title":           existingPage.Title,
+			"updated_count":   updatedCount,
+			"affected_pages":  updatedSlugs,
 		},
 	}, nil
 }

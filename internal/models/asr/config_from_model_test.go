@@ -14,6 +14,7 @@ func TestConfigFromModel(t *testing.T) {
 		Parameters: types.ModelParameters{
 			BaseURL:       "https://api.example.com/v1",
 			APIKey:        "sk",
+			ExtraConfig:   map[string]string{"asr_response_format": "json"},
 			CustomHeaders: map[string]string{"X": "y"},
 		},
 	}
@@ -23,6 +24,9 @@ func TestConfigFromModel(t *testing.T) {
 	}
 	if cfg.BaseURL != "https://api.example.com/v1" || cfg.APIKey != "sk" {
 		t.Errorf("connection fields mismatch: %+v", cfg)
+	}
+	if cfg.ResponseFormat != "json" {
+		t.Errorf("ResponseFormat not propagated: %+v", cfg)
 	}
 	if cfg.CustomHeaders["X"] != "y" {
 		t.Errorf("CustomHeaders not propagated: %+v", cfg.CustomHeaders)

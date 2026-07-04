@@ -29,3 +29,17 @@ test('agent progress events are routed into visible tool cards', () => {
   assert.match(source, /const transientStatus = dataPayload\?\.transient === true/)
   assert.match(source, /transient_status: transientStatus/)
 })
+
+test('agent answer chunks do not seed new event content from aggregate message content', () => {
+  assert.doesNotMatch(source, /answerEvent\.content\s*=\s*message\.content/)
+  assert.match(source, /answerEvent\.content = String\(answerEvent\.content \|\| ''\) \+ String\(data\.content\)/)
+})
+
+test('transient agent progress supersedes temporary answer narration', () => {
+  assert.match(source, /shouldSupersedeAgentAnswersForProgress/)
+  assert.match(source, /return dataPayload\.transient === true/)
+  assert.match(
+    source,
+    /case 'agent_progress': \{[\s\S]*shouldSupersedeAgentAnswersForProgress\(dataPayload\)[\s\S]*supersedeAgentAnswers\(message\)/,
+  )
+})

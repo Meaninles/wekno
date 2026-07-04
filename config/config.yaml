@@ -14,7 +14,7 @@ conversation:
   rerank_threshold: 0.3
   rerank_top_k: 30
   fallback_strategy: "model"
-  fallback_response: "抱歉，我无法回答这个问题。"
+  fallback_response: "Sorry, I am unable to answer this question."
   fallback_prompt_id: "default_fallback_prompt"  # from prompt_templates/fallback.yaml (mode: "model")
   enable_rewrite: true
   enable_query_expansion: true
@@ -49,62 +49,62 @@ knowledge_base:
 extract:
   extract_graph:
     description: |
-      基于给定文本，按以下步骤完成信息抽取任务，确保逻辑清晰、信息完整且准确：
+      Based on the given text, complete the information extraction task following these steps, ensuring clear logic and complete, accurate information:
 
-      ## 步骤 1：实体抽取与属性补充
-      1. **抽取核心实体**：通读文本，按逻辑顺序（如叙事顺序或实体关联紧密度）抽取与任务相关的所有核心实体。
-      2. **补充实体属性**：对每个抽取出的实体，全面补充文本中明确提到的详细属性，确保不遗漏关键属性。
+      ## Step 1: Entity Extraction and Attribute Enrichment
+      1. **Extract core entities**: Read through the text and extract all core entities relevant to the task in logical order (such as narrative order or entity association closeness).
+      2. **Enrich entity attributes**: For each extracted entity, comprehensively supplement its detailed attributes explicitly mentioned in the text, ensuring no key attributes are omitted.
 
-      ## 步骤 2：关系抽取与核验
-      1. **识别关系类型**：只从指定关系列表中选择对应类型。允许的关系类型为：%s。
-      2. **抽取有效关系**：基于已抽取的实体和属性，识别文本中真实存在的关系，确保关系事实准确且没有虚假关联。
-      3. **明确关系主体**：对每条抽取出的关系，清楚标注两个相关实体，避免主体混淆。
-      4. **补充关系属性**：如果文本包含与某条关系直接相关的补充信息，请将其作为该关系的相关属性。
+      ## Step 2: Relationship Extraction and Verification
+      1. **Identify relationship types**: Select corresponding types only from the specified relationship list. Allowed relationship types are: %s.
+      2. **Extract valid relationships**: Based on the extracted entities and attributes, identify relationships that genuinely exist in the text, ensuring relationships are factually accurate with no false associations.
+      3. **Clarify relationship subjects**: For each extracted relationship, clearly annotate the two associated entities to avoid subject confusion.
+      4. **Supplement related attributes**: If the text contains supplementary information directly related to a relationship, include it as a related attribute of the relationship.
     tags:
       - "Author"
       - "Alias"
     examples:
       - text: |
-          《罗密欧与朱丽叶》是威廉·莎士比亚早期创作的一部悲剧，讲述两个来自敌对家族的意大利青年之间的爱情。
-          它是莎士比亚生前最受欢迎的戏剧之一，也以另一个标题《最优秀而悲惨的罗密欧与朱丽叶》为人所知。
-          故事围绕蒙太古家族的罗密欧和凯普莱特家族的朱丽叶展开，他们被禁止的爱情最终以悲剧告终。
+          "Romeo and Juliet" is a tragedy written by William Shakespeare early in his career about the romance between two Italian youths from feuding families.
+          It was among Shakespeare's most popular plays during his lifetime. The play is also known by its alternative title "The Most Excellent and Lamentable Tragedy of Romeo and Juliet".
+          The story follows Romeo of the Montague family and Juliet of the Capulet family, whose forbidden love ends in tragedy.
         node:
-          - name: "罗密欧与朱丽叶"
+          - name: "Romeo and Juliet"
             attributes:
-              - "威廉·莎士比亚创作的悲剧"
-              - "又名《最优秀而悲惨的罗密欧与朱丽叶》"
-              - "莎士比亚最受欢迎的戏剧之一"
-          - name: "最优秀而悲惨的罗密欧与朱丽叶"
+              - "A tragedy by William Shakespeare"
+              - "Also known as 'The Most Excellent and Lamentable Tragedy of Romeo and Juliet'"
+              - "Among Shakespeare's most popular plays"
+          - name: "The Most Excellent and Lamentable Tragedy of Romeo and Juliet"
             attributes:
-              - "《罗密欧与朱丽叶》的别名"
-          - name: "威廉·莎士比亚"
+              - "Alternative title for Romeo and Juliet"
+          - name: "William Shakespeare"
             attributes:
-              - "剧作家"
-              - "《罗密欧与朱丽叶》的作者，该剧创作于其早期职业生涯"
+              - "Playwright"
+              - "Author of Romeo and Juliet, written early in his career"
         relation:
-          - node1: "罗密欧与朱丽叶"
-            node2: "威廉·莎士比亚"
+          - node1: "Romeo and Juliet"
+            node2: "William Shakespeare"
             type: "Author"
-          - node1: "罗密欧与朱丽叶"
-            node2: "最优秀而悲惨的罗密欧与朱丽叶"
+          - node1: "Romeo and Juliet"
+            node2: "The Most Excellent and Lamentable Tragedy of Romeo and Juliet"
             type: "Alias"
   extract_entity:
     description: |
-      基于用户问题，按以下步骤处理关键信息抽取任务：
-      1. 分析逻辑关联：首先充分分析文本内容，识别其核心逻辑关系，并简要标注核心逻辑类型；
-      2. 抽取关键实体：基于已识别的逻辑关系，从文本中精准抽取关键信息，并归类为清晰实体，确保不遗漏核心信息且不添加冗余内容；
-      3. 排序实体优先级：按每个实体与文本核心主题的关联紧密度排序，优先呈现最有助于理解主旨的重要实体；
+      Based on the user's question, process the key information extraction task following these steps:
+      1. Analyze logical connections: First, fully analyze the text content, identify its core logical relationships, and briefly annotate the core logic type;
+      2. Extract key entities: Based on the identified logical relationships, precisely extract key information from the text and classify it into clear entities, ensuring no core information is omitted and no redundant content is added;
+      3. Prioritize entities: Sort by the closeness of each entity's association with the core topic of the text, presenting the most important entities for understanding the main idea first;
     examples:
-      - text: "《罗密欧与朱丽叶》是威廉·莎士比亚早期创作的一部悲剧，也是世界文学中最常上演的戏剧之一。"
+      - text: "'Romeo and Juliet' is a tragedy written by William Shakespeare early in his career, and is one of the most frequently performed plays in world literature."
         node:
-          - name: "罗密欧与朱丽叶"
-          - name: "威廉·莎士比亚"
-          - name: "世界文学"
+          - name: "Romeo and Juliet"
+          - name: "William Shakespeare"
+          - name: "world literature"
   fabri_text:
     with_tag: |
-      请随机生成一段与 %s 相关的文本，字数控制在 [50-200]，并尽量包含与这些标签相关的专业术语或典型元素，使文本更有针对性和相关性。
+      Please randomly generate a text related to %s, with a word count between [50-200], and try to include some professional terms or typical elements related to these tags to make the text more targeted and relevant.
     with_no_tag: |
-      请随机生成一段内容自选的文本，字数控制在 [50-200]。
+      Please randomly generate a text with freely chosen content, with a word count between [50-200].
 
 
 # Tenant configuration

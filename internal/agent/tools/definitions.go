@@ -14,7 +14,7 @@ const (
 	ToolQueryKnowledgeGraph = "query_knowledge_graph"
 	ToolGetDocumentInfo     = "get_document_info"
 	ToolDatabaseQuery       = "database_query"
-	ToolDataAnalysis        = "data_analysis"
+	ToolDataAnalysis  = "data_analysis"
 	ToolDataSchema          = "data_schema"
 	ToolDBCatalog           = "db_catalog"
 	ToolDBSchema            = "db_schema"
@@ -63,16 +63,16 @@ func AvailableToolDefinitions() []AvailableTool {
 		{Name: ToolDBQuery, Label: "数据源分析", Description: "对已绑定数据源执行只读 SQL 分析"},
 		{Name: ToolReadSkill, Label: "读取技能", Description: "按需读取技能内容以学习专业能力"},
 		{Name: ToolExecuteSkillScript, Label: "执行技能脚本", Description: "在沙箱环境中执行技能脚本"},
-		{Name: ToolWikiReadPage, Label: "读取维基页面", Description: "读取指定的维基页面内容"},
-		{Name: ToolWikiSearch, Label: "搜索维基", Description: "在维基中搜索页面"},
+		{Name: ToolWikiReadPage, Label: "读取Wiki页面", Description: "读取指定的Wiki页面内容"},
+		{Name: ToolWikiSearch, Label: "搜索Wiki", Description: "在Wiki中搜索页面"},
 		{Name: ToolWikiReadSourceDoc, Label: "精读源文档", Description: "使用知识点深入阅读特定原始文档"},
-		{Name: ToolWikiFlagIssue, Label: "标记维基问题", Description: "标记页面中存在的事实错误或合并冲突问题"},
-		{Name: ToolWikiWritePage, Label: "创建/覆盖维基", Description: "创建新页面或完全覆盖已有页面"},
-		{Name: ToolWikiReplaceText, Label: "局部替换维基", Description: "替换维基页面中的特定文本"},
-		{Name: ToolWikiRenamePage, Label: "重命名维基", Description: "重命名维基页面并自动更新关联链接"},
-		{Name: ToolWikiDeletePage, Label: "删除维基", Description: "删除维基页面并自动清理关联死链"},
-		{Name: ToolWikiReadIssue, Label: "查看维基问题", Description: "查看特定的维基页面问题详情"},
-		{Name: ToolWikiUpdateIssue, Label: "更新维基问题状态", Description: "更新特定的维基页面问题状态"},
+		{Name: ToolWikiFlagIssue, Label: "标记Wiki问题", Description: "标记页面中存在的事实错误或合并冲突问题"},
+		{Name: ToolWikiWritePage, Label: "创建/覆盖Wiki", Description: "创建新页面或完全覆盖已有页面"},
+		{Name: ToolWikiReplaceText, Label: "局部替换Wiki", Description: "替换Wiki页面中的特定文本"},
+		{Name: ToolWikiRenamePage, Label: "重命名Wiki", Description: "重命名Wiki页面并自动更新关联链接"},
+		{Name: ToolWikiDeletePage, Label: "删除Wiki", Description: "删除Wiki页面并自动清理关联死链"},
+		{Name: ToolWikiReadIssue, Label: "查看Wiki问题", Description: "查看特定的Wiki页面问题详情"},
+		{Name: ToolWikiUpdateIssue, Label: "更新Wiki问题状态", Description: "更新特定的Wiki页面问题状态"},
 	}
 }
 

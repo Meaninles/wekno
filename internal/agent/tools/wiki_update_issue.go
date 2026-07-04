@@ -19,18 +19,18 @@ func NewWikiUpdateIssueTool(wikiService interfaces.WikiPageService, kbIDs []stri
 	return &wikiUpdateIssueTool{
 		BaseTool: NewBaseTool(
 			ToolWikiUpdateIssue,
-			"更新特定 wiki 页面问题的状态（例如设为 'resolved' 或 'ignored'）。",
+			"Update the status of a specific wiki page issue (e.g., set it to 'resolved' or 'ignored').",
 			json.RawMessage(`{
   "type": "object",
   "properties": {
     "issue_id": {
       "type": "string",
-      "description": "要更新的问题 ID。"
+      "description": "The ID of the issue to update."
     },
     "status": {
       "type": "string",
       "enum": ["resolved", "ignored", "pending"],
-      "description": "问题的新状态。"
+      "description": "The new status for the issue."
     }
   },
   "required": ["issue_id", "status"]
@@ -47,28 +47,28 @@ func (t *wikiUpdateIssueTool) Execute(ctx context.Context, args json.RawMessage)
 		Status  string `json:"status"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "参数无效: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Invalid parameters: " + err.Error()}, nil
 	}
 
 	if params.IssueID == "" {
-		return &types.ToolResult{Success: false, Error: "需要 issue_id"}, nil
+		return &types.ToolResult{Success: false, Error: "issue_id is required"}, nil
 	}
 	if params.Status == "" {
-		return &types.ToolResult{Success: false, Error: "需要 status"}, nil
+		return &types.ToolResult{Success: false, Error: "status is required"}, nil
 	}
 
 	if len(t.kbIDs) == 0 {
-		return &types.ToolResult{Success: false, Error: "没有可用知识库"}, nil
+		return &types.ToolResult{Success: false, Error: "No knowledge bases available"}, nil
 	}
 
 	// Update issue status
 	err := t.wikiService.UpdateIssueStatus(ctx, params.IssueID, params.Status)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: "更新问题状态失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to update issue status: " + err.Error()}, nil
 	}
 
 	return &types.ToolResult{
 		Success: true,
-		Output:  fmt.Sprintf("已成功将问题 %s 更新为状态 '%s'", params.IssueID, params.Status),
+		Output:  fmt.Sprintf("Successfully updated issue %s to status '%s'", params.IssueID, params.Status),
 	}, nil
 }

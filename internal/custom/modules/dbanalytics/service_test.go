@@ -306,7 +306,7 @@ func TestFormatAnalysisOutputProvidesChartAnchorAndSuppressesTableByDefault(t *t
 	if !strings.Contains(output, "{{chart:chart_abc123}}") {
 		t.Fatalf("analysis output missing explicit chart anchor: %s", output)
 	}
-	if !strings.Contains(output, "不要把这些行渲染为 Markdown 表格") {
+	if !strings.Contains(output, "do not render these rows as a Markdown table") {
 		t.Fatalf("analysis output missing no-table rule: %s", output)
 	}
 }

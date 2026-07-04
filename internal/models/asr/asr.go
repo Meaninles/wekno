@@ -36,6 +36,9 @@ type Config struct {
 	APIKey    string
 	ModelID   string
 	Language  string // optional: specify language for transcription
+	// ResponseFormat optionally overrides the audio transcription response_format.
+	// Empty keeps the historical default of verbose_json.
+	ResponseFormat string
 	// CustomHeaders 允许在调用远程 API 时附加自定义 HTTP 请求头（类似 OpenAI Python SDK 的 extra_headers）。
 	CustomHeaders map[string]string
 }
@@ -48,12 +51,13 @@ func ConfigFromModel(m *types.Model) *Config {
 		return nil
 	}
 	return &Config{
-		ModelID:       m.ID,
-		APIKey:        m.Parameters.APIKey,
-		BaseURL:       m.Parameters.BaseURL,
-		ModelName:     m.Name,
-		Source:        m.Source,
-		CustomHeaders: m.Parameters.CustomHeaders,
+		ModelID:        m.ID,
+		APIKey:         m.Parameters.APIKey,
+		BaseURL:        m.Parameters.BaseURL,
+		ModelName:      m.Name,
+		Source:         m.Source,
+		ResponseFormat: m.Parameters.ExtraConfig["asr_response_format"],
+		CustomHeaders:  m.Parameters.CustomHeaders,
 	}
 }
 

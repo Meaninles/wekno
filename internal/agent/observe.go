@@ -84,7 +84,7 @@ func (e *AgentEngine) analyzeResponse(
 
 		answer := response.Content
 		if answer == "" {
-			answer = "抱歉，此请求被内容安全策略阻止。请尝试换一种问法。"
+			answer = "Sorry, this request was blocked by the content safety policy. Please try rephrasing your question."
 		}
 
 		answerID := generateEventID("answer")
@@ -262,13 +262,13 @@ func buildRuntimeContextBlock(
 			}
 		}
 		sb.WriteString("  </pinned_documents>\n")
-		sb.WriteString("  <note>上方固定文档集合是本轮的权威范围。")
-		sb.WriteString("优先从这些文档检索内容（例如使用 knowledge_id 调用 list_knowledge_chunks）。")
-		sb.WriteString("如果较早轮次分析过其他文档，不要复用那次分析，请按当前范围重新查询。</note>\n")
+		sb.WriteString("  <note>The pinned-document set above is authoritative for THIS turn. ")
+		sb.WriteString("Prioritize retrieving content from these documents (e.g. list_knowledge_chunks with the knowledge_id). ")
+		sb.WriteString("If an earlier turn analysed a different document, do NOT reuse that analysis — re-query against the current scope.</note>\n")
 	}
 
-	sb.WriteString("  <communication_instruction>回答或 Thought 中不要使用内部工具名或标识符。用“关键词检索”代替 grep_chunks，用“语义检索”代替 knowledge_search，用“浏览完整文档”代替 list_knowledge_chunks；同样不要暴露 chunk_id、knowledge_id 或其他内部 ID，请用标题或名称指代文档。</communication_instruction>\n")
-	sb.WriteString("  <answer_instruction>当你已经收集到足够信息时，请直接写出完整的用户可见回答并停止，不要在最终消息里再请求工具。在此之前继续使用工具，不要在调查过程中给出不完整答案。</answer_instruction>\n")
+	sb.WriteString("  <communication_instruction>Do not use internal tool names or identifiers in your answers or in Thought. Say \"keyword retrieval\" instead of grep_chunks, \"semantic retrieval\" instead of knowledge_search, \"browse full document\" instead of list_knowledge_chunks; likewise never expose chunk_id, knowledge_id, or other internal IDs—refer to documents by title or name.</communication_instruction>\n")
+	sb.WriteString("  <answer_instruction>When you have gathered enough information, write your complete user-facing answer as your reply and stop—do not request any more tools in that final message. Until then, keep using tools; do not give a partial answer mid-investigation.</answer_instruction>\n")
 
 	sb.WriteString("</runtime_context>")
 	return sb.String()
@@ -290,14 +290,14 @@ func buildMustUseBlock(mcpServices []*PinnedMCPServiceInfo, skills []*PinnedSkil
 		if display == "" {
 			display = sanitizeMustUseField(svc.ID)
 		}
-		lines = append(lines, fmt.Sprintf("必须使用名称以 %s 开头的 MCP 工具（@%s）回答下面的问题。", prefix, display))
+		lines = append(lines, fmt.Sprintf("Must use MCP tools whose names start with %s (@%s) to answer the question below.", prefix, display))
 	}
 	for _, skill := range skills {
 		if skill == nil || skill.Name == "" {
 			continue
 		}
 		name := sanitizeMustUseField(skill.Name)
-		lines = append(lines, fmt.Sprintf("回答前必须为 @Skill \"%s\" 调用 read_skill(skill_name=\"%s\")。", name, name))
+		lines = append(lines, fmt.Sprintf("Must call read_skill(skill_name=\"%s\") for @Skill \"%s\" before answering.", name, name))
 	}
 	if len(lines) == 0 {
 		return ""
@@ -447,7 +447,7 @@ func (e *AgentEngine) appendToolResults(
 	for _, toolCall := range step.ToolCalls {
 		resultContent := toolCall.Result.Output
 		if !toolCall.Result.Success {
-			resultContent = fmt.Sprintf("错误: %s", toolCall.Result.Error)
+			resultContent = fmt.Sprintf("Error: %s", toolCall.Result.Error)
 		}
 
 		toolMsg := chat.Message{
@@ -495,7 +495,7 @@ func redactHistoryKBResults(llmContext []chat.Message) []chat.Message {
 		if msg.Role == "tool" && kbToolNames[msg.Name] {
 			redacted = append(redacted, chat.Message{
 				Role:       msg.Role,
-				Content:    "[已省略上一轮检索结果，因为知识库可能已变化。请重新检索。]",
+				Content:    "[Previous retrieval result omitted — knowledge base may have changed. Please perform a fresh search.]",
 				ToolCallID: msg.ToolCallID,
 				Name:       msg.Name,
 			})

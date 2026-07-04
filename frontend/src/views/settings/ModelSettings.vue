@@ -198,6 +198,9 @@ function convertToLegacyFormat(model: ModelConfig) {
     lkeapRegion: model.parameters.extra_config?.region || 'ap-guangzhou',
     // 原始存库值，编辑弹窗内再 resolve（避免打开时被推断值覆盖）
     thinkingControl: model.parameters.extra_config?.thinking_control,
+    generalAgentClaudeBaseUrl: model.parameters.extra_config?.general_agent_claude_base_url || '',
+    asrResponseFormat: model.parameters.extra_config?.asr_response_format || 'verbose_json',
+    extraConfig: model.parameters.extra_config || {},
     _modelType: backendTypeToModelType[model.type] || 'chat' as ModelType,
     // Preserve the credential metadata map so the editor dialog can render
     // the "Configured" state without an extra round-trip.
@@ -408,9 +411,11 @@ const handleModelSave = async (modelData: any) => {
     const trimmedAppSecret = (modelData.appSecret ?? '').trim()
     const appSecretFields: { app_secret?: string } =
       !editingModel.value && trimmedAppSecret ? { app_secret: trimmedAppSecret } : {}
-    const extraConfig: Record<string, string> = {}
+    const extraConfig: Record<string, string> = { ...(modelData.extraConfig || {}) }
     if (modelData.provider === 'lkeap' && saveType === 'rerank') {
       extraConfig.region = (modelData.lkeapRegion || 'ap-guangzhou').trim()
+    } else {
+      delete extraConfig.region
     }
     if (
       saveType === 'chat'
@@ -418,6 +423,19 @@ const handleModelSave = async (modelData: any) => {
       && modelData.thinkingControl
     ) {
       extraConfig.thinking_control = modelData.thinkingControl
+    } else {
+      delete extraConfig.thinking_control
+    }
+    const generalAgentClaudeBaseUrl = (modelData.generalAgentClaudeBaseUrl || '').trim()
+    if ((saveType === 'chat' || saveType === 'vllm') && generalAgentClaudeBaseUrl) {
+      extraConfig.general_agent_claude_base_url = generalAgentClaudeBaseUrl
+    } else {
+      delete extraConfig.general_agent_claude_base_url
+    }
+    if (saveType === 'asr') {
+      extraConfig.asr_response_format = modelData.asrResponseFormat || 'verbose_json'
+    } else {
+      delete extraConfig.asr_response_format
     }
     const extraConfigFields = Object.keys(extraConfig).length > 0
       ? { extra_config: extraConfig }

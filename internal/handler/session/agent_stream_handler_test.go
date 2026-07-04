@@ -118,6 +118,47 @@ func TestHandleToolCallSupersedesPreambleByDefault(t *testing.T) {
 	}
 }
 
+func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{
+		ID:        "assistant-1",
+		SessionID: "session-1",
+		Content:   "streamed final answer",
+	}
+	handler := NewAgentStreamHandler(
+		context.Background(),
+		"session-1",
+		"assistant-1",
+		"request-1",
+		time.Time{},
+		msg,
+		stream,
+		event.NewEventBus(),
+	)
+
+	if err := handler.handleFinalAnswer(context.Background(), event.Event{
+		ID:   "answer-1",
+		Type: event.EventAgentFinalAnswer,
+		Data: event.AgentFinalAnswerData{Content: "streamed final answer", Done: true},
+	}); err != nil {
+		t.Fatalf("handleFinalAnswer returned error: %v", err)
+	}
+	if err := handler.handleComplete(context.Background(), event.Event{
+		ID:   "complete-1",
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID:   "assistant-1",
+			FinalAnswer: "streamed final answer",
+		},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+
+	if msg.Content != "streamed final answer" {
+		t.Fatalf("assistant content = %q, want single final answer", msg.Content)
+	}
+}
+
 func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {
 	stream := &recordingStreamManager{}
 	handler := NewAgentStreamHandler(

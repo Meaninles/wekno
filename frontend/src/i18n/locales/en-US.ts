@@ -3808,6 +3808,13 @@ export default {
       dimensionOverrideDesc: 'Enable only if the provider documentation says this model accepts a dimensions parameter.',
       supportsVisionLabel: 'Supports Vision / Multimodal',
       supportsVisionDesc: 'Whether the model accepts image and multimodal input',
+      generalAgentClaudeBaseUrlLabel: 'Anthropic-compatible endpoint (General Agent, optional)',
+      generalAgentClaudeBaseUrlPlaceholder: 'e.g. http://model-gateway:30001/anthropic',
+      generalAgentClaudeBaseUrlDesc:
+        'Used only by Claude SDK runtimes such as General Agent, Document Processing, and Data Analysis. The Claude SDK endpoint and API key both come from this model configuration. Local no-auth endpoints do not need an API key.',
+      asrResponseFormatLabel: 'ASR response format',
+      asrResponseFormatDesc:
+        'The response_format sent to /v1/audio/transcriptions. Default is verbose_json; some compatible services only support json.',
       thinkingControlLabel: 'Thinking mode request format',
       thinkingControlDesc:
         'Controls how the agent’s “Thinking mode” on/off switch is written to the API. We pre-select based on vendor/model when possible; change it to match your API docs. With “Do not send”, the agent Thinking mode switch has no effect.',

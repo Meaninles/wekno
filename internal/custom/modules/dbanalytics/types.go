@@ -442,25 +442,25 @@ type TableProfile struct {
 }
 
 type QueryInput struct {
-	SourceID        string `json:"source_id,omitempty" jsonschema:"可选的数据库源 ID，来自 db_catalog/db_schema；当跨绑定数据源使用 sql_table_name 值时可省略"`
-	SQL             string `json:"sql" jsonschema:"针对已物化数据库分析表执行的 DuckDB 兼容只读 SQL；请使用 db_catalog/db_schema 返回的 sql_table_name 值"`
-	ChartRequested  bool   `json:"chart_requested,omitempty" jsonschema:"仅当用户明确要求生成图表、绘图、可视化或点名某种图表类型时为 true"`
-	PreferredChart  string `json:"preferred_chart,omitempty" jsonschema:"可选图表类型；仅在用户明确请求图表后，按用户要求或分析意图选择：line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
-	ChartIntent     string `json:"chart_intent,omitempty" jsonschema:"可选的自然语言图表意图，例如比较各区域中不同客户类型的销售额；仅在 chart_requested 为 true 时使用"`
-	PrimaryMetric   string `json:"primary_metric,omitempty" jsonschema:"可选 SQL 结果列名；当 chart_requested 为 true 时作为主要可视化指标"`
-	SecondaryMetric string `json:"secondary_metric,omitempty" jsonschema:"可选 SQL 结果列名；作为次要指标，尤其用于 dual_axis_combo 或关系类图表"`
-	Dimension       string `json:"dimension,omitempty" jsonschema:"可选 SQL 结果列名；当 chart_requested 为 true 时作为主类别轴或时间轴"`
-	Series          string `json:"series,omitempty" jsonschema:"可选 SQL 结果列名；当 chart_requested 为 true 时作为系列、堆叠或分组维度"`
-	ChartTitle      string `json:"chart_title,omitempty" jsonschema:"可选的简洁中文图表标题；当它有助于让渲染图表与最终解释一致时使用"`
-	TableRequested  bool   `json:"table_requested,omitempty" jsonschema:"仅当用户明确要求表格、明细、原始数据或列表输出时为 true；即使请求了图表，默认也为 false"`
+	SourceID        string `json:"source_id,omitempty" jsonschema:"optional database source id copied from db_catalog/db_schema; omit it when using sql_table_name values across bound sources"`
+	SQL             string `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against materialized database analysis tables; use sql_table_name values from db_catalog/db_schema"`
+	ChartRequested  bool   `json:"chart_requested,omitempty" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 图表, 可视化, or a named chart type"`
+	PreferredChart  string `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user or selected after an explicit chart request: line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
+	ChartIntent     string `json:"chart_intent,omitempty" jsonschema:"optional natural-language chart intent, e.g. compare regional sales by customer segment; used only when chart_requested is true"`
+	PrimaryMetric   string `json:"primary_metric,omitempty" jsonschema:"optional SQL result column name that should be the primary visual metric when chart_requested is true"`
+	SecondaryMetric string `json:"secondary_metric,omitempty" jsonschema:"optional SQL result column name for a secondary metric, especially dual_axis_combo or relationship charts"`
+	Dimension       string `json:"dimension,omitempty" jsonschema:"optional SQL result column name that should be the main category/time axis when chart_requested is true"`
+	Series          string `json:"series,omitempty" jsonschema:"optional SQL result column name that should be the series/stack/group dimension when chart_requested is true"`
+	ChartTitle      string `json:"chart_title,omitempty" jsonschema:"optional concise Chinese chart title; use when it helps align the rendered chart with the final explanation"`
+	TableRequested  bool   `json:"table_requested,omitempty" jsonschema:"true only when the user explicitly asks for table/detail/raw/list output; false by default even when a chart is requested"`
 }
 
 type SchemaInput struct {
-	SourceID   string   `json:"source_id,omitempty" jsonschema:"可选的数据库源 ID，来自 db_catalog/db_schema；当 table_names 包含 sql_table_name 值时可省略"`
-	TableNames []string `json:"table_names,omitempty" jsonschema:"可选的 db_catalog 返回的 sql_table_name 值；也接受物理 schema.table 名称"`
+	SourceID   string   `json:"source_id,omitempty" jsonschema:"optional database source id copied from db_catalog/db_schema; omit it when table_names contains sql_table_name values"`
+	TableNames []string `json:"table_names,omitempty" jsonschema:"optional sql_table_name values returned by db_catalog; physical schema.table names are also accepted"`
 }
 
 type CatalogInput struct {
-	Query    string `json:"query" jsonschema:"用户问题或业务术语，用于匹配表、列和描述"`
-	SourceID string `json:"source_id,omitempty" jsonschema:"可选的数据库源 ID"`
+	Query    string `json:"query" jsonschema:"user question or business terms to match against tables, columns and descriptions"`
+	SourceID string `json:"source_id,omitempty" jsonschema:"optional database source id"`
 }

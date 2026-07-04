@@ -306,7 +306,10 @@
       </template>
 
       <!-- Section 3 — 高级选项（仅在有内容时渲染，避免空 section 出现底部分隔线） -->
-      <section v-if="activeModelType === 'embedding' || activeModelType === 'chat'" class="setting-drawer__section">
+      <section
+        v-if="activeModelType === 'embedding' || activeModelType === 'chat' || activeModelType === 'vllm' || activeModelType === 'asr'"
+        class="setting-drawer__section"
+      >
         <h4 class="setting-drawer__section-title">{{ $t('model.editor.sectionAdvanced') }}</h4>
 
         <!-- Embedding 专用：维度 -->
@@ -343,6 +346,28 @@
             <t-switch v-model="formData.supportsVision" />
             <span class="form-desc form-desc--inline">{{ $t('model.editor.supportsVisionDesc') }}</span>
           </div>
+        </div>
+
+        <div v-if="showGeneralAgentClaudeBaseUrlField" class="form-item">
+          <label class="form-label">{{ $t('model.editor.generalAgentClaudeBaseUrlLabel') }}</label>
+          <t-input
+            v-model="formData.generalAgentClaudeBaseUrl"
+            :placeholder="$t('model.editor.generalAgentClaudeBaseUrlPlaceholder')"
+          />
+          <p class="form-desc">{{ $t('model.editor.generalAgentClaudeBaseUrlDesc') }}</p>
+        </div>
+
+        <div v-if="activeModelType === 'asr'" class="form-item">
+          <label class="form-label">{{ $t('model.editor.asrResponseFormatLabel') }}</label>
+          <t-select v-model="formData.asrResponseFormat">
+            <t-option
+              v-for="opt in asrResponseFormatOptions"
+              :key="opt.value"
+              :value="opt.value"
+              :label="opt.label"
+            />
+          </t-select>
+          <p class="form-desc">{{ $t('model.editor.asrResponseFormatDesc') }}</p>
         </div>
 
         <!-- Chat + 远程 API：思考模式参数格式 -->
@@ -420,6 +445,12 @@ interface ModelFormData {
   supportsVision?: boolean
   /** extra_config.thinking_control — how agent thinking on/off maps to API fields. */
   thinkingControl?: string
+  /** extra_config.general_agent_claude_base_url — Anthropic-compatible endpoint for Claude SDK agents. */
+  generalAgentClaudeBaseUrl?: string
+  /** extra_config.asr_response_format — response_format for OpenAI-compatible ASR APIs. */
+  asrResponseFormat?: string
+  /** Raw model extra_config, used to preserve unrelated backend-managed keys on save. */
+  extraConfig?: Record<string, string>
   // 自定义 HTTP 请求头（类似 OpenAI Python SDK 的 extra_headers）
   customHeaders?: CustomHeaderItem[]
   /** LKEAP Rerank：腾讯云 SecretKey（创建时写入 app_secret） */
@@ -638,6 +669,10 @@ const showThinkingControlField = computed(() =>
   activeModelType.value === 'chat' && formData.value.source === 'remote',
 )
 
+const showGeneralAgentClaudeBaseUrlField = computed(() =>
+  activeModelType.value === 'chat' || activeModelType.value === 'vllm',
+)
+
 const resolvedThinkingControl = (): ThinkingControlValue =>
   defaultThinkingControl(
     formData.value.provider || '',
@@ -678,6 +713,14 @@ const thinkingControlOptions = computed(() => {
     hint: t(`model.editor.thinkingControl.${key}.hint`),
   }))
 })
+
+const asrResponseFormatOptions = computed(() => [
+  { value: 'verbose_json', label: 'verbose_json' },
+  { value: 'json', label: 'json' },
+  { value: 'text', label: 'text' },
+  { value: 'srt', label: 'srt' },
+  { value: 'vtt', label: 'vtt' },
+])
 
 // Header icon for the SettingDrawer — uses the same TDesign icon name table
 // as the model card list, so the drawer's leading badge visually matches the
@@ -805,6 +848,9 @@ const formData = ref<ModelFormData>({
   isDefault: false,
   supportsVision: false,
   thinkingControl: defaultThinkingControl('generic', ''),
+  generalAgentClaudeBaseUrl: '',
+  asrResponseFormat: 'verbose_json',
+  extraConfig: {},
   customHeaders: [],
   appSecret: '',
   lkeapRegion: 'ap-guangzhou',
@@ -1040,6 +1086,9 @@ const resetForm = () => {
     isDefault: false,
     supportsVision: false,
     thinkingControl: defaultThinkingControl('generic', ''),
+    generalAgentClaudeBaseUrl: '',
+    asrResponseFormat: 'verbose_json',
+    extraConfig: {},
     customHeaders: [],
     appSecret: '',
     lkeapRegion: 'ap-guangzhou',
@@ -1290,6 +1339,13 @@ const checkRemoteAPI = async () => {
     const idPayload = isEdit.value && props.modelData?.id
       ? { modelId: props.modelData.id as string }
       : {}
+    const extraConfig: Record<string, string> = { ...(formData.value.extraConfig || {}) }
+    if (activeModelType.value === 'asr' && formData.value.asrResponseFormat) {
+      extraConfig.asr_response_format = formData.value.asrResponseFormat
+    }
+    const extraConfigPayload = Object.keys(extraConfig).length > 0
+      ? { extraConfig }
+      : {}
 
     switch (activeModelType.value) {
       case 'chat':
@@ -1369,6 +1425,7 @@ const checkRemoteAPI = async () => {
           provider: formData.value.provider,
           ...idPayload,
           ...headerPayload,
+          ...extraConfigPayload,
         })
         break
 

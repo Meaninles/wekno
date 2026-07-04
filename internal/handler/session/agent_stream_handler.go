@@ -669,7 +669,11 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 			h.assistantMessage.KnowledgeReferences = knowledgeRefs
 		}
 
-		h.assistantMessage.Content += data.FinalAnswer
+		if data.FinalAnswer != "" {
+			h.assistantMessage.Content = data.FinalAnswer
+		} else {
+			h.assistantMessage.Content = h.finalAnswer
+		}
 
 		// Update agent steps if provided
 		if data.AgentSteps != nil {

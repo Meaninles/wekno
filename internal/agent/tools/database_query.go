@@ -14,91 +14,91 @@ import (
 
 var databaseQueryTool = BaseTool{
 	name: ToolDatabaseQuery,
-	description: `执行 SQL 查询，从数据库中检索信息。
+	description: `Execute SQL queries to retrieve information from the database.
 
-## 安全特性
-- 自动注入 tenant_id：所有查询都会自动按当前登录用户的 tenant_id 过滤
-- 自动软删除过滤：所有查询都会自动只包含 deleted_at IS NULL 的记录
-- 只读查询：只允许 SELECT 语句
-- 安全表范围：只允许查询授权表（knowledge_bases、knowledges、chunks）
+## Security Features
+- Automatic tenant_id injection: All queries are automatically filtered by the logged-in user's tenant_id
+- Automatic soft-delete filtering: All queries are automatically filtered to include only records with deleted_at IS NULL
+- Read-only queries: Only SELECT statements are allowed
+- Safe tables: Only allow queries on authorized tables (knowledge_bases, knowledges, chunks)
 
-## 可用表和字段
+## Available Tables and Columns
 
 ### knowledge_bases
-- id (VARCHAR): 知识库 ID
-- name (VARCHAR): 知识库名称
-- description (TEXT): 描述
-- tenant_id (INTEGER): 所属租户 ID
-- embedding_model_id, summary_model_id, rerank_model_id (VARCHAR): 模型 ID
-- vlm_config (JSON): 包含 VLM 设置，例如 enabled 标志和 model_id
+- id (VARCHAR): Knowledge base ID
+- name (VARCHAR): Knowledge base name
+- description (TEXT): Description
+- tenant_id (INTEGER): Owner tenant ID
+- embedding_model_id, summary_model_id, rerank_model_id (VARCHAR): Model IDs
+- vlm_config (JSON): Includes VLM settings such as enabled flag and model_id
 - created_at, updated_at, deleted_at (TIMESTAMP)
 
 ### knowledges (documents)
-- id (VARCHAR): 文档 ID
-- tenant_id (INTEGER): 所属租户 ID
-- knowledge_base_id (VARCHAR): 所属知识库 ID
-- type (VARCHAR): 文档类型
-- title (VARCHAR): 文档标题
-- description (TEXT): 描述
-- source (VARCHAR): 来源位置
-- parse_status (VARCHAR): 处理状态（unprocessed/processing/completed/failed）
-- enable_status (VARCHAR): 启用状态（enabled/disabled）
-- file_name, file_type (VARCHAR): 文件信息
-- file_size, storage_size (BIGINT): 字节大小
+- id (VARCHAR): Document ID
+- tenant_id (INTEGER): Owner tenant ID
+- knowledge_base_id (VARCHAR): Parent knowledge base ID
+- type (VARCHAR): Document type
+- title (VARCHAR): Document title
+- description (TEXT): Description
+- source (VARCHAR): Source location
+- parse_status (VARCHAR): Processing status (unprocessed/processing/completed/failed)
+- enable_status (VARCHAR): Enable status (enabled/disabled)
+- file_name, file_type (VARCHAR): File information
+- file_size, storage_size (BIGINT): Size in bytes
 - created_at, updated_at, processed_at, deleted_at (TIMESTAMP)
 
 
 
 ### chunks
-- id (VARCHAR): 分块 ID
-- tenant_id (INTEGER): 所属租户 ID
-- knowledge_base_id (VARCHAR): 所属知识库 ID
-- knowledge_id (VARCHAR): 所属文档 ID
-- content (TEXT): 分块内容
-- chunk_index (INTEGER): 文档内索引
-- is_enabled (BOOLEAN): 启用状态
-- chunk_type (VARCHAR): 类型（text/image/table）
+- id (VARCHAR): Chunk ID
+- tenant_id (INTEGER): Owner tenant ID
+- knowledge_base_id (VARCHAR): Parent knowledge base ID
+- knowledge_id (VARCHAR): Parent document ID
+- content (TEXT): Chunk content
+- chunk_index (INTEGER): Index in document
+- is_enabled (BOOLEAN): Enable status
+- chunk_type (VARCHAR): Type (text/image/table)
 - created_at, updated_at, deleted_at (TIMESTAMP)
 
-## 使用示例
+## Usage Examples
 
-查询知识库信息：
+Query knowledge base information:
 {
   "sql": "SELECT id, name, description FROM knowledge_bases ORDER BY created_at DESC LIMIT 10"
 }
 
-按状态统计文档：
+Count documents by status:
 {
   "sql": "SELECT parse_status, COUNT(*) as count FROM knowledges GROUP BY parse_status"
 }
 
-查找最近会话：
+Find recent sessions:
 {
   "sql": "SELECT id, title, created_at FROM sessions ORDER BY created_at DESC LIMIT 5"
 }
 
-获取存储用量：
+Get storage usage:
 {
   "sql": "SELECT SUM(storage_size) as total_storage FROM knowledges"
 }
 
-关联知识库和文档：
+Join knowledge bases and documents:
 {
   "sql": "SELECT kb.name as kb_name, COUNT(k.id) as doc_count FROM knowledge_bases kb LEFT JOIN knowledges k ON kb.id = k.knowledge_base_id GROUP BY kb.id, kb.name"
 }
 
-## 重要说明
-- 不要在 WHERE 条件中包含 tenant_id，系统会自动添加
-- 除非确实需要，不要手动添加 deleted_at 过滤；默认查询已强制 deleted_at IS NULL
-- 只允许 SELECT 查询
-- 使用 LIMIT 限制结果数量以获得更好性能
-- 跨表查询时使用合适的 JOIN
-- 所有时间戳均为带时区的 UTC 时间`,
+## Important Notes
+- DO NOT include tenant_id in WHERE clause - it's automatically added
+- DO NOT include deleted_at filtering manually unless needed - default query already enforces deleted_at IS NULL
+- Only SELECT queries are allowed
+- Limit results with LIMIT clause for better performance
+- Use appropriate JOINs when querying across tables
+- All timestamps are in UTC with time zone`,
 	schema: utils.GenerateSchema[DatabaseQueryInput](),
 }
 
 type DatabaseQueryInput struct {
-	SQL string `json:"sql" jsonschema:"要执行的 SELECT SQL 查询。不要包含 tenant_id 条件，系统会出于安全原因自动添加。"`
+	SQL string `json:"sql" jsonschema:"The SELECT SQL query to execute. DO NOT include tenant_id condition - it will be automatically added for security."`
 }
 
 // DatabaseQueryTool allows AI to query the database with auto-injected tenant_id for security
@@ -132,7 +132,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 		logger.Errorf(ctx, "[Tool][DatabaseQuery] Failed to parse args: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("解析参数失败: %v", err),
+			Error:   fmt.Sprintf("Failed to parse args: %v", err),
 		}, err
 	}
 
@@ -141,7 +141,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 		logger.Errorf(ctx, "[Tool][DatabaseQuery] Missing or invalid SQL parameter")
 		return &types.ToolResult{
 			Success: false,
-			Error:   "缺少或无效的 'sql' 参数",
+			Error:   "Missing or invalid 'sql' parameter",
 		}, fmt.Errorf("missing sql parameter")
 	}
 
@@ -155,7 +155,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 		logger.Errorf(ctx, "[Tool][DatabaseQuery] SQL validation failed: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("SQL 校验失败: %v", err),
+			Error:   fmt.Sprintf("SQL validation failed: %v", err),
 		}, err
 	}
 
@@ -170,7 +170,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 		logger.Errorf(ctx, "[Tool][DatabaseQuery] Query execution failed: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("查询执行失败: %v", err),
+			Error:   fmt.Sprintf("Query execution failed: %v", err),
 		}, err
 	}
 	defer rows.Close()
@@ -182,7 +182,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("获取列信息失败: %v", err),
+			Error:   fmt.Sprintf("Failed to get columns: %v", err),
 		}, err
 	}
 
@@ -200,7 +200,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 		if err := rows.Scan(columnPointers...); err != nil {
 			return &types.ToolResult{
 				Success: false,
-				Error:   fmt.Sprintf("扫描行失败: %v", err),
+				Error:   fmt.Sprintf("Failed to scan row: %v", err),
 			}, err
 		}
 
@@ -221,7 +221,7 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 	if err := rows.Err(); err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("遍历行失败: %v", err),
+			Error:   fmt.Sprintf("Error iterating rows: %v", err),
 		}, err
 	}
 
@@ -298,19 +298,19 @@ func (t *DatabaseQueryTool) formatQueryResults(
 	columns []string,
 	results []map[string]interface{},
 ) string {
-	output := "=== 查询结果 ===\n\n"
-	output += fmt.Sprintf("返回 %d 行\n\n", len(results))
+	output := "=== Query Results ===\n\n"
+	output += fmt.Sprintf("Returned %d rows\n\n", len(results))
 
 	if len(results) == 0 {
-		output += "未找到匹配记录。\n"
+		output += "No matching records found.\n"
 		return output
 	}
 
-	output += "=== 数据详情 ===\n\n"
+	output += "=== Data Details ===\n\n"
 
 	// Format each row
 	for i, row := range results {
-		output += fmt.Sprintf("--- 记录 #%d ---\n", i+1)
+		output += fmt.Sprintf("--- Record #%d ---\n", i+1)
 		for _, col := range columns {
 			value := row[col]
 			// Format the value
@@ -338,7 +338,7 @@ func (t *DatabaseQueryTool) formatQueryResults(
 
 	// Add summary statistics if applicable
 	if len(results) > 10 {
-		output += fmt.Sprintf("注意：当前显示 %d 条记录（共 %d 条）。请考虑使用 LIMIT 子句限制结果数量。\n", len(results), len(results))
+		output += fmt.Sprintf("Note: Showing %d records out of %d total. Consider using a LIMIT clause to restrict the result count.\n", len(results), len(results))
 	}
 
 	return output

@@ -35,6 +35,9 @@ const (
 	generalClaudeProviderEnv  = "CUSTOM_GENERAL_AGENT_CLAUDE_PROVIDER"
 	deepSeekAnthropicBaseURL  = "https://api.deepseek.com/anthropic"
 	zhipuAnthropicBaseURL     = "https://open.bigmodel.cn/api/anthropic"
+	generalClaudeAuthAPIKey   = "api_key"
+	generalClaudeAuthHelper   = "api_key_helper"
+	generalClaudeNoAuthKey    = "weknora-no-auth"
 )
 
 type Service struct {
@@ -444,6 +447,17 @@ func (s *Service) resolveLLMConfig(ctx context.Context, config *types.AgentConfi
 	if err != nil {
 		return nil, fmt.Errorf("通用智能体无法读取模型配置: %w", err)
 	}
+	out, err := generalClaudeLLMConfigFromModel(model)
+	if err != nil {
+		return nil, err
+	}
+	if err := secutils.ValidateURLForSSRF(out.BaseURL); err != nil {
+		return nil, fmt.Errorf("通用智能体接口地址未通过 SSRF 校验: %w", err)
+	}
+	return out, nil
+}
+
+func generalClaudeLLMConfigFromModel(model *types.Model) (*LLMConfig, error) {
 	if model == nil || model.Type != types.ModelTypeKnowledgeQA {
 		return nil, errors.New("通用智能体需要对话模型")
 	}
@@ -460,9 +474,6 @@ func (s *Service) resolveLLMConfig(ctx context.Context, config *types.AgentConfi
 	if out.ModelName == "" {
 		return nil, errors.New("通用智能体模型缺少模型名称")
 	}
-	if out.APIKey == "" {
-		return nil, errors.New("通用智能体模型缺少 API key")
-	}
 	if !override.baseConfigured {
 		deriveGeneralClaudeEndpoint(out)
 	} else if out.Provider == "" {
@@ -471,11 +482,17 @@ func (s *Service) resolveLLMConfig(ctx context.Context, config *types.AgentConfi
 	if out.BaseURL == "" {
 		return nil, errors.New("通用智能体无法为当前模型推导 Anthropic 兼容接口：请在模型 extra_config 配置通用智能体兼容接口 Base URL；API key 会复用当前模型")
 	}
-	if err := secutils.ValidateURLForSSRF(out.BaseURL); err != nil {
-		return nil, fmt.Errorf("通用智能体接口地址未通过 SSRF 校验: %w", err)
-	}
 	if out.Provider == "" {
 		out.Provider = string(modelprovider.ProviderAnthropic)
+	}
+	if out.APIKey == "" {
+		if !override.baseConfigured {
+			return nil, errors.New("通用智能体模型缺少 API key")
+		}
+		out.AuthType = generalClaudeAuthHelper
+		out.APIKeyHelper = fmt.Sprintf("printf %s", generalClaudeNoAuthKey)
+	} else {
+		out.AuthType = generalClaudeAuthAPIKey
 	}
 	return out, nil
 }
@@ -495,6 +512,7 @@ func applyGeneralClaudeOverrides(cfg *LLMConfig, extra map[string]string) overri
 	}
 	if baseURL != "" {
 		cfg.BaseURL = baseURL
+		cfg.Provider = string(modelprovider.ProviderAnthropic)
 	}
 	if provider != "" {
 		cfg.Provider = provider
@@ -505,13 +523,13 @@ func applyGeneralClaudeOverrides(cfg *LLMConfig, extra map[string]string) overri
 	return overrideStatus{configured: configured, baseConfigured: baseURL != ""}
 }
 
-func overrideValue(extra map[string]string, envName string, keys ...string) string {
+func overrideValue(extra map[string]string, _ string, keys ...string) string {
 	for _, key := range keys {
 		if value := strings.TrimSpace(extra[key]); value != "" {
 			return value
 		}
 	}
-	return strings.TrimSpace(os.Getenv(envName))
+	return ""
 }
 
 func deriveGeneralClaudeEndpoint(cfg *LLMConfig) {
@@ -520,18 +538,9 @@ func deriveGeneralClaudeEndpoint(cfg *LLMConfig) {
 	}
 	provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
 	baseURL := strings.ToLower(strings.TrimSpace(cfg.BaseURL))
-	modelName := strings.ToLower(strings.TrimSpace(cfg.ModelName))
 	switch {
 	case provider == string(modelprovider.ProviderAnthropic) || provider == "claude" ||
 		strings.Contains(baseURL, "anthropic") || strings.Contains(baseURL, "claude"):
-		cfg.Provider = string(modelprovider.ProviderAnthropic)
-	case provider == string(modelprovider.ProviderDeepSeek) || strings.Contains(baseURL, "deepseek.com") ||
-		strings.HasPrefix(modelName, "deepseek-"):
-		cfg.BaseURL = deepSeekAnthropicBaseURL
-		cfg.Provider = string(modelprovider.ProviderAnthropic)
-	case provider == string(modelprovider.ProviderZhipu) || strings.Contains(baseURL, "open.bigmodel.cn") ||
-		strings.HasPrefix(modelName, "glm-"):
-		cfg.BaseURL = zhipuAnthropicBaseURL
 		cfg.Provider = string(modelprovider.ProviderAnthropic)
 	default:
 		// Do not treat an arbitrary OpenAI-compatible chat endpoint as
@@ -746,7 +755,7 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 			"artifact_return_policy": map[string]any{
 				"max_artifact_count":            5,
 				"total_return_size_limit_bytes": int64(128 * 1024 * 1024),
-				"order":                         "重要文件优先",
+				"order":                         "important files first",
 			},
 		}
 		out["visible_resources"] = s.visibleResources(ctx, config)
@@ -1194,9 +1203,9 @@ func tenantIDFromContext(ctx context.Context) uint64 {
 }
 
 func renderSystemPrompt(ctx context.Context, prompt string, webSearchEnabled bool) string {
-	status := "未启用"
+	status := "Disabled"
 	if webSearchEnabled {
-		status = "已启用"
+		status = "Enabled"
 	}
 	replacements := map[string]string{
 		"web_search_status": status,

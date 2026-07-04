@@ -24,39 +24,39 @@ func NewWikiWritePageTool(wikiPageService interfaces.WikiPageService, kbIDs []st
 	return &wikiWritePageTool{
 		BaseTool: NewBaseTool(
 			ToolWikiWritePage,
-			"创建新的 Wiki 页面，或完整覆盖已有页面。会自动处理出站链接。",
+			"Create a new Wiki page or completely overwrite an existing one. Automatically handles outbound links.",
 			json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"slug": {
 						"type": "string",
-						"description": "Wiki 页面的 slug（例如 'entity/hunyuan-damoxing'）"
+						"description": "The slug of the Wiki page (e.g. 'entity/hunyuan-damoxing')"
 					},
 					"title": {
 						"type": "string",
-						"description": "页面标题"
+						"description": "The title of the page"
 					},
 					"summary": {
 						"type": "string",
-						"description": "用于索引列表的一句话摘要"
+						"description": "A one-sentence summary for the index listing"
 					},
 					"content": {
 						"type": "string",
-						"description": "页面完整的 Markdown 内容。不要使用占位符。"
+						"description": "The FULL, complete Markdown content of the page. Do NOT use placeholders."
 					},
 					"page_type": {
 						"type": "string",
-						"description": "页面类型，例如 'summary'、'entity'、'concept'、'synthesis'、'comparison'"
+						"description": "The page type, e.g., 'summary', 'entity', 'concept', 'synthesis', 'comparison'"
 					},
 					"aliases": {
 						"type": "array",
 						"items": {"type": "string"},
-						"description": "页面别名列表（可选）"
+						"description": "A list of aliases for the page (optional)"
 					},
 					"source_refs": {
 						"type": "array",
 						"items": {"type": "string"},
-						"description": "对此页面有贡献的来源知识 ID 列表（仅 UUID）。如果提供，将完全替换页面现有的 source_refs。"
+						"description": "A list of source knowledge IDs (UUIDs only) that contributed to this page. If provided, these will COMPLETELY REPLACE the existing source_refs of the page."
 					}
 				},
 				"required": ["slug", "title", "summary", "content", "page_type"]
@@ -80,22 +80,22 @@ func (t *wikiWritePageTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "解析参数失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to parse arguments: " + err.Error()}, nil
 	}
 
 	if len(t.kbIDs) == 0 {
-		return &types.ToolResult{Success: false, Error: "没有可编辑的知识库"}, nil
+		return &types.ToolResult{Success: false, Error: "No knowledge bases available for editing"}, nil
 	}
 	kbID := t.kbIDs[0]
 
 	if params.Title == "" || params.PageType == "" || params.Content == "" || params.Summary == "" {
-		return &types.ToolResult{Success: false, Error: "写入操作需要 title、summary、content 和 page_type"}, nil
+		return &types.ToolResult{Success: false, Error: "title, summary, content, and page_type are required for write action"}, nil
 	}
 
 	// Try to get the existing page
 	existingPage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, params.Slug)
 	if err != nil && !errors.Is(err, repository.ErrWikiPageNotFound) {
-		return &types.ToolResult{Success: false, Error: "检查已有页面失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to check existing page: " + err.Error()}, nil
 	}
 
 	resolvedRefs := resolveSourceRefs(ctx, t.knowledgeService, params.SourceRefs)
@@ -115,7 +115,7 @@ func (t *wikiWritePageTool) Execute(ctx context.Context, args json.RawMessage) (
 
 		_, err = t.wikiPageService.UpdatePage(ctx, existingPage)
 		if err != nil {
-			return &types.ToolResult{Success: false, Error: "更新页面失败: " + err.Error()}, nil
+			return &types.ToolResult{Success: false, Error: "Failed to update page: " + err.Error()}, nil
 		}
 		action = "updated"
 	} else {
@@ -132,7 +132,7 @@ func (t *wikiWritePageTool) Execute(ctx context.Context, args json.RawMessage) (
 		}
 		_, err = t.wikiPageService.CreatePage(ctx, newPage)
 		if err != nil {
-			return &types.ToolResult{Success: false, Error: "创建页面失败: " + err.Error()}, nil
+			return &types.ToolResult{Success: false, Error: "Failed to create page: " + err.Error()}, nil
 		}
 		action = "created"
 	}
@@ -143,16 +143,12 @@ func (t *wikiWritePageTool) Execute(ctx context.Context, args json.RawMessage) (
 	// Rebuild the index page to reflect the new/updated summary
 	_ = t.wikiPageService.RebuildIndexPage(ctx, kbID)
 
-	actionText := "创建"
-	if action == "updated" {
-		actionText = "更新"
-	}
-	output := fmt.Sprintf("已成功%s页面 [[%s]]。\n- 标题: %s\n- 类型: %s\n- 摘要: %s\n- 内容长度: %d 字符", actionText, params.Slug, params.Title, params.PageType, params.Summary, len(params.Content))
+	output := fmt.Sprintf("Successfully %s page [[%s]].\n- Title: %s\n- Type: %s\n- Summary: %s\n- Content length: %d chars", action, params.Slug, params.Title, params.PageType, params.Summary, len(params.Content))
 	if len(params.Aliases) > 0 {
-		output += fmt.Sprintf("\n- 别名: %s", strings.Join(params.Aliases, ", "))
+		output += fmt.Sprintf("\n- Aliases: %s", strings.Join(params.Aliases, ", "))
 	}
 	if len(resolvedRefs) > 0 {
-		output += fmt.Sprintf("\n- 来源引用: %d 个文档", len(resolvedRefs))
+		output += fmt.Sprintf("\n- Source refs: %d document(s)", len(resolvedRefs))
 	}
 
 	return &types.ToolResult{

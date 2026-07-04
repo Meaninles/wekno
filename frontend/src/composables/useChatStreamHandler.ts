@@ -11,6 +11,12 @@ export function shouldSupersedeAgentAnswersForToolCall(dataPayload?: ChatMessage
   return dataPayload.tool_name !== 'create_artifact'
 }
 
+export function shouldSupersedeAgentAnswersForProgress(dataPayload?: ChatMessage) {
+  if (!dataPayload) return false
+  if (dataPayload.preserve_answer === true) return false
+  return dataPayload.transient === true
+}
+
 export interface UseChatStreamHandlerOptions {
   messagesList: ChatMessage[]
   loading: Ref<boolean>
@@ -273,6 +279,23 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       }
     }
     return out
+  }
+
+  const supersedeAgentAnswers = (message: ChatMessage) => {
+    if (!message.agentEventStream) return false
+    let retracted = false
+    for (const ev of message.agentEventStream as ChatMessage[]) {
+      if (ev.type === 'answer' && !ev.superseded && ev.content && String(ev.content).trim()) {
+        ev.superseded = true
+        ev.done = true
+        retracted = true
+      }
+    }
+    if (retracted) {
+      message.content = recomposeAgentAnswer(message)
+      fullContent.value = String(message.content || '')
+    }
+    return retracted
   }
 
   const reconstructEventStreamFromSteps = (
@@ -700,18 +723,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       case 'tool_call': {
         if (dataPayload?.tool_name === 'final_answer') break
         if (shouldSupersedeAgentAnswersForToolCall(dataPayload) && message.agentEventStream) {
-          let retracted = false
-          for (const ev of message.agentEventStream as ChatMessage[]) {
-            if (ev.type === 'answer' && !ev.superseded && ev.content && String(ev.content).trim()) {
-              ev.superseded = true
-              ev.done = true
-              retracted = true
-            }
-          }
-          if (retracted) {
-            message.content = recomposeAgentAnswer(message)
-            fullContent.value = String(message.content || '')
-          }
+          supersedeAgentAnswers(message)
         }
         if (dataPayload && (dataPayload.tool_name || dataPayload.tool_call_id)) {
           if (!message.agentEventStream) message.agentEventStream = []
@@ -762,6 +774,9 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         break
       }
       case 'agent_progress': {
+        if (shouldSupersedeAgentAnswersForProgress(dataPayload)) {
+          supersedeAgentAnswers(message)
+        }
         if (!message.agentEventStream) message.agentEventStream = []
         if (!message._pendingToolCalls) message._pendingToolCalls = new Map()
         const stream = message.agentEventStream as ChatMessage[]
@@ -955,9 +970,6 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
           answerEvent = { type: 'answer', event_id: eventId, content: '', done: false }
           stream.push(answerEvent)
           if (eventId) eventMap.set(eventId, answerEvent)
-        }
-        if (!answerEvent.content && message.content && String(message.content).trim()) {
-          answerEvent.content = message.content
         }
         if (data.content) {
           answerEvent.content = String(answerEvent.content || '') + String(data.content)

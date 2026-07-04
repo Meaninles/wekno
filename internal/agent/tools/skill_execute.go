@@ -16,35 +16,35 @@ import (
 
 var executeSkillScriptTool = BaseTool{
 	name: ToolExecuteSkillScript,
-	description: `在沙箱环境中执行技能中的脚本。
+	description: `Execute a script from a skill in a sandboxed environment.
 
-## 用法
-- 使用此工具运行技能附带的工具脚本
-- 为了安全，脚本会在隔离沙箱中执行
-- 只能执行已加载技能中的脚本
+## Usage
+- Use this tool to run utility scripts bundled with a skill
+- Scripts are executed in an isolated sandbox for security
+- Only scripts from loaded skills can be executed
 
-## 何时使用
-- 当技能说明引用工具脚本时（例如“运行 scripts/analyze_form.py”）
-- 当技能工作流需要自动化或数据处理时
-- 当确定性操作用脚本执行比生成代码更可靠时
+## When to Use
+- When a skill's instructions reference a utility script (e.g., "Run scripts/analyze_form.py")
+- When automation or data processing is needed as part of skill workflow
+- For deterministic operations where script execution is more reliable than generating code
 
-## 安全
-- 脚本在权限受限的沙箱环境中运行
-- 默认禁用网络访问
-- 文件访问限制在技能目录内
+## Security
+- Scripts run in a sandboxed environment with limited permissions
+- Network access is disabled by default
+- File access is restricted to the skill directory
 
-## 返回
-- 脚本的 stdout 和 stderr 输出
-- 表示成功（0）或失败（非 0）的退出码`,
+## Returns
+- Script stdout and stderr output
+- Exit code indicating success (0) or failure (non-zero)`,
 	schema: utils.GenerateSchema[ExecuteSkillScriptInput](),
 }
 
 // ExecuteSkillScriptInput defines the input parameters for the execute_skill_script tool
 type ExecuteSkillScriptInput struct {
-	SkillName  string   `json:"skill_name" jsonschema:"包含该脚本的技能名称"`
-	ScriptPath string   `json:"script_path" jsonschema:"技能目录内脚本的相对路径（例如 scripts/analyze.py）"`
-	Args       []string `json:"args,omitempty" jsonschema:"传递给脚本的可选命令行参数。注意：如果使用 --file 标志，必须提供技能目录中实际存在的文件路径。如果数据在内存中（不是文件），请改用 'input' 参数。"`
-	Input      string   `json:"input,omitempty" jsonschema:"通过 stdin 传递给脚本的可选输入数据。当内存中有需要脚本处理的数据（例如 JSON 字符串）时使用。等价于管道输入：echo 'data' | python script.py"`
+	SkillName  string   `json:"skill_name" jsonschema:"Name of the skill containing the script"`
+	ScriptPath string   `json:"script_path" jsonschema:"Relative path to the script within the skill directory (e.g. scripts/analyze.py)"`
+	Args       []string `json:"args,omitempty" jsonschema:"Optional command-line arguments to pass to the script. Note: if using --file flag, you must provide an actual file path that exists in the skill directory. If you have data in memory (not a file), use the 'input' parameter instead."`
+	Input      string   `json:"input,omitempty" jsonschema:"Optional input data to pass to the script via stdin. Use this when you have data in memory (e.g. JSON string) that the script should process. This is equivalent to piping data: echo 'data' | python script.py"`
 }
 
 // ExecuteSkillScriptTool allows the agent to execute skill scripts in a sandbox
@@ -71,7 +71,7 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 		logger.Errorf(ctx, "[Tool][ExecuteSkillScript] Failed to parse args: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("解析参数失败: %v", err),
+			Error:   fmt.Sprintf("Failed to parse args: %v", err),
 		}, nil
 	}
 
@@ -79,14 +79,14 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 	if input.SkillName == "" {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "需要提供 skill_name",
+			Error:   "skill_name is required",
 		}, nil
 	}
 
 	if input.ScriptPath == "" {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "需要提供 script_path",
+			Error:   "script_path is required",
 		}, nil
 	}
 
@@ -94,7 +94,7 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 	if t.skillManager == nil || !t.skillManager.IsEnabled() {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "技能未启用",
+			Error:   "Skills are not enabled",
 		}, nil
 	}
 
@@ -107,27 +107,27 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 		logger.Errorf(ctx, "[Tool][ExecuteSkillScript] Script execution failed: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("脚本执行失败: %v", err),
+			Error:   fmt.Sprintf("Script execution failed: %v", err),
 		}, nil
 	}
 
 	// Build output
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("=== 脚本执行: %s/%s ===\n\n", input.SkillName, input.ScriptPath))
+	builder.WriteString(fmt.Sprintf("=== Script Execution: %s/%s ===\n\n", input.SkillName, input.ScriptPath))
 
 	if len(input.Args) > 0 {
-		builder.WriteString(fmt.Sprintf("**参数**: %v\n", input.Args))
+		builder.WriteString(fmt.Sprintf("**Arguments**: %v\n", input.Args))
 	}
 
-	builder.WriteString(fmt.Sprintf("**退出码**: %d\n", result.ExitCode))
-	builder.WriteString(fmt.Sprintf("**耗时**: %v\n\n", result.Duration))
+	builder.WriteString(fmt.Sprintf("**Exit Code**: %d\n", result.ExitCode))
+	builder.WriteString(fmt.Sprintf("**Duration**: %v\n\n", result.Duration))
 
 	if result.Killed {
-		builder.WriteString("**警告**: 脚本已终止（超时或被杀死）\n\n")
+		builder.WriteString("**Warning**: Script was terminated (timeout or killed)\n\n")
 	}
 
 	if result.Stdout != "" {
-		builder.WriteString("## 标准输出\n\n")
+		builder.WriteString("## Standard Output\n\n")
 		builder.WriteString("```\n")
 		builder.WriteString(result.Stdout)
 		if !strings.HasSuffix(result.Stdout, "\n") {
@@ -137,7 +137,7 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 	}
 
 	if result.Stderr != "" {
-		builder.WriteString("## 标准错误\n\n")
+		builder.WriteString("## Standard Error\n\n")
 		builder.WriteString("```\n")
 		builder.WriteString(result.Stderr)
 		if !strings.HasSuffix(result.Stderr, "\n") {
@@ -147,7 +147,7 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 	}
 
 	if result.Error != "" {
-		builder.WriteString("## 错误\n\n")
+		builder.WriteString("## Error\n\n")
 		builder.WriteString(result.Error)
 		builder.WriteString("\n")
 	}

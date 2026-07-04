@@ -197,3 +197,87 @@ func TestSanitizeAgentStepsForClient_stripsArgsProviderMetadataAndRawOutput(t *t
 		t.Fatalf("raw_content leaked in client agent steps: %#v", results[0])
 	}
 }
+
+func TestSanitizeAgentStepsForClient_preservesStructuredAnalysisColumnsAndChartContract(t *testing.T) {
+	steps := []types.AgentStep{{
+		Iteration: 1,
+		ToolCalls: []types.ToolCall{{
+			ID:   "call-1",
+			Name: ToolDataAnalysis,
+			Result: &types.ToolResult{
+				Success: true,
+				Data: map[string]interface{}{
+					"display_type":    "structured_analysis_result",
+					"analysis_type":   "database",
+					"row_count":       1,
+					"chart_requested": true,
+					"columns": []interface{}{
+						map[string]interface{}{"name": "order_date", "type": "TIMESTAMP", "semantic_type": "time"},
+						map[string]interface{}{"name": "order_cnt", "type": "BIGINT", "semantic_type": "metric"},
+					},
+					"rows": []interface{}{
+						map[string]interface{}{"order_date": "2026-05-01T00:00:00Z", "order_cnt": 2},
+					},
+					"chart": map[string]interface{}{
+						"eligible":     true,
+						"id":           "chart_daily_orders",
+						"type":         "line",
+						"default_type": "line",
+						"x":            "order_date",
+						"y":            []interface{}{"order_cnt"},
+						"contract": map[string]interface{}{
+							"id":   "chart_daily_orders",
+							"type": "line",
+							"encoding": map[string]interface{}{
+								"x":     map[string]interface{}{"field": "order_date", "role": "time"},
+								"value": map[string]interface{}{"field": "order_cnt", "role": "metric", "aggregate": "sum"},
+							},
+							"display": map[string]interface{}{
+								"title":         "每日订单趋势",
+								"value_label":   "订单数",
+								"table_visible": false,
+							},
+						},
+					},
+				},
+			},
+		}},
+	}}
+
+	sanitized := SanitizeAgentStepsForClient(steps)
+	data := sanitized[0].ToolCalls[0].Result.Data
+
+	columns, ok := data["columns"].([]map[string]interface{})
+	if !ok || len(columns) != 2 {
+		t.Fatalf("columns = %#v, want sanitized column objects", data["columns"])
+	}
+	if columns[0]["name"] != "order_date" || columns[1]["name"] != "order_cnt" {
+		t.Fatalf("column names were not preserved: %#v", columns)
+	}
+	if strings.Contains(columns[0]["name"].(string), "map[") {
+		t.Fatalf("column object was stringified: %#v", columns[0]["name"])
+	}
+
+	chart, ok := data["chart"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("chart = %#v, want map", data["chart"])
+	}
+	if chart["id"] != "chart_daily_orders" || chart["type"] != "line" {
+		t.Fatalf("chart id/type not preserved: %#v", chart)
+	}
+	contract, ok := chart["contract"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("chart contract = %#v, want map", chart["contract"])
+	}
+	if contract["id"] != "chart_daily_orders" || contract["type"] != "line" {
+		t.Fatalf("contract id/type not preserved: %#v", contract)
+	}
+	encoding, ok := contract["encoding"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("contract encoding = %#v, want map", contract["encoding"])
+	}
+	value, ok := encoding["value"].(map[string]interface{})
+	if !ok || value["field"] != "order_cnt" {
+		t.Fatalf("contract value field not preserved: %#v", encoding["value"])
+	}
+}

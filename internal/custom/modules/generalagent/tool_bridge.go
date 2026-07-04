@@ -175,7 +175,7 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 	result, err := run.registry.ExecuteTool(execCtx, req.ToolName, req.Arguments)
 	durationMs := time.Since(start).Milliseconds()
 	if result == nil {
-		result = &types.ToolResult{Success: false, Error: "工具未返回结果"}
+		result = &types.ToolResult{Success: false, Error: "tool returned no result"}
 	}
 	if err != nil && result.Error == "" {
 		result.Error = err.Error()

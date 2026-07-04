@@ -54,10 +54,12 @@ type ArtifactResult struct {
 }
 
 type LLMConfig struct {
-	ModelName string `json:"model_name"`
-	BaseURL   string `json:"base_url"`
-	APIKey    string `json:"api_key,omitempty"`
-	Provider  string `json:"provider,omitempty"`
+	ModelName    string `json:"model_name"`
+	BaseURL      string `json:"base_url"`
+	APIKey       string `json:"api_key,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	AuthType     string `json:"auth_type,omitempty"`
+	APIKeyHelper string `json:"api_key_helper,omitempty"`
 }
 
 type RuntimeToolSpec struct {

@@ -19,20 +19,20 @@ func NewWikiReadIssueTool(wikiService interfaces.WikiPageService, kbIDs []string
 	return &wikiReadIssueTool{
 		BaseTool: NewBaseTool(
 			ToolWikiReadIssue,
-			"读取特定 wiki 页面问题的详情，或列出某个 wiki 页面的待处理问题。",
+			"Read the details of a specific wiki page issue or list pending issues for a wiki page.",
 			json.RawMessage(`{
   "type": "object",
   "properties": {
     "issue_id": {
       "type": "string",
-      "description": "可选：要读取的特定问题 ID。"
+      "description": "Optional: The ID of a specific issue to read."
     },
     "slug": {
       "type": "string",
-      "description": "可选：要列出待处理问题的 wiki 页面 slug。"
+      "description": "Optional: The slug of the wiki page to list pending issues for."
     }
   },
-  "description": "提供 issue_id 或 slug 以读取问题。"
+  "description": "Provide either issue_id or slug to read issue(s)."
 }`),
 		),
 		wikiService: wikiService,
@@ -46,18 +46,18 @@ func (t *wikiReadIssueTool) Execute(ctx context.Context, args json.RawMessage) (
 		Slug    string `json:"slug"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "参数无效: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Invalid parameters: " + err.Error()}, nil
 	}
 
 	issueID := strings.TrimSpace(params.IssueID)
 	slug := strings.TrimSpace(params.Slug)
 
 	if issueID == "" && slug == "" {
-		return &types.ToolResult{Success: false, Error: "需要 issue_id 或 slug"}, nil
+		return &types.ToolResult{Success: false, Error: "Either issue_id or slug is required"}, nil
 	}
 
 	if len(t.kbIDs) == 0 {
-		return &types.ToolResult{Success: false, Error: "没有可用知识库"}, nil
+		return &types.ToolResult{Success: false, Error: "No knowledge bases available"}, nil
 	}
 
 	kbID := t.kbIDs[0]
@@ -66,25 +66,25 @@ func (t *wikiReadIssueTool) Execute(ctx context.Context, args json.RawMessage) (
 		// Just reuse ListIssues since there's no GetIssueByID yet
 		issues, err := t.wikiService.ListIssues(ctx, kbID, "", "")
 		if err != nil {
-			return &types.ToolResult{Success: false, Error: "列出问题失败: " + err.Error()}, nil
+			return &types.ToolResult{Success: false, Error: "Failed to list issues: " + err.Error()}, nil
 		}
-
+		
 		for _, issue := range issues {
 			if issue.ID == issueID {
 				out, _ := json.MarshalIndent(issue, "", "  ")
 				return &types.ToolResult{Success: true, Output: string(out)}, nil
 			}
 		}
-		return &types.ToolResult{Success: false, Error: "未找到问题"}, nil
+		return &types.ToolResult{Success: false, Error: "Issue not found"}, nil
 	}
 
 	issues, err := t.wikiService.ListIssues(ctx, kbID, slug, "pending")
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: "列出问题失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to list issues: " + err.Error()}, nil
 	}
 
 	if len(issues) == 0 {
-		return &types.ToolResult{Success: true, Output: "未找到该 slug 的待处理问题: " + slug}, nil
+		return &types.ToolResult{Success: true, Output: "No pending issues found for slug: " + slug}, nil
 	}
 
 	out, _ := json.MarshalIndent(issues, "", "  ")

@@ -133,7 +133,7 @@ func (c *Consolidator) Consolidate(
 	summaryMsg := chat.Message{
 		Role: "system",
 		Content: fmt.Sprintf(
-			"[记忆摘要 - 已压缩 %d 条较早消息]\n\n%s",
+			"[Memory Summary - %d earlier messages consolidated]\n\n%s",
 			len(toConsolidate), summary,
 		),
 	}
@@ -250,31 +250,31 @@ func (c *Consolidator) summarizeWithRetry(
 // buildConsolidationPrompt creates the prompt for LLM to summarize messages.
 func (c *Consolidator) buildConsolidationPrompt(messages []chat.Message) string {
 	var sb strings.Builder
-	sb.WriteString("请总结以下对话历史，并保留：\n")
-	sb.WriteString("1. 关键事实和已做出的决定\n")
-	sb.WriteString("2. 工具执行结果及其结论\n")
-	sb.WriteString("3. 用户的原始意图和要求\n")
-	sb.WriteString("4. 遇到的错误以及如何解决\n\n")
-	sb.WriteString("需要总结的对话：\n\n")
+	sb.WriteString("Summarize the following conversation history, preserving:\n")
+	sb.WriteString("1. Key facts and decisions made\n")
+	sb.WriteString("2. Tool execution results and their outcomes\n")
+	sb.WriteString("3. User's original intent and requirements\n")
+	sb.WriteString("4. Any errors encountered and how they were resolved\n\n")
+	sb.WriteString("Conversation to summarize:\n\n")
 
 	for _, msg := range messages {
 		switch msg.Role {
 		case "user":
-			sb.WriteString(fmt.Sprintf("**用户**: %s\n\n", truncateForPrompt(msg.Content, 2000)))
+			sb.WriteString(fmt.Sprintf("**User**: %s\n\n", truncateForPrompt(msg.Content, 2000)))
 		case "assistant":
 			if len(msg.ToolCalls) > 0 {
 				names := make([]string, len(msg.ToolCalls))
 				for i, tc := range msg.ToolCalls {
 					names[i] = tc.Function.Name
 				}
-				sb.WriteString(fmt.Sprintf("**助手** [调用工具: %s]: %s\n\n",
+				sb.WriteString(fmt.Sprintf("**Assistant** [called tools: %s]: %s\n\n",
 					strings.Join(names, ", "), truncateForPrompt(msg.Content, 1000)))
 			} else {
-				sb.WriteString(fmt.Sprintf("**助手**: %s\n\n",
+				sb.WriteString(fmt.Sprintf("**Assistant**: %s\n\n",
 					truncateForPrompt(msg.Content, 2000)))
 			}
 		case "tool":
-			sb.WriteString(fmt.Sprintf("**工具 [%s]**: %s\n\n",
+			sb.WriteString(fmt.Sprintf("**Tool [%s]**: %s\n\n",
 				msg.Name, truncateForPrompt(msg.Content, 1000)))
 		}
 	}
@@ -285,26 +285,26 @@ func (c *Consolidator) buildConsolidationPrompt(messages []chat.Message) string 
 // rawArchive creates a simple text dump of messages as fallback when LLM fails.
 func (c *Consolidator) rawArchive(messages []chat.Message) string {
 	var sb strings.Builder
-	sb.WriteString("原始对话归档（LLM 摘要不可用）：\n\n")
+	sb.WriteString("Raw conversation archive (LLM summarization unavailable):\n\n")
 
 	for _, msg := range messages {
 		content := truncateForPrompt(msg.Content, 500)
 		switch msg.Role {
 		case "user":
-			sb.WriteString(fmt.Sprintf("- 用户: %s\n", content))
+			sb.WriteString(fmt.Sprintf("- User: %s\n", content))
 		case "assistant":
 			if len(msg.ToolCalls) > 0 {
 				names := make([]string, len(msg.ToolCalls))
 				for j, tc := range msg.ToolCalls {
 					names[j] = tc.Function.Name
 				}
-				sb.WriteString(fmt.Sprintf("- 助手 [工具: %s]: %s\n",
+				sb.WriteString(fmt.Sprintf("- Assistant [tools: %s]: %s\n",
 					strings.Join(names, ","), content))
 			} else {
-				sb.WriteString(fmt.Sprintf("- 助手: %s\n", content))
+				sb.WriteString(fmt.Sprintf("- Assistant: %s\n", content))
 			}
 		case "tool":
-			sb.WriteString(fmt.Sprintf("- 工具[%s]: %s\n", msg.Name, content))
+			sb.WriteString(fmt.Sprintf("- Tool[%s]: %s\n", msg.Name, content))
 		}
 	}
 
@@ -322,13 +322,14 @@ func truncateForPrompt(s string, maxLen int) string {
 
 //nolint:lll // raw string literal used for prompt readability
 const consolidationSystemPrompt = "" +
-	"你是对话摘要助手。" +
-	"你的任务是为用户与 AI 助手之间的对话生成简洁但完整的摘要。\n\n" +
-	"摘要应当：\n" +
-	"- 使用与原始对话相同的语言\n" +
-	"- 保留所有关键事实、数字和具体细节\n" +
-	"- 包含所有工具执行的结果\n" +
-	"- 记录遇到的错误或问题\n" +
-	"- 如果对话覆盖多个主题，请用清晰小节组织\n" +
-	"- 保持简洁，目标长度不超过原文的 30%\n\n" +
-	"只输出摘要，不要添加开场白或解释。"
+	"You are a conversation summarizer. " +
+	"Your task is to create a concise but comprehensive summary " +
+	"of a conversation between a user and an AI assistant.\n\n" +
+	"The summary should:\n" +
+	"- Be written in the same language as the original conversation\n" +
+	"- Preserve all key facts, numbers, and specific details\n" +
+	"- Include the outcomes of any tool executions\n" +
+	"- Note any errors or issues encountered\n" +
+	"- Be structured with clear sections if the conversation covered multiple topics\n" +
+	"- Be concise — aim for 30% or less of the original length\n\n" +
+	"Output only the summary, no preamble or explanation."

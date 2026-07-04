@@ -79,7 +79,7 @@ const props = defineProps<{
 }>()
 
 const router = useRouter()
-const expanded = ref(true)
+const expanded = ref(false)
 
 const references = computed(() => props.session?.knowledge_references ?? [])
 

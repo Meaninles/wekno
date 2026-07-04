@@ -23,9 +23,12 @@ from app.runner import (  # noqa: E402
     ToolUseFragment,
     block_background_bash_hook,
     build_background_task_resume_prompt,
+    build_prompt,
     build_system_prompt,
     claude_auth_env,
+    classify_data_analysis_display_intent,
     data_analysis_pre_tool_hook_factory,
+    DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY,
     data_analysis_final_answer_pre_tool_hook_factory,
     data_analysis_stop_hook_factory,
     deterministic_final_validation,
@@ -444,7 +447,8 @@ EOF""",
             runtime_config=RuntimeConfigSpec(agent_type="data-analysis"),
             tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
         )
-        hook = data_analysis_pre_tool_hook_factory(payload)
+        state = {DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": False, "confidence": "high"}}
+        hook = data_analysis_pre_tool_hook_factory(payload, state)
 
         chart_output = asyncio.run(
             hook(
@@ -468,9 +472,36 @@ EOF""",
         )
 
         self.assertEqual(chart_output["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertIn("没有明确要求图表", chart_output["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("chart_requested=false", chart_output["hookSpecificOutput"]["permissionDecisionReason"])
         self.assertEqual(table_output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("没有明确要求表格", table_output["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_data_analysis_pre_tool_hook_requires_chart_flag_when_intent_requests_chart(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="没看到图啊，请用图展示",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="data-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+        state = {DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"}}
+        hook = data_analysis_pre_tool_hook_factory(payload, state)
+
+        output = asyncio.run(
+            hook(
+                {
+                    "tool_name": "mcp__weknora__db_query",
+                    "tool_input": {"sql": "SELECT region, SUM(amount) amount FROM orders GROUP BY region"},
+                },
+                "toolu_1",
+                {},
+            )
+        )
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("chart_requested=true", output["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_data_analysis_pre_tool_hook_requires_explicit_only_chart_name(self):
         payload = ChatPayload(
@@ -482,7 +513,8 @@ EOF""",
             runtime_config=RuntimeConfigSpec(agent_type="data-analysis"),
             tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
         )
-        hook = data_analysis_pre_tool_hook_factory(payload)
+        state = {DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"}}
+        hook = data_analysis_pre_tool_hook_factory(payload, state)
 
         output = asyncio.run(
             hook(
@@ -501,6 +533,53 @@ EOF""",
 
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("显式点名", output["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_classify_data_analysis_display_intent_returns_structured_result(self):
+        captured = {}
+
+        class Options:
+            def __init__(self, **kwargs):
+                captured["options"] = kwargs
+
+        async def fake_query(prompt, options):
+            captured["prompt"] = prompt
+            yield Message(
+                [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "chart_requested": True,
+                                "confidence": "high",
+                                "preferred_chart": "stacked_bar",
+                                "reason": "用户要求用图展示上一轮数据分析。",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                ]
+            )
+
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="没看到图啊，请用图展示",
+            history=[{"role": "assistant", "content": "上一轮给出了客户分层和商品大类销售额分析。"}],
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="data-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        intent = asyncio.run(classify_data_analysis_display_intent(payload, fake_query, Options, {}, "claude-test", None, Path(".")))
+
+        self.assertTrue(intent["chart_requested"])
+        self.assertEqual(intent["confidence"], "high")
+        self.assertEqual(intent["preferred_chart"], "stacked_bar")
+        self.assertEqual(captured["options"]["tools"], [])
+        self.assertEqual(captured["options"]["allowed_tools"], [])
+        self.assertIn("没看到图啊，请用图展示", captured["prompt"])
+        self.assertIn("上一轮给出了客户分层", captured["prompt"])
 
     def test_parse_mcp_tool_response_payload_accepts_text_block_list(self):
         payload = parse_mcp_tool_response_payload(
@@ -537,6 +616,7 @@ EOF""",
                 tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
             )
             state = {
+                DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
                 "db_query_calls": [
                     {
                         "chart_id": "chart_region_amount",
@@ -624,6 +704,7 @@ EOF""",
                 tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
             )
             state = {
+                DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
                 "db_query_calls": [
                     {
                         "chart_id": "chart_region_amount",
@@ -685,6 +766,7 @@ EOF""",
                 tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
             )
             state = {
+                DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
                 "db_query_calls": [
                     {
                         "chart_id": "chart_region_amount",
@@ -761,6 +843,25 @@ EOF""",
 
         self.assertEqual(issues, [])
 
+    def test_deterministic_final_validation_requires_chart_when_intent_requests_chart(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="没看到图啊，请用图展示",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="data-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+        state = {DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"}}
+
+        issues = deterministic_final_validation(payload, "各区域销售额差异明显。", state)
+
+        codes = {issue["code"] for issue in issues}
+        self.assertIn("missing_chart_query", codes)
+        self.assertIn("missing_chart_placeholder", codes)
+        self.assertTrue(any("chart_requested=true" in issue["message"] for issue in issues))
+
     def test_deterministic_final_validation_rejects_unrequested_table_with_chart_output(self):
         payload = ChatPayload(
             run_id="run-1",
@@ -772,6 +873,7 @@ EOF""",
             tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
         )
         state = {
+            DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
             "db_query_calls": [
                 {
                     "chart_id": "chart_region_amount",
@@ -809,6 +911,7 @@ EOF""",
             "display": {"language": "zh-CN", "table_visible": False},
         }
         state = {
+            DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
             "db_query_calls": [
                 {
                     "chart_id": "chart_used",
@@ -840,6 +943,7 @@ EOF""",
             tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
         )
         state = {
+            DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
             "db_query_calls": [
                 {
                     "chart_id": "chart_region_amount",
@@ -865,6 +969,7 @@ EOF""",
             tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
         )
         state = {
+            DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
             "final_answer_requested_chart_ids": ["chart_other"],
             "db_query_calls": [
                 {
@@ -1245,6 +1350,126 @@ EOF""",
         self.assertIn('<reference_files variable="{{word_template_files}}" count="3">', prepared.xml)
         self.assertIn("document_templates/word/references/03_word_03.docx", prepared.replacements["word_template_files"])
         self.assertNotIn("document_templates/word/references/04_word_04.docx", prepared.replacements["word_template_files"])
+
+    def test_document_template_context_is_near_user_request_before_visible_context(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请生成 Word 和 PPT",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="document-processing-agent"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+            visible_context={
+                "agent": {"system_prompt": "large duplicated system prompt", "name": "文档处理"},
+                "current_turn": {
+                    "user_request_verbatim": "请生成 Word 和 PPT",
+                    "selected_chat_skill_context": "duplicated skill context",
+                    "image_urls": ["http://example.test/image.png"],
+                },
+                "effective_configuration": {
+                    "allowed_tools": ["Read", "Write"],
+                    "artifact_return_policy": {"max_artifact_count": 5},
+                    "runtime_model_id": "model-1",
+                },
+            },
+            document_template_context=DocumentTemplateContextSpec(
+                files=[
+                    DocumentTemplateFileSpec(
+                        role="requirement",
+                        format="word",
+                        source="upload",
+                        file_name="word.md",
+                        file_type="md",
+                        content_base64=base64.b64encode(b"# Word rules").decode("ascii"),
+                    ),
+                    DocumentTemplateFileSpec(
+                        role="requirement",
+                        format="ppt",
+                        source="upload",
+                        file_name="ppt.md",
+                        file_type="md",
+                        content_base64=base64.b64encode(b"# PPT rules").decode("ascii"),
+                    ),
+                ]
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared = prepare_document_template_context(payload, Path(tmp))
+            prompt = build_prompt(payload, prepared)
+
+        self.assertLess(prompt.index("<document_template_preflight"), prompt.index("<weknora_context>"))
+        self.assertLess(prompt.index("<document_template_context"), prompt.index("<visible_context"))
+        self.assertIn("Read `document_templates/word/requirement/word.md`", prompt)
+        self.assertIn("Read `document_templates/ppt/requirement/ppt.md`", prompt)
+        self.assertIn("form a short internal delivery plan", prompt)
+        self.assertIn('"runtime_model_id": "model-1"', prompt)
+        self.assertNotIn("large duplicated system prompt", prompt)
+        self.assertNotIn("duplicated skill context", prompt)
+        self.assertNotIn('"allowed_tools"', prompt)
+        self.assertNotIn('"artifact_return_policy"', prompt)
+
+    def test_build_prompt_includes_data_analysis_display_intent(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="没看到图啊，请用图展示",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="data-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        prompt = build_prompt(
+            payload,
+            data_analysis_display_intent={
+                "chart_requested": True,
+                "confidence": "high",
+                "preferred_chart": "stacked_bar",
+                "reason": "用户要求补图。",
+            },
+        )
+
+        self.assertIn("<data_analysis_display_intent", prompt)
+        self.assertIn('"chart_requested": true', prompt)
+        self.assertIn("用户需要图表展示", prompt)
+        self.assertIn("db_query with chart_requested=true", prompt)
+
+    def test_system_prompt_points_to_document_template_context_without_inlining_xml(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请生成 Word",
+            system_prompt="Use {{document_template_context}} and {{document_template_usage_rules}} then {{word_template_requirement}}.",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="document-processing-agent"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+            document_template_context=DocumentTemplateContextSpec(
+                files=[
+                    DocumentTemplateFileSpec(
+                        role="requirement",
+                        format="word",
+                        source="upload",
+                        file_name="word.md",
+                        file_type="md",
+                        content_base64=base64.b64encode(b"# Word rules").decode("ascii"),
+                    )
+                ]
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared = prepare_document_template_context(payload, Path(tmp))
+            prompt = build_system_prompt(payload, document_templates=prepared)
+
+        self.assertIn("Document template context is provided once", prompt)
+        self.assertIn("document_templates/word/requirement/word.md", prompt)
+        self.assertNotIn('<document_template_context source=', prompt)
+        self.assertNotIn("<format name=", prompt)
+        self.assertNotIn("{{document_template_context}}", prompt)
+        self.assertNotIn("{{document_template_usage_rules}}", prompt)
 
     def test_validate_pptx_layout_detects_text_overlap(self):
         data = self.make_pptx_bytes(

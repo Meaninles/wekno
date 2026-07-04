@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -1471,6 +1472,16 @@ Document-template usage rules:
 """.strip()
 
 
+DOCUMENT_TEMPLATE_CONTEXT_SYSTEM_POINTER = (
+    "Document template context is provided once in the run prompt's "
+    "<document_template_context> block near the <user_request>. Read that block and the files it lists."
+)
+DOCUMENT_TEMPLATE_USAGE_RULES_SYSTEM_POINTER = (
+    "Document-template usage rules are provided in the run prompt's "
+    "<document_template_context><usage_rules> block near the <user_request>."
+)
+
+
 PPT_DECK_SPEC_TEMPLATE: dict[str, Any] = {
     "meta": {
         "title": "",
@@ -2000,14 +2011,82 @@ def prepare_document_template_context(payload: ChatPayload, run_dir: Path) -> Pr
     return PreparedDocumentTemplateContext(xml=xml, replacements=replacements)
 
 
-def replace_document_template_placeholders(text: str, prepared: PreparedDocumentTemplateContext | None) -> str:
+def replace_document_template_placeholders(
+    text: str,
+    prepared: PreparedDocumentTemplateContext | None,
+    *,
+    inline_context: bool = True,
+) -> str:
     if not text:
         return text
     replacements = prepared.replacements if prepared else {}
     for key in DOCUMENT_TEMPLATE_VARIABLES:
-        value = replacements.get(key, f"{{{{{key}}}}}")
+        if not inline_context and key == "document_template_context":
+            value = DOCUMENT_TEMPLATE_CONTEXT_SYSTEM_POINTER
+        elif not inline_context and key == "document_template_usage_rules":
+            value = DOCUMENT_TEMPLATE_USAGE_RULES_SYSTEM_POINTER
+        else:
+            value = replacements.get(key, f"{{{{{key}}}}}")
         text = text.replace("{{" + key + "}}", value)
     return text
+
+
+def document_template_preflight_block(prepared: PreparedDocumentTemplateContext | None) -> str:
+    if not prepared or not prepared.xml:
+        return ""
+    requirement_paths = re.findall(r'<requirement_file\b[^>]*\bpath="([^"]+)"', prepared.xml)
+    reference_paths = re.findall(r'<reference_file\b[^>]*\bpath="([^"]+)"', prepared.xml)
+    if not requirement_paths and not reference_paths:
+        return ""
+    lines: list[str] = []
+    lines.append('<document_template_preflight role="workflow_requirement" priority="high">')
+    lines.append(
+        "Before creating or modifying any Word, Excel, PDF or PPT deliverable, explicitly inspect the configured "
+        "document-template context for each requested output format."
+    )
+    if requirement_paths:
+        lines.append("<required_requirement_file_reads>")
+        for path in requirement_paths:
+            lines.append(f"- Read `{path}` before writing or editing the corresponding deliverable.")
+        lines.append("</required_requirement_file_reads>")
+    if reference_paths:
+        lines.append("<reference_template_inspection>")
+        for path in reference_paths:
+            lines.append(f"- Inspect `{path}` as a soft visual/structural reference before writing or editing the corresponding deliverable.")
+        lines.append("</reference_template_inspection>")
+    lines.append(
+        "After reading the relevant requirement/reference files, form a short internal delivery plan that maps each "
+        "requested output file to the template files and generation approach you will use. Do this before creating "
+        "final document files or registering artifacts."
+    )
+    lines.append(
+        "This is a workflow requirement, not a fixed content template. The user's current request remains authoritative "
+        "for topic, content and deliverable intent."
+    )
+    lines.append("</document_template_preflight>")
+    return "\n".join(lines)
+
+
+def prompt_visible_context(raw: dict[str, Any]) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        ctx = copy.deepcopy(raw)
+    except Exception:
+        ctx = dict(raw)
+    agent = ctx.get("agent")
+    if isinstance(agent, dict):
+        agent.pop("system_prompt", None)
+    current_turn = ctx.get("current_turn")
+    if isinstance(current_turn, dict):
+        current_turn.pop("user_request_verbatim", None)
+        current_turn.pop("selected_chat_skill_context", None)
+        current_turn.pop("image_urls", None)
+    effective = ctx.get("effective_configuration")
+    if isinstance(effective, dict):
+        effective.pop("allowed_tools", None)
+        effective.pop("artifact_return_policy", None)
+    return ctx
 
 
 def prepare_data_analysis_reference_doc(payload: ChatPayload, run_dir: Path) -> PreparedDataAnalysisReferenceDoc | None:
@@ -2044,7 +2123,7 @@ def build_system_prompt(
     data_analysis_reference: PreparedDataAnalysisReferenceDoc | None = None,
 ) -> str:
     base = (payload.system_prompt or "").strip()
-    base = replace_document_template_placeholders(base, document_templates)
+    base = replace_document_template_placeholders(base, document_templates, inline_context=False)
     if is_data_analysis_payload(payload):
         base = replace_data_analysis_reference_placeholders(base, data_analysis_reference)
     max_turns = effective_max_turns(payload)
@@ -2142,6 +2221,7 @@ def build_prompt(
     payload: ChatPayload,
     document_templates: PreparedDocumentTemplateContext | None = None,
     ppt_workspace: PreparedPPTGenerationWorkspace | None = None,
+    data_analysis_display_intent: dict[str, Any] | None = None,
 ) -> str:
     parts: list[str] = []
     parts.append("<current_task_priority>")
@@ -2154,15 +2234,46 @@ def build_prompt(
     parts.append("<user_request verbatim=\"true\" priority=\"highest\">")
     parts.append(payload.query)
     parts.append("</user_request>")
+    if is_data_analysis_payload(payload) and isinstance(data_analysis_display_intent, dict):
+        intent = normalize_data_analysis_display_intent(data_analysis_display_intent)
+        parts.append('<data_analysis_display_intent source="runtime_preflight" role="binding_runtime_decision">')
+        parts.append(
+            json.dumps(
+                {
+                    "chart_requested": intent["chart_requested"],
+                    "status_text": data_analysis_display_intent_message(intent),
+                    "confidence": intent["confidence"],
+                    "preferred_chart": intent["preferred_chart"],
+                    "reason": intent["reason"],
+                    "instructions": [
+                        "This preflight decision is authoritative for whether this turn should render a chart.",
+                        "If chart_requested is true, call db_query with chart_requested=true for analytical result queries and include at least one matching {{chart:<id>}} placeholder in final_answer.content.",
+                        "If chart_requested is false, do not set db_query.chart_requested=true and do not include chart placeholders.",
+                        "If a runtime hook rejects a tool call or final_answer because it conflicts with this decision, correct the specific field it names and retry.",
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        parts.append("</data_analysis_display_intent>")
+    preflight = document_template_preflight_block(document_templates)
+    if preflight:
+        parts.append(preflight)
+    if document_templates and document_templates.xml:
+        parts.append(document_templates.xml)
+    if ppt_workspace and ppt_workspace.xml:
+        parts.append(ppt_workspace.xml)
     parts.append("<weknora_context>")
     parts.append(
         "This payload comes from the WeKnora frontend and agent configuration. "
         "Only the <user_request verbatim=\"true\" priority=\"highest\"> block is the user's exact current chat input; "
         "all other blocks are contextual information with their own source labels."
     )
-    if payload.visible_context:
+    visible_context = prompt_visible_context(payload.visible_context)
+    if visible_context:
         parts.append('<visible_context source="WeKnora frontend-visible state and effective agent configuration" role="user_visible_context">')
-        parts.append(json.dumps(payload.visible_context, ensure_ascii=False, indent=2))
+        parts.append(json.dumps(visible_context, ensure_ascii=False, indent=2))
         parts.append("</visible_context>")
     if payload.history:
         parts.append('<conversation_history source="WeKnora session history" role="background_context">')
@@ -2210,10 +2321,6 @@ def build_prompt(
                 parts.append("[no extracted text available]")
             parts.append("</attachment>")
         parts.append("</attachments>")
-    if document_templates and document_templates.xml:
-        parts.append(document_templates.xml)
-    if ppt_workspace and ppt_workspace.xml:
-        parts.append(ppt_workspace.xml)
     if payload.image_urls:
         parts.append("<image_urls>")
         for url in payload.image_urls:
@@ -2223,6 +2330,7 @@ def build_prompt(
     parts.append("<task_reminder>")
     parts.append(
         "Now execute the exact user_request shown at the top. "
+        "If document_template_preflight is present, complete it before creating final document files or registering artifacts. "
         "Use the WeKnora context only as supporting information and available capability descriptions. "
         "Use the configured user language for every user-visible output, and do not start background tasks."
     )
@@ -3035,26 +3143,76 @@ SUPPORTED_CHART_TYPES = tuple(dict.fromkeys((*DEFAULT_CHART_TYPES, *EXPLICIT_CHA
 DATA_ANALYSIS_FINAL_VALIDATION_MAX_BLOCKS = 1
 DATA_ANALYSIS_VALIDATION_HOOK_TIMEOUT_SECONDS = env_int("CUSTOM_GENERAL_AGENT_DATA_ANALYSIS_VALIDATION_TIMEOUT_SEC", 60)
 
-CHART_REQUEST_RE = re.compile(
-    r"(图表|可视化|画图|绘图|作图|出图|图形|柱状图|条形图|折线图|饼图|散点图|热力图|漏斗图|双轴|组合图|"
-    r"面积图|雷达图|树图|箱线图|chart|graph|plot|visuali[sz]ation|bar|line|pie|scatter|heatmap|funnel|combo|area|radar|treemap|boxplot)",
-    re.IGNORECASE,
-)
 TABLE_REQUEST_RE = re.compile(r"(表格|明细|列表|清单|原始数据|原始结果|查询结果|table|tabular|detail|raw|list)", re.IGNORECASE)
 MARKDOWN_TABLE_RE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|[\s:|\-]+\|\s*$")
 CHART_PLACEHOLDER_RE = re.compile(r"\{\{\s*chart\s*:\s*([A-Za-z0-9_.:-]+)\s*\}\}")
+DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY = "data_analysis_display_intent"
 
 
 def is_data_analysis_payload(payload: ChatPayload) -> bool:
     return payload.runtime_config.agent_type == "data-analysis"
 
 
-def user_requested_chart(payload: ChatPayload) -> bool:
-    return bool(CHART_REQUEST_RE.search(payload.query or ""))
-
-
 def user_requested_table(payload: ChatPayload) -> bool:
     return bool(TABLE_REQUEST_RE.search(payload.query or ""))
+
+
+def truthy_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on", "需要", "是"}
+    return False
+
+
+def normalize_data_analysis_display_intent(raw: Any) -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    confidence = str(data.get("confidence") or "unknown").strip().lower()
+    if confidence not in {"high", "medium", "low", "unknown", "error"}:
+        confidence = "unknown"
+    preferred_chart = str(data.get("preferred_chart") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    reason = str(data.get("reason") or "").strip()
+    if len(reason) > 600:
+        reason = reason[:600] + "...[truncated]"
+    return {
+        "chart_requested": truthy_bool(data.get("chart_requested")),
+        "confidence": confidence,
+        "preferred_chart": preferred_chart,
+        "reason": reason,
+        "source": str(data.get("source") or "llm_intent_classifier").strip() or "llm_intent_classifier",
+    }
+
+
+def data_analysis_display_intent(state: dict[str, Any] | None) -> dict[str, Any]:
+    state = state if isinstance(state, dict) else {}
+    return normalize_data_analysis_display_intent(state.get(DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY))
+
+
+def data_analysis_chart_requested(state: dict[str, Any] | None) -> bool:
+    return data_analysis_display_intent(state).get("chart_requested") is True
+
+
+def data_analysis_display_intent_message(intent: dict[str, Any]) -> str:
+    return "用户需要图表展示" if intent.get("chart_requested") is True else "用户不需要图表展示"
+
+
+def data_analysis_display_intent_progress_event(intent: dict[str, Any], phase: str = "success") -> RunEvent:
+    normalized = normalize_data_analysis_display_intent(intent)
+    message = data_analysis_display_intent_message(normalized)
+    event = validation_progress_event(
+        "data-analysis-display-intent",
+        "data_analysis_display_intent",
+        message,
+        phase=phase,
+        stage="complete",
+        done=True,
+        transient=False,
+    )
+    if isinstance(event.data, dict):
+        event.data["display_intent"] = normalized
+    return event
 
 
 def user_requested_explicit_chart(payload: ChatPayload, chart_type: str) -> bool:
@@ -3077,7 +3235,7 @@ def deny_tool(reason: str) -> dict[str, Any]:
     return hook_permission_output("deny", reason)
 
 
-def data_analysis_pre_tool_hook_factory(payload: ChatPayload) -> Callable[[Any, str | None, Any], Any]:
+def data_analysis_pre_tool_hook_factory(payload: ChatPayload, state: dict[str, Any] | None = None) -> Callable[[Any, str | None, Any], Any]:
     async def hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         tool_name = data_analysis_tool_name(str(block_value(input_data, "tool_name", "") or block_value(input_data, "toolName", "") or ""))
         if tool_name != "db_query":
@@ -3090,10 +3248,18 @@ def data_analysis_pre_tool_hook_factory(payload: ChatPayload) -> Callable[[Any, 
         tool_input = tool_input or {}
         if not isinstance(tool_input, dict):
             return hook_permission_output("allow")
-        if truthy_tool_value(tool_input.get("chart_requested")) and not user_requested_chart(payload):
+        intent = data_analysis_display_intent(state)
+        if truthy_tool_value(tool_input.get("chart_requested")) and not intent.get("chart_requested"):
             return deny_tool(
-                "用户没有明确要求图表/可视化，本次 db_query 不允许设置 chart_requested=true。"
+                "本轮进入主智能体前的图表展示意图识别结果为 chart_requested=false（用户不需要图表展示）。"
+                "当前 db_query 设置了 chart_requested=true，与该结构化意图不一致。"
                 "请改为 chart_requested=false，并只用查询结果支撑文字分析。"
+            )
+        if intent.get("chart_requested") is True and not truthy_tool_value(tool_input.get("chart_requested")):
+            return deny_tool(
+                "本轮进入主智能体前的图表展示意图识别结果为 chart_requested=true（用户需要图表展示）。"
+                "当前 db_query 没有设置 chart_requested=true，会导致最终答案没有可渲染图表。"
+                "请重新调用 db_query 并设置 chart_requested=true；如果只是查看结构，请改用 db_schema/db_catalog。"
             )
         if truthy_tool_value(tool_input.get("table_requested")) and not user_requested_table(payload):
             return deny_tool(
@@ -3299,7 +3465,7 @@ def data_analysis_chart_calls(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def data_analysis_needs_chart_validation(state: dict[str, Any], answer: str) -> bool:
-    return bool(data_analysis_chart_calls(state)) or bool(CHART_PLACEHOLDER_RE.search(answer or ""))
+    return data_analysis_chart_requested(state) or bool(data_analysis_chart_calls(state)) or bool(CHART_PLACEHOLDER_RE.search(answer or ""))
 
 
 def normalize_chart_type(chart_type: str) -> str:
@@ -3358,6 +3524,7 @@ def deterministic_final_validation(payload: ChatPayload, answer: str, state: dic
     chart_calls = data_analysis_chart_calls(state)
     placeholders = CHART_PLACEHOLDER_RE.findall(answer or "")
     placeholder_set = set(placeholders)
+    chart_requested_by_intent = data_analysis_chart_requested(state)
     declared_chart_ids = [
         str(item).strip()
         for item in (state.get("final_answer_requested_chart_ids") if isinstance(state.get("final_answer_requested_chart_ids"), list) else [])
@@ -3365,18 +3532,46 @@ def deterministic_final_validation(payload: ChatPayload, answer: str, state: dic
     ]
     declared_set = set(declared_chart_ids)
 
-    if not chart_calls and not placeholders:
+    if not chart_calls and not placeholders and not chart_requested_by_intent:
         return []
 
-    if chart_calls and not user_requested_chart(payload):
-        issues.append({"code": "chart_not_requested", "message": "用户没有明确要求图表，但工具结果包含结构化图表。"})
+    if (chart_calls or placeholders) and not chart_requested_by_intent:
+        issues.append(
+            {
+                "code": "chart_not_requested",
+                "message": (
+                    "本轮图表展示意图识别结果为 chart_requested=false（用户不需要图表展示），"
+                    "但最终答案或工具结果包含结构化图表。请移除图表占位符，并不要设置 db_query.chart_requested=true。"
+                ),
+            }
+        )
     if not user_requested_table(payload) and MARKDOWN_TABLE_RE.search(answer or ""):
         issues.append({"code": "table_not_requested", "message": "用户没有明确要求表格，但最终答案包含 Markdown 表格。"})
     issues.extend(placeholder_structure_issues(answer, placeholders))
 
     known_by_id = {str(item.get("contract", {}).get("id") or ""): item for item in chart_calls if str(item.get("contract", {}).get("id") or "")}
-    if chart_calls and user_requested_chart(payload) and not placeholders:
-        issues.append({"code": "missing_chart_placeholder", "message": "用户要求图表，但最终答案没有引用任何 {{chart:<id>}} 占位符。"})
+    if chart_requested_by_intent and not chart_calls:
+        issues.append(
+            {
+                "code": "missing_chart_query",
+                "message": (
+                    "本轮图表展示意图识别结果为 chart_requested=true（用户需要图表展示），"
+                    "但本轮没有任何 db_query(chart_requested=true) 生成结构化图表。"
+                    "请重新调用 db_query 并设置 chart_requested=true。"
+                ),
+            }
+        )
+    if chart_requested_by_intent and not placeholders:
+        issues.append(
+            {
+                "code": "missing_chart_placeholder",
+                "message": (
+                    "本轮图表展示意图识别结果为 chart_requested=true（用户需要图表展示），"
+                    "但最终答案没有引用任何 {{chart:<id>}} 占位符。"
+                    "请在对应说明段落后紧贴引用已生成图表的占位符。"
+                ),
+            }
+        )
 
     if declared_set:
         for chart_id in declared_chart_ids:
@@ -3455,7 +3650,8 @@ def compact_validation_context(payload: ChatPayload, answer: str, state: dict[st
         ][:8],
         "deterministic_issues": deterministic_issues,
         "display_rules": {
-            "chart_requested_by_user": user_requested_chart(payload),
+            "data_analysis_display_intent": data_analysis_display_intent(state),
+            "chart_requested_by_user": data_analysis_chart_requested(state),
             "table_requested_by_user": user_requested_table(payload),
             "default_supported_chart_types": list(DEFAULT_CHART_TYPES),
             "restricted_chart_types_requiring_user_name": sorted(EXPLICIT_CHART_TYPES.keys()),
@@ -3470,22 +3666,107 @@ def compact_validation_context(payload: ChatPayload, answer: str, state: dict[st
     }
 
 
-def parse_judge_json(text: str) -> dict[str, Any]:
+def parse_json_object(text: str) -> dict[str, Any]:
     raw = (text or "").strip()
     if not raw:
-        return {"pass": True, "issues": []}
+        return {}
     try:
         parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {"pass": True, "issues": []}
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             try:
                 parsed = json.loads(match.group(0))
-                return parsed if isinstance(parsed, dict) else {"pass": True, "issues": []}
+                return parsed if isinstance(parsed, dict) else {}
             except Exception:
                 pass
+    return {}
+
+
+def parse_judge_json(text: str) -> dict[str, Any]:
+    raw = (text or "").strip()
+    if not raw:
+        return {"pass": True, "issues": []}
+    parsed = parse_json_object(raw)
+    if parsed:
+        return parsed
     return {"pass": False, "issues": [{"code": "judge_parse_failed", "message": "LLM judge did not return valid JSON."}], "repair_instruction": "重新检查最终答案，确保图表说明匹配实际渲染内容，文字洞察有查询结果支撑。"}
+
+
+def compact_intent_history(payload: ChatPayload, max_messages: int = 8, max_chars: int = 1600) -> list[dict[str, str]]:
+    messages = payload.history[-max_messages:] if payload.history else []
+    out: list[dict[str, str]] = []
+    for msg in messages:
+        content = (msg.content or "").strip()
+        if len(content) > max_chars:
+            content = content[:max_chars] + "...[truncated]"
+        out.append({"role": msg.role, "content": content})
+    return out
+
+
+async def classify_data_analysis_display_intent(
+    payload: ChatPayload,
+    query_fn: Callable[..., Any],
+    options_cls: Any,
+    env: dict[str, str],
+    model: str,
+    settings: str | None,
+    run_dir: Path,
+) -> dict[str, Any]:
+    context_payload = {
+        "current_user_query": payload.query,
+        "recent_conversation_history": compact_intent_history(payload),
+        "visible_context": prompt_visible_context(payload.visible_context),
+    }
+    system = (
+        "你是 WeKnora 数据分析运行时的图表展示意图识别器。"
+        "你只判断当前用户这一轮是否需要生成可渲染的数据图表。"
+        "不要做数据分析，不要生成 SQL，不要输出 Markdown，只返回 JSON。"
+    )
+    prompt = (
+        "请基于 current_user_query，并只在需要解析指代时参考 recent_conversation_history，"
+        "语义判断用户本轮是否需要图表展示。不要做关键词匹配式判断；要理解否定、追问、上下文指代和“没看到图”等反馈。\n\n"
+        "返回且仅返回 JSON，格式固定为："
+        "{\"chart_requested\": boolean, \"confidence\": \"high|medium|low\", "
+        "\"preferred_chart\": string|null, \"reason\": string}。\n\n"
+        "字段含义：chart_requested=true 表示本轮需要最终展示可渲染图表；"
+        "chart_requested=false 表示本轮不需要图表展示，或只是文字解释/表格/代码/图片/图标/地图等非数据图表请求。\n\n"
+        "Context:\n"
+        + json.dumps(context_payload, ensure_ascii=False)[:20000]
+    )
+    intent_options = options_cls(
+        cwd=str(run_dir),
+        env=env,
+        settings=settings,
+        system_prompt=system,
+        setting_sources=["project"],
+        tools=[],
+        allowed_tools=[],
+        permission_mode="dontAsk",
+        include_partial_messages=False,
+        hooks={},
+        max_turns=1,
+        model=model or None,
+        thinking=llm_judge_thinking_config(),
+    )
+    parts: list[str] = []
+    async for message in query_fn(prompt=prompt, options=intent_options):
+        blocks = final_text_blocks(message)
+        if blocks:
+            parts = blocks
+    parsed = parse_json_object("".join(parts))
+    if not parsed:
+        return normalize_data_analysis_display_intent(
+            {
+                "chart_requested": False,
+                "confidence": "error",
+                "reason": "图表展示意图识别未返回有效 JSON，按不需要图表展示处理。",
+                "source": "llm_intent_classifier",
+            }
+        )
+    parsed["source"] = "llm_intent_classifier"
+    return normalize_data_analysis_display_intent(parsed)
 
 
 async def run_data_analysis_judge(
@@ -4129,6 +4410,34 @@ class GeneralAgentRunner:
         env, model, settings = claude_auth_env(self.payload, self.config_dir)
         data_analysis_state: dict[str, Any] = {}
         data_analysis_final_answer_mode = is_data_analysis_payload(self.payload)
+        if data_analysis_final_answer_mode:
+            yield validation_progress_event(
+                "data-analysis-display-intent",
+                "data_analysis_display_intent",
+                "正在识别是否需要图表展示",
+                stage="start",
+            )
+            try:
+                intent = await classify_data_analysis_display_intent(
+                    self.payload,
+                    query,
+                    ClaudeAgentOptions,
+                    env,
+                    model,
+                    settings,
+                    self.run_dir,
+                )
+            except Exception as exc:
+                intent = normalize_data_analysis_display_intent(
+                    {
+                        "chart_requested": False,
+                        "confidence": "error",
+                        "reason": f"图表展示意图识别失败，按不需要图表展示处理：{exc}",
+                        "source": "llm_intent_classifier",
+                    }
+                )
+            data_analysis_state[DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY] = intent
+            yield data_analysis_display_intent_progress_event(intent)
         server = build_weknora_server(self.payload, self.artifacts, data_analysis_state)
         sdk_tools = claude_sdk_builtin_tools(self.payload)
         allowed_tools = [f"mcp__weknora__{t.name}" for t in self.payload.tools]
@@ -4157,7 +4466,7 @@ class GeneralAgentRunner:
         }
         if data_analysis_final_answer_mode:
             runtime_hooks["PreToolUse"].append(
-                HookMatcher(matcher=None, hooks=[data_analysis_pre_tool_hook_factory(self.payload)], timeout=5)
+                HookMatcher(matcher=None, hooks=[data_analysis_pre_tool_hook_factory(self.payload, data_analysis_state)], timeout=5)
             )
             runtime_hooks["PreToolUse"].append(
                 HookMatcher(
@@ -4338,7 +4647,12 @@ class GeneralAgentRunner:
                     producer.cancel()
                     await asyncio.gather(producer, return_exceptions=True)
 
-        prompt = build_prompt(self.payload, self.document_templates, self.ppt_generation_workspace)
+        prompt = build_prompt(
+            self.payload,
+            self.document_templates,
+            self.ppt_generation_workspace,
+            data_analysis_state.get(DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY),
+        )
         options = initial_options
         resume_attempts = 0
         while True:

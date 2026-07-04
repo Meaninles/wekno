@@ -44,17 +44,15 @@ agent_type_presets:
         description: "基於文件分塊的檢索式問答，適合未啟用 Wiki 的文件 / FAQ 知識庫。"
     config:
       system_prompt_id: "progressive_rag_agent"
+      thinking: true
       temperature: 0.7
-      max_iterations: 30
-      # `thinking` and `todo_write` are intentionally NOT included by default.
-      # They are useful for multi-step planning / self-reflection, but most
-      # users don't need them for single-turn Q&A and they noticeably bloat
-      # token usage. Enable them manually in the tool list when needed.
+      max_iterations: 50
       allowed_tools:
         - "knowledge_search"
         - "grep_chunks"
         - "list_knowledge_chunks"
         - "get_document_info"
+        - "query_knowledge_graph"
       retain_retrieval_history: false
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
@@ -79,17 +77,16 @@ agent_type_presets:
         description: "以 Wiki 為主的檢索與圖譜跳轉回答，必須綁定已啟用 Wiki 的知識庫。"
     config:
       system_prompt_id: "wiki_researcher"
+      thinking: true
       temperature: 0.7
       max_iterations: 30
-      # `thinking` / `todo_write` can be enabled manually if the user wants
-      # explicit reflection or planning across long wiki navigation chains;
-      # not on by default.
       allowed_tools:
         - "wiki_search"
         - "wiki_read_page"
         - "wiki_read_source_doc"
         - "wiki_flag_issue"
       retain_retrieval_history: false
+      history_turns: 10
       kb_selection_mode: "all"
     # kb_filter derived from allowed_tools: any_of = [wiki]
 
@@ -110,11 +107,9 @@ agent_type_presets:
         description: "先用 Wiki 建立導覽和背景，再用分塊檢索精確引用。需綁定同時啟用 Wiki 與向量/關鍵詞索引的知識庫。"
     config:
       system_prompt_id: "hybrid_rag_wiki_agent"
+      thinking: true
       temperature: 0.7
       max_iterations: 40
-      # `thinking` and `todo_write` are opt-in. Turn them on manually when the
-      # user wants explicit self-reflection or a visible step-by-step plan for
-      # multi-hop hybrid searches.
       allowed_tools:
         - "wiki_search"
         - "wiki_read_page"
@@ -128,21 +123,9 @@ agent_type_presets:
       faq_direct_answer_threshold: 0.9
       faq_score_boost: 1.2
       kb_selection_mode: "all"
-    # Hybrid is meant to be the most flexible preset: the agent adapts at
-    # runtime based on what each KB exposes.
-    #  - KB has wiki + chunks  → full "wiki-first, RAG-verify" workflow
-    #  - KB has only chunks    → fallback to pure RAG (see prompt's "Fallback rules")
-    #  - KB has only wiki      → fallback to wiki-only answering
-    #  - FAQ KB                → allowed; knowledge_search still works on FAQ chunks
-    # kb_filter derived from allowed_tools: any_of = [vector, keyword, wiki].
-    # We only require that the KB expose AT LEAST ONE retrievable surface so
-    # the agent has SOMETHING to call. KBs with zero indexing (e.g. graph-only
-    # or completely unindexed) are still excluded since no tool will return
-    # anything useful.
 
   # --------------------------------------------------------------------------
-  # Document Processing Agent — general-agent loop copied from General Agent,
-  # with document-specific instructions and artifact generation.
+  # Document Processing Agent
   # --------------------------------------------------------------------------
   - id: "document-processing-agent"
     i18n:
@@ -157,6 +140,7 @@ agent_type_presets:
         description: "文件處理智能體，直接生成或修改 Word / Excel / PDF / PPT 文件，並保留通用智能體能力。"
     config:
       system_prompt_id: "document_claude_agent"
+      thinking: true
       document_template:
         word:
           requirement_file:
@@ -188,8 +172,10 @@ agent_type_presets:
           template_files: []
       professional_skills_selection_mode: "none"
       selected_professional_skills: []
-      temperature: 0.7
-      max_iterations: 30
+      temperature: 0.4
+      max_completion_tokens: 8192
+      max_iterations: 100
+      llm_call_timeout: 600
       allowed_tools:
         - "thinking"
         - "todo_write"
@@ -210,17 +196,17 @@ agent_type_presets:
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
       faq_score_boost: 1.2
-      web_search_enabled: true
+      web_search_enabled: false
       web_fetch_enabled: true
       web_fetch_top_n: 3
+      history_turns: 10
+      claude_sdk_web_search_enabled: true
       kb_selection_mode: "all"
       db_data_sources: []
       enable_artifacts: true
 
   # --------------------------------------------------------------------------
-  # Data Analysis — general-agent runtime over bound MySQL / PostgreSQL sources.
-  # This does not depend on knowledge-base capabilities; the editor binds
-  # database sources separately from KB scope.
+  # Data Analysis
   # --------------------------------------------------------------------------
   - id: "data-analysis"
     i18n:
@@ -235,23 +221,33 @@ agent_type_presets:
         description: "基於通用智能體內核，對已綁定的 MySQL / PostgreSQL 資料來源執行 SQL 查詢、統計分析和結構化圖表展示。"
     config:
       system_prompt_id: "data_analyst"
+      thinking: true
       temperature: 0.2
-      max_iterations: 30
+      max_completion_tokens: 8192
+      max_iterations: 100
+      llm_call_timeout: 600
       allowed_tools:
         - "thinking"
         - "todo_write"
         - "db_catalog"
         - "db_schema"
         - "db_query"
+        - "grep_chunks"
+        - "knowledge_search"
+        - "list_knowledge_chunks"
+        - "query_knowledge_graph"
+        - "get_document_info"
+        - "database_query"
       web_search_enabled: false
-      kb_selection_mode: "none"
+      web_fetch_enabled: true
+      web_fetch_top_n: 3
+      history_turns: 10
+      embedding_top_k: 5
+      kb_selection_mode: "all"
       db_data_sources: []
 
   # --------------------------------------------------------------------------
-  # General Agent — general-agent loop with all WeKnora retrieval, tools,
-  # MCP services, Skills and database data sources bridged back through Go.
-  # This type intentionally mirrors the native smart-reasoning editor surface,
-  # plus database data-source selection.
+  # General Agent
   # --------------------------------------------------------------------------
   - id: "general-agent"
     i18n:
@@ -266,8 +262,11 @@ agent_type_presets:
         description: "通用智能體，復用 WeKnora 知識檢索、網路搜尋、MCP、Skills、工具和資料庫來源。"
     config:
       system_prompt_id: "general_claude_agent"
-      temperature: 0.7
-      max_iterations: 30
+      thinking: true
+      temperature: 0.5
+      max_completion_tokens: 8192
+      max_iterations: 100
+      llm_call_timeout: 600
       allowed_tools:
         - "thinking"
         - "todo_write"
@@ -288,9 +287,11 @@ agent_type_presets:
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
       faq_score_boost: 1.2
-      web_search_enabled: true
+      web_search_enabled: false
       web_fetch_enabled: true
       web_fetch_top_n: 3
+      history_turns: 10
+      claude_sdk_web_search_enabled: true
       kb_selection_mode: "all"
       db_data_sources: []
       enable_artifacts: true

@@ -2160,6 +2160,9 @@ export default {
       notReadyMissing: "누락: {items}",
       configureAction: "구성",
       sharedNotReadyContact: "공유한 조직 관리자에게 구성을 요청하세요",
+      pinnedSection: "상단 고정",
+      pin: "상단 고정",
+      unpin: "고정 해제",
     },
     // 내장 에이전트 정보
     builtinInfo: {

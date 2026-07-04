@@ -11,8 +11,43 @@
         </div>
 
         <div class="agent-selector-content" @scroll="hideDetailPanel">
+          <!-- 置顶智能体 -->
+          <div v-if="pinnedAgents.length > 0" class="agent-group agent-group-pinned">
+            <div class="agent-group-title agent-group-title-pinned">
+              <TIcon name="pin-filled" size="12px" />
+              <span>{{ $t('agent.selector.pinnedSection') }}</span>
+            </div>
+            <div v-for="item in pinnedAgents" :key="item.key" class="agent-option"
+              :class="{ selected: isPinnedAgentSelected(item) }"
+              @mouseenter="onPinnedOptionEnter(item, $event)" @mouseleave="onOptionLeave"
+              @click="selectPinnedAgent(item)">
+              <div v-if="item.agent.id === BUILTIN_QUICK_ANSWER_ID || item.agent.id === BUILTIN_SMART_REASONING_ID"
+                class="builtin-icon" :class="item.agent.config?.agent_mode === 'smart-reasoning' ? 'agent' : 'normal'">
+                <TIcon :name="item.agent.config?.agent_mode === 'smart-reasoning' ? 'control-platform' : 'chat'"
+                  size="13px" />
+              </div>
+              <div v-else-if="item.agent.avatar" class="builtin-avatar">{{ item.agent.avatar }}</div>
+              <AgentAvatar v-else :name="item.agent.name" size="small" />
+              <span class="agent-option-name">{{ item.agent.name }}</span>
+              <span v-if="item.sourceTenantId" class="shared-tag">{{ $t('agent.selector.sharedLabel') }}</span>
+              <div class="agent-option-actions" @mouseenter.stop="hideDetailPanel">
+                <t-tooltip :content="$t('agent.selector.unpin')" placement="top">
+                  <button type="button" class="agent-option-pin pinned" :aria-label="$t('agent.selector.unpin')"
+                    @click.stop="togglePinnedAgent(item)">
+                    <TIcon name="pin-filled" size="13px" />
+                  </button>
+                </t-tooltip>
+                <t-tooltip
+                  :content="$t('agent.selector.notReadyHint', { items: formatNotReadyHint(item.agent, item.sourceTenantId) })"
+                  placement="top" v-if="getAgentNotReadyLabels(item.agent, item.sourceTenantId).length">
+                  <TIcon name="error-circle" size="14px" class="not-ready-icon" @click.stop />
+                </t-tooltip>
+              </div>
+            </div>
+          </div>
+
           <!-- 内置智能体 -->
-          <div class="agent-group">
+          <div v-if="builtinAgents.length > 0" class="agent-group">
             <div class="agent-group-title">{{ $t('agent.builtinAgents') }}</div>
             <div v-for="agent in builtinAgents" :key="agent.id" class="agent-option"
               :class="{ selected: isMyAgentSelected(agent) }" @mouseenter="onOptionEnter(agent, $event)"
@@ -27,9 +62,17 @@
                 <TIcon name="app" size="13px" />
               </div>
               <span class="agent-option-name">{{ agent.name }}</span>
-              <div v-if="getAgentNotReadyLabels(agent).length" class="agent-option-actions">
-                <t-tooltip :content="$t('agent.selector.notReadyHint', { items: formatNotReadyHint(agent) })"
+              <div class="agent-option-actions" @mouseenter.stop="hideDetailPanel">
+                <t-tooltip :content="agentPinned(agent) ? $t('agent.selector.unpin') : $t('agent.selector.pin')"
                   placement="top">
+                  <button type="button" class="agent-option-pin" :class="{ pinned: agentPinned(agent) }"
+                    :aria-label="agentPinned(agent) ? $t('agent.selector.unpin') : $t('agent.selector.pin')"
+                    @click.stop="toggleAgentPin(agent)">
+                    <TIcon :name="agentPinned(agent) ? 'pin-filled' : 'pin'" size="13px" />
+                  </button>
+                </t-tooltip>
+                <t-tooltip :content="$t('agent.selector.notReadyHint', { items: formatNotReadyHint(agent) })"
+                  placement="top" v-if="getAgentNotReadyLabels(agent).length">
                   <TIcon name="error-circle" size="14px" class="not-ready-icon" @click.stop />
                 </t-tooltip>
               </div>
@@ -44,9 +87,17 @@
               @mouseleave="onOptionLeave" @click="selectAgent(agent)">
               <AgentAvatar :name="agent.name" size="small" />
               <span class="agent-option-name">{{ agent.name }}</span>
-              <div v-if="getAgentNotReadyLabels(agent).length" class="agent-option-actions">
-                <t-tooltip :content="$t('agent.selector.notReadyHint', { items: formatNotReadyHint(agent) })"
+              <div class="agent-option-actions" @mouseenter.stop="hideDetailPanel">
+                <t-tooltip :content="agentPinned(agent) ? $t('agent.selector.unpin') : $t('agent.selector.pin')"
                   placement="top">
+                  <button type="button" class="agent-option-pin" :class="{ pinned: agentPinned(agent) }"
+                    :aria-label="agentPinned(agent) ? $t('agent.selector.unpin') : $t('agent.selector.pin')"
+                    @click.stop="toggleAgentPin(agent)">
+                    <TIcon :name="agentPinned(agent) ? 'pin-filled' : 'pin'" size="13px" />
+                  </button>
+                </t-tooltip>
+                <t-tooltip :content="$t('agent.selector.notReadyHint', { items: formatNotReadyHint(agent) })"
+                  placement="top" v-if="getAgentNotReadyLabels(agent).length">
                   <TIcon name="error-circle" size="14px" class="not-ready-icon" @click.stop />
                 </t-tooltip>
               </div>
@@ -63,18 +114,27 @@
               <AgentAvatar :name="shared.agent.name" size="small" />
               <span class="agent-option-name">{{ shared.agent.name }}</span>
               <span class="shared-tag">{{ $t('agent.selector.sharedLabel') }}</span>
-              <div v-if="getAgentNotReadyLabels(shared.agent, String(shared.source_tenant_id)).length"
-                class="agent-option-actions">
+              <div class="agent-option-actions" @mouseenter.stop="hideDetailPanel">
+                <t-tooltip
+                  :content="sharedAgentPinned(shared) ? $t('agent.selector.unpin') : $t('agent.selector.pin')"
+                  placement="top">
+                  <button type="button" class="agent-option-pin" :class="{ pinned: sharedAgentPinned(shared) }"
+                    :aria-label="sharedAgentPinned(shared) ? $t('agent.selector.unpin') : $t('agent.selector.pin')"
+                    @click.stop="toggleSharedAgentPin(shared)">
+                    <TIcon :name="sharedAgentPinned(shared) ? 'pin-filled' : 'pin'" size="13px" />
+                  </button>
+                </t-tooltip>
                 <t-tooltip
                   :content="$t('agent.selector.notReadyHint', { items: formatNotReadyHint(shared.agent, String(shared.source_tenant_id)) })"
-                  placement="top">
+                  placement="top" v-if="getAgentNotReadyLabels(shared.agent, String(shared.source_tenant_id)).length">
                   <TIcon name="error-circle" size="14px" class="not-ready-icon" @click.stop />
                 </t-tooltip>
               </div>
             </div>
           </div>
 
-          <div v-if="builtinAgents.length === 0 && customAgents.length === 0 && sharedAgentsList.length === 0"
+          <div
+            v-if="pinnedAgents.length === 0 && builtinAgents.length === 0 && customAgents.length === 0 && sharedAgentsList.length === 0"
             class="agent-option empty">
             {{ $t('agent.noAgents') }}
           </div>
@@ -162,7 +222,7 @@
 import { ref, computed, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
-import { Icon as TIcon, Tooltip as TTooltip } from 'tdesign-vue-next';
+import { Icon as TIcon } from 'tdesign-vue-next';
 import { type CustomAgent, BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from '@/api/agent';
 import AgentAvatar from '@/components/AgentAvatar.vue';
 import { useOrganizationStore } from '@/stores/organization';
@@ -178,11 +238,13 @@ import {
   type AgentNotReadyReasonKey,
 } from '@/utils/agent-readiness';
 import { formatLocalizedList } from '@/utils/format-list';
+import { agentPinKey, useChatAgentPins } from '@/custom/modules/agentPins/agentPins';
 
 const { t, locale } = useI18n();
 const router = useRouter();
 const orgStore = useOrganizationStore();
 const settingsStore = useSettingsStore();
+const agentPins = useChatAgentPins();
 
 const props = defineProps<{
   visible: boolean;
@@ -208,6 +270,13 @@ type SharedAgentSelection = Omit<SharedAgentInfo, 'agent'> & {
   agent: CustomAgent;
 };
 
+type PinnedAgentSelection = {
+  key: string;
+  agent: CustomAgent;
+  sourceTenantId?: string;
+  sharedMeta?: AgentDetailTarget['sharedMeta'];
+};
+
 const dropdownStyle = ref<Record<string, string>>({});
 const activeDetail = ref<AgentDetailTarget | null>(null);
 const detailAnchorEl = ref<HTMLElement | null>(null);
@@ -216,12 +285,13 @@ const detailPanelStyle = ref<Record<string, string>>({});
 let detailHideTimer: ReturnType<typeof setTimeout> | null = null;
 
 const DETAIL_PANEL_WIDTH = 200;
-const DETAIL_BRIDGE_OVERLAP = 10;
+const DETAIL_PANEL_GAP = 8;
+const DETAIL_BRIDGE_WIDTH = 8;
 const DETAIL_HIDE_DELAY_MS = 400;
 
 const agentsList = computed(() => props.agents ?? []);
 
-const builtinAgents = computed(() => {
+const localizedBuiltinAgents = computed(() => {
   const apiBuiltins = agentsList.value.filter(a => a.is_builtin);
   return apiBuiltins.map(agent => {
     if (agent.id === BUILTIN_QUICK_ANSWER_ID) {
@@ -234,7 +304,13 @@ const builtinAgents = computed(() => {
   });
 });
 
-const customAgents = computed(() => agentsList.value.filter(a => !a.is_builtin));
+const builtinAgents = computed(() =>
+  localizedBuiltinAgents.value.filter(agent => !agentPinned(agent)),
+);
+
+const customAgents = computed(() =>
+  agentsList.value.filter(agent => !agent.is_builtin && !agentPinned(agent)),
+);
 
 const toCustomAgent = (agent: SharedAgentInfo['agent']): CustomAgent => ({
   ...agent,
@@ -242,11 +318,44 @@ const toCustomAgent = (agent: SharedAgentInfo['agent']): CustomAgent => ({
   config: agent.config ?? {},
 });
 
-const sharedAgentsList = computed<SharedAgentSelection[]>(() =>
+const allSharedAgentsList = computed<SharedAgentSelection[]>(() =>
   (orgStore.sharedAgents || [])
     .filter(shared => !shared.disabled_by_me)
     .map(shared => ({ ...shared, agent: toCustomAgent(shared.agent) })),
 );
+
+const sharedAgentsList = computed<SharedAgentSelection[]>(() =>
+  allSharedAgentsList.value.filter(shared => !sharedAgentPinned(shared)),
+);
+
+const pinnedAgents = computed<PinnedAgentSelection[]>(() => {
+  const byKey = new Map<string, PinnedAgentSelection>();
+  for (const agent of localizedBuiltinAgents.value) {
+    const key = agentPinKey(agent.id);
+    byKey.set(key, { key, agent });
+  }
+  for (const agent of agentsList.value.filter(agent => !agent.is_builtin)) {
+    const key = agentPinKey(agent.id);
+    byKey.set(key, { key, agent });
+  }
+  for (const shared of allSharedAgentsList.value) {
+    const sourceTenantId = String(shared.source_tenant_id);
+    const key = agentPinKey(shared.agent.id, sourceTenantId);
+    byKey.set(key, {
+      key,
+      agent: shared.agent,
+      sourceTenantId,
+      sharedMeta: {
+        org_name: shared.org_name,
+        shared_by_username: shared.shared_by_username,
+      },
+    });
+  }
+  return Array.from(agentPins.pinnedKeys.value)
+    .reverse()
+    .map(key => byKey.get(key))
+    .filter((item): item is PinnedAgentSelection => !!item);
+});
 
 const currentAgentSourceTenantId = computed(() => settingsStore.selectedAgentSourceTenantId ?? null);
 
@@ -255,6 +364,46 @@ const isSharedAgentSelected = (shared: SharedAgentSelection) =>
 
 const isMyAgentSelected = (agent: CustomAgent) =>
   props.currentAgentId === agent.id && !currentAgentSourceTenantId.value;
+
+const agentPinned = (agent: CustomAgent) => agentPins.isPinned(agent.id);
+
+const sharedAgentPinned = (shared: SharedAgentSelection) =>
+  agentPins.isPinned(shared.agent.id, String(shared.source_tenant_id));
+
+const toggleAgentPin = (agent: CustomAgent) => {
+  agentPins.togglePinned(agent.id);
+};
+
+const toggleSharedAgentPin = (shared: SharedAgentSelection) => {
+  agentPins.togglePinned(shared.agent.id, String(shared.source_tenant_id));
+};
+
+const isPinnedAgentSelected = (item: PinnedAgentSelection) => {
+  if (item.sourceTenantId) {
+    return props.currentAgentId === item.agent.id && currentAgentSourceTenantId.value === item.sourceTenantId;
+  }
+  return isMyAgentSelected(item.agent);
+};
+
+const onPinnedOptionEnter = (item: PinnedAgentSelection, event: MouseEvent) => {
+  onOptionEnter(item.agent, event, item.sourceTenantId, item.sharedMeta);
+};
+
+const togglePinnedAgent = (item: PinnedAgentSelection) => {
+  agentPins.togglePinned(item.agent.id, item.sourceTenantId);
+};
+
+const selectPinnedAgent = (item: PinnedAgentSelection) => {
+  if (!item.sourceTenantId) {
+    selectAgent(item.agent);
+    return;
+  }
+  if (getAgentNotReadyLabels(item.agent, item.sourceTenantId).length > 0) {
+    emitAgentNotReady(item.agent, item.sourceTenantId);
+    return;
+  }
+  emit('select', item.agent, item.sourceTenantId);
+};
 
 const isDetailCurrent = computed(() => {
   const detail = activeDetail.value;
@@ -359,8 +508,7 @@ const updateDetailPanelPosition = () => {
   const rowRect = rectToCssPx(el.getBoundingClientRect(), zoom);
   const { width: vw, height: vh } = cssViewportSize(zoom);
 
-  // 向左重叠一段透明区域，避免鼠标从选项移向浮层时经过空隙触发 mouseleave
-  let left = rowRect.right - DETAIL_BRIDGE_OVERLAP;
+  let left = rowRect.right + DETAIL_PANEL_GAP;
   if (left + DETAIL_PANEL_WIDTH > vw - 8) {
     left = Math.max(8, vw - DETAIL_PANEL_WIDTH - 8);
   }
@@ -388,6 +536,7 @@ const updateDetailPanelPosition = () => {
     left: `${Math.round(left)}px`,
     top: `${Math.round(top)}px`,
     width: `${DETAIL_PANEL_WIDTH}px`,
+    '--detail-bridge-width': `${DETAIL_BRIDGE_WIDTH}px`,
     zIndex: '10002',
   };
 };
@@ -693,9 +842,43 @@ watch(activeDetail, (detail) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
+  gap: 2px;
+  min-width: 22px;
   height: 22px;
   flex-shrink: 0;
+}
+
+.agent-option-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--td-text-color-placeholder);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--td-bg-color-component-hover, #e8e8e8);
+    color: var(--td-brand-color);
+    opacity: 1;
+  }
+
+  &.pinned {
+    color: var(--td-brand-color);
+    opacity: 1;
+  }
+}
+
+.agent-option:hover .agent-option-pin,
+.agent-option.selected .agent-option-pin {
+  opacity: 1;
 }
 
 .not-ready-icon {
@@ -759,16 +942,17 @@ watch(activeDetail, (detail) => {
 
 /* 详情浮层 */
 .agent-detail-panel {
+  --detail-bridge-width: 8px;
   box-sizing: border-box;
   position: relative;
 
-  // 左侧透明桥接区：承接从选项移入的鼠标，避免经过间隙时浮层消失
+  // 左侧透明桥接区只覆盖浮窗与下拉之间的空隙，不能压住列表右侧按钮。
   &::before {
     content: '';
     position: absolute;
-    left: -12px;
+    left: calc(-1 * var(--detail-bridge-width));
     top: 0;
-    width: 12px;
+    width: var(--detail-bridge-width);
     height: 100%;
   }
 }

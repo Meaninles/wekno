@@ -139,7 +139,7 @@ func LanguageFromContext(ctx context.Context) (string, bool) {
 }
 
 // LanguageNameFromContext returns the human-readable language name for use in prompts.
-// e.g. "zh-CN" -> "简体中文", "en-US" -> "English", "ko-KR" -> "Korean"
+// e.g. "zh-CN" -> "Chinese (Simplified)", "en-US" -> "English", "ko-KR" -> "Korean"
 // Falls back to DefaultLanguage() (WEKNORA_LANGUAGE env, then "zh-CN").
 func LanguageNameFromContext(ctx context.Context) string {
 	lang, ok := LanguageFromContext(ctx)
@@ -153,9 +153,9 @@ func LanguageNameFromContext(ctx context.Context) string {
 func LanguageLocaleName(locale string) string {
 	switch locale {
 	case "zh-CN", "zh", "zh-Hans":
-		return "简体中文"
+		return "Chinese (Simplified)"
 	case "zh-TW", "zh-HK", "zh-Hant":
-		return "繁体中文"
+		return "Chinese (Traditional)"
 	case "en-US", "en", "en-GB":
 		return "English"
 	case "ko-KR", "ko":

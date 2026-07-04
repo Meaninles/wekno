@@ -22,13 +22,13 @@ func NewWikiDeletePageTool(wikiPageService interfaces.WikiPageService, kbIDs []s
 	return &wikiDeletePageTool{
 		BaseTool: NewBaseTool(
 			ToolWikiDeletePage,
-			"删除 Wiki 页面。会自动清理其他页面上的入站链接，防止死链。",
+			"Delete a Wiki page. Automatically cleans up incoming links on other pages to prevent dead links.",
 			json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"slug": {
 						"type": "string",
-						"description": "要删除的 Wiki 页面 slug"
+						"description": "The slug of the Wiki page to delete"
 					}
 				},
 				"required": ["slug"]
@@ -45,29 +45,29 @@ func (t *wikiDeletePageTool) Execute(ctx context.Context, args json.RawMessage) 
 	}
 
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "解析参数失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to parse arguments: " + err.Error()}, nil
 	}
 
 	if len(t.kbIDs) == 0 {
-		return &types.ToolResult{Success: false, Error: "没有可编辑的知识库"}, nil
+		return &types.ToolResult{Success: false, Error: "No knowledge bases available for editing"}, nil
 	}
 	kbID := t.kbIDs[0]
 
 	if params.Slug == "" {
-		return &types.ToolResult{Success: false, Error: "需要 slug"}, nil
+		return &types.ToolResult{Success: false, Error: "slug is required"}, nil
 	}
 
 	// Fetch page to get its incoming links before deleting
 	existingPage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, params.Slug)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: "获取待删除页面失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to fetch page to delete: " + err.Error()}, nil
 	}
 	inLinks := make([]string, len(existingPage.InLinks))
 	copy(inLinks, existingPage.InLinks)
 
 	err = t.wikiPageService.DeletePage(ctx, kbID, params.Slug)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: "删除页面失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to delete page: " + err.Error()}, nil
 	}
 
 	// Clean up incoming links to prevent dead links
@@ -106,20 +106,20 @@ func (t *wikiDeletePageTool) Execute(ctx context.Context, args json.RawMessage) 
 		}
 	}
 
-	outputMsg := fmt.Sprintf("已成功删除页面 [[%s]]，并清理 %d 个入站链接。", params.Slug, updatedCount)
+	outputMsg := fmt.Sprintf("Successfully deleted page [[%s]] and cleaned up %d incoming links.", params.Slug, updatedCount)
 	if updatedCount > 0 {
-		outputMsg += fmt.Sprintf("\n- 受影响页面: %s", strings.Join(updatedSlugs, ", "))
+		outputMsg += fmt.Sprintf("\n- Affected pages: %s", strings.Join(updatedSlugs, ", "))
 	}
 
 	return &types.ToolResult{
 		Success: true,
 		Output:  outputMsg,
 		Data: map[string]interface{}{
-			"display_type":   "wiki_delete_page",
-			"slug":           params.Slug,
-			"title":          existingPage.Title,
-			"updated_count":  updatedCount,
-			"affected_pages": updatedSlugs,
+			"display_type":    "wiki_delete_page",
+			"slug":            params.Slug,
+			"title":           existingPage.Title,
+			"updated_count":   updatedCount,
+			"affected_pages":  updatedSlugs,
 		},
 	}, nil
 }

@@ -40,15 +40,15 @@ func TestLanguageLocaleName(t *testing.T) {
 		locale   string
 		expected string
 	}{
-		// 简体中文 variants
-		{"Chinese Simplified zh-CN", "zh-CN", "简体中文"},
-		{"Chinese Simplified zh", "zh", "简体中文"},
-		{"Chinese Simplified zh-Hans", "zh-Hans", "简体中文"},
+		// Chinese (Simplified) variants
+		{"Chinese Simplified zh-CN", "zh-CN", "Chinese (Simplified)"},
+		{"Chinese Simplified zh", "zh", "Chinese (Simplified)"},
+		{"Chinese Simplified zh-Hans", "zh-Hans", "Chinese (Simplified)"},
 
 		// Chinese (Traditional) variants
-		{"Chinese Traditional zh-TW", "zh-TW", "繁体中文"},
-		{"Chinese Traditional zh-HK", "zh-HK", "繁体中文"},
-		{"Chinese Traditional zh-Hant", "zh-Hant", "繁体中文"},
+		{"Chinese Traditional zh-TW", "zh-TW", "Chinese (Traditional)"},
+		{"Chinese Traditional zh-HK", "zh-HK", "Chinese (Traditional)"},
+		{"Chinese Traditional zh-Hant", "zh-Hant", "Chinese (Traditional)"},
 
 		// English variants
 		{"English en-US", "en-US", "English"},

@@ -24,6 +24,7 @@ from app.runner import (  # noqa: E402
     block_background_bash_hook,
     build_background_task_resume_prompt,
     build_system_prompt,
+    claude_auth_env,
     data_analysis_pre_tool_hook_factory,
     data_analysis_final_answer_pre_tool_hook_factory,
     data_analysis_stop_hook_factory,
@@ -66,6 +67,47 @@ class ResultMessage:
 
 
 class RunnerProgressTest(unittest.TestCase):
+    def test_claude_auth_env_uses_api_key_environment(self):
+        payload = ChatPayload(
+            run_id="run-auth-key",
+            session_id="session-auth-key",
+            assistant_message_id="assistant-auth-key",
+            query="hello",
+            llm=LLMConfig(model_name="claude-test", base_url="http://gateway", api_key="sk-test"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        env, model, settings = claude_auth_env(payload, Path("/tmp/claude-config"))
+
+        self.assertEqual(model, "claude-test")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-test")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-test")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://gateway")
+        self.assertIsNone(settings)
+
+    def test_claude_auth_env_maps_no_api_key_to_helper_settings(self):
+        payload = ChatPayload(
+            run_id="run-auth-helper",
+            session_id="session-auth-helper",
+            assistant_message_id="assistant-auth-helper",
+            query="hello",
+            llm=LLMConfig(
+                model_name="claude-test",
+                base_url="http://gateway",
+                auth_type="api_key_helper",
+                api_key_helper="printf weknora-no-auth",
+            ),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        env, model, settings = claude_auth_env(payload, Path("/tmp/claude-config"))
+
+        self.assertEqual(model, "claude-test")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://gateway")
+        self.assertEqual(json.loads(settings or "{}"), {"apiKeyHelper": "printf weknora-no-auth"})
+
     def make_xlsx_bytes(self, styles_xml):
         out = io.BytesIO()
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -361,7 +403,7 @@ EOF""",
         self.assertIn("命中：", reason)
         self.assertIn("原因：", reason)
         self.assertIn("请改为前台/同步执行", reason)
-        self.assertIn("每个已启动任务都必须", reason)
+        self.assertIn("Every started task must remain observable", reason)
 
     def test_block_background_bash_hook_denies_background_before_tool_use(self):
         output = asyncio.run(
@@ -505,7 +547,7 @@ EOF""",
                 ],
             }
             events = []
-            hook = data_analysis_final_answer_pre_tool_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", Path("."), events.append)
+            hook = data_analysis_final_answer_pre_tool_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", None, Path("."), events.append)
 
             output = asyncio.run(
                 hook(
@@ -544,7 +586,7 @@ EOF""",
             )
             state = {}
             events = []
-            hook = data_analysis_final_answer_pre_tool_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", Path("."), events.append)
+            hook = data_analysis_final_answer_pre_tool_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", None, Path("."), events.append)
 
             output = asyncio.run(
                 hook(
@@ -601,7 +643,7 @@ EOF""",
                 ],
             }
             events = []
-            hook = data_analysis_final_answer_pre_tool_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", Path("."), events.append)
+            hook = data_analysis_final_answer_pre_tool_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", None, Path("."), events.append)
 
             output = asyncio.run(
                 hook(
@@ -679,7 +721,7 @@ EOF""",
                     encoding="utf-8",
                 )
                 events = []
-                hook = data_analysis_stop_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", Path(tmp), events.append)
+                hook = data_analysis_stop_hook_factory(payload, state, lambda *args, **kwargs: None, object, {}, "", None, Path(tmp), events.append)
 
                 first = asyncio.run(hook({"transcript_path": str(transcript)}, None, {}))
                 second = asyncio.run(hook({"transcript_path": str(transcript)}, None, {}))
@@ -874,6 +916,7 @@ EOF""",
                 Options,
                 {},
                 "claude-test",
+                None,
                 Path("."),
                 {"user_request": "画图分析销售", "final_answer": "结论。"},
             )
@@ -883,6 +926,7 @@ EOF""",
         self.assertEqual(captured["options"]["thinking"], {"type": "disabled"})
         self.assertEqual(captured["options"]["tools"], [])
         self.assertEqual(captured["options"]["allowed_tools"], [])
+        self.assertNotIn("max_budget_usd", captured["options"])
         self.assertIn("Perform one concise semantic review", captured["prompt"])
         self.assertIn("query_results", captured["prompt"])
         self.assertIn("reference facts only", captured["prompt"])
@@ -945,10 +989,10 @@ EOF""",
         prompt = build_background_task_resume_prompt({"toolu_1"}, 2)
 
         self.assertIn("toolu_1", prompt)
-        self.assertIn("现在不要提供最终回答", prompt)
-        self.assertIn("不要说你会等待", prompt)
-        self.assertIn("不要再次使用 run_in_background", prompt)
-        self.assertIn("用户配置语言", prompt)
+        self.assertIn("Do not provide a final answer yet", prompt)
+        self.assertIn("Do not say that you will wait", prompt)
+        self.assertIn("Do not use run_in_background again", prompt)
+        self.assertIn("user's configured language", prompt)
 
     def test_build_system_prompt_contains_final_review_policy(self):
         payload = ChatPayload(
@@ -962,10 +1006,10 @@ EOF""",
 
         prompt = build_system_prompt(payload)
 
-        self.assertIn("最终自查", prompt)
-        self.assertIn("产物审阅", prompt)
-        self.assertIn("审阅限制", prompt)
-        self.assertIn("用户原始逐字请求", prompt)
+        self.assertIn("Final self-review", prompt)
+        self.assertIn("Artifact review", prompt)
+        self.assertIn("Review limit", prompt)
+        self.assertIn("user's original verbatim request", prompt)
 
     def test_build_system_prompt_contains_execution_limits(self):
         payload = ChatPayload(
@@ -982,14 +1026,14 @@ EOF""",
 
         self.assertIn("max_turns=42", prompt)
         self.assertIn("API_TIMEOUT_MS=123000", prompt)
-        self.assertIn("单次 LLM/API 调用最多等待 123 秒", prompt)
+        self.assertIn("single LLM/API call may wait at most 123 seconds", prompt)
         self.assertIn('"max_iterations": 42', prompt)
         self.assertIn('"claude_sdk_max_turns": 42', prompt)
-        self.assertIn("绝不要使用带 run_in_background=true 的 Bash", prompt)
-        self.assertIn("每个已启动任务都必须在当前运行中保持可观察", prompt)
-        self.assertIn("单独的运行时校验 LLM judge 调用", prompt)
-        self.assertIn("不会改变主智能体 thinking 模式", prompt)
-        self.assertIn("强制语言约定", prompt)
+        self.assertIn("Never use Bash with run_in_background=true", prompt)
+        self.assertIn("Every started task must remain observable in the current run", prompt)
+        self.assertIn("Separate runtime validation LLM judge calls", prompt)
+        self.assertIn("does not change the main agent thinking mode", prompt)
+        self.assertIn("Mandatory language contract", prompt)
 
     def test_data_analysis_prompt_materializes_runtime_reference_path(self):
         payload = ChatPayload(
@@ -1038,11 +1082,11 @@ EOF""",
         self.assertIn("excel_style_apply_check", prompt)
         self.assertIn("disabled_apply_attributes", prompt)
         self.assertIn('{"disabled_apply_attributes":["applyBorder"],"reason":"用户明确要求不要框线"}', prompt)
-        self.assertIn("create_artifact 只是交付/安全步骤", prompt)
-        self.assertIn("不会重复内容/样式/版式质量审阅", prompt)
-        self.assertIn("不要在 review_artifacts 中重复确定性 PPTX 包/XML 检查", prompt)
-        self.assertIn("它不判断内容质量、用户请求匹配或视觉风格", prompt)
-        self.assertIn("文档处理最终交付检查", prompt)
+        self.assertIn("create_artifact is a delivery/safety step only", prompt)
+        self.assertIn("does not repeat content/style/layout quality review", prompt)
+        self.assertIn("Do not duplicate deterministic PPTX package/XML checks in review_artifacts", prompt)
+        self.assertIn("It does not judge content quality, user-request alignment or visual style", prompt)
+        self.assertIn("Document-processing final delivery check", prompt)
 
     def test_prepare_ppt_generation_workspace_materializes_open_renderer(self):
         payload = ChatPayload(
@@ -1072,8 +1116,8 @@ EOF""",
         self.assertEqual(spec["slides"][0]["layout"], "freeform")
         self.assertIn("custom_operations", spec["extensions"])
         self.assertIn("generated/ppt/render_pptx.py", prepared.xml)
-        self.assertIn("不限制最终风格", prepared.xml)
-        self.assertIn("不要通过 Bash heredoc", prepared.xml)
+        self.assertIn("does not constrain final style", prepared.xml)
+        self.assertIn("Do not create long PPT Python scripts through Bash heredocs", prepared.xml)
 
     def test_prepare_ppt_generation_workspace_only_for_document_agent(self):
         payload = ChatPayload(
@@ -1111,10 +1155,10 @@ EOF""",
         self.assertIn("generated/ppt/deck_spec.template.json", prompt)
         self.assertIn("generated/ppt/deck_spec.json", prompt)
         self.assertIn("generated/ppt/render_pptx.py", prompt)
-        self.assertIn("不限制最终风格", prompt)
-        self.assertIn("不要通过 Bash heredoc", prompt)
-        self.assertIn("不要在 review_artifacts 中重复确定性 PPTX 包/XML 检查", prompt)
-        self.assertIn("只确认目标产物已注册", prompt)
+        self.assertIn("does not constrain final style", prompt)
+        self.assertIn("Do not create long PPT Python scripts through Bash heredocs", prompt)
+        self.assertIn("Do not duplicate deterministic PPTX package/XML checks in review_artifacts", prompt)
+        self.assertIn("Only confirm that the intended artifacts were registered", prompt)
 
     def test_prepare_document_template_context_includes_ppt_files(self):
         payload = ChatPayload(
@@ -1308,7 +1352,7 @@ EOF""",
 
             other = store.run_dir / "other.pptx"
             other.write_bytes(repaired_pptx)
-            with self.assertRaisesRegex(RuntimeError, "调用 create_artifact 前需要先进行产物审阅"):
+            with self.assertRaisesRegex(RuntimeError, "Artifact review required"):
                 store.register_file("other.pptx", "other.pptx")
 
         self.assertNotEqual(first["sha256"], second["sha256"])

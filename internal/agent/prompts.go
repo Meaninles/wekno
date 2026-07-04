@@ -217,9 +217,9 @@ func renderPromptPlaceholders(template string, knowledgeBases []*KnowledgeBaseIn
 	if strings.Contains(result, "{{knowledge_bases}}") {
 		var replacement string
 		if len(knowledgeBases) == 0 {
-			replacement = "（本会话未绑定知识库）"
+			replacement = "(no knowledge bases bound to this session)"
 		} else {
-			replacement = "（请查看用户消息 `<runtime_context>` 内的 `<bound_knowledge_bases>`，其中包含当前绑定知识库列表及其 capabilities）"
+			replacement = "(see `<bound_knowledge_bases>` inside the user message's `<runtime_context>` for the current bound KB list and their capabilities)"
 		}
 		result = strings.ReplaceAll(result, "{{knowledge_bases}}", replacement)
 	}
@@ -235,29 +235,29 @@ func formatSkillsMetadata(skillsMetadata []*skills.SkillMetadata) string {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("\n### 可用 Skills（重要，请仔细阅读）\n\n")
-	builder.WriteString("**你必须针对每个用户请求主动考虑是否使用这些 skills。**\n\n")
+	builder.WriteString("\n### Available Skills (IMPORTANT - READ CAREFULLY)\n\n")
+	builder.WriteString("**You MUST actively consider using these skills for EVERY user request.**\n\n")
 
-	builder.WriteString("#### Skill 匹配协议（强制）\n\n")
-	builder.WriteString("回答任何用户问题前，请遵循以下检查清单：\n\n")
-	builder.WriteString("1. **扫描**：阅读下方每个 skill 的描述和触发条件\n")
-	builder.WriteString("2. **匹配**：检查用户意图是否匹配任何 skill 的触发条件（关键词、场景或任务类型）\n")
-	builder.WriteString("3. **加载**：如果发现匹配，在生成回答前调用 `read_skill(skill_name=\"...\")`\n")
-	builder.WriteString("4. **应用**：遵循该 skill 的指令，提供质量更高、结构更清晰的回答\n\n")
+	builder.WriteString("#### Skill Matching Protocol (MANDATORY)\n\n")
+	builder.WriteString("Before responding to ANY user query, follow this checklist:\n\n")
+	builder.WriteString("1. **SCAN**: Read each skill's description and trigger conditions below\n")
+	builder.WriteString("2. **MATCH**: Check if the user's intent matches ANY skill's triggers (keywords, scenarios, or task types)\n")
+	builder.WriteString("3. **LOAD**: If a match is found, call `read_skill(skill_name=\"...\")` BEFORE generating your response\n")
+	builder.WriteString("4. **APPLY**: Follow the skill's instructions to provide a higher-quality, structured response\n\n")
 
-	builder.WriteString("**关键要求**：适用时必须使用 skill。不要为了节省时间或 token 跳过 skills。\n\n")
+	builder.WriteString("**⚠️ CRITICAL**: Skill usage is MANDATORY when applicable. Do NOT skip skills to save time or tokens.\n\n")
 
-	builder.WriteString("#### 可用 Skills\n\n")
+	builder.WriteString("#### Available Skills\n\n")
 	for i, skill := range skillsMetadata {
 		builder.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, skill.Name))
 		builder.WriteString(fmt.Sprintf("   %s\n\n", skill.Description))
 	}
 
-	builder.WriteString("#### 工具参考\n\n")
-	builder.WriteString("- `read_skill(skill_name)`：加载完整 skill 指令（使用 skill 前必须调用）\n")
-	builder.WriteString("- `execute_skill_script(skill_name, script_path, args, input)`：运行 skill 随附的工具脚本\n")
-	builder.WriteString("  - `input`：通过 stdin 直接传入数据（当数据在内存中时使用，例如 JSON 字符串）\n")
-	builder.WriteString("  - `args`：命令行参数（只有在 skill 目录中确有实际文件路径时才使用 `--file`）\n")
+	builder.WriteString("#### Tool Reference\n\n")
+	builder.WriteString("- `read_skill(skill_name)`: Load full skill instructions (MUST call before using a skill)\n")
+	builder.WriteString("- `execute_skill_script(skill_name, script_path, args, input)`: Run utility scripts bundled with a skill\n")
+	builder.WriteString("  - `input`: Pass data directly via stdin (use this when you have data in memory, e.g. JSON string)\n")
+	builder.WriteString("  - `args`: Command-line arguments (only use `--file` if you have an actual file path in the skill directory)\n")
 
 	return builder.String()
 }
@@ -265,9 +265,9 @@ func formatSkillsMetadata(skillsMetadata []*skills.SkillMetadata) string {
 // renderPromptPlaceholdersWithStatus renders placeholders including web search status
 // Supported placeholders:
 //   - {{knowledge_bases}}
-//   - {{web_search_status}} -> "已启用" or "未启用"
+//   - {{web_search_status}} -> "Enabled" or "Disabled"
 //   - {{current_time}} -> current time string
-//   - {{language}} -> user language name (e.g. "简体中文", "English")
+//   - {{language}} -> user language name (e.g. "Chinese (Simplified)", "English")
 //   - {{skills}} -> formatted skills metadata (if any)
 func renderPromptPlaceholdersWithStatus(
 	template string,
@@ -279,9 +279,9 @@ func renderPromptPlaceholdersWithStatus(
 	// Knowledge bases need special formatting, so handle it first
 	result := renderPromptPlaceholders(template, knowledgeBases)
 
-	status := "未启用"
+	status := "Disabled"
 	if webSearchEnabled {
-		status = "已启用"
+		status = "Enabled"
 	}
 
 	result = types.RenderPromptPlaceholders(result, types.PlaceholderValues{
@@ -296,7 +296,7 @@ func renderPromptPlaceholdersWithStatus(
 // BuildSystemPromptOptions contains optional parameters for BuildSystemPrompt
 type BuildSystemPromptOptions struct {
 	SkillsMetadata []*skills.SkillMetadata
-	Language       string         // User language name for {{language}} placeholder (e.g. "简体中文")
+	Language       string         // User language name for {{language}} placeholder (e.g. "Chinese (Simplified)")
 	Config         *config.Config // Config for reading prompt templates; nil falls back to hardcoded defaults
 }
 

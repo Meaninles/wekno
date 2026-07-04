@@ -16,28 +16,28 @@ import (
 
 var readSkillTool = BaseTool{
 	name: ToolReadSkill,
-	description: `按需读取技能内容，了解专门能力。
+	description: `Read skill content on demand to learn specialized capabilities.
 
-## 用法
-- 当用户请求匹配某个可用技能的描述时使用此工具
-- 提供 skill_name 以加载技能的完整说明（SKILL.md 内容）
-- 可选提供 file_path，以读取技能目录内的其他文件
+## Usage
+- Use this tool when a user request matches an available skill's description
+- Provide the skill_name to load the skill's full instructions (SKILL.md content)
+- Optionally provide file_path to read additional files within the skill directory
 
-## 何时使用
-- 系统提示显示某个可用技能匹配用户请求时
-- 执行匹配技能描述的任务之前
-- 需要读取技能内的补充文档或参考文件时
+## When to Use
+- When the system prompt shows an available skill that matches the user's request
+- Before performing tasks that match a skill's description
+- To read additional documentation or reference files within a skill
 
-## 返回
-- 完成任务所需的技能说明和指引
-- 如果指定 file_path，则返回文件内容`,
+## Returns
+- Skill instructions and guidance for completing the task
+- File content if file_path is specified`,
 	schema: utils.GenerateSchema[ReadSkillInput](),
 }
 
 // ReadSkillInput defines the input parameters for the read_skill tool
 type ReadSkillInput struct {
-	SkillName string `json:"skill_name" jsonschema:"要读取的技能名称"`
-	FilePath  string `json:"file_path,omitempty" jsonschema:"技能目录内特定文件的可选相对路径"`
+	SkillName string `json:"skill_name" jsonschema:"Name of the skill to read"`
+	FilePath  string `json:"file_path,omitempty" jsonschema:"Optional relative path to a specific file within the skill directory"`
 }
 
 // ReadSkillTool allows the agent to read skill content on demand
@@ -64,7 +64,7 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 		logger.Errorf(ctx, "[Tool][ReadSkill] Failed to parse args: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("解析参数失败: %v", err),
+			Error:   fmt.Sprintf("Failed to parse args: %v", err),
 		}, nil
 	}
 
@@ -72,7 +72,7 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 	if input.SkillName == "" {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "需要提供 skill_name",
+			Error:   "skill_name is required",
 		}, nil
 	}
 
@@ -80,7 +80,7 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 	if t.skillManager == nil || !t.skillManager.IsEnabled() {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "技能未启用",
+			Error:   "Skills are not enabled",
 		}, nil
 	}
 
@@ -94,11 +94,11 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 			logger.Errorf(ctx, "[Tool][ReadSkill] Failed to read skill file: %v", err)
 			return &types.ToolResult{
 				Success: false,
-				Error:   fmt.Sprintf("读取技能文件失败: %v", err),
+				Error:   fmt.Sprintf("Failed to read skill file: %v", err),
 			}, nil
 		}
 
-		builder.WriteString(fmt.Sprintf("=== 技能文件: %s/%s ===\n\n", input.SkillName, input.FilePath))
+		builder.WriteString(fmt.Sprintf("=== Skill File: %s/%s ===\n\n", input.SkillName, input.FilePath))
 		builder.WriteString(content)
 
 		resultData["skill_name"] = input.SkillName
@@ -113,7 +113,7 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 			logger.Errorf(ctx, "[Tool][ReadSkill] Failed to load skill: %v", err)
 			return &types.ToolResult{
 				Success: false,
-				Error:   fmt.Sprintf("加载技能失败: %v", err),
+				Error:   fmt.Sprintf("Failed to load skill: %v", err),
 			}, nil
 		}
 
@@ -123,19 +123,19 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 			files = []string{} // Non-fatal error
 		}
 
-		builder.WriteString(fmt.Sprintf("=== 技能: %s ===\n\n", skill.Name))
-		builder.WriteString(fmt.Sprintf("**描述**: %s\n\n", skill.Description))
-		builder.WriteString("## 说明\n\n")
+		builder.WriteString(fmt.Sprintf("=== Skill: %s ===\n\n", skill.Name))
+		builder.WriteString(fmt.Sprintf("**Description**: %s\n\n", skill.Description))
+		builder.WriteString("## Instructions\n\n")
 		builder.WriteString(skill.Instructions)
 
 		// Add available files section
 		if len(files) > 1 { // More than just SKILL.md
-			builder.WriteString("\n\n## 可用文件\n\n")
-			builder.WriteString("此技能目录中有以下可用文件。使用带 `file_path` 的 `read_skill` 读取它们：\n\n")
+			builder.WriteString("\n\n## Available Files\n\n")
+			builder.WriteString("The following files are available in this skill directory. Use `read_skill` with `file_path` to read them:\n\n")
 			for _, file := range files {
 				if file != skills.SkillFileName { // Don't list SKILL.md again
 					if skills.IsScript(file) {
-						builder.WriteString(fmt.Sprintf("- `%s`（脚本，可执行）\n", file))
+						builder.WriteString(fmt.Sprintf("- `%s` (script - can be executed)\n", file))
 					} else {
 						builder.WriteString(fmt.Sprintf("- `%s`\n", file))
 					}

@@ -41,11 +41,11 @@ func renderIndexOverviewForAgent(resp *types.WikiIndexResponse) string {
 	}
 
 	typeLabels := map[string]string{
-		types.WikiPageTypeSummary:    "摘要",
-		types.WikiPageTypeEntity:     "实体",
-		types.WikiPageTypeConcept:    "概念",
-		types.WikiPageTypeSynthesis:  "综合",
-		types.WikiPageTypeComparison: "对比",
+		types.WikiPageTypeSummary:    "Summary",
+		types.WikiPageTypeEntity:     "Entity",
+		types.WikiPageTypeConcept:    "Concept",
+		types.WikiPageTypeSynthesis:  "Synthesis",
+		types.WikiPageTypeComparison: "Comparison",
 	}
 
 	nonEmpty := 0
@@ -58,7 +58,7 @@ func renderIndexOverviewForAgent(resp *types.WikiIndexResponse) string {
 			label = g.Type
 		}
 		if int64(len(g.Items)) < g.Total {
-			fmt.Fprintf(&sb, "\n## %s（共 %d，显示前 %d）\n\n", label, g.Total, len(g.Items))
+			fmt.Fprintf(&sb, "\n## %s (%d total, showing top %d)\n\n", label, g.Total, len(g.Items))
 		} else {
 			fmt.Fprintf(&sb, "\n## %s (%d)\n\n", label, g.Total)
 		}
@@ -82,9 +82,9 @@ func renderIndexOverviewForAgent(resp *types.WikiIndexResponse) string {
 	}
 
 	if nonEmpty == 0 {
-		sb.WriteString("\n*暂无 wiki 页面。请上传文档开始生成。*\n")
+		sb.WriteString("\n*No wiki pages yet. Upload documents to get started.*\n")
 	} else {
-		sb.WriteString("\n_如需探索任一类别下的更多页面，请带查询调用 wiki_search，或直接读取特定 slug。_\n")
+		sb.WriteString("\n_To explore more pages under any category, use wiki_search with a query, or read a specific slug directly._\n")
 	}
 	return sb.String()
 }
@@ -282,20 +282,20 @@ func NewWikiReadPageTool(
 	return &wikiReadPageTool{
 		BaseTool: NewBaseTool(
 			ToolWikiReadPage,
-			`按 slug 读取一个或多个 wiki 页面。返回完整 Markdown 内容、元数据和链接。
-当你知道特定 wiki 页面的 slug 时使用此工具（例如 "entity/acme-corp"、"concept/rag"）。
-当同一个 slug 存在于多个知识库时，会返回所有匹配页面（每个页面都带 knowledge_base_id）。传入 "knowledge_base_id" 可限制到特定知识库。`,
+			`Read one or more wiki pages by their slugs. Returns the full markdown content, metadata, and links.
+Use this to read specific wiki pages when you know their slug (e.g. "entity/acme-corp", "concept/rag").
+When the same slug exists in multiple knowledge bases, all matching pages are returned (each tagged with its knowledge_base_id). Pass "knowledge_base_id" to limit to a specific KB.`,
 			json.RawMessage(`{
   "type": "object",
   "properties": {
     "slugs": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "要读取的 wiki 页面 slug 列表（例如 ['entity/acme-corp', 'index']）"
+      "description": "List of wiki page slugs to read (e.g. ['entity/acme-corp', 'index'])"
     },
     "knowledge_base_id": {
       "type": "string",
-      "description": "可选：特定知识库 ID。如果省略，则从范围内每个 wiki 知识库读取该 slug（返回所有匹配项）。"
+      "description": "Optional: specific knowledge base ID. If omitted, reads the slug from every wiki KB in scope (all matches returned)."
     }
   },
   "required": ["slugs"]
@@ -321,7 +321,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 		KnowledgeBaseID string `json:"knowledge_base_id"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "参数无效: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Invalid parameters: " + err.Error()}, nil
 	}
 
 	var slugsToFetch []string
@@ -329,7 +329,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 	slugsToFetch = append(slugsToFetch, parseStringOrArray(params.Slug)...)
 
 	if len(slugsToFetch) == 0 {
-		return &types.ToolResult{Success: false, Error: "缺少 'slugs' 参数"}, nil
+		return &types.ToolResult{Success: false, Error: "Missing 'slugs' parameter"}, nil
 	}
 
 	// Build effective scope list. If the caller pinned a knowledge_base_id,
@@ -370,7 +370,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 
 			if seen {
 				// We already injected the summary for this link in this session (within the same KB)
-				descs = append(descs, fmt.Sprintf("[[%s]]（摘要已省略，本会话已见过）", s))
+				descs = append(descs, fmt.Sprintf("[[%s]] (summary omitted, already seen)", s))
 			} else {
 				if linkPage, err := t.wikiService.GetPageBySlug(ctx, kbID, s); err == nil && linkPage != nil {
 					descs = append(descs, fmt.Sprintf("[[%s]] (%s)", s, linkPage.Summary))
@@ -380,7 +380,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 			}
 		}
 		if len(descs) == 0 {
-			return []string{"（无）"}
+			return []string{"(none)"}
 		}
 		return descs
 	}
@@ -485,7 +485,7 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 			// exposed to the model as a tool argument).
 			passesScope, scopeErr := pagePassesWikiScope(ctx, page, sc, fetchTags)
 			if scopeErr != nil {
-				errs = append(errs, fmt.Sprintf("校验 KB %s 中 '%s' 的 wiki 范围失败: %v", actualKBID, slug, scopeErr))
+				errs = append(errs, fmt.Sprintf("Failed to validate wiki scope for '%s' in KB %s: %v", slug, actualKBID, scopeErr))
 				continue
 			}
 			if !passesScope {
@@ -510,11 +510,11 @@ func (t *wikiReadPageTool) Execute(ctx context.Context, args json.RawMessage) (*
 		if len(hits) == 0 {
 			if kbs := filteredOut[slug]; len(kbs) > 0 {
 				errs = append(errs, fmt.Sprintf(
-					"Wiki 页面 '%s' 存在于 %v，但其来源文档均不在用户固定范围内",
+					"Wiki page '%s' exists in %v but none of its source documents are within the scope pinned by the user",
 					slug, kbs,
 				))
 			} else {
-				errs = append(errs, fmt.Sprintf("未找到 Wiki 页面 '%s'", slug))
+				errs = append(errs, fmt.Sprintf("Wiki page '%s' not found", slug))
 			}
 			continue
 		}
@@ -574,31 +574,31 @@ func NewWikiSearchTool(
 	return &wikiSearchTool{
 		BaseTool: NewBaseTool(
 			ToolWikiSearch,
-			`使用 PostgreSQL POSIX 正则表达式搜索 wiki 页面（~* 操作符，不区分大小写）。
-强烈优先使用正则一次搜索多个概念，而不是简单纯文本查询。
-返回匹配页面的标题、slug 和摘要（每条都带 knowledge_base_id）。
-示例：
-- 交替（推荐）："stardust|skyvault"（匹配任一词）
-- 多词（推荐）："psionic.*engine"（按顺序匹配两个词）
-- 前缀匹配："^entity/.*"（查找所有实体）
-- 普通文本："engine"（匹配标题/内容/slug/摘要中的任意位置）
-重要：JSON 转义中，正则里的每个反斜杠都必须在 JSON 工具参数中写成 \\（例如搜索字面量 "C++" 要写 "C\\+\\+"，不要写 "C\+\+"；搜索 "\d+" 要写 "\\d+"，不要写 "\d+"）。普通的 "\+" / "\d" 等是非法 JSON 转义，会解析失败。
-当你不知道精确 slug 时，用此工具查找相关 wiki 页面。`,
+			`Search wiki pages using PostgreSQL POSIX regular expressions (~* operator, case-insensitive).
+STRONGLY PREFER using regex to search for multiple concepts at once rather than simple plain text queries.
+Returns matching pages with titles, slugs, and summaries (each tagged with its knowledge_base_id).
+Examples:
+- Alternation (RECOMMENDED): "stardust|skyvault" (matches either word)
+- Multiple terms (RECOMMENDED): "psionic.*engine" (matches both words in order)
+- Prefix matching: "^entity/.*" (finds all entities)
+- Plain text: "engine" (matches anywhere in title/content/slug/summary)
+IMPORTANT — JSON escaping: every backslash in a regex MUST be written as \\ inside the JSON tool arguments (e.g. to search for literal "C++" write "C\\+\\+", NOT "C\+\+"; for "\d+" write "\\d+"). Plain "\+" / "\d" etc. are invalid JSON escapes and will fail to parse.
+Use this to find relevant wiki pages when you don't know the exact slug.`,
 			json.RawMessage(`{
   "type": "object",
   "properties": {
     "queries": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "要执行的正则搜索查询列表"
+      "description": "List of regex search queries to run"
     },
     "limit": {
       "type": "integer",
-      "description": "每个查询最多返回的结果数（默认 10）"
+      "description": "Max results to return per query (default 10)"
     },
     "knowledge_base_id": {
       "type": "string",
-      "description": "可选：限制在范围内的单个知识库 ID。"
+      "description": "Optional: restrict search to a single knowledge base ID in scope."
     }
   },
   "required": ["queries"]
@@ -619,7 +619,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		KnowledgeBaseID string `json:"knowledge_base_id"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "参数无效: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Invalid parameters: " + err.Error()}, nil
 	}
 
 	var queriesToRun []string
@@ -627,7 +627,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	queriesToRun = append(queriesToRun, parseStringOrArray(params.Query)...)
 
 	if len(queriesToRun) == 0 {
-		return &types.ToolResult{Success: false, Error: "缺少 'queries' 参数"}, nil
+		return &types.ToolResult{Success: false, Error: "Missing 'queries' parameter"}, nil
 	}
 
 	if params.Limit <= 0 {
@@ -726,7 +726,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 
 			summary := p.Summary
 			if seen {
-				summary = "（摘要已省略，之前搜索中已见过）"
+				summary = "(summary omitted, already seen in previous search)"
 			}
 			fmt.Fprintf(&sb,
 				"<page>\n<knowledge_base_id>%s</knowledge_base_id>\n<link>[[%s|%s]]</link>\n<type>%s</type>%s\n<summary>%s</summary>%s\n</page>\n",

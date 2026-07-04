@@ -21,67 +21,67 @@ import (
 
 var knowledgeSearchTool = BaseTool{
 	name: ToolKnowledgeSearch,
-	description: `语义/向量搜索工具，用于按含义、意图和概念相关性检索知识。
+	description: `Semantic/vector search tool for retrieving knowledge by meaning, intent, and conceptual relevance.
 
-此工具使用 embedding 理解用户查询，并在知识库分块中查找语义相似的内容。
+This tool uses embeddings to understand the user's query and find semantically similar content across knowledge base chunks.
 
-## 用途
-适用于高层理解类任务，例如：
-- 概念解释
-- 主题概览
-- 基于推理的信息需求
-- 上下文驱动或意图驱动的检索
-- 无法通过字面关键词匹配回答的查询
+## Purpose
+Designed for high-level understanding tasks, such as:
+- conceptual explanations
+- topic overviews
+- reasoning-based information needs
+- contextual or intent-driven retrieval
+- queries that cannot be answered with literal keyword matching
 
-此工具按“含义”而不是精确文本搜索。即使用词不同，也能识别概念相关的分块。
+The tool searches by MEANING rather than exact text. It identifies chunks that are conceptually relevant even when the wording differs.
 
-## 此工具不做什么
-- 不执行精确关键词匹配
-- 不搜索特定命名实体
-- 不应用于字面查找任务
-- 不应接收很长的原始文本或用户消息作为查询
-- 不应用于定位特定字符串或错误码
+## What the Tool Does NOT Do
+- Does NOT perform exact keyword matching
+- Does NOT search for specific named entities
+- Should NOT be used for literal lookup tasks
+- Should NOT receive long raw text or user messages as queries
+- Should NOT be used to locate specific strings or error codes
 
-对于字面量、关键词或实体搜索，应使用其他工具。
+For literal/keyword/entity search, another tool should be used.
 
-## 必需输入行为
-"queries" 必须包含 **1 到 5 个简短、清晰的语义问题或概念陈述**，明确表达模型要检索的含义。
+## Required Input Behavior
+"queries" must contain **1–5 short, well-formed semantic questions or conceptual statements** that clearly express the meaning the model is trying to retrieve.
 
-每个 query 应代表一个**概念、想法、主题、解释或意图**，例如：
-- 抽象主题
-- 定义
-- 机制
-- 最佳实践
-- 比较
-- 如何/为什么类问题
+Each query should represent a **concept, idea, topic, explanation, or intent**, such as:
+- abstract topics
+- definitions
+- mechanisms
+- best practices
+- comparisons
+- how/why questions
 
-避免：
-- 关键词列表
-- 用户消息原始文本
-- 完整段落
-- 未处理输入
+Avoid:
+- keyword lists
+- raw text from user messages
+- full paragraphs
+- unprocessed input
 
-## 有效 query 形态示例（不是固定内容）：
-- “……的核心思想是什么”
-- “X 一般如何工作”
-- “解释……的目的”
-- “……背后的关键原则是什么”
-- “……概览”
+## Examples of valid query shapes (not content):
+- "What is the main idea of..."
+- "How does X work in general?"
+- "Explain the purpose of..."
+- "What are the key principles behind..."
+- "Overview of ..."
 
-## 参数
-- queries（必填）：1 到 5 个语义问题或概念陈述。
-  它们应反映你希望 embedding 捕捉的含义或主题。
-- knowledge_base_ids（可选）：限制搜索范围。
+## Parameters
+- queries (required): 1–5 semantic questions or conceptual statements.
+  These should reflect the meaning or topic you want embeddings to capture.
+- knowledge_base_ids (optional): limit the search scope.
 
-## 输出
-返回按语义相似度排序的分块，适用时会重新排序。
-结果表示概念相关性，而不是字面关键词重叠。`,
+## Output
+Returns chunks ranked by semantic similarity, reranked when applicable.  
+Results represent conceptual relevance, not literal keyword overlap.`,
 	schema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "queries": {
       "type": "array",
-      "description": "必填：1 到 5 个语义问题/主题（例如 ['什么是 RAG？', 'RAG 的好处']）",
+      "description": "REQUIRED: 1-5 semantic questions/topics (e.g., ['What is RAG?', 'RAG benefits'])",
       "items": {
         "type": "string"
       },
@@ -90,7 +90,7 @@ var knowledgeSearchTool = BaseTool{
     },
     "knowledge_base_ids": {
       "type": "array",
-      "description": "可选：要搜索的知识库 ID",
+      "description": "Optional: KB IDs to search",
       "items": {
         "type": "string"
       },
@@ -171,7 +171,7 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 		logger.Errorf(ctx, "[Tool][KnowledgeSearch] Failed to parse args: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("解析参数失败: %v", err),
+			Error:   fmt.Sprintf("Failed to parse args: %v", err),
 		}, err
 	}
 
@@ -208,7 +208,7 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 		logger.Errorf(ctx, "[Tool][KnowledgeSearch] No search targets available")
 		return &types.ToolResult{
 			Success: false,
-			Error:   "未指定知识库，且没有配置搜索目标",
+			Error:   "no knowledge bases specified and no search targets configured",
 		}, fmt.Errorf("no search targets available")
 	}
 
@@ -223,7 +223,7 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 		logger.Errorf(ctx, "[Tool][KnowledgeSearch] No queries provided")
 		return &types.ToolResult{
 			Success: false,
-			Error:   "需要提供 queries 参数",
+			Error:   "queries parameter is required",
 		}, fmt.Errorf("no queries provided")
 	}
 
@@ -743,45 +743,45 @@ func (t *KnowledgeSearchTool) rerankWithLLM(
 				passagesBuilder.WriteString("\n")
 			}
 			passagesBuilder.WriteString("─────────────────────────────────────────────────────────────\n")
-			passagesBuilder.WriteString(fmt.Sprintf("片段 %d:\n", i+1))
+			passagesBuilder.WriteString(fmt.Sprintf("Passage %d:\n", i+1))
 			passagesBuilder.WriteString("─────────────────────────────────────────────────────────────\n")
 			passagesBuilder.WriteString(content + "\n")
 		}
 
 		// Optimized prompt focused on retrieval matching and reranking
 		prompt := fmt.Sprintf(
-			`你是搜索结果重排序专家。你的任务是评估每段检索文本与用户搜索查询和信息需求的匹配程度。
+			`You are a search result reranking expert. Your task is to evaluate how well each retrieved passage matches the user's search query and information need.
 
-用户查询：%s
+User Query: %s
 
-任务：通过评估检索相关性，对这些搜索结果重新排序，即判断每段文本回答或关联该查询的程度。
+Your task: Rerank these search results by evaluating their retrieval relevance - how well each passage answers or relates to the query.
 
-评分标准（0.0 到 1.0）：
-- 1.0（0.9-1.0）：直接回答查询，包含所需关键信息，高度相关
-- 0.8（0.7-0.8）：强相关，提供大量相关信息
-- 0.6（0.5-0.6）：中等相关，包含部分相关信息但可能不完整
-- 0.4（0.3-0.4）：弱相关，与查询只有少量相关性
-- 0.2（0.1-0.2）：几乎不相关，大多无关
-- 0.0（0.0）：完全无关，与查询没有关系
+Scoring Criteria (0.0 to 1.0):
+- 1.0 (0.9-1.0): Directly answers the query, contains key information needed, highly relevant
+- 0.8 (0.7-0.8): Strongly related, provides substantial relevant information
+- 0.6 (0.5-0.6): Moderately related, contains some relevant information but may be incomplete
+- 0.4 (0.3-0.4): Weakly related, minimal relevance to the query
+- 0.2 (0.1-0.2): Barely related, mostly irrelevant
+- 0.0 (0.0): Completely irrelevant, no relation to the query
 
-评估因素：
-1. 查询-答案匹配：该段文本是否直接回应用户所问？
-2. 信息完整性：它是否提供足够信息来回答查询？
-3. 语义相关性：内容是否在语义上关联查询意图？
-4. 关键术语覆盖：是否覆盖查询中的重要术语/概念？
-5. 信息准确性：信息是否准确可信？
+Evaluation Factors:
+1. Query-Answer Match: Does the passage directly address what the user is asking?
+2. Information Completeness: Does it provide sufficient information to answer the query?
+3. Semantic Relevance: Does the content semantically relate to the query intent?
+4. Key Term Coverage: Does it cover important terms/concepts from the query?
+5. Information Accuracy: Is the information accurate and trustworthy?
 
-检索文本：
+Retrieved Passages:
 %s
 
-重要：精确返回 %d 个分数，每行一个，且严格使用以下格式：
-片段 1: X.XX
-片段 2: X.XX
-片段 3: X.XX
+IMPORTANT: Return exactly %d scores, one per line, in this exact format:
+Passage 1: X.XX
+Passage 2: X.XX
+Passage 3: X.XX
 ...
-片段 %d: X.XX
+Passage %d: X.XX
 
-只输出分数，不要解释或添加其他文本。`,
+Output only the scores, no explanations or additional text.`,
 			query,
 			passagesBuilder.String(),
 			len(batch),
@@ -791,7 +791,7 @@ func (t *KnowledgeSearchTool) rerankWithLLM(
 		messages := []chat.Message{
 			{
 				Role:    "system",
-				Content: "你是专注信息检索的专业搜索结果重排序专家。你评估检索文本在搜索场景中与用户查询的匹配程度。重点关注检索相关性：该文本是否回答查询、提供所需信息，并匹配用户的信息需求。始终只返回分数，不要解释。",
+				Content: "You are a professional search result reranking expert specializing in information retrieval. You evaluate how well retrieved passages match user queries in search scenarios. Focus on retrieval relevance: whether the passage answers the query, provides needed information, and matches the user's information need. Always respond with scores only, no explanations.",
 			},
 			{
 				Role:    "user",
@@ -1112,12 +1112,12 @@ func (t *KnowledgeSearchTool) formatOutput(
 		if len(queries) > 0 {
 			data["queries"] = queries
 		}
-		output := fmt.Sprintf("在 %d 个知识库中未找到相关内容。\n\n", len(kbsToSearch))
-		output += "=== ⚠️ 关键 - 下一步 ===\n"
-		output += "- ❌ 不要使用训练数据或通用知识回答\n"
-		output += "- ✅ 如果 web_search 已启用：必须使用 web_search 查找信息\n"
-		output += "- ✅ 如果 web_search 未启用：说明“我在知识库中未找到相关信息”\n"
-		output += "- 绝不要编造或推断答案，只使用检索到的内容\n"
+		output := fmt.Sprintf("No relevant content found in %d knowledge base(s).\n\n", len(kbsToSearch))
+		output += "=== ⚠️ CRITICAL - Next Steps ===\n"
+		output += "- ❌ DO NOT use training data or general knowledge to answer\n"
+		output += "- ✅ If web_search is enabled: You MUST use web_search to find information\n"
+		output += "- ✅ If web_search is disabled: State 'I couldn't find relevant information in the knowledge base'\n"
+		output += "- NEVER fabricate or infer answers - ONLY use retrieved content\n"
 
 		return &types.ToolResult{
 			Success: true,
@@ -1427,10 +1427,10 @@ func (t *KnowledgeSearchTool) getEnrichedPassage(ctx context.Context, result *ty
 	var imageTexts []string
 	for _, img := range imageInfos {
 		if img.Caption != "" {
-			imageTexts = append(imageTexts, fmt.Sprintf("图片说明：%s", img.Caption))
+			imageTexts = append(imageTexts, fmt.Sprintf("Image Caption: %s", img.Caption))
 		}
 		if img.OCRText != "" {
-			imageTexts = append(imageTexts, fmt.Sprintf("图片文字：%s", img.OCRText))
+			imageTexts = append(imageTexts, fmt.Sprintf("Image Text: %s", img.OCRText))
 		}
 	}
 

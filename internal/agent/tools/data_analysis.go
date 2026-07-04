@@ -21,9 +21,9 @@ import (
 
 var dataAnalysisTool = BaseTool{
 	name: ToolDataAnalysis,
-	description: "当知识内容是 CSV 或 Excel 文件时使用此工具。它会把数据加载到内存并执行 SQL 进行数据分析。" +
-		"对于包含多个工作表的 Excel 文件，每个工作表都会加载到同一张表中，并通过 '__sheet_name' 列暴露来源工作表名称，便于按工作表筛选或聚合。" +
-		"如果用户问题需要数据统计，请将问题转换为 SQL 并执行。",
+	description: "Use this tool when the knowledge is CSV or Excel files. It loads the data into memory and executes SQL for data analysis. " +
+		"For Excel files with multiple sheets, every sheet is loaded into the same table and the source sheet name is exposed as a '__sheet_name' column so you can filter/aggregate per sheet. " +
+		"If the user's question requires data statistics, convert the question into SQL and execute it.",
 	schema: utils.GenerateSchema[DataAnalysisInput](),
 }
 
@@ -99,7 +99,7 @@ func buildMissingColumnSuggestion(sqlErr error, schema *TableSchema) string {
 
 	for _, col := range schema.Columns {
 		if normalizeIdentifierForMatch(col.Name) == normalizedMissing {
-			return fmt.Sprintf("列 %q 不存在。你是不是想使用 %q？请使用 schema 中的精确列名。", missing, col.Name)
+			return fmt.Sprintf("Column %q does not exist. Did you mean %q? Please use the exact column name from schema.", missing, col.Name)
 		}
 	}
 
@@ -107,10 +107,10 @@ func buildMissingColumnSuggestion(sqlErr error, schema *TableSchema) string {
 }
 
 type DataAnalysisInput struct {
-	KnowledgeID    string `json:"knowledge_id" jsonschema:"要查询的知识 ID"`
-	Sql            string `json:"sql" jsonschema:"要在知识数据上执行的 SQL"`
-	ChartRequested bool   `json:"chart_requested" jsonschema:"仅当用户明确要求生成图表、绘图、可视化、柱状图、折线图或饼图时为 true"`
-	PreferredChart string `json:"preferred_chart,omitempty" jsonschema:"用户请求的可选图表类型：bar,line,pie,scatter"`
+	KnowledgeID    string `json:"knowledge_id" jsonschema:"id of the knowledge to query"`
+	Sql            string `json:"sql" jsonschema:"SQL to be executed on knowledge"`
+	ChartRequested bool   `json:"chart_requested" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 柱状图, 折线图, 饼图, 图表, or 可视化"`
+	PreferredChart string `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user: bar,line,pie,scatter"`
 }
 
 type DataAnalysisTool struct {
@@ -201,7 +201,7 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Failed to parse input args: %v", err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("解析输入参数失败: %v", err),
+			Error:   fmt.Sprintf("Failed to parse input args: %v", err),
 		}, err
 	}
 
@@ -210,7 +210,7 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Failed to load knowledge ID '%s': %v", input.KnowledgeID, err)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("加载知识 ID '%s' 失败: %v", input.KnowledgeID, err),
+			Error:   fmt.Sprintf("Failed to load knowledge ID '%s': %v", input.KnowledgeID, err),
 		}, err
 	}
 
@@ -234,7 +234,7 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Modification query rejected for session %s: %s", t.sessionID, input.Sql)
 		return &types.ToolResult{
 			Success: false,
-			Error:   "DuckDB 工具只支持只读查询（SELECT、SHOW、DESCRIBE、EXPLAIN、PRAGMA）。不允许执行修改操作（INSERT、UPDATE、DELETE、CREATE、DROP 等）。",
+			Error:   "DuckDB tool only supports read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN, PRAGMA). Modification operations (INSERT, UPDATE, DELETE, CREATE, DROP, etc.) are not allowed.",
 		}, fmt.Errorf("modification queries are not allowed")
 	}
 
@@ -249,7 +249,7 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] SQL validation failed for session %s: %v", t.sessionID, validation.Errors)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("SQL 校验失败: %v", validation.Errors),
+			Error:   fmt.Sprintf("SQL validation failed: %v", validation.Errors),
 		}, fmt.Errorf("SQL validation failed: %v", validation.Errors)
 	}
 
@@ -260,12 +260,12 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		if suggestion := buildMissingColumnSuggestion(err, schema); suggestion != "" {
 			return &types.ToolResult{
 				Success: false,
-				Error:   fmt.Sprintf("查询执行失败: %v。%s", err, suggestion),
+				Error:   fmt.Sprintf("Query execution failed: %v. %s", err, suggestion),
 			}, err
 		}
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("查询执行失败: %v", err),
+			Error:   fmt.Sprintf("Query execution failed: %v", err),
 		}, err
 	}
 
@@ -368,18 +368,18 @@ func (t *DataAnalysisTool) executeSingleQuery(ctx context.Context, sqlQuery stri
 func (t *DataAnalysisTool) formatQueryResults(results []map[string]string, query string) string {
 	var output strings.Builder
 
-	output.WriteString("=== DuckDB 查询结果 ===\n\n")
-	output.WriteString(fmt.Sprintf("执行的 SQL：%s\n\n", query))
-	output.WriteString(fmt.Sprintf("返回 %d 行\n\n", len(results)))
+	output.WriteString("=== DuckDB Query Results ===\n\n")
+	output.WriteString(fmt.Sprintf("Executed SQL: %s\n\n", query))
+	output.WriteString(fmt.Sprintf("Returned %d rows\n\n", len(results)))
 
 	if len(results) == 0 {
-		output.WriteString("未找到匹配记录。\n")
+		output.WriteString("No matching records found.\n")
 		return output.String()
 	}
 
-	output.WriteString("=== 数据详情 ===\n\n")
+	output.WriteString("=== Data Details ===\n\n")
 	if len(results) > 10 {
-		output.WriteString(fmt.Sprintf("当前显示全部 %d 条记录。为了提升性能，请考虑使用 LIMIT 子句限制结果数量。\n\n", len(results)))
+		output.WriteString(fmt.Sprintf("Showing all %d records. Consider using a LIMIT clause to restrict the result count for better performance.\n\n", len(results)))
 	}
 
 	// Write each record as a separate JSON line
@@ -388,7 +388,7 @@ func (t *DataAnalysisTool) formatQueryResults(results []map[string]string, query
 
 		// Remove the trailing newline added by Encode
 		recordStr := strings.Trim(string(recordBytes), "\n")
-		output.WriteString(fmt.Sprintf("记录 %d: %s\n", i+1, recordStr))
+		output.WriteString(fmt.Sprintf("record %d: %s\n", i+1, recordStr))
 	}
 
 	return output.String()
@@ -911,10 +911,10 @@ func (t *DataAnalysisTool) TableName(knowledge *types.Knowledge) string {
 // buildSchemaDescription builds a formatted schema description
 func (t *TableSchema) Description() string {
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("表名: %s\n", t.TableName))
-	builder.WriteString(fmt.Sprintf("列数: %d\n", len(t.Columns)))
-	builder.WriteString(fmt.Sprintf("行数: %d\n\n", t.RowCount))
-	builder.WriteString("列信息:\n")
+	builder.WriteString(fmt.Sprintf("Table name: %s\n", t.TableName))
+	builder.WriteString(fmt.Sprintf("Columns: %d\n", len(t.Columns)))
+	builder.WriteString(fmt.Sprintf("Rows: %d\n\n", t.RowCount))
+	builder.WriteString("Column info:\n")
 
 	for _, col := range t.Columns {
 		builder.WriteString(fmt.Sprintf("- %s (%s)\n", col.Name, col.Type))

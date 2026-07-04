@@ -13,50 +13,50 @@ import (
 
 var getDocumentInfoTool = BaseTool{
 	name: ToolGetDocumentInfo,
-	description: `检索文档的详细元数据信息。
+	description: `Retrieve detailed metadata information about documents.
 
-## 何时使用
+## When to Use
 
-在以下场景使用此工具：
-- 需要了解文档基本信息（标题、类型、大小等）
-- 检查文档是否存在且可用
-- 批量查询多个文档的元数据
-- 了解文档处理状态
+Use this tool when:
+- Need to understand document basic information (title, type, size, etc.)
+- Check if document exists and is available
+- Batch query metadata for multiple documents
+- Understand document processing status
 
-不要在以下场景使用：
-- 需要文档内容（使用 knowledge_search）
-- 需要特定文本分块（搜索结果已经包含完整内容）
-
-
-## 返回信息
-
-- 基本信息：标题、描述、来源类型
-- 文件信息：文件名、类型、大小
-- 处理状态：是否已处理、分块数量
-- 元数据：自定义标签和属性
+Do not use when:
+- Need document content (use knowledge_search)
+- Need specific text chunks (search results already contain full content)
 
 
-## 注意事项
+## Returned Information
 
-- 并发查询多个文档可获得更好性能
-- 返回完整文档元数据，而不只是标题
-- 可检查文档处理状态（parse_status）
+- Basic info: title, description, source type
+- File info: filename, type, size
+- Processing status: whether processed, chunk count
+- Metadata: custom tags and properties
+
+
+## Notes
+
+- Concurrent query for multiple documents provides better performance
+- Returns complete document metadata, not just title
+- Can check document processing status (parse_status)
 
 ## IDs
-- knowledge_ids：普通文档 knowledges
-- faq_ids：单条 FAQ 条目。返回标准问题和答案，而不是容器标题。`,
+- knowledge_ids: regular documents knowledges
+- faq_ids: individual FAQ entries. Returns the standard question and answers, not the container title.`,
 	schema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "knowledge_ids": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "普通文档的 Document/knowledge ID"
+      "description": "Document/knowledge IDs for regular documents"
     },
     "faq_ids": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "FAQ 条目 ID（等于 grep_chunks 返回的 chunk_id）。查询单条 FAQ 问答时用它代替 knowledge_ids。"
+      "description": "FAQ entry IDs (= chunk_id from grep_chunks). Use instead of knowledge_ids for a single FAQ Q&A."
     }
   }
 }`),
@@ -98,7 +98,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 	if err := json.Unmarshal(args, &input); err != nil {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("解析参数失败: %v", err),
+			Error:   fmt.Sprintf("Failed to parse args: %v", err),
 		}, err
 	}
 
@@ -107,7 +107,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 	if len(knowledgeIDs) == 0 && len(faqIDs) == 0 {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "需要提供 knowledge_ids 或 faq_ids（非空数组）",
+			Error:   "knowledge_ids or faq_ids is required (non-empty array)",
 		}, fmt.Errorf("missing ids")
 	}
 
@@ -134,13 +134,13 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			chunk, err := t.chunkService.GetChunkByIDOnly(ctx, id)
 			if err != nil || chunk == nil {
 				mu.Lock()
-				results["faq:"+id] = &docInfo{err: fmt.Errorf("未找到 FAQ 条目: %v", err)}
+				results["faq:"+id] = &docInfo{err: fmt.Errorf("faq entry not found: %v", err)}
 				mu.Unlock()
 				return
 			}
 			if !t.searchTargets.ContainsKB(chunk.KnowledgeBaseID) {
 				mu.Lock()
-				results["faq:"+id] = &docInfo{err: fmt.Errorf("无法访问知识库 %s", chunk.KnowledgeBaseID)}
+				results["faq:"+id] = &docInfo{err: fmt.Errorf("knowledge base %s is not accessible", chunk.KnowledgeBaseID)}
 				mu.Unlock()
 				return
 			}
@@ -148,9 +148,9 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			if scopeErr != nil || !allowed {
 				mu.Lock()
 				if scopeErr != nil {
-					results["faq:"+id] = &docInfo{err: fmt.Errorf("校验 FAQ 范围失败: %v", scopeErr)}
+					results["faq:"+id] = &docInfo{err: fmt.Errorf("failed to validate FAQ scope: %v", scopeErr)}
 				} else {
-					results["faq:"+id] = &docInfo{err: fmt.Errorf("FAQ 条目 %s 不在当前 @mention 范围内", id)}
+					results["faq:"+id] = &docInfo{err: fmt.Errorf("FAQ entry %s is not within the current @mention scope", id)}
 				}
 				mu.Unlock()
 				return
@@ -175,7 +175,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			if err != nil {
 				mu.Lock()
 				results[id] = &docInfo{
-					err: fmt.Errorf("获取文档信息失败: %v", err),
+					err: fmt.Errorf("failed to get document info: %v", err),
 				}
 				mu.Unlock()
 				return
@@ -185,7 +185,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			if !t.searchTargets.ContainsKB(knowledge.KnowledgeBaseID) {
 				mu.Lock()
 				results[id] = &docInfo{
-					err: fmt.Errorf("无法访问知识库 %s", knowledge.KnowledgeBaseID),
+					err: fmt.Errorf("knowledge base %s is not accessible", knowledge.KnowledgeBaseID),
 				}
 				mu.Unlock()
 				return
@@ -194,9 +194,9 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			if scopeErr != nil || !allowed {
 				mu.Lock()
 				if scopeErr != nil {
-					results[id] = &docInfo{err: fmt.Errorf("校验文档范围失败: %v", scopeErr)}
+					results[id] = &docInfo{err: fmt.Errorf("failed to validate document scope: %v", scopeErr)}
 				} else {
-					results[id] = &docInfo{err: fmt.Errorf("文档 %s 不在当前 @mention 范围内", knowledge.ID)}
+					results[id] = &docInfo{err: fmt.Errorf("document %s is not within the current @mention scope", knowledge.ID)}
 				}
 				mu.Unlock()
 				return
@@ -213,7 +213,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			if err != nil {
 				mu.Lock()
 				results[id] = &docInfo{
-					err: fmt.Errorf("获取文档信息失败: %v", err),
+					err: fmt.Errorf("failed to get document info: %v", err),
 				}
 				mu.Unlock()
 				return
@@ -238,7 +238,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 	for _, knowledgeID := range knowledgeIDs {
 		result := results[knowledgeID]
 		if result == nil {
-			errors = append(errors, fmt.Sprintf("%s: 未找到", knowledgeID))
+			errors = append(errors, fmt.Sprintf("%s: not found", knowledgeID))
 			continue
 		}
 		if result.err != nil {
@@ -254,7 +254,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 		result := results["faq:"+faqID]
 		if result == nil {
-			errors = append(errors, fmt.Sprintf("faq:%s: 未找到", faqID))
+			errors = append(errors, fmt.Sprintf("faq:%s: not found", faqID))
 			continue
 		}
 		if result.err != nil {
@@ -267,15 +267,15 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 	if len(successDocs) == 0 {
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("未能检索到任何文档信息。错误: %v", errors),
+			Error:   fmt.Sprintf("Failed to retrieve any document info. Errors: %v", errors),
 		}, fmt.Errorf("all document retrievals failed")
 	}
 
-	output := "=== 文档信息 ===\n\n"
-	output += fmt.Sprintf("成功检索 %d / %d 个条目\n\n", len(successDocs), requested)
+	output := "=== Document Info ===\n\n"
+	output += fmt.Sprintf("Successfully retrieved %d / %d entries\n\n", len(successDocs), requested)
 
 	if len(errors) > 0 {
-		output += "=== 部分失败 ===\n"
+		output += "=== Partial Failures ===\n"
 		for _, errMsg := range errors {
 			output += fmt.Sprintf("  - %s\n", errMsg)
 		}
@@ -284,7 +284,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 
 	formattedDocs := make([]map[string]interface{}, 0, len(successDocs))
 	for i, doc := range successDocs {
-		output += fmt.Sprintf("[条目 #%d]\n", i+1)
+		output += fmt.Sprintf("[Entry #%d]\n", i+1)
 
 		if doc.chunk != nil {
 			formatted := formatFAQEntryInfo(&output, doc.chunk, doc.faqMeta)
@@ -294,26 +294,26 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 
 		k := doc.knowledge
 		output += fmt.Sprintf("  ID:           %s\n", k.ID)
-		output += fmt.Sprintf("  标题:         %s\n", k.Title)
+		output += fmt.Sprintf("  Title:        %s\n", k.Title)
 
 		if k.Description != "" {
-			output += fmt.Sprintf("  描述:         %s\n", k.Description)
+			output += fmt.Sprintf("  Description:  %s\n", k.Description)
 		}
 
-		output += fmt.Sprintf("  来源:         %s\n", formatSource(k.Type, k.Source))
+		output += fmt.Sprintf("  Source:       %s\n", formatSource(k.Type, k.Source))
 
 		if k.FileName != "" {
-			output += fmt.Sprintf("  文件名:       %s\n", k.FileName)
-			output += fmt.Sprintf("  文件类型:     %s\n", k.FileType)
-			output += fmt.Sprintf("  文件大小:     %s\n", formatFileSize(k.FileSize))
+			output += fmt.Sprintf("  File Name:    %s\n", k.FileName)
+			output += fmt.Sprintf("  File Type:    %s\n", k.FileType)
+			output += fmt.Sprintf("  File Size:    %s\n", formatFileSize(k.FileSize))
 		}
 
-		output += fmt.Sprintf("  解析状态:     %s\n", formatParseStatus(k.ParseStatus))
-		output += fmt.Sprintf("  分块数量:     %d\n", doc.chunkCount)
+		output += fmt.Sprintf("  Parse Status: %s\n", formatParseStatus(k.ParseStatus))
+		output += fmt.Sprintf("  Chunk Count:  %d\n", doc.chunkCount)
 
 		if k.Metadata != nil {
 			if metadata, err := k.Metadata.Map(); err == nil && len(metadata) > 0 {
-				output += "  元数据:\n"
+				output += "  Metadata:\n"
 				for key, value := range metadata {
 					output += fmt.Sprintf("    - %s: %v\n", key, value)
 				}
@@ -365,28 +365,28 @@ func formatFAQEntryInfo(output *string, chunk *types.Chunk, meta *types.FAQChunk
 		title = strings.TrimSpace(meta.StandardQuestion)
 	}
 	if title == "" {
-		title = "FAQ 条目"
+		title = "FAQ Entry"
 	}
 
 	*output += fmt.Sprintf("  FAQ ID:       %s\n", chunk.ID)
-	*output += fmt.Sprintf("  问题:         %s\n", title)
+	*output += fmt.Sprintf("  Question:     %s\n", title)
 	if chunk.KnowledgeID != "" {
-		*output += fmt.Sprintf("  容器 ID:      %s\n", chunk.KnowledgeID)
+		*output += fmt.Sprintf("  Container ID: %s\n", chunk.KnowledgeID)
 	}
 	if meta != nil && len(meta.Answers) > 0 {
-		*output += "  答案:\n"
+		*output += "  Answers:\n"
 		for _, ans := range meta.Answers {
 			*output += fmt.Sprintf("    - %s\n", ans)
 		}
 	}
 	if meta != nil && len(meta.SimilarQuestions) > 0 {
 		display, omitted := truncateSimilarQuestionsForDisplay(meta.SimilarQuestions)
-		*output += "  相似问题:\n"
+		*output += "  Similar Questions:\n"
 		for _, sq := range display {
 			*output += fmt.Sprintf("    - %s\n", sq)
 		}
 		if omitted > 0 {
-			*output += fmt.Sprintf("    ... 另有 %d 条已省略\n", omitted)
+			*output += fmt.Sprintf("    ... and %d more omitted\n", omitted)
 		}
 	}
 	*output += "\n"
@@ -412,11 +412,11 @@ func formatFAQEntryInfo(output *string, chunk *types.Chunk, meta *types.FAQChunk
 func formatSource(knowledgeType, source string) string {
 	switch knowledgeType {
 	case "file":
-		return "文件上传"
+		return "File Upload"
 	case "url":
 		return fmt.Sprintf("URL: %s", source)
 	case "passage":
-		return "文本输入"
+		return "Text Input"
 	default:
 		return knowledgeType
 	}
@@ -441,13 +441,13 @@ func formatFileSize(size int64) string {
 func formatParseStatus(status string) string {
 	switch status {
 	case "pending":
-		return "待处理"
+		return "Pending"
 	case "processing":
-		return "处理中"
+		return "Processing"
 	case "completed", "success":
-		return "已完成"
+		return "Completed"
 	case "failed":
-		return "失败"
+		return "Failed"
 	default:
 		return status
 	}

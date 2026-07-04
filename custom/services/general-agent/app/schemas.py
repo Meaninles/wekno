@@ -22,6 +22,8 @@ class LLMConfig(BaseModel):
     base_url: str = ""
     api_key: str = ""
     provider: str = ""
+    auth_type: str = ""
+    api_key_helper: str = ""
 
 
 class RuntimeToolSpec(BaseModel):

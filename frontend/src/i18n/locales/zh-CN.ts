@@ -2764,6 +2764,11 @@ export default {
       dimensionOverrideDesc: "仅在确认该模型支持 dimensions 参数时开启；默认只使用检测到的实际维度。",
       supportsVisionLabel: "支持视觉/多模态",
       supportsVisionDesc: "模型是否支持图片等多模态输入",
+      generalAgentClaudeBaseUrlLabel: "Anthropic 兼容接口（通用智能体，可选）",
+      generalAgentClaudeBaseUrlPlaceholder: "例如：http://model-gateway:30001/anthropic",
+      generalAgentClaudeBaseUrlDesc: "仅供通用智能体、文档处理、数据分析等 Claude SDK 运行时使用。Claude SDK 的接口地址和 API Key 均来自当前模型配置；本地无鉴权接口可不配置 API Key。",
+      asrResponseFormatLabel: "ASR 响应格式",
+      asrResponseFormatDesc: "发送到 /v1/audio/transcriptions 的 response_format。默认 verbose_json；部分兼容服务只支持 json。",
       thinkingControlLabel: "思考模式参数格式",
       thinkingControlDesc:
         "决定智能体「思考模式」开/关时如何写入 API。已尝试按厂商/模型预选，若与实际情况不符请按 API 文档手动修改；选「不写入」时，智能体「思考模式」开关不生效。",

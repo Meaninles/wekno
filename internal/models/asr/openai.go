@@ -26,6 +26,7 @@ type OpenAIASR struct {
 	client    *openai.Client
 	baseURL   string
 	language  string
+	format    openai.AudioResponseFormat
 }
 
 // NewOpenAIASR creates an OpenAI-compatible ASR instance.
@@ -49,6 +50,7 @@ func NewOpenAIASR(config *Config) (*OpenAIASR, error) {
 		client:    openai.NewClientWithConfig(apiCfg),
 		baseURL:   config.BaseURL,
 		language:  config.Language,
+		format:    normalizeAudioResponseFormat(config.ResponseFormat),
 	}, nil
 }
 
@@ -70,7 +72,7 @@ func (s *OpenAIASR) Transcribe(ctx context.Context, audioBytes []byte, fileName 
 		Model:    s.modelName,
 		FilePath: fileName,
 		Reader:   bytes.NewReader(audioBytes),
-		Format:   openai.AudioResponseFormatVerboseJSON,
+		Format:   s.format,
 	}
 
 	if s.language != "" {
@@ -108,6 +110,25 @@ func (s *OpenAIASR) Transcribe(ctx context.Context, audioBytes []byte, fileName 
 
 func (s *OpenAIASR) GetModelName() string { return s.modelName }
 func (s *OpenAIASR) GetModelID() string   { return s.modelID }
+
+func normalizeAudioResponseFormat(format string) openai.AudioResponseFormat {
+	switch strings.TrimSpace(strings.ToLower(format)) {
+	case "":
+		return openai.AudioResponseFormatVerboseJSON
+	case "json":
+		return openai.AudioResponseFormatJSON
+	case "text":
+		return openai.AudioResponseFormatText
+	case "srt":
+		return openai.AudioResponseFormatSRT
+	case "verbose_json":
+		return openai.AudioResponseFormatVerboseJSON
+	case "vtt":
+		return openai.AudioResponseFormatVTT
+	default:
+		return openai.AudioResponseFormat(format)
+	}
+}
 
 // DetectAudioFormat returns a file extension hint for the given audio bytes.
 func DetectAudioFormat(data []byte, fileName string) string {

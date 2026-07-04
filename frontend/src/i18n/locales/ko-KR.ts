@@ -2741,6 +2741,9 @@ export default {
       dimensionOverrideDesc: "제공자 문서에서 이 모델이 dimensions 매개변수를 지원한다고 확인한 경우에만 켜세요.",
       supportsVisionLabel: "비전/멀티모달 지원",
       supportsVisionDesc: "모델의 이미지 등 멀티모달 입력 지원 여부",
+      asrResponseFormatLabel: "ASR 응답 형식",
+      asrResponseFormatDesc:
+        "/v1/audio/transcriptions로 보내는 response_format입니다. 기본값은 verbose_json이며, 일부 호환 서비스는 json만 지원합니다.",
       thinkingControlLabel: "사고 모드 매개변수 형식",
       thinkingControlDesc:
         "에이전트 「사고 모드」 켜기/끄기 시 API에 어떻게 기록할지 결정합니다. 벤더/모델에 따라 미리 선택되며, 실제 API와 다르면 문서에 맞게 수정하세요. 「전송 안 함」을 선택하면 에이전트 「사고 모드」 스위치가 효과가 없습니다.",

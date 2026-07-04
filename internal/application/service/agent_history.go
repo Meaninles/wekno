@@ -216,7 +216,7 @@ func filterNonTerminalToolCalls(calls []types.ToolCall) []types.ToolCall {
 }
 
 // toolCallOutput returns the textual content to use for a historical tool
-// message: the recorded Output on success, or an error line otherwise so
+// message: the recorded Output on success, or an "Error: …" line otherwise so
 // the model can tell that an earlier tool call failed.
 func toolCallOutput(tc types.ToolCall) string {
 	if tc.Result == nil {
@@ -224,9 +224,9 @@ func toolCallOutput(tc types.ToolCall) string {
 	}
 	if !tc.Result.Success {
 		if tc.Result.Error != "" {
-			return "错误: " + tc.Result.Error
+			return "Error: " + tc.Result.Error
 		}
-		return "错误: 工具调用失败"
+		return "Error: tool call failed"
 	}
 	return agenttools.CompactToolOutputForHistory(tc.Name, tc.Result)
 }

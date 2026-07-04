@@ -28,10 +28,7 @@ Key environment variables:
 - `CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS`: LLM request timeout.
 - `CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS`: streaming idle timeout.
 - `CUSTOM_GENERAL_AGENT_MAX_TURNS`: fallback max turns when agent config does not set `max_iterations`.
-- `CUSTOM_GENERAL_AGENT_MAX_BUDGET_USD`: Claude Agent SDK run budget guard.
-- `CUSTOM_GENERAL_AGENT_CLAUDE_MODEL_NAME`: optional override for the Claude/Anthropic-compatible runtime model name. Defaults to the selected WeKnora chat model name or its `remote_model_name`.
-- `CUSTOM_GENERAL_AGENT_CLAUDE_BASE_URL`: optional override for the Anthropic-compatible endpoint. If omitted, Go derives a dedicated endpoint for known providers such as Anthropic, DeepSeek and Zhipu/GLM, reusing the selected model API key.
-- `CUSTOM_GENERAL_AGENT_CLAUDE_PROVIDER`: optional provider marker; normally `anthropic`.
+- Claude SDK model name, Anthropic-compatible endpoint, and API key are resolved from the selected model in WeKnora model management. Configure `extra_config.general_agent_claude_base_url` on generic/local models that need a dedicated Anthropic-compatible endpoint; the selected model's encrypted API key is reused when configured. If that model intentionally has no API key, Go marks the run as `api_key_helper` auth and the sidecar passes a no-auth placeholder through Claude Code's `apiKeyHelper` setting so the SDK can start.
 
 MCP test fixtures to configure in WeKnora for acceptance:
 

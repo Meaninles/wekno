@@ -216,9 +216,9 @@ func CompactToolOutputForHistory(toolName string, result *types.ToolResult) stri
 	}
 	if !result.Success {
 		if result.Error != "" {
-			return "错误: " + result.Error
+			return "Error: " + result.Error
 		}
-		return "错误: 工具调用失败"
+		return "Error: tool call failed"
 	}
 	if result.Output != "" && !ShouldOmitRawToolOutput(toolName, result.Data) {
 		return result.Output
@@ -229,9 +229,9 @@ func CompactToolOutputForHistory(toolName string, result *types.ToolResult) stri
 func compactToolSummary(success bool, errMsg string, data map[string]interface{}) string {
 	if !success {
 		if errMsg != "" {
-			return "错误: " + errMsg
+			return "Error: " + errMsg
 		}
-		return "错误: 工具调用失败"
+		return "Error: tool call failed"
 	}
 	switch stringField(data, "display_type") {
 	case "knowledge_chunks_list":
@@ -242,13 +242,13 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 		fetched := intField(data, "fetched_chunks")
 		total := intField(data, "total_chunks")
 		if q := stringField(data, "faq_question"); q != "" {
-			return fmt.Sprintf("已加载 FAQ 条目：%s（内容已从历史中省略）", q)
+			return fmt.Sprintf("Loaded FAQ entry: %s (content omitted from history)", q)
 		}
 		if title != "" && total > 0 {
-			return fmt.Sprintf("已从 %s 列出 %d/%d 个分块（内容已从历史中省略）", title, fetched, total)
+			return fmt.Sprintf("Listed %d/%d chunks from %s (content omitted from history)", fetched, total, title)
 		}
 		if title != "" {
-			return fmt.Sprintf("已列出 %s 的分块（内容已从历史中省略）", title)
+			return fmt.Sprintf("Listed chunks from %s (content omitted from history)", title)
 		}
 	case "grep_results":
 		chunks := intField(data, "total_matches")
@@ -257,7 +257,7 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 			docs = intField(data, "result_count")
 		}
 		if chunks > 0 {
-			return fmt.Sprintf("关键词搜索在 %d 个文档中找到 %d 个匹配分块（详情已从历史中省略）", docs, chunks)
+			return fmt.Sprintf("Keyword search found %d matching chunks across %d document(s) (details omitted from history)", chunks, docs)
 		}
 	case "search_results":
 		count := intField(data, "result_count")
@@ -265,22 +265,22 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 			count = intField(data, "count")
 		}
 		if count > 0 {
-			return fmt.Sprintf("语义搜索返回 %d 条结果（详情已从历史中省略）", count)
+			return fmt.Sprintf("Semantic search returned %d result(s) (details omitted from history)", count)
 		}
 	case "db_catalog":
 		count := intField(data, "count")
-		return fmt.Sprintf("数据库目录匹配 %d 张表", count)
+		return fmt.Sprintf("Database catalog matched %d table(s)", count)
 	case "db_schema":
 		count := intField(data, "count")
-		return fmt.Sprintf("已加载 %d 张表的数据库 schema", count)
+		return fmt.Sprintf("Loaded database schema for %d table(s)", count)
 	case "structured_analysis_result":
 		rows := intField(data, "row_count")
-		return fmt.Sprintf("结构化数据分析返回 %d 行", rows)
+		return fmt.Sprintf("Structured data analysis returned %d row(s)", rows)
 	}
 	if displayType := stringField(data, "display_type"); displayType != "" {
-		return fmt.Sprintf("工具已完成（%s；载荷已从历史中省略）", displayType)
+		return fmt.Sprintf("Tool completed (%s; payload omitted from history)", displayType)
 	}
-	return "工具已完成（载荷已从历史中省略）"
+	return "Tool completed (payload omitted from history)"
 }
 
 func stringField(data map[string]interface{}, key string) string {
@@ -614,6 +614,13 @@ func sanitizeRows(value interface{}, maxRows int) []map[string]interface{} {
 }
 
 func sanitizeColumns(value interface{}, maxItems int) []map[string]interface{} {
+	if columns := sanitizeMapList(value, maxItems, []string{"name", "type", "semantic_type"}, map[string]int{
+		"name":          160,
+		"type":          120,
+		"semantic_type": 120,
+	}); len(columns) > 0 {
+		return columns
+	}
 	if stringsList := sanitizeStringList(value, maxItems, 120); len(stringsList) > 0 {
 		out := make([]map[string]interface{}, 0, len(stringsList))
 		for _, name := range stringsList {
@@ -621,11 +628,7 @@ func sanitizeColumns(value interface{}, maxItems int) []map[string]interface{} {
 		}
 		return out
 	}
-	return sanitizeMapList(value, maxItems, []string{"name", "type", "semantic_type"}, map[string]int{
-		"name":          160,
-		"type":          120,
-		"semantic_type": 120,
-	})
+	return nil
 }
 
 func sanitizeChartSpec(value interface{}) map[string]interface{} {
@@ -633,9 +636,131 @@ func sanitizeChartSpec(value interface{}) map[string]interface{} {
 	if !ok {
 		return nil
 	}
-	out := copyFields(m, "eligible", "default_type", "x", "reason")
+	out := copyFields(m,
+		"eligible", "id", "type", "default_type", "x", "group", "value",
+		"reason", "language", "labels_locale", "table_visible", "explicit_chart",
+		"chart_title", "title",
+	)
 	if y := sanitizeStringList(m["y"], clientListLimit, 160); len(y) > 0 {
 		out["y"] = y
+	}
+	if secondaryY := sanitizeStringList(m["secondary_y"], clientListLimit, 160); len(secondaryY) > 0 {
+		out["secondary_y"] = secondaryY
+	}
+	if values := sanitizeStringList(m["values"], clientListLimit, 160); len(values) > 0 {
+		out["values"] = values
+	}
+	if contract := sanitizeChartContract(m["contract"]); len(contract) > 0 {
+		out["contract"] = contract
+	}
+	if validation := sanitizeChartValidation(m["validation"]); len(validation) > 0 {
+		out["validation"] = validation
+	}
+	return out
+}
+
+func sanitizeChartContract(value interface{}) map[string]interface{} {
+	m, ok := mapItem(value)
+	if !ok {
+		return nil
+	}
+	out := copyFields(m, "id", "type")
+	for _, key := range []string{
+		"intent", "encoding", "transform", "visual_scope", "evidence_scope", "display", "metadata",
+	} {
+		if sanitized := sanitizeJSONLike(m[key], 4); sanitized != nil {
+			out[key] = sanitized
+		}
+	}
+	return out
+}
+
+func sanitizeChartValidation(value interface{}) map[string]interface{} {
+	m, ok := mapItem(value)
+	if !ok {
+		return nil
+	}
+	out := copyFields(m, "status")
+	if issues := sanitizeStringList(m["issues"], clientListLimit, 500); len(issues) > 0 {
+		out["issues"] = issues
+	}
+	return out
+}
+
+func sanitizeJSONLike(value interface{}, depth int) interface{} {
+	if depth <= 0 || value == nil {
+		return nil
+	}
+	switch v := value.(type) {
+	case string:
+		return truncateText(v, clientSummaryTextLimit)
+	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return v
+	case map[string]interface{}:
+		return sanitizeJSONMap(v, depth)
+	case map[string]string:
+		m := make(map[string]interface{}, len(v))
+		for key, val := range v {
+			m[key] = val
+		}
+		return sanitizeJSONMap(m, depth)
+	case []interface{}:
+		return sanitizeJSONList(v, depth)
+	case []string:
+		out := make([]interface{}, 0, len(v))
+		for _, item := range v {
+			out = append(out, truncateText(item, clientSummaryTextLimit))
+		}
+		return out
+	case []map[string]interface{}:
+		items := make([]interface{}, 0, len(v))
+		for _, item := range v {
+			items = append(items, item)
+		}
+		return sanitizeJSONList(items, depth)
+	default:
+		return truncateText(fmt.Sprint(v), clientSummaryTextLimit)
+	}
+}
+
+func sanitizeJSONMap(m map[string]interface{}, depth int) map[string]interface{} {
+	if depth <= 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	count := 0
+	for key, val := range m {
+		if count >= clientColumnLimit {
+			break
+		}
+		cleanKey := truncateText(key, 120)
+		if cleanKey == "" {
+			continue
+		}
+		sanitized := sanitizeJSONLike(val, depth-1)
+		if sanitized == nil {
+			continue
+		}
+		out[cleanKey] = sanitized
+		count++
+	}
+	return out
+}
+
+func sanitizeJSONList(items []interface{}, depth int) []interface{} {
+	if depth <= 0 {
+		return nil
+	}
+	if len(items) > clientListLimit {
+		items = items[:clientListLimit]
+	}
+	out := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		sanitized := sanitizeJSONLike(item, depth-1)
+		if sanitized == nil {
+			continue
+		}
+		out = append(out, sanitized)
 	}
 	return out
 }
@@ -662,6 +787,10 @@ func sanitizeStringList(value interface{}, maxItems, maxChars int) []string {
 		items = append(items, v...)
 	case []interface{}:
 		for _, item := range v {
+			switch item.(type) {
+			case map[string]interface{}, map[string]string, []interface{}, []map[string]interface{}:
+				continue
+			}
 			items = append(items, fmt.Sprint(item))
 		}
 	default:

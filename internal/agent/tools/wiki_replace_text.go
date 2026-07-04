@@ -22,26 +22,26 @@ func NewWikiReplaceTextTool(wikiPageService interfaces.WikiPageService, kbIDs []
 	return &wikiReplaceTextTool{
 		BaseTool: NewBaseTool(
 			ToolWikiReplaceText,
-			"替换 Wiki 页面中的特定精确文本。适合小范围修正。",
+			"Replace specific exact text in a Wiki page. Ideal for minor corrections.",
 			json.RawMessage(`{
 				"type": "object",
 				"properties": {
 					"slug": {
 						"type": "string",
-						"description": "Wiki 页面的 slug"
+						"description": "The slug of the Wiki page"
 					},
 					"old_text": {
 						"type": "string",
-						"description": "要查找并替换的精确文本"
+						"description": "The exact text to find and replace"
 					},
 					"new_text": {
 						"type": "string",
-						"description": "要插入的新文本"
+						"description": "The new text to insert"
 					},
 					"source_refs": {
 						"type": "array",
 						"items": {"type": "string"},
-						"description": "可选来源知识 ID 列表（仅 UUID），用于说明此变更依据。如果提供，将完全替换页面现有的 source_refs。"
+						"description": "An optional list of source knowledge IDs (UUIDs only) that justify this change. If provided, these will COMPLETELY REPLACE the existing source_refs of the page."
 					}
 				},
 				"required": ["slug", "old_text", "new_text"]
@@ -62,26 +62,26 @@ func (t *wikiReplaceTextTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	if err := json.Unmarshal(args, &params); err != nil {
-		return &types.ToolResult{Success: false, Error: "解析参数失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to parse arguments: " + err.Error()}, nil
 	}
 
 	if len(t.kbIDs) == 0 {
-		return &types.ToolResult{Success: false, Error: "没有可编辑的知识库"}, nil
+		return &types.ToolResult{Success: false, Error: "No knowledge bases available for editing"}, nil
 	}
 	kbID := t.kbIDs[0]
 
 	if params.OldText == "" {
-		return &types.ToolResult{Success: false, Error: "需要 old_text"}, nil
+		return &types.ToolResult{Success: false, Error: "old_text is required"}, nil
 	}
 
 	// Get the existing page
 	existingPage, err := t.wikiPageService.GetPageBySlug(ctx, kbID, params.Slug)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: fmt.Sprintf("获取页面 %s 失败: %v", params.Slug, err)}, nil
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("Failed to fetch page %s: %v", params.Slug, err)}, nil
 	}
 
 	if !strings.Contains(existingPage.Content, params.OldText) {
-		return &types.ToolResult{Success: false, Error: "当前页面内容中未找到 old_text。请确保按原文精确复制。"}, nil
+		return &types.ToolResult{Success: false, Error: "old_text not found in the current page content. Ensure you copy it exactly as it appears."}, nil
 	}
 
 	existingPage.Content = strings.Replace(existingPage.Content, params.OldText, params.NewText, 1)
@@ -92,13 +92,13 @@ func (t *wikiReplaceTextTool) Execute(ctx context.Context, args json.RawMessage)
 
 	_, err = t.wikiPageService.UpdatePage(ctx, existingPage)
 	if err != nil {
-		return &types.ToolResult{Success: false, Error: "更新页面失败: " + err.Error()}, nil
+		return &types.ToolResult{Success: false, Error: "Failed to update page: " + err.Error()}, nil
 	}
 
 	oldPreview := truncateRunes(params.OldText, 80)
 	newPreview := truncateRunes(params.NewText, 80)
 
-	output := fmt.Sprintf("已成功替换页面 [[%s]] 上的文本。\n- 旧文本: %s\n- 新文本: %s", params.Slug, oldPreview, newPreview)
+	output := fmt.Sprintf("Successfully replaced text on page [[%s]].\n- Old: %s\n- New: %s", params.Slug, oldPreview, newPreview)
 
 	return &types.ToolResult{
 		Success: true,

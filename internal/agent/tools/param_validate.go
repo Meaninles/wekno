@@ -55,7 +55,7 @@ func ValidateParams(args json.RawMessage, schema json.RawMessage) []ValidationEr
 				if !exists || val == nil {
 					errs = append(errs, ValidationError{
 						Param:   fieldName,
-						Message: fmt.Sprintf("缺少必填参数 '%s'", fieldName),
+						Message: fmt.Sprintf("required parameter '%s' is missing", fieldName),
 					})
 				}
 			}
@@ -94,7 +94,7 @@ func validateProperty(name string, val any, prop map[string]any) []ValidationErr
 	if targetType != "" && !checkType(val, targetType) {
 		errs = append(errs, ValidationError{
 			Param:   name,
-			Message: fmt.Sprintf("参数 '%s' 应为 '%s' 类型", name, targetType),
+			Message: fmt.Sprintf("parameter '%s' should be type '%s'", name, targetType),
 		})
 		return errs // skip further checks if type is wrong
 	}
@@ -106,7 +106,7 @@ func validateProperty(name string, val any, prop map[string]any) []ValidationErr
 				allowed := formatEnum(enumList)
 				errs = append(errs, ValidationError{
 					Param:   name,
-					Message: fmt.Sprintf("参数 '%s' 必须是 [%s] 之一", name, allowed),
+					Message: fmt.Sprintf("parameter '%s' must be one of [%s]", name, allowed),
 				})
 			}
 		}
@@ -118,13 +118,13 @@ func validateProperty(name string, val any, prop map[string]any) []ValidationErr
 		if minVal, ok := getFloat(prop, "minimum"); ok && numVal < minVal {
 			errs = append(errs, ValidationError{
 				Param:   name,
-				Message: fmt.Sprintf("参数 '%s' 必须 >= %v", name, minVal),
+				Message: fmt.Sprintf("parameter '%s' must be >= %v", name, minVal),
 			})
 		}
 		if maxVal, ok := getFloat(prop, "maximum"); ok && numVal > maxVal {
 			errs = append(errs, ValidationError{
 				Param:   name,
-				Message: fmt.Sprintf("参数 '%s' 必须 <= %v", name, maxVal),
+				Message: fmt.Sprintf("parameter '%s' must be <= %v", name, maxVal),
 			})
 		}
 	}
@@ -135,14 +135,14 @@ func validateProperty(name string, val any, prop map[string]any) []ValidationErr
 			if minLen, ok := getFloat(prop, "minLength"); ok && float64(len(s)) < minLen {
 				errs = append(errs, ValidationError{
 					Param: name,
-					Message: fmt.Sprintf("参数 '%s' 至少需要 %d 个字符",
+					Message: fmt.Sprintf("parameter '%s' must have at least %d characters",
 						name, int(minLen)),
 				})
 			}
 			if maxLen, ok := getFloat(prop, "maxLength"); ok && float64(len(s)) > maxLen {
 				errs = append(errs, ValidationError{
 					Param: name,
-					Message: fmt.Sprintf("参数 '%s' 最多允许 %d 个字符",
+					Message: fmt.Sprintf("parameter '%s' must have at most %d characters",
 						name, int(maxLen)),
 				})
 			}
@@ -230,5 +230,5 @@ func FormatValidationErrors(errs []ValidationError) string {
 	for i, e := range errs {
 		msgs[i] = e.Message
 	}
-	return "参数校验失败：" + strings.Join(msgs, "；")
+	return "Parameter validation failed: " + strings.Join(msgs, "; ")
 }

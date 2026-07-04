@@ -29,8 +29,10 @@ func convertImageAttachments(items []ImageAttachment) types.MessageImages {
 }
 
 // extractImageURLsAndOCRText extracts image references and concatenated analysis text.
-// For LLM consumption it prefers the raw Data (data URI) when available so that
-// image_resolve can skip the disk round-trip; falls back to the storage URL otherwise.
+// Prefer the server-side storage URL. The raw Data field is a request-only upload
+// payload; passing data: base64 through QARequest can make text-only agent prompts
+// enormous. Vision model adapters can resolve local:// URLs back to bytes when
+// they actually need image input.
 func extractImageURLsAndOCRText(images []ImageAttachment) (urls []string, ocrText string) {
 	if len(images) == 0 {
 		return nil, ""
@@ -39,10 +41,10 @@ func extractImageURLsAndOCRText(images []ImageAttachment) (urls []string, ocrTex
 	var parts []string
 	for _, img := range images {
 		switch {
-		case img.Data != "":
-			urls = append(urls, img.Data)
 		case img.URL != "":
 			urls = append(urls, img.URL)
+		case img.Data != "":
+			urls = append(urls, img.Data)
 		}
 		if img.Caption != "" {
 			parts = append(parts, img.Caption)

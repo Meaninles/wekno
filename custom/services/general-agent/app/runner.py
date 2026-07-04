@@ -87,6 +87,7 @@ def claude_auth_env(payload: ChatPayload, config_dir: Path) -> tuple[dict[str, s
 
 
 DATA_IMAGE_RE = re.compile(r"^data:(image/[A-Za-z0-9.+-]+);base64,(.+)$", re.DOTALL)
+DATA_BASE64_URL_RE = re.compile(r"^data:([A-Za-z0-9.+/-]+);base64,(.+)$", re.DOTALL)
 
 
 def mcp_text(data: Any, is_error: bool = False) -> dict[str, Any]:
@@ -101,6 +102,16 @@ def _truncate_text(value: str, limit: int = 120_000) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + f"\n...[truncated {len(value) - limit} chars]"
+
+
+def prompt_media_reference(value: str) -> str:
+    text = (value or "").strip()
+    match = DATA_BASE64_URL_RE.match(text)
+    if not match:
+        return text
+    mime_type = match.group(1)
+    encoded = match.group(2)
+    return f"[inline {mime_type} data omitted from text prompt; base64_length={len(encoded)}]"
 
 
 def materialize_professional_skills(payload: ChatPayload, run_dir: Path) -> list[str]:
@@ -2324,7 +2335,7 @@ def build_prompt(
     if payload.image_urls:
         parts.append("<image_urls>")
         for url in payload.image_urls:
-            parts.append(url)
+            parts.append(prompt_media_reference(url))
         parts.append("</image_urls>")
     parts.append("</weknora_context>")
     parts.append("<task_reminder>")

@@ -39,6 +39,7 @@ from app.runner import (  # noqa: E402
     prepare_data_analysis_reference_doc,
     prepare_document_template_context,
     prepare_ppt_generation_workspace,
+    prompt_media_reference,
     parse_mcp_tool_response_payload,
     run_data_analysis_judge,
     sanitize_artifact_bytes,
@@ -1409,6 +1410,36 @@ EOF""",
         self.assertNotIn("duplicated skill context", prompt)
         self.assertNotIn('"allowed_tools"', prompt)
         self.assertNotIn('"artifact_return_policy"', prompt)
+
+    def test_build_prompt_omits_inline_base64_image_urls(self):
+        inline = "data:image/jpeg;base64," + base64.b64encode(b"x" * 1024).decode("ascii")
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="总结下这张图",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            image_urls=[inline, "local://10002/chat-images/image.jpg"],
+            image_description="图片里有砖厂和多堆砖坯。",
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        prompt = build_prompt(payload)
+
+        self.assertNotIn(inline, prompt)
+        self.assertNotIn("data:image/jpeg;base64", prompt)
+        self.assertIn("[inline image/jpeg data omitted from text prompt; base64_length=", prompt)
+        self.assertIn("local://10002/chat-images/image.jpg", prompt)
+        self.assertIn("图片里有砖厂和多堆砖坯。", prompt)
+
+    def test_prompt_media_reference_omits_inline_audio_base64(self):
+        inline = "data:audio/wav;base64," + base64.b64encode(b"audio-bytes").decode("ascii")
+
+        got = prompt_media_reference(inline)
+
+        self.assertNotIn("audio-bytes", got)
+        self.assertNotIn("base64,", got)
+        self.assertIn("inline audio/wav data omitted", got)
 
     def test_build_prompt_includes_data_analysis_display_intent(self):
         payload = ChatPayload(

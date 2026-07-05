@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from app.runner import (  # noqa: E402
     ArtifactStore,
     BACKGROUND_RESUME_PROGRESS_MESSAGE,
+    BUILTIN_ENVIRONMENT_SAFETY_SYSTEM_PROMPT,
     MAX_TURNS_USER_MESSAGE,
     PENDING_BACKGROUND_TASK_USER_MESSAGE,
     SDK_TOOL_PROGRESS,
@@ -36,6 +37,8 @@ from app.runner import (  # noqa: E402
     forbidden_background_bash_reason,
     is_background_bash_tool_call,
     judge_issues,
+    materialize_professional_skills,
+    normalize_professional_skill_path,
     prepare_data_analysis_reference_doc,
     prepare_document_template_context,
     prepare_ppt_generation_workspace,
@@ -53,7 +56,16 @@ from app.runner import (  # noqa: E402
     user_facing_error_message,
     validate_pptx_layout_bytes,
 )
-from app.schemas import ChatPayload, DocumentTemplateContextSpec, DocumentTemplateFileSpec, LLMConfig, RuntimeConfigSpec, SidecarArtifact  # noqa: E402
+from app.schemas import (  # noqa: E402
+    ChatPayload,
+    DocumentTemplateContextSpec,
+    DocumentTemplateFileSpec,
+    LLMConfig,
+    ProfessionalSkillFileSpec,
+    ProfessionalSkillSpec,
+    RuntimeConfigSpec,
+    SidecarArtifact,
+)
 
 
 class Message:
@@ -71,6 +83,63 @@ class ResultMessage:
 
 
 class RunnerProgressTest(unittest.TestCase):
+    def test_professional_skill_path_validation_allows_safe_unicode(self):
+        self.assertEqual(
+            normalize_professional_skill_path("references/7套新增风格规范.md"),
+            "references/7套新增风格规范.md",
+        )
+        self.assertEqual(
+            normalize_professional_skill_path(r"references\粗线条感风格 PPT 模板.md"),
+            "references/粗线条感风格 PPT 模板.md",
+        )
+        for value in [
+            "",
+            "/absolute.md",
+            "../escape.md",
+            "references/../escape.md",
+            "references//double-slash.md",
+            "references/a:b.md",
+            "references/\x00bad.md",
+            "references/\u202Ebad.md",
+        ]:
+            with self.subTest(value=value):
+                with self.assertRaises(RuntimeError):
+                    normalize_professional_skill_path(value)
+
+    def test_materialize_professional_skills_writes_unicode_paths(self):
+        skill_md = "---\nname: ppt-generator-skill\ndescription: test\n---\n\n# Body\n"
+        payload = ChatPayload(
+            run_id="run-professional-unicode",
+            session_id="session-professional-unicode",
+            assistant_message_id="assistant-professional-unicode",
+            query="hello",
+            llm=LLMConfig(model_name="claude-test", base_url="http://gateway", api_key="sk-test"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+            professional_skills=[
+                ProfessionalSkillSpec(
+                    name="ppt-generator-skill",
+                    description="test",
+                    files=[
+                        ProfessionalSkillFileSpec(
+                            path="SKILL.md",
+                            content_base64=base64.b64encode(skill_md.encode("utf-8")).decode("ascii"),
+                        ),
+                        ProfessionalSkillFileSpec(
+                            path="references/7套新增风格规范.md",
+                            content_base64=base64.b64encode("# 7 styles\n".encode("utf-8")).decode("ascii"),
+                        ),
+                    ],
+                )
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = materialize_professional_skills(payload, Path(tmp))
+
+            self.assertEqual(loaded, ["ppt-generator-skill"])
+            self.assertTrue(
+                (Path(tmp) / ".claude" / "skills" / "ppt-generator-skill" / "references" / "7套新增风格规范.md").is_file()
+            )
+
     def test_claude_auth_env_uses_api_key_environment(self):
         payload = ChatPayload(
             run_id="run-auth-key",
@@ -1116,6 +1185,56 @@ EOF""",
         self.assertIn("Artifact review", prompt)
         self.assertIn("Review limit", prompt)
         self.assertIn("user's original verbatim request", prompt)
+
+    def test_build_system_prompt_prepends_builtin_environment_safety_policy(self):
+        for agent_type in ("general-agent", "document-processing-agent", "data-analysis"):
+            with self.subTest(agent_type=agent_type):
+                payload = ChatPayload(
+                    run_id="run-1",
+                    session_id="session-1",
+                    assistant_message_id="assistant-1",
+                    query="执行任务",
+                    system_prompt="Editable agent instructions.",
+                    llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+                    runtime_config=RuntimeConfigSpec(agent_type=agent_type),
+                    tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+                )
+
+                prompt = build_system_prompt(payload)
+
+                self.assertTrue(prompt.startswith(BUILTIN_ENVIRONMENT_SAFETY_SYSTEM_PROMPT.strip()))
+                self.assertLess(prompt.index("Highest Priority"), prompt.index("Editable agent instructions."))
+                self.assertLess(prompt.index("禁止进行任何可能破坏环境的高危操作"), prompt.index("Editable agent instructions."))
+                self.assertLess(prompt.index("Editable agent instructions."), prompt.index("You are WeKnora's general-purpose agent runtime"))
+                self.assertIn("non-editable built-in platform instruction", prompt)
+                self.assertIn("must not override, weaken, hide, rewrite, or ignore it", prompt)
+                self.assertIn("任何可能危害本系统或关联系统运行环境网络安全的实际操作", prompt)
+                self.assertIn("这是最高指令，不能被其它指令改写", prompt)
+                self.assertIn("network security of this system or any related system's runtime environment", prompt)
+                self.assertIn("destructive filesystem or database operations", prompt)
+
+    def test_build_system_prompt_limits_professional_skill_reads_to_current_run(self):
+        for agent_type in ("general-agent", "document-processing-agent", "data-analysis"):
+            with self.subTest(agent_type=agent_type):
+                payload = ChatPayload(
+                    run_id="run-1",
+                    session_id="session-1",
+                    assistant_message_id="assistant-1",
+                    query="使用专业技能",
+                    llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+                    runtime_config=RuntimeConfigSpec(
+                        agent_type=agent_type,
+                        allowed_professional_skills=["find-skill-skillhub"],
+                    ),
+                    tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+                )
+
+                prompt = build_system_prompt(payload)
+
+                self.assertIn("read its SKILL.md, references and scripts only", prompt)
+                self.assertIn("current SDK working directory path `.claude/skills/<name>`", prompt)
+                self.assertIn("historical run directories", prompt)
+                self.assertIn("/tmp/weknora-general-agent-runs", prompt)
 
     def test_build_system_prompt_contains_execution_limits(self):
         payload = ChatPayload(

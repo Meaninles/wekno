@@ -14,6 +14,7 @@ interface Settings {
   agentConfig: AgentConfig;
   selectedKnowledgeBases: string[];  // 当前选中的知识库ID列表
   selectedSkillNames: string[]; // 当前对话直接引入的 Skill 名称列表
+  selectedProfessionalSkillNames: string[]; // 当前对话选择的专业 Skill 名称列表
   selectedFiles: string[]; // 当前选中的文件ID列表
   selectedFileKbMap: Record<string, string>; // 文件ID -> 知识库ID，用于刷新后带 kb_id 拉取共享知识库文件
   selectedTags: Array<{ id: string; name: string; kbId: string; kbName?: string }>;
@@ -85,6 +86,7 @@ const defaultSettings: Settings = {
   },
   selectedKnowledgeBases: [],  // 默认为空数组
   selectedSkillNames: [], // 默认为空数组
+  selectedProfessionalSkillNames: [], // 默认为空数组
   selectedFiles: [], // 默认为空数组
   selectedFileKbMap: {},  // 文件ID -> 知识库ID
   selectedTags: [],
@@ -120,6 +122,8 @@ function loadAndReconcileSettings(): Settings {
   loaded.selectedTags ||= [];
   loaded.selectedMCPServices ||= [];
   loaded.selectedSkills ||= loaded.selectedTools || [];
+  loaded.selectedSkillNames ||= [];
+  loaded.selectedProfessionalSkillNames ||= [];
   loaded.selectedFileKbMap ||= {};
   if (reconcileBuiltinAgentMode(loaded)) {
     localStorage.setItem("WeKnora_settings", JSON.stringify(loaded));
@@ -382,6 +386,45 @@ export const useSettingsStore = defineStore("settings", {
     getSelectedSkillNames(): string[] {
       return this.settings.selectedSkillNames || [];
     },
+
+    // 选择专业 Skills（替换整个列表）
+    selectProfessionalSkillNames(skillNames: string[]) {
+      const seen = new Set<string>();
+      this.settings.selectedProfessionalSkillNames = (skillNames || [])
+        .map((name: string) => String(name || "").trim())
+        .filter((name: string) => {
+          if (!name || seen.has(name)) return false;
+          seen.add(name);
+          return true;
+        });
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
+    addProfessionalSkillName(skillName: string) {
+      const name = String(skillName || "").trim();
+      if (!name) return;
+      if (!this.settings.selectedProfessionalSkillNames) this.settings.selectedProfessionalSkillNames = [];
+      if (!this.settings.selectedProfessionalSkillNames.includes(name)) {
+        this.settings.selectedProfessionalSkillNames.push(name);
+        localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+      }
+    },
+
+    removeProfessionalSkillName(skillName: string) {
+      if (!this.settings.selectedProfessionalSkillNames) return;
+      this.settings.selectedProfessionalSkillNames =
+        this.settings.selectedProfessionalSkillNames.filter((name: string) => name !== skillName);
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
+    clearProfessionalSkillNames() {
+      this.settings.selectedProfessionalSkillNames = [];
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
+    getSelectedProfessionalSkillNames(): string[] {
+      return this.settings.selectedProfessionalSkillNames || [];
+    },
     
     // 启用/禁用网络搜索
     toggleWebSearch(enabled: boolean) {
@@ -556,6 +599,7 @@ export const useSettingsStore = defineStore("settings", {
       this.settings.selectedTags = [];
       this.settings.selectedMCPServices = [];
       this.settings.selectedSkills = [];
+      this.settings.selectedProfessionalSkillNames = [];
       localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
     

@@ -175,9 +175,20 @@ var registry = map[string]settingSpec{
 		Default:         int64(32),
 		Category:        "worker",
 		RequiresRestart: true,
-		Description: "异步任务 worker 并发数（asynq 线程池大小）。" +
-			"文档解析、嵌入等任务多为 I/O 等待，适当提高可缩短批量上传排队时间。" +
+		Description: "普通异步任务 worker 并发数（不包含重型文档解析队列）。" +
+			"普通文档解析、嵌入等任务多为 I/O 等待，适当提高可缩短批量上传排队时间。" +
 			"修改后需重启服务进程方可生效。",
+	},
+	// asynq.heavy_document_concurrency is the dedicated worker pool size for
+	// resource-heavy document parsing tasks.
+	"asynq.heavy_document_concurrency": {
+		Type:            "int",
+		EnvName:         "WEKNORA_HEAVY_DOCUMENT_CONCURRENCY",
+		Default:         int64(2),
+		Category:        "worker",
+		RequiresRestart: true,
+		Description: "重型文档解析 worker 并发数。命中文件大小或 DOCX/XLSX/CSV 结构重型阈值的文档，" +
+			"进入独立重型队列处理，不占用普通任务 worker。默认 2，修改后需重启服务进程方可生效。",
 	},
 }
 
@@ -612,7 +623,7 @@ func (s *systemSettingService) List(ctx context.Context) ([]*types.SystemSetting
 	for _, key := range keys {
 		spec := registry[key]
 		if row := byKey[key]; row != nil {
-			row.Enum = spec.Enum
+			enrichSystemSettingRow(row, spec)
 			if isBootstrapDefaultRow(row, spec) {
 				row.Value = s.fallbackJSONForSpec(key, spec)
 			}
@@ -652,13 +663,28 @@ func (s *systemSettingService) Get(ctx context.Context, key string) (*types.Syst
 		return nil, err
 	}
 	if row != nil {
-		row.Enum = spec.Enum
+		enrichSystemSettingRow(row, spec)
 		if isBootstrapDefaultRow(row, spec) {
 			row.Value = s.fallbackJSONForSpec(key, spec)
 		}
 		return row, nil
 	}
 	return s.virtualSetting(key, spec), nil
+}
+
+func enrichSystemSettingRow(row *types.SystemSetting, spec settingSpec) {
+	if row == nil {
+		return
+	}
+	category := spec.Category
+	if category == "" {
+		category = "general"
+	}
+	row.ValueType = spec.Type
+	row.Category = category
+	row.Description = spec.Description
+	row.RequiresRestart = spec.RequiresRestart
+	row.Enum = spec.Enum
 }
 
 func (s *systemSettingService) virtualSetting(key string, spec settingSpec) *types.SystemSetting {
@@ -1161,7 +1187,7 @@ func encodeForType(declared string, rawValue any) (types.JSON, error) {
 //     400 body verbatim).
 func validateRegistryEntry(key string, rawValue any) error {
 	switch key {
-	case "asynq.concurrency":
+	case "asynq.concurrency", "asynq.heavy_document_concurrency":
 		n, err := coerceToPositiveInt64(rawValue)
 		if err != nil {
 			return err

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/fileguard"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
@@ -66,6 +67,11 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	if !isValidFileType(fileName) {
 		logger.Error(ctx, "Invalid file type")
 		return nil, ErrInvalidFileType
+	}
+	guardReport := fileguard.AnalyzeMultipartFile(file, fileName)
+	if err := guardReport.ValidationError(); err != nil {
+		logger.Warnf(ctx, "File preflight rejected upload %s: %s", fileName, err.Error())
+		return nil, werrors.NewBadRequestError(err.Error())
 	}
 
 	// Calculate file hash for deduplication
@@ -268,12 +274,13 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(
-		types.TypeDocumentProcess,
-		payloadBytes,
-		documentProcessTaskOptions(s.config, asynq.MaxRetry(3))...,
+	opts := documentProcessTaskOptionsForQueue(
+		s.config,
+		documentProcessQueueForReport(guardReport),
+		asynq.MaxRetry(3),
 	)
-	info, err := s.task.Enqueue(task)
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+	info, err := s.task.Enqueue(task, opts...)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue document process task: %v", err)
 		// 即使入队失败，也返回knowledge，因为文件已保存
@@ -449,12 +456,9 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(
-		types.TypeDocumentProcess,
-		payloadBytes,
-		documentProcessTaskOptions(s.config, asynq.MaxRetry(3))...,
-	)
-	info, err := s.task.Enqueue(task)
+	opts := documentProcessTaskOptions(s.config, asynq.MaxRetry(3))
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+	info, err := s.task.Enqueue(task, opts...)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue URL process task: %v", err)
 		return knowledge, nil
@@ -688,12 +692,9 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		return knowledge, nil
 	}
 
-	task := asynq.NewTask(
-		types.TypeDocumentProcess,
-		payloadBytes,
-		documentProcessTaskOptions(s.config)...,
-	)
-	info, err := s.task.Enqueue(task)
+	opts := documentProcessTaskOptions(s.config)
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+	info, err := s.task.Enqueue(task, opts...)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue file URL process task: %v", err)
 		return knowledge, nil
@@ -923,12 +924,9 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 			return knowledge, nil
 		}
 
-		task := asynq.NewTask(
-			types.TypeDocumentProcess,
-			payloadBytes,
-			documentProcessTaskOptions(s.config, asynq.MaxRetry(3))...,
-		)
-		info, err := s.task.Enqueue(task)
+		opts := documentProcessTaskOptions(s.config, asynq.MaxRetry(3))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+		info, err := s.task.Enqueue(task, opts...)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue passage process task: %v", err)
 			return knowledge, nil

@@ -40,6 +40,8 @@ import {
 import { formatLocalizedList } from '@/utils/format-list';
 import type { MentionItem, MentionItemType, MentionRequestItem } from '@/types/mention';
 
+type SkillSelectionMode = 'all' | 'selected' | 'none';
+
 const route = useRoute();
 const router = useRouter();
 const settingsStore = useSettingsStore();
@@ -171,6 +173,16 @@ const selectedAgent = computed(() => {
     is_builtin: true,
     config: { agent_mode: 'quick-answer' as const }
   } as CustomAgent;
+});
+
+const isSelectedAgentResolved = computed(() => {
+  const sourceTenantId = settingsStore.selectedAgentSourceTenantId;
+  if (sourceTenantId) {
+    return (orgStore.sharedAgents || []).some(
+      s => s.agent?.id === selectedAgentId.value && String(s.source_tenant_id) === sourceTenantId
+    );
+  }
+  return agents.value.some(a => a.id === selectedAgentId.value);
 });
 
 // 判断是否为自定义智能体（非内置）
@@ -455,6 +467,30 @@ const selectedSkillNames = computed(() => {
   ];
   return Array.from(new Set(names.map(name => String(name || '').trim()).filter(Boolean)));
 });
+const agentProfessionalSkillsSelectionMode = computed<SkillSelectionMode>(() => {
+  if (!hasAgentConfig.value) return 'none';
+  return currentAgentConfig.value?.professional_skills_selection_mode || 'none';
+});
+const agentConfiguredProfessionalSkillNames = computed(() => {
+  const config = currentAgentConfig.value || {};
+  return Array.from(new Set((config.selected_professional_skills || [])
+    .map((name: string) => String(name || '').trim())
+    .filter(Boolean)));
+});
+const isProfessionalSkillAllowedByAgent = (name: string) => {
+  const normalized = String(name || '').trim();
+  if (!normalized) return false;
+  const mode = agentProfessionalSkillsSelectionMode.value;
+  if (mode === 'none') return false;
+  if (mode === 'selected') return agentConfiguredProfessionalSkillNames.value.includes(normalized);
+  return true;
+};
+const selectedProfessionalSkillNames = computed(() => {
+  const names = settingsStore.settings.selectedProfessionalSkillNames || [];
+  return Array.from(new Set(names.map(name => String(name || '').trim()).filter(Boolean)))
+    .filter(name => isProfessionalSkillAllowedByAgent(name));
+});
+const selectedSkillContextCount = computed(() => selectedSkillNames.value.length + selectedProfessionalSkillNames.value.length);
 const selectedFileIds = computed(() => settingsStore.settings.selectedFiles || []);
 const selectedTags = computed(() => settingsStore.settings.selectedTags || []);
 const selectedMCPServiceIds = computed(() => settingsStore.settings.selectedMCPServices || []);
@@ -646,6 +682,10 @@ const removeSelectedSkill = (name: string) => {
   settingsStore.removeSkillName(name);
 };
 
+const removeSelectedProfessionalSkill = (name: string) => {
+  settingsStore.removeProfessionalSkillName(name);
+};
+
 // 使用 computed 从 store 读取，并通过 setter 同步回 store
 const selectedModelId = computed({
   get: () => settingsStore.conversationModels.selectedChatModelId || '',
@@ -675,7 +715,7 @@ const inputPlaceholder = computed(() => {
   }
 
   const hasKnowledge = allSelectedItems.value.length > 0;
-  const hasSkillContext = selectedSkillNames.value.length > 0;
+  const hasSkillContext = selectedSkillContextCount.value > 0;
   const hasWebSearch = isWebSearchEnabled.value && isWebSearchConfigured.value;
 
   if (hasKnowledge && hasWebSearch) {
@@ -1764,6 +1804,9 @@ const createSession = async (val: string) => {
   if (!chatResources.isFresh('models')) {
     await loadChatModels()
   }
+  if (!isSelectedAgentResolved.value) {
+    await loadAgents();
+  }
 
   // 发送前校验当前选中的智能体（含默认快速问答）是否已配置完成
   const agentToCheck = selectedAgent.value;
@@ -1790,6 +1833,12 @@ const createSession = async (val: string) => {
       settingsStore.selectedAgentSourceTenantId ?? undefined,
     );
     return;
+  }
+  const rawProfessionalSkillNames = settingsStore.settings.selectedProfessionalSkillNames || [];
+  const effectiveProfessionalSkillNames = selectedProfessionalSkillNames.value;
+  if (rawProfessionalSkillNames.length !== effectiveProfessionalSkillNames.length
+    || rawProfessionalSkillNames.some((name: string, index: number) => name !== effectiveProfessionalSkillNames[index])) {
+    settingsStore.selectProfessionalSkillNames(effectiveProfessionalSkillNames);
   }
   // 获取@提及的知识库和文件信息
   const mentionedItems: MentionRequestItem[] = allSelectedItems.value.map(item => ({
@@ -2337,7 +2386,7 @@ defineExpose({
         @update:files="uploadedAttachments = $event" />
 
       <!-- 选中的知识库、文件和 Skill 标签（显示在输入框内顶部） -->
-      <div v-if="allSelectedItems.length > 0 || selectedSkillNames.length > 0" class="selected-tags-inline">
+      <div v-if="allSelectedItems.length > 0 || selectedSkillNames.length > 0 || selectedProfessionalSkillNames.length > 0" class="selected-tags-inline">
         <span v-for="name in selectedSkillNames" :key="`skill-${name}`" class="mention-chip mention-chip--skill">
           <span class="mention-chip__icon-wrap">
             <span class="mention-chip__icon">
@@ -2346,6 +2395,17 @@ defineExpose({
           </span>
           <span class="mention-chip__name" :title="name">{{ name }}</span>
           <span class="mention-chip__remove" @click.stop="removeSelectedSkill(name)"
+            :aria-label="$t('common.remove')">×</span>
+        </span>
+        <span v-for="name in selectedProfessionalSkillNames" :key="`professional-skill-${name}`"
+          class="mention-chip mention-chip--professional-skill">
+          <span class="mention-chip__icon-wrap">
+            <span class="mention-chip__icon">
+              <t-icon name="tools" />
+            </span>
+          </span>
+          <span class="mention-chip__name" :title="name">{{ name }}</span>
+          <span class="mention-chip__remove" @click.stop="removeSelectedProfessionalSkill(name)"
             :aria-label="$t('common.remove')">×</span>
         </span>
         <span v-for="item in allSelectedItems" :key="item.id" class="mention-chip" :class="[
@@ -2475,14 +2535,14 @@ defineExpose({
           <!-- Skill 上下文选择按钮 -->
           <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
             <template #content>
-              <span>{{ selectedSkillNames.length > 0 ? $t('input.skillWithCount', {
-                count: selectedSkillNames.length
+              <span>{{ selectedSkillContextCount > 0 ? $t('input.skillWithCount', {
+                count: selectedSkillContextCount
               }) : $t('input.skill') }}</span>
             </template>
             <div ref="skillButtonRef" class="control-btn kb-btn skill-context-btn" data-guide="chat-skill-selector"
-              :class="{ 'active': selectedSkillNames.length > 0 }" @click.stop @mousedown.prevent="toggleSkillSelector">
+              :class="{ 'active': selectedSkillContextCount > 0 }" @click.stop @mousedown.prevent="toggleSkillSelector">
               <t-icon name="lightbulb" class="control-icon" />
-              <span v-if="selectedSkillNames.length > 0" class="kb-count">{{ selectedSkillNames.length }}</span>
+              <span v-if="selectedSkillContextCount > 0" class="kb-count">{{ selectedSkillContextCount }}</span>
             </div>
           </t-tooltip>
 
@@ -2597,6 +2657,8 @@ defineExpose({
     <!-- Skill 选择下拉 -->
     <Teleport to="body">
       <SkillSelector v-model:visible="showSkillSelector" :anchorEl="skillButtonRef"
+        :professional-selection-mode="agentProfessionalSkillsSelectionMode"
+        :allowed-professional-skill-names="agentConfiguredProfessionalSkillNames"
         @close="showSkillSelector = false" />
     </Teleport>
   </div>
@@ -2815,6 +2877,22 @@ const getImgSrc = (url: string) => {
 .mention-chip--skill:hover {
   background: rgba(37, 99, 235, 0.12);
   border-color: rgba(37, 99, 235, 0.34);
+}
+
+.mention-chip--professional-skill {
+  background: rgba(15, 118, 110, 0.08);
+  border-color: rgba(15, 118, 110, 0.24);
+  color: var(--td-text-color-primary, #1f2937);
+}
+
+.mention-chip--professional-skill .mention-chip__icon-wrap {
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+}
+
+.mention-chip--professional-skill:hover {
+  background: rgba(15, 118, 110, 0.12);
+  border-color: rgba(15, 118, 110, 0.36);
 }
 
 /* 智能体预配置：虚线边框区分 */

@@ -50,6 +50,14 @@ test('agent progress text is clamped with a fade mask', () => {
   assert.match(source, /mask-image:\s*linear-gradient/)
 })
 
+test('live intermediate answer text is clamped to two lines', () => {
+  assert.match(source, /isLiveIntermediateAnswerEvent/)
+  assert.match(source, /answer-event--intermediate/)
+  assert.match(source, /event\.final_answer === true/)
+  assert.match(source, /-webkit-line-clamp:\s*2/)
+  assert.match(source, /line-clamp:\s*2/)
+})
+
 test('streaming tool log uses the same timeline structure', () => {
   assert.match(source, /'is-streaming-timeline': showStreamingTimeline/)
   assert.match(source, /'tree-child': isStreamingTimelineEvent\(event\)/)

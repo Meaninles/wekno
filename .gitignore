@@ -53,6 +53,11 @@ data/weknora.db
 data/weknora.db-wal
 data/weknora.db-shm
 skills-lock.json
+/skills/professional/*
+!/skills/professional/find-skill-skillhub/
+!/skills/professional/find-skill-skillhub/**
+!/skills/professional/anysearch-skill/
+!/skills/professional/anysearch-skill/**
 
 web/
 

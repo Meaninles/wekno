@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,6 +73,16 @@ func TestDocumentProcessTaskOptions_extraMaxRetry(t *testing.T) {
 	opts := documentProcessTaskOptions(nil, asynq.MaxRetry(3))
 	queue, timeout, maxRetry := parseDocumentProcessOpts(t, opts)
 	assert.Equal(t, "default", queue)
+	assert.Equal(t, config.DefaultDocumentProcessTimeout, timeout)
+	require.NotNil(t, maxRetry)
+	assert.Equal(t, 3, *maxRetry)
+}
+
+func TestDocumentProcessTaskOptionsForQueue_heavy(t *testing.T) {
+	t.Parallel()
+	opts := documentProcessTaskOptionsForQueue(nil, types.QueueDocumentHeavy, asynq.MaxRetry(3))
+	queue, timeout, maxRetry := parseDocumentProcessOpts(t, opts)
+	assert.Equal(t, types.QueueDocumentHeavy, queue)
 	assert.Equal(t, config.DefaultDocumentProcessTimeout, timeout)
 	require.NotNil(t, maxRetry)
 	assert.Equal(t, 3, *maxRetry)

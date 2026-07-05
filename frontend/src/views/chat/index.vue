@@ -609,15 +609,27 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         }
     }
 
-    // 将@提及的知识库和文件信息存入用户消息
-    messagesList.push({ content: value, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' });
-    userHasScrolledUp.value = false;
-    scrollToBottom(true);
-
     // Get agent mode status from settings store (prefer selectedAgentId for builtins)
     const agentEnabled = props.embeddedMode
         ? isAgentStreamAgentId(props.agentId, true)
         : useSettingsStoreInstance.isAgentStreamMode;
+    const professionalSkillNames = props.embeddedMode || !agentEnabled
+        ? []
+        : (useSettingsStoreInstance.settings.selectedProfessionalSkillNames || []);
+    const normalizedProfessionalSkillNames = Array.from(new Set(
+        professionalSkillNames
+            .map((name) => String(name || '').trim())
+            .filter(Boolean),
+    ));
+    const professionalSkillPrefix = normalizedProfessionalSkillNames.length > 0
+        ? `使用${normalizedProfessionalSkillNames.map((name) => `${name}技能`).join('、')}完成以下工作`
+        : '';
+    const requestQuery = professionalSkillPrefix ? `${professionalSkillPrefix}\n${value}` : value;
+
+    // 将@提及的知识库和文件信息存入用户消息
+    messagesList.push({ content: requestQuery, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' });
+    userHasScrolledUp.value = false;
+    scrollToBottom(true);
 
     // Get web search status from settings store
     const webSearchEnabled = props.embeddedMode ? false : useSettingsStoreInstance.isWebSearchEnabled;
@@ -682,7 +694,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         mentioned_items: mentionedItems,
         images: imageAttachments.length > 0 ? imageAttachments : undefined,
         attachment_uploads: attachmentUploads.length > 0 ? attachmentUploads : undefined,
-        query: value,
+        query: requestQuery,
         method: 'POST',
         url: endpoint,
     });

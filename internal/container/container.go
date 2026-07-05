@@ -261,7 +261,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	redisAvailable := os.Getenv("REDIS_ADDR") != ""
 	if redisAvailable {
 		must(container.Provide(router.NewAsyncqClient, dig.As(new(interfaces.TaskEnqueuer))))
-		must(container.Provide(router.NewAsynqServer))
+		must(container.Provide(router.NewAsynqServers))
 		// Asynq inspector for cancel-by-knowledge-id (best-effort
 		// dequeue of pending/scheduled/retry tasks + active-task cancel).
 		must(container.Provide(router.NewAsynqInspector))

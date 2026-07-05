@@ -155,14 +155,98 @@ flowchart LR
   B --> INFRA["基础设施<br/>PostgreSQL / Redis / MinIO / DocReader / Langfuse"]
 ```
 
-二开边界遵循 [二开目录结构规范](./docs/custom/二开目录结构规范.md)：
+## 当前二开情况与规范
 
-- 后端二开模块位于 `internal/custom/modules/`。
-- 后端统一注册点位于 `internal/custom/bootstrap/`。
-- 前端二开页面与模块位于 `frontend/src/custom/modules/`。
-- 旁路服务位于 `custom/services/`。
-- 自定义迁移参考位于 `migrations/custom/`。
-- 原生代码只保留必要注册点、路由挂载、Hook 和类型字段。
+本项目已经在 WeKnora 原生能力上做了较多企业化二开。所有新增能力遵循 [二开目录结构规范](./docs/custom/二开目录结构规范.md)：大段业务逻辑放在 `custom/`、`internal/custom/`、`frontend/src/custom/`，原生代码只保留必要注册点、路由挂载、Hook 和少量类型字段。
+
+### 后端二开模块
+
+后端统一入口位于 `internal/custom/bootstrap/bootstrap.go`。该入口负责创建二开服务、执行二开表迁移、注册路由、启动调度器，并把二开能力挂接到原生会话、Agent、技能、消息和工具链路中。
+
+| 模块 | 目录 | 当前职责 |
+| --- | --- | --- |
+| 统一注册入口 | `internal/custom/bootstrap/` | 注册二开 handler、service、scheduler、Agent runner、技能扩展、消息增强和运行时工具。 |
+| 答案反馈 | `internal/custom/modules/answerfeedback/` | 支持回答点赞/点踩，记录消息反馈和运行快照，用于质量分析与后续训练数据沉淀。 |
+| 内置智能体默认值 | `internal/custom/modules/builtinagentdefaults/` | 管理内置智能体默认配置和恢复默认逻辑，避免环境相关模型、数据源、MCP 被误覆盖。 |
+| 默认配置中心 | `internal/custom/modules/configcenter/` | 支持系统管理员从源工作区选择模型、向量库、解析器、存储、联网搜索、MCP，并复制下发到用户工作区。 |
+| 数据库分析 | `internal/custom/modules/dbanalytics/` | 管理 MySQL/PostgreSQL 数据源、元数据、字段语义、脱敏规则、共享关系，并向智能体提供 `db_catalog`、`db_schema`、`db_query` 工具。 |
+| 文件安全校验 | `internal/custom/modules/fileguard/` | 对上传文件做类型、大小、压缩包、XML、CSV、Office 等安全与复杂度检查，区分轻量/重型文件处理路径。 |
+| 通用智能体 | `internal/custom/modules/generalagent/` | 将 `general-agent`、`document-processing-agent`、`data-analysis` 等类型接入 Claude Agent SDK Sidecar，负责运行时配置、工具回调、产物持久化和下载。 |
+| IAM/SSO | `internal/custom/modules/iam/` | 支持统一身份认证登录、组织人员同步、定时同步、手动同步、外部组织/用户映射和共享空间成员候选查询。 |
+| 定时会话 | `internal/custom/modules/scheduledchat/` | 支持按小时/日/周/月自动向智能体提问，保存运行记录，并将结果写入真实会话。 |
+| 技能中心 | `internal/custom/modules/skillhub/` | 管理轻量技能和专业技能包，支持导入、下载、共享给空间/用户，并注入智能体运行上下文。 |
+| 来源引用增强 | `internal/custom/modules/sourcerefs/` | 抽取和整理回答中的来源引用信息，服务前端来源时间线展示。 |
+| 文本编码 | `internal/custom/modules/textencoding/` | 增强文本解码能力，减少上传资料因编码不一致导致的乱码或解析失败。 |
+| 使用指南 | `internal/custom/modules/userguide/` | 自动创建和维护“使用指南”共享空间/知识库，并把活跃用户纳入可见范围。 |
+
+当前二开 API 统一挂载在 `/api/v1/custom/*` 下，核心路由包括：
+
+- `/api/v1/custom/iam/*`：SSO、组织同步、空间成员候选。
+- `/api/v1/custom/config-center/*`：默认资源选择和下发。
+- `/api/v1/custom/skills/*`：轻量技能、专业技能、共享和下载。
+- `/api/v1/custom/scheduled-chat/*`：定时任务、运行记录和提示词预览。
+- `/api/v1/custom/db-analytics/*`：数据库源、元数据、安全范围、共享和智能体绑定。
+- `/api/v1/custom/general-agent/*`：通用智能体产物下载和 Sidecar 工具回调。
+- `/api/v1/custom/answer-feedback/*`：回答反馈写入和查询。
+
+### 前端二开模块
+
+前端二开能力集中在 `frontend/src/custom/modules/`，页面入口尽量挂到现有设置页、信息源、智能体、对话和集成页面中。
+
+| 模块 | 目录 | 当前职责 |
+| --- | --- | --- |
+| 智能体置顶 | `agentPins/` | 增强智能体列表置顶和常用入口体验。 |
+| 答案反馈 | `answerfeedback/` | 在对话消息下方提供点赞/点踩组件，并调用后端反馈接口。 |
+| Chrome 插件 | `chrome-extension/` | 提供离线插件下载、安装指南、一键配置和浏览器扩展桥接逻辑。 |
+| 默认配置中心 | `configcenter/` | 系统管理员选择源用户资源、配置默认授权和批量下发。 |
+| 控制台过滤 | `consoleFilter/` | 降低前端开发环境中无关控制台噪声。 |
+| 数据库分析 | `dbanalytics/` | 数据源管理界面，支持连接配置、元数据、表字段范围和共享管理。 |
+| 文档处理 | `documentprocessing/` | 文档处理智能体相关前端扩展入口。 |
+| IAM | `iam/` | IAM 同步设置、组织树、空间成员批量选择和候选用户检索。 |
+| 信息源页签 | `information-source/` | 扩展信息源页面导航，把知识库、数据源等入口组织到统一信息源视图。 |
+| 模型选项处理 | `model-options/` | 对模型下拉选项做去重和内置智能体托管模型隐藏处理。 |
+| 安全消息渲染 | `safeMessage/` | 增强消息渲染安全性和前端异常兜底。 |
+| 定时会话 | `scheduledchat/` | 定时任务列表、创建编辑、运行记录、立即运行和模板预览。 |
+| 技能中心 | `skillhub/` | 轻量技能、专业技能、技能选择器、共享、下载和置顶。 |
+| 来源时间线 | `sourceReferences/` | 展示回答引用、检索来源、工具来源和时间线。 |
+| 上传信息 | `uploadInfo/` | 上传确认、解析配置覆盖、上传状态与批次信息展示。 |
+
+### 旁路服务与运行时
+
+可独立运行的大段二开能力放在 `custom/services/`，通过 Docker Compose 与 Go 后端协作。
+
+| 服务 | 目录 | 容器/端口 | 当前职责 |
+| --- | --- | --- | --- |
+| 通用智能体 Sidecar | `custom/services/general-agent/` | `weknora-custom-general-agent`，`127.0.0.1:8091` | 运行 Claude Agent SDK loop，接收 Go 后端下发的工具 schema 和上下文，工具执行统一回调 Go。 |
+| 文档处理智能体 Sidecar | `custom/services/document-processing-agent/` | `weknora-custom-document-processing-agent`，`127.0.0.1:8093` | 在通用智能体运行时基础上预装 LibreOffice、Pandoc、PDF/Office 处理库和中文字体，用于文档生成与转换。 |
+| 浏览器宿主实验目录 | `custom/services/browser-host/` | 当前保留日志与测试目录 | 为浏览器宿主类能力预留的旁路服务目录。 |
+
+Sidecar 的边界很明确：Python 不直接连接 WeKnora 数据库、对象存储、MCP 服务或业务数据源；Go 后端仍是权限、租户、密钥、OAuth、审批、检索、数据库查询、审计和持久化的唯一执行边界。
+
+### 迁移与数据表
+
+二开迁移参考文件位于 `migrations/custom/`，编号从 `900000` 以后开始，当前包含：
+
+- `configcenter`：默认授权、用户授权和托管副本。
+- `dbanalytics`：数据库源、表字段元数据、共享关系。
+- `generalagent`：智能体产物和原始输入持久化。
+- `iam`：SSO/同步设置、外部组织、外部用户和同步记录。
+- `skillhub`：轻量技能、专业技能和共享关系。
+
+开发环境启动时，部分二开模块会通过 GORM AutoMigrate 保持表结构可用；生产发布如需显式 SQL 迁移，以 `migrations/custom/` 下的文件为准。
+
+### 原生代码注册点
+
+为了降低后续升级冲突，原生代码只保留少量稳定挂接点：
+
+- `internal/container/container.go`：注册 `custombootstrap.NewHandlers`、启动二开 scheduler，并把二开服务注入容器。
+- `internal/router/router.go`：挂载 `/api/v1/custom` 路由和嵌入产物下载路由。
+- `internal/handler/auth.go`：在 `/auth/me` 等用户 provisioning 流程中调用二开 Hook。
+- `internal/middleware/auth.go`：放行 SSO public callback 等匿名入口。
+- `frontend/src/views/settings/Settings.vue`：挂载 IAM、默认配置中心等设置入口。
+- `frontend/src/views/auth/Login.vue`：在登录页显示可选统一身份认证入口。
+
+后续新增企业功能时，应优先新增独立二开模块，只在上述注册点或 `internal/custom/bootstrap/`、`frontend/src/custom/` 中扩展，不应把大段业务逻辑继续写入原生目录。
 
 ## 本地开发启动
 

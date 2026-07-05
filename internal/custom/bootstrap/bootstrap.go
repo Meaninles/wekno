@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -18,8 +19,10 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
+	"github.com/Tencent/WeKnora/internal/custom/modules/userguide"
 	"github.com/Tencent/WeKnora/internal/handler"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
+	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -43,6 +46,7 @@ type Handlers struct {
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
 	skillHubService             *skillhub.Service
+	userGuideService            *userguide.Service
 }
 
 func NewHandlers(
@@ -51,6 +55,9 @@ func NewHandlers(
 	duckdb *sql.DB,
 	userService interfaces.UserService,
 	orgService interfaces.OrganizationService,
+	knowledgeBaseService interfaces.KnowledgeBaseService,
+	knowledgeService interfaces.KnowledgeService,
+	kbShareService interfaces.KBShareService,
 	sessionService interfaces.SessionService,
 	agentService interfaces.AgentService,
 	messageService interfaces.MessageService,
@@ -60,14 +67,18 @@ func NewHandlers(
 	tenantMemberService interfaces.TenantMemberService,
 	streamManager interfaces.StreamManager,
 	modelService interfaces.ModelService,
+	fileService interfaces.FileService,
+	documentReader interfaces.DocumentReader,
+	imageResolver *docparser.ImageResolver,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
-	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService)
+	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService)
 	iamService := iam.NewService(db, userService)
+	userGuideService := userguide.NewService(db, orgService, knowledgeBaseService, kbShareService)
 	scheduledChatService := scheduledchat.NewService(
 		db,
 		sessionService,
@@ -78,6 +89,9 @@ func NewHandlers(
 		tenantMemberService,
 		userService,
 		streamManager,
+		fileService,
+		modelService,
+		sessionhandler.NewAttachmentProcessor(fileService, documentReader, imageResolver, modelService),
 	)
 	skillHubService := skillhub.NewService(db)
 	if err := configCenterService.Migrate(ctx); err != nil {
@@ -101,8 +115,22 @@ func NewHandlers(
 	if err := skillHubService.Migrate(ctx); err != nil {
 		return nil, err
 	}
-	handler.RegisterCustomProvisionerHook(configCenterService.EnsureUserProvisioned)
-	iamService.SetProvisioner(configCenterService.EnsureUserProvisioned)
+	if err := userGuideService.EnsureAllUsers(ctx); err != nil {
+		logger.Warnf(ctx, "[custom bootstrap] failed to provision guide KB for existing users: %v", err)
+	}
+	provisionUser := func(ctx context.Context, user *types.User) error {
+		configErr := configCenterService.EnsureUserProvisioned(ctx, user)
+		guideErr := userGuideService.EnsureUserProvisioned(ctx, user)
+		if configErr != nil && guideErr != nil {
+			return fmt.Errorf("config center: %v; user guide: %w", configErr, guideErr)
+		}
+		if configErr != nil {
+			return configErr
+		}
+		return guideErr
+	}
+	handler.RegisterCustomProvisionerHook(provisionUser)
+	iamService.SetProvisioner(provisionUser)
 	appservice.RegisterAdditionalSkillLister(skillHubService.AdditionalMetadata)
 	appservice.RegisterProfessionalSkillLister(skillhub.ProfessionalMetadata)
 	appservice.RegisterRuntimeSkillConfigurer(skillHubService.ConfigureRuntimeSkills)
@@ -172,6 +200,7 @@ func NewHandlers(
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
 		skillHubService:             skillHubService,
+		userGuideService:            userGuideService,
 	}, nil
 }
 

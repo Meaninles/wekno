@@ -339,6 +339,7 @@ func (h *AuthHandler) OIDCRedirectCallback(c *gin.Context) {
 		c.Redirect(http.StatusFound, frontendRedirectURI+"#oidc_error="+urlQueryEscape("login_failed")+"&oidc_error_description="+urlQueryEscape(resp.Message))
 		return
 	}
+	runCustomProvisioner(ctx, resp.User)
 
 	payload, err := encodeOIDCCallbackPayload(resp)
 	if err != nil {
@@ -779,6 +780,7 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 			return
 		}
 	}
+	runCustomProvisioner(ctx, user)
 
 	accessToken, refreshToken, err := h.userService.GenerateTokens(ctx, user)
 	if err != nil {

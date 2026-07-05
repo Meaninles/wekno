@@ -126,10 +126,115 @@
           <span>启用任务</span>
         </label>
 
-        <label class="switch-field">
-          <t-switch v-model="form.web_search_enabled" />
-          <span>允许本次对话使用网络搜索</span>
-        </label>
+        <section class="capability-panel">
+          <div class="capability-panel__header">
+            <span>对话能力</span>
+            <small>与直接对话的选择能力保持一致</small>
+          </div>
+
+          <div
+            v-if="form.web_search_enabled || selectedKnowledgeBaseIds.length > 0 || selectedKnowledgeFiles.length > 0 || selectedSkillNamesModel.length > 0 || selectedProfessionalSkillNamesModel.length > 0 || selectedImageCount > 0 || selectedAttachmentUploads.length > 0"
+            class="selected-tags-inline"
+          >
+            <span v-if="form.web_search_enabled" class="mention-chip mention-chip--web">
+              <span class="mention-chip__icon"><t-icon name="search" /></span>
+              <span class="mention-chip__name">网络搜索</span>
+              <span class="mention-chip__remove" @click.stop="form.web_search_enabled = false">×</span>
+            </span>
+            <span v-for="id in selectedKnowledgeBaseIds" :key="`kb-${id}`" class="mention-chip mention-chip--kb">
+              <span class="mention-chip__icon"><t-icon name="folder" /></span>
+              <span class="mention-chip__name">{{ knowledgeBases.find(kb => kb.id === id)?.name || id }}</span>
+              <span class="mention-chip__remove" @click.stop="removeKnowledgeBase(id)">×</span>
+            </span>
+            <span v-for="file in selectedKnowledgeFiles" :key="`file-${file.id}`" class="mention-chip mention-chip--file">
+              <span class="mention-chip__icon"><t-icon name="file" /></span>
+              <span class="mention-chip__name" :title="file.kbName">{{ file.name }}</span>
+              <span class="mention-chip__remove" @click.stop="removeKnowledgeFile(file.id)">×</span>
+            </span>
+            <span v-for="name in selectedSkillNamesModel" :key="`skill-${name}`" class="mention-chip mention-chip--skill">
+              <span class="mention-chip__icon"><t-icon name="lightbulb" /></span>
+              <span class="mention-chip__name">{{ name }}</span>
+              <span class="mention-chip__remove" @click.stop="removeSelectedSkill(name)">×</span>
+            </span>
+            <span v-for="name in selectedProfessionalSkillNamesModel" :key="`professional-${name}`" class="mention-chip mention-chip--professional-skill">
+              <span class="mention-chip__icon"><t-icon name="tools" /></span>
+              <span class="mention-chip__name">{{ name }}</span>
+              <span class="mention-chip__remove" @click.stop="removeSelectedProfessionalSkill(name)">×</span>
+            </span>
+            <span v-for="(_, index) in form.request_context?.images || []" :key="`image-${index}`" class="mention-chip mention-chip--image">
+              <span class="mention-chip__icon"><t-icon name="image" /></span>
+              <span class="mention-chip__name">图片 {{ index + 1 }}</span>
+              <span class="mention-chip__remove" @click.stop="removeImage(index)">×</span>
+            </span>
+            <span v-for="(file, index) in selectedAttachmentUploads" :key="`attachment-${index}-${file.file_name}`" class="mention-chip mention-chip--attachment">
+              <span class="mention-chip__icon"><t-icon name="attachment" /></span>
+              <span class="mention-chip__name">{{ file.file_name }} · {{ formatFileSize(file.file_size) }}</span>
+              <span class="mention-chip__remove" @click.stop="removeAttachment(index)">×</span>
+            </span>
+          </div>
+
+          <div class="capability-actions">
+            <label class="capability-select">
+              <span>知识库</span>
+              <t-select v-model="selectedKnowledgeBaseIds" multiple filterable clearable placeholder="选择知识库">
+                <t-option
+                  v-for="kb in knowledgeBases"
+                  :key="kb.id"
+                  :value="kb.id"
+                  :label="kb.name"
+                />
+              </t-select>
+            </label>
+
+            <div class="file-search">
+              <span>文件</span>
+              <div class="file-search__bar">
+                <t-input v-model="fileSearchKeyword" placeholder="搜索知识库文件，留空显示最近文件" @enter="searchKnowledgeFiles" />
+                <t-button variant="outline" :loading="fileSearching" @click="searchKnowledgeFiles">搜索</t-button>
+              </div>
+              <div v-if="fileSearchResults.length > 0" class="file-result-list">
+                <button
+                  v-for="file in fileSearchResults"
+                  :key="file.id"
+                  type="button"
+                  class="file-result"
+                  :class="{ selected: isKnowledgeFileSelected(file.id) }"
+                  @click="toggleKnowledgeFile(file)"
+                >
+                  <t-icon name="file" />
+                  <span>{{ file.name }}</span>
+                  <small>{{ file.kbName || '知识库文件' }}</small>
+                </button>
+              </div>
+            </div>
+
+            <div class="capability-buttons">
+              <t-button
+                variant="outline"
+                :class="{ 'capability-button--active': form.web_search_enabled }"
+                @click="form.web_search_enabled = !form.web_search_enabled"
+              >
+                <template #icon><t-icon name="search" /></template>
+                网络搜索
+              </t-button>
+              <t-button ref="skillButtonRef" variant="outline" @click="showSkillSelector = true">
+                <template #icon><t-icon name="lightbulb" /></template>
+                Skill
+              </t-button>
+              <t-button variant="outline" @click="triggerImageUpload">
+                <template #icon><t-icon name="image" /></template>
+                图片
+              </t-button>
+              <t-button variant="outline" @click="triggerAttachmentUpload">
+                <template #icon><t-icon name="attachment" /></template>
+                文件
+              </t-button>
+            </div>
+
+            <input ref="imageInput" type="file" accept="image/*" multiple class="hidden-input" @change="handleImageFiles" />
+            <input ref="attachmentInput" type="file" multiple class="hidden-input" @change="handleAttachmentFiles" />
+          </div>
+        </section>
 
         <div class="template-row">
           <t-select v-model="selectedTemplateId" placeholder="选择模板" clearable @change="applySelectedTemplate">
@@ -169,6 +274,18 @@
           <t-button variant="outline" @click="drawerVisible = false">取消</t-button>
           <t-button theme="primary" :loading="saving" @click="saveTask">保存</t-button>
         </footer>
+
+        <Teleport to="body">
+          <SkillSelector
+            v-model:visible="showSkillSelector"
+            v-model:selected-skill-names="selectedSkillNamesModel"
+            v-model:selected-professional-skill-names="selectedProfessionalSkillNamesModel"
+            :anchorEl="skillButtonRef"
+            :professional-selection-mode="professionalSkillSelectionMode"
+            :allowed-professional-skill-names="allowedProfessionalSkillNames"
+            @close="showSkillSelector = false"
+          />
+        </Teleport>
       </div>
     </t-drawer>
 
@@ -196,10 +313,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { listAgents, type CustomAgent } from '@/api/agent'
+import { listKnowledgeBases, searchKnowledge } from '@/api/knowledge-base'
+import { useAuthStore } from '@/stores/auth'
+import SkillSelector from '@/custom/modules/skillhub/SkillSelector.vue'
 import {
   createScheduledChatTask,
   deleteScheduledChatTask,
@@ -211,6 +331,7 @@ import {
   runScheduledChatTaskNow,
   updateScheduledChatTask,
   type ScheduledChatPromptTemplate,
+  type ScheduledChatRequestContext,
   type ScheduledChatRun,
   type ScheduledChatTask,
   type ScheduledChatTaskPayload,
@@ -218,9 +339,28 @@ import {
   type ScheduleType,
 } from './api'
 
+type SkillSelectionMode = 'all' | 'selected' | 'none'
+
+interface KnowledgeBaseOption {
+  id: string
+  name: string
+  type?: 'document' | 'faq'
+  embedding_model_id?: string
+  summary_model_id?: string
+}
+
+interface SelectedKnowledgeFile {
+  id: string
+  name: string
+  kbId?: string
+  kbName?: string
+}
+
 const router = useRouter()
+const authStore = useAuthStore()
 const tasks = ref<ScheduledChatTask[]>([])
 const agents = ref<CustomAgent[]>([])
+const knowledgeBases = ref<KnowledgeBaseOption[]>([])
 const variables = ref<ScheduledChatVariable[]>([])
 const templates = ref<ScheduledChatPromptTemplate[]>([])
 const runs = ref<ScheduledChatRun[]>([])
@@ -232,8 +372,28 @@ const editingTask = ref<ScheduledChatTask | null>(null)
 const selectedTemplateId = ref('')
 const previewContent = ref('')
 const promptInput = ref<HTMLTextAreaElement | null>(null)
+const showSkillSelector = ref(false)
+const skillButtonRef = ref<any | null>(null)
+const selectedKnowledgeFiles = ref<SelectedKnowledgeFile[]>([])
+const fileSearchKeyword = ref('')
+const fileSearchResults = ref<SelectedKnowledgeFile[]>([])
+const fileSearching = ref(false)
+const imageInput = ref<HTMLInputElement | null>(null)
+const attachmentInput = ref<HTMLInputElement | null>(null)
 
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+
+function emptyRequestContext(): ScheduledChatRequestContext {
+  return {
+    knowledge_base_ids: [],
+    knowledge_ids: [],
+    skill_names: [],
+    professional_skill_names: [],
+    mentioned_items: [],
+    images: [],
+    attachment_uploads: [],
+  }
+}
 
 const form = reactive<ScheduledChatTaskPayload>({
   name: '',
@@ -248,23 +408,63 @@ const form = reactive<ScheduledChatTaskPayload>({
   day_of_month: 1,
   prompt_template: '',
   web_search_enabled: false,
+  request_context: emptyRequestContext(),
 })
 
 const firstAgentId = computed(() => agents.value[0]?.id || '')
+const selectedAgent = computed(() => agents.value.find(agent => agent.id === form.agent_id))
+const professionalSkillSelectionMode = computed<SkillSelectionMode>(() =>
+  selectedAgent.value?.config?.professional_skills_selection_mode || 'none',
+)
+const allowedProfessionalSkillNames = computed(() =>
+  Array.from(new Set((selectedAgent.value?.config?.selected_professional_skills || [])
+    .map(name => String(name || '').trim())
+    .filter(Boolean))),
+)
+const selectedSkillNamesModel = computed({
+  get: () => form.request_context?.skill_names || [],
+  set: (names: string[]) => {
+    ensureRequestContext().skill_names = normalizeNames(names)
+  },
+})
+const selectedProfessionalSkillNamesModel = computed({
+  get: () => form.request_context?.professional_skill_names || [],
+  set: (names: string[]) => {
+    ensureRequestContext().professional_skill_names = normalizeProfessionalSkillNames(names)
+  },
+})
+const selectedImageCount = computed(() => form.request_context?.images?.length || 0)
+const selectedAttachmentUploads = computed(() => form.request_context?.attachment_uploads || [])
+const selectedKnowledgeBaseIds = computed({
+  get: () => form.request_context?.knowledge_base_ids || [],
+  set: (ids: string[]) => {
+    ensureRequestContext().knowledge_base_ids = normalizeNames(ids)
+  },
+})
 
 onMounted(loadAll)
+
+watch(() => form.agent_id, () => {
+  selectedProfessionalSkillNamesModel.value = normalizeProfessionalSkillNames(selectedProfessionalSkillNamesModel.value)
+})
+
+watch(drawerVisible, (visible) => {
+  if (!visible) showSkillSelector.value = false
+})
 
 async function loadAll() {
   loading.value = true
   try {
-    const [taskRes, agentRes, variableRes, templateRes] = await Promise.all([
+    const [taskRes, agentRes, kbRes, variableRes, templateRes] = await Promise.all([
       listScheduledChatTasks(),
       listAgents(),
+      listKnowledgeBases(),
       getScheduledChatVariables(),
       getScheduledChatPromptTemplates(),
     ])
     tasks.value = taskRes.data || []
     agents.value = agentRes.data || []
+    knowledgeBases.value = Array.isArray((kbRes as any)?.data) ? (kbRes as any).data : []
     variables.value = variableRes.data || []
     templates.value = templateRes.data || []
   } catch (e: any) {
@@ -287,6 +487,10 @@ function resetForm() {
   form.day_of_month = 1
   form.prompt_template = ''
   form.web_search_enabled = false
+  form.request_context = emptyRequestContext()
+  selectedKnowledgeFiles.value = []
+  fileSearchKeyword.value = ''
+  fileSearchResults.value = []
   selectedTemplateId.value = ''
   previewContent.value = ''
 }
@@ -311,9 +515,260 @@ function openEdit(task: ScheduledChatTask) {
   form.day_of_month = task.day_of_month
   form.prompt_template = task.prompt_template
   form.web_search_enabled = task.web_search_enabled
+  form.request_context = normalizeRequestContext(task.request_context)
+  selectedKnowledgeFiles.value = filesFromRequestContext(form.request_context)
+  fileSearchKeyword.value = ''
+  fileSearchResults.value = []
   selectedTemplateId.value = ''
   previewContent.value = ''
   drawerVisible.value = true
+}
+
+function ensureRequestContext() {
+  if (!form.request_context) form.request_context = emptyRequestContext()
+  form.request_context.knowledge_base_ids ||= []
+  form.request_context.knowledge_ids ||= []
+  form.request_context.skill_names ||= []
+  form.request_context.professional_skill_names ||= []
+  form.request_context.mentioned_items ||= []
+  form.request_context.images ||= []
+  form.request_context.attachment_uploads ||= []
+  return form.request_context
+}
+
+function normalizeRequestContext(ctx?: ScheduledChatRequestContext): ScheduledChatRequestContext {
+  return {
+    ...emptyRequestContext(),
+    ...(ctx || {}),
+    knowledge_base_ids: normalizeNames(ctx?.knowledge_base_ids || []),
+    knowledge_ids: normalizeNames(ctx?.knowledge_ids || []),
+    skill_names: normalizeNames(ctx?.skill_names || []),
+    professional_skill_names: normalizeProfessionalSkillNames(ctx?.professional_skill_names || []),
+    mentioned_items: Array.isArray(ctx?.mentioned_items) ? ctx!.mentioned_items : [],
+    images: Array.isArray(ctx?.images) ? ctx!.images : [],
+    attachment_uploads: Array.isArray(ctx?.attachment_uploads) ? ctx!.attachment_uploads : [],
+  }
+}
+
+function buildRequestContext(): ScheduledChatRequestContext {
+  const ctx = normalizeRequestContext(form.request_context)
+  ctx.knowledge_ids = normalizeNames(selectedKnowledgeFiles.value.map(file => file.id))
+  ctx.mentioned_items = [
+    ...selectedKnowledgeBaseIds.value.map(id => {
+      const kb = knowledgeBases.value.find(item => item.id === id)
+      return {
+        id,
+        name: kb?.name || id,
+        type: 'kb',
+        kb_type: kb?.type || 'document',
+      }
+    }),
+    ...selectedKnowledgeFiles.value.map(file => ({
+      id: file.id,
+      name: file.name,
+      type: 'file',
+      kb_id: file.kbId,
+      kb_name: file.kbName,
+    })),
+    ...ctx.skill_names!.map(name => ({
+      id: name,
+      name,
+      type: 'skill',
+      skill_name: name,
+    })),
+  ]
+  form.request_context = ctx
+  return ctx
+}
+
+function normalizeNames(names: string[]) {
+  const seen = new Set<string>()
+  return (names || [])
+    .map(name => String(name || '').trim())
+    .filter(name => {
+      if (!name || seen.has(name)) return false
+      seen.add(name)
+      return true
+    })
+}
+
+function normalizeProfessionalSkillNames(names: string[]) {
+  const normalized = normalizeNames(names)
+  const mode = professionalSkillSelectionMode.value
+  if (mode === 'none') return []
+  if (mode === 'selected') {
+    const allowed = new Set(allowedProfessionalSkillNames.value)
+    return normalized.filter(name => allowed.has(name))
+  }
+  return normalized
+}
+
+function filesFromRequestContext(ctx?: ScheduledChatRequestContext): SelectedKnowledgeFile[] {
+  const items = Array.isArray(ctx?.mentioned_items) ? ctx!.mentioned_items : []
+  const files: SelectedKnowledgeFile[] = items
+    .filter(item => item.type === 'file')
+    .map(item => ({
+      id: item.id,
+      name: item.name || item.id,
+      kbId: item.kb_id,
+      kbName: item.kb_name,
+    }))
+  const known = new Set(files.map(file => file.id))
+  for (const id of ctx?.knowledge_ids || []) {
+    if (!known.has(id)) {
+      files.push({ id, name: id })
+    }
+  }
+  return files
+}
+
+async function searchKnowledgeFiles() {
+  fileSearching.value = true
+  try {
+    const keyword = fileSearchKeyword.value.trim()
+    const agentIDForSearch = sharedAgentIDForKnowledgeSearch()
+    const res: any = await searchKnowledge(keyword, 0, 20, undefined, {
+      agent_id: agentIDForSearch,
+      recent: !keyword,
+    })
+    fileSearchResults.value = Array.isArray(res?.data)
+      ? res.data.map((item: any) => ({
+        id: item.id,
+        name: item.title || item.file_name || item.id,
+        kbId: item.knowledge_base_id || item.kb_id,
+        kbName: item.knowledge_base_name || '',
+      }))
+      : []
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || '搜索文件失败')
+  } finally {
+    fileSearching.value = false
+  }
+}
+
+function sharedAgentIDForKnowledgeSearch() {
+  const agent = selectedAgent.value
+  const agentTenantID = Number(agent?.tenant_id || 0)
+  const currentTenantID = Number(authStore.effectiveTenantId || authStore.currentTenantId || 0)
+  if (!agent || agent.is_builtin || !agentTenantID || !currentTenantID) return undefined
+  return agentTenantID !== currentTenantID ? agent.id : undefined
+}
+
+function toggleKnowledgeFile(file: SelectedKnowledgeFile) {
+  const index = selectedKnowledgeFiles.value.findIndex(item => item.id === file.id)
+  if (index >= 0) {
+    selectedKnowledgeFiles.value.splice(index, 1)
+  } else {
+    selectedKnowledgeFiles.value.push(file)
+  }
+  ensureRequestContext().knowledge_ids = selectedKnowledgeFiles.value.map(item => item.id)
+}
+
+function removeKnowledgeFile(id: string) {
+  selectedKnowledgeFiles.value = selectedKnowledgeFiles.value.filter(file => file.id !== id)
+  ensureRequestContext().knowledge_ids = selectedKnowledgeFiles.value.map(file => file.id)
+}
+
+function isKnowledgeFileSelected(id: string) {
+  return selectedKnowledgeFiles.value.some(file => file.id === id)
+}
+
+function removeSelectedSkill(name: string) {
+  selectedSkillNamesModel.value = selectedSkillNamesModel.value.filter(item => item !== name)
+}
+
+function removeSelectedProfessionalSkill(name: string) {
+  selectedProfessionalSkillNamesModel.value = selectedProfessionalSkillNamesModel.value.filter(item => item !== name)
+}
+
+function removeKnowledgeBase(id: string) {
+  selectedKnowledgeBaseIds.value = selectedKnowledgeBaseIds.value.filter(item => item !== id)
+}
+
+function triggerImageUpload() {
+  if (!selectedAgent.value?.config?.image_upload_enabled) {
+    MessagePlugin.warning('当前智能体未启用图片上传')
+    return
+  }
+  imageInput.value?.click()
+}
+
+function triggerAttachmentUpload() {
+  attachmentInput.value?.click()
+}
+
+async function handleImageFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  if (files.length === 0) return
+  const ctx = ensureRequestContext()
+  const current = ctx.images || []
+  for (const file of files) {
+    if (current.length >= 5) {
+      MessagePlugin.warning('最多上传 5 张图片')
+      break
+    }
+    if (!file.type.startsWith('image/')) {
+      MessagePlugin.warning(`不是图片文件：${file.name}`)
+      continue
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      MessagePlugin.warning(`图片超过 10MB：${file.name}`)
+      continue
+    }
+    current.push({ data: await readFileAsDataURL(file) })
+  }
+  ctx.images = current
+}
+
+async function handleAttachmentFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  if (files.length === 0) return
+  const ctx = ensureRequestContext()
+  const current = ctx.attachment_uploads || []
+  for (const file of files) {
+    if (current.length >= 5) {
+      MessagePlugin.warning('最多上传 5 个文件')
+      break
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      MessagePlugin.warning(`文件超过 20MB：${file.name}`)
+      continue
+    }
+    const dataUrl = await readFileAsDataURL(file)
+    current.push({
+      data: String(dataUrl).split(',')[1] || String(dataUrl),
+      file_name: file.name,
+      file_size: file.size,
+    })
+  }
+  ctx.attachment_uploads = current
+}
+
+function removeImage(index: number) {
+  ensureRequestContext().images!.splice(index, 1)
+}
+
+function removeAttachment(index: number) {
+  ensureRequestContext().attachment_uploads!.splice(index, 1)
+}
+
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
 async function saveTask() {
@@ -331,10 +786,14 @@ async function saveTask() {
   }
   saving.value = true
   try {
+    const payload = {
+      ...form,
+      request_context: buildRequestContext(),
+    }
     if (editingTask.value) {
-      await updateScheduledChatTask(editingTask.value.id, { ...form })
+      await updateScheduledChatTask(editingTask.value.id, payload)
     } else {
-      await createScheduledChatTask({ ...form })
+      await createScheduledChatTask(payload)
     }
     MessagePlugin.success('保存成功')
     drawerVisible.value = false
@@ -361,6 +820,7 @@ async function toggleTask(task: ScheduledChatTask, enabled: boolean) {
       day_of_month: task.day_of_month,
       prompt_template: task.prompt_template,
       web_search_enabled: task.web_search_enabled,
+      request_context: normalizeRequestContext(task.request_context),
     })
     await loadAll()
   } catch (e: any) {
@@ -459,6 +919,7 @@ async function previewPrompt() {
       task_name: form.name,
       agent_id: form.agent_id,
       timezone: form.timezone,
+      request_context: buildRequestContext(),
     })
     previewContent.value = res.data?.content || ''
   } catch (e: any) {
@@ -630,6 +1091,155 @@ function statusTheme(status?: string) {
   align-items: center;
   gap: 8px;
   font-size: 14px;
+}
+
+.capability-panel {
+  border: 1px solid var(--td-component-border);
+  background: var(--td-bg-color-secondarycontainer);
+  padding: 12px;
+}
+
+.capability-panel__header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.capability-panel__header small {
+  color: var(--td-text-color-secondary);
+  font-weight: 400;
+}
+
+.selected-tags-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--td-component-border);
+  border-radius: 6px;
+  background: var(--td-bg-color-container);
+  font-size: 13px;
+}
+
+.mention-chip__icon {
+  display: inline-flex;
+  color: var(--td-brand-color);
+}
+
+.mention-chip__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-chip__remove {
+  color: var(--td-text-color-secondary);
+  cursor: pointer;
+}
+
+.mention-chip__remove:hover {
+  color: var(--td-error-color);
+}
+
+.mention-chip--professional-skill .mention-chip__icon,
+.mention-chip--attachment .mention-chip__icon {
+  color: var(--td-warning-color);
+}
+
+.mention-chip--file .mention-chip__icon,
+.mention-chip--image .mention-chip__icon {
+  color: var(--td-success-color);
+}
+
+.mention-chip--web .mention-chip__icon {
+  color: var(--td-brand-color);
+}
+
+.capability-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.capability-select,
+.file-search {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.file-search__bar,
+.capability-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.capability-button--active {
+  border-color: var(--td-brand-color) !important;
+  color: var(--td-brand-color) !important;
+  background: var(--td-brand-color-light) !important;
+}
+
+.file-search__bar > :first-child {
+  flex: 1;
+}
+
+.file-result-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.file-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: center;
+  border: 1px solid var(--td-component-border);
+  border-radius: 6px;
+  background: var(--td-bg-color-container);
+  color: var(--td-text-color-primary);
+  padding: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-result.selected {
+  border-color: var(--td-brand-color);
+  background: var(--td-brand-color-light);
+}
+
+.file-result span,
+.file-result small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-result small {
+  grid-column: 2;
+  color: var(--td-text-color-secondary);
+}
+
+.hidden-input {
+  display: none;
 }
 
 .template-row > :first-child {

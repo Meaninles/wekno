@@ -46,6 +46,29 @@ Use this skill when testing.
 		skill.Name, skill.Description, len(skill.Instructions))
 }
 
+func TestParseSkillFileUsesSlugWhenReadableNameIsInvalid(t *testing.T) {
+	content := `---
+name: Word / DOCX
+slug: word-docx
+description: Create and edit Word documents.
+---
+# Word Skill
+
+Use this skill for DOCX work.
+`
+
+	skill, err := ParseSkillFile(content)
+	if err != nil {
+		t.Fatalf("ParseSkillFile returned error: %v", err)
+	}
+	if skill.Name != "word-docx" {
+		t.Fatalf("Name = %q, want word-docx", skill.Name)
+	}
+	if skill.DisplayName != "word-docx" {
+		t.Fatalf("DisplayName = %q, want word-docx", skill.DisplayName)
+	}
+}
+
 func TestSkillValidation(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -72,7 +95,7 @@ func TestSkillValidation(t *testing.T) {
 			skillName:   "My Skill",
 			description: "A skill",
 			wantErr:     true,
-			errContains: "lowercase letters",
+			errContains: "letters, numbers, and hyphens",
 		},
 		{
 			name:        "reserved word in name",

@@ -285,9 +285,9 @@
           </t-tooltip>
         </div>
         <t-form :data="professionalImportForm" label-align="top">
-          <t-form-item label="技能名称" name="name">
-            <t-input v-model="professionalImportForm.name" placeholder="例如：document-review" />
-            <p class="form-hint">必须与通用智能体专业技能命名规则兼容，建议使用小写字母、数字和连字符。</p>
+          <t-form-item label="运行标识（可选）" name="name">
+            <t-input v-model="professionalImportForm.name" placeholder="例如：word-docx；留空自动从包内 slug 推导" />
+            <p class="form-hint">前端展示、内部目录和选择值都使用这个 slug；只允许小写字母、数字和连字符。</p>
           </t-form-item>
           <t-form-item label="技能描述（可选）" name="description">
             <t-textarea
@@ -303,7 +303,7 @@
               <t-icon name="upload" />
               <span>{{ professionalPackageLabel }}</span>
               <small>支持 .zip、.tar、.tar.gz、.tgz、.7z、.rar；最大 30MB，解压限时 1 分钟；解压后总文件不超过 50MB，单文件不超过 10MB。</small>
-              <small>压缩包内必须包含且只包含一个 SKILL.md 所在技能目录；技能触发规则来自 SKILL.md，编辑时不上传新包则只更新名称和展示描述。</small>
+              <small>压缩包内必须包含且只包含一个 SKILL.md；原始技能文件会保持不变，运行时按内部 slug 临时适配。</small>
             </label>
           </t-form-item>
         </t-form>
@@ -525,12 +525,12 @@ const userShareForm = ref<{ user_id: string; username: string; permission: Skill
 
 const RESERVED_SCOPES = new Set(['all', 'mine'])
 const PROFESSIONAL_PACKAGE_MAX_BYTES = 30 * 1024 * 1024
-const PROFESSIONAL_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/
+const PROFESSIONAL_NAME_PATTERN = /^[\p{L}\p{N}-]{1,64}$/u
 const LIGHTWEIGHT_NAME_MAX_CHARS = 64
 const LIGHTWEIGHT_DESCRIPTION_MAX_CHARS = 1024
 const LIGHTWEIGHT_PROMPT_MAX_CHARS = 20000
 const lightweightRuleText = '名称 1-64 字且不含换行；提示词必填，最多 2 万字；描述可选。'
-const professionalRuleText = '名称用小写字母/数字/连字符；包不超过 30MB；需含唯一 SKILL.md，解压限时 1 分钟。'
+const professionalRuleText = '名称统一使用包内 slug；缺失 slug 时从合法 name、目录名或包名推导；包不超过 30MB 且需含唯一 SKILL.md。'
 const mineSkills = computed(() => skills.value.filter((skill) => skill.is_mine))
 const allSkillsCount = computed(() => skills.value.length)
 
@@ -568,8 +568,8 @@ const createActionLabel = computed(() => activeSkillKind.value === 'professional
 const professionalEditorHeader = computed(() => professionalEditorMode.value === 'edit' ? '编辑专业技能' : '新增专业技能')
 const professionalImportTip = computed(() =>
   professionalEditorMode.value === 'edit'
-    ? '可更新专业技能名称和展示描述；上传新压缩包时会替换当前技能目录，并保留原始包用于下载。技能触发规则来自 SKILL.md。'
-    : '上传时会立即解压、校验并保存为专业技能目录；技能触发规则来自 SKILL.md，名称会尝试按压缩包文件名自动填写。',
+    ? '可更新 slug 和展示描述；上传新压缩包时会替换当前技能目录，并保留原始包用于下载。'
+    : '上传时会立即解压、校验并保存为专业技能目录；原始技能文件保持不变，名称优先使用包内 slug。',
 )
 const professionalPackageLabel = computed(() => {
   if (professionalPackageFile.value) return professionalPackageFile.value.name
@@ -707,18 +707,34 @@ function resetProfessionalImport() {
 }
 
 function isValidProfessionalName(name: string) {
-  return PROFESSIONAL_NAME_PATTERN.test(name) && !name.includes('--')
+  return PROFESSIONAL_NAME_PATTERN.test(name)
 }
 
 function professionalNameFromPackage(filename: string) {
   const raw = filename.split(/[\\/]/).pop() || ''
   const lower = raw.toLowerCase()
   const extensions = ['.tar.gz', '.tar.bz2', '.tar.xz', '.tgz', '.zip', '.tar', '.7z', '.rar', '.gz']
+  let base = raw
   for (const ext of extensions) {
-    if (lower.endsWith(ext)) return raw.slice(0, -ext.length)
+    if (lower.endsWith(ext)) {
+      base = raw.slice(0, -ext.length)
+      break
+    }
   }
-  const dotIndex = raw.lastIndexOf('.')
-  return dotIndex > 0 ? raw.slice(0, dotIndex) : raw
+  if (base === raw) {
+    const dotIndex = raw.lastIndexOf('.')
+    base = dotIndex > 0 ? raw.slice(0, dotIndex) : raw
+  }
+  return slugFromText(base)
+}
+
+function slugFromText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/\s*\(\d+\)\s*$/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
 }
 
 function handleProfessionalPackageChange(event: Event) {
@@ -737,23 +753,19 @@ function handleProfessionalPackageChange(event: Event) {
   professionalPackageFile.value = file
   if (professionalEditorMode.value === 'create') {
     const candidate = professionalNameFromPackage(file.name).trim()
-    if (isValidProfessionalName(candidate)) {
-      professionalImportForm.value.name = candidate
-    } else {
-      MessagePlugin.warning(`压缩包名称“${candidate || file.name}”不符合技能名称规则，已保留文件但未自动填写名称。`)
-    }
+    if (isValidProfessionalName(candidate)) professionalImportForm.value.name = candidate
   }
 }
 
 async function saveProfessionalSkill() {
   const name = professionalImportForm.value.name.trim()
   const description = professionalImportForm.value.description.trim()
-  if (!name) {
-    MessagePlugin.warning('请填写技能名称')
+  if (name && !isValidProfessionalName(name)) {
+    MessagePlugin.warning('运行标识只能使用字母、数字和连字符，最长 64 个字符。')
     return
   }
-  if (!isValidProfessionalName(name)) {
-    MessagePlugin.warning('技能名称只能使用小写字母、数字和连字符，且不能以连字符开头或结尾。')
+  if (professionalEditorMode.value === 'edit' && !name) {
+    MessagePlugin.warning('编辑专业技能时运行标识不能为空')
     return
   }
   if (charCount(description) > LIGHTWEIGHT_DESCRIPTION_MAX_CHARS) {

@@ -21,6 +21,7 @@ export interface ScheduledChatTask {
   day_of_month: number
   prompt_template: string
   web_search_enabled: boolean
+  request_context?: ScheduledChatRequestContext
   next_run_at?: string
   last_run_at?: string
   last_success_at?: string
@@ -60,6 +61,30 @@ export interface ScheduledChatTaskPayload {
   day_of_month: number
   prompt_template: string
   web_search_enabled: boolean
+  request_context?: ScheduledChatRequestContext
+}
+
+export interface ScheduledChatRequestContext {
+  knowledge_base_ids?: string[]
+  knowledge_ids?: string[]
+  tag_ids?: string[]
+  tag_scopes?: Array<{ knowledge_base_id: string; tag_ids: string[] }>
+  mcp_service_ids?: string[]
+  skill_names?: string[]
+  professional_skill_names?: string[]
+  images?: Array<{ data?: string; url?: string; caption?: string }>
+  attachment_uploads?: Array<{ data: string; file_name: string; file_size: number }>
+  mentioned_items?: Array<{
+    id: string
+    name: string
+    type: string
+    kb_type?: string
+    kb_id?: string
+    kb_name?: string
+    service_id?: string
+    skill_name?: string
+  }>
+  summary_model_id?: string
 }
 
 export interface ScheduledChatVariable {
@@ -114,6 +139,7 @@ export function renderScheduledChatPreview(payload: {
   task_name?: string
   agent_id?: string
   timezone?: string
+  request_context?: ScheduledChatRequestContext
 }) {
   return post(`${base}/render-preview`, payload) as unknown as Promise<{ success: boolean; data: { content: string } }>
 }

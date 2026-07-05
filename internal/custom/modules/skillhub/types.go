@@ -151,6 +151,7 @@ type SkillShareList struct {
 type ProfessionalSkillListItem struct {
 	ID               string              `json:"id,omitempty"`
 	Name             string              `json:"name"`
+	DisplayName      string              `json:"display_name,omitempty"`
 	Description      string              `json:"description"`
 	Kind             string              `json:"kind"`
 	FileCount        int                 `json:"file_count"`

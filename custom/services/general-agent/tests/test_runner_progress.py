@@ -39,6 +39,11 @@ from app.runner import (  # noqa: E402
     judge_issues,
     materialize_professional_skills,
     normalize_professional_skill_path,
+    original_input_files_xml,
+    original_input_failures_xml,
+    original_input_completion_message,
+    original_input_fallback_action,
+    PreparedOriginalInputFile,
     prepare_data_analysis_reference_doc,
     prepare_document_template_context,
     prepare_ppt_generation_workspace,
@@ -83,6 +88,70 @@ class ResultMessage:
 
 
 class RunnerProgressTest(unittest.TestCase):
+    def test_original_input_files_xml_labels_weknora_originals_without_urls(self):
+        xml = original_input_files_xml(
+            [
+                PreparedOriginalInputFile(
+                    id="orig-1",
+                    source="weknora_chat_upload_original",
+                    role="user_uploaded_original_file",
+                    file_name="report.docx",
+                    file_type="docx",
+                    file_size=123,
+                    sha256="a" * 64,
+                    path="input_files/uploads/01_report.docx",
+                )
+            ],
+            "input_files/original_input_manifest.json",
+        )
+
+        self.assertIn("用户在 WeKnora 上传的原文件", xml)
+        self.assertIn("input_files/uploads/01_report.docx", xml)
+        self.assertIn("WeKnora user uploaded original file", xml)
+        self.assertNotIn("download_url", xml)
+        self.assertNotIn("http://", xml)
+
+    def test_original_input_failures_xml_declares_fallback(self):
+        xml = original_input_failures_xml(
+            [
+                {
+                    "file_name": "bad.pdf",
+                    "source": "WeKnora user uploaded original file",
+                    "reason": "download_or_verification_failed",
+                    "fallback_action": "附件解析文本和文件元数据",
+                }
+            ]
+        )
+
+        self.assertIn("原文件副本未能", xml)
+        self.assertIn("附件抽取文本", xml)
+        self.assertIn("附件解析文本和文件元数据", xml)
+        self.assertIn("bad.pdf", xml)
+
+    def test_original_input_completion_message_hides_fallback_when_all_succeeded(self):
+        message = original_input_completion_message(1, 1, [])
+
+        self.assertEqual(message, "用户在 WeKnora 上传或选择的原文件准备完成（成功 1/1，失败 0 个）")
+        self.assertNotIn("回退", message)
+        self.assertNotIn("既有逻辑", message)
+
+    def test_original_input_completion_message_describes_failure_fallback_actions(self):
+        message = original_input_completion_message(
+            1,
+            3,
+            [
+                {"fallback_action": original_input_fallback_action("weknora_chat_upload_original", "pdf")},
+                {"fallback_action": original_input_fallback_action("weknora_chat_image_original", "png")},
+                {"fallback_action": original_input_fallback_action("weknora_selected_knowledge_original", "docx")},
+            ],
+        )
+
+        self.assertIn("失败 3 个", message)
+        self.assertIn("附件解析文本和文件元数据", message)
+        self.assertIn("图片理解结果和已保存图片引用", message)
+        self.assertIn("知识库检索结果和知识库工具上下文", message)
+        self.assertNotIn("既有逻辑", message)
+
     def test_professional_skill_path_validation_allows_safe_unicode(self):
         self.assertEqual(
             normalize_professional_skill_path("references/7套新增风格规范.md"),

@@ -25,6 +25,7 @@ func NewSkillHandler(skillService interfaces.SkillService) *SkillHandler {
 // SkillInfoResponse represents the skill info returned to frontend
 type SkillInfoResponse struct {
 	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
 	Description string `json:"description"`
 	Kind        string `json:"kind,omitempty"`
 }
@@ -55,6 +56,7 @@ func (h *SkillHandler) ListSkills(c *gin.Context) {
 	for _, meta := range skillsMetadata {
 		response = append(response, SkillInfoResponse{
 			Name:        meta.Name,
+			DisplayName: meta.DisplayName,
 			Description: meta.Description,
 			Kind:        "lightweight",
 		})
@@ -67,6 +69,7 @@ func (h *SkillHandler) ListSkills(c *gin.Context) {
 	for _, meta := range professionalMetadata {
 		professionalResponse = append(professionalResponse, SkillInfoResponse{
 			Name:        meta.Name,
+			DisplayName: meta.DisplayName,
 			Description: meta.Description,
 			Kind:        "professional",
 		})

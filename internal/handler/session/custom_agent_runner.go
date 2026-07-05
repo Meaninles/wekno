@@ -6,6 +6,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
 // AgentQARunner is a custom smart-reasoning runtime that can take over an
@@ -37,4 +38,15 @@ func agentQARunnerFor(agentType string) AgentQARunner {
 	agentQARunnerRegistry.RLock()
 	defer agentQARunnerRegistry.RUnlock()
 	return agentQARunnerRegistry.byType[agentType]
+}
+
+// RunAgentQA dispatches an AgentQA request through the registered custom
+// runtime for the agent_type when one exists, falling back to native AgentQA.
+func RunAgentQA(ctx context.Context, sessionService interfaces.SessionService, req *types.QARequest, eventBus *event.EventBus) error {
+	if req != nil && req.CustomAgent != nil {
+		if runner := agentQARunnerFor(req.CustomAgent.Config.AgentType); runner != nil {
+			return runner(ctx, req, eventBus)
+		}
+	}
+	return sessionService.AgentQA(ctx, req, eventBus)
 }

@@ -28,6 +28,11 @@ func convertImageAttachments(items []ImageAttachment) types.MessageImages {
 	return result
 }
 
+// ConvertImageAttachments converts ImageAttachment slice to persisted message images.
+func ConvertImageAttachments(items []ImageAttachment) types.MessageImages {
+	return convertImageAttachments(items)
+}
+
 // extractImageURLsAndOCRText extracts image references and concatenated analysis text.
 // Prefer the server-side storage URL. The raw Data field is a request-only upload
 // payload; passing data: base64 through QARequest can make text-only agent prompts
@@ -54,6 +59,11 @@ func extractImageURLsAndOCRText(images []ImageAttachment) (urls []string, ocrTex
 		ocrText = strings.Join(parts, "\n")
 	}
 	return
+}
+
+// ExtractImageURLsAndOCRText extracts image URLs and VLM/OCR text from uploads.
+func ExtractImageURLsAndOCRText(images []ImageAttachment) (urls []string, ocrText string) {
+	return extractImageURLsAndOCRText(images)
 }
 
 // convertMentionedItems converts MentionedItemRequest slice to types.MentionedItems

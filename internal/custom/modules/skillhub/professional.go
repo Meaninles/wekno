@@ -44,6 +44,7 @@ func IsReservedProfessionalSkillName(name string) bool {
 
 type ProfessionalSkillPackage struct {
 	Name        string                  `json:"name"`
+	DisplayName string                  `json:"display_name,omitempty"`
 	Description string                  `json:"description"`
 	Files       []ProfessionalSkillFile `json:"files"`
 }
@@ -83,8 +84,7 @@ func registerProfessionalAccessResolver(fn func(context.Context) (map[string]pro
 }
 
 func ProfessionalMetadata(ctx context.Context) ([]*skills.SkillMetadata, error) {
-	loader := skills.NewLoader([]string{getProfessionalSkillsDir()})
-	metadata, err := loader.DiscoverSkills()
+	metadata, err := discoverProfessionalMetadata()
 	if err != nil {
 		return nil, err
 	}
@@ -95,8 +95,7 @@ func ProfessionalMetadata(ctx context.Context) ([]*skills.SkillMetadata, error) 
 
 func ProfessionalPackages(ctx context.Context, names []string, all bool) ([]ProfessionalSkillPackage, error) {
 	_ = ctx
-	loader := skills.NewLoader([]string{getProfessionalSkillsDir()})
-	metadata, err := loader.DiscoverSkills()
+	metadata, err := discoverProfessionalMetadata()
 	if err != nil {
 		return nil, err
 	}
@@ -122,41 +121,38 @@ func ProfessionalPackages(ctx context.Context, names []string, all bool) ([]Prof
 	var total int64
 	packages := make([]ProfessionalSkillPackage, 0, len(selected))
 	for _, meta := range selected {
-		skill, err := loader.LoadSkillInstructions(meta.Name)
-		if err != nil {
-			return nil, fmt.Errorf("load professional skill %s: %w", meta.Name, err)
-		}
-		files, err := loader.ListSkillFiles(meta.Name)
+		files, err := listProfessionalSkillFiles(meta.BasePath)
 		if err != nil {
 			return nil, fmt.Errorf("list professional skill %s files: %w", meta.Name, err)
 		}
 		sort.Strings(files)
 		pkg := ProfessionalSkillPackage{
-			Name:        skill.Name,
-			Description: skill.Description,
+			Name:        meta.Name,
+			DisplayName: meta.DisplayName,
+			Description: meta.Description,
 			Files:       make([]ProfessionalSkillFile, 0, len(files)),
 		}
 		for _, rel := range files {
 			clean, err := normalizeProfessionalSkillRelativePath(rel)
 			if err != nil {
-				return nil, fmt.Errorf("invalid professional skill file path %s/%s: %w", skill.Name, rel, err)
+				return nil, fmt.Errorf("invalid professional skill file path %s/%s: %w", meta.Name, rel, err)
 			}
 			if isProfessionalManagementFile(clean) {
 				continue
 			}
-			fullPath := filepath.Join(skill.BasePath, filepath.FromSlash(clean))
+			fullPath := filepath.Join(meta.BasePath, filepath.FromSlash(clean))
 			info, err := os.Lstat(fullPath)
 			if err != nil {
-				return nil, fmt.Errorf("stat professional skill file %s/%s: %w", skill.Name, rel, err)
+				return nil, fmt.Errorf("stat professional skill file %s/%s: %w", meta.Name, rel, err)
 			}
 			if info.Mode()&os.ModeSymlink != 0 {
-				return nil, fmt.Errorf("symbolic links are not allowed in skill packages: %s/%s", skill.Name, clean)
+				return nil, fmt.Errorf("symbolic links are not allowed in skill packages: %s/%s", meta.Name, clean)
 			}
 			if info.IsDir() {
 				continue
 			}
 			if info.Size() > maxProfessionalSkillFileSize {
-				return nil, fmt.Errorf("professional skill file too large: %s/%s", skill.Name, rel)
+				return nil, fmt.Errorf("professional skill file too large: %s/%s", meta.Name, rel)
 			}
 			total += info.Size()
 			if total > maxProfessionalSkillTotalSize {
@@ -164,7 +160,13 @@ func ProfessionalPackages(ctx context.Context, names []string, all bool) ([]Prof
 			}
 			content, err := os.ReadFile(fullPath)
 			if err != nil {
-				return nil, fmt.Errorf("read professional skill file %s/%s: %w", skill.Name, rel, err)
+				return nil, fmt.Errorf("read professional skill file %s/%s: %w", meta.Name, rel, err)
+			}
+			if clean == skills.SkillFileName {
+				content, err = normalizeSkillMarkdownForRuntime(string(content), meta.Name, meta.DisplayName)
+				if err != nil {
+					return nil, fmt.Errorf("normalize runtime professional skill %s: %w", meta.Name, err)
+				}
 			}
 			pkg.Files = append(pkg.Files, ProfessionalSkillFile{
 				Path:          clean,
@@ -172,11 +174,97 @@ func ProfessionalPackages(ctx context.Context, names []string, all bool) ([]Prof
 			})
 		}
 		if len(pkg.Files) == 0 {
-			return nil, fmt.Errorf("professional skill %s has no files", skill.Name)
+			return nil, fmt.Errorf("professional skill %s has no files", meta.Name)
 		}
 		packages = append(packages, pkg)
 	}
 	return packages, nil
+}
+
+func discoverProfessionalMetadata() ([]*skills.SkillMetadata, error) {
+	root := getProfessionalSkillsDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	metadata := make([]*skills.SkillMetadata, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		basePath := filepath.Join(root, entry.Name())
+		meta, err := readProfessionalMetadataFromDir(basePath)
+		if err != nil {
+			continue
+		}
+		metadata = append(metadata, meta)
+	}
+	return metadata, nil
+}
+
+func readProfessionalMetadataFromDir(basePath string) (*skills.SkillMetadata, error) {
+	content, err := os.ReadFile(filepath.Join(basePath, skills.SkillFileName))
+	if err != nil {
+		return nil, err
+	}
+	marker := readProfessionalSkillMarker(basePath)
+	name := strings.TrimSpace(marker.RuntimeName)
+	displayName := strings.TrimSpace(marker.DisplayName)
+	identity, identityErr := resolveProfessionalSkillIdentity(string(content), name, displayName, filepath.Base(basePath), marker.ArchiveFileName)
+	skill, parseErr := skills.ParseSkillFile(string(content))
+	if identityErr != nil && parseErr != nil {
+		return nil, parseErr
+	}
+	if name == "" || !isValidProfessionalSkillName(name) {
+		if identityErr == nil {
+			name = identity.RuntimeName
+		} else {
+			name = skill.Name
+		}
+	}
+	description := ""
+	if identityErr == nil {
+		if displayName == "" {
+			displayName = identity.DisplayName
+		}
+		description = identity.Description
+	} else {
+		if displayName == "" {
+			displayName = strings.TrimSpace(skill.DisplayName)
+		}
+		description = skill.Description
+	}
+	if displayName == "" {
+		displayName = name
+	}
+	return &skills.SkillMetadata{
+		Name:        name,
+		DisplayName: displayName,
+		Description: description,
+		BasePath:    basePath,
+	}, nil
+}
+
+func listProfessionalSkillFiles(basePath string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(basePath, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(basePath, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	})
+	return files, err
 }
 
 func resolveProfessionalAccess(ctx context.Context) map[string]professionalAccessEntry {

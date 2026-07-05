@@ -645,7 +645,8 @@ export const useSettingsStore = defineStore("settings", {
         }
         if (typeof state.agent_id === "string" && state.agent_id) {
           this.settings.selectedAgentId = state.agent_id;
-          // 上次记录是自有 agent 还是共享 agent，目前服务端不区分回传 sourceTenantId。
+          const sourceTenantId = state.agent_source_tenant_id || state.source_tenant_id || "";
+          this.settings.selectedAgentSourceTenantId = sourceTenantId ? String(sourceTenantId) : null;
           // 与 selectAgent() 不同，这里**不**重置 KB/文件选择 —— 因为我们紧接着
           // 就要用 state 里的 KB/文件覆盖，不需要先清空再写。
         }
@@ -658,10 +659,20 @@ export const useSettingsStore = defineStore("settings", {
         }
         if (Array.isArray(state.knowledge_ids)) {
           this.settings.selectedFiles = [...state.knowledge_ids];
-          // selectedFileKbMap 此时无法重建（state 里没存 KB 归属），交给前端按
-          // 需要 lazy 拉取。保留 store 现值，避免误删用户刚加进来的文件映射。
+          // selectedFileKbMap 需要 mentioned_items 中的 kb_id 才能重建；
+          // 若历史会话没有这部分数据，保留 store 现值做尽力恢复。
         }
         if (Array.isArray(state.mentioned_items)) {
+          const fileKbMap: Record<string, string> = {};
+          state.mentioned_items.forEach((item) => {
+            if (item.type === "file" && item.id && item.kb_id) {
+              fileKbMap[item.id] = item.kb_id;
+            }
+          });
+          if (Object.keys(fileKbMap).length > 0) {
+            this.settings.selectedFileKbMap = fileKbMap;
+          }
+
           const fromMentions = state.mentioned_items
             .filter(item => item.type === "tag" && item.id && item.kb_id)
             .map(item => ({ id: item.id, name: item.name || item.id, kbId: item.kb_id!, kbName: item.kb_name }));
@@ -689,15 +700,20 @@ export const useSettingsStore = defineStore("settings", {
         if (Array.isArray(state.skill_names)) {
           this.settings.selectedSkills = [...state.skill_names];
         } else if (Array.isArray(state.mentioned_items)) {
-          this.settings.selectedSkills = state.mentioned_items
+          const skillNames = state.mentioned_items
             .filter(item => item.type === "skill" && item.id)
             .map(item => item.skill_name || item.id);
+          this.settings.selectedSkills = skillNames;
+          this.settings.selectedSkillNames = skillNames;
         }
         if (typeof state.web_search_enabled === "boolean") {
           this.settings.webSearchEnabled = state.web_search_enabled;
         }
         if (Array.isArray(state.skill_names)) {
           this.settings.selectedSkillNames = [...state.skill_names];
+        }
+        if (Array.isArray(state.professional_skill_names)) {
+          this.settings.selectedProfessionalSkillNames = [...state.professional_skill_names];
         }
       } finally {
         // 复位必须延后到下一次 flush 之后：监听 selectedAgentId 的 watcher 默认
@@ -719,6 +735,8 @@ export const useSettingsStore = defineStore("settings", {
 // 字段全部可选——历史会话或新建会话首发前的请求没有这条记录。
 export interface SessionLastRequestStatePayload {
   agent_id?: string;
+  agent_source_tenant_id?: string;
+  source_tenant_id?: string;
   agent_enabled?: boolean;
   model_id?: string;
   knowledge_base_ids?: string[];
@@ -726,12 +744,15 @@ export interface SessionLastRequestStatePayload {
   tag_ids?: string[];
   mcp_service_ids?: string[];
   skill_names?: string[];
+  professional_skill_names?: string[];
   mentioned_items?: Array<{
     id: string;
     name?: string;
     type: string;
+    kb_type?: string;
     kb_id?: string;
     kb_name?: string;
+    service_id?: string;
     skill_name?: string;
   }>;
   web_search_enabled?: boolean;

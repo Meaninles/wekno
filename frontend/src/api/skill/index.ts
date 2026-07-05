@@ -3,6 +3,7 @@ import { del, get, getDown, post, postUpload, put } from "../../utils/request";
 // Skill信息
 export interface SkillInfo {
   name: string;
+  display_name?: string;
   description: string;
   kind?: 'lightweight' | 'professional';
 }
@@ -37,6 +38,7 @@ export interface ManagedSkill {
 export interface ManagedProfessionalSkill {
   id?: string;
   name: string;
+  display_name?: string;
   description: string;
   kind: 'professional';
   file_count: number;
@@ -97,17 +99,19 @@ export function listManagedProfessionalSkills() {
   return get('/api/v1/custom/skills/professional') as unknown as Promise<{ success: boolean; data: ManagedProfessionalSkill[]; total?: number }>;
 }
 
-export function importProfessionalSkill(payload: { name: string; description?: string; package: File }) {
+export function importProfessionalSkill(payload: { name?: string; display_name?: string; description?: string; package: File }) {
   const form = new FormData();
-  form.append('name', payload.name);
+  form.append('name', payload.name || '');
+  form.append('display_name', payload.display_name || '');
   form.append('description', payload.description || '');
   form.append('package', payload.package);
   return postUpload('/api/v1/custom/skills/professional', form) as unknown as Promise<{ success: boolean; data: ManagedProfessionalSkill; message?: string }>;
 }
 
-export function updateProfessionalSkill(id: string, payload: { name: string; description?: string; package?: File | null }) {
+export function updateProfessionalSkill(id: string, payload: { name: string; display_name?: string; description?: string; package?: File | null }) {
   const form = new FormData();
   form.append('name', payload.name);
+  form.append('display_name', payload.display_name || '');
   form.append('description', payload.description || '');
   if (payload.package) form.append('package', payload.package);
   return put(`/api/v1/custom/skills/professional/${id}`, form, {

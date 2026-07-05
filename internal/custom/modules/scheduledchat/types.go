@@ -1,8 +1,12 @@
 package scheduledchat
 
 import (
+	"database/sql/driver"
+	"encoding/json"
 	"time"
 
+	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -45,6 +49,7 @@ type Task struct {
 	DayOfMonth        int            `json:"day_of_month" gorm:"not null;default:1"` // Invalid dates are skipped.
 	PromptTemplate    string         `json:"prompt_template" gorm:"type:text;not null"`
 	WebSearchEnabled  bool           `json:"web_search_enabled" gorm:"not null;default:false"`
+	RequestContext    RequestContext `json:"request_context" gorm:"type:jsonb;not null;default:'{}'"`
 	ConcurrencyPolicy string         `json:"concurrency_policy" gorm:"type:varchar(32);not null;default:'skip_if_running'"`
 	NextRunAt         *time.Time     `json:"next_run_at" gorm:"index"`
 	LastRunAt         *time.Time     `json:"last_run_at"`
@@ -100,25 +105,72 @@ func (r *Run) BeforeCreate(tx *gorm.DB) error {
 }
 
 type TaskRequest struct {
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	Enabled          *bool  `json:"enabled"`
-	AgentID          string `json:"agent_id"`
-	ScheduleType     string `json:"schedule_type"`
-	Timezone         string `json:"timezone"`
-	Minute           int    `json:"minute"`
-	Hour             int    `json:"hour"`
-	Weekday          int    `json:"weekday"`
-	DayOfMonth       int    `json:"day_of_month"`
-	PromptTemplate   string `json:"prompt_template"`
-	WebSearchEnabled bool   `json:"web_search_enabled"`
+	Name             string         `json:"name"`
+	Description      string         `json:"description"`
+	Enabled          *bool          `json:"enabled"`
+	AgentID          string         `json:"agent_id"`
+	ScheduleType     string         `json:"schedule_type"`
+	Timezone         string         `json:"timezone"`
+	Minute           int            `json:"minute"`
+	Hour             int            `json:"hour"`
+	Weekday          int            `json:"weekday"`
+	DayOfMonth       int            `json:"day_of_month"`
+	PromptTemplate   string         `json:"prompt_template"`
+	WebSearchEnabled bool           `json:"web_search_enabled"`
+	RequestContext   RequestContext `json:"request_context"`
 }
 
 type RenderPreviewRequest struct {
-	PromptTemplate string `json:"prompt_template"`
-	TaskName       string `json:"task_name"`
-	AgentID        string `json:"agent_id"`
-	Timezone       string `json:"timezone"`
+	PromptTemplate string         `json:"prompt_template"`
+	TaskName       string         `json:"task_name"`
+	AgentID        string         `json:"agent_id"`
+	Timezone       string         `json:"timezone"`
+	RequestContext RequestContext `json:"request_context"`
+}
+
+// RequestContext stores the structured chat request state replayed by a
+// scheduled task. Keeping this versioned JSON-shaped envelope lets future
+// agent capabilities flow through scheduled runs without table churn.
+type RequestContext struct {
+	KnowledgeBaseIDs       []string                          `json:"knowledge_base_ids,omitempty"`
+	KnowledgeIDs           []string                          `json:"knowledge_ids,omitempty"`
+	TagIDs                 []string                          `json:"tag_ids,omitempty"`
+	TagScopes              []types.TagScope                  `json:"tag_scopes,omitempty"`
+	MCPServiceIDs          []string                          `json:"mcp_service_ids,omitempty"`
+	SkillNames             []string                          `json:"skill_names,omitempty"`
+	ProfessionalSkillNames []string                          `json:"professional_skill_names,omitempty"`
+	MentionedItems         types.MentionedItems              `json:"mentioned_items,omitempty"`
+	SummaryModelID         string                            `json:"summary_model_id,omitempty"`
+	Images                 []sessionhandler.ImageAttachment  `json:"images,omitempty"`
+	AttachmentUploads      []sessionhandler.AttachmentUpload `json:"attachment_uploads,omitempty"`
+}
+
+// Value implements driver.Valuer for JSONB storage.
+func (c RequestContext) Value() (driver.Value, error) {
+	return json.Marshal(c)
+}
+
+// Scan implements sql.Scanner for JSONB storage.
+func (c *RequestContext) Scan(value interface{}) error {
+	if value == nil {
+		*c = RequestContext{}
+		return nil
+	}
+	var b []byte
+	switch v := value.(type) {
+	case []byte:
+		b = v
+	case string:
+		b = []byte(v)
+	default:
+		*c = RequestContext{}
+		return nil
+	}
+	if len(b) == 0 {
+		*c = RequestContext{}
+		return nil
+	}
+	return json.Unmarshal(b, c)
 }
 
 type Variable struct {

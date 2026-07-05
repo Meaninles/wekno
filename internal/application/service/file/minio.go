@@ -22,12 +22,17 @@ import (
 type minioFileService struct {
 	client     *minio.Client
 	bucketName string
+	pathPrefix string
 }
 
 // newMinioClient creates a bare minioFileService with just the SDK client initialised.
 // Shared by NewMinioFileService (which also ensures the bucket exists) and
 // CheckMinioConnectivity (read-only probe).
-func newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool) (*minioFileService, error) {
+func newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool, pathPrefix string) (*minioFileService, error) {
+	normalizedPrefix, err := normalizeMinioPathPrefix(pathPrefix)
+	if err != nil {
+		return nil, err
+	}
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
 		Secure: useSSL,
@@ -35,7 +40,11 @@ func newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName string, u
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize MinIO client: %w", err)
 	}
-	return &minioFileService{client: client, bucketName: bucketName}, nil
+	return &minioFileService{
+		client:     client,
+		bucketName: bucketName,
+		pathPrefix: normalizedPrefix,
+	}, nil
 }
 
 // NewMinioFileService creates a MinIO file service.
@@ -43,7 +52,15 @@ func newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName string, u
 func NewMinioFileService(endpoint,
 	accessKeyID, secretAccessKey, bucketName string, useSSL bool,
 ) (interfaces.FileService, error) {
-	svc, err := newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName, useSSL)
+	return NewMinioFileServiceWithPathPrefix(endpoint, accessKeyID, secretAccessKey, bucketName, useSSL, "")
+}
+
+// NewMinioFileServiceWithPathPrefix creates a MinIO file service that writes
+// new objects under a dedicated object-key prefix.
+func NewMinioFileServiceWithPathPrefix(endpoint,
+	accessKeyID, secretAccessKey, bucketName string, useSSL bool, pathPrefix string,
+) (interfaces.FileService, error) {
+	svc, err := newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName, useSSL, pathPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -84,11 +101,27 @@ func (s *minioFileService) CheckConnectivity(ctx context.Context) error {
 // CheckMinioConnectivity tests MinIO connectivity using the provided credentials.
 // It creates a temporary service instance internally and delegates to CheckConnectivity.
 func CheckMinioConnectivity(ctx context.Context, endpoint, accessKeyID, secretAccessKey, bucketName string, useSSL bool) error {
-	svc, err := newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName, useSSL)
+	svc, err := newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName, useSSL, "")
 	if err != nil {
 		return err
 	}
 	return svc.CheckConnectivity(ctx)
+}
+
+func normalizeMinioPathPrefix(pathPrefix string) (string, error) {
+	prefix := strings.ReplaceAll(strings.TrimSpace(pathPrefix), "\\", "/")
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return "", nil
+	}
+	if err := utils.SafeObjectKey(prefix); err != nil {
+		return "", fmt.Errorf("invalid MinIO path prefix: %w", err)
+	}
+	return prefix + "/", nil
+}
+
+func (s *minioFileService) prefixedObjectName(format string, args ...any) string {
+	return s.pathPrefix + fmt.Sprintf(format, args...)
 }
 
 // parseMinioFilePath extracts the object name from a provider scheme: minio://{bucket}/{objectKey}
@@ -118,7 +151,7 @@ func (s *minioFileService) SaveFile(ctx context.Context,
 ) (string, error) {
 	// Generate object name
 	ext := filepath.Ext(file.Filename)
-	objectName := fmt.Sprintf("%d/%s/%s%s", tenantID, knowledgeID, uuid.New().String(), ext)
+	objectName := s.prefixedObjectName("%d/%s/%s%s", tenantID, knowledgeID, uuid.New().String(), ext)
 
 	// Open file
 	src, err := file.Open()
@@ -177,7 +210,7 @@ func (s *minioFileService) CopyFile(ctx context.Context,
 	}
 
 	ext := filepath.Ext(srcPath)
-	destKey := fmt.Sprintf("%d/%s/%s%s", tenantID, knowledgeID, uuid.New().String(), ext)
+	destKey := s.prefixedObjectName("%d/%s/%s%s", tenantID, knowledgeID, uuid.New().String(), ext)
 
 	_, err = s.client.CopyObject(ctx,
 		minio.CopyDestOptions{Bucket: s.bucketName, Object: destKey},
@@ -192,15 +225,19 @@ func (s *minioFileService) CopyFile(ctx context.Context,
 	return newPath, nil
 }
 
-// SaveBytes saves bytes data to MinIO and returns the file path
-// temp parameter is ignored for MinIO (no auto-expiration support in this implementation)
+// SaveBytes saves bytes data to MinIO and returns the file path.
 func (s *minioFileService) SaveBytes(ctx context.Context, data []byte, tenantID uint64, fileName string, temp bool) (string, error) {
 	safeName, err := utils.SafeFileName(fileName)
 	if err != nil {
 		return "", fmt.Errorf("invalid file name: %w", err)
 	}
 	ext := filepath.Ext(safeName)
-	objectName := fmt.Sprintf("%d/exports/%s%s", tenantID, uuid.New().String(), ext)
+	var objectName string
+	if temp {
+		objectName = s.prefixedObjectName("temp/%d/%s%s", tenantID, uuid.New().String(), ext)
+	} else {
+		objectName = s.prefixedObjectName("%d/exports/%s%s", tenantID, uuid.New().String(), ext)
+	}
 
 	// Upload bytes to MinIO
 	reader := bytes.NewReader(data)

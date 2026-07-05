@@ -24,6 +24,12 @@ const (
 // separately (either in the pipeline rewrite step for RAG paths, or via
 // analyzeImageAttachments for pure chat paths with non-vision models).
 func (h *Handler) saveImageAttachments(ctx context.Context, images []ImageAttachment, tenantID uint64, storageProvider string) error {
+	return SaveImageAttachments(ctx, h.fileService, images, tenantID, storageProvider)
+}
+
+// SaveImageAttachments decodes base64 images from the request and saves them to
+// storage. The images slice is mutated in place: URL is populated.
+func SaveImageAttachments(ctx context.Context, fileService interfaces.FileService, images []ImageAttachment, tenantID uint64, storageProvider string) error {
 	if len(images) == 0 {
 		return nil
 	}
@@ -31,7 +37,7 @@ func (h *Handler) saveImageAttachments(ctx context.Context, images []ImageAttach
 		return fmt.Errorf("too many images, max %d", maxImagesCount)
 	}
 
-	fileSvc := h.resolveImageFileService(ctx, storageProvider)
+	fileSvc := resolveImageFileService(ctx, fileService, storageProvider)
 
 	for i := range images {
 		img := &images[i]
@@ -62,11 +68,20 @@ func (h *Handler) saveImageAttachments(ctx context.Context, images []ImageAttach
 // Used as a fallback for pure chat paths where the pipeline rewrite step won't run.
 // For RAG paths, image analysis is handled in the pipeline rewrite step instead.
 func (h *Handler) analyzeImageAttachments(ctx context.Context, images []ImageAttachment, vlmModelID string, userQuery string) {
+	AnalyzeImageAttachments(ctx, h.modelService, images, vlmModelID, userQuery)
+}
+
+// AnalyzeImageAttachments runs VLM analysis on saved images and populates Caption.
+func AnalyzeImageAttachments(ctx context.Context, modelService interfaces.ModelService, images []ImageAttachment, vlmModelID string, userQuery string) {
 	if len(images) == 0 || vlmModelID == "" {
 		return
 	}
+	if modelService == nil {
+		logger.Warnf(ctx, "No model service available for image analysis, skipping")
+		return
+	}
 
-	vlmModel, err := h.modelService.GetVLMModel(ctx, vlmModelID)
+	vlmModel, err := modelService.GetVLMModel(ctx, vlmModelID)
 	if err != nil {
 		logger.Warnf(ctx, "No VLM model available for image analysis, skipping: %v", err)
 		return
@@ -141,19 +156,23 @@ func mimeToExt(mime string) string {
 }
 
 func (h *Handler) resolveImageFileService(ctx context.Context, storageProvider string) interfaces.FileService {
+	return resolveImageFileService(ctx, h.fileService, storageProvider)
+}
+
+func resolveImageFileService(ctx context.Context, fileService interfaces.FileService, storageProvider string) interfaces.FileService {
 	if strings.TrimSpace(storageProvider) == "" {
-		return h.fileService
+		return fileService
 	}
 
 	tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	if tenant == nil || tenant.StorageEngineConfig == nil {
-		return h.fileService
+		return fileService
 	}
 
 	svc, resolvedProvider, err := filesvc.NewFileServiceFromStorageConfig(storageProvider, tenant.StorageEngineConfig, "")
 	if err != nil {
 		logger.Warnf(ctx, "[image-storage] failed to create %s file service: %v, fallback to default", storageProvider, err)
-		return h.fileService
+		return fileService
 	}
 	logger.Infof(ctx, "[image-storage] using provider=%s for image uploads", resolvedProvider)
 	return svc

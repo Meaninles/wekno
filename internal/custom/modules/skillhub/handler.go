@@ -57,6 +57,7 @@ func (h *Handler) ImportProfessional(c *gin.Context) {
 
 	item, err := h.service.ImportProfessionalSkill(c.Request.Context(), ProfessionalSkillImportRequest{
 		Name:        c.PostForm("name"),
+		DisplayName: c.PostForm("display_name"),
 		Description: c.PostForm("description"),
 		File:        file,
 		Filename:    header.Filename,
@@ -88,6 +89,7 @@ func (h *Handler) UpdateProfessional(c *gin.Context) {
 	description, descriptionProvided := c.GetPostForm("description")
 	item, err := h.service.UpdateProfessionalSkill(c.Request.Context(), c.Param("id"), ProfessionalSkillUpdateRequest{
 		Name:                c.PostForm("name"),
+		DisplayName:         c.PostForm("display_name"),
 		Description:         description,
 		DescriptionProvided: descriptionProvided,
 		File:                file,

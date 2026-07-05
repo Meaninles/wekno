@@ -21,30 +21,32 @@ import (
 
 // qaRequestContext holds all the common data needed for QA requests
 type qaRequestContext struct {
-	ctx               context.Context
-	c                 *gin.Context
-	sessionID         string
-	requestID         string
-	receivedAt        time.Time // Wall-clock time the handler started processing the request
-	query             string
-	session           *types.Session
-	customAgent       *types.CustomAgent
-	assistantMessage  *types.Message
-	knowledgeBaseIDs  []string
-	knowledgeIDs      []string
-	tagScopes         []types.TagScope
-	tagIDs            []string
-	mcpServiceIDs     []string
-	skillNames        []string
-	summaryModelID    string
-	webSearchEnabled  bool
-	enableMemory      bool // Whether memory feature is enabled
-	mentionedItems    types.MentionedItems
-	effectiveTenantID uint64                   // when using shared agent, tenant ID for model/KB/MCP resolution; 0 = use context tenant
-	images            []ImageAttachment        // Uploaded images with analysis text
-	userMessageID     string                   // Created user message ID (populated after createUserMessage)
-	channel           string                   // Source channel: "web", "api", "im", etc.
-	attachments       types.MessageAttachments // Processed file attachments
+	ctx                    context.Context
+	c                      *gin.Context
+	sessionID              string
+	requestID              string
+	receivedAt             time.Time // Wall-clock time the handler started processing the request
+	query                  string
+	session                *types.Session
+	customAgent            *types.CustomAgent
+	assistantMessage       *types.Message
+	knowledgeBaseIDs       []string
+	knowledgeIDs           []string
+	tagScopes              []types.TagScope
+	tagIDs                 []string
+	mcpServiceIDs          []string
+	skillNames             []string
+	professionalSkillNames []string
+	summaryModelID         string
+	webSearchEnabled       bool
+	enableMemory           bool // Whether memory feature is enabled
+	mentionedItems         types.MentionedItems
+	effectiveTenantID      uint64                    // when using shared agent, tenant ID for model/KB/MCP resolution; 0 = use context tenant
+	images                 []ImageAttachment         // Uploaded images with analysis text
+	userMessageID          string                    // Created user message ID (populated after createUserMessage)
+	channel                string                    // Source channel: "web", "api", "im", etc.
+	attachments            types.MessageAttachments  // Processed file attachments
+	originalInputFiles     []types.OriginalInputFile // Runtime-only original file descriptors for Claude SDK agents
 
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
@@ -74,6 +76,7 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 		WebSearchEnabled:   rc.webSearchEnabled,
 		EnableMemory:       rc.enableMemory,
 		Attachments:        rc.attachments,
+		OriginalInputFiles: append([]types.OriginalInputFile(nil), rc.originalInputFiles...),
 	}
 }
 
@@ -128,6 +131,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 
 	// Get custom agent if agent_id is provided. Backend resolves shared agent from share relation (no client-provided tenant).
 	customAgent, effectiveTenantID := h.resolveAgent(ctx, c, request.AgentID)
+	isClaudeSDKAgent := customAgent != nil && types.IsClaudeSDKAgentType(customAgent.Config.AgentType)
 
 	// Merge @mentioned items into knowledge_base_ids and knowledge_ids
 	kbIDs, knowledgeIDs := mergeKnowledgeTargets(request.KnowledgeBaseIDs, request.KnowledgeIds, request.MentionedItems)
@@ -156,6 +160,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	// Process inline base64 images: decode and save to storage.
 	// VLM analysis for RAG paths is deferred to the pipeline rewrite step.
 	// For pure chat paths with non-vision models, VLM analysis runs here as fallback.
+	var originalInputFiles []types.OriginalInputFile
 	if len(request.Images) > 0 {
 		if customAgent == nil || !customAgent.Config.ImageUploadEnabled {
 			logger.Warnf(ctx, "[%s] Image upload is not enabled for this agent, rejecting %d images", logPrefix, len(request.Images))
@@ -170,6 +175,32 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		if err := h.saveImageAttachments(ctx, request.Images, tenantID, agentStorageProvider); err != nil {
 			logger.Errorf(ctx, "[%s] Failed to save images: %v", logPrefix, err)
 			return nil, nil, errors.NewBadRequestError(fmt.Sprintf("Image save failed: %v", err))
+		}
+		if isClaudeSDKAgent {
+			for i, image := range request.Images {
+				if strings.TrimSpace(image.Data) == "" {
+					continue
+				}
+				imgBytes, ext, err := decodeDataURI(image.Data)
+				if err != nil {
+					logger.Warnf(ctx, "[%s] image %d original file decode failed, falling back to previous image context path: %v", logPrefix, i+1, err)
+					continue
+				}
+				fileName := fmt.Sprintf("uploaded_image_%02d%s", i+1, ext)
+				original, err := h.createClaudeOriginalInputFromBytes(
+					ctx,
+					imgBytes,
+					fileName,
+					tenantID,
+					types.OriginalInputSourceChatImage,
+					types.OriginalInputRoleUserUploadedOriginal,
+				)
+				if err != nil {
+					logger.Warnf(ctx, "[%s] image original file transfer failed, falling back to previous image context path: %v", logPrefix, err)
+					continue
+				}
+				originalInputFiles = append(originalInputFiles, *original)
+			}
 		}
 
 		// VLM analysis is always deferred to after SSE stream is up:
@@ -204,6 +235,10 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 
 		// Process all attachments concurrently.
 		processedAttachments = make(types.MessageAttachments, len(request.AttachmentUploads))
+		var originalAttachmentFiles []types.OriginalInputFile
+		if isClaudeSDKAgent {
+			originalAttachmentFiles = make([]types.OriginalInputFile, len(request.AttachmentUploads))
+		}
 		var wg sync.WaitGroup
 		errChan := make(chan error, len(request.AttachmentUploads))
 
@@ -216,6 +251,22 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 				if err != nil {
 					errChan <- fmt.Errorf("attachment %d decode failed: %w", idx+1, err)
 					return
+				}
+
+				if isClaudeSDKAgent {
+					original, err := h.createClaudeOriginalInputFromBytes(
+						ctx,
+						data,
+						att.FileName,
+						tenantID,
+						types.OriginalInputSourceChatUpload,
+						types.OriginalInputRoleUserUploadedOriginal,
+					)
+					if err != nil {
+						logger.Warnf(ctx, "[%s] attachment %d original file transfer failed, falling back to extracted attachment context: %v", logPrefix, idx+1, err)
+					} else {
+						originalAttachmentFiles[idx] = *original
+					}
 				}
 
 				processed, err := h.attachmentProcessor.ProcessAttachment(
@@ -240,6 +291,11 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		}
 
 		logger.Infof(ctx, "[%s] all attachments processed", logPrefix)
+		for _, original := range originalAttachmentFiles {
+			if original.ID != "" {
+				originalInputFiles = append(originalInputFiles, original)
+			}
+		}
 	}
 
 	// Resolve enable_memory:
@@ -261,6 +317,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	tagIDs := dedupRequestStrings(append(request.TagIDs, mentionedIDsByType(request.MentionedItems, "tag")...))
 	mcpServiceIDs := dedupRequestStrings(append(request.MCPServiceIDs, mentionedIDsByType(request.MentionedItems, "mcp")...))
 	skillNames := dedupRequestStrings(append(request.SkillNames, mentionedIDsByType(request.MentionedItems, "skill")...))
+	professionalSkillNames := dedupRequestStrings(request.ProfessionalSkillNames)
 
 	// Build request context
 	reqCtx := &qaRequestContext{
@@ -279,22 +336,24 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			IsCompleted: false,
 			Channel:     request.Channel,
 		},
-		knowledgeBaseIDs:  secutils.SanitizeForLogArray(kbIDs),
-		knowledgeIDs:      secutils.SanitizeForLogArray(knowledgeIDs),
-		tagScopes:         tagScopes,
-		tagIDs:            secutils.SanitizeForLogArray(tagIDs),
-		mcpServiceIDs:     secutils.SanitizeForLogArray(mcpServiceIDs),
-		skillNames:        secutils.SanitizeForLogArray(skillNames),
-		summaryModelID:    secutils.SanitizeForLog(request.SummaryModelID),
-		webSearchEnabled:  request.WebSearchEnabled,
-		enableMemory:      enableMemory,
-		mentionedItems:    convertMentionedItems(request.MentionedItems),
-		effectiveTenantID: effectiveTenantID,
-		images:            request.Images,
-		channel:           request.Channel,
-		attachments:       processedAttachments,
-		reqAgentEnabled:   request.AgentEnabled,
-		reqAgentID:        request.AgentID,
+		knowledgeBaseIDs:       secutils.SanitizeForLogArray(kbIDs),
+		knowledgeIDs:           secutils.SanitizeForLogArray(knowledgeIDs),
+		tagScopes:              tagScopes,
+		tagIDs:                 secutils.SanitizeForLogArray(tagIDs),
+		mcpServiceIDs:          secutils.SanitizeForLogArray(mcpServiceIDs),
+		skillNames:             secutils.SanitizeForLogArray(skillNames),
+		professionalSkillNames: secutils.SanitizeForLogArray(professionalSkillNames),
+		summaryModelID:         secutils.SanitizeForLog(request.SummaryModelID),
+		webSearchEnabled:       request.WebSearchEnabled,
+		enableMemory:           enableMemory,
+		mentionedItems:         convertMentionedItems(request.MentionedItems),
+		effectiveTenantID:      effectiveTenantID,
+		images:                 request.Images,
+		channel:                request.Channel,
+		attachments:            processedAttachments,
+		originalInputFiles:     originalInputFiles,
+		reqAgentEnabled:        request.AgentEnabled,
+		reqAgentID:             request.AgentID,
 	}
 
 	return reqCtx, &request, nil
@@ -921,13 +980,20 @@ func (h *Handler) persistLastRequestState(parentCtx context.Context, reqCtx *qaR
 	}
 
 	state := &types.SessionLastRequestState{
-		AgentID:          reqCtx.reqAgentID,
-		AgentEnabled:     agentEnabled,
-		ModelID:          reqCtx.summaryModelID,
-		KnowledgeBaseIDs: reqCtx.knowledgeBaseIDs,
-		KnowledgeIDs:     reqCtx.knowledgeIDs,
-		SkillNames:       reqCtx.skillNames,
-		WebSearchEnabled: reqCtx.webSearchEnabled,
+		AgentID:                reqCtx.reqAgentID,
+		AgentEnabled:           agentEnabled,
+		ModelID:                reqCtx.summaryModelID,
+		KnowledgeBaseIDs:       append([]string(nil), reqCtx.knowledgeBaseIDs...),
+		KnowledgeIDs:           append([]string(nil), reqCtx.knowledgeIDs...),
+		TagIDs:                 append([]string(nil), reqCtx.tagIDs...),
+		MCPServiceIDs:          append([]string(nil), reqCtx.mcpServiceIDs...),
+		SkillNames:             append([]string(nil), reqCtx.skillNames...),
+		ProfessionalSkillNames: append([]string(nil), reqCtx.professionalSkillNames...),
+		MentionedItems:         append(types.MentionedItems(nil), reqCtx.mentionedItems...),
+		WebSearchEnabled:       reqCtx.webSearchEnabled,
+	}
+	if reqCtx.effectiveTenantID != 0 && reqCtx.session != nil && reqCtx.session.TenantID != reqCtx.effectiveTenantID {
+		state.AgentSourceTenantID = fmt.Sprintf("%d", reqCtx.effectiveTenantID)
 	}
 
 	if err := h.sessionService.UpdateSessionLastRequestState(ctx, reqCtx.sessionID, state); err != nil {

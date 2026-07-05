@@ -417,6 +417,13 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "imported-skill", "SKILL.md")); err != nil {
 		t.Fatalf("SKILL.md was not extracted before runtime: %v", err)
 	}
+	originalSkillMD, err := os.ReadFile(filepath.Join(root, "imported-skill", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read imported original SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(originalSkillMD), "name: package-name") {
+		t.Fatalf("import modified original SKILL.md:\n%s", string(originalSkillMD))
+	}
 	if _, err := os.Stat(filepath.Join(root, "imported-skill", "references", "checklist.md")); err != nil {
 		t.Fatalf("resource file was not extracted before runtime: %v", err)
 	}
@@ -431,10 +438,24 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if len(packages) != 1 {
 		t.Fatalf("packages len = %d, want 1", len(packages))
 	}
+	if packages[0].Name != "imported-skill" {
+		t.Fatalf("package name = %q, want imported-skill", packages[0].Name)
+	}
+	var runtimeSkillMD string
 	for _, file := range packages[0].Files {
 		if strings.HasSuffix(file.Path, ".zip") || file.Path == professionalSkillMetaFile || file.Path == professionalArchiveFile {
 			t.Fatalf("runtime package includes non-runtime artifact: %+v", file)
 		}
+		if file.Path == "SKILL.md" {
+			data, err := base64.StdEncoding.DecodeString(file.ContentBase64)
+			if err != nil {
+				t.Fatalf("decode runtime SKILL.md: %v", err)
+			}
+			runtimeSkillMD = string(data)
+		}
+	}
+	if !strings.Contains(runtimeSkillMD, "name: imported-skill") {
+		t.Fatalf("runtime SKILL.md was not adapted:\n%s", runtimeSkillMD)
 	}
 	var foundUnicode bool
 	for _, file := range packages[0].Files {
@@ -483,9 +504,29 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read updated SKILL.md: %v", err)
 	}
-	if !strings.Contains(string(updatedSkillMD), "name: updated-skill") ||
+	if !strings.Contains(string(updatedSkillMD), "name: package-name") ||
 		!strings.Contains(string(updatedSkillMD), "description: packaged description") {
-		t.Fatalf("updated SKILL.md was not normalized:\n%s", string(updatedSkillMD))
+		t.Fatalf("updated original SKILL.md was unexpectedly changed:\n%s", string(updatedSkillMD))
+	}
+	updatedPackages, err := ProfessionalPackages(context.Background(), []string{"updated-skill"}, false)
+	if err != nil {
+		t.Fatalf("ProfessionalPackages after update returned error: %v", err)
+	}
+	if len(updatedPackages) != 1 {
+		t.Fatalf("updated packages len = %d, want 1", len(updatedPackages))
+	}
+	var updatedRuntimeSkillMD string
+	for _, file := range updatedPackages[0].Files {
+		if file.Path == "SKILL.md" {
+			data, err := base64.StdEncoding.DecodeString(file.ContentBase64)
+			if err != nil {
+				t.Fatalf("decode updated runtime SKILL.md: %v", err)
+			}
+			updatedRuntimeSkillMD = string(data)
+		}
+	}
+	if !strings.Contains(updatedRuntimeSkillMD, "name: updated-skill") {
+		t.Fatalf("updated runtime SKILL.md was not adapted:\n%s", updatedRuntimeSkillMD)
 	}
 
 	if err := svc.DeleteProfessionalSkill(ctx, item.ID); err != nil {
@@ -493,6 +534,94 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "updated-skill")); !os.IsNotExist(err) {
 		t.Fatalf("deleted professional skill directory still exists or stat failed: %v", err)
+	}
+}
+
+func TestImportProfessionalSkillUsesSlugAndPreservesReadableName(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	svc := NewService(db)
+	if err := svc.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate skillhub: %v", err)
+	}
+	root := t.TempDir()
+	t.Setenv("WEKNORA_PROFESSIONAL_SKILLS_DIR", root)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	writeZipFile(t, zw, "word-docx/SKILL.md", `---
+name: Word / DOCX
+slug: word-docx
+version: 1.0.2
+description: Create, inspect, and edit Microsoft Word documents and DOCX files.
+---
+
+# Word / DOCX
+
+Use this skill for Word documents.
+`)
+	writeZipFile(t, zw, "word-docx/_meta.json", `{"slug":"word-docx","version":"1.0.2"}`)
+	writeZipFile(t, zw, "excel-xlsx (1).zip", "not part of this skill")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(12002))
+	ctx = context.WithValue(ctx, types.UserIDContextKey, "professional-word-user")
+	ctx = context.WithValue(ctx, types.TenantRoleContextKey, types.TenantRoleContributor)
+	item, err := svc.ImportProfessionalSkill(ctx, ProfessionalSkillImportRequest{
+		File:     nopMultipartFile{bytes.NewReader(buf.Bytes())},
+		Filename: "word-docx (1).zip",
+	})
+	if err != nil {
+		t.Fatalf("ImportProfessionalSkill returned error: %v", err)
+	}
+	if item.Name != "word-docx" || item.DisplayName != "word-docx" {
+		t.Fatalf("imported item = %+v, want slug name and slug display name", item)
+	}
+	if _, err := os.Stat(filepath.Join(root, "word-docx", "excel-xlsx (1).zip")); !os.IsNotExist(err) {
+		t.Fatalf("sibling archive outside skill root should not be copied into skill directory: %v", err)
+	}
+	originalSkillMD, err := os.ReadFile(filepath.Join(root, "word-docx", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read original SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(originalSkillMD), "name: Word / DOCX") {
+		t.Fatalf("original SKILL.md was modified:\n%s", string(originalSkillMD))
+	}
+
+	items, err := svc.ListProfessionalForManage(ctx)
+	if err != nil {
+		t.Fatalf("ListProfessionalForManage returned error: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "word-docx" {
+		t.Fatalf("managed items = %+v, want slug name", items)
+	}
+
+	packages, err := ProfessionalPackages(context.Background(), []string{"word-docx"}, false)
+	if err != nil {
+		t.Fatalf("ProfessionalPackages returned error: %v", err)
+	}
+	if len(packages) != 1 || packages[0].Name != "word-docx" {
+		t.Fatalf("packages = %+v, want slug name", packages)
+	}
+	var runtimeSkillMD string
+	for _, file := range packages[0].Files {
+		if file.Path == "SKILL.md" {
+			data, err := base64.StdEncoding.DecodeString(file.ContentBase64)
+			if err != nil {
+				t.Fatalf("decode runtime SKILL.md: %v", err)
+			}
+			runtimeSkillMD = string(data)
+		}
+		if strings.HasSuffix(file.Path, ".zip") {
+			t.Fatalf("runtime package includes sibling archive: %+v", file)
+		}
+	}
+	if !strings.Contains(runtimeSkillMD, "name: word-docx") {
+		t.Fatalf("runtime SKILL.md was not adapted with slug name:\n%s", runtimeSkillMD)
 	}
 }
 

@@ -199,13 +199,18 @@ func (c *SummaryConfig) Scan(value interface{}) error {
 // to the frontend by GetSession so the chat input can restore the same agent,
 // model, KB scope, etc. the user had selected last time.
 type SessionLastRequestState struct {
-	AgentID          string   `json:"agent_id,omitempty"`
-	AgentEnabled     bool     `json:"agent_enabled"`
-	ModelID          string   `json:"model_id,omitempty"`
-	KnowledgeBaseIDs []string `json:"knowledge_base_ids,omitempty"`
-	KnowledgeIDs     []string `json:"knowledge_ids,omitempty"`
-	SkillNames       []string `json:"skill_names,omitempty"`
-	WebSearchEnabled bool     `json:"web_search_enabled"`
+	AgentID                string         `json:"agent_id,omitempty"`
+	AgentSourceTenantID    string         `json:"agent_source_tenant_id,omitempty"`
+	AgentEnabled           bool           `json:"agent_enabled"`
+	ModelID                string         `json:"model_id,omitempty"`
+	KnowledgeBaseIDs       []string       `json:"knowledge_base_ids,omitempty"`
+	KnowledgeIDs           []string       `json:"knowledge_ids,omitempty"`
+	TagIDs                 []string       `json:"tag_ids,omitempty"`
+	MCPServiceIDs          []string       `json:"mcp_service_ids,omitempty"`
+	SkillNames             []string       `json:"skill_names,omitempty"`
+	ProfessionalSkillNames []string       `json:"professional_skill_names,omitempty"`
+	MentionedItems         MentionedItems `json:"mentioned_items,omitempty"`
+	WebSearchEnabled       bool           `json:"web_search_enabled"`
 }
 
 // Value implements driver.Valuer for SessionLastRequestState (JSONB).

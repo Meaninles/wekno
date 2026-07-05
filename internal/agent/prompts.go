@@ -249,7 +249,11 @@ func formatSkillsMetadata(skillsMetadata []*skills.SkillMetadata) string {
 
 	builder.WriteString("#### Available Skills\n\n")
 	for i, skill := range skillsMetadata {
-		builder.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, skill.Name))
+		title := skill.Name
+		if displayName := strings.TrimSpace(skill.DisplayName); displayName != "" && displayName != skill.Name {
+			title = fmt.Sprintf("%s (`%s`)", displayName, skill.Name)
+		}
+		builder.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, title))
 		builder.WriteString(fmt.Sprintf("   %s\n\n", skill.Description))
 	}
 

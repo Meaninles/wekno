@@ -316,6 +316,10 @@ func (h *Handler) fail(c *gin.Context, err error) {
 	logger.Warnf(c.Request.Context(), "[custom skillhub] request failed: %v", err)
 	msg := err.Error()
 	switch {
+	case isProfessionalSkillNameExistsError(err):
+		c.Error(apperrors.NewConflictError(duplicateProfessionalSkillNameMessage))
+	case isLightweightSkillNameExistsError(err):
+		c.Error(apperrors.NewConflictError(duplicateLightweightSkillNameMessage))
 	case strings.Contains(msg, "permission denied"):
 		c.Error(apperrors.NewForbiddenError(msg))
 	case strings.Contains(msg, "record not found"):

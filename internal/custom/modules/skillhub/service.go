@@ -222,6 +222,9 @@ func (s *Service) Create(ctx context.Context, req SkillRequest) (*Skill, error) 
 		return nil, err
 	}
 	if err := s.db.WithContext(ctx).Create(skill).Error; err != nil {
+		if isLightweightSkillNameExistsError(err) {
+			return nil, errLightweightSkillNameExists
+		}
 		return nil, err
 	}
 	return skill, nil
@@ -249,6 +252,9 @@ func (s *Service) Update(ctx context.Context, id string, req SkillRequest) (*Ski
 		"enabled":      next.Enabled,
 		"updated_at":   time.Now(),
 	}).Error; err != nil {
+		if isLightweightSkillNameExistsError(err) {
+			return nil, errLightweightSkillNameExists
+		}
 		return nil, err
 	}
 	return &next, nil
@@ -590,10 +596,10 @@ func (s *Service) validateSkill(ctx context.Context, skill *Skill, currentID str
 		return err
 	}
 	if count > 0 {
-		return fmt.Errorf("skill name already exists")
+		return errLightweightSkillNameExists
 	}
 	if preloadedSkillExists(skill.Name) {
-		return fmt.Errorf("skill name conflicts with a preloaded skill")
+		return errLightweightSkillNameExists
 	}
 	return nil
 }

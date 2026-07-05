@@ -200,6 +200,9 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 	if description == "" {
 		description = identity.Description
 	}
+	if err := s.ensureProfessionalSkillNameAvailable(ctx, identity.RuntimeName, ""); err != nil {
+		return nil, err
+	}
 
 	root := getProfessionalSkillsDir()
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -210,7 +213,7 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 		return nil, fmt.Errorf("invalid professional skill target path")
 	}
 	if _, err := os.Stat(target); err == nil {
-		return nil, fmt.Errorf("professional skill %q already exists", identity.RuntimeName)
+		return nil, errProfessionalSkillNameExists
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("check professional skill target: %w", err)
 	}
@@ -246,6 +249,9 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 	}
 	if err := s.db.WithContext(ctx).Create(record).Error; err != nil {
 		_ = os.RemoveAll(target)
+		if isProfessionalSkillNameExistsError(err) {
+			return nil, errProfessionalSkillNameExists
+		}
 		return nil, err
 	}
 
@@ -288,12 +294,8 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 		nextDisplayName = nextName
 	}
 	if nextName != record.Name {
-		var count int64
-		if err := s.db.WithContext(ctx).Model(&ProfessionalSkill{}).Where("name = ? AND id <> ?", nextName, record.ID).Count(&count).Error; err != nil {
+		if err := s.ensureProfessionalSkillNameAvailable(ctx, nextName, record.ID); err != nil {
 			return nil, err
-		}
-		if count > 0 {
-			return nil, fmt.Errorf("professional skill name already exists")
 		}
 	}
 
@@ -307,7 +309,7 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 	}
 	if nextName != record.Name {
 		if _, err := os.Stat(targetDir); err == nil {
-			return nil, fmt.Errorf("professional skill %q already exists", nextName)
+			return nil, errProfessionalSkillNameExists
 		} else if err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("check professional skill target: %w", err)
 		}
@@ -387,6 +389,9 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 		"archive_file_name": nextArchiveName,
 		"updated_at":        time.Now(),
 	}).Error; err != nil {
+		if isProfessionalSkillNameExistsError(err) {
+			return nil, errProfessionalSkillNameExists
+		}
 		return nil, err
 	}
 	record.Name = nextName
@@ -453,6 +458,25 @@ func (s *Service) canManageProfessionalFromContext(ctx context.Context) bool {
 	tenantID, _ := types.TenantIDFromContext(ctx)
 	userID, _ := types.UserIDFromContext(ctx)
 	return tenantID != 0 && userID != "" && types.TenantRoleFromContext(ctx).HasPermission(types.TenantRoleContributor)
+}
+
+func (s *Service) ensureProfessionalSkillNameAvailable(ctx context.Context, name, currentID string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	var count int64
+	query := s.db.WithContext(ctx).Model(&ProfessionalSkill{}).Where("name = ?", name)
+	if strings.TrimSpace(currentID) != "" {
+		query = query.Where("id <> ?", strings.TrimSpace(currentID))
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return errProfessionalSkillNameExists
+	}
+	return nil
 }
 
 func (s *Service) ensureProfessionalRecordForMetadata(ctx context.Context, meta *skills.SkillMetadata) (*ProfessionalSkill, error) {

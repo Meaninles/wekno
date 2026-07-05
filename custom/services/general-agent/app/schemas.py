@@ -92,6 +92,20 @@ class AttachmentSpec(BaseModel):
     is_truncated: bool = False
 
 
+class OriginalInputFileSpec(BaseModel):
+    id: str = ""
+    source: str = ""
+    role: str = ""
+    file_name: str = ""
+    file_type: str = ""
+    file_size: int = 0
+    sha256: str = ""
+    download_url: str = ""
+    storage_url: str = ""
+    knowledge_id: str = ""
+    knowledge_base_id: str = ""
+
+
 class DocumentTemplateFileSpec(BaseModel):
     role: str = ""
     format: str = ""
@@ -133,6 +147,7 @@ class ProfessionalSkillFileSpec(BaseModel):
 
 class ProfessionalSkillSpec(BaseModel):
     name: str
+    display_name: str = ""
     description: str = ""
     files: list[ProfessionalSkillFileSpec] = Field(default_factory=list)
 
@@ -152,6 +167,7 @@ class ChatPayload(BaseModel):
     quoted_context: str = ""
     selected_skill_context: str = ""
     attachments: list[AttachmentSpec] = Field(default_factory=list)
+    original_input_files: list[OriginalInputFileSpec] = Field(default_factory=list)
     document_template_context: DocumentTemplateContextSpec = Field(default_factory=DocumentTemplateContextSpec)
     visible_context: dict[str, Any] = Field(default_factory=dict)
     professional_skills: list[ProfessionalSkillSpec] = Field(default_factory=list)
@@ -166,6 +182,7 @@ class ChatPayload(BaseModel):
         "history",
         "image_urls",
         "attachments",
+        "original_input_files",
         "professional_skills",
         "tools",
         mode="before",

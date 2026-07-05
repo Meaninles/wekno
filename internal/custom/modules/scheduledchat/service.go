@@ -15,6 +15,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -37,6 +38,14 @@ type scheduledSessionTitleBackfillRow struct {
 	TaskName    string
 }
 
+type scheduledSessionStateBackfillRow struct {
+	SessionID        string
+	TenantID         uint64
+	AgentID          string
+	WebSearchEnabled bool
+	RequestContext   RequestContext
+}
+
 type Service struct {
 	db                  *gorm.DB
 	sessionService      interfaces.SessionService
@@ -47,6 +56,9 @@ type Service struct {
 	tenantMemberService interfaces.TenantMemberService
 	userService         interfaces.UserService
 	streamManager       interfaces.StreamManager
+	fileService         interfaces.FileService
+	modelService        interfaces.ModelService
+	attachmentProcessor *sessionhandler.AttachmentProcessor
 
 	schedulerMu     sync.Mutex
 	schedulerCancel context.CancelFunc
@@ -62,6 +74,9 @@ func NewService(
 	tenantMemberService interfaces.TenantMemberService,
 	userService interfaces.UserService,
 	streamManager interfaces.StreamManager,
+	fileService interfaces.FileService,
+	modelService interfaces.ModelService,
+	attachmentProcessor *sessionhandler.AttachmentProcessor,
 ) *Service {
 	return &Service{
 		db:                  db,
@@ -73,6 +88,9 @@ func NewService(
 		tenantMemberService: tenantMemberService,
 		userService:         userService,
 		streamManager:       streamManager,
+		fileService:         fileService,
+		modelService:        modelService,
+		attachmentProcessor: attachmentProcessor,
 	}
 }
 
@@ -89,6 +107,9 @@ func (s *Service) Migrate(ctx context.Context) error {
 	}
 	if err := s.backfillScheduledSessionTitles(ctx, db); err != nil {
 		logger.Warnf(ctx, "[custom scheduledchat] backfill session titles failed: %v", err)
+	}
+	if err := s.backfillScheduledSessionLastRequestStates(ctx, db); err != nil {
+		logger.Warnf(ctx, "[custom scheduledchat] backfill session request state failed: %v", err)
 	}
 	return nil
 }
@@ -123,6 +144,89 @@ func (s *Service) backfillScheduledSessionTitles(ctx context.Context, db *gorm.D
 			Update("title", title).Error; err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s *Service) backfillScheduledSessionLastRequestStates(ctx context.Context, db *gorm.DB) error {
+	var rows []scheduledSessionStateBackfillRow
+	if err := db.WithContext(ctx).
+		Table("sessions AS s").
+		Select("s.id AS session_id, tasks.tenant_id AS tenant_id, COALESCE(tasks.agent_id, '') AS agent_id, COALESCE(tasks.web_search_enabled, false) AS web_search_enabled, tasks.request_context AS request_context").
+		Joins("JOIN custom_scheduled_chat_runs AS runs ON runs.session_id = s.id AND runs.deleted_at IS NULL").
+		Joins("JOIN custom_scheduled_chat_tasks AS tasks ON tasks.id = runs.task_id").
+		Where("s.deleted_at IS NULL").
+		Where("s.description LIKE ?", SessionMarkerPrefix+"%").
+		Where("s.agent_config IS NULL").
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		agentID := strings.TrimSpace(row.AgentID)
+		if agentID == "" {
+			continue
+		}
+		agent := s.lookupAgentForSessionStateBackfill(ctx, db, row.TenantID, agentID)
+		task := &Task{
+			TenantID:         row.TenantID,
+			AgentID:          agentID,
+			WebSearchEnabled: row.WebSearchEnabled,
+		}
+		state := scheduledLastRequestState(task, agent, row.RequestContext)
+		if state == nil {
+			continue
+		}
+		stateValue, err := state.Value()
+		if err != nil {
+			return err
+		}
+		if err := db.WithContext(ctx).
+			Table("sessions").
+			Where("id = ? AND agent_config IS NULL", row.SessionID).
+			UpdateColumn("agent_config", stateValue).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) lookupAgentForSessionStateBackfill(ctx context.Context, db *gorm.DB, tenantID uint64, agentID string) *types.CustomAgent {
+	if strings.TrimSpace(agentID) == "" || tenantID == 0 {
+		return nil
+	}
+	lookupCtx := context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	lookupCtx = context.WithValue(lookupCtx, types.TenantRoleContextKey, types.TenantRoleAdmin)
+	if s != nil && s.agentShareService != nil {
+		if agent, err := s.agentShareService.GetSharedAgentForTenant(lookupCtx, tenantID, types.TenantRoleAdmin, agentID); err == nil && agent != nil {
+			return agent
+		}
+	}
+	if s != nil && s.customAgentService != nil {
+		if agent, err := s.customAgentService.GetAgentByID(lookupCtx, agentID); err == nil && agent != nil {
+			return agent
+		}
+	}
+	if agent := types.GetBuiltinAgentWithContext(lookupCtx, agentID, tenantID); agent != nil {
+		return agent
+	}
+	if db == nil {
+		return nil
+	}
+	var own types.CustomAgent
+	if err := db.WithContext(ctx).
+		Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", agentID, tenantID).
+		First(&own).Error; err == nil {
+		return &own
+	}
+	var shared types.CustomAgent
+	if err := db.WithContext(ctx).
+		Table("custom_agents AS agents").
+		Select("agents.*").
+		Joins("JOIN agent_shares AS shares ON shares.agent_id = agents.id AND shares.source_tenant_id = agents.tenant_id AND shares.deleted_at IS NULL").
+		Joins("JOIN organization_tenant_members AS otm ON otm.organization_id = shares.organization_id").
+		Where("agents.id = ? AND otm.tenant_id = ? AND shares.source_tenant_id != ? AND agents.deleted_at IS NULL", agentID, tenantID, tenantID).
+		First(&shared).Error; err == nil {
+		return &shared
 	}
 	return nil
 }
@@ -253,6 +357,7 @@ func (s *Service) CreateTask(ctx context.Context, req TaskRequest) (*Task, error
 		DayOfMonth:        req.DayOfMonth,
 		PromptTemplate:    strings.TrimSpace(req.PromptTemplate),
 		WebSearchEnabled:  req.WebSearchEnabled,
+		RequestContext:    normalizeRequestContext(req.RequestContext),
 		ConcurrencyPolicy: ConcurrencySkipIfRunning,
 	}
 	if err := normalizeAndValidateTask(task); err != nil {
@@ -298,6 +403,7 @@ func (s *Service) UpdateTask(ctx context.Context, id string, req TaskRequest) (*
 	task.DayOfMonth = req.DayOfMonth
 	task.PromptTemplate = strings.TrimSpace(req.PromptTemplate)
 	task.WebSearchEnabled = req.WebSearchEnabled
+	task.RequestContext = normalizeRequestContext(req.RequestContext)
 	task.ConcurrencyPolicy = ConcurrencySkipIfRunning
 	task.LastMessage = ""
 	if err := normalizeAndValidateTask(task); err != nil {
@@ -500,19 +606,26 @@ func (s *Service) executeRun(runID string) {
 		s.finishRun(runCtx, &run, &task, RunStatusFailed, err.Error())
 		return
 	}
+	requestContext := effectiveRequestContextForAgent(task.RequestContext, agent)
 
 	renderedPrompt, err := s.renderPrompt(runCtx, &task, &run, agent, tenant, user)
 	if err != nil {
 		s.finishRun(runCtx, &run, &task, RunStatusFailed, err.Error())
 		return
 	}
+	renderedPrompt = applyProfessionalSkillPrefix(requestContext.ProfessionalSkillNames, renderedPrompt)
 	run.RenderedPrompt = renderedPrompt
 	if err := s.db.WithContext(runCtx).Model(&Run{}).Where("id = ?", run.ID).
 		Update("rendered_prompt", renderedPrompt).Error; err != nil {
 		logger.Warnf(runCtx, "[custom scheduledchat] update rendered prompt failed: %v", err)
 	}
+	images, imageURLs, imageDescription, attachments, err := s.prepareRequestMedia(runCtx, agent, renderedPrompt, requestContext)
+	if err != nil {
+		s.finishRun(runCtx, &run, &task, RunStatusFailed, err.Error())
+		return
+	}
 
-	session, userMsg, assistantMsg, err := s.createConversation(runCtx, &task, &run, renderedPrompt)
+	session, userMsg, assistantMsg, err := s.createConversation(runCtx, &task, &run, agent, renderedPrompt, requestContext, images, attachments)
 	if err != nil {
 		s.finishRun(runCtx, &run, &task, RunStatusFailed, err.Error())
 		return
@@ -602,14 +715,23 @@ func (s *Service) executeRun(runID string) {
 		Query:              renderedPrompt,
 		AssistantMessageID: assistantMsg.ID,
 		CustomAgent:        agent,
+		KnowledgeBaseIDs:   cloneStringSlice(requestContext.KnowledgeBaseIDs),
+		KnowledgeIDs:       cloneStringSlice(requestContext.KnowledgeIDs),
+		TagScopes:          cloneTagScopes(requestContext.TagScopes),
+		MCPServiceIDs:      cloneStringSlice(requestContext.MCPServiceIDs),
+		SkillNames:         cloneStringSlice(requestContext.SkillNames),
+		ImageURLs:          imageURLs,
+		ImageDescription:   imageDescription,
+		SummaryModelID:     requestContext.SummaryModelID,
 		UserMessageID:      userMsg.ID,
 		WebSearchEnabled:   task.WebSearchEnabled,
 		EnableMemory:       false,
+		Attachments:        attachments,
 	}
 
 	var serviceErr error
 	if agentMode {
-		serviceErr = s.sessionService.AgentQA(execCtx, qaReq, eventBus)
+		serviceErr = sessionhandler.RunAgentQA(execCtx, s.sessionService, qaReq, eventBus)
 		s.completeAssistantMessage(runCtx, assistantMsg, renderedPrompt)
 		complete()
 	} else {
@@ -654,13 +776,18 @@ func (s *Service) createConversation(
 	ctx context.Context,
 	task *Task,
 	run *Run,
+	agent *types.CustomAgent,
 	renderedPrompt string,
+	requestContext RequestContext,
+	images []sessionhandler.ImageAttachment,
+	attachments types.MessageAttachments,
 ) (*types.Session, *types.Message, *types.Message, error) {
 	session, err := s.sessionService.CreateSession(ctx, &types.Session{
-		Title:       sessionTitleForRun(task, run),
-		Description: fmt.Sprintf("%stask=%s;run=%s", SessionMarkerPrefix, task.ID, run.ID),
-		TenantID:    task.TenantID,
-		UserID:      task.RunAsUserID,
+		Title:            sessionTitleForRun(task, run),
+		Description:      fmt.Sprintf("%stask=%s;run=%s", SessionMarkerPrefix, task.ID, run.ID),
+		TenantID:         task.TenantID,
+		UserID:           task.RunAsUserID,
+		LastRequestState: scheduledLastRequestState(task, agent, requestContext),
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -677,13 +804,16 @@ func (s *Service) createConversation(
 	}
 	requestID := uuid.NewString()
 	userMsg, err := s.messageService.CreateMessage(ctx, &types.Message{
-		SessionID:   session.ID,
-		Role:        "user",
-		Content:     renderedPrompt,
-		RequestID:   requestID,
-		IsCompleted: true,
-		Channel:     MessageChannel,
-		CreatedAt:   time.Now(),
+		SessionID:      session.ID,
+		Role:           "user",
+		Content:        renderedPrompt,
+		RequestID:      requestID,
+		MentionedItems: cloneMentionedItems(requestContext.MentionedItems),
+		Images:         sessionhandler.ConvertImageAttachments(images),
+		Attachments:    append(types.MessageAttachments(nil), attachments...),
+		IsCompleted:    true,
+		Channel:        MessageChannel,
+		CreatedAt:      time.Now(),
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -706,6 +836,33 @@ func (s *Service) createConversation(
 		logger.Warnf(ctx, "[custom scheduledchat] update run message ids failed: %v", err)
 	}
 	return session, userMsg, assistantMsg, nil
+}
+
+func scheduledLastRequestState(task *Task, agent *types.CustomAgent, requestContext RequestContext) *types.SessionLastRequestState {
+	if task == nil {
+		return nil
+	}
+	agentEnabled := false
+	if agent != nil {
+		agentEnabled = agent.IsAgentMode()
+	}
+	state := &types.SessionLastRequestState{
+		AgentID:                task.AgentID,
+		AgentEnabled:           agentEnabled,
+		ModelID:                requestContext.SummaryModelID,
+		KnowledgeBaseIDs:       cloneStringSlice(requestContext.KnowledgeBaseIDs),
+		KnowledgeIDs:           cloneStringSlice(requestContext.KnowledgeIDs),
+		TagIDs:                 cloneStringSlice(requestContext.TagIDs),
+		MCPServiceIDs:          cloneStringSlice(requestContext.MCPServiceIDs),
+		SkillNames:             cloneStringSlice(requestContext.SkillNames),
+		ProfessionalSkillNames: cloneStringSlice(requestContext.ProfessionalSkillNames),
+		MentionedItems:         append(types.MentionedItems(nil), requestContext.MentionedItems...),
+		WebSearchEnabled:       task.WebSearchEnabled,
+	}
+	if agent != nil && agent.TenantID != 0 && task.TenantID != 0 && agent.TenantID != task.TenantID {
+		state.AgentSourceTenantID = strconv.FormatUint(agent.TenantID, 10)
+	}
+	return state
 }
 
 func sessionTitleForRun(task *Task, run *Run) string {
@@ -855,9 +1012,11 @@ func (s *Service) RenderPreview(ctx context.Context, req RenderPreviewRequest) (
 	tenant, _ := s.tenantService.GetTenantByID(ctx, tenantID)
 	user, _ := s.userService.GetUserByID(ctx, userID)
 	agentName := ""
+	var selectedAgent *types.CustomAgent
 	if req.AgentID != "" {
 		if agent, err := s.resolveAgentForContext(ctx, req.AgentID); err == nil && agent != nil {
 			agentName = agent.Name
+			selectedAgent = agent
 		}
 	}
 	if tenant == nil {
@@ -873,7 +1032,12 @@ func (s *Service) RenderPreview(ctx context.Context, req RenderPreviewRequest) (
 	task := &Task{Name: strings.TrimSpace(req.TaskName), Timezone: tz, PromptTemplate: req.PromptTemplate}
 	agent := &types.CustomAgent{Name: agentName}
 	run := &Run{ScheduledAt: time.Now().UTC()}
-	return s.renderPrompt(ctx, task, run, agent, tenant, user)
+	rendered, err := s.renderPrompt(ctx, task, run, agent, tenant, user)
+	if err != nil {
+		return "", err
+	}
+	requestContext := effectiveRequestContextForAgent(req.RequestContext, selectedAgent)
+	return applyProfessionalSkillPrefix(requestContext.ProfessionalSkillNames, rendered), nil
 }
 
 func (s *Service) finishRun(ctx context.Context, run *Run, task *Task, status, message string) {
@@ -1052,12 +1216,294 @@ func (s *Service) successRunCount(ctx context.Context, taskID string) int64 {
 	return count
 }
 
+func (s *Service) prepareRequestMedia(
+	ctx context.Context,
+	agent *types.CustomAgent,
+	query string,
+	requestContext RequestContext,
+) ([]sessionhandler.ImageAttachment, []string, string, types.MessageAttachments, error) {
+	images := cloneImageAttachments(requestContext.Images)
+	if len(images) > 0 {
+		if agent == nil || !agent.Config.ImageUploadEnabled {
+			return nil, nil, "", nil, fmt.Errorf("image upload is not enabled for this agent")
+		}
+		if types.IsClaudeSDKAgentType(agent.Config.AgentType) && strings.TrimSpace(agent.Config.VLMModelID) == "" {
+			return nil, nil, "", nil, fmt.Errorf("general agent image upload requires a configured VLM model")
+		}
+		if s.fileService == nil {
+			return nil, nil, "", nil, fmt.Errorf("image storage service is not configured")
+		}
+		tenantID, _ := types.TenantIDFromContext(ctx)
+		if err := sessionhandler.SaveImageAttachments(ctx, s.fileService, images, tenantID, agent.Config.ImageStorageProvider); err != nil {
+			return nil, nil, "", nil, err
+		}
+		if strings.TrimSpace(agent.Config.VLMModelID) != "" {
+			sessionhandler.AnalyzeImageAttachments(ctx, s.modelService, images, agent.Config.VLMModelID, query)
+		}
+	}
+	imageURLs, imageDescription := sessionhandler.ExtractImageURLsAndOCRText(images)
+
+	uploads := requestContext.AttachmentUploads
+	if len(uploads) == 0 {
+		return images, imageURLs, imageDescription, nil, nil
+	}
+	if s.attachmentProcessor == nil {
+		return nil, nil, "", nil, fmt.Errorf("attachment processor is not configured")
+	}
+	maxSizeMB := secutils.GetMaxFileSizeMB()
+	maxSize := int64(maxSizeMB) * 1024 * 1024
+	for i, upload := range uploads {
+		if upload.FileSize > maxSize {
+			return nil, nil, "", nil, fmt.Errorf("attachment %d exceeds size limit of %dMB", i+1, maxSizeMB)
+		}
+	}
+
+	tenantID, _ := types.TenantIDFromContext(ctx)
+	asrModelID := ""
+	if agent != nil && agent.Config.AudioUploadEnabled && agent.Config.ASRModelID != "" {
+		asrModelID = agent.Config.ASRModelID
+	}
+	attachments := make(types.MessageAttachments, 0, len(uploads))
+	for i, upload := range uploads {
+		data, err := sessionhandler.DecodeBase64Attachment(upload.Data)
+		if err != nil {
+			return nil, nil, "", nil, fmt.Errorf("attachment %d decode failed: %w", i+1, err)
+		}
+		fileSize := upload.FileSize
+		if fileSize <= 0 {
+			fileSize = int64(len(data))
+		}
+		if fileSize > maxSize {
+			return nil, nil, "", nil, fmt.Errorf("attachment %d exceeds size limit of %dMB", i+1, maxSizeMB)
+		}
+		processed, err := s.attachmentProcessor.ProcessAttachment(
+			ctx,
+			data,
+			upload.FileName,
+			fileSize,
+			tenantID,
+			asrModelID,
+		)
+		if err != nil {
+			return nil, nil, "", nil, fmt.Errorf("attachment %d processing failed: %w", i+1, err)
+		}
+		attachments = append(attachments, *processed)
+	}
+	return images, imageURLs, imageDescription, attachments, nil
+}
+
+func normalizeRequestContext(ctx RequestContext) RequestContext {
+	normalized := RequestContext{
+		KnowledgeBaseIDs:       uniqueTrimmedStrings(ctx.KnowledgeBaseIDs),
+		KnowledgeIDs:           uniqueTrimmedStrings(ctx.KnowledgeIDs),
+		TagIDs:                 uniqueTrimmedStrings(ctx.TagIDs),
+		TagScopes:              normalizeTagScopes(ctx.TagScopes),
+		MCPServiceIDs:          uniqueTrimmedStrings(ctx.MCPServiceIDs),
+		SkillNames:             uniqueTrimmedStrings(ctx.SkillNames),
+		ProfessionalSkillNames: uniqueTrimmedStrings(ctx.ProfessionalSkillNames),
+		SummaryModelID:         strings.TrimSpace(ctx.SummaryModelID),
+		Images:                 normalizeImageAttachments(ctx.Images),
+		AttachmentUploads:      normalizeAttachmentUploads(ctx.AttachmentUploads),
+	}
+	for _, item := range ctx.MentionedItems {
+		item.ID = strings.TrimSpace(item.ID)
+		item.Name = strings.TrimSpace(item.Name)
+		item.Type = strings.TrimSpace(item.Type)
+		item.KBType = strings.TrimSpace(item.KBType)
+		item.KBID = strings.TrimSpace(item.KBID)
+		item.KBName = strings.TrimSpace(item.KBName)
+		item.ServiceID = strings.TrimSpace(item.ServiceID)
+		item.SkillName = strings.TrimSpace(item.SkillName)
+		if item.ID == "" || item.Type == "" {
+			continue
+		}
+		normalized.MentionedItems = append(normalized.MentionedItems, item)
+		switch item.Type {
+		case "kb":
+			normalized.KnowledgeBaseIDs = appendUniqueString(normalized.KnowledgeBaseIDs, item.ID)
+		case "file":
+			normalized.KnowledgeIDs = appendUniqueString(normalized.KnowledgeIDs, item.ID)
+		case "tag":
+			normalized.TagIDs = appendUniqueString(normalized.TagIDs, item.ID)
+			normalized.KnowledgeBaseIDs = appendUniqueString(normalized.KnowledgeBaseIDs, item.KBID)
+		case "mcp":
+			normalized.MCPServiceIDs = appendUniqueString(normalized.MCPServiceIDs, item.ID)
+		case "skill":
+			if item.SkillName != "" {
+				normalized.SkillNames = appendUniqueString(normalized.SkillNames, item.SkillName)
+			} else {
+				normalized.SkillNames = appendUniqueString(normalized.SkillNames, item.ID)
+			}
+		}
+	}
+	return normalized
+}
+
+func effectiveRequestContextForAgent(ctx RequestContext, agent *types.CustomAgent) RequestContext {
+	normalized := normalizeRequestContext(ctx)
+	normalized.ProfessionalSkillNames = professionalSkillNamesAllowedByAgent(
+		normalized.ProfessionalSkillNames,
+		agent,
+	)
+	return normalized
+}
+
+func professionalSkillNamesAllowedByAgent(requested []string, agent *types.CustomAgent) []string {
+	requested = uniqueTrimmedStrings(requested)
+	if len(requested) == 0 || agent == nil {
+		return nil
+	}
+	mode := strings.TrimSpace(agent.Config.ProfessionalSkillsSelectionMode)
+	if mode == "" || mode == "none" {
+		return nil
+	}
+	if mode == "all" {
+		return requested
+	}
+	if mode != "selected" {
+		return nil
+	}
+	allowed := map[string]bool{}
+	for _, name := range uniqueTrimmedStrings(agent.Config.SelectedProfessionalSkills) {
+		allowed[name] = true
+	}
+	out := make([]string, 0, len(requested))
+	for _, name := range requested {
+		if allowed[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func normalizeTagScopes(scopes []types.TagScope) []types.TagScope {
+	out := make([]types.TagScope, 0, len(scopes))
+	seen := map[string]map[string]bool{}
+	for _, scope := range scopes {
+		kbID := strings.TrimSpace(scope.KnowledgeBaseID)
+		if kbID == "" {
+			continue
+		}
+		tagIDs := uniqueTrimmedStrings(scope.TagIDs)
+		if len(tagIDs) == 0 {
+			continue
+		}
+		if seen[kbID] == nil {
+			seen[kbID] = map[string]bool{}
+			out = append(out, types.TagScope{KnowledgeBaseID: kbID})
+		}
+		for _, tagID := range tagIDs {
+			if seen[kbID][tagID] {
+				continue
+			}
+			seen[kbID][tagID] = true
+			for i := range out {
+				if out[i].KnowledgeBaseID == kbID {
+					out[i].TagIDs = append(out[i].TagIDs, tagID)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+func applyProfessionalSkillPrefix(skillNames []string, query string) string {
+	names := uniqueTrimmedStrings(skillNames)
+	if len(names) == 0 {
+		return query
+	}
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s技能", name))
+	}
+	return fmt.Sprintf("使用%s完成以下工作\n%s", strings.Join(parts, "、"), query)
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func cloneStringSlice(values []string) []string {
+	return append([]string(nil), values...)
+}
+
+func cloneTagScopes(values []types.TagScope) []types.TagScope {
+	out := make([]types.TagScope, 0, len(values))
+	for _, value := range values {
+		out = append(out, types.TagScope{
+			KnowledgeBaseID: value.KnowledgeBaseID,
+			TagIDs:          cloneStringSlice(value.TagIDs),
+		})
+	}
+	return out
+}
+
+func normalizeImageAttachments(values []sessionhandler.ImageAttachment) []sessionhandler.ImageAttachment {
+	out := make([]sessionhandler.ImageAttachment, 0, len(values))
+	for _, value := range values {
+		value.URL = strings.TrimSpace(value.URL)
+		value.Caption = strings.TrimSpace(value.Caption)
+		if strings.TrimSpace(value.Data) == "" && value.URL == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func cloneImageAttachments(values []sessionhandler.ImageAttachment) []sessionhandler.ImageAttachment {
+	out := make([]sessionhandler.ImageAttachment, len(values))
+	copy(out, values)
+	return out
+}
+
+func normalizeAttachmentUploads(values []sessionhandler.AttachmentUpload) []sessionhandler.AttachmentUpload {
+	out := make([]sessionhandler.AttachmentUpload, 0, len(values))
+	for _, value := range values {
+		value.FileName = strings.TrimSpace(value.FileName)
+		if strings.TrimSpace(value.Data) == "" || value.FileName == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func cloneMentionedItems(values types.MentionedItems) types.MentionedItems {
+	return append(types.MentionedItems(nil), values...)
+}
+
 func normalizeAndValidateTask(task *Task) error {
 	task.Name = strings.TrimSpace(task.Name)
 	task.AgentID = strings.TrimSpace(task.AgentID)
 	task.ScheduleType = strings.TrimSpace(task.ScheduleType)
 	task.Timezone = strings.TrimSpace(task.Timezone)
 	task.PromptTemplate = strings.TrimSpace(task.PromptTemplate)
+	task.RequestContext = normalizeRequestContext(task.RequestContext)
 	if task.Name == "" {
 		return fmt.Errorf("name is required")
 	}
@@ -1207,6 +1653,78 @@ func PromptTemplates() []PromptTemplate {
 			Name:        "风险巡检",
 			Description: "定期检查异常、风险和需要人工跟进的问题",
 			Content:     "请检查截至 {{current_time}} 的风险、异常和待处理事项。若没有明显风险，请说明检查范围和结论。请用 {{language}} 输出。",
+		},
+		{
+			ID:          "weekly-work-report",
+			Name:        "周工作报告",
+			Description: "生成面向团队或上级的周报",
+			Content:     "请生成 {{week_start}} 至 {{week_end}} 的周工作报告，面向团队负责人阅读。请按以下结构输出：\n1. 本周完成事项：用结果导向表述，尽量给出可量化数据\n2. 关键进展与里程碑：说明影响和价值\n3. 问题与风险：区分已解决、处理中、需协助\n4. 下周计划：列出优先级、负责人建议和预期产出\n5. 需要决策或支持的事项\n请用 {{language}} 输出，语气专业、简洁。",
+		},
+		{
+			ID:          "monthly-business-review",
+			Name:        "月度经营分析",
+			Description: "梳理核心指标、变化原因和行动建议",
+			Content:     "请基于可访问的数据、知识库和工具，生成 {{month_start}} 至 {{month_end}} 的月度经营分析。输出结构：\n1. 本月核心结论：先给 3-5 条要点\n2. 核心指标变化：列出指标、环比/同比或阶段变化、异常点\n3. 变化原因分析：区分数据事实、合理推断和待验证假设\n4. 机会与风险：说明影响范围和优先级\n5. 下月行动建议：给出可执行动作、目标和跟踪指标\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "industry-research-brief",
+			Name:        "行业调研简报",
+			Description: "定期整理行业动态、趋势和机会",
+			Content:     "请围绕当前任务相关行业，生成截至 {{current_date}} 的行业调研简报。请使用可访问的网络搜索、知识库或文件信息，并标注信息来源类型。输出结构：\n1. 摘要：3-5 条最重要结论\n2. 市场/政策/技术/客户需求动态\n3. 重要公司或产品动作\n4. 对我们的机会、威胁和影响\n5. 后续需要深入验证的问题清单\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "competitor-monitor",
+			Name:        "竞品动态跟踪",
+			Description: "跟踪竞品产品、市场和内容更新",
+			Content:     "请跟踪截至 {{current_time}} 的竞品动态，优先使用网络搜索、知识库和已选择文件。请输出：\n1. 新增动态列表：竞品名称、动作、时间、来源线索\n2. 动态类型归类：产品功能、定价、市场活动、客户案例、融资/组织、内容发布\n3. 可能影响：对客户、销售、产品路线或市场定位的影响\n4. 建议跟进动作：需要谁关注、建议何时处理、预期产出\n如果信息不足，请明确缺口和建议补充的数据源。请用 {{language}} 输出。",
+		},
+		{
+			ID:          "data-analysis-digest",
+			Name:        "数据分析解读",
+			Description: "把周期性数据转成结论和行动项",
+			Content:     "请对当前任务涉及的数据进行分析，生成截至 {{current_time}} 的数据解读报告。请按以下结构输出：\n1. 数据范围与口径：说明时间范围、指标定义和数据来源\n2. 关键发现：列出最重要的变化、异常和趋势\n3. 分析过程：说明对比维度、分组、排序或筛选逻辑\n4. 可能原因：区分事实、推断和待验证假设\n5. 行动建议：给出优先级、预期收益和跟踪指标\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "research-material-digest",
+			Name:        "调研资料综述",
+			Description: "汇总知识库/文件中的调研材料",
+			Content:     "请基于已选择的知识库和文件，生成调研资料综述。请输出：\n1. 资料范围：列出涉及的主题、文件或知识库线索\n2. 核心观点：按主题归纳，不要简单罗列原文\n3. 证据与依据：概括关键数据、案例或论据\n4. 分歧与不确定性：指出材料之间的冲突或信息缺口\n5. 可直接用于报告的段落草稿\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "meeting-action-summary",
+			Name:        "会议纪要与行动项",
+			Description: "把会议材料整理成纪要和待办",
+			Content:     "请基于已选择的会议记录、文档或上下文，整理会议纪要。输出结构：\n1. 会议主题与时间：如无法确定请说明\n2. 关键结论：按议题归纳\n3. 决策事项：列出决策内容、影响和后续要求\n4. 行动项：用表格列出事项、负责人、截止时间、依赖和状态\n5. 待确认问题：列出需要补充信息的问题\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "project-progress-risk",
+			Name:        "项目进展与风险",
+			Description: "定期输出项目状态、阻塞和风险",
+			Content:     "请生成截至 {{current_date}} 的项目进展与风险报告。请输出：\n1. 项目总体状态：正常/需关注/高风险，并说明判断依据\n2. 本周期完成进展：按模块或里程碑列出\n3. 延期、阻塞与风险：包含影响、概率、责任方和缓解建议\n4. 下周期计划：明确交付物、优先级和依赖\n5. 需要管理层或跨团队协助的事项\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "sales-customer-followup",
+			Name:        "客户跟进摘要",
+			Description: "整理客户沟通、需求和下一步动作",
+			Content:     "请基于已选择的客户资料、沟通记录或知识库内容，生成客户跟进摘要。请输出：\n1. 客户背景与当前阶段\n2. 近期沟通要点：需求、异议、预算、决策链、时间表\n3. 风险与机会：说明可能影响成交或续约的因素\n4. 下一步跟进行动：事项、负责人建议、截止时间和话术要点\n5. 可同步给团队的简短摘要\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "news-public-opinion-monitor",
+			Name:        "新闻舆情监测",
+			Description: "监控新闻、舆情和外部信号",
+			Content:     "请监测截至 {{current_time}} 与任务主题相关的新闻、舆情和外部信号。请输出：\n1. 重要动态：按影响程度排序，说明来源线索和时间\n2. 情绪与立场：正面/中性/负面及代表性观点\n3. 潜在影响：对品牌、业务、客户或政策环境的影响\n4. 需要响应的事项：建议动作、优先级和责任方\n5. 信息不足或需要继续跟踪的方向\n请用 {{language}} 输出。",
+		},
+		{
+			ID:          "executive-briefing",
+			Name:        "管理层简报",
+			Description: "把复杂信息压缩成管理层可读摘要",
+			Content:     "请将本次任务相关信息整理成管理层简报。要求先给结论，再给依据。输出结构：\n1. 一页摘要：3-5 条最重要结论\n2. 背景：为什么现在需要关注\n3. 关键事实与数据：只保留影响判断的信息\n4. 决策选项：列出可选方案、收益、风险和资源需求\n5. 建议决策与下一步\n请用 {{language}} 输出，避免冗长背景铺垫。",
+		},
+		{
+			ID:          "report-outline-draft",
+			Name:        "报告大纲与初稿",
+			Description: "从资料生成正式报告结构和初稿",
+			Content:     "请基于已选择资料，为当前主题生成一份正式报告的大纲和初稿。请输出：\n1. 报告标题建议\n2. 适用读者与写作目标\n3. 详细大纲：每个章节说明要回答的问题和需要的数据\n4. 初稿正文：先完成摘要、背景、分析、结论与建议\n5. 待补充材料清单：列出缺失数据、图表或访谈信息\n请用 {{language}} 输出。",
 		},
 	}
 }

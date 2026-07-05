@@ -113,6 +113,7 @@ type ProfessionalSkillFileSpec struct {
 
 type ProfessionalSkillSpec struct {
 	Name        string                      `json:"name"`
+	DisplayName string                      `json:"display_name,omitempty"`
 	Description string                      `json:"description"`
 	Files       []ProfessionalSkillFileSpec `json:"files"`
 }
@@ -123,6 +124,20 @@ type AttachmentSpec struct {
 	FileSize    int64  `json:"file_size"`
 	Content     string `json:"content,omitempty"`
 	IsTruncated bool   `json:"is_truncated,omitempty"`
+}
+
+type OriginalInputFileSpec struct {
+	ID              string `json:"id"`
+	Source          string `json:"source"`
+	Role            string `json:"role"`
+	FileName        string `json:"file_name"`
+	FileType        string `json:"file_type"`
+	FileSize        int64  `json:"file_size"`
+	SHA256          string `json:"sha256"`
+	DownloadURL     string `json:"download_url"`
+	StorageURL      string `json:"storage_url,omitempty"`
+	KnowledgeID     string `json:"knowledge_id,omitempty"`
+	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
 }
 
 type DocumentTemplateContextSpec struct {
@@ -169,6 +184,7 @@ type ChatPayload struct {
 	QuotedContext           string                      `json:"quoted_context,omitempty"`
 	SelectedSkillContext    string                      `json:"selected_skill_context,omitempty"`
 	Attachments             []AttachmentSpec            `json:"attachments,omitempty"`
+	OriginalInputFiles      []OriginalInputFileSpec     `json:"original_input_files,omitempty"`
 	DocumentTemplateContext DocumentTemplateContextSpec `json:"document_template_context,omitempty"`
 	VisibleContext          map[string]any              `json:"visible_context,omitempty"`
 	ProfessionalSkills      []ProfessionalSkillSpec     `json:"professional_skills,omitempty"`

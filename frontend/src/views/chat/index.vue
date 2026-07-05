@@ -690,6 +690,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         summary_model_id: modelId,
         mcp_service_ids: requestMcpServiceIds,
         skill_names: requestSkillNames,
+        professional_skill_names: normalizedProfessionalSkillNames,
         tag_ids: tagIds,
         mentioned_items: mentionedItems,
         images: imageAttachments.length > 0 ? imageAttachments : undefined,

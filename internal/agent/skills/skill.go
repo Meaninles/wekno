@@ -37,6 +37,8 @@ var xmlTagPattern = regexp.MustCompile(`<[^>]+>`)
 type Skill struct {
 	// Metadata (Level 1) - always loaded
 	Name        string `yaml:"name"`
+	Slug        string `yaml:"slug,omitempty"`
+	DisplayName string `yaml:"display_name,omitempty"`
 	Description string `yaml:"description"`
 
 	// Filesystem information
@@ -52,6 +54,7 @@ type Skill struct {
 // This is the lightweight representation used during skill discovery
 type SkillMetadata struct {
 	Name        string
+	DisplayName string
 	Description string
 	BasePath    string // Path to skill directory for later loading
 }
@@ -66,6 +69,8 @@ type SkillFile struct {
 
 // Validate checks if the skill metadata is valid according to Claude's specification
 func (s *Skill) Validate() error {
+	s.normalizeIdentity()
+
 	// Validate name
 	if s.Name == "" {
 		return errors.New("skill name is required")
@@ -74,7 +79,7 @@ func (s *Skill) Validate() error {
 		return fmt.Errorf("skill name exceeds maximum length of %d characters", MaxNameLength)
 	}
 	if !namePattern.MatchString(s.Name) {
-		return errors.New("skill name must contain only lowercase letters, numbers, and hyphens")
+		return errors.New("skill name must contain only letters, numbers, and hyphens, or provide a valid slug")
 	}
 	for _, reserved := range reservedWords {
 		if strings.Contains(s.Name, reserved) {
@@ -83,6 +88,9 @@ func (s *Skill) Validate() error {
 	}
 	if xmlTagPattern.MatchString(s.Name) {
 		return errors.New("skill name cannot contain XML tags")
+	}
+	if xmlTagPattern.MatchString(s.DisplayName) {
+		return errors.New("skill display_name cannot contain XML tags")
 	}
 
 	// Validate description
@@ -99,10 +107,24 @@ func (s *Skill) Validate() error {
 	return nil
 }
 
+func (s *Skill) normalizeIdentity() {
+	s.Name = strings.TrimSpace(s.Name)
+	s.Slug = strings.TrimSpace(s.Slug)
+	s.DisplayName = strings.TrimSpace(s.DisplayName)
+
+	if s.Name != "" && !namePattern.MatchString(s.Name) && s.Slug != "" && namePattern.MatchString(s.Slug) {
+		s.Name = s.Slug
+	}
+	if s.DisplayName == "" {
+		s.DisplayName = s.Name
+	}
+}
+
 // ToMetadata converts a Skill to its lightweight metadata representation
 func (s *Skill) ToMetadata() *SkillMetadata {
 	return &SkillMetadata{
 		Name:        s.Name,
+		DisplayName: s.DisplayName,
 		Description: s.Description,
 		BasePath:    s.BasePath,
 	}

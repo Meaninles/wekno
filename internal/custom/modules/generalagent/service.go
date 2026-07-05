@@ -41,14 +41,16 @@ const (
 )
 
 type Service struct {
-	db             *gorm.DB
-	sessionService interfaces.SessionService
-	agentService   interfaces.AgentService
-	messageService interfaces.MessageService
-	modelService   interfaces.ModelService
-	client         *Client
-	documentClient *Client
-	artifactRoot   string
+	db               *gorm.DB
+	sessionService   interfaces.SessionService
+	agentService     interfaces.AgentService
+	messageService   interfaces.MessageService
+	modelService     interfaces.ModelService
+	knowledgeService interfaces.KnowledgeService
+	fileService      interfaces.FileService
+	client           *Client
+	documentClient   *Client
+	artifactRoot     string
 }
 
 func NewService(
@@ -57,20 +59,24 @@ func NewService(
 	agentService interfaces.AgentService,
 	messageService interfaces.MessageService,
 	modelService interfaces.ModelService,
+	knowledgeService interfaces.KnowledgeService,
+	fileService interfaces.FileService,
 ) *Service {
 	root := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT"))
 	if root == "" {
 		root = filepath.Join("custom", "general-agent-artifacts")
 	}
 	return &Service{
-		db:             db,
-		sessionService: sessionService,
-		agentService:   agentService,
-		messageService: messageService,
-		modelService:   modelService,
-		client:         NewClientFromEnv(),
-		documentClient: NewDocumentProcessingClientFromEnv(),
-		artifactRoot:   root,
+		db:               db,
+		sessionService:   sessionService,
+		agentService:     agentService,
+		messageService:   messageService,
+		modelService:     modelService,
+		knowledgeService: knowledgeService,
+		fileService:      fileService,
+		client:           NewClientFromEnv(),
+		documentClient:   NewDocumentProcessingClientFromEnv(),
+		artifactRoot:     root,
 	}
 }
 
@@ -137,6 +143,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	agentConfig.ProfessionalSkillsEnabled = len(professionalSkills) > 0
 	agentConfig.AllowedProfessionalSkills = professionalSkillNames(professionalSkills)
 	runID := uuid.New().String()
+	originalInputFiles := s.originalInputFileSpecs(ctx, req, runID)
 	userID, _ := types.UserIDFromContext(ctx)
 	active := &activeRun{
 		runID:              runID,
@@ -168,6 +175,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		QuotedContext:           req.QuotedContext,
 		SelectedSkillContext:    selectedSkillContext,
 		Attachments:             attachmentSpecs(req.Attachments),
+		OriginalInputFiles:      originalInputFiles,
 		DocumentTemplateContext: documentTemplateContextSpec(ctx, agentConfig),
 		VisibleContext:          s.buildVisibleContext(ctx, req, agentConfig, selectedSkillContext),
 		ProfessionalSkills:      professionalSkills,
@@ -635,6 +643,7 @@ func (s *Service) professionalSkillSpecs(ctx context.Context, agent *types.Custo
 	for _, pkg := range packages {
 		spec := ProfessionalSkillSpec{
 			Name:        pkg.Name,
+			DisplayName: pkg.DisplayName,
 			Description: pkg.Description,
 			Files:       make([]ProfessionalSkillFileSpec, 0, len(pkg.Files)),
 		}

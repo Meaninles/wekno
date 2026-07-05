@@ -559,6 +559,43 @@ func (s *knowledgeService) GetKnowledgeFile(ctx context.Context, id string) (io.
 		return nil, "", err
 	}
 
+	file, filename, err := s.openKnowledgeFileForRecord(ctx, knowledge)
+	return file, filename, err
+}
+
+// GetKnowledgeFileWithSharedAccess retrieves the physical file associated with a
+// knowledge entry, including entries from shared KBs the caller can access.
+func (s *knowledgeService) GetKnowledgeFileWithSharedAccess(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+) (io.ReadCloser, string, *types.Knowledge, error) {
+	knowledgeList, err := s.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, []string{id})
+	if err != nil {
+		return nil, "", nil, err
+	}
+	var knowledge *types.Knowledge
+	for _, item := range knowledgeList {
+		if item != nil && item.ID == id {
+			knowledge = item
+			break
+		}
+	}
+	if knowledge == nil {
+		return nil, "", nil, repository.ErrKnowledgeNotFound
+	}
+
+	file, filename, err := s.openKnowledgeFileForRecord(ctx, knowledge)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return file, filename, knowledge, nil
+}
+
+func (s *knowledgeService) openKnowledgeFileForRecord(ctx context.Context, knowledge *types.Knowledge) (io.ReadCloser, string, error) {
+	if knowledge == nil {
+		return nil, "", repository.ErrKnowledgeNotFound
+	}
 	// Manual knowledge stores content in Metadata — stream it directly as a .md file.
 	if knowledge.IsManual() {
 		meta, err := knowledge.ManualMetadata()
@@ -574,9 +611,21 @@ func (s *knowledgeService) GetKnowledgeFile(ctx context.Context, id string) (io.
 		return io.NopCloser(strings.NewReader(content)), filename, nil
 	}
 
+	fileCtx := ctx
+	if knowledge.TenantID != 0 {
+		fileCtx = context.WithValue(fileCtx, types.TenantIDContextKey, knowledge.TenantID)
+		if s.tenantService != nil {
+			if tenant, err := s.tenantService.GetTenantByID(ctx, knowledge.TenantID); err == nil && tenant != nil {
+				fileCtx = context.WithValue(fileCtx, types.TenantInfoContextKey, tenant)
+			} else if err != nil {
+				logger.Warnf(ctx, "Failed to load tenant %d for knowledge file storage resolution: %v", knowledge.TenantID, err)
+			}
+		}
+	}
+
 	// Resolve KB-level file service with FilePath fallback protection
-	kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
-	file, err := s.resolveFileServiceForPath(ctx, kb, knowledge.FilePath).GetFile(ctx, knowledge.FilePath)
+	kb, _ := s.kbService.GetKnowledgeBaseByID(fileCtx, knowledge.KnowledgeBaseID)
+	file, err := s.resolveFileServiceForPath(fileCtx, kb, knowledge.FilePath).GetFile(fileCtx, knowledge.FilePath)
 	if err != nil {
 		return nil, "", err
 	}

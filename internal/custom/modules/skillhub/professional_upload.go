@@ -13,12 +13,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/agent/skills"
 	"github.com/Tencent/WeKnora/internal/types"
+	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 )
 
@@ -31,8 +33,11 @@ const (
 	professionalExtractTimeout       = time.Minute
 )
 
+var professionalRuntimeNamePattern = regexp.MustCompile(`^[\p{L}\p{N}-]+$`)
+
 type ProfessionalSkillImportRequest struct {
 	Name        string
+	DisplayName string
 	Description string
 	File        multipart.File
 	Filename    string
@@ -40,6 +45,7 @@ type ProfessionalSkillImportRequest struct {
 
 type ProfessionalSkillUpdateRequest struct {
 	Name                string
+	DisplayName         string
 	Description         string
 	DescriptionProvided bool
 	File                multipart.File
@@ -52,10 +58,30 @@ type ProfessionalSkillDownload struct {
 	Cleanup  func()
 }
 
+type professionalSkillIdentity struct {
+	RuntimeName string
+	DisplayName string
+	Description string
+	ArchiveName string
+}
+
+type professionalSkillFrontmatter struct {
+	Name        string `yaml:"name"`
+	Slug        string `yaml:"slug"`
+	DisplayName string `yaml:"display_name"`
+	Description string `yaml:"description"`
+}
+
+type professionalSkillMarker struct {
+	ManagedBy       string `json:"managed_by"`
+	CreatedAt       string `json:"created_at"`
+	ArchiveFileName string `json:"archive_file_name"`
+	RuntimeName     string `json:"runtime_name,omitempty"`
+	DisplayName     string `json:"display_name,omitempty"`
+}
+
 func (s *Service) ListProfessionalForManage(ctx context.Context) ([]ProfessionalSkillListItem, error) {
-	root := getProfessionalSkillsDir()
-	loader := skills.NewLoader([]string{root})
-	metadata, err := loader.DiscoverSkills()
+	metadata, err := discoverProfessionalMetadata()
 	if err != nil {
 		return nil, err
 	}
@@ -91,11 +117,12 @@ func (s *Service) ListProfessionalForManage(ctx context.Context) ([]Professional
 		if managedRecord && !entry.Accessible && !systemReserved {
 			continue
 		}
-		files, _ := loader.ListSkillFiles(meta.Name)
+		files, _ := listProfessionalSkillFiles(meta.BasePath)
 		files = filterRuntimeProfessionalFiles(files)
 		updatedAt := professionalSkillUpdatedAt(meta.BasePath)
 		item := ProfessionalSkillListItem{
 			Name:           meta.Name,
+			DisplayName:    meta.DisplayName,
 			Description:    "",
 			Kind:           "professional",
 			FileCount:      len(files),
@@ -104,6 +131,9 @@ func (s *Service) ListProfessionalForManage(ctx context.Context) ([]Professional
 		}
 		if managedRecord && entry.Record != nil {
 			item = s.professionalItemFromAccess(entry, len(files), updatedAt)
+			if item.DisplayName == "" {
+				item.DisplayName = meta.DisplayName
+			}
 			if item.Description == "" {
 				item.Description = meta.Description
 			}
@@ -130,16 +160,6 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 	userID, _ := types.UserIDFromContext(ctx)
 	if tenantID == 0 || userID == "" {
 		return nil, fmt.Errorf("tenant and user are required")
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		return nil, fmt.Errorf("professional skill name is required")
-	}
-	if err := validateProfessionalSkillName(req.Name); err != nil {
-		return nil, err
-	}
-	if IsReservedProfessionalSkillName(req.Name) {
-		return nil, fmt.Errorf("professional skill %q is system reserved", req.Name)
 	}
 	description, err := normalizeProfessionalDescription(req.Description)
 	if err != nil {
@@ -170,28 +190,31 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 		return nil, err
 	}
 
-	skillRoot, patchedSkill, err := validateExtractedProfessionalSkill(extractDir, req.Name)
+	skillRoot, identity, err := validateExtractedProfessionalSkill(extractDir, req.Name, req.DisplayName, req.Filename)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(skillRoot, skills.SkillFileName), patchedSkill, 0o644); err != nil {
-		return nil, fmt.Errorf("write normalized SKILL.md: %w", err)
+	if IsReservedProfessionalSkillName(identity.RuntimeName) {
+		return nil, fmt.Errorf("professional skill %q is system reserved", identity.RuntimeName)
+	}
+	if description == "" {
+		description = identity.Description
 	}
 
 	root := getProfessionalSkillsDir()
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("create professional skills directory: %w", err)
 	}
-	target := filepath.Join(root, req.Name)
+	target := filepath.Join(root, identity.RuntimeName)
 	if !pathWithin(root, target) {
 		return nil, fmt.Errorf("invalid professional skill target path")
 	}
 	if _, err := os.Stat(target); err == nil {
-		return nil, fmt.Errorf("professional skill %q already exists", req.Name)
+		return nil, fmt.Errorf("professional skill %q already exists", identity.RuntimeName)
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("check professional skill target: %w", err)
 	}
-	staging, err := os.MkdirTemp(root, "."+req.Name+"-upload-*")
+	staging, err := os.MkdirTemp(root, "."+identity.RuntimeName+"-upload-*")
 	if err != nil {
 		return nil, fmt.Errorf("create staging directory: %w", err)
 	}
@@ -207,7 +230,7 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 	if err := copyProfessionalArchive(archivePath, filepath.Join(staging, professionalArchiveFile)); err != nil {
 		return nil, err
 	}
-	if err := writeProfessionalSkillMarker(staging, req.Filename); err != nil {
+	if err := writeProfessionalSkillMarker(staging, req.Filename, identity); err != nil {
 		return nil, err
 	}
 	if err := os.Rename(staging, target); err != nil {
@@ -217,7 +240,7 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 	record := &ProfessionalSkill{
 		TenantID:        tenantID,
 		CreatorID:       userID,
-		Name:            req.Name,
+		Name:            identity.RuntimeName,
 		Description:     description,
 		ArchiveFileName: cleanProfessionalArchiveFilename(req.Filename),
 	}
@@ -238,9 +261,10 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 	if IsReservedProfessionalSkillName(record.Name) {
 		return nil, fmt.Errorf("professional skill %q is system reserved and cannot be modified", record.Name)
 	}
+	currentIdentity := professionalSkillIdentityForDir(filepath.Join(getProfessionalSkillsDir(), record.Name), record.Name)
 	nextName := strings.TrimSpace(req.Name)
 	if nextName == "" {
-		return nil, fmt.Errorf("professional skill name is required")
+		nextName = record.Name
 	}
 	if err := validateProfessionalSkillName(nextName); err != nil {
 		return nil, err
@@ -255,6 +279,13 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 		if err != nil {
 			return nil, err
 		}
+	}
+	nextDisplayName := normalizeRequestedProfessionalDisplayName(req.DisplayName)
+	if nextDisplayName == "" {
+		nextDisplayName = currentIdentity.DisplayName
+	}
+	if nextDisplayName == "" {
+		nextDisplayName = nextName
 	}
 	if nextName != record.Name {
 		var count int64
@@ -314,12 +345,14 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 		if err := extractProfessionalSkillArchive(archivePath, req.Filename, extractDir, deadline); err != nil {
 			return nil, err
 		}
-		skillRoot, patchedSkill, err := validateExtractedProfessionalSkill(extractDir, nextName)
+		skillRoot, identity, err := validateExtractedProfessionalSkill(extractDir, nextName, nextDisplayName, req.Filename)
 		if err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(filepath.Join(skillRoot, skills.SkillFileName), patchedSkill, 0o644); err != nil {
-			return nil, fmt.Errorf("write normalized SKILL.md: %w", err)
+		nextName = identity.RuntimeName
+		nextDisplayName = identity.DisplayName
+		if nextDescription == "" {
+			nextDescription = identity.Description
 		}
 		if err := copyDir(skillRoot, staging); err != nil {
 			return nil, err
@@ -332,22 +365,14 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 		if err := copyDir(currentDir, staging); err != nil {
 			return nil, err
 		}
-		content, err := os.ReadFile(filepath.Join(currentDir, skills.SkillFileName))
-		if err != nil {
-			return nil, fmt.Errorf("read existing SKILL.md: %w", err)
-		}
-		patchedSkill, err := normalizeSkillMarkdownName(string(content), nextName)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := skills.ParseSkillFile(string(patchedSkill)); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(staging, skills.SkillFileName), patchedSkill, 0o644); err != nil {
-			return nil, fmt.Errorf("write normalized SKILL.md: %w", err)
-		}
 	}
-	if err := writeProfessionalSkillMarker(staging, nextArchiveName); err != nil {
+	nextIdentity := professionalSkillIdentity{
+		RuntimeName: nextName,
+		DisplayName: nextDisplayName,
+		Description: nextDescription,
+		ArchiveName: nextArchiveName,
+	}
+	if err := writeProfessionalSkillMarker(staging, nextArchiveName, nextIdentity); err != nil {
 		return nil, err
 	}
 
@@ -859,10 +884,16 @@ func (s *Service) professionalItemFromAccess(entry professionalAccessEntry, file
 
 func (s *Service) professionalItemFromRecord(record ProfessionalSkill, isMine bool, shareID, shareType string, fileCount int, updatedAt *time.Time) ProfessionalSkillListItem {
 	systemReserved := IsReservedProfessionalSkillName(record.Name)
+	identity := professionalSkillIdentityForDir(filepath.Join(getProfessionalSkillsDir(), record.Name), record.Name)
+	description := record.Description
+	if description == "" {
+		description = identity.Description
+	}
 	return ProfessionalSkillListItem{
 		ID:              record.ID,
 		Name:            record.Name,
-		Description:     record.Description,
+		DisplayName:     identity.DisplayName,
+		Description:     description,
 		Kind:            "professional",
 		FileCount:       fileCount,
 		Managed:         true,
@@ -1245,25 +1276,30 @@ func safeArchivePath(raw string) (string, error) {
 }
 
 func validateProfessionalSkillName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("professional skill name is required")
+	}
 	if len(name) > skills.MaxNameLength {
 		return fmt.Errorf("professional skill name exceeds %d characters", skills.MaxNameLength)
 	}
-	for i, r := range name {
-		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
-		if !valid {
-			return fmt.Errorf("professional skill name must use lowercase letters, numbers, and hyphens only")
-		}
-		if i == 0 && r == '-' {
-			return fmt.Errorf("professional skill name must not start with a hyphen")
-		}
-	}
-	if strings.HasSuffix(name, "-") {
-		return fmt.Errorf("professional skill name must not end with a hyphen")
-	}
-	if strings.Contains(name, "--") {
-		return fmt.Errorf("professional skill name must not contain consecutive hyphens")
+	if !professionalRuntimeNamePattern.MatchString(name) {
+		return fmt.Errorf("professional skill name must use letters, numbers, and hyphens only")
 	}
 	return nil
+}
+
+func isValidProfessionalSkillName(name string) bool {
+	return validateProfessionalSkillName(name) == nil
+}
+
+func normalizeRequestedProfessionalDisplayName(value string) string {
+	value = strings.TrimSpace(value)
+	if len([]rune(value)) > skills.MaxDescriptionLength {
+		runes := []rune(value)
+		value = string(runes[:skills.MaxDescriptionLength])
+	}
+	return value
 }
 
 func normalizeProfessionalDescription(raw string) (string, error) {
@@ -1316,12 +1352,11 @@ func validateExtractedTree(root string) error {
 	})
 }
 
-func validateExtractedProfessionalSkill(root, requestedName string) (string, []byte, error) {
+func validateExtractedProfessionalSkill(root, requestedName, requestedDisplayName, archiveFilename string) (string, professionalSkillIdentity, error) {
 	if err := validateExtractedTree(root); err != nil {
-		return "", nil, err
+		return "", professionalSkillIdentity{}, err
 	}
 	var skillFiles []string
-	var regularFiles []string
 	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1329,75 +1364,220 @@ func validateExtractedProfessionalSkill(root, requestedName string) (string, []b
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
 		if filepath.Base(path) == skills.SkillFileName {
 			skillFiles = append(skillFiles, path)
 		}
-		if !isArchiveJunk(rel) {
-			regularFiles = append(regularFiles, path)
-		}
 		return nil
 	}); err != nil {
-		return "", nil, err
+		return "", professionalSkillIdentity{}, err
 	}
 	if len(skillFiles) != 1 {
-		return "", nil, fmt.Errorf("professional skill package must contain exactly one SKILL.md")
+		return "", professionalSkillIdentity{}, fmt.Errorf("professional skill package must contain exactly one SKILL.md")
 	}
 	skillRoot := filepath.Dir(skillFiles[0])
-	for _, path := range regularFiles {
-		if !pathWithin(skillRoot, path) {
-			return "", nil, fmt.Errorf("professional skill package must contain one skill directory; file outside skill root: %s", path)
-		}
-	}
 
 	content, err := os.ReadFile(skillFiles[0])
 	if err != nil {
-		return "", nil, fmt.Errorf("read SKILL.md: %w", err)
+		return "", professionalSkillIdentity{}, fmt.Errorf("read SKILL.md: %w", err)
 	}
-	parsed, err := skills.ParseSkillFile(string(content))
+	identity, err := resolveProfessionalSkillIdentity(string(content), requestedName, requestedDisplayName, filepath.Base(skillRoot), archiveFilename)
 	if err != nil {
-		return "", nil, err
+		return "", professionalSkillIdentity{}, err
 	}
-	if strings.TrimSpace(parsed.Instructions) == "" {
-		return "", nil, fmt.Errorf("SKILL.md body is required")
-	}
-	patched, err := normalizeSkillMarkdownName(string(content), requestedName)
+	runtimeSkill, err := normalizeSkillMarkdownForRuntime(string(content), identity.RuntimeName, identity.DisplayName)
 	if err != nil {
-		return "", nil, err
+		return "", professionalSkillIdentity{}, err
 	}
-	if _, err := skills.ParseSkillFile(string(patched)); err != nil {
-		return "", nil, err
+	if _, err := skills.ParseSkillFile(string(runtimeSkill)); err != nil {
+		return "", professionalSkillIdentity{}, err
 	}
-	return skillRoot, patched, nil
+	return skillRoot, identity, nil
 }
 
-func normalizeSkillMarkdownName(content, name string) ([]byte, error) {
+func resolveProfessionalSkillIdentity(content, requestedName, requestedDisplayName, rootName, archiveFilename string) (professionalSkillIdentity, error) {
+	frontmatter, body, err := skillMarkdownParts(content)
+	if err != nil {
+		return professionalSkillIdentity{}, err
+	}
+	if strings.TrimSpace(body) == "" {
+		return professionalSkillIdentity{}, fmt.Errorf("SKILL.md body is required")
+	}
+	var meta professionalSkillFrontmatter
+	if err := yaml.Unmarshal([]byte(frontmatter), &meta); err != nil {
+		return professionalSkillIdentity{}, fmt.Errorf("failed to parse YAML frontmatter: %w", err)
+	}
+	if strings.TrimSpace(meta.Description) == "" {
+		return professionalSkillIdentity{}, fmt.Errorf("skill description is required")
+	}
+
+	requestedName = strings.TrimSpace(requestedName)
+	displayName := normalizeRequestedProfessionalDisplayName(requestedDisplayName)
+
+	candidates := []string{
+		requestedName,
+		professionalSlugFromCandidate(requestedName),
+		meta.Slug,
+		meta.Name,
+		professionalSlugFromCandidate(meta.Slug),
+		professionalSlugFromCandidate(meta.Name),
+		professionalSlugFromCandidate(meta.DisplayName),
+		professionalSlugFromCandidate(rootName),
+		professionalSlugFromCandidate(professionalNameFromArchive(archiveFilename)),
+	}
+	runtimeName := ""
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if isValidProfessionalSkillName(candidate) {
+			runtimeName = candidate
+			break
+		}
+	}
+	if runtimeName == "" {
+		return professionalSkillIdentity{}, fmt.Errorf("professional skill package must provide a valid slug or name")
+	}
+
+	if displayName == "" {
+		displayName = runtimeName
+	}
+
+	return professionalSkillIdentity{
+		RuntimeName: runtimeName,
+		DisplayName: displayName,
+		Description: strings.TrimSpace(meta.Description),
+	}, nil
+}
+
+func normalizeSkillMarkdownForRuntime(content, name, displayName string) ([]byte, error) {
 	frontmatter, body, err := skillMarkdownParts(content)
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(frontmatter, "\n")
-	replaced := false
-	for i, line := range lines {
-		if strings.TrimLeft(line, " \t") != line {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(frontmatter), &doc); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML frontmatter: %w", err)
+	}
+	mapping := yamlMappingNode(&doc)
+	if mapping == nil {
+		return nil, fmt.Errorf("SKILL.md frontmatter must be a YAML mapping")
+	}
+	setYAMLScalar(mapping, "name", name)
+	setYAMLScalar(mapping, "slug", name)
+	if strings.TrimSpace(displayName) != "" && strings.TrimSpace(displayName) != name {
+		setYAMLScalar(mapping, "display_name", strings.TrimSpace(displayName))
+	}
+	description := getYAMLScalar(mapping, "description")
+	setYAMLScalar(mapping, "description", runtimeProfessionalDescription(description, displayName, name))
+	encoded, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, err
+	}
+	return []byte("---\n" + strings.TrimSpace(string(encoded)) + "\n---\n\n" + strings.TrimSpace(body) + "\n"), nil
+}
+
+func yamlMappingNode(doc *yaml.Node) *yaml.Node {
+	if doc == nil {
+		return nil
+	}
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		return yamlMappingNode(doc.Content[0])
+	}
+	if doc.Kind == yaml.MappingNode {
+		return doc
+	}
+	return nil
+}
+
+func getYAMLScalar(mapping *yaml.Node, key string) string {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return strings.TrimSpace(mapping.Content[i+1].Value)
+		}
+	}
+	return ""
+}
+
+func setYAMLScalar(mapping *yaml.Node, key, value string) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+	)
+}
+
+func runtimeProfessionalDescription(description, displayName, runtimeName string) string {
+	description = strings.TrimSpace(description)
+	displayName = strings.TrimSpace(displayName)
+	if displayName != "" && displayName != runtimeName && !strings.Contains(strings.ToLower(description), strings.ToLower(displayName)) {
+		description = strings.TrimSpace("User-visible name: " + displayName + ". " + description)
+	}
+	runes := []rune(description)
+	if len(runes) > skills.MaxDescriptionLength {
+		description = string(runes[:skills.MaxDescriptionLength])
+	}
+	return description
+}
+
+func professionalNameFromArchive(filename string) string {
+	name := filepath.Base(strings.TrimSpace(filename))
+	lower := strings.ToLower(name)
+	for _, ext := range []string{".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip", ".tar", ".7z", ".rar", ".gz"} {
+		if strings.HasSuffix(lower, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		return name[:idx]
+	}
+	return name
+}
+
+func professionalSlugFromCandidate(value string) string {
+	value = trimCommonArchiveCopySuffix(strings.ToLower(strings.TrimSpace(value)))
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastHyphen = false
 			continue
 		}
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, "name:") {
-			continue
+		if !lastHyphen {
+			b.WriteByte('-')
+			lastHyphen = true
 		}
-		lines[i] = "name: " + name
-		replaced = true
-		break
 	}
-	if !replaced {
-		return nil, fmt.Errorf("SKILL.md frontmatter must include top-level name")
+	return strings.Trim(b.String(), "-")
+}
+
+func trimCommonArchiveCopySuffix(value string) string {
+	value = strings.TrimSpace(value)
+	for strings.HasSuffix(value, ")") {
+		start := strings.LastIndex(value, "(")
+		if start < 0 {
+			break
+		}
+		inner := strings.TrimSpace(value[start+1 : len(value)-1])
+		if inner == "" {
+			break
+		}
+		allDigits := true
+		for _, r := range inner {
+			if r < '0' || r > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if !allDigits {
+			break
+		}
+		value = strings.TrimSpace(value[:start])
 	}
-	return []byte("---\n" + strings.Join(lines, "\n") + "\n---\n\n" + strings.TrimSpace(body) + "\n"), nil
+	return value
 }
 
 func skillMarkdownParts(content string) (string, string, error) {
@@ -1480,16 +1660,64 @@ func pathWithin(root, path string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != "..")
 }
 
-func writeProfessionalSkillMarker(dir, archiveFilename string) error {
-	data, err := json.Marshal(map[string]any{
-		"managed_by":        "weknora",
-		"created_at":        time.Now().UTC().Format(time.RFC3339),
-		"archive_file_name": cleanProfessionalArchiveFilename(archiveFilename),
-	})
+func writeProfessionalSkillMarker(dir, archiveFilename string, identity professionalSkillIdentity) error {
+	existing := readProfessionalSkillMarker(dir)
+	createdAt := existing.CreatedAt
+	if strings.TrimSpace(createdAt) == "" {
+		createdAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	marker := professionalSkillMarker{
+		ManagedBy:       "weknora",
+		CreatedAt:       createdAt,
+		ArchiveFileName: cleanProfessionalArchiveFilename(archiveFilename),
+		RuntimeName:     strings.TrimSpace(identity.RuntimeName),
+		DisplayName:     strings.TrimSpace(identity.DisplayName),
+	}
+	data, err := json.Marshal(marker)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, professionalSkillMetaFile), data, 0o644)
+}
+
+func readProfessionalSkillMarker(dir string) professionalSkillMarker {
+	var marker professionalSkillMarker
+	if dir == "" {
+		return marker
+	}
+	data, err := os.ReadFile(filepath.Join(dir, professionalSkillMetaFile))
+	if err != nil {
+		return marker
+	}
+	_ = json.Unmarshal(data, &marker)
+	return marker
+}
+
+func professionalSkillIdentityForDir(dir, fallbackName string) professionalSkillIdentity {
+	marker := readProfessionalSkillMarker(dir)
+	identity := professionalSkillIdentity{
+		RuntimeName: strings.TrimSpace(marker.RuntimeName),
+		DisplayName: strings.TrimSpace(marker.DisplayName),
+		ArchiveName: strings.TrimSpace(marker.ArchiveFileName),
+	}
+	if identity.RuntimeName == "" {
+		identity.RuntimeName = strings.TrimSpace(fallbackName)
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, skills.SkillFileName)); err == nil {
+		if resolved, err := resolveProfessionalSkillIdentity(string(content), identity.RuntimeName, identity.DisplayName, filepath.Base(dir), identity.ArchiveName); err == nil {
+			if identity.RuntimeName == "" {
+				identity.RuntimeName = resolved.RuntimeName
+			}
+			if identity.DisplayName == "" {
+				identity.DisplayName = resolved.DisplayName
+			}
+			identity.Description = resolved.Description
+		}
+	}
+	if identity.DisplayName == "" {
+		identity.DisplayName = identity.RuntimeName
+	}
+	return identity
 }
 
 func professionalSkillManaged(dir string) bool {

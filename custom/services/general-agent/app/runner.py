@@ -1451,6 +1451,242 @@ def emit_progress_event(emit_progress: ProgressEmitter | None, event: RunEvent) 
     emit_progress(event)
 
 
+@dataclass(frozen=True)
+class PreparedOriginalInputFile:
+    id: str
+    source: str
+    role: str
+    file_name: str
+    file_type: str
+    file_size: int
+    sha256: str
+    path: str
+    knowledge_id: str = ""
+    knowledge_base_id: str = ""
+
+
+def original_input_download_retries() -> int:
+    return max(1, min(3, env_int("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_DOWNLOAD_RETRIES", 3)))
+
+
+def original_input_download_timeout_seconds() -> int:
+    return env_int("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_DOWNLOAD_TIMEOUT_SEC", 120)
+
+
+def original_input_source_dir(source: str, file_type: str) -> str:
+    normalized = (source or "").strip().lower()
+    ext = (file_type or "").strip().lower().lstrip(".")
+    if normalized == "weknora_chat_image_original":
+        return "images"
+    if normalized == "weknora_selected_knowledge_original":
+        return "knowledge_files"
+    if ext in {"mp3", "wav", "m4a", "flac", "ogg"}:
+        return "audio"
+    return "uploads"
+
+
+def original_input_display_source(source: str) -> str:
+    normalized = (source or "").strip().lower()
+    if normalized == "weknora_selected_knowledge_original":
+        return "WeKnora selected knowledge original file"
+    if normalized == "weknora_chat_image_original":
+        return "WeKnora user uploaded original image file"
+    return "WeKnora user uploaded original file"
+
+
+def original_input_fallback_action(source: str, file_type: str = "") -> str:
+    normalized = (source or "").strip().lower()
+    ext = (file_type or "").strip().lower().lstrip(".")
+    if normalized == "weknora_selected_knowledge_original":
+        return "知识库检索结果和知识库工具上下文"
+    if normalized == "weknora_chat_image_original":
+        return "图片理解结果和已保存图片引用"
+    if ext in {"mp3", "wav", "m4a", "flac", "ogg"}:
+        return "音频转写文本或音频文件元数据"
+    return "附件解析文本和文件元数据"
+
+
+def original_input_completion_message(success_count: int, total: int, failures: list[dict[str, str]]) -> str:
+    base = f"用户在 WeKnora 上传或选择的原文件准备完成（成功 {success_count}/{total}，失败 {len(failures)} 个"
+    if not failures:
+        return base + "）"
+    actions = []
+    seen = set()
+    for failure in failures:
+        action = (failure.get("fallback_action") or "").strip()
+        if action and action not in seen:
+            seen.add(action)
+            actions.append(action)
+    action_text = "、".join(actions) if actions else "附件解析文本、图片说明或知识库上下文"
+    return base + f"；失败项已继续使用：{action_text}）"
+
+
+def original_input_target_path(run_dir: Path, index: int, item: Any) -> Path:
+    file_name = safe_filename(getattr(item, "file_name", "") or f"original_{index}.bin")
+    if not file_name:
+        file_name = f"original_{index}.bin"
+    source_dir = original_input_source_dir(getattr(item, "source", ""), getattr(item, "file_type", ""))
+    target = run_dir / "input_files" / source_dir / f"{index:02d}_{file_name}"
+    resolved = target.resolve()
+    root = run_dir.resolve()
+    if root not in resolved.parents:
+        raise RuntimeError("original input path escapes run directory")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def download_and_verify_original_input_file(item: Any, run_dir: Path, index: int) -> PreparedOriginalInputFile:
+    url = (getattr(item, "download_url", "") or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise RuntimeError(f"original input file {getattr(item, 'file_name', '') or index} is missing an HTTP(S) download URL")
+    expected_sha = (getattr(item, "sha256", "") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        raise RuntimeError(f"original input file {getattr(item, 'file_name', '') or index} is missing a valid sha256")
+    expected_size = int(getattr(item, "file_size", 0) or 0)
+    if expected_size < 0:
+        raise RuntimeError(f"original input file {getattr(item, 'file_name', '') or index} has invalid size")
+
+    target = original_input_target_path(run_dir, index, item)
+    tmp = target.with_suffix(target.suffix + ".download")
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        req = urlrequest.Request(url, method="GET")
+        with urlrequest.urlopen(req, timeout=original_input_download_timeout_seconds()) as resp:
+            with tmp.open("wb") as fh:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    hasher.update(chunk)
+                    fh.write(chunk)
+    except HTTPError as exc:
+        tmp.unlink(missing_ok=True)
+        raw = exc.read()[:512]
+        raise RuntimeError(f"download HTTP {exc.code}: {raw.decode('utf-8', 'ignore')}") from exc
+    except URLError as exc:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"download failed: {exc}") from exc
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    actual_sha = hasher.hexdigest()
+    if expected_size > 0 and total != expected_size:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"size mismatch: expected {expected_size}, got {total}")
+    if actual_sha != expected_sha:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"sha256 mismatch: expected {expected_sha}, got {actual_sha}")
+    tmp.replace(target)
+    return PreparedOriginalInputFile(
+        id=getattr(item, "id", "") or str(uuid.uuid4()),
+        source=getattr(item, "source", "") or "weknora_original_file",
+        role=getattr(item, "role", "") or "original_file",
+        file_name=getattr(item, "file_name", "") or target.name,
+        file_type=(getattr(item, "file_type", "") or normalized_ext(target.name)).lstrip("."),
+        file_size=total,
+        sha256=actual_sha,
+        path=_relative_path(target, run_dir),
+        knowledge_id=getattr(item, "knowledge_id", "") or "",
+        knowledge_base_id=getattr(item, "knowledge_base_id", "") or "",
+    )
+
+
+def original_input_manifest_items(files: list[PreparedOriginalInputFile]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in files:
+        data = {
+            "id": item.id,
+            "source": original_input_display_source(item.source),
+            "source_code": item.source,
+            "role": item.role,
+            "path": item.path,
+            "file_name": item.file_name,
+            "file_type": item.file_type,
+            "file_size": item.file_size,
+            "sha256": item.sha256,
+        }
+        if item.knowledge_id:
+            data["knowledge_id"] = item.knowledge_id
+        if item.knowledge_base_id:
+            data["knowledge_base_id"] = item.knowledge_base_id
+        out.append(data)
+    return out
+
+
+def write_original_input_manifest(run_dir: Path, files: list[PreparedOriginalInputFile]) -> str:
+    root = run_dir / "input_files"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "original_input_manifest.json"
+    path.write_text(json.dumps({"files": original_input_manifest_items(files)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return _relative_path(path, run_dir)
+
+
+def json_xml_attr(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def original_input_files_xml(files: list[PreparedOriginalInputFile], manifest_path: str = "") -> str:
+    if not files:
+        return ""
+    lines: list[str] = []
+    lines.append(
+        '<original_input_files source="WeKnora user uploaded original files and selected knowledge original files" '
+        'role="byte_verified_local_copies">'
+    )
+    lines.append("<meaning>")
+    lines.append(
+        "这些文件是用户在 WeKnora 上传的原文件，或用户在 WeKnora 明确选择的知识库具体文件的原始文件副本。"
+        "它们已在 Claude SDK 启动前下载到当前 SDK 工作目录，并完成 size 与 sha256 校验。"
+    )
+    lines.append("</meaning>")
+    if manifest_path:
+        lines.append(f'<manifest path="{manifest_path}" />')
+    lines.append("<files>")
+    for idx, item in enumerate(original_input_manifest_items(files), start=1):
+        attrs = (
+            f'index="{idx}" path={json_xml_attr(item["path"])} name={json_xml_attr(item["file_name"])} '
+            f'type={json_xml_attr(item["file_type"])} size_bytes="{item["file_size"]}" sha256="{item["sha256"]}" '
+            f'source={json_xml_attr(item["source"])} role={json_xml_attr(item["role"])}'
+        )
+        if item.get("knowledge_id"):
+            attrs += f' knowledge_id={json_xml_attr(item["knowledge_id"])}'
+        lines.append(f"<file {attrs} />")
+    lines.append("</files>")
+    lines.append("<rules>")
+    lines.append("Use these local paths when the task requires inspecting, modifying, converting, extracting from, or preserving the user's original files.")
+    lines.append("Do not treat extracted attachment text, image descriptions, URLs, or prior chat summaries as a substitute for these original files.")
+    lines.append("For document modification work, copy the relevant original file to a working/output path, edit that copy, and register the final output artifact.")
+    lines.append("Object storage URLs, temporary download URLs, and storage object keys are intentionally hidden from the prompt; only local verified file paths are authoritative.")
+    lines.append("</rules>")
+    lines.append("</original_input_files>")
+    return "\n".join(lines)
+
+
+def original_input_failures_xml(failures: list[dict[str, str]]) -> str:
+    if not failures:
+        return ""
+    lines: list[str] = []
+    lines.append(
+        '<original_input_files_unavailable source="WeKnora runtime" '
+        'role="fallback_notice">'
+    )
+    lines.append(
+        "部分 WeKnora 原文件副本未能在 Claude SDK 启动前下载或校验成功。"
+        "这不是用户请求本身的失败；请继续使用 WeKnora 已提供的附件抽取文本、图片描述、知识库检索和工具上下文完成任务。"
+    )
+    for idx, item in enumerate(failures, start=1):
+        lines.append(
+            f"<file index=\"{idx}\" name={json_xml_attr(item.get('file_name') or '')} "
+            f"source={json_xml_attr(item.get('source') or '')} reason={json_xml_attr(item.get('reason') or 'download_or_verification_failed')} "
+            f"fallback_action={json_xml_attr(item.get('fallback_action') or '')} />"
+        )
+    lines.append("</original_input_files_unavailable>")
+    return "\n".join(lines)
+
+
 def unique_tool_names(items: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -2205,6 +2441,16 @@ def build_system_prompt(
                 "\n- data_analysis_runtime_reference_path: reference guidance was not materialized for this run. "
                 "Continue with the configured data-analysis prompt and runtime tool rules."
             )
+    original_input_contract = ""
+    if payload.original_input_files:
+        original_input_contract = (
+            "\n- original_input_files: byte-verified local copies of files the user uploaded in WeKnora, "
+            "or specific knowledge files the user selected in WeKnora for this turn, when the <original_input_files> "
+            "block lists local paths. For file inspection, modification, conversion, image/audio handling, or "
+            "document-preservation work, use those listed local paths as authoritative originals. If only "
+            "<original_input_files_unavailable> is present for a file, continue with WeKnora's extracted attachment "
+            "text, image descriptions, knowledge retrieval, and tools."
+        )
     artifact_review_policy = ""
     if payload.runtime_config.agent_type == "document-processing-agent" and payload.enable_artifacts:
         artifact_review_policy = """
@@ -2243,6 +2489,7 @@ Context contract:
 - image_description: WeKnora's derived description of user-uploaded images when available. It is auxiliary visual context.
 - image_urls: user-uploaded image URLs when available. They identify image inputs associated with the current turn.
 - attachments: files uploaded by the user in WeKnora, including file metadata and extracted text when WeKnora could extract it. Truncated notes indicate partial extraction.
+{original_input_contract}
 {document_context_contract}
 {data_analysis_context_contract}
 - user_request: the exact current prompt the user typed in the WeKnora chat input. This is the authoritative current request and must not be rewritten, summarized, converted, or silently replaced by other context.
@@ -2274,6 +2521,9 @@ def build_prompt(
     document_templates: PreparedDocumentTemplateContext | None = None,
     ppt_workspace: PreparedPPTGenerationWorkspace | None = None,
     data_analysis_display_intent: dict[str, Any] | None = None,
+    original_input_files: list[PreparedOriginalInputFile] | None = None,
+    original_input_manifest_path: str = "",
+    original_input_failures: list[dict[str, str]] | None = None,
 ) -> str:
     parts: list[str] = []
     parts.append("<current_task_priority>")
@@ -2316,6 +2566,12 @@ def build_prompt(
         parts.append(document_templates.xml)
     if ppt_workspace and ppt_workspace.xml:
         parts.append(ppt_workspace.xml)
+    original_inputs_xml = original_input_files_xml(original_input_files or [], original_input_manifest_path)
+    if original_inputs_xml:
+        parts.append(original_inputs_xml)
+    original_failures_xml = original_input_failures_xml(original_input_failures or [])
+    if original_failures_xml:
+        parts.append(original_failures_xml)
     parts.append("<weknora_context>")
     parts.append(
         "This payload comes from the WeKnora frontend and agent configuration. "
@@ -4452,12 +4708,90 @@ class GeneralAgentRunner:
         self.ppt_generation_workspace = prepare_ppt_generation_workspace(payload, self.run_dir)
         self.data_analysis_reference = prepare_data_analysis_reference_doc(payload, self.run_dir)
         self.professional_skill_names = materialize_professional_skills(payload, self.run_dir)
+        self.original_input_files: list[PreparedOriginalInputFile] = []
+        self.original_input_manifest_path = ""
+        self.original_input_failures: list[dict[str, str]] = []
 
     async def run(self) -> AsyncIterator[RunEvent]:
         try:
             from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
         except Exception as exc:
             raise RuntimeError(f"general-agent runtime dependency is not installed or cannot be loaded: {exc}") from exc
+
+        if self.payload.original_input_files:
+            total = len(self.payload.original_input_files)
+            yield validation_progress_event(
+                f"original-input-files-{self.payload.run_id}",
+                "prepare_original_input_files",
+                f"正在准备用户在 WeKnora 上传或选择的原文件（0/{total}）",
+                phase="start",
+                stage="download",
+            )
+            prepared: list[PreparedOriginalInputFile] = []
+            max_attempts = original_input_download_retries()
+            for index, item in enumerate(self.payload.original_input_files, start=1):
+                name = safe_filename(item.file_name or f"original_{index}") or f"original_{index}"
+                fallback_action = original_input_fallback_action(item.source, item.file_type)
+                last_error = ""
+                for attempt in range(1, max_attempts + 1):
+                    yield validation_progress_event(
+                        f"original-input-file-{self.payload.run_id}-{index}",
+                        "prepare_original_input_file",
+                        f"正在下载并校验 WeKnora 原文件：{name}（{index}/{total}，第 {attempt}/{max_attempts} 次）",
+                        phase="start",
+                        stage="download",
+                        transient=True,
+                    )
+                    try:
+                        prepared_file = await asyncio.to_thread(download_and_verify_original_input_file, item, self.run_dir, index)
+                        prepared.append(prepared_file)
+                        yield validation_progress_event(
+                            f"original-input-file-{self.payload.run_id}-{index}",
+                            "prepare_original_input_file",
+                            f"WeKnora 原文件已准备完成：{name}",
+                            phase="success",
+                            stage="download",
+                        )
+                        last_error = ""
+                        break
+                    except Exception as exc:
+                        last_error = str(exc)
+                        if attempt >= max_attempts:
+                            yield validation_progress_event(
+                                f"original-input-file-{self.payload.run_id}-{index}",
+                                "prepare_original_input_file",
+                                f"WeKnora 原文件准备失败：{name}；已继续使用{fallback_action}。{last_error}",
+                                phase="error",
+                                stage="download",
+                            )
+                            self.original_input_failures.append(
+                                {
+                                    "file_name": name,
+                                    "source": original_input_display_source(item.source),
+                                    "reason": "download_or_verification_failed",
+                                    "fallback_action": fallback_action,
+                                }
+                            )
+                            break
+                        yield validation_progress_event(
+                            f"original-input-file-{self.payload.run_id}-{index}",
+                            "prepare_original_input_file",
+                            f"WeKnora 原文件下载校验失败，准备重试：{name}，{last_error}",
+                            phase="start",
+                            stage="retry",
+                            transient=True,
+                        )
+                        await asyncio.sleep(min(2 ** (attempt - 1), 5))
+            self.original_input_files = prepared
+            if self.original_input_files:
+                self.original_input_manifest_path = write_original_input_manifest(self.run_dir, self.original_input_files)
+            yield validation_progress_event(
+                f"original-input-files-{self.payload.run_id}",
+                "prepare_original_input_files",
+                original_input_completion_message(len(prepared), total, self.original_input_failures),
+                phase="success" if len(prepared) == total else "error",
+                stage="download",
+            )
 
         env, model, settings = claude_auth_env(self.payload, self.config_dir)
         data_analysis_state: dict[str, Any] = {}
@@ -4704,6 +5038,9 @@ class GeneralAgentRunner:
             self.document_templates,
             self.ppt_generation_workspace,
             data_analysis_state.get(DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY),
+            self.original_input_files,
+            self.original_input_manifest_path,
+            self.original_input_failures,
         )
         options = initial_options
         resume_attempts = 0

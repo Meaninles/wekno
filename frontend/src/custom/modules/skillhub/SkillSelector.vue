@@ -11,7 +11,7 @@
           @keydown.down.prevent="moveSelection(1)"
           @keydown.up.prevent="moveSelection(-1)"
           @keydown.enter.prevent="toggleSelection"
-          @keydown.esc="close"
+          @keydown.esc.stop.prevent="close"
         />
       </div>
 
@@ -73,7 +73,10 @@
           </div>
         </div>
 
-        <div v-if="!currentSkillsAvailable" class="skill-empty">
+        <div v-if="skillsLoading" class="skill-empty">
+          {{ $t('common.loading') }}
+        </div>
+        <div v-else-if="!currentSkillsAvailable" class="skill-empty">
           {{ activeTab === 'professional' ? $t('skill.selector.professionalUnavailable') : $t('skill.selector.sandboxUnavailable') }}
         </div>
         <div v-else-if="filteredSkills.length === 0" class="skill-empty">
@@ -109,9 +112,11 @@ const props = defineProps<{
   offsetY?: number
   professionalSelectionMode?: SkillSelectionMode | null
   allowedProfessionalSkillNames?: string[]
+  selectedSkillNames?: string[]
+  selectedProfessionalSkillNames?: string[]
 }>()
 
-const emit = defineEmits(['close', 'update:visible'])
+const emit = defineEmits(['close', 'update:visible', 'update:selectedSkillNames', 'update:selectedProfessionalSkillNames'])
 const router = useRouter()
 const { t } = useI18n()
 const settingsStore = useSettingsStore()
@@ -125,14 +130,20 @@ const skills = ref<SkillInfo[]>([])
 const professionalSkills = ref<SkillInfo[]>([])
 const skillsAvailable = ref(true)
 const professionalSkillsAvailable = ref(false)
+const skillsLoading = ref(false)
 const searchInput = ref<HTMLInputElement | null>(null)
 const skillList = ref<HTMLElement | null>(null)
 const dropdownStyle = ref<Record<string, string>>({})
 const dropdownWidth = props.dropdownWidth ?? 320
 const offsetY = props.offsetY ?? 8
+let loadRequestID = 0
 
-const selectedNames = computed(() => settingsStore.settings.selectedSkillNames || [])
-const selectedProfessionalNames = computed(() => settingsStore.settings.selectedProfessionalSkillNames || [])
+const selectedNames = computed(() => Array.isArray(props.selectedSkillNames)
+  ? props.selectedSkillNames
+  : (settingsStore.settings.selectedSkillNames || []))
+const selectedProfessionalNames = computed(() => Array.isArray(props.selectedProfessionalSkillNames)
+  ? props.selectedProfessionalSkillNames
+  : (settingsStore.settings.selectedProfessionalSkillNames || []))
 const normalizedProfessionalMode = computed<SkillSelectionMode>(() => props.professionalSelectionMode || 'none')
 
 const allowedProfessionalNameSet = computed(() => {
@@ -184,11 +195,14 @@ const emptyText = computed(() => {
 })
 
 const resolveAnchorEl = () => {
-  const a = props.anchorEl
-  if (!a) return null
-  if (typeof a === 'object' && 'value' in a) return a.value ?? null
-  if (typeof a === 'object' && '$el' in a) return a.$el ?? null
-  return a
+  const resolve = (value: any, depth = 0): any | null => {
+    if (!value || depth > 4) return null
+    if (typeof Element !== 'undefined' && value instanceof Element) return value
+    if (typeof value === 'object' && '$el' in value && value.$el) return resolve(value.$el, depth + 1)
+    if (typeof value === 'object' && 'value' in value && value.value) return resolve(value.value, depth + 1)
+    return value
+  }
+  return resolve(props.anchorEl)
 }
 
 const activeSelectedNames = computed(() =>
@@ -197,14 +211,43 @@ const activeSelectedNames = computed(() =>
 
 const isSelected = (name: string) => activeSelectedNames.value.includes(name)
 
-const toggleSkill = (name: string) => {
-  if (activeTab.value === 'professional') {
-    isSelected(name)
-      ? settingsStore.removeProfessionalSkillName(name)
-      : settingsStore.addProfessionalSkillName(name)
+const setLightweightSelection = (names: string[]) => {
+  if (Array.isArray(props.selectedSkillNames)) {
+    emit('update:selectedSkillNames', normalizeNames(names))
     return
   }
-  isSelected(name) ? settingsStore.removeSkillName(name) : settingsStore.addSkillName(name)
+  settingsStore.selectSkillNames(names)
+}
+
+const setProfessionalSelection = (names: string[]) => {
+  if (Array.isArray(props.selectedProfessionalSkillNames)) {
+    emit('update:selectedProfessionalSkillNames', normalizeNames(names))
+    return
+  }
+  settingsStore.selectProfessionalSkillNames(names)
+}
+
+const normalizeNames = (names: string[]) => {
+  const seen = new Set<string>()
+  return (names || [])
+    .map((name) => String(name || '').trim())
+    .filter((name) => {
+      if (!name || seen.has(name)) return false
+      seen.add(name)
+      return true
+    })
+}
+
+const toggleSkill = (name: string) => {
+  const selected = activeSelectedNames.value
+  const next = isSelected(name)
+    ? selected.filter((item) => item !== name)
+    : [...selected, name]
+  if (activeTab.value === 'professional') {
+    setProfessionalSelection(next)
+    return
+  }
+  setLightweightSelection(next)
 }
 
 const toggleSelection = () => {
@@ -236,18 +279,18 @@ const moveSelection = (dir: number) => {
 const selectAll = () => {
   const names = filteredSkills.value.map((skill) => skill.name)
   if (activeTab.value === 'professional') {
-    settingsStore.selectProfessionalSkillNames(names)
+    setProfessionalSelection(names)
     return
   }
-  settingsStore.selectSkillNames(names)
+  setLightweightSelection(names)
 }
 
 const clearAll = () => {
   if (activeTab.value === 'professional') {
-    settingsStore.clearProfessionalSkillNames()
+    setProfessionalSelection([])
     return
   }
-  settingsStore.clearSkillNames()
+  setLightweightSelection([])
 }
 
 const close = () => {
@@ -261,8 +304,11 @@ const goManage = () => {
 }
 
 const loadSkillOptions = async () => {
+  const requestID = ++loadRequestID
+  skillsLoading.value = true
   try {
     const res = await listSkills()
+    if (requestID !== loadRequestID) return
     skillsAvailable.value = res?.skills_available !== false
     skills.value = Array.isArray(res?.data)
       ? res.data.filter((skill) => skill.kind !== 'professional')
@@ -270,11 +316,16 @@ const loadSkillOptions = async () => {
     professionalSkills.value = Array.isArray(res?.professional_data) ? res.professional_data : []
     professionalSkillsAvailable.value = res?.professional_skills_available === true && professionalSkills.value.length > 0
   } catch (e) {
+    if (requestID !== loadRequestID) return
     console.error('[SkillSelector] failed to load skills', e)
     skillsAvailable.value = false
     professionalSkillsAvailable.value = false
     skills.value = []
     professionalSkills.value = []
+  } finally {
+    if (requestID === loadRequestID) {
+      skillsLoading.value = false
+    }
   }
 }
 
@@ -282,13 +333,15 @@ const updateDropdownPosition = () => {
   const anchor = resolveAnchorEl()
   const zoom = getRootZoom()
   const { width: vwFallback, height: vhFallback } = cssViewportSize(zoom)
+  const viewportMargin = 16
+  const effectiveWidth = Math.max(160, Math.min(dropdownWidth, vwFallback - viewportMargin * 2))
 
   const applyFallback = () => {
     const topFallback = Math.max(80, vhFallback / 2 - 160)
     dropdownStyle.value = {
       position: 'fixed',
-      width: `${dropdownWidth}px`,
-      left: `${Math.round((vwFallback - dropdownWidth) / 2)}px`,
+      width: `${effectiveWidth}px`,
+      left: `${Math.max(viewportMargin, Math.round((vwFallback - effectiveWidth) / 2))}px`,
       top: `${Math.round(topFallback)}px`,
       transform: 'none',
       margin: '0',
@@ -322,8 +375,8 @@ const updateDropdownPosition = () => {
   const vw = vwFallback
   const vh = vhFallback
   let left = Math.floor(rect.left)
-  const minLeft = 16
-  const maxLeft = Math.max(16, vw - dropdownWidth - 16)
+  const minLeft = viewportMargin
+  const maxLeft = Math.max(viewportMargin, vw - effectiveWidth - viewportMargin)
   left = Math.max(minLeft, Math.min(maxLeft, left))
 
   const preferredDropdownHeight = 330
@@ -348,7 +401,7 @@ const updateDropdownPosition = () => {
   if (shouldOpenBelow) {
     dropdownStyle.value = {
       position: 'fixed',
-      width: `${dropdownWidth}px`,
+      width: `${effectiveWidth}px`,
       left: `${left}px`,
       top: `${Math.floor(rect.bottom + offsetY)}px`,
       maxHeight: `${actualHeight}px`,
@@ -359,7 +412,7 @@ const updateDropdownPosition = () => {
   } else {
     dropdownStyle.value = {
       position: 'fixed',
-      width: `${dropdownWidth}px`,
+      width: `${effectiveWidth}px`,
       left: `${left}px`,
       bottom: `${vh - rect.top + offsetY}px`,
       maxHeight: `${actualHeight}px`,
@@ -388,9 +441,8 @@ watch(hasProfessionalTab, (hasTab) => {
 
 watch(() => props.visible, async (v) => {
   if (v) {
-    await loadSkillOptions()
-    activeTab.value = hasProfessionalTab.value ? 'professional' : 'lightweight'
     await nextTick()
+    updateDropdownPosition()
     requestAnimationFrame(() => {
       updateDropdownPosition()
       requestAnimationFrame(() => updateDropdownPosition())
@@ -400,7 +452,16 @@ watch(() => props.visible, async (v) => {
     scrollHandler = () => updateDropdownPosition()
     window.addEventListener('resize', resizeHandler, { passive: true })
     window.addEventListener('scroll', scrollHandler, { passive: true, capture: true })
+    void loadSkillOptions().then(async () => {
+      if (!props.visible) return
+      activeTab.value = hasProfessionalTab.value ? 'professional' : 'lightweight'
+      highlightedIndex.value = 0
+      await nextTick()
+      updateDropdownPosition()
+    })
   } else {
+    loadRequestID += 1
+    skillsLoading.value = false
     searchQuery.value = ''
     highlightedIndex.value = 0
     if (resizeHandler) {
@@ -433,6 +494,8 @@ watch(() => props.visible, async (v) => {
 
 .skill-dropdown {
   position: fixed !important;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
   background: var(--td-bg-color-container);
   border: .5px solid var(--td-component-border);
   border-radius: 10px;

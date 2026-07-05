@@ -103,6 +103,32 @@ app:
   extraEnv: []
   # - name: OLLAMA_BASE_URL
   #   value: "http://ollama:11434"
+  # Claude SDK original-file transfer compatibility:
+  # If app.env.STORAGE_TYPE is "obs" and OBS_* are already configured here,
+  # general-agent requests automatically reuse OBS with the dedicated prefix
+  # "weknora/__weknora_claude_sdk_original_inputs__/". The Python sidecar does
+  # not need OBS credentials; it only downloads backend-generated temporary URLs.
+  # - name: OBS_ENDPOINT
+  #   value: "https://obs.cn-north-4.myhuaweicloud.com"
+  # - name: OBS_REGION
+  #   value: "cn-north-4"
+  # - name: OBS_ACCESS_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: obs-secret
+  #       key: accessKey
+  # - name: OBS_SECRET_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: obs-secret
+  #       key: secretKey
+  # - name: OBS_BUCKET_NAME
+  #   value: "weknora"
+  # Optional explicit override:
+  # - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_STORAGE_PROVIDER
+  #   value: "obs"
+  # - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX
+  #   value: "weknora/__weknora_claude_sdk_original_inputs__/"
 
   # -- Service configuration
   service:

@@ -10857,7 +10857,7 @@ const docTemplate = `{
                         "ApiKeyAuth": []
                     }
                 ],
-                "description": "获取所有预装的Agent Skills元数据",
+                "description": "获取所有预装的智能体技能元数据",
                 "consumes": [
                     "application/json"
                 ],

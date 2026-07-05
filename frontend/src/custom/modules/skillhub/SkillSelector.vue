@@ -15,10 +15,33 @@
         />
       </div>
 
+      <div v-if="showSkillTabs" class="skill-tabs" role="tablist">
+        <button
+          type="button"
+          class="skill-tab"
+          :class="{ active: activeTab === 'professional' }"
+          role="tab"
+          :aria-selected="activeTab === 'professional'"
+          @click="setActiveTab('professional')"
+        >
+          {{ $t('skill.selector.professionalTab') }}
+        </button>
+        <button
+          type="button"
+          class="skill-tab"
+          :class="{ active: activeTab === 'lightweight' }"
+          role="tab"
+          :aria-selected="activeTab === 'lightweight'"
+          @click="setActiveTab('lightweight')"
+        >
+          {{ $t('skill.selector.lightweightTab') }}
+        </button>
+      </div>
+
       <div class="skill-list" ref="skillList" @wheel.stop>
         <div
           v-for="(skill, index) in filteredSkills"
-          :key="skill.name"
+          :key="`${activeTab}-${skill.name}`"
           :class="['skill-item', { selected: isSelected(skill.name), highlighted: highlightedIndex === index }]"
           @click="toggleSkill(skill.name)"
           @mouseenter="highlightedIndex = index"
@@ -29,19 +52,32 @@
             </svg>
           </div>
           <div class="skill-icon">
-            <t-icon name="lightbulb" />
+            <t-icon :name="activeTab === 'professional' ? 'tools' : 'lightbulb'" />
           </div>
           <div class="skill-body">
             <div class="skill-name">{{ skill.name }}</div>
             <div class="skill-desc">{{ skill.description }}</div>
           </div>
+          <div class="skill-item-actions" @click.stop>
+            <t-tooltip :content="isPinned(skill.name) ? $t('menu.unpin') : $t('menu.pin')" placement="top">
+              <button
+                type="button"
+                class="skill-pin"
+                :class="{ pinned: isPinned(skill.name) }"
+                :aria-label="isPinned(skill.name) ? $t('menu.unpin') : $t('menu.pin')"
+                @click.stop="togglePinned(skill.name)"
+              >
+                <t-icon :name="isPinned(skill.name) ? 'pin-filled' : 'pin'" size="13px" />
+              </button>
+            </t-tooltip>
+          </div>
         </div>
 
-        <div v-if="!skillsAvailable" class="skill-empty">
-          {{ $t('skill.selector.sandboxUnavailable') }}
+        <div v-if="!currentSkillsAvailable" class="skill-empty">
+          {{ activeTab === 'professional' ? $t('skill.selector.professionalUnavailable') : $t('skill.selector.sandboxUnavailable') }}
         </div>
         <div v-else-if="filteredSkills.length === 0" class="skill-empty">
-          {{ searchQuery ? $t('skill.selector.noMatch') : $t('skill.selector.empty') }}
+          {{ emptyText }}
         </div>
       </div>
 
@@ -57,25 +93,38 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { listSkills, type SkillInfo } from '@/api/skill'
 import { getRootZoom, rectToCssPx, cssViewportSize } from '@/utils/zoom'
+import { useChatSkillPins, type SkillPinKind } from './skillPins'
+
+type SkillSelectionMode = 'all' | 'selected' | 'none'
+type SkillTab = SkillPinKind
 
 const props = defineProps<{
   visible: boolean
   anchorEl?: any | null
   dropdownWidth?: number
   offsetY?: number
+  professionalSelectionMode?: SkillSelectionMode | null
+  allowedProfessionalSkillNames?: string[]
 }>()
 
 const emit = defineEmits(['close', 'update:visible'])
 const router = useRouter()
+const { t } = useI18n()
 const settingsStore = useSettingsStore()
+const lightweightPins = useChatSkillPins('lightweight')
+const professionalPins = useChatSkillPins('professional')
 
 const searchQuery = ref('')
 const highlightedIndex = ref(0)
+const activeTab = ref<SkillTab>('lightweight')
 const skills = ref<SkillInfo[]>([])
+const professionalSkills = ref<SkillInfo[]>([])
 const skillsAvailable = ref(true)
+const professionalSkillsAvailable = ref(false)
 const searchInput = ref<HTMLInputElement | null>(null)
 const skillList = ref<HTMLElement | null>(null)
 const dropdownStyle = ref<Record<string, string>>({})
@@ -83,13 +132,55 @@ const dropdownWidth = props.dropdownWidth ?? 320
 const offsetY = props.offsetY ?? 8
 
 const selectedNames = computed(() => settingsStore.settings.selectedSkillNames || [])
+const selectedProfessionalNames = computed(() => settingsStore.settings.selectedProfessionalSkillNames || [])
+const normalizedProfessionalMode = computed<SkillSelectionMode>(() => props.professionalSelectionMode || 'none')
+
+const allowedProfessionalNameSet = computed(() => {
+  const names = props.allowedProfessionalSkillNames || []
+  return new Set(names.map((name) => String(name || '').trim()).filter(Boolean))
+})
+
+const professionalOptions = computed(() => {
+  if (normalizedProfessionalMode.value === 'none') return []
+  if (normalizedProfessionalMode.value === 'selected') {
+    return professionalSkills.value.filter((skill) => allowedProfessionalNameSet.value.has(skill.name))
+  }
+  return professionalSkills.value
+})
+
+const hasProfessionalTab = computed(() =>
+  professionalSkillsAvailable.value
+  && normalizedProfessionalMode.value !== 'none'
+  && professionalOptions.value.length > 0,
+)
+const showSkillTabs = computed(() => hasProfessionalTab.value)
+
+const sortedLightweightSkills = computed(() => lightweightPins.sortPinnedFirst(skills.value, (skill) => skill.name))
+const sortedProfessionalSkills = computed(() =>
+  professionalPins.sortPinnedFirst(professionalOptions.value, (skill) => skill.name),
+)
+
+const currentSkills = computed(() => activeTab.value === 'professional' && hasProfessionalTab.value
+  ? sortedProfessionalSkills.value
+  : sortedLightweightSkills.value)
+const currentSkillsAvailable = computed(() => activeTab.value === 'professional'
+  ? professionalSkillsAvailable.value
+  : skillsAvailable.value)
 
 const filteredSkills = computed(() => {
-  if (!searchQuery.value) return skills.value
+  const source = currentSkills.value
+  if (!searchQuery.value) return source
   const q = searchQuery.value.toLowerCase()
-  return skills.value.filter((skill) =>
+  return source.filter((skill) =>
     skill.name.toLowerCase().includes(q) || (skill.description || '').toLowerCase().includes(q),
   )
+})
+
+const emptyText = computed(() => {
+  if (searchQuery.value) return t('skill.selector.noMatch')
+  return activeTab.value === 'professional'
+    ? t('skill.selector.professionalEmpty')
+    : t('skill.selector.empty')
 })
 
 const resolveAnchorEl = () => {
@@ -100,9 +191,19 @@ const resolveAnchorEl = () => {
   return a
 }
 
-const isSelected = (name: string) => selectedNames.value.includes(name)
+const activeSelectedNames = computed(() =>
+  activeTab.value === 'professional' ? selectedProfessionalNames.value : selectedNames.value,
+)
+
+const isSelected = (name: string) => activeSelectedNames.value.includes(name)
 
 const toggleSkill = (name: string) => {
+  if (activeTab.value === 'professional') {
+    isSelected(name)
+      ? settingsStore.removeProfessionalSkillName(name)
+      : settingsStore.addProfessionalSkillName(name)
+    return
+  }
   isSelected(name) ? settingsStore.removeSkillName(name) : settingsStore.addSkillName(name)
 }
 
@@ -110,6 +211,17 @@ const toggleSelection = () => {
   const skill = filteredSkills.value[highlightedIndex.value]
   if (skill) toggleSkill(skill.name)
 }
+
+const setActiveTab = (tab: SkillTab) => {
+  if (tab === 'professional' && !hasProfessionalTab.value) return
+  activeTab.value = tab
+  highlightedIndex.value = 0
+  nextTick(() => searchInput.value?.focus())
+}
+
+const activePins = computed(() => activeTab.value === 'professional' ? professionalPins : lightweightPins)
+const isPinned = (name: string) => activePins.value.isPinned(name)
+const togglePinned = (name: string) => activePins.value.togglePinned(name)
 
 const moveSelection = (dir: number) => {
   const max = filteredSkills.value.length
@@ -121,8 +233,22 @@ const moveSelection = (dir: number) => {
   })
 }
 
-const selectAll = () => settingsStore.selectSkillNames(filteredSkills.value.map((skill) => skill.name))
-const clearAll = () => settingsStore.clearSkillNames()
+const selectAll = () => {
+  const names = filteredSkills.value.map((skill) => skill.name)
+  if (activeTab.value === 'professional') {
+    settingsStore.selectProfessionalSkillNames(names)
+    return
+  }
+  settingsStore.selectSkillNames(names)
+}
+
+const clearAll = () => {
+  if (activeTab.value === 'professional') {
+    settingsStore.clearProfessionalSkillNames()
+    return
+  }
+  settingsStore.clearSkillNames()
+}
 
 const close = () => {
   emit('update:visible', false)
@@ -138,11 +264,17 @@ const loadSkillOptions = async () => {
   try {
     const res = await listSkills()
     skillsAvailable.value = res?.skills_available !== false
-    skills.value = Array.isArray(res?.data) ? res.data : []
+    skills.value = Array.isArray(res?.data)
+      ? res.data.filter((skill) => skill.kind !== 'professional')
+      : []
+    professionalSkills.value = Array.isArray(res?.professional_data) ? res.professional_data : []
+    professionalSkillsAvailable.value = res?.professional_skills_available === true && professionalSkills.value.length > 0
   } catch (e) {
     console.error('[SkillSelector] failed to load skills', e)
     skillsAvailable.value = false
+    professionalSkillsAvailable.value = false
     skills.value = []
+    professionalSkills.value = []
   }
 }
 
@@ -194,8 +326,8 @@ const updateDropdownPosition = () => {
   const maxLeft = Math.max(16, vw - dropdownWidth - 16)
   left = Math.max(minLeft, Math.min(maxLeft, left))
 
-  const preferredDropdownHeight = 300
-  const minDropdownHeight = 210
+  const preferredDropdownHeight = 330
+  const minDropdownHeight = 230
   const topMargin = 20
   const spaceBelow = vh - rect.bottom
   const spaceAbove = rect.top
@@ -241,9 +373,23 @@ const updateDropdownPosition = () => {
 let resizeHandler: (() => void) | null = null
 let scrollHandler: (() => void) | null = null
 
+watch(filteredSkills, (items) => {
+  if (highlightedIndex.value >= items.length) {
+    highlightedIndex.value = Math.max(0, items.length - 1)
+  }
+})
+
+watch(hasProfessionalTab, (hasTab) => {
+  if (!hasTab && activeTab.value === 'professional') {
+    activeTab.value = 'lightweight'
+    highlightedIndex.value = 0
+  }
+})
+
 watch(() => props.visible, async (v) => {
   if (v) {
     await loadSkillOptions()
+    activeTab.value = hasProfessionalTab.value ? 'professional' : 'lightweight'
     await nextTick()
     requestAnimationFrame(() => {
       updateDropdownPosition()
@@ -319,6 +465,37 @@ watch(() => props.visible, async (v) => {
   }
 }
 
+.skill-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px 0;
+  border-bottom: 1px solid var(--td-component-stroke);
+  background: var(--td-bg-color-container);
+}
+
+.skill-tab {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+
+  &:hover,
+  &.active {
+    color: var(--td-brand-color);
+  }
+
+  &.active {
+    border-bottom-color: var(--td-brand-color);
+  }
+}
+
 .skill-list {
   flex: 1;
   min-height: 0;
@@ -332,7 +509,7 @@ watch(() => props.visible, async (v) => {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 7px 6px 7px 8px;
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.12s;
@@ -400,6 +577,48 @@ watch(() => props.visible, async (v) => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.skill-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.skill-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--td-text-color-placeholder);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--td-bg-color-component-hover, #e8e8e8);
+    color: var(--td-brand-color);
+    opacity: 1;
+  }
+
+  &.pinned {
+    color: var(--td-brand-color);
+    opacity: 1;
+  }
+}
+
+.skill-item:hover .skill-pin,
+.skill-item.selected .skill-pin {
+  opacity: 1;
 }
 
 .skill-empty {

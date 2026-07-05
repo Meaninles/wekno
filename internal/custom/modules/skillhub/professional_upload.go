@@ -65,6 +65,9 @@ func (s *Service) ListProfessionalForManage(ctx context.Context) ([]Professional
 			if _, ok := access[meta.Name]; ok {
 				continue
 			}
+			if IsReservedProfessionalSkillName(meta.Name) {
+				continue
+			}
 			record, err := s.ensureProfessionalRecordForMetadata(ctx, meta)
 			if err != nil {
 				return nil, err
@@ -83,24 +86,35 @@ func (s *Service) ListProfessionalForManage(ctx context.Context) ([]Professional
 	}
 	out := make([]ProfessionalSkillListItem, 0, len(metadata))
 	for _, meta := range metadata {
+		systemReserved := IsReservedProfessionalSkillName(meta.Name)
 		entry, managedRecord := access[meta.Name]
-		if managedRecord && !entry.Accessible {
+		if managedRecord && !entry.Accessible && !systemReserved {
 			continue
 		}
 		files, _ := loader.ListSkillFiles(meta.Name)
 		files = filterRuntimeProfessionalFiles(files)
 		updatedAt := professionalSkillUpdatedAt(meta.BasePath)
 		item := ProfessionalSkillListItem{
-			Name:        meta.Name,
-			Description: "",
-			Kind:        "professional",
-			FileCount:   len(files),
-			UpdatedAt:   updatedAt,
+			Name:           meta.Name,
+			Description:    "",
+			Kind:           "professional",
+			FileCount:      len(files),
+			UpdatedAt:      updatedAt,
+			SystemReserved: systemReserved,
 		}
 		if managedRecord && entry.Record != nil {
 			item = s.professionalItemFromAccess(entry, len(files), updatedAt)
+			if item.Description == "" {
+				item.Description = meta.Description
+			}
 		} else {
 			item.Managed = professionalSkillManaged(meta.BasePath)
+		}
+		if systemReserved {
+			item.Managed = true
+			item.IsMine = true
+			item.CanManage = false
+			item.CanDownload = false
 		}
 		out = append(out, item)
 	}
@@ -479,7 +493,10 @@ func createProfessionalSkillZip(skillName, dir, filename string) (*ProfessionalS
 		if err != nil {
 			return err
 		}
-		rel = filepath.ToSlash(rel)
+		rel, err = normalizeProfessionalSkillRelativePath(rel)
+		if err != nil {
+			return fmt.Errorf("invalid professional skill file path %s: %w", rel, err)
+		}
 		if isProfessionalManagementFile(rel) {
 			return nil
 		}
@@ -722,7 +739,12 @@ func (s *Service) professionalAccessByName(ctx context.Context) (map[string]prof
 			SourceTenantID: record.TenantID,
 			Permission:     types.OrgRoleViewer,
 		}
-		if noAccessContext {
+		if IsReservedProfessionalSkillName(record.Name) {
+			entry.Accessible = true
+			entry.IsMine = true
+			entry.CanManage = false
+			entry.Permission = types.OrgRoleViewer
+		} else if noAccessContext {
 			entry.Accessible = true
 		} else if tenantID != 0 && record.TenantID == tenantID {
 			canManage := record.CreatorID == userID || types.TenantRoleFromContext(ctx).HasPermission(types.TenantRoleAdmin)
@@ -821,8 +843,8 @@ func (s *Service) professionalItemFromAccess(entry professionalAccessEntry, file
 		return ProfessionalSkillListItem{}
 	}
 	item := s.professionalItemFromRecord(*entry.Record, entry.IsMine, entry.ShareID, entry.ShareType, fileCount, updatedAt)
-	item.CanManage = entry.CanManage
-	item.CanDownload = entry.CanManage
+	item.CanManage = entry.CanManage && !item.SystemReserved
+	item.CanDownload = entry.CanManage && !item.SystemReserved
 	item.OrganizationID = entry.OrganizationID
 	item.OrganizationName = entry.OrganizationName
 	item.TargetUserID = entry.TargetUserID
@@ -846,7 +868,7 @@ func (s *Service) professionalItemFromRecord(record ProfessionalSkill, isMine bo
 		Managed:         true,
 		IsMine:          isMine,
 		CanManage:       isMine && !systemReserved,
-		CanDownload:     isMine,
+		CanDownload:     isMine && !systemReserved,
 		SystemReserved:  systemReserved,
 		ArchiveFileName: record.ArchiveFileName,
 		ShareID:         shareID,
@@ -1215,21 +1237,11 @@ func (r deadlineReader) Read(p []byte) (int, error) {
 }
 
 func safeArchivePath(raw string) (string, error) {
-	rel := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
-	rel = strings.TrimPrefix(rel, "./")
-	if rel == "" || strings.HasPrefix(rel, "/") {
-		return "", fmt.Errorf("invalid archive entry path: %s", raw)
+	rel, err := normalizeProfessionalSkillRelativePath(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid archive entry path %q: %w", raw, err)
 	}
-	clean := filepath.ToSlash(filepath.Clean(rel))
-	if clean == "." || clean == "" || strings.HasPrefix(clean, "../") || clean == ".." {
-		return "", fmt.Errorf("invalid archive entry path: %s", raw)
-	}
-	for _, part := range strings.Split(clean, "/") {
-		if part == "" || part == "." || part == ".." || strings.Contains(part, ":") {
-			return "", fmt.Errorf("invalid archive entry path: %s", raw)
-		}
-	}
-	return clean, nil
+	return rel, nil
 }
 
 func validateProfessionalSkillName(name string) error {
@@ -1277,6 +1289,13 @@ func validateExtractedTree(root string) error {
 		}
 		if entry.IsDir() {
 			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		if _, relErr = normalizeProfessionalSkillRelativePath(rel); relErr != nil {
+			return fmt.Errorf("invalid professional skill file path %s: %w", rel, relErr)
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -1412,7 +1431,11 @@ func copyDir(src, dst string) error {
 		if rel == "." {
 			return nil
 		}
-		target := filepath.Join(dst, rel)
+		clean, err := normalizeProfessionalSkillRelativePath(rel)
+		if err != nil {
+			return fmt.Errorf("invalid professional skill file path %s: %w", rel, err)
+		}
+		target := filepath.Join(dst, filepath.FromSlash(clean))
 		if entry.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}

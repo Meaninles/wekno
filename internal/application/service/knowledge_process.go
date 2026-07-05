@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/custom/modules/fileguard"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
@@ -2118,12 +2119,13 @@ func (s *knowledgeService) ReparseKnowledge(
 			return existing, nil
 		}
 
-		task := asynq.NewTask(
-			types.TypeDocumentProcess,
-			payloadBytes,
-			documentProcessTaskOptions(s.config, asynq.MaxRetry(3))...,
+		opts := documentProcessTaskOptionsForQueue(
+			s.config,
+			s.documentQueueForStoredDocument(ctx, kb, existing, taskPayload),
+			asynq.MaxRetry(3),
 		)
-		info, err := s.task.Enqueue(task)
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+		info, err := s.task.Enqueue(task, opts...)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue reparse task: %v", err)
 			return existing, nil
@@ -2171,12 +2173,9 @@ func (s *knowledgeService) ReparseKnowledge(
 			return existing, nil
 		}
 
-		task := asynq.NewTask(
-			types.TypeDocumentProcess,
-			payloadBytes,
-			documentProcessTaskOptions(s.config)...,
-		)
-		info, err := s.task.Enqueue(task)
+		opts := documentProcessTaskOptions(s.config)
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+		info, err := s.task.Enqueue(task, opts...)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue file URL reparse task: %v", err)
 			return existing, nil
@@ -2217,12 +2216,9 @@ func (s *knowledgeService) ReparseKnowledge(
 			return existing, nil
 		}
 
-		task := asynq.NewTask(
-			types.TypeDocumentProcess,
-			payloadBytes,
-			documentProcessTaskOptions(s.config, asynq.MaxRetry(3))...,
-		)
-		info, err := s.task.Enqueue(task)
+		opts := documentProcessTaskOptions(s.config, asynq.MaxRetry(3))
+		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+		info, err := s.task.Enqueue(task, opts...)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue URL reparse task: %v", err)
 			return existing, nil
@@ -2246,9 +2242,9 @@ func (s *knowledgeService) ReparseKnowledge(
 //   - Any in-flight worker reads the new status at its next checkpoint and
 //     bails (see processChunks / ProcessDocument / downstream handlers).
 //   - The asynq inspector (if available) dequeues pending / scheduled / retry
-//     tasks for this knowledge_id across the default / critical / low queues
-//     and signals active workers to stop. Lite mode (no Redis) skips the
-//     dequeue step — the checkpoint-based abort is the only stop signal there.
+//     tasks for this knowledge_id across all knowledge-related queues and
+//     signals active workers to stop. Lite mode (no Redis) skips the dequeue
+//     step — the checkpoint-based abort is the only stop signal there.
 //   - Idempotent: re-calling on an already-cancelled row is a no-op.
 //
 // Errors:
@@ -2660,6 +2656,91 @@ func (s *knowledgeService) ProcessManualUpdate(ctx context.Context, t *asynq.Tas
 	return nil
 }
 
+func (s *knowledgeService) analyzeStoredDocumentForGuard(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledge *types.Knowledge,
+	payload types.DocumentProcessPayload,
+) (fileguard.Report, error) {
+	fileName := strings.TrimSpace(payload.FileName)
+	if fileName == "" {
+		fileName = knowledge.FileName
+	}
+	fileType := strings.TrimSpace(payload.FileType)
+	if fileType == "" {
+		fileType = knowledge.FileType
+	}
+	if !fileguard.NeedsContentAnalysis(fileName, fileType) {
+		return fileguard.AnalyzeSize(fileName, fileType, knowledge.FileSize), nil
+	}
+
+	fileReader, err := s.resolveFileServiceForPath(ctx, kb, payload.FilePath).GetFile(ctx, payload.FilePath)
+	if err != nil {
+		return fileguard.Report{}, err
+	}
+	defer fileReader.Close()
+
+	contentBytes, err := io.ReadAll(fileReader)
+	if err != nil {
+		return fileguard.Report{}, err
+	}
+	return fileguard.AnalyzeBytes(fileName, fileType, contentBytes), nil
+}
+
+func (s *knowledgeService) documentQueueForStoredDocument(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledge *types.Knowledge,
+	payload types.DocumentProcessPayload,
+) string {
+	report, err := s.analyzeStoredDocumentForGuard(ctx, kb, knowledge, payload)
+	if err != nil {
+		logger.Warnf(ctx, "failed to inspect stored file for queue routing knowledge_id=%s: %v", knowledge.ID, err)
+		return types.QueueDefault
+	}
+	return documentProcessQueueForReport(report)
+}
+
+func (s *knowledgeService) rerouteHeavyDocumentIfNeeded(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	payload types.DocumentProcessPayload,
+	report fileguard.Report,
+	maxRetry int,
+) (bool, error) {
+	if !report.IsHeavy() {
+		return false, nil
+	}
+	queueName, ok := asynq.GetQueueName(ctx)
+	if !ok {
+		return false, nil
+	}
+	if queueName == types.QueueDocumentHeavy {
+		return false, nil
+	}
+	if s.task == nil {
+		return false, nil
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal heavy document task payload: %w", err)
+	}
+	extra := make([]asynq.Option, 0, 1)
+	if maxRetry > 0 {
+		extra = append(extra, asynq.MaxRetry(maxRetry))
+	}
+	opts := documentProcessTaskOptionsForQueue(s.config, types.QueueDocumentHeavy, extra...)
+	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
+	info, err := s.task.Enqueue(task, opts...)
+	if err != nil {
+		return false, fmt.Errorf("failed to enqueue heavy document task: %w", err)
+	}
+	logger.Infof(ctx, "Rerouted heavy document task to %s: id=%s knowledge_id=%s reasons=%s",
+		types.QueueDocumentHeavy, info.ID, knowledge.ID, strings.Join(report.HeavyReasons, "；"))
+	return true, nil
+}
+
 // ProcessDocument handles Asynq document processing tasks
 func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) error {
 	var payload types.DocumentProcessPayload
@@ -2849,6 +2930,15 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			s.repo.UpdateKnowledge(ctx, knowledge)
 			return nil
 		}
+		guardReport := fileguard.AnalyzeBytes(resolvedFileName, resolvedFileType, contentBytes)
+		if err := guardReport.ValidationError(); err != nil {
+			logger.Warnf(ctx, "File URL preflight rejected %s: %s", resolvedFileName, err.Error())
+			knowledge.ParseStatus = "failed"
+			knowledge.ErrorMessage = err.Error()
+			knowledge.UpdatedAt = time.Now()
+			s.repo.UpdateKnowledge(ctx, knowledge)
+			return nil
+		}
 
 		if resolvedFileName != "" && knowledge.FileName == "" {
 			knowledge.FileName = resolvedFileName
@@ -2869,10 +2959,17 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			}
 			return fmt.Errorf("failed to save downloaded file: %w", err)
 		}
+		contentBytes = nil
 
 		payload.FilePath = filePath
 		payload.FileName = resolvedFileName
 		payload.FileType = resolvedFileType
+		payload.FileURL = ""
+		if rerouted, err := s.rerouteHeavyDocumentIfNeeded(ctx, knowledge, payload, guardReport, maxRetry); err != nil {
+			return err
+		} else if rerouted {
+			return nil
+		}
 		convertResult, err = s.convert(ctx, payload, kb, knowledge, eff, isLastRetry)
 		if err != nil {
 			return err
@@ -2926,6 +3023,27 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		return nil
 	} else {
 		// File import
+		if payload.FilePath != "" {
+			guardReport, err := s.analyzeStoredDocumentForGuard(ctx, kb, knowledge, payload)
+			if err != nil {
+				logger.Errorf(ctx, "failed to inspect file before parsing: %v", err)
+				_, failErr := s.failKnowledge(ctx, knowledge, isLastRetry, "failed to inspect file before parsing: %v", err)
+				return failErr
+			}
+			if validationErr := guardReport.ValidationError(); validationErr != nil {
+				logger.Warnf(ctx, "Stored file preflight rejected %s: %s", payload.FileName, validationErr.Error())
+				knowledge.ParseStatus = "failed"
+				knowledge.ErrorMessage = validationErr.Error()
+				knowledge.UpdatedAt = time.Now()
+				s.repo.UpdateKnowledge(ctx, knowledge)
+				return nil
+			}
+			if rerouted, err := s.rerouteHeavyDocumentIfNeeded(ctx, knowledge, payload, guardReport, maxRetry); err != nil {
+				return err
+			} else if rerouted {
+				return nil
+			}
+		}
 		convertResult, err = s.convert(ctx, payload, kb, knowledge, eff, isLastRetry)
 		if err != nil {
 			return err

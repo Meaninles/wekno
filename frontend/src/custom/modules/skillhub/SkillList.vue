@@ -37,20 +37,20 @@
         <button
           type="button"
           class="skill-type-tab"
-          :class="{ active: activeSkillKind === 'lightweight' }"
-          @click="activeSkillKind = 'lightweight'"
-        >
-          轻量技能
-          <span>{{ displayedSkills.length }}</span>
-        </button>
-        <button
-          type="button"
-          class="skill-type-tab"
           :class="{ active: activeSkillKind === 'professional' }"
           @click="activeSkillKind = 'professional'"
         >
           专业技能
           <span>{{ professionalSkills.length }}</span>
+        </button>
+        <button
+          type="button"
+          class="skill-type-tab"
+          :class="{ active: activeSkillKind === 'lightweight' }"
+          @click="activeSkillKind = 'lightweight'"
+        >
+          轻量技能
+          <span>{{ displayedSkills.length }}</span>
         </button>
       </div>
 
@@ -490,7 +490,7 @@ const skills = ref<ManagedSkill[]>([])
 const professionalSkills = ref<ManagedProfessionalSkill[]>([])
 const orgSkillMap = ref<Record<string, ManagedSkill[]>>({})
 const spaceSelection = ref('all')
-const activeSkillKind = ref<'lightweight' | 'professional'>('lightweight')
+const activeSkillKind = ref<'lightweight' | 'professional'>('professional')
 const openMoreId = ref('')
 
 const editorVisible = ref(false)

@@ -34,3 +34,8 @@ test('event list helpers are hoisted for initial history render', () => {
   assert.match(source, /function buildFullEventList\(/)
   assert.doesNotMatch(source, /const buildFullEventList\s*=/)
 })
+
+test('answer display ignores superseded answer events', () => {
+  assert.match(source, /e\.type === 'answer' && !e\.superseded/)
+  assert.match(source, /const answerEvents = result\.filter\(\(e: any\) => e\.type === 'answer' && !e\.superseded\)/)
+})

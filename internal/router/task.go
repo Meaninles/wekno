@@ -23,7 +23,7 @@ import (
 type AsynqTaskParams struct {
 	dig.In
 
-	Server               *asynq.Server
+	Servers              *AsynqServers
 	KnowledgeService     interfaces.KnowledgeService
 	KnowledgeBaseService interfaces.KnowledgeBaseService
 	TagService           interfaces.KnowledgeTagService
@@ -119,19 +119,35 @@ func asynqRetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 // nature of doc parsing (most time is spent in DocReader / embedding RPCs,
 // not on local CPU).
 const defaultAsynqConcurrency = 32
+const defaultHeavyDocumentConcurrency = 2
 
-func NewAsynqServer(svc interfaces.SystemSettingService) *asynq.Server {
+type AsynqServers struct {
+	Normal *asynq.Server
+	Heavy  *asynq.Server
+}
+
+func NewAsynqServers(svc interfaces.SystemSettingService) *AsynqServers {
 	opt := getAsynqRedisClientOpt()
 	concurrency := defaultAsynqConcurrency
+	heavyConcurrency := defaultHeavyDocumentConcurrency
 	if svc != nil {
 		n := svc.GetInt(context.Background(), "asynq.concurrency", "WEKNORA_ASYNQ_CONCURRENCY", defaultAsynqConcurrency)
 		if n > 0 {
 			concurrency = int(n)
 		}
+		heavy := svc.GetInt(
+			context.Background(),
+			"asynq.heavy_document_concurrency",
+			"WEKNORA_HEAVY_DOCUMENT_CONCURRENCY",
+			defaultHeavyDocumentConcurrency,
+		)
+		if heavy > 0 {
+			heavyConcurrency = int(heavy)
+		}
 	}
-	log.Printf("asynq server starting with concurrency=%d redis_op_timeout=%dms",
+	log.Printf("asynq normal server starting with concurrency=%d redis_op_timeout=%dms",
 		concurrency, readRedisOpTimeoutMs())
-	srv := asynq.NewServer(
+	normal := asynq.NewServer(
 		opt,
 		asynq.Config{
 			Concurrency: concurrency,
@@ -146,7 +162,19 @@ func NewAsynqServer(svc interfaces.SystemSettingService) *asynq.Server {
 			RetryDelayFunc: asynqRetryDelayFunc,
 		},
 	)
-	return srv
+	log.Printf("asynq heavy document server starting with concurrency=%d redis_op_timeout=%dms",
+		heavyConcurrency, readRedisOpTimeoutMs())
+	heavy := asynq.NewServer(
+		opt,
+		asynq.Config{
+			Concurrency: heavyConcurrency,
+			Queues: map[string]int{
+				types.QueueDocumentHeavy: 1,
+			},
+			RetryDelayFunc: asynqRetryDelayFunc,
+		},
+	)
+	return &AsynqServers{Normal: normal, Heavy: heavy}
 }
 
 func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
@@ -226,12 +254,23 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	// Register wiki ingest handler
 	mux.HandleFunc(types.TypeWikiIngest, params.WikiIngest.Handle)
 
-	go func() {
-		// Start the server
-		if err := params.Server.Run(mux); err != nil {
-			log.Fatalf("could not run server: %v", err)
-		}
-	}()
+	if params.Servers != nil && params.Servers.Normal != nil {
+		go func() {
+			if err := params.Servers.Normal.Run(mux); err != nil {
+				log.Fatalf("could not run normal asynq server: %v", err)
+			}
+		}()
+	}
+	if params.Servers != nil && params.Servers.Heavy != nil {
+		go func() {
+			if err := params.Servers.Heavy.Run(mux); err != nil {
+				log.Fatalf("could not run heavy document asynq server: %v", err)
+			}
+		}()
+	}
+	if params.Servers == nil || (params.Servers.Normal == nil && params.Servers.Heavy == nil) {
+		log.Fatalf("could not run asynq server: no server configured")
+	}
 	return mux
 }
 

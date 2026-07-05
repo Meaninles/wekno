@@ -7,8 +7,10 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/fileguard"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -116,7 +118,8 @@ func (s *createKnowledgeFileServiceStub) CopyFile(ctx context.Context, srcPath s
 }
 
 type createKnowledgeTaskEnqueuerStub struct {
-	calls int
+	calls  int
+	queues []string
 }
 
 func (s *createKnowledgeTaskEnqueuerStub) Enqueue(
@@ -124,7 +127,16 @@ func (s *createKnowledgeTaskEnqueuerStub) Enqueue(
 	opts ...asynq.Option,
 ) (*asynq.TaskInfo, error) {
 	s.calls++
-	return &asynq.TaskInfo{ID: "task-1", Queue: "default"}, nil
+	queue := types.QueueDefault
+	for _, opt := range opts {
+		if opt.Type() == asynq.QueueOpt {
+			if q, ok := opt.Value().(string); ok && q != "" {
+				queue = q
+			}
+		}
+	}
+	s.queues = append(s.queues, queue)
+	return &asynq.TaskInfo{ID: "task-1", Queue: queue}, nil
 }
 
 func TestCreateKnowledgeFromFileDoesNotPersistWhenStorageSaveFails(t *testing.T) {
@@ -190,6 +202,40 @@ func TestCreateKnowledgeFromFilePersistsStoredFilePathOnCreate(t *testing.T) {
 	require.NotNil(t, repo.createdKnowledge)
 	require.Equal(t, "stored/"+knowledge.ID, repo.createdKnowledge.FilePath)
 	require.Equal(t, 1, task.calls)
+}
+
+func TestCreateKnowledgeFromFileRoutesHeavyFileToHeavyQueue(t *testing.T) {
+	t.Parallel()
+
+	repo := &createKnowledgeFileRepoStub{}
+	fileSvc := &createKnowledgeFileServiceStub{}
+	task := &createKnowledgeTaskEnqueuerStub{}
+	svc := &knowledgeService{
+		repo:      repo,
+		kbService: &createKnowledgeFileKBServiceStub{kb: &types.KnowledgeBase{ID: "kb-1"}},
+		fileSvc:   fileSvc,
+		task:      task,
+	}
+
+	file := newMultipartFileHeader(t, "large.pdf", strings.Repeat("x", 10*1024*1024+1))
+	require.Greater(t, file.Size, int64(10*1024*1024))
+	require.True(t, fileguard.AnalyzeMultipartFile(file, "large.pdf").IsHeavy())
+
+	knowledge, err := svc.CreateKnowledgeFromFile(
+		newCreateKnowledgeFileContext(),
+		"kb-1",
+		file,
+		nil,
+		nil,
+		"",
+		nil,
+		"",
+		nil,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, knowledge)
+	require.Equal(t, []string{types.QueueDocumentHeavy}, task.queues)
 }
 
 func TestCreateKnowledgeFromFileDeletesStoredFileWhenCreateFails(t *testing.T) {
@@ -289,5 +335,7 @@ func newMultipartFileHeader(t *testing.T, filename string, content string) *mult
 	req := httptest.NewRequest("POST", "/", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	require.NoError(t, req.ParseMultipartForm(1024))
-	return req.MultipartForm.File["file"][0]
+	fh := req.MultipartForm.File["file"][0]
+	fh.Size = int64(len(content))
+	return fh
 }

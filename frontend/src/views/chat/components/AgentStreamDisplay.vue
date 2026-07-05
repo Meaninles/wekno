@@ -299,7 +299,7 @@
 
             <!-- Answer Event -->
             <div v-else-if="event.type === 'answer' && (event.done || (event.content && event.content.trim()))"
-              class="answer-event">
+              class="answer-event" :class="{ 'answer-event--intermediate': isLiveIntermediateAnswerEvent(event) }">
               <div v-if="event.content && event.content.trim()" class="answer-content markdown-content">
                 <template
                   v-for="(segment, segmentIndex) in renderAnswerSegments(event === activeAnswerEventRef ? typedAnswer : event.content)"
@@ -1591,7 +1591,7 @@ const displayEvents = computed(() => {
   // Quick-answer RAG: pipeline steps and model thinking live in RagPipelineProgress;
   // here we only render the final answer stream.
   if (props.ragMode) {
-    return result.filter((e: any) => e.type === 'answer');
+    return result.filter((e: any) => e.type === 'answer' && !e.superseded);
   }
 
   // While the conversation is still running, keep the same lightweight tool-log
@@ -1613,7 +1613,7 @@ const displayEvents = computed(() => {
   }
 
   // Done: the steps live in the collapsed tree; show only the answer here.
-  const answerEvents = result.filter((e: any) => e.type === 'answer');
+  const answerEvents = result.filter((e: any) => e.type === 'answer' && !e.superseded);
   const errorEvents = result.filter((e: any) => e.type === 'error');
   const terminalError = errorEvents[errorEvents.length - 1];
   if (terminalError) {
@@ -1659,6 +1659,19 @@ const displayEvents = computed(() => {
 
   return result;
 });
+
+const isLiveIntermediateAnswerEvent = (event: any): boolean => {
+  if (!event || event.type !== 'answer') return false;
+  if (event.final_answer === true || event.superseded || isConversationDone.value) return false;
+  const events = displayEvents.value;
+  const index = events.indexOf(event);
+  if (index < 0) return false;
+  return events.slice(index + 1).some((next: any) => {
+    if (!next || next.type === 'agent_complete') return false;
+    if (isTransientStatusEvent(next)) return true;
+    return next.type !== 'answer' || next.final_answer === true;
+  });
+};
 
 // Get unique key for event
 const getEventKey = (event: any, index: number): string => {
@@ -2706,6 +2719,18 @@ const handleAddToKnowledge = (answerEvent: any) => {
 
   .answer-toolbar {
     margin-top: 10px;
+  }
+
+  &.answer-event--intermediate {
+    .answer-content {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      overflow: hidden;
+      -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 72%, rgb(0 0 0 / 28%) 100%);
+      mask-image: linear-gradient(to bottom, #000 0%, #000 72%, rgb(0 0 0 / 28%) 100%);
+    }
   }
 }
 

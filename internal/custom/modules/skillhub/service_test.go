@@ -143,6 +143,145 @@ func TestProfessionalPackagesSelectsConfiguredSkills(t *testing.T) {
 	}
 }
 
+func TestReservedProfessionalSkillsAreImmutablePresets(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	svc := NewService(db)
+	if err := svc.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate skillhub: %v", err)
+	}
+	root := t.TempDir()
+	writeProfessionalSkill(t, root, "anysearch-skill", "AnySearch", "search body")
+	writeProfessionalSkill(t, root, "find-skill-skillhub", "Find SkillHub", "find body")
+	t.Setenv("WEKNORA_PROFESSIONAL_SKILLS_DIR", root)
+
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(14001))
+	ctx = context.WithValue(ctx, types.UserIDContextKey, "reserved-professional-owner")
+	ctx = context.WithValue(ctx, types.TenantRoleContextKey, types.TenantRoleContributor)
+
+	items, err := svc.ListProfessionalForManage(ctx)
+	if err != nil {
+		t.Fatalf("ListProfessionalForManage returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items len = %d, want 2", len(items))
+	}
+	for _, item := range items {
+		if !item.SystemReserved {
+			t.Fatalf("item %s SystemReserved = false, want true", item.Name)
+		}
+		if !item.IsMine || item.CanManage || item.CanDownload || item.ID != "" {
+			t.Fatalf("reserved item = %+v, want owned preset without generated management capability", item)
+		}
+	}
+
+	if _, err := svc.ImportProfessionalSkill(ctx, ProfessionalSkillImportRequest{Name: "anysearch-skill"}); err == nil ||
+		!strings.Contains(err.Error(), "system reserved") {
+		t.Fatalf("ImportProfessionalSkill reserved error = %v, want system reserved", err)
+	}
+
+	record := &ProfessionalSkill{
+		TenantID:        14001,
+		CreatorID:       "reserved-professional-owner",
+		Name:            "anysearch-skill",
+		Description:     "existing reserved record",
+		ArchiveFileName: "anysearch-skill.zip",
+	}
+	if err := db.Create(record).Error; err != nil {
+		t.Fatalf("create reserved professional record: %v", err)
+	}
+
+	items, err = svc.ListProfessionalForManage(ctx)
+	if err != nil {
+		t.Fatalf("ListProfessionalForManage after existing record returned error: %v", err)
+	}
+	for _, item := range items {
+		if item.Name == "anysearch-skill" && (!item.IsMine || item.CanManage || item.CanDownload) {
+			t.Fatalf("reserved item with existing record = %+v, want owned immutable preset", item)
+		}
+	}
+
+	otherCtx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(14002))
+	otherCtx = context.WithValue(otherCtx, types.UserIDContextKey, "other-reserved-professional-user")
+	otherCtx = context.WithValue(otherCtx, types.TenantRoleContextKey, types.TenantRoleContributor)
+	otherItems, err := svc.ListProfessionalForManage(otherCtx)
+	if err != nil {
+		t.Fatalf("ListProfessionalForManage for other user returned error: %v", err)
+	}
+	var foundOtherReserved bool
+	for _, item := range otherItems {
+		if item.Name != "anysearch-skill" {
+			continue
+		}
+		foundOtherReserved = true
+		if !item.SystemReserved || !item.IsMine || item.CanManage || item.CanDownload {
+			t.Fatalf("reserved item for other user = %+v, want owned immutable preset", item)
+		}
+	}
+	if !foundOtherReserved {
+		t.Fatalf("reserved skill with existing record was not visible to other user: %+v", otherItems)
+	}
+
+	if _, err := svc.UpdateProfessionalSkill(ctx, record.ID, ProfessionalSkillUpdateRequest{Name: "renamed-anysearch"}); err == nil ||
+		!strings.Contains(err.Error(), "system reserved") {
+		t.Fatalf("UpdateProfessionalSkill reserved error = %v, want system reserved", err)
+	}
+	if err := svc.DeleteProfessionalSkill(ctx, record.ID); err == nil ||
+		!strings.Contains(err.Error(), "system reserved") {
+		t.Fatalf("DeleteProfessionalSkill reserved error = %v, want system reserved", err)
+	}
+
+	regular := &ProfessionalSkill{
+		TenantID:        14001,
+		CreatorID:       "reserved-professional-owner",
+		Name:            "regular-professional-skill",
+		Description:     "regular",
+		ArchiveFileName: "regular.zip",
+	}
+	if err := db.Create(regular).Error; err != nil {
+		t.Fatalf("create regular professional record: %v", err)
+	}
+	if _, err := svc.UpdateProfessionalSkill(ctx, regular.ID, ProfessionalSkillUpdateRequest{Name: "find-skill-skillhub"}); err == nil ||
+		!strings.Contains(err.Error(), "system reserved") {
+		t.Fatalf("UpdateProfessionalSkill rename to reserved error = %v, want system reserved", err)
+	}
+}
+
+func TestProfessionalSkillRelativePathValidationAllowsSafeUnicode(t *testing.T) {
+	valid := map[string]string{
+		"references/7套新增风格规范.md":        "references/7套新增风格规范.md",
+		`references\MBE插画风格规范.md`:       "references/MBE插画风格规范.md",
+		"./references/粗线条感风格 PPT 模板.md": "references/粗线条感风格 PPT 模板.md",
+	}
+	for input, want := range valid {
+		got, err := normalizeProfessionalSkillRelativePath(input)
+		if err != nil {
+			t.Fatalf("normalizeProfessionalSkillRelativePath(%q) returned error: %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("normalizeProfessionalSkillRelativePath(%q) = %q, want %q", input, got, want)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"/absolute.md",
+		"../escape.md",
+		"references/../escape.md",
+		"references//double-slash.md",
+		"references/a:b.md",
+		"references/\x00bad.md",
+		"references/\u202Ebad.md",
+	}
+	for _, input := range invalid {
+		if got, err := normalizeProfessionalSkillRelativePath(input); err == nil {
+			t.Fatalf("normalizeProfessionalSkillRelativePath(%q) = %q, want error", input, got)
+		}
+	}
+}
+
 func TestListProfessionalForManageAdoptsFilesystemSkill(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -251,6 +390,8 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	zw := zip.NewWriter(&buf)
 	writeZipFile(t, zw, "packed-skill/SKILL.md", "---\nname: package-name\ndescription: packaged description\n---\n\n# Body\n\nUse resources.\n")
 	writeZipFile(t, zw, "packed-skill/references/checklist.md", "# Checklist\n")
+	writeZipFile(t, zw, "packed-skill/references/7套新增风格规范.md", "# 7 styles\n")
+	writeZipFile(t, zw, "packed-skill/references/粗线条感风格 PPT 模板.md", "# Bold line style\n")
 	if err := zw.Close(); err != nil {
 		t.Fatalf("close zip: %v", err)
 	}
@@ -279,6 +420,9 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "imported-skill", "references", "checklist.md")); err != nil {
 		t.Fatalf("resource file was not extracted before runtime: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(root, "imported-skill", "references", "7套新增风格规范.md")); err != nil {
+		t.Fatalf("unicode resource file was not extracted before runtime: %v", err)
+	}
 
 	packages, err := ProfessionalPackages(context.Background(), []string{"imported-skill"}, false)
 	if err != nil {
@@ -291,6 +435,16 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 		if strings.HasSuffix(file.Path, ".zip") || file.Path == professionalSkillMetaFile || file.Path == professionalArchiveFile {
 			t.Fatalf("runtime package includes non-runtime artifact: %+v", file)
 		}
+	}
+	var foundUnicode bool
+	for _, file := range packages[0].Files {
+		if file.Path == "references/7套新增风格规范.md" {
+			foundUnicode = true
+			break
+		}
+	}
+	if !foundUnicode {
+		t.Fatalf("runtime package files = %+v, want unicode reference path", packages[0].Files)
 	}
 
 	download, err := svc.DownloadProfessionalSkill(ctx, item.ID)

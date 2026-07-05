@@ -298,6 +298,54 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     return retracted
   }
 
+  const normalizeFinalAnswerFromComplete = (
+    message: ChatMessage,
+    dataPayload?: ChatMessage,
+  ) => {
+    const finalAnswer =
+      typeof dataPayload?.final_answer === 'string' ? dataPayload.final_answer : ''
+    if (!finalAnswer.trim()) return false
+
+    if (!message.agentEventStream) message.agentEventStream = []
+    if (!message._eventMap) message._eventMap = new Map()
+
+    const stream = message.agentEventStream as ChatMessage[]
+    for (const ev of stream) {
+      if (ev.type === 'answer') {
+        ev.superseded = true
+        ev.done = true
+      }
+    }
+
+    const finalEventId =
+      (dataPayload?.final_answer_event_id as string | undefined) ||
+      `final-answer-${String(message.id || message.request_id || Date.now())}`
+    let finalEvent = stream.find(
+      (ev) => ev.type === 'answer' && ev.final_answer === true,
+    )
+    if (!finalEvent) {
+      finalEvent = {
+        type: 'answer',
+        event_id: finalEventId,
+        content: '',
+        done: true,
+        final_answer: true,
+      }
+      stream.push(finalEvent)
+    }
+
+    finalEvent.event_id = finalEvent.event_id || finalEventId
+    finalEvent.content = finalAnswer
+    finalEvent.done = true
+    finalEvent.superseded = false
+    finalEvent.final_answer = true
+    ;(message._eventMap as Map<string, ChatMessage>).set(String(finalEvent.event_id), finalEvent)
+
+    message.content = finalAnswer
+    fullContent.value = finalAnswer
+    return true
+  }
+
   const reconstructEventStreamFromSteps = (
     agentSteps: unknown[],
     messageContent: string,
@@ -992,6 +1040,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       }
       case 'complete': {
         log('[Agent] Complete event received')
+        normalizeFinalAnswerFromComplete(message, dataPayload)
         loading.value = false
         isReplying.value = false
         message.is_completed = true

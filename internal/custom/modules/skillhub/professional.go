@@ -21,7 +21,24 @@ const (
 	maxProfessionalSkillTotalSize = 50 * 1024 * 1024
 )
 
+var reservedProfessionalSkillNames = []string{
+	"anysearch-skill",
+	"find-skill-skillhub",
+}
+
+func ReservedProfessionalSkillNames() []string {
+	out := make([]string, len(reservedProfessionalSkillNames))
+	copy(out, reservedProfessionalSkillNames)
+	return out
+}
+
 func IsReservedProfessionalSkillName(name string) bool {
+	name = strings.TrimSpace(name)
+	for _, reserved := range reservedProfessionalSkillNames {
+		if name == reserved {
+			return true
+		}
+	}
 	return false
 }
 
@@ -120,17 +137,20 @@ func ProfessionalPackages(ctx context.Context, names []string, all bool) ([]Prof
 			Files:       make([]ProfessionalSkillFile, 0, len(files)),
 		}
 		for _, rel := range files {
-			if isProfessionalManagementFile(filepath.ToSlash(rel)) {
+			clean, err := normalizeProfessionalSkillRelativePath(rel)
+			if err != nil {
+				return nil, fmt.Errorf("invalid professional skill file path %s/%s: %w", skill.Name, rel, err)
+			}
+			if isProfessionalManagementFile(clean) {
 				continue
 			}
-			clean := filepath.Clean(rel)
-			if clean == "." || strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
-				return nil, fmt.Errorf("invalid professional skill file path %s/%s", skill.Name, rel)
-			}
-			fullPath := filepath.Join(skill.BasePath, clean)
-			info, err := os.Stat(fullPath)
+			fullPath := filepath.Join(skill.BasePath, filepath.FromSlash(clean))
+			info, err := os.Lstat(fullPath)
 			if err != nil {
 				return nil, fmt.Errorf("stat professional skill file %s/%s: %w", skill.Name, rel, err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("symbolic links are not allowed in skill packages: %s/%s", skill.Name, clean)
 			}
 			if info.IsDir() {
 				continue
@@ -147,7 +167,7 @@ func ProfessionalPackages(ctx context.Context, names []string, all bool) ([]Prof
 				return nil, fmt.Errorf("read professional skill file %s/%s: %w", skill.Name, rel, err)
 			}
 			pkg.Files = append(pkg.Files, ProfessionalSkillFile{
-				Path:          filepath.ToSlash(clean),
+				Path:          clean,
 				ContentBase64: base64.StdEncoding.EncodeToString(content),
 			})
 		}

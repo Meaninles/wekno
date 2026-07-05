@@ -170,8 +170,10 @@ agent_type_presets:
             file_name: "GB_T_9704_2012_党政机关公文格式_PPT模板要求.md"
             file_type: "md"
           template_files: []
-      professional_skills_selection_mode: "none"
-      selected_professional_skills: []
+      professional_skills_selection_mode: "selected"
+      selected_professional_skills:
+        - "anysearch-skill"
+        - "find-skill-skillhub"
       temperature: 0.4
       max_completion_tokens: 8192
       max_iterations: 100
@@ -256,7 +258,7 @@ agent_type_presets:
         description: "General-purpose agent. Reuses WeKnora KB retrieval, web search, MCP, Skills, tools and database sources."
       zh-CN:
         label: "通用智能体"
-        description: "通用智能体，复用 WeKnora 知识检索、网络搜索、MCP、Skills、工具和数据库数据源。"
+        description: "通用智能体，通常不单独使用，建议配合一个或多个专业Skill使用。可复用 WeKnora 检索、工具、MCP、Skills 和数据库数据源。"
       zh-TW:
         label: "通用智能體"
         description: "通用智能體，復用 WeKnora 知識檢索、網路搜尋、MCP、Skills、工具和資料庫來源。"

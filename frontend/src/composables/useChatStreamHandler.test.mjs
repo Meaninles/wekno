@@ -43,3 +43,15 @@ test('transient agent progress supersedes temporary answer narration', () => {
     /case 'agent_progress': \{[\s\S]*shouldSupersedeAgentAnswersForProgress\(dataPayload\)[\s\S]*supersedeAgentAnswers\(message\)/,
   )
 })
+
+test('agent complete normalizes live answers to backend final answer', () => {
+  assert.match(source, /normalizeFinalAnswerFromComplete/)
+  assert.match(source, /dataPayload\?\.final_answer/)
+  assert.match(source, /ev\.type === 'answer'[\s\S]*ev\.superseded = true/)
+  assert.match(source, /finalEvent\.final_answer = true/)
+  assert.match(source, /message\.content = finalAnswer/)
+  assert.match(
+    source,
+    /case 'complete': \{[\s\S]*normalizeFinalAnswerFromComplete\(message, dataPayload\)/,
+  )
+})

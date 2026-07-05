@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -26,6 +27,7 @@ func (s *Service) ApplyReferenceModelDefaults(
 	agent *types.CustomAgent,
 	tenantID uint64,
 ) (*types.CustomAgent, error) {
+	agent = applyReservedProfessionalSkillDefaults(agent)
 	if s == nil || s.db == nil || agent == nil || !types.IsBuiltinAgentID(agent.ID) {
 		return agent, nil
 	}
@@ -55,8 +57,55 @@ func (s *Service) ApplyReferenceModelDefaults(
 	if err != nil {
 		return nil, err
 	}
+	applyReservedProfessionalSkillsToConfig(&resolved.Config)
 	resolved.EnsureDefaults()
 	return &resolved, nil
+}
+
+func applyReservedProfessionalSkillDefaults(agent *types.CustomAgent) *types.CustomAgent {
+	if agent == nil || !types.IsBuiltinAgentID(agent.ID) {
+		return agent
+	}
+	resolved := *agent
+	applyReservedProfessionalSkillsToConfig(&resolved.Config)
+	return &resolved
+}
+
+func applyReservedProfessionalSkillsToConfig(cfg *types.CustomAgentConfig) {
+	if cfg == nil || cfg.AgentMode != types.AgentModeSmartReasoning {
+		return
+	}
+	if cfg.AgentType != types.AgentTypeGeneralAgent && cfg.AgentType != types.AgentTypeDocumentProcessingAgent {
+		return
+	}
+	if cfg.ProfessionalSkillsSelectionMode == "" || cfg.ProfessionalSkillsSelectionMode == "none" {
+		cfg.ProfessionalSkillsSelectionMode = "selected"
+	}
+	if cfg.ProfessionalSkillsSelectionMode != "selected" {
+		return
+	}
+	cfg.SelectedProfessionalSkills = appendMissingStrings(
+		cfg.SelectedProfessionalSkills,
+		skillhub.ReservedProfessionalSkillNames()...,
+	)
+}
+
+func appendMissingStrings(base []string, values ...string) []string {
+	out := append([]string(nil), base...)
+	seen := make(map[string]bool, len(out)+len(values))
+	for _, value := range out {
+		if value != "" {
+			seen[value] = true
+		}
+	}
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		out = append(out, value)
+		seen[value] = true
+	}
+	return out
 }
 
 func (s *Service) isPersonalTenant(ctx context.Context, tenantID uint64) (bool, error) {

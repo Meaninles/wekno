@@ -673,6 +673,32 @@ export default {
     sourceUpload: "本地上传",
     sourceUrl: "URL 导入",
     sourceManual: "手动创建",
+    uploadInfoButton: "上传信息",
+    uploadInfoTitle: "上传信息",
+    uploadInfoStartedAt: "开始于",
+    uploadInfoElapsed: "耗时",
+    uploadInfoTotal: "共 {count} 项",
+    uploadInfoSuccess: "成功 {count}",
+    uploadInfoFailed: "失败 {count}",
+    uploadInfoEmpty: "暂无上传记录",
+    uploadInfoBatchTitle: "上传任务（{count}项）",
+    uploadInfoBatchRunning: "已处理 {done}/{total}",
+    uploadInfoBatchSuccess: "全部成功（{total}）",
+    uploadInfoBatchFailed: "全部失败（{total}）",
+    uploadInfoBatchPartial: "成功 {success}，失败 {failed}",
+    uploadInfoRunning: "{count} 项正在上传或处理",
+    uploadInfoQueued: "{count} 项等待上传",
+    uploadInfoWaiting: "等待上传开始",
+    uploadInfoClearFinished: "清空已完成",
+    uploadInfoClearCompleted: "清空已完成",
+    uploadInfoClearAll: "清空全部",
+    uploadInfoStatusQueued: "等待中",
+    uploadInfoStatusUploading: "上传中",
+    uploadInfoStatusProcessing: "处理中",
+    uploadInfoStatusSuccess: "已提交解析",
+    uploadInfoStatusFailed: "失败",
+    uploadInfoSubmittedForParsing: "已提交解析队列",
+    uploadInfoFetchingUrl: "正在导入网页",
     updatedTimeFilter: "更新时间",
     updatedTimeFrom: "起始时间",
     updatedTimeTo: "结束时间",
@@ -2456,7 +2482,8 @@ export default {
           default_storage_quota_gb: "新租户默认存储配额 (GB)",
         },
         asynq: {
-          concurrency: "异步任务并发数",
+          concurrency: "普通任务 worker 并发数",
+          heavy_document_concurrency: "重型文档 worker 并发数",
         },
       },
       keyDescriptions: {
@@ -2481,9 +2508,12 @@ export default {
         },
         asynq: {
           concurrency:
-            "异步任务 worker 并发数（asynq 线程池大小）。" +
-            "文档解析、嵌入等任务多为 I/O 等待，适当提高可缩短批量上传排队时间。" +
+            "普通异步任务 worker 并发数（不包含重型文档解析队列）。" +
+            "普通文档解析、嵌入等任务多为 I/O 等待，适当提高可缩短批量上传排队时间。" +
             "修改后需重启服务进程方可生效。",
+          heavy_document_concurrency:
+            "重型文档解析 worker 并发数。命中文件大小或 DOCX/XLSX/CSV 结构重型阈值的文档，" +
+            "进入独立重型队列处理，不占用普通任务 worker。默认 2，修改后需重启服务进程方可生效。",
         },
       },
       enumLabels: {
@@ -4033,9 +4063,13 @@ export default {
     },
     selector: {
       searchPlaceholder: "搜索 Skill",
+      professionalTab: "专业",
+      lightweightTab: "轻量",
       empty: "暂无可用 Skill",
+      professionalEmpty: "暂无可用专业 Skill",
       noMatch: "没有匹配的 Skill",
       sandboxUnavailable: "当前环境未启用 Skills",
+      professionalUnavailable: "当前环境未启用专业 Skills",
       manage: "管理",
     },
     editor: {

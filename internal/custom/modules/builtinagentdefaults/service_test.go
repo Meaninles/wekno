@@ -63,6 +63,59 @@ func TestMergeResetConfigPreservesRuntimeBindings(t *testing.T) {
 	}
 }
 
+func TestApplyReferenceModelDefaultsAddsReservedProfessionalSkills(t *testing.T) {
+	requireBuiltinAgentConfig(t)
+	svc := NewService(nil, nil)
+	agent := &types.CustomAgent{
+		ID:        types.BuiltinGeneralAgentID,
+		IsBuiltin: true,
+		TenantID:  10002,
+		Config: types.CustomAgentConfig{
+			AgentMode:                       types.AgentModeSmartReasoning,
+			AgentType:                       types.AgentTypeGeneralAgent,
+			ProfessionalSkillsSelectionMode: "none",
+			SelectedProfessionalSkills:      []string{"tenant-skill"},
+		},
+	}
+
+	got, err := svc.ApplyReferenceModelDefaults(context.Background(), agent, 10002)
+	if err != nil {
+		t.Fatalf("ApplyReferenceModelDefaults returned error: %v", err)
+	}
+	if got.Config.ProfessionalSkillsSelectionMode != "selected" {
+		t.Fatalf("professional mode = %q, want selected", got.Config.ProfessionalSkillsSelectionMode)
+	}
+	for _, name := range []string{"tenant-skill", "anysearch-skill", "find-skill-skillhub"} {
+		if !stringSliceContains(got.Config.SelectedProfessionalSkills, name) {
+			t.Fatalf("selected professional skills = %#v, want %s", got.Config.SelectedProfessionalSkills, name)
+		}
+	}
+}
+
+func TestApplyReferenceModelDefaultsDoesNotAddReservedProfessionalSkillsToDataAnalysis(t *testing.T) {
+	requireBuiltinAgentConfig(t)
+	svc := NewService(nil, nil)
+	agent := &types.CustomAgent{
+		ID:        types.BuiltinDataAnalystID,
+		IsBuiltin: true,
+		TenantID:  10002,
+		Config: types.CustomAgentConfig{
+			AgentMode:                       types.AgentModeSmartReasoning,
+			AgentType:                       types.AgentTypeDataAnalysis,
+			ProfessionalSkillsSelectionMode: "none",
+		},
+	}
+
+	got, err := svc.ApplyReferenceModelDefaults(context.Background(), agent, 10002)
+	if err != nil {
+		t.Fatalf("ApplyReferenceModelDefaults returned error: %v", err)
+	}
+	if got.Config.ProfessionalSkillsSelectionMode != "none" || len(got.Config.SelectedProfessionalSkills) != 0 {
+		t.Fatalf("data-analysis professional skills = mode %q skills %#v, want unchanged none",
+			got.Config.ProfessionalSkillsSelectionMode, got.Config.SelectedProfessionalSkills)
+	}
+}
+
 func TestMergeResetConfigClearsDataSourcesForNonDataAnalysisAgents(t *testing.T) {
 	defaultConfig := types.CustomAgentConfig{
 		AgentType:     types.AgentTypeGeneralAgent,
@@ -270,4 +323,13 @@ func requireCreate(t *testing.T, db *gorm.DB, value any) {
 	if err := db.Create(value).Error; err != nil {
 		t.Fatalf("create %T: %v", value, err)
 	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -157,6 +157,16 @@ func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
 	if msg.Content != "streamed final answer" {
 		t.Fatalf("assistant content = %q, want single final answer", msg.Content)
 	}
+	if len(stream.events) == 0 {
+		t.Fatalf("stream events = 0, want complete event")
+	}
+	complete := stream.events[len(stream.events)-1]
+	if complete.Type != types.ResponseTypeComplete {
+		t.Fatalf("last stream event type = %s, want complete", complete.Type)
+	}
+	if got := complete.Data["final_answer"]; got != "streamed final answer" {
+		t.Fatalf("complete final_answer = %q, want streamed final answer", got)
+	}
 }
 
 func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {

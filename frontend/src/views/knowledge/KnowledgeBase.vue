@@ -45,6 +45,9 @@ import FAQEntryManager from './components/FAQEntryManager.vue';
 import DocumentListView from './components/DocumentListView.vue';
 import DocumentBatchBar from './components/DocumentBatchBar.vue';
 import KbUploadSourceDropdown from './components/KbUploadSourceDropdown.vue';
+import UploadInfoButton from '@/custom/modules/uploadInfo/UploadInfoButton.vue';
+import UploadInfoDialog from '@/custom/modules/uploadInfo/UploadInfoDialog.vue';
+import { useUploadInfoStore, type UploadInfoBatchHandle } from '@/custom/modules/uploadInfo/store';
 import TagEditDialog from './components/TagEditDialog.vue';
 import KbTagManageDrawer from './components/KbTagManageDrawer.vue';
 import { useTagChipsOverflow } from '@/composables/useTagChipsOverflow';
@@ -1661,6 +1664,7 @@ const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'flac', 'ogg'];
 
 const uploadConfirmStore = useUploadConfirmStore();
+const uploadInfoStore = useUploadInfoStore();
 
 const getFolderUploadFileName = (file: File) => {
   const relativePath = (file as any).webkitRelativePath;
@@ -1706,7 +1710,7 @@ const showUploadResultMessages = (
 
 const executeUploadBatch = async (
   files: File[],
-  options: { processConfig?: KnowledgeProcessOverrides } = {},
+  options: { processConfig?: KnowledgeProcessOverrides; itemIds?: string[] } = {},
 ) => {
   const targetKbId = kbId.value;
   if (!targetKbId || files.length === 0) {
@@ -1722,8 +1726,12 @@ const executeUploadBatch = async (
     return !!relativePath && relativePath.split('/').length > 2;
   });
 
-  for (const file of files) {
+  for (const [index, file] of files.entries()) {
+    const uploadInfoItemId = options.itemIds?.[index];
     try {
+      if (uploadInfoItemId) {
+        uploadInfoStore.startItem(uploadInfoItemId);
+      }
       const uploadData: {
         file: File
         tag_ids?: string[]
@@ -1737,32 +1745,45 @@ const executeUploadBatch = async (
         uploadData.process_config = options.processConfig;
       }
 
-      const responseData: any = await uploadKnowledgeFile(targetKbId, uploadData);
+      const responseData: any = await uploadKnowledgeFile(targetKbId, uploadData, (event: any) => {
+        if (uploadInfoItemId) {
+          uploadInfoStore.updateItemProgress(uploadInfoItemId, event?.loaded, event?.total);
+        }
+      });
       const isSuccess = responseData?.success || responseData?.code === 200 || responseData?.status === 'success' || (!responseData?.error && responseData);
       if (isSuccess) {
         successCount++;
+        if (uploadInfoItemId) {
+          uploadInfoStore.markItemSuccess(uploadInfoItemId, t('knowledgeBase.uploadInfoSubmittedForParsing'));
+        }
       } else {
         failCount++;
+        let errorMessage = t('knowledgeBase.uploadFailed');
+        if (responseData?.error?.message) {
+          errorMessage = responseData.error.message;
+        } else if (responseData?.message) {
+          errorMessage = responseData.message;
+        }
+        if (responseData?.code === 'duplicate_file' || responseData?.error?.code === 'duplicate_file') {
+          errorMessage = t('knowledgeBase.fileExists');
+        }
+        if (uploadInfoItemId) {
+          uploadInfoStore.markItemFailed(uploadInfoItemId, errorMessage);
+        }
         if (totalCount === 1) {
-          let errorMessage = t('knowledgeBase.uploadFailed');
-          if (responseData?.error?.message) {
-            errorMessage = responseData.error.message;
-          } else if (responseData?.message) {
-            errorMessage = responseData.message;
-          }
-          if (responseData?.code === 'duplicate_file' || responseData?.error?.code === 'duplicate_file') {
-            errorMessage = t('knowledgeBase.fileExists');
-          }
           MessagePlugin.error(errorMessage);
         }
       }
     } catch (error: any) {
       failCount++;
+      let errorMessage = error?.error?.message || error?.message || t('knowledgeBase.uploadFailed');
+      if (error?.code === 'duplicate_file') {
+        errorMessage = t('knowledgeBase.fileExists');
+      }
+      if (uploadInfoItemId) {
+        uploadInfoStore.markItemFailed(uploadInfoItemId, errorMessage);
+      }
       if (totalCount === 1) {
-        let errorMessage = error?.error?.message || error?.message || t('knowledgeBase.uploadFailed');
-        if (error?.code === 'duplicate_file') {
-          errorMessage = t('knowledgeBase.fileExists');
-        }
         MessagePlugin.error(errorMessage);
       }
     }
@@ -1778,7 +1799,11 @@ const executeUploadBatch = async (
   return { successCount, failCount };
 };
 
-const executeUrlImport = async (url: string, processConfig?: KnowledgeProcessOverrides) => {
+const executeUrlImport = async (
+  url: string,
+  processConfig?: KnowledgeProcessOverrides,
+  uploadInfoItemId?: string,
+) => {
   const targetKbId = kbId.value;
   if (!targetKbId) {
     MessagePlugin.error(t('error.missingKbId'));
@@ -1787,6 +1812,10 @@ const executeUrlImport = async (url: string, processConfig?: KnowledgeProcessOve
 
   const tagIdsToUpload = selectedTagIds.value.length > 0 ? [...selectedTagIds.value] : undefined;
   try {
+    if (uploadInfoItemId) {
+      uploadInfoStore.startItem(uploadInfoItemId);
+      uploadInfoStore.markItemProcessing(uploadInfoItemId, t('knowledgeBase.uploadInfoFetchingUrl'));
+    }
     const responseData: any = await createKnowledgeFromURL(targetKbId, {
       url,
       tag_ids: tagIdsToUpload,
@@ -1797,6 +1826,9 @@ const executeUrlImport = async (url: string, processConfig?: KnowledgeProcessOve
     }));
     const isSuccess = responseData?.success || responseData?.code === 200 || responseData?.status === 'success' || (!responseData?.error && responseData);
     if (isSuccess) {
+      if (uploadInfoItemId) {
+        uploadInfoStore.markItemSuccess(uploadInfoItemId, t('knowledgeBase.uploadInfoSubmittedForParsing'));
+      }
       MessagePlugin.success(t('knowledgeBase.urlImportSuccess'));
     } else {
       let errorMessage = t('knowledgeBase.urlImportFailed');
@@ -1808,12 +1840,18 @@ const executeUrlImport = async (url: string, processConfig?: KnowledgeProcessOve
       if (responseData?.code === 'duplicate_url' || responseData?.error?.code === 'duplicate_url') {
         errorMessage = t('knowledgeBase.urlExists');
       }
+      if (uploadInfoItemId) {
+        uploadInfoStore.markItemFailed(uploadInfoItemId, errorMessage);
+      }
       MessagePlugin.error(errorMessage);
     }
   } catch (error: any) {
     let errorMessage = error?.error?.message || error?.message || t('knowledgeBase.urlImportFailed');
     if (error?.code === 'duplicate_url') {
       errorMessage = t('knowledgeBase.urlExists');
+    }
+    if (uploadInfoItemId) {
+      uploadInfoStore.markItemFailed(uploadInfoItemId, errorMessage);
     }
     MessagePlugin.error(errorMessage);
   }
@@ -1827,6 +1865,11 @@ const handleUploadConfirmResult = async (result: UploadConfirmResult) => {
   const files = result.files || [];
   const urls = result.urls || [];
   const processConfig = result.processConfig;
+  let uploadInfoBatch: UploadInfoBatchHandle | null = null;
+
+  if (kbId.value && (files.length > 0 || urls.length > 0)) {
+    uploadInfoBatch = uploadInfoStore.createBatch({ kbId: kbId.value, files, urls });
+  }
 
   if (files.length > 0) {
     const hasFolderPaths = files.some((file) => {
@@ -1836,11 +1879,11 @@ const handleUploadConfirmResult = async (result: UploadConfirmResult) => {
     if (hasFolderPaths) {
       MessagePlugin.info(t('knowledgeBase.uploadingFolder', { total: files.length }));
     }
-    await executeUploadBatch(files, { processConfig });
+    await executeUploadBatch(files, { processConfig, itemIds: uploadInfoBatch?.fileItemIds });
   }
 
-  for (const url of urls) {
-    await executeUrlImport(url, processConfig);
+  for (const [index, url] of urls.entries()) {
+    await executeUrlImport(url, processConfig, uploadInfoBatch?.urlItemIds[index]);
   }
 };
 
@@ -2625,6 +2668,7 @@ async function createNewSession(value: string): Promise<void> {
                   </t-tooltip>
                 </div>
                 <div v-if="canEdit" class="doc-filter-actions">
+                  <UploadInfoButton trigger-class="content-bar-icon-btn" />
                   <KbUploadSourceDropdown ref="uploadSourceRef" :accept-file-types="acceptFileTypes"
                     :supported-file-types="[...supportedFileTypes]" include-manual trigger-icon="file-add"
                     trigger-class="content-bar-icon-btn" data-guide="kb-detail-add-doc"
@@ -2996,6 +3040,8 @@ async function createNewSession(value: string): Promise<void> {
   <KnowledgeBaseEditorModal :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
     :kb-id="uiStore.currentKBId || undefined" :initial-type="uiStore.kbEditorType"
     @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
+
+  <UploadInfoDialog />
 
   <ContextualGuide tour="kbDetail" :when="showKbDetailContextualGuide" />
 
@@ -3506,6 +3552,9 @@ async function createNewSession(value: string): Promise<void> {
 
   .doc-filter-actions {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
 
     :deep(.content-bar-icon-btn) {
       color: var(--td-text-color-secondary);

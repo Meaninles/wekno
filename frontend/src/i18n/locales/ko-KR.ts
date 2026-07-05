@@ -2452,7 +2452,8 @@ export default {
           default_storage_quota_gb: "신규 테넌트 기본 저장 용량 (GB)",
         },
         asynq: {
-          concurrency: "비동기 작업 워커 동시 처리 수",
+          concurrency: "일반 작업 worker 동시 처리 수",
+          heavy_document_concurrency: "대형 문서 worker 동시 처리 수",
         },
       },
       keyDescriptions: {
@@ -2472,7 +2473,9 @@ export default {
         },
         asynq: {
           concurrency:
-            "비동기 작업 worker 동시 처리 수(asynq 스레드 풀 크기)입니다. 문서 파싱·임베딩 등은 대부분 I/O 대기이므로 값을 올리면 대량 업로드 대기 시간을 줄일 수 있습니다. 적용하려면 서비스 프로세스를 재시작해야 합니다.",
+            "대형 문서 파싱 큐를 제외한 일반 비동기 작업 worker 동시 처리 수입니다. 일반 문서 파싱·임베딩 등은 대부분 I/O 대기이므로 값을 올리면 대량 업로드 대기 시간을 줄일 수 있습니다. 적용하려면 서비스 프로세스를 재시작해야 합니다.",
+          heavy_document_concurrency:
+            "대형 문서 파싱 전용 worker 동시 처리 수입니다. 파일 크기 또는 DOCX/XLSX/CSV 구조 기준의 대형 임계값에 걸린 문서는 독립된 대형 큐에서 처리되며 일반 작업 worker를 사용하지 않습니다. 기본값은 2이며 적용하려면 서비스 프로세스를 재시작해야 합니다.",
         },
       },
       enumLabels: {
@@ -4022,9 +4025,13 @@ export default {
     },
     selector: {
       searchPlaceholder: "Skill 검색",
+      professionalTab: "전문",
+      lightweightTab: "경량",
       empty: "사용 가능한 Skill 없음",
+      professionalEmpty: "사용 가능한 전문 Skill 없음",
       noMatch: "일치하는 Skill 없음",
       sandboxUnavailable: "현재 환경에서 Skills가 활성화되지 않았습니다",
+      professionalUnavailable: "현재 환경에서 전문 Skills가 활성화되지 않았습니다",
       manage: "관리",
     },
     editor: {

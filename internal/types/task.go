@@ -1,12 +1,16 @@
 package types
 
-// Asynq queue names. MUST stay in sync with the Queues weight map in
-// router.NewAsynqServer — a task enqueued to a queue that the server does not
-// list will never be consumed.
+// Asynq queue names. MUST stay in sync with the queue maps in
+// router.NewAsynqServers — a task enqueued to a queue that no server lists will
+// never be consumed.
 const (
-	QueueCritical   = "critical"
-	QueueDefault    = "default"
-	QueueLow        = "low"
+	QueueCritical = "critical"
+	QueueDefault  = "default"
+	QueueLow      = "low"
+	// QueueDocumentHeavy isolates resource-heavy document parsing. It is
+	// consumed by a dedicated asynq server whose concurrency is controlled by
+	// asynq.heavy_document_concurrency instead of the normal worker pool.
+	QueueDocumentHeavy = "document_heavy"
 	// QueueMultimodal isolates high-volume, slow VLM image tasks (OCR + caption)
 	// so a single large scanned PDF (hundreds–thousands of page images) cannot
 	// saturate the shared worker pool and block user-facing document parsing in
@@ -205,8 +209,8 @@ type KnowledgeListDeletePayload struct {
 // KnowledgeListReparsePayload represents the batch knowledge reparse task payload
 type KnowledgeListReparsePayload struct {
 	TracingContext
-	TenantID      uint64                      `json:"tenant_id"`
-	KnowledgeIDs  []string                    `json:"knowledge_ids"`
+	TenantID      uint64                     `json:"tenant_id"`
+	KnowledgeIDs  []string                   `json:"knowledge_ids"`
 	ProcessConfig *KnowledgeProcessOverrides `json:"process_config,omitempty"`
 }
 

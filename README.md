@@ -9,9 +9,9 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-ffffff?labelColor=d4eaf7&color=2e6cc4" />
 </p>
 
-# WeKnora 企业级 Agent 知识库平台
+# WeKnora Agent 知识库平台
 
-本仓库是基于 WeKnora 深度二开的企业级 Agent 知识库平台。它不只是一个 RAG 问答系统，而是面向企业内部知识沉淀、智能体编排、数据分析、办公文档处理和多渠道发布的一体化工作台。
+本仓库是基于 WeKnora 深度二开的 Agent 知识库平台。它不只是一个 RAG 问答系统，而是面向企业内部知识沉淀、智能体编排、数据分析、办公文档处理和多渠道发布的一体化工作台。
 
 平台以知识库为可信信息底座，以智能体为业务入口，把文档、FAQ、Wiki、外部内容源、数据库、MCP 工具、技能包、定时任务和企业身份体系连接起来。企业可以用它搭建制度问答、客服助手、销售/经营数据分析、文档生成、行业研究、内部门户客服、IM 机器人和自动报告等场景。
 

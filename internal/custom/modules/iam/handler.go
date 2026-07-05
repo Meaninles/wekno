@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	coretypes "github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -178,6 +179,16 @@ func (h *Handler) SSOCallback(c *gin.Context) {
 			"oidc_error_description": {err.Error()},
 		}))
 		return
+	}
+	// Provision defaults (guide KB, config center) for first-time SSO users.
+	// LoginWithSSO internally calls ensureLocalUser, which also runs the
+	// provisioner, but an explicit call at handler level acts as a safety
+	// net — matching the pattern in auth.go:OIDCRedirectCallback.
+	if resp != nil && resp.User != nil {
+		if provisionErr := h.service.RunProvisioner(c.Request.Context(), resp.User); provisionErr != nil {
+			// Non-fatal: user is already logged in; log and continue.
+			logger.Warnf(c.Request.Context(), "[iam] SSO provisioner failed for user %s: %v", resp.User.Username, provisionErr)
+		}
 	}
 	payload, err := EncodeCallbackPayload(resp)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,6 +108,47 @@ func TestCreateLightweightSkillUsesPresetPromptValidation(t *testing.T) {
 	}
 }
 
+func TestCreateLightweightSkillDuplicateNameReturnsSentinel(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	svc := NewService(db)
+	if err := svc.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate skillhub: %v", err)
+	}
+
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(11002))
+	ctx = context.WithValue(ctx, types.UserIDContextKey, "duplicate-lightweight-user")
+	ctx = context.WithValue(ctx, types.TenantRoleContextKey, types.TenantRoleContributor)
+
+	req := SkillRequest{
+		Name:         "重复技能",
+		Description:  "duplicate test",
+		Instructions: "按要求完成任务。",
+	}
+	if _, err := svc.Create(ctx, req); err != nil {
+		t.Fatalf("first Create returned error: %v", err)
+	}
+	if _, err := svc.Create(ctx, req); !errors.Is(err, errLightweightSkillNameExists) {
+		t.Fatalf("second Create error = %v, want errLightweightSkillNameExists", err)
+	}
+}
+
+func TestDuplicateSkillNameErrorDetectionCoversDatabaseConstraints(t *testing.T) {
+	lightErr := errors.New(`ERROR: duplicate key value violates unique constraint "idx_custom_skill_global_name" (SQLSTATE 23505)`)
+	if !isLightweightSkillNameExistsError(lightErr) {
+		t.Fatalf("lightweight duplicate constraint was not detected")
+	}
+	proErr := errors.New(`ERROR: duplicate key value violates unique constraint "idx_custom_professional_skill_name" (SQLSTATE 23505)`)
+	if !isProfessionalSkillNameExistsError(proErr) {
+		t.Fatalf("professional duplicate constraint was not detected")
+	}
+	if isLightweightSkillNameExistsError(proErr) {
+		t.Fatalf("professional duplicate constraint must not be classified as lightweight")
+	}
+}
+
 func TestProfessionalPackagesSelectsConfiguredSkills(t *testing.T) {
 	root := t.TempDir()
 	writeProfessionalSkill(t, root, "alpha-skill", "Alpha skill", "alpha body")
@@ -140,6 +182,42 @@ func TestProfessionalPackagesSelectsConfiguredSkills(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "beta body") {
 		t.Fatalf("packaged content = %q, want beta body", string(content))
+	}
+}
+
+func TestImportProfessionalSkillDuplicateNameReturnsSentinel(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	svc := NewService(db)
+	if err := svc.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate skillhub: %v", err)
+	}
+	root := t.TempDir()
+	t.Setenv("WEKNORA_PROFESSIONAL_SKILLS_DIR", root)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	writeZipFile(t, zw, "duplicate-pro/SKILL.md", "---\nname: duplicate-pro\ndescription: Duplicate professional skill\n---\n\n# Body\n")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(12003))
+	ctx = context.WithValue(ctx, types.UserIDContextKey, "duplicate-professional-user")
+	ctx = context.WithValue(ctx, types.TenantRoleContextKey, types.TenantRoleContributor)
+	req := func() ProfessionalSkillImportRequest {
+		return ProfessionalSkillImportRequest{
+			File:     nopMultipartFile{bytes.NewReader(buf.Bytes())},
+			Filename: "duplicate-pro.zip",
+		}
+	}
+	if _, err := svc.ImportProfessionalSkill(ctx, req()); err != nil {
+		t.Fatalf("first ImportProfessionalSkill returned error: %v", err)
+	}
+	if _, err := svc.ImportProfessionalSkill(ctx, req()); !errors.Is(err, errProfessionalSkillNameExists) {
+		t.Fatalf("second ImportProfessionalSkill error = %v, want errProfessionalSkillNameExists", err)
 	}
 }
 

@@ -935,9 +935,8 @@ func (s *Service) ensureLocalUser(ctx context.Context, ext ExternalUser) (*types
 		if err := s.updateLocalUser(ctx, withLocalUserID(ext, user.ID)); err != nil {
 			return nil, err
 		}
-		if err := s.runProvisioner(ctx, user); err != nil {
-			return nil, err
-		}
+		// Provisioner is best-effort: defaults that fail must not block login.
+		s.logProvisionErr(ctx, user, s.runProvisioner(ctx, user))
 		return user, nil
 	}
 	user, err := s.userService.Register(ctx, &types.RegisterRequest{
@@ -951,13 +950,12 @@ func (s *Service) ensureLocalUser(ctx context.Context, ext ExternalUser) (*types
 	if err := s.updateLocalUser(ctx, ext); err != nil {
 		return nil, err
 	}
-	if err := s.runProvisioner(ctx, user); err != nil {
-		return nil, err
-	}
+	// Provisioner is best-effort: defaults that fail must not block login.
+	s.logProvisionErr(ctx, user, s.runProvisioner(ctx, user))
 	return user, nil
 }
 
-func (s *Service) runProvisioner(ctx context.Context, user *types.User) error {
+func (s *Service) RunProvisioner(ctx context.Context, user *types.User) error {
 	if s.provisionUser == nil || user == nil {
 		return nil
 	}
@@ -965,6 +963,16 @@ func (s *Service) runProvisioner(ctx context.Context, user *types.User) error {
 		return fmt.Errorf("provision IAM user defaults: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) logProvisionErr(ctx context.Context, user *types.User, err error) {
+	if err != nil && user != nil {
+		logger.Warnf(ctx, "[iam] provisioner failed for user %s (non-fatal): %v", user.Username, err)
+	}
+}
+
+func (s *Service) runProvisioner(ctx context.Context, user *types.User) error {
+	return s.RunProvisioner(ctx, user)
 }
 
 func (s *Service) updateLocalUser(ctx context.Context, ext ExternalUser) error {

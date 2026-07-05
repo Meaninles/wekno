@@ -1,17 +1,6 @@
-<p align="center">
-  <img src="./docs/images/logo.png" alt="WeKnora Logo" height="120" />
-</p>
+# 智能体知识库平台
 
-<p align="center">
-  <img alt="版本" src="https://img.shields.io/badge/version-0.6.3-2e6cc4?labelColor=d4eaf7" />
-  <img alt="文档语言" src="https://img.shields.io/badge/docs-中文-5ac725" />
-  <img alt="部署方式" src="https://img.shields.io/badge/deploy-Docker%20%2F%20Kubernetes-4e6b99" />
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-ffffff?labelColor=d4eaf7&color=2e6cc4" />
-</p>
-
-# WeKnora 企业级 Agent 知识库平台
-
-本仓库是基于 WeKnora 深度二开的企业级 Agent 知识库平台。它不只是一个 RAG 问答系统，而是面向企业内部知识沉淀、智能体编排、数据分析、办公文档处理和多渠道发布的一体化工作台。
+本仓库是基于 WeKnora 二开的企业级智能体知识库平台。它不只是一个 RAG 问答系统，而是面向企业内部知识沉淀、智能体编排、数据分析、办公文档处理和多渠道发布的一体化工作台。
 
 平台以知识库为可信信息底座，以智能体为业务入口，把文档、FAQ、Wiki、外部内容源、数据库、MCP 工具、技能包、定时任务和企业身份体系连接起来。企业可以用它搭建制度问答、客服助手、销售/经营数据分析、文档生成、行业研究、内部门户客服、IM 机器人和自动报告等场景。
 
@@ -21,18 +10,18 @@
 | --- | --- | --- |
 | 前端开发服务 | `http://localhost:5177` | 位于 `frontend/`，当前开发环境使用该入口访问界面。 |
 | 后端 API | `http://localhost:8080` | Docker Desktop 中 `app-dev` 容器对外端口。 |
-| 通用智能体 Sidecar | `http://127.0.0.1:8091/health` | Claude Agent SDK 运行时。 |
-| 文档处理智能体 Sidecar | `http://127.0.0.1:8093/health` | 预装 LibreOffice、Pandoc、PDF 和 Office 处理依赖。 |
+| 通用智能体旁路服务 | `http://127.0.0.1:8091/health` | Claude Agent SDK 运行时。 |
+| 文档处理智能体旁路服务 | `http://127.0.0.1:8093/health` | 预装 LibreOffice、Pandoc、PDF 和 Office 处理依赖。 |
 | Langfuse | `http://localhost:3000` | 启用 profile 后可查看链路追踪。 |
 
 ## 平台定位
 
-WeKnora 的企业二开版本围绕四个核心目标建设：
+平台围绕四个核心目标建设：
 
 | 目标 | 平台能力 |
 | --- | --- |
 | 让企业知识可检索、可引用、可治理 | 文档知识库、FAQ、Wiki、图谱、标签、批量重解析、解析时间线、来源引用。 |
-| 让 Agent 能完成真实业务任务 | 快速问答、智能推理、通用智能体、数据分析智能体、文档处理智能体、MCP、技能和联网搜索。 |
+| 让智能体能完成真实业务任务 | 快速问答、智能推理、通用智能体、数据分析智能体、文档处理智能体、MCP、技能和联网搜索。 |
 | 让企业资源安全协作 | 多租户 RBAC、共享空间、资源共享、统一身份认证、默认配置中心、审计和凭据加密。 |
 | 让能力可以被业务系统复用 | API、网页嵌入、IM 渠道、Chrome 插件、ClawHub 技能、定时任务。 |
 
@@ -61,7 +50,7 @@ WeKnora 的企业二开版本围绕四个核心目标建设：
 - 支持上传确认时覆盖解析配置，包括解析器、分块、多模态、ASR、图谱和问题生成。
 - 支持批量删除、批量重解析、标签筛选、解析状态和解析时间线。
 
-### 2. Agent 工作台
+### 2. 智能体工作台
 
 平台内置多类智能体，可直接使用，也可以复制后改造成业务智能体：
 
@@ -71,27 +60,25 @@ WeKnora 的企业二开版本围绕四个核心目标建设：
 | 简单对话 | 通用对话、写作、临时文件和图片问题。 |
 | 智能推理 | ReAct 多步推理，编排知识库、工具、MCP 和联网搜索。 |
 | 维基问答 | 面向 Wiki 页面和目录的知识问答。 |
-| 深度研究 | 联网检索、资料综合和研究型问题。 |
 | 数据分析 | 连接 MySQL/PostgreSQL，生成 SQL、指标解释和图表。 |
 | 通用智能体 | 同时使用知识库、数据库、MCP、技能、联网搜索和产物生成。 |
-| 文档处理 | 生成或修改 Word、Excel、PDF、PPT 等办公文档。 |
-| 知识图谱专家 | 围绕实体关系、图谱和结构化知识分析。 |
+| 文档处理 | 生成或修改 Word、Excel、PDF、PPT 等办公文档，可按需绑定数据库源辅助分析。 |
 
 智能体配置覆盖模型、提示词、上下文模板、知识库范围、检索参数、数据库数据源、联网搜索、多模态、工具、MCP、技能、共享和集成渠道。
 
-### 3. 通用智能体与文档处理 Sidecar
+### 3. 通用智能体与文档处理旁路服务
 
-本项目新增了 Claude Agent SDK Sidecar 运行时：
+本项目新增了 Claude Agent SDK 旁路服务运行时：
 
 - Go 后端负责权限、租户、密钥、MCP、工具执行、检索、数据库访问和结果持久化。
-- Python Sidecar 只负责 agentic loop 和动态工具调度，不直接连接 WeKnora 数据库、对象存储或 MCP 服务。
+- Python 旁路服务只负责智能体推理循环和动态工具调度，不直接连接 WeKnora 数据库、对象存储或 MCP 服务。
 - 工具调用统一回调 Go 后端，复用原生权限、审批、OAuth、审计和安全边界。
 - 通用智能体支持知识库检索、网络搜索、多模态、MCP、Skills、数据库工具和产物生成。
 - 文档处理智能体使用独立镜像，预装 LibreOffice、Pandoc、PDF 工具、中文字体和常用 Office/Python 库，适合企业文档生成与转换。
 
 ### 4. 数据库分析
 
-数据库数据源用于数据分析智能体和通用智能体，当前支持 MySQL 和 PostgreSQL：
+数据库数据源用于数据分析智能体，也可供通用智能体和文档处理智能体按需使用，当前支持 MySQL 和 PostgreSQL：
 
 - 管理数据源连接、测试连接、刷新表和字段元数据。
 - 控制可见表范围、最大返回行数、最大扫描行数和查询超时。
@@ -149,7 +136,7 @@ flowchart LR
   F --> B["Go 后端<br/>app-dev / API"]
   B --> KB["知识底座<br/>文档 / FAQ / Wiki / 图谱 / 向量 / 关键词"]
   B --> AG["Agent 运行时<br/>原生 Agent / 通用 Agent / 文档处理"]
-  AG --> SC["Python Sidecar<br/>Claude Agent SDK"]
+  AG --> SC["Python 旁路服务<br/>Claude Agent SDK"]
   AG --> TOOL["工具层<br/>MCP / DB / Web Search / Skills / 文件产物"]
   B --> GOV["企业治理<br/>RBAC / IAM / 默认配置 / 审计 / 凭据加密"]
   B --> INFRA["基础设施<br/>PostgreSQL / Redis / MinIO / DocReader / Langfuse"]
@@ -165,13 +152,13 @@ flowchart LR
 
 | 模块 | 目录 | 当前职责 |
 | --- | --- | --- |
-| 统一注册入口 | `internal/custom/bootstrap/` | 注册二开 handler、service、scheduler、Agent runner、技能扩展、消息增强和运行时工具。 |
+| 统一注册入口 | `internal/custom/bootstrap/` | 注册二开处理器、服务、调度器、智能体运行器、技能扩展、消息增强和运行时工具。 |
 | 答案反馈 | `internal/custom/modules/answerfeedback/` | 支持回答点赞/点踩，记录消息反馈和运行快照，用于质量分析与后续训练数据沉淀。 |
 | 内置智能体默认值 | `internal/custom/modules/builtinagentdefaults/` | 管理内置智能体默认配置和恢复默认逻辑，避免环境相关模型、数据源、MCP 被误覆盖。 |
 | 默认配置中心 | `internal/custom/modules/configcenter/` | 支持系统管理员从源工作区选择模型、向量库、解析器、存储、联网搜索、MCP，并复制下发到用户工作区。 |
 | 数据库分析 | `internal/custom/modules/dbanalytics/` | 管理 MySQL/PostgreSQL 数据源、元数据、字段语义、脱敏规则、共享关系，并向智能体提供 `db_catalog`、`db_schema`、`db_query` 工具。 |
 | 文件安全校验 | `internal/custom/modules/fileguard/` | 对上传文件做类型、大小、压缩包、XML、CSV、Office 等安全与复杂度检查，区分轻量/重型文件处理路径。 |
-| 通用智能体 | `internal/custom/modules/generalagent/` | 将 `general-agent`、`document-processing-agent`、`data-analysis` 等类型接入 Claude Agent SDK Sidecar，负责运行时配置、工具回调、产物持久化和下载。 |
+| 通用智能体 | `internal/custom/modules/generalagent/` | 将 `general-agent`、`document-processing-agent`、`data-analysis` 接入 Claude Agent SDK 旁路服务，负责运行时配置、工具回调、产物持久化和下载。 |
 | IAM/SSO | `internal/custom/modules/iam/` | 支持统一身份认证登录、组织人员同步、定时同步、手动同步、外部组织/用户映射和共享空间成员候选查询。 |
 | 定时会话 | `internal/custom/modules/scheduledchat/` | 支持按小时/日/周/月自动向智能体提问，保存运行记录，并将结果写入真实会话。 |
 | 技能中心 | `internal/custom/modules/skillhub/` | 管理轻量技能和专业技能包，支持导入、下载、共享给空间/用户，并注入智能体运行上下文。 |
@@ -186,7 +173,7 @@ flowchart LR
 - `/api/v1/custom/skills/*`：轻量技能、专业技能、共享和下载。
 - `/api/v1/custom/scheduled-chat/*`：定时任务、运行记录和提示词预览。
 - `/api/v1/custom/db-analytics/*`：数据库源、元数据、安全范围、共享和智能体绑定。
-- `/api/v1/custom/general-agent/*`：通用智能体产物下载和 Sidecar 工具回调。
+- `/api/v1/custom/general-agent/*`：通用智能体产物下载和旁路服务工具回调。
 - `/api/v1/custom/answer-feedback/*`：回答反馈写入和查询。
 
 ### 前端二开模块
@@ -217,11 +204,11 @@ flowchart LR
 
 | 服务 | 目录 | 容器/端口 | 当前职责 |
 | --- | --- | --- | --- |
-| 通用智能体 Sidecar | `custom/services/general-agent/` | `weknora-custom-general-agent`，`127.0.0.1:8091` | 运行 Claude Agent SDK loop，接收 Go 后端下发的工具 schema 和上下文，工具执行统一回调 Go。 |
-| 文档处理智能体 Sidecar | `custom/services/document-processing-agent/` | `weknora-custom-document-processing-agent`，`127.0.0.1:8093` | 在通用智能体运行时基础上预装 LibreOffice、Pandoc、PDF/Office 处理库和中文字体，用于文档生成与转换。 |
+| 通用智能体旁路服务 | `custom/services/general-agent/` | `weknora-custom-general-agent`，`127.0.0.1:8091` | 运行 `general-agent` 和 `data-analysis` 的 Claude Agent SDK 循环，接收 Go 后端下发的工具结构和上下文，工具执行统一回调 Go。 |
+| 文档处理智能体旁路服务 | `custom/services/document-processing-agent/` | `weknora-custom-document-processing-agent`，`127.0.0.1:8093` | 运行 `document-processing-agent`，在同一 SDK 应用基础上预装 LibreOffice、Pandoc、PDF/Office 处理库和中文字体，用于文档生成与转换。 |
 | 浏览器宿主实验目录 | `custom/services/browser-host/` | 当前保留日志与测试目录 | 为浏览器宿主类能力预留的旁路服务目录。 |
 
-Sidecar 的边界很明确：Python 不直接连接 WeKnora 数据库、对象存储、MCP 服务或业务数据源；Go 后端仍是权限、租户、密钥、OAuth、审批、检索、数据库查询、审计和持久化的唯一执行边界。
+旁路服务的边界很明确：Python 不直接连接 WeKnora 数据库、对象存储、MCP 服务或业务数据源；Go 后端仍是权限、租户、密钥、OAuth、审批、检索、数据库查询、审计和持久化的唯一执行边界。
 
 ### 迁移与数据表
 
@@ -283,7 +270,7 @@ docker compose -f docker-compose.dev.yml -f docker-compose.dev.app.yml up -d --b
 http://localhost:8080
 ```
 
-### 启动智能体 Sidecar
+### 启动智能体旁路服务
 
 ```bash
 docker compose -f custom/docker-compose.general-agent.yml up -d --build
@@ -322,7 +309,7 @@ docker compose -f docker-compose.dev.yml -f docker-compose.dev.app.yml up -d --b
 docker compose -f custom/docker-compose.general-agent.yml up -d --build
 ```
 
-如果只改前端代码，重启前端开发服务即可；如果改 Go 后端、Sidecar、Dockerfile、环境变量或依赖，必须重新拉起对应容器。
+如果只改前端代码，重启前端开发服务即可；如果改 Go 后端、旁路服务、Dockerfile、环境变量或依赖，必须重新拉起对应容器。
 
 ## 配置与安全注意事项
 
@@ -339,7 +326,7 @@ docker compose -f custom/docker-compose.general-agent.yml up -d --build
 | --- | --- |
 | [用户使用指南](./docs/custom/使用指南/用户使用指南.md) | 面向平台使用者、知识库维护者、空间管理员和系统管理员。 |
 | [智能体开发指南](./docs/custom/使用指南/智能体开发指南.md) | 面向智能体配置、调试、发布和集成开发。 |
-| [通用智能体方案](./docs/custom/通用智能体方案.md) | 通用智能体与 Claude Agent SDK Sidecar 的实现基准。 |
+| [通用智能体方案](./docs/custom/通用智能体方案.md) | 通用智能体与 Claude Agent SDK 旁路服务的实现说明。 |
 | [统一身份认证与默认配置说明](./docs/custom/统一身份认证与默认配置实现说明.md) | IAM、SSO、组织同步和默认配置中心。 |
 | [二开目录结构规范](./docs/custom/二开目录结构规范.md) | 二开代码目录、注册点和命名约束。 |
 | [API 文档](./docs/api/README.md) | REST API 说明。 |

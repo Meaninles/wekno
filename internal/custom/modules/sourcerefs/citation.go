@@ -20,6 +20,7 @@ type CitationSource struct {
 	ID              string `json:"id"`
 	Type            string `json:"type"`
 	Title           string `json:"title"`
+	Granularity     string `json:"granularity,omitempty"`
 	KnowledgeID     string `json:"knowledge_id,omitempty"`
 	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
 	ChunkID         string `json:"chunk_id,omitempty"`
@@ -162,6 +163,7 @@ func ContextCitationAttrs(ref *types.SearchResult) string {
 		parts = append(parts, fmt.Sprintf(`source_title="%s"`, xmlAttr(title)))
 	}
 	if SourceTypeFromRef(ref) == SourceTypeKnowledge {
+		parts = append(parts, `source_granularity="document_fragment"`)
 		if chunkID := knowledgeChunkID(ref); chunkID != "" {
 			parts = append(parts, fmt.Sprintf(`chunk_id="%s"`, xmlAttr(chunkID)))
 			parts = append(parts, fmt.Sprintf(`chunk_index="%d"`, ref.ChunkIndex))
@@ -188,6 +190,7 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 		}
 		switch src.Type {
 		case SourceTypeKnowledge:
+			attrs = append(attrs, `granularity="document_fragment"`)
 			if src.KnowledgeBaseID != "" {
 				attrs = append(attrs, fmt.Sprintf(`knowledge_base_id="%s"`, xmlAttr(src.KnowledgeBaseID)))
 			}
@@ -260,6 +263,7 @@ func citationSourceFromRef(id string, ref *types.SearchResult) *CitationSource {
 	case SourceTypeData:
 		src.KnowledgeID = ""
 	default:
+		src.Granularity = "document_fragment"
 		if src.KnowledgeID == "" {
 			src.KnowledgeID = strings.TrimSpace(ref.Metadata["knowledge_id"])
 		}

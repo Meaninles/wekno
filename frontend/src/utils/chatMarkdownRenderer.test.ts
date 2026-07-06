@@ -432,6 +432,60 @@ test('buildCitedSourceReferenceItems only returns sources cited by answer text',
   assert.equal(items[0].number, 1)
 })
 
+test('buildCitedSourceReferenceItems keeps saved reference content for detail views', () => {
+  const savedContent = '行业地位 LightCounting 披露的供应商格局显示，中际旭创处于全球光模块供应商领先位置。'
+  const items = buildCitedSourceReferenceItems(
+    [
+      {
+        id: 'chunk-1',
+        content: savedContent,
+        knowledge_id: 'doc-1',
+        knowledge_base_id: 'kb-1',
+        knowledge_title: '光模块报告.pdf',
+        metadata: { citation_id: 'S2', source_type: 'knowledge' },
+      },
+    ],
+    '行业地位引用这一段。<src id="S2" />',
+    true,
+  )
+
+  assert.equal(items.length, 1)
+  assert.equal(items[0].content, savedContent)
+  assert.match(items[0].snippet, /行业地位/)
+})
+
+test('buildCitedSourceReferenceItems keeps multiple fragments with duplicated citation id', () => {
+  const items = buildCitedSourceReferenceItems(
+    [
+      {
+        id: 'chunk-1',
+        content: '第一段文档片段内容，用于说明平台模式。',
+        knowledge_id: 'doc-1',
+        knowledge_base_id: 'kb-1',
+        knowledge_title: '智能体开发指南.md',
+        metadata: { citation_id: 'S4', source_type: 'knowledge' },
+      },
+      {
+        id: 'chunk-2',
+        content: '第二段文档片段内容，用于说明配置步骤。',
+        knowledge_id: 'doc-1',
+        knowledge_base_id: 'kb-1',
+        knowledge_title: '智能体开发指南.md',
+        metadata: { citation_id: 'S4', source_type: 'knowledge' },
+      },
+    ],
+    '配置时参考这些内容。<src id="S4" />',
+    true,
+  )
+
+  assert.equal(items.length, 1)
+  assert.equal(items[0].fragmentCount, 2)
+  assert.match(items[0].content || '', /文档片段 1/)
+  assert.match(items[0].content || '', /第一段文档片段内容/)
+  assert.match(items[0].content || '', /文档片段 2/)
+  assert.match(items[0].content || '', /第二段文档片段内容/)
+})
+
 test('buildCitedSourceReferenceItems falls back only when no inline citation exists', () => {
   const refs: SourceReference[] = [
     { id: 'web-1', chunk_type: 'web_search', metadata: { citation_id: 'S1', source_type: 'web', url: 'https://example.com/a' } },

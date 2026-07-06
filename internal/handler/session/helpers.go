@@ -233,6 +233,14 @@ func buildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.St
 						KnowledgeDescription: getString(refMap, "knowledge_description"),
 						KnowledgeBaseID:      getString(refMap, "knowledge_base_id"),
 					}
+					if meta, ok := refMap["metadata"].(map[string]interface{}); ok {
+						sr.Metadata = make(map[string]string, len(meta))
+						for k, v := range meta {
+							if strVal, ok := v.(string); ok {
+								sr.Metadata[k] = strVal
+							}
+						}
+					}
 					searchResults = append(searchResults, sr)
 				}
 			}

@@ -16,13 +16,14 @@
             </div>
             <div v-if="session.isRagMode" class="rag-answer-stack">
                 <RagPipelineProgress :session="session" :embedded-mode="embeddedMode" />
+                <SourceReferenceHub v-if="session.knowledge_references?.length" ref="sourceReferenceHub"
+                    :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay v-if="session.isAgentMode" :session="session" :session-id="sessionId"
                     :user-query="userQuery" :rag-mode="true" />
             </div>
             <template v-else>
-                <SourceReferenceTimeline v-if="shouldShowSourceReferenceTimeline" :session="session"
-                    :embedded-mode="embeddedMode" />
-                <docInfo v-else-if="session.knowledge_references?.length" :session="session"></docInfo>
+                <SourceReferenceHub v-if="session.knowledge_references?.length" ref="sourceReferenceHub"
+                    :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay :session="session" :session-id="sessionId" :user-query="userQuery"
                     v-if="session.isAgentMode" />
             </template>
@@ -75,19 +76,19 @@
     </div>
 </template>
 <script setup>
-import { onMounted, onBeforeUnmount, watch, computed, ref, reactive, nextTick, onUpdated } from 'vue';
+import { onMounted, onBeforeUnmount, watch, computed, ref, nextTick, onUpdated } from 'vue';
 import 'katex/dist/katex.min.css';
-import docInfo from './docInfo.vue';
 import deepThink from './deepThink.vue';
 import AgentStreamDisplay from './AgentStreamDisplay.vue';
 import RagPipelineProgress from './RagPipelineProgress.vue';
-import SourceReferenceTimeline from '@/custom/modules/sourceReferences/SourceReferenceTimeline.vue';
+import SourceReferenceHub from './SourceReferenceHub.vue';
 import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
 import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
 import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbackButtons.vue';
 import { sanitizeMarkdownHTML, safeMarkdownToHTML, createSafeImage, isValidImageURL, hydrateProtectedFileImages } from '@/utils/security';
 import { useI18n } from 'vue-i18n';
+import { useRouter } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useUIStore } from '@/stores/ui';
 import {
@@ -124,10 +125,11 @@ const mentionTagIcon = (item) => {
     return 'file';
 };
 
-const emit = defineEmits(['scroll-bottom'])
 const { t } = useI18n()
+const router = useRouter();
 const uiStore = useUIStore();
 let parentMd = ref()
+const sourceReferenceHub = ref(null);
 const { float: citationFloat, rebind: rebindCitations, cancelClose: cancelCitationClose, scheduleClose: scheduleCitationClose } = useChatCitationPopover(parentMd, {
     getKnowledgeReferences: () => props.session?.knowledge_references,
     sessionId: () => props.sessionId,
@@ -165,20 +167,6 @@ const props = defineProps({
 });
 
 const showRequestInfo = computed(() => !!(props.session?.request_id || props.session?.id));
-const shouldShowSourceReferenceTimeline = computed(() => {
-    const refs = props.session?.knowledge_references;
-    if (!props.session?.isAgentMode || !Array.isArray(refs) || refs.length === 0) return false;
-    return refs.some((ref) => {
-        const sourceType = ref?.metadata?.source_type;
-        return sourceType === 'knowledge'
-            || sourceType === 'wiki'
-            || sourceType === 'web'
-            || sourceType === 'data_source'
-            || ref?.chunk_type === 'wiki_page'
-            || ref?.chunk_type === 'data_source';
-    });
-});
-
 const preview = (url) => {
     nextTick(() => {
         reviewUrl.value = url;
@@ -290,6 +278,48 @@ const handleMarkdownImageClick = (e) => {
     }
 };
 
+const handleSourceCitationClick = (e) => {
+    const target = e.target;
+    const sourceEl = target?.closest?.('.citation-source');
+    if (!sourceEl) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (sourceReferenceHub.value?.activateByElement?.(sourceEl)) return;
+
+    const type = sourceEl.getAttribute('data-source-type') || '';
+    if (type === 'web') {
+        const url = sourceEl.getAttribute('data-url') || '';
+        if (url) window.open(url, '_blank', 'noopener,noreferrer');
+        return;
+    }
+    if (type === 'wiki') {
+        const kbId = sourceEl.getAttribute('data-kb-id') || '';
+        const slug = sourceEl.getAttribute('data-slug') || '';
+        if (kbId && slug) {
+            openRouteInNewTab({
+                path: `/platform/knowledge-bases/${kbId}`,
+                query: { tab: 'graph', slug },
+            });
+        }
+        return;
+    }
+    if (type === 'knowledge') {
+        const kbId = sourceEl.getAttribute('data-kb-id') || '';
+        const knowledgeId = sourceEl.getAttribute('data-knowledge-id') || '';
+        if (kbId) {
+            openRouteInNewTab({
+                path: `/platform/knowledge-bases/${kbId}`,
+                query: knowledgeId ? { knowledge_id: knowledgeId } : {},
+            });
+        }
+    }
+};
+
+const openRouteInNewTab = (location) => {
+    const href = router.resolve(location).href;
+    window.open(new URL(href, window.location.origin).toString(), '_blank', 'noopener,noreferrer');
+};
+
 watch(renderedHTML, () => {
     nextTick(() => {
         rebindCitations();
@@ -312,6 +342,7 @@ onMounted(async () => {
     nextTick(async () => {
         if (parentMd.value) {
             parentMd.value.addEventListener('click', handleMarkdownImageClick, true);
+            parentMd.value.addEventListener('click', handleSourceCitationClick, true);
         }
         rebindCitations();
         await hydrateProtectedFileImages(parentMd.value);
@@ -322,6 +353,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
     if (parentMd.value) {
         parentMd.value.removeEventListener('click', handleMarkdownImageClick, true);
+        parentMd.value.removeEventListener('click', handleSourceCitationClick, true);
     }
 });
 </script>

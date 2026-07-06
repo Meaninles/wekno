@@ -475,9 +475,9 @@
   <picturePreview :reviewImg="imagePreviewVisible" :reviewUrl="imagePreviewUrl" @closePreImg="closeImagePreview" />
 
   <!-- Wiki Page Detail Drawer -->
-  <t-drawer v-model:visible="wikiDrawerVisible" :header="wikiDrawerPage?.title || ''" size="480px" :footer="false"
-    placement="right" attach="body" :show-overlay="true" :close-btn="true" :close-on-overlay-click="true"
-    class="wiki-graph-drawer">
+  <t-drawer v-if="wikiDrawerVisible" v-model:visible="wikiDrawerVisible" :header="wikiDrawerPage?.title || ''"
+    size="480px" :footer="false" placement="right" attach="body" :show-overlay="true" :close-btn="true"
+    :close-on-overlay-click="true" class="wiki-graph-drawer">
     <template v-if="wikiDrawerPage">
       <div class="wiki-reader-meta"
         style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
@@ -747,6 +747,7 @@ watch(wikiDrawerContent, async () => {
 const openWikiDrawer = async (kbId: string, slug: string) => {
   if (!kbId || !slug) return;
   try {
+    window.dispatchEvent(new CustomEvent('weknora:wiki-drawer-open'));
     currentWikiKbId.value = kbId;
     const res = await getWikiPage(kbId, slug);
     wikiDrawerPage.value = (res as any).data || res as any;
@@ -761,7 +762,10 @@ const navigateToWikiGraph = () => {
   if (currentWikiKbId.value && wikiDrawerPage.value?.slug) {
     wikiDrawerVisible.value = false;
     try {
-      router.push(`/platform/knowledge-bases/${currentWikiKbId.value}?tab=graph&slug=${encodeURIComponent(wikiDrawerPage.value.slug)}`);
+      openRouteInNewTab({
+        path: `/platform/knowledge-bases/${currentWikiKbId.value}`,
+        query: { tab: 'graph', slug: wikiDrawerPage.value.slug },
+      });
     } catch (error) {
       console.error('Failed to navigate to wiki graph:', error);
     }
@@ -1771,13 +1775,43 @@ const handleCitationActivate = (el: HTMLElement) => {
       // @ts-ignore
       window.runtime.BrowserOpenURL(url);
     } else {
-      const newWindow = window.open(url, '_blank', 'noopener,noreferrer');
-      if (!newWindow) {
-        window.location.assign(url);
-      }
+      window.open(url, '_blank', 'noopener,noreferrer');
     }
   } catch {
-    window.location.assign(url);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+};
+
+const openRouteInNewTab = (location: Parameters<typeof router.resolve>[0]) => {
+  const href = router.resolve(location).href;
+  window.open(new URL(href, window.location.origin).toString(), '_blank', 'noopener,noreferrer');
+};
+
+const handleSourceCitationActivate = (el: HTMLElement) => {
+  const type = el.getAttribute('data-source-type') || '';
+  if (type === 'web') {
+    const url = el.getAttribute('data-url') || '';
+    if (url) handleCitationActivate(el);
+    return;
+  }
+  if (type === 'wiki') {
+    const slug = el.getAttribute('data-slug') || '';
+    const kbId = el.getAttribute('data-kb-id') || getKbIdForWiki(slug);
+    if (kbId && slug) {
+      openWikiDrawer(kbId, slug);
+    } else {
+      MessagePlugin.warning(t('agentStream.citation.noKbForWiki'));
+    }
+    return;
+  }
+  if (type === 'knowledge') {
+    const kbId = el.getAttribute('data-kb-id') || '';
+    const knowledgeId = el.getAttribute('data-knowledge-id') || '';
+    if (!kbId) return;
+    openRouteInNewTab({
+      path: `/platform/knowledge-bases/${kbId}`,
+      query: knowledgeId ? { knowledge_id: knowledgeId } : {},
+    });
   }
 };
 
@@ -1842,6 +1876,14 @@ const onRootClick = (e: Event) => {
     }
   }
 
+  const sourceEl = target.closest?.('.citation-source') as HTMLElement | null;
+  if (sourceEl) {
+    e.preventDefault();
+    e.stopPropagation();
+    handleSourceCitationActivate(sourceEl);
+    return;
+  }
+
   // Handle web citation clicks
   const webEl = target.closest?.('.citation-web') as HTMLElement | null;
   if (webEl && webEl.getAttribute('data-url')) {
@@ -1858,8 +1900,7 @@ const onRootClick = (e: Event) => {
     const kbId = kbEl.getAttribute('data-kb-id');
     if (kbId) {
       try {
-        // Navigate to knowledge base detail page
-        router.push(`/platform/knowledge-bases/${kbId}`);
+        openRouteInNewTab(`/platform/knowledge-bases/${kbId}`);
       } catch (error) {
         console.error('Failed to navigate to knowledge base:', error);
       }
@@ -1906,6 +1947,15 @@ const onRootKeydown = (e: KeyboardEvent) => {
   const target = e.target as HTMLElement;
   if (!target) return;
 
+  const sourceEl = target.closest?.('.citation-source') as HTMLElement | null;
+  if (sourceEl) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleSourceCitationActivate(sourceEl);
+    }
+    return;
+  }
+
   // Handle web citation keyboard
   const webEl = target.closest?.('.citation-web') as HTMLElement | null;
   if (webEl) {
@@ -1924,7 +1974,7 @@ const onRootKeydown = (e: KeyboardEvent) => {
       const kbId = kbEl.getAttribute('data-kb-id');
       if (kbId) {
         try {
-          router.push(`/platform/knowledge-bases/${kbId}`);
+          openRouteInNewTab(`/platform/knowledge-bases/${kbId}`);
         } catch (error) {
           console.error('Failed to navigate to knowledge base:', error);
         }
@@ -2001,7 +2051,7 @@ const prepareAgentMarkdown = (markdown: string, cachedSvgHtml?: string | null): 
   const mermaidSafe = !isConversationDone.value
     ? prepareStreamingMermaidMarkdown(markdown, cachedSvgHtml ?? streamingMermaidSvgCache.value)
     : replaceIncompleteMermaidWithPlaceholder(markdown);
-  return mermaidSafe.replace(/<(?:kb|web)\b[^>]*$/i, '');
+  return mermaidSafe.replace(/<(?:kb|web|src)\b[^>]*$/i, '');
 };
 
 const renderAgentMarkdown = (

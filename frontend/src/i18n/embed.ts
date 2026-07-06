@@ -377,9 +377,9 @@ const messages = {
         "searchingWithQuery": "正在检索知识库：「{query}」",
         "searchDone": "检索完成",
         "searchDoneWithQuery": "检索知识库：「{query}」",
-        "referencedDocs": "引用 <strong>{count}</strong> 篇文档",
-        "referencedWebs": "引用 <strong>{count}</strong> 条网页",
-        "referencedDocAndWeb": "引用 <strong>{docCount}</strong> 篇文档和 <strong>{webCount}</strong> 条网页"
+        "referencedDocs": "已阅读 <strong>{count}</strong> 篇文档",
+        "referencedWebs": "已阅读 <strong>{count}</strong> 条网页",
+        "referencedDocAndWeb": "已阅读 <strong>{docCount}</strong> 篇文档和 <strong>{webCount}</strong> 条网页"
       },
       "toolStatus": {
         "calling": "正在调用 {name}...",
@@ -842,9 +842,9 @@ const messages = {
         "searchingWithQuery": "Searching knowledge base: \"{query}\"",
         "searchDone": "Search complete",
         "searchDoneWithQuery": "Searched knowledge base: \"{query}\"",
-        "referencedDocs": "Cited <strong>{count}</strong> documents",
-        "referencedWebs": "Cited <strong>{count}</strong> web results",
-        "referencedDocAndWeb": "Cited <strong>{docCount}</strong> documents and <strong>{webCount}</strong> web results"
+        "referencedDocs": "Read <strong>{count}</strong> documents",
+        "referencedWebs": "Read <strong>{count}</strong> web results",
+        "referencedDocAndWeb": "Read <strong>{docCount}</strong> documents and <strong>{webCount}</strong> web results"
       },
       "toolStatus": {
         "calling": "Calling {name}...",

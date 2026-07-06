@@ -35,6 +35,7 @@ type activeRun struct {
 	steps    []types.AgentStep
 	progress map[string]progressRecord
 	refSeen  map[string]bool
+	sources  *sourcerefs.Registry
 }
 
 type progressRecord struct {
@@ -198,44 +199,49 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 			Data:       result.Data,
 		},
 	})
-	run.emitSourceReferences(req.ToolName, result)
+	sourceReferences := run.registerSourceReferences(req.ToolName, result)
 	if err != nil {
 		logger.Warnf(run.ctx, "general-agent tool %s failed: %v", req.ToolName, err)
 	}
 	return &ToolCallResponse{
-		Success: result.Success,
-		Output:  result.Output,
-		Error:   result.Error,
-		Data:    result.Data,
-		Images:  result.Images,
+		Success:          result.Success,
+		Output:           result.Output,
+		Error:            result.Error,
+		Data:             result.Data,
+		Images:           result.Images,
+		SourceReferences: sourceReferences,
 	}, nil
 }
 
-func (r *activeRun) emitSourceReferences(toolName string, result *types.ToolResult) {
+func (r *activeRun) registerSourceReferences(toolName string, result *types.ToolResult) []*sourcerefs.CitationSource {
 	refs := sourcerefs.ExtractFromToolResult(toolName, result)
 	if len(refs) == 0 {
-		return
+		return nil
 	}
 
 	newRefs := r.filterNewSourceReferences(refs)
-	if len(newRefs) == 0 {
-		return
+	if len(newRefs) > 0 {
+		r.eventBus.Emit(r.ctx, event.Event{
+			Type:      event.EventAgentReferences,
+			SessionID: r.sessionID,
+			RequestID: r.requestID,
+			Data: event.AgentReferencesData{
+				References: newRefs,
+			},
+		})
 	}
 
-	r.eventBus.Emit(r.ctx, event.Event{
-		Type:      event.EventAgentReferences,
-		SessionID: r.sessionID,
-		RequestID: r.requestID,
-		Data: event.AgentReferencesData{
-			References: newRefs,
-		},
-	})
+	return sourcerefs.SourcesFromReferences(refs)
 }
 
 func (r *activeRun) filterNewSourceReferences(refs []*types.SearchResult) []*types.SearchResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.sources == nil {
+		r.sources = sourcerefs.NewRegistry()
+	}
+	r.sources.Register(refs)
 	if r.refSeen == nil {
 		r.refSeen = make(map[string]bool, len(refs))
 	}

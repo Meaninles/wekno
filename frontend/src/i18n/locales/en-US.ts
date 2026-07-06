@@ -5291,9 +5291,9 @@ export default {
       searchingWithQuery: 'Searching knowledge base: "{query}"',
       searchDone: 'Search complete',
       searchDoneWithQuery: 'Searched knowledge base: "{query}"',
-      referencedDocs: 'Cited <strong>{count}</strong> documents',
-      referencedWebs: 'Cited <strong>{count}</strong> web results',
-      referencedDocAndWeb: 'Cited <strong>{docCount}</strong> documents and <strong>{webCount}</strong> web results',
+      referencedDocs: 'Read <strong>{count}</strong> documents',
+      referencedWebs: 'Read <strong>{count}</strong> web results',
+      referencedDocAndWeb: 'Read <strong>{docCount}</strong> documents and <strong>{webCount}</strong> web results',
     },
     toolStatus: {
       calling: 'Calling {name}...',

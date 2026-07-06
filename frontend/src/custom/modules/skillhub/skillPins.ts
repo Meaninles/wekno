@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { updateMyPreferences, type UserPreferences } from '@/api/auth'
 import { readUserId, safeGetItem, safeSetItem } from '@/composables/preferenceStorage'
 import { useAuthStore } from '@/stores/auth'
 import { stablePinnedFirst } from '@/custom/modules/agentPins/agentPins'
@@ -40,7 +41,23 @@ function normalizePinnedKeys(value: unknown): string[] {
   return out
 }
 
+function authStoreOrNull() {
+  try {
+    return useAuthStore()
+  } catch {
+    return null
+  }
+}
+
+function serverPinnedKeys(): string[] | null {
+  const authStore = authStoreOrNull()
+  const pins = authStore?.user?.preferences?.chat_skill_pins
+  return Array.isArray(pins) ? normalizePinnedKeys(pins) : null
+}
+
 function readPinnedKeys(): string[] {
+  const serverKeys = serverPinnedKeys()
+  if (serverKeys) return serverKeys
   const raw = safeGetItem(storageKey())
   if (!raw) return []
   try {
@@ -50,9 +67,36 @@ function readPinnedKeys(): string[] {
   }
 }
 
+function patchAuthPreferences(prefs: Partial<UserPreferences>): void {
+  const authStore = authStoreOrNull()
+  if (!authStore?.user) return
+  authStore.user = {
+    ...authStore.user,
+    preferences: {
+      ...(authStore.user.preferences || {}),
+      ...prefs,
+    },
+  }
+}
+
 function writePinnedKeys(keys: string[]): void {
-  safeSetItem(storageKey(), JSON.stringify(normalizePinnedKeys(keys)))
+  const nextKeys = normalizePinnedKeys(keys)
+  const previousServerKeys = serverPinnedKeys()
+  safeSetItem(storageKey(), JSON.stringify(nextKeys))
+  patchAuthPreferences({ chat_skill_pins: nextKeys })
   revision.value++
+  updateMyPreferences({ chat_skill_pins: nextKeys })
+    .then((resp) => {
+      if (!resp.success) throw new Error(resp.message || 'update failed')
+      if (resp.data) patchAuthPreferences(resp.data)
+    })
+    .catch((error) => {
+      if (previousServerKeys) {
+        patchAuthPreferences({ chat_skill_pins: previousServerKeys })
+      }
+      revision.value++
+      console.warn('[skillPins] failed to persist pins', error)
+    })
 }
 
 if (typeof window !== 'undefined') {

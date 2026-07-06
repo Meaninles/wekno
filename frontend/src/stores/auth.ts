@@ -7,16 +7,40 @@ import i18n from '@/i18n'
 import { reloadFontFromStorage } from '@/composables/useFont'
 import { reloadThemeFromStorage } from '@/composables/useTheme'
 import { resetMigrationLatch } from '@/composables/preferenceStorage'
-import { BUILTIN_QUICK_ANSWER_ID } from '@/api/agent'
 import { useChatResourcesStore } from '@/stores/chatResources'
 import { useEditorResourcesStore } from '@/stores/editorResources'
 import { useOrganizationStore } from '@/stores/organization'
+import { useSettingsStore } from '@/stores/settings'
 
 /** 登出时丢弃 Pinia 内的租户级资源缓存，避免 SPA 重登复用上一账号数据。 */
 function clearSessionResourceCaches() {
   useChatResourcesStore().invalidate()
   useEditorResourcesStore().invalidate()
   useOrganizationStore().clearState()
+}
+
+const LAST_CHAT_MODEL_KEY = 'weknora_last_chat_model_id'
+
+function removeLastChatModelKeys() {
+  localStorage.removeItem(LAST_CHAT_MODEL_KEY)
+  for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+    const key = localStorage.key(i)
+    if (key?.startsWith(`${LAST_CHAT_MODEL_KEY}:`)) {
+      localStorage.removeItem(key)
+    }
+  }
+}
+
+function readStoredObjectId(key: string): string {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return ''
+    const parsed = JSON.parse(raw)
+    const id = parsed?.id
+    return id === undefined || id === null ? '' : String(id)
+  } catch {
+    return ''
+  }
 }
 
 // Per-user UI preferences are namespaced by user id in localStorage.
@@ -180,10 +204,17 @@ export const useAuthStore = defineStore('auth', () => {
   // 操作方法
   const setUser = (userData: UserInfo) => {
     const previousId = user.value?.id
+    const storedUserId = readStoredObjectId('weknora_user')
     user.value = userData
     // 保存到localStorage
     localStorage.setItem('weknora_user', JSON.stringify(userData))
-    if (previousId !== userData.id) {
+    const userChanged = previousId !== userData.id
+    const storedUserChanged = !!storedUserId && storedUserId !== userData.id
+    if (userChanged || storedUserChanged) {
+      clearSessionResourceCaches()
+      if (previousId || storedUserChanged) {
+        clearTenantScopedClientState()
+      }
       reloadUserPreferences()
     }
     // 把后端持久化的 user 偏好（记忆开关等）同步到 settings store。
@@ -200,9 +231,18 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   const setTenant = (tenantData: TenantInfo) => {
+    const previousTenantId = tenant.value?.id
+    const storedTenantId = readStoredObjectId('weknora_tenant')
     tenant.value = tenantData
     // 保存到localStorage
     localStorage.setItem('weknora_tenant', JSON.stringify(tenantData))
+    const tenantId = String(tenantData.id)
+    const tenantChanged = !!previousTenantId && String(previousTenantId) !== tenantId
+    const storedTenantChanged = !!storedTenantId && storedTenantId !== tenantId
+    if (tenantChanged || storedTenantChanged) {
+      clearSessionResourceCaches()
+      clearTenantScopedClientState()
+    }
   }
 
   const setToken = (tokenValue: string) => {
@@ -234,31 +274,13 @@ export const useAuthStore = defineStore('auth', () => {
   // These keys are NOT tenant-scoped in storage; after a tenant switch they
   // would otherwise be reloaded verbatim and the chat input would post under
   // the new tenant with an Agent / model id that only existed in the old
-  // tenant — backend 403s or "model not found". Called from setSelectedTenant
-  // only on an actual tenant change, so logout / init paths are not touched.
+  // tenant — backend 403s or "model not found". Called on tenant changes,
+  // logout, and in-memory user switches.
   const clearTenantScopedClientState = () => {
     try {
-      localStorage.removeItem('weknora_last_chat_model_id')
+      removeLastChatModelKeys()
       localStorage.removeItem('weknora_current_kb')
-      const raw = localStorage.getItem('WeKnora_settings')
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (parsed && typeof parsed === 'object') {
-          parsed.selectedAgentId = BUILTIN_QUICK_ANSWER_ID
-          parsed.selectedAgentSourceTenantId = null
-          parsed.isAgentEnabled = false
-          if (parsed.conversationModels && typeof parsed.conversationModels === 'object') {
-            parsed.conversationModels.summaryModelId = ''
-            parsed.conversationModels.rerankModelId = ''
-            parsed.conversationModels.selectedChatModelId = ''
-          }
-          parsed.selectedKnowledgeBases = []
-          parsed.selectedFiles = []
-          parsed.selectedFileKbMap = {}
-          parsed.knowledgeBaseId = ''
-          localStorage.setItem('WeKnora_settings', JSON.stringify(parsed))
-        }
-      }
+      useSettingsStore().resetTenantScopedState()
     } catch (e) {
       // localStorage may be disabled or contain malformed JSON — best effort.
       console.warn('[auth] failed to clear tenant-scoped client state', e)
@@ -281,6 +303,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
     if (tenantChanged) {
       clearTenantScopedClientState()
+      clearSessionResourceCaches()
     }
   }
 
@@ -392,6 +415,7 @@ export const useAuthStore = defineStore('auth', () => {
     memberships.value = []
     pendingInvitationCount.value = 0
     clearSessionResourceCaches()
+    clearTenantScopedClientState()
 
     // 清空localStorage
     localStorage.removeItem('weknora_user')

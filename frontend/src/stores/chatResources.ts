@@ -13,6 +13,34 @@ type ResourceKey = 'knowledgeBases' | 'agents' | 'models' | 'webSearchProviders'
 
 export type ListCreatorFilter = 'all' | 'mine' | 'others'
 
+function readStorageValue(key: string): string {
+  if (typeof localStorage === 'undefined') return ''
+  try {
+    return localStorage.getItem(key) || ''
+  } catch {
+    return ''
+  }
+}
+
+function readStoredId(key: string): string {
+  const raw = readStorageValue(key)
+  if (!raw) return ''
+  try {
+    const parsed = JSON.parse(raw)
+    const id = parsed?.id
+    return id === undefined || id === null ? '' : String(id)
+  } catch {
+    return ''
+  }
+}
+
+function currentResourceScope(): string {
+  const userId = readStoredId('weknora_user')
+  const selectedTenantId = readStorageValue('weknora_selected_tenant_id')
+  const tenantId = selectedTenantId || readStoredId('weknora_tenant')
+  return `${userId}:${tenantId}`
+}
+
 function isKbModelReady(kb: any): boolean {
   if (!kb.summary_model_id || kb.summary_model_id === '') return false
   const strategy = kb.indexing_strategy
@@ -30,6 +58,8 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
 
   const loadedAt = ref<Partial<Record<ResourceKey, number>>>({})
   const inflight = new Map<ResourceKey, Promise<void>>()
+  const cacheScope = ref(currentResourceScope())
+  let cacheGeneration = 0
   // creator==='all' 的列表请求单独去重：首屏 platform 预取与对话页 onMounted
   // 可能并发触发，缓存尚未写入时不去重会重复打 listKnowledgeBases / listAgents。
   let kbAllInflight: Promise<any[]> | null = null
@@ -47,17 +77,57 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
   const validKnowledgeBases = computed(() => rawKnowledgeBases.value.filter(isKbModelReady))
   const chatModels = computed(() => allModels.value.filter((m) => m.type === 'KnowledgeQA'))
 
+  function resetResourceState() {
+    loadedAt.value = {}
+    rawKnowledgeBases.value = []
+    agents.value = []
+    disabledOwnAgentIds.value = []
+    allModels.value = []
+    webSearchProviders.value = []
+    agentKbCache.clear()
+    inflight.clear()
+    agentKbInflight.clear()
+    kbAllInflight = null
+    agentsAllInflight = null
+    invalidateKnowledgeBaseDetail()
+  }
+
+  function syncResourceScope(): string {
+    const nextScope = currentResourceScope()
+    if (nextScope !== cacheScope.value) {
+      cacheScope.value = nextScope
+      cacheGeneration += 1
+      resetResourceState()
+    }
+    return cacheScope.value
+  }
+
+  function isCurrentResourceRequest(scope: string, generation: number): boolean {
+    return syncResourceScope() === scope && cacheGeneration === generation
+  }
+
   function isFresh(key: ResourceKey): boolean {
+    syncResourceScope()
     const at = loadedAt.value[key]
     return !!at && Date.now() - at < CACHE_TTL_MS
   }
 
-  async function runOnce(key: ResourceKey, force: boolean, loader: () => Promise<void>): Promise<void> {
+  async function runOnce(
+    key: ResourceKey,
+    force: boolean,
+    loader: (scope: string, generation: number) => Promise<void>,
+  ): Promise<void> {
+    syncResourceScope()
     if (!force && isFresh(key)) return
     const existing = inflight.get(key)
     if (existing) return existing
-    const p = loader().finally(() => {
-      inflight.delete(key)
+    const requestScope = cacheScope.value
+    const requestGeneration = cacheGeneration
+    let p: Promise<void>
+    p = loader(requestScope, requestGeneration).finally(() => {
+      if (inflight.get(key) === p) {
+        inflight.delete(key)
+      }
     })
     inflight.set(key, p)
     return p
@@ -77,16 +147,20 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
       return res?.data && Array.isArray(res.data) ? res.data : []
     }
 
+    syncResourceScope()
     if (!force && isFresh('knowledgeBases')) {
       return rawKnowledgeBases.value
     }
     if (!force && kbAllInflight) return kbAllInflight
 
+    const requestScope = cacheScope.value
+    const requestGeneration = cacheGeneration
     const gen = ++kbAllGen
     kbAllInflight = (async () => {
       try {
         const res: any = await listKnowledgeBases()
         const data = res?.data && Array.isArray(res.data) ? res.data : []
+        if (!isCurrentResourceRequest(requestScope, requestGeneration)) return []
         rawKnowledgeBases.value = data
         loadedAt.value.knowledgeBases = Date.now()
         const orgStore = useOrganizationStore()
@@ -123,12 +197,15 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
       return { data: res.data || [], disabled_own_agent_ids: res.disabled_own_agent_ids || [] }
     }
 
+    syncResourceScope()
     if (!force && isFresh('agents')) {
       return { data: agents.value, disabled_own_agent_ids: disabledOwnAgentIds.value }
     }
     if (!force && agentsAllInflight) return agentsAllInflight
 
     const gen = ++agentsAllGen
+    const requestScope = cacheScope.value
+    const requestGeneration = cacheGeneration
     agentsAllInflight = (async () => {
       try {
         const [agentsRes] = await Promise.all([
@@ -137,6 +214,9 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
         ])
         const res = agentsRes as { data?: CustomAgent[]; disabled_own_agent_ids?: string[] }
         const data = res.data || []
+        if (!isCurrentResourceRequest(requestScope, requestGeneration)) {
+          return { data: [], disabled_own_agent_ids: [] }
+        }
         agents.value = data
         disabledOwnAgentIds.value = res.disabled_own_agent_ids || []
         loadedAt.value.agents = Date.now()
@@ -153,8 +233,9 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
   }
 
   async function ensureModels(force = false): Promise<void> {
-    return runOnce('models', force, async () => {
+    return runOnce('models', force, async (requestScope, requestGeneration) => {
       const models = await listModels()
+      if (!isCurrentResourceRequest(requestScope, requestGeneration)) return
       allModels.value = Array.isArray(models) ? models : []
       loadedAt.value.models = Date.now()
     })
@@ -166,9 +247,10 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
   }
 
   async function ensureWebSearchProviders(force = false): Promise<void> {
-    return runOnce('webSearchProviders', force, async () => {
+    return runOnce('webSearchProviders', force, async (requestScope, requestGeneration) => {
       const response = await listWebSearchProviders()
       const providers = (response as any)?.data
+      if (!isCurrentResourceRequest(requestScope, requestGeneration)) return
       webSearchProviders.value = Array.isArray(providers) ? providers : []
       loadedAt.value.webSearchProviders = Date.now()
     })
@@ -187,6 +269,7 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
   }
 
   async function ensureAgentKnowledgeBases(agentId: string, force = false): Promise<any[]> {
+    syncResourceScope()
     const cached = agentKbCache.get(agentId)
     if (!force && cached && Date.now() - cached.at < CACHE_TTL_MS) {
       return cached.data
@@ -194,10 +277,13 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
     const existing = agentKbInflight.get(agentId)
     if (existing) return existing
 
+    const requestScope = syncResourceScope()
+    const requestGeneration = cacheGeneration
     const p = (async () => {
       try {
         const res: any = await listKnowledgeBases({ agent_id: agentId })
         const list = res?.data && Array.isArray(res.data) ? res.data : []
+        if (!isCurrentResourceRequest(requestScope, requestGeneration)) return []
         agentKbCache.set(agentId, { at: Date.now(), data: list })
         return list
       } finally {
@@ -211,6 +297,7 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
   /** 单个知识库详情（侧栏 + 详情页共用，去重并发请求） */
   async function fetchKnowledgeBaseById(kbId: string, force = false): Promise<any | null> {
     if (!kbId) return null
+    syncResourceScope()
     const cached = kbDetailCache.get(kbId)
     if (!force && cached && Date.now() - cached.at < CACHE_TTL_MS) {
       return cached.data
@@ -218,10 +305,13 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
     const existing = kbDetailInflight.get(kbId)
     if (existing) return existing
 
+    const requestScope = syncResourceScope()
+    const requestGeneration = cacheGeneration
     const p = (async () => {
       try {
         const res: any = await getKnowledgeBaseById(kbId)
         const data = res?.data ?? null
+        if (!isCurrentResourceRequest(requestScope, requestGeneration)) return null
         if (data) {
           kbDetailCache.set(kbId, { at: Date.now(), data })
         }
@@ -247,20 +337,10 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
   }
 
   function invalidate(...keys: ResourceKey[]) {
+    cacheScope.value = currentResourceScope()
+    cacheGeneration += 1
     if (keys.length === 0) {
-      loadedAt.value = {}
-      rawKnowledgeBases.value = []
-      agents.value = []
-      disabledOwnAgentIds.value = []
-      allModels.value = []
-      webSearchProviders.value = []
-      agentKbCache.clear()
-      // 同时丢弃所有 inflight 句柄，否则失效后仍在飞行的请求会把旧数据写回缓存。
-      inflight.clear()
-      agentKbInflight.clear()
-      kbAllInflight = null
-      agentsAllInflight = null
-      invalidateKnowledgeBaseDetail()
+      resetResourceState()
       return
     }
     keys.forEach((k) => {

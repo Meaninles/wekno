@@ -145,27 +145,73 @@ func TestValidateBytesSizeOnlyLimit(t *testing.T) {
 	}
 }
 
-func TestValidateBytesDocumentSizeLimitsDoubled(t *testing.T) {
+func TestAnalyzeSizeDocumentSizeLimitsRaisedTo50MB(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		typ  string
-		mb   int
 		want string
 	}{
-		{name: "report.pdf", typ: "pdf", mb: 20, want: "PDF 文件大小不能超过 20MB"},
-		{name: "deck.pptx", typ: "pptx", mb: 20, want: "PPT 文件大小不能超过 20MB"},
-		{name: "deck.ppt", typ: "ppt", mb: 16, want: "PPT 旧格式文件大小不能超过 16MB"},
+		{name: "report.pdf", typ: "pdf", want: "PDF 文件大小不能超过 50MB"},
+		{name: "deck.pptx", typ: "pptx", want: "PPT 文件大小不能超过 50MB"},
+		{name: "deck.ppt", typ: "ppt", want: "PPT 旧格式文件大小不能超过 50MB"},
 	} {
-		if err := ValidateBytes(tc.name, tc.typ, make([]byte, int64(tc.mb)*mb)); err != nil {
-			t.Fatalf("expected %s at limit to pass: %s", tc.name, err.Error())
+		if err := AnalyzeSize(tc.name, tc.typ, 50*mb).ValidationError(); err != nil {
+			t.Fatalf("expected %s at 50MB limit to pass: %s", tc.name, err.Error())
 		}
-		err := ValidateBytes(tc.name, tc.typ, make([]byte, int64(tc.mb)*mb+1))
+		err := AnalyzeSize(tc.name, tc.typ, 50*mb+1).ValidationError()
 		if err == nil {
 			t.Fatalf("expected %s just above limit to fail", tc.name)
 		}
 		if !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("message missing %q: %s", tc.want, err.Error())
 		}
+	}
+}
+
+func TestValidateBytesPPTXAllowsNear50MBStoredMedia(t *testing.T) {
+	data := zipStoredBytes(t, map[string][]byte{
+		"ppt/slides/slide1.xml": []byte(`<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:sp/></p:spTree></p:cSld></p:sld>`),
+		"ppt/media/video.bin":   make([]byte, 49*mb),
+	})
+	if int64(len(data)) > 50*mb {
+		t.Fatalf("test fixture unexpectedly exceeds 50MB: %d", len(data))
+	}
+	if err := ValidateBytes("near-limit.pptx", "pptx", data); err != nil {
+		t.Fatalf("expected near-50MB PPTX with low compression to pass: %s", err.Error())
+	}
+}
+
+func TestValidateBytesPPTXRejectsExcessiveCompression(t *testing.T) {
+	data := zipBytes(t, map[string]string{
+		"ppt/media/image1.bin": strings.Repeat("x", 41*mb),
+	})
+	err := ValidateBytes("compressed.pptx", "pptx", data)
+	if err == nil {
+		t.Fatal("expected highly compressed PPTX to fail")
+	}
+	want := "PPT 文件压缩膨胀倍数不能超过 10 倍"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("message missing %q: %s", want, err.Error())
+	}
+}
+
+func TestValidateBytesPPTXRejectsSlidesAbove200(t *testing.T) {
+	files := map[string]string{}
+	for i := 1; i <= 200; i++ {
+		files[fmt.Sprintf("ppt/slides/slide%d.xml", i)] = `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld/></p:sld>`
+	}
+	if err := ValidateBytes("slides-200.pptx", "pptx", zipBytes(t, files)); err != nil {
+		t.Fatalf("expected 200-slide PPTX to pass: %s", err.Error())
+	}
+
+	files["ppt/slides/slide201.xml"] = `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld/></p:sld>`
+	err := ValidateBytes("slides-201.pptx", "pptx", zipBytes(t, files))
+	if err == nil {
+		t.Fatal("expected 201-slide PPTX to fail")
+	}
+	want := "PPT 幻灯片数量不能超过 200 页"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("message missing %q: %s", want, err.Error())
 	}
 }
 
@@ -278,7 +324,7 @@ func TestAnalyzeSizeMarksHeavyBeforeHardLimit(t *testing.T) {
 		t.Fatalf("expected pdf above heavy threshold to be marked heavy")
 	}
 
-	report = AnalyzeSize("report.pdf", "pdf", 20*mb+1)
+	report = AnalyzeSize("report.pdf", "pdf", 50*mb+1)
 	if report.ValidationError() == nil {
 		t.Fatal("expected pdf above hard limit to fail")
 	}
@@ -335,6 +381,28 @@ func zipBytes(t *testing.T, files map[string]string) []byte {
 			t.Fatal(err)
 		}
 		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func zipStoredBytes(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		w, err := zw.CreateHeader(&zip.FileHeader{
+			Name:   name,
+			Method: zip.Store,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(content); err != nil {
 			t.Fatal(err)
 		}
 	}

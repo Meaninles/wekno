@@ -546,6 +546,12 @@ func (s *userService) UpdateUserPreferences(
 			merged.LastActiveTenantID = &v
 		}
 	}
+	if patch.ChatAgentPins != nil {
+		merged.ChatAgentPins = normalizePreferenceStrings(patch.ChatAgentPins)
+	}
+	if patch.ChatSkillPins != nil {
+		merged.ChatSkillPins = normalizePreferenceStrings(patch.ChatSkillPins)
+	}
 
 	user.Preferences = merged
 	user.UpdatedAt = time.Now()
@@ -553,6 +559,23 @@ func (s *userService) UpdateUserPreferences(
 		return types.UserPreferences{}, err
 	}
 	return merged, nil
+}
+
+func normalizePreferenceStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized
 }
 
 // DeleteUser deletes a user

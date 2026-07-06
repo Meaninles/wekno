@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -118,16 +120,34 @@ func NewHandlers(
 	if err := userGuideService.EnsureAllUsers(ctx); err != nil {
 		logger.Warnf(ctx, "[custom bootstrap] failed to provision guide KB for existing users: %v", err)
 	}
+	if err := builtinAgentDefaultsService.EnsureAllUsers(ctx); err != nil {
+		logger.Warnf(ctx, "[custom bootstrap] failed to provision built-in agent defaults for existing users: %v", err)
+	}
 	provisionUser := func(ctx context.Context, user *types.User) error {
-		configErr := configCenterService.EnsureUserProvisioned(ctx, user)
-		guideErr := userGuideService.EnsureUserProvisioned(ctx, user)
-		if configErr != nil && guideErr != nil {
-			return fmt.Errorf("config center: %v; user guide: %w", configErr, guideErr)
+		baseCtx := context.Background()
+		if ctx != nil {
+			baseCtx = context.WithoutCancel(ctx)
 		}
+		provisionCtx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
+		defer cancel()
+
+		configErr := configCenterService.EnsureUserProvisioned(provisionCtx, user)
+		builtinErr := builtinAgentDefaultsService.EnsureUserProvisioned(provisionCtx, user)
+		guideErr := userGuideService.EnsureUserProvisioned(provisionCtx, user)
+		errs := make([]string, 0, 3)
 		if configErr != nil {
-			return configErr
+			errs = append(errs, fmt.Sprintf("config center: %v", configErr))
 		}
-		return guideErr
+		if builtinErr != nil {
+			errs = append(errs, fmt.Sprintf("built-in agent defaults: %v", builtinErr))
+		}
+		if guideErr != nil {
+			errs = append(errs, fmt.Sprintf("user guide: %v", guideErr))
+		}
+		if len(errs) > 0 {
+			return fmt.Errorf("%s", strings.Join(errs, "; "))
+		}
+		return nil
 	}
 	handler.RegisterCustomProvisionerHook(provisionUser)
 	iamService.SetProvisioner(provisionUser)

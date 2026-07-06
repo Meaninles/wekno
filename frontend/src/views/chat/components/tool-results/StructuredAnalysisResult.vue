@@ -1,5 +1,5 @@
 <template>
-  <div class="structured-analysis">
+  <div class="structured-analysis" :class="{ 'structured-analysis--mobile': mobileMode }">
     <div v-if="renderChartArea" class="analysis-chart" :class="{ 'analysis-chart--error': chartError }">
       <div ref="chartEl" class="analysis-chart__canvas" />
       <div v-if="chartError" class="analysis-chart__error">{{ chartError }}</div>
@@ -42,6 +42,7 @@ import {
   TreemapChart,
 } from 'echarts/charts';
 import {
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
   RadarComponent,
@@ -63,6 +64,7 @@ echarts.use([
   RadarChart,
   ScatterChart,
   TreemapChart,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
   RadarComponent,
@@ -72,14 +74,20 @@ echarts.use([
   CanvasRenderer,
 ]);
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   data: StructuredAnalysisData;
-}>();
+  mobileMode?: boolean;
+}>(), {
+  mobileMode: false,
+});
 
 const chartEl = ref<HTMLDivElement | null>(null);
 const chartError = ref('');
 const chartUnavailable = ref(false);
 let chart: EChartsType | null = null;
+let resizeObserver: ResizeObserver | null = null;
+let resizeFrame = 0;
+let outsideChartPointerEvent = '';
 
 const rows = computed(() => props.data.rows || []);
 const columnNames = computed(() => {
@@ -536,16 +544,26 @@ function buildChartTitle(chartType: string, xField: string, yFields: string[]): 
 }
 
 function baseTitle(chartType: string, xField: string, yFields: string[]) {
-  const width = Math.max(160, (chartEl.value?.clientWidth || 800) - 64);
+  const widthPadding = props.mobileMode ? 32 : 64;
+  const width = Math.max(props.mobileMode ? 120 : 160, (chartEl.value?.clientWidth || 800) - widthPadding);
   return {
     text: contractDisplayLabel('title') || buildChartTitle(chartType, xField, yFields),
-    top: 6,
+    top: props.mobileMode ? 4 : 6,
     left: 'center',
-    textStyle: { fontSize: 15, fontWeight: 600, width, overflow: 'truncate' },
+    textStyle: { fontSize: props.mobileMode ? 13 : 15, fontWeight: 600, width, overflow: 'truncate' },
   };
 }
 
 function commonGrid(top = 76, bottom = 56, left = 68, right = 40) {
+  if (props.mobileMode) {
+    return {
+      left: 30,
+      right: 30,
+      top,
+      bottom: Math.max(bottom, 54),
+      containLabel: false,
+    };
+  }
   return { left, right, top, bottom, containLabel: true };
 }
 
@@ -558,20 +576,20 @@ function valueAxisName(field: string, fallback = '数值') {
 }
 
 function categoryAxisLabel(maxWidth = 88) {
-  return { hideOverlap: true, overflow: 'truncate', width: maxWidth };
+  return { hideOverlap: true, overflow: 'truncate', width: props.mobileMode ? Math.min(maxWidth, 64) : maxWidth };
 }
 
 function axisNameOption(name: string, rotate = 0, gap = 32) {
   return {
     name,
     nameLocation: 'middle',
-    nameGap: gap,
+    nameGap: props.mobileMode ? Math.min(gap, 26) : gap,
     nameRotate: rotate,
     nameTextStyle: {
       align: 'center',
       verticalAlign: 'middle',
       overflow: 'truncate',
-      width: 120,
+      width: props.mobileMode ? 84 : 120,
     },
   };
 }
@@ -1010,6 +1028,220 @@ function buildBoxplotOption(chartType: string, xField: string, yFields: string[]
   };
 }
 
+function asOptionArray(value: any): any[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function mobileLegendOption(legend: any = {}) {
+  return {
+    ...legend,
+    type: 'scroll',
+    left: 8,
+    right: 8,
+    top: legend.top ?? 30,
+    itemWidth: 10,
+    itemHeight: 8,
+    pageIconSize: 10,
+    pageButtonItemGap: 4,
+    textStyle: {
+      ...(legend.textStyle || {}),
+      fontSize: 11,
+    },
+  };
+}
+
+function tuneMobileAxis(axis: any, isCategory = false, orientation: 'x' | 'y' = 'x') {
+  if (!axis || typeof axis !== 'object') return axis;
+  const isValueYAxis = orientation === 'y' && !isCategory;
+  return {
+    ...axis,
+    name: '',
+    nameGap: 0,
+    nameTextStyle: {
+      ...(axis.nameTextStyle || {}),
+      fontSize: 10,
+      width: 76,
+      overflow: 'truncate',
+    },
+    axisLabel: {
+      ...(axis.axisLabel || {}),
+      hideOverlap: true,
+      inside: isValueYAxis ? false : axis.axisLabel?.inside,
+      width: isCategory ? 58 : 32,
+      overflow: 'truncate',
+      fontSize: 10,
+      margin: isValueYAxis ? 3 : 4,
+      rotate: isCategory && Array.isArray(axis.data) && axis.data.length > 6
+        ? Math.max(Number(axis.axisLabel?.rotate || 0), 28)
+        : axis.axisLabel?.rotate,
+    },
+  };
+}
+
+function categoryAxisIndexes(option: any): number[] {
+  return asOptionArray(option.xAxis)
+    .map((axis, index) => ({ axis, index }))
+    .filter(({ axis }) => axis?.type === 'category')
+    .map(({ index }) => index);
+}
+
+function maxCategoryCount(option: any): number {
+  return Math.max(
+    0,
+    ...asOptionArray(option.xAxis)
+      .filter(axis => axis?.type === 'category')
+      .map(axis => Array.isArray(axis.data) ? axis.data.length : 0),
+  );
+}
+
+function ensureGridBottom(option: any, minBottom: number) {
+  const grids = asOptionArray(option.grid);
+  if (!grids.length) return;
+  const nextGrids = grids.map((grid) => ({
+    ...grid,
+    bottom: Math.max(Number(grid?.bottom || 0), minBottom),
+  }));
+  option.grid = Array.isArray(option.grid) ? nextGrids : nextGrids[0];
+}
+
+function appendMobileDataZoom(option: any, chartType: string) {
+  const zoomableTypes = new Set(['bar', 'line', 'area', 'stacked_bar', 'histogram', 'dual_axis_combo', 'boxplot']);
+  const xAxisIndexes = categoryAxisIndexes(option);
+  const pointCount = maxCategoryCount(option);
+  if (!zoomableTypes.has(chartType) || xAxisIndexes.length === 0 || pointCount <= 6) return;
+
+  const existing = asOptionArray(option.dataZoom);
+  option.dataZoom = [
+    ...existing,
+    {
+      type: 'inside',
+      xAxisIndex: xAxisIndexes,
+      zoomOnMouseWheel: false,
+      moveOnMouseMove: true,
+      moveOnMouseWheel: true,
+      preventDefaultMouseMove: true,
+    },
+    {
+      type: 'slider',
+      xAxisIndex: xAxisIndexes,
+      height: 16,
+      bottom: 8,
+      showDetail: false,
+      brushSelect: false,
+      borderColor: 'transparent',
+      fillerColor: 'rgba(7, 193, 96, 0.16)',
+      handleSize: 12,
+      textStyle: { fontSize: 10 },
+    },
+  ];
+  ensureGridBottom(option, 74);
+}
+
+function tuneMobileSeries(option: any, chartType: string) {
+  const series = asOptionArray(option.series);
+  for (const item of series) {
+    if (!item || typeof item !== 'object') continue;
+    item.label = {
+      ...(item.label || {}),
+      fontSize: 10,
+      overflow: 'truncate',
+      width: chartType === 'treemap' ? 72 : item.label?.width,
+    };
+
+    if (chartType === 'pie') {
+      item.radius = ['32%', '60%'];
+      item.center = ['50%', '54%'];
+      item.top = 38;
+      item.bottom = 28;
+    } else if (chartType === 'funnel') {
+      item.top = 68;
+      item.bottom = 32;
+      item.left = '7%';
+      item.width = '86%';
+    } else if (chartType === 'treemap') {
+      item.top = 52;
+      item.bottom = 8;
+      item.left = 4;
+      item.right = 4;
+    }
+  }
+  option.series = Array.isArray(option.series) ? series : series[0];
+}
+
+function tuneMobileSpecialLayouts(option: any, chartType: string) {
+  if (chartType === 'pie' || chartType === 'funnel') {
+    option.legend = mobileLegendOption({
+      ...(option.legend || {}),
+      top: 'auto',
+      bottom: 0,
+    });
+  }
+
+  if (chartType === 'radar') {
+    option.legend = mobileLegendOption({
+      ...(option.legend || {}),
+      top: 'auto',
+      bottom: 0,
+    });
+    if (option.radar) {
+      option.radar = {
+        ...option.radar,
+        top: 64,
+        bottom: 42,
+        radius: '54%',
+        axisName: {
+          ...(option.radar.axisName || {}),
+          fontSize: 10,
+          overflow: 'truncate',
+          width: 64,
+        },
+      };
+    }
+  }
+
+  if (chartType === 'heatmap') {
+    option.visualMap = {
+      ...(option.visualMap || {}),
+      show: false,
+    };
+    ensureGridBottom(option, 64);
+  }
+}
+
+function applyMobileChartOption(option: any, chartType: string) {
+  if (!props.mobileMode || !option) return option;
+
+  option.tooltip = {
+    ...(option.tooltip || {}),
+    alwaysShowContent: false,
+    appendToBody: false,
+    confine: true,
+    enterable: false,
+    hideDelay: 60,
+    triggerOn: 'click',
+    textStyle: {
+      ...(option.tooltip?.textStyle || {}),
+      fontSize: 12,
+    },
+  };
+
+  if (option.legend) {
+    option.legend = mobileLegendOption(option.legend);
+  }
+
+  const xAxes = asOptionArray(option.xAxis).map(axis => tuneMobileAxis(axis, axis?.type === 'category', 'x'));
+  const yAxes = asOptionArray(option.yAxis).map(axis => tuneMobileAxis(axis, axis?.type === 'category', 'y'));
+  if (xAxes.length) option.xAxis = Array.isArray(option.xAxis) ? xAxes : xAxes[0];
+  if (yAxes.length) option.yAxis = Array.isArray(option.yAxis) ? yAxes : yAxes[0];
+
+  tuneMobileSeries(option, chartType);
+  tuneMobileSpecialLayouts(option, chartType);
+  appendMobileDataZoom(option, chartType);
+
+  return option;
+}
+
 function buildChartOption() {
   const spec = props.data.chart;
   if (!spec || rows.value.length === 0) return null;
@@ -1057,11 +1289,17 @@ function buildChartOption() {
       option = buildCategoryMetricOption(chartType, xField, resolvedYFields);
       break;
   }
-  return option || (xField && resolvedYFields.length ? buildCategoryMetricOption('bar', xField, resolvedYFields) : null);
+  const fallback = option || (xField && resolvedYFields.length ? buildCategoryMetricOption('bar', xField, resolvedYFields) : null);
+  return applyMobileChartOption(fallback, fallback === option ? chartType : 'bar');
 }
 
 async function renderChart() {
   await nextTick();
+  if (props.mobileMode && typeof window !== 'undefined') {
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+    });
+  }
   if (!showChart.value || !chartEl.value) {
     chart?.dispose();
     chart = null;
@@ -1079,7 +1317,11 @@ async function renderChart() {
     }
     chartError.value = '';
     chartUnavailable.value = false;
-    if (!chart) chart = echarts.init(chartEl.value);
+    if (!chart) {
+      chart = props.mobileMode
+        ? echarts.init(chartEl.value, undefined, { renderer: 'canvas', useCoarsePointer: true })
+        : echarts.init(chartEl.value);
+    }
     chart.setOption(option, true);
     chart.resize();
   } catch (error) {
@@ -1112,9 +1354,48 @@ function resizeChart() {
   chart?.resize();
 }
 
+function scheduleResizeChart() {
+  if (typeof window === 'undefined') {
+    resizeChart();
+    return;
+  }
+  window.cancelAnimationFrame(resizeFrame);
+  resizeFrame = window.requestAnimationFrame(() => resizeChart());
+}
+
+function hideChartInteractionState() {
+  if (!chart) return;
+  chart.dispatchAction({ type: 'hideTip' });
+  chart.dispatchAction({ type: 'downplay' });
+}
+
+function handleOutsideChartPointer(event: Event) {
+  if (!props.mobileMode || !chartEl.value) return;
+  const target = event.target;
+  if (target instanceof Node && chartEl.value.contains(target)) return;
+  hideChartInteractionState();
+}
+
+function addOutsideChartPointerListener() {
+  if (!props.mobileMode || typeof document === 'undefined') return;
+  outsideChartPointerEvent = typeof window !== 'undefined' && 'PointerEvent' in window ? 'pointerdown' : 'touchstart';
+  document.addEventListener(outsideChartPointerEvent, handleOutsideChartPointer, true);
+}
+
+function removeOutsideChartPointerListener() {
+  if (!outsideChartPointerEvent || typeof document === 'undefined') return;
+  document.removeEventListener(outsideChartPointerEvent, handleOutsideChartPointer, true);
+  outsideChartPointerEvent = '';
+}
+
 onMounted(() => {
   renderChart();
   window.addEventListener('resize', resizeChart);
+  addOutsideChartPointerListener();
+  if (props.mobileMode && chartEl.value && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(scheduleResizeChart);
+    resizeObserver.observe(chartEl.value);
+  }
 });
 watch(() => props.data, renderChart, { deep: true });
 watch(() => props.data, () => {
@@ -1123,6 +1404,10 @@ watch(() => props.data, () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resizeChart);
+  removeOutsideChartPointerListener();
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  if (typeof window !== 'undefined') window.cancelAnimationFrame(resizeFrame);
   chart?.dispose();
   chart = null;
 });
@@ -1202,6 +1487,46 @@ onBeforeUnmount(() => {
 
   &.compact {
     padding: 12px 16px;
+  }
+}
+
+.structured-analysis--mobile {
+  width: 100%;
+  min-width: 0;
+  color: #1e3027;
+  font-size: 13px;
+
+  .analysis-chart {
+    height: clamp(260px, 74vw, 340px);
+    margin: 4px 0 10px;
+    border: 0;
+    border-radius: 12px;
+    background: #fff;
+  }
+
+  .analysis-table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    border: 0;
+    border-radius: 12px;
+    background: #fff;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .analysis-table {
+    width: max-content;
+    min-width: 100%;
+    font-size: 12px;
+    line-height: 1.45;
+
+    th,
+    td {
+      padding: 8px 10px;
+    }
+  }
+
+  .empty-result.compact {
+    display: none;
   }
 }
 </style>

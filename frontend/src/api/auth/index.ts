@@ -99,6 +99,8 @@ export interface UserPreferences {
   // 偏好；后端在 Login / RefreshToken 时校验 membership 有效后才会沿用，
   // 否则回退到 home 并清掉这个字段。传 0 给 PATCH 表示「清除偏好」。
   last_active_tenant_id?: number | null
+  chat_agent_pins?: string[] | null
+  chat_skill_pins?: string[] | null
 }
 
 // 用户信息接口

@@ -54,6 +54,24 @@ services:
       - WeKnora-network-dev
     command: ["bash", "scripts/dev_app_docker.sh"]
 
+  mobile-web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.mobile
+    image: weknora-mobile-web:local
+    container_name: WeKnora-mobile-web
+    environment:
+      APP_SCHEME: http
+      APP_HOST: app-dev
+      APP_PORT: 8080
+      MAX_FILE_SIZE_MB: 50
+    ports:
+      - "${MOBILE_WEB_PORT:-8081}:80"
+    depends_on:
+      - app-dev
+    networks:
+      - WeKnora-network-dev
+
 volumes:
   go-mod-cache-dev:
   go-build-cache-dev:

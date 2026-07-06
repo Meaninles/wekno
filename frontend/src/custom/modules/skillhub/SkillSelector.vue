@@ -240,14 +240,21 @@ const normalizeNames = (names: string[]) => {
 
 const toggleSkill = (name: string) => {
   const selected = activeSelectedNames.value
+  const removing = isSelected(name)
   const next = isSelected(name)
     ? selected.filter((item) => item !== name)
     : [...selected, name]
   if (activeTab.value === 'professional') {
     setProfessionalSelection(next)
+    if (!removing) {
+      setLightweightSelection(selectedNames.value.filter((item) => item !== name))
+    }
     return
   }
   setLightweightSelection(next)
+  if (!removing) {
+    setProfessionalSelection(selectedProfessionalNames.value.filter((item) => item !== name))
+  }
 }
 
 const toggleSelection = () => {

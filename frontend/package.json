@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mobile": "vite --config vite.mobile.config.ts",
     "build": "vite build",
+    "build:mobile": "vite build --config vite.mobile.config.ts",
     "build-with-types": "run-p type-check \"build-only {@}\" --",
     "preview": "vite preview",
     "build-only": "vite build",

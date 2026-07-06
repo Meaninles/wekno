@@ -1579,7 +1579,7 @@ const onDragHandleMouseDown = (e: MouseEvent) => {
     .timeline_header {
         font-family: var(--app-font-family);
         font-size: 11px;
-        font-weight: 600;
+        font-weight: 400;
         color: var(--td-text-color-disabled);
         padding-top: 4px;
         padding-bottom: 1px;
@@ -1709,6 +1709,7 @@ const onDragHandleMouseDown = (e: MouseEvent) => {
             flex: 1 1 auto;
             min-width: 0;
             overflow: hidden;
+            font-weight: 380;
             white-space: nowrap;
             text-overflow: ellipsis;
         }

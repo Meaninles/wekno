@@ -3,9 +3,12 @@ package builtinagentdefaults
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -23,6 +26,126 @@ type Service struct {
 
 func NewService(db *gorm.DB, agentService interfaces.CustomAgentService) *Service {
 	return &Service{db: db, agentService: agentService}
+}
+
+// EnsureAllUsers backfills built-in agent records for existing active personal
+// tenants. Missing rows are created with tenant-local model IDs resolved from
+// the reference tenant defaults; existing rows are left untouched.
+func (s *Service) EnsureAllUsers(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var users []types.User
+	if err := s.db.WithContext(ctx).
+		Where("is_active = ?", true).
+		Where("tenant_id <> ?", referenceTenantID).
+		Find(&users).Error; err != nil {
+		return err
+	}
+
+	seenTenants := make(map[uint64]bool, len(users))
+	errs := make([]string, 0)
+	for i := range users {
+		user := &users[i]
+		if user.TenantID == 0 || seenTenants[user.TenantID] {
+			continue
+		}
+		seenTenants[user.TenantID] = true
+		if err := s.EnsureUserProvisioned(ctx, user); err != nil {
+			errs = append(errs, fmt.Sprintf("%s/%d: %v", user.Username, user.TenantID, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// EnsureUserProvisioned makes the user's home tenant own concrete built-in
+// agent rows before the frontend loads models/agents on first login.
+func (s *Service) EnsureUserProvisioned(ctx context.Context, user *types.User) error {
+	if s == nil || s.db == nil || user == nil || user.TenantID == 0 || !user.IsActive {
+		return nil
+	}
+	if user.TenantID == referenceTenantID {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	provisionCtx := context.WithValue(ctx, types.TenantIDContextKey, user.TenantID)
+	if user.ID != "" {
+		provisionCtx = context.WithValue(provisionCtx, types.UserIDContextKey, user.ID)
+	}
+	return s.ensureTenantBuiltinAgents(provisionCtx, user.TenantID)
+}
+
+func (s *Service) ensureTenantBuiltinAgents(ctx context.Context, tenantID uint64) error {
+	errs := make([]string, 0)
+	for _, builtinID := range types.GetBuiltinAgentIDs() {
+		if !isPublicBuiltinAgent(builtinID) {
+			continue
+		}
+		if err := s.ensureTenantBuiltinAgent(ctx, tenantID, builtinID); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", builtinID, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (s *Service) ensureTenantBuiltinAgent(ctx context.Context, tenantID uint64, id string) error {
+	var existingCount int64
+	err := s.db.WithContext(ctx).
+		Model(&types.CustomAgent{}).
+		Where("id = ? AND tenant_id = ?", id, tenantID).
+		Count(&existingCount).Error
+	if err != nil {
+		return err
+	}
+	if existingCount > 0 {
+		return nil
+	}
+
+	defaultAgent := types.GetBuiltinAgentWithContext(ctx, id, tenantID)
+	if defaultAgent == nil {
+		return ErrBuiltinAgentNotFound
+	}
+
+	now := time.Now()
+	agent := &types.CustomAgent{
+		ID:               defaultAgent.ID,
+		Name:             defaultAgent.Name,
+		Description:      defaultAgent.Description,
+		Avatar:           defaultAgent.Avatar,
+		IsBuiltin:        true,
+		TenantID:         tenantID,
+		RunnableByViewer: defaultAgent.RunnableByViewer,
+		Config:           defaultAgent.Config,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+
+	agent.EnsureDefaults()
+	if err := types.NormalizeCustomAgentDocumentTemplateConfig(&agent.Config); err != nil {
+		return err
+	}
+	resolvedAgent, err := s.ApplyReferenceModelDefaults(ctx, agent, tenantID)
+	if err != nil {
+		return err
+	}
+	agent = resolvedAgent
+
+	return s.db.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(agent).Error
 }
 
 func (s *Service) Reset(ctx context.Context, id string) (*types.CustomAgent, error) {

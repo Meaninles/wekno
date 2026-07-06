@@ -7,6 +7,9 @@ export type SourceReference = {
   knowledge_title?: string
   knowledge_filename?: string
   knowledge_base_id?: string
+  chunk_index?: number
+  start_at?: number
+  end_at?: number
   chunk_type?: string
   metadata?: Record<string, string>
 }
@@ -24,6 +27,10 @@ export type SourceReferenceItem = {
   url: string
   knowledgeBaseId: string
   knowledgeId: string
+  chunkId: string
+  chunkIndex: number | null
+  startAt: number | null
+  endAt: number | null
   slug: string
   sourceId: string
   clickable: boolean
@@ -74,6 +81,10 @@ export function buildSourceReferenceItems(
     const slug = metadata.slug || stripWikiID(ref.id || '')
     const knowledgeBaseId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
     const knowledgeId = ref.knowledge_id || metadata.knowledge_id || ''
+    const chunkId = knowledgeChunkId(ref, type)
+    const chunkIndex = numberValue(ref.chunk_index ?? metadata.chunk_index)
+    const startAt = numberValue(ref.start_at ?? metadata.start_at)
+    const endAt = numberValue(ref.end_at ?? metadata.end_at)
     const sourceId = metadata.source_id || stripDataSourceID(ref.id || '')
     const title = normalizeDisplayText(sourceTitle(ref, type, url, slug, sourceId))
     const sourceLabel = normalizeDisplayText(sourceLabelFor(ref, type, url))
@@ -91,12 +102,17 @@ export function buildSourceReferenceItems(
       url,
       knowledgeBaseId,
       knowledgeId,
+      chunkId,
+      chunkIndex,
+      startAt,
+      endAt,
       slug,
       sourceId,
       clickable: isClickable(type, {
         url,
         knowledgeBaseId,
         knowledgeId,
+        chunkId,
         slug,
         sourceId,
       }),
@@ -183,6 +199,30 @@ export function isHttpUrl(value?: string): boolean {
   return Boolean(value && (value.startsWith('http://') || value.startsWith('https://')))
 }
 
+export function focusEmptyKnowledgeDocumentLinkReferenceTarget(
+  root: ParentNode | null | undefined,
+  origin: HTMLAnchorElement | null | undefined,
+): boolean {
+  if (!root || !origin) return false
+  if ((origin.getAttribute('href') ?? null) !== '') return false
+
+  const linkTitle = normalizeReferenceTitle(origin.textContent || '')
+  if (!linkTitle) return false
+
+  const candidates = Array.from(root.querySelectorAll<HTMLElement>('.citation-source'))
+    .filter((el) => (el.dataset.sourceType || 'knowledge') === 'knowledge')
+  if (!candidates.length) return false
+
+  const matched = candidates.filter((el) => referenceTitleMatches(linkTitle, el.dataset.title || ''))
+  if (!matched.length) return false
+
+  const target = nearestReferenceTarget(matched, origin)
+  if (!target) return false
+
+  focusReferenceTarget(target)
+  return true
+}
+
 function compareSourceItems(
   a: SourceReferenceItem,
   b: SourceReferenceItem,
@@ -216,7 +256,11 @@ function fallbackSourceKey(ref: SourceReference, type: SourceReferenceKind): str
   if (type === 'data_source') {
     return `data_source:${metadata.source_id || stripDataSourceID(ref.id || '') || metadata.source_name || ref.id || ''}`
   }
-  return `knowledge:${ref.knowledge_base_id || metadata.knowledge_base_id || ''}:${ref.knowledge_id || metadata.knowledge_id || ref.knowledge_title || ref.knowledge_filename || ref.id || ''}`
+  const kbId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
+  const knowledgeId = ref.knowledge_id || metadata.knowledge_id || ''
+  const chunkId = knowledgeChunkId(ref, type)
+  if (chunkId) return `knowledge:${kbId}:${knowledgeId}:${chunkId}`
+  return `knowledge:${kbId}:${knowledgeId || ref.knowledge_title || ref.knowledge_filename || ref.id || ''}`
 }
 
 function sourceTitle(ref: SourceReference, type: SourceReferenceKind, url: string, slug: string, sourceId: string): string {
@@ -254,6 +298,7 @@ function isClickable(
     url: string
     knowledgeBaseId: string
     knowledgeId: string
+    chunkId: string
     slug: string
     sourceId: string
   },
@@ -261,7 +306,69 @@ function isClickable(
   if (type === 'web') return Boolean(info.url)
   if (type === 'wiki') return Boolean(info.knowledgeBaseId && info.slug)
   if (type === 'data_source') return Boolean(info.sourceId)
-  return Boolean(info.knowledgeBaseId)
+  return Boolean(info.chunkId || info.knowledgeId || info.knowledgeBaseId)
+}
+
+function nearestReferenceTarget(candidates: HTMLElement[], origin?: Element | null): HTMLElement | null {
+  if (!candidates.length) return null
+  if (!origin) return candidates[0]
+
+  const following = candidates.find((candidate) =>
+    Boolean(origin.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING),
+  )
+  return following || candidates[0]
+}
+
+function focusReferenceTarget(target: HTMLElement) {
+  target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+  target.focus?.({ preventScroll: true })
+  target.classList.remove('is-source-jump-target')
+  window.setTimeout(() => target.classList.add('is-source-jump-target'), 0)
+  window.setTimeout(() => target.classList.remove('is-source-jump-target'), 1400)
+}
+
+function referenceTitleMatches(linkTitle: string, sourceTitle: string): boolean {
+  const source = normalizeReferenceTitle(sourceTitle)
+  return Boolean(source && (
+    source === linkTitle ||
+    source.includes(linkTitle) ||
+    linkTitle.includes(source)
+  ))
+}
+
+function normalizeReferenceTitle(value: string): string {
+  const decoded = safeDecode(value)
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .pop() || value
+  return decoded
+    .replace(/\.[^.]+$/, '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(String(value || '').trim())
+  } catch {
+    return String(value || '').trim()
+  }
+}
+
+function knowledgeChunkId(ref: SourceReference, type: SourceReferenceKind): string {
+  if (type !== 'knowledge') return ''
+  const metadata = ref.metadata || {}
+  const id = metadata.chunk_id || ref.id || ''
+  const knowledgeId = ref.knowledge_id || metadata.knowledge_id || ''
+  return id && id !== knowledgeId ? id : ''
+}
+
+function numberValue(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const num = Number(value)
+  return Number.isFinite(num) ? num : null
 }
 
 function stripWikiID(value: string): string {

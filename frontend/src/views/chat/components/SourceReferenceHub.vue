@@ -2,7 +2,7 @@
   <div v-if="items.length" ref="rootElement" class="source-reference-hub" :class="{ 'is-embedded': embeddedMode }">
     <button type="button" class="source-reference-trigger" @click.stop="togglePanel">
       <t-icon class="source-reference-trigger__icon" name="file-search" />
-      <span class="source-reference-trigger__text">引用 {{ items.length }} 篇资料作为参考</span>
+      <span class="source-reference-trigger__text">引用 {{ items.length }} 条参考资料</span>
       <t-icon class="source-reference-trigger__arrow" name="chevron-right" />
     </button>
 
@@ -38,27 +38,48 @@
       </div>
     </Teleport>
 
-    <t-drawer v-if="wikiDrawerVisible" v-model:visible="wikiDrawerVisible" :header="wikiDrawerPage?.title || ''"
-      size="480px" :footer="false" placement="right" attach="body" :show-overlay="true" :close-btn="true"
-      :close-on-overlay-click="true" :destroy-on-close="true" class="source-reference-wiki-drawer">
-      <template v-if="wikiDrawerPage">
-        <div class="wiki-reader-meta">
-          <t-tag v-if="wikiDrawerPage.page_type" size="small" :theme="getTypeTheme(wikiDrawerPage.page_type)"
-            variant="light-outline">
-            {{ getTypeLabel(wikiDrawerPage.page_type) }}
-          </t-tag>
-          <span v-if="wikiDrawerPage.version" class="wiki-reader-meta-text">
-            {{ t('knowledgeEditor.wikiBrowser.version', { ver: wikiDrawerPage.version }) }}
-          </span>
-          <t-button size="small" variant="text" @click="openWikiGraphInNewTab">
-            {{ t('knowledgeEditor.wikiBrowser.viewInGraph') }}
-          </t-button>
-        </div>
-        <div ref="wikiDrawerBodyRef" class="wiki-reader-body" v-html="wikiDrawerContent"
-          @click="handleWikiDrawerClick" />
-      </template>
-    </t-drawer>
   </div>
+
+  <t-drawer v-if="wikiDrawerVisible" v-model:visible="wikiDrawerVisible" :header="wikiDrawerPage?.title || ''"
+    size="480px" :footer="false" placement="right" attach="body" :show-overlay="true" :close-btn="true"
+    :close-on-overlay-click="true" :destroy-on-close="true" class="source-reference-wiki-drawer">
+    <template v-if="wikiDrawerPage">
+      <div class="wiki-reader-meta">
+        <t-tag v-if="wikiDrawerPage.page_type" size="small" :theme="getTypeTheme(wikiDrawerPage.page_type)"
+          variant="light-outline">
+          {{ getTypeLabel(wikiDrawerPage.page_type) }}
+        </t-tag>
+        <span v-if="wikiDrawerPage.version" class="wiki-reader-meta-text">
+          {{ t('knowledgeEditor.wikiBrowser.version', { ver: wikiDrawerPage.version }) }}
+        </span>
+        <t-button size="small" variant="text" @click="openWikiGraphInNewTab">
+          {{ t('knowledgeEditor.wikiBrowser.viewInGraph') }}
+        </t-button>
+      </div>
+      <div ref="wikiDrawerBodyRef" class="wiki-reader-body" v-html="wikiDrawerContent"
+        @click="handleWikiDrawerClick" />
+    </template>
+  </t-drawer>
+
+  <t-drawer v-if="knowledgeDrawerVisible" v-model:visible="knowledgeDrawerVisible"
+    :header="knowledgeDrawer.title || '知识库文档'" size="480px" :footer="false" placement="right" attach="body"
+    :show-overlay="true" :close-btn="true" :close-on-overlay-click="true" :destroy-on-close="true"
+    class="source-reference-wiki-drawer">
+    <div class="wiki-reader-meta">
+      <t-tag size="small" theme="primary" variant="light-outline">文档片段</t-tag>
+      <span v-if="knowledgeDrawerMetaText" class="wiki-reader-meta-text">{{ knowledgeDrawerMetaText }}</span>
+      <t-button v-if="canOpenKnowledgeDocument" size="small" variant="text" @click="openKnowledgeDocumentInNewTab">
+        打开文档
+      </t-button>
+    </div>
+    <div v-if="knowledgeDrawer.loading" class="wiki-reader-body source-reference-reader-state">
+      正在加载文档片段
+    </div>
+    <div v-else-if="knowledgeDrawer.error" class="wiki-reader-body source-reference-reader-state is-error">
+      {{ knowledgeDrawer.error }}
+    </div>
+    <div v-else ref="knowledgeDrawerBodyRef" class="wiki-reader-body" v-html="knowledgeDrawerContent" />
+  </t-drawer>
 </template>
 
 <script setup lang="ts">
@@ -67,11 +88,14 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { marked } from 'marked'
 import { MessagePlugin } from 'tdesign-vue-next'
+import { getChunkByIdOnly } from '@/api/knowledge-base'
 import { getWikiPage, type WikiPage } from '@/api/wiki'
+import { useChatResourcesStore } from '@/stores/chatResources'
 import { hydrateProtectedFileImages, sanitizeMarkdownHTML } from '@/utils/security'
 import { wrapChatMarkdownTables } from '@/utils/chatMarkdownRenderer'
 import {
   buildCitedSourceReferenceItems,
+  buildSourceReferenceItems,
   sourceTypeLabel,
   type SourceReference,
   type SourceReferenceItem,
@@ -85,6 +109,17 @@ type SessionWithReferences = {
   knowledge_references?: SourceReference[]
 }
 
+type KnowledgeDrawerState = {
+  title: string
+  content: string
+  knowledgeBaseId: string
+  knowledgeId: string
+  chunkId: string
+  chunkIndex: number | null
+  loading: boolean
+  error: string
+}
+
 const props = defineProps<{
   session?: SessionWithReferences
   content?: string
@@ -93,6 +128,7 @@ const props = defineProps<{
 
 const { t } = useI18n()
 const router = useRouter()
+const chatResources = useChatResourcesStore()
 
 const rootElement = ref<HTMLElement | null>(null)
 const panelElement = ref<HTMLElement | null>(null)
@@ -101,6 +137,18 @@ const wikiDrawerVisible = ref(false)
 const wikiDrawerPage = ref<WikiPage | null>(null)
 const wikiDrawerBodyRef = ref<HTMLElement | null>(null)
 const currentWikiKbId = ref('')
+const knowledgeDrawerVisible = ref(false)
+const knowledgeDrawerBodyRef = ref<HTMLElement | null>(null)
+const knowledgeDrawer = ref<KnowledgeDrawerState>({
+  title: '',
+  content: '',
+  knowledgeBaseId: '',
+  knowledgeId: '',
+  chunkId: '',
+  chunkIndex: null,
+  loading: false,
+  error: '',
+})
 const panelOwnerId = `source-reference-${Math.random().toString(36).slice(2)}`
 
 const referenceContent = computed(() => {
@@ -125,6 +173,8 @@ const items = computed(() => buildCitedSourceReferenceItems(
   Boolean(props.session?.is_completed),
 ))
 
+const allItems = computed(() => buildSourceReferenceItems(props.session?.knowledge_references))
+
 const wikiDrawerContent = computed(() => {
   if (!wikiDrawerPage.value) return ''
   const preprocessed = String(wikiDrawerPage.value.content || '').replace(
@@ -142,10 +192,31 @@ const wikiDrawerContent = computed(() => {
   return sanitizeMarkdownHTML(wrapChatMarkdownTables(html))
 })
 
+const knowledgeDrawerContent = computed(() => {
+  const html = marked.parse(knowledgeDrawer.value.content || '', { breaks: true, async: false }) as string
+  return sanitizeMarkdownHTML(wrapChatMarkdownTables(html))
+})
+
+const knowledgeDrawerMetaText = computed(() => {
+  const index = knowledgeDrawer.value.chunkIndex
+  return index === null ? '' : `第 ${index + 1} 个文档片段`
+})
+
+const canOpenKnowledgeDocument = computed(() =>
+  Boolean(knowledgeDrawer.value.knowledgeBaseId && knowledgeDrawer.value.knowledgeId),
+)
+
 watch(wikiDrawerContent, async () => {
   await nextTick()
   if (wikiDrawerBodyRef.value) {
     await hydrateProtectedFileImages(wikiDrawerBodyRef.value)
+  }
+})
+
+watch(knowledgeDrawerContent, async () => {
+  await nextTick()
+  if (knowledgeDrawerBodyRef.value) {
+    await hydrateProtectedFileImages(knowledgeDrawerBodyRef.value)
   }
 })
 
@@ -199,14 +270,11 @@ function activateItem(item: SourceReferenceItem) {
     window.open(item.url, '_blank', 'noopener,noreferrer')
     return
   }
-  if (item.type === 'knowledge' && item.knowledgeBaseId) {
-    openRouteInNewTab({
-      path: `/platform/knowledge-bases/${item.knowledgeBaseId}`,
-      query: item.knowledgeId ? { knowledge_id: item.knowledgeId } : {},
-    })
+  if (item.type === 'knowledge') {
+    void openKnowledgeDrawer(item)
     return
   }
-  if (item.type === 'wiki' && item.knowledgeBaseId && item.slug) {
+  if (item.type === 'wiki' && item.slug) {
     void openWikiDrawer(item.knowledgeBaseId, item.slug)
     return
   }
@@ -224,6 +292,9 @@ function itemFromElement(el: HTMLElement): SourceReferenceItem | null {
   const url = el.getAttribute('data-url') || ''
   const knowledgeBaseId = el.getAttribute('data-kb-id') || ''
   const knowledgeId = el.getAttribute('data-knowledge-id') || ''
+  const chunkId = el.getAttribute('data-chunk-id') || ''
+  const chunkIndexAttr = el.getAttribute('data-chunk-index') || ''
+  const chunkIndex = chunkIndexAttr === '' ? NaN : Number(chunkIndexAttr)
   const slug = el.getAttribute('data-slug') || ''
   const citationId = el.getAttribute('data-source-id') || ''
   return {
@@ -239,29 +310,133 @@ function itemFromElement(el: HTMLElement): SourceReferenceItem | null {
     url,
     knowledgeBaseId,
     knowledgeId,
+    chunkId,
+    chunkIndex: Number.isFinite(chunkIndex) ? chunkIndex : null,
+    startAt: null,
+    endAt: null,
     slug,
     sourceId: el.getAttribute('data-data-source-id') || '',
     clickable: type === 'web'
       ? Boolean(url)
       : type === 'wiki'
-        ? Boolean(knowledgeBaseId && slug)
-        : Boolean(knowledgeBaseId),
+        ? Boolean(slug)
+        : Boolean(chunkId || knowledgeId || knowledgeBaseId),
   }
 }
 
+async function openKnowledgeDrawer(item: SourceReferenceItem) {
+  panelVisible.value = false
+  wikiDrawerVisible.value = false
+  knowledgeDrawer.value = {
+    title: item.title || '知识库文档',
+    content: item.snippet || '',
+    knowledgeBaseId: item.knowledgeBaseId,
+    knowledgeId: item.knowledgeId,
+    chunkId: item.chunkId,
+    chunkIndex: item.chunkIndex,
+    loading: Boolean(item.chunkId),
+    error: '',
+  }
+  knowledgeDrawerVisible.value = true
+
+  if (!item.chunkId) {
+    if (!item.snippet) {
+      knowledgeDrawer.value.error = '这个引用没有关联到可打开的文档片段。'
+    }
+    knowledgeDrawer.value.loading = false
+    return
+  }
+
+  try {
+    const res: any = await getChunkByIdOnly(item.chunkId)
+    const data = res?.data || res || {}
+    knowledgeDrawer.value = {
+      ...knowledgeDrawer.value,
+      content: String(data.content || item.snippet || '').trim(),
+      knowledgeId: item.knowledgeId || data.knowledge_id || '',
+      knowledgeBaseId: item.knowledgeBaseId || data.knowledge_base_id || '',
+      chunkIndex: item.chunkIndex ?? (Number.isFinite(Number(data.chunk_index)) ? Number(data.chunk_index) : null),
+      loading: false,
+      error: data.content || item.snippet ? '' : '没有找到这个文档片段的正文内容。',
+    }
+  } catch (e) {
+    console.error(`Failed to load knowledge fragment ${item.chunkId}:`, e)
+    knowledgeDrawer.value = {
+      ...knowledgeDrawer.value,
+      loading: false,
+      error: '文档片段加载失败，可以稍后重试。',
+    }
+  }
+}
+
+function sameSlug(left: string, right: string) {
+  if (left === right) return true
+  try {
+    return decodeURIComponent(left) === right || left === decodeURIComponent(right)
+  } catch {
+    return false
+  }
+}
+
+function isWikiKb(kb: any) {
+  return kb?.indexing_strategy?.wiki_enabled === true || kb?.wiki_config?.wiki_enabled === true
+}
+
+async function resolveWikiPage(kbId: string, slug: string): Promise<WikiPage> {
+  if (kbId) {
+    const res = await getWikiPage(kbId, slug)
+    return ((res as any).data || res) as WikiPage
+  }
+
+  const referenced = allItems.value.find((item) =>
+    item.type === 'wiki' && sameSlug(item.slug, slug) && item.knowledgeBaseId,
+  )
+  if (referenced?.knowledgeBaseId) {
+    const res = await getWikiPage(referenced.knowledgeBaseId, slug)
+    return ((res as any).data || res) as WikiPage
+  }
+
+  await chatResources.ensureKnowledgeBases().catch(() => undefined)
+  const candidates = (chatResources.rawKnowledgeBases || [])
+    .filter(isWikiKb)
+    .map((kb: any) => String(kb.id || ''))
+    .filter(Boolean)
+
+  for (const candidateKbId of candidates) {
+    try {
+      const res = await getWikiPage(candidateKbId, slug)
+      const page = ((res as any).data || res) as WikiPage
+      if (page?.slug || page?.title || page?.content) return page
+    } catch {
+      // Try the next accessible wiki knowledge base.
+    }
+  }
+
+  throw new Error('Wiki page not found')
+}
+
 async function openWikiDrawer(kbId: string, slug: string) {
-  if (!kbId || !slug) return
+  if (!slug) return
   try {
     panelVisible.value = false
+    knowledgeDrawerVisible.value = false
     window.dispatchEvent(new CustomEvent('weknora:wiki-drawer-open'))
-    currentWikiKbId.value = kbId
-    const res = await getWikiPage(kbId, slug)
-    wikiDrawerPage.value = (res as any).data || res as any
+    const page = await resolveWikiPage(kbId, slug)
+    currentWikiKbId.value = page.knowledge_base_id || kbId
+    wikiDrawerPage.value = page
     wikiDrawerVisible.value = true
   } catch (e) {
     console.error(`Failed to load wiki page ${slug}:`, e)
     MessagePlugin.warning(t('agentStream.citation.loadFailed'))
   }
+}
+
+function openKnowledgeDocumentInNewTab() {
+  if (!knowledgeDrawer.value.knowledgeBaseId || !knowledgeDrawer.value.knowledgeId) return
+  router.push({
+    path: `/platform/knowledge-bases/${knowledgeDrawer.value.knowledgeBaseId}`,
+    query: { knowledge_id: knowledgeDrawer.value.knowledgeId },
+  })
 }
 
 function openWikiGraphInNewTab() {
@@ -600,6 +775,10 @@ defineExpose({
     align-items: center;
     gap: 12px;
     margin-bottom: 14px;
+
+    .t-button {
+      margin-left: auto;
+    }
   }
 
   .wiki-reader-meta-text {
@@ -730,6 +909,19 @@ defineExpose({
       border-bottom: 1px solid var(--td-component-stroke);
       text-align: left;
       vertical-align: top;
+    }
+  }
+
+  .source-reference-reader-state {
+    padding: 18px;
+    border-radius: 8px;
+    background: var(--td-bg-color-secondarycontainer);
+    color: var(--td-text-color-secondary);
+    text-align: center;
+
+    &.is-error {
+      color: var(--td-error-color);
+      background: var(--td-error-color-1);
     }
   }
 }

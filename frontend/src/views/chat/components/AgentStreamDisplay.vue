@@ -499,6 +499,29 @@
       </div>
     </template>
   </t-drawer>
+
+  <t-drawer v-if="knowledgeDrawerVisible" v-model:visible="knowledgeDrawerVisible"
+    :header="knowledgeDrawer.title || '知识库文档'" size="480px" :footer="false" placement="right" attach="body"
+    :show-overlay="true" :close-btn="true" :close-on-overlay-click="true" class="wiki-graph-drawer">
+    <div class="wiki-reader-meta"
+      style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <t-tag size="small" theme="primary" variant="light-outline">文档片段</t-tag>
+        <span v-if="knowledgeDrawerMetaText" class="wiki-reader-meta-text">{{ knowledgeDrawerMetaText }}</span>
+      </div>
+      <t-link v-if="canOpenKnowledgeDocument" theme="primary" hover="color" @click="openKnowledgeDocumentInNewTab">
+        <template #prefixIcon><t-icon name="file" /></template>
+        打开文档
+      </t-link>
+    </div>
+    <div v-if="knowledgeDrawer.loading" class="wiki-reader-body source-reference-reader-state">
+      正在加载文档片段
+    </div>
+    <div v-else-if="knowledgeDrawer.error" class="wiki-reader-body source-reference-reader-state is-error">
+      {{ knowledgeDrawer.error }}
+    </div>
+    <div v-else ref="knowledgeDrawerBodyRef" class="wiki-reader-body" v-html="knowledgeDrawerContent"></div>
+  </t-drawer>
 </template>
 
 <script setup lang="ts">
@@ -516,11 +539,13 @@ import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbac
 import { countGrepDocuments } from '@/utils/grepResultsGroup';
 import { getKnowledgeChunksSummaryHtml } from '@/utils/knowledgeChunksDisplay';
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
+import { getChunkByIdOnly } from '@/api/knowledge-base';
 import { getWikiPage, type WikiPage } from '@/api/wiki';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useUIStore } from '@/stores/ui';
 import { useSettingsStore } from '@/stores/settings';
 import { useAuthStore } from '@/stores/auth';
+import { useChatResourcesStore } from '@/stores/chatResources';
 import { useI18n } from 'vue-i18n';
 import i18n from '@/i18n';
 import {
@@ -553,6 +578,11 @@ import {
   type StructuredChartInfo,
 } from '@/utils/structuredChartMarkdown';
 import {
+  buildSourceReferenceItems,
+  focusEmptyKnowledgeDocumentLinkReferenceTarget,
+  type SourceReferenceItem,
+} from '@/utils/sourceReferences';
+import {
   createMermaidCodeRenderer,
   ensureMermaidInitialized,
   enhanceMarkdownContainer,
@@ -569,6 +599,7 @@ const route = useRoute();
 const uiStore = useUIStore();
 const settingsStore = useSettingsStore();
 const authStore = useAuthStore();
+const chatResources = useChatResourcesStore();
 const { t } = useI18n();
 
 ensureMermaidInitialized();
@@ -689,11 +720,35 @@ const closeImagePreview = () => {
   imagePreviewVisible.value = false;
 };
 
+type KnowledgeDrawerState = {
+  title: string;
+  content: string;
+  knowledgeBaseId: string;
+  knowledgeId: string;
+  chunkId: string;
+  chunkIndex: number | null;
+  loading: boolean;
+  error: string;
+};
+
 // Wiki Drawer 状态
 const wikiDrawerVisible = ref(false);
 const wikiDrawerPage = ref<WikiPage | null>(null);
 const wikiDrawerBodyRef = ref<HTMLElement | null>(null);
 const currentWikiKbId = ref<string>('');
+const knowledgeDrawerVisible = ref(false);
+const knowledgeDrawerBodyRef = ref<HTMLElement | null>(null);
+const knowledgeDrawer = ref<KnowledgeDrawerState>({
+  title: '',
+  content: '',
+  knowledgeBaseId: '',
+  knowledgeId: '',
+  chunkId: '',
+  chunkIndex: null,
+  loading: false,
+  error: '',
+});
+const sourceReferenceItems = computed(() => buildSourceReferenceItems(props.session?.knowledge_references));
 
 function getTypeTheme(type: string): string {
   const map: Record<string, string> = {
@@ -737,6 +792,20 @@ const wikiDrawerContent = computed(() => {
   return wrapChatMarkdownTables(marked.parse(preprocessed, { breaks: true, async: false }) as string);
 });
 
+const knowledgeDrawerContent = computed(() => {
+  const html = marked.parse(knowledgeDrawer.value.content || '', { breaks: true, async: false }) as string;
+  return sanitizeMarkdownHTML(wrapChatMarkdownTables(html));
+});
+
+const knowledgeDrawerMetaText = computed(() => {
+  const index = knowledgeDrawer.value.chunkIndex;
+  return index === null ? '' : `第 ${index + 1} 个文档片段`;
+});
+
+const canOpenKnowledgeDocument = computed(() =>
+  Boolean(knowledgeDrawer.value.knowledgeBaseId && knowledgeDrawer.value.knowledgeId),
+);
+
 watch(wikiDrawerContent, async () => {
   await nextTick();
   if (wikiDrawerBodyRef.value) {
@@ -744,13 +813,67 @@ watch(wikiDrawerContent, async () => {
   }
 });
 
-const openWikiDrawer = async (kbId: string, slug: string) => {
-  if (!kbId || !slug) return;
+watch(knowledgeDrawerContent, async () => {
+  await nextTick();
+  if (knowledgeDrawerBodyRef.value) {
+    await hydrateProtectedFileImages(knowledgeDrawerBodyRef.value);
+  }
+});
+
+function isWikiKb(kb: any): boolean {
+  return kb?.indexing_strategy?.wiki_enabled === true || kb?.wiki_config?.wiki_enabled === true;
+}
+
+function sameWikiSlug(left: string, right: string): boolean {
+  if (left === right) return true;
   try {
-    window.dispatchEvent(new CustomEvent('weknora:wiki-drawer-open'));
-    currentWikiKbId.value = kbId;
+    return decodeURIComponent(left) === right || left === decodeURIComponent(right);
+  } catch {
+    return false;
+  }
+}
+
+async function resolveWikiPage(kbId: string, slug: string): Promise<WikiPage> {
+  if (kbId) {
     const res = await getWikiPage(kbId, slug);
-    wikiDrawerPage.value = (res as any).data || res as any;
+    return ((res as any).data || res) as WikiPage;
+  }
+
+  const referenced = sourceReferenceItems.value.find((item) =>
+    item.type === 'wiki' && sameWikiSlug(item.slug, slug) && item.knowledgeBaseId,
+  );
+  if (referenced?.knowledgeBaseId) {
+    const res = await getWikiPage(referenced.knowledgeBaseId, slug);
+    return ((res as any).data || res) as WikiPage;
+  }
+
+  await chatResources.ensureKnowledgeBases().catch(() => undefined);
+  const candidates = (chatResources.rawKnowledgeBases || [])
+    .filter(isWikiKb)
+    .map((kb: any) => String(kb.id || ''))
+    .filter(Boolean);
+
+  for (const candidateKbId of candidates) {
+    try {
+      const res = await getWikiPage(candidateKbId, slug);
+      const page = ((res as any).data || res) as WikiPage;
+      if (page?.slug || page?.title || page?.content) return page;
+    } catch {
+      // Try the next accessible wiki knowledge base.
+    }
+  }
+
+  throw new Error('Wiki page not found');
+}
+
+const openWikiDrawer = async (kbId: string, slug: string) => {
+  if (!slug) return;
+  try {
+    knowledgeDrawerVisible.value = false;
+    window.dispatchEvent(new CustomEvent('weknora:wiki-drawer-open'));
+    const page = await resolveWikiPage(kbId, slug);
+    currentWikiKbId.value = page.knowledge_base_id || kbId;
+    wikiDrawerPage.value = page;
     wikiDrawerVisible.value = true;
   } catch (e) {
     console.error(`Failed to load page ${slug}:`, e);
@@ -1787,6 +1910,124 @@ const openRouteInNewTab = (location: Parameters<typeof router.resolve>[0]) => {
   window.open(new URL(href, window.location.origin).toString(), '_blank', 'noopener,noreferrer');
 };
 
+const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
+  const citationId = el.getAttribute('data-source-id') || '';
+  const matched = sourceReferenceItems.value.find((item) => item.citationId === citationId);
+  if (matched) return matched;
+
+  const type = (el.getAttribute('data-source-type') || 'knowledge') as SourceReferenceItem['type'];
+  const title = el.getAttribute('data-title') || '知识库文档';
+  const knowledgeBaseId = el.getAttribute('data-kb-id') || '';
+  const knowledgeId = el.getAttribute('data-knowledge-id') || '';
+  const chunkId = el.getAttribute('data-chunk-id') || '';
+  const chunkIndexAttr = el.getAttribute('data-chunk-index') || '';
+  const chunkIndex = chunkIndexAttr === '' ? NaN : Number(chunkIndexAttr);
+
+  return {
+    key: citationId || `${type}:${title}:${chunkId}`,
+    number: Number(el.getAttribute('data-citation-number') || '0') || 0,
+    citationId,
+    type,
+    title,
+    sourceLabel: el.getAttribute('data-source-label') || '知识库文档',
+    snippet: '',
+    count: 1,
+    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : type === 'data_source' ? 'server' : 'file',
+    url: el.getAttribute('data-url') || '',
+    knowledgeBaseId,
+    knowledgeId,
+    chunkId,
+    chunkIndex: Number.isFinite(chunkIndex) ? chunkIndex : null,
+    startAt: null,
+    endAt: null,
+    slug: el.getAttribute('data-slug') || '',
+    sourceId: el.getAttribute('data-data-source-id') || '',
+    clickable: Boolean(chunkId || knowledgeId || knowledgeBaseId),
+  };
+};
+
+const openKnowledgeDrawer = async (item: SourceReferenceItem) => {
+  wikiDrawerVisible.value = false;
+  knowledgeDrawer.value = {
+    title: item.title || '知识库文档',
+    content: item.snippet || '',
+    knowledgeBaseId: item.knowledgeBaseId,
+    knowledgeId: item.knowledgeId,
+    chunkId: item.chunkId,
+    chunkIndex: item.chunkIndex,
+    loading: Boolean(item.chunkId),
+    error: '',
+  };
+  knowledgeDrawerVisible.value = true;
+
+  if (!item.chunkId) {
+    if (!item.snippet) {
+      knowledgeDrawer.value.error = '这个引用没有关联到可打开的文档片段。';
+    }
+    knowledgeDrawer.value.loading = false;
+    return;
+  }
+
+  try {
+    const res: any = await getChunkByIdOnly(item.chunkId);
+    const data = res?.data || res || {};
+    knowledgeDrawer.value = {
+      ...knowledgeDrawer.value,
+      content: String(data.content || item.snippet || '').trim(),
+      knowledgeId: item.knowledgeId || data.knowledge_id || '',
+      knowledgeBaseId: item.knowledgeBaseId || data.knowledge_base_id || '',
+      chunkIndex: item.chunkIndex ?? (Number.isFinite(Number(data.chunk_index)) ? Number(data.chunk_index) : null),
+      loading: false,
+      error: data.content || item.snippet ? '' : '没有找到这个文档片段的正文内容。',
+    };
+  } catch (error) {
+    console.error(`Failed to load knowledge fragment ${item.chunkId}:`, error);
+    knowledgeDrawer.value = {
+      ...knowledgeDrawer.value,
+      loading: false,
+      error: '文档片段加载失败，可以稍后重试。',
+    };
+  }
+};
+
+const openLegacyKnowledgeDrawer = (el: HTMLElement) => {
+  const rawChunkId = el.getAttribute('data-chunk-id') || '';
+  const title = el.getAttribute('data-doc') || '知识库文档';
+  const kbId = el.getAttribute('data-kb-id') || '';
+  const matched = sourceReferenceItems.value.find((item) =>
+    item.type === 'knowledge' && item.chunkId && item.chunkId === rawChunkId,
+  );
+  void openKnowledgeDrawer(matched || {
+    key: `knowledge:${kbId}:${rawChunkId || title}`,
+    number: 0,
+    citationId: '',
+    type: 'knowledge',
+    title,
+    sourceLabel: '知识库文档',
+    snippet: '',
+    count: 1,
+    icon: 'file',
+    url: '',
+    knowledgeBaseId: kbId,
+    knowledgeId: '',
+    chunkId: rawChunkId,
+    chunkIndex: null,
+    startAt: null,
+    endAt: null,
+    slug: '',
+    sourceId: '',
+    clickable: true,
+  });
+};
+
+const openKnowledgeDocumentInNewTab = () => {
+  if (!knowledgeDrawer.value.knowledgeBaseId || !knowledgeDrawer.value.knowledgeId) return;
+  router.push({
+    path: `/platform/knowledge-bases/${knowledgeDrawer.value.knowledgeBaseId}`,
+    query: { knowledge_id: knowledgeDrawer.value.knowledgeId },
+  });
+};
+
 const handleSourceCitationActivate = (el: HTMLElement) => {
   const type = el.getAttribute('data-source-type') || '';
   if (type === 'web') {
@@ -1797,21 +2038,16 @@ const handleSourceCitationActivate = (el: HTMLElement) => {
   if (type === 'wiki') {
     const slug = el.getAttribute('data-slug') || '';
     const kbId = el.getAttribute('data-kb-id') || getKbIdForWiki(slug);
-    if (kbId && slug) {
-      openWikiDrawer(kbId, slug);
+    if (slug) {
+      void openWikiDrawer(kbId, slug);
     } else {
       MessagePlugin.warning(t('agentStream.citation.noKbForWiki'));
     }
     return;
   }
   if (type === 'knowledge') {
-    const kbId = el.getAttribute('data-kb-id') || '';
-    const knowledgeId = el.getAttribute('data-knowledge-id') || '';
-    if (!kbId) return;
-    openRouteInNewTab({
-      path: `/platform/knowledge-bases/${kbId}`,
-      query: knowledgeId ? { knowledge_id: knowledgeId } : {},
-    });
+    const item = sourceItemFromElement(el);
+    if (item) void openKnowledgeDrawer(item);
   }
 };
 
@@ -1845,14 +2081,6 @@ const getKbIdForWiki = (slug: string): string => {
         if (hit) return hit;
       }
     }
-  }
-
-  // Fallbacks
-  const selectedKbs = settingsStore.getSelectedKnowledgeBases();
-  if (selectedKbs && selectedKbs.length > 0) return selectedKbs[0];
-
-  if (authStore.knowledgeBases && authStore.knowledgeBases.length > 0) {
-    return authStore.knowledgeBases[0].id;
   }
 
   return '';
@@ -1892,19 +2120,12 @@ const onRootClick = (e: Event) => {
     return;
   }
 
-  // Handle KB citation clicks -> navigate to KB detail page
+  // Handle legacy knowledge citations.
   const kbEl = target.closest?.('.citation-kb') as HTMLElement | null;
-  if (kbEl && kbEl.getAttribute('data-kb-id')) {
+  if (kbEl) {
     e.preventDefault();
     e.stopPropagation();
-    const kbId = kbEl.getAttribute('data-kb-id');
-    if (kbId) {
-      try {
-        openRouteInNewTab(`/platform/knowledge-bases/${kbId}`);
-      } catch (error) {
-        console.error('Failed to navigate to knowledge base:', error);
-      }
-    }
+    openLegacyKnowledgeDrawer(kbEl);
     return;
   }
 
@@ -1919,19 +2140,18 @@ const onRootClick = (e: Event) => {
       return;
     }
 
-    // Determine the relevant KB ID
     const kbId = getKbIdForWiki(slug || '');
-
-    if (kbId && slug) {
-      openWikiDrawer(kbId, slug);
-    } else {
-      MessagePlugin.warning(t('agentStream.citation.noKbForWiki'));
-    }
+    void openWikiDrawer(kbId, slug);
     return;
   }
 
   // Handle generic a clicks (especially in Wails desktop)
   const aEl = target.closest?.('a') as HTMLAnchorElement | null;
+  if (aEl && focusEmptyKnowledgeDocumentLinkReferenceTarget(rootElement.value, aEl)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   // @ts-ignore
   if (aEl && aEl.href && window.runtime && window.runtime.BrowserOpenURL) {
     if (aEl.href.startsWith('http://') || aEl.href.startsWith('https://')) {
@@ -1966,19 +2186,12 @@ const onRootKeydown = (e: KeyboardEvent) => {
     return;
   }
 
-  // Handle KB citation keyboard -> navigate to KB detail
+  // Handle legacy knowledge citation keyboard.
   const kbEl = target.closest?.('.citation-kb') as HTMLElement | null;
   if (kbEl) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      const kbId = kbEl.getAttribute('data-kb-id');
-      if (kbId) {
-        try {
-          openRouteInNewTab(`/platform/knowledge-bases/${kbId}`);
-        } catch (error) {
-          console.error('Failed to navigate to knowledge base:', error);
-        }
-      }
+      openLegacyKnowledgeDrawer(kbEl);
     }
     return;
   }
@@ -1992,8 +2205,8 @@ const onRootKeydown = (e: KeyboardEvent) => {
 
       const kbId = getKbIdForWiki(slug || '');
 
-      if (kbId && slug) {
-        openWikiDrawer(kbId, slug);
+      if (slug) {
+        void openWikiDrawer(kbId, slug);
       } else {
         MessagePlugin.warning(t('agentStream.citation.noKbForWiki'));
       }
@@ -3893,6 +4106,19 @@ const handleAddToKnowledge = (answerEvent: any) => {
 
     table code {
       font-size: 12px;
+    }
+  }
+
+  .source-reference-reader-state {
+    padding: 18px;
+    border-radius: 8px;
+    background: var(--td-bg-color-secondarycontainer);
+    color: var(--td-text-color-secondary);
+    text-align: center;
+
+    &.is-error {
+      color: var(--td-error-color);
+      background: var(--td-error-color-1);
     }
   }
 }

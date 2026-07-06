@@ -111,6 +111,14 @@
     color: color-mix(in srgb, var(--td-brand-color) 86%, var(--td-text-color-primary));
   }
 
+  :deep(.citation-source.is-source-jump-target) {
+    background: var(--td-brand-color);
+    color: var(--td-text-color-anti);
+    box-shadow:
+      inset 0 0 0 1px var(--td-brand-color),
+      0 0 0 4px color-mix(in srgb, var(--td-brand-color) 22%, transparent);
+  }
+
   :deep(.citation-source .citation-number) {
     font-size: 1em;
     line-height: 1;

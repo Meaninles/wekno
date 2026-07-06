@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
+import { getChunkByIdOnly } from "@/api/knowledge-base";
 import { getDown } from "@/utils/request";
+import { resolveCitationChunkId } from "@/utils/citationMarkdown";
 import { unwrapFinalAnswerWrappers } from "@/utils/finalAnswer";
 import { splitStructuredChartMarkdown, type StructuredChartInfo } from "@/utils/structuredChartMarkdown";
 import MobileResourceRail from "./MobileResourceRail.vue";
@@ -14,6 +16,8 @@ import { downloadBlob, formatFileSize } from "../utils";
 import type { GeneralAgentArtifactFile, GeneralAgentArtifactsData, StructuredAnalysisData } from "@/types/tool-results";
 import {
   buildCitedSourceReferenceItems,
+  buildSourceReferenceItems,
+  focusEmptyKnowledgeDocumentLinkReferenceTarget,
   sourceTypeLabel,
   type SourceReferenceItem,
   type SourceReferenceKind,
@@ -277,6 +281,12 @@ const sourceReferenceItems = computed(() =>
   ),
 );
 
+const allSourceReferenceItems = computed(() =>
+  buildSourceReferenceItems(
+    Array.isArray(props.message.knowledge_references) ? props.message.knowledge_references : [],
+  ),
+);
+
 const citationNumberById = computed(() => new Map(
   sourceReferenceItems.value
     .filter((item) => item.citationId)
@@ -461,6 +471,144 @@ const selectedCitationItem = ref<SourceReferenceItem | null>(null);
 const detailItem = ref<SourceReferenceItem | null>(null);
 const detailHistoryPushed = ref(false);
 
+const emptySourceItem = (overrides: Partial<SourceReferenceItem>): SourceReferenceItem => ({
+  key: "",
+  number: 0,
+  citationId: "",
+  type: "knowledge",
+  title: "来源",
+  sourceLabel: "",
+  snippet: "",
+  count: 1,
+  icon: "file",
+  url: "",
+  knowledgeBaseId: "",
+  knowledgeId: "",
+  chunkId: "",
+  chunkIndex: null,
+  startAt: null,
+  endAt: null,
+  slug: "",
+  sourceId: "",
+  clickable: true,
+  ...overrides,
+});
+
+const pickKbId = (value: unknown): string => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === "string" && item) return item;
+    }
+  }
+  return "";
+};
+
+const sameSlug = (left: string, right: string) => {
+  if (left === right) return true;
+  try {
+    return decodeURIComponent(left) === right || left === decodeURIComponent(right);
+  } catch {
+    return false;
+  }
+};
+
+const foundKbMapsFromEvent = (event: any): Array<Record<string, unknown>> => {
+  const candidates = [
+    event?.tool_data?.found_kbs,
+    event?.data?.found_kbs,
+    event?.result?.found_kbs,
+    event?.result?.data?.found_kbs,
+    event?.tool_result?.found_kbs,
+    event?.tool_result?.data?.found_kbs,
+  ];
+  return candidates.filter((item): item is Record<string, unknown> =>
+    Boolean(item && typeof item === "object" && !Array.isArray(item)),
+  );
+};
+
+const getKbIdForWiki = (slug: string) => {
+  if (!slug) return "";
+
+  const fromReferences = allSourceReferenceItems.value.find((item) =>
+    item.type === "wiki" && sameSlug(item.slug, slug) && item.knowledgeBaseId,
+  );
+  if (fromReferences?.knowledgeBaseId) return fromReferences.knowledgeBaseId;
+
+  const eventGroups = [
+    Array.isArray(props.message.agentEventStream) ? props.message.agentEventStream : [],
+    Array.isArray(props.message.agent_steps) ? props.message.agent_steps : [],
+    Array.isArray(props.message.tool_results) ? props.message.tool_results : [],
+  ];
+  for (const group of eventGroups) {
+    for (let index = group.length - 1; index >= 0; index -= 1) {
+      for (const foundKbs of foundKbMapsFromEvent(group[index])) {
+        const direct = pickKbId(foundKbs[slug]);
+        if (direct) return direct;
+        const matchedKey = Object.keys(foundKbs).find((key) => sameSlug(key, slug));
+        if (matchedKey) {
+          const matched = pickKbId(foundKbs[matchedKey]);
+          if (matched) return matched;
+        }
+      }
+    }
+  }
+
+  return "";
+};
+
+const sourceItemFromWikiElement = (el: HTMLElement): SourceReferenceItem | null => {
+  const slug = el.getAttribute("data-slug") || "";
+  if (!slug) return null;
+  const kbId = el.getAttribute("data-kb-id") || getKbIdForWiki(slug);
+  return emptySourceItem({
+    key: `wiki:${kbId}:${slug}`,
+    type: "wiki",
+    title: el.textContent?.trim() || slug,
+    sourceLabel: "Wiki",
+    icon: "bookmark",
+    knowledgeBaseId: kbId,
+    slug,
+    clickable: Boolean(kbId && slug),
+  });
+};
+
+const sourceItemFromWikiRoute = (href: string, title = ""): SourceReferenceItem | null => {
+  if (!href || typeof window === "undefined") return null;
+  let url: URL;
+  try {
+    url = new URL(href, window.location.origin);
+  } catch {
+    return null;
+  }
+  const match = url.pathname.match(/\/platform\/knowledge-bases\/([^/?#]+)/);
+  if (!match) return null;
+  const slug = url.searchParams.get("slug") || url.searchParams.get("wiki_slug") || "";
+  if (!slug) return null;
+  const tab = url.searchParams.get("tab") || "";
+  if (tab && tab !== "wiki" && tab !== "graph") return null;
+  const kbId = decodeURIComponent(match[1] || "");
+  return emptySourceItem({
+    key: `wiki:${kbId}:${slug}`,
+    type: "wiki",
+    title: title || slug,
+    sourceLabel: "Wiki",
+    icon: "bookmark",
+    knowledgeBaseId: kbId,
+    slug,
+    clickable: Boolean(kbId && slug),
+  });
+};
+
+const focusKnowledgeDocumentLinkTarget = (href: string, origin: HTMLElement) => {
+  if (href !== "" || typeof window === "undefined") return false;
+  return focusEmptyKnowledgeDocumentLinkReferenceTarget(
+    origin.closest(".mobile-message") || origin.closest(".mobile-markdown") || document,
+    origin as HTMLAnchorElement,
+  );
+};
+
 const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
   const citationId = el.getAttribute("data-source-id") || "";
   const matched = sourceReferenceItems.value.find((item) => item.citationId === citationId);
@@ -471,6 +619,9 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
   const url = el.getAttribute("data-url") || "";
   const knowledgeBaseId = el.getAttribute("data-kb-id") || "";
   const knowledgeId = el.getAttribute("data-knowledge-id") || "";
+  const chunkId = el.getAttribute("data-chunk-id") || "";
+  const chunkIndexAttr = el.getAttribute("data-chunk-index") || "";
+  const chunkIndex = chunkIndexAttr === "" ? NaN : Number(chunkIndexAttr);
   const slug = el.getAttribute("data-slug") || "";
   const sourceId = el.getAttribute("data-data-source-id") || "";
   return {
@@ -486,33 +637,182 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
     url,
     knowledgeBaseId,
     knowledgeId,
+    chunkId,
+    chunkIndex: Number.isFinite(chunkIndex) ? chunkIndex : null,
+    startAt: null,
+    endAt: null,
     slug,
     sourceId,
     clickable: type === "web"
       ? Boolean(url)
       : type === "wiki"
-        ? Boolean(knowledgeBaseId && slug)
+        ? Boolean(slug)
         : type === "knowledge"
-          ? Boolean(knowledgeId || knowledgeBaseId)
+          ? Boolean(chunkId || knowledgeId || knowledgeBaseId)
           : Boolean(sourceId),
   };
+};
+
+const openWikiSource = (item: SourceReferenceItem | null) => {
+  if (!item) return false;
+  if (!item.slug) {
+    MessagePlugin.warning("没有找到这个 Wiki 页面");
+    return true;
+  }
+  detailItem.value = item;
+  pushDetailHistory();
+  return true;
+};
+
+const openLegacyKbCitation = async (el: HTMLElement) => {
+  const title = el.getAttribute("data-doc") || "知识库文档";
+  const kbId = el.getAttribute("data-kb-id") || "";
+  const rawChunkId = el.getAttribute("data-chunk-id") || "";
+  const refs = Array.isArray(props.message.knowledge_references) ? props.message.knowledge_references : [];
+  const chunkId = resolveCitationChunkId(rawChunkId, { doc: title, kbId }, refs) || rawChunkId;
+  const ref = refs.find((item: any) => item?.id === chunkId || item?.metadata?.chunk_id === chunkId);
+
+  const baseItem = emptySourceItem({
+    key: `knowledge:${kbId}:${chunkId || title}`,
+    type: "knowledge",
+    title,
+    sourceLabel: "知识库文档",
+    snippet: "正在加载文档片段内容...",
+    icon: "file",
+    knowledgeBaseId: kbId || ref?.knowledge_base_id || ref?.metadata?.knowledge_base_id || "",
+    knowledgeId: ref?.knowledge_id || ref?.metadata?.knowledge_id || "",
+    chunkId,
+    clickable: true,
+  });
+  detailItem.value = baseItem;
+  pushDetailHistory();
+
+  if (!chunkId) {
+    detailItem.value = { ...baseItem, snippet: "这个引用没有关联到可打开的文档片段内容。" };
+    return;
+  }
+
+  try {
+    const res: any = await getChunkByIdOnly(chunkId);
+    const content = String(res?.data?.content || "").trim();
+    detailItem.value = {
+      ...baseItem,
+      knowledgeId: baseItem.knowledgeId || res?.data?.knowledge_id || "",
+      knowledgeBaseId: baseItem.knowledgeBaseId || res?.data?.knowledge_base_id || "",
+      snippet: content || "没有找到这个文档片段的正文内容。",
+    };
+  } catch (error) {
+    console.warn("[mobile] load citation chunk failed", error);
+    detailItem.value = {
+      ...baseItem,
+      snippet: "文档片段内容加载失败，可以稍后重试。",
+    };
+  }
 };
 
 const handleMarkdownClick = (event: MouseEvent) => {
   const target = event.target as HTMLElement;
   const sourceEl = target.closest?.(".citation-source") as HTMLElement | null;
-  if (!sourceEl) return;
-  event.preventDefault();
-  event.stopPropagation();
-  const item = sourceItemFromElement(sourceEl);
-  if (item) selectedCitationItem.value = item;
+  if (sourceEl) {
+    event.preventDefault();
+    event.stopPropagation();
+    const item = sourceItemFromElement(sourceEl);
+    if (item) selectedCitationItem.value = item;
+    return;
+  }
+
+  const wikiEl = target.closest?.(".citation-wiki, .wiki-content-link") as HTMLElement | null;
+  if (wikiEl) {
+    event.preventDefault();
+    event.stopPropagation();
+    openWikiSource(sourceItemFromWikiElement(wikiEl));
+    return;
+  }
+
+  const kbEl = target.closest?.(".citation-kb") as HTMLElement | null;
+  if (kbEl) {
+    event.preventDefault();
+    event.stopPropagation();
+    void openLegacyKbCitation(kbEl);
+    return;
+  }
+
+  const webEl = target.closest?.(".citation-web") as HTMLElement | null;
+  if (webEl) {
+    event.preventDefault();
+    event.stopPropagation();
+    const url = webEl.getAttribute("data-url") || webEl.getAttribute("href") || "";
+    if (url) openExternalUrl(url);
+    return;
+  }
+
+  const linkEl = target.closest?.("a") as HTMLAnchorElement | null;
+  if (!linkEl) return;
+  const rawHref = linkEl.getAttribute("href");
+  if (focusKnowledgeDocumentLinkTarget(rawHref ?? "", linkEl)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  const href = rawHref || linkEl.href || "";
+  const wikiRouteItem = sourceItemFromWikiRoute(href, linkEl.textContent?.trim() || "");
+  if (wikiRouteItem) {
+    event.preventDefault();
+    event.stopPropagation();
+    openWikiSource(wikiRouteItem);
+    return;
+  }
+  if (/^https?:\/\//i.test(href)) {
+    event.preventDefault();
+    event.stopPropagation();
+    openExternalUrl(href);
+  }
+};
+
+const handleMarkdownActivationKey = (target: HTMLElement) => {
+  const sourceEl = target.closest?.(".citation-source") as HTMLElement | null;
+  if (sourceEl) {
+    const item = sourceItemFromElement(sourceEl);
+    if (item) selectedCitationItem.value = item;
+    return true;
+  }
+
+  const wikiEl = target.closest?.(".citation-wiki, .wiki-content-link") as HTMLElement | null;
+  if (wikiEl) return openWikiSource(sourceItemFromWikiElement(wikiEl));
+
+  const kbEl = target.closest?.(".citation-kb") as HTMLElement | null;
+  if (kbEl) {
+    void openLegacyKbCitation(kbEl);
+    return true;
+  }
+
+  const webEl = target.closest?.(".citation-web") as HTMLElement | null;
+  if (webEl) {
+    const url = webEl.getAttribute("data-url") || webEl.getAttribute("href") || "";
+    if (url) openExternalUrl(url);
+    return true;
+  }
+
+  const linkEl = target.closest?.("a") as HTMLAnchorElement | null;
+  if (!linkEl) return false;
+  const rawHref = linkEl.getAttribute("href");
+  if (focusKnowledgeDocumentLinkTarget(rawHref ?? "", linkEl)) return true;
+  const href = rawHref || linkEl.href || "";
+  const wikiRouteItem = sourceItemFromWikiRoute(href, linkEl.textContent?.trim() || "");
+  if (wikiRouteItem) return openWikiSource(wikiRouteItem);
+  if (/^https?:\/\//i.test(href)) {
+    openExternalUrl(href);
+    return true;
+  }
+  return false;
 };
 
 const handleMarkdownKeydown = (event: KeyboardEvent) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   const target = event.target as HTMLElement;
-  if (!target.closest?.(".citation-source")) return;
-  handleMarkdownClick(event as unknown as MouseEvent);
+  if (!handleMarkdownActivationKey(target)) return;
+  event.preventDefault();
+  event.stopPropagation();
 };
 
 const openExternalUrl = (url: string) => {
@@ -586,6 +886,7 @@ onBeforeUnmount(() => {
       <MobileResourceRail
         v-if="isUser && (mentionedChips.length || uploadChips.length)"
         dense
+        align-end
         :items="[...mentionedChips, ...uploadChips]"
       />
 
@@ -883,6 +1184,12 @@ onBeforeUnmount(() => {
   transform: scale(0.96);
 }
 
+.mobile-markdown :deep(.citation-source.is-source-jump-target) {
+  background: #07c160;
+  color: #fff;
+  box-shadow: 0 0 0 4px rgba(7, 193, 96, 0.18);
+}
+
 .mobile-markdown :deep(.citation-source .citation-number) {
   line-height: 1;
 }
@@ -894,6 +1201,45 @@ onBeforeUnmount(() => {
 .mobile-markdown :deep(.citation-web) {
   color: #078f49;
   text-decoration: none;
+}
+
+.mobile-markdown :deep(.citation-wiki),
+.mobile-markdown :deep(.wiki-content-link) {
+  color: #078f49;
+  font-weight: 620;
+  text-decoration: underline;
+  text-decoration-color: rgba(7, 143, 73, 0.32);
+  text-underline-offset: 3px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-markdown :deep(.citation-kb) {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  background: #eef8f3;
+  color: #078f49;
+  padding: 1px 7px;
+  font-size: 0.86em;
+  line-height: 1.6;
+  vertical-align: 0.08em;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-markdown :deep(.citation-kb:active),
+.mobile-markdown :deep(.citation-wiki:active),
+.mobile-markdown :deep(.wiki-content-link:active) {
+  opacity: 0.72;
+}
+
+.mobile-markdown :deep(.citation-kb .citation-text) {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mobile-markdown :deep(pre code) {

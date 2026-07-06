@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { MessagePlugin } from "tdesign-vue-next";
 import {
   createSessions,
@@ -42,6 +43,7 @@ type SkillSelectionMode = "all" | "selected" | "none";
 
 const route = useRoute();
 const router = useRouter();
+const { t } = useI18n();
 const authStore = useAuthStore();
 const settingsStore = useSettingsStore();
 const chatResources = useChatResourcesStore();
@@ -76,6 +78,9 @@ const professionalSkills = ref<SkillInfo[]>([]);
 const skillsAvailable = ref(true);
 const professionalSkillsAvailable = ref(false);
 const knowledgeFiles = ref<any[]>([]);
+const activeFileKbId = ref("");
+const fileListLoading = ref(false);
+const loadedFileKbIds = ref<Set<string>>(new Set());
 const pendingImages = ref<File[]>([]);
 const pendingAttachments = ref<MobileUploadAttachment[]>([]);
 const startedSessionIds = ref<Set<string>>(new Set());
@@ -177,8 +182,25 @@ const {
 const knowledgeBases = computed(() => chatResources.validKnowledgeBases);
 const agents = computed(() => chatResources.agents);
 const chatModels = computed(() => chatResources.chatModels);
+const modelTypeShortKeyByBackendType: Record<string, "chat" | "embedding" | "rerank" | "vllm" | "asr"> = {
+  KnowledgeQA: "chat",
+  Embedding: "embedding",
+  Rerank: "rerank",
+  VLLM: "vllm",
+  ASR: "asr",
+};
+const mobileModelTypeLabel = (type?: ModelConfig["type"] | string) => {
+  const key = modelTypeShortKeyByBackendType[String(type || "")];
+  return key ? t(`modelSettings.typeShort.${key}`) : String(type || "");
+};
 const selectedKbIds = computed(() => settingsStore.settings.selectedKnowledgeBases || []);
 const selectedFileIds = computed(() => settingsStore.settings.selectedFiles || []);
+const activeFileKnowledgeBase = computed(() =>
+  knowledgeBases.value.find((kb) => kb.id === activeFileKbId.value) || null,
+);
+const activeFileRows = computed(() =>
+  activeFileKbId.value ? knowledgeFiles.value.filter((file) => file.kb_id === activeFileKbId.value) : [],
+);
 const selectedSkillNames = computed(() => {
   const names = [
     ...(settingsStore.settings.selectedSkillNames || []),
@@ -466,6 +488,36 @@ const responseList = (res: any) => {
   return [];
 };
 
+const normalizeKnowledgeFile = (kbId: string, file: any) => {
+  const kb = knowledgeBases.value.find((item) => item.id === kbId);
+  return {
+    ...file,
+    kb_id: kbId,
+    kb_name: kb?.name,
+    display_name: file.file_name || file.title || file.source || "未命名文档",
+  };
+};
+
+const mergeKnowledgeFiles = (kbId: string, files: any[]) => {
+  knowledgeFiles.value = [
+    ...knowledgeFiles.value.filter((file) => file.kb_id !== kbId),
+    ...files,
+  ];
+};
+
+const loadKnowledgeFilesForKb = async (kbId: string, force = false) => {
+  if (!kbId) return;
+  if (!force && loadedFileKbIds.value.has(kbId)) return;
+  fileListLoading.value = true;
+  try {
+    const res: any = await listKnowledgeFiles(kbId, { page: 1, page_size: 100 }).catch(() => ({ data: [] }));
+    mergeKnowledgeFiles(kbId, responseList(res).map((file: any) => normalizeKnowledgeFile(kbId, file)));
+    loadedFileKbIds.value = new Set([...loadedFileKbIds.value, kbId]);
+  } finally {
+    fileListLoading.value = false;
+  }
+};
+
 const sessionHasActivity = (item: any) => {
   if (!item?.id) return false;
   if (startedSessionIds.value.has(item.id)) return true;
@@ -502,28 +554,22 @@ const upsertStartedSession = (sessionId: string) => {
 };
 
 const loadKnowledgeChildren = async () => {
-  const kbIds = selectedKbIds.value.length
-    ? selectedKbIds.value
-    : knowledgeBases.value.slice(0, 3).map((kb) => kb.id);
-  if (!kbIds.length) {
+  if (activeFileKbId.value && !knowledgeBases.value.some((kb) => kb.id === activeFileKbId.value)) {
+    activeFileKbId.value = "";
+  }
+
+  const kbIds = new Set(
+    Object.values(settingsStore.settings.selectedFileKbMap || {}).filter(Boolean),
+  );
+  if (activeFileKbId.value) kbIds.add(activeFileKbId.value);
+
+  if (!knowledgeBases.value.length) {
     knowledgeFiles.value = [];
+    loadedFileKbIds.value = new Set();
     return;
   }
 
-  const filesByKb = await Promise.all(
-    kbIds.map(async (kbId) => {
-      const kb = knowledgeBases.value.find((item) => item.id === kbId);
-      const res: any = await listKnowledgeFiles(kbId, { page: 1, page_size: 50 }).catch(() => ({ data: [] }));
-      return responseList(res).map((file: any) => ({
-        ...file,
-        kb_id: kbId,
-        kb_name: kb?.name,
-        display_name: file.file_name || file.title || file.source || "未命名文档",
-      }));
-    }),
-  );
-
-  knowledgeFiles.value = filesByKb.flat();
+  await Promise.all([...kbIds].map((kbId) => loadKnowledgeFilesForKb(kbId)));
 };
 
 const loadSessions = async () => {
@@ -765,6 +811,38 @@ const selectModel = (model: ModelConfig) => {
     selectedChatModelId: model.id || "",
   });
   closeSheet();
+};
+
+const selectKnowledgeTab = (tab: KnowledgeSheetTab) => {
+  activeKnowledgeTab.value = tab;
+  if (tab === "file" && activeFileKbId.value) {
+    void loadKnowledgeFilesForKb(activeFileKbId.value);
+  }
+};
+
+const openFileKnowledgeBase = async (kbId: string) => {
+  activeFileKbId.value = kbId;
+  await loadKnowledgeFilesForKb(kbId, true);
+};
+
+const backToFileKnowledgeBases = () => {
+  activeFileKbId.value = "";
+};
+
+const selectedFileCountForKb = (kbId: string) => {
+  const selected = new Set(selectedFileIds.value);
+  return selectedFileIds.value.filter((fileId) => {
+    const mappedKbId = settingsStore.settings.selectedFileKbMap?.[fileId];
+    if (mappedKbId) return mappedKbId === kbId;
+    const file = knowledgeFiles.value.find((item) => item.id === fileId);
+    return file?.kb_id === kbId && selected.has(fileId);
+  }).length;
+};
+
+const fileFolderMeta = (kb: any) => {
+  const selectedCount = selectedFileCountForKb(kb.id);
+  const total = kb.document_count || kb.knowledge_count || 0;
+  return selectedCount > 0 ? `已选 ${selectedCount} 个 · ${total} 个文档` : `${total} 个文档`;
 };
 
 const toggleKnowledgeBase = async (kbId: string) => {
@@ -1268,7 +1346,7 @@ onBeforeUnmount(() => {
             :class="{ active: activeKnowledgeTab === 'kb' }"
             role="tab"
             :aria-selected="activeKnowledgeTab === 'kb'"
-            @click="activeKnowledgeTab = 'kb'"
+            @click="selectKnowledgeTab('kb')"
           >
             知识库
           </button>
@@ -1278,7 +1356,7 @@ onBeforeUnmount(() => {
             :class="{ active: activeKnowledgeTab === 'file' }"
             role="tab"
             :aria-selected="activeKnowledgeTab === 'file'"
-            @click="activeKnowledgeTab = 'file'"
+            @click="selectKnowledgeTab('file')"
           >
             文件
           </button>
@@ -1344,7 +1422,7 @@ onBeforeUnmount(() => {
             @click="selectModel(model)"
           >
             <span>{{ model.display_name || model.name }}</span>
-            <small>{{ model.source }} · {{ model.type }}</small>
+            <small>{{ mobileModelTypeLabel(model.type) }}</small>
           </button>
 
           <button
@@ -1360,7 +1438,42 @@ onBeforeUnmount(() => {
           </button>
 
           <button
-            v-for="file in activeSheet === 'context' && activeKnowledgeTab === 'file' ? knowledgeFiles : []"
+            v-for="kb in activeSheet === 'context' && activeKnowledgeTab === 'file' && !activeFileKbId ? knowledgeBases : []"
+            :key="`file-folder:${kb.id}`"
+            type="button"
+            class="sheet-row sheet-row--with-action sheet-row--folder"
+            @click="openFileKnowledgeBase(kb.id)"
+          >
+            <div class="sheet-row__main">
+              <span class="sheet-row__title-with-icon">
+                <MobileIcon name="folder" />
+                {{ kb.name }}
+              </span>
+              <small>{{ fileFolderMeta(kb) }}</small>
+            </div>
+            <MobileIcon name="chevron-right" />
+          </button>
+
+          <div
+            v-if="activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId"
+            class="file-folder-header"
+          >
+            <button type="button" @click="backToFileKnowledgeBases">
+              <MobileIcon name="chevron-left" />
+              <span>{{ activeFileKnowledgeBase?.name || '返回知识库' }}</span>
+            </button>
+            <small>选择要引用的文件</small>
+          </div>
+
+          <div
+            v-if="activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && fileListLoading"
+            class="sheet-empty"
+          >
+            正在加载文件
+          </div>
+
+          <button
+            v-for="file in activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && !fileListLoading ? activeFileRows : []"
             :key="file.id"
             type="button"
             class="sheet-row"
@@ -1400,7 +1513,8 @@ onBeforeUnmount(() => {
             v-if="
               (activeSheet === 'model' && !chatModels.length) ||
               (activeSheet === 'context' && activeKnowledgeTab === 'kb' && !knowledgeBases.length) ||
-              (activeSheet === 'context' && activeKnowledgeTab === 'file' && !knowledgeFiles.length) ||
+              (activeSheet === 'context' && activeKnowledgeTab === 'file' && !activeFileKbId && !knowledgeBases.length) ||
+              (activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && !fileListLoading && !activeFileRows.length) ||
               (activeSheet === 'skill' && (!skillsAvailable || !activeSkillRows.length))
             "
             class="sheet-empty"
@@ -1778,11 +1892,64 @@ onBeforeUnmount(() => {
   flex-direction: initial;
 }
 
+.sheet-row--folder {
+  min-height: 62px;
+}
+
 .sheet-row__main {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 4px;
+}
+
+.sheet-row__title-with-icon {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+}
+
+.sheet-row__title-with-icon .mobile-icon {
+  color: #07a557;
+  font-size: 17px;
+}
+
+.file-folder-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-bottom: 1px solid #edf2ef;
+  margin: -2px 0 4px;
+  padding: 2px 4px 10px;
+}
+
+.file-folder-header button {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: #13261e;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 650;
+  padding: 6px 0;
+}
+
+.file-folder-header button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-folder-header small {
+  color: #7f9088;
+  font-size: 12px;
+  line-height: 1.35;
+  padding-left: 24px;
 }
 
 .sheet-row.selected {

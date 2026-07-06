@@ -557,7 +557,9 @@ type updateMyPreferencesRequest struct {
 	// tenant id to set / replace, or 0 to clear. Membership is validated
 	// at next login, not here. Nil = field omitted from the PATCH and
 	// stays untouched.
-	LastActiveTenantID *uint64 `json:"last_active_tenant_id"`
+	LastActiveTenantID *uint64  `json:"last_active_tenant_id"`
+	ChatAgentPins      []string `json:"chat_agent_pins"`
+	ChatSkillPins      []string `json:"chat_skill_pins"`
 }
 
 // UpdateMyPreferences godoc
@@ -593,6 +595,8 @@ func (h *AuthHandler) UpdateMyPreferences(c *gin.Context) {
 	patch := types.UserPreferences{
 		EnableMemory:       req.EnableMemory,
 		LastActiveTenantID: req.LastActiveTenantID,
+		ChatAgentPins:      req.ChatAgentPins,
+		ChatSkillPins:      req.ChatSkillPins,
 	}
 	prefs, err := h.userService.UpdateUserPreferences(ctx, user.ID, patch)
 	if err != nil {

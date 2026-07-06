@@ -856,8 +856,11 @@ onUnmounted(() => {
   justify-content: center;
 
   .user-name {
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 18px;
+    letter-spacing: 0;
+    font-variant-numeric: tabular-nums;
     color: var(--td-text-color-primary);
     white-space: nowrap;
     overflow: hidden;

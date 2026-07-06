@@ -69,7 +69,9 @@
                   仅对极少数尚未拿到 id 的本地占位消息 fallback 到 role+created_at+index。
                 -->
                 <div v-for="(session, index) in messagesList"
-                    :key="session.id || `${session.role}-${session.created_at}-${index}`" class="msg-item-wrapper">
+                    :key="session.id || `${session.role}-${session.created_at}-${index}`" class="msg-item-wrapper"
+                    :data-chat-message-index="index" :data-chat-message-role="session.role"
+                    :data-chat-question-index="session.role === 'user' ? index : null">
 
                     <div v-if="session.role == 'user'">
                         <usermsg :content="session.content" :mentioned_items="session.mentioned_items"
@@ -92,6 +94,8 @@
                 </div>
             </div>
         </div>
+        <ChatQuestionLocator :messages="messagesList" :scroll-container="scrollContainer"
+            :embedded-mode="embeddedMode" />
         <transition name="scroll-btn-fade">
             <div v-show="userHasScrolledUp" class="scroll-to-bottom-btn" @click="onClickScrollToBottom">
                 <t-icon name="chevron-down" size="20px" />
@@ -115,6 +119,7 @@ import { useRoute, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router';
 import InputField from '../../components/Input-field.vue';
 import botmsg from './components/botmsg.vue';
 import usermsg from './components/usermsg.vue';
+import ChatQuestionLocator from '@/custom/modules/chatQuestionLocator/ChatQuestionLocator.vue';
 import { getMessageList, getSession } from "@/api/chat/index";
 import { getSuggestedQuestions } from "@/api/agent/index";
 import { useStream } from '../../api/chat/streame'

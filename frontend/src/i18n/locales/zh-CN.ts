@@ -274,7 +274,7 @@ export default {
       steps: {
         kb: {
           title: "选择知识范围",
-          desc: "点击 @ 可指定一个或多个知识库/文件，仅基于选中内容回答；不选则按当前智能体配置检索。",
+          desc: "点击 {'@'} 可指定一个或多个知识库/文件，仅基于选中内容回答；不选则按当前智能体配置检索。",
         },
         input: {
           title: "输入你的问题",
@@ -3052,7 +3052,7 @@ export default {
     last30Days: "近30天",
     lastYear: "近1年",
     earlier: "更早",
-    pinned: "已置顶",
+    pinned: "置顶",
   },
   upload: {
     uploadDocument: "上传文档",

@@ -114,6 +114,10 @@ const defaultSettings: Settings = {
   autoCheckUpdate: true,
 };
 
+function cloneDefaultSettings(): Settings {
+  return JSON.parse(JSON.stringify(defaultSettings)) as Settings;
+}
+
 /** Keep builtin agent id and isAgentEnabled in sync after localStorage reload. */
 function loadAndReconcileSettings(): Settings {
   const loaded = JSON.parse(
@@ -213,6 +217,30 @@ export const useSettingsStore = defineStore("settings", {
     // 获取设置
     getSettings(): Settings {
       return this.settings;
+    },
+
+    resetTenantScopedState() {
+      const defaults = cloneDefaultSettings();
+      const current = this.settings || defaults;
+      this.settings = {
+        ...current,
+        knowledgeBaseId: defaults.knowledgeBaseId,
+        isAgentEnabled: defaults.isAgentEnabled,
+        selectedKnowledgeBases: [],
+        selectedSkillNames: [],
+        selectedProfessionalSkillNames: [],
+        selectedFiles: [],
+        selectedFileKbMap: {},
+        selectedTags: [],
+        selectedMCPServices: [],
+        selectedSkills: [],
+        conversationModels: { ...defaults.conversationModels },
+        selectedAgentId: defaults.selectedAgentId,
+        selectedAgentSourceTenantId: defaults.selectedAgentSourceTenantId,
+      };
+      this._defaultsSnapshot = null;
+      this._isApplyingSessionState = false;
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
 
     // 获取API端点

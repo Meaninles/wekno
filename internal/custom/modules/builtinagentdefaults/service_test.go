@@ -245,6 +245,127 @@ func TestApplyReferenceModelDefaultsClonesModelsForPersonalTenant(t *testing.T) 
 	}
 }
 
+func TestEnsureUserProvisionedCreatesMissingBuiltinAgentsWithTenantModelDefaults(t *testing.T) {
+	requireBuiltinAgentConfig(t)
+	db := openBuiltinAgentDefaultsTestDB(t)
+	svc := NewService(db, nil)
+
+	enabled := true
+	sourceTenantID := uint64(10000)
+	targetTenantID := uint64(10002)
+	targetUser := &types.User{
+		ID:           "target-user",
+		Username:     "target@example.com",
+		PasswordHash: "x",
+		TenantID:     targetTenantID,
+		IsActive:     true,
+	}
+
+	requireCreate(t, db, targetUser)
+	requireCreate(t, db, &types.Model{
+		ID:          "source-deepseek-model",
+		TenantID:    sourceTenantID,
+		Name:        "deepseek-v4-flash-int8",
+		DisplayName: "DeepSeek-V4-Flash-INT8 LiteLLM",
+		Type:        types.ModelTypeKnowledgeQA,
+		Source:      types.ModelSourceRemote,
+		Parameters: types.ModelParameters{
+			BaseURL:       "https://model.example.com/v1",
+			InterfaceType: "openai",
+			Provider:      "generic",
+		},
+		Status: types.ModelStatusActive,
+	})
+	requireCreate(t, db, &types.Model{
+		ID:       "source-rerank-model",
+		TenantID: sourceTenantID,
+		Name:     "BAAI/bge-reranker-v2-m3",
+		Type:     types.ModelTypeRerank,
+		Source:   types.ModelSourceRemote,
+		Parameters: types.ModelParameters{
+			BaseURL:       "https://rerank.example.com/v1",
+			InterfaceType: "openai",
+		},
+		Status: types.ModelStatusActive,
+	})
+	requireCreate(t, db, &types.CustomAgent{
+		ID:        types.BuiltinQuickAnswerID,
+		Name:      "快速问答",
+		IsBuiltin: true,
+		TenantID:  sourceTenantID,
+		Config: types.CustomAgentConfig{
+			AgentMode:           types.AgentModeQuickAnswer,
+			ModelID:             "source-deepseek-model",
+			RerankModelID:       "source-rerank-model",
+			Temperature:         0.7,
+			MaxCompletionTokens: 4096,
+			Thinking:            &enabled,
+		},
+	})
+	requireCreate(t, db, &types.CustomAgent{
+		ID:        types.BuiltinSmartReasoningID,
+		Name:      "智能推理",
+		IsBuiltin: true,
+		TenantID:  targetTenantID,
+		Config: types.CustomAgentConfig{
+			AgentMode: types.AgentModeSmartReasoning,
+			ModelID:   "tenant-custom-model",
+		},
+	})
+
+	if err := svc.EnsureUserProvisioned(context.Background(), targetUser); err != nil {
+		t.Fatalf("EnsureUserProvisioned returned error: %v", err)
+	}
+
+	expectedChatID := deterministicModelCloneID(targetTenantID, "source-deepseek-model")
+	expectedRerankID := deterministicModelCloneID(targetTenantID, "source-rerank-model")
+
+	var quickAnswer types.CustomAgent
+	if err := db.Where("id = ? AND tenant_id = ?", types.BuiltinQuickAnswerID, targetTenantID).
+		First(&quickAnswer).Error; err != nil {
+		t.Fatalf("expected tenant quick-answer agent: %v", err)
+	}
+	if !quickAnswer.IsBuiltin {
+		t.Fatalf("quick-answer should be built-in")
+	}
+	if quickAnswer.Config.ModelID != expectedChatID {
+		t.Fatalf("quick-answer model_id = %q, want %q", quickAnswer.Config.ModelID, expectedChatID)
+	}
+	if quickAnswer.Config.RerankModelID != expectedRerankID {
+		t.Fatalf("quick-answer rerank_model_id = %q, want %q", quickAnswer.Config.RerankModelID, expectedRerankID)
+	}
+
+	var clonedChat types.Model
+	if err := db.Where("id = ? AND tenant_id = ?", expectedChatID, targetTenantID).First(&clonedChat).Error; err != nil {
+		t.Fatalf("expected cloned quick-answer chat model: %v", err)
+	}
+	if clonedChat.Name != "deepseek-v4-flash-int8" || clonedChat.ManagedBy != modelCloneManagedBy {
+		t.Fatalf("unexpected cloned chat model: %#v", clonedChat)
+	}
+
+	var smartReasoning types.CustomAgent
+	if err := db.Where("id = ? AND tenant_id = ?", types.BuiltinSmartReasoningID, targetTenantID).
+		First(&smartReasoning).Error; err != nil {
+		t.Fatalf("expected existing smart-reasoning agent: %v", err)
+	}
+	if smartReasoning.Config.ModelID != "tenant-custom-model" {
+		t.Fatalf("existing built-in agent should not be overwritten, got %#v", smartReasoning.Config)
+	}
+
+	if err := svc.EnsureUserProvisioned(context.Background(), targetUser); err != nil {
+		t.Fatalf("EnsureUserProvisioned second call returned error: %v", err)
+	}
+	var quickAnswerCount int64
+	if err := db.Model(&types.CustomAgent{}).
+		Where("id = ? AND tenant_id = ?", types.BuiltinQuickAnswerID, targetTenantID).
+		Count(&quickAnswerCount).Error; err != nil {
+		t.Fatalf("count quick-answer: %v", err)
+	}
+	if quickAnswerCount != 1 {
+		t.Fatalf("quick-answer row count = %d, want 1", quickAnswerCount)
+	}
+}
+
 func TestApplyReferenceModelConfigSyncsPromptFields(t *testing.T) {
 	svc := NewService(nil, nil)
 	current := types.CustomAgentConfig{

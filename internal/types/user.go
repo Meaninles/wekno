@@ -42,6 +42,16 @@ type UserPreferences struct {
 	//        a stored *0 the same as nil.
 	// *N   = preferred tenant id.
 	LastActiveTenantID *uint64 `json:"last_active_tenant_id,omitempty"`
+
+	// ChatAgentPins stores the user's pinned chat-agent keys for the
+	// conversation agent selector. Keys are frontend-defined stable IDs
+	// such as "local:<agent_id>" and "shared:<source_tenant_id>:<agent_id>".
+	ChatAgentPins []string `json:"chat_agent_pins"`
+
+	// ChatSkillPins stores the user's pinned skill keys for both the desktop
+	// and mobile chat skill selectors. Keys include skill kind, for example
+	// "lightweight:<name>" and "professional:<name>".
+	ChatSkillPins []string `json:"chat_skill_pins"`
 }
 
 // Value implements driver.Valuer so GORM persists UserPreferences as

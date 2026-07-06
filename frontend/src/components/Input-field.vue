@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { onBeforeRouteUpdate } from 'vue-router';
 import { MessagePlugin } from "tdesign-vue-next";
 import { useSettingsStore } from '@/stores/settings';
+import { useAuthStore } from '@/stores/auth';
 import { useUIStore } from '@/stores/ui';
 import { useMenuStore } from '@/stores/menu';
 import { listKnowledgeBases, searchKnowledge, batchQueryKnowledge, listKnowledgeTags } from '@/api/knowledge-base';
@@ -45,6 +46,7 @@ type SkillSelectionMode = 'all' | 'selected' | 'none';
 const route = useRoute();
 const router = useRouter();
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const uiStore = useUIStore();
 const orgStore = useOrganizationStore();
 const menuStore = useMenuStore();
@@ -460,7 +462,7 @@ const props = defineProps({
 const isAgentEnabled = computed(() => settingsStore.isAgentEnabled);
 const isWebSearchEnabled = computed(() => settingsStore.isWebSearchEnabled);
 const selectedKbIds = computed(() => settingsStore.settings.selectedKnowledgeBases || []);
-const selectedSkillNames = computed(() => {
+const rawSelectedSkillNames = computed(() => {
   const names = [
     ...(settingsStore.settings.selectedSkillNames || []),
     ...(settingsStore.settings.selectedSkills || []),
@@ -489,6 +491,10 @@ const selectedProfessionalSkillNames = computed(() => {
   const names = settingsStore.settings.selectedProfessionalSkillNames || [];
   return Array.from(new Set(names.map(name => String(name || '').trim()).filter(Boolean)))
     .filter(name => isProfessionalSkillAllowedByAgent(name));
+});
+const selectedSkillNames = computed(() => {
+  const professionalNames = new Set(selectedProfessionalSkillNames.value);
+  return rawSelectedSkillNames.value.filter(name => !professionalNames.has(name));
 });
 const selectedSkillContextCount = computed(() => selectedSkillNames.value.length + selectedProfessionalSkillNames.value.length);
 const selectedFileIds = computed(() => settingsStore.settings.selectedFiles || []);
@@ -660,8 +666,12 @@ const allSelectedItems = computed(() => {
     isAgentConfigured: false,
   }));
 
-  return [...agentConfiguredKbs, ...userSelectedKbs, ...files, ...tags, ...selectedMCPItems.value, ...skillMentionItems.value];
+  return [...agentConfiguredKbs, ...userSelectedKbs, ...files, ...tags, ...selectedMCPItems.value];
 });
+
+const selectedReferenceChipCount = computed(() =>
+  allSelectedItems.value.length + selectedSkillNames.value.length + selectedProfessionalSkillNames.value.length
+);
 
 // 移除选中项（智能体配置的项也可以移除）
 const removeSelectedItem = (item: MentionItem) => {
@@ -680,10 +690,23 @@ const removeSelectedItem = (item: MentionItem) => {
 
 const removeSelectedSkill = (name: string) => {
   settingsStore.removeSkillName(name);
+  settingsStore.removeSkill(name);
 };
 
 const removeSelectedProfessionalSkill = (name: string) => {
   settingsStore.removeProfessionalSkillName(name);
+};
+
+const clearSelectedReferences = () => {
+  const skillNames = [...rawSelectedSkillNames.value];
+  const mcpServiceIds = [...selectedMCPServiceIds.value];
+  settingsStore.clearKnowledgeBases();
+  settingsStore.clearFiles();
+  settingsStore.clearTags();
+  settingsStore.clearSkillNames();
+  skillNames.forEach((name) => settingsStore.removeSkill(name));
+  settingsStore.clearProfessionalSkillNames();
+  mcpServiceIds.forEach((id) => settingsStore.removeMCPService(id));
 };
 
 // 使用 computed 从 store 读取，并通过 setter 同步回 store
@@ -899,18 +922,20 @@ const enabledAgents = computed(() =>
   agents.value.filter(a => !disabledOwnAgentIds.value.includes(a.id))
 );
 
-// LAST_CHAT_MODEL_KEY scopes the per-user "last selected chat model"
-// to localStorage. The previous implementation wrote this back to the
-// tenant-level KV /tenants/kv/conversation-config — which (a) required
-// Admin+ to mutate, so a Viewer/Contributor switching models in the
-// chat input got a 403, and (b) silently overwrote the tenant default
-// for everyone else. localStorage is per-user-per-browser, which is
-// what "remember my last pick" actually wants.
+// Persist the user's last selected chat model under the active user + tenant.
+// Model IDs are tenant-owned; a global key can make a newly logged-in user post
+// an old tenant's model ID as summary_model_id.
 const LAST_CHAT_MODEL_KEY = 'weknora_last_chat_model_id'
+
+const lastChatModelStorageKey = computed(() => {
+  const userId = String(authStore.currentUserId || '').trim()
+  const tenantId = String(authStore.effectiveTenantId || authStore.currentTenantId || '').trim()
+  return userId && tenantId ? `${LAST_CHAT_MODEL_KEY}:${tenantId}:${userId}` : LAST_CHAT_MODEL_KEY
+})
 
 const readLastChatModelID = (): string => {
   try {
-    return localStorage.getItem(LAST_CHAT_MODEL_KEY) || ''
+    return localStorage.getItem(lastChatModelStorageKey.value) || ''
   } catch {
     return ''
   }
@@ -919,9 +944,9 @@ const readLastChatModelID = (): string => {
 const writeLastChatModelID = (id: string) => {
   try {
     if (id) {
-      localStorage.setItem(LAST_CHAT_MODEL_KEY, id)
+      localStorage.setItem(lastChatModelStorageKey.value, id)
     } else {
-      localStorage.removeItem(LAST_CHAT_MODEL_KEY)
+      localStorage.removeItem(lastChatModelStorageKey.value)
     }
   } catch {
     // localStorage may be disabled in incognito mode; ignore.
@@ -929,6 +954,22 @@ const writeLastChatModelID = (id: string) => {
 }
 
 const normalizeModelId = (id?: string | null) => (id || '').trim();
+
+const findRawChatModelById = (id?: string | null) => {
+  const modelId = normalizeModelId(id);
+  if (!modelId) return undefined;
+  return rawChatModels.value.find(model => normalizeModelId(model.id) === modelId);
+};
+
+const isSelectedAgentModelId = (id?: string | null) => {
+  const modelId = normalizeModelId(id);
+  return !!modelId && normalizeModelId(agentModelId.value) === modelId;
+};
+
+const isUsableChatModelId = (id?: string | null) => {
+  const modelId = normalizeModelId(id);
+  return !!modelId && (!!findRawChatModelById(modelId) || isSelectedAgentModelId(modelId));
+};
 
 const applyChatModelSelection = (modelId: string) => {
   settingsStore.updateConversationModels({
@@ -978,16 +1019,22 @@ const ensureModelSelection = () => {
   if (syncModelFromSelectedAgent()) {
     return;
   }
-  if (selectedModelId.value) {
+  if (isUsableChatModelId(selectedModelId.value)) {
     return;
+  }
+  if (selectedModelId.value) {
+    applyChatModelSelection('');
   }
   const lastPick = readLastChatModelID();
-  if (lastPick) {
-    selectedModelId.value = lastPick;
+  if (isUsableChatModelId(lastPick)) {
+    applyChatModelSelection(lastPick);
     return;
   }
+  if (lastPick) {
+    writeLastChatModelID('');
+  }
   if (availableModels.value.length > 0) {
-    selectedModelId.value = availableModels.value[0].id || '';
+    applyChatModelSelection(availableModels.value[0].id || '');
   }
 };
 
@@ -996,7 +1043,7 @@ const ensureModelSelection = () => {
 watch(
   [selectedAgentId, () => settingsStore.selectedAgentSourceTenantId, agentModelId],
   () => {
-    syncModelFromSelectedAgent();
+    ensureModelSelection();
   },
   { immediate: true }
 );
@@ -1021,16 +1068,18 @@ const handleModelChange = (value: string | number | Array<string | number> | und
     return;
   }
   if (val === '__add_model__') {
-    selectedModelId.value = readLastChatModelID();
+    const lastPick = readLastChatModelID();
+    selectedModelId.value = isUsableChatModelId(lastPick) ? lastPick : '';
     handleGoToConversationModels();
     return;
   }
 
-  // The chat-level model picker now persists per-user-per-browser via
-  // localStorage instead of writing to the tenant-shared KV. This is what
-  // "remember my last pick" should always have meant — the previous PUT
-  // /tenants/kv/conversation-config required Admin+, so a Viewer or
-  // Contributor switching models from the chat input got a 403.
+  if (!isUsableChatModelId(val)) {
+    writeLastChatModelID('');
+    ensureModelSelection();
+    return;
+  }
+
   writeLastChatModelID(val);
   selectedModelId.value = val;
   showModelSelector.value = false;
@@ -1807,6 +1856,12 @@ const createSession = async (val: string) => {
   if (!isSelectedAgentResolved.value) {
     await loadAgents();
   }
+  ensureModelSelection();
+  const modelIdForSend = normalizeModelId(selectedModelId.value);
+  if (!isUsableChatModelId(modelIdForSend)) {
+    MessagePlugin.warning(t('input.notConfigured'));
+    return;
+  }
 
   // 发送前校验当前选中的智能体（含默认快速问答）是否已配置完成
   const agentToCheck = selectedAgent.value;
@@ -1840,8 +1895,19 @@ const createSession = async (val: string) => {
     || rawProfessionalSkillNames.some((name: string, index: number) => name !== effectiveProfessionalSkillNames[index])) {
     settingsStore.selectProfessionalSkillNames(effectiveProfessionalSkillNames);
   }
-  // 获取@提及的知识库和文件信息
-  const mentionedItems: MentionRequestItem[] = allSelectedItems.value.map(item => ({
+  const rawSkillNames = rawSelectedSkillNames.value;
+  const effectiveSkillNames = selectedSkillNames.value;
+  if (rawSkillNames.length !== effectiveSkillNames.length
+    || rawSkillNames.some((name: string, index: number) => name !== effectiveSkillNames[index])) {
+    settingsStore.selectSkillNames(effectiveSkillNames);
+    const effectiveSet = new Set(effectiveSkillNames);
+    rawSkillNames
+      .filter((name: string) => !effectiveSet.has(name))
+      .forEach((name: string) => settingsStore.removeSkill(name));
+  }
+
+  // 获取@提及的知识库和文件信息；普通 Skill 只写入消息展示和后端兼容字段一次。
+  const mentionedItems: MentionRequestItem[] = [...allSelectedItems.value, ...skillMentionItems.value].map(item => ({
     id: item.id,
     name: item.name,
     type: item.type,
@@ -1859,7 +1925,7 @@ const createSession = async (val: string) => {
   // detached DOM element (which causes getComputedStyle to throw).
   const textarea = getTextareaEl();
   if (textarea) textarea.blur();
-  emit('send-msg', val, selectedModelId.value, mentionedItems, imageFiles, attachmentFiles);
+  emit('send-msg', val, modelIdForSend, mentionedItems, imageFiles, attachmentFiles);
 
   // Clean up image previews
   uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
@@ -2063,8 +2129,10 @@ const handleSelectAgent = async (agent: CustomAgent, sourceTenantId?: string) =>
     selectedModelId.value = agentModel;
   } else {
     const lastPick = readLastChatModelID();
-    if (lastPick) {
+    if (isUsableChatModelId(lastPick)) {
       selectedModelId.value = lastPick;
+    } else {
+      ensureModelSelection();
     }
   }
 
@@ -2426,6 +2494,16 @@ defineExpose({
           <span class="mention-chip__remove" @click.stop="removeSelectedItem(item)"
             :aria-label="$t('common.remove')">×</span>
         </span>
+        <button
+          v-if="selectedReferenceChipCount > 3"
+          type="button"
+          class="mention-chip mention-chip--clear"
+          aria-label="全部清空引用资源"
+          @click.stop="clearSelectedReferences"
+        >
+          <t-icon name="close" />
+          <span>全部清空</span>
+        </button>
       </div>
 
       <!-- 实际输入框 -->
@@ -2811,6 +2889,21 @@ const getImgSrc = (url: string) => {
 
 .mention-chip:hover .mention-chip__remove {
   opacity: 0.85;
+}
+
+.mention-chip--clear {
+  appearance: none;
+  gap: 4px;
+  border-style: dashed;
+  color: var(--td-text-color-secondary, #6b7280);
+  font-family: inherit;
+  font-weight: 500;
+  padding-right: 8px;
+  cursor: pointer;
+}
+
+.mention-chip--clear:hover {
+  color: var(--td-text-color-primary, #1f2937);
 }
 
 .mention-chip__remove:hover {

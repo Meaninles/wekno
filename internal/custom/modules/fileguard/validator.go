@@ -31,11 +31,11 @@ type byteLimit struct {
 var fileSizeLimits = map[string]sizeLimit{
 	"docx":     {10, "Word 文档"},
 	"xlsx":     {10, "Excel 文件"},
-	"pdf":      {20, "PDF 文件"},
+	"pdf":      {50, "PDF 文件"},
 	"doc":      {5, "Word 旧格式文件"},
 	"xls":      {3, "Excel 旧格式文件"},
-	"pptx":     {20, "PPT 文件"},
-	"ppt":      {16, "PPT 旧格式文件"},
+	"pptx":     {50, "PPT 文件"},
+	"ppt":      {50, "PPT 旧格式文件"},
 	"csv":      {20, "CSV 文件"},
 	"txt":      {3, "文本文件"},
 	"text":     {3, "文本文件"},
@@ -213,6 +213,30 @@ var defaultXLSXLimits = xlsxLimits{
 	cellStyles:          1000,
 }
 
+type pptxLimits struct {
+	entries         int
+	uncompressedMB  int64
+	slideXMLMB      int64
+	slideXMLTotalMB int64
+	compressionRate float64
+	slides          int64
+	slideShapes     int64
+	mediaFiles      int64
+	mediaMB         int64
+}
+
+var defaultPPTXLimits = pptxLimits{
+	entries:         2000,
+	uncompressedMB:  200,
+	slideXMLMB:      8,
+	slideXMLTotalMB: 80,
+	compressionRate: 10,
+	slides:          200,
+	slideShapes:     100000,
+	mediaFiles:      1000,
+	mediaMB:         450,
+}
+
 type csvLimits struct {
 	scanMB     int64
 	rows       int64
@@ -307,7 +331,7 @@ func analyze(fileName string, fileTypeHint string, size int64, open func() (read
 	ext := fileTypeFromName(fileName)
 
 	switch ext {
-	case "docx", "xlsx":
+	case "docx", "xlsx", "pptx":
 		ra, err := open()
 		if err != nil {
 			report.addIssueText("文件结构异常或已损坏，无法解析")
@@ -326,8 +350,10 @@ func analyze(fileName string, fileTypeHint string, size int64, open func() (read
 		}
 		if ext == "docx" {
 			validateDOCX(zr, size, &report)
-		} else {
+		} else if ext == "xlsx" {
 			validateXLSX(zr, &report)
+		} else {
+			validatePPTX(zr, size, &report)
 		}
 	case "csv":
 		ra, err := open()
@@ -747,6 +773,107 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 	}
 }
 
+func validatePPTX(zr *zip.Reader, fileBytes int64, report *Report) {
+	limits := defaultPPTXLimits
+	stats := zipStats(zr)
+	report.metric("pptx_zip_entries", len(zr.File))
+	report.metric("pptx_uncompressed_bytes", stats.uncompressedBytes)
+	report.metric("pptx_media_count", stats.pptMediaCount)
+	report.metric("pptx_media_bytes", stats.pptMediaBytes)
+
+	if len(zr.File) > limits.entries {
+		report.addIssue("PPT 文件内部文件数量不能超过 %s 个（当前 %s 个）", formatInt(int64(limits.entries)), formatInt(int64(len(zr.File))))
+	}
+	if stats.uncompressedBytes > limits.uncompressedMB*mb {
+		report.addIssue("PPT 文件内部内容展开后不能超过 %dMB（当前 %s）", limits.uncompressedMB, formatMB(stats.uncompressedBytes))
+	}
+	if stats.uncompressedBytes > 100*mb {
+		report.markHeavy("PPT 文件内部内容展开后超过重型阈值 100MB（当前 %s）", formatMB(stats.uncompressedBytes))
+	}
+	if fileBytes > 0 && float64(stats.uncompressedBytes)/float64(fileBytes) > limits.compressionRate {
+		report.addIssue("PPT 文件压缩膨胀倍数不能超过 %s 倍（当前 %.2f 倍）", trimFloat(limits.compressionRate), float64(stats.uncompressedBytes)/float64(fileBytes))
+	}
+	if fileBytes > 0 {
+		ratio := float64(stats.uncompressedBytes) / float64(fileBytes)
+		report.metric("pptx_compression_ratio", ratio)
+		if ratio > 10 {
+			report.markHeavy("PPT 文件压缩膨胀倍数超过重型阈值 10 倍（当前 %.2f 倍）", ratio)
+		}
+	}
+	if stats.pptMediaCount > limits.mediaFiles {
+		report.addIssue("PPT 文件内图片/媒体文件数量不能超过 %s 个（当前 %s 个）", formatInt(limits.mediaFiles), formatInt(stats.pptMediaCount))
+	}
+	if stats.pptMediaBytes > limits.mediaMB*mb {
+		report.addIssue("PPT 文件内图片/媒体总大小不能超过 %dMB（当前 %s）", limits.mediaMB, formatMB(stats.pptMediaBytes))
+	}
+	if stats.pptMediaBytes > 75*mb {
+		report.markHeavy("PPT 文件内图片/媒体总大小超过重型阈值 75MB（当前 %s）", formatMB(stats.pptMediaBytes))
+	}
+
+	var slideXMLTotal int64
+	var slideCount int64
+	var shapeCount int64
+	var maxSlideXML *namedInt64
+	for _, f := range zr.File {
+		if !isSlideXML(f.Name) {
+			continue
+		}
+		slideCount++
+		slideName := path.Base(normalizeZipName(f.Name))
+		size := int64(f.UncompressedSize64)
+		slideXMLTotal += size
+		if maxSlideXML == nil || size > maxSlideXML.value {
+			maxSlideXML = &namedInt64{name: slideName, value: size}
+		}
+		if size > maxXMLScanBytes {
+			report.addIssue("文档内部结构过大，无法安全检查完整结构，单个 XML 最大扫描量不能超过 %dMB（%s：当前 %s）", maxXMLScanBytes/mb, slideName, formatMB(size))
+			continue
+		}
+		shapes, err := countAnyStartElements(f, map[string]struct{}{
+			"sp":           {},
+			"pic":          {},
+			"graphicFrame": {},
+		})
+		if err != nil {
+			report.addIssueText("文件结构异常或已损坏，无法解析")
+			return
+		}
+		shapeCount += shapes
+	}
+
+	report.metric("pptx_slides", slideCount)
+	report.metric("pptx_slide_xml_total_bytes", slideXMLTotal)
+	report.metric("pptx_slide_shapes", shapeCount)
+	if maxSlideXML != nil {
+		report.metric("pptx_max_slide_xml_bytes", maxSlideXML.value)
+		report.metric("pptx_max_slide_xml_name", maxSlideXML.name)
+	}
+	if slideCount > limits.slides {
+		report.addIssue("PPT 幻灯片数量不能超过 %s 页（当前 %s 页）", formatInt(limits.slides), formatInt(slideCount))
+	}
+	if slideCount > 150 {
+		report.markHeavy("PPT 幻灯片数量超过重型阈值 150 页（当前 %s 页）", formatInt(slideCount))
+	}
+	if maxSlideXML != nil && maxSlideXML.value > limits.slideXMLMB*mb {
+		report.addIssue("单页 PPT 内部结构不能超过 %dMB（%s：当前 %s）", limits.slideXMLMB, maxSlideXML.name, formatMB(maxSlideXML.value))
+	}
+	if maxSlideXML != nil && maxSlideXML.value > 4*mb {
+		report.markHeavy("单页 PPT 内部结构超过重型阈值 4MB（%s：当前 %s）", maxSlideXML.name, formatMB(maxSlideXML.value))
+	}
+	if slideXMLTotal > limits.slideXMLTotalMB*mb {
+		report.addIssue("所有 PPT 页面内部结构总大小不能超过 %dMB（当前 %s）", limits.slideXMLTotalMB, formatMB(slideXMLTotal))
+	}
+	if slideXMLTotal > 40*mb {
+		report.markHeavy("所有 PPT 页面内部结构总大小超过重型阈值 40MB（当前 %s）", formatMB(slideXMLTotal))
+	}
+	if shapeCount > limits.slideShapes {
+		report.addIssue("PPT 页面对象数量不能超过 %s 个（当前 %s 个）", formatInt(limits.slideShapes), formatInt(shapeCount))
+	}
+	if shapeCount > 10000 {
+		report.markHeavy("PPT 页面对象数量超过重型阈值 10,000 个（当前 %s 个）", formatInt(shapeCount))
+	}
+}
+
 func validateCSV(ra readerAtSize, report *Report) {
 	limits := defaultCSVLimits
 	size := ra.Size()
@@ -841,6 +968,8 @@ type zipStatValues struct {
 	wordMediaCount    int64
 	wordMediaBytes    int64
 	xlsxMediaBytes    int64
+	pptMediaCount     int64
+	pptMediaBytes     int64
 }
 
 func zipStats(zr *zip.Reader) zipStatValues {
@@ -855,6 +984,10 @@ func zipStats(zr *zip.Reader) zipStatValues {
 		}
 		if strings.HasPrefix(name, "xl/media/") && !strings.HasSuffix(name, "/") {
 			s.xlsxMediaBytes += size
+		}
+		if strings.HasPrefix(name, "ppt/media/") && !strings.HasSuffix(name, "/") {
+			s.pptMediaCount++
+			s.pptMediaBytes += size
 		}
 	}
 	return s
@@ -1082,6 +1215,15 @@ func isWorksheetXML(name string) bool {
 		!strings.Contains(name, "/_rels/")
 }
 
+func isSlideXML(name string) bool {
+	name = normalizeZipName(name)
+	base := path.Base(name)
+	return strings.HasPrefix(name, "ppt/slides/") &&
+		strings.HasSuffix(name, ".xml") &&
+		!strings.Contains(name, "/_rels/") &&
+		strings.HasPrefix(base, "slide")
+}
+
 func attrValue(attrs []xml.Attr, local string) string {
 	for _, attr := range attrs {
 		if attr.Name.Local == local {
@@ -1132,6 +1274,10 @@ func normalizeExt(value string) string {
 		return "docx"
 	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
 		return "xlsx"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return "pptx"
+	case "application/vnd.ms-powerpoint":
+		return "ppt"
 	}
 	return value
 }

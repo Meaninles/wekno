@@ -68,6 +68,7 @@ const scrollRef = ref<HTMLElement | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const imageInputRef = ref<HTMLInputElement | null>(null);
 const attachmentInputRef = ref<HTMLInputElement | null>(null);
+const shouldFollowAnswer = ref(true);
 
 const sessions = ref<any[]>([]);
 const skills = ref<SkillInfo[]>([]);
@@ -84,16 +85,73 @@ const resumeFailedMessageIds = ref<Set<string>>(new Set());
 let recoverPollTimer: ReturnType<typeof setTimeout> | null = null;
 let recoverPollAttempts = 0;
 let suppressNextResume = false;
+let activeStreamScrollIntent: "answer" | "non-answer" | "" = "";
+let lastMessageScrollTop = 0;
+let programmaticScrollUntil = 0;
 
 const { onChunk, startStream, stopStream, error } = useStream();
 
+const SCROLL_BOTTOM_THRESHOLD = 140;
+const STREAM_NON_ANSWER_TYPES = new Set([
+  "agent_query",
+  "thinking",
+  "tool_call",
+  "tool_result",
+  "agent_progress",
+  "reflection",
+  "tool_approval_required",
+  "tool_approval_resolved",
+  "mcp_oauth_required",
+  "mcp_oauth_resolved",
+  "session_title",
+  "stop",
+]);
+
+const isNearMessageBottom = (el: HTMLElement) =>
+  el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD;
+
+const inferStreamScrollIntent = (data: ChatMessage): "answer" | "non-answer" => {
+  const responseType = String(data.response_type || "");
+  if (STREAM_NON_ANSWER_TYPES.has(responseType)) return "non-answer";
+  if (responseType === "answer" || responseType === "complete" || responseType === "references") return "answer";
+
+  const nextContent = `${fullContent.value || ""}${data.content || ""}`;
+  if (nextContent.includes("<think>")) {
+    const thinkCloseTag = "</think>";
+    if (!nextContent.includes(thinkCloseTag)) return "non-answer";
+    const visibleAnswer = nextContent.slice(nextContent.lastIndexOf(thinkCloseTag) + thinkCloseTag.length).trim();
+    if (!visibleAnswer) return "non-answer";
+  }
+  return "answer";
+};
+
 const scrollToBottom = async (force = false) => {
+  const intent = activeStreamScrollIntent;
+  if (intent === "non-answer") return;
   await nextTick();
   const el = scrollRef.value;
   if (!el) return;
-  if (force || el.scrollHeight - el.scrollTop - el.clientHeight < 180) {
+  if (!force && !shouldFollowAnswer.value && !isNearMessageBottom(el)) return;
+  if (!force && intent === "answer" && !shouldFollowAnswer.value) return;
+  if (force || shouldFollowAnswer.value || isNearMessageBottom(el)) {
+    programmaticScrollUntil = Date.now() + 180;
     el.scrollTop = el.scrollHeight;
+    lastMessageScrollTop = el.scrollTop;
+    shouldFollowAnswer.value = true;
   }
+};
+
+const handleMessageScroll = () => {
+  const el = scrollRef.value;
+  if (!el) return;
+  const currentTop = el.scrollTop;
+  const nearBottom = isNearMessageBottom(el);
+  if (nearBottom) {
+    shouldFollowAnswer.value = true;
+  } else if (Date.now() > programmaticScrollUntil && currentTop < lastMessageScrollTop - 2) {
+    shouldFollowAnswer.value = false;
+  }
+  lastMessageScrollTop = currentTop;
 };
 
 const {
@@ -600,6 +658,8 @@ const startNewChat = async () => {
   clearRecoverPoll();
   stopStream();
   messagesList.splice(0);
+  shouldFollowAnswer.value = true;
+  lastMessageScrollTop = 0;
   currentSessionId.value = "";
   currentAssistantMessageId.value = "";
   fullContent.value = "";
@@ -985,6 +1045,8 @@ watch(
       isResumingStream.value = false;
       currentSessionId.value = "";
       messagesList.splice(0);
+      shouldFollowAnswer.value = true;
+      lastMessageScrollTop = 0;
       currentAssistantMessageId.value = "";
       fullContent.value = "";
       loading.value = false;
@@ -1023,7 +1085,12 @@ onChunk((data) => {
     }
     return;
   }
-  processStreamChunk(data);
+  activeStreamScrollIntent = inferStreamScrollIntent(data);
+  try {
+    processStreamChunk(data);
+  } finally {
+    activeStreamScrollIntent = "";
+  }
 });
 
 onMounted(async () => {
@@ -1054,7 +1121,7 @@ onBeforeUnmount(() => {
       </button>
     </header>
 
-    <section ref="scrollRef" class="message-scroll">
+    <section ref="scrollRef" class="message-scroll" @scroll="handleMessageScroll">
       <div v-if="isLoadingHistory" class="mobile-empty">正在加载会话</div>
       <template v-else>
         <div v-if="messagesList.length === 0" class="mobile-welcome">

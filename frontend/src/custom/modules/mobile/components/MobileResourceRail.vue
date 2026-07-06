@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import type { MobileResourceChip, MobileResourceType } from "../utils";
 
-defineProps<{
+const props = defineProps<{
   items: MobileResourceChip[];
   dense?: boolean;
+  alignEnd?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -44,56 +46,74 @@ const labelFor = (type: MobileResourceType) => {
   };
   return map[type] || "资源";
 };
+
+const showClearChip = computed(() =>
+  props.items.length > 3 && props.items.some((item) => item.removable !== false),
+);
 </script>
 
 <template>
-  <div v-if="items.length" class="mobile-resource-rail" :class="{ 'is-dense': dense }">
-    <div
-      v-for="item in items"
-      :key="`${item.type}:${item.id}`"
-      class="resource-chip"
-      :class="`is-${item.type}`"
-    >
-      <div class="resource-chip__icon">
-        <MobileIcon :name="iconFor(item.type)" />
-      </div>
-      <div class="resource-chip__text">
-        <span class="resource-chip__type">{{ labelFor(item.type) }}</span>
-        <span class="resource-chip__name">{{ item.name }}</span>
+  <div v-if="items.length" class="mobile-resource-rail" :class="{ 'is-dense': dense, 'is-align-end': alignEnd }">
+    <div class="mobile-resource-rail__track">
+      <div
+        v-for="item in items"
+        :key="`${item.type}:${item.id}`"
+        class="resource-chip"
+        :class="`is-${item.type}`"
+      >
+        <div class="resource-chip__icon">
+          <MobileIcon :name="iconFor(item.type)" />
+        </div>
+        <div class="resource-chip__text">
+          <span class="resource-chip__type">{{ labelFor(item.type) }}</span>
+          <span class="resource-chip__name">{{ item.name }}</span>
+        </div>
+        <button
+          v-if="item.removable !== false"
+          type="button"
+          class="resource-chip__remove"
+          :aria-label="`移除${item.name}`"
+          @click.stop="emit('remove', item)"
+        >
+          <MobileIcon name="close" />
+        </button>
       </div>
       <button
-        v-if="item.removable !== false"
+        v-if="showClearChip"
         type="button"
-        class="resource-chip__remove"
-        :aria-label="`移除${item.name}`"
-        @click.stop="emit('remove', item)"
+        class="resource-clear-chip"
+        aria-label="全部清空引用资源"
+        @click.stop="emit('clear')"
       >
         <MobileIcon name="close" />
+        <span>全部清空</span>
       </button>
     </div>
-    <button
-      v-if="items.length > 3"
-      type="button"
-      class="resource-clear-chip"
-      aria-label="全部清空引用资源"
-      @click.stop="emit('clear')"
-    >
-      <MobileIcon name="close" />
-      <span>全部清空</span>
-    </button>
   </div>
 </template>
 
 <style scoped>
 .mobile-resource-rail {
   display: flex;
-  gap: 8px;
   width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 2px 2px 4px;
   scrollbar-width: none;
   -webkit-overflow-scrolling: touch;
+}
+
+.mobile-resource-rail__track {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 100%;
+  width: max-content;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.is-align-end .mobile-resource-rail__track {
+  justify-content: flex-end;
 }
 
 .mobile-resource-rail::-webkit-scrollbar {

@@ -16,13 +16,17 @@
             </div>
             <div v-if="session.isRagMode" class="rag-answer-stack">
                 <RagPipelineProgress :session="session" :embedded-mode="embeddedMode" />
-                <SourceReferenceHub v-if="session.knowledge_references?.length" ref="sourceReferenceHub"
+                <SourceReferenceHub
+                    v-if="session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks)"
+                    ref="sourceReferenceHub"
                     :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay v-if="session.isAgentMode" :session="session" :session-id="sessionId"
                     :user-query="userQuery" :rag-mode="true" />
             </div>
             <template v-else>
-                <SourceReferenceHub v-if="session.knowledge_references?.length" ref="sourceReferenceHub"
+                <SourceReferenceHub
+                    v-if="session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks)"
+                    ref="sourceReferenceHub"
                     :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay :session="session" :session-id="sessionId" :user-query="userQuery"
                     v-if="session.isAgentMode" />
@@ -110,6 +114,7 @@ import { refreshMarkdownEnhancements } from '@/utils/markdownEnhancements';
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
 import { useTypewriter } from '@/composables/useTypewriter';
 import { vStableHtml } from '@/directives/stableHtml';
+import { focusEmptyKnowledgeDocumentLinkReferenceTarget } from '@/utils/sourceReferences';
 
 ensureMermaidInitialized();
 
@@ -221,6 +226,8 @@ const hasActualContent = computed(() => {
     return text && text.trim().length > 0;
 });
 
+const hasInlineWikiLinks = computed(() => /\[\[[^\]]+\]\]/.test(answerText.value || ''));
+
 // 获取实际内容
 const getActualContent = () => {
     return (props.content || props.session?.content || '').trim();
@@ -315,6 +322,17 @@ const handleSourceCitationClick = (e) => {
     }
 };
 
+const handleEmptyKnowledgeDocumentLinkClick = (e) => {
+    const target = e.target;
+    const linkEl = target?.closest?.('a');
+    if (!linkEl) return;
+
+    if (!focusEmptyKnowledgeDocumentLinkReferenceTarget(parentMd.value, linkEl)) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+};
+
 const openRouteInNewTab = (location) => {
     const href = router.resolve(location).href;
     window.open(new URL(href, window.location.origin).toString(), '_blank', 'noopener,noreferrer');
@@ -342,6 +360,7 @@ onMounted(async () => {
     nextTick(async () => {
         if (parentMd.value) {
             parentMd.value.addEventListener('click', handleMarkdownImageClick, true);
+            parentMd.value.addEventListener('click', handleEmptyKnowledgeDocumentLinkClick, true);
             parentMd.value.addEventListener('click', handleSourceCitationClick, true);
         }
         rebindCitations();
@@ -353,6 +372,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
     if (parentMd.value) {
         parentMd.value.removeEventListener('click', handleMarkdownImageClick, true);
+        parentMd.value.removeEventListener('click', handleEmptyKnowledgeDocumentLinkClick, true);
         parentMd.value.removeEventListener('click', handleSourceCitationClick, true);
     }
 });

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
-import { downKnowledgeDetails, getKnowledgeDetails } from "@/api/knowledge-base";
+import { downKnowledgeDetails, getChunkByIdOnly, getKnowledgeDetails } from "@/api/knowledge-base";
 import { getWikiPage, type WikiPage } from "@/api/wiki";
+import { useChatResourcesStore } from "@/stores/chatResources";
 import {
   hostFromUrl,
   sourceTypeLabel,
@@ -15,6 +16,8 @@ const props = defineProps<{
   item: SourceReferenceItem | null;
 }>();
 
+const chatResources = useChatResourcesStore();
+
 const emit = defineEmits<{
   close: [];
 }>();
@@ -22,6 +25,8 @@ const emit = defineEmits<{
 const loading = ref(false);
 const error = ref("");
 const knowledgeDetail = ref<Record<string, any> | null>(null);
+const knowledgeFragment = ref("");
+const resolvedKnowledgeId = ref("");
 const wikiPage = ref<WikiPage | null>(null);
 const wikiStack = ref<WikiPage[]>([]);
 const downloading = ref(false);
@@ -53,8 +58,12 @@ const displayTime = computed(() =>
   formatTime(knowledgeDetail.value?.created_at || knowledgeDetail.value?.updated_at || knowledgeDetail.value?.time),
 );
 
-const knowledgeSummary = computed(() =>
-  String(knowledgeDetail.value?.description || props.item?.snippet || "").trim(),
+const knowledgeFragmentContent = computed(() =>
+  String(knowledgeFragment.value || props.item?.snippet || "").trim(),
+);
+
+const knowledgeFragmentHtml = computed(() =>
+  knowledgeFragmentContent.value ? renderMobileMarkdown(knowledgeFragmentContent.value) : "",
 );
 
 const wikiHtml = computed(() => {
@@ -66,18 +75,24 @@ const wikiHtml = computed(() => {
 const sourceLabel = computed(() => {
   if (!props.item) return "";
   const typeText = sourceTypeLabel(props.item.type);
-  const label = props.item.type === "web" ? hostFromUrl(props.item.url) || props.item.sourceLabel || "" : props.item.sourceLabel || "";
+  const label = props.item.type === "wiki"
+    ? wikiPage.value?.knowledge_base_id || props.item.sourceLabel || ""
+    : props.item.type === "web"
+      ? hostFromUrl(props.item.url) || props.item.sourceLabel || ""
+      : props.item.sourceLabel || "";
   return label && label !== typeText ? label : "";
 });
 
 const canDownloadKnowledge = computed(() =>
-  isKnowledge.value && Boolean(knowledgeDetail.value?.id || props.item?.knowledgeId),
+  isKnowledge.value && Boolean(knowledgeDetail.value?.id || props.item?.knowledgeId || resolvedKnowledgeId.value),
 );
 
 watch(
   () => props.item,
   (item) => {
     knowledgeDetail.value = null;
+    knowledgeFragment.value = "";
+    resolvedKnowledgeId.value = "";
     wikiPage.value = null;
     wikiStack.value = [];
     error.value = "";
@@ -92,25 +107,78 @@ watch(
 );
 
 async function loadKnowledge(item: SourceReferenceItem) {
-  if (!item.knowledgeId) {
-    error.value = item.snippet ? "" : "这个引用没有关联到可打开的文档";
+  if (!item.knowledgeId && !item.chunkId) {
+    error.value = item.snippet ? "" : "这个引用没有关联到可打开的文档片段";
     return;
   }
   loading.value = true;
   error.value = "";
+  const failures: string[] = [];
   try {
-    const res: any = await getKnowledgeDetails(item.knowledgeId);
-    knowledgeDetail.value = res?.data || res || null;
-  } catch (err: any) {
-    console.error("[mobile] load citation knowledge failed", err);
-    error.value = err?.message || "文档信息加载失败";
+    const tasks: Promise<void>[] = [];
+    if (item.knowledgeId) {
+      tasks.push(getKnowledgeDetails(item.knowledgeId)
+        .then((res: any) => {
+          knowledgeDetail.value = res?.data || res || null;
+          resolvedKnowledgeId.value = knowledgeDetail.value?.id || item.knowledgeId;
+        })
+        .catch((err: any) => {
+          console.error("[mobile] load citation knowledge failed", err);
+          failures.push("文档信息加载失败");
+        }));
+    }
+    if (item.chunkId) {
+      tasks.push(getChunkByIdOnly(item.chunkId)
+        .then((res: any) => {
+          const data = res?.data || res || {};
+          knowledgeFragment.value = String(data.content || item.snippet || "").trim();
+          resolvedKnowledgeId.value = item.knowledgeId || data.knowledge_id || resolvedKnowledgeId.value;
+        })
+        .catch((err: any) => {
+          console.error("[mobile] load citation knowledge fragment failed", err);
+          failures.push("文档片段加载失败");
+        }));
+    } else {
+      knowledgeFragment.value = item.snippet || "";
+    }
+    await Promise.all(tasks);
+    if (!knowledgeFragmentContent.value && failures.length) {
+      error.value = failures[0];
+    }
   } finally {
     loading.value = false;
   }
 }
 
+const isWikiKb = (kb: any) => kb?.indexing_strategy?.wiki_enabled === true || kb?.wiki_config?.wiki_enabled === true;
+
+async function resolveWikiPage(kbId: string, slug: string) {
+  if (kbId) {
+    const res: any = await getWikiPage(kbId, slug);
+    return (res?.data || res) as WikiPage;
+  }
+
+  await chatResources.ensureKnowledgeBases().catch(() => undefined);
+  const candidates = (chatResources.rawKnowledgeBases || [])
+    .filter(isWikiKb)
+    .map((kb: any) => String(kb.id || ""))
+    .filter(Boolean);
+
+  for (const candidateKbId of candidates) {
+    try {
+      const res: any = await getWikiPage(candidateKbId, slug);
+      const page = (res?.data || res) as WikiPage;
+      if (page?.slug || page?.title || page?.content) return page;
+    } catch {
+      // Try the next wiki knowledge base; a slug may legitimately exist in only one.
+    }
+  }
+
+  throw new Error("未在可访问的 Wiki 知识库中找到这个页面");
+}
+
 async function loadWiki(kbId: string, slug: string, pushCurrent: boolean) {
-  if (!kbId || !slug) {
+  if (!slug) {
     error.value = "这个引用没有关联到可打开的 Wiki 页面";
     return;
   }
@@ -118,8 +186,7 @@ async function loadWiki(kbId: string, slug: string, pushCurrent: boolean) {
   error.value = "";
   const previous = wikiPage.value;
   try {
-    const res: any = await getWikiPage(kbId, slug);
-    const nextPage = (res?.data || res) as WikiPage;
+    const nextPage = await resolveWikiPage(kbId, slug);
     if (pushCurrent && previous) {
       wikiStack.value = [...wikiStack.value, previous];
     }
@@ -143,12 +210,12 @@ function backWikiPage() {
 function handleWikiBodyClick(event: MouseEvent) {
   const target = event.target as HTMLElement;
   const link = target.closest?.(".citation-wiki, .wiki-content-link") as HTMLElement | null;
-  if (!link || !props.item?.knowledgeBaseId) return;
+  if (!link) return;
   const slug = link.getAttribute("data-slug") || "";
   if (!slug) return;
   event.preventDefault();
   event.stopPropagation();
-  void loadWiki(props.item.knowledgeBaseId, slug, true);
+  void loadWiki(wikiPage.value?.knowledge_base_id || props.item?.knowledgeBaseId || "", slug, true);
 }
 
 function openWeb() {
@@ -165,7 +232,7 @@ function openWeb() {
 }
 
 async function downloadKnowledge() {
-  const id = knowledgeDetail.value?.id || props.item?.knowledgeId || "";
+  const id = knowledgeDetail.value?.id || props.item?.knowledgeId || resolvedKnowledgeId.value || "";
   if (!id || downloading.value) return;
   downloading.value = true;
   try {
@@ -274,10 +341,10 @@ function pageTypeLabel(type?: string) {
           </section>
 
           <section class="detail-section">
-            <h2>摘要</h2>
+            <h2>文档片段</h2>
             <div class="summary-card">
-              <p v-if="knowledgeSummary">{{ knowledgeSummary }}</p>
-              <p v-else>暂无摘要。可以下载原文档查看完整内容。</p>
+              <div v-if="knowledgeFragmentHtml" class="mobile-rich-content" v-html="knowledgeFragmentHtml" />
+              <p v-else>暂无文档片段内容。可以下载原文档查看完整内容。</p>
             </div>
           </section>
         </template>

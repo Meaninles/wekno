@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -12,6 +13,7 @@ import (
 const (
 	MetadataCitationID    = "citation_id"
 	MetadataCitationTitle = "citation_title"
+	MetadataChunkID       = "chunk_id"
 )
 
 type CitationSource struct {
@@ -20,6 +22,10 @@ type CitationSource struct {
 	Title           string `json:"title"`
 	KnowledgeID     string `json:"knowledge_id,omitempty"`
 	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
+	ChunkID         string `json:"chunk_id,omitempty"`
+	ChunkIndex      int    `json:"chunk_index,omitempty"`
+	StartAt         int    `json:"start_at,omitempty"`
+	EndAt           int    `json:"end_at,omitempty"`
 	Slug            string `json:"slug,omitempty"`
 	URL             string `json:"url,omitempty"`
 }
@@ -83,6 +89,12 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 			if src.KnowledgeID != "" {
 				ref.Metadata["knowledge_id"] = src.KnowledgeID
 			}
+			if src.Type == SourceTypeKnowledge && src.ChunkID != "" {
+				ref.Metadata[MetadataChunkID] = src.ChunkID
+				ref.Metadata["chunk_index"] = strconv.Itoa(src.ChunkIndex)
+				ref.Metadata["start_at"] = strconv.Itoa(src.StartAt)
+				ref.Metadata["end_at"] = strconv.Itoa(src.EndAt)
+			}
 		}
 		if !seenOut[id] {
 			seenOut[id] = true
@@ -113,7 +125,12 @@ func CitationKey(ref *types.SearchResult) string {
 	case SourceTypeData:
 		return normalizedKey(sourceType, firstNonEmpty(ref.Metadata["source_id"], ref.ID, ref.KnowledgeTitle))
 	default:
-		return normalizedKey(sourceType, ref.KnowledgeBaseID, firstNonEmpty(ref.KnowledgeID, ref.KnowledgeTitle, ref.KnowledgeFilename, ref.ID))
+		knowledgeID := firstNonEmpty(ref.KnowledgeID, ref.Metadata["knowledge_id"])
+		chunkID := knowledgeChunkID(ref)
+		if chunkID != "" {
+			return normalizedKey(sourceType, ref.KnowledgeBaseID, knowledgeID, chunkID)
+		}
+		return normalizedKey(sourceType, ref.KnowledgeBaseID, firstNonEmpty(knowledgeID, ref.KnowledgeTitle, ref.KnowledgeFilename, ref.ID))
 	}
 }
 
@@ -144,6 +161,12 @@ func ContextCitationAttrs(ref *types.SearchResult) string {
 	if title != "" {
 		parts = append(parts, fmt.Sprintf(`source_title="%s"`, xmlAttr(title)))
 	}
+	if SourceTypeFromRef(ref) == SourceTypeKnowledge {
+		if chunkID := knowledgeChunkID(ref); chunkID != "" {
+			parts = append(parts, fmt.Sprintf(`chunk_id="%s"`, xmlAttr(chunkID)))
+			parts = append(parts, fmt.Sprintf(`chunk_index="%d"`, ref.ChunkIndex))
+		}
+	}
 	return " " + strings.Join(parts, " ")
 }
 
@@ -165,8 +188,15 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 		}
 		switch src.Type {
 		case SourceTypeKnowledge:
+			if src.KnowledgeBaseID != "" {
+				attrs = append(attrs, fmt.Sprintf(`knowledge_base_id="%s"`, xmlAttr(src.KnowledgeBaseID)))
+			}
 			if src.KnowledgeID != "" {
 				attrs = append(attrs, fmt.Sprintf(`knowledge_id="%s"`, xmlAttr(src.KnowledgeID)))
+			}
+			if src.ChunkID != "" {
+				attrs = append(attrs, fmt.Sprintf(`chunk_id="%s"`, xmlAttr(src.ChunkID)))
+				attrs = append(attrs, fmt.Sprintf(`chunk_index="%d"`, src.ChunkIndex))
 			}
 		case SourceTypeWiki:
 			if src.Slug != "" {
@@ -219,7 +249,7 @@ func citationSourceFromRef(id string, ref *types.SearchResult) *CitationSource {
 		ID:              id,
 		Type:            sourceType,
 		Title:           sourceTitle(ref),
-		KnowledgeID:     ref.KnowledgeID,
+		KnowledgeID:     firstNonEmpty(ref.KnowledgeID, ref.Metadata["knowledge_id"]),
 		KnowledgeBaseID: firstNonEmpty(ref.KnowledgeBaseID, ref.Metadata["knowledge_base_id"]),
 	}
 	switch sourceType {
@@ -232,6 +262,12 @@ func citationSourceFromRef(id string, ref *types.SearchResult) *CitationSource {
 	default:
 		if src.KnowledgeID == "" {
 			src.KnowledgeID = strings.TrimSpace(ref.Metadata["knowledge_id"])
+		}
+		src.ChunkID = knowledgeChunkID(ref)
+		if src.ChunkID != "" {
+			src.ChunkIndex = ref.ChunkIndex
+			src.StartAt = ref.StartAt
+			src.EndAt = ref.EndAt
 		}
 	}
 	if src.Title == "" {
@@ -262,6 +298,22 @@ func ensureMetadata(ref *types.SearchResult) {
 	if ref.Metadata == nil {
 		ref.Metadata = map[string]string{}
 	}
+}
+
+func knowledgeChunkID(ref *types.SearchResult) string {
+	if ref == nil {
+		return ""
+	}
+	if ref.Metadata != nil {
+		if id := strings.TrimSpace(ref.Metadata[MetadataChunkID]); id != "" {
+			return id
+		}
+	}
+	id := strings.TrimSpace(ref.ID)
+	if id == "" || id == strings.TrimSpace(ref.KnowledgeID) {
+		return ""
+	}
+	return id
 }
 
 func normalizedKey(parts ...string) string {

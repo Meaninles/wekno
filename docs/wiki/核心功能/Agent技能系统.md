@@ -41,7 +41,6 @@ source: agent-skills.md
 | `data-processor` | 数据处理、格式转换、结构化提取 |
 | `doc-coauthoring` | 结构化文档协作创作 |
 | `document-analyzer` | 文档结构、主题和质量分析 |
-| `openmaic-classroom` | OpenMAIC 课堂相关技能 |
 
 ## 配置字段
 

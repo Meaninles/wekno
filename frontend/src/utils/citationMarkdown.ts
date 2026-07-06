@@ -215,10 +215,12 @@ export function preprocessCitationTags(
       const safeSourceLabel = escapeHtml(item.sourceLabel)
       const safeKbId = escapeHtml(item.knowledgeBaseId)
       const safeKnowledgeId = escapeHtml(item.knowledgeId)
+      const safeChunkId = escapeHtml(item.chunkId)
+      const safeChunkIndex = item.chunkIndex === null ? '' : escapeHtml(String(item.chunkIndex))
       const safeSlug = escapeHtml(item.slug)
       const safeUrl = escapeHtml(item.url)
       const safeDataSourceId = escapeHtml(item.sourceId)
-      return `<span class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" role="button" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"><span class="citation-number">${safeNumber}</span></span>`
+      return `<span class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-chunk-id="${safeChunkId}" data-chunk-index="${safeChunkIndex}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" role="button" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"><span class="citation-number">${safeNumber}</span></span>`
     })
     .replace(WEB_TAG_ATTR_RE, (_m, attrString: string) => {
       const attrs = parseTagAttributes(attrString)

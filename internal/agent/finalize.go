@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -33,6 +35,17 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 	// Build messages with all context
 	systemPrompt := e.buildSystemPrompt(ctx)
 	userTurn := e.RenderUserTurnContent(sessionID, query)
+	citationContext, citationRefs := prepareFinalAnswerCitationContext(state)
+	if len(citationRefs) > 0 {
+		e.eventBus.Emit(ctx, event.Event{
+			ID:        generateEventID("references"),
+			Type:      event.EventAgentReferences,
+			SessionID: sessionID,
+			Data: event.AgentReferencesData{
+				References: citationRefs,
+			},
+		})
+	}
 
 	messages := []chat.Message{
 		{Role: "system", Content: systemPrompt},
@@ -53,6 +66,15 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		}
 	}
 
+	if citationContext != "" {
+		messages = append(messages, chat.Message{
+			Role: "user",
+			Content: "Citation handles available for the final answer:\n" +
+				citationContext +
+				"\nUse these handles only when the cited statement is directly supported by the matching context.",
+		})
+	}
+
 	logger.Debugf(ctx, "[Agent][FinalAnswer] Built context: %d messages, %d tool results",
 		len(messages), toolResultCount)
 
@@ -63,7 +85,7 @@ User question: %s
 
 Requirements:
 1. Answer based on the actually retrieved content
-2. Clearly cite information sources (chunk_id, document name)
+2. When citation_sources are provided, cite factual statements inline with <src id="S1" /> using the exact source id. For knowledge-base sources, each id represents a specific document fragment, not the whole document; cite the fragment whose content directly supports the sentence or paragraph. Do not invent source ids and do not expose internal chunk_id or knowledge_id values in the user-facing answer.
 3. Organize the answer in a structured format
 4. If information is insufficient, honestly state so
 5. IMPORTANT: Respond in the same language as the user's question
@@ -136,6 +158,100 @@ Now generate the final answer:`, query)
 	})
 	state.FinalAnswer = fullAnswer
 	return nil
+}
+
+func prepareFinalAnswerCitationContext(state *types.AgentState) (string, []*types.SearchResult) {
+	if state == nil {
+		return "", nil
+	}
+
+	refs := collectToolSourceReferences(state)
+	if len(refs) == 0 {
+		return "", nil
+	}
+	sourcerefs.AssignCitationIDs(refs)
+	mergeStateKnowledgeReferences(state, refs)
+	return renderFinalAnswerCitationContext(refs), refs
+}
+
+func collectToolSourceReferences(state *types.AgentState) []*types.SearchResult {
+	refs := make([]*types.SearchResult, 0)
+	seen := make(map[string]bool)
+	for _, step := range state.RoundSteps {
+		for _, toolCall := range step.ToolCalls {
+			if toolCall.Result == nil {
+				continue
+			}
+			for _, ref := range sourcerefs.ExtractFromToolResult(toolCall.Name, toolCall.Result) {
+				key := sourcerefs.ReferenceKey(ref)
+				if key == "" || seen[key] {
+					continue
+				}
+				seen[key] = true
+				refs = append(refs, ref)
+			}
+		}
+	}
+	return refs
+}
+
+func mergeStateKnowledgeReferences(state *types.AgentState, refs []*types.SearchResult) {
+	if state == nil || len(refs) == 0 {
+		return
+	}
+	seen := make(map[string]bool, len(state.KnowledgeRefs)+len(refs))
+	for _, ref := range state.KnowledgeRefs {
+		if key := sourcerefs.ReferenceKey(ref); key != "" {
+			seen[key] = true
+		}
+	}
+	for _, ref := range refs {
+		key := sourcerefs.ReferenceKey(ref)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		state.KnowledgeRefs = append(state.KnowledgeRefs, ref)
+	}
+}
+
+func renderFinalAnswerCitationContext(refs []*types.SearchResult) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	if catalog := sourcerefs.RenderCitationCatalog(refs); catalog != "" {
+		b.WriteString(catalog)
+		b.WriteString("\n")
+	}
+	b.WriteString("<citation_contexts>\n")
+	for _, ref := range refs {
+		if ref == nil {
+			continue
+		}
+		attrs := sourcerefs.ContextCitationAttrs(ref)
+		if attrs == "" {
+			continue
+		}
+		content := strings.TrimSpace(ref.Content)
+		if content == "" {
+			content = strings.TrimSpace(ref.KnowledgeTitle)
+		}
+		if content == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("<context%s>%s</context>\n", attrs, escapeCitationXMLText(content)))
+	}
+	b.WriteString("</citation_contexts>")
+	return b.String()
+}
+
+func escapeCitationXMLText(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+	).Replace(s)
 }
 
 // handleMaxIterations generates a final answer when the agent loop exhausted all iterations

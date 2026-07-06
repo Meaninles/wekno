@@ -501,7 +501,7 @@
   </t-drawer>
 
   <t-drawer v-if="knowledgeDrawerVisible" v-model:visible="knowledgeDrawerVisible"
-    :header="knowledgeDrawer.title || '知识库文档'" size="480px" :footer="false" placement="right" attach="body"
+    :header="knowledgeDrawer.title || '知识库文档片段'" size="480px" :footer="false" placement="right" attach="body"
     :show-overlay="true" :close-btn="true" :close-on-overlay-click="true" class="wiki-graph-drawer">
     <div class="wiki-reader-meta"
       style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
@@ -580,6 +580,7 @@ import {
 import {
   buildSourceReferenceItems,
   focusEmptyKnowledgeDocumentLinkReferenceTarget,
+  sourceTypeLabel,
   type SourceReferenceItem,
 } from '@/utils/sourceReferences';
 import {
@@ -727,6 +728,7 @@ type KnowledgeDrawerState = {
   knowledgeId: string;
   chunkId: string;
   chunkIndex: number | null;
+  fragmentCount: number;
   loading: boolean;
   error: string;
 };
@@ -745,6 +747,7 @@ const knowledgeDrawer = ref<KnowledgeDrawerState>({
   knowledgeId: '',
   chunkId: '',
   chunkIndex: null,
+  fragmentCount: 0,
   loading: false,
   error: '',
 });
@@ -798,6 +801,9 @@ const knowledgeDrawerContent = computed(() => {
 });
 
 const knowledgeDrawerMetaText = computed(() => {
+  if (knowledgeDrawer.value.fragmentCount > 1) {
+    return `${knowledgeDrawer.value.fragmentCount} 个文档片段`;
+  }
   const index = knowledgeDrawer.value.chunkIndex;
   return index === null ? '' : `第 ${index + 1} 个文档片段`;
 });
@@ -1916,7 +1922,7 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
   if (matched) return matched;
 
   const type = (el.getAttribute('data-source-type') || 'knowledge') as SourceReferenceItem['type'];
-  const title = el.getAttribute('data-title') || '知识库文档';
+  const title = el.getAttribute('data-title') || sourceTypeLabel(type);
   const knowledgeBaseId = el.getAttribute('data-kb-id') || '';
   const knowledgeId = el.getAttribute('data-knowledge-id') || '';
   const chunkId = el.getAttribute('data-chunk-id') || '';
@@ -1929,7 +1935,7 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
     citationId,
     type,
     title,
-    sourceLabel: el.getAttribute('data-source-label') || '知识库文档',
+    sourceLabel: el.getAttribute('data-source-label') || sourceTypeLabel(type),
     snippet: '',
     count: 1,
     icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : type === 'data_source' ? 'server' : 'file',
@@ -1948,17 +1954,25 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
 
 const openKnowledgeDrawer = async (item: SourceReferenceItem) => {
   wikiDrawerVisible.value = false;
+  const savedContent = String(item.content || '').trim();
+  const initialContent = savedContent || item.snippet || '';
   knowledgeDrawer.value = {
-    title: item.title || '知识库文档',
-    content: item.snippet || '',
+    title: item.title || '知识库文档片段',
+    content: initialContent,
     knowledgeBaseId: item.knowledgeBaseId,
     knowledgeId: item.knowledgeId,
     chunkId: item.chunkId,
     chunkIndex: item.chunkIndex,
-    loading: Boolean(item.chunkId),
+    fragmentCount: item.fragmentCount || 0,
+    loading: Boolean(item.chunkId && !savedContent),
     error: '',
   };
   knowledgeDrawerVisible.value = true;
+
+  if (savedContent) {
+    knowledgeDrawer.value.loading = false;
+    return;
+  }
 
   if (!item.chunkId) {
     if (!item.snippet) {
@@ -1977,6 +1991,7 @@ const openKnowledgeDrawer = async (item: SourceReferenceItem) => {
       knowledgeId: item.knowledgeId || data.knowledge_id || '',
       knowledgeBaseId: item.knowledgeBaseId || data.knowledge_base_id || '',
       chunkIndex: item.chunkIndex ?? (Number.isFinite(Number(data.chunk_index)) ? Number(data.chunk_index) : null),
+      fragmentCount: item.fragmentCount || 0,
       loading: false,
       error: data.content || item.snippet ? '' : '没有找到这个文档片段的正文内容。',
     };
@@ -1992,7 +2007,7 @@ const openKnowledgeDrawer = async (item: SourceReferenceItem) => {
 
 const openLegacyKnowledgeDrawer = (el: HTMLElement) => {
   const rawChunkId = el.getAttribute('data-chunk-id') || '';
-  const title = el.getAttribute('data-doc') || '知识库文档';
+  const title = el.getAttribute('data-doc') || '知识库文档片段';
   const kbId = el.getAttribute('data-kb-id') || '';
   const matched = sourceReferenceItems.value.find((item) =>
     item.type === 'knowledge' && item.chunkId && item.chunkId === rawChunkId,
@@ -2003,7 +2018,7 @@ const openLegacyKnowledgeDrawer = (el: HTMLElement) => {
     citationId: '',
     type: 'knowledge',
     title,
-    sourceLabel: '知识库文档',
+    sourceLabel: '知识库文档片段',
     snippet: '',
     count: 1,
     icon: 'file',

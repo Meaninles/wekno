@@ -21,6 +21,8 @@ export type SourceReferenceItem = {
   type: SourceReferenceKind
   title: string
   sourceLabel: string
+  content?: string
+  fragmentCount?: number
   snippet: string
   count: number
   icon: string
@@ -65,6 +67,7 @@ export function buildSourceReferenceItems(
     const citationId = metadata.citation_id || ''
     const key = citationId || fallbackSourceKey(ref, type)
     if (!key) continue
+    const fullContent = referenceContent(ref.content || '')
 
     if (!firstSeen.has(key)) {
       firstSeen.set(key, seenIndex++)
@@ -73,6 +76,7 @@ export function buildSourceReferenceItems(
     const existing = grouped.get(key)
     if (existing) {
       existing.count += 1
+      mergeReferenceContent(existing, fullContent)
       if (!existing.snippet) existing.snippet = summarizeContent(ref.content || '')
       continue
     }
@@ -96,6 +100,8 @@ export function buildSourceReferenceItems(
       type,
       title,
       sourceLabel,
+      content: fullContent,
+      fragmentCount: fullContent ? 1 : 0,
       snippet: summarizeContent(ref.content || ''),
       count: 1,
       icon: iconForSourceType(type),
@@ -183,7 +189,7 @@ export function sourceTypeLabel(type: SourceReferenceKind): string {
   if (type === 'web') return '网页'
   if (type === 'wiki') return 'Wiki'
   if (type === 'data_source') return '数据源'
-  return '知识库文档'
+  return '知识库文档片段'
 }
 
 export function hostFromUrl(value?: string): string {
@@ -282,7 +288,7 @@ function sourceLabelFor(ref: SourceReference, type: SourceReferenceKind, url: st
   if (type === 'web') return hostFromUrl(url) || metadata.source || '网页'
   if (type === 'wiki') return metadata.knowledge_base_name || 'Wiki'
   if (type === 'data_source') return metadata.database_type || metadata.source_name || '数据源'
-  return metadata.knowledge_base_name || metadata.source_name || '知识库文档'
+  return metadata.knowledge_base_name || metadata.source_name || '知识库文档片段'
 }
 
 function iconForSourceType(type: SourceReferenceKind): string {
@@ -397,6 +403,38 @@ function summarizeContent(content: string): string {
     .replace(/\s+/g, ' ')
   if (normalized.length <= 120) return normalized
   return `${normalized.slice(0, 120)}...`
+}
+
+function mergeReferenceContent(item: SourceReferenceItem, nextContent: string) {
+  const next = referenceContent(nextContent)
+  if (!next) return
+  const current = referenceContent(item.content || '')
+  if (!current) {
+    item.content = next
+    item.fragmentCount = 1
+    item.snippet = summarizeContent(next)
+    return
+  }
+  if (current.includes(next) || next.includes(current)) return
+
+  const nextIndex = Math.max(item.fragmentCount || 1, 1) + 1
+  const currentContent = (item.fragmentCount || 1) > 1
+    ? current
+    : formatReferenceFragment(1, current)
+  item.content = `${currentContent}\n\n---\n\n${formatReferenceFragment(nextIndex, next)}`
+  item.fragmentCount = nextIndex
+  item.snippet = summarizeContent(current)
+}
+
+function formatReferenceFragment(index: number, content: string): string {
+  return `### 文档片段 ${index}\n\n${content}`
+}
+
+function referenceContent(content: string): string {
+  return String(content || '')
+    .replace(/\uFFFD/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim()
 }
 
 function normalizeDisplayText(value: string): string {

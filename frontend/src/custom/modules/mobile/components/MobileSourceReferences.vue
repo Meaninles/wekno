@@ -1,17 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-
-type SourceKind = "knowledge" | "wiki" | "web" | "data_source";
-
-type SourceReference = {
-  id?: string;
-  knowledge_id?: string;
-  knowledge_title?: string;
-  knowledge_filename?: string;
-  knowledge_base_id?: string;
-  chunk_type?: string;
-  metadata?: Record<string, string>;
-};
+import {
+  buildSourceReferenceItems,
+  sourceTypeLabel,
+  type SourceReference,
+  type SourceReferenceKind,
+} from "@/utils/sourceReferences";
 
 const props = defineProps<{
   references?: SourceReference[];
@@ -19,53 +13,18 @@ const props = defineProps<{
 
 const expanded = ref(false);
 
-const sourceKind = (ref: SourceReference): SourceKind => {
-  const metadataType = ref.metadata?.source_type;
-  if (metadataType === "wiki") return "wiki";
-  if (metadataType === "web") return "web";
-  if (metadataType === "data_source") return "data_source";
-  if (ref.chunk_type === "wiki_page") return "wiki";
-  if (ref.chunk_type === "web_search") return "web";
-  if (ref.chunk_type === "data_source") return "data_source";
-  return "knowledge";
-};
-
-const rows = computed(() => {
-  const seen = new Set<string>();
-  return (props.references || [])
-    .map((ref) => {
-      const type = sourceKind(ref);
-      const metadata = ref.metadata || {};
-      const title =
-        ref.knowledge_title ||
-        ref.knowledge_filename ||
-        metadata.title ||
-        metadata.url ||
-        ref.knowledge_id ||
-        ref.id ||
-        "未命名来源";
-      const key = `${type}:${ref.knowledge_id || ref.id || title}`;
-      if (seen.has(key)) return null;
-      seen.add(key);
-      return {
-        key,
-        type,
-        title,
-        meta:
-          type === "web"
-            ? "搜索"
-            : type === "wiki"
-              ? "Wiki"
-              : type === "data_source"
-                ? "数据源"
-                : "知识库",
-      };
-    })
-    .filter(Boolean) as Array<{ key: string; type: SourceKind; title: string; meta: string }>;
-});
+const rows = computed(() => buildSourceReferenceItems(props.references || [])
+  .map((item) => ({
+    key: item.key,
+    type: item.type,
+    title: item.title || "未命名来源",
+    meta: item.type === "knowledge" && (item.fragmentCount || item.count) > 1
+      ? `${item.fragmentCount || item.count} 个文档片段`
+      : sourceTypeLabel(item.type),
+  })));
 
 const summary = computed(() => {
-  const counts = rows.value.reduce<Record<SourceKind, number>>(
+  const counts = rows.value.reduce<Record<SourceReferenceKind, number>>(
     (acc, row) => {
       acc[row.type] += 1;
       return acc;
@@ -73,7 +32,7 @@ const summary = computed(() => {
     { knowledge: 0, wiki: 0, web: 0, data_source: 0 },
   );
   const parts: string[] = [];
-  if (counts.knowledge) parts.push(`${counts.knowledge}篇文档`);
+  if (counts.knowledge) parts.push(`${counts.knowledge}个文档片段`);
   if (counts.wiki) parts.push(`${counts.wiki}个Wiki`);
   if (counts.web) parts.push(`${counts.web}条搜索`);
   if (counts.data_source) parts.push(`${counts.data_source}个数据源`);
@@ -123,11 +82,9 @@ const summary = computed(() => {
 }
 
 .source-ref-head__text {
-  overflow: hidden;
   font-size: 13px;
   font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .source-ref-list {
@@ -139,8 +96,8 @@ const summary = computed(() => {
 
 .source-ref-row {
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: start;
   gap: 7px;
   color: #40554c;
   font-size: 13px;
@@ -166,12 +123,11 @@ const summary = computed(() => {
 }
 
 .source-ref-row__title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .source-ref-row__meta {
+  grid-column: 2;
   color: #7a8b83;
 }
 </style>

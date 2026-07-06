@@ -62,7 +62,7 @@
   </t-drawer>
 
   <t-drawer v-if="knowledgeDrawerVisible" v-model:visible="knowledgeDrawerVisible"
-    :header="knowledgeDrawer.title || '知识库文档'" size="480px" :footer="false" placement="right" attach="body"
+    :header="knowledgeDrawer.title || '知识库文档片段'" size="480px" :footer="false" placement="right" attach="body"
     :show-overlay="true" :close-btn="true" :close-on-overlay-click="true" :destroy-on-close="true"
     class="source-reference-wiki-drawer">
     <div class="wiki-reader-meta">
@@ -116,6 +116,7 @@ type KnowledgeDrawerState = {
   knowledgeId: string
   chunkId: string
   chunkIndex: number | null
+  fragmentCount: number
   loading: boolean
   error: string
 }
@@ -146,6 +147,7 @@ const knowledgeDrawer = ref<KnowledgeDrawerState>({
   knowledgeId: '',
   chunkId: '',
   chunkIndex: null,
+  fragmentCount: 0,
   loading: false,
   error: '',
 })
@@ -198,6 +200,9 @@ const knowledgeDrawerContent = computed(() => {
 })
 
 const knowledgeDrawerMetaText = computed(() => {
+  if (knowledgeDrawer.value.fragmentCount > 1) {
+    return `${knowledgeDrawer.value.fragmentCount} 个文档片段`
+  }
   const index = knowledgeDrawer.value.chunkIndex
   return index === null ? '' : `第 ${index + 1} 个文档片段`
 })
@@ -327,17 +332,25 @@ function itemFromElement(el: HTMLElement): SourceReferenceItem | null {
 async function openKnowledgeDrawer(item: SourceReferenceItem) {
   panelVisible.value = false
   wikiDrawerVisible.value = false
+  const savedContent = String(item.content || '').trim()
+  const initialContent = savedContent || item.snippet || ''
   knowledgeDrawer.value = {
-    title: item.title || '知识库文档',
-    content: item.snippet || '',
+    title: item.title || '知识库文档片段',
+    content: initialContent,
     knowledgeBaseId: item.knowledgeBaseId,
     knowledgeId: item.knowledgeId,
     chunkId: item.chunkId,
     chunkIndex: item.chunkIndex,
-    loading: Boolean(item.chunkId),
+    fragmentCount: item.fragmentCount || 0,
+    loading: Boolean(item.chunkId && !savedContent),
     error: '',
   }
   knowledgeDrawerVisible.value = true
+
+  if (savedContent) {
+    knowledgeDrawer.value.loading = false
+    return
+  }
 
   if (!item.chunkId) {
     if (!item.snippet) {
@@ -356,6 +369,7 @@ async function openKnowledgeDrawer(item: SourceReferenceItem) {
       knowledgeId: item.knowledgeId || data.knowledge_id || '',
       knowledgeBaseId: item.knowledgeBaseId || data.knowledge_base_id || '',
       chunkIndex: item.chunkIndex ?? (Number.isFinite(Number(data.chunk_index)) ? Number(data.chunk_index) : null),
+      fragmentCount: item.fragmentCount || 0,
       loading: false,
       error: data.content || item.snippet ? '' : '没有找到这个文档片段的正文内容。',
     }
@@ -509,7 +523,12 @@ function sourceTypeText(type: SourceReferenceKind): string {
 function sourceDetailLabel(item: SourceReferenceItem): string {
   const typeText = sourceTypeText(item.type)
   const label = item.sourceLabel || ''
-  return label && label !== typeText ? label : ''
+  const base = label && label !== typeText ? label : ''
+  if (item.type === 'knowledge' && (item.fragmentCount || item.count) > 1) {
+    const fragmentText = `${item.fragmentCount || item.count} 个文档片段`
+    return base ? `${base} · ${fragmentText}` : fragmentText
+  }
+  return base
 }
 
 function getTypeTheme(type?: string): string {

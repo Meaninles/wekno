@@ -58,8 +58,15 @@ const displayTime = computed(() =>
   formatTime(knowledgeDetail.value?.created_at || knowledgeDetail.value?.updated_at || knowledgeDetail.value?.time),
 );
 
+const knowledgeFragmentMeta = computed(() => {
+  if (!props.item || props.item.type !== "knowledge") return "";
+  const count = props.item.fragmentCount || props.item.count || 0;
+  if (count > 1) return `${count} 个文档片段`;
+  return props.item.chunkIndex === null ? "" : `第 ${props.item.chunkIndex + 1} 个文档片段`;
+});
+
 const knowledgeFragmentContent = computed(() =>
-  String(knowledgeFragment.value || props.item?.snippet || "").trim(),
+  String(knowledgeFragment.value || props.item?.content || props.item?.snippet || "").trim(),
 );
 
 const knowledgeFragmentHtml = computed(() =>
@@ -107,7 +114,10 @@ watch(
 );
 
 async function loadKnowledge(item: SourceReferenceItem) {
-  if (!item.knowledgeId && !item.chunkId) {
+  const savedContent = String(item.content || "").trim();
+  knowledgeFragment.value = savedContent || item.snippet || "";
+
+  if (!item.knowledgeId && !item.chunkId && !savedContent) {
     error.value = item.snippet ? "" : "这个引用没有关联到可打开的文档片段";
     return;
   }
@@ -127,7 +137,7 @@ async function loadKnowledge(item: SourceReferenceItem) {
           failures.push("文档信息加载失败");
         }));
     }
-    if (item.chunkId) {
+    if (item.chunkId && !savedContent) {
       tasks.push(getChunkByIdOnly(item.chunkId)
         .then((res: any) => {
           const data = res?.data || res || {};
@@ -138,7 +148,7 @@ async function loadKnowledge(item: SourceReferenceItem) {
           console.error("[mobile] load citation knowledge fragment failed", err);
           failures.push("文档片段加载失败");
         }));
-    } else {
+    } else if (!savedContent) {
       knowledgeFragment.value = item.snippet || "";
     }
     await Promise.all(tasks);
@@ -331,10 +341,14 @@ function pageTypeLabel(type?: string) {
           <section class="detail-section">
             <h2>基本信息</h2>
             <div class="detail-grid">
+              <span>文档</span>
+              <strong>{{ displayTitle }}</strong>
               <span>上传时间</span>
               <strong>{{ displayTime || '未知' }}</strong>
               <span>类型</span>
               <strong><em class="file-type-chip">{{ displayFileType }}</em></strong>
+              <span v-if="knowledgeFragmentMeta">片段</span>
+              <strong v-if="knowledgeFragmentMeta">{{ knowledgeFragmentMeta }}</strong>
               <span v-if="sourceLabel">来源</span>
               <strong v-if="sourceLabel">{{ sourceLabel }}</strong>
             </div>

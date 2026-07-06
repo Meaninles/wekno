@@ -27,6 +27,22 @@ const sourceMeta = (item: SourceReferenceItem) => {
   const meta = item.type === "web" ? hostFromUrl(item.url) || item.sourceLabel || "" : item.sourceLabel || "";
   return meta && meta !== typeText ? meta : "";
 };
+
+const citationPreview = (item: SourceReferenceItem | null) => {
+  const snippet = String(item?.snippet || "").trim();
+  if (snippet) return snippet;
+
+  const content = String(item?.content || "").replace(/\s+/g, " ").trim();
+  if (content.length <= 120) return content;
+  return `${content.slice(0, 120)}...`;
+};
+
+const openLabel = (item: SourceReferenceItem) => {
+  if (item.type === "web") return "打开网页";
+  if (item.type === "wiki") return "查看 Wiki";
+  if (item.type === "knowledge") return "查看文档片段";
+  return "查看来源";
+};
 </script>
 
 <template>
@@ -38,7 +54,7 @@ const sourceMeta = (item: SourceReferenceItem) => {
           <span class="citation-card__number">{{ props.item.number }}.</span>
           <strong>{{ props.item.title }}</strong>
         </div>
-        <p v-if="props.item.snippet" class="citation-card__snippet">{{ props.item.snippet }}</p>
+        <p v-if="citationPreview(props.item)" class="citation-card__snippet">{{ citationPreview(props.item) }}</p>
         <div class="citation-card__meta">
           <span class="citation-card__icon"><MobileIcon :name="iconFor(props.item)" /></span>
           <span>{{ sourceTypeLabel(props.item.type) }}</span>
@@ -53,7 +69,7 @@ const sourceMeta = (item: SourceReferenceItem) => {
           :disabled="!props.item.clickable"
           @click="emit('open', props.item)"
         >
-          {{ props.item.type === 'web' ? '打开网页' : props.item.type === 'wiki' ? '查看 Wiki' : '查看来源' }}
+          {{ openLabel(props.item) }}
         </button>
       </div>
     </section>
@@ -72,9 +88,12 @@ const sourceMeta = (item: SourceReferenceItem) => {
 
 .citation-sheet {
   width: 100%;
+  max-height: 86dvh;
+  overflow-y: auto;
   border-radius: 20px 20px 0 0;
   background: #f7f8f8;
   padding: 10px 14px calc(env(safe-area-inset-bottom) + 14px);
+  -webkit-overflow-scrolling: touch;
 }
 
 .citation-sheet__grip {
@@ -121,11 +140,13 @@ const sourceMeta = (item: SourceReferenceItem) => {
 
 .citation-card__head strong {
   display: -webkit-box;
+  min-width: 0;
   overflow: hidden;
   color: #1b2923;
   font-size: 20px;
   font-weight: 560;
   line-height: 1.45;
+  overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
@@ -137,6 +158,8 @@ const sourceMeta = (item: SourceReferenceItem) => {
   color: #6d7b75;
   font-size: 16px;
   line-height: 1.8;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;
 }
@@ -144,7 +167,8 @@ const sourceMeta = (item: SourceReferenceItem) => {
 .citation-card__meta {
   display: flex;
   min-width: 0;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 7px;
   color: #7b8c84;
   font-size: 14px;
@@ -161,10 +185,8 @@ const sourceMeta = (item: SourceReferenceItem) => {
 }
 
 .citation-card__source {
-  overflow: hidden;
   min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .citation-sheet__actions {

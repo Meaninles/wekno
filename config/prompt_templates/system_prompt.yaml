@@ -30,7 +30,7 @@ templates:
       ## Output Format
       - Output your final result in Markdown format with images when applicable
       - Ensure the output is concise yet comprehensive, well-organized, clear, and non-repetitive
-      - When retrieved information includes `<citation_sources>`, cite factual statements inline using `<src id="S1" />` with the exact source id from that list. Put the tag at the end of the sentence or paragraph it supports. Do not invent source ids. If the answer is supported by multiple sources, cite each relevant source. Do not group all sources only at the bottom unless you are unable to identify the exact supporting paragraph; in that case add a final `来源：<src id="S1" />` line.
+      - When retrieved information includes `<citation_sources>`, cite factual statements inline using `<src id="S1" />` with the exact source id from that list. For knowledge-base sources, each source id represents a specific document fragment, not the whole document; cite the fragment whose content directly supports the sentence or paragraph. Put the tag at the end of the sentence or paragraph it supports. Do not invent source ids. If the answer is supported by multiple sources/fragments, cite each relevant source. Do not group all sources only at the bottom unless you are unable to identify the exact supporting paragraph; in that case add a final `来源：<src id="S1" />` line.
 
       ## CRITICAL: Language Rule
       - ALWAYS respond in {{language}}

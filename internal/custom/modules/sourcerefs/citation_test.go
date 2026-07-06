@@ -1,6 +1,7 @@
 package sourcerefs
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -42,8 +43,17 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 	if got := sources[0].ChunkID; got != "chunk-1" {
 		t.Fatalf("first source chunk id = %q, want chunk-1", got)
 	}
+	if got := sources[0].Granularity; got != "document_fragment" {
+		t.Fatalf("first source granularity = %q, want document_fragment", got)
+	}
 	if got := refs[1].Metadata[MetadataChunkID]; got != "chunk-2" {
 		t.Fatalf("second metadata chunk id = %q, want chunk-2", got)
+	}
+	if catalog := RenderCitationCatalog(refs); !strings.Contains(catalog, `granularity="document_fragment"`) || !strings.Contains(catalog, `chunk_id="chunk-1"`) {
+		t.Fatalf("catalog should mark knowledge sources as document fragments with chunk ids, got %s", catalog)
+	}
+	if attrs := ContextCitationAttrs(refs[0]); !strings.Contains(attrs, `source_granularity="document_fragment"`) || !strings.Contains(attrs, `chunk_id="chunk-1"`) {
+		t.Fatalf("context attrs should mark citation as document fragment, got %s", attrs)
 	}
 }
 

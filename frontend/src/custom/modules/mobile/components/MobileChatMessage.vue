@@ -665,19 +665,21 @@ const openWikiSource = (item: SourceReferenceItem | null) => {
 };
 
 const openLegacyKbCitation = async (el: HTMLElement) => {
-  const title = el.getAttribute("data-doc") || "知识库文档";
+  const title = el.getAttribute("data-doc") || "知识库文档片段";
   const kbId = el.getAttribute("data-kb-id") || "";
   const rawChunkId = el.getAttribute("data-chunk-id") || "";
   const refs = Array.isArray(props.message.knowledge_references) ? props.message.knowledge_references : [];
   const chunkId = resolveCitationChunkId(rawChunkId, { doc: title, kbId }, refs) || rawChunkId;
   const ref = refs.find((item: any) => item?.id === chunkId || item?.metadata?.chunk_id === chunkId);
+  const savedContent = String(ref?.content || "").trim();
 
   const baseItem = emptySourceItem({
     key: `knowledge:${kbId}:${chunkId || title}`,
     type: "knowledge",
     title,
-    sourceLabel: "知识库文档",
-    snippet: "正在加载文档片段内容...",
+    sourceLabel: "知识库文档片段",
+    content: savedContent,
+    snippet: savedContent || "正在加载文档片段内容...",
     icon: "file",
     knowledgeBaseId: kbId || ref?.knowledge_base_id || ref?.metadata?.knowledge_base_id || "",
     knowledgeId: ref?.knowledge_id || ref?.metadata?.knowledge_id || "",
@@ -686,6 +688,8 @@ const openLegacyKbCitation = async (el: HTMLElement) => {
   });
   detailItem.value = baseItem;
   pushDetailHistory();
+
+  if (savedContent) return;
 
   if (!chunkId) {
     detailItem.value = { ...baseItem, snippet: "这个引用没有关联到可打开的文档片段内容。" };
@@ -699,6 +703,7 @@ const openLegacyKbCitation = async (el: HTMLElement) => {
       ...baseItem,
       knowledgeId: baseItem.knowledgeId || res?.data?.knowledge_id || "",
       knowledgeBaseId: baseItem.knowledgeBaseId || res?.data?.knowledge_base_id || "",
+      content,
       snippet: content || "没有找到这个文档片段的正文内容。",
     };
   } catch (error) {

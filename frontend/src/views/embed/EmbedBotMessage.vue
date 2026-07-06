@@ -2,13 +2,15 @@
   <div class="embed-bot-msg" :class="{ 'is-embedded': embeddedMode }">
     <div v-if="session?.isRagMode" class="rag-answer-stack">
       <RagPipelineProgress :session="session" embedded-mode />
+      <SourceReferenceHub v-if="session?.knowledge_references?.length" ref="sourceReferenceHub" :session="session"
+        :content="answerText" embedded-mode />
       <AgentStreamDisplay v-if="session?.isAgentMode" :session="session" :session-id="sessionId" :user-query="userQuery"
         rag-mode :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken"
         :embed-session-sig="embedSessionSig" />
     </div>
     <template v-else>
-      <SourceReferenceTimeline v-if="shouldShowSourceReferenceTimeline" :session="session" embedded-mode />
-      <DocInfo v-else-if="session?.knowledge_references?.length" :session="session" embedded-mode />
+      <SourceReferenceHub v-if="session?.knowledge_references?.length" ref="sourceReferenceHub" :session="session"
+        :content="answerText" embedded-mode />
       <AgentStreamDisplay v-if="session?.isAgentMode" :session="session" :session-id="sessionId" :user-query="userQuery"
         :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken"
         :embed-session-sig="embedSessionSig" />
@@ -47,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onMounted, onUpdated, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue'
 import 'katex/dist/katex.min.css'
 import {
   sanitizeMarkdownHTML,
@@ -75,11 +77,8 @@ const RagPipelineProgress = defineAsyncComponent(
 const AgentStreamDisplay = defineAsyncComponent(
   () => import('@/views/chat/components/AgentStreamDisplay.vue'),
 )
-const DocInfo = defineAsyncComponent(
-  () => import('@/views/chat/components/docInfo.vue'),
-)
-const SourceReferenceTimeline = defineAsyncComponent(
-  () => import('@/custom/modules/sourceReferences/SourceReferenceTimeline.vue'),
+const SourceReferenceHub = defineAsyncComponent(
+  () => import('@/views/chat/components/SourceReferenceHub.vue'),
 )
 const DeepThink = defineAsyncComponent(
   () => import('@/views/chat/components/deepThink.vue'),
@@ -102,9 +101,12 @@ type EmbedSession = {
   is_completed?: boolean
   agentEventStream?: Array<Record<string, unknown>>
   knowledge_references?: Array<{
+    id?: string
     chunk_type?: string
     knowledge_id?: string
     knowledge_title?: string
+    knowledge_filename?: string
+    knowledge_base_id?: string
     metadata?: Record<string, string>
   }>
 }
@@ -133,19 +135,7 @@ const props = withDefaults(
 )
 
 const parentMd = ref<HTMLElement | null>(null)
-const shouldShowSourceReferenceTimeline = computed(() => {
-  const refs = props.session?.knowledge_references
-  if (!props.session?.isAgentMode || !Array.isArray(refs) || refs.length === 0) return false
-  return refs.some((ref) => {
-    const sourceType = ref?.metadata?.source_type
-    return sourceType === 'knowledge'
-      || sourceType === 'wiki'
-      || sourceType === 'web'
-      || sourceType === 'data_source'
-      || ref?.chunk_type === 'wiki_page'
-      || ref?.chunk_type === 'data_source'
-  })
-})
+const sourceReferenceHub = ref<InstanceType<typeof SourceReferenceHub> | null>(null)
 
 const embedChannelIdRef = computed(() => props.embedChannelId)
 const embedTokenRef = computed(() => props.embedToken)
@@ -186,6 +176,7 @@ const renderedHTML = computed(() => {
     escapeMarkdown: safeMarkdownToHTML,
     sanitizeHtml: sanitizeMarkdownHTML,
     streaming: !props.session?.is_completed,
+    knowledgeReferences: props.session?.knowledge_references,
   })
 })
 
@@ -204,6 +195,21 @@ const hydrateImages = async () => {
 
 const renderMermaidDiagrams = async () => {
   await enhanceMarkdownContainer(parentMd.value)
+}
+
+const handleSourceCitationClick = (event: MouseEvent) => {
+  const target = event.target as HTMLElement | null
+  const sourceEl = target?.closest?.('.citation-source') as HTMLElement | null
+  if (!sourceEl) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (sourceReferenceHub.value?.activateByElement?.(sourceEl)) return
+
+  const type = sourceEl.getAttribute('data-source-type') || ''
+  if (type === 'web') {
+    const url = sourceEl.getAttribute('data-url') || ''
+    if (url) window.open(url, '_blank', 'noopener,noreferrer')
+  }
 }
 
 watch(renderedHTML, () => {
@@ -227,9 +233,14 @@ onUpdated(() => {
 
 onMounted(() => {
   nextTick(async () => {
+    parentMd.value?.addEventListener('click', handleSourceCitationClick, true)
     await hydrateImages()
     await renderMermaidDiagrams()
   })
+})
+
+onBeforeUnmount(() => {
+  parentMd.value?.removeEventListener('click', handleSourceCitationClick, true)
 })
 </script>
 

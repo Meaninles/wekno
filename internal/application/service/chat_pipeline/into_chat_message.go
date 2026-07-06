@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -119,10 +120,16 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 
 	var contextsBuilder strings.Builder
 
+	sourcerefs.AssignCitationIDs(chatManage.MergeResult)
+
 	// Collect unique document metadata (title + description), once per knowledge
 	allResults := chatManage.MergeResult
 	if chatManage.FAQPriorityEnabled && len(faqResults) > 0 {
 		allResults = append(faqResults, docResults...)
+	}
+	if catalog := sourcerefs.RenderCitationCatalog(allResults); catalog != "" {
+		contextsBuilder.WriteString(catalog)
+		contextsBuilder.WriteString("\n")
 	}
 	docHeader := buildDocumentHeader(allResults)
 	if docHeader != "" {
@@ -136,9 +143,9 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 		for i, result := range faqResults {
 			passage := getEnrichedPassageForChat(ctx, result)
 			if hasHighConfidenceFAQ && i == 0 {
-				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"FAQ-%d\" match=\"exact\">%s</context>\n", i+1, passage))
+				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"FAQ-%d\" match=\"exact\"%s>%s</context>\n", i+1, sourcerefs.ContextCitationAttrs(result), passage))
 			} else {
-				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"FAQ-%d\">%s</context>\n", i+1, passage))
+				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"FAQ-%d\"%s>%s</context>\n", i+1, sourcerefs.ContextCitationAttrs(result), passage))
 			}
 		}
 		contextsBuilder.WriteString("</source>\n")
@@ -147,7 +154,7 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 			contextsBuilder.WriteString("<source type=\"document\" priority=\"supplementary\">\n")
 			for i, result := range docResults {
 				passage := getEnrichedPassageForChat(ctx, result)
-				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"DOC-%d\">%s</context>\n", i+1, passage))
+				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"DOC-%d\"%s>%s</context>\n", i+1, sourcerefs.ContextCitationAttrs(result), passage))
 			}
 			contextsBuilder.WriteString("</source>")
 		}
@@ -157,7 +164,7 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 			if i > 0 {
 				contextsBuilder.WriteString("\n")
 			}
-			contextsBuilder.WriteString(fmt.Sprintf("<context id=\"%d\">%s</context>", i+1, passage))
+			contextsBuilder.WriteString(fmt.Sprintf("<context id=\"%d\"%s>%s</context>", i+1, sourcerefs.ContextCitationAttrs(result), passage))
 		}
 	}
 

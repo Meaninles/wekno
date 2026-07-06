@@ -1,9 +1,17 @@
 /** Shared citation tag preprocessing for chat markdown (QA + agent). */
+import {
+  buildCitedSourceReferenceItems,
+  buildSourceReferenceItems,
+  findSourceReferenceItem,
+  getSourceReferenceKind,
+  type SourceReference,
+} from './sourceReferences.ts'
 
-/** Self-closing or unclosed `<kb/>` / `<web/>` tags from model output. */
-export const KB_WEB_TAG_RE = /<(?:kb|web)\b[^>]*?\s*\/?>/g
+/** Self-closing or unclosed `<kb/>` / `<web/>` / `<src/>` tags from model output. */
+export const KB_WEB_TAG_RE = /<(?:kb|web|src)\b[^>]*?\s*\/?>/g
 const KB_TAG_ATTR_RE = /<kb\b([^>]*?)\s*\/?>/g
 const WEB_TAG_ATTR_RE = /<web\b([^>]*?)\s*\/?>/g
+const SRC_TAG_ATTR_RE = /<src\b([^>]*?)\s*\/?>/g
 
 const ATTRIBUTE_REGEX = /([\w-]+)\s*=\s*"([^"]*)"/g
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -27,11 +35,12 @@ export function stripIncompleteCitationTag(content: string): string {
   const isCitationPrefix = tail === '<'
     || /^<k(?:b(?:\s[\s\S]*)?)?$/i.test(tail)
     || /^<w(?:e(?:b(?:\s[\s\S]*)?)?)?$/i.test(tail)
+    || /^<s(?:r(?:c(?:\s[\s\S]*)?)?)?$/i.test(tail)
 
   return isCitationPrefix ? content.slice(0, start) : content
 }
 
-export type CitationKnowledgeRef = {
+export type CitationKnowledgeRef = SourceReference & {
   id?: string
   knowledge_id?: string
   knowledge_title?: string
@@ -39,6 +48,7 @@ export type CitationKnowledgeRef = {
   chunk_index?: number
   chunk_type?: string
   knowledge_base_id?: string
+  metadata?: Record<string, string>
 }
 
 function parseTagAttributes(attrString: string): Record<string, string> {
@@ -78,6 +88,46 @@ function docTitlesMatch(a: string, b: string): boolean {
   const na = normalizeDocTitle(a)
   const nb = normalizeDocTitle(b)
   return na === nb || na.includes(nb) || nb.includes(na)
+}
+
+function sourceType(ref: CitationKnowledgeRef): string {
+  return getSourceReferenceKind(ref)
+}
+
+function findSourceRef(sourceId: string, refs?: CitationKnowledgeRef[] | null): CitationKnowledgeRef | undefined {
+  const id = sourceId.trim()
+  if (!id) return undefined
+  return (refs || []).find((ref) => ref?.metadata?.citation_id === id)
+}
+
+function hasInlineCitation(content: string, refs?: CitationKnowledgeRef[] | null): boolean {
+  if (/<kb\b([^>]*?)\s*\/?>/i.test(content)
+    || /<web\b([^>]*?)\s*\/?>/i.test(content)
+    || /\[\[([^\]]+)\]\]/.test(content)) {
+    return true
+  }
+  const srcTags = content.matchAll(/<src\b([^>]*?)\s*\/?>/gi)
+  for (const match of srcTags) {
+    const attrs = parseTagAttributes(match[1] || '')
+    const sourceId = attrs.id || attrs.source_id || attrs.sourceId || ''
+    if (findSourceRef(sourceId, refs)) return true
+  }
+  return false
+}
+
+export function appendFallbackSourceCitations(
+  content: string,
+  refs?: CitationKnowledgeRef[] | null,
+): string {
+  if (!content.trim() || hasInlineCitation(content, refs)) return content
+  const sourceItems = buildSourceReferenceItems(refs)
+    .filter((item) => item.type !== 'data_source' && item.citationId)
+  if (!sourceItems.length) return content
+  const tags = sourceItems
+    .slice(0, 6)
+    .map((item) => `<src id="${item.citationId}" />`)
+    .join(' ')
+  return `${content.trimEnd()}\n\n来源：${tags}`
 }
 
 /** Map model context index (1, FAQ-1, DOC-2) to the real chunk UUID from retrieval results. */
@@ -146,10 +196,30 @@ export function resolveCitationChunkId(
 export function preprocessCitationTags(
   contentStr: string,
   refs?: CitationKnowledgeRef[] | null,
+  sourceCitationNumberById?: Map<string, number>,
 ): string {
   if (!contentStr.trim()) return ''
 
   return contentStr
+    .replace(SRC_TAG_ATTR_RE, (_m, attrString: string) => {
+      const attrs = parseTagAttributes(attrString)
+      const sourceId = attrs.id || attrs.source_id || attrs.sourceId || ''
+      const item = findSourceReferenceItem(refs, sourceId)
+      if (!item) return ''
+
+      const safeSourceId = escapeHtml(item.citationId || sourceId)
+      const displayNumber = sourceCitationNumberById?.get(item.citationId) || item.number
+      const safeNumber = escapeHtml(String(displayNumber))
+      const safeType = escapeHtml(item.type)
+      const safeTitle = escapeHtml(item.title)
+      const safeSourceLabel = escapeHtml(item.sourceLabel)
+      const safeKbId = escapeHtml(item.knowledgeBaseId)
+      const safeKnowledgeId = escapeHtml(item.knowledgeId)
+      const safeSlug = escapeHtml(item.slug)
+      const safeUrl = escapeHtml(item.url)
+      const safeDataSourceId = escapeHtml(item.sourceId)
+      return `<span class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" role="button" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"><span class="citation-number">${safeNumber}</span></span>`
+    })
     .replace(WEB_TAG_ATTR_RE, (_m, attrString: string) => {
       const attrs = parseTagAttributes(attrString)
       const url = attrs.url || ''
@@ -206,6 +276,10 @@ export function extractCitationHtmlPlaceholders(
   refs?: CitationKnowledgeRef[] | null,
 ): { content: string; htmlSnippets: string[] } {
   const htmlSnippets: string[] = []
+  const sourceCitationNumberById = new Map(
+    buildCitedSourceReferenceItems(refs, contentStr, false)
+      .map((item) => [item.citationId, item.number] as const),
+  )
   const storeHtml = (html: string): string => {
     const idx = htmlSnippets.length
     htmlSnippets.push(html)
@@ -213,8 +287,8 @@ export function extractCitationHtmlPlaceholders(
   }
 
   const content = contentStr
-    .replace(KB_WEB_TAG_RE, (match) => storeHtml(preprocessCitationTags(match, refs)))
-    .replace(/\[\[([^\]]+)\]\]/g, (match) => storeHtml(preprocessCitationTags(match, refs)))
+    .replace(KB_WEB_TAG_RE, (match) => storeHtml(preprocessCitationTags(match, refs, sourceCitationNumberById)))
+    .replace(/\[\[([^\]]+)\]\]/g, (match) => storeHtml(preprocessCitationTags(match, refs, sourceCitationNumberById)))
 
   return { content, htmlSnippets }
 }
@@ -231,7 +305,7 @@ function isFencedCodeDelimiterLine(line: string): boolean {
   return FENCED_CODE_DELIMITER_RE.test(line)
 }
 
-/** Collapse newlines around <kb/> / <web/> so marked keeps citations inline. */
+/** Collapse newlines around citation tags so marked keeps citations inline. */
 export function joinCitationTagsToPreviousLine(content: string): string {
   if (!content) return content
 
@@ -242,14 +316,14 @@ export function joinCitationTagsToPreviousLine(content: string): string {
   while (result !== prev) {
     prev = result
     result = result.replace(
-      /(<(?:kb|web)\b[^>]*?\s*\/?>)\s*\n+\s*(<(?:kb|web)\b)/gi,
+      /(<(?:kb|web|src)\b[^>]*?\s*\/?>)\s*\n+\s*(<(?:kb|web|src)\b)/gi,
       '$1 $2',
     )
   }
 
   // Blank lines before citations: join to the previous content. Fenced-code
   // delimiters are the only exception because ``` / ~~~ must stay on their own line.
-  result = result.replace(/\n[ \t]*\n+([ \t]*<(?:kb|web)\b)/gi, (match, kbStart, offset, full) => {
+  result = result.replace(/\n[ \t]*\n+([ \t]*<(?:kb|web|src)\b)/gi, (match, kbStart, offset, full) => {
     const before = full.slice(0, offset)
     const lastLine = before.split('\n').filter((line: string) => line.trim()).pop() || ''
     if (isFencedCodeDelimiterLine(lastLine)) {
@@ -260,7 +334,7 @@ export function joinCitationTagsToPreviousLine(content: string): string {
 
   // Single newline before citation when it follows text or another citation (not after a blank line)
   result = result.replace(
-    /(?<!\n)(<(?:kb|web)\b[^>]*?\s*\/?>|[ \t]*\S[^\n]*?)\n([ \t]*<(?:kb|web)\b)/g,
+    /(?<!\n)(<(?:kb|web|src)\b[^>]*?\s*\/?>|[ \t]*\S[^\n]*?)\n([ \t]*<(?:kb|web|src)\b)/g,
     (match, beforePart: string, kbStart: string, offset: number, full: string) => {
       // Resolve the full preceding line: lazy capture + lookbehind can grab only a
       // partial line (e.g. ``` captured as ``), which would skip the fence check.

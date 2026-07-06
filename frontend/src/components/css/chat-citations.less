@@ -82,8 +82,45 @@
     color: color-mix(in srgb, var(--td-brand-color) 82%, var(--td-text-color-primary));
   }
 
+  :deep(.citation-source) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.25em;
+    min-height: 1.25em;
+    padding: 0 0.26em;
+    border-radius: 999px;
+    font-size: 0.86em;
+    line-height: 1;
+    vertical-align: 0.08em;
+    transform: none;
+    background: color-mix(in srgb, var(--td-brand-color) 8%, transparent);
+    color: color-mix(in srgb, var(--td-brand-color) 84%, var(--td-text-color-primary));
+    border: 0;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--td-brand-color) 20%, transparent);
+    cursor: pointer;
+    white-space: nowrap;
+    position: relative;
+    text-decoration: none;
+    transition: background 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+  }
+
+  :deep(.citation-source:hover) {
+    background: color-mix(in srgb, var(--td-brand-color) 14%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--td-brand-color) 32%, transparent);
+    color: color-mix(in srgb, var(--td-brand-color) 86%, var(--td-text-color-primary));
+  }
+
+  :deep(.citation-source .citation-number) {
+    font-size: 1em;
+    line-height: 1;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+
   :deep(.citation-web:focus-visible),
-  :deep(.citation-kb:focus-visible) {
+  :deep(.citation-kb:focus-visible),
+  :deep(.citation-source:focus-visible) {
     outline: 2px solid var(--td-component-border);
     outline-offset: 2px;
   }

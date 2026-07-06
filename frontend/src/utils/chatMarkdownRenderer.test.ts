@@ -19,6 +19,11 @@ import {
   resolveCitationChunkId,
   stripIncompleteCitationTag,
 } from './citationMarkdown.ts'
+import {
+  buildCitedSourceReferenceItems,
+  extractSourceCitationIds,
+  type SourceReference,
+} from './sourceReferences.ts'
 
 const SAMPLE_DOC = 'example-report.docx'
 const SAMPLE_CHUNK_A = '00000001-0000-4000-8000-000000000001'
@@ -287,6 +292,155 @@ test('renderChatMarkdown preserves citations, math, and sanitized output through
   assert.match(html, /<div class="chat-markdown-table"><table>/)
   assert.match(html, /<img src="https:\/\/example\.com\/a\.png"/)
   assert.doesNotMatch(html, /javascript:alert/)
+})
+
+test('renderChatMarkdown renders unified source citations', () => {
+  const renderer = createChatMarkdownRenderer()
+  const html = renderChatMarkdown(
+    '堡垒机用于管控运维访问。<src id="S1" />',
+    {
+      renderer,
+      escapeMarkdown: (text) => text,
+      sanitizeHtml: (html) => html,
+      knowledgeReferences: [
+        {
+          id: 'chunk-1',
+          knowledge_id: 'doc-1',
+          knowledge_base_id: 'kb-1',
+          knowledge_title: '堡垒机',
+          metadata: {
+            citation_id: 'S1',
+            citation_title: '堡垒机',
+            source_type: 'knowledge',
+          },
+        },
+      ],
+    },
+  )
+
+  assert.match(html, /class="citation citation-source citation-source--knowledge"/)
+  assert.match(html, /data-source-id="S1"/)
+  assert.match(html, /data-citation-number="1"/)
+  assert.match(html, /data-knowledge-id="doc-1"/)
+  assert.match(html, /<span class="citation-number">1<\/span>/)
+})
+
+test('renderChatMarkdown appends fallback source citations after completion', () => {
+  const renderer = createChatMarkdownRenderer()
+  const html = renderChatMarkdown(
+    '堡垒机用于管控运维访问。',
+    {
+      renderer,
+      escapeMarkdown: (text) => text,
+      sanitizeHtml: (html) => html,
+      streaming: false,
+      knowledgeReferences: [
+        {
+          id: 'chunk-1',
+          knowledge_id: 'doc-1',
+          knowledge_base_id: 'kb-1',
+          knowledge_title: '堡垒机',
+          metadata: {
+            citation_id: 'S1',
+            citation_title: '堡垒机',
+            source_type: 'knowledge',
+          },
+        },
+      ],
+    },
+  )
+
+  assert.match(html, /来源：/)
+  assert.match(html, /data-source-id="S1"/)
+  assert.match(html, /<span class="citation-number">1<\/span>/)
+})
+
+test('renderChatMarkdown renumbers source citations by answer usage order', () => {
+  const renderer = createChatMarkdownRenderer()
+  const html = renderChatMarkdown(
+    '答案只引用第五个资料。<src id="S5" />',
+    {
+      renderer,
+      escapeMarkdown: (text) => text,
+      sanitizeHtml: (html) => html,
+      streaming: false,
+      knowledgeReferences: [
+        {
+          id: 'web-1',
+          chunk_type: 'web_search',
+          metadata: { citation_id: 'S1', source_type: 'web', url: 'https://example.com/a' },
+        },
+        {
+          id: 'doc-1',
+          knowledge_id: 'doc-1',
+          knowledge_base_id: 'kb-1',
+          knowledge_title: '报告.pdf',
+          metadata: { citation_id: 'S5', source_type: 'knowledge' },
+        },
+      ],
+    },
+  )
+
+  assert.match(html, /data-source-id="S5"/)
+  assert.match(html, /data-citation-number="1"/)
+  assert.match(html, /<span class="citation-number">1<\/span>/)
+  assert.doesNotMatch(html, /data-citation-number="5"/)
+})
+
+test('renderChatMarkdown ignores invalid source ids and falls back to valid refs', () => {
+  const renderer = createChatMarkdownRenderer()
+  const html = renderChatMarkdown(
+    '堡垒机用于管控运维访问。<src id="S999" />',
+    {
+      renderer,
+      escapeMarkdown: (text) => text,
+      sanitizeHtml: (html) => html,
+      streaming: false,
+      knowledgeReferences: [
+        {
+          id: 'chunk-1',
+          knowledge_id: 'doc-1',
+          knowledge_base_id: 'kb-1',
+          knowledge_title: '堡垒机',
+          metadata: {
+            citation_id: 'S1',
+            citation_title: '堡垒机',
+            source_type: 'knowledge',
+          },
+        },
+      ],
+    },
+  )
+
+  assert.doesNotMatch(html, /data-source-id="S999"/)
+  assert.match(html, /data-source-id="S1"/)
+})
+
+test('buildCitedSourceReferenceItems only returns sources cited by answer text', () => {
+  const items = buildCitedSourceReferenceItems(
+    [
+      { id: 'web-1', chunk_type: 'web_search', metadata: { citation_id: 'S1', source_type: 'web', url: 'https://example.com/a' } },
+      { id: 'doc-1', knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', knowledge_title: '报告.pdf', metadata: { citation_id: 'S5', source_type: 'knowledge' } },
+    ],
+    '答案只引用了第五个来源。<src id="S5" /> <src id="S5" />',
+    true,
+  )
+
+  assert.deepEqual(extractSourceCitationIds('A <src id="S5" /> B <src source_id="S1" />'), ['S5', 'S1'])
+  assert.equal(items.length, 1)
+  assert.equal(items[0].citationId, 'S5')
+  assert.equal(items[0].number, 1)
+})
+
+test('buildCitedSourceReferenceItems falls back only when no inline citation exists', () => {
+  const refs: SourceReference[] = [
+    { id: 'web-1', chunk_type: 'web_search', metadata: { citation_id: 'S1', source_type: 'web', url: 'https://example.com/a' } },
+    { id: 'doc-1', knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', knowledge_title: '报告.pdf', metadata: { citation_id: 'S2', source_type: 'knowledge' } },
+  ]
+
+  assert.equal(buildCitedSourceReferenceItems(refs, '没有显式引用。', false).length, 0)
+  assert.equal(buildCitedSourceReferenceItems(refs, '没有显式引用。', true).length, 2)
+  assert.equal(buildCitedSourceReferenceItems(refs, '已有旧标签 <kb doc="x" chunk_id="1" />', true).length, 0)
 })
 
 test('resolveCitationChunkId maps context index to retrieval chunk UUID', () => {

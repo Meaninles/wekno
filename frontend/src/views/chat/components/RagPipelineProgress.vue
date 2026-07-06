@@ -19,7 +19,6 @@
       <div v-for="(step, index) in steps" :key="step.id" class="tree-child" :class="{
         'tree-child-last':
           !showDoneRow
-          && !hasReferences
           && !showThinkingStep
           && index === steps.length - 1,
       }">
@@ -36,25 +35,6 @@
               <div v-if="step.summaryHtml" class="search-results-summary-fixed">
                 <div class="results-summary-text" v-html="step.summaryHtml" />
               </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="hasReferences" class="tree-child rag-ref-step"
-        :class="{ 'tree-child-last': !showThinkingStep && !showDoneRow }">
-        <div class="tree-branch" />
-        <div class="tree-child-content">
-          <div class="tool-event">
-            <div class="action-card">
-              <div class="action-header" @click="toggleReferences">
-                <div class="action-title">
-                  <t-icon class="action-title-icon" name="file-search" />
-                  <span class="action-name">{{ referencesHeaderText }}</span>
-                </div>
-              </div>
-              <DocInfo v-show="refsExpanded" :session="session" :embedded-mode="embeddedMode" timeline-mode
-                content-only />
             </div>
           </div>
         </div>
@@ -120,7 +100,7 @@
 
       <div v-if="showExpandedTimeline" class="tree-children tree-children-expanded">
         <div v-for="(step, index) in steps" :key="step.id" class="tree-child"
-          :class="{ 'tree-child-last': index === steps.length - 1 && !hasReferences && !showDoneRow && !showThinkingStep }">
+          :class="{ 'tree-child-last': index === steps.length - 1 && !showDoneRow && !showThinkingStep }">
           <div class="tree-branch" />
           <div class="tree-child-content">
             <div class="tool-event">
@@ -134,25 +114,6 @@
                 <div v-if="step.summaryHtml" class="search-results-summary-fixed">
                   <div class="results-summary-text" v-html="step.summaryHtml" />
                 </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="hasReferences" class="tree-child rag-ref-step"
-          :class="{ 'tree-child-last': !showThinkingStep && !showDoneRow }">
-          <div class="tree-branch" />
-          <div class="tree-child-content">
-            <div class="tool-event">
-              <div class="action-card">
-                <div class="action-header" @click="toggleReferences">
-                  <div class="action-title">
-                    <t-icon class="action-title-icon" name="file-search" />
-                    <span class="action-name">{{ referencesHeaderText }}</span>
-                  </div>
-                </div>
-                <DocInfo v-show="refsExpanded" :session="session" :embedded-mode="embeddedMode" timeline-mode
-                  content-only />
               </div>
             </div>
           </div>
@@ -207,7 +168,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import DocInfo from './docInfo.vue'
 import { getAgentToolIconName } from '@/utils/agent-tool-icons'
 import {
   getKnowledgeSearchSummaryHtml,
@@ -228,7 +188,6 @@ const props = defineProps<{
 
 const { t } = useI18n()
 const userExpanded = ref(false)
-const refsExpanded = ref(false)
 const thinkingExpanded = ref(true)
 const rootElement = ref<HTMLElement | null>(null)
 
@@ -261,10 +220,6 @@ const hasAnswer = computed(() => {
     return typeof content === 'string' && content.trim().length > 0
   })
 })
-
-const hasReferences = computed(
-  () => (props.session?.knowledge_references?.length ?? 0) > 0,
-)
 
 const steps = computed(() => {
   const stream = props.session?.agentEventStream
@@ -379,20 +334,6 @@ const referenceWebCount = computed(() => {
   return refs.filter((item) => item.chunk_type === 'web_search').length
 })
 
-const referencesHeaderText = computed(() => {
-  const docCount = referenceDocCount.value
-  const webCount = referenceWebCount.value
-  const total = props.session?.knowledge_references?.length ?? 0
-
-  if (docCount > 0 && webCount > 0) {
-    return t('chat.referencesDocAndWebCount', { docCount, webCount })
-  }
-  if (docCount > 0) {
-    return t('chat.referencesDocCount', { count: docCount })
-  }
-  return t('chat.referencesTitle', { count: total })
-})
-
 const collapsedSummaryHtml = computed(() => {
   if (steps.value.length === 0) {
     return hasThinking.value ? t('agentStream.toolStatus.thinkingDone') : ''
@@ -428,10 +369,6 @@ const collapsedSummaryHtml = computed(() => {
 
 function toggleExpanded() {
   userExpanded.value = !userExpanded.value
-}
-
-function toggleReferences() {
-  refsExpanded.value = !refsExpanded.value
 }
 
 function toggleThinking() {

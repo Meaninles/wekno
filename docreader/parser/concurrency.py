@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 _LIMITERS: Dict[str, threading.BoundedSemaphore] = {}
 _LIMITERS_LOCK = threading.Lock()
+_PDFIUM_LOCK = threading.RLock()
 
 
 def _get_limiter(name: str, max_workers: int) -> threading.BoundedSemaphore:
@@ -37,3 +38,17 @@ def parser_worker_limit(name: str, max_workers: int) -> Iterator[None]:
         yield
     finally:
         limiter.release()
+
+
+@contextmanager
+def pdfium_thread_guard() -> Iterator[None]:
+    """Serialize in-process PDFium calls.
+
+    PDFium is process-safe but not thread-safe: even calls on different
+    documents may corrupt the process when they run concurrently. Keep all
+    pypdfium2/PDFium work in this Python process behind one re-entrant mutex.
+    """
+
+    logger.debug("Waiting for global PDFium lock")
+    with _PDFIUM_LOCK:
+        yield

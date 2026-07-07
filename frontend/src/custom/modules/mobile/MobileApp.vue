@@ -106,7 +106,7 @@ const redirectToEnterpriseSSO = () => {
   if (redirecting.value) return;
   redirecting.value = true;
   bootMessage.value = "正在跳转统一身份认证";
-  window.location.replace("/api/v1/custom/iam/sso/entry");
+  window.location.replace("/api/v1/custom/iam/sso/entry?client=mobile");
 };
 
 const bootstrap = async () => {

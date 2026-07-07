@@ -24,6 +24,11 @@ const is = (current: string, names: string[]) => names.includes(current);
       <path d="M4 12h16" />
       <path d="M4 17h16" />
     </template>
+    <template v-else-if="is(name, ['ellipsis'])">
+      <circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    </template>
 
     <template v-else-if="is(name, ['setting'])">
       <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />

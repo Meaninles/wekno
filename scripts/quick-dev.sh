@@ -96,7 +96,7 @@ printf "%b\n" "${GREEN}========================================${NC}"
 echo ""
 
 log_info "访问地址:"
-echo "  - 前端: http://localhost:5173"
+echo "  - 前端: http://localhost:5177"
 echo "  - 后端 API: http://localhost:8080"
 echo "  - MinIO Console: http://localhost:9001"
 echo ""
@@ -120,4 +120,3 @@ fi
 echo ""
 log_success "开发环境已就绪，开始编码吧！"
 echo ""
-

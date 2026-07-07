@@ -168,6 +168,7 @@ flowchart LR
 | 通用智能体 | `internal/custom/modules/generalagent/` | 将 `general-agent`、`document-processing-agent`、`data-analysis` 接入 Claude Agent SDK 旁路服务，负责运行时配置、工具回调、产物持久化和下载。 |
 | IAM/SSO | `internal/custom/modules/iam/` | 支持统一身份认证登录、组织人员同步、定时同步、手动同步、外部组织/用户映射和共享空间成员候选查询。 |
 | 定时会话 | `internal/custom/modules/scheduledchat/` | 支持按小时/日/周/月自动向智能体提问，保存运行记录，并将结果写入真实会话。 |
+| 会话状态 | `internal/custom/modules/sessionstate/` | 记录不同用户或 Principal 对会话的已读水位，给 Web 和移动端会话列表提供未读/生成中状态。 |
 | 技能中心 | `internal/custom/modules/skillhub/` | 管理轻量技能和专业技能包，支持导入、下载、共享给空间/用户，并注入智能体运行上下文。 |
 | 来源引用增强 | `internal/custom/modules/sourcerefs/` | 抽取和整理回答中的来源引用信息，服务前端来源时间线展示。 |
 | 文本编码 | `internal/custom/modules/textencoding/` | 增强文本解码能力，减少上传资料因编码不一致导致的乱码或解析失败。 |
@@ -179,6 +180,7 @@ flowchart LR
 - `/api/v1/custom/config-center/*`：默认资源选择和下发。
 - `/api/v1/custom/skills/*`：轻量技能、专业技能、共享和下载。
 - `/api/v1/custom/scheduled-chat/*`：定时任务、运行记录和提示词预览。
+- `/api/v1/custom/session-state/*`：会话已读水位、未读状态和生成中状态。
 - `/api/v1/custom/db-analytics/*`：数据库源、元数据、安全范围、共享和智能体绑定。
 - `/api/v1/custom/general-agent/*`：通用智能体产物下载和旁路服务工具回调。
 - `/api/v1/custom/answer-feedback/*`：回答反馈写入和查询。
@@ -198,9 +200,11 @@ flowchart LR
 | 文档处理 | `documentprocessing/` | 文档处理智能体相关前端扩展入口。 |
 | IAM | `iam/` | IAM 同步设置、组织树、空间成员批量选择和候选用户检索。 |
 | 信息源页签 | `information-source/` | 扩展信息源页面导航，把知识库、数据源等入口组织到统一信息源视图。 |
+| 移动端 | `mobile/` | 提供移动端聊天、知识库管理、设置、来源引用、产物下载和同域 SSO 回跳适配。 |
 | 模型选项处理 | `model-options/` | 对模型下拉选项做去重和内置智能体托管模型隐藏处理。 |
 | 安全消息渲染 | `safeMessage/` | 增强消息渲染安全性和前端异常兜底。 |
 | 定时会话 | `scheduledchat/` | 定时任务列表、创建编辑、运行记录、立即运行和模板预览。 |
+| 会话状态 | `sessionState/` | 封装二开会话状态接口，供 Web 侧边栏和移动端抽屉展示未读提示。 |
 | 技能中心 | `skillhub/` | 轻量技能、专业技能、技能选择器、共享、下载和置顶。 |
 | 来源时间线 | `sourceReferences/` | 展示回答引用、检索来源、工具来源和时间线。 |
 | 上传信息 | `uploadInfo/` | 上传确认、解析配置覆盖、上传状态与批次信息展示。 |
@@ -226,6 +230,7 @@ flowchart LR
 - `generalagent`：智能体产物和原始输入持久化。
 - `iam`：SSO/同步设置、外部组织、外部用户和同步记录。
 - `skillhub`：轻量技能、专业技能和共享关系。
+- `sessionstate`：当前通过 GORM AutoMigrate 维护 `custom_session_read_states`，暂未提供显式 SQL 文件。
 
 开发环境启动时，部分二开模块会通过 GORM AutoMigrate 保持表结构可用；生产发布如需显式 SQL 迁移，以 `migrations/custom/` 下的文件为准。
 

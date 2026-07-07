@@ -141,26 +141,25 @@
                     <template v-else>
                         <template v-for="(group, groupIndex) in filteredGroupedSessions" :key="group.key">
                             <div v-if="group.label" class="timeline_header session-list-row session-list-row--flat"
-                                :class="{ 'timeline_header--with-scope': groupIndex === 0 && showSessionSourceFilter && !batchMode }">
+                                :class="{ 'timeline_header--with-scope': groupIndex === 0 && showSessionSourceFilter }">
                                 <span class="session-list-row__body">
                                     <span class="timeline_header-label">{{ group.label }}</span>
                                 </span>
-                                <SessionSourceFilter v-if="groupIndex === 0 && showSessionSourceFilter && !batchMode"
+                                <SessionSourceFilter v-if="groupIndex === 0 && showSessionSourceFilter"
                                     inline :emphasized="sessionScopeFilterPinned" :sources="sessionSourceOptions"
                                     :current="activeSessionBucketKey" @select="switchSessionBucket" />
                             </div>
                             <div v-for="subitem in group.items" :key="subitem.id"
                                 class="submenu_item_p session-chat-row" :class="{
-                                    'session-chat-row--active': !batchMode && subitem.path === currentSecondpath,
-                                    'session-chat-row--selected': batchMode && batchSelectedIds.includes(subitem.id),
+                                    'session-chat-row--active': subitem.path === currentSecondpath,
                                 }">
                                 <div class="session-list-row session-list-row--flat">
                                     <div class="session-list-row__body">
-                                        <SessionSidebarRow :item="subitem" :batch-mode="batchMode"
-                                            :active-path="currentSecondpath" :selected-ids="batchSelectedIds"
+                                        <SessionSidebarRow :item="subitem"
+                                            :active-path="currentSecondpath"
                                             :menu-options="buildSessionMenuOptions(subitem)"
+                                            :unread="isSessionUnread(subitem)"
                                             @navigate="subitem.path && gotopage(subitem.path)"
-                                            @toggle-select="toggleBatchSelect(subitem.id)"
                                             @menu-click="handleSessionMenuClick($event, subitem)"
                                             @hover-in="mouseenteBotDownr(subitem.id)" @hover-out="mouseleaveBotDown" />
                                     </div>
@@ -177,24 +176,6 @@
                 </div>
             </div>
 
-            <!-- 批量管理底部操作条 -->
-            <div v-if="batchMode && !uiStore.sidebarCollapsed" class="batch-inline-footer">
-                <div class="batch-footer-left">
-                    <t-checkbox :checked="isAllBatchSelected" :indeterminate="isBatchIndeterminate"
-                        @change="toggleBatchSelectAll">
-                        {{ t('batchManage.selectAll') }}
-                    </t-checkbox>
-                </div>
-                <div class="batch-footer-right">
-                    <t-button size="small" variant="text" @click="exitBatchMode">
-                        {{ t('batchManage.cancel') }}
-                    </t-button>
-                    <t-button size="small" theme="danger" variant="base" :disabled="batchSelectedIds.length === 0"
-                        :loading="batchDeleting" @click="handleInlineBatchDelete">
-                        {{ t('batchManage.delete') }}{{ batchSelectedIds.length > 0 ? `(${batchDisplayCount})` : '' }}
-                    </t-button>
-                </div>
-            </div>
         </div>
 
 
@@ -210,7 +191,7 @@
 import { storeToRefs } from 'pinia';
 import { onMounted, onUnmounted, watch, computed, ref, h, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { getSessionsList, delSession, batchDelSessions, deleteAllSessions, clearSessionMessages, pinSession, unpinSession } from "@/api/chat/index";
+import { getSessionsList, delSession, pinSession, unpinSession } from "@/api/chat/index";
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { listAllIMChannels } from '@/api/agent/index';
 import SessionSidebarRow from './SessionSidebarRow.vue';
@@ -252,7 +233,8 @@ import { useAuthStore } from '@/stores/auth';
 import { useOrganizationStore } from '@/stores/organization';
 import { useUIStore } from '@/stores/ui';
 import { useCommandPaletteStore } from '@/stores/commandPalette';
-import { MessagePlugin, DialogPlugin, Icon as TIcon } from "tdesign-vue-next";
+import { listSessionStatuses, markSessionRead, type SessionStatusMap } from '@/custom/modules/sessionState/api';
+import { MessagePlugin, Icon as TIcon } from "tdesign-vue-next";
 import UserMenu from '@/components/UserMenu.vue';
 import TenantSelector from '@/components/TenantSelector.vue';
 import { useI18n } from 'vue-i18n';
@@ -309,6 +291,7 @@ const router = useRouter();
 const currentpath = ref('');
 const total = ref(0);
 const sessionBuckets = ref<Record<string, SidebarSessionBucket>>({});
+const sessionStatuses = ref<SessionStatusMap>({});
 const bucketOrder = ref<string[]>([]);
 let bucketRequestToken = 0;
 const sessionListBooting = ref(false);
@@ -348,29 +331,6 @@ type MenuItem = { title: string; icon: string; path: string; childrenPath?: stri
 const { menuArr, visibleMenuArr } = storeToRefs(usemenuStore);
 let activeSubmenu = ref<string>('');
 const isLiteEdition = ref(false);
-
-// 批量管理状态
-const batchMode = ref(false)
-const batchSelectedIds = ref<string[]>([])
-const batchDeleting = ref(false)
-
-const allSessionIds = computed(() => {
-    const chatMenu = (menuArr.value as unknown as MenuItem[]).find((item: MenuItem) => item.path === 'creatChat');
-    if (!chatMenu?.children) return [];
-    return (chatMenu.children as any[]).map((s: any) => s.id);
-})
-
-const isAllBatchSelected = computed(() =>
-    allSessionIds.value.length > 0 && batchSelectedIds.value.length === allSessionIds.value.length
-)
-
-const isBatchIndeterminate = computed(() =>
-    batchSelectedIds.value.length > 0 && batchSelectedIds.value.length < allSessionIds.value.length
-)
-
-const batchDisplayCount = computed(() =>
-    isAllBatchSelected.value ? total.value : batchSelectedIds.value.length
-)
 
 // 是否可以访问所有租户
 const canAccessAllTenants = computed(() => authStore.canAccessAllTenants);
@@ -496,7 +456,7 @@ const filteredGroupedSessions = computed(() => {
 });
 
 const showSessionScopeFallback = computed(() => {
-    if (!showSessionSourceFilter.value || batchMode.value) return false;
+    if (!showSessionSourceFilter.value) return false;
     if (sessionListBooting.value && !hasAnySession.value) return true;
     const bucket = activeBucket.value;
     if (bucket?.loading && !bucket.loaded && filteredGroupedSessions.value.length === 0) return true;
@@ -508,6 +468,59 @@ const refreshSessionListScrollability = async () => {
     await nextTick();
     const container = scrollContainer.value;
     sessionListCanScroll.value = !!container && container.scrollHeight > container.clientHeight + 1;
+};
+
+const currentChatSessionId = () => String(route.params.chatid || '');
+
+const isSessionUnread = (item: any) => {
+    const id = String(item?.id || '');
+    if (!id || id === currentChatSessionId()) return false;
+    return sessionStatuses.value[id]?.unread === true;
+};
+
+const mergeSessionStatuses = (statuses: SessionStatusMap) => {
+    if (!statuses || Object.keys(statuses).length === 0) return;
+    sessionStatuses.value = { ...sessionStatuses.value, ...statuses };
+    const currentId = currentChatSessionId();
+    if (currentId && statuses[currentId]?.unread) {
+        void markSessionAsRead(currentId);
+    }
+};
+
+const refreshSessionStatuses = async (rows: Array<{ id?: string }> = flattenBucketItems(sessionBuckets.value, bucketOrder.value)) => {
+    const ids = rows.map((item) => String(item?.id || '')).filter(Boolean);
+    if (ids.length === 0) return;
+    try {
+        mergeSessionStatuses(await listSessionStatuses(ids));
+    } catch (err) {
+        console.warn('[session-state] failed to refresh session status', err);
+    }
+};
+
+const markSessionReadLocal = (sessionId: string) => {
+    if (!sessionId) return;
+    const current = sessionStatuses.value[sessionId];
+    if (!current) return;
+    sessionStatuses.value = {
+        ...sessionStatuses.value,
+        [sessionId]: { ...current, unread: false },
+    };
+};
+
+const markSessionAsRead = async (sessionId: string) => {
+    if (!sessionId) return;
+    markSessionReadLocal(sessionId);
+    try {
+        const status = await markSessionRead(sessionId);
+        if (status) mergeSessionStatuses({ [sessionId]: status });
+    } catch (err) {
+        console.warn('[session-state] failed to mark session read', err);
+    }
+};
+
+const markCurrentSessionAsRead = () => {
+    const sessionId = currentChatSessionId();
+    if (sessionId) void markSessionAsRead(sessionId);
 };
 
 /** 列表未撑满滚动区时自动续页（按当前可见 DOM 测量，避免折叠导致误判） */
@@ -536,89 +549,9 @@ const mouseleaveBotDown = () => {
     activeSubmenu.value = '';
 }
 
-const enterBatchMode = () => {
-    batchMode.value = true
-    batchSelectedIds.value = []
-}
-
-const exitBatchMode = () => {
-    batchMode.value = false
-    batchSelectedIds.value = []
-}
-
-const toggleBatchSelect = (id: string) => {
-    const idx = batchSelectedIds.value.indexOf(id)
-    if (idx > -1) {
-        batchSelectedIds.value.splice(idx, 1)
-    } else {
-        batchSelectedIds.value.push(id)
-    }
-}
-
-const toggleBatchSelectAll = (checked: boolean) => {
-    batchSelectedIds.value = checked ? [...allSessionIds.value] : []
-}
-
-const handleInlineBatchDelete = () => {
-    if (batchSelectedIds.value.length === 0) return
-    const isDeleteAll = isAllBatchSelected.value
-    const displayCount = batchDisplayCount.value
-    const confirmDialog = DialogPlugin.confirm({
-        header: t('batchManage.deleteConfirmTitle'),
-        body: isDeleteAll
-            ? t('batchManage.deleteAllConfirmBody') || t('batchManage.deleteConfirmBody', { count: displayCount })
-            : t('batchManage.deleteConfirmBody', { count: displayCount }),
-        confirmBtn: { content: t('batchManage.delete'), theme: 'danger' as const },
-        cancelBtn: t('batchManage.cancel'),
-        theme: 'warning',
-        onConfirm: async () => {
-            batchDeleting.value = true
-            try {
-                let res: any
-                if (isDeleteAll) {
-                    res = await deleteAllSessions()
-                } else {
-                    res = await batchDelSessions([...batchSelectedIds.value])
-                }
-                if (res && res.success === true) {
-                    if (isDeleteAll) {
-                        usemenuStore.clearMenuArr();
-                        total.value = 0;
-                        await getMessageList();
-                    } else {
-                        let next = sessionBuckets.value;
-                        for (const id of batchSelectedIds.value) {
-                            next = removeSessionFromBuckets(next, id);
-                        }
-                        sessionBuckets.value = next;
-                        syncMenuStoreFromBuckets();
-                    }
-                    const currentChatId = route.params.chatid as string;
-                    if (currentChatId && (isDeleteAll || batchSelectedIds.value.includes(currentChatId))) {
-                        router.push('/platform/creatChat');
-                    }
-                    batchSelectedIds.value = []
-                    MessagePlugin.success(t('batchManage.deleteSuccess'))
-                    exitBatchMode()
-                } else {
-                    MessagePlugin.error(t('batchManage.deleteFailed'))
-                }
-            } catch {
-                MessagePlugin.error(t('batchManage.deleteFailed'))
-            }
-            batchDeleting.value = false
-            confirmDialog.destroy()
-        },
-    })
-}
-
 const handleSessionMenuClick = (data: { value: string }, item: any) => {
     if (data?.value === 'delete') {
         delCard(item);
-    } else if (data?.value === 'clearMessages') {
-        clearMessages(item);
-    } else if (data?.value === 'batchManage') {
-        enterBatchMode()
     } else if (data?.value === 'pin' || data?.value === 'unpin') {
         togglePin(item, data.value === 'pin');
     }
@@ -642,9 +575,7 @@ const buildSessionMenuOptions = (item: any) => {
         });
     }
     options.push(
-        { content: t('menu.clearMessages'), value: 'clearMessages', prefixIcon: () => h(TIcon, { name: 'clear', size: '16px' }) },
-        { content: t('menu.batchManage'), value: 'batchManage', prefixIcon: () => h(TIcon, { name: 'queue', size: '16px' }) },
-        { content: t('upload.deleteRecord'), value: 'delete', theme: 'error', prefixIcon: () => h(TIcon, { name: 'delete', size: '16px' }) },
+        { content: '删除对话', value: 'delete', theme: 'error', prefixIcon: () => h(TIcon, { name: 'delete', size: '16px' }) },
     );
     return options;
 };
@@ -682,21 +613,6 @@ const togglePin = (item: any, pin: boolean) => {
         MessagePlugin.error(pin ? t('menu.pinFailed') : t('menu.unpinFailed'));
     }).finally(() => {
         pinningIds.value.delete(item.id);
-    });
-};
-
-const clearMessages = (item: any) => {
-    clearSessionMessages(item.id).then((res: any) => {
-        if (res && res.success) {
-            MessagePlugin.success(t('menu.clearMessagesSuccess'));
-            if (item.id === route.params.chatid) {
-                window.dispatchEvent(new CustomEvent('session-messages-cleared', { detail: { sessionId: item.id } }));
-            }
-        } else {
-            MessagePlugin.error(t('menu.clearMessagesFailed'));
-        }
-    }).catch(() => {
-        MessagePlugin.error(t('menu.clearMessagesFailed'));
     });
 };
 
@@ -836,6 +752,7 @@ const loadBucketPage = async (key: string, page?: number, token?: number) => {
             [key]: mergeBucketPage(current, rows, res?.total ?? rows.length, nextPage),
         };
         syncMenuStoreFromBuckets();
+        await refreshSessionStatuses(rows);
         await refreshSessionListScrollability();
     } catch {
         if (activeToken !== bucketRequestToken) return;
@@ -901,6 +818,7 @@ const initSessionBuckets = async () => {
     if (token === bucketRequestToken) {
         sessionListBooting.value = false;
         syncMenuStoreFromBuckets();
+        await refreshSessionStatuses();
         await ensureBucketFillsViewport('web');
         await refreshSessionListScrollability();
     }
@@ -993,6 +911,7 @@ onMounted(async () => {
 
     await loadSessionOriginMeta();
     await getMessageList();
+    markCurrentSessionAsRead();
     const initialChatId = route.params.chatid as string | undefined;
     if (initialChatId) {
         ensureSessionInSidebar(initialChatId);
@@ -1023,6 +942,7 @@ watch([() => route.name, () => route.params], (newvalue, oldvalue) => {
     if (nameStr === 'chat' && newChatId) {
         ensureSessionInSidebar(newChatId);
         void syncActiveBucketFromChat(newChatId);
+        void markSessionAsRead(newChatId);
     }
 
     // 路由变化时更新图标状态和知识库信息（不涉及对话列表）
@@ -1726,50 +1646,8 @@ const onDragHandleMouseDown = (e: MouseEvent) => {
             color: var(--td-brand-color);
         }
 
-        .submenu_title--batch {
-            margin-left: 4px;
-        }
-
-        &.submenu_item_batch {
-            padding-left: 0;
-        }
     }
 
-    :deep(.submenu_item_batch) {
-        cursor: pointer;
-        user-select: none;
-    }
-
-    .batch-checkbox {
-        flex-shrink: 0;
-    }
-
-}
-
-.batch-inline-footer {
-    position: sticky;
-    bottom: 0;
-    z-index: 2;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 12px;
-    border-top: 1px solid var(--td-component-stroke);
-    background: var(--td-bg-color-container);
-
-    .batch-footer-left {
-        display: flex;
-        align-items: center;
-        font-size: 13px;
-        color: var(--td-text-color-placeholder);
-    }
-
-    .batch-footer-right {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-    }
 }
 
 /* 知识库下拉菜单样式 */

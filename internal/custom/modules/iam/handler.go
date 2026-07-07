@@ -211,6 +211,10 @@ func ssoFrontendRedirectFromRequest(r *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	isMobile := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("client")), "mobile")
+	if isMobile {
+		return origin + "/mobile/", nil
+	}
 	parsed, err := url.Parse(origin)
 	if err != nil {
 		return "", err

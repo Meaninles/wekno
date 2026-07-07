@@ -44,7 +44,7 @@ shop.example.com          embed.example.com        app.example.com
 | 希望 CDN / WAF 对 embed 流量单独限速、缓存 | **可以考虑** |
 | 合规要求「对外嵌入」与「内部管理」必须不同源 | **需要** |
 
-本地开发：`http://localhost:5173` 同域即可，Vite 已把 `/embed/*` 指到 `embed.html`，**不必**配子域。
+本地开发：`http://localhost:5177` 同域即可，Vite 已把 `/embed/*` 指到 `embed.html`，**不必**配子域。
 
 ## 怎么配置
 

@@ -18,6 +18,8 @@
 | POST   | `/sessions/:session_id/pin`                | 置顶会话                      |
 | DELETE | `/sessions/:id/pin`                        | 取消置顶会话                  |
 | GET    | `/sessions/continue-stream/:session_id`    | 继续未完成的流式响应          |
+| POST   | `/custom/session-state/status`             | 批量查询会话展示状态（二开）  |
+| POST   | `/custom/session-state/sessions/:id/read`  | 标记会话已读（二开）          |
 
 > **路由命名说明**：置顶接口的 POST 与 DELETE 使用了不同的路径参数名（POST 用 `:session_id`，DELETE 用 `:id`）。这是由于 gin 路由器为每个 HTTP 方法维护独立的 radix tree，且既有树中的通配符命名不同，必须保留以避免注册时的 `wildcard conflicts` panic。两者语义上都指会话 ID。
 
@@ -199,6 +201,85 @@ curl --location 'http://localhost:8080/api/v1/sessions?page=1&page_size=10&keywo
 ```
 
 > 列表项始终包含置顶状态字段，IM 来源相关字段（`im_platform`、`im_chat_id`、`im_thread_id`、`im_user_id`、`im_agent_id`、`im_channel_id`）仅对 IM 创建的会话填充，Web 会话省略。
+
+## POST `/custom/session-state/status` - 批量查询会话展示状态
+
+二开接口，用于 Web 侧边栏和移动端会话抽屉展示未读提示、最后一条助手消息和生成中状态。它不修改会话内容，也不替代 `/sessions` 列表接口。
+
+**请求**:
+
+```curl
+curl --location 'http://localhost:8080/api/v1/custom/session-state/status' \
+--header 'Authorization: Bearer <jwt>' \
+--header 'Content-Type: application/json' \
+--data '{
+    "session_ids": [
+        "411d6b70-9a85-4d03-bb74-aab0fd8bd12f",
+        "ceb9babb-1e30-41d7-817d-fd584954304b"
+    ]
+}'
+```
+
+**请求参数**:
+
+| 字段 | 类型 | 必填 | 描述 |
+| ---- | ---- | ---- | ---- |
+| `session_ids` | string[] | 是 | 要查询的会话 ID。服务端会去重、忽略空值，单次最多处理 120 个。 |
+
+**响应**:
+
+```json
+{
+    "success": true,
+    "data": {
+        "411d6b70-9a85-4d03-bb74-aab0fd8bd12f": {
+            "session_id": "411d6b70-9a85-4d03-bb74-aab0fd8bd12f",
+            "last_assistant_message_id": "ebbf7e53-dfe6-44d5-882f-36a4104910b5",
+            "last_assistant_at": "2026-04-01T09:12:33.123456+08:00",
+            "is_running": false,
+            "unread": true
+        }
+    }
+}
+```
+
+只会返回当前租户和当前访问者可见的会话。API Key、嵌入、IM 等外部入口会按 Principal 生成独立已读身份，避免不同终端用户共用未读状态。
+
+## POST `/custom/session-state/sessions/:id/read` - 标记会话已读
+
+二开接口，用于记录当前访问者对指定会话的已读水位。
+
+**请求**:
+
+```curl
+curl --location --request POST 'http://localhost:8080/api/v1/custom/session-state/sessions/411d6b70-9a85-4d03-bb74-aab0fd8bd12f/read' \
+--header 'Authorization: Bearer <jwt>' \
+--header 'Content-Type: application/json' \
+--data '{}'
+```
+
+**路径参数**:
+
+| 字段 | 类型 | 必填 | 描述 |
+| ---- | ---- | ---- | ---- |
+| `id` | string | 是 | 会话 ID |
+
+**响应**:
+
+```json
+{
+    "success": true,
+    "data": {
+        "session_id": "411d6b70-9a85-4d03-bb74-aab0fd8bd12f",
+        "last_assistant_message_id": "ebbf7e53-dfe6-44d5-882f-36a4104910b5",
+        "last_assistant_at": "2026-04-01T09:12:33.123456+08:00",
+        "is_running": false,
+        "unread": false
+    }
+}
+```
+
+会话不存在或对当前访问者不可见时返回 `404`。
 
 ## PUT `/sessions/:id` - 更新会话
 

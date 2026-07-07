@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { computed, nextTick, ref, watch } from "vue";
 import {
   hostFromUrl,
   sourceTypeLabel,
   type SourceReferenceItem,
 } from "@/utils/sourceReferences";
+import { createSafeImage, hydrateProtectedFileImages, sanitizeMarkdownHTML } from "@/utils/security";
 
 const props = defineProps<{
   item: SourceReferenceItem | null;
@@ -13,6 +15,8 @@ const emit = defineEmits<{
   close: [];
   open: [item: SourceReferenceItem];
 }>();
+
+const imagePreviewRef = ref<HTMLElement | null>(null);
 
 const iconFor = (item: SourceReferenceItem | null) => {
   if (!item) return "file";
@@ -28,14 +32,75 @@ const sourceMeta = (item: SourceReferenceItem) => {
   return meta && meta !== typeText ? meta : "";
 };
 
-const citationPreview = (item: SourceReferenceItem | null) => {
-  const snippet = String(item?.snippet || "").trim();
+const citationImageSource = computed(() =>
+  firstImageSource(`${props.item?.content || ""}\n${props.item?.snippet || ""}`),
+);
+
+const citationImageHtml = computed(() => {
+  if (!citationImageSource.value) return "";
+  return sanitizeMarkdownHTML(createSafeImage(citationImageSource.value, props.item?.title || "", ""));
+});
+
+const citationPreview = computed(() => {
+  const snippet = stripImageMarkup(String(props.item?.snippet || "")).trim();
   if (snippet) return snippet;
 
-  const content = String(item?.content || "").replace(/\s+/g, " ").trim();
+  const content = stripImageMarkup(String(props.item?.content || ""))
+    .replace(/\s+/g, " ")
+    .trim();
   if (content.length <= 120) return content;
   return `${content.slice(0, 120)}...`;
-};
+});
+
+watch(
+  citationImageHtml,
+  async () => {
+    if (!citationImageHtml.value) return;
+    await nextTick();
+    await hydrateProtectedFileImages(imagePreviewRef.value);
+  },
+  { immediate: true, flush: "post" },
+);
+
+function decodeImageSource(value: string) {
+  const source = value
+    .trim()
+    .replace(/^<([\s\S]*)>$/, "$1")
+    .replace(/^['"]|['"]$/g, "");
+  if (!source) return "";
+  if (typeof document === "undefined") {
+    return source
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#x2f;/gi, "/")
+      .replace(/&#47;/g, "/");
+  }
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = source;
+  return textarea.value;
+}
+
+function firstImageSource(content: string) {
+  if (!content) return "";
+  const htmlMatch = content.match(/<img\b[^>]*>/i);
+  if (htmlMatch?.[0]) {
+    const protectedMatch = htmlMatch[0].match(/\bdata-protected-src=(["'])(.*?)\1/i);
+    if (protectedMatch?.[2]) return decodeImageSource(protectedMatch[2]);
+    const srcMatch = htmlMatch[0].match(/\bsrc=(["'])(.*?)\1/i);
+    if (srcMatch?.[2]) return decodeImageSource(srcMatch[2]);
+  }
+
+  const markdownMatch = content.match(/!\[[^\]]*]\(\s*(<[^>]+>|[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/);
+  return markdownMatch?.[1] ? decodeImageSource(markdownMatch[1]) : "";
+}
+
+function stripImageMarkup(content: string) {
+  if (!content) return "";
+  return content
+    .replace(/<img\b[^>]*>/gi, "")
+    .replace(/!\[[^\]]*]\(\s*(?:<[^>]+>|[^)]+)\s*\)/g, "")
+    .trim();
+}
 
 const openLabel = (item: SourceReferenceItem) => {
   if (item.type === "web") return "打开网页";
@@ -54,7 +119,13 @@ const openLabel = (item: SourceReferenceItem) => {
           <span class="citation-card__number">{{ props.item.number }}.</span>
           <strong>{{ props.item.title }}</strong>
         </div>
-        <p v-if="citationPreview(props.item)" class="citation-card__snippet">{{ citationPreview(props.item) }}</p>
+        <div
+          v-if="citationImageHtml"
+          ref="imagePreviewRef"
+          class="citation-card__image-preview"
+          v-html="citationImageHtml"
+        />
+        <p v-if="citationPreview" class="citation-card__snippet">{{ citationPreview }}</p>
         <div class="citation-card__meta">
           <span class="citation-card__icon"><MobileIcon :name="iconFor(props.item)" /></span>
           <span>{{ sourceTypeLabel(props.item.type) }}</span>
@@ -149,6 +220,27 @@ const openLabel = (item: SourceReferenceItem) => {
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.citation-card__image-preview {
+  width: 100%;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #edf3f0;
+}
+
+.citation-card__image-preview :deep(img.markdown-image),
+.citation-card__image-preview :deep(img[data-protected-src]) {
+  display: block;
+  width: 100%;
+  max-height: min(44dvh, 340px);
+  object-fit: contain;
+  background: #edf3f0;
+}
+
+.citation-card__image-preview :deep(img[data-img-loading]) {
+  min-height: 150px;
+  opacity: 0.9;
 }
 
 .citation-card__snippet {

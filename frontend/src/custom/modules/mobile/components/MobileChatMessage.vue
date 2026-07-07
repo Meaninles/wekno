@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 import { getChunkByIdOnly } from "@/api/knowledge-base";
 import { getDown } from "@/utils/request";
 import { resolveCitationChunkId } from "@/utils/citationMarkdown";
 import { unwrapFinalAnswerWrappers } from "@/utils/finalAnswer";
+import { clearProtectedFileFailureCache, hydrateProtectedFileImages } from "@/utils/security";
 import { splitStructuredChartMarkdown, type StructuredChartInfo } from "@/utils/structuredChartMarkdown";
 import MobileResourceRail from "./MobileResourceRail.vue";
 import MobileCitationSheet from "./MobileCitationSheet.vue";
@@ -43,6 +44,9 @@ type MobileAnswerSegment =
 const isUser = computed(() => props.message.role === "user");
 const isAssistant = computed(() => props.message.role === "assistant");
 const downloadingArtifactId = ref("");
+const messageBodyRef = ref<HTMLElement | null>(null);
+let messageHydrationRun = 0;
+let completionHydrationCacheCleared = false;
 
 const mentionedChips = computed<MobileResourceChip[]>(() => {
   const items = Array.isArray(props.message.mentioned_items) ? props.message.mentioned_items : [];
@@ -331,6 +335,31 @@ const answerSplit = computed(() => {
 const answerSegments = computed(() => answerSplit.value.segments);
 const promotedStructuredResults = computed(() =>
   structuredAnalysisResults.value.filter((_, index) => !answerSplit.value.usedResultIndexes.has(index)),
+);
+
+const renderedMarkdownImageHydrationKey = computed(() =>
+  answerSegments.value
+    .filter((segment): segment is Extract<MobileAnswerSegment, { kind: "markdown" }> => segment.kind === "markdown")
+    .map((segment) => segment.html)
+    .join("\n"),
+);
+
+watch(
+  [renderedMarkdownImageHydrationKey, () => props.message.is_completed],
+  async ([, completed]) => {
+    if (!isAssistant.value || shouldShowThinking.value) return;
+    const run = ++messageHydrationRun;
+    if (completed && !completionHydrationCacheCleared) {
+      clearProtectedFileFailureCache();
+      completionHydrationCacheCleared = true;
+    } else if (!completed) {
+      completionHydrationCacheCleared = false;
+    }
+    await nextTick();
+    if (run !== messageHydrationRun) return;
+    await hydrateProtectedFileImages(messageBodyRef.value);
+  },
+  { immediate: true, flush: "post" },
 );
 
 const isArtifactsData = (value: any): value is GeneralAgentArtifactsData => {
@@ -689,10 +718,11 @@ const openLegacyKbCitation = async (el: HTMLElement) => {
   detailItem.value = baseItem;
   pushDetailHistory();
 
-  if (savedContent) return;
-
   if (!chunkId) {
-    detailItem.value = { ...baseItem, snippet: "这个引用没有关联到可打开的文档片段内容。" };
+    detailItem.value = {
+      ...baseItem,
+      snippet: savedContent || "这个引用没有关联到可打开的文档片段内容。",
+    };
     return;
   }
 
@@ -886,7 +916,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <article class="mobile-message" :class="{ 'is-user': isUser, 'is-assistant': isAssistant }">
+  <article ref="messageBodyRef" class="mobile-message" :class="{ 'is-user': isUser, 'is-assistant': isAssistant }">
     <div class="message-stack">
       <MobileResourceRail
         v-if="isUser && (mentionedChips.length || uploadChips.length)"
@@ -1250,6 +1280,34 @@ onBeforeUnmount(() => {
 .mobile-markdown :deep(pre code) {
   background: transparent;
   padding: 0;
+}
+
+.mobile-markdown :deep(img.markdown-image),
+.mobile-markdown :deep(img[data-protected-src]) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0;
+  border-radius: 10px;
+  background: #edf3f0;
+  object-fit: contain;
+}
+
+.mobile-markdown :deep(img[data-img-loading]) {
+  min-height: 160px;
+  opacity: 0.9;
+}
+
+.mobile-markdown :deep(.chat-markdown-table) {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 14px;
+  border: 1px solid #e1e9e5;
+  border-radius: 8px;
+  background: #fff;
+  -webkit-overflow-scrolling: touch;
 }
 
 .mobile-markdown :deep(table) {

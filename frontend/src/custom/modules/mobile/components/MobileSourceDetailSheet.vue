@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUpdated, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 import { downKnowledgeDetails, getChunkByIdOnly, getKnowledgeDetails } from "@/api/knowledge-base";
 import { getWikiPage, type WikiPage } from "@/api/wiki";
 import { useChatResourcesStore } from "@/stores/chatResources";
+import { hydrateProtectedFileImages } from "@/utils/security";
 import {
   hostFromUrl,
   sourceTypeLabel,
@@ -30,6 +31,9 @@ const resolvedKnowledgeId = ref("");
 const wikiPage = ref<WikiPage | null>(null);
 const wikiStack = ref<WikiPage[]>([]);
 const downloading = ref(false);
+const knowledgeBodyRef = ref<HTMLElement | null>(null);
+const knowledgeRenderVersion = ref(0);
+let knowledgeHydrationRun = 0;
 
 const isKnowledge = computed(() => props.item?.type === "knowledge");
 const isWiki = computed(() => props.item?.type === "wiki");
@@ -103,6 +107,7 @@ watch(
     wikiPage.value = null;
     wikiStack.value = [];
     error.value = "";
+    knowledgeRenderVersion.value += 1;
     if (!item) return;
     if (item.type === "knowledge") {
       void loadKnowledge(item);
@@ -113,9 +118,36 @@ watch(
   { immediate: true },
 );
 
+watch(
+  [() => props.item?.key, knowledgeFragmentHtml, knowledgeRenderVersion],
+  () => {
+    void hydrateKnowledgeFragmentAfterRender();
+  },
+  { immediate: true, flush: "post" },
+);
+
+onMounted(() => {
+  void hydrateKnowledgeFragmentAfterRender();
+});
+
+onUpdated(() => {
+  void hydrateKnowledgeFragmentAfterRender();
+});
+
+async function hydrateKnowledgeFragmentAfterRender() {
+  if (!isKnowledge.value || !knowledgeFragmentHtml.value) return;
+  const run = ++knowledgeHydrationRun;
+  await nextTick();
+  if (run !== knowledgeHydrationRun) return;
+  const root = knowledgeBodyRef.value || document.querySelector(".source-detail .knowledge-fragment-content");
+  await hydrateProtectedFileImages(root);
+}
+
 async function loadKnowledge(item: SourceReferenceItem) {
   const savedContent = String(item.content || "").trim();
-  knowledgeFragment.value = savedContent || item.snippet || "";
+  knowledgeFragment.value = item.chunkId
+    ? item.snippet || savedContent || "正在加载文档片段内容..."
+    : savedContent || item.snippet || "";
 
   if (!item.knowledgeId && !item.chunkId && !savedContent) {
     error.value = item.snippet ? "" : "这个引用没有关联到可打开的文档片段";
@@ -137,12 +169,13 @@ async function loadKnowledge(item: SourceReferenceItem) {
           failures.push("文档信息加载失败");
         }));
     }
-    if (item.chunkId && !savedContent) {
+    if (item.chunkId) {
       tasks.push(getChunkByIdOnly(item.chunkId)
         .then((res: any) => {
           const data = res?.data || res || {};
-          knowledgeFragment.value = String(data.content || item.snippet || "").trim();
+          knowledgeFragment.value = String(data.content || savedContent || item.snippet || "").trim();
           resolvedKnowledgeId.value = item.knowledgeId || data.knowledge_id || resolvedKnowledgeId.value;
+          knowledgeRenderVersion.value += 1;
         })
         .catch((err: any) => {
           console.error("[mobile] load citation knowledge fragment failed", err);
@@ -357,7 +390,13 @@ function pageTypeLabel(type?: string) {
           <section class="detail-section">
             <h2>文档片段</h2>
             <div class="summary-card">
-              <div v-if="knowledgeFragmentHtml" class="mobile-rich-content" v-html="knowledgeFragmentHtml" />
+              <div
+                v-if="knowledgeFragmentHtml"
+                :key="knowledgeRenderVersion"
+                ref="knowledgeBodyRef"
+                class="mobile-rich-content knowledge-fragment-content"
+                v-html="knowledgeFragmentHtml"
+              />
               <p v-else>暂无文档片段内容。可以下载原文档查看完整内容。</p>
             </div>
           </section>
@@ -629,6 +668,34 @@ function pageTypeLabel(type?: string) {
   color: #07a557;
   font-weight: 560;
   text-decoration: none;
+}
+
+.knowledge-fragment-content :deep(img.markdown-image),
+.knowledge-fragment-content :deep(img[data-protected-src]) {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0;
+  border-radius: 8px;
+  background: #edf3f0;
+  object-fit: contain;
+}
+
+.knowledge-fragment-content :deep(img[data-img-loading]) {
+  min-height: 160px;
+  opacity: 0.9;
+}
+
+.knowledge-fragment-content :deep(.chat-markdown-table) {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 14px;
+  border: 1px solid #e1e9e5;
+  border-radius: 8px;
+  background: #fff;
+  -webkit-overflow-scrolling: touch;
 }
 
 .mobile-rich-content :deep(table) {

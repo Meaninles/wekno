@@ -7,7 +7,7 @@ import uuid
 
 from PIL import Image
 
-from docreader.parser.concurrency import parser_worker_limit
+from docreader.parser.concurrency import parser_worker_limit, pdfium_thread_guard
 from docreader.parser.pdf_parser import PDFScannedParser, _normalize_image_quality
 
 
@@ -31,6 +31,35 @@ class ParserConcurrencyTest(unittest.TestCase):
                     active_workers -= 1
 
         threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+
+        start.wait()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(max_active_workers, 1)
+
+    def test_pdfium_thread_guard_serializes_reentrant_work(self):
+        active_workers = 0
+        max_active_workers = 0
+        state_lock = threading.Lock()
+        start = threading.Barrier(4)
+
+        def worker():
+            nonlocal active_workers, max_active_workers
+            start.wait()
+            with pdfium_thread_guard():
+                # The PDF parser can call helpers that also need the same guard.
+                with pdfium_thread_guard():
+                    with state_lock:
+                        active_workers += 1
+                        max_active_workers = max(max_active_workers, active_workers)
+                    time.sleep(0.02)
+                    with state_lock:
+                        active_workers -= 1
+
+        threads = [threading.Thread(target=worker) for _ in range(3)]
         for thread in threads:
             thread.start()
 

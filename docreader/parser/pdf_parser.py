@@ -26,7 +26,7 @@ import statistics
 from docreader.config import CONFIG
 from docreader.models.document import Document
 from docreader.parser.base_parser import BaseParser
-from docreader.parser.concurrency import parser_worker_limit
+from docreader.parser.concurrency import parser_worker_limit, pdfium_thread_guard
 
 logger = logging.getLogger(__name__)
 
@@ -1313,7 +1313,10 @@ class PDFScannedParser(BaseParser):
         )
 
         try:
-            with parser_worker_limit("pdf_render", CONFIG.pdf_render_max_workers):
+            with (
+                parser_worker_limit("pdf_render", CONFIG.pdf_render_max_workers),
+                pdfium_thread_guard(),
+            ):
                 pdf = pdfium.PdfDocument(content)
                 try:
                     page_count = len(pdf)
@@ -1416,6 +1419,10 @@ class PDFParser(BaseParser):
         import pypdfium2 as pdfium
         import pypdfium2.raw as pdfium_r
 
+        with pdfium_thread_guard():
+            return self._route_locked(content, pdfium, pdfium_r)
+
+    def _route_locked(self, content: bytes, pdfium, pdfium_r) -> Document:
         base_name = os.path.splitext(self.file_name or "document")[0]
         scale = max(1, CONFIG.pdf_render_dpi) / 72
         quality = _normalize_image_quality(CONFIG.pdf_jpeg_quality)

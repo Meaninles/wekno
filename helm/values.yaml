@@ -212,6 +212,60 @@ frontend:
   affinity: {}
 
 # -----------------------------------------------------------------------------
+# Mobile Web UI
+# -----------------------------------------------------------------------------
+mobileWeb:
+  # -- Enable the mobile web component mounted at /mobile/
+  enabled: false
+
+  # -- Number of replicas
+  replicaCount: 1
+
+  image:
+    # -- Image repository
+    repository: weknora-mobile-web
+    # -- Image tag
+    tag: local
+    # -- Image pull policy
+    pullPolicy: IfNotPresent
+
+  # -- Resource requests and limits
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # -- Container security context
+  securityContext:
+    allowPrivilegeEscalation: false
+
+  # -- Service configuration
+  service:
+    type: ClusterIP
+    port: 80
+
+  # -- Backend app service host for mobile nginx proxy
+  appHost: app
+
+  # -- Backend app service port for mobile nginx proxy
+  appPort: 8080
+
+  # -- Backend app scheme for mobile nginx proxy
+  appScheme: http
+
+  # -- Node selector
+  nodeSelector: {}
+
+  # -- Tolerations
+  tolerations: []
+
+  # -- Affinity rules
+  affinity: {}
+
+# -----------------------------------------------------------------------------
 # Docreader (Document Parser - gRPC)
 # -----------------------------------------------------------------------------
 docreader:

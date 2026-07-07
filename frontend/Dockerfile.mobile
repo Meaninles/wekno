@@ -11,7 +11,7 @@ RUN npm run build:mobile
 
 FROM nginx:stable-alpine
 
-COPY --from=build /app/dist-mobile /usr/share/nginx/html
+COPY --from=build /app/dist-mobile /usr/share/nginx/html/mobile
 COPY nginx.mobile.conf /etc/nginx/templates/default.conf.template
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 

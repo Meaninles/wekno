@@ -7,6 +7,10 @@ window.__RUNTIME_CONFIG__ = {
 };
 EOF
 
+if [ -d /usr/share/nginx/html/mobile ]; then
+  cp /usr/share/nginx/html/config.js /usr/share/nginx/html/mobile/config.js
+fi
+
 # 处理 nginx 配置
 export MAX_FILE_SIZE=${MAX_FILE_SIZE_MB}M
 export APP_HOST=${APP_HOST:-app}

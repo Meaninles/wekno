@@ -5,5 +5,10 @@ export function getApiBaseUrl(): string {
   // POST". Strip trailing slash so axios doesn't produce `/app/weknora//api/v1/...`.
   // See: plugins/weknora/patches/api-base-baseurl.patch
   const base = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
+  // Mobile is mounted under /mobile/ only for SPA assets and history routes.
+  // API calls must still go to the shared backend at /api/ on the same host.
+  if (base === '/mobile') {
+    return '';
+  }
   return base;
 }

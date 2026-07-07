@@ -120,6 +120,13 @@ Return the frontend image with tag.
 {{- end }}
 
 {{/*
+Return the mobile web image with tag.
+*/}}
+{{- define "weknora.mobileWeb.image" -}}
+{{- printf "%s:%s" .Values.mobileWeb.image.repository .Values.mobileWeb.image.tag }}
+{{- end }}
+
+{{/*
 Return the docreader image with tag.
 */}}
 {{- define "weknora.docreader.image" -}}

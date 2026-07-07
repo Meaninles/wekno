@@ -24,7 +24,7 @@ const decodeOIDCResult = (encoded: string) => {
 };
 
 const clearOIDCCallbackState = (path = "/chat") => {
-  window.history.replaceState({}, document.title, path);
+  window.history.replaceState({}, document.title, router.resolve(path).href);
 };
 
 const syncOIDCUserContext = async () => {

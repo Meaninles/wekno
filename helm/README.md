@@ -129,6 +129,12 @@ ingress:
     enabled: true
     secretName: weknora-tls
 
+mobileWeb:
+  enabled: true
+  image:
+    repository: registry.company.com/weknora-mobile-web
+    tag: v0.6.3
+
 secrets:
   existingSecret: weknora-secrets  # Use pre-created secret
 ```
@@ -179,6 +185,23 @@ helm install weknora ./helm \
 | `frontend.replicaCount` | Number of replicas | `1` |
 | `frontend.image.repository` | Image repository | `wechatopenai/weknora-ui` |
 | `frontend.image.tag` | Image tag | `latest` |
+
+### Mobile Web
+
+When `mobileWeb.enabled=true`, the chart creates a `mobile-web` Deployment/Service
+and adds an Ingress path `/mobile` before the desktop frontend catch-all. The
+mobile image must be built from `frontend/Dockerfile.mobile`; it serves the SPA
+under `/mobile/` and static assets under `/mobile/assets/`.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `mobileWeb.enabled` | Enable mobile web mounted at `/mobile/` | `false` |
+| `mobileWeb.replicaCount` | Number of replicas | `1` |
+| `mobileWeb.image.repository` | Image repository | `weknora-mobile-web` |
+| `mobileWeb.image.tag` | Image tag | `local` |
+| `mobileWeb.service.port` | Service port | `80` |
+| `mobileWeb.appHost` | Backend app service host | `app` |
+| `mobileWeb.appPort` | Backend app service port | `8080` |
 
 ### PostgreSQL (ParadeDB)
 

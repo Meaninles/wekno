@@ -37,6 +37,7 @@ function configureForwardedHeaders(proxy: any) {
 }
 
 export default defineConfig({
+  base: "/mobile/",
   define: {
     __FRONTEND_VERSION__: JSON.stringify(pkg.version ?? "unknown"),
     __FRONTEND_COMMIT__: JSON.stringify(resolveFrontendCommit()),

@@ -41,6 +41,16 @@ spec:
                 name: app
                 port:
                   name: http
+          {{- if .Values.mobileWeb.enabled }}
+          # Mobile web routes - must come before frontend catch-all
+          - path: /mobile
+            pathType: Prefix
+            backend:
+              service:
+                name: mobile-web
+                port:
+                  name: http
+          {{- end }}
           # Frontend routes - catch-all
           - path: /
             pathType: Prefix

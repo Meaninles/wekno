@@ -24,7 +24,7 @@ spec:
             - name: APP_SCHEME
               value: http
             - name: APP_HOST
-              value: weknora-app
+              value: app
             - name: APP_PORT
               value: "8080"
             - name: MAX_FILE_SIZE_MB
@@ -55,11 +55,12 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
+  ingressClassName: nginx
   rules:
-    - host: m.example.com
+    - host: weknora.example.com
       http:
         paths:
-          - path: /
+          - path: /mobile
             pathType: Prefix
             backend:
               service:

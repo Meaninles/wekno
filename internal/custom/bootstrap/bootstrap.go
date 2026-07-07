@@ -20,6 +20,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/custom/modules/userguide"
 	"github.com/Tencent/WeKnora/internal/handler"
@@ -34,6 +35,7 @@ type Handlers struct {
 	ConfigCenter         *configcenter.Handler
 	IAM                  *iam.Handler
 	ScheduledChat        *scheduledchat.Handler
+	SessionState         *sessionstate.Handler
 	SkillHub             *skillhub.Handler
 	DBAnalytics          *dbanalytics.Handler
 	GeneralAgent         *generalagent.Handler
@@ -47,6 +49,7 @@ type Handlers struct {
 	generalAgentService         *generalagent.Service
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
+	sessionStateService         *sessionstate.Service
 	skillHubService             *skillhub.Service
 	userGuideService            *userguide.Service
 }
@@ -95,6 +98,7 @@ func NewHandlers(
 		modelService,
 		sessionhandler.NewAttachmentProcessor(fileService, documentReader, imageResolver, modelService),
 	)
+	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
 	if err := configCenterService.Migrate(ctx); err != nil {
 		return nil, err
@@ -112,6 +116,9 @@ func NewHandlers(
 		return nil, err
 	}
 	if err := scheduledChatService.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err := sessionStateService.Migrate(ctx); err != nil {
 		return nil, err
 	}
 	if err := skillHubService.Migrate(ctx); err != nil {
@@ -207,6 +214,7 @@ func NewHandlers(
 		ConfigCenter:                configcenter.NewHandler(configCenterService),
 		IAM:                         iam.NewHandler(iamService, orgService),
 		ScheduledChat:               scheduledchat.NewHandler(scheduledChatService),
+		SessionState:                sessionstate.NewHandler(sessionStateService),
 		SkillHub:                    skillhub.NewHandler(skillHubService, db),
 		DBAnalytics:                 dbanalytics.NewHandler(dbAnalyticsService),
 		GeneralAgent:                generalagent.NewHandler(generalAgentService),
@@ -219,6 +227,7 @@ func NewHandlers(
 		generalAgentService:         generalAgentService,
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
+		sessionStateService:         sessionStateService,
 		skillHubService:             skillHubService,
 		userGuideService:            userGuideService,
 	}, nil
@@ -304,6 +313,14 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 	{
 		spaceMemberRoutes.GET("/space-member-organizations", handlers.IAM.ListSpaceMemberCandidateOrganizations)
 		spaceMemberRoutes.GET("/space-member-candidates", handlers.IAM.ListSpaceMemberCandidateUsers)
+	}
+
+	if handlers.SessionState != nil {
+		sessionStateRoutes := v1.Group("/custom/session-state")
+		{
+			sessionStateRoutes.POST("/status", handlers.SessionState.ListStatus)
+			sessionStateRoutes.POST("/sessions/:session_id/read", handlers.SessionState.MarkRead)
+		}
 	}
 
 	skillRoutes := v1.Group("/custom/skills")

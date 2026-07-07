@@ -2,26 +2,18 @@
   <div
     :class="[
       'submenu_item',
-      !batchMode && item.path && activePath === item.path ? 'submenu_item_active' : '',
-      batchMode && selectedIds.includes(item.id) ? 'submenu_item_selected' : '',
-      batchMode ? 'submenu_item_batch' : '',
+      item.path && activePath === item.path ? 'submenu_item_active' : '',
     ]"
     @mouseenter="emit('hover-in')"
     @mouseleave="emit('hover-out')"
-    @click="batchMode ? emit('toggle-select') : emit('navigate')"
+    @click="emit('navigate')"
   >
-    <t-checkbox
-      v-if="batchMode"
-      class="batch-checkbox"
-      :checked="selectedIds.includes(item.id)"
-      @click.stop
-      @change="emit('toggle-select')"
-    />
-    <span class="submenu_title" :class="batchMode ? 'submenu_title--batch' : ''" :title="item.title || ''">
+    <span class="submenu_title" :title="item.title || ''">
       <t-icon v-if="item.is_pinned" name="pin" class="submenu_pin_icon" />
       <span class="submenu_title-text">{{ item.title || item.id }}</span>
     </span>
-    <div v-if="!batchMode" class="session-row-menu-wrap" @click.stop>
+    <i v-if="unread" class="session-unread-dot" aria-label="有新回复"></i>
+    <div class="session-row-menu-wrap" @click.stop>
       <button
         ref="triggerRef"
         type="button"
@@ -74,17 +66,15 @@ interface SessionMenuOption {
 
 defineProps<{
   item: { id: string; path?: string; title?: string; is_pinned?: boolean }
-  batchMode: boolean
   activePath: string
-  selectedIds: string[]
   menuOptions: SessionMenuOption[]
+  unread?: boolean
   /** 渠道文件夹下的会话（样式与聊天区会话共用文案列对齐） */
   nested?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'navigate'): void
-  (e: 'toggle-select'): void
   (e: 'menu-click', data: { value: string }): void
   (e: 'hover-in'): void
   (e: 'hover-out'): void
@@ -156,6 +146,19 @@ onBeforeUnmount(() => {
 .session-row-menu-wrap {
   position: relative;
   flex: 0 0 auto;
+}
+
+.session-unread-dot {
+  flex: 0 0 auto;
+  margin: 0 4px 0 6px;
+}
+
+.session-unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #07c160;
+  box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.12);
 }
 
 .menu-more-wrap {

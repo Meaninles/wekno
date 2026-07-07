@@ -562,7 +562,7 @@ OIDC 配置定义位于 `internal/config/config.go`，环境变量示例见 `.en
 staticClients:
   - id: weknora
     redirectURIs:
-      - 'http://127.0.0.1:5173/api/v1/auth/oidc/callback'
+      - 'http://127.0.0.1:5177/api/v1/auth/oidc/callback'
       - 'http://127.0.0.1/api/v1/auth/oidc/callback'
     name: 'WeKnora'
     # secret: <YOUR_SECRET_HERE>
@@ -578,8 +578,8 @@ ${window.location.origin}/api/v1/auth/oidc/callback
 
 所以：
 
-- 若前端从 `http://127.0.0.1:5173` 访问，则 redirect URI 为
-  `http://127.0.0.1:5173/api/v1/auth/oidc/callback`
+- 若前端从 `http://127.0.0.1:5177` 访问，则 redirect URI 为
+  `http://127.0.0.1:5177/api/v1/auth/oidc/callback`
 - 若通过 Nginx 统一入口访问，则可能是
   `http://127.0.0.1/api/v1/auth/oidc/callback`
 

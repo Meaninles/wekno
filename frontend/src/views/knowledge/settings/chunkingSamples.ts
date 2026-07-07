@@ -67,7 +67,7 @@ make dev-app               # 启动后端，热重载
 make dev-frontend          # 启动前端，自动刷新
 \`\`\`
 
-打开浏览器访问 http://localhost:5173 即可。
+打开浏览器访问 http://localhost:5177 即可。
 
 ## 架构概览
 
@@ -124,7 +124,7 @@ docker pull docker.m.daocloud.io/wechatopenai/weknora-docreader:v0.5.0
 docker pull docker.m.daocloud.io/wechatopenai/weknora-ui:v0.5.0
 \`\`\`
 
-### Q2: 启动后访问 5173 显示旧界面？
+### Q2: 启动后访问 5177 显示旧界面？
 浏览器缓存了旧版前端资源。Ctrl+Shift+R 强制刷新即可，必要时清空站点存储。
 
 ### Q3: 注册新用户报 500 Internal Server Error

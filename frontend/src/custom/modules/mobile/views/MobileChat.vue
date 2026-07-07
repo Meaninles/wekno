@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { MessagePlugin } from "tdesign-vue-next";
 import {
   createSessions,
+  delSession,
   getMessageList,
   getSessionsList,
   pinSession,
@@ -21,6 +22,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useChatResourcesStore } from "@/stores/chatResources";
 import { useSettingsStore } from "@/stores/settings";
 import { agentPinKey, useChatAgentPins } from "@/custom/modules/agentPins/agentPins";
+import { listSessionStatuses, markSessionRead, type SessionStatusMap } from "@/custom/modules/sessionState/api";
 import { useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
 import MobileResourceRail from "../components/MobileResourceRail.vue";
@@ -73,6 +75,7 @@ const attachmentInputRef = ref<HTMLInputElement | null>(null);
 const shouldFollowAnswer = ref(true);
 
 const sessions = ref<any[]>([]);
+const sessionStatuses = ref<SessionStatusMap>({});
 const skills = ref<SkillInfo[]>([]);
 const professionalSkills = ref<SkillInfo[]>([]);
 const skillsAvailable = ref(true);
@@ -85,6 +88,7 @@ const pendingImages = ref<File[]>([]);
 const pendingAttachments = ref<MobileUploadAttachment[]>([]);
 const startedSessionIds = ref<Set<string>>(new Set());
 const sessionPinningIds = ref<Set<string>>(new Set());
+const sessionActionMenuId = ref("");
 const isResumingStream = ref(false);
 const resumeFailedMessageIds = ref<Set<string>>(new Set());
 let recoverPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -93,6 +97,7 @@ let suppressNextResume = false;
 let activeStreamScrollIntent: "answer" | "non-answer" | "" = "";
 let lastMessageScrollTop = 0;
 let programmaticScrollUntil = 0;
+let sessionsSyncing = false;
 
 const { onChunk, startStream, stopStream, error } = useStream();
 
@@ -369,6 +374,57 @@ const sessionTimestamp = (item: any) => {
   return Number.isFinite(timestamp) ? timestamp : 0;
 };
 
+const isSessionUnread = (item: any) => {
+  const id = String(item?.id || "");
+  if (!id || id === currentSessionId.value) return false;
+  return sessionStatuses.value[id]?.unread === true;
+};
+
+const mergeSessionStatuses = (statuses: SessionStatusMap) => {
+  if (!statuses || Object.keys(statuses).length === 0) return;
+  sessionStatuses.value = { ...sessionStatuses.value, ...statuses };
+  const currentStatus = currentSessionId.value ? statuses[currentSessionId.value] : null;
+  if (currentStatus?.unread) {
+    void markCurrentSessionRead();
+  }
+};
+
+const refreshSessionStatuses = async (rows = sessions.value) => {
+  const ids = rows.map((item) => String(item?.id || "")).filter(Boolean);
+  if (!ids.length) return;
+  try {
+    mergeSessionStatuses(await listSessionStatuses(ids));
+  } catch (err) {
+    console.warn("[mobile] failed to refresh session status", err);
+  }
+};
+
+const markSessionReadLocal = (sessionId: string) => {
+  if (!sessionId) return;
+  const current = sessionStatuses.value[sessionId];
+  if (!current) return;
+  sessionStatuses.value = {
+    ...sessionStatuses.value,
+    [sessionId]: { ...current, unread: false },
+  };
+};
+
+const markSessionAsRead = async (sessionId: string) => {
+  if (!sessionId) return;
+  markSessionReadLocal(sessionId);
+  try {
+    const status = await markSessionRead(sessionId);
+    if (status) mergeSessionStatuses({ [sessionId]: status });
+  } catch (err) {
+    console.warn("[mobile] failed to mark session read", err);
+  }
+};
+
+function markCurrentSessionRead() {
+  if (!currentSessionId.value) return;
+  void markSessionAsRead(currentSessionId.value);
+}
+
 const monthLabel = (date: Date) => `${date.getFullYear()}年${date.getMonth() + 1}月`;
 
 const sessionGroups = computed<SessionGroup[]>(() => {
@@ -572,13 +628,18 @@ const loadKnowledgeChildren = async () => {
   await Promise.all([...kbIds].map((kbId) => loadKnowledgeFilesForKb(kbId)));
 };
 
-const loadSessions = async () => {
-  sessionsLoading.value = true;
+const loadSessions = async (options: { silent?: boolean } = {}) => {
+  if (sessionsSyncing) return;
+  sessionsSyncing = true;
+  if (!options.silent) sessionsLoading.value = true;
   try {
     const res: any = await getSessionsList(1, 40);
-    sessions.value = (res?.data || []).filter(sessionHasActivity);
+    const rows = (res?.data || []).filter(sessionHasActivity);
+    sessions.value = rows;
+    await refreshSessionStatuses(rows);
   } finally {
-    sessionsLoading.value = false;
+    sessionsSyncing = false;
+    if (!options.silent) sessionsLoading.value = false;
   }
 };
 
@@ -611,6 +672,7 @@ const loadMessages = async () => {
       await nextTick();
       await scrollToBottom(true);
     }
+    markCurrentSessionRead();
   }
 };
 
@@ -654,6 +716,8 @@ const pollIncompleteReply = (sessionId: string, messageId: string) => {
         isReplying.value = false;
         loading.value = false;
         currentAssistantMessageId.value = "";
+        void markSessionAsRead(sessionId);
+        void loadSessions({ silent: true });
         clearRecoverPoll();
         return;
       }
@@ -698,6 +762,7 @@ async function resumeTrailingIncompleteReply() {
     method: "GET",
     url: "/api/v1/sessions/continue-stream",
   });
+  void markCurrentSessionRead();
 }
 
 const startNewChat = async () => {
@@ -717,7 +782,9 @@ const startNewChat = async () => {
 };
 
 const openSession = async (id: string) => {
+  closeSessionActionMenu();
   if (!id || id === currentSessionId.value) {
+    if (id) void markSessionAsRead(id);
     drawerOpen.value = false;
     return;
   }
@@ -732,6 +799,15 @@ const openSession = async (id: string) => {
   drawerOpen.value = false;
   await router.replace(`/chat/${id}`);
   await loadMessages();
+  void markSessionAsRead(id);
+};
+
+const closeSessionActionMenu = () => {
+  sessionActionMenuId.value = "";
+};
+
+const toggleSessionActionMenu = (id: string) => {
+  sessionActionMenuId.value = sessionActionMenuId.value === id ? "" : id;
 };
 
 const updateSessionPinState = (sessionId: string, pin: boolean, pinnedAt?: string | null) => {
@@ -746,6 +822,7 @@ const updateSessionPinState = (sessionId: string, pin: boolean, pinnedAt?: strin
 
 const toggleSessionPin = async (item: any) => {
   if (!item?.id || sessionPinningIds.value.has(item.id)) return;
+  closeSessionActionMenu();
   const pin = !item.is_pinned;
   const previous = { is_pinned: !!item.is_pinned, pinned_at: item.pinned_at || null };
   const nextIds = new Set(sessionPinningIds.value);
@@ -764,6 +841,28 @@ const toggleSessionPin = async (item: any) => {
     const doneIds = new Set(sessionPinningIds.value);
     doneIds.delete(item.id);
     sessionPinningIds.value = doneIds;
+  }
+};
+
+const removeSessionsLocal = (ids: string[]) => {
+  const deleting = new Set(ids);
+  sessions.value = sessions.value.filter((item) => !deleting.has(item.id));
+};
+
+const deleteMobileSession = async (item: any) => {
+  if (!item?.id) return;
+  closeSessionActionMenu();
+  if (!window.confirm(`确定删除「${item.title || "新对话"}」？`)) return;
+  try {
+    const res: any = await delSession(item.id);
+    if (res?.success === false) throw new Error(res?.message || "删除失败");
+    removeSessionsLocal([item.id]);
+    MessagePlugin.success("已删除");
+    if (item.id === currentSessionId.value) {
+      await startNewChat();
+    }
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "删除失败");
   }
 };
 
@@ -970,6 +1069,7 @@ const buildMentionedItems = (): MobileMentionItem[] => {
 const sendMessage = async () => {
   const value = inputValue.value.trim();
   if (!value || isReplying.value) return;
+  let outgoingSessionId = "";
   try {
     loading.value = true;
     isReplying.value = true;
@@ -994,10 +1094,12 @@ const sendMessage = async () => {
     }
 
     const sessionId = await ensureSession();
+    outgoingSessionId = sessionId;
     clearRecoverPoll();
     isResumingStream.value = false;
     markSessionStarted(sessionId);
     upsertStartedSession(sessionId);
+    void markSessionAsRead(sessionId);
     prepareForNewOutgoingMessage();
 
     const professionalPrefix = effectiveProfessionalSkillNames.length
@@ -1050,6 +1152,7 @@ const sendMessage = async () => {
       method: "POST",
       url: endpoint,
     });
+    void markSessionAsRead(sessionId);
     void loadSessions();
   } catch (err: any) {
     console.error("[mobile] send failed", err);
@@ -1068,6 +1171,7 @@ const stopGenerating = async () => {
   if (currentSessionId.value && messageId) {
     await stopSession(currentSessionId.value, messageId).catch(() => undefined);
   }
+  void loadSessions({ silent: true });
 };
 
 const handleImageFiles = (event: Event) => {
@@ -1117,6 +1221,7 @@ watch(
       loading.value = false;
       isReplying.value = false;
       await loadMessages();
+      void markSessionAsRead(nextId);
     } else if (!nextId && currentSessionId.value) {
       clearRecoverPoll();
       stopStream();
@@ -1149,6 +1254,7 @@ watch(error, (message) => {
   MessagePlugin.error(message);
   loading.value = false;
   isReplying.value = false;
+  void loadSessions({ silent: true });
 });
 
 onChunk((data) => {
@@ -1163,11 +1269,20 @@ onChunk((data) => {
     }
     return;
   }
+  const finished =
+    data.response_type === "complete" ||
+    data.response_type === "stop" ||
+    data.response_type === "error" ||
+    (data.response_type === "answer" && data.done === true);
   activeStreamScrollIntent = inferStreamScrollIntent(data);
   try {
     processStreamChunk(data);
   } finally {
     activeStreamScrollIntent = "";
+  }
+  if (finished) {
+    void markCurrentSessionRead();
+    void loadSessions({ silent: true });
   }
 });
 
@@ -1176,6 +1291,7 @@ onMounted(async () => {
   await loadSessions();
   if (currentSessionId.value) {
     await loadMessages();
+    void markCurrentSessionRead();
   }
 });
 
@@ -1281,7 +1397,7 @@ onBeforeUnmount(() => {
 
     <div v-if="drawerOpen" class="drawer-layer" @click.self="drawerOpen = false">
       <aside class="session-drawer">
-        <div class="drawer-scroll">
+        <div class="drawer-scroll" @click="closeSessionActionMenu">
           <div v-if="sessionsLoading" class="drawer-empty">正在加载</div>
           <div v-else-if="!sessionGroups.length" class="drawer-empty">暂无会话</div>
           <template v-else>
@@ -1291,23 +1407,33 @@ onBeforeUnmount(() => {
                 v-for="item in group.items"
                 :key="item.id"
                 class="session-row"
-                :class="{ active: item.id === currentSessionId }"
+                :class="{ active: item.id === currentSessionId, unread: isSessionUnread(item) }"
                 role="button"
                 tabindex="0"
                 @click="openSession(item.id)"
                 @keydown.enter.prevent="openSession(item.id)"
               >
-                <span>{{ item.title || "新对话" }}</span>
+                <span class="session-row__title">{{ item.title || "新对话" }}</span>
+                <i v-if="isSessionUnread(item)" class="session-unread-dot" aria-label="有新回复"></i>
                 <button
                   type="button"
-                  class="session-pin"
-                  :class="{ pinned: item.is_pinned }"
+                  class="session-more"
                   :disabled="sessionPinningIds.has(item.id)"
-                  :aria-label="item.is_pinned ? '取消置顶' : '置顶'"
-                  @click.stop="toggleSessionPin(item)"
+                  aria-label="会话操作"
+                  @click.stop="toggleSessionActionMenu(item.id)"
                 >
-                  <MobileIcon :name="item.is_pinned ? 'pin-filled' : 'pin'" />
+                  <MobileIcon name="ellipsis" />
                 </button>
+                <div v-if="sessionActionMenuId === item.id" class="session-action-menu" @click.stop>
+                  <button type="button" @click="toggleSessionPin(item)">
+                    <MobileIcon :name="item.is_pinned ? 'pin-filled' : 'pin'" />
+                    <span>{{ item.is_pinned ? "取消置顶" : "置顶" }}</span>
+                  </button>
+                  <button type="button" class="danger" @click="deleteMobileSession(item)">
+                    <MobileIcon name="delete" />
+                    <span>删除对话</span>
+                  </button>
+                </div>
               </div>
             </section>
           </template>
@@ -1865,6 +1991,7 @@ onBeforeUnmount(() => {
 }
 
 .session-row {
+  position: relative;
   display: flex;
   width: 100%;
   min-height: 48px;
@@ -1962,7 +2089,7 @@ onBeforeUnmount(() => {
   color: #057c41;
 }
 
-.session-row span {
+.session-row__title {
   overflow: hidden;
   min-width: 0;
   flex: 1;
@@ -1973,7 +2100,20 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.session-pin {
+.session-unread-dot {
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+.session-unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #07c160;
+  box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.12);
+}
+
+.session-more {
   display: grid;
   width: 30px;
   height: 30px;
@@ -1986,12 +2126,49 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 
-.session-pin.pinned {
-  color: #07a557;
+.session-more .mobile-icon {
+  font-size: 19px;
 }
 
-.session-pin:disabled {
+.session-more:disabled {
   opacity: 0.55;
+}
+
+.session-action-menu {
+  position: absolute;
+  right: 8px;
+  top: calc(100% - 2px);
+  z-index: 20;
+  display: grid;
+  min-width: 138px;
+  border: 1px solid #dfe8e3;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(17, 41, 28, 0.14);
+  padding: 5px;
+}
+
+.session-action-menu button {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #24372f;
+  font: inherit;
+  font-size: 14px;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.session-action-menu button:active {
+  background: #edf9f2;
+}
+
+.session-action-menu button.danger {
+  color: #c93535;
 }
 
 .sheet-row span {

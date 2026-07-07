@@ -123,6 +123,7 @@ import ChatQuestionLocator from '@/custom/modules/chatQuestionLocator/ChatQuesti
 import { getMessageList, getSession } from "@/api/chat/index";
 import { getSuggestedQuestions } from "@/api/agent/index";
 import { useStream } from '../../api/chat/streame'
+import { markSessionRead } from '@/custom/modules/sessionState/api';
 import { useMenuStore } from '@/stores/menu';
 import { useSettingsStore } from '@/stores/settings';
 import { MessagePlugin } from 'tdesign-vue-next';
@@ -185,6 +186,13 @@ const attachStreamDebugToMessage = (message) => {
 };
 const route = useRoute();
 const session_id = ref(props.session_id || route.params.chatid);
+
+const markCurrentSessionRead = () => {
+    if (props.embeddedMode || !session_id.value) return;
+    void markSessionRead(String(session_id.value)).catch((err) => {
+        console.warn('[session-state] failed to mark current session read', err);
+    });
+};
 
 // 拉 session 详情，并按其 last_request_state 把输入栏状态恢复到当时的发起态。
 // 嵌入式（embeddedMode）由宿主页面注入 agent/KB，所以跳过整套恢复逻辑，
@@ -371,6 +379,7 @@ watch([() => route.params], async (newvalue) => {
         useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
 
         await loadSessionAndHydrate(session_id.value);
+        markCurrentSessionRead();
         let data = {
             session_id: session_id.value,
             created_at: '',
@@ -564,6 +573,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     prepareForNewOutgoingMessage();
     isReplying.value = true;
     loading.value = true;
+    markCurrentSessionRead();
 
     // Convert images to base64 data URIs for backend processing and local display
     let imageAttachments = [];
@@ -704,6 +714,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         method: 'POST',
         url: endpoint,
     });
+    markCurrentSessionRead();
 }
 
 // Quietly recover an in-flight IM reply we couldn't attach to (it's generated on
@@ -784,7 +795,15 @@ onChunk((data) => {
         }
         return;
     }
+    const finished =
+        data.response_type === 'complete' ||
+        data.response_type === 'stop' ||
+        data.response_type === 'error' ||
+        (data.response_type === 'answer' && data.done === true);
     processStreamChunk(data);
+    if (finished) {
+        markCurrentSessionRead();
+    }
 });
 
 const handleSessionCleared = (e) => {
@@ -813,6 +832,7 @@ onBeforeMount(async () => {
 
     // 必须在 Input-field onMounted 之前完成：按 session.last_request_state 恢复输入栏
     await loadSessionAndHydrate(session_id.value);
+    markCurrentSessionRead();
 });
 
 onMounted(async () => {

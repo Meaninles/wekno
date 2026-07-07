@@ -194,7 +194,7 @@ export default defineConfig({
     exclude: ['tdesign-icons-vue-next'],
   },
   server: {
-    port: 5173,
+    port: 5177,
     host: true,
     // 代理配置，用于开发环境
     proxy: {

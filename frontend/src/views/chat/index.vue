@@ -93,6 +93,7 @@ import { useChatStreamHandler } from '@/composables/useChatStreamHandler';
 import { useStickyBottomOnResize } from '@/composables/useStickyBottomOnResize';
 import { clearCitationChunkCache } from '@/utils/citationChunkCache';
 import { isAgentStreamAgentId } from '@/utils/agent-mode';
+import { getSessionDraftState, saveSessionDraftState } from '@/custom/modules/sessionState/draftState';
 
 const props = defineProps({
     session_id: { type: String, default: '' },
@@ -173,6 +174,49 @@ const loadSessionAndHydrate = async (sid) => {
     }
 };
 const inputFieldRef = ref();
+
+const getInputAttachments = () => inputFieldRef.value?.getUploadedAttachments?.() || [];
+
+const saveCurrentConversationDraft = () => {
+    if (props.embeddedMode || !session_id.value) return;
+    saveSessionDraftState(
+        session_id.value,
+        useSettingsStoreInstance.captureConversationScopedState(),
+        getInputAttachments(),
+    );
+};
+
+const applyRouteConversationOverrides = () => {
+    const agentIdFromQuery = props.agentId || (route.query.agent_id && String(route.query.agent_id));
+    const sourceTenantIdFromQuery = route.query.source_tenant_id && String(route.query.source_tenant_id);
+    if (agentIdFromQuery && sourceTenantIdFromQuery) {
+        useSettingsStoreInstance.selectAgent(agentIdFromQuery, sourceTenantIdFromQuery);
+    } else if (agentIdFromQuery) {
+        useSettingsStoreInstance.selectAgent(agentIdFromQuery, null);
+    }
+
+    if (props.kbIds && props.kbIds.length > 0) {
+        useSettingsStoreInstance.selectKnowledgeBases(props.kbIds);
+    }
+};
+
+const hydrateConversationScopedState = async (sid, syncAttachments = true) => {
+    if (!sid || props.embeddedMode) return null;
+
+    useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
+    useSettingsStoreInstance.resetConversationScopedState();
+    await loadSessionAndHydrate(sid);
+
+    const draft = getSessionDraftState(sid);
+    if (draft?.settings) {
+        useSettingsStoreInstance.applyLastRequestState(draft.settings);
+    }
+    if (syncAttachments) {
+        inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
+    }
+    return draft;
+};
+
 const created_at = ref('');
 const limit = ref(20);
 const messagesList = reactive([]);
@@ -232,11 +276,15 @@ const getUserQuery = (index) => {
 watch([() => route.params], async (newvalue) => {
     isFirstEnter.value = true;
     if (newvalue[0].chatid) {
+        const nextSessionId = newvalue[0].chatid;
+        if (String(session_id.value || '') !== String(nextSessionId || '')) {
+            saveCurrentConversationDraft();
+        }
         if (!firstQuery.value) {
             scrollLock.value = false;
         }
         messagesList.splice(0);
-        session_id.value = newvalue[0].chatid;
+        session_id.value = nextSessionId;
         clearCitationChunkCache();
 
         // 切换会话时，重置状态
@@ -249,11 +297,8 @@ watch([() => route.params], async (newvalue) => {
         currentAssistantMessageId.value = '';
         userHasScrolledUp.value = false;
 
-        // 跨会话切换：先把旧会话覆盖前的全局默认还原，再让新会话重新拍快照
-        // 并应用自己的 last_request_state（在 loadSessionAndHydrate 内部完成）。
-        useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
-
-        await loadSessionAndHydrate(session_id.value);
+        await hydrateConversationScopedState(session_id.value);
+        applyRouteConversationOverrides();
         markCurrentSessionRead();
         let data = {
             session_id: session_id.value,
@@ -685,21 +730,9 @@ const handleSessionCleared = (e) => {
 };
 
 onBeforeMount(async () => {
-    // 若从智能体列表点击共享智能体进入，URL 带 agent_id 与 source_tenant_id，同步到 store
-    const agentIdFromQuery = props.agentId || (route.query.agent_id && String(route.query.agent_id));
-    const sourceTenantIdFromQuery = route.query.source_tenant_id && String(route.query.source_tenant_id);
-    if (agentIdFromQuery && sourceTenantIdFromQuery) {
-        useSettingsStoreInstance.selectAgent(agentIdFromQuery, sourceTenantIdFromQuery);
-    } else if (agentIdFromQuery) {
-        useSettingsStoreInstance.selectAgent(agentIdFromQuery, null);
-    }
-
-    if (props.kbIds && props.kbIds.length > 0) {
-        useSettingsStoreInstance.selectKnowledgeBases(props.kbIds);
-    }
-
-    // 必须在 Input-field onMounted 之前完成：按 session.last_request_state 恢复输入栏
-    await loadSessionAndHydrate(session_id.value);
+    // 必须在 Input-field onMounted 之前完成：按当前 session 恢复对话级配置。
+    await hydrateConversationScopedState(session_id.value, false);
+    applyRouteConversationOverrides();
     markCurrentSessionRead();
 });
 
@@ -723,11 +756,12 @@ onMounted(async () => {
         }
         const initialAttachmentFiles = [...(firstAttachmentFiles.value || [])];
         sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], firstImageFiles.value || [], initialAttachmentFiles);
-        if (initialAttachmentFiles.length > 0) {
-            inputFieldRef.value?.setUploadedAttachments?.(initialAttachmentFiles);
-        }
+        inputFieldRef.value?.setUploadedAttachments?.(initialAttachmentFiles);
+        saveSessionDraftState(session_id.value, useSettingsStoreInstance.captureConversationScopedState(), initialAttachmentFiles);
         usemenuStore.changeFirstQuery('', [], '', [], []);
     } else {
+        const draft = getSessionDraftState(session_id.value);
+        inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
         scrollLock.value = false;
         hasMoreHistory.value = true;
         historyLoadingMore.value = false;
@@ -752,15 +786,18 @@ onUnmounted(() => {
     if (recoverPollTimer) { clearTimeout(recoverPollTimer); recoverPollTimer = null; }
 });
 onBeforeRouteLeave((to, from, next) => {
+    saveCurrentConversationDraft();
     clearData()
-    // 离开聊天会话 → 还原"用户全局默认"，避免旧会话的请求态泄漏到新建对话。
-    useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
+    if (!props.embeddedMode) {
+        inputFieldRef.value?.clearUploadedAttachments?.();
+        // 离开聊天会话 → 回到新对话默认，避免当前会话配置泄漏到其它页面或新建对话。
+        useSettingsStoreInstance.resetConversationScopedState();
+    }
     next()
 })
 onBeforeRouteUpdate((to, from, next) => {
+    saveCurrentConversationDraft();
     clearData()
-    // 仅"会话 → 会话"会落到这里；跨会话覆盖的还原放到 route.params 的 watch 里，
-    // 因为新会话的 getSession 也在那边触发，便于保证 restore→snapshot→apply 顺序。
     next()
 })
 </script>

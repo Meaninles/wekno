@@ -244,7 +244,7 @@ agent_type_presets:
       web_fetch_enabled: true
       web_fetch_top_n: 3
       history_turns: 10
-      embedding_top_k: 5
+      embedding_top_k: 10
       kb_selection_mode: "all"
       db_data_sources: []
 

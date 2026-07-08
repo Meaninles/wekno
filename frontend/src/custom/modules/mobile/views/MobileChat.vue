@@ -7,6 +7,7 @@ import {
   createSessions,
   delSession,
   getMessageList,
+  getSession,
   getSessionsList,
   pinSession,
   stopSession,
@@ -23,7 +24,9 @@ import { useChatResourcesStore } from "@/stores/chatResources";
 import { useSettingsStore } from "@/stores/settings";
 import { agentPinKey, useChatAgentPins } from "@/custom/modules/agentPins/agentPins";
 import { listSessionStatuses, markSessionRead, type SessionStatusMap } from "@/custom/modules/sessionState/api";
+import { clearSessionDraftState, getSessionDraftState, saveSessionDraftState } from "@/custom/modules/sessionState/draftState";
 import { useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
+import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
 import MobileResourceRail from "../components/MobileResourceRail.vue";
 import {
@@ -98,8 +101,47 @@ let activeStreamScrollIntent: "answer" | "non-answer" | "" = "";
 let lastMessageScrollTop = 0;
 let programmaticScrollUntil = 0;
 let sessionsSyncing = false;
+let isHydratingConversationState = false;
 
 const { onChunk, startStream, stopStream, error } = useStream();
+
+const toDraftAttachments = (attachments: MobileUploadAttachment[] = pendingAttachments.value): AttachmentFile[] =>
+  attachments
+    .filter((attachment) => !!attachment?.file)
+    .map((attachment, index) => ({
+      file: attachment.file,
+      id: `mobile-${index}-${attachment.file.name}-${attachment.file.lastModified || 0}`,
+      name: attachment.name || attachment.file.name,
+      size: attachment.size || attachment.file.size,
+      type: attachment.file.type || "",
+    }));
+
+const fromDraftAttachments = (attachments: AttachmentFile[] = []): MobileUploadAttachment[] =>
+  attachments
+    .filter((attachment): attachment is AttachmentFile => !!attachment?.file)
+    .map((attachment) => ({
+      file: attachment.file,
+      name: attachment.name || attachment.file.name,
+      size: attachment.size || attachment.file.size,
+    }));
+
+const saveCurrentMobileDraft = () => {
+  if (isHydratingConversationState) return;
+  if (!currentSessionId.value) return;
+  saveSessionDraftState(
+    currentSessionId.value,
+    settingsStore.captureConversationScopedState(),
+    toDraftAttachments(),
+    pendingImages.value,
+  );
+};
+
+const resetMobileConversationState = () => {
+  settingsStore.resetConversationScopedState();
+  pendingImages.value = [];
+  pendingAttachments.value = [];
+  activeFileKbId.value = "";
+};
 
 const SCROLL_BOTTOM_THRESHOLD = 140;
 const STREAM_NON_ANSWER_TYPES = new Set([
@@ -628,6 +670,39 @@ const loadKnowledgeChildren = async () => {
   await Promise.all([...kbIds].map((kbId) => loadKnowledgeFilesForKb(kbId)));
 };
 
+const loadSessionConversationState = async (sessionId: string) => {
+  if (!sessionId) return;
+  try {
+    const res: any = await getSession(sessionId);
+    const lastState = res?.data?.last_request_state;
+    if (lastState) settingsStore.applyLastRequestState(lastState);
+  } catch (error) {
+    console.warn("[mobile] failed to load session state", error);
+  }
+};
+
+const hydrateMobileConversationState = async (sessionId: string) => {
+  isHydratingConversationState = true;
+  resetMobileConversationState();
+  try {
+    if (!sessionId) {
+      await loadKnowledgeChildren();
+      return;
+    }
+
+    await loadSessionConversationState(sessionId);
+    const draft = getSessionDraftState(sessionId);
+    if (draft?.settings) {
+      settingsStore.applyLastRequestState(draft.settings);
+    }
+    pendingAttachments.value = fromDraftAttachments(draft?.attachments || []);
+    pendingImages.value = draft?.images || [];
+    await loadKnowledgeChildren();
+  } finally {
+    isHydratingConversationState = false;
+  }
+};
+
 const loadSessions = async (options: { silent?: boolean } = {}) => {
   if (sessionsSyncing) return;
   sessionsSyncing = true;
@@ -765,7 +840,8 @@ async function resumeTrailingIncompleteReply() {
   void markCurrentSessionRead();
 }
 
-const startNewChat = async () => {
+const resetToNewChat = async (preserveCurrentDraft = true) => {
+  if (preserveCurrentDraft) saveCurrentMobileDraft();
   clearRecoverPoll();
   stopStream();
   messagesList.splice(0);
@@ -778,7 +854,37 @@ const startNewChat = async () => {
   loading.value = false;
   isReplying.value = false;
   drawerOpen.value = false;
+  resetMobileConversationState();
+  await loadKnowledgeChildren();
   await router.replace("/chat");
+};
+
+const startNewChat = async () => {
+  await resetToNewChat(true);
+};
+
+const switchMobileSession = async (id: string, options: { updateRoute?: boolean; preserveCurrentDraft?: boolean } = {}) => {
+  const nextId = String(id || "");
+  if (!nextId) return;
+  if (options.preserveCurrentDraft !== false && nextId !== currentSessionId.value) {
+    saveCurrentMobileDraft();
+  }
+
+  clearRecoverPoll();
+  stopStream();
+  isResumingStream.value = false;
+  currentSessionId.value = nextId;
+  currentAssistantMessageId.value = "";
+  fullContent.value = "";
+  loading.value = false;
+  isReplying.value = false;
+  drawerOpen.value = false;
+  await hydrateMobileConversationState(nextId);
+  if (options.updateRoute !== false && String(route.params.sessionId || "") !== nextId) {
+    await router.replace(`/chat/${nextId}`);
+  }
+  await loadMessages();
+  void markSessionAsRead(nextId);
 };
 
 const openSession = async (id: string) => {
@@ -788,18 +894,7 @@ const openSession = async (id: string) => {
     drawerOpen.value = false;
     return;
   }
-  clearRecoverPoll();
-  stopStream();
-  isResumingStream.value = false;
-  currentSessionId.value = id;
-  currentAssistantMessageId.value = "";
-  fullContent.value = "";
-  loading.value = false;
-  isReplying.value = false;
-  drawerOpen.value = false;
-  await router.replace(`/chat/${id}`);
-  await loadMessages();
-  void markSessionAsRead(id);
+  await switchMobileSession(id, { updateRoute: true, preserveCurrentDraft: true });
 };
 
 const closeSessionActionMenu = () => {
@@ -856,10 +951,11 @@ const deleteMobileSession = async (item: any) => {
   try {
     const res: any = await delSession(item.id);
     if (res?.success === false) throw new Error(res?.message || "删除失败");
+    clearSessionDraftState(item.id);
     removeSessionsLocal([item.id]);
     MessagePlugin.success("已删除");
     if (item.id === currentSessionId.value) {
-      await startNewChat();
+      await resetToNewChat(false);
     }
   } catch (error: any) {
     MessagePlugin.error(error?.message || "删除失败");
@@ -1123,7 +1219,12 @@ const sendMessage = async () => {
 
     inputValue.value = "";
     pendingImages.value = [];
-    pendingAttachments.value = [];
+    saveSessionDraftState(
+      sessionId,
+      settingsStore.captureConversationScopedState(),
+      toDraftAttachments(),
+      pendingImages.value,
+    );
     await scrollToBottom(true);
     void loadSessions();
 
@@ -1212,28 +1313,9 @@ watch(
   async (id) => {
     const nextId = String(id || "");
     if (nextId && nextId !== currentSessionId.value) {
-      clearRecoverPoll();
-      stopStream();
-      isResumingStream.value = false;
-      currentSessionId.value = nextId;
-      currentAssistantMessageId.value = "";
-      fullContent.value = "";
-      loading.value = false;
-      isReplying.value = false;
-      await loadMessages();
-      void markSessionAsRead(nextId);
+      await switchMobileSession(nextId, { updateRoute: false, preserveCurrentDraft: true });
     } else if (!nextId && currentSessionId.value) {
-      clearRecoverPoll();
-      stopStream();
-      isResumingStream.value = false;
-      currentSessionId.value = "";
-      messagesList.splice(0);
-      shouldFollowAnswer.value = true;
-      lastMessageScrollTop = 0;
-      currentAssistantMessageId.value = "";
-      fullContent.value = "";
-      loading.value = false;
-      isReplying.value = false;
+      await resetToNewChat(true);
     }
   },
 );
@@ -1287,6 +1369,11 @@ onChunk((data) => {
 });
 
 onMounted(async () => {
+  if (currentSessionId.value) {
+    await hydrateMobileConversationState(currentSessionId.value);
+  } else {
+    resetMobileConversationState();
+  }
   await loadResources();
   await loadSessions();
   if (currentSessionId.value) {
@@ -1296,8 +1383,10 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  saveCurrentMobileDraft();
   clearRecoverPoll();
   stopStream();
+  resetMobileConversationState();
 });
 </script>
 

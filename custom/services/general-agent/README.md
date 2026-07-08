@@ -1,6 +1,6 @@
 # WeKnora 通用智能体旁路服务
 
-本服务承载 `agent_type=general-agent` 和 `agent_type=data-analysis` 的 Claude Agent SDK 推理循环。
+本服务承载 `agent_type=general-agent`、`agent_type=data-analysis` 和 `agent_type=table-analysis` 的 Claude Agent SDK 推理循环。
 
 边界：
 

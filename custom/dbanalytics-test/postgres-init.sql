@@ -176,3 +176,22 @@ INSERT INTO ops.traffic_daily VALUES
 
 INSERT INTO shadow.tmp_2024_x VALUES ('a','orphan','2024x'),('b','legacy','n/a');
 INSERT INTO shadow.job_audit_evt VALUES ('load_order','2026-05-08 01:00:00','warn','late rows'),('load_sku','2026-05-08 01:03:00','info','ok');
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'analytics_reader') THEN
+    CREATE ROLE analytics_reader LOGIN PASSWORD 'analytics_pwd';
+  ELSE
+    ALTER ROLE analytics_reader WITH LOGIN PASSWORD 'analytics_pwd';
+  END IF;
+END
+$$;
+
+ALTER ROLE analytics_reader WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+GRANT CONNECT ON DATABASE ops_warehouse TO analytics_reader;
+GRANT USAGE ON SCHEMA public, ops, stg, shadow TO analytics_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA public, ops, stg, shadow TO analytics_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO analytics_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA ops GRANT SELECT ON TABLES TO analytics_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA stg GRANT SELECT ON TABLES TO analytics_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA shadow GRANT SELECT ON TABLES TO analytics_reader;

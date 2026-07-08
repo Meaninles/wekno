@@ -244,7 +244,7 @@ const submit = () => {
   if (getTextareaEl()) query.value = ''
   uploadedImages.value.forEach((img) => URL.revokeObjectURL(img.preview))
   uploadedImages.value = []
-  uploadedAttachments.value = []
+  // Keep file attachments selected so follow-up turns upload the same transient context.
 }
 
 const onKeydown = (_val: string, ctx: { e: KeyboardEvent }) => {

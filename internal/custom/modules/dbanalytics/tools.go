@@ -66,10 +66,10 @@ func NewQueryTool(service *Service, scope ToolScope, allowChart bool) *QueryTool
 			`Execute a read-only SQL analysis query over authorized MySQL/PostgreSQL data source tables.
 The query is executed by DuckDB after source tables are materialized, so write DuckDB-compatible SQL rather than source-database-specific SQL.
 Use only SQL table names returned by db_catalog/db_schema. Use SELECT only, aggregate before returning raw rows, and add filters/limits.
+Do not use compound queries: UNION, UNION ALL, INTERSECT, or EXCEPT are rejected by SQL validation.
 source_id is optional; omit it unless you intentionally want to restrict the query to one source_id returned by db_catalog/db_schema.
 Set chart_requested=true only when the user explicitly asks for chart/graph/plot/visualization/图表/可视化 or a named chart type.
-When a chart is returned, use its ChartContract visual_scope as the source of truth for what the chart actually renders; query rows and evidence_scope may still support separate textual insights.
-Set table_requested=true only when the user explicitly asks for table/detail/raw/list output; otherwise query rows are evidence for the answer and the UI will not render a table.`,
+When a chart is returned, use its ChartContract visual_scope as the source of truth for what the chart actually renders; query rows and evidence_scope may still support separate textual insights.`,
 			utils.GenerateSchema[QueryInput](),
 		),
 		service:    service,
@@ -206,14 +206,12 @@ func formatAnalysisOutput(data map[string]any) string {
 	rows, _ := data["rows"].([]map[string]any)
 	chart, _ := data["chart"].(map[string]any)
 	chartEligible, _ := chart["eligible"].(bool)
-	tableRequested, _ := data["table_requested"].(bool)
 	var b strings.Builder
 	b.WriteString("=== Structured Analysis Result ===\n")
 	b.WriteString(fmt.Sprintf("SQL: %s\n", data["query"]))
 	b.WriteString(fmt.Sprintf("Returned rows: %d\n", len(rows)))
 	b.WriteString(fmt.Sprintf("Display mode: %s\n", data["display_mode"]))
 	b.WriteString(fmt.Sprintf("Chart requested: %v\n", data["chart_requested"]))
-	b.WriteString(fmt.Sprintf("Table requested: %v\n", tableRequested))
 	if chartEligible {
 		chartID := fmt.Sprint(chart["id"])
 		contractJSON, _ := json.Marshal(chart["contract"])
@@ -233,9 +231,6 @@ func formatAnalysisOutput(data map[string]any) string {
 		b.WriteString("Final chart explanation rule: ChartContract visual_scope describes what the chart actually renders. Additional conclusions may use query rows or evidence_scope, but write them as textual insights and do not claim the chart itself visualizes non_visual_fields.\n")
 	} else if data["chart_requested"] == true {
 		b.WriteString(fmt.Sprintf("Structured chart unavailable: %s\n", chart["reason"]))
-	}
-	if !tableRequested {
-		b.WriteString("Final answer rule: do not render these rows as a Markdown table unless the user explicitly asked for a table/detail/raw/list output.\n")
 	}
 	b.WriteString("\n")
 	for i, row := range rows {

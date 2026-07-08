@@ -813,6 +813,102 @@ func (s *Service) TestConnection(ctx context.Context, tenantID uint64, id string
 	return err
 }
 
+type SourceAvailabilityItem struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type SourceAvailabilityIssue struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Error string `json:"error"`
+}
+
+type SourceAvailabilityResult struct {
+	Available   []SourceAvailabilityItem  `json:"available"`
+	Unavailable []SourceAvailabilityIssue `json:"unavailable"`
+}
+
+func (s *Service) CheckSourceAvailability(ctx context.Context, scope ToolScope) (*SourceAvailabilityResult, error) {
+	result := &SourceAvailabilityResult{}
+	if s == nil || s.db == nil {
+		return result, nil
+	}
+	sourceIDs := uniqueStrings(scope.SourceIDs)
+	if len(sourceIDs) == 0 {
+		return result, nil
+	}
+	sourceTenantID := scope.SourceTenantID
+	if sourceTenantID == 0 {
+		sourceTenantID = scope.TenantID
+	}
+	for _, sourceID := range sourceIDs {
+		src, err := s.runtimeSourceForAvailability(ctx, sourceTenantID, scope.TenantID, scope.TenantRole, sourceID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				result.Unavailable = append(result.Unavailable, SourceAvailabilityIssue{
+					ID:    sourceID,
+					Name:  sourceID,
+					Error: "数据源不存在或当前用户无权访问",
+				})
+				continue
+			}
+			return result, err
+		}
+		name := displaySourceName(src)
+		cfg, err := src.ParseConfig()
+		if err != nil {
+			result.Unavailable = append(result.Unavailable, SourceAvailabilityIssue{ID: src.ID, Name: name, Error: "读取数据源配置失败：" + sanitizeError(err)})
+			_ = s.db.WithContext(ctx).Model(src).Updates(map[string]any{"status": SourceStatusError, "error_message": err.Error()}).Error
+			continue
+		}
+		conn, err := connectorFor(src.Type)
+		if err != nil {
+			result.Unavailable = append(result.Unavailable, SourceAvailabilityIssue{ID: src.ID, Name: name, Error: sanitizeError(err)})
+			_ = s.db.WithContext(ctx).Model(src).Updates(map[string]any{"status": SourceStatusError, "error_message": err.Error()}).Error
+			continue
+		}
+		err = s.validateSourceAccess(ctx, conn, cfg, sourceTimeout(src.TimeoutSeconds))
+		updates := map[string]any{"status": SourceStatusActive, "error_message": ""}
+		if err != nil {
+			updates["status"] = SourceStatusError
+			updates["error_message"] = err.Error()
+			result.Unavailable = append(result.Unavailable, SourceAvailabilityIssue{ID: src.ID, Name: name, Error: err.Error()})
+		} else {
+			result.Available = append(result.Available, SourceAvailabilityItem{ID: src.ID, Name: name})
+		}
+		_ = s.db.WithContext(ctx).Model(src).Updates(updates).Error
+	}
+	return result, nil
+}
+
+func (s *Service) runtimeSourceForAvailability(ctx context.Context, sourceTenantID, callerTenantID uint64, callerTenantRole types.TenantRole, sourceID string) (*Source, error) {
+	if sourceTenantID != 0 {
+		var src Source
+		err := s.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", sourceTenantID, sourceID).First(&src).Error
+		if err == nil {
+			return &src, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	if callerTenantID != 0 {
+		return s.GetSourceWithPermission(ctx, callerTenantID, sourceID, callerTenantRole, types.OrgRoleViewer)
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func displaySourceName(src *Source) string {
+	if src == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(src.Name); name != "" {
+		return name
+	}
+	return strings.TrimSpace(src.ID)
+}
+
 func (s *Service) validateSourceAccess(ctx context.Context, conn Connector, cfg SourceConfig, timeout time.Duration) error {
 	if err := conn.Validate(ctx, cfg, timeout); err != nil {
 		return newSourceValidationError(
@@ -1303,15 +1399,9 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 	}
 	chartRequested := input.ChartRequested && allowChart
 	chart := inferChartSpec(cols, resultRows, input.PreferredChart, chartRequested, chartHintsFromInput(input))
-	tableRequested := input.TableRequested
 	displayMode := "text_only"
 	if eligible, _ := chart["eligible"].(bool); eligible {
 		displayMode = "chart_only"
-		if tableRequested {
-			displayMode = "chart_and_table"
-		}
-	} else if tableRequested {
-		displayMode = "table"
 	}
 	return map[string]any{
 		"display_type":    DisplayTypeStructuredAnalysis,
@@ -1324,8 +1414,6 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 		"row_count":       len(resultRows),
 		"chart_requested": chartRequested,
 		"chart":           chart,
-		"table_requested": tableRequested,
-		"table_visible":   tableRequested,
 		"limits":          map[string]any{"max_rows": maxRows, "max_scan_rows": maxScanRows, "truncated": len(resultRows) >= maxRows},
 	}, nil
 }

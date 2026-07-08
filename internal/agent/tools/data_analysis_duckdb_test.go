@@ -105,6 +105,44 @@ func TestTableAnalysisExecuteSingleQueryUsesDBQueryStyleLimitBudget(t *testing.T
 	}
 }
 
+func TestTableAnalysisDuckDBValidationAllowsTryCast(t *testing.T) {
+	db := newCSVTestDuckDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE attachment_1(category VARCHAR, amount VARCHAR)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO attachment_1 VALUES ('A', '1'), ('B', 'not-a-number')`); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	validation := tool.validateTableAnalysisSQL(ctx, `SELECT category, TRY_CAST(amount AS INTEGER) AS amount_int FROM attachment_1`, []string{"attachment_1"})
+	if !validation.Valid {
+		t.Fatalf("DuckDB-compatible TRY_CAST should pass table_analysis validation, got %#v", validation.Errors)
+	}
+}
+
+func TestTableAnalysisDuckDBValidationAllowsLLMNormalizedMetricDataset(t *testing.T) {
+	db := newCSVTestDuckDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE attachment_1(category VARCHAR, amount INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO attachment_1 VALUES ('A', 1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	validation := tool.validateTableAnalysisSQL(ctx, `SELECT '管理序列' AS seq, 14 AS child_count FROM attachment_1 LIMIT 1`, []string{"attachment_1"})
+	if !validation.Valid {
+		t.Fatalf("LLM-normalized visible metrics should be allowed by SQL validation; source_mapping is enforced at tool-call level, got %#v", validation.Errors)
+	}
+	valuesValidation := tool.validateTableAnalysisSQL(ctx, `SELECT * FROM (VALUES ('管理序列', 14), ('营销序列', 2)) AS t(seq, child_count)`, []string{"attachment_1"})
+	if !valuesValidation.Valid {
+		t.Fatalf("VALUES normalized datasets should be allowed by SQL validation; source_mapping is enforced at tool-call level, got %#v", valuesValidation.Errors)
+	}
+}
+
 // writeWorkbook builds a minimal .xlsx with the given sheet -> rows layout.
 // Each inner row is a list of cell values; the first row of each sheet is
 // treated as the header, matching what read_xlsx expects by default.
@@ -399,5 +437,76 @@ func TestLoadFromExcel_QuotedSheetName(t *testing.T) {
 	}
 	if got != sheet {
 		t.Errorf("sheet-name roundtrip mismatch: got %q, want %q", got, sheet)
+	}
+}
+
+func TestLoadFromExcel_CellEvidenceCapturesIrregularDeepRows(t *testing.T) {
+	db := newTestDuckDB(t)
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "irregular.xlsx")
+
+	f := excelize.NewFile()
+	sheet := "股份岗位序列划分"
+	if _, err := f.NewSheet(sheet); err != nil {
+		t.Fatalf("new sheet: %v", err)
+	}
+	if err := f.DeleteSheet("Sheet1"); err != nil {
+		t.Fatalf("delete default sheet: %v", err)
+	}
+	for cell, value := range map[string]any{
+		"A4":  "管理序列",
+		"A5":  "职能序列（161）",
+		"A32": "技术序列（24）",
+		"A39": "技能序列（118）",
+		"A56": "营销序列",
+		"C56": "营销业务",
+		"C57": "营销支持",
+	} {
+		if err := f.SetCellValue(sheet, cell, value); err != nil {
+			t.Fatalf("set %s: %v", cell, err)
+		}
+	}
+	if err := f.SaveAs(path); err != nil {
+		t.Fatalf("save workbook: %v", err)
+	}
+	_ = f.Close()
+
+	tool := &DataAnalysisTool{
+		BaseTool:  dataAnalysisTool,
+		db:        db,
+		sessionID: "test-irregular-cell-evidence",
+	}
+
+	ctx := context.Background()
+	schema, err := tool.LoadFromExcel(ctx, path, "t_irregular")
+	if err != nil {
+		t.Fatalf("LoadFromExcel: %v", err)
+	}
+	t.Cleanup(func() { tool.Cleanup(ctx) })
+
+	cellTable := metadataString(schema.Metadata, "cell_table_name")
+	if cellTable == "" {
+		t.Fatalf("expected cell evidence table metadata, got %#v", schema.Metadata)
+	}
+
+	want := map[string]string{
+		"A56": "营销序列",
+		"C56": "营销业务",
+		"C57": "营销支持",
+	}
+	for cell, expected := range want {
+		var got string
+		err := db.QueryRowContext(ctx,
+			fmt.Sprintf(`SELECT effective_value FROM "%s" WHERE sheet_name = ? AND cell_ref = ?`, cellTable),
+			sheet,
+			cell,
+		).Scan(&got)
+		if err != nil {
+			t.Fatalf("query cell %s from evidence table %s: %v", cell, cellTable, err)
+		}
+		if got != expected {
+			t.Fatalf("cell %s value mismatch: got %q, want %q", cell, got, expected)
+		}
 	}
 }

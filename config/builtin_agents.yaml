@@ -223,9 +223,10 @@ builtin_agents:
       agent_type: "table-analysis"
       system_prompt_id: "table_analyst"
       thinking: true
-      temperature: 0.3
-      max_completion_tokens: 4096
-      max_iterations: 30
+      temperature: 0.2
+      max_completion_tokens: 8192
+      max_iterations: 100
+      llm_call_timeout: 600
       kb_selection_mode: "all"
       retrieve_kb_only_when_mentioned: false
       supported_file_types:
@@ -233,21 +234,27 @@ builtin_agents:
         - "xlsx"
         - "xls"
       allowed_tools:
-        - "knowledge_search"
+        - "thinking"
+        - "todo_write"
         - "grep_chunks"
+        - "knowledge_search"
+        - "list_knowledge_chunks"
+        - "query_knowledge_graph"
         - "get_document_info"
         - "table_schema"
         - "table_analysis"
       web_search_enabled: false
       web_search_max_results: 0
+      web_fetch_enabled: true
+      web_fetch_top_n: 3
       reflection_enabled: true
       multi_turn_enabled: true
       history_turns: 10
       faq_priority_enabled: false
-      embedding_top_k: 10
+      embedding_top_k: 5
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
 
   - id: "builtin-general-agent"

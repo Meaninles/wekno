@@ -153,7 +153,7 @@ func classifyTableAnalysisDisplayIntent(
 		contextPayload["current_user_query"] = req.Query
 	}
 	payloadJSON, _ := json.Marshal(contextPayload)
-	system := "你是 WeKnora 表格分析运行时的图表展示意图识别器。你只判断当前用户这一轮是否需要生成可渲染的数据图表。不要做数据分析，不要生成 SQL，不要输出 Markdown，只返回 JSON。"
+	system := "你是 WeKnora 表格分析运行时的展示意图识别器。你只判断当前用户这一轮是否需要生成可渲染的数据图表。不要做数据分析，不要生成 SQL，不要输出 Markdown，只返回 JSON。"
 	prompt := "请基于 current_user_query，并只在需要解析指代时参考 recent_conversation_history，语义判断用户本轮是否需要图表展示。不要做关键词匹配式判断；要理解否定、追问、上下文指代和“没看到图”等反馈。\n\n" +
 		"返回且仅返回 JSON，格式固定为：{\"chart_requested\": boolean, \"confidence\": \"high|medium|low\", \"preferred_chart\": string|null, \"reason\": string}。\n\n" +
 		"字段含义：chart_requested=true 表示本轮需要最终展示可渲染的数据图表；chart_requested=false 表示本轮不需要图表展示，或只是文字解释/表格/代码/图片/图标/地图等非数据图表请求。\n\n" +
@@ -224,8 +224,9 @@ func tableAnalysisDisplayIntentPromptBlock(intent *types.TableAnalysisDisplayInt
 		"reason":          intent.Reason,
 		"source":          intent.Source,
 		"runtime_rules": []string{
-			"If chart_requested is true, call table_analysis with chart_requested=true for analytical result queries.",
+			"If chart_requested is true, exploratory evidence-inspection table_analysis calls may keep chart_requested=false, but at least one final analytical result query must call table_analysis with chart_requested=true.",
 			"If chart_requested is false, do not set table_analysis.chart_requested=true.",
+			"When table_analysis returns a chart or visible table result, the tool input must include LLM-authored source_mapping JSON; this is a weak-template evidence mapping, not a fixed schema.",
 			"If table_analysis rejects a call because it conflicts with this decision, correct chart_requested/preferred_chart and retry.",
 		},
 	})

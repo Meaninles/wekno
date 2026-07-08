@@ -19,47 +19,6 @@
                             :row-col="[{ width: '70%', height: '16px' }, { width: '90%', height: '16px' }]" />
                     </div>
                 </div>
-                <!-- 推荐问题卡片 - 仅在新会话（无消息）时展示 -->
-                <div v-if="!embeddedMode && messagesList.length === 0 && !loading" class="suggested-questions-container"
-                    :class="{ 'has-questions': suggestedQuestions.length > 0 || suggestedQuestionsLoading }">
-                    <!-- 骨架屏占位 -->
-                    <div v-if="suggestedQuestionsLoading && suggestedQuestions.length === 0"
-                        class="suggested-questions-inner">
-                        <div class="suggested-questions-title"><t-skeleton animation="gradient"
-                                :row-col="[{ width: '120px', height: '14px' }]" /></div>
-                        <div class="suggested-questions-grid">
-                            <div v-for="n in 6" :key="'sq-skel-' + n" class="suggested-question-card sq-card-skeleton">
-                                <t-skeleton animation="gradient"
-                                    :row-col="[{ width: '100%', height: '14px', type: 'rect' }]" />
-                            </div>
-                        </div>
-                    </div>
-                    <transition v-else appear name="sq-fade">
-                        <div v-if="suggestedQuestions.length > 0" class="suggested-questions-inner">
-                            <div class="suggested-questions-title-row">
-                                <p class="suggested-questions-caption">
-                                    <span class="suggested-questions-title">{{ t('chat.suggestedQuestions') }}</span>
-                                    <button type="button" class="suggested-questions-refresh"
-                                        :disabled="suggestedQuestionsLoading"
-                                        :title="t('chat.refreshSuggestedQuestions')"
-                                        :aria-label="t('chat.refreshSuggestedQuestions')"
-                                        @click="fetchSuggestedQuestions">
-                                        <t-icon :name="suggestedQuestionsLoading ? 'loading' : 'refresh'"
-                                            :class="{ 'sq-refresh-spin': suggestedQuestionsLoading }" />
-                                    </button>
-                                </p>
-                            </div>
-                            <div class="suggested-questions-grid">
-                                <div v-for="(item, index) in suggestedQuestions" :key="item.question"
-                                    class="suggested-question-card"
-                                    @click="handleSuggestedQuestionClick(item.question)">
-                                    <span class="suggested-question-text">{{ item.question }}</span>
-                                    <span v-if="item.source === 'faq'" class="suggested-question-badge faq">FAQ</span>
-                                </div>
-                            </div>
-                        </div>
-                    </transition>
-                </div>
                 <!--
                   关键：必须用 session.id 作为 key，不能用 v-for 的索引。
                   向上滚动加载历史时会插入一批消息（push/unshift）到列表，
@@ -121,7 +80,6 @@ import botmsg from './components/botmsg.vue';
 import usermsg from './components/usermsg.vue';
 import ChatQuestionLocator from '@/custom/modules/chatQuestionLocator/ChatQuestionLocator.vue';
 import { getMessageList, getSession } from "@/api/chat/index";
-import { getSuggestedQuestions } from "@/api/agent/index";
 import { useStream } from '../../api/chat/streame'
 import { markSessionRead } from '@/custom/modules/sessionState/api';
 import { useMenuStore } from '@/stores/menu';
@@ -250,89 +208,6 @@ const isNearBottom = () => {
 const handleKBEditorSuccess = (kbId) => {
     navigateToKnowledgeBaseList(kbId)
 }
-
-// ===== 推荐问题 =====
-const suggestedQuestions = ref([]);
-const suggestedQuestionsLoading = ref(false);
-let suggestedQuestionsFetchId = 0; // 用于取消过时的请求
-let suggestedDebounceTimer = null;
-
-const cancelSuggestedQuestionsFetch = () => {
-    suggestedQuestionsFetchId++;
-    suggestedQuestionsLoading.value = false;
-    suggestedQuestions.value = [];
-    if (suggestedDebounceTimer) {
-        clearTimeout(suggestedDebounceTimer);
-        suggestedDebounceTimer = null;
-    }
-};
-
-const fetchSuggestedQuestionsIfNeeded = async () => {
-    if (props.embeddedMode) return;
-    // 初始历史尚未拉完时不能判断是否有消息，避免有历史的会话误请求推荐问法
-    if (historyLoading.value || messagesList.length > 0) {
-        if (messagesList.length > 0) {
-            cancelSuggestedQuestionsFetch();
-        }
-        return;
-    }
-    await fetchSuggestedQuestions();
-};
-
-const fetchSuggestedQuestions = async () => {
-    if (historyLoading.value || messagesList.length > 0) {
-        return;
-    }
-    const fetchId = ++suggestedQuestionsFetchId;
-    suggestedQuestionsLoading.value = true;
-    // 加载期间保留旧数据，不清空，避免布局抖动
-    try {
-        const agentId = useSettingsStoreInstance.selectedAgentId;
-        if (!agentId) return;
-        const res = await getSuggestedQuestions(agentId, useSettingsStoreInstance.getSuggestedQuestionsParams(6));
-        if (fetchId === suggestedQuestionsFetchId) {
-            suggestedQuestions.value = res?.data?.questions || [];
-        }
-    } catch (err) {
-        console.warn('[SuggestedQuestions] Failed to fetch:', err);
-        if (fetchId === suggestedQuestionsFetchId) {
-            suggestedQuestions.value = [];
-        }
-    } finally {
-        if (fetchId === suggestedQuestionsFetchId) {
-            suggestedQuestionsLoading.value = false;
-        }
-    }
-};
-
-const handleSuggestedQuestionClick = (question) => {
-    if (inputFieldRef.value?.triggerSend) {
-        inputFieldRef.value.triggerSend(question);
-    } else {
-        sendMsg(question);
-    }
-};
-
-// 防抖包装，切换知识库/文件时300ms内不重复请求
-const debouncedFetchSuggestions = () => {
-    if (historyLoading.value || messagesList.length > 0) return;
-    if (suggestedDebounceTimer) clearTimeout(suggestedDebounceTimer);
-    suggestedDebounceTimer = setTimeout(() => { fetchSuggestedQuestionsIfNeeded(); }, 300);
-};
-
-// 监听 Agent / 知识库 / 文件 / 标签 / MCP / Skill @mention，重新获取推荐问题
-watch(
-    () => ({
-        agentId: useSettingsStoreInstance.selectedAgentId,
-        kbs: useSettingsStoreInstance.settings.selectedKnowledgeBases,
-        files: useSettingsStoreInstance.settings.selectedFiles,
-        tags: useSettingsStoreInstance.settings.selectedTags,
-        mcps: useSettingsStoreInstance.settings.selectedMCPServices,
-        skills: useSettingsStoreInstance.settings.selectedSkills,
-    }),
-    debouncedFetchSuggestions,
-    { deep: true },
-);
 
 function fileToBase64(file) {
     return new Promise((resolve, reject) => {
@@ -530,9 +405,6 @@ const getmsgList = (data, isScrollType = false, scrollHeight) => {
             }
             return;
         }
-        if (!isScrollType) {
-            cancelSuggestedQuestionsFetch();
-        }
         const nextCursor = batch[0].created_at;
         if (isScrollType && created_at.value && nextCursor === created_at.value) {
             hasMoreHistory.value = false;
@@ -551,9 +423,6 @@ const getmsgList = (data, isScrollType = false, scrollHeight) => {
     }).finally(() => {
         historyLoading.value = false;
         historyLoadingMore.value = false;
-        if (!isScrollType && messagesList.length === 0) {
-            fetchSuggestedQuestionsIfNeeded();
-        }
     })
 }
 
@@ -812,7 +681,6 @@ const handleSessionCleared = (e) => {
         created_at.value = '';
         hasMoreHistory.value = true;
         historyLoadingMore.value = false;
-        fetchSuggestedQuestionsIfNeeded();
     }
 };
 
@@ -853,7 +721,11 @@ onMounted(async () => {
                 rerankModelId: '',
             });
         }
-        sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], firstImageFiles.value || [], firstAttachmentFiles.value || []);
+        const initialAttachmentFiles = [...(firstAttachmentFiles.value || [])];
+        sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], firstImageFiles.value || [], initialAttachmentFiles);
+        if (initialAttachmentFiles.length > 0) {
+            inputFieldRef.value?.setUploadedAttachments?.(initialAttachmentFiles);
+        }
         usemenuStore.changeFirstQuery('', [], '', [], []);
     } else {
         scrollLock.value = false;
@@ -1148,23 +1020,4 @@ onBeforeRouteUpdate((to, from, next) => {
     }
 }
 
-@import '../../components/css/suggested-questions.less';
-
-.suggested-questions-container {
-    transition: min-height 0.3s @suggested-ease;
-}
-
-.suggested-questions-inner {
-    animation: contentFadeIn 0.3s ease-out;
-}
-
-.sq-fade-enter-active,
-.sq-fade-leave-active {
-    transition: opacity 0.25s @suggested-ease;
-}
-
-.sq-fade-enter-from,
-.sq-fade-leave-to {
-    opacity: 0;
-}
 </style>

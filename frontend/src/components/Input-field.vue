@@ -74,6 +74,7 @@ const imageUploading = ref(false);
 const attachmentUploadRef = ref<InstanceType<typeof AttachmentUpload>>();
 const uploadedAttachments = ref<AttachmentFile[]>([]);
 const CHAT_FILE_DROP_EVENT = 'weknora:chat-file-drop';
+const CHAT_ATTACHMENT_MAX_FILES = 5;
 
 const isImageFile = (file: File) => {
   if (file.type.startsWith('image/')) {
@@ -140,6 +141,18 @@ const addImageFiles = (files: File[]) => {
 const removeImage = (index: number) => {
   const removed = uploadedImages.value.splice(index, 1);
   if (removed.length > 0) URL.revokeObjectURL(removed[0].preview);
+};
+
+const setUploadedAttachments = (attachments: AttachmentFile[] = []) => {
+  const nextAttachments = attachments
+    .filter((attachment): attachment is AttachmentFile => !!attachment?.file)
+    .slice(0, CHAT_ATTACHMENT_MAX_FILES)
+    .map(attachment => ({ ...attachment }));
+
+  uploadedAttachments.value = nextAttachments;
+  nextTick(() => {
+    attachmentUploadRef.value?.setFiles(nextAttachments);
+  });
 };
 
 const triggerImageUpload = () => {
@@ -1918,7 +1931,7 @@ const createSession = async (val: string) => {
     skill_name: item.skillName,
   }));
   const imageFiles = uploadedImages.value.map(img => img.file);
-  const attachmentFiles = uploadedAttachments.value;
+  const attachmentFiles = uploadedAttachments.value.map(attachment => ({ ...attachment }));
 
   // Blur the textarea BEFORE emitting, so that when the parent navigates away
   // and Vue unmounts this component, TDesign's blur handler won't fire on a
@@ -1931,10 +1944,7 @@ const createSession = async (val: string) => {
   uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
   uploadedImages.value = [];
 
-  // Clean up attachments
-  attachmentUploadRef.value?.clear();
-  uploadedAttachments.value = [];
-
+  // Keep file attachments selected so follow-up turns upload the same transient context.
   clearvalue();
 }
 
@@ -2430,7 +2440,8 @@ defineExpose({
     if (!text.trim()) return;
     query.value = text;
     nextTick(() => createSession(text));
-  }
+  },
+  setUploadedAttachments,
 });
 
 </script>
@@ -2450,7 +2461,7 @@ defineExpose({
       </div>
 
       <!-- 附件列表区域 (由 AttachmentUpload 组件渲染) -->
-      <AttachmentUpload ref="attachmentUploadRef" :max-files="5" :max-size="20"
+      <AttachmentUpload ref="attachmentUploadRef" :max-files="CHAT_ATTACHMENT_MAX_FILES" :max-size="20"
         :supported-file-types="agentSupportedFileTypes"
         @update:files="uploadedAttachments = $event" />
 

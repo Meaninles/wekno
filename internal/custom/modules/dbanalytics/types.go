@@ -443,7 +443,7 @@ type TableProfile struct {
 
 type QueryInput struct {
 	SourceID        string `json:"source_id,omitempty" jsonschema:"optional database source id copied from db_catalog/db_schema; omit it when using sql_table_name values across bound sources"`
-	SQL             string `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against materialized database analysis tables; use sql_table_name values from db_catalog/db_schema"`
+	SQL             string `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against materialized database analysis tables; use sql_table_name values from db_catalog/db_schema; do not use UNION, UNION ALL, INTERSECT, or EXCEPT because compound queries are rejected"`
 	ChartRequested  bool   `json:"chart_requested,omitempty" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 图表, 可视化, or a named chart type"`
 	PreferredChart  string `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user or selected after an explicit chart request: line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
 	ChartIntent     string `json:"chart_intent,omitempty" jsonschema:"optional natural-language chart intent, e.g. compare regional sales by customer segment; used only when chart_requested is true"`
@@ -452,7 +452,6 @@ type QueryInput struct {
 	Dimension       string `json:"dimension,omitempty" jsonschema:"optional SQL result column name that should be the main category/time axis when chart_requested is true"`
 	Series          string `json:"series,omitempty" jsonschema:"optional SQL result column name that should be the series/stack/group dimension when chart_requested is true"`
 	ChartTitle      string `json:"chart_title,omitempty" jsonschema:"optional concise Chinese chart title; use when it helps align the rendered chart with the final explanation"`
-	TableRequested  bool   `json:"table_requested,omitempty" jsonschema:"true only when the user explicitly asks for table/detail/raw/list output; false by default even when a chart is requested"`
 }
 
 type SchemaInput struct {

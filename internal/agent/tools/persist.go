@@ -555,7 +555,7 @@ func sanitizeAgentProgressData(data map[string]interface{}) map[string]interface
 }
 
 func sanitizeFinalAnswerCandidateSummary(summary map[string]interface{}) map[string]interface{} {
-	out := copyFields(summary, "content_length", "content_preview", "has_markdown_table")
+	out := copyFields(summary, "content_length", "content_preview")
 	if refs := sanitizeStringList(summary["referenced_chart_ids"], clientListLimit, 160); len(refs) > 0 {
 		out["referenced_chart_ids"] = refs
 	}

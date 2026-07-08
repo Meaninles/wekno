@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -82,6 +83,26 @@ func TestBuildArtifactToolResultSerializesArtifactsAsMapList(t *testing.T) {
 	}
 	if got := artifacts[0]["filename"]; got != "report.pdf" {
 		t.Fatalf("filename = %v, want report.pdf", got)
+	}
+}
+
+func TestUnavailableDataSourceAnswerFormatsFixedMessages(t *testing.T) {
+	if got := unavailableDataSourceAnswer(nil); got != "当前无可用数据源" {
+		t.Fatalf("answer = %q, want fixed no-source message", got)
+	}
+
+	got := unavailableDataSourceAnswer(&dbanalytics.SourceAvailabilityResult{
+		Unavailable: []dbanalytics.SourceAvailabilityIssue{
+			{ID: "src-1", Name: "订单库", Error: "连接测试失败：dial tcp timeout"},
+			{ID: "src-2", Name: "客户库", Error: "账号权限校验失败：只读权限不足"},
+		},
+	})
+	if !strings.Contains(got, "已配置数据源订单库、客户库不可用，报错如下：") {
+		t.Fatalf("answer header = %q", got)
+	}
+	if !strings.Contains(got, "订单库：连接测试失败：dial tcp timeout") ||
+		!strings.Contains(got, "客户库：账号权限校验失败：只读权限不足") {
+		t.Fatalf("answer missing per-source errors: %q", got)
 	}
 }
 

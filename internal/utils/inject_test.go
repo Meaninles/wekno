@@ -352,6 +352,28 @@ func TestValidateSQL_GroundedSelectOutput(t *testing.T) {
 	}
 }
 
+func TestValidateSQL_RangeSubselectCollectsTablesForGrounding(t *testing.T) {
+	_, validation := ValidateSQL(
+		"SELECT * FROM (SELECT category, SUM(amount) AS amount FROM attachment_1 GROUP BY category) AS q",
+		WithSelectOnly(),
+		WithAllowedTables("attachment_1"),
+		WithGroundedSelectOutput(),
+	)
+	if !validation.Valid {
+		t.Fatalf("table-backed FROM subselect should pass grounding validation, got %#v", validation.Errors)
+	}
+
+	_, hardcodedValidation := ValidateSQL(
+		"SELECT * FROM (SELECT '管理序列' AS seq, 14 AS child_count FROM attachment_1 LIMIT 1) AS q",
+		WithSelectOnly(),
+		WithAllowedTables("attachment_1"),
+		WithGroundedSelectOutput(),
+	)
+	if hardcodedValidation.Valid {
+		t.Fatal("hard-coded metrics inside a FROM subselect should still be rejected")
+	}
+}
+
 func TestValidateSQL_SafeSystemTypeCasts(t *testing.T) {
 	sql := "SELECT CAST(amount AS INTEGER) AS amount_int FROM orders"
 

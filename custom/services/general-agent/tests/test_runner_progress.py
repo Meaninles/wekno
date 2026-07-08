@@ -28,6 +28,7 @@ from app.runner import (  # noqa: E402
     build_system_prompt,
     claude_auth_env,
     classify_data_analysis_display_intent,
+    data_analysis_needs_chart_validation,
     data_analysis_post_tool_hook_factory,
     data_analysis_pre_tool_hook_factory,
     DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY,
@@ -577,7 +578,7 @@ EOF""",
 
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
 
-    def test_data_analysis_pre_tool_hook_enforces_chart_and_table_opt_in(self):
+    def test_data_analysis_pre_tool_hook_enforces_chart_intent_but_not_table_intent(self):
         payload = ChatPayload(
             run_id="run-1",
             session_id="session-1",
@@ -613,8 +614,7 @@ EOF""",
 
         self.assertEqual(chart_output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("chart_requested=false", chart_output["hookSpecificOutput"]["permissionDecisionReason"])
-        self.assertEqual(table_output["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertIn("没有明确要求表格", table_output["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(table_output["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_data_analysis_pre_tool_hook_requires_chart_flag_when_intent_requests_chart(self):
         payload = ChatPayload(
@@ -643,7 +643,7 @@ EOF""",
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("chart_requested=true", output["hookSpecificOutput"]["permissionDecisionReason"])
 
-    def test_table_analysis_pre_tool_hook_targets_table_analysis_tool(self):
+    def test_table_analysis_pre_tool_hook_allows_exploratory_query_without_chart_flag(self):
         payload = ChatPayload(
             run_id="run-1",
             session_id="session-1",
@@ -667,11 +667,7 @@ EOF""",
             )
         )
 
-        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-        reason = output["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("table_analysis", reason)
-        self.assertIn("table_schema", reason)
-        self.assertNotIn("db_query", reason)
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_table_analysis_post_tool_hook_records_table_chart_call(self):
         payload = ChatPayload(
@@ -690,7 +686,6 @@ EOF""",
             "data": {
                 "display_type": "structured_analysis_result",
                 "chart_requested": True,
-                "table_requested": False,
                 "columns": [
                     {"name": "区域", "semantic_type": "dimension"},
                     {"name": "销售额", "semantic_type": "metric"},
@@ -801,12 +796,16 @@ EOF""",
         intent = asyncio.run(classify_data_analysis_display_intent(payload, fake_query, Options, {}, "claude-test", None, Path(".")))
 
         self.assertTrue(intent["chart_requested"])
+        self.assertNotIn("table_requested", intent)
         self.assertEqual(intent["confidence"], "high")
         self.assertEqual(intent["preferred_chart"], "stacked_bar")
         self.assertEqual(captured["options"]["tools"], [])
         self.assertEqual(captured["options"]["allowed_tools"], [])
         self.assertIn("没看到图啊，请用图展示", captured["prompt"])
         self.assertIn("上一轮给出了客户分层", captured["prompt"])
+        self.assertNotIn("table_requested", captured["prompt"])
+        self.assertIn("不要判断数据源是否存在、是否可用、是否有数据", captured["options"]["system_prompt"])
+        self.assertIn("本步骤只判断用户是否想要图表，不判断图表是否最终能生成", captured["prompt"])
 
     def test_parse_mcp_tool_response_payload_accepts_text_block_list(self):
         payload = parse_mcp_tool_response_payload(
@@ -829,7 +828,7 @@ EOF""",
         self.assertTrue(payload["success"])
         self.assertEqual(payload["data"]["display_type"], "structured_analysis_result")
 
-    def test_data_analysis_final_answer_pre_hook_rejects_unrequested_table_with_chart_output(self):
+    def test_data_analysis_final_answer_pre_hook_allows_markdown_table_with_chart_output(self):
         previous = os.environ.get("CUSTOM_GENERAL_AGENT_DATA_ANALYSIS_LLM_JUDGE")
         os.environ["CUSTOM_GENERAL_AGENT_DATA_ANALYSIS_LLM_JUDGE"] = "0"
         try:
@@ -848,7 +847,7 @@ EOF""",
                     {
                         "chart_id": "chart_region_amount",
                         "contract": {"id": "chart_region_amount", "type": "bar"},
-                        "result": {"chart_requested": True, "table_requested": False},
+                        "result": {"chart_requested": True},
                         "validation_issues": [],
                     }
                 ],
@@ -869,11 +868,10 @@ EOF""",
                 )
             )
 
-            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-            self.assertIn("table_not_requested", output["hookSpecificOutput"]["permissionDecisionReason"])
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
             self.assertEqual(state["final_validation_attempts"], 1)
-            self.assertEqual(events[-1].data["validation_issue_codes"], ["table_not_requested"])
-            self.assertTrue(events[-1].data["final_answer_candidate"]["has_markdown_table"])
+            self.assertEqual(events[-1].data["validation_issue_codes"], [])
+            self.assertNotIn("has_markdown_table", events[-1].data["final_answer_candidate"])
             self.assertIn("chart_region_amount", events[-1].data["final_answer_candidate"]["referenced_chart_ids"])
         finally:
             if previous is None:
@@ -903,7 +901,7 @@ EOF""",
                     {
                         "tool_name": "mcp__weknora__final_answer",
                         "tool_input": {
-                            "content": "| 区域 | 销售额 |\n| --- | --- |\n| 东区 | 10 |",
+                            "content": "东区销售额最高，南区次之，西区最低。",
                         },
                     },
                     "toolu_final",
@@ -948,7 +946,7 @@ EOF""",
                             "transform": {"group_by": ["region"], "aggregate": "sum", "dedupe_policy": "aggregate"},
                             "display": {"language": "zh-CN", "table_visible": False},
                         },
-                        "result": {"chart_requested": True, "table_requested": False},
+                        "result": {"chart_requested": True},
                         "validation_issues": [],
                     }
                 ],
@@ -973,7 +971,7 @@ EOF""",
             self.assertEqual(state["final_answer_prevalidated_content"], "各区域销售额对比如下。\n\n{{chart:chart_region_amount}}\n\n东区表现最好。")
             self.assertEqual(
                 [event.message for event in events],
-                ["正在校验数据分析最终答案", "正在校验图表占位符和表格规则", "最终校验通过"],
+                ["正在校验数据分析最终答案", "正在校验图表占位符和图表引用规则", "最终校验通过"],
             )
             self.assertTrue(events[-1].done)
         finally:
@@ -1010,7 +1008,7 @@ EOF""",
                             "transform": {"group_by": ["region"], "aggregate": "sum", "dedupe_policy": "aggregate"},
                             "display": {"language": "zh-CN", "table_visible": False},
                         },
-                        "result": {"chart_requested": True, "table_requested": False},
+                        "result": {"chart_requested": True},
                         "validation_issues": [],
                     }
                 ],
@@ -1069,7 +1067,7 @@ EOF""",
             tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
         )
 
-        issues = deterministic_final_validation(payload, "| 区域 | 销售额 |\n| --- | --- |\n| 东区 | 10 |", {})
+        issues = deterministic_final_validation(payload, "东区销售额最高，南区次之，西区最低。", {})
 
         self.assertEqual(issues, [])
 
@@ -1108,7 +1106,10 @@ EOF""",
                 {
                     "chart_id": "chart_region_amount",
                     "contract": {"id": "chart_region_amount", "type": "bar"},
-                    "result": {"chart_requested": True, "table_requested": False},
+                    "result": {
+                        "chart_requested": True,
+                        "source_mapping": {"说明": "区域来自 A 列，销售额来自 B 列汇总"},
+                    },
                     "validation_issues": [],
                 }
             ],
@@ -1118,7 +1119,33 @@ EOF""",
 
         self.assertEqual(issues, [])
 
-    def test_deterministic_final_validation_rejects_unrequested_table_with_chart_output(self):
+    def test_deterministic_final_validation_requires_table_analysis_source_mapping(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请画图分析表格里的销售额",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="table-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+        state = {
+            DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
+            "table_analysis_calls": [
+                {
+                    "chart_id": "chart_region_amount",
+                    "contract": {"id": "chart_region_amount", "type": "bar"},
+                    "result": {"chart_requested": True},
+                    "validation_issues": [],
+                }
+            ],
+        }
+
+        issues = deterministic_final_validation(payload, "各区域销售如下。\n\n{{chart:chart_region_amount}}", state)
+
+        self.assertTrue(any(issue["code"] == "missing_source_mapping" for issue in issues))
+
+    def test_deterministic_final_validation_allows_markdown_table_with_chart_output(self):
         payload = ChatPayload(
             run_id="run-1",
             session_id="session-1",
@@ -1132,10 +1159,10 @@ EOF""",
             DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
             "db_query_calls": [
                 {
-                    "chart_id": "chart_region_amount",
-                    "contract": {"id": "chart_region_amount", "type": "bar"},
-                    "result": {"chart_requested": True, "table_requested": False},
-                    "validation_issues": [],
+                        "chart_id": "chart_region_amount",
+                        "contract": {"id": "chart_region_amount", "type": "bar"},
+                        "result": {"chart_requested": True},
+                        "validation_issues": [],
                 }
             ],
         }
@@ -1146,7 +1173,28 @@ EOF""",
             state,
         )
 
-        self.assertTrue(any(issue["code"] == "table_not_requested" for issue in issues))
+        self.assertEqual(issues, [])
+
+    def test_deterministic_final_validation_ignores_markdown_table_without_chart_output(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="分析各区域销售情况",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="data-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+        state = {DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": False, "confidence": "high"}}
+
+        self.assertFalse(data_analysis_needs_chart_validation(state, "| 区域 | 销售额 |\n| --- | --- |\n| 东区 | 10 |", payload))
+        issues = deterministic_final_validation(
+            payload,
+            "| 区域 | 销售额 |\n| --- | --- |\n| 东区 | 10 |",
+            state,
+        )
+
+        self.assertEqual(issues, [])
 
     def test_deterministic_final_validation_does_not_force_unreferenced_exploratory_charts(self):
         payload = ChatPayload(
@@ -1172,13 +1220,13 @@ EOF""",
                 {
                     "chart_id": "chart_used",
                     "contract": {"id": "chart_used", **valid_contract},
-                    "result": {"chart_requested": True, "table_requested": False},
+                    "result": {"chart_requested": True},
                     "validation_issues": [],
                 },
                 {
                     "chart_id": "chart_exploratory",
                     "contract": {"id": "chart_exploratory", **valid_contract},
-                    "result": {"chart_requested": True, "table_requested": False},
+                    "result": {"chart_requested": True},
                     "validation_issues": [],
                 },
             ],
@@ -1204,7 +1252,7 @@ EOF""",
                 {
                     "chart_id": "chart_region_amount",
                     "contract": {"id": "chart_region_amount"},
-                    "result": {"chart_requested": True, "table_requested": False},
+                    "result": {"chart_requested": True},
                     "validation_issues": ["ChartContract missing type/encoding/value fields."],
                 }
             ],
@@ -1239,7 +1287,7 @@ EOF""",
                         },
                         "display": {"language": "zh-CN", "table_visible": False},
                     },
-                    "result": {"chart_requested": True, "table_requested": False},
+                    "result": {"chart_requested": True},
                     "validation_issues": [],
                 }
             ],
@@ -1769,6 +1817,7 @@ EOF""",
 
         self.assertIn("<data_analysis_display_intent", prompt)
         self.assertIn('"chart_requested": true', prompt)
+        self.assertNotIn('"table_requested"', prompt)
         self.assertIn("用户需要图表展示", prompt)
         self.assertIn("db_query with chart_requested=true", prompt)
 
@@ -1795,9 +1844,35 @@ EOF""",
 
         self.assertIn("<table_analysis_display_intent", prompt)
         self.assertIn('"chart_requested": true', prompt)
+        self.assertNotIn('"table_requested"', prompt)
         self.assertIn("用户需要图表展示", prompt)
         self.assertIn("table_analysis with chart_requested=true", prompt)
         self.assertNotIn("db_query with chart_requested=true", prompt)
+
+    def test_build_prompt_ignores_table_display_intent(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请用图展示表格里的销售趋势，并列出明细表格",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="table-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        prompt = build_prompt(
+            payload,
+            data_analysis_display_intent={
+                "chart_requested": True,
+                "table_requested": True,
+                "confidence": "high",
+                "preferred_chart": "line",
+                "reason": "用户要求用图展示表格趋势。",
+            },
+        )
+
+        self.assertNotIn('"table_requested"', prompt)
+        self.assertNotIn("table_analysis.table_requested", prompt)
 
     def test_system_prompt_points_to_document_template_context_without_inlining_xml(self):
         payload = ChatPayload(

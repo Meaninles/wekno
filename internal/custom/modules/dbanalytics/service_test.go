@@ -287,12 +287,11 @@ func TestInferChartSpecContractPreservesMultiMetricFields(t *testing.T) {
 	}
 }
 
-func TestFormatAnalysisOutputProvidesChartAnchorAndSuppressesTableByDefault(t *testing.T) {
+func TestFormatAnalysisOutputProvidesChartAnchorWithoutTableSuppressionRule(t *testing.T) {
 	output := formatAnalysisOutput(map[string]any{
 		"query":           `SELECT day, revenue FROM orders_v`,
 		"display_mode":    "chart_only",
 		"chart_requested": true,
-		"table_requested": false,
 		"chart": map[string]any{
 			"eligible":     true,
 			"id":           "chart_abc123",
@@ -306,8 +305,8 @@ func TestFormatAnalysisOutputProvidesChartAnchorAndSuppressesTableByDefault(t *t
 	if !strings.Contains(output, "{{chart:chart_abc123}}") {
 		t.Fatalf("analysis output missing explicit chart anchor: %s", output)
 	}
-	if !strings.Contains(output, "do not render these rows as a Markdown table") {
-		t.Fatalf("analysis output missing no-table rule: %s", output)
+	if strings.Contains(output, "do not render these rows as a Markdown table") {
+		t.Fatalf("analysis output should not include no-table rule: %s", output)
 	}
 }
 

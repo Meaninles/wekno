@@ -115,6 +115,7 @@ type sqlValidator struct {
 	maxUnionBranches     int
 	maxUnionDepth        int
 	checkGroundedOutput  bool
+	allowTablelessSelect bool
 
 	// Table validation
 	allowedTables   map[string]bool
@@ -545,6 +546,15 @@ func WithSafeUnionAll(maxBranches, maxDepth int) SQLValidationOption {
 func WithGroundedSelectOutput() SQLValidationOption {
 	return func(v *sqlValidator) {
 		v.checkGroundedOutput = true
+	}
+}
+
+// WithAllowTablelessSelect allows SELECT statements that construct rows without
+// a FROM table, for example VALUES-derived result sets. Keep this paired with
+// SELECT-only validation and a narrow execution context.
+func WithAllowTablelessSelect() SQLValidationOption {
+	return func(v *sqlValidator) {
+		v.allowTablelessSelect = true
 	}
 }
 
@@ -1807,7 +1817,7 @@ func (v *sqlValidator) validatePlainSelectStmt(stmt *pg_query.SelectStmt, result
 	}
 
 	// Ensure at least one valid table is referenced
-	if len(tablesInQuery) == 0 {
+	if len(tablesInQuery) == 0 && !v.allowTablelessSelect {
 		return fmt.Errorf("no valid table found in query")
 	}
 	if v.checkGroundedOutput && !selectTargetListHasGroundedOutput(stmt.TargetList) {
@@ -1864,8 +1874,28 @@ func (v *sqlValidator) validateFromItem(node *pg_query.Node, tables map[string]s
 	}
 
 	// Handle RangeSubselect (subquery in FROM)
-	if v.checkSubqueries && node.GetRangeSubselect() != nil {
-		return fmt.Errorf("subqueries in FROM clause are not allowed")
+	if rs := node.GetRangeSubselect(); rs != nil {
+		if v.checkSubqueries {
+			return fmt.Errorf("subqueries in FROM clause are not allowed")
+		}
+		if rs.Subquery == nil {
+			return fmt.Errorf("invalid subquery in FROM clause")
+		}
+		subSelect := rs.Subquery.GetSelectStmt()
+		if subSelect == nil {
+			return fmt.Errorf("subqueries in FROM clause must be SELECT-only")
+		}
+		if err := v.validateSelectStmtDepth(subSelect, result, 0); err != nil {
+			return err
+		}
+		for _, tableName := range extractTableNamesFromPgQuery(subSelect) {
+			normalized := strings.ToLower(strings.TrimSpace(tableName))
+			if normalized == "" {
+				continue
+			}
+			tables[normalized] = normalized
+		}
+		return nil
 	}
 
 	// Handle RangeFunction (function in FROM)

@@ -103,6 +103,24 @@ app:
   extraEnv: []
   # - name: OLLAMA_BASE_URL
   #   value: "http://ollama:11434"
+  # Claude SDK sidecars are not created by this chart. Deploy
+  # weknora-custom-general-agent and weknora-custom-document-processing-agent
+  # separately in the same namespace, then set the app-side connection vars.
+  # general-agent, data-analysis and table-analysis use the general sidecar;
+  # document-processing-agent uses the document-processing sidecar.
+  # - name: CUSTOM_GENERAL_AGENT_URL
+  #   value: "http://weknora-custom-general-agent:8091"
+  # - name: CUSTOM_DOCUMENT_PROCESSING_AGENT_URL
+  #   value: "http://weknora-custom-document-processing-agent:8091"
+  # - name: CUSTOM_GENERAL_AGENT_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: general-agent-secret
+  #       key: apiKey
+  # - name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
+  #   value: "http://app:8080/api/v1/custom/general-agent/internal/tools/call"
+  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT
+  #   value: "/data/files/general-agent-artifacts"
   # Claude SDK original-file transfer compatibility:
   # If app.env.STORAGE_TYPE is "obs" and OBS_* are already configured here,
   # general-agent requests automatically reuse OBS with the dedicated prefix

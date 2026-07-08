@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	appservice "github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -759,15 +759,14 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 	if user == nil {
 		logger.Info(ctx, "Auto-setup: creating default user and tenant for lite edition")
 
-		randomBytes := make([]byte, 24)
-		if _, err := rand.Read(randomBytes); err != nil {
+		randomPassword, err := appservice.GenerateCompliantRandomPassword()
+		if err != nil {
 			appErr := errors.NewInternalServerError("auto-setup failed: unable to generate credentials")
 			c.Error(appErr)
 			return
 		}
-		randomPassword := base64.RawURLEncoding.EncodeToString(randomBytes)
 
-		_, err := h.userService.Register(ctx, &types.RegisterRequest{
+		_, err = h.userService.Register(ctx, &types.RegisterRequest{
 			Username: defaultUsername,
 			Password: randomPassword,
 		})

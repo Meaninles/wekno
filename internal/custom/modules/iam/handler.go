@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/Tencent/WeKnora/internal/logger"
 	coretypes "github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -52,12 +51,34 @@ func (h *Handler) SaveSetting(c *gin.Context) {
 }
 
 func (h *Handler) RunSync(c *gin.Context) {
-	run, err := h.service.RunSync(c.Request.Context(), "manual")
+	var req struct {
+		IAMOrganizationExternalID string `json:"iam_organization_external_id"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	run, err := h.service.RunSync(c.Request.Context(), "manual", SyncScope{
+		OrganizationExternalID: req.IAMOrganizationExternalID,
+	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error(), "data": run})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": run})
+}
+
+func (h *Handler) ListOrganizations(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	orgs, err := h.service.ListOrganizations(
+		c.Request.Context(),
+		strings.TrimSpace(c.Query("parent_id")),
+		c.Query("q"),
+		limit,
+		truthyQuery(c.Query("include_users")),
+	)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": orgs})
 }
 
 func (h *Handler) ListRuns(c *gin.Context) {
@@ -76,11 +97,14 @@ func (h *Handler) ListSpaceMemberCandidateOrganizations(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "1000"))
+	parentID := strings.TrimSpace(c.Query("parent_id"))
 	orgs, err := h.service.ListSpaceMemberCandidateOrganizations(
 		c.Request.Context(),
 		spaceID,
+		parentID,
 		c.Query("q"),
 		limit,
+		truthyQuery(c.Query("include_users")),
 	)
 	if err != nil {
 		writeError(c, err)
@@ -99,11 +123,13 @@ func (h *Handler) ListSpaceMemberCandidateUsers(c *gin.Context) {
 	if len(orgIDs) == 0 {
 		orgIDs = splitQueryList(c.Query("iam_org_id"))
 	}
+	directOnly := truthyQuery(c.Query("direct"))
 	users, err := h.service.ListSpaceMemberCandidateUsers(
 		c.Request.Context(),
 		spaceID,
 		c.Query("q"),
 		orgIDs,
+		directOnly,
 		limit,
 	)
 	if err != nil {
@@ -111,6 +137,11 @@ func (h *Handler) ListSpaceMemberCandidateUsers(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": users})
+}
+
+func truthyQuery(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func (h *Handler) GetSSOConfig(c *gin.Context) {
@@ -179,16 +210,6 @@ func (h *Handler) SSOCallback(c *gin.Context) {
 			"oidc_error_description": {err.Error()},
 		}))
 		return
-	}
-	// Provision defaults (guide KB, config center) for first-time SSO users.
-	// LoginWithSSO internally calls ensureLocalUser, which also runs the
-	// provisioner, but an explicit call at handler level acts as a safety
-	// net — matching the pattern in auth.go:OIDCRedirectCallback.
-	if resp != nil && resp.User != nil {
-		if provisionErr := h.service.RunProvisioner(c.Request.Context(), resp.User); provisionErr != nil {
-			// Non-fatal: user is already logged in; log and continue.
-			logger.Warnf(c.Request.Context(), "[iam] SSO provisioner failed for user %s: %v", resp.User.Username, provisionErr)
-		}
 	}
 	payload, err := EncodeCallbackPayload(resp)
 	if err != nil {

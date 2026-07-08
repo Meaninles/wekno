@@ -33,6 +33,17 @@
         </div>
       </div>
 
+      <!-- 姓名 -->
+      <div class="setting-row">
+        <div class="setting-info">
+          <label>姓名</label>
+          <p class="desc">用于系统内展示的姓名</p>
+        </div>
+        <div class="setting-control">
+          <span class="info-value">{{ userInfo?.display_name || userInfo?.username || '-' }}</span>
+        </div>
+      </div>
+
       <!-- 用户名 -->
       <div class="setting-row">
         <div class="setting-info">

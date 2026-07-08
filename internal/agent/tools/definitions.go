@@ -14,8 +14,10 @@ const (
 	ToolQueryKnowledgeGraph = "query_knowledge_graph"
 	ToolGetDocumentInfo     = "get_document_info"
 	ToolDatabaseQuery       = "database_query"
-	ToolDataAnalysis  = "data_analysis"
+	ToolDataAnalysis        = "data_analysis"
 	ToolDataSchema          = "data_schema"
+	ToolTableAnalysis       = "table_analysis"
+	ToolTableSchema         = "table_schema"
 	ToolDBCatalog           = "db_catalog"
 	ToolDBSchema            = "db_schema"
 	ToolDBQuery             = "db_query"
@@ -58,6 +60,8 @@ func AvailableToolDefinitions() []AvailableTool {
 		{Name: ToolDatabaseQuery, Label: "查询数据库", Description: "查询数据库中的信息"},
 		{Name: ToolDataAnalysis, Label: "数据分析", Description: "理解数据文件并进行数据分析"},
 		{Name: ToolDataSchema, Label: "查看数据元信息", Description: "获取表格文件的元信息"},
+		{Name: ToolTableAnalysis, Label: "表格分析", Description: "使用 DuckDB SQL 分析 CSV/Excel 表格并按需生成图表"},
+		{Name: ToolTableSchema, Label: "查看表格结构", Description: "获取 CSV/Excel 表格文件的结构信息"},
 		{Name: ToolDBCatalog, Label: "数据库目录", Description: "查看已绑定 MySQL/PostgreSQL 数据源中的可分析表"},
 		{Name: ToolDBSchema, Label: "数据库结构", Description: "查看数据库表结构、字段说明、样本值和语义类型"},
 		{Name: ToolDBQuery, Label: "数据源分析", Description: "对已绑定数据源执行只读 SQL 分析"},

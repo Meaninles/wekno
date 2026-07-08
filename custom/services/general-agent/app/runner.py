@@ -1257,22 +1257,23 @@ def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_an
 
         sdk_tools.append(create_artifact)
 
-    if is_data_analysis_payload(payload):
+    if is_structured_analysis_payload(payload):
+        agent_label = analysis_agent_label(payload, english=True)
 
         @tool(
             "final_answer",
-            "Submit the final user-visible data-analysis answer. This is mandatory for the data-analysis agent: do not end with natural-language text directly. When chart output is present, the runtime validates output rules such as placeholders and table policy, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
+            f"Submit the final user-visible {agent_label} answer. This is mandatory for this agent: do not end with natural-language text directly. When chart output is present, the runtime validates output rules such as placeholders, chart_ids alignment, and table policy, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
             {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Complete final answer in the user's language. Include {{chart:<id>}} placeholders only for charts that should appear in the final answer.",
+                        "description": "Complete final answer in the user's language. Include {{chart:<id>}} placeholders only for charts that should appear in the final answer. Do not include Markdown tables unless the user explicitly requested table/detail/raw/list output.",
                     },
                     "chart_ids": {
                         "type": "array",
-                        "description": "Optional chart ids intentionally referenced in content, in display order.",
+                        "description": "Optional chart ids intentionally referenced in content, in display order. When content contains chart placeholders, this list should exactly match those placeholder ids.",
                         "items": {"type": "string"},
                     },
                 },
@@ -1330,7 +1331,7 @@ def runtime_summary(payload: ChatPayload) -> str:
             "claude_sdk_max_turns": effective_max_turns(payload),
             "single_llm_api_call_timeout_seconds": effective_llm_api_timeout_seconds(payload),
         },
-        "tools": [*([t.name for t in payload.tools]), *(["final_answer"] if is_data_analysis_payload(payload) else [])],
+        "tools": [*([t.name for t in payload.tools]), *(["final_answer"] if is_structured_analysis_payload(payload) else [])],
         "retrieval": {
             "embedding_top_k": cfg.embedding_top_k,
             "keyword_threshold": cfg.keyword_threshold,
@@ -1393,9 +1394,10 @@ def tool_catalog(payload: ChatPayload) -> str:
                 'pass `excel_style_apply_check` as `{"disabled_apply_attributes":["applyBorder"],"reason":"用户明确要求不要框线"}`. '
                 "`disabled_apply_attributes` accepts exact values: `applyBorder`, `applyFill`, `applyNumberFormat`, `applyFont`, `applyAlignment`, `applyProtection`. Omit by default."
             )
-    if is_data_analysis_payload(payload):
+    if is_structured_analysis_payload(payload):
+        agent_label = analysis_agent_label(payload, english=True)
         lines.append(
-            "- final_answer (data-analysis final delivery): mandatory final tool. Call `final_answer` directly when the answer is ready, with the complete user-visible answer in `content` and optional referenced chart ids in `chart_ids`; do not finish by writing direct natural-language final text. The runtime validates output rules such as chart placeholders and unrequested tables. ChartContract/spec consistency notes are reference facts for wording, not a hard gate."
+            f"- final_answer ({agent_label} final delivery): mandatory final tool. Call `final_answer` directly when the answer is ready, with the complete user-visible answer in `content` and optional referenced chart ids in `chart_ids`; do not finish by writing direct natural-language final text. The runtime validates output rules such as chart placeholders and unrequested tables. ChartContract/spec consistency notes are reference facts for wording, not a hard gate."
         )
     if not lines:
         return "No WeKnora tools are exposed for this run."
@@ -1426,22 +1428,26 @@ def validation_progress_event(
     stage: str = "",
     done: bool | None = None,
     transient: bool = False,
+    extra_data: dict[str, Any] | None = None,
 ) -> RunEvent:
     text = (message or "").strip()
     event_done = phase in {"success", "error"} if done is None else bool(done)
+    data = {
+        "tool_name": tool_name,
+        "tool_call_id": validation_id,
+        "phase": phase,
+        "stage": stage,
+        "message": text,
+        "transient": transient,
+    }
+    if isinstance(extra_data, dict):
+        data.update(extra_data)
     return RunEvent(
         id=validation_id,
         type="progress",
         content=text,
         message=text,
-        data={
-            "tool_name": tool_name,
-            "tool_call_id": validation_id,
-            "phase": phase,
-            "stage": stage,
-            "message": text,
-            "transient": transient,
-        },
+        data=data,
         done=event_done,
     )
 
@@ -2363,7 +2369,7 @@ def prompt_visible_context(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_data_analysis_reference_doc(payload: ChatPayload, run_dir: Path) -> PreparedDataAnalysisReferenceDoc | None:
-    if not is_data_analysis_payload(payload):
+    if not is_structured_analysis_payload(payload):
         return None
     if not DATA_ANALYSIS_REFERENCE_SOURCE.is_file():
         return None
@@ -2411,7 +2417,7 @@ def build_system_prompt(
 ) -> str:
     base = (payload.system_prompt or "").strip()
     base = replace_document_template_placeholders(base, document_templates, inline_context=False)
-    if is_data_analysis_payload(payload):
+    if is_structured_analysis_payload(payload):
         base = replace_data_analysis_reference_placeholders(base, data_analysis_reference)
     max_turns = effective_max_turns(payload)
     llm_timeout_seconds = effective_llm_api_timeout_seconds(payload)
@@ -2430,17 +2436,19 @@ def build_system_prompt(
                 "It stabilizes writing/execution only and does not constrain final PPT style or python-pptx capability; extend the renderer if needed."
             )
     data_analysis_context_contract = ""
-    if is_data_analysis_payload(payload):
+    if is_structured_analysis_payload(payload):
+        query_tool = analysis_query_tool_name(payload)
+        label = analysis_agent_label(payload, english=True)
         if data_analysis_reference:
             data_analysis_context_contract = (
-                f"\n- data_analysis_runtime_reference_path: fixed guidance file for this data-analysis run at `{data_analysis_reference.path}`. "
-                "Use it when planning structured charts, chart hints, SQL aliases, final_answer placement, or when validation asks for repair. "
+                f"\n- data_analysis_runtime_reference_path: fixed guidance file for this {label} run at `{data_analysis_reference.path}`. "
+                f"Use it when planning {query_tool} structured charts, chart hints, SQL aliases, final_answer placement, or when validation asks for repair. "
                 "It is execution guidance only; do not quote it in the final answer."
             )
         else:
             data_analysis_context_contract = (
                 "\n- data_analysis_runtime_reference_path: reference guidance was not materialized for this run. "
-                "Continue with the configured data-analysis prompt and runtime tool rules."
+                f"Continue with the configured {label} prompt and runtime tool rules."
             )
     original_input_contract = ""
     if payload.original_input_files:
@@ -2538,9 +2546,11 @@ def build_prompt(
     parts.append("<user_request verbatim=\"true\" priority=\"highest\">")
     parts.append(payload.query)
     parts.append("</user_request>")
-    if is_data_analysis_payload(payload) and isinstance(data_analysis_display_intent, dict):
+    if is_structured_analysis_payload(payload) and isinstance(data_analysis_display_intent, dict):
         intent = normalize_data_analysis_display_intent(data_analysis_display_intent)
-        parts.append('<data_analysis_display_intent source="runtime_preflight" role="binding_runtime_decision">')
+        intent_tag = analysis_display_intent_tag(payload)
+        query_tool = analysis_query_tool_name(payload)
+        parts.append(f'<{intent_tag} source="runtime_preflight" role="binding_runtime_decision">')
         parts.append(
             json.dumps(
                 {
@@ -2551,8 +2561,8 @@ def build_prompt(
                     "reason": intent["reason"],
                     "instructions": [
                         "This preflight decision is authoritative for whether this turn should render a chart.",
-                        "If chart_requested is true, call db_query with chart_requested=true for analytical result queries and include at least one matching {{chart:<id>}} placeholder in final_answer.content.",
-                        "If chart_requested is false, do not set db_query.chart_requested=true and do not include chart placeholders.",
+                        f"If chart_requested is true, call {query_tool} with chart_requested=true for analytical result queries and include at least one matching {{{{chart:<id>}}}} placeholder in final_answer.content.",
+                        f"If chart_requested is false, do not set {query_tool}.chart_requested=true and do not include chart placeholders.",
                         "If a runtime hook rejects a tool call or final_answer because it conflicts with this decision, correct the specific field it names and retry.",
                     ],
                 },
@@ -2560,7 +2570,7 @@ def build_prompt(
                 indent=2,
             )
         )
-        parts.append("</data_analysis_display_intent>")
+        parts.append(f"</{intent_tag}>")
     preflight = document_template_preflight_block(document_templates)
     if preflight:
         parts.append(preflight)
@@ -3457,10 +3467,69 @@ TABLE_REQUEST_RE = re.compile(r"(表格|明细|列表|清单|原始数据|原始
 MARKDOWN_TABLE_RE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|[\s:|\-]+\|\s*$")
 CHART_PLACEHOLDER_RE = re.compile(r"\{\{\s*chart\s*:\s*([A-Za-z0-9_.:-]+)\s*\}\}")
 DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY = "data_analysis_display_intent"
+DATA_ANALYSIS_AGENT_TYPE = "data-analysis"
+TABLE_ANALYSIS_AGENT_TYPE = "table-analysis"
+STRUCTURED_ANALYSIS_AGENT_TYPES = {DATA_ANALYSIS_AGENT_TYPE, TABLE_ANALYSIS_AGENT_TYPE}
 
 
 def is_data_analysis_payload(payload: ChatPayload) -> bool:
-    return payload.runtime_config.agent_type == "data-analysis"
+    return payload.runtime_config.agent_type == DATA_ANALYSIS_AGENT_TYPE
+
+
+def is_table_analysis_payload(payload: ChatPayload) -> bool:
+    return payload.runtime_config.agent_type == TABLE_ANALYSIS_AGENT_TYPE
+
+
+def is_structured_analysis_payload(payload: ChatPayload) -> bool:
+    return payload.runtime_config.agent_type in STRUCTURED_ANALYSIS_AGENT_TYPES
+
+
+def analysis_agent_label(payload: ChatPayload, english: bool = False) -> str:
+    if is_table_analysis_payload(payload):
+        return "table-analysis" if english else "表格分析"
+    return "data-analysis" if english else "数据分析"
+
+
+def analysis_query_tool_name(payload: ChatPayload) -> str:
+    return "table_analysis" if is_table_analysis_payload(payload) else "db_query"
+
+
+def analysis_schema_tool_hint(payload: ChatPayload) -> str:
+    return "table_schema" if is_table_analysis_payload(payload) else "db_schema/db_catalog"
+
+
+def analysis_display_intent_tool_name(payload: ChatPayload | None = None) -> str:
+    if payload is not None and is_table_analysis_payload(payload):
+        return "table_analysis_display_intent"
+    return "data_analysis_display_intent"
+
+
+def analysis_display_intent_tag(payload: ChatPayload) -> str:
+    return "table_analysis_display_intent" if is_table_analysis_payload(payload) else "data_analysis_display_intent"
+
+
+def analysis_display_intent_event_id(payload: ChatPayload | None = None) -> str:
+    if payload is not None and is_table_analysis_payload(payload):
+        return "table-analysis-display-intent"
+    return "data-analysis-display-intent"
+
+
+def analysis_final_validation_tool_name(payload: ChatPayload | None = None) -> str:
+    if payload is not None and is_table_analysis_payload(payload):
+        return "table_analysis_final_validation"
+    return "data_analysis_final_validation"
+
+
+def analysis_final_validation_event_id(payload: ChatPayload | None = None) -> str:
+    if payload is not None and is_table_analysis_payload(payload):
+        return "table-analysis-final-validation"
+    return "data-analysis-final-validation"
+
+
+def analysis_query_calls_state_key(payload: ChatPayload | None = None) -> str:
+    if payload is not None and is_table_analysis_payload(payload):
+        return "table_analysis_calls"
+    return "db_query_calls"
 
 
 def user_requested_table(payload: ChatPayload) -> bool:
@@ -3508,12 +3577,16 @@ def data_analysis_display_intent_message(intent: dict[str, Any]) -> str:
     return "用户需要图表展示" if intent.get("chart_requested") is True else "用户不需要图表展示"
 
 
-def data_analysis_display_intent_progress_event(intent: dict[str, Any], phase: str = "success") -> RunEvent:
+def data_analysis_display_intent_progress_event(
+    intent: dict[str, Any],
+    phase: str = "success",
+    payload: ChatPayload | None = None,
+) -> RunEvent:
     normalized = normalize_data_analysis_display_intent(intent)
     message = data_analysis_display_intent_message(normalized)
     event = validation_progress_event(
-        "data-analysis-display-intent",
-        "data_analysis_display_intent",
+        analysis_display_intent_event_id(payload),
+        analysis_display_intent_tool_name(payload),
         message,
         phase=phase,
         stage="complete",
@@ -3548,7 +3621,8 @@ def deny_tool(reason: str) -> dict[str, Any]:
 def data_analysis_pre_tool_hook_factory(payload: ChatPayload, state: dict[str, Any] | None = None) -> Callable[[Any, str | None, Any], Any]:
     async def hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         tool_name = data_analysis_tool_name(str(block_value(input_data, "tool_name", "") or block_value(input_data, "toolName", "") or ""))
-        if tool_name != "db_query":
+        query_tool = analysis_query_tool_name(payload)
+        if tool_name != query_tool:
             return hook_permission_output("allow")
         tool_input = block_value(input_data, "tool_input", None)
         if tool_input is None:
@@ -3562,18 +3636,18 @@ def data_analysis_pre_tool_hook_factory(payload: ChatPayload, state: dict[str, A
         if truthy_tool_value(tool_input.get("chart_requested")) and not intent.get("chart_requested"):
             return deny_tool(
                 "本轮进入主智能体前的图表展示意图识别结果为 chart_requested=false（用户不需要图表展示）。"
-                "当前 db_query 设置了 chart_requested=true，与该结构化意图不一致。"
+                f"当前 {query_tool} 设置了 chart_requested=true，与该结构化意图不一致。"
                 "请改为 chart_requested=false，并只用查询结果支撑文字分析。"
             )
         if intent.get("chart_requested") is True and not truthy_tool_value(tool_input.get("chart_requested")):
             return deny_tool(
                 "本轮进入主智能体前的图表展示意图识别结果为 chart_requested=true（用户需要图表展示）。"
-                "当前 db_query 没有设置 chart_requested=true，会导致最终答案没有可渲染图表。"
-                "请重新调用 db_query 并设置 chart_requested=true；如果只是查看结构，请改用 db_schema/db_catalog。"
+                f"当前 {query_tool} 没有设置 chart_requested=true，会导致最终答案没有可渲染图表。"
+                f"请重新调用 {query_tool} 并设置 chart_requested=true；如果只是查看结构，请改用 {analysis_schema_tool_hint(payload)}。"
             )
         if truthy_tool_value(tool_input.get("table_requested")) and not user_requested_table(payload):
             return deny_tool(
-                "用户没有明确要求表格/明细/原始结果，本次 db_query 不允许设置 table_requested=true。"
+                f"用户没有明确要求表格/明细/原始结果，本次 {query_tool} 不允许设置 table_requested=true。"
                 "请改为 table_requested=false，最终答案也不要输出 Markdown 表格。"
             )
         preferred = str(tool_input.get("preferred_chart") or "").strip().lower().replace("-", "_").replace(" ", "_")
@@ -3667,20 +3741,23 @@ def summarize_query_result(data: dict[str, Any], max_rows: int = 8) -> dict[str,
     }
 
 
-def data_analysis_post_tool_hook_factory(state: dict[str, Any]) -> Callable[[Any, str | None, Any], Any]:
+def data_analysis_post_tool_hook_factory(payload: ChatPayload, state: dict[str, Any]) -> Callable[[Any, str | None, Any], Any]:
+    chat_payload = payload
+
     async def hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         tool_name = data_analysis_tool_name(str(block_value(input_data, "tool_name", "") or block_value(input_data, "toolName", "") or ""))
-        if tool_name != "db_query":
+        query_tool = analysis_query_tool_name(chat_payload)
+        if tool_name != query_tool:
             return {}
         tool_response = block_value(input_data, "tool_response", None)
         if tool_response is None:
             tool_response = block_value(input_data, "toolResponse", None)
         if tool_response is None:
             tool_response = block_value(input_data, "response", None)
-        payload = parse_mcp_tool_response_payload(tool_response)
-        if not payload.get("success"):
+        tool_payload = parse_mcp_tool_response_payload(tool_response)
+        if not tool_payload.get("success"):
             return {}
-        data = payload.get("data")
+        data = tool_payload.get("data")
         if not isinstance(data, dict) or data.get("display_type") != "structured_analysis_result":
             return {}
 
@@ -3693,7 +3770,7 @@ def data_analysis_post_tool_hook_factory(state: dict[str, Any]) -> Callable[[Any
             "result": summarize_query_result(data),
             "validation_issues": validation_issues_from_chart(data),
         }
-        state.setdefault("db_query_calls", []).append(call_summary)
+        state.setdefault(analysis_query_calls_state_key(chat_payload), []).append(call_summary)
         if chart_id:
             state.setdefault("chart_contracts", {})[chart_id] = contract
         if call_summary["validation_issues"]:
@@ -3701,7 +3778,7 @@ def data_analysis_post_tool_hook_factory(state: dict[str, Any]) -> Callable[[Any
                 "hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
                     "additionalContext": (
-                        "Data analysis chart contract/spec validation notes were reported as non-blocking reference facts. "
+                        f"{analysis_agent_label(chat_payload, english=True)} chart contract/spec validation notes were reported as non-blocking reference facts. "
                         "Use them when wording the final answer, but do not retry solely to satisfy the spec: "
                         + "; ".join(call_summary["validation_issues"])
                     ),
@@ -3744,8 +3821,9 @@ def transcript_latest_assistant_answer(transcript_path: str) -> str:
     return latest
 
 
-def data_analysis_chart_calls(state: dict[str, Any]) -> list[dict[str, Any]]:
-    db_calls = state.get("db_query_calls") if isinstance(state.get("db_query_calls"), list) else []
+def data_analysis_chart_calls(state: dict[str, Any], payload: ChatPayload | None = None) -> list[dict[str, Any]]:
+    calls_key = analysis_query_calls_state_key(payload)
+    db_calls = state.get(calls_key) if isinstance(state.get(calls_key), list) else []
     calls = [
         item for item in db_calls
         if isinstance(item, dict)
@@ -3774,8 +3852,8 @@ def data_analysis_chart_calls(state: dict[str, Any]) -> list[dict[str, Any]]:
     return calls
 
 
-def data_analysis_needs_chart_validation(state: dict[str, Any], answer: str) -> bool:
-    return data_analysis_chart_requested(state) or bool(data_analysis_chart_calls(state)) or bool(CHART_PLACEHOLDER_RE.search(answer or ""))
+def data_analysis_needs_chart_validation(state: dict[str, Any], answer: str, payload: ChatPayload | None = None) -> bool:
+    return data_analysis_chart_requested(state) or bool(data_analysis_chart_calls(state, payload)) or bool(CHART_PLACEHOLDER_RE.search(answer or ""))
 
 
 def normalize_chart_type(chart_type: str) -> str:
@@ -3831,7 +3909,8 @@ def placeholder_structure_issues(answer: str, placeholders: list[str]) -> list[d
 
 def deterministic_final_validation(payload: ChatPayload, answer: str, state: dict[str, Any]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
-    chart_calls = data_analysis_chart_calls(state)
+    query_tool = analysis_query_tool_name(payload)
+    chart_calls = data_analysis_chart_calls(state, payload)
     placeholders = CHART_PLACEHOLDER_RE.findall(answer or "")
     placeholder_set = set(placeholders)
     chart_requested_by_intent = data_analysis_chart_requested(state)
@@ -3851,7 +3930,7 @@ def deterministic_final_validation(payload: ChatPayload, answer: str, state: dic
                 "code": "chart_not_requested",
                 "message": (
                     "本轮图表展示意图识别结果为 chart_requested=false（用户不需要图表展示），"
-                    "但最终答案或工具结果包含结构化图表。请移除图表占位符，并不要设置 db_query.chart_requested=true。"
+                    f"但最终答案或工具结果包含结构化图表。请移除图表占位符，并不要设置 {query_tool}.chart_requested=true。"
                 ),
             }
         )
@@ -3866,8 +3945,8 @@ def deterministic_final_validation(payload: ChatPayload, answer: str, state: dic
                 "code": "missing_chart_query",
                 "message": (
                     "本轮图表展示意图识别结果为 chart_requested=true（用户需要图表展示），"
-                    "但本轮没有任何 db_query(chart_requested=true) 生成结构化图表。"
-                    "请重新调用 db_query 并设置 chart_requested=true。"
+                    f"但本轮没有任何 {query_tool}(chart_requested=true) 生成结构化图表。"
+                    f"请重新调用 {query_tool} 并设置 chart_requested=true。"
                 ),
             }
         )
@@ -3931,8 +4010,9 @@ def compact_query_result_for_validation(call: dict[str, Any], max_rows: int = 5)
 
 
 def compact_validation_context(payload: ChatPayload, answer: str, state: dict[str, Any], deterministic_issues: list[dict[str, Any]]) -> dict[str, Any]:
-    db_calls = state.get("db_query_calls") if isinstance(state.get("db_query_calls"), list) else []
-    chart_calls = data_analysis_chart_calls(state)
+    calls_key = analysis_query_calls_state_key(payload)
+    db_calls = state.get(calls_key) if isinstance(state.get(calls_key), list) else []
+    chart_calls = data_analysis_chart_calls(state, payload)
     placeholders = CHART_PLACEHOLDER_RE.findall(answer or "")
     placeholder_set = set(placeholders)
     referenced_chart_calls = [
@@ -3960,9 +4040,10 @@ def compact_validation_context(payload: ChatPayload, answer: str, state: dict[st
         ][:8],
         "deterministic_issues": deterministic_issues,
         "display_rules": {
-            "data_analysis_display_intent": data_analysis_display_intent(state),
+            analysis_display_intent_tool_name(payload): data_analysis_display_intent(state),
             "chart_requested_by_user": data_analysis_chart_requested(state),
             "table_requested_by_user": user_requested_table(payload),
+            "query_tool": analysis_query_tool_name(payload),
             "default_supported_chart_types": list(DEFAULT_CHART_TYPES),
             "restricted_chart_types_requiring_user_name": sorted(EXPLICIT_CHART_TYPES.keys()),
             "explicit_only_chart_types": sorted(EXPLICIT_CHART_TYPES.keys()),
@@ -4030,7 +4111,7 @@ async def classify_data_analysis_display_intent(
         "visible_context": prompt_visible_context(payload.visible_context),
     }
     system = (
-        "你是 WeKnora 数据分析运行时的图表展示意图识别器。"
+        f"你是 WeKnora {analysis_agent_label(payload)}运行时的图表展示意图识别器。"
         "你只判断当前用户这一轮是否需要生成可渲染的数据图表。"
         "不要做数据分析，不要生成 SQL，不要输出 Markdown，只返回 JSON。"
     )
@@ -4166,17 +4247,74 @@ def judge_issues(judge_result: dict[str, Any], prefix: str) -> list[dict[str, An
     return out
 
 
-def data_analysis_validation_repair(attempts: int, issues: list[dict[str, Any]], message: str | None = None) -> dict[str, Any]:
+def compact_validation_issue(issue: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in ("code", "severity", "chart_id"):
+        value = issue.get(key)
+        if value is not None and str(value).strip():
+            out[key] = str(value).strip()[:160]
+    message = str(issue.get("message") or "").strip()
+    if message:
+        out["message"] = _truncate_text(message, 500)
+    required_action = str(issue.get("required_action") or "").strip()
+    if required_action:
+        out["required_action"] = _truncate_text(required_action, 500)
+    return out or {"message": _truncate_text(str(issue), 500)}
+
+
+def compact_validation_issues(issues: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
+    return [compact_validation_issue(issue if isinstance(issue, dict) else {"message": str(issue)}) for issue in issues[:limit]]
+
+
+def final_answer_candidate_summary(content: str, requested_chart_ids: list[str]) -> dict[str, Any]:
+    placeholders = CHART_PLACEHOLDER_RE.findall(content or "")
     return {
-        "message": message or "数据分析最终答案未通过输出前校验。请修正后再提交 final_answer。",
+        "content_length": len(content or ""),
+        "content_preview": _truncate_text(content or "", 800),
+        "referenced_chart_ids": placeholders,
+        "declared_chart_ids": requested_chart_ids,
+        "has_markdown_table": bool(MARKDOWN_TABLE_RE.search(content or "")),
+    }
+
+
+def final_validation_progress_details(
+    attempts: int,
+    issues: list[dict[str, Any]],
+    content: str,
+    requested_chart_ids: list[str],
+    *,
+    bypassed: bool = False,
+) -> dict[str, Any]:
+    issue_summary = compact_validation_issues(issues)
+    return {
+        "validation_attempt": attempts,
+        "max_blocking_attempts": DATA_ANALYSIS_FINAL_VALIDATION_MAX_BLOCKS,
+        "validation_bypassed": bypassed,
+        "validation_issue_codes": [str(issue.get("code") or "").strip() for issue in issue_summary if str(issue.get("code") or "").strip()],
+        "validation_issues": issue_summary,
+        "final_answer_candidate": final_answer_candidate_summary(content, requested_chart_ids),
+    }
+
+
+def data_analysis_validation_repair(
+    attempts: int,
+    issues: list[dict[str, Any]],
+    message: str | None = None,
+    payload: ChatPayload | None = None,
+) -> dict[str, Any]:
+    query_tool = analysis_query_tool_name(payload) if payload is not None else "db_query"
+    label = analysis_agent_label(payload) if payload is not None else "数据分析"
+    return {
+        "message": message or f"{label}最终答案未通过输出前校验。请修正后再提交 final_answer。",
         "attempt": attempts,
         "max_blocking_attempts": DATA_ANALYSIS_FINAL_VALIDATION_MAX_BLOCKS,
         "issues": issues[:12],
         "required_actions": [
-            "必要时重新调用 db_query 生成符合用户意图的结构化图表。",
+            f"必要时重新调用 {query_tool} 生成符合用户意图的结构化图表。",
             "ChartContract/spec 校验信息只作为参考事实，不要为了满足 spec 字段完整性而反复修正；优先保证结论有查询结果支撑。",
             "用户未明确要求表格时不要输出 Markdown 表格。",
             "每个最终要展示的图表都必须在对应说明段落后紧贴 {{chart:<id>}}。",
+            "final_answer.chart_ids 必须和 content 中实际展示的 {{chart:<id>}} 占位符完全一致并保持顺序；不要声明未展示的图表。",
             "最终不需要展示的历史图表不要写入 final_answer 内容。",
         ],
     }
@@ -4194,14 +4332,14 @@ async def validate_data_analysis_final_answer(
     run_dir: Path,
     emit_progress: ProgressEmitter | None = None,
 ) -> list[dict[str, Any]]:
-    if not data_analysis_needs_chart_validation(state, answer):
+    if not data_analysis_needs_chart_validation(state, answer, payload):
         return []
 
     emit_progress_event(
         emit_progress,
         validation_progress_event(
-            "data-analysis-final-validation",
-            "data_analysis_final_validation",
+            analysis_final_validation_event_id(payload),
+            analysis_final_validation_tool_name(payload),
             "正在校验图表占位符和表格规则",
             stage="hard_rules",
         ),
@@ -4214,8 +4352,8 @@ async def validate_data_analysis_final_answer(
         emit_progress_event(
             emit_progress,
             validation_progress_event(
-                "data-analysis-final-validation",
-                "data_analysis_final_validation",
+                analysis_final_validation_event_id(payload),
+                analysis_final_validation_tool_name(payload),
                 "正在进行答案一致性校验",
                 stage="llm_judge",
             ),
@@ -4225,7 +4363,7 @@ async def validate_data_analysis_final_answer(
             judge = await run_data_analysis_judge(query_fn, options_cls, env, model, settings, run_dir, validation_context)
             return judge_issues(judge, "llm_judge")
         except Exception as exc:
-            return [{"code": "llm_judge:error", "message": f"数据分析最终答案 LLM Judge 执行失败：{exc}"}]
+            return [{"code": "llm_judge:error", "message": f"{analysis_agent_label(payload)}最终答案 LLM Judge 执行失败：{exc}"}]
 
     return []
 
@@ -4241,6 +4379,10 @@ def data_analysis_final_answer_pre_tool_hook_factory(
     run_dir: Path,
     emit_progress: ProgressEmitter | None = None,
 ) -> Callable[[Any, str | None, Any], Any]:
+    validation_id = analysis_final_validation_event_id(payload)
+    validation_tool = analysis_final_validation_tool_name(payload)
+    label = analysis_agent_label(payload)
+
     async def hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         tool_name = data_analysis_tool_name(str(block_value(input_data, "tool_name", "") or block_value(input_data, "toolName", "") or ""))
         if tool_name != "final_answer":
@@ -4265,12 +4407,14 @@ def data_analysis_final_answer_pre_tool_hook_factory(
         if not content:
             attempts = int(state.get("final_validation_attempts") or 0) + 1
             state["final_validation_attempts"] = attempts
+            empty_issues = [{"code": "empty_final_answer", "message": "final_answer.content 不能为空。"}]
+            state["last_validation_issues"] = empty_issues
             emit_progress_event(
                 emit_progress,
                 validation_progress_event(
-                    "data-analysis-final-validation",
-                    "data_analysis_final_validation",
-                    "正在校验数据分析最终答案",
+                    validation_id,
+                    validation_tool,
+                    f"正在校验{label}最终答案",
                     stage="start",
                 ),
             )
@@ -4279,33 +4423,47 @@ def data_analysis_final_answer_pre_tool_hook_factory(
                 emit_progress_event(
                     emit_progress,
                     validation_progress_event(
-                        "data-analysis-final-validation",
-                        "data_analysis_final_validation",
-                        "校验已达到最大次数，继续输出最终答案",
-                        phase="success",
+                        validation_id,
+                        validation_tool,
+                        "最终校验已达到最大修正次数，继续输出当前答案",
+                        phase="error",
                         stage="bypass",
                         done=True,
+                        extra_data=final_validation_progress_details(
+                            attempts,
+                            empty_issues,
+                            content,
+                            requested_chart_ids,
+                            bypassed=True,
+                        ),
                     ),
                 )
                 return hook_permission_output("allow")
             repair = data_analysis_validation_repair(
                 attempts,
-                [{"code": "empty_final_answer", "message": "final_answer.content 不能为空。"}],
+                empty_issues,
+                payload=payload,
             )
             emit_progress_event(
                 emit_progress,
                 validation_progress_event(
-                    "data-analysis-final-validation",
-                    "data_analysis_final_validation",
+                    validation_id,
+                    validation_tool,
                     "最终答案为空，正在要求智能体修正",
                     phase="error",
                     stage="hard_rules",
                     done=True,
+                    extra_data=final_validation_progress_details(
+                        attempts,
+                        empty_issues,
+                        content,
+                        requested_chart_ids,
+                    ),
                 ),
             )
             return hook_permission_output("deny", json.dumps(repair, ensure_ascii=False))
 
-        if not data_analysis_needs_chart_validation(state, content):
+        if not data_analysis_needs_chart_validation(state, content, payload):
             return hook_permission_output("allow")
 
         attempts = int(state.get("final_validation_attempts") or 0) + 1
@@ -4313,24 +4471,32 @@ def data_analysis_final_answer_pre_tool_hook_factory(
         emit_progress_event(
             emit_progress,
             validation_progress_event(
-                "data-analysis-final-validation",
-                "data_analysis_final_validation",
-                "正在校验数据分析最终答案",
+                validation_id,
+                validation_tool,
+                f"正在校验{label}最终答案",
                 stage="start",
             ),
         )
 
         if attempts > DATA_ANALYSIS_FINAL_VALIDATION_MAX_BLOCKS:
             state["validation_bypassed"] = True
+            previous_issues = state.get("last_validation_issues") if isinstance(state.get("last_validation_issues"), list) else []
             emit_progress_event(
                 emit_progress,
                 validation_progress_event(
-                    "data-analysis-final-validation",
-                    "data_analysis_final_validation",
-                    "校验已达到最大次数，继续输出最终答案",
-                    phase="success",
+                    validation_id,
+                    validation_tool,
+                    "最终校验已达到最大修正次数，继续输出当前答案",
+                    phase="error",
                     stage="bypass",
                     done=True,
+                    extra_data=final_validation_progress_details(
+                        attempts,
+                        previous_issues,
+                        content,
+                        requested_chart_ids,
+                        bypassed=True,
+                    ),
                 ),
             )
             return hook_permission_output("allow")
@@ -4342,28 +4508,40 @@ def data_analysis_final_answer_pre_tool_hook_factory(
             emit_progress_event(
                 emit_progress,
                 validation_progress_event(
-                    "data-analysis-final-validation",
-                    "data_analysis_final_validation",
+                    validation_id,
+                    validation_tool,
                     "最终校验通过",
                     phase="success",
                     stage="complete",
                     done=True,
+                    extra_data=final_validation_progress_details(
+                        attempts,
+                        [],
+                        content,
+                        requested_chart_ids,
+                    ),
                 ),
             )
             return hook_permission_output("allow")
 
-        repair = data_analysis_validation_repair(attempts, issues)
+        repair = data_analysis_validation_repair(attempts, issues, payload=payload)
         emit_progress_event(
             emit_progress,
-            validation_progress_event(
-                "data-analysis-final-validation",
-                "data_analysis_final_validation",
-                "最终校验发现问题，正在要求智能体修正",
-                phase="error",
-                stage="repair",
-                done=True,
-            ),
-        )
+                validation_progress_event(
+                    validation_id,
+                    validation_tool,
+                    "最终校验发现问题，正在要求智能体修正",
+                    phase="error",
+                    stage="repair",
+                    done=True,
+                    extra_data=final_validation_progress_details(
+                        attempts,
+                        issues,
+                        content,
+                        requested_chart_ids,
+                    ),
+                ),
+            )
         return hook_permission_output("deny", json.dumps(repair, ensure_ascii=False))
 
     return hook
@@ -4380,13 +4558,17 @@ def data_analysis_stop_hook_factory(
     run_dir: Path,
     emit_progress: ProgressEmitter | None = None,
 ) -> Callable[[Any, str | None, Any], Any]:
+    validation_id = analysis_final_validation_event_id(payload)
+    validation_tool = analysis_final_validation_tool_name(payload)
+    label = analysis_agent_label(payload)
+
     async def hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         if state.get("final_answer_accepted") and str(state.get("final_answer_content") or "").strip():
             return {}
 
         transcript_path = str(block_value(input_data, "transcript_path", "") or "")
         answer = transcript_latest_assistant_answer(transcript_path)
-        if not data_analysis_needs_chart_validation(state, answer):
+        if not data_analysis_needs_chart_validation(state, answer, payload):
             return {}
 
         attempts = int(state.get("final_validation_attempts") or 0) + 1
@@ -4394,9 +4576,9 @@ def data_analysis_stop_hook_factory(
         emit_progress_event(
             emit_progress,
             validation_progress_event(
-                "data-analysis-final-validation",
-                "data_analysis_final_validation",
-                "正在校验数据分析最终答案提交方式",
+                validation_id,
+                validation_tool,
+                f"正在校验{label}最终答案提交方式",
                 stage="final_answer_required",
             ),
         )
@@ -4405,9 +4587,9 @@ def data_analysis_stop_hook_factory(
             emit_progress_event(
                 emit_progress,
                 validation_progress_event(
-                    "data-analysis-final-validation",
-                    "data_analysis_final_validation",
-                    "数据分析最终答案校验已达到最大次数，继续输出",
+                    validation_id,
+                    validation_tool,
+                    f"{label}最终答案校验已达到最大次数，继续输出",
                     phase="success",
                     stage="bypass",
                     done=True,
@@ -4418,7 +4600,7 @@ def data_analysis_stop_hook_factory(
         all_issues = [
             {
                 "code": "final_answer_tool_required",
-                "message": "数据分析智能体必须调用 final_answer 工具提交最终答案，不能直接用自然语言结束。",
+                "message": f"{label}必须调用 final_answer 工具提交最终答案，不能直接用自然语言结束。",
                 "required_action": "把最终答案完整写入 final_answer.content。只有 final_answer 通过校验后才会展示给用户。",
             }
         ]
@@ -4428,13 +4610,14 @@ def data_analysis_stop_hook_factory(
         repair = data_analysis_validation_repair(
             attempts,
             all_issues,
-            "数据分析最终答案必须通过 final_answer 工具提交。请修正后再提交 final_answer。",
+            f"{label}最终答案必须通过 final_answer 工具提交。请修正后再提交 final_answer。",
+            payload=payload,
         )
         emit_progress_event(
             emit_progress,
             validation_progress_event(
-                "data-analysis-final-validation",
-                "data_analysis_final_validation",
+                validation_id,
+                validation_tool,
                 "最终答案未通过提交方式校验，正在要求智能体修正",
                 phase="error",
                 stage="repair",
@@ -4443,7 +4626,7 @@ def data_analysis_stop_hook_factory(
         )
         return {
             "decision": "block",
-            "systemMessage": "数据分析答案正在进行自动一致性修正。",
+            "systemMessage": f"{label}答案正在进行自动一致性修正。",
             "reason": json.dumps(repair, ensure_ascii=False),
             "suppressOutput": True,
         }
@@ -4689,6 +4872,8 @@ def tool_progress(tool_name: str) -> str:
         return "正在读取网页内容"
     if "__db_" in tool_name or tool_name.endswith(("db_catalog", "db_schema", "db_query")):
         return "正在分析数据库数据源"
+    if tool_name.endswith(("table_schema", "table_analysis")):
+        return "正在分析表格数据"
     if "__create_artifact" in tool_name or tool_name.endswith("create_artifact"):
         return "正在生成可下载文件"
     if "__read_skill" in tool_name or "__execute_skill" in tool_name:
@@ -4797,11 +4982,11 @@ class GeneralAgentRunner:
 
         env, model, settings = claude_auth_env(self.payload, self.config_dir)
         data_analysis_state: dict[str, Any] = {}
-        data_analysis_final_answer_mode = is_data_analysis_payload(self.payload)
+        data_analysis_final_answer_mode = is_structured_analysis_payload(self.payload)
         if data_analysis_final_answer_mode:
             yield validation_progress_event(
-                "data-analysis-display-intent",
-                "data_analysis_display_intent",
+                analysis_display_intent_event_id(self.payload),
+                analysis_display_intent_tool_name(self.payload),
                 "正在识别是否需要图表展示",
                 stage="start",
             )
@@ -4825,7 +5010,7 @@ class GeneralAgentRunner:
                     }
                 )
             data_analysis_state[DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY] = intent
-            yield data_analysis_display_intent_progress_event(intent)
+            yield data_analysis_display_intent_progress_event(intent, payload=self.payload)
         server = build_weknora_server(self.payload, self.artifacts, data_analysis_state)
         sdk_tools = claude_sdk_builtin_tools(self.payload)
         allowed_tools = [f"mcp__weknora__{t.name}" for t in self.payload.tools]
@@ -4876,7 +5061,7 @@ class GeneralAgentRunner:
                 )
             )
             runtime_hooks["PostToolUse"] = [
-                HookMatcher(matcher=None, hooks=[data_analysis_post_tool_hook_factory(data_analysis_state)], timeout=10)
+                HookMatcher(matcher=None, hooks=[data_analysis_post_tool_hook_factory(self.payload, data_analysis_state)], timeout=10)
             ]
             runtime_hooks["Stop"] = [
                 HookMatcher(

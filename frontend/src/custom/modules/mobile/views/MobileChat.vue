@@ -481,7 +481,7 @@ const sessionGroups = computed<SessionGroup[]>(() => {
   return [pinned, ...buckets, ...monthBuckets.values()].filter((group) => group.items.length > 0);
 });
 
-const userDisplayName = computed(() => authStore.user?.username || "企业用户");
+const userDisplayName = computed(() => authStore.user?.display_name || authStore.user?.username || "企业用户");
 
 const userAvatarText = computed(() => {
   const name = userDisplayName.value.trim();

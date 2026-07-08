@@ -84,6 +84,8 @@ func SanitizeToolDataForClient(data map[string]interface{}) map[string]interface
 		return sanitizeDocumentInfoData(data)
 	case "general_agent_artifacts":
 		return sanitizeGeneralArtifactsData(data)
+	case "agent_progress":
+		return sanitizeAgentProgressData(data)
 	case "plan":
 		return sanitizePlanData(data)
 	case "thinking":
@@ -276,6 +278,17 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 	case "structured_analysis_result":
 		rows := intField(data, "row_count")
 		return fmt.Sprintf("Structured data analysis returned %d row(s)", rows)
+	case "agent_progress":
+		message := stringField(data, "agent_progress_message")
+		if message == "" {
+			message = stringField(data, "message")
+		}
+		if codes := validationIssueCodesSummary(data); codes != "" {
+			return fmt.Sprintf("%s (%s)", message, codes)
+		}
+		if message != "" {
+			return message
+		}
 	}
 	if displayType := stringField(data, "display_type"); displayType != "" {
 		return fmt.Sprintf("Tool completed (%s; payload omitted from history)", displayType)
@@ -316,6 +329,36 @@ func intField(data map[string]interface{}, key string) int {
 	default:
 		return 0
 	}
+}
+
+func validationIssueCodesSummary(data map[string]interface{}) string {
+	if data == nil {
+		return ""
+	}
+	allCodes := sanitizeStringList(data["validation_issue_codes"], clientListLimit, 120)
+	codes := allCodes
+	if len(codes) == 0 {
+		for _, item := range listMapItems(data["validation_issues"]) {
+			if code := stringField(item, "code"); code != "" {
+				codes = append(codes, code)
+				if len(codes) >= clientListLimit {
+					break
+				}
+			}
+		}
+		allCodes = codes
+	}
+	if len(codes) == 0 {
+		return ""
+	}
+	display := codes
+	if len(display) > 3 {
+		display = display[:3]
+	}
+	if len(allCodes) > len(display) {
+		return fmt.Sprintf("issues: %s +%d", strings.Join(display, ", "), len(allCodes)-len(display))
+	}
+	return "issues: " + strings.Join(display, ", ")
 }
 
 func sanitizeWebSearchData(data map[string]interface{}) map[string]interface{} {
@@ -481,6 +524,44 @@ func sanitizeGeneralArtifactsData(data map[string]interface{}) map[string]interf
 		"filename":     clientFilenameTextLimit,
 		"download_url": 1000,
 	})
+	return out
+}
+
+func sanitizeAgentProgressData(data map[string]interface{}) map[string]interface{} {
+	out := copyFields(data,
+		"display_type", "tool_name", "tool_call_id", "progress_id",
+		"phase", "stage", "message", "agent_progress_message", "transient",
+		"validation_attempt", "max_blocking_attempts", "validation_bypassed",
+	)
+	if codes := sanitizeStringList(data["validation_issue_codes"], clientListLimit, 160); len(codes) > 0 {
+		out["validation_issue_codes"] = codes
+	}
+	issues := sanitizeMapList(data["validation_issues"], clientListLimit, []string{
+		"code", "severity", "chart_id", "message", "required_action",
+	}, map[string]int{
+		"code":            160,
+		"severity":        80,
+		"chart_id":        160,
+		"message":         500,
+		"required_action": 500,
+	})
+	if len(issues) > 0 {
+		out["validation_issues"] = issues
+	}
+	if summary, ok := data["final_answer_candidate"].(map[string]interface{}); ok {
+		out["final_answer_candidate"] = sanitizeFinalAnswerCandidateSummary(summary)
+	}
+	return out
+}
+
+func sanitizeFinalAnswerCandidateSummary(summary map[string]interface{}) map[string]interface{} {
+	out := copyFields(summary, "content_length", "content_preview", "has_markdown_table")
+	if refs := sanitizeStringList(summary["referenced_chart_ids"], clientListLimit, 160); len(refs) > 0 {
+		out["referenced_chart_ids"] = refs
+	}
+	if declared := sanitizeStringList(summary["declared_chart_ids"], clientListLimit, 160); len(declared) > 0 {
+		out["declared_chart_ids"] = declared
+	}
 	return out
 }
 

@@ -79,8 +79,10 @@ var ToolCapabilityRequirements = map[string]ToolRequirement{
 	"wiki_update_issue":    {AllOf: []KBCapability{CapWiki}},
 
 	// ---- Data analysis (reads table summary/column chunks from RAG ingest) ----
-	"data_analysis": {AnyOf: []KBCapability{CapVector, CapKeyword}, ConsumesFiles: true},
-	"data_schema":          {AnyOf: []KBCapability{CapVector, CapKeyword}, ConsumesFiles: true},
+	"data_analysis":  {AnyOf: []KBCapability{CapVector, CapKeyword}, ConsumesFiles: true},
+	"data_schema":    {AnyOf: []KBCapability{CapVector, CapKeyword}, ConsumesFiles: true},
+	"table_analysis": {AnyOf: []KBCapability{CapVector, CapKeyword}, ConsumesFiles: true},
+	"table_schema":   {AnyOf: []KBCapability{CapVector, CapKeyword}, ConsumesFiles: true},
 }
 
 func hasCap(caps types.KBCapabilities, c KBCapability) bool {

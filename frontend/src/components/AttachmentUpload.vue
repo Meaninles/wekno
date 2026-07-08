@@ -18,6 +18,7 @@ const props = defineProps<{
   maxFiles?: number;
   maxSize?: number; // in MB
   disabled?: boolean;
+  supportedFileTypes?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -30,6 +31,22 @@ const fileInputRef = ref<HTMLInputElement>();
 
 const maxFiles = computed(() => props.maxFiles || 5);
 const maxSize = computed(() => (props.maxSize || 20) * 1024 * 1024); // Convert MB to bytes
+const normalizedSupportedFileTypes = computed(() => {
+  return (props.supportedFileTypes || [])
+    .map(type => type.trim().toLowerCase().replace(/^\./, ''))
+    .filter(Boolean);
+});
+const acceptFileTypes = computed(() => normalizedSupportedFileTypes.value.map(type => `.${type}`).join(','));
+
+const getFileExtension = (fileName: string): string => {
+  const parts = fileName.split('.');
+  return parts.length > 1 ? parts.pop()?.toLowerCase() || '' : '';
+};
+
+const isFileTypeSupported = (file: File): boolean => {
+  if (normalizedSupportedFileTypes.value.length === 0) return true;
+  return normalizedSupportedFileTypes.value.includes(getFileExtension(file.name));
+};
 
 const triggerFileSelect = () => {
   if (props.disabled) return;
@@ -48,6 +65,11 @@ const addFiles = async (files: File[]) => {
   if (props.disabled) return;
   
   for (const file of files) {
+    if (!isFileTypeSupported(file)) {
+      MessagePlugin.warning(t('chat.attachmentTypeNotSupported', { name: file.name }));
+      continue;
+    }
+
     // Check max files limit
     if (attachments.value.length >= maxFiles.value) {
       MessagePlugin.warning(t('chat.attachmentTooMany', { max: maxFiles.value }));
@@ -60,7 +82,8 @@ const addFiles = async (files: File[]) => {
       continue;
     }
     
-    const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+    const fileExt = getFileExtension(file.name);
+    const ext = fileExt ? `.${fileExt}` : '';
 
     const attachment: AttachmentFile = {
       file,
@@ -125,6 +148,7 @@ defineExpose({
       ref="fileInputRef"
       type="file"
       multiple
+      :accept="acceptFileTypes"
       style="display: none"
       @change="handleFileSelect"
     />

@@ -33,7 +33,9 @@ var dbAnalysisToolNames = map[string]bool{
 }
 
 func agentSupportsDBDataSources(agentType string) bool {
-	return types.IsClaudeSDKAgentType(agentType)
+	return agentType == types.AgentTypeDataAnalysis ||
+		agentType == types.AgentTypeGeneralAgent ||
+		agentType == types.AgentTypeDocumentProcessingAgent
 }
 
 func agentRequiresDBDataSources(agentType string) bool {

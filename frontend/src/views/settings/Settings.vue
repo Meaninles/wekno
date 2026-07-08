@@ -62,7 +62,7 @@
             <div class="settings-content">
               <div class="content-wrapper" :class="{
                 'content-wrapper--wide': currentSection === 'members',
-                'content-wrapper--full': ['system-global', 'custom-config-center', 'custom-iam-sync'].includes(currentSection),
+                'content-wrapper--full': ['system-global', 'custom-config-center', 'custom-iam-sync', 'custom-admin-governance'].includes(currentSection),
               }">
                 <!-- 角色不允许访问当前 section（deep-link 进来 / 跨租户切换后角色降级）—— 优先于具体 section 渲染。
                      正常导航走 navItems filter 不会到这里，但 watch(navItems) 的 fallback 会在角色降级
@@ -133,6 +133,10 @@
                     <IAMSyncSettings />
                   </div>
 
+                  <div v-if="currentSection === 'custom-admin-governance'" class="section">
+                    <SystemAdminGovernance />
+                  </div>
+
                   <!-- 用户信息（账户基础信息：ID / 用户名 / 邮箱 / 注册时间）。
                      从 ApiInfo.vue 拆出来，原页面挂的是 owner-only 入口，
                      用户的基本信息不该跟 owner 权限绑定。 -->
@@ -192,6 +196,7 @@ import TenantMembers from './TenantMembers.vue'
 import SystemSettings from '@/views/system/SystemSettings.vue'
 import ConfigCenterSettings from '@/custom/modules/configcenter/ConfigCenterSettings.vue'
 import IAMSyncSettings from '@/custom/modules/iam/IAMSyncSettings.vue'
+import SystemAdminGovernance from '@/custom/modules/admin/SystemAdminGovernance.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -248,7 +253,7 @@ const SECTION_MIN_ROLE: Record<string, RoleKey> = {
   api: 'owner',
 }
 
-const SYSTEM_ADMIN_SECTIONS = new Set(['system-global', 'custom-config-center', 'custom-iam-sync'])
+const SYSTEM_ADMIN_SECTIONS = new Set(['system-global', 'custom-config-center', 'custom-iam-sync', 'custom-admin-governance'])
 
 const canSeeSection = (key: string): boolean => {
   if (SYSTEM_ADMIN_SECTIONS.has(key)) {
@@ -283,6 +288,7 @@ const navItems = computed(() => {
     { key: 'system-global', icon: 'server', label: t('settings.system') },
     { key: 'custom-config-center', icon: 'setting-1', label: '默认配置' },
     { key: 'custom-iam-sync', icon: 'usergroup', label: '组织人员同步' },
+    { key: 'custom-admin-governance', icon: 'secured', label: '空间与用户权限' },
     { key: 'userprofile', icon: 'user', label: t('userProfile.title') },
     { key: 'tenant', icon: 'user-circle', label: t('settings.tenantInfo') },
     { key: 'members', icon: 'usergroup', label: t('tenantMember.title') },
@@ -291,7 +297,7 @@ const navItems = computed(() => {
   // currentTenantRole 为空表示「membership 还没加载」—— 比起渲染整套
   // viewer 入口然后角色一返回又消失，先卡住不渲染更稳，跟原先 members
   // 入口的策略一致。
-  if (!authStore.currentTenantRole && !authStore.canAccessAllTenants) {
+  if (!authStore.currentTenantRole && !authStore.canAccessAllTenants && !authStore.isSystemAdmin) {
     return [] as NavItem[]
   }
   return all.filter((it) => canSeeSection(it.key))
@@ -328,7 +334,7 @@ const navGroups = computed<NavGroup[]>(() => {
     {
       key: 'platform',
       label: t('settings.navGroups.platform'),
-      items: pickItems(['system-global', 'custom-config-center', 'custom-iam-sync', 'system']),
+      items: pickItems(['system-global', 'custom-config-center', 'custom-iam-sync', 'custom-admin-governance', 'system']),
     },
   ].filter((group) => group.items.length > 0)
 })

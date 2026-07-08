@@ -28,6 +28,7 @@ from app.runner import (  # noqa: E402
     build_system_prompt,
     claude_auth_env,
     classify_data_analysis_display_intent,
+    data_analysis_post_tool_hook_factory,
     data_analysis_pre_tool_hook_factory,
     DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY,
     data_analysis_final_answer_pre_tool_hook_factory,
@@ -642,6 +643,93 @@ EOF""",
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("chart_requested=true", output["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_table_analysis_pre_tool_hook_targets_table_analysis_tool(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请用图展示上传表格里的销售额",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="table-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+        state = {DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"}}
+        hook = data_analysis_pre_tool_hook_factory(payload, state)
+
+        output = asyncio.run(
+            hook(
+                {
+                    "tool_name": "mcp__weknora__table_analysis",
+                    "tool_input": {"sql": "SELECT region, SUM(amount) amount FROM table_1 GROUP BY region"},
+                },
+                "toolu_1",
+                {},
+            )
+        )
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("table_analysis", reason)
+        self.assertIn("table_schema", reason)
+        self.assertNotIn("db_query", reason)
+
+    def test_table_analysis_post_tool_hook_records_table_chart_call(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请用图展示上传表格里的销售额",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="table-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+        state = {}
+        hook = data_analysis_post_tool_hook_factory(payload, state)
+        tool_payload = {
+            "success": True,
+            "data": {
+                "display_type": "structured_analysis_result",
+                "chart_requested": True,
+                "table_requested": False,
+                "columns": [
+                    {"name": "区域", "semantic_type": "dimension"},
+                    {"name": "销售额", "semantic_type": "metric"},
+                ],
+                "rows": [{"区域": "东区", "销售额": "10"}],
+                "row_count": 1,
+                "chart": {
+                    "id": "chart_region_amount",
+                    "type": "bar",
+                    "contract": {
+                        "id": "chart_region_amount",
+                        "type": "bar",
+                        "encoding": {
+                            "x": {"field": "区域", "role": "dimension"},
+                            "value": {"field": "销售额", "role": "metric", "aggregate": "sum"},
+                        },
+                        "display": {"language": "zh-CN", "table_visible": False},
+                    },
+                    "validation": {"status": "pass", "issues": []},
+                },
+            },
+        }
+
+        output = asyncio.run(
+            hook(
+                {
+                    "tool_name": "mcp__weknora__table_analysis",
+                    "tool_response": {"content": [{"type": "text", "text": json.dumps(tool_payload)}]},
+                },
+                "toolu_table_chart",
+                {},
+            )
+        )
+
+        self.assertEqual(output, {})
+        self.assertEqual(state["table_analysis_calls"][0]["chart_id"], "chart_region_amount")
+        self.assertEqual(state["chart_contracts"]["chart_region_amount"]["type"], "bar")
+        self.assertNotIn("db_query_calls", state)
+
     def test_data_analysis_pre_tool_hook_requires_explicit_only_chart_name(self):
         payload = ChatPayload(
             run_id="run-1",
@@ -784,6 +872,9 @@ EOF""",
             self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
             self.assertIn("table_not_requested", output["hookSpecificOutput"]["permissionDecisionReason"])
             self.assertEqual(state["final_validation_attempts"], 1)
+            self.assertEqual(events[-1].data["validation_issue_codes"], ["table_not_requested"])
+            self.assertTrue(events[-1].data["final_answer_candidate"]["has_markdown_table"])
+            self.assertIn("chart_region_amount", events[-1].data["final_answer_candidate"]["referenced_chart_ids"])
         finally:
             if previous is None:
                 os.environ.pop("CUSTOM_GENERAL_AGENT_DATA_ANALYSIS_LLM_JUDGE", None)
@@ -1000,6 +1091,32 @@ EOF""",
         self.assertIn("missing_chart_query", codes)
         self.assertIn("missing_chart_placeholder", codes)
         self.assertTrue(any("chart_requested=true" in issue["message"] for issue in issues))
+
+    def test_deterministic_final_validation_uses_table_analysis_call_state(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请画图分析表格里的销售额",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="table-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+        state = {
+            DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY: {"chart_requested": True, "confidence": "high"},
+            "table_analysis_calls": [
+                {
+                    "chart_id": "chart_region_amount",
+                    "contract": {"id": "chart_region_amount", "type": "bar"},
+                    "result": {"chart_requested": True, "table_requested": False},
+                    "validation_issues": [],
+                }
+            ],
+        }
+
+        issues = deterministic_final_validation(payload, "各区域销售如下。\n\n{{chart:chart_region_amount}}", state)
+
+        self.assertEqual(issues, [])
 
     def test_deterministic_final_validation_rejects_unrequested_table_with_chart_output(self):
         payload = ChatPayload(
@@ -1256,7 +1373,7 @@ EOF""",
         self.assertIn("user's original verbatim request", prompt)
 
     def test_build_system_prompt_prepends_builtin_environment_safety_policy(self):
-        for agent_type in ("general-agent", "document-processing-agent", "data-analysis"):
+        for agent_type in ("general-agent", "document-processing-agent", "data-analysis", "table-analysis"):
             with self.subTest(agent_type=agent_type):
                 payload = ChatPayload(
                     run_id="run-1",
@@ -1283,7 +1400,7 @@ EOF""",
                 self.assertIn("destructive filesystem or database operations", prompt)
 
     def test_build_system_prompt_limits_professional_skill_reads_to_current_run(self):
-        for agent_type in ("general-agent", "document-processing-agent", "data-analysis"):
+        for agent_type in ("general-agent", "document-processing-agent", "data-analysis", "table-analysis"):
             with self.subTest(agent_type=agent_type):
                 payload = ChatPayload(
                     run_id="run-1",
@@ -1654,6 +1771,33 @@ EOF""",
         self.assertIn('"chart_requested": true', prompt)
         self.assertIn("用户需要图表展示", prompt)
         self.assertIn("db_query with chart_requested=true", prompt)
+
+    def test_build_prompt_includes_table_analysis_display_intent(self):
+        payload = ChatPayload(
+            run_id="run-1",
+            session_id="session-1",
+            assistant_message_id="assistant-1",
+            query="请用图展示表格里的销售趋势",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="table-analysis"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        prompt = build_prompt(
+            payload,
+            data_analysis_display_intent={
+                "chart_requested": True,
+                "confidence": "high",
+                "preferred_chart": "line",
+                "reason": "用户要求用图展示表格趋势。",
+            },
+        )
+
+        self.assertIn("<table_analysis_display_intent", prompt)
+        self.assertIn('"chart_requested": true', prompt)
+        self.assertIn("用户需要图表展示", prompt)
+        self.assertIn("table_analysis with chart_requested=true", prompt)
+        self.assertNotIn("db_query with chart_requested=true", prompt)
 
     def test_system_prompt_points_to_document_template_context_without_inlining_xml(self):
         payload = ChatPayload(

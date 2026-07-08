@@ -20,6 +20,8 @@ const (
 	BuiltinDeepResearcherID = "builtin-deep-researcher"
 	// BuiltinDataAnalystID is the ID for the built-in Claude SDK data analysis agent
 	BuiltinDataAnalystID = "builtin-data-analyst"
+	// BuiltinTableAnalystID is the ID for the built-in Claude SDK table analysis agent
+	BuiltinTableAnalystID = "builtin-table-analyst"
 	// BuiltinKnowledgeGraphExpertID is the ID for the built-in knowledge graph expert agent
 	BuiltinKnowledgeGraphExpertID = "builtin-knowledge-graph-expert"
 	// BuiltinDocumentProcessingID is the ID for the built-in Claude SDK document processing agent
@@ -56,6 +58,9 @@ const (
 	// AgentTypeDataAnalysis runs the Claude SDK data-analysis preset over bound
 	// MySQL/PostgreSQL data sources using db_catalog + db_schema + db_query tools.
 	AgentTypeDataAnalysis = "data-analysis"
+	// AgentTypeTableAnalysis runs the Claude SDK table-analysis preset over CSV/Excel
+	// knowledge files and uploads using DuckDB SQL and structured chart output.
+	AgentTypeTableAnalysis = "table-analysis"
 	// AgentTypeDocumentProcessingAgent runs the Claude Agent SDK sidecar with
 	// document-processing-specific instructions.
 	AgentTypeDocumentProcessingAgent = "document-processing-agent"
@@ -72,7 +77,8 @@ const (
 func IsClaudeSDKAgentType(agentType string) bool {
 	return agentType == AgentTypeGeneralAgent ||
 		agentType == AgentTypeDocumentProcessingAgent ||
-		agentType == AgentTypeDataAnalysis
+		agentType == AgentTypeDataAnalysis ||
+		agentType == AgentTypeTableAnalysis
 }
 
 // CustomAgent represents a configurable AI agent (similar to GPTs)
@@ -432,6 +438,7 @@ var builtinAgentIDsOrdered = []string{
 	BuiltinWikiResearcherID,
 	BuiltinDeepResearcherID,
 	BuiltinDataAnalystID,
+	BuiltinTableAnalystID,
 	BuiltinGeneralAgentID,
 	BuiltinDocumentProcessingID,
 	BuiltinKnowledgeGraphExpertID,

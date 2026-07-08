@@ -15,6 +15,7 @@ export interface LoginResponse {
   user?: {
     id: string
     username: string
+    display_name?: string
     avatar?: string
     tenant_id: number
     can_access_all_tenants?: boolean
@@ -107,6 +108,7 @@ export interface UserPreferences {
 export interface UserInfo {
   id: string
   username: string
+  display_name?: string
   avatar?: string
   tenant_id: string
   can_access_all_tenants?: boolean
@@ -145,6 +147,7 @@ export function userInfoFromApi(
   return {
     id: u?.id || '',
     username: u?.username || '',
+    display_name: u?.display_name || '',
     avatar: u?.avatar,
     tenant_id: String(tid) || '',
     can_access_all_tenants: u?.can_access_all_tenants === true,

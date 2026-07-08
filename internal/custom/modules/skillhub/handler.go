@@ -304,7 +304,7 @@ func (h *Handler) SearchUsers(c *gin.Context) {
 	}
 	out := make([]userOption, 0, len(users))
 	for _, user := range users {
-		out = append(out, userOption{ID: user.ID, Username: user.Username, Avatar: user.Avatar, TenantID: user.TenantID})
+		out = append(out, userOption{ID: user.ID, Username: user.DisplayNameOrUsername(), Avatar: user.Avatar, TenantID: user.TenantID})
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": out})
 }

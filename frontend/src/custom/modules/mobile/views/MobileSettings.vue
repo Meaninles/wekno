@@ -29,6 +29,8 @@ const backToChat = () => {
   router.replace(returnTo.value);
 };
 
+const accountDisplayName = computed(() => authStore.user?.display_name || authStore.user?.username || "企业用户");
+
 const openKnowledgeManager = () => {
   router.push({
     path: "/settings/knowledge",
@@ -64,7 +66,7 @@ onMounted(refreshPermissions);
     <section class="account-card">
       <div class="account-avatar">W</div>
       <div class="account-info">
-        <strong>{{ authStore.user?.username || '企业用户' }}</strong>
+        <strong>{{ accountDisplayName }}</strong>
       </div>
       <em>统一身份认证</em>
     </section>

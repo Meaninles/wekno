@@ -290,7 +290,7 @@ func (r *activeRun) recordToolCall(iteration int, id, name string, args map[stri
 	r.steps = append(r.steps, step)
 }
 
-func (r *activeRun) recordProgressStatus(id, name, phase, message string) {
+func (r *activeRun) recordProgressStatus(id, name, phase, message string, metadata map[string]any) {
 	id = strings.TrimSpace(id)
 	name = strings.TrimSpace(name)
 	phase = strings.TrimSpace(phase)
@@ -326,15 +326,26 @@ func (r *activeRun) recordProgressStatus(id, name, phase, message string) {
 	}
 
 	success := phase != "error"
+	resultData := map[string]interface{}{
+		"agent_progress":         true,
+		"agent_progress_message": message,
+		"phase":                  phase,
+		"display_type":           "agent_progress",
+	}
+	for key, value := range metadata {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		resultData[key] = value
+	}
+	resultData["agent_progress"] = true
+	resultData["agent_progress_message"] = message
+	resultData["phase"] = phase
+	resultData["display_type"] = "agent_progress"
 	result := &types.ToolResult{
 		Success: success,
 		Output:  message,
-		Data: map[string]interface{}{
-			"agent_progress":         true,
-			"agent_progress_message": message,
-			"phase":                  phase,
-			"display_type":           "agent_progress",
-		},
+		Data:    resultData,
 	}
 	if !success {
 		result.Error = message

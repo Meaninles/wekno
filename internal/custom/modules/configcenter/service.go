@@ -46,7 +46,7 @@ func (s *Service) ListUsers(ctx context.Context) ([]UserSummary, error) {
 	for _, user := range users {
 		out = append(out, UserSummary{
 			ID:       user.ID,
-			Username: user.Username,
+			Username: user.DisplayNameOrUsername(),
 			TenantID: user.TenantID,
 			Active:   user.IsActive,
 		})

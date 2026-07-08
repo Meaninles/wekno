@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -31,6 +32,19 @@ type OrganizationHandler struct {
 	kbService     interfaces.KnowledgeBaseService
 	knowledgeRepo interfaces.KnowledgeRepository
 	chunkRepo     interfaces.ChunkRepository
+}
+
+type CustomPendingOrganizationMemberGrantRequest struct {
+	OrganizationID    string
+	IAMExternalUserID string
+	Role              types.OrgMemberRole
+	InvitedByUserID   string
+}
+
+var customPendingOrganizationMemberGrantHook func(context.Context, CustomPendingOrganizationMemberGrantRequest) error
+
+func RegisterCustomPendingOrganizationMemberGrantHook(fn func(context.Context, CustomPendingOrganizationMemberGrantRequest) error) {
+	customPendingOrganizationMemberGrantHook = fn
 }
 
 // NewOrganizationHandler creates a new organization handler
@@ -421,7 +435,7 @@ func (h *OrganizationHandler) ListMembers(c *gin.Context) {
 			resp.TenantName = t.Name
 		}
 		if m.RepresentativeUser != nil {
-			resp.Username = m.RepresentativeUser.Username
+			resp.Username = m.RepresentativeUser.DisplayNameOrUsername()
 			resp.Avatar = m.RepresentativeUser.Avatar
 		}
 		response = append(response, resp)
@@ -960,7 +974,7 @@ func (h *OrganizationHandler) ListJoinRequests(c *gin.Context) {
 			item.RequestType = string(types.JoinRequestTypeJoin)
 		}
 		if r.User != nil {
-			item.Username = r.User.Username
+			item.Username = r.User.DisplayNameOrUsername()
 		}
 		resp = append(resp, item)
 	}
@@ -1267,7 +1281,7 @@ func (h *OrganizationHandler) ListOrgShares(c *gin.Context) {
 		}
 		// Get shared by user info
 		if user, err := h.userService.GetUserByID(ctx, s.SharedByUserID); err == nil && user != nil {
-			resp.SharedByUsername = user.Username
+			resp.SharedByUsername = user.DisplayNameOrUsername()
 		}
 		response = append(response, resp)
 	}
@@ -1468,7 +1482,7 @@ func (h *OrganizationHandler) ListOrgAgentShares(c *gin.Context) {
 			resp.OrganizationName = s.Organization.Name
 		}
 		if u, err := h.userService.GetUserByID(ctx, s.SharedByUserID); err == nil && u != nil {
-			resp.SharedByUsername = u.Username
+			resp.SharedByUsername = u.DisplayNameOrUsername()
 		}
 		response = append(response, resp)
 	}
@@ -1753,6 +1767,9 @@ func (h *OrganizationHandler) toOrgResponse(ctx context.Context, org *types.Orga
 	} else {
 		isOwner = org.OwnerID == currentUserID
 	}
+	if types.IsSystemAdminFromContext(ctx) {
+		isOwner = true
+	}
 	resp := types.OrganizationResponse{
 		ID:                     org.ID,
 		Name:                   org.Name,
@@ -1902,7 +1919,7 @@ func (h *OrganizationHandler) SearchTenantsForInvite(c *gin.Context) {
 			candidate: types.TenantInviteCandidate{
 				TenantID:               u.TenantID,
 				RepresentativeUserID:   u.ID,
-				RepresentativeUsername: u.Username,
+				RepresentativeUsername: u.DisplayNameOrUsername(),
 				RepresentativeAvatar:   u.Avatar,
 			},
 		}
@@ -2016,6 +2033,34 @@ func (h *OrganizationHandler) InviteMember(c *gin.Context) {
 	// Validate role
 	if !req.Role.IsValid() {
 		c.Error(apperrors.NewValidationError("Invalid role; must be viewer, editor, or admin"))
+		return
+	}
+
+	iamExternalUserID := strings.TrimSpace(req.IAMExternalUserID)
+	if iamExternalUserID != "" && req.TenantID == 0 && strings.TrimSpace(req.UserID) == "" {
+		if customPendingOrganizationMemberGrantHook == nil {
+			c.Error(apperrors.NewInternalServerError("IAM pending member grant hook is unavailable"))
+			return
+		}
+		if err := customPendingOrganizationMemberGrantHook(ctx, CustomPendingOrganizationMemberGrantRequest{
+			OrganizationID:    orgID,
+			IAMExternalUserID: iamExternalUserID,
+			Role:              req.Role,
+			InvitedByUserID:   userID,
+		}); err != nil {
+			logger.Errorf(ctx, "Failed to create IAM pending member grant: %v", err)
+			c.Error(apperrors.NewValidationError(err.Error()))
+			return
+		}
+		logger.Infof(ctx, "User %s invited IAM external user %s to organization %s with role %s",
+			secutils.SanitizeForLog(userID),
+			secutils.SanitizeForLog(iamExternalUserID),
+			orgID,
+			req.Role)
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "Member grant created successfully",
+		})
 		return
 	}
 

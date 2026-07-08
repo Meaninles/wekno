@@ -6,10 +6,11 @@ import { get, post, put, del } from "../../utils/request";
 // 'wiki-qa'      : Wiki 图谱导航问答
 // 'hybrid-rag-wiki': Wiki + 分块混合检索
 // 'data-analysis': 数据分析（通用运行时 + MySQL/PostgreSQL + SQL）
+// 'table-analysis': 表格分析（通用运行时 + CSV/Excel + DuckDB SQL）
 // 'general-agent': 通用智能体（通用运行时 + WeKnora 能力桥）
 // 'document-processing-agent': 文档处理（通用运行时 + 文档产物能力）
 // 'custom'       : 完全自定义（不应用预设）
-export type AgentType = 'rag-qa' | 'wiki-qa' | 'hybrid-rag-wiki' | 'data-analysis' | 'general-agent' | 'document-processing-agent' | 'custom';
+export type AgentType = 'rag-qa' | 'wiki-qa' | 'hybrid-rag-wiki' | 'data-analysis' | 'table-analysis' | 'general-agent' | 'document-processing-agent' | 'custom';
 
 export interface CustomAgentConfig {
   // ===== 基础设置 =====
@@ -167,6 +168,7 @@ export const BUILTIN_QUICK_ANSWER_ID = 'builtin-quick-answer';
 export const BUILTIN_SIMPLE_CHAT_ID = 'builtin-simple-chat';
 export const BUILTIN_SMART_REASONING_ID = 'builtin-smart-reasoning';
 export const BUILTIN_DATA_ANALYST_ID = 'builtin-data-analyst';
+export const BUILTIN_TABLE_ANALYST_ID = 'builtin-table-analyst';
 export const BUILTIN_GENERAL_AGENT_ID = 'builtin-general-agent';
 export const BUILTIN_DOCUMENT_PROCESSING_ID = 'builtin-document-processing';
 
@@ -273,8 +275,11 @@ export interface KBCapabilities {
 // 预设的"自动填充"配置载荷：仅包含被预设覆盖的字段；其他字段不动
 export interface AgentTypePresetConfig {
   system_prompt_id?: string;
+  thinking?: boolean;
   temperature?: number;
+  max_completion_tokens?: number;
   max_iterations?: number;
+  llm_call_timeout?: number;
   allowed_tools?: string[];
   retain_retrieval_history?: boolean;
   faq_priority_enabled?: boolean;
@@ -284,6 +289,7 @@ export interface AgentTypePresetConfig {
   claude_sdk_web_search_enabled?: boolean;
   web_fetch_enabled?: boolean;
   web_fetch_top_n?: number;
+  history_turns?: number;
   supported_file_types?: string[];
   enable_artifacts?: boolean;
   document_template?: DocumentTemplateConfig;

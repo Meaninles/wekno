@@ -1,0 +1,4 @@
+-- Migration: 000067_home_tenant_display_names (rollback)
+-- Intentionally no-op: this is a display-name data repair. Reverting would
+-- rewrite user-facing tenant names back to usernames and could overwrite
+-- legitimate edits made after the migration.

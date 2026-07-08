@@ -73,6 +73,9 @@ type AgentConfig struct {
 	// RuntimeAttachments are files uploaded with the current user turn. They are
 	// available to runtime tools but are not persisted in agent configuration.
 	RuntimeAttachments MessageAttachments `json:"-"`
+	// TableAnalysisDisplayIntent is the per-turn preflight decision for the
+	// table-analysis tool path when the legacy native runner is used.
+	TableAnalysisDisplayIntent *TableAnalysisDisplayIntent `json:"-"`
 	// LLM call timeout in seconds (default: 120). Controls the maximum time for a single LLM call.
 	LLMCallTimeout int `json:"llm_call_timeout,omitempty"`
 
@@ -101,6 +104,16 @@ type AgentConfig struct {
 
 	// General-agent artifact settings.
 	EnableArtifacts bool `json:"enable_artifacts,omitempty"`
+}
+
+// TableAnalysisDisplayIntent captures whether the current user turn requires
+// a rendered chart before table-analysis tool use.
+type TableAnalysisDisplayIntent struct {
+	ChartRequested bool   `json:"chart_requested"`
+	Confidence     string `json:"confidence,omitempty"`
+	PreferredChart string `json:"preferred_chart,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	Source         string `json:"source,omitempty"`
 }
 
 // SessionAgentConfig represents session-level agent configuration

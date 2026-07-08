@@ -640,7 +640,7 @@
       </div>
     </t-dialog>
 
-    <!-- 添加成员弹窗（按租户邀请） -->
+    <!-- 添加成员弹窗 -->
     <t-dialog v-model:visible="showAddMemberDialog" :header="$t('organization.addMember.dialogTitle')"
       :confirm-btn="{ content: addMemberConfirmText, loading: addMemberSubmitting, disabled: addMemberConfirmDisabled }"
       :cancel-btn="$t('common.cancel')" @confirm="handleAddMember" @close="resetAddMemberDialog" width="620px">
@@ -764,14 +764,14 @@ const upgradeForm = ref({
   message: ''
 })
 
-// 添加成员（按租户邀请）相关状态。Plan 3 之后，邀请实际上是把
+// 添加成员相关状态。Plan 3 之后，邀请实际上是把
 // 一整个租户拉进空间；这里的「搜索结果」是租户候选列表，每条带一个
 // 代表用户用于展示。`selectedTenantId` 是真正提交给后端的 tenant_id。
 type AddMemberMode = 'tenant' | 'member' | 'organization'
 
 const showAddMemberDialog = ref(false)
 const addMemberSubmitting = ref(false)
-const addMemberMode = ref<AddMemberMode>('tenant')
+const addMemberMode = ref<AddMemberMode>('organization')
 const tenantSearchLoading = ref(false)
 const tenantSearchResults = ref<TenantInviteCandidate[]>([])
 const selectedTenantId = ref<number | null>(null)
@@ -865,9 +865,9 @@ const addMemberRoleOptions = computed(() => [
 ])
 
 const addMemberModeOptions = computed(() => [
+  { label: t('organization.addMember.modeOrganization'), value: 'organization' as AddMemberMode },
   { label: t('organization.addMember.modeTenant'), value: 'tenant' as AddMemberMode },
   { label: t('organization.addMember.modeMember'), value: 'member' as AddMemberMode },
-  { label: t('organization.addMember.modeOrganization'), value: 'organization' as AddMemberMode },
 ])
 
 const addMemberTip = computed(() => {
@@ -1326,9 +1326,11 @@ const handleAddMember = async () => {
     let successCount = 0
     let failedCount = 0
     for (const candidate of selectedInviteCandidates.value) {
+      const isLocalCandidate = !!candidate.tenant_id
       const res = await inviteMember(props.orgId, {
-        tenant_id: candidate.tenant_id,
-        representative_user_id: candidate.user_id,
+        tenant_id: isLocalCandidate ? candidate.tenant_id : undefined,
+        representative_user_id: isLocalCandidate ? candidate.user_id : undefined,
+        iam_external_user_id: isLocalCandidate ? undefined : candidate.iam_external_id,
         role: addMemberRole.value,
       })
       if (res.success) successCount += 1

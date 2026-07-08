@@ -96,7 +96,10 @@ func (s *agentShareService) ShareAgent(ctx context.Context, agentID string, orgI
 		return nil, ErrAgentNotFoundForShare
 	}
 	if agent.TenantID != tenantID {
-		return nil, ErrNotAgentOwner
+		if !types.IsSystemAdminFromContext(ctx) {
+			return nil, ErrNotAgentOwner
+		}
+		tenantID = agent.TenantID
 	}
 
 	if agent.Config.ModelID == "" {
@@ -118,15 +121,17 @@ func (s *agentShareService) ShareAgent(ctx context.Context, agentID string, orgI
 	}
 
 	// Caller's tenant must be an org member with editor+ role to share.
-	tm, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
-	if err != nil {
-		if errors.Is(err, repository.ErrOrgMemberNotFound) {
-			return nil, ErrTenantNotInOrg
+	if !types.IsSystemAdminFromContext(ctx) {
+		tm, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
+		if err != nil {
+			if errors.Is(err, repository.ErrOrgMemberNotFound) {
+				return nil, ErrTenantNotInOrg
+			}
+			return nil, err
 		}
-		return nil, err
-	}
-	if !tm.Role.HasPermission(types.OrgRoleEditor) {
-		return nil, ErrOrgRoleCannotShareAgent
+		if !tm.Role.HasPermission(types.OrgRoleEditor) {
+			return nil, ErrOrgRoleCannotShareAgent
+		}
 	}
 
 	// 智能体共享仅支持只读
@@ -173,6 +178,9 @@ func (s *agentShareService) RemoveShare(ctx context.Context, shareID string, use
 			return ErrAgentShareNotFound
 		}
 		return err
+	}
+	if types.IsSystemAdminFromContext(ctx) {
+		return s.shareRepo.Delete(ctx, shareID)
 	}
 	// (1) Original sharer.
 	if share.SharedByUserID == userID {
@@ -237,7 +245,7 @@ func (s *agentShareService) ListSharedAgents(ctx context.Context, tenantID uint6
 		}
 		if share.SharedByUserID != "" {
 			if u, err := s.userRepo.GetUserByID(ctx, share.SharedByUserID); err == nil && u != nil {
-				info.SharedByUsername = u.Username
+				info.SharedByUsername = u.DisplayNameOrUsername()
 			}
 		}
 		key := fmt.Sprintf("%s_%d", share.AgentID, share.SourceTenantID)
@@ -278,10 +286,16 @@ func (s *agentShareService) ListSharedAgents(ctx context.Context, tenantID uint6
 func (s *agentShareService) ListSharedAgentsInOrganization(ctx context.Context, orgID string, tenantID uint64, callerTenantRole types.TenantRole) ([]*types.OrganizationSharedAgentItem, error) {
 	tm, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
 	if err != nil {
-		if errors.Is(err, repository.ErrOrgMemberNotFound) {
+		if errors.Is(err, repository.ErrOrgMemberNotFound) && types.IsSystemAdminFromContext(ctx) {
+			if _, orgErr := s.orgRepo.GetByID(ctx, orgID); orgErr != nil {
+				return nil, orgErr
+			}
+			tm = &types.OrganizationTenantMember{OrganizationID: orgID, TenantID: tenantID, Role: types.OrgRoleAdmin}
+		} else if errors.Is(err, repository.ErrOrgMemberNotFound) {
 			return nil, ErrTenantNotInOrg
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
 
 	shares, err := s.shareRepo.ListByOrganization(ctx, orgID)
@@ -314,7 +328,7 @@ func (s *agentShareService) ListSharedAgentsInOrganization(ctx context.Context, 
 		}
 		if share.SharedByUserID != "" {
 			if u, err := s.userRepo.GetUserByID(ctx, share.SharedByUserID); err == nil && u != nil {
-				info.SharedByUsername = u.Username
+				info.SharedByUsername = u.DisplayNameOrUsername()
 			}
 		}
 
@@ -393,7 +407,7 @@ func (s *agentShareService) ListSharedAgentsInOrganizations(ctx context.Context,
 			}
 			if share.SharedByUserID != "" {
 				if u, err := s.userRepo.GetUserByID(ctx, share.SharedByUserID); err == nil && u != nil {
-					info.SharedByUsername = u.Username
+					info.SharedByUsername = u.DisplayNameOrUsername()
 				}
 			}
 			item := &types.OrganizationSharedAgentItem{

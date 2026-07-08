@@ -87,6 +87,9 @@ func IsTenantAccessible(
 	if user.TenantID == targetTenantID {
 		return true
 	}
+	if user.IsSystemAdmin {
+		return true
+	}
 	if cfg != nil && cfg.Tenant != nil && cfg.Tenant.EnableCrossTenantAccess && user.CanAccessAllTenants {
 		return true
 	}
@@ -111,9 +114,14 @@ func IsTenantAccessible(
 func RequireCrossTenantAccess(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		// First the cluster-wide flag — if it's off, nobody gets through,
-		// not even users with CanAccessAllTenants=true. This mirrors the
-		// "must require BOTH" rule that previously lived in tenant.go.
+		u, ok := ctx.Value(types.UserContextKey).(*types.User)
+		if ok && u != nil && u.IsSystemAdmin {
+			c.Next()
+			return
+		}
+
+		// First the cluster-wide flag for ordinary cross-tenant superusers.
+		// SystemAdmin is handled above as a platform-wide role.
 		if cfg == nil || cfg.Tenant == nil || !cfg.Tenant.EnableCrossTenantAccess {
 			uid, _ := types.UserIDFromContext(ctx)
 			logger.Warnf(ctx,
@@ -123,7 +131,6 @@ func RequireCrossTenantAccess(cfg *config.Config) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		u, ok := ctx.Value(types.UserContextKey).(*types.User)
 		if !ok || u == nil || !u.CanAccessAllTenants {
 			uid, _ := types.UserIDFromContext(ctx)
 			logger.Warnf(ctx,
@@ -177,6 +184,10 @@ func RequirePathTenantMatch(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 		if pathTenantID == ctxTenantID {
+			c.Next()
+			return
+		}
+		if types.IsSystemAdminFromContext(ctx) {
 			c.Next()
 			return
 		}

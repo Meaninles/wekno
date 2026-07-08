@@ -247,6 +247,151 @@ func TestValidateSQL_TableNames(t *testing.T) {
 	}
 }
 
+func TestValidateSQL_SafeUnionAllOption(t *testing.T) {
+	_, defaultValidation := ValidateSQL(
+		"SELECT id FROM users UNION ALL SELECT id FROM orders",
+		WithSelectOnly(),
+		WithAllowedTables("users", "orders"),
+	)
+	if defaultValidation.Valid {
+		t.Fatal("UNION ALL should remain disabled unless WithSafeUnionAll is explicitly enabled")
+	}
+
+	parseResult, validation := ValidateSQL(
+		"SELECT id FROM users UNION ALL SELECT id FROM orders",
+		WithSelectOnly(),
+		WithAllowedTables("users", "orders"),
+		WithSafeUnionAll(4, 4),
+	)
+	if !validation.Valid {
+		t.Fatalf("expected bounded UNION ALL to pass, got %#v", validation.Errors)
+	}
+	if strings.Join(parseResult.TableNames, ",") != "users,orders" {
+		t.Fatalf("expected table names from UNION branches, got %#v", parseResult.TableNames)
+	}
+
+	_, distinctValidation := ValidateSQL(
+		"SELECT id FROM users UNION SELECT id FROM orders",
+		WithSelectOnly(),
+		WithAllowedTables("users", "orders"),
+		WithSafeUnionAll(4, 4),
+	)
+	if distinctValidation.Valid {
+		t.Fatal("UNION DISTINCT should not be allowed by the safe UNION ALL option")
+	}
+
+	_, constantsValidation := ValidateSQL(
+		"SELECT 'a' AS name UNION ALL SELECT 'b' AS name",
+		WithSelectOnly(),
+		WithSafeUnionAll(4, 4),
+	)
+	if constantsValidation.Valid {
+		t.Fatal("constant-only UNION ALL datasets should not pass table-backed analysis validation")
+	}
+
+	_, branchLimitValidation := ValidateSQL(
+		"SELECT id FROM users UNION ALL SELECT id FROM orders UNION ALL SELECT id FROM sessions",
+		WithSelectOnly(),
+		WithAllowedTables("users", "orders", "sessions"),
+		WithSafeUnionAll(2, 4),
+	)
+	if branchLimitValidation.Valid {
+		t.Fatal("UNION ALL branch count should be bounded")
+	}
+}
+
+func TestValidateSQL_GroundedSelectOutput(t *testing.T) {
+	_, defaultValidation := ValidateSQL(
+		"SELECT '管理序列' AS seq, 14 AS child_count FROM attachment_1 WHERE sheet_name = '岗位'",
+		WithSelectOnly(),
+		WithAllowedTables("attachment_1"),
+	)
+	if !defaultValidation.Valid {
+		t.Fatalf("grounded-output checks should be opt-in, got %#v", defaultValidation.Errors)
+	}
+
+	_, constantValidation := ValidateSQL(
+		"SELECT '管理序列' AS seq, 14 AS child_count FROM attachment_1 WHERE sheet_name = '岗位'",
+		WithSelectOnly(),
+		WithAllowedTables("attachment_1"),
+		WithGroundedSelectOutput(),
+	)
+	if constantValidation.Valid {
+		t.Fatal("constant-only table-backed SELECT output should be rejected")
+	}
+
+	_, disguisedValidation := ValidateSQL(
+		"SELECT category, 14 AS child_count FROM attachment_1",
+		WithSelectOnly(),
+		WithAllowedTables("attachment_1"),
+		WithGroundedSelectOutput(),
+	)
+	if disguisedValidation.Valid {
+		t.Fatal("direct numeric literal output should be rejected even when another output column is grounded")
+	}
+
+	_, aggregateValidation := ValidateSQL(
+		"SELECT '管理序列' AS seq, COUNT(*) AS child_count FROM attachment_1 WHERE category = '管理' UNION ALL SELECT '职能序列', COUNT(*) FROM attachment_1 WHERE category = '职能'",
+		WithSelectOnly(),
+		WithAllowedTables("attachment_1"),
+		WithSafeUnionAll(4, 4),
+		WithGroundedSelectOutput(),
+	)
+	if !aggregateValidation.Valid {
+		t.Fatalf("constant labels plus table-derived aggregates should pass, got %#v", aggregateValidation.Errors)
+	}
+
+	_, caseValidation := ValidateSQL(
+		"SELECT CASE WHEN category LIKE '%管理%' THEN '管理序列' ELSE category END AS seq, SUM(amount) AS amount FROM attachment_1 GROUP BY seq",
+		WithSelectOnly(),
+		WithAllowedTables("attachment_1"),
+		WithGroundedSelectOutput(),
+	)
+	if !caseValidation.Valid {
+		t.Fatalf("CASE expressions over source columns should pass, got %#v", caseValidation.Errors)
+	}
+}
+
+func TestValidateSQL_SafeSystemTypeCasts(t *testing.T) {
+	sql := "SELECT CAST(amount AS INTEGER) AS amount_int FROM orders"
+
+	_, strictValidation := ValidateSQL(
+		sql,
+		WithSelectOnly(),
+		WithAllowedTables("orders"),
+	)
+	if strictValidation.Valid {
+		t.Fatal("pg_catalog integer casts should remain blocked unless explicitly enabled")
+	}
+
+	_, validation := ValidateSQL(
+		sql,
+		WithSelectOnly(),
+		WithAllowedTables("orders"),
+		WithSafeSystemTypeCasts(),
+	)
+	if !validation.Valid {
+		t.Fatalf("expected ordinary numeric cast to pass when enabled, got %#v", validation.Errors)
+	}
+}
+
+func TestValidateSQL_CTEBodiesAreDeepValidated(t *testing.T) {
+	sql := `WITH suspicious AS (
+		SELECT pg_read_file('/etc/passwd') AS payload FROM orders
+	)
+	SELECT payload FROM suspicious`
+
+	_, validation := ValidateSQL(
+		sql,
+		WithSelectOnly(),
+		WithAllowedTables("orders"),
+		WithNoDangerousFunctions(),
+	)
+	if validation.Valid {
+		t.Fatal("dangerous functions inside CTE bodies should be rejected")
+	}
+}
+
 func TestValidateSQL_InjectionRisk(t *testing.T) {
 	tests := []struct {
 		name          string

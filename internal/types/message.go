@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,6 +85,35 @@ type MessageAttachment struct {
 // MessageAttachments is a slice of MessageAttachment for database storage
 type MessageAttachments []MessageAttachment
 
+const RuntimeAttachmentIDPrefix = "attachment:"
+
+// RuntimeAttachmentID returns the transient ID used by agent tools to refer to
+// files uploaded in the current user turn. The ID is 1-based to match the
+// visible attachment index in the prompt.
+func RuntimeAttachmentID(index int) string {
+	return fmt.Sprintf("%s%d", RuntimeAttachmentIDPrefix, index+1)
+}
+
+// ParseRuntimeAttachmentID parses IDs produced by RuntimeAttachmentID.
+func ParseRuntimeAttachmentID(id string) (int, bool) {
+	raw := strings.TrimSpace(id)
+	if !strings.HasPrefix(raw, RuntimeAttachmentIDPrefix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(raw, RuntimeAttachmentIDPrefix))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n - 1, true
+}
+
+// IsTabularFileType reports whether ext/fileType is supported by the
+// table-analysis DuckDB tools.
+func IsTabularFileType(fileType string) bool {
+	ext := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(fileType)), ".")
+	return ext == "csv" || ext == "xlsx" || ext == "xls"
+}
+
 // BuildPrompt returns a formatted prompt section for all attachments,
 // injecting file metadata and extracted content into the LLM context.
 func (attachments MessageAttachments) BuildPrompt() string {
@@ -99,6 +129,10 @@ func (attachments MessageAttachments) BuildPrompt() string {
 		sb.WriteString("<metadata>\n")
 		sb.WriteString(fmt.Sprintf("<type>%s</type>\n", att.FileType))
 		sb.WriteString(fmt.Sprintf("<size_kb>%.2f</size_kb>\n", float64(att.FileSize)/1024))
+		if IsTabularFileType(att.FileType) {
+			sb.WriteString(fmt.Sprintf("<table_analysis_id>%s</table_analysis_id>\n", RuntimeAttachmentID(i)))
+			sb.WriteString("<table_analysis_note>Use this ID as knowledge_id when calling table_schema or table_analysis for this uploaded CSV/Excel file.</table_analysis_note>\n")
+		}
 		sb.WriteString("</metadata>\n")
 
 		if att.Content != "" {

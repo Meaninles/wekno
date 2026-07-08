@@ -199,6 +199,57 @@ builtin_agents:
       rerank_top_k: 5
       rerank_threshold: 0.3
 
+  - id: "builtin-table-analyst"
+    avatar: "📊"
+    is_builtin: true
+    i18n:
+      default:
+        name: "Table Analyst"
+        description: "CSV/Excel table analysis agent with DuckDB SQL and optional structured charts"
+      zh-CN:
+        name: "表格分析"
+        description: "支持从知识库或上传的 CSV/Excel 文件中选择表格，使用 DuckDB SQL 分析并按需生成结构化图表"
+      zh-TW:
+        name: "表格分析"
+        description: "支援從知識庫或上傳的 CSV/Excel 文件中選擇表格，使用 DuckDB SQL 分析並按需生成結構化圖表"
+      ja-JP:
+        name: "テーブル分析"
+        description: "ナレッジベースまたはアップロードされた CSV/Excel を DuckDB SQL で分析し、必要に応じて構造化チャートを生成するエージェント"
+      ko-KR:
+        name: "표 분석"
+        description: "지식 베이스 또는 업로드한 CSV/Excel 파일을 DuckDB SQL로 분석하고 요청 시 구조화 차트를 생성하는 에이전트"
+    config:
+      agent_mode: "smart-reasoning"
+      agent_type: "table-analysis"
+      system_prompt_id: "table_analyst"
+      thinking: true
+      temperature: 0.3
+      max_completion_tokens: 4096
+      max_iterations: 30
+      kb_selection_mode: "all"
+      retrieve_kb_only_when_mentioned: false
+      supported_file_types:
+        - "csv"
+        - "xlsx"
+        - "xls"
+      allowed_tools:
+        - "knowledge_search"
+        - "grep_chunks"
+        - "get_document_info"
+        - "table_schema"
+        - "table_analysis"
+      web_search_enabled: false
+      web_search_max_results: 0
+      reflection_enabled: true
+      multi_turn_enabled: true
+      history_turns: 10
+      faq_priority_enabled: false
+      embedding_top_k: 10
+      keyword_threshold: 0.3
+      vector_threshold: 0.5
+      rerank_top_k: 10
+      rerank_threshold: 0.3
+
   - id: "builtin-general-agent"
     avatar: "🧠"
     is_builtin: true

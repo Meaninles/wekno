@@ -2451,6 +2451,7 @@ defineExpose({
 
       <!-- 附件列表区域 (由 AttachmentUpload 组件渲染) -->
       <AttachmentUpload ref="attachmentUploadRef" :max-files="5" :max-size="20"
+        :supported-file-types="agentSupportedFileTypes"
         @update:files="uploadedAttachments = $event" />
 
       <!-- 选中的知识库、文件和 Skill 标签（显示在输入框内顶部） -->

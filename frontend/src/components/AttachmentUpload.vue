@@ -130,10 +130,19 @@ const getFileIcon = (fileName: string): string => {
   return 'file';
 };
 
+const setFiles = (files: AttachmentFile[] = []) => {
+  attachments.value = files
+    .filter((attachment): attachment is AttachmentFile => !!attachment?.file)
+    .slice(0, maxFiles.value)
+    .map(attachment => ({ ...attachment }));
+  emit('update:files', attachments.value);
+};
+
 defineExpose({
   attachments,
   triggerFileSelect,
   addFiles,
+  setFiles,
   clear: () => {
     attachments.value = [];
     emit('update:files', []);

@@ -166,3 +166,9 @@ INSERT INTO traffic_daily VALUES
 
 INSERT INTO tmp_2024_x VALUES ('a','orphan','2024x'),('b','legacy','n/a');
 INSERT INTO job_audit_evt VALUES ('load_order','2026-05-08 01:00:00','warn','late rows'),('load_sku','2026-05-08 01:03:00','info','ok');
+
+CREATE USER IF NOT EXISTS 'analytics_reader'@'%' IDENTIFIED BY 'analytics_pwd';
+ALTER USER 'analytics_reader'@'%' IDENTIFIED BY 'analytics_pwd';
+REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'analytics_reader'@'%';
+GRANT SELECT, SHOW VIEW ON `retail_ops`.* TO 'analytics_reader'@'%';
+FLUSH PRIVILEGES;

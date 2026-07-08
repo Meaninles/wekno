@@ -1262,14 +1262,14 @@ def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_an
 
         @tool(
             "final_answer",
-            f"Submit the final user-visible {agent_label} answer. This is mandatory for this agent: do not end with natural-language text directly. When chart output is present, the runtime validates output rules such as placeholders, chart_ids alignment, and table policy, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
+            f"Submit the final user-visible {agent_label} answer. This is mandatory for this agent: do not end with natural-language text directly. When chart output is present, the runtime validates output rules such as placeholders and chart_ids alignment, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
             {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Complete final answer in the user's language. Include {{chart:<id>}} placeholders only for charts that should appear in the final answer. Do not include Markdown tables unless the user explicitly requested table/detail/raw/list output.",
+                        "description": "Complete final answer in the user's language. Include {{chart:<id>}} placeholders only for charts that should appear in the final answer.",
                     },
                     "chart_ids": {
                         "type": "array",
@@ -1397,7 +1397,7 @@ def tool_catalog(payload: ChatPayload) -> str:
     if is_structured_analysis_payload(payload):
         agent_label = analysis_agent_label(payload, english=True)
         lines.append(
-            f"- final_answer ({agent_label} final delivery): mandatory final tool. Call `final_answer` directly when the answer is ready, with the complete user-visible answer in `content` and optional referenced chart ids in `chart_ids`; do not finish by writing direct natural-language final text. The runtime validates output rules such as chart placeholders and unrequested tables. ChartContract/spec consistency notes are reference facts for wording, not a hard gate."
+            f"- final_answer ({agent_label} final delivery): mandatory final tool. Call `final_answer` directly when the answer is ready, with the complete user-visible answer in `content` and optional referenced chart ids in `chart_ids`; do not finish by writing direct natural-language final text. The runtime validates output rules such as chart placeholders and chart id alignment. ChartContract/spec consistency notes are reference facts for wording, not a hard gate."
         )
     if not lines:
         return "No WeKnora tools are exposed for this run."
@@ -2550,6 +2550,13 @@ def build_prompt(
         intent = normalize_data_analysis_display_intent(data_analysis_display_intent)
         intent_tag = analysis_display_intent_tag(payload)
         query_tool = analysis_query_tool_name(payload)
+        chart_true_instruction = (
+            "If chart_requested is true, exploratory evidence-inspection table_analysis calls may keep chart_requested=false, "
+            "but at least one final analytical result query must call table_analysis with chart_requested=true, include LLM-authored source_mapping, "
+            "and include one matching {{chart:<id>}} placeholder in final_answer.content."
+            if is_table_analysis_payload(payload)
+            else f"If chart_requested is true, call {query_tool} with chart_requested=true for analytical result queries and include at least one matching {{{{chart:<id>}}}} placeholder in final_answer.content."
+        )
         parts.append(f'<{intent_tag} source="runtime_preflight" role="binding_runtime_decision">')
         parts.append(
             json.dumps(
@@ -2561,7 +2568,7 @@ def build_prompt(
                     "reason": intent["reason"],
                     "instructions": [
                         "This preflight decision is authoritative for whether this turn should render a chart.",
-                        f"If chart_requested is true, call {query_tool} with chart_requested=true for analytical result queries and include at least one matching {{{{chart:<id>}}}} placeholder in final_answer.content.",
+                        chart_true_instruction,
                         f"If chart_requested is false, do not set {query_tool}.chart_requested=true and do not include chart placeholders.",
                         "If a runtime hook rejects a tool call or final_answer because it conflicts with this decision, correct the specific field it names and retry.",
                     ],
@@ -3463,8 +3470,6 @@ SUPPORTED_CHART_TYPES = tuple(dict.fromkeys((*DEFAULT_CHART_TYPES, *EXPLICIT_CHA
 DATA_ANALYSIS_FINAL_VALIDATION_MAX_BLOCKS = 1
 DATA_ANALYSIS_VALIDATION_HOOK_TIMEOUT_SECONDS = env_int("CUSTOM_GENERAL_AGENT_DATA_ANALYSIS_VALIDATION_TIMEOUT_SEC", 60)
 
-TABLE_REQUEST_RE = re.compile(r"(表格|明细|列表|清单|原始数据|原始结果|查询结果|table|tabular|detail|raw|list)", re.IGNORECASE)
-MARKDOWN_TABLE_RE = re.compile(r"(?m)^\s*\|.+\|\s*$\n^\s*\|[\s:|\-]+\|\s*$")
 CHART_PLACEHOLDER_RE = re.compile(r"\{\{\s*chart\s*:\s*([A-Za-z0-9_.:-]+)\s*\}\}")
 DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY = "data_analysis_display_intent"
 DATA_ANALYSIS_AGENT_TYPE = "data-analysis"
@@ -3530,10 +3535,6 @@ def analysis_query_calls_state_key(payload: ChatPayload | None = None) -> str:
     if payload is not None and is_table_analysis_payload(payload):
         return "table_analysis_calls"
     return "db_query_calls"
-
-
-def user_requested_table(payload: ChatPayload) -> bool:
-    return bool(TABLE_REQUEST_RE.search(payload.query or ""))
 
 
 def truthy_bool(value: Any) -> bool:
@@ -3639,16 +3640,15 @@ def data_analysis_pre_tool_hook_factory(payload: ChatPayload, state: dict[str, A
                 f"当前 {query_tool} 设置了 chart_requested=true，与该结构化意图不一致。"
                 "请改为 chart_requested=false，并只用查询结果支撑文字分析。"
             )
-        if intent.get("chart_requested") is True and not truthy_tool_value(tool_input.get("chart_requested")):
+        if (
+            intent.get("chart_requested") is True
+            and not truthy_tool_value(tool_input.get("chart_requested"))
+            and not is_table_analysis_payload(payload)
+        ):
             return deny_tool(
                 "本轮进入主智能体前的图表展示意图识别结果为 chart_requested=true（用户需要图表展示）。"
                 f"当前 {query_tool} 没有设置 chart_requested=true，会导致最终答案没有可渲染图表。"
                 f"请重新调用 {query_tool} 并设置 chart_requested=true；如果只是查看结构，请改用 {analysis_schema_tool_hint(payload)}。"
-            )
-        if truthy_tool_value(tool_input.get("table_requested")) and not user_requested_table(payload):
-            return deny_tool(
-                f"用户没有明确要求表格/明细/原始结果，本次 {query_tool} 不允许设置 table_requested=true。"
-                "请改为 table_requested=false，最终答案也不要输出 Markdown 表格。"
             )
         preferred = str(tool_input.get("preferred_chart") or "").strip().lower().replace("-", "_").replace(" ", "_")
         if preferred in EXPLICIT_CHART_TYPES and not user_requested_explicit_chart(payload, preferred):
@@ -3730,15 +3730,19 @@ def validation_issues_from_chart(data: dict[str, Any]) -> list[str]:
 
 def summarize_query_result(data: dict[str, Any], max_rows: int = 8) -> dict[str, Any]:
     rows = data.get("rows")
-    return {
+    summary = {
         "query": data.get("query", ""),
         "columns": data.get("columns", []),
         "row_count": data.get("row_count", 0),
         "rows_sample": rows[:max_rows] if isinstance(rows, list) else [],
         "chart_requested": data.get("chart_requested", False),
-        "table_requested": data.get("table_requested", False),
         "display_mode": data.get("display_mode", ""),
     }
+    if "source_mapping" in data:
+        summary["source_mapping"] = data.get("source_mapping")
+    if "source_mapping_validation" in data:
+        summary["source_mapping_validation"] = data.get("source_mapping_validation")
+    return summary
 
 
 def data_analysis_post_tool_hook_factory(payload: ChatPayload, state: dict[str, Any]) -> Callable[[Any, str | None, Any], Any]:
@@ -3844,7 +3848,7 @@ def data_analysis_chart_calls(state: dict[str, Any], payload: ChatPayload | None
                 {
                     "chart_id": chart_id,
                     "contract": contract,
-                    "result": {"chart_requested": True, "table_requested": False},
+                    "result": {"chart_requested": True},
                     "validation_issues": [],
                 }
             )
@@ -3870,8 +3874,15 @@ def chart_output_rule_issues(payload: ChatPayload, item: dict[str, Any]) -> list
         issues.append({"code": "explicit_chart_not_requested", "chart_id": chart_id, "message": f"{chart_type} 必须由用户明确点名才可生成。"})
 
     result = item.get("result") if isinstance(item.get("result"), dict) else {}
-    if result.get("table_requested") is True and not user_requested_table(payload):
-        issues.append({"code": "table_tool_not_requested", "chart_id": chart_id, "message": "用户未要求表格，但数据查询请求了表格输出。"})
+    if is_table_analysis_payload(payload) and result.get("chart_requested") is True:
+        mapping = result.get("source_mapping")
+        has_mapping = isinstance(mapping, dict) and any(str(key).strip() and value is not None for key, value in mapping.items())
+        if not has_mapping:
+            issues.append({
+                "code": "missing_source_mapping",
+                "chart_id": chart_id,
+                "message": "表格分析图表结果缺少 LLM 自行生成的 source_mapping，无法把结果表交给最终 LLM judge 与原始文件证据做一致性核对。",
+            })
 
     return issues
 
@@ -3922,7 +3933,7 @@ def deterministic_final_validation(payload: ChatPayload, answer: str, state: dic
     declared_set = set(declared_chart_ids)
 
     if not chart_calls and not placeholders and not chart_requested_by_intent:
-        return []
+        return issues
 
     if (chart_calls or placeholders) and not chart_requested_by_intent:
         issues.append(
@@ -3934,8 +3945,6 @@ def deterministic_final_validation(payload: ChatPayload, answer: str, state: dic
                 ),
             }
         )
-    if not user_requested_table(payload) and MARKDOWN_TABLE_RE.search(answer or ""):
-        issues.append({"code": "table_not_requested", "message": "用户没有明确要求表格，但最终答案包含 Markdown 表格。"})
     issues.extend(placeholder_structure_issues(answer, placeholders))
 
     known_by_id = {str(item.get("contract", {}).get("id") or ""): item for item in chart_calls if str(item.get("contract", {}).get("id") or "")}
@@ -3997,16 +4006,28 @@ def compact_query_result_for_validation(call: dict[str, Any], max_rows: int = 5)
     result = call.get("result") if isinstance(call.get("result"), dict) else {}
     rows = result.get("rows_sample")
     query = str(result.get("query") or "")
-    return {
+    out = {
         "chart_id": call.get("chart_id", ""),
         "columns": result.get("columns", []),
         "row_count": result.get("row_count", 0),
         "rows_sample": rows[:max_rows] if isinstance(rows, list) else [],
         "chart_requested": result.get("chart_requested", False),
-        "table_requested": result.get("table_requested", False),
         "display_mode": result.get("display_mode", ""),
         "query_excerpt": query[:800],
     }
+    if "source_mapping" in result:
+        out["source_mapping"] = result.get("source_mapping")
+    if "source_mapping_validation" in result:
+        validation = result.get("source_mapping_validation")
+        if isinstance(validation, dict):
+            compact_validation = dict(validation)
+            cells = compact_validation.get("referenced_cells")
+            if isinstance(cells, list):
+                compact_validation["referenced_cells"] = cells[:40]
+            out["source_mapping_validation"] = compact_validation
+        else:
+            out["source_mapping_validation"] = validation
+    return out
 
 
 def compact_validation_context(payload: ChatPayload, answer: str, state: dict[str, Any], deterministic_issues: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4042,7 +4063,6 @@ def compact_validation_context(payload: ChatPayload, answer: str, state: dict[st
         "display_rules": {
             analysis_display_intent_tool_name(payload): data_analysis_display_intent(state),
             "chart_requested_by_user": data_analysis_chart_requested(state),
-            "table_requested_by_user": user_requested_table(payload),
             "query_tool": analysis_query_tool_name(payload),
             "default_supported_chart_types": list(DEFAULT_CHART_TYPES),
             "restricted_chart_types_requiring_user_name": sorted(EXPLICIT_CHART_TYPES.keys()),
@@ -4111,18 +4131,23 @@ async def classify_data_analysis_display_intent(
         "visible_context": prompt_visible_context(payload.visible_context),
     }
     system = (
-        f"你是 WeKnora {analysis_agent_label(payload)}运行时的图表展示意图识别器。"
+        f"你是 WeKnora {analysis_agent_label(payload)}运行时的展示意图识别器。"
         "你只判断当前用户这一轮是否需要生成可渲染的数据图表。"
+        "不要判断数据源是否存在、是否可用、是否有数据；数据源可用性由后端在智能体启动前用硬规则检查。"
         "不要做数据分析，不要生成 SQL，不要输出 Markdown，只返回 JSON。"
     )
     prompt = (
         "请基于 current_user_query，并只在需要解析指代时参考 recent_conversation_history，"
         "语义判断用户本轮是否需要图表展示。不要做关键词匹配式判断；要理解否定、追问、上下文指代和“没看到图”等反馈。\n\n"
+        "重要边界：不要因为 visible_context 中的数据源列表为空、状态异常、字段缺失、上下文看起来没有数据，"
+        "而把明确的画图/图表/可视化请求判为 chart_requested=false。"
+        "本步骤只判断用户是否想要图表，不判断图表是否最终能生成。\n\n"
         "返回且仅返回 JSON，格式固定为："
         "{\"chart_requested\": boolean, \"confidence\": \"high|medium|low\", "
         "\"preferred_chart\": string|null, \"reason\": string}。\n\n"
         "字段含义：chart_requested=true 表示本轮需要最终展示可渲染图表；"
-        "chart_requested=false 表示本轮不需要图表展示，或只是文字解释/表格/代码/图片/图标/地图等非数据图表请求。\n\n"
+        "chart_requested=false 表示本轮不需要图表展示，或只是文字解释/表格/代码/图片/图标/地图等非数据图表请求。"
+        "\n\n"
         "Context:\n"
         + json.dumps(context_payload, ensure_ascii=False)[:20000]
     )
@@ -4179,6 +4204,11 @@ async def run_data_analysis_judge(
         "Check whether the answer satisfies the user request, whether conclusions are supported by query result samples, "
         "whether chart placeholders are near the matching explanation, "
         "whether there are unnecessary charts or unsupported claims, and whether Chinese display/language expectations are met. "
+        "For table-analysis results, source_mapping and source_mapping_validation are the evidence contract between normalized result tables and the original CSV/Excel file. "
+        "When they are present, verify that result rows, visible metrics, chart claims, derivation rules, and referenced original cells are mutually consistent. "
+        "Block only clear contradictions, missing required mappings for displayed table-analysis charts, or obvious omissions from the original-file evidence such as a category present in referenced cells but absent from the chart result. "
+        "When blocking table-analysis evidence issues, be concrete: name the chart_id, result row, result field, displayed value, source_mapping path or source cell/range, the conflicting source value, why the derivation is wrong or unsupported, and the exact correction needed. "
+        "Do not return vague messages like 'data inconsistent' without a repairable location. "
         "ChartContract/spec and validation notes are reference facts only; do not fail solely because of contract/spec field completeness, encoding, or validation-note mismatches. "
         "Use query_results as the primary support for business conclusions. "
         "Explicit-only chart types are restricted types that require user naming; they are not the only allowed chart types. "
@@ -4194,7 +4224,7 @@ async def run_data_analysis_judge(
         f"{task}\n\n"
         "Return JSON with this schema: "
         "{\"pass\": boolean, \"severity\": \"blocker|warning|none\", "
-        "\"issues\": [{\"severity\": \"blocker|warning\", \"code\": string, \"message\": string, \"chart_id\": string, \"required_action\": string}], "
+        "\"issues\": [{\"severity\": \"blocker|warning\", \"code\": string, \"message\": string, \"chart_id\": string, \"result_row\": string, \"result_field\": string, \"displayed_value\": string, \"source_ref\": string, \"source_value\": string, \"mapping_path\": string, \"why_wrong\": string, \"required_action\": string}], "
         "\"repair_instruction\": string}.\n\n"
         "Context:\n"
         + json.dumps(context_payload, ensure_ascii=False)[:24000]
@@ -4249,13 +4279,26 @@ def judge_issues(judge_result: dict[str, Any], prefix: str) -> list[dict[str, An
 
 def compact_validation_issue(issue: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for key in ("code", "severity", "chart_id"):
+    for key in (
+        "code",
+        "severity",
+        "chart_id",
+        "result_row",
+        "result_field",
+        "displayed_value",
+        "source_ref",
+        "source_value",
+        "mapping_path",
+    ):
         value = issue.get(key)
         if value is not None and str(value).strip():
-            out[key] = str(value).strip()[:160]
+            out[key] = str(value).strip()[:260]
     message = str(issue.get("message") or "").strip()
     if message:
         out["message"] = _truncate_text(message, 500)
+    why_wrong = str(issue.get("why_wrong") or "").strip()
+    if why_wrong:
+        out["why_wrong"] = _truncate_text(why_wrong, 500)
     required_action = str(issue.get("required_action") or "").strip()
     if required_action:
         out["required_action"] = _truncate_text(required_action, 500)
@@ -4273,7 +4316,6 @@ def final_answer_candidate_summary(content: str, requested_chart_ids: list[str])
         "content_preview": _truncate_text(content or "", 800),
         "referenced_chart_ids": placeholders,
         "declared_chart_ids": requested_chart_ids,
-        "has_markdown_table": bool(MARKDOWN_TABLE_RE.search(content or "")),
     }
 
 
@@ -4311,8 +4353,9 @@ def data_analysis_validation_repair(
         "issues": issues[:12],
         "required_actions": [
             f"必要时重新调用 {query_tool} 生成符合用户意图的结构化图表。",
+            "表格分析图表结果必须随工具调用提供 source_mapping：说明结果字段、结果行和值与原始 CSV/Excel 字段、sheet、单元格、范围和推导规则的对应关系。",
+            "如果 source_mapping_validation 显示缺失引用或文本不匹配，优先修正 source_mapping 或重新查询原始单元格证据表，而不是硬编无证据结果。",
             "ChartContract/spec 校验信息只作为参考事实，不要为了满足 spec 字段完整性而反复修正；优先保证结论有查询结果支撑。",
-            "用户未明确要求表格时不要输出 Markdown 表格。",
             "每个最终要展示的图表都必须在对应说明段落后紧贴 {{chart:<id>}}。",
             "final_answer.chart_ids 必须和 content 中实际展示的 {{chart:<id>}} 占位符完全一致并保持顺序；不要声明未展示的图表。",
             "最终不需要展示的历史图表不要写入 final_answer 内容。",
@@ -4340,7 +4383,7 @@ async def validate_data_analysis_final_answer(
         validation_progress_event(
             analysis_final_validation_event_id(payload),
             analysis_final_validation_tool_name(payload),
-            "正在校验图表占位符和表格规则",
+            "正在校验图表占位符和图表引用规则",
             stage="hard_rules",
         ),
     )

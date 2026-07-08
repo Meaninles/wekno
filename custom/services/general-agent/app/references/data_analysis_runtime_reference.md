@@ -9,15 +9,47 @@ This file is prepared inside the Claude SDK working directory for WeKnora data-a
 3. Keep SQL and chart generation simple and inspectable. Prefer one well-aggregated query per chart or insight over a long script that is hard to debug.
 4. ChartContract/spec and validation notes are reference facts for wording and debugging. They are not a hard gate and are not a whitelist of every business insight you may discuss. Extra conclusions are allowed when they are supported by query rows.
 5. Put each `{{chart:<id>}}` immediately after the paragraph explaining that chart. Do not gather all chart placeholders at the end.
-6. By default, generate charts only, not Markdown tables. Use `table_requested=true` only when the user asks for table/detail/raw/list output; for compact numeric evidence under a chart, use prose or short bullets.
-7. Default chart text should be Chinese: titles, axis labels, legends, derived labels, and tooltip labels. Original English data values may remain English.
-8. Before final delivery, call `final_answer` with the complete visible answer in `content`; include only chart ids that are actually explained. When `content` contains `{{chart:<id>}}` placeholders, set `chart_ids` to exactly those ids in the same display order and do not declare ids that are not referenced.
+6. Default chart text should be Chinese: titles, axis labels, legends, derived labels, and tooltip labels. Original English data values may remain English.
+7. Before final delivery, call `final_answer` with the complete visible answer in `content`; include only chart ids that are actually explained. When `content` contains `{{chart:<id>}}` placeholders, set `chart_ids` to exactly those ids in the same display order and do not declare ids that are not referenced.
 
-For CSV/Excel table-analysis, `table_schema` may expose a raw Excel cell table when the normal header-based table appears incomplete. Use that `raw_table_name` through `table_analysis` for merged-cell, decorative-header, cross-tab or irregular workbooks instead of creating a local CSV and trying to chart that file.
+For structured-analysis runs, the runtime injects a display-intent block before the main agent runs. Treat `chart_requested` as the authority for chart output.
 
-For CSV/Excel table-analysis, `UNION ALL` is only for combining a small number of real table-backed SELECT branches from the provided table names. Do not construct chart data with hard-coded `UNION ALL SELECT 'label', 123` rows; derive rows from the source table or raw table with `GROUP BY`, CASE expressions, sheet filters, or other grounded SQL.
+For CSV/Excel table-analysis, write SELECT-only DuckDB SQL. Validation and execution use DuckDB semantics, so tolerant casts such as `TRY_CAST(value AS INTEGER)` are valid when converting text-loaded CSV/Excel values.
 
-For CSV/Excel table-analysis, every visible result column used for analysis or charting must be grounded in source columns, `*`, or table-derived aggregates/window expressions. Do not use `SELECT 'label', 123 FROM table LIMIT 1` or the same pattern inside `UNION ALL`; that only proves a row exists and is not valid table-derived analysis.
+For CSV/Excel table-analysis, `table_schema` may expose an original-file cell evidence table (`cell_table_name`). Use that table through `table_analysis` to inspect sheet names, row/column numbers, A1 cell refs, merged ranges, raw values, and effective values for merged-cell, decorative-header, cross-tab, sectioned or otherwise irregular workbooks.
+
+For irregular CSV/Excel files, first inspect `cell_table_name`, then normalize the evidence into a result table suitable for analysis or ECharts. You may use `VALUES`, `UNION ALL`, CTEs, CASE expressions and aggregates for this normalization. The runtime intentionally lets your LLM judgment handle messy spreadsheet layout instead of forcing all output columns to be mechanically derived by SQL.
+
+For table-analysis chart result calls, you must author `source_mapping` yourself in the `table_analysis` input. The backend does not generate this JSON. It only receives it, forwards it, lightly inspects referenced cells when obvious cell refs are present, and provides it to the final LLM judge. The template below is weak guidance only; the runtime does not enforce this exact shape.
+
+Weak `source_mapping` template:
+
+```json
+{
+  "purpose": "chart_result",
+  "result_table": "每个岗位序列的子序列数量和子类数量",
+  "result_fields": [
+    {
+      "result_field": "序列",
+      "meaning": "岗位序列名称",
+      "source_fields": ["原文件中的序列分段标题"],
+      "source_refs": [{"sheet": "股份岗位序列划分", "cell": "A56", "text": "营销序列"}],
+      "derivation": "取序列分段标题文本"
+    }
+  ],
+  "row_mappings": [
+    {
+      "result_row": "营销序列",
+      "result_values": {"序列": "营销序列", "子序列数量": "2"},
+      "source_refs": [{"sheet": "股份岗位序列划分", "cells": ["A56", "C56", "C57"], "text": "营销序列"}],
+      "derivation": "统计营销序列下 C 列非空子序列名称"
+    }
+  ],
+  "derivation_rules": ["按序列分段标题向下归属，直到下一个序列分段标题"],
+  "assumptions": [],
+  "confidence": "high"
+}
+```
 
 `db_query` and `table_analysis` share the same visible result-budget contract: analytical SQL is wrapped by the tool with an outer `LIMIT` using `limits.max_rows` (default 1000), and `limits.truncated=true` means the returned row count reached that limit, so more rows may exist. Do not treat `truncated=true` as an exact total count. There is no table-analysis-specific SQL timeout rule in the prompt; keep queries efficient through aggregation, filters, and sensible detail-row limits.
 
@@ -121,5 +153,4 @@ If final validation reports an issue:
 - Chart id mismatch: make `final_answer.chart_ids` exactly match the `{{chart:<id>}}` placeholders in `content`, in display order.
 - ChartContract/spec validation note: treat it as reference only. Revise wording or rerun the structured query tool only when the visible answer would be misleading or the query result cannot support the conclusion.
 - Extra/superseded charts: omit their placeholders and do not mention them.
-- Table violation: remove Markdown table unless the user explicitly requested one.
 - Explicit-only chart violation: use a default chart type unless the user named that exact chart type.

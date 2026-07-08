@@ -333,9 +333,14 @@ const answerSplit = computed(() => {
 });
 
 const answerSegments = computed(() => answerSplit.value.segments);
-const promotedStructuredResults = computed(() =>
-  structuredAnalysisResults.value.filter((_, index) => !answerSplit.value.usedResultIndexes.has(index)),
+const hasExplicitStructuredChartPlaceholders = computed(() =>
+  /\{\{\s*chart\s*:\s*([a-zA-Z0-9_-]+|\d+)\s*\}\}/.test(answerMarkdown.value),
 );
+
+const promotedStructuredResults = computed(() => {
+  if (hasExplicitStructuredChartPlaceholders.value) return [];
+  return structuredAnalysisResults.value.filter((_, index) => !answerSplit.value.usedResultIndexes.has(index));
+});
 
 const renderedMarkdownImageHydrationKey = computed(() =>
   answerSegments.value

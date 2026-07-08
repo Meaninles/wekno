@@ -85,7 +85,7 @@ func NewHandlers(
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
-	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService)
+	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
 	iamService := iam.NewService(db, userService)
 	userGuideService := userguide.NewService(db, orgService, knowledgeBaseService, kbShareService)
 	scheduledChatService := scheduledchat.NewService(

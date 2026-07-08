@@ -31,7 +31,7 @@ var dataAnalysisTool = BaseTool{
 
 var tableAnalysisTool = BaseTool{
 	name:        ToolTableAnalysis,
-	description: "Use this tool for CSV/Excel table analysis. It loads one knowledge-base file or current-turn uploaded table attachment into DuckDB, executes read-only SQL, and can return structured chart data when chart_requested is true. When chart output is requested, pass chart_intent and field hints using actual SQL result column names.",
+	description: "Use this tool for CSV/Excel table analysis. It exposes both a normal DuckDB table and a faithful original-file cell evidence table, executes SELECT-only DuckDB SQL, and can return structured chart data when chart_requested is true. You may use VALUES or UNION ALL to normalize irregular files, but chart results must include non-empty LLM-authored source_mapping JSON that maps result data back to original file evidence. The prompt template is weak guidance only and is not validated as a fixed schema.",
 	schema:      utils.GenerateSchema[TableAnalysisInput](),
 }
 
@@ -42,6 +42,8 @@ const excelRawTableSuffix = "__raw"
 
 const DisplayTypeStructuredAnalysis = "structured_analysis_result"
 const tableAnalysisMaxRows = 1000
+
+var reDuckDBTryCastForPostgresValidation = regexp.MustCompile(`(?i)\btry_cast\s*\(`)
 
 // sqlSingleQuoteEscape escapes single quotes in a string so it can be safely
 // embedded inside a single-quoted SQL literal.
@@ -117,17 +119,17 @@ func buildMissingColumnSuggestion(sqlErr error, schema *TableSchema) string {
 }
 
 type DataAnalysisInput struct {
-	KnowledgeID     string `json:"knowledge_id" jsonschema:"id of the knowledge-base CSV/Excel file or current-turn uploaded table attachment to query"`
-	Sql             string `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against the loaded CSV/Excel table; use the table name returned by table_schema"`
-	ChartRequested  bool   `json:"chart_requested,omitempty" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 图表, 可视化, or a named chart type"`
-	PreferredChart  string `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user or selected after an explicit chart request: line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
-	ChartIntent     string `json:"chart_intent,omitempty" jsonschema:"optional natural-language chart intent, e.g. compare subcategory counts by sequence; used only when chart_requested is true"`
-	PrimaryMetric   string `json:"primary_metric,omitempty" jsonschema:"optional SQL result column name that should be the primary visual metric when chart_requested is true"`
-	SecondaryMetric string `json:"secondary_metric,omitempty" jsonschema:"optional SQL result column name for a secondary metric, especially dual_axis_combo or relationship charts"`
-	Dimension       string `json:"dimension,omitempty" jsonschema:"optional SQL result column name that should be the main category/time axis when chart_requested is true"`
-	Series          string `json:"series,omitempty" jsonschema:"optional SQL result column name that should be the series/stack/group dimension when chart_requested is true"`
-	ChartTitle      string `json:"chart_title,omitempty" jsonschema:"optional concise Chinese chart title; use when it helps align the rendered chart with the final explanation"`
-	TableRequested  bool   `json:"table_requested,omitempty" jsonschema:"true only when the user explicitly asks for table/detail/raw/list output; false by default even when a chart is requested"`
+	KnowledgeID     string                 `json:"knowledge_id" jsonschema:"id of the knowledge-base CSV/Excel file or current-turn uploaded table attachment to query"`
+	Sql             string                 `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against the loaded CSV/Excel table; use the table name returned by table_schema"`
+	ChartRequested  bool                   `json:"chart_requested,omitempty" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 图表, 可视化, or a named chart type"`
+	PreferredChart  string                 `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user or selected after an explicit chart request: line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
+	ChartIntent     string                 `json:"chart_intent,omitempty" jsonschema:"optional natural-language chart intent, e.g. compare subcategory counts by sequence; used only when chart_requested is true"`
+	PrimaryMetric   string                 `json:"primary_metric,omitempty" jsonschema:"optional SQL result column name that should be the primary visual metric when chart_requested is true"`
+	SecondaryMetric string                 `json:"secondary_metric,omitempty" jsonschema:"optional SQL result column name for a secondary metric, especially dual_axis_combo or relationship charts"`
+	Dimension       string                 `json:"dimension,omitempty" jsonschema:"optional SQL result column name that should be the main category/time axis when chart_requested is true"`
+	Series          string                 `json:"series,omitempty" jsonschema:"optional SQL result column name that should be the series/stack/group dimension when chart_requested is true"`
+	ChartTitle      string                 `json:"chart_title,omitempty" jsonschema:"optional concise Chinese chart title; use when it helps align the rendered chart with the final explanation"`
+	SourceMapping   map[string]interface{} `json:"source_mapping,omitempty" jsonschema:"required for table_analysis chart result queries: LLM-authored JSON mapping from SQL result fields/rows/values to original CSV/Excel fields, cells, ranges, and derivation rules; use the prompt template as weak guidance only; the runtime forwards it and may inspect referenced cells, but never auto-generates it or validates an exact template shape"`
 }
 
 type TableAnalysisInput = DataAnalysisInput
@@ -290,14 +292,15 @@ func (t *DataAnalysisTool) tableAnalysisValidationOptions(allowedTables []string
 		utils.WithAllowedTables(allowedTables...),
 		utils.WithSingleStatement(),
 		utils.WithNoDangerousFunctions(),
-		utils.WithInjectionRiskCheck(),
 	}
 	if t.isTableAnalysisTool() {
 		opts = append(opts,
-			utils.WithSafeUnionAll(6, 6),
+			utils.WithSafeUnionAll(64, 16),
 			utils.WithSafeSystemTypeCasts(),
-			utils.WithGroundedSelectOutput(),
+			utils.WithAllowTablelessSelect(),
 		)
+	} else {
+		opts = append(opts, utils.WithInjectionRiskCheck())
 	}
 	return opts
 }
@@ -315,6 +318,69 @@ func limitTableAnalysisSQL(sqlText string, maxRows int) string {
 		maxRows = tableAnalysisMaxRows
 	}
 	return fmt.Sprintf("SELECT * FROM (%s) AS __weknora_table_analysis_limited LIMIT %d", normalizeTableAnalysisSQL(sqlText), maxRows)
+}
+
+func tableAnalysisSQLForASTValidation(sqlText string) string {
+	return reDuckDBTryCastForPostgresValidation.ReplaceAllString(sqlText, "CAST(")
+}
+
+func newTableAnalysisValidationError(errorType, message, details string) *utils.SQLValidationResult {
+	return &utils.SQLValidationResult{
+		Valid: false,
+		Errors: []utils.SQLValidationError{
+			{Type: errorType, Message: message, Details: details},
+		},
+	}
+}
+
+func normalizeTableAnalysisASTValidationErrors(validation *utils.SQLValidationResult) *utils.SQLValidationResult {
+	if validation == nil || validation.Valid {
+		return validation
+	}
+	for i := range validation.Errors {
+		if validation.Errors[i].Type != "parse_error" {
+			continue
+		}
+		validation.Errors[i].Type = "statement_validation_error"
+		validation.Errors[i].Message = "DuckDB SQL passed syntax validation but could not be analyzed by table_analysis safety rules"
+		validation.Errors[i].Details = validation.Errors[i].Details + "; simplify the SELECT shape or avoid DuckDB-only constructs that cannot be inspected by the safety validator"
+	}
+	return validation
+}
+
+func (t *DataAnalysisTool) validateTableAnalysisSQL(ctx context.Context, sqlText string, allowedTables []string) *utils.SQLValidationResult {
+	sqlText = normalizeTableAnalysisSQL(sqlText)
+	if t == nil || t.db == nil {
+		return newTableAnalysisValidationError(
+			"parse_error",
+			"Failed to parse DuckDB SQL",
+			"DuckDB connection is unavailable for table_analysis SQL validation",
+		)
+	}
+
+	duckDBSQL := fmt.Sprintf("EXPLAIN SELECT * FROM (%s) AS __weknora_table_analysis_validate LIMIT 0", sqlText)
+	rows, err := t.db.QueryContext(ctx, duckDBSQL)
+	if err != nil {
+		return newTableAnalysisValidationError(
+			"parse_error",
+			"Failed to parse DuckDB SQL",
+			fmt.Sprintf("DuckDB SQL parse/bind error: %v", err),
+		)
+	}
+	defer rows.Close()
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		return newTableAnalysisValidationError(
+			"parse_error",
+			"Failed to parse DuckDB SQL",
+			fmt.Sprintf("DuckDB SQL parse/bind error: %v", err),
+		)
+	}
+
+	compatSQL := tableAnalysisSQLForASTValidation(sqlText)
+	_, validation := utils.ValidateSQL(compatSQL, t.tableAnalysisValidationOptions(allowedTables)...)
+	return normalizeTableAnalysisASTValidationErrors(validation)
 }
 
 // Execute executes the SQL query on DuckDB (only read-only queries are allowed)
@@ -352,6 +418,14 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		input.Sql = rewrittenSQL
 	}
 	input.Sql = normalizeTableAnalysisSQL(input.Sql)
+	if t.isTableAnalysisTool() && input.ChartRequested && !hasUsableTableAnalysisSourceMapping(input.SourceMapping) {
+		err := fmt.Errorf("table_analysis chart result queries must include non-empty LLM-authored source_mapping JSON that maps result data back to original file evidence; the template is weak guidance only and is not validated as a fixed schema")
+		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Missing source_mapping for session %s: %v", t.sessionID, err)
+		return &types.ToolResult{
+			Success: false,
+			Error:   err.Error(),
+		}, err
+	}
 
 	if !t.isTableAnalysisTool() {
 		// Preserve legacy data_analysis behavior. The table_analysis tool uses
@@ -376,7 +450,12 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 	// Validate SQL with comprehensive security checks
 	// IMPORTANT: Must enable validateSelectStmt to block RangeFunction attacks
 	allowedTables := allowedTableAnalysisTables(schema)
-	_, validation := utils.ValidateSQL(input.Sql, t.tableAnalysisValidationOptions(allowedTables)...)
+	var validation *utils.SQLValidationResult
+	if t.isTableAnalysisTool() {
+		validation = t.validateTableAnalysisSQL(ctx, input.Sql, allowedTables)
+	} else {
+		_, validation = utils.ValidateSQL(input.Sql, t.tableAnalysisValidationOptions(allowedTables)...)
+	}
 	if !validation.Valid {
 		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] SQL validation failed for session %s: %v", t.sessionID, validation.Errors)
 		return &types.ToolResult{
@@ -405,15 +484,13 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 	logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Completed execution query, total %d rows for session %s", len(results), t.sessionID)
 	chartRequested := input.ChartRequested && t.allowChart
 	chart := inferStructuredChartSpec(columns, results, input.PreferredChart, chartRequested, tableChartHintsFromInput(input))
-	tableRequested := input.TableRequested
+	sourceMappingValidation := map[string]interface{}{"status": "not_applicable"}
+	if t.isTableAnalysisTool() {
+		sourceMappingValidation = t.validateTableAnalysisSourceMapping(ctx, schema, input.SourceMapping)
+	}
 	displayMode := "text_only"
 	if eligible, _ := chart["eligible"].(bool); eligible {
 		displayMode = "chart_only"
-		if tableRequested {
-			displayMode = "chart_and_table"
-		}
-	} else if tableRequested {
-		displayMode = "table"
 	}
 	limits := map[string]interface{}{"truncated": truncated}
 	if t.isTableAnalysisTool() {
@@ -423,20 +500,20 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		Success: true,
 		Output:  queryOutput,
 		Data: map[string]interface{}{
-			"display_type":    DisplayTypeStructuredAnalysis,
-			"display_mode":    displayMode,
-			"analysis_type":   "file",
-			"source":          map[string]interface{}{"type": "file", "knowledge_id": input.KnowledgeID, "table_name": schema.TableName, "allowed_tables": allowedTables},
-			"columns":         columns,
-			"rows":            results,
-			"row_count":       len(results),
-			"query":           input.Sql,
-			"chart_requested": chartRequested,
-			"chart":           chart,
-			"table_requested": tableRequested,
-			"table_visible":   tableRequested,
-			"limits":          limits,
-			"session_id":      t.sessionID,
+			"display_type":              DisplayTypeStructuredAnalysis,
+			"display_mode":              displayMode,
+			"analysis_type":             "file",
+			"source":                    map[string]interface{}{"type": "file", "knowledge_id": input.KnowledgeID, "table_name": schema.TableName, "allowed_tables": allowedTables},
+			"columns":                   columns,
+			"rows":                      results,
+			"row_count":                 len(results),
+			"query":                     input.Sql,
+			"chart_requested":           chartRequested,
+			"chart":                     chart,
+			"source_mapping":            input.SourceMapping,
+			"source_mapping_validation": sourceMappingValidation,
+			"limits":                    limits,
+			"session_id":                t.sessionID,
 		},
 	}, nil
 }
@@ -565,6 +642,9 @@ func (t *DataAnalysisTool) applyDisplayIntentToInput(input *DataAnalysisInput) e
 		return fmt.Errorf("table-analysis display intent is chart_requested=false, but %s was called with chart_requested=true; retry with chart_requested=false and answer with text/table evidence only", toolName)
 	}
 	if t.displayIntent.ChartRequested && !input.ChartRequested {
+		if t.isTableAnalysisTool() {
+			return nil
+		}
 		return fmt.Errorf("table-analysis display intent is chart_requested=true, but %s was called without chart_requested=true; retry the analytical result query with chart_requested=true", toolName)
 	}
 	if t.displayIntent.ChartRequested && strings.TrimSpace(input.PreferredChart) == "" && strings.TrimSpace(t.displayIntent.PreferredChart) != "" {
@@ -1576,6 +1656,7 @@ type ColumnInfo struct {
 //   - error: any error that occurred during the operation
 func (t *DataAnalysisTool) LoadFromCSV(ctx context.Context, filename string, tableName string) (*TableSchema, error) {
 	logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Loading CSV file '%s' into table '%s' for session %s", filename, tableName, t.sessionID)
+	cellTableName := cellEvidenceTableName(tableName)
 
 	// Record the created table for cleanup. If already exists, skip creation
 	if t.recordCreatedTable(tableName) {
@@ -1602,10 +1683,29 @@ func (t *DataAnalysisTool) LoadFromCSV(ctx context.Context, filename string, tab
 		}
 
 		logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Successfully created table '%s' from CSV file in session %s (encoding=%s)", tableName, t.sessionID, encodingName)
+
+		if t.recordCreatedTable(cellTableName) {
+			if rows, err := createCSVCellEvidenceTable(ctx, t.db, csvPath, cellTableName); err != nil {
+				logger.Warnf(ctx,
+					"[Tool][LegacyDataAnalysis] Failed to create CSV cell evidence table '%s' from '%s' (session=%s): %v",
+					cellTableName, csvPath, t.sessionID, err,
+				)
+			} else {
+				logger.Infof(ctx,
+					"[Tool][LegacyDataAnalysis] Successfully created CSV cell evidence table '%s' with %d cells for session %s",
+					cellTableName, rows, t.sessionID,
+				)
+			}
+		}
 	}
 
 	// Get and return the table schema
-	return t.LoadFromTable(ctx, tableName)
+	schema, err := t.LoadFromTable(ctx, tableName)
+	if err != nil {
+		return nil, err
+	}
+	t.attachCellEvidenceTableMetadata(ctx, schema, cellTableName, "CSV cell evidence table")
+	return schema, nil
 }
 
 func normalizeCSVFileForDuckDB(ctx context.Context, filename string) (string, func(), string, error) {
@@ -1670,7 +1770,7 @@ func normalizeCSVFileForDuckDB(ctx context.Context, filename string) (string, fu
 // 'spatial' extension (for st_read_meta used to enumerate sheets).
 func (t *DataAnalysisTool) LoadFromExcel(ctx context.Context, filename string, tableName string) (*TableSchema, error) {
 	logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Loading Excel file '%s' into table '%s' for session %s", filename, tableName, t.sessionID)
-	rawTableName := rawExcelTableName(tableName)
+	cellTableName := cellEvidenceTableName(tableName)
 
 	// Record the created table for cleanup. If already exists, skip creation.
 	if t.recordCreatedTable(tableName) {
@@ -1682,31 +1782,38 @@ func (t *DataAnalysisTool) LoadFromExcel(ctx context.Context, filename string, t
 			)
 		}
 
-		createTableSQL := buildExcelCreateTableSQL(tableName, filename, sheetNames)
-
-		if _, err := t.db.ExecContext(ctx, createTableSQL); err != nil {
-			logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Failed to create table from Excel (sheets=%v): %v", sheetNames, err)
-			return nil, fmt.Errorf("failed to create table from Excel file (sheets=%v): %w", sheetNames, err)
-		}
-
-		logger.Infof(ctx,
-			"[Tool][LegacyDataAnalysis] Successfully created table '%s' from Excel file in session %s (sheets=%v)",
-			tableName, t.sessionID, sheetNames,
-		)
-
-		if t.recordCreatedTable(rawTableName) {
-			rawCreateSQL := buildExcelRawCreateTableSQL(rawTableName, filename, sheetNames)
-			if _, err := t.db.ExecContext(ctx, rawCreateSQL); err != nil {
+		if t.recordCreatedTable(cellTableName) {
+			if rows, err := createExcelCellEvidenceTable(ctx, t.db, filename, cellTableName, sheetNames); err != nil {
 				logger.Warnf(ctx,
-					"[Tool][LegacyDataAnalysis] Failed to create raw Excel table '%s' from '%s' (sheets=%v, session=%s): %v",
-					rawTableName, filename, sheetNames, t.sessionID, err,
+					"[Tool][LegacyDataAnalysis] Failed to create Excel cell evidence table '%s' from '%s' (sheets=%v, session=%s): %v",
+					cellTableName, filename, sheetNames, t.sessionID, err,
 				)
 			} else {
 				logger.Infof(ctx,
-					"[Tool][LegacyDataAnalysis] Successfully created raw Excel table '%s' from Excel file in session %s (sheets=%v)",
-					rawTableName, t.sessionID, sheetNames,
+					"[Tool][LegacyDataAnalysis] Successfully created Excel cell evidence table '%s' with %d cells for session %s (sheets=%v)",
+					cellTableName, rows, t.sessionID, sheetNames,
 				)
 			}
+		}
+
+		createTableSQL := buildExcelCreateTableSQL(tableName, filename, sheetNames)
+
+		if _, err := t.db.ExecContext(ctx, createTableSQL); err != nil {
+			logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Failed to create structured table from Excel (sheets=%v): %v; falling back to cell evidence table", sheetNames, err)
+			fallbackSQL := fmt.Sprintf("CREATE TABLE %s AS SELECT * FROM %s", quoteDuckDBIdentifier(tableName), quoteDuckDBIdentifier(cellTableName))
+			if _, fallbackErr := t.db.ExecContext(ctx, fallbackSQL); fallbackErr != nil {
+				logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Failed to create table from Excel and fallback cell table (sheets=%v): %v; fallback=%v", sheetNames, err, fallbackErr)
+				return nil, fmt.Errorf("failed to create table from Excel file (sheets=%v): %w; fallback cell table failed: %v", sheetNames, err, fallbackErr)
+			}
+			logger.Infof(ctx,
+				"[Tool][LegacyDataAnalysis] Created fallback table '%s' from cell evidence table '%s' for session %s",
+				tableName, cellTableName, t.sessionID,
+			)
+		} else {
+			logger.Infof(ctx,
+				"[Tool][LegacyDataAnalysis] Successfully created table '%s' from Excel file in session %s (sheets=%v)",
+				tableName, t.sessionID, sheetNames,
+			)
 		}
 	}
 
@@ -1714,7 +1821,7 @@ func (t *DataAnalysisTool) LoadFromExcel(ctx context.Context, filename string, t
 	if err != nil {
 		return nil, err
 	}
-	t.attachRawExcelTableMetadata(ctx, schema, rawTableName)
+	t.attachCellEvidenceTableMetadata(ctx, schema, cellTableName, "Excel cell evidence table")
 	return schema, nil
 }
 
@@ -1857,27 +1964,38 @@ func buildExcelRawCreateTableSQL(tableName, filename string, sheetNames []string
 	)
 }
 
-func (t *DataAnalysisTool) attachRawExcelTableMetadata(ctx context.Context, schema *TableSchema, rawTableName string) {
-	if schema == nil || strings.TrimSpace(rawTableName) == "" {
+func (t *DataAnalysisTool) attachCellEvidenceTableMetadata(ctx context.Context, schema *TableSchema, cellTableName string, label string) {
+	if schema == nil || strings.TrimSpace(cellTableName) == "" {
 		return
 	}
-	rawSchema, err := t.LoadFromTable(ctx, rawTableName)
+	cellSchema, err := t.LoadFromTable(ctx, cellTableName)
 	if err != nil {
-		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Raw Excel table '%s' is not available for session %s: %v", rawTableName, t.sessionID, err)
+		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Cell evidence table '%s' is not available for session %s: %v", cellTableName, t.sessionID, err)
 		return
 	}
 	if schema.Metadata == nil {
 		schema.Metadata = map[string]interface{}{}
 	}
-	schema.Metadata["raw_table_name"] = rawSchema.TableName
-	schema.Metadata["raw_column_count"] = len(rawSchema.Columns)
-	schema.Metadata["raw_row_count"] = rawSchema.RowCount
-	rawColumns := make([]map[string]interface{}, 0, len(rawSchema.Columns))
-	for _, col := range rawSchema.Columns {
-		rawColumns = append(rawColumns, map[string]interface{}{"name": col.Name, "type": col.Type})
+	if strings.TrimSpace(label) == "" {
+		label = "Original file cell evidence table"
 	}
-	schema.Metadata["raw_columns"] = rawColumns
-	schema.Metadata["raw_usage"] = "Use raw_table_name when the structured table appears incomplete because of merged cells, decorative headers, cross-tab layout, or irregular Excel formatting. The raw table is the same workbook loaded with header=false."
+	schema.Metadata["cell_table_name"] = cellSchema.TableName
+	schema.Metadata["cell_table_label"] = label
+	schema.Metadata["cell_column_count"] = len(cellSchema.Columns)
+	schema.Metadata["cell_row_count"] = cellSchema.RowCount
+	cellColumns := make([]map[string]interface{}, 0, len(cellSchema.Columns))
+	for _, col := range cellSchema.Columns {
+		cellColumns = append(cellColumns, map[string]interface{}{"name": col.Name, "type": col.Type})
+	}
+	schema.Metadata["cell_columns"] = cellColumns
+	schema.Metadata["cell_usage"] = "Use cell_table_name as the authoritative original-file evidence table for irregular layouts, merged cells, decorative headers, cross-tab data, section headings, or when the structured table appears incomplete. The table has one row per non-empty or merged cell with sheet_name, row_number, column_number, cell_ref, value, effective_value, and merged_range."
+	// Keep the legacy metadata key as an alias so older references still point
+	// at the faithful cell evidence table rather than DuckDB's inferred raw rows.
+	schema.Metadata["raw_table_name"] = cellSchema.TableName
+	schema.Metadata["raw_column_count"] = len(cellSchema.Columns)
+	schema.Metadata["raw_row_count"] = cellSchema.RowCount
+	schema.Metadata["raw_columns"] = cellColumns
+	schema.Metadata["raw_usage"] = schema.Metadata["cell_usage"]
 }
 
 // LoadFromKnowledge loads data from a Knowledge entity into a DuckDB table and returns the table schema.
@@ -2200,8 +2318,13 @@ func allowedTableAnalysisTables(schema *TableSchema) []string {
 		return nil
 	}
 	out := []string{schema.TableName}
+	if cellName := metadataString(schema.Metadata, "cell_table_name"); cellName != "" && cellName != schema.TableName {
+		out = append(out, cellName)
+	}
 	if rawName := metadataString(schema.Metadata, "raw_table_name"); rawName != "" && rawName != schema.TableName {
-		out = append(out, rawName)
+		if !containsStringValue(out, rawName) {
+			out = append(out, rawName)
+		}
 	}
 	return out
 }
@@ -2245,15 +2368,17 @@ func (t *TableSchema) Description() string {
 		builder.WriteString(fmt.Sprintf("- %s (%s)\n", col.Name, col.Type))
 	}
 
-	if rawName := metadataString(t.Metadata, "raw_table_name"); rawName != "" {
-		builder.WriteString("\nRaw Excel cell table:\n")
-		builder.WriteString(fmt.Sprintf("- Table name: %s\n", rawName))
-		builder.WriteString(fmt.Sprintf("- Columns: %v\n", t.Metadata["raw_column_count"]))
-		builder.WriteString(fmt.Sprintf("- Rows: %v\n", t.Metadata["raw_row_count"]))
-		builder.WriteString("- Use this raw table when merged cells, decorative headers or irregular layout make the structured table incomplete. Query it with the same table_analysis tool; it is the same workbook loaded with header=false.\n")
-		if rawColumns, ok := t.Metadata["raw_columns"].([]map[string]interface{}); ok && len(rawColumns) > 0 {
-			builder.WriteString("- Raw column info:\n")
-			for _, col := range rawColumns {
+	if cellName := metadataString(t.Metadata, "cell_table_name"); cellName != "" {
+		builder.WriteString("\nOriginal file cell evidence table:\n")
+		builder.WriteString(fmt.Sprintf("- Table name: %s\n", cellName))
+		builder.WriteString(fmt.Sprintf("- Columns: %v\n", t.Metadata["cell_column_count"]))
+		builder.WriteString(fmt.Sprintf("- Rows: %v\n", t.Metadata["cell_row_count"]))
+		builder.WriteString("- This is the authoritative source for irregular CSV/Excel understanding. It contains source_kind, sheet_name, row_number, column_number, column_letter, cell_ref, value, effective_value, merged_range, is_merged, and is_blank.\n")
+		builder.WriteString("- Use this table to inspect original cells, section headings, merged cells, and non-rectangular layouts before constructing a normalized analysis result.\n")
+		builder.WriteString("- When using table_analysis for chart output, include source_mapping JSON that maps result fields and rows back to this evidence table or the original file fields.\n")
+		if cellColumns, ok := t.Metadata["cell_columns"].([]map[string]interface{}); ok && len(cellColumns) > 0 {
+			builder.WriteString("- Cell evidence column info:\n")
+			for _, col := range cellColumns {
 				builder.WriteString(fmt.Sprintf("  - %s (%s)\n", col["name"], col["type"]))
 			}
 		}

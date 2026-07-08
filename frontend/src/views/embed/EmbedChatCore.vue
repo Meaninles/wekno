@@ -19,29 +19,6 @@
         </div>
 
         <div
-          v-if="showSuggestedBlock"
-          class="embed-suggested"
-        >
-          <p v-if="suggestedQuestions.length > 0" class="embed-suggested__title">
-            {{ t('chat.suggestedQuestions') }}
-          </p>
-          <div v-if="suggestedLoading && suggestedQuestions.length === 0" class="embed-suggested__grid">
-            <div v-for="n in 4" :key="`sq-skel-${n}`" class="embed-suggested__card embed-suggested__card--skeleton" />
-          </div>
-          <div v-else-if="suggestedQuestions.length > 0" class="embed-suggested__grid">
-            <button
-              v-for="item in suggestedQuestions"
-              :key="item.question"
-              type="button"
-              class="embed-suggested__card"
-              @click="handleSuggestedClick(item.question)"
-            >
-              <span class="embed-suggested__text">{{ item.question }}</span>
-            </button>
-          </div>
-        </div>
-
-        <div
           v-for="(session, index) in messagesList"
           :key="(session.id as string) || `${session.role}-${session.created_at}-${index}`"
           class="msg-item-wrapper"
@@ -104,8 +81,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
-import { useI18n } from 'vue-i18n'
-import { getEmbedSuggestedQuestions, onEmbedHostOpenWithQuery, type SuggestedQuestion } from '@/api/embed'
+import { onEmbedHostOpenWithQuery } from '@/api/embed'
 import EmbedInputField from '@/components/EmbedInputField.vue'
 import EmbedBotMessage from '@/views/embed/EmbedBotMessage.vue'
 import EmbedUserMessage from '@/views/embed/EmbedUserMessage.vue'
@@ -137,12 +113,9 @@ const emit = defineEmits<{
   (e: 'messages-state', hasMessages: boolean): void
 }>()
 
-const { t } = useI18n()
 const sessionIdRef = toRef(props, 'sessionId')
 const sessionSigRef = toRef(props, 'sessionSig')
 const visitorIdRef = toRef(props, 'visitorId')
-const suggestedQuestions = ref<SuggestedQuestion[]>([])
-const suggestedLoading = ref(false)
 const hostContextRef = ref<Record<string, unknown>>(props.hostContext || {})
 
 function asUnknownArray(value: unknown): unknown[] | undefined {
@@ -236,29 +209,6 @@ const showGlobalTypingIndicator = computed(() =>
 /** 访客未发言前始终展示欢迎语（含历史加载中），发送后隐藏 */
 const showWelcome = computed(() => hasWelcomeText.value && !hasUserMessage.value)
 
-const showSuggestedBlock = computed(() =>
-  props.showSuggestedQuestions
-  && !hasUserMessage.value
-  && !loading.value
-  && !historyLoading.value
-  && (suggestedLoading.value || suggestedQuestions.value.length > 0))
-
-const fetchSuggestedQuestions = async () => {
-  if (!props.showSuggestedQuestions || !props.channelId || !props.token) {
-    suggestedQuestions.value = []
-    return
-  }
-  suggestedLoading.value = true
-  try {
-    const res = await getEmbedSuggestedQuestions(props.channelId, props.token, 6)
-    suggestedQuestions.value = res?.data?.questions || []
-  } catch {
-    suggestedQuestions.value = []
-  } finally {
-    suggestedLoading.value = false
-  }
-}
-
 const onSendMsg = (query: string, imageFiles: File[] = [], attachmentFiles: File[] = []) => {
   void sendMsg(query, {
     webSearchEnabled: webSearchEnabled.value,
@@ -267,16 +217,9 @@ const onSendMsg = (query: string, imageFiles: File[] = [], attachmentFiles: File
   })
 }
 
-const handleSuggestedClick = (question: string) => {
-  const text = question.trim()
-  if (!text || isReplying.value) return
-  void sendMsg(text, { webSearchEnabled: webSearchEnabled.value })
-}
-
 let removeOpenQueryListener: (() => void) | null = null
 
 onMounted(() => {
-  fetchSuggestedQuestions()
   removeOpenQueryListener = onEmbedHostOpenWithQuery((query) => {
     if (isReplying.value) return
     void sendMsg(query, { webSearchEnabled: webSearchEnabled.value })
@@ -286,11 +229,6 @@ onMounted(() => {
 onUnmounted(() => {
   removeOpenQueryListener?.()
 })
-
-watch(
-  () => [props.showSuggestedQuestions, props.channelId, props.token] as const,
-  () => { fetchSuggestedQuestions() },
-)
 </script>
 
 <style scoped lang="less">
@@ -319,55 +257,6 @@ watch(
   width: 100%;
   padding: 12px 16px 0;
   box-sizing: border-box;
-}
-
-.embed-suggested {
-  width: 100%;
-
-  &__title {
-    margin: 0 0 8px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--td-text-color-secondary);
-  }
-
-  &__grid {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  &__card {
-    display: block;
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--td-component-stroke);
-    border-radius: 10px;
-    background: var(--td-bg-color-container);
-    text-align: left;
-    cursor: pointer;
-    transition: border-color 0.15s ease, background 0.15s ease;
-
-    &:hover {
-      border-color: var(--td-brand-color-3, var(--td-brand-color));
-      background: color-mix(in srgb, var(--td-brand-color) 4%, var(--td-bg-color-container));
-    }
-
-    &--skeleton {
-      height: 40px;
-      cursor: default;
-      background: linear-gradient(90deg, #f0f0f0 25%, #e6e6e6 50%, #f0f0f0 75%);
-      background-size: 200% 100%;
-      animation: sk-shimmer 1.2s ease-in-out infinite;
-      border: none;
-    }
-  }
-
-  &__text {
-    font-size: 13px;
-    line-height: 1.45;
-    color: var(--td-text-color-primary);
-  }
 }
 
 .embed-welcome-bubble {

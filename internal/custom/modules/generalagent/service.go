@@ -17,6 +17,7 @@ import (
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -48,6 +49,7 @@ type Service struct {
 	modelService     interfaces.ModelService
 	knowledgeService interfaces.KnowledgeService
 	fileService      interfaces.FileService
+	dbAnalytics      *dbanalytics.Service
 	client           *Client
 	documentClient   *Client
 	artifactRoot     string
@@ -61,6 +63,7 @@ func NewService(
 	modelService interfaces.ModelService,
 	knowledgeService interfaces.KnowledgeService,
 	fileService interfaces.FileService,
+	dbAnalytics *dbanalytics.Service,
 ) *Service {
 	root := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT"))
 	if root == "" {
@@ -74,6 +77,7 @@ func NewService(
 		modelService:     modelService,
 		knowledgeService: knowledgeService,
 		fileService:      fileService,
+		dbAnalytics:      dbAnalytics,
 		client:           NewClientFromEnv(),
 		documentClient:   NewDocumentProcessingClientFromEnv(),
 		artifactRoot:     root,
@@ -110,8 +114,12 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 
 	start := time.Now()
 	sessionID := req.Session.ID
+	runID := uuid.New().String()
 	agentConfig, err := s.sessionService.BuildAgentRuntimeConfig(ctx, req)
 	if err != nil {
+		return err
+	}
+	if blocked, err := s.preflightDataAnalysisSources(ctx, eventBus, req, agentConfig, runID, start); blocked || err != nil {
 		return err
 	}
 	sidecarClient := s.clientForAgentType(agentConfig.AgentType)
@@ -142,7 +150,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	}
 	agentConfig.ProfessionalSkillsEnabled = len(professionalSkills) > 0
 	agentConfig.AllowedProfessionalSkills = professionalSkillNames(professionalSkills)
-	runID := uuid.New().String()
 	originalInputFiles := s.originalInputFileSpecs(ctx, req, runID)
 	userID, _ := types.UserIDFromContext(ctx)
 	active := &activeRun{
@@ -294,6 +301,139 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		},
 	})
 	return nil
+}
+
+func (s *Service) preflightDataAnalysisSources(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, config *types.AgentConfig, runID string, start time.Time) (bool, error) {
+	if req == nil || config == nil || config.AgentType != types.AgentTypeDataAnalysis {
+		return false, nil
+	}
+	progressID := "data-source-preflight-" + runID
+	emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "正在检查数据源可用性", "start", false, nil)
+	if s.dbAnalytics == nil {
+		answer := "当前无可用数据源"
+		emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "数据源可用性检查完成：当前无可用数据源", "success", true, map[string]interface{}{"available": false})
+		emitGeneralAgentPreflightAnswer(ctx, eventBus, req, runID, answer, start)
+		return true, nil
+	}
+	scope := dbanalytics.ToolScope{
+		AgentID:        config.AgentID,
+		AgentType:      config.AgentType,
+		SessionID:      req.Session.ID,
+		TenantID:       tenantIDFromContext(ctx),
+		TenantRole:     types.TenantRoleFromContext(ctx),
+		SourceTenantID: config.AgentTenantID,
+		SourceIDs:      append([]string(nil), config.DBDataSources...),
+	}
+	result, err := s.dbAnalytics.CheckSourceAvailability(ctx, scope)
+	if err != nil {
+		return false, err
+	}
+	if result != nil && len(result.Available) > 0 {
+		emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "数据源可用性检查通过", "success", true, map[string]interface{}{
+			"available":         true,
+			"available_sources": result.Available,
+			"unavailable":       result.Unavailable,
+		})
+		return false, nil
+	}
+	answer := unavailableDataSourceAnswer(result)
+	emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "数据源可用性检查完成：当前无可用数据源", "success", true, map[string]interface{}{
+		"available":   false,
+		"unavailable": unavailableIssues(result),
+	})
+	emitGeneralAgentPreflightAnswer(ctx, eventBus, req, runID, answer, start)
+	return true, nil
+}
+
+func emitGeneralAgentProgress(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, id, toolName, content, phase string, done bool, metadata map[string]interface{}) {
+	if eventBus == nil || req == nil {
+		return
+	}
+	eventBus.Emit(ctx, event.Event{
+		ID:        id,
+		Type:      event.EventAgentProgress,
+		SessionID: req.Session.ID,
+		RequestID: req.RequestID,
+		Data: event.AgentProgressData{
+			Content:    content,
+			ToolName:   toolName,
+			ToolCallID: id,
+			Phase:      phase,
+			Done:       done,
+			Metadata:   metadata,
+		},
+	})
+}
+
+func emitGeneralAgentPreflightAnswer(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, runID, answer string, start time.Time) {
+	if eventBus == nil || req == nil {
+		return
+	}
+	answerID := "data-source-preflight-answer-" + runID
+	eventBus.Emit(ctx, event.Event{
+		ID:        answerID,
+		Type:      event.EventAgentFinalAnswer,
+		SessionID: req.Session.ID,
+		RequestID: req.RequestID,
+		Data: event.AgentFinalAnswerData{
+			Content: answer,
+			Done:    false,
+		},
+	})
+	eventBus.Emit(ctx, event.Event{
+		ID:        answerID,
+		Type:      event.EventAgentFinalAnswer,
+		SessionID: req.Session.ID,
+		RequestID: req.RequestID,
+		Data: event.AgentFinalAnswerData{
+			Content: "",
+			Done:    true,
+		},
+	})
+	eventBus.Emit(ctx, event.Event{
+		Type:      event.EventAgentComplete,
+		SessionID: req.Session.ID,
+		RequestID: req.RequestID,
+		Data: event.AgentCompleteData{
+			SessionID:       req.Session.ID,
+			FinalAnswer:     answer,
+			TotalDurationMs: time.Since(start).Milliseconds(),
+			MessageID:       req.AssistantMessageID,
+			RequestID:       req.RequestID,
+		},
+	})
+}
+
+func unavailableDataSourceAnswer(result *dbanalytics.SourceAvailabilityResult) string {
+	issues := unavailableIssues(result)
+	if len(issues) == 0 {
+		return "当前无可用数据源"
+	}
+	names := make([]string, 0, len(issues))
+	lines := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		name := strings.TrimSpace(issue.Name)
+		if name == "" {
+			name = strings.TrimSpace(issue.ID)
+		}
+		if name == "" {
+			name = "未命名数据源"
+		}
+		errText := strings.TrimSpace(issue.Error)
+		if errText == "" {
+			errText = "未知错误"
+		}
+		names = append(names, name)
+		lines = append(lines, fmt.Sprintf("%s：%s", name, errText))
+	}
+	return fmt.Sprintf("已配置数据源%s不可用，报错如下：\n%s", strings.Join(names, "、"), strings.Join(lines, "\n"))
+}
+
+func unavailableIssues(result *dbanalytics.SourceAvailabilityResult) []dbanalytics.SourceAvailabilityIssue {
+	if result == nil {
+		return nil
+	}
+	return result.Unavailable
 }
 
 func (s *Service) emitSidecarEvent(ctx context.Context, eventBus *event.EventBus, sessionID, fallbackAnswerID string, evt StreamEvent, streamed *strings.Builder, lastAnswerID *string, lastAnswerDone *bool, active *activeRun) {

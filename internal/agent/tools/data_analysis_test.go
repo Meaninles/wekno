@@ -137,7 +137,7 @@ func TestSqlSingleQuoteEscape(t *testing.T) {
 	}
 }
 
-func TestTableSchemaDescriptionAndAllowedTablesIncludeRawExcelTable(t *testing.T) {
+func TestTableSchemaDescriptionAndAllowedTablesIncludeCellEvidenceTable(t *testing.T) {
 	schema := &TableSchema{
 		TableName: "attachment_1",
 		Columns: []ColumnInfo{
@@ -145,22 +145,22 @@ func TestTableSchemaDescriptionAndAllowedTablesIncludeRawExcelTable(t *testing.T
 		},
 		RowCount: 4,
 		Metadata: map[string]interface{}{
-			"raw_table_name":   "attachment_1__raw",
-			"raw_column_count": 3,
-			"raw_row_count":    int64(40),
-			"raw_columns": []map[string]interface{}{
-				{"name": "column0", "type": "VARCHAR"},
-				{"name": "column1", "type": "VARCHAR"},
+			"cell_table_name":   "attachment_1__cells",
+			"cell_column_count": 11,
+			"cell_row_count":    int64(40),
+			"cell_columns": []map[string]interface{}{
+				{"name": "cell_ref", "type": "VARCHAR"},
+				{"name": "effective_value", "type": "VARCHAR"},
 			},
 		},
 	}
 
 	desc := schema.Description()
-	if !strings.Contains(desc, "Raw Excel cell table") || !strings.Contains(desc, "attachment_1__raw") {
-		t.Fatalf("raw table guidance missing from description:\n%s", desc)
+	if !strings.Contains(desc, "Original file cell evidence table") || !strings.Contains(desc, "attachment_1__cells") {
+		t.Fatalf("cell evidence table guidance missing from description:\n%s", desc)
 	}
 	allowed := allowedTableAnalysisTables(schema)
-	if len(allowed) != 2 || allowed[0] != "attachment_1" || allowed[1] != "attachment_1__raw" {
+	if len(allowed) != 2 || allowed[0] != "attachment_1" || allowed[1] != "attachment_1__cells" {
 		t.Fatalf("unexpected allowed tables: %#v", allowed)
 	}
 }
@@ -202,6 +202,13 @@ func TestTableAnalysisValidationOptionsAreTableOnly(t *testing.T) {
 	if defaultValidation.Valid {
 		t.Fatal("legacy data_analysis validation should not allow UNION ALL")
 	}
+	_, defaultInjectionValidation := utils.ValidateSQL(
+		"SELECT id FROM attachment_1 WHERE false",
+		defaultTool.tableAnalysisValidationOptions([]string{"attachment_1"})...,
+	)
+	if defaultInjectionValidation.Valid {
+		t.Fatal("legacy data_analysis validation should still keep SQL injection risk checks")
+	}
 
 	tableTool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, nil, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
 	_, tableValidation := utils.ValidateSQL(
@@ -216,11 +223,46 @@ func TestTableAnalysisValidationOptionsAreTableOnly(t *testing.T) {
 		"(SELECT '管理序列' AS seq, 14 AS child_count FROM attachment_1 WHERE \"__sheet_name\" = '岗位' LIMIT 1) UNION ALL (SELECT '职能序列', 23 FROM attachment_1 WHERE \"__sheet_name\" = '岗位' LIMIT 1)",
 		tableTool.tableAnalysisValidationOptions([]string{"attachment_1", "attachment_1__raw"})...,
 	)
-	if hardcodedValidation.Valid {
-		t.Fatal("table_analysis validation should reject hard-coded constant chart datasets even when each branch references a table")
+	if !hardcodedValidation.Valid {
+		t.Fatalf("table_analysis validation should allow LLM-normalized constant datasets; source_mapping is enforced at tool-call level, got %#v", hardcodedValidation.Errors)
 	}
-	if len(hardcodedValidation.Errors) == 0 || !strings.Contains(hardcodedValidation.Errors[0].Details, "constant-only") {
-		t.Fatalf("expected constant-only grounding error, got %#v", hardcodedValidation.Errors)
+
+	_, valuesValidation := utils.ValidateSQL(
+		`SELECT * FROM (VALUES ('管理序列', 1), ('营销序列', 2)) AS t(seq, child_count)`,
+		tableTool.tableAnalysisValidationOptions([]string{"attachment_1", "attachment_1__raw"})...,
+	)
+	if !valuesValidation.Valid {
+		t.Fatalf("table_analysis validation should allow VALUES-normalized datasets; source_mapping is enforced at tool-call level, got %#v", valuesValidation.Errors)
+	}
+
+	_, boolFilterValidation := utils.ValidateSQL(
+		`SELECT cell_ref, effective_value FROM attachment_1__cells WHERE sheet_name = '股份岗位序列划分' AND column_letter = 'A' AND row_number >= 4 AND row_number <= 60 AND is_blank = false`,
+		tableTool.tableAnalysisValidationOptions([]string{"attachment_1", "attachment_1__cells"})...,
+	)
+	if !boolFilterValidation.Valid {
+		t.Fatalf("table_analysis validation should allow ordinary boolean field comparisons, got %#v", boolFilterValidation.Errors)
+	}
+
+	_, emptyProbeValidation := utils.ValidateSQL(
+		`SELECT cell_ref FROM attachment_1__cells WHERE false`,
+		tableTool.tableAnalysisValidationOptions([]string{"attachment_1", "attachment_1__cells"})...,
+	)
+	if !emptyProbeValidation.Valid {
+		t.Fatalf("table_analysis validation should allow harmless empty-result probes; runtime limits still apply, got %#v", emptyProbeValidation.Errors)
+	}
+}
+
+func TestTableAnalysisRequiresSourceMappingOnlyForDisplayedResult(t *testing.T) {
+	if hasUsableTableAnalysisSourceMapping(nil) {
+		t.Fatal("nil mapping should not be usable")
+	}
+	if hasUsableTableAnalysisSourceMapping(map[string]interface{}{"result_fields": []interface{}{}}) {
+		t.Fatal("empty template-looking mapping should not be usable")
+	}
+	if !hasUsableTableAnalysisSourceMapping(map[string]interface{}{
+		"说明": "营销序列来自 A56，子序列来自 C56:C57",
+	}) {
+		t.Fatal("free-form non-empty LLM-authored mapping should be usable")
 	}
 }
 

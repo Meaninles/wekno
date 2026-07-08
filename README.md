@@ -28,7 +28,7 @@
 | 目标 | 平台能力 |
 | --- | --- |
 | 让企业知识可检索、可引用、可治理 | 文档知识库、FAQ、Wiki、图谱、标签、批量重解析、解析时间线、来源引用。 |
-| 让智能体能完成真实业务任务 | 快速问答、智能推理、通用智能体、数据分析智能体、文档处理智能体、MCP、技能和联网搜索。 |
+| 让智能体能完成真实业务任务 | 快速问答、智能推理、通用智能体、数据分析智能体、表格分析智能体、文档处理智能体、MCP、技能和联网搜索。 |
 | 让企业资源安全协作 | 多租户 RBAC、共享空间、资源共享、统一身份认证、默认配置中心、审计和凭据加密。 |
 | 让能力可以被业务系统复用 | API、网页嵌入、IM 渠道、Chrome 插件、ClawHub 技能、定时任务。 |
 
@@ -40,6 +40,7 @@
 | 客服或标准口径问答 | FAQ 知识库 + FAQ 优先策略 + 推荐问题。 |
 | 大量长文档结构化阅读 | Wiki 知识库 + Wiki 问答 + 页面链接图谱。 |
 | 企业经营数据分析 | MySQL/PostgreSQL 数据源 + 数据分析智能体 + 图表/报告输出。 |
+| CSV/Excel 即席分析 | 表格分析智能体 + 知识库表格或本轮附件 + 图表输出。 |
 | 生成 Word、Excel、PDF、PPT | 文档处理智能体 + 企业模板 + 专业技能。 |
 | 复杂业务编排 | 通用智能体 + 知识库 + 数据库 + MCP + 联网搜索 + 产物生成。 |
 | 每日/每周自动报告 | 定时任务 + 绑定智能体 + 固定上下文和提示词模板。 |
@@ -68,6 +69,7 @@
 | 智能推理 | ReAct 多步推理，编排知识库、工具、MCP 和联网搜索。 |
 | 维基问答 | 面向 Wiki 页面和目录的知识问答。 |
 | 数据分析 | 连接 MySQL/PostgreSQL，生成 SQL、指标解释和图表。 |
+| 表格分析 | 分析 CSV/Excel 知识库文件或对话附件，生成表格结论和图表。 |
 | 通用智能体 | 同时使用知识库、数据库、MCP、技能、联网搜索和产物生成。 |
 | 文档处理 | 生成或修改 Word、Excel、PDF、PPT 等办公文档，可按需绑定数据库源辅助分析。 |
 
@@ -165,7 +167,7 @@ flowchart LR
 | 默认配置中心 | `internal/custom/modules/configcenter/` | 支持系统管理员从源工作区选择模型、向量库、解析器、存储、联网搜索、MCP，并复制下发到用户工作区。 |
 | 数据库分析 | `internal/custom/modules/dbanalytics/` | 管理 MySQL/PostgreSQL 数据源、元数据、字段语义、脱敏规则、共享关系，并向智能体提供 `db_catalog`、`db_schema`、`db_query` 工具。 |
 | 文件安全校验 | `internal/custom/modules/fileguard/` | 对上传文件做类型、大小、压缩包、XML、CSV、Office 等安全与复杂度检查，区分轻量/重型文件处理路径。 |
-| 通用智能体 | `internal/custom/modules/generalagent/` | 将 `general-agent`、`document-processing-agent`、`data-analysis` 接入 Claude Agent SDK 旁路服务，负责运行时配置、工具回调、产物持久化和下载。 |
+| 通用智能体 | `internal/custom/modules/generalagent/` | 将 `general-agent`、`document-processing-agent`、`data-analysis`、`table-analysis` 接入 Claude Agent SDK 旁路服务，负责运行时配置、工具回调、产物持久化和下载。 |
 | IAM/SSO | `internal/custom/modules/iam/` | 支持统一身份认证登录、组织人员同步、定时同步、手动同步、外部组织/用户映射和共享空间成员候选查询。 |
 | 定时会话 | `internal/custom/modules/scheduledchat/` | 支持按小时/日/周/月自动向智能体提问，保存运行记录，并将结果写入真实会话。 |
 | 会话状态 | `internal/custom/modules/sessionstate/` | 记录不同用户或 Principal 对会话的已读水位，给 Web 和移动端会话列表提供未读/生成中状态。 |
@@ -215,7 +217,7 @@ flowchart LR
 
 | 服务 | 目录 | 容器/端口 | 当前职责 |
 | --- | --- | --- | --- |
-| 通用智能体旁路服务 | `custom/services/general-agent/` | `weknora-custom-general-agent`，`127.0.0.1:8091` | 运行 `general-agent` 和 `data-analysis` 的 Claude Agent SDK 循环，接收 Go 后端下发的工具结构和上下文，工具执行统一回调 Go。 |
+| 通用智能体旁路服务 | `custom/services/general-agent/` | `weknora-custom-general-agent`，`127.0.0.1:8091` | 运行 `general-agent`、`data-analysis` 和 `table-analysis` 的 Claude Agent SDK 循环，接收 Go 后端下发的工具结构和上下文，工具执行统一回调 Go。 |
 | 文档处理智能体旁路服务 | `custom/services/document-processing-agent/` | `weknora-custom-document-processing-agent`，`127.0.0.1:8093` | 运行 `document-processing-agent`，在同一 SDK 应用基础上预装 LibreOffice、Pandoc、PDF/Office 处理库和中文字体，用于文档生成与转换。 |
 | 浏览器宿主实验目录 | `custom/services/browser-host/` | 当前保留日志与测试目录 | 为浏览器宿主类能力预留的旁路服务目录。 |
 
@@ -288,6 +290,14 @@ http://localhost:8080
 docker compose -f custom/docker-compose.general-agent.yml up -d --build
 ```
 
+默认接入开发网络 `weknora_WeKnora-network-dev`。如果使用主 `docker-compose.yml` 生产栈，先启动主栈，再指定生产网络：
+
+```bash
+CUSTOM_GENERAL_AGENT_NETWORK=weknora_WeKnora-network docker compose -f custom/docker-compose.general-agent.yml up -d --build
+```
+
+生产环境还必须在 `.env` 中为 app 和两个旁路服务配置相同的 `CUSTOM_GENERAL_AGENT_API_KEY`；产物目录建议使用持久化路径 `CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT=/data/files/general-agent-artifacts`。
+
 健康检查：
 
 ```bash
@@ -328,6 +338,7 @@ docker compose -f custom/docker-compose.general-agent.yml up -d --build
 - 生产环境不要把 API Key、嵌入发布 Token、模型密钥或数据库密码放到浏览器或静态包。
 - 对公网网页嵌入建议使用安全模式，业务后端代持发布 Token，并换取短期 `ems_` 会话 Token。
 - 数据库分析只应开放必要表和字段，敏感字段设置为脱敏或隐藏。
+- Claude SDK 旁路服务的 `CUSTOM_GENERAL_AGENT_API_KEY` 必须与 Go 后端一致，工具回调地址按部署网络设置为 app 容器可访问地址。
 - MCP 有副作用或高风险工具应开启审批。
 - 统一身份认证部署在反向代理后时，需要正确透传 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto`。
 - 修改二开逻辑前先阅读 [二开目录结构规范](./docs/custom/二开目录结构规范.md)，避免把大段业务代码散落到原生目录。

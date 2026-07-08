@@ -49,5 +49,5 @@ volumes:
 
 networks:
   WeKnora-network-dev:
-    name: weknora_WeKnora-network-dev
+    name: ${CUSTOM_GENERAL_AGENT_NETWORK:-weknora_WeKnora-network-dev}
     external: true

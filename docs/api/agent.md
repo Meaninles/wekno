@@ -18,6 +18,7 @@
 | `builtin-simple-chat` | 简单对话 | 不默认绑定知识库，支持联网搜索和文件、图片、音频上传 | `quick-answer` |
 | `builtin-smart-reasoning` | 智能推理 | ReAct 推理框架，支持多步思考和工具调用 | `smart-reasoning` / `rag-qa` |
 | `builtin-data-analyst` | 数据分析 | Claude SDK 数据分析智能体，绑定 MySQL/PostgreSQL 数据源后使用 SQL 和图表分析数据 | `smart-reasoning` / `data-analysis` |
+| `builtin-table-analyst` | 表格分析 | Claude SDK 表格分析智能体，分析 CSV/Excel 知识库文件或对话附件并生成图表 | `smart-reasoning` / `table-analysis` |
 | `builtin-general-agent` | 通用智能体 | Claude SDK 通用智能体，复用知识库、联网、MCP、技能、数据库源和产物生成 | `smart-reasoning` / `general-agent` |
 | `builtin-document-processing` | 文档处理 | Claude SDK 文档处理智能体，生成或修改 Word、Excel、PDF、PPT 文档 | `smart-reasoning` / `document-processing-agent` |
 | `builtin-wiki-researcher` | 维基问答 | 面向 Wiki 知识库的问答智能体 | `smart-reasoning` / `wiki-qa` |
@@ -30,7 +31,7 @@
 | `quick-answer` | RAG 模式，快速问答，直接基于知识库检索结果生成回答 |
 | `smart-reasoning` | ReAct 模式，支持多步推理和工具调用 |
 
-`smart-reasoning` 下还可以通过 `agent_type` 选择类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`document-processing-agent`、`general-agent`、`custom`。其中 `general-agent`、`document-processing-agent`、`data-analysis` 会进入 Claude SDK sidecar 运行时。
+`smart-reasoning` 下还可以通过 `agent_type` 选择类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、`general-agent`、`custom`。其中 `general-agent`、`document-processing-agent`、`data-analysis`、`table-analysis` 会进入 Claude SDK sidecar 运行时。
 
 ## API 列表
 
@@ -420,7 +421,7 @@ curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `agent_mode` | string | - | 智能体模式：`quick-answer`（RAG）或 `smart-reasoning`（ReAct） |
-| `agent_type` | string | `custom` | 智能推理类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`document-processing-agent`、`general-agent`、`custom` |
+| `agent_type` | string | `custom` | 智能推理类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、`general-agent`、`custom` |
 | `system_prompt` | string | - | 系统提示词，支持使用占位符 |
 | `system_prompt_id` | string | - | 系统提示词模板 ID（引用 `prompt_templates/` YAML 文件中的模板） |
 | `context_template` | string | - | 上下文模板（仅 quick-answer 模式使用） |
@@ -459,7 +460,7 @@ curl --location 'http://localhost:8080/api/v1/agents/placeholders' \
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `db_data_sources` | []string | - | 绑定的 MySQL/PostgreSQL 数据源 ID。`data-analysis` 必填，`general-agent` 和 `document-processing-agent` 可选 |
+| `db_data_sources` | []string | - | 绑定的 MySQL/PostgreSQL 数据源 ID。`data-analysis` 必填，`general-agent` 和 `document-processing-agent` 可选，`table-analysis` 不使用 |
 
 ### 知识库设置
 

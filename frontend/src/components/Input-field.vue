@@ -155,6 +155,14 @@ const setUploadedAttachments = (attachments: AttachmentFile[] = []) => {
   });
 };
 
+const getUploadedAttachments = (): AttachmentFile[] => uploadedAttachments.value
+  .filter((attachment): attachment is AttachmentFile => !!attachment?.file)
+  .map((attachment) => ({ ...attachment }));
+
+const clearUploadedAttachments = () => {
+  setUploadedAttachments([]);
+};
+
 const triggerImageUpload = () => {
   imageInputRef.value?.click();
 };
@@ -1000,8 +1008,8 @@ const syncModelFromSelectedAgent = () => {
   return true;
 };
 
-// Initial chat-model selection priority: current agent model > per-user last
-// pick (localStorage) > current store value > first available model.
+// Initial chat-model selection priority: current agent model > current
+// conversation value > per-user last pick (new-chat default) > first available model.
 // Agent-level model belongs on the agent and must win whenever an agent
 // with model_id is selected or restored after refresh.
 const initChatModelSelection = () => {
@@ -1009,7 +1017,7 @@ const initChatModelSelection = () => {
 
   const lastPick = readLastChatModelID();
   const currentSelectedModel = settingsStore.conversationModels.selectedChatModelId;
-  const initialSelection = lastPick || currentSelectedModel || '';
+  const initialSelection = currentSelectedModel || lastPick || '';
   applyChatModelSelection(initialSelection);
   ensureModelSelection();
 };
@@ -2442,6 +2450,8 @@ defineExpose({
     nextTick(() => createSession(text));
   },
   setUploadedAttachments,
+  getUploadedAttachments,
+  clearUploadedAttachments,
 });
 
 </script>

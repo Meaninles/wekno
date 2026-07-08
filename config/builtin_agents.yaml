@@ -41,7 +41,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
       enable_query_expansion: true
       enable_rewrite: true
@@ -86,7 +86,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
       enable_query_expansion: true
       enable_rewrite: true
@@ -140,7 +140,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
 
   - id: "builtin-data-analyst"
@@ -251,7 +251,7 @@ builtin_agents:
       multi_turn_enabled: true
       history_turns: 10
       faq_priority_enabled: false
-      embedding_top_k: 5
+      embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
       rerank_top_k: 5
@@ -323,7 +323,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
 
   - id: "builtin-document-processing"
@@ -421,7 +421,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
 
   - id: "builtin-wiki-researcher"
@@ -466,7 +466,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
 
   - id: "builtin-wiki-fixer"
@@ -515,6 +515,6 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 5
       rerank_threshold: 0.3
 

@@ -243,6 +243,32 @@ export const useSettingsStore = defineStore("settings", {
       localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
 
+    resetConversationScopedState() {
+      const defaults = cloneDefaultSettings();
+      const current = this.settings || defaults;
+      this.settings = {
+        ...current,
+        knowledgeBaseId: defaults.knowledgeBaseId,
+        isAgentEnabled: defaults.isAgentEnabled,
+        selectedKnowledgeBases: [],
+        selectedSkillNames: [],
+        selectedProfessionalSkillNames: [],
+        selectedFiles: [],
+        selectedFileKbMap: {},
+        selectedTags: [],
+        selectedMCPServices: [],
+        selectedSkills: [],
+        selectedTools: [],
+        conversationModels: { ...defaults.conversationModels },
+        selectedAgentId: defaults.selectedAgentId,
+        selectedAgentSourceTenantId: defaults.selectedAgentSourceTenantId,
+        webSearchEnabled: defaults.webSearchEnabled,
+      };
+      this._defaultsSnapshot = null;
+      this._isApplyingSessionState = false;
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
     // 获取API端点
     getEndpoint(): string {
       return this.settings.endpoint || defaultSettings.endpoint;
@@ -661,6 +687,71 @@ export const useSettingsStore = defineStore("settings", {
       // 的就是 localStorage 中既有的值，再写一次只会增加无意义的 IO。
     },
 
+    captureConversationScopedState(): SessionLastRequestStatePayload {
+      const selectedKnowledgeBases = [...(this.settings.selectedKnowledgeBases || [])];
+      const selectedFiles = [...(this.settings.selectedFiles || [])];
+      const selectedFileKbMap = { ...(this.settings.selectedFileKbMap || {}) };
+      const selectedTags = [...(this.settings.selectedTags || [])];
+      const selectedMCPServices = [...(this.settings.selectedMCPServices || [])];
+      const skillNames = Array.from(new Set([
+        ...(this.settings.selectedSkillNames || []),
+        ...(this.settings.selectedSkills || []),
+      ].map((name) => String(name || "").trim()).filter(Boolean)));
+      const professionalSkillNames = Array.from(new Set(
+        (this.settings.selectedProfessionalSkillNames || [])
+          .map((name) => String(name || "").trim())
+          .filter(Boolean),
+      ));
+      const mentionedItems: SessionLastRequestStatePayload["mentioned_items"] = [
+        ...selectedKnowledgeBases.map((id) => ({
+          id,
+          name: id,
+          type: "kb",
+        })),
+        ...selectedFiles.map((id) => ({
+          id,
+          name: id,
+          type: "file",
+          kb_id: selectedFileKbMap[id],
+        })),
+        ...selectedTags.map((tag) => ({
+          id: tag.id,
+          name: tag.name || tag.id,
+          type: "tag",
+          kb_id: tag.kbId,
+          kb_name: tag.kbName,
+        })),
+        ...selectedMCPServices.map((id) => ({
+          id,
+          name: id,
+          type: "mcp",
+          service_id: id,
+        })),
+        ...skillNames.map((name) => ({
+          id: name,
+          name,
+          type: "skill",
+          skill_name: name,
+        })),
+      ];
+
+      return {
+        agent_id: this.settings.selectedAgentId || "",
+        agent_source_tenant_id: this.settings.selectedAgentSourceTenantId || undefined,
+        agent_enabled: !!this.settings.isAgentEnabled,
+        model_id: this.settings.conversationModels?.selectedChatModelId || "",
+        knowledge_base_ids: selectedKnowledgeBases,
+        knowledge_ids: selectedFiles,
+        selected_file_kb_map: selectedFileKbMap,
+        tag_ids: selectedTags.map((tag) => tag.id).filter(Boolean),
+        mcp_service_ids: selectedMCPServices,
+        skill_names: skillNames,
+        professional_skill_names: professionalSkillNames,
+        mentioned_items: mentionedItems,
+        web_search_enabled: !!this.settings.webSearchEnabled,
+      };
+    },
+
     // 根据 session.last_request_state 覆盖输入栏相关字段。
     // 只触碰本次记录的字段，**不**清空 store 中其它无关字段（如模型列表）。
     // 任何字段缺失则保留 store 现值，做"尽力恢复"。
@@ -687,8 +778,17 @@ export const useSettingsStore = defineStore("settings", {
         }
         if (Array.isArray(state.knowledge_ids)) {
           this.settings.selectedFiles = [...state.knowledge_ids];
-          // selectedFileKbMap 需要 mentioned_items 中的 kb_id 才能重建；
-          // 若历史会话没有这部分数据，保留 store 现值做尽力恢复。
+          this.settings.selectedFileKbMap = {};
+        }
+        if (state.selected_file_kb_map && typeof state.selected_file_kb_map === "object") {
+          const selected = new Set(this.settings.selectedFiles || []);
+          const nextFileKbMap: Record<string, string> = {};
+          Object.entries(state.selected_file_kb_map).forEach(([fileId, kbId]) => {
+            if (fileId && kbId && (!selected.size || selected.has(fileId))) {
+              nextFileKbMap[fileId] = String(kbId);
+            }
+          });
+          this.settings.selectedFileKbMap = nextFileKbMap;
         }
         if (Array.isArray(state.mentioned_items)) {
           const fileKbMap: Record<string, string> = {};
@@ -698,7 +798,7 @@ export const useSettingsStore = defineStore("settings", {
             }
           });
           if (Object.keys(fileKbMap).length > 0) {
-            this.settings.selectedFileKbMap = fileKbMap;
+            this.settings.selectedFileKbMap = { ...this.settings.selectedFileKbMap, ...fileKbMap };
           }
 
           const fromMentions = state.mentioned_items
@@ -773,6 +873,7 @@ export interface SessionLastRequestStatePayload {
   mcp_service_ids?: string[];
   skill_names?: string[];
   professional_skill_names?: string[];
+  selected_file_kb_map?: Record<string, string>;
   mentioned_items?: Array<{
     id: string;
     name?: string;

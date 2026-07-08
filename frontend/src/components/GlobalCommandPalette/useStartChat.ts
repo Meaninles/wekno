@@ -1,6 +1,5 @@
 import { useRouter } from 'vue-router'
 import { useMenuStore } from '@/stores/menu'
-import { useSettingsStore } from '@/stores/settings'
 
 /**
  * Shared "start a new chat with query + KB/file preselected" helper.
@@ -15,7 +14,6 @@ import { useSettingsStore } from '@/stores/settings'
 export function useStartChat() {
   const router = useRouter()
   const menuStore = useMenuStore()
-  const settingsStore = useSettingsStore()
 
   /**
    * @param query The user's query; it becomes the pre-filled first message
@@ -26,15 +24,14 @@ export function useStartChat() {
     const q = (query || '').trim()
     if (!q) return
 
-    if (kbIds.length > 0) {
-      settingsStore.selectKnowledgeBases(kbIds)
-    }
-    for (const fid of fileIds) {
-      settingsStore.addFile(fid)
-    }
-
     menuStore.setPrefillQuery(q)
-    router.push('/platform/creatChat')
+    router.push({
+      path: '/platform/creatChat',
+      query: {
+        ...(kbIds.length > 0 ? { kb_ids: kbIds.join(',') } : {}),
+        ...(fileIds.length > 0 ? { file_ids: fileIds.join(',') } : {}),
+      },
+    })
   }
 
   return { startChat }

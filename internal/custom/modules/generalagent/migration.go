@@ -39,6 +39,23 @@ var generalAgentMigrationStatements = []string{
 		updated_at = NOW()
 		WHERE config->>'agent_type' = 'general-agent'
 		  AND (config->'allowed_artifact_formats' IS NOT NULL OR config->'max_artifacts' IS NOT NULL)`,
+	`UPDATE custom_agents
+		SET config = jsonb_set(jsonb_set(config, '{embedding_top_k}', '10'::jsonb, true), '{rerank_top_k}', '5'::jsonb, true),
+		    updated_at = NOW()
+		WHERE is_builtin = TRUE
+		  AND id = 'builtin-table-analyst'
+		  AND (
+			(config->>'embedding_top_k' = '5' AND config->>'rerank_top_k' = '5')
+			OR (config->>'embedding_top_k' = '10' AND config->>'rerank_top_k' = '10')
+			OR config->>'embedding_top_k' IS NULL
+		  )`,
+	`UPDATE custom_agents
+		SET config = jsonb_set(config, '{rerank_top_k}', '5'::jsonb, true),
+		    updated_at = NOW()
+		WHERE is_builtin = TRUE
+		  AND id <> 'builtin-table-analyst'
+		  AND config->>'embedding_top_k' = '10'
+		  AND config->>'rerank_top_k' = '10'`,
 	`DELETE FROM mcp_services
 		WHERE tenant_id = 0
 		  AND name = 'General Agent MCP Fixtures'

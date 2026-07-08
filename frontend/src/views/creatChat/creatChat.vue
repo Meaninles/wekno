@@ -16,7 +16,7 @@
         @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
 </template>
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onBeforeMount } from 'vue';
 import ContextualGuide from '@/components/ContextualGuide.vue';
 import InputField from '@/components/Input-field.vue';
 import { createSessions } from "@/api/chat/index";
@@ -28,6 +28,7 @@ import { MessagePlugin } from 'tdesign-vue-next';
 import { useI18n } from 'vue-i18n';
 import KnowledgeBaseEditorModal from '@/views/knowledge/KnowledgeBaseEditorModal.vue';
 import { useKnowledgeBaseCreationNavigation } from '@/hooks/useKnowledgeBaseCreationNavigation';
+import { saveSessionDraftState } from '@/custom/modules/sessionState/draftState';
 
 const router = useRouter();
 const route = useRoute();
@@ -42,6 +43,42 @@ const showChatContextualGuide = computed(() => {
 });
 
 const inputFieldRef = ref();
+
+const parseQueryList = (value: unknown): string[] => {
+    const raw = Array.isArray(value) ? value.join(',') : String(value || '');
+    return raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+};
+
+const applyInitialConversationContext = () => {
+    const agentIdFromQuery = route.query.agent_id && String(route.query.agent_id);
+    const sourceTenantIdFromQuery = route.query.source_tenant_id && String(route.query.source_tenant_id);
+    if (agentIdFromQuery && sourceTenantIdFromQuery) {
+        settingsStore.selectAgent(agentIdFromQuery, sourceTenantIdFromQuery);
+    } else if (agentIdFromQuery) {
+        settingsStore.selectAgent(agentIdFromQuery, null);
+    }
+
+    const kbId = route.params.kbId && String(route.params.kbId);
+    const queryKbIds = parseQueryList(route.query.kb_ids);
+    const initialKbIds = kbId ? [kbId] : queryKbIds;
+    if (initialKbIds.length > 0) {
+        settingsStore.selectKnowledgeBases(initialKbIds);
+    }
+
+    const queryFileIds = parseQueryList(route.query.file_ids);
+    queryFileIds.forEach((fileId) => settingsStore.addFile(fileId));
+    if (queryFileIds.length > 0 && initialKbIds.length === 1) {
+        settingsStore.setFileKbMap(Object.fromEntries(queryFileIds.map((fileId) => [fileId, initialKbIds[0]])));
+    }
+};
+
+onBeforeMount(() => {
+    settingsStore.resetConversationScopedState();
+    applyInitialConversationContext();
+});
 
 const sendMsg = (value: string, modelId: string, mentionedItems: any[], imageFiles: any[] = [], attachmentFiles: any[] = []) => {
     createNewSession(value, modelId, mentionedItems, imageFiles, attachmentFiles);
@@ -91,6 +128,7 @@ const navigateToSession = async (sessionId: string, value: string, modelId: stri
     };
     usemenuStore.updataMenuChildren(obj);
     usemenuStore.changeIsFirstSession(true);
+    saveSessionDraftState(sessionId, settingsStore.captureConversationScopedState(), attachmentFiles);
     usemenuStore.changeFirstQuery(value, mentionedItems, modelId, imageFiles, attachmentFiles);
     router.push(`/platform/chat/${sessionId}`);
 }

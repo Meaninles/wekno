@@ -55,6 +55,27 @@ type qaRequestContext struct {
 	reqAgentID      string
 }
 
+func attachmentFileTypeAllowed(fileName string, supportedFileTypes []string) bool {
+	if len(supportedFileTypes) == 0 {
+		return true
+	}
+	lastDot := strings.LastIndex(fileName, ".")
+	if lastDot < 0 || lastDot == len(fileName)-1 {
+		return false
+	}
+	ext := strings.ToLower(strings.TrimSpace(fileName[lastDot+1:]))
+	if ext == "" {
+		return false
+	}
+	for _, supported := range supportedFileTypes {
+		normalized := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(supported), "."))
+		if normalized != "" && normalized == ext {
+			return true
+		}
+	}
+	return false
+}
+
 // buildQARequest converts the qaRequestContext into a types.QARequest for service invocation.
 func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 	imageURLs, imageDescription := extractImageURLsAndOCRText(rc.images)
@@ -222,6 +243,10 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			if upload.FileSize > maxSize {
 				return nil, nil, errors.NewBadRequestError(
 					fmt.Sprintf("attachment %d exceeds size limit of %dMB", i+1, maxSizeMB))
+			}
+			if customAgent != nil && !attachmentFileTypeAllowed(upload.FileName, customAgent.Config.SupportedFileTypes) {
+				return nil, nil, errors.NewBadRequestError(
+					fmt.Sprintf("attachment %d file type is not supported by the selected agent", i+1))
 			}
 		}
 

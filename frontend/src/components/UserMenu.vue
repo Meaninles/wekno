@@ -275,7 +275,7 @@ const { homeTenantId, isHomeTenantActive, isHomeTenant } = useHomeTenant()
 // 单租户用户也能正常显示自己的 home tenant 名。
 const activeTenantName = computed(() => {
   return (
-    authStore.selectedTenantName ||
+    authStore.currentTenantName ||
     authStore.tenant?.name ||
     ''
   )
@@ -324,10 +324,11 @@ let chromeExtensionSubmenuHideTimer: ReturnType<typeof setTimeout> | null = null
 // 用户信息
 const userInfo = ref({
   username: t('common.defaultUser'),
+  displayName: '',
   avatar: ''
 })
 
-const userName = computed(() => userInfo.value.username)
+const userName = computed(() => userInfo.value.displayName || userInfo.value.username)
 const userSecondaryLine = computed(() => {
   if (showTenantIdentityLine.value) return ''
   const tenantName = activeTenantName.value?.trim()
@@ -717,6 +718,7 @@ const loadUserInfo = async () => {
       const user = response.data.user
       userInfo.value = {
         username: user.username || t('common.info'),
+        displayName: user.display_name || '',
         avatar: user.avatar || ''
       }
       // 同时更新 authStore 中的用户信息，确保包含 can_access_all_tenants /

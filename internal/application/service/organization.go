@@ -96,11 +96,11 @@ func (s *organizationService) CreateOrganization(ctx context.Context, userID str
 
 	now := time.Now()
 	org := &types.Organization{
-		ID:                     uuid.New().String(),
-		Name:                   req.Name,
-		Description:            req.Description,
-		Avatar:                 strings.TrimSpace(req.Avatar),
-		OwnerID:                userID,
+		ID:          uuid.New().String(),
+		Name:        req.Name,
+		Description: req.Description,
+		Avatar:      strings.TrimSpace(req.Avatar),
+		OwnerID:     userID,
 		// Owning tenant is pinned at create time; never changes even if
 		// the owner user later moves to another tenant. See migration
 		// 000046 and the isOwnerTenant helper below.
@@ -336,9 +336,10 @@ func (s *organizationService) DeleteOrganization(ctx context.Context, id string,
 		return err
 	}
 
+	isSystemAdmin := types.IsSystemAdminFromContext(ctx)
 	isOwnerTenant := org.OwnerTenantID != 0 && org.OwnerTenantID == tenantID
 	isLegacyOwnerUser := org.OwnerTenantID == 0 && org.OwnerID == userID
-	if !isOwnerTenant && !isLegacyOwnerUser {
+	if !isSystemAdmin && !isOwnerTenant && !isLegacyOwnerUser {
 		return ErrOrgPermissionDenied
 	}
 
@@ -455,6 +456,17 @@ func (s *organizationService) GetTenantMember(ctx context.Context, orgID string,
 	member, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
 	if err != nil {
 		if errors.Is(err, repository.ErrOrgMemberNotFound) {
+			if types.IsSystemAdminFromContext(ctx) {
+				if _, orgErr := s.orgRepo.GetByID(ctx, orgID); orgErr != nil {
+					return nil, orgErr
+				}
+				return &types.OrganizationTenantMember{
+					ID:             "system-admin",
+					OrganizationID: orgID,
+					TenantID:       tenantID,
+					Role:           types.OrgRoleAdmin,
+				}, nil
+			}
 			return nil, ErrTenantNotInOrg
 		}
 		return nil, err
@@ -559,6 +571,12 @@ func (s *organizationService) JoinByInviteCode(ctx context.Context, inviteCode s
 
 // IsTenantOrgAdmin reports whether the tenant has admin role in the org.
 func (s *organizationService) IsTenantOrgAdmin(ctx context.Context, orgID string, tenantID uint64) (bool, error) {
+	if types.IsSystemAdminFromContext(ctx) {
+		if _, err := s.orgRepo.GetByID(ctx, orgID); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	member, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
 	if err != nil {
 		if errors.Is(err, repository.ErrOrgMemberNotFound) {
@@ -571,6 +589,12 @@ func (s *organizationService) IsTenantOrgAdmin(ctx context.Context, orgID string
 
 // GetTenantRoleInOrg gets a tenant's role in an organization.
 func (s *organizationService) GetTenantRoleInOrg(ctx context.Context, orgID string, tenantID uint64) (types.OrgMemberRole, error) {
+	if types.IsSystemAdminFromContext(ctx) {
+		if _, err := s.orgRepo.GetByID(ctx, orgID); err != nil {
+			return "", err
+		}
+		return types.OrgRoleAdmin, nil
+	}
 	member, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
 	if err != nil {
 		if errors.Is(err, repository.ErrOrgMemberNotFound) {

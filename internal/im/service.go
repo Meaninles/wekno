@@ -1914,20 +1914,23 @@ func (s *Service) resolveThreadSession(ctx context.Context, msg *IncomingMessage
 
 // toolDisplayNames maps internal tool function names to user-friendly labels.
 var toolDisplayNames = map[string]string{
-	"thinking":              "深度思考",
-	"todo_write":            "制定计划",
-	"knowledge_search":      "知识库检索",
-	"grep_chunks":           "关键词搜索",
-	"list_knowledge_chunks": "查看文档分块",
-	"query_knowledge_graph": "查询知识图谱",
-	"get_document_info":     "获取文档信息",
-	"database_query":        "查询数据库",
-	"data_analysis":  "数据分析",
-	"data_schema":           "查看数据元信息",
-	"web_search":            "网络搜索",
-	"web_fetch":             "网页阅读",
-	"read_skill":            "读取技能",
-	"execute_skill_script":  "执行技能脚本",
+	"thinking":                      "深度思考",
+	"todo_write":                    "制定计划",
+	"knowledge_search":              "知识库检索",
+	"grep_chunks":                   "关键词搜索",
+	"list_knowledge_chunks":         "查看文档分块",
+	"query_knowledge_graph":         "查询知识图谱",
+	"get_document_info":             "获取文档信息",
+	"database_query":                "查询数据库",
+	"data_analysis":                 "数据分析",
+	"data_schema":                   "查看数据元信息",
+	"table_analysis":                "表格分析",
+	"table_schema":                  "查看表格结构",
+	"table_analysis_display_intent": "图表意图判断",
+	"web_search":                    "网络搜索",
+	"web_fetch":                     "网页阅读",
+	"read_skill":                    "读取技能",
+	"execute_skill_script":          "执行技能脚本",
 }
 
 // internalToolNames lists tools whose execution should NOT be displayed in IM

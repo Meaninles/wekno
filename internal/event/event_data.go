@@ -157,13 +157,14 @@ type AgentThoughtData struct {
 
 // AgentProgressData represents user-visible generic agent progress.
 type AgentProgressData struct {
-	Content    string `json:"content"`
-	ToolName   string `json:"tool_name,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	Phase      string `json:"phase,omitempty"`
-	Transient  bool   `json:"transient,omitempty"`
-	Iteration  int    `json:"iteration"`
-	Done       bool   `json:"done"`
+	Content    string                 `json:"content"`
+	ToolName   string                 `json:"tool_name,omitempty"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"`
+	Phase      string                 `json:"phase,omitempty"`
+	Transient  bool                   `json:"transient,omitempty"`
+	Iteration  int                    `json:"iteration"`
+	Done       bool                   `json:"done"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // AgentToolCallData represents agent tool call notification data

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -36,6 +37,76 @@ var (
 	jwtSecretOnce sync.Once
 	jwtSecret     string
 )
+
+const (
+	DisabledUserLoginMessage = "暂无Knora智能体系统权限，请联系系统管理员"
+	passwordMinLength        = 8
+	passwordMaxLength        = 32
+)
+
+// DefaultUserWorkspaceName returns the generated name for a user's home
+// tenant. DisplayName is preferred because IAM usernames can be work IDs
+// or phone numbers; username remains the fallback for local users.
+func DefaultUserWorkspaceName(username, displayName string) string {
+	owner := strings.TrimSpace(displayName)
+	if owner == "" {
+		owner = strings.TrimSpace(username)
+	}
+	if owner == "" {
+		owner = "User"
+	}
+	return fmt.Sprintf("%s's Workspace", secutils.SanitizeForLog(owner))
+}
+
+func isGeneratedUserWorkspaceName(name string) bool {
+	return strings.HasSuffix(strings.TrimSpace(name), "'s Workspace")
+}
+
+// ValidatePasswordComplexity is the single backend rule for user-set
+// passwords. Keep this in sync with the login/register form hint.
+func ValidatePasswordComplexity(password string) error {
+	if len(password) < passwordMinLength || len(password) > passwordMaxLength {
+		return fmt.Errorf("password must be %d-%d characters", passwordMinLength, passwordMaxLength)
+	}
+	hasLetter := false
+	hasNumber := false
+	hasSymbol := false
+	for _, r := range password {
+		if unicode.IsSpace(r) {
+			return errors.New("password must not contain whitespace")
+		}
+		switch {
+		case unicode.IsLetter(r):
+			hasLetter = true
+		case unicode.IsDigit(r):
+			hasNumber = true
+		default:
+			hasSymbol = true
+		}
+	}
+	categoryCount := 0
+	for _, ok := range []bool{hasLetter, hasNumber, hasSymbol} {
+		if ok {
+			categoryCount++
+		}
+	}
+	if categoryCount < 2 {
+		return errors.New("password must use at least two of letters, numbers, and symbols")
+	}
+	return nil
+}
+
+func GenerateCompliantRandomPassword() (string, error) {
+	randomPart, err := generateRandomString(18)
+	if err != nil {
+		return "", err
+	}
+	password := "A1" + randomPart
+	if len(password) > passwordMaxLength {
+		password = password[:passwordMaxLength]
+	}
+	return password, nil
+}
 
 // getJwtSecret retrieves the JWT secret from the environment, falling back to a securely generated random secret.
 func getJwtSecret() string {
@@ -85,10 +156,14 @@ func NewUserService(
 func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error) {
 	logger.Info(ctx, "Start user registration")
 	req.Username = strings.TrimSpace(req.Username)
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
 
 	// Validate input
 	if req.Username == "" || req.Password == "" {
 		return nil, errors.New("username and password are required")
+	}
+	if err := ValidatePasswordComplexity(req.Password); err != nil {
+		return nil, err
 	}
 
 	// Check if user already exists
@@ -107,7 +182,7 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 	// Create default tenant for the user
 	// Note: RetrieverEngines is left empty - system will use defaults from RETRIEVE_DRIVER env
 	tenant := &types.Tenant{
-		Name:        fmt.Sprintf("%s's Workspace", secutils.SanitizeForLog(req.Username)),
+		Name:        DefaultUserWorkspaceName(req.Username, req.DisplayName),
 		Description: "Default workspace",
 		Status:      "active",
 	}
@@ -122,6 +197,7 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 	user := &types.User{
 		ID:           uuid.New().String(),
 		Username:     req.Username,
+		DisplayName:  req.DisplayName,
 		PasswordHash: string(hashedPassword),
 		TenantID:     createdTenant.ID,
 		IsActive:     true,
@@ -175,7 +251,7 @@ func (s *userService) Login(ctx context.Context, req *types.LoginRequest) (*type
 		logger.Warn(ctx, "User account is disabled")
 		return &types.LoginResponse{
 			Success: false,
-			Message: "Account is disabled",
+			Message: DisabledUserLoginMessage,
 		}, nil
 	}
 
@@ -247,6 +323,42 @@ func (s *userService) BuildLoginMemberships(
 	return s.buildMembershipsForUser(ctx, user, activeTenant)
 }
 
+func (s *userService) syncHomeTenantNameForUser(
+	ctx context.Context,
+	user *types.User,
+	tenant *types.Tenant,
+) *types.Tenant {
+	if s.tenantService == nil || user == nil || tenant == nil {
+		return tenant
+	}
+	if user.TenantID == 0 || tenant.ID != user.TenantID {
+		return tenant
+	}
+
+	desired := DefaultUserWorkspaceName(user.Username, user.DisplayName)
+	current := strings.TrimSpace(tenant.Name)
+	if current == desired {
+		return tenant
+	}
+	if current != "" && !isGeneratedUserWorkspaceName(current) {
+		return tenant
+	}
+
+	previous := tenant.Name
+	tenant.Name = desired
+	updated, err := s.tenantService.UpdateTenant(ctx, tenant)
+	if err != nil {
+		tenant.Name = previous
+		logger.Warnf(ctx, "Failed to sync home tenant name for user %s tenant %d: %v",
+			user.ID, tenant.ID, err)
+		return tenant
+	}
+	if updated != nil {
+		return updated
+	}
+	return tenant
+}
+
 func (s *userService) buildMembershipsForUser(
 	ctx context.Context,
 	user *types.User,
@@ -255,6 +367,7 @@ func (s *userService) buildMembershipsForUser(
 	if user == nil {
 		return []types.Membership{}
 	}
+	activeTenant = s.syncHomeTenantNameForUser(ctx, user, activeTenant)
 	if s.memberService == nil {
 		return synthFallbackMembership(user, activeTenant)
 	}
@@ -285,6 +398,9 @@ func (s *userService) buildMembershipsForUser(
 			logger.Warnf(ctx, "Failed to batch-load tenants for memberships (user=%s): %v",
 				user.ID, terr)
 		}
+	}
+	if homeTenant, ok := tenantByID[user.TenantID]; ok && homeTenant != nil {
+		tenantByID[user.TenantID] = s.syncHomeTenantNameForUser(ctx, user, homeTenant)
 	}
 
 	out := make([]types.Membership, 0, len(rows))
@@ -433,7 +549,7 @@ func (s *userService) LoginWithOIDC(ctx context.Context, code, redirectURI strin
 	}
 
 	if !user.IsActive {
-		return &types.OIDCCallbackResponse{Success: false, Message: "Account is disabled"}, nil
+		return &types.OIDCCallbackResponse{Success: false, Message: DisabledUserLoginMessage}, nil
 	}
 
 	// Resolve target tenant once so the JWT claim and the tenant we
@@ -595,6 +711,9 @@ func (s *userService) ChangePassword(ctx context.Context, userID string, oldPass
 	if err != nil {
 		return errors.New("invalid old password")
 	}
+	if err := ValidatePasswordComplexity(newPassword); err != nil {
+		return err
+	}
 
 	// Hash new password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -670,7 +789,7 @@ func (s *userService) resolveLoginTenantID(ctx context.Context, user *types.User
 
 	// Membership (or cross-tenant superuser) must still be valid. Mirrors
 	// the gate in SwitchTenant so the two entry points stay consistent.
-	if !user.CanAccessAllTenants {
+	if !user.CanAccessAllTenants && !user.IsSystemAdmin {
 		if s.memberService == nil {
 			logger.Warnf(ctx,
 				"resolveLoginTenantID: member service unavailable; falling back to home for user %s",
@@ -797,7 +916,7 @@ func (s *userService) SwitchTenant(
 
 	// Verify membership unless the caller is a cross-tenant superuser
 	// switching outside their home tenant.
-	if !user.CanAccessAllTenants || targetTenantID == user.TenantID {
+	if !user.IsSystemAdmin && (!user.CanAccessAllTenants || targetTenantID == user.TenantID) {
 		if s.memberService == nil {
 			return nil, errors.New("tenant membership service unavailable")
 		}
@@ -879,6 +998,9 @@ func (s *userService) ValidateToken(ctx context.Context, tokenString string) (*t
 	if err != nil {
 		return nil, 0, err
 	}
+	if !user.IsActive {
+		return nil, 0, errors.New(DisabledUserLoginMessage)
+	}
 
 	// Extract active tenant from the JWT. Anything missing or unparseable
 	// falls back to the user's home tenant so old tokens (and tokens issued
@@ -959,6 +1081,9 @@ func (s *userService) RefreshToken(
 	user, err := s.userRepo.GetUserByID(ctx, userID)
 	if err != nil {
 		return "", "", err
+	}
+	if !user.IsActive {
+		return "", "", errors.New(DisabledUserLoginMessage)
 	}
 
 	// Revoke old refresh token
@@ -1139,6 +1264,13 @@ func (s *userService) resolveOIDCUserInfo(ctx context.Context, cfg *config.OIDCA
 	if info.Username == "" {
 		info.Username = extractClaimAsString(claims, "name")
 	}
+	info.DisplayName = firstNonEmptyString(
+		extractClaimAsString(claims, "fullname"),
+		extractClaimAsString(claims, "fullName"),
+		extractClaimAsString(claims, "display_name"),
+		extractClaimAsString(claims, "displayName"),
+		extractClaimAsString(claims, "name"),
+	)
 	return info, nil
 }
 
@@ -1169,19 +1301,35 @@ func (s *userService) fetchOIDCUserInfo(ctx context.Context, endpoint, accessTok
 
 func (s *userService) provisionOIDCUser(ctx context.Context, info *types.OIDCUserInfo) (*types.User, error) {
 	username := s.generateOIDCUsername(ctx, info)
-	randomPassword, err := generateRandomString(32)
+	randomPassword, err := GenerateCompliantRandomPassword()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate password for OIDC user: %w", err)
 	}
 
 	user, err := s.Register(ctx, &types.RegisterRequest{
-		Username: username,
-		Password: randomPassword,
+		Username:    username,
+		DisplayName: strings.TrimSpace(info.DisplayName),
+		Password:    randomPassword,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto-provision OIDC user: %w", err)
 	}
+	if name := strings.TrimSpace(info.DisplayName); name != "" {
+		user.DisplayName = name
+		if err := s.userRepo.UpdateUser(ctx, user); err != nil {
+			logger.Warnf(ctx, "Failed to save OIDC user display name for %s: %v", user.ID, err)
+		}
+	}
 	return user, nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (s *userService) generateOIDCUsername(ctx context.Context, info *types.OIDCUserInfo) string {

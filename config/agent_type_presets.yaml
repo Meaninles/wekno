@@ -249,6 +249,43 @@ agent_type_presets:
       db_data_sources: []
 
   # --------------------------------------------------------------------------
+  # Table Analysis
+  # --------------------------------------------------------------------------
+  - id: "table-analysis"
+    i18n:
+      default:
+        label: "Table Analysis"
+        description: "General-agent runtime table analysis agent for CSV / Excel files. Uses DuckDB SQL over knowledge-base files or uploads and can show structured charts on request."
+      zh-CN:
+        label: "表格分析"
+        description: "基于通用智能体内核，对知识库或上传的 CSV / Excel 表格执行 DuckDB SQL 查询、统计分析和结构化图表展示。"
+      zh-TW:
+        label: "表格分析"
+        description: "基於通用智能體內核，對知識庫或上傳的 CSV / Excel 表格執行 DuckDB SQL 查詢、統計分析和結構化圖表展示。"
+    config:
+      system_prompt_id: "table_analyst"
+      thinking: true
+      temperature: 0.3
+      max_completion_tokens: 4096
+      max_iterations: 30
+      allowed_tools:
+        - "knowledge_search"
+        - "grep_chunks"
+        - "get_document_info"
+        - "table_schema"
+        - "table_analysis"
+      retain_retrieval_history: true
+      faq_priority_enabled: false
+      web_search_enabled: false
+      web_fetch_enabled: false
+      history_turns: 10
+      kb_selection_mode: "all"
+      supported_file_types:
+        - "csv"
+        - "xlsx"
+        - "xls"
+
+  # --------------------------------------------------------------------------
   # General Agent
   # --------------------------------------------------------------------------
   - id: "general-agent"

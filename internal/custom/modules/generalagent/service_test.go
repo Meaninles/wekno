@@ -258,7 +258,7 @@ func TestEmitSidecarProgressUsesAgentProgress(t *testing.T) {
 		ID:      "toolu-1",
 		Type:    "progress",
 		Content: "正在执行命令",
-		Data:    []byte(`{"tool_name":"Bash","tool_call_id":"toolu-1","phase":"start","message":"正在执行命令"}`),
+		Data:    []byte(`{"tool_name":"Bash","tool_call_id":"toolu-1","phase":"start","message":"正在执行命令","validation_issue_codes":["table_not_requested"]}`),
 	}, &streamed, &lastID, &lastDone, nil)
 
 	if len(got) != 1 {
@@ -273,5 +273,8 @@ func TestEmitSidecarProgressUsesAgentProgress(t *testing.T) {
 	}
 	if data.Content != "正在执行命令" || data.ToolName != "Bash" || data.ToolCallID != "toolu-1" || data.Phase != "start" {
 		t.Fatalf("progress data not preserved: %+v", data)
+	}
+	if codes, ok := data.Metadata["validation_issue_codes"].([]interface{}); !ok || len(codes) != 1 || codes[0] != "table_not_requested" {
+		t.Fatalf("progress metadata not preserved: %#v", data.Metadata)
 	}
 }

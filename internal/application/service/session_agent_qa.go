@@ -98,6 +98,22 @@ func (s *sessionService) AgentQA(
 		llmContext = []chat.Message{}
 	}
 
+	if agentConfig.AgentType == types.AgentTypeTableAnalysis {
+		emitTableAnalysisDisplayIntentProgress(ctx, eventBus, sessionID, nil, "start")
+		intent, intentErr := classifyTableAnalysisDisplayIntent(ctx, summaryModel, req, agentConfig, llmContext)
+		if intentErr != nil {
+			logger.Warnf(ctx, "Table analysis display intent classification failed: %v", intentErr)
+			intent = normalizeTableAnalysisDisplayIntent(&types.TableAnalysisDisplayIntent{
+				ChartRequested: false,
+				Confidence:     "error",
+				Reason:         fmt.Sprintf("图表展示意图识别失败，按不需要图表展示处理：%v", intentErr),
+				Source:         "llm_intent_classifier",
+			})
+		}
+		agentConfig.TableAnalysisDisplayIntent = intent
+		emitTableAnalysisDisplayIntentProgress(ctx, eventBus, sessionID, intent, "success")
+	}
+
 	// Create agent engine with EventBus
 	logger.Info(ctx, "Creating agent engine")
 	engine, err := s.agentService.CreateAgentEngine(
@@ -146,6 +162,9 @@ func (s *sessionService) AgentQA(
 		agentQuery = skillContext + "\n\n[用户问题]\n" + agentQuery
 		logger.Infof(ctx, "Prepended lightweight skill context (mode=%s, configured=%d, chat=%d)",
 			lightMode, len(lightNames), len(req.SkillNames))
+	}
+	if agentConfig.AgentType == types.AgentTypeTableAnalysis && agentConfig.TableAnalysisDisplayIntent != nil {
+		agentQuery = tableAnalysisDisplayIntentPromptBlock(agentConfig.TableAnalysisDisplayIntent) + "\n\n" + agentQuery
 	}
 
 	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside

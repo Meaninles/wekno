@@ -105,12 +105,12 @@ export const useAuthStore = defineStore('auth', () => {
         ? String(tenant.value.id)
         : ''
     if (!tid) return ''
-    if (selectedTenantId.value && selectedTenantName.value) {
-      return selectedTenantName.value
-    }
     const fromMembership = memberships.value.find((m) => String(m.tenant_id) === tid)
     if (fromMembership?.tenant_name) return fromMembership.tenant_name
     if (tenant.value && String(tenant.value.id) === tid) return tenant.value.name || ''
+    if (selectedTenantId.value && selectedTenantName.value) {
+      return selectedTenantName.value
+    }
     return ''
   })
 
@@ -164,6 +164,7 @@ export const useAuthStore = defineStore('auth', () => {
         ? String(tenant.value.id)
         : ''
     if (!tid) return ''
+    if (isSystemAdmin.value) return 'owner'
     const match = memberships.value.find((m) => String(m.tenant_id) === tid)
     if (match?.role) return match.role
     // Cross-tenant superuser visiting a tenant they're not a member of:
@@ -236,6 +237,7 @@ export const useAuthStore = defineStore('auth', () => {
     tenant.value = tenantData
     // 保存到localStorage
     localStorage.setItem('weknora_tenant', JSON.stringify(tenantData))
+    syncSelectedTenantNameFromKnownTenants()
     const tenantId = String(tenantData.id)
     const tenantChanged = !!previousTenantId && String(previousTenantId) !== tenantId
     const storedTenantChanged = !!storedTenantId && storedTenantId !== tenantId
@@ -287,15 +289,36 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  function resolveKnownTenantName(tenantId: string | number | null | undefined): string {
+    if (tenantId === null || tenantId === undefined || tenantId === '') return ''
+    const tid = String(tenantId)
+    const fromMembership = memberships.value.find((m) => String(m.tenant_id) === tid)
+    if (fromMembership?.tenant_name) return fromMembership.tenant_name
+    if (tenant.value && String(tenant.value.id) === tid) return tenant.value.name || ''
+    const fromAllTenants = allTenants.value.find((t) => String(t.id) === tid)
+    return fromAllTenants?.name || ''
+  }
+
+  function syncSelectedTenantNameFromKnownTenants() {
+    if (selectedTenantId.value === null || selectedTenantId.value === undefined) return
+    const knownName = resolveKnownTenantName(selectedTenantId.value)
+    if (!knownName || knownName === selectedTenantName.value) return
+    selectedTenantName.value = knownName
+    localStorage.setItem('weknora_selected_tenant_name', knownName)
+  }
+
   const setSelectedTenant = (tenantId: number | null, tenantName: string | null = null) => {
     const previousTenantId = selectedTenantId.value
     const tenantChanged = previousTenantId !== tenantId
+    const nextTenantName = tenantId !== null ? tenantName || resolveKnownTenantName(tenantId) || null : null
     selectedTenantId.value = tenantId
-    selectedTenantName.value = tenantName
+    selectedTenantName.value = nextTenantName
     if (tenantId !== null) {
       localStorage.setItem('weknora_selected_tenant_id', String(tenantId))
-      if (tenantName) {
-        localStorage.setItem('weknora_selected_tenant_name', tenantName)
+      if (nextTenantName) {
+        localStorage.setItem('weknora_selected_tenant_name', nextTenantName)
+      } else {
+        localStorage.removeItem('weknora_selected_tenant_name')
       }
     } else {
       localStorage.removeItem('weknora_selected_tenant_id')
@@ -309,6 +332,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   const setAllTenants = (tenants: TenantInfoFromAPI[]) => {
     allTenants.value = tenants
+    syncSelectedTenantNameFromKnownTenants()
   }
 
   const setMemberships = (
@@ -316,6 +340,7 @@ export const useAuthStore = defineStore('auth', () => {
   ) => {
     memberships.value = Array.isArray(list) ? list : []
     localStorage.setItem('weknora_memberships', JSON.stringify(memberships.value))
+    syncSelectedTenantNameFromKnownTenants()
   }
 
   // setPendingInvitationCount is the explicit setter used by the

@@ -344,7 +344,7 @@ func (s *Service) emitSidecarEvent(ctx context.Context, eventBus *event.EventBus
 			return
 		}
 		if active != nil {
-			active.recordProgressStatus(progress.ToolCallID, progress.ToolName, progress.Phase, progress.Content)
+			active.recordProgressStatus(progress.ToolCallID, progress.ToolName, progress.Phase, progress.Content, progress.Metadata)
 		}
 		eventBus.Emit(ctx, event.Event{
 			ID:        progress.ToolCallID,
@@ -358,6 +358,7 @@ func (s *Service) emitSidecarEvent(ctx context.Context, eventBus *event.EventBus
 				Transient:  progress.Transient,
 				Iteration:  evt.Iteration,
 				Done:       progress.Done,
+				Metadata:   progress.Metadata,
 			},
 		})
 	}
@@ -370,6 +371,7 @@ type sidecarProgressData struct {
 	Phase      string
 	Transient  bool
 	Done       bool
+	Metadata   map[string]any
 }
 
 func sidecarProgressDataFromEvent(evt StreamEvent) sidecarProgressData {
@@ -384,6 +386,7 @@ func sidecarProgressDataFromEvent(evt StreamEvent) sidecarProgressData {
 	if len(evt.Data) > 0 {
 		var data map[string]any
 		if err := json.Unmarshal(evt.Data, &data); err == nil {
+			out.Metadata = data
 			out.ToolName = strings.TrimSpace(stringFromAny(data["tool_name"]))
 			out.ToolCallID = strings.TrimSpace(stringFromAny(data["tool_call_id"]))
 			out.Phase = strings.TrimSpace(stringFromAny(data["phase"]))

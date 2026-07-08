@@ -247,6 +247,7 @@ export interface InviteMemberRequest {
   tenant_id?: number
   representative_user_id?: string
   user_id?: string
+  iam_external_user_id?: string
   role: 'admin' | 'editor' | 'viewer'
 }
 

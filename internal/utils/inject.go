@@ -111,6 +111,10 @@ type sqlValidator struct {
 	// Statement type validation
 	checkSelectOnly      bool
 	checkSingleStatement bool
+	allowSafeUnionAll    bool
+	maxUnionBranches     int
+	maxUnionDepth        int
+	checkGroundedOutput  bool
 
 	// Table validation
 	allowedTables   map[string]bool
@@ -121,12 +125,13 @@ type sqlValidator struct {
 	checkFunctionNames bool
 
 	// Security checks
-	checkInjectionRisk  bool
-	checkSubqueries     bool
-	checkCTEs           bool
-	checkSystemColumns  bool
-	checkSchemaAccess   bool
-	checkDangerousFuncs bool
+	checkInjectionRisk   bool
+	checkSubqueries      bool
+	checkCTEs            bool
+	checkSystemColumns   bool
+	checkSchemaAccess    bool
+	checkDangerousFuncs  bool
+	allowSafeSystemCasts bool
 
 	// Tenant isolation
 	enableTenantInjection bool
@@ -276,6 +281,11 @@ func extractTableNamesFromSelectStmt(selectStmt *pg_query.SelectStmt, inheritedC
 				extractTableNamesFromQueryNode(cte.Ctequery, ctes, tables, tableMap)
 			}
 		}
+	}
+
+	if selectStmt.Op != pg_query.SetOperation_SETOP_NONE {
+		extractTableNamesFromSelectStmt(selectStmt.Larg, ctes, tables, tableMap)
+		extractTableNamesFromSelectStmt(selectStmt.Rarg, ctes, tables, tableMap)
 	}
 
 	for _, fromItem := range selectStmt.FromClause {
@@ -511,6 +521,33 @@ func WithSingleStatement() SQLValidationOption {
 	}
 }
 
+// WithSafeUnionAll allows bounded UNION ALL chains while keeping other compound
+// operations disabled. It is intended for analysis tools that need to combine a
+// small number of real table-backed SELECT branches without enabling unbounded
+// set-operation queries.
+func WithSafeUnionAll(maxBranches, maxDepth int) SQLValidationOption {
+	return func(v *sqlValidator) {
+		v.allowSafeUnionAll = true
+		if maxBranches <= 0 {
+			maxBranches = 6
+		}
+		if maxDepth <= 0 {
+			maxDepth = maxBranches
+		}
+		v.maxUnionBranches = maxBranches
+		v.maxUnionDepth = maxDepth
+	}
+}
+
+// WithGroundedSelectOutput rejects SELECT statements whose visible output is
+// entirely constant while still reading from a table. This prevents analysis
+// tools from fabricating chart datasets such as SELECT 'A', 123 FROM table.
+func WithGroundedSelectOutput() SQLValidationOption {
+	return func(v *sqlValidator) {
+		v.checkGroundedOutput = true
+	}
+}
+
 // WithAllowedFunctions creates a validation option that checks if functions are in the allowed list
 func WithAllowedFunctions(functions ...string) SQLValidationOption {
 	return func(v *sqlValidator) {
@@ -608,6 +645,15 @@ func WithNoSchemaAccess() SQLValidationOption {
 func WithNoDangerousFunctions() SQLValidationOption {
 	return func(v *sqlValidator) {
 		v.checkDangerousFuncs = true
+	}
+}
+
+// WithSafeSystemTypeCasts allows ordinary pg_catalog scalar type names emitted
+// by the PostgreSQL parser for SQL such as CAST(x AS INTEGER). Dangerous system
+// functions and identifiers remain governed by the other validation options.
+func WithSafeSystemTypeCasts() SQLValidationOption {
+	return func(v *sqlValidator) {
+		v.allowSafeSystemCasts = true
 	}
 }
 
@@ -1355,17 +1401,352 @@ func (v *sqlValidator) validateInput(sql string) error {
 
 // validateSelectStmt validates a SELECT statement with configured options
 func (v *sqlValidator) validateSelectStmt(stmt *pg_query.SelectStmt, result *SQLValidationResult) error {
-	tablesInQuery := make(map[string]string) // table name -> alias
+	return v.validateSelectStmtDepth(stmt, result, 0)
+}
 
-	// Check for UNION/INTERSECT/EXCEPT (compound queries)
+func (v *sqlValidator) validateSelectStmtDepth(stmt *pg_query.SelectStmt, result *SQLValidationResult, depth int) error {
+	if stmt == nil {
+		return fmt.Errorf("invalid SELECT statement")
+	}
+	if stmt.WithClause != nil {
+		if v.checkCTEs {
+			return fmt.Errorf("WITH clause (CTEs) is not allowed")
+		}
+		if stmt.WithClause.Recursive {
+			return fmt.Errorf("recursive CTEs are not allowed")
+		}
+		for _, cteNode := range stmt.WithClause.Ctes {
+			cte := cteNode.GetCommonTableExpr()
+			if cte == nil || cte.Ctequery == nil {
+				return fmt.Errorf("invalid CTE query")
+			}
+			cteSelect := cte.Ctequery.GetSelectStmt()
+			if cteSelect == nil {
+				return fmt.Errorf("CTE query must be SELECT-only")
+			}
+			if err := v.validateSelectStmtDepth(cteSelect, result, depth); err != nil {
+				return err
+			}
+		}
+	}
 	if stmt.Op != pg_query.SetOperation_SETOP_NONE {
+		return v.validateCompoundSelectStmt(stmt, result, depth)
+	}
+	return v.validatePlainSelectStmt(stmt, result)
+}
+
+func (v *sqlValidator) validateCompoundSelectStmt(stmt *pg_query.SelectStmt, result *SQLValidationResult, depth int) error {
+	if !v.allowSafeUnionAll {
 		return fmt.Errorf("compound queries (UNION/INTERSECT/EXCEPT) are not allowed")
 	}
-
-	// Check for WITH clause (CTEs)
-	if v.checkCTEs && stmt.WithClause != nil {
-		return fmt.Errorf("WITH clause (CTEs) is not allowed")
+	if stmt.Op != pg_query.SetOperation_SETOP_UNION || !stmt.All {
+		return fmt.Errorf("only bounded UNION ALL compound queries are allowed")
 	}
+	maxDepth := v.maxUnionDepth
+	if maxDepth <= 0 {
+		maxDepth = 6
+	}
+	if depth >= maxDepth {
+		return fmt.Errorf("UNION ALL nesting depth exceeds limit %d", maxDepth)
+	}
+	maxBranches := v.maxUnionBranches
+	if maxBranches <= 0 {
+		maxBranches = 6
+	}
+	if branches := countSelectBranches(stmt); branches > maxBranches {
+		return fmt.Errorf("UNION ALL branch count %d exceeds limit %d", branches, maxBranches)
+	}
+	if stmt.IntoClause != nil {
+		return fmt.Errorf("SELECT INTO is not allowed")
+	}
+	if len(stmt.LockingClause) > 0 {
+		return fmt.Errorf("locking clauses (FOR UPDATE, etc.) are not allowed")
+	}
+	for _, sortBy := range stmt.SortClause {
+		if err := v.validateNode(sortBy, result); err != nil {
+			return err
+		}
+	}
+	if err := v.validateNode(stmt.LimitOffset, result); err != nil {
+		return err
+	}
+	if err := v.validateNode(stmt.LimitCount, result); err != nil {
+		return err
+	}
+	if stmt.Larg == nil || stmt.Rarg == nil {
+		return fmt.Errorf("UNION ALL must have both left and right SELECT branches")
+	}
+	if err := v.validateSelectStmtDepth(stmt.Larg, result, depth+1); err != nil {
+		return err
+	}
+	if err := v.validateSelectStmtDepth(stmt.Rarg, result, depth+1); err != nil {
+		return err
+	}
+	return nil
+}
+
+func countSelectBranches(stmt *pg_query.SelectStmt) int {
+	if stmt == nil {
+		return 0
+	}
+	if stmt.Op == pg_query.SetOperation_SETOP_NONE {
+		return 1
+	}
+	return countSelectBranches(stmt.Larg) + countSelectBranches(stmt.Rarg)
+}
+
+func selectTargetListHasGroundedOutput(targets []*pg_query.Node) bool {
+	for _, target := range targets {
+		if nodeHasGroundedOutput(target) {
+			return true
+		}
+	}
+	return false
+}
+
+func selectTargetListHasUnsafeLiteralOutput(targets []*pg_query.Node) bool {
+	for _, target := range targets {
+		if targetHasUnsafeLiteralOutput(target) {
+			return true
+		}
+	}
+	return false
+}
+
+func targetHasUnsafeLiteralOutput(node *pg_query.Node) bool {
+	if node == nil {
+		return false
+	}
+	if rt := node.GetResTarget(); rt != nil {
+		return directExprIsUnsafeLiteral(rt.Val)
+	}
+	return directExprIsUnsafeLiteral(node)
+}
+
+func directExprIsUnsafeLiteral(node *pg_query.Node) bool {
+	if node == nil {
+		return false
+	}
+	if tc := node.GetTypeCast(); tc != nil {
+		return tc.Arg != nil && tc.Arg.GetAConst() != nil
+	}
+	if c := node.GetAConst(); c != nil {
+		return c.GetIval() != nil || c.GetFval() != nil || c.GetBoolval() != nil || c.GetBsval() != nil || c.GetIsnull()
+	}
+	return false
+}
+
+func nodeHasGroundedOutput(node *pg_query.Node) bool {
+	if node == nil {
+		return false
+	}
+	if node.GetAStar() != nil {
+		return true
+	}
+	if cr := node.GetColumnRef(); cr != nil {
+		for _, field := range cr.Fields {
+			if field.GetAStar() != nil {
+				return true
+			}
+			if s := field.GetString_(); s != nil && strings.TrimSpace(s.Sval) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	if rt := node.GetResTarget(); rt != nil {
+		return nodeHasGroundedOutput(rt.Val)
+	}
+	if fc := node.GetFuncCall(); fc != nil {
+		if isGroundingAggregateFunction(pgFunctionName(fc.Funcname)) {
+			return true
+		}
+		for _, arg := range fc.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if node.GetAggref() != nil || node.GetWindowFunc() != nil {
+		return true
+	}
+	if tc := node.GetTypeCast(); tc != nil {
+		return nodeHasGroundedOutput(tc.Arg)
+	}
+	if ae := node.GetAExpr(); ae != nil {
+		return nodeHasGroundedOutput(ae.Lexpr) || nodeHasGroundedOutput(ae.Rexpr)
+	}
+	if be := node.GetBoolExpr(); be != nil {
+		for _, arg := range be.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if nt := node.GetNullTest(); nt != nil {
+		return nodeHasGroundedOutput(nt.Arg)
+	}
+	if ce := node.GetCoalesceExpr(); ce != nil {
+		for _, arg := range ce.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if caseExpr := node.GetCaseExpr(); caseExpr != nil {
+		if nodeHasGroundedOutput(caseExpr.Arg) || nodeHasGroundedOutput(caseExpr.Defresult) {
+			return true
+		}
+		for _, when := range caseExpr.Args {
+			if nodeHasGroundedOutput(when) {
+				return true
+			}
+		}
+		return false
+	}
+	if cw := node.GetCaseWhen(); cw != nil {
+		return nodeHasGroundedOutput(cw.Expr) || nodeHasGroundedOutput(cw.Result)
+	}
+	if sb := node.GetSortBy(); sb != nil {
+		return nodeHasGroundedOutput(sb.Node)
+	}
+	if list := node.GetList(); list != nil {
+		for _, item := range list.Items {
+			if nodeHasGroundedOutput(item) {
+				return true
+			}
+		}
+		return false
+	}
+	if ae := node.GetAArrayExpr(); ae != nil {
+		for _, elem := range ae.Elements {
+			if nodeHasGroundedOutput(elem) {
+				return true
+			}
+		}
+		return false
+	}
+	if re := node.GetRowExpr(); re != nil {
+		for _, arg := range re.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if mm := node.GetMinMaxExpr(); mm != nil {
+		for _, arg := range mm.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if ni := node.GetNullIfExpr(); ni != nil {
+		for _, arg := range ni.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if sao := node.GetScalarArrayOpExpr(); sao != nil {
+		for _, arg := range sao.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if ace := node.GetArrayCoerceExpr(); ace != nil {
+		return nodeHasGroundedOutput(ace.Arg)
+	}
+	if cvi := node.GetCoerceViaIo(); cvi != nil {
+		return nodeHasGroundedOutput(cvi.Arg)
+	}
+	if ce := node.GetCollateExpr(); ce != nil {
+		return nodeHasGroundedOutput(ce.Arg)
+	}
+	if sl := node.GetSubLink(); sl != nil {
+		if nodeHasGroundedOutput(sl.Testexpr) {
+			return true
+		}
+		if sl.Subselect != nil {
+			if selectStmt := sl.Subselect.GetSelectStmt(); selectStmt != nil {
+				return selectTargetListHasGroundedOutput(selectStmt.TargetList)
+			}
+		}
+		return false
+	}
+	if oe := node.GetOpExpr(); oe != nil {
+		for _, arg := range oe.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if de := node.GetDistinctExpr(); de != nil {
+		for _, arg := range de.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if xe := node.GetXmlExpr(); xe != nil {
+		for _, arg := range append(xe.Args, xe.NamedArgs...) {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if jce := node.GetJsonConstructorExpr(); jce != nil {
+		for _, arg := range jce.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	if fe := node.GetFuncExpr(); fe != nil {
+		for _, arg := range fe.Args {
+			if nodeHasGroundedOutput(arg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pgFunctionName(parts []*pg_query.Node) string {
+	name := ""
+	for _, part := range parts {
+		if s := part.GetString_(); s != nil {
+			name = strings.ToLower(strings.TrimSpace(s.Sval))
+		}
+	}
+	return name
+}
+
+func isGroundingAggregateFunction(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "count", "countif", "sum", "avg", "mean", "min", "max", "median", "mode",
+		"stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp",
+		"quantile", "quantile_cont", "quantile_disc", "array_agg", "string_agg",
+		"bool_and", "bool_or", "first", "last", "any_value":
+		return true
+	default:
+		return false
+	}
+}
+
+func (v *sqlValidator) validatePlainSelectStmt(stmt *pg_query.SelectStmt, result *SQLValidationResult) error {
+	tablesInQuery := make(map[string]string) // table name -> alias
 
 	// Check for INTO clause (SELECT INTO)
 	if stmt.IntoClause != nil {
@@ -1418,10 +1799,22 @@ func (v *sqlValidator) validateSelectStmt(stmt *pg_query.SelectStmt, result *SQL
 			return err
 		}
 	}
+	if err := v.validateNode(stmt.LimitOffset, result); err != nil {
+		return err
+	}
+	if err := v.validateNode(stmt.LimitCount, result); err != nil {
+		return err
+	}
 
 	// Ensure at least one valid table is referenced
 	if len(tablesInQuery) == 0 {
 		return fmt.Errorf("no valid table found in query")
+	}
+	if v.checkGroundedOutput && !selectTargetListHasGroundedOutput(stmt.TargetList) {
+		return fmt.Errorf("SELECT output must include at least one source column, wildcard, aggregate, or window expression; constant-only table-backed SELECT outputs are not allowed")
+	}
+	if v.checkGroundedOutput && selectTargetListHasUnsafeLiteralOutput(stmt.TargetList) {
+		return fmt.Errorf("SELECT output contains direct numeric, boolean, NULL, or typed literal columns; derive visible metric values from source columns or table aggregates instead")
 	}
 
 	return nil
@@ -1521,6 +1914,9 @@ func (v *sqlValidator) validateNode(node *pg_query.Node, result *SQLValidationRe
 		if tc.TypeName != nil {
 			typeName := v.getTypeName(tc.TypeName)
 			if strings.HasPrefix(strings.ToLower(typeName), "pg_") {
+				if v.allowSafeSystemCasts && isSafeSystemCastType(typeName) {
+					return nil
+				}
 				return fmt.Errorf("casting to system type '%s' is not allowed", typeName)
 			}
 		}
@@ -2146,4 +2542,29 @@ func (v *sqlValidator) getTypeName(tn *pg_query.TypeName) string {
 		}
 	}
 	return strings.Join(parts, ".")
+}
+
+func isSafeSystemCastType(typeName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(typeName))
+	normalized = strings.TrimPrefix(normalized, "pg_catalog.")
+	normalized = strings.TrimPrefix(normalized, "pg_")
+	safeTypes := map[string]bool{
+		"bool":        true,
+		"boolean":     true,
+		"bpchar":      true,
+		"date":        true,
+		"float4":      true,
+		"float8":      true,
+		"int2":        true,
+		"int4":        true,
+		"int8":        true,
+		"numeric":     true,
+		"text":        true,
+		"time":        true,
+		"timestamp":   true,
+		"timestamptz": true,
+		"timetz":      true,
+		"varchar":     true,
+	}
+	return safeTypes[normalized]
 }

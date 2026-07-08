@@ -116,6 +116,7 @@
                 <t-input v-model="formData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
                   autocomplete="current-password" size="large" :disabled="loading" @enter="handleLogin" />
               </t-form-item>
+              <p class="password-rule-hint">{{ $t('auth.passwordRuleHint') }}</p>
 
               <t-button type="submit" theme="primary" size="large" block :loading="loading" class="submit-button">
                 {{ loading ? $t('auth.loggingIn') : $t('auth.login') }}
@@ -188,6 +189,7 @@
                 <t-input v-model="registerData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
                   autocomplete="new-password" size="large" :disabled="loading" />
               </t-form-item>
+              <p class="password-rule-hint">{{ $t('auth.passwordRuleHint') }}</p>
 
               <t-form-item :label="$t('auth.confirmPassword')" name="confirmPassword">
                 <t-input v-model="registerData.confirmPassword" :placeholder="$t('auth.confirmPasswordPlaceholder')"
@@ -281,6 +283,24 @@ const customSSOLoginText = computed(() => {
   return customSSOProviderName.value ? `使用${customSSOProviderName.value}登录` : '统一身份认证登录'
 })
 
+function hasPasswordTypeMix(value: unknown) {
+  const password = String(value || '')
+  if (!password) return true
+  let hasLetter = false
+  let hasNumber = false
+  let hasSymbol = false
+  for (const char of Array.from(password)) {
+    if (/\p{L}/u.test(char)) {
+      hasLetter = true
+    } else if (/\p{N}/u.test(char)) {
+      hasNumber = true
+    } else if (!/\s/u.test(char)) {
+      hasSymbol = true
+    }
+  }
+  return [hasLetter, hasNumber, hasSymbol].filter(Boolean).length >= 2
+}
+
 // Login form data
 const formData = reactive<{ [key: string]: any }>({
   username: '',
@@ -303,8 +323,8 @@ const formRules = computed(() => ({
     { required: true, message: t('auth.passwordRequired'), type: 'error' },
     { min: 8, message: t('auth.passwordMinLength'), type: 'error' },
     { max: 32, message: t('auth.passwordMaxLength'), type: 'error' },
-    { pattern: /[a-zA-Z]/, message: t('auth.passwordMustContainLetter'), type: 'error' },
-    { pattern: /\d/, message: t('auth.passwordMustContainNumber'), type: 'error' }
+    { pattern: /^\S+$/, message: t('auth.passwordNoWhitespace'), type: 'error' },
+    { validator: hasPasswordTypeMix, message: t('auth.passwordMustUseTwoTypes'), type: 'error' }
   ]
 }))
 
@@ -324,8 +344,8 @@ const registerRules = computed(() => ({
     { required: true, message: t('auth.passwordRequired'), type: 'error' },
     { min: 8, message: t('auth.passwordMinLength'), type: 'error' },
     { max: 32, message: t('auth.passwordMaxLength'), type: 'error' },
-    { pattern: /[a-zA-Z]/, message: t('auth.passwordMustContainLetter'), type: 'error' },
-    { pattern: /\d/, message: t('auth.passwordMustContainNumber'), type: 'error' }
+    { pattern: /^\S+$/, message: t('auth.passwordNoWhitespace'), type: 'error' },
+    { validator: hasPasswordTypeMix, message: t('auth.passwordMustUseTwoTypes'), type: 'error' }
   ],
   confirmPassword: [
     { required: true, message: t('auth.confirmPasswordRequired'), type: 'error' },
@@ -1317,6 +1337,13 @@ onMounted(async () => {
   :deep(.t-form-item__control) {
     width: 100%;
   }
+}
+
+.password-rule-hint {
+  margin: -8px 0 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--td-text-color-secondary);
 }
 
 .submit-button {

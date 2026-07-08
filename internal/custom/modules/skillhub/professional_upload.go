@@ -843,7 +843,7 @@ func (s *Service) professionalAccessByName(ctx context.Context) (map[string]prof
 				entry.OrganizationName = share.Organization.Name
 			}
 			if share.SharedByUser != nil {
-				entry.SharedByUsername = share.SharedByUser.Username
+				entry.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
 			}
 			out[record.Name] = entry
 		}
@@ -876,10 +876,10 @@ func (s *Service) professionalAccessByName(ctx context.Context) (map[string]prof
 			entry.Permission = share.Permission
 			entry.SharedAt = &share.CreatedAt
 			if share.TargetUser != nil {
-				entry.TargetUsername = share.TargetUser.Username
+				entry.TargetUsername = share.TargetUser.DisplayNameOrUsername()
 			}
 			if share.SharedByUser != nil {
-				entry.SharedByUsername = share.SharedByUser.Username
+				entry.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
 			}
 			out[record.Name] = entry
 		}
@@ -945,7 +945,7 @@ func (s *Service) professionalItemFromOrgShare(record ProfessionalSkill, share O
 		item.OrganizationName = share.Organization.Name
 	}
 	if share.SharedByUser != nil {
-		item.SharedByUsername = share.SharedByUser.Username
+		item.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
 	}
 	return item
 }
@@ -958,10 +958,10 @@ func (s *Service) professionalItemFromUserShare(record ProfessionalSkill, share 
 	item.Permission = share.Permission
 	item.SharedAt = &share.CreatedAt
 	if share.TargetUser != nil {
-		item.TargetUsername = share.TargetUser.Username
+		item.TargetUsername = share.TargetUser.DisplayNameOrUsername()
 	}
 	if share.SharedByUser != nil {
-		item.SharedByUsername = share.SharedByUser.Username
+		item.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
 	}
 	return item
 }

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
+	"github.com/xuri/excelize/v2"
 )
 
 var dataAnalysisTool = BaseTool{
@@ -27,11 +29,19 @@ var dataAnalysisTool = BaseTool{
 	schema: utils.GenerateSchema[DataAnalysisInput](),
 }
 
+var tableAnalysisTool = BaseTool{
+	name:        ToolTableAnalysis,
+	description: "Use this tool for CSV/Excel table analysis. It loads one knowledge-base file or current-turn uploaded table attachment into DuckDB, executes read-only SQL, and can return structured chart data when chart_requested is true. When chart output is requested, pass chart_intent and field hints using actual SQL result column names.",
+	schema:      utils.GenerateSchema[TableAnalysisInput](),
+}
+
 // excelSheetNameColumn is the name of the synthetic column that identifies
 // which Excel sheet a row came from when multiple sheets are unioned together.
 const excelSheetNameColumn = "__sheet_name"
+const excelRawTableSuffix = "__raw"
 
 const DisplayTypeStructuredAnalysis = "structured_analysis_result"
+const tableAnalysisMaxRows = 1000
 
 // sqlSingleQuoteEscape escapes single quotes in a string so it can be safely
 // embedded inside a single-quoted SQL literal.
@@ -107,11 +117,20 @@ func buildMissingColumnSuggestion(sqlErr error, schema *TableSchema) string {
 }
 
 type DataAnalysisInput struct {
-	KnowledgeID    string `json:"knowledge_id" jsonschema:"id of the knowledge to query"`
-	Sql            string `json:"sql" jsonschema:"SQL to be executed on knowledge"`
-	ChartRequested bool   `json:"chart_requested" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 柱状图, 折线图, 饼图, 图表, or 可视化"`
-	PreferredChart string `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user: bar,line,pie,scatter"`
+	KnowledgeID     string `json:"knowledge_id" jsonschema:"id of the knowledge-base CSV/Excel file or current-turn uploaded table attachment to query"`
+	Sql             string `json:"sql" jsonschema:"DuckDB-compatible read-only SQL to run against the loaded CSV/Excel table; use the table name returned by table_schema"`
+	ChartRequested  bool   `json:"chart_requested,omitempty" jsonschema:"true only when the user explicitly asks for a chart, graph, plot, visualization, 图表, 可视化, or a named chart type"`
+	PreferredChart  string `json:"preferred_chart,omitempty" jsonschema:"optional chart type requested by the user or selected after an explicit chart request: line,bar,stacked_bar,pie,scatter,histogram,heatmap,funnel,dual_axis_combo,area,radar,treemap,boxplot"`
+	ChartIntent     string `json:"chart_intent,omitempty" jsonschema:"optional natural-language chart intent, e.g. compare subcategory counts by sequence; used only when chart_requested is true"`
+	PrimaryMetric   string `json:"primary_metric,omitempty" jsonschema:"optional SQL result column name that should be the primary visual metric when chart_requested is true"`
+	SecondaryMetric string `json:"secondary_metric,omitempty" jsonschema:"optional SQL result column name for a secondary metric, especially dual_axis_combo or relationship charts"`
+	Dimension       string `json:"dimension,omitempty" jsonschema:"optional SQL result column name that should be the main category/time axis when chart_requested is true"`
+	Series          string `json:"series,omitempty" jsonschema:"optional SQL result column name that should be the series/stack/group dimension when chart_requested is true"`
+	ChartTitle      string `json:"chart_title,omitempty" jsonschema:"optional concise Chinese chart title; use when it helps align the rendered chart with the final explanation"`
+	TableRequested  bool   `json:"table_requested,omitempty" jsonschema:"true only when the user explicitly asks for table/detail/raw/list output; false by default even when a chart is requested"`
 }
+
+type TableAnalysisInput = DataAnalysisInput
 
 type DataAnalysisTool struct {
 	BaseTool
@@ -122,7 +141,10 @@ type DataAnalysisTool struct {
 	db                   *sql.DB
 	sessionID            string
 	allowChart           bool
+	displayIntent        *types.TableAnalysisDisplayIntent
+	runtimeAttachments   types.MessageAttachments
 	createdTables        []string // Track tables created in this session
+	loadedSchemas        map[string]*TableSchema
 	// localBaseDir is the LOCAL_STORAGE_BASE_DIR value captured at construction
 	// time so resolveFileServiceForKnowledge uses the same base path that was
 	// used when the local FileService was initialised by DI.  Re-reading the
@@ -132,6 +154,8 @@ type DataAnalysisTool struct {
 	localBaseDir string
 }
 
+type TableAnalysisTool = DataAnalysisTool
+
 func NewDataAnalysisTool(
 	knowledgeBaseService interfaces.KnowledgeBaseService,
 	knowledgeService interfaces.KnowledgeService,
@@ -139,8 +163,16 @@ func NewDataAnalysisTool(
 	fileService interfaces.FileService,
 	db *sql.DB,
 	sessionID string,
-	_ ...string,
+	agentTypes ...string,
 ) *DataAnalysisTool {
+	allowChart := false
+	for _, agentType := range agentTypes {
+		if agentType == types.AgentTypeTableAnalysis {
+			allowChart = true
+			break
+		}
+	}
+
 	return &DataAnalysisTool{
 		BaseTool:             dataAnalysisTool,
 		knowledgeBaseService: knowledgeBaseService,
@@ -149,13 +181,65 @@ func NewDataAnalysisTool(
 		tenantService:        tenantService,
 		db:                   db,
 		sessionID:            sessionID,
-		allowChart:           false,
+		allowChart:           allowChart,
+		loadedSchemas:        make(map[string]*TableSchema),
 		// Capture LOCAL_STORAGE_BASE_DIR once at construction time so that every
 		// call to resolveFileServiceForKnowledge uses the same base path.  The
 		// env var is guaranteed to be set (or empty == "/data/files" fallback)
 		// when the application starts and the DI container is assembled.
 		localBaseDir: strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR")),
 	}
+}
+
+func NewDataAnalysisToolWithConfig(
+	knowledgeBaseService interfaces.KnowledgeBaseService,
+	knowledgeService interfaces.KnowledgeService,
+	tenantService interfaces.TenantService,
+	fileService interfaces.FileService,
+	db *sql.DB,
+	sessionID string,
+	config *types.AgentConfig,
+) *DataAnalysisTool {
+	agentType := ""
+	if config != nil {
+		agentType = config.AgentType
+	}
+	tool := NewDataAnalysisTool(
+		knowledgeBaseService,
+		knowledgeService,
+		tenantService,
+		fileService,
+		db,
+		sessionID,
+		agentType,
+	)
+	if config != nil {
+		tool.displayIntent = config.TableAnalysisDisplayIntent
+		tool.runtimeAttachments = append(types.MessageAttachments(nil), config.RuntimeAttachments...)
+	}
+	return tool
+}
+
+func NewTableAnalysisToolWithConfig(
+	knowledgeBaseService interfaces.KnowledgeBaseService,
+	knowledgeService interfaces.KnowledgeService,
+	tenantService interfaces.TenantService,
+	fileService interfaces.FileService,
+	db *sql.DB,
+	sessionID string,
+	config *types.AgentConfig,
+) *TableAnalysisTool {
+	tool := NewDataAnalysisToolWithConfig(
+		knowledgeBaseService,
+		knowledgeService,
+		tenantService,
+		fileService,
+		db,
+		sessionID,
+		config,
+	)
+	tool.BaseTool = tableAnalysisTool
+	return tool
 }
 
 // recordCreatedTable records a table name for cleanup, ensuring uniqueness
@@ -174,6 +258,7 @@ func (t *DataAnalysisTool) recordCreatedTable(tableName string) bool {
 func (t *DataAnalysisTool) Cleanup(ctx context.Context) {
 	if len(t.createdTables) == 0 {
 		logger.Infof(ctx, "[Tool][LegacyDataAnalysis] No tables to clean up for session: %s", t.sessionID)
+		t.loadedSchemas = nil
 		return
 	}
 
@@ -191,6 +276,45 @@ func (t *DataAnalysisTool) Cleanup(ctx context.Context) {
 
 	// Clear the list after cleanup
 	t.createdTables = nil
+	t.loadedSchemas = nil
+}
+
+func (t *DataAnalysisTool) isTableAnalysisTool() bool {
+	return t != nil && t.Name() == ToolTableAnalysis
+}
+
+func (t *DataAnalysisTool) tableAnalysisValidationOptions(allowedTables []string) []utils.SQLValidationOption {
+	opts := []utils.SQLValidationOption{
+		utils.WithInputValidation(6, 12000),
+		utils.WithSelectOnly(),
+		utils.WithAllowedTables(allowedTables...),
+		utils.WithSingleStatement(),
+		utils.WithNoDangerousFunctions(),
+		utils.WithInjectionRiskCheck(),
+	}
+	if t.isTableAnalysisTool() {
+		opts = append(opts,
+			utils.WithSafeUnionAll(6, 6),
+			utils.WithSafeSystemTypeCasts(),
+			utils.WithGroundedSelectOutput(),
+		)
+	}
+	return opts
+}
+
+func normalizeTableAnalysisSQL(sqlText string) string {
+	sqlText = strings.TrimSpace(sqlText)
+	for strings.HasSuffix(sqlText, ";") {
+		sqlText = strings.TrimSpace(strings.TrimSuffix(sqlText, ";"))
+	}
+	return sqlText
+}
+
+func limitTableAnalysisSQL(sqlText string, maxRows int) string {
+	if maxRows <= 0 {
+		maxRows = tableAnalysisMaxRows
+	}
+	return fmt.Sprintf("SELECT * FROM (%s) AS __weknora_table_analysis_limited LIMIT %d", normalizeTableAnalysisSQL(sqlText), maxRows)
 }
 
 // Execute executes the SQL query on DuckDB (only read-only queries are allowed)
@@ -202,6 +326,13 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		return &types.ToolResult{
 			Success: false,
 			Error:   fmt.Sprintf("Failed to parse input args: %v", err),
+		}, err
+	}
+	if err := t.applyDisplayIntentToInput(&input); err != nil {
+		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Display intent rejected tool input for session %s: %v", t.sessionID, err)
+		return &types.ToolResult{
+			Success: false,
+			Error:   err.Error(),
 		}, err
 	}
 
@@ -220,31 +351,32 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 		logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Auto-rewrote SQL identifiers for session %s: %v", t.sessionID, fixes)
 		input.Sql = rewrittenSQL
 	}
+	input.Sql = normalizeTableAnalysisSQL(input.Sql)
 
-	// Check if this is a read-only query
-	normalizedSQL := strings.TrimSpace(strings.ToLower(input.Sql))
-	isReadOnly := strings.HasPrefix(normalizedSQL, "select") ||
-		strings.HasPrefix(normalizedSQL, "show") ||
-		strings.HasPrefix(normalizedSQL, "describe") ||
-		strings.HasPrefix(normalizedSQL, "explain") ||
-		strings.HasPrefix(normalizedSQL, "pragma")
+	if !t.isTableAnalysisTool() {
+		// Preserve legacy data_analysis behavior. The table_analysis tool uses
+		// parser-based validation below so read-only CTEs are not misclassified.
+		normalizedSQL := strings.TrimSpace(strings.ToLower(input.Sql))
+		isReadOnly := strings.HasPrefix(normalizedSQL, "select") ||
+			strings.HasPrefix(normalizedSQL, "show") ||
+			strings.HasPrefix(normalizedSQL, "describe") ||
+			strings.HasPrefix(normalizedSQL, "explain") ||
+			strings.HasPrefix(normalizedSQL, "pragma")
 
-	if !isReadOnly {
-		// Reject modification queries
-		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Modification query rejected for session %s: %s", t.sessionID, input.Sql)
-		return &types.ToolResult{
-			Success: false,
-			Error:   "DuckDB tool only supports read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN, PRAGMA). Modification operations (INSERT, UPDATE, DELETE, CREATE, DROP, etc.) are not allowed.",
-		}, fmt.Errorf("modification queries are not allowed")
+		if !isReadOnly {
+			// Reject modification queries
+			logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Modification query rejected for session %s: %s", t.sessionID, input.Sql)
+			return &types.ToolResult{
+				Success: false,
+				Error:   "DuckDB tool only supports read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN, PRAGMA). Modification operations (INSERT, UPDATE, DELETE, CREATE, DROP, etc.) are not allowed.",
+			}, fmt.Errorf("modification queries are not allowed")
+		}
 	}
 
 	// Validate SQL with comprehensive security checks
 	// IMPORTANT: Must enable validateSelectStmt to block RangeFunction attacks
-	_, validation := utils.ValidateSQL(input.Sql,
-		utils.WithAllowedTables(schema.TableName),
-		utils.WithSingleStatement(),      // Block multiple statements
-		utils.WithNoDangerousFunctions(), // Block dangerous functions
-	)
+	allowedTables := allowedTableAnalysisTables(schema)
+	_, validation := utils.ValidateSQL(input.Sql, t.tableAnalysisValidationOptions(allowedTables)...)
 	if !validation.Valid {
 		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] SQL validation failed for session %s: %v", t.sessionID, validation.Errors)
 		return &types.ToolResult{
@@ -255,7 +387,7 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 
 	logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Received SQL query for session %s: %s", t.sessionID, input.Sql)
 	// Execute single query and get results
-	columns, results, err := t.executeSingleQuery(ctx, input.Sql)
+	columns, results, truncated, err := t.executeSingleQuery(ctx, input.Sql)
 	if err != nil {
 		if suggestion := buildMissingColumnSuggestion(err, schema); suggestion != "" {
 			return &types.ToolResult{
@@ -272,20 +404,38 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 	queryOutput := t.formatQueryResults(results, input.Sql)
 	logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Completed execution query, total %d rows for session %s", len(results), t.sessionID)
 	chartRequested := input.ChartRequested && t.allowChart
+	chart := inferStructuredChartSpec(columns, results, input.PreferredChart, chartRequested, tableChartHintsFromInput(input))
+	tableRequested := input.TableRequested
+	displayMode := "text_only"
+	if eligible, _ := chart["eligible"].(bool); eligible {
+		displayMode = "chart_only"
+		if tableRequested {
+			displayMode = "chart_and_table"
+		}
+	} else if tableRequested {
+		displayMode = "table"
+	}
+	limits := map[string]interface{}{"truncated": truncated}
+	if t.isTableAnalysisTool() {
+		limits["max_rows"] = tableAnalysisMaxRows
+	}
 	return &types.ToolResult{
 		Success: true,
 		Output:  queryOutput,
 		Data: map[string]interface{}{
 			"display_type":    DisplayTypeStructuredAnalysis,
+			"display_mode":    displayMode,
 			"analysis_type":   "file",
-			"source":          map[string]interface{}{"type": "file", "knowledge_id": input.KnowledgeID, "table_name": schema.TableName},
+			"source":          map[string]interface{}{"type": "file", "knowledge_id": input.KnowledgeID, "table_name": schema.TableName, "allowed_tables": allowedTables},
 			"columns":         columns,
 			"rows":            results,
 			"row_count":       len(results),
 			"query":           input.Sql,
 			"chart_requested": chartRequested,
-			"chart":           inferStructuredChartSpec(columns, results, input.PreferredChart, chartRequested),
-			"limits":          map[string]interface{}{"truncated": false},
+			"chart":           chart,
+			"table_requested": tableRequested,
+			"table_visible":   tableRequested,
+			"limits":          limits,
 			"session_id":      t.sessionID,
 		},
 	}, nil
@@ -298,14 +448,22 @@ func (t *DataAnalysisTool) Execute(ctx context.Context, args json.RawMessage) (*
 //   - existingColumns: existing column names to merge with (can be nil or empty)
 //
 // Returns:
-//   - []string: merged column names (existing + new columns, deduplicated)
+//   - []map[string]interface{}: result column metadata
 //   - []map[string]string: query results
+//   - bool: whether the result was truncated by the table-analysis row budget
 //   - error: any error that occurred during execution
-func (t *DataAnalysisTool) executeSingleQuery(ctx context.Context, sqlQuery string) ([]map[string]interface{}, []map[string]string, error) {
-	rows, err := t.db.QueryContext(ctx, sqlQuery)
+func (t *DataAnalysisTool) executeSingleQuery(ctx context.Context, sqlQuery string) ([]map[string]interface{}, []map[string]string, bool, error) {
+	querySQL := sqlQuery
+	maxRows := 0
+	if t.isTableAnalysisTool() {
+		maxRows = tableAnalysisMaxRows
+		querySQL = limitTableAnalysisSQL(sqlQuery, maxRows)
+	}
+
+	rows, err := t.db.QueryContext(ctx, querySQL)
 	if err != nil {
 		logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Query execution failed: %v", err)
-		return nil, nil, fmt.Errorf("query execution failed: %w", err)
+		return nil, nil, false, fmt.Errorf("query execution failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -313,7 +471,7 @@ func (t *DataAnalysisTool) executeSingleQuery(ctx context.Context, sqlQuery stri
 	columnNames, err := rows.Columns()
 	if err != nil {
 		logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Failed to get columns: %v", err)
-		return nil, nil, fmt.Errorf("failed to get columns: %w", err)
+		return nil, nil, false, fmt.Errorf("failed to get columns: %w", err)
 	}
 	columnTypes, _ := rows.ColumnTypes()
 	columns := make([]map[string]interface{}, 0, len(columnNames))
@@ -340,7 +498,7 @@ func (t *DataAnalysisTool) executeSingleQuery(ctx context.Context, sqlQuery stri
 
 		if err := rows.Scan(columnPointers...); err != nil {
 			logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Failed to scan row: %v", err)
-			return nil, nil, fmt.Errorf("failed to scan row: %w", err)
+			return nil, nil, false, fmt.Errorf("failed to scan row: %w", err)
 		}
 
 		rowMap := make(map[string]string)
@@ -358,10 +516,11 @@ func (t *DataAnalysisTool) executeSingleQuery(ctx context.Context, sqlQuery stri
 
 	if err := rows.Err(); err != nil {
 		logger.Errorf(ctx, "[Tool][LegacyDataAnalysis] Error iterating rows: %v", err)
-		return nil, nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, nil, false, fmt.Errorf("error iterating rows: %w", err)
 	}
 
-	return columns, results, nil
+	truncated := maxRows > 0 && len(results) >= maxRows
+	return columns, results, truncated, nil
 }
 
 // formatQueryResults formats query results into JSONL format (one JSON object per line)
@@ -394,6 +553,26 @@ func (t *DataAnalysisTool) formatQueryResults(results []map[string]string, query
 	return output.String()
 }
 
+func (t *DataAnalysisTool) applyDisplayIntentToInput(input *DataAnalysisInput) error {
+	if input == nil || !t.allowChart || t.displayIntent == nil {
+		return nil
+	}
+	toolName := t.Name()
+	if strings.TrimSpace(toolName) == "" {
+		toolName = ToolTableAnalysis
+	}
+	if input.ChartRequested && !t.displayIntent.ChartRequested {
+		return fmt.Errorf("table-analysis display intent is chart_requested=false, but %s was called with chart_requested=true; retry with chart_requested=false and answer with text/table evidence only", toolName)
+	}
+	if t.displayIntent.ChartRequested && !input.ChartRequested {
+		return fmt.Errorf("table-analysis display intent is chart_requested=true, but %s was called without chart_requested=true; retry the analytical result query with chart_requested=true", toolName)
+	}
+	if t.displayIntent.ChartRequested && strings.TrimSpace(input.PreferredChart) == "" && strings.TrimSpace(t.displayIntent.PreferredChart) != "" {
+		input.PreferredChart = t.displayIntent.PreferredChart
+	}
+	return nil
+}
+
 func inferResultSemanticType(name, dataType string) string {
 	lowerName := strings.ToLower(name)
 	lowerType := strings.ToLower(dataType)
@@ -412,62 +591,949 @@ func inferResultSemanticType(name, dataType string) string {
 	return "dimension"
 }
 
-func inferStructuredChartSpec(columns []map[string]interface{}, rows []map[string]string, preferred string, requested bool) map[string]interface{} {
-	spec := map[string]interface{}{"eligible": false, "default_type": "", "x": "", "y": []string{}, "reason": "chart not requested"}
+type tableChartColumnGroups struct {
+	dimensions []string
+	metrics    []string
+	times      []string
+}
+
+type tableChartIntentHints struct {
+	intent          string
+	primaryMetric   string
+	secondaryMetric string
+	dimension       string
+	series          string
+	title           string
+}
+
+func tableChartHintsFromInput(input DataAnalysisInput) tableChartIntentHints {
+	return tableChartIntentHints{
+		intent:          strings.TrimSpace(input.ChartIntent),
+		primaryMetric:   strings.TrimSpace(input.PrimaryMetric),
+		secondaryMetric: strings.TrimSpace(input.SecondaryMetric),
+		dimension:       strings.TrimSpace(input.Dimension),
+		series:          strings.TrimSpace(input.Series),
+		title:           strings.TrimSpace(input.ChartTitle),
+	}
+}
+
+func inferStructuredChartSpec(columns []map[string]interface{}, rows []map[string]string, preferred string, requested bool, hintsOpt ...tableChartIntentHints) map[string]interface{} {
+	hints := tableChartIntentHints{}
+	if len(hintsOpt) > 0 {
+		hints = hintsOpt[0]
+	}
+	spec := map[string]interface{}{
+		"eligible":       false,
+		"id":             "",
+		"type":           "",
+		"default_type":   "",
+		"x":              "",
+		"y":              []string{},
+		"group":          "",
+		"secondary_y":    []string{},
+		"value":          "",
+		"reason":         "chart not requested",
+		"language":       "zh-CN",
+		"labels_locale":  "zh-CN",
+		"table_visible":  false,
+		"explicit_chart": requested,
+		"chart_intent":   hints.intent,
+		"chart_title":    hints.title,
+		"contract":       map[string]interface{}{},
+		"validation":     map[string]interface{}{"status": "not_requested", "issues": []string{"chart not requested"}},
+	}
 	if !requested {
 		return spec
 	}
 	if len(rows) == 0 || len(columns) < 2 {
 		spec["reason"] = "not enough result data for chart"
+		spec["validation"] = map[string]interface{}{"status": "invalid", "issues": []string{"not enough result data for chart"}}
 		return spec
 	}
-	var dimensions, metrics, times []string
+	groups := classifyTableChartColumns(columns, rows)
+	if len(groups.metrics) == 0 {
+		spec["reason"] = "no numeric metric column"
+		spec["validation"] = map[string]interface{}{"status": "invalid", "issues": []string{"no numeric metric column"}}
+		return spec
+	}
+	chartType := normalizeStructuredChartType(preferred)
+	if chartType == "" {
+		chartType = chooseDefaultTableChartType(groups)
+	}
+	if !supportedStructuredChartType(chartType) {
+		spec["reason"] = "unsupported chart type"
+		spec["validation"] = map[string]interface{}{"status": "invalid", "issues": []string{"unsupported chart type"}}
+		return spec
+	}
+	if !populateTableChartSpec(spec, chartType, groups, rows, hints) {
+		if spec["reason"] == "" {
+			spec["reason"] = "result shape is not suitable for requested chart"
+		}
+		spec["validation"] = map[string]interface{}{"status": "invalid", "issues": []string{fmt.Sprint(spec["reason"])}}
+		return spec
+	}
+
+	spec["eligible"] = true
+	spec["default_type"] = chartType
+	spec["type"] = chartType
+	spec["id"] = structuredChartID(chartType, spec)
+	spec["reason"] = ""
+	contract := buildStructuredChartContract(spec, chartType, groups, columns, hints)
+	spec["contract"] = contract
+	spec["validation"] = validateStructuredChartContract(contract, columns)
+	return spec
+}
+
+func classifyTableChartColumns(columns []map[string]interface{}, rows []map[string]string) tableChartColumnGroups {
+	var groups tableChartColumnGroups
 	for _, col := range columns {
 		name := fmt.Sprint(col["name"])
 		sem := fmt.Sprint(col["semantic_type"])
 		if sem == "metric" && resultColumnLooksNumeric(rows, name) {
-			metrics = append(metrics, name)
+			groups.metrics = append(groups.metrics, name)
 		} else if sem == "time" {
-			times = append(times, name)
+			groups.times = append(groups.times, name)
 		} else {
-			dimensions = append(dimensions, name)
+			groups.dimensions = append(groups.dimensions, name)
 		}
 	}
-	if len(metrics) == 0 {
-		spec["reason"] = "no numeric metric column"
-		return spec
+	return groups
+}
+
+func normalizeStructuredChartType(chartType string) string {
+	chartType = strings.ToLower(strings.TrimSpace(chartType))
+	chartType = strings.ReplaceAll(chartType, "-", "_")
+	chartType = strings.ReplaceAll(chartType, " ", "_")
+	switch chartType {
+	case "combo", "dual_axis", "dual_axis_chart", "dual_axis_bar_line", "bar_line", "bar_line_combo":
+		return "dual_axis_combo"
+	case "stacked", "stackedbar", "stacked_bar_chart":
+		return "stacked_bar"
+	case "tree_map":
+		return "treemap"
+	default:
+		return chartType
 	}
-	chartType := strings.ToLower(strings.TrimSpace(preferred))
-	if chartType == "" {
-		if len(times) > 0 {
-			chartType = "line"
-		} else if len(dimensions) > 0 && len(rows) <= 12 {
-			chartType = "bar"
-		} else if len(metrics) >= 2 && len(dimensions) == 0 {
-			chartType = "scatter"
-		} else {
-			chartType = "bar"
+}
+
+func supportedStructuredChartType(chartType string) bool {
+	switch chartType {
+	case "line", "bar", "stacked_bar", "pie", "scatter", "histogram", "heatmap", "funnel", "dual_axis_combo",
+		"area", "radar", "treemap", "boxplot":
+		return true
+	default:
+		return false
+	}
+}
+
+func chooseDefaultTableChartType(groups tableChartColumnGroups) string {
+	if len(groups.times) > 0 {
+		if len(groups.metrics) >= 2 {
+			return "dual_axis_combo"
+		}
+		return "line"
+	}
+	if len(groups.dimensions) >= 2 && len(groups.metrics) > 0 {
+		return "stacked_bar"
+	}
+	if len(groups.metrics) >= 2 && len(groups.dimensions) == 0 {
+		return "scatter"
+	}
+	return "bar"
+}
+
+func tableChartDimensionCandidates(groups tableChartColumnGroups, preferTime bool) []string {
+	out := make([]string, 0, len(groups.dimensions)+len(groups.times))
+	add := func(items []string) {
+		for _, item := range items {
+			if item != "" && !containsStringValue(out, item) {
+				out = append(out, item)
+			}
 		}
 	}
-	x := ""
-	if len(times) > 0 {
-		x = times[0]
-	} else if len(dimensions) > 0 {
-		x = dimensions[0]
-	} else if len(metrics) > 1 {
-		x = metrics[0]
-		metrics = metrics[1:]
+	if preferTime {
+		add(groups.times)
+		add(groups.dimensions)
+	} else {
+		add(groups.dimensions)
+		add(groups.times)
 	}
-	if x == "" {
-		spec["reason"] = "no usable x axis"
-		return spec
+	return out
+}
+
+func preferredChartField(preferred string, candidates []string) string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred == "" {
+		return ""
 	}
-	spec["eligible"] = true
-	spec["default_type"] = chartType
-	spec["x"] = x
-	spec["y"] = metrics
-	spec["reason"] = ""
-	return spec
+	for _, field := range candidates {
+		if strings.TrimSpace(field) == preferred {
+			return field
+		}
+	}
+	for _, field := range candidates {
+		if strings.EqualFold(strings.TrimSpace(field), preferred) {
+			return field
+		}
+	}
+	return ""
+}
+
+func chooseTableChartDimension(groups tableChartColumnGroups, preferred string, preferTime bool, exclude ...string) string {
+	candidates := tableChartDimensionCandidates(groups, preferTime)
+	filtered := make([]string, 0, len(candidates))
+	for _, field := range candidates {
+		if field == "" || containsStringValue(exclude, field) {
+			continue
+		}
+		filtered = append(filtered, field)
+	}
+	if field := preferredChartField(preferred, filtered); field != "" {
+		return field
+	}
+	return firstStringValue(filtered)
+}
+
+func chooseTableChartMetric(groups tableChartColumnGroups, preferred string, exclude ...string) string {
+	candidates := make([]string, 0, len(groups.metrics))
+	for _, field := range groups.metrics {
+		if field == "" || containsStringValue(exclude, field) {
+			continue
+		}
+		candidates = append(candidates, field)
+	}
+	if field := preferredChartField(preferred, candidates); field != "" {
+		return field
+	}
+	return firstStringValue(candidates)
+}
+
+func orderedTableChartMetrics(groups tableChartColumnGroups, preferred ...string) []string {
+	out := make([]string, 0, len(groups.metrics))
+	for _, hint := range preferred {
+		if field := preferredChartField(hint, groups.metrics); field != "" && !containsStringValue(out, field) {
+			out = append(out, field)
+		}
+	}
+	for _, field := range groups.metrics {
+		if field != "" && !containsStringValue(out, field) {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
+func populateTableChartSpec(spec map[string]interface{}, chartType string, groups tableChartColumnGroups, rows []map[string]string, hints tableChartIntentHints) bool {
+	_ = rows
+	dimensionAxis := chooseTableChartDimension(groups, hints.dimension, true)
+	categoryAxis := chooseTableChartDimension(groups, hints.dimension, false)
+	metric := chooseTableChartMetric(groups, hints.primaryMetric)
+
+	switch chartType {
+	case "line", "area":
+		if dimensionAxis == "" || metric == "" {
+			spec["reason"] = "line/area chart requires one dimension/time column and one metric column"
+			return false
+		}
+		spec["x"] = dimensionAxis
+		if preferredChartField(hints.primaryMetric, groups.metrics) != "" {
+			spec["y"] = []string{metric}
+		} else {
+			spec["y"] = groups.metrics
+		}
+	case "bar":
+		if categoryAxis == "" || metric == "" {
+			spec["reason"] = "bar chart requires one category column and one metric column"
+			return false
+		}
+		spec["x"] = categoryAxis
+		if preferredChartField(hints.primaryMetric, groups.metrics) != "" {
+			spec["y"] = []string{metric}
+		} else {
+			spec["y"] = groups.metrics
+		}
+	case "stacked_bar":
+		if categoryAxis == "" || len(groups.dimensions)+len(groups.times) < 2 || metric == "" {
+			spec["reason"] = "stacked bar chart requires two dimensions and one metric column"
+			return false
+		}
+		spec["x"] = categoryAxis
+		spec["group"] = chooseTableChartDimension(groups, hints.series, false, categoryAxis)
+		spec["y"] = []string{metric}
+	case "pie", "funnel", "treemap":
+		if categoryAxis == "" || metric == "" {
+			spec["reason"] = chartType + " requires one category column and one metric column"
+			return false
+		}
+		spec["x"] = categoryAxis
+		spec["y"] = []string{metric}
+		if chartType == "treemap" {
+			spec["group"] = chooseTableChartDimension(groups, hints.series, false, categoryAxis)
+		}
+	case "scatter":
+		if len(groups.metrics) < 2 {
+			spec["reason"] = "scatter chart requires at least two metric columns"
+			return false
+		}
+		xMetric := chooseTableChartMetric(groups, hints.primaryMetric)
+		yMetric := chooseTableChartMetric(groups, hints.secondaryMetric, xMetric)
+		if xMetric == "" || yMetric == "" {
+			spec["reason"] = "scatter chart requires two distinct metric columns"
+			return false
+		}
+		spec["x"] = xMetric
+		spec["y"] = []string{yMetric}
+	case "histogram":
+		if metric == "" {
+			spec["reason"] = "histogram requires one numeric metric column"
+			return false
+		}
+		spec["x"] = metric
+		if len(groups.metrics) > 1 {
+			spec["y"] = []string{groups.metrics[1]}
+		}
+	case "heatmap":
+		if categoryAxis == "" || len(groups.dimensions)+len(groups.times) < 2 || metric == "" {
+			spec["reason"] = "heatmap requires two dimensions and one metric column"
+			return false
+		}
+		spec["x"] = categoryAxis
+		spec["group"] = chooseTableChartDimension(groups, hints.series, false, categoryAxis)
+		spec["y"] = []string{metric}
+	case "dual_axis_combo":
+		if dimensionAxis == "" || len(groups.metrics) < 2 {
+			spec["reason"] = "dual-axis combo chart requires one dimension and two metric columns"
+			return false
+		}
+		primary := chooseTableChartMetric(groups, hints.primaryMetric)
+		secondary := chooseTableChartMetric(groups, hints.secondaryMetric, primary)
+		if primary == "" || secondary == "" {
+			spec["reason"] = "dual-axis combo chart requires two distinct metric columns"
+			return false
+		}
+		spec["x"] = dimensionAxis
+		spec["y"] = []string{primary}
+		spec["secondary_y"] = []string{secondary}
+	case "radar":
+		if len(groups.metrics) < 3 {
+			spec["reason"] = "radar chart requires at least three metric columns"
+			return false
+		}
+		spec["x"] = categoryAxis
+		spec["y"] = orderedTableChartMetrics(groups, hints.primaryMetric, hints.secondaryMetric)
+	case "boxplot":
+		fiveNumber := inferFiveNumberFields(groups.metrics)
+		if len(fiveNumber) == 5 {
+			spec["x"] = categoryAxis
+			spec["y"] = fiveNumber
+			break
+		}
+		if metric == "" {
+			spec["reason"] = "boxplot requires raw numeric values or min/q1/median/q3/max columns"
+			return false
+		}
+		spec["x"] = categoryAxis
+		spec["y"] = []string{metric}
+	default:
+		return false
+	}
+	return true
+}
+
+func buildStructuredChartContract(spec map[string]interface{}, chartType string, groups tableChartColumnGroups, columns []map[string]interface{}, hints tableChartIntentHints) map[string]interface{} {
+	x := stringFromInterface(spec["x"])
+	yFields := stringsFromInterface(spec["y"])
+	metric := firstStringValue(yFields)
+	group := stringFromInterface(spec["group"])
+	secondary := firstStringValue(stringsFromInterface(spec["secondary_y"]))
+	value := stringFromInterface(spec["value"])
+	if value == "" {
+		value = metric
+	}
+	spec["value"] = value
+
+	encoding := map[string]interface{}{}
+	setEncodingField(encoding, "x", x, tableChartFieldRole(groups, x), "")
+	switch chartType {
+	case "heatmap":
+		setEncodingField(encoding, "y", group, tableChartFieldRole(groups, group), "")
+		setEncodingField(encoding, "value", value, "metric", "sum")
+	case "stacked_bar":
+		setEncodingField(encoding, "series", group, tableChartFieldRole(groups, group), "")
+		setEncodingField(encoding, "stack", group, tableChartFieldRole(groups, group), "")
+		setEncodingField(encoding, "value", value, "metric", "sum")
+	case "scatter":
+		setEncodingField(encoding, "y", metric, "metric", "")
+		if x != "" {
+			setEncodingField(encoding, "x", x, "metric", "")
+		}
+	case "histogram":
+		setEncodingField(encoding, "value", x, "metric", "count")
+	case "dual_axis_combo":
+		setEncodingField(encoding, "value", metric, "metric", "sum")
+		setEncodingField(encoding, "secondary_value", secondary, "metric", "sum")
+	case "treemap":
+		hierarchy := []map[string]interface{}{}
+		if x != "" {
+			hierarchy = append(hierarchy, chartEncodingField(x, tableChartFieldRole(groups, x), ""))
+		}
+		if group != "" {
+			hierarchy = append(hierarchy, chartEncodingField(group, tableChartFieldRole(groups, group), ""))
+		}
+		encoding["hierarchy"] = hierarchy
+		setEncodingField(encoding, "value", value, "metric", "sum")
+	case "radar", "boxplot":
+		setEncodingField(encoding, "value", metric, "metric", chartAggregateForType(chartType))
+		setEncodingFields(encoding, "values", yFields, "metric", chartAggregateForType(chartType))
+	default:
+		setEncodingField(encoding, "y", metric, "metric", "")
+		setEncodingField(encoding, "value", value, "metric", "sum")
+		if len(yFields) > 1 {
+			setEncodingFields(encoding, "values", yFields, "metric", "sum")
+		}
+	}
+
+	availableFields := columnNamesFromInterfaceMaps(columns)
+	visualDimensions := chartVisualDimensions(chartType, x, group)
+	visualMetrics := chartVisualMetrics(chartType, x, yFields, secondary, value)
+	visualFields := uniqueNonEmptyStrings(append(visualDimensions, visualMetrics...)...)
+	return map[string]interface{}{
+		"id":       stringFromInterface(spec["id"]),
+		"type":     chartType,
+		"intent":   map[string]interface{}{"task": chartTask(chartType), "reason": hints.intent},
+		"encoding": encoding,
+		"transform": map[string]interface{}{
+			"group_by":      chartGroupBy(chartType, x, group),
+			"aggregate":     chartAggregateForType(chartType),
+			"dedupe_policy": chartDedupePolicy(chartType),
+			"sort":          []map[string]interface{}{},
+			"limit":         nil,
+		},
+		"visual_scope": map[string]interface{}{
+			"dimensions":  visualDimensions,
+			"series":      group,
+			"metrics":     visualMetrics,
+			"fields":      visualFields,
+			"description": "fields actually encoded by the rendered chart",
+		},
+		"evidence_scope": map[string]interface{}{
+			"available_fields":  availableFields,
+			"visualized_fields": visualFields,
+			"non_visual_fields": differenceStrings(availableFields, visualFields),
+			"description":       "query result fields may support textual insights; do not claim non_visual_fields are visually encoded by this chart",
+		},
+		"display": map[string]interface{}{
+			"title":         chartDisplayTitle(chartType, x, group, value, hints.title),
+			"x_label":       x,
+			"y_label":       chartYLabel(chartType, group, value),
+			"value_label":   value,
+			"legend_title":  chartLegendTitle(chartType, group),
+			"language":      "zh-CN",
+			"table_visible": false,
+		},
+		"metadata": map[string]interface{}{
+			"source":  "table_analysis",
+			"columns": availableFields,
+		},
+	}
+}
+
+func setEncodingField(encoding map[string]interface{}, key string, field string, role string, aggregate string) {
+	if field == "" {
+		return
+	}
+	encoding[key] = chartEncodingField(field, role, aggregate)
+}
+
+func setEncodingFields(encoding map[string]interface{}, key string, fields []string, role string, aggregate string) {
+	items := make([]map[string]interface{}, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		items = append(items, chartEncodingField(field, role, aggregate))
+	}
+	if len(items) > 0 {
+		encoding[key] = items
+	}
+}
+
+func chartEncodingField(field, role, aggregate string) map[string]interface{} {
+	out := map[string]interface{}{"field": field}
+	if role != "" {
+		out["role"] = role
+	}
+	if aggregate != "" {
+		out["aggregate"] = aggregate
+	}
+	return out
+}
+
+func tableChartFieldRole(groups tableChartColumnGroups, field string) string {
+	if field == "" {
+		return ""
+	}
+	for _, item := range groups.metrics {
+		if item == field {
+			return "metric"
+		}
+	}
+	for _, item := range groups.times {
+		if item == field {
+			return "time"
+		}
+	}
+	for _, item := range groups.dimensions {
+		if item == field {
+			return "dimension"
+		}
+	}
+	return "dimension"
+}
+
+func chartTask(chartType string) string {
+	switch chartType {
+	case "line", "area", "dual_axis_combo":
+		return "trend"
+	case "pie", "stacked_bar", "treemap":
+		return "composition"
+	case "histogram", "boxplot":
+		return "distribution"
+	case "scatter":
+		return "relationship"
+	case "heatmap":
+		return "comparison"
+	case "funnel":
+		return "conversion"
+	default:
+		return "comparison"
+	}
+}
+
+func chartAggregateForType(chartType string) string {
+	switch chartType {
+	case "histogram":
+		return "count"
+	case "scatter", "boxplot":
+		return "none"
+	default:
+		return "sum"
+	}
+}
+
+func chartDedupePolicy(chartType string) string {
+	switch chartType {
+	case "scatter", "boxplot":
+		return "keep"
+	default:
+		return "aggregate"
+	}
+}
+
+func chartGroupBy(chartType, x, group string) []string {
+	out := make([]string, 0, 3)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || containsStringValue(out, value) {
+			return
+		}
+		out = append(out, value)
+	}
+	switch chartType {
+	case "heatmap", "stacked_bar":
+		add(x)
+		add(group)
+	default:
+		add(x)
+	}
+	return out
+}
+
+func chartDisplayTitle(chartType, x, group, value, preferred string) string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred != "" {
+		return preferred
+	}
+	if x != "" && group != "" && value != "" {
+		switch chartType {
+		case "heatmap":
+			return fmt.Sprintf("%s与%s%s热力图", x, group, value)
+		case "stacked_bar":
+			return fmt.Sprintf("%s-%s%s构成", x, group, value)
+		case "treemap":
+			return fmt.Sprintf("%s-%s%s树图", x, group, value)
+		}
+	}
+	if x != "" && value != "" {
+		switch chartType {
+		case "line":
+			return fmt.Sprintf("%s%s趋势", x, value)
+		case "area":
+			return fmt.Sprintf("%s%s面积趋势", x, value)
+		case "bar":
+			return fmt.Sprintf("%s%s对比", x, value)
+		case "pie":
+			return fmt.Sprintf("%s%s占比", x, value)
+		case "funnel":
+			return fmt.Sprintf("%s%s漏斗", x, value)
+		case "dual_axis_combo":
+			return fmt.Sprintf("%s多指标趋势", x)
+		}
+	}
+	switch chartType {
+	case "heatmap":
+		return "交叉热力分析"
+	case "stacked_bar":
+		return "分组堆叠对比"
+	case "line":
+		return "趋势分析"
+	case "area":
+		return "面积趋势分析"
+	case "pie":
+		return "占比分析"
+	case "scatter":
+		return "散点关系分析"
+	case "histogram":
+		return "分布分析"
+	case "funnel":
+		return "漏斗分析"
+	case "dual_axis_combo":
+		return "双轴组合分析"
+	case "radar":
+		return "雷达对比分析"
+	case "treemap":
+		return "层级树图"
+	case "boxplot":
+		return "箱线分布分析"
+	default:
+		if x != "" && value != "" {
+			return fmt.Sprintf("%s对比", x)
+		}
+		if group != "" {
+			return fmt.Sprintf("%s分析", group)
+		}
+		return "数据图表"
+	}
+}
+
+func chartYLabel(chartType, group, value string) string {
+	switch chartType {
+	case "heatmap":
+		return group
+	case "scatter", "boxplot":
+		return value
+	default:
+		if value != "" {
+			return value
+		}
+		return "数值"
+	}
+}
+
+func chartLegendTitle(chartType, group string) string {
+	switch chartType {
+	case "stacked_bar", "heatmap":
+		return group
+	default:
+		return ""
+	}
+}
+
+func chartVisualDimensions(chartType, x, group string) []string {
+	switch chartType {
+	case "scatter", "histogram":
+		return []string{}
+	case "heatmap", "stacked_bar", "treemap":
+		return uniqueNonEmptyStrings(x, group)
+	default:
+		return uniqueNonEmptyStrings(x)
+	}
+}
+
+func chartVisualMetrics(chartType, x string, yFields []string, secondary, value string) []string {
+	switch chartType {
+	case "histogram":
+		return uniqueNonEmptyStrings(x)
+	case "dual_axis_combo":
+		return uniqueNonEmptyStrings(value, secondary)
+	case "scatter":
+		return uniqueNonEmptyStrings(x, firstStringValue(yFields))
+	default:
+		return uniqueNonEmptyStrings(append(yFields, value)...)
+	}
+}
+
+func validateStructuredChartContract(contract map[string]interface{}, columns []map[string]interface{}) map[string]interface{} {
+	issues := make([]string, 0)
+	chartType := stringFromInterface(contract["type"])
+	encoding, _ := contract["encoding"].(map[string]interface{})
+	columnSet := make(map[string]bool, len(columns))
+	for _, col := range columns {
+		name := strings.TrimSpace(fmt.Sprint(col["name"]))
+		if name != "" {
+			columnSet[name] = true
+		}
+	}
+	requireField := func(key string) string {
+		field := encodingFieldName(encoding, key)
+		if field == "" {
+			issues = append(issues, fmt.Sprintf("encoding.%s is required", key))
+			return ""
+		}
+		if !columnSet[field] {
+			issues = append(issues, fmt.Sprintf("encoding.%s field %q is not in query columns", key, field))
+		}
+		return field
+	}
+	requireAnyHierarchy := func() {
+		raw, _ := encoding["hierarchy"].([]map[string]interface{})
+		if len(raw) == 0 {
+			if arr, ok := encoding["hierarchy"].([]interface{}); ok {
+				if len(arr) == 0 {
+					issues = append(issues, "encoding.hierarchy is required")
+				}
+				for _, item := range arr {
+					if m, ok := item.(map[string]interface{}); ok {
+						field := stringFromInterface(m["field"])
+						if field == "" {
+							issues = append(issues, "encoding.hierarchy contains an empty field")
+						} else if !columnSet[field] {
+							issues = append(issues, fmt.Sprintf("encoding.hierarchy field %q is not in query columns", field))
+						}
+					}
+				}
+				return
+			}
+			issues = append(issues, "encoding.hierarchy is required")
+			return
+		}
+		for _, item := range raw {
+			field := stringFromInterface(item["field"])
+			if field == "" {
+				issues = append(issues, "encoding.hierarchy contains an empty field")
+			} else if !columnSet[field] {
+				issues = append(issues, fmt.Sprintf("encoding.hierarchy field %q is not in query columns", field))
+			}
+		}
+	}
+	requireFields := func(key string, min int) []string {
+		fields := encodingFieldNames(encoding, key)
+		if len(fields) < min {
+			issues = append(issues, fmt.Sprintf("encoding.%s requires at least %d field(s)", key, min))
+			return fields
+		}
+		for _, field := range fields {
+			if !columnSet[field] {
+				issues = append(issues, fmt.Sprintf("encoding.%s field %q is not in query columns", key, field))
+			}
+		}
+		return fields
+	}
+
+	switch chartType {
+	case "heatmap":
+		requireField("x")
+		requireField("y")
+		requireField("value")
+	case "stacked_bar":
+		requireField("x")
+		requireField("series")
+		requireField("value")
+	case "bar", "line", "area", "pie", "funnel":
+		requireField("x")
+		requireField("value")
+	case "dual_axis_combo":
+		requireField("x")
+		requireField("value")
+		requireField("secondary_value")
+	case "scatter":
+		requireField("x")
+		requireField("y")
+	case "histogram":
+		requireField("value")
+	case "treemap":
+		requireAnyHierarchy()
+		requireField("value")
+	case "radar":
+		requireFields("values", 3)
+	case "boxplot":
+		if len(encodingFieldNames(encoding, "values")) > 0 {
+			requireFields("values", 1)
+		} else {
+			requireField("value")
+		}
+	default:
+		issues = append(issues, "unsupported chart type in contract")
+	}
+
+	status := "pass"
+	if len(issues) > 0 {
+		status = "invalid"
+	}
+	return map[string]interface{}{"status": status, "issues": issues}
+}
+
+func encodingFieldName(encoding map[string]interface{}, key string) string {
+	raw, ok := encoding[key]
+	if !ok {
+		return ""
+	}
+	switch value := raw.(type) {
+	case map[string]interface{}:
+		return stringFromInterface(value["field"])
+	case map[string]string:
+		return value["field"]
+	default:
+		return ""
+	}
+}
+
+func encodingFieldNames(encoding map[string]interface{}, key string) []string {
+	raw, ok := encoding[key]
+	if !ok {
+		return nil
+	}
+	switch value := raw.(type) {
+	case []map[string]interface{}:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if field := stringFromInterface(item["field"]); field != "" {
+				out = append(out, field)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if m, ok := item.(map[string]interface{}); ok {
+				if field := stringFromInterface(m["field"]); field != "" {
+					out = append(out, field)
+				}
+			}
+		}
+		return out
+	default:
+		if field := encodingFieldName(encoding, key); field != "" {
+			return []string{field}
+		}
+		return nil
+	}
+}
+
+func columnNamesFromInterfaceMaps(columns []map[string]interface{}) []string {
+	out := make([]string, 0, len(columns))
+	for _, col := range columns {
+		name := strings.TrimSpace(fmt.Sprint(col["name"]))
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func stringFromInterface(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func stringsFromInterface(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := stringFromInterface(item); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		if text := stringFromInterface(value); text != "" && text != "<nil>" {
+			return []string{text}
+		}
+		return nil
+	}
+}
+
+func firstStringValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func uniqueNonEmptyStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || containsStringValue(out, value) {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func differenceStrings(all []string, used []string) []string {
+	out := make([]string, 0, len(all))
+	for _, value := range all {
+		value = strings.TrimSpace(value)
+		if value == "" || containsStringValue(used, value) || containsStringValue(out, value) {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func findFieldByName(fields []string, aliases ...string) string {
+	for _, alias := range aliases {
+		needle := strings.ToLower(alias)
+		for _, field := range fields {
+			lower := strings.ToLower(field)
+			if lower == needle || strings.Contains(lower, needle) {
+				return field
+			}
+		}
+	}
+	return ""
+}
+
+func inferFiveNumberFields(metrics []string) []string {
+	minField := findFieldByName(metrics, "min", "minimum", "最小")
+	q1Field := findFieldByName(metrics, "q1", "p25", "quantile_25", "lower_quartile", "第一四分位")
+	medianField := findFieldByName(metrics, "median", "p50", "quantile_50", "中位")
+	q3Field := findFieldByName(metrics, "q3", "p75", "quantile_75", "upper_quartile", "第三四分位")
+	maxField := findFieldByName(metrics, "max", "maximum", "最大")
+	if minField == "" || q1Field == "" || medianField == "" || q3Field == "" || maxField == "" {
+		return nil
+	}
+	return []string{minField, q1Field, medianField, q3Field, maxField}
+}
+
+func structuredChartID(chartType string, spec map[string]interface{}) string {
+	payload := fmt.Sprintf("%s|%v|%v|%v|%v",
+		chartType,
+		spec["x"],
+		spec["y"],
+		spec["group"],
+		spec["secondary_y"],
+	)
+	sum := sha1.Sum([]byte(payload))
+	return fmt.Sprintf("chart_%x", sum[:5])
+}
+
+func containsStringValue(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func resultColumnLooksNumeric(rows []map[string]string, name string) bool {
@@ -604,6 +1670,7 @@ func normalizeCSVFileForDuckDB(ctx context.Context, filename string) (string, fu
 // 'spatial' extension (for st_read_meta used to enumerate sheets).
 func (t *DataAnalysisTool) LoadFromExcel(ctx context.Context, filename string, tableName string) (*TableSchema, error) {
 	logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Loading Excel file '%s' into table '%s' for session %s", filename, tableName, t.sessionID)
+	rawTableName := rawExcelTableName(tableName)
 
 	// Record the created table for cleanup. If already exists, skip creation.
 	if t.recordCreatedTable(tableName) {
@@ -626,10 +1693,29 @@ func (t *DataAnalysisTool) LoadFromExcel(ctx context.Context, filename string, t
 			"[Tool][LegacyDataAnalysis] Successfully created table '%s' from Excel file in session %s (sheets=%v)",
 			tableName, t.sessionID, sheetNames,
 		)
+
+		if t.recordCreatedTable(rawTableName) {
+			rawCreateSQL := buildExcelRawCreateTableSQL(rawTableName, filename, sheetNames)
+			if _, err := t.db.ExecContext(ctx, rawCreateSQL); err != nil {
+				logger.Warnf(ctx,
+					"[Tool][LegacyDataAnalysis] Failed to create raw Excel table '%s' from '%s' (sheets=%v, session=%s): %v",
+					rawTableName, filename, sheetNames, t.sessionID, err,
+				)
+			} else {
+				logger.Infof(ctx,
+					"[Tool][LegacyDataAnalysis] Successfully created raw Excel table '%s' from Excel file in session %s (sheets=%v)",
+					rawTableName, t.sessionID, sheetNames,
+				)
+			}
+		}
 	}
 
-	// Get and return the table schema
-	return t.LoadFromTable(ctx, tableName)
+	schema, err := t.LoadFromTable(ctx, tableName)
+	if err != nil {
+		return nil, err
+	}
+	t.attachRawExcelTableMetadata(ctx, schema, rawTableName)
+	return schema, nil
 }
 
 // listExcelSheets returns the names of every sheet (layer) inside the given
@@ -647,7 +1733,11 @@ func (t *DataAnalysisTool) listExcelSheets(ctx context.Context, filename string)
 
 	rows, err := t.db.QueryContext(ctx, metaSQL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query sheet metadata: %w", err)
+		sheetNames, fallbackErr := listExcelSheetsWithExcelize(filename)
+		if fallbackErr == nil && len(sheetNames) > 0 {
+			return sheetNames, nil
+		}
+		return nil, fmt.Errorf("failed to query sheet metadata: %w; excelize fallback: %v", err, fallbackErr)
 	}
 	defer rows.Close()
 
@@ -664,6 +1754,30 @@ func (t *DataAnalysisTool) listExcelSheets(ctx context.Context, filename string)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating sheet metadata rows: %w", err)
+	}
+	if len(names) == 0 {
+		sheetNames, fallbackErr := listExcelSheetsWithExcelize(filename)
+		if fallbackErr == nil && len(sheetNames) > 0 {
+			return sheetNames, nil
+		}
+	}
+	return names, nil
+}
+
+func listExcelSheetsWithExcelize(filename string) ([]string, error) {
+	workbook, err := excelize.OpenFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer workbook.Close()
+
+	rawNames := workbook.GetSheetList()
+	names := make([]string, 0, len(rawNames))
+	for _, name := range rawNames {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		names = append(names, name)
 	}
 	return names, nil
 }
@@ -708,6 +1822,62 @@ func buildExcelCreateTableSQL(tableName, filename string, sheetNames []string) s
 		tableName,
 		strings.Join(parts, "\nUNION ALL BY NAME\n"),
 	)
+}
+
+func buildExcelRawCreateTableSQL(tableName, filename string, sheetNames []string) string {
+	escFile := sqlSingleQuoteEscape(filename)
+
+	if len(sheetNames) == 0 {
+		return fmt.Sprintf(
+			"CREATE TABLE \"%s\" AS SELECT * FROM read_xlsx('%s', header=false, all_varchar=true)",
+			tableName, escFile,
+		)
+	}
+
+	if len(sheetNames) == 1 {
+		escSheet := sqlSingleQuoteEscape(sheetNames[0])
+		return fmt.Sprintf(
+			"CREATE TABLE \"%s\" AS SELECT *, '%s' AS %s FROM read_xlsx('%s', sheet = '%s', header=false, all_varchar=true)",
+			tableName, escSheet, excelSheetNameColumn, escFile, escSheet,
+		)
+	}
+
+	parts := make([]string, 0, len(sheetNames))
+	for _, sheet := range sheetNames {
+		escSheet := sqlSingleQuoteEscape(sheet)
+		parts = append(parts, fmt.Sprintf(
+			"SELECT *, '%s' AS %s FROM read_xlsx('%s', sheet = '%s', header=false, all_varchar=true)",
+			escSheet, excelSheetNameColumn, escFile, escSheet,
+		))
+	}
+	return fmt.Sprintf(
+		"CREATE TABLE \"%s\" AS %s",
+		tableName,
+		strings.Join(parts, "\nUNION ALL BY NAME\n"),
+	)
+}
+
+func (t *DataAnalysisTool) attachRawExcelTableMetadata(ctx context.Context, schema *TableSchema, rawTableName string) {
+	if schema == nil || strings.TrimSpace(rawTableName) == "" {
+		return
+	}
+	rawSchema, err := t.LoadFromTable(ctx, rawTableName)
+	if err != nil {
+		logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Raw Excel table '%s' is not available for session %s: %v", rawTableName, t.sessionID, err)
+		return
+	}
+	if schema.Metadata == nil {
+		schema.Metadata = map[string]interface{}{}
+	}
+	schema.Metadata["raw_table_name"] = rawSchema.TableName
+	schema.Metadata["raw_column_count"] = len(rawSchema.Columns)
+	schema.Metadata["raw_row_count"] = rawSchema.RowCount
+	rawColumns := make([]map[string]interface{}, 0, len(rawSchema.Columns))
+	for _, col := range rawSchema.Columns {
+		rawColumns = append(rawColumns, map[string]interface{}{"name": col.Name, "type": col.Type})
+	}
+	schema.Metadata["raw_columns"] = rawColumns
+	schema.Metadata["raw_usage"] = "Use raw_table_name when the structured table appears incomplete because of merged cells, decorative headers, cross-tab layout, or irregular Excel formatting. The raw table is the same workbook loaded with header=false."
 }
 
 // LoadFromKnowledge loads data from a Knowledge entity into a DuckDB table and returns the table schema.
@@ -808,6 +1978,93 @@ func (t *DataAnalysisTool) materializeKnowledgeFile(ctx context.Context, knowled
 	return tmpPath, cleanup, nil
 }
 
+func (t *DataAnalysisTool) runtimeAttachmentByID(attachmentID string) (types.MessageAttachment, bool) {
+	index, ok := types.ParseRuntimeAttachmentID(attachmentID)
+	if !ok || index < 0 || index >= len(t.runtimeAttachments) {
+		return types.MessageAttachment{}, false
+	}
+	att := t.runtimeAttachments[index]
+	if !types.IsTabularFileType(att.FileType) {
+		return types.MessageAttachment{}, false
+	}
+	return att, true
+}
+
+func (t *DataAnalysisTool) materializeRuntimeAttachmentFile(ctx context.Context, attachmentID string, att types.MessageAttachment) (string, func(), error) {
+	noop := func() {}
+	if t.fileService == nil {
+		return "", noop, fmt.Errorf("file service is not available")
+	}
+	if strings.TrimSpace(att.URL) == "" {
+		return "", noop, fmt.Errorf("attachment '%s' has no stored file URL", attachmentID)
+	}
+
+	reader, err := t.fileService.GetFile(ctx, att.URL)
+	if err != nil {
+		return "", noop, fmt.Errorf("failed to open uploaded attachment '%s': %w", attachmentID, err)
+	}
+	defer reader.Close()
+
+	suffix := ""
+	if ext := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(att.FileType)), "."); ext != "" {
+		suffix = "." + ext
+	}
+	tmp, err := os.CreateTemp("", "weknora-tabular-attachment-*"+suffix)
+	if err != nil {
+		return "", noop, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+			logger.Warnf(ctx, "[Tool][LegacyDataAnalysis] Failed to remove attachment temp file %s: %v", tmpPath, err)
+		}
+	}
+	if _, err := io.Copy(tmp, reader); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", noop, fmt.Errorf("failed to copy uploaded attachment '%s' to temp file: %w", attachmentID, err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", noop, fmt.Errorf("failed to finalize temp file for uploaded attachment '%s': %w", attachmentID, err)
+	}
+	return tmpPath, cleanup, nil
+}
+
+func (t *DataAnalysisTool) LoadFromRuntimeAttachment(ctx context.Context, attachmentID string, att types.MessageAttachment) (*TableSchema, error) {
+	tableName := runtimeAttachmentTableName(attachmentID)
+	fileType := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(att.FileType)), ".")
+	localPath, cleanup, err := t.materializeRuntimeAttachmentFile(ctx, attachmentID, att)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	switch fileType {
+	case "csv":
+		return t.LoadFromCSV(ctx, localPath, tableName)
+	case "xlsx", "xls":
+		return t.LoadFromExcel(ctx, localPath, tableName)
+	default:
+		return nil, fmt.Errorf("unsupported uploaded attachment file type: %s (supported types: csv, xlsx, xls)", fileType)
+	}
+}
+
+func cloneTableSchema(schema *TableSchema) *TableSchema {
+	if schema == nil {
+		return nil
+	}
+	cloned := *schema
+	cloned.Columns = append([]ColumnInfo(nil), schema.Columns...)
+	if schema.Metadata != nil {
+		cloned.Metadata = make(map[string]interface{}, len(schema.Metadata))
+		for key, value := range schema.Metadata {
+			cloned.Metadata[key] = value
+		}
+	}
+	return &cloned
+}
+
 // LoadFromKnowledgeID loads data from a Knowledge ID into a DuckDB table and returns the table schema
 // Parameters:
 //   - ctx: context for cancellation and timeout
@@ -818,6 +2075,29 @@ func (t *DataAnalysisTool) materializeKnowledgeFile(ctx context.Context, knowled
 //   - *TableSchema: schema information of the created table
 //   - error: any error that occurred during the operation
 func (t *DataAnalysisTool) LoadFromKnowledgeID(ctx context.Context, knowledgeID string) (*TableSchema, error) {
+	if t.isTableAnalysisTool() {
+		if t.loadedSchemas == nil {
+			t.loadedSchemas = make(map[string]*TableSchema)
+		}
+		if cached, ok := t.loadedSchemas[knowledgeID]; ok {
+			logger.Infof(ctx, "[Tool][LegacyDataAnalysis] Reusing cached table schema for knowledge ID '%s' in session %s", knowledgeID, t.sessionID)
+			return cloneTableSchema(cached), nil
+		}
+	}
+
+	var schema *TableSchema
+	var err error
+	if att, ok := t.runtimeAttachmentByID(knowledgeID); ok {
+		schema, err = t.LoadFromRuntimeAttachment(ctx, knowledgeID, att)
+		if err != nil {
+			return nil, err
+		}
+		if t.isTableAnalysisTool() {
+			t.loadedSchemas[knowledgeID] = cloneTableSchema(schema)
+		}
+		return schema, nil
+	}
+
 	// Use GetKnowledgeByIDOnly to support cross-tenant shared KB
 	knowledge, err := t.knowledgeService.GetKnowledgeByIDOnly(ctx, knowledgeID)
 	if err != nil {
@@ -825,7 +2105,14 @@ func (t *DataAnalysisTool) LoadFromKnowledgeID(ctx context.Context, knowledgeID 
 		return nil, fmt.Errorf("failed to get knowledge by ID: %w", err)
 	}
 
-	return t.LoadFromKnowledge(ctx, knowledge)
+	schema, err = t.LoadFromKnowledge(ctx, knowledge)
+	if err != nil {
+		return nil, err
+	}
+	if t.isTableAnalysisTool() {
+		t.loadedSchemas[knowledgeID] = cloneTableSchema(schema)
+	}
+	return schema, nil
 }
 
 // LoadFromTable retrieves the schema information of an existing table
@@ -908,6 +2195,44 @@ func (t *DataAnalysisTool) TableName(knowledge *types.Knowledge) string {
 	return "k_" + strings.ReplaceAll(knowledge.ID, "-", "_")
 }
 
+func allowedTableAnalysisTables(schema *TableSchema) []string {
+	if schema == nil {
+		return nil
+	}
+	out := []string{schema.TableName}
+	if rawName := metadataString(schema.Metadata, "raw_table_name"); rawName != "" && rawName != schema.TableName {
+		out = append(out, rawName)
+	}
+	return out
+}
+
+func runtimeAttachmentTableName(attachmentID string) string {
+	index, ok := types.ParseRuntimeAttachmentID(attachmentID)
+	if !ok {
+		return "attachment_unknown"
+	}
+	return fmt.Sprintf("attachment_%d", index+1)
+}
+
+func rawExcelTableName(tableName string) string {
+	return tableName + excelRawTableSuffix
+}
+
+func metadataString(metadata map[string]interface{}, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return ""
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if strings.EqualFold(text, "<nil>") {
+		return ""
+	}
+	return text
+}
+
 // buildSchemaDescription builds a formatted schema description
 func (t *TableSchema) Description() string {
 	var builder strings.Builder
@@ -918,6 +2243,20 @@ func (t *TableSchema) Description() string {
 
 	for _, col := range t.Columns {
 		builder.WriteString(fmt.Sprintf("- %s (%s)\n", col.Name, col.Type))
+	}
+
+	if rawName := metadataString(t.Metadata, "raw_table_name"); rawName != "" {
+		builder.WriteString("\nRaw Excel cell table:\n")
+		builder.WriteString(fmt.Sprintf("- Table name: %s\n", rawName))
+		builder.WriteString(fmt.Sprintf("- Columns: %v\n", t.Metadata["raw_column_count"]))
+		builder.WriteString(fmt.Sprintf("- Rows: %v\n", t.Metadata["raw_row_count"]))
+		builder.WriteString("- Use this raw table when merged cells, decorative headers or irregular layout make the structured table incomplete. Query it with the same table_analysis tool; it is the same workbook loaded with header=false.\n")
+		if rawColumns, ok := t.Metadata["raw_columns"].([]map[string]interface{}); ok && len(rawColumns) > 0 {
+			builder.WriteString("- Raw column info:\n")
+			for _, col := range rawColumns {
+				builder.WriteString(fmt.Sprintf("  - %s (%s)\n", col["name"], col["type"]))
+			}
+		}
 	}
 
 	return builder.String()

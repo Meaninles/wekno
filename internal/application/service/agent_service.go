@@ -56,6 +56,18 @@ func agentHasKnowledgeScope(config *types.AgentConfig) bool {
 	return len(config.SearchTargets) > 0
 }
 
+func agentHasRuntimeTabularAttachments(config *types.AgentConfig) bool {
+	if config == nil || config.AgentType != types.AgentTypeTableAnalysis {
+		return false
+	}
+	for _, att := range config.RuntimeAttachments {
+		if types.IsTabularFileType(att.FileType) {
+			return true
+		}
+	}
+	return false
+}
+
 // knowledgeBaseIDsForPrompt returns KB IDs to show in runtime_context metadata.
 // Prefer explicit KnowledgeBases; fall back to deduped IDs from SearchTargets.
 func knowledgeBaseIDsForPrompt(config *types.AgentConfig) []string {
@@ -512,6 +524,7 @@ func (s *agentService) registerTools(
 
 	// Filter out knowledge base tools if no knowledge scope is configured for this turn.
 	hasKnowledge := agentHasKnowledgeScope(config)
+	hasRuntimeTables := agentHasRuntimeTabularAttachments(config)
 	if !hasKnowledge {
 		filteredTools := make([]string, 0)
 		kbTools := map[string]bool{
@@ -523,6 +536,8 @@ func (s *agentService) registerTools(
 			tools.ToolDatabaseQuery:       true,
 			tools.ToolDataAnalysis:        true,
 			tools.ToolDataSchema:          true,
+			tools.ToolTableAnalysis:       true,
+			tools.ToolTableSchema:         true,
 			// Wiki tools also require at least one KB in scope.
 			tools.ToolWikiReadPage:      true,
 			tools.ToolWikiSearch:        true,
@@ -547,6 +562,10 @@ func (s *agentService) registerTools(
 
 		for _, toolName := range allowedTools {
 			if !kbTools[toolName] {
+				filteredTools = append(filteredTools, toolName)
+				continue
+			}
+			if hasRuntimeTables && (toolName == tools.ToolTableAnalysis || toolName == tools.ToolTableSchema) {
 				filteredTools = append(filteredTools, toolName)
 			}
 		}
@@ -626,6 +645,22 @@ func (s *agentService) registerTools(
 	// Deduplicate while preserving original order.
 	allowedTools = dedupStrings(allowedTools)
 
+	var tableAnalysisRuntimeTool *tools.TableAnalysisTool
+	tableAnalysisTool := func() *tools.TableAnalysisTool {
+		if tableAnalysisRuntimeTool == nil {
+			tableAnalysisRuntimeTool = tools.NewTableAnalysisToolWithConfig(
+				s.knowledgeBaseService,
+				s.knowledgeService,
+				s.tenantService,
+				s.fileService,
+				s.duckdb,
+				sessionID,
+				config,
+			)
+		}
+		return tableAnalysisRuntimeTool
+	}
+
 	// logger.Infof(ctx, "Registering tools: %v, webSearchEnabled: %v", allowedTools, config.WebSearchEnabled)
 	// Register each allowed tool
 	for _, toolName := range allowedTools {
@@ -675,12 +710,20 @@ func (s *agentService) registerTools(
 			logger.Infof(ctx, "Registered web_fetch tool for session: %s, maxItems: %d", sessionID, config.WebFetchTopN)
 
 		case tools.ToolDataAnalysis:
-			toolToRegister = tools.NewDataAnalysisTool(s.knowledgeBaseService, s.knowledgeService, s.tenantService, s.fileService, s.duckdb, sessionID, config.AgentType)
+			toolToRegister = tools.NewDataAnalysisToolWithConfig(s.knowledgeBaseService, s.knowledgeService, s.tenantService, s.fileService, s.duckdb, sessionID, config)
 			logger.Infof(ctx, "Registered data_analysis tool for session: %s", sessionID)
 
 		case tools.ToolDataSchema:
 			toolToRegister = tools.NewDataSchemaTool(s.knowledgeService, s.chunkService.GetRepository())
 			logger.Infof(ctx, "Registered data_schema tool")
+
+		case tools.ToolTableAnalysis:
+			toolToRegister = tableAnalysisTool()
+			logger.Infof(ctx, "Registered table_analysis tool for session: %s", sessionID)
+
+		case tools.ToolTableSchema:
+			toolToRegister = tools.NewTableSchemaTool(s.knowledgeService, s.chunkService.GetRepository(), tableAnalysisTool())
+			logger.Infof(ctx, "Registered table_schema tool")
 
 		// Wiki tools — only registered when wiki KBs are detected
 		case tools.ToolWikiReadPage:

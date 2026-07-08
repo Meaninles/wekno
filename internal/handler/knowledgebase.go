@@ -744,7 +744,7 @@ func pickUserDisplayName(u *types.User) string {
 	if u == nil {
 		return ""
 	}
-	return u.Username
+	return u.DisplayNameOrUsername()
 }
 
 // TogglePinKnowledgeBase godoc

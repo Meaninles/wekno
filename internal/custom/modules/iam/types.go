@@ -4,6 +4,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -82,6 +83,7 @@ type ExternalOrganization struct {
 	Name               string         `json:"name" gorm:"type:varchar(255);not null"`
 	ParentExternalID   string         `json:"parent_external_id" gorm:"type:varchar(128);index"`
 	Disabled           bool           `json:"disabled" gorm:"default:false;index"`
+	SubtreeUserCount   int64          `json:"subtree_user_count" gorm:"default:0"`
 	Sequence           string         `json:"sequence" gorm:"type:varchar(128)"`
 	ExternalUpdatedAt  string         `json:"external_updated_at" gorm:"type:varchar(64)"`
 	Raw                string         `json:"raw" gorm:"type:jsonb"`
@@ -109,6 +111,7 @@ type ExternalUser struct {
 	DisplayName            string         `json:"display_name" gorm:"type:varchar(255)"`
 	OrganizationExternalID string         `json:"organization_external_id" gorm:"type:varchar(128);index"`
 	Disabled               bool           `json:"disabled" gorm:"default:false;index"`
+	AccessEnabled          bool           `json:"access_enabled" gorm:"default:false;index"`
 	WeKnoraUserID          string         `json:"weknora_user_id" gorm:"column:weknora_user_id;type:varchar(36);index"`
 	ExternalUpdatedAt      string         `json:"external_updated_at" gorm:"type:varchar(64)"`
 	Raw                    string         `json:"raw" gorm:"type:jsonb"`
@@ -129,14 +132,28 @@ func (u *ExternalUser) BeforeCreate(tx *gorm.DB) error {
 }
 
 type SpaceMemberCandidateOrganization struct {
-	ExternalID       string `json:"external_id"`
-	Name             string `json:"name"`
-	ParentExternalID string `json:"parent_external_id,omitempty"`
-	UserCount        int64  `json:"user_count"`
-	TenantCount      int64  `json:"tenant_count"`
+	ExternalID        string `json:"external_id"`
+	Name              string `json:"name"`
+	ParentExternalID  string `json:"parent_external_id,omitempty"`
+	HasChildren       bool   `json:"has_children"`
+	UserCount         int64  `json:"user_count"`
+	TenantCount       int64  `json:"tenant_count"`
+	NodeType          string `json:"node_type,omitempty"`
+	IAMExternalID     string `json:"iam_external_id,omitempty"`
+	UserID            string `json:"user_id,omitempty"`
+	Username          string `json:"username,omitempty"`
+	DisplayName       string `json:"display_name,omitempty"`
+	Avatar            string `json:"avatar,omitempty"`
+	TenantID          uint64 `json:"tenant_id,omitempty"`
+	TenantName        string `json:"tenant_name,omitempty"`
+	HasLocalUser      bool   `json:"has_local_user,omitempty"`
+	AccessEnabled     bool   `json:"access_enabled,omitempty"`
+	AlreadySelected   bool   `json:"already_selected,omitempty"`
+	SelectionDisabled bool   `json:"selection_disabled,omitempty"`
 }
 
 type SpaceMemberCandidateUser struct {
+	IAMExternalID             string `json:"iam_external_id"`
 	UserID                    string `json:"user_id"`
 	Username                  string `json:"username"`
 	DisplayName               string `json:"display_name,omitempty"`
@@ -145,22 +162,53 @@ type SpaceMemberCandidateUser struct {
 	TenantName                string `json:"tenant_name,omitempty"`
 	IAMOrganizationExternalID string `json:"iam_organization_external_id,omitempty"`
 	IAMOrganizationName       string `json:"iam_organization_name,omitempty"`
+	HasLocalUser              bool   `json:"has_local_user"`
+	AccessEnabled             bool   `json:"access_enabled"`
+	AlreadySelected           bool   `json:"already_selected"`
+	SelectionDisabled         bool   `json:"selection_disabled"`
+}
+
+type PendingSpaceMemberGrant struct {
+	ID                string              `json:"id" gorm:"type:varchar(36);primaryKey"`
+	OrganizationID    string              `json:"organization_id" gorm:"type:varchar(36);not null;uniqueIndex:idx_custom_iam_pending_space_member"`
+	IAMExternalUserID string              `json:"iam_external_user_id" gorm:"type:varchar(128);not null;uniqueIndex:idx_custom_iam_pending_space_member;index"`
+	Role              types.OrgMemberRole `json:"role" gorm:"type:varchar(32);not null;default:'viewer'"`
+	InvitedByUserID   string              `json:"invited_by_user_id" gorm:"type:varchar(36);default:''"`
+	RedeemedAt        *time.Time          `json:"redeemed_at,omitempty" gorm:"index"`
+	RedeemedTenantID  uint64              `json:"redeemed_tenant_id" gorm:"index"`
+	RedeemedUserID    string              `json:"redeemed_user_id" gorm:"type:varchar(36);default:'';index"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
+}
+
+func (PendingSpaceMemberGrant) TableName() string {
+	return "custom_iam_pending_space_member_grants"
+}
+
+func (g *PendingSpaceMemberGrant) BeforeCreate(tx *gorm.DB) error {
+	if g.ID == "" {
+		g.ID = uuid.New().String()
+	}
+	return nil
 }
 
 type SyncRun struct {
-	ID            string     `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TriggeredBy   string     `json:"triggered_by" gorm:"type:varchar(64);not null"`
-	Status        string     `json:"status" gorm:"type:varchar(32);not null;index"`
-	Message       string     `json:"message" gorm:"type:text"`
-	OrgCount      int        `json:"org_count"`
-	UserCount     int        `json:"user_count"`
-	StartedAt     time.Time  `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at"`
-	CreatedUsers  int        `json:"created_users"`
-	UpdatedUsers  int        `json:"updated_users"`
-	DisabledUsers int        `json:"disabled_users"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID            string           `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TriggeredBy   string           `json:"triggered_by" gorm:"type:varchar(64);not null"`
+	Status        string           `json:"status" gorm:"type:varchar(32);not null;index"`
+	Message       string           `json:"message" gorm:"type:text"`
+	ScopeOrgID    string           `json:"scope_organization_external_id,omitempty" gorm:"type:varchar(128);index"`
+	ScopeOrgName  string           `json:"scope_organization_name,omitempty" gorm:"type:varchar(255)"`
+	OrgCount      int              `json:"org_count"`
+	UserCount     int              `json:"user_count"`
+	StartedAt     time.Time        `json:"started_at"`
+	FinishedAt    *time.Time       `json:"finished_at"`
+	CreatedUsers  int              `json:"created_users"`
+	UpdatedUsers  int              `json:"updated_users"`
+	DisabledUsers int              `json:"disabled_users"`
+	CreatedAt     time.Time        `json:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+	Progress      *SyncRunProgress `json:"progress,omitempty" gorm:"-"`
 }
 
 func (SyncRun) TableName() string {
@@ -172,4 +220,13 @@ func (r *SyncRun) BeforeCreate(tx *gorm.DB) error {
 		r.ID = uuid.New().String()
 	}
 	return nil
+}
+
+type SyncRunProgress struct {
+	OrgCount       int        `json:"org_count"`
+	UserCount      int        `json:"user_count"`
+	CreatedUsers   int        `json:"created_users"`
+	UpdatedUsers   int        `json:"updated_users"`
+	DisabledUsers  int        `json:"disabled_users"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
 }

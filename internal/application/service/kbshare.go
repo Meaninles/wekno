@@ -27,7 +27,7 @@ var (
 // in this org, with what role" rather than "is this user". The 3-D cap
 // inside CheckTenantKBPermission encodes:
 //
-//   effective = min(share.Permission, tenant_org_role, tenant_role_cap)
+//	effective = min(share.Permission, tenant_org_role, tenant_role_cap)
 //
 // where tenant_role_cap pins tenant Viewers to OrgRoleViewer regardless
 // of what the org-level grant said. That keeps the tenant RBAC promise
@@ -80,6 +80,14 @@ func (s *kbShareService) ShareKnowledgeBase(ctx context.Context, kbID string, or
 		return nil, ErrKBNotFound
 	}
 	if kb.TenantID != tenantID {
+		if !types.IsSystemAdminFromContext(ctx) {
+			return nil, ErrNotKBOwner
+		}
+		tenantID = kb.TenantID
+	}
+
+	isSystemAdmin := types.IsSystemAdminFromContext(ctx)
+	if kb.TenantID != tenantID {
 		return nil, ErrNotKBOwner
 	}
 
@@ -92,15 +100,17 @@ func (s *kbShareService) ShareKnowledgeBase(ctx context.Context, kbID string, or
 	}
 
 	// Caller's tenant must be an org member with editor+ role to share.
-	tm, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
-	if err != nil {
-		if errors.Is(err, repository.ErrOrgMemberNotFound) {
-			return nil, ErrTenantNotInOrg
+	if !isSystemAdmin {
+		tm, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
+		if err != nil {
+			if errors.Is(err, repository.ErrOrgMemberNotFound) {
+				return nil, ErrTenantNotInOrg
+			}
+			return nil, err
 		}
-		return nil, err
-	}
-	if !tm.Role.HasPermission(types.OrgRoleEditor) {
-		return nil, ErrOrgRoleCannotShare
+		if !tm.Role.HasPermission(types.OrgRoleEditor) {
+			return nil, ErrOrgRoleCannotShare
+		}
 	}
 
 	if !permission.IsValid() {
@@ -203,6 +213,9 @@ func (s *kbShareService) callerCanManageShare(
 	callerUserID string,
 	callerTenantID uint64,
 ) bool {
+	if types.IsSystemAdminFromContext(ctx) {
+		return true
+	}
 	// (1) Original sharer.
 	if shareSharedByUserID == callerUserID {
 		return true
@@ -227,7 +240,7 @@ func (s *kbShareService) ListSharesByKnowledgeBase(ctx context.Context, kbID str
 	if err != nil {
 		return nil, ErrKBNotFound
 	}
-	if kb.TenantID != tenantID {
+	if kb.TenantID != tenantID && !types.IsSystemAdminFromContext(ctx) {
 		return nil, ErrNotKBOwner
 	}
 	return s.shareRepo.ListByKnowledgeBase(ctx, kbID)
@@ -324,10 +337,16 @@ func (s *kbShareService) ListSharedKnowledgeBases(ctx context.Context, tenantID 
 func (s *kbShareService) ListSharedKnowledgeBasesInOrganization(ctx context.Context, orgID string, tenantID uint64, callerTenantRole types.TenantRole) ([]*types.OrganizationSharedKnowledgeBaseItem, error) {
 	tm, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)
 	if err != nil {
-		if errors.Is(err, repository.ErrOrgMemberNotFound) {
+		if errors.Is(err, repository.ErrOrgMemberNotFound) && types.IsSystemAdminFromContext(ctx) {
+			if _, orgErr := s.orgRepo.GetByID(ctx, orgID); orgErr != nil {
+				return nil, orgErr
+			}
+			tm = &types.OrganizationTenantMember{OrganizationID: orgID, TenantID: tenantID, Role: types.OrgRoleAdmin}
+		} else if errors.Is(err, repository.ErrOrgMemberNotFound) {
 			return nil, ErrTenantNotInOrg
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
 
 	shares, err := s.shareRepo.ListByOrganization(ctx, orgID)
@@ -438,6 +457,9 @@ func (s *kbShareService) GetShareByKBAndOrg(ctx context.Context, kbID string, or
 // where the caller's tenant is a member, capped by the 3-D rule. Empty
 // when isShared is false.
 func (s *kbShareService) CheckTenantKBPermission(ctx context.Context, kbID string, callerTenantID uint64, callerTenantRole types.TenantRole) (types.OrgMemberRole, bool, error) {
+	if types.IsSystemAdminFromContext(ctx) {
+		return types.OrgRoleAdmin, true, nil
+	}
 	shares, err := s.shareRepo.ListByKnowledgeBase(ctx, kbID)
 	if err != nil {
 		return "", false, err

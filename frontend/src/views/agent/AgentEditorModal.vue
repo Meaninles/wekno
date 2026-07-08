@@ -2268,11 +2268,11 @@ const navItems = computed(() => {
   items.push({ key: 'websearch', icon: 'internet', label: t('agent.editor.webSearchConfig') });
   items.push({ key: 'multimodal', icon: 'image', label: t('agentEditor.imageUpload.navLabel') });
   // Agent 模式能力
-  if (isAgentMode.value && !isDataAnalysisAgent.value) {
+  if (isAgentMode.value && !isFixedAnalysisAgent.value) {
     items.push({ key: 'tools', icon: 'tools', label: t('agent.editor.toolsConfig') });
     items.push({ key: 'mcp', icon: 'server', label: t('agentEditor.mcp.label') });
   }
-  if (isAgentMode.value && !isDataAnalysisAgent.value && (skillsAvailable.value || (isGeneralRuntimeAgent.value && professionalSkillsAvailable.value))) {
+  if (isAgentMode.value && !isFixedAnalysisAgent.value && (skillsAvailable.value || (isGeneralRuntimeAgent.value && professionalSkillsAvailable.value))) {
     items.push({ key: 'skills', icon: 'lightbulb', label: t('agent.editor.skillsConfig') });
   }
   // 发布（仅编辑模式）
@@ -2684,6 +2684,8 @@ const agentType = computed({
 });
 
 const isDataAnalysisAgent = computed(() => isAgentMode.value && agentType.value === 'data-analysis');
+const isTableAnalysisAgent = computed(() => isAgentMode.value && agentType.value === 'table-analysis');
+const isFixedAnalysisAgent = computed(() => isDataAnalysisAgent.value || isTableAnalysisAgent.value);
 const isGeneralAgent = computed(() => isAgentMode.value && agentType.value === 'general-agent');
 const isDocumentProcessingAgent = computed(() => isAgentMode.value && agentType.value === 'document-processing-agent');
 const isGeneralRuntimeAgent = computed(() => isGeneralAgent.value || isDocumentProcessingAgent.value);
@@ -3220,8 +3222,11 @@ const applyAgentTypePreset = (preset: AgentTypePreset | null) => {
       }
     }
   }
+  if (typeof c.thinking === 'boolean') target.thinking = c.thinking;
   if (typeof c.temperature === 'number') target.temperature = c.temperature;
+  if (typeof c.max_completion_tokens === 'number') target.max_completion_tokens = c.max_completion_tokens;
   if (typeof c.max_iterations === 'number') target.max_iterations = c.max_iterations;
+  if (typeof c.llm_call_timeout === 'number') target.llm_call_timeout = c.llm_call_timeout;
   if (Array.isArray(c.allowed_tools)) target.allowed_tools = [...c.allowed_tools];
   if (Array.isArray(c.db_data_sources)) {
     target.db_data_sources = [...c.db_data_sources];
@@ -3234,6 +3239,7 @@ const applyAgentTypePreset = (preset: AgentTypePreset | null) => {
   if (typeof c.claude_sdk_web_search_enabled === 'boolean') target.claude_sdk_web_search_enabled = c.claude_sdk_web_search_enabled;
   if (typeof c.web_fetch_enabled === 'boolean') target.web_fetch_enabled = c.web_fetch_enabled;
   if (typeof c.web_fetch_top_n === 'number') target.web_fetch_top_n = c.web_fetch_top_n;
+  if (typeof c.history_turns === 'number') target.history_turns = c.history_turns;
   if (typeof c.enable_artifacts === 'boolean') target.enable_artifacts = c.enable_artifacts;
   if (c.document_template) {
     target.document_template = JSON.parse(JSON.stringify(c.document_template));
@@ -3289,6 +3295,9 @@ const onAgentTypeChange = (val: AgentType) => {
   }
   if (val === 'data-analysis' && ['tools', 'mcp', 'skills'].includes(currentSection.value)) {
     currentSection.value = 'database';
+  }
+  if (val === 'table-analysis' && ['database', 'tools', 'mcp', 'skills'].includes(currentSection.value)) {
+    currentSection.value = 'knowledge';
   }
 
   // 用新预设的默认名/描述刷新自动填充字段

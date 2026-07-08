@@ -24,13 +24,13 @@ export function getAgentToolIconName(toolName: string): string {
   if (toolName === 'todo_write') {
     return 'task'
   }
-  if (toolName === 'image_analysis' || toolName === 'query_understand') {
+  if (toolName === 'image_analysis' || toolName === 'query_understand' || toolName === 'table_analysis_display_intent') {
     return 'ai-search'
   }
-  if (toolName === 'db_catalog' || toolName === 'db_schema') {
+  if (toolName === 'db_catalog' || toolName === 'db_schema' || toolName === 'table_schema') {
     return 'server'
   }
-  if (toolName === 'db_query' || toolName === 'database_query' || toolName === 'data_analysis') {
+  if (toolName === 'db_query' || toolName === 'database_query' || toolName === 'data_analysis' || toolName === 'table_analysis') {
     return 'chart-bar'
   }
   if (toolName.startsWith('mcp_')) {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/types"
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/xuri/excelize/v2"
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -46,6 +47,62 @@ func newTestDuckDB(t *testing.T) *sql.DB {
 		}
 	}
 	return db
+}
+
+func TestTableAnalysisExecuteSingleQueryAllowsCTEUnionAllWithBudget(t *testing.T) {
+	db := newCSVTestDuckDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE attachment_1(category VARCHAR, amount INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO attachment_1 VALUES ('A', 1), ('B', 2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE attachment_1__raw(category VARCHAR, amount INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO attachment_1__raw VALUES ('C', 3), ('D', 4)`); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	_, rows, truncated, err := tool.executeSingleQuery(ctx, `
+WITH normalized AS (
+	SELECT category, amount FROM attachment_1
+)
+SELECT category, amount FROM normalized
+UNION ALL
+SELECT category, amount FROM attachment_1__raw
+ORDER BY category`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("small UNION ALL result should not be marked as truncated")
+	}
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows, got %d: %#v", len(rows), rows)
+	}
+}
+
+func TestTableAnalysisExecuteSingleQueryUsesDBQueryStyleLimitBudget(t *testing.T) {
+	db := newCSVTestDuckDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE nums AS SELECT range AS id FROM range(0, 1005)`); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewTableAnalysisToolWithConfig(nil, nil, nil, nil, db, "session-table", &types.AgentConfig{AgentType: types.AgentTypeTableAnalysis})
+	_, rows, truncated, err := tool.executeSingleQuery(ctx, `SELECT id FROM nums ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("expected result at max_rows to be marked as truncated")
+	}
+	if len(rows) != tableAnalysisMaxRows {
+		t.Fatalf("expected %d rows from the outer LIMIT budget, got %d", tableAnalysisMaxRows, len(rows))
+	}
 }
 
 // writeWorkbook builds a minimal .xlsx with the given sheet -> rows layout.

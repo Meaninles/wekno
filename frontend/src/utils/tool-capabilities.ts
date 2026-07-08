@@ -75,6 +75,8 @@ export const TOOL_CAPABILITY_REQUIREMENTS: Record<string, ToolRequirement> = {
   // ---- Data analysis (reads table summary/column chunks produced by RAG ingest) ----
   data_analysis: { anyOf: ['vector', 'keyword'], consumesFiles: true },
   data_schema:   { anyOf: ['vector', 'keyword'], consumesFiles: true },
+  table_analysis: { anyOf: ['vector', 'keyword'], consumesFiles: true },
+  table_schema:   { anyOf: ['vector', 'keyword'], consumesFiles: true },
 };
 
 /**

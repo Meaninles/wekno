@@ -428,7 +428,7 @@ func (s *Service) ListSharesBySource(ctx context.Context, sourceID string, tenan
 			resp.RequireApproval = share.Organization.RequireApproval
 		}
 		if share.SharedByUser != nil {
-			resp.SharedByUsername = share.SharedByUser.Username
+			resp.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
 		}
 		out = append(out, resp)
 	}

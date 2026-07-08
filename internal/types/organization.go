@@ -122,8 +122,8 @@ type OrganizationTenantMember struct {
 	CreatedAt            time.Time     `json:"created_at"`
 	UpdatedAt            time.Time     `json:"updated_at"`
 
-	Organization        *Organization `json:"organization,omitempty" gorm:"foreignKey:OrganizationID"`
-	RepresentativeUser  *User         `json:"representative_user,omitempty" gorm:"foreignKey:RepresentativeUserID"`
+	Organization       *Organization `json:"organization,omitempty" gorm:"foreignKey:OrganizationID"`
+	RepresentativeUser *User         `json:"representative_user,omitempty" gorm:"foreignKey:RepresentativeUserID"`
 }
 
 // TableName returns the table name for GORM
@@ -256,15 +256,15 @@ func (AgentShare) TableName() string {
 
 // SharedAgentInfo represents a shared agent with additional sharing info
 type SharedAgentInfo struct {
-	Agent             *CustomAgent  `json:"agent"`
-	ShareID           string        `json:"share_id"`
-	OrganizationID    string        `json:"organization_id"`
-	OrgName           string        `json:"org_name"`
-	Permission        OrgMemberRole `json:"permission"`
-	SourceTenantID    uint64        `json:"source_tenant_id"`
-	SharedAt          time.Time     `json:"shared_at"`
-	SharedByUserID    string        `json:"shared_by_user_id,omitempty"`
-	SharedByUsername  string        `json:"shared_by_username,omitempty"`
+	Agent            *CustomAgent  `json:"agent"`
+	ShareID          string        `json:"share_id"`
+	OrganizationID   string        `json:"organization_id"`
+	OrgName          string        `json:"org_name"`
+	Permission       OrgMemberRole `json:"permission"`
+	SourceTenantID   uint64        `json:"source_tenant_id"`
+	SharedAt         time.Time     `json:"shared_at"`
+	SharedByUserID   string        `json:"shared_by_user_id,omitempty"`
+	SharedByUsername string        `json:"shared_by_username,omitempty"`
 	// DisabledByMe: current tenant has hidden this shared agent from their conversation dropdown (per-user preference)
 	DisabledByMe bool `json:"disabled_by_me"`
 }
@@ -280,7 +280,7 @@ type SourceFromAgentInfo struct {
 // When SourceFromAgent is set, the KB is from a shared agent's config (no direct KB share); show as read-only and "来自智能体 XXX".
 type OrganizationSharedKnowledgeBaseItem struct {
 	SharedKnowledgeBaseInfo
-	IsMine          bool                `json:"is_mine"`
+	IsMine          bool                 `json:"is_mine"`
 	SourceFromAgent *SourceFromAgentInfo `json:"source_from_agent,omitempty"`
 }
 
@@ -381,8 +381,12 @@ type InviteMemberRequest struct {
 	// UserID is retained for backward compatibility. When set without
 	// TenantID, the handler resolves the user's TenantID and uses this
 	// user as the representative.
-	UserID string        `json:"user_id"`
-	Role   OrgMemberRole `json:"role" binding:"required"` // Role to assign: admin/editor/viewer
+	UserID string `json:"user_id"`
+	// IAMExternalUserID lets custom IAM invite an external account before
+	// a local user/tenant exists. The grant is redeemed when that account
+	// first logs in and gets a local tenant.
+	IAMExternalUserID string        `json:"iam_external_user_id"`
+	Role              OrgMemberRole `json:"role" binding:"required"` // Role to assign: admin/editor/viewer
 }
 
 // ShareKnowledgeBaseRequest represents a request to share a knowledge base
@@ -452,11 +456,11 @@ type OrganizationMemberResponse struct {
 // caused this tenant to show up in the search). Multiple users may belong
 // to the same tenant; deduplication is by TenantID.
 type TenantInviteCandidate struct {
-	TenantID                uint64 `json:"tenant_id"`
-	TenantName              string `json:"tenant_name"`
-	RepresentativeUserID    string `json:"representative_user_id"`
-	RepresentativeUsername  string `json:"representative_username"`
-	RepresentativeAvatar    string `json:"representative_avatar,omitempty"`
+	TenantID               uint64 `json:"tenant_id"`
+	TenantName             string `json:"tenant_name"`
+	RepresentativeUserID   string `json:"representative_user_id"`
+	RepresentativeUsername string `json:"representative_username"`
+	RepresentativeAvatar   string `json:"representative_avatar,omitempty"`
 }
 
 // KnowledgeBaseShareResponse represents a share record in API responses
@@ -494,10 +498,10 @@ type AgentShareResponse struct {
 	MyPermission     string    `json:"my_permission,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	// Agent scope summary for list display (from agent config when available)
-	ScopeKB        string `json:"scope_kb,omitempty"`        // "all" | "selected" | "none"
+	ScopeKB        string `json:"scope_kb,omitempty"`       // "all" | "selected" | "none"
 	ScopeKBCount   int    `json:"scope_kb_count,omitempty"` // when selected
 	ScopeWebSearch bool   `json:"scope_web_search,omitempty"`
-	ScopeMCP       string `json:"scope_mcp,omitempty"`        // "all" | "selected" | "none"
+	ScopeMCP       string `json:"scope_mcp,omitempty"`       // "all" | "selected" | "none"
 	ScopeMCPCount  int    `json:"scope_mcp_count,omitempty"` // when selected
 	// Agent avatar (emoji or icon name) for list display
 	AgentAvatar string `json:"agent_avatar,omitempty"`
@@ -505,8 +509,8 @@ type AgentShareResponse struct {
 
 // ListOrganizationsResponse represents the response for listing organizations
 type ListOrganizationsResponse struct {
-	Organizations  []OrganizationResponse     `json:"organizations"`
-	Total          int64                      `json:"total"`
+	Organizations  []OrganizationResponse       `json:"organizations"`
+	Total          int64                        `json:"total"`
 	ResourceCounts *ResourceCountsByOrgResponse `json:"resource_counts,omitempty"` // 各空间内知识库/智能体数量，供列表侧栏展示
 }
 

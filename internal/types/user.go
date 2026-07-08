@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -91,6 +92,8 @@ type User struct {
 	ID string `json:"id"         gorm:"type:varchar(36);primaryKey"`
 	// Username of the user
 	Username string `json:"username"   gorm:"type:varchar(100);uniqueIndex;not null"`
+	// DisplayName is the human-readable name shown in UI. It is not unique.
+	DisplayName string `json:"display_name" gorm:"type:varchar(255);default:''"`
 	// Hashed password of the user
 	PasswordHash string `json:"-"          gorm:"type:varchar(255);not null"`
 	// Avatar URL of the user
@@ -179,15 +182,17 @@ type OIDCCallbackResponse struct {
 }
 
 type OIDCUserInfo struct {
-	Subject  string                 `json:"subject,omitempty"`
-	Username string                 `json:"username,omitempty"`
-	Claims   map[string]interface{} `json:"claims,omitempty"`
+	Subject     string                 `json:"subject,omitempty"`
+	Username    string                 `json:"username,omitempty"`
+	DisplayName string                 `json:"display_name,omitempty"`
+	Claims      map[string]interface{} `json:"claims,omitempty"`
 }
 
 // RegisterRequest represents a registration request
 type RegisterRequest struct {
-	Username string `json:"username" binding:"required,min=2,max=50"`
-	Password string `json:"password" binding:"required,min=6"`
+	Username    string `json:"username" binding:"required,min=2,max=50"`
+	DisplayName string `json:"display_name,omitempty"`
+	Password    string `json:"password" binding:"required,min=8,max=32"`
 }
 
 // LoginResponse represents a login response
@@ -223,6 +228,7 @@ type RegisterResponse struct {
 type UserInfo struct {
 	ID                  string          `json:"id"`
 	Username            string          `json:"username"`
+	DisplayName         string          `json:"display_name,omitempty"`
 	Avatar              string          `json:"avatar"`
 	TenantID            uint64          `json:"tenant_id"`
 	IsActive            bool            `json:"is_active"`
@@ -238,6 +244,7 @@ func (u *User) ToUserInfo() *UserInfo {
 	return &UserInfo{
 		ID:                  u.ID,
 		Username:            u.Username,
+		DisplayName:         u.DisplayName,
 		Avatar:              u.Avatar,
 		TenantID:            u.TenantID,
 		IsActive:            u.IsActive,
@@ -247,4 +254,14 @@ func (u *User) ToUserInfo() *UserInfo {
 		CreatedAt:           u.CreatedAt,
 		UpdatedAt:           u.UpdatedAt,
 	}
+}
+
+func (u *User) DisplayNameOrUsername() string {
+	if u == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(u.DisplayName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(u.Username)
 }

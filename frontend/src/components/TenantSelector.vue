@@ -119,7 +119,10 @@ const currentTenantName = computed(() => {
   // 首先从当前加载的租户列表中查找
   const tenant = tenants.value.find(t => t.id === currentTenantId.value)
   if (tenant) return tenant.name
-  // 如果是选中的租户，使用保存的租户名称
+  // 其次使用 auth store 从最新 tenant / memberships 快照解析出的名称。
+  const storeName = authStore.currentTenantName
+  if (storeName) return storeName
+  // 如果是选中的租户，最后才使用保存的租户名称
   if (selectedTenantId.value && authStore.selectedTenantName) {
     return authStore.selectedTenantName
   }

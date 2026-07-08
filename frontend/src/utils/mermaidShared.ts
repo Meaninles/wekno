@@ -202,12 +202,13 @@ let mermaidCount = 0
 export const createMermaidCodeRenderer = (idPrefix: string) => {
   return ({ text, lang }: Tokens.Code) => {
     const { html: highlighted, language: highlightLang } = highlightCode(text, lang)
-    if (lang === 'mermaid') {
+    const explicitLang = (lang || '').trim()
+    if (explicitLang === 'mermaid') {
       const id = `${idPrefix}-${++mermaidCount}`
       const inner = `<code class="hljs language-${highlightLang}">${highlighted}</code>`
       return buildMermaidBlockHtml(inner, `id="${id}" data-mermaid="false"`)
     }
-    return buildCodeBlockHtml(lang || highlightLang, highlighted, highlightLang)
+    return buildCodeBlockHtml(explicitLang, highlighted, highlightLang)
   }
 }
 

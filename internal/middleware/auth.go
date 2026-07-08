@@ -112,7 +112,14 @@ func Auth(
 		if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			user, jwtTenantID, err := userService.ValidateToken(c.Request.Context(), token)
-			if err == nil && user != nil {
+			if err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"error": err.Error(),
+				})
+				c.Abort()
+				return
+			}
+			if user != nil {
 				// JWT Token认证成功
 				// 默认 target = JWT 里的 tenant_id（来自登录或 /auth/switch-tenant），
 				// 兼容 ValidateToken 的 fallback：claim 缺失时 jwtTenantID == user.TenantID。
@@ -511,6 +518,13 @@ func resolveTenantRole(
 	crossTenantSwitch bool,
 	cfg *config.Config,
 ) (types.TenantRole, bool) {
+	if user != nil && user.IsSystemAdmin {
+		logger.Infof(ctx,
+			"[auth] resolveTenantRole system admin -> Owner: user=%s tenant=%d",
+			user.ID, targetTenantID)
+		return types.TenantRoleOwner, true
+	}
+
 	// 1. 正常成员关系
 	member, err := memberService.GetMembership(ctx, user.ID, targetTenantID)
 	if err == nil && member != nil && member.Status == types.TenantMemberStatusActive {

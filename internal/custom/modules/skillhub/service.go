@@ -632,7 +632,7 @@ func (s *Service) itemFromOrgShare(share OrganizationShare, currentTenantID uint
 		item.OrganizationName = share.Organization.Name
 	}
 	if share.SharedByUser != nil {
-		item.SharedByUsername = share.SharedByUser.Username
+		item.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
 	}
 	return item
 }
@@ -655,10 +655,10 @@ func (s *Service) itemFromUserShare(share UserShare, currentTenantID uint64) Ski
 		SharedAt:         &share.CreatedAt,
 	}
 	if share.TargetUser != nil {
-		item.TargetUsername = share.TargetUser.Username
+		item.TargetUsername = share.TargetUser.DisplayNameOrUsername()
 	}
 	if share.SharedByUser != nil {
-		item.SharedByUsername = share.SharedByUser.Username
+		item.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
 	}
 	return item
 }

@@ -140,7 +140,7 @@ func (h *TenantMemberHandler) ListMembers(c *gin.Context) {
 			JoinedAt:  m.JoinedAt,
 		}
 		if u, ok := usersByID[m.UserID]; ok && u != nil {
-			row.Username = u.Username
+			row.Username = u.DisplayNameOrUsername()
 			row.Avatar = u.Avatar
 		}
 		resp = append(resp, row)

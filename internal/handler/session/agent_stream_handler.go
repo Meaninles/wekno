@@ -190,6 +190,21 @@ func (h *AgentStreamHandler) handleAgentProgress(ctx context.Context, evt event.
 		phase = "start"
 	}
 	done := data.Done || phase == "success" || phase == "error"
+	metadata := map[string]interface{}{
+		"tool_name":    toolName,
+		"tool_call_id": toolCallID,
+		"progress_id":  "agent_progress:" + toolCallID,
+		"message":      content,
+		"phase":        phase,
+		"success":      phase != "error",
+		"transient":    data.Transient,
+	}
+	for key, value := range data.Metadata {
+		if key == "" {
+			continue
+		}
+		metadata[key] = value
+	}
 
 	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
 		ID:        evt.ID,
@@ -197,15 +212,7 @@ func (h *AgentStreamHandler) handleAgentProgress(ctx context.Context, evt event.
 		Content:   content,
 		Done:      done,
 		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"tool_name":    toolName,
-			"tool_call_id": toolCallID,
-			"progress_id":  "agent_progress:" + toolCallID,
-			"message":      content,
-			"phase":        phase,
-			"success":      phase != "error",
-			"transient":    data.Transient,
-		},
+		Data:      metadata,
 	}); err != nil {
 		logger.GetLogger(h.ctx).Error("Append agent progress event to stream failed", "error", err)
 	}

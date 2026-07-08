@@ -74,3 +74,21 @@ func TestTenantIDFromClaims(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultUserWorkspaceNamePrefersDisplayName(t *testing.T) {
+	if got := DefaultUserWorkspaceName("20203485", "吕扬"); got != "吕扬's Workspace" {
+		t.Fatalf("DefaultUserWorkspaceName() = %q, want display-name workspace", got)
+	}
+	if got := DefaultUserWorkspaceName("20203485", " "); got != "20203485's Workspace" {
+		t.Fatalf("DefaultUserWorkspaceName() = %q, want username fallback", got)
+	}
+}
+
+func TestIsGeneratedUserWorkspaceName(t *testing.T) {
+	if !isGeneratedUserWorkspaceName("20203485's Workspace") {
+		t.Fatal("expected generated workspace name to be detected")
+	}
+	if isGeneratedUserWorkspaceName("研发知识库") {
+		t.Fatal("expected custom workspace name to be left alone")
+	}
+}

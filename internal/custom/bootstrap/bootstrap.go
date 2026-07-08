@@ -13,6 +13,7 @@ import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/config"
+	customadmin "github.com/Tencent/WeKnora/internal/custom/modules/admin"
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
@@ -41,9 +42,11 @@ type Handlers struct {
 	GeneralAgent         *generalagent.Handler
 	AnswerFeedback       *answerfeedback.Handler
 	BuiltinAgentDefaults *builtinagentdefaults.Handler
+	Admin                *customadmin.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
+	adminService                *customadmin.Service
 	builtinAgentDefaultsService *builtinagentdefaults.Service
 	dbAnalyticsService          *dbanalytics.Service
 	generalAgentService         *generalagent.Service
@@ -78,6 +81,7 @@ func NewHandlers(
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
+	adminService := customadmin.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
@@ -158,6 +162,14 @@ func NewHandlers(
 	}
 	handler.RegisterCustomProvisionerHook(provisionUser)
 	iamService.SetProvisioner(provisionUser)
+	handler.RegisterCustomPendingOrganizationMemberGrantHook(func(ctx context.Context, req handler.CustomPendingOrganizationMemberGrantRequest) error {
+		return iamService.CreatePendingSpaceMemberGrant(ctx, iam.PendingSpaceMemberGrantInput{
+			OrganizationID:    req.OrganizationID,
+			IAMExternalUserID: req.IAMExternalUserID,
+			Role:              req.Role,
+			InvitedByUserID:   req.InvitedByUserID,
+		})
+	})
 	appservice.RegisterAdditionalSkillLister(skillHubService.AdditionalMetadata)
 	appservice.RegisterProfessionalSkillLister(skillhub.ProfessionalMetadata)
 	appservice.RegisterRuntimeSkillConfigurer(skillHubService.ConfigureRuntimeSkills)
@@ -169,11 +181,12 @@ func NewHandlers(
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeDocumentProcessingAgent, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeDataAnalysis, generalAgentService.Run)
+	sessionhandler.RegisterAgentQARunner(types.AgentTypeTableAnalysis, generalAgentService.Run)
 	appservice.RegisterRuntimeToolRecognizer(func(_ context.Context, config *types.AgentConfig, toolName string) bool {
 		if config == nil {
 			return false
 		}
-		if types.IsClaudeSDKAgentType(config.AgentType) {
+		if supportsDBAnalyticsRuntimeTools(config.AgentType) {
 			return toolName == dbanalytics.ToolDBCatalog ||
 				toolName == dbanalytics.ToolDBSchema ||
 				toolName == dbanalytics.ToolDBQuery
@@ -184,7 +197,7 @@ func NewHandlers(
 		if config == nil || len(config.DBDataSources) == 0 {
 			return nil
 		}
-		if !types.IsClaudeSDKAgentType(config.AgentType) {
+		if !supportsDBAnalyticsRuntimeTools(config.AgentType) {
 			return nil
 		}
 		allowed := map[string]bool{}
@@ -220,8 +233,10 @@ func NewHandlers(
 		GeneralAgent:                generalagent.NewHandler(generalAgentService),
 		AnswerFeedback:              answerfeedback.NewHandler(answerFeedbackService, messageService),
 		BuiltinAgentDefaults:        builtinagentdefaults.NewHandler(builtinAgentDefaultsService),
+		Admin:                       customadmin.NewHandler(adminService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
+		adminService:                adminService,
 		builtinAgentDefaultsService: builtinAgentDefaultsService,
 		dbAnalyticsService:          dbAnalyticsService,
 		generalAgentService:         generalAgentService,
@@ -231,6 +246,12 @@ func NewHandlers(
 		skillHubService:             skillHubService,
 		userGuideService:            userGuideService,
 	}, nil
+}
+
+func supportsDBAnalyticsRuntimeTools(agentType string) bool {
+	return agentType == types.AgentTypeDataAnalysis ||
+		agentType == types.AgentTypeGeneralAgent ||
+		agentType == types.AgentTypeDocumentProcessingAgent
 }
 
 func StartSchedulers(handlers *Handlers) {
@@ -299,6 +320,15 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 			iamRoutes.PUT("/settings", handlers.IAM.SaveSetting)
 			iamRoutes.POST("/sync", handlers.IAM.RunSync)
 			iamRoutes.GET("/sync-runs", handlers.IAM.ListRuns)
+			iamRoutes.GET("/organizations", handlers.IAM.ListOrganizations)
+		}
+
+		adminRoutes := custom.Group("/admin")
+		{
+			adminRoutes.GET("/spaces", handlers.Admin.SearchSpaces)
+			adminRoutes.GET("/users", handlers.Admin.SearchUsers)
+			adminRoutes.PUT("/users-active", handlers.Admin.BatchSetUsersActive)
+			adminRoutes.PUT("/users/:id/active", handlers.Admin.SetUserActive)
 		}
 	}
 

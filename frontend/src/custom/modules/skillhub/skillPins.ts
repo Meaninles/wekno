@@ -23,7 +23,7 @@ function storageKey(): string {
   return `WeKnora_${readUserId()}_${tenantSegmentForKey()}${CHAT_SKILL_PINS_SUFFIX}`
 }
 
-function skillPinKey(kind: SkillPinKind, skillName: string): string {
+export function skillPinKey(kind: SkillPinKind, skillName: string): string {
   const name = String(skillName || '').trim()
   return name ? `${kind}:${name}` : ''
 }

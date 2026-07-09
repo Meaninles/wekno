@@ -23,6 +23,14 @@ test('agent progress messages are rendered as visible tool titles', () => {
   assert.match(source, /if \(agentProgressMessage\)/)
 })
 
+test('rag mode still renders non-rag tool calls while delegating rag pipeline rows', () => {
+  assert.match(source, /RAG_PIPELINE_TOOL_NAMES/)
+  assert.match(source, /hasNonRagToolEvents/)
+  assert.match(source, /if \(props\.ragMode && !hasNonRagToolEvents\.value\)/)
+  assert.match(source, /if \(isRagDelegatedEvent\(e\)\) return false/)
+  assert.match(source, /RAG_PIPELINE_TOOL_NAMES\.has\(event\.tool_name\)/)
+})
+
 test('answer text is not reclassified with operational preamble regexes', () => {
   assert.doesNotMatch(source, /OPERATIONAL_ANSWER_PREAMBLE_RE/)
   assert.doesNotMatch(source, /foldOperationalAnswerPreambles/)

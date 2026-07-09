@@ -37,7 +37,7 @@ import { listSessionStatuses, markSessionRead, type SessionStatusMap } from "@/c
 import { clearSessionDraftState, getSessionDraftState, saveSessionDraftState } from "@/custom/modules/sessionState/draftState";
 import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
 import { absoluteShareURL, createChatShare } from "@/custom/modules/chatshare/api";
-import { useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
+import { skillPinKey, useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
 import { copyTextToClipboard } from "@/utils/chatMessageShared";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
@@ -53,6 +53,7 @@ import {
   type MobileResourceChip,
   type MobileUploadAttachment,
 } from "../utils";
+import { sortPinnedFirstByRecency } from "../pinOrdering";
 
 type ChatMessage = Record<string, any>;
 type SheetTab = "agent" | "model" | "context" | "skill";
@@ -254,23 +255,36 @@ const mobileModelTypeLabel = (type?: ModelConfig["type"] | string) => {
   const key = modelTypeShortKeyByBackendType[String(type || "")];
   return key ? t(`modelSettings.typeShort.${key}`) : String(type || "");
 };
-const selectedKbIds = computed(() => settingsStore.settings.selectedKnowledgeBases || []);
-const selectedFileIds = computed(() => settingsStore.settings.selectedFiles || []);
+
+const normalizeStringList = (values: unknown[] = []) => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const item = String(value || "").trim();
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
+};
+
+const selectedKbIds = computed(() => normalizeStringList(settingsStore.settings.selectedKnowledgeBases || []));
+const selectedFileIds = computed(() => normalizeStringList(settingsStore.settings.selectedFiles || []));
 const activeFileKnowledgeBase = computed(() =>
   knowledgeBases.value.find((kb) => kb.id === activeFileKbId.value) || null,
 );
-const selectedSkillNames = computed(() => {
-  const names = [
+const rawSelectedSkillNames = computed(() =>
+  normalizeStringList([
     ...(settingsStore.settings.selectedSkillNames || []),
     ...(settingsStore.settings.selectedSkills || []),
-  ];
-  return Array.from(new Set(names.map((name) => String(name || "").trim()).filter(Boolean)));
-});
+  ]),
+);
 const selectedAgentId = computed(() => settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID);
 const selectedModelId = computed(() => settingsStore.conversationModels.selectedChatModelId || "");
 
 const fallbackBuiltinAgentNames: Record<string, string> = {
   [BUILTIN_QUICK_ANSWER_ID]: "快速问答",
+  [BUILTIN_SIMPLE_CHAT_ID]: "简单对话",
   [BUILTIN_SMART_REASONING_ID]: "智能推理",
   [BUILTIN_WIKI_RESEARCHER_ID]: "维基问答",
   [BUILTIN_DATA_ANALYST_ID]: "数据分析",
@@ -302,7 +316,11 @@ const mobileAgentRows = computed<CustomAgent[]>(() => {
     quickAgent,
     ...agents.value.filter((agent) => agent.id !== BUILTIN_QUICK_ANSWER_ID),
   ];
-  return agentPins.sortPinnedFirst(merged, (agent) => agentPinKey(agent.id));
+  return sortPinnedFirstByRecency(
+    merged,
+    Array.from(agentPins.pinnedKeys.value),
+    (agent) => agentPinKey(agent.id),
+  );
 });
 
 const currentAgentConfig = computed(() => selectedAgent.value?.config || {});
@@ -389,8 +407,7 @@ const hasProfessionalSkillTab = computed(() =>
 );
 
 const selectedProfessionalSkillNames = computed(() => {
-  const names = settingsStore.settings.selectedProfessionalSkillNames || [];
-  const normalized = Array.from(new Set(names.map((name) => String(name || "").trim()).filter(Boolean)));
+  const normalized = normalizeStringList(settingsStore.settings.selectedProfessionalSkillNames || []);
   const mode = agentProfessionalSkillsSelectionMode.value;
   if (mode === "none") return [];
   if (mode === "selected") {
@@ -400,17 +417,28 @@ const selectedProfessionalSkillNames = computed(() => {
   return normalized;
 });
 
+const selectedProfessionalSkillNameSet = computed(() => new Set(selectedProfessionalSkillNames.value));
+
+const selectedSkillNames = computed(() =>
+  rawSelectedSkillNames.value.filter((name) => !selectedProfessionalSkillNameSet.value.has(name)),
+);
+
 const selectedSkillContextCount = computed(() => selectedSkillNames.value.length + selectedProfessionalSkillNames.value.length);
 
 const sortedLightweightSkills = computed(() =>
-  lightweightPins.sortPinnedFirst(
+  sortPinnedFirstByRecency(
     skills.value.filter((skill) => skill.kind !== "professional"),
-    (skill) => skill.name,
+    Array.from(lightweightPins.pinnedKeys.value),
+    (skill) => skillPinKey("lightweight", skill.name),
   ),
 );
 
 const sortedProfessionalSkills = computed(() =>
-  professionalPins.sortPinnedFirst(professionalOptions.value, (skill) => skill.name),
+  sortPinnedFirstByRecency(
+    professionalOptions.value,
+    Array.from(professionalPins.pinnedKeys.value),
+    (skill) => skillPinKey("professional", skill.name),
+  ),
 );
 
 const activeSkillRows = computed(() => {
@@ -482,32 +510,77 @@ const shareCurrentMobileChat = async () => {
   }
 };
 
+const pushUniqueChip = (
+  chips: MobileResourceChip[],
+  seen: Set<string>,
+  chip: MobileResourceChip,
+  uniqueKey = `${chip.type}:${chip.id}`,
+) => {
+  if (seen.has(uniqueKey)) return;
+  seen.add(uniqueKey);
+  chips.push(chip);
+};
+
+const uploadFileKey = (file: File | { name?: string; size?: number; lastModified?: number }) =>
+  `${file.name || ""}:${file.size || 0}:${file.lastModified || 0}`;
+
+const uniqueFilesByIdentity = (files: File[]) => {
+  const seen = new Set<string>();
+  return files.filter((file) => {
+    const key = uploadFileKey(file);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const uniqueAttachmentsByIdentity = (attachments: MobileUploadAttachment[]) => {
+  const seen = new Set<string>();
+  return attachments.filter((attachment) => {
+    const key = uploadFileKey(attachment.file);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
 const selectedResourceChips = computed<MobileResourceChip[]>(() => {
   const chips: MobileResourceChip[] = [];
+  const seen = new Set<string>();
   for (const kbId of selectedKbIds.value) {
     const kb = knowledgeBases.value.find((item) => item.id === kbId);
-    chips.push({ id: kbId, type: "kb", name: kb?.name || "知识库" });
+    pushUniqueChip(chips, seen, { id: kbId, type: "kb", name: kb?.name || "知识库" });
   }
   for (const fileId of selectedAllowedFileIds.value) {
     const file = knowledgeFiles.value.find((item) => item.id === fileId);
-    chips.push({ id: fileId, type: "file", name: file?.file_name || file?.display_name || fileId });
+    pushUniqueChip(chips, seen, { id: fileId, type: "file", name: file?.file_name || file?.display_name || fileId });
   }
   for (const name of selectedSkillNames.value) {
-    chips.push({ id: `skill:${name}`, type: "skill", name });
+    pushUniqueChip(chips, seen, { id: `skill:${name}`, type: "skill", name }, `skill-name:${name}`);
   }
   for (const name of selectedProfessionalSkillNames.value) {
-    chips.push({ id: `professional:${name}`, type: "skill", name });
+    pushUniqueChip(chips, seen, { id: `professional:${name}`, type: "professional", name }, `skill-name:${name}`);
   }
   pendingImages.value.forEach((file, index) => {
-    chips.push({ id: `image:${index}:${file.name}`, type: "image", name: file.name || `图片 ${index + 1}` });
+    pushUniqueChip(
+      chips,
+      seen,
+      { id: `image:${index}:${file.name}`, type: "image", name: file.name || `图片 ${index + 1}` },
+      `image:${uploadFileKey(file)}`,
+    );
   });
   pendingAttachments.value.forEach((file, index) => {
-    chips.push({
-      id: `attachment:${index}:${file.name}`,
-      type: "attachment",
-      name: file.name,
-      meta: formatFileSize(file.size),
-    });
+    pushUniqueChip(
+      chips,
+      seen,
+      {
+        id: `attachment:${index}:${file.name}`,
+        type: "attachment",
+        name: file.name,
+        meta: formatFileSize(file.size),
+      },
+      `attachment:${uploadFileKey(file.file)}`,
+    );
   });
   return chips;
 });
@@ -813,8 +886,10 @@ const hydrateMobileConversationState = async (sessionId: string) => {
     if (draft?.settings) {
       settingsStore.applyConversationResourceState(draft.settings);
     }
-    pendingAttachments.value = fromDraftAttachments(draft?.attachments || []);
-    pendingImages.value = (draft?.images || []).filter((file): file is File => file instanceof File);
+    pendingAttachments.value = uniqueAttachmentsByIdentity(fromDraftAttachments(draft?.attachments || []));
+    pendingImages.value = uniqueFilesByIdentity(
+      (draft?.images || []).filter((file): file is File => file instanceof File),
+    );
     await loadKnowledgeChildren();
   } finally {
     isHydratingConversationState = false;
@@ -970,7 +1045,7 @@ const resetToNewChat = async (preserveCurrentDraft = true) => {
   currentSessionId.value = "";
   currentAssistantMessageId.value = "";
   fullContent.value = "";
-  inputValue.value = "";
+  await clearComposerInput();
   loading.value = false;
   isReplying.value = false;
   drawerOpen.value = false;
@@ -1101,6 +1176,7 @@ const selectAgent = (agent: CustomAgent) => {
 };
 
 const isAgentPinned = (agent: CustomAgent) => agentPins.isPinned(agent.id);
+const isSelectedAgent = (agent: CustomAgent) => selectedAgentId.value === agent.id;
 
 const toggleAgentPin = (agent: CustomAgent) => {
   agentPins.togglePinned(agent.id);
@@ -1187,6 +1263,9 @@ const toggleSkill = (skill: SkillInfo) => {
     settingsStore.removeSkillName(name);
     settingsStore.removeSkill(name);
   } else {
+    if (selectedProfessionalSkillNames.value.includes(name)) {
+      settingsStore.removeProfessionalSkillName(name);
+    }
     settingsStore.addSkillName(name);
   }
 };
@@ -1194,7 +1273,11 @@ const toggleSkill = (skill: SkillInfo) => {
 const toggleProfessionalSkill = (skill: SkillInfo) => {
   const name = skill.name;
   if (selectedProfessionalSkillNames.value.includes(name)) settingsStore.removeProfessionalSkillName(name);
-  else settingsStore.addProfessionalSkillName(name);
+  else {
+    settingsStore.removeSkillName(name);
+    settingsStore.removeSkill(name);
+    settingsStore.addProfessionalSkillName(name);
+  }
 };
 
 const isActiveSkillSelected = (name: string) => {
@@ -1228,11 +1311,11 @@ const removeChip = (chip: MobileResourceChip) => {
     return;
   }
   if (chip.type === "file") settingsStore.removeFile(chip.id);
-  if (chip.type === "skill") {
+  if (chip.type === "skill" || chip.type === "professional") {
     const separator = chip.id.indexOf(":");
     const kind = separator >= 0 ? chip.id.slice(0, separator) : "skill";
     const name = separator >= 0 ? chip.id.slice(separator + 1) : chip.id;
-    if (kind === "professional") settingsStore.removeProfessionalSkillName(name || chip.name);
+    if (kind === "professional" || chip.type === "professional") settingsStore.removeProfessionalSkillName(name || chip.name);
     else {
       settingsStore.removeSkillName(name || chip.id);
       settingsStore.removeSkill(name || chip.id);
@@ -1356,7 +1439,7 @@ const sendMessage = async () => {
       channel: "web",
     });
 
-    inputValue.value = "";
+    await clearComposerInput();
     saveSessionDraftState(
       sessionId,
       settingsStore.captureConversationScopedState(),
@@ -1415,7 +1498,10 @@ const stopGenerating = async () => {
 
 const handleImageFiles = (event: Event) => {
   const files = Array.from((event.target as HTMLInputElement).files || []);
-  pendingImages.value.push(...files.filter((file) => file.type.startsWith("image/")).slice(0, 6));
+  pendingImages.value = uniqueFilesByIdentity([
+    ...pendingImages.value,
+    ...files.filter((file) => file.type.startsWith("image/")),
+  ]).slice(0, 6);
   (event.target as HTMLInputElement).value = "";
 };
 
@@ -1426,24 +1512,37 @@ const handleAttachmentFiles = (event: Event) => {
     MessagePlugin.warning(`当前智能体不支持该文件类型：${file.name}`);
     return false;
   });
-  pendingAttachments.value.push(
-    ...acceptedFiles.slice(0, 6).map((file) => ({
+  pendingAttachments.value = uniqueAttachmentsByIdentity([
+    ...pendingAttachments.value,
+    ...acceptedFiles.map((file) => ({
       file,
       name: file.name,
       size: file.size,
     })),
-  );
+  ]).slice(0, 6);
   (event.target as HTMLInputElement).value = "";
 };
+
+const COMPOSER_MIN_HEIGHT = 28;
+const COMPOSER_MAX_HEIGHT = 116;
 
 const autoGrow = () => {
   const el = textareaRef.value;
   if (!el) return;
   el.style.height = "auto";
-  el.style.height = `${Math.min(el.scrollHeight, 116)}px`;
+  const nextHeight = inputValue.value ? Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT) : COMPOSER_MIN_HEIGHT;
+  el.style.height = `${nextHeight}px`;
 };
 
-watch(inputValue, autoGrow);
+const clearComposerInput = async () => {
+  inputValue.value = "";
+  await nextTick();
+  autoGrow();
+};
+
+watch(inputValue, () => {
+  void nextTick(autoGrow);
+}, { flush: "post" });
 
 watch(hasProfessionalSkillTab, (hasTab) => {
   if (!hasTab && activeSkillTab.value === "professional") {
@@ -1771,7 +1870,7 @@ onBeforeUnmount(() => {
             v-for="agent in activeSheet === 'agent' ? mobileAgentRows : []"
             :key="agent.id"
             class="sheet-row sheet-row--with-action"
-            :class="{ selected: selectedAgentId === agent.id || ([BUILTIN_QUICK_ANSWER_ID, BUILTIN_SIMPLE_CHAT_ID] as string[]).includes(selectedAgentId) && agent.id === BUILTIN_QUICK_ANSWER_ID }"
+            :class="{ selected: isSelectedAgent(agent) }"
             role="button"
             tabindex="0"
             @click="selectAgent(agent)"

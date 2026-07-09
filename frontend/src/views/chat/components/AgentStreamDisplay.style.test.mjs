@@ -83,12 +83,14 @@ test('tool rows use line icon names instead of legacy asset masks', () => {
 })
 
 test('rag mode delegates pre-answer loading to pipeline and keeps dots while answer streams', () => {
-  assert.match(source, /if \(props\.ragMode\) return hasAnswerStarted\.value/)
+  assert.match(source, /if \(props\.ragMode\) return hasAnswerStarted\.value \|\| hasNonRagToolEvents\.value/)
   assert.match(source, /v-if="!ragMode \|\| displayEvents\.length > 0 \|\| showAgentActivityIndicator"/)
 })
 
-test('rag mode keeps model thinking out of the answer stream component', () => {
-  assert.match(source, /if \(props\.ragMode\)\s*\{[\s\S]*e\.type === 'answer'/)
+test('rag mode keeps delegated pipeline rows out of the answer stream component', () => {
+  assert.match(source, /isRagDelegatedEvent/)
+  assert.match(source, /if \(props\.ragMode && !hasNonRagToolEvents\.value\)\s*\{[\s\S]*e\.type === 'answer'/)
+  assert.match(source, /if \(isRagDelegatedEvent\(e\)\) return false/)
   assert.doesNotMatch(
     source,
     /if \(props\.ragMode\)\s*\{[\s\S]*e\.type === 'answer' \|\| e\.type === 'thinking'/,
@@ -108,7 +110,7 @@ test('pending tool rows do not render an extra axis dot', () => {
 
 test('agent mode keeps gray timeline dots for the full turn', () => {
   assert.match(source, /if \(isConversationDone\.value\) return false/)
-  assert.match(source, /if \(props\.ragMode\) return false/)
+  assert.match(source, /if \(props\.ragMode && !hasNonRagToolEvents\.value\) return false/)
   assert.match(source, /return true;\s*\}\);/)
   assert.match(source, /chat-timeline-loading\.less/)
 })

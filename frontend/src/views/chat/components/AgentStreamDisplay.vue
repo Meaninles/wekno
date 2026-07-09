@@ -585,6 +585,7 @@ import {
   sourceTypeLabel,
   type SourceReferenceItem,
 } from '@/utils/sourceReferences';
+import { RAG_PIPELINE_TOOL_NAMES } from '@/utils/rag-pipeline-history';
 import {
   createMermaidCodeRenderer,
   ensureMermaidInitialized,
@@ -1005,6 +1006,35 @@ configureMarkedForChatMarkdown();
 // Event stream
 const eventStream = computed(() => props.session?.agentEventStream || []);
 
+const isRagPipelineToolCallEvent = (event: any): boolean => {
+  return Boolean(
+    event?.type === 'tool_call' &&
+    typeof event.tool_name === 'string' &&
+    RAG_PIPELINE_TOOL_NAMES.has(event.tool_name),
+  );
+};
+
+const isRagDelegatedEvent = (event: any): boolean => {
+  if (!props.ragMode || !event) return false;
+  if (event.type === 'thinking') return true;
+  if (event.type === 'tool_call' && event.tool_name === 'thinking') return true;
+  return isRagPipelineToolCallEvent(event);
+};
+
+const hasNonRagToolEvents = computed(() => {
+  const stream = eventStream.value;
+  if (!stream || !Array.isArray(stream)) return false;
+  return stream.some((event: any) => {
+    if (!event) return false;
+    if (event.type === 'tool_call') {
+      if (isRagPipelineToolCallEvent(event)) return false;
+      if (event.tool_name === 'thinking') return false;
+      return true;
+    }
+    return event.type === 'tool_approval_required' || event.type === 'mcp_oauth_required';
+  });
+});
+
 // Expanded events tracking (for tool calls and thinking events)
 const expandedEvents = ref<Set<string>>(new Set());
 
@@ -1243,7 +1273,7 @@ watch(answerFullyRendered, (ready) => {
 // Agent: dots until the turn completes. RAG: pipeline dots before answer; answer stream dots after.
 const showAgentActivityIndicator = computed(() => {
   if (isConversationDone.value) return false;
-  if (props.ragMode) return hasAnswerStarted.value;
+  if (props.ragMode) return hasAnswerStarted.value || hasNonRagToolEvents.value;
   return true;
 });
 
@@ -1391,11 +1421,10 @@ const intermediateStepsSummaryHtml = computed(() => {
 });
 
 // Should show the collapsed steps indicator (tree root). Collapse ONLY once the
-// conversation is done. RAG quick-answer mode never shows the tool tree —
-// intermediate progress is handled by RagPipelineProgress and disappears once
-// references or the answer arrive.
+// conversation is done. In RAG quick-answer mode, RagPipelineProgress owns the
+// retrieval timeline; keep AgentStreamDisplay for additional tool/skill calls.
 const shouldShowCollapsedSteps = computed(() => {
-  if (props.ragMode) return false
+  if (props.ragMode && !hasNonRagToolEvents.value) return false
   const hasSteps = intermediateStepsCount.value > 0;
   return hasSteps && isConversationDone.value;
 });
@@ -1601,6 +1630,7 @@ const intermediateEvents = computed(() => {
   const result = buildFullEventList(stream);
   const hidden = hiddenThinkingEventIds.value;
   return result.filter((e: any) => {
+    if (isRagDelegatedEvent(e)) return false;
     if (e.type === 'answer' || e.type === 'agent_complete') return false;
     if (isTransientStatusEvent(e)) return false;
     if (e.type === 'thinking' && e.event_id && hidden.has(e.event_id)) return false;
@@ -1784,9 +1814,9 @@ const displayEvents = computed(() => {
 
   const result = buildFullEventList(stream);
 
-  // Quick-answer RAG: pipeline steps and model thinking live in RagPipelineProgress;
-  // here we only render the final answer stream.
-  if (props.ragMode) {
+  // Quick-answer RAG: pipeline steps and model thinking live in RagPipelineProgress.
+  // If the same turn also emits additional tool/skill calls, show those here.
+  if (props.ragMode && !hasNonRagToolEvents.value) {
     return result.filter((e: any) => e.type === 'answer' && !e.superseded);
   }
 
@@ -1801,6 +1831,7 @@ const displayEvents = computed(() => {
       return -1;
     })();
     return result.filter((e: any, index: number) => {
+      if (isRagDelegatedEvent(e)) return false;
       if (isTransientStatusEvent(e)) return index === lastRenderableIndex;
       if (e.type === 'thinking') return false;
       if (e.type === 'tool_call' && e.tool_name === 'thinking') return false;

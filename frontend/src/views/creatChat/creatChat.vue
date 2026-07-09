@@ -87,9 +87,11 @@ const sendMsg = (value: string, modelId: string, mentionedItems: any[], imageFil
 async function createNewSession(value: string, modelId: string, mentionedItems: any[] = [], imageFiles: any[] = [], attachmentFiles: any[] = []) {
     const selectedKbs = settingsStore.settings.selectedKnowledgeBases || [];
     const selectedFiles = settingsStore.settings.selectedFiles || [];
+    const requestState = settingsStore.captureConversationScopedState();
 
     // 构建 session 数据，包含 Agent 配置
     const sessionData: any = {};
+    sessionData.last_request_state = requestState;
 
     // 添加 Agent 配置（知识库信息在 agent_config 中）
     sessionData.agent_config = {
@@ -104,7 +106,7 @@ async function createNewSession(value: string, modelId: string, mentionedItems: 
     try {
         const res = await createSessions(sessionData);
         if (res.data && res.data.id) {
-            await navigateToSession(res.data.id, value, modelId, mentionedItems, imageFiles, attachmentFiles);
+            await navigateToSession(res.data.id, requestState, value, modelId, mentionedItems, imageFiles, attachmentFiles);
         } else {
             console.error('[createChat] Failed to create session');
             MessagePlugin.error(t('createChat.messages.createFailed'));
@@ -115,7 +117,7 @@ async function createNewSession(value: string, modelId: string, mentionedItems: 
     }
 }
 
-const navigateToSession = async (sessionId: string, value: string, modelId: string, mentionedItems: any[], imageFiles: any[] = [], attachmentFiles: any[] = []) => {
+const navigateToSession = async (sessionId: string, requestState: ReturnType<typeof settingsStore.captureConversationScopedState>, value: string, modelId: string, mentionedItems: any[], imageFiles: any[] = [], attachmentFiles: any[] = []) => {
     const now = new Date().toISOString();
     let obj = {
         title: t('createChat.newSessionTitle'),
@@ -128,7 +130,7 @@ const navigateToSession = async (sessionId: string, value: string, modelId: stri
     };
     usemenuStore.updataMenuChildren(obj);
     usemenuStore.changeIsFirstSession(true);
-    saveSessionDraftState(sessionId, settingsStore.captureConversationScopedState(), attachmentFiles);
+    saveSessionDraftState(sessionId, requestState, attachmentFiles, imageFiles);
     usemenuStore.changeFirstQuery(value, mentionedItems, modelId, imageFiles, attachmentFiles);
     router.push(`/platform/chat/${sessionId}`);
 }

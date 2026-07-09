@@ -1,9 +1,9 @@
 import { defineStore } from "pinia";
 import { nextTick } from "vue";
-import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SIMPLE_CHAT_ID, BUILTIN_SMART_REASONING_ID } from "@/api/agent";
+import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SIMPLE_CHAT_ID } from "@/api/agent";
 import { getApiBaseUrl } from "@/utils/api-base";
 import { updateMyPreferences, type UserPreferences } from "@/api/auth";
-import { isAgentStreamAgentId, isQuickAnswerAgentId, reconcileBuiltinAgentMode } from "@/utils/agent-mode";
+import { isAgentStreamAgentId, isAgentStreamBuiltinAgentId, isQuickAnswerAgentId, reconcileBuiltinAgentMode } from "@/utils/agent-mode";
 
 // 定义设置接口
 interface Settings {
@@ -243,26 +243,39 @@ export const useSettingsStore = defineStore("settings", {
       localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
 
-    resetConversationScopedState() {
+    resetConversationScopedState(options: { preserveAgent?: boolean; preserveConversationModels?: boolean; preserveSkills?: boolean; preserveWebSearch?: boolean } = {}) {
       const defaults = cloneDefaultSettings();
       const current = this.settings || defaults;
+      const preserveAgent = options.preserveAgent ?? true;
+      const preserveConversationModels = options.preserveConversationModels ?? true;
+      const preserveSkills = options.preserveSkills ?? false;
+      const preserveWebSearch = options.preserveWebSearch ?? false;
+      const selectedAgentId = preserveAgent
+        ? (current.selectedAgentId || defaults.selectedAgentId)
+        : defaults.selectedAgentId;
       this.settings = {
         ...current,
         knowledgeBaseId: defaults.knowledgeBaseId,
-        isAgentEnabled: defaults.isAgentEnabled,
+        isAgentEnabled: preserveAgent
+          ? isAgentStreamAgentId(selectedAgentId, current.isAgentEnabled || false)
+          : defaults.isAgentEnabled,
         selectedKnowledgeBases: [],
-        selectedSkillNames: [],
-        selectedProfessionalSkillNames: [],
+        selectedSkillNames: preserveSkills ? [...(current.selectedSkillNames || [])] : [],
+        selectedProfessionalSkillNames: preserveSkills ? [...(current.selectedProfessionalSkillNames || [])] : [],
         selectedFiles: [],
         selectedFileKbMap: {},
         selectedTags: [],
         selectedMCPServices: [],
-        selectedSkills: [],
+        selectedSkills: preserveSkills ? [...(current.selectedSkills || [])] : [],
         selectedTools: [],
-        conversationModels: { ...defaults.conversationModels },
-        selectedAgentId: defaults.selectedAgentId,
-        selectedAgentSourceTenantId: defaults.selectedAgentSourceTenantId,
-        webSearchEnabled: defaults.webSearchEnabled,
+        conversationModels: preserveConversationModels
+          ? { ...(current.conversationModels || defaults.conversationModels) }
+          : { ...defaults.conversationModels },
+        selectedAgentId,
+        selectedAgentSourceTenantId: preserveAgent
+          ? (current.selectedAgentSourceTenantId || defaults.selectedAgentSourceTenantId)
+          : defaults.selectedAgentSourceTenantId,
+        webSearchEnabled: preserveWebSearch ? !!current.webSearchEnabled : defaults.webSearchEnabled,
       };
       this._defaultsSnapshot = null;
       this._isApplyingSessionState = false;
@@ -640,7 +653,7 @@ export const useSettingsStore = defineStore("settings", {
       // 根据智能体类型自动切换 Agent 模式
       if (agentId === BUILTIN_QUICK_ANSWER_ID || agentId === BUILTIN_SIMPLE_CHAT_ID) {
         this.settings.isAgentEnabled = false;
-      } else if (agentId === BUILTIN_SMART_REASONING_ID) {
+      } else if (isAgentStreamBuiltinAgentId(agentId)) {
         this.settings.isAgentEnabled = true;
       }
       // 自定义智能体需要根据其配置来决定
@@ -738,7 +751,10 @@ export const useSettingsStore = defineStore("settings", {
       return {
         agent_id: this.settings.selectedAgentId || "",
         agent_source_tenant_id: this.settings.selectedAgentSourceTenantId || undefined,
-        agent_enabled: !!this.settings.isAgentEnabled,
+        agent_enabled: isAgentStreamAgentId(
+          this.settings.selectedAgentId,
+          this.settings.isAgentEnabled || false,
+        ),
         model_id: this.settings.conversationModels?.selectedChatModelId || "",
         knowledge_base_ids: selectedKnowledgeBases,
         knowledge_ids: selectedFiles,
@@ -855,6 +871,88 @@ export const useSettingsStore = defineStore("settings", {
       // 注意：故意不写 localStorage —— 旧会话的状态不应污染"用户默认"。
       // 离开会话时 restoreDefaultsIfSnapshotted 会把 localStorage 里那份完整
       // 的默认值再次同步回 this.settings。
+    },
+
+    // 只恢复同一会话内的资源态，不触碰当前智能体和模型选择。
+    applyConversationResourceState(state: SessionLastRequestStatePayload | null | undefined) {
+      if (!state) return;
+      this._isApplyingSessionState = true;
+      try {
+        if (Array.isArray(state.knowledge_base_ids)) {
+          this.settings.selectedKnowledgeBases = [...state.knowledge_base_ids];
+        }
+        if (Array.isArray(state.knowledge_ids)) {
+          this.settings.selectedFiles = [...state.knowledge_ids];
+          this.settings.selectedFileKbMap = {};
+        }
+        if (state.selected_file_kb_map && typeof state.selected_file_kb_map === "object") {
+          const selected = new Set(this.settings.selectedFiles || []);
+          const nextFileKbMap: Record<string, string> = {};
+          Object.entries(state.selected_file_kb_map).forEach(([fileId, kbId]) => {
+            if (fileId && kbId && (!selected.size || selected.has(fileId))) {
+              nextFileKbMap[fileId] = String(kbId);
+            }
+          });
+          this.settings.selectedFileKbMap = nextFileKbMap;
+        }
+        if (Array.isArray(state.mentioned_items)) {
+          const fileKbMap: Record<string, string> = {};
+          state.mentioned_items.forEach((item) => {
+            if (item.type === "file" && item.id && item.kb_id) {
+              fileKbMap[item.id] = item.kb_id;
+            }
+          });
+          if (Object.keys(fileKbMap).length > 0) {
+            this.settings.selectedFileKbMap = { ...this.settings.selectedFileKbMap, ...fileKbMap };
+          }
+
+          const fromMentions = state.mentioned_items
+            .filter(item => item.type === "tag" && item.id && item.kb_id)
+            .map(item => ({ id: item.id, name: item.name || item.id, kbId: item.kb_id!, kbName: item.kb_name }));
+          const covered = new Set(fromMentions.map(t => t.id));
+          const orphanTagIds = (state.tag_ids || []).filter(id => id && !covered.has(id));
+          if (orphanTagIds.length > 0 && Array.isArray(state.knowledge_base_ids) && state.knowledge_base_ids.length === 1) {
+            const kbId = state.knowledge_base_ids[0];
+            orphanTagIds.forEach(id => {
+              fromMentions.push({ id, name: id, kbId, kbName: undefined });
+            });
+          }
+          this.settings.selectedTags = fromMentions;
+
+          if (!Array.isArray(state.skill_names)) {
+            const skillNames = state.mentioned_items
+              .filter(item => item.type === "skill" && item.id)
+              .map(item => item.skill_name || item.id);
+            this.settings.selectedSkills = skillNames;
+            this.settings.selectedSkillNames = skillNames;
+          }
+        } else if (Array.isArray(state.tag_ids)) {
+          const existing = this.settings.selectedTags || [];
+          const tagIds = state.tag_ids;
+          this.settings.selectedTags = existing.filter(tag => tagIds.includes(tag.id));
+        }
+        if (Array.isArray(state.mcp_service_ids)) {
+          this.settings.selectedMCPServices = [...state.mcp_service_ids];
+        } else if (Array.isArray(state.mentioned_items)) {
+          this.settings.selectedMCPServices = state.mentioned_items
+            .filter(item => item.type === "mcp" && item.id)
+            .map(item => item.id);
+        }
+        if (Array.isArray(state.skill_names)) {
+          this.settings.selectedSkills = [...state.skill_names];
+          this.settings.selectedSkillNames = [...state.skill_names];
+        }
+        if (Array.isArray(state.professional_skill_names)) {
+          this.settings.selectedProfessionalSkillNames = [...state.professional_skill_names];
+        }
+        if (typeof state.web_search_enabled === "boolean") {
+          this.settings.webSearchEnabled = state.web_search_enabled;
+        }
+      } finally {
+        nextTick(() => {
+          this._isApplyingSessionState = false;
+        });
+      }
     },
   },
 });

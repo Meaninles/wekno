@@ -148,8 +148,11 @@ type AuthToken struct {
 
 // LoginRequest represents a login request
 type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password" binding:"required,min=6"`
+	Username          string `json:"username"`
+	Password          string `json:"password,omitempty"`
+	EncryptedPassword string `json:"encrypted_password,omitempty"`
+	ChallengeID       string `json:"challenge_id,omitempty"`
+	CaptchaAnswer     string `json:"captcha_answer,omitempty"`
 }
 
 type OIDCAuthURLResponse struct {
@@ -192,9 +195,13 @@ type OIDCUserInfo struct {
 
 // RegisterRequest represents a registration request
 type RegisterRequest struct {
-	Username    string `json:"username" binding:"required,min=2,max=50"`
-	DisplayName string `json:"display_name,omitempty"`
-	Password    string `json:"password" binding:"required,min=8,max=32"`
+	Username                 string `json:"username" binding:"required,min=2,max=50"`
+	DisplayName              string `json:"display_name,omitempty"`
+	Password                 string `json:"password,omitempty" binding:"omitempty,min=8,max=32"`
+	EncryptedPassword        string `json:"encrypted_password,omitempty"`
+	EncryptedConfirmPassword string `json:"encrypted_confirm_password,omitempty"`
+	ChallengeID              string `json:"challenge_id,omitempty"`
+	CaptchaAnswer            string `json:"captcha_answer,omitempty"`
 }
 
 // LoginResponse represents a login response

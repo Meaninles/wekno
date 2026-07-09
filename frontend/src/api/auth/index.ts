@@ -6,7 +6,10 @@ const t = (key: string) => i18n.global.t(key)
 // 用户登录接口
 export interface LoginRequest {
   username: string
-  password: string
+  password?: string
+  encrypted_password?: string
+  challenge_id?: string
+  captcha_answer?: string
 }
 
 export interface LoginResponse {
@@ -72,7 +75,11 @@ export interface OIDCConfigResponse {
 // 用户注册接口
 export interface RegisterRequest {
   username: string
-  password: string
+  password?: string
+  encrypted_password?: string
+  encrypted_confirm_password?: string
+  challenge_id?: string
+  captcha_answer?: string
 }
 
 export interface RegisterResponse {
@@ -479,7 +486,11 @@ export interface InviteLookupResponse {
 export interface RegisterByInviteRequest {
   token: string
   username: string
-  password: string
+  password?: string
+  encrypted_password?: string
+  encrypted_confirm_password?: string
+  challenge_id?: string
+  captcha_answer?: string
 }
 
 /**

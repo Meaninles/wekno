@@ -78,7 +78,7 @@ let failedQueue: Array<{ resolve: Function; reject: Function }> = [];
 // must surface to the page (e.g. expired token), not trigger the
 // refresh-then-redirect-to-login flow (issue #1617). '/auth/register' already
 // covers '/auth/register-by-invite' via substring match.
-const PUBLIC_AUTH_PATHS = ['/auth/auto-setup', '/auth/login', '/auth/register', '/auth/oidc/', '/custom/iam/sso/', '/auth/invitations/lookup', '/api/v1/embed/'];
+const PUBLIC_AUTH_PATHS = ['/auth/auto-setup', '/auth/login', '/auth/register', '/auth/oidc/', '/custom/iam/sso/', '/custom/auth-security/challenge', '/auth/invitations/lookup', '/api/v1/embed/'];
 
 function isPublicAuthRequest(url?: string): boolean {
   if (!url) return false;

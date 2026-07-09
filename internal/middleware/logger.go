@@ -42,7 +42,7 @@ func (r loggerResponseBodyWriter) Write(b []byte) (int, error) {
 // sensitiveFieldRegex 匹配 JSON 中的敏感字段（不区分大小写，兼容 snake_case / camelCase / PascalCase）。
 // $1 捕获原始字段名（包括两侧引号），保持日志中的字段名不变，仅将值替换为 "***"。
 var sensitiveFieldRegex = regexp.MustCompile(
-	`(?i)("(?:password|passwd|token|access[_-]?token|refresh[_-]?token|id[_-]?token|` +
+	`(?i)("(?:(?:[a-z0-9]+[_-])*password(?:[_-]?[a-z0-9]+)*|passwd|token|access[_-]?token|refresh[_-]?token|id[_-]?token|` +
 		`authorization|auth[_-]?token|api[_-]?key|api[_-]?secret|secret[_-]?key|` +
 		`client[_-]?secret|private[_-]?key|secret)")\s*:\s*"[^"]*"`,
 )

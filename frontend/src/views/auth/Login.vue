@@ -113,10 +113,27 @@
               </t-form-item>
 
               <t-form-item :label="$t('auth.password')" name="password">
-                <t-input v-model="formData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
-                  autocomplete="current-password" size="large" :disabled="loading" @enter="handleLogin" />
+                <div class="password-input" @copy.capture.prevent="preventPasswordClipboard"
+                  @cut.capture.prevent="preventPasswordClipboard" @contextmenu.capture.prevent="preventPasswordClipboard"
+                  @keydown.capture="preventPasswordCopyShortcut">
+                  <t-input v-model="formData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
+                    autocomplete="current-password" size="large" :disabled="loading" @enter="handleLogin" />
+                </div>
               </t-form-item>
               <p class="password-rule-hint">{{ $t('auth.passwordRuleHint') }}</p>
+
+              <t-form-item :label="$t('auth.captcha')" name="captcha">
+                <div class="captcha-control">
+                  <t-input v-model="formData.captcha" :placeholder="$t('auth.captchaPlaceholder')" type="text"
+                    autocomplete="off" size="large" :disabled="loading || loginChallengeLoading" @enter="handleLogin" />
+                  <button type="button" class="captcha-image-button" :disabled="loading || loginChallengeLoading"
+                    @click="loadLoginChallenge">
+                    <img v-if="loginChallenge?.captcha_image" :src="loginChallenge.captcha_image"
+                      :alt="$t('auth.captcha')" class="captcha-image" />
+                    <span v-else class="captcha-loading">{{ $t('auth.captchaLoading') }}</span>
+                  </button>
+                </div>
+              </t-form-item>
 
               <t-button type="submit" theme="primary" size="large" block :loading="loading" class="submit-button">
                 {{ loading ? $t('auth.loggingIn') : $t('auth.login') }}
@@ -186,14 +203,37 @@
               </t-form-item>
 
               <t-form-item :label="$t('auth.password')" name="password">
-                <t-input v-model="registerData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
-                  autocomplete="new-password" size="large" :disabled="loading" />
+                <div class="password-input" @copy.capture.prevent="preventPasswordClipboard"
+                  @cut.capture.prevent="preventPasswordClipboard" @contextmenu.capture.prevent="preventPasswordClipboard"
+                  @keydown.capture="preventPasswordCopyShortcut">
+                  <t-input v-model="registerData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
+                    autocomplete="new-password" size="large" :disabled="loading" />
+                </div>
               </t-form-item>
               <p class="password-rule-hint">{{ $t('auth.passwordRuleHint') }}</p>
 
               <t-form-item :label="$t('auth.confirmPassword')" name="confirmPassword">
-                <t-input v-model="registerData.confirmPassword" :placeholder="$t('auth.confirmPasswordPlaceholder')"
-                  type="password" autocomplete="new-password" size="large" :disabled="loading" @enter="handleRegister" />
+                <div class="password-input" @copy.capture.prevent="preventPasswordClipboard"
+                  @cut.capture.prevent="preventPasswordClipboard" @contextmenu.capture.prevent="preventPasswordClipboard"
+                  @keydown.capture="preventPasswordCopyShortcut">
+                  <t-input v-model="registerData.confirmPassword" :placeholder="$t('auth.confirmPasswordPlaceholder')"
+                    type="password" autocomplete="new-password" size="large" :disabled="loading"
+                    @enter="handleRegister" />
+                </div>
+              </t-form-item>
+
+              <t-form-item :label="$t('auth.captcha')" name="captcha">
+                <div class="captcha-control">
+                  <t-input v-model="registerData.captcha" :placeholder="$t('auth.captchaPlaceholder')" type="text"
+                    autocomplete="off" size="large" :disabled="loading || registerChallengeLoading"
+                    @enter="handleRegister" />
+                  <button type="button" class="captcha-image-button" :disabled="loading || registerChallengeLoading"
+                    @click="loadRegisterChallenge">
+                    <img v-if="registerChallenge?.captcha_image" :src="registerChallenge.captcha_image"
+                      :alt="$t('auth.captcha')" class="captcha-image" />
+                    <span v-else class="captcha-loading">{{ $t('auth.captchaLoading') }}</span>
+                  </button>
+                </div>
               </t-form-item>
 
               <t-button type="submit" theme="primary" size="large" block :loading="loading" class="submit-button">
@@ -235,6 +275,7 @@ import {
   registerByInvite,
   type InviteLookup,
 } from '@/api/auth'
+import { encryptAuthPassword, getAuthChallenge, type AuthChallenge } from '@/custom/modules/authSecurity/api'
 import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
 import { consumeShareReturnPath, rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn'
@@ -280,6 +321,10 @@ const inviteToken = ref('')
 const inviteLookup = ref<InviteLookup | null>(null)
 const inviteLookupError = ref('')
 const inviteLookupLoading = ref(false)
+const loginChallenge = ref<AuthChallenge | null>(null)
+const loginChallengeLoading = ref(false)
+const registerChallenge = ref<AuthChallenge | null>(null)
+const registerChallengeLoading = ref(false)
 
 const oidcLoginText = computed(() => {
   if (oidcProviderName.value) {
@@ -313,13 +358,15 @@ function hasPasswordTypeMix(value: unknown) {
 const formData = reactive<{ [key: string]: any }>({
   username: '',
   password: '',
+  captcha: '',
 })
 
 // Register form data
 const registerData = reactive<{ [key: string]: any }>({
   username: '',
   password: '',
-  confirmPassword: ''
+  confirmPassword: '',
+  captcha: '',
 })
 
 // Login form validation rules
@@ -333,6 +380,9 @@ const formRules = computed(() => ({
     { max: 32, message: t('auth.passwordMaxLength'), type: 'error' },
     { pattern: /^\S+$/, message: t('auth.passwordNoWhitespace'), type: 'error' },
     { validator: hasPasswordTypeMix, message: t('auth.passwordMustUseTwoTypes'), type: 'error' }
+  ],
+  captcha: [
+    { required: true, message: t('auth.captchaRequired'), type: 'error' }
   ]
 }))
 
@@ -362,16 +412,77 @@ const registerRules = computed(() => ({
       message: t('auth.passwordMismatch'),
       type: 'error'
     }
+  ],
+  captcha: [
+    { required: true, message: t('auth.captchaRequired'), type: 'error' }
   ]
 }))
 
 // Toggle login/register mode
 const toggleMode = () => {
   isRegisterMode.value = !isRegisterMode.value
+  if (isRegisterMode.value) {
+    loadRegisterChallenge()
+  } else {
+    loadLoginChallenge()
+  }
 
   Object.keys(registerData).forEach(key => {
     (registerData as any)[key] = ''
   })
+}
+
+const loadLoginChallenge = async () => {
+  try {
+    loginChallengeLoading.value = true
+    const response = await getAuthChallenge()
+    if (!response.success || !response.data) {
+      loginChallenge.value = null
+      MessagePlugin.error(response.message || t('auth.captchaLoadFailed'))
+      return
+    }
+    loginChallenge.value = response.data
+    formData.captcha = ''
+  } catch (error: any) {
+    loginChallenge.value = null
+    MessagePlugin.error(error?.message || t('auth.captchaLoadFailed'))
+  } finally {
+    loginChallengeLoading.value = false
+  }
+}
+
+const loadRegisterChallenge = async () => {
+  try {
+    registerChallengeLoading.value = true
+    const response = await getAuthChallenge()
+    if (!response.success || !response.data) {
+      registerChallenge.value = null
+      MessagePlugin.error(response.message || t('auth.captchaLoadFailed'))
+      return
+    }
+    registerChallenge.value = response.data
+    registerData.captcha = ''
+  } catch (error: any) {
+    registerChallenge.value = null
+    MessagePlugin.error(error?.message || t('auth.captchaLoadFailed'))
+  } finally {
+    registerChallengeLoading.value = false
+  }
+}
+
+const preventPasswordClipboard = (event: Event) => {
+  event.preventDefault()
+}
+
+const preventPasswordCopyShortcut = (event: KeyboardEvent) => {
+  const key = event.key.toLowerCase()
+  if ((event.ctrlKey || event.metaKey) && (key === 'c' || key === 'x')) {
+    event.preventDefault()
+  }
+}
+
+const clearPasswordInput = () => {
+  formData.password = ''
 }
 
 const persistLoginResponse = async (response: any) => {
@@ -507,21 +618,38 @@ const handleLogin = async () => {
     if (valid !== true) return
 
     loading.value = true
+    if (!loginChallenge.value) {
+      await loadLoginChallenge()
+    }
+    if (!loginChallenge.value) {
+      MessagePlugin.error(t('auth.captchaLoadFailed'))
+      return
+    }
+
+    const encryptedPassword = await encryptAuthPassword(
+      formData.password,
+      loginChallenge.value.public_key,
+    )
 
     const response = await login({
       username: formData.username,
-      password: formData.password,
+      encrypted_password: encryptedPassword,
+      challenge_id: loginChallenge.value.challenge_id,
+      captcha_answer: formData.captcha,
     })
 
     if (response.success) {
+      clearPasswordInput()
       await persistLoginResponse(response)
       notifyLoginSuccess(response, t, tm, formatRole, roleIcon)
     } else {
       MessagePlugin.error(response.message || t('auth.loginError'))
+      await loadLoginChallenge()
     }
   } catch (error: any) {
     console.error('登录错误:', error)
     MessagePlugin.error(error.message || t('auth.loginErrorRetry'))
+    await loadLoginChallenge()
   } finally {
     loading.value = false
   }
@@ -537,15 +665,34 @@ const handleRegister = async () => {
     if (valid !== true) return
 
     loading.value = true
+    if (!registerChallenge.value) {
+      await loadRegisterChallenge()
+    }
+    if (!registerChallenge.value) {
+      MessagePlugin.error(t('auth.captchaLoadFailed'))
+      return
+    }
+
+    const [encryptedPassword, encryptedConfirmPassword] = await Promise.all([
+      encryptAuthPassword(registerData.password, registerChallenge.value.public_key),
+      encryptAuthPassword(registerData.confirmPassword, registerChallenge.value.public_key),
+    ])
+    const registerPayload = {
+      username: registerData.username,
+      encrypted_password: encryptedPassword,
+      encrypted_confirm_password: encryptedConfirmPassword,
+      challenge_id: registerChallenge.value.challenge_id,
+      captcha_answer: registerData.captcha,
+    }
 
     if (inviteToken.value) {
       const response = await registerByInvite({
         token: inviteToken.value,
-        username: registerData.username,
-        password: registerData.password,
+        ...registerPayload,
       })
       if (!response.success) {
         MessagePlugin.error(response.message || t('auth.registerFailed'))
+        await loadRegisterChallenge()
         return
       }
       MessagePlugin.success(t('auth.registerSuccess'))
@@ -556,10 +703,7 @@ const handleRegister = async () => {
       return
     }
 
-    const response = await register({
-      username: registerData.username,
-      password: registerData.password
-    })
+    const response = await register(registerPayload)
 
     if (response.success) {
       MessagePlugin.success(t('auth.registerSuccess'))
@@ -567,6 +711,7 @@ const handleRegister = async () => {
       // Switch to login mode and fill in username
       isRegisterMode.value = false
       formData.username = registerData.username
+      await loadLoginChallenge()
 
       // Clear register form
       Object.keys(registerData).forEach(key => {
@@ -574,10 +719,12 @@ const handleRegister = async () => {
       })
     } else {
       MessagePlugin.error(response.message || t('auth.registerFailed'))
+      await loadRegisterChallenge()
     }
   } catch (error: any) {
     console.error('注册错误:', error)
     MessagePlugin.error(error.message || t('auth.registerError'))
+    await loadRegisterChallenge()
   } finally {
     loading.value = false
   }
@@ -618,6 +765,11 @@ onMounted(async () => {
     // single-user instance.
     loadOIDCConfig()
     loadCustomSSOConfig()
+    if (isRegisterMode.value) {
+      loadRegisterChallenge()
+    } else {
+      loadLoginChallenge()
+    }
     return
   }
 
@@ -645,6 +797,7 @@ onMounted(async () => {
   loadOIDCConfig()
   loadCustomSSOConfig()
   loadAuthConfig()
+  loadLoginChallenge()
 })
 </script>
 
@@ -1354,6 +1507,53 @@ onMounted(async () => {
   font-size: 12px;
   line-height: 1.5;
   color: var(--td-text-color-secondary);
+}
+
+.password-input {
+  user-select: none;
+
+  :deep(input) {
+    user-select: none;
+  }
+}
+
+.captcha-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 142px;
+  gap: 10px;
+  align-items: stretch;
+  width: 100%;
+}
+
+.captcha-image-button {
+  width: 142px;
+  height: 46px;
+  padding: 0;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 8px;
+  background: var(--td-bg-color-container);
+  cursor: pointer;
+  overflow: hidden;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+}
+
+.captcha-image {
+  display: block;
+  width: 142px;
+  height: 46px;
+}
+
+.captcha-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
 }
 
 .submit-button {

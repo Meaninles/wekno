@@ -14,9 +14,13 @@ class DocReaderConfigTest(unittest.TestCase):
         self.assertEqual(cfg.pdf_render_max_workers, 1)
         self.assertEqual(cfg.pdf_render_dpi, 200)
         self.assertEqual(cfg.pdf_jpeg_quality, 85)
+        self.assertEqual(cfg.grpc_health_port, 50052)
+        self.assertEqual(cfg.grpc_health_max_workers, 2)
 
     def test_loads_parser_concurrency_env(self):
         env = {
+            "DOCREADER_HEALTH_GRPC_PORT": "50053",
+            "DOCREADER_HEALTH_GRPC_MAX_WORKERS": "3",
             "DOCREADER_MARKITDOWN_MAX_WORKERS": "3",
             "DOCREADER_PDF_RENDER_MAX_WORKERS": "2",
             "DOCREADER_PDF_RENDER_DPI": "180",
@@ -29,10 +33,14 @@ class DocReaderConfigTest(unittest.TestCase):
         self.assertEqual(cfg.pdf_render_max_workers, 2)
         self.assertEqual(cfg.pdf_render_dpi, 180)
         self.assertEqual(cfg.pdf_jpeg_quality, 85)
+        self.assertEqual(cfg.grpc_health_port, 50053)
+        self.assertEqual(cfg.grpc_health_max_workers, 3)
 
     def test_dump_config_includes_parser_limits(self):
         dumped = config.dump_config()
 
+        self.assertIn("DOCREADER_HEALTH_GRPC_PORT", dumped)
+        self.assertIn("DOCREADER_HEALTH_GRPC_MAX_WORKERS", dumped)
         self.assertIn("DOCREADER_MARKITDOWN_MAX_WORKERS", dumped)
         self.assertIn("DOCREADER_PDF_RENDER_MAX_WORKERS", dumped)
         self.assertIn("DOCREADER_PDF_RENDER_DPI", dumped)

@@ -45,9 +45,14 @@ spec:
             - containerPort: 50051
               name: grpc
               protocol: TCP
+            - containerPort: {{ .Values.docreader.healthPort }}
+              name: health-grpc
+              protocol: TCP
           env:
             - name: STORAGE_TYPE
               value: {{ .Values.docreader.env.STORAGE_TYPE | quote }}
+            - name: DOCREADER_HEALTH_GRPC_PORT
+              value: {{ .Values.docreader.healthPort | quote }}
           resources:
             {{- toYaml .Values.docreader.resources | nindent 12 }}
           # gRPC health check using grpc_health_probe
@@ -55,7 +60,9 @@ spec:
             exec:
               command:
                 - grpc_health_probe
-                - -addr=localhost:50051
+                - -addr=127.0.0.1:{{ .Values.docreader.healthPort }}
+                - -connect-timeout=1s
+                - -rpc-timeout=5s
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
@@ -64,7 +71,9 @@ spec:
             exec:
               command:
                 - grpc_health_probe
-                - -addr=localhost:50051
+                - -addr=127.0.0.1:{{ .Values.docreader.healthPort }}
+                - -connect-timeout=1s
+                - -rpc-timeout=5s
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 3

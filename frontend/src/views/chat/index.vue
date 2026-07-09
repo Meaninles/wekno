@@ -153,29 +153,10 @@ const markCurrentSessionRead = () => {
     });
 };
 
-// 拉 session 详情，并按其 last_request_state 把输入栏状态恢复到当时的发起态。
-// 嵌入式（embeddedMode）由宿主页面注入 agent/KB，所以跳过整套恢复逻辑，
-// 避免污染宿主的 settings store。
-const loadSessionAndHydrate = async (sid) => {
-    if (!sid || props.embeddedMode) return;
-    try {
-        const sessionRes = await getSession(sid);
-        if (sessionRes?.data) {
-            const lastState = sessionRes.data.last_request_state;
-            if (lastState) {
-                // 先把当前的"全局默认"快照下来，再用 session 状态覆盖；
-                // 离开会话时会从快照还原，避免本会话的状态污染新建对话。
-                useSettingsStoreInstance.snapshotAsDefaultsIfNeeded();
-                useSettingsStoreInstance.applyLastRequestState(lastState);
-            }
-        }
-    } catch (error) {
-        console.error('Failed to load session data:', error);
-    }
-};
 const inputFieldRef = ref();
 
 const getInputAttachments = () => inputFieldRef.value?.getUploadedAttachments?.() || [];
+const getInputImages = () => inputFieldRef.value?.getUploadedImages?.() || [];
 
 const saveCurrentConversationDraft = () => {
     if (props.embeddedMode || !session_id.value) return;
@@ -183,7 +164,21 @@ const saveCurrentConversationDraft = () => {
         session_id.value,
         useSettingsStoreInstance.captureConversationScopedState(),
         getInputAttachments(),
+        getInputImages(),
     );
+};
+
+const loadSessionResourceState = async (sid) => {
+    if (!sid || props.embeddedMode) return;
+    try {
+        const sessionRes = await getSession(sid);
+        const lastState = sessionRes?.data?.last_request_state;
+        if (lastState) {
+            useSettingsStoreInstance.applyConversationResourceState(lastState);
+        }
+    } catch (error) {
+        console.error('Failed to load session resource state:', error);
+    }
 };
 
 const applyRouteConversationOverrides = () => {
@@ -205,14 +200,15 @@ const hydrateConversationScopedState = async (sid, syncAttachments = true) => {
 
     useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
     useSettingsStoreInstance.resetConversationScopedState();
-    await loadSessionAndHydrate(sid);
+    await loadSessionResourceState(sid);
 
     const draft = getSessionDraftState(sid);
     if (draft?.settings) {
-        useSettingsStoreInstance.applyLastRequestState(draft.settings);
+        useSettingsStoreInstance.applyConversationResourceState(draft.settings);
     }
     if (syncAttachments) {
         inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
+        inputFieldRef.value?.setUploadedImages?.(draft?.images || []);
     }
     return draft;
 };
@@ -628,6 +624,14 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         method: 'POST',
         url: endpoint,
     });
+    if (!props.embeddedMode) {
+        saveSessionDraftState(
+            session_id.value,
+            useSettingsStoreInstance.captureConversationScopedState(),
+            attachmentFiles,
+            imageFiles,
+        );
+    }
     markCurrentSessionRead();
 }
 
@@ -730,7 +734,8 @@ const handleSessionCleared = (e) => {
 };
 
 onBeforeMount(async () => {
-    // 必须在 Input-field onMounted 之前完成：按当前 session 恢复对话级配置。
+    // 必须在 Input-field onMounted 之前完成：进入会话时只清空材料上下文，
+    // 保留用户当前选择的智能体、模型、skill 和联网开关。
     await hydrateConversationScopedState(session_id.value, false);
     applyRouteConversationOverrides();
     markCurrentSessionRead();
@@ -755,13 +760,20 @@ onMounted(async () => {
             });
         }
         const initialAttachmentFiles = [...(firstAttachmentFiles.value || [])];
-        sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], firstImageFiles.value || [], initialAttachmentFiles);
+        const initialImageFiles = [...(firstImageFiles.value || [])];
+        sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], initialImageFiles, initialAttachmentFiles);
+        const initialDraft = getSessionDraftState(session_id.value);
+        if (initialDraft?.settings) {
+            useSettingsStoreInstance.applyConversationResourceState(initialDraft.settings);
+        }
         inputFieldRef.value?.setUploadedAttachments?.(initialAttachmentFiles);
-        saveSessionDraftState(session_id.value, useSettingsStoreInstance.captureConversationScopedState(), initialAttachmentFiles);
+        inputFieldRef.value?.setUploadedImages?.(initialImageFiles);
+        saveSessionDraftState(session_id.value, useSettingsStoreInstance.captureConversationScopedState(), initialAttachmentFiles, initialImageFiles);
         usemenuStore.changeFirstQuery('', [], '', [], []);
     } else {
         const draft = getSessionDraftState(session_id.value);
         inputFieldRef.value?.setUploadedAttachments?.(draft?.attachments || []);
+        inputFieldRef.value?.setUploadedImages?.(draft?.images || []);
         scrollLock.value = false;
         hasMoreHistory.value = true;
         historyLoadingMore.value = false;
@@ -790,7 +802,8 @@ onBeforeRouteLeave((to, from, next) => {
     clearData()
     if (!props.embeddedMode) {
         inputFieldRef.value?.clearUploadedAttachments?.();
-        // 离开聊天会话 → 回到新对话默认，避免当前会话配置泄漏到其它页面或新建对话。
+        inputFieldRef.value?.clearUploadedImages?.();
+        // 会话切换只清空资源；智能体和模型是用户当前选择，继续保留。
         useSettingsStoreInstance.resetConversationScopedState();
     }
     next()

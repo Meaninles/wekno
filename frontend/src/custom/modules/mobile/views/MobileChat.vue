@@ -15,7 +15,17 @@ import {
 } from "@/api/chat";
 import { useStream } from "@/api/chat/streame";
 import { listKnowledgeFiles } from "@/api/knowledge-base";
-import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SIMPLE_CHAT_ID, type CustomAgent } from "@/api/agent";
+import {
+  BUILTIN_DATA_ANALYST_ID,
+  BUILTIN_DOCUMENT_PROCESSING_ID,
+  BUILTIN_GENERAL_AGENT_ID,
+  BUILTIN_QUICK_ANSWER_ID,
+  BUILTIN_SIMPLE_CHAT_ID,
+  BUILTIN_SMART_REASONING_ID,
+  BUILTIN_TABLE_ANALYST_ID,
+  BUILTIN_WIKI_RESEARCHER_ID,
+  type CustomAgent,
+} from "@/api/agent";
 import { listSkills, type SkillInfo } from "@/api/skill";
 import type { ModelConfig } from "@/api/model";
 import { useChatStreamHandler } from "@/composables/useChatStreamHandler";
@@ -258,8 +268,25 @@ const selectedSkillNames = computed(() => {
 const selectedAgentId = computed(() => settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID);
 const selectedModelId = computed(() => settingsStore.conversationModels.selectedChatModelId || "");
 
+const fallbackBuiltinAgentNames: Record<string, string> = {
+  [BUILTIN_QUICK_ANSWER_ID]: "快速问答",
+  [BUILTIN_SMART_REASONING_ID]: "智能推理",
+  [BUILTIN_WIKI_RESEARCHER_ID]: "维基问答",
+  [BUILTIN_DATA_ANALYST_ID]: "数据分析",
+  [BUILTIN_TABLE_ANALYST_ID]: "表格分析",
+  [BUILTIN_GENERAL_AGENT_ID]: "通用智能体",
+  [BUILTIN_DOCUMENT_PROCESSING_ID]: "文档处理",
+};
+
 const selectedAgent = computed(() => {
-  return agents.value.find((agent) => agent.id === selectedAgentId.value) || null;
+  const found = agents.value.find((agent) => agent.id === selectedAgentId.value);
+  if (found) return found;
+  return {
+    id: selectedAgentId.value,
+    name: fallbackBuiltinAgentNames[selectedAgentId.value] || selectedAgentId.value,
+    is_builtin: selectedAgentId.value.startsWith("builtin-"),
+    config: { agent_mode: settingsStore.isAgentStreamMode ? "smart-reasoning" : "quick-answer" },
+  } as CustomAgent;
 });
 
 const mobileAgentRows = computed<CustomAgent[]>(() => {
@@ -670,16 +697,6 @@ const loadKnowledgeChildren = async () => {
   await Promise.all([...kbIds].map((kbId) => loadKnowledgeFilesForKb(kbId)));
 };
 
-const loadSessionConversationState = async (sessionId: string) => {
-  if (!sessionId) return;
-  try {
-    const res: any = await getSession(sessionId);
-    const lastState = res?.data?.last_request_state;
-    if (lastState) settingsStore.applyLastRequestState(lastState);
-  } catch (error) {
-    console.warn("[mobile] failed to load session state", error);
-  }
-};
 
 const hydrateMobileConversationState = async (sessionId: string) => {
   isHydratingConversationState = true;
@@ -690,13 +707,20 @@ const hydrateMobileConversationState = async (sessionId: string) => {
       return;
     }
 
-    await loadSessionConversationState(sessionId);
+    try {
+      const res: any = await getSession(sessionId);
+      const lastState = res?.data?.last_request_state;
+      if (lastState) settingsStore.applyConversationResourceState(lastState);
+    } catch (error) {
+      console.warn("[mobile] failed to load session resource state", error);
+    }
+
     const draft = getSessionDraftState(sessionId);
     if (draft?.settings) {
-      settingsStore.applyLastRequestState(draft.settings);
+      settingsStore.applyConversationResourceState(draft.settings);
     }
     pendingAttachments.value = fromDraftAttachments(draft?.attachments || []);
-    pendingImages.value = draft?.images || [];
+    pendingImages.value = (draft?.images || []).filter((file): file is File => file instanceof File);
     await loadKnowledgeChildren();
   } finally {
     isHydratingConversationState = false;
@@ -720,7 +744,9 @@ const loadSessions = async (options: { silent?: boolean } = {}) => {
 
 const ensureSession = async () => {
   if (currentSessionId.value) return currentSessionId.value;
-  const response: any = await createSessions({});
+  const response: any = await createSessions({
+    last_request_state: settingsStore.captureConversationScopedState(),
+  });
   const id = response?.data?.id;
   if (!id) throw new Error("创建会话失败");
   currentSessionId.value = id;
@@ -1218,7 +1244,6 @@ const sendMessage = async () => {
     });
 
     inputValue.value = "";
-    pendingImages.value = [];
     saveSessionDraftState(
       sessionId,
       settingsStore.captureConversationScopedState(),

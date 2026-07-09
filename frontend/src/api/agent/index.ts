@@ -167,10 +167,13 @@ export interface UpdateAgentRequest {
 export const BUILTIN_QUICK_ANSWER_ID = 'builtin-quick-answer';
 export const BUILTIN_SIMPLE_CHAT_ID = 'builtin-simple-chat';
 export const BUILTIN_SMART_REASONING_ID = 'builtin-smart-reasoning';
+export const BUILTIN_WIKI_RESEARCHER_ID = 'builtin-wiki-researcher';
+export const BUILTIN_DEEP_RESEARCHER_ID = 'builtin-deep-researcher';
 export const BUILTIN_DATA_ANALYST_ID = 'builtin-data-analyst';
 export const BUILTIN_TABLE_ANALYST_ID = 'builtin-table-analyst';
 export const BUILTIN_GENERAL_AGENT_ID = 'builtin-general-agent';
 export const BUILTIN_DOCUMENT_PROCESSING_ID = 'builtin-document-processing';
+export const BUILTIN_KNOWLEDGE_GRAPH_EXPERT_ID = 'builtin-knowledge-graph-expert';
 
 // AgentMode 常量
 export const AGENT_MODE_QUICK_ANSWER = 'quick-answer';

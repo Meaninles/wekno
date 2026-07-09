@@ -19,7 +19,16 @@ import AgentSelector from './AgentSelector.vue';
 import { getCaretCoordinates } from '@/utils/caret';
 import { getRootZoom, rectToCssPx, cssViewportSize } from '@/utils/zoom';
 import { type ModelConfig } from '@/api/model';
-import { type CustomAgent, BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from '@/api/agent';
+import {
+  type CustomAgent,
+  BUILTIN_DATA_ANALYST_ID,
+  BUILTIN_DOCUMENT_PROCESSING_ID,
+  BUILTIN_GENERAL_AGENT_ID,
+  BUILTIN_QUICK_ANSWER_ID,
+  BUILTIN_SMART_REASONING_ID,
+  BUILTIN_TABLE_ANALYST_ID,
+  BUILTIN_WIKI_RESEARCHER_ID,
+} from '@/api/agent';
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { useEditorResourcesStore } from '@/stores/editorResources';
 import { useI18n } from 'vue-i18n';
@@ -143,6 +152,20 @@ const removeImage = (index: number) => {
   if (removed.length > 0) URL.revokeObjectURL(removed[0].preview);
 };
 
+const clearUploadedImages = () => {
+  uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
+  uploadedImages.value = [];
+};
+
+const setUploadedImages = (files: File[] = []) => {
+  clearUploadedImages();
+  addImageFiles(files.filter((file): file is File => file instanceof File));
+};
+
+const getUploadedImages = (): File[] => uploadedImages.value
+  .map(img => img.file)
+  .filter((file): file is File => file instanceof File);
+
 const setUploadedAttachments = (attachments: AttachmentFile[] = []) => {
   const nextAttachments = attachments
     .filter((attachment): attachment is AttachmentFile => !!attachment?.file)
@@ -176,6 +199,20 @@ const selectedAgentId = computed({
   get: () => settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
   set: (val: string) => settingsStore.selectAgent(val)
 });
+
+const unresolvedBuiltinAgentName = (agentId: string) => {
+  const zhNames: Record<string, string> = {
+    [BUILTIN_QUICK_ANSWER_ID]: t('input.normalMode'),
+    [BUILTIN_SMART_REASONING_ID]: t('input.agentMode'),
+    [BUILTIN_WIKI_RESEARCHER_ID]: '维基问答',
+    [BUILTIN_DATA_ANALYST_ID]: '数据分析',
+    [BUILTIN_TABLE_ANALYST_ID]: '表格分析',
+    [BUILTIN_GENERAL_AGENT_ID]: '通用智能体',
+    [BUILTIN_DOCUMENT_PROCESSING_ID]: '文档处理',
+  };
+  return zhNames[agentId] || agentId;
+};
+
 const selectedAgent = computed(() => {
   // When a shared-agent source tenant is set, resolve from sharedAgents FIRST.
   // Builtin agents (e.g. builtin-smart-reasoning) use the same constant ID across
@@ -190,11 +227,12 @@ const selectedAgent = computed(() => {
   }
   const mine = agents.value.find(a => a.id === selectedAgentId.value);
   if (mine) return mine;
+  const fallbackId = selectedAgentId.value || BUILTIN_QUICK_ANSWER_ID;
   return {
-    id: BUILTIN_QUICK_ANSWER_ID,
-    name: t('input.normalMode'),
-    is_builtin: true,
-    config: { agent_mode: 'quick-answer' as const }
+    id: fallbackId,
+    name: unresolvedBuiltinAgentName(fallbackId),
+    is_builtin: fallbackId.startsWith('builtin-'),
+    config: { agent_mode: settingsStore.isAgentStreamMode ? 'smart-reasoning' as const : 'quick-answer' as const }
   } as CustomAgent;
 });
 
@@ -1820,6 +1858,7 @@ onUnmounted(() => {
   document.removeEventListener('click', closeAgentModeSelector);
   document.removeEventListener('click', closeModelSelector);
   document.removeEventListener('click', closeMentionSelector);
+  clearUploadedImages();
   if (resizeHandler) {
     window.removeEventListener('resize', resizeHandler);
   }
@@ -1948,11 +1987,7 @@ const createSession = async (val: string) => {
   if (textarea) textarea.blur();
   emit('send-msg', val, modelIdForSend, mentionedItems, imageFiles, attachmentFiles);
 
-  // Clean up image previews
-  uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
-  uploadedImages.value = [];
-
-  // Keep file attachments selected so follow-up turns upload the same transient context.
+  // Keep transient resources selected so follow-up turns in the same session reuse them.
   clearvalue();
 }
 
@@ -2449,6 +2484,9 @@ defineExpose({
     query.value = text;
     nextTick(() => createSession(text));
   },
+  setUploadedImages,
+  getUploadedImages,
+  clearUploadedImages,
   setUploadedAttachments,
   getUploadedAttachments,
   clearUploadedAttachments,

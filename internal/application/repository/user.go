@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -93,6 +94,21 @@ func (r *userRepository) GetUserByTenantID(ctx context.Context, tenantID uint64)
 // UpdateUser updates a user
 func (r *userRepository) UpdateUser(ctx context.Context, user *types.User) error {
 	return r.db.WithContext(ctx).Save(user).Error
+}
+
+// UpdateLastLoginAt records a successful login without touching other user fields.
+func (r *userRepository) UpdateLastLoginAt(ctx context.Context, userID string, loginAt time.Time) error {
+	result := r.db.WithContext(ctx).
+		Model(&types.User{}).
+		Where("id = ?", userID).
+		UpdateColumn("last_login_at", loginAt)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 // DeleteUser deletes a user

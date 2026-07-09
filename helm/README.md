@@ -193,6 +193,15 @@ and adds an Ingress path `/mobile` before the desktop frontend catch-all. The
 mobile image must be built from `frontend/Dockerfile.mobile`; it serves the SPA
 under `/mobile/` and static assets under `/mobile/assets/`.
 
+Chat share links use the shared path `/share/chat/:token`. In the default chart
+Ingress, `/share/` is handled by the desktop frontend catch-all and the page
+switches between desktop and mobile layouts by viewport. If you customize the
+Ingress to route `/share/` to `mobile-web` instead, also route `/assets/` to
+`mobile-web`; the mobile image includes the desktop SPA at `/` specifically for
+that deployment shape. Set the app env `FRONTEND_BASE_URL` to the public origin
+if the create-share API should return absolute URLs; otherwise it returns a
+host-relative `/share/chat/:token` path.
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `mobileWeb.enabled` | Enable mobile web mounted at `/mobile/` | `false` |

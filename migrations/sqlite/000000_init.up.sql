@@ -223,6 +223,7 @@ CREATE TABLE IF NOT EXISTS users (
     avatar VARCHAR(500),
     tenant_id INTEGER,
     is_active BOOLEAN NOT NULL DEFAULT 1,
+    last_login_at DATETIME,
     can_access_all_tenants BOOLEAN NOT NULL DEFAULT 0,
     -- Per-user JSON preferences (memory toggle, future UI knobs).
     -- SQLite has no JSONB; store as TEXT and let GORM (de)serialise via

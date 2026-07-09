@@ -281,6 +281,7 @@ func (s *userService) Login(ctx context.Context, req *types.LoginRequest) (*type
 		}, nil
 	}
 	logger.Info(ctx, "Tokens generated successfully")
+	s.recordLoginBestEffort(ctx, user)
 
 	// Get tenant information
 	tenant, err := s.tenantService.GetTenantByID(ctx, resolvedTenantID)
@@ -559,6 +560,7 @@ func (s *userService) LoginWithOIDC(ctx context.Context, code, redirectURI strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate local tokens: %w", err)
 	}
+	s.recordLoginBestEffort(ctx, user)
 
 	// 拉取 tenant + memberships，让 OIDC 登录的返回结构与本地登录一致，
 	// 前端无须为 OIDC 单独走一次 /auth/me 才能拿到角色。
@@ -749,6 +751,31 @@ func (s *userService) GenerateTokens(
 	user *types.User,
 ) (accessToken, refreshToken string, err error) {
 	return s.generateTokensForTenant(ctx, user, s.resolveLoginTenantID(ctx, user))
+}
+
+// RecordLogin persists the user's latest successful login time.
+func (s *userService) RecordLogin(ctx context.Context, user *types.User) error {
+	if user == nil || strings.TrimSpace(user.ID) == "" {
+		return nil
+	}
+	updater, ok := s.userRepo.(interface {
+		UpdateLastLoginAt(context.Context, string, time.Time) error
+	})
+	if !ok {
+		return nil
+	}
+	loginAt := time.Now().UTC()
+	if err := updater.UpdateLastLoginAt(ctx, user.ID, loginAt); err != nil {
+		return err
+	}
+	user.LastLoginAt = &loginAt
+	return nil
+}
+
+func (s *userService) recordLoginBestEffort(ctx context.Context, user *types.User) {
+	if err := s.RecordLogin(ctx, user); err != nil {
+		logger.Warnf(ctx, "Failed to record last login time for user %s: %v", user.ID, err)
+	}
 }
 
 // resolveLoginTenantID picks the tenant whose ID should be encoded in a

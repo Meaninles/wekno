@@ -171,6 +171,7 @@ flowchart LR
 | IAM/SSO | `internal/custom/modules/iam/` | 支持统一身份认证登录、组织人员同步、定时同步、手动同步、外部组织/用户映射和共享空间成员候选查询。 |
 | 定时会话 | `internal/custom/modules/scheduledchat/` | 支持按小时/日/周/月自动向智能体提问，保存运行记录，并将结果写入真实会话。 |
 | 会话状态 | `internal/custom/modules/sessionstate/` | 记录不同用户或 Principal 对会话的已读水位，给 Web 和移动端会话列表提供未读/生成中状态。 |
+| 对话分享 | `internal/custom/modules/chatshare/` | 将 Web 会话快照导出为登录态可见的分享链接，查看端不要求原会话权限，并屏蔽引用跳转。 |
 | 技能中心 | `internal/custom/modules/skillhub/` | 管理轻量技能和专业技能包，支持导入、下载、共享给空间/用户，并注入智能体运行上下文。 |
 | 来源引用增强 | `internal/custom/modules/sourcerefs/` | 抽取和整理回答中的来源引用信息，服务前端来源时间线展示。 |
 | 文本编码 | `internal/custom/modules/textencoding/` | 增强文本解码能力，减少上传资料因编码不一致导致的乱码或解析失败。 |
@@ -183,6 +184,7 @@ flowchart LR
 - `/api/v1/custom/skills/*`：轻量技能、专业技能、共享和下载。
 - `/api/v1/custom/scheduled-chat/*`：定时任务、运行记录和提示词预览。
 - `/api/v1/custom/session-state/*`：会话已读水位、未读状态和生成中状态。
+- `/api/v1/custom/chat-share/*`：创建对话分享、读取分享快照，并通过分享 token 代理读取图片/附件和下载通用智能体产物。
 - `/api/v1/custom/db-analytics/*`：数据库源、元数据、安全范围、共享和智能体绑定。
 - `/api/v1/custom/general-agent/*`：通用智能体产物下载和旁路服务工具回调。
 - `/api/v1/custom/answer-feedback/*`：回答反馈写入和查询。
@@ -198,6 +200,7 @@ flowchart LR
 | Chrome 插件 | `chrome-extension/` | 提供离线插件下载、安装指南、一键配置和浏览器扩展桥接逻辑。 |
 | 默认配置中心 | `configcenter/` | 系统管理员选择源用户资源、配置默认授权和批量下发。 |
 | 控制台过滤 | `consoleFilter/` | 降低前端开发环境中无关控制台噪声。 |
+| 对话分享 | `chatshare/` | 提供分享图标、分享页、登录回跳、受保护图片/附件代理和电脑/移动响应式查看。 |
 | 数据库分析 | `dbanalytics/` | 数据源管理界面，支持连接配置、元数据、表字段范围和共享管理。 |
 | 文档处理 | `documentprocessing/` | 文档处理智能体相关前端扩展入口。 |
 | IAM | `iam/` | IAM 同步设置、组织树、空间成员批量选择和候选用户检索。 |
@@ -233,6 +236,7 @@ flowchart LR
 - `iam`：SSO/同步设置、外部组织、外部用户和同步记录。
 - `skillhub`：轻量技能、专业技能和共享关系。
 - `sessionstate`：当前通过 GORM AutoMigrate 维护 `custom_session_read_states`，暂未提供显式 SQL 文件。
+- `chatshare`：当前通过 GORM AutoMigrate 维护 `custom_chatshare_links` 和 `custom_chatshare_messages`，暂未提供显式 SQL 文件。
 
 开发环境启动时，部分二开模块会通过 GORM AutoMigrate 保持表结构可用；生产发布如需显式 SQL 迁移，以 `migrations/custom/` 下的文件为准。
 
@@ -246,6 +250,8 @@ flowchart LR
 - `internal/middleware/auth.go`：放行 SSO public callback 等匿名入口。
 - `frontend/src/views/settings/Settings.vue`：挂载 IAM、默认配置中心等设置入口。
 - `frontend/src/views/auth/Login.vue`：在登录页显示可选统一身份认证入口。
+- `frontend/src/components/menu.vue`、`frontend/src/custom/modules/mobile/views/MobileChat.vue`：挂载电脑端和移动端对话分享入口。
+- `frontend/src/views/chat/components/botmsg.vue`、`frontend/src/views/chat/components/usermsg.vue`：支持分享模式下的只读消息渲染和文件代理。
 
 后续新增企业功能时，应优先新增独立二开模块，只在上述注册点或 `internal/custom/bootstrap/`、`frontend/src/custom/` 中扩展，不应把大段业务逻辑继续写入原生目录。
 
@@ -341,6 +347,7 @@ docker compose -f custom/docker-compose.general-agent.yml up -d --build
 - Claude SDK 旁路服务的 `CUSTOM_GENERAL_AGENT_API_KEY` 必须与 Go 后端一致，工具回调地址按部署网络设置为 app 容器可访问地址。
 - MCP 有副作用或高风险工具应开启审批。
 - 统一身份认证部署在反向代理后时，需要正确透传 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto`。
+- 对话分享创建响应可通过 `FRONTEND_BASE_URL` 返回公网绝对链接；未配置时返回同域相对路径 `/share/chat/:token`。
 - 修改二开逻辑前先阅读 [二开目录结构规范](./docs/custom/二开目录结构规范.md)，避免把大段业务代码散落到原生目录。
 
 ## 重要文档
@@ -351,6 +358,7 @@ docker compose -f custom/docker-compose.general-agent.yml up -d --build
 | [智能体开发指南](./docs/custom/使用指南/智能体开发指南.md) | 面向智能体配置、调试、发布和集成开发。 |
 | [通用智能体方案](./docs/custom/通用智能体方案.md) | 通用智能体与 Claude Agent SDK 旁路服务的实现说明。 |
 | [统一身份认证与默认配置说明](./docs/custom/统一身份认证与默认配置实现说明.md) | IAM、SSO、组织同步和默认配置中心。 |
+| [对话分享实现说明](./docs/custom/对话分享功能实现说明.md) | 对话分享链接、权限边界、前后端实现和同域部署要求。 |
 | [二开目录结构规范](./docs/custom/二开目录结构规范.md) | 二开代码目录、注册点和命名约束。 |
 | [API 文档](./docs/api/README.md) | REST API 说明。 |
 | [MCP 配置说明](./mcp-server/MCP_CONFIG.md) | MCP 服务接入配置。 |

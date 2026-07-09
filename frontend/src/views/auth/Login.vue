@@ -237,12 +237,20 @@ import {
 } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
+import { consumeShareReturnPath, rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const { t, tm } = useI18n()
 const { formatRole, roleIcon } = useRoleLabel()
+const defaultLoginTarget = '/platform/knowledge-bases'
+
+const loginRedirectTarget = () => consumeShareReturnPath(route.query.returnTo) || defaultLoginTarget
+
+const rememberCurrentShareReturn = () => {
+  rememberShareReturnPath(route.query.returnTo)
+}
 
 // Form references
 const formRef = ref()
@@ -410,7 +418,7 @@ const persistLoginResponse = async (response: any) => {
   }
 
   await nextTick()
-  router.replace('/platform/knowledge-bases')
+  router.replace(loginRedirectTarget())
 }
 
 const getBackendOIDCRedirectURI = () => `${window.location.origin}/api/v1/auth/oidc/callback`
@@ -461,6 +469,7 @@ const handleOIDCLogin = async () => {
       return
     }
 
+    rememberCurrentShareReturn()
     window.location.href = authorizationURL
   } catch (error: any) {
     console.error('OIDC 登录跳转失败:', error)
@@ -481,6 +490,7 @@ const handleCustomSSOLogin = async () => {
       return
     }
 
+    rememberCurrentShareReturn()
     window.location.href = authorizationURL
   } catch (error: any) {
     console.error('统一身份认证跳转失败:', error)
@@ -612,7 +622,7 @@ onMounted(async () => {
   }
 
   if (authStore.isLoggedIn) {
-    router.replace('/platform/knowledge-bases')
+    router.replace(loginRedirectTarget())
     return
   }
 

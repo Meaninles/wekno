@@ -10,6 +10,8 @@ import {
   listKnowledgeFiles,
   uploadKnowledgeFile,
 } from "@/api/knowledge-base";
+import { useEditorResourcesStore } from "@/stores/editorResources";
+import { filterUploadFiles } from "@/views/knowledge/utils/uploadSources";
 import {
   downloadBlob,
   formatFileSize,
@@ -23,6 +25,7 @@ type KnowledgeFileRow = Record<string, any>;
 
 const router = useRouter();
 const route = useRoute();
+const editorResources = useEditorResourcesStore();
 const kbList = ref<KnowledgeBaseRow[]>([]);
 const fileList = ref<KnowledgeFileRow[]>([]);
 const selectedKbId = ref("");
@@ -36,6 +39,40 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
 const selectedKb = computed(() => kbList.value.find((item) => item.id === selectedKbId.value) || null);
 const hasRunningParse = computed(() => fileList.value.some((item) => isParseInFlight(item.parse_status)));
+const supportedFileTypes = computed<Set<string>>(() => {
+  const engines = editorResources.parserEngines || [];
+  if (!engines.length) return new Set<string>();
+
+  const rules: { file_types?: string[]; engine?: string }[] =
+    selectedKb.value?.chunking_config?.parser_engine_rules || [];
+  const ruleMap = new Map<string, string>();
+  rules.forEach((rule) => {
+    (rule.file_types || []).forEach((fileType) => {
+      if (fileType && rule.engine) ruleMap.set(fileType.toLowerCase(), rule.engine);
+    });
+  });
+
+  const availableEngineNames = new Set(
+    engines.filter((engine: any) => engine.Available !== false).map((engine: any) => engine.Name),
+  );
+  const available = new Set<string>();
+  engines.forEach((engine: any) => {
+    (engine.FileTypes || []).forEach((rawType: string) => {
+      const fileType = String(rawType || "").trim().toLowerCase();
+      if (!fileType || available.has(fileType)) return;
+      const explicitEngine = ruleMap.get(fileType);
+      if (explicitEngine) {
+        if (availableEngineNames.has(explicitEngine)) available.add(fileType);
+      } else if (engine.Available !== false) {
+        available.add(fileType);
+      }
+    });
+  });
+  return available;
+});
+const acceptFileTypes = computed(() =>
+  [...supportedFileTypes.value].map((fileType) => `.${fileType}`).join(","),
+);
 const returnTo = computed(() => {
   const raw = Array.isArray(route.query.returnTo) ? route.query.returnTo[0] : route.query.returnTo;
   if (typeof raw === "string" && (raw === "/chat" || raw.startsWith("/chat/"))) return raw;
@@ -132,9 +169,23 @@ const handleUpload = async (event: Event) => {
   const files = Array.from((event.target as HTMLInputElement).files || []);
   (event.target as HTMLInputElement).value = "";
   if (!files.length || !selectedKbId.value) return;
+  const { validFiles, skippedCount, videoFilteredCount, hiddenFileCount } = filterUploadFiles(files, {
+    supportedFileTypes: supportedFileTypes.value,
+    multiFile: files.length > 1,
+  });
+  const filteredCount = skippedCount + videoFilteredCount + hiddenFileCount;
+  if (filteredCount > 0) {
+    MessagePlugin.warning(
+      validFiles.length
+        ? `已过滤 ${filteredCount} 个不支持的文件`
+        : "选中的文件均不支持",
+    );
+  }
+  if (!validFiles.length) return;
+
   uploading.value = true;
   try {
-    for (const file of files) {
+    for (const file of validFiles) {
       await uploadKnowledgeFile(selectedKbId.value, { file });
     }
     MessagePlugin.success("上传已提交");
@@ -181,7 +232,10 @@ watch(selectedKbId, () => {
 });
 
 onMounted(async () => {
-  await loadKnowledgeBases();
+  await Promise.all([
+    editorResources.ensureParserEngines().catch(() => undefined),
+    loadKnowledgeBases(),
+  ]);
   await loadFiles();
 });
 
@@ -230,7 +284,7 @@ onBeforeUnmount(clearPolling);
         <MobileIcon v-else name="upload" />
         <span>上传文档</span>
       </button>
-      <input ref="uploadInputRef" type="file" multiple hidden @change="handleUpload" />
+      <input ref="uploadInputRef" type="file" :accept="acceptFileTypes" multiple hidden @change="handleUpload" />
     </section>
 
     <section class="doc-section">

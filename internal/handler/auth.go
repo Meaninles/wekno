@@ -50,6 +50,21 @@ func runCustomProvisioner(ctx context.Context, user *types.User) {
 	}
 }
 
+func recordUserLogin(ctx context.Context, userService interfaces.UserService, user *types.User) {
+	if user == nil {
+		return
+	}
+	recorder, ok := userService.(interface {
+		RecordLogin(context.Context, *types.User) error
+	})
+	if !ok {
+		return
+	}
+	if err := recorder.RecordLogin(ctx, user); err != nil {
+		logger.Warnf(ctx, "failed to record last login time for user %s: %v", user.ID, err)
+	}
+}
+
 // NewAuthHandler creates a new auth handler instance with the provided services
 // Parameters:
 //   - userService: An implementation of the UserService interface for business logic
@@ -792,6 +807,7 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 		c.Error(appErr)
 		return
 	}
+	recordUserLogin(ctx, h.userService, user)
 
 	tenant, _ := h.tenantService.GetTenantByID(ctx, user.TenantID)
 

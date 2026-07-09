@@ -49,7 +49,7 @@
             下载
           </t-button>
           <t-button
-            v-if="!isEmbedMode"
+            v-if="!isEmbedMode && !shareMode"
             size="small"
             theme="primary"
             :loading="importingId === file.artifact_id"
@@ -146,6 +146,7 @@ const props = defineProps<{
   embedToken?: string;
   embedSessionId?: string;
   embedSessionSig?: string;
+  shareMode?: boolean;
 }>();
 
 interface KnowledgeBaseOption {
@@ -176,6 +177,7 @@ const files = computed(() => props.data.artifacts || []);
 const notice = computed(() => props.data.notice || '');
 const noticeTheme = computed(() => props.data.persist_failed ? 'error' : 'warning');
 const isEmbedMode = computed(() => props.embeddedMode === true);
+const shareMode = computed(() => props.shareMode === true);
 const canUseEmbedDownload = computed(() => {
   return isEmbedMode.value
     && !!props.embedChannelId

@@ -9,7 +9,10 @@
 !src/**
 !public
 !public/**
+!index.html
+!embed.html
 !mobile.html
+!vite.config.ts
 !vite.mobile.config.ts
 !tsconfig.json
 !tsconfig.app.json

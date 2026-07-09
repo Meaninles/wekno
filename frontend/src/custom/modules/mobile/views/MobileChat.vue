@@ -35,8 +35,11 @@ import { useSettingsStore } from "@/stores/settings";
 import { agentPinKey, useChatAgentPins } from "@/custom/modules/agentPins/agentPins";
 import { listSessionStatuses, markSessionRead, type SessionStatusMap } from "@/custom/modules/sessionState/api";
 import { clearSessionDraftState, getSessionDraftState, saveSessionDraftState } from "@/custom/modules/sessionState/draftState";
+import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
+import { absoluteShareURL, createChatShare } from "@/custom/modules/chatshare/api";
 import { useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
+import { copyTextToClipboard } from "@/utils/chatMessageShared";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
 import MobileResourceRail from "../components/MobileResourceRail.vue";
 import {
@@ -74,6 +77,7 @@ const isReplying = ref(false);
 const isLoadingHistory = ref(false);
 const sessionsLoading = ref(false);
 const resourcesLoading = ref(false);
+const shareCreating = ref(false);
 const drawerOpen = ref(false);
 const sheetOpen = ref(false);
 const activeSheet = ref<SheetTab>("context");
@@ -255,9 +259,6 @@ const selectedFileIds = computed(() => settingsStore.settings.selectedFiles || [
 const activeFileKnowledgeBase = computed(() =>
   knowledgeBases.value.find((kb) => kb.id === activeFileKbId.value) || null,
 );
-const activeFileRows = computed(() =>
-  activeFileKbId.value ? knowledgeFiles.value.filter((file) => file.kb_id === activeFileKbId.value) : [],
-);
 const selectedSkillNames = computed(() => {
   const names = [
     ...(settingsStore.settings.selectedSkillNames || []),
@@ -305,6 +306,62 @@ const mobileAgentRows = computed<CustomAgent[]>(() => {
 });
 
 const currentAgentConfig = computed(() => selectedAgent.value?.config || {});
+const normalizeFileType = (value?: string) =>
+  String(value || "").trim().toLowerCase().replace(/^\./, "");
+
+const fileTypeFromName = (name?: string) => {
+  const cleaned = String(name || "").split(/[?#]/)[0];
+  const parts = cleaned.split(".");
+  return parts.length > 1 ? normalizeFileType(parts.pop()) : "";
+};
+
+const knowledgeFileType = (file: any) =>
+  normalizeFileType(file?.file_type) ||
+  fileTypeFromName(file?.file_name || file?.display_name || file?.title || file?.source);
+
+const agentSupportedFileTypes = computed(() => {
+  const values = currentAgentConfig.value?.supported_file_types || [];
+  return Array.from(new Set(values.map((type: string) => normalizeFileType(type)).filter(Boolean)));
+});
+
+const agentSupportedFileTypeSet = computed(() => new Set(agentSupportedFileTypes.value));
+
+const isFileTypeAllowedByAgent = (fileType: string) => {
+  const allowed = agentSupportedFileTypeSet.value;
+  if (allowed.size === 0) return true;
+  return allowed.has(normalizeFileType(fileType));
+};
+
+const isKnowledgeFileAllowedByAgent = (file: any) => isFileTypeAllowedByAgent(knowledgeFileType(file));
+
+const isAttachmentAllowedByAgent = (file: File | { name?: string }) =>
+  isFileTypeAllowedByAgent(fileTypeFromName(file?.name));
+
+const attachmentAcceptTypes = computed(() =>
+  agentSupportedFileTypes.value.map((type) => `.${type}`).join(","),
+);
+
+const activeFileRows = computed(() =>
+  activeFileKbId.value
+    ? knowledgeFiles.value.filter((file) => file.kb_id === activeFileKbId.value && isKnowledgeFileAllowedByAgent(file))
+    : [],
+);
+
+const knowledgeFileById = computed(() => {
+  const map = new Map<string, any>();
+  knowledgeFiles.value.forEach((file) => {
+    if (file?.id) map.set(String(file.id), file);
+  });
+  return map;
+});
+
+const selectedAllowedFileIds = computed(() => {
+  if (agentSupportedFileTypeSet.value.size === 0) return selectedFileIds.value;
+  return selectedFileIds.value.filter((fileId) => {
+    const file = knowledgeFileById.value.get(String(fileId));
+    return file ? isKnowledgeFileAllowedByAgent(file) : false;
+  });
+});
 
 const agentProfessionalSkillsSelectionMode = computed<SkillSelectionMode>(() => {
   return currentAgentConfig.value?.professional_skills_selection_mode || "none";
@@ -398,13 +455,40 @@ const compactTitle = computed(() => {
   return row?.title || "新对话";
 });
 
+const shareCurrentMobileChat = async () => {
+  if (!currentSessionId.value || shareCreating.value) return;
+  shareCreating.value = true;
+  try {
+    const resp: any = await createChatShare(currentSessionId.value);
+    const link = absoluteShareURL(resp?.data?.url, resp?.data?.token);
+    if (!link) throw new Error("分享链接生成失败");
+    const nav = navigator as Navigator & {
+      share?: (data: { title?: string; url?: string }) => Promise<void>;
+    };
+    if (nav.share) {
+      try {
+        await nav.share({ title: compactTitle.value, url: link });
+        return;
+      } catch (error: any) {
+        if (error?.name === "AbortError") return;
+      }
+    }
+    await copyTextToClipboard(link);
+    MessagePlugin.success("分享链接已复制");
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "分享失败");
+  } finally {
+    shareCreating.value = false;
+  }
+};
+
 const selectedResourceChips = computed<MobileResourceChip[]>(() => {
   const chips: MobileResourceChip[] = [];
   for (const kbId of selectedKbIds.value) {
     const kb = knowledgeBases.value.find((item) => item.id === kbId);
     chips.push({ id: kbId, type: "kb", name: kb?.name || "知识库" });
   }
-  for (const fileId of selectedFileIds.value) {
+  for (const fileId of selectedAllowedFileIds.value) {
     const file = knowledgeFiles.value.find((item) => item.id === fileId);
     chips.push({ id: fileId, type: "file", name: file?.file_name || file?.display_name || fileId });
   }
@@ -428,7 +512,7 @@ const selectedResourceChips = computed<MobileResourceChip[]>(() => {
   return chips;
 });
 
-const selectedKnowledgeContextCount = computed(() => selectedKbIds.value.length + selectedFileIds.value.length);
+const selectedKnowledgeContextCount = computed(() => selectedKbIds.value.length + selectedAllowedFileIds.value.length);
 
 type SessionGroup = {
   key: string;
@@ -635,8 +719,19 @@ const loadKnowledgeFilesForKb = async (kbId: string, force = false) => {
   if (!force && loadedFileKbIds.value.has(kbId)) return;
   fileListLoading.value = true;
   try {
-    const res: any = await listKnowledgeFiles(kbId, { page: 1, page_size: 100 }).catch(() => ({ data: [] }));
-    mergeKnowledgeFiles(kbId, responseList(res).map((file: any) => normalizeKnowledgeFile(kbId, file)));
+    const fileTypes = agentSupportedFileTypes.value;
+    const requests = fileTypes.length > 0
+      ? fileTypes.map((fileType) => listKnowledgeFiles(kbId, { page: 1, page_size: 100, file_type: fileType }))
+      : [listKnowledgeFiles(kbId, { page: 1, page_size: 100 })];
+    const responses = await Promise.all(requests.map((request) => request.catch(() => ({ data: [] }))));
+    const filesById = new Map<string, any>();
+    responses.flatMap(responseList).forEach((file: any) => {
+      const normalized = normalizeKnowledgeFile(kbId, file);
+      if (normalized.id && isKnowledgeFileAllowedByAgent(normalized)) {
+        filesById.set(String(normalized.id), normalized);
+      }
+    });
+    mergeKnowledgeFiles(kbId, [...filesById.values()]);
     loadedFileKbIds.value = new Set([...loadedFileKbIds.value, kbId]);
   } finally {
     fileListLoading.value = false;
@@ -696,7 +791,6 @@ const loadKnowledgeChildren = async () => {
 
   await Promise.all([...kbIds].map((kbId) => loadKnowledgeFilesForKb(kbId)));
 };
-
 
 const hydrateMobileConversationState = async (sessionId: string) => {
   isHydratingConversationState = true;
@@ -1051,8 +1145,8 @@ const backToFileKnowledgeBases = () => {
 };
 
 const selectedFileCountForKb = (kbId: string) => {
-  const selected = new Set(selectedFileIds.value);
-  return selectedFileIds.value.filter((fileId) => {
+  const selected = new Set(selectedAllowedFileIds.value);
+  return selectedAllowedFileIds.value.filter((fileId) => {
     const mappedKbId = settingsStore.settings.selectedFileKbMap?.[fileId];
     if (mappedKbId) return mappedKbId === kbId;
     const file = knowledgeFiles.value.find((item) => item.id === fileId);
@@ -1075,6 +1169,10 @@ const toggleKnowledgeBase = async (kbId: string) => {
 };
 
 const toggleKnowledgeFile = (file: any) => {
+  if (!isKnowledgeFileAllowedByAgent(file)) {
+    MessagePlugin.warning(`当前智能体不支持该文件类型：${file.display_name || file.file_name || "未命名文档"}`);
+    return;
+  }
   if (selectedFileIds.value.includes(file.id)) {
     settingsStore.removeFile(file.id);
   } else {
@@ -1163,13 +1261,28 @@ const clearSelectedResources = () => {
   void loadKnowledgeChildren();
 };
 
+const pruneUnsupportedSelectedFiles = () => {
+  if (agentSupportedFileTypeSet.value.size === 0) return;
+  selectedFileIds.value.forEach((fileId) => {
+    const file = knowledgeFileById.value.get(String(fileId));
+    if (file && !isKnowledgeFileAllowedByAgent(file)) {
+      settingsStore.removeFile(fileId);
+    }
+  });
+};
+
+const pruneUnsupportedAttachments = () => {
+  if (agentSupportedFileTypeSet.value.size === 0) return;
+  pendingAttachments.value = pendingAttachments.value.filter((attachment) => isAttachmentAllowedByAgent(attachment.file));
+};
+
 const buildMentionedItems = (): MobileMentionItem[] => {
   const mentioned: MobileMentionItem[] = [];
   selectedKbIds.value.forEach((id) => {
     const kb = knowledgeBases.value.find((item) => item.id === id);
     mentioned.push({ id, name: kb?.name || id, type: "kb", kb_type: kb?.type });
   });
-  selectedFileIds.value.forEach((id) => {
+  selectedAllowedFileIds.value.forEach((id) => {
     const file = knowledgeFiles.value.find((item) => item.id === id);
     mentioned.push({
       id,
@@ -1254,7 +1367,7 @@ const sendMessage = async () => {
     void loadSessions();
 
     const kbIdSet = new Set(selectedKbIds.value);
-    const fileIdSet = new Set(selectedFileIds.value);
+    const fileIdSet = new Set(selectedAllowedFileIds.value);
 
     const endpoint = agentEnabled ? "/api/v1/agent-chat" : "/api/v1/knowledge-chat";
     const modelId = selectedModel.value?.id || selectedModelId.value || "";
@@ -1308,8 +1421,13 @@ const handleImageFiles = (event: Event) => {
 
 const handleAttachmentFiles = (event: Event) => {
   const files = Array.from((event.target as HTMLInputElement).files || []);
+  const acceptedFiles = files.filter((file) => {
+    if (isAttachmentAllowedByAgent(file)) return true;
+    MessagePlugin.warning(`当前智能体不支持该文件类型：${file.name}`);
+    return false;
+  });
   pendingAttachments.value.push(
-    ...files.slice(0, 6).map((file) => ({
+    ...acceptedFiles.slice(0, 6).map((file) => ({
       file,
       name: file.name,
       size: file.size,
@@ -1332,6 +1450,17 @@ watch(hasProfessionalSkillTab, (hasTab) => {
     activeSkillTab.value = "lightweight";
   }
 });
+
+watch(
+  () => agentSupportedFileTypes.value.join(","),
+  async () => {
+    loadedFileKbIds.value = new Set();
+    knowledgeFiles.value = [];
+    pruneUnsupportedAttachments();
+    await loadKnowledgeChildren();
+    pruneUnsupportedSelectedFiles();
+  },
+);
 
 watch(
   () => route.params.sessionId,
@@ -1423,6 +1552,16 @@ onBeforeUnmount(() => {
       </button>
       <div class="chat-title">
         <span>{{ compactTitle }}</span>
+        <button
+          v-if="currentSessionId"
+          type="button"
+          class="title-share-button"
+          :class="{ loading: shareCreating }"
+          aria-label="分享对话"
+          @click="shareCurrentMobileChat"
+        >
+          <ShareIcon />
+        </button>
       </div>
       <button type="button" class="icon-button" aria-label="新建会话" @click="startNewChat">
         <MobileIcon name="plus-circle" />
@@ -1506,7 +1645,7 @@ onBeforeUnmount(() => {
       </div>
 
       <input ref="imageInputRef" type="file" accept="image/*" multiple hidden @change="handleImageFiles" />
-      <input ref="attachmentInputRef" type="file" multiple hidden @change="handleAttachmentFiles" />
+      <input ref="attachmentInputRef" type="file" :accept="attachmentAcceptTypes" multiple hidden @change="handleAttachmentFiles" />
     </footer>
 
     <div v-if="drawerOpen" class="drawer-layer" @click.self="drawerOpen = false">
@@ -1810,16 +1949,36 @@ onBeforeUnmount(() => {
   align-self: stretch;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   line-height: 1.25;
 }
 
 .chat-title span {
   overflow: hidden;
-  max-width: 100%;
+  max-width: calc(100% - 34px);
   font-size: 16px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.title-share-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #24372f;
+  padding: 0;
+  font-size: 19px;
+}
+
+.title-share-button.loading {
+  pointer-events: none;
+  opacity: 0.55;
 }
 
 .message-scroll {

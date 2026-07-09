@@ -4,6 +4,7 @@ import type { AxiosRequestConfig } from "axios";
 import { generateRandomString, MAX_FILE_SIZE_MB } from "./index";
 import i18n from '@/i18n'
 import { getApiBaseUrl } from './api-base';
+import { rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn';
 
 const t = (key: string) => i18n.global.t(key)
 
@@ -131,7 +132,8 @@ function redirectToLogin() {
   if (window.location.pathname === '/login') return;
   // Embed 渠道用 Embed token 鉴权，匿名访问不应被踢到登录页
   if (isEmbedPage()) return;
-  window.location.href = '/login';
+  const returnTo = rememberShareReturnPath(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+  window.location.href = returnTo ? `/login?${new URLSearchParams({ returnTo }).toString()}` : '/login';
 }
 
 instance.interceptors.response.use(

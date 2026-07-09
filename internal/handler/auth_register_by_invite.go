@@ -188,6 +188,7 @@ func (h *AuthHandler) RegisterByInvite(c *gin.Context) {
 		c.Error(apperrors.NewInternalServerError("token generation failed").WithDetails(err.Error()))
 		return
 	}
+	recordUserLogin(ctx, h.userService, user)
 
 	tenant, _ := h.tenantService.GetTenantByID(ctx, inv.TenantID)
 	c.JSON(http.StatusCreated, &types.LoginResponse{

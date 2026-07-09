@@ -16,6 +16,7 @@ import (
 	customadmin "github.com/Tencent/WeKnora/internal/custom/modules/admin"
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
@@ -42,12 +43,14 @@ type Handlers struct {
 	GeneralAgent         *generalagent.Handler
 	AnswerFeedback       *answerfeedback.Handler
 	BuiltinAgentDefaults *builtinagentdefaults.Handler
+	ChatShare            *chatshare.Handler
 	Admin                *customadmin.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
 	adminService                *customadmin.Service
 	builtinAgentDefaultsService *builtinagentdefaults.Service
+	chatShareService            *chatshare.Service
 	dbAnalyticsService          *dbanalytics.Service
 	generalAgentService         *generalagent.Service
 	iamService                  *iam.Service
@@ -84,6 +87,7 @@ func NewHandlers(
 	adminService := customadmin.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
+	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
 	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
 	iamService := iam.NewService(db, userService)
@@ -126,6 +130,9 @@ func NewHandlers(
 		return nil, err
 	}
 	if err := skillHubService.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err := chatShareService.Migrate(ctx); err != nil {
 		return nil, err
 	}
 	if err := userGuideService.EnsureAllUsers(ctx); err != nil {
@@ -233,11 +240,13 @@ func NewHandlers(
 		GeneralAgent:                generalagent.NewHandler(generalAgentService),
 		AnswerFeedback:              answerfeedback.NewHandler(answerFeedbackService, messageService),
 		BuiltinAgentDefaults:        builtinagentdefaults.NewHandler(builtinAgentDefaultsService),
+		ChatShare:                   chatshare.NewHandler(chatShareService),
 		Admin:                       customadmin.NewHandler(adminService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
 		builtinAgentDefaultsService: builtinAgentDefaultsService,
+		chatShareService:            chatShareService,
 		dbAnalyticsService:          dbAnalyticsService,
 		generalAgentService:         generalAgentService,
 		iamService:                  iamService,
@@ -343,6 +352,16 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 	{
 		spaceMemberRoutes.GET("/space-member-organizations", handlers.IAM.ListSpaceMemberCandidateOrganizations)
 		spaceMemberRoutes.GET("/space-member-candidates", handlers.IAM.ListSpaceMemberCandidateUsers)
+	}
+
+	if handlers.ChatShare != nil {
+		chatShareRoutes := v1.Group("/custom/chat-share")
+		{
+			chatShareRoutes.POST("/sessions/:session_id", handlers.ChatShare.Create)
+			chatShareRoutes.GET("/:token", handlers.ChatShare.Get)
+			chatShareRoutes.GET("/:token/files", handlers.ChatShare.File)
+			chatShareRoutes.GET("/:token/artifacts/:artifact_id/download", handlers.ChatShare.Artifact)
+		}
 	}
 
 	if handlers.SessionState != nil {

@@ -6,11 +6,21 @@ import { getDown } from "@/utils/request";
 import { resolveCitationChunkId } from "@/utils/citationMarkdown";
 import { unwrapFinalAnswerWrappers } from "@/utils/finalAnswer";
 import { clearProtectedFileFailureCache, hydrateProtectedFileImages } from "@/utils/security";
+import { hydrateSharedProtectedFileImages } from "@/custom/modules/chatshare/protectedFiles";
+import {
+  normalizeMessageArtifacts,
+  normalizeMessageAttachments,
+  normalizeMessageImages,
+  shareImageProtectedSrc,
+  shareImageSrc,
+} from "@/custom/modules/chatshare/media";
 import { splitStructuredChartMarkdown, type StructuredChartInfo } from "@/utils/structuredChartMarkdown";
 import MobileResourceRail from "./MobileResourceRail.vue";
 import MobileCitationSheet from "./MobileCitationSheet.vue";
 import MobileSourceDetailSheet from "./MobileSourceDetailSheet.vue";
 import MobileStructuredAnalysisResult from "./MobileStructuredAnalysisResult.vue";
+import MobileIcon from "./MobileIcon.vue";
+import picturePreview from "@/components/picture-preview.vue";
 import { renderMobileMarkdown } from "../mobileMarkdown";
 import type { MobileResourceChip } from "../utils";
 import { downloadBlob, formatFileSize } from "../utils";
@@ -28,6 +38,8 @@ type ChatMessage = Record<string, any>;
 
 const props = defineProps<{
   message: ChatMessage;
+  shareMode?: boolean;
+  shareToken?: string;
 }>();
 
 type StructuredAnalysisBlock = {
@@ -45,8 +57,13 @@ const isUser = computed(() => props.message.role === "user");
 const isAssistant = computed(() => props.message.role === "assistant");
 const downloadingArtifactId = ref("");
 const messageBodyRef = ref<HTMLElement | null>(null);
+const reviewImg = ref(false);
+const reviewUrl = ref("");
 let messageHydrationRun = 0;
 let completionHydrationCacheCleared = false;
+
+const userImages = computed(() => normalizeMessageImages(props.message.images));
+const userAttachments = computed(() => normalizeMessageAttachments(props.message.attachments));
 
 const mentionedChips = computed<MobileResourceChip[]>(() => {
   const items = Array.isArray(props.message.mentioned_items) ? props.message.mentioned_items : [];
@@ -69,9 +86,7 @@ const mentionedChips = computed<MobileResourceChip[]>(() => {
 
 const uploadChips = computed<MobileResourceChip[]>(() => {
   const chips: MobileResourceChip[] = [];
-  const images = Array.isArray(props.message.images) ? props.message.images : [];
-  const attachments = Array.isArray(props.message.attachments) ? props.message.attachments : [];
-  images.forEach((img: any, index: number) => {
+  userImages.value.forEach((img: any, index: number) => {
     chips.push({
       id: `image:${index}`,
       type: "image",
@@ -79,7 +94,7 @@ const uploadChips = computed<MobileResourceChip[]>(() => {
       removable: false,
     });
   });
-  attachments.forEach((file: any, index: number) => {
+  userAttachments.value.forEach((file: any, index: number) => {
     chips.push({
       id: `attachment:${file.file_name || index}`,
       type: "attachment",
@@ -90,6 +105,21 @@ const uploadChips = computed<MobileResourceChip[]>(() => {
   });
   return chips;
 });
+
+const imageSrc = (img: any) => shareImageSrc(img?.url, props.shareMode);
+const imageProtectedSrc = (img: any) => shareImageProtectedSrc(img?.url, props.shareMode);
+
+const previewImage = (event: MouseEvent) => {
+  const src = (event.target as HTMLImageElement | null)?.src;
+  if (!src) return;
+  reviewUrl.value = src;
+  reviewImg.value = true;
+};
+
+const closePreImg = () => {
+  reviewImg.value = false;
+  reviewUrl.value = "";
+};
 
 const latestAgentPreview = computed(() => {
   const stream = Array.isArray(props.message.agentEventStream)
@@ -138,7 +168,7 @@ const agentStepPreviews = computed(() => {
 });
 
 const shouldShowThinking = computed(() => {
-  return isAssistant.value && props.message.isAgentMode && !props.message.is_completed;
+  return !props.shareMode && isAssistant.value && props.message.isAgentMode && !props.message.is_completed;
 });
 
 const isStructuredAnalysisData = (value: any): value is StructuredAnalysisData => {
@@ -277,18 +307,20 @@ const structuredChartInfos = computed<StructuredChartInfo[]>(() =>
 
 const answerMarkdown = computed(() => unwrapFinalAnswerWrappers(String(props.message.content || "")));
 
-const sourceReferenceItems = computed(() =>
-  buildCitedSourceReferenceItems(
+const sourceReferenceItems = computed(() => props.shareMode
+  ? []
+  : buildCitedSourceReferenceItems(
     Array.isArray(props.message.knowledge_references) ? props.message.knowledge_references : [],
     answerMarkdown.value,
     Boolean(props.message.is_completed),
-  ),
+  )
 );
 
-const allSourceReferenceItems = computed(() =>
-  buildSourceReferenceItems(
+const allSourceReferenceItems = computed(() => props.shareMode
+  ? []
+  : buildSourceReferenceItems(
     Array.isArray(props.message.knowledge_references) ? props.message.knowledge_references : [],
-  ),
+  )
 );
 
 const citationNumberById = computed(() => new Map(
@@ -318,7 +350,7 @@ const answerSplit = computed(() => {
         return result ? { key: `chart:${segment.resultIndex}:${index}`, kind: "structured_result", result } : null;
       }
       const html = renderMobileMarkdown(segment.content || "", {
-        knowledgeReferences: props.message.knowledge_references,
+        knowledgeReferences: props.shareMode ? [] : props.message.knowledge_references,
         streaming: !props.message.is_completed,
         citationNumberById: citationNumberById.value,
       });
@@ -349,6 +381,8 @@ const renderedMarkdownImageHydrationKey = computed(() =>
     .join("\n"),
 );
 
+const userImageHydrationKey = computed(() => userImages.value.map((img) => img.url).join("\n"));
+
 watch(
   [renderedMarkdownImageHydrationKey, () => props.message.is_completed],
   async ([, completed]) => {
@@ -362,7 +396,27 @@ watch(
     }
     await nextTick();
     if (run !== messageHydrationRun) return;
-    await hydrateProtectedFileImages(messageBodyRef.value);
+    if (props.shareMode && props.shareToken) {
+      await hydrateSharedProtectedFileImages(messageBodyRef.value, props.shareToken);
+    } else {
+      await hydrateProtectedFileImages(messageBodyRef.value);
+    }
+  },
+  { immediate: true, flush: "post" },
+);
+
+watch(
+  [userImageHydrationKey, () => props.shareMode, () => props.shareToken],
+  async () => {
+    if (!isUser.value || userImages.value.length === 0) return;
+    const run = ++messageHydrationRun;
+    await nextTick();
+    if (run !== messageHydrationRun) return;
+    if (props.shareMode && props.shareToken) {
+      await hydrateSharedProtectedFileImages(messageBodyRef.value, props.shareToken);
+    } else {
+      await hydrateProtectedFileImages(messageBodyRef.value);
+    }
   },
   { immediate: true, flush: "post" },
 );
@@ -411,6 +465,16 @@ const collectArtifactsFromSteps = (steps: any[], results: GeneralAgentArtifactsD
 };
 
 const artifactResult = computed<GeneralAgentArtifactsData | null>(() => {
+  const directArtifacts = normalizeMessageArtifacts(props.message.artifacts);
+  if (directArtifacts.length > 0) {
+    return {
+      display_type: "general_agent_artifacts",
+      artifacts: directArtifacts,
+      artifact_original_count: directArtifacts.length,
+    } as GeneralAgentArtifactsData;
+  }
+  if (props.shareMode) return null;
+
   const results: GeneralAgentArtifactsData[] = [];
   const stream = Array.isArray(props.message.agentEventStream) ? props.message.agentEventStream : [];
   const steps = Array.isArray(props.message.agent_steps) ? props.message.agent_steps : [];
@@ -459,10 +523,12 @@ const artifactFiles = computed<GeneralAgentArtifactFile[]>(() => {
   return files;
 });
 
-const visibleArtifactFiles = computed(() => artifactFiles.value.slice(0, 3));
+const visibleArtifactFiles = computed(() => props.shareMode ? artifactFiles.value : artifactFiles.value.slice(0, 3));
 const hiddenArtifactCount = computed(() => Math.max(0, artifactFiles.value.length - visibleArtifactFiles.value.length));
 const artifactNotice = computed(() => artifactResult.value?.notice || "");
-const shouldShowArtifacts = computed(() => isAssistant.value && (artifactFiles.value.length > 0 || !!artifactNotice.value));
+const shouldShowArtifacts = computed(() =>
+  isAssistant.value && (artifactFiles.value.length > 0 || !!artifactNotice.value),
+);
 
 const artifactMetaText = computed(() => {
   const total = Number(artifactResult.value?.artifact_original_count || 0);
@@ -752,6 +818,11 @@ const openLegacyKbCitation = async (el: HTMLElement) => {
 
 const handleMarkdownClick = (event: MouseEvent) => {
   const target = event.target as HTMLElement;
+  if (props.shareMode && isReadonlyJumpTarget(target)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   const sourceEl = target.closest?.(".citation-source") as HTMLElement | null;
   if (sourceEl) {
     event.preventDefault();
@@ -810,6 +881,8 @@ const handleMarkdownClick = (event: MouseEvent) => {
 };
 
 const handleMarkdownActivationKey = (target: HTMLElement) => {
+  if (props.shareMode && isReadonlyJumpTarget(target)) return true;
+
   const sourceEl = target.closest?.(".citation-source") as HTMLElement | null;
   if (sourceEl) {
     const item = sourceItemFromElement(sourceEl);
@@ -856,6 +929,7 @@ const handleMarkdownKeydown = (event: KeyboardEvent) => {
 };
 
 const openExternalUrl = (url: string) => {
+  if (props.shareMode) return;
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.target = "_blank";
@@ -877,6 +951,7 @@ const pushDetailHistory = () => {
 };
 
 const openCitationSource = (item: SourceReferenceItem) => {
+  if (props.shareMode) return;
   selectedCitationItem.value = null;
   if (item.type === "web") {
     if (item.url) openExternalUrl(item.url);
@@ -889,6 +964,10 @@ const openCitationSource = (item: SourceReferenceItem) => {
   detailItem.value = item;
   pushDetailHistory();
 };
+
+const isReadonlyJumpTarget = (target: HTMLElement | null) => Boolean(
+  target?.closest?.("a, .citation-source, .citation-wiki, .citation-kb, .citation-web, .wiki-content-link"),
+);
 
 const closeCitationPreview = () => {
   selectedCitationItem.value = null;
@@ -922,13 +1001,28 @@ onBeforeUnmount(() => {
 
 <template>
   <article ref="messageBodyRef" class="mobile-message" :class="{ 'is-user': isUser, 'is-assistant': isAssistant }">
-    <div class="message-stack">
+    <div
+      class="message-stack"
+      :class="{ 'is-user-stack': isUser, 'is-assistant-stack': isAssistant }"
+    >
       <MobileResourceRail
         v-if="isUser && (mentionedChips.length || uploadChips.length)"
         dense
         align-end
         :items="[...mentionedChips, ...uploadChips]"
       />
+
+      <div v-if="isUser && userImages.length" class="mobile-user-images">
+        <img
+          v-for="(img, index) in userImages"
+          :key="`${img.url}-${index}`"
+          class="mobile-user-image"
+          :src="imageSrc(img)"
+          :data-protected-src="imageProtectedSrc(img)"
+          alt=""
+          @click="previewImage"
+        />
+      </div>
 
       <div v-if="isUser" class="user-bubble">
         <p>{{ message.content }}</p>
@@ -1009,14 +1103,17 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <MobileCitationSheet
+      v-if="!shareMode"
       :item="selectedCitationItem"
       @close="closeCitationPreview"
       @open="openCitationSource"
     />
     <MobileSourceDetailSheet
+      v-if="!shareMode"
       :item="detailItem"
       @close="closeSourceDetail"
     />
+    <picturePreview v-if="reviewImg" :reviewImg="reviewImg" :reviewUrl="reviewUrl" @closePreImg="closePreImg" />
   </article>
 </template>
 
@@ -1024,7 +1121,9 @@ onBeforeUnmount(() => {
 .mobile-message {
   display: flex;
   align-items: flex-start;
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
 }
 
 .mobile-message.is-user {
@@ -1037,36 +1136,61 @@ onBeforeUnmount(() => {
 
 .message-stack {
   display: flex;
+  box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
   flex-direction: column;
   gap: 7px;
 }
 
-.is-user .message-stack {
+.message-stack.is-user-stack {
   align-items: flex-end;
-  flex: 0 1 86%;
-  width: auto;
+  flex: 0 1 auto;
+  width: 86%;
   max-width: 680px;
 }
 
-.is-assistant .message-stack {
+.message-stack.is-assistant-stack {
   align-items: flex-start;
-  flex: 1 1 100%;
-  width: auto;
+  flex: 1 1 auto;
+  width: 100%;
   max-width: 100%;
 }
 
 .user-bubble {
+  box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
   border-radius: 16px 16px 4px 16px;
   background: #07c160;
   color: #fff;
   padding: 10px 12px;
-  font-size: var(--mobile-reading-font-size);
-  line-height: var(--mobile-reading-line-height);
+  font-size: var(--mobile-reading-font-size, 18.5px);
+  line-height: var(--mobile-reading-line-height, 2.22);
   overflow-wrap: anywhere;
+}
+
+.mobile-user-images {
+  display: flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.mobile-user-image {
+  box-sizing: border-box;
+  width: 104px;
+  height: 104px;
+  border: 1px solid #d9e4df;
+  border-radius: 10px;
+  background: #edf3f0;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+
+.mobile-user-image[data-img-loading] {
+  opacity: 0.82;
 }
 
 .user-bubble p {
@@ -1078,6 +1202,7 @@ onBeforeUnmount(() => {
 
 .assistant-card {
   display: flex;
+  box-sizing: border-box;
   min-width: 0;
   width: 100%;
   max-width: 100%;
@@ -1087,8 +1212,8 @@ onBeforeUnmount(() => {
   border-radius: 16px 16px 16px 4px;
   background: #fff;
   padding: 12px 14px;
-  font-size: var(--mobile-reading-font-size);
-  line-height: var(--mobile-reading-line-height);
+  font-size: var(--mobile-reading-font-size, 18.5px);
+  line-height: var(--mobile-reading-line-height, 2.22);
   box-shadow: 0 1px 3px rgba(15, 36, 26, 0.06);
 }
 
@@ -1164,12 +1289,14 @@ onBeforeUnmount(() => {
 }
 
 .mobile-markdown {
+  box-sizing: border-box;
   min-width: 0;
+  width: 100%;
   max-width: 100%;
   overflow-wrap: anywhere;
   color: #1f2d27;
-  font-size: var(--mobile-reading-font-size);
-  line-height: var(--mobile-reading-line-height);
+  font-size: var(--mobile-reading-font-size, 18.5px);
+  line-height: var(--mobile-reading-line-height, 2.22);
 }
 
 .mobile-markdown :deep(p) {
@@ -1305,6 +1432,7 @@ onBeforeUnmount(() => {
 }
 
 .mobile-markdown :deep(.chat-markdown-table) {
+  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
   overflow-x: auto;
@@ -1316,6 +1444,7 @@ onBeforeUnmount(() => {
 }
 
 .mobile-markdown :deep(table) {
+  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
   border-collapse: collapse;
@@ -1326,6 +1455,7 @@ onBeforeUnmount(() => {
 
 .mobile-markdown :deep(th),
 .mobile-markdown :deep(td) {
+  box-sizing: border-box;
   border-bottom: 1px solid #e4ede8;
   padding: 8px 6px;
   text-align: left;

@@ -17,19 +17,19 @@
             <div v-if="session.isRagMode" class="rag-answer-stack">
                 <RagPipelineProgress :session="session" :embedded-mode="embeddedMode" />
                 <SourceReferenceHub
-                    v-if="session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks)"
+                    v-if="!shareMode && (session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks))"
                     ref="sourceReferenceHub"
                     :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay v-if="session.isAgentMode" :session="session" :session-id="sessionId"
-                    :user-query="userQuery" :rag-mode="true" />
+                    :user-query="userQuery" :rag-mode="true" :share-mode="shareMode" />
             </div>
             <template v-else>
                 <SourceReferenceHub
-                    v-if="session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks)"
+                    v-if="!shareMode && (session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks))"
                     ref="sourceReferenceHub"
                     :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay :session="session" :session-id="sessionId" :user-query="userQuery"
-                    v-if="session.isAgentMode" />
+                    :share-mode="shareMode" v-if="session.isAgentMode" />
             </template>
             <deepThink :deepSession="session" v-if="session.showThink && !session.isAgentMode"></deepThink>
         </div>
@@ -50,7 +50,7 @@
                 </div>
             </div>
             <!-- 复制和添加到知识库按钮 - 非 Agent 模式下显示 -->
-            <div v-if="session.is_completed && (content || session.content)" class="answer-toolbar">
+            <div v-if="!shareMode && session.is_completed && (content || session.content)" class="answer-toolbar">
                 <t-button size="small" variant="outline" shape="round" @click.stop="handleCopyAnswer"
                     :title="$t('agent.copy')">
                     <t-icon name="copy" />
@@ -74,7 +74,7 @@
         </div>
         <picturePreview :reviewImg="reviewImg" :reviewUrl="reviewUrl" @closePreImg="closePreImg"></picturePreview>
         <Teleport to="body">
-            <ChatCitationFloat :float="citationFloat" :on-enter="cancelCitationClose"
+            <ChatCitationFloat v-if="!shareMode" :float="citationFloat" :on-enter="cancelCitationClose"
                 :on-leave="scheduleCitationClose" />
         </Teleport>
     </div>
@@ -91,6 +91,7 @@ import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
 import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbackButtons.vue';
 import { sanitizeMarkdownHTML, safeMarkdownToHTML, createSafeImage, isValidImageURL, hydrateProtectedFileImages } from '@/utils/security';
+import { hydrateSharedProtectedFileImages } from '@/custom/modules/chatshare/protectedFiles';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
@@ -168,8 +169,17 @@ const props = defineProps({
     sessionId: {
         type: String,
         default: ''
+    },
+    shareMode: {
+        type: Boolean,
+        default: false
+    },
+    shareToken: {
+        type: String,
+        default: ''
     }
 });
+const shareMode = computed(() => props.shareMode);
 
 const showRequestInfo = computed(() => !!(props.session?.request_id || props.session?.id));
 const preview = (url) => {
@@ -286,6 +296,10 @@ const handleMarkdownImageClick = (e) => {
 };
 
 const handleSourceCitationClick = (e) => {
+    if (props.shareMode) {
+        preventReadonlyJump(e);
+        return;
+    }
     const target = e.target;
     const sourceEl = target?.closest?.('.citation-source');
     if (!sourceEl) return;
@@ -323,6 +337,10 @@ const handleSourceCitationClick = (e) => {
 };
 
 const handleEmptyKnowledgeDocumentLinkClick = (e) => {
+    if (props.shareMode) {
+        preventReadonlyJump(e);
+        return;
+    }
     const target = e.target;
     const linkEl = target?.closest?.('a');
     if (!linkEl) return;
@@ -331,6 +349,17 @@ const handleEmptyKnowledgeDocumentLinkClick = (e) => {
 
     e.preventDefault();
     e.stopPropagation();
+};
+
+const readonlyJumpSelector = 'a, .citation-source, .citation-wiki, .citation-kb, .citation-web, .wiki-content-link';
+
+const preventReadonlyJump = (e) => {
+    const target = e.target;
+    const linkTarget = target?.closest?.(readonlyJumpSelector);
+    if (!linkTarget) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
 };
 
 const openRouteInNewTab = (location) => {
@@ -347,7 +376,11 @@ watch(renderedHTML, () => {
 // 渲染 Mermaid 图表的函数
 onUpdated(() => {
     nextTick(async () => {
-        await hydrateProtectedFileImages(parentMd.value);
+        if (props.shareMode && props.shareToken) {
+            await hydrateSharedProtectedFileImages(parentMd.value, props.shareToken);
+        } else {
+            await hydrateProtectedFileImages(parentMd.value);
+        }
         refreshMarkdownEnhancements(parentMd.value);
         if (props.session?.is_completed) {
             await renderMermaidInContainer(parentMd.value);
@@ -359,18 +392,24 @@ onMounted(async () => {
     // 为 markdown-content 中的图片添加点击事件
     nextTick(async () => {
         if (parentMd.value) {
+            parentMd.value.addEventListener('click', preventReadonlyJump, true);
             parentMd.value.addEventListener('click', handleMarkdownImageClick, true);
             parentMd.value.addEventListener('click', handleEmptyKnowledgeDocumentLinkClick, true);
             parentMd.value.addEventListener('click', handleSourceCitationClick, true);
         }
         rebindCitations();
-        await hydrateProtectedFileImages(parentMd.value);
+        if (props.shareMode && props.shareToken) {
+            await hydrateSharedProtectedFileImages(parentMd.value, props.shareToken);
+        } else {
+            await hydrateProtectedFileImages(parentMd.value);
+        }
         await enhanceMarkdownContainer(parentMd.value);
     });
 });
 
 onBeforeUnmount(() => {
     if (parentMd.value) {
+        parentMd.value.removeEventListener('click', preventReadonlyJump, true);
         parentMd.value.removeEventListener('click', handleMarkdownImageClick, true);
         parentMd.value.removeEventListener('click', handleEmptyKnowledgeDocumentLinkClick, true);
         parentMd.value.removeEventListener('click', handleSourceCitationClick, true);

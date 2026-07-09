@@ -1,5 +1,13 @@
 <template>
     <div class="aside_box" :class="{ 'aside_box--collapsed': uiStore.sidebarCollapsed }">
+        <t-tooltip v-if="isInChatDetail" placement="bottom" content="分享对话">
+            <button type="button" class="desktop-chat-share-button"
+                :class="{ 'desktop-chat-share-button--loading': shareCreating }"
+                :disabled="shareCreating" @click.stop="shareCurrentDesktopChat" aria-label="分享对话">
+                <ShareIcon />
+            </button>
+        </t-tooltip>
+
         <!-- 展开时：Logo + 搜索/折叠按钮同行 -->
         <div class="logo_row" v-if="!uiStore.sidebarCollapsed">
             <div class="logo_box" @click="router.push('/platform/knowledge-bases')" style="cursor: pointer;">
@@ -240,6 +248,9 @@ import TenantSelector from '@/components/TenantSelector.vue';
 import { useI18n } from 'vue-i18n';
 import { getSystemInfo } from '@/api/system';
 import { INTEGRATION_PREVIEW_ITEMS, INTEGRATION_TAB_MIN_ROLE } from '@/config/integrations';
+import ShareIcon from '@/custom/modules/chatshare/components/ShareIcon.vue';
+import { absoluteShareURL, createChatShare } from '@/custom/modules/chatshare/api';
+import { copyTextToClipboard } from '@/utils/chatMessageShared';
 
 const chatResources = useChatResourcesStore();
 const integrationPreviewItems = computed(() =>
@@ -297,6 +308,7 @@ let bucketRequestToken = 0;
 const sessionListBooting = ref(false);
 const currentSecondpath = ref('');
 const scrollContainer = ref<HTMLElement | null>(null);
+const shareCreating = ref(false);
 const imPlatforms = ref<string[]>([]);
 const embedChannelNames = ref<Record<string, string>>({});
 const activeSessionBucketKey = ref(DEFAULT_SESSION_BUCKET_KEY);
@@ -471,6 +483,23 @@ const refreshSessionListScrollability = async () => {
 };
 
 const currentChatSessionId = () => String(route.params.chatid || '');
+
+const shareCurrentDesktopChat = async () => {
+    const sessionId = currentChatSessionId();
+    if (!sessionId || shareCreating.value) return;
+    shareCreating.value = true;
+    try {
+        const resp: any = await createChatShare(sessionId);
+        const link = absoluteShareURL(resp?.data?.url, resp?.data?.token);
+        if (!link) throw new Error('分享链接生成失败');
+        await copyTextToClipboard(link);
+        MessagePlugin.success('分享链接已复制');
+    } catch (error: any) {
+        MessagePlugin.error(error?.message || '分享失败');
+    } finally {
+        shareCreating.value = false;
+    }
+};
 
 const isSessionUnread = (item: any) => {
     const id = String(item?.id || '');
@@ -1770,6 +1799,61 @@ const onDragHandleMouseDown = (e: MouseEvent) => {
         width: 18px;
         height: 18px;
         display: block;
+    }
+
+    :deep(.chat-share-icon) {
+        width: 18px;
+        height: 18px;
+    }
+}
+
+.header-icon-btn--loading {
+    pointer-events: none;
+    opacity: 0.55;
+}
+
+.desktop-chat-share-button {
+    position: fixed;
+    top: 18px;
+    right: 24px;
+    z-index: 1200;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    cursor: pointer;
+    color: var(--td-text-color-secondary);
+    background: transparent;
+    border: 0;
+    border-radius: 8px;
+    box-shadow: none;
+    transition: background-color 0.2s ease, color 0.2s ease;
+
+    &:hover {
+        color: var(--td-text-color-primary);
+        background: var(--td-bg-color-container-hover);
+    }
+
+    &:disabled {
+        cursor: default;
+    }
+
+    :deep(.chat-share-icon) {
+        width: 18px;
+        height: 18px;
+    }
+}
+
+.desktop-chat-share-button--loading {
+    pointer-events: none;
+    opacity: 0.55;
+}
+
+@media (max-width: 768px) {
+    .desktop-chat-share-button {
+        display: none;
     }
 }
 

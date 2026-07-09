@@ -14,12 +14,13 @@
         </div>
         <!-- 显示上传的图片 -->
         <div v-if="hasImages" class="user_images">
-            <img v-for="(img, idx) in props.images" :key="idx" :src="img.url" class="user_image_thumb"
+            <img v-for="(img, idx) in displayImages" :key="idx" :src="imageSrc(img)"
+                :data-protected-src="imageProtectedSrc(img)" class="user_image_thumb" alt=""
                 @click="previewImage($event)" />
         </div>
         <!-- 显示上传的附件 -->
         <div v-if="hasAttachments" class="user_attachments">
-            <div v-for="(att, idx) in props.attachments" :key="idx" class="user_attachment_card">
+            <div v-for="(att, idx) in displayAttachments" :key="idx" class="user_attachment_card">
                 <div class="attachment_card_icon">
                     <svg viewBox="0 0 40 48" fill="none" xmlns="http://www.w3.org/2000/svg" width="36" height="44">
                         <rect width="40" height="48" rx="4" fill="#4A90D9" />
@@ -48,6 +49,13 @@ import { computed, ref, watch, onMounted, nextTick } from "vue";
 import { hydrateProtectedFileImages } from '@/utils/security';
 import picturePreview from '@/components/picture-preview.vue';
 import { useI18n } from 'vue-i18n';
+import { hydrateSharedProtectedFileImages } from '@/custom/modules/chatshare/protectedFiles';
+import {
+    normalizeMessageAttachments,
+    normalizeMessageImages,
+    shareImageProtectedSrc,
+    shareImageSrc,
+} from '@/custom/modules/chatshare/media';
 
 const { t } = useI18n();
 
@@ -91,6 +99,14 @@ const props = defineProps({
     embeddedMode: {
         type: Boolean,
         default: false
+    },
+    shareMode: {
+        type: Boolean,
+        default: false
+    },
+    shareToken: {
+        type: String,
+        default: ''
     }
 });
 
@@ -109,8 +125,13 @@ const channelLabel = computed(() => {
 const channelClass = computed(() => props.channel ? `channel-${props.channel}` : '');
 
 const containerRef = ref(null);
-const hasImages = computed(() => props.images && props.images.length > 0);
-const hasAttachments = computed(() => props.attachments && props.attachments.length > 0);
+const displayImages = computed(() => normalizeMessageImages(props.images));
+const displayAttachments = computed(() => normalizeMessageAttachments(props.attachments));
+const hasImages = computed(() => displayImages.value.length > 0);
+const hasAttachments = computed(() => displayAttachments.value.length > 0);
+
+const imageSrc = (img) => shareImageSrc(img?.url, props.shareMode);
+const imageProtectedSrc = (img) => shareImageProtectedSrc(img?.url, props.shareMode);
 
 const getAttachmentIcon = (fileNameOrType) => {
     const ext = (fileNameOrType || '').split('.').pop()?.toLowerCase();
@@ -136,10 +157,18 @@ const formatFileSize = (bytes) => {
 
 const hydrateImages = async () => {
     await nextTick();
+    if (props.shareMode && props.shareToken) {
+        await hydrateSharedProtectedFileImages(containerRef.value, props.shareToken);
+        return;
+    }
     await hydrateProtectedFileImages(containerRef.value);
 };
 
-watch(() => props.images, hydrateImages);
+watch(
+    [() => props.images, () => props.shareMode, () => props.shareToken],
+    hydrateImages,
+    { deep: true },
+);
 onMounted(hydrateImages);
 
 const reviewImg = ref(false);

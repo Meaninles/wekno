@@ -313,7 +313,8 @@
                   </div>
                 </template>
               </div>
-              <div v-if="event.done && event.content && event.content.trim() && !embeddedMode" class="answer-toolbar">
+              <div v-if="event.done && event.content && event.content.trim() && !embeddedMode && !shareMode"
+                class="answer-toolbar">
                 <t-button size="small" variant="outline" shape="round" @click.stop="handleCopyAnswer(event)"
                   :title="$t('agent.copy')">
                   <t-icon name="copy" />
@@ -450,7 +451,7 @@
           :arguments="result.arguments" :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId"
           :embed-token="embedToken" :embed-session-id="sessionId" :embed-session-sig="embedSessionSig" />
       </div>
-      <div v-if="showRequestInfo && isConversationDone && !hasDoneAnswerContent" class="answer-toolbar">
+      <div v-if="showRequestInfo && isConversationDone && !hasDoneAnswerContent && !shareMode" class="answer-toolbar">
         <ChatRequestInfoButton :session="requestInfoSession" :session-id="sessionId" />
       </div>
       <!-- Loading Indicator (inside container so it scrolls into view) -->
@@ -469,7 +470,8 @@
     </div>
   </div>
   <!-- 引用 hover 浮层（与历史消息共用同一组件） -->
-  <ChatCitationFloat :float="citationFloat" :on-enter="cancelCitationClose" :on-leave="scheduleCitationClose" />
+  <ChatCitationFloat v-if="!shareMode" :float="citationFloat" :on-enter="cancelCitationClose"
+    :on-leave="scheduleCitationClose" />
 
   <!-- Image Preview -->
   <picturePreview :reviewImg="imagePreviewVisible" :reviewUrl="imagePreviewUrl" @closePreImg="closeImagePreview" />
@@ -939,6 +941,7 @@ interface SessionData {
   debugRequest?: Record<string, unknown>;
   isAgentMode?: boolean;
   agentEventStream?: any[];
+  tool_results?: any[];
   knowledge_references?: any[];
   answer_feedback?: 'like' | 'dislike' | '';
 }
@@ -968,6 +971,7 @@ const props = defineProps<{
   embedSessionSig?: string;
   embedVisitorId?: string;
   ragMode?: boolean;
+  shareMode?: boolean;
 }>();
 
 const embedAuthProps = computed(() => ({
@@ -980,8 +984,9 @@ const embedAuthProps = computed(() => ({
 }));
 
 const showRequestInfo = computed(
-  () => !props.embeddedMode && !!(props.session?.request_id || props.session?.id),
+  () => !props.embeddedMode && !props.shareMode && !!(props.session?.request_id || props.session?.id),
 );
+const shareMode = computed(() => props.shareMode === true);
 const requestInfoSession = computed(() => props.session as unknown as Record<string, unknown>);
 
 const {
@@ -1613,26 +1618,81 @@ const visibleIntermediateEvents = computed(() => {
   });
 });
 
+const isRenderableStructuredChart = (result: StructuredResultBlock | null): result is StructuredResultBlock => (
+  !!result &&
+  result.display_type === 'structured_analysis_result' &&
+  result.tool_data?.chart_requested === true &&
+  result.tool_data?.chart?.eligible === true
+);
+
+const normalizeStructuredResultBlock = (event: any): StructuredResultBlock | null => {
+  if (!event || typeof event !== 'object') return null;
+  const toolData = event.tool_data && typeof event.tool_data === 'object'
+    ? event.tool_data
+    : event.data && typeof event.data === 'object'
+      ? event.data
+      : event;
+  const displayType = event.display_type || toolData?.display_type;
+  if (displayType !== 'structured_analysis_result') return null;
+  return {
+    display_type: 'structured_analysis_result',
+    tool_data: {
+      ...toolData,
+      display_type: 'structured_analysis_result',
+    },
+    output: event.output,
+    arguments: event.arguments,
+  };
+};
+
+const structuredResultKey = (result: StructuredResultBlock) => {
+  const data = result.tool_data || {};
+  const chart = (data.chart || {}) as any;
+  const columns = Array.isArray(data.columns)
+    ? data.columns.map((column: any) => column?.name).filter(Boolean).join(',')
+    : '';
+  return [
+    chart.contract?.id || chart.id || '',
+    chart.contract?.type || chart.default_type || chart.type || '',
+    chart.contract?.encoding?.x?.field || chart.x || '',
+    chart.contract?.encoding?.value?.field || (Array.isArray(chart.y) ? chart.y.join(',') : ''),
+    data.query || '',
+    columns,
+    data.row_count ?? data.rows?.length ?? '',
+  ].join('|');
+};
+
 const structuredAnalysisResults = computed<StructuredResultBlock[]>(() => {
   if (!isConversationDone.value) return [];
   const stream = eventStream.value;
-  if (!stream || !Array.isArray(stream)) return [];
-  const result = buildFullEventList(stream);
-  return result
-    .filter((event: any) =>
-      event?.type === 'tool_call' &&
-      event.pending !== true &&
-      event.success !== false &&
-      event.display_type === 'structured_analysis_result' &&
-      event.tool_data?.chart_requested === true &&
-      event.tool_data?.chart?.eligible === true
-    )
-    .map((event: any) => ({
-      display_type: 'structured_analysis_result',
-      tool_data: event.tool_data,
-      output: event.output,
-      arguments: event.arguments,
-    }));
+  const results: StructuredResultBlock[] = [];
+  if (Array.isArray(stream)) {
+    const result = buildFullEventList(stream);
+    result
+      .filter((event: any) =>
+        event?.type === 'tool_call' &&
+        event.pending !== true &&
+        event.success !== false
+      )
+      .forEach((event: any) => {
+        const normalized = normalizeStructuredResultBlock(event);
+        if (isRenderableStructuredChart(normalized)) results.push(normalized);
+      });
+  }
+
+  const toolResults = Array.isArray(props.session?.tool_results) ? props.session.tool_results : [];
+  toolResults.forEach((event: any) => {
+    const normalized = normalizeStructuredResultBlock(event);
+    if (isRenderableStructuredChart(normalized)) results.push(normalized);
+  });
+
+  const seen = new Set<string>();
+  return results.filter((result) => {
+    const key = structuredResultKey(result);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 });
 
 const structuredChartInfos = computed<StructuredChartInfo[]>(() => (

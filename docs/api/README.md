@@ -47,6 +47,8 @@ X-Request-ID: unique_request_id
 
 请妥善保管您的 API Key，避免泄露。API Key 代表您的账户身份，拥有完整的 API 访问权限。
 
+部分二开 Web 端接口不使用 API Key 认证，而要求 Web 登录态 Bearer Token，例如对话分享。具体认证方式以各接口文档为准。
+
 ## 错误处理
 
 所有 API 使用标准的 HTTP 状态码表示请求状态，并返回统一的错误响应格式：
@@ -78,6 +80,7 @@ WeKnora API 按功能分为以下几类：
 | FAQ管理 | 管理FAQ问答对 | [faq.md](./faq.md) |
 | 智能体管理 | 创建和管理自定义智能体 | [agent.md](./agent.md) |
 | 会话管理 | 创建和管理对话会话 | [session.md](./session.md) |
+| 对话分享（二开） | 生成和查看登录态对话分享快照 | [chat-share.md](./chat-share.md) |
 | 知识搜索 | 在知识库中搜索内容 | [knowledge-search.md](./knowledge-search.md) |
 | 聊天功能 | 基于知识库和 Agent 进行问答 | [chat.md](./chat.md) |
 | 消息管理 | 获取和管理对话消息 | [message.md](./message.md) |

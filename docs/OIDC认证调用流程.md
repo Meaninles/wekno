@@ -424,6 +424,8 @@ GenerateTokens(ctx, user)
 
 并写入本地 `auth_tokens` 存储（通过 `tokenRepo.CreateToken`）。
 
+登录态签发成功后，后端会把当前时间写入 `users.last_login_at`。刷新令牌和切换租户不会更新这个字段。
+
 最终后端会返回 OIDC 回调载荷，其中包含：
 
 - `token`

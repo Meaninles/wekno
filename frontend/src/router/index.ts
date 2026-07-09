@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { autoSetup, getCurrentUser, userInfoFromApi } from '@/api/auth'
+import { consumeShareReturnPath, rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn'
 
 /** Lite /桌面 WebView 硬刷新时可能只打开 `/`，用 session 记住上次页面以便恢复 */
 const LITE_LAST_PATH_KEY = 'weknora_lite_last_path'
@@ -78,6 +79,12 @@ const router = createRouter({
           query: code ? { invite_code: code } : {}
         }
       },
+      meta: { requiresInit: true, requiresAuth: true }
+    },
+    {
+      path: "/share/chat/:token",
+      name: "chatShare",
+      component: () => import("../custom/modules/chatshare/views/ChatShareView.vue"),
       meta: { requiresInit: true, requiresAuth: true }
     },
     {
@@ -326,7 +333,7 @@ router.beforeEach(async (to, from, next) => {
   if (to.meta.requiresAuth === false || to.meta.requiresInit === false) {
     // 如果已登录用户访问登录页面，重定向到知识库列表页面
     if (to.path === '/login' && authStore.isLoggedIn) {
-      next('/platform/knowledge-bases')
+      next(consumeShareReturnPath(to.query.returnTo) || '/platform/knowledge-bases')
       return
     }
     next()
@@ -358,7 +365,8 @@ router.beforeEach(async (to, from, next) => {
           markAutoSetupFailed()
         }
       }
-      next('/login')
+      const shareReturnTo = rememberShareReturnPath(to.fullPath)
+      next(shareReturnTo ? { path: '/login', query: { returnTo: shareReturnTo } } : '/login')
       return
     }
   }

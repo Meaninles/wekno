@@ -12,6 +12,9 @@ type CreateSessionRequest struct {
 	Title string `json:"title"`
 	// Description for the session (optional)
 	Description string `json:"description"`
+	// LastRequestState stores the input-bar state that should be restored when
+	// the newly-created session page mounts before the first message is sent.
+	LastRequestState *types.SessionLastRequestState `json:"last_request_state,omitempty"`
 }
 
 // GenerateTitleRequest defines the request structure for generating a session title

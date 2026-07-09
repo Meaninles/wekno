@@ -102,6 +102,8 @@ type User struct {
 	TenantID uint64 `json:"tenant_id"  gorm:"index"`
 	// Whether the user is active
 	IsActive bool `json:"is_active"  gorm:"default:true"`
+	// LastLoginAt is the most recent successful login time for this user.
+	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
 	// Whether the user can access all tenants (cross-tenant access)
 	CanAccessAllTenants bool `json:"can_access_all_tenants" gorm:"default:false"`
 	// Whether the user is a system administrator (independent of tenant roles)
@@ -232,6 +234,7 @@ type UserInfo struct {
 	Avatar              string          `json:"avatar"`
 	TenantID            uint64          `json:"tenant_id"`
 	IsActive            bool            `json:"is_active"`
+	LastLoginAt         *time.Time      `json:"last_login_at,omitempty"`
 	CanAccessAllTenants bool            `json:"can_access_all_tenants"`
 	IsSystemAdmin       bool            `json:"is_system_admin"`
 	Preferences         UserPreferences `json:"preferences"`
@@ -248,6 +251,7 @@ func (u *User) ToUserInfo() *UserInfo {
 		Avatar:              u.Avatar,
 		TenantID:            u.TenantID,
 		IsActive:            u.IsActive,
+		LastLoginAt:         u.LastLoginAt,
 		CanAccessAllTenants: u.CanAccessAllTenants,
 		IsSystemAdmin:       u.IsSystemAdmin,
 		Preferences:         u.Preferences,

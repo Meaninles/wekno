@@ -1107,6 +1107,13 @@ func (s *Service) LoginWithSSO(ctx context.Context, code, state string) (*types.
 	if err != nil {
 		return nil, err
 	}
+	if recorder, ok := s.userService.(interface {
+		RecordLogin(context.Context, *types.User) error
+	}); ok {
+		if err := recorder.RecordLogin(ctx, user); err != nil {
+			logger.Warnf(ctx, "[custom iam] failed to record last login time for user %s: %v", user.ID, err)
+		}
+	}
 	var tenant types.Tenant
 	if err := s.db.WithContext(ctx).First(&tenant, "id = ?", user.TenantID).Error; err != nil {
 		return nil, err

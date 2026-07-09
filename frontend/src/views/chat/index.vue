@@ -761,11 +761,11 @@ onMounted(async () => {
         }
         const initialAttachmentFiles = [...(firstAttachmentFiles.value || [])];
         const initialImageFiles = [...(firstImageFiles.value || [])];
-        sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], initialImageFiles, initialAttachmentFiles);
         const initialDraft = getSessionDraftState(session_id.value);
         if (initialDraft?.settings) {
             useSettingsStoreInstance.applyConversationResourceState(initialDraft.settings);
         }
+        sendMsg(firstQuery.value, firstModelId.value || '', firstMentionedItems.value || [], initialImageFiles, initialAttachmentFiles);
         inputFieldRef.value?.setUploadedAttachments?.(initialAttachmentFiles);
         inputFieldRef.value?.setUploadedImages?.(initialImageFiles);
         saveSessionDraftState(session_id.value, useSettingsStoreInstance.captureConversationScopedState(), initialAttachmentFiles, initialImageFiles);

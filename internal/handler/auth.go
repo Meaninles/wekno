@@ -34,11 +34,32 @@ type AuthHandler struct {
 }
 
 var customProvisionerHook func(context.Context, *types.User) error
+var customLoginSecurityHook func(*gin.Context, *types.LoginRequest) error
+var customLoginResultHook func(*gin.Context, *types.LoginRequest, *types.LoginResponse, error)
+var customRegisterSecurityHook func(*gin.Context, *types.RegisterRequest) error
 
 // RegisterCustomProvisionerHook lets custom modules run idempotent post-login
 // setup without changing AuthHandler's constructor signature.
 func RegisterCustomProvisionerHook(fn func(context.Context, *types.User) error) {
 	customProvisionerHook = fn
+}
+
+// RegisterCustomLoginSecurityHook lets custom modules enforce login-only
+// controls such as encrypted password challenges and captcha validation.
+func RegisterCustomLoginSecurityHook(fn func(*gin.Context, *types.LoginRequest) error) {
+	customLoginSecurityHook = fn
+}
+
+// RegisterCustomLoginResultHook lets custom modules update login attempt
+// state after the native password verifier has returned a result.
+func RegisterCustomLoginResultHook(fn func(*gin.Context, *types.LoginRequest, *types.LoginResponse, error)) {
+	customLoginResultHook = fn
+}
+
+// RegisterCustomRegisterSecurityHook lets custom modules enforce registration
+// controls such as encrypted password challenges and captcha validation.
+func RegisterCustomRegisterSecurityHook(fn func(*gin.Context, *types.RegisterRequest) error) {
+	customRegisterSecurityHook = fn
 }
 
 func runCustomProvisioner(ctx context.Context, user *types.User) {
@@ -164,8 +185,14 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		c.Error(appErr)
 		return
 	}
-	req.Username = secutils.SanitizeForLog(req.Username)
-	req.Password = secutils.SanitizeForLog(req.Password)
+	req.Username = strings.TrimSpace(req.Username)
+
+	if customRegisterSecurityHook != nil {
+		if err := customRegisterSecurityHook(c, &req); err != nil {
+			c.Error(err)
+			return
+		}
+	}
 
 	// Validate required fields
 	if req.Username == "" || req.Password == "" {
@@ -174,7 +201,6 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		c.Error(appErr)
 		return
 	}
-	req.Username = secutils.SanitizeForLog(req.Username)
 	// Call service to register user
 	user, err := h.userService.Register(ctx, &req)
 	if err != nil {
@@ -221,8 +247,22 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	username := secutils.SanitizeForLog(strings.TrimSpace(req.Username))
 
 	// Validate required fields
-	if username == "" || req.Password == "" {
+	if username == "" {
 		logger.Error(ctx, "Missing required login fields")
+		appErr := errors.NewValidationError("Username is required")
+		c.Error(appErr)
+		return
+	}
+
+	if customLoginSecurityHook != nil {
+		if err := customLoginSecurityHook(c, &req); err != nil {
+			c.Error(err)
+			return
+		}
+	}
+
+	if req.Password == "" {
+		logger.Error(ctx, "Missing required login password")
 		appErr := errors.NewValidationError("Username and password are required")
 		c.Error(appErr)
 		return
@@ -230,6 +270,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Call service to authenticate user
 	response, err := h.userService.Login(ctx, &req)
+	if customLoginResultHook != nil {
+		customLoginResultHook(c, &req, response, err)
+	}
 	if err != nil {
 		logger.Errorf(ctx, "Failed to login user: %v", err)
 		appErr := errors.NewUnauthorizedError("Login failed").WithDetails(err.Error())

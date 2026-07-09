@@ -14,9 +14,13 @@ import (
 
 // registerByInviteRequest is the body for /auth/register-by-invite.
 type registerByInviteRequest struct {
-	Token    string `json:"token"    binding:"required"`
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required,min=6"`
+	Token                    string `json:"token"    binding:"required"`
+	Username                 string `json:"username" binding:"required"`
+	Password                 string `json:"password,omitempty"`
+	EncryptedPassword        string `json:"encrypted_password,omitempty"`
+	EncryptedConfirmPassword string `json:"encrypted_confirm_password,omitempty"`
+	ChallengeID              string `json:"challenge_id,omitempty"`
+	CaptchaAnswer            string `json:"captcha_answer,omitempty"`
 }
 
 // invitationLookupResponse is the public projection of a share-link
@@ -129,12 +133,27 @@ func (h *AuthHandler) RegisterByInvite(c *gin.Context) {
 	}
 	req.Token = strings.TrimSpace(req.Token)
 	req.Username = strings.TrimSpace(req.Username)
+	registerReq := &types.RegisterRequest{
+		Username:                 req.Username,
+		Password:                 req.Password,
+		EncryptedPassword:        req.EncryptedPassword,
+		EncryptedConfirmPassword: req.EncryptedConfirmPassword,
+		ChallengeID:              req.ChallengeID,
+		CaptchaAnswer:            req.CaptchaAnswer,
+	}
+	if customRegisterSecurityHook != nil {
+		if err := customRegisterSecurityHook(c, registerReq); err != nil {
+			c.Error(err)
+			return
+		}
+	}
+	req.Username = registerReq.Username
 	// Password is intentionally NOT sanitized: SanitizeForLog strips
 	// \n, \r, \t and control chars to make a string safe to write into
 	// a log line — applying it to a real password would silently
 	// rewrite the stored credential and lock the user out. Passwords
 	// must never be logged, so they don't need that defence here.
-	if req.Token == "" || req.Username == "" || req.Password == "" {
+	if req.Token == "" || registerReq.Username == "" || registerReq.Password == "" {
 		c.Error(apperrors.NewValidationError("token, username and password are required"))
 		return
 	}
@@ -152,19 +171,16 @@ func (h *AuthHandler) RegisterByInvite(c *gin.Context) {
 	// If the account already exists we shouldn't quietly succeed here:
 	// share-link registration is "create new account + join tenant", not
 	// "join my existing account". Surface 409 so the SPA can prompt login.
-	if existing, _ := h.userService.GetUserByUsername(ctx, req.Username); existing != nil {
+	if existing, _ := h.userService.GetUserByUsername(ctx, registerReq.Username); existing != nil {
 		c.Error(apperrors.NewConflictError(
 			"this username already has an account; please log in to join the workspace"))
 		return
 	}
 
-	user, err := h.userService.Register(ctx, &types.RegisterRequest{
-		Username: req.Username,
-		Password: req.Password,
-	})
+	user, err := h.userService.Register(ctx, registerReq)
 	if err != nil {
 		logger.Errorf(ctx, "register-by-invite: user create failed for %s: %v",
-			secutils.SanitizeForLog(req.Username), err)
+			secutils.SanitizeForLog(registerReq.Username), err)
 		c.Error(apperrors.NewBadRequestError(err.Error()))
 		return
 	}

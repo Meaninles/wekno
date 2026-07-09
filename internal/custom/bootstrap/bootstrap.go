@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
@@ -15,6 +16,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	customadmin "github.com/Tencent/WeKnora/internal/custom/modules/admin"
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
+	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
@@ -29,6 +31,7 @@ import (
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -45,10 +48,12 @@ type Handlers struct {
 	BuiltinAgentDefaults *builtinagentdefaults.Handler
 	ChatShare            *chatshare.Handler
 	Admin                *customadmin.Handler
+	AuthSecurity         *authsecurity.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
 	adminService                *customadmin.Service
+	authSecurityService         *authsecurity.Service
 	builtinAgentDefaultsService *builtinagentdefaults.Service
 	chatShareService            *chatshare.Service
 	dbAnalyticsService          *dbanalytics.Service
@@ -64,6 +69,7 @@ func NewHandlers(
 	cfg *config.Config,
 	db *gorm.DB,
 	duckdb *sql.DB,
+	redisClient *redis.Client,
 	userService interfaces.UserService,
 	orgService interfaces.OrganizationService,
 	knowledgeBaseService interfaces.KnowledgeBaseService,
@@ -86,6 +92,7 @@ func NewHandlers(
 	configCenterService := configcenter.NewService(db)
 	adminService := customadmin.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
+	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
 	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
@@ -112,6 +119,9 @@ func NewHandlers(
 		return nil, err
 	}
 	if err := answerFeedbackService.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err := authSecurityService.Migrate(ctx); err != nil {
 		return nil, err
 	}
 	if err := dbAnalyticsService.Migrate(ctx); err != nil {
@@ -168,6 +178,10 @@ func NewHandlers(
 		return nil
 	}
 	handler.RegisterCustomProvisionerHook(provisionUser)
+	authSecurityHandler := authsecurity.NewHandler(authSecurityService)
+	handler.RegisterCustomLoginSecurityHook(authSecurityHandler.PrepareLogin)
+	handler.RegisterCustomLoginResultHook(authSecurityHandler.RecordLoginResult)
+	handler.RegisterCustomRegisterSecurityHook(authSecurityHandler.PrepareRegister)
 	iamService.SetProvisioner(provisionUser)
 	handler.RegisterCustomPendingOrganizationMemberGrantHook(func(ctx context.Context, req handler.CustomPendingOrganizationMemberGrantRequest) error {
 		return iamService.CreatePendingSpaceMemberGrant(ctx, iam.PendingSpaceMemberGrantInput{
@@ -242,9 +256,11 @@ func NewHandlers(
 		BuiltinAgentDefaults:        builtinagentdefaults.NewHandler(builtinAgentDefaultsService),
 		ChatShare:                   chatshare.NewHandler(chatShareService),
 		Admin:                       customadmin.NewHandler(adminService),
+		AuthSecurity:                authSecurityHandler,
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
+		authSecurityService:         authSecurityService,
 		builtinAgentDefaultsService: builtinAgentDefaultsService,
 		chatShareService:            chatShareService,
 		dbAnalyticsService:          dbAnalyticsService,
@@ -306,6 +322,10 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 		generalAgentInternalRoutes := customPublic.Group("/general-agent/internal")
 		{
 			generalAgentInternalRoutes.POST("/tools/call", handlers.GeneralAgent.CallTool)
+		}
+		authSecurityRoutes := customPublic.Group("/auth-security", middleware.PublicAuthRateLimit())
+		{
+			authSecurityRoutes.GET("/challenge", handlers.AuthSecurity.Challenge)
 		}
 	}
 

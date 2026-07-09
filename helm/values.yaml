@@ -324,6 +324,9 @@ docreader:
     type: ClusterIP
     port: 50051
 
+  # -- Local-only gRPC health probe port inside the docreader container
+  healthPort: 50052
+
   # -- Node selector
   nodeSelector: {}
 

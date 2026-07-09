@@ -1,7 +1,9 @@
 import logging
 import os
 import re
+import signal
 import sys
+import threading
 import traceback
 import uuid
 from concurrent import futures
@@ -288,11 +290,8 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
         return ListEnginesResponse(engines=engines)
 
 
-def main():
-    config.print_config()
-
+def _create_docreader_server() -> grpc.Server:
     interceptors = [AuthInterceptor()]
-
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=CONFIG.grpc_max_workers),
         options=[
@@ -303,9 +302,6 @@ def main():
     )
 
     docreader_pb2_grpc.add_DocReaderServicer_to_server(DocReaderServicer(), server)
-
-    health_servicer = HealthServicer()
-    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
     try:
         tls_credentials = load_tls_credentials()
@@ -322,16 +318,63 @@ def main():
             "Server starting on port %d WITHOUT TLS (insecure mode)", CONFIG.grpc_port
         )
 
+    return server
+
+
+def _create_health_server() -> grpc.Server:
+    health_server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=CONFIG.grpc_health_max_workers)
+    )
+    health_pb2_grpc.add_HealthServicer_to_server(HealthServicer(), health_server)
+
+    bind_addr = f"127.0.0.1:{CONFIG.grpc_health_port}"
+    if health_server.add_insecure_port(bind_addr) == 0:
+        logger.error("Failed to bind health gRPC server on %s", bind_addr)
+        sys.exit(1)
+
+    logger.info(
+        "Health gRPC server starting on %s with %d workers",
+        bind_addr,
+        CONFIG.grpc_health_max_workers,
+    )
+    return health_server
+
+
+def _install_signal_handlers(shutdown_event: threading.Event) -> None:
+    def _handle_signal(signum, _frame):
+        logger.info("Received signal %s, shutting down servers", signum)
+        shutdown_event.set()
+
+    for sig_name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            signal.signal(sig, _handle_signal)
+
+
+def main():
+    config.print_config()
+
+    shutdown_event = threading.Event()
+    _install_signal_handlers(shutdown_event)
+
+    server = _create_docreader_server()
+    health_server = _create_health_server()
+
     server.start()
+    health_server.start()
 
     logger.info("Server started on port %d", CONFIG.grpc_port)
+    logger.info("Health server started on port %d", CONFIG.grpc_health_port)
     logger.info("Server is ready to accept connections")
 
     try:
-        server.wait_for_termination()
-    except KeyboardInterrupt:
-        logger.info("Received termination signal, shutting down server")
-        server.stop(0)
+        while not shutdown_event.wait(timeout=1):
+            pass
+    finally:
+        logger.info("Stopping health server")
+        health_server.stop(0)
+        logger.info("Stopping docreader server")
+        server.stop(10).wait()
 
 
 if __name__ == "__main__":

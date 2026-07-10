@@ -43,7 +43,8 @@ Do not use when:
 - Can check document processing status (parse_status)
 
 ## IDs
-- knowledge_ids: regular documents knowledges
+- knowledge_ids: regular document (knowledge) IDs only. Do NOT put a knowledge-base ID here.
+- knowledge_base_ids: IDs of knowledge bases already in the current scope. This returns a scope reminder; use knowledge_search or wiki_search to retrieve their content.
 - faq_ids: individual FAQ entries. Returns the standard question and answers, not the container title.`,
 	schema: json.RawMessage(`{
   "type": "object",
@@ -52,6 +53,11 @@ Do not use when:
       "type": "array",
       "items": { "type": "string" },
       "description": "Document/knowledge IDs for regular documents"
+    },
+    "knowledge_base_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Knowledge-base IDs already in scope. For their content, use knowledge_search or wiki_search instead."
     },
     "faq_ids": {
       "type": "array",
@@ -65,8 +71,9 @@ Do not use when:
 // GetDocumentInfoInput defines the input parameters for get document info tool.
 // Either knowledge_ids or faq_ids may be provided (at least one); both are optional in the schema.
 type GetDocumentInfoInput struct {
-	KnowledgeIDs []string `json:"knowledge_ids,omitempty"`
-	FAQIDs       []string `json:"faq_ids,omitempty"`
+	KnowledgeIDs     []string `json:"knowledge_ids,omitempty"`
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids,omitempty"`
+	FAQIDs           []string `json:"faq_ids,omitempty"`
 }
 
 // GetDocumentInfoTool retrieves detailed information about a document/knowledge
@@ -103,11 +110,12 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	knowledgeIDs := input.KnowledgeIDs
+	knowledgeBaseIDs := input.KnowledgeBaseIDs
 	faqIDs := input.FAQIDs
-	if len(knowledgeIDs) == 0 && len(faqIDs) == 0 {
+	if len(knowledgeIDs) == 0 && len(knowledgeBaseIDs) == 0 && len(faqIDs) == 0 {
 		return &types.ToolResult{
 			Success: false,
-			Error:   "knowledge_ids or faq_ids is required (non-empty array)",
+			Error:   "knowledge_ids, knowledge_base_ids or faq_ids is required (non-empty array)",
 		}, fmt.Errorf("missing ids")
 	}
 
@@ -116,12 +124,29 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 		chunk      *types.Chunk
 		faqMeta    *types.FAQChunkMetadata
 		chunkCount int
-		err        error
+		// knowledgeBaseID is populated when a caller provided a KB ID rather
+		// than a document ID.  It is a successful scope acknowledgement, not
+		// a missing-document error: the agent should continue with the
+		// appropriate retrieval tool.
+		knowledgeBaseID string
+		err             error
 	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	results := make(map[string]*docInfo)
+
+	for _, knowledgeBaseID := range knowledgeBaseIDs {
+		knowledgeBaseID = strings.TrimSpace(knowledgeBaseID)
+		if knowledgeBaseID == "" {
+			continue
+		}
+		if !t.searchTargets.ContainsKB(knowledgeBaseID) {
+			results["kb:"+knowledgeBaseID] = &docInfo{err: fmt.Errorf("knowledge base %s is not accessible", knowledgeBaseID)}
+			continue
+		}
+		results["kb:"+knowledgeBaseID] = &docInfo{knowledgeBaseID: knowledgeBaseID}
+	}
 
 	for _, faqID := range faqIDs {
 		faqID = strings.TrimSpace(faqID)
@@ -173,6 +198,16 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			// Get knowledge metadata without tenant filter to support shared KB
 			knowledge, err := t.knowledgeService.GetKnowledgeByIDOnly(ctx, id)
 			if err != nil {
+				// The model can see both document IDs and KB IDs in the visible
+				// context.  Treat an in-scope KB ID passed here as a recoverable
+				// identifier-kind mismatch, rather than presenting the user with a
+				// false "knowledge not found" failure.
+				if t.searchTargets.ContainsKB(id) {
+					mu.Lock()
+					results[id] = &docInfo{knowledgeBaseID: id}
+					mu.Unlock()
+					return
+				}
 				mu.Lock()
 				results[id] = &docInfo{
 					err: fmt.Errorf("failed to get document info: %v", err),
@@ -231,8 +266,9 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 
 	wg.Wait()
 
-	requested := len(knowledgeIDs) + len(faqIDs)
+	requested := len(knowledgeIDs) + len(knowledgeBaseIDs) + len(faqIDs)
 	successDocs := make([]*docInfo, 0)
+	scopeKnowledgeBaseIDs := make([]string, 0)
 	var errors []string
 
 	for _, knowledgeID := range knowledgeIDs {
@@ -243,8 +279,26 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 		if result.err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", knowledgeID, result.err))
+		} else if result.knowledgeBaseID != "" {
+			scopeKnowledgeBaseIDs = append(scopeKnowledgeBaseIDs, result.knowledgeBaseID)
 		} else if result.knowledge != nil {
 			successDocs = append(successDocs, result)
+		}
+	}
+	for _, knowledgeBaseID := range knowledgeBaseIDs {
+		knowledgeBaseID = strings.TrimSpace(knowledgeBaseID)
+		if knowledgeBaseID == "" {
+			continue
+		}
+		result := results["kb:"+knowledgeBaseID]
+		if result == nil {
+			errors = append(errors, fmt.Sprintf("knowledge_base:%s: not found", knowledgeBaseID))
+			continue
+		}
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("knowledge_base:%s: %v", knowledgeBaseID, result.err))
+		} else if result.knowledgeBaseID != "" {
+			scopeKnowledgeBaseIDs = append(scopeKnowledgeBaseIDs, result.knowledgeBaseID)
 		}
 	}
 	for _, faqID := range faqIDs {
@@ -264,7 +318,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
-	if len(successDocs) == 0 {
+	if len(successDocs) == 0 && len(scopeKnowledgeBaseIDs) == 0 {
 		return &types.ToolResult{
 			Success: false,
 			Error:   fmt.Sprintf("Failed to retrieve any document info. Errors: %v", errors),
@@ -273,6 +327,13 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 
 	output := "=== Document Info ===\n\n"
 	output += fmt.Sprintf("Successfully retrieved %d / %d entries\n\n", len(successDocs), requested)
+	if len(scopeKnowledgeBaseIDs) > 0 {
+		output += "=== Knowledge Base Scope ===\n"
+		for _, knowledgeBaseID := range scopeKnowledgeBaseIDs {
+			output += fmt.Sprintf("  - %s is an accessible knowledge base, not a document ID. Use knowledge_search or wiki_search to retrieve its content.\n", knowledgeBaseID)
+		}
+		output += "\n"
+	}
 
 	if len(errors) > 0 {
 		output += "=== Partial Failures ===\n"
@@ -345,17 +406,24 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
+	data := map[string]interface{}{
+		"documents":          formattedDocs,
+		"total_docs":         len(successDocs),
+		"requested":          requested,
+		"errors":             errors,
+		"knowledge_base_ids": scopeKnowledgeBaseIDs,
+	}
+	if len(successDocs) > 0 {
+		data["display_type"] = "document_info"
+		data["title"] = firstTitle
+	} else {
+		data["display_type"] = "knowledge_base_scope"
+	}
+
 	return &types.ToolResult{
 		Success: true,
 		Output:  output,
-		Data: map[string]interface{}{
-			"documents":    formattedDocs,
-			"total_docs":   len(successDocs),
-			"requested":    requested,
-			"errors":       errors,
-			"display_type": "document_info",
-			"title":        firstTitle,
-		},
+		Data:    data,
 	}, nil
 }
 

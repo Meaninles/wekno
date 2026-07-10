@@ -2687,6 +2687,24 @@ def final_text_blocks(message: Any) -> list[str]:
     return fragments
 
 
+def result_message_text(message: Any) -> str:
+    """Return the SDK's authoritative terminal answer when it is available.
+
+    Some Claude SDK providers expose their final text only on ResultMessage.result
+    instead of repeating it in an assistant TextBlock or a StreamEvent delta.  If
+    we ignore that field, the run is marked successful with an empty or partial
+    final answer even though the provider returned the complete result.
+    """
+    if message.__class__.__name__ != "ResultMessage":
+        return ""
+    result = getattr(message, "result", None)
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result.strip()
+    return str(result).strip()
+
+
 def answer_replay_chunks(text: str, max_chars: int = 96) -> list[str]:
     chunks: list[str] = []
     buf: list[str] = []
@@ -5172,6 +5190,8 @@ class GeneralAgentRunner:
         text_buffer_parts: list[str] = []
         active_status_id = ""
 
+        terminal_result_answer = ""
+
         def ensure_answer_id() -> str:
             nonlocal answer_segment_index, active_answer_id
             if not active_answer_id:
@@ -5283,6 +5303,9 @@ class GeneralAgentRunner:
                 if message.__class__.__name__ == "ResultMessage":
                     if getattr(message, "is_error", False):
                         raise RuntimeError(user_facing_error_message(message))
+                    result_text = result_message_text(message)
+                    if result_text:
+                        terminal_result_answer = result_text
                 terminal_ids = terminal_background_tool_ids(message)
                 if terminal_ids:
                     pending_background_tool_ids.difference_update(terminal_ids)
@@ -5405,7 +5428,13 @@ class GeneralAgentRunner:
                     else:
                         final_candidate_parts.append(answer_text)
                 reset_text_stream_state()
-            answer = "".join(final_candidate_parts).strip()
+            # ResultMessage.result is the SDK's terminal, authoritative value.
+            # Prefer it over partial assistant deltas so a provider that emits
+            # only an early fragment cannot leave the saved final response
+            # truncated.
+            answer = terminal_result_answer
+            if not answer:
+                answer = "".join(final_candidate_parts).strip()
             if not answer:
                 answer = "".join(current_segment_delta_parts).strip()
             if not answer:

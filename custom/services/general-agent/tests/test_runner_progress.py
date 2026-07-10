@@ -51,6 +51,7 @@ from app.runner import (  # noqa: E402
     prepare_ppt_generation_workspace,
     prompt_media_reference,
     parse_mcp_tool_response_payload,
+    result_message_text,
     run_data_analysis_judge,
     sanitize_artifact_bytes,
     sdk_tool_progress_event,
@@ -2030,6 +2031,12 @@ EOF""",
         msg = ResultMessage(result="API request timed out after API_TIMEOUT_MS")
 
         self.assertEqual(user_facing_error_message(msg), TIMEOUT_USER_MESSAGE)
+
+    def test_result_message_text_uses_terminal_sdk_answer(self):
+        msg = ResultMessage(result="  完整的最终回答  ")
+
+        self.assertEqual(result_message_text(msg), "完整的最终回答")
+        self.assertEqual(result_message_text(Message([], "")), "")
 
     def test_pending_background_task_error_message_is_user_facing(self):
         self.assertIn("后台任务未完成", PENDING_BACKGROUND_TASK_USER_MESSAGE)

@@ -2,7 +2,7 @@ import { fileURLToPath, URL } from "node:url";
 import { resolve, dirname } from "node:path";
 import { execSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import vue from "@vitejs/plugin-vue";
 import vueJsx from "@vitejs/plugin-vue-jsx";
 
@@ -36,6 +36,37 @@ function configureForwardedHeaders(proxy: any) {
   });
 }
 
+function mobileHistoryFallback(): Plugin {
+  return {
+    name: "weknora-mobile-history-fallback",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        const originalURL = req.url ?? "";
+        const queryIndex = originalURL.indexOf("?");
+        const pathname = queryIndex >= 0 ? originalURL.slice(0, queryIndex) : originalURL;
+        const query = queryIndex >= 0 ? originalURL.slice(queryIndex) : "";
+        const relativePath = pathname.startsWith("/mobile/")
+          ? pathname.slice("/mobile/".length)
+          : "";
+        const acceptsHTML = req.headers.accept?.includes("text/html") ?? false;
+        const isMobileHistoryRoute =
+          acceptsHTML &&
+          (pathname === "/mobile" ||
+            pathname === "/mobile/" ||
+            (pathname.startsWith("/mobile/") &&
+              relativePath !== "mobile.html" &&
+              !relativePath.split("/").at(-1)?.includes(".")));
+
+        if (isMobileHistoryRoute) {
+          req.url = `/mobile/mobile.html${query}`;
+        }
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
   base: "/mobile/",
   define: {
@@ -58,7 +89,7 @@ export default defineConfig({
       },
     },
   },
-  plugins: [vue(), vueJsx()],
+  plugins: [mobileHistoryFallback(), vue(), vueJsx()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

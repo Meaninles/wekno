@@ -31,6 +31,7 @@ import type { ModelConfig } from "@/api/model";
 import { useChatStreamHandler } from "@/composables/useChatStreamHandler";
 import { useAuthStore } from "@/stores/auth";
 import { useChatResourcesStore } from "@/stores/chatResources";
+import { useOrganizationStore } from "@/stores/organization";
 import { useSettingsStore } from "@/stores/settings";
 import { agentPinKey, useChatAgentPins } from "@/custom/modules/agentPins/agentPins";
 import { listSessionStatuses, markSessionRead, type SessionStatusMap } from "@/custom/modules/sessionState/api";
@@ -54,6 +55,7 @@ import {
   type MobileUploadAttachment,
 } from "../utils";
 import { sortPinnedFirstByRecency } from "../pinOrdering";
+import { mergeMobileChatKnowledgeBases } from "../knowledgeCatalog";
 
 type ChatMessage = Record<string, any>;
 type SheetTab = "agent" | "model" | "context" | "skill";
@@ -66,6 +68,7 @@ const { t } = useI18n();
 const authStore = useAuthStore();
 const settingsStore = useSettingsStore();
 const chatResources = useChatResourcesStore();
+const organizationStore = useOrganizationStore();
 const agentPins = useChatAgentPins();
 const lightweightPins = useChatSkillPins("lightweight");
 const professionalPins = useChatSkillPins("professional");
@@ -241,7 +244,12 @@ const {
   onError: (message) => MessagePlugin.error(message),
 });
 
-const knowledgeBases = computed(() => chatResources.validKnowledgeBases);
+const knowledgeBases = computed<any[]>(() =>
+  mergeMobileChatKnowledgeBases(
+    chatResources.validKnowledgeBases,
+    organizationStore.sharedKnowledgeBases,
+  ) as any[],
+);
 const agents = computed(() => chatResources.agents);
 const chatModels = computed(() => chatResources.chatModels);
 const modelTypeShortKeyByBackendType: Record<string, "chat" | "embedding" | "rerank" | "vllm" | "asr"> = {

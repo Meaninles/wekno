@@ -18,6 +18,14 @@
           </div>
           <p class="header-subtitle" style="--wails-draggable: drag">{{ $t('knowledgeList.subtitle') }}</p>
         </div>
+        <div class="header-actions" style="--wails-draggable: no-drag">
+          <t-tooltip content="搜索知识库和文档" placement="bottom">
+            <t-button variant="text" theme="default" shape="square" class="header-search-btn"
+              aria-label="搜索知识库和文档" @click="knowledgeSearchVisible = true">
+              <template #icon><t-icon name="search" size="16px" /></template>
+            </t-button>
+          </t-tooltip>
+        </div>
       </div>
       <div class="kb-list-main">
         <!-- creator filter intentionally removed from chrome: every card
@@ -687,6 +695,8 @@
     <ShareKnowledgeBaseDialog v-model:visible="shareDialogVisible" :knowledge-base-id="sharingKbId"
       :knowledge-base-name="sharingKbName" @shared="handleShareSuccess" />
 
+    <DesktopKnowledgeSearchDialog v-model:visible="knowledgeSearchVisible" />
+
     <!-- 右侧：共享知识库详情面板 -->
     <Teleport to="body">
       <Transition name="shared-detail-drawer">
@@ -783,6 +793,7 @@ import { useI18n } from 'vue-i18n'
 import { useListUrlState } from '@/composables/useListUrlState'
 import { useResourcePins } from '@/composables/useResourcePins'
 import InformationSourceTabs from '@/custom/modules/information-source/InformationSourceTabs.vue'
+import DesktopKnowledgeSearchDialog from '@/custom/modules/knowledgeSearch/DesktopKnowledgeSearchDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -792,6 +803,7 @@ const { loaded: modelsReadyLoaded, isReadyForDocumentKb } = useTenantModelReadin
 const orgStore = useOrganizationStore()
 const chatResources = useChatResourcesStore()
 const { t } = useI18n()
+const knowledgeSearchVisible = ref(false)
 
 // 左侧空间选择：默认根据当前角色决定。
 // Viewer 在该租户里通常 0 KB owned，"我的"会显示空状态、又把共享 KB 藏起来，
@@ -1862,6 +1874,28 @@ const handleUploadFinishedEvent = (event: Event) => {
   }
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-search-btn {
+  min-width: 32px !important;
+  width: 32px !important;
+  height: 32px;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 6px;
+  color: var(--td-text-color-secondary);
+  background: transparent !important;
+
+  &:hover {
+    color: var(--td-brand-color);
+    background: var(--td-bg-color-container-hover) !important;
+  }
+}
+
 // Tab 切换样式（已由左侧菜单替代，保留以备兼容）
 .kb-tabs {
   display: flex;
@@ -2797,7 +2831,7 @@ const handleUploadFinishedEvent = (event: Event) => {
   }
 }
 
-:deep(.t-dialog__position.t-dialog--top) {
+:deep(.t-dialog__position.t-dialog--top:has(.del-knowledge-dialog)) {
   padding-top: 40vh !important;
 }
 

@@ -105,8 +105,8 @@ func applyKnowledgeListFilter(query *gorm.DB, filter types.KnowledgeListFilter) 
 		)
 	}
 	if filter.Keyword != "" {
-		escaped := escapeLikeKeyword(filter.Keyword)
-		query = query.Where("(file_name LIKE ? OR title LIKE ?)", "%"+escaped+"%", "%"+escaped+"%")
+		escaped := strings.ToLower(escapeLikeKeyword(filter.Keyword))
+		query = query.Where("(LOWER(file_name) LIKE ? OR LOWER(title) LIKE ?)", "%"+escaped+"%", "%"+escaped+"%")
 	}
 	// FileType and Source share the same special-case routing onto `type` for
 	// the "manual" / "url" values, so callers can pick either control.
@@ -524,7 +524,7 @@ func (r *knowledgeRepository) SearchKnowledge(
 	var results []KnowledgeWithKBName
 	query := r.db.WithContext(ctx).
 		Table("knowledges").
-		Select("knowledges.*, knowledge_bases.name as knowledge_base_name").
+		Select("knowledges.id, knowledges.knowledge_base_id, knowledges.type, knowledges.title, knowledges.file_name, knowledges.file_type, knowledge_bases.name as knowledge_base_name").
 		Joins("JOIN knowledge_bases ON knowledge_bases.id = knowledges.knowledge_base_id").
 		Where("knowledges.tenant_id = ?", tenantID).
 		Where("knowledge_bases.type = ?", types.KnowledgeBaseTypeDocument).
@@ -532,8 +532,8 @@ func (r *knowledgeRepository) SearchKnowledge(
 
 	// If keyword is provided, filter by file_name or title
 	if keyword != "" {
-		escaped := escapeLikeKeyword(keyword)
-		query = query.Where("(knowledges.file_name LIKE ? OR knowledges.title LIKE ?)", "%"+escaped+"%", "%"+escaped+"%")
+		escaped := strings.ToLower(escapeLikeKeyword(keyword))
+		query = query.Where("(LOWER(knowledges.file_name) LIKE ? OR LOWER(knowledges.title) LIKE ?)", "%"+escaped+"%", "%"+escaped+"%")
 	}
 
 	// If fileTypes is provided, filter by file extension or type
@@ -624,6 +624,7 @@ func (r *knowledgeRepository) SearchKnowledgeInScopes(
 	keyword string,
 	offset, limit int,
 	fileTypes []string,
+	includeTotal bool,
 ) ([]*types.Knowledge, bool, int64, error) {
 	if len(scopes) == 0 {
 		return nil, false, 0, nil
@@ -644,15 +645,15 @@ func (r *knowledgeRepository) SearchKnowledgeInScopes(
 
 	query := r.db.WithContext(ctx).
 		Table("knowledges").
-		Select("knowledges.*, knowledge_bases.name as knowledge_base_name").
+		Select("knowledges.id, knowledges.knowledge_base_id, knowledges.type, knowledges.title, knowledges.file_name, knowledges.file_type, knowledge_bases.name as knowledge_base_name").
 		Joins("JOIN knowledge_bases ON knowledge_bases.id = knowledges.knowledge_base_id AND knowledge_bases.tenant_id = knowledges.tenant_id").
 		Where(scopeCondition, args...).
 		Where("knowledge_bases.type = ?", types.KnowledgeBaseTypeDocument).
 		Where("knowledges.deleted_at IS NULL")
 
 	if keyword != "" {
-		escaped := escapeLikeKeyword(keyword)
-		query = query.Where("(knowledges.file_name LIKE ? OR knowledges.title LIKE ?)", "%"+escaped+"%", "%"+escaped+"%")
+		escaped := strings.ToLower(escapeLikeKeyword(keyword))
+		query = query.Where("(LOWER(knowledges.file_name) LIKE ? OR LOWER(knowledges.title) LIKE ?)", "%"+escaped+"%", "%"+escaped+"%")
 	}
 
 	if len(fileTypes) > 0 {
@@ -710,8 +711,10 @@ func (r *knowledgeRepository) SearchKnowledgeInScopes(
 	}
 
 	var total int64
-	if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
-		return nil, false, 0, err
+	if includeTotal {
+		if err := query.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+			return nil, false, 0, err
+		}
 	}
 
 	var results []KnowledgeWithKBName

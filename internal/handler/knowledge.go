@@ -16,6 +16,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgesearch"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -1846,6 +1847,7 @@ func (h *KnowledgeHandler) UpdateImageInfo(c *gin.Context) {
 // @Param        keyword    query     string  false "Keyword to search"
 // @Param        offset     query     int     false "Offset for pagination"
 // @Param        limit      query     int     false "Limit for pagination (default 20)"
+// @Param        include_total query  bool    false "Whether to count all matches (default true; disable for efficient incremental paging)"
 // @Param        file_types query     string  false "Comma-separated file extensions to filter (e.g., csv,xlsx)"
 // @Param        agent_id   query     string  false "Shared agent ID (search within agent's KB scope)"
 // @Param        recent     query     bool    false "Return recent files when keyword is empty"
@@ -1875,6 +1877,20 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
 	keyword = strings.TrimSpace(keyword)
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
+	includeTotal := true
+	if raw, exists := c.GetQuery("include_total"); exists {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			includeTotal = parsed
+		}
+	}
 
 	var fileTypes []string
 	if fileTypesStr := c.Query("file_types"); fileTypesStr != "" {
@@ -1959,35 +1975,41 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
 					agentID, removed)
 			}
 		}
-		knowledges, hasMore, total, err := h.kgService.SearchKnowledgeForScopes(ctx, scopes, keyword, offset, limit, fileTypes)
+		knowledges, hasMore, total, err := h.kgService.SearchKnowledgeForScopes(ctx, scopes, keyword, offset, limit, fileTypes, includeTotal)
 		if err != nil {
 			logger.ErrorWithFields(ctx, err, nil)
 			c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
+		response := gin.H{
 			"success":  true,
-			"data":     knowledges,
+			"data":     knowledgesearch.Results(knowledges),
 			"has_more": hasMore,
-			"total":    total,
-		})
+		}
+		if includeTotal {
+			response["total"] = total
+		}
+		c.JSON(http.StatusOK, response)
 		return
 	}
 
 	// Default: own + shared KBs
-	knowledges, hasMore, total, err := h.kgService.SearchKnowledge(ctx, keyword, offset, limit, fileTypes)
+	knowledges, hasMore, total, err := h.kgService.SearchKnowledge(ctx, keyword, offset, limit, fileTypes, includeTotal)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(errors.NewInternalServerError("Failed to search knowledge").WithDetails(err.Error()))
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"success":  true,
-		"data":     knowledges,
+		"data":     knowledgesearch.Results(knowledges),
 		"has_more": hasMore,
-		"total":    total,
-	})
+	}
+	if includeTotal {
+		response["total"] = total
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // MoveKnowledgeRequest defines the request for moving knowledge items

@@ -460,7 +460,7 @@ export function searchKnowledge(
   offset = 0,
   limit = 20,
   fileTypes?: string[],
-  options?: { agent_id?: string; recent?: boolean }
+  options?: { agent_id?: string; recent?: boolean; include_total?: boolean }
 ) {
   const query = new URLSearchParams();
   if (keyword) {
@@ -473,6 +473,7 @@ export function searchKnowledge(
   }
   if (options?.agent_id) query.set('agent_id', options.agent_id);
   if (options?.recent) query.set('recent', 'true');
+  if (options?.include_total !== undefined) query.set('include_total', String(options.include_total));
   return get(`/api/v1/knowledge/search?${query.toString()}`);
 }
 

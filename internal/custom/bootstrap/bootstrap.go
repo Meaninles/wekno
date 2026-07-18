@@ -451,6 +451,7 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 	if handlers.ChatShare != nil {
 		chatShareRoutes := v1.Group("/custom/chat-share")
 		{
+			chatShareRoutes.GET("/sessions/:session_id/candidates", handlers.ChatShare.Candidates)
 			chatShareRoutes.POST("/sessions/:session_id", handlers.ChatShare.Create)
 			chatShareRoutes.GET("/:token", handlers.ChatShare.Get)
 			chatShareRoutes.GET("/:token/files", handlers.ChatShare.File)

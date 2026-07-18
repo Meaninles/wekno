@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +27,14 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
-var ErrWebLoginRequired = errors.New("web login required")
+var (
+	ErrWebLoginRequired        = errors.New("web login required")
+	ErrInvalidMessageSelection = errors.New("invalid message selection")
+)
+
+const maxShareMessageSelection = 1000
+
+var providerResourcePattern = regexp.MustCompile("(?i)(?:local|minio|cos|tos|s3|oss|ks3|obs)://[^\\s<>\"'`]+")
 
 type Service struct {
 	db                *gorm.DB
@@ -47,7 +56,15 @@ type artifactRow struct {
 	FileSize    int64          `gorm:"column:file_size"`
 	SHA256      string         `gorm:"column:sha256"`
 	ContentType string         `gorm:"column:content_type"`
+	CreatedAt   time.Time      `gorm:"column:created_at"`
 	DeletedAt   gorm.DeletedAt `gorm:"column:deleted_at"`
+}
+
+type shareTurn struct {
+	ID             string
+	Messages       []types.Message
+	Selectable     bool
+	DisabledReason string
 }
 
 func (artifactRow) TableName() string {
@@ -91,42 +108,126 @@ func (s *Service) Migrate(ctx context.Context) error {
 	config := *db.Config
 	config.DisableForeignKeyConstraintWhenMigrating = true
 	db.Config = &config
-	return db.WithContext(ctx).AutoMigrate(&Link{}, &MessageSnapshot{})
+	return db.WithContext(ctx).AutoMigrate(&Link{}, &MessageSnapshot{}, &ResourceSnapshot{})
 }
 
-func (s *Service) CreateShare(ctx context.Context, sessionID string) (*LinkDTO, error) {
+func (s *Service) GetCandidates(ctx context.Context, sessionID string) (*CandidatesDTO, error) {
 	if err := requireWebUser(ctx); err != nil {
 		return nil, err
 	}
 	if s == nil || s.db == nil || s.sessionService == nil {
 		return nil, fmt.Errorf("chat share service is unavailable")
 	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
-	}
-
-	session, err := s.sessionService.GetSession(ctx, sessionID)
+	session, messages, err := s.loadSessionMessages(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	if session == nil {
-		return nil, gorm.ErrRecordNotFound
+
+	messageIDs := make([]string, 0, len(messages))
+	for i := range messages {
+		messageIDs = append(messageIDs, messages[i].ID)
+	}
+	artifactsByMessage, err := s.artifactSnapshotsByMessage(ctx, s.db, session.TenantID, session.ID, messageIDs, "")
+	if err != nil {
+		logger.Warnf(ctx, "[chatshare] failed to load candidate artifacts: session_id=%s err=%v", session.ID, err)
+		artifactsByMessage = nil
 	}
 
-	var messages []types.Message
-	if err := s.db.WithContext(ctx).
-		Where("session_id = ?", sessionID).
-		Order("created_at ASC, updated_at ASC, id ASC").
-		Find(&messages).Error; err != nil {
+	turns := buildShareTurns(messages)
+	turnByMessageID := make(map[string]*shareTurn, len(messages))
+	for i := range turns {
+		for _, message := range turns[i].Messages {
+			turnByMessageID[message.ID] = &turns[i]
+		}
+	}
+
+	candidates := make([]CandidateMessageDTO, 0, len(messages))
+	for _, message := range messages {
+		turn := turnByMessageID[message.ID]
+		if turn == nil {
+			continue
+		}
+		candidates = append(candidates, CandidateMessageDTO{
+			ID:             message.ID,
+			TurnID:         turn.ID,
+			SessionID:      message.SessionID,
+			RequestID:      message.RequestID,
+			Content:        message.Content,
+			Role:           message.Role,
+			MentionedItems: append(types.MentionedItems(nil), message.MentionedItems...),
+			Images:         append(types.MessageImages(nil), message.Images...),
+			Attachments:    append(types.MessageAttachments(nil), message.Attachments...),
+			ToolResults:    structuredToolResultsFromAgentSteps(message.AgentSteps),
+			Artifacts:      artifactsByMessage[message.ID],
+			IsCompleted:    message.IsCompleted,
+			IsFallback:     message.IsFallback,
+			Channel:        message.Channel,
+			Selectable:     turn.Selectable,
+			DisabledReason: turn.DisabledReason,
+			CreatedAt:      message.CreatedAt,
+			UpdatedAt:      message.UpdatedAt,
+		})
+	}
+	title := strings.TrimSpace(session.Title)
+	if title == "" {
+		title = "未命名对话"
+	}
+	return &CandidatesDTO{SessionID: session.ID, Title: title, Messages: candidates}, nil
+}
+
+func (s *Service) CreateShare(ctx context.Context, sessionID string, messageIDs []string) (*LinkDTO, error) {
+	if err := requireWebUser(ctx); err != nil {
 		return nil, err
+	}
+	if s == nil || s.db == nil || s.sessionService == nil {
+		return nil, fmt.Errorf("chat share service is unavailable")
+	}
+
+	selectedIDSet := make(map[string]struct{}, len(messageIDs))
+	for _, rawID := range messageIDs {
+		id := strings.TrimSpace(rawID)
+		if id != "" {
+			selectedIDSet[id] = struct{}{}
+		}
+	}
+	if len(selectedIDSet) == 0 || len(selectedIDSet) > maxShareMessageSelection {
+		return nil, ErrInvalidMessageSelection
+	}
+
+	session, messages, err := s.loadSessionMessages(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	selectedMessageCount := 0
+	for _, turn := range buildShareTurns(messages) {
+		selectedInTurn := 0
+		for _, message := range turn.Messages {
+			if _, selected := selectedIDSet[message.ID]; selected {
+				selectedInTurn++
+			}
+		}
+		if selectedInTurn == 0 {
+			continue
+		}
+		if !turn.Selectable || selectedInTurn != len(turn.Messages) {
+			return nil, ErrInvalidMessageSelection
+		}
+		selectedMessageCount += selectedInTurn
+	}
+	if selectedMessageCount != len(selectedIDSet) {
+		return nil, ErrInvalidMessageSelection
+	}
+	selectedMessages := make([]types.Message, 0, len(selectedIDSet))
+	for _, message := range messages {
+		if _, selected := selectedIDSet[message.ID]; selected {
+			selectedMessages = append(selectedMessages, message)
+		}
 	}
 
 	token, tokenHash, err := generateToken()
 	if err != nil {
 		return nil, err
 	}
-	tenantID, _ := types.TenantIDFromContext(ctx)
 	userID, _ := types.UserIDFromContext(ctx)
 	if userID == "" {
 		principal, _ := types.PrincipalFromContext(ctx)
@@ -135,7 +236,7 @@ func (s *Service) CreateShare(ctx context.Context, sessionID string) (*LinkDTO, 
 
 	link := Link{
 		TokenHash:       tokenHash,
-		SourceTenantID:  tenantID,
+		SourceTenantID:  session.TenantID,
 		SessionID:       session.ID,
 		SourceUserID:    session.UserID,
 		CreatedByUserID: userID,
@@ -146,30 +247,9 @@ func (s *Service) CreateShare(ctx context.Context, sessionID string) (*LinkDTO, 
 		link.Title = "未命名对话"
 	}
 
-	snapshots := make([]MessageSnapshot, 0, len(messages))
-	for idx, msg := range messages {
-		if strings.TrimSpace(msg.Role) == "" {
-			continue
-		}
-		snapshots = append(snapshots, MessageSnapshot{
-			ShareID:             link.ID,
-			Seq:                 idx + 1,
-			OriginalMessageID:   msg.ID,
-			SessionID:           msg.SessionID,
-			RequestID:           msg.RequestID,
-			Content:             msg.Content,
-			Role:                msg.Role,
-			KnowledgeReferences: make(types.References, 0),
-			MentionedItems:      append(types.MentionedItems(nil), msg.MentionedItems...),
-			Images:              append(types.MessageImages(nil), msg.Images...),
-			Attachments:         append(types.MessageAttachments(nil), msg.Attachments...),
-			ToolResults:         structuredToolResultsFromAgentSteps(msg.AgentSteps),
-			IsCompleted:         msg.IsCompleted,
-			IsFallback:          msg.IsFallback,
-			Channel:             msg.Channel,
-			CreatedAt:           msg.CreatedAt,
-			UpdatedAt:           msg.UpdatedAt,
-		})
+	snapshots := make([]MessageSnapshot, 0, len(selectedMessages))
+	for idx, message := range selectedMessages {
+		snapshots = append(snapshots, messageSnapshotFromMessage(message, idx+1))
 	}
 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -181,6 +261,15 @@ func (s *Service) CreateShare(ctx context.Context, sessionID string) (*LinkDTO, 
 		}
 		if len(snapshots) > 0 {
 			if err := tx.Create(&snapshots).Error; err != nil {
+				return err
+			}
+		}
+		resources, err := s.buildResourceSnapshots(ctx, tx, &link, selectedMessages)
+		if err != nil {
+			return err
+		}
+		if len(resources) > 0 {
+			if err := tx.Create(&resources).Error; err != nil {
 				return err
 			}
 		}
@@ -197,6 +286,106 @@ func (s *Service) CreateShare(ctx context.Context, sessionID string) (*LinkDTO, 
 		Title:     link.Title,
 		CreatedAt: link.CreatedAt,
 	}, nil
+}
+
+func (s *Service) loadSessionMessages(ctx context.Context, sessionID string) (*types.Session, []types.Message, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil, fmt.Errorf("session_id is required")
+	}
+	session, err := s.sessionService.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if session == nil {
+		return nil, nil, gorm.ErrRecordNotFound
+	}
+	var messages []types.Message
+	if err := s.db.WithContext(ctx).
+		Where("session_id = ? AND role IN ?", session.ID, []string{"user", "assistant"}).
+		Order("created_at ASC, updated_at ASC, id ASC").
+		Find(&messages).Error; err != nil {
+		return nil, nil, err
+	}
+	return session, messages, nil
+}
+
+func buildShareTurns(messages []types.Message) []shareTurn {
+	turns := make([]shareTurn, 0, (len(messages)+1)/2)
+	requestTurnIndex := make(map[string]int)
+
+	for _, message := range messages {
+		requestID := strings.TrimSpace(message.RequestID)
+		if requestID == "" {
+			turns = append(turns, shareTurn{
+				ID:       "unmatched:" + message.ID,
+				Messages: []types.Message{message},
+			})
+			continue
+		}
+		turnID := "request:" + requestID
+		index, exists := requestTurnIndex[turnID]
+		if !exists {
+			index = len(turns)
+			requestTurnIndex[turnID] = index
+			turns = append(turns, shareTurn{ID: turnID})
+		}
+		turns[index].Messages = append(turns[index].Messages, message)
+	}
+
+	for i := range turns {
+		userCount := 0
+		assistantCount := 0
+		assistantCompleted := false
+		assistantHasOutput := false
+		for _, message := range turns[i].Messages {
+			switch message.Role {
+			case "user":
+				userCount++
+			case "assistant":
+				assistantCount++
+				assistantCompleted = message.IsCompleted
+				assistantHasOutput = strings.TrimSpace(message.Content) != ""
+			}
+		}
+		switch {
+		case userCount == 1 && assistantCount == 1 && len(turns[i].Messages) == 2 && assistantCompleted && assistantHasOutput:
+			turns[i].Selectable = true
+		case userCount == 1 && assistantCount == 1 && !assistantCompleted:
+			turns[i].DisabledReason = "回答生成中，完成后可分享"
+		case userCount == 1 && assistantCount == 1 && !assistantHasOutput:
+			turns[i].DisabledReason = "回答无有效内容，无法分享"
+		case userCount > 0 && assistantCount == 0:
+			turns[i].DisabledReason = "暂无完整回答，无法分享"
+		case userCount == 0 && assistantCount > 0:
+			turns[i].DisabledReason = "未找到关联问题，无法分享"
+		default:
+			turns[i].DisabledReason = "问答关联异常，无法分享"
+		}
+	}
+
+	return turns
+}
+
+func messageSnapshotFromMessage(message types.Message, seq int) MessageSnapshot {
+	return MessageSnapshot{
+		Seq:                 seq,
+		OriginalMessageID:   message.ID,
+		SessionID:           message.SessionID,
+		RequestID:           message.RequestID,
+		Content:             message.Content,
+		Role:                message.Role,
+		KnowledgeReferences: make(types.References, 0),
+		MentionedItems:      append(types.MentionedItems(nil), message.MentionedItems...),
+		Images:              append(types.MessageImages(nil), message.Images...),
+		Attachments:         append(types.MessageAttachments(nil), message.Attachments...),
+		ToolResults:         structuredToolResultsFromAgentSteps(message.AgentSteps),
+		IsCompleted:         message.IsCompleted,
+		IsFallback:          message.IsFallback,
+		Channel:             message.Channel,
+		CreatedAt:           message.CreatedAt,
+		UpdatedAt:           message.UpdatedAt,
+	}
 }
 
 func (s *Service) GetShare(ctx context.Context, token string) (*ViewDTO, error) {
@@ -385,20 +574,66 @@ func (s *Service) attachArtifacts(ctx context.Context, link *Link, token string,
 	if s == nil || s.db == nil || link == nil || len(messages) == 0 {
 		return nil
 	}
-	var rows []artifactRow
+	var allowed []ResourceSnapshot
 	if err := s.db.WithContext(ctx).
-		Where("tenant_id = ? AND session_id = ? AND deleted_at IS NULL", link.SourceTenantID, link.SessionID).
-		Order("created_at ASC, id ASC").
-		Find(&rows).Error; err != nil {
+		Where("share_id = ? AND resource_type = ?", link.ID, ResourceTypeArtifact).
+		Find(&allowed).Error; err != nil {
 		return err
 	}
-	if len(rows) == 0 {
+	if len(allowed) == 0 {
 		return nil
+	}
+	artifactIDs := make([]string, 0, len(allowed))
+	for _, resource := range allowed {
+		artifactIDs = append(artifactIDs, resource.ResourceKey)
+	}
+	byMessageID, err := s.artifactSnapshotsByMessage(
+		ctx,
+		s.db.Where("id IN ?", artifactIDs),
+		link.SourceTenantID,
+		link.SessionID,
+		nil,
+		token,
+	)
+	if err != nil {
+		return err
+	}
+	for i := range messages {
+		if artifacts := byMessageID[messages[i].OriginalMessageID]; len(artifacts) > 0 {
+			messages[i].Artifacts = artifacts
+		}
+	}
+	return nil
+}
+
+func (s *Service) artifactSnapshotsByMessage(
+	ctx context.Context,
+	db *gorm.DB,
+	tenantID uint64,
+	sessionID string,
+	messageIDs []string,
+	token string,
+) (map[string][]ArtifactSnapshot, error) {
+	if db == nil {
+		return nil, nil
+	}
+	query := db.WithContext(ctx).
+		Where("tenant_id = ? AND session_id = ? AND deleted_at IS NULL", tenantID, sessionID)
+	if len(messageIDs) > 0 {
+		query = query.Where("message_id IN ?", messageIDs)
+	}
+	var rows []artifactRow
+	if err := query.Order("created_at ASC, id ASC").Find(&rows).Error; err != nil {
+		return nil, err
 	}
 	byMessageID := make(map[string][]ArtifactSnapshot, len(rows))
 	for _, row := range rows {
 		if strings.TrimSpace(row.MessageID) == "" {
 			continue
+		}
+		downloadURL := ""
+		if token != "" {
+			downloadURL = s.shareArtifactURL(token, row.ID)
 		}
 		byMessageID[row.MessageID] = append(byMessageID[row.MessageID], ArtifactSnapshot{
 			ArtifactID:  row.ID,
@@ -406,13 +641,122 @@ func (s *Service) attachArtifacts(ctx context.Context, link *Link, token string,
 			FileType:    row.FileType,
 			FileSize:    row.FileSize,
 			SHA256:      row.SHA256,
-			DownloadURL: s.shareArtifactURL(token, row.ID),
+			DownloadURL: downloadURL,
 		})
 	}
-	for i := range messages {
-		if artifacts := byMessageID[messages[i].OriginalMessageID]; len(artifacts) > 0 {
-			messages[i].Artifacts = artifacts
+	return byMessageID, nil
+}
+
+func (s *Service) buildResourceSnapshots(
+	ctx context.Context,
+	db *gorm.DB,
+	link *Link,
+	messages []types.Message,
+) ([]ResourceSnapshot, error) {
+	if db == nil || link == nil || len(messages) == 0 {
+		return nil, nil
+	}
+	resources := make([]ResourceSnapshot, 0)
+	seen := make(map[string]struct{})
+	add := func(messageID, resourceType, resourceKey string) {
+		resourceKey = strings.TrimSpace(resourceKey)
+		if messageID == "" || resourceKey == "" {
+			return
 		}
+		key := resourceType + "\x00" + resourceKey
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		resources = append(resources, ResourceSnapshot{
+			ShareID:           link.ID,
+			OriginalMessageID: messageID,
+			ResourceType:      resourceType,
+			ResourceKey:       resourceKey,
+		})
+	}
+
+	messageIDs := make([]string, 0, len(messages))
+	for _, message := range messages {
+		messageIDs = append(messageIDs, message.ID)
+		for _, image := range message.Images {
+			if path := canonicalProviderResource(image.URL); path != "" {
+				add(message.ID, ResourceTypeFile, path)
+			}
+		}
+		for _, attachment := range message.Attachments {
+			if path := canonicalProviderResource(attachment.URL); path != "" {
+				add(message.ID, ResourceTypeFile, path)
+			}
+		}
+		for _, path := range providerResourcesFromContent(message.Content) {
+			add(message.ID, ResourceTypeFile, path)
+		}
+	}
+
+	var artifacts []artifactRow
+	if err := db.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND session_id = ? AND message_id IN ? AND deleted_at IS NULL",
+			link.SourceTenantID,
+			link.SessionID,
+			messageIDs,
+		).
+		Find(&artifacts).Error; err != nil {
+		return nil, err
+	}
+	for _, artifact := range artifacts {
+		add(artifact.MessageID, ResourceTypeArtifact, artifact.ID)
+	}
+	return resources, nil
+}
+
+func canonicalProviderResource(raw string) string {
+	decoded := strings.TrimSpace(html.UnescapeString(raw))
+	if decoded == "" || types.ParseProviderScheme(decoded) == "" {
+		return ""
+	}
+	return decoded
+}
+
+func providerResourcesFromContent(content string) []string {
+	decoded := html.UnescapeString(content)
+	matches := providerResourcePattern.FindAllString(decoded, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	resources := make([]string, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		match = strings.TrimRight(strings.TrimSpace(match), ".,;:!?)]}")
+		path := canonicalProviderResource(match)
+		if path == "" {
+			continue
+		}
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		resources = append(resources, path)
+	}
+	return resources
+}
+
+func (s *Service) resourceAllowed(ctx context.Context, shareID, resourceType, resourceKey string) error {
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&ResourceSnapshot{}).
+		Where(
+			"share_id = ? AND resource_type = ? AND resource_hash = ? AND resource_key = ?",
+			shareID,
+			resourceType,
+			tokenHash(resourceKey),
+			resourceKey,
+		).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return gorm.ErrRecordNotFound
 	}
 	return nil
 }
@@ -428,6 +772,9 @@ func (s *Service) GetSharedFile(ctx context.Context, token string, filePath stri
 	filePath = strings.TrimSpace(filePath)
 	if filePath == "" || strings.Contains(filePath, "..") {
 		return nil, "", fmt.Errorf("invalid file_path")
+	}
+	if err := s.resourceAllowed(ctx, link.ID, ResourceTypeFile, filePath); err != nil {
+		return nil, "", err
 	}
 	if err := validateStoragePathTenant(filePath, link.SourceTenantID); err != nil {
 		return nil, "", err
@@ -487,6 +834,9 @@ func (s *Service) GetSharedArtifact(ctx context.Context, token string, artifactI
 	artifactID = strings.TrimSpace(artifactID)
 	if artifactID == "" {
 		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if err := s.resourceAllowed(ctx, link.ID, ResourceTypeArtifact, artifactID); err != nil {
+		return nil, err
 	}
 
 	var row artifactRow

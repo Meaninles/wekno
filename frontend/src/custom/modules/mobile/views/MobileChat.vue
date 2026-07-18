@@ -37,10 +37,8 @@ import { agentPinKey, useChatAgentPins } from "@/custom/modules/agentPins/agentP
 import { listSessionStatuses, markSessionRead, type SessionStatusMap } from "@/custom/modules/sessionState/api";
 import { clearSessionDraftState, getSessionDraftState, saveSessionDraftState } from "@/custom/modules/sessionState/draftState";
 import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
-import { absoluteShareURL, createChatShare } from "@/custom/modules/chatshare/api";
 import { skillPinKey, useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
-import { copyTextToClipboard } from "@/utils/chatMessageShared";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
 import MobileResourceRail from "../components/MobileResourceRail.vue";
 import {
@@ -81,7 +79,6 @@ const isReplying = ref(false);
 const isLoadingHistory = ref(false);
 const sessionsLoading = ref(false);
 const resourcesLoading = ref(false);
-const shareCreating = ref(false);
 const drawerOpen = ref(false);
 const sheetOpen = ref(false);
 const activeSheet = ref<SheetTab>("context");
@@ -491,31 +488,9 @@ const compactTitle = computed(() => {
   return row?.title || "新对话";
 });
 
-const shareCurrentMobileChat = async () => {
-  if (!currentSessionId.value || shareCreating.value) return;
-  shareCreating.value = true;
-  try {
-    const resp: any = await createChatShare(currentSessionId.value);
-    const link = absoluteShareURL(resp?.data?.url, resp?.data?.token);
-    if (!link) throw new Error("分享链接生成失败");
-    const nav = navigator as Navigator & {
-      share?: (data: { title?: string; url?: string }) => Promise<void>;
-    };
-    if (nav.share) {
-      try {
-        await nav.share({ title: compactTitle.value, url: link });
-        return;
-      } catch (error: any) {
-        if (error?.name === "AbortError") return;
-      }
-    }
-    await copyTextToClipboard(link);
-    MessagePlugin.success("分享链接已复制");
-  } catch (error: any) {
-    MessagePlugin.error(error?.message || "分享失败");
-  } finally {
-    shareCreating.value = false;
-  }
+const shareCurrentMobileChat = () => {
+  if (!currentSessionId.value) return;
+  void router.push({ name: "mobile-chat-share", params: { sessionId: currentSessionId.value } });
 };
 
 const pushUniqueChip = (
@@ -1663,7 +1638,6 @@ onBeforeUnmount(() => {
           v-if="currentSessionId"
           type="button"
           class="title-share-button"
-          :class="{ loading: shareCreating }"
           aria-label="分享对话"
           @click="shareCurrentMobileChat"
         >
@@ -2081,11 +2055,6 @@ onBeforeUnmount(() => {
   color: #24372f;
   padding: 0;
   font-size: 19px;
-}
-
-.title-share-button.loading {
-  pointer-events: none;
-  opacity: 0.55;
 }
 
 .message-scroll {

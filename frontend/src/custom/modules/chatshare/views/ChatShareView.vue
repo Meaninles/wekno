@@ -7,13 +7,9 @@ import usermsg from "@/views/chat/components/usermsg.vue";
 import GeneralAgentArtifactsResult from "@/views/chat/components/tool-results/GeneralAgentArtifactsResult.vue";
 import ChatQuestionLocator from "@/custom/modules/chatQuestionLocator/ChatQuestionLocator.vue";
 import MobileChatMessage from "@/custom/modules/mobile/components/MobileChatMessage.vue";
-import { getChatShare, type ChatShareMessage, type ChatShareView } from "../api";
-import {
-  normalizeMessageArtifacts,
-  normalizeMessageAttachments,
-  normalizeMessageImages,
-  normalizeMessageToolResults,
-} from "../media";
+import { getChatShare, type ChatShareView } from "../api";
+import { normalizeMessageArtifacts } from "../media";
+import { artifactDataFor, normalizeChatShareMessage, userQueryFor } from "../message";
 
 const route = useRoute();
 const share = ref<ChatShareView | null>(null);
@@ -25,66 +21,7 @@ let mediaQuery: MediaQueryList | null = null;
 
 const token = computed(() => String(route.params.token || "").trim());
 const title = computed(() => share.value?.title || "分享对话");
-const messages = computed(() => (share.value?.messages || []).map(normalizeMessage));
-
-function normalizeMessage(message: ChatShareMessage): ChatShareMessage {
-  const artifacts = normalizeMessageArtifacts(message.artifacts);
-  const toolResults = normalizeMessageToolResults(message.tool_results);
-  const hasStructuredCharts = toolResults.some((item) =>
-    item.display_type === "structured_analysis_result" &&
-    item.tool_data?.chart_requested === true &&
-    item.tool_data?.chart?.eligible === true,
-  );
-  const content = typeof message.content === "string" ? message.content : "";
-  return {
-    ...message,
-    content,
-    knowledge_references: [],
-    agent_steps: [],
-    tool_results: toolResults,
-    agentEventStream: hasStructuredCharts
-      ? [
-        {
-          type: "answer",
-          event_id: `${message.id || message.original_message_id || "share"}-answer`,
-          content,
-          done: true,
-          final_answer: true,
-        },
-        {
-          type: "agent_complete",
-          event_id: `${message.id || message.original_message_id || "share"}-complete`,
-        },
-      ]
-      : [],
-    artifacts,
-    isAgentMode: hasStructuredCharts,
-    isRagMode: false,
-    showThink: false,
-    hideContent: false,
-    is_completed: true,
-    mentioned_items: Array.isArray(message.mentioned_items) ? message.mentioned_items : [],
-    images: normalizeMessageImages(message.images),
-    attachments: normalizeMessageAttachments(message.attachments),
-  };
-}
-
-function artifactDataFor(message: ChatShareMessage) {
-  const artifacts = normalizeMessageArtifacts(message.artifacts);
-  return {
-    display_type: "general_agent_artifacts" as const,
-    artifacts,
-    artifact_original_count: artifacts.length,
-  };
-}
-
-function userQueryFor(index: number) {
-  for (let i = index - 1; i >= 0; i -= 1) {
-    const item = messages.value[i];
-    if (item?.role === "user") return String(item.content || "");
-  }
-  return "";
-}
+const messages = computed(() => (share.value?.messages || []).map(normalizeChatShareMessage));
 
 async function loadShare() {
   if (!token.value) {
@@ -169,7 +106,7 @@ onBeforeUnmount(() => {
                 :content="message.content"
                 :session="message"
                 :session-id="share?.session_id || ''"
-                :user-query="userQueryFor(index)"
+                :user-query="userQueryFor(messages, index)"
                 :share-mode="true"
                 :share-token="token"
               />

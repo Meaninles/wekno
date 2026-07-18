@@ -23,7 +23,7 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
-func (h *Handler) Create(c *gin.Context) {
+func (h *Handler) Candidates(c *gin.Context) {
 	ctx := c.Request.Context()
 	sessionID := strings.TrimSpace(c.Param("session_id"))
 	if sessionID == "" {
@@ -35,7 +35,32 @@ func (h *Handler) Create(c *gin.Context) {
 		return
 	}
 
-	result, err := h.service.CreateShare(ctx, sessionID)
+	result, err := h.service.GetCandidates(ctx, sessionID)
+	if err != nil {
+		h.writeServiceError(c, err, "failed to load chat share candidates")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+func (h *Handler) Create(c *gin.Context) {
+	ctx := c.Request.Context()
+	sessionID := strings.TrimSpace(c.Param("session_id"))
+	if sessionID == "" {
+		c.Error(apperrors.NewBadRequestError("session_id is required"))
+		return
+	}
+	if h == nil || h.service == nil {
+		c.Error(apperrors.NewInternalServerError("chat share service unavailable"))
+		return
+	}
+	var req CreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(apperrors.NewBadRequestError("message_ids is required"))
+		return
+	}
+
+	result, err := h.service.CreateShare(ctx, sessionID, req.MessageIDs)
 	if err != nil {
 		h.writeServiceError(c, err, "failed to create chat share")
 		return
@@ -131,6 +156,8 @@ func (h *Handler) writeServiceError(c *gin.Context, err error, fallback string) 
 	switch {
 	case stderrors.Is(err, ErrWebLoginRequired):
 		c.Error(apperrors.NewUnauthorizedError("web login required"))
+	case stderrors.Is(err, ErrInvalidMessageSelection):
+		c.Error(apperrors.NewBadRequestError("invalid message selection"))
 	case stderrors.Is(err, gorm.ErrRecordNotFound):
 		c.Error(apperrors.NewNotFoundError("chat share not found"))
 	default:

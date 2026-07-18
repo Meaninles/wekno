@@ -12,7 +12,11 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-const ShareStatusActive = "active"
+const (
+	ShareStatusActive    = "active"
+	ResourceTypeFile     = "file"
+	ResourceTypeArtifact = "artifact"
+)
 
 type Link struct {
 	ID              string         `json:"id" gorm:"primaryKey;type:varchar(36)"`
@@ -93,6 +97,33 @@ func (m *MessageSnapshot) BeforeCreate(_ *gorm.DB) error {
 	return nil
 }
 
+// ResourceSnapshot is the exact resource allowlist captured for a share. It
+// prevents a token from being reused to fetch files or artifacts belonging to
+// messages that the creator did not select.
+type ResourceSnapshot struct {
+	ID                string    `json:"id" gorm:"primaryKey;type:varchar(36)"`
+	ShareID           string    `json:"share_id" gorm:"type:varchar(36);not null;index;uniqueIndex:idx_chatshare_resource,priority:1"`
+	OriginalMessageID string    `json:"original_message_id" gorm:"type:varchar(36);not null;index"`
+	ResourceType      string    `json:"resource_type" gorm:"type:varchar(32);not null;index;uniqueIndex:idx_chatshare_resource,priority:2"`
+	ResourceHash      string    `json:"-" gorm:"type:varchar(64);not null;uniqueIndex:idx_chatshare_resource,priority:3"`
+	ResourceKey       string    `json:"-" gorm:"type:text;not null"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+func (ResourceSnapshot) TableName() string {
+	return "custom_chatshare_resources"
+}
+
+func (r *ResourceSnapshot) BeforeCreate(_ *gorm.DB) error {
+	if r.ID == "" {
+		r.ID = uuid.NewString()
+	}
+	if r.ResourceHash == "" && r.ResourceKey != "" {
+		r.ResourceHash = tokenHash(r.ResourceKey)
+	}
+	return nil
+}
+
 type ToolResultSnapshots []ToolResultSnapshot
 
 func (t ToolResultSnapshots) Value() (driver.Value, error) {
@@ -146,6 +177,40 @@ type LinkDTO struct {
 	URL       string    `json:"url,omitempty"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type CreateRequest struct {
+	MessageIDs []string `json:"message_ids" binding:"required,min=1"`
+}
+
+// CandidateMessageDTO contains only fields that can be rendered in the
+// read-only selection screen. In particular, it never exposes agent_steps or
+// knowledge references.
+type CandidateMessageDTO struct {
+	ID             string                   `json:"id"`
+	TurnID         string                   `json:"turn_id"`
+	SessionID      string                   `json:"session_id"`
+	RequestID      string                   `json:"request_id"`
+	Content        string                   `json:"content"`
+	Role           string                   `json:"role"`
+	MentionedItems types.MentionedItems     `json:"mentioned_items,omitempty"`
+	Images         types.MessageImages      `json:"images,omitempty"`
+	Attachments    types.MessageAttachments `json:"attachments,omitempty"`
+	ToolResults    ToolResultSnapshots      `json:"tool_results,omitempty"`
+	Artifacts      []ArtifactSnapshot       `json:"artifacts,omitempty"`
+	IsCompleted    bool                     `json:"is_completed"`
+	IsFallback     bool                     `json:"is_fallback,omitempty"`
+	Channel        string                   `json:"channel,omitempty"`
+	Selectable     bool                     `json:"selectable"`
+	DisabledReason string                   `json:"disabled_reason,omitempty"`
+	CreatedAt      time.Time                `json:"created_at"`
+	UpdatedAt      time.Time                `json:"updated_at"`
+}
+
+type CandidatesDTO struct {
+	SessionID string                `json:"session_id"`
+	Title     string                `json:"title"`
+	Messages  []CandidateMessageDTO `json:"messages"`
 }
 
 type ViewDTO struct {

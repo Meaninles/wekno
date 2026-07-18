@@ -1,6 +1,5 @@
 *
 !dist
-!dist-mobile
 !package.json
 !package-lock.json
 !packages

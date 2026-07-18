@@ -518,7 +518,10 @@ func sanitizeGeneralArtifactsData(data map[string]interface{}) map[string]interf
 		"artifact_returned_count", "artifact_dropped_count",
 		"artifact_returned_size", "artifact_limit_bytes",
 	)
-	out["artifacts"] = sanitizeMapList(data["artifacts"], clientListLimit, []string{
+	// Artifact entries contain only compact identifiers and file metadata. Keep
+	// the complete list so the client can progressively render every artifact;
+	// the generic clientListLimit would make later entries irretrievable.
+	out["artifacts"] = sanitizeMapList(data["artifacts"], 0, []string{
 		"artifact_id", "filename", "file_type", "file_size", "sha256", "download_url",
 	}, map[string]int{
 		"filename":     clientFilenameTextLimit,

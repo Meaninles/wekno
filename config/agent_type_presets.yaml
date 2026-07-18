@@ -343,6 +343,62 @@ agent_type_presets:
       enable_artifacts: true
 
   # --------------------------------------------------------------------------
+  # Knowledge Base Manager — a configurable type, never a built-in agent.
+  # --------------------------------------------------------------------------
+  - id: "knowledge-base-manager"
+    i18n:
+      default:
+        label: "Knowledge Base Manager"
+        description: "General-agent runtime with explicitly scoped document add, safe replace and delete capabilities."
+      zh-CN:
+        label: "知识库管理智能体"
+        description: "基于通用智能体，在明确指定的知识库内新增、先增后删替换或删除完整文档。"
+      zh-TW:
+        label: "知識庫管理智能體"
+        description: "基於通用智能體，在明確指定的知識庫內新增、安全替換或刪除完整文件。"
+    config:
+      system_prompt_id: "knowledge_base_manager_agent"
+      thinking: true
+      temperature: 0.3
+      max_completion_tokens: 8192
+      max_iterations: 100
+      llm_call_timeout: 600
+      allowed_tools:
+        - "thinking"
+        - "todo_write"
+        - "knowledge_search"
+        - "grep_chunks"
+        - "list_knowledge_chunks"
+        - "get_document_info"
+        - "query_knowledge_graph"
+        - "wiki_search"
+        - "wiki_read_page"
+        - "wiki_read_source_doc"
+        - "kb_list_documents"
+        - "kb_add_document"
+        - "kb_replace_document"
+        - "kb_delete_document"
+        - "kb_mutation_status"
+      retain_retrieval_history: true
+      faq_priority_enabled: false
+      web_search_enabled: true
+      claude_sdk_web_search_enabled: true
+      web_fetch_enabled: true
+      web_fetch_top_n: 5
+      history_turns: 10
+      kb_selection_mode: "selected"
+      enable_artifacts: true
+      knowledge_management:
+        default_permissions:
+          add: true
+          modify: true
+          delete: true
+        knowledge_base_overrides: {}
+    kb_filter:
+      none_of:
+        - "faq"
+
+  # --------------------------------------------------------------------------
   # Custom — no preset; user configures everything by hand.
   # --------------------------------------------------------------------------
   - id: "custom"

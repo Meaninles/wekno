@@ -850,10 +850,11 @@
                       <div class="setting-row">
                         <div class="setting-info">
                           <label>允许生成文件</label>
-                          <p class="desc">开启后，通用智能体可以按用户需求生成可下载产物；最多返回 5 个文件，合计必须小于 128MB，超限时按生成顺序保留前面的文件。</p>
+                          <p v-if="isKnowledgeBaseManager" class="desc">知识库管理必须开启产物能力：联网内容需先生成并注册为本轮产物，再交给知识库原生解析。</p>
+                          <p v-else class="desc">开启后，通用智能体可以按用户需求生成可下载产物；最多返回 5 个文件，合计必须小于 128MB，超限时按生成顺序保留前面的文件。</p>
                         </div>
                         <div class="setting-control">
-                          <t-switch v-model="formData.config.enable_artifacts" />
+                          <t-switch v-model="formData.config.enable_artifacts" :disabled="isKnowledgeBaseManager" />
                         </div>
                       </div>
                     </template>
@@ -1051,7 +1052,7 @@
                             </header>
                             <div class="tool-grid">
                               <t-checkbox v-for="tool in group.tools" :key="tool.value" :value="tool.value"
-                                :disabled="tool.disabled"
+                                :disabled="tool.disabled || tool.fixed"
                                 :class="['tool-card', { 'tool-card--disabled': tool.disabled, 'tool-card--danger': tool.danger }]">
                                 <div class="tool-card-body">
                                   <div class="tool-card-head">
@@ -1059,6 +1060,7 @@
                                     <span v-if="tool.danger" class="tool-card-badge">
                                       {{ $t('agentEditor.tools.dangerTag') }}
                                     </span>
+                                    <span v-if="tool.fixed" class="tool-card-badge">权限控制</span>
                                   </div>
                                   <span v-if="tool.description" class="tool-card-desc">{{ tool.description }}</span>
                                   <span v-if="tool.disabled && tool.disabledReason" class="tool-card-hint">
@@ -1286,12 +1288,19 @@
                         <p class="desc">{{ $t('agentEditor.desc.kbScope') }}</p>
                       </div>
                       <div class="setting-control">
-                        <t-radio-group v-model="kbSelectionMode">
+                        <t-radio-group v-if="!isKnowledgeBaseManager" v-model="kbSelectionMode">
                           <t-radio-button value="all">{{ $t('agent.editor.allKnowledgeBases') }}</t-radio-button>
                           <t-radio-button value="selected">{{ $t('agent.editor.selectedKnowledgeBases')
                             }}</t-radio-button>
                           <t-radio-button value="none">{{ $t('agent.editor.noKnowledgeBase') }}</t-radio-button>
                         </t-radio-group>
+                        <div v-else class="kb-manager-scope-lock" data-testid="kb-manager-scope-lock">
+                          <t-icon name="lock-on" />
+                          <div>
+                            <strong>仅限指定知识库</strong>
+                            <p>不能选择全部知识库，也不能留空；对话中的 @ 知识库或 @ 文档会进一步收窄范围。</p>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -1341,8 +1350,23 @@
                       </div>
                     </div>
 
+                    <div v-if="isKnowledgeBaseManager" class="setting-row setting-row-vertical">
+                      <div class="setting-info">
+                        <label>知识库操作权限 <span class="required">*</span></label>
+                        <p class="desc">统一设置所有已选知识库，也可以只覆盖个别知识库。</p>
+                      </div>
+                      <div class="setting-control setting-control-full">
+                        <KnowledgeBasePermissionEditor
+                          v-model="formData.config.knowledge_management"
+                          :knowledge-base-ids="formData.config.knowledge_bases || []"
+                          :knowledge-bases="kbOptions"
+                          :disabled="isBuiltinAgent"
+                        />
+                      </div>
+                    </div>
+
                     <!-- 支持的文件类型（限制用户可选择的文件类型） -->
-                    <div v-if="hasKnowledgeBase" class="setting-row">
+                    <div v-if="hasKnowledgeBase && !isKnowledgeBaseManager" class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agentEditor.fileTypes.label') }}</label>
                         <p class="desc">{{ $t('agentEditor.fileTypes.desc') }}</p>
@@ -1357,7 +1381,7 @@
                     </div>
 
                     <!-- 仅在提及时检索知识库（当配置了知识库时显示） -->
-                    <div v-if="hasKnowledgeBase" class="setting-row">
+                    <div v-if="hasKnowledgeBase && !isKnowledgeBaseManager" class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agent.editor.retrieveKBOnlyWhenMentioned') }}</label>
                         <p class="desc">{{ $t('agent.editor.retrieveKBOnlyWhenMentionedDesc') }}</p>
@@ -1686,6 +1710,7 @@ import {
   type DocumentTemplateConfig,
   type DocumentTemplateFile,
   type DocumentTemplateFormatConfig,
+  type KnowledgeManagementConfig,
 } from '@/api/agent';
 import { type ModelConfig } from '@/api/model';
 import { type AgentNotReadyReasonKey, agentRequiresRerankModel } from '@/utils/agent-readiness';
@@ -1703,6 +1728,15 @@ import AgentAvatar from '@/components/AgentAvatar.vue';
 import PromptTemplateSelector from '@/components/PromptTemplateSelector.vue';
 import ModelSelector from '@/components/ModelSelector.vue';
 import AgentShareSettings from '@/components/AgentShareSettings.vue';
+import KnowledgeBasePermissionEditor from '@/custom/modules/kbmanager/KnowledgeBasePermissionEditor.vue';
+import {
+  DEFAULT_KNOWLEDGE_MANAGEMENT_PERMISSIONS,
+  KNOWLEDGE_MANAGEMENT_TOOL_OPTIONS,
+  normalizeKnowledgeManagementConfig,
+  pickDefaultRerankModelID,
+  syncKnowledgeManagementToolNames,
+  validateKnowledgeBaseManagerSelection,
+} from '@/custom/modules/kbmanager/config';
 import { listEmbedChannels } from '@/api/embed';
 import { getRootZoom, rectToCssPx } from '@/utils/zoom';
 import {
@@ -1852,7 +1886,7 @@ onBeforeUnmount(() => {
 const saving = ref(false);
 const resettingBuiltinAgent = ref(false);
 const allModels = ref<ModelConfig[]>([]);
-const kbOptions = ref<{ label: string; value: string; type?: 'document' | 'faq'; count?: number; shared?: boolean; orgName?: string; ragEnabled?: boolean; wikiEnabled?: boolean; capabilities?: KBCapabilities }[]>([]);
+const kbOptions = ref<{ label: string; value: string; type?: 'document' | 'faq'; count?: number; shared?: boolean; orgName?: string; permission?: 'owner' | 'admin' | 'editor' | 'viewer' | null; ragEnabled?: boolean; wikiEnabled?: boolean; capabilities?: KBCapabilities }[]>([]);
 const dbSourceOptions = ref<DatabaseSource[]>([]);
 // 智能体类型预设（仅 smart-reasoning 模式下展示）
 const agentTypePresets = ref<AgentTypePreset[]>([]);
@@ -1928,7 +1962,16 @@ const skillsActiveTab = ref<'lightweight' | 'professional'>('lightweight');
 // danger: 写类破坏性工具，UI 上给出显著提示
 // 工具的 KB 能力依赖关系统一在 `@/utils/tool-capabilities` 声明，
 // `availableTools` 通过 `evaluateToolRequirement` 读取，不在这里重复维护。
-const allTools = computed(() => [
+interface AgentToolOption {
+  value: string;
+  label: string;
+  description: string;
+  group: string;
+  danger?: boolean;
+  fixed?: boolean;
+}
+
+const allTools = computed<AgentToolOption[]>(() => [
   // 基础思考类
   { value: 'thinking', label: t('agentEditor.tools.thinking'), description: t('agentEditor.tools.thinkingDesc'), group: 'base' },
   { value: 'todo_write', label: t('agentEditor.tools.todoWrite'), description: t('agentEditor.tools.todoWriteDesc'), group: 'base' },
@@ -1958,6 +2001,7 @@ const allTools = computed(() => [
   { value: 'db_catalog', label: '数据源目录', description: '按业务词检索已绑定数据源中的表和字段', group: 'database' },
   { value: 'db_schema', label: '数据库结构', description: '获取表结构、字段说明、样本值和内部业务含义推断上下文', group: 'database' },
   { value: 'db_query', label: '数据源分析', description: '对已绑定 MySQL/PostgreSQL 数据源执行只读 SQL 分析', group: 'database' },
+  ...(isKnowledgeBaseManager.value ? KNOWLEDGE_MANAGEMENT_TOOL_OPTIONS : []),
 ]);
 
 // 工具分组元信息
@@ -1969,6 +2013,7 @@ const toolGroups = computed(() => [
   { key: 'wiki_issue', label: t('agentEditor.tools.groupWikiIssue') },
   { key: 'data', label: t('agentEditor.tools.groupData') },
   { key: 'database', label: '数据分析' },
+  { key: 'knowledge_management', label: '知识库管理（由权限配置控制）' },
 ]);
 
 // 知识库分组：我的 vs 共享的
@@ -2413,6 +2458,10 @@ const defaultFormData = {
     // 让用户无需先去勾选 KB 即可上手；如有需要可改为 "selected" / "none"。
     kb_selection_mode: 'all' as 'all' | 'selected' | 'none',
     knowledge_bases: [] as string[],
+    knowledge_management: {
+      default_permissions: { add: true, modify: true, delete: true },
+      knowledge_base_overrides: {},
+    } as KnowledgeManagementConfig,
     db_data_sources: [] as string[],
     retrieve_kb_only_when_mentioned: false,
     // 智能推理下的类型预设：新建 agent 时默认给 RAG 问答（最常用场景）。
@@ -2472,6 +2521,11 @@ const applyDefaultChatModelIfEmpty = () => {
     formData.value.config.model_id = chat.id
   }
 }
+
+const applyDefaultRerankModelIfEmpty = () => {
+  if (formData.value.config.rerank_model_id) return;
+  formData.value.config.rerank_model_id = pickDefaultRerankModelID(allModels.value);
+};
 
 const agentMode = computed({
   get: () => formData.value.config.agent_mode,
@@ -2688,9 +2742,31 @@ const isTableAnalysisAgent = computed(() => isAgentMode.value && agentType.value
 const isFixedAnalysisAgent = computed(() => isDataAnalysisAgent.value || isTableAnalysisAgent.value);
 const isGeneralAgent = computed(() => isAgentMode.value && agentType.value === 'general-agent');
 const isDocumentProcessingAgent = computed(() => isAgentMode.value && agentType.value === 'document-processing-agent');
-const isGeneralRuntimeAgent = computed(() => isGeneralAgent.value || isDocumentProcessingAgent.value);
+const isKnowledgeBaseManager = computed(() => isAgentMode.value && agentType.value === 'knowledge-base-manager');
+const isGeneralRuntimeAgent = computed(() => isGeneralAgent.value || isDocumentProcessingAgent.value || isKnowledgeBaseManager.value);
 const supportsNativeAgentWebSearch = computed(() => isDataAnalysisAgent.value || isGeneralRuntimeAgent.value);
 const canUseDatabaseSources = computed(() => isDataAnalysisAgent.value || isGeneralRuntimeAgent.value);
+
+const ensureKnowledgeManagementConfig = (): KnowledgeManagementConfig => {
+  const raw = formData.value.config.knowledge_management as KnowledgeManagementConfig | undefined;
+  const selected = (formData.value.config.knowledge_bases || []) as string[];
+  const normalized = normalizeKnowledgeManagementConfig(raw, selected);
+  if (JSON.stringify(raw || {}) !== JSON.stringify(normalized)) {
+    formData.value.config.knowledge_management = normalized;
+  }
+  return normalized;
+};
+
+const syncKnowledgeManagementTools = () => {
+  if (!isKnowledgeBaseManager.value) return;
+  const manager = ensureKnowledgeManagementConfig();
+  const selected = (formData.value.config.knowledge_bases || []) as string[];
+  formData.value.config.allowed_tools = syncKnowledgeManagementToolNames(
+    formData.value.config.allowed_tools || [],
+    selected,
+    manager,
+  );
+};
 
 watch(navItems, (items) => {
   if (!items.some((item) => item.key === currentSection.value)) {
@@ -3097,6 +3173,7 @@ const presetKbMismatchKeyMap: Record<string, string> = {
   'hybrid-rag-wiki': 'hybridRagWiki',
 };
 const presetKbMismatchReason = (preset: AgentTypePreset): string => {
+  if (preset.id === 'knowledge-base-manager') return '知识库管理智能体不支持 FAQ 知识库';
   const subKey = presetKbMismatchKeyMap[preset.id];
   if (subKey) return t(`agentEditor.agentType.kbMismatch.${subKey}`);
   return t('agentEditor.agentType.kbMismatch.generic');
@@ -3116,6 +3193,9 @@ const presetKbMismatchReason = (preset: AgentTypePreset): string => {
 // `@/utils/tool-capabilities` 维护一份。
 const effectiveKbFilter = (preset: AgentTypePreset | null): AgentTypeKBFilter | null => {
   if (!preset) return null;
+  // 管理工具不依赖 RAG/Wiki 检索能力；该类型只应用 YAML 中的业务约束
+  // （当前为排除 FAQ），不能被读取类工具反向推导成“必须开启某种索引”。
+  if (preset.id === 'knowledge-base-manager') return preset.kb_filter || null;
   const derived = deriveKbFilterFromTools(preset.config?.allowed_tools || []);
   const yaml = preset.kb_filter;
 
@@ -3186,8 +3266,16 @@ const filteredKbOptionsForPreset = computed(() => {
   return kbOptions.value.map(kb => {
     const presetResult = kbSatisfiesPresetFilter(kb, preset);
     const modeResult = kbSatisfiesQuickAnswerMode(kb);
-    const ok = presetResult.ok && modeResult.ok;
-    const reason = !presetResult.ok ? presetResult.reason : (!modeResult.ok ? modeResult.reason : '');
+    const managerPermissionOK = !isKnowledgeBaseManager.value
+      || !kb.shared
+      || kb.permission === 'admin'
+      || kb.permission === 'editor';
+    const ok = presetResult.ok && modeResult.ok && managerPermissionOK;
+    const reason = !presetResult.ok
+      ? presetResult.reason
+      : (!modeResult.ok
+        ? modeResult.reason
+        : (!managerPermissionOK ? '共享知识库需要“可编辑”或“管理员”权限' : ''));
     return { ...kb, disabled: !ok, disabledReason: reason };
   });
 });
@@ -3246,6 +3334,14 @@ const applyAgentTypePreset = (preset: AgentTypePreset | null) => {
   } else if (target.agent_type === 'document-processing-agent') {
     target.document_template = createDefaultDocumentTemplateConfig();
   }
+  if (c.knowledge_management) {
+    target.knowledge_management = JSON.parse(JSON.stringify(c.knowledge_management));
+  } else if (target.agent_type === 'knowledge-base-manager') {
+    target.knowledge_management = {
+      default_permissions: { ...DEFAULT_KNOWLEDGE_MANAGEMENT_PERMISSIONS },
+      knowledge_base_overrides: {},
+    };
+  }
   if (c.professional_skills_selection_mode) {
     target.professional_skills_selection_mode = c.professional_skills_selection_mode;
     professionalSkillsSelectionMode.value = c.professional_skills_selection_mode;
@@ -3279,7 +3375,7 @@ const onAgentTypeChange = (val: AgentType) => {
   if (val !== 'custom') {
     applyAgentTypePreset(preset);
   }
-  if (val !== 'data-analysis' && val !== 'general-agent' && val !== 'document-processing-agent') {
+  if (val !== 'data-analysis' && val !== 'general-agent' && val !== 'document-processing-agent' && val !== 'knowledge-base-manager') {
     formData.value.config.db_data_sources = [];
     formData.value.config.allowed_tools = (formData.value.config.allowed_tools || []).filter(
       (tool: string) => !['db_catalog', 'db_schema', 'db_query'].includes(tool),
@@ -3292,6 +3388,17 @@ const onAgentTypeChange = (val: AgentType) => {
     }
   } else {
     ensureDocumentTemplateConfig();
+  }
+  if (val !== 'knowledge-base-manager') {
+    delete formData.value.config.knowledge_management;
+  } else {
+    formData.value.config.kb_selection_mode = 'selected';
+    kbSelectionMode.value = 'selected';
+    formData.value.config.retrieve_kb_only_when_mentioned = false;
+    formData.value.config.supported_file_types = [];
+    applyDefaultRerankModelIfEmpty();
+    ensureKnowledgeManagementConfig();
+    syncKnowledgeManagementTools();
   }
   if (val === 'data-analysis' && ['tools', 'mcp', 'skills'].includes(currentSection.value)) {
     currentSection.value = 'database';
@@ -3389,6 +3496,15 @@ const applyAgentFormData = (agent: CustomAgent) => {
     ensureDocumentTemplateConfig();
   } else {
     delete formData.value.config.document_template;
+  }
+  if (isKnowledgeBaseManager.value) {
+    formData.value.config.kb_selection_mode = 'selected';
+    formData.value.config.retrieve_kb_only_when_mentioned = false;
+    formData.value.config.supported_file_types = [];
+    ensureKnowledgeManagementConfig();
+    syncKnowledgeManagementTools();
+  } else {
+    delete formData.value.config.knowledge_management;
   }
   initKbSelectionMode();
   initMcpSelectionMode();
@@ -3612,6 +3728,11 @@ watch(kbSelectionMode, (mode) => {
     enforceNoKnowledgeBaseConfig();
     return;
   }
+  if (isKnowledgeBaseManager.value && mode !== 'selected') {
+    kbSelectionMode.value = 'selected';
+    formData.value.config.kb_selection_mode = 'selected';
+    return;
+  }
   formData.value.config.kb_selection_mode = mode;
   if (mode === 'none') {
     // 不使用知识库，清空相关配置
@@ -3622,6 +3743,18 @@ watch(kbSelectionMode, (mode) => {
   }
   // selected 模式保持 knowledge_bases 不变
 });
+
+watch(
+  () => [
+    isKnowledgeBaseManager.value,
+    ...(formData.value.config.knowledge_bases || []),
+    JSON.stringify(formData.value.config.knowledge_management || {}),
+  ],
+  () => {
+    if (!isKnowledgeBaseManager.value || isInitializing.value) return;
+    syncKnowledgeManagementTools();
+  },
+);
 
 watch(canConfigureKnowledgeBase, (canConfigure) => {
   if (!canConfigure) {
@@ -3807,6 +3940,7 @@ const mapKbToOption = (kb: any, shared: boolean, orgName?: string) => {
     count: kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count || 0),
     shared,
     orgName,
+    permission: shared ? orgStore.getKBPermission(kb.id) : 'owner',
     ragEnabled: caps ? (caps.vector || caps.keyword) : (!strategy || strategy.vector_enabled || strategy.keyword_enabled),
     wikiEnabled: caps ? caps.wiki : (strategy?.wiki_enabled || false),
     capabilities: caps,
@@ -4745,6 +4879,30 @@ const handleResetBuiltinAgent = async () => {
   }
 };
 
+const validateKnowledgeBaseManagerBeforeSave = (): boolean => {
+  if (!isKnowledgeBaseManager.value) return true;
+  formData.value.config.kb_selection_mode = 'selected';
+  kbSelectionMode.value = 'selected';
+  formData.value.config.retrieve_kb_only_when_mentioned = false;
+  formData.value.config.supported_file_types = [];
+
+  const selected = [...new Set<string>((formData.value.config.knowledge_bases || []) as string[])];
+  formData.value.config.knowledge_bases = selected;
+  const manager = ensureKnowledgeManagementConfig();
+  const error = validateKnowledgeBaseManagerSelection(
+    selected,
+    filteredKbOptionsForPreset.value,
+    manager,
+  );
+  if (error) {
+    MessagePlugin.error(error);
+    currentSection.value = 'knowledge';
+    return false;
+  }
+  syncKnowledgeManagementTools();
+  return true;
+};
+
 const handleSave = async () => {
   if (!canConfigureKnowledgeBase.value) {
     enforceNoKnowledgeBaseConfig();
@@ -4803,6 +4961,16 @@ const handleSave = async () => {
 
   if (!formData.value.config.model_id) {
     MessagePlugin.error(t('agent.editor.modelRequired'));
+    currentSection.value = 'model';
+    return;
+  }
+
+  if (!validateKnowledgeBaseManagerBeforeSave()) {
+    return;
+  }
+
+  if (isKnowledgeBaseManager.value && !formData.value.config.rerank_model_id?.trim()) {
+    MessagePlugin.error(t('agent.editor.rerankModelRequired'));
     currentSection.value = 'model';
     return;
   }
@@ -6597,6 +6765,25 @@ const handleSave = async () => {
 .tag-wiki {
   color: #00b42a;
   background: rgba(0, 180, 42, 0.1);
+}
+
+.kb-manager-scope-lock {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  color: var(--td-text-color-primary);
+  background: var(--td-brand-color-light);
+  border: 1px solid var(--td-brand-color-3);
+  border-radius: 8px;
+
+  p {
+    margin: 4px 0 0;
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+  }
 }
 
 </style>

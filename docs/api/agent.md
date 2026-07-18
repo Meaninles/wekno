@@ -31,7 +31,7 @@
 | `quick-answer` | RAG 模式，快速问答，直接基于知识库检索结果生成回答 |
 | `smart-reasoning` | ReAct 模式，支持多步推理和工具调用 |
 
-`smart-reasoning` 下还可以通过 `agent_type` 选择类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、`general-agent`、`custom`。其中 `general-agent`、`document-processing-agent`、`data-analysis`、`table-analysis` 会进入 Claude SDK sidecar 运行时。
+`smart-reasoning` 下还可以通过 `agent_type` 选择类型预设：`rag-qa`、`wiki-qa`、`hybrid-rag-wiki`、`data-analysis`、`table-analysis`、`document-processing-agent`、`general-agent`、`knowledge-base-manager`、`custom`。其中 `general-agent`、`knowledge-base-manager`、`document-processing-agent`、`data-analysis`、`table-analysis` 会进入 Claude SDK sidecar 运行时。
 
 ## API 列表
 

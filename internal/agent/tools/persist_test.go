@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -151,6 +152,41 @@ func TestSanitizeToolResultForClient_stripsWebFetchRawContent(t *testing.T) {
 	}
 	if results[0]["summary"] != "short summary" {
 		t.Fatalf("summary should remain, got %#v", results[0]["summary"])
+	}
+}
+
+func TestSanitizeToolResultForClient_preservesAllGeneralAgentArtifacts(t *testing.T) {
+	artifacts := make([]map[string]interface{}, 0, 38)
+	for i := 0; i < 38; i++ {
+		artifacts = append(artifacts, map[string]interface{}{
+			"artifact_id":  fmt.Sprintf("artifact-%02d", i),
+			"filename":     fmt.Sprintf("policy-%02d.pdf", i),
+			"file_type":    "pdf",
+			"file_size":    1024 + i,
+			"sha256":       strings.Repeat("a", 64),
+			"download_url": fmt.Sprintf("/artifacts/%02d/download", i),
+			"private_path": "/must/not/reach/browser",
+		})
+	}
+
+	meta := SanitizeToolResultForClient("general_agent", &types.ToolResult{
+		Success: true,
+		Data: map[string]interface{}{
+			"display_type":            "general_agent_artifacts",
+			"artifact_original_count": 38,
+			"artifacts":               artifacts,
+		},
+	})
+
+	got, ok := meta["artifacts"].([]map[string]interface{})
+	if !ok || len(got) != 38 {
+		t.Fatalf("artifacts = %#v, want all 38 sanitized entries", meta["artifacts"])
+	}
+	if got[37]["artifact_id"] != "artifact-37" || got[37]["filename"] != "policy-37.pdf" {
+		t.Fatalf("last artifact was not preserved: %#v", got[37])
+	}
+	if _, ok := got[0]["private_path"]; ok {
+		t.Fatalf("unexpected artifact field leaked to client: %#v", got[0])
 	}
 }
 

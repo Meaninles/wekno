@@ -8,6 +8,13 @@ import { unwrapFinalAnswerWrappers } from "@/utils/finalAnswer";
 import { clearProtectedFileFailureCache, hydrateProtectedFileImages } from "@/utils/security";
 import { hydrateSharedProtectedFileImages } from "@/custom/modules/chatshare/protectedFiles";
 import {
+  ARTIFACT_PAGE_SIZE,
+  artifactMetaText as buildArtifactMetaText,
+  nextArtifactVisibleCount,
+  remainingArtifactCount,
+  visibleArtifacts,
+} from "@/custom/modules/generalagent/artifactPagination";
+import {
   normalizeMessageArtifacts,
   normalizeMessageAttachments,
   normalizeMessageImages,
@@ -56,6 +63,7 @@ type MobileAnswerSegment =
 const isUser = computed(() => props.message.role === "user");
 const isAssistant = computed(() => props.message.role === "assistant");
 const downloadingArtifactId = ref("");
+const artifactVisibleCount = ref(ARTIFACT_PAGE_SIZE);
 const messageBodyRef = ref<HTMLElement | null>(null);
 const reviewImg = ref(false);
 const reviewUrl = ref("");
@@ -523,21 +531,26 @@ const artifactFiles = computed<GeneralAgentArtifactFile[]>(() => {
   return files;
 });
 
-const visibleArtifactFiles = computed(() => props.shareMode ? artifactFiles.value : artifactFiles.value.slice(0, 3));
-const hiddenArtifactCount = computed(() => Math.max(0, artifactFiles.value.length - visibleArtifactFiles.value.length));
+const visibleArtifactFiles = computed(() => visibleArtifacts(artifactFiles.value, artifactVisibleCount.value));
+const hiddenArtifactCount = computed(() => remainingArtifactCount(
+  artifactFiles.value.length,
+  visibleArtifactFiles.value.length,
+));
 const artifactNotice = computed(() => artifactResult.value?.notice || "");
 const shouldShowArtifacts = computed(() =>
   isAssistant.value && (artifactFiles.value.length > 0 || !!artifactNotice.value),
 );
 
 const artifactMetaText = computed(() => {
-  const total = Number(artifactResult.value?.artifact_original_count || 0);
-  const dropped = Number(artifactResult.value?.artifact_dropped_count || 0);
-  if (total > 0 && dropped > 0) {
-    return `返回 ${Math.max(0, total - dropped)}/${total}`;
-  }
-  return `${artifactFiles.value.length} 个文件`;
+  return buildArtifactMetaText(artifactResult.value, artifactFiles.value.length);
 });
+
+const showMoreArtifacts = () => {
+  artifactVisibleCount.value = nextArtifactVisibleCount(
+    artifactVisibleCount.value,
+    artifactFiles.value.length,
+  );
+};
 
 const artifactFileTypeLabel = (file: GeneralAgentArtifactFile) => {
   const type = String(file.file_type || (file.filename.includes(".") ? file.filename.split(".").pop() : "") || "")
@@ -1088,9 +1101,14 @@ onBeforeUnmount(() => {
                 <MobileIcon name="download" />
               </button>
             </div>
-            <div v-if="hiddenArtifactCount" class="mobile-artifacts__more">
-              还有 {{ hiddenArtifactCount }} 个产物可在桌面端查看
-            </div>
+            <button
+              v-if="hiddenArtifactCount"
+              type="button"
+              class="mobile-artifacts__more"
+              @click="showMoreArtifacts"
+            >
+              展示更多（剩余 {{ hiddenArtifactCount }} 个）
+            </button>
           </div>
           <div v-else class="mobile-artifacts__empty">没有可返回的产物文件</div>
         </section>
@@ -1514,6 +1532,14 @@ onBeforeUnmount(() => {
   background: #fff8e9;
   color: #9c6410;
   padding: 8px 9px;
+}
+
+.mobile-artifacts__more {
+  align-self: center;
+  border: 1px solid #bfe8cf;
+  border-radius: 999px;
+  background: #fff;
+  padding: 7px 13px;
 }
 
 .mobile-artifacts__list {

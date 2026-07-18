@@ -69,6 +69,9 @@ function mobileHistoryFallback(): Plugin {
 
 export default defineConfig({
   base: "/mobile/",
+  // Do not share optimize-deps output with the desktop dev server. The two
+  // configs have different entry graphs and otherwise overwrite each other.
+  cacheDir: "node_modules/.vite-mobile",
   define: {
     __FRONTEND_VERSION__: JSON.stringify(pkg.version ?? "unknown"),
     __FRONTEND_COMMIT__: JSON.stringify(resolveFrontendCommit()),

@@ -130,6 +130,9 @@ function resolveVueOfficePptxEntry(): string {
 }
 
 export default defineConfig({
+  // Desktop and mobile dev servers run side-by-side. Keep their dependency
+  // pre-bundles isolated so one server cannot invalidate the other's graph.
+  cacheDir: 'node_modules/.vite-desktop',
   define: {
     __FRONTEND_VERSION__: JSON.stringify(FRONTEND_VERSION),
     __FRONTEND_COMMIT__: JSON.stringify(FRONTEND_COMMIT),
@@ -192,6 +195,10 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['tdesign-icons-vue-next'],
+    // These dependencies are only reached from lazy desktop routes/features.
+    // Pre-bundle them at startup so the first KB/wiki or Mermaid render does
+    // not trigger an optimizer generation change mid-navigation.
+    include: ['vue-virtual-scroller', 'mermaid'],
   },
   server: {
     port: 5177,

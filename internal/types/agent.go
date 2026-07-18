@@ -26,6 +26,10 @@ type AgentConfig struct {
 	// DocumentTemplate is scoped to AgentTypeDocumentProcessingAgent and carries
 	// template requirement/reference files into the Claude SDK sidecar.
 	DocumentTemplate *DocumentTemplateConfig `json:"document_template,omitempty"`
+	// KnowledgeManagement is the effective, current-turn mutation scope for a
+	// knowledge-base-manager. It is runtime-only and never loaded directly from
+	// the persisted agent JSON.
+	KnowledgeManagement *KnowledgeManagementRuntimeScope `json:"knowledge_management,omitempty"`
 	// Deprecated: Use SystemPrompt instead. Kept for backward compatibility during migration.
 	SystemPromptWebEnabled    string        `json:"system_prompt_web_enabled,omitempty"`     // Deprecated: Custom prompt when web search is enabled
 	SystemPromptWebDisabled   string        `json:"system_prompt_web_disabled,omitempty"`    // Deprecated: Custom prompt when web search is disabled

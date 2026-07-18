@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"strconv"
@@ -131,22 +132,35 @@ func (c *Client) ChatStream(ctx context.Context, payload ChatPayload, onEvent fu
 }
 
 func (c *Client) Download(ctx context.Context, runID, token string) ([]byte, error) {
+	data, _, err := c.DownloadWithName(ctx, runID, token)
+	return data, err
+}
+
+func (c *Client) DownloadWithName(ctx context.Context, runID, token string) ([]byte, string, error) {
 	url := fmt.Sprintf("%s/v1/runs/%s/files/%s", c.baseURL, runID, token)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("general agent download failed: status=%d body=%s", resp.StatusCode, string(data))
+		return nil, "", fmt.Errorf("general agent download failed: status=%d body=%s", resp.StatusCode, string(data))
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	fileName := ""
+	if _, params, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Disposition")); parseErr == nil {
+		fileName = strings.TrimSpace(params["filename"])
+	}
+	return data, fileName, nil
 }

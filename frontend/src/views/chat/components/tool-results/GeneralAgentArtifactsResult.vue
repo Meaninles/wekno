@@ -17,7 +17,7 @@
     <p v-if="data.summary" class="general-artifacts__summary">{{ data.summary }}</p>
 
     <div class="general-artifacts__files">
-      <div v-for="file in files" :key="file.artifact_id" class="general-artifacts__file">
+      <div v-for="file in visibleFiles" :key="file.artifact_id" class="general-artifacts__file">
         <div class="general-artifacts__file-main">
           <div class="general-artifacts__file-icon">{{ fileTypeLabel(artifactFileType(file)) }}</div>
           <div class="general-artifacts__file-text">
@@ -59,6 +59,11 @@
             入库
           </t-button>
         </div>
+      </div>
+      <div v-if="hiddenArtifactCount > 0" class="general-artifacts__more">
+        <t-button variant="outline" size="small" @click="showMoreArtifacts">
+          展示更多（剩余 {{ hiddenArtifactCount }} 个）
+        </t-button>
       </div>
       <div v-if="files.length === 0" class="general-artifacts__empty">
         没有可返回的产物文件。
@@ -138,6 +143,13 @@ import {
   normalizePreviewFileType,
 } from '@/utils/documentPreview';
 import type { GeneralAgentArtifactFile, GeneralAgentArtifactsData } from '@/types/tool-results';
+import {
+  ARTIFACT_PAGE_SIZE,
+  artifactMetaText,
+  nextArtifactVisibleCount,
+  remainingArtifactCount,
+  visibleArtifacts,
+} from '@/custom/modules/generalagent/artifactPagination';
 
 const props = defineProps<{
   data: GeneralAgentArtifactsData;
@@ -168,12 +180,15 @@ const previewFile = ref<GeneralAgentArtifactFile | null>(null);
 const previewBlob = ref<Blob | null>(null);
 const selectedKbId = ref('');
 const knowledgeBases = ref<KnowledgeBaseOption[]>([]);
+const visibleCount = ref(ARTIFACT_PAGE_SIZE);
 
 onMounted(() => {
   editorResources.ensureParserEngines().catch(() => {});
 });
 
 const files = computed(() => props.data.artifacts || []);
+const visibleFiles = computed(() => visibleArtifacts(files.value, visibleCount.value));
+const hiddenArtifactCount = computed(() => remainingArtifactCount(files.value.length, visibleFiles.value.length));
 const notice = computed(() => props.data.notice || '');
 const noticeTheme = computed(() => props.data.persist_failed ? 'error' : 'warning');
 const isEmbedMode = computed(() => props.embeddedMode === true);
@@ -186,13 +201,7 @@ const canUseEmbedDownload = computed(() => {
     && !!props.embedSessionSig;
 });
 const metaText = computed(() => {
-  const total = Number(props.data.artifact_original_count || 0);
-  const dropped = Number(props.data.artifact_dropped_count || 0);
-  if (total > 0 && dropped > 0) {
-    const returned = Math.max(0, total - dropped);
-    return `返回 ${returned}/${total} 个文件`;
-  }
-  return `${files.value.length} 个文件`;
+  return artifactMetaText(props.data, files.value.length);
 });
 const canConfirm = computed(() => !!selectedFile.value && !!selectedKbId.value && !importing.value);
 const previewTitle = computed(() => previewFile.value?.filename ? `预览：${previewFile.value.filename}` : '预览');
@@ -228,6 +237,10 @@ function formatSize(size: number) {
 
 function shortSha(sha: string) {
   return sha.length > 12 ? sha.slice(0, 12) : sha;
+}
+
+function showMoreArtifacts() {
+  visibleCount.value = nextArtifactVisibleCount(visibleCount.value, files.value.length);
 }
 
 async function fetchBlob(file: GeneralAgentArtifactFile): Promise<Blob> {
@@ -440,6 +453,12 @@ async function handleImport() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.general-artifacts__more {
+  display: flex;
+  justify-content: center;
+  padding-top: 2px;
 }
 
 .general-artifacts__file {

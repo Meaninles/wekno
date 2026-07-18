@@ -28,6 +28,21 @@ func TestDedupeSidecarArtifactsByFilenameKeepLast(t *testing.T) {
 	}
 }
 
+func TestArtifactReturnPolicyRemovesCountLimitOnlyForKnowledgeBaseManager(t *testing.T) {
+	manager := artifactReturnPolicy(types.AgentTypeKnowledgeBaseManager)
+	if manager["artifact_count_limited"] != false || manager["max_artifact_count"] != nil {
+		t.Fatalf("manager policy = %#v, want unlimited artifact count", manager)
+	}
+	if manager["total_return_size_limit_bytes"] != int64(128*1024*1024) {
+		t.Fatalf("manager size limit = %v, want 128MB", manager["total_return_size_limit_bytes"])
+	}
+
+	general := artifactReturnPolicy(types.AgentTypeGeneralAgent)
+	if general["artifact_count_limited"] != true || general["max_artifact_count"] != 5 {
+		t.Fatalf("general policy = %#v, want five-artifact limit", general)
+	}
+}
+
 func TestBuildArtifactToolResultIncludesPersistFailureNotice(t *testing.T) {
 	data, output, emit := buildArtifactToolResult(&ChatResult{
 		ArtifactOriginalCount: 1,

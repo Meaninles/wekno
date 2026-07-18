@@ -9,8 +9,20 @@ import { get, post, put, del } from "../../utils/request";
 // 'table-analysis': 表格分析（通用运行时 + CSV/Excel + DuckDB SQL）
 // 'general-agent': 通用智能体（通用运行时 + WeKnora 能力桥）
 // 'document-processing-agent': 文档处理（通用运行时 + 文档产物能力）
+// 'knowledge-base-manager': 知识库管理（通用运行时 + 文档新增/先增后删替换/删除）
 // 'custom'       : 完全自定义（不应用预设）
-export type AgentType = 'rag-qa' | 'wiki-qa' | 'hybrid-rag-wiki' | 'data-analysis' | 'table-analysis' | 'general-agent' | 'document-processing-agent' | 'custom';
+export type AgentType = 'rag-qa' | 'wiki-qa' | 'hybrid-rag-wiki' | 'data-analysis' | 'table-analysis' | 'general-agent' | 'document-processing-agent' | 'knowledge-base-manager' | 'custom';
+
+export interface KnowledgeManagementPermissionSet {
+  add: boolean;
+  modify: boolean;
+  delete: boolean;
+}
+
+export interface KnowledgeManagementConfig {
+  default_permissions: KnowledgeManagementPermissionSet;
+  knowledge_base_overrides: Record<string, KnowledgeManagementPermissionSet>;
+}
 
 export interface CustomAgentConfig {
   // ===== 基础设置 =====
@@ -22,6 +34,7 @@ export interface CustomAgentConfig {
   system_prompt_id?: string;        // 引用的 prompt template ID（预设会填入此字段）
   context_template?: string;        // 上下文模板（普通模式）
   document_template?: DocumentTemplateConfig; // 文档处理智能体的 Word/Excel/PDF/PPT 模板设置
+  knowledge_management?: KnowledgeManagementConfig; // 知识库管理智能体的默认权限及逐库覆盖
 
   // ===== 模型设置 =====
   model_id?: string;
@@ -296,6 +309,7 @@ export interface AgentTypePresetConfig {
   supported_file_types?: string[];
   enable_artifacts?: boolean;
   document_template?: DocumentTemplateConfig;
+  knowledge_management?: KnowledgeManagementConfig;
   professional_skills_selection_mode?: 'all' | 'selected' | 'none';
   selected_professional_skills?: string[];
   kb_selection_mode?: 'all' | 'selected' | 'none';

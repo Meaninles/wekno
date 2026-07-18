@@ -303,6 +303,9 @@ func (s *sessionService) buildAgentConfig(
 
 	// Resolve knowledge bases using shared helper
 	agentConfig.KnowledgeBases, agentConfig.KnowledgeIDs = s.resolveKnowledgeBases(ctx, req)
+	if err := applyAgentRuntimeConfigHooks(ctx, req, agentConfig); err != nil {
+		return nil, err
+	}
 
 	// Use custom agent's allowed tools if specified, otherwise use defaults
 	if len(customAgent.Config.AllowedTools) > 0 {

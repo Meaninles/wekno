@@ -53,24 +53,29 @@ type AgentTypePresetEntry struct {
 // We mirror json tags (not yaml tags) directly from CustomAgentConfig so the
 // frontend can apply them via simple Object.assign.
 type AgentTypePresetConfig struct {
-	SystemPromptID                  string                  `yaml:"system_prompt_id"       json:"system_prompt_id,omitempty"`
-	Temperature                     float64                 `yaml:"temperature"            json:"temperature,omitempty"`
-	MaxIterations                   int                     `yaml:"max_iterations"         json:"max_iterations,omitempty"`
-	AllowedTools                    []string                `yaml:"allowed_tools"          json:"allowed_tools,omitempty"`
-	DBDataSources                   []string                `yaml:"db_data_sources"        json:"db_data_sources,omitempty"`
-	RetainRetrievalHistory          bool                    `yaml:"retain_retrieval_history" json:"retain_retrieval_history,omitempty"`
-	FAQPriorityEnabled              bool                    `yaml:"faq_priority_enabled"   json:"faq_priority_enabled,omitempty"`
-	FAQDirectAnswerThreshold        float64                 `yaml:"faq_direct_answer_threshold" json:"faq_direct_answer_threshold,omitempty"`
-	FAQScoreBoost                   float64                 `yaml:"faq_score_boost"       json:"faq_score_boost,omitempty"`
-	WebSearchEnabled                bool                    `yaml:"web_search_enabled"     json:"web_search_enabled,omitempty"`
-	ClaudeSDKWebSearchEnabled       bool                    `yaml:"claude_sdk_web_search_enabled" json:"claude_sdk_web_search_enabled,omitempty"`
-	WebFetchEnabled                 bool                    `yaml:"web_fetch_enabled"      json:"web_fetch_enabled,omitempty"`
-	WebFetchTopN                    int                     `yaml:"web_fetch_top_n"        json:"web_fetch_top_n,omitempty"`
-	SupportedFileTypes              []string                `yaml:"supported_file_types"   json:"supported_file_types,omitempty"`
-	EnableArtifacts                 bool                    `yaml:"enable_artifacts"       json:"enable_artifacts,omitempty"`
-	DocumentTemplate                *DocumentTemplateConfig `yaml:"document_template" json:"document_template,omitempty"`
-	ProfessionalSkillsSelectionMode string                  `yaml:"professional_skills_selection_mode" json:"professional_skills_selection_mode,omitempty"`
-	SelectedProfessionalSkills      []string                `yaml:"selected_professional_skills" json:"selected_professional_skills,omitempty"`
+	SystemPromptID                  string                     `yaml:"system_prompt_id"       json:"system_prompt_id,omitempty"`
+	Thinking                        *bool                      `yaml:"thinking"               json:"thinking,omitempty"`
+	Temperature                     float64                    `yaml:"temperature"            json:"temperature,omitempty"`
+	MaxCompletionTokens             int                        `yaml:"max_completion_tokens"  json:"max_completion_tokens,omitempty"`
+	MaxIterations                   int                        `yaml:"max_iterations"         json:"max_iterations,omitempty"`
+	LLMCallTimeout                  int                        `yaml:"llm_call_timeout"        json:"llm_call_timeout,omitempty"`
+	AllowedTools                    []string                   `yaml:"allowed_tools"          json:"allowed_tools,omitempty"`
+	DBDataSources                   []string                   `yaml:"db_data_sources"        json:"db_data_sources,omitempty"`
+	RetainRetrievalHistory          bool                       `yaml:"retain_retrieval_history" json:"retain_retrieval_history,omitempty"`
+	FAQPriorityEnabled              bool                       `yaml:"faq_priority_enabled"   json:"faq_priority_enabled,omitempty"`
+	FAQDirectAnswerThreshold        float64                    `yaml:"faq_direct_answer_threshold" json:"faq_direct_answer_threshold,omitempty"`
+	FAQScoreBoost                   float64                    `yaml:"faq_score_boost"       json:"faq_score_boost,omitempty"`
+	WebSearchEnabled                bool                       `yaml:"web_search_enabled"     json:"web_search_enabled,omitempty"`
+	ClaudeSDKWebSearchEnabled       bool                       `yaml:"claude_sdk_web_search_enabled" json:"claude_sdk_web_search_enabled,omitempty"`
+	WebFetchEnabled                 bool                       `yaml:"web_fetch_enabled"      json:"web_fetch_enabled,omitempty"`
+	WebFetchTopN                    int                        `yaml:"web_fetch_top_n"        json:"web_fetch_top_n,omitempty"`
+	HistoryTurns                    int                        `yaml:"history_turns"          json:"history_turns,omitempty"`
+	SupportedFileTypes              []string                   `yaml:"supported_file_types"   json:"supported_file_types,omitempty"`
+	EnableArtifacts                 bool                       `yaml:"enable_artifacts"       json:"enable_artifacts,omitempty"`
+	DocumentTemplate                *DocumentTemplateConfig    `yaml:"document_template" json:"document_template,omitempty"`
+	KnowledgeManagement             *KnowledgeManagementConfig `yaml:"knowledge_management" json:"knowledge_management,omitempty"`
+	ProfessionalSkillsSelectionMode string                     `yaml:"professional_skills_selection_mode" json:"professional_skills_selection_mode,omitempty"`
+	SelectedProfessionalSkills      []string                   `yaml:"selected_professional_skills" json:"selected_professional_skills,omitempty"`
 	// KBSelectionMode presets the KB picker mode: "all" | "selected" | "none".
 	// When empty, the user's current value stays untouched.
 	KBSelectionMode string `yaml:"kb_selection_mode" json:"kb_selection_mode,omitempty"`

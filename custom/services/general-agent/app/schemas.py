@@ -68,6 +68,12 @@ class RuntimeConfigSpec(BaseModel):
     faq_priority_enabled: bool = False
     faq_direct_answer_threshold: float = 0
     faq_score_boost: float = 0
+    knowledge_management: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("knowledge_management", mode="before")
+    @classmethod
+    def coerce_optional_dicts(cls, value: Any) -> Any:
+        return empty_dict_when_none(value)
 
     @field_validator(
         "allowed_tools",

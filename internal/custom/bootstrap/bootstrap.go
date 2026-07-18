@@ -23,6 +23,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
+	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
@@ -58,6 +59,7 @@ type Handlers struct {
 	chatShareService            *chatshare.Service
 	dbAnalyticsService          *dbanalytics.Service
 	generalAgentService         *generalagent.Service
+	kbManagerService            *kbmanager.Service
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
 	sessionStateService         *sessionstate.Service
@@ -97,6 +99,14 @@ func NewHandlers(
 	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
 	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
+	kbManagerService := kbmanager.NewService(
+		db,
+		knowledgeBaseService,
+		knowledgeService,
+		kbShareService,
+		tenantService,
+		generalAgentService,
+	)
 	iamService := iam.NewService(db, userService)
 	userGuideService := userguide.NewService(db, orgService, knowledgeBaseService, kbShareService)
 	scheduledChatService := scheduledchat.NewService(
@@ -128,6 +138,9 @@ func NewHandlers(
 		return nil, err
 	}
 	if err := generalAgentService.Migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err := kbManagerService.Migrate(ctx); err != nil {
 		return nil, err
 	}
 	if err := iamService.Migrate(ctx); err != nil {
@@ -197,15 +210,21 @@ func NewHandlers(
 	appservice.RegisterSelectedSkillContextResolver(skillHubService.SelectedSkillContext)
 	appservice.RegisterAllSkillContextResolver(skillHubService.AllSkillContext)
 	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentDefaultsService.ApplyReferenceModelDefaults)
+	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
+	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
+	sessionhandler.RegisterAgentQARunner(types.AgentTypeKnowledgeBaseManager, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeDocumentProcessingAgent, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeDataAnalysis, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeTableAnalysis, generalAgentService.Run)
 	appservice.RegisterRuntimeToolRecognizer(func(_ context.Context, config *types.AgentConfig, toolName string) bool {
 		if config == nil {
 			return false
+		}
+		if config.AgentType == types.AgentTypeKnowledgeBaseManager && kbmanager.IsManagementTool(toolName) {
+			return true
 		}
 		if supportsDBAnalyticsRuntimeTools(config.AgentType) {
 			return toolName == dbanalytics.ToolDBCatalog ||
@@ -215,6 +234,33 @@ func NewHandlers(
 		return false
 	})
 	appservice.RegisterRuntimeToolRegistrar(func(ctx context.Context, registry *agenttools.ToolRegistry, config *types.AgentConfig, sessionID string) error {
+		if config != nil && config.AgentType == types.AgentTypeKnowledgeBaseManager && config.KnowledgeManagement != nil {
+			allowed := make(map[string]bool, len(config.AllowedTools))
+			for _, toolName := range config.AllowedTools {
+				allowed[toolName] = true
+			}
+			scope := kbmanager.ToolScope{
+				AgentID:       config.AgentID,
+				AgentTenantID: config.AgentTenantID,
+				SessionID:     sessionID,
+				Runtime:       config.KnowledgeManagement,
+			}
+			if allowed[kbmanager.ToolListDocuments] {
+				registry.RegisterTool(kbmanager.NewListDocumentsTool(kbManagerService, scope))
+			}
+			if allowed[kbmanager.ToolMutationStatus] {
+				registry.RegisterTool(kbmanager.NewMutationStatusTool(kbManagerService, scope))
+			}
+			if allowed[kbmanager.ToolAddDocument] && runtimeHasPermission(config.KnowledgeManagement, "add") {
+				registry.RegisterTool(kbmanager.NewAddDocumentTool(kbManagerService, scope))
+			}
+			if allowed[kbmanager.ToolReplaceDocument] && runtimeHasPermission(config.KnowledgeManagement, "modify") {
+				registry.RegisterTool(kbmanager.NewReplaceDocumentTool(kbManagerService, scope))
+			}
+			if allowed[kbmanager.ToolDeleteDocument] && runtimeHasPermission(config.KnowledgeManagement, "delete") {
+				registry.RegisterTool(kbmanager.NewDeleteDocumentTool(kbManagerService, scope))
+			}
+		}
 		if config == nil || len(config.DBDataSources) == 0 {
 			return nil
 		}
@@ -265,6 +311,7 @@ func NewHandlers(
 		chatShareService:            chatShareService,
 		dbAnalyticsService:          dbAnalyticsService,
 		generalAgentService:         generalAgentService,
+		kbManagerService:            kbManagerService,
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
 		sessionStateService:         sessionStateService,
@@ -276,7 +323,31 @@ func NewHandlers(
 func supportsDBAnalyticsRuntimeTools(agentType string) bool {
 	return agentType == types.AgentTypeDataAnalysis ||
 		agentType == types.AgentTypeGeneralAgent ||
+		agentType == types.AgentTypeKnowledgeBaseManager ||
 		agentType == types.AgentTypeDocumentProcessingAgent
+}
+
+func runtimeHasPermission(scope *types.KnowledgeManagementRuntimeScope, permission string) bool {
+	if scope == nil {
+		return false
+	}
+	for _, value := range scope.EffectivePermissions {
+		switch permission {
+		case "add":
+			if value.Normalize().Add {
+				return true
+			}
+		case "modify":
+			if value.Normalize().Modify {
+				return true
+			}
+		case "delete":
+			if value.Normalize().Delete {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func StartSchedulers(handlers *Handlers) {
@@ -296,6 +367,9 @@ func StartSchedulers(handlers *Handlers) {
 	}
 	if handlers.answerFeedbackService != nil {
 		handlers.answerFeedbackService.Start()
+	}
+	if handlers.kbManagerService != nil {
+		handlers.kbManagerService.Start()
 	}
 }
 

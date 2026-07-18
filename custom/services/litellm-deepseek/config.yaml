@@ -1,0 +1,104 @@
+model_list:
+  # Public model used by WeKnora. This deployment intentionally calls the
+  # internal OpenAI-format deployment below, so /v1/messages is rebuilt from
+  # normalized OpenAI chunks instead of passing the upstream Anthropic SSE
+  # through unchanged.
+  - model_name: deepseek-v4-flash-int8
+    litellm_params:
+      model: openai/deepseek-v4-flash-int8-anthropic-upstream
+      api_base: http://127.0.0.1:4000/v1
+      api_key: os.environ/LITELLM_MASTER_KEY
+      timeout: 600
+      stream_timeout: 600
+    model_info:
+      mode: chat
+      max_input_tokens: 200000
+      max_output_tokens: 32000
+      supports_function_calling: true
+      supports_tool_choice: true
+      supports_vision: false
+      supports_reasoning: false
+
+  # Claude Agent SDK receives the model's canonical WeKnora name. Keep this
+  # alias in addition to the short diagnostic name above so callers do not
+  # have to rewrite their configured model identity.
+  - model_name: /models/DeepSeek-V4-Flash-INT8
+    litellm_params:
+      model: openai/deepseek-v4-flash-int8-anthropic-upstream
+      api_base: http://127.0.0.1:4000/v1
+      api_key: os.environ/LITELLM_MASTER_KEY
+      timeout: 600
+      stream_timeout: 600
+    model_info:
+      mode: chat
+      max_input_tokens: 200000
+      max_output_tokens: 32000
+      supports_function_calling: true
+      supports_tool_choice: true
+      supports_vision: false
+      supports_reasoning: false
+
+  # Internal deployment. Calling it through /v1/chat/completions makes
+  # LiteLLM parse the upstream Anthropic stream into normalized OpenAI chunks.
+  - model_name: deepseek-v4-flash-int8-anthropic-upstream
+    litellm_params:
+      model: anthropic//models/DeepSeek-V4-Flash-INT8
+      api_base: os.environ/DEEPSEEK_ANTHROPIC_API_BASE
+      api_key: os.environ/DEEPSEEK_ANTHROPIC_API_KEY
+      timeout: 600
+      stream_timeout: 600
+    model_info:
+      mode: chat
+      max_input_tokens: 200000
+      max_output_tokens: 32000
+      supports_function_calling: true
+      supports_tool_choice: true
+      supports_vision: false
+      supports_reasoning: false
+
+  # Keep the former OpenAI-compatible route available for diagnosis/fallback
+  # once that upstream becomes healthy again. It is not used by the public
+  # model above.
+  - model_name: deepseek-v4-flash-int8-openai-upstream
+    litellm_params:
+      model: hosted_vllm//models/DeepSeek-V4-Flash-INT8
+      api_base: os.environ/DEEPSEEK_OPENAI_API_BASE
+      api_key: os.environ/DEEPSEEK_OPENAI_API_KEY
+      timeout: 600
+      stream_timeout: 600
+    model_info:
+      mode: chat
+      max_input_tokens: 1048576
+      max_output_tokens: 1048576
+      supports_function_calling: true
+      supports_tool_choice: true
+      supports_vision: false
+      supports_reasoning: false
+
+  - model_name: Qwen3.6-27B-tool
+    litellm_params:
+      model: openai/Qwen3.6-27B-tool
+      api_base: os.environ/QWEN_API_BASE
+      api_key: os.environ/QWEN_API_KEY
+      timeout: 600
+      stream_timeout: 600
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+    model_info:
+      mode: chat
+      max_input_tokens: 262144
+      max_output_tokens: 262144
+      supports_function_calling: true
+      supports_tool_choice: true
+      supports_vision: false
+      supports_reasoning: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  callbacks:
+    - stream_normalizer.stream_normalizer
+  drop_params: true
+  set_verbose: false

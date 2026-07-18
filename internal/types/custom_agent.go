@@ -68,6 +68,9 @@ const (
 	// WeKnora's native retrieval, tools, MCP services, Skills, multimodal inputs
 	// and database analytics source bindings.
 	AgentTypeGeneralAgent = "general-agent"
+	// AgentTypeKnowledgeBaseManager runs on the general-agent runtime and adds
+	// server-authorized whole-document inventory/add/replace/delete operations.
+	AgentTypeKnowledgeBaseManager = "knowledge-base-manager"
 	// AgentTypeCustom is the "no preset" option; user-configured end to end.
 	AgentTypeCustom = "custom"
 )
@@ -76,6 +79,7 @@ const (
 // Claude Agent SDK sidecar instead of the legacy in-process ReAct engine.
 func IsClaudeSDKAgentType(agentType string) bool {
 	return agentType == AgentTypeGeneralAgent ||
+		agentType == AgentTypeKnowledgeBaseManager ||
 		agentType == AgentTypeDocumentProcessingAgent ||
 		agentType == AgentTypeDataAnalysis ||
 		agentType == AgentTypeTableAnalysis
@@ -143,6 +147,10 @@ type CustomAgentConfig struct {
 	// only for AgentTypeDocumentProcessingAgent; an explicit empty value means
 	// the user intentionally removed all defaults.
 	DocumentTemplate *DocumentTemplateConfig `yaml:"document_template" json:"document_template,omitempty"`
+	// KnowledgeManagement configures the selected-KB mutation ceiling for the
+	// knowledge-base-manager type. Runtime tools still intersect it with the
+	// current turn selection and the caller's live platform permissions.
+	KnowledgeManagement *KnowledgeManagementConfig `yaml:"knowledge_management" json:"knowledge_management,omitempty"`
 
 	// ===== Model Settings =====
 	// Model ID to use for conversations

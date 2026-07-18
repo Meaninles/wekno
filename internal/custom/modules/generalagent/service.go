@@ -154,6 +154,8 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	userID, _ := types.UserIDFromContext(ctx)
 	active := &activeRun{
 		runID:              runID,
+		client:             sidecarClient,
+		originalInputFiles: originalInputFilesByID(originalInputFiles),
 		ctx:                ctx,
 		eventBus:           eventBus,
 		registry:           registry,
@@ -904,15 +906,25 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 			"faq_direct_answer_threshold":      config.FAQDirectAnswerThreshold,
 			"faq_score_boost":                  config.FAQScoreBoost,
 			"artifacts_enabled":                config.EnableArtifacts,
-			"artifact_return_policy": map[string]any{
-				"max_artifact_count":            5,
-				"total_return_size_limit_bytes": int64(128 * 1024 * 1024),
-				"order":                         "important files first",
-			},
+			"artifact_return_policy":           artifactReturnPolicy(config.AgentType),
 		}
 		out["visible_resources"] = s.visibleResources(ctx, config)
 	}
 	return out
+}
+
+func artifactReturnPolicy(agentType string) map[string]any {
+	policy := map[string]any{
+		"max_artifact_count":            5,
+		"artifact_count_limited":        true,
+		"total_return_size_limit_bytes": int64(128 * 1024 * 1024),
+		"order":                         "important files first",
+	}
+	if agentType == types.AgentTypeKnowledgeBaseManager {
+		policy["max_artifact_count"] = nil
+		policy["artifact_count_limited"] = false
+	}
+	return policy
 }
 
 type visibleDBSource struct {
@@ -1344,6 +1356,7 @@ func runtimeConfigSpec(c *types.AgentConfig) RuntimeConfigSpec {
 		FAQPriorityEnabled:          c.FAQPriorityEnabled,
 		FAQDirectAnswerThreshold:    c.FAQDirectAnswerThreshold,
 		FAQScoreBoost:               c.FAQScoreBoost,
+		KnowledgeManagement:         c.KnowledgeManagement,
 	}
 }
 

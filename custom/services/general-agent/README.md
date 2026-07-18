@@ -1,13 +1,13 @@
 # WeKnora 通用智能体旁路服务
 
-本服务承载 `agent_type=general-agent`、`agent_type=data-analysis` 和 `agent_type=table-analysis` 的 Claude Agent SDK 推理循环。
+本服务承载 `agent_type=general-agent`、`agent_type=knowledge-base-manager`、`agent_type=data-analysis` 和 `agent_type=table-analysis` 的 Claude Agent SDK 推理循环。
 
 边界：
 
 - 旁路服务不直接连接 WeKnora 数据库、对象存储、MCP 服务或业务数据源。
 - WeKnora Go 后端会为每次运行下发允许使用的工具 schema。
 - 工具执行始终通过 `/api/v1/custom/general-agent/internal/tools/call` 回调 Go 后端。
-- 产物生成只由 `enable_artifacts` 控制。提示词要求最多 5 个产物、总大小小于 128MB，并优先生成重要文件；旁路服务在前端持久化前按同一规则保留产物。
+- 产物生成只由 `enable_artifacts` 控制。通常最多返回 5 个产物；`knowledge-base-manager` 类型不限制产物数量。所有类型仍要求单次返回产物总大小小于 128MB，旁路服务会在前端持久化前应用对应规则。
 - `agent_type=document-processing-agent` 使用相邻的文档处理镜像，不使用本容器。
 
 本地 Docker：

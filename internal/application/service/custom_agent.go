@@ -24,6 +24,9 @@ var (
 	ErrAgentNameRequired            = errors.New("agent name is required")
 	ErrAgentDatabaseSourcesRequired = errors.New("data-analysis agents must bind at least one data source")
 	ErrAgentDocumentTemplateInvalid = errors.New("document template config is invalid")
+	// ErrAgentCustomConfigInvalid wraps validation failures returned by custom
+	// agent-type normalizers so the HTTP layer can consistently return 400.
+	ErrAgentCustomConfigInvalid = errors.New("custom agent config is invalid")
 )
 
 var dbAnalysisToolNames = map[string]bool{
@@ -35,6 +38,7 @@ var dbAnalysisToolNames = map[string]bool{
 func agentSupportsDBDataSources(agentType string) bool {
 	return agentType == types.AgentTypeDataAnalysis ||
 		agentType == types.AgentTypeGeneralAgent ||
+		agentType == types.AgentTypeKnowledgeBaseManager ||
 		agentType == types.AgentTypeDocumentProcessingAgent
 }
 
@@ -207,6 +211,9 @@ func (s *customAgentService) CreateAgent(ctx context.Context, agent *types.Custo
 		return nil, err
 	}
 	if err := normalizeCustomAgentDataSourceConfig(agent); err != nil {
+		return nil, err
+	}
+	if err := applyCustomAgentConfigNormalizers(ctx, agent); err != nil {
 		return nil, err
 	}
 
@@ -399,6 +406,9 @@ func (s *customAgentService) UpdateAgent(ctx context.Context, agent *types.Custo
 	if err := normalizeCustomAgentDataSourceConfig(existingAgent); err != nil {
 		return nil, err
 	}
+	if err := applyCustomAgentConfigNormalizers(ctx, existingAgent); err != nil {
+		return nil, err
+	}
 
 	logger.Infof(ctx, "Updating custom agent, ID: %s, name: %s", agent.ID, agent.Name)
 
@@ -481,6 +491,9 @@ func (s *customAgentService) updateBuiltinAgent(ctx context.Context, agent *type
 		return nil, err
 	}
 	if err := normalizeCustomAgentDataSourceConfig(newAgent); err != nil {
+		return nil, err
+	}
+	if err := applyCustomAgentConfigNormalizers(ctx, newAgent); err != nil {
 		return nil, err
 	}
 	resolvedAgent, err := applyBuiltinAgentConfigOverlays(ctx, newAgent, tenantID)
@@ -592,6 +605,9 @@ func (s *customAgentService) CopyAgent(ctx context.Context, id string) (*types.C
 		return nil, err
 	}
 	if err := normalizeCustomAgentDataSourceConfig(newAgent); err != nil {
+		return nil, err
+	}
+	if err := applyCustomAgentConfigNormalizers(ctx, newAgent); err != nil {
 		return nil, err
 	}
 

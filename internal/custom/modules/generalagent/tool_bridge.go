@@ -20,6 +20,8 @@ import (
 
 type activeRun struct {
 	runID              string
+	client             *Client
+	originalInputFiles map[string]OriginalInputFileSpec
 	ctx                context.Context
 	eventBus           *event.EventBus
 	registry           interfaces.AgentToolRegistry
@@ -148,6 +150,7 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 	start := time.Now()
 	execTimeout := run.toolTimeoutFor(req.ToolName)
 	execCtx := agenttools.WithToolExecContext(run.ctx, &agenttools.ToolExecContext{
+		RunID:              run.runID,
 		SessionID:          run.sessionID,
 		AssistantMessageID: run.assistantMessageID,
 		RequestID:          run.requestID,

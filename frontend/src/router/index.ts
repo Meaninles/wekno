@@ -182,6 +182,12 @@ const router = createRouter({
           meta: { requiresInit: true, requiresAuth: true }
         },
         {
+          path: "chat/:chatid/share",
+          name: "chatShareSelect",
+          component: () => import("../custom/modules/chatshare/views/ChatShareSelectView.vue"),
+          meta: { requiresInit: true, requiresAuth: true }
+        },
+        {
           path: "chat/:chatid",
           name: "chat",
           component: () => import("../views/chat/index.vue"),

@@ -39,7 +39,10 @@ import (
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-const defaultAPIBaseURL = "https://qyapi.weixin.qq.com"
+const (
+	defaultAPIBaseURL   = "https://qyapi.weixin.qq.com"
+	wecomPKCS7BlockSize = 32
+)
 
 // extraHostFromEndpoint returns the lowercased hostname from endpoint if it
 // differs from defaultEndpoint; otherwise returns "". Used to extend the SSRF
@@ -277,17 +280,53 @@ func (a *WebhookAdapter) SendReply(ctx context.Context, incoming *im.IncomingMes
 		return fmt.Errorf("get access token: %w", err)
 	}
 
+	chunks := splitWeComMarkdown(reply.Content)
+	if len(chunks) > 1 {
+		logger.Infof(ctx, "[WeCom] Splitting markdown reply: bytes=%d chunks=%d", len(reply.Content), len(chunks))
+	}
+
 	// For group chats, try sending to the group via appchat API first.
 	// This works for groups created via /cgi-bin/appchat/create.
 	if incoming.ChatType == im.ChatTypeGroup && incoming.ChatID != "" {
-		if err := a.sendToAppChat(ctx, accessToken, incoming.ChatID, reply); err == nil {
-			return nil
+		for i, content := range chunks {
+			chunkReply := cloneReplyWithContent(reply, content)
+			if err := a.sendToAppChat(ctx, accessToken, incoming.ChatID, chunkReply); err != nil {
+				// Preserve the existing direct-message fallback when the group
+				// route fails before any content has been delivered. Once a
+				// chunk is sent, do not resend the whole answer privately.
+				if i == 0 {
+					logger.Debugf(ctx, "[WeCom] appchat/send failed for chat=%s, falling back to touser: %v", incoming.ChatID, err)
+					return a.sendChunksToUser(ctx, accessToken, incoming.UserID, reply, chunks)
+				}
+				return fmt.Errorf("send appchat chunk %d/%d: %w", i+1, len(chunks), err)
+			}
 		}
-		logger.Debugf(ctx, "[WeCom] appchat/send failed for chat=%s, falling back to touser: %v", incoming.ChatID, err)
+		return nil
 	}
 
 	// Fallback (or direct message): send to the user directly.
-	return a.sendToUser(ctx, accessToken, incoming.UserID, reply)
+	return a.sendChunksToUser(ctx, accessToken, incoming.UserID, reply, chunks)
+}
+
+func cloneReplyWithContent(reply *im.ReplyMessage, content string) *im.ReplyMessage {
+	cloned := *reply
+	cloned.Content = content
+	return &cloned
+}
+
+func (a *WebhookAdapter) sendChunksToUser(
+	ctx context.Context,
+	accessToken string,
+	userID string,
+	reply *im.ReplyMessage,
+	chunks []string,
+) error {
+	for i, content := range chunks {
+		if err := a.sendToUser(ctx, accessToken, userID, cloneReplyWithContent(reply, content)); err != nil {
+			return fmt.Errorf("send user chunk %d/%d: %w", i+1, len(chunks), err)
+		}
+	}
+	return nil
 }
 
 // sendToAppChat sends a message to a WeCom group chat via the appchat API.
@@ -458,9 +497,10 @@ func (a *WebhookAdapter) decrypt(encrypted string) ([]byte, error) {
 	mode := cipher.NewCBCDecrypter(block, iv)
 	mode.CryptBlocks(ciphertext, ciphertext)
 
-	// Remove and verify PKCS#7 padding
+	// WeCom uses PKCS#7 padding to a 32-byte boundary. This is distinct
+	// from AES's 16-byte cipher block size.
 	padLen := int(ciphertext[len(ciphertext)-1])
-	if padLen > aes.BlockSize || padLen == 0 || padLen > len(ciphertext) {
+	if padLen > wecomPKCS7BlockSize || padLen == 0 || padLen > len(ciphertext) {
 		return nil, fmt.Errorf("invalid padding")
 	}
 	for i := 0; i < padLen; i++ {

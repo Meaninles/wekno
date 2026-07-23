@@ -168,6 +168,10 @@ type QuestionGenerationPayload struct {
 	// knowledge. Empty when the batch is at a document boundary.
 	PrevChunkID string `json:"prev_chunk_id,omitempty"`
 	NextChunkID string `json:"next_chunk_id,omitempty"`
+	// SparseSample means ChunkIDs are deterministic strata from a much larger
+	// logical document, not adjacent chunks. The worker must not present
+	// neighboring sampled entries as surrounding context.
+	SparseSample bool `json:"sparse_sample,omitempty"`
 }
 
 // SummaryGenerationPayload represents the summary generation task payload

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -17,13 +18,20 @@ var listKnowledgeChunksTool = BaseTool{
 
 ## Use After grep_chunks or knowledge_search:
 - **FAQ hit** (type faq): list_knowledge_chunks(faq_id="<chunk_id from search>") — reads that one FAQ entry with answers from metadata.
-- **Document hit**: list_knowledge_chunks(knowledge_id="<document id>") — pages through all chunks.
+- **Exact document hit (preferred)**: list_knowledge_chunks(chunk_id="<chunk_id from search>") — deep-reads that exact chunk.
+- **Whole document**: list_knowledge_chunks(knowledge_id="<document id>") — pages through all chunks.
 
 ## Parameters (provide exactly one id target):
 - faq_id (optional): FAQ entry ID from grep_chunks / knowledge_search.
 - chunk_id (optional): Single non-FAQ chunk ID (do not use for FAQ — use faq_id).
 - knowledge_id (optional): Document/knowledge ID to page through all chunks.
 - limit / offset: Only for knowledge_id paging (default limit 20, max 100).
+- Never derive offset from chunk_index. chunk_index is a logical coordinate and
+  can be sparse in historical documents; offset is a zero-based ordinal in the
+  filtered document stream. Follow next_offset from the previous page.
+- chunk_index is never a page number, spreadsheet row, source line, JSON item,
+  image frame/tile, or audio timestamp. Cite source_locator and the record keys
+  present in content; source_locator always refers to the original unsplit file.
 
 ## Output:
 Full chunk content. FAQ entries include <faq> with <answer> from metadata.`,
@@ -51,7 +59,7 @@ Full chunk content. FAQ entries include <faq> with <answer> from metadata.`,
     },
     "offset": {
       "type": "integer",
-      "description": "Start position when using knowledge_id (default 0)",
+      "description": "Zero-based ordinal start position for knowledge_id paging (default 0). Never copy chunk_index into offset; use next_offset returned by the previous page.",
       "default": 0,
       "minimum": 0
     }
@@ -229,7 +237,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 
 	knowledgeTitle := t.lookupKnowledgeTitle(ctx, knowledgeID)
 
-	output := t.buildOutput(knowledgeID, knowledgeTitle, totalChunks, fetched, chunks)
+	output := t.buildOutput(knowledgeID, knowledgeTitle, totalChunks, fetched, offset, chunks)
 
 	formattedChunks := make([]map[string]interface{}, 0, len(chunks))
 	for idx, c := range chunks {
@@ -244,6 +252,9 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 			"start_at":        c.StartAt,
 			"end_at":          c.EndAt,
 			"parent_chunk_id": c.ParentChunkID,
+		}
+		if locator := sourcerefs.ModelSourceLocator(c.SourceLocator); locator != "" {
+			chunkData["source_locator"] = json.RawMessage(locator)
 		}
 
 		appendFAQChunkData(chunkData, c)
@@ -335,7 +346,7 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 	}
 
 	knowledgeTitle := t.lookupKnowledgeTitle(ctx, chunk.KnowledgeID)
-	output := t.buildOutput(chunk.KnowledgeID, knowledgeTitle, 1, 1, chunks)
+	output := t.buildOutput(chunk.KnowledgeID, knowledgeTitle, 1, 1, 0, chunks)
 
 	formattedChunks := []map[string]interface{}{
 		{
@@ -347,6 +358,9 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 			"knowledge_id":   chunk.KnowledgeID,
 			"knowledge_base": chunk.KnowledgeBaseID,
 		},
+	}
+	if locator := sourcerefs.ModelSourceLocator(chunk.SourceLocator); locator != "" {
+		formattedChunks[0]["source_locator"] = json.RawMessage(locator)
 	}
 	appendFAQChunkData(formattedChunks[0], chunk)
 	normalizeFAQChunkDataMap(formattedChunks[0], chunk)
@@ -393,6 +407,7 @@ func (t *ListKnowledgeChunksTool) buildOutput(
 	knowledgeTitle string,
 	total int64,
 	fetched int,
+	offset int,
 	chunks []*types.Chunk,
 ) string {
 	var b strings.Builder
@@ -401,8 +416,13 @@ func (t *ListKnowledgeChunksTool) buildOutput(
 	if knowledgeTitle != "" {
 		titleAttr = fmt.Sprintf(" title=\"%s\"", knowledgeTitle)
 	}
-	fmt.Fprintf(&b, "<knowledge_chunks knowledge_id=\"%s\"%s total=\"%d\" fetched=\"%d\">\n",
-		knowledgeID, titleAttr, total, fetched)
+	fmt.Fprintf(&b, "<knowledge_chunks knowledge_id=\"%s\"%s total=\"%d\" fetched=\"%d\" offset=\"%d\">\n",
+		knowledgeID, titleAttr, total, fetched, offset)
+	b.WriteString(
+		"<coordinate_instruction>chunk_index is a logical chunk ordinal only and MUST NOT be reported as a page, " +
+			"spreadsheet row, source line, JSON item, image frame/tile, or audio timestamp. " +
+			"For citations use source_locator from the original unsplit file and record keys in content.</coordinate_instruction>\n",
+	)
 
 	if fetched == 0 {
 		b.WriteString("</knowledge_chunks>")
@@ -423,13 +443,21 @@ func (t *ListKnowledgeChunksTool) buildOutput(
 			fmt.Fprintf(&b, "<chunk chunk_id=\"%s\" chunk_index=\"%d\" type=\"%s\">\n",
 				c.ID, c.ChunkIndex, c.ChunkType)
 		}
+		if locator := sourcerefs.ModelSourceLocator(c.SourceLocator); locator != "" {
+			fmt.Fprintf(&b, "<source_locator>%s</source_locator>\n", xmlEscape(locator))
+		}
 		fmt.Fprintf(&b, "<content>%s</content>\n", summarizeContent(c.Content))
 		writeChunkImagesXML(&b, c)
 		b.WriteString("</chunk>\n")
 	}
 
-	if int64(fetched) < total {
-		fmt.Fprintf(&b, "<pagination remaining=\"%d\" />\n", int64(total)-int64(fetched))
+	nextOffset := int64(offset + fetched)
+	if nextOffset < total {
+		fmt.Fprintf(
+			&b,
+			"<pagination next_offset=\"%d\" remaining=\"%d\" instruction=\"use next_offset exactly; never use chunk_index as offset\" />\n",
+			nextOffset, total-nextOffset,
+		)
 	}
 
 	b.WriteString("</knowledge_chunks>")

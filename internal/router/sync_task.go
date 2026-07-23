@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
 	"github.com/Tencent/WeKnora/internal/custom/modules/terminalrepair"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -702,6 +703,8 @@ func RegisterSyncHandlers(params SyncTaskParams) {
 	params.Executor.RegisterHandler(types.TypeChunkExtract, params.ChunkExtractor.Handle)
 	params.Executor.RegisterHandler(types.TypeDataTableSummary, params.DataTableSummary.Handle)
 	params.Executor.RegisterHandler(types.TypeDocumentProcess, params.KnowledgeService.ProcessDocument)
+	params.Executor.RegisterHandler(documentsplit.TypePartProcess, params.KnowledgeService.ProcessDocumentSplitPart)
+	params.Executor.RegisterHandler(documentsplit.TypeFinalize, params.KnowledgeService.ProcessDocumentSplitFinalize)
 	params.Executor.RegisterHandler(types.TypeManualProcess, params.KnowledgeService.ProcessManualUpdate)
 	params.Executor.RegisterHandler(types.TypeFAQImport, params.KnowledgeService.ProcessFAQImport)
 	params.Executor.RegisterHandler(types.TypeQuestionGeneration, params.KnowledgeService.ProcessQuestionGeneration)

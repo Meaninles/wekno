@@ -170,6 +170,10 @@ type KnowledgeService interface {
 	ProcessManualUpdate(ctx context.Context, t *asynq.Task) error
 	// ProcessDocument handles Asynq document processing tasks
 	ProcessDocument(ctx context.Context, t *asynq.Task) error
+	// ProcessDocumentSplitPart parses and stages one bounded physical part.
+	ProcessDocumentSplitPart(ctx context.Context, t *asynq.Task) error
+	// ProcessDocumentSplitFinalize publishes one complete logical generation.
+	ProcessDocumentSplitFinalize(ctx context.Context, t *asynq.Task) error
 	// ProcessFAQImport handles Asynq FAQ import tasks
 	ProcessFAQImport(ctx context.Context, t *asynq.Task) error
 	// ProcessQuestionGeneration handles Asynq question generation tasks

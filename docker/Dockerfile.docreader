@@ -108,6 +108,7 @@ RUN apt-get update && apt-get install -y \
     libglu1-mesa \
     libsm6 \
     libreoffice \
+    ffmpeg \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -148,6 +149,7 @@ RUN python -m playwright install-deps webkit
 
 COPY docreader/pyproject.toml docreader/uv.lock ./
 COPY --from=builder /app/docreader docreader
+COPY custom/services/document-splitter/weknora_document_splitter /app/weknora_document_splitter
 
 # 创建共享临时图片目录
 RUN mkdir -p /tmp/docreader

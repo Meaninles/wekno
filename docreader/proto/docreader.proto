@@ -13,6 +13,13 @@ service DocReader {
   // unary message-size cap) can be returned without RESOURCE_EXHAUSTED and
   // with bounded memory on both ends.
   rpc ReadStream(ReadRequest) returns (stream ReadStreamResponse) {}
+  // Split is a bounded-memory bidirectional stream used before parsing a
+  // document that exceeds one or more parser workload limits. The client
+  // sends one header followed by source byte frames. The server writes the
+  // source to an isolated temporary file, creates format-aware physical
+  // parts, and streams back a ZIP archive containing manifest.json and the
+  // parts. Individual gRPC frames stay small regardless of source size.
+  rpc Split(stream SplitRequest) returns (stream SplitResponse) {}
   rpc ListEngines(ListEnginesRequest) returns (ListEnginesResponse) {}
 }
 
@@ -66,6 +73,44 @@ message ReadStreamResponse {
   oneof payload {
     ReadStreamMeta meta = 1;
     ImageRef image = 2;
+  }
+}
+
+message SplitHeader {
+  string file_name = 1;
+  string file_type = 2;
+  uint64 source_size = 3;
+  string source_sha256 = 4;
+  uint32 minimum_parts = 5;
+  double target_ratio = 6;
+  string request_id = 7;
+}
+
+message SplitRequest {
+  oneof payload {
+    SplitHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message SplitArchiveHeader {
+  uint64 archive_size = 1;
+  string archive_sha256 = 2;
+  uint32 part_count = 3;
+  string planner_version = 4;
+}
+
+message SplitError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message SplitResponse {
+  oneof payload {
+    SplitArchiveHeader header = 1;
+    bytes data = 2;
+    SplitError error = 3;
   }
 }
 

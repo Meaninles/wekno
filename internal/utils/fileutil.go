@@ -15,10 +15,18 @@ func GetContentTypeByExt(ext string) string {
 		return "application/msword"
 	case ".docx":
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case ".ppt":
+		return "application/vnd.ms-powerpoint"
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 	case ".xls":
 		return "application/vnd.ms-excel"
 	case ".xlsx":
 		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case ".epub":
+		return "application/epub+zip"
+	case ".mhtml":
+		return "multipart/related"
 	case ".png":
 		return "image/png"
 	case ".jpg", ".jpeg":
@@ -27,6 +35,10 @@ func GetContentTypeByExt(ext string) string {
 		return "image/gif"
 	case ".webp":
 		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".tiff", ".tif":
+		return "image/tiff"
 	case ".svg":
 		return "image/svg+xml"
 	case ".txt":
@@ -39,6 +51,12 @@ func GetContentTypeByExt(ext string) string {
 		return "audio/mpeg"
 	case ".wav":
 		return "audio/wav"
+	case ".m4a":
+		return "audio/mp4"
+	case ".flac":
+		return "audio/flac"
+	case ".ogg":
+		return "audio/ogg"
 	case ".zip":
 		return "application/zip"
 	case ".tar":

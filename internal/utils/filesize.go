@@ -40,3 +40,20 @@ func GetMaxFileSizeMB() int64 {
 	}
 	return 50 // default 50MB
 }
+
+// GetMaxKnowledgeSourceFileSize is the logical-document upload ceiling. It is
+// intentionally independent from parser message limits: oversized sources are
+// streamed to the format-aware splitter and every physical part remains below
+// the existing per-format parser limits.
+func GetMaxKnowledgeSourceFileSize() int64 {
+	return GetMaxKnowledgeSourceFileSizeMB() * 1024 * 1024
+}
+
+func GetMaxKnowledgeSourceFileSizeMB() int64 {
+	if sizeStr := os.Getenv("MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB"); sizeStr != "" {
+		if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && size > 0 {
+			return size
+		}
+	}
+	return 2048
+}

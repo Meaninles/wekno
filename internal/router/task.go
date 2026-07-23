@@ -13,6 +13,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/terminalrepair"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/middleware/asynqdl"
@@ -141,6 +142,7 @@ const defaultBackgroundTaskConcurrency = 32
 type AsynqServers struct {
 	Normal   *asynq.Server // background and legacy queues
 	Document *asynq.Server
+	Part     *asynq.Server
 }
 
 type documentWorkflowRouter interface {
@@ -157,14 +159,15 @@ type documentQueueReadiness interface {
 	MarkReady(context.Context) error
 }
 
-func startAsynqServerPair(
+func startAsynqServers(
 	normal asynqServerLifecycle,
 	document asynqServerLifecycle,
+	part asynqServerLifecycle,
 	handler asynq.Handler,
 	readiness documentQueueReadiness,
 ) error {
-	if normal == nil || document == nil {
-		return errors.New("background and document asynq servers are both required")
+	if normal == nil || document == nil || part == nil {
+		return errors.New("background, document and document-part asynq servers are required")
 	}
 	if err := normal.Start(handler); err != nil {
 		return fmt.Errorf("start background asynq server: %w", err)
@@ -173,12 +176,19 @@ func startAsynqServerPair(
 		normal.Shutdown()
 		return fmt.Errorf("start document workflow asynq server: %w", err)
 	}
+	if err := part.Start(handler); err != nil {
+		document.Shutdown()
+		normal.Shutdown()
+		return fmt.Errorf("start document part asynq server: %w", err)
+	}
 	if readiness == nil {
+		part.Shutdown()
 		document.Shutdown()
 		normal.Shutdown()
 		return errors.New("mark document queue ready: coordinator is unavailable")
 	}
 	if err := readiness.MarkReady(context.Background()); err != nil {
+		part.Shutdown()
 		document.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("mark document queue ready: %w", err)
@@ -238,7 +248,10 @@ func documentServerConcurrency(coordinator *documentqueue.Coordinator) int {
 	return coordinator.Capacity()
 }
 
-func NewAsynqServers(coordinator *documentqueue.Coordinator) *AsynqServers {
+func NewAsynqServers(
+	coordinator *documentqueue.Coordinator,
+	splitManager *documentsplit.Manager,
+) *AsynqServers {
 	opt := getAsynqRedisClientOpt()
 	concurrency := documentServerConcurrency(coordinator)
 	backgroundConcurrency := defaultBackgroundTaskConcurrency
@@ -281,7 +294,21 @@ func NewAsynqServers(coordinator *documentqueue.Coordinator) *AsynqServers {
 			ShutdownTimeout: 30 * time.Second,
 		},
 	)
-	return &AsynqServers{Normal: normal, Document: document}
+	partConcurrency := splitManager.Config().PartConcurrency
+	log.Printf("asynq document part server starting with concurrency=%d", partConcurrency)
+	part := asynq.NewServer(
+		opt,
+		asynq.Config{
+			Concurrency: partConcurrency,
+			Queues: map[string]int{
+				documentsplit.QueuePart: 1,
+			},
+			RetryDelayFunc:  asynqRetryDelayFunc,
+			IsFailure:       asynqIsFailureFunc,
+			ShutdownTimeout: 30 * time.Second,
+		},
+	)
+	return &AsynqServers{Normal: normal, Document: document, Part: part}
 }
 
 func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
@@ -326,6 +353,8 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	documentHandler := documentRootHandler(params.DocumentQueue, params.KnowledgeService.ProcessDocument)
 	manualHandler := documentRootHandler(params.DocumentQueue, params.KnowledgeService.ProcessManualUpdate)
 	mux.HandleFunc(types.TypeDocumentProcess, documentHandler)
+	mux.HandleFunc(documentsplit.TypePartProcess, params.KnowledgeService.ProcessDocumentSplitPart)
+	mux.HandleFunc(documentsplit.TypeFinalize, params.KnowledgeService.ProcessDocumentSplitFinalize)
 
 	// Register manual knowledge processing handler (cleanup + re-indexing)
 	mux.HandleFunc(types.TypeManualProcess, manualHandler)
@@ -374,14 +403,16 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	// generation/item terminal transition.
 	mux.HandleFunc(types.TypeKnowledgeTerminalRepair, terminalRepairer.Handle)
 
-	if params.Servers == nil || params.Servers.Normal == nil || params.Servers.Document == nil {
-		return nil, errors.New("could not run asynq servers: background and document servers are both required")
+	if params.Servers == nil || params.Servers.Normal == nil ||
+		params.Servers.Document == nil || params.Servers.Part == nil {
+		return nil, errors.New("could not run asynq servers: background, document and part servers are required")
 	}
 	if params.DocumentQueue == nil {
 		return nil, errors.New("could not run asynq servers: document queue coordinator is required")
 	}
-	if err := startAsynqServerPair(
-		params.Servers.Normal, params.Servers.Document, mux, params.DocumentQueue,
+	if err := startAsynqServers(
+		params.Servers.Normal, params.Servers.Document, params.Servers.Part,
+		mux, params.DocumentQueue,
 	); err != nil {
 		return nil, fmt.Errorf("could not run asynq servers: %w", err)
 	}
@@ -394,6 +425,9 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 			// drain derivatives needed by already-active document workflows.
 			if params.Servers.Document != nil {
 				params.Servers.Document.Shutdown()
+			}
+			if params.Servers.Part != nil {
+				params.Servers.Part.Shutdown()
 			}
 			if params.Servers.Normal != nil {
 				params.Servers.Normal.Shutdown()

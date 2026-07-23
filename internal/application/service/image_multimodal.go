@@ -153,6 +153,18 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			payload.KnowledgeID, payload.ImageURL)
 		return nil
 	}
+	parentChunk, err := s.chunkService.GetChunkByIDOnly(ctx, payload.ChunkID)
+	if err != nil {
+		return fmt.Errorf("load multimodal parent chunk: %w", err)
+	}
+	if parentChunk == nil ||
+		parentChunk.TenantID != payload.TenantID ||
+		parentChunk.KnowledgeID != payload.KnowledgeID ||
+		parentChunk.KnowledgeBaseID != payload.KnowledgeBaseID ||
+		(parentChunk.ProcessingGeneration != "" &&
+			parentChunk.ProcessingGeneration != payload.ProcessingGeneration) {
+		return errors.New("image multimodal: parent chunk identity mismatch")
+	}
 	plan, err := processownership.ParseFanoutPlan(knowledge.ProcessingFanout)
 	if err != nil {
 		return fmt.Errorf("load image durable fanout plan: %w", err)
@@ -320,35 +332,47 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 
 	if imageInfo.OCRText != "" {
 		newChunks = append(newChunks, &types.Chunk{
-			ID:              stableImageChunkID(payload, "ocr"),
-			TenantID:        payload.TenantID,
-			KnowledgeID:     payload.KnowledgeID,
-			KnowledgeBaseID: payload.KnowledgeBaseID,
-			Content:         imageInfo.OCRText,
-			ChunkType:       types.ChunkTypeImageOCR,
-			ParentChunkID:   payload.ChunkID,
-			IsEnabled:       true,
-			Flags:           types.ChunkFlagRecommended,
-			ImageInfo:       string(imageInfoJSON),
-			CreatedAt:       time.Now(),
-			UpdatedAt:       time.Now(),
+			ID:                   stableImageChunkID(payload, "ocr"),
+			TenantID:             payload.TenantID,
+			KnowledgeID:          payload.KnowledgeID,
+			KnowledgeBaseID:      payload.KnowledgeBaseID,
+			Content:              imageInfo.OCRText,
+			ChunkType:            types.ChunkTypeImageOCR,
+			ParentChunkID:        payload.ChunkID,
+			ChunkIndex:           parentChunk.ChunkIndex,
+			StartAt:              parentChunk.StartAt,
+			EndAt:                parentChunk.EndAt,
+			IsEnabled:            true,
+			Flags:                types.ChunkFlagRecommended,
+			ImageInfo:            string(imageInfoJSON),
+			ProcessingGeneration: payload.ProcessingGeneration,
+			SplitPartIndex:       parentChunk.SplitPartIndex,
+			SourceLocator:        append(types.JSON(nil), parentChunk.SourceLocator...),
+			CreatedAt:            time.Now(),
+			UpdatedAt:            time.Now(),
 		})
 	}
 
 	if imageInfo.Caption != "" {
 		newChunks = append(newChunks, &types.Chunk{
-			ID:              stableImageChunkID(payload, "caption"),
-			TenantID:        payload.TenantID,
-			KnowledgeID:     payload.KnowledgeID,
-			KnowledgeBaseID: payload.KnowledgeBaseID,
-			Content:         imageInfo.Caption,
-			ChunkType:       types.ChunkTypeImageCaption,
-			ParentChunkID:   payload.ChunkID,
-			IsEnabled:       true,
-			Flags:           types.ChunkFlagRecommended,
-			ImageInfo:       string(imageInfoJSON),
-			CreatedAt:       time.Now(),
-			UpdatedAt:       time.Now(),
+			ID:                   stableImageChunkID(payload, "caption"),
+			TenantID:             payload.TenantID,
+			KnowledgeID:          payload.KnowledgeID,
+			KnowledgeBaseID:      payload.KnowledgeBaseID,
+			Content:              imageInfo.Caption,
+			ChunkType:            types.ChunkTypeImageCaption,
+			ParentChunkID:        payload.ChunkID,
+			ChunkIndex:           parentChunk.ChunkIndex,
+			StartAt:              parentChunk.StartAt,
+			EndAt:                parentChunk.EndAt,
+			IsEnabled:            true,
+			Flags:                types.ChunkFlagRecommended,
+			ImageInfo:            string(imageInfoJSON),
+			ProcessingGeneration: payload.ProcessingGeneration,
+			SplitPartIndex:       parentChunk.SplitPartIndex,
+			SourceLocator:        append(types.JSON(nil), parentChunk.SourceLocator...),
+			CreatedAt:            time.Now(),
+			UpdatedAt:            time.Now(),
 		})
 	}
 	imgOut["chunks_created"] = len(newChunks)

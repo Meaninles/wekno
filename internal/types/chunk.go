@@ -118,7 +118,7 @@ type Chunk struct {
 	// Tenant ID, used for multi-tenant isolation
 	TenantID uint64 `json:"tenant_id"`
 	// ID of the parent knowledge, associated with the Knowledge model
-	KnowledgeID string `json:"knowledge_id"`
+	KnowledgeID string `json:"knowledge_id" gorm:"index:idx_chunks_split_generation,priority:1"`
 	// ID of the knowledge base, for quick location
 	KnowledgeBaseID string `json:"knowledge_base_id"`
 	// Optional tag ID for categorization within a knowledge base (used for FAQ)
@@ -126,7 +126,7 @@ type Chunk struct {
 	// Actual text content of the chunk
 	Content string `json:"content"`
 	// Index position of the chunk in the original document
-	ChunkIndex int `json:"chunk_index"`
+	ChunkIndex int `json:"chunk_index" gorm:"type:bigint"`
 	// Whether the chunk is enabled, can be used to temporarily disable certain chunks
 	IsEnabled bool `json:"is_enabled"               gorm:"default:true"`
 	// Flags 存储多个布尔状态的位标志（如推荐状态等）
@@ -135,9 +135,9 @@ type Chunk struct {
 	// Status of the chunk
 	Status int `json:"status"                   gorm:"default:0"`
 	// Starting character position in the original text
-	StartAt int `json:"start_at"`
+	StartAt int `json:"start_at" gorm:"type:bigint"`
 	// Ending character position in the original text
-	EndAt int `json:"end_at"`
+	EndAt int `json:"end_at" gorm:"type:bigint"`
 	// Previous chunk ID
 	PreChunkID string `json:"pre_chunk_id"`
 	// Next chunk ID
@@ -167,6 +167,16 @@ type Chunk struct {
 	// when generating embeddings. NOT persisted — populated by the chunker
 	// during initial splitting and discarded after indexing.
 	ContextHeader string `json:"-" gorm:"-"`
+	// ProcessingGeneration and SplitPartIndex identify physically split,
+	// generation-scoped staging rows. Ordinary chunks keep the zero values.
+	// Split workers write IsEnabled=false rows and the finalizer publishes only
+	// the complete generation, preventing partial documents from retrieval.
+	ProcessingGeneration string `json:"processing_generation,omitempty" gorm:"type:varchar(36);not null;default:'';index:idx_chunks_split_generation,priority:2"`
+	SplitPartIndex       int    `json:"split_part_index,omitempty" gorm:"not null;default:-1;index:idx_chunks_split_generation,priority:3"`
+	// SourceLocator maps this physical chunk back to the original logical
+	// document coordinate (page, sheet/row/column, line, JSON item, tile or
+	// audio time range).
+	SourceLocator JSON `json:"source_locator,omitempty" gorm:"type:json"`
 }
 
 // EmbeddingContent returns the chunk content with ContextHeader prepended

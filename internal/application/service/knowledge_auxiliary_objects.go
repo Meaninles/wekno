@@ -100,7 +100,10 @@ func (s *auxiliaryPlannedFileService) SaveBytes(
 		path string
 		err  error
 	)
-	if s.owner.Kind == knowledgeaux.KindFanoutImage || s.owner.Kind == knowledgeaux.KindCloneImage {
+	if s.owner.Kind == knowledgeaux.KindFanoutImage ||
+		s.owner.Kind == knowledgeaux.KindCloneImage ||
+		s.owner.Kind == knowledgeaux.KindSplitInput ||
+		s.owner.Kind == knowledgeaux.KindSplitImage {
 		// Image ownership is knowledge-scoped. This makes the physical key
 		// independently prove tenant+knowledge ownership during migration and
 		// prevents two documents from ever sharing a newly written image path.
@@ -119,6 +122,38 @@ func (s *auxiliaryPlannedFileService) SaveBytes(
 	}
 	if err := s.registry.CommitReserved(ctx, object, false, func() error {
 		return s.base.CommitBytesAtPath(ctx, data, path)
+	}); err != nil {
+		return "", errors.Join(err, s.registry.Abort(ctx, object))
+	}
+	return path, nil
+}
+
+// SaveReader persists an already-staged bounded stream under the same durable
+// ownership protocol as SaveBytes. Large split parts must use this path so an
+// object-store upload never requires a second full in-memory copy.
+func (s *auxiliaryPlannedFileService) SaveReader(
+	ctx context.Context,
+	reader io.ReadSeeker,
+	size int64,
+	contentType string,
+	tenantID uint64,
+	fileName string,
+) (string, error) {
+	if tenantID != s.owner.TenantID || reader == nil || size < 0 {
+		return "", knowledgeaux.ErrInvalidObject
+	}
+	path, err := s.base.ReserveFilePath(tenantID, s.owner.KnowledgeID, fileName)
+	if err != nil {
+		return "", fmt.Errorf("reserve auxiliary stream path: %w", err)
+	}
+	object := s.owner
+	object.Path = path
+	object, err = s.registry.Reserve(ctx, object, false, s.base)
+	if err != nil {
+		return "", fmt.Errorf("reserve auxiliary stream ownership: %w", err)
+	}
+	if err := s.registry.CommitReserved(ctx, object, false, func() error {
+		return filesvc.CommitReaderAtPath(ctx, s.base, reader, size, contentType, path)
 	}); err != nil {
 		return "", errors.Join(err, s.registry.Abort(ctx, object))
 	}

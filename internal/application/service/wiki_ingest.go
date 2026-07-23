@@ -15,6 +15,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/agent"
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
@@ -298,7 +299,8 @@ type wikiIngestService struct {
 	// id at run-time (LatestAttempt) rather than carrying it in the
 	// asynq payload, which is per-KB and would otherwise be ambiguous
 	// for the 5-docs-per-batch fan-out.
-	spanTracker SpanTracker
+	spanTracker  SpanTracker
+	splitManager *documentsplit.Manager
 	// llmRetryPolicy is an optional test seam. Production uses the policy from
 	// the custom Wiki queue module; tests inject deterministic jitter/waits and
 	// never spend real time sleeping.
@@ -330,6 +332,7 @@ func NewWikiIngestService(
 	deadLetterRepo interfaces.TaskDeadLetterRepository,
 	redisClient *redis.Client,
 	spanTracker SpanTracker,
+	splitManager *documentsplit.Manager,
 ) interfaces.TaskHandler {
 	svc := &wikiIngestService{
 		wikiService:    wikiService,
@@ -344,6 +347,7 @@ func NewWikiIngestService(
 		deadLetterRepo: deadLetterRepo,
 		redisClient:    redisClient,
 		spanTracker:    spanTracker,
+		splitManager:   splitManager,
 	}
 	return svc
 }

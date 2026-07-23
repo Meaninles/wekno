@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -116,6 +117,7 @@ var queuesScanned = []string{
 	types.QueueMultimodal,
 	types.QueueGraph,
 	types.QueueQuestion,
+	documentsplit.QueuePart,
 }
 
 // taskTypesForKnowledgeCancel contains only single-document workers. A batch
@@ -133,6 +135,8 @@ var taskTypesForKnowledgeCancel = map[string]struct{}{
 	types.TypeChunkExtract:         {},
 	types.TypeDataTableSummary:     {},
 	types.TypeFAQImport:            {},
+	documentsplit.TypePartProcess:  {},
+	documentsplit.TypeFinalize:     {},
 }
 
 var multiKnowledgeTaskTypes = map[string]struct{}{

@@ -1,7 +1,11 @@
 // src/utils/request.js
 import axios from "axios";
 import type { AxiosRequestConfig } from "axios";
-import { generateRandomString, MAX_FILE_SIZE_MB } from "./index";
+import {
+  generateRandomString,
+  MAX_FILE_SIZE_MB,
+  MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB,
+} from "./index";
 import i18n from '@/i18n'
 import { getApiBaseUrl } from './api-base';
 import { rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn';
@@ -83,6 +87,16 @@ const PUBLIC_AUTH_PATHS = ['/auth/auto-setup', '/auth/login', '/auth/register', 
 function isPublicAuthRequest(url?: string): boolean {
   if (!url) return false;
   return PUBLIC_AUTH_PATHS.some(p => url.includes(p));
+}
+
+function uploadLimitForRequest(url?: string): number {
+  if (
+    url
+    && /^\/api\/v1\/knowledge-bases\/[^/]+\/knowledge\/file\/?(?:\?|$)/.test(url)
+  ) {
+    return MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB;
+  }
+  return MAX_FILE_SIZE_MB;
 }
 
 async function extractErrorMessage(data: any): Promise<string | undefined> {
@@ -240,7 +254,9 @@ instance.interceptors.response.use(
     if (error.response.status === 413) {
       return Promise.reject({ 
         status: 413, 
-        message: i18n.global.t('error.fileSizeExceeded', { size: MAX_FILE_SIZE_MB }),
+        message: i18n.global.t('error.fileSizeExceeded', {
+          size: uploadLimitForRequest(originalRequest?.url),
+        }),
         success: false
       });
     }

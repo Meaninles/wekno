@@ -11,6 +11,14 @@ type DocReader interface {
 	Read(ctx context.Context, req *types.ReadRequest) (*types.ReadResult, error)
 }
 
+// DocumentSplitter is an optional streaming capability exposed by the
+// bundled DocReader transport. Large-file processing fails closed when this
+// capability is unavailable; silently sending the original oversized source
+// to a parser would recreate the memory and gRPC limits this path removes.
+type DocumentSplitter interface {
+	Split(ctx context.Context, req *types.DocumentSplitRequest) (*types.DocumentSplitResult, error)
+}
+
 // DocumentReader extends DocReader with transport lifecycle management
 // and remote engine discovery. Used by gRPC/HTTP clients that talk to
 // the Python docreader service.

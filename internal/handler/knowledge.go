@@ -357,11 +357,10 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 		return
 	}
 
-	// Validate file size — read MAX_FILE_SIZE_MB env (50MB default).
-	// Deliberately not a runtime system_setting; see filesize.go for the
-	// rationale (nginx / docreader / browser bundle all cache this at
-	// container startup, so a UI knob would silently mismatch).
-	maxSizeMB := utils.GetMaxFileSizeMB()
+	// This is the logical source ceiling, not a parser/gRPC message limit.
+	// Sources above a format's existing parser limit are physically split by
+	// the durable processing workflow before any parser call.
+	maxSizeMB := utils.GetMaxKnowledgeSourceFileSizeMB()
 	maxSize := maxSizeMB * 1024 * 1024
 	if file.Size > maxSize {
 		logger.Error(ctx, "File size too large")
@@ -1322,9 +1321,17 @@ func mimeTypeByExt(filename string) string {
 		".svg":      "image/svg+xml",
 		".tiff":     "image/tiff",
 		".txt":      "text/plain; charset=utf-8",
+		".text":     "text/plain; charset=utf-8",
 		".md":       "text/markdown; charset=utf-8",
 		".markdown": "text/markdown; charset=utf-8",
 		".json":     "application/json; charset=utf-8",
+		".epub":     "application/epub+zip",
+		".mhtml":    "multipart/related",
+		".mp3":      "audio/mpeg",
+		".wav":      "audio/wav",
+		".m4a":      "audio/mp4",
+		".flac":     "audio/flac",
+		".ogg":      "audio/ogg",
 		".xml":      "application/xml; charset=utf-8",
 		".html":     "text/html; charset=utf-8",
 		".css":      "text/css; charset=utf-8",

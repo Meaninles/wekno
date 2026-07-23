@@ -15,6 +15,7 @@ import (
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -25,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 const (
@@ -367,9 +369,10 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 	// Capture chunk content shape on output — lets traces answer "WHAT
 	// did the LLM call see?" without joining back to the chunk store.
 	// Preview is truncated to keep span rows reasonable.
+	graphInput := logicalChunkLLMContent(chunk, chunk.Content)
 	if gSpan != nil {
-		graphOut["chunk_chars"] = len([]rune(chunk.Content))
-		graphOut["chunk_preview"] = previewText(chunk.Content, 200)
+		graphOut["chunk_chars"] = len([]rune(graphInput))
+		graphOut["chunk_preview"] = previewText(graphInput, 200)
 	}
 	kb, err := s.knowledgeBaseRepo.GetKnowledgeBaseByID(ctx, chunk.KnowledgeBaseID)
 	if err != nil {
@@ -429,7 +432,7 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 		},
 	}
 	extractor := chatpipeline.NewExtractor(chatModel, template)
-	graph, err := extractor.Extract(ctx, chunk.Content)
+	graph, err := extractor.Extract(ctx, graphInput)
 	if err != nil {
 		handleErr = err
 		return err
@@ -517,6 +520,7 @@ type DataTableSummaryService struct {
 	sqlDB                *sql.DB
 	taskEnqueuer         interfaces.TaskEnqueuer
 	redisClient          *redis.Client
+	splitManager         *documentsplit.Manager
 }
 
 // NewDataTableSummaryService creates a new DataTableSummaryService
@@ -533,6 +537,7 @@ func NewDataTableSummaryService(
 	sqlDB *sql.DB,
 	taskEnqueuer interfaces.TaskEnqueuer,
 	redisClient *redis.Client,
+	splitManager *documentsplit.Manager,
 ) interfaces.TaskHandler {
 	return &DataTableSummaryService{
 		modelService:         modelService,
@@ -547,6 +552,7 @@ func NewDataTableSummaryService(
 		sqlDB:                sqlDB,
 		taskEnqueuer:         taskEnqueuer,
 		redisClient:          redisClient,
+		splitManager:         splitManager,
 	}
 }
 
@@ -844,6 +850,21 @@ func (s *DataTableSummaryService) resolveFileServiceForKnowledge(ctx context.Con
 // processTableData 处理表格数据：加载 -> 分析 -> 生成摘要 -> 创建chunks
 // 思路：将数据处理的核心流程集中在一起，保持逻辑连贯性
 func (s *DataTableSummaryService) processTableData(ctx context.Context, resources *extractionResources) ([]*types.Chunk, error) {
+	if s.splitManager != nil && resources != nil && resources.knowledge != nil {
+		plan, err := s.splitManager.GetPlanForGeneration(
+			ctx,
+			resources.knowledge.TenantID,
+			resources.knowledge.ID,
+			resources.knowledge.ProcessingGeneration,
+		)
+		switch {
+		case err == nil:
+			return s.processSplitTableData(ctx, resources, plan)
+		case !errors.Is(err, gorm.ErrRecordNotFound):
+			return nil, fmt.Errorf("load physical split table plan: %w", err)
+		}
+	}
+
 	// 创建DuckDB会话并加载数据
 	sessionID := fmt.Sprintf("table_summary_%s", resources.knowledge.ID)
 	fileSvc := s.resolveFileServiceForKnowledge(ctx, resources)
@@ -899,6 +920,61 @@ func (s *DataTableSummaryService) processTableData(ctx context.Context, resource
 	return chunks, nil
 }
 
+// processSplitTableData preserves the semantics of one logical workbook while
+// avoiding a second full-file materialisation after physical parsing. Samples
+// are selected over the immutable global chunk order and retain worksheet /
+// row / column coordinates in the LLM prompt.
+func (s *DataTableSummaryService) processSplitTableData(
+	ctx context.Context,
+	resources *extractionResources,
+	plan *documentsplit.Plan,
+) ([]*types.Chunk, error) {
+	const maximumTableStrata = int64(64)
+	samples, total, err := loadGenerationChunkStrata(
+		ctx,
+		s.splitManager,
+		resources.knowledge.TenantID,
+		resources.knowledge.ID,
+		resources.knowledge.ProcessingGeneration,
+		[]types.ChunkType{types.ChunkTypeText},
+		maximumTableStrata,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sample split logical table: %w", err)
+	}
+	parts, err := s.splitManager.ListParts(ctx, plan.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load split table coverage: %w", err)
+	}
+	corpus, err := documentsplit.BuildTableSummaryCorpus(
+		plan, resources.knowledge, samples, total, 24_000, parts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	tableDescription, err := s.generateTableDescription(
+		ctx,
+		resources.chatModel,
+		corpus.TableName,
+		corpus.SchemaDescription,
+		corpus.SampleDescription,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("generate split table description: %w", err)
+	}
+	columnDescription, err := s.generateColumnDescriptions(
+		ctx,
+		resources.chatModel,
+		corpus.TableName,
+		corpus.SchemaDescription,
+		corpus.SampleDescription,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("generate split table column descriptions: %w", err)
+	}
+	return s.buildChunks(resources, tableDescription, columnDescription), nil
+}
+
 // buildChunks 构建chunk对象
 // tableDescription和columnDescriptions分别生成一个chunk
 func (s *DataTableSummaryService) buildChunks(resources *extractionResources, tableDescription string, columnDescription string) []*types.Chunk {
@@ -906,30 +982,32 @@ func (s *DataTableSummaryService) buildChunks(resources *extractionResources, ta
 
 	// 表格摘要chunk
 	summaryChunk := &types.Chunk{
-		ID:              stableDataTableChunkID(resources.knowledge, "summary"),
-		TenantID:        resources.knowledge.TenantID,
-		KnowledgeID:     resources.knowledge.ID,
-		KnowledgeBaseID: resources.knowledge.KnowledgeBaseID,
-		Content:         tableDescription,
-		ChunkIndex:      0,
-		IsEnabled:       true,
-		ChunkType:       types.ChunkTypeTableSummary,
-		Status:          int(types.ChunkStatusStored),
+		ID:                   stableDataTableChunkID(resources.knowledge, "summary"),
+		TenantID:             resources.knowledge.TenantID,
+		KnowledgeID:          resources.knowledge.ID,
+		KnowledgeBaseID:      resources.knowledge.KnowledgeBaseID,
+		Content:              tableDescription,
+		ChunkIndex:           0,
+		IsEnabled:            true,
+		ChunkType:            types.ChunkTypeTableSummary,
+		Status:               int(types.ChunkStatusStored),
+		ProcessingGeneration: resources.knowledge.ProcessingGeneration,
 	}
 	chunks = append(chunks, summaryChunk)
 
 	// 列描述chunk（所有列的描述合并为一个chunk）
 	columnChunk := &types.Chunk{
-		ID:              stableDataTableChunkID(resources.knowledge, "columns"),
-		TenantID:        resources.knowledge.TenantID,
-		KnowledgeID:     resources.knowledge.ID,
-		KnowledgeBaseID: resources.knowledge.KnowledgeBaseID,
-		Content:         columnDescription,
-		ChunkIndex:      1,
-		IsEnabled:       true,
-		ChunkType:       types.ChunkTypeTableColumn,
-		ParentChunkID:   summaryChunk.ID,
-		Status:          int(types.ChunkStatusStored),
+		ID:                   stableDataTableChunkID(resources.knowledge, "columns"),
+		TenantID:             resources.knowledge.TenantID,
+		KnowledgeID:          resources.knowledge.ID,
+		KnowledgeBaseID:      resources.knowledge.KnowledgeBaseID,
+		Content:              columnDescription,
+		ChunkIndex:           1,
+		IsEnabled:            true,
+		ChunkType:            types.ChunkTypeTableColumn,
+		ParentChunkID:        summaryChunk.ID,
+		Status:               int(types.ChunkStatusStored),
+		ProcessingGeneration: resources.knowledge.ProcessingGeneration,
 	}
 	chunks = append(chunks, columnChunk)
 
@@ -1078,22 +1156,38 @@ func (s *DataTableSummaryService) generateColumnDescriptions(ctx context.Context
 func (s *DataTableSummaryService) buildSampleDataDescription(sampleData *types.ToolResult, maxRows int) string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("Sample data (first %d rows):\n", maxRows))
-
-	rows, ok := sampleData.Data["rows"].([]map[string]interface{})
-	if !ok {
+	if sampleData == nil || sampleData.Data == nil || maxRows <= 0 {
 		return builder.String()
 	}
 
-	for i, row := range rows {
-		if i >= maxRows {
-			break
+	appendRows := func(rows []any) {
+		for i, row := range rows {
+			if i >= maxRows {
+				break
+			}
+			jsonBytes, err := json.Marshal(row)
+			if err != nil {
+				continue
+			}
+			builder.Write(jsonBytes)
+			builder.WriteString("\n")
 		}
-		jsonBytes, err := json.Marshal(row)
-		if err != nil {
-			continue
+	}
+	switch rows := sampleData.Data["rows"].(type) {
+	case []map[string]interface{}:
+		values := make([]any, len(rows))
+		for index := range rows {
+			values[index] = rows[index]
 		}
-		builder.WriteString(string(jsonBytes))
-		builder.WriteString("\n")
+		appendRows(values)
+	case []map[string]string:
+		values := make([]any, len(rows))
+		for index := range rows {
+			values[index] = rows[index]
+		}
+		appendRows(values)
+	case []interface{}:
+		appendRows(rows)
 	}
 
 	return builder.String()

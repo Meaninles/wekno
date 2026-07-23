@@ -1,6 +1,8 @@
 package sourcerefs
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -17,18 +19,19 @@ const (
 )
 
 type CitationSource struct {
-	ID              string `json:"id"`
-	Type            string `json:"type"`
-	Title           string `json:"title"`
-	Granularity     string `json:"granularity,omitempty"`
-	KnowledgeID     string `json:"knowledge_id,omitempty"`
-	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
-	ChunkID         string `json:"chunk_id,omitempty"`
-	ChunkIndex      int    `json:"chunk_index,omitempty"`
-	StartAt         int    `json:"start_at,omitempty"`
-	EndAt           int    `json:"end_at,omitempty"`
-	Slug            string `json:"slug,omitempty"`
-	URL             string `json:"url,omitempty"`
+	ID              string     `json:"id"`
+	Type            string     `json:"type"`
+	Title           string     `json:"title"`
+	Granularity     string     `json:"granularity,omitempty"`
+	KnowledgeID     string     `json:"knowledge_id,omitempty"`
+	KnowledgeBaseID string     `json:"knowledge_base_id,omitempty"`
+	ChunkID         string     `json:"chunk_id,omitempty"`
+	ChunkIndex      int        `json:"chunk_index,omitempty"`
+	StartAt         int        `json:"start_at,omitempty"`
+	EndAt           int        `json:"end_at,omitempty"`
+	SourceLocator   types.JSON `json:"source_locator,omitempty"`
+	Slug            string     `json:"slug,omitempty"`
+	URL             string     `json:"url,omitempty"`
 }
 
 type Registry struct {
@@ -95,6 +98,9 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 				ref.Metadata["chunk_index"] = strconv.Itoa(src.ChunkIndex)
 				ref.Metadata["start_at"] = strconv.Itoa(src.StartAt)
 				ref.Metadata["end_at"] = strconv.Itoa(src.EndAt)
+				if len(src.SourceLocator) > 0 {
+					ref.Metadata["source_locator"] = string(src.SourceLocator)
+				}
 			}
 		}
 		if !seenOut[id] {
@@ -168,6 +174,9 @@ func ContextCitationAttrs(ref *types.SearchResult) string {
 			parts = append(parts, fmt.Sprintf(`chunk_id="%s"`, xmlAttr(chunkID)))
 			parts = append(parts, fmt.Sprintf(`chunk_index="%d"`, ref.ChunkIndex))
 		}
+		if locator := sourceLocatorAttribute(ref.SourceLocator); locator != "" {
+			parts = append(parts, fmt.Sprintf(`source_locator="%s"`, xmlAttr(locator)))
+		}
 	}
 	return " " + strings.Join(parts, " ")
 }
@@ -200,6 +209,9 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 			if src.ChunkID != "" {
 				attrs = append(attrs, fmt.Sprintf(`chunk_id="%s"`, xmlAttr(src.ChunkID)))
 				attrs = append(attrs, fmt.Sprintf(`chunk_index="%d"`, src.ChunkIndex))
+			}
+			if locator := sourceLocatorAttribute(src.SourceLocator); locator != "" {
+				attrs = append(attrs, fmt.Sprintf(`source_locator="%s"`, xmlAttr(locator)))
 			}
 		case SourceTypeWiki:
 			if src.Slug != "" {
@@ -272,12 +284,62 @@ func citationSourceFromRef(id string, ref *types.SearchResult) *CitationSource {
 			src.ChunkIndex = ref.ChunkIndex
 			src.StartAt = ref.StartAt
 			src.EndAt = ref.EndAt
+			src.SourceLocator = append(types.JSON(nil), ref.SourceLocator...)
+			if len(src.SourceLocator) == 0 && ref.Metadata != nil {
+				raw := []byte(strings.TrimSpace(ref.Metadata["source_locator"]))
+				if json.Valid(raw) {
+					src.SourceLocator = append(types.JSON(nil), raw...)
+				}
+			}
 		}
 	}
 	if src.Title == "" {
 		src.Title = id
 	}
 	return src
+}
+
+// sourceLocatorAttribute keeps the model-facing citation catalog bounded while
+// CitationSource.SourceLocator retains the complete coordinate for API/UI
+// consumers. Invalid JSON is never injected into the XML prompt.
+func sourceLocatorAttribute(locator types.JSON) string {
+	if len(locator) == 0 || !json.Valid(locator) {
+		return ""
+	}
+	const maximumRunes = 1024
+	var logical map[string]any
+	if err := json.Unmarshal(locator, &logical); err != nil {
+		return ""
+	}
+	for key := range logical {
+		if key == "physical_part_index" ||
+			strings.HasPrefix(key, "part_row_") ||
+			strings.HasPrefix(key, "part_line_") {
+			delete(logical, key)
+		}
+	}
+	logicalLocator, err := json.Marshal(logical)
+	if err != nil {
+		return ""
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, logicalLocator); err != nil {
+		return ""
+	}
+	value := compact.String()
+	runes := []rune(value)
+	if len(runes) > maximumRunes {
+		return string(runes[:maximumRunes]) + "…"
+	}
+	return value
+}
+
+// ModelSourceLocator returns a bounded, compact original-source coordinate for
+// model-facing retrieval tools. chunk_index is only a logical ordering key; a
+// model must use this locator (plus record keys present in the content) when it
+// cites pages, sheets, rows, lines, JSON paths, image tiles or audio ranges.
+func ModelSourceLocator(locator types.JSON) string {
+	return sourceLocatorAttribute(locator)
 }
 
 func sourceTitle(ref *types.SearchResult) string {

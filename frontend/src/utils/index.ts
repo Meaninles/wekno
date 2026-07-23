@@ -6,6 +6,7 @@ declare global {
   interface Window {
     __RUNTIME_CONFIG__?: {
       MAX_FILE_SIZE_MB?: number;
+      MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB?: number;
     };
   }
 }
@@ -15,7 +16,12 @@ declare global {
 export const MAX_FILE_SIZE_MB = window.__RUNTIME_CONFIG__?.MAX_FILE_SIZE_MB
   || Number(import.meta.env.VITE_MAX_FILE_SIZE_MB) 
   || 50;
-const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+export const MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB =
+  window.__RUNTIME_CONFIG__?.MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB
+  || Number(import.meta.env.VITE_MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB)
+  || 2048;
+const MAX_KNOWLEDGE_SOURCE_FILE_SIZE_BYTES =
+  MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB * 1024 * 1024;
 
 export function generateRandomString(length: number) {
   let result = "";
@@ -40,7 +46,11 @@ export function formatStringDate(date: any) {
     year + "-" + month + "-" + day + " " + hour + ":" + minute + ":" + second
   );
 }
-const DEFAULT_VALID_TYPES = new Set(["pdf", "txt", "md", "docx", "doc", "pptx", "ppt", "epub", "mhtml", "jpg", "jpeg", "png", "csv", "xlsx", "xls", "mp3", "wav", "m4a", "flac", "ogg"]);
+const DEFAULT_VALID_TYPES = new Set([
+  "pdf", "txt", "text", "md", "markdown", "docx", "doc", "pptx", "ppt",
+  "epub", "mhtml", "jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff",
+  "csv", "xlsx", "xls", "json", "mp3", "wav", "m4a", "flac", "ogg",
+]);
 
 /**
  * Returns true when the file should be **rejected**.
@@ -61,9 +71,9 @@ export function kbFileTypeVerification(file: any, silent = false, validTypes?: S
     }
     return true;
   }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
+  if (file.size > MAX_KNOWLEDGE_SOURCE_FILE_SIZE_BYTES) {
     if (!silent) {
-      MessagePlugin.error(i18n.global.t('error.fileSizeExceeded', { size: MAX_FILE_SIZE_MB }));
+      MessagePlugin.error(i18n.global.t('error.fileSizeExceeded', { size: MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB }));
     }
     return true;
   }

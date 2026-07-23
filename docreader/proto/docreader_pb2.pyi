@@ -103,6 +103,64 @@ class ReadStreamResponse(_message.Message):
     image: ImageRef
     def __init__(self, meta: _Optional[_Union[ReadStreamMeta, _Mapping]] = ..., image: _Optional[_Union[ImageRef, _Mapping]] = ...) -> None: ...
 
+class SplitHeader(_message.Message):
+    __slots__ = ("file_name", "file_type", "source_size", "source_sha256", "minimum_parts", "target_ratio", "request_id")
+    FILE_NAME_FIELD_NUMBER: _ClassVar[int]
+    FILE_TYPE_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_SIZE_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_SHA256_FIELD_NUMBER: _ClassVar[int]
+    MINIMUM_PARTS_FIELD_NUMBER: _ClassVar[int]
+    TARGET_RATIO_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    file_name: str
+    file_type: str
+    source_size: int
+    source_sha256: str
+    minimum_parts: int
+    target_ratio: float
+    request_id: str
+    def __init__(self, file_name: _Optional[str] = ..., file_type: _Optional[str] = ..., source_size: _Optional[int] = ..., source_sha256: _Optional[str] = ..., minimum_parts: _Optional[int] = ..., target_ratio: _Optional[float] = ..., request_id: _Optional[str] = ...) -> None: ...
+
+class SplitRequest(_message.Message):
+    __slots__ = ("header", "data")
+    HEADER_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    header: SplitHeader
+    data: bytes
+    def __init__(self, header: _Optional[_Union[SplitHeader, _Mapping]] = ..., data: _Optional[bytes] = ...) -> None: ...
+
+class SplitArchiveHeader(_message.Message):
+    __slots__ = ("archive_size", "archive_sha256", "part_count", "planner_version")
+    ARCHIVE_SIZE_FIELD_NUMBER: _ClassVar[int]
+    ARCHIVE_SHA256_FIELD_NUMBER: _ClassVar[int]
+    PART_COUNT_FIELD_NUMBER: _ClassVar[int]
+    PLANNER_VERSION_FIELD_NUMBER: _ClassVar[int]
+    archive_size: int
+    archive_sha256: str
+    part_count: int
+    planner_version: str
+    def __init__(self, archive_size: _Optional[int] = ..., archive_sha256: _Optional[str] = ..., part_count: _Optional[int] = ..., planner_version: _Optional[str] = ...) -> None: ...
+
+class SplitError(_message.Message):
+    __slots__ = ("code", "message", "retryable")
+    CODE_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    RETRYABLE_FIELD_NUMBER: _ClassVar[int]
+    code: str
+    message: str
+    retryable: bool
+    def __init__(self, code: _Optional[str] = ..., message: _Optional[str] = ..., retryable: bool = ...) -> None: ...
+
+class SplitResponse(_message.Message):
+    __slots__ = ("header", "data", "error")
+    HEADER_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    header: SplitArchiveHeader
+    data: bytes
+    error: SplitError
+    def __init__(self, header: _Optional[_Union[SplitArchiveHeader, _Mapping]] = ..., data: _Optional[bytes] = ..., error: _Optional[_Union[SplitError, _Mapping]] = ...) -> None: ...
+
 class ListEnginesRequest(_message.Message):
     __slots__ = ("config_overrides",)
     class ConfigOverridesEntry(_message.Message):

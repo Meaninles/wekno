@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -16,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 // KnowledgePostProcessService acts as an orchestrator for all post-processing tasks
@@ -28,6 +31,7 @@ type KnowledgePostProcessService struct {
 	pendingRepo   interfaces.TaskPendingOpsRepository
 	redisClient   *redis.Client
 	spanTracker   SpanTracker
+	splitManager  *documentsplit.Manager
 }
 
 // enrichmentPlan describes the asynchronous work spawned after the primary
@@ -50,10 +54,11 @@ type enrichmentPlan struct {
 const durableEnrichmentPlanStage = "enrichment"
 
 type durableQuestionBatch struct {
-	ChunkIDs    []string `json:"chunk_ids"`
-	BatchIndex  int      `json:"batch_index"`
-	PrevChunkID string   `json:"prev_chunk_id,omitempty"`
-	NextChunkID string   `json:"next_chunk_id,omitempty"`
+	ChunkIDs     []string `json:"chunk_ids"`
+	BatchIndex   int      `json:"batch_index"`
+	PrevChunkID  string   `json:"prev_chunk_id,omitempty"`
+	NextChunkID  string   `json:"next_chunk_id,omitempty"`
+	SparseSample bool     `json:"sparse_sample,omitempty"`
 }
 
 type durableGraphTask struct {
@@ -82,10 +87,14 @@ type durableEnrichmentFanout struct {
 	QuestionCount        int                    `json:"question_count,omitempty"`
 	QuestionBatches      []durableQuestionBatch `json:"question_batches,omitempty"`
 	GraphTasks           []durableGraphTask     `json:"graph_tasks,omitempty"`
+	QuestionChunkCount   int                    `json:"question_chunk_count,omitempty"`
+	QuestionBatchCount   int                    `json:"question_batch_count,omitempty"`
+	GraphChunkCount      int                    `json:"graph_chunk_count,omitempty"`
+	GraphModelID         string                 `json:"graph_model_id,omitempty"`
 }
 
 func (p durableEnrichmentFanout) validate(payload types.KnowledgePostProcessPayload) error {
-	if p.Stage != durableEnrichmentPlanStage || p.Version != 1 ||
+	if p.Stage != durableEnrichmentPlanStage || (p.Version != 1 && p.Version != 2) ||
 		p.TenantID != payload.TenantID || p.KnowledgeID != payload.KnowledgeID ||
 		p.KnowledgeBaseID != payload.KnowledgeBaseID ||
 		p.ProcessingGeneration != payload.ProcessingGeneration {
@@ -101,10 +110,25 @@ func (p durableEnrichmentFanout) validate(payload types.KnowledgePostProcessPayl
 			return errors.New("durable enrichment fanout has invalid graph task")
 		}
 	}
+	if p.Version == 2 {
+		if p.QuestionChunkCount < 0 || p.QuestionBatchCount < 0 ||
+			p.GraphChunkCount < 0 ||
+			(p.QuestionBatchCount > 0 && p.QuestionChunkCount == 0) ||
+			(p.GraphChunkCount > 0 && strings.TrimSpace(p.GraphModelID) == "") {
+			return errors.New("durable enrichment fanout has invalid paged counts")
+		}
+	}
 	return nil
 }
 
 func (p durableEnrichmentFanout) subtaskCount() int {
+	if p.Version == 2 {
+		count := p.QuestionBatchCount + p.GraphChunkCount
+		if p.SpawnSummary {
+			count++
+		}
+		return count
+	}
 	count := len(p.QuestionBatches) + len(p.GraphTasks)
 	if p.SpawnSummary {
 		count++
@@ -155,6 +179,7 @@ func NewKnowledgePostProcessService(
 	pendingRepo interfaces.TaskPendingOpsRepository,
 	redisClient *redis.Client,
 	spanTracker SpanTracker,
+	splitManager *documentsplit.Manager,
 ) interfaces.TaskHandler {
 	return &KnowledgePostProcessService{
 		knowledgeRepo: knowledgeRepo,
@@ -164,6 +189,7 @@ func NewKnowledgePostProcessService(
 		pendingRepo:   pendingRepo,
 		redisClient:   redisClient,
 		spanTracker:   spanTracker,
+		splitManager:  splitManager,
 	}
 }
 
@@ -172,6 +198,231 @@ func (s *KnowledgePostProcessService) tracker() SpanTracker {
 		return noopSpanTracker{}
 	}
 	return s.spanTracker
+}
+
+func splitEnrichmentStrataCaps(
+	plan *documentsplit.Plan, cfg documentsplit.Config,
+) (question, graph int64) {
+	question = int64(cfg.QuestionStrata)
+	graph = int64(cfg.GraphStrata)
+	if plan == nil {
+		return question, graph
+	}
+	switch strings.ToLower(strings.TrimPrefix(
+		strings.TrimSpace(plan.SourceType), ".",
+	)) {
+	case "csv", "xls", "xlsx":
+		question = int64(cfg.TableQuestionStrata)
+		graph = int64(cfg.TableGraphStrata)
+	}
+	return question, graph
+}
+
+func (s *KnowledgePostProcessService) buildPagedSplitEnrichmentPlan(
+	ctx context.Context,
+	payload types.KnowledgePostProcessPayload,
+	kb *types.KnowledgeBase,
+	eff types.EffectiveProcessConfig,
+	attempt int,
+) (durableEnrichmentFanout, bool, error) {
+	var empty durableEnrichmentFanout
+	if s.splitManager == nil {
+		return empty, false, nil
+	}
+	splitPlan, err := s.splitManager.GetPlanForGeneration(
+		ctx, payload.TenantID, payload.KnowledgeID, payload.ProcessingGeneration,
+	)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return empty, false, nil
+	}
+	if err != nil {
+		return empty, false, fmt.Errorf("load physical split enrichment plan: %w", err)
+	}
+	textTypes := []types.ChunkType{
+		types.ChunkTypeText, types.ChunkTypeImageOCR, types.ChunkTypeImageCaption,
+	}
+	textCount, err := s.splitManager.CountGenerationChunks(
+		ctx, payload.TenantID, payload.KnowledgeID,
+		payload.ProcessingGeneration, textTypes,
+	)
+	if err != nil {
+		return empty, true, err
+	}
+	plainCount, err := s.splitManager.CountGenerationChunks(
+		ctx, payload.TenantID, payload.KnowledgeID,
+		payload.ProcessingGeneration, []types.ChunkType{types.ChunkTypeText},
+	)
+	if err != nil {
+		return empty, true, err
+	}
+	const maxSafePlanCount = int64(100_000_000)
+	if textCount < 0 || plainCount < 0 ||
+		textCount > maxSafePlanCount || plainCount > maxSafePlanCount {
+		return empty, true, errors.New("physical split enrichment chunk count is outside safety bounds")
+	}
+	plan := durableEnrichmentFanout{
+		Stage: durableEnrichmentPlanStage, Version: 2,
+		TenantID: payload.TenantID, KnowledgeID: payload.KnowledgeID,
+		KnowledgeBaseID:      payload.KnowledgeBaseID,
+		ProcessingGeneration: payload.ProcessingGeneration,
+		Language:             payload.Language, Attempt: attempt, Tracing: payload.TracingContext,
+		TextChunkCount: int(textCount), SpawnSummary: textCount > 0,
+		SpawnWiki: kb.IndexingStrategy.WikiEnabled && textCount > 0,
+	}
+	if plan.SpawnSummary && kb.NeedsEmbeddingModel() && eff.QuestionGenerationConfig.Enabled {
+		plan.QuestionCount = eff.QuestionGenerationConfig.QuestionCount
+		if plan.QuestionCount <= 0 {
+			plan.QuestionCount = 3
+		}
+		if plan.QuestionCount > 10 {
+			plan.QuestionCount = 10
+		}
+		questionCap, _ := splitEnrichmentStrataCaps(
+			splitPlan, s.splitManager.Config(),
+		)
+		plan.QuestionChunkCount = int(min(plainCount, questionCap))
+		plan.QuestionBatchCount =
+			(plan.QuestionChunkCount + questionGenChunkBatchSize - 1) /
+				questionGenChunkBatchSize
+	}
+	if eff.GraphEnabled && textCount > 0 {
+		if strings.TrimSpace(kb.SummaryModelID) == "" {
+			return empty, true, errors.New("graph extraction model is not configured")
+		}
+		_, graphCap := splitEnrichmentStrataCaps(
+			splitPlan, s.splitManager.Config(),
+		)
+		plan.GraphChunkCount = int(min(textCount, graphCap))
+		plan.GraphModelID = kb.SummaryModelID
+	}
+	if err := plan.validate(payload); err != nil {
+		return empty, true, err
+	}
+	return plan, true, nil
+}
+
+func (s *KnowledgePostProcessService) enqueuePagedSplitQuestionTasks(
+	ctx context.Context,
+	payload types.KnowledgePostProcessPayload,
+	questionCount int,
+	attempt int,
+	expectedChunks int,
+	expectedBatches int,
+) (int, error) {
+	if expectedChunks == 0 && expectedBatches == 0 {
+		return 0, nil
+	}
+	if expectedChunks <= 0 || expectedBatches <= 0 {
+		return 0, errors.New("paged split question plan has inconsistent counts")
+	}
+	if s.splitManager == nil {
+		return 0, errors.New("paged split question planner is unavailable")
+	}
+	selected, logicalTotal, err := loadGenerationChunkStrata(
+		ctx, s.splitManager, payload.TenantID, payload.KnowledgeID,
+		payload.ProcessingGeneration,
+		[]types.ChunkType{types.ChunkTypeText}, int64(expectedChunks),
+	)
+	if err != nil {
+		return 0, err
+	}
+	if len(selected) != expectedChunks {
+		return 0, fmt.Errorf(
+			"paged split question plan changed: expected %d sampled chunks, found %d",
+			expectedChunks, len(selected),
+		)
+	}
+	sparse := logicalTotal > int64(len(selected))
+	enqueued := 0
+	batchIndex := 0
+	for start := 0; start < len(selected); start += questionGenChunkBatchSize {
+		end := min(len(selected), start+questionGenChunkBatchSize)
+		batch := durableQuestionBatch{
+			BatchIndex:   batchIndex,
+			ChunkIDs:     make([]string, 0, end-start),
+			SparseSample: sparse,
+		}
+		for _, chunk := range selected[start:end] {
+			batch.ChunkIDs = append(batch.ChunkIDs, chunk.ID)
+		}
+		// Only contiguous/full selections have real in-document neighbors.
+		// Sparse strata deliberately carry no false adjacency between distant
+		// rows/pages; each sampled chunk still includes its precise locator.
+		if !sparse {
+			if start > 0 {
+				batch.PrevChunkID = selected[start-1].ID
+			}
+			if end < len(selected) {
+				batch.NextChunkID = selected[end].ID
+			}
+		}
+		accepted, enqueueErr := s.enqueueQuestionGenerationTasks(
+			ctx, payload, questionCount, attempt, []durableQuestionBatch{batch},
+		)
+		enqueued += accepted
+		if enqueueErr != nil {
+			return enqueued, enqueueErr
+		}
+		batchIndex++
+	}
+	if batchIndex != expectedBatches {
+		return enqueued, fmt.Errorf(
+			"paged split question plan changed: expected %d batches, found %d",
+			expectedBatches, batchIndex,
+		)
+	}
+	return enqueued, nil
+}
+
+func (s *KnowledgePostProcessService) enqueuePagedSplitGraphTasks(
+	ctx context.Context,
+	payload types.KnowledgePostProcessPayload,
+	attempt int,
+	modelID string,
+	expectedChunks int,
+) (int, []string, error) {
+	if expectedChunks == 0 {
+		return 0, nil, nil
+	}
+	if s.splitManager == nil {
+		return 0, nil, errors.New("paged split graph planner is unavailable")
+	}
+	chunkTypes := []types.ChunkType{
+		types.ChunkTypeText, types.ChunkTypeImageOCR, types.ChunkTypeImageCaption,
+	}
+	selected, _, err := loadGenerationChunkStrata(
+		ctx, s.splitManager, payload.TenantID, payload.KnowledgeID,
+		payload.ProcessingGeneration, chunkTypes, int64(expectedChunks),
+	)
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(selected) != expectedChunks {
+		return 0, nil, fmt.Errorf(
+			"paged split graph plan changed: expected %d chunks, found %d",
+			expectedChunks, len(selected),
+		)
+	}
+	enqueued := 0
+	var unowned []string
+	for position, chunk := range selected {
+		ok, enqueueErr := NewChunkExtractTask(
+			ctx, s.taskEnqueuer, payload.TenantID, chunk.ID, modelID,
+			payload.KnowledgeID, payload.KnowledgeBaseID,
+			payload.ProcessingGeneration, attempt, position,
+		)
+		if enqueueErr != nil {
+			return enqueued, unowned, fmt.Errorf(
+				"enqueue paged graph fanout chunk %d: %w", position, enqueueErr,
+			)
+		}
+		if ok {
+			enqueued++
+		} else {
+			unowned = append(unowned, fmt.Sprintf("graph_chunk[%d]", position))
+		}
+	}
+	return enqueued, unowned, nil
 }
 
 // Handle implements asynq handler for TypeKnowledgePostProcess.
@@ -272,72 +523,81 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		}
 		processOverrides, _ := knowledge.ProcessOverrides()
 		eff := ResolveProcessConfig(kb, processOverrides)
-		chunks, err := s.chunkService.ListChunksByKnowledgeID(ctx, payload.KnowledgeID)
+		var pagedSplit bool
+		durablePlan, pagedSplit, err = s.buildPagedSplitEnrichmentPlan(
+			ctx, payload, kb, eff, attempt,
+		)
 		if err != nil {
-			return fmt.Errorf("list chunks for knowledge %s: %w", payload.KnowledgeID, err)
+			return err
 		}
-		var textChunks []*types.Chunk
-		for _, chunk := range chunks {
-			if chunk.ChunkType == types.ChunkTypeText || chunk.ChunkType == types.ChunkTypeImageOCR ||
-				chunk.ChunkType == types.ChunkTypeImageCaption {
-				textChunks = append(textChunks, chunk)
+		if !pagedSplit {
+			chunks, err := s.chunkService.ListChunksByKnowledgeID(ctx, payload.KnowledgeID)
+			if err != nil {
+				return fmt.Errorf("list chunks for knowledge %s: %w", payload.KnowledgeID, err)
 			}
-		}
-		durablePlan = durableEnrichmentFanout{
-			Stage:                durableEnrichmentPlanStage,
-			Version:              1,
-			TenantID:             payload.TenantID,
-			KnowledgeID:          payload.KnowledgeID,
-			KnowledgeBaseID:      payload.KnowledgeBaseID,
-			ProcessingGeneration: payload.ProcessingGeneration,
-			Language:             payload.Language,
-			Attempt:              attempt,
-			Tracing:              payload.TracingContext,
-			TextChunkCount:       len(textChunks),
-			SpawnSummary:         len(textChunks) > 0,
-			SpawnWiki:            kb.IndexingStrategy.WikiEnabled && len(textChunks) > 0,
-		}
-		if durablePlan.SpawnSummary && kb.NeedsEmbeddingModel() && eff.QuestionGenerationConfig.Enabled {
-			questionCount := eff.QuestionGenerationConfig.QuestionCount
-			if questionCount <= 0 {
-				questionCount = 3
-			}
-			if questionCount > 10 {
-				questionCount = 10
-			}
-			durablePlan.QuestionCount = questionCount
-			var questionChunks []*types.Chunk
-			for _, chunk := range textChunks {
-				if chunk.ChunkType == types.ChunkTypeText {
-					questionChunks = append(questionChunks, chunk)
+			var textChunks []*types.Chunk
+			for _, chunk := range chunks {
+				if chunk.ChunkType == types.ChunkTypeText || chunk.ChunkType == types.ChunkTypeImageOCR ||
+					chunk.ChunkType == types.ChunkTypeImageCaption {
+					textChunks = append(textChunks, chunk)
 				}
 			}
-			sort.Slice(questionChunks, func(i, j int) bool {
-				return questionChunks[i].StartAt < questionChunks[j].StartAt
-			})
-			for start, batchIndex := 0, 0; start < len(questionChunks); start, batchIndex = start+questionGenChunkBatchSize, batchIndex+1 {
-				end := start + questionGenChunkBatchSize
-				if end > len(questionChunks) {
-					end = len(questionChunks)
-				}
-				batch := durableQuestionBatch{BatchIndex: batchIndex}
-				for _, chunk := range questionChunks[start:end] {
-					batch.ChunkIDs = append(batch.ChunkIDs, chunk.ID)
-				}
-				if start > 0 {
-					batch.PrevChunkID = questionChunks[start-1].ID
-				}
-				if end < len(questionChunks) {
-					batch.NextChunkID = questionChunks[end].ID
-				}
-				durablePlan.QuestionBatches = append(durablePlan.QuestionBatches, batch)
+			durablePlan = durableEnrichmentFanout{
+				Stage:                durableEnrichmentPlanStage,
+				Version:              1,
+				TenantID:             payload.TenantID,
+				KnowledgeID:          payload.KnowledgeID,
+				KnowledgeBaseID:      payload.KnowledgeBaseID,
+				ProcessingGeneration: payload.ProcessingGeneration,
+				Language:             payload.Language,
+				Attempt:              attempt,
+				Tracing:              payload.TracingContext,
+				TextChunkCount:       len(textChunks),
+				SpawnSummary:         len(textChunks) > 0,
+				SpawnWiki:            kb.IndexingStrategy.WikiEnabled && len(textChunks) > 0,
 			}
-		}
-		if eff.GraphEnabled {
-			for index, chunk := range textChunks {
-				durablePlan.GraphTasks = append(durablePlan.GraphTasks, durableGraphTask{
-					ChunkID: chunk.ID, ChunkIndex: index, ModelID: kb.SummaryModelID,
+			if durablePlan.SpawnSummary && kb.NeedsEmbeddingModel() && eff.QuestionGenerationConfig.Enabled {
+				questionCount := eff.QuestionGenerationConfig.QuestionCount
+				if questionCount <= 0 {
+					questionCount = 3
+				}
+				if questionCount > 10 {
+					questionCount = 10
+				}
+				durablePlan.QuestionCount = questionCount
+				var questionChunks []*types.Chunk
+				for _, chunk := range textChunks {
+					if chunk.ChunkType == types.ChunkTypeText {
+						questionChunks = append(questionChunks, chunk)
+					}
+				}
+				sort.Slice(questionChunks, func(i, j int) bool {
+					return questionChunks[i].StartAt < questionChunks[j].StartAt
 				})
+				for start, batchIndex := 0, 0; start < len(questionChunks); start, batchIndex = start+questionGenChunkBatchSize, batchIndex+1 {
+					end := start + questionGenChunkBatchSize
+					if end > len(questionChunks) {
+						end = len(questionChunks)
+					}
+					batch := durableQuestionBatch{BatchIndex: batchIndex}
+					for _, chunk := range questionChunks[start:end] {
+						batch.ChunkIDs = append(batch.ChunkIDs, chunk.ID)
+					}
+					if start > 0 {
+						batch.PrevChunkID = questionChunks[start-1].ID
+					}
+					if end < len(questionChunks) {
+						batch.NextChunkID = questionChunks[end].ID
+					}
+					durablePlan.QuestionBatches = append(durablePlan.QuestionBatches, batch)
+				}
+			}
+			if eff.GraphEnabled {
+				for index, chunk := range textChunks {
+					durablePlan.GraphTasks = append(durablePlan.GraphTasks, durableGraphTask{
+						ChunkID: chunk.ID, ChunkIndex: index, ModelID: kb.SummaryModelID,
+					})
+				}
 			}
 		}
 		if err := durablePlan.validate(payload); err != nil {
@@ -353,6 +613,10 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	willSpawnWiki := durablePlan.SpawnWiki
 	questionBatchCount := len(durablePlan.QuestionBatches)
 	graphChunkCount := len(durablePlan.GraphTasks)
+	if durablePlan.Version == 2 {
+		questionBatchCount = durablePlan.QuestionBatchCount
+		graphChunkCount = durablePlan.GraphChunkCount
+	}
 	expectedSubtasks := durablePlan.subtaskCount()
 
 	enqueuedWiki := false
@@ -514,9 +778,17 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 					"chunk_count": durablePlan.TextChunkCount,
 				})
 			}
-			enqueuedQuestionCount, err = s.enqueueQuestionGenerationTasks(
-				ctx, payload, durablePlan.QuestionCount, attempt, durablePlan.QuestionBatches,
-			)
+			if durablePlan.Version == 2 {
+				enqueuedQuestionCount, err = s.enqueuePagedSplitQuestionTasks(
+					ctx, payload, durablePlan.QuestionCount, attempt,
+					durablePlan.QuestionChunkCount,
+					durablePlan.QuestionBatchCount,
+				)
+			} else {
+				enqueuedQuestionCount, err = s.enqueueQuestionGenerationTasks(
+					ctx, payload, durablePlan.QuestionCount, attempt, durablePlan.QuestionBatches,
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("enqueue durable question fanout: %w", err)
 			}
@@ -527,20 +799,31 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	enqueuedGraphCount := 0
 	if graphChunkCount > 0 {
 		logger.Infof(ctx, "[KnowledgePostProcess] Replaying Graph RAG task plan with %d chunks", graphChunkCount)
-		for _, graphTask := range durablePlan.GraphTasks {
-			ok, err := NewChunkExtractTask(
-				ctx, s.taskEnqueuer, payload.TenantID, graphTask.ChunkID, graphTask.ModelID,
-				payload.KnowledgeID, payload.KnowledgeBaseID, payload.ProcessingGeneration,
-				attempt, graphTask.ChunkIndex,
+		if durablePlan.Version == 2 {
+			var pagedUnowned []string
+			enqueuedGraphCount, pagedUnowned, err = s.enqueuePagedSplitGraphTasks(
+				ctx, payload, attempt, durablePlan.GraphModelID, durablePlan.GraphChunkCount,
 			)
 			if err != nil {
-				logger.Errorf(ctx, "[KnowledgePostProcess] Failed to create chunk extract task for %s: %v", graphTask.ChunkID, err)
-				return fmt.Errorf("enqueue durable graph fanout chunk %d: %w", graphTask.ChunkIndex, err)
+				return err
 			}
-			if ok {
-				enqueuedGraphCount++
-			} else {
-				unownedItems = append(unownedItems, fmt.Sprintf("graph_chunk[%d]", graphTask.ChunkIndex))
+			unownedItems = append(unownedItems, pagedUnowned...)
+		} else {
+			for _, graphTask := range durablePlan.GraphTasks {
+				ok, err := NewChunkExtractTask(
+					ctx, s.taskEnqueuer, payload.TenantID, graphTask.ChunkID, graphTask.ModelID,
+					payload.KnowledgeID, payload.KnowledgeBaseID, payload.ProcessingGeneration,
+					attempt, graphTask.ChunkIndex,
+				)
+				if err != nil {
+					logger.Errorf(ctx, "[KnowledgePostProcess] Failed to create chunk extract task for %s: %v", graphTask.ChunkID, err)
+					return fmt.Errorf("enqueue durable graph fanout chunk %d: %w", graphTask.ChunkIndex, err)
+				}
+				if ok {
+					enqueuedGraphCount++
+				} else {
+					unownedItems = append(unownedItems, fmt.Sprintf("graph_chunk[%d]", graphTask.ChunkIndex))
+				}
 			}
 		}
 	}
@@ -616,6 +899,10 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		"enqueued_wiki":           enqueuedWiki,
 		"enqueued_graph":          enqueuedGraphCount > 0,
 		"enqueued_graph_count":    enqueuedGraphCount,
+	}
+	if durablePlan.Version == 2 {
+		postOutput["question_sampled_chunks"] = durablePlan.QuestionChunkCount
+		postOutput["graph_sampled_chunks"] = durablePlan.GraphChunkCount
 	}
 	if wikiEnqueueError != "" {
 		postOutput["wiki_enqueue_error"] = wikiEnqueueError
@@ -737,6 +1024,7 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationTasks(
 			BatchIndex:           currentBatchIndex,
 			PrevChunkID:          batch.PrevChunkID,
 			NextChunkID:          batch.NextChunkID,
+			SparseSample:         batch.SparseSample,
 		}
 
 		langfuse.InjectTracing(ctx, &taskPayload)

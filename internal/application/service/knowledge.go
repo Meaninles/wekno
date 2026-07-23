@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
@@ -66,6 +67,7 @@ type knowledgeService struct {
 	taskPendingRepo interfaces.TaskPendingOpsRepository
 	wikiDeleteCoord *wikidelete.Coordinator
 	auxObjects      *knowledgeaux.Registry
+	splitManager    *documentsplit.Manager
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -113,6 +115,7 @@ func NewKnowledgeService(
 	taskPendingRepo interfaces.TaskPendingOpsRepository,
 	wikiDeleteCoord *wikidelete.Coordinator,
 	auxObjects *knowledgeaux.Registry,
+	splitManager *documentsplit.Manager,
 	spanTracker SpanTracker,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
@@ -141,6 +144,7 @@ func NewKnowledgeService(
 		taskPendingRepo: taskPendingRepo,
 		wikiDeleteCoord: wikiDeleteCoord,
 		auxObjects:      auxObjects,
+		splitManager:    splitManager,
 		spanTracker:     spanTracker,
 	}, nil
 }

@@ -18,6 +18,18 @@ const mb = 1024 * 1024
 
 const maxXMLScanBytes int64 = 256 * mb
 
+// Highly repetitive Office XML routinely compresses beyond the historical
+// parser workload thresholds (DOCX 30x, PPTX 10x). Those thresholds are useful
+// for routing a document to the heavy/split path, but they are not a reliable
+// zip-bomb boundary on their own. Keep a separate, deliberately conservative
+// archive safety envelope so legitimate business documents can be physically
+// split while pathological archives are still rejected before any entry is
+// inflated.
+const (
+	officeArchiveMaxExpansionRatio = 200.0
+	officeArchiveMaxExpandedBytes  = int64(4 * 1024 * mb)
+)
+
 type sizeLimit struct {
 	mb    int64
 	label string
@@ -88,6 +100,18 @@ var heavySizeLimits = map[string]byteLimit{
 	"wav":      {5 * mb / 2, "WAV 音频文件"},
 }
 
+// HardSizeLimit returns the per-physical-part parser safety ceiling for a
+// supported document type. Logical uploads may exceed this ceiling because
+// they are split first; no splitter output is allowed to exceed it.
+func HardSizeLimit(fileType string) (int64, bool) {
+	normalized := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(fileType), "."))
+	limit, ok := fileSizeLimits[normalized]
+	if !ok {
+		return 0, false
+	}
+	return limit.mb * mb, true
+}
+
 type Weight string
 
 const (
@@ -95,11 +119,32 @@ const (
 	WeightHeavy Weight = "heavy"
 )
 
+type Disposition string
+
+const (
+	DispositionPass               Disposition = "pass"
+	DispositionSplitRequired      Disposition = "split_required"
+	DispositionRejectUnsafe       Disposition = "reject_unsafe"
+	DispositionRejectUnsplittable Disposition = "reject_unsplittable"
+)
+
+type Violation struct {
+	Class   Disposition `json:"class"`
+	Message string      `json:"message"`
+}
+
 type Report struct {
-	Issues       []string
-	Weight       Weight
-	HeavyReasons []string
-	Metrics      map[string]any
+	// Issues contains only terminal rejection reasons. Workload limits that a
+	// physical split can resolve live in SplitReasons and must not reject the
+	// original upload.
+	Issues        []string
+	SplitReasons  []string
+	Violations    []Violation
+	Disposition   Disposition
+	RequiredParts int
+	Weight        Weight
+	HeavyReasons  []string
+	Metrics       map[string]any
 }
 
 func (r Report) ValidationError() error {
@@ -110,19 +155,67 @@ func (r Report) IsHeavy() bool {
 	return r.Weight == WeightHeavy
 }
 
+func (r Report) NeedsSplit() bool {
+	return r.Disposition == DispositionSplitRequired
+}
+
 func newReport() Report {
 	return Report{
-		Weight:  WeightLight,
-		Metrics: map[string]any{},
+		Disposition:   DispositionPass,
+		RequiredParts: 1,
+		Weight:        WeightLight,
+		Metrics:       map[string]any{},
 	}
 }
 
-func (r *Report) addIssue(format string, args ...any) {
-	r.Issues = append(r.Issues, fmt.Sprintf(format, args...))
+// addLimitIssue converts an existing per-parser workload ceiling into a
+// physical-part count. The 75% target matches the splitter's byte/row/cell
+// targets, leaving headroom for repeated headers, overlap and serialization
+// variance instead of merely producing two parts that can still exceed the
+// original structural limit.
+func (r *Report) addLimitIssue(current, limit int64, format string, args ...any) {
+	target := max(int64(1), limit*3/4)
+	parts := int((current + target - 1) / target)
+	r.addSplitParts(parts, fmt.Sprintf(format, args...))
 }
 
 func (r *Report) addIssueText(message string) {
 	r.Issues = append(r.Issues, message)
+	r.Violations = append(r.Violations, Violation{
+		Class: DispositionRejectUnsafe, Message: message,
+	})
+	r.Disposition = DispositionRejectUnsafe
+}
+
+func (r *Report) addUnsafe(format string, args ...any) {
+	r.addIssueText(fmt.Sprintf(format, args...))
+}
+
+func (r *Report) addUnsplittable(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	r.Issues = append(r.Issues, message)
+	r.Violations = append(r.Violations, Violation{
+		Class: DispositionRejectUnsplittable, Message: message,
+	})
+	if r.Disposition != DispositionRejectUnsafe {
+		r.Disposition = DispositionRejectUnsplittable
+	}
+}
+
+func (r *Report) addSplitParts(parts int, message string) {
+	if parts < 2 {
+		parts = 2
+	}
+	r.SplitReasons = append(r.SplitReasons, message)
+	r.Violations = append(r.Violations, Violation{
+		Class: DispositionSplitRequired, Message: message,
+	})
+	if r.Disposition == DispositionPass || r.Disposition == DispositionSplitRequired {
+		r.Disposition = DispositionSplitRequired
+	}
+	if parts > r.RequiredParts {
+		r.RequiredParts = parts
+	}
 }
 
 func (r *Report) markHeavy(format string, args ...any) {
@@ -298,7 +391,7 @@ func AnalyzeSize(fileName, fileType string, size int64) Report {
 
 func NeedsContentAnalysis(fileName, fileType string) bool {
 	switch fileTypeFromName(analysisName(fileName, fileType)) {
-	case "docx", "xlsx", "csv":
+	case "docx", "xlsx", "pptx", "csv":
 		return true
 	default:
 		return false
@@ -348,6 +441,10 @@ func analyze(fileName string, fileTypeHint string, size int64, open func() (read
 			report.addIssueText("文件已加密或受密码保护，暂不支持上传解析")
 			return report
 		}
+		validateOfficeArchiveSafety(ext, zr, size, &report)
+		if report.Disposition == DispositionRejectUnsafe {
+			return report
+		}
 		if ext == "docx" {
 			validateDOCX(zr, size, &report)
 		} else if ext == "xlsx" {
@@ -385,10 +482,37 @@ func analyzeSizeOnly(fileName string, fileTypeHint string, size int64) Report {
 		report.markHeavy("%s大小超过重型阈值 %s（当前 %s）", heavy.label, formatByteSize(heavy.bytes), formatByteSize(size))
 	}
 	if limit, ok := fileSizeLimits[ext]; ok && size > limit.mb*mb {
-		report.addIssue("%s大小不能超过 %dMB（当前 %s）", limit.label, limit.mb, formatMB(size))
+		target := int64(float64(limit.mb*mb) * 0.75)
+		parts := int((size + target - 1) / target)
+		report.addSplitParts(parts, fmt.Sprintf(
+			"%s大小超过单分片上限 %dMB（当前 %s），将自动物理拆分",
+			limit.label, limit.mb, formatMB(size),
+		))
 	}
 	return report
 }
+
+// AnalyzeReaderAt applies the same structural preflight to a staged or
+// provider-backed object without materializing it in memory.
+func AnalyzeReaderAt(fileName, fileType string, reader io.ReaderAt, size int64) Report {
+	if reader == nil || size < 0 {
+		report := newReport()
+		report.addUnsafe("文件结构异常或已损坏，无法解析")
+		return report
+	}
+	name := analysisName(fileName, fileType)
+	return analyze(name, fileType, size, func() (readerAtSize, error) {
+		return borrowedReaderAt{ReaderAt: reader, size: size}, nil
+	})
+}
+
+type borrowedReaderAt struct {
+	io.ReaderAt
+	size int64
+}
+
+func (r borrowedReaderAt) Size() int64  { return r.size }
+func (r borrowedReaderAt) Close() error { return nil }
 
 type validationError []string
 
@@ -422,16 +546,13 @@ func validateDOCX(zr *zip.Reader, fileBytes int64, report *Report) {
 	report.metric("docx_word_media_bytes", stats.wordMediaBytes)
 
 	if len(zr.File) > limits.entries {
-		report.addIssue("Word 文档内部文件数量不能超过 %s 个（当前 %s 个）", formatInt(int64(limits.entries)), formatInt(int64(len(zr.File))))
+		report.addLimitIssue(int64(len(zr.File)), int64(limits.entries), "Word 文档内部文件数量不能超过 %s 个（当前 %s 个）", formatInt(int64(limits.entries)), formatInt(int64(len(zr.File))))
 	}
 	if stats.uncompressedBytes > limits.uncompressedMB*mb {
-		report.addIssue("Word 文档内部内容展开后不能超过 %dMB（当前 %s）", limits.uncompressedMB, formatMB(stats.uncompressedBytes))
+		report.addLimitIssue(stats.uncompressedBytes, limits.uncompressedMB*mb, "Word 文档内部内容展开后不能超过 %dMB（当前 %s）", limits.uncompressedMB, formatMB(stats.uncompressedBytes))
 	}
 	if stats.uncompressedBytes > 40*mb {
 		report.markHeavy("Word 文档内部内容展开后超过重型阈值 40MB（当前 %s）", formatMB(stats.uncompressedBytes))
-	}
-	if fileBytes > 0 && float64(stats.uncompressedBytes)/float64(fileBytes) > limits.compressionRate {
-		report.addIssue("Word 文档压缩膨胀倍数不能超过 %s 倍（当前 %.2f 倍）", trimFloat(limits.compressionRate), float64(stats.uncompressedBytes)/float64(fileBytes))
 	}
 	if fileBytes > 0 {
 		ratio := float64(stats.uncompressedBytes) / float64(fileBytes)
@@ -441,10 +562,10 @@ func validateDOCX(zr *zip.Reader, fileBytes int64, report *Report) {
 		}
 	}
 	if stats.wordMediaCount > limits.mediaFiles {
-		report.addIssue("Word 文档内图片/媒体文件数量不能超过 %s 个（当前 %s 个）", formatInt(limits.mediaFiles), formatInt(stats.wordMediaCount))
+		report.addLimitIssue(stats.wordMediaCount, limits.mediaFiles, "Word 文档内图片/媒体文件数量不能超过 %s 个（当前 %s 个）", formatInt(limits.mediaFiles), formatInt(stats.wordMediaCount))
 	}
 	if stats.wordMediaBytes > limits.mediaMB*mb {
-		report.addIssue("Word 文档内图片/媒体总大小不能超过 %dMB（当前 %s）", limits.mediaMB, formatMB(stats.wordMediaBytes))
+		report.addLimitIssue(stats.wordMediaBytes, limits.mediaMB*mb, "Word 文档内图片/媒体总大小不能超过 %dMB（当前 %s）", limits.mediaMB, formatMB(stats.wordMediaBytes))
 	}
 	if doc == nil {
 		report.addIssueText("文件结构异常或已损坏，无法解析")
@@ -452,14 +573,14 @@ func validateDOCX(zr *zip.Reader, fileBytes int64, report *Report) {
 	}
 	report.metric("docx_document_xml_bytes", int64(doc.UncompressedSize64))
 	if int64(doc.UncompressedSize64) > limits.documentXMLMB*mb {
-		report.addIssue("Word 正文结构过大，正文 XML 不能超过 %dMB（当前 %s）", limits.documentXMLMB, formatMB(int64(doc.UncompressedSize64)))
+		report.addLimitIssue(int64(doc.UncompressedSize64), limits.documentXMLMB*mb, "Word 正文结构过大，正文 XML 不能超过 %dMB（当前 %s）", limits.documentXMLMB, formatMB(int64(doc.UncompressedSize64)))
 	}
 	if int64(doc.UncompressedSize64) > 15*mb {
 		report.markHeavy("Word 正文 XML 超过重型阈值 15MB（当前 %s）", formatMB(int64(doc.UncompressedSize64)))
 	}
 
 	if int64(doc.UncompressedSize64) > maxXMLScanBytes {
-		report.addIssue("文档内部结构过大，无法安全检查完整结构，单个 XML 最大扫描量不能超过 %dMB（当前 %s）", maxXMLScanBytes/mb, formatMB(int64(doc.UncompressedSize64)))
+		report.addLimitIssue(int64(doc.UncompressedSize64), maxXMLScanBytes, "文档内部结构过大，无法安全检查完整结构，单个 XML 最大扫描量不能超过 %dMB（当前 %s）", maxXMLScanBytes/mb, formatMB(int64(doc.UncompressedSize64)))
 		return
 	}
 
@@ -475,37 +596,37 @@ func validateDOCX(zr *zip.Reader, fileBytes int64, report *Report) {
 	report.metric("docx_table_cells", counters.tableCells)
 	report.metric("docx_page_break_hints", counters.pageBreakHints)
 	if counters.paragraphs > limits.paragraphs {
-		report.addIssue("Word 文档段落数不能超过 %s 个（当前 %s 个）", formatInt(limits.paragraphs), formatInt(counters.paragraphs))
+		report.addLimitIssue(counters.paragraphs, limits.paragraphs, "Word 文档段落数不能超过 %s 个（当前 %s 个）", formatInt(limits.paragraphs), formatInt(counters.paragraphs))
 	}
 	if counters.paragraphs > 50000 {
 		report.markHeavy("Word 文档段落数超过重型阈值 50,000 个（当前 %s 个）", formatInt(counters.paragraphs))
 	}
 	if counters.textNodes > limits.textNodes {
-		report.addIssue("Word 文档文本节点数不能超过 %s 个（当前 %s 个）", formatInt(limits.textNodes), formatInt(counters.textNodes))
+		report.addLimitIssue(counters.textNodes, limits.textNodes, "Word 文档文本节点数不能超过 %s 个（当前 %s 个）", formatInt(limits.textNodes), formatInt(counters.textNodes))
 	}
 	if counters.textNodes > 75000 {
 		report.markHeavy("Word 文档文本节点数超过重型阈值 75,000 个（当前 %s 个）", formatInt(counters.textNodes))
 	}
 	if counters.tables > limits.tables {
-		report.addIssue("Word 文档表格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.tables), formatInt(counters.tables))
+		report.addLimitIssue(counters.tables, limits.tables, "Word 文档表格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.tables), formatInt(counters.tables))
 	}
 	if counters.tables > 500 {
 		report.markHeavy("Word 文档表格数量超过重型阈值 500 个（当前 %s 个）", formatInt(counters.tables))
 	}
 	if counters.tableRows > limits.tableRows {
-		report.addIssue("Word 文档表格行数不能超过 %s 行（当前 %s 行）", formatInt(limits.tableRows), formatInt(counters.tableRows))
+		report.addLimitIssue(counters.tableRows, limits.tableRows, "Word 文档表格行数不能超过 %s 行（当前 %s 行）", formatInt(limits.tableRows), formatInt(counters.tableRows))
 	}
 	if counters.tableRows > 10000 {
 		report.markHeavy("Word 文档表格行数超过重型阈值 10,000 行（当前 %s 行）", formatInt(counters.tableRows))
 	}
 	if counters.tableCells > limits.tableCells {
-		report.addIssue("Word 文档表格单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.tableCells), formatInt(counters.tableCells))
+		report.addLimitIssue(counters.tableCells, limits.tableCells, "Word 文档表格单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.tableCells), formatInt(counters.tableCells))
 	}
 	if counters.tableCells > 40000 {
 		report.markHeavy("Word 文档表格单元格数量超过重型阈值 40,000 个（当前 %s 个）", formatInt(counters.tableCells))
 	}
 	if counters.pageBreakHints > limits.pageBreakHints {
-		report.addIssue("Word 文档分页数量不能超过 %s 页左右（当前 %s 个分页提示）", formatInt(limits.pageBreakHints), formatInt(counters.pageBreakHints))
+		report.addLimitIssue(counters.pageBreakHints, limits.pageBreakHints, "Word 文档分页数量不能超过 %s 页左右（当前 %s 个分页提示）", formatInt(limits.pageBreakHints), formatInt(counters.pageBreakHints))
 	}
 	if counters.pageBreakHints > 400 {
 		report.markHeavy("Word 文档分页提示超过重型阈值 400 个（当前 %s 个）", formatInt(counters.pageBreakHints))
@@ -572,10 +693,10 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 	report.metric("xlsx_media_bytes", stats.xlsxMediaBytes)
 
 	if len(zr.File) > limits.entries {
-		report.addIssue("Excel 文件内部文件数量不能超过 %s 个（当前 %s 个）", formatInt(int64(limits.entries)), formatInt(int64(len(zr.File))))
+		report.addLimitIssue(int64(len(zr.File)), int64(limits.entries), "Excel 文件内部文件数量不能超过 %s 个（当前 %s 个）", formatInt(int64(limits.entries)), formatInt(int64(len(zr.File))))
 	}
 	if stats.uncompressedBytes > limits.uncompressedMB*mb {
-		report.addIssue("Excel 文件内部内容展开后不能超过 %dMB（当前 %s）", limits.uncompressedMB, formatMB(stats.uncompressedBytes))
+		report.addLimitIssue(stats.uncompressedBytes, limits.uncompressedMB*mb, "Excel 文件内部内容展开后不能超过 %dMB（当前 %s）", limits.uncompressedMB, formatMB(stats.uncompressedBytes))
 	}
 	if stats.uncompressedBytes > 40*mb {
 		report.markHeavy("Excel 文件内部内容展开后超过重型阈值 40MB（当前 %s）", formatMB(stats.uncompressedBytes))
@@ -604,7 +725,7 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 			maxSheetXML = &namedInt64{name: sheetName, value: size}
 		}
 		if size > maxXMLScanBytes {
-			report.addIssue("文档内部结构过大，无法安全检查完整结构，单个 XML 最大扫描量不能超过 %dMB（%s：当前 %s）", maxXMLScanBytes/mb, sheetName, formatMB(size))
+			report.addLimitIssue(size, maxXMLScanBytes, "文档内部结构过大，无法安全检查完整结构，单个 XML 最大扫描量不能超过 %dMB（%s：当前 %s）", maxXMLScanBytes/mb, sheetName, formatMB(size))
 			continue
 		}
 		c, err := scanWorksheetXML(f)
@@ -651,13 +772,13 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 	}
 
 	if maxSheetXML != nil && maxSheetXML.value > limits.worksheetXMLMB*mb {
-		report.addIssue("单个工作表内部结构不能超过 %dMB（%s：当前 %s）", limits.worksheetXMLMB, maxSheetXML.name, formatMB(maxSheetXML.value))
+		report.addLimitIssue(maxSheetXML.value, limits.worksheetXMLMB*mb, "单个工作表内部结构不能超过 %dMB（%s：当前 %s）", limits.worksheetXMLMB, maxSheetXML.name, formatMB(maxSheetXML.value))
 	}
 	if maxSheetXML != nil && maxSheetXML.value > 5*mb/2 {
 		report.markHeavy("单个工作表内部结构超过重型阈值 %s（%s：当前 %s）", formatByteSize(5*mb/2), maxSheetXML.name, formatMB(maxSheetXML.value))
 	}
 	if worksheetXMLTotal > limits.worksheetXMLTotalMB*mb {
-		report.addIssue("所有工作表内部结构总大小不能超过 %dMB（当前 %s）", limits.worksheetXMLTotalMB, formatMB(worksheetXMLTotal))
+		report.addLimitIssue(worksheetXMLTotal, limits.worksheetXMLTotalMB*mb, "所有工作表内部结构总大小不能超过 %dMB（当前 %s）", limits.worksheetXMLTotalMB, formatMB(worksheetXMLTotal))
 	}
 	if worksheetXMLTotal > 15*mb {
 		report.markHeavy("所有工作表内部结构总大小超过重型阈值 15MB（当前 %s）", formatMB(worksheetXMLTotal))
@@ -668,7 +789,7 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 		sharedBytes := int64(shared.UncompressedSize64)
 		report.metric("xlsx_shared_strings_bytes", sharedBytes)
 		if int64(shared.UncompressedSize64) > limits.sharedStringsMB*mb {
-			report.addIssue("Excel 共享字符串表不能超过 %dMB（当前 %s）", limits.sharedStringsMB, formatMB(int64(shared.UncompressedSize64)))
+			report.addLimitIssue(int64(shared.UncompressedSize64), limits.sharedStringsMB*mb, "Excel 共享字符串表不能超过 %dMB（当前 %s）", limits.sharedStringsMB, formatMB(int64(shared.UncompressedSize64)))
 		}
 		if sharedBytes > 3*mb/2 {
 			report.markHeavy("Excel 共享字符串表超过重型阈值 %s（当前 %s）", formatByteSize(3*mb/2), formatMB(sharedBytes))
@@ -681,7 +802,7 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 			}
 			report.metric("xlsx_shared_string_items", items)
 			if items > limits.sharedStringItems {
-				report.addIssue("Excel 唯一文本项数量不能超过 %s 个（当前 %s 个）", formatInt(limits.sharedStringItems), formatInt(items))
+				report.addLimitIssue(items, limits.sharedStringItems, "Excel 唯一文本项数量不能超过 %s 个（当前 %s 个）", formatInt(limits.sharedStringItems), formatInt(items))
 			}
 			if items > 25000 {
 				report.markHeavy("Excel 唯一文本项数量超过重型阈值 25,000 个（当前 %s 个）", formatInt(items))
@@ -689,49 +810,49 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 		}
 	}
 	if maxSheetRows != nil && maxSheetRows.value > limits.sheetRows {
-		report.addIssue("单个工作表行数不能超过 %s 行（%s：当前 %s 行）", formatInt(limits.sheetRows), maxSheetRows.name, formatInt(maxSheetRows.value))
+		report.addLimitIssue(maxSheetRows.value, limits.sheetRows, "单个工作表行数不能超过 %s 行（%s：当前 %s 行）", formatInt(limits.sheetRows), maxSheetRows.name, formatInt(maxSheetRows.value))
 	}
 	if maxSheetRows != nil && maxSheetRows.value > 10000 {
 		report.markHeavy("单个工作表行数超过重型阈值 10,000 行（%s：当前 %s 行）", maxSheetRows.name, formatInt(maxSheetRows.value))
 	}
 	if totalRows > limits.totalRows {
-		report.addIssue("Excel 总行数不能超过 %s 行（当前 %s 行）", formatInt(limits.totalRows), formatInt(totalRows))
+		report.addLimitIssue(totalRows, limits.totalRows, "Excel 总行数不能超过 %s 行（当前 %s 行）", formatInt(limits.totalRows), formatInt(totalRows))
 	}
 	if totalRows > 15000 {
 		report.markHeavy("Excel 总行数超过重型阈值 15,000 行（当前 %s 行）", formatInt(totalRows))
 	}
 	if maxSheetColumns != nil && maxSheetColumns.value > limits.sheetColumns {
-		report.addIssue("单个工作表列数不能超过 %s 列（%s：当前 %s 列）", formatInt(limits.sheetColumns), maxSheetColumns.name, formatInt(maxSheetColumns.value))
+		report.addLimitIssue(maxSheetColumns.value, limits.sheetColumns, "单个工作表列数不能超过 %s 列（%s：当前 %s 列）", formatInt(limits.sheetColumns), maxSheetColumns.name, formatInt(maxSheetColumns.value))
 	}
 	if maxSheetColumns != nil && maxSheetColumns.value > 50 {
 		report.markHeavy("单个工作表列数超过重型阈值 50 列（%s：当前 %s 列）", maxSheetColumns.name, formatInt(maxSheetColumns.value))
 	}
 	if totalCells > limits.totalCells {
-		report.addIssue("Excel 总单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.totalCells), formatInt(totalCells))
+		report.addLimitIssue(totalCells, limits.totalCells, "Excel 总单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.totalCells), formatInt(totalCells))
 	}
 	if totalCells > 50000 {
 		report.markHeavy("Excel 总单元格数量超过重型阈值 50,000 个（当前 %s 个）", formatInt(totalCells))
 	}
 	if formulaCells > limits.formulaCells {
-		report.addIssue("Excel 公式单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.formulaCells), formatInt(formulaCells))
+		report.addLimitIssue(formulaCells, limits.formulaCells, "Excel 公式单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.formulaCells), formatInt(formulaCells))
 	}
 	if formulaCells > 15000 {
 		report.markHeavy("Excel 公式单元格数量超过重型阈值 15,000 个（当前 %s 个）", formatInt(formulaCells))
 	}
 	if conditionalFormats > limits.conditionalFormats {
-		report.addIssue("Excel 条件格式规则数量不能超过 %s 条（当前 %s 条）", formatInt(limits.conditionalFormats), formatInt(conditionalFormats))
+		report.addLimitIssue(conditionalFormats, limits.conditionalFormats, "Excel 条件格式规则数量不能超过 %s 条（当前 %s 条）", formatInt(limits.conditionalFormats), formatInt(conditionalFormats))
 	}
 	if conditionalFormats > 250 {
 		report.markHeavy("Excel 条件格式规则数量超过重型阈值 250 条（当前 %s 条）", formatInt(conditionalFormats))
 	}
 	if mergeRanges > limits.mergeRanges {
-		report.addIssue("Excel 合并单元格区域数量不能超过 %s 个（当前 %s 个）", formatInt(limits.mergeRanges), formatInt(mergeRanges))
+		report.addLimitIssue(mergeRanges, limits.mergeRanges, "Excel 合并单元格区域数量不能超过 %s 个（当前 %s 个）", formatInt(limits.mergeRanges), formatInt(mergeRanges))
 	}
 	if mergeRanges > 2500 {
 		report.markHeavy("Excel 合并单元格区域数量超过重型阈值 2,500 个（当前 %s 个）", formatInt(mergeRanges))
 	}
 	if mergedCoveredCells > limits.mergedCoveredCells {
-		report.addIssue("Excel 合并单元格覆盖范围不能超过 %s 个单元格（当前 %s 个单元格）", formatInt(limits.mergedCoveredCells), formatInt(mergedCoveredCells))
+		report.addLimitIssue(mergedCoveredCells, limits.mergedCoveredCells, "Excel 合并单元格覆盖范围不能超过 %s 个单元格（当前 %s 个单元格）", formatInt(limits.mergedCoveredCells), formatInt(mergedCoveredCells))
 	}
 	if mergedCoveredCells > 25000 {
 		report.markHeavy("Excel 合并单元格覆盖范围超过重型阈值 25,000 个单元格（当前 %s 个单元格）", formatInt(mergedCoveredCells))
@@ -744,13 +865,13 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 	}
 	report.metric("xlsx_drawing_objects", drawingObjects)
 	if drawingObjects > limits.drawingObjects {
-		report.addIssue("Excel 图片/绘图对象数量不能超过 %s 个（当前 %s 个）", formatInt(limits.drawingObjects), formatInt(drawingObjects))
+		report.addLimitIssue(drawingObjects, limits.drawingObjects, "Excel 图片/绘图对象数量不能超过 %s 个（当前 %s 个）", formatInt(limits.drawingObjects), formatInt(drawingObjects))
 	}
 	if drawingObjects > 50 {
 		report.markHeavy("Excel 图片/绘图对象数量超过重型阈值 50 个（当前 %s 个）", formatInt(drawingObjects))
 	}
 	if stats.xlsxMediaBytes > limits.mediaMB*mb {
-		report.addIssue("Excel 内图片/媒体总大小不能超过 %dMB（当前 %s）", limits.mediaMB, formatMB(stats.xlsxMediaBytes))
+		report.addLimitIssue(stats.xlsxMediaBytes, limits.mediaMB*mb, "Excel 内图片/媒体总大小不能超过 %dMB（当前 %s）", limits.mediaMB, formatMB(stats.xlsxMediaBytes))
 	}
 	if stats.xlsxMediaBytes > 25*mb {
 		report.markHeavy("Excel 内图片/媒体总大小超过重型阈值 25MB（当前 %s）", formatMB(stats.xlsxMediaBytes))
@@ -765,7 +886,7 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 		}
 		report.metric("xlsx_cell_styles", stylesCount)
 		if stylesCount > limits.cellStyles {
-			report.addIssue("Excel 单元格样式数量不能超过 %s 个（当前 %s 个）", formatInt(limits.cellStyles), formatInt(stylesCount))
+			report.addLimitIssue(stylesCount, limits.cellStyles, "Excel 单元格样式数量不能超过 %s 个（当前 %s 个）", formatInt(limits.cellStyles), formatInt(stylesCount))
 		}
 		if stylesCount > 500 {
 			report.markHeavy("Excel 单元格样式数量超过重型阈值 500 个（当前 %s 个）", formatInt(stylesCount))
@@ -782,16 +903,13 @@ func validatePPTX(zr *zip.Reader, fileBytes int64, report *Report) {
 	report.metric("pptx_media_bytes", stats.pptMediaBytes)
 
 	if len(zr.File) > limits.entries {
-		report.addIssue("PPT 文件内部文件数量不能超过 %s 个（当前 %s 个）", formatInt(int64(limits.entries)), formatInt(int64(len(zr.File))))
+		report.addLimitIssue(int64(len(zr.File)), int64(limits.entries), "PPT 文件内部文件数量不能超过 %s 个（当前 %s 个）", formatInt(int64(limits.entries)), formatInt(int64(len(zr.File))))
 	}
 	if stats.uncompressedBytes > limits.uncompressedMB*mb {
-		report.addIssue("PPT 文件内部内容展开后不能超过 %dMB（当前 %s）", limits.uncompressedMB, formatMB(stats.uncompressedBytes))
+		report.addLimitIssue(stats.uncompressedBytes, limits.uncompressedMB*mb, "PPT 文件内部内容展开后不能超过 %dMB（当前 %s）", limits.uncompressedMB, formatMB(stats.uncompressedBytes))
 	}
 	if stats.uncompressedBytes > 100*mb {
 		report.markHeavy("PPT 文件内部内容展开后超过重型阈值 100MB（当前 %s）", formatMB(stats.uncompressedBytes))
-	}
-	if fileBytes > 0 && float64(stats.uncompressedBytes)/float64(fileBytes) > limits.compressionRate {
-		report.addIssue("PPT 文件压缩膨胀倍数不能超过 %s 倍（当前 %.2f 倍）", trimFloat(limits.compressionRate), float64(stats.uncompressedBytes)/float64(fileBytes))
 	}
 	if fileBytes > 0 {
 		ratio := float64(stats.uncompressedBytes) / float64(fileBytes)
@@ -801,10 +919,10 @@ func validatePPTX(zr *zip.Reader, fileBytes int64, report *Report) {
 		}
 	}
 	if stats.pptMediaCount > limits.mediaFiles {
-		report.addIssue("PPT 文件内图片/媒体文件数量不能超过 %s 个（当前 %s 个）", formatInt(limits.mediaFiles), formatInt(stats.pptMediaCount))
+		report.addLimitIssue(stats.pptMediaCount, limits.mediaFiles, "PPT 文件内图片/媒体文件数量不能超过 %s 个（当前 %s 个）", formatInt(limits.mediaFiles), formatInt(stats.pptMediaCount))
 	}
 	if stats.pptMediaBytes > limits.mediaMB*mb {
-		report.addIssue("PPT 文件内图片/媒体总大小不能超过 %dMB（当前 %s）", limits.mediaMB, formatMB(stats.pptMediaBytes))
+		report.addLimitIssue(stats.pptMediaBytes, limits.mediaMB*mb, "PPT 文件内图片/媒体总大小不能超过 %dMB（当前 %s）", limits.mediaMB, formatMB(stats.pptMediaBytes))
 	}
 	if stats.pptMediaBytes > 75*mb {
 		report.markHeavy("PPT 文件内图片/媒体总大小超过重型阈值 75MB（当前 %s）", formatMB(stats.pptMediaBytes))
@@ -826,7 +944,7 @@ func validatePPTX(zr *zip.Reader, fileBytes int64, report *Report) {
 			maxSlideXML = &namedInt64{name: slideName, value: size}
 		}
 		if size > maxXMLScanBytes {
-			report.addIssue("文档内部结构过大，无法安全检查完整结构，单个 XML 最大扫描量不能超过 %dMB（%s：当前 %s）", maxXMLScanBytes/mb, slideName, formatMB(size))
+			report.addLimitIssue(size, maxXMLScanBytes, "文档内部结构过大，无法安全检查完整结构，单个 XML 最大扫描量不能超过 %dMB（%s：当前 %s）", maxXMLScanBytes/mb, slideName, formatMB(size))
 			continue
 		}
 		shapes, err := countAnyStartElements(f, map[string]struct{}{
@@ -849,25 +967,25 @@ func validatePPTX(zr *zip.Reader, fileBytes int64, report *Report) {
 		report.metric("pptx_max_slide_xml_name", maxSlideXML.name)
 	}
 	if slideCount > limits.slides {
-		report.addIssue("PPT 幻灯片数量不能超过 %s 页（当前 %s 页）", formatInt(limits.slides), formatInt(slideCount))
+		report.addLimitIssue(slideCount, limits.slides, "PPT 幻灯片数量不能超过 %s 页（当前 %s 页）", formatInt(limits.slides), formatInt(slideCount))
 	}
 	if slideCount > 150 {
 		report.markHeavy("PPT 幻灯片数量超过重型阈值 150 页（当前 %s 页）", formatInt(slideCount))
 	}
 	if maxSlideXML != nil && maxSlideXML.value > limits.slideXMLMB*mb {
-		report.addIssue("单页 PPT 内部结构不能超过 %dMB（%s：当前 %s）", limits.slideXMLMB, maxSlideXML.name, formatMB(maxSlideXML.value))
+		report.addLimitIssue(maxSlideXML.value, limits.slideXMLMB*mb, "单页 PPT 内部结构不能超过 %dMB（%s：当前 %s）", limits.slideXMLMB, maxSlideXML.name, formatMB(maxSlideXML.value))
 	}
 	if maxSlideXML != nil && maxSlideXML.value > 4*mb {
 		report.markHeavy("单页 PPT 内部结构超过重型阈值 4MB（%s：当前 %s）", maxSlideXML.name, formatMB(maxSlideXML.value))
 	}
 	if slideXMLTotal > limits.slideXMLTotalMB*mb {
-		report.addIssue("所有 PPT 页面内部结构总大小不能超过 %dMB（当前 %s）", limits.slideXMLTotalMB, formatMB(slideXMLTotal))
+		report.addLimitIssue(slideXMLTotal, limits.slideXMLTotalMB*mb, "所有 PPT 页面内部结构总大小不能超过 %dMB（当前 %s）", limits.slideXMLTotalMB, formatMB(slideXMLTotal))
 	}
 	if slideXMLTotal > 40*mb {
 		report.markHeavy("所有 PPT 页面内部结构总大小超过重型阈值 40MB（当前 %s）", formatMB(slideXMLTotal))
 	}
 	if shapeCount > limits.slideShapes {
-		report.addIssue("PPT 页面对象数量不能超过 %s 个（当前 %s 个）", formatInt(limits.slideShapes), formatInt(shapeCount))
+		report.addLimitIssue(shapeCount, limits.slideShapes, "PPT 页面对象数量不能超过 %s 个（当前 %s 个）", formatInt(limits.slideShapes), formatInt(shapeCount))
 	}
 	if shapeCount > 10000 {
 		report.markHeavy("PPT 页面对象数量超过重型阈值 10,000 个（当前 %s 个）", formatInt(shapeCount))
@@ -878,7 +996,7 @@ func validateCSV(ra readerAtSize, report *Report) {
 	limits := defaultCSVLimits
 	size := ra.Size()
 	if size > limits.scanMB*mb {
-		report.addIssue("CSV 文件结构检查最大读取量不能超过 %dMB（当前 %s），请拆分后上传", limits.scanMB, formatMB(size))
+		report.addLimitIssue(size, limits.scanMB*mb, "CSV 文件结构检查最大读取量不能超过 %dMB（当前 %s），请拆分后上传", limits.scanMB, formatMB(size))
 		return
 	}
 
@@ -932,31 +1050,31 @@ func validateCSV(ra readerAtSize, report *Report) {
 	report.metric("csv_max_field_bytes", maxFieldBytes)
 
 	if rows > limits.rows {
-		report.addIssue("CSV 总行数不能超过 %s 行（当前 %s 行）", formatInt(limits.rows), formatInt(rows))
+		report.addLimitIssue(rows, limits.rows, "CSV 总行数不能超过 %s 行（当前 %s 行）", formatInt(limits.rows), formatInt(rows))
 	}
 	if rows > 50000 {
 		report.markHeavy("CSV 总行数超过重型阈值 50,000 行（当前 %s 行）", formatInt(rows))
 	}
 	if maxColumns > limits.columns {
-		report.addIssue("CSV 单行列数不能超过 %s 列（当前 %s 列）", formatInt(limits.columns), formatInt(maxColumns))
+		report.addLimitIssue(maxColumns, limits.columns, "CSV 单行列数不能超过 %s 列（当前 %s 列）", formatInt(limits.columns), formatInt(maxColumns))
 	}
 	if maxColumns > 50 {
 		report.markHeavy("CSV 单行列数超过重型阈值 50 列（当前 %s 列）", formatInt(maxColumns))
 	}
 	if cells > limits.cells {
-		report.addIssue("CSV 总单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.cells), formatInt(cells))
+		report.addLimitIssue(cells, limits.cells, "CSV 总单元格数量不能超过 %s 个（当前 %s 个）", formatInt(limits.cells), formatInt(cells))
 	}
 	if cells > 150000 {
 		report.markHeavy("CSV 总单元格数量超过重型阈值 150,000 个（当前 %s 个）", formatInt(cells))
 	}
 	if maxRowBytes > limits.rowBytes {
-		report.addIssue("CSV 单行内容不能超过 %s（当前 %s）", formatByteSize(limits.rowBytes), formatByteSize(maxRowBytes))
+		report.addUnsplittable("CSV 单行内容不能超过 %s（当前 %s）", formatByteSize(limits.rowBytes), formatByteSize(maxRowBytes))
 	}
 	if maxRowBytes > 512*1024 {
 		report.markHeavy("CSV 单行内容超过重型阈值 512KB（当前 %s）", formatByteSize(maxRowBytes))
 	}
 	if maxFieldBytes > limits.fieldBytes {
-		report.addIssue("CSV 单个单元格内容不能超过 %s（当前 %s）", formatByteSize(limits.fieldBytes), formatByteSize(maxFieldBytes))
+		report.addUnsplittable("CSV 单个单元格内容不能超过 %s（当前 %s）", formatByteSize(limits.fieldBytes), formatByteSize(maxFieldBytes))
 	}
 	if maxFieldBytes > 256*1024 {
 		report.markHeavy("CSV 单个单元格内容超过重型阈值 256KB（当前 %s）", formatByteSize(maxFieldBytes))
@@ -975,22 +1093,78 @@ type zipStatValues struct {
 func zipStats(zr *zip.Reader) zipStatValues {
 	var s zipStatValues
 	for _, f := range zr.File {
-		size := int64(f.UncompressedSize64)
-		s.uncompressedBytes += size
+		size := saturatingUint64ToInt64(f.UncompressedSize64)
+		s.uncompressedBytes = saturatingAddInt64(s.uncompressedBytes, size)
 		name := normalizeZipName(f.Name)
 		if strings.HasPrefix(name, "word/media/") && !strings.HasSuffix(name, "/") {
 			s.wordMediaCount++
-			s.wordMediaBytes += size
+			s.wordMediaBytes = saturatingAddInt64(s.wordMediaBytes, size)
 		}
 		if strings.HasPrefix(name, "xl/media/") && !strings.HasSuffix(name, "/") {
-			s.xlsxMediaBytes += size
+			s.xlsxMediaBytes = saturatingAddInt64(s.xlsxMediaBytes, size)
 		}
 		if strings.HasPrefix(name, "ppt/media/") && !strings.HasSuffix(name, "/") {
 			s.pptMediaCount++
-			s.pptMediaBytes += size
+			s.pptMediaBytes = saturatingAddInt64(s.pptMediaBytes, size)
 		}
 	}
 	return s
+}
+
+func validateOfficeArchiveSafety(ext string, zr *zip.Reader, fileBytes int64, report *Report) {
+	stats := zipStats(zr)
+	report.metric("office_archive_uncompressed_bytes", stats.uncompressedBytes)
+	if stats.uncompressedBytes > officeArchiveMaxExpandedBytes {
+		report.addUnsafe(
+			"%s内部内容展开后超过安全上限 %s（当前 %s）",
+			officeArchiveLabel(ext),
+			formatByteSize(officeArchiveMaxExpandedBytes),
+			formatByteSize(stats.uncompressedBytes),
+		)
+		return
+	}
+	if fileBytes <= 0 {
+		return
+	}
+	ratio := float64(stats.uncompressedBytes) / float64(fileBytes)
+	report.metric("office_archive_compression_ratio", ratio)
+	if ratio > officeArchiveMaxExpansionRatio {
+		report.addUnsafe(
+			"%s压缩膨胀倍数异常，安全上限为 %s 倍（当前 %.2f 倍）",
+			officeArchiveLabel(ext),
+			trimFloat(officeArchiveMaxExpansionRatio),
+			ratio,
+		)
+	}
+}
+
+func officeArchiveLabel(ext string) string {
+	switch ext {
+	case "docx":
+		return "Word 文档"
+	case "xlsx":
+		return "Excel 文件"
+	case "pptx":
+		return "PPT 文件"
+	default:
+		return "Office 文档"
+	}
+}
+
+func saturatingUint64ToInt64(value uint64) int64 {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if value > uint64(maxInt64) {
+		return maxInt64
+	}
+	return int64(value)
+}
+
+func saturatingAddInt64(left, right int64) int64 {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if left >= maxInt64-right {
+		return maxInt64
+	}
+	return left + right
 }
 
 type worksheetCounters struct {

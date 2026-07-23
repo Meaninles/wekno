@@ -607,6 +607,7 @@ func (p *PluginSearch) tryDirectChunkLoading(ctx context.Context, tenantID uint6
 			ParentChunkID: chunk.ParentChunkID,
 			ImageInfo:     chunk.ImageInfo,
 			ChunkMetadata: chunk.Metadata,
+			SourceLocator: chunk.SourceLocator,
 			StartAt:       chunk.StartAt,
 			EndAt:         chunk.EndAt,
 		}

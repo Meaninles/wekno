@@ -33,8 +33,24 @@ func NewChunkRepository(db *gorm.DB) interfaces.ChunkRepository {
 // A deadlock retry wrapper is kept as defense-in-depth for any remaining
 // edge cases on secondary unique indexes.
 func (r *chunkRepository) CreateChunks(ctx context.Context, chunks []*types.Chunk) error {
+	disabledIDs := make([]string, 0)
+	zeroFlagIDs := make([]string, 0)
+	splitPartIDs := make(map[int][]string)
 	for _, chunk := range chunks {
 		chunk.Content = common.CleanInvalidUTF8(chunk.Content)
+		// Capture explicit zero values before GORM's create callbacks replace
+		// them in both the SQL and the in-memory structs.
+		if !chunk.IsEnabled {
+			disabledIDs = append(disabledIDs, chunk.ID)
+		}
+		if chunk.Flags == 0 {
+			zeroFlagIDs = append(zeroFlagIDs, chunk.ID)
+		}
+		if chunk.ProcessingGeneration != "" {
+			splitPartIDs[chunk.SplitPartIndex] = append(
+				splitPartIDs[chunk.SplitPartIndex], chunk.ID,
+			)
+		}
 	}
 
 	db := r.db.WithContext(ctx)
@@ -49,10 +65,40 @@ func (r *chunkRepository) CreateChunks(ctx context.Context, chunks []*types.Chun
 		}
 	}
 
-	// Select("*") ensures zero-value fields (IsEnabled=false, Flags=0) are
-	// explicitly inserted, bypassing GORM's default value behavior.
-	// SeqID=0 is skipped by GORM automatically (autoIncrement tag).
-	return db.Select("*").CreateInBatches(chunks, 100).Error
+	// GORM applies non-zero `default` tags to Go zero values even with
+	// Select("*"). Preserve the API's explicit false/zero values and split
+	// part 0 in the same transaction as insertion, so no partial generation is
+	// observable between INSERT and the correcting UPDATE.
+	return db.Transaction(func(tx *gorm.DB) error {
+		// SeqID=0 is skipped by GORM automatically (autoIncrement tag).
+		if err := tx.Select("*").CreateInBatches(chunks, 100).Error; err != nil {
+			return err
+		}
+		updateIDs := func(ids []string, column string, value interface{}) error {
+			const updateBatchSize = 500
+			for start := 0; start < len(ids); start += updateBatchSize {
+				end := min(start+updateBatchSize, len(ids))
+				if err := tx.Model(&types.Chunk{}).Where(
+					"id IN ?", ids[start:end],
+				).Update(column, value).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := updateIDs(disabledIDs, "is_enabled", false); err != nil {
+			return err
+		}
+		if err := updateIDs(zeroFlagIDs, "flags", 0); err != nil {
+			return err
+		}
+		for partIndex, ids := range splitPartIDs {
+			if err := updateIDs(ids, "split_part_index", partIndex); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // GetChunkByID retrieves a chunk by its ID and tenant ID

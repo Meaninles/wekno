@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1001,24 +1002,43 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 		maxInputChars = s.config.Conversation.Summary.MaxInputChars
 	}
 
-	// Sort chunks by StartAt for proper concatenation
+	// Sort chunks by logical order. Physical split generations use the global
+	// chunk index because StartAt is a synthetic sparse coordinate; ordinary
+	// one-shot documents preserve the historical StartAt reconstruction.
 	sortedChunks := make([]*types.Chunk, len(chunks))
 	copy(sortedChunks, chunks)
-	sort.Slice(sortedChunks, func(i, j int) bool {
-		return sortedChunks[i].StartAt < sortedChunks[j].StartAt
-	})
+	isPhysicalSplit := false
+	for _, chunk := range sortedChunks {
+		if chunk.ProcessingGeneration != "" && chunk.SplitPartIndex >= 0 {
+			isPhysicalSplit = true
+			break
+		}
+	}
+	if isPhysicalSplit {
+		sort.Slice(sortedChunks, func(i, j int) bool {
+			return sortedChunks[i].ChunkIndex < sortedChunks[j].ChunkIndex
+		})
+	} else {
+		sort.Slice(sortedChunks, func(i, j int) bool {
+			return sortedChunks[i].StartAt < sortedChunks[j].StartAt
+		})
+	}
 
 	// Concatenate original chunk contents by StartAt offset to reconstruct the
 	// document, then enrich with image info in a second pass. Enrichment must
 	// happen AFTER concatenation because StartAt is based on original document
 	// offsets — enriched (longer) content would break the positioning.
 	chunkContents := ""
-	for _, chunk := range sortedChunks {
-		runes := []rune(chunkContents)
-		if chunk.StartAt <= len(runes) {
-			chunkContents = string(runes[:chunk.StartAt]) + chunk.Content
-		} else {
-			chunkContents = chunkContents + chunk.Content
+	if isPhysicalSplit {
+		chunkContents = buildPhysicalSplitSummarySample(sortedChunks, maxInputChars)
+	} else {
+		for _, chunk := range sortedChunks {
+			runes := []rune(chunkContents)
+			if chunk.StartAt <= len(runes) {
+				chunkContents = string(runes[:chunk.StartAt]) + chunk.Content
+			} else {
+				chunkContents = chunkContents + chunk.Content
+			}
 		}
 	}
 
@@ -1049,7 +1069,9 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 	}
 
 	// Apply length limit: sample long content to fit within maxInputChars
-	chunkContents = sampleLongContent(chunkContents, maxInputChars)
+	if !isPhysicalSplit {
+		chunkContents = sampleLongContent(chunkContents, maxInputChars)
+	}
 
 	logger.GetLogger(ctx).Infof("getSummary: content length=%d chars (max=%d) for knowledge %s",
 		len([]rune(chunkContents)), maxInputChars, knowledge.ID)
@@ -1098,6 +1120,51 @@ func (s *knowledgeService) getSummary(ctx context.Context,
 	}
 	logger.GetLogger(ctx).WithField("summary", summary.Content).Infof("GetSummary success")
 	return summary.Content, nil
+}
+
+func buildPhysicalSplitSummarySample(chunks []*types.Chunk, maxChars int) string {
+	if len(chunks) == 0 || maxChars <= 0 {
+		return ""
+	}
+	// The loader already chooses evenly distributed logical positions. Divide
+	// the LLM budget across those strata so a huge workbook/book/audio file is
+	// represented end-to-end rather than by only the first physical part.
+	perChunk := maxChars / len(chunks)
+	if perChunk < 160 {
+		perChunk = 160
+	}
+	var builder strings.Builder
+	for _, chunk := range chunks {
+		header := ""
+		var locator map[string]any
+		if len(chunk.SourceLocator) > 0 && json.Unmarshal(chunk.SourceLocator, &locator) == nil {
+			header = logicalLocatorHeader(locator)
+		}
+		available := perChunk
+		if header != "" {
+			header = "\n\n【" + header + "】\n"
+			builder.WriteString(header)
+			available -= len([]rune(header))
+		}
+		if available <= 0 {
+			continue
+		}
+		runes := []rune(strings.TrimSpace(chunk.Content))
+		if len(runes) > available {
+			head := available * 2 / 3
+			tail := available - head
+			builder.WriteString(string(runes[:head]))
+			builder.WriteString("\n[…]\n")
+			builder.WriteString(string(runes[len(runes)-tail:]))
+		} else {
+			builder.WriteString(string(runes))
+		}
+	}
+	result := []rune(builder.String())
+	if len(result) > maxChars {
+		return string(result[:maxChars])
+	}
+	return string(result)
 }
 
 // sampleLongContent returns content that fits within maxChars.
@@ -1317,22 +1384,16 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 		}
 	}
 
-	// Get text chunks for this knowledge
-	chunks, err := s.chunkService.ListChunksByKnowledgeID(ctx, payload.KnowledgeID)
+	textChunks, logicalTextCount, err := s.loadLogicalSummaryChunks(
+		ctx, knowledge, payload.ProcessingGeneration,
+	)
 	if err != nil {
-		logger.Errorf(ctx, "Failed to get chunks: %v", err)
+		logger.Errorf(ctx, "Failed to get summary chunks: %v", err)
 		summaryErr = err
 		return fmt.Errorf("list summary chunks: %w", err)
 	}
-
-	// Filter text chunks only
-	textChunks := make([]*types.Chunk, 0)
-	for _, chunk := range chunks {
-		if chunk.ChunkType == types.ChunkTypeText {
-			textChunks = append(textChunks, chunk)
-		}
-	}
-	summaryOut["text_chunks"] = len(textChunks)
+	summaryOut["text_chunks"] = logicalTextCount
+	summaryOut["sampled_chunks"] = len(textChunks)
 
 	if len(textChunks) == 0 {
 		logger.Infof(ctx, "No text chunks found for knowledge: %s", payload.KnowledgeID)
@@ -1434,7 +1495,7 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 	if strings.TrimSpace(summary) != "" && kb.NeedsEmbeddingModel() {
 		// Get max chunk index
 		maxChunkIndex := 0
-		for _, chunk := range chunks {
+		for _, chunk := range textChunks {
 			if chunk.ChunkIndex > maxChunkIndex {
 				maxChunkIndex = chunk.ChunkIndex
 			}
@@ -1446,19 +1507,20 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 		// and surfacing them in retrieved RAG context can re-introduce the
 		// hallucination vector this branch is meant to close.
 		summaryChunk := &types.Chunk{
-			ID:              summaryGenerationChunkID(payload.KnowledgeID, payload.ProcessingGeneration),
-			TenantID:        knowledge.TenantID,
-			KnowledgeID:     knowledge.ID,
-			KnowledgeBaseID: knowledge.KnowledgeBaseID,
-			Content:         fmt.Sprintf("# Summary\n%s", summary),
-			ChunkIndex:      maxChunkIndex + 1,
-			IsEnabled:       true,
-			CreatedAt:       time.Now(),
-			UpdatedAt:       time.Now(),
-			StartAt:         0,
-			EndAt:           0,
-			ChunkType:       types.ChunkTypeSummary,
-			ParentChunkID:   textChunks[0].ID,
+			ID:                   summaryGenerationChunkID(payload.KnowledgeID, payload.ProcessingGeneration),
+			TenantID:             knowledge.TenantID,
+			KnowledgeID:          knowledge.ID,
+			KnowledgeBaseID:      knowledge.KnowledgeBaseID,
+			Content:              fmt.Sprintf("# Summary\n%s", summary),
+			ChunkIndex:           maxChunkIndex + 1,
+			IsEnabled:            true,
+			CreatedAt:            time.Now(),
+			UpdatedAt:            time.Now(),
+			StartAt:              0,
+			EndAt:                0,
+			ChunkType:            types.ChunkTypeSummary,
+			ParentChunkID:        textChunks[0].ID,
+			ProcessingGeneration: payload.ProcessingGeneration,
 		}
 
 		// A retry must reuse the same summary chunk. If the first delivery
@@ -1493,6 +1555,7 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 			existing.EndAt = summaryChunk.EndAt
 			existing.ChunkType = summaryChunk.ChunkType
 			existing.ParentChunkID = summaryChunk.ParentChunkID
+			existing.ProcessingGeneration = summaryChunk.ProcessingGeneration
 			summaryChunk = existing
 			err = s.chunkService.UpdateChunk(ctx, summaryChunk)
 		} else {
@@ -1892,10 +1955,11 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 	imageInfoMap := searchutil.CollectImageInfoByChunkIDs(ctx, s.chunkRepo, payload.TenantID, textChunkIDs)
 
 	enrichContent := func(chunk *types.Chunk) string {
+		content := chunk.Content
 		if info, ok := imageInfoMap[chunk.ID]; ok && info != "" {
-			return searchutil.EnrichContentWithImageInfo(chunk.Content, info)
+			content = searchutil.EnrichContentWithImageInfo(content, info)
 		}
-		return chunk.Content
+		return logicalChunkLLMContent(chunk, content)
 	}
 
 	// Generate questions for each chunk with context
@@ -2270,21 +2334,28 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 		if c == nil {
 			return ""
 		}
+		content := c.Content
 		if info, ok := imageInfoMap[c.ID]; ok && info != "" {
-			return searchutil.EnrichContentWithImageInfo(c.Content, info)
+			content = searchutil.EnrichContentWithImageInfo(content, info)
 		}
-		return c.Content
+		return logicalChunkLLMContent(c, content)
 	}
 
 	// neighborContent returns the context content for position i within the
 	// batch: the in-batch neighbor when present, else the boundary chunk.
 	prevContentAt := func(i int) string {
+		if payload.SparseSample {
+			return ""
+		}
 		if i > 0 {
 			return enrich(batchChunks[i-1])
 		}
 		return enrich(prevChunk)
 	}
 	nextContentAt := func(i int) string {
+		if payload.SparseSample {
+			return ""
+		}
 		if i < len(batchChunks)-1 {
 			return enrich(batchChunks[i+1])
 		}
@@ -3626,11 +3697,29 @@ func (s *knowledgeService) analyzeStoredDocumentForGuard(
 	}
 	defer fileReader.Close()
 
-	contentBytes, err := io.ReadAll(fileReader)
+	staged, err := os.CreateTemp("", "weknora-fileguard-*")
 	if err != nil {
 		return fileguard.Report{}, err
 	}
-	return fileguard.AnalyzeBytes(fileName, fileType, contentBytes), nil
+	stagedName := staged.Name()
+	defer func() {
+		_ = staged.Close()
+		_ = os.Remove(stagedName)
+	}()
+	maxSource := secutils.GetMaxKnowledgeSourceFileSize()
+	written, err := io.Copy(staged, io.LimitReader(fileReader, maxSource+1))
+	if err != nil {
+		return fileguard.Report{}, err
+	}
+	if written > maxSource {
+		return fileguard.Report{}, fmt.Errorf("logical document exceeds configured source limit of %d bytes", maxSource)
+	}
+	if written != knowledge.FileSize {
+		return fileguard.Report{}, fmt.Errorf(
+			"stored source size mismatch: read %d bytes, expected %d", written, knowledge.FileSize,
+		)
+	}
+	return fileguard.AnalyzeReaderAt(fileName, fileType, staged, written), nil
 }
 
 func (s *knowledgeService) documentQueueForStoredDocument(
@@ -3861,7 +3950,9 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 
 		resolvedFileName := payload.FileName
 		resolvedFileType := payload.FileType
-		contentBytes, err := downloadFileFromURL(ctx, payload.FileURL, &resolvedFileName, &resolvedFileType)
+		download, err := downloadFileFromURL(
+			ctx, payload.FileURL, &resolvedFileName, &resolvedFileType,
+		)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to download file from URL: %s, error: %v", payload.FileURL, err)
 			if isLastRetry {
@@ -3871,6 +3962,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			}
 			return fmt.Errorf("failed to download file from URL: %w", err)
 		}
+		defer download.Close()
 
 		if resolvedFileType != "" && !allowedFileURLExtensions[strings.ToLower(resolvedFileType)] {
 			logger.Errorf(ctx, "Unsupported file type resolved from file URL: %s", resolvedFileType)
@@ -3880,7 +3972,9 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			}
 			return nil
 		}
-		guardReport := fileguard.AnalyzeBytes(resolvedFileName, resolvedFileType, contentBytes)
+		guardReport := fileguard.AnalyzeReaderAt(
+			resolvedFileName, resolvedFileType, download.File, download.Size,
+		)
 		if err := guardReport.ValidationError(); err != nil {
 			logger.Warnf(ctx, "File URL preflight rejected %s: %s", resolvedFileName, err.Error())
 			if markErr := s.markActiveProcessingFailed(ctx, knowledge, err.Error(), "mark file URL preflight failure"); markErr != nil {
@@ -3898,6 +3992,8 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			knowledge.FileType = resolvedFileType
 			metadataValues["file_type"] = resolvedFileType
 		}
+		knowledge.FileSize = download.Size
+		metadataValues["file_size"] = download.Size
 		if len(metadataValues) > 0 {
 			metadataValues["updated_at"] = time.Now()
 			if err := s.updateActiveProcessingColumns(ctx, knowledge, metadataValues, "persist resolved file URL metadata"); err != nil {
@@ -3911,7 +4007,17 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		if storageErr != nil {
 			return storageErr
 		}
-		filePath, err := fileSvc.SaveBytes(ctx, contentBytes, payload.TenantID, resolvedFileName, true)
+		streamFileSvc, ok := fileSvc.(auxiliaryStreamSaver)
+		if !ok {
+			return errors.New("file URL storage does not support bounded stream commits")
+		}
+		if _, err := download.File.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewind downloaded file: %w", err)
+		}
+		filePath, err := streamFileSvc.SaveReader(
+			ctx, download.File, download.Size, download.ContentType,
+			payload.TenantID, resolvedFileName,
+		)
 		if err != nil {
 			if isLastRetry {
 				if markErr := s.markActiveProcessingFailed(ctx, knowledge, err.Error(), "mark file URL storage failure"); markErr != nil {
@@ -3920,12 +4026,27 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			}
 			return fmt.Errorf("failed to save downloaded file: %w", err)
 		}
-		contentBytes = nil
 
 		payload.FilePath = filePath
 		payload.FileName = resolvedFileName
 		payload.FileType = resolvedFileType
 		payload.FileURL = ""
+		if guardReport.NeedsSplit() {
+			logger.Infof(ctx,
+				"[document split] downloaded source exceeds per-part workload limits knowledge=%s reasons=%s",
+				knowledge.ID, strings.Join(guardReport.SplitReasons, "；"),
+			)
+			if splitErr := s.prepareDocumentSplit(
+				ctx, kb, knowledge, payload, guardReport,
+			); splitErr != nil {
+				_, failErr := s.failKnowledge(
+					ctx, knowledge, isLastRetry,
+					"failed to prepare downloaded physical document split: %v", splitErr,
+				)
+				return failErr
+			}
+			return nil
+		}
 		if rerouted, err := s.rerouteHeavyDocumentIfNeeded(ctx, knowledge, payload, guardReport, maxRetry); err != nil {
 			return err
 		} else if rerouted {
@@ -3999,6 +4120,23 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 				if markErr := s.markActiveProcessingFailed(ctx, knowledge, validationErr.Error(), "mark stored file preflight failure"); markErr != nil {
 					return markErr
 				}
+				return nil
+			}
+			if guardReport.NeedsSplit() {
+				logger.Infof(ctx,
+					"[document split] source exceeds per-part workload limits knowledge=%s reasons=%s",
+					knowledge.ID, strings.Join(guardReport.SplitReasons, "；"),
+				)
+				if splitErr := s.prepareDocumentSplit(ctx, kb, knowledge, payload, guardReport); splitErr != nil {
+					logger.Errorf(ctx, "failed to prepare physical document split: %v", splitErr)
+					_, failErr := s.failKnowledge(
+						ctx, knowledge, isLastRetry,
+						"failed to prepare physical document split: %v", splitErr,
+					)
+					return failErr
+				}
+				// The durable part plan now owns the rest of this generation.
+				// Returning releases the whole-document scheduler slot.
 				return nil
 			}
 			if rerouted, err := s.rerouteHeavyDocumentIfNeeded(ctx, knowledge, payload, guardReport, maxRetry); err != nil {

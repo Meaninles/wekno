@@ -1897,7 +1897,9 @@ func (s *wikiIngestService) mapOneDocument(
 		return nil, nil, nil
 	}
 
-	chunks, err := s.chunkRepo.ListChunksByKnowledgeID(ctx, payload.TenantID, knowledgeID)
+	chunks, logicalChunkCount, err := s.loadWikiLogicalChunks(
+		ctx, payload.TenantID, knowledgeID, op.ProcessingGeneration,
+	)
 	if err != nil {
 		s.tracker().FailSpan(ctx, wikiSpan, "LIST_CHUNKS_FAILED", err.Error(), err)
 		return nil, nil, fmt.Errorf("get chunks: %w", err)
@@ -1908,12 +1910,15 @@ func (s *wikiIngestService) mapOneDocument(
 		return nil, nil, nil
 	}
 
-	content := reconstructEnrichedContent(ctx, s.chunkRepo, payload.TenantID, chunks)
+	content := s.reconstructWikiLogicalContent(
+		ctx, payload.TenantID, chunks, logicalChunkCount,
+	)
 	rawRuneCount := len([]rune(content))
 	if len([]rune(content)) > maxContentForWiki {
 		content = string([]rune(content)[:maxContentForWiki])
 	}
-	logger.Infof(ctx, "wiki ingest: doc %s chunks=%d content_len(raw=%d,truncated=%d)", knowledgeID, len(chunks), rawRuneCount, len([]rune(content)))
+	logger.Infof(ctx, "wiki ingest: doc %s chunks=%d sampled=%d content_len(raw=%d,truncated=%d)",
+		knowledgeID, logicalChunkCount, len(chunks), rawRuneCount, len([]rune(content)))
 
 	// Refuse to run LLM-based extraction when the document carries no real
 	// text — e.g. a scanned PDF whose pages were converted to images but where

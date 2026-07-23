@@ -2,10 +2,14 @@ package docparser
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,12 +25,172 @@ import (
 )
 
 func getMaxMessageSize() int {
-	if sizeStr := os.Getenv("MAX_FILE_SIZE_MB"); sizeStr != "" {
+	if sizeStr := os.Getenv("DOCREADER_GRPC_MAX_FILE_SIZE_MB"); sizeStr != "" {
 		if size, err := strconv.Atoi(sizeStr); err == nil && size > 0 {
 			return size * 1024 * 1024
 		}
 	}
 	return 50 * 1024 * 1024
+}
+
+const splitStreamFrameBytes = 1024 * 1024
+
+func getMaxSplitExpansionRatio() float64 {
+	const fallback = 12.0
+	raw := strings.TrimSpace(os.Getenv("CUSTOM_DOCUMENT_SPLIT_MAX_EXPANSION_RATIO"))
+	if raw == "" {
+		return fallback
+	}
+	ratio, err := strconv.ParseFloat(raw, 64)
+	if err != nil || ratio < 1 || ratio > 100 {
+		return fallback
+	}
+	return ratio
+}
+
+// Split implements interfaces.DocumentSplitter using bounded gRPC frames.
+// Both source and archive hashes are verified at the transport boundary so a
+// retry can never adopt a truncated physical split as a durable plan.
+func (p *GRPCDocumentReader) Split(
+	ctx context.Context,
+	req *types.DocumentSplitRequest,
+) (*types.DocumentSplitResult, error) {
+	if req == nil || req.Source == nil || req.Destination == nil ||
+		req.SourceSize <= 0 || req.FileName == "" || req.FileType == "" {
+		return nil, errors.New("gRPC document split: invalid request")
+	}
+	p.mu.RLock()
+	client := p.client
+	p.mu.RUnlock()
+	if client == nil {
+		return nil, errNotConnected
+	}
+	stream, err := client.Split(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gRPC document split open: %w", err)
+	}
+	if err := stream.Send(&proto.SplitRequest{
+		Payload: &proto.SplitRequest_Header{Header: &proto.SplitHeader{
+			FileName:     req.FileName,
+			FileType:     req.FileType,
+			SourceSize:   uint64(req.SourceSize),
+			SourceSha256: req.SourceSHA256,
+			MinimumParts: uint32(max(req.MinimumParts, 1)),
+			TargetRatio:  req.TargetRatio,
+			RequestId:    req.RequestID,
+		}},
+	}); err != nil {
+		return nil, fmt.Errorf("gRPC document split send header: %w", err)
+	}
+	buffer := make([]byte, splitStreamFrameBytes)
+	var sent int64
+	for {
+		n, readErr := req.Source.Read(buffer)
+		if n > 0 {
+			sent += int64(n)
+			if sent > req.SourceSize {
+				return nil, fmt.Errorf(
+					"gRPC document split source grew while reading: expected %d bytes",
+					req.SourceSize,
+				)
+			}
+			if err := stream.Send(&proto.SplitRequest{
+				Payload: &proto.SplitRequest_Data{Data: buffer[:n]},
+			}); err != nil {
+				return nil, fmt.Errorf("gRPC document split send data: %w", err)
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("gRPC document split read source: %w", readErr)
+		}
+	}
+	if sent != req.SourceSize {
+		return nil, fmt.Errorf(
+			"gRPC document split source size mismatch: read %d bytes, expected %d",
+			sent, req.SourceSize,
+		)
+	}
+	if err := stream.CloseSend(); err != nil {
+		return nil, fmt.Errorf("gRPC document split close source: %w", err)
+	}
+
+	var result *types.DocumentSplitResult
+	digest := sha256.New()
+	var received int64
+	for {
+		frame, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			return nil, fmt.Errorf("gRPC document split receive: %w", recvErr)
+		}
+		if remoteErr := frame.GetError(); remoteErr != nil {
+			return nil, fmt.Errorf(
+				"document split rejected code=%s retryable=%t: %s",
+				remoteErr.GetCode(), remoteErr.GetRetryable(), remoteErr.GetMessage(),
+			)
+		}
+		if header := frame.GetHeader(); header != nil {
+			if result != nil || received != 0 {
+				return nil, errors.New("gRPC document split returned an out-of-order header")
+			}
+			maximumArchiveSize := max(
+				int64(512*1024*1024),
+				int64(float64(req.SourceSize)*getMaxSplitExpansionRatio()),
+			)
+			if header.GetArchiveSize() == 0 ||
+				header.GetArchiveSize() > uint64(maximumArchiveSize) {
+				return nil, fmt.Errorf(
+					"gRPC document split archive size %d is outside safety bound %d",
+					header.GetArchiveSize(), maximumArchiveSize,
+				)
+			}
+			result = &types.DocumentSplitResult{
+				ArchiveSize:    int64(header.GetArchiveSize()),
+				ArchiveSHA256:  header.GetArchiveSha256(),
+				PartCount:      int(header.GetPartCount()),
+				PlannerVersion: header.GetPlannerVersion(),
+			}
+			continue
+		}
+		data := frame.GetData()
+		if len(data) == 0 {
+			return nil, errors.New("gRPC document split returned an empty data frame")
+		}
+		if result == nil {
+			return nil, errors.New("gRPC document split returned data before its header")
+		}
+		n, writeErr := req.Destination.Write(data)
+		if writeErr != nil {
+			return nil, fmt.Errorf("gRPC document split write archive: %w", writeErr)
+		}
+		if n != len(data) {
+			return nil, io.ErrShortWrite
+		}
+		_, _ = digest.Write(data)
+		received += int64(n)
+		if received > result.ArchiveSize {
+			return nil, errors.New("gRPC document split archive exceeds declared size")
+		}
+	}
+	if result == nil || result.PartCount <= 0 {
+		return nil, errors.New("gRPC document split returned no archive header")
+	}
+	if received != result.ArchiveSize {
+		return nil, fmt.Errorf(
+			"gRPC document split archive size mismatch: received %d bytes, expected %d",
+			received, result.ArchiveSize,
+		)
+	}
+	actualSHA := hex.EncodeToString(digest.Sum(nil))
+	if result.ArchiveSHA256 == "" || !strings.EqualFold(actualSHA, result.ArchiveSHA256) {
+		return nil, errors.New("gRPC document split archive hash mismatch")
+	}
+	return result, nil
 }
 
 // GRPCDocumentReader implements DocumentReader over gRPC.

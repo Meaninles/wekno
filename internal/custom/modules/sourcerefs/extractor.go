@@ -180,7 +180,38 @@ func knowledgeRefFromMap(item map[string]interface{}, parent map[string]interfac
 		Score:             floatValue(item["score"]),
 		ChunkType:         chunkType,
 		Metadata:          metadata,
+		SourceLocator:     jsonValue(item["source_locator"]),
 	}
+}
+
+func jsonValue(value interface{}) types.JSON {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case json.RawMessage:
+		if json.Valid(typed) {
+			return append(types.JSON(nil), typed...)
+		}
+	case types.JSON:
+		if json.Valid(typed) {
+			return append(types.JSON(nil), typed...)
+		}
+	case []byte:
+		if json.Valid(typed) {
+			return append(types.JSON(nil), typed...)
+		}
+	case string:
+		raw := []byte(strings.TrimSpace(typed))
+		if json.Valid(raw) {
+			return types.JSON(raw)
+		}
+	default:
+		raw, err := json.Marshal(typed)
+		if err == nil && json.Valid(raw) {
+			return types.JSON(raw)
+		}
+	}
+	return nil
 }
 
 func extractWebReferences(data map[string]interface{}) []*types.SearchResult {

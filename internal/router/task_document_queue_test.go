@@ -164,24 +164,26 @@ func TestDocumentServerConcurrencyComesFromCoordinatorCapacity(t *testing.T) {
 	_ = documentServerConcurrency(nil)
 }
 
-func TestAsynqServersBecomeReadyOnlyAfterBothStart(t *testing.T) {
+func TestAsynqServersBecomeReadyOnlyAfterAllWorkersStart(t *testing.T) {
 	events := []string{}
 	normal := &fakeAsynqServerLifecycle{name: "normal", events: &events}
 	document := &fakeAsynqServerLifecycle{name: "document", events: &events}
+	part := &fakeAsynqServerLifecycle{name: "part", events: &events}
 	readiness := &fakeDocumentQueueReadiness{events: &events}
-	err := startAsynqServerPair(
-		normal, document, asynq.HandlerFunc(func(context.Context, *asynq.Task) error { return nil }), readiness,
+	err := startAsynqServers(
+		normal, document, part,
+		asynq.HandlerFunc(func(context.Context, *asynq.Task) error { return nil }), readiness,
 	)
 	if err != nil {
-		t.Fatalf("start server pair: %v", err)
+		t.Fatalf("start servers: %v", err)
 	}
-	want := []string{"normal.start", "document.start", "ready"}
+	want := []string{"normal.start", "document.start", "part.start", "ready"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("startup events = %v, want %v", events, want)
 	}
-	if normal.shutdowns != 0 || document.shutdowns != 0 || readiness.calls != 1 {
-		t.Fatalf("success lifecycle counts: normal shutdown=%d document shutdown=%d ready=%d",
-			normal.shutdowns, document.shutdowns, readiness.calls)
+	if normal.shutdowns != 0 || document.shutdowns != 0 || part.shutdowns != 0 || readiness.calls != 1 {
+		t.Fatalf("success lifecycle counts: normal shutdown=%d document shutdown=%d part shutdown=%d ready=%d",
+			normal.shutdowns, document.shutdowns, part.shutdowns, readiness.calls)
 	}
 }
 
@@ -190,10 +192,12 @@ func TestAsynqServerStartupFailureNeverMarksReadyAndRollsBack(t *testing.T) {
 		name         string
 		normalErr    error
 		documentErr  error
+		partErr      error
 		readyErr     error
 		wantEvents   []string
 		wantNormal   int
 		wantDocument int
+		wantPart     int
 	}{
 		{
 			name: "background fails", normalErr: errors.New("normal failed"),
@@ -205,9 +209,14 @@ func TestAsynqServerStartupFailureNeverMarksReadyAndRollsBack(t *testing.T) {
 			wantNormal: 1,
 		},
 		{
-			name: "ready persistence fails", readyErr: errors.New("database failed"),
-			wantEvents: []string{"normal.start", "document.start", "ready", "document.shutdown", "normal.shutdown"},
+			name: "part fails", partErr: errors.New("part failed"),
+			wantEvents: []string{"normal.start", "document.start", "part.start", "document.shutdown", "normal.shutdown"},
 			wantNormal: 1, wantDocument: 1,
+		},
+		{
+			name: "ready persistence fails", readyErr: errors.New("database failed"),
+			wantEvents: []string{"normal.start", "document.start", "part.start", "ready", "part.shutdown", "document.shutdown", "normal.shutdown"},
+			wantNormal: 1, wantDocument: 1, wantPart: 1,
 		},
 	}
 	for _, test := range tests {
@@ -215,9 +224,10 @@ func TestAsynqServerStartupFailureNeverMarksReadyAndRollsBack(t *testing.T) {
 			events := []string{}
 			normal := &fakeAsynqServerLifecycle{name: "normal", events: &events, startErr: test.normalErr}
 			document := &fakeAsynqServerLifecycle{name: "document", events: &events, startErr: test.documentErr}
+			part := &fakeAsynqServerLifecycle{name: "part", events: &events, startErr: test.partErr}
 			readiness := &fakeDocumentQueueReadiness{events: &events, err: test.readyErr}
-			err := startAsynqServerPair(
-				normal, document,
+			err := startAsynqServers(
+				normal, document, part,
 				asynq.HandlerFunc(func(context.Context, *asynq.Task) error { return nil }),
 				readiness,
 			)
@@ -227,9 +237,11 @@ func TestAsynqServerStartupFailureNeverMarksReadyAndRollsBack(t *testing.T) {
 			if !reflect.DeepEqual(events, test.wantEvents) {
 				t.Fatalf("failure events = %v, want %v", events, test.wantEvents)
 			}
-			if normal.shutdowns != test.wantNormal || document.shutdowns != test.wantDocument {
-				t.Fatalf("shutdowns normal/document = %d/%d, want %d/%d",
-					normal.shutdowns, document.shutdowns, test.wantNormal, test.wantDocument)
+			if normal.shutdowns != test.wantNormal || document.shutdowns != test.wantDocument ||
+				part.shutdowns != test.wantPart {
+				t.Fatalf("shutdowns normal/document/part = %d/%d/%d, want %d/%d/%d",
+					normal.shutdowns, document.shutdowns, part.shutdowns,
+					test.wantNormal, test.wantDocument, test.wantPart)
 			}
 			wantReadyCalls := 0
 			if test.readyErr != nil {

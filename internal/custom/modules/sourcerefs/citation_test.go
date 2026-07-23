@@ -16,6 +16,7 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 			KnowledgeTitle:  "堡垒机",
 			ChunkIndex:      0,
 			ChunkType:       "text",
+			SourceLocator:   types.JSON(`{"kind":"sheet_range","sheet":"资产目录","row_start":90001,"row_end":91000}`),
 		},
 		{
 			ID:              "chunk-2",
@@ -49,7 +50,15 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 	if got := refs[1].Metadata[MetadataChunkID]; got != "chunk-2" {
 		t.Fatalf("second metadata chunk id = %q, want chunk-2", got)
 	}
-	if catalog := RenderCitationCatalog(refs); !strings.Contains(catalog, `granularity="document_fragment"`) || !strings.Contains(catalog, `chunk_id="chunk-1"`) {
+	if got := string(sources[0].SourceLocator); !strings.Contains(got, `"row_start":90001`) {
+		t.Fatalf("logical source locator was lost: %q", got)
+	}
+	if got := refs[0].Metadata["source_locator"]; !strings.Contains(got, `"sheet":"资产目录"`) {
+		t.Fatalf("citation metadata source locator was lost: %q", got)
+	}
+	if catalog := RenderCitationCatalog(refs); !strings.Contains(catalog, `granularity="document_fragment"`) ||
+		!strings.Contains(catalog, `chunk_id="chunk-1"`) ||
+		!strings.Contains(catalog, `source_locator="{&quot;kind&quot;:&quot;sheet_range&quot;`) {
 		t.Fatalf("catalog should mark knowledge sources as document fragments with chunk ids, got %s", catalog)
 	}
 	if attrs := ContextCitationAttrs(refs[0]); !strings.Contains(attrs, `source_granularity="document_fragment"`) || !strings.Contains(attrs, `chunk_id="chunk-1"`) {

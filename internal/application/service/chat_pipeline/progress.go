@@ -193,7 +193,7 @@ func EndRetrievalProgress(
 		SessionID: chatManage.SessionID,
 		Data: event.AgentToolResultData{
 			ToolCallID: progress.toolCallID,
-			ToolName:   retrievalProgressTool,
+			ToolName:   progress.toolName,
 			Output:     output,
 			Error:      errMsg,
 			Success:    success,

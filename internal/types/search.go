@@ -134,6 +134,12 @@ type SearchResult struct {
 	// ChunkMetadata stores chunk-level metadata (e.g., generated questions)
 	ChunkMetadata JSON `json:"chunk_metadata,omitempty"`
 
+	// SourceLocator is the stable coordinate of this fragment in the original
+	// logical document (page, sheet/row/column, line, JSON path, image tile or
+	// audio time range). It deliberately describes the unsplit source rather
+	// than an internal physical part.
+	SourceLocator JSON `json:"source_locator,omitempty"`
+
 	// MatchedContent is the actual content that was matched in vector search
 	// For FAQ: this is the matched question text (standard or similar question)
 	MatchedContent string `json:"matched_content,omitempty"`

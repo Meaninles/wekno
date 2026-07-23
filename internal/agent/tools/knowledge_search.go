@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
@@ -1138,6 +1139,12 @@ func (t *KnowledgeSearchTool) formatOutput(
 	// all retrieval tools.
 	var ob strings.Builder
 	ob.WriteString(fmt.Sprintf("<search_results count=\"%d\">\n", len(results)))
+	ob.WriteString(
+		"<deep_read_instruction>For an exact document hit, call list_knowledge_chunks with its chunk_id. " +
+			"chunk_index is a logical chunk ordinal, never a page, sheet row, source line, JSON item, image frame, or audio time. " +
+			"Never convert chunk_index into offset; knowledge_id paging uses the returned next_offset. " +
+			"For source citations use source_locator and record keys in the content only.</deep_read_instruction>\n",
+	)
 	for _, q := range queries {
 		ob.WriteString(fmt.Sprintf("<query>%s</query>\n", xmlEscape(q)))
 	}
@@ -1227,6 +1234,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 					xmlEscape(result.SourceQuery),
 				))
 			}
+			writeModelSourceLocator(&ob, result.SourceLocator)
 			ob.WriteString("<note>(content omitted, already returned in a previous knowledge_search call this session)</note>\n")
 			if directFAQRecommended {
 				ob.WriteString(fmt.Sprintf(
@@ -1264,6 +1272,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 					xmlEscape(result.SourceQuery),
 				))
 			}
+			writeModelSourceLocator(&ob, result.SourceLocator)
 			if directFAQRecommended {
 				ob.WriteString(fmt.Sprintf(
 					"<direct_answer_recommended threshold=\"%.3f\">true</direct_answer_recommended>\n",
@@ -1318,6 +1327,9 @@ func (t *KnowledgeSearchTool) formatOutput(
 		})
 
 		last := formattedResults[len(formattedResults)-1]
+		if locator := sourcerefs.ModelSourceLocator(result.SourceLocator); locator != "" {
+			last["source_locator"] = json.RawMessage(locator)
+		}
 
 		if result.ImageInfo != "" {
 			var imageInfos []types.ImageInfo
@@ -1397,6 +1409,15 @@ func (t *KnowledgeSearchTool) formatOutput(
 		Output:  output,
 		Data:    data,
 	}, nil
+}
+
+func writeModelSourceLocator(builder *strings.Builder, locator types.JSON) {
+	if builder == nil {
+		return
+	}
+	if value := sourcerefs.ModelSourceLocator(locator); value != "" {
+		fmt.Fprintf(builder, "<source_locator>%s</source_locator>\n", xmlEscape(value))
+	}
 }
 
 // chunkRange represents a continuous range of chunk indices

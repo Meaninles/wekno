@@ -449,20 +449,13 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 
 // allowedFileURLExtensions defines the supported file extensions for file URL import
 var allowedFileURLExtensions = map[string]bool{
-	"txt":  true,
-	"md":   true,
-	"pdf":  true,
-	"docx": true,
-	"doc":  true,
-	"mp3":  true,
-	"wav":  true,
-	"m4a":  true,
-	"flac": true,
-	"ogg":  true,
+	"pdf": true, "txt": true, "text": true, "docx": true, "doc": true,
+	"epub": true, "mhtml": true, "md": true, "markdown": true,
+	"png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true,
+	"bmp": true, "tiff": true, "csv": true, "xlsx": true, "xls": true,
+	"pptx": true, "ppt": true, "json": true,
+	"mp3": true, "wav": true, "m4a": true, "flac": true, "ogg": true,
 }
-
-// maxFileURLSize is the maximum allowed file size for file URL import (10MB)
-const maxFileURLSize = 10 * 1024 * 1024
 
 // extractFileNameFromURL extracts the filename from a URL path
 func extractFileNameFromURL(rawURL string) string {

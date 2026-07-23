@@ -1,6 +1,9 @@
 package types
 
-import "strings"
+import (
+	"io"
+	"strings"
+)
 
 // ReadRequest is the unified transport-agnostic request for document reading.
 // Set FileContent for file mode, URL for URL mode.
@@ -24,6 +27,29 @@ type ReadResult struct {
 	Error           string
 	IsAudio         bool   // true when the result contains raw audio data needing ASR transcription
 	AudioData       []byte // raw audio bytes for ASR processing
+}
+
+// DocumentSplitRequest is streamed to the format-aware splitter before a
+// source that exceeds parser workload limits is parsed. Source and Destination
+// are deliberately io streams: implementations must not materialize the
+// original source or the returned archive in memory.
+type DocumentSplitRequest struct {
+	FileName     string
+	FileType     string
+	SourceSize   int64
+	SourceSHA256 string
+	MinimumParts int
+	TargetRatio  float64
+	RequestID    string
+	Source       io.Reader
+	Destination  io.Writer
+}
+
+type DocumentSplitResult struct {
+	ArchiveSize    int64
+	ArchiveSHA256  string
+	PartCount      int
+	PlannerVersion string
 }
 
 // ImageRef represents an image reference extracted from the document.

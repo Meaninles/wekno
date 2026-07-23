@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,12 +18,15 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
 // isValidFileType checks if a file type is supported
 func isValidFileType(filename string) bool {
 	switch strings.ToLower(getFileType(filename)) {
-	case "pdf", "txt", "docx", "doc", "epub", "mhtml", "md", "markdown", "png", "jpg", "jpeg", "gif", "csv", "xlsx", "xls", "pptx", "ppt", "json",
+	case "pdf", "txt", "text", "docx", "doc", "epub", "mhtml", "md", "markdown",
+		"png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff",
+		"csv", "xlsx", "xls", "pptx", "ppt", "json",
 		"mp3", "wav", "m4a", "flac", "ogg":
 		return true
 	default:
@@ -333,12 +338,51 @@ func IsVideoType(fileType string) bool {
 	}
 }
 
-// downloadFileFromURL downloads a remote file to a temp file and returns its binary content.
+type downloadedFile struct {
+	File        *os.File
+	Path        string
+	Size        int64
+	MD5         string
+	ContentType string
+}
+
+func (d *downloadedFile) Close() {
+	if d == nil {
+		return
+	}
+	if d.File != nil {
+		_ = d.File.Close()
+	}
+	if d.Path != "" {
+		_ = os.Remove(d.Path)
+	}
+}
+
+// downloadFileFromURL streams a remote file into a seekable temporary file.
 // payloadFileName and payloadFileType are in/out pointers: if they point to an empty string,
 // the function resolves the value from Content-Disposition / URL path and writes it back.
 // It does NOT perform SSRF validation — callers are responsible for that.
-func downloadFileFromURL(ctx context.Context, fileURL string, payloadFileName, payloadFileType *string) ([]byte, error) {
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+func downloadFileFromURL(
+	ctx context.Context,
+	fileURL string,
+	payloadFileName, payloadFileType *string,
+) (*downloadedFile, error) {
+	if payloadFileName == nil || payloadFileType == nil {
+		return nil, errors.New("file URL metadata pointers are required")
+	}
+	maximum := secutils.GetMaxKnowledgeSourceFileSize()
+	httpClient := &http.Client{
+		Timeout: 30 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("too many file URL redirects")
+			}
+			if err := secutils.ValidateURLForSSRF(req.URL.String()); err != nil {
+				return fmt.Errorf("file URL redirect rejected: %w", err)
+			}
+			return nil
+		},
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request for file URL: %w", err)
@@ -354,8 +398,11 @@ func downloadFileFromURL(ctx context.Context, fileURL string, payloadFileName, p
 	}
 
 	// Reject oversized files early via Content-Length
-	if contentLength := resp.ContentLength; contentLength > maxFileURLSize {
-		return nil, fmt.Errorf("file size %d bytes exceeds limit of %d bytes (10MB)", contentLength, maxFileURLSize)
+	if contentLength := resp.ContentLength; contentLength > maximum {
+		return nil, fmt.Errorf(
+			"file size %d bytes exceeds logical document limit of %d bytes",
+			contentLength, maximum,
+		)
 	}
 
 	// Resolve fileName: payload > Content-Disposition > URL path
@@ -367,32 +414,56 @@ func downloadFileFromURL(ctx context.Context, fileURL string, payloadFileName, p
 	if *payloadFileName == "" {
 		*payloadFileName = extractFileNameFromURL(fileURL)
 	}
+	*payloadFileName = sanitizeDownloadedFileName(*payloadFileName)
+	if *payloadFileName == "" {
+		return nil, errors.New("remote file name could not be resolved")
+	}
 	if *payloadFileType == "" && *payloadFileName != "" {
 		*payloadFileType = getFileType(*payloadFileName)
 	}
 
-	// Stream response body into a temp file, capped at maxFileURLSize
+	// Stream response body into a temp file, capped at the logical source
+	// ceiling. Hashing happens in the same pass; no second in-memory copy is
+	// created even for multi-gigabyte sources.
 	tmpFile, err := os.CreateTemp("", "weknora-fileurl-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	limiter := &io.LimitedReader{R: resp.Body, N: maxFileURLSize + 1}
-	written, err := io.Copy(tmpFile, limiter)
-	tmpFile.Close()
+	failed := func(cause error) (*downloadedFile, error) {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return nil, cause
+	}
+	digest := md5.New()
+	limiter := &io.LimitedReader{R: resp.Body, N: maximum + 1}
+	written, err := io.Copy(io.MultiWriter(tmpFile, digest), limiter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to write temp file: %w", err)
+		return failed(fmt.Errorf("failed to write temp file: %w", err))
 	}
-	if written > maxFileURLSize {
-		return nil, fmt.Errorf("file size exceeds limit of 10MB")
+	if written > maximum {
+		return failed(fmt.Errorf(
+			"file size exceeds logical document limit of %d bytes", maximum,
+		))
 	}
+	if err := tmpFile.Sync(); err != nil {
+		return failed(fmt.Errorf("flush downloaded file: %w", err))
+	}
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return failed(fmt.Errorf("rewind downloaded file: %w", err))
+	}
+	return &downloadedFile{
+		File: tmpFile, Path: tmpPath, Size: written,
+		MD5:         hex.EncodeToString(digest.Sum(nil)),
+		ContentType: resp.Header.Get("Content-Type"),
+	}, nil
+}
 
-	contentBytes, err := os.ReadFile(tmpPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read temp file: %w", err)
+func sanitizeDownloadedFileName(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	value = filepath.Base(value)
+	if value == "." || value == string(filepath.Separator) {
+		return ""
 	}
-
-	return contentBytes, nil
+	return value
 }

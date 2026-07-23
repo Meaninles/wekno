@@ -29,6 +29,7 @@ from docreader.proto.docreader_pb2 import (
     ParserEngineInfo,
 )
 from docreader.utils.request import init_logging_request_id, request_id_context
+from weknora_document_splitter import split_rpc
 
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
@@ -273,6 +274,11 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
                 len(result.content),
                 sent,
             )
+
+    def Split(self, request_iterator, context):
+        # All format-specific implementation lives in the custom sidecar
+        # module; this method is the stable native registration point.
+        yield from split_rpc(request_iterator, context)
 
     def ListEngines(self, request, context):
         overrides = dict(getattr(request, "config_overrides", None) or {})

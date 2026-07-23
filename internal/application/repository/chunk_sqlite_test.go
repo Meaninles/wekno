@@ -63,6 +63,32 @@ func TestCreateChunks_SQLite_SeqIDAutoAssigned(t *testing.T) {
 	}
 }
 
+func TestCreateChunksPreservesExplicitSplitStagingZeroValues(t *testing.T) {
+	db := setupChunkTestDB(t)
+	repo := NewChunkRepository(db)
+	ctx := context.Background()
+	staged := &types.Chunk{
+		ID:                   uuid.New().String(),
+		TenantID:             1,
+		KnowledgeBaseID:      uuid.New().String(),
+		KnowledgeID:          uuid.New().String(),
+		Content:              "staged",
+		ChunkType:            types.ChunkTypeText,
+		IsEnabled:            false,
+		Flags:                0,
+		ProcessingGeneration: uuid.New().String(),
+		SplitPartIndex:       0,
+	}
+	require.NoError(t, repo.CreateChunks(ctx, []*types.Chunk{staged}))
+
+	var saved types.Chunk
+	require.NoError(t, db.First(&saved, "id = ?", staged.ID).Error)
+	require.False(t, saved.IsEnabled)
+	require.Equal(t, types.ChunkFlags(0), saved.Flags)
+	require.Equal(t, 0, saved.SplitPartIndex)
+	require.Equal(t, staged.ProcessingGeneration, saved.ProcessingGeneration)
+}
+
 func TestCreateChunks_SQLite_SeqIDContinuesFromExisting(t *testing.T) {
 	db := setupChunkTestDB(t)
 	repo := NewChunkRepository(db)

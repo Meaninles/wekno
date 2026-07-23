@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
@@ -114,5 +115,21 @@ func TestDataTableTerminalFanInSurvivesCancelledWorkerContext(t *testing.T) {
 	}
 	if len(enqueuer.tasks) != 1 || enqueuer.tasks[0].Type() != types.TypeKnowledgePostProcess {
 		t.Fatalf("postprocess tasks = %d, want 1", len(enqueuer.tasks))
+	}
+}
+
+func TestBuildSampleDataDescriptionAcceptsStringRows(t *testing.T) {
+	svc := &DataTableSummaryService{}
+	description := svc.buildSampleDataDescription(&types.ToolResult{
+		Data: map[string]interface{}{
+			"rows": []map[string]string{
+				{"资产编号": "A-001", "部门": "财务部"},
+				{"资产编号": "A-002", "部门": "运营部"},
+			},
+		},
+	}, 10)
+	if !strings.Contains(description, `"资产编号":"A-001"`) ||
+		!strings.Contains(description, `"部门":"运营部"`) {
+		t.Fatalf("string-valued rows were omitted: %q", description)
 	}
 }

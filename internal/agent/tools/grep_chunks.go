@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -379,7 +380,7 @@ func (t *GrepChunksTool) searchChunks(
 
 	query := t.db.WithContext(ctx).Table("chunks").
 		Select("chunks.id, chunks.content, chunks.chunk_index, chunks.knowledge_id, "+
-			"chunks.knowledge_base_id, chunks.chunk_type, chunks.metadata, chunks.created_at, "+
+			"chunks.knowledge_base_id, chunks.chunk_type, chunks.metadata, chunks.source_locator, chunks.created_at, "+
 			"knowledges.title as knowledge_title").
 		Joins("JOIN knowledges ON chunks.knowledge_id = knowledges.id").
 		Where("chunks.is_enabled = ?", true).
@@ -483,6 +484,12 @@ func (t *GrepChunksTool) formatOutput(
 		return b.String()
 	}
 
+	b.WriteString(
+		"<deep_read_instruction>For an exact document hit, call list_knowledge_chunks with its chunk_id. " +
+			"chunk_index is a logical chunk ordinal, never a page, sheet row, source line, JSON item, image frame, or audio time. " +
+			"Never convert chunk_index into offset; knowledge_id paging uses the returned next_offset. " +
+			"For source citations use source_locator and record keys in the content only.</deep_read_instruction>\n",
+	)
 	for _, r := range results {
 		counts := countRegexHits(r.Content, compiled, queries)
 		snippet := extractChunkMatchSnippet(&r.Chunk, compiled)
@@ -520,6 +527,9 @@ func (t *GrepChunksTool) formatOutput(
 				"<chunk chunk_id=\"%s\" knowledge_id=\"%s\" knowledge_title=\"%s\"%s chunk_index=\"%d\" score=\"%.3f\">\n",
 				xmlEscape(r.ID), xmlEscape(r.KnowledgeID), xmlEscape(r.KnowledgeTitle),
 				extraAttr, r.ChunkIndex, r.MatchScore)
+		}
+		if locator := sourcerefs.ModelSourceLocator(r.SourceLocator); locator != "" {
+			fmt.Fprintf(&b, "<source_locator>%s</source_locator>\n", xmlEscape(locator))
 		}
 
 		for _, q := range queries {
@@ -663,18 +673,19 @@ func (t *GrepChunksTool) aggregateByKnowledge(
 }
 
 type grepChunkResult struct {
-	ChunkID         string  `json:"chunk_id,omitempty"`
-	FAQID           string  `json:"faq_id,omitempty"`
-	KnowledgeID     string  `json:"knowledge_id"`
-	KnowledgeBaseID string  `json:"knowledge_base_id"`
-	KnowledgeTitle  string  `json:"knowledge_title"`
-	ChunkType       string  `json:"chunk_type"`
-	Index           int     `json:"index,omitempty"`
-	ChunkIndex      int     `json:"chunk_index,omitempty"`
-	FAQQuestion     string  `json:"faq_question,omitempty"`
-	TitleMatch      bool    `json:"title_match,omitempty"`
-	MatchSnippet    string  `json:"match_snippet,omitempty"`
-	Score           float64 `json:"score"`
+	ChunkID         string     `json:"chunk_id,omitempty"`
+	FAQID           string     `json:"faq_id,omitempty"`
+	KnowledgeID     string     `json:"knowledge_id"`
+	KnowledgeBaseID string     `json:"knowledge_base_id"`
+	KnowledgeTitle  string     `json:"knowledge_title"`
+	ChunkType       string     `json:"chunk_type"`
+	Index           int        `json:"index,omitempty"`
+	ChunkIndex      int        `json:"chunk_index,omitempty"`
+	FAQQuestion     string     `json:"faq_question,omitempty"`
+	TitleMatch      bool       `json:"title_match,omitempty"`
+	MatchSnippet    string     `json:"match_snippet,omitempty"`
+	SourceLocator   types.JSON `json:"source_locator,omitempty"`
+	Score           float64    `json:"score"`
 }
 
 func buildGrepChunkResults(results []chunkWithTitle, compiled []*regexp.Regexp) []grepChunkResult {
@@ -690,6 +701,7 @@ func buildGrepChunkResults(results []chunkWithTitle, compiled []*regexp.Regexp) 
 			ChunkType:       string(r.ChunkType),
 			TitleMatch:      r.TitleMatch,
 			MatchSnippet:    extractChunkMatchSnippet(&r.Chunk, compiled),
+			SourceLocator:   append(types.JSON(nil), r.SourceLocator...),
 			Score:           r.MatchScore,
 		}
 		if r.ChunkType == types.ChunkTypeFAQ {

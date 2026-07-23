@@ -36,6 +36,8 @@ const (
 	KindFileURLTemp     = "file_url_temp"
 	KindCloneSourceFile = "clone_source_file"
 	KindCloneImage      = "clone_image"
+	KindSplitInput      = "document_split_input"
+	KindSplitImage      = "document_split_image"
 
 	referenceFingerprintPrefix = "ref-sha256:"
 
@@ -166,7 +168,8 @@ func NewWithResolver(db *gorm.DB, resolver ServiceResolver) *Registry {
 func validKind(kind string) bool {
 	switch kind {
 	case KindFanoutImage, KindFAQEntries, KindFAQFailedExport,
-		KindSourceFile, KindFileURLTemp, KindCloneSourceFile, KindCloneImage:
+		KindSourceFile, KindFileURLTemp, KindCloneSourceFile, KindCloneImage,
+		KindSplitInput, KindSplitImage:
 		return true
 	default:
 		return false

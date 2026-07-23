@@ -44,6 +44,11 @@ class DocReaderStub(object):
                 request_serializer=docreader__pb2.ReadRequest.SerializeToString,
                 response_deserializer=docreader__pb2.ReadStreamResponse.FromString,
                 _registered_method=True)
+        self.Split = channel.stream_stream(
+                '/docreader.DocReader/Split',
+                request_serializer=docreader__pb2.SplitRequest.SerializeToString,
+                response_deserializer=docreader__pb2.SplitResponse.FromString,
+                _registered_method=True)
         self.ListEngines = channel.unary_unary(
                 '/docreader.DocReader/ListEngines',
                 request_serializer=docreader__pb2.ListEnginesRequest.SerializeToString,
@@ -72,6 +77,18 @@ class DocReaderServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Split(self, request_iterator, context):
+        """Split is a bounded-memory bidirectional stream used before parsing a
+        document that exceeds one or more parser workload limits. The client
+        sends one header followed by source byte frames. The server writes the
+        source to an isolated temporary file, creates format-aware physical
+        parts, and streams back a ZIP archive containing manifest.json and the
+        parts. Individual gRPC frames stay small regardless of source size.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ListEngines(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -90,6 +107,11 @@ def add_DocReaderServicer_to_server(servicer, server):
                     servicer.ReadStream,
                     request_deserializer=docreader__pb2.ReadRequest.FromString,
                     response_serializer=docreader__pb2.ReadStreamResponse.SerializeToString,
+            ),
+            'Split': grpc.stream_stream_rpc_method_handler(
+                    servicer.Split,
+                    request_deserializer=docreader__pb2.SplitRequest.FromString,
+                    response_serializer=docreader__pb2.SplitResponse.SerializeToString,
             ),
             'ListEngines': grpc.unary_unary_rpc_method_handler(
                     servicer.ListEngines,
@@ -151,6 +173,33 @@ class DocReader(object):
             '/docreader.DocReader/ReadStream',
             docreader__pb2.ReadRequest.SerializeToString,
             docreader__pb2.ReadStreamResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Split(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            '/docreader.DocReader/Split',
+            docreader__pb2.SplitRequest.SerializeToString,
+            docreader__pb2.SplitResponse.FromString,
             options,
             channel_credentials,
             insecure,

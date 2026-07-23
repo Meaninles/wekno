@@ -56,6 +56,7 @@ import (
 	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
@@ -286,6 +287,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 		// already handles.
 		must(container.Provide(router.NewNoopTaskInspector))
 	}
+	must(container.Provide(documentsplit.NewManager))
 	// Custom Wiki queue recovery republishes a missing Redis wake-up for any
 	// durable PostgreSQL pending-op. Keep the implementation outside native
 	// services; this is the sole provider registration point.
@@ -404,6 +406,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 		must(container.Invoke(documentqueue.Start))
 		must(container.Invoke(router.RegisterSyncHandlers))
 	}
+	// Split recovery starts only after its handlers are registered. PostgreSQL
+	// plans are authoritative and missing Redis wake-ups are republished here.
+	must(container.Invoke(documentsplit.Start))
 	// Start only after the async server / Lite handlers are registered so the
 	// recovery module's immediate scan always has a consumer.
 	must(container.Invoke(corefanout.StartRecovery))

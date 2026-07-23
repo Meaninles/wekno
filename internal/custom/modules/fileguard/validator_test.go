@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestValidateBytesDOCXReportsMultipleStructuralLimits(t *testing.T) {
+func TestAnalyzeBytesDOCXRejectsUnsafeCompressionBeforeInflatingEntries(t *testing.T) {
 	var doc strings.Builder
 	doc.WriteString(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`)
 	for i := 0; i < 20001; i++ {
@@ -23,13 +23,43 @@ func TestValidateBytesDOCXReportsMultipleStructuralLimits(t *testing.T) {
 		"word/document.xml": doc.String(),
 	})
 
-	err := ValidateBytes("heavy.docx", "docx", data)
-	if err == nil {
-		t.Fatal("expected validation error")
+	report := AnalyzeBytes("heavy.docx", "docx", data)
+	if report.Disposition != DispositionRejectUnsafe {
+		t.Fatalf("disposition = %s, want %s", report.Disposition, DispositionRejectUnsafe)
 	}
-	msg := err.Error()
+	err := report.ValidationError()
+	if err == nil || !strings.Contains(err.Error(), "Word 文档压缩膨胀倍数异常，安全上限为 200 倍") {
+		t.Fatalf("expected unsafe compression rejection, got %v", err)
+	}
+	if len(report.SplitReasons) != 0 {
+		t.Fatalf("unsafe archive should be rejected before XML inflation: %v", report.SplitReasons)
+	}
+}
+
+func TestAnalyzeBytesDOCXRequestsSplitForStructuralLimits(t *testing.T) {
+	var doc strings.Builder
+	doc.WriteString(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`)
+	for i := 0; i < 20001; i++ {
+		doc.WriteString(`<w:tr/>`)
+	}
+	for i := 0; i < 80001; i++ {
+		doc.WriteString(`<w:tc/>`)
+	}
+	doc.WriteString(`</w:body></w:document>`)
+
+	data := zipBytes(t, map[string]string{
+		"word/document.xml":    doc.String(),
+		"word/media/noise.bin": string(deterministicNoise(16 * 1024)),
+	})
+	report := AnalyzeBytes("large-table.docx", "docx", data)
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable DOCX was rejected: %v", err)
+	}
+	if !report.NeedsSplit() {
+		t.Fatalf("disposition = %s, want split_required", report.Disposition)
+	}
+	msg := strings.Join(report.SplitReasons, "，")
 	for _, want := range []string{
-		"Word 文档压缩膨胀倍数不能超过 30 倍",
 		"Word 文档表格行数不能超过 20,000 行",
 		"Word 文档表格单元格数量不能超过 80,000 个",
 	} {
@@ -45,7 +75,29 @@ func TestValidateBytesDOCXReportsMultipleStructuralLimits(t *testing.T) {
 	}
 }
 
-func TestValidateBytesXLSXReportsMultipleStructuralLimits(t *testing.T) {
+func TestAnalyzeBytesDOCXAllowsLegitimateHighCompression(t *testing.T) {
+	data := zipBytes(t, map[string]string{
+		"word/document.xml": `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>` +
+			strings.Repeat("legitimate-business-document-content-", 360000) +
+			`</w:t></w:r></w:p></w:body></w:document>`,
+		"word/media/noise.bin": string(deterministicNoise(320 * 1024)),
+	})
+
+	report := AnalyzeBytes("legitimate-high-compression.docx", "docx", data)
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("legitimate high-compression DOCX was rejected: %v", err)
+	}
+	ratio, ok := report.Metrics["docx_compression_ratio"].(float64)
+	if !ok || ratio <= defaultDOCXLimits.compressionRate ||
+		ratio >= officeArchiveMaxExpansionRatio {
+		t.Fatalf("fixture ratio %.2f is outside the intended legitimate range", ratio)
+	}
+	if !report.IsHeavy() {
+		t.Fatal("legitimate high-compression DOCX should use the heavy execution path")
+	}
+}
+
+func TestAnalyzeBytesXLSXRequestsPhysicalSplitForStructuralLimits(t *testing.T) {
 	var sheet strings.Builder
 	sheet.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`)
 	for row := 1; row <= 30001; row++ {
@@ -67,11 +119,15 @@ func TestValidateBytesXLSXReportsMultipleStructuralLimits(t *testing.T) {
 		"xl/worksheets/sheet1.xml":   sheet.String(),
 	})
 
-	err := ValidateBytes("heavy.xlsx", "xlsx", data)
-	if err == nil {
-		t.Fatal("expected validation error")
+	report := AnalyzeBytes("heavy.xlsx", "xlsx", data)
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable workbook was rejected: %v", err)
 	}
-	msg := err.Error()
+	if !report.NeedsSplit() || report.RequiredParts < 2 {
+		t.Fatalf("expected split-required report, got disposition=%s parts=%d",
+			report.Disposition, report.RequiredParts)
+	}
+	msg := strings.Join(report.SplitReasons, "，")
 	for _, want := range []string{
 		"单个工作表行数不能超过 30,000 行（数据项：当前 30,001 行）",
 		"Excel 总单元格数量不能超过 300,000 个",
@@ -134,14 +190,30 @@ func TestValidateBytesXLSXDoesNotDoubleCountPictures(t *testing.T) {
 	}
 }
 
-func TestValidateBytesSizeOnlyLimit(t *testing.T) {
-	err := ValidateBytes("large.json", "json", make([]byte, mb+1))
-	if err == nil {
-		t.Fatal("expected validation error")
+func TestAnalyzeBytesSizeOnlyLimitRequestsSplit(t *testing.T) {
+	report := AnalyzeBytes("large.json", "json", make([]byte, mb+1))
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable JSON was rejected: %v", err)
 	}
-	want := "JSON 文件大小不能超过 1MB（当前 1MB）"
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("message missing %q: %s", want, err.Error())
+	if !report.NeedsSplit() {
+		t.Fatalf("disposition = %s, want split_required", report.Disposition)
+	}
+	want := "JSON 文件大小超过单分片上限 1MB（当前 1MB），将自动物理拆分"
+	msg := strings.Join(report.SplitReasons, "，")
+	if !strings.Contains(msg, want) {
+		t.Fatalf("message missing %q: %s", want, msg)
+	}
+}
+
+func TestStructuralLimitDerivesUniformPartCountWithHeadroom(t *testing.T) {
+	report := newReport()
+	report.addLimitIssue(1_000, 100, "synthetic workload")
+	// 75% of 100 is the 75-unit physical target: ceil(1000/75) = 14.
+	if report.RequiredParts != 14 {
+		t.Fatalf("required parts = %d, want 14", report.RequiredParts)
+	}
+	if !report.NeedsSplit() {
+		t.Fatalf("disposition = %s, want split_required", report.Disposition)
 	}
 }
 
@@ -151,19 +223,23 @@ func TestAnalyzeSizeDocumentSizeLimitsRaisedTo50MB(t *testing.T) {
 		typ  string
 		want string
 	}{
-		{name: "report.pdf", typ: "pdf", want: "PDF 文件大小不能超过 50MB"},
-		{name: "deck.pptx", typ: "pptx", want: "PPT 文件大小不能超过 50MB"},
-		{name: "deck.ppt", typ: "ppt", want: "PPT 旧格式文件大小不能超过 50MB"},
+		{name: "report.pdf", typ: "pdf", want: "PDF 文件大小超过单分片上限 50MB"},
+		{name: "deck.pptx", typ: "pptx", want: "PPT 文件大小超过单分片上限 50MB"},
+		{name: "deck.ppt", typ: "ppt", want: "PPT 旧格式文件大小超过单分片上限 50MB"},
 	} {
 		if err := AnalyzeSize(tc.name, tc.typ, 50*mb).ValidationError(); err != nil {
 			t.Fatalf("expected %s at 50MB limit to pass: %s", tc.name, err.Error())
 		}
-		err := AnalyzeSize(tc.name, tc.typ, 50*mb+1).ValidationError()
-		if err == nil {
-			t.Fatalf("expected %s just above limit to fail", tc.name)
+		report := AnalyzeSize(tc.name, tc.typ, 50*mb+1)
+		if err := report.ValidationError(); err != nil {
+			t.Fatalf("expected %s just above per-part limit to remain admissible: %v", tc.name, err)
 		}
-		if !strings.Contains(err.Error(), tc.want) {
-			t.Fatalf("message missing %q: %s", tc.want, err.Error())
+		if !report.NeedsSplit() {
+			t.Fatalf("expected %s just above limit to require split", tc.name)
+		}
+		msg := strings.Join(report.SplitReasons, "，")
+		if !strings.Contains(msg, tc.want) {
+			t.Fatalf("message missing %q: %s", tc.want, msg)
 		}
 	}
 }
@@ -189,13 +265,13 @@ func TestValidateBytesPPTXRejectsExcessiveCompression(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected highly compressed PPTX to fail")
 	}
-	want := "PPT 文件压缩膨胀倍数不能超过 10 倍"
+	want := "PPT 文件压缩膨胀倍数异常，安全上限为 200 倍"
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("message missing %q: %s", want, err.Error())
 	}
 }
 
-func TestValidateBytesPPTXRejectsSlidesAbove200(t *testing.T) {
+func TestAnalyzeBytesPPTXRequestsSplitAbove200Slides(t *testing.T) {
 	files := map[string]string{}
 	for i := 1; i <= 200; i++ {
 		files[fmt.Sprintf("ppt/slides/slide%d.xml", i)] = `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld/></p:sld>`
@@ -205,17 +281,21 @@ func TestValidateBytesPPTXRejectsSlidesAbove200(t *testing.T) {
 	}
 
 	files["ppt/slides/slide201.xml"] = `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld/></p:sld>`
-	err := ValidateBytes("slides-201.pptx", "pptx", zipBytes(t, files))
-	if err == nil {
-		t.Fatal("expected 201-slide PPTX to fail")
+	report := AnalyzeBytes("slides-201.pptx", "pptx", zipBytes(t, files))
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable PPTX was rejected: %v", err)
+	}
+	if !report.NeedsSplit() {
+		t.Fatalf("disposition = %s, want split_required", report.Disposition)
 	}
 	want := "PPT 幻灯片数量不能超过 200 页"
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("message missing %q: %s", want, err.Error())
+	msg := strings.Join(report.SplitReasons, "，")
+	if !strings.Contains(msg, want) {
+		t.Fatalf("message missing %q: %s", want, msg)
 	}
 }
 
-func TestValidateBytesCSVReportsMultipleStructuralLimits(t *testing.T) {
+func TestAnalyzeBytesCSVRequestsSplitForMultipleStructuralLimits(t *testing.T) {
 	var data strings.Builder
 	for i := 0; i < 101; i++ {
 		if i > 0 {
@@ -228,11 +308,14 @@ func TestValidateBytesCSVReportsMultipleStructuralLimits(t *testing.T) {
 		data.WriteString("a,b,c\n")
 	}
 
-	err := ValidateBytes("large.csv", "csv", []byte(data.String()))
-	if err == nil {
-		t.Fatal("expected validation error")
+	report := AnalyzeBytes("large.csv", "csv", []byte(data.String()))
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable CSV was rejected: %v", err)
 	}
-	msg := err.Error()
+	if !report.NeedsSplit() {
+		t.Fatalf("disposition = %s, want split_required", report.Disposition)
+	}
+	msg := strings.Join(report.SplitReasons, "，")
 	for _, want := range []string{
 		"CSV 总行数不能超过 100,000 行（当前 100,001 行）",
 		"CSV 单行列数不能超过 100 列（当前 101 列）",
@@ -266,14 +349,18 @@ func TestValidateBytesCSVReportsLargeFieldAndRow(t *testing.T) {
 	}
 }
 
-func TestValidateBytesUsesFileTypeWhenNameHasNoExtension(t *testing.T) {
-	err := ValidateBytes("download", "json", make([]byte, mb+1))
-	if err == nil {
-		t.Fatal("expected validation error")
+func TestAnalyzeBytesUsesFileTypeWhenNameHasNoExtension(t *testing.T) {
+	report := AnalyzeBytes("download", "json", make([]byte, mb+1))
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable JSON was rejected: %v", err)
 	}
-	want := "JSON 文件大小不能超过 1MB"
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("message missing %q: %s", want, err.Error())
+	if !report.NeedsSplit() {
+		t.Fatalf("disposition = %s, want split_required", report.Disposition)
+	}
+	want := "JSON 文件大小超过单分片上限 1MB"
+	msg := strings.Join(report.SplitReasons, "，")
+	if !strings.Contains(msg, want) {
+		t.Fatalf("message missing %q: %s", want, msg)
 	}
 }
 
@@ -281,24 +368,32 @@ func TestValidateBytesAudioLimitsCoverOneHourRecording(t *testing.T) {
 	if err := ValidateBytes("meeting.mp3", "mp3", make([]byte, 100*mb)); err != nil {
 		t.Fatalf("expected 100MB mp3 to pass: %s", err.Error())
 	}
-	err := ValidateBytes("meeting.mp3", "mp3", make([]byte, 100*mb+1))
-	if err == nil {
-		t.Fatal("expected mp3 just above 100MB to fail")
+	report := AnalyzeBytes("meeting.mp3", "mp3", make([]byte, 100*mb+1))
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable mp3 was rejected: %v", err)
 	}
-	want := "音频文件大小不能超过 100MB"
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("message missing %q: %s", want, err.Error())
+	if !report.NeedsSplit() {
+		t.Fatal("expected mp3 just above 100MB to require split")
+	}
+	want := "音频文件大小超过单分片上限 100MB"
+	msg := strings.Join(report.SplitReasons, "，")
+	if !strings.Contains(msg, want) {
+		t.Fatalf("message missing %q: %s", want, msg)
 	}
 }
 
-func TestValidateBytesFLACLimit(t *testing.T) {
-	err := ValidateBytes("meeting.flac", "flac", make([]byte, 100*mb+1))
-	if err == nil {
-		t.Fatal("expected flac above 100MB to fail")
+func TestAnalyzeBytesFLACLimitRequestsSplit(t *testing.T) {
+	report := AnalyzeBytes("meeting.flac", "flac", make([]byte, 100*mb+1))
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("splittable flac was rejected: %v", err)
 	}
-	want := "音频文件大小不能超过 100MB"
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("message missing %q: %s", want, err.Error())
+	if !report.NeedsSplit() {
+		t.Fatal("expected flac above 100MB to require split")
+	}
+	want := "音频文件大小超过单分片上限 100MB"
+	msg := strings.Join(report.SplitReasons, "，")
+	if !strings.Contains(msg, want) {
+		t.Fatalf("message missing %q: %s", want, msg)
 	}
 }
 
@@ -325,8 +420,11 @@ func TestAnalyzeSizeMarksHeavyBeforeHardLimit(t *testing.T) {
 	}
 
 	report = AnalyzeSize("report.pdf", "pdf", 50*mb+1)
-	if report.ValidationError() == nil {
-		t.Fatal("expected pdf above hard limit to fail")
+	if err := report.ValidationError(); err != nil {
+		t.Fatalf("expected pdf above per-part limit to remain admissible: %v", err)
+	}
+	if !report.NeedsSplit() {
+		t.Fatal("expected pdf above per-part limit to require split")
 	}
 	if !report.IsHeavy() {
 		t.Fatalf("expected pdf above hard limit to also be marked heavy")
@@ -420,4 +518,14 @@ func columnName(col int) string {
 		col /= 26
 	}
 	return name
+}
+
+func deterministicNoise(size int) []byte {
+	var seed uint32 = 0x9e3779b9
+	data := make([]byte, size)
+	for i := range data {
+		seed = seed*1664525 + 1013904223
+		data[i] = byte(seed >> 24)
+	}
+	return data
 }

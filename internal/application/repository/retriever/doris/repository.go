@@ -42,15 +42,15 @@ func NewDorisRetrieveEngineRepository(
 	}
 
 	repo := &dorisRepository{
-		db:             db,
-		httpClient:     &http.Client{},
-		feHTTPBase:     strings.TrimRight(feHTTPBase, "/"),
-		username:       username,
-		password:       password,
-		database:       database,
-		tableBaseName:  tableBaseName,
-		bucketsNum:     indexCfg.GetBucketsNum(0),
-		replicationNum: indexCfg.GetReplicationNum(0),
+		db:                  db,
+		httpClient:          &http.Client{},
+		feHTTPBase:          strings.TrimRight(feHTTPBase, "/"),
+		username:            username,
+		password:            password,
+		database:            database,
+		tableBaseName:       tableBaseName,
+		bucketsNum:          indexCfg.GetBucketsNum(0),
+		replicationNum:      indexCfg.GetReplicationNum(0),
 		compatModeRequested: compatMode,
 	}
 	log.Infof("[Doris] Repository initialized: db=%s, base=%s, fe_http=%s, compat_mode=%s",
@@ -244,6 +244,36 @@ func (r *dorisRepository) DeleteByKnowledgeIDList(ctx context.Context,
 	knowledgeIDList []string, dimension int, _ string,
 ) error {
 	return r.deleteByField(ctx, fieldKnowledgeID, knowledgeIDList, dimension)
+}
+
+func (r *dorisRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	_ string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(knowledgeIDList))
+	args := make([]any, 0, len(knowledgeIDList)+1)
+	args = append(args, knowledgeBaseID)
+	for i, knowledgeID := range knowledgeIDList {
+		placeholders[i] = "?"
+		args = append(args, knowledgeID)
+	}
+	stmt := fmt.Sprintf(
+		"DELETE FROM `%s` WHERE %s = ? AND %s IN (%s)",
+		r.getTableName(dimension),
+		fieldKnowledgeBaseID,
+		fieldKnowledgeID,
+		strings.Join(placeholders, ", "),
+	)
+	if _, err := r.db.ExecContext(ctx, stmt, args...); err != nil {
+		return fmt.Errorf("doris delete scoped knowledge indices: %w", err)
+	}
+	return nil
 }
 
 // DeleteBySourceIDList 用 source_id 列删除。

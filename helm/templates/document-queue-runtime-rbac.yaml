@@ -1,0 +1,37 @@
+{{/*
+Copyright 2025 Tencent
+SPDX-License-Identifier: MIT
+
+The document queue lists only Pods in its own namespace, then matches the exact
+immutable Pod UID. It does not watch the cluster and receives no mutation
+permission; a missing UID is never considered termination proof.
+*/}}
+{{- if and .Values.app.enabled .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "weknora.fullname" . }}-document-queue-runtime-verifier
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "app" "context" .) | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "weknora.fullname" . }}-document-queue-runtime-verifier
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "app" "context" .) | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "weknora.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "weknora.fullname" . }}-document-queue-runtime-verifier
+{{- end }}

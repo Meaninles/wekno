@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -74,6 +75,35 @@ func TestAppendUnique(t *testing.T) {
 	result = appendUnique(result, "b")
 	if len(result) != 3 {
 		t.Errorf("Expected 3 items (no dup), got %d", len(result))
+	}
+}
+
+func TestBuildLogEntryCarriesDurableSourceOpID(t *testing.T) {
+	svc := &wikiIngestService{}
+	pages := []types.WikiLogPageRef{{Slug: "summary/k1", Title: "Doc 1"}}
+
+	for _, tc := range []struct {
+		name   string
+		action string
+		opID   int64
+	}{
+		{name: "ingest", action: WikiOpIngest, opID: 41},
+		{name: "retract", action: WikiOpRetract, opID: 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := svc.buildLogEntry(7, "kb-1", tc.action, "k1", "Doc 1", "summary", pages, tc.opID)
+			if entry.SourceOpID == nil || *entry.SourceOpID != tc.opID {
+				t.Fatalf("source_op_id = %v, want %d", entry.SourceOpID, tc.opID)
+			}
+			if entry.Action != tc.action {
+				t.Fatalf("action = %q, want %q", entry.Action, tc.action)
+			}
+		})
+	}
+
+	legacy := svc.buildLogEntry(7, "kb-1", "maintenance", "", "", "", nil, 0)
+	if legacy.SourceOpID != nil {
+		t.Fatalf("non-queue log source_op_id = %v, want nil", *legacy.SourceOpID)
 	}
 }
 
@@ -327,20 +357,32 @@ func TestGenerateWithTemplateMasksImageURLsBeforeLLM(t *testing.T) {
 	if !strings.Contains(got, realURL) {
 		t.Fatalf("returned content does not contain restored real URL: %q", got)
 	}
+	if model.deadline.IsZero() {
+		t.Fatal("chat model did not receive a per-call deadline")
+	}
+	if remaining := time.Until(model.deadline); remaining <= 0 || remaining > wikiLLMCallTimeout {
+		t.Fatalf("chat deadline remaining = %v, want (0, %v]", remaining, wikiLLMCallTimeout)
+	}
 }
 
 type templateCaptureChatModel struct {
 	prompt   string
 	response string
+	err      error
+	deadline time.Time
 }
 
 func (m *templateCaptureChatModel) Chat(
-	_ context.Context,
+	ctx context.Context,
 	messages []chat.Message,
 	_ *chat.ChatOptions,
 ) (*types.ChatResponse, error) {
+	m.deadline, _ = ctx.Deadline()
 	if len(messages) > 0 {
 		m.prompt = messages[0].Content
+	}
+	if m.err != nil {
+		return nil, m.err
 	}
 	return &types.ChatResponse{Content: m.response}, nil
 }

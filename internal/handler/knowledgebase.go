@@ -1043,9 +1043,10 @@ func (h *KnowledgeBaseHandler) CopyKnowledgeBase(c *gin.Context) {
 	}
 
 	// Enqueue KB clone task to Asynq
-	task := asynq.NewTask(types.TypeKBClone, payloadBytes,
-		asynq.TaskID(taskID), asynq.Queue("default"), asynq.MaxRetry(3))
-	info, err := h.asynqClient.Enqueue(task)
+	task := asynq.NewTask(types.TypeKBClone, payloadBytes)
+	info, err := h.asynqClient.Enqueue(
+		task, asynq.TaskID(taskID), asynq.Queue("default"), asynq.MaxRetry(3),
+	)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue KB clone task: %v", err)
 		c.Error(apperrors.NewInternalServerError("Failed to enqueue task"))

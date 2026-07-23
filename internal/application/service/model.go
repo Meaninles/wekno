@@ -28,6 +28,13 @@ var ErrModelNotFound = errors.New("model not found")
 // configuration.
 var ErrModelAlreadyExists = errors.New("model already exists")
 
+// ErrChatModelConfiguration is returned after a persisted model was loaded
+// successfully but its configuration could not construct a chat client.
+// Repository and other infrastructure failures are deliberately not wrapped
+// with this sentinel: callers may safely treat this error as requiring an
+// operator configuration change rather than retrying the same row forever.
+var ErrChatModelConfiguration = errors.New("invalid chat model configuration")
+
 // modelService implements the model service interface
 type modelService struct {
 	repo          interfaces.ModelRepository
@@ -598,7 +605,7 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
 			"model_id":   model.ID,
 			"model_name": model.Name,
 		})
-		return nil, err
+		return nil, fmt.Errorf("%w for model %s: %w", ErrChatModelConfiguration, model.ID, err)
 	}
 
 	return chatModel, nil

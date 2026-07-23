@@ -39,6 +39,21 @@ func (r *knowledgeBaseRepository) GetKnowledgeBaseByID(ctx context.Context, id s
 	return &kb, nil
 }
 
+// GetKnowledgeBaseByIDUnscoped returns a KB even after soft deletion.  It is
+// intentionally kept off the broad repository interface: the durable KB
+// delete worker uses it to verify tombstone+outbox hand-off, and exact-attempt
+// move recovery uses it only to settle a row already committed to its target.
+func (r *knowledgeBaseRepository) GetKnowledgeBaseByIDUnscoped(ctx context.Context, id string) (*types.KnowledgeBase, error) {
+	var kb types.KnowledgeBase
+	if err := r.db.WithContext(ctx).Unscoped().Where("id = ?", id).First(&kb).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrKnowledgeBaseNotFound
+		}
+		return nil, err
+	}
+	return &kb, nil
+}
+
 // GetKnowledgeBaseByIDAndTenant gets a knowledge base by id only if it belongs to the given tenant (enforces tenant isolation)
 func (r *knowledgeBaseRepository) GetKnowledgeBaseByIDAndTenant(ctx context.Context, id string, tenantID uint64) (*types.KnowledgeBase, error) {
 	var kb types.KnowledgeBase

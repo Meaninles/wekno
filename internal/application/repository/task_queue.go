@@ -5,7 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
@@ -19,6 +24,47 @@ type taskPendingOpsRepository struct {
 // NewTaskPendingOpsRepository constructs a GORM-backed implementation.
 func NewTaskPendingOpsRepository(db *gorm.DB) interfaces.TaskPendingOpsRepository {
 	return &taskPendingOpsRepository{db: db}
+}
+
+// AcquireWikiIngestLease is the production-only extension used by the durable
+// Wiki coordinator after it acquires the Redis/Lite process lock. Keeping it
+// structural avoids widening the generic queue interface, while the service
+// fails closed when its production repository does not implement this method.
+func (r *taskPendingOpsRepository) AcquireWikiIngestLease(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+) (wikilease.Identity, error) {
+	return wikilease.Acquire(ctx, r.db, tenantID, knowledgeBaseID)
+}
+
+// withWikiLeaseMutation wraps queue bookkeeping performed by a durable Wiki
+// worker. Tombstoned KBs are allowed here because terminal queue draining is a
+// delete-side operation; the exact lease still prevents a former worker from
+// deleting/incrementing/archiving rows after a replacement advanced the epoch.
+func (r *taskPendingOpsRepository) withWikiLeaseMutation(
+	ctx context.Context,
+	mutation func(tx *gorm.DB, identity wikilease.Identity) error,
+) (bool, error) {
+	identity, hasIdentity := wikilease.IdentityFromContext(ctx)
+	if !wikilease.Required(ctx) && !hasIdentity {
+		return false, nil
+	}
+	if !hasIdentity {
+		return true, wikilease.ErrLeaseRequired
+	}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if _, err := kbwritefence.LockExisting(tx, identity.TenantID, identity.KnowledgeBaseID); err != nil {
+			return err
+		}
+		if err := wikiingestguard.ValidateScope(
+			ctx, tx, identity.TenantID, identity.KnowledgeBaseID,
+		); err != nil {
+			return err
+		}
+		return mutation(tx, identity)
+	})
+	return true, err
 }
 
 // Enqueue inserts a single op. Callers must populate TenantID/TaskType/
@@ -40,7 +86,52 @@ func (r *taskPendingOpsRepository) Enqueue(ctx context.Context, op *types.TaskPe
 		// driver-level default handling.
 		op.Payload = []byte("{}")
 	}
+	if op.EnqueuedAt.IsZero() {
+		// EnqueuedAt is not named CreatedAt, so GORM does not treat it as an
+		// auto-create timestamp. Without an explicit value GORM includes Go's
+		// year-0001 zero time in the INSERT and bypasses the database DEFAULT.
+		op.EnqueuedAt = time.Now().UTC()
+	}
+	if op.TaskType == types.TypeWikiIngest && op.Scope == types.TaskScopeKnowledgeBase {
+		return kbwritefence.WithActive(ctx, r.db, op.TenantID, op.ScopeID, func(tx *gorm.DB) error {
+			if err := wikiingestguard.ValidateScope(ctx, tx, op.TenantID, op.ScopeID); err != nil {
+				return err
+			}
+			return tx.Create(op).Error
+		})
+	}
 	return r.db.WithContext(ctx).Create(op).Error
+}
+
+// WithActiveWikiKnowledgeBase serializes a Wiki wake-up publication with KB
+// deletion. The callback intentionally runs while the parent-row lock is
+// owned: if publication wins, deletion subsequently observes/cancels the
+// signal; if deletion wins, the tombstone prevents a late signal entirely.
+//
+// This is an optional capability discovered structurally by the Wiki service;
+// keeping it out of the generic pending-op interface avoids coupling unrelated
+// queues to a Wiki-only external-publication contract.
+func (r *taskPendingOpsRepository) WithActiveWikiKnowledgeBase(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	publish func() error,
+) error {
+	guarded, err := r.withWikiLeaseMutation(ctx, func(_ *gorm.DB, identity wikilease.Identity) error {
+		if identity.TenantID != tenantID || identity.KnowledgeBaseID != knowledgeBaseID {
+			return wikiingestguard.ErrInvalidIdentity
+		}
+		return publish()
+	})
+	if guarded {
+		return err
+	}
+	return kbwritefence.WithActive(ctx, r.db, tenantID, knowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, knowledgeBaseID); err != nil {
+			return err
+		}
+		return publish()
+	})
 }
 
 // PeekBatch returns up to `limit` rows for the (task_type, scope, scope_id)
@@ -71,15 +162,106 @@ func (r *taskPendingOpsRepository) PeekBatch(
 	return ops, nil
 }
 
+// UpdateWikiPayload checkpoints service-owned Wiki progress without widening
+// the generic queue interface. The source generation is validated under the
+// same KB -> knowledge lock order as Wiki page/log writes, and the exact queue
+// tuple prevents a stale worker from repurposing an unrelated row ID.
+func (r *taskPendingOpsRepository) UpdateWikiPayload(
+	ctx context.Context,
+	id int64,
+	tenantID uint64,
+	knowledgeBaseID string,
+	payload []byte,
+) (bool, error) {
+	if id <= 0 || tenantID == 0 || knowledgeBaseID == "" || len(payload) == 0 {
+		return false, errors.New("task pending ops: complete Wiki payload checkpoint identity is required")
+	}
+	updated := false
+	err := kbwritefence.WithActive(ctx, r.db, tenantID, knowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, knowledgeBaseID); err != nil {
+			return err
+		}
+		result := tx.Model(&types.TaskPendingOp{}).
+			Where("id = ? AND tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ?",
+				id, tenantID, types.TypeWikiIngest, types.TaskScopeKnowledgeBase, knowledgeBaseID, "ingest").
+			Update("payload", payload)
+		if result.Error != nil {
+			return result.Error
+		}
+		updated = result.RowsAffected == 1
+		return nil
+	})
+	return updated, err
+}
+
 // DeleteByIDs removes the given rows in one statement. Empty input is a
 // no-op so the caller can invoke unconditionally at the end of a batch.
 func (r *taskPendingOpsRepository) DeleteByIDs(ctx context.Context, ids []int64) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	guarded, err := r.withWikiLeaseMutation(ctx, func(tx *gorm.DB, identity wikilease.Identity) error {
+		return tx.Where(
+			"id IN ? AND tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ?",
+			ids, identity.TenantID, types.TypeWikiIngest,
+			types.TaskScopeKnowledgeBase, identity.KnowledgeBaseID,
+		).Delete(&types.TaskPendingOp{}).Error
+	})
+	if guarded {
+		return err
+	}
 	return r.db.WithContext(ctx).
 		Where("id IN ?", ids).
 		Delete(&types.TaskPendingOp{}).Error
+}
+
+// ArchiveToDeadLetter atomically removes one pending op and writes its
+// dead-letter record. The delete is a compare-and-swap on fail_count: if a
+// coordinator has renewed/reset the row since the caller observed it, the
+// stale archive attempt becomes an idempotent no-op. Any validation or INSERT
+// failure rolls the delete back.
+func (r *taskPendingOpsRepository) ArchiveToDeadLetter(
+	ctx context.Context,
+	pendingID int64,
+	dl *types.TaskDeadLetter,
+) error {
+	archive := func(tx *gorm.DB, identity *wikilease.Identity) error {
+		if dl == nil {
+			return validateAndDefaultDeadLetter(dl)
+		}
+		if identity != nil && (dl.TenantID != identity.TenantID || dl.TaskType != types.TypeWikiIngest ||
+			dl.Scope != types.TaskScopeKnowledgeBase || dl.ScopeID != identity.KnowledgeBaseID) {
+			return wikiingestguard.ErrInvalidIdentity
+		}
+		query := tx.Where("id = ? AND fail_count = ?", pendingID, dl.FailCount)
+		if identity != nil {
+			query = query.Where(
+				"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ?",
+				identity.TenantID, types.TypeWikiIngest,
+				types.TaskScopeKnowledgeBase, identity.KnowledgeBaseID,
+			)
+		}
+		result := query.
+			Delete(&types.TaskPendingOp{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+
+		if err := validateAndDefaultDeadLetter(dl); err != nil {
+			return err
+		}
+		return tx.Create(dl).Error
+	}
+	guarded, err := r.withWikiLeaseMutation(ctx, func(tx *gorm.DB, identity wikilease.Identity) error {
+		return archive(tx, &identity)
+	})
+	if guarded {
+		return err
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return archive(tx, nil) })
 }
 
 // IncrFailCount atomically bumps fail_count for one row and returns the
@@ -91,7 +273,19 @@ func (r *taskPendingOpsRepository) DeleteByIDs(ctx context.Context, ids []int64)
 // by a concurrent DeleteByIDs (e.g. dead-letter path), which is benign.
 func (r *taskPendingOpsRepository) IncrFailCount(ctx context.Context, id int64) (int, error) {
 	var newCount int
-	err := r.db.WithContext(ctx).Raw(
+	guarded, err := r.withWikiLeaseMutation(ctx, func(tx *gorm.DB, identity wikilease.Identity) error {
+		return tx.Raw(
+			`UPDATE task_pending_ops SET fail_count = fail_count + 1
+			 WHERE id = ? AND tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ?
+			 RETURNING fail_count`,
+			id, identity.TenantID, types.TypeWikiIngest,
+			types.TaskScopeKnowledgeBase, identity.KnowledgeBaseID,
+		).Scan(&newCount).Error
+	})
+	if guarded {
+		return newCount, err
+	}
+	err = r.db.WithContext(ctx).Raw(
 		`UPDATE task_pending_ops SET fail_count = fail_count + 1 WHERE id = ? RETURNING fail_count`,
 		id,
 	).Scan(&newCount).Error
@@ -115,6 +309,69 @@ func (r *taskPendingOpsRepository) PendingCount(
 		return 0, err
 	}
 	return n, nil
+}
+
+// ExistsByDedupKey reports whether the queue contains at least one row
+// matching (task_type, scope, scope_id, dedup_key), optionally narrowed to
+// an exact op. It selects only the primary key and stops after one row so
+// lifecycle probes do not deserialize payloads or scan the rest of a large
+// KB queue.
+func (r *taskPendingOpsRepository) ExistsByDedupKey(
+	ctx context.Context,
+	taskType, scope, scopeID, dedupKey, op string,
+) (bool, error) {
+	if taskType == "" || scope == "" || scopeID == "" || dedupKey == "" {
+		return false, errors.New("task pending ops: task_type, scope, scope_id, dedup_key are required")
+	}
+
+	q := r.db.WithContext(ctx).
+		Model(&types.TaskPendingOp{}).
+		Select("id").
+		Where("task_type = ? AND scope = ? AND scope_id = ? AND dedup_key = ?",
+			taskType, scope, scopeID, dedupKey)
+	if op != "" {
+		q = q.Where("op = ?", op)
+	}
+
+	var row types.TaskPendingOp
+	res := q.Limit(1).Find(&row)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+func escapePendingDedupLikePrefix(prefix string) string {
+	prefix = strings.ReplaceAll(prefix, `\`, `\\`)
+	prefix = strings.ReplaceAll(prefix, `%`, `\%`)
+	prefix = strings.ReplaceAll(prefix, `_`, `\_`)
+	return prefix
+}
+
+// ExistsByDedupKeyPrefix reports whether any generation-scoped row exists for
+// a service-owned prefix. Equality filters on the queue tuple and operation
+// keep the prefix range bounded by idx_task_pending_ops_lookup.
+func (r *taskPendingOpsRepository) ExistsByDedupKeyPrefix(
+	ctx context.Context,
+	taskType, scope, scopeID, dedupKeyPrefix, op string,
+) (bool, error) {
+	if taskType == "" || scope == "" || scopeID == "" || dedupKeyPrefix == "" {
+		return false, errors.New("task pending ops: task_type, scope, scope_id, dedup_key_prefix are required")
+	}
+	q := r.db.WithContext(ctx).
+		Model(&types.TaskPendingOp{}).
+		Select("id").
+		Where("task_type = ? AND scope = ? AND scope_id = ?", taskType, scope, scopeID).
+		Where(`dedup_key LIKE ? ESCAPE '\'`, escapePendingDedupLikePrefix(dedupKeyPrefix)+"%")
+	if op != "" {
+		q = q.Where("op = ?", op)
+	}
+	var row types.TaskPendingOp
+	res := q.Limit(1).Find(&row)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // DeleteByDedupKey drops rows in the tuple whose dedup_key matches.
@@ -144,6 +401,22 @@ func (r *taskPendingOpsRepository) DeleteByDedupKey(
 	return q.Delete(&types.TaskPendingOp{}).Error
 }
 
+func (r *taskPendingOpsRepository) DeleteByDedupKeyPrefix(
+	ctx context.Context,
+	taskType, scope, scopeID, dedupKeyPrefix, op string,
+) error {
+	if taskType == "" || scope == "" || scopeID == "" || dedupKeyPrefix == "" {
+		return errors.New("task pending ops: task_type, scope, scope_id, dedup_key_prefix are required")
+	}
+	q := r.db.WithContext(ctx).
+		Where("task_type = ? AND scope = ? AND scope_id = ?", taskType, scope, scopeID).
+		Where(`dedup_key LIKE ? ESCAPE '\'`, escapePendingDedupLikePrefix(dedupKeyPrefix)+"%")
+	if op != "" {
+		q = q.Where("op = ?", op)
+	}
+	return q.Delete(&types.TaskPendingOp{}).Error
+}
+
 // taskDeadLetterRepository implements interfaces.TaskDeadLetterRepository.
 type taskDeadLetterRepository struct {
 	db *gorm.DB
@@ -158,6 +431,16 @@ func NewTaskDeadLetterRepository(db *gorm.DB) interfaces.TaskDeadLetterRepositor
 // middleware swallows the error so a failed insert never masks the
 // underlying task error.
 func (r *taskDeadLetterRepository) Insert(ctx context.Context, dl *types.TaskDeadLetter) error {
+	if err := validateAndDefaultDeadLetter(dl); err != nil {
+		return err
+	}
+	return r.db.WithContext(ctx).Create(dl).Error
+}
+
+// validateAndDefaultDeadLetter centralizes the invariants shared by
+// direct dead-letter inserts and atomic pending-op archival. Keep the
+// validation/default order stable so Insert retains its existing behavior.
+func validateAndDefaultDeadLetter(dl *types.TaskDeadLetter) error {
 	if dl == nil {
 		return errors.New("task dead letters: nil entry")
 	}
@@ -170,7 +453,10 @@ func (r *taskDeadLetterRepository) Insert(ctx context.Context, dl *types.TaskDea
 	if len(dl.Payload) == 0 {
 		dl.Payload = []byte("{}")
 	}
-	return r.db.WithContext(ctx).Create(dl).Error
+	if dl.FailedAt.IsZero() {
+		dl.FailedAt = time.Now()
+	}
+	return nil
 }
 
 // ListByScope returns dead letters for (scope, scope_id) newest-first

@@ -231,6 +231,11 @@ type WikiPageRepository interface {
 	// unchanged body, and status-only transitions.
 	UpdateMeta(ctx context.Context, page *types.WikiPage) error
 
+	// QuarantineForDelete atomically unions a source-deletion marker onto the
+	// current page, archives it, and advances its optimistic-lock version so a
+	// writer that loaded the page before quarantine cannot publish stale data.
+	QuarantineForDelete(ctx context.Context, kbID, slug, sourceKnowledgeID string) error
+
 	// UpdateAutoLinkedContent rewrites `content`, `out_links` and
 	// `updated_at` in place while leaving `version` untouched. Intended for
 	// machine-only link markup changes (cross-link injection / dead-link

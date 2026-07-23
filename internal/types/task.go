@@ -1,5 +1,10 @@
 package types
 
+import (
+	"encoding/json"
+	"time"
+)
+
 // Asynq queue names. MUST stay in sync with the queue maps in
 // router.NewAsynqServers — a task enqueued to a queue that no server lists will
 // never be consumed.
@@ -7,9 +12,13 @@ const (
 	QueueCritical = "critical"
 	QueueDefault  = "default"
 	QueueLow      = "low"
-	// QueueDocumentHeavy isolates resource-heavy document parsing. It is
-	// consumed by a dedicated asynq server whose concurrency is controlled by
-	// asynq.heavy_document_concurrency instead of the normal worker pool.
+	// QueueDocument carries only root document/manual workflows. Every full
+	// application replica consumes it with its own configured document-slot
+	// concurrency; derived tasks stay on their existing queues.
+	QueueDocument = "document"
+	// QueueDocumentHeavy is retained only for legacy in-flight root tasks. The
+	// background server consumes these deliveries just long enough to durably
+	// forward them to QueueDocument; complete parsing never runs in this lane.
 	QueueDocumentHeavy = "document_heavy"
 	// QueueMultimodal isolates high-volume, slow VLM image tasks (OCR + caption)
 	// so a single large scanned PDF (hundreds–thousands of page images) cannot
@@ -28,23 +37,24 @@ const (
 )
 
 const (
-	TypeChunkExtract         = "chunk:extract"
-	TypeDocumentProcess      = "document:process"       // 文档处理任务
-	TypeFAQImport            = "faq:import"             // FAQ导入任务（包含dry run模式）
-	TypeQuestionGeneration   = "question:generation"    // 问题生成任务
-	TypeSummaryGeneration    = "summary:generation"     // 摘要生成任务
-	TypeKBClone              = "kb:clone"               // 知识库复制任务
-	TypeIndexDelete          = "index:delete"           // 索引删除任务
-	TypeKBDelete             = "kb:delete"              // 知识库删除任务
-	TypeKnowledgeListDelete  = "knowledge:list_delete"  // 批量删除知识任务
-	TypeKnowledgeListReparse = "knowledge:list_reparse" // 批量重解析知识任务
-	TypeKnowledgeMove        = "knowledge:move"         // 知识移动任务
-	TypeDataTableSummary     = "datatable:summary"      // 表格摘要任务
-	TypeImageMultimodal      = "image:multimodal"       // 图片多模态处理任务（OCR + VLM Caption）
-	TypeKnowledgePostProcess = "knowledge:post_process" // 知识后处理任务（统一调度）
-	TypeManualProcess        = "manual:process"         // 手工知识更新任务（cleanup + 重新索引）
-	TypeDataSourceSync       = "datasource:sync"        // 数据源同步任务
-	TypeWikiIngest           = "wiki:ingest"            // Wiki 页面同步任务
+	TypeChunkExtract            = "chunk:extract"
+	TypeDocumentProcess         = "document:process"          // 文档处理任务
+	TypeFAQImport               = "faq:import"                // FAQ导入任务（包含dry run模式）
+	TypeQuestionGeneration      = "question:generation"       // 问题生成任务
+	TypeSummaryGeneration       = "summary:generation"        // 摘要生成任务
+	TypeKBClone                 = "kb:clone"                  // 知识库复制任务
+	TypeIndexDelete             = "index:delete"              // 索引删除任务
+	TypeKBDelete                = "kb:delete"                 // 知识库删除任务
+	TypeKnowledgeListDelete     = "knowledge:list_delete"     // 批量删除知识任务
+	TypeKnowledgeListReparse    = "knowledge:list_reparse"    // 批量重解析知识任务
+	TypeKnowledgeMove           = "knowledge:move"            // 知识移动任务
+	TypeDataTableSummary        = "datatable:summary"         // 表格摘要任务
+	TypeImageMultimodal         = "image:multimodal"          // 图片多模态处理任务（OCR + VLM Caption）
+	TypeKnowledgePostProcess    = "knowledge:post_process"    // 知识后处理任务（统一调度）
+	TypeManualProcess           = "manual:process"            // 手工知识更新任务（cleanup + 重新索引）
+	TypeDataSourceSync          = "datasource:sync"           // 数据源同步任务
+	TypeWikiIngest              = "wiki:ingest"               // Wiki 页面同步任务
+	TypeKnowledgeTerminalRepair = "knowledge:terminal_repair" // 终态/扇出持久修复任务
 )
 
 // ExtractChunkPayload represents the extract chunk task payload
@@ -57,8 +67,10 @@ type ExtractChunkPayload struct {
 	// parse attempt's postprocess stage so the worker can record a
 	// postprocess.graph.chunk[i] subspan. 0 / "" means "skip span
 	// recording" for legacy in-flight tasks.
-	KnowledgeID string `json:"knowledge_id,omitempty"`
-	Attempt     int    `json:"attempt,omitempty"`
+	KnowledgeID          string `json:"knowledge_id,omitempty"`
+	KnowledgeBaseID      string `json:"knowledge_base_id,omitempty"`
+	ProcessingGeneration string `json:"processing_generation,omitempty"`
+	Attempt              int    `json:"attempt,omitempty"`
 	// ChunkIndex is the 0-based ordinal of this chunk inside the parent
 	// knowledge's text-chunk set, used as the subspan name suffix
 	// ("postprocess.graph.chunk[3]") so the timeline preserves order.
@@ -72,6 +84,8 @@ type DocumentProcessPayload struct {
 	TenantID                 uint64   `json:"tenant_id"`
 	KnowledgeID              string   `json:"knowledge_id"`
 	KnowledgeBaseID          string   `json:"knowledge_base_id"`
+	ProcessingGeneration     string   `json:"processing_generation"`
+	ProcessingOwner          string   `json:"processing_owner"`
 	FilePath                 string   `json:"file_path,omitempty"` // 文件路径（文件导入时使用）
 	FileName                 string   `json:"file_name,omitempty"` // 文件名（文件导入时使用）
 	FileType                 string   `json:"file_type,omitempty"` // 文件类型（文件导入时使用）
@@ -89,6 +103,11 @@ type DocumentProcessPayload struct {
 	// retried spans overwrite the previous attempt's row rather than
 	// fan out into a new attempt for every retry.
 	Attempt int `json:"attempt,omitempty"`
+	// DocumentWorkflowID/Epoch are assigned by the durable document queue
+	// outbox. Business handlers deliberately ignore them; the coordinator uses
+	// them to reject duplicate or delayed deliveries before processing begins.
+	DocumentWorkflowID    string `json:"document_workflow_id,omitempty"`
+	DocumentWorkflowEpoch int64  `json:"document_workflow_epoch,omitempty"`
 }
 
 // FAQImportPayload represents the FAQ import task payload (including dry run mode)
@@ -109,10 +128,11 @@ type FAQImportPayload struct {
 // QuestionGenerationPayload represents the question generation task payload
 type QuestionGenerationPayload struct {
 	TracingContext
-	TenantID        uint64 `json:"tenant_id"`
-	KnowledgeBaseID string `json:"knowledge_base_id"`
-	KnowledgeID     string `json:"knowledge_id"`
-	QuestionCount   int    `json:"question_count"`
+	TenantID             uint64 `json:"tenant_id"`
+	KnowledgeBaseID      string `json:"knowledge_base_id"`
+	KnowledgeID          string `json:"knowledge_id"`
+	ProcessingGeneration string `json:"processing_generation"`
+	QuestionCount        int    `json:"question_count"`
 	// Language is the request locale (e.g. zh-CN, en-US) when the task was enqueued, used for {{language}} / {{lang}} in templates.
 	Language string `json:"language,omitempty"`
 	// Attempt links this task to the parent parse attempt so the worker
@@ -153,10 +173,11 @@ type QuestionGenerationPayload struct {
 // SummaryGenerationPayload represents the summary generation task payload
 type SummaryGenerationPayload struct {
 	TracingContext
-	TenantID        uint64 `json:"tenant_id"`
-	KnowledgeBaseID string `json:"knowledge_base_id"`
-	KnowledgeID     string `json:"knowledge_id"`
-	Language        string `json:"language,omitempty"`
+	TenantID             uint64 `json:"tenant_id"`
+	KnowledgeBaseID      string `json:"knowledge_base_id"`
+	KnowledgeID          string `json:"knowledge_id"`
+	ProcessingGeneration string `json:"processing_generation"`
+	Language             string `json:"language,omitempty"`
 	// Attempt links this task to the parent parse attempt so the worker
 	// can record a postprocess.summary subspan under the right attempt's
 	// postprocess stage. See QuestionGenerationPayload.Attempt notes.
@@ -197,28 +218,77 @@ type KBDeletePayload struct {
 	// soft-delete) so the async worker can resolve the right store. nil means
 	// the KB had no binding — falls back to EffectiveEngines.
 	VectorStoreID *string `json:"vector_store_id,omitempty"`
+	// StorageProvider is the effective provider snapshot captured before the
+	// KB row is soft-deleted.  The delete worker must not route files through a
+	// later tenant default (or the process-wide default) when cleanup retries.
+	StorageProvider string `json:"storage_provider"`
 }
 
 // KnowledgeListDeletePayload represents the batch knowledge delete task payload
 type KnowledgeListDeletePayload struct {
 	TracingContext
-	TenantID     uint64   `json:"tenant_id"`
-	KnowledgeIDs []string `json:"knowledge_ids"`
+	TenantID                uint64   `json:"tenant_id"`
+	KnowledgeIDs            []string `json:"knowledge_ids"`
+	ExpectedKnowledgeBaseID string   `json:"expected_knowledge_base_id,omitempty"`
+	// RecoveryClaimedAt is set only by the stale-intent scanner. The worker
+	// must CAS this exact deleting generation before doing any work.
+	RecoveryClaimedAt *time.Time `json:"recovery_claimed_at,omitempty"`
 }
 
-// KnowledgeListReparsePayload represents the batch knowledge reparse task payload
+// KnowledgeReparseExpectedSnapshot is the immutable row incarnation from
+// which one deterministic batch child is allowed to claim.
+type KnowledgeReparseExpectedSnapshot struct {
+	TenantID             uint64    `json:"tenant_id"`
+	KnowledgeID          string    `json:"knowledge_id"`
+	KnowledgeBaseID      string    `json:"knowledge_base_id"`
+	ParseStatus          string    `json:"parse_status"`
+	ProcessingGeneration string    `json:"processing_generation"`
+	ProcessingOwner      string    `json:"processing_owner"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+// KnowledgeListReparsePayload represents the batch knowledge reparse task payload.
 type KnowledgeListReparsePayload struct {
 	TracingContext
-	TenantID      uint64                     `json:"tenant_id"`
-	KnowledgeIDs  []string                   `json:"knowledge_ids"`
-	ProcessConfig *KnowledgeProcessOverrides `json:"process_config,omitempty"`
+	TenantID             uint64                     `json:"tenant_id"`
+	KnowledgeIDs         []string                   `json:"knowledge_ids"`
+	ProcessConfig        *KnowledgeProcessOverrides `json:"process_config,omitempty"`
+	ProcessingGeneration string                     `json:"processing_generation,omitempty"`
+	ProcessingOwner      string                     `json:"processing_owner,omitempty"`
+	// ExpectedSnapshot is copied into a single-item child from the immutable
+	// parent payload. Every retry may claim only while the row still matches all
+	// fields, including UpdatedAt, closing status/generation ABA races.
+	ExpectedSnapshot *KnowledgeReparseExpectedSnapshot `json:"expected_snapshot,omitempty"`
+	// ExpectedSnapshots is populated before the parent task is first persisted,
+	// so a partial fan-out retry never refreshes its intent from newer row state.
+	// Children carry only ExpectedSnapshot and clear this map.
+	ExpectedSnapshots map[string]KnowledgeReparseExpectedSnapshot `json:"expected_snapshots,omitempty"`
+	// BatchID makes multi-document fan-out stable across a parent retry. Each
+	// child uses (BatchID, knowledge_id) as both its task and generation
+	// identity. ProcessingGeneration/Owner are populated only on single-item
+	// children, allowing a retry to resume its own uncertain Pending/Processing
+	// commit without ever adopting a later user-initiated generation.
+	BatchID string `json:"batch_id,omitempty"`
+}
+
+// KnowledgeTerminalRepairPayload carries an exhausted task into a separate,
+// high-retry repair lane. OriginalPayload is preserved verbatim so the repair
+// worker can derive the exact tenant/KB/generation/item fence without relying
+// on mutable knowledge-base configuration.
+type KnowledgeTerminalRepairPayload struct {
+	OriginalTaskType string          `json:"original_task_type"`
+	OriginalPayload  json.RawMessage `json:"original_payload"`
+	LastError        string          `json:"last_error"`
 }
 
 // KnowledgeMovePayload represents the knowledge move task payload
 type KnowledgeMovePayload struct {
 	TracingContext
-	TenantID     uint64   `json:"tenant_id"`
-	TaskID       string   `json:"task_id"`
+	TenantID uint64 `json:"tenant_id"`
+	TaskID   string `json:"task_id"`
+	// AttemptID is the immutable owner of every lifecycle marker written by
+	// this move. It must never be inferred from mutable knowledge state.
+	AttemptID    string   `json:"attempt_id"`
 	KnowledgeIDs []string `json:"knowledge_ids"`
 	SourceKBID   string   `json:"source_kb_id"`
 	TargetKBID   string   `json:"target_kb_id"`
@@ -251,21 +321,32 @@ type ManualProcessPayload struct {
 	KnowledgeBaseID string `json:"knowledge_base_id"`
 	Content         string `json:"content"`      // cleaned markdown content
 	NeedCleanup     bool   `json:"need_cleanup"` // true for update, false for create
+	// ProcessingGeneration and ProcessingOwner identify the exact planned
+	// manual-processing task. Legacy file_hash generations are intentionally
+	// not accepted: missing ownership fails closed.
+	ProcessingGeneration string `json:"processing_generation"`
+	ProcessingOwner      string `json:"processing_owner"`
+	// Attempt is allocated by the reparse producer so an Asynq retry joins the
+	// same span tree instead of opening another logical processing attempt.
+	Attempt               int    `json:"attempt,omitempty"`
+	DocumentWorkflowID    string `json:"document_workflow_id,omitempty"`
+	DocumentWorkflowEpoch int64  `json:"document_workflow_epoch,omitempty"`
 }
 
 // ImageMultimodalPayload represents the image multimodal processing task payload.
 type ImageMultimodalPayload struct {
 	TracingContext
-	TenantID        uint64 `json:"tenant_id"`
-	KnowledgeID     string `json:"knowledge_id"`
-	KnowledgeBaseID string `json:"knowledge_base_id"`
-	ChunkID         string `json:"chunk_id"`         // parent text chunk
-	ImageURL        string `json:"image_url"`        // provider:// URL (e.g. local://..., minio://...)
-	ImageLocalPath  string `json:"image_local_path"` // deprecated: kept for backward compat with in-flight tasks
-	EnableOCR       bool   `json:"enable_ocr"`
-	EnableCaption   bool   `json:"enable_caption"`
-	Language        string `json:"language,omitempty"`          // Request locale for {{language}} in prompt templates
-	ImageSourceType string `json:"image_source_type,omitempty"` // Source type of the image (e.g., "scanned_pdf")
+	TenantID             uint64 `json:"tenant_id"`
+	KnowledgeID          string `json:"knowledge_id"`
+	KnowledgeBaseID      string `json:"knowledge_base_id"`
+	ProcessingGeneration string `json:"processing_generation"`
+	ChunkID              string `json:"chunk_id"`         // parent text chunk
+	ImageURL             string `json:"image_url"`        // provider:// URL (e.g. local://..., minio://...)
+	ImageLocalPath       string `json:"image_local_path"` // deprecated: kept for backward compat with in-flight tasks
+	EnableOCR            bool   `json:"enable_ocr"`
+	EnableCaption        bool   `json:"enable_caption"`
+	Language             string `json:"language,omitempty"`          // Request locale for {{language}} in prompt templates
+	ImageSourceType      string `json:"image_source_type,omitempty"` // Source type of the image (e.g., "scanned_pdf")
 	// Attempt links this image task back to the parent ProcessDocument
 	// attempt so the worker can record its image[i] subspan under the
 	// same attempt's multimodal stage span.
@@ -279,11 +360,28 @@ type ImageMultimodalPayload struct {
 // KnowledgePostProcessPayload represents the knowledge post process task payload.
 type KnowledgePostProcessPayload struct {
 	TracingContext
-	TenantID        uint64 `json:"tenant_id"`
-	KnowledgeID     string `json:"knowledge_id"`
-	KnowledgeBaseID string `json:"knowledge_base_id"`
-	Language        string `json:"language,omitempty"` // Request locale for {{language}} in prompt templates
-	Attempt         int    `json:"attempt,omitempty"`
+	TenantID             uint64 `json:"tenant_id"`
+	KnowledgeID          string `json:"knowledge_id"`
+	KnowledgeBaseID      string `json:"knowledge_base_id"`
+	ProcessingGeneration string `json:"processing_generation"`
+	Language             string `json:"language,omitempty"` // Request locale for {{language}} in prompt templates
+	Attempt              int    `json:"attempt,omitempty"`
+}
+
+// DataTableSummaryPayload is generation-scoped because table enrichment is
+// dispatched only after the core document commit. It participates in the same
+// durable fan-in as image multimodal tasks and must never write into a newer
+// reparse generation.
+type DataTableSummaryPayload struct {
+	TracingContext
+	TenantID             uint64 `json:"tenant_id"`
+	KnowledgeID          string `json:"knowledge_id"`
+	KnowledgeBaseID      string `json:"knowledge_base_id"`
+	ProcessingGeneration string `json:"processing_generation"`
+	SummaryModel         string `json:"summary_model"`
+	EmbeddingModel       string `json:"embedding_model"`
+	Language             string `json:"language,omitempty"`
+	Attempt              int    `json:"attempt,omitempty"`
 }
 
 // KBCloneTaskStatus represents the status of a knowledge base clone task

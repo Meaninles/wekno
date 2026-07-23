@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // wikiLogEntryRepository implements interfaces.WikiLogEntryRepository.
@@ -24,11 +28,73 @@ func NewWikiLogEntryRepository(db *gorm.DB) interfaces.WikiLogEntryRepository {
 // AppendBatch inserts every entry in one statement. Empty batches are a
 // no-op so callers can invoke unconditionally at the end of a wiki ingest
 // batch without guarding against the "no events this round" case.
+//
+// Queue-backed entries carry task_pending_ops.id in source_op_id. The unique
+// index on that nullable column plus ON CONFLICT makes this write durable and
+// idempotent across retries after a later index/publication/queue-settlement
+// failure. Legacy and administrative entries have a NULL source_op_id; SQL
+// unique semantics deliberately allow more than one of those rows.
 func (r *wikiLogEntryRepository) AppendBatch(ctx context.Context, entries []*types.WikiLogEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Create(&entries).Error
+	type kbKey struct {
+		tenantID uint64
+		kbID     string
+	}
+	keySet := make(map[kbKey]struct{})
+	for index, entry := range entries {
+		if entry == nil || entry.TenantID == 0 || entry.KnowledgeBaseID == "" {
+			return fmt.Errorf("append wiki log entries: entry %d has an incomplete knowledge-base identity", index)
+		}
+		keySet[kbKey{tenantID: entry.TenantID, kbID: entry.KnowledgeBaseID}] = struct{}{}
+	}
+	keys := make([]kbKey, 0, len(keySet))
+	for key := range keySet {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].tenantID != keys[j].tenantID {
+			return keys[i].tenantID < keys[j].tenantID
+		}
+		return keys[i].kbID < keys[j].kbID
+	})
+	// Keep the original plain-INSERT path for batches that have no durable
+	// source key (legacy/admin callers). Besides avoiding an unnecessary
+	// conflict clause, GORM reliably scans every generated ID back into such
+	// slices. Queue-backed production batches take the idempotent path below;
+	// their caller never relies on returned log IDs.
+	queueBacked := false
+	for _, entry := range entries {
+		if entry != nil && entry.SourceOpID != nil {
+			queueBacked = true
+			break
+		}
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, key := range keys {
+			if err := kbwritefence.LockActive(tx, key.tenantID, key.kbID); err != nil {
+				return fmt.Errorf("append wiki log entries: lock tenant=%d KB=%s: %w", key.tenantID, key.kbID, err)
+			}
+		}
+		if tenantID, knowledgeBaseID, ok := wikiingestguard.Scope(ctx); ok {
+			if len(keys) != 1 || keys[0].tenantID != tenantID || keys[0].kbID != knowledgeBaseID {
+				return wikiingestguard.ErrInvalidIdentity
+			}
+			if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, knowledgeBaseID); err != nil {
+				return err
+			}
+		} else if err := wikiingestguard.Validate(ctx, tx); err != nil {
+			return err
+		}
+		if !queueBacked {
+			return tx.Create(&entries).Error
+		}
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "source_op_id"}},
+			DoNothing: true,
+		}).Create(&entries).Error
+	})
 }
 
 // List returns up to `limit` entries strictly older than `cursor`, newest

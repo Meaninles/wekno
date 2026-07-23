@@ -3,16 +3,18 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/url"
 	"os"
 	"path"
-	"slices"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
 	"github.com/Tencent/WeKnora/internal/custom/modules/fileguard"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
@@ -208,6 +210,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		EmbeddingModelID: kb.EmbeddingModelID,
 		Metadata:         metadataJSON,
 	}
+	assignNewDocumentProcessingIdentity(knowledge)
 
 	if processOverrides != nil {
 		if err := knowledge.SetProcessOverrides(processOverrides); err != nil {
@@ -215,88 +218,61 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 			return nil, err
 		}
 	}
-
-	// Save the file to storage (use KB-level storage engine if configured)
-	logger.Infof(ctx, "Saving file, knowledge ID: %s", knowledge.ID)
-	fileSvc := s.resolveFileService(ctx, kb)
-	filePath, err := fileSvc.SaveFile(ctx, file, knowledge.TenantID, knowledge.ID)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to save file, knowledge ID: %s, error: %v", knowledge.ID, err)
+	if err := s.prepareInitialKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		return nil, err
 	}
-	knowledge.FilePath = filePath
+	questionCount := eff.QuestionGenerationConfig.QuestionCount
+	if questionCount <= 0 {
+		questionCount = 3
+	}
+	lang, _ := types.LanguageFromContext(ctx)
+	queue := documentProcessQueueForReport(guardReport)
+	var prepared *preparedDocumentWorkflow
 
-	// Save knowledge record to database after the file is safely stored.
-	logger.Info(ctx, "Saving knowledge record to database")
-	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
-		logger.Errorf(ctx, "Failed to create knowledge record, ID: %s, error: %v", knowledge.ID, err)
-		if deleteErr := fileSvc.DeleteFile(ctx, filePath); deleteErr != nil {
-			logger.Errorf(ctx, "Failed to delete saved file after knowledge creation failed, path: %s, error: %v", filePath, deleteErr)
+	// Allocate a final path, persist ownership before the provider write, then
+	// prepare the immutable task and adopt both its workflow binding and tags in
+	// the knowledge INSERT. Recovery and KB deletion share the same lock domain.
+	logger.Infof(ctx, "Saving owned source file, knowledge ID: %s", knowledge.ID)
+	if err := s.reserveCommitAndAdoptSourceFile(ctx, kb, knowledge, file, func() error {
+		taskPayload := types.DocumentProcessPayload{
+			TenantID: tenantID, KnowledgeID: knowledge.ID, KnowledgeBaseID: kbID,
+			FilePath: knowledge.FilePath, FileName: safeFilename, FileType: getFileType(safeFilename),
+			EnableMultimodel:         eff.EnableMultimodel,
+			EnableQuestionGeneration: eff.QuestionGenerationConfig.Enabled,
+			QuestionCount:            questionCount, Language: lang,
 		}
+		documentProcessOwnershipPayload(knowledge, &taskPayload)
+		langfuse.InjectTracing(ctx, &taskPayload)
+		payloadBytes, marshalErr := json.Marshal(taskPayload)
+		if marshalErr != nil {
+			return fmt.Errorf("marshal document process task payload: %w", marshalErr)
+		}
+		opts := documentProcessTaskOptionsForQueue(
+			s.config, queue, asynq.MaxRetry(3), documentProcessStableTaskID(knowledge, queue),
+		)
+		var prepareErr error
+		prepared, prepareErr = s.prepareDocumentWorkflow(
+			ctx, asynq.NewTask(types.TypeDocumentProcess, payloadBytes), opts...,
+		)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		return prepared.attachKnowledge(knowledge)
+	}); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "source-file knowledge adoption failed")
+		logger.Errorf(ctx, "Failed to create owned source file, knowledge ID: %s, error: %v", knowledge.ID, err)
 		return nil, err
 	}
 
 	// Set tag relations
 	if err := s.setAndAttachKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		logger.Errorf(ctx, "Failed to set knowledge tags, knowledge ID: %s, error: %v", knowledge.ID, err)
-		return nil, err
+		failure := fmt.Errorf("attach tags before document dispatch: %w", err)
+		return knowledge, s.failPendingDocumentDispatch(ctx, knowledge, failure, "mark tag attach dispatch gap failed")
 	}
 
-	// Enqueue document processing task to Asynq
-	logger.Info(ctx, "Enqueuing document processing task to Asynq")
-	enableMultimodelValue := eff.EnableMultimodel
-
-	enableQuestionGeneration := eff.QuestionGenerationConfig.Enabled
-	questionCount := eff.QuestionGenerationConfig.QuestionCount
-	if questionCount <= 0 {
-		questionCount = 3
-	}
-
-	lang, _ := types.LanguageFromContext(ctx)
-	taskPayload := types.DocumentProcessPayload{
-		TenantID:                 tenantID,
-		KnowledgeID:              knowledge.ID,
-		KnowledgeBaseID:          kbID,
-		FilePath:                 filePath,
-		FileName:                 safeFilename,
-		FileType:                 getFileType(safeFilename),
-		EnableMultimodel:         enableMultimodelValue,
-		EnableQuestionGeneration: enableQuestionGeneration,
-		QuestionCount:            questionCount,
-		Language:                 lang,
-	}
-
-	langfuse.InjectTracing(ctx, &taskPayload)
-	payloadBytes, err := json.Marshal(taskPayload)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to marshal document process task payload: %v", err)
-		// 即使入队失败，也返回knowledge，因为文件已保存
-		return knowledge, nil
-	}
-
-	opts := documentProcessTaskOptionsForQueue(
-		s.config,
-		documentProcessQueueForReport(guardReport),
-		asynq.MaxRetry(3),
-	)
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
-	info, err := s.task.Enqueue(task, opts...)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to enqueue document process task: %v", err)
-		// 即使入队失败，也返回knowledge，因为文件已保存
-		return knowledge, nil
-	}
-	logger.Infof(
-		ctx,
-		"Enqueued document process task: id=%s queue=%s knowledge_id=%s",
-		info.ID,
-		info.Queue,
-		knowledge.ID,
-	)
-
-	if slices.Contains([]string{"csv", "xlsx", "xls"}, getFileType(safeFilename)) {
-		NewDataTableSummaryTask(ctx, s.task, tenantID, knowledge.ID, kb.SummaryModelID, kb.EmbeddingModelID)
-	}
+	logger.Info(ctx, "Activating durable document processing workflow")
+	s.dispatchPreparedDocumentWorkflow(ctx, prepared)
 
 	logger.Infof(ctx, "Knowledge from file created successfully, ID: %s", knowledge.ID)
 	return knowledge, nil
@@ -409,6 +385,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 		UpdatedAt:        time.Now(),
 		EmbeddingModelID: kb.EmbeddingModelID,
 	}
+	assignNewDocumentProcessingIdentity(knowledge)
 
 	// Save knowledge record
 	logger.Infof(ctx, "Saving knowledge record to database, ID: %s", knowledge.ID)
@@ -416,8 +393,42 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	urlQuestionCount := eff.QuestionGenerationConfig.QuestionCount
+	if urlQuestionCount <= 0 {
+		urlQuestionCount = 3
+	}
+	urlLanguage, _ := types.LanguageFromContext(ctx)
+	if err := s.prepareInitialKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
+		return nil, err
+	}
+	taskPayload := types.DocumentProcessPayload{
+		TenantID: tenantID, KnowledgeID: knowledge.ID, KnowledgeBaseID: kbID, URL: url,
+		EnableMultimodel:         eff.EnableMultimodel,
+		EnableQuestionGeneration: eff.QuestionGenerationConfig.Enabled,
+		QuestionCount:            urlQuestionCount, Language: urlLanguage,
+	}
+	documentProcessOwnershipPayload(knowledge, &taskPayload)
+	langfuse.InjectTracing(ctx, &taskPayload)
+	payloadBytes, err := json.Marshal(taskPayload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal URL process task payload: %w", err)
+	}
+	opts := documentProcessTaskOptions(
+		s.config, asynq.MaxRetry(3), documentProcessStableTaskID(knowledge, types.QueueDefault),
+	)
+	prepared, err := s.prepareDocumentWorkflow(
+		ctx, asynq.NewTask(types.TypeDocumentProcess, payloadBytes), opts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepared.attachKnowledge(knowledge); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "URL workflow identity mismatch")
+		return nil, err
+	}
 
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "URL knowledge create failed")
 		logger.Errorf(ctx, "Failed to create knowledge record: %v", err)
 		return nil, err
 	}
@@ -425,45 +436,12 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	// Set tag relations
 	if err := s.setAndAttachKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		logger.Errorf(ctx, "Failed to set knowledge tags, knowledge ID: %s, error: %v", knowledge.ID, err)
-		return nil, err
+		failure := fmt.Errorf("attach tags before URL dispatch: %w", err)
+		return knowledge, s.failPendingDocumentDispatch(ctx, knowledge, failure, "mark URL tag attach dispatch gap failed")
 	}
 
-	// Enqueue URL processing task to Asynq
-	logger.Info(ctx, "Enqueuing URL processing task to Asynq")
-	enableMultimodelValue := eff.EnableMultimodel
-	enableQuestionGeneration := eff.QuestionGenerationConfig.Enabled
-	questionCount := eff.QuestionGenerationConfig.QuestionCount
-	if questionCount <= 0 {
-		questionCount = 3
-	}
-
-	lang, _ := types.LanguageFromContext(ctx)
-	taskPayload := types.DocumentProcessPayload{
-		TenantID:                 tenantID,
-		KnowledgeID:              knowledge.ID,
-		KnowledgeBaseID:          kbID,
-		URL:                      url,
-		EnableMultimodel:         enableMultimodelValue,
-		EnableQuestionGeneration: enableQuestionGeneration,
-		QuestionCount:            questionCount,
-		Language:                 lang,
-	}
-
-	langfuse.InjectTracing(ctx, &taskPayload)
-	payloadBytes, err := json.Marshal(taskPayload)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to marshal URL process task payload: %v", err)
-		return knowledge, nil
-	}
-
-	opts := documentProcessTaskOptions(s.config, asynq.MaxRetry(3))
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
-	info, err := s.task.Enqueue(task, opts...)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to enqueue URL process task: %v", err)
-		return knowledge, nil
-	}
-	logger.Infof(ctx, "Enqueued URL process task: id=%s queue=%s knowledge_id=%s", info.ID, info.Queue, knowledge.ID)
+	logger.Info(ctx, "Activating durable URL processing workflow")
+	s.dispatchPreparedDocumentWorkflow(ctx, prepared)
 
 	logger.Infof(ctx, "Knowledge from URL created successfully, ID: %s", knowledge.ID)
 	return knowledge, nil
@@ -633,6 +611,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		UpdatedAt:        time.Now(),
 		EmbeddingModelID: kb.EmbeddingModelID,
 	}
+	assignNewDocumentProcessingIdentity(knowledge)
 	if knowledge.Title == "" {
 		knowledge.Title = displayName
 	}
@@ -651,8 +630,43 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	if err != nil {
 		return nil, err
 	}
+	fileURLQuestionCount := eff.QuestionGenerationConfig.QuestionCount
+	if fileURLQuestionCount <= 0 {
+		fileURLQuestionCount = 3
+	}
+	fileURLLanguage, _ := types.LanguageFromContext(ctx)
+	if err := s.prepareInitialKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
+		return nil, err
+	}
+	taskPayload := types.DocumentProcessPayload{
+		TenantID: tenantID, KnowledgeID: knowledge.ID, KnowledgeBaseID: kbID,
+		FileURL: fileURL, FileName: fileName, FileType: fileType,
+		EnableMultimodel:         eff.EnableMultimodel,
+		EnableQuestionGeneration: eff.QuestionGenerationConfig.Enabled,
+		QuestionCount:            fileURLQuestionCount, Language: fileURLLanguage,
+	}
+	documentProcessOwnershipPayload(knowledge, &taskPayload)
+	langfuse.InjectTracing(ctx, &taskPayload)
+	payloadBytes, err := json.Marshal(taskPayload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal file URL process task payload: %w", err)
+	}
+	opts := documentProcessTaskOptions(
+		s.config, asynq.MaxRetry(3), documentProcessStableTaskID(knowledge, types.QueueDefault),
+	)
+	prepared, err := s.prepareDocumentWorkflow(
+		ctx, asynq.NewTask(types.TypeDocumentProcess, payloadBytes), opts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepared.attachKnowledge(knowledge); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "file URL workflow identity mismatch")
+		return nil, err
+	}
 
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "file URL knowledge create failed")
 		logger.Errorf(ctx, "Failed to create knowledge record: %v", err)
 		return nil, err
 	}
@@ -660,46 +674,11 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	// Set tag relations
 	if err := s.setAndAttachKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		logger.Errorf(ctx, "Failed to set knowledge tags, knowledge ID: %s, error: %v", knowledge.ID, err)
-		return nil, err
+		failure := fmt.Errorf("attach tags before file URL dispatch: %w", err)
+		return knowledge, s.failPendingDocumentDispatch(ctx, knowledge, failure, "mark file URL tag attach dispatch gap failed")
 	}
 
-	// Build async task payload
-	enableMultimodelValue := eff.EnableMultimodel
-	enableQuestionGeneration := eff.QuestionGenerationConfig.Enabled
-	questionCount := eff.QuestionGenerationConfig.QuestionCount
-	if questionCount <= 0 {
-		questionCount = 3
-	}
-
-	lang, _ := types.LanguageFromContext(ctx)
-	taskPayload := types.DocumentProcessPayload{
-		TenantID:                 tenantID,
-		KnowledgeID:              knowledge.ID,
-		KnowledgeBaseID:          kbID,
-		FileURL:                  fileURL,
-		FileName:                 fileName,
-		FileType:                 fileType,
-		EnableMultimodel:         enableMultimodelValue,
-		EnableQuestionGeneration: enableQuestionGeneration,
-		QuestionCount:            questionCount,
-		Language:                 lang,
-	}
-
-	langfuse.InjectTracing(ctx, &taskPayload)
-	payloadBytes, err := json.Marshal(taskPayload)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to marshal file URL process task payload: %v", err)
-		return knowledge, nil
-	}
-
-	opts := documentProcessTaskOptions(s.config)
-	task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
-	info, err := s.task.Enqueue(task, opts...)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to enqueue file URL process task: %v", err)
-		return knowledge, nil
-	}
-	logger.Infof(ctx, "Enqueued file URL process task: id=%s queue=%s knowledge_id=%s", info.ID, info.Queue, knowledge.ID)
+	s.dispatchPreparedDocumentWorkflow(ctx, prepared)
 
 	logger.Infof(ctx, "Knowledge from file URL created successfully, ID: %s", knowledge.ID)
 	return knowledge, nil
@@ -771,6 +750,7 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 	meta := types.NewManualKnowledgeMetadata(cleanContent, status, 1)
 
 	knowledge := &types.Knowledge{
+		ID:               uuid.NewString(),
 		TenantID:         tenantID,
 		KnowledgeBaseID:  kbID,
 		Type:             types.KnowledgeTypeManual,
@@ -786,6 +766,7 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 		FileName:         fileName,
 		FileType:         types.KnowledgeTypeManual,
 	}
+	knowledge.ProcessingGeneration = uuid.NewString()
 	if err := knowledge.SetManualMetadata(meta); err != nil {
 		logger.Errorf(ctx, "Failed to set manual metadata: %v", err)
 		return nil, err
@@ -794,6 +775,10 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 
 	if status == types.ManualKnowledgeStatusPublish {
 		knowledge.ParseStatus = "pending"
+		knowledge.ProcessingOwner = processownership.DocumentOwner(
+			knowledge.ID,
+			knowledge.ProcessingGeneration,
+		)
 	}
 
 	if status == types.ManualKnowledgeStatusPublish {
@@ -801,8 +786,19 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 			return nil, err
 		}
 	}
+	if err := s.prepareInitialKnowledgeTags(ctx, tenantID, kbID, knowledge, payload.TagIDs); err != nil {
+		return nil, err
+	}
+	var prepared *preparedDocumentWorkflow
+	if status == types.ManualKnowledgeStatusPublish {
+		prepared, err = s.prepareManualProcessingWorkflow(ctx, knowledge, cleanContent, false, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "manual knowledge create failed")
 		logger.Errorf(ctx, "Failed to create manual knowledge record: %v", err)
 		return nil, err
 	}
@@ -810,18 +806,16 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 	// Set tag relations
 	if err := s.setAndAttachKnowledgeTags(ctx, tenantID, kbID, knowledge, payload.TagIDs); err != nil {
 		logger.Errorf(ctx, "Failed to set knowledge tags, knowledge ID: %s, error: %v", knowledge.ID, err)
-		return nil, err
+		if status == types.ManualKnowledgeStatusPublish {
+			failure := fmt.Errorf("attach tags before manual dispatch: %w", err)
+			return knowledge, s.failPendingDocumentDispatch(ctx, knowledge, failure, "mark manual tag attach dispatch gap failed")
+		}
+		return knowledge, err
 	}
 
 	if status == types.ManualKnowledgeStatusPublish {
-		logger.Infof(ctx, "Manual knowledge created, enqueuing async processing task, ID: %s", knowledge.ID)
-		if err := s.enqueueManualProcessing(ctx, knowledge, cleanContent, false); err != nil {
-			logger.Errorf(ctx, "Failed to enqueue manual processing task for new knowledge: %v", err)
-			// Non-fatal: mark as failed so user can retry
-			knowledge.ParseStatus = "failed"
-			knowledge.ErrorMessage = "Failed to enqueue processing task"
-			s.repo.UpdateKnowledge(ctx, knowledge)
-		}
+		logger.Infof(ctx, "Manual knowledge created, activating durable workflow, ID: %s", knowledge.ID)
+		s.dispatchPreparedDocumentWorkflow(ctx, prepared)
 	}
 
 	return knowledge, nil
@@ -876,10 +870,49 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 		UpdatedAt:        time.Now(),
 		EmbeddingModelID: kb.EmbeddingModelID,
 	}
+	assignNewDocumentProcessingIdentity(knowledge)
+	passageQuestionCount := 3
+	passageQuestionsEnabled := false
+	if kb.QuestionGenerationConfig != nil {
+		passageQuestionsEnabled = kb.QuestionGenerationConfig.Enabled
+		if kb.QuestionGenerationConfig.QuestionCount > 0 {
+			passageQuestionCount = kb.QuestionGenerationConfig.QuestionCount
+		}
+	}
+	passageLanguage, _ := types.LanguageFromContext(ctx)
+	var prepared *preparedDocumentWorkflow
+	if !syncMode {
+		taskPayload := types.DocumentProcessPayload{
+			TenantID: knowledge.TenantID, KnowledgeID: knowledge.ID, KnowledgeBaseID: kbID,
+			Passages: safePassages, EnableMultimodel: false,
+			EnableQuestionGeneration: passageQuestionsEnabled,
+			QuestionCount:            passageQuestionCount, Language: passageLanguage,
+		}
+		documentProcessOwnershipPayload(knowledge, &taskPayload)
+		langfuse.InjectTracing(ctx, &taskPayload)
+		payloadBytes, marshalErr := json.Marshal(taskPayload)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal passage process task payload: %w", marshalErr)
+		}
+		opts := documentProcessTaskOptions(
+			s.config, asynq.MaxRetry(3), documentProcessStableTaskID(knowledge, types.QueueDefault),
+		)
+		prepared, err = s.prepareDocumentWorkflow(
+			ctx, asynq.NewTask(types.TypeDocumentProcess, payloadBytes), opts...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := prepared.attachKnowledge(knowledge); err != nil {
+			s.abortUnboundDocumentWorkflow(ctx, prepared, "passage workflow identity mismatch")
+			return nil, err
+		}
+	}
 
 	// Save knowledge record
 	logger.Infof(ctx, "Saving knowledge record to database, ID: %s", knowledge.ID)
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "passage knowledge create failed")
 		logger.Errorf(ctx, "Failed to create knowledge record: %v", err)
 		return nil, err
 	}
@@ -887,54 +920,56 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 	// Process passages
 	if syncMode {
 		logger.Info(ctx, "Processing passage synchronously")
-		s.processDocumentFromPassage(ctx, kb, knowledge, safePassages)
+		if err := s.processDocumentFromPassage(ctx, kb, knowledge, safePassages); err != nil {
+			return s.resolveSynchronousPassageProcessResult(ctx, knowledge, err)
+		}
 		logger.Infof(ctx, "Knowledge from passage created successfully (sync), ID: %s", knowledge.ID)
 	} else {
-		// Enqueue passage processing task to Asynq
-		logger.Info(ctx, "Enqueuing passage processing task to Asynq")
-		tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
-		// Check question generation config
-		enableQuestionGeneration := false
-		questionCount := 3 // default
-		if kb.QuestionGenerationConfig != nil && kb.QuestionGenerationConfig.Enabled {
-			enableQuestionGeneration = true
-			if kb.QuestionGenerationConfig.QuestionCount > 0 {
-				questionCount = kb.QuestionGenerationConfig.QuestionCount
-			}
-		}
-
-		lang, _ := types.LanguageFromContext(ctx)
-		taskPayload := types.DocumentProcessPayload{
-			TenantID:                 tenantID,
-			KnowledgeID:              knowledge.ID,
-			KnowledgeBaseID:          kbID,
-			Passages:                 safePassages,
-			EnableMultimodel:         false, // 文本段落不支持多模态
-			EnableQuestionGeneration: enableQuestionGeneration,
-			QuestionCount:            questionCount,
-			Language:                 lang,
-		}
-
-		langfuse.InjectTracing(ctx, &taskPayload)
-		payloadBytes, err := json.Marshal(taskPayload)
-		if err != nil {
-			logger.Errorf(ctx, "Failed to marshal passage process task payload: %v", err)
-			// 即使入队失败，也返回knowledge
-			return knowledge, nil
-		}
-
-		opts := documentProcessTaskOptions(s.config, asynq.MaxRetry(3))
-		task := asynq.NewTask(types.TypeDocumentProcess, payloadBytes)
-		info, err := s.task.Enqueue(task, opts...)
-		if err != nil {
-			logger.Errorf(ctx, "Failed to enqueue passage process task: %v", err)
-			return knowledge, nil
-		}
-		logger.Infof(ctx, "Enqueued passage process task: id=%s queue=%s knowledge_id=%s", info.ID, info.Queue, knowledge.ID)
+		logger.Info(ctx, "Activating durable passage processing workflow")
+		s.dispatchPreparedDocumentWorkflow(ctx, prepared)
 		logger.Infof(ctx, "Knowledge from passage created successfully, ID: %s", knowledge.ID)
 	}
 	return knowledge, nil
+}
+
+// resolveSynchronousPassageProcessResult distinguishes a pre-commit indexing
+// failure from the narrow post-core dispatch gap. Returning an API error after
+// the core row committed invites a client retry that creates another knowledge
+// row. In that exact state the durable recovery loop owns publication, so the
+// synchronous create is accepted and returns the authoritative reloaded row.
+func (s *knowledgeService) resolveSynchronousPassageProcessResult(
+	ctx context.Context,
+	expected *types.Knowledge,
+	processErr error,
+) (*types.Knowledge, error) {
+	if processErr == nil {
+		return expected, nil
+	}
+	if expected == nil || s.repo == nil {
+		return expected, fmt.Errorf("process passage knowledge: %w", processErr)
+	}
+
+	current, reloadErr := s.repo.GetKnowledgeByID(ctx, expected.TenantID, expected.ID)
+	if reloadErr == nil && current != nil &&
+		current.TenantID == expected.TenantID &&
+		current.ID == expected.ID &&
+		current.KnowledgeBaseID == expected.KnowledgeBaseID &&
+		current.ProcessingGeneration == expected.ProcessingGeneration {
+		if _, exactErr := corefanout.ParseExact(current); exactErr == nil {
+			logger.Warnf(ctx,
+				"Synchronous passage core commit succeeded but fanout dispatch failed; accepted for durable recovery: knowledge_id=%s generation=%s error=%v",
+				current.ID, current.ProcessingGeneration, processErr,
+			)
+			return current, nil
+		}
+	}
+	if reloadErr != nil {
+		logger.Warnf(ctx,
+			"Failed to verify synchronous passage commit boundary for %s: %v",
+			expected.ID, reloadErr,
+		)
+	}
+	return expected, fmt.Errorf("process passage knowledge %s: %w", expected.ID, processErr)
 }
 
 // UpdateManualKnowledge updates manual Markdown knowledge content.
@@ -978,6 +1013,18 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	if !existing.IsManual() {
 		return nil, werrors.NewBadRequestError("仅支持手工知识的在线编辑")
 	}
+	switch existing.ParseStatus {
+	case types.ParseStatusPending, types.ParseStatusProcessing, types.ParseStatusFinalizing, types.ParseStatusCancelling:
+		// A running generation owns unscoped chunk/vector cleanup. Allowing an
+		// edit to cycle the row back to pending while that worker is alive would
+		// let the old generation delete or finalize the new generation's data.
+		return nil, werrors.NewBadRequestError("知识正在处理中，请等待完成或先取消解析")
+	case types.ParseStatusDeleting:
+		return nil, werrors.NewBadRequestError("知识正在删除中，无法编辑")
+	}
+	originalStatus := existing.ParseStatus
+	originalGeneration := existing.ProcessingGeneration
+	originalOwner := existing.ProcessingOwner
 
 	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, existing.KnowledgeBaseID)
 	if err != nil {
@@ -1010,14 +1057,32 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	existing.EnableStatus = "disabled"
 	existing.UpdatedAt = time.Now()
 	existing.EmbeddingModelID = kb.EmbeddingModelID
+	existing.ErrorMessage = ""
+	existing.PendingSubtasksCount = 0
+	// Every edit, including a draft transition, invalidates every previously
+	// queued worker. Published tasks carry this same durable identity.
+	existing.ProcessingGeneration = uuid.NewString()
+	existing.ProcessingOwner = ""
+	existing.ProcessingWorkflowID = ""
 
 	if status == types.ManualKnowledgeStatusDraft {
 		existing.ParseStatus = types.ManualKnowledgeStatusDraft
 		existing.Description = ""
 		existing.ProcessedAt = nil
 
-		if err := s.repo.UpdateKnowledge(ctx, existing); err != nil {
+		if err := s.requireDocumentProcessingIdentitySwap(
+			ctx,
+			existing,
+			originalStatus,
+			originalGeneration,
+			originalOwner,
+			manualKnowledgeUpdateValues(existing),
+			"persist manual draft generation",
+		); err != nil {
 			logger.Errorf(ctx, "Failed to persist manual draft: %v", err)
+			if errors.Is(err, errKnowledgeStateFenceConflict) {
+				return nil, werrors.NewBadRequestError("知识状态已变更，请刷新后重试")
+			}
 			return nil, err
 		}
 		return existing, nil
@@ -1025,27 +1090,37 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 
 	// Publish: persist pending status and enqueue async task for cleanup + re-indexing
 	existing.ParseStatus = "pending"
+	existing.ProcessingOwner = processownership.DocumentOwner(existing.ID, existing.ProcessingGeneration)
 	existing.Description = ""
 	existing.ProcessedAt = nil
 
 	if _, err := ApplyKnowledgeProcessOverrides(ctx, kb, existing, payload.ProcessConfig, nil, nil); err != nil {
 		return nil, err
 	}
-
-	if err := s.repo.UpdateKnowledge(ctx, existing); err != nil {
-		logger.Errorf(ctx, "Failed to persist manual knowledge before indexing: %v", err)
+	prepared, err := s.prepareManualProcessingWorkflow(ctx, existing, cleanContent, true, 0)
+	if err != nil {
 		return nil, err
 	}
 
-	logger.Infof(ctx, "Manual knowledge updated, enqueuing async processing task, ID: %s", existing.ID)
-	if err := s.enqueueManualProcessing(ctx, existing, cleanContent, true); err != nil {
-		logger.Errorf(ctx, "Failed to enqueue manual processing task: %v", err)
-		// Non-fatal: mark as failed so user can retry
-		existing.ParseStatus = "failed"
-		existing.ErrorMessage = "Failed to enqueue processing task"
-		s.repo.UpdateKnowledge(ctx, existing)
-		return nil, werrors.NewInternalServerError("Failed to submit processing task")
+	if err := s.requireDocumentProcessingIdentitySwap(
+		ctx,
+		existing,
+		originalStatus,
+		originalGeneration,
+		originalOwner,
+		manualKnowledgeUpdateValues(existing),
+		"persist manual publish generation",
+	); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "manual publish generation commit failed")
+		logger.Errorf(ctx, "Failed to persist manual knowledge before indexing: %v", err)
+		if errors.Is(err, errKnowledgeStateFenceConflict) {
+			return nil, werrors.NewBadRequestError("知识状态已变更，请刷新后重试")
+		}
+		return nil, err
 	}
+
+	logger.Infof(ctx, "Manual knowledge updated, activating durable workflow, ID: %s", existing.ID)
+	s.dispatchPreparedDocumentWorkflow(ctx, prepared)
 	return existing, nil
 }
 
@@ -1053,28 +1128,156 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
 	knowledge *types.Knowledge, content string, needCleanup bool,
 ) error {
-	requestID, _ := types.RequestIDFromContext(ctx)
-	payload := types.ManualProcessPayload{
-		RequestId:       requestID,
-		TenantID:        knowledge.TenantID,
-		KnowledgeID:     knowledge.ID,
-		KnowledgeBaseID: knowledge.KnowledgeBaseID,
-		Content:         content,
-		NeedCleanup:     needCleanup,
-	}
-	langfuse.InjectTracing(ctx, &payload)
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal manual process payload: %w", err)
-	}
+	return s.enqueueManualProcessingAttempt(ctx, knowledge, content, needCleanup, 0)
+}
 
-	task := asynq.NewTask(types.TypeManualProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
-	info, err := s.task.Enqueue(task)
+func (s *knowledgeService) enqueueManualProcessingAttempt(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	content string,
+	needCleanup bool,
+	attempt int,
+) error {
+	task, opts, err := buildManualProcessingTask(ctx, knowledge, content, needCleanup, attempt)
+	if err != nil {
+		return err
+	}
+	info, err := s.task.Enqueue(task, opts...)
+	if errors.Is(err, asynq.ErrTaskIDConflict) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("failed to enqueue manual process task: %w", err)
 	}
 	logger.Infof(ctx, "Enqueued manual process task: knowledge_id=%s, asynq_id=%s", knowledge.ID, info.ID)
 	return nil
+}
+
+func (s *knowledgeService) prepareManualProcessingWorkflow(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	content string,
+	needCleanup bool,
+	attempt int,
+) (*preparedDocumentWorkflow, error) {
+	return s.prepareManualProcessingWorkflowWithTracing(
+		ctx, knowledge, content, needCleanup, attempt, nil,
+	)
+}
+
+func (s *knowledgeService) prepareManualProcessingWorkflowWithTracing(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	content string,
+	needCleanup bool,
+	attempt int,
+	stableTracing *types.TracingContext,
+) (*preparedDocumentWorkflow, error) {
+	task, opts, err := buildManualProcessingTaskWithTracing(
+		ctx, knowledge, content, needCleanup, attempt, stableTracing,
+	)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := s.prepareDocumentWorkflow(ctx, task, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepared.attachKnowledge(knowledge); err != nil {
+		s.abortUnboundDocumentWorkflow(ctx, prepared, "manual workflow identity mismatch")
+		return nil, err
+	}
+	return prepared, nil
+}
+
+func buildManualProcessingTask(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	content string,
+	needCleanup bool,
+	attempt int,
+) (*asynq.Task, []asynq.Option, error) {
+	return buildManualProcessingTaskWithTracing(
+		ctx, knowledge, content, needCleanup, attempt, nil,
+	)
+}
+
+func buildManualProcessingTaskWithTracing(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	content string,
+	needCleanup bool,
+	attempt int,
+	stableTracing *types.TracingContext,
+) (*asynq.Task, []asynq.Option, error) {
+	if knowledge == nil {
+		return nil, nil, errors.New("manual processing knowledge is required")
+	}
+	if strings.TrimSpace(knowledge.ProcessingGeneration) == "" || strings.TrimSpace(knowledge.ProcessingOwner) == "" {
+		return nil, nil, errors.New("manual processing generation is required")
+	}
+	requestID, _ := types.RequestIDFromContext(ctx)
+	if stableTracing != nil {
+		// A batch child may retry under a fresh Asynq observation/request
+		// context. Derive the manual worker request label solely from the
+		// immutable parent carrier so the prepared plan remains byte-stable.
+		requestID = stableTracing.LangfuseSessionID
+	}
+	payload := types.ManualProcessPayload{
+		RequestId:            requestID,
+		TenantID:             knowledge.TenantID,
+		KnowledgeID:          knowledge.ID,
+		KnowledgeBaseID:      knowledge.KnowledgeBaseID,
+		Content:              content,
+		NeedCleanup:          needCleanup,
+		ProcessingGeneration: knowledge.ProcessingGeneration,
+		ProcessingOwner:      knowledge.ProcessingOwner,
+		Attempt:              attempt,
+	}
+	if stableTracing != nil {
+		payload.TracingContext = *stableTracing
+	} else {
+		langfuse.InjectTracing(ctx, &payload)
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal manual process payload: %w", err)
+	}
+
+	task := asynq.NewTask(types.TypeManualProcess, payloadBytes)
+	opts := []asynq.Option{
+		asynq.Queue("default"),
+		asynq.MaxRetry(3),
+		asynq.TaskID(processownership.ManualTaskID(knowledge.ID, knowledge.ProcessingGeneration)),
+	}
+	return task, opts, nil
+}
+
+// manualKnowledgeUpdateValues deliberately excludes storage_size. Existing
+// artifact ownership remains attached to the row until cleanup transfers that
+// charge atomically through ResetKnowledgeStorage; a metadata/status edit must
+// never manufacture or discard a tenant storage charge.
+func manualKnowledgeUpdateValues(knowledge *types.Knowledge) map[string]interface{} {
+	return map[string]interface{}{
+		"metadata":               knowledge.Metadata,
+		"title":                  knowledge.Title,
+		"file_name":              knowledge.FileName,
+		"file_type":              knowledge.FileType,
+		"type":                   knowledge.Type,
+		"source":                 knowledge.Source,
+		"enable_status":          knowledge.EnableStatus,
+		"embedding_model_id":     knowledge.EmbeddingModelID,
+		"parse_status":           knowledge.ParseStatus,
+		"description":            knowledge.Description,
+		"processed_at":           knowledge.ProcessedAt,
+		"error_message":          knowledge.ErrorMessage,
+		"pending_subtasks_count": knowledge.PendingSubtasksCount,
+		"processing_generation":  knowledge.ProcessingGeneration,
+		"processing_owner":       knowledge.ProcessingOwner,
+		"processing_workflow_id": knowledge.ProcessingWorkflowID,
+		"processing_fanout":      nil,
+		"updated_at":             knowledge.UpdatedAt,
+	}
 }
 
 func ensureManualFileName(title string) string {
@@ -1107,10 +1310,10 @@ func sanitizeManualDownloadFilename(title string) string {
 
 func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	kb *types.KnowledgeBase, knowledge *types.Knowledge, content string, doSync bool,
-) {
+) error {
 	clean := strings.TrimSpace(content)
-	if clean == "" {
-		return
+	if err := s.heartbeatActiveProcessing(ctx, knowledge, "fence manual content processing"); err != nil {
+		return err
 	}
 
 	// Resolve embedded data:base64 images and remote http(s) images → storage, replace URLs.
@@ -1133,6 +1336,9 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 			clean = updatedContent
 			resolvedImages = append(resolvedImages, storedImages...)
 		}
+	}
+	if err := s.heartbeatActiveProcessing(ctx, knowledge, "fence resolved manual images"); err != nil {
+		return err
 	}
 
 	processOverrides, _ := knowledge.ProcessOverrides()
@@ -1188,10 +1394,14 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	}
 
 	if doSync {
-		s.processChunks(ctx, kb, knowledge, parsed, opts)
-		return
+		return s.processChunks(ctx, kb, knowledge, parsed, opts)
 	}
 
 	newCtx := logger.CloneContext(ctx)
-	go s.processChunks(newCtx, kb, knowledge, parsed, opts)
+	go func() {
+		if err := s.processChunks(newCtx, kb, knowledge, parsed, opts); err != nil {
+			logger.Errorf(newCtx, "manual processing failed for %s: %v", knowledge.ID, err)
+		}
+	}()
+	return nil
 }

@@ -48,6 +48,10 @@ const (
 	// pending_subtasks_count holds the outstanding subtask count; the
 	// last subtask to finish atomically promotes the row to completed.
 	ParseStatusFinalizing = "finalizing"
+	// ParseStatusCancelling is the durable user-cancel intent. The row stays
+	// here, retaining its processing owner, until queue inspection proves that
+	// no lifecycle worker can still publish artifacts for the generation.
+	ParseStatusCancelling = "cancelling"
 	// ParseStatusCompleted indicates the knowledge has been processed
 	// successfully AND every enrichment subtask has reached a terminal
 	// state. No further resources will be spent on the document until
@@ -118,6 +122,10 @@ type Knowledge struct {
 	KnowledgeBaseID string `json:"knowledge_base_id"`
 	// Tags holds the tags associated with this knowledge (populated on query, not persisted directly).
 	Tags []*KnowledgeTag `json:"tags"               gorm:"-"`
+	// InitialTagIDs is a create-only transaction input. The repository writes
+	// these relations in the same transaction as the knowledge row, so a crash
+	// cannot expose a document workflow before its requested tags are durable.
+	InitialTagIDs []string `json:"-" gorm:"-"`
 	// Type of the knowledge
 	Type string `json:"type"`
 	// Title of the knowledge
@@ -130,6 +138,21 @@ type Knowledge struct {
 	Channel string `json:"channel"            gorm:"type:varchar(50);default:'web'"`
 	// Parse status of the knowledge
 	ParseStatus string `json:"parse_status"`
+	// ProcessingGeneration is a durable, unique identity for one parse run.
+	// It is deliberately independent from FileHash: uploaded content may stay
+	// unchanged across reparses while ownership must still advance.
+	ProcessingGeneration string `json:"processing_generation,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	// ProcessingOwner is the stable task ownership token for the core parsing
+	// phase. It is cleared atomically when the indexed artifacts are committed.
+	ProcessingOwner string `json:"-" gorm:"type:varchar(160);not null;default:''"`
+	// ProcessingWorkflowID binds this exact parsing generation to its immutable
+	// durable document-workflow plan. It is deliberately hidden from API
+	// responses: callers observe queue state through the document queue API.
+	ProcessingWorkflowID string `json:"-" gorm:"type:varchar(36);not null;default:''"`
+	// ProcessingFanout durably records the generation-scoped downstream plan
+	// (multimodal images or direct post-process). A worker retry can replay it
+	// after the core commit without parsing or charging storage again.
+	ProcessingFanout JSON `json:"-" gorm:"type:json"`
 	// PendingSubtasksCount is the outstanding enrichment subtask count
 	// (summary + question + graph chunks). Only meaningful while
 	// ParseStatus == "finalizing"; defaults to 0 in any terminal state.
@@ -168,6 +191,23 @@ type Knowledge struct {
 	DeletedAt gorm.DeletedAt `json:"deleted_at"         gorm:"index"`
 	// Knowledge base name (not stored in database, populated on query)
 	KnowledgeBaseName string `json:"knowledge_base_name" gorm:"-"`
+}
+
+// KnowledgeFanoutCompletion is the durable, generation-scoped completion
+// ledger for core fan-out items (multimodal images and data-table summary).
+// Redis mirrors this state for fast fan-in, but correctness never depends on
+// a Redis key surviving restarts or TTL expiry.
+type KnowledgeFanoutCompletion struct {
+	TenantID             uint64    `gorm:"primaryKey;column:tenant_id"`
+	KnowledgeID          string    `gorm:"primaryKey;column:knowledge_id"`
+	KnowledgeBaseID      string    `gorm:"column:knowledge_base_id;not null"`
+	ProcessingGeneration string    `gorm:"primaryKey;column:processing_generation"`
+	ItemID               string    `gorm:"primaryKey;column:item_id"`
+	CompletedAt          time.Time `gorm:"column:completed_at;not null"`
+}
+
+func (KnowledgeFanoutCompletion) TableName() string {
+	return "knowledge_fanout_completions"
 }
 
 // GetMetadata returns the metadata as a map[string]string.

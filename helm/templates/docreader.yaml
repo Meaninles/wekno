@@ -27,6 +27,7 @@ spec:
       labels:
         {{- include "weknora.componentSelectorLabels" (dict "component" "docreader" "context" .) | nindent 8 }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.docreader.terminationGracePeriodSeconds }}
       {{- include "weknora.imagePullSecrets" . | nindent 6 }}
       serviceAccountName: {{ include "weknora.serviceAccountName" . }}
       {{- with .Values.global.podSecurityContext }}
@@ -86,6 +87,15 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.docreader.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.docreader.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.docreader.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.docreader.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "weknora.componentSelectorLabels" (dict "component" "docreader" "context" .) | nindent 14 }}
+      {{- end }}
       {{- with .Values.docreader.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
@@ -101,6 +111,10 @@ metadata:
     {{- include "weknora.componentLabels" (dict "component" "docreader" "context" .) | nindent 4 }}
 spec:
   type: {{ .Values.docreader.service.type }}
+  {{- if .Values.docreader.service.headless }}
+  clusterIP: None
+  publishNotReadyAddresses: false
+  {{- end }}
   selector:
     {{- include "weknora.componentSelectorLabels" (dict "component" "docreader" "context" .) | nindent 4 }}
   ports:

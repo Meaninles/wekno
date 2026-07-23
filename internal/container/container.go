@@ -54,6 +54,12 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
 	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
+	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/database"
 	"github.com/Tencent/WeKnora/internal/datasource"
 	feishuConnector "github.com/Tencent/WeKnora/internal/datasource/connector/feishu"
@@ -258,9 +264,11 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewSessionService))
 
 	logger.Debugf(ctx, "[Container] Registering task enqueuer...")
+	must(container.Provide(documentqueue.NewCoordinator))
 	redisAvailable := os.Getenv("REDIS_ADDR") != ""
 	if redisAvailable {
-		must(container.Provide(router.NewAsyncqClient, dig.As(new(interfaces.TaskEnqueuer))))
+		must(container.Provide(router.NewAsyncqClient))
+		must(container.Provide(documentqueue.NewEnqueuer, dig.As(new(interfaces.TaskEnqueuer))))
 		must(container.Provide(router.NewAsynqServers))
 		// Asynq inspector for cancel-by-knowledge-id (best-effort
 		// dequeue of pending/scheduled/retry tasks + active-task cancel).
@@ -270,11 +278,28 @@ func BuildContainer(container *dig.Container) *dig.Container {
 		syncExec := router.NewSyncTaskExecutor()
 		must(container.Provide(func() interfaces.TaskEnqueuer { return syncExec }))
 		must(container.Provide(func() *router.SyncTaskExecutor { return syncExec }))
+		must(container.Invoke(func(cleaner interfaces.ResourceCleaner) {
+			registerSyncTaskExecutorCleanup(syncExec, cleaner)
+		}))
 		// Lite mode: no Redis means no asynq inspector. SyncTaskExecutor
 		// dispatches inline goroutines that the checkpoint-based abort
 		// already handles.
 		must(container.Provide(router.NewNoopTaskInspector))
 	}
+	// Custom Wiki queue recovery republishes a missing Redis wake-up for any
+	// durable PostgreSQL pending-op. Keep the implementation outside native
+	// services; this is the sole provider registration point.
+	must(container.Provide(corefanout.NewRecovery))
+	must(container.Provide(wikiqueue.NewRecovery))
+	must(container.Provide(kbdeletequeue.New))
+	must(container.Provide(kbdeletequeue.NewRecovery))
+	must(container.Provide(knowledgeaux.New))
+	must(container.Provide(knowledgeaux.NewRecovery))
+	// Migrate provable legacy source/image ownership before any scheduler,
+	// housekeeping worker, Asynq consumer, or HTTP router can touch documents.
+	must(container.Invoke(knowledgeaux.RunStartupBackfill))
+	must(container.Provide(wikidelete.New))
+	must(container.Provide(wikidelete.NewRecovery))
 
 	// Chat pipeline components for processing chat requests
 	logger.Debugf(ctx, "[Container] Registering chat pipeline plugins...")
@@ -367,10 +392,25 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	logger.Debugf(ctx, "[Container] Registering router and starting task server...")
 	must(container.Provide(router.NewRouter))
 	if redisAvailable {
+		// The durable coordinator must register/adopt its boot before a worker
+		// can receive an old delivery. RunAsynqServer registers later in the
+		// cleanup stack, so workers drain before the coordinator heartbeat stops.
+		must(container.Invoke(documentqueue.Start))
 		must(container.Invoke(router.RunAsynqServer))
 	} else {
+		// Lite still exposes queue status and uses the same durable state-machine
+		// fixtures. Start/migrate the coordinator even though task execution is
+		// synchronous and no Redis consumer is created.
+		must(container.Invoke(documentqueue.Start))
 		must(container.Invoke(router.RegisterSyncHandlers))
 	}
+	// Start only after the async server / Lite handlers are registered so the
+	// recovery module's immediate scan always has a consumer.
+	must(container.Invoke(corefanout.StartRecovery))
+	must(container.Invoke(wikiqueue.StartRecovery))
+	must(container.Invoke(kbdeletequeue.StartRecovery))
+	must(container.Invoke(knowledgeaux.StartRecovery))
+	must(container.Invoke(wikidelete.StartRecovery))
 
 	logger.Infof(ctx, "[Container] Container initialization completed successfully")
 	return container
@@ -578,12 +618,12 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 		// Run base migrations (all versioned migrations including embeddings)
 		// The embeddings migration will be conditionally executed based on skip_embedding parameter in DSN
 		if err := database.RunMigrationsWithOptions(migrateDSN, migrationOpts); err != nil {
-			// Log warning but don't fail startup - migrations might be handled externally
-			logger.Warnf(context.Background(), "Database migration failed: %v", err)
-			logger.Warnf(
-				context.Background(),
-				"Continuing with application startup. Please run migrations manually if needed.",
-			)
+			// Runtime code may depend on columns, indexes, and constraints added by
+			// the same release. Continuing with an older schema produces delayed,
+			// partial failures in queue settlement and can falsely acknowledge
+			// durable work. Operators that manage schema externally must explicitly
+			// set AUTO_MIGRATE=false; when auto-migration is enabled, fail closed.
+			return nil, fmt.Errorf("database migration failed: %w", err)
 		}
 
 		// Post-migration: resolve __pending_env__ storage provider markers for historical KBs.
@@ -696,13 +736,14 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("MINIO_BUCKET_NAME") == "" {
 			return nil, fmt.Errorf("missing MinIO configuration")
 		}
-		return file.NewMinioFileService(
+		svc, err := file.NewMinioFileService(
 			os.Getenv("MINIO_ENDPOINT"),
 			os.Getenv("MINIO_ACCESS_KEY_ID"),
 			os.Getenv("MINIO_SECRET_ACCESS_KEY"),
 			os.Getenv("MINIO_BUCKET_NAME"),
 			strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
 		)
+		return file.MarkGlobalStorageService(svc), err
 	case "cos":
 		if os.Getenv("COS_BUCKET_NAME") == "" ||
 			os.Getenv("COS_REGION") == "" ||
@@ -711,7 +752,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("COS_PATH_PREFIX") == "" {
 			return nil, fmt.Errorf("missing COS configuration")
 		}
-		return file.NewCosFileServiceWithTempBucket(
+		svc, err := file.NewCosFileServiceWithTempBucket(
 			os.Getenv("COS_BUCKET_NAME"),
 			os.Getenv("COS_REGION"),
 			os.Getenv("COS_SECRET_ID"),
@@ -720,6 +761,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("COS_TEMP_BUCKET_NAME"),
 			os.Getenv("COS_TEMP_REGION"),
 		)
+		return file.MarkGlobalStorageService(svc), err
 	case "tos":
 		if os.Getenv("TOS_ENDPOINT") == "" ||
 			os.Getenv("TOS_REGION") == "" ||
@@ -728,7 +770,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("TOS_BUCKET_NAME") == "" {
 			return nil, fmt.Errorf("missing TOS configuration")
 		}
-		return file.NewTosFileServiceWithTempBucket(
+		svc, err := file.NewTosFileServiceWithTempBucket(
 			os.Getenv("TOS_ENDPOINT"),
 			os.Getenv("TOS_REGION"),
 			os.Getenv("TOS_ACCESS_KEY"),
@@ -738,6 +780,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("TOS_TEMP_BUCKET_NAME"), // 可选：临时桶名称（桶需配置生命周期规则自动过期）
 			os.Getenv("TOS_TEMP_REGION"),      // 可选：临时桶 region，默认与主桶相同
 		)
+		return file.MarkGlobalStorageService(svc), err
 	case "s3":
 		if os.Getenv("S3_ENDPOINT") == "" ||
 			os.Getenv("S3_REGION") == "" ||
@@ -750,7 +793,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 		if pathPrefix == "" {
 			pathPrefix = "weknora/"
 		}
-		return file.NewS3FileService(
+		svc, err := file.NewS3FileService(
 			os.Getenv("S3_ENDPOINT"),
 			os.Getenv("S3_ACCESS_KEY"),
 			os.Getenv("S3_SECRET_KEY"),
@@ -758,6 +801,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("S3_REGION"),
 			pathPrefix,
 		)
+		return file.MarkGlobalStorageService(svc), err
 	case "obs":
 		if os.Getenv("OBS_ENDPOINT") == "" ||
 			os.Getenv("OBS_ACCESS_KEY") == "" ||
@@ -770,7 +814,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 		if obsPathPrefix == "" {
 			obsPathPrefix = "weknora/"
 		}
-		return file.NewObsFileService(
+		svc, err := file.NewObsFileService(
 			os.Getenv("OBS_ENDPOINT"),
 			obsRegion,
 			os.Getenv("OBS_ACCESS_KEY"),
@@ -778,6 +822,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("OBS_BUCKET_NAME"),
 			obsPathPrefix,
 		)
+		return file.MarkGlobalStorageService(svc), err
 	case "oss":
 		if os.Getenv("OSS_ENDPOINT") == "" ||
 			os.Getenv("OSS_REGION") == "" ||
@@ -790,7 +835,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 		if pathPrefix == "" {
 			pathPrefix = "weknora/"
 		}
-		return file.NewOssFileServiceWithTempBucket(
+		svc, err := file.NewOssFileServiceWithTempBucket(
 			os.Getenv("OSS_ENDPOINT"),
 			os.Getenv("OSS_REGION"),
 			os.Getenv("OSS_ACCESS_KEY"),
@@ -800,15 +845,16 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("OSS_TEMP_BUCKET_NAME"),
 			os.Getenv("OSS_TEMP_REGION"),
 		)
+		return file.MarkGlobalStorageService(svc), err
 	case "local":
 		baseDir := os.Getenv("LOCAL_STORAGE_BASE_DIR")
 		if baseDir == "" {
 			baseDir = "/data/files"
 		}
 		externalURL := strings.TrimSpace(os.Getenv("APP_EXTERNAL_URL"))
-		return file.NewLocalFileService(baseDir, externalURL), nil
+		return file.MarkGlobalStorageService(file.NewLocalFileService(baseDir, externalURL)), nil
 	case "dummy":
-		return file.NewDummyFileService(), nil
+		return file.MarkGlobalStorageService(file.NewDummyFileService()), nil
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", storageType)
 	}
@@ -1211,6 +1257,20 @@ func registerLangfuseCleanup(mgr *langfuse.Manager, cleaner interfaces.ResourceC
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return mgr.Shutdown(ctx)
+	})
+}
+
+// registerSyncTaskExecutorCleanup makes Lite task cancellation part of the
+// process lifecycle. Producers are registered later and therefore stop first
+// under ResourceCleaner's reverse-order cleanup before this bounded drain.
+func registerSyncTaskExecutorCleanup(executor *router.SyncTaskExecutor, cleaner interfaces.ResourceCleaner) {
+	if executor == nil {
+		return
+	}
+	cleaner.RegisterWithName("SyncTaskExecutor", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return executor.Shutdown(ctx)
 	})
 }
 

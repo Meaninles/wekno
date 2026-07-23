@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -177,6 +178,33 @@ func TestMiddleware_RepoFailure_DoesNotMaskTaskError(t *testing.T) {
 	gotErr := runMiddleware(repo, "any", []byte(`{"tenant_id":1}`), wantErr)
 	if !errors.Is(gotErr, wantErr) {
 		t.Fatalf("repo failure must not mask task error; got %v", gotErr)
+	}
+}
+
+func TestMiddleware_CallbackFailureIsNotSwallowed(t *testing.T) {
+	repo := &fakeRepo{}
+	taskErr := errors.New("task boom")
+	callbackErr := errors.New("terminal repair enqueue failed")
+	mw := MiddlewareWithCallback(repo, func(context.Context, *asynq.Task, error) error {
+		return callbackErr
+	})
+	wrapper := mw(asynq.HandlerFunc(func(context.Context, *asynq.Task) error { return taskErr }))
+	err := wrapper.ProcessTask(context.Background(), asynq.NewTask("any", []byte(`{}`)))
+	if !errors.Is(err, taskErr) || !errors.Is(err, callbackErr) {
+		t.Fatalf("middleware error = %v, want joined task and callback errors", err)
+	}
+}
+
+func TestMiddleware_CallbackPanicBecomesVisibleError(t *testing.T) {
+	repo := &fakeRepo{}
+	taskErr := errors.New("task boom")
+	mw := MiddlewareWithCallback(repo, func(context.Context, *asynq.Task, error) error {
+		panic("repair panic")
+	})
+	wrapper := mw(asynq.HandlerFunc(func(context.Context, *asynq.Task) error { return taskErr }))
+	err := wrapper.ProcessTask(context.Background(), asynq.NewTask("any", []byte(`{}`)))
+	if !errors.Is(err, taskErr) || !strings.Contains(err.Error(), "dead-letter callback panicked") {
+		t.Fatalf("middleware error = %v, want original plus visible callback panic", err)
 	}
 }
 

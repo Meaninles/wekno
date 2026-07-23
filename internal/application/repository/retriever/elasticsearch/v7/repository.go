@@ -439,6 +439,48 @@ func (e *elasticsearchRepository) DeleteByKnowledgeIDList(ctx context.Context,
 	return e.deleteByFieldList(ctx, e.idField("knowledge_id"), knowledgeIDList)
 }
 
+func (e *elasticsearchRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(map[string]any{
+		"query": map[string]any{
+			"bool": map[string]any{
+				"filter": []any{
+					map[string]any{"terms": map[string]any{
+						e.idField("knowledge_base_id"): []string{knowledgeBaseID},
+					}},
+					map[string]any{"terms": map[string]any{
+						e.idField("knowledge_id"): knowledgeIDList,
+					}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("elasticsearch v7 encode scoped delete: %w", err)
+	}
+	resp, err := e.client.DeleteByQuery(
+		[]string{e.index},
+		bytes.NewReader(body),
+		e.client.DeleteByQuery.WithContext(ctx),
+	)
+	if err != nil {
+		return fmt.Errorf("elasticsearch v7 delete scoped knowledge indices: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.IsError() {
+		return fmt.Errorf("elasticsearch v7 delete scoped knowledge indices: %s", resp.String())
+	}
+	return nil
+}
+
 // deleteByFieldList Delete documents by field value list
 func (e *elasticsearchRepository) deleteByFieldList(ctx context.Context, field string, valueList []string) error {
 	log := logger.GetLogger(ctx)

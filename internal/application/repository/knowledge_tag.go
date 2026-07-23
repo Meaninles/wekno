@@ -16,37 +16,42 @@ func (r *knowledgeRepository) SetKnowledgeTags(
 	tagIDs []string,
 ) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Delete all existing tag relations for this knowledge
-		if err := tx.Where("knowledge_id = ?", knowledgeID).
-			Delete(&types.KnowledgeTagRelation{}).Error; err != nil {
-			return err
-		}
-		// Insert new relations (skip empty and duplicate IDs)
-		if len(tagIDs) == 0 {
-			return nil
-		}
-		seen := make(map[string]struct{}, len(tagIDs))
-		now := time.Now()
-		relations := make([]types.KnowledgeTagRelation, 0, len(tagIDs))
-		for _, tagID := range tagIDs {
-			if tagID == "" {
-				continue
-			}
-			if _, dup := seen[tagID]; dup {
-				continue
-			}
-			seen[tagID] = struct{}{}
-			relations = append(relations, types.KnowledgeTagRelation{
-				KnowledgeID: knowledgeID,
-				TagID:       tagID,
-				CreatedAt:   now,
-			})
-		}
-		if len(relations) == 0 {
-			return nil
-		}
-		return tx.Create(&relations).Error
+		return replaceKnowledgeTagsTx(tx, knowledgeID, tagIDs)
 	})
+}
+
+func replaceKnowledgeTagsTx(tx *gorm.DB, knowledgeID string, tagIDs []string) error {
+	if tx == nil {
+		return gorm.ErrInvalidDB
+	}
+	if err := tx.Where("knowledge_id = ?", knowledgeID).
+		Delete(&types.KnowledgeTagRelation{}).Error; err != nil {
+		return err
+	}
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tagIDs))
+	now := time.Now()
+	relations := make([]types.KnowledgeTagRelation, 0, len(tagIDs))
+	for _, tagID := range tagIDs {
+		if tagID == "" {
+			continue
+		}
+		if _, duplicate := seen[tagID]; duplicate {
+			continue
+		}
+		seen[tagID] = struct{}{}
+		relations = append(relations, types.KnowledgeTagRelation{
+			KnowledgeID: knowledgeID,
+			TagID:       tagID,
+			CreatedAt:   now,
+		})
+	}
+	if len(relations) == 0 {
+		return nil
+	}
+	return tx.Create(&relations).Error
 }
 
 // GetKnowledgeTags returns tags for multiple knowledge IDs.

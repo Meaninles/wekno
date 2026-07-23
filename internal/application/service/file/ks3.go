@@ -6,50 +6,217 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
+	"github.com/Tencent/WeKnora/internal/custom/modules/storagebinding"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
-	"github.com/google/uuid"
 	ks3aws "github.com/ks3sdklib/aws-sdk-go/aws"
 	"github.com/ks3sdklib/aws-sdk-go/aws/credentials"
 	ks3s3 "github.com/ks3sdklib/aws-sdk-go/service/s3"
 )
 
-const ks3Scheme = "ks3://"
+const (
+	ks3Provider = "ks3"
+	ks3Scheme   = ks3Provider + "://"
+)
 
 // ks3FileService implements FileService for Kingsoft Cloud KS3.
 // KS3 uses V2 signing by default and virtual-hosted style addressing,
 // so it cannot be handled by the generic S3 provider without workarounds.
 type ks3FileService struct {
-	client     *ks3s3.S3
-	bucketName string
-	pathPrefix string
+	client          *ks3s3.S3
+	endpoint        string
+	region          string
+	bucketName      string
+	pathPrefix      string
+	bindingSource   string
+	credentialScope string
+	credentialRef   string
 }
+
+var _ interfaces.PlannedFileService = (*ks3FileService)(nil)
 
 // NewKS3FileService creates a KS3 file service and ensures the bucket exists.
 func NewKS3FileService(endpoint, region, accessKey, secretKey, bucketName, pathPrefix string) (interfaces.FileService, error) {
+	svc, err := newKS3FileService(endpoint, region, accessKey, secretKey, bucketName, pathPrefix)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureKS3Bucket(svc.client, bucketName); err != nil {
+		return nil, err
+	}
+	return svc, nil
+}
+
+// newKS3FileService constructs a client without probing or provisioning the
+// bucket. Historical binding resolution must remain read-only.
+func newKS3FileService(
+	endpoint, region, accessKey, secretKey, bucketName, pathPrefix string,
+) (*ks3FileService, error) {
 	client, err := newKS3Client(endpoint, region, accessKey, secretKey)
 	if err != nil {
 		return nil, err
 	}
 
 	pathPrefix = strings.Trim(pathPrefix, "/")
-
-	svc := &ks3FileService{
-		client:     client,
-		bucketName: bucketName,
-		pathPrefix: pathPrefix,
+	credentialRef, err := storagebinding.CredentialProfileReference(
+		storagebinding.CredentialScopeDirect, storagebinding.ProviderKS3, "default",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to identify KS3 credentials: %w", err)
 	}
 
-	if err := ensureKS3Bucket(client, bucketName); err != nil {
-		return nil, err
+	svc := &ks3FileService{
+		client:          client,
+		endpoint:        endpoint,
+		region:          region,
+		bucketName:      bucketName,
+		pathPrefix:      pathPrefix,
+		bindingSource:   "direct",
+		credentialScope: "direct",
+		credentialRef:   credentialRef,
 	}
 
 	return svc, nil
+}
+
+func (s *ks3FileService) ReserveFilePath(
+	tenantID uint64, knowledgeID string, fileName string,
+) (string, error) {
+	key, err := plannedfile.FileKey(s.pathPrefix, tenantID, knowledgeID, fileName)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath(ks3Provider, s.bucketName, key)
+}
+
+func (s *ks3FileService) ReserveBytesPath(
+	tenantID uint64, fileName string, _ bool,
+) (string, error) {
+	key, err := plannedfile.BytesKey(s.pathPrefix, tenantID, fileName, "exports")
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath(ks3Provider, s.bucketName, key)
+}
+
+func (s *ks3FileService) ReserveCopyPath(
+	srcPath string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	srcKey, err := plannedfile.ParseBucketPath(srcPath, ks3Provider, s.bucketName, "")
+	if err != nil {
+		return "", fmt.Errorf("ks3 copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+	}
+	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+path.Ext(srcKey))
+}
+
+func (s *ks3FileService) plannedMainKey(filePath string) (string, error) {
+	key, err := plannedfile.ParseBucketPath(filePath, ks3Provider, s.bucketName, s.pathPrefix)
+	if err != nil {
+		return "", fmt.Errorf("planned KS3 destination is not bound to this service: %w", err)
+	}
+	return key, nil
+}
+
+func (s *ks3FileService) CommitFileAtPath(
+	ctx context.Context, file *multipart.FileHeader, filePath string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if file == nil {
+		return fmt.Errorf("planned KS3 commit: file is nil")
+	}
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	src, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("planned KS3 commit: open upload: %w", err)
+	}
+	defer src.Close()
+	ext := filepath.Ext(file.Filename)
+	contentType := file.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(ext)
+	}
+	_, err = s.client.PutObject(&ks3s3.PutObjectInput{
+		Bucket: ks3aws.String(s.bucketName), Key: ks3aws.String(key), Body: src,
+		ContentType: ks3aws.String(contentType),
+	})
+	if err != nil {
+		return fmt.Errorf("planned KS3 commit: upload: %w", err)
+	}
+	return nil
+}
+
+func (s *ks3FileService) commitReaderAtPath(
+	ctx context.Context, reader io.ReadSeeker, _ int64, contentType, filePath string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(path.Ext(key))
+	}
+	if _, err := s.client.PutObject(&ks3s3.PutObjectInput{
+		Bucket: ks3aws.String(s.bucketName), Key: ks3aws.String(key), Body: reader,
+		ContentType: ks3aws.String(contentType),
+	}); err != nil {
+		return fmt.Errorf("planned KS3 stream commit: %w", err)
+	}
+	return nil
+}
+
+func (s *ks3FileService) CommitBytesAtPath(ctx context.Context, data []byte, filePath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.PutObject(&ks3s3.PutObjectInput{
+		Bucket: ks3aws.String(s.bucketName), Key: ks3aws.String(key), Body: bytes.NewReader(data),
+		ContentType: ks3aws.String(utils.GetContentTypeByExt(path.Ext(key))),
+	})
+	if err != nil {
+		return fmt.Errorf("planned KS3 bytes commit: upload: %w", err)
+	}
+	return nil
+}
+
+func (s *ks3FileService) CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	srcKey, err := plannedfile.ParseBucketPath(srcPath, ks3Provider, s.bucketName, "")
+	if err != nil {
+		return fmt.Errorf("planned KS3 copy source: %w", err)
+	}
+	dstKey, err := s.plannedMainKey(dstPath)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.CopyObject(&ks3s3.CopyObjectInput{
+		Bucket: ks3aws.String(s.bucketName), Key: ks3aws.String(dstKey),
+		SourceBucket: ks3aws.String(s.bucketName), SourceKey: ks3aws.String(srcKey),
+	})
+	if err != nil {
+		return fmt.Errorf("planned KS3 copy commit: %w", err)
+	}
+	return nil
 }
 
 func newKS3Client(endpoint, region, accessKey, secretKey string) (*ks3s3.S3, error) {
@@ -130,52 +297,28 @@ func parseKS3FilePath(filePath string) (bucket, objectKey string, err error) {
 }
 
 func (s *ks3FileService) SaveFile(ctx context.Context, file *multipart.FileHeader, tenantID uint64, knowledgeID string) (string, error) {
-	ext := filepath.Ext(file.Filename)
-	objectKey := joinKS3Key(s.pathPrefix, fmt.Sprintf("%d", tenantID), knowledgeID, uuid.New().String()+ext)
-
-	src, err := file.Open()
+	if file == nil {
+		return "", fmt.Errorf("failed to save file to KS3: file is nil")
+	}
+	filePath, err := s.ReserveFilePath(tenantID, knowledgeID, file.Filename)
 	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
+		return "", err
 	}
-	defer src.Close()
-
-	contentType := file.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = utils.GetContentTypeByExt(ext)
+	if err := s.CommitFileAtPath(ctx, file, filePath); err != nil {
+		return "", err
 	}
-
-	_, err = s.client.PutObject(&ks3s3.PutObjectInput{
-		Bucket:      ks3aws.String(s.bucketName),
-		Key:         ks3aws.String(objectKey),
-		Body:        src,
-		ContentType: ks3aws.String(contentType),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload file to KS3: %w", err)
-	}
-
-	return fmt.Sprintf("%s%s/%s", ks3Scheme, s.bucketName, objectKey), nil
+	return filePath, nil
 }
 
 func (s *ks3FileService) SaveBytes(ctx context.Context, data []byte, tenantID uint64, fileName string, temp bool) (string, error) {
-	safeName, err := utils.SafeFileName(fileName)
+	filePath, err := s.ReserveBytesPath(tenantID, fileName, temp)
 	if err != nil {
-		return "", fmt.Errorf("invalid file name: %w", err)
+		return "", err
 	}
-	ext := filepath.Ext(safeName)
-	objectKey := joinKS3Key(s.pathPrefix, fmt.Sprintf("%d", tenantID), "exports", uuid.New().String()+ext)
-
-	_, err = s.client.PutObject(&ks3s3.PutObjectInput{
-		Bucket:      ks3aws.String(s.bucketName),
-		Key:         ks3aws.String(objectKey),
-		Body:        bytes.NewReader(data),
-		ContentType: ks3aws.String(utils.GetContentTypeByExt(ext)),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload bytes to KS3: %w", err)
+	if err := s.CommitBytesAtPath(ctx, data, filePath); err != nil {
+		return "", err
 	}
-
-	return fmt.Sprintf("%s%s/%s", ks3Scheme, s.bucketName, objectKey), nil
+	return filePath, nil
 }
 
 // CopyFile copies an existing KS3 object to a new knowledge-owned object using a
@@ -184,36 +327,24 @@ func (s *ks3FileService) SaveBytes(ctx context.Context, data []byte, tenantID ui
 func (s *ks3FileService) CopyFile(ctx context.Context,
 	srcPath string, tenantID uint64, knowledgeID string,
 ) (string, error) {
-	srcBucket, srcKey, err := parseKS3FilePath(srcPath)
+	newPath, err := s.ReserveCopyPath(srcPath, tenantID, knowledgeID)
 	if err != nil {
-		return "", fmt.Errorf("ks3 copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+		return "", err
 	}
-	if err := utils.SafeObjectKey(srcKey); err != nil {
-		return "", fmt.Errorf("invalid source path: %w", err)
+	if err := s.CommitCopyAtPath(ctx, srcPath, newPath); err != nil {
+		return "", err
 	}
-
-	ext := filepath.Ext(srcPath)
-	destKey := joinKS3Key(s.pathPrefix, fmt.Sprintf("%d", tenantID), knowledgeID, uuid.New().String()+ext)
-
-	_, err = s.client.CopyObject(&ks3s3.CopyObjectInput{
-		Bucket:       ks3aws.String(s.bucketName),
-		Key:          ks3aws.String(destKey),
-		SourceBucket: ks3aws.String(srcBucket),
-		SourceKey:    ks3aws.String(srcKey),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to copy file in KS3: %w", err)
-	}
-
-	newPath := fmt.Sprintf("%s%s/%s", ks3Scheme, s.bucketName, destKey)
 	logger.Infof(ctx, "Copied KS3 object %s to %s", srcPath, newPath)
 	return newPath, nil
 }
 
 func (s *ks3FileService) GetFile(ctx context.Context, filePath string) (io.ReadCloser, error) {
-	_, objectKey, err := parseKS3FilePath(filePath)
+	bucket, objectKey, err := parseKS3FilePath(filePath)
 	if err != nil {
 		return nil, err
+	}
+	if bucket != s.bucketName {
+		return nil, fmt.Errorf("KS3 bucket %q is not bound to this service", bucket)
 	}
 	if err := utils.SafeObjectKey(objectKey); err != nil {
 		return nil, fmt.Errorf("invalid file path: %w", err)
@@ -231,9 +362,12 @@ func (s *ks3FileService) GetFile(ctx context.Context, filePath string) (io.ReadC
 }
 
 func (s *ks3FileService) DeleteFile(ctx context.Context, filePath string) error {
-	_, objectKey, err := parseKS3FilePath(filePath)
+	bucket, objectKey, err := parseKS3FilePath(filePath)
 	if err != nil {
 		return err
+	}
+	if bucket != s.bucketName {
+		return fmt.Errorf("KS3 bucket %q is not bound to this service", bucket)
 	}
 	if err := utils.SafeObjectKey(objectKey); err != nil {
 		return fmt.Errorf("invalid file path: %w", err)
@@ -266,9 +400,12 @@ func (s *ks3FileService) CheckConnectivity(ctx context.Context) error {
 }
 
 func (s *ks3FileService) GetFileURL(ctx context.Context, filePath string) (string, error) {
-	_, objectKey, err := parseKS3FilePath(filePath)
+	bucket, objectKey, err := parseKS3FilePath(filePath)
 	if err != nil {
 		return "", err
+	}
+	if bucket != s.bucketName {
+		return "", fmt.Errorf("KS3 bucket %q is not bound to this service", bucket)
 	}
 	if err := utils.SafeObjectKey(objectKey); err != nil {
 		return "", fmt.Errorf("invalid file path: %w", err)

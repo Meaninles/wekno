@@ -1,10 +1,85 @@
 package service
 
 import (
+	"context"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type wikiPageVersionFenceRepo struct {
+	interfaces.WikiPageRepository
+	current         *types.WikiPage
+	updateCalls     int
+	autoUpdateCalls int
+}
+
+func (r *wikiPageVersionFenceRepo) GetBySlug(context.Context, string, string) (*types.WikiPage, error) {
+	return r.current, nil
+}
+
+func (r *wikiPageVersionFenceRepo) Update(context.Context, *types.WikiPage) error {
+	r.updateCalls++
+	return nil
+}
+
+func (r *wikiPageVersionFenceRepo) UpdateAutoLinkedContent(context.Context, *types.WikiPage) error {
+	r.autoUpdateCalls++
+	return nil
+}
+
+func TestUpdatePageRejectsStaleCallerBeforeCopyingContent(t *testing.T) {
+	current := &types.WikiPage{
+		ID:              "page-current",
+		KnowledgeBaseID: "kb-version-fence",
+		Slug:            "concept/current",
+		Title:           "Current",
+		Content:         "newer database body",
+		Summary:         "newer database summary",
+		PageType:        types.WikiPageTypeConcept,
+		Status:          types.WikiPageStatusPublished,
+		Version:         2,
+	}
+	repo := &wikiPageVersionFenceRepo{current: current}
+	svc := &wikiPageService{repo: repo}
+	stale := *current
+	stale.Content = "stale caller body"
+	stale.Summary = "stale caller summary"
+	stale.Version = 1
+
+	_, err := svc.UpdatePage(context.Background(), &stale)
+	require.ErrorIs(t, err, repository.ErrWikiPageConflict)
+	assert.Zero(t, repo.updateCalls)
+	assert.Equal(t, "newer database body", current.Content)
+	assert.Equal(t, "newer database summary", current.Summary)
+}
+
+func TestUpdateAutoLinkedContentRejectsStaleCallerBeforeCopyingContent(t *testing.T) {
+	current := &types.WikiPage{
+		ID:              "page-current-auto",
+		KnowledgeBaseID: "kb-auto-version-fence",
+		Slug:            "concept/current-auto",
+		Content:         "newer database body",
+		OutLinks:        types.StringArray{"concept/live"},
+		Version:         4,
+	}
+	repo := &wikiPageVersionFenceRepo{current: current}
+	svc := &wikiPageService{repo: repo}
+	stale := *current
+	stale.Content = "stale decorated body"
+	stale.OutLinks = types.StringArray{"concept/stale"}
+	stale.Version = 3
+
+	err := svc.UpdateAutoLinkedContent(context.Background(), &stale)
+	require.ErrorIs(t, err, repository.ErrWikiPageConflict)
+	assert.Zero(t, repo.autoUpdateCalls)
+	assert.Equal(t, "newer database body", current.Content)
+	assert.Equal(t, types.StringArray{"concept/live"}, current.OutLinks)
+}
 
 func TestParseOutLinks(t *testing.T) {
 	svc := &wikiPageService{}

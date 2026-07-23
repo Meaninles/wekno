@@ -2,6 +2,8 @@ package retriever
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -329,6 +331,77 @@ func (v *KeywordsVectorHybridRetrieveEngineService) CopyIndices(
 	return v.indexRepository.CopyIndices(
 		ctx, sourceKnowledgeBaseID, sourceToTargetKBIDMap, sourceToTargetChunkIDMap, targetKnowledgeBaseID, dimension, knowledgeType,
 	)
+}
+
+// SupportsKnowledgeIndexMove reports whether the underlying repository can
+// atomically update the KB ownership of existing index rows. A scoped delete is
+// not sufficient: CopyIndices may silently skip every target row when
+// (source_id, source_type) is unique and the move preserves source identity.
+func (v *KeywordsVectorHybridRetrieveEngineService) SupportsKnowledgeIndexMove() bool {
+	_, ok := v.indexRepository.(interfaces.KnowledgeIndexInPlaceMover)
+	return ok
+}
+
+// MoveKnowledgeIndices delegates exclusively to the backend's atomic/in-place
+// primitive. Backends without that guarantee fail closed before the document
+// lifecycle is claimed and must use reparse mode.
+func (v *KeywordsVectorHybridRetrieveEngineService) MoveKnowledgeIndices(
+	ctx context.Context,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	knowledgeID string,
+	chunkIDs []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if sourceKnowledgeBaseID == "" || targetKnowledgeBaseID == "" || knowledgeID == "" {
+		return newKnowledgeIndexMoveError(
+			errors.New("move knowledge indices: source KB, target KB, and knowledge ID are required"),
+			true,
+		)
+	}
+	if sourceKnowledgeBaseID == targetKnowledgeBaseID {
+		return newKnowledgeIndexMoveError(
+			errors.New("move knowledge indices: source and target KB must differ"),
+			true,
+		)
+	}
+	if len(chunkIDs) == 0 {
+		return nil
+	}
+	for _, chunkID := range chunkIDs {
+		if chunkID == "" {
+			return newKnowledgeIndexMoveError(errors.New("move knowledge indices: empty chunk ID"), true)
+		}
+	}
+
+	mover, ok := v.indexRepository.(interfaces.KnowledgeIndexInPlaceMover)
+	if !ok {
+		return newKnowledgeIndexMoveError(fmt.Errorf(
+			"move knowledge indices: retrieval engine %s does not support atomic in-place moves; use reparse mode",
+			v.indexRepository.EngineType(),
+		), true)
+	}
+	if err := mover.MoveKnowledgeIndicesInPlace(
+		ctx,
+		sourceKnowledgeBaseID,
+		targetKnowledgeBaseID,
+		knowledgeID,
+		chunkIDs,
+		dimension,
+		knowledgeType,
+	); err != nil {
+		// A write error can be commit-uncertain (for example the server commits
+		// before the connection drops). Only a repository error whose read-back
+		// explicitly proves SourceIntact permits lifecycle rollback.
+		var stateErr interfaces.KnowledgeIndexInPlaceMoveError
+		sourceIntact := errors.As(err, &stateErr) && stateErr.SourceIntact()
+		return newKnowledgeIndexMoveError(
+			fmt.Errorf("move knowledge indices in place: %w", err),
+			sourceIntact,
+		)
+	}
+	return nil
 }
 
 // BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch

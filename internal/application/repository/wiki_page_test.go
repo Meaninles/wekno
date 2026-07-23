@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -71,7 +72,207 @@ func setupWikiPagesTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(wikiPagesTestDDL).Error)
 	require.NoError(t, db.Exec(wikiFoldersTestDDL).Error)
+	require.NoError(t, db.AutoMigrate(&types.KnowledgeBase{}))
+	for _, kbID := range []string{
+		"kb-a", "kb-auto-link-cas", "kb-cap", "kb-f", "kb-other",
+		"kb-quarantine", "kb-quarantine-meta", "kb-quarantine-meta-clear",
+		"kb-quarantine-meta-fresh", "kb-quarantine-meta-stale-clear",
+	} {
+		require.NoError(t, db.Create(&types.KnowledgeBase{ID: kbID, TenantID: 1, Name: kbID}).Error)
+	}
 	return db
+}
+
+func TestQuarantineForDeleteUnionsSourcesAndFencesStaleWriter(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+	page := makeWikiPage("kb-quarantine", "entity/shared", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	page.SourceRefs = types.StringArray{"source-1", "source-2", "survivor"}
+	require.NoError(t, repo.Create(ctx, page))
+
+	stale := *page
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-1"))
+	stale.Content = "stale writer must not publish"
+	require.ErrorIs(t, repo.Update(ctx, &stale), ErrWikiPageConflict)
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-2"))
+
+	got, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, types.WikiPageStatusArchived, got.Status)
+	sources, err := wikidelete.PendingSources(got)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"source-1", "source-2"}, sources)
+	assert.Equal(t, 3, got.Version)
+}
+
+func TestUpdateMetaRejectsStaleWriterAfterDeleteQuarantine(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+	page := makeWikiPage("kb-quarantine-meta", "concept/shared", types.WikiPageTypeConcept, types.WikiPageStatusPublished)
+	page.SourceRefs = types.StringArray{"source-1", "survivor"}
+	require.NoError(t, repo.Create(ctx, page))
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-1"))
+
+	incoming := *page
+	incoming.Status = types.WikiPageStatusPublished
+	incoming.PageMetadata = types.JSON([]byte(`{}`))
+	incoming.SourceRefs = types.StringArray{"survivor"}
+	require.ErrorIs(t, repo.UpdateMeta(ctx, &incoming), ErrWikiPageConflict)
+
+	got, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, types.WikiPageStatusArchived, got.Status)
+	sources, err := wikidelete.PendingSources(got)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"source-1"}, sources)
+	assert.Equal(t, types.StringArray{"source-1", "survivor"}, got.SourceRefs)
+}
+
+func TestUpdateMetaFreshOrdinaryWritePreservesDeleteQuarantine(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+	page := makeWikiPage("kb-quarantine-meta-fresh", "concept/shared", types.WikiPageTypeConcept, types.WikiPageStatusPublished)
+	page.SourceRefs = types.StringArray{"source-1", "survivor"}
+	require.NoError(t, repo.Create(ctx, page))
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-1"))
+
+	incoming, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	incoming.Status = types.WikiPageStatusPublished
+	incoming.PageMetadata = types.JSON([]byte(`{"caller":"kept"}`))
+	incoming.SourceRefs = types.StringArray{"survivor"}
+	require.NoError(t, repo.UpdateMeta(ctx, incoming))
+
+	got, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, types.WikiPageStatusArchived, got.Status)
+	sources, err := wikidelete.PendingSources(got)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"source-1"}, sources)
+	assert.Equal(t, types.StringArray{"survivor"}, got.SourceRefs)
+}
+
+func TestUpdateMetaTrustedClearUsesCurrentMarkerAndExactSources(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+	page := makeWikiPage("kb-quarantine-meta-clear", "concept/shared", types.WikiPageTypeConcept, types.WikiPageStatusPublished)
+	page.SourceRefs = types.StringArray{"source-1", "source-2", "survivor"}
+	require.NoError(t, wikidelete.MarkApplied(page, 101))
+	require.NoError(t, repo.Create(ctx, page))
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-1"))
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-2"))
+
+	incoming, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	version := incoming.Version
+	// Simulate a reducer payload whose marker is absent. Trusted completion
+	// must rebuild from the current row and remove only source-1.
+	incoming.Status = types.WikiPageStatusPublished
+	incoming.PageMetadata = types.JSON([]byte(`{"applied":"retained"}`))
+	require.NoError(t, wikidelete.MarkApplied(incoming, 202))
+	require.NoError(t, repo.UpdateMeta(
+		wikidelete.WithQuarantineClear(ctx, "source-1"), incoming,
+	))
+
+	got, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, version, got.Version, "metadata completion must not bump the user revision")
+	assert.Equal(t, types.WikiPageStatusArchived, got.Status)
+	sources, err := wikidelete.PendingSources(got)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"source-2"}, sources)
+	assert.Contains(t, string(got.PageMetadata), `"applied":"retained"`)
+	for _, opID := range []int64{101, 202} {
+		applied, appliedErr := wikidelete.IsApplied(got, opID)
+		require.NoError(t, appliedErr)
+		assert.True(t, applied, "applied operation %d must survive trusted metadata merge", opID)
+	}
+
+	// A context carrying no source IDs has no clear authority.
+	noAuthority := *got
+	noAuthority.Status = types.WikiPageStatusPublished
+	noAuthority.PageMetadata = types.JSON([]byte(`{}`))
+	require.NoError(t, repo.UpdateMeta(wikidelete.WithQuarantineClear(ctx), &noAuthority))
+	stillQuarantined, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	sources, err = wikidelete.PendingSources(stillQuarantined)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"source-2"}, sources)
+	assert.Equal(t, types.WikiPageStatusArchived, stillQuarantined.Status)
+	for _, opID := range []int64{101, 202} {
+		applied, appliedErr := wikidelete.IsApplied(stillQuarantined, opID)
+		require.NoError(t, appliedErr)
+		assert.True(t, applied, "ordinary metadata writes must preserve applied operation %d", opID)
+	}
+
+	final := *stillQuarantined
+	final.Status = types.WikiPageStatusPublished
+	final.PageMetadata = types.JSON([]byte(`{}`))
+	require.NoError(t, repo.UpdateMeta(
+		wikidelete.WithQuarantineClear(ctx, "source-2"), &final,
+	))
+	cleared, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	sources, err = wikidelete.PendingSources(cleared)
+	require.NoError(t, err)
+	assert.Empty(t, sources)
+	assert.Equal(t, types.WikiPageStatusPublished, cleared.Status)
+	assert.Equal(t, version, cleared.Version)
+	for _, opID := range []int64{101, 202} {
+		applied, appliedErr := wikidelete.IsApplied(cleared, opID)
+		require.NoError(t, appliedErr)
+		assert.True(t, applied, "trusted clear must preserve applied operation %d", opID)
+	}
+}
+
+func TestUpdateMetaTrustedClearRejectsStaleVersionWithoutLosingNewMarker(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+	page := makeWikiPage("kb-quarantine-meta-stale-clear", "concept/shared", types.WikiPageTypeConcept, types.WikiPageStatusPublished)
+	page.SourceRefs = types.StringArray{"source-1", "source-2", "survivor"}
+	require.NoError(t, repo.Create(ctx, page))
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-1"))
+
+	stale, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	stale.Status = types.WikiPageStatusPublished
+	stale.PageMetadata = types.JSON([]byte(`{}`))
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-2"))
+
+	err = repo.UpdateMeta(wikidelete.WithQuarantineClear(ctx, "source-1"), stale)
+	require.ErrorIs(t, err, ErrWikiPageConflict)
+	got, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	sources, err := wikidelete.PendingSources(got)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"source-1", "source-2"}, sources)
+	assert.Equal(t, types.WikiPageStatusArchived, got.Status)
+}
+
+func TestUpdateAutoLinkedContentRejectsVersionChangedByQuarantine(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+	page := makeWikiPage("kb-auto-link-cas", "entity/shared", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	page.SourceRefs = types.StringArray{"source-1", "survivor"}
+	require.NoError(t, repo.Create(ctx, page))
+
+	stale := *page
+	stale.Content = "stale auto-linked body"
+	stale.OutLinks = types.StringArray{"entity/stale"}
+	require.NoError(t, repo.QuarantineForDelete(ctx, page.KnowledgeBaseID, page.Slug, "source-1"))
+	require.ErrorIs(t, repo.UpdateAutoLinkedContent(ctx, &stale), ErrWikiPageConflict)
+
+	got, err := repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, page.Content, got.Content)
+	assert.Empty(t, got.OutLinks)
+	assert.Equal(t, types.WikiPageStatusArchived, got.Status)
 }
 
 // makeWikiPage builds a minimal WikiPage suitable for insert. Title is

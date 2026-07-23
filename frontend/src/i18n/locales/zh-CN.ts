@@ -614,6 +614,10 @@ export default {
     statusProcessing: "解析中",
     statusFinalizing: "优化中",
     statusPending: "等待中",
+    documentQueuePosition: "排队 {position}/{total}",
+    documentQueuePositionOnly: "排队第 {position}",
+    documentQueueTooltip: "全系统共有 {total} 个文档等待解析，当前文档排在第 {position} 位",
+    documentQueueTooltipPositionOnly: "当前文档排在全系统解析队列第 {position} 位",
     statusFailed: "失败",
     statusCancelled: "已取消",
     statusDraft: "草稿",
@@ -2490,8 +2494,8 @@ export default {
           default_storage_quota_gb: "新租户默认存储配额 (GB)",
         },
         asynq: {
-          concurrency: "普通任务 worker 并发数",
-          heavy_document_concurrency: "重型文档 worker 并发数",
+          concurrency: "单实例文档解析并发",
+          heavy_document_concurrency: "重型文档并发（高级）",
         },
       },
       keyDescriptions: {
@@ -2516,12 +2520,11 @@ export default {
         },
         asynq: {
           concurrency:
-            "普通异步任务 worker 并发数（不包含重型文档解析队列）。" +
-            "普通文档解析、嵌入等任务多为 I/O 等待，适当提高可缩短批量上传排队时间。" +
-            "修改后需重启服务进程方可生效。",
+            "每个全功能解析实例可同时处理的文档数。一个并发槽位会跟随同一文档完成解析、切片、向量化及相关衍生处理；" +
+            "增加实例会水平扩展整套系统的总吞吐。修改后需重启所有解析实例方可生效。",
           heavy_document_concurrency:
-            "重型文档解析 worker 并发数。命中文件大小或 DOCX/XLSX/CSV 结构重型阈值的文档，" +
-            "进入独立重型队列处理，不占用普通任务 worker。默认 2，修改后需重启服务进程方可生效。",
+            "单个解析实例内的重型文档并发保护上限，仅在文档命中文件大小或结构重型阈值时使用。" +
+            "日常总并发请设置上方“单实例文档解析并发”；本项通常无需调整，修改后需重启所有解析实例。",
         },
       },
       enumLabels: {

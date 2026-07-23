@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -121,6 +122,30 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 		DryRun:      payload.DryRun,
 		EnqueuedAt:  enqueuedAt,
 	}
+	cleanupEntriesObject := func(rootErr error) error {
+		if taskPayload.EntriesURL == "" {
+			return rootErr
+		}
+		var cleanupErr error
+		if s.auxObjects != nil {
+			cleanupErr = s.auxObjects.DeletePaths(
+				ctx, tenantID, kbID, knowledgeID, effectiveAuxiliaryProvider(ctx, kb),
+				[]string{taskPayload.EntriesURL},
+			)
+		} else {
+			cleanupErr = errors.New("cleanup FAQ entries object: auxiliary registry is unavailable")
+		}
+		return errors.Join(rootErr, cleanupErr)
+	}
+	storeEntries := func(entriesData []byte, fileName string) (string, error) {
+		faqFileSvc, err := s.plannedAuxiliaryFileService(
+			ctx, kb, faqKnowledge, knowledgeaux.KindFAQEntries,
+		)
+		if err != nil {
+			return "", err
+		}
+		return faqFileSvc.SaveBytes(ctx, entriesData, tenantID, fileName, false)
+	}
 
 	// 阈值：超过 200 条或序列化后超过 50KB 时使用对象存储
 	const (
@@ -141,7 +166,7 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 
 		// 上传到私有桶（主桶），任务处理完成后清理
 		fileName := fmt.Sprintf("faq_import_entries_%s_%d.json", taskID, enqueuedAt)
-		entriesURL, err := s.fileSvc.SaveBytes(ctx, entriesData, tenantID, fileName, false)
+		entriesURL, err := storeEntries(entriesData, fileName)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to upload FAQ entries to object storage: %v", err)
 			return "", fmt.Errorf("failed to upload entries: %w", err)
@@ -159,15 +184,18 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to marshal FAQ import task payload: %v", err)
-		return "", fmt.Errorf("failed to marshal task payload: %w", err)
+		return "", cleanupEntriesObject(fmt.Errorf("failed to marshal task payload: %w", err))
 	}
 
 	// 再次检查 payload 大小
 	if len(payloadBytes) > payloadSizeThreshold && taskPayload.EntriesURL == "" {
 		// payload 太大但还没上传，现在上传
-		entriesData, _ := json.Marshal(payload.Entries)
+		entriesData, marshalErr := json.Marshal(payload.Entries)
+		if marshalErr != nil {
+			return "", fmt.Errorf("failed to marshal oversized FAQ entries: %w", marshalErr)
+		}
 		fileName := fmt.Sprintf("faq_import_entries_%s_%d.json", taskID, enqueuedAt)
-		entriesURL, err := s.fileSvc.SaveBytes(ctx, entriesData, tenantID, fileName, false)
+		entriesURL, err := storeEntries(entriesData, fileName)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to upload FAQ entries to object storage: %v", err)
 			return "", fmt.Errorf("failed to upload entries: %w", err)
@@ -178,7 +206,10 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 		taskPayload.EntriesURL = entriesURL
 		taskPayload.EntryCount = entryCount
 
-		payloadBytes, _ = json.Marshal(taskPayload)
+		payloadBytes, err = json.Marshal(taskPayload)
+		if err != nil {
+			return "", cleanupEntriesObject(fmt.Errorf("failed to marshal object-backed FAQ task payload: %w", err))
+		}
 	}
 
 	logger.Infof(ctx, "FAQ import task payload size: %d bytes", len(payloadBytes))
@@ -195,14 +226,16 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 	task := asynq.NewTask(
 		types.TypeFAQImport,
 		payloadBytes,
+	)
+	info, err := s.task.Enqueue(
+		task,
 		asynq.TaskID(asynqTaskID),
 		asynq.Queue("default"),
 		asynq.MaxRetry(maxRetry),
 	)
-	info, err := s.task.Enqueue(task)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue FAQ import task: %v", err)
-		return "", fmt.Errorf("failed to enqueue task: %w", err)
+		return "", cleanupEntriesObject(fmt.Errorf("failed to enqueue task: %w", err))
 	}
 	logger.Infof(ctx, "Enqueued FAQ import task: id=%s queue=%s task_id=%s dry_run=%v", info.ID, info.Queue, taskID, payload.DryRun)
 
@@ -211,8 +244,11 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 
 // generateFailedEntriesCSV 生成失败条目的 CSV 文件并上传
 func (s *knowledgeService) generateFailedEntriesCSV(ctx context.Context,
-	tenantID uint64, taskID string, failedEntries []types.FAQFailedEntry,
+	payload *types.FAQImportPayload, failedEntries []types.FAQFailedEntry,
 ) (string, error) {
+	if payload == nil {
+		return "", errors.New("generate failed FAQ CSV: payload is required")
+	}
 	// 生成 CSV 内容
 	var buf strings.Builder
 
@@ -254,16 +290,56 @@ func (s *knowledgeService) generateFailedEntriesCSV(ctx context.Context,
 	}
 
 	// 上传 CSV 文件到临时存储（会自动过期）
-	fileName := fmt.Sprintf("faq_dryrun_failed_%s.csv", taskID)
-	filePath, err := s.fileSvc.SaveBytes(ctx, []byte(buf.String()), tenantID, fileName, true)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	if err != nil {
+		return "", fmt.Errorf("load FAQ knowledge for failed export: %w", err)
+	}
+	if knowledge == nil {
+		return "", errors.New("load FAQ knowledge for failed export: repository returned nil")
+	}
+	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KBID)
+	if err != nil {
+		return "", fmt.Errorf("load FAQ knowledge base for failed export: %w", err)
+	}
+	if kb == nil {
+		return "", errors.New("load FAQ knowledge base for failed export: service returned nil")
+	}
+	fileService, err := s.plannedAuxiliaryFileService(
+		ctx, kb, knowledge, knowledgeaux.KindFAQFailedExport,
+	)
+	if err != nil {
+		return "", err
+	}
+	fileName := fmt.Sprintf("faq_dryrun_failed_%s.csv", payload.TaskID)
+	filePath, err := fileService.SaveBytes(ctx, []byte(buf.String()), payload.TenantID, fileName, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to save CSV file: %w", err)
 	}
-
 	// 获取下载 URL
-	fileURL, err := s.fileSvc.GetFileURL(ctx, filePath)
+	fileURL, err := fileService.GetFileURL(ctx, filePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to get file URL: %w", err)
+		var cleanupErr error
+		if s.auxObjects != nil {
+			cleanupErr = s.auxObjects.DeletePaths(
+				ctx, payload.TenantID, payload.KBID, payload.KnowledgeID,
+				effectiveAuxiliaryProvider(ctx, kb), []string{filePath},
+			)
+		}
+		return "", errors.Join(fmt.Errorf("failed to get file URL: %w", err), cleanupErr)
+	}
+	// Refresh the same ownership row with its client-facing URL so recovery can
+	// distinguish a committed LastFAQImportResult from a superseded/dry-run CSV.
+	if err := s.registerFAQObject(
+		ctx, kb, knowledge, filePath, fileURL, knowledgeaux.KindFAQFailedExport,
+	); err != nil {
+		var cleanupErr error
+		if s.auxObjects != nil {
+			cleanupErr = s.auxObjects.DeletePaths(
+				ctx, payload.TenantID, payload.KBID, payload.KnowledgeID,
+				effectiveAuxiliaryProvider(ctx, kb), []string{filePath},
+			)
+		}
+		return "", errors.Join(fmt.Errorf("record failed FAQ CSV reference: %w", err), cleanupErr)
 	}
 
 	logger.Infof(ctx, "Generated failed entries CSV: %s, entries: %d", fileURL, len(failedEntries))
@@ -322,6 +398,13 @@ func (s *knowledgeService) saveFAQImportResultToDatabase(ctx context.Context,
 	// 更新数据库
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		return fmt.Errorf("failed to update knowledge with import result: %w", err)
+	}
+	if s.auxObjects != nil {
+		if err := s.auxObjects.DeleteSupersededFAQExports(
+			ctx, tenantID, payload.KBID, knowledge.ID, importResult.FailedEntriesURL,
+		); err != nil {
+			return fmt.Errorf("cleanup superseded FAQ failed exports: %w", err)
+		}
 	}
 
 	logger.Infof(ctx, "Saved FAQ import result to database: knowledge_id=%s, task_id=%s, total=%d, success=%d, failed=%d, skipped=%d",
@@ -1117,15 +1200,21 @@ func (s *knowledgeService) updateFAQImportProgressStatus(
 
 // cleanupFAQEntriesFileOnFinalFailure 在任务最终失败时清理对象存储中的 entries 文件
 // 只有当 retryCount >= maxRetry 时才执行清理，否则重试时还需要使用这个文件
-func (s *knowledgeService) cleanupFAQEntriesFileOnFinalFailure(ctx context.Context, entriesURL string, retryCount, maxRetry int) {
-	if entriesURL == "" || retryCount < maxRetry {
-		return
+func (s *knowledgeService) cleanupFAQEntriesFileOnFinalFailure(
+	ctx context.Context,
+	payload *types.FAQImportPayload,
+	retryCount int,
+	maxRetry int,
+) error {
+	if payload == nil || payload.EntriesURL == "" || retryCount < maxRetry {
+		return nil
 	}
-	if err := s.fileSvc.DeleteFile(ctx, entriesURL); err != nil {
-		logger.Warnf(ctx, "Failed to delete FAQ entries file from object storage on final failure: %v", err)
-	} else {
-		logger.Infof(ctx, "Deleted FAQ entries file from object storage on final failure: %s", entriesURL)
+	if s.auxObjects != nil {
+		return s.auxObjects.DeletePaths(
+			ctx, payload.TenantID, payload.KBID, payload.KnowledgeID, "", []string{payload.EntriesURL},
+		)
 	}
+	return errors.New("cleanup FAQ entries on final failure: auxiliary registry is unavailable")
 }
 
 // runningFAQImportInfo stores the task ID and enqueued timestamp for uniquely identifying a task instance
@@ -1335,11 +1424,22 @@ func (s *knowledgeService) incrementalIndexFAQEntry(
 
 	// 5. 更新 knowledge 记录
 	now := time.Now()
-	knowledge.UpdatedAt = now
-	knowledge.ProcessedAt = &now
-	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
+	if err := s.requireKnowledgeStateSwap(
+		ctx,
+		types.MustTenantIDFromContext(ctx),
+		knowledge.ID,
+		knowledge.KnowledgeBaseID,
+		types.ParseStatusCompleted,
+		map[string]interface{}{
+			"processed_at": &now,
+			"updated_at":   now,
+		},
+		"publish FAQ incremental index timestamp",
+	); err != nil {
 		return err
 	}
+	knowledge.UpdatedAt = now
+	knowledge.ProcessedAt = &now
 
 	totalDuration := time.Since(indexStartTime)
 	logger.Debugf(ctx, "incrementalIndexFAQEntry: completed in %v, updated %d/%d entries",
@@ -1420,23 +1520,42 @@ func (s *knowledgeService) indexFAQChunks(ctx context.Context,
 	logger.Debugf(ctx, "indexFAQChunks: batch indexed %d index info entries in %v (avg: %v per entry)",
 		len(indexInfo), batchIndexDuration, batchIndexDuration/time.Duration(len(indexInfo)))
 
-	if adjustStorage && size > 0 {
-		adjustStartTime := time.Now()
-		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, size); err == nil {
-			tenantInfo.StorageUsed += size
-		}
-		knowledge.StorageSize += size
-		adjustDuration := time.Since(adjustStartTime)
-		if adjustDuration > 50*time.Millisecond {
-			logger.Debugf(ctx, "indexFAQChunks: adjusted storage in %v", adjustDuration)
-		}
-	}
-
 	updateStartTime := time.Now()
+	expectedParseStatus := knowledge.ParseStatus
+	if adjustStorage && size > 0 {
+		knowledge.StorageSize += size
+	}
 	now := time.Now()
 	knowledge.UpdatedAt = now
 	knowledge.ProcessedAt = &now
-	err = s.repo.UpdateKnowledge(ctx, knowledge)
+	storageDelta := int64(0)
+	if adjustStorage {
+		storageDelta = size
+	}
+	finalized, err := finalizeKnowledgeWithStorage(
+		ctx,
+		s.repo,
+		knowledge,
+		expectedParseStatus,
+		storageDelta,
+	)
+	if err == nil && !finalized {
+		err = errKnowledgeStateFenceConflict
+	}
+	if err != nil {
+		// The caller owns chunk rollback. Remove the vectors written by this
+		// invocation before returning so a deletion/state transition cannot
+		// leave searchable FAQ ghosts or an untracked storage charge.
+		if cleanupErr := retrieveEngine.DeleteByChunkIDList(
+			ctx, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ,
+		); cleanupErr != nil {
+			logger.Warnf(ctx, "cleanup FAQ vectors after finalization failure: %v", cleanupErr)
+		}
+		return fmt.Errorf("atomic FAQ knowledge/storage finalization: %w", err)
+	}
+	if adjustStorage && size > 0 {
+		tenantInfo.StorageUsed += size
+	}
 	updateDuration := time.Since(updateStartTime)
 	if updateDuration > 50*time.Millisecond {
 		logger.Debugf(ctx, "indexFAQChunks: updated knowledge in %v", updateDuration)
@@ -1519,8 +1638,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
 
 	// 获取任务重试信息，用于判断是否是最后一次重试
-	retryCount, _ := asynq.GetRetryCount(ctx)
-	maxRetry, _ := asynq.GetMaxRetry(ctx)
+	retryCount, maxRetry, _ := taskRetryMetadata(ctx)
 	isLastRetry := retryCount >= maxRetry
 
 	tenantInfo, err := s.tenantRepo.GetTenantByID(ctx, payload.TenantID)
@@ -1533,23 +1651,32 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	// 如果 entries 存储在对象存储中，先下载
 	if payload.EntriesURL != "" && len(payload.Entries) == 0 {
 		logger.Infof(ctx, "Downloading FAQ entries from object storage: %s", payload.EntriesURL)
-		reader, err := s.fileSvc.GetFile(ctx, payload.EntriesURL)
+		entriesFileSvc, routeErr := s.auxiliaryFileServiceForPath(
+			ctx, nil, payload.KBID, payload.KnowledgeID, payload.EntriesURL,
+		)
+		if routeErr != nil {
+			return fmt.Errorf("resolve FAQ entries storage: %w", routeErr)
+		}
+		reader, err := entriesFileSvc.GetFile(ctx, payload.EntriesURL)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to download FAQ entries from object storage: %v", err)
-			return fmt.Errorf("failed to download entries: %w", err)
+			cleanupErr := s.cleanupFAQEntriesFileOnFinalFailure(ctx, &payload, retryCount, maxRetry)
+			return errors.Join(fmt.Errorf("failed to download entries: %w", err), cleanupErr)
 		}
 		defer reader.Close()
 
 		entriesData, err := io.ReadAll(reader)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to read FAQ entries data: %v", err)
-			return fmt.Errorf("failed to read entries data: %w", err)
+			cleanupErr := s.cleanupFAQEntriesFileOnFinalFailure(ctx, &payload, retryCount, maxRetry)
+			return errors.Join(fmt.Errorf("failed to read entries data: %w", err), cleanupErr)
 		}
 
 		var entries []types.FAQEntryPayload
 		if err := json.Unmarshal(entriesData, &entries); err != nil {
 			logger.Errorf(ctx, "Failed to unmarshal FAQ entries: %v", err)
-			return fmt.Errorf("failed to unmarshal entries: %w", err)
+			cleanupErr := s.cleanupFAQEntriesFileOnFinalFailure(ctx, &payload, retryCount, maxRetry)
+			return errors.Join(fmt.Errorf("failed to unmarshal entries: %w", err), cleanupErr)
 		}
 
 		payload.Entries = entries
@@ -1652,8 +1779,8 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
 			}
 		}
-		s.cleanupFAQEntriesFileOnFinalFailure(ctx, payload.EntriesURL, retryCount, maxRetry)
-		return fmt.Errorf("failed to get knowledge base: %w", err)
+		cleanupErr := s.cleanupFAQEntriesFileOnFinalFailure(ctx, &payload, retryCount, maxRetry)
+		return errors.Join(fmt.Errorf("failed to get knowledge base: %w", err), cleanupErr)
 	}
 
 	// 检查任务状态 - 幂等性处理（复用之前获取的 existingProgress）
@@ -1681,8 +1808,8 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
 			}
 		}
-		s.cleanupFAQEntriesFileOnFinalFailure(ctx, payload.EntriesURL, retryCount, maxRetry)
-		return fmt.Errorf("failed to delete unindexed chunks: %w", err)
+		cleanupErr := s.cleanupFAQEntriesFileOnFinalFailure(ctx, &payload, retryCount, maxRetry)
+		return errors.Join(fmt.Errorf("failed to delete unindexed chunks: %w", err), cleanupErr)
 	}
 	if len(chunksDeleted) > 0 {
 		logger.Infof(ctx, "Deleted unindexed chunks: %d", len(chunksDeleted))
@@ -1737,8 +1864,8 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
 			}
 		}
-		s.cleanupFAQEntriesFileOnFinalFailure(ctx, payload.EntriesURL, retryCount, maxRetry)
-		return fmt.Errorf("FAQ import failed: %w", err)
+		cleanupErr := s.cleanupFAQEntriesFileOnFinalFailure(ctx, &payload, retryCount, maxRetry)
+		return errors.Join(fmt.Errorf("FAQ import failed: %w", err), cleanupErr)
 	}
 
 	// 任务成功完成
@@ -1755,8 +1882,17 @@ func (s *knowledgeService) finalizeFAQValidation(ctx context.Context, payload *t
 ) error {
 	// 清理对象存储中的 entries 文件（如果有）
 	if payload.EntriesURL != "" {
-		if err := s.fileSvc.DeleteFile(ctx, payload.EntriesURL); err != nil {
-			logger.Warnf(ctx, "Failed to delete FAQ entries file from object storage: %v", err)
+		var cleanupErr error
+		if s.auxObjects != nil {
+			cleanupErr = s.auxObjects.DeletePaths(
+				ctx, payload.TenantID, payload.KBID, payload.KnowledgeID, "", []string{payload.EntriesURL},
+			)
+		} else {
+			cleanupErr = errors.New("cleanup FAQ entries: auxiliary registry is unavailable")
+		}
+		if cleanupErr != nil {
+			// The durable ownership row remains for background recovery.
+			logger.Warnf(ctx, "Failed to delete FAQ entries file from object storage: %v", cleanupErr)
 		} else {
 			logger.Infof(ctx, "Deleted FAQ entries file from object storage: %s", payload.EntriesURL)
 		}
@@ -1765,7 +1901,7 @@ func (s *knowledgeService) finalizeFAQValidation(ctx context.Context, payload *t
 
 	// 如果有失败条目，生成 CSV 文件
 	if len(progress.FailedEntries) > 0 {
-		csvURL, err := s.generateFailedEntriesCSV(ctx, payload.TenantID, payload.TaskID, progress.FailedEntries)
+		csvURL, err := s.generateFailedEntriesCSV(ctx, payload, progress.FailedEntries)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to generate failed entries CSV: %v", err)
 		} else {

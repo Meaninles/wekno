@@ -8,29 +8,43 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
+	"github.com/Tencent/WeKnora/internal/custom/modules/storagebinding"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
-	"github.com/google/uuid"
 )
 
 // ossFileService implements the FileService interface for Aliyun OSS
 // using the official Aliyun OSS SDK v2 (github.com/aliyun/alibabacloud-oss-go-sdk-v2).
 type ossFileService struct {
-	client         *oss.Client
-	tempClient     *oss.Client
-	pathPrefix     string
-	bucketName     string
-	tempBucketName string
+	client          *oss.Client
+	tempClient      *oss.Client
+	endpoint        string
+	region          string
+	tempRegion      string
+	pathPrefix      string
+	bucketName      string
+	tempBucketName  string
+	bindingSource   string
+	credentialScope string
+	credentialRef   string
 }
 
-const ossScheme = "oss://"
+const (
+	ossProvider = "oss"
+	ossScheme   = ossProvider + "://"
+)
+
+var _ interfaces.PlannedFileService = (*ossFileService)(nil)
 
 // newOSSClient creates an OSS client using the official Aliyun SDK v2.
 func newOSSClient(endpoint, region, accessKey, secretKey string) (*oss.Client, error) {
@@ -75,12 +89,30 @@ func NewOssFileService(endpoint, region, accessKey, secretKey, bucketName, pathP
 
 // NewOssFileServiceWithTempBucket creates an Aliyun OSS file service with optional temp bucket.
 func NewOssFileServiceWithTempBucket(endpoint, region, accessKey, secretKey, bucketName, pathPrefix, tempBucketName, tempRegion string) (interfaces.FileService, error) {
-	client, err := newOSSClient(endpoint, region, accessKey, secretKey)
+	svc, err := newOSSFileService(
+		endpoint, region, accessKey, secretKey, bucketName, pathPrefix, tempBucketName, tempRegion,
+	)
 	if err != nil {
 		return nil, err
 	}
+	if err := ossEnsureBucket(svc.client, bucketName); err != nil {
+		return nil, err
+	}
+	if svc.tempClient != nil {
+		if err := ossEnsureBucket(svc.tempClient, tempBucketName); err != nil {
+			return nil, err
+		}
+	}
+	return svc, nil
+}
 
-	if err := ossEnsureBucket(client, bucketName); err != nil {
+// newOSSFileService constructs clients without probing or provisioning any
+// bucket. Historical binding resolution must remain read-only.
+func newOSSFileService(
+	endpoint, region, accessKey, secretKey, bucketName, pathPrefix, tempBucketName, tempRegion string,
+) (*ossFileService, error) {
+	client, err := newOSSClient(endpoint, region, accessKey, secretKey)
+	if err != nil {
 		return nil, err
 	}
 
@@ -93,9 +125,6 @@ func NewOssFileServiceWithTempBucket(endpoint, region, accessKey, secretKey, buc
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize OSS temp client: %w", err)
 		}
-		if err := ossEnsureBucket(tempClient, tempBucketName); err != nil {
-			return nil, err
-		}
 	}
 
 	// Normalize pathPrefix: ensure it ends with '/' if not empty
@@ -103,13 +132,191 @@ func NewOssFileServiceWithTempBucket(endpoint, region, accessKey, secretKey, buc
 		pathPrefix += "/"
 	}
 
+	credentialRef, err := storagebinding.CredentialProfileReference(
+		storagebinding.CredentialScopeDirect, storagebinding.ProviderOSS, "default",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to identify OSS credentials: %w", err)
+	}
 	return &ossFileService{
-		client:         client,
-		tempClient:     tempClient,
-		pathPrefix:     pathPrefix,
-		bucketName:     bucketName,
-		tempBucketName: tempBucketName,
+		client:          client,
+		tempClient:      tempClient,
+		endpoint:        endpoint,
+		region:          region,
+		tempRegion:      tempRegion,
+		pathPrefix:      pathPrefix,
+		bucketName:      bucketName,
+		tempBucketName:  tempBucketName,
+		bindingSource:   "direct",
+		credentialScope: "direct",
+		credentialRef:   credentialRef,
 	}, nil
+}
+
+func (s *ossFileService) ReserveFilePath(
+	tenantID uint64, knowledgeID string, fileName string,
+) (string, error) {
+	key, err := plannedfile.FileKey(s.pathPrefix, tenantID, knowledgeID, fileName)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath(ossProvider, s.bucketName, key)
+}
+
+func (s *ossFileService) ReserveBytesPath(
+	tenantID uint64, fileName string, temp bool,
+) (string, error) {
+	if temp && s.tempClient != nil {
+		name, err := plannedfile.NewObjectName(fileName)
+		if err != nil {
+			return "", err
+		}
+		key, err := plannedfile.BuildKey("", "exports", strconv.FormatUint(tenantID, 10), name)
+		if err != nil {
+			return "", err
+		}
+		return plannedfile.FormatBucketPath(ossProvider, s.tempBucketName, key)
+	}
+	key, err := plannedfile.BytesKey(s.pathPrefix, tenantID, fileName, "exports")
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath(ossProvider, s.bucketName, key)
+}
+
+func (s *ossFileService) ReserveCopyPath(
+	srcPath string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	srcKey, err := plannedfile.ParseBucketPath(srcPath, ossProvider, s.bucketName, "")
+	if err != nil {
+		return "", fmt.Errorf("oss copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+	}
+	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+path.Ext(srcKey))
+}
+
+func (s *ossFileService) plannedMainKey(filePath string) (string, error) {
+	key, err := plannedfile.ParseBucketPath(filePath, ossProvider, s.bucketName, s.pathPrefix)
+	if err != nil {
+		return "", fmt.Errorf("planned OSS destination is not bound to this service: %w", err)
+	}
+	return key, nil
+}
+
+func (s *ossFileService) plannedBytesTarget(filePath string) (*oss.Client, string, string, error) {
+	if key, err := s.plannedMainKey(filePath); err == nil {
+		return s.client, s.bucketName, key, nil
+	}
+	if s.tempClient != nil {
+		key, err := plannedfile.ParseBucketPath(filePath, ossProvider, s.tempBucketName, "exports")
+		if err == nil {
+			return s.tempClient, s.tempBucketName, key, nil
+		}
+	}
+	return nil, "", "", fmt.Errorf("planned OSS bytes destination is not bound to this service")
+}
+
+func (s *ossFileService) CommitFileAtPath(
+	ctx context.Context, file *multipart.FileHeader, filePath string,
+) error {
+	if file == nil {
+		return fmt.Errorf("planned OSS commit: file is nil")
+	}
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	src, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("planned OSS commit: open upload: %w", err)
+	}
+	defer src.Close()
+	ext := filepath.Ext(file.Filename)
+	contentType := file.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(ext)
+	}
+	const multipartThreshold = 10 * 1024 * 1024
+	if file.Size > multipartThreshold {
+		uploader := s.client.NewUploader(func(uo *oss.UploaderOptions) {
+			uo.PartSize = 10 * 1024 * 1024
+			uo.ParallelNum = 3
+		})
+		if _, err := uploader.UploadFrom(ctx, &oss.PutObjectRequest{
+			Bucket: oss.Ptr(s.bucketName), Key: oss.Ptr(key), ContentType: oss.Ptr(contentType),
+		}, src); err != nil {
+			return fmt.Errorf("planned OSS commit: multipart upload: %w", err)
+		}
+		return nil
+	}
+	if _, err := s.client.PutObject(ctx, &oss.PutObjectRequest{
+		Bucket: oss.Ptr(s.bucketName), Key: oss.Ptr(key), Body: src, ContentType: oss.Ptr(contentType),
+	}); err != nil {
+		return fmt.Errorf("planned OSS commit: upload: %w", err)
+	}
+	return nil
+}
+
+func (s *ossFileService) commitReaderAtPath(
+	ctx context.Context, reader io.ReadSeeker, size int64, contentType, filePath string,
+) error {
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(path.Ext(key))
+	}
+	const multipartThreshold = 10 * 1024 * 1024
+	if size > multipartThreshold {
+		uploader := s.client.NewUploader(func(options *oss.UploaderOptions) {
+			options.PartSize = multipartThreshold
+			options.ParallelNum = 3
+		})
+		if _, err := uploader.UploadFrom(ctx, &oss.PutObjectRequest{
+			Bucket: oss.Ptr(s.bucketName), Key: oss.Ptr(key), ContentType: oss.Ptr(contentType),
+		}, reader); err != nil {
+			return fmt.Errorf("planned OSS stream multipart commit: %w", err)
+		}
+		return nil
+	}
+	if _, err := s.client.PutObject(ctx, &oss.PutObjectRequest{
+		Bucket: oss.Ptr(s.bucketName), Key: oss.Ptr(key), Body: reader, ContentType: oss.Ptr(contentType),
+	}); err != nil {
+		return fmt.Errorf("planned OSS stream commit: %w", err)
+	}
+	return nil
+}
+
+func (s *ossFileService) CommitBytesAtPath(ctx context.Context, data []byte, filePath string) error {
+	client, bucket, key, err := s.plannedBytesTarget(filePath)
+	if err != nil {
+		return err
+	}
+	if _, err := client.PutObject(ctx, &oss.PutObjectRequest{
+		Bucket: oss.Ptr(bucket), Key: oss.Ptr(key), Body: bytes.NewReader(data),
+		ContentType: oss.Ptr(utils.GetContentTypeByExt(path.Ext(key))),
+	}); err != nil {
+		return fmt.Errorf("planned OSS bytes commit: upload: %w", err)
+	}
+	return nil
+}
+
+func (s *ossFileService) CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error {
+	srcKey, err := plannedfile.ParseBucketPath(srcPath, ossProvider, s.bucketName, "")
+	if err != nil {
+		return fmt.Errorf("planned OSS copy source: %w", err)
+	}
+	dstKey, err := s.plannedMainKey(dstPath)
+	if err != nil {
+		return err
+	}
+	if _, err := s.client.CopyObject(ctx, &oss.CopyObjectRequest{
+		Bucket: oss.Ptr(s.bucketName), Key: oss.Ptr(dstKey),
+		SourceBucket: oss.Ptr(s.bucketName), SourceKey: oss.Ptr(srcKey),
+	}); err != nil {
+		return fmt.Errorf("planned OSS copy commit: %w", err)
+	}
+	return nil
 }
 
 // CheckOssConnectivity tests OSS connectivity using the provided credentials.
@@ -162,85 +369,31 @@ func (s *ossFileService) CheckConnectivity(ctx context.Context) error {
 func (s *ossFileService) SaveFile(ctx context.Context,
 	file *multipart.FileHeader, tenantID uint64, knowledgeID string,
 ) (string, error) {
-	ext := filepath.Ext(file.Filename)
-	objectName := fmt.Sprintf("%s%d/%s/%s%s", s.pathPrefix, tenantID, knowledgeID, uuid.New().String(), ext)
-
-	src, err := file.Open()
+	if file == nil {
+		return "", fmt.Errorf("failed to save file to OSS: file is nil")
+	}
+	filePath, err := s.ReserveFilePath(tenantID, knowledgeID, file.Filename)
 	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
+		return "", err
 	}
-	defer src.Close()
-
-	contentType := file.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = utils.GetContentTypeByExt(ext)
+	if err := s.CommitFileAtPath(ctx, file, filePath); err != nil {
+		return "", err
 	}
-
-	// Use Uploader for files > 10MB (auto multipart with concurrent uploads)
-	const multipartThreshold = 10 * 1024 * 1024
-	if file.Size > multipartThreshold {
-		uploader := s.client.NewUploader(func(uo *oss.UploaderOptions) {
-			uo.PartSize = 10 * 1024 * 1024 // 10MB per part
-			uo.ParallelNum = 3             // 3 concurrent uploads
-		})
-
-		_, err = uploader.UploadFrom(ctx,
-			&oss.PutObjectRequest{
-				Bucket:      oss.Ptr(s.bucketName),
-				Key:         oss.Ptr(objectName),
-				ContentType: oss.Ptr(contentType),
-			},
-			src,
-		)
-		if err != nil {
-			return "", fmt.Errorf("failed to upload file to OSS (multipart): %w", err)
-		}
-	} else {
-		_, err = s.client.PutObject(ctx, &oss.PutObjectRequest{
-			Bucket:      oss.Ptr(s.bucketName),
-			Key:         oss.Ptr(objectName),
-			Body:        src,
-			ContentType: oss.Ptr(contentType),
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to upload file to OSS: %w", err)
-		}
-	}
-
-	return fmt.Sprintf("oss://%s/%s", s.bucketName, objectName), nil
+	return filePath, nil
 }
 
 // SaveBytes saves bytes data to OSS.
 // If temp is true and temp bucket is configured, saves to temp bucket.
 // Otherwise saves to main bucket.
 func (s *ossFileService) SaveBytes(ctx context.Context, data []byte, tenantID uint64, fileName string, temp bool) (string, error) {
-	safeName, err := utils.SafeFileName(fileName)
+	filePath, err := s.ReserveBytesPath(tenantID, fileName, temp)
 	if err != nil {
-		return "", fmt.Errorf("invalid file name: %w", err)
+		return "", err
 	}
-	ext := filepath.Ext(safeName)
-
-	targetBucket := s.bucketName
-	client := s.client
-	objectName := fmt.Sprintf("%s%d/exports/%s%s", s.pathPrefix, tenantID, uuid.New().String(), ext)
-
-	if temp && s.tempClient != nil {
-		targetBucket = s.tempBucketName
-		client = s.tempClient
-		objectName = fmt.Sprintf("exports/%d/%s%s", tenantID, uuid.New().String(), ext)
+	if err := s.CommitBytesAtPath(ctx, data, filePath); err != nil {
+		return "", err
 	}
-
-	_, err = client.PutObject(ctx, &oss.PutObjectRequest{
-		Bucket:      oss.Ptr(targetBucket),
-		Key:         oss.Ptr(objectName),
-		Body:        bytes.NewReader(data),
-		ContentType: oss.Ptr(utils.GetContentTypeByExt(ext)),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload bytes to OSS: %w", err)
-	}
-
-	return fmt.Sprintf("oss://%s/%s", targetBucket, objectName), nil
+	return filePath, nil
 }
 
 // CopyFile copies an existing OSS object to a new knowledge-owned object using a
@@ -249,30 +402,25 @@ func (s *ossFileService) SaveBytes(ctx context.Context, data []byte, tenantID ui
 func (s *ossFileService) CopyFile(ctx context.Context,
 	srcPath string, tenantID uint64, knowledgeID string,
 ) (string, error) {
-	srcBucket, srcKey, err := parseOssFilePath(srcPath)
+	newPath, err := s.ReserveCopyPath(srcPath, tenantID, knowledgeID)
 	if err != nil {
-		return "", fmt.Errorf("oss copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+		return "", err
 	}
-	if err := utils.SafeObjectKey(srcKey); err != nil {
-		return "", fmt.Errorf("invalid source path: %w", err)
+	if err := s.CommitCopyAtPath(ctx, srcPath, newPath); err != nil {
+		return "", err
 	}
-
-	ext := filepath.Ext(srcPath)
-	destKey := fmt.Sprintf("%s%d/%s/%s%s", s.pathPrefix, tenantID, knowledgeID, uuid.New().String(), ext)
-
-	_, err = s.client.CopyObject(ctx, &oss.CopyObjectRequest{
-		Bucket:       oss.Ptr(s.bucketName),
-		Key:          oss.Ptr(destKey),
-		SourceBucket: oss.Ptr(srcBucket),
-		SourceKey:    oss.Ptr(srcKey),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to copy file in OSS: %w", err)
-	}
-
-	newPath := fmt.Sprintf("oss://%s/%s", s.bucketName, destKey)
 	logger.Infof(ctx, "Copied OSS object %s to %s", srcPath, newPath)
 	return newPath, nil
+}
+
+func (s *ossFileService) clientForBoundBucket(bucket string) (*oss.Client, error) {
+	if bucket == s.bucketName {
+		return s.client, nil
+	}
+	if s.tempClient != nil && bucket == s.tempBucketName {
+		return s.tempClient, nil
+	}
+	return nil, fmt.Errorf("OSS bucket %q is not bound to this service", bucket)
 }
 
 // GetFile retrieves a file from OSS by its path.
@@ -285,11 +433,9 @@ func (s *ossFileService) GetFile(ctx context.Context, filePath string) (io.ReadC
 		return nil, fmt.Errorf("invalid file path: %w", err)
 	}
 
-	var client *oss.Client
-	if bucketName == s.tempBucketName && s.tempClient != nil {
-		client = s.tempClient
-	} else {
-		client = s.client
+	client, err := s.clientForBoundBucket(bucketName)
+	if err != nil {
+		return nil, err
 	}
 
 	resp, err := client.GetObject(ctx, &oss.GetObjectRequest{
@@ -313,11 +459,9 @@ func (s *ossFileService) DeleteFile(ctx context.Context, filePath string) error 
 		return fmt.Errorf("invalid file path: %w", err)
 	}
 
-	var client *oss.Client
-	if bucketName == s.tempBucketName && s.tempClient != nil {
-		client = s.tempClient
-	} else {
-		client = s.client
+	client, err := s.clientForBoundBucket(bucketName)
+	if err != nil {
+		return err
 	}
 
 	_, err = client.DeleteObject(ctx, &oss.DeleteObjectRequest{
@@ -341,12 +485,9 @@ func (s *ossFileService) GetFileURL(ctx context.Context, filePath string) (strin
 		return "", fmt.Errorf("invalid file path: %w", err)
 	}
 
-	// Determine which client to use
-	var client *oss.Client
-	if bucketName == s.tempBucketName && s.tempClient != nil {
-		client = s.tempClient
-	} else {
-		client = s.client
+	client, err := s.clientForBoundBucket(bucketName)
+	if err != nil {
+		return "", err
 	}
 
 	// Generate presigned URL (valid for 24 hours)

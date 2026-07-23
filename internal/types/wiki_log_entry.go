@@ -79,6 +79,15 @@ type WikiLogEntry struct {
 	// frontend pagination uses it as a stable cursor without needing to
 	// disambiguate identical created_at values.
 	ID uint64 `json:"id" gorm:"primaryKey;autoIncrement"`
+	// SourceOpID is the durable task_pending_ops.id that produced this event.
+	// It is nullable for log rows created before queue-backed Wiki ingestion
+	// and for administrative events that do not originate from that queue.
+	// A database unique index makes an event append idempotent across worker
+	// retries: once the log INSERT commits, replaying the same pending row can
+	// safely continue with index/publication/settlement without adding another
+	// visible event. This is internal provenance and is intentionally omitted
+	// from the public API response.
+	SourceOpID *int64 `json:"-" gorm:"column:source_op_id"`
 	// Tenant scope, mirrored from the enclosing knowledge base.
 	TenantID uint64 `json:"tenant_id" gorm:"index"`
 	// Knowledge base this event belongs to.

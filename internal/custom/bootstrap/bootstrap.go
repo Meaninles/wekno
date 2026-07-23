@@ -21,6 +21,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
@@ -50,6 +51,7 @@ type Handlers struct {
 	ChatShare            *chatshare.Handler
 	Admin                *customadmin.Handler
 	AuthSecurity         *authsecurity.Handler
+	DocumentQueue        *documentqueue.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -89,6 +91,7 @@ func NewHandlers(
 	fileService interfaces.FileService,
 	documentReader interfaces.DocumentReader,
 	imageResolver *docparser.ImageResolver,
+	documentQueueCoordinator *documentqueue.Coordinator,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
@@ -306,6 +309,7 @@ func NewHandlers(
 		ChatShare:                   chatshare.NewHandler(chatShareService),
 		Admin:                       customadmin.NewHandler(adminService),
 		AuthSecurity:                authSecurityHandler,
+		DocumentQueue:               documentqueue.NewHandler(documentQueueCoordinator),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -438,6 +442,14 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 			adminRoutes.PUT("/users-active", handlers.Admin.BatchSetUsersActive)
 			adminRoutes.PUT("/users/:id/active", handlers.Admin.SetUserActive)
 		}
+
+		if handlers.DocumentQueue != nil {
+			documentQueueAdminRoutes := custom.Group("/document-queue")
+			{
+				documentQueueAdminRoutes.GET("/instances", handlers.DocumentQueue.Instances)
+				documentQueueAdminRoutes.POST("/instances/termination-attestation", handlers.DocumentQueue.AttestTermination)
+			}
+		}
 	}
 
 	if handlers.BuiltinAgentDefaults != nil && ownedAgentOrAdmin != nil {
@@ -469,6 +481,14 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 		{
 			sessionStateRoutes.POST("/status", handlers.SessionState.ListStatus)
 			sessionStateRoutes.POST("/sessions/:session_id/read", handlers.SessionState.MarkRead)
+		}
+	}
+
+	if handlers.DocumentQueue != nil {
+		documentQueueRoutes := v1.Group("/custom/document-queue")
+		{
+			documentQueueRoutes.GET("/status", handlers.DocumentQueue.Status)
+			documentQueueRoutes.POST("/status", handlers.DocumentQueue.StatusBatch)
 		}
 	}
 

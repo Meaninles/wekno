@@ -35,7 +35,7 @@ func TestMoveKnowledgeReuseVectors_CrossStoreRejected(t *testing.T) {
 			dst := &types.KnowledgeBase{ID: "kb-dst", VectorStoreID: tt.dstStore}
 			kn := &types.Knowledge{ID: "k1", EmbeddingModelID: "m1"}
 
-			err := s.moveKnowledgeReuseVectors(ctx, kn, src, dst)
+			err := s.moveKnowledgeReuseVectors(ctx, kn, src, dst, knowledgeMoveTestAttemptID)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "different vector stores")
 		})

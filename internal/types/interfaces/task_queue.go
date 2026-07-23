@@ -13,11 +13,11 @@ import (
 // tuple is the only routing primitive the repository understands;
 // deduplication, batching, and retry policy live in the consumer.
 //
-// Concurrency model in this revision: PeekBatch does NOT take row
-// locks. Consumers are expected to enforce per-(scope_id) serialization
-// out-of-band (wiki ingest does this via Redis SetNX wiki:active:<kbID>).
-// The reserved `claimed_at` column lets a future revision adopt
-// pessimistic locking without a schema change.
+// Concurrency model in this revision: PeekBatch does NOT take row locks.
+// Wiki ingest uses Redis/Lite for liveness serialization and a monotonically
+// increasing database epoch/token for correctness fencing at every mutation.
+// The reserved `claimed_at` column remains available for queues that later
+// adopt pessimistic row claiming.
 type TaskPendingOpsRepository interface {
 	// Enqueue inserts a single op. The caller fills in TenantID, TaskType,
 	// Scope, ScopeID, Op, DedupKey, Payload; ID, FailCount, EnqueuedAt
@@ -31,9 +31,16 @@ type TaskPendingOpsRepository interface {
 	PeekBatch(ctx context.Context, taskType, scope, scopeID string, limit int) ([]*types.TaskPendingOp, error)
 
 	// DeleteByIDs removes the given rows. No-op for empty input. Used
-	// to consume a successfully-processed batch, and to drop ops that
-	// have been moved to task_dead_letters.
+	// to consume a successfully-processed batch.
 	DeleteByIDs(ctx context.Context, ids []int64) error
+
+	// ArchiveToDeadLetter atomically moves one pending row into the
+	// dead-letter archive only if its current fail_count still equals the
+	// supplied dead-letter FailCount. A missing or renewed pending row is an
+	// idempotent no-op; if validation or insertion of the dead letter fails,
+	// the pending row remains queued because both operations share one
+	// transaction.
+	ArchiveToDeadLetter(ctx context.Context, pendingID int64, dl *types.TaskDeadLetter) error
 
 	// IncrFailCount increments fail_count for one row and returns the
 	// new value. Returns (0, nil) if the row does not exist (race with
@@ -45,6 +52,20 @@ type TaskPendingOpsRepository interface {
 	// used by the wiki ingest follow-up scheduler.
 	PendingCount(ctx context.Context, taskType, scope, scopeID string) (int64, error)
 
+	// ExistsByDedupKey reports whether at least one row exists for the
+	// exact queue tuple and service-defined deduplication key. If op is
+	// non-empty, only that operation kind is considered. This is the
+	// read-only counterpart of DeleteByDedupKey and lets task inspection
+	// prove that a per-object operation is still queued without loading
+	// an entire KB-scoped batch into memory.
+	ExistsByDedupKey(ctx context.Context, taskType, scope, scopeID, dedupKey, op string) (bool, error)
+
+	// ExistsByDedupKeyPrefix is the generation-aware counterpart used by
+	// document-scoped inspectors. The prefix must include the service-owned
+	// separator (for Wiki ingest: "<knowledge_id>:") so one document cannot
+	// match another document whose ID merely shares a textual prefix.
+	ExistsByDedupKeyPrefix(ctx context.Context, taskType, scope, scopeID, dedupKeyPrefix, op string) (bool, error)
+
 	// DeleteByDedupKey removes rows for the tuple whose DedupKey
 	// matches. If `op` is non-empty, only rows with that exact op are
 	// removed (this lets wiki ingest scrub queued "ingest" ops while
@@ -53,6 +74,10 @@ type TaskPendingOpsRepository interface {
 	// deleted). If `op` is empty, every matching row is removed
 	// regardless of op.
 	DeleteByDedupKey(ctx context.Context, taskType, scope, scopeID, dedupKey, op string) error
+
+	// DeleteByDedupKeyPrefix removes every generation-scoped row for one
+	// logical object while preserving other operation kinds when op is set.
+	DeleteByDedupKeyPrefix(ctx context.Context, taskType, scope, scopeID, dedupKeyPrefix, op string) error
 }
 
 // TaskDeadLetterRepository persists rows for the generic task dead-letter

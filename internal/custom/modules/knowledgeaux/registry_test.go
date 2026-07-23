@@ -1,0 +1,636 @@
+package knowledgeaux
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Tencent/WeKnora/internal/custom/modules/storagebinding"
+	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+var registryTestSequence atomic.Uint64
+
+type fakeFileService struct {
+	mu       sync.Mutex
+	provider string
+	deleted  []string
+	failures map[string]int
+	started  chan string
+	release  <-chan struct{}
+}
+
+func (s *fakeFileService) BindingForPath(filePath string) (storagebinding.Binding, error) {
+	provider, err := ProviderForPath(filePath, s.provider)
+	if err != nil || provider != s.provider {
+		return storagebinding.Binding{}, ErrBindingMismatch
+	}
+	if provider == "local" {
+		return storagebinding.Normalize(storagebinding.Binding{
+			Provider: storagebinding.ProviderLocal, CanonicalLocalBase: "/fake/" + provider,
+			LocalRootIdentity: "fake:" + provider,
+			ConfigSource:      storagebinding.ConfigSourceDirect,
+			CredentialScope:   storagebinding.CredentialScopeNone,
+		})
+	}
+	parts := strings.SplitN(strings.TrimPrefix(filePath, provider+"://"), "/", 3)
+	if len(parts) < 2 || parts[0] == "" {
+		return storagebinding.Binding{}, ErrBindingMismatch
+	}
+	region := "test-region"
+	if provider == "cos" {
+		region = parts[1]
+	}
+	credentialRef, err := storagebinding.CredentialProfileReference(
+		storagebinding.CredentialScopeDirect, storagebinding.ProviderName(provider), "default",
+	)
+	if err != nil {
+		return storagebinding.Binding{}, err
+	}
+	binding := storagebinding.Binding{
+		Provider: storagebinding.ProviderName(provider), Endpoint: "https://" + provider + ".example.test",
+		Region: region, Bucket: parts[0], UseSSL: true,
+		ConfigSource:    storagebinding.ConfigSourceDirect,
+		CredentialScope: storagebinding.CredentialScopeDirect, CredentialRef: credentialRef,
+	}
+	if provider == "cos" {
+		binding.Endpoint = storagebinding.COSCanonicalEndpoint(binding.Bucket, binding.Region)
+	}
+	return storagebinding.Normalize(binding)
+}
+
+func (s *fakeFileService) CheckConnectivity(context.Context) error { return nil }
+func (s *fakeFileService) SaveFile(context.Context, *multipart.FileHeader, uint64, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+func (s *fakeFileService) SaveBytes(context.Context, []byte, uint64, string, bool) (string, error) {
+	return "", errors.New("not implemented")
+}
+func (s *fakeFileService) GetFile(context.Context, string) (io.ReadCloser, error) {
+	return nil, errors.New("not implemented")
+}
+func (s *fakeFileService) GetFileURL(_ context.Context, path string) (string, error) {
+	return path, nil
+}
+func (s *fakeFileService) DeleteFile(_ context.Context, path string) error {
+	if s.started != nil {
+		s.started <- path
+	}
+	if s.release != nil {
+		<-s.release
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deleted = append(s.deleted, path)
+	if s.failures[path] > 0 {
+		s.failures[path]--
+		return errors.New("injected delete failure")
+	}
+	return nil
+}
+
+type registryKnowledgeCreator struct {
+	started chan struct{}
+	release <-chan struct{}
+	calls   atomic.Int32
+}
+
+func (c *registryKnowledgeCreator) CreateKnowledgeTx(
+	_ context.Context, tx *gorm.DB, knowledge *types.Knowledge,
+) error {
+	c.calls.Add(1)
+	if err := tx.Create(knowledge).Error; err != nil {
+		return err
+	}
+	if c.started != nil {
+		close(c.started)
+	}
+	if c.release != nil {
+		<-c.release
+	}
+	return nil
+}
+func (s *fakeFileService) CopyFile(context.Context, string, uint64, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func openRegistryTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := filepath.Join(t.TempDir(), fmt.Sprintf("knowledgeaux-%d.db", registryTestSequence.Add(1))) +
+		"?_busy_timeout=5000&_journal_mode=WAL"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.TaskPendingOp{},
+	))
+	require.NoError(t, db.Create(&types.Tenant{ID: 7, Name: "tenant"}).Error)
+	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb-1", TenantID: 7, Name: "kb"}).Error)
+	return db
+}
+
+func testRegistry(db *gorm.DB, services map[string]*fakeFileService) *Registry {
+	return NewWithResolver(db, func(
+		_ context.Context, _ *types.Tenant, provider string,
+	) (interfaces.FileService, string, error) {
+		service := services[provider]
+		if service == nil && services == nil {
+			service = &fakeFileService{provider: provider, failures: map[string]int{}}
+		}
+		if service == nil {
+			return nil, provider, fmt.Errorf("provider %s unavailable", provider)
+		}
+		return service, provider, nil
+	})
+}
+
+func createOwner(t *testing.T, db *gorm.DB, status, generation string) *types.Knowledge {
+	t.Helper()
+	knowledge := &types.Knowledge{
+		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1",
+		Type: "file", ParseStatus: status, ProcessingGeneration: generation,
+	}
+	require.NoError(t, db.Create(knowledge).Error)
+	return knowledge
+}
+
+func objectFor(path, generation, kind string) Object {
+	provider, err := ProviderForPath(path, "obs")
+	if err != nil {
+		panic(err)
+	}
+	binding, err := (&fakeFileService{provider: provider}).BindingForPath(path)
+	if err != nil {
+		panic(err)
+	}
+	return Object{
+		TenantID: 7, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
+		ProcessingGeneration: generation, Path: path, FallbackProvider: "obs", Kind: kind,
+		Binding: &binding,
+	}
+}
+
+func countOwnership(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).Count(&count).Error)
+	return count
+}
+
+func TestProviderForPathExplicitSchemeWinsOverFallback(t *testing.T) {
+	tests := []struct {
+		path, fallback, want string
+	}{
+		{"minio://bucket/key", "obs", "minio"},
+		{"local://7/key", "cos", "local"},
+		{"https://bucket.cos.ap-guangzhou.myqcloud.com/key", "obs", "cos"},
+		{"legacy/without/scheme", "obs", "obs"},
+	}
+	for _, test := range tests {
+		got, err := ProviderForPath(test.path, test.fallback)
+		require.NoError(t, err)
+		require.Equal(t, test.want, got)
+	}
+	_, err := ProviderForPath("azure://bucket/key", "obs")
+	require.ErrorIs(t, err, ErrProviderRouting)
+}
+
+func TestRegisterIsIdempotentAndGenerationFenced(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusProcessing, "generation-1")
+	registry := testRegistry(db, nil)
+	object := objectFor("local://7/image.png", "generation-1", KindFanoutImage)
+
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+	_, err = registry.Register(context.Background(), object)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, countOwnership(t, db))
+
+	object.ProcessingGeneration = "generation-2"
+	_, err = registry.Register(context.Background(), object)
+	require.ErrorIs(t, err, ErrKnowledgeFence)
+	require.EqualValues(t, 1, countOwnership(t, db))
+}
+
+func TestCleanupKnowledgeRoutesMixedProvidersAndRetainsOnlyFailedPath(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	obs := &fakeFileService{provider: "obs", failures: map[string]int{"obs://bucket/image.png": 1}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local, "obs": obs})
+	for _, object := range []Object{
+		objectFor("local://7/image.png", "generation-1", KindFanoutImage),
+		objectFor("obs://bucket/image.png", "generation-1", KindFanoutImage),
+	} {
+		_, err := registry.Register(context.Background(), object)
+		require.NoError(t, err)
+	}
+
+	err := registry.CleanupDerived(context.Background(), 7, "kb-1", "knowledge-1", "obs", nil)
+	require.Error(t, err)
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Equal(t, []string{"local://7/image.png"}, local.deleted)
+	require.Equal(t, []string{"obs://bucket/image.png"}, obs.deleted)
+
+	require.NoError(t, registry.CleanupDerived(context.Background(), 7, "kb-1", "knowledge-1", "obs", nil))
+	require.Zero(t, countOwnership(t, db))
+	require.Equal(t, []string{"obs://bucket/image.png", "obs://bucket/image.png"}, obs.deleted)
+}
+
+func TestRecoveryCleansStaleFAQEntriesAfterPendingTaskCancellation(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/faq.json", "generation-1", KindFAQEntries)
+	object.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).
+		Update("enqueued_at", time.Now().Add(-time.Hour)).Error)
+
+	recovery := NewRecoveryWithConfig(registry, RecoveryConfig{
+		ScanInterval: time.Hour, ScanTimeout: time.Hour, PendingOwnerGrace: time.Nanosecond,
+		FAQEntriesMaxAge: time.Nanosecond, FAQExportMaxAge: time.Nanosecond,
+	})
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.Zero(t, countOwnership(t, db))
+	require.Equal(t, []string{"local://7/faq.json"}, local.deleted)
+}
+
+func TestRecoveryRetainsReferencedFAQExportAndCleansSupersededExport(t *testing.T) {
+	db := openRegistryTestDB(t)
+	owner := createOwner(t, db, types.ParseStatusCompleted, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/failed.csv", "generation-1", KindFAQFailedExport)
+	object.FallbackProvider = "local"
+	object.Reference = "https://download/failed.csv"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+	require.NoError(t, owner.SetLastFAQImportResult(&types.FAQImportResult{
+		FailedEntriesURL: object.Reference,
+	}))
+	require.NoError(t, db.Model(owner).Update("last_faq_import_result", owner.LastFAQImportResult).Error)
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).
+		Update("enqueued_at", time.Now().Add(-time.Hour)).Error)
+
+	recovery := NewRecoveryWithConfig(registry, RecoveryConfig{
+		ScanInterval: time.Hour, ScanTimeout: time.Hour, PendingOwnerGrace: time.Nanosecond,
+		FAQEntriesMaxAge: time.Nanosecond, FAQExportMaxAge: time.Nanosecond,
+	})
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+
+	require.NoError(t, db.Model(owner).Update("last_faq_import_result", types.JSON(nil)).Error)
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.Zero(t, countOwnership(t, db))
+	require.Equal(t, []string{"local://7/failed.csv"}, local.deleted)
+}
+
+func TestPendingSourceReservationSurvivesGraceThenRecoversWithoutKnowledgeRow(t *testing.T) {
+	db := openRegistryTestDB(t)
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/knowledge-1/source.pdf", "generation-1", KindSourceFile)
+	object.FallbackProvider = "local"
+	object, err := registry.Reserve(context.Background(), object, true)
+	require.NoError(t, err)
+
+	recovery := NewRecoveryWithConfig(registry, RecoveryConfig{
+		ScanInterval: time.Hour, ScanTimeout: time.Hour, PendingOwnerGrace: time.Hour,
+		FAQEntriesMaxAge: time.Hour, FAQExportMaxAge: time.Hour,
+	})
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).
+		Update("enqueued_at", time.Now().Add(-2*time.Hour)).Error)
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.Zero(t, countOwnership(t, db))
+	require.Equal(t, []string{"local://7/knowledge-1/source.pdf"}, local.deleted)
+}
+
+func TestRecoveryRetainsFailedDerivedObjectsForPartialWork(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusFailed, "generation-1")
+	path := "local://7/orphan.png"
+	local := &fakeFileService{provider: "local", failures: map[string]int{path: 1}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor(path, "generation-1", KindFanoutImage)
+	object.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+	recovery := NewRecovery(registry)
+
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+
+	// A new processing generation makes the old derived object unreferenced;
+	// provider failure retains proof for the next recovery cycle.
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Update("processing_generation", "generation-2").Error)
+	require.Error(t, recovery.RecoverNow(context.Background()))
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.Zero(t, countOwnership(t, db))
+}
+
+func TestDerivedCleanupAndRecoveryNeverDeletePersistentSources(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusFailed, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	objects := []Object{
+		objectFor("local://7/source.pdf", "generation-1", KindSourceFile),
+		objectFor("local://7/clone-source.pdf", "generation-1", KindCloneSourceFile),
+		objectFor("local://7/image.png", "generation-1", KindFanoutImage),
+	}
+	for _, object := range objects {
+		object.FallbackProvider = "local"
+		_, err := registry.Register(context.Background(), object)
+		require.NoError(t, err)
+	}
+
+	recovery := NewRecovery(registry)
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.Empty(t, local.deleted, "failed status retains partial derived work and both sources")
+
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Update("processing_generation", "generation-2").Error)
+	require.NoError(t, recovery.RecoverNow(context.Background()))
+	require.Equal(t, []string{"local://7/image.png"}, local.deleted)
+	require.EqualValues(t, 2, countOwnership(t, db))
+
+	require.NoError(t, registry.CleanupDerived(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", nil,
+	))
+	require.EqualValues(t, 2, countOwnership(t, db))
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", nil,
+	))
+	require.Zero(t, countOwnership(t, db))
+	require.ElementsMatch(t, []string{
+		"local://7/image.png", "local://7/source.pdf", "local://7/clone-source.pdf",
+	}, local.deleted)
+}
+
+func TestCleanupSkipsClientReferenceForRegisteredFAQExport(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/export.csv", "generation-1", KindFAQFailedExport)
+	object.FallbackProvider = "local"
+	object.Reference = "https://download.example/export.csv"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{object.Reference},
+	))
+	require.Equal(t, []string{object.Path}, local.deleted)
+}
+
+func TestKnowledgeBaseScopedLedgerIsolation(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusProcessing, "generation-1")
+	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb-2", TenantID: 7, Name: "kb-2"}).Error)
+	require.NoError(t, db.Create(&types.Knowledge{
+		ID: "knowledge-2", TenantID: 7, KnowledgeBaseID: "kb-2", Type: "file",
+		ParseStatus: types.ParseStatusProcessing, ProcessingGeneration: "generation-2",
+	}).Error)
+	registry := testRegistry(db, nil)
+	_, err := registry.Register(context.Background(), objectFor(
+		"local://7/kb-1.png", "generation-1", KindFanoutImage,
+	))
+	require.NoError(t, err)
+	second := objectFor("local://7/kb-2.png", "generation-2", KindFanoutImage)
+	second.KnowledgeBaseID = "kb-2"
+	second.KnowledgeID = "knowledge-2"
+	_, err = registry.Register(context.Background(), second)
+	require.NoError(t, err)
+
+	count1, err := registry.CountKnowledgeBase(context.Background(), 7, "kb-1")
+	require.NoError(t, err)
+	count2, err := registry.CountKnowledgeBase(context.Background(), 7, "kb-2")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count1)
+	require.EqualValues(t, 1, count2)
+
+	var rows []types.TaskPendingOp
+	require.NoError(t, db.Order("id").Find(&rows).Error)
+	require.Equal(t, types.TaskScopeKnowledgeBase, rows[0].Scope)
+	require.Equal(t, "kb-1", rows[0].ScopeID)
+	require.Contains(t, rows[0].DedupKey, "knowledge-1:")
+	require.Equal(t, "kb-2", rows[1].ScopeID)
+}
+
+func TestFileServiceForPathRequiresExactRegisteredKBTuple(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusProcessing, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/faq.json", "generation-1", KindFAQEntries)
+	object.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+
+	service, err := registry.FileServiceForPath(
+		context.Background(), 7, "kb-1", "knowledge-1", object.Path, "obs",
+	)
+	require.NoError(t, err)
+	require.Same(t, local, service)
+	_, err = registry.FileServiceForPath(
+		context.Background(), 7, "wrong-kb", "knowledge-1", object.Path, "local",
+	)
+	require.ErrorIs(t, err, ErrReservationLost)
+	_, err = registry.FileServiceForPath(
+		context.Background(), 7, "kb-1", "knowledge-1", "", "local",
+	)
+	require.ErrorIs(t, err, ErrInvalidObject)
+}
+
+func TestRecoveryFirstPreventsLateReservationAdoption(t *testing.T) {
+	db := openRegistryTestDB(t)
+	releaseDelete := make(chan struct{})
+	deleteStarted := make(chan string, 1)
+	local := &fakeFileService{
+		provider: "local", failures: map[string]int{}, started: deleteStarted, release: releaseDelete,
+	}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/knowledge-1/source.pdf", "generation-1", KindSourceFile)
+	object.FallbackProvider = "local"
+	object, err := registry.Reserve(context.Background(), object, true)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).
+		Update("enqueued_at", time.Now().Add(-2*time.Hour)).Error)
+
+	recovery := NewRecoveryWithConfig(registry, RecoveryConfig{
+		ScanInterval: time.Hour, ScanTimeout: time.Hour, PendingOwnerGrace: time.Nanosecond,
+		FAQEntriesMaxAge: time.Hour, FAQExportMaxAge: time.Hour,
+	})
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- recovery.RecoverNow(context.Background()) }()
+	require.Equal(t, object.Path, <-deleteStarted)
+
+	creator := &registryKnowledgeCreator{}
+	knowledge := &types.Knowledge{
+		ID: object.KnowledgeID, TenantID: object.TenantID, KnowledgeBaseID: object.KnowledgeBaseID,
+		Type: "file", FilePath: object.Path, ParseStatus: types.ParseStatusPending,
+		ProcessingGeneration: object.ProcessingGeneration,
+	}
+	adoptDone := make(chan error, 1)
+	go func() {
+		adoptDone <- registry.AdoptReservedKnowledge(context.Background(), object, knowledge, creator)
+	}()
+	select {
+	case err := <-adoptDone:
+		t.Fatalf("adoption escaped recovery lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseDelete)
+	require.NoError(t, <-recoveryDone)
+	require.ErrorIs(t, <-adoptDone, ErrReservationLost)
+	require.Zero(t, creator.calls.Load())
+	var count int64
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", object.KnowledgeID).Count(&count).Error)
+	require.Zero(t, count)
+}
+
+func TestAdoptionFirstPreventsRecoveryFromDeletingCommittedSource(t *testing.T) {
+	db := openRegistryTestDB(t)
+	local := &fakeFileService{provider: "local", failures: map[string]int{}, started: make(chan string, 1)}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/knowledge-1/source.pdf", "generation-1", KindSourceFile)
+	object.FallbackProvider = "local"
+	object, err := registry.Reserve(context.Background(), object, true)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).
+		Update("enqueued_at", time.Now().Add(-2*time.Hour)).Error)
+
+	creatorStarted := make(chan struct{})
+	releaseCreator := make(chan struct{})
+	creator := &registryKnowledgeCreator{started: creatorStarted, release: releaseCreator}
+	knowledge := &types.Knowledge{
+		ID: object.KnowledgeID, TenantID: object.TenantID, KnowledgeBaseID: object.KnowledgeBaseID,
+		Type: "file", FilePath: object.Path, ParseStatus: types.ParseStatusPending,
+		ProcessingGeneration: object.ProcessingGeneration,
+	}
+	adoptDone := make(chan error, 1)
+	go func() {
+		adoptDone <- registry.AdoptReservedKnowledge(context.Background(), object, knowledge, creator)
+	}()
+	<-creatorStarted
+
+	recovery := NewRecoveryWithConfig(registry, RecoveryConfig{
+		ScanInterval: time.Hour, ScanTimeout: time.Hour, PendingOwnerGrace: time.Nanosecond,
+		FAQEntriesMaxAge: time.Hour, FAQExportMaxAge: time.Hour,
+	})
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- recovery.RecoverNow(context.Background()) }()
+	select {
+	case path := <-local.started:
+		t.Fatalf("recovery deleted while adoption held the KB lock: %s", path)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseCreator)
+	require.NoError(t, <-adoptDone)
+	require.NoError(t, <-recoveryDone)
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+}
+
+func TestDeleteWaitsForCommitAndDeleteFirstSuppressesCommitCallback(t *testing.T) {
+	t.Run("commit first", func(t *testing.T) {
+		db := openRegistryTestDB(t)
+		createOwner(t, db, types.ParseStatusProcessing, "generation-1")
+		deleteStarted := make(chan string, 1)
+		local := &fakeFileService{provider: "local", failures: map[string]int{}, started: deleteStarted}
+		registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+		object := objectFor("local://7/image.png", "generation-1", KindFanoutImage)
+		object.FallbackProvider = "local"
+		object, err := registry.Reserve(context.Background(), object, false)
+		require.NoError(t, err)
+		commitStarted := make(chan struct{})
+		releaseCommit := make(chan struct{})
+		commitDone := make(chan error, 1)
+		go func() {
+			commitDone <- registry.CommitReserved(context.Background(), object, false, func() error {
+				close(commitStarted)
+				<-releaseCommit
+				return nil
+			})
+		}()
+		<-commitStarted
+		deleteDone := make(chan error, 1)
+		go func() {
+			deleteDone <- registry.DeletePaths(
+				context.Background(), 7, "kb-1", "knowledge-1", "local", []string{object.Path},
+			)
+		}()
+		select {
+		case path := <-deleteStarted:
+			t.Fatalf("delete escaped commit lock: %s", path)
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(releaseCommit)
+		require.NoError(t, <-commitDone)
+		require.NoError(t, <-deleteDone)
+		require.Equal(t, object.Path, <-deleteStarted)
+	})
+
+	t.Run("delete first", func(t *testing.T) {
+		db := openRegistryTestDB(t)
+		createOwner(t, db, types.ParseStatusProcessing, "generation-1")
+		deleteStarted := make(chan string, 1)
+		releaseDelete := make(chan struct{})
+		local := &fakeFileService{
+			provider: "local", failures: map[string]int{}, started: deleteStarted, release: releaseDelete,
+		}
+		registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+		object := objectFor("local://7/image.png", "generation-1", KindFanoutImage)
+		object.FallbackProvider = "local"
+		object, err := registry.Reserve(context.Background(), object, false)
+		require.NoError(t, err)
+		deleteDone := make(chan error, 1)
+		go func() {
+			deleteDone <- registry.DeletePaths(
+				context.Background(), 7, "kb-1", "knowledge-1", "local", []string{object.Path},
+			)
+		}()
+		require.Equal(t, object.Path, <-deleteStarted)
+		var commitCalls atomic.Int32
+		commitDone := make(chan error, 1)
+		go func() {
+			commitDone <- registry.CommitReserved(context.Background(), object, false, func() error {
+				commitCalls.Add(1)
+				return nil
+			})
+		}()
+		select {
+		case err := <-commitDone:
+			t.Fatalf("commit escaped delete lock: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(releaseDelete)
+		require.NoError(t, <-deleteDone)
+		require.ErrorIs(t, <-commitDone, ErrReservationLost)
+		require.Zero(t, commitCalls.Load())
+	})
+}

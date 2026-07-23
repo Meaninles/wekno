@@ -48,6 +48,8 @@ import KbUploadSourceDropdown from './components/KbUploadSourceDropdown.vue';
 import UploadInfoButton from '@/custom/modules/uploadInfo/UploadInfoButton.vue';
 import UploadInfoDialog from '@/custom/modules/uploadInfo/UploadInfoDialog.vue';
 import { useUploadInfoStore, type UploadInfoBatchHandle } from '@/custom/modules/uploadInfo/store';
+import DocumentQueueBadge from '@/custom/modules/documentQueue/DocumentQueueBadge.vue';
+import { useDocumentQueueStatus } from '@/custom/modules/documentQueue/useDocumentQueueStatus';
 import TagEditDialog from './components/TagEditDialog.vue';
 import KbTagManageDrawer from './components/KbTagManageDrawer.vue';
 import { useTagChipsOverflow } from '@/composables/useTagChipsOverflow';
@@ -340,6 +342,20 @@ function clearTraceAvailabilityCache() {
 function isParseInFlight(status?: string): boolean {
   return isKnowledgeParseInFlight(status);
 }
+
+// Queue state is fetched once for the currently rendered document page and
+// shared by both grid/list views. Poll only while at least one visible card is
+// in flight; terminal pages do not generate background queue traffic.
+const documentQueueKnowledgeIds = computed(() =>
+  cardList.value.map((item: KnowledgeCard) => item.id).filter(Boolean),
+);
+const documentQueuePollingEnabled = computed(() =>
+  cardList.value.some((item: KnowledgeCard) => isParseInFlight(item.parse_status)),
+);
+const {
+  waitingTotal: documentQueueWaitingTotal,
+  itemsById: documentQueueItems,
+} = useDocumentQueueStatus(documentQueueKnowledgeIds, documentQueuePollingEnabled);
 
 // Status line shown on the card body while parse is still in flight.
 function inFlightCardStatusText(item: KnowledgeCard): string {
@@ -2845,6 +2861,8 @@ async function createNewSession(value: string): Promise<void> {
                             @keydown.enter.stop="handleViewTrace(index, item)"
                             @keydown.space.prevent.stop="handleViewTrace(index, item)">{{
                               inFlightCardStatusText(item) }}</span>
+                          <DocumentQueueBadge :status="documentQueueItems[item.id]"
+                            :waiting-total="documentQueueWaitingTotal" />
                           <button type="button" class="card-analyze-trace-btn" :title="t('knowledgeStages.viewTrace')"
                             :aria-label="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)">
                             <t-icon name="chart-line" />
@@ -2950,6 +2968,8 @@ async function createNewSession(value: string): Promise<void> {
                         <div v-if="isParseInFlight(hoveredCardItem.parse_status)" class="card-popover-status parsing">
                           <KnowledgeProcessingTimeline :knowledge-id="hoveredCardItem.id"
                             :parse-status="hoveredCardItem.parse_status" :auto-poll="false" :compact="true" />
+                          <DocumentQueueBadge :status="documentQueueItems[hoveredCardItem.id]"
+                            :waiting-total="documentQueueWaitingTotal" />
                         </div>
                         <div v-else-if="hoveredCardItem.parse_status === 'failed'" class="card-popover-status failure">
                           <KnowledgeProcessingTimeline :knowledge-id="hoveredCardItem.id"
@@ -3004,7 +3024,9 @@ async function createNewSession(value: string): Promise<void> {
                 </template>
                 <template v-else-if="cardList.length && viewMode === 'list'">
                   <DocumentListView :items="cardList" :selected-ids="selectedIds" :tag-list="tagList"
-                    :can-edit="canEdit" @open="(item: any) => openKnowledgeItem(item)" @toggle-row="toggleSelectRow"
+                    :can-edit="canEdit" :queue-status-by-id="documentQueueItems"
+                    :queue-waiting-total="documentQueueWaitingTotal"
+                    @open="(item: any) => openKnowledgeItem(item)" @toggle-row="toggleSelectRow"
                     @toggle-all="toggleSelectAll" @action="(action: any, item: any) => handleListAction(action, item)"
                     @tag-edit="(item: any) => openTagEditDialog(item)" />
                 </template>

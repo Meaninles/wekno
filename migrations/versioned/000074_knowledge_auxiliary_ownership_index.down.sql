@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS uq_task_pending_ops_knowledge_aux_owned;

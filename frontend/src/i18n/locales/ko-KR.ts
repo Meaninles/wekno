@@ -616,6 +616,10 @@ export default {
     statusProcessing: "처리 중",
     statusFinalizing: "최적화 중",
     statusPending: "대기 중",
+    documentQueuePosition: "대기 {position}/{total}",
+    documentQueuePositionOnly: "대기 #{position}",
+    documentQueueTooltip: "시스템 전체에서 {total}개 문서가 파싱을 기다리고 있으며, 현재 문서는 {position}번째입니다",
+    documentQueueTooltipPositionOnly: "현재 문서는 시스템 전체 파싱 대기열의 {position}번째입니다",
     statusFailed: "실패",
     statusCancelled: "취소됨",
     statusDraft: "초안",
@@ -2455,8 +2459,8 @@ export default {
           default_storage_quota_gb: "신규 테넌트 기본 저장 용량 (GB)",
         },
         asynq: {
-          concurrency: "일반 작업 worker 동시 처리 수",
-          heavy_document_concurrency: "대형 문서 worker 동시 처리 수",
+          concurrency: "인스턴스당 문서 파싱 동시 처리 수",
+          heavy_document_concurrency: "대형 문서 동시 처리 수(고급)",
         },
       },
       keyDescriptions: {
@@ -2476,9 +2480,9 @@ export default {
         },
         asynq: {
           concurrency:
-            "대형 문서 파싱 큐를 제외한 일반 비동기 작업 worker 동시 처리 수입니다. 일반 문서 파싱·임베딩 등은 대부분 I/O 대기이므로 값을 올리면 대량 업로드 대기 시간을 줄일 수 있습니다. 적용하려면 서비스 프로세스를 재시작해야 합니다.",
+            "각 전체 기능 파싱 인스턴스가 동시에 처리할 수 있는 문서 수입니다. 하나의 슬롯은 같은 문서의 파싱, 청킹, 벡터화 및 관련 파생 작업을 끝까지 처리하며, 인스턴스를 추가하면 시스템 전체 처리량이 수평 확장됩니다. 변경 후 모든 파싱 인스턴스를 재시작해야 합니다.",
           heavy_document_concurrency:
-            "대형 문서 파싱 전용 worker 동시 처리 수입니다. 파일 크기 또는 DOCX/XLSX/CSV 구조 기준의 대형 임계값에 걸린 문서는 독립된 대형 큐에서 처리되며 일반 작업 worker를 사용하지 않습니다. 기본값은 2이며 적용하려면 서비스 프로세스를 재시작해야 합니다.",
+            "파일 크기 또는 구조 기준의 대형 임계값에 걸린 문서에 대한 인스턴스별 보호 상한입니다. 일반 용량은 위의 ‘인스턴스당 문서 파싱 동시 처리 수’를 사용하세요. 보통 조정할 필요가 없으며 변경 후 모든 파싱 인스턴스를 재시작해야 합니다.",
         },
       },
       enumLabels: {

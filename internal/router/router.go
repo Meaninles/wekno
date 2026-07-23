@@ -20,6 +20,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/config"
 	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/handler"
 	"github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -88,6 +89,7 @@ type RouterParams struct {
 	WeKnoraCloudHandler          *handler.WeKnoraCloudHandler
 	WikiPageHandler              *handler.WikiPageHandler
 	CustomHandlers               *custombootstrap.Handlers
+	DocumentQueue                *documentqueue.Coordinator `optional:"true"`
 }
 
 // NewRouter 创建新的路由
@@ -124,7 +126,18 @@ func NewRouter(params RouterParams) *gin.Engine {
 
 	// 健康检查（不需要认证）
 	r.GET("/health", func(c *gin.Context) {
+		if params.DocumentQueue != nil && !params.DocumentQueue.IsLive() {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy"})
+			return
+		}
 		c.JSON(200, gin.H{"status": "ok"})
+	})
+	r.GET("/ready", func(c *gin.Context) {
+		if params.DocumentQueue != nil && !params.DocumentQueue.IsReady() {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
 
 	// Swagger API 文档（仅在非生产环境下启用）

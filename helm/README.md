@@ -110,6 +110,11 @@ global:
 
 app:
   replicaCount: 3
+  topologySpread:
+    whenUnsatisfiable: DoNotSchedule
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
   resources:
     requests:
       cpu: 500m
@@ -117,6 +122,25 @@ app:
     limits:
       cpu: 2
       memory: 4Gi
+
+# Every app replica is a complete document-processing worker. The administrator
+# setting `asynq.concurrency` is the per-replica complete-document concurrency.
+docreader:
+  replicaCount: 3
+  service:
+    headless: true
+  topologySpread:
+    whenUnsatisfiable: DoNotSchedule
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# With STORAGE_TYPE=local, all app replicas must see the same files. Use a
+# ReadWriteMany storage class, or preferably configure shared object storage.
+dataFiles:
+  persistence:
+    accessModes:
+      - ReadWriteMany
 
 postgresql:
   persistence:
@@ -164,6 +188,7 @@ helm install weknora ./helm \
 | `serviceAccount.create` | Create ServiceAccount | `true` |
 | `serviceAccount.name` | ServiceAccount name | `""` |
 | `serviceAccount.annotations` | ServiceAccount annotations | `{}` |
+| `serviceAccount.automountServiceAccountToken` | Automount a general token on every component (the app verifier uses a dedicated projected token instead) | `false` |
 
 ### App (Backend)
 
@@ -176,6 +201,41 @@ helm install weknora ./helm \
 | `app.resources` | Resource limits | See values.yaml |
 | `app.env` | Environment variables | See values.yaml |
 | `app.extraEnv` | Additional env vars | `[]` |
+| `app.documentQueue.kubernetesRuntimeVerifier.enabled` | Verify exact terminated Pod UIDs before automatic cross-Pod takeover | `true` |
+| `app.documentQueue.kubernetesRuntimeVerifier.containerName` | App container whose current terminated state is authoritative | `app` |
+
+The app replicas share one durable PostgreSQL document-workflow outbox and one
+Redis delivery queue. Scaling `app.replicaCount` adds complete document workers;
+idle replicas claim globally waiting documents. A process restart with the same
+pod identity resumes its leases, while an expired lease from a failed/replaced
+pod is reassigned only after the delivery is confirmed inactive and the old
+boot has a runtime-backed termination proof. A normal SIGTERM publishes that
+proof after local handlers drain; an in-Pod container restart keeps the Pod UID
+and atomically adopts the old boot. By default, healthy replicas use a narrowly
+scoped projected service-account token to list Pods only in their namespace,
+match the exact immutable UID encoded in `instance_id`, and accept only the
+current `app` container's `terminated` state or terminal Pod phase. A
+`deletionTimestamp`, missing UID/404, heartbeat age, or lease expiry is never
+termination proof. When Kubernetes cannot retain an explicit terminal status
+(notably some node-partition/forced-deletion cases), fence the node/runtime and
+use the SystemAdmin-only
+`POST /api/v1/custom/document-queue/instances/termination-attestation` endpoint
+with the exact old `instance_id` and `boot_id`. Do not use pod-local file
+storage with multiple replicas.
+
+### DocReader
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `docreader.enabled` | Enable document parser | `true` |
+| `docreader.replicaCount` | Number of parser replicas | `1` |
+| `docreader.service.headless` | Expose all parser endpoints for gRPC round-robin | `true` |
+
+For worker high availability, run at least two app replicas and two DocReader
+replicas across failure domains, with disruption budgets enabled. PostgreSQL,
+Redis, object storage and the selected vector/graph/model
+providers must also use their own HA deployments; worker scaling does not make
+those external dependencies highly available.
 
 ### Frontend
 
@@ -231,6 +291,14 @@ host-relative `/share/chat/:token` path.
 | `redis.image.tag` | Image tag | `7-alpine` |
 | `redis.persistence.enabled` | Enable persistence | `true` |
 | `redis.persistence.size` | PVC size | `1Gi` |
+
+### Uploaded File Storage
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `dataFiles.persistence.enabled` | Persist uploaded files | `true` |
+| `dataFiles.persistence.size` | PVC size | `10Gi` |
+| `dataFiles.persistence.accessModes` | PVC access modes | `[ReadWriteOnce]` |
 
 ### Ingress
 

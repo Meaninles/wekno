@@ -1,15 +1,21 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ErrWikiPageNotFound is returned when a wiki page is not found
@@ -37,33 +43,81 @@ func (r *wikiPageRepository) wikiCategoryRankOrder() string {
 
 // Create inserts a new wiki page record
 func (r *wikiPageRepository) Create(ctx context.Context, page *types.WikiPage) error {
-	return r.db.WithContext(ctx).Create(page).Error
+	if page == nil {
+		return errors.New("create wiki page: page is nil")
+	}
+	return kbwritefence.WithActive(ctx, r.db, page.TenantID, page.KnowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, page.TenantID, page.KnowledgeBaseID); err != nil {
+			return err
+		}
+		if err := tx.Create(page).Error; err != nil {
+			return err
+		}
+		return wikiingestguard.RecordPageApplication(ctx, tx, page.Slug)
+	})
 }
 
 // Update updates an existing wiki page record with optimistic locking.
 // Increments version — use only for content changes visible to the user.
 // The caller must set page.Version to the expected current version.
 func (r *wikiPageRepository) Update(ctx context.Context, page *types.WikiPage) error {
+	if page == nil {
+		return errors.New("update wiki page: page is nil")
+	}
 	expectedVersion := page.Version
-	page.Version = expectedVersion + 1
-
-	result := r.db.WithContext(ctx).
-		Model(page).
-		Where("id = ? AND version = ?", page.ID, expectedVersion).
-		Updates(page)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		// Could be not found or version conflict — check which
-		var count int64
-		r.db.WithContext(ctx).Model(&types.WikiPage{}).Where("id = ?", page.ID).Count(&count)
-		if count == 0 {
-			return ErrWikiPageNotFound
+	return kbwritefence.WithActive(ctx, r.db, page.TenantID, page.KnowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, page.TenantID, page.KnowledgeBaseID); err != nil {
+			return err
 		}
-		return ErrWikiPageConflict
-	}
-	return nil
+		page.Version = expectedVersion + 1
+		// Use an explicit map so zero-valued hierarchy/provenance fields are
+		// committed with the visible content and version bump. UpdatePage used
+		// to require a second UpdateMeta transaction to clear those fields;
+		// that split made it impossible to atomically bind a durable ingest op
+		// to the complete page mutation.
+		result := tx.Model(&types.WikiPage{}).
+			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND version = ?",
+				page.ID, page.TenantID, page.KnowledgeBaseID, expectedVersion).
+			Updates(map[string]interface{}{
+				"title":         page.Title,
+				"page_type":     page.PageType,
+				"status":        page.Status,
+				"content":       page.Content,
+				"summary":       page.Summary,
+				"aliases":       page.Aliases,
+				"parent_slug":   page.ParentSlug,
+				"folder_id":     page.FolderID,
+				"category_path": page.CategoryPath,
+				"wiki_path":     page.WikiPath,
+				"depth":         page.Depth,
+				"sort_order":    page.SortOrder,
+				"source_refs":   page.SourceRefs,
+				"chunk_refs":    page.ChunkRefs,
+				"in_links":      page.InLinks,
+				"out_links":     page.OutLinks,
+				"page_metadata": page.PageMetadata,
+				"version":       page.Version,
+				"updated_at":    page.UpdatedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			// Could be not found or version conflict — check which.
+			var count int64
+			if err := tx.Model(&types.WikiPage{}).
+				Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?",
+					page.ID, page.TenantID, page.KnowledgeBaseID).
+				Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return ErrWikiPageNotFound
+			}
+			return ErrWikiPageConflict
+		}
+		return wikiingestguard.RecordPageApplication(ctx, tx, page.Slug)
+	})
 }
 
 // UpdateAutoLinkedContent persists content changes produced by the automatic
@@ -73,21 +127,40 @@ func (r *wikiPageRepository) Update(ctx context.Context, page *types.WikiPage) e
 // pages appear as v2 on first view and confuse users who expect `version` to
 // correspond to the number of intentional revisions.
 func (r *wikiPageRepository) UpdateAutoLinkedContent(ctx context.Context, page *types.WikiPage) error {
-	result := r.db.WithContext(ctx).
-		Model(page).
-		Where("id = ?", page.ID).
-		Updates(map[string]interface{}{
-			"content":    page.Content,
-			"out_links":  page.OutLinks,
-			"updated_at": page.UpdatedAt,
-		})
-	if result.Error != nil {
-		return result.Error
+	if page == nil {
+		return errors.New("update wiki auto-linked content: page is nil")
 	}
-	if result.RowsAffected == 0 {
-		return ErrWikiPageNotFound
-	}
-	return nil
+	expectedVersion := page.Version
+	return kbwritefence.WithActive(ctx, r.db, page.TenantID, page.KnowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, page.TenantID, page.KnowledgeBaseID); err != nil {
+			return err
+		}
+		result := tx.Model(&types.WikiPage{}).
+			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND version = ?",
+				page.ID, page.TenantID, page.KnowledgeBaseID, expectedVersion).
+			Updates(map[string]interface{}{
+				"content":    page.Content,
+				"out_links":  page.OutLinks,
+				"updated_at": page.UpdatedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			var count int64
+			if err := tx.Model(&types.WikiPage{}).
+				Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?",
+					page.ID, page.TenantID, page.KnowledgeBaseID).
+				Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return ErrWikiPageNotFound
+			}
+			return ErrWikiPageConflict
+		}
+		return wikiingestguard.RecordPageApplication(ctx, tx, page.Slug)
+	})
 }
 
 // UpdateMeta updates bookkeeping / provenance fields WITHOUT incrementing the
@@ -98,31 +171,150 @@ func (r *wikiPageRepository) UpdateAutoLinkedContent(ctx context.Context, page *
 //
 // Used by link maintenance, re-ingest (same-content case), and status changes.
 func (r *wikiPageRepository) UpdateMeta(ctx context.Context, page *types.WikiPage) error {
-	result := r.db.WithContext(ctx).
-		Model(page).
-		Where("id = ?", page.ID).
-		Updates(map[string]interface{}{
-			"in_links":      page.InLinks,
-			"out_links":     page.OutLinks,
-			"status":        page.Status,
-			"source_refs":   page.SourceRefs,
-			"chunk_refs":    page.ChunkRefs,
-			"page_metadata": page.PageMetadata,
-			"parent_slug":   page.ParentSlug,
-			"folder_id":     page.FolderID,
-			"category_path": page.CategoryPath,
-			"wiki_path":     page.WikiPath,
-			"depth":         page.Depth,
-			"sort_order":    page.SortOrder,
-			"updated_at":    page.UpdatedAt,
-		})
-	if result.Error != nil {
-		return result.Error
+	if page == nil {
+		return errors.New("update wiki page metadata: page is nil")
 	}
-	if result.RowsAffected == 0 {
+	return kbwritefence.WithActive(ctx, r.db, page.TenantID, page.KnowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, page.TenantID, page.KnowledgeBaseID); err != nil {
+			return err
+		}
+		query := tx.Select("id", "status", "page_metadata", "version").
+			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?",
+				page.ID, page.TenantID, page.KnowledgeBaseID)
+		if tx.Dialector.Name() != "sqlite" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var current types.WikiPage
+		if err := query.First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrWikiPageNotFound
+			}
+			return err
+		}
+		if current.Version != page.Version {
+			return ErrWikiPageConflict
+		}
+		clearSources := wikidelete.ClearSources(ctx)
+		if len(clearSources) > 0 {
+			if err := wikidelete.CompleteAuthorized(&current, page, clearSources...); err != nil {
+				return err
+			}
+		} else if err := wikidelete.Preserve(&current, page); err != nil {
+			return err
+		}
+
+		// The row lock serializes PostgreSQL writers. Keeping the expected
+		// version in the UPDATE closes the read/write window for SQLite and
+		// defensively protects against any writer that does not share this
+		// transaction path. Metadata writes intentionally do not bump the
+		// user-visible revision counter.
+		result := tx.Model(&types.WikiPage{}).
+			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ? AND version = ?",
+				page.ID, page.TenantID, page.KnowledgeBaseID, page.Version).
+			Updates(map[string]interface{}{
+				"in_links":      page.InLinks,
+				"out_links":     page.OutLinks,
+				"status":        page.Status,
+				"source_refs":   page.SourceRefs,
+				"chunk_refs":    page.ChunkRefs,
+				"page_metadata": page.PageMetadata,
+				"parent_slug":   page.ParentSlug,
+				"folder_id":     page.FolderID,
+				"category_path": page.CategoryPath,
+				"wiki_path":     page.WikiPath,
+				"depth":         page.Depth,
+				"sort_order":    page.SortOrder,
+				"updated_at":    page.UpdatedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			var count int64
+			if err := tx.Model(&types.WikiPage{}).
+				Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?",
+					page.ID, page.TenantID, page.KnowledgeBaseID).
+				Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return ErrWikiPageNotFound
+			}
+			return ErrWikiPageConflict
+		}
+		return wikiingestguard.RecordPageApplication(ctx, tx, page.Slug)
+	})
+}
+
+// QuarantineForDelete is the row-level serialization point between Wiki
+// writers and source deletion. Incrementing version is intentional: although
+// ordinary metadata writes do not create a revision, quarantine must fence a
+// content writer that loaded the previous version before the page was hidden.
+func (r *wikiPageRepository) QuarantineForDelete(
+	ctx context.Context,
+	kbID, slug, sourceKnowledgeID string,
+) error {
+	if kbID == "" || slug == "" || sourceKnowledgeID == "" {
+		return errors.New("wiki delete quarantine: KB, slug, and source are required")
+	}
+	var tenantID uint64
+	if err := r.db.WithContext(ctx).Model(&types.WikiPage{}).
+		Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
+		Pluck("tenant_id", &tenantID).Error; err != nil {
+		return err
+	}
+	if tenantID == 0 {
 		return ErrWikiPageNotFound
 	}
-	return nil
+	return kbwritefence.WithActive(ctx, r.db, tenantID, kbID, func(tx *gorm.DB) error {
+		query := tx.Where("tenant_id = ? AND knowledge_base_id = ? AND slug = ?", tenantID, kbID, slug)
+		if tx.Dialector.Name() != "sqlite" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var current types.WikiPage
+		if err := query.First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrWikiPageNotFound
+			}
+			return err
+		}
+		if current.PageType != types.WikiPageTypeIndex && current.PageType != types.WikiPageTypeLog {
+			referenced := false
+			prefix := sourceKnowledgeID + "|"
+			for _, ref := range current.SourceRefs {
+				if ref == sourceKnowledgeID || strings.HasPrefix(ref, prefix) {
+					referenced = true
+					break
+				}
+			}
+			if !referenced {
+				return nil
+			}
+		}
+		beforeStatus := current.Status
+		beforeMetadata := append([]byte(nil), current.PageMetadata...)
+		if err := wikidelete.Quarantine(&current, sourceKnowledgeID); err != nil {
+			return err
+		}
+		if beforeStatus == current.Status && bytes.Equal(beforeMetadata, current.PageMetadata) {
+			return nil
+		}
+		result := tx.Model(&types.WikiPage{}).
+			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?", current.ID, tenantID, kbID).
+			Updates(map[string]interface{}{
+				"status":        current.Status,
+				"page_metadata": current.PageMetadata,
+				"version":       gorm.Expr("version + 1"),
+				"updated_at":    time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrWikiPageNotFound
+		}
+		return nil
+	})
 }
 
 // GetByID retrieves a wiki page by its unique ID
@@ -456,7 +648,15 @@ var ErrWikiFolderNotFound = errors.New("wiki folder not found")
 var ErrWikiFolderConflict = errors.New("wiki folder name conflict")
 
 func (r *wikiPageRepository) CreateFolder(ctx context.Context, folder *types.WikiFolder) error {
-	return r.db.WithContext(ctx).Create(folder).Error
+	if folder == nil {
+		return errors.New("create wiki folder: folder is nil")
+	}
+	return kbwritefence.WithActive(ctx, r.db, folder.TenantID, folder.KnowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, folder.TenantID, folder.KnowledgeBaseID); err != nil {
+			return err
+		}
+		return tx.Create(folder).Error
+	})
 }
 
 func (r *wikiPageRepository) GetFolderByID(ctx context.Context, kbID string, id string) (*types.WikiFolder, error) {
@@ -514,37 +714,57 @@ func (r *wikiPageRepository) ListAllFolders(ctx context.Context, kbID string) ([
 }
 
 func (r *wikiPageRepository) UpdateFolder(ctx context.Context, folder *types.WikiFolder) error {
-	result := r.db.WithContext(ctx).
-		Model(&types.WikiFolder{}).
-		Where("id = ?", folder.ID).
-		Updates(map[string]interface{}{
-			"parent_id":  folder.ParentID,
-			"name":       folder.Name,
-			"path":       folder.Path,
-			"depth":      folder.Depth,
-			"sort_order": folder.SortOrder,
-			"updated_at": folder.UpdatedAt,
-		})
-	if result.Error != nil {
-		return result.Error
+	if folder == nil {
+		return errors.New("update wiki folder: folder is nil")
 	}
-	if result.RowsAffected == 0 {
-		return ErrWikiFolderNotFound
-	}
-	return nil
+	return kbwritefence.WithActive(ctx, r.db, folder.TenantID, folder.KnowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, folder.TenantID, folder.KnowledgeBaseID); err != nil {
+			return err
+		}
+		result := tx.Model(&types.WikiFolder{}).
+			Where("id = ? AND tenant_id = ? AND knowledge_base_id = ?", folder.ID, folder.TenantID, folder.KnowledgeBaseID).
+			Updates(map[string]interface{}{
+				"parent_id":  folder.ParentID,
+				"name":       folder.Name,
+				"path":       folder.Path,
+				"depth":      folder.Depth,
+				"sort_order": folder.SortOrder,
+				"updated_at": folder.UpdatedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrWikiFolderNotFound
+		}
+		return nil
+	})
 }
 
 func (r *wikiPageRepository) DeleteFolder(ctx context.Context, kbID string, id string) error {
-	result := r.db.WithContext(ctx).
-		Where("knowledge_base_id = ? AND id = ?", kbID, id).
-		Delete(&types.WikiFolder{})
-	if result.Error != nil {
-		return result.Error
+	deleteRow := func(tx *gorm.DB) error {
+		result := tx.Where("knowledge_base_id = ? AND id = ?", kbID, id).
+			Delete(&types.WikiFolder{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrWikiFolderNotFound
+		}
+		return nil
 	}
-	if result.RowsAffected == 0 {
-		return ErrWikiFolderNotFound
+	if tenantID, guardedKBID, ok := wikiingestguard.Scope(ctx); ok {
+		if guardedKBID != kbID {
+			return wikiingestguard.ErrInvalidIdentity
+		}
+		return kbwritefence.WithActive(ctx, r.db, tenantID, kbID, func(tx *gorm.DB) error {
+			if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, kbID); err != nil {
+				return err
+			}
+			return deleteRow(tx)
+		})
 	}
-	return nil
+	return r.db.WithContext(ctx).Transaction(deleteRow)
 }
 
 func (r *wikiPageRepository) CountPagesInFolder(ctx context.Context, kbID string, folderID string) (int64, error) {
@@ -919,16 +1139,34 @@ func (r *wikiPageRepository) ListRecentForSuggestions(
 
 // Delete soft-deletes a wiki page by knowledge base ID and slug
 func (r *wikiPageRepository) Delete(ctx context.Context, kbID string, slug string) error {
-	result := r.db.WithContext(ctx).
-		Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
-		Delete(&types.WikiPage{})
-	if result.Error != nil {
-		return result.Error
+	write := func(tx *gorm.DB) error {
+		if tenantID, guardedKBID, ok := wikiingestguard.Scope(ctx); ok {
+			if guardedKBID != kbID {
+				return wikiingestguard.ErrInvalidIdentity
+			}
+			if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, kbID); err != nil {
+				return err
+			}
+		} else if err := wikiingestguard.Validate(ctx, tx); err != nil {
+			return err
+		}
+		result := tx.Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
+			Delete(&types.WikiPage{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrWikiPageNotFound
+		}
+		return wikiingestguard.RecordPageApplication(ctx, tx, slug)
 	}
-	if result.RowsAffected == 0 {
-		return ErrWikiPageNotFound
+	if tenantID, guardedKBID, ok := wikiingestguard.Scope(ctx); ok {
+		if guardedKBID != kbID {
+			return wikiingestguard.ErrInvalidIdentity
+		}
+		return kbwritefence.WithActive(ctx, r.db, tenantID, kbID, write)
 	}
-	return nil
+	return r.db.WithContext(ctx).Transaction(write)
 }
 
 // DeleteByID soft-deletes a wiki page by ID
@@ -1044,7 +1282,12 @@ func (r *wikiPageRepository) CountOrphans(ctx context.Context, kbID string) (int
 }
 
 func (r *wikiPageRepository) CreateIssue(ctx context.Context, issue *types.WikiPageIssue) error {
-	return r.db.WithContext(ctx).Create(issue).Error
+	if issue == nil {
+		return errors.New("create wiki page issue: issue is nil")
+	}
+	return kbwritefence.WithActive(ctx, r.db, issue.TenantID, issue.KnowledgeBaseID, func(tx *gorm.DB) error {
+		return tx.Create(issue).Error
+	})
 }
 
 func (r *wikiPageRepository) ListIssues(ctx context.Context, kbID string, slug string, status string) ([]*types.WikiPageIssue, error) {

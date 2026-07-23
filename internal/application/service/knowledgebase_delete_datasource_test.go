@@ -141,14 +141,14 @@ func TestDeleteDataSourcesForKnowledgeBase(t *testing.T) {
 		dsScheduler: scheduler,
 	}
 
-	svc.deleteDataSourcesForKnowledgeBase(ctxWithTenant(1), kbID)
+	require.NoError(t, svc.deleteDataSourcesForKnowledgeBase(ctxWithTenant(1), kbID))
 
 	assert.ElementsMatch(t, []string{"ds-1", "ds-2"}, dsRepo.deleteIDs)
 	assert.ElementsMatch(t, []string{"ds-1", "ds-2"}, syncLogRepo.canceled)
 	assert.Equal(t, 0, scheduler.EntryCount())
 }
 
-func TestDeleteKnowledgeBaseCleansUpDataSources(t *testing.T) {
+func TestDeleteKnowledgeBaseFailsClosedWithoutOutboxCoordinator(t *testing.T) {
 	const kbID = "kb-1"
 	dsRepo := newKBDeleteDSRepo(kbID,
 		&types.DataSource{ID: "ds-1", KnowledgeBaseID: kbID, Status: types.DataSourceStatusActive, SyncSchedule: "0 0 * * * *"},
@@ -171,12 +171,12 @@ func TestDeleteKnowledgeBaseCleansUpDataSources(t *testing.T) {
 
 	ctx := ctxWithTenantStorage(1, "local")
 	err := svc.DeleteKnowledgeBase(ctx, kbID)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "durable outbox coordinator is unavailable")
 
-	assert.Equal(t, kbID, kbRepo.deletedID)
-	assert.Equal(t, []string{"ds-1"}, dsRepo.deleteIDs)
-	assert.Equal(t, []string{"ds-1"}, syncLogRepo.canceled)
-	assert.Equal(t, 0, scheduler.EntryCount())
+	assert.Empty(t, kbRepo.deletedID)
+	assert.Empty(t, dsRepo.deleteIDs)
+	assert.Empty(t, syncLogRepo.canceled)
+	assert.Equal(t, 1, scheduler.EntryCount())
 }
 
 func TestDeleteDataSourcesForKnowledgeBaseContinuesOnDeleteError(t *testing.T) {
@@ -191,30 +191,25 @@ func TestDeleteDataSourcesForKnowledgeBaseContinuesOnDeleteError(t *testing.T) {
 		syncLogRepo: &kbDeleteSyncLogRepo{},
 	}
 
-	svc.deleteDataSourcesForKnowledgeBase(context.Background(), kbID)
+	err := svc.deleteDataSourcesForKnowledgeBase(context.Background(), kbID)
+	require.ErrorIs(t, err, dsRepo.deleteErr)
 	assert.Empty(t, dsRepo.deleteIDs)
 }
 
-func TestDeleteKnowledgeBaseContinuesWhenDataSourceCleanupFails(t *testing.T) {
+func TestDeleteDataSourcesForKnowledgeBaseReturnsCleanupFailure(t *testing.T) {
 	const kbID = "kb-2"
 	dsRepo := &deleteErrDSRepo{
 		kbDeleteDSRepo: *newKBDeleteDSRepo(kbID, &types.DataSource{ID: "ds-bad", KnowledgeBaseID: kbID}),
 		deleteErr:      errors.New("db unavailable"),
 	}
 
-	kbRepo := &kbDeleteKBRepo{fakeKBRepo: *newFakeKBRepo()}
-	kbRepo.rows[kbID] = &types.KnowledgeBase{ID: kbID, TenantID: 1, Name: "test"}
-
 	svc := &knowledgeBaseService{
-		repo:        kbRepo,
-		asynqClient: kbDeleteTaskEnqueuer{},
 		dsRepo:      dsRepo,
 		syncLogRepo: &kbDeleteSyncLogRepo{},
 	}
 
-	err := svc.DeleteKnowledgeBase(ctxWithTenantStorage(1, "local"), kbID)
-	require.NoError(t, err)
-	assert.Equal(t, kbID, kbRepo.deletedID)
+	err := svc.deleteDataSourcesForKnowledgeBase(ctxWithTenantStorage(1, "local"), kbID)
+	require.ErrorIs(t, err, dsRepo.deleteErr)
 }
 
 // deleteErrDSRepo injects a delete failure for testing best-effort cleanup.

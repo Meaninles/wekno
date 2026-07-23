@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
+	"github.com/Tencent/WeKnora/internal/custom/modules/storagebinding"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
@@ -24,13 +27,24 @@ import (
 
 // s3FileService AWS S3 file service implementation
 type s3FileService struct {
-	client     *s3.Client
-	bucketName string
-	pathPrefix string
+	client          *s3.Client
+	endpoint        string
+	region          string
+	bucketName      string
+	pathPrefix      string
+	usePathStyle    bool
+	bindingSource   string
+	credentialScope string
+	credentialRef   string
 }
 
+var _ interfaces.PlannedFileService = (*s3FileService)(nil)
+
 // newS3Client creates a bare s3FileService with just the SDK client initialised.
-func newS3Client(endpoint, accessKey, secretKey, bucketName, region, pathPrefix string) (*s3FileService, error) {
+func newS3Client(
+	endpoint, accessKey, secretKey, bucketName, region, pathPrefix string,
+	forcePathStyle ...bool,
+) (*s3FileService, error) {
 	var cfg aws.Config
 	var err error
 
@@ -48,8 +62,12 @@ func newS3Client(endpoint, accessKey, secretKey, bucketName, region, pathPrefix 
 	// For S3-compatible services (non-AWS), use path-style addressing
 	// (endpoint/bucket/key) instead of virtual-hosted style (bucket.endpoint/key).
 	var client *s3.Client
+	usePathStyle := false
 	if endpoint != "" {
-		usePathStyle := !strings.Contains(endpoint, "amazonaws.com")
+		usePathStyle = !strings.Contains(endpoint, "amazonaws.com")
+		if len(forcePathStyle) > 0 {
+			usePathStyle = forcePathStyle[0]
+		}
 		client = s3.NewFromConfig(cfg, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(endpoint)
 			o.UsePathStyle = usePathStyle
@@ -64,10 +82,22 @@ func newS3Client(endpoint, accessKey, secretKey, bucketName, region, pathPrefix 
 		pathPrefix += "/"
 	}
 
+	credentialRef, err := storagebinding.CredentialProfileReference(
+		storagebinding.CredentialScopeDirect, storagebinding.ProviderS3, "default",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to identify S3 credentials: %w", err)
+	}
 	return &s3FileService{
-		client:     client,
-		bucketName: bucketName,
-		pathPrefix: pathPrefix,
+		client:          client,
+		endpoint:        endpoint,
+		region:          region,
+		bucketName:      bucketName,
+		pathPrefix:      pathPrefix,
+		usePathStyle:    usePathStyle,
+		bindingSource:   "direct",
+		credentialScope: "direct",
+		credentialRef:   credentialRef,
 	}, nil
 }
 
@@ -76,7 +106,29 @@ func newS3Client(endpoint, accessKey, secretKey, bucketName, region, pathPrefix 
 func NewS3FileService(endpoint,
 	accessKey, secretKey, bucketName, region, pathPrefix string,
 ) (interfaces.FileService, error) {
-	svc, err := newS3Client(endpoint, accessKey, secretKey, bucketName, region, pathPrefix)
+	return newProvisionedS3FileService(
+		endpoint, accessKey, secretKey, bucketName, region, pathPrefix,
+	)
+}
+
+// NewS3FileServiceWithPathStyle creates an S3 service with an explicit
+// addressing mode. Tenant configuration uses this when ForcePathStyle is set.
+func NewS3FileServiceWithPathStyle(
+	endpoint, accessKey, secretKey, bucketName, region, pathPrefix string,
+	usePathStyle bool,
+) (interfaces.FileService, error) {
+	return newProvisionedS3FileService(
+		endpoint, accessKey, secretKey, bucketName, region, pathPrefix, usePathStyle,
+	)
+}
+
+func newProvisionedS3FileService(
+	endpoint, accessKey, secretKey, bucketName, region, pathPrefix string,
+	forcePathStyle ...bool,
+) (interfaces.FileService, error) {
+	svc, err := newS3Client(
+		endpoint, accessKey, secretKey, bucketName, region, pathPrefix, forcePathStyle...,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +223,128 @@ func (s *s3FileService) parseS3FilePath(filePath string) (string, error) {
 		return "", fmt.Errorf("invalid file path: %w", err)
 	}
 	return parts[1], nil
+}
+
+func (s *s3FileService) ReserveFilePath(
+	tenantID uint64, knowledgeID string, fileName string,
+) (string, error) {
+	key, err := plannedfile.FileKey(s.pathPrefix, tenantID, knowledgeID, fileName)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath("s3", s.bucketName, key)
+}
+
+func (s *s3FileService) ReserveBytesPath(
+	tenantID uint64, fileName string, _ bool,
+) (string, error) {
+	key, err := plannedfile.BytesKey(s.pathPrefix, tenantID, fileName, "exports")
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath("s3", s.bucketName, key)
+}
+
+func (s *s3FileService) ReserveCopyPath(
+	srcPath string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	srcKey, err := s.parsePlannedS3Path(srcPath, false)
+	if err != nil {
+		return "", fmt.Errorf("s3 copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+	}
+	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+path.Ext(srcKey))
+}
+
+func (s *s3FileService) CommitFileAtPath(
+	ctx context.Context, file *multipart.FileHeader, filePath string,
+) error {
+	if file == nil {
+		return fmt.Errorf("planned S3 commit: file is nil")
+	}
+	key, err := s.parsePlannedS3Path(filePath, true)
+	if err != nil {
+		return err
+	}
+	src, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("planned S3 commit: open upload: %w", err)
+	}
+	defer src.Close()
+	contentType := file.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(path.Ext(key))
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucketName), Key: aws.String(key), Body: src,
+		ContentLength: aws.Int64(file.Size), ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return fmt.Errorf("planned S3 commit: put exact object: %w", err)
+	}
+	return nil
+}
+
+func (s *s3FileService) commitReaderAtPath(
+	ctx context.Context, reader io.ReadSeeker, size int64, contentType, filePath string,
+) error {
+	key, err := s.parsePlannedS3Path(filePath, true)
+	if err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(path.Ext(key))
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucketName), Key: aws.String(key), Body: reader,
+		ContentLength: aws.Int64(size), ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return fmt.Errorf("planned S3 stream commit: %w", err)
+	}
+	return nil
+}
+
+func (s *s3FileService) CommitBytesAtPath(ctx context.Context, data []byte, filePath string) error {
+	key, err := s.parsePlannedS3Path(filePath, true)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucketName), Key: aws.String(key), Body: bytes.NewReader(data),
+		ContentLength: aws.Int64(int64(len(data))),
+		ContentType:   aws.String(utils.GetContentTypeByExt(path.Ext(key))),
+	})
+	if err != nil {
+		return fmt.Errorf("planned S3 commit: put exact bytes object: %w", err)
+	}
+	return nil
+}
+
+func (s *s3FileService) CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error {
+	srcKey, err := s.parsePlannedS3Path(srcPath, false)
+	if err != nil {
+		return fmt.Errorf("planned S3 copy source: %w", err)
+	}
+	dstKey, err := s.parsePlannedS3Path(dstPath, true)
+	if err != nil {
+		return fmt.Errorf("planned S3 copy destination: %w", err)
+	}
+	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket: aws.String(s.bucketName), CopySource: aws.String(s.bucketName + "/" + srcKey),
+		Key: aws.String(dstKey),
+	})
+	if err != nil {
+		return fmt.Errorf("planned S3 commit: copy exact object: %w", err)
+	}
+	return nil
+}
+
+func (s *s3FileService) parsePlannedS3Path(filePath string, requirePrefix bool) (string, error) {
+	prefix := ""
+	if requirePrefix {
+		prefix = s.pathPrefix
+	}
+	return plannedfile.ParseBucketPath(filePath, "s3", s.bucketName, prefix)
 }
 
 // SaveFile saves a file to S3

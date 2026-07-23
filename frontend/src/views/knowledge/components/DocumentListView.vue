@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatFileSize, getFileIcon } from '@/utils/files';
 import { useTagChipsOverflow } from '@/composables/useTagChipsOverflow';
+import DocumentQueueBadge from '@/custom/modules/documentQueue/DocumentQueueBadge.vue';
+import type { DocumentQueueItemStatus } from '@/custom/modules/documentQueue/types';
 
 interface Tag {
   id: string;
@@ -32,6 +34,8 @@ const props = defineProps<{
   canEdit: boolean;
   tagList: Tag[];
   loading?: boolean;
+  queueStatusById?: Record<string, DocumentQueueItemStatus>;
+  queueWaitingTotal?: number;
 }>();
 
 const emit = defineEmits<{
@@ -234,7 +238,12 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
           </span>
           <div class="row-file-text">
             <span class="row-file-name" :title="item.file_name">{{ item.file_name }}</span>
-            <span v-if="item.description" class="row-file-desc" :title="item.description">{{ item.description }}</span>
+            <DocumentQueueBadge
+              v-if="isParseInFlight(item)"
+              :status="queueStatusById?.[item.id]"
+              :waiting-total="queueWaitingTotal"
+            />
+            <span v-else-if="item.description" class="row-file-desc" :title="item.description">{{ item.description }}</span>
           </div>
         </div>
 

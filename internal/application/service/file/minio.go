@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
+	"github.com/Tencent/WeKnora/internal/custom/modules/storagebinding"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
@@ -20,10 +24,17 @@ import (
 
 // minioFileService MinIO file service implementation
 type minioFileService struct {
-	client     *minio.Client
-	bucketName string
-	pathPrefix string
+	client          *minio.Client
+	endpoint        string
+	bucketName      string
+	pathPrefix      string
+	useSSL          bool
+	bindingSource   string
+	credentialScope string
+	credentialRef   string
 }
+
+var _ interfaces.PlannedFileService = (*minioFileService)(nil)
 
 // newMinioClient creates a bare minioFileService with just the SDK client initialised.
 // Shared by NewMinioFileService (which also ensures the bucket exists) and
@@ -40,10 +51,21 @@ func newMinioClient(endpoint, accessKeyID, secretAccessKey, bucketName string, u
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize MinIO client: %w", err)
 	}
+	credentialRef, err := storagebinding.CredentialProfileReference(
+		storagebinding.CredentialScopeDirect, storagebinding.ProviderMinIO, "default",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to identify MinIO credentials: %w", err)
+	}
 	return &minioFileService{
-		client:     client,
-		bucketName: bucketName,
-		pathPrefix: normalizedPrefix,
+		client:          client,
+		endpoint:        endpoint,
+		bucketName:      bucketName,
+		pathPrefix:      normalizedPrefix,
+		useSSL:          useSSL,
+		bindingSource:   "direct",
+		credentialScope: "direct",
+		credentialRef:   credentialRef,
 	}, nil
 }
 
@@ -122,6 +144,128 @@ func normalizeMinioPathPrefix(pathPrefix string) (string, error) {
 
 func (s *minioFileService) prefixedObjectName(format string, args ...any) string {
 	return s.pathPrefix + fmt.Sprintf(format, args...)
+}
+
+func (s *minioFileService) ReserveFilePath(
+	tenantID uint64, knowledgeID string, fileName string,
+) (string, error) {
+	key, err := plannedfile.FileKey(s.pathPrefix, tenantID, knowledgeID, fileName)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath("minio", s.bucketName, key)
+}
+
+func (s *minioFileService) ReserveBytesPath(
+	tenantID uint64, fileName string, temp bool,
+) (string, error) {
+	var key string
+	var err error
+	if temp {
+		name, nameErr := plannedfile.NewObjectName(fileName)
+		if nameErr != nil {
+			return "", nameErr
+		}
+		key, err = plannedfile.BuildKey(s.pathPrefix, "temp", strconv.FormatUint(tenantID, 10), name)
+	} else {
+		key, err = plannedfile.BytesKey(s.pathPrefix, tenantID, fileName, "exports")
+	}
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath("minio", s.bucketName, key)
+}
+
+func (s *minioFileService) ReserveCopyPath(
+	srcPath string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	srcKey, err := s.parsePlannedMinioPath(srcPath, false)
+	if err != nil {
+		return "", fmt.Errorf("minio copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+	}
+	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+path.Ext(srcKey))
+}
+
+func (s *minioFileService) CommitFileAtPath(
+	ctx context.Context, file *multipart.FileHeader, filePath string,
+) error {
+	if file == nil {
+		return fmt.Errorf("planned MinIO commit: file is nil")
+	}
+	key, err := s.parsePlannedMinioPath(filePath, true)
+	if err != nil {
+		return err
+	}
+	src, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("planned MinIO commit: open upload: %w", err)
+	}
+	defer src.Close()
+	_, err = s.client.PutObject(ctx, s.bucketName, key, src, file.Size, minio.PutObjectOptions{
+		ContentType: file.Header.Get("Content-Type"),
+	})
+	if err != nil {
+		return fmt.Errorf("planned MinIO commit: put exact object: %w", err)
+	}
+	return nil
+}
+
+func (s *minioFileService) commitReaderAtPath(
+	ctx context.Context, reader io.ReadSeeker, size int64, contentType, filePath string,
+) error {
+	key, err := s.parsePlannedMinioPath(filePath, true)
+	if err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = utils.GetContentTypeByExt(path.Ext(key))
+	}
+	if _, err := s.client.PutObject(ctx, s.bucketName, key, reader, size, minio.PutObjectOptions{ContentType: contentType}); err != nil {
+		return fmt.Errorf("planned MinIO stream commit: %w", err)
+	}
+	return nil
+}
+
+func (s *minioFileService) CommitBytesAtPath(ctx context.Context, data []byte, filePath string) error {
+	key, err := s.parsePlannedMinioPath(filePath, true)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.PutObject(
+		ctx, s.bucketName, key, bytes.NewReader(data), int64(len(data)),
+		minio.PutObjectOptions{ContentType: utils.GetContentTypeByExt(path.Ext(key))},
+	)
+	if err != nil {
+		return fmt.Errorf("planned MinIO commit: put exact bytes object: %w", err)
+	}
+	return nil
+}
+
+func (s *minioFileService) CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error {
+	srcKey, err := s.parsePlannedMinioPath(srcPath, false)
+	if err != nil {
+		return fmt.Errorf("planned MinIO copy source: %w", err)
+	}
+	dstKey, err := s.parsePlannedMinioPath(dstPath, true)
+	if err != nil {
+		return fmt.Errorf("planned MinIO copy destination: %w", err)
+	}
+	_, err = s.client.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: s.bucketName, Object: dstKey},
+		minio.CopySrcOptions{Bucket: s.bucketName, Object: srcKey},
+	)
+	if err != nil {
+		return fmt.Errorf("planned MinIO commit: copy exact object: %w", err)
+	}
+	return nil
+}
+
+func (s *minioFileService) parsePlannedMinioPath(filePath string, requirePrefix bool) (string, error) {
+	prefix := ""
+	if requirePrefix {
+		prefix = s.pathPrefix
+	}
+	return plannedfile.ParseBucketPath(filePath, "minio", s.bucketName, prefix)
 }
 
 // parseMinioFilePath extracts the object name from a provider scheme: minio://{bucket}/{objectKey}

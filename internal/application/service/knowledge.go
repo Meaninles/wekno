@@ -12,11 +12,15 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -60,6 +64,8 @@ type knowledgeService struct {
 	kbShareService  interfaces.KBShareService
 	imageResolver   *docparser.ImageResolver
 	taskPendingRepo interfaces.TaskPendingOpsRepository
+	wikiDeleteCoord *wikidelete.Coordinator
+	auxObjects      *knowledgeaux.Registry
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -105,6 +111,8 @@ func NewKnowledgeService(
 	wikiRepo interfaces.WikiPageRepository,
 	wikiService interfaces.WikiPageService,
 	taskPendingRepo interfaces.TaskPendingOpsRepository,
+	wikiDeleteCoord *wikidelete.Coordinator,
+	auxObjects *knowledgeaux.Registry,
 	spanTracker SpanTracker,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
@@ -131,6 +139,8 @@ func NewKnowledgeService(
 		wikiRepo:        wikiRepo,
 		wikiService:     wikiService,
 		taskPendingRepo: taskPendingRepo,
+		wikiDeleteCoord: wikiDeleteCoord,
+		auxObjects:      auxObjects,
 		spanTracker:     spanTracker,
 	}, nil
 }
@@ -184,6 +194,19 @@ func attemptSuperseded(ctx context.Context, tracker SpanTracker, knowledgeID str
 	return tracker.LatestAttempt(ctx, knowledgeID) > attempt
 }
 
+// taskRetryMetadata reads the real Asynq worker metadata when present and
+// falls back to the project-owned Lite executor context. Asynq's context keys
+// are private implementation details, so sharing this adapter is safer than
+// attempting to forge them in Lite mode.
+func taskRetryMetadata(ctx context.Context) (retryCount, maxRetry int, ok bool) {
+	retryCount, retryOK := asynq.GetRetryCount(ctx)
+	maxRetry, maxOK := asynq.GetMaxRetry(ctx)
+	if retryOK && maxOK {
+		return retryCount, maxRetry, true
+	}
+	return taskretry.Metadata(ctx)
+}
+
 // finalizeSubtaskDetachedTimeout bounds the detached decrement so a wedged DB
 // connection can't hang a worker goroutine forever in its terminal defer.
 const finalizeSubtaskDetachedTimeout = 10 * time.Second
@@ -201,32 +224,40 @@ const finalizeSubtaskDetachedTimeout = 10 * time.Second
 // Why detach: the decrement runs after the handler body, often as the very
 // last thing a worker does. If it rode the task ctx, a cancelled ctx (graceful
 // shutdown, a worker being preempted, or the task being interrupted under
-// load) would make the DB UPDATE fail. That failure is only logged and
-// swallowed, and because enrichment handlers frequently still return success
-// (per-chunk LLM errors are tolerated, not propagated), asynq never retries —
-// so the slot is never drained and the parent knowledge is stranded in
-// "finalizing" forever with a non-zero counter. Detaching keeps the counter
-// correct across cancellation; a bounded timeout guards against a wedged DB.
+// load) would make the DB UPDATE fail. The detached attempt keeps the counter
+// correct across cancellation, while a bounded timeout guards against a wedged
+// DB. Any finalizer error is returned to the handler's named result so Asynq
+// retries instead of ACKing a task whose durable slot was never drained.
 //
 // source is a free-form tag (e.g. "question_batch[3]", "summary", "wiki")
 // used to attribute a decrement failure to a specific subtask in logs.
 func finalizeSubtaskDetached(
 	ctx context.Context,
 	repo interfaces.KnowledgeRepository,
-	knowledgeID, source string,
+	tenantID uint64,
+	knowledgeID, knowledgeBaseID, processingGeneration, source string,
 	retErr error,
 	superseded, final bool,
-) {
-	willDrain := repo != nil && knowledgeID != "" && !superseded && (retErr == nil || final)
+) error {
+	willDrain := repo != nil && tenantID != 0 && knowledgeID != "" && knowledgeBaseID != "" &&
+		processingGeneration != "" && !superseded && (retErr == nil || final)
 	if !willDrain {
-		return
+		return nil
 	}
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout)
 	defer cancel()
-	if _, _, err := repo.FinalizeSubtask(dctx, knowledgeID); err != nil {
-		logger.Warnf(ctx, "finalize subtask decrement failed source=%s knowledge=%s err=%v",
-			source, knowledgeID, err)
+	finalizer, ok := repo.(interface {
+		FinalizeSubtaskGenerationItem(context.Context, uint64, string, string, string, string) (int, bool, error)
+	})
+	if !ok {
+		return fmt.Errorf("finalize subtask source=%s knowledge=%s: exactly-once finalizer unavailable", source, knowledgeID)
 	}
+	if _, _, err := finalizer.FinalizeSubtaskGenerationItem(
+		dctx, tenantID, knowledgeID, knowledgeBaseID, processingGeneration, source,
+	); err != nil {
+		return fmt.Errorf("finalize subtask decrement source=%s knowledge=%s: %w", source, knowledgeID, err)
+	}
+	return nil
 }
 
 // beginStage / endStage / failStage / skipStage are the by-name shims
@@ -381,31 +412,33 @@ func (s *knowledgeService) isKnowledgeDeleting(ctx context.Context, tenantID uin
 	return knowledge.ParseStatus == types.ParseStatusDeleting
 }
 
-// isKnowledgeAborted returns (true, status) when the knowledge has been
-// marked as deleting OR cancelled so async pipeline workers should bail
+// isKnowledgeAborted returns (true, status, nil) when the knowledge has been
+// marked as deleting/cancelling/cancelled so async pipeline workers should bail
 // out. Status is returned so callers can branch on cleanup behavior:
 // deleting → existing cleanup of partial chunks/index applies;
 // cancelled → keep partially written data per user expectation.
 //
-// When the row is missing or unreadable we conservatively return
-// (true, ParseStatusDeleting): the existing deleting branch already
-// handles cleanup-or-no-op semantics safely.
+// A definitely missing row is equivalent to deletion. A transient read error
+// is returned to the worker: treating an unavailable database as deleting can
+// trigger destructive artifact cleanup against a still-live generation.
 func (s *knowledgeService) isKnowledgeAborted(
 	ctx context.Context, tenantID uint64, knowledgeID string,
-) (bool, string) {
+) (bool, string, error) {
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to check knowledge abort status (assuming deleted): %v", err)
-		return true, types.ParseStatusDeleting
+		if errors.Is(err, repository.ErrKnowledgeNotFound) {
+			return true, types.ParseStatusDeleting, nil
+		}
+		return false, "", fmt.Errorf("check knowledge abort status: %w", err)
 	}
 	if knowledge == nil {
-		return true, types.ParseStatusDeleting
+		return true, types.ParseStatusDeleting, nil
 	}
 	switch knowledge.ParseStatus {
-	case types.ParseStatusDeleting, types.ParseStatusCancelled:
-		return true, knowledge.ParseStatus
+	case types.ParseStatusDeleting, types.ParseStatusCancelling, types.ParseStatusCancelled:
+		return true, knowledge.ParseStatus, nil
 	}
-	return false, knowledge.ParseStatus
+	return false, knowledge.ParseStatus, nil
 }
 
 // checkStorageEngineConfigured verifies that the knowledge base has a storage engine configured
@@ -625,7 +658,13 @@ func (s *knowledgeService) openKnowledgeFileForRecord(ctx context.Context, knowl
 
 	// Resolve KB-level file service with FilePath fallback protection
 	kb, _ := s.kbService.GetKnowledgeBaseByID(fileCtx, knowledge.KnowledgeBaseID)
-	file, err := s.resolveFileServiceForPath(fileCtx, kb, knowledge.FilePath).GetFile(fileCtx, knowledge.FilePath)
+	resolvedFileService, err := s.auxiliaryFileServiceForPath(
+		fileCtx, kb, knowledge.KnowledgeBaseID, knowledge.ID, knowledge.FilePath,
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	file, err := resolvedFileService.GetFile(fileCtx, knowledge.FilePath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -784,6 +823,14 @@ func (s *knowledgeService) setAndAttachKnowledgeTags(
 	knowledge *types.Knowledge,
 	tagIDs []string,
 ) error {
+	// Create flows validate and carry InitialTagIDs into the repository's
+	// knowledge INSERT transaction. Rewriting them after commit would reopen a
+	// crash window between the document row/workflow binding and its requested
+	// tag relations. Non-create callers keep the replace behavior below.
+	if knowledge != nil && knowledge.InitialTagIDs != nil {
+		s.attachTagsToKnowledge(ctx, knowledge)
+		return nil
+	}
 	if err := s.validateKnowledgeTagIDs(ctx, tenantID, kbID, tagIDs); err != nil {
 		return err
 	}
@@ -793,6 +840,25 @@ func (s *knowledgeService) setAndAttachKnowledgeTags(
 		}
 	}
 	s.attachTagsToKnowledge(ctx, knowledge)
+	return nil
+}
+
+func (s *knowledgeService) prepareInitialKnowledgeTags(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	knowledge *types.Knowledge,
+	tagIDs []string,
+) error {
+	if knowledge == nil {
+		return errors.New("knowledge is required for initial tags")
+	}
+	if err := s.validateKnowledgeTagIDs(ctx, tenantID, kbID, tagIDs); err != nil {
+		return err
+	}
+	// Preserve a non-nil empty slice as the explicit "validated, no tags"
+	// create intent. This lets setAndAttachKnowledgeTags avoid a second write.
+	knowledge.InitialTagIDs = append([]string{}, tagIDs...)
 	return nil
 }
 

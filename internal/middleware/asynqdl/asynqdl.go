@@ -16,6 +16,8 @@ package asynqdl
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -56,9 +58,11 @@ import (
 //
 // The callback receives the raw asynq Task and the final error. It runs with
 // context.Background() (NOT the task ctx) so a cancelled task ctx during
-// shutdown doesn't also drop the state update. Errors are logged and
-// swallowed; the callback must NEVER alter the original task error.
-type OnDeadLetter func(ctx context.Context, t *asynq.Task, taskErr error)
+// shutdown doesn't also drop the state update. A callback error is joined to
+// the original task error; callers may use it to signal that even scheduling
+// their durable terminal-repair task failed. This keeps repair failures
+// visible instead of silently ACKing the callback path.
+type OnDeadLetter func(ctx context.Context, t *asynq.Task, taskErr error) error
 
 // MiddlewareWithCallback is the extended form of Middleware. The callback may
 // be nil, in which case behaviour matches Middleware exactly.
@@ -90,20 +94,24 @@ func MiddlewareWithCallback(repo interfaces.TaskDeadLetterRepository, cb OnDeadL
 			if cb != nil {
 				// Wrap callback so a panic in user code doesn't escape
 				// into asynq's worker goroutine.
-				safeInvokeCallback(ctx, t, err, cb)
+				if callbackErr := safeInvokeCallback(ctx, t, err, cb); callbackErr != nil {
+					logger.Warnf(ctx, "asynq dead-letter callback failed for %s: %v", t.Type(), callbackErr)
+					return errors.Join(err, callbackErr)
+				}
 			}
 			return err
 		})
 	}
 }
 
-func safeInvokeCallback(ctx context.Context, t *asynq.Task, taskErr error, cb OnDeadLetter) {
+func safeInvokeCallback(ctx context.Context, t *asynq.Task, taskErr error, cb OnDeadLetter) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Warnf(ctx, "asynq dead-letter callback panicked for %s: %v", t.Type(), r)
+			retErr = fmt.Errorf("dead-letter callback panicked: %v", r)
 		}
 	}()
-	cb(context.Background(), t, taskErr)
+	return cb(context.Background(), t, taskErr)
 }
 
 // Middleware preserves the original signature for callers that don't need

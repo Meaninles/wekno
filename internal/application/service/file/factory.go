@@ -48,7 +48,11 @@ func NewFileServiceFromStorageConfig(
 			}
 		}
 		externalURL := strings.TrimSpace(os.Getenv("APP_EXTERNAL_URL"))
-		return NewLocalFileService(baseDir, externalURL), p, nil
+		source := storageBindingSourceGlobal
+		if sec != nil && sec.Local != nil {
+			source = storageBindingSourceTenant
+		}
+		return setStorageBindingIdentity(NewLocalFileService(baseDir, externalURL), source, "none"), p, nil
 
 	case "minio":
 		if sec == nil || sec.MinIO == nil {
@@ -71,7 +75,14 @@ func NewFileServiceFromStorageConfig(
 		if endpoint == "" || accessKeyID == "" || secretAccessKey == "" || bucketName == "" {
 			return nil, p, fmt.Errorf("incomplete minio config")
 		}
-		svc, err := NewMinioFileService(endpoint, accessKeyID, secretAccessKey, bucketName, sec.MinIO.UseSSL)
+		svc, err := NewMinioFileServiceWithPathPrefix(
+			endpoint, accessKeyID, secretAccessKey, bucketName, sec.MinIO.UseSSL, sec.MinIO.PathPrefix,
+		)
+		credentialScope := storageBindingSourceGlobal
+		if sec.MinIO.Mode == "remote" {
+			credentialScope = storageBindingSourceTenant
+		}
+		svc = setStorageBindingIdentity(svc, storageBindingSourceTenant, credentialScope)
 		return svc, p, err
 
 	case "cos":
@@ -83,6 +94,7 @@ func NewFileServiceFromStorageConfig(
 			pathPrefix = "weknora"
 		}
 		svc, err := NewCosFileService(sec.COS.BucketName, sec.COS.Region, sec.COS.SecretID, sec.COS.SecretKey, pathPrefix)
+		svc = setStorageBindingIdentity(svc, storageBindingSourceTenant, storageBindingSourceTenant)
 		return svc, p, err
 
 	case "tos":
@@ -90,6 +102,7 @@ func NewFileServiceFromStorageConfig(
 			return nil, p, fmt.Errorf("incomplete tos config")
 		}
 		svc, err := NewTosFileService(sec.TOS.Endpoint, sec.TOS.Region, sec.TOS.AccessKey, sec.TOS.SecretKey, sec.TOS.BucketName, sec.TOS.PathPrefix)
+		svc = setStorageBindingIdentity(svc, storageBindingSourceTenant, storageBindingSourceTenant)
 		return svc, p, err
 	case "s3":
 		if sec == nil || sec.S3 == nil || sec.S3.Endpoint == "" || sec.S3.Region == "" || sec.S3.AccessKey == "" || sec.S3.SecretKey == "" || sec.S3.BucketName == "" {
@@ -99,16 +112,41 @@ func NewFileServiceFromStorageConfig(
 		if pathPrefix == "" {
 			pathPrefix = "weknora/"
 		}
-		svc, err := NewS3FileService(sec.S3.Endpoint, sec.S3.AccessKey, sec.S3.SecretKey, sec.S3.BucketName, sec.S3.Region, pathPrefix)
+		var svc interfaces.FileService
+		var err error
+		if sec.S3.ForcePathStyle {
+			svc, err = NewS3FileServiceWithPathStyle(
+				sec.S3.Endpoint, sec.S3.AccessKey, sec.S3.SecretKey,
+				sec.S3.BucketName, sec.S3.Region, pathPrefix, true,
+			)
+		} else {
+			svc, err = NewS3FileService(
+				sec.S3.Endpoint, sec.S3.AccessKey, sec.S3.SecretKey,
+				sec.S3.BucketName, sec.S3.Region, pathPrefix,
+			)
+		}
+		svc = setStorageBindingIdentity(svc, storageBindingSourceTenant, storageBindingSourceTenant)
 		return svc, p, err
 
 	case "obs":
-		obsEndpoint := strings.TrimSpace(os.Getenv("OBS_ENDPOINT"))
-		obsRegion := strings.TrimSpace(os.Getenv("OBS_REGION"))
-		obsAccessKey := strings.TrimSpace(os.Getenv("OBS_ACCESS_KEY"))
-		obsSecretKey := strings.TrimSpace(os.Getenv("OBS_SECRET_KEY"))
-		obsBucketName := strings.TrimSpace(os.Getenv("OBS_BUCKET_NAME"))
-		obsPathPrefix := strings.TrimSpace(os.Getenv("OBS_PATH_PREFIX"))
+		obsEndpoint, obsRegion, obsAccessKey, obsSecretKey, obsBucketName, obsPathPrefix := "", "", "", "", "", ""
+		source := storageBindingSourceGlobal
+		if sec != nil && sec.OBS != nil {
+			obsEndpoint = strings.TrimSpace(sec.OBS.Endpoint)
+			obsRegion = strings.TrimSpace(sec.OBS.Region)
+			obsAccessKey = strings.TrimSpace(sec.OBS.AccessKey)
+			obsSecretKey = strings.TrimSpace(sec.OBS.SecretKey)
+			obsBucketName = strings.TrimSpace(sec.OBS.BucketName)
+			obsPathPrefix = strings.TrimSpace(sec.OBS.PathPrefix)
+			source = storageBindingSourceTenant
+		} else {
+			obsEndpoint = strings.TrimSpace(os.Getenv("OBS_ENDPOINT"))
+			obsRegion = strings.TrimSpace(os.Getenv("OBS_REGION"))
+			obsAccessKey = strings.TrimSpace(os.Getenv("OBS_ACCESS_KEY"))
+			obsSecretKey = strings.TrimSpace(os.Getenv("OBS_SECRET_KEY"))
+			obsBucketName = strings.TrimSpace(os.Getenv("OBS_BUCKET_NAME"))
+			obsPathPrefix = strings.TrimSpace(os.Getenv("OBS_PATH_PREFIX"))
+		}
 		if obsPathPrefix == "" {
 			obsPathPrefix = "weknora/"
 		}
@@ -119,6 +157,7 @@ func NewFileServiceFromStorageConfig(
 			obsRegion = "cn-north-4"
 		}
 		svc, err := NewObsFileService(obsEndpoint, obsRegion, obsAccessKey, obsSecretKey, obsBucketName, obsPathPrefix)
+		svc = setStorageBindingIdentity(svc, source, source)
 		return svc, p, err
 
 	case "oss":
@@ -143,6 +182,7 @@ func NewFileServiceFromStorageConfig(
 				sec.OSS.BucketName, pathPrefix,
 			)
 		}
+		svc = setStorageBindingIdentity(svc, storageBindingSourceTenant, storageBindingSourceTenant)
 		return svc, p, err
 
 	case "ks3":
@@ -154,6 +194,7 @@ func NewFileServiceFromStorageConfig(
 			pathPrefix = "weknora/"
 		}
 		svc, err := NewKS3FileService(sec.KS3.Endpoint, sec.KS3.Region, sec.KS3.AccessKey, sec.KS3.SecretKey, sec.KS3.BucketName, pathPrefix)
+		svc = setStorageBindingIdentity(svc, storageBindingSourceTenant, storageBindingSourceTenant)
 		return svc, p, err
 
 	default:

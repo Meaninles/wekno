@@ -14,6 +14,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/balancer/roundrobin"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/status"
@@ -61,6 +62,13 @@ func (p *GRPCDocumentReader) connect(addr string) error {
 			authConfig.TLSEnabled,
 		)
 	}
+	// A headless Kubernetes Service returns every healthy DocReader pod. The
+	// default gRPC policy is pick_first, which would keep all document workers
+	// pinned to one backend and preserve a parser single point. round_robin
+	// spreads RPCs and transparently moves new calls when one endpoint exits.
+	opts = append(opts, grpc.WithDefaultServiceConfig(
+		`{"loadBalancingConfig":[{"round_robin":{}}]}`,
+	))
 
 	resolver.SetDefaultScheme("dns")
 

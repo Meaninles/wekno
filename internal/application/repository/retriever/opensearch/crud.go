@@ -349,6 +349,64 @@ func (r *Repository) DeleteByKnowledgeIDList(
 	return r.deleteByList(ctx, knowledgeIDs, dim, "knowledge_id")
 }
 
+func (r *Repository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDs []string,
+	dim int,
+	_ string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDs) == 0 {
+		return nil
+	}
+	if len(knowledgeIDs) > 1000 {
+		return fmt.Errorf(
+			"opensearch: scoped knowledge-delete batch %d > 1000 cap: %w",
+			len(knowledgeIDs),
+			ErrBatchTooLarge,
+		)
+	}
+	var index string
+	if dim == 0 {
+		if err := r.ensureKeywordsIndex(ctx); err != nil {
+			return err
+		}
+		index = r.keywordsIndex()
+	} else {
+		if err := r.ensureReady(ctx, dim); err != nil {
+			return err
+		}
+		index = r.indexAlias(dim)
+	}
+	body, err := json.Marshal(map[string]any{
+		"query": map[string]any{
+			"bool": map[string]any{
+				"filter": []any{
+					map[string]any{"term": map[string]any{"knowledge_base_id": knowledgeBaseID}},
+					map[string]any{"terms": map[string]any{"knowledge_id": knowledgeIDs}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("opensearch: marshal scoped delete body: %w", err)
+	}
+	refresh := true
+	req := osapi.DocumentDeleteByQueryReq{
+		Indices: []string{index},
+		Body:    bytes.NewReader(body),
+		Params:  osapi.DocumentDeleteByQueryParams{Refresh: &refresh},
+	}
+	resp, err := r.client.Document.DeleteByQuery(ctx, req)
+	if err != nil {
+		return wrapTransport(err)
+	}
+	if resp != nil {
+		drainAndClose(resp.Inspect().Response.Body)
+	}
+	return nil
+}
+
 // deleteByList factors the common cap / empty / ensureReady / dispatch
 // logic out of the three DeleteBy* methods. dim==0 routes to the
 // dim-less keywords index.

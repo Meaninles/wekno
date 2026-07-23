@@ -268,38 +268,40 @@ func (s *knowledgeService) resolveFileService(ctx context.Context, kb *types.Kno
 	return svc
 }
 
-// resolveFileServiceForPath is like resolveFileService but adds a safety check:
-// if the resolved provider doesn't match what the filePath implies, fall back to
-// the provider inferred from the file path. This protects historical data when
-// tenant/KB config changes but files were stored under the old provider.
-func (s *knowledgeService) resolveFileServiceForPath(ctx context.Context, kb *types.KnowledgeBase, filePath string) interfaces.FileService {
+// resolveFileServiceForPath gives an explicit provider path absolute routing
+// precedence. Historical provider:// objects must never be sent to the current
+// KB or process-wide default after a storage setting change. Only a path with
+// no provider evidence uses the KB's current legacy route.
+func (s *knowledgeService) resolveFileServiceForPath(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	filePath string,
+) (interfaces.FileService, error) {
 	svc := s.resolveFileService(ctx, kb)
 	if filePath == "" {
-		return svc
+		return svc, nil
 	}
 
 	inferred := types.InferStorageFromFilePath(filePath)
 	if inferred == "" {
-		return svc
+		return svc, nil
 	}
-
-	configured := kb.GetStorageProvider()
-	if configured == "" {
-		tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-		if tenant != nil && tenant.StorageEngineConfig != nil {
-			configured = strings.ToLower(strings.TrimSpace(tenant.StorageEngineConfig.DefaultProvider))
-		}
+	tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	if tenant == nil {
+		return nil, fmt.Errorf("resolve explicit storage provider %s for %q: tenant is unavailable", inferred, filePath)
 	}
-	if configured == "" {
-		configured = strings.ToLower(strings.TrimSpace(os.Getenv("STORAGE_TYPE")))
+	exact, resolvedProvider, err := filesvc.NewFileServiceFromStorageConfig(
+		inferred,
+		tenant.StorageEngineConfig,
+		strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR")),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve explicit storage provider %s for %q: %w", inferred, filePath, err)
 	}
-
-	if configured != "" && configured != inferred {
-		logger.Warnf(ctx, "[storage] FilePath format mismatch: configured=%s inferred=%s filePath=%s, using global fallback",
-			configured, inferred, filePath)
-		return s.fileSvc
+	if exact == nil || resolvedProvider != inferred {
+		return nil, fmt.Errorf("resolve explicit storage provider %s for %q: resolved as %q", inferred, filePath, resolvedProvider)
 	}
-	return svc
+	return exact, nil
 }
 
 func IsImageType(fileType string) bool {

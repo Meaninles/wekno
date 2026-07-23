@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -39,6 +40,15 @@ type sqliteRepository struct {
 	db        *gorm.DB
 	vecTables map[int]bool // tracks which vec0 tables have been created (keyed by dimension)
 }
+
+type sqliteInPlaceMoveError struct {
+	cause        error
+	sourceIntact bool
+}
+
+func (e *sqliteInPlaceMoveError) Error() string      { return e.cause.Error() }
+func (e *sqliteInPlaceMoveError) Unwrap() error      { return e.cause }
+func (e *sqliteInPlaceMoveError) SourceIntact() bool { return e.sourceIntact }
 
 func NewSQLiteRetrieveEngineRepository(db *gorm.DB) interfaces.RetrieveEngineRepository {
 	logger.GetLogger(context.Background()).Info("[SQLite] Initializing SQLite retriever engine repository with sqlite-vec")
@@ -210,6 +220,121 @@ func (r *sqliteRepository) DeleteByKnowledgeIDList(ctx context.Context, knowledg
 	r.db.WithContext(ctx).Where("knowledge_id IN ?", knowledgeIDList).Find(&rows)
 	r.deleteRowsAndVecs(ctx, rows)
 	return r.db.WithContext(ctx).Where("knowledge_id IN ?", knowledgeIDList).Delete(&sqliteEmbedding{}).Error
+}
+
+func (r *sqliteRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	_ int,
+	_ string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	query := r.db.WithContext(ctx).
+		Where("knowledge_base_id = ? AND knowledge_id IN ?", knowledgeBaseID, knowledgeIDList)
+	var rows []sqliteEmbedding
+	if err := query.Find(&rows).Error; err != nil {
+		return err
+	}
+	r.deleteRowsAndVecs(ctx, rows)
+	return r.db.WithContext(ctx).
+		Where("knowledge_base_id = ? AND knowledge_id IN ?", knowledgeBaseID, knowledgeIDList).
+		Delete(&sqliteEmbedding{}).Error
+}
+
+// MoveKnowledgeIndicesInPlace updates only the ownership column on the
+// embedding row. The auxiliary FTS and sqlite-vec tables are keyed by the
+// stable embedding row ID, so they do not need to be copied or rebuilt.
+func (r *sqliteRepository) MoveKnowledgeIndicesInPlace(
+	ctx context.Context,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	knowledgeID string,
+	chunkIDs []string,
+	_ int,
+	_ string,
+) error {
+	if sourceKnowledgeBaseID == "" || targetKnowledgeBaseID == "" || knowledgeID == "" {
+		return errors.New("sqlite move knowledge indices: source KB, target KB, and knowledge ID are required")
+	}
+	if sourceKnowledgeBaseID == targetKnowledgeBaseID || len(chunkIDs) == 0 {
+		return nil
+	}
+	result := r.db.WithContext(ctx).
+		Model(&sqliteEmbedding{}).
+		Where("knowledge_base_id = ? AND knowledge_id = ?", sourceKnowledgeBaseID, knowledgeID).
+		Update("knowledge_base_id", targetKnowledgeBaseID)
+	if result.Error != nil {
+		return r.classifyInPlaceMoveResult(
+			ctx,
+			sourceKnowledgeBaseID,
+			targetKnowledgeBaseID,
+			knowledgeID,
+			fmt.Errorf("sqlite move knowledge indices in place: %w", result.Error),
+		)
+	}
+	if result.RowsAffected == 0 {
+		return r.classifyInPlaceMoveResult(ctx, sourceKnowledgeBaseID, targetKnowledgeBaseID, knowledgeID, fmt.Errorf(
+			"sqlite move knowledge indices in place: no source indices found for knowledge %s in KB %s",
+			knowledgeID,
+			sourceKnowledgeBaseID,
+		))
+	}
+	return nil
+}
+
+func (r *sqliteRepository) classifyInPlaceMoveResult(
+	ctx context.Context,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	knowledgeID string,
+	cause error,
+) error {
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	type kbCount struct {
+		KnowledgeBaseID string `gorm:"column:knowledge_base_id"`
+		Count           int64  `gorm:"column:row_count"`
+	}
+	var counts []kbCount
+	readErr := r.db.WithContext(readCtx).
+		Model(&sqliteEmbedding{}).
+		Select("knowledge_base_id, COUNT(*) AS row_count").
+		Where("knowledge_id = ? AND knowledge_base_id IN ?", knowledgeID,
+			[]string{sourceKnowledgeBaseID, targetKnowledgeBaseID}).
+		Group("knowledge_base_id").
+		Find(&counts).Error
+	if readErr != nil {
+		return &sqliteInPlaceMoveError{
+			cause: errors.Join(cause, fmt.Errorf("sqlite in-place move read-back: %w", readErr)),
+		}
+	}
+	var sourceCount, targetCount int64
+	for _, count := range counts {
+		switch count.KnowledgeBaseID {
+		case sourceKnowledgeBaseID:
+			sourceCount = count.Count
+		case targetKnowledgeBaseID:
+			targetCount = count.Count
+		}
+	}
+	if sourceCount > 0 && targetCount == 0 {
+		return &sqliteInPlaceMoveError{cause: cause, sourceIntact: true}
+	}
+	if targetCount > 0 && sourceCount == 0 {
+		logger.GetLogger(ctx).Warnf(
+			"[SQLite] In-place move write returned an error but read-back proved target commit for knowledge %s",
+			knowledgeID,
+		)
+		return nil
+	}
+	return &sqliteInPlaceMoveError{cause: errors.Join(cause, fmt.Errorf(
+		"sqlite in-place move state is uncertain after read-back (source_rows=%d target_rows=%d)",
+		sourceCount,
+		targetCount,
+	))}
 }
 
 func (r *sqliteRepository) CopyIndices(ctx context.Context,

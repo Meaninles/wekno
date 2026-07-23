@@ -2,6 +2,7 @@ package retriever
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -282,6 +283,98 @@ func (c *CompositeRetrieveEngine) CopyIndices(
 		}
 		return nil
 	})
+}
+
+// SupportsKnowledgeIndexMove preflights every engine without mutating data.
+// Reuse mode calls this before claiming Completed -> Processing so unsupported
+// remote backends fail closed and the document remains untouched.
+func (c *CompositeRetrieveEngine) SupportsKnowledgeIndexMove() bool {
+	if c == nil || len(c.engineInfos) == 0 {
+		return false
+	}
+	for _, engineInfo := range c.engineInfos {
+		if engineInfo == nil || engineInfo.retrieveEngine == nil {
+			return false
+		}
+		mover, ok := engineInfo.retrieveEngine.(interfaces.KnowledgeIndexMover)
+		if !ok || !mover.SupportsKnowledgeIndexMove() {
+			return false
+		}
+	}
+	return true
+}
+
+// MoveKnowledgeIndices performs a compensatable move across every retrieval
+// engine backing this composite. Capability is preflighted for all engines
+// before the first mutation. Engines are then moved in a stable sequence; if a
+// later engine fails, earlier successful engines are moved back in reverse
+// order and every rollback failure is surfaced to the caller.
+func (c *CompositeRetrieveEngine) MoveKnowledgeIndices(
+	ctx context.Context,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	knowledgeID string,
+	chunkIDs []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	movers := make([]interfaces.KnowledgeIndexMover, 0, len(c.engineInfos))
+	for _, engineInfo := range c.engineInfos {
+		if engineInfo == nil || engineInfo.retrieveEngine == nil {
+			return newKnowledgeIndexMoveError(
+				errors.New("move knowledge indices: composite contains a nil retrieval engine"),
+				true,
+			)
+		}
+		mover, ok := engineInfo.retrieveEngine.(interfaces.KnowledgeIndexMover)
+		if !ok || !mover.SupportsKnowledgeIndexMove() {
+			return newKnowledgeIndexMoveError(fmt.Errorf(
+				"move knowledge indices: retrieval engine %s does not support scoped moves",
+				engineInfo.retrieveEngine.EngineType(),
+			), true)
+		}
+		movers = append(movers, mover)
+	}
+
+	for i, mover := range movers {
+		if err := mover.MoveKnowledgeIndices(
+			ctx,
+			sourceKnowledgeBaseID,
+			targetKnowledgeBaseID,
+			knowledgeID,
+			chunkIDs,
+			dimension,
+			knowledgeType,
+		); err != nil {
+			rollbackComplete := KnowledgeIndexMoveRollbackComplete(err)
+			errList := []error{fmt.Errorf(
+				"move knowledge indices: engine %s: %w",
+				c.engineInfos[i].retrieveEngine.EngineType(),
+				err,
+			)}
+			for rollbackIndex := i - 1; rollbackIndex >= 0; rollbackIndex-- {
+				rollbackMover := movers[rollbackIndex]
+				if rollbackErr := rollbackMover.MoveKnowledgeIndices(
+					ctx,
+					targetKnowledgeBaseID,
+					sourceKnowledgeBaseID,
+					knowledgeID,
+					chunkIDs,
+					dimension,
+					knowledgeType,
+				); rollbackErr != nil {
+					rollbackComplete = false
+					errList = append(errList, fmt.Errorf(
+						"move knowledge indices rollback: engine %s: %w",
+						c.engineInfos[rollbackIndex].retrieveEngine.EngineType(),
+						rollbackErr,
+					))
+				}
+			}
+			return newKnowledgeIndexMoveError(errors.Join(errList...), rollbackComplete)
+		}
+	}
+	return nil
 }
 
 // DeleteByKnowledgeIDList deletes vector embeddings by knowledge ID list from all registered repositories

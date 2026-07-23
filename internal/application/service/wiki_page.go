@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -101,6 +102,23 @@ func (s *wikiPageService) UpdatePage(ctx context.Context, page *types.WikiPage) 
 	if err != nil {
 		return nil, fmt.Errorf("get existing page: %w", err)
 	}
+	// The payload is itself a read snapshot (UI edit, ingest reducer, agent
+	// tool, etc.). Do not transplant its content onto a newer row merely
+	// because we just loaded that newer row here; doing so would defeat the
+	// repository CAS by changing the expected version to the fresh value.
+	if page.Version != existing.Version {
+		return nil, fmt.Errorf("update wiki page: %w", repository.ErrWikiPageConflict)
+	}
+	clearSources := wikidelete.ClearSources(ctx)
+	if len(clearSources) > 0 {
+		if err := wikidelete.CompleteAuthorized(existing, page, clearSources...); err != nil {
+			return nil, fmt.Errorf("complete delete quarantine: %w", err)
+		}
+	} else {
+		if err := wikidelete.Preserve(existing, page); err != nil {
+			return nil, fmt.Errorf("preserve delete quarantine: %w", err)
+		}
+	}
 
 	oldOutLinks := existing.OutLinks
 
@@ -141,12 +159,6 @@ func (s *wikiPageService) UpdatePage(ctx context.Context, page *types.WikiPage) 
 		if err := s.repo.Update(ctx, existing); err != nil {
 			return nil, fmt.Errorf("update wiki page: %w", err)
 		}
-		// GORM's struct Updates path skips zero values, so persist hierarchy
-		// metadata through the explicit map path as well. This keeps clearing
-		// parent/category fields deterministic without changing version again.
-		if err := s.repo.UpdateMeta(ctx, existing); err != nil {
-			return nil, fmt.Errorf("update wiki page hierarchy meta: %w", err)
-		}
 	} else {
 		// No user-visible change — persist bookkeeping fields but preserve
 		// the version so downstream consumers can rely on it.
@@ -179,6 +191,9 @@ func (s *wikiPageService) UpdateAutoLinkedContent(ctx context.Context, page *typ
 	existing, err := s.repo.GetBySlug(ctx, page.KnowledgeBaseID, page.Slug)
 	if err != nil {
 		return fmt.Errorf("get existing page: %w", err)
+	}
+	if page.Version != existing.Version {
+		return fmt.Errorf("update auto-linked content: %w", repository.ErrWikiPageConflict)
 	}
 
 	oldOutLinks := existing.OutLinks

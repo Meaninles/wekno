@@ -2,6 +2,7 @@ package milvus
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -372,6 +373,41 @@ func (m *milvusRepository) DeleteByKnowledgeIDList(ctx context.Context,
 	}
 
 	log.Infof("[Milvus] Successfully deleted documents by knowledge IDs")
+	return nil
+}
+
+func (m *milvusRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	kbJSON, err := json.Marshal(knowledgeBaseID)
+	if err != nil {
+		return fmt.Errorf("milvus encode knowledge base ID: %w", err)
+	}
+	idsJSON, err := json.Marshal(knowledgeIDList)
+	if err != nil {
+		return fmt.Errorf("milvus encode knowledge IDs: %w", err)
+	}
+	expr := fmt.Sprintf(
+		"%s == %s && %s in %s",
+		fieldKnowledgeBaseID,
+		kbJSON,
+		fieldKnowledgeID,
+		idsJSON,
+	)
+	_, err = m.client.Delete(
+		ctx,
+		client.NewDeleteOption(m.getCollectionName(dimension)).WithExpr(expr),
+	)
+	if err != nil {
+		return fmt.Errorf("milvus delete scoped knowledge indices: %w", err)
+	}
 	return nil
 }
 

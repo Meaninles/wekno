@@ -329,6 +329,34 @@ func (q *qdrantRepository) DeleteByKnowledgeIDList(ctx context.Context,
 	return nil
 }
 
+func (q *qdrantRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	collectionName := q.getCollectionName(dimension)
+	wait := true
+	_, err := q.client.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: collectionName,
+		Wait:           &wait,
+		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewMatch(fieldKnowledgeBaseID, knowledgeBaseID),
+				qdrant.NewMatchKeywords(fieldKnowledgeID, knowledgeIDList...),
+			},
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("qdrant delete scoped knowledge indices: %w", err)
+	}
+	return nil
+}
+
 // DeleteBySourceIDList removes points from the collection based on source IDs
 func (q *qdrantRepository) DeleteBySourceIDList(ctx context.Context,
 	sourceIDList []string, dimension int, knowledgeType string,
@@ -841,8 +869,10 @@ func (q *qdrantRepository) CopyIndices(ctx context.Context,
 		}
 
 		if len(targetPoints) > 0 {
+			wait := true
 			_, err := q.client.Upsert(ctx, &qdrant.UpsertPoints{
 				CollectionName: collectionName,
+				Wait:           &wait,
 				Points:         targetPoints,
 			})
 			if err != nil {

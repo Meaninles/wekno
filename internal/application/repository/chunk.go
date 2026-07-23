@@ -14,6 +14,8 @@ import (
 	"gorm.io/gorm"
 )
 
+var ErrChunkNotFound = errors.New("chunk not found")
+
 // chunkRepository implements the ChunkRepository interface
 type chunkRepository struct {
 	db *gorm.DB
@@ -58,7 +60,7 @@ func (r *chunkRepository) GetChunkByID(ctx context.Context, tenantID uint64, id 
 	var chunk types.Chunk
 	if err := r.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).First(&chunk).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("chunk not found")
+			return nil, ErrChunkNotFound
 		}
 		return nil, err
 	}
@@ -70,7 +72,7 @@ func (r *chunkRepository) GetChunkByIDOnly(ctx context.Context, id string) (*typ
 	var chunk types.Chunk
 	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&chunk).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("chunk not found")
+			return nil, ErrChunkNotFound
 		}
 		return nil, err
 	}
@@ -82,7 +84,7 @@ func (r *chunkRepository) GetChunkBySeqID(ctx context.Context, tenantID uint64, 
 	var chunk types.Chunk
 	if err := r.db.WithContext(ctx).Where("tenant_id = ? AND seq_id = ?", tenantID, seqID).First(&chunk).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("chunk not found")
+			return nil, ErrChunkNotFound
 		}
 		return nil, err
 	}
@@ -142,6 +144,24 @@ func (r *chunkRepository) ListChunksByKnowledgeID(
 		return nil, err
 	}
 	return chunks, nil
+}
+
+// ListChunkIDsByKnowledgeIDUnscoped returns stable chunk identities even
+// after the source deletion path soft-deleted the chunk rows. Content is not
+// selected: Wiki retract needs only the IDs to scrub page.chunk_refs.
+func (r *chunkRepository) ListChunkIDsByKnowledgeIDUnscoped(
+	ctx context.Context, tenantID uint64, knowledgeID string,
+) ([]string, error) {
+	var ids []string
+	if err := r.db.WithContext(ctx).
+		Unscoped().
+		Model(&types.Chunk{}).
+		Where("tenant_id = ? AND knowledge_id = ?", tenantID, knowledgeID).
+		Order("id ASC").
+		Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // ListPagedChunksByKnowledgeID lists chunks for a knowledge ID with pagination
@@ -452,6 +472,27 @@ func (r *chunkRepository) ListImageInfoByKnowledgeIDs(
 ) ([]interfaces.ChunkImageInfo, error) {
 	var results []interfaces.ChunkImageInfo
 	err := r.db.WithContext(ctx).
+		Model(&types.Chunk{}).
+		Select("knowledge_id, image_info").
+		Where("tenant_id = ? AND knowledge_id IN ? AND image_info != ''", tenantID, knowledgeIDs).
+		Scan(&results).Error
+	return results, err
+}
+
+// ListImageInfoByKnowledgeIDsUnscoped returns image cleanup metadata from
+// both live and soft-deleted chunks. Knowledge deletion is retryable: one
+// cleanup branch may soft-delete chunks before an object-store deletion in a
+// sibling branch fails. A later attempt must still be able to rediscover every
+// extracted image URL instead of finalizing with orphaned objects.
+func (r *chunkRepository) ListImageInfoByKnowledgeIDsUnscoped(
+	ctx context.Context, tenantID uint64, knowledgeIDs []string,
+) ([]interfaces.ChunkImageInfo, error) {
+	if len(knowledgeIDs) == 0 {
+		return nil, nil
+	}
+	var results []interfaces.ChunkImageInfo
+	err := r.db.WithContext(ctx).
+		Unscoped().
 		Model(&types.Chunk{}).
 		Select("knowledge_id, image_info").
 		Where("tenant_id = ? AND knowledge_id IN ? AND image_info != ''", tenantID, knowledgeIDs).

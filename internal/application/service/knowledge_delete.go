@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -42,296 +46,322 @@ func collectImageURLs(ctx context.Context, imageInfos []string) []string {
 
 // deleteExtractedImages deletes all extracted image files from storage.
 // Standalone function — callable from both knowledgeService and knowledgeBaseService.
-// Errors are logged but do not fail the overall deletion.
-func deleteExtractedImages(ctx context.Context, fileSvc interfaces.FileService, imageURLs []string) {
+// Callers that own a durable delete intent should return the joined error so a
+// retry can finish cleanup; legacy callers may intentionally ignore it.
+func deleteExtractedImages(ctx context.Context, fileSvc interfaces.FileService, imageURLs []string) error {
 	if len(imageURLs) == 0 {
-		return
+		return nil
+	}
+	if fileSvc == nil {
+		return errors.New("delete extracted images: file service is unavailable")
 	}
 	logger.Infof(ctx, "Deleting %d extracted images", len(imageURLs))
+	var errs []error
 	for _, url := range imageURLs {
 		if err := fileSvc.DeleteFile(ctx, url); err != nil {
 			logger.Errorf(ctx, "Failed to delete extracted image %s: %v", url, err)
+			errs = append(errs, fmt.Errorf("delete extracted image %s: %w", url, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// unscopedChunkImageInfoRepository is implemented by the production GORM
+// chunk repository. It deliberately stays out of the broad ChunkRepository
+// interface: only crash-recoverable deletion is allowed to inspect metadata
+// on soft-deleted chunks.
+type unscopedChunkImageInfoRepository interface {
+	ListImageInfoByKnowledgeIDsUnscoped(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeIDs []string,
+	) ([]interfaces.ChunkImageInfo, error)
+}
+
+type knowledgeDeleteVectorGroupKey struct {
+	KnowledgeBaseID  string
+	VectorStoreID    string
+	EmbeddingModelID string
+	KnowledgeType    string
+}
+
+func buildKnowledgeDeleteVectorGroups(
+	knowledges []*types.Knowledge,
+	knowledgeBases map[string]*types.KnowledgeBase,
+) (map[knowledgeDeleteVectorGroupKey][]string, error) {
+	groups := make(map[knowledgeDeleteVectorGroupKey][]string)
+	for _, knowledge := range knowledges {
+		if knowledge == nil {
+			return nil, errors.New("knowledge delete batch: nil knowledge in vector cleanup plan")
+		}
+		kb := knowledgeBases[knowledge.KnowledgeBaseID]
+		if kb == nil {
+			return nil, fmt.Errorf("knowledge delete batch: KB %s disappeared from routing snapshot", knowledge.KnowledgeBaseID)
+		}
+		storeID := ""
+		if kb.VectorStoreID != nil {
+			storeID = strings.TrimSpace(*kb.VectorStoreID)
+		}
+		key := knowledgeDeleteVectorGroupKey{
+			KnowledgeBaseID:  knowledge.KnowledgeBaseID,
+			VectorStoreID:    storeID,
+			EmbeddingModelID: knowledge.EmbeddingModelID,
+			KnowledgeType:    knowledge.Type,
+		}
+		groups[key] = append(groups[key], knowledge.ID)
+	}
+	return groups, nil
+}
+
+func (s *knowledgeService) listDeleteImageInfo(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeIDs []string,
+) ([]interfaces.ChunkImageInfo, error) {
+	repo, ok := s.chunkRepo.(unscopedChunkImageInfoRepository)
+	if !ok || repo == nil {
+		return nil, errors.New("knowledge delete: unscoped image metadata repository is unavailable")
+	}
+	rows, err := repo.ListImageInfoByKnowledgeIDsUnscoped(ctx, tenantID, knowledgeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge delete: snapshot extracted image metadata: %w", err)
+	}
+	return rows, nil
+}
+
+func (s *knowledgeService) requiredFileServiceForPath(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	path string,
+) (interfaces.FileService, error) {
+	if kb == nil {
+		return nil, errors.New("knowledge delete: knowledge base is unavailable for storage routing")
+	}
+	fileSvc, err := s.resolveFileServiceForPath(ctx, kb, path)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge delete: resolve path %q for KB %s: %w", path, kb.ID, err)
+	}
+	if fileSvc == nil {
+		return nil, fmt.Errorf("knowledge delete: no file service can resolve path %q for KB %s", path, kb.ID)
+	}
+	return fileSvc, nil
+}
+
+func (s *knowledgeService) deleteExtractedImagesForKB(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	imageURLs []string,
+) error {
+	var errs []error
+	for _, imageURL := range imageURLs {
+		fileSvc, err := s.requiredFileServiceForPath(ctx, kb, imageURL)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		errs = append(errs, deleteExtractedImages(ctx, fileSvc, []string{imageURL}))
+	}
+	return errors.Join(errs...)
+}
+
+func (s *knowledgeService) dequeueCommittedDeleteIntents(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeIDs []string,
+) {
+	rows, err := s.repo.GetKnowledgeBatch(ctx, tenantID, knowledgeIDs)
+	if err != nil {
+		logger.Warnf(ctx, "knowledge delete: failed to inspect committed intents before task cancellation: %v", err)
+		return
+	}
+	for _, row := range rows {
+		if row != nil && row.ParseStatus == types.ParseStatusDeleting {
+			s.dequeueKnowledgeTasks(ctx, row.ID)
 		}
 	}
 }
 
 // DeleteKnowledge deletes a knowledge entry and all related resources
 func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error {
-	// Get the knowledge entry
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), id)
-	if err != nil {
-		return err
-	}
-
-	// Mark as deleting first to prevent async task conflicts
-	// This ensures that any running async tasks will detect the deletion and abort
-	originalStatus := knowledge.ParseStatus
-	knowledge.ParseStatus = types.ParseStatusDeleting
-	knowledge.UpdatedAt = time.Now()
-	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge failed to mark as deleting")
-		// Continue with deletion even if marking fails
-	} else {
-		logger.Infof(ctx, "Marked knowledge %s as deleting (previous status: %s)", id, originalStatus)
-	}
-
-	// Best-effort: purge any queued downstream tasks for this knowledge
-	// (multimodal / post-process / question / summary / graph extract).
-	// Worker checkpoints already drop them on the floor, but dequeuing
-	// here avoids waking workers just to no-op when the parse was still
-	// in flight at delete time. No-op in Lite mode and on completed rows
-	// (no queued descendants anyway).
-	if originalStatus == types.ParseStatusPending ||
-		originalStatus == types.ParseStatusProcessing {
-		s.dequeueKnowledgeTasks(ctx, id)
-	}
-
-	// Resolve file service for this KB before spawning goroutines
-	kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
-	kbFileSvc := s.resolveFileService(ctx, kb)
-
-	// Collect image URLs before chunks are deleted (ImageInfo references are lost after deletion)
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	chunkImageInfos, err := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, tenantID, []string{id})
-	if err != nil {
-		logger.Errorf(ctx, "Failed to collect image URLs for cleanup: %v", err)
-	}
-	var imageInfoStrs []string
-	for _, ci := range chunkImageInfos {
-		imageInfoStrs = append(imageInfoStrs, ci.ImageInfo)
-	}
-	imageURLs := collectImageURLs(ctx, imageInfoStrs)
-
-	wg := errgroup.Group{}
-	// Delete knowledge embeddings from vector store.
-	// Skip entirely when the knowledge has no embedding model (e.g. Wiki-only KB):
-	// nothing was ever written to the vector store, so there is nothing to delete,
-	// and GetEmbeddingModel would fail with "model ID cannot be empty".
-	if strings.TrimSpace(knowledge.EmbeddingModelID) != "" {
-		wg.Go(func() error {
-			// kb was already loaded above for resolveFileService — reuse its
-			// VectorStoreID for engine routing.
-			var boundStoreID *string
-			if kb != nil {
-				boundStoreID = kb.VectorStoreID
-			}
-			retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
-				ctx,
-				s.retrieveEngine,
-				s.ownership,
-				tenantID,
-				boundStoreID,
-			)
-			if err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-				return err
-			}
-			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
-			if err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-				return err
-			}
-			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-				return err
-			}
-			return nil
-		})
-	} else {
-		logger.Infof(ctx, "Knowledge %s has no embedding model, skipping vector store cleanup", knowledge.ID)
-	}
-
-	// Clean wiki pages before deleting chunks so cleanup can still identify
-	// which chunk_refs belonged to this source document.
-	if kb != nil && kb.IsWikiEnabled() {
-		s.cleanupWikiOnKnowledgeDelete(ctx, knowledge)
-	}
-
-	// Delete all chunks associated with this knowledge
-	wg.Go(func() error {
-		if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete chunks failed")
-			return err
-		}
-		return nil
-	})
-
-	// Delete the physical file and extracted images if they exist
-	wg.Go(func() error {
-		if knowledge.FilePath != "" {
-			if err := kbFileSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
-			}
-		}
-		deleteExtractedImages(ctx, kbFileSvc, imageURLs)
-		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-		tenantInfo.StorageUsed -= knowledge.StorageSize
-		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -knowledge.StorageSize); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
-		}
-		return nil
-	})
-
-	// Delete the knowledge graph
-	wg.Go(func() error {
-		namespace := types.NameSpace{KnowledgeBase: knowledge.KnowledgeBaseID, Knowledge: knowledge.ID}
-		if err := s.graphEngine.DelGraph(ctx, []types.NameSpace{namespace}); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge graph failed")
-			return err
-		}
-		return nil
-	})
-
-	if err = wg.Wait(); err != nil {
-		return err
-	}
-	if err := s.repo.DeleteKnowledgeTagRelations(ctx, id); err != nil {
-		logger.Warnf(ctx, "Failed to delete tag relations for knowledge %s: %v", id, err)
-	}
-	// Delete the knowledge entry itself from the database
-	return s.repo.DeleteKnowledge(ctx, ctx.Value(types.TenantIDContextKey).(uint64), id)
+	// Keep every entry point on the same durable mark → quiesce → resnapshot
+	// → cleanup → finalize pipeline. Historically this single-item path had a
+	// weaker best-effort cancellation boundary and could race active parsers.
+	return s.DeleteKnowledgeList(ctx, []string{id})
 }
 
-// cleanupWikiOnKnowledgeDelete handles wiki pages when a source document is deleted.
-//
-// There are three sources of truth we must keep consistent:
-//   - The knowledge row (being soft-deleted right now by the caller)
-//   - Wiki pages whose source_refs include this knowledge
-//   - Pending/in-flight wiki_ingest tasks that may create *new* pages pointing at it
-//
-// The function is deliberately best-effort and idempotent:
-//   - It writes a tombstone + scrubs pending ingest ops so new pages cannot be
-//     born with a stale source_ref (guards (a) queued ingest and (b) ingest
-//     tasks mid-LLM call — both consult the tombstone before writing).
-//   - It immediately reconciles any pages already present (delete-if-only-ref
-//     or strip-ref-if-multi).
-//   - It *unconditionally* enqueues a retract task. Crucially we DO NOT gate
-//     enqueue on "pages currently exist": in the ingest/delete race the
-//     knowledge may have pages that exist only after this function returns
-//     (the ingest task fires later and, absent the tombstone, would have
-//     created them). The retract handler re-queries ListPagesBySourceRef at
-//     run time, so even with an empty PageSlugs it will do the right thing —
-//     and at worst it's a cheap no-op.
-func (s *knowledgeService) cleanupWikiOnKnowledgeDelete(ctx context.Context, knowledge *types.Knowledge) {
-	if knowledge == nil {
-		return
+type wikiKnowledgeDeletionPlan struct {
+	knowledge    *types.Knowledge
+	pages        []*types.WikiPage
+	sourceChunks []string
+	pendingOp    *types.TaskPendingOp
+}
+
+// prepareWikiKnowledgeDeletion is the hard durability boundary for source
+// deletion. One database transaction locks every knowledge row, exposes the
+// deleting intent, removes obsolete ingest work, and upserts a durable retract.
+// A worker therefore never sees a deleting status that can later be rolled
+// back independently. Page reconciliation and Redis wake-ups happen only after
+// commit; both are idempotent and backed by the PostgreSQL operation.
+func (s *knowledgeService) prepareWikiKnowledgeDeletion(
+	ctx context.Context,
+	knowledges []*types.Knowledge,
+) error {
+	if len(knowledges) == 0 {
+		return nil
 	}
-	kbID := knowledge.KnowledgeBaseID
-	knowledgeID := knowledge.ID
-	if kbID == "" || knowledgeID == "" {
-		return
+	if s.wikiDeleteCoord == nil {
+		return errors.New("wiki delete coordinator is unavailable")
 	}
 
-	// (1) Tombstone + scrub pending ingest — must happen first so any
-	// wiki_ingest task that wakes up between here and the retract enqueue
-	// below sees "knowledge gone" and bails out.
-	s.markKnowledgeDeletedForWiki(ctx, kbID, knowledgeID)
-	s.scrubWikiPendingIngest(ctx, kbID, knowledgeID, "cleanup")
+	plans := make([]*wikiKnowledgeDeletionPlan, 0, len(knowledges))
+	requests := make([]wikidelete.Request, 0, len(knowledges))
+	for _, knowledge := range knowledges {
+		plan, err := s.buildWikiKnowledgeDeletionPlan(ctx, knowledge)
+		if err != nil {
+			return err
+		}
+		plans = append(plans, plan)
+		requests = append(requests, wikidelete.Request{
+			TenantID:        knowledge.TenantID,
+			KnowledgeID:     knowledge.ID,
+			KnowledgeBaseID: knowledge.KnowledgeBaseID,
+			PendingOp:       plan.pendingOp,
+		})
+	}
+	if err := s.wikiDeleteCoord.Prepare(ctx, requests); err != nil {
+		return fmt.Errorf("prepare durable Wiki deletion: %w", err)
+	}
 
-	// Pull title/summary from the knowledge itself — do NOT read them from
-	// existing wiki pages. In the race window wiki pages may not exist yet,
-	// and even when they do their "summary" is the LLM-extracted one which
-	// we're about to invalidate anyway. The knowledge row still has the
-	// original Title/FileName/Description, which is what the retract prompt
-	// actually wants.
+	var activationErrs []error
+	for _, plan := range plans {
+		if err := s.activateWikiKnowledgeDeletion(ctx, plan); err != nil {
+			activationErrs = append(activationErrs, err)
+		}
+	}
+	return errors.Join(activationErrs...)
+}
+
+func (s *knowledgeService) buildWikiKnowledgeDeletionPlan(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+) (*wikiKnowledgeDeletionPlan, error) {
+	if knowledge == nil || knowledge.ID == "" || knowledge.KnowledgeBaseID == "" || knowledge.TenantID == 0 {
+		return nil, errors.New("wiki delete plan: complete knowledge identity is required")
+	}
+
+	pages, err := s.wikiRepo.ListBySourceRef(ctx, knowledge.KnowledgeBaseID, knowledge.ID)
+	if err != nil {
+		// This snapshot is the synchronous visibility barrier: sole-source
+		// pages are deleted and shared pages are quarantined before external
+		// cleanup/finalization can continue. Unknown page state must therefore
+		// fail closed and retry, not expose deleted-source prose until the
+		// asynchronous retract happens to run.
+		return nil, fmt.Errorf("wiki delete plan: snapshot pages for %s: %w", knowledge.ID, err)
+	}
+	chunkIDRepo, ok := s.chunkRepo.(unscopedChunkIDRepository)
+	if !ok || chunkIDRepo == nil {
+		return nil, errors.New("wiki delete plan: chunk repository is unavailable")
+	}
+	sourceChunks, err := chunkIDRepo.ListChunkIDsByKnowledgeIDUnscoped(ctx, knowledge.TenantID, knowledge.ID)
+	if err != nil {
+		return nil, fmt.Errorf("wiki delete plan: snapshot source chunks for %s: %w", knowledge.ID, err)
+	}
+	sourceChunks = stableStringUnion(sourceChunks)
+
 	docTitle := knowledge.Title
 	if docTitle == "" {
 		docTitle = knowledge.FileName
 	}
 	if docTitle == "" {
-		docTitle = knowledgeID
+		docTitle = knowledge.ID
 	}
 	docSummary := knowledge.Description
-
-	// (2) Immediate reconciliation for pages already present. If ingest
-	// hasn't run yet this simply finds nothing; that's fine — see (3).
-	pages, err := s.wikiRepo.ListBySourceRef(ctx, kbID, knowledgeID)
-	if err != nil {
-		logger.Warnf(ctx, "wiki cleanup: failed to list pages by source ref %s: %v", knowledgeID, err)
-		pages = nil
-	}
-	sourceChunkRefs := s.wikiChunkRefsForKnowledge(ctx, knowledge)
-
-	// Prefer the on-disk summary if the summary page already exists (it's
-	// richer than the raw user-provided description). Leave docSummary
-	// untouched otherwise so we still pass something meaningful downstream.
+	knownSlugs := make([]string, 0, len(pages))
 	for _, page := range pages {
+		if page == nil {
+			continue
+		}
 		if page.PageType == types.WikiPageTypeSummary && page.Summary != "" {
 			docSummary = page.Summary
-			break
+		}
+		if page.Slug != "" && page.PageType != types.WikiPageTypeIndex && page.PageType != types.WikiPageTypeLog {
+			knownSlugs = append(knownSlugs, page.Slug)
 		}
 	}
-
-	var deletedSlugs []string
-	var retractSlugs []string
-	for _, page := range pages {
-		if page.PageType == types.WikiPageTypeIndex || page.PageType == types.WikiPageTypeLog {
-			continue
-		}
-
-		remaining := removeSourceRef(page.SourceRefs, knowledgeID)
-
-		if len(remaining) == 0 {
-			if err := s.wikiService.DeletePage(ctx, kbID, page.Slug); err != nil {
-				logger.Warnf(ctx, "wiki cleanup: failed to delete page %s: %v", page.Slug, err)
-			} else {
-				deletedSlugs = append(deletedSlugs, page.Slug)
-			}
-		} else {
-			page.SourceRefs = remaining
-			page.ChunkRefs = removeChunkRefs(page.ChunkRefs, sourceChunkRefs)
-			if err := s.wikiService.UpdatePageMeta(ctx, page); err != nil {
-				logger.Warnf(ctx, "wiki cleanup: failed to update source refs for page %s: %v", page.Slug, err)
-			} else {
-				retractSlugs = append(retractSlugs, page.Slug)
-			}
-		}
-	}
-
-	if len(deletedSlugs) > 0 {
-		logger.Infof(ctx, "wiki cleanup: deleted %d pages after knowledge %s deletion: %v",
-			len(deletedSlugs), knowledgeID, deletedSlugs)
-	}
-
-	allAffectedSlugs := append(retractSlugs, deletedSlugs...)
-
-	// (3) Unconditionally enqueue the retract task. See function comment —
-	// an empty PageSlugs is not a bug, it's the signal "re-query at run
-	// time". The handler will ListPagesBySourceRef again, pick up any
-	// pages that materialised after we looked, and also rebuild index/log
-	// so the knowledge's disappearance is reflected in the UI.
 	lang, _ := types.LanguageFromContext(ctx)
-	tenantID, _ := types.TenantIDFromContext(ctx)
-	EnqueueWikiRetract(ctx, s.task, s.taskPendingRepo, WikiRetractPayload{
-		TenantID:        tenantID,
-		KnowledgeBaseID: kbID,
-		KnowledgeID:     knowledgeID,
-		DocTitle:        docTitle,
-		DocSummary:      docSummary,
-		Language:        lang,
-		PageSlugs:       allAffectedSlugs,
-	})
-	logger.Infof(ctx, "wiki cleanup: enqueued retract task for knowledge %s (%d known slugs: %v)",
-		knowledgeID, len(allAffectedSlugs), allAffectedSlugs)
+	op := WikiPendingOp{
+		Op:           WikiOpRetract,
+		KnowledgeID:  knowledge.ID,
+		DocTitle:     docTitle,
+		DocSummary:   docSummary,
+		Language:     lang,
+		PageSlugs:    stableStringUnion(knownSlugs),
+		SourceChunks: sourceChunks,
+	}
+	payload, err := json.Marshal(op)
+	if err != nil {
+		return nil, fmt.Errorf("wiki delete plan: marshal retract for %s: %w", knowledge.ID, err)
+	}
+	return &wikiKnowledgeDeletionPlan{
+		knowledge:    knowledge,
+		pages:        pages,
+		sourceChunks: sourceChunks,
+		pendingOp: &types.TaskPendingOp{
+			TenantID: knowledge.TenantID,
+			TaskType: wikiTaskType,
+			Scope:    wikiTaskScope,
+			ScopeID:  knowledge.KnowledgeBaseID,
+			Op:       WikiOpRetract,
+			DedupKey: knowledge.ID,
+			Payload:  payload,
+		},
+	}, nil
 }
 
-func (s *knowledgeService) wikiChunkRefsForKnowledge(ctx context.Context, knowledge *types.Knowledge) map[string]bool {
-	if knowledge == nil || s.chunkRepo == nil {
-		return nil
+func (s *knowledgeService) activateWikiKnowledgeDeletion(
+	ctx context.Context,
+	plan *wikiKnowledgeDeletionPlan,
+) error {
+	if plan == nil || plan.knowledge == nil {
+		return errors.New("wiki delete activation: plan is required")
 	}
-	chunks, err := s.chunkRepo.ListChunksByKnowledgeID(ctx, knowledge.TenantID, knowledge.ID)
-	if err != nil {
-		logger.Warnf(ctx, "wiki cleanup: failed to list chunks for knowledge %s: %v", knowledge.ID, err)
-		return nil
+	knowledge := plan.knowledge
+	s.markKnowledgeDeletedForWiki(ctx, knowledge.KnowledgeBaseID, knowledge.ID)
+	if err := enqueueWikiTrigger(s.task, WikiIngestPayload{
+		TenantID:        knowledge.TenantID,
+		KnowledgeBaseID: knowledge.KnowledgeBaseID,
+	}, wikiFollowUpDelay, true); err != nil {
+		logger.Warnf(ctx, "wiki delete: durable retract persisted but trigger degraded for %s: %v", knowledge.ID, err)
 	}
-	refs := make(map[string]bool, len(chunks))
-	for _, chunk := range chunks {
-		if chunk == nil || chunk.ID == "" {
+
+	for _, page := range plan.pages {
+		if page == nil || page.PageType == types.WikiPageTypeIndex || page.PageType == types.WikiPageTypeLog {
 			continue
 		}
-		refs[chunk.ID] = true
+		// Always archive, including sole-source pages. The durable reducer will
+		// delete a sole-source page; retaining it briefly keeps provenance
+		// available for retries. The repository call locks the current row,
+		// unions concurrent source markers, and increments version to fence stale
+		// content writers.
+		if err := s.wikiRepo.QuarantineForDelete(
+			ctx, knowledge.KnowledgeBaseID, page.Slug, knowledge.ID,
+		); err != nil && !errors.Is(err, repository.ErrWikiPageNotFound) {
+			return fmt.Errorf("wiki delete: quarantine page %s: %w", page.Slug, err)
+		}
 	}
-	return refs
+	indexPage, err := s.wikiService.GetIndex(ctx, knowledge.KnowledgeBaseID)
+	if err != nil {
+		return fmt.Errorf("wiki delete: load index quarantine for %s: %w", knowledge.ID, err)
+	}
+	if indexPage == nil {
+		return fmt.Errorf("wiki delete: load index quarantine for %s: service returned nil", knowledge.ID)
+	}
+	if err := s.wikiRepo.QuarantineForDelete(
+		ctx, knowledge.KnowledgeBaseID, indexPage.Slug, knowledge.ID,
+	); err != nil {
+		return fmt.Errorf("wiki delete: persist index quarantine for %s: %w", knowledge.ID, err)
+	}
+	return nil
 }
 
 // markKnowledgeDeletedForWiki writes a short-TTL tombstone so any wiki_ingest
@@ -356,13 +386,18 @@ func (s *knowledgeService) markKnowledgeDeletedForWiki(ctx context.Context, kbID
 //
 // Retract entries stay put — delete still needs them to unlink referencing
 // pages, and reparse never enqueues retracts for the doc being reparsed.
-// We pass op=WikiOpIngest so DeleteByDedupKey filters to the ingest rows
-// only.
+// We pass op=WikiOpIngest and the generation-key prefix so every stale ingest
+// generation is removed while retract rows stay intact.
 func (s *knowledgeService) scrubWikiPendingIngest(ctx context.Context, kbID, knowledgeID, reason string) {
 	if s.taskPendingRepo == nil || kbID == "" || knowledgeID == "" {
 		return
 	}
-	if err := s.taskPendingRepo.DeleteByDedupKey(ctx, wikiTaskType, wikiTaskScope, kbID, knowledgeID, WikiOpIngest); err != nil {
+	dedupPrefix, prefixErr := wikiqueue.IngestDedupPrefix(knowledgeID)
+	if prefixErr != nil {
+		logger.Warnf(ctx, "wiki %s: invalid pending ingest identity for knowledge %s: %v", reason, knowledgeID, prefixErr)
+		return
+	}
+	if err := s.taskPendingRepo.DeleteByDedupKeyPrefix(ctx, wikiTaskType, wikiTaskScope, kbID, dedupPrefix, WikiOpIngest); err != nil {
 		logger.Warnf(ctx, "wiki %s: failed to scrub pending ingest ops for knowledge %s: %v", reason, knowledgeID, err)
 		return
 	}
@@ -425,96 +460,407 @@ func removeChunkRefs(refs types.StringArray, removed map[string]bool) types.Stri
 	return result
 }
 
-// DeleteKnowledgeList deletes a knowledge entry and all related resources
+const (
+	knowledgeDeleteQuiesceTimeout = 30 * time.Second
+	knowledgeDeleteQuiescePoll    = 250 * time.Millisecond
+)
+
+// quiesceKnowledgeDeletion establishes a hard hand-off between document
+// workers and destructive cleanup. Merely setting parse_status=deleting or
+// sending an asynq cancellation is insufficient: an already-running worker
+// may still be inside a vector/chunk write. We therefore keep cancelling new
+// descendants and wait until Redis proves that no document-lifecycle task is
+// queued or active for any target. Wiki tasks are deliberately excluded; the
+// durable retract queue owns their independent cleanup.
+func (s *knowledgeService) quiesceKnowledgeDeletion(
+	ctx context.Context,
+	knowledges []*types.Knowledge,
+) error {
+	return quiesceKnowledgeDeletionWithInspector(ctx, s.taskInspector, knowledges)
+}
+
+func quiesceKnowledgeDeletionWithInspector(
+	ctx context.Context,
+	taskInspector interfaces.TaskInspector,
+	knowledges []*types.Knowledge,
+) error {
+	if len(knowledges) == 0 {
+		return nil
+	}
+	if taskInspector == nil {
+		return errors.New("knowledge delete: task inspector unavailable for quiescence barrier")
+	}
+
+	targets := make([]interfaces.KnowledgeTaskTarget, 0, len(knowledges))
+	for _, knowledge := range knowledges {
+		if knowledge == nil || strings.TrimSpace(knowledge.ID) == "" || strings.TrimSpace(knowledge.KnowledgeBaseID) == "" {
+			return errors.New("knowledge delete: invalid target at quiescence barrier")
+		}
+		targets = append(targets, interfaces.KnowledgeTaskTarget{
+			KnowledgeBaseID: knowledge.KnowledgeBaseID,
+			KnowledgeID:     knowledge.ID,
+		})
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, knowledgeDeleteQuiesceTimeout)
+	defer cancel()
+	ticker := time.NewTicker(knowledgeDeleteQuiescePoll)
+	defer ticker.Stop()
+	emptySnapshots := 0
+	toCancel := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		toCancel[target.KnowledgeID] = struct{}{}
+	}
+
+	for {
+		for _, target := range targets {
+			if _, shouldCancel := toCancel[target.KnowledgeID]; !shouldCancel {
+				continue
+			}
+			if _, _, err := taskInspector.CancelTasksForKnowledge(waitCtx, target.KnowledgeID); err != nil {
+				return fmt.Errorf("knowledge delete: cancel lifecycle tasks for %s: %w", target.KnowledgeID, err)
+			}
+		}
+		live, err := taskInspector.DocumentLifecycleTaskKnowledgeIDs(waitCtx, targets)
+		if err != nil {
+			return fmt.Errorf("knowledge delete: inspect lifecycle task quiescence: %w", err)
+		}
+		if len(live) == 0 {
+			emptySnapshots++
+			// Queue snapshots are atomic per Asynq queue, not across every
+			// queue. Requiring two cancellation+snapshot rounds closes the
+			// hand-off window where a parent in a later-scanned queue fans out
+			// a child into an earlier-scanned queue while the first scan runs.
+			if emptySnapshots >= 2 {
+				return nil
+			}
+		} else {
+			emptySnapshots = 0
+		}
+		// The first round purges queued descendants for every target. Later
+		// rounds repeat the expensive destructive scan only for IDs the single
+		// batched liveness probe still reports, rather than O(all IDs × backlog)
+		// on every 250ms tick.
+		toCancel = make(map[string]struct{}, len(live))
+		for knowledgeID := range live {
+			toCancel[knowledgeID] = struct{}{}
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf(
+				"knowledge delete: lifecycle tasks did not quiesce for %d document(s): %w",
+				len(live), waitCtx.Err(),
+			)
+		case <-ticker.C:
+		}
+	}
+}
+
+// DeleteKnowledgeList deletes knowledge entries and all related resources.
+// Direct service callers are already operating on authoritative IDs; queued
+// user operations additionally call deleteKnowledgeListExpected to re-check
+// the KB identity captured at enqueue time.
 func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string) error {
+	return s.deleteKnowledgeListInBatches(ctx, ids, "")
+}
+
+const knowledgeDeleteWorkerBatchSize = 25
+
+func normalizeKnowledgeDeleteIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	result := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func (s *knowledgeService) knowledgeDeleteContext(
+	ctx context.Context,
+) (context.Context, *types.Tenant, error) {
+	tenantID, ok := types.TenantIDFromContext(ctx)
+	if !ok || tenantID == 0 {
+		return ctx, nil, errors.New("knowledge delete: tenant context is required")
+	}
+	if tenant, ok := types.TenantInfoFromContext(ctx); ok && tenant != nil {
+		if tenant.ID != tenantID {
+			return ctx, nil, errors.New("knowledge delete: tenant context identity mismatch")
+		}
+		return ctx, tenant, nil
+	}
+	tenant, err := s.tenantRepo.GetTenantByID(ctx, tenantID)
+	if err != nil {
+		return ctx, nil, fmt.Errorf("knowledge delete: load tenant %d: %w", tenantID, err)
+	}
+	if tenant == nil || tenant.ID != tenantID {
+		return ctx, nil, fmt.Errorf("knowledge delete: tenant %d is unavailable", tenantID)
+	}
+	return context.WithValue(ctx, types.TenantInfoContextKey, tenant), tenant, nil
+}
+
+func validateKnowledgeDeleteKB(
+	knowledges []*types.Knowledge,
+	expectedKnowledgeBaseID string,
+) error {
+	if expectedKnowledgeBaseID == "" {
+		return nil
+	}
+	for _, knowledge := range knowledges {
+		if knowledge == nil || knowledge.KnowledgeBaseID != expectedKnowledgeBaseID {
+			actual := "<nil>"
+			knowledgeID := "<nil>"
+			if knowledge != nil {
+				actual = knowledge.KnowledgeBaseID
+				knowledgeID = knowledge.ID
+			}
+			return fmt.Errorf(
+				"knowledge delete batch: knowledge %s moved from expected KB %s to %s",
+				knowledgeID, expectedKnowledgeBaseID, actual,
+			)
+		}
+	}
+	return nil
+}
+
+func (s *knowledgeService) beginKnowledgeDeletionBatch(
+	ctx context.Context,
+	tenantID uint64,
+	ids []string,
+	expectedKnowledgeBaseID string,
+) error {
+	knowledges, err := s.repo.GetKnowledgeBatch(ctx, tenantID, ids)
+	if err != nil {
+		return err
+	}
+	if len(knowledges) == 0 {
+		return nil
+	}
+	if err := validateKnowledgeDeleteKB(knowledges, expectedKnowledgeBaseID); err != nil {
+		return err
+	}
+	intents := make([]wikidelete.Intent, 0, len(knowledges))
+	for _, knowledge := range knowledges {
+		docTitle := knowledge.Title
+		if docTitle == "" {
+			docTitle = knowledge.FileName
+		}
+		if docTitle == "" {
+			docTitle = knowledge.ID
+		}
+		lang, _ := types.LanguageFromContext(ctx)
+		payload, err := json.Marshal(WikiPendingOp{
+			Op:          WikiOpRetract,
+			KnowledgeID: knowledge.ID,
+			DocTitle:    docTitle,
+			DocSummary:  knowledge.Description,
+			Language:    lang,
+		})
+		if err != nil {
+			return fmt.Errorf("begin knowledge deletion: encode minimal Wiki retract: %w", err)
+		}
+		intents = append(intents, wikidelete.Intent{
+			TenantID:        tenantID,
+			KnowledgeID:     knowledge.ID,
+			KnowledgeBaseID: knowledge.KnowledgeBaseID,
+			PendingOp: &types.TaskPendingOp{
+				TenantID: tenantID, TaskType: wikiTaskType, Scope: wikiTaskScope,
+				ScopeID: knowledge.KnowledgeBaseID, Op: WikiOpRetract,
+				DedupKey: knowledge.ID, Payload: payload,
+			},
+		})
+	}
+	if err := s.wikiDeleteCoord.Begin(ctx, intents); err != nil {
+		return fmt.Errorf("begin durable knowledge deletion: %w", err)
+	}
+	triggeredKBs := make(map[string]struct{})
+	for _, knowledge := range knowledges {
+		s.markKnowledgeDeletedForWiki(ctx, knowledge.KnowledgeBaseID, knowledge.ID)
+		if _, triggered := triggeredKBs[knowledge.KnowledgeBaseID]; triggered {
+			continue
+		}
+		triggeredKBs[knowledge.KnowledgeBaseID] = struct{}{}
+		if err := enqueueWikiTrigger(s.task, WikiIngestPayload{
+			TenantID: tenantID, KnowledgeBaseID: knowledge.KnowledgeBaseID,
+		}, wikiFollowUpDelay, true); err != nil {
+			// PostgreSQL is authoritative; wikiqueue.Recovery republishes a
+			// missing wake-up every minute.
+			logger.Warnf(ctx, "knowledge delete: minimal retract trigger degraded for KB %s: %v", knowledge.KnowledgeBaseID, err)
+		}
+	}
+	return nil
+}
+
+func (s *knowledgeService) deleteKnowledgeListInBatches(
+	ctx context.Context,
+	ids []string,
+	expectedKnowledgeBaseID string,
+) error {
+	ids = normalizeKnowledgeDeleteIDs(ids)
 	if len(ids) == 0 {
 		return nil
 	}
-	// 1. Get the knowledge entry
-	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	var tenantInfo *types.Tenant
+	var err error
+	ctx, tenantInfo, err = s.knowledgeDeleteContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Phase 1 is intentionally separate and cheap: persist deletion intent
+	// for the full root operation before any external cleanup. If the root task
+	// later times out or dead-letters, every tail row is visible to Recovery.
+	for start := 0; start < len(ids); start += knowledgeDeleteWorkerBatchSize {
+		end := start + knowledgeDeleteWorkerBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		if err := s.beginKnowledgeDeletionBatch(
+			ctx, tenantInfo.ID, ids[start:end], expectedKnowledgeBaseID,
+		); err != nil {
+			return fmt.Errorf("claim knowledge delete batch [%d:%d]: %w", start, end, err)
+		}
+	}
+
+	var batchErr error
+	for start := 0; start < len(ids); start += knowledgeDeleteWorkerBatchSize {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(batchErr, err)
+		}
+		end := start + knowledgeDeleteWorkerBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		// Continue with later bounded batches after an isolated failure. The
+		// task still returns the joined error so Asynq retries; successfully
+		// finalized rows disappear from the next retry's scoped read.
+		if err := s.deleteKnowledgeListExpected(ctx, ids[start:end], expectedKnowledgeBaseID); err != nil {
+			batchErr = errors.Join(batchErr, fmt.Errorf("delete knowledge batch [%d:%d]: %w", start, end, err))
+		}
+	}
+	return batchErr
+}
+
+func (s *knowledgeService) deleteKnowledgeListExpected(
+	ctx context.Context,
+	ids []string,
+	expectedKnowledgeBaseID string,
+) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	// The caller has already persisted deletion intent for the complete root
+	// operation. From here onward every snapshot must be taken after active
+	// document writers have crossed the quiescence barrier.
+	tenantInfo, ok := types.TenantInfoFromContext(ctx)
+	if !ok || tenantInfo == nil {
+		return errors.New("knowledge delete batch: tenant info is unavailable")
+	}
 	knowledgeList, err := s.repo.GetKnowledgeBatch(ctx, tenantInfo.ID, ids)
 	if err != nil {
 		return err
 	}
 
-	// Mark all as deleting first to prevent async task conflicts.
-	// Remember which entries still had queued / in-flight downstream tasks
-	// so we can dequeue them in one pass after marking.
-	var inFlightIDs []string
-	for _, knowledge := range knowledgeList {
-		prev := knowledge.ParseStatus
-		knowledge.ParseStatus = types.ParseStatusDeleting
-		knowledge.UpdatedAt = time.Now()
-		if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).WithField("knowledge_id", knowledge.ID).
-				Errorf("DeleteKnowledgeList failed to mark as deleting")
-			// Continue with deletion even if marking fails
-		}
-		if prev == types.ParseStatusPending || prev == types.ParseStatusProcessing {
-			inFlightIDs = append(inFlightIDs, knowledge.ID)
-		}
+	if len(knowledgeList) == 0 {
+		return nil
 	}
-	logger.Infof(ctx, "Marked %d knowledge entries as deleting", len(knowledgeList))
-
-	// Best-effort dequeue of downstream tasks for in-flight entries.
-	// See DeleteKnowledge for the rationale; loop is per-knowledge because
-	// the inspector only filters by knowledge_id, not by ID set.
-	for _, kid := range inFlightIDs {
-		s.dequeueKnowledgeTasks(ctx, kid)
+	if err := validateKnowledgeDeleteKB(knowledgeList, expectedKnowledgeBaseID); err != nil {
+		return err
 	}
 
-	// Pre-resolve file services per KB so goroutines don't need DB access
-	kbFileServices := make(map[string]interfaces.FileService)
-	for _, knowledge := range knowledgeList {
-		if _, ok := kbFileServices[knowledge.KnowledgeBaseID]; !ok {
-			kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
-			kbFileServices[knowledge.KnowledgeBaseID] = s.resolveFileService(ctx, kb)
-		}
+	// Marked deleting above. Wait before taking *any* resource/provenance
+	// snapshot so an active parser cannot append a final chunk/image/page after
+	// the snapshot and leave an orphan behind.
+	if err := s.quiesceKnowledgeDeletion(ctx, knowledgeList); err != nil {
+		return err
 	}
-
-	// Collect image URLs before chunks are deleted
-	chunkImageInfos, err := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, tenantInfo.ID, ids)
+	knowledgeList, err = s.repo.GetKnowledgeBatch(ctx, tenantInfo.ID, ids)
 	if err != nil {
-		logger.Errorf(ctx, "Failed to collect image URLs for batch cleanup: %v", err)
+		return fmt.Errorf("knowledge delete batch: reload after quiescence: %w", err)
 	}
-	knowledgeToKB := make(map[string]string)
-	for _, k := range knowledgeList {
-		knowledgeToKB[k.ID] = k.KnowledgeBaseID
+	if len(knowledgeList) == 0 {
+		return nil
 	}
-	kbImageInfos := make(map[string][]string) // kbID → []imageInfo JSON
+	if err := validateKnowledgeDeleteKB(knowledgeList, expectedKnowledgeBaseID); err != nil {
+		return err
+	}
+	for _, knowledge := range knowledgeList {
+		if knowledge.ParseStatus != types.ParseStatusDeleting {
+			return fmt.Errorf(
+				"knowledge delete batch: quiesced knowledge %s lost deleting claim (status=%s)",
+				knowledge.ID, knowledge.ParseStatus,
+			)
+		}
+	}
+	deleteIDs := make([]string, 0, len(knowledgeList))
+	knowledgeToKB := make(map[string]string, len(knowledgeList))
+	knowledgeBases := make(map[string]*types.KnowledgeBase)
+	for _, knowledge := range knowledgeList {
+		deleteIDs = append(deleteIDs, knowledge.ID)
+		knowledgeToKB[knowledge.ID] = knowledge.KnowledgeBaseID
+		if _, loaded := knowledgeBases[knowledge.KnowledgeBaseID]; loaded {
+			continue
+		}
+		kb, kbErr := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
+		if kbErr != nil {
+			return fmt.Errorf("knowledge delete batch: load KB %s: %w", knowledge.KnowledgeBaseID, kbErr)
+		}
+		if kb == nil {
+			return fmt.Errorf("knowledge delete batch: load KB %s: service returned nil without error", knowledge.KnowledgeBaseID)
+		}
+		knowledgeBases[knowledge.KnowledgeBaseID] = kb
+	}
+
+	// Read through soft deletes on every retry. Failure is a hard boundary:
+	// finalizing without this snapshot would orphan extracted image objects.
+	chunkImageInfos, err := s.listDeleteImageInfo(ctx, tenantInfo.ID, deleteIDs)
+	if err != nil {
+		return err
+	}
+	knowledgeImageInfos := make(map[string][]string) // knowledgeID -> []imageInfo JSON
 	for _, ci := range chunkImageInfos {
-		kbID := knowledgeToKB[ci.KnowledgeID]
-		kbImageInfos[kbID] = append(kbImageInfos[kbID], ci.ImageInfo)
+		_, belongs := knowledgeToKB[ci.KnowledgeID]
+		if !belongs {
+			return fmt.Errorf("knowledge delete batch: image metadata belongs to unexpected knowledge %s", ci.KnowledgeID)
+		}
+		knowledgeImageInfos[ci.KnowledgeID] = append(knowledgeImageInfos[ci.KnowledgeID], ci.ImageInfo)
 	}
-	kbImageURLs := make(map[string][]string) // kbID → []imageURL (deduplicated)
-	for kbID, infos := range kbImageInfos {
-		kbImageURLs[kbID] = collectImageURLs(ctx, infos)
+	knowledgeAuxiliaryPaths := make(map[string][]string, len(knowledgeList))
+	for _, knowledge := range knowledgeList {
+		paths, pathErr := auxiliaryPathsFromKnowledge(knowledge)
+		if pathErr != nil {
+			return pathErr
+		}
+		paths = append(paths, collectImageURLs(ctx, knowledgeImageInfos[knowledge.ID])...)
+		knowledgeAuxiliaryPaths[knowledge.ID] = uniqueNonEmptyStrings(paths)
 	}
+
+	// Refresh the durable retract and synchronous quarantine from the
+	// post-barrier page/chunk snapshot. Begin already made the delete intent
+	// crash-recoverable; a failure here leaves deleting rows for Recovery.
+	if err := s.prepareWikiKnowledgeDeletion(ctx, knowledgeList); err != nil {
+		return err
+	}
+	logger.Infof(ctx, "Prepared %d knowledge entries for durable deletion", len(knowledgeList))
 
 	wg := errgroup.Group{}
 	// 2. Delete knowledge embeddings from vector store
 	wg.Go(func() error {
 		tenantID := types.MustTenantIDFromContext(ctx)
-		// Batch cleanup spans multiple KBs that may be bound to different
-		// VectorStores; routing this batch through tenant effective engines
-		// keeps the legacy behavior intact.
-		// TODO: fan out the batch per-store using each KB's own
-		// VectorStoreID so cleanup hits the right backend for bound KBs.
-		retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
-			ctx, s.retrieveEngine, s.ownership, tenantID, nil)
-		if err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-			return err
-		}
-		// Group by EmbeddingModelID and Type
-		type groupKey struct {
-			EmbeddingModelID string
-			Type             string
-		}
-		group := map[groupKey][]string{}
-		for _, knowledge := range knowledgeList {
-			key := groupKey{EmbeddingModelID: knowledge.EmbeddingModelID, Type: knowledge.Type}
-			group[key] = append(group[key], knowledge.ID)
+		// A KB-bound store is intentionally not reachable through the tenant's
+		// default engine set. Group by the complete routing identity so every
+		// deletion reaches exactly the backend that received the vectors.
+		group, groupErr := buildKnowledgeDeleteVectorGroups(knowledgeList, knowledgeBases)
+		if groupErr != nil {
+			return groupErr
 		}
 		for key, knowledgeIDs := range group {
 			// Wiki-only knowledge never had embeddings written to the vector store,
@@ -524,12 +870,22 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 				logger.Infof(ctx, "Skipping vector store cleanup for %d knowledge entries without embedding model", len(knowledgeIDs))
 				continue
 			}
+			var boundStoreID *string
+			if key.VectorStoreID != "" {
+				storeID := key.VectorStoreID
+				boundStoreID = &storeID
+			}
+			retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
+				ctx, s.retrieveEngine, s.ownership, tenantID, boundStoreID)
+			if err != nil {
+				return fmt.Errorf("knowledge delete batch: resolve vector store for KB %s: %w", key.KnowledgeBaseID, err)
+			}
 			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, key.EmbeddingModelID)
 			if err != nil {
 				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge get embedding model failed")
 				return err
 			}
-			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDs, embeddingModel.GetDimensions(), key.Type); err != nil {
+			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDs, embeddingModel.GetDimensions(), key.KnowledgeType); err != nil {
 				logger.GetLogger(ctx).
 					WithField("error", err).
 					Errorf("DeleteKnowledge delete knowledge embedding failed")
@@ -539,50 +895,28 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 		return nil
 	})
 
-	// 3. Clean wiki pages before deleting chunks so cleanup can still identify
-	// which chunk_refs belonged to each source document.
-	for _, knowledge := range knowledgeList {
-		kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
-		if kb != nil && kb.IsWikiEnabled() {
-			s.cleanupWikiOnKnowledgeDelete(ctx, knowledge)
-		}
-	}
-
 	// 4. Delete all chunks associated with this knowledge
 	wg.Go(func() error {
-		if err := s.chunkService.DeleteByKnowledgeList(ctx, ids); err != nil {
+		if err := s.chunkService.DeleteByKnowledgeList(ctx, deleteIDs); err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete chunks failed")
 			return err
 		}
 		return nil
 	})
 
-	// 5. Delete the physical file and extracted images if they exist
+	// 5. Delete source and derived objects through one lifecycle. The durable
+	// registry is merged with chunk.image_info, processing_fanout and FAQ
+	// metadata so retries retain evidence after chunks or task payloads vanish.
 	wg.Go(func() error {
-		storageAdjust := int64(0)
+		var cleanupErr error
 		for _, knowledge := range knowledgeList {
-			if knowledge.FilePath != "" {
-				fSvc := kbFileServices[knowledge.KnowledgeBaseID]
-				if err := fSvc.DeleteFile(ctx, knowledge.FilePath); err != nil {
-					logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete file failed")
-				}
-			}
-			storageAdjust -= knowledge.StorageSize
+			paths := append([]string(nil), knowledgeAuxiliaryPaths[knowledge.ID]...)
+			paths = append(paths, knowledge.FilePath)
+			cleanupErr = errors.Join(cleanupErr, s.cleanupKnowledgeAuxiliaryForDelete(
+				ctx, knowledgeBases[knowledge.KnowledgeBaseID], knowledge, paths,
+			))
 		}
-		// Delete extracted images per KB
-		for kbID, urls := range kbImageURLs {
-			fSvc := kbFileServices[kbID]
-			if fSvc == nil {
-				logger.Warnf(ctx, "No file service for KB %s, skipping %d image deletions", kbID, len(urls))
-				continue
-			}
-			deleteExtractedImages(ctx, fSvc, urls)
-		}
-		tenantInfo.StorageUsed += storageAdjust
-		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, storageAdjust); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge update tenant storage used failed")
-		}
-		return nil
+		return cleanupErr
 	})
 
 	// Delete the knowledge graph
@@ -604,16 +938,37 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 	if err = wg.Wait(); err != nil {
 		return err
 	}
-	for _, knowledgeID := range ids {
-		if err := s.repo.DeleteKnowledgeTagRelations(ctx, knowledgeID); err != nil {
-			logger.Warnf(ctx, "Failed to delete tag relations for knowledge %s: %v", knowledgeID, err)
-		}
+	removedStorage, err := s.wikiDeleteCoord.Finalize(ctx, tenantInfo.ID, deleteIDs)
+	if err != nil {
+		return fmt.Errorf("finalize durable knowledge deletion batch: %w", err)
 	}
-	// 6. Delete the knowledge entry itself from the database
-	return s.repo.DeleteKnowledgeList(ctx, tenantInfo.ID, ids)
+	tenantInfo.StorageUsed -= removedStorage
+	if tenantInfo.StorageUsed < 0 {
+		tenantInfo.StorageUsed = 0
+	}
+	return nil
 }
 
 func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowledge *types.Knowledge) error {
+	return s.cleanupKnowledgeResourcesWithMoveFence(ctx, knowledge, false)
+}
+
+// cleanupKnowledgeResourcesWithinMoveFence is used only while the move
+// repository holds both endpoint KB rows active for the complete callback.
+// The specialized auxiliary cleanup avoids trying to upgrade that outer
+// PostgreSQL parent lock from a second connection.
+func (s *knowledgeService) cleanupKnowledgeResourcesWithinMoveFence(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+) error {
+	return s.cleanupKnowledgeResourcesWithMoveFence(ctx, knowledge, true)
+}
+
+func (s *knowledgeService) cleanupKnowledgeResourcesWithMoveFence(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	moveFenceHeld bool,
+) error {
 	logger.GetLogger(ctx).Infof("Cleaning knowledge resources before manual update, knowledge ID: %s", knowledge.ID)
 
 	var cleanupErr error
@@ -623,23 +978,25 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 		return nil
 	}
 
-	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	tenantInfo, ok := types.TenantInfoFromContext(ctx)
+	if !ok || tenantInfo == nil {
+		return errors.New("cleanup knowledge resources: tenant info is unavailable")
+	}
+
+	// Storage and vector routing are properties of the source KB.  Never fall
+	// back to the tenant's default engines/store when this lookup fails: doing
+	// so can report a successful reparse/move while deleting the wrong backend
+	// and leaving the source resources orphaned.
+	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
+	if err != nil {
+		return fmt.Errorf("cleanup knowledge resources: load source KB %s: %w", knowledge.KnowledgeBaseID, err)
+	}
+	if kb == nil {
+		return fmt.Errorf("cleanup knowledge resources: load source KB %s: service returned nil without error", knowledge.KnowledgeBaseID)
+	}
 	if knowledge.EmbeddingModelID != "" {
-		// Load KB to discover its VectorStoreID binding. Falls back to tenant
-		// effective engines if the KB has no binding or the load fails.
-		//
-		// Silent fallback risk: if a bound KB fails to load here due to a
-		// transient DB error, the cleanup will delete from env engines and
-		// leave orphan vectors in the bound store. Warn so operators can spot it.
-		var boundStoreID *string
-		if kb, loadErr := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID); loadErr == nil && kb != nil {
-			boundStoreID = kb.VectorStoreID
-		} else if loadErr != nil {
-			logger.GetLogger(ctx).WithField("error", loadErr).WithField("knowledge_base_id", knowledge.KnowledgeBaseID).
-				Warnf("cleanupKnowledgeResources: failed to load KB for vector store resolution; falling back to tenant effective engines")
-		}
 		retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
-			ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, boundStoreID)
+			ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, kb.VectorStoreID)
 		if err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Error("Failed to init retrieve engine during cleanup")
 			cleanupErr = errors.Join(cleanupErr, err)
@@ -657,27 +1014,46 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 		}
 	}
 
-	// Collect image URLs before chunks are deleted
-	kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
-	fileSvc := s.resolveFileService(ctx, kb)
-	chunkImageInfos, imgErr := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, tenantInfo.ID, []string{knowledge.ID})
+	// Read image metadata through soft-deleted chunks.  A previous delivery may
+	// have deleted the chunks and then failed to delete one image; the unscoped
+	// snapshot is the durable retry evidence for that partially-completed
+	// cleanup.
+	chunkImageInfos, imgErr := s.listDeleteImageInfo(ctx, tenantInfo.ID, []string{knowledge.ID})
 	if imgErr != nil {
 		logger.GetLogger(ctx).WithField("error", imgErr).Error("Failed to collect image URLs for cleanup")
-		cleanupErr = errors.Join(cleanupErr, imgErr)
+		return imgErr
 	}
 	var imageInfoStrs []string
 	for _, ci := range chunkImageInfos {
 		imageInfoStrs = append(imageInfoStrs, ci.ImageInfo)
 	}
-	imageURLs := collectImageURLs(ctx, imageInfoStrs)
+	imageURLs, imageDecodeErr := collectImageURLsStrict(imageInfoStrs)
+	if imageDecodeErr != nil {
+		return fmt.Errorf("decode extracted image metadata for cleanup: %w", imageDecodeErr)
+	}
+	metadataPaths, metadataErr := auxiliaryPathsFromKnowledge(knowledge)
+	if metadataErr != nil {
+		return metadataErr
+	}
+	imageURLs = uniqueNonEmptyStrings(append(imageURLs, metadataPaths...))
 
 	if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge chunks")
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 
-	// Delete extracted images after chunks are deleted
-	deleteExtractedImages(ctx, fileSvc, imageURLs)
+	// Source FilePath is intentionally absent: reparse/manual-update owns the
+	// original upload. Every derived object uses the same durable lifecycle as
+	// full deletion, including pre-fanout and FAQ artifacts.
+	var derivedCleanupErr error
+	if moveFenceHeld {
+		derivedCleanupErr = s.cleanupDerivedKnowledgeAuxiliaryWithinMoveFence(ctx, kb, knowledge, imageURLs)
+	} else {
+		derivedCleanupErr = s.cleanupDerivedKnowledgeAuxiliary(ctx, kb, knowledge, imageURLs)
+	}
+	if derivedCleanupErr != nil {
+		cleanupErr = errors.Join(cleanupErr, derivedCleanupErr)
+	}
 
 	namespace := types.NameSpace{KnowledgeBase: knowledge.KnowledgeBaseID, Knowledge: knowledge.ID}
 	if err := s.graphEngine.DelGraph(ctx, []types.NameSpace{namespace}); err != nil {
@@ -685,19 +1061,27 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+
 	if knowledge.StorageSize > 0 {
-		tenantInfo.StorageUsed -= knowledge.StorageSize
+		previousStorageSize := knowledge.StorageSize
+		reset, err := resetKnowledgeStorage(ctx, s.repo, knowledge)
+		if err != nil {
+			return fmt.Errorf("atomically reset knowledge storage after cleanup: %w", err)
+		}
+		if !reset {
+			return fmt.Errorf("atomically reset knowledge storage after cleanup: %w", errKnowledgeStateFenceConflict)
+		}
+		tenantInfo.StorageUsed -= previousStorageSize
 		if tenantInfo.StorageUsed < 0 {
 			tenantInfo.StorageUsed = 0
-		}
-		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -knowledge.StorageSize); err != nil {
-			logger.GetLogger(ctx).WithField("error", err).Error("Failed to adjust storage usage during manual cleanup")
-			cleanupErr = errors.Join(cleanupErr, err)
 		}
 		knowledge.StorageSize = 0
 	}
 
-	return cleanupErr
+	return nil
 }
 
 // ProcessKnowledgeListDelete handles Asynq knowledge list delete tasks
@@ -706,6 +1090,47 @@ func (s *knowledgeService) ProcessKnowledgeListDelete(ctx context.Context, t *as
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
 		logger.Errorf(ctx, "Failed to unmarshal knowledge list delete payload: %v", err)
 		return err
+	}
+	if payload.TenantID == 0 {
+		return errors.New("knowledge list delete payload: tenant_id is required")
+	}
+	if len(payload.KnowledgeIDs) == 0 {
+		return errors.New("knowledge list delete payload: knowledge_ids is required")
+	}
+	if strings.TrimSpace(payload.ExpectedKnowledgeBaseID) == "" {
+		return errors.New("knowledge list delete payload: expected_knowledge_base_id is required")
+	}
+	payload.KnowledgeIDs = normalizeKnowledgeDeleteIDs(payload.KnowledgeIDs)
+	if len(payload.KnowledgeIDs) == 0 {
+		return errors.New("knowledge list delete payload: knowledge_ids contains no valid IDs")
+	}
+	if payload.RecoveryClaimedAt != nil {
+		if len(payload.KnowledgeIDs) != 1 {
+			return errors.New("knowledge list delete payload: recovery claim must target exactly one knowledge")
+		}
+		intent := wikidelete.Intent{
+			TenantID:        payload.TenantID,
+			KnowledgeID:     payload.KnowledgeIDs[0],
+			KnowledgeBaseID: strings.TrimSpace(payload.ExpectedKnowledgeBaseID),
+		}
+		retryCount, _ := asynq.GetRetryCount(ctx)
+		var claimed bool
+		var err error
+		if retryCount > 0 {
+			claimed, err = s.wikiDeleteCoord.ContinueRecovery(ctx, intent)
+		} else {
+			claimed, err = s.wikiDeleteCoord.ClaimRecovery(ctx, intent, payload.RecoveryClaimedAt.UTC())
+		}
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			logger.Infof(ctx,
+				"Ignoring obsolete knowledge delete recovery for %s (generation %s)",
+				payload.KnowledgeIDs[0], payload.RecoveryClaimedAt.UTC().Format(time.RFC3339Nano),
+			)
+			return nil
+		}
 	}
 
 	logger.Infof(ctx, "Processing knowledge list delete task for %d knowledge items", len(payload.KnowledgeIDs))
@@ -722,7 +1147,9 @@ func (s *knowledgeService) ProcessKnowledgeListDelete(ctx context.Context, t *as
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
 
 	// Delete knowledge list
-	if err := s.DeleteKnowledgeList(ctx, payload.KnowledgeIDs); err != nil {
+	if err := s.deleteKnowledgeListInBatches(
+		ctx, payload.KnowledgeIDs, strings.TrimSpace(payload.ExpectedKnowledgeBaseID),
+	); err != nil {
 		logger.Errorf(ctx, "Failed to delete knowledge list: %v", err)
 		return err
 	}

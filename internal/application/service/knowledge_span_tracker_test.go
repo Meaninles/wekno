@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -194,6 +196,101 @@ func TestSpanTracker_BeginSubSpan_HangsUnderParent(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, types.SpanKindGeneration, rows[0].Kind)
 	assert.Equal(t, parent.SpanID, rows[0].ParentSpanID, "subspan must reference parent stage's span_id")
+}
+
+// TestSpanTracker_BeginSubSpan_BoundsLongNames covers identifiers such as
+// postprocess.wiki.page[summary/<uuid>] that exceed the PostgreSQL
+// VARCHAR(64) span-name column. The stored name must remain deterministic
+// and collision-resistant, while the exact original stays available in the
+// input payload for trace inspection.
+func TestSpanTracker_BeginSubSpan_BoundsLongNames(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-long-name", "")
+	require.NoError(t, err)
+	parent := tracker.BeginStage(ctx, "kid-long-name", attempt, types.StagePostProcess, nil)
+	require.NotNil(t, parent)
+
+	originalName := "postprocess.wiki.page[summary/12345678-1234-1234-1234-1234567890ab]"
+	callerInput := types.JSONMap{"slug": "summary/12345678-1234-1234-1234-1234567890ab"}
+	span := tracker.BeginSubSpan(ctx, parent, originalName, types.SpanKindSubSpan, callerInput)
+	require.NotNil(t, span, "a long name must not turn span tracking into a best-effort write failure")
+
+	expectedName := boundedSpanName(originalName)
+	assert.Equal(t, expectedName, span.Name)
+	assert.LessOrEqual(t, utf8.RuneCountInString(span.Name), spanNameMaxRunes)
+	assert.True(t, strings.HasPrefix(span.Name, "postprocess.wiki.page[summary/"),
+		"the bounded name should retain a human-readable identity prefix")
+	assert.NotContains(t, callerInput, spanOriginalNameInputKey,
+		"enriching the persisted input must not mutate the caller-owned map")
+
+	var stored types.KnowledgeProcessingSpan
+	require.NoError(t, db.Where("knowledge_id = ? AND span_id = ?", "kid-long-name", span.SpanID).
+		Take(&stored).Error)
+	assert.Equal(t, expectedName, stored.Name)
+	assert.Equal(t, originalName, stored.Input[spanOriginalNameInputKey])
+	assert.Equal(t, callerInput["slug"], stored.Input["slug"])
+
+	// Callers use the full logical name. Lookup must apply the same canonical
+	// mapping used by BeginSubSpan rather than requiring them to know storage
+	// implementation details.
+	found := tracker.LookupSpanByName(ctx, "kid-long-name", attempt, originalName)
+	require.NotNil(t, found)
+	assert.Equal(t, span.SpanID, found.SpanID)
+}
+
+// TestBoundedSpanName_DeterministicAndCollisionResistant locks down the
+// canonicalization contract used by retry supersession. Names that share a
+// long prefix must not collapse onto one database key, including multibyte
+// Unicode slugs where bytes and PostgreSQL characters differ.
+func TestBoundedSpanName_DeterministicAndCollisionResistant(t *testing.T) {
+	sharedPrefix := "postprocess.wiki.page[" + strings.Repeat("共同前缀", 20)
+	first := sharedPrefix + "/page-a]"
+	second := sharedPrefix + "/page-b]"
+
+	firstBounded := boundedSpanName(first)
+	assert.Equal(t, firstBounded, boundedSpanName(first), "canonicalization must be deterministic")
+	assert.NotEqual(t, firstBounded, boundedSpanName(second),
+		"the hash suffix must distinguish names whose readable prefixes match")
+	assert.Equal(t, spanNameMaxRunes, utf8.RuneCountInString(firstBounded))
+	assert.Equal(t, "short-name", boundedSpanName("short-name"),
+		"already-valid names must retain their historical value exactly")
+}
+
+// TestSpanTracker_BeginSubSpan_LongNameRetrySupersedesCanonicalRow verifies
+// that bounding happens before CancelOpenSpansByName. Otherwise a retry
+// would search for the overlong logical name, miss the bounded running row,
+// and leave duplicate live spans behind.
+func TestSpanTracker_BeginSubSpan_LongNameRetrySupersedesCanonicalRow(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-long-retry", "")
+	require.NoError(t, err)
+	parent := tracker.BeginStage(ctx, "kid-long-retry", attempt, types.StagePostProcess, nil)
+	require.NotNil(t, parent)
+
+	name := "postprocess.wiki.page[concept/" + strings.Repeat("reliability-", 8) + "]"
+	first := tracker.BeginSubSpan(ctx, parent, name, types.SpanKindSubSpan, nil)
+	require.NotNil(t, first)
+	second := tracker.BeginSubSpan(ctx, parent, name, types.SpanKindSubSpan, nil)
+	require.NotNil(t, second)
+	assert.NotEqual(t, first.SpanID, second.SpanID)
+
+	type row struct {
+		SpanID string
+		Status string
+		Name   string
+	}
+	var rows []row
+	require.NoError(t, db.Table("knowledge_processing_spans").
+		Select("span_id, status, name").
+		Where("knowledge_id = ? AND name = ?", "kid-long-retry", boundedSpanName(name)).
+		Order("id ASC").Find(&rows).Error)
+	require.Len(t, rows, 2)
+	assert.Equal(t, types.SpanStatusCancelled, rows[0].Status)
+	assert.Equal(t, types.SpanStatusRunning, rows[1].Status)
 }
 
 // TestSpanTracker_BeginStage_ReentryIsIdempotent guarantees that a second

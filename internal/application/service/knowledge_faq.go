@@ -1562,18 +1562,19 @@ func (s *knowledgeService) ensureFAQKnowledge(
 		return existing, nil
 	}
 	knowledge := &types.Knowledge{
-		TenantID:         tenantID,
-		KnowledgeBaseID:  kb.ID,
-		Type:             types.KnowledgeTypeFAQ,
-		Channel:          types.ChannelWeb,
-		Title:            buildFAQKnowledgeTitle(kb.Name),
-		Description:      "FAQ 条目容器",
-		Source:           types.KnowledgeTypeFAQ,
-		ParseStatus:      "completed",
-		EnableStatus:     "enabled",
-		EmbeddingModelID: kb.EmbeddingModelID,
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
+		TenantID:             tenantID,
+		KnowledgeBaseID:      kb.ID,
+		ProcessingGeneration: uuid.NewString(),
+		Type:                 types.KnowledgeTypeFAQ,
+		Channel:              types.ChannelWeb,
+		Title:                buildFAQKnowledgeTitle(kb.Name),
+		Description:          "FAQ 条目容器",
+		Source:               types.KnowledgeTypeFAQ,
+		ParseStatus:          "completed",
+		EnableStatus:         "enabled",
+		EmbeddingModelID:     kb.EmbeddingModelID,
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
 	}
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
 		return nil, err

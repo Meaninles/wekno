@@ -1,0 +1,116 @@
+# Opt-in disposable workers for local failover tests. This file deliberately
+# does not start PostgreSQL/Redis/object storage: it joins the existing dev
+# network and exercises several identical application+DocReader pairs against
+# the same durable queue.
+
+x-worker-base: &worker-base
+  image: weknora-dev-app:local
+  working_dir: /workspace
+  env_file:
+    - ../../../.env
+  environment: &worker-environment
+    GIN_MODE: debug
+    DB_HOST: postgres
+    DB_PORT: 5432
+    DOCREADER_TRANSPORT: grpc
+    MINIO_ENDPOINT: minio:9000
+    MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID:-minioadmin}
+    MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY:-minioadmin}
+    REDIS_ADDR: redis:6379
+    MILVUS_ADDRESS: milvus:19530
+    NEO4J_URI: bolt://neo4j:7687
+    QDRANT_HOST: qdrant
+    LOCAL_STORAGE_BASE_DIR: /workspace/.local-data/files
+    DUCKDB_SKIP_EXTENSION_LOAD: "true"
+    CGO_ENABLED: "1"
+    CGO_CFLAGS: "-Wno-deprecated-declarations -Wno-gnu-folding-constant"
+    CUSTOM_DOCUMENT_QUEUE_HEARTBEAT_INTERVAL: ${CUSTOM_DOCUMENT_QUEUE_HEARTBEAT_INTERVAL:-2s}
+    # Must outlive Asynq's ~60s active-task recovery window. A shorter custom
+    # lease would permit a second same-generation handler before Asynq has
+    # fenced/recovered the original delivery.
+    CUSTOM_DOCUMENT_QUEUE_LEASE_DURATION: ${CUSTOM_DOCUMENT_QUEUE_LEASE_DURATION:-75s}
+    CUSTOM_DOCUMENT_QUEUE_RECOVERY_INTERVAL: ${CUSTOM_DOCUMENT_QUEUE_RECOVERY_INTERVAL:-2s}
+    CUSTOM_DOCUMENT_QUEUE_INSTANCE_STALE_AFTER: ${CUSTOM_DOCUMENT_QUEUE_INSTANCE_STALE_AFTER:-6s}
+    CUSTOM_DOCUMENT_QUEUE_POLL_INTERVAL: ${CUSTOM_DOCUMENT_QUEUE_POLL_INTERVAL:-500ms}
+    CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART: "true"
+  volumes:
+    - ../../..:/workspace
+    - go-mod-cache-cluster-e2e:/go/pkg/mod
+    - go-build-cache-cluster-e2e:/root/.cache/go-build
+  networks:
+    - weknora-dev
+  command: ["bash", "scripts/dev_app_docker.sh"]
+  restart: "no"
+  profiles: ["cluster-e2e"]
+
+x-docreader-base: &docreader-base
+  image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
+  environment: &docreader-environment
+    DOCREADER_IMAGE_OUTPUT_DIR: /tmp/docreader
+    DOCREADER_HEALTH_GRPC_PORT: "50052"
+    DOCREADER_GRPC_MAX_WORKERS: ${DOCREADER_GRPC_MAX_WORKERS:-4}
+    DOCREADER_MARKITDOWN_MAX_WORKERS: ${DOCREADER_MARKITDOWN_MAX_WORKERS:-1}
+    DOCREADER_ODL_MAX_WORKERS: ${DOCREADER_ODL_MAX_WORKERS:-1}
+    DOCREADER_PDF_RENDER_MAX_WORKERS: ${DOCREADER_PDF_RENDER_MAX_WORKERS:-1}
+  healthcheck:
+    test: ["CMD", "grpc_health_probe", "-addr=127.0.0.1:50052", "-connect-timeout=1s", "-rpc-timeout=5s"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 20s
+  networks:
+    - weknora-dev
+  restart: "no"
+  profiles: ["cluster-e2e"]
+
+services:
+  docreader-a:
+    <<: *docreader-base
+    container_name: WeKnora-docreader-cluster-e2e-a
+    volumes:
+      - docreader-a-cluster-e2e:/tmp/docreader
+
+  docreader-b:
+    <<: *docreader-base
+    container_name: WeKnora-docreader-cluster-e2e-b
+    volumes:
+      - docreader-b-cluster-e2e:/tmp/docreader
+
+  worker-a:
+    <<: *worker-base
+    container_name: WeKnora-worker-cluster-e2e-a
+    hostname: worker-cluster-e2e-a
+    environment:
+      <<: *worker-environment
+      # scripts/dev_app_docker.sh deliberately derives DOCREADER_ADDR from
+      # DEV_DOCKER_DOCREADER_ADDR, so set the source variable here. Setting
+      # DOCREADER_ADDR directly would be overwritten with the shared
+      # `docreader:50051` default and invalidate per-instance fault isolation.
+      DEV_DOCKER_DOCREADER_ADDR: docreader-a:50051
+      CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: worker-cluster-e2e-a
+    depends_on:
+      docreader-a:
+        condition: service_healthy
+
+  worker-b:
+    <<: *worker-base
+    container_name: WeKnora-worker-cluster-e2e-b
+    hostname: worker-cluster-e2e-b
+    environment:
+      <<: *worker-environment
+      DEV_DOCKER_DOCREADER_ADDR: docreader-b:50051
+      CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: worker-cluster-e2e-b
+    depends_on:
+      docreader-b:
+        condition: service_healthy
+
+networks:
+  weknora-dev:
+    external: true
+    name: ${WEKNORA_DEV_NETWORK:-weknora_WeKnora-network-dev}
+
+volumes:
+  go-mod-cache-cluster-e2e:
+  go-build-cache-cluster-e2e:
+  docreader-a-cluster-e2e:
+  docreader-b-cluster-e2e:

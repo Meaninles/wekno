@@ -15,6 +15,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/stretchr/testify/require"
 )
 
 // MoveKnowledge cross-store reuse_vectors gate — handler-level pre-flight tests.
@@ -131,6 +132,28 @@ func TestMoveKnowledge_CrossStoreGate(t *testing.T) {
 				t.Fatalf("body %q unexpectedly contains gate message %q (gate short-circuited a valid move)",
 					w.Body.String(), tt.wantBodyNotHas)
 			}
+		})
+	}
+}
+
+func TestValidateMoveReparseSourceRejectsUnreconstructableKnowledge(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		knowledge *types.Knowledge
+		wantError bool
+	}{
+		{name: "FAQ", knowledge: &types.Knowledge{ID: "faq-1", Type: types.KnowledgeTypeFAQ}, wantError: true},
+		{name: "empty document path", knowledge: &types.Knowledge{ID: "doc-1", Type: "document"}, wantError: true},
+		{name: "stored document", knowledge: &types.Knowledge{ID: "doc-2", Type: "document", FilePath: "local://docs/a.pdf"}},
+		{name: "manual content", knowledge: &types.Knowledge{ID: "manual-1", Type: types.KnowledgeTypeManual}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMoveReparseSource(tc.knowledge)
+			if tc.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }

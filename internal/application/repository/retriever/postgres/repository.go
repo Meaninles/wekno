@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -20,6 +21,15 @@ import (
 type pgRepository struct {
 	db *gorm.DB // Database connection
 }
+
+type pgInPlaceMoveError struct {
+	cause        error
+	sourceIntact bool
+}
+
+func (e *pgInPlaceMoveError) Error() string      { return e.cause.Error() }
+func (e *pgInPlaceMoveError) Unwrap() error      { return e.cause }
+func (e *pgInPlaceMoveError) SourceIntact() bool { return e.sourceIntact }
 
 // NewPostgresRetrieveEngineRepository creates a new PostgreSQL retriever repository
 func NewPostgresRetrieveEngineRepository(db *gorm.DB) interfaces.RetrieveEngineRepository {
@@ -144,6 +154,135 @@ func (g *pgRepository) DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDL
 	}
 	logger.GetLogger(ctx).Infof("[Postgres] Successfully deleted %d indices by knowledge IDs", result.RowsAffected)
 	return nil
+}
+
+// DeleteByKnowledgeBaseAndKnowledgeIDList deletes only the source side of a
+// reuse-vectors move. Knowledge IDs are stable across that move, so the KB
+// predicate is required to avoid deleting the freshly copied target rows.
+func (g *pgRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	result := g.db.WithContext(ctx).
+		Where("knowledge_base_id = ? AND knowledge_id IN ?", knowledgeBaseID, knowledgeIDList).
+		Delete(&pgVector{})
+	if result.Error != nil {
+		return fmt.Errorf("postgres delete scoped knowledge indices: %w", result.Error)
+	}
+	logger.GetLogger(ctx).Infof(
+		"[Postgres] Deleted %d indices in KB %s by knowledge IDs",
+		result.RowsAffected,
+		knowledgeBaseID,
+	)
+	return nil
+}
+
+// MoveKnowledgeIndicesInPlace atomically changes KB ownership on the existing
+// rows. This deliberately does not call CopyIndices: embeddings has a unique
+// (source_id, source_type) key and a reuse move preserves both fields, so a
+// copy with ON CONFLICT DO NOTHING would insert zero target rows and a later
+// source delete would destroy the document's entire vector set.
+func (g *pgRepository) MoveKnowledgeIndicesInPlace(
+	ctx context.Context,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	knowledgeID string,
+	chunkIDs []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if sourceKnowledgeBaseID == "" || targetKnowledgeBaseID == "" || knowledgeID == "" {
+		return errors.New("postgres move knowledge indices: source KB, target KB, and knowledge ID are required")
+	}
+	if sourceKnowledgeBaseID == targetKnowledgeBaseID || len(chunkIDs) == 0 {
+		return nil
+	}
+	result := g.db.WithContext(ctx).
+		Model(&pgVector{}).
+		Where("knowledge_base_id = ? AND knowledge_id = ?", sourceKnowledgeBaseID, knowledgeID).
+		Update("knowledge_base_id", targetKnowledgeBaseID)
+	if result.Error != nil {
+		return g.classifyInPlaceMoveResult(
+			ctx,
+			sourceKnowledgeBaseID,
+			targetKnowledgeBaseID,
+			knowledgeID,
+			fmt.Errorf("postgres move knowledge indices in place: %w", result.Error),
+		)
+	}
+	if result.RowsAffected == 0 {
+		return g.classifyInPlaceMoveResult(ctx, sourceKnowledgeBaseID, targetKnowledgeBaseID, knowledgeID, fmt.Errorf(
+			"postgres move knowledge indices in place: no source indices found for knowledge %s in KB %s",
+			knowledgeID,
+			sourceKnowledgeBaseID,
+		))
+	}
+	logger.GetLogger(ctx).Infof(
+		"[Postgres] Moved %d indices in place from KB %s to KB %s for knowledge %s",
+		result.RowsAffected,
+		sourceKnowledgeBaseID,
+		targetKnowledgeBaseID,
+		knowledgeID,
+	)
+	return nil
+}
+
+func (g *pgRepository) classifyInPlaceMoveResult(
+	ctx context.Context,
+	sourceKnowledgeBaseID string,
+	targetKnowledgeBaseID string,
+	knowledgeID string,
+	cause error,
+) error {
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	type kbCount struct {
+		KnowledgeBaseID string `gorm:"column:knowledge_base_id"`
+		Count           int64  `gorm:"column:row_count"`
+	}
+	var counts []kbCount
+	readErr := g.db.WithContext(readCtx).
+		Model(&pgVector{}).
+		Select("knowledge_base_id, COUNT(*) AS row_count").
+		Where("knowledge_id = ? AND knowledge_base_id IN ?", knowledgeID,
+			[]string{sourceKnowledgeBaseID, targetKnowledgeBaseID}).
+		Group("knowledge_base_id").
+		Find(&counts).Error
+	if readErr != nil {
+		return &pgInPlaceMoveError{
+			cause: errors.Join(cause, fmt.Errorf("postgres in-place move read-back: %w", readErr)),
+		}
+	}
+	var sourceCount, targetCount int64
+	for _, count := range counts {
+		switch count.KnowledgeBaseID {
+		case sourceKnowledgeBaseID:
+			sourceCount = count.Count
+		case targetKnowledgeBaseID:
+			targetCount = count.Count
+		}
+	}
+	if sourceCount > 0 && targetCount == 0 {
+		return &pgInPlaceMoveError{cause: cause, sourceIntact: true}
+	}
+	if targetCount > 0 && sourceCount == 0 {
+		logger.GetLogger(ctx).Warnf(
+			"[Postgres] In-place move write returned an error but read-back proved target commit for knowledge %s",
+			knowledgeID,
+		)
+		return nil
+	}
+	return &pgInPlaceMoveError{cause: errors.Join(cause, fmt.Errorf(
+		"postgres in-place move state is uncertain after read-back (source_rows=%d target_rows=%d)",
+		sourceCount,
+		targetCount,
+	))}
 }
 
 // Retrieve handles retrieval requests and routes to appropriate method

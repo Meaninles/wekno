@@ -357,12 +357,13 @@ type WikiConfig struct {
 
 	// IngestMapParallel sets the errgroup limit for the Map phase
 	// (per-document extraction + summary + chunk citation). 0 falls
-	// back to 10. Bound by the LLM provider's concurrency limit and
+	// back to the service's conservative default (currently 2). Bound by the LLM provider's concurrency limit and
 	// the worker's outbound HTTP pool.
 	IngestMapParallel int `yaml:"ingest_map_parallel" json:"ingest_map_parallel,omitempty"`
 
 	// IngestReduceParallel sets the errgroup limit for the Reduce phase
-	// (per-slug page write). 0 falls back to 10. Bound by the same
+	// (per-slug page write). 0 falls back to the service's conservative
+	// default (currently 2). Bound by the same
 	// LLM concurrency / HTTP pool considerations as the Map phase,
 	// plus DB connection pool size.
 	IngestReduceParallel int `yaml:"ingest_reduce_parallel" json:"ingest_reduce_parallel,omitempty"`
@@ -436,7 +437,6 @@ type WikiPageListResponse struct {
 	PageSize   int         `json:"page_size"`
 	TotalPages int         `json:"total_pages"`
 }
-
 
 // WikiGraphMode enumerates the graph query modes exposed to the API.
 const (

@@ -345,6 +345,39 @@ func (w *weaviateRepository) DeleteByKnowledgeIDList(ctx context.Context,
 	return nil
 }
 
+func (w *weaviateRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	where := filters.Where().
+		WithOperator(filters.And).
+		WithOperands([]*filters.WhereBuilder{
+			filters.Where().
+				WithPath([]string{fieldKnowledgeBaseID}).
+				WithOperator(filters.Equal).
+				WithValueText(knowledgeBaseID),
+			filters.Where().
+				WithPath([]string{fieldKnowledgeID}).
+				WithOperator(filters.ContainsAny).
+				WithValueText(knowledgeIDList...),
+		})
+	_, err := w.client.Batch().ObjectsBatchDeleter().
+		WithClassName(w.getCollectionName(dimension)).
+		WithWhere(where).
+		WithOutput("minimal").
+		Do(ctx)
+	if err != nil {
+		return fmt.Errorf("weaviate delete scoped knowledge indices: %w", err)
+	}
+	return nil
+}
+
 // DeleteBySourceIDList removes points from the collection based on source IDs
 func (w *weaviateRepository) DeleteBySourceIDList(ctx context.Context,
 	sourceIDList []string, dimension int, knowledgeType string,

@@ -3,15 +3,24 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-var ErrKnowledgeNotFound = errors.New("knowledge not found")
+var (
+	ErrKnowledgeNotFound = errors.New("knowledge not found")
+	// ErrKnowledgeDeleting is the repository-wide write fence. Once the
+	// durable delete coordinator claims a row, no stale full-row or column
+	// update may resurrect it by replacing parse_status=deleting.
+	ErrKnowledgeDeleting = errors.New("knowledge is being deleted")
+)
 
 // escapeLikeKeyword escapes SQL LIKE wildcards (%, _) in a keyword
 // so they are treated as literal characters.
@@ -22,7 +31,10 @@ func escapeLikeKeyword(keyword string) string {
 	return keyword
 }
 
-// omitFieldsOnUpdate defines fields to omit when updating knowledge.
+// genericOmitFieldsOnUpdate defines lifecycle fields a full-row metadata save
+// is never allowed to write. Lifecycle transitions have dedicated CAS helpers;
+// omitting these fields prevents a slow summary/question worker from saving an
+// old snapshot over a newer processing generation or terminal state.
 //
 // PendingSubtasksCount is deliberately omitted from every full-row Save:
 // it is an orchestration counter owned exclusively by the atomic helpers
@@ -36,7 +48,29 @@ func escapeLikeKeyword(keyword string) string {
 // counter jump back up and never reach zero (the "stuck
 // pending_subtasks_count / never promoted to completed" bug). Omitting
 // the column here means Save can never touch it.
-var omitFieldsOnUpdate = []string{"DeletedAt", "PendingSubtasksCount"}
+var genericOmitFieldsOnUpdate = []string{
+	"DeletedAt",
+	"ParseStatus",
+	"ProcessingGeneration",
+	"ProcessingOwner",
+	"ProcessingWorkflowID",
+	"ProcessingFanout",
+	"PendingSubtasksCount",
+	"ProcessedAt",
+}
+
+// atomicFinalizeOmitFields is used only by the guarded core finalizer. That
+// transaction owns lifecycle fields, but the enrichment counter remains owned
+// by its own atomic helpers.
+var atomicFinalizeOmitFields = []string{"DeletedAt", "PendingSubtasksCount", "ProcessingWorkflowID"}
+
+var terminalKnowledgeStatuses = []string{
+	types.ParseStatusCompleted,
+	types.ParseStatusFailed,
+	types.ParseStatusCancelling,
+	types.ParseStatusCancelled,
+	types.ParseStatusDeleting,
+}
 
 // knowledgeRepository implements knowledge base and knowledge repository interface
 type knowledgeRepository struct {
@@ -50,8 +84,42 @@ func NewKnowledgeRepository(db *gorm.DB) interfaces.KnowledgeRepository {
 
 // CreateKnowledge creates knowledge
 func (r *knowledgeRepository) CreateKnowledge(ctx context.Context, knowledge *types.Knowledge) error {
-	err := r.db.WithContext(ctx).Create(knowledge).Error
-	return err
+	if knowledge == nil {
+		return errors.New("create knowledge: knowledge is nil")
+	}
+	return kbwritefence.WithActive(
+		ctx, r.db, knowledge.TenantID, knowledge.KnowledgeBaseID,
+		func(tx *gorm.DB) error {
+			if err := tx.Create(knowledge).Error; err != nil {
+				return fmt.Errorf("create knowledge: %w", err)
+			}
+			if len(knowledge.InitialTagIDs) > 0 {
+				if err := replaceKnowledgeTagsTx(tx, knowledge.ID, knowledge.InitialTagIDs); err != nil {
+					return fmt.Errorf("create knowledge tags: %w", err)
+				}
+			}
+			return nil
+		},
+	)
+}
+
+func (r *knowledgeRepository) CreateKnowledgeTx(
+	ctx context.Context,
+	tx *gorm.DB,
+	knowledge *types.Knowledge,
+) error {
+	if tx == nil || knowledge == nil {
+		return errors.New("create knowledge in transaction: dependencies are unavailable")
+	}
+	if err := tx.WithContext(ctx).Create(knowledge).Error; err != nil {
+		return fmt.Errorf("create knowledge in transaction: %w", err)
+	}
+	if len(knowledge.InitialTagIDs) > 0 {
+		if err := replaceKnowledgeTagsTx(tx.WithContext(ctx), knowledge.ID, knowledge.InitialTagIDs); err != nil {
+			return fmt.Errorf("create knowledge tags in transaction: %w", err)
+		}
+	}
+	return nil
 }
 
 // GetKnowledgeByID gets knowledge
@@ -176,8 +244,153 @@ func (r *knowledgeRepository) ListPagedKnowledgeByKnowledgeBaseID(
 
 // UpdateKnowledge updates knowledge
 func (r *knowledgeRepository) UpdateKnowledge(ctx context.Context, knowledge *types.Knowledge) error {
-	err := r.db.WithContext(ctx).Omit(omitFieldsOnUpdate...).Save(knowledge).Error
-	return err
+	if knowledge == nil || knowledge.ID == "" || knowledge.TenantID == 0 || knowledge.KnowledgeBaseID == "" {
+		return errors.New("update knowledge: complete knowledge identity is required")
+	}
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND COALESCE(processing_generation, '') = ? AND parse_status <> ?",
+			knowledge.TenantID,
+			knowledge.ID,
+			knowledge.KnowledgeBaseID,
+			knowledge.ProcessingGeneration,
+			types.ParseStatusDeleting,
+		).
+		Select("*").
+		Omit(genericOmitFieldsOnUpdate...).
+		Updates(knowledge)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("update knowledge %s: state or generation conflict: %w", knowledge.ID, ErrKnowledgeDeleting)
+	}
+	return nil
+}
+
+// FinalizeKnowledgeWithStorage atomically persists a processing result and
+// charges its storage to the owning tenant. The expected identity is part of
+// the UPDATE predicate so a concurrent cancel, delete, move, or reparse wins
+// cleanly without leaving tenant storage charged for data the knowledge row
+// never adopted.
+func (r *knowledgeRepository) FinalizeKnowledgeWithStorage(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	expectedParseStatus string,
+	storageDelta int64,
+) (bool, error) {
+	if knowledge == nil || knowledge.ID == "" || knowledge.TenantID == 0 || knowledge.KnowledgeBaseID == "" {
+		return false, errors.New("finalize knowledge storage: complete knowledge identity is required")
+	}
+	if expectedParseStatus == "" {
+		return false, errors.New("finalize knowledge storage: expected parse status is required")
+	}
+	if storageDelta < 0 {
+		return false, errors.New("finalize knowledge storage: storage delta cannot be negative")
+	}
+
+	var finalized bool
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ? AND COALESCE(file_hash, '') = ?",
+				knowledge.TenantID,
+				knowledge.ID,
+				knowledge.KnowledgeBaseID,
+				expectedParseStatus,
+				knowledge.FileHash,
+			).
+			Select("*").
+			Omit(atomicFinalizeOmitFields...).
+			Updates(knowledge)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+
+		if storageDelta > 0 {
+			result = tx.Model(&types.Tenant{}).
+				Where("id = ?", knowledge.TenantID).
+				UpdateColumn("storage_used", gorm.Expr("storage_used + ?", storageDelta))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("finalize knowledge storage: tenant %d not found", knowledge.TenantID)
+			}
+		}
+		finalized = true
+		return nil
+	})
+	return finalized, err
+}
+
+// ResetKnowledgeStorage atomically transfers ownership of an existing storage
+// charge away from a knowledge row after its external resources were cleaned.
+// The exact row generation and previous size are part of the predicate, so a
+// concurrent delete either performs the reset itself or observes storage_size
+// zero and cannot double-decrement the tenant.
+func (r *knowledgeRepository) ResetKnowledgeStorage(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	expectedKnowledgeBaseID string,
+	expectedParseStatus string,
+	expectedGeneration string,
+	expectedStorageSize int64,
+) (bool, error) {
+	if tenantID == 0 || knowledgeID == "" || expectedKnowledgeBaseID == "" || expectedParseStatus == "" {
+		return false, errors.New("reset knowledge storage: complete expected identity is required")
+	}
+	if expectedStorageSize < 0 {
+		return false, errors.New("reset knowledge storage: expected size cannot be negative")
+	}
+
+	var reset bool
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ? AND COALESCE(processing_generation, '') = ? AND storage_size = ?",
+				tenantID,
+				knowledgeID,
+				expectedKnowledgeBaseID,
+				expectedParseStatus,
+				expectedGeneration,
+				expectedStorageSize,
+			).
+			UpdateColumn("storage_size", 0)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+
+		if expectedStorageSize > 0 {
+			result = tx.Model(&types.Tenant{}).
+				Where("id = ?", tenantID).
+				UpdateColumn(
+					"storage_used",
+					gorm.Expr(
+						"CASE WHEN storage_used < ? THEN 0 ELSE storage_used - ? END",
+						expectedStorageSize,
+						expectedStorageSize,
+					),
+				)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("reset knowledge storage: tenant %d not found", tenantID)
+			}
+		}
+		reset = true
+		return nil
+	})
+	return reset, err
 }
 
 // UpdateKnowledgeBatch updates knowledge items in batch
@@ -185,17 +398,39 @@ func (r *knowledgeRepository) UpdateKnowledgeBatch(ctx context.Context, knowledg
 	if len(knowledgeList) == 0 {
 		return nil
 	}
-	return r.db.Debug().WithContext(ctx).Omit(omitFieldsOnUpdate...).Save(knowledgeList).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		txRepo := &knowledgeRepository{db: tx}
+		for _, knowledge := range knowledgeList {
+			if err := txRepo.UpdateKnowledge(ctx, knowledge); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // DeleteKnowledge deletes knowledge
 func (r *knowledgeRepository) DeleteKnowledge(ctx context.Context, tenantID uint64, id string) error {
-	return r.db.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenantID, id).Delete(&types.Knowledge{}).Error
+	return r.DeleteKnowledgeList(ctx, tenantID, []string{id})
 }
 
 // DeleteKnowledge deletes knowledge
 func (r *knowledgeRepository) DeleteKnowledgeList(ctx context.Context, tenantID uint64, ids []string) error {
-	return r.db.WithContext(ctx).Where("tenant_id = ? AND id in ?", tenantID, ids).Delete(&types.Knowledge{}).Error
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Knowledge uses soft delete, so the ledger FK cascade never fires.
+		// Keep explicit cleanup and the soft delete atomic for every repository
+		// deletion path, including whole-KB deletion which bypasses the Wiki
+		// deletion coordinator.
+		if err := tx.Where("tenant_id = ? AND knowledge_id IN ?", tenantID, ids).
+			Delete(&types.KnowledgeFanoutCompletion{}).Error; err != nil {
+			return fmt.Errorf("delete knowledge fanout completions: %w", err)
+		}
+		return tx.Where("tenant_id = ? AND id IN ?", tenantID, ids).
+			Delete(&types.Knowledge{}).Error
+	})
 }
 
 // GetKnowledgeBatch gets knowledge in batch
@@ -306,8 +541,19 @@ func (r *knowledgeRepository) UpdateKnowledgeColumn(
 	column string,
 	value interface{},
 ) error {
-	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Update(column, value).Error
-	return err
+	query := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ? AND parse_status <> ?", id, types.ParseStatusDeleting)
+	if column == "parse_status" {
+		query = query.Where("parse_status NOT IN ? OR parse_status = ?", terminalKnowledgeStatuses, value)
+	}
+	result := query.Update(column, value)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("update knowledge %s column %s: %w", id, column, ErrKnowledgeDeleting)
+	}
+	return nil
 }
 
 // UpdateKnowledgeColumns writes multiple columns in a single UPDATE so callers
@@ -322,7 +568,492 @@ func (r *knowledgeRepository) UpdateKnowledgeColumns(
 	if len(values) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Updates(values).Error
+	query := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ? AND parse_status <> ?", id, types.ParseStatusDeleting)
+	if nextStatus, ok := values["parse_status"]; ok {
+		query = query.Where("parse_status NOT IN ? OR parse_status = ?", terminalKnowledgeStatuses, nextStatus)
+	}
+	result := query.Updates(values)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("update knowledge %s columns: %w", id, ErrKnowledgeDeleting)
+	}
+	return nil
+}
+
+// CompareAndSwapKnowledgeState applies a state transition only while the
+// knowledge still has the tenant, knowledge-base and parse-status identity the
+// caller observed. Long-running move/reparse flows use this as their write
+// fence: once deletion changes parse_status to deleting, a stale worker can no
+// longer save an old full-row snapshot over the durable delete intent.
+func (r *knowledgeRepository) CompareAndSwapKnowledgeState(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedParseStatus string,
+	values map[string]interface{},
+) (bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" || expectedParseStatus == "" {
+		return false, errors.New("compare-and-swap knowledge state: complete expected identity is required")
+	}
+	if len(values) == 0 {
+		return false, errors.New("compare-and-swap knowledge state: update values are required")
+	}
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ?",
+			tenantID,
+			id,
+			expectedKnowledgeBaseID,
+			expectedParseStatus,
+		).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// CompareAndSwapKnowledgeGeneration is the generation-aware variant used by
+// reparse/manual-processing flows. parse_status alone is not a sufficient
+// ownership token: an old worker can observe processing, a newer edit can
+// cycle the row through pending back to processing, and the old worker would
+// otherwise be able to commit against the newer run. file_hash is a stable
+// content identity for uploaded documents and a unique processing generation
+// for manual knowledge, so including it in the predicate closes that ABA race.
+func (r *knowledgeRepository) CompareAndSwapKnowledgeGeneration(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedParseStatus string,
+	expectedGeneration string,
+	values map[string]interface{},
+) (bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" || expectedParseStatus == "" {
+		return false, errors.New("compare-and-swap knowledge generation: complete expected identity is required")
+	}
+	if len(values) == 0 {
+		return false, errors.New("compare-and-swap knowledge generation: update values are required")
+	}
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ? AND COALESCE(file_hash, '') = ?",
+			tenantID,
+			id,
+			expectedKnowledgeBaseID,
+			expectedParseStatus,
+			expectedGeneration,
+		).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// CompareAndSwapDocumentProcessing fences a core document worker by complete
+// row identity, durable processing generation and the stable task owner.
+func (r *knowledgeRepository) CompareAndSwapDocumentProcessing(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedParseStatus string,
+	expectedGeneration string,
+	expectedOwner string,
+	values map[string]interface{},
+) (bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" ||
+		expectedParseStatus == "" || expectedGeneration == "" {
+		return false, errors.New("compare-and-swap document processing: complete expected identity is required")
+	}
+	if len(values) == 0 {
+		return false, errors.New("compare-and-swap document processing: update values are required")
+	}
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ? AND processing_generation = ? AND COALESCE(processing_owner, '') = ?",
+			tenantID,
+			id,
+			expectedKnowledgeBaseID,
+			expectedParseStatus,
+			expectedGeneration,
+			expectedOwner,
+		).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// CompareAndSwapBatchReparseSnapshot claims a deterministic batch-reparse
+// generation from the exact immutable snapshot captured before the parent task
+// was persisted. UpdatedAt is part of the SQL predicate, rather than a prior
+// application-side check, so status/generation ABA and heartbeat races cannot
+// let an old batch adopt a newer row incarnation.
+func (r *knowledgeRepository) CompareAndSwapBatchReparseSnapshot(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedParseStatus string,
+	expectedGeneration string,
+	expectedOwner string,
+	expectedUpdatedAt time.Time,
+	values map[string]interface{},
+) (bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" ||
+		expectedParseStatus == "" || expectedUpdatedAt.IsZero() {
+		return false, errors.New("compare-and-swap batch reparse snapshot: complete expected identity is required")
+	}
+	if len(values) == 0 {
+		return false, errors.New("compare-and-swap batch reparse snapshot: update values are required")
+	}
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ? AND COALESCE(processing_generation, '') = ? AND COALESCE(processing_owner, '') = ? AND updated_at = ?",
+			tenantID,
+			id,
+			expectedKnowledgeBaseID,
+			expectedParseStatus,
+			expectedGeneration,
+			expectedOwner,
+			expectedUpdatedAt,
+		).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// CompareAndSwapKnowledgeProcessingGeneration is used after the core owner is
+// consumed. It accepts only an explicit set of nonterminal lifecycle states.
+func (r *knowledgeRepository) CompareAndSwapKnowledgeProcessingGeneration(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedGeneration string,
+	expectedStatuses []string,
+	values map[string]interface{},
+) (bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" || expectedGeneration == "" {
+		return false, errors.New("compare-and-swap processing generation: complete expected identity is required")
+	}
+	if len(expectedStatuses) == 0 || len(values) == 0 {
+		return false, errors.New("compare-and-swap processing generation: statuses and values are required")
+	}
+	for _, status := range expectedStatuses {
+		switch status {
+		case types.ParseStatusPending, types.ParseStatusProcessing, types.ParseStatusFinalizing, types.ParseStatusCancelling:
+		default:
+			return false, fmt.Errorf("compare-and-swap processing generation: terminal status %q is not allowed", status)
+		}
+	}
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ?",
+			tenantID,
+			id,
+			expectedKnowledgeBaseID,
+			expectedGeneration,
+			expectedStatuses,
+		).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// RecordKnowledgeFanoutCompletion inserts one generation-scoped fan-out item
+// exactly once. The composite primary key makes retries and duplicate worker
+// deliveries harmless across both PostgreSQL and SQLite.
+func (r *knowledgeRepository) RecordKnowledgeFanoutCompletion(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	knowledgeBaseID string,
+	processingGeneration string,
+	itemID string,
+) (bool, error) {
+	if tenantID == 0 || knowledgeID == "" || knowledgeBaseID == "" ||
+		processingGeneration == "" || itemID == "" {
+		return false, errors.New("record knowledge fanout completion: complete identity is required")
+	}
+	inserted := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Serialize with a generation swap. If reparse/delete wins first, a
+		// delayed old worker cannot recreate ledger rows that retention cleanup
+		// has just removed.
+		query := tx.Model(&types.Knowledge{}).
+			Select("id").
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ?",
+				tenantID, knowledgeID, knowledgeBaseID, processingGeneration,
+				[]string{types.ParseStatusPending, types.ParseStatusProcessing},
+			)
+		if tx.Dialector.Name() != "sqlite" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var current struct{ ID string }
+		if err := query.Take(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		row := &types.KnowledgeFanoutCompletion{
+			TenantID:             tenantID,
+			KnowledgeID:          knowledgeID,
+			KnowledgeBaseID:      knowledgeBaseID,
+			ProcessingGeneration: processingGeneration,
+			ItemID:               itemID,
+			CompletedAt:          time.Now(),
+		}
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(row)
+		if result.Error != nil {
+			return result.Error
+		}
+		inserted = result.RowsAffected == 1
+		return nil
+	})
+	return inserted, err
+}
+
+// ListKnowledgeFanoutCompletions returns the durable completion set used to
+// rebuild Redis fan-in state after restart/TTL expiry.
+func (r *knowledgeRepository) ListKnowledgeFanoutCompletions(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	knowledgeBaseID string,
+	processingGeneration string,
+) ([]string, error) {
+	if tenantID == 0 || knowledgeID == "" || knowledgeBaseID == "" || processingGeneration == "" {
+		return nil, errors.New("list knowledge fanout completions: complete identity is required")
+	}
+	var itemIDs []string
+	err := r.db.WithContext(ctx).
+		Model(&types.KnowledgeFanoutCompletion{}).
+		Where(
+			"tenant_id = ? AND knowledge_id = ? AND knowledge_base_id = ? AND processing_generation = ?",
+			tenantID, knowledgeID, knowledgeBaseID, processingGeneration,
+		).
+		Pluck("item_id", &itemIDs).Error
+	return itemIDs, err
+}
+
+// CountKnowledgeFanoutCompletions returns the authoritative number of core
+// fan-out completions without transferring the whole set on every item. The
+// enrichment drain shares this table but uses a reserved prefix and therefore
+// does not participate in the image/data-table fan-in count.
+func (r *knowledgeRepository) CountKnowledgeFanoutCompletions(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	knowledgeBaseID string,
+	processingGeneration string,
+) (int64, error) {
+	if tenantID == 0 || knowledgeID == "" || knowledgeBaseID == "" || processingGeneration == "" {
+		return 0, errors.New("count knowledge fanout completions: complete identity is required")
+	}
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&types.KnowledgeFanoutCompletion{}).
+		Where(
+			"tenant_id = ? AND knowledge_id = ? AND knowledge_base_id = ? AND processing_generation = ? AND item_id NOT LIKE ?",
+			tenantID, knowledgeID, knowledgeBaseID, processingGeneration, "enrichment:%",
+		).
+		Count(&count).Error
+	return count, err
+}
+
+func (r *knowledgeRepository) KnowledgeFanoutCompletionExists(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	knowledgeBaseID string,
+	processingGeneration string,
+	itemID string,
+) (bool, error) {
+	if tenantID == 0 || knowledgeID == "" || knowledgeBaseID == "" ||
+		processingGeneration == "" || itemID == "" {
+		return false, errors.New("check knowledge fanout completion: complete identity is required")
+	}
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&types.KnowledgeFanoutCompletion{}).
+		Where(
+			"tenant_id = ? AND knowledge_id = ? AND knowledge_base_id = ? AND processing_generation = ? AND item_id = ?",
+			tenantID, knowledgeID, knowledgeBaseID, processingGeneration, itemID,
+		).
+		Limit(1).
+		Count(&count).Error
+	return count > 0, err
+}
+
+// CleanupKnowledgeFanoutCompletions bounds the durable ledger. A non-empty
+// keepGeneration removes every older generation for the exact tenant/KB/
+// knowledge identity; an empty keepGeneration removes all rows during final
+// soft deletion. Callers must treat an error as a lifecycle failure so they do
+// not enqueue a new generation while stale completion facts remain.
+func (r *knowledgeRepository) CleanupKnowledgeFanoutCompletions(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	knowledgeBaseID string,
+	keepGeneration string,
+) error {
+	if tenantID == 0 || knowledgeID == "" || knowledgeBaseID == "" {
+		return errors.New("cleanup knowledge fanout completions: complete identity is required")
+	}
+	query := r.db.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND knowledge_id = ? AND knowledge_base_id = ?",
+			tenantID, knowledgeID, knowledgeBaseID,
+		)
+	if keepGeneration != "" {
+		query = query.Where("processing_generation <> ?", keepGeneration)
+	}
+	return query.Delete(&types.KnowledgeFanoutCompletion{}).Error
+}
+
+// FailDocumentProcessingGeneration is the dead-letter-only fence. The planned
+// owner is persisted before enqueue, so both pending and processing rows must
+// match the exact payload owner. processed_at IS NULL makes every core-committed
+// row ineligible even if a delayed dead-letter callback arrives afterwards.
+func (r *knowledgeRepository) FailDocumentProcessingGeneration(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedGeneration string,
+	expectedOwner string,
+	values map[string]interface{},
+) (bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" ||
+		expectedGeneration == "" || expectedOwner == "" || len(values) == 0 {
+		return false, errors.New("fail document processing generation: complete expected identity is required")
+	}
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where("tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND processed_at IS NULL",
+			tenantID, id, expectedKnowledgeBaseID, expectedGeneration).
+		Where("parse_status IN ? AND processing_owner = ?",
+			[]string{types.ParseStatusPending, types.ParseStatusProcessing}, expectedOwner).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// CompletePostProcessDeadLetterGeneration degrades a core-committed document
+// to completed when its optional post-processing orchestrator exhausts its
+// retries. The processed_at predicate is the durable boundary between an
+// unfinished core parse (which must still fail) and usable chunks/indexes whose
+// summary/question/graph enrichment may safely be abandoned.
+func (r *knowledgeRepository) CompletePostProcessDeadLetterGeneration(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedGeneration string,
+) (bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" || expectedGeneration == "" {
+		return false, errors.New("complete postprocess dead-letter generation: complete identity is required")
+	}
+	now := time.Now()
+	result := r.db.WithContext(ctx).
+		Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ? AND processed_at IS NOT NULL",
+			tenantID, id, expectedKnowledgeBaseID, expectedGeneration,
+			[]string{types.ParseStatusProcessing, types.ParseStatusFinalizing},
+		).
+		Updates(map[string]interface{}{
+			"parse_status":           types.ParseStatusCompleted,
+			"pending_subtasks_count": 0,
+			"error_message":          "",
+			"processing_owner":       "",
+			"processing_fanout":      nil,
+			"summary_status": gorm.Expr(
+				"CASE WHEN summary_status IN (?, ?) THEN ? ELSE summary_status END",
+				types.SummaryStatusPending,
+				types.SummaryStatusProcessing,
+				types.SummaryStatusFailed,
+			),
+			"updated_at": now,
+		})
+	return result.RowsAffected == 1, result.Error
+}
+
+// FinalizeKnowledgeWithStorageOwned is the owner-aware core commit. The owner
+// and generation are consumed by the update atomically with tenant charging.
+func (r *knowledgeRepository) FinalizeKnowledgeWithStorageOwned(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	expectedParseStatus string,
+	expectedGeneration string,
+	expectedOwner string,
+	storageDelta int64,
+) (bool, error) {
+	if knowledge == nil || knowledge.ID == "" || knowledge.TenantID == 0 || knowledge.KnowledgeBaseID == "" ||
+		expectedParseStatus == "" || expectedGeneration == "" || expectedOwner == "" {
+		return false, errors.New("finalize owned knowledge storage: complete expected identity is required")
+	}
+	if storageDelta < 0 {
+		return false, errors.New("finalize owned knowledge storage: storage delta cannot be negative")
+	}
+
+	var finalized bool
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND parse_status = ? AND processing_generation = ? AND processing_owner = ?",
+				knowledge.TenantID,
+				knowledge.ID,
+				knowledge.KnowledgeBaseID,
+				expectedParseStatus,
+				expectedGeneration,
+				expectedOwner,
+			).
+			Select("*").
+			Omit(atomicFinalizeOmitFields...).
+			Updates(knowledge)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		if storageDelta > 0 {
+			result = tx.Model(&types.Tenant{}).
+				Where("id = ?", knowledge.TenantID).
+				UpdateColumn("storage_used", gorm.Expr("storage_used + ?", storageDelta))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("finalize owned knowledge storage: tenant %d not found", knowledge.TenantID)
+			}
+		}
+		finalized = true
+		return nil
+	})
+	return finalized, err
 }
 
 // UpdateActiveDeletingKnowledgeColumns only touches rows that are still visible
@@ -414,6 +1145,167 @@ func (r *knowledgeRepository) FinalizeSubtask(
 		return 0, promoted, nil
 	}
 	return snap.PendingSubtasksCount, promoted, nil
+}
+
+// FinalizeSubtaskGeneration is the generation-scoped variant used by every
+// document enrichment descendant. An old summary/question/graph task cannot
+// decrement or promote a newer reparse generation that reused the same row.
+func (r *knowledgeRepository) FinalizeSubtaskGeneration(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedGeneration string,
+) (int, bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" || expectedGeneration == "" {
+		return 0, false, errors.New("finalize subtask generation: complete identity is required")
+	}
+	now := time.Now()
+	res := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count > 0",
+			tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+		).
+		Updates(map[string]interface{}{
+			"pending_subtasks_count": gorm.Expr("pending_subtasks_count - 1"),
+			"updated_at":             now,
+		})
+	if res.Error != nil {
+		return 0, false, res.Error
+	}
+
+	promoteRes := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count = 0",
+			tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+		).
+		Updates(map[string]interface{}{
+			"parse_status":      types.ParseStatusCompleted,
+			"processed_at":      now,
+			"processing_owner":  "",
+			"processing_fanout": nil,
+			"updated_at":        now,
+		})
+	if promoteRes.Error != nil {
+		return 0, false, promoteRes.Error
+	}
+	promoted := promoteRes.RowsAffected > 0
+
+	var snap struct {
+		PendingSubtasksCount int `gorm:"column:pending_subtasks_count"`
+	}
+	if err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Select("pending_subtasks_count").
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ?",
+			tenantID, id, expectedKnowledgeBaseID, expectedGeneration,
+		).Take(&snap).Error; err != nil {
+		return 0, promoted, nil
+	}
+	return snap.PendingSubtasksCount, promoted, nil
+}
+
+// FinalizeSubtaskGenerationItem is the exactly-once descendant drain. The
+// completion ledger insert and counter decrement share one transaction, so an
+// Asynq retry of a successful summary/question/graph handler cannot consume a
+// second slot. Duplicate calls still attempt the guarded zero-count promotion
+// to repair a crash between an earlier decrement and promotion.
+func (r *knowledgeRepository) FinalizeSubtaskGenerationItem(
+	ctx context.Context,
+	tenantID uint64,
+	id string,
+	expectedKnowledgeBaseID string,
+	expectedGeneration string,
+	itemID string,
+) (int, bool, error) {
+	if tenantID == 0 || id == "" || expectedKnowledgeBaseID == "" ||
+		expectedGeneration == "" || itemID == "" {
+		return 0, false, errors.New("finalize subtask generation item: complete identity is required")
+	}
+	now := time.Now()
+	newCount := 0
+	promoted := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Lock the exact live generation before touching the ledger. Besides
+		// fencing the counter, this prevents a delayed old task from recreating
+		// obsolete rows after a reparse claim cleaned them up.
+		query := tx.Model(&types.Knowledge{}).
+			Select("id").
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ?",
+				tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+			)
+		if tx.Dialector.Name() != "sqlite" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var current struct{ ID string }
+		if err := query.Take(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		completion := &types.KnowledgeFanoutCompletion{
+			TenantID:             tenantID,
+			KnowledgeID:          id,
+			KnowledgeBaseID:      expectedKnowledgeBaseID,
+			ProcessingGeneration: expectedGeneration,
+			ItemID:               "enrichment:" + itemID,
+			CompletedAt:          now,
+		}
+		insert := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(completion)
+		if insert.Error != nil {
+			return insert.Error
+		}
+		if insert.RowsAffected == 1 {
+			decrement := tx.Model(&types.Knowledge{}).
+				Where(
+					"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count > 0",
+					tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+				).
+				Updates(map[string]interface{}{
+					"pending_subtasks_count": gorm.Expr("pending_subtasks_count - 1"),
+					"updated_at":             now,
+				})
+			if decrement.Error != nil {
+				return decrement.Error
+			}
+		}
+		promotion := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count = 0",
+				tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+			).
+			Updates(map[string]interface{}{
+				"parse_status":      types.ParseStatusCompleted,
+				"processed_at":      now,
+				"processing_owner":  "",
+				"processing_fanout": nil,
+				"updated_at":        now,
+			})
+		if promotion.Error != nil {
+			return promotion.Error
+		}
+		promoted = promotion.RowsAffected == 1
+		var snapshot struct {
+			PendingSubtasksCount int `gorm:"column:pending_subtasks_count"`
+		}
+		if err := tx.Model(&types.Knowledge{}).
+			Select("pending_subtasks_count").
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ?",
+				tenantID, id, expectedKnowledgeBaseID, expectedGeneration,
+			).
+			Take(&snapshot).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		newCount = snapshot.PendingSubtasksCount
+		return nil
+	})
+	return newCount, promoted, err
 }
 
 // SetFinalizing atomically transitions a row from 'processing' to

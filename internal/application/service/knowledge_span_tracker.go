@@ -26,6 +26,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,25 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+)
+
+const (
+	// knowledge_processing_spans.name is VARCHAR(64) in both the PostgreSQL
+	// and SQLite schemas. Subspan names can contain caller-controlled
+	// identifiers (Wiki slugs, file names, etc.), so enforce the storage
+	// invariant before every subspan write instead of relying on each caller
+	// to remember the database limit.
+	spanNameMaxRunes = 64
+
+	// Six SHA-256 bytes (12 hex characters) leave a useful readable prefix
+	// while making two long names with the same prefix independently
+	// addressable for retry cancellation and cross-process lookup.
+	spanNameHashBytes = 6
+
+	// When a name is bounded, keep the exact value in the span input so the
+	// trace remains fully diagnosable even though the indexed display name is
+	// constrained by the database schema.
+	spanOriginalNameInputKey = "span_name_original"
 )
 
 // Span is the in-memory handle the pipeline holds while a stage / subspan
@@ -200,6 +221,42 @@ func newSpanID() string {
 	return strings.ReplaceAll(uuid.NewString(), "-", "")
 }
 
+// boundedSpanName returns a deterministic, PostgreSQL-safe display name.
+// PostgreSQL VARCHAR(n) limits Unicode characters rather than UTF-8 bytes,
+// hence the rune-based budget. A hash suffix prevents the common-prefix
+// collisions that plain truncation would cause for names such as Wiki page
+// spans whose UUID or distinguishing slug component appears near the end.
+func boundedSpanName(name string) string {
+	runes := []rune(name)
+	if len(runes) <= spanNameMaxRunes {
+		return name
+	}
+
+	sum := sha256.Sum256([]byte(name))
+	hash := hex.EncodeToString(sum[:spanNameHashBytes])
+	prefixRunes := spanNameMaxRunes - 1 - len(hash) // one rune for "~"
+	return string(runes[:prefixRunes]) + "~" + hash
+}
+
+// prepareSubSpanNameInput applies the storage bound without mutating the
+// caller's JSONMap. Retaining the original value in input makes the mapping
+// reversible for operators and keeps the shortened name focused on stable
+// indexing/correlation rather than trying to encode every detail into 64
+// characters.
+func prepareSubSpanNameInput(name string, input types.JSONMap) (string, types.JSONMap) {
+	bounded := boundedSpanName(name)
+	if bounded == name {
+		return name, input
+	}
+
+	withOriginal := make(types.JSONMap, len(input)+1)
+	for key, value := range input {
+		withOriginal[key] = value
+	}
+	withOriginal[spanOriginalNameInputKey] = name
+	return bounded, withOriginal
+}
+
 func (t *spanTracker) recordStart(spanID string, at time.Time) {
 	t.startsMu.Lock()
 	t.starts[spanID] = at
@@ -280,8 +337,8 @@ func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attemp
 		return nil
 	}
 	var (
-		rootID    string
-		existing  *types.KnowledgeProcessingSpan
+		rootID   string
+		existing *types.KnowledgeProcessingSpan
 	)
 	for i := range rows {
 		r := rows[i]
@@ -373,6 +430,7 @@ func (t *spanTracker) BeginSubSpan(ctx context.Context, parent *Span, name, kind
 	if parent == nil || name == "" {
 		return nil
 	}
+	name, input = prepareSubSpanNameInput(name, input)
 	if kind != types.SpanKindGeneration && kind != types.SpanKindSubSpan {
 		kind = types.SpanKindSubSpan
 	}
@@ -558,6 +616,7 @@ func (t *spanTracker) LookupSpanByName(ctx context.Context, knowledgeID string, 
 	if name == "" || knowledgeID == "" || attempt <= 0 {
 		return nil
 	}
+	name = boundedSpanName(name)
 	rows, err := t.repo.ListByAttempt(ctx, knowledgeID, attempt)
 	if err != nil {
 		logger.Warnf(ctx, "[SpanTracker] LookupSpanByName list failed kid=%s attempt=%d: %v",

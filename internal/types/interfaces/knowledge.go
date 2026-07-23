@@ -7,6 +7,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
+	"gorm.io/gorm"
 )
 
 // KnowledgeService defines the interface for knowledge services.
@@ -200,6 +201,14 @@ type KnowledgeService interface {
 	SearchKnowledge(ctx context.Context, keyword string, offset, limit int, fileTypes []string, includeTotal bool) ([]*types.Knowledge, bool, int64, error)
 	// SearchKnowledgeForScopes searches knowledge within the given (tenant_id, kb_id) scopes (e.g. for shared agent context).
 	SearchKnowledgeForScopes(ctx context.Context, scopes []types.KnowledgeSearchScope, keyword string, offset, limit int, fileTypes []string, includeTotal bool) ([]*types.Knowledge, bool, int64, error)
+}
+
+// KnowledgeTransactionalCreator inserts a knowledge row using a transaction
+// owned by a higher-level lifecycle coordinator. It is intentionally separate
+// from KnowledgeRepository: only flows that must atomically adopt another
+// durable resource (such as a planned storage object) need this capability.
+type KnowledgeTransactionalCreator interface {
+	CreateKnowledgeTx(ctx context.Context, tx *gorm.DB, knowledge *types.Knowledge) error
 }
 
 // KnowledgeRepository defines the interface for knowledge repositories.

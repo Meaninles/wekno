@@ -165,30 +165,19 @@ var registry = map[string]settingSpec{
 			"仅在创建时读取，修改后只对之后新建的租户生效，不会回写已存在的租户。" +
 			"0 或负数表示使用内置默认值 10GB。",
 	},
-	// asynq.concurrency is the asynq worker pool size (parallel in-flight
-	// tasks). Read once when the asynq server starts — changing it in the
-	// UI requires a process restart to take effect. Mirrors
-	// WEKNORA_ASYNQ_CONCURRENCY (default 32).
+	// asynq.concurrency is the number of complete document workflows admitted
+	// by each full processing instance. It is intentionally not the internal
+	// task-worker count: one slot follows a document through parse, chunking,
+	// vectorization and derived work until terminal completion.
 	"asynq.concurrency": {
 		Type:            "int",
 		EnvName:         "WEKNORA_ASYNQ_CONCURRENCY",
-		Default:         int64(32),
+		Default:         int64(4),
 		Category:        "worker",
 		RequiresRestart: true,
-		Description: "普通异步任务 worker 并发数（不包含重型文档解析队列）。" +
-			"普通文档解析、嵌入等任务多为 I/O 等待，适当提高可缩短批量上传排队时间。" +
-			"修改后需重启服务进程方可生效。",
-	},
-	// asynq.heavy_document_concurrency is the dedicated worker pool size for
-	// resource-heavy document parsing tasks.
-	"asynq.heavy_document_concurrency": {
-		Type:            "int",
-		EnvName:         "WEKNORA_HEAVY_DOCUMENT_CONCURRENCY",
-		Default:         int64(2),
-		Category:        "worker",
-		RequiresRestart: true,
-		Description: "重型文档解析 worker 并发数。命中文件大小或 DOCX/XLSX/CSV 结构重型阈值的文档，" +
-			"进入独立重型队列处理，不占用普通任务 worker。默认 2，修改后需重启服务进程方可生效。",
+		Description: "每个完整文档解析实例可同时处理的文档数。一个并发槽会贯穿解析、分块、" +
+			"向量化以及摘要、问题、知识图谱、Wiki 等衍生阶段；增加实例即可水平扩展总吞吐。" +
+			"修改后需重启所有解析实例方可生效。",
 	},
 }
 
@@ -1187,7 +1176,7 @@ func encodeForType(declared string, rawValue any) (types.JSON, error) {
 //     400 body verbatim).
 func validateRegistryEntry(key string, rawValue any) error {
 	switch key {
-	case "asynq.concurrency", "asynq.heavy_document_concurrency":
+	case "asynq.concurrency":
 		n, err := coerceToPositiveInt64(rawValue)
 		if err != nil {
 			return err

@@ -47,23 +47,39 @@ func setupResetPendingDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func TestResetPendingTasks_KnowledgeFindThenUpdate(t *testing.T) {
+func TestResetPendingTasks_PreservesStaleKnowledgeLifecycleStates(t *testing.T) {
 	db := setupResetPendingDB(t)
 	stale := time.Now().Add(-2 * time.Hour)
-	require.NoError(t, db.Exec(
-		`INSERT INTO knowledges (id, parse_status, updated_at) VALUES (?, ?, ?)`,
-		"k-stuck", types.ParseStatusProcessing, stale,
-	).Error)
+	statuses := []string{
+		types.ParseStatusPending,
+		types.ParseStatusProcessing,
+		types.ParseStatusFinalizing,
+		types.ParseStatusDeleting,
+	}
+	for i, status := range statuses {
+		require.NoError(t, db.Exec(
+			`INSERT INTO knowledges
+			 (id, parse_status, summary_status, pending_subtasks_count, error_message, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"k-"+status, status, types.SummaryStatusProcessing, i+1, "keep me", stale,
+		).Error)
+	}
 
 	t.Setenv("REDIS_ADDR", "redis:6379")
 	resetPendingTasks(db)
 
-	var status, errMsg string
-	require.NoError(t, db.Raw(
-		`SELECT parse_status, error_message FROM knowledges WHERE id = ?`, "k-stuck",
-	).Row().Scan(&status, &errMsg))
-	assert.Equal(t, types.ParseStatusFailed, status)
-	assert.Contains(t, errMsg, "application restart")
+	for i, status := range statuses {
+		var gotStatus, summaryStatus, errMsg string
+		var pending int
+		require.NoError(t, db.Raw(
+			`SELECT parse_status, summary_status, pending_subtasks_count, error_message
+			 FROM knowledges WHERE id = ?`, "k-"+status,
+		).Row().Scan(&gotStatus, &summaryStatus, &pending, &errMsg))
+		assert.Equal(t, status, gotStatus)
+		assert.Equal(t, types.SummaryStatusProcessing, summaryStatus)
+		assert.Equal(t, i+1, pending)
+		assert.Equal(t, "keep me", errMsg)
+	}
 }
 
 func TestResetPendingTasks_KnowledgeFreshInDistributedMode(t *testing.T) {
@@ -121,25 +137,27 @@ func TestResetPendingTasks_SyncLogLiteMode(t *testing.T) {
 	assert.Equal(t, types.SyncLogStatusFailed, status)
 }
 
-func TestStuckKnowledgeParseQuery_ReuseAfterFindDoesNotBreakUpdate(t *testing.T) {
+func TestResetPendingTasks_PreservesKnowledgeLifecycleInLiteMode(t *testing.T) {
 	db := setupResetPendingDB(t)
 	stale := time.Now().Add(-2 * time.Hour)
 	require.NoError(t, db.Exec(
-		`INSERT INTO knowledges (id, parse_status, updated_at) VALUES (?, ?, ?)`,
-		"k-reuse", types.ParseStatusProcessing, stale,
+		`INSERT INTO knowledges
+		 (id, parse_status, summary_status, pending_subtasks_count, error_message, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"k-delete-lite", types.ParseStatusDeleting, types.SummaryStatusPending, 2, "durable intent", stale,
 	).Error)
 
-	distributed := true
-	staleCutoff := time.Now().Add(-resetPendingStaleWindow)
+	os.Unsetenv("REDIS_ADDR")
+	resetPendingTasks(db)
 
-	var rows []types.Knowledge
-	q := stuckKnowledgeParseQuery(db, distributed, staleCutoff)
-	require.NoError(t, q.Select("id").Find(&rows).Error)
-	require.Len(t, rows, 1)
-
-	result := stuckKnowledgeParseQuery(db, distributed, staleCutoff).Updates(map[string]interface{}{
-		"parse_status": types.ParseStatusFailed,
-	})
-	require.NoError(t, result.Error)
-	assert.Equal(t, int64(1), result.RowsAffected)
+	var status, summaryStatus, errMsg string
+	var pending int
+	require.NoError(t, db.Raw(
+		`SELECT parse_status, summary_status, pending_subtasks_count, error_message
+		 FROM knowledges WHERE id = ?`, "k-delete-lite",
+	).Row().Scan(&status, &summaryStatus, &pending, &errMsg))
+	assert.Equal(t, types.ParseStatusDeleting, status)
+	assert.Equal(t, types.SummaryStatusPending, summaryStatus)
+	assert.Equal(t, 2, pending)
+	assert.Equal(t, "durable intent", errMsg)
 }

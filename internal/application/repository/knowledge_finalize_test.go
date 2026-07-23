@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS knowledges (
     description TEXT,
     source VARCHAR(2048) NOT NULL DEFAULT '',
     parse_status VARCHAR(50) NOT NULL DEFAULT 'unprocessed',
+    processing_generation VARCHAR(36) NOT NULL DEFAULT '',
+    processing_owner VARCHAR(160) NOT NULL DEFAULT '',
+    processing_fanout TEXT,
     enable_status VARCHAR(50) NOT NULL DEFAULT 'enabled',
     embedding_model_id VARCHAR(64),
     file_name VARCHAR(255),
@@ -281,6 +284,36 @@ func TestUpdateKnowledge_PendingCounterOmittedOnReset(t *testing.T) {
 	require.NoError(t, repo.UpdateKnowledgeColumn(ctx, id, "pending_subtasks_count", 0))
 	_, count = reloadKnowledgeRow(t, db, id)
 	assert.Equal(t, 0, count)
+}
+
+func TestOrdinaryKnowledgeWritesCannotOverwriteDeletingFence(t *testing.T) {
+	db := setupKnowledgeTestDB(t)
+	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
+	ctx := context.Background()
+	id := insertProcessingKnowledge(t, db)
+
+	stale, err := repo.GetKnowledgeByID(ctx, 1, id)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", id).
+		Update("parse_status", types.ParseStatusDeleting).Error)
+
+	stale.Title = "stale writer"
+	stale.ParseStatus = types.ParseStatusCompleted
+	require.ErrorIs(t, repo.UpdateKnowledge(ctx, stale), ErrKnowledgeDeleting)
+	require.ErrorIs(t, repo.UpdateKnowledgeColumn(ctx, id, "title", "column writer"), ErrKnowledgeDeleting)
+	require.ErrorIs(t, repo.UpdateKnowledgeColumns(ctx, id, map[string]interface{}{
+		"parse_status": types.ParseStatusFailed,
+		"title":        "multi-column writer",
+	}), ErrKnowledgeDeleting)
+
+	var got struct {
+		ParseStatus string
+		Title       string
+	}
+	require.NoError(t, db.Model(&types.Knowledge{}).
+		Select("parse_status", "title").Where("id = ?", id).Scan(&got).Error)
+	assert.Equal(t, types.ParseStatusDeleting, got.ParseStatus)
+	assert.Equal(t, "finalize-test", got.Title)
 }
 
 func TestUpdateActiveDeletingKnowledgeColumns_GuardsStateAndSoftDelete(t *testing.T) {

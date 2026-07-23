@@ -29,3 +29,23 @@ type FileService interface {
 	// when srcPath belongs to a different storage provider than this service.
 	CopyFile(ctx context.Context, srcPath string, tenantID uint64, knowledgeID string) (string, error)
 }
+
+// PlannedFileService is the crash-safe write extension used by the knowledge
+// auxiliary ownership ledger. Reserve methods only allocate and validate the
+// final provider path; they MUST NOT write an object. Commit methods write
+// exactly that path and must be safe to retry. A commit error is treated as an
+// uncertain outcome, so callers keep the pre-existing durable intent until an
+// exact DeleteFile succeeds.
+//
+// This remains a separate interface so non-knowledge test doubles and external
+// integrations are not silently given weaker semantics. Knowledge-owned write
+// paths require this interface and fail closed when a provider lacks it.
+type PlannedFileService interface {
+	FileService
+	ReserveFilePath(tenantID uint64, knowledgeID string, fileName string) (string, error)
+	CommitFileAtPath(ctx context.Context, file *multipart.FileHeader, filePath string) error
+	ReserveBytesPath(tenantID uint64, fileName string, temp bool) (string, error)
+	CommitBytesAtPath(ctx context.Context, data []byte, filePath string) error
+	ReserveCopyPath(srcPath string, tenantID uint64, knowledgeID string) (string, error)
+	CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error
+}

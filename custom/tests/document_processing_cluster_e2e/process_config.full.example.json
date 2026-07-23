@@ -1,0 +1,29 @@
+{
+  "question_generation_config": {
+    "enabled": true,
+    "question_count": 1
+  },
+  "graph_enabled": true,
+  "extract_config": {
+    "enabled": true,
+    "text": "Extract the main document, section and verification capability entities and their relationships.",
+    "tags": ["document", "section", "capability"],
+    "nodes": [
+      {
+        "name": "Document",
+        "attributes": ["name", "marker"]
+      },
+      {
+        "name": "Capability",
+        "attributes": ["name"]
+      }
+    ],
+    "relations": [
+      {
+        "node1": "Document",
+        "node2": "Capability",
+        "type": "VERIFIES"
+      }
+    ]
+  }
+}

@@ -27,8 +27,10 @@ spec:
       labels:
         {{- include "weknora.componentSelectorLabels" (dict "component" "app" "context" .) | nindent 8 }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds }}
       {{- include "weknora.imagePullSecrets" . | nindent 6 }}
       serviceAccountName: {{ include "weknora.serviceAccountName" . }}
+      automountServiceAccountToken: false
       {{- with .Values.app.podSecurityContext | default .Values.global.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -47,6 +49,41 @@ spec:
               protocol: TCP
           env:
             # Application settings
+            # Stable for process/container restarts inside one pod. A replacement
+            # pod intentionally gets a new identity and its expired work is stolen.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID
+              # A Pod UID survives an in-pod container restart but is never
+              # reused by a replacement Pod. This makes same-ID boot adoption
+              # an orchestrator-backed termination proof instead of a timeout.
+              value: "k8s/$(POD_NAMESPACE)/$(POD_UID)"
+            - name: CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART
+              value: "true"
+            {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+            - name: CUSTOM_DOCUMENT_QUEUE_KUBERNETES_RUNTIME_VERIFIER_ENABLED
+              value: "true"
+            - name: CUSTOM_DOCUMENT_QUEUE_KUBERNETES_API_SERVER
+              value: {{ .Values.app.documentQueue.kubernetesRuntimeVerifier.apiServer | quote }}
+            - name: CUSTOM_DOCUMENT_QUEUE_KUBERNETES_CONTAINER_NAME
+              value: {{ .Values.app.documentQueue.kubernetesRuntimeVerifier.containerName | quote }}
+            - name: CUSTOM_DOCUMENT_QUEUE_KUBERNETES_REQUEST_TIMEOUT
+              value: {{ .Values.app.documentQueue.kubernetesRuntimeVerifier.requestTimeout | quote }}
+            - name: CUSTOM_DOCUMENT_QUEUE_KUBERNETES_TOKEN_FILE
+              value: /var/run/secrets/weknora-document-queue-kubernetes/token
+            - name: CUSTOM_DOCUMENT_QUEUE_KUBERNETES_CA_FILE
+              value: /var/run/secrets/weknora-document-queue-kubernetes/ca.crt
+            {{- end }}
             - name: GIN_MODE
               value: {{ .Values.app.env.GIN_MODE | quote }}
             - name: TZ
@@ -148,6 +185,11 @@ spec:
           volumeMounts:
             - name: data-files
               mountPath: /data/files
+            {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+            - name: document-queue-kubernetes-api
+              mountPath: /var/run/secrets/weknora-document-queue-kubernetes
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.app.resources | nindent 12 }}
           {{- with .Values.app.livenessProbe }}
@@ -166,6 +208,20 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+        - name: document-queue-kubernetes-api
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: {{ .Values.app.documentQueue.kubernetesRuntimeVerifier.tokenExpirationSeconds }}
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        {{- end }}
       {{- with .Values.app.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -173,6 +229,15 @@ spec:
       {{- with .Values.app.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.app.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.app.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.app.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.app.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "weknora.componentSelectorLabels" (dict "component" "app" "context" .) | nindent 14 }}
       {{- end }}
       {{- with .Values.app.tolerations }}
       tolerations:

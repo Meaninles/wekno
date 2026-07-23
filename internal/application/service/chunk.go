@@ -403,9 +403,11 @@ func (s *chunkService) DeleteGeneratedQuestion(ctx context.Context, chunkID stri
 		return fmt.Errorf("failed to get knowledge base: %w", err)
 	}
 
-	// 5. Delete the vector index for this question
-	// The source_id format is: {chunk_id}-{question_id}
-	sourceID := fmt.Sprintf("%s-%s", chunkID, questionID)
+	// 5. Delete the vector index for this question. Generated-question
+	// source IDs are the compact, generation-scoped question IDs themselves;
+	// ChunkID is stored in its own index column and must not be concatenated
+	// here because embeddings.source_id is varchar(64).
+	sourceID := questionVectorSourceID(questionID)
 
 	retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
 		ctx, s.retrieveEngine, s.ownership, tenantID, kb.VectorStoreID)

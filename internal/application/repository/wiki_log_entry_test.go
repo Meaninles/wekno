@@ -19,6 +19,7 @@ import (
 const wikiLogEntriesTestDDL = `
 CREATE TABLE IF NOT EXISTS wiki_log_entries (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_op_id      INTEGER,
     tenant_id         INTEGER NOT NULL,
     knowledge_base_id VARCHAR(36) NOT NULL,
     action            VARCHAR(32) NOT NULL,
@@ -28,6 +29,8 @@ CREATE TABLE IF NOT EXISTS wiki_log_entries (
     pages_affected    TEXT NOT NULL DEFAULT '[]',
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_log_entries_source_op_id
+    ON wiki_log_entries (source_op_id);
 `
 
 func setupWikiLogTestDB(t *testing.T) *gorm.DB {
@@ -35,6 +38,10 @@ func setupWikiLogTestDB(t *testing.T) *gorm.DB {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(wikiLogEntriesTestDDL).Error)
+	require.NoError(t, db.AutoMigrate(&types.KnowledgeBase{}))
+	for _, kbID := range []string{"kb-a", "kb-b", "kb-other"} {
+		require.NoError(t, db.Create(&types.KnowledgeBase{ID: kbID, TenantID: 1, Name: kbID}).Error)
+	}
 	return db
 }
 
@@ -110,6 +117,50 @@ func TestWikiLogEntryRepository_AppendBatch_Empty(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&types.WikiLogEntry{}).Count(&count).Error)
 	assert.Equal(t, int64(0), count)
+}
+
+// TestWikiLogEntryRepository_AppendBatch_IdempotentBySourceOpID models the
+// production retry boundary: the event INSERT committed, but a later index,
+// publish, or queue-settlement step failed and the same pending rows were
+// delivered again. Both ingest and retract events must remain singletons,
+// while a genuinely new source row is still appended in the retry batch.
+func TestWikiLogEntryRepository_AppendBatch_IdempotentBySourceOpID(t *testing.T) {
+	db := setupWikiLogTestDB(t)
+	repo := NewWikiLogEntryRepository(db)
+	ctx := context.Background()
+
+	ingestID := int64(101)
+	retractID := int64(102)
+	newIngestID := int64(103)
+	ingest := makeLogEntry("kb-a", "ingest", "k1", "Original ingest")
+	ingest.SourceOpID = &ingestID
+	retract := makeLogEntry("kb-a", "retract", "k2", "Original retract")
+	retract.SourceOpID = &retractID
+	require.NoError(t, repo.AppendBatch(ctx, []*types.WikiLogEntry{ingest, retract}))
+
+	// The retry payload is deliberately different. DO NOTHING must preserve
+	// the first committed event rather than overwriting history.
+	retriedIngest := makeLogEntry("kb-a", "ingest", "k1", "Retry must not overwrite")
+	retriedIngest.SourceOpID = &ingestID
+	retriedRetract := makeLogEntry("kb-a", "retract", "k2", "Retry must not overwrite")
+	retriedRetract.SourceOpID = &retractID
+	newIngest := makeLogEntry("kb-a", "ingest", "k3", "New source op")
+	newIngest.SourceOpID = &newIngestID
+	require.NoError(t, repo.AppendBatch(ctx, []*types.WikiLogEntry{
+		retriedIngest,
+		retriedRetract,
+		newIngest,
+	}))
+
+	var got []types.WikiLogEntry
+	require.NoError(t, db.Order("source_op_id ASC").Find(&got).Error)
+	require.Len(t, got, 3)
+	assert.Equal(t, "Original ingest", got[0].DocTitle)
+	assert.Equal(t, "Original retract", got[1].DocTitle)
+	assert.Equal(t, "New source op", got[2].DocTitle)
+	assert.Equal(t, ingestID, *got[0].SourceOpID)
+	assert.Equal(t, retractID, *got[1].SourceOpID)
+	assert.Equal(t, newIngestID, *got[2].SourceOpID)
 }
 
 // TestWikiLogEntryRepository_List_CursorPagination walks the feed with a

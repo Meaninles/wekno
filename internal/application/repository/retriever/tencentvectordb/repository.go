@@ -143,6 +143,22 @@ func (r *repository) DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDLis
 	return r.deleteByFilter(ctx, dimension, tcvectordb.In(fieldKnowledgeID, knowledgeIDList))
 }
 
+func (r *repository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	return r.deleteByFilter(ctx, dimension, strings.Join([]string{
+		tcvectordb.In(fieldKnowledgeBaseID, []string{knowledgeBaseID}),
+		tcvectordb.In(fieldKnowledgeID, knowledgeIDList),
+	}, " and "))
+}
+
 func (r *repository) CopyIndices(
 	ctx context.Context,
 	sourceKnowledgeBaseID string,

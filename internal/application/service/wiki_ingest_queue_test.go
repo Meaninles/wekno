@@ -1,0 +1,2666 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
+	"github.com/Tencent/WeKnora/internal/models/chat"
+	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+type wikiQueuePendingRepoStub struct {
+	interfaces.TaskPendingOpsRepository
+
+	enqueueErr    error
+	peekErr       error
+	deleteErr     error
+	archiveErr    error
+	incrErr       error
+	countErr      error
+	checkpointErr error
+
+	rows          []*types.TaskPendingOp
+	pendingCount  int64
+	countFromRows bool
+	incrCount     int
+
+	enqueued        []*types.TaskPendingOp
+	deletedIDs      [][]int64
+	incrementedIDs  []int64
+	archivedIDs     []int64
+	archived        []*types.TaskDeadLetter
+	enqueueCtxErr   error
+	peekCtxErr      error
+	deleteCtxErr    error
+	incrCtxErr      error
+	countCtxErr     error
+	peekCalls       int
+	deleteCalls     int
+	countCalls      int
+	checkpointCalls int
+	leaseMu         sync.Mutex
+	leaseEpoch      int64
+	leaseErr        error
+	leaseAcquires   int
+}
+
+// wikiQueueNoLeasePendingRepo intentionally hides the production lease
+// extension while preserving the generic queue interface.
+type wikiQueueNoLeasePendingRepo struct {
+	interfaces.TaskPendingOpsRepository
+}
+
+func (r *wikiQueuePendingRepoStub) AcquireWikiIngestLease(
+	_ context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+) (wikilease.Identity, error) {
+	r.leaseMu.Lock()
+	defer r.leaseMu.Unlock()
+	r.leaseAcquires++
+	if r.leaseErr != nil {
+		return wikilease.Identity{}, r.leaseErr
+	}
+	r.leaseEpoch++
+	return wikilease.Identity{
+		TenantID: tenantID, KnowledgeBaseID: knowledgeBaseID,
+		Epoch: r.leaseEpoch, Token: fmt.Sprintf("test-wiki-lease-token-%032d", r.leaseEpoch),
+	}, nil
+}
+
+func (r *wikiQueuePendingRepoStub) WithActiveWikiKnowledgeBase(
+	ctx context.Context,
+	_ uint64,
+	_ string,
+	publish func() error,
+) error {
+	if wikilease.Required(ctx) {
+		if _, ok := wikilease.IdentityFromContext(ctx); !ok {
+			return wikilease.ErrLeaseRequired
+		}
+	}
+	return publish()
+}
+
+func (r *wikiQueuePendingRepoStub) UpdateWikiPayload(
+	_ context.Context,
+	id int64,
+	_ uint64,
+	_ string,
+	payload []byte,
+) (bool, error) {
+	r.checkpointCalls++
+	if r.checkpointErr != nil {
+		return false, r.checkpointErr
+	}
+	for _, row := range r.rows {
+		if row != nil && row.ID == id {
+			row.Payload = slices.Clone(payload)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *wikiQueuePendingRepoStub) Enqueue(ctx context.Context, op *types.TaskPendingOp) error {
+	r.enqueueCtxErr = ctx.Err()
+	if r.enqueueErr != nil {
+		return r.enqueueErr
+	}
+	copyOp := *op
+	copyOp.Payload = slices.Clone(op.Payload)
+	r.enqueued = append(r.enqueued, &copyOp)
+	return nil
+}
+
+func (r *wikiQueuePendingRepoStub) PeekBatch(
+	ctx context.Context,
+	_, _, _ string,
+	limit int,
+) ([]*types.TaskPendingOp, error) {
+	r.peekCalls++
+	r.peekCtxErr = ctx.Err()
+	if r.peekErr != nil {
+		return nil, r.peekErr
+	}
+	if limit > 0 && len(r.rows) > limit {
+		return r.rows[:limit], nil
+	}
+	return r.rows, nil
+}
+
+func (r *wikiQueuePendingRepoStub) DeleteByIDs(ctx context.Context, ids []int64) error {
+	r.deleteCalls++
+	r.deleteCtxErr = ctx.Err()
+	r.deletedIDs = append(r.deletedIDs, slices.Clone(ids))
+	if r.deleteErr != nil {
+		return r.deleteErr
+	}
+	if len(r.rows) > 0 {
+		deleted := make(map[int64]struct{}, len(ids))
+		for _, id := range ids {
+			deleted[id] = struct{}{}
+		}
+		kept := r.rows[:0]
+		for _, row := range r.rows {
+			if _, ok := deleted[row.ID]; !ok {
+				kept = append(kept, row)
+			}
+		}
+		r.rows = kept
+	}
+	return nil
+}
+
+func (r *wikiQueuePendingRepoStub) ArchiveToDeadLetter(ctx context.Context, id int64, row *types.TaskDeadLetter) error {
+	if r.archiveErr != nil {
+		return r.archiveErr
+	}
+	copyRow := *row
+	copyRow.Payload = slices.Clone(row.Payload)
+	r.archivedIDs = append(r.archivedIDs, id)
+	r.archived = append(r.archived, &copyRow)
+	if len(r.rows) > 0 {
+		kept := r.rows[:0]
+		for _, pending := range r.rows {
+			if pending.ID != id {
+				kept = append(kept, pending)
+			}
+		}
+		r.rows = kept
+	}
+	return nil
+}
+
+func (r *wikiQueuePendingRepoStub) IncrFailCount(ctx context.Context, id int64) (int, error) {
+	r.incrCtxErr = ctx.Err()
+	r.incrementedIDs = append(r.incrementedIDs, id)
+	if r.incrErr != nil {
+		return 0, r.incrErr
+	}
+	return r.incrCount, nil
+}
+
+func (r *wikiQueuePendingRepoStub) PendingCount(ctx context.Context, _, _, _ string) (int64, error) {
+	r.countCalls++
+	r.countCtxErr = ctx.Err()
+	if r.countErr != nil {
+		return 0, r.countErr
+	}
+	if r.countFromRows {
+		return int64(len(r.rows)), nil
+	}
+	return r.pendingCount, nil
+}
+
+func TestProcessWikiIngestFailsClosedWithoutDatabaseLeaseRepositoryAndReleasesLiteLock(t *testing.T) {
+	generic := &wikiQueuePendingRepoStub{}
+	svc := &wikiIngestService{
+		pendingRepo: wikiQueueNoLeasePendingRepo{TaskPendingOpsRepository: generic},
+	}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 7, KnowledgeBaseID: "kb-1"})
+	require.NoError(t, err)
+	err = svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	require.ErrorContains(t, err, "mandatory database lease fencing")
+	_, held := svc.liteLocks.Load("kb-1")
+	require.False(t, held, "failed DB acquisition must release the Lite coordination lock")
+}
+
+func TestProcessWikiIngestDatabaseLeaseAcquireFailureReleasesLiteLockAndRetries(t *testing.T) {
+	dbErr := errors.New("database unavailable")
+	pending := &wikiQueuePendingRepoStub{leaseErr: dbErr}
+	svc := &wikiIngestService{pendingRepo: pending}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 7, KnowledgeBaseID: "kb-1"})
+	require.NoError(t, err)
+	err = svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	require.ErrorIs(t, err, dbErr)
+	require.Equal(t, 1, pending.leaseAcquires)
+	_, held := svc.liteLocks.Load("kb-1")
+	require.False(t, held, "DB errors must release the process lock before Asynq retries")
+}
+
+func TestProcessWikiIngestDatabaseLeaseAcquireFailureReleasesRedisLock(t *testing.T) {
+	address := strings.TrimSpace(os.Getenv("WEKNORA_TEST_REDIS_ADDR"))
+	if address == "" {
+		t.Skip("set WEKNORA_TEST_REDIS_ADDR to run the Redis lease-release integration test")
+	}
+	password := os.Getenv("WEKNORA_TEST_REDIS_PASSWORD")
+	if password == "" {
+		password = os.Getenv("REDIS_PASSWORD")
+	}
+	client := redis.NewClient(&redis.Options{Addr: address, Password: password})
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	require.NoError(t, client.Ping(context.Background()).Err())
+
+	kbID := fmt.Sprintf("kb-db-lease-failure-%d", time.Now().UnixNano())
+	key := wikiActiveKeyPrefix + kbID
+	t.Cleanup(func() { _ = client.Del(context.Background(), key).Err() })
+	dbErr := errors.New("database unavailable after Redis lock")
+	pending := &wikiQueuePendingRepoStub{leaseErr: dbErr}
+	svc := &wikiIngestService{pendingRepo: pending, redisClient: client}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 7, KnowledgeBaseID: kbID})
+	require.NoError(t, err)
+	err = svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	require.ErrorIs(t, err, dbErr)
+	exists, err := client.Exists(context.Background(), key).Result()
+	require.NoError(t, err)
+	require.Zero(t, exists, "DB acquisition failure must release the Redis coordination lock")
+}
+
+func TestProcessWikiIngestObsoleteDatabaseLeaseIsAcknowledgedWithoutQueueFailure(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{leaseErr: &wikilease.FencedError{
+		ExpectedTenantID: 7, ExpectedKnowledgeBaseID: "kb-1",
+		ExpectedEpoch: 1, CurrentEpoch: 2,
+	}}
+	svc := &wikiIngestService{pendingRepo: pending}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 7, KnowledgeBaseID: "kb-1"})
+	require.NoError(t, err)
+	require.NoError(t, svc.ProcessWikiIngest(
+		context.Background(), asynq.NewTask(types.TypeWikiIngest, payload),
+	))
+	require.Empty(t, pending.incrementedIDs)
+	require.Empty(t, pending.archived)
+	require.Empty(t, pending.deletedIDs)
+	_, held := svc.liteLocks.Load("kb-1")
+	require.False(t, held)
+}
+
+func TestWikiQueueSettlementContextPreservesDatabaseLeaseIdentity(t *testing.T) {
+	identity := wikilease.Identity{
+		TenantID: 7, KnowledgeBaseID: "kb-1", Epoch: 3,
+		Token: "0123456789012345678901234567890123456789012",
+	}
+	parent, cancelParent := context.WithCancel(wikilease.WithIdentity(context.Background(), identity))
+	cancelParent()
+	settleCtx, cancelSettle := newWikiQueueSettlementContext(parent)
+	defer cancelSettle()
+	restored, ok := wikilease.IdentityFromContext(settleCtx)
+	require.True(t, ok)
+	require.Equal(t, identity, restored)
+	require.NoError(t, settleCtx.Err(), "WithoutCancel must detach task cancellation for bounded settlement")
+}
+
+type wikiQueueKBServiceStub struct {
+	interfaces.KnowledgeBaseService
+	kb    *types.KnowledgeBase
+	err   error
+	calls int
+}
+
+func (s *wikiQueueKBServiceStub) GetKnowledgeBaseByIDOnly(context.Context, string) (*types.KnowledgeBase, error) {
+	s.calls++
+	if s.kb == nil || s.err != nil {
+		return s.kb, s.err
+	}
+	copyKB := *s.kb
+	if copyKB.TenantID == 0 {
+		copyKB.TenantID = 42
+	}
+	return &copyKB, nil
+}
+
+func (s *wikiQueueKBServiceStub) GetKnowledgeBaseByID(ctx context.Context, id string) (*types.KnowledgeBase, error) {
+	return s.GetKnowledgeBaseByIDOnly(ctx, id)
+}
+
+type wikiQueueKnowledgeServiceStub struct {
+	interfaces.KnowledgeService
+	mu        sync.RWMutex
+	knowledge *types.Knowledge
+	err       error
+	calls     int
+}
+
+type wikiQueueModelServiceStub struct {
+	interfaces.ModelService
+	model chat.Chat
+	err   error
+}
+
+type blockingWikiChatModel struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingWikiChatModel) Chat(
+	ctx context.Context,
+	_ []chat.Message,
+	_ *chat.ChatOptions,
+) (*types.ChatResponse, error) {
+	m.once.Do(func() { close(m.entered) })
+	select {
+	case <-m.release:
+		return &types.ChatResponse{Content: "SUMMARY: updated\nupdated page body"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *blockingWikiChatModel) ChatStream(
+	context.Context,
+	[]chat.Message,
+	*chat.ChatOptions,
+) (<-chan types.StreamResponse, error) {
+	return nil, nil
+}
+
+func (m *blockingWikiChatModel) GetModelName() string { return "blocking" }
+func (m *blockingWikiChatModel) GetModelID() string   { return "blocking" }
+
+func (s *wikiQueueModelServiceStub) GetChatModel(context.Context, string) (chat.Chat, error) {
+	return s.model, s.err
+}
+
+func (s *wikiQueueKnowledgeServiceStub) GetKnowledgeByIDOnly(context.Context, string) (*types.Knowledge, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.knowledge == nil || s.err != nil {
+		return s.knowledge, s.err
+	}
+	copyKnowledge := *s.knowledge
+	if copyKnowledge.TenantID == 0 {
+		copyKnowledge.TenantID = 42
+	}
+	if copyKnowledge.KnowledgeBaseID == "" {
+		copyKnowledge.KnowledgeBaseID = "kb-1"
+	}
+	if copyKnowledge.ProcessingGeneration == "" {
+		copyKnowledge.ProcessingGeneration = "test-generation"
+	}
+	if copyKnowledge.ParseStatus == "" {
+		copyKnowledge.ParseStatus = types.ParseStatusCompleted
+	}
+	if copyKnowledge.ProcessedAt == nil &&
+		(copyKnowledge.ParseStatus == types.ParseStatusProcessing ||
+			copyKnowledge.ParseStatus == types.ParseStatusFinalizing ||
+			copyKnowledge.ParseStatus == types.ParseStatusCompleted) {
+		now := time.Unix(1_700_000_000, 0)
+		copyKnowledge.ProcessedAt = &now
+	}
+	return &copyKnowledge, nil
+}
+
+func (s *wikiQueueKnowledgeServiceStub) mutateKnowledge(mutate func(*types.Knowledge)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.knowledge != nil && mutate != nil {
+		mutate(s.knowledge)
+	}
+}
+
+type wikiQueuePageServiceStub struct {
+	interfaces.WikiPageService
+	getPage         *types.WikiPage
+	getErr          error
+	indexPage       *types.WikiPage
+	indexErr        error
+	listPages       []*types.WikiPage
+	listErr         error
+	listSlugs       []string
+	listSlugsErr    error
+	createErr       error
+	updateErr       error
+	deleteErr       error
+	getCalls        int
+	listCalls       int
+	createCalls     int
+	updated         []*types.WikiPage
+	contentWrites   []*types.WikiPage
+	metaClearIDs    [][]string
+	contentClearIDs [][]string
+	deleted         []string
+}
+
+func (s *wikiQueuePageServiceStub) GetPageBySlug(context.Context, string, string) (*types.WikiPage, error) {
+	s.getCalls++
+	return s.getPage, s.getErr
+}
+
+func (s *wikiQueuePageServiceStub) ListPagesBySourceRef(context.Context, string, string) ([]*types.WikiPage, error) {
+	s.listCalls++
+	return s.listPages, s.listErr
+}
+
+func (s *wikiQueuePageServiceStub) ListSlugsBySourceRef(context.Context, string, string) ([]string, error) {
+	return s.listSlugs, s.listSlugsErr
+}
+
+func (s *wikiQueuePageServiceStub) CreatePage(_ context.Context, page *types.WikiPage) (*types.WikiPage, error) {
+	s.createCalls++
+	if s.createErr != nil {
+		return nil, s.createErr
+	}
+	return page, nil
+}
+
+func (s *wikiQueuePageServiceStub) GetIndex(context.Context, string) (*types.WikiPage, error) {
+	return s.indexPage, s.indexErr
+}
+
+func (s *wikiQueuePageServiceStub) UpdatePage(ctx context.Context, page *types.WikiPage) (*types.WikiPage, error) {
+	copyPage := *page
+	copyPage.SourceRefs = slices.Clone(page.SourceRefs)
+	copyPage.ChunkRefs = slices.Clone(page.ChunkRefs)
+	s.contentWrites = append(s.contentWrites, &copyPage)
+	s.contentClearIDs = append(s.contentClearIDs, wikidelete.ClearSources(ctx))
+	if s.updateErr != nil {
+		return nil, s.updateErr
+	}
+	return page, nil
+}
+
+func (s *wikiQueuePageServiceStub) UpdatePageMeta(ctx context.Context, page *types.WikiPage) error {
+	copyPage := *page
+	copyPage.SourceRefs = slices.Clone(page.SourceRefs)
+	s.updated = append(s.updated, &copyPage)
+	s.metaClearIDs = append(s.metaClearIDs, wikidelete.ClearSources(ctx))
+	return s.updateErr
+}
+
+func (s *wikiQueuePageServiceStub) DeletePage(_ context.Context, _ string, slug string) error {
+	s.deleted = append(s.deleted, slug)
+	return s.deleteErr
+}
+
+type wikiQueueChunkRepoStub struct {
+	interfaces.ChunkRepository
+	ids []string
+	err error
+}
+
+func (s *wikiQueueChunkRepoStub) ListChunkIDsByKnowledgeIDUnscoped(
+	context.Context,
+	uint64,
+	string,
+) ([]string, error) {
+	return slices.Clone(s.ids), s.err
+}
+
+type wikiQueueLogEntryServiceStub struct {
+	interfaces.WikiLogEntryService
+	err     error
+	entries []*types.WikiLogEntry
+}
+
+func (s *wikiQueueLogEntryServiceStub) AppendBatch(_ context.Context, entries []*types.WikiLogEntry) error {
+	for _, entry := range entries {
+		copyEntry := *entry
+		s.entries = append(s.entries, &copyEntry)
+	}
+	return s.err
+}
+
+type wikiQueueTaskEnqueuerStub struct {
+	err      error
+	tasks    []*asynq.Task
+	opts     [][]asynq.Option
+	prepared map[string]*asynq.Task
+	resumed  map[string]bool
+	aborts   int
+	binds    int
+}
+
+func (e *wikiQueueTaskEnqueuerStub) Enqueue(
+	task *asynq.Task,
+	opts ...asynq.Option,
+) (*asynq.TaskInfo, error) {
+	e.tasks = append(e.tasks, task)
+	e.opts = append(e.opts, slices.Clone(opts))
+	if e.err != nil {
+		return nil, e.err
+	}
+	return &asynq.TaskInfo{ID: "test-task", Type: task.Type(), Queue: "low"}, nil
+}
+
+func (e *wikiQueueTaskEnqueuerStub) PrepareDocumentWorkflow(
+	_ context.Context,
+	task *asynq.Task,
+	_ ...asynq.Option,
+) (*documentqueue.Workflow, bool, error) {
+	if e.err != nil {
+		return nil, false, e.err
+	}
+	var identity struct {
+		TenantID             uint64 `json:"tenant_id"`
+		KnowledgeID          string `json:"knowledge_id"`
+		KnowledgeBaseID      string `json:"knowledge_base_id"`
+		ProcessingGeneration string `json:"processing_generation"`
+	}
+	if err := json.Unmarshal(task.Payload(), &identity); err != nil {
+		return nil, false, err
+	}
+	id := "workflow-" + identity.KnowledgeID + "-" + identity.ProcessingGeneration
+	if e.prepared == nil {
+		e.prepared = make(map[string]*asynq.Task)
+	}
+	created := e.prepared[id] == nil
+	e.prepared[id] = task
+	return &documentqueue.Workflow{
+		ID: id, TenantID: identity.TenantID,
+		KnowledgeID: identity.KnowledgeID, KnowledgeBaseID: identity.KnowledgeBaseID,
+		ProcessingGeneration: identity.ProcessingGeneration,
+		TaskType:             task.Type(), Payload: append([]byte(nil), task.Payload()...),
+		State: documentqueue.StatePreparing,
+	}, created, nil
+}
+
+func (e *wikiQueueTaskEnqueuerStub) AbortDocumentWorkflow(
+	_ context.Context,
+	binding documentqueue.WorkflowBinding,
+	_ string,
+) error {
+	e.aborts++
+	delete(e.prepared, binding.WorkflowID)
+	return nil
+}
+
+func (e *wikiQueueTaskEnqueuerStub) BindDocumentWorkflowTransitionTx(
+	tx *gorm.DB,
+	binding documentqueue.WorkflowBinding,
+	transition func(*gorm.DB) error,
+) error {
+	e.binds++
+	if tx == nil || transition == nil || e.prepared[binding.WorkflowID] == nil {
+		return errors.New("prepared workflow binding is unavailable")
+	}
+	if err := transition(tx); err != nil {
+		return err
+	}
+	var bound int64
+	if err := tx.Table("knowledges").Where(
+		"id = ? AND tenant_id = ? AND knowledge_base_id = ? AND parse_status = ? AND processing_generation = ? AND processing_owner = ? AND processing_workflow_id = ?",
+		binding.KnowledgeID, binding.TenantID, binding.KnowledgeBaseID,
+		types.ParseStatusPending, binding.ProcessingGeneration, binding.ProcessingOwner,
+		binding.WorkflowID,
+	).Count(&bound).Error; err != nil {
+		return err
+	}
+	if bound != 1 {
+		return errors.New("prepared workflow binding validation failed")
+	}
+	return nil
+}
+
+func (e *wikiQueueTaskEnqueuerStub) ResumeDocumentWorkflow(
+	_ context.Context,
+	binding documentqueue.WorkflowBinding,
+) (*asynq.TaskInfo, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	task := e.prepared[binding.WorkflowID]
+	if task == nil {
+		return nil, errors.New("prepared workflow not found")
+	}
+	if e.resumed == nil {
+		e.resumed = make(map[string]bool)
+	}
+	if !e.resumed[binding.WorkflowID] {
+		e.tasks = append(e.tasks, task)
+		e.resumed[binding.WorkflowID] = true
+	}
+	return &asynq.TaskInfo{ID: binding.WorkflowID, Type: task.Type(), Queue: types.QueueDocument}, nil
+}
+
+type wikiQueueDeadLetterRepoStub struct {
+	interfaces.TaskDeadLetterRepository
+	insertErr error
+	inserted  []*types.TaskDeadLetter
+	ctxErr    error
+}
+
+type countingWikiChatModel struct {
+	mu       sync.Mutex
+	calls    int
+	response string
+}
+
+func (m *countingWikiChatModel) Chat(
+	context.Context,
+	[]chat.Message,
+	*chat.ChatOptions,
+) (*types.ChatResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	return &types.ChatResponse{Content: m.response}, nil
+}
+
+func (m *countingWikiChatModel) ChatStream(
+	context.Context,
+	[]chat.Message,
+	*chat.ChatOptions,
+) (<-chan types.StreamResponse, error) {
+	return nil, errors.New("streaming is not used by wiki replay tests")
+}
+
+func (m *countingWikiChatModel) GetModelName() string { return "counting" }
+func (m *countingWikiChatModel) GetModelID() string   { return "counting" }
+
+func (m *countingWikiChatModel) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+// wikiReplayPageServiceStub models the durable boundaries relevant to an
+// ingest replay: ordinary page writes checkpoint applied_page_slugs, index
+// writes persist their source_op_id marker on the index row, and publication
+// is an independent metadata transition. Reads return copies so a failed
+// write cannot accidentally mutate the committed test state through aliases.
+type wikiReplayPageServiceStub struct {
+	interfaces.WikiPageService
+	mu sync.Mutex
+
+	pending *wikiQueuePendingRepoStub
+	pages   map[string]*types.WikiPage
+	index   *types.WikiPage
+
+	indexWriteFailures       int
+	publicationWriteFailures int
+	contentWritesBySlug      map[string]int
+	publicationWritesBySlug  map[string]int
+}
+
+func cloneReplayWikiPage(page *types.WikiPage) *types.WikiPage {
+	if page == nil {
+		return nil
+	}
+	copyPage := *page
+	copyPage.SourceRefs = slices.Clone(page.SourceRefs)
+	copyPage.ChunkRefs = slices.Clone(page.ChunkRefs)
+	copyPage.InLinks = slices.Clone(page.InLinks)
+	copyPage.OutLinks = slices.Clone(page.OutLinks)
+	copyPage.Aliases = slices.Clone(page.Aliases)
+	copyPage.CategoryPath = slices.Clone(page.CategoryPath)
+	copyPage.PageMetadata = slices.Clone(page.PageMetadata)
+	return &copyPage
+}
+
+func (s *wikiReplayPageServiceStub) GetPageBySlug(
+	_ context.Context,
+	_ string,
+	slug string,
+) (*types.WikiPage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	page := s.pages[slug]
+	if page == nil {
+		return nil, apprepo.ErrWikiPageNotFound
+	}
+	return cloneReplayWikiPage(page), nil
+}
+
+func (s *wikiReplayPageServiceStub) GetIndex(context.Context, string) (*types.WikiPage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneReplayWikiPage(s.index), nil
+}
+
+func (s *wikiReplayPageServiceStub) CreatePage(ctx context.Context, page *types.WikiPage) (*types.WikiPage, error) {
+	return s.commitContentPage(ctx, page)
+}
+
+func (s *wikiReplayPageServiceStub) UpdatePage(ctx context.Context, page *types.WikiPage) (*types.WikiPage, error) {
+	return s.commitContentPage(ctx, page)
+}
+
+func (s *wikiReplayPageServiceStub) commitContentPage(
+	ctx context.Context,
+	page *types.WikiPage,
+) (*types.WikiPage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if page.Slug == "index" {
+		if s.indexWriteFailures > 0 {
+			s.indexWriteFailures--
+			return nil, errors.New("injected index write failure")
+		}
+		s.index = cloneReplayWikiPage(page)
+		s.contentWritesBySlug[page.Slug]++
+		return cloneReplayWikiPage(page), nil
+	}
+	s.pages[page.Slug] = cloneReplayWikiPage(page)
+	s.contentWritesBySlug[page.Slug]++
+	s.markPageAppliedLocked(ctx, page.Slug)
+	return cloneReplayWikiPage(page), nil
+}
+
+func (s *wikiReplayPageServiceStub) UpdatePageMeta(_ context.Context, page *types.WikiPage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.publicationWriteFailures > 0 {
+		s.publicationWriteFailures--
+		return errors.New("injected publication write failure")
+	}
+	s.pages[page.Slug] = cloneReplayWikiPage(page)
+	s.publicationWritesBySlug[page.Slug]++
+	return nil
+}
+
+func (s *wikiReplayPageServiceStub) UpdateAutoLinkedContent(_ context.Context, page *types.WikiPage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pages[page.Slug] = cloneReplayWikiPage(page)
+	return nil
+}
+
+func (s *wikiReplayPageServiceStub) ListBySlugs(
+	_ context.Context,
+	_ string,
+	slugs []string,
+) (map[string]*types.WikiPageLite, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make(map[string]*types.WikiPageLite)
+	for _, slug := range slugs {
+		if page := s.pages[slug]; page != nil {
+			result[slug] = &types.WikiPageLite{
+				Slug: slug, Title: page.Title, PageType: page.PageType,
+				Status: page.Status, Aliases: slices.Clone(page.Aliases), OutLinks: slices.Clone(page.OutLinks),
+			}
+		}
+	}
+	return result, nil
+}
+
+func (s *wikiReplayPageServiceStub) ListSummariesByKnowledgeIDs(
+	context.Context,
+	string,
+	[]string,
+) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
+func (s *wikiReplayPageServiceStub) ExistsSlugs(
+	_ context.Context,
+	_ string,
+	slugs []string,
+) (map[string]bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make(map[string]bool, len(slugs))
+	for _, slug := range slugs {
+		page := s.pages[slug]
+		result[slug] = page != nil && page.Status != types.WikiPageStatusArchived
+	}
+	return result, nil
+}
+
+func (s *wikiReplayPageServiceStub) markPageAppliedLocked(ctx context.Context, slug string) {
+	identities := wikiingestguard.Identities(ctx)
+	if len(identities) == 0 || s.pending == nil {
+		return
+	}
+	for _, row := range s.pending.rows {
+		if row == nil {
+			continue
+		}
+		var op WikiPendingOp
+		if err := json.Unmarshal(row.Payload, &op); err != nil {
+			continue
+		}
+		matched := false
+		for _, identity := range identities {
+			if identity.KnowledgeID == op.KnowledgeID &&
+				identity.ProcessingGeneration == op.ProcessingGeneration {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if !slices.Contains(op.AppliedPageSlugs, slug) {
+			op.AppliedPageSlugs = append(op.AppliedPageSlugs, slug)
+			slices.Sort(op.AppliedPageSlugs)
+		}
+		encoded, err := json.Marshal(op)
+		if err == nil {
+			row.Payload = encoded
+		}
+	}
+}
+
+type wikiReplayLogEntryServiceStub struct {
+	interfaces.WikiLogEntryService
+	mu                  sync.Mutex
+	failuresAfterCommit int
+	appendCalls         int
+	bySourceOpID        map[int64]*types.WikiLogEntry
+}
+
+func (s *wikiReplayLogEntryServiceStub) AppendBatch(_ context.Context, entries []*types.WikiLogEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.appendCalls++
+	for _, entry := range entries {
+		if entry == nil || entry.SourceOpID == nil {
+			continue
+		}
+		if _, exists := s.bySourceOpID[*entry.SourceOpID]; !exists {
+			copyEntry := *entry
+			s.bySourceOpID[*entry.SourceOpID] = &copyEntry
+		}
+	}
+	if s.failuresAfterCommit > 0 {
+		s.failuresAfterCommit--
+		return errors.New("injected log response failure after commit")
+	}
+	return nil
+}
+
+func (r *wikiQueueDeadLetterRepoStub) Insert(ctx context.Context, row *types.TaskDeadLetter) error {
+	r.ctxErr = ctx.Err()
+	if r.insertErr != nil {
+		return r.insertErr
+	}
+	copyRow := *row
+	copyRow.Payload = slices.Clone(row.Payload)
+	r.inserted = append(r.inserted, &copyRow)
+	return nil
+}
+
+func hasAsynqOption(opts []asynq.Option, optionType asynq.OptionType) bool {
+	for _, opt := range opts {
+		if opt.Type() == optionType {
+			return true
+		}
+	}
+	return false
+}
+
+func optionDuration(opts []asynq.Option, optionType asynq.OptionType) (time.Duration, bool) {
+	for _, opt := range opts {
+		if opt.Type() != optionType {
+			continue
+		}
+		d, ok := opt.Value().(time.Duration)
+		return d, ok
+	}
+	return 0, false
+}
+
+func wikiPendingRows(count int) []*types.TaskPendingOp {
+	rows := make([]*types.TaskPendingOp, 0, count)
+	for i := 1; i <= count; i++ {
+		rows = append(rows, wikiPendingRow(int64(i), WikiPendingOp{
+			Op: WikiOpIngest, KnowledgeID: fmt.Sprintf("knowledge-%d", i),
+		}))
+	}
+	return rows
+}
+
+func wikiPendingRow(id int64, op WikiPendingOp) *types.TaskPendingOp {
+	if op.Op == WikiOpIngest && op.ProcessingGeneration == "" {
+		op.ProcessingGeneration = "test-generation"
+	}
+	payload, err := json.Marshal(op)
+	if err != nil {
+		panic(err)
+	}
+	dedupKey := op.KnowledgeID
+	if op.Op == WikiOpIngest {
+		dedupKey, err = wikiqueue.IngestDedupKey(op.KnowledgeID, op.ProcessingGeneration)
+		if err != nil {
+			panic(err)
+		}
+	}
+	return &types.TaskPendingOp{
+		ID: id, TenantID: 42, TaskType: wikiTaskType, Scope: wikiTaskScope, ScopeID: "kb-1",
+		Op: op.Op, DedupKey: dedupKey, Payload: payload,
+	}
+}
+
+func TestEnqueueWikiIngestUniqueDuplicateIsSuccess(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{}
+	enqueuer := &wikiQueueTaskEnqueuerStub{err: asynq.ErrDuplicateTask}
+	ctx := context.WithValue(context.Background(), types.LanguageContextKey, "en-US")
+
+	result, err := EnqueueWikiIngest(ctx, enqueuer, repo, 42, "kb-1", "knowledge-1", "generation-1")
+	if err != nil {
+		t.Fatalf("EnqueueWikiIngest() error = %v, want nil duplicate-trigger result", err)
+	}
+	if !result.PendingPersisted || !result.TriggerScheduled {
+		t.Fatalf("EnqueueWikiIngest() result = %+v, want durable row and existing/scheduled trigger", result)
+	}
+	if len(repo.enqueued) != 1 {
+		t.Fatalf("persisted pending rows = %d, want 1", len(repo.enqueued))
+	}
+	var op WikiPendingOp
+	if err := json.Unmarshal(repo.enqueued[0].Payload, &op); err != nil {
+		t.Fatalf("unmarshal pending payload: %v", err)
+	}
+	if op.Language != "en-US" {
+		t.Fatalf("pending op language = %q, want en-US", op.Language)
+	}
+	if op.ProcessingGeneration != "generation-1" {
+		t.Fatalf("pending op processing generation = %q, want generation-1", op.ProcessingGeneration)
+	}
+	if repo.enqueued[0].DedupKey != "knowledge-1:generation-1" {
+		t.Fatalf("pending op dedup key = %q, want generation-scoped key", repo.enqueued[0].DedupKey)
+	}
+	if len(enqueuer.tasks) != 1 {
+		t.Fatalf("trigger attempts = %d, want 1", len(enqueuer.tasks))
+	}
+	if !hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
+		t.Fatal("initial trigger is missing asynq.Unique")
+	}
+	if ttl, ok := optionDuration(enqueuer.opts[0], asynq.UniqueOpt); !ok || ttl != wikiTriggerUniqueTTL {
+		t.Fatalf("Unique TTL = %v (ok=%v), want %v", ttl, ok, wikiTriggerUniqueTTL)
+	}
+	if timeout, ok := optionDuration(enqueuer.opts[0], asynq.TimeoutOpt); !ok || timeout != wikiIngestTaskTimeout {
+		t.Fatalf("task timeout = %v (ok=%v), want %v", timeout, ok, wikiIngestTaskTimeout)
+	}
+
+	var trigger WikiIngestPayload
+	if err := json.Unmarshal(enqueuer.tasks[0].Payload(), &trigger); err != nil {
+		t.Fatalf("unmarshal trigger payload: %v", err)
+	}
+	if trigger.KnowledgeBaseID != "kb-1" || trigger.TenantID != 42 {
+		t.Fatalf("trigger identity = tenant:%d kb:%q", trigger.TenantID, trigger.KnowledgeBaseID)
+	}
+	if trigger.Language != "" || trigger.TracingContext != (types.TracingContext{}) {
+		t.Fatalf("trigger payload must remain stable, got language=%q tracing=%+v", trigger.Language, trigger.TracingContext)
+	}
+}
+
+func TestEnqueueWikiIngestRejectsMissingGenerationBeforePersistence(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+
+	result, err := EnqueueWikiIngest(
+		context.Background(), enqueuer, repo, 42, "kb-1", "knowledge-1", "",
+	)
+	require.Error(t, err)
+	require.False(t, result.PendingPersisted)
+	require.Empty(t, repo.enqueued)
+	require.Empty(t, enqueuer.tasks)
+}
+
+func TestEnqueueWikiIngestTriggerFailureLeavesDurableRowAndReturnsError(t *testing.T) {
+	triggerErr := errors.New("redis unavailable")
+	repo := &wikiQueuePendingRepoStub{}
+	enqueuer := &wikiQueueTaskEnqueuerStub{err: triggerErr}
+
+	result, err := EnqueueWikiIngest(context.Background(), enqueuer, repo, 42, "kb-1", "knowledge-1", "generation-1")
+	if !errors.Is(err, triggerErr) {
+		t.Fatalf("EnqueueWikiIngest() error = %v, want wrapped trigger error", err)
+	}
+	if !result.PendingPersisted || result.TriggerScheduled {
+		t.Fatalf("EnqueueWikiIngest() result = %+v, want persisted row and failed trigger", result)
+	}
+	if len(repo.enqueued) != 1 {
+		t.Fatalf("persisted pending rows = %d, want 1", len(repo.enqueued))
+	}
+	if len(repo.deletedIDs) != 0 {
+		t.Fatalf("trigger failure must not delete durable row, deletes=%v", repo.deletedIDs)
+	}
+}
+
+func TestEnqueueWikiIngestPersistFailureIsNotHidden(t *testing.T) {
+	persistErr := errors.New("postgres unavailable")
+	repo := &wikiQueuePendingRepoStub{enqueueErr: persistErr}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+
+	result, err := EnqueueWikiIngest(context.Background(), enqueuer, repo, 42, "kb-1", "knowledge-1", "generation-1")
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("EnqueueWikiIngest() error = %v, want wrapped persist error", err)
+	}
+	if result.PendingPersisted || !result.TriggerScheduled {
+		t.Fatalf("EnqueueWikiIngest() result = %+v, want failed persistence and successful wake-up", result)
+	}
+	if len(enqueuer.tasks) != 1 {
+		t.Fatalf("worker should still wake an existing queue, trigger attempts=%d", len(enqueuer.tasks))
+	}
+}
+
+func TestEnqueueWikiRetractTriggerFailureLeavesDurableRow(t *testing.T) {
+	triggerErr := errors.New("redis unavailable")
+	repo := &wikiQueuePendingRepoStub{}
+	enqueuer := &wikiQueueTaskEnqueuerStub{err: triggerErr}
+
+	result, err := EnqueueWikiRetract(context.Background(), enqueuer, repo, WikiRetractPayload{
+		TenantID: 42, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
+	})
+	if !errors.Is(err, triggerErr) {
+		t.Fatalf("EnqueueWikiRetract() error = %v, want wrapped trigger error", err)
+	}
+	if !result.PendingPersisted || result.TriggerScheduled {
+		t.Fatalf("EnqueueWikiRetract() result = %+v, want persisted row and failed trigger", result)
+	}
+	if len(repo.enqueued) != 1 || repo.enqueued[0].Op != WikiOpRetract {
+		t.Fatalf("persisted retract rows = %+v, want one retract", repo.enqueued)
+	}
+}
+
+func TestEnqueueWikiRetractPersistFailureIsNotHidden(t *testing.T) {
+	persistErr := errors.New("postgres unavailable")
+	repo := &wikiQueuePendingRepoStub{enqueueErr: persistErr}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+
+	result, err := EnqueueWikiRetract(context.Background(), enqueuer, repo, WikiRetractPayload{
+		TenantID: 42, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
+	})
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("EnqueueWikiRetract() error = %v, want wrapped persistence error", err)
+	}
+	if result.PendingPersisted || !result.TriggerScheduled {
+		t.Fatalf("EnqueueWikiRetract() result = %+v, want failed persistence and successful wake-up", result)
+	}
+}
+
+func TestSettleWikiQueueCancelledBeforeSettlementDoesNotMutateQueue(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{pendingCount: 3, incrCount: 1}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: repo, task: enqueuer}
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	followUp, err := svc.settleWikiQueue(
+		parentCtx,
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		[]int64{10, 11},
+		[]WikiPendingOp{{Op: WikiOpIngest, KnowledgeID: "failed-doc", dbID: 12}},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("settleWikiQueue() error = %v, want context.Canceled", err)
+	}
+	if followUp {
+		t.Fatal("cancelled business batch must not schedule follow-up settlement")
+	}
+	if len(repo.deletedIDs) != 0 || len(repo.incrementedIDs) != 0 || len(enqueuer.tasks) != 0 {
+		t.Fatalf("cancelled business batch mutated queue: deletes=%v increments=%v triggers=%d",
+			repo.deletedIDs, repo.incrementedIDs, len(enqueuer.tasks))
+	}
+}
+
+func TestWikiQueueSettlementContextSurvivesCancellationAfterEntry(t *testing.T) {
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	settleCtx, cancelSettle := newWikiQueueSettlementContext(parentCtx)
+	defer cancelSettle()
+
+	cancelParent()
+	if err := parentCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent context error = %v, want context.Canceled", err)
+	}
+	if err := settleCtx.Err(); err != nil {
+		t.Fatalf("settlement context inherited parent cancellation: %v", err)
+	}
+}
+
+func TestSettleWikiQueueLostLeaseDoesNotMutateQueue(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{pendingCount: 3, incrCount: 1}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: repo, task: enqueuer}
+	leaseErr := errors.New("lease ownership lost")
+	leaseCtx, cancelLease := context.WithCancelCause(context.Background())
+	cancelLease(leaseErr)
+
+	followUp, err := svc.settleWikiQueue(
+		context.Background(),
+		leaseCtx,
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		[]int64{10, 11},
+		[]WikiPendingOp{{Op: WikiOpIngest, KnowledgeID: "failed-doc", dbID: 12}},
+	)
+	if !errors.Is(err, leaseErr) {
+		t.Fatalf("settleWikiQueue() error = %v, want lease error", err)
+	}
+	if followUp {
+		t.Fatal("lost lease must not schedule follow-up settlement")
+	}
+	if len(repo.deletedIDs) != 0 || len(repo.incrementedIDs) != 0 || len(enqueuer.tasks) != 0 {
+		t.Fatalf("lost lease mutated queue: deletes=%v increments=%v triggers=%d",
+			repo.deletedIDs, repo.incrementedIDs, len(enqueuer.tasks))
+	}
+}
+
+func TestSettleWikiQueueActiveBatchUsesDetachedContextAndNonUniqueFollowUp(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{pendingCount: 3, incrCount: 1}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: repo, task: enqueuer}
+
+	followUp, err := svc.settleWikiQueue(
+		context.Background(),
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		[]int64{10, 11},
+		[]WikiPendingOp{{Op: WikiOpIngest, KnowledgeID: "failed-doc", dbID: 12}},
+	)
+	if err != nil {
+		t.Fatalf("settleWikiQueue() error = %v", err)
+	}
+	if !followUp {
+		t.Fatal("settleWikiQueue() followUp = false, want true")
+	}
+	if repo.deleteCtxErr != nil || repo.incrCtxErr != nil || repo.countCtxErr != nil {
+		t.Fatalf("settlement context was not live: delete=%v incr=%v count=%v",
+			repo.deleteCtxErr, repo.incrCtxErr, repo.countCtxErr)
+	}
+	if len(repo.deletedIDs) != 1 || !slices.Equal(repo.deletedIDs[0], []int64{10, 11}) {
+		t.Fatalf("deleted ids = %v, want [[10 11]]", repo.deletedIDs)
+	}
+	if !slices.Equal(repo.incrementedIDs, []int64{12}) {
+		t.Fatalf("incremented ids = %v, want [12]", repo.incrementedIDs)
+	}
+	if len(enqueuer.tasks) != 1 {
+		t.Fatalf("follow-up attempts = %d, want 1", len(enqueuer.tasks))
+	}
+	if hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
+		t.Fatal("follow-up must not carry Unique while current unique task is active")
+	}
+	if delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt); !ok || delay != wikiFollowUpDelay {
+		t.Fatalf("follow-up delay = %v (ok=%v), want %v", delay, ok, wikiFollowUpDelay)
+	}
+}
+
+func TestScheduleLockConflictFollowUpUsesFreshNonUniqueTask(t *testing.T) {
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{task: enqueuer}
+	payload := WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-locked"}
+
+	scheduled, err := svc.scheduleLockConflictFollowUp(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("scheduleLockConflictFollowUp() error = %v", err)
+	}
+	if !scheduled || len(enqueuer.tasks) != 1 {
+		t.Fatalf("scheduleLockConflictFollowUp() = %v, tasks=%d; want true, 1", scheduled, len(enqueuer.tasks))
+	}
+	if hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
+		t.Fatal("lock-conflict replacement must not carry Unique while the current signal is active")
+	}
+	if delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt); !ok || delay != wikiLockConflictDelay {
+		t.Fatalf("lock-conflict delay = %v (ok=%v), want %v", delay, ok, wikiLockConflictDelay)
+	}
+	var decoded WikiIngestPayload
+	if err := json.Unmarshal(enqueuer.tasks[0].Payload(), &decoded); err != nil {
+		t.Fatalf("decode replacement payload: %v", err)
+	}
+	if decoded != payload {
+		t.Fatalf("replacement payload = %+v, want %+v", decoded, payload)
+	}
+}
+
+func TestScheduleLockConflictFollowUpEnqueueFailureIsVisible(t *testing.T) {
+	enqueueErr := errors.New("redis unavailable")
+	svc := &wikiIngestService{task: &wikiQueueTaskEnqueuerStub{err: enqueueErr}}
+
+	scheduled, err := svc.scheduleLockConflictFollowUp(
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-locked"},
+	)
+	if scheduled || !errors.Is(err, enqueueErr) {
+		t.Fatalf("scheduleLockConflictFollowUp() = (%v, %v), want (false, wrapped enqueue error)", scheduled, err)
+	}
+}
+
+func TestSettleWikiQueueDeleteFailureReturnsErrorAndStillSchedulesRecovery(t *testing.T) {
+	deleteErr := errors.New("delete transaction aborted")
+	repo := &wikiQueuePendingRepoStub{deleteErr: deleteErr, pendingCount: 5}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: repo, task: enqueuer}
+
+	followUp, err := svc.settleWikiQueue(
+		context.Background(),
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		[]int64{1, 2, 3, 4, 5},
+		nil,
+	)
+	if !errors.Is(err, deleteErr) {
+		t.Fatalf("settleWikiQueue() error = %v, want wrapped delete error", err)
+	}
+	if !followUp {
+		t.Fatal("delete failure should still schedule a recovery trigger")
+	}
+	if len(enqueuer.tasks) != 1 {
+		t.Fatalf("follow-up attempts = %d, want 1", len(enqueuer.tasks))
+	}
+}
+
+func TestSettleWikiQueueFollowUpFailureReturnsError(t *testing.T) {
+	enqueueErr := errors.New("redis write failed")
+	repo := &wikiQueuePendingRepoStub{pendingCount: 2}
+	enqueuer := &wikiQueueTaskEnqueuerStub{err: enqueueErr}
+	svc := &wikiIngestService{pendingRepo: repo, task: enqueuer}
+
+	followUp, err := svc.settleWikiQueue(
+		context.Background(),
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		nil,
+		nil,
+	)
+	if !errors.Is(err, enqueueErr) {
+		t.Fatalf("settleWikiQueue() error = %v, want wrapped enqueue error", err)
+	}
+	if followUp {
+		t.Fatal("followUp = true after enqueue failure")
+	}
+}
+
+func TestPeekPendingListRepositoryFailureReturnsError(t *testing.T) {
+	peekErr := errors.New("query timeout")
+	svc := &wikiIngestService{pendingRepo: &wikiQueuePendingRepoStub{peekErr: peekErr}}
+
+	ops, ids, err := svc.peekPendingList(context.Background(), "kb-1", 5)
+	if !errors.Is(err, peekErr) {
+		t.Fatalf("peekPendingList() error = %v, want wrapped query error", err)
+	}
+	if ops != nil || ids != nil {
+		t.Fatalf("peekPendingList() = (%v, %v), want nil results on failure", ops, ids)
+	}
+}
+
+func TestProcessWikiIngestRedisLockFailureIsFailClosed(t *testing.T) {
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:         "127.0.0.1:1",
+		DialTimeout:  50 * time.Millisecond,
+		ReadTimeout:  50 * time.Millisecond,
+		WriteTimeout: 50 * time.Millisecond,
+		MaxRetries:   0,
+	})
+	defer redisClient.Close()
+
+	repo := &wikiQueuePendingRepoStub{}
+	svc := &wikiIngestService{redisClient: redisClient, pendingRepo: repo}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err = svc.ProcessWikiIngest(ctx, asynq.NewTask(types.TypeWikiIngest, payload))
+	if err == nil || !strings.Contains(err.Error(), "acquire active lock") {
+		t.Fatalf("ProcessWikiIngest() error = %v, want active-lock acquisition failure", err)
+	}
+	if repo.peekCalls != 0 || repo.deleteCalls != 0 || repo.countCalls != 0 {
+		t.Fatalf("lock failure must not touch queue: peek=%d delete=%d count=%d",
+			repo.peekCalls, repo.deleteCalls, repo.countCalls)
+	}
+}
+
+func TestRequeueFailedOpsDeadLetterFailureKeepsPendingRow(t *testing.T) {
+	archiveErr := errors.New("archive insert failed")
+	pending := &wikiQueuePendingRepoStub{
+		incrCount:  wikiMaxFailRetries + 1,
+		archiveErr: archiveErr,
+	}
+	svc := &wikiIngestService{pendingRepo: pending}
+
+	err := svc.requeueFailedOps(
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		[]WikiPendingOp{{Op: WikiOpIngest, KnowledgeID: "knowledge-1", dbID: 99}},
+	)
+	if !errors.Is(err, archiveErr) {
+		t.Fatalf("requeueFailedOps() error = %v, want wrapped archive error", err)
+	}
+	if len(pending.deletedIDs) != 0 || len(pending.archivedIDs) != 0 {
+		t.Fatalf("failed atomic archive mutated pending row: deletes=%v archives=%v", pending.deletedIDs, pending.archivedIDs)
+	}
+}
+
+func TestProcessWikiIngestWikiDisabledDrainsAllPendingBatches(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows:          wikiPendingRows(7),
+		countFromRows: true,
+	}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	kbService := &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+		ID: "kb-1",
+		WikiConfig: &types.WikiConfig{
+			IngestBatchSize: 5,
+		},
+		IndexingStrategy: types.IndexingStrategy{WikiEnabled: false},
+	}}
+	svc := &wikiIngestService{
+		kbService:   kbService,
+		pendingRepo: pending,
+		task:        enqueuer,
+	}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("first disabled-Wiki drain error = %v", err)
+	}
+	if len(pending.rows) != 2 {
+		t.Fatalf("rows after first terminal batch = %d, want 2", len(pending.rows))
+	}
+	if len(pending.deletedIDs) != 1 || !slices.Equal(pending.deletedIDs[0], []int64{1, 2, 3, 4, 5}) {
+		t.Fatalf("first terminal delete = %v, want [[1 2 3 4 5]]", pending.deletedIDs)
+	}
+	if len(enqueuer.tasks) != 1 {
+		t.Fatalf("follow-up tasks after first batch = %d, want 1", len(enqueuer.tasks))
+	}
+	if hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
+		t.Fatal("terminal-drain follow-up must not use Unique")
+	}
+
+	// Execute the scheduled follow-up directly. The second terminal batch must
+	// consume the remainder and stop scheduling, proving the recovery scanner
+	// cannot keep waking an immortal disabled-Wiki queue.
+	if err := svc.ProcessWikiIngest(context.Background(), enqueuer.tasks[0]); err != nil {
+		t.Fatalf("second disabled-Wiki drain error = %v", err)
+	}
+	if len(pending.rows) != 0 {
+		t.Fatalf("rows after final terminal batch = %d, want 0", len(pending.rows))
+	}
+	if len(pending.deletedIDs) != 2 || !slices.Equal(pending.deletedIDs[1], []int64{6, 7}) {
+		t.Fatalf("terminal deletes = %v, want second delete [6 7]", pending.deletedIDs)
+	}
+	if len(enqueuer.tasks) != 1 {
+		t.Fatalf("final terminal batch scheduled another task: total=%d", len(enqueuer.tasks))
+	}
+	if kbService.calls != 2 {
+		t.Fatalf("KB lookups = %d, want 2", kbService.calls)
+	}
+}
+
+func TestProcessWikiIngestKnowledgeBaseNotFoundDrainsOrphanRows(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows:          wikiPendingRows(3),
+		countFromRows: true,
+	}
+	kbService := &wikiQueueKBServiceStub{err: apprepo.ErrKnowledgeBaseNotFound}
+	svc := &wikiIngestService{
+		kbService:   kbService,
+		pendingRepo: pending,
+		task:        &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "deleted-kb"})
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("not-found terminal drain error = %v", err)
+	}
+	if len(pending.rows) != 0 {
+		t.Fatalf("orphan pending rows = %d, want 0", len(pending.rows))
+	}
+	if len(pending.deletedIDs) != 1 || !slices.Equal(pending.deletedIDs[0], []int64{1, 2, 3}) {
+		t.Fatalf("orphan rows deleted = %v, want [[1 2 3]]", pending.deletedIDs)
+	}
+}
+
+func TestProcessWikiIngestKnowledgeBaseLookupTransientErrorRetriesWithoutQueueMutation(t *testing.T) {
+	lookupErr := errors.New("database connection reset")
+	pending := &wikiQueuePendingRepoStub{
+		rows:          wikiPendingRows(3),
+		countFromRows: true,
+	}
+	svc := &wikiIngestService{
+		kbService:   &wikiQueueKBServiceStub{err: lookupErr},
+		pendingRepo: pending,
+		task:        &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+	if err != nil {
+		t.Fatalf("marshal task payload: %v", err)
+	}
+
+	err = svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("transient KB lookup error = %v, want wrapped lookup error", err)
+	}
+	if pending.peekCalls != 0 || pending.deleteCalls != 0 || pending.countCalls != 0 {
+		t.Fatalf(
+			"transient KB lookup failure mutated queue: peek=%d delete=%d count=%d",
+			pending.peekCalls,
+			pending.deleteCalls,
+			pending.countCalls,
+		)
+	}
+	if len(pending.rows) != 3 {
+		t.Fatalf("pending rows after transient lookup failure = %d, want 3", len(pending.rows))
+	}
+}
+
+func TestProcessWikiIngestNilKnowledgeBaseWithoutErrorKeepsPendingRows(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows:          wikiPendingRows(1),
+		countFromRows: true,
+	}
+	svc := &wikiIngestService{
+		kbService:   &wikiQueueKBServiceStub{},
+		pendingRepo: pending,
+		task:        &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	if err == nil || !strings.Contains(err.Error(), "returned nil without error") {
+		t.Fatalf("ProcessWikiIngest() error = %v, want nil-KB invariant error", err)
+	}
+	if pending.peekCalls != 0 || pending.deleteCalls != 0 || len(pending.rows) != 1 {
+		t.Fatalf("nil-KB invariant mutated queue: peek=%d delete=%d rows=%d",
+			pending.peekCalls, pending.deleteCalls, len(pending.rows))
+	}
+}
+
+func TestIsKnowledgeGoneOnlyTreatsExplicitTerminalStatesAsGone(t *testing.T) {
+	t.Run("repository not found", func(t *testing.T) {
+		svc := &wikiIngestService{knowledgeSvc: &wikiQueueKnowledgeServiceStub{err: apprepo.ErrKnowledgeNotFound}}
+		gone, err := svc.isKnowledgeGone(context.Background(), "kb-1", "knowledge-1")
+		if err != nil || !gone {
+			t.Fatalf("isKnowledgeGone() = (%v, %v), want (true, nil)", gone, err)
+		}
+	})
+
+	t.Run("deleting status", func(t *testing.T) {
+		svc := &wikiIngestService{knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID:          "knowledge-1",
+			ParseStatus: types.ParseStatusDeleting,
+		}}}
+		gone, err := svc.isKnowledgeGone(context.Background(), "kb-1", "knowledge-1")
+		if err != nil || !gone {
+			t.Fatalf("isKnowledgeGone() = (%v, %v), want (true, nil)", gone, err)
+		}
+	})
+
+	t.Run("transient lookup failure", func(t *testing.T) {
+		lookupErr := errors.New("postgres connection reset")
+		svc := &wikiIngestService{knowledgeSvc: &wikiQueueKnowledgeServiceStub{err: lookupErr}}
+		gone, err := svc.isKnowledgeGone(context.Background(), "kb-1", "knowledge-1")
+		if gone || !errors.Is(err, lookupErr) {
+			t.Fatalf("isKnowledgeGone() = (%v, %v), want (false, wrapped lookup error)", gone, err)
+		}
+	})
+
+	t.Run("moved to another knowledge base", func(t *testing.T) {
+		svc := &wikiIngestService{knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID: "knowledge-1", KnowledgeBaseID: "kb-target", ParseStatus: types.ParseStatusCompleted,
+		}}}
+		gone, err := svc.isKnowledgeGone(context.Background(), "kb-source", "knowledge-1")
+		if err != nil || !gone {
+			t.Fatalf("isKnowledgeGone() = (%v, %v), want moved-away source to be gone", gone, err)
+		}
+	})
+}
+
+func TestPrepareWikiRetractAuthorizesOnlyCommittedMoveAwayFromSource(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		currentKB string
+		wantApply bool
+	}{
+		{name: "committed target", currentKB: "kb-target", wantApply: true},
+		{name: "later chained move", currentKB: "kb-third", wantApply: true},
+		{name: "failed move compensated to source", currentKB: "kb-source", wantApply: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &wikiIngestService{
+				knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+					ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: tc.currentKB,
+					ParseStatus: types.ParseStatusCompleted,
+				}},
+				chunkRepo: &wikiQueueChunkRepoStub{ids: []string{"chunk-1"}},
+			}
+			prepared, apply, err := svc.prepareWikiRetract(context.Background(), 42, "kb-source", WikiPendingOp{
+				Op: WikiOpRetract, KnowledgeID: "knowledge-1",
+				MoveTargetKnowledgeBaseID: "kb-target",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantApply, apply)
+			if tc.wantApply {
+				assert.Equal(t, []string{"chunk-1"}, prepared.SourceChunks)
+			} else {
+				assert.Empty(t, prepared.SourceChunks)
+			}
+		})
+	}
+}
+
+func TestReduceSlugUpdatesKnowledgeLookupFailureDoesNotTouchPage(t *testing.T) {
+	lookupErr := errors.New("knowledge query timeout")
+	pages := &wikiQueuePageServiceStub{}
+	svc := &wikiIngestService{
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{err: lookupErr},
+		wikiService:  pages,
+	}
+
+	_, _, _, err := svc.reduceSlugUpdates(
+		context.Background(),
+		nil,
+		"kb-1",
+		"entity/acme",
+		[]SlugUpdate{{
+			Slug:                 "entity/acme",
+			Type:                 types.WikiPageTypeEntity,
+			KnowledgeID:          "knowledge-1",
+			ProcessingGeneration: "test-generation",
+		}},
+		42,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("reduceSlugUpdates() error = %v, want wrapped knowledge lookup error", err)
+	}
+	if pages.getCalls != 0 || pages.createCalls != 0 {
+		t.Fatalf("knowledge lookup failure touched wiki pages: get=%d create=%d", pages.getCalls, pages.createCalls)
+	}
+}
+
+func TestReduceSlugUpdatesPageReadFailureIsNotTreatedAsNotFound(t *testing.T) {
+	readErr := errors.New("wiki page query timeout")
+	pages := &wikiQueuePageServiceStub{getErr: readErr}
+	svc := &wikiIngestService{
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{ID: "knowledge-1"}},
+		wikiService:  pages,
+	}
+
+	_, _, _, err := svc.reduceSlugUpdates(
+		context.Background(),
+		nil,
+		"kb-1",
+		"summary/knowledge-1",
+		[]SlugUpdate{{
+			Slug:                 "summary/knowledge-1",
+			Type:                 "summary",
+			KnowledgeID:          "knowledge-1",
+			ProcessingGeneration: "test-generation",
+			SourceRef:            "knowledge-1",
+			DocTitle:             "Document",
+			SummaryBody:          "body",
+			SummaryLine:          "summary",
+		}},
+		42,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("reduceSlugUpdates() error = %v, want wrapped page read error", err)
+	}
+	if pages.createCalls != 0 {
+		t.Fatalf("transient page read failure created %d pages, want 0", pages.createCalls)
+	}
+}
+
+func TestReduceSlugUpdatesExplicitNotFoundMayCreatePage(t *testing.T) {
+	pages := &wikiQueuePageServiceStub{getErr: apprepo.ErrWikiPageNotFound}
+	svc := &wikiIngestService{
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{ID: "knowledge-1"}},
+		wikiService:  pages,
+	}
+
+	changed, _, _, err := svc.reduceSlugUpdates(
+		context.Background(),
+		nil,
+		"kb-1",
+		"summary/knowledge-1",
+		[]SlugUpdate{{
+			Slug:                 "summary/knowledge-1",
+			Type:                 "summary",
+			KnowledgeID:          "knowledge-1",
+			ProcessingGeneration: "test-generation",
+			SourceRef:            "knowledge-1",
+			DocTitle:             "Document",
+			SummaryBody:          "body",
+			SummaryLine:          "summary",
+		}},
+		42,
+		nil,
+		nil,
+	)
+	if err != nil || !changed {
+		t.Fatalf("reduceSlugUpdates() = (changed=%v, err=%v), want (true, nil)", changed, err)
+	}
+	if pages.createCalls != 1 {
+		t.Fatalf("explicit not-found create calls = %d, want 1", pages.createCalls)
+	}
+}
+
+func TestReduceSlugUpdatesLLMFailurePropagatesInsteadOfAcknowledgingRetract(t *testing.T) {
+	modelErr := errors.New("model rejected request")
+	pages := &wikiQueuePageServiceStub{getPage: &types.WikiPage{
+		ID:              "page-1",
+		KnowledgeBaseID: "kb-1",
+		Slug:            "entity/acme",
+		PageType:        types.WikiPageTypeEntity,
+		Status:          types.WikiPageStatusPublished,
+		Content:         "existing content",
+		SourceRefs:      types.StringArray{"knowledge-1", "knowledge-2|Surviving source"},
+	}}
+	svc := &wikiIngestService{wikiService: pages}
+
+	_, _, _, err := svc.reduceSlugUpdates(
+		context.Background(),
+		&templateCaptureChatModel{err: modelErr},
+		"kb-1",
+		"entity/acme",
+		[]SlugUpdate{{
+			Slug:              "entity/acme",
+			Type:              "retract",
+			KnowledgeID:       "knowledge-1",
+			RetractDocContent: "removed contribution",
+		}},
+		42,
+		&WikiBatchContext{
+			SlugTitleMany: func(context.Context, []string) map[string]string { return nil },
+			SummaryContentByKnowledgeID: func(context.Context, string) string {
+				return "surviving source summary"
+			},
+		},
+		nil,
+	)
+	if !errors.Is(err, modelErr) {
+		t.Fatalf("reduceSlugUpdates() error = %v, want wrapped LLM failure", err)
+	}
+}
+
+func TestReduceSlugUpdatesRejectsIdentityChangedWhileLLMIsBlocked(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*types.Knowledge)
+	}{
+		{
+			name: "reparse advances generation",
+			mutate: func(knowledge *types.Knowledge) {
+				knowledge.ProcessingGeneration = "generation-2"
+			},
+		},
+		{
+			name: "move changes knowledge base",
+			mutate: func(knowledge *types.Knowledge) {
+				knowledge.KnowledgeBaseID = "kb-2"
+			},
+		},
+		{
+			name: "delete enters terminal state",
+			mutate: func(knowledge *types.Knowledge) {
+				knowledge.ParseStatus = types.ParseStatusDeleting
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			processedAt := time.Now().UTC()
+			knowledge := &types.Knowledge{
+				ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1",
+				ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusCompleted,
+				ProcessedAt: &processedAt,
+			}
+			knowledgeSvc := &wikiQueueKnowledgeServiceStub{knowledge: knowledge}
+			pages := &wikiQueuePageServiceStub{getPage: &types.WikiPage{
+				ID: "page-1", TenantID: 42, KnowledgeBaseID: "kb-1", Slug: "entity/acme",
+				PageType: types.WikiPageTypeEntity, Status: types.WikiPageStatusPublished,
+				Content: "old page body", SourceRefs: types.StringArray{"knowledge-other"},
+			}}
+			model := &blockingWikiChatModel{entered: make(chan struct{}), release: make(chan struct{})}
+			svc := &wikiIngestService{knowledgeSvc: knowledgeSvc, wikiService: pages}
+			update := SlugUpdate{
+				Slug: "entity/acme", Type: types.WikiPageTypeEntity,
+				Item:     extractedItem{Name: "Acme", Description: "new facts", Details: "new facts"},
+				DocTitle: "Document", KnowledgeID: "knowledge-1", SourceRef: "knowledge-1",
+				ProcessingGeneration: "generation-1", SourceOpID: 77, Language: "English",
+			}
+			batchCtx := &WikiBatchContext{
+				SlugTitleMany:   func(context.Context, []string) map[string]string { return nil },
+				PlannedFolderID: map[string]string{},
+			}
+
+			done := make(chan error, 1)
+			go func() {
+				_, _, _, err := svc.reduceSlugUpdates(
+					context.Background(), model, "kb-1", update.Slug,
+					[]SlugUpdate{update}, 42, batchCtx, nil,
+				)
+				done <- err
+			}()
+
+			select {
+			case <-model.entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("reduce did not enter the blocking LLM")
+			}
+			knowledgeSvc.mutateKnowledge(tc.mutate)
+			close(model.release)
+			err := <-done
+			require.Error(t, err)
+			require.NotEmpty(t, wikiingestguard.StaleIdentities(err))
+			assert.Empty(t, pages.contentWrites)
+			assert.Zero(t, pages.createCalls)
+			assert.Empty(t, pages.updated)
+		})
+	}
+}
+
+func TestReduceSlugUpdatesRetractQuarantinesAndDoesNotApplySameOperationTwice(t *testing.T) {
+	page := &types.WikiPage{
+		ID:              "page-1",
+		KnowledgeBaseID: "kb-1",
+		Slug:            "entity/acme",
+		PageType:        types.WikiPageTypeEntity,
+		Status:          types.WikiPageStatusPublished,
+		Content:         "deleted and surviving facts",
+		SourceRefs:      types.StringArray{"knowledge-1", "knowledge-2|Surviving source"},
+		ChunkRefs:       types.StringArray{"chunk-deleted", "chunk-surviving"},
+	}
+	pages := &wikiQueuePageServiceStub{getPage: page}
+	svc := &wikiIngestService{wikiService: pages}
+	update := SlugUpdate{
+		Slug:              "entity/acme",
+		Type:              "retract",
+		KnowledgeID:       "knowledge-1",
+		RetractDocContent: "deleted contribution",
+		SourceChunks:      []string{"chunk-deleted"},
+		SourceOpID:        77,
+	}
+	batchCtx := &WikiBatchContext{
+		SlugTitleMany: func(context.Context, []string) map[string]string { return nil },
+		SummaryContentByKnowledgeID: func(context.Context, string) string {
+			return "surviving source summary"
+		},
+	}
+
+	model := &templateCaptureChatModel{response: "SUMMARY: safe\nsurviving facts only"}
+	changed, affected, _, err := svc.reduceSlugUpdates(
+		context.Background(), model, "kb-1", page.Slug, []SlugUpdate{update}, 42, batchCtx, nil,
+	)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, "retract", affected)
+	require.Len(t, pages.updated, 1, "quarantine must persist before the model edit")
+	assert.Equal(t, types.WikiPageStatusArchived, pages.updated[0].Status)
+	require.Len(t, pages.contentWrites, 1)
+	assert.Equal(t, types.WikiPageStatusPublished, pages.contentWrites[0].Status)
+	assert.Equal(t, types.StringArray{"knowledge-2|Surviving source"}, pages.contentWrites[0].SourceRefs)
+	assert.Equal(t, types.StringArray{"chunk-surviving"}, pages.contentWrites[0].ChunkRefs)
+
+	pages.getPage = pages.contentWrites[0]
+	retryModel := &templateCaptureChatModel{err: errors.New("must not be called")}
+	changed, affected, _, err = svc.reduceSlugUpdates(
+		context.Background(), retryModel, "kb-1", page.Slug, []SlugUpdate{update}, 42, batchCtx, nil,
+	)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, "retract", affected)
+	assert.Empty(t, retryModel.prompt, "applied source_op_id must bypass the LLM on retry")
+}
+
+func TestMergeFailedWikiOpsCountsMultiSlugContributorOnceAndAcksUnaffected(t *testing.T) {
+	pending := []WikiPendingOp{
+		{Op: WikiOpIngest, KnowledgeID: "knowledge-a", dbID: 1},
+		{Op: WikiOpIngest, KnowledgeID: "knowledge-b", dbID: 2},
+		{Op: WikiOpIngest, KnowledgeID: "knowledge-c", dbID: 3},
+	}
+	existing := []WikiPendingOp{pending[0]}
+	failedKnowledgeIDs := map[string]struct{}{
+		"knowledge-a": {}, // contributed to two failed slugs
+		"knowledge-b": {},
+	}
+
+	failed := mergeFailedWikiOps(existing, pending, failedKnowledgeIDs)
+	if len(failed) != 2 || failed[0].dbID != 1 || failed[1].dbID != 2 {
+		t.Fatalf("merged failed ops = %+v, want db IDs [1 2] exactly once", failed)
+	}
+	trimIDs := wikiQueueTrimIDs([]int64{1, 2, 3}, failed)
+	if !slices.Equal(trimIDs, []int64{3}) {
+		t.Fatalf("trim IDs = %v, want only unaffected row [3]", trimIDs)
+	}
+
+	repo := &wikiQueuePendingRepoStub{incrCount: 1}
+	svc := &wikiIngestService{pendingRepo: repo}
+	if err := svc.requeueFailedOps(context.Background(), WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"}, failed); err != nil {
+		t.Fatalf("requeueFailedOps() error = %v", err)
+	}
+	if !slices.Equal(repo.incrementedIDs, []int64{1, 2}) {
+		t.Fatalf("fail-count increments = %v, want [1 2] once each", repo.incrementedIDs)
+	}
+}
+
+func TestPeekPendingListMalformedRetractFallsBackToDurableColumns(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{{
+		ID:       91,
+		Op:       WikiOpRetract,
+		DedupKey: "knowledge-1",
+		Payload:  json.RawMessage(`{"broken"`),
+	}}}
+	svc := &wikiIngestService{pendingRepo: repo}
+
+	ops, ids, err := svc.peekPendingList(context.Background(), "kb-1", 5)
+	if err != nil {
+		t.Fatalf("peekPendingList() error = %v", err)
+	}
+	if len(ops) != 1 || ops[0].Op != WikiOpRetract || ops[0].KnowledgeID != "knowledge-1" || ops[0].dbID != 91 {
+		t.Fatalf("fallback ops = %+v, want durable retract columns", ops)
+	}
+	if !slices.Equal(ids, []int64{91}) {
+		t.Fatalf("peeked IDs = %v, want [91]", ids)
+	}
+}
+
+func TestWikiGenerationPreflightLateOldOpCannotSuppressCurrentGeneration(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	repo := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{
+		wikiPendingRow(1, WikiPendingOp{
+			Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-new",
+		}),
+		// Simulate the old PostProcess producer winning the enqueue race later.
+		wikiPendingRow(2, WikiPendingOp{
+			Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-old",
+		}),
+	}}
+	svc := &wikiIngestService{
+		pendingRepo: repo,
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1",
+			ProcessingGeneration: "generation-new", ParseStatus: types.ParseStatusCompleted,
+			ProcessedAt: &now,
+		}},
+	}
+
+	ops, ids, err := svc.peekPendingList(context.Background(), "kb-1", 10)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 2}, ids)
+	require.Len(t, ops, 2, "generation-scoped dedup must retain both rows for authoritative preflight")
+
+	processable, failed, stale := svc.preflightWikiPendingOps(context.Background(), WikiIngestPayload{
+		TenantID: 42, KnowledgeBaseID: "kb-1",
+	}, ops)
+	require.Empty(t, failed)
+	require.Equal(t, 1, stale)
+	require.Len(t, processable, 1)
+	require.Equal(t, "generation-new", processable[0].ProcessingGeneration)
+	require.Equal(t, int64(1), processable[0].dbID)
+}
+
+func TestProcessWikiIngestStaleGenerationIsTerminalWithoutFailCountRetry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(19, WikiPendingOp{
+			Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-old",
+		})},
+		countFromRows: true,
+	}
+	svc := &wikiIngestService{
+		pendingRepo: pending,
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID: "kb-1", TenantID: 42, WikiConfig: &types.WikiConfig{IngestBatchSize: 5},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1",
+			ProcessingGeneration: "generation-new", ParseStatus: types.ParseStatusCompleted,
+			ProcessedAt: &now,
+		}},
+	}
+	payload, err := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.ProcessWikiIngest(
+		context.Background(), asynq.NewTask(types.TypeWikiIngest, payload),
+	))
+	assert.Empty(t, pending.rows, "terminal stale work must be acknowledged")
+	assert.Empty(t, pending.incrementedIDs, "terminal stale work must not consume the retry budget")
+	assert.Empty(t, pending.archived, "terminal stale work is superseded, not a dead letter")
+}
+
+func TestRestorePreparedWikiIngestMarksOnlyDurablyAppliedSlugs(t *testing.T) {
+	op := WikiPendingOp{
+		Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+		dbID: 77,
+		Prepared: &wikiPreparedIngest{
+			DocTitle: "Document", Summary: "summary",
+			Pages: []types.WikiLogPageRef{{Slug: "summary/knowledge-1", Title: "Document"}},
+			Updates: []SlugUpdate{
+				{Slug: "summary/knowledge-1", Type: "summary"},
+				{Slug: "entity/acme", Type: types.WikiPageTypeEntity},
+			},
+		},
+		AppliedPageSlugs: []string{"entity/acme"},
+	}
+	svc := &wikiIngestService{}
+	result, updates, restored := svc.restorePreparedWikiIngest(
+		context.Background(), WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"}, op,
+	)
+
+	require.True(t, restored)
+	require.NotNil(t, result)
+	assert.Equal(t, int64(77), result.SourceOpID)
+	require.Len(t, updates, 2)
+	assert.False(t, updates[0].PageAlreadyApplied)
+	assert.True(t, updates[1].PageAlreadyApplied)
+	for _, update := range updates {
+		assert.Equal(t, "knowledge-1", update.KnowledgeID)
+		assert.Equal(t, "generation-1", update.ProcessingGeneration)
+		assert.Equal(t, int64(77), update.SourceOpID)
+	}
+}
+
+func TestReduceSlugUpdatesDurablyAppliedPageSkipsLLMAndPageMutation(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pages := &wikiQueuePageServiceStub{getPage: &types.WikiPage{
+		ID: "page-1", TenantID: 42, KnowledgeBaseID: "kb-1", Slug: "entity/acme",
+		PageType: types.WikiPageTypeEntity, Status: types.WikiPageStatusDraft,
+		Content: "already committed body", SourceRefs: types.StringArray{"knowledge-1"},
+	}}
+	model := &templateCaptureChatModel{err: errors.New("must not be called")}
+	svc := &wikiIngestService{
+		wikiService: pages,
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1",
+			ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusCompleted,
+			ProcessedAt: &now,
+		}},
+	}
+	changed, affected, _, err := svc.reduceSlugUpdates(
+		context.Background(), model, "kb-1", "entity/acme", []SlugUpdate{{
+			Slug: "entity/acme", Type: types.WikiPageTypeEntity,
+			KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+			SourceOpID: 77, PageAlreadyApplied: true,
+		}}, 42, &WikiBatchContext{}, nil,
+	)
+
+	require.NoError(t, err)
+	assert.True(t, changed, "downstream publication/log/index stages still need replay")
+	assert.Equal(t, "ingest", affected)
+	assert.Empty(t, model.prompt)
+	assert.Zero(t, pages.createCalls)
+	assert.Empty(t, pages.contentWrites)
+	assert.Empty(t, pages.updated)
+}
+
+func TestProcessWikiIngestReplayAfterPostPageStageFailureIsExactlyOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		stage              string
+		firstRunReturnsErr bool
+		wantModelCalls     int
+	}{
+		{name: "log response fails after commit", stage: "log", wantModelCalls: 1},
+		{name: "index write fails", stage: "index", wantModelCalls: 2},
+		{name: "publication write fails", stage: "publication", wantModelCalls: 1},
+		{name: "queue settlement delete fails", stage: "settlement", firstRunReturnsErr: true, wantModelCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const summarySlug = "summary/knowledge-1"
+			now := time.Unix(1_700_000_000, 0)
+			op := WikiPendingOp{
+				Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+				Language: "en-US",
+				Prepared: &wikiPreparedIngest{
+					DocTitle: "Document", Summary: "document summary",
+					Pages: []types.WikiLogPageRef{{Slug: summarySlug, Title: "Document - Summary"}},
+					Updates: []SlugUpdate{{
+						Slug: summarySlug, Type: "summary", DocTitle: "Document",
+						SourceRef: "knowledge-1", SummaryBody: "durable summary body",
+						SummaryLine: "durable summary line",
+					}},
+				},
+			}
+			pending := &wikiQueuePendingRepoStub{
+				rows:          []*types.TaskPendingOp{wikiPendingRow(77, op)},
+				countFromRows: true,
+			}
+			pages := &wikiReplayPageServiceStub{
+				pending: pending,
+				pages: map[string]*types.WikiPage{summarySlug: {
+					ID: "summary-page", TenantID: 42, KnowledgeBaseID: "kb-1", Slug: summarySlug,
+					Title: "Old", PageType: types.WikiPageTypeSummary, Status: types.WikiPageStatusDraft,
+					Content: "old summary body", Version: 1,
+				}},
+				index: &types.WikiPage{
+					ID: "index-page", TenantID: 42, KnowledgeBaseID: "kb-1", Slug: "index",
+					Title: "Index", PageType: types.WikiPageTypeIndex, Status: types.WikiPageStatusPublished,
+					Content: "existing index intro", Summary: "existing index intro", Version: 1,
+				},
+				contentWritesBySlug:     make(map[string]int),
+				publicationWritesBySlug: make(map[string]int),
+			}
+			logs := &wikiReplayLogEntryServiceStub{bySourceOpID: make(map[int64]*types.WikiLogEntry)}
+			switch tc.stage {
+			case "log":
+				logs.failuresAfterCommit = 1
+			case "index":
+				pages.indexWriteFailures = 1
+			case "publication":
+				pages.publicationWriteFailures = 1
+			case "settlement":
+				pending.deleteErr = errors.New("injected queue settlement failure")
+			default:
+				t.Fatalf("unknown stage %q", tc.stage)
+			}
+			model := &countingWikiChatModel{response: "updated index intro"}
+			svc := &wikiIngestService{
+				wikiService: pages,
+				kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+					ID: "kb-1", TenantID: 42,
+					WikiConfig: &types.WikiConfig{
+						SynthesisModelID: "model-1", IngestBatchSize: 1,
+						IngestMapParallel: 1, IngestReduceParallel: 1,
+					},
+					IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+				}},
+				knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+					ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1",
+					ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusCompleted,
+					ProcessedAt: &now,
+				}},
+				modelService: &wikiQueueModelServiceStub{model: model},
+				logEntrySvc:  logs,
+				pendingRepo:  pending,
+				task:         &wikiQueueTaskEnqueuerStub{},
+			}
+			payload, err := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+			require.NoError(t, err)
+			task := asynq.NewTask(types.TypeWikiIngest, payload)
+
+			firstErr := svc.ProcessWikiIngest(context.Background(), task)
+			if tc.firstRunReturnsErr {
+				require.Error(t, firstErr)
+			} else {
+				require.NoError(t, firstErr)
+			}
+			require.Len(t, pending.rows, 1, "failed post-page stage must keep the durable operation")
+			var afterFirst WikiPendingOp
+			require.NoError(t, json.Unmarshal(pending.rows[0].Payload, &afterFirst))
+			require.NotNil(t, afterFirst.Prepared)
+			assert.Equal(t, []string{summarySlug}, afterFirst.AppliedPageSlugs)
+			assert.Equal(t, 1, pages.contentWritesBySlug[summarySlug],
+				"the content page must have committed before the injected failure")
+
+			pending.deleteErr = nil
+			require.NoError(t, svc.ProcessWikiIngest(context.Background(), task))
+
+			assert.Empty(t, pending.rows)
+			assert.Zero(t, pending.checkpointCalls,
+				"a durable Prepared plan must bypass Map and never be checkpointed again")
+			assert.Equal(t, 1, pages.contentWritesBySlug[summarySlug],
+				"AppliedPageSlugs must suppress duplicate content mutation on replay")
+			assert.Equal(t, types.WikiPageStatusPublished, pages.pages[summarySlug].Status)
+			assert.Equal(t, "durable summary body", pages.pages[summarySlug].Content)
+			assert.Len(t, logs.bySourceOpID, 1, "source_op_id makes log replay idempotent")
+			assert.Equal(t, tc.wantModelCalls, model.callCount())
+		})
+	}
+}
+
+func TestProcessWikiIngestWikiDisabledReconcilesRetractBeforeAck(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
+			Op:           WikiOpRetract,
+			KnowledgeID:  "knowledge-1",
+			PageSlugs:    []string{"entity/sole", "entity/shared"},
+			SourceChunks: []string{"chunk-old"},
+		})},
+		countFromRows: true,
+	}
+	indexPage := &types.WikiPage{
+		Slug: "index", PageType: types.WikiPageTypeIndex, Status: types.WikiPageStatusPublished,
+	}
+	sharedPage := &types.WikiPage{
+		Slug: "entity/shared", PageType: types.WikiPageTypeEntity, Status: types.WikiPageStatusPublished,
+		SourceRefs: types.StringArray{"knowledge-1|Document", "knowledge-2"},
+		ChunkRefs:  types.StringArray{"chunk-old", "chunk-surviving"},
+	}
+	require.NoError(t, wikidelete.Quarantine(indexPage, "knowledge-1", "knowledge-concurrent"))
+	require.NoError(t, wikidelete.Quarantine(sharedPage, "knowledge-1", "knowledge-concurrent"))
+	pages := &wikiQueuePageServiceStub{
+		indexPage: indexPage,
+		listPages: []*types.WikiPage{
+			{Slug: "entity/sole", PageType: types.WikiPageTypeEntity, SourceRefs: types.StringArray{"knowledge-1"}, ChunkRefs: types.StringArray{"chunk-old"}},
+			sharedPage,
+		},
+	}
+	logs := &wikiQueueLogEntryServiceStub{}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			WikiConfig:       &types.WikiConfig{IngestBatchSize: 5},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: false},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1", ParseStatus: types.ParseStatusDeleting,
+		}},
+		chunkRepo:   &wikiQueueChunkRepoStub{ids: []string{"chunk-db"}},
+		wikiService: pages,
+		logEntrySvc: logs,
+		pendingRepo: pending,
+		task:        &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("disabled-Wiki retract drain error = %v", err)
+	}
+	if !slices.Equal(pages.deleted, []string{"entity/sole"}) {
+		t.Fatalf("deleted pages = %v, want [entity/sole]", pages.deleted)
+	}
+	if len(pages.updated) != 1 || pages.updated[0].Slug != "entity/shared" ||
+		!slices.Equal(pages.updated[0].SourceRefs, types.StringArray{"knowledge-2"}) ||
+		!slices.Equal(pages.updated[0].ChunkRefs, types.StringArray{"chunk-surviving"}) ||
+		pages.updated[0].Status != types.WikiPageStatusArchived {
+		t.Fatalf("shared-page metadata updates = %+v, want archived source/chunk refs for surviving source", pages.updated)
+	}
+	if len(pages.contentWrites) != 1 || pages.contentWrites[0].PageType != types.WikiPageTypeIndex {
+		t.Fatalf("disabled-Wiki index resets = %+v, want one neutral index write", pages.contentWrites)
+	}
+	assert.Equal(t, [][]string{{"knowledge-1"}}, pages.metaClearIDs)
+	assert.Equal(t, [][]string{{"knowledge-1"}}, pages.contentClearIDs)
+	sharedPending, err := wikidelete.PendingSources(pages.updated[0])
+	require.NoError(t, err)
+	assert.Equal(t, []string{"knowledge-concurrent"}, sharedPending,
+		"completing one retract must retain a concurrent page quarantine")
+	indexPending, err := wikidelete.PendingSources(pages.contentWrites[0])
+	require.NoError(t, err)
+	assert.Equal(t, []string{"knowledge-concurrent"}, indexPending,
+		"completing one retract must retain a concurrent index quarantine")
+	assert.Equal(t, types.WikiPageStatusArchived, pages.contentWrites[0].Status)
+	sharedApplied, err := wikidelete.IsApplied(pages.updated[0], 1)
+	require.NoError(t, err)
+	assert.True(t, sharedApplied)
+	indexApplied, err := wikidelete.IsApplied(pages.contentWrites[0], 1)
+	require.NoError(t, err)
+	assert.True(t, indexApplied)
+	if len(logs.entries) != 1 || logs.entries[0].Action != "retract" ||
+		logs.entries[0].SourceOpID == nil || *logs.entries[0].SourceOpID != 1 {
+		t.Fatalf("disabled-Wiki log entries = %+v, want idempotent retract event for op 1", logs.entries)
+	}
+	if len(pending.rows) != 0 || !slices.Equal(pending.deletedIDs[0], []int64{1}) {
+		t.Fatalf("pending queue after deterministic retract = rows:%d deletes:%v", len(pending.rows), pending.deletedIDs)
+	}
+}
+
+func TestReconcileDisabledWikiRetractCompletesMarkerAfterPriorSourceRefCleanup(t *testing.T) {
+	page := &types.WikiPage{
+		Slug:       "entity/shared",
+		PageType:   types.WikiPageTypeEntity,
+		Status:     types.WikiPageStatusPublished,
+		SourceRefs: types.StringArray{"knowledge-surviving"},
+	}
+	require.NoError(t, wikidelete.Quarantine(page, "knowledge-removed", "knowledge-concurrent"))
+	pages := &wikiQueuePageServiceStub{getPage: page}
+	svc := &wikiIngestService{wikiService: pages}
+
+	require.NoError(t, svc.reconcileDisabledWikiRetract(context.Background(), "kb-1", WikiPendingOp{
+		Op:          WikiOpRetract,
+		KnowledgeID: "knowledge-removed",
+		PageSlugs:   []string{"entity/shared"},
+		dbID:        91,
+	}))
+
+	require.Len(t, pages.updated, 1)
+	assert.Equal(t, types.WikiPageStatusArchived, pages.updated[0].Status)
+	assert.Equal(t, [][]string{{"knowledge-removed"}}, pages.metaClearIDs)
+	pendingSources, err := wikidelete.PendingSources(pages.updated[0])
+	require.NoError(t, err)
+	assert.Equal(t, []string{"knowledge-concurrent"}, pendingSources)
+	applied, err := wikidelete.IsApplied(pages.updated[0], 91)
+	require.NoError(t, err)
+	assert.True(t, applied)
+}
+
+func TestProcessWikiIngestWikiDisabledSharedMarkerOrWriteFailureKeepsRetractPending(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		page      func(t *testing.T) *types.WikiPage
+		updateErr error
+	}{
+		{
+			name: "invalid marker",
+			page: func(*testing.T) *types.WikiPage {
+				return &types.WikiPage{
+					Slug: "entity/shared", PageType: types.WikiPageTypeEntity,
+					SourceRefs:   types.StringArray{"knowledge-1", "knowledge-2"},
+					PageMetadata: types.JSON(`{"_weknora_delete_quarantine":`),
+				}
+			},
+		},
+		{
+			name: "metadata write",
+			page: func(t *testing.T) *types.WikiPage {
+				page := &types.WikiPage{
+					Slug: "entity/shared", PageType: types.WikiPageTypeEntity, Status: types.WikiPageStatusPublished,
+					SourceRefs: types.StringArray{"knowledge-1", "knowledge-2"},
+				}
+				require.NoError(t, wikidelete.Quarantine(page, "knowledge-1", "knowledge-concurrent"))
+				return page
+			},
+			updateErr: errors.New("wiki metadata write unavailable"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pending := &wikiQueuePendingRepoStub{
+				rows: []*types.TaskPendingOp{wikiPendingRow(31, WikiPendingOp{
+					Op: WikiOpRetract, KnowledgeID: "knowledge-1", PageSlugs: []string{"entity/shared"},
+				})},
+				countFromRows: true,
+			}
+			pages := &wikiQueuePageServiceStub{listPages: []*types.WikiPage{tc.page(t)}, updateErr: tc.updateErr}
+			svc := &wikiIngestService{
+				kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+					ID:               "kb-1",
+					WikiConfig:       &types.WikiConfig{IngestBatchSize: 5},
+					IndexingStrategy: types.IndexingStrategy{WikiEnabled: false},
+				}},
+				knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+					ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1", ParseStatus: types.ParseStatusDeleting,
+				}},
+				chunkRepo:   &wikiQueueChunkRepoStub{},
+				wikiService: pages,
+				pendingRepo: pending,
+				task:        &wikiQueueTaskEnqueuerStub{},
+			}
+			payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+			require.NoError(t, svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)))
+			assert.Len(t, pending.rows, 1, "failed shared-page completion must leave the durable retract pending")
+			assert.Empty(t, pending.deletedIDs)
+			assert.Equal(t, []int64{31}, pending.incrementedIDs)
+		})
+	}
+}
+
+func TestProcessWikiIngestWikiDisabledIndexMarkerOrWriteFailureKeepsRetractPending(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		indexPage *types.WikiPage
+		updateErr error
+	}{
+		{
+			name: "invalid marker",
+			indexPage: &types.WikiPage{
+				Slug: "index", PageType: types.WikiPageTypeIndex, Status: types.WikiPageStatusPublished,
+				PageMetadata: types.JSON(`{"_weknora_delete_quarantine":`),
+			},
+		},
+		{
+			name: "content write",
+			indexPage: &types.WikiPage{
+				Slug: "index", PageType: types.WikiPageTypeIndex, Status: types.WikiPageStatusPublished,
+			},
+			updateErr: errors.New("wiki index write unavailable"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pending := &wikiQueuePendingRepoStub{
+				rows: []*types.TaskPendingOp{wikiPendingRow(41, WikiPendingOp{
+					Op:          WikiOpRetract,
+					KnowledgeID: "knowledge-1",
+				})},
+				countFromRows: true,
+			}
+			svc := &wikiIngestService{
+				kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+					ID:               "kb-1",
+					WikiConfig:       &types.WikiConfig{IngestBatchSize: 5},
+					IndexingStrategy: types.IndexingStrategy{WikiEnabled: false},
+				}},
+				knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+					ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1", ParseStatus: types.ParseStatusDeleting,
+				}},
+				chunkRepo:   &wikiQueueChunkRepoStub{},
+				wikiService: &wikiQueuePageServiceStub{indexPage: tc.indexPage, updateErr: tc.updateErr},
+				logEntrySvc: &wikiQueueLogEntryServiceStub{},
+				pendingRepo: pending,
+				task:        &wikiQueueTaskEnqueuerStub{},
+			}
+			payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+			require.NoError(t, svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)))
+			assert.Len(t, pending.rows, 1, "failed index completion must leave the durable retract pending")
+			assert.Empty(t, pending.deletedIDs)
+			assert.Equal(t, []int64{41}, pending.incrementedIDs)
+		})
+	}
+}
+
+func TestProcessWikiIngestWikiDisabledRetractFailureDeadLettersWithCause(t *testing.T) {
+	cleanupErr := errors.New("wiki page database unavailable")
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
+			Op:          WikiOpRetract,
+			KnowledgeID: "knowledge-1",
+		})},
+		countFromRows: true,
+		incrCount:     wikiMaxFailRetries + 1,
+	}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			WikiConfig:       &types.WikiConfig{IngestBatchSize: 5},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: false},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1", ParseStatus: types.ParseStatusDeleting,
+		}},
+		chunkRepo:   &wikiQueueChunkRepoStub{},
+		wikiService: &wikiQueuePageServiceStub{listErr: cleanupErr},
+		pendingRepo: pending,
+		task:        &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("disabled-Wiki failed retract settlement error = %v", err)
+	}
+	if len(pending.archived) != 1 {
+		t.Fatalf("dead letters = %d, want 1", len(pending.archived))
+	}
+	if !strings.Contains(pending.archived[0].LastError, cleanupErr.Error()) {
+		t.Fatalf("dead-letter cause = %q, want cleanup error", pending.archived[0].LastError)
+	}
+	if len(pending.rows) != 0 {
+		t.Fatalf("dead-lettered retract left %d pending rows", len(pending.rows))
+	}
+}
+
+func TestProcessWikiIngestRejectsTriggerTenantMismatchWithoutTouchingQueue(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows:          []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{Op: WikiOpIngest, KnowledgeID: "knowledge-1"})},
+		countFromRows: true,
+	}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID: "kb-1", TenantID: 7, WikiConfig: &types.WikiConfig{IngestBatchSize: 5},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+		}},
+		pendingRepo: pending,
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	require.ErrorContains(t, err, "trigger tenant mismatch")
+	assert.Len(t, pending.rows, 1)
+	assert.Empty(t, pending.deletedIDs)
+	assert.Empty(t, pending.archived)
+}
+
+func TestRebuildIndexPageDoesNotApplySameDurableChangeTwice(t *testing.T) {
+	indexPage := &types.WikiPage{
+		ID: "index-1", KnowledgeBaseID: "kb-1", Slug: "index",
+		PageType: types.WikiPageTypeIndex, Status: types.WikiPageStatusPublished,
+		Content: "existing intro", Summary: "existing intro",
+	}
+	pages := &wikiQueuePageServiceStub{indexPage: indexPage}
+	svc := &wikiIngestService{wikiService: pages}
+	change := wikiIndexChange{
+		SourceOpID: 91, KnowledgeID: "knowledge-1",
+		Description: "<document_removed><title>old</title></document_removed>",
+		Retract:     true,
+	}
+	model := &templateCaptureChatModel{response: "updated intro"}
+	require.NoError(t, svc.rebuildIndexPage(
+		context.Background(), model, WikiIngestPayload{KnowledgeBaseID: "kb-1"}, []wikiIndexChange{change}, "English",
+	))
+	require.Len(t, pages.contentWrites, 1)
+	assert.Equal(t, "updated intro", pages.contentWrites[0].Content)
+
+	retryModel := &templateCaptureChatModel{err: errors.New("must not be called")}
+	require.NoError(t, svc.rebuildIndexPage(
+		context.Background(), retryModel, WikiIngestPayload{KnowledgeBaseID: "kb-1"}, []wikiIndexChange{change}, "English",
+	))
+	assert.Empty(t, retryModel.prompt)
+	assert.Len(t, pages.contentWrites, 1)
+}
+
+func TestRebuildIndexPageRetractLLMFailureKeepsChangeUnapplied(t *testing.T) {
+	indexPage := &types.WikiPage{
+		ID: "index-1", KnowledgeBaseID: "kb-1", Slug: "index",
+		PageType: types.WikiPageTypeIndex, Status: types.WikiPageStatusArchived,
+		Content: "intro that still mentions deleted document", Summary: "stale intro",
+	}
+	require.NoError(t, wikidelete.Quarantine(indexPage, "knowledge-1"))
+	pages := &wikiQueuePageServiceStub{indexPage: indexPage}
+	svc := &wikiIngestService{wikiService: pages}
+	modelErr := errors.New("rate limited")
+	change := wikiIndexChange{
+		SourceOpID: 92, KnowledgeID: "knowledge-1", Retract: true,
+		Description: "<document_removed><title>old</title></document_removed>",
+	}
+
+	err := svc.rebuildIndexPage(
+		context.Background(),
+		&templateCaptureChatModel{err: modelErr},
+		WikiIngestPayload{KnowledgeBaseID: "kb-1"},
+		[]wikiIndexChange{change},
+		"English",
+	)
+	require.ErrorIs(t, err, modelErr)
+	assert.Empty(t, pages.contentWrites, "failed retract intro must not be persisted or marked applied")
+	applied, markerErr := wikidelete.IsApplied(indexPage, change.SourceOpID)
+	require.NoError(t, markerErr)
+	assert.False(t, applied)
+	pendingSources, markerErr := wikidelete.PendingSources(indexPage)
+	require.NoError(t, markerErr)
+	assert.Equal(t, []string{"knowledge-1"}, pendingSources)
+}
+
+func TestResolveRetractSlugSetLookupFailurePropagates(t *testing.T) {
+	lookupErr := errors.New("source-ref query failed")
+	svc := &wikiIngestService{wikiService: &wikiQueuePageServiceStub{listErr: lookupErr}}
+
+	slugs, err := svc.resolveRetractSlugSet(context.Background(), "kb-1", WikiPendingOp{
+		Op:          WikiOpRetract,
+		KnowledgeID: "knowledge-1",
+		PageSlugs:   []string{"entity/snapshot"},
+	})
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("resolveRetractSlugSet() error = %v, want wrapped lookup error", err)
+	}
+	if slugs != nil {
+		t.Fatalf("resolveRetractSlugSet() returned partial slugs on failed authoritative lookup: %v", slugs)
+	}
+}
+
+func TestGetExistingPageSlugsForKnowledgeFailurePropagates(t *testing.T) {
+	lookupErr := errors.New("old-page snapshot query failed")
+	svc := &wikiIngestService{wikiService: &wikiQueuePageServiceStub{listSlugsErr: lookupErr}}
+
+	slugs, err := svc.getExistingPageSlugsForKnowledge(context.Background(), "kb-1", "knowledge-1")
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("getExistingPageSlugsForKnowledge() error = %v, want wrapped lookup error", err)
+	}
+	if slugs != nil {
+		t.Fatalf("getExistingPageSlugsForKnowledge() slugs = %v, want nil on failed snapshot", slugs)
+	}
+}
+
+func TestPublishDraftPagesReportsReadFailure(t *testing.T) {
+	readErr := errors.New("publication read failed")
+	svc := &wikiIngestService{wikiService: &wikiQueuePageServiceStub{getErr: readErr}}
+
+	failures := svc.publishDraftPages(context.Background(), 42, "kb-1", []string{"entity/acme"}, nil)
+	if len(failures) != 1 || !errors.Is(failures["entity/acme"], readErr) {
+		t.Fatalf("publishDraftPages() failures = %v, want wrapped read error for entity/acme", failures)
+	}
+}
+
+func TestProcessWikiIngestUnknownOpDeadLettersWithoutModel(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
+			Op:          "mystery",
+			KnowledgeID: "knowledge-1",
+		})},
+		countFromRows: true,
+		incrCount:     wikiMaxFailRetries + 1,
+	}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			WikiConfig:       &types.WikiConfig{},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{ID: "knowledge-1"}},
+		pendingRepo:  pending,
+		task:         &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("unknown-op settlement error = %v", err)
+	}
+	if len(pending.archived) != 1 || !strings.Contains(pending.archived[0].LastError, "unsupported") {
+		t.Fatalf("unknown-op archive = %+v, want durable unsupported-op cause", pending.archived)
+	}
+	if len(pending.rows) != 0 {
+		t.Fatalf("unknown op left %d pending rows after dead-letter", len(pending.rows))
+	}
+}
+
+func TestProcessWikiIngestMissingSynthesisModelUsesBoundedOpDeadLetter(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
+			Op:          WikiOpIngest,
+			KnowledgeID: "knowledge-1",
+		})},
+		countFromRows: true,
+		incrCount:     wikiMaxFailRetries + 1,
+	}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			WikiConfig:       &types.WikiConfig{},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{ID: "knowledge-1"}},
+		pendingRepo:  pending,
+		task:         &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("missing-model settlement error = %v", err)
+	}
+	if len(pending.archived) != 1 || !strings.Contains(pending.archived[0].LastError, "no synthesis model configured") {
+		t.Fatalf("missing-model archive = %+v, want durable configuration cause", pending.archived)
+	}
+	if pending.peekCalls != 1 {
+		t.Fatalf("missing-model path peek calls = %d, want 1 before configuration handling", pending.peekCalls)
+	}
+}
+
+func TestProcessWikiIngestMissingConfiguredModelUsesBoundedOpDeadLetter(t *testing.T) {
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
+			Op:          WikiOpIngest,
+			KnowledgeID: "knowledge-1",
+		})},
+		countFromRows: true,
+		incrCount:     wikiMaxFailRetries + 1,
+	}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			SummaryModelID:   "deleted-model",
+			WikiConfig:       &types.WikiConfig{},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{ID: "knowledge-1"}},
+		modelService: &wikiQueueModelServiceStub{err: ErrModelNotFound},
+		pendingRepo:  pending,
+		task:         &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("missing configured model settlement error = %v", err)
+	}
+	if len(pending.archived) != 1 || !strings.Contains(pending.archived[0].LastError, "model not found") {
+		t.Fatalf("missing configured model archive = %+v, want durable not-found cause", pending.archived)
+	}
+}
+
+func TestProcessWikiIngestInvalidModelConfigurationUsesBoundedOpDeadLetter(t *testing.T) {
+	configurationErr := fmt.Errorf("%w: unsupported chat model source", ErrChatModelConfiguration)
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
+			Op:          WikiOpIngest,
+			KnowledgeID: "knowledge-1",
+		})},
+		countFromRows: true,
+		incrCount:     wikiMaxFailRetries + 1,
+	}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			SummaryModelID:   "misconfigured-model",
+			WikiConfig:       &types.WikiConfig{},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{ID: "knowledge-1"}},
+		modelService: &wikiQueueModelServiceStub{err: configurationErr},
+		pendingRepo:  pending,
+		task:         &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
+		t.Fatalf("invalid configuration settlement error = %v", err)
+	}
+	if len(pending.incrementedIDs) != 1 || pending.incrementedIDs[0] != 1 {
+		t.Fatalf("invalid configuration increments = %v, want pending row 1", pending.incrementedIDs)
+	}
+	if len(pending.archived) != 1 || !strings.Contains(pending.archived[0].LastError, "invalid chat model configuration") {
+		t.Fatalf("invalid configuration archive = %+v, want durable typed configuration cause", pending.archived)
+	}
+	if len(pending.rows) != 0 {
+		t.Fatalf("invalid configuration left %d pending rows after retry budget exhaustion", len(pending.rows))
+	}
+}
+
+func TestProcessWikiIngestTransientModelLookupErrorKeepsPendingRows(t *testing.T) {
+	modelErr := errors.New("model repository connection reset")
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
+			Op:          WikiOpIngest,
+			KnowledgeID: "knowledge-1",
+		})},
+		countFromRows: true,
+	}
+	svc := &wikiIngestService{
+		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			SummaryModelID:   "model-1",
+			WikiConfig:       &types.WikiConfig{},
+			IndexingStrategy: types.IndexingStrategy{WikiEnabled: true},
+		}},
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{ID: "knowledge-1"}},
+		modelService: &wikiQueueModelServiceStub{err: modelErr},
+		pendingRepo:  pending,
+		task:         &wikiQueueTaskEnqueuerStub{},
+	}
+	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
+
+	err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	if !errors.Is(err, modelErr) {
+		t.Fatalf("ProcessWikiIngest() error = %v, want transient model lookup error", err)
+	}
+	if pending.peekCalls != 1 || pending.deleteCalls != 0 || len(pending.incrementedIDs) != 0 || len(pending.archived) != 0 {
+		t.Fatalf("transient model lookup mutated queue: peek=%d delete=%d increments=%v archives=%d",
+			pending.peekCalls, pending.deleteCalls, pending.incrementedIDs, len(pending.archived))
+	}
+	if len(pending.rows) != 1 {
+		t.Fatalf("transient model lookup left %d rows, want 1", len(pending.rows))
+	}
+}

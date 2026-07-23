@@ -215,3 +215,24 @@ func TestUpdateChunk_SQLite_NoNOWError(t *testing.T) {
 	require.NoError(t, db.First(&saved, "id = ?", chunk.ID).Error)
 	assert.Equal(t, "updated content", saved.Content)
 }
+
+func TestListImageInfoByKnowledgeIDsUnscopedIncludesSoftDeletedChunks(t *testing.T) {
+	db := setupChunkTestDB(t)
+	repo := &chunkRepository{db: db}
+	ctx := context.Background()
+
+	chunk := makeChunk(uuid.New().String(), "knowledge-images", "text")
+	chunk.ImageInfo = `[{"url":"obs://bucket/deleted-image.png"}]`
+	require.NoError(t, db.Create(chunk).Error)
+	require.NoError(t, db.Where("id = ?", chunk.ID).Delete(&types.Chunk{}).Error)
+
+	active, err := repo.ListImageInfoByKnowledgeIDs(ctx, 1, []string{chunk.KnowledgeID})
+	require.NoError(t, err)
+	assert.Empty(t, active, "the normal query must continue to hide soft-deleted chunks")
+
+	all, err := repo.ListImageInfoByKnowledgeIDsUnscoped(ctx, 1, []string{chunk.KnowledgeID})
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	assert.Equal(t, chunk.KnowledgeID, all[0].KnowledgeID)
+	assert.JSONEq(t, chunk.ImageInfo, all[0].ImageInfo)
+}

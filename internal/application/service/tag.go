@@ -282,10 +282,12 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 		if len(knowledgeIDs) == 0 {
 			return nil
 		}
-		// Enqueue async task to delete knowledge files
+		// Enqueue one durable root task. The worker processes bounded batches
+		// sequentially, avoiding partial fan-out and concurrent page RMW races.
 		payload := types.KnowledgeListDeletePayload{
-			TenantID:     tenantID,
-			KnowledgeIDs: knowledgeIDs,
+			TenantID:                tenantID,
+			KnowledgeIDs:            knowledgeIDs,
+			ExpectedKnowledgeBaseID: kb.ID,
 		}
 		langfuse.InjectTracing(ctx, &payload)
 		payloadBytes, err := json.Marshal(payload)
@@ -293,8 +295,8 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 			logger.Errorf(ctx, "Failed to marshal knowledge list delete payload: %v", err)
 			return werrors.NewInternalServerError("删除标签下的文档失败")
 		}
-		task := asynq.NewTask(types.TypeKnowledgeListDelete, payloadBytes, asynq.Queue("low"), asynq.MaxRetry(3))
-		info, err := s.task.Enqueue(task)
+		task := asynq.NewTask(types.TypeKnowledgeListDelete, payloadBytes)
+		info, err := s.task.Enqueue(task, asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(6*time.Hour))
 		if err != nil {
 			logger.Errorf(ctx, "Failed to enqueue knowledge list delete task: %v", err)
 			return werrors.NewInternalServerError("删除标签下的文档失败")
@@ -370,8 +372,8 @@ func (s *knowledgeTagService) enqueueIndexDeleteTask(ctx context.Context,
 		return
 	}
 
-	task := asynq.NewTask(types.TypeIndexDelete, payloadBytes, asynq.Queue("low"), asynq.MaxRetry(10))
-	info, err := s.task.Enqueue(task)
+	task := asynq.NewTask(types.TypeIndexDelete, payloadBytes)
+	info, err := s.task.Enqueue(task, asynq.Queue("low"), asynq.MaxRetry(10))
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue index delete task: %v", err)
 		return

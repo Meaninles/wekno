@@ -23,6 +23,8 @@ services:
       QDRANT_HOST: qdrant
       LOCAL_STORAGE_BASE_DIR: /workspace/.local-data/files
       DUCKDB_SKIP_EXTENSION_LOAD: "true"
+      CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: ${CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID:-weknora-app-dev}
+      CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART: "true"
       CGO_ENABLED: "1"
       CGO_CFLAGS: "-Wno-deprecated-declarations -Wno-gnu-folding-constant"
       WEKNORA_SANDBOX_MODE: ${WEKNORA_SANDBOX_MODE:-local}

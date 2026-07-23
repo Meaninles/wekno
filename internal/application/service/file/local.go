@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -17,11 +18,14 @@ import (
 
 // localFileService implements the FileService interface for local file system storage
 type localFileService struct {
-	baseDir     string // Base directory for file storage
-	externalURL string // External URL base for presigned URL generation (empty = return local:// paths)
+	baseDir       string // Base directory for file storage
+	externalURL   string // External URL base for presigned URL generation (empty = return local:// paths)
+	bindingSource string
 }
 
 const localScheme = "local://"
+
+var _ interfaces.PlannedFileService = (*localFileService)(nil)
 
 // CheckConnectivity verifies the local storage directory exists and is accessible.
 func (s *localFileService) CheckConnectivity(ctx context.Context) error {
@@ -40,9 +44,182 @@ func (s *localFileService) CheckConnectivity(ctx context.Context) error {
 // when set, GetFileURL returns presigned HTTP URLs instead of local:// paths.
 func NewLocalFileService(baseDir, externalURL string) interfaces.FileService {
 	return &localFileService{
-		baseDir:     baseDir,
-		externalURL: strings.TrimRight(externalURL, "/"),
+		baseDir:       baseDir,
+		externalURL:   strings.TrimRight(externalURL, "/"),
+		bindingSource: "direct",
 	}
+}
+
+func (s *localFileService) ReserveFilePath(
+	tenantID uint64, knowledgeID string, fileName string,
+) (string, error) {
+	key, err := plannedfile.FileKey("", tenantID, knowledgeID, fileName)
+	if err != nil {
+		return "", err
+	}
+	return s.validatePlannedDestination(localScheme + key)
+}
+
+func (s *localFileService) ReserveBytesPath(
+	tenantID uint64, fileName string, _ bool,
+) (string, error) {
+	key, err := plannedfile.BytesKey("", tenantID, fileName, "exports")
+	if err != nil {
+		return "", err
+	}
+	return s.validatePlannedDestination(localScheme + key)
+}
+
+func (s *localFileService) ReserveCopyPath(
+	srcPath string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	srcResolved, err := s.resolvePlannedSource(srcPath)
+	if err != nil {
+		return "", err
+	}
+	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+filepath.Ext(srcResolved))
+}
+
+func (s *localFileService) CommitFileAtPath(
+	ctx context.Context, file *multipart.FileHeader, filePath string,
+) error {
+	if file == nil {
+		return fmt.Errorf("planned local commit: file is nil")
+	}
+	_, destination, err := s.plannedDestination(filePath)
+	if err != nil {
+		return err
+	}
+	src, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("planned local commit: open upload: %w", err)
+	}
+	defer src.Close()
+	return atomicReplaceLocal(ctx, destination, func(dst io.Writer) error {
+		_, err := io.Copy(dst, src)
+		return err
+	})
+}
+
+func (s *localFileService) commitReaderAtPath(
+	ctx context.Context, reader io.ReadSeeker, _ int64, _ string, filePath string,
+) error {
+	_, destination, err := s.plannedDestination(filePath)
+	if err != nil {
+		return err
+	}
+	return atomicReplaceLocal(ctx, destination, func(dst io.Writer) error {
+		_, err := io.Copy(dst, reader)
+		return err
+	})
+}
+
+func (s *localFileService) CommitBytesAtPath(ctx context.Context, data []byte, filePath string) error {
+	_, destination, err := s.plannedDestination(filePath)
+	if err != nil {
+		return err
+	}
+	return atomicReplaceLocal(ctx, destination, func(dst io.Writer) error {
+		_, err := dst.Write(data)
+		return err
+	})
+}
+
+func (s *localFileService) CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error {
+	source, err := s.resolvePlannedSource(srcPath)
+	if err != nil {
+		return err
+	}
+	_, destination, err := s.plannedDestination(dstPath)
+	if err != nil {
+		return err
+	}
+	src, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("planned local copy: open source: %w", err)
+	}
+	defer src.Close()
+	return atomicReplaceLocal(ctx, destination, func(dst io.Writer) error {
+		_, err := io.Copy(dst, src)
+		return err
+	})
+}
+
+func (s *localFileService) validatePlannedDestination(filePath string) (string, error) {
+	canonical, _, err := s.plannedDestination(filePath)
+	return canonical, err
+}
+
+func (s *localFileService) plannedDestination(filePath string) (string, string, error) {
+	if s == nil || strings.TrimSpace(s.baseDir) == "" || !strings.HasPrefix(filePath, localScheme) {
+		return "", "", fmt.Errorf("planned local path is not bound to this service")
+	}
+	rel := strings.TrimPrefix(filePath, localScheme)
+	if strings.Contains(rel, ":") {
+		return "", "", fmt.Errorf("planned local path contains a volume or alternate-stream separator")
+	}
+	if err := plannedfile.ValidateKey(rel, ""); err != nil {
+		return "", "", fmt.Errorf("planned local path: %w", err)
+	}
+	candidate := filepath.Join(s.baseDir, filepath.FromSlash(rel))
+	resolved, err := secutils.SafePathUnderBase(s.baseDir, candidate)
+	if err != nil {
+		return "", "", fmt.Errorf("planned local path: %w", err)
+	}
+	return localScheme + filepath.ToSlash(rel), resolved, nil
+}
+
+func (s *localFileService) resolvePlannedSource(filePath string) (string, error) {
+	if marker := strings.Index(filePath, "://"); marker >= 0 && !strings.HasPrefix(filePath, localScheme) {
+		return "", fmt.Errorf("planned local copy rejected source %q: %w", filePath, ErrCrossBackendCopy)
+	}
+	candidate := s.normalizePathForBase(filePath)
+	resolved, err := secutils.SafePathUnderBase(s.baseDir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("planned local copy source: %w", err)
+	}
+	return resolved, nil
+}
+
+func atomicReplaceLocal(ctx context.Context, destination string, write func(io.Writer) error) (err error) {
+	if write == nil {
+		return fmt.Errorf("planned local commit: writer is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dir := filepath.Dir(destination)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("planned local commit: create directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".planned-*")
+	if err != nil {
+		return fmt.Errorf("planned local commit: create temporary file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+	if err := tmp.Chmod(0o644); err != nil {
+		return fmt.Errorf("planned local commit: set temporary permissions: %w", err)
+	}
+	if err := write(tmp); err != nil {
+		return fmt.Errorf("planned local commit: write temporary file: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("planned local commit: sync temporary file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("planned local commit: close temporary file: %w", err)
+	}
+	if err := os.Rename(tmpPath, destination); err != nil {
+		return fmt.Errorf("planned local commit: atomically replace destination: %w", err)
+	}
+	return nil
 }
 
 // SaveFile stores an uploaded file to the local file system
@@ -143,6 +320,10 @@ func (s *localFileService) DeleteFile(ctx context.Context, filePath string) erro
 
 	err = os.Remove(resolved)
 	if err != nil {
+		if os.IsNotExist(err) {
+			logger.Infof(ctx, "File already absent; delete is idempotently complete: %s", resolved)
+			return nil
+		}
 		logger.Errorf(ctx, "Failed to delete file: %v", err)
 		return fmt.Errorf("failed to delete file: %w", err)
 	}

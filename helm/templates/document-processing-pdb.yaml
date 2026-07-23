@@ -1,0 +1,30 @@
+{{/* Keep complete document workers and parser backends available during voluntary disruptions. */}}
+{{- if and .Values.app.enabled .Values.app.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "weknora.fullname" . }}-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "app" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.app.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" "app" "context" .) | nindent 6 }}
+---
+{{- end }}
+{{- if and .Values.docreader.enabled .Values.docreader.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "weknora.fullname" . }}-docreader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "docreader" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.docreader.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" "docreader" "context" .) | nindent 6 }}
+{{- end }}

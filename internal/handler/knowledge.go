@@ -17,6 +17,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgesearch"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -25,6 +26,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/utils"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
 
@@ -206,21 +208,25 @@ func (h *KnowledgeHandler) handleDuplicateKnowledgeError(c *gin.Context,
 
 // enqueueKnowledgeListDelete enqueues an async batch-delete task for the
 // given knowledge IDs and returns the asynq task ID.
+const knowledgeDeleteTaskBatchSize = 200
+
 func (h *KnowledgeHandler) enqueueKnowledgeListDelete(
-	ctx context.Context, tenantID uint64, ids []string,
+	ctx context.Context, tenantID uint64, expectedKnowledgeBaseID string, ids []string,
 ) (string, error) {
 	payload := types.KnowledgeListDeletePayload{
-		TenantID:     tenantID,
-		KnowledgeIDs: ids,
+		TenantID:                tenantID,
+		KnowledgeIDs:            ids,
+		ExpectedKnowledgeBaseID: expectedKnowledgeBaseID,
 	}
 	langfuse.InjectTracing(ctx, &payload)
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal payload: %w", err)
 	}
-	task := asynq.NewTask(types.TypeKnowledgeListDelete, payloadBytes,
-		asynq.Queue("low"), asynq.MaxRetry(3))
-	info, err := h.asynqClient.Enqueue(task)
+	task := asynq.NewTask(types.TypeKnowledgeListDelete, payloadBytes)
+	info, err := h.asynqClient.Enqueue(
+		task, asynq.Queue("low"), asynq.MaxRetry(3), asynq.Timeout(6*time.Hour),
+	)
 	if err != nil {
 		return "", fmt.Errorf("enqueue task: %w", err)
 	}
@@ -230,21 +236,76 @@ func (h *KnowledgeHandler) enqueueKnowledgeListDelete(
 // enqueueKnowledgeListReparse enqueues an async batch-reparse task for the
 // given knowledge IDs and returns the asynq task ID.
 func (h *KnowledgeHandler) enqueueKnowledgeListReparse(
-	ctx context.Context, tenantID uint64, ids []string, processConfig *types.KnowledgeProcessOverrides,
+	ctx context.Context,
+	tenantID uint64,
+	expectedKBID string,
+	ids []string,
+	processConfig *types.KnowledgeProcessOverrides,
 ) (string, error) {
+	knowledgeList, err := h.kgService.GetKnowledgeBatch(ctx, tenantID, ids)
+	if err != nil {
+		return "", fmt.Errorf("capture batch reparse snapshots: %w", err)
+	}
+	requested := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return "", errors.NewBadRequestError("batch reparse contains an empty knowledge ID")
+		}
+		if _, duplicate := requested[id]; duplicate {
+			return "", errors.NewBadRequestError("batch reparse contains duplicate knowledge IDs")
+		}
+		requested[id] = struct{}{}
+	}
+	snapshots := make(map[string]types.KnowledgeReparseExpectedSnapshot, len(ids))
+	for _, knowledge := range knowledgeList {
+		if knowledge == nil || knowledge.TenantID != tenantID {
+			return "", errors.NewBadRequestError("batch reparse knowledge identity changed before submission")
+		}
+		if _, wanted := requested[knowledge.ID]; !wanted {
+			return "", errors.NewBadRequestError("batch reparse returned an unexpected knowledge entry")
+		}
+		if knowledge.KnowledgeBaseID != expectedKBID {
+			return "", errors.NewBadRequestError("batch reparse knowledge moved before submission")
+		}
+		if _, duplicate := snapshots[knowledge.ID]; duplicate {
+			return "", errors.NewBadRequestError("batch reparse returned a duplicate knowledge entry")
+		}
+		snapshot, snapshotErr := processownership.CaptureBatchReparseSnapshot(knowledge)
+		if snapshotErr != nil {
+			return "", snapshotErr
+		}
+		snapshots[knowledge.ID] = snapshot
+	}
+	if len(snapshots) != len(requested) {
+		return "", errors.NewBadRequestError("some knowledge entries disappeared before batch reparse submission")
+	}
+
 	payload := types.KnowledgeListReparsePayload{
-		TenantID:      tenantID,
-		KnowledgeIDs:  ids,
-		ProcessConfig: processConfig,
+		TenantID:          tenantID,
+		KnowledgeIDs:      append([]string(nil), ids...),
+		ProcessConfig:     processConfig,
+		BatchID:           uuid.NewString(),
+		ExpectedSnapshots: snapshots,
+	}
+	if len(ids) == 1 {
+		payload.ProcessingGeneration, payload.ProcessingOwner = processownership.BatchReparseIdentity(
+			tenantID, payload.BatchID, ids[0],
+		)
+		snapshot := snapshots[ids[0]]
+		payload.ExpectedSnapshot = &snapshot
+		payload.ExpectedSnapshots = nil
 	}
 	langfuse.InjectTracing(ctx, &payload)
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal payload: %w", err)
 	}
-	task := asynq.NewTask(types.TypeKnowledgeListReparse, payloadBytes,
-		asynq.Queue("low"), asynq.MaxRetry(3))
-	info, err := h.asynqClient.Enqueue(task)
+	const maxBatchReparsePayloadBytes = 256 << 10
+	if len(payloadBytes) > maxBatchReparsePayloadBytes {
+		return "", errors.NewBadRequestError("batch reparse request is too large")
+	}
+	task := asynq.NewTask(types.TypeKnowledgeListReparse, payloadBytes)
+	info, err := h.asynqClient.Enqueue(task, asynq.Queue("low"), asynq.MaxRetry(3))
 	if err != nil {
 		return "", fmt.Errorf("enqueue task: %w", err)
 	}
@@ -953,7 +1014,7 @@ func (h *KnowledgeHandler) DeleteKnowledge(c *gin.Context) {
 		return
 	}
 
-	_, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleEditor)
+	knowledge, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleEditor)
 	if err != nil {
 		c.Error(err)
 		return
@@ -970,7 +1031,9 @@ func (h *KnowledgeHandler) DeleteKnowledge(c *gin.Context) {
 	}
 
 	logger.Infof(ctx, "Enqueuing knowledge delete, ID: %s", secutils.SanitizeForLog(id))
-	taskID, err := h.enqueueKnowledgeListDelete(effCtx, effectiveTenantID, []string{id})
+	taskID, err := h.enqueueKnowledgeListDelete(
+		effCtx, effectiveTenantID, knowledge.KnowledgeBaseID, []string{id},
+	)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue knowledge delete task: %v", err)
 		c.Error(errors.NewInternalServerError("Failed to enqueue delete task"))
@@ -1033,9 +1096,8 @@ func (h *KnowledgeHandler) BatchDeleteKnowledge(c *gin.Context) {
 		c.Error(errors.NewBadRequestError("ids cannot be empty"))
 		return
 	}
-	const maxBatch = 200
-	if len(ids) > maxBatch {
-		c.Error(errors.NewBadRequestError(fmt.Sprintf("too many ids (max %d per batch)", maxBatch)))
+	if len(ids) > knowledgeDeleteTaskBatchSize {
+		c.Error(errors.NewBadRequestError(fmt.Sprintf("too many ids (max %d per batch)", knowledgeDeleteTaskBatchSize)))
 		return
 	}
 
@@ -1073,7 +1135,7 @@ func (h *KnowledgeHandler) BatchDeleteKnowledge(c *gin.Context) {
 		}
 	}
 
-	taskID, err := h.enqueueKnowledgeListDelete(ctx, effectiveTenantID, ids)
+	taskID, err := h.enqueueKnowledgeListDelete(ctx, effectiveTenantID, kbID, ids)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue batch knowledge delete task: %v", err)
 		c.Error(errors.NewInternalServerError("Failed to enqueue batch delete task"))
@@ -1147,7 +1209,7 @@ func (h *KnowledgeHandler) ClearKnowledgeBaseContents(c *gin.Context) {
 		knowledgeIDs = append(knowledgeIDs, knowledge.ID)
 	}
 
-	taskID, err := h.enqueueKnowledgeListDelete(ctx, effectiveTenantID, knowledgeIDs)
+	taskID, err := h.enqueueKnowledgeListDelete(ctx, effectiveTenantID, kbID, knowledgeIDs)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue knowledge list delete task: %v", err)
 		c.Error(errors.NewInternalServerError("Failed to enqueue cleanup task"))
@@ -1160,7 +1222,10 @@ func (h *KnowledgeHandler) ClearKnowledgeBaseContents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Knowledge base contents clear task submitted",
-		"data":    gin.H{"deleted_count": len(knowledgeIDs)},
+		"data": gin.H{
+			"task_id":       taskID,
+			"deleted_count": len(knowledgeIDs),
+		},
 	})
 }
 
@@ -1605,7 +1670,7 @@ func (h *KnowledgeHandler) ReparseKnowledge(c *gin.Context) {
 	}
 
 	// Validate KB access with editor permission (reparse requires write access)
-	_, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleEditor)
+	knowledge, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleEditor)
 	if err != nil {
 		c.Error(err)
 		return
@@ -1626,8 +1691,17 @@ func (h *KnowledgeHandler) ReparseKnowledge(c *gin.Context) {
 		processOverrides = req.ProcessConfig
 	}
 
-	// Call service to reparse knowledge
-	knowledge, err := h.kgService.ReparseKnowledge(effCtx, id, processOverrides)
+	// Submit the single-document request through the same durable controller as
+	// batch reparse. The controller owns the stable child identity and performs
+	// destructive cleanup only after the request has been accepted by the task
+	// queue, so an HTTP process exit cannot strand a half-cleaned document.
+	_, err = h.enqueueKnowledgeListReparse(
+		effCtx,
+		knowledge.TenantID,
+		knowledge.KnowledgeBaseID,
+		[]string{id},
+		processOverrides,
+	)
 	if err != nil {
 		if appErr, ok := errors.IsAppError(err); ok {
 			c.Error(appErr)
@@ -2029,6 +2103,19 @@ type MoveKnowledgeResponse struct {
 	Message        string `json:"message"`
 }
 
+func validateMoveReparseSource(knowledge *types.Knowledge) error {
+	if knowledge == nil {
+		return goerrors.New("reparse move source knowledge is required")
+	}
+	if knowledge.Type == types.KnowledgeTypeFAQ {
+		return goerrors.New("reparse mode is not supported for FAQ knowledge; use reuse_vectors within the same store")
+	}
+	if !knowledge.IsManual() && strings.TrimSpace(knowledge.FilePath) == "" {
+		return fmt.Errorf("knowledge %s has no persistent source file for reparse mode", knowledge.ID)
+	}
+	return nil
+}
+
 // MoveKnowledge moves knowledge items from one knowledge base to another (async task).
 //
 // MoveKnowledge godoc
@@ -2134,6 +2221,12 @@ func (h *KnowledgeHandler) MoveKnowledge(c *gin.Context) {
 			c.Error(errors.NewBadRequestError(fmt.Sprintf("Knowledge item %s is not in completed status (current: %s)", kID, knowledge.ParseStatus)))
 			return
 		}
+		if req.Mode == "reparse" {
+			if err := validateMoveReparseSource(knowledge); err != nil {
+				c.Error(errors.NewBadRequestError(err.Error()))
+				return
+			}
+		}
 	}
 
 	// Generate task ID
@@ -2143,6 +2236,7 @@ func (h *KnowledgeHandler) MoveKnowledge(c *gin.Context) {
 	payload := types.KnowledgeMovePayload{
 		TenantID:     tenantID.(uint64),
 		TaskID:       taskID,
+		AttemptID:    taskID,
 		KnowledgeIDs: req.KnowledgeIDs,
 		SourceKBID:   req.SourceKBID,
 		TargetKBID:   req.TargetKBID,
@@ -2158,9 +2252,10 @@ func (h *KnowledgeHandler) MoveKnowledge(c *gin.Context) {
 	}
 
 	// Enqueue move task
-	task := asynq.NewTask(types.TypeKnowledgeMove, payloadBytes,
-		asynq.TaskID(taskID), asynq.Queue("default"), asynq.MaxRetry(3))
-	info, err := h.asynqClient.Enqueue(task)
+	task := asynq.NewTask(types.TypeKnowledgeMove, payloadBytes)
+	info, err := h.asynqClient.Enqueue(
+		task, asynq.TaskID(taskID), asynq.Queue("default"), asynq.MaxRetry(10),
+	)
 	if err != nil {
 		logger.Errorf(ctx, "MoveKnowledge: failed to enqueue task: %v", err)
 		c.Error(errors.NewInternalServerError("Failed to enqueue task"))
@@ -2383,9 +2478,14 @@ func (h *KnowledgeHandler) BatchReparseKnowledge(c *gin.Context) {
 		}
 	}
 
-	taskID, err := h.enqueueKnowledgeListReparse(ctx, effectiveTenantID, ids, req.ProcessConfig)
+	taskID, err := h.enqueueKnowledgeListReparse(ctx, effectiveTenantID, kbID, ids, req.ProcessConfig)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to enqueue batch knowledge reparse task: %v", err)
+		var appErr *errors.AppError
+		if goerrors.As(err, &appErr) {
+			c.Error(appErr)
+			return
+		}
 		c.Error(errors.NewInternalServerError("Failed to enqueue batch reparse task"))
 		return
 	}

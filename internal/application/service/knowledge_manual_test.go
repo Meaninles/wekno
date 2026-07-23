@@ -1,7 +1,12 @@
 package service
 
 import (
+	"errors"
 	"testing"
+	"time"
+
+	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestSanitizeManualDownloadFilename covers the filename-sanitization logic used
@@ -92,4 +97,62 @@ func TestSanitizeManualDownloadFilename(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManualKnowledgeUpdateValuesPreservesStorageOwnership(t *testing.T) {
+	knowledge := &types.Knowledge{
+		ID:                   "manual-1",
+		ParseStatus:          types.ParseStatusPending,
+		ProcessingGeneration: "generation-2",
+		ProcessingOwner:      "owner-2",
+		StorageSize:          4096,
+		ErrorMessage:         "",
+		EnableStatus:         "disabled",
+		EmbeddingModelID:     "embedding-1",
+	}
+
+	values := manualKnowledgeUpdateValues(knowledge)
+	_, writesStorage := values["storage_size"]
+	assert.False(t, writesStorage, "metadata/status updates must not discard or recreate a tenant storage charge")
+	assert.Equal(t, "generation-2", values["processing_generation"])
+	assert.Equal(t, "owner-2", values["processing_owner"])
+	assert.Equal(t, types.ParseStatusPending, values["parse_status"])
+}
+
+func TestProcessingFailureValuesPreserveRecoverableStorage(t *testing.T) {
+	values := processingFailureValuesPreservingStorage("cleanup failed", time.Unix(123, 0))
+	_, writesStorage := values["storage_size"]
+	assert.False(t, writesStorage, "failure handling must leave the row as owner of any unreleased charge")
+	assert.Equal(t, types.ParseStatusFailed, values["parse_status"])
+	assert.Equal(t, "cleanup failed", values["error_message"])
+}
+
+func TestCleanupArtifactsPrecedesFailureTransition(t *testing.T) {
+	var order []string
+	err := cleanupArtifactsBeforeFailureTransition(
+		func() error {
+			order = append(order, "cleanup")
+			return nil
+		},
+		func() error {
+			order = append(order, "failed")
+			return nil
+		},
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"cleanup", "failed"}, order)
+}
+
+func TestCleanupFailureLeavesLifecycleActive(t *testing.T) {
+	cleanupErr := errors.New("object store unavailable")
+	transitioned := false
+	err := cleanupArtifactsBeforeFailureTransition(
+		func() error { return cleanupErr },
+		func() error {
+			transitioned = true
+			return nil
+		},
+	)
+	assert.ErrorIs(t, err, cleanupErr)
+	assert.False(t, transitioned, "Failed must not be published while partial artifacts may remain")
 }

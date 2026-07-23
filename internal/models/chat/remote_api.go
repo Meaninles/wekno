@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/provider"
@@ -79,6 +80,14 @@ func NewRemoteAPIChat(chatConfig *ChatConfig) (*RemoteAPIChat, error) {
 			// SDK 默认未显式设置时 HTTPClient 为 nil，此时构造一个新的注入了 header 的 client。
 			config.HTTPClient = secutils.WrapHTTPClientWithHeaders(nil, chatConfig.CustomHeaders)
 		}
+	}
+	// Capture status and Retry-After before go-openai consumes the response.
+	// The SDK preserves status codes in its error types but drops headers,
+	// which prevents higher-level pipelines from respecting provider rate
+	// limits. Keep this wrapper outermost so it observes the final response
+	// after custom-header injection and redirects.
+	if httpClient, ok := config.HTTPClient.(*http.Client); ok {
+		config.HTTPClient = wrapHTTPClientForResponseMetadata(httpClient)
 	}
 
 	modelName := chatConfig.ModelName
@@ -167,6 +176,8 @@ func (c *RemoteAPIChat) Chat(ctx context.Context, messages []Message, opts *Chat
 	// 调用方若显式设置了更短或更长的 deadline，都会被原样尊重。
 	timeoutCtx, cancel := withLLMTimeout(ctx, defaultChatTimeout)
 	defer cancel()
+	responseMeta := &responseMetadata{}
+	timeoutCtx = context.WithValue(timeoutCtx, responseMetadataContextKey{}, responseMeta)
 
 	body, endpoint, useRawHTTP, err := c.buildOutbound(messages, opts, false)
 	if err != nil {
@@ -184,10 +195,11 @@ func (c *RemoteAPIChat) Chat(ctx context.Context, messages []Message, opts *Chat
 			logger.Warnf(timeoutCtx, "[LLM Request] Model %s does not support multimodal, retrying without images", c.modelName)
 			cleaned := stripImagesFromMessages(messages)
 			req = c.shapedRequest(cleaned, opts, false)
+			responseMeta.reset()
 			resp, err = c.client.CreateChatCompletion(timeoutCtx, req)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("create chat completion: %w", err)
+			return nil, fmt.Errorf("create chat completion: %w", enrichRemoteAPIError(err, responseMeta))
 		}
 	}
 
@@ -237,7 +249,7 @@ func (c *RemoteAPIChat) chatWithRawHTTP(ctx context.Context, endpoint string, cu
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, newHTTPStatusError(resp, string(body), nil, time.Now())
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -264,6 +276,8 @@ func (c *RemoteAPIChat) ChatStream(ctx context.Context, messages []Message, opts
 	// 仅在调用方未设置 deadline 时附加兜底超时；流式调用默认超时更长，
 	// 因为带思考/推理的模型可能数十秒甚至几分钟才产出首 token。
 	timeoutCtx, cancel := withLLMTimeout(ctx, defaultStreamTimeout)
+	responseMeta := &responseMetadata{}
+	timeoutCtx = context.WithValue(timeoutCtx, responseMetadataContextKey{}, responseMeta)
 
 	body, endpoint, useRawHTTP, err := c.buildOutbound(messages, opts, true)
 	if err != nil {
@@ -291,12 +305,13 @@ func (c *RemoteAPIChat) ChatStream(ctx context.Context, messages []Message, opts
 			logger.Warnf(timeoutCtx, "[LLM Stream] Model %s does not support multimodal, retrying without images", c.modelName)
 			cleaned := stripImagesFromMessages(messages)
 			req = c.shapedRequest(cleaned, opts, true)
+			responseMeta.reset()
 			stream, err = c.client.CreateChatCompletionStream(timeoutCtx, req)
 		}
 		if err != nil {
 			cancel()
 			close(streamChan)
-			return nil, fmt.Errorf("create chat completion stream: %w", err)
+			return nil, fmt.Errorf("create chat completion stream: %w", enrichRemoteAPIError(err, responseMeta))
 		}
 	}
 
@@ -369,7 +384,7 @@ func (c *RemoteAPIChat) chatStreamWithRawHTTP(ctx context.Context, endpoint stri
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, newHTTPStatusError(resp, string(body), nil, time.Now())
 	}
 
 	streamChan := make(chan types.StreamResponse)

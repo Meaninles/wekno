@@ -13,7 +13,9 @@ type WikiLogEntryRepository interface {
 	// AppendBatch inserts a batch of events in a single INSERT...VALUES
 	// statement. All entries in a batch must belong to the same KB in
 	// practice, but the repo does not enforce that — the caller owns the
-	// grouping.
+	// grouping. Queue-backed entries carrying SourceOpID are idempotent:
+	// replaying the same durable pending operation must not append a second
+	// user-visible event.
 	AppendBatch(ctx context.Context, entries []*types.WikiLogEntry) error
 
 	// List returns up to `limit` entries in (knowledge_base_id, id DESC)

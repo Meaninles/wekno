@@ -287,6 +287,33 @@ func (e *elasticsearchRepository) DeleteByKnowledgeIDList(ctx context.Context,
 	return nil
 }
 
+func (e *elasticsearchRepository) DeleteByKnowledgeBaseAndKnowledgeIDList(
+	ctx context.Context,
+	knowledgeBaseID string,
+	knowledgeIDList []string,
+	dimension int,
+	knowledgeType string,
+) error {
+	if knowledgeBaseID == "" || len(knowledgeIDList) == 0 {
+		return nil
+	}
+	filter := []types.Query{
+		{Terms: &types.TermsQuery{TermsQuery: map[string]types.TermsQueryField{
+			e.idField("knowledge_base_id"): []string{knowledgeBaseID},
+		}}},
+		{Terms: &types.TermsQuery{TermsQuery: map[string]types.TermsQueryField{
+			e.idField("knowledge_id"): knowledgeIDList,
+		}}},
+	}
+	_, err := e.client.DeleteByQuery(e.index).
+		Query(&types.Query{Bool: &types.BoolQuery{Filter: filter}}).
+		Do(ctx)
+	if err != nil {
+		return fmt.Errorf("elasticsearch delete scoped knowledge indices: %w", err)
+	}
+	return nil
+}
+
 // getBaseConds creates the base query conditions for retrieval operations
 // Returns a slice of Query objects with must and must_not conditions
 // KnowledgeBaseIDs and KnowledgeIDs use AND logic (search specific documents within knowledge bases)

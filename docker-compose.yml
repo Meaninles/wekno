@@ -202,7 +202,15 @@ services:
       #   >0 强制限额；=0 走 handler 默认；<0 关闭限额（不建议共享部署使用）
       - WEKNORA_TENANT_ENABLE_RBAC=${WEKNORA_TENANT_ENABLE_RBAC:-}
       - WEKNORA_TENANT_MAX_OWNED_PER_USER=${WEKNORA_TENANT_MAX_OWNED_PER_USER:-}
-      - WEKNORA_ASYNQ_CONCURRENCY=${WEKNORA_ASYNQ_CONCURRENCY:-32}
+      # Per-instance concurrency for complete document workflows (parse,
+      # vectorization and counted derivatives). Cluster capacity scales with
+      # the number of application replicas.
+      - WEKNORA_ASYNQ_CONCURRENCY=${WEKNORA_ASYNQ_CONCURRENCY:-4}
+      # container_name is unique in this Compose project; Docker never runs
+      # two incarnations of it at once, so a restart can safely adopt the
+      # prior boot's document workflows.
+      - CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID=${CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID:-weknora-app}
+      - CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART=true
       - APK_MIRROR_ARG=${APK_MIRROR_ARG:-}
       - WEKNORA_BOOTSTRAP_SYSTEM_ADMIN_EMAIL=${WEKNORA_BOOTSTRAP_SYSTEM_ADMIN_EMAIL:-}
     depends_on:

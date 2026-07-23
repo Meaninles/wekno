@@ -613,6 +613,10 @@ export default {
     statusProcessing: 'Processing',
     statusFinalizing: 'Optimizing',
     statusPending: 'Pending',
+    documentQueuePosition: 'Queued {position}/{total}',
+    documentQueuePositionOnly: 'Queue #{position}',
+    documentQueueTooltip: '{total} documents are waiting system-wide; this document is #{position}',
+    documentQueueTooltipPositionOnly: 'This document is #{position} in the system-wide parsing queue',
     statusFailed: 'Failed',
     statusCancelled: 'Cancelled',
     statusDraft: 'Draft',
@@ -3544,8 +3548,8 @@ export default {
           default_storage_quota_gb: 'Default storage quota for new tenants (GB)',
         },
         asynq: {
-          concurrency: 'Normal task worker concurrency',
-          heavy_document_concurrency: 'Heavy document worker concurrency',
+          concurrency: 'Document concurrency per instance',
+          heavy_document_concurrency: 'Heavy document concurrency (advanced)',
         },
       },
       keyDescriptions: {
@@ -3565,9 +3569,9 @@ export default {
         },
         asynq: {
           concurrency:
-            'Normal async task worker concurrency, excluding the heavy document parsing queue. Normal document parsing, embedding, and similar tasks are mostly I/O-bound, so raising this value can shorten queue time for bulk uploads. Requires a service process restart to take effect.',
+            'Number of documents each full processing instance may handle concurrently. One slot follows a document through parsing, chunking, vectorization, and related derived work; adding instances scales total system throughput horizontally. Restart every processing instance after changing this value.',
           heavy_document_concurrency:
-            'Dedicated worker concurrency for heavy document parsing. Documents that hit file-size or DOCX/XLSX/CSV structural heavy thresholds are processed in an isolated heavy queue and do not consume normal task workers. Default is 2 and requires a service process restart to take effect.',
+            'Per-instance safety cap for documents that hit file-size or structural heavy thresholds. Use "Document concurrency per instance" for normal capacity planning; this advanced value rarely needs adjustment and requires all processing instances to restart.',
         },
       },
       enumLabels: {

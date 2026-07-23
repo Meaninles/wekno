@@ -1,31 +1,41 @@
 package file
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"os"
-	"path/filepath"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
+	"github.com/Tencent/WeKnora/internal/custom/modules/storagebinding"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/google/uuid"
 )
 
 type obsFileService struct {
-	client      *s3.Client
-	bucketName  string
-	endpoint    string
-	region      string
-	pathPrefix  string
-	proxyDomain string
+	client          *s3.Client
+	bucketName      string
+	endpoint        string
+	region          string
+	pathPrefix      string
+	proxyDomain     string
+	bindingSource   string
+	credentialScope string
+	credentialRef   string
 }
+
+const obsProvider = "obs"
+
+var _ interfaces.PlannedFileService = (*obsFileService)(nil)
 
 type obsEndpointResolver struct {
 	url string
@@ -43,7 +53,33 @@ func NewObsFileService(
 	endpoint, region, accessKeyID, secretAccessKey, bucketName string,
 	pathPrefix string,
 ) (interfaces.FileService, error) {
+	svc, err := newObsFileService(
+		endpoint, region, accessKeyID, secretAccessKey, bucketName, pathPrefix,
+		strings.TrimSuffix(os.Getenv("OBS_PROXY_DOMAIN"), "/"),
+	)
+	if err != nil {
+		return nil, err
+	}
 
+	_, err = svc.client.HeadBucket(context.Background(), &s3.HeadBucketInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		_, createErr := svc.client.CreateBucket(context.Background(), &s3.CreateBucketInput{
+			Bucket: aws.String(bucketName),
+		})
+		if createErr != nil {
+			fmt.Printf("Warning: bucket %s may not exist or cannot be created: %v\n", bucketName, createErr)
+		}
+	}
+	return svc, nil
+}
+
+// newObsFileService constructs a client without probing or provisioning a
+// bucket. Historical binding resolution must use this read-only constructor.
+func newObsFileService(
+	endpoint, region, accessKeyID, secretAccessKey, bucketName, pathPrefix, proxyDomain string,
+) (*obsFileService, error) {
 	client := s3.New(s3.Options{
 		Region:           region,
 		EndpointResolver: &obsEndpointResolver{url: endpoint},
@@ -51,28 +87,153 @@ func NewObsFileService(
 		UsePathStyle:     true,
 	})
 
-	_, err := client.HeadBucket(context.Background(), &s3.HeadBucketInput{
-		Bucket: aws.String(bucketName),
+	credentialRef, err := storagebinding.CredentialProfileReference(
+		storagebinding.CredentialScopeDirect, storagebinding.ProviderOBS, "default",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to identify OBS credentials: %w", err)
+	}
+	return &obsFileService{
+		client:          client,
+		bucketName:      bucketName,
+		endpoint:        endpoint,
+		region:          region,
+		pathPrefix:      strings.Trim(pathPrefix, "/"),
+		proxyDomain:     strings.TrimSuffix(proxyDomain, "/"),
+		bindingSource:   "direct",
+		credentialScope: "direct",
+		credentialRef:   credentialRef,
+	}, nil
+}
+
+func (s *obsFileService) ReserveFilePath(
+	tenantID uint64, knowledgeID string, fileName string,
+) (string, error) {
+	key, err := plannedfile.FileKey(s.pathPrefix, tenantID, knowledgeID, fileName)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath(obsProvider, s.bucketName, key)
+}
+
+func (s *obsFileService) ReserveBytesPath(
+	tenantID uint64, fileName string, temp bool,
+) (string, error) {
+	name, err := plannedfile.NewObjectName(fileName)
+	if err != nil {
+		return "", err
+	}
+	segments := []string{strconv.FormatUint(tenantID, 10), name}
+	if temp {
+		segments = append([]string{"temp"}, segments...)
+	}
+	key, err := plannedfile.BuildKey(s.pathPrefix, segments...)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath(obsProvider, s.bucketName, key)
+}
+
+func (s *obsFileService) ReserveCopyPath(
+	srcPath string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	srcKey, err := plannedfile.ParseBucketPath(srcPath, obsProvider, s.bucketName, "")
+	if err != nil {
+		return "", fmt.Errorf("obs copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+	}
+	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+path.Ext(srcKey))
+}
+
+func (s *obsFileService) plannedMainKey(filePath string) (string, error) {
+	key, err := plannedfile.ParseBucketPath(filePath, obsProvider, s.bucketName, s.pathPrefix)
+	if err != nil {
+		return "", fmt.Errorf("planned OBS destination is not bound to this service: %w", err)
+	}
+	return key, nil
+}
+
+func (s *obsFileService) CommitFileAtPath(
+	ctx context.Context, file *multipart.FileHeader, filePath string,
+) error {
+	if file == nil {
+		return fmt.Errorf("planned OBS commit: file is nil")
+	}
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	src, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("planned OBS commit: open upload: %w", err)
+	}
+	defer src.Close()
+	contentType := file.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucketName), Key: aws.String(key), Body: src,
+		ContentLength: aws.Int64(file.Size), ContentType: aws.String(contentType),
 	})
 	if err != nil {
-		_, createErr := client.CreateBucket(context.Background(), &s3.CreateBucketInput{
-			Bucket: aws.String(bucketName),
-		})
-		if createErr != nil {
-			fmt.Printf("Warning: bucket %s may not exist or cannot be created: %v\n", bucketName, createErr)
-		}
+		return fmt.Errorf("planned OBS commit: upload: %w", err)
 	}
+	return nil
+}
 
-	proxyDomain := strings.TrimSuffix(os.Getenv("OBS_PROXY_DOMAIN"), "/")
+func (s *obsFileService) commitReaderAtPath(
+	ctx context.Context, reader io.ReadSeeker, size int64, contentType, filePath string,
+) error {
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucketName), Key: aws.String(key), Body: reader,
+		ContentLength: aws.Int64(size), ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return fmt.Errorf("planned OBS stream commit: %w", err)
+	}
+	return nil
+}
 
-	return &obsFileService{
-		client:      client,
-		bucketName:  bucketName,
-		endpoint:    endpoint,
-		region:      region,
-		pathPrefix:  strings.Trim(pathPrefix, "/"),
-		proxyDomain: proxyDomain,
-	}, nil
+func (s *obsFileService) CommitBytesAtPath(ctx context.Context, data []byte, filePath string) error {
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucketName), Key: aws.String(key), Body: bytes.NewReader(data),
+		ContentLength: aws.Int64(int64(len(data))), ContentType: aws.String("application/octet-stream"),
+		ACL: "public-read",
+	})
+	if err != nil {
+		return fmt.Errorf("planned OBS bytes commit: upload: %w", err)
+	}
+	return nil
+}
+
+func (s *obsFileService) CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error {
+	srcKey, err := plannedfile.ParseBucketPath(srcPath, obsProvider, s.bucketName, "")
+	if err != nil {
+		return fmt.Errorf("planned OBS copy source: %w", err)
+	}
+	dstKey, err := s.plannedMainKey(dstPath)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket: aws.String(s.bucketName), CopySource: aws.String(s.bucketName + "/" + srcKey),
+		Key: aws.String(dstKey),
+	})
+	if err != nil {
+		return fmt.Errorf("planned OBS copy commit: %w", err)
+	}
+	return nil
 }
 
 func CheckObsConnectivity(ctx context.Context, endpoint, region, accessKey, secretKey, bucketName string) error {
@@ -109,6 +270,13 @@ func (s *obsFileService) CheckConnectivity(ctx context.Context) error {
 }
 
 func (s *obsFileService) parseObsFilePath(filePath string) (string, error) {
+	if strings.HasPrefix(filePath, obsProvider+"://") {
+		key, err := plannedfile.ParseBucketPath(filePath, obsProvider, s.bucketName, "")
+		if err != nil {
+			return "", fmt.Errorf("invalid OBS file path: %w", err)
+		}
+		return key, nil
+	}
 	prefix := s.getPrifix()
 
 	if strings.HasPrefix(filePath, prefix) {
@@ -116,7 +284,7 @@ func (s *obsFileService) parseObsFilePath(filePath string) (string, error) {
 		// With proxy domain: path is {prefix}/{objectKey} (no bucket name)
 		if s.proxyDomain != "" {
 			rest = strings.TrimPrefix(rest, "/")
-			if rest != "" {
+			if err := plannedfile.ValidateKey(rest, ""); err == nil {
 				return rest, nil
 			}
 			return "", fmt.Errorf("invalid OBS file path: %s", filePath)
@@ -128,6 +296,12 @@ func (s *obsFileService) parseObsFilePath(filePath string) (string, error) {
 		}
 		return "", fmt.Errorf("invalid OBS file path: %s", filePath)
 	}
+	if strings.Contains(filePath, "://") {
+		return "", fmt.Errorf("invalid OBS file provider")
+	}
+	if err := plannedfile.ValidateKey(filePath, ""); err != nil {
+		return "", fmt.Errorf("invalid OBS object key: %w", err)
+	}
 	return filePath, nil
 }
 
@@ -138,45 +312,31 @@ func (s *obsFileService) getPrifix() string {
 	return "obs://"
 }
 
+func (s *obsFileService) legacyOBSPath(filePath string) (string, error) {
+	if s.proxyDomain == "" {
+		return filePath, nil
+	}
+	key, err := plannedfile.ParseBucketPath(filePath, obsProvider, s.bucketName, s.pathPrefix)
+	if err != nil {
+		return "", err
+	}
+	return s.proxyDomain + "/" + key, nil
+}
+
 func (s *obsFileService) SaveFile(ctx context.Context,
 	file *multipart.FileHeader, tenantID uint64, knowledgeID string,
 ) (string, error) {
-	ext := filepath.Ext(file.Filename)
-
-	var objectKey string
-	if s.pathPrefix != "" {
-		objectKey = fmt.Sprintf("%s/%d/%s/%s%s", s.pathPrefix, tenantID, knowledgeID, uuid.New().String(), ext)
-	} else {
-		objectKey = fmt.Sprintf("%d/%s/%s%s", tenantID, knowledgeID, uuid.New().String(), ext)
+	if file == nil {
+		return "", fmt.Errorf("failed to save file to OBS: file is nil")
 	}
-
-	src, err := file.Open()
+	filePath, err := s.ReserveFilePath(tenantID, knowledgeID, file.Filename)
 	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
+		return "", err
 	}
-	defer src.Close()
-
-	contentType := file.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	if err := s.CommitFileAtPath(ctx, file, filePath); err != nil {
+		return "", err
 	}
-
-	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(s.bucketName),
-		Key:           aws.String(objectKey),
-		Body:          src,
-		ContentLength: aws.Int64(file.Size),
-		ContentType:   aws.String(contentType),
-		// ACL:           "private",
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload file to OBS: %w", err)
-	}
-	prefix := s.getPrifix()
-	if s.proxyDomain != "" {
-		return fmt.Sprintf("%s%s", prefix, objectKey), nil
-	}
-	return fmt.Sprintf("%s%s/%s", prefix, s.bucketName, objectKey), nil
+	return s.legacyOBSPath(filePath)
 }
 
 func (s *obsFileService) GetFile(ctx context.Context, filePath string) (io.ReadCloser, error) {
@@ -240,76 +400,42 @@ func (s *obsFileService) CopyFile(ctx context.Context,
 	// Reject paths that do not use this service's prefix (proxy domain or obs://).
 	// parseObsFilePath falls back to returning the raw input for unknown prefixes,
 	// so guard explicitly here to detect cross-backend sources.
-	if !strings.HasPrefix(srcPath, s.getPrifix()) {
-		return "", fmt.Errorf("obs copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+	canonicalSource := srcPath
+	if !strings.HasPrefix(srcPath, obsProvider+"://") {
+		if !strings.HasPrefix(srcPath, s.getPrifix()) {
+			return "", fmt.Errorf("obs copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+		}
+		srcKey, err := s.parseObsFilePath(srcPath)
+		if err != nil {
+			return "", fmt.Errorf("obs copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+		}
+		canonicalSource, err = plannedfile.FormatBucketPath(obsProvider, s.bucketName, srcKey)
+		if err != nil {
+			return "", err
+		}
 	}
-	srcKey, err := s.parseObsFilePath(srcPath)
+	newPath, err := s.ReserveCopyPath(canonicalSource, tenantID, knowledgeID)
 	if err != nil {
 		return "", fmt.Errorf("obs copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
 	}
-
-	ext := filepath.Ext(srcPath)
-	var destKey string
-	if s.pathPrefix != "" {
-		destKey = fmt.Sprintf("%s/%d/%s/%s%s", s.pathPrefix, tenantID, knowledgeID, uuid.New().String(), ext)
-	} else {
-		destKey = fmt.Sprintf("%d/%s/%s%s", tenantID, knowledgeID, uuid.New().String(), ext)
+	if err := s.CommitCopyAtPath(ctx, canonicalSource, newPath); err != nil {
+		return "", err
 	}
-
-	// CopySource is "bucket/key"; the '/' separators must NOT be percent-encoded
-	// (url.PathEscape would turn them into %2F and break the bucket/key split).
-	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:     aws.String(s.bucketName),
-		CopySource: aws.String(s.bucketName + "/" + srcKey),
-		Key:        aws.String(destKey),
-	})
+	legacyPath, err := s.legacyOBSPath(newPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to copy file in OBS: %w", err)
+		return "", err
 	}
-
-	prefix := s.getPrifix()
-	var newPath string
-	if s.proxyDomain != "" {
-		newPath = fmt.Sprintf("%s%s", prefix, destKey)
-	} else {
-		newPath = fmt.Sprintf("%s%s/%s", prefix, s.bucketName, destKey)
-	}
-	logger.Infof(ctx, "Copied OBS object %s to %s", srcPath, newPath)
-	return newPath, nil
+	logger.Infof(ctx, "Copied OBS object %s to %s", srcPath, legacyPath)
+	return legacyPath, nil
 }
 
 func (s *obsFileService) SaveBytes(ctx context.Context, data []byte, tenantID uint64, fileName string, temp bool) (string, error) {
-	ext := filepath.Ext(fileName)
-
-	var objectKey string
-	if temp {
-		if s.pathPrefix != "" {
-			objectKey = fmt.Sprintf("%s/temp/%d/%s%s", s.pathPrefix, tenantID, uuid.New().String(), ext)
-		} else {
-			objectKey = fmt.Sprintf("temp/%d/%s%s", tenantID, uuid.New().String(), ext)
-		}
-	} else {
-		if s.pathPrefix != "" {
-			objectKey = fmt.Sprintf("%s/%d/%s%s", s.pathPrefix, tenantID, uuid.New().String(), ext)
-		} else {
-			objectKey = fmt.Sprintf("%d/%s%s", tenantID, uuid.New().String(), ext)
-		}
-	}
-
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(s.bucketName),
-		Key:         aws.String(objectKey),
-		Body:        strings.NewReader(string(data)),
-		ContentType: aws.String("application/octet-stream"),
-		ACL:         "public-read",
-	})
+	filePath, err := s.ReserveBytesPath(tenantID, fileName, temp)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload bytes to OBS: %w", err)
+		return "", err
 	}
-
-	prefix := s.getPrifix()
-	if s.proxyDomain != "" {
-		return fmt.Sprintf("%s%s", prefix, objectKey), nil
+	if err := s.CommitBytesAtPath(ctx, data, filePath); err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("%s%s/%s", prefix, s.bucketName, objectKey), nil
+	return s.legacyOBSPath(filePath)
 }

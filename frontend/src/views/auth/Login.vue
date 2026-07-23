@@ -276,6 +276,7 @@ import {
   type InviteLookup,
 } from '@/api/auth'
 import { encryptAuthPassword, getAuthChallenge, type AuthChallenge } from '@/custom/modules/authSecurity/api'
+import { hasPasswordTypeMix } from '@/custom/modules/authSecurity/passwordPolicy'
 import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
 import { consumeShareReturnPath, rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn'
@@ -335,24 +336,6 @@ const oidcLoginText = computed(() => {
 const customSSOLoginText = computed(() => {
   return customSSOProviderName.value ? `使用${customSSOProviderName.value}登录` : '统一身份认证登录'
 })
-
-function hasPasswordTypeMix(value: unknown) {
-  const password = String(value || '')
-  if (!password) return true
-  let hasLetter = false
-  let hasNumber = false
-  let hasSymbol = false
-  for (const char of Array.from(password)) {
-    if (/\p{L}/u.test(char)) {
-      hasLetter = true
-    } else if (/\p{N}/u.test(char)) {
-      hasNumber = true
-    } else if (!/\s/u.test(char)) {
-      hasSymbol = true
-    }
-  }
-  return [hasLetter, hasNumber, hasSymbol].filter(Boolean).length >= 2
-}
 
 // Login form data
 const formData = reactive<{ [key: string]: any }>({

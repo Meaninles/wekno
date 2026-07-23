@@ -716,6 +716,9 @@ func (s *userService) ChangePassword(ctx context.Context, userID string, oldPass
 	if err := ValidatePasswordComplexity(newPassword); err != nil {
 		return err
 	}
+	if oldPassword == newPassword {
+		return errors.New("new password must be different from the current password")
+	}
 
 	// Hash new password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -723,10 +726,13 @@ func (s *userService) ChangePassword(ctx context.Context, userID string, oldPass
 		return err
 	}
 
-	user.PasswordHash = string(hashedPassword)
-	user.UpdatedAt = time.Now()
-
-	return s.userRepo.UpdateUser(ctx, user)
+	return s.userRepo.ChangePasswordAndRevokeTokens(
+		ctx,
+		user.ID,
+		user.PasswordHash,
+		string(hashedPassword),
+		time.Now(),
+	)
 }
 
 // ValidatePassword validates user password

@@ -1,4 +1,4 @@
-import { get } from '@/utils/request'
+import { get, post } from '@/utils/request'
 
 export interface AuthChallenge {
   challenge_id: string
@@ -8,6 +8,20 @@ export interface AuthChallenge {
 }
 
 export type LoginChallenge = AuthChallenge
+
+export interface PasswordCapability {
+  account_source: 'local' | 'iam'
+  can_change_password: boolean
+  reason?: string
+}
+
+export interface ChangePasswordPayload {
+  encrypted_old_password: string
+  encrypted_new_password: string
+  encrypted_confirm_password: string
+  challenge_id: string
+  captcha_answer: string
+}
 
 export async function getAuthChallenge(): Promise<{ success: boolean; data?: AuthChallenge; message?: string }> {
   try {
@@ -22,6 +36,36 @@ export async function getAuthChallenge(): Promise<{ success: boolean; data?: Aut
 }
 
 export const getLoginChallenge = getAuthChallenge
+
+export async function getPasswordCapability(): Promise<{
+  success: boolean
+  data?: PasswordCapability
+  message?: string
+}> {
+  try {
+    const response = await get('/api/v1/custom/auth-security/password-capability')
+    return response as {
+      success: boolean
+      data?: PasswordCapability
+      message?: string
+    }
+  } catch (error: any) {
+    return {
+      success: false,
+      message: error?.message || '读取账号密码设置失败',
+    }
+  }
+}
+
+export function changeLocalPassword(payload: ChangePasswordPayload): Promise<{
+  success: boolean
+  message?: string
+}> {
+  return post('/api/v1/auth/change-password', payload) as unknown as Promise<{
+    success: boolean
+    message?: string
+  }>
+}
 
 export async function encryptAuthPassword(password: string, publicKeyPem: string): Promise<string> {
   const key = await window.crypto.subtle.importKey(

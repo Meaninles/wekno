@@ -2,6 +2,7 @@ package interfaces
 
 import (
 	"context"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -92,6 +93,14 @@ type UserRepository interface {
 	GetUserByTenantID(ctx context.Context, tenantID uint64) (*types.User, error)
 	// UpdateUser updates a user
 	UpdateUser(ctx context.Context, user *types.User) error
+	// ChangePasswordAndRevokeTokens atomically replaces the password hash
+	// (using oldPasswordHash as a compare-and-swap guard) and revokes every
+	// outstanding access/refresh token owned by the user.
+	ChangePasswordAndRevokeTokens(
+		ctx context.Context,
+		userID, oldPasswordHash, newPasswordHash string,
+		updatedAt time.Time,
+	) error
 	// DeleteUser deletes a user
 	DeleteUser(ctx context.Context, id string) error
 	// ListUsers lists users with pagination

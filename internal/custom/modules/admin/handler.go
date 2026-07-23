@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -48,6 +50,27 @@ func (h *Handler) SearchUsers(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
+}
+
+func (h *Handler) CreateLocalAccount(c *gin.Context) {
+	var req CreateLocalAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "账号参数无效"})
+		return
+	}
+	result, err := h.service.CreateLocalAccount(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	actorID := c.GetString(types.UserIDContextKey.String())
+	logger.Infof(
+		c.Request.Context(),
+		"[custom admin] local account created actor=%s target=%s",
+		secutils.SanitizeForLog(actorID),
+		secutils.SanitizeForLog(result.User.Username),
+	)
+	c.JSON(http.StatusCreated, gin.H{"success": true, "data": result})
 }
 
 type setUserActiveRequest struct {
@@ -102,15 +125,24 @@ func (h *Handler) BatchSetUsersActive(c *gin.Context) {
 
 func writeError(c *gin.Context, err error) {
 	status := http.StatusInternalServerError
+	message := err.Error()
 	switch {
-	case errors.Is(err, ErrQueryRequired), errors.Is(err, ErrInvalidActiveState):
+	case errors.Is(err, ErrQueryRequired),
+		errors.Is(err, ErrInvalidActiveState),
+		errors.Is(err, ErrInvalidUsername),
+		errors.Is(err, ErrDisplayNameTooLong):
 		status = http.StatusBadRequest
+	case errors.Is(err, ErrLocalUsernameExists), errors.Is(err, ErrIAMUsernameExists):
+		status = http.StatusConflict
 	case errors.Is(err, ErrCannotDisableSelf), errors.Is(err, ErrLastActiveSystemAdmin):
 		status = http.StatusForbidden
 	case errors.Is(err, ErrUserNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, ErrAccountCreateFailed):
+		logger.Errorf(c.Request.Context(), "[custom admin] local account creation failed: %v", err)
+		message = ErrAccountCreateFailed.Error()
 	}
-	c.JSON(status, gin.H{"success": false, "message": err.Error()})
+	c.JSON(status, gin.H{"success": false, "message": message})
 }
 
 func splitList(value string) []string {

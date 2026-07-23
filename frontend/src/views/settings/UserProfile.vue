@@ -66,6 +66,8 @@
         </div>
       </div>
     </div>
+
+    <PasswordSettings v-if="!loading && !error" />
   </div>
 </template>
 
@@ -73,6 +75,7 @@
 import { ref, onMounted } from 'vue'
 import { getCurrentUser, type UserInfo } from '@/api/auth'
 import { useI18n } from 'vue-i18n'
+import PasswordSettings from '@/custom/modules/authSecurity/PasswordSettings.vue'
 
 const { t, locale } = useI18n()
 

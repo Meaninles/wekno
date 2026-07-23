@@ -132,6 +132,12 @@ export interface AdminBulkUserActiveResult {
   skipped_system_admins: number
 }
 
+export interface AdminCreatedLocalAccount {
+  user: AdminManagedUser
+  temporary_password: string
+  warnings?: string[]
+}
+
 export function listCustomUsers(): Promise<{ data: CustomUserSummary[] }> {
   return get('/api/v1/custom/config-center/users')
 }
@@ -218,6 +224,17 @@ export function searchAdminUsers(params: {
   if (params.direct) search.set('direct', 'true')
   search.set('limit', String(params.limit ?? 100))
   return get(`/api/v1/custom/admin/users?${search.toString()}`) as unknown as Promise<{ success: boolean; data: AdminManagedUser[]; message?: string }>
+}
+
+export function createAdminLocalAccount(input: {
+  username: string
+  display_name?: string
+}): Promise<{ success: boolean; data?: AdminCreatedLocalAccount; message?: string }> {
+  return post('/api/v1/custom/admin/users', input) as unknown as Promise<{
+    success: boolean
+    data?: AdminCreatedLocalAccount
+    message?: string
+  }>
 }
 
 export function setAdminUserActive(userId: string, active: boolean): Promise<{ success: boolean; data: AdminManagedUser; message?: string }> {

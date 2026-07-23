@@ -15,6 +15,7 @@ var (
 	ErrUserNotFound       = errors.New("user not found")
 	ErrUserAlreadyExists  = errors.New("user already exists")
 	ErrTokenNotFound      = errors.New("token not found")
+	ErrPasswordChanged    = errors.New("password was changed concurrently")
 	ErrCannotRevokeSelf   = errors.New("cannot revoke your own system admin privileges")
 	ErrLastSystemAdmin    = errors.New("cannot revoke the last remaining system administrator")
 	ErrUserNotSystemAdmin = errors.New("user is not a system administrator")
@@ -94,6 +95,44 @@ func (r *userRepository) GetUserByTenantID(ctx context.Context, tenantID uint64)
 // UpdateUser updates a user
 func (r *userRepository) UpdateUser(ctx context.Context, user *types.User) error {
 	return r.db.WithContext(ctx).Save(user).Error
+}
+
+// ChangePasswordAndRevokeTokens performs the credential replacement and
+// session invalidation in one transaction. Matching the previous hash keeps
+// two concurrent password-change requests from both succeeding after they
+// validated the same old password.
+func (r *userRepository) ChangePasswordAndRevokeTokens(
+	ctx context.Context,
+	userID, oldPasswordHash, newPasswordHash string,
+	updatedAt time.Time,
+) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&types.User{}).
+			Where("id = ? AND password_hash = ?", userID, oldPasswordHash).
+			Updates(map[string]any{
+				"password_hash": newPasswordHash,
+				"updated_at":    updatedAt,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			var count int64
+			if err := tx.Model(&types.User{}).Where("id = ?", userID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return ErrUserNotFound
+			}
+			return ErrPasswordChanged
+		}
+		return tx.Model(&types.AuthToken{}).
+			Where("user_id = ? AND is_revoked = ?", userID, false).
+			Updates(map[string]any{
+				"is_revoked": true,
+				"updated_at": updatedAt,
+			}).Error
+	})
 }
 
 // UpdateLastLoginAt records a successful login without touching other user fields.

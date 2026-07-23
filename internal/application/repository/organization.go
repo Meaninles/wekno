@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -166,13 +167,71 @@ func (r *organizationRepository) ListTenantMembers(ctx context.Context, orgID st
 	err := r.db.WithContext(ctx).
 		Preload("RepresentativeUser").
 		Where("organization_id = ?", orgID).
-		Order("created_at ASC").
+		Order("created_at ASC, id ASC").
 		Find(&members).Error
 
 	if err != nil {
 		return nil, err
 	}
 	return members, nil
+}
+
+// ListTenantMembersPage returns a stable page and the filtered total. Search
+// matches the canonical tenant name plus the representative user's username
+// or display name. The joins are used only for filtering; RepresentativeUser
+// remains a batched GORM preload so member rows are not duplicated.
+func (r *organizationRepository) ListTenantMembersPage(
+	ctx context.Context,
+	orgID string,
+	search string,
+	offset, limit int,
+) ([]*types.OrganizationTenantMember, int64, error) {
+	search = strings.TrimSpace(search)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	buildQuery := func() *gorm.DB {
+		q := r.db.WithContext(ctx).
+			Model(&types.OrganizationTenantMember{}).
+			Where("organization_tenant_members.organization_id = ?", orgID)
+		if search == "" {
+			return q
+		}
+		like := "%" + escapeLikePattern(search) + "%"
+		return q.
+			Joins("LEFT JOIN tenants ON tenants.id = organization_tenant_members.tenant_id").
+			Joins("LEFT JOIN users ON users.id = organization_tenant_members.representative_user_id AND users.deleted_at IS NULL").
+			Where(
+				`LOWER(COALESCE(tenants.name, '')) LIKE LOWER(?) ESCAPE '\' OR `+
+					`LOWER(COALESCE(users.username, '')) LIKE LOWER(?) ESCAPE '\' OR `+
+					`LOWER(COALESCE(users.display_name, '')) LIKE LOWER(?) ESCAPE '\'`,
+				like, like, like,
+			)
+	}
+
+	var total int64
+	if err := buildQuery().Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var members []*types.OrganizationTenantMember
+	err := buildQuery().
+		Preload("RepresentativeUser").
+		Order("organization_tenant_members.created_at ASC, organization_tenant_members.id ASC").
+		Offset(offset).
+		Limit(limit).
+		Find(&members).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	return members, total, nil
 }
 
 // GetTenantMember returns the (org, tenant) membership row, or

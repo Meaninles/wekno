@@ -198,6 +198,15 @@ export interface ListOrganizationsResponse {
 export interface ListMembersResponse {
   members: OrganizationMember[]
   total: number
+  page: number
+  page_size: number
+}
+
+export interface ListMembersParams {
+  page?: number
+  page_size?: number
+  /** Match tenant name or representative user's username/display name. */
+  q?: string
 }
 
 export interface JoinRequestResponse {
@@ -506,9 +515,18 @@ export async function generateInviteCode(id: string): Promise<ApiResponse<{ invi
 /**
  * List organization members
  */
-export async function listMembers(orgId: string): Promise<ApiResponse<ListMembersResponse>> {
+export async function listMembers(
+  orgId: string,
+  params: ListMembersParams = {},
+): Promise<ApiResponse<ListMembersResponse>> {
   try {
-    const response = await get(`/api/v1/organizations/${orgId}/members`)
+    const search = new URLSearchParams()
+    if (params.page != null && params.page > 0) search.set('page', String(params.page))
+    if (params.page_size != null && params.page_size > 0) search.set('page_size', String(params.page_size))
+    const q = params.q?.trim()
+    if (q) search.set('q', q)
+    const query = search.toString()
+    const response = await get(`/api/v1/organizations/${orgId}/members${query ? `?${query}` : ''}`)
     return response as unknown as ApiResponse<ListMembersResponse>
   } catch (error: any) {
     return { success: false, message: error.message || 'Failed to list members' }

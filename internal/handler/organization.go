@@ -387,7 +387,10 @@ func (h *OrganizationHandler) DeleteOrganization(c *gin.Context) {
 // @Description  获取组织的所有成员（按租户）
 // @Tags         组织管理
 // @Produce      json
-// @Param        id  path  string  true  "组织ID"
+// @Param        id         path   string  true   "组织ID"
+// @Param        q          query  string  false  "按租户名或代表用户名称模糊筛选"
+// @Param        page       query  int     false  "页码（从 1 起）"  default(1)
+// @Param        page_size  query  int     false  "每页数量（最大 100）"  default(20)
 // @Success      200  {object}  types.ListMembersResponse
 // @Security     Bearer
 // @Router       /organizations/{id}/members [get]
@@ -407,7 +410,13 @@ func (h *OrganizationHandler) ListMembers(c *gin.Context) {
 		return
 	}
 
-	members, err := h.orgService.ListTenantMembers(ctx, orgID)
+	q := strings.TrimSpace(c.Query("q"))
+	page, pageSize, ok := parseListPagination(c)
+	if !ok {
+		return
+	}
+
+	members, total, err := h.orgService.ListTenantMembersPage(ctx, orgID, q, page, pageSize)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to list members: %v", err)
 		c.Error(apperrors.NewInternalServerError("Failed to list members").WithDetails(err.Error()))
@@ -444,8 +453,10 @@ func (h *OrganizationHandler) ListMembers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": types.ListMembersResponse{
-			Members: response,
-			Total:   int64(len(response)),
+			Members:  response,
+			Total:    total,
+			Page:     page,
+			PageSize: pageSize,
 		},
 	})
 }

@@ -29,6 +29,7 @@ type OrganizationService interface {
 	RemoveTenantMember(ctx context.Context, orgID string, memberTenantID uint64, operatorUserID string, operatorTenantID uint64) error
 	UpdateTenantMemberRole(ctx context.Context, orgID string, memberTenantID uint64, role types.OrgMemberRole, operatorUserID string, operatorTenantID uint64) error
 	ListTenantMembers(ctx context.Context, orgID string) ([]*types.OrganizationTenantMember, error)
+	ListTenantMembersPage(ctx context.Context, orgID string, query string, page, pageSize int) ([]*types.OrganizationTenantMember, int64, error)
 	GetTenantMember(ctx context.Context, orgID string, tenantID uint64) (*types.OrganizationTenantMember, error)
 
 	// Invite Code
@@ -71,6 +72,7 @@ type OrganizationRepository interface {
 	RemoveTenantMember(ctx context.Context, orgID string, tenantID uint64) error
 	UpdateTenantMemberRole(ctx context.Context, orgID string, tenantID uint64, role types.OrgMemberRole) error
 	ListTenantMembers(ctx context.Context, orgID string) ([]*types.OrganizationTenantMember, error)
+	ListTenantMembersPage(ctx context.Context, orgID string, query string, offset, limit int) ([]*types.OrganizationTenantMember, int64, error)
 	GetTenantMember(ctx context.Context, orgID string, tenantID uint64) (*types.OrganizationTenantMember, error)
 	ListTenantMembersByTenantForOrgs(ctx context.Context, tenantID uint64, orgIDs []string) (map[string]*types.OrganizationTenantMember, error)
 	CountTenantMembers(ctx context.Context, orgID string) (int64, error)
@@ -96,7 +98,7 @@ type OrganizationRepository interface {
 // (not user). The 3-dimension cap is applied inside CheckTenantKBPermission
 // and is the canonical permission gate for shared KBs:
 //
-//   effective = min(share.Permission, tenant_org_role, tenant_role_cap)
+//	effective = min(share.Permission, tenant_org_role, tenant_role_cap)
 //
 // where tenant_role_cap pins tenant Viewers to OrgRoleViewer regardless
 // of the org-level grant — Viewer in your own tenant must always be

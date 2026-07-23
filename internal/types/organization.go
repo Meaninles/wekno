@@ -573,8 +573,10 @@ type ListJoinRequestsResponse struct {
 
 // ListMembersResponse represents the response for listing members
 type ListMembersResponse struct {
-	Members []OrganizationMemberResponse `json:"members"`
-	Total   int64                        `json:"total"`
+	Members  []OrganizationMemberResponse `json:"members"`
+	Total    int64                        `json:"total"`
+	Page     int                          `json:"page"`
+	PageSize int                          `json:"page_size"`
 }
 
 // ListSharesResponse represents the response for listing shares

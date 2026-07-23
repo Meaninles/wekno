@@ -451,6 +451,28 @@ func (s *organizationService) ListTenantMembers(ctx context.Context, orgID strin
 	return s.orgRepo.ListTenantMembers(ctx, orgID)
 }
 
+// ListTenantMembersPage returns one stable page plus the total number of
+// organization tenant-members matching the optional tenant/user query.
+func (s *organizationService) ListTenantMembersPage(
+	ctx context.Context,
+	orgID string,
+	query string,
+	page, pageSize int,
+) ([]*types.OrganizationTenantMember, int64, error) {
+	query = strings.TrimSpace(query)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	offset := (page - 1) * pageSize
+	return s.orgRepo.ListTenantMembersPage(ctx, orgID, query, offset, pageSize)
+}
+
 // GetTenantMember returns the (org, tenant) membership row.
 func (s *organizationService) GetTenantMember(ctx context.Context, orgID string, tenantID uint64) (*types.OrganizationTenantMember, error) {
 	member, err := s.orgRepo.GetTenantMember(ctx, orgID, tenantID)

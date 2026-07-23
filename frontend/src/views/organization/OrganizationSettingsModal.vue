@@ -222,7 +222,7 @@
                 </div>
 
                 <!-- 成员管理（含角色权限说明） -->
-                <div v-show="currentSection === 'members'" class="section">
+                <div v-if="currentSection === 'members'" class="section">
                   <div class="section-header">
                     <h2>{{ $t('organization.manageMembers') }}</h2>
                     <p class="section-description">{{ $t('organization.settings.membersDesc') }}</p>
@@ -333,7 +333,7 @@
 
                     <t-loading :loading="membersLoading">
                       <div class="members-list">
-                        <div v-for="member in filteredMembers" :key="member.id" class="member-item" :class="{
+                        <div v-for="member in members" :key="member.id" class="member-item" :class="{
                           'is-owner': isOwnerMember(member),
                           'is-me': member.user_id === authStore.currentUserId
                         }">
@@ -371,11 +371,16 @@
                             </t-popconfirm>
                           </div>
                         </div>
-                        <div v-if="filteredMembers.length === 0" class="empty-members">
+                        <div v-if="members.length === 0 && !membersLoading" class="empty-members">
                           {{ $t('organization.noMembers') }}
                         </div>
                       </div>
                     </t-loading>
+                    <div v-if="membersTotal > 0" class="members-pagination">
+                      <t-pagination v-model="membersPage" v-model:page-size="membersPageSize" :total="membersTotal"
+                        size="small" show-jumper show-page-number show-page-size
+                        :page-size-options="MEMBERS_PAGE_SIZE_OPTIONS" @change="onMembersPageChange" />
+                    </div>
                   </div>
                 </div>
 
@@ -681,7 +686,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
@@ -752,6 +757,14 @@ const reviewingRequestId = ref<string | null>(null)
 const sharesLoading = ref(false)
 const membersLoading = ref(false)
 const memberSearchQuery = ref('')
+const memberSearchQ = ref('')
+const membersTotal = ref(0)
+const membersPage = ref(1)
+const membersPageSize = ref(20)
+const membersLoadedOrgId = ref<string | null>(null)
+const MEMBERS_PAGE_SIZE_OPTIONS = [20, 50, 100]
+let memberSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let membersRequestSequence = 0
 const submitting = ref(false)
 const refreshingCode = ref(false)
 const inviteCode = ref('')
@@ -946,15 +959,6 @@ const roleOptions = computed(() => [
   { label: t('organization.role.viewer'), value: 'viewer' }
 ])
 
-const filteredMembers = computed(() => {
-  const query = memberSearchQuery.value.toLowerCase()
-  if (!query) return members.value
-  return members.value.filter((m) =>
-    (m.tenant_name || '').toLowerCase().includes(query) ||
-    (m.username || '').toLowerCase().includes(query)
-  )
-})
-
 // 成员行的主标题：优先展示「租户名」，回退到代表用户名 / 租户 ID。Plan 3
 // 之后每一行成员都对应一个租户，UI 必须先于代表用户呈现租户身份，
 // 否则用户会误以为这是按"人"加进来的。
@@ -1040,19 +1044,62 @@ const fetchOrgDetail = async () => {
   }
 }
 
+const resetMembersState = () => {
+  membersRequestSequence += 1
+  if (memberSearchDebounceTimer) {
+    clearTimeout(memberSearchDebounceTimer)
+    memberSearchDebounceTimer = null
+  }
+  members.value = []
+  membersTotal.value = 0
+  membersPage.value = 1
+  membersPageSize.value = 20
+  memberSearchQuery.value = ''
+  memberSearchQ.value = ''
+  membersLoadedOrgId.value = null
+  membersLoading.value = false
+}
+
 const fetchMembers = async () => {
-  if (!props.orgId) return
+  const orgId = props.orgId
+  if (!orgId) return
+  const requestSequence = ++membersRequestSequence
   membersLoading.value = true
   try {
-    const res = await listMembers(props.orgId)
+    const res = await listMembers(orgId, {
+      page: membersPage.value,
+      page_size: membersPageSize.value,
+      q: memberSearchQ.value || undefined,
+    })
+    if (requestSequence !== membersRequestSequence || orgId !== props.orgId || !props.visible) {
+      return
+    }
     if (res.success && res.data) {
+      const total = res.data.total ?? 0
+      const pageSize = res.data.page_size ?? membersPageSize.value
+      const maxPage = Math.max(1, Math.ceil(total / Math.max(1, pageSize)))
+      if (membersPage.value > maxPage) {
+        membersPage.value = maxPage
+        void fetchMembers()
+        return
+      }
       members.value = res.data.members || []
+      membersTotal.value = total
+      if (res.data.page > 0) membersPage.value = res.data.page
+      if (res.data.page_size > 0) membersPageSize.value = res.data.page_size
+      membersLoadedOrgId.value = orgId
     }
   } catch (error) {
     console.error('Failed to fetch members:', error)
   } finally {
-    membersLoading.value = false
+    if (requestSequence === membersRequestSequence) {
+      membersLoading.value = false
+    }
   }
+}
+
+const onMembersPageChange = () => {
+  void fetchMembers()
 }
 
 const fetchSharedKBs = async () => {
@@ -1610,19 +1657,17 @@ const getPermissionTheme = (permission: string) => {
 watch(() => props.visible, (newVal) => {
   if (newVal) {
     currentSection.value = 'basic'
-    memberSearchQuery.value = ''
+    resetMembersState()
     joinRequests.value = []
     if (props.mode === 'create') {
       // 创建模式：重置表单
       formData.value = { name: '', description: '', avatar: '', require_approval: false, searchable: false, invite_code_validity_days: 7, member_limit: 50 }
       orgInfo.value = null
-      members.value = []
       sharedKnowledgeBases.value = []
       inviteCode.value = ''
       inviteCodeExpiresAt.value = null
     } else if (props.orgId) {
       fetchOrgDetail()
-      fetchMembers()
       fetchSharedKBs()
     }
   } else {
@@ -1631,19 +1676,55 @@ watch(() => props.visible, (newVal) => {
       agentScopePopoverTimer.value = null
     }
     agentScopePopover.value = null
+    resetMembersState()
   }
 })
 
 watch(currentSection, (section) => {
+  if (
+    section === 'members' &&
+    props.orgId &&
+    membersLoadedOrgId.value !== props.orgId &&
+    !membersLoading.value
+  ) {
+    void fetchMembers()
+  }
   if (section === 'joinRequests' && props.orgId) {
     fetchJoinRequests()
   }
+})
+
+watch(memberSearchQuery, (query) => {
+  if (memberSearchDebounceTimer) {
+    clearTimeout(memberSearchDebounceTimer)
+    memberSearchDebounceTimer = null
+  }
+  if (!props.visible || currentSection.value !== 'members' || !props.orgId) {
+    return
+  }
+  memberSearchDebounceTimer = setTimeout(() => {
+    memberSearchDebounceTimer = null
+    if (!props.visible || currentSection.value !== 'members' || !props.orgId) {
+      return
+    }
+    memberSearchQ.value = query.trim()
+    membersPage.value = 1
+    void fetchMembers()
+  }, 320)
 })
 
 watch(addMemberMode, () => {
   selectedBatchCandidates.value = []
   addMemberDuplicateTenantCount.value = 0
   batchPickerKey.value += 1
+})
+
+onBeforeUnmount(() => {
+  membersRequestSequence += 1
+  if (memberSearchDebounceTimer) {
+    clearTimeout(memberSearchDebounceTimer)
+    memberSearchDebounceTimer = null
+  }
 })
 </script>
 
@@ -2394,6 +2475,12 @@ watch(addMemberMode, () => {
     color: var(--td-text-color-secondary);
     font-size: 14px;
   }
+}
+
+.members-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 16px;
 }
 
 // Shared KBs

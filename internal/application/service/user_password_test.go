@@ -28,3 +28,20 @@ func TestValidatePasswordComplexityRequiresTwoCharacterTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateCompliantRandomPasswordAlwaysMatchesPolicy(t *testing.T) {
+	seen := make(map[string]struct{})
+	for range 100 {
+		password, err := GenerateCompliantRandomPassword()
+		if err != nil {
+			t.Fatalf("GenerateCompliantRandomPassword returned error: %v", err)
+		}
+		if err := ValidatePasswordComplexity(password); err != nil {
+			t.Fatalf("generated password %q violates policy: %v", password, err)
+		}
+		if _, exists := seen[password]; exists {
+			t.Fatalf("generated duplicate password %q", password)
+		}
+		seen[password] = struct{}{}
+	}
+}

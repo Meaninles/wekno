@@ -1,8 +1,14 @@
 <template>
   <div class="admin-governance">
     <div class="section-header">
-      <h2>空间与用户权限</h2>
-      <p class="section-description">系统管理员按需搜索空间，或按组织树和关键词管理用户可用性。</p>
+      <div>
+        <h2>空间与用户权限</h2>
+        <p class="section-description">系统管理员按需搜索空间，或按组织树和关键词管理用户可用性。</p>
+      </div>
+      <t-button theme="primary" @click="createAccountVisible = true">
+        <template #icon><t-icon name="user-add" /></template>
+        新建本地账号
+      </t-button>
     </div>
 
     <section class="admin-section">
@@ -147,6 +153,10 @@
     </section>
 
     <OrganizationSettingsModal v-model:visible="orgModalVisible" :org-id="activeOrgId" mode="edit" />
+    <CreateLocalAccountDialog
+      v-model:visible="createAccountVisible"
+      @created="handleAccountCreated"
+    />
   </div>
 </template>
 
@@ -155,6 +165,7 @@ import { computed, h, onMounted, reactive, ref, resolveComponent, watch } from '
 import { useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import OrganizationSettingsModal from '@/views/organization/OrganizationSettingsModal.vue'
+import CreateLocalAccountDialog from './CreateLocalAccountDialog.vue'
 import {
   batchSetAdminUsersActive,
   listIAMOrganizations,
@@ -162,6 +173,7 @@ import {
   searchAdminUsers,
   setAdminUserActive,
   type AdminBulkUserActiveResult,
+  type AdminCreatedLocalAccount,
   type AdminManagedUser,
   type AdminSpaceSummary,
   type IAMOrganizationNode,
@@ -204,6 +216,7 @@ const updatingUsers = reactive<Record<string, boolean>>({})
 
 const orgModalVisible = ref(false)
 const activeOrgId = ref('')
+const createAccountVisible = ref(false)
 
 const selectedOrgExternalIds = computed(() =>
   selectedOrgIds.value
@@ -467,6 +480,13 @@ async function loadUsers() {
   }
 }
 
+function handleAccountCreated(result: AdminCreatedLocalAccount) {
+  userQuery.value = result.user.username
+  selectedOrgIds.value = []
+  userSearched.value = true
+  void loadUsers()
+}
+
 function displayNameWithUsername(displayName?: string, username?: string, fallback?: string) {
   const name = (displayName || '').trim()
   const account = (username || '').trim()
@@ -580,6 +600,10 @@ onMounted(() => {
 }
 
 .section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 28px;
 
   h2 {
@@ -773,6 +797,11 @@ onMounted(() => {
 }
 
 @media (max-width: 900px) {
+  .section-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .user-tools {
     grid-template-columns: 1fr;
   }

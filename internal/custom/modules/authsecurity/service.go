@@ -58,6 +58,31 @@ func (s *Service) Migrate(ctx context.Context) error {
 	return s.db.WithContext(ctx).AutoMigrate(&LoginAttempt{})
 }
 
+func (s *Service) GetPasswordCapability(ctx context.Context, userID string) (*PasswordCapability, error) {
+	userID = strings.TrimSpace(userID)
+	if s == nil || s.db == nil || userID == "" {
+		return nil, errors.New("password capability is unavailable")
+	}
+	var linkedIAMUsers int64
+	if err := s.db.WithContext(ctx).
+		Table("custom_iam_users").
+		Where("weknora_user_id = ? AND deleted_at IS NULL", userID).
+		Count(&linkedIAMUsers).Error; err != nil {
+		return nil, fmt.Errorf("check IAM account linkage: %w", err)
+	}
+	if linkedIAMUsers > 0 {
+		return &PasswordCapability{
+			AccountSource:     "iam",
+			CanChangePassword: false,
+			Reason:            "密码由 IAM 统一身份认证系统管理",
+		}, nil
+	}
+	return &PasswordCapability{
+		AccountSource:     "local",
+		CanChangePassword: true,
+	}, nil
+}
+
 func (s *Service) NewChallenge(ctx context.Context) (*ChallengeResponse, error) {
 	if s == nil {
 		return nil, errors.New("auth security service is unavailable")

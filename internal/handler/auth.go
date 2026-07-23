@@ -37,6 +37,8 @@ var customProvisionerHook func(context.Context, *types.User) error
 var customLoginSecurityHook func(*gin.Context, *types.LoginRequest) error
 var customLoginResultHook func(*gin.Context, *types.LoginRequest, *types.LoginResponse, error)
 var customRegisterSecurityHook func(*gin.Context, *types.RegisterRequest) error
+var customPasswordChangeSecurityHook func(*gin.Context, *types.ChangePasswordRequest) error
+var customPasswordChangeGuardHook func(context.Context, *types.User) error
 
 // RegisterCustomProvisionerHook lets custom modules run idempotent post-login
 // setup without changing AuthHandler's constructor signature.
@@ -60,6 +62,19 @@ func RegisterCustomLoginResultHook(fn func(*gin.Context, *types.LoginRequest, *t
 // controls such as encrypted password challenges and captcha validation.
 func RegisterCustomRegisterSecurityHook(fn func(*gin.Context, *types.RegisterRequest) error) {
 	customRegisterSecurityHook = fn
+}
+
+// RegisterCustomPasswordChangeSecurityHook lets the custom auth-security
+// module decrypt the one-time challenge payload before the native service
+// validates the old password and applies the new one.
+func RegisterCustomPasswordChangeSecurityHook(fn func(*gin.Context, *types.ChangePasswordRequest) error) {
+	customPasswordChangeSecurityHook = fn
+}
+
+// RegisterCustomPasswordChangeGuardHook lets custom identity providers block
+// local password mutations for externally managed accounts.
+func RegisterCustomPasswordChangeGuardHook(fn func(context.Context, *types.User) error) {
+	customPasswordChangeGuardHook = fn
 }
 
 func runCustomProvisioner(ctx context.Context, user *types.User) {
@@ -676,9 +691,10 @@ func (h *AuthHandler) UpdateMyPreferences(c *gin.Context) {
 // @Tags         认证
 // @Accept       json
 // @Produce      json
-// @Param        request  body      object{old_password=string,new_password=string}  true  "密码修改请求"
-// @Success      200      {object}  map[string]interface{}                           "修改成功"
-// @Failure      400      {object}  errors.AppError                                  "请求参数错误"
+// @Param        request  body      types.ChangePasswordRequest  true  "加密密码修改请求"
+// @Success      200      {object}  map[string]interface{}       "修改成功"
+// @Failure      400      {object}  errors.AppError              "请求参数错误"
+// @Failure      403      {object}  errors.AppError              "IAM 账号不允许修改密码"
 // @Security     Bearer
 // @Router       /auth/change-password [post]
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
@@ -686,11 +702,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 
 	logger.Info(ctx, "Start password change")
 
-	var req struct {
-		OldPassword string `json:"old_password" binding:"required"`
-		NewPassword string `json:"new_password" binding:"required,min=6"`
-	}
-
+	var req types.ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Error(ctx, "Failed to parse password change request", err)
 		appErr := errors.NewValidationError("Invalid password change request").WithDetails(err.Error())
@@ -706,6 +718,23 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		c.Error(appErr)
 		return
 	}
+
+	if customPasswordChangeGuardHook == nil || customPasswordChangeSecurityHook == nil {
+		c.Error(errors.NewServiceUnavailableError("密码安全服务不可用"))
+		return
+	}
+	if err := customPasswordChangeGuardHook(ctx, user); err != nil {
+		c.Error(err)
+		return
+	}
+	if err := customPasswordChangeSecurityHook(c, &req); err != nil {
+		c.Error(err)
+		return
+	}
+	defer func() {
+		req.OldPassword = ""
+		req.NewPassword = ""
+	}()
 
 	// Change password
 	err = h.userService.ChangePassword(ctx, user.ID, req.OldPassword, req.NewPassword)

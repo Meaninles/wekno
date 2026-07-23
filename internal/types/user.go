@@ -204,6 +204,20 @@ type RegisterRequest struct {
 	CaptchaAnswer            string `json:"captcha_answer,omitempty"`
 }
 
+// ChangePasswordRequest carries only encrypted password values over the
+// wire. The custom auth-security hook decrypts and validates the three
+// ciphertexts, then fills OldPassword/NewPassword in memory for the native
+// password service. Plaintext fields are deliberately excluded from JSON.
+type ChangePasswordRequest struct {
+	OldPassword              string `json:"-"`
+	NewPassword              string `json:"-"`
+	EncryptedOldPassword     string `json:"encrypted_old_password"`
+	EncryptedNewPassword     string `json:"encrypted_new_password"`
+	EncryptedConfirmPassword string `json:"encrypted_confirm_password"`
+	ChallengeID              string `json:"challenge_id"`
+	CaptchaAnswer            string `json:"captcha_answer"`
+}
+
 // LoginResponse represents a login response
 type LoginResponse struct {
 	Success bool   `json:"success"`

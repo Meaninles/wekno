@@ -1,6 +1,7 @@
 package authsecurity
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -34,6 +35,20 @@ func (h *Handler) Challenge(c *gin.Context) {
 	})
 }
 
+func (h *Handler) PasswordCapability(c *gin.Context) {
+	userID, ok := types.UserIDFromContext(c.Request.Context())
+	if !ok || strings.TrimSpace(userID) == "" {
+		c.Error(apperrors.NewUnauthorizedError("未登录"))
+		return
+	}
+	capability, err := h.service.GetPasswordCapability(c.Request.Context(), userID)
+	if err != nil {
+		c.Error(apperrors.NewInternalServerError("读取账号密码能力失败").WithDetails(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": capability})
+}
+
 func (h *Handler) PrepareLogin(c *gin.Context, req *types.LoginRequest) error {
 	username := strings.TrimSpace(req.Username)
 	if username == "" {
@@ -59,6 +74,50 @@ func (h *Handler) PrepareLogin(c *gin.Context, req *types.LoginRequest) error {
 		return err
 	}
 	req.Password = password
+	return nil
+}
+
+func (h *Handler) PreparePasswordChange(c *gin.Context, req *types.ChangePasswordRequest) error {
+	if h == nil || h.service == nil || req == nil {
+		return apperrors.NewServiceUnavailableError("密码安全校验不可用")
+	}
+	if strings.TrimSpace(req.ChallengeID) == "" ||
+		strings.TrimSpace(req.EncryptedOldPassword) == "" ||
+		strings.TrimSpace(req.EncryptedNewPassword) == "" ||
+		strings.TrimSpace(req.EncryptedConfirmPassword) == "" ||
+		strings.TrimSpace(req.CaptchaAnswer) == "" {
+		return apperrors.NewValidationError("请输入验证码并刷新密码安全验证后重试")
+	}
+	passwords, err := h.service.DecryptPasswords(
+		c.Request.Context(),
+		req.ChallengeID,
+		req.CaptchaAnswer,
+		req.EncryptedOldPassword,
+		req.EncryptedNewPassword,
+		req.EncryptedConfirmPassword,
+	)
+	if err != nil {
+		return err
+	}
+	if len(passwords) != 3 || passwords[1] != passwords[2] {
+		return apperrors.NewValidationError("两次输入的新密码不一致")
+	}
+	req.OldPassword = passwords[0]
+	req.NewPassword = passwords[1]
+	return nil
+}
+
+func (h *Handler) GuardPasswordChange(ctx context.Context, user *types.User) error {
+	if h == nil || h.service == nil || user == nil {
+		return apperrors.NewServiceUnavailableError("密码修改策略不可用")
+	}
+	capability, err := h.service.GetPasswordCapability(ctx, user.ID)
+	if err != nil {
+		return apperrors.NewInternalServerError("读取账号密码策略失败").WithDetails(err.Error())
+	}
+	if !capability.CanChangePassword {
+		return apperrors.NewForbiddenError(capability.Reason)
+	}
 	return nil
 }
 

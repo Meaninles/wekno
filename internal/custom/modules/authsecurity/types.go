@@ -29,3 +29,9 @@ type ChallengeResponse struct {
 	CaptchaImage     string `json:"captcha_image"`
 	ExpiresInSeconds int    `json:"expires_in_seconds"`
 }
+
+type PasswordCapability struct {
+	AccountSource     string `json:"account_source"`
+	CanChangePassword bool   `json:"can_change_password"`
+	Reason            string `json:"reason,omitempty"`
+}

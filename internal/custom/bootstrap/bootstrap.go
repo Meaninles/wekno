@@ -92,7 +92,7 @@ func NewHandlers(
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
-	adminService := customadmin.NewService(db)
+	adminService := customadmin.NewService(db, userService)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
@@ -195,6 +195,9 @@ func NewHandlers(
 	handler.RegisterCustomLoginSecurityHook(authSecurityHandler.PrepareLogin)
 	handler.RegisterCustomLoginResultHook(authSecurityHandler.RecordLoginResult)
 	handler.RegisterCustomRegisterSecurityHook(authSecurityHandler.PrepareRegister)
+	handler.RegisterCustomPasswordChangeSecurityHook(authSecurityHandler.PreparePasswordChange)
+	handler.RegisterCustomPasswordChangeGuardHook(authSecurityHandler.GuardPasswordChange)
+	adminService.SetProvisioner(provisionUser)
 	iamService.SetProvisioner(provisionUser)
 	handler.RegisterCustomPendingOrganizationMemberGrantHook(func(ctx context.Context, req handler.CustomPendingOrganizationMemberGrantRequest) error {
 		return iamService.CreatePendingSpaceMemberGrant(ctx, iam.PendingSpaceMemberGrantInput{
@@ -397,9 +400,10 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 		{
 			generalAgentInternalRoutes.POST("/tools/call", handlers.GeneralAgent.CallTool)
 		}
-		authSecurityRoutes := customPublic.Group("/auth-security", middleware.PublicAuthRateLimit())
+		authSecurityRoutes := customPublic.Group("/auth-security")
 		{
-			authSecurityRoutes.GET("/challenge", handlers.AuthSecurity.Challenge)
+			authSecurityRoutes.GET("/challenge", middleware.PublicAuthRateLimit(), handlers.AuthSecurity.Challenge)
+			authSecurityRoutes.GET("/password-capability", handlers.AuthSecurity.PasswordCapability)
 		}
 	}
 
@@ -430,6 +434,7 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 		{
 			adminRoutes.GET("/spaces", handlers.Admin.SearchSpaces)
 			adminRoutes.GET("/users", handlers.Admin.SearchUsers)
+			adminRoutes.POST("/users", handlers.Admin.CreateLocalAccount)
 			adminRoutes.PUT("/users-active", handlers.Admin.BatchSetUsersActive)
 			adminRoutes.PUT("/users/:id/active", handlers.Admin.SetUserActive)
 		}

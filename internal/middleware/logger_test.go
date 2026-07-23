@@ -44,6 +44,11 @@ func TestSanitizeBody(t *testing.T) {
 			want: `{"confirm_password":"***","new_password":"***","encrypted_password":"***"}`,
 		},
 		{
+			name: "temporary password response masked",
+			in:   `{"username":"new-user","temporary_password":"A1-secret"}`,
+			want: `{"username":"new-user","temporary_password":"***"}`,
+		},
+		{
 			name: "extra whitespace around colon",
 			in:   `{"apiKey"  :   "leak"}`,
 			want: `{"apiKey":"***"}`,

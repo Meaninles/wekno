@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	appservice "github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -19,14 +23,122 @@ var (
 	ErrLastActiveSystemAdmin = errors.New("cannot disable the last active system administrator")
 	ErrUserNotFound          = errors.New("user not found")
 	ErrInvalidActiveState    = errors.New("active state is required")
+	ErrInvalidUsername       = errors.New("用户名须为 2-20 个字母、数字、中文或下划线")
+	ErrDisplayNameTooLong    = errors.New("姓名不能超过 255 个字符")
+	ErrLocalUsernameExists   = errors.New("该用户名已存在")
+	ErrIAMUsernameExists     = errors.New("该用户名属于 IAM 统一身份认证账号，请通过统一身份认证开通")
+	ErrAccountCreateFailed   = errors.New("创建账号失败")
 )
 
+var localUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_\p{Han}]+$`)
+
 type Service struct {
-	db *gorm.DB
+	db            *gorm.DB
+	userService   interfaces.UserService
+	provisionUser func(context.Context, *types.User) error
 }
 
-func NewService(db *gorm.DB) *Service {
-	return &Service{db: db}
+func NewService(db *gorm.DB, userService interfaces.UserService) *Service {
+	return &Service{db: db, userService: userService}
+}
+
+func (s *Service) SetProvisioner(fn func(context.Context, *types.User) error) {
+	s.provisionUser = fn
+}
+
+func (s *Service) CreateLocalAccount(
+	ctx context.Context,
+	input CreateLocalAccountRequest,
+) (*CreateLocalAccountResult, error) {
+	username := strings.TrimSpace(input.Username)
+	displayName := strings.TrimSpace(input.DisplayName)
+	if utf8.RuneCountInString(username) < 2 ||
+		utf8.RuneCountInString(username) > 20 ||
+		!localUsernamePattern.MatchString(username) {
+		return nil, ErrInvalidUsername
+	}
+	if utf8.RuneCountInString(displayName) > 255 {
+		return nil, ErrDisplayNameTooLong
+	}
+	if s == nil || s.db == nil || s.userService == nil {
+		return nil, ErrAccountCreateFailed
+	}
+
+	var localCount int64
+	if err := s.db.WithContext(ctx).
+		Table("users").
+		Where("deleted_at IS NULL AND LOWER(username) = LOWER(?)", username).
+		Count(&localCount).Error; err != nil {
+		return nil, fmt.Errorf("%w: check local username: %v", ErrAccountCreateFailed, err)
+	}
+	if localCount > 0 {
+		return nil, ErrLocalUsernameExists
+	}
+
+	var iamCount int64
+	if err := s.db.WithContext(ctx).
+		Table("custom_iam_users").
+		Where("deleted_at IS NULL AND LOWER(username) = LOWER(?)", username).
+		Count(&iamCount).Error; err != nil {
+		return nil, fmt.Errorf("%w: check IAM username: %v", ErrAccountCreateFailed, err)
+	}
+	if iamCount > 0 {
+		return nil, ErrIAMUsernameExists
+	}
+
+	password, err := appservice.GenerateCompliantRandomPassword()
+	if err != nil {
+		return nil, fmt.Errorf("%w: generate password: %v", ErrAccountCreateFailed, err)
+	}
+	// Keep the generator and the authoritative password rule coupled even if
+	// either implementation changes later.
+	if err := appservice.ValidatePasswordComplexity(password); err != nil {
+		return nil, fmt.Errorf("%w: generated password violates policy: %v", ErrAccountCreateFailed, err)
+	}
+
+	user, err := s.userService.Register(ctx, &types.RegisterRequest{
+		Username:    username,
+		DisplayName: displayName,
+		Password:    password,
+	})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			return nil, ErrLocalUsernameExists
+		}
+		return nil, fmt.Errorf("%w: %v", ErrAccountCreateFailed, err)
+	}
+	if user == nil {
+		return nil, ErrAccountCreateFailed
+	}
+
+	result := &CreateLocalAccountResult{
+		User: UserSummary{
+			ID:            user.ID,
+			Username:      user.Username,
+			DisplayName:   user.DisplayName,
+			TenantID:      user.TenantID,
+			IsActive:      user.IsActive,
+			IsSystemAdmin: user.IsSystemAdmin,
+			HasLocalUser:  true,
+			AccessEnabled: user.IsActive,
+			CreatedAt:     user.CreatedAt,
+			UpdatedAt:     user.UpdatedAt,
+		},
+		TemporaryPassword: password,
+	}
+	if err := s.db.WithContext(ctx).
+		Table("tenants").
+		Select("name").
+		Where("id = ? AND deleted_at IS NULL", user.TenantID).
+		Scan(&result.User.TenantName).Error; err != nil {
+		result.Warnings = append(result.Warnings, "账号已创建，但读取个人空间名称失败")
+	}
+	if s.provisionUser != nil {
+		if err := s.provisionUser(ctx, user); err != nil {
+			result.Warnings = append(result.Warnings, "账号已创建，但部分默认资源初始化失败")
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) SearchSpaces(ctx context.Context, query string, limit int) ([]SpaceSummary, error) {

@@ -52,3 +52,14 @@ type BulkUserActiveResult struct {
 	SkippedSelf         int64 `json:"skipped_self"`
 	SkippedSystemAdmins int64 `json:"skipped_system_admins"`
 }
+
+type CreateLocalAccountRequest struct {
+	Username    string `json:"username" binding:"required"`
+	DisplayName string `json:"display_name"`
+}
+
+type CreateLocalAccountResult struct {
+	User              UserSummary `json:"user"`
+	TemporaryPassword string      `json:"temporary_password"`
+	Warnings          []string    `json:"warnings,omitempty"`
+}

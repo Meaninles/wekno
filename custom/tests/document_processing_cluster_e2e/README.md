@@ -345,9 +345,91 @@ python custom/tests/document_processing_cluster_e2e/run_e2e.py `
   --verify-sample 2 --timeout 2400
 ```
 
-若图片和表格分属不同文档，当前命令会对两个 sample 都要求两种能力；正式验收应分别运行图片批次和表格批次，以便断言精确。
+若图片和表格分属不同文档，可用 fixture manifest 对每个文档分别声明预期能力，避免把图片断言误套到表格文档或反过来。仓库提供确定性 fixture 生成器，生成的是真实 Office、PDF、EPUB、MHTML、图片和音频文件，不是简单改扩展名：
 
-只有生成了 `expect_derived=multimodal` / `table` 的成功报告，才能宣称相应真实格式已覆盖；固定 fixture 还应重复传入 `--expect-chunk-text`，校验 OCR/表格关键文本确实进入持久 chunk。Markdown 的完整衍生能力报告不能替代 OCR、图片描述、Excel、PDF、Word 或 PPT 的格式验收。
+```powershell
+$fixtureDir = Join-Path $PWD 'custom/tests/document_processing_cluster_e2e/format_fixtures'
+docker run --rm `
+  -v "${PWD}:/workspace" -w /workspace `
+  wechatopenai/weknora-docreader:latest `
+  python custom/tests/document_processing_cluster_e2e/generate_supported_format_fixtures.py `
+  /workspace/custom/tests/document_processing_cluster_e2e/format_fixtures `
+  --audio-source /workspace/internal/assets/asr_test.wav
+
+$fixtureArgs = Get-ChildItem $fixtureDir -File |
+  Where-Object Name -ne 'manifest.json' |
+  ForEach-Object { '--fixture'; $_.FullName }
+python custom/tests/document_processing_cluster_e2e/run_e2e.py `
+  @fixtureArgs `
+  --fixture-manifest (Join-Path $fixtureDir 'manifest.json') `
+  --process-config custom/tests/document_processing_cluster_e2e/process_config.full.example.json `
+  --expect-derived summary,questions,graph,wiki `
+  --question-retrieval-sample 3 `
+  --wiki-timeout 2400 --timeout 7200
+```
+
+当前生成器覆盖后端声明支持的 27 种扩展名：
+`pdf/txt/text/docx/doc/epub/mhtml/md/markdown/png/jpg/jpeg/gif/webp/bmp/tiff/csv/xlsx/xls/pptx/ppt/json/mp3/wav/m4a/flac/ogg`。
+manifest 为每份 fixture 保存 marker、表格/多模态预期和内容哈希；运行器会逐文档检查解析 chunk、向量召回、问题质量和回查、摘要、图谱及 Wiki，不允许用某一种格式的成功替代另一种。
+
+## 制度文档真实召回验收
+
+任务 `019f84a3-c107-77f2-9bd4-5057919d514b` 的制度语料由 28 个 DOC/DOCX/PDF 源文件、22 个制度单元及 1518 个策划问题组成。正式验收不复制语料进仓库，而是直接读取该任务留下的 manifest、问题集和原文件目录：
+
+```powershell
+$corpusRoot = 'C:\Users\erjiguan\Documents\Codex\2026-07-21\sites-plugin-sites-openai-bundled'
+python custom/tests/document_processing_cluster_e2e/run_e2e.py `
+  --policy-manifest (Join-Path $corpusRoot 'data/company-policy-manifest.json') `
+  --policy-questions (Join-Path $corpusRoot 'data/company-policy-questions.json') `
+  --policy-fixture-dir (Join-Path $corpusRoot 'public/company-policies/original') `
+  --policy-queries-per-source 2 `
+  --policy-recall-at-k 10 `
+  --min-policy-recall 0.90 `
+  --process-config custom/tests/document_processing_cluster_e2e/process_config.full.example.json `
+  --question-retrieval-sample 3 `
+  --wiki-timeout 3600 --timeout 14400
+```
+
+该模式强制所有 28 个源文件完成摘要、问题、知识图谱和 Wiki；按来源分层抽取 56 个真实问题做跨文档 hybrid-search，报告 recall@10、MRR 和逐来源覆盖，并要求每个源文件至少命中一条正文、附件或流程锚点。生成问题还必须自然、去重、能回查原文，禁止“根据《某制度》”“第几条”“原文件第几页”等面向数据集的元问题。
+
+## 1000 份、多用户、多知识库容量验收
+
+`run_multitenant_e2e.py` 是最终容量门禁，不是把同一个小文件重复上传
+1000 次。它按 27 种受支持格式循环生成唯一文件，按 88% 小型、10% 中型、
+2% 大型分层，均匀交错分配给至少 2 个用户、且每个用户至少 2 个知识库。
+默认验收参数使用 8 个用户、16 个知识库和 1000 份文档。
+
+测试会为每个临时用户只授权指定的 LiteLLM
+`deepseek-v4-flash-int8`，并逐用户核对模型名称、凭据已配置以及
+`base_url` 包含 `:14000`。临时密码和 API Key 只保存在进程内存中，不写
+事件日志或报告。知识库统一开启向量、关键词、摘要、问题生成、知识图谱、
+Wiki、多模态和语音识别。
+
+除每份文档必须完成、具有切块/向量/摘要/问题/图谱/Wiki 产物外，测试还
+通过两组证据证明工作不是只在一个实例上完成：
+
+- 持久化处理 span 记录每一阶段实际执行的 `instance_id + boot_id`，并要求
+  DocReader、切块、向量化、后处理、摘要、问题、图谱和 Wiki 都覆盖所有
+  健康实例。
+- 每个容器单独抓取无高基数标签的 Prometheus 增量，要求文档、后处理、
+  摘要、问题、图谱、Wiki、多模态和表格任务在每个实例上都有成功执行。
+
+示例（管理员 JWT 和测试过程中生成的租户 API Key 都不要写入命令历史）：
+
+```powershell
+$env:WEKNORA_E2E_ADMIN_TOKEN='<system-admin-jwt>'
+python custom/tests/document_processing_cluster_e2e/run_multitenant_e2e.py `
+  --documents 1000 --principals 8 --knowledge-bases-per-principal 2 `
+  --upload-concurrency 64 --instance-count 3 `
+  --expected-instance-concurrency 4 `
+  --worker-container WeKnora-app-dev `
+  --worker-container WeKnora-worker-cluster-e2e-a `
+  --worker-container WeKnora-worker-cluster-e2e-b
+```
+
+`--documents` 小于 1000 会直接拒绝；只有验证测试脚本本身时才允许显式加
+`--allow-small`。报告只保留脱敏后的用户/租户/知识库标识、格式和大小分布、
+队列等待、吞吐、实例阶段矩阵以及拓扑边界。
 
 ## 不能由 Worker 测试消除的基础设施单点
 

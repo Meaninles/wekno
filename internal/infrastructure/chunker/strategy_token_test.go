@@ -1,6 +1,10 @@
 package chunker
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestEnsureDefaults_TokenLimitClampsChunkSize(t *testing.T) {
 	cfg := SplitterConfig{
@@ -31,5 +35,23 @@ func TestEnsureDefaults_NoTokenLimitKeepsChunkSize(t *testing.T) {
 	out := ensureDefaults(cfg)
 	if out.ChunkSize != 800 {
 		t.Errorf("ChunkSize should stay 800, got %d", out.ChunkSize)
+	}
+}
+
+func TestTokenLimitAlsoSplitsOversizedProtectedBlocks(t *testing.T) {
+	content := "```\n" + strings.Repeat("token-safe-code ", 200) + "\n```"
+	chunks := Split(content, SplitterConfig{
+		ChunkSize:  10000,
+		TokenLimit: 100,
+		Languages:  []string{LangEnglish},
+	})
+	if len(chunks) < 2 {
+		t.Fatalf("expected protected block to split under token budget, got %d chunk(s)", len(chunks))
+	}
+	maxRunes := CharsForTokenLimit(100, LangEnglish)
+	for index, chunk := range chunks {
+		if got := utf8.RuneCountInString(chunk.Content); got > maxRunes {
+			t.Fatalf("chunk %d has %d runes, token-derived max is %d", index, got, maxRunes)
+		}
 	}
 }

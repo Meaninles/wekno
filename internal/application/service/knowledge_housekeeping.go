@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -47,6 +48,7 @@ type HousekeepingService struct {
 	// A missing inspector is treated as unknown queue state and preserves
 	// candidates; housekeeping never guesses that unavailable means empty.
 	inspector interfaces.TaskInspector
+	cache     *contentcache.Store
 
 	mu      sync.Mutex
 	started bool
@@ -56,12 +58,16 @@ type HousekeepingService struct {
 // the cron — call Start in the application bootstrap so a misconfigured
 // cron schedule cannot prevent the rest of the service from coming up.
 func NewHousekeepingService(
-	db *gorm.DB, cfg *config.Config, inspector interfaces.TaskInspector,
+	db *gorm.DB,
+	cfg *config.Config,
+	inspector interfaces.TaskInspector,
+	cache *contentcache.Store,
 ) *HousekeepingService {
 	return &HousekeepingService{
 		db:        db,
 		cfg:       cfg,
 		inspector: inspector,
+		cache:     cache,
 		cron: cron.New(cron.WithSeconds(), cron.WithChain(
 			cron.Recover(cron.DefaultLogger),
 		)),
@@ -183,6 +189,15 @@ func (h *HousekeepingService) runSweep(ctx context.Context) {
 		logger.Infof(ctx,
 			"[Housekeeping] %d candidate(s) skipped — live work queued/running or queue state unavailable",
 			queueSkipped)
+	}
+
+	if h.cache != nil {
+		deleted, err := h.cache.Sweep(ctx, time.Now().Add(-30*24*time.Hour), 500)
+		if err != nil {
+			logger.Warnf(ctx, "[Housekeeping] content cache sweep failed: %v", err)
+		} else if deleted > 0 {
+			logger.Infof(ctx, "[Housekeeping] removed %d expired unreferenced content cache entries", deleted)
+		}
 	}
 	if fanoutSkipped > 0 {
 		logger.Infof(ctx,
@@ -507,6 +522,9 @@ func (h *HousekeepingService) recoverStuckKnowledge(
 				"parse_status":           types.ParseStatusFailed,
 				"error_message":          "core parsing stuck > " + threshold.String() + ", recovered by housekeeping",
 				"pending_subtasks_count": 0,
+				"enrichment_status":      types.EnrichmentStatusNone,
+				"wiki_status":            types.WikiStatusNone,
+				"wiki_error_message":     "",
 				"processing_owner":       "",
 				"processing_fanout":      nil,
 			})
@@ -525,6 +543,7 @@ func (h *HousekeepingService) recoverStuckKnowledge(
 			Updates(map[string]interface{}{
 				"parse_status":           types.ParseStatusCompleted,
 				"pending_subtasks_count": 0,
+				"enrichment_status":      types.EnrichmentStatusDegraded,
 				"error_message":          "",
 				"processing_owner":       "",
 				"processing_fanout":      nil,
@@ -551,6 +570,7 @@ func (h *HousekeepingService) recoverStuckKnowledge(
 			Updates(map[string]interface{}{
 				"parse_status":           types.ParseStatusCompleted,
 				"pending_subtasks_count": 0,
+				"enrichment_status":      types.EnrichmentStatusDegraded,
 				"error_message":          "",
 				"processing_owner":       "",
 				"processing_fanout":      nil,

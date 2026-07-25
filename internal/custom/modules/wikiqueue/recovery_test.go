@@ -33,7 +33,8 @@ CREATE TABLE task_pending_ops (
     payload     TEXT NOT NULL DEFAULT '{}',
     fail_count  INTEGER NOT NULL DEFAULT 0,
     enqueued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    claimed_at  DATETIME
+    claimed_at  DATETIME,
+    map_ready_at DATETIME
 );`
 
 const recoveryKnowledgeBasesTestDDL = `
@@ -175,6 +176,21 @@ func optionValue(opts []asynq.Option, optionType asynq.OptionType) (any, bool) {
 	return nil, false
 }
 
+func splitRecoveryCalls(calls []enqueueCall) (commits, maps []enqueueCall) {
+	for _, call := range calls {
+		var payload struct {
+			TaskMode string `json:"task_mode"`
+		}
+		_ = json.Unmarshal(call.task.Payload(), &payload)
+		if payload.TaskMode == "map" {
+			maps = append(maps, call)
+		} else {
+			commits = append(commits, call)
+		}
+	}
+	return commits, maps
+}
+
 func TestRecoverNowPublishesOneStableTriggerPerPendingKnowledgeBase(t *testing.T) {
 	db := newRecoveryTestDB(t)
 	insertPendingOp(t, db, 7, types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-a", "ingest")
@@ -188,11 +204,20 @@ func TestRecoverNowPublishesOneStableTriggerPerPendingKnowledgeBase(t *testing.T
 	require.NoError(t, recovery.RecoverNow(context.Background()))
 
 	calls := enqueuer.snapshot()
-	require.Len(t, calls, 2)
-	assert.Equal(t, types.TypeWikiIngest, calls[0].task.Type())
-	assert.JSONEq(t, `{"tenant_id":7,"knowledge_base_id":"kb-a"}`, string(calls[0].task.Payload()))
-	assert.Equal(t, `{"tenant_id":7,"knowledge_base_id":"kb-a"}`, string(calls[0].task.Payload()), "payload bytes must be stable for asynq.Unique")
-	assert.JSONEq(t, `{"tenant_id":8,"knowledge_base_id":"kb-b"}`, string(calls[1].task.Payload()))
+	require.Len(t, calls, 4)
+	commits, maps := splitRecoveryCalls(calls)
+	require.Len(t, commits, 2)
+	require.Len(t, maps, 2)
+	assert.Equal(t, types.TypeWikiIngest, commits[0].task.Type())
+	assert.JSONEq(t, `{"tenant_id":7,"knowledge_base_id":"kb-a"}`, string(commits[0].task.Payload()))
+	assert.Equal(t, `{"tenant_id":7,"knowledge_base_id":"kb-a"}`, string(commits[0].task.Payload()), "payload bytes must be stable for asynq.Unique")
+	assert.JSONEq(t, `{"tenant_id":8,"knowledge_base_id":"kb-b"}`, string(commits[1].task.Payload()))
+	assert.JSONEq(t,
+		`{"tenant_id":7,"knowledge_base_id":"kb-a","task_mode":"map","map_dedup_key":"kb-a-doc"}`,
+		string(maps[0].task.Payload()))
+	assert.JSONEq(t,
+		`{"tenant_id":8,"knowledge_base_id":"kb-b","task_mode":"map","map_dedup_key":"kb-b-doc"}`,
+		string(maps[1].task.Payload()))
 
 	wantOptions := map[asynq.OptionType]any{
 		asynq.QueueOpt:     types.QueueLow,
@@ -202,7 +227,7 @@ func TestRecoverNowPublishesOneStableTriggerPerPendingKnowledgeBase(t *testing.T
 		asynq.UniqueOpt:    defaultUniqueTTL,
 	}
 	for optionType, want := range wantOptions {
-		got, ok := optionValue(calls[0].opts, optionType)
+		got, ok := optionValue(commits[0].opts, optionType)
 		require.Truef(t, ok, "missing asynq option %v", optionType)
 		assert.Equal(t, want, got)
 	}
@@ -235,7 +260,7 @@ func TestRecoverNowTreatsUniqueDuplicateAsHealthy(t *testing.T) {
 
 	err := NewRecovery(db, enqueuer, nil).RecoverNow(context.Background())
 	require.NoError(t, err)
-	assert.Len(t, enqueuer.snapshot(), 1)
+	assert.Len(t, enqueuer.snapshot(), 2)
 }
 
 func TestRecoverNowSkipsKnowledgeBaseWithActiveWorker(t *testing.T) {
@@ -251,8 +276,11 @@ func TestRecoverNowSkipsKnowledgeBaseWithActiveWorker(t *testing.T) {
 
 	require.NoError(t, recovery.RecoverNow(context.Background()))
 	calls := enqueuer.snapshot()
-	require.Len(t, calls, 1)
-	assert.JSONEq(t, `{"tenant_id":42,"knowledge_base_id":"kb-idle"}`, string(calls[0].task.Payload()))
+	require.Len(t, calls, 3)
+	commits, maps := splitRecoveryCalls(calls)
+	require.Len(t, commits, 1)
+	require.Len(t, maps, 2, "Map is document-local and must continue while another commit owns the KB")
+	assert.JSONEq(t, `{"tenant_id":42,"knowledge_base_id":"kb-idle"}`, string(commits[0].task.Payload()))
 	assert.Equal(t, []string{
 		wikiActiveKeyPrefix + "kb-active",
 		wikiActiveKeyPrefix + "kb-idle",
@@ -274,7 +302,7 @@ func TestRecoverNowRedisLookupFailureStillAttemptsTrigger(t *testing.T) {
 	err := recovery.RecoverNow(context.Background())
 	require.ErrorIs(t, err, redisErr)
 	assert.Contains(t, err.Error(), "check active worker")
-	assert.Len(t, enqueuer.snapshot(), 1, "Redis uncertainty must not be treated as an empty queue")
+	assert.Len(t, enqueuer.snapshot(), 2, "Redis uncertainty must not suppress either durable lane")
 }
 
 func TestRecoverNowContinuesAfterRedisFailureAndRetriesNextRound(t *testing.T) {
@@ -293,10 +321,10 @@ func TestRecoverNowContinuesAfterRedisFailureAndRetriesNextRound(t *testing.T) {
 	err := recovery.RecoverNow(context.Background())
 	require.ErrorIs(t, err, redisErr)
 	assert.Contains(t, err.Error(), `knowledge_base="kb-a"`)
-	assert.Len(t, enqueuer.snapshot(), 2, "one failed KB must not prevent later KBs from being triggered")
+	assert.Len(t, enqueuer.snapshot(), 4, "one failed KB must not prevent later KBs or Maps from being triggered")
 
 	require.NoError(t, recovery.RecoverNow(context.Background()))
-	assert.Len(t, enqueuer.snapshot(), 4, "durable scopes must be retried on the next scan")
+	assert.Len(t, enqueuer.snapshot(), 8, "both durable lanes must be retried on the next scan")
 
 	var rowCount int64
 	require.NoError(t, db.Table("task_pending_ops").Count(&rowCount).Error)
@@ -344,25 +372,30 @@ func TestStartIsImmediateIdempotentAndRestartable(t *testing.T) {
 
 	recovery.Start(context.Background())
 	recovery.Start(context.Background())
-	select {
-	case <-enqueuer.called:
-	case <-time.After(time.Second):
-		t.Fatal("startup scan did not run immediately")
+	deadline := time.Now().Add(time.Second)
+	for len(enqueuer.snapshot()) < 2 && time.Now().Before(deadline) {
+		select {
+		case <-enqueuer.called:
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
+	require.Len(t, enqueuer.snapshot(), 2, "startup scan did not publish both durable lanes")
 	time.Sleep(25 * time.Millisecond)
-	assert.Len(t, enqueuer.snapshot(), 1, "second Start must not create another loop")
+	assert.Len(t, enqueuer.snapshot(), 2, "second Start must not create another loop")
 
 	recovery.Stop()
 	recovery.Stop()
 
 	recovery.Start(context.Background())
-	select {
-	case <-enqueuer.called:
-	case <-time.After(time.Second):
-		t.Fatal("recovery did not restart after Stop")
+	deadline = time.Now().Add(time.Second)
+	for len(enqueuer.snapshot()) < 4 && time.Now().Before(deadline) {
+		select {
+		case <-enqueuer.called:
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	recovery.Stop()
-	assert.Len(t, enqueuer.snapshot(), 2)
+	assert.Len(t, enqueuer.snapshot(), 4)
 }
 
 func TestLoopSurvivesPanicAndRetriesOnNextTick(t *testing.T) {

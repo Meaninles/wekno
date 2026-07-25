@@ -14,6 +14,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // taskPendingOpsRepository implements interfaces.TaskPendingOpsRepository.
@@ -97,7 +98,13 @@ func (r *taskPendingOpsRepository) Enqueue(ctx context.Context, op *types.TaskPe
 			if err := wikiingestguard.ValidateScope(ctx, tx, op.TenantID, op.ScopeID); err != nil {
 				return err
 			}
-			return tx.Create(op).Error
+			// Wiki producers are deliberately replayable: document
+			// finalization, recovery scans, and a restarted replica may all
+			// publish the same generation. The partial unique indexes make
+			// the durable row the idempotency boundary; DO NOTHING turns a
+			// conflicting replay into success without replacing a richer
+			// Map/page checkpoint already stored in the canonical payload.
+			return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(op).Error
 		})
 	}
 	return r.db.WithContext(ctx).Create(op).Error
@@ -162,6 +169,134 @@ func (r *taskPendingOpsRepository) PeekBatch(
 	return ops, nil
 }
 
+// GetWikiIngestByDedupKey resolves one exact document-generation row for a
+// distributed Wiki Map worker. The normalized tuple is part of the lookup so
+// a delayed or forged task cannot address another tenant/KB/op by row id.
+func (r *taskPendingOpsRepository) GetWikiIngestByDedupKey(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	dedupKey string,
+) (*types.TaskPendingOp, error) {
+	if tenantID == 0 || strings.TrimSpace(knowledgeBaseID) == "" || strings.TrimSpace(dedupKey) == "" {
+		return nil, errors.New("task pending ops: complete Wiki Map identity is required")
+	}
+	var op types.TaskPendingOp
+	err := r.db.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ? AND dedup_key = ?",
+			tenantID,
+			types.TypeWikiIngest,
+			types.TaskScopeKnowledgeBase,
+			knowledgeBaseID,
+			"ingest",
+			dedupKey,
+		).
+		First(&op).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &op, nil
+}
+
+// DeleteWikiIngestByDedupKey terminally removes one stale generation using
+// the same complete identity as the distributed Map lookup. It is safe to
+// race KB deletion (both remove the row) and cannot touch another tenant even
+// if an external payload reuses textual identifiers.
+func (r *taskPendingOpsRepository) DeleteWikiIngestByDedupKey(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	dedupKey string,
+) error {
+	if tenantID == 0 || strings.TrimSpace(knowledgeBaseID) == "" || strings.TrimSpace(dedupKey) == "" {
+		return errors.New("task pending ops: complete stale Wiki Map identity is required")
+	}
+	return r.db.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ? AND dedup_key = ?",
+			tenantID,
+			types.TypeWikiIngest,
+			types.TaskScopeKnowledgeBase,
+			knowledgeBaseID,
+			"ingest",
+			dedupKey,
+		).
+		Delete(&types.TaskPendingOp{}).Error
+}
+
+func wikiCommitReadyPredicate(dialect string) string {
+	retractReady := "COALESCE(payload->>'retract_plan_state', '') <> 'intent'"
+	if dialect == "sqlite" {
+		retractReady = "COALESCE(json_extract(payload, '$.retract_plan_state'), '') <> 'intent'"
+	}
+	return "(op = 'ingest' AND map_ready_at IS NOT NULL)" +
+		" OR (op = 'retract' AND " + retractReady + ")" +
+		" OR op NOT IN ('ingest', 'retract')"
+}
+
+// PeekWikiCommitBatch returns only rows whose document-local work is ready for
+// the shared-KB materialization boundary. Unprepared ingest rows are
+// deliberately bypassed, so one slow document cannot head-of-line block
+// hundreds of already-mapped documents.
+func (r *taskPendingOpsRepository) PeekWikiCommitBatch(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	limit int,
+) ([]*types.TaskPendingOp, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var ops []*types.TaskPendingOp
+	err := r.db.WithContext(ctx).
+		Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ?",
+			tenantID,
+			types.TypeWikiIngest,
+			types.TaskScopeKnowledgeBase,
+			knowledgeBaseID,
+		).
+		Where(wikiCommitReadyPredicate(r.db.Dialector.Name())).
+		Order("id ASC").
+		Limit(limit).
+		Find(&ops).Error
+	if err != nil {
+		return nil, err
+	}
+	return ops, nil
+}
+
+// CountWikiCommitReady is the cheap follow-up predicate for the commit lane.
+// Distributed Map workers wake the lane when they publish a new ready row;
+// counting all unprepared rows here would otherwise create a permanent
+// five-second polling loop while long documents are still mapping.
+func (r *taskPendingOpsRepository) CountWikiCommitReady(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&types.TaskPendingOp{}).
+		Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ?",
+			tenantID,
+			types.TypeWikiIngest,
+			types.TaskScopeKnowledgeBase,
+			knowledgeBaseID,
+		).
+		Where(wikiCommitReadyPredicate(r.db.Dialector.Name())).
+		Count(&count).Error
+	return count, err
+}
+
 // UpdateWikiPayload checkpoints service-owned Wiki progress without widening
 // the generic queue interface. The source generation is validated under the
 // same KB -> knowledge lock order as Wiki page/log writes, and the exact queue
@@ -185,6 +320,48 @@ func (r *taskPendingOpsRepository) UpdateWikiPayload(
 			Where("id = ? AND tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ?",
 				id, tenantID, types.TypeWikiIngest, types.TaskScopeKnowledgeBase, knowledgeBaseID, "ingest").
 			Update("payload", payload)
+		if result.Error != nil {
+			return result.Error
+		}
+		updated = result.RowsAffected == 1
+		return nil
+	})
+	return updated, err
+}
+
+// MarkWikiMapReady publishes a complete document-local Map result. Payload
+// and readiness marker share one transaction and one generation validation,
+// so a commit worker can never materialize stale or partially-written output.
+func (r *taskPendingOpsRepository) MarkWikiMapReady(
+	ctx context.Context,
+	id int64,
+	tenantID uint64,
+	knowledgeBaseID string,
+	payload []byte,
+) (bool, error) {
+	if id <= 0 || tenantID == 0 || strings.TrimSpace(knowledgeBaseID) == "" || len(payload) == 0 {
+		return false, errors.New("task pending ops: complete Wiki Map checkpoint identity is required")
+	}
+	updated := false
+	err := kbwritefence.WithActive(ctx, r.db, tenantID, knowledgeBaseID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, knowledgeBaseID); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		result := tx.Exec(
+			`UPDATE task_pending_ops
+			 SET payload = ?, map_ready_at = ?
+			 WHERE id = ? AND tenant_id = ? AND task_type = ?
+			   AND scope = ? AND scope_id = ? AND op = ?`,
+			payload,
+			now,
+			id,
+			tenantID,
+			types.TypeWikiIngest,
+			types.TaskScopeKnowledgeBase,
+			knowledgeBaseID,
+			"ingest",
+		)
 		if result.Error != nil {
 			return result.Error
 		}

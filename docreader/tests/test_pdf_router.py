@@ -11,6 +11,7 @@ from docreader.parser.pdf_parser import (
     _is_artifact_column,
     _join_line_glyphs,
     _merge_orphan_punctuation_lines,
+    _page_visual_object_count,
     _point_in_boxes,
     _segments_to_markdown,
     _select_embedded_images,
@@ -36,6 +37,51 @@ def _make_image_only_pdf(num_pages: int = 2) -> bytes:
     return buf.getvalue()
 
 
+def _make_single_page_pdf(content_stream: bytes) -> bytes:
+    """Build a dependency-free one-page PDF for page-object routing tests."""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+            b"/Resources << >> /Contents 4 0 R >>"
+        ),
+        (
+            b"<< /Length "
+            + str(len(content_stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + content_stream
+            + b"\nendstream"
+        ),
+    ]
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{index} 0 obj\n".encode("ascii"))
+        output.extend(obj)
+        output.extend(b"\nendobj\n")
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(output)
+
+
+def _make_vector_only_pdf() -> bytes:
+    # Rectangle and crossing lines: visible paths, intentionally no text object.
+    return _make_single_page_pdf(
+        b"0 0 0 RG 1 w 20 20 160 160 re S 20 100 m 180 100 l S"
+    )
+
+
 class ClassifyPageTest(unittest.TestCase):
     def test_full_page_image_is_scanned_even_with_text(self):
         # Scanned newspaper: image covers the page, embedded OCR text exists.
@@ -53,6 +99,9 @@ class ClassifyPageTest(unittest.TestCase):
     def test_blank_page_is_text(self):
         # No image, no text -> not rendered as an image.
         self.assertEqual(_classify_page(0.0, 0), "text")
+
+    def test_vector_only_page_is_scanned(self):
+        self.assertEqual(_classify_page(0.0, 0, visual_object_count=3), "scanned")
 
 
 class StripRepeatingLinesTest(unittest.TestCase):
@@ -423,6 +472,38 @@ class PDFRouterIntegrationTest(unittest.TestCase):
                 b"\xff\xd8"
             )
         )
+
+    def test_vector_only_pdf_routes_to_scanned(self):
+        import pypdfium2 as pdfium
+        import pypdfium2.raw as pdfium_r
+
+        pdf_bytes = _make_vector_only_pdf()
+        with pdfium.PdfDocument(pdf_bytes) as pdf:
+            page = pdf[0]
+            try:
+                self.assertGreater(_page_visual_object_count(page, pdfium_r), 0)
+                self.assertEqual(page.get_textpage().get_text_range(), "")
+            finally:
+                page.close()
+
+        doc = PDFParser(file_name="vector.pdf", file_type="pdf").parse_into_text(
+            pdf_bytes
+        )
+        self.assertEqual(doc.metadata["scanned_page_count"], 1)
+        self.assertEqual(doc.metadata["text_page_count"], 0)
+        self.assertIn("images/vector_page_1.jpg", doc.images)
+        self.assertIn("![vector_page_1.jpg]", doc.content)
+
+    def test_blank_pdf_has_no_visual_objects(self):
+        import pypdfium2 as pdfium
+        import pypdfium2.raw as pdfium_r
+
+        with pdfium.PdfDocument(_make_single_page_pdf(b"")) as pdf:
+            page = pdf[0]
+            try:
+                self.assertEqual(_page_visual_object_count(page, pdfium_r), 0)
+            finally:
+                page.close()
 
     def test_malformed_pdf_raises_after_fallback(self):
         # Routing fails to open the PDF, falls back to full rendering which also

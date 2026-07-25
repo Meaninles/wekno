@@ -246,6 +246,215 @@ func (r *wikiPageRepository) UpdateMeta(ctx context.Context, page *types.WikiPag
 	})
 }
 
+func (r *wikiPageRepository) AddInLink(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	targetSlug string,
+	sourceSlug string,
+) error {
+	return r.mutateInLink(ctx, tenantID, kbID, targetSlug, sourceSlug, true)
+}
+
+func (r *wikiPageRepository) RemoveInLink(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	targetSlug string,
+	sourceSlug string,
+) error {
+	return r.mutateInLink(ctx, tenantID, kbID, targetSlug, sourceSlug, false)
+}
+
+// mutateInLink changes only one set membership directly in the database.
+// Reverse links are bookkeeping shared by many independently processed source
+// pages; loading a whole target row and writing its stale in_links snapshot
+// through UpdateMeta loses concurrent sources and collides with content
+// version bumps. A row-local JSON expression lets PostgreSQL serialize the
+// memberships while leaving the user-visible version untouched.
+func (r *wikiPageRepository) mutateInLink(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	targetSlug string,
+	sourceSlug string,
+	add bool,
+) error {
+	targetSlug = strings.TrimSpace(targetSlug)
+	sourceSlug = strings.TrimSpace(sourceSlug)
+	if tenantID == 0 || strings.TrimSpace(kbID) == "" ||
+		targetSlug == "" || sourceSlug == "" {
+		return errors.New("mutate wiki in-link: tenant, KB, target and source are required")
+	}
+
+	return kbwritefence.WithActive(ctx, r.db, tenantID, kbID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, kbID); err != nil {
+			return err
+		}
+		query := tx.Model(&types.WikiPage{}).
+			Where(
+				"tenant_id = ? AND knowledge_base_id = ? AND slug = ?",
+				tenantID,
+				kbID,
+				targetSlug,
+			)
+		updates := map[string]any{"updated_at": time.Now()}
+
+		if tx.Dialector != nil && tx.Dialector.Name() == "sqlite" {
+			validArray := `CASE
+				WHEN json_valid(in_links) AND json_type(in_links) = 'array'
+				THEN in_links ELSE '[]' END`
+			if add {
+				query = query.Where(
+					`NOT EXISTS (
+						SELECT 1 FROM json_each(`+validArray+`) AS link
+						 WHERE CAST(link.value AS TEXT) = ?
+					)`,
+					sourceSlug,
+				)
+				updates["in_links"] = gorm.Expr(
+					`json_insert(`+validArray+`, '$[#]', ?)`,
+					sourceSlug,
+				)
+			} else {
+				query = query.Where(
+					`EXISTS (
+						SELECT 1 FROM json_each(`+validArray+`) AS link
+						 WHERE CAST(link.value AS TEXT) = ?
+					)`,
+					sourceSlug,
+				)
+				updates["in_links"] = gorm.Expr(
+					`COALESCE((
+						SELECT json_group_array(link.value)
+						  FROM json_each(`+validArray+`) AS link
+						 WHERE CAST(link.value AS TEXT) <> ?
+					), '[]')`,
+					sourceSlug,
+				)
+			}
+		} else {
+			validArray := `CASE
+				WHEN jsonb_typeof(in_links) = 'array'
+				THEN in_links ELSE '[]'::jsonb END`
+			if add {
+				query = query.Where(
+					`NOT (`+validArray+` @> jsonb_build_array(?::text))`,
+					sourceSlug,
+				)
+				updates["in_links"] = gorm.Expr(
+					validArray+` || jsonb_build_array(?::text)`,
+					sourceSlug,
+				)
+			} else {
+				query = query.Where(
+					validArray+` @> jsonb_build_array(?::text)`,
+					sourceSlug,
+				)
+				updates["in_links"] = gorm.Expr(
+					`COALESCE((
+						SELECT jsonb_agg(link.value ORDER BY link.ordinality)
+						  FROM jsonb_array_elements_text(`+validArray+`)
+						       WITH ORDINALITY AS link(value, ordinality)
+						 WHERE link.value <> ?
+					), '[]'::jsonb)`,
+					sourceSlug,
+				)
+			}
+		}
+		return query.Updates(updates).Error
+	})
+}
+
+// SyncInLinksForTarget closes the source-before-target creation race. A source
+// page may already contain [[target]] while target does not exist; in that
+// ordering AddInLink correctly no-ops. As soon as target is created, this
+// set-based query reconstructs its complete reverse edge set from all live
+// source pages in the same tenant/KB.
+func (r *wikiPageRepository) SyncInLinksForTarget(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	targetSlug string,
+) error {
+	targetSlug = strings.TrimSpace(targetSlug)
+	if tenantID == 0 || strings.TrimSpace(kbID) == "" || targetSlug == "" {
+		return errors.New("sync wiki in-links: tenant, KB and target are required")
+	}
+	return kbwritefence.WithActive(ctx, r.db, tenantID, kbID, func(tx *gorm.DB) error {
+		if err := wikiingestguard.ValidateScope(ctx, tx, tenantID, kbID); err != nil {
+			return err
+		}
+		var expression clause.Expr
+		if tx.Dialector != nil && tx.Dialector.Name() == "sqlite" {
+			expression = gorm.Expr(
+				`COALESCE((
+					SELECT json_group_array(ordered.slug)
+					  FROM (
+						SELECT source.slug
+						  FROM wiki_pages AS source
+						 WHERE source.tenant_id = ?
+						   AND source.knowledge_base_id = ?
+						   AND source.deleted_at IS NULL
+						   AND source.status <> ?
+						   AND EXISTS (
+								SELECT 1
+								  FROM json_each(
+									CASE WHEN json_valid(source.out_links)
+									          AND json_type(source.out_links) = 'array'
+									     THEN source.out_links ELSE '[]' END
+								  ) AS out_link
+								 WHERE CAST(out_link.value AS TEXT) = ?
+						   )
+						 ORDER BY source.slug
+					  ) AS ordered
+				), '[]')`,
+				tenantID,
+				kbID,
+				types.WikiPageStatusArchived,
+				targetSlug,
+			)
+		} else {
+			expression = gorm.Expr(
+				`COALESCE((
+					SELECT jsonb_agg(source.slug ORDER BY source.slug)
+					  FROM wiki_pages AS source
+					 WHERE source.tenant_id = ?
+					   AND source.knowledge_base_id = ?
+					   AND source.deleted_at IS NULL
+					   AND source.status <> ?
+					   AND (CASE
+							WHEN jsonb_typeof(source.out_links) = 'array'
+							THEN source.out_links ELSE '[]'::jsonb
+					    END) @> jsonb_build_array(?::text)
+				), '[]'::jsonb)`,
+				tenantID,
+				kbID,
+				types.WikiPageStatusArchived,
+				targetSlug,
+			)
+		}
+		result := tx.Model(&types.WikiPage{}).
+			Where(
+				"tenant_id = ? AND knowledge_base_id = ? AND slug = ?",
+				tenantID,
+				kbID,
+				targetSlug,
+			).
+			Updates(map[string]any{
+				"in_links":   expression,
+				"updated_at": time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrWikiPageNotFound
+		}
+		return nil
+	})
+}
+
 // QuarantineForDelete is the row-level serialization point between Wiki
 // writers and source deletion. Incrementing version is intentional: although
 // ordinary metadata writes do not create a revision, quarantine must fence a
@@ -343,6 +552,27 @@ func (r *wikiPageRepository) GetBySlug(ctx context.Context, kbID string, slug st
 	return &page, nil
 }
 
+// GetGraphPageBySlug returns the minimum projection required by the bounded
+// ego-graph path. Keeping this separate from GetBySlug prevents a graph click
+// from loading content/summary/page_metadata/source_refs for the center page.
+func (r *wikiPageRepository) GetGraphPageBySlug(
+	ctx context.Context,
+	kbID string,
+	slug string,
+) (*types.WikiPage, error) {
+	var page types.WikiPage
+	if err := r.db.WithContext(ctx).
+		Select("slug", "title", "page_type", "status", "in_links", "out_links").
+		Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
+		First(&page).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrWikiPageNotFound
+		}
+		return nil, err
+	}
+	return &page, nil
+}
+
 // List retrieves wiki pages with filtering and pagination
 func (r *wikiPageRepository) List(ctx context.Context, req *types.WikiPageListRequest) ([]*types.WikiPage, int64, error) {
 	query := r.db.WithContext(ctx).Model(&types.WikiPage{}).
@@ -355,14 +585,38 @@ func (r *wikiPageRepository) List(ctx context.Context, req *types.WikiPageListRe
 	}
 	if req.Status != "" {
 		query = query.Where("status = ?", req.Status)
+	} else {
+		// Quarantine is the synchronous visibility fence used by document
+		// deletion. Archived pages can still retain their previous body and
+		// source_refs briefly while the durable Wiki reducer reconciles shared
+		// pages. The default user-facing list must hide them immediately;
+		// operators can still request status=archived explicitly.
+		query = query.Where("status <> ?", types.WikiPageStatusArchived)
 	}
 	if req.Query != "" {
-		// Use PostgreSQL full-text search + ILIKE for aliases
-		query = query.Where(
-			"(to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, '')) @@ plainto_tsquery('simple', ?) OR aliases::text ILIKE ?)",
-			req.Query,
-			"%"+req.Query+"%",
-		)
+		if req.Projection == "graph" {
+			// Graph catalogue search is intentionally title/slug/alias only.
+			// Searching page content here would force a full-text pass over
+			// large wiki bodies for every debounced keystroke.
+			if r.db.Dialector != nil && r.db.Dialector.Name() == "sqlite" {
+				query = query.Where(
+					"(lower(title) LIKE lower(?) OR lower(slug) LIKE lower(?) OR lower(CAST(aliases AS TEXT)) LIKE lower(?))",
+					"%"+req.Query+"%", "%"+req.Query+"%", "%"+req.Query+"%",
+				)
+			} else {
+				query = query.Where(
+					"(title ILIKE ? OR slug ILIKE ? OR aliases::text ILIKE ?)",
+					"%"+req.Query+"%", "%"+req.Query+"%", "%"+req.Query+"%",
+				)
+			}
+		} else {
+			// Use PostgreSQL full-text search + ILIKE for aliases.
+			query = query.Where(
+				"(to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, '')) @@ plainto_tsquery('simple', ?) OR aliases::text ILIKE ?)",
+				req.Query,
+				"%"+req.Query+"%",
+			)
+		}
 	}
 	// Directory filters are pushed to SQL so the DB does the counting and
 	// pagination instead of loading every page of the type into memory. `depth`
@@ -420,10 +674,19 @@ func (r *wikiPageRepository) List(ctx context.Context, req *types.WikiPageListRe
 	if pageSize < 1 {
 		pageSize = 20
 	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
 	offset := (page - 1) * pageSize
 
 	// Pagination
 	query = query.Offset(offset).Limit(pageSize)
+	if req.Projection == "graph" {
+		query = query.Select(
+			"id", "tenant_id", "knowledge_base_id", "slug", "title",
+			"page_type", "status", "created_at", "updated_at",
+		)
+	}
 
 	var pages []*types.WikiPage
 	if err := query.Find(&pages).Error; err != nil {
@@ -498,40 +761,124 @@ func (r *wikiPageRepository) ListByTypeLight(
 	return entries, total, nil
 }
 
+// ListGraphNeighbors returns a bounded, deterministic page of nodes directly
+// referenced by the center's in_links or out_links arrays. Unlike ListAll,
+// this query never reads page content and its response memory is O(limit),
+// independent of the number of pages in the knowledge base.
+func (r *wikiPageRepository) ListGraphNeighbors(
+	ctx context.Context,
+	kbID string,
+	center string,
+	pageTypes []string,
+	limit int,
+	offset int,
+) ([]types.WikiGraphNode, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	db := r.db.WithContext(ctx)
+	base := db.Model(&types.WikiPage{}).
+		Where("wiki_pages.knowledge_base_id = ?", kbID).
+		Where("wiki_pages.slug <> ?", center).
+		Where("wiki_pages.status <> ?", types.WikiPageStatusArchived)
+
+	// PostgreSQL stores link arrays as JSONB; SQLite stores JSON text. Both
+	// engines can expand the two arrays inside the center row without
+	// interpolating the (potentially very large) slug list into SQL.
+	linkCountExpr := `CASE WHEN jsonb_typeof(wiki_pages.in_links) = 'array'
+			THEN jsonb_array_length(wiki_pages.in_links) ELSE 0 END +
+		CASE WHEN jsonb_typeof(wiki_pages.out_links) = 'array'
+			THEN jsonb_array_length(wiki_pages.out_links) ELSE 0 END`
+	if db.Dialector != nil && db.Dialector.Name() == "sqlite" {
+		base = base.Where(`wiki_pages.slug IN (
+			SELECT CAST(value AS TEXT)
+			  FROM wiki_pages AS graph_center,
+			       json_each(CASE WHEN json_type(graph_center.in_links) = 'array'
+			                      THEN graph_center.in_links ELSE '[]' END)
+			 WHERE graph_center.knowledge_base_id = ?
+			   AND graph_center.slug = ?
+			   AND graph_center.deleted_at IS NULL
+			UNION
+			SELECT CAST(value AS TEXT)
+			  FROM wiki_pages AS graph_center,
+			       json_each(CASE WHEN json_type(graph_center.out_links) = 'array'
+			                      THEN graph_center.out_links ELSE '[]' END)
+			 WHERE graph_center.knowledge_base_id = ?
+			   AND graph_center.slug = ?
+			   AND graph_center.deleted_at IS NULL
+		)`, kbID, center, kbID, center)
+		linkCountExpr = `CASE WHEN json_type(wiki_pages.in_links) = 'array'
+				THEN json_array_length(wiki_pages.in_links) ELSE 0 END +
+			CASE WHEN json_type(wiki_pages.out_links) = 'array'
+				THEN json_array_length(wiki_pages.out_links) ELSE 0 END`
+	} else {
+		base = base.Where(`wiki_pages.slug IN (
+			SELECT jsonb_array_elements_text(
+				(CASE WHEN jsonb_typeof(graph_center.in_links) = 'array'
+				      THEN graph_center.in_links ELSE '[]'::jsonb END) ||
+				(CASE WHEN jsonb_typeof(graph_center.out_links) = 'array'
+				      THEN graph_center.out_links ELSE '[]'::jsonb END)
+			)
+			  FROM wiki_pages AS graph_center
+			 WHERE graph_center.knowledge_base_id = ?
+			   AND graph_center.slug = ?
+			   AND graph_center.deleted_at IS NULL
+		)`, kbID, center)
+	}
+
+	cleanTypes := make([]string, 0, len(pageTypes))
+	seenTypes := make(map[string]struct{}, len(pageTypes))
+	for _, pageType := range pageTypes {
+		pageType = strings.TrimSpace(pageType)
+		if pageType == "" {
+			continue
+		}
+		if _, duplicate := seenTypes[pageType]; duplicate {
+			continue
+		}
+		seenTypes[pageType] = struct{}{}
+		cleanTypes = append(cleanTypes, pageType)
+	}
+	if len(cleanTypes) > 0 {
+		base = base.Where("wiki_pages.page_type IN ?", cleanTypes)
+	}
+
+	var total int64
+	if err := base.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if total == 0 {
+		return []types.WikiGraphNode{}, 0, nil
+	}
+
+	var nodes []types.WikiGraphNode
+	if err := base.
+		Select("wiki_pages.slug, wiki_pages.title, wiki_pages.page_type, (" + linkCountExpr + ") AS link_count").
+		Order("link_count DESC").
+		Order("wiki_pages.slug ASC").
+		Limit(limit).
+		Offset(offset).
+		Scan(&nodes).Error; err != nil {
+		return nil, 0, err
+	}
+	return nodes, total, nil
+}
+
 // ListBySourceRef retrieves all wiki pages that reference a given source knowledge ID.
 // Handles both old format ("knowledgeID") and new format ("knowledgeID|title") in source_refs JSON array.
 func (r *wikiPageRepository) ListBySourceRef(ctx context.Context, kbID string, sourceKnowledgeID string) ([]*types.WikiPage, error) {
-	// Build the JSON needle safely so arbitrary IDs cannot break out of the
-	// quoted string (e.g. ids containing quotes or backslashes).
-	needle, err := json.Marshal([]string{sourceKnowledgeID})
-	if err != nil {
-		return nil, fmt.Errorf("marshal source ref needle: %w", err)
-	}
-
-	// For the "knowledgeID|title" prefix form, match against the JSON-encoded
-	// value: json.Marshal escapes special chars so the LIKE pattern is safe.
-	prefix, err := json.Marshal(sourceKnowledgeID + "|")
-	if err != nil {
-		return nil, fmt.Errorf("marshal source ref prefix: %w", err)
-	}
-	// prefix is a JSON string including the surrounding quotes; e.g. "abc|".
-	// We strip the trailing quote so LIKE can continue into the title portion.
-	prefixStr := string(prefix)
-	if len(prefixStr) >= 2 && prefixStr[len(prefixStr)-1] == '"' {
-		prefixStr = prefixStr[:len(prefixStr)-1]
-	}
-	// Escape LIKE metacharacters in the already-JSON-escaped prefix, then wrap
-	// with %…% to match anywhere in the serialized JSON array.
-	likePattern := "%" + escapeLikePattern(prefixStr) + "%"
-
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
-		Where("knowledge_base_id = ? AND (source_refs @> ?::jsonb OR source_refs::text LIKE ?)",
-			kbID,
-			string(needle),
-			likePattern,
-		).
-		Find(&pages).Error; err != nil {
+	query, err := applyWikiPageSourceRefFilter(
+		r.db.WithContext(ctx), kbID, sourceKnowledgeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := query.Find(&pages).Error; err != nil {
 		return nil, err
 	}
 	return pages, nil
@@ -547,6 +894,80 @@ func (r *wikiPageRepository) ListBySourceRef(ctx context.Context, kbID string, s
 // containment branch and idx_wiki_pages_source_refs_text for the legacy
 // text-LIKE branch — both added in migration 000041.
 func (r *wikiPageRepository) ListSlugsBySourceRef(ctx context.Context, kbID string, sourceKnowledgeID string) ([]string, error) {
+	var slugs []string
+	query, err := applyWikiPageSourceRefFilter(
+		r.db.WithContext(ctx).Model(&types.WikiPage{}),
+		kbID,
+		sourceKnowledgeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := query.Pluck("slug", &slugs).Error; err != nil {
+		return nil, err
+	}
+	return slugs, nil
+}
+
+// ListSourceProvenanceBySourceRef returns the minimum old-page provenance
+// needed for a reparse replacement. In particular it never selects content,
+// summary, aliases, links, or metadata, so one document touching a very large
+// shared page cannot inflate the Map phase's memory or network footprint.
+func (r *wikiPageRepository) ListSourceProvenanceBySourceRef(
+	ctx context.Context,
+	kbID string,
+	sourceKnowledgeID string,
+) ([]types.WikiPageSourceProvenance, error) {
+	query, err := applyWikiPageSourceRefFilter(
+		r.db.WithContext(ctx).Model(&types.WikiPage{}),
+		kbID,
+		sourceKnowledgeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var rows []types.WikiPageSourceProvenance
+	if err := query.
+		Select("slug", "page_type", "chunk_refs").
+		Order("slug ASC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// applyWikiPageSourceRefFilter is the single source-of-truth for the two
+// supported source_refs encodings: "knowledge-id" and
+// "knowledge-id|legacy-title". PostgreSQL keeps the indexed containment/text
+// predicate used in production. SQLite expands the JSON array so IDs
+// containing LIKE metacharacters cannot match a neighbouring document.
+func applyWikiPageSourceRefFilter(
+	query *gorm.DB,
+	kbID string,
+	sourceKnowledgeID string,
+) (*gorm.DB, error) {
+	if query == nil {
+		return nil, errors.New("wiki page source-ref query is nil")
+	}
+	if query.Dialector != nil && query.Dialector.Name() == "sqlite" {
+		prefixPattern := escapeLikePattern(sourceKnowledgeID) + "|%"
+		return query.Where(
+			`knowledge_base_id = ? AND EXISTS (
+				SELECT 1
+				  FROM json_each(
+					CASE WHEN json_valid(wiki_pages.source_refs)
+					     THEN wiki_pages.source_refs ELSE '[]' END
+				  ) AS source_ref
+				 WHERE CAST(source_ref.value AS TEXT) = ?
+				    OR CAST(source_ref.value AS TEXT) LIKE ? ESCAPE '\'
+			)`,
+			kbID,
+			sourceKnowledgeID,
+			prefixPattern,
+		), nil
+	}
+
 	needle, err := json.Marshal([]string{sourceKnowledgeID})
 	if err != nil {
 		return nil, fmt.Errorf("marshal source ref needle: %w", err)
@@ -561,18 +982,12 @@ func (r *wikiPageRepository) ListSlugsBySourceRef(ctx context.Context, kbID stri
 	}
 	likePattern := "%" + escapeLikePattern(prefixStr) + "%"
 
-	var slugs []string
-	if err := r.db.WithContext(ctx).
-		Model(&types.WikiPage{}).
-		Where("knowledge_base_id = ? AND (source_refs @> ?::jsonb OR source_refs::text LIKE ?)",
-			kbID,
-			string(needle),
-			likePattern,
-		).
-		Pluck("slug", &slugs).Error; err != nil {
-		return nil, err
-	}
-	return slugs, nil
+	return query.Where(
+		"knowledge_base_id = ? AND (source_refs @> ?::jsonb OR source_refs::text LIKE ?)",
+		kbID,
+		string(needle),
+		likePattern,
+	), nil
 }
 
 // ListBySlugs returns lightweight projections (slug, title, page_type,
@@ -1137,7 +1552,11 @@ func (r *wikiPageRepository) ListRecentForSuggestions(
 	return pages, nil
 }
 
-// Delete soft-deletes a wiki page by knowledge base ID and slug
+// Delete permanently removes a wiki page by knowledge base ID and slug.
+// There is no Wiki-page restore workflow, and a soft-delete tombstone would
+// retain generated prose after its final source document was deleted. The
+// caller already snapshots the page for link/chunk cleanup before entering
+// this repository boundary.
 func (r *wikiPageRepository) Delete(ctx context.Context, kbID string, slug string) error {
 	write := func(tx *gorm.DB) error {
 		if tenantID, guardedKBID, ok := wikiingestguard.Scope(ctx); ok {
@@ -1150,7 +1569,7 @@ func (r *wikiPageRepository) Delete(ctx context.Context, kbID string, slug strin
 		} else if err := wikiingestguard.Validate(ctx, tx); err != nil {
 			return err
 		}
-		result := tx.Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
+		result := tx.Unscoped().Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
 			Delete(&types.WikiPage{})
 		if result.Error != nil {
 			return result.Error
@@ -1169,9 +1588,10 @@ func (r *wikiPageRepository) Delete(ctx context.Context, kbID string, slug strin
 	return r.db.WithContext(ctx).Transaction(write)
 }
 
-// DeleteByID soft-deletes a wiki page by ID
+// DeleteByID permanently removes a Wiki page. As with Delete, keeping an
+// unrecoverable content tombstone would violate document-deletion semantics.
 func (r *wikiPageRepository) DeleteByID(ctx context.Context, id string) error {
-	result := r.db.WithContext(ctx).
+	result := r.db.WithContext(ctx).Unscoped().
 		Where("id = ?", id).
 		Delete(&types.WikiPage{})
 	if result.Error != nil {

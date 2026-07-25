@@ -85,6 +85,8 @@ type Part struct {
 	Attempt              int        `json:"attempt" gorm:"not null;default:0"`
 	LeaseEpoch           int64      `json:"lease_epoch" gorm:"not null;default:0"`
 	LeaseOwner           string     `json:"lease_owner,omitempty" gorm:"type:varchar(160);not null;default:'';index"`
+	LeaseInstanceID      string     `json:"lease_instance_id,omitempty" gorm:"type:varchar(255);not null;default:'';index"`
+	LeaseBootID          string     `json:"lease_boot_id,omitempty" gorm:"type:varchar(64);not null;default:'';index"`
 	LeaseUntil           *time.Time `json:"lease_until,omitempty" gorm:"index"`
 	OutputPath           string     `json:"-" gorm:"type:text;not null;default:''"`
 	OutputSize           int64      `json:"output_size" gorm:"not null;default:0"`

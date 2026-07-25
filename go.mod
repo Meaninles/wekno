@@ -69,6 +69,7 @@ require (
 	github.com/yanyiwu/gojieba v1.4.7
 	go.uber.org/dig v1.19.0
 	golang.org/x/crypto v0.51.0
+	golang.org/x/image v0.25.0
 	golang.org/x/mod v0.36.0
 	golang.org/x/net v0.54.0
 	golang.org/x/sync v0.20.0

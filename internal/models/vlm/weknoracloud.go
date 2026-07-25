@@ -51,14 +51,14 @@ func NewWeKnoraCloudVLM(config *Config) (*WeKnoraCloudVLM, error) {
 		appID:           config.AppID,
 		apiKey:          config.AppSecret,
 		baseURL:         strings.TrimRight(config.BaseURL, "/"),
-		client:          &http.Client{Timeout: vlmHTTPTimeout()},
+		client:          newVLMHTTPClient(vlmHTTPTimeout()),
 	}, nil
 }
 
 type weKnoraCloudVLMContentPart struct {
-	Type     string                      `json:"type"`
-	Text     string                      `json:"text,omitempty"`
-	ImageURL *weKnoraCloudVLMImageURL    `json:"image_url,omitempty"`
+	Type     string                   `json:"type"`
+	Text     string                   `json:"text,omitempty"`
+	ImageURL *weKnoraCloudVLMImageURL `json:"image_url,omitempty"`
 }
 
 type weKnoraCloudVLMImageURL struct {

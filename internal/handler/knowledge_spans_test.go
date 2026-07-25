@@ -122,3 +122,18 @@ func TestBuildSpanTree_LastFailureSurfaces(t *testing.T) {
 		"last_error must point at the actually-failed span, not the cascade-cancelled downstream")
 	a.Equal("DOCREADER_TIMEOUT", lastFail.ErrorCode)
 }
+
+func TestBuildSpanTree_SuccessfulRetrySupersedesHistoricalFailure(t *testing.T) {
+	now := time.Now()
+	failedAt := now.Add(time.Second)
+	doneAt := now.Add(2 * time.Second)
+	rows := []types.KnowledgeProcessingSpan{
+		{ID: 1, KnowledgeID: "kid", Attempt: 1, SpanID: "root", Name: "knowledge_processing", Kind: types.SpanKindRoot, Status: types.SpanStatusDone, StartedAt: &now, FinishedAt: &doneAt},
+		{ID: 2, KnowledgeID: "kid", Attempt: 1, SpanID: "wiki-old", ParentSpanID: "post", Name: "postprocess.wiki", Kind: types.SpanKindSubSpan, Status: types.SpanStatusFailed, ErrorCode: "WIKI_MATERIALIZATION_FAILED", StartedAt: &now, FinishedAt: &failedAt},
+		{ID: 3, KnowledgeID: "kid", Attempt: 1, SpanID: "wiki-new", ParentSpanID: "post", Name: "postprocess.wiki", Kind: types.SpanKindSubSpan, Status: types.SpanStatusDone, StartedAt: &failedAt, FinishedAt: &doneAt},
+	}
+
+	_, _, lastFail := buildSpanTree("kid", 1, rows, types.ParseStatusCompleted)
+	assert.Nil(t, lastFail,
+		"a successful latest retry must not leave the document API reporting an obsolete failure")
+}

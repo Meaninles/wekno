@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,6 +32,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/Tencent/WeKnora/internal/agent/approval"
 	"github.com/Tencent/WeKnora/internal/application/repository"
@@ -54,11 +55,16 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
 	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
+	"github.com/Tencent/WeKnora/internal/custom/modules/connectiontls"
+	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
+	"github.com/Tencent/WeKnora/internal/custom/modules/databasepool"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentrecovery"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/database"
@@ -121,6 +127,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(initFileService))
 	must(container.Provide(initRedisClient))
 	must(container.Provide(initAntsPool))
+	must(container.Provide(contentcache.NewStore))
 
 	must(container.Invoke(registerLangfuseCleanup))
 
@@ -200,6 +207,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewChunkService))
 	must(container.Provide(service.NewKnowledgeTagService))
 	must(container.Provide(embedding.NewBatchEmbedder))
+	must(container.Provide(modeladmission.NewManager))
 	must(container.Provide(service.NewModelService))
 	must(container.Provide(service.NewDatasetService))
 	must(container.Provide(service.NewEvaluationService))
@@ -292,14 +300,12 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// durable PostgreSQL pending-op. Keep the implementation outside native
 	// services; this is the sole provider registration point.
 	must(container.Provide(corefanout.NewRecovery))
+	must(container.Provide(enrichmentrecovery.NewRecovery))
 	must(container.Provide(wikiqueue.NewRecovery))
 	must(container.Provide(kbdeletequeue.New))
 	must(container.Provide(kbdeletequeue.NewRecovery))
 	must(container.Provide(knowledgeaux.New))
 	must(container.Provide(knowledgeaux.NewRecovery))
-	// Migrate provable legacy source/image ownership before any scheduler,
-	// housekeeping worker, Asynq consumer, or HTTP router can touch documents.
-	must(container.Invoke(knowledgeaux.RunStartupBackfill))
 	must(container.Provide(wikidelete.New))
 	must(container.Provide(wikidelete.NewRecovery))
 
@@ -412,6 +418,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// Start only after the async server / Lite handlers are registered so the
 	// recovery module's immediate scan always has a consumer.
 	must(container.Invoke(corefanout.StartRecovery))
+	must(container.Invoke(enrichmentrecovery.StartRecovery))
 	must(container.Invoke(wikiqueue.StartRecovery))
 	must(container.Invoke(kbdeletequeue.StartRecovery))
 	must(container.Invoke(knowledgeaux.StartRecovery))
@@ -485,12 +492,17 @@ func initRedisClient() (*redis.Client, error) {
 	if err != nil {
 		db = 0
 	}
+	tlsConfig, err := connectiontls.RedisConfigFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("配置 Redis TLS 失败: %w", err)
+	}
 
 	client := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Username: os.Getenv("REDIS_USERNAME"),
-		Password: os.Getenv("REDIS_PASSWORD"),
-		DB:       db,
+		Addr:      redisAddr,
+		Username:  os.Getenv("REDIS_USERNAME"),
+		Password:  os.Getenv("REDIS_PASSWORD"),
+		DB:        db,
+		TLSConfig: tlsConfig,
 	})
 
 	_, err = client.Ping(context.Background()).Result()
@@ -516,22 +528,14 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 	var sqliteDBPath string
 	switch os.Getenv("DB_DRIVER") {
 	case "postgres":
-		// DSN for GORM (key-value format)
-		gormDSN := fmt.Sprintf(
-			"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
-			os.Getenv("DB_HOST"),
-			os.Getenv("DB_PORT"),
-			os.Getenv("DB_USER"),
-			os.Getenv("DB_PASSWORD"),
-			os.Getenv("DB_NAME"),
-			"disable",
-		)
+		// Build both clients from the same validated TLS configuration. This
+		// avoids the historical split-brain where GORM and golang-migrate
+		// silently forced sslmode=disable independently.
+		gormDSN, err := database.PostgresGormDSNFromEnv()
+		if err != nil {
+			return nil, fmt.Errorf("build PostgreSQL GORM DSN: %w", err)
+		}
 		dialector = postgres.Open(gormDSN)
-
-		// DSN for golang-migrate (URL format)
-		// URL-encode password to handle special characters like !@#
-		dbPassword := os.Getenv("DB_PASSWORD")
-		encodedPassword := url.QueryEscape(dbPassword)
 
 		// Check if postgres is in RETRIEVE_DRIVER to determine skip_embedding
 		retrieveDriver := strings.Split(os.Getenv("RETRIEVE_DRIVER"), ",")
@@ -540,16 +544,11 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 			skipEmbedding = "false"
 		}
 		logger.Infof(context.Background(), "Skip embedding: %s", skipEmbedding)
-
-		migrateDSN = fmt.Sprintf(
-			"postgres://%s:%s@%s:%s/%s?sslmode=disable&options=-c%%20app.skip_embedding=%s",
-			os.Getenv("DB_USER"),
-			encodedPassword, // Use encoded password
-			os.Getenv("DB_HOST"),
-			os.Getenv("DB_PORT"),
-			os.Getenv("DB_NAME"),
-			skipEmbedding,
-		)
+		skipEmbeddingBool := skipEmbedding == "true"
+		migrateDSN, err = database.PostgresMigrationURLFromEnv(&skipEmbeddingBool)
+		if err != nil {
+			return nil, fmt.Errorf("build PostgreSQL migration URL: %w", err)
+		}
 
 		// Debug log (don't log password)
 		logger.Infof(context.Background(), "DB Config: user=%s host=%s port=%s dbname=%s",
@@ -581,6 +580,21 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 		NowFunc: func() time.Time {
 			return time.Now().UTC()
 		},
+		// Slow vector INSERTs can contain thousands of float values. GORM's
+		// default slow-query logger interpolates every value, producing
+		// multi-megabyte log records that consume CPU/I/O and may expose
+		// sensitive document text. Keep timings and SQL shape while binding
+		// values remain parameterized.
+		Logger: gormlogger.New(
+			stdlog.New(os.Stdout, "\r\n", stdlog.LstdFlags),
+			gormlogger.Config{
+				SlowThreshold:             200 * time.Millisecond,
+				LogLevel:                  gormlogger.Warn,
+				IgnoreRecordNotFoundError: true,
+				ParameterizedQueries:      true,
+				Colorful:                  false,
+			},
+		),
 	})
 	if err != nil {
 		return nil, err
@@ -598,11 +612,27 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 				"(see vectorStoreService.isPostgres for impact)", name)
 	}
 
+	// Apply the per-replica hard connection budget before migrations and
+	// startup recovery can fan out. The implementation lives in custom code;
+	// this is only the native bootstrap registration point.
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
+	}
+	poolConfig, err := databasepool.ConfigureFromEnv(sqlDB, db.Dialector.Name())
+	if err != nil {
+		return nil, err
+	}
+	logger.Infof(
+		context.Background(),
+		"DB pool: max_open=%d max_idle=%d max_lifetime=%s max_idle_time=%s",
+		poolConfig.MaxOpenConns,
+		poolConfig.MaxIdleConns,
+		poolConfig.ConnMaxLifetime,
+		poolConfig.ConnMaxIdleTime,
+	)
+
 	if os.Getenv("DB_DRIVER") == "sqlite" {
-		sqlDB, err := db.DB()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
-		}
 		if err := sqlDB.Ping(); err != nil {
 			return nil, fmt.Errorf("failed to ping SQLite database: %w", err)
 		}
@@ -643,23 +673,6 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 	} else {
 		logger.Infof(context.Background(), "Auto-migration is disabled (AUTO_MIGRATE=false)")
 	}
-
-	// Get underlying SQL DB object
-	sqlDB, err := db.DB()
-	if err != nil {
-		return nil, err
-	}
-
-	// Configure connection pool parameters
-	if os.Getenv("DB_DRIVER") == "sqlite" {
-		// SQLite only supports one concurrent writer even in WAL mode.
-		// Limiting to a single open connection serialises all DB access and
-		// prevents "database is locked" errors from concurrent goroutines.
-		sqlDB.SetMaxOpenConns(1)
-	} else {
-		sqlDB.SetMaxIdleConns(10)
-	}
-	sqlDB.SetConnMaxLifetime(time.Duration(10) * time.Minute)
 
 	return db, nil
 }

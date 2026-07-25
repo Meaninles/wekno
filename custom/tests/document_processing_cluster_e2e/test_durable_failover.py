@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import unittest
+import urllib.error
 from unittest import mock
 
 from custom.tests.document_processing_cluster_e2e.cluster_e2e import (
+    APIError,
     ClusterE2ERunner,
     DockerController,
     E2EFailure,
@@ -13,6 +15,7 @@ from custom.tests.document_processing_cluster_e2e.cluster_e2e import (
     WorkerInstance,
 )
 from custom.tests.document_processing_cluster_e2e.run_durable_failover import (
+    SplitScopeAPIClient,
     WorkerTarget,
     assert_no_takeover_while_paused,
     validate_worker_mappings,
@@ -150,6 +153,88 @@ class DockerEvidenceTests(unittest.TestCase):
                     [WorkerTarget("worker-a", "c1"), WorkerTarget("worker-b", "c2")],
                     instances,
                 )
+
+
+class SplitScopeAPIClientTests(unittest.TestCase):
+    def test_admin_only_calls_do_not_use_the_tenant_workload_credential(self) -> None:
+        workload = mock.Mock()
+        control = mock.Mock()
+        expected = (WorkerInstance("worker-a", "boot-a", "ready", 1, 0),)
+        control.get_instances.return_value = expected
+        client = SplitScopeAPIClient(workload, control)
+
+        self.assertEqual(client.get_instances(optional=False), expected)
+        client.attest_instance_termination("worker-a", "boot-a", "proof")
+        self.assertEqual(
+            client.system_setting("asynq.concurrency"),
+            control.system_setting.return_value,
+        )
+        self.assertEqual(client.get_queue(["k1"]), workload.get_queue.return_value)
+
+        workload.get_instances.assert_not_called()
+        workload.attest_instance_termination.assert_not_called()
+        workload.system_setting.assert_not_called()
+        control.get_instances.assert_called_once_with(optional=False)
+        control.attest_instance_termination.assert_called_once_with(
+            "worker-a", "boot-a", "proof"
+        )
+        control.system_setting.assert_called_once_with("asynq.concurrency")
+
+    def test_read_only_call_retries_a_cold_start_transport_failure(self) -> None:
+        refused = E2EFailure("GET failed during cold start")
+        refused.__cause__ = urllib.error.URLError("connection refused")
+
+        workload = mock.Mock()
+        workload.list_all_knowledge.side_effect = [
+            refused,
+            [{"id": "k1"}],
+        ]
+        client = SplitScopeAPIClient(
+            workload,
+            mock.Mock(),
+            read_retry_timeout=1,
+            read_retry_interval=0,
+        )
+
+        self.assertEqual(client.list_all_knowledge("kb-1"), [{"id": "k1"}])
+        self.assertEqual(workload.list_all_knowledge.call_count, 2)
+
+    def test_read_only_call_retries_503_but_not_500(self) -> None:
+        workload = mock.Mock()
+        workload.get_knowledge.side_effect = [
+            APIError("GET", "http://test/k1", 503, "starting"),
+            {"id": "k1"},
+        ]
+        client = SplitScopeAPIClient(
+            workload,
+            mock.Mock(),
+            read_retry_timeout=1,
+            read_retry_interval=0,
+        )
+        self.assertEqual(client.get_knowledge("k1"), {"id": "k1"})
+
+        workload.get_knowledge.side_effect = APIError(
+            "GET", "http://test/k2", 500, "product failure"
+        )
+        with self.assertRaises(APIError):
+            client.get_knowledge("k2")
+        self.assertEqual(workload.get_knowledge.call_count, 3)
+
+    def test_mutating_calls_are_never_retried(self) -> None:
+        workload = mock.Mock()
+        transient = E2EFailure("connection reset")
+        transient.__cause__ = urllib.error.URLError("connection reset")
+        workload.delete_knowledge.side_effect = transient
+        client = SplitScopeAPIClient(
+            workload,
+            mock.Mock(),
+            read_retry_timeout=1,
+            read_retry_interval=0,
+        )
+
+        with self.assertRaises(E2EFailure):
+            client.delete_knowledge("k1")
+        workload.delete_knowledge.assert_called_once_with("k1")
 
 
 class FailoverEvidenceTests(unittest.TestCase):

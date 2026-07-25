@@ -34,6 +34,8 @@ import { useEditorResourcesStore } from '@/stores/editorResources';
 import { useI18n } from 'vue-i18n';
 import AttachmentUpload, { type AttachmentFile } from './AttachmentUpload.vue';
 import { dedupeChatModelOptions } from '@/custom/modules/model-options/dedupe';
+import { resolveChatModelSelection } from '@/custom/modules/chatModelSelection/policy';
+import { resolveAgentEnabledFromMode } from '@/custom/modules/agentConversationMode/policy';
 import {
   kbSatisfiesAgentRequirements,
   deriveKbFilterForAgent,
@@ -433,6 +435,22 @@ const agentMode = computed(() => {
   if (!hasAgentConfig.value) return '';
   return currentAgentConfig.value?.agent_mode || '';
 });
+
+// Agent data arrives asynchronously and the selected ID is persisted across
+// reloads. Reconcile the runtime switch once that config is resolved; otherwise
+// a smart-reasoning agent can be sent through the quick-answer endpoint and its
+// structured tool protocol is rendered as ordinary answer text.
+watch(
+  [isSelectedAgentResolved, agentMode],
+  ([resolved, mode]) => {
+    if (!resolved || settingsStore._isApplyingSessionState) return;
+    const enabled = resolveAgentEnabledFromMode(mode);
+    if (enabled !== null && enabled !== settingsStore.settings.isAgentEnabled) {
+      settingsStore.toggleAgent(enabled);
+    }
+  },
+  { immediate: true },
+);
 
 // "all" 模式 + 智能体工具有 KB 依赖时的兼容性过滤；'selected'/'none' 不在这里二次过滤
 // （selected 由编辑器负责，none 已经空表）。
@@ -1038,26 +1056,27 @@ const applyChatModelSelection = (modelId: string) => {
   });
 };
 
-const syncModelFromSelectedAgent = () => {
-  const modelId = normalizeModelId(agentModelId.value);
-  if (!modelId) return false;
+const preferredChatModelSelection = () => resolveChatModelSelection({
+  currentModelId: selectedModelId.value,
+  agentModelId: agentModelId.value,
+  lastUserModelId: readLastChatModelID(),
+  availableModelIds: rawChatModels.value.map(model => model.id),
+  catalogReady: chatResources.isFresh('models'),
+});
 
-  applyChatModelSelection(modelId);
-  return true;
+const applyPreferredChatModelSelection = () => {
+  const resolution = preferredChatModelSelection();
+  if (resolution.modelId !== selectedModelId.value) {
+    applyChatModelSelection(resolution.modelId);
+  }
+  return resolution;
 };
 
-// Initial chat-model selection priority: current agent model > current
-// conversation value > per-user last pick (new-chat default) > first available model.
-// Agent-level model belongs on the agent and must win whenever an agent
-// with model_id is selected or restored after refresh.
+// A model selected in the UI is a request-level override and must survive the
+// create-chat -> chat route remount. Switching agents still applies that
+// agent's configured model because handleSelectAgent updates the current model.
 const initChatModelSelection = () => {
-  if (syncModelFromSelectedAgent()) return;
-
-  const lastPick = readLastChatModelID();
-  const currentSelectedModel = settingsStore.conversationModels.selectedChatModelId;
-  const initialSelection = currentSelectedModel || lastPick || '';
-  applyChatModelSelection(initialSelection);
-  ensureModelSelection();
+  applyPreferredChatModelSelection();
 };
 
 const loadChatModels = async (force = false) => {
@@ -1075,30 +1094,21 @@ const loadChatModels = async (force = false) => {
 };
 
 const ensureModelSelection = () => {
-  if (syncModelFromSelectedAgent()) {
-    return;
-  }
-  if (isUsableChatModelId(selectedModelId.value)) {
-    return;
-  }
-  if (selectedModelId.value) {
-    applyChatModelSelection('');
-  }
+  const resolution = applyPreferredChatModelSelection();
   const lastPick = readLastChatModelID();
-  if (isUsableChatModelId(lastPick)) {
-    applyChatModelSelection(lastPick);
-    return;
-  }
-  if (lastPick) {
+  if (
+    chatResources.isFresh('models')
+    && lastPick
+    && resolution.source !== 'explicit-user'
+    && resolution.source !== 'last-user'
+    && !isUsableChatModelId(lastPick)
+  ) {
     writeLastChatModelID('');
-  }
-  if (availableModels.value.length > 0) {
-    applyChatModelSelection(availableModels.value[0].id || '');
   }
 };
 
-// 智能体身份或其数据到位时，把对话模型同步到智能体配置的 model_id。
-// 这覆盖刷新、从其它页面进入、以及切换智能体三种场景。
+// 智能体身份或其数据到位时重新计算有效模型：保留用户在下拉框中的
+// 显式选择，否则回退到智能体配置的 model_id。
 watch(
   [selectedAgentId, () => settingsStore.selectedAgentSourceTenantId, agentModelId],
   () => {

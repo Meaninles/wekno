@@ -121,6 +121,13 @@ type WikiPageService interface {
 	// only need the slug set (e.g. wiki ingest's "before" snapshot).
 	ListSlugsBySourceRef(ctx context.Context, kbID string, knowledgeID string) ([]string, error)
 
+	// ListSourceProvenanceBySourceRef returns only slug/page_type/chunk_refs.
+	// Reparse uses it to remove one document's old citations without loading
+	// the full wiki page bodies.
+	ListSourceProvenanceBySourceRef(
+		ctx context.Context, kbID string, knowledgeID string,
+	) ([]types.WikiPageSourceProvenance, error)
+
 	// ListBySlugs is the lazy fetcher used by the wiki ingest batch
 	// context: returns lightweight projections (no content / source_refs)
 	// for the requested slugs in a single IN query. Used in place of
@@ -231,6 +238,24 @@ type WikiPageRepository interface {
 	// unchanged body, and status-only transitions.
 	UpdateMeta(ctx context.Context, page *types.WikiPage) error
 
+	// AddInLink and RemoveInLink mutate one reverse-link membership with a
+	// database-side JSON operation. They intentionally do not participate in
+	// the user-visible page-version CAS: concurrent source pages may update
+	// the same target and must merge rather than overwrite each other.
+	AddInLink(
+		ctx context.Context, tenantID uint64, kbID, targetSlug, sourceSlug string,
+	) error
+	RemoveInLink(
+		ctx context.Context, tenantID uint64, kbID, targetSlug, sourceSlug string,
+	) error
+
+	// SyncInLinksForTarget derives the complete reverse-link set from live
+	// pages' out_links. It is called after target creation so source-before-
+	// target ordering cannot leave a permanently missing reverse edge.
+	SyncInLinksForTarget(
+		ctx context.Context, tenantID uint64, kbID, targetSlug string,
+	) error
+
 	// QuarantineForDelete atomically unions a source-deletion marker onto the
 	// current page, archives it, and advances its optimistic-lock version so a
 	// writer that loaded the page before quarantine cannot publish stale data.
@@ -249,6 +274,11 @@ type WikiPageRepository interface {
 	// GetBySlug retrieves a wiki page by slug within a knowledge base.
 	GetBySlug(ctx context.Context, kbID string, slug string) (*types.WikiPage, error)
 
+	// GetGraphPageBySlug retrieves only the columns needed to build an ego
+	// graph center. In particular it excludes content, summary and metadata,
+	// so selecting a node cannot pull a multi-megabyte wiki body into memory.
+	GetGraphPageBySlug(ctx context.Context, kbID string, slug string) (*types.WikiPage, error)
+
 	// List retrieves wiki pages with filtering and pagination.
 	List(ctx context.Context, req *types.WikiPageListRequest) ([]*types.WikiPage, int64, error)
 
@@ -261,6 +291,19 @@ type WikiPageRepository interface {
 	// have to materialize TEXT content for every wiki_pages row.
 	ListByTypeLight(ctx context.Context, kbID string, pageType string, limit int, offset int) ([]types.WikiIndexEntry, int64, error)
 
+	// ListGraphNeighbors returns one deterministic page of live one-hop
+	// neighbors for center. The lookup is executed by the database against
+	// the center row's in_links/out_links JSON arrays and projects only graph
+	// fields, so opening a local graph never materializes the whole wiki.
+	ListGraphNeighbors(
+		ctx context.Context,
+		kbID string,
+		center string,
+		pageTypes []string,
+		limit int,
+		offset int,
+	) ([]types.WikiGraphNode, int64, error)
+
 	// ListBySourceRef retrieves all wiki pages that reference a given source knowledge ID.
 	ListBySourceRef(ctx context.Context, kbID string, sourceKnowledgeID string) ([]*types.WikiPage, error)
 
@@ -269,6 +312,12 @@ type WikiPageRepository interface {
 	// projected to a single column for the wiki ingest pipeline's
 	// "before" snapshot path.
 	ListSlugsBySourceRef(ctx context.Context, kbID string, sourceKnowledgeID string) ([]string, error)
+
+	// ListSourceProvenanceBySourceRef projects only the columns needed to
+	// replace one source document's old Wiki citations during reparse.
+	ListSourceProvenanceBySourceRef(
+		ctx context.Context, kbID string, sourceKnowledgeID string,
+	) ([]types.WikiPageSourceProvenance, error)
 
 	// ListBySlugs returns lightweight projections (slug/title/page_type/
 	// status/aliases/out_links) for the given slugs in one IN query.

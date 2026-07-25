@@ -113,7 +113,8 @@ CREATE TABLE IF NOT EXISTS task_pending_ops (
     payload TEXT NOT NULL DEFAULT '{}',
     fail_count INTEGER NOT NULL DEFAULT 0,
     enqueued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    claimed_at DATETIME
+    claimed_at DATETIME,
+    map_ready_at DATETIME
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_pending_ops_scope
@@ -122,11 +123,27 @@ CREATE INDEX IF NOT EXISTS idx_task_pending_ops_tenant
     ON task_pending_ops(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_task_pending_ops_scope_op_dedup
     ON task_pending_ops(task_type, scope, scope_id, op, dedup_key);
+CREATE INDEX IF NOT EXISTS idx_task_pending_ops_wiki_commit_ready
+    ON task_pending_ops(tenant_id, scope_id, id)
+    WHERE task_type = 'wiki:ingest'
+      AND scope = 'knowledge_base'
+      AND (op <> 'ingest' OR map_ready_at IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_task_pending_ops_wiki_map_pending
+    ON task_pending_ops(id)
+    WHERE task_type = 'wiki:ingest'
+      AND scope = 'knowledge_base'
+      AND op = 'ingest'
+      AND map_ready_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_task_pending_ops_wiki_retract
     ON task_pending_ops(tenant_id, task_type, scope, scope_id, op, dedup_key)
     WHERE task_type = 'wiki:ingest'
       AND scope = 'knowledge_base'
       AND op = 'retract';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_pending_ops_wiki_ingest
+    ON task_pending_ops(tenant_id, task_type, scope, scope_id, op, dedup_key)
+    WHERE task_type = 'wiki:ingest'
+      AND scope = 'knowledge_base'
+      AND op = 'ingest';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_task_pending_ops_knowledge_aux_owned
     ON task_pending_ops(tenant_id, task_type, scope, scope_id, op, dedup_key)
     WHERE task_type = 'knowledge:aux_object'
@@ -358,6 +375,9 @@ CREATE INDEX IF NOT EXISTS idx_kpspan_status_started
 CREATE INDEX IF NOT EXISTS idx_kpspan_parent
     ON knowledge_processing_spans(parent_span_id)
     WHERE parent_span_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kpspan_one_root_per_attempt
+    ON knowledge_processing_spans(knowledge_id, attempt)
+    WHERE kind = 'root';
 
 CREATE TABLE IF NOT EXISTS sessions (
     id VARCHAR(36) PRIMARY KEY,

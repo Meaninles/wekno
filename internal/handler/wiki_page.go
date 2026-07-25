@@ -80,6 +80,7 @@ func getSlugParam(c *gin.Context) string {
 // @Param        page_type  query     string  false  "Filter by page type; comma-separated for multiple (e.g. entity,concept)"
 // @Param        status     query     string  false  "Filter by status"
 // @Param        query      query     string  false  "Full-text search"
+// @Param        projection query     string  false  "Response projection; graph returns lightweight catalogue fields"
 // @Param        page       query     int     false  "Page number"
 // @Param        page_size  query     int     false  "Page size"
 // @Param        sort_by    query     string  false  "Sort field"
@@ -117,6 +118,7 @@ func (h *WikiPageHandler) ListPages(c *gin.Context) {
 		PageType:        c.Query("page_type"),
 		Status:          c.Query("status"),
 		Query:           c.Query("query"),
+		Projection:      c.Query("projection"),
 		FolderID:        folderID,
 		CategoryPath:    types.StringArray(categoryPath),
 		CategoryDepth:   categoryDepth,
@@ -607,6 +609,7 @@ const (
 // @Param        depth   query int     false  "Ego BFS depth (1-3, default 1)"
 // @Param        types   query string  false  "Comma-separated page_type allow-list"
 // @Param        limit   query int     false  "Max nodes to return (default 500, max 2000)"
+// @Param        page    query int     false  "Ego neighbor page (1-based)"
 // @Success      200  {object}  types.WikiGraphData
 // @Security     Bearer
 // @Router       /knowledgebase/{kb_id}/wiki/graph [get]
@@ -658,6 +661,16 @@ func (h *WikiPageHandler) GetGraph(c *gin.Context) {
 		limit = parsed
 	}
 
+	page := 1
+	if v := c.Query("page"); v != "" {
+		parsed, parseErr := strconv.Atoi(v)
+		if parseErr != nil || parsed < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "page must be a positive integer"})
+			return
+		}
+		page = parsed
+	}
+
 	var typesFilter []string
 	if v := strings.TrimSpace(c.Query("types")); v != "" {
 		for _, t := range strings.Split(v, ",") {
@@ -675,6 +688,7 @@ func (h *WikiPageHandler) GetGraph(c *gin.Context) {
 		Depth:           depth,
 		Types:           typesFilter,
 		Limit:           limit,
+		Page:            page,
 	}
 
 	graph, err := h.wikiService.GetGraph(c.Request.Context(), req)

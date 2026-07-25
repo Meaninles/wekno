@@ -35,10 +35,10 @@ type TaskPendingOp struct {
 	// Operation kind. Service-defined: e.g. "ingest" / "retract" for
 	// wiki, but other consumers can use whatever vocabulary they like.
 	Op string `json:"op" gorm:"type:varchar(32)"`
-	// Optional service-defined deduplication key. The consumer is
-	// responsible for collapsing equivalent ops within a peeked batch
-	// (the queue itself does NOT enforce uniqueness — multiple rows with
-	// the same DedupKey can coexist; the consumer chooses which wins).
+	// Optional service-defined deduplication key. Generic queue consumers
+	// decide their own semantics. Wiki ingest/retract and auxiliary ownership
+	// use partial database unique indexes because their producers are
+	// replayable across replicas and restarts.
 	DedupKey string `json:"dedup_key" gorm:"type:varchar(128);default:''"`
 	// JSON-serialized op payload. Schema is consumer-defined; the queue
 	// stores it verbatim. Use json.RawMessage to avoid double-decode.
@@ -55,6 +55,12 @@ type TaskPendingOp struct {
 	// coordinator. Reserved so future row-claiming workers can adopt it
 	// without another migration.
 	ClaimedAt *time.Time `json:"claimed_at,omitempty"`
+	// MapReadyAt is set only after the expensive, document-local Wiki Map
+	// phase has been durably checkpointed. Wiki commit workers select ingest
+	// rows through this marker, which lets Map run horizontally on every
+	// replica while keeping shared KB page materialization serialized.
+	// Non-Wiki queues and Wiki retract rows ignore this column.
+	MapReadyAt *time.Time `json:"map_ready_at,omitempty" gorm:"->"`
 }
 
 // TableName binds TaskPendingOp to the `task_pending_ops` table.

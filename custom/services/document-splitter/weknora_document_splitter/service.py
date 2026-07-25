@@ -2292,16 +2292,6 @@ def _split_image(
                 raise SplitFailure("empty_image", "image dimensions are invalid")
             frame_sizes.append((width, height))
 
-        total_pixels = sum(width * height for width, height in frame_sizes)
-        desired_total = max(
-            minimum_parts,
-            frame_count,
-            math.ceil(
-                source.stat().st_size
-                / max(1, int(_HARD_BYTES[ext] * ratio))
-            ),
-            math.ceil(total_pixels / policy.image_tile_pixels),
-        )
         result: list[Part] = []
 
         for frame_index, (width, height) in enumerate(frame_sizes):
@@ -2309,15 +2299,67 @@ def _split_image(
             image.load()
             base = image.convert("RGBA" if image.mode == "RGBA" else "RGB")
             frame_pixels = width * height
+
+            # BMP/TIFF and some GIFs can be much larger on disk than their
+            # losslessly-normalized PNG representation. Splitting from the
+            # source byte count alone cuts ordinary text lines across vertical
+            # tile boundaries (for example, "WKN-FORMAT-TIFF-7319" became two
+            # unrelated OCR fragments). First try the complete frame as PNG.
+            # If it fits both the parser byte limit and the VLM pixel budget,
+            # keeping it intact is faster and preserves the semantic layout.
+            normalized_path = output / f"image-{len(result):06d}.png"
+            base.save(normalized_path, format="PNG", optimize=True)
+            normalized_size = normalized_path.stat().st_size
+            if (
+                normalized_size <= _HARD_BYTES["png"]
+                and frame_pixels <= policy.image_tile_pixels
+            ):
+                result.append(
+                    Part(
+                        normalized_path,
+                        "png",
+                        {
+                            "kind": "image_tile",
+                            "frame_index": frame_index + 1,
+                            "frame_count": frame_count,
+                            "x_start": 0,
+                            "y_start": 0,
+                            "x_end": width,
+                            "y_end": height,
+                            "source_width": width,
+                            "source_height": height,
+                        },
+                        {
+                            "pixels": frame_pixels,
+                            "frame_index": frame_index + 1,
+                            "normalized_whole_frame": True,
+                        },
+                    )
+                )
+                if len(result) > policy.max_parts:
+                    raise SplitFailure(
+                        "too_many_parts",
+                        f"image requires more than {policy.max_parts} tiles",
+                    )
+                continue
+            normalized_path.unlink(missing_ok=True)
+
             desired = max(
-                1,
-                math.ceil(desired_total * frame_pixels / max(1, total_pixels)),
+                2,
+                math.ceil(
+                    normalized_size
+                    / max(1, int(_HARD_BYTES["png"] * ratio))
+                ),
                 math.ceil(frame_pixels / policy.image_tile_pixels),
             )
-            columns = max(
-                1, math.ceil(math.sqrt(desired * width / max(1, height)))
-            )
-            rows = max(1, math.ceil(desired / columns))
+
+            # Prefer full-width horizontal strips. Document text is normally
+            # laid out in horizontal lines, so this preserves complete OCR
+            # tokens and table rows. The bounded recursive writer below still
+            # bisects an individual strip horizontally if an extreme panorama
+            # cannot fit the hard PNG limit.
+            columns = 1
+            rows = desired
             tile_width = math.ceil(width / columns)
             tile_height = math.ceil(height / rows)
             overlap_x = max(8, int(tile_width * 0.05))

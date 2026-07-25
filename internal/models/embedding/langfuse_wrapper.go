@@ -75,7 +75,10 @@ func (l *langfuseEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]
 }
 
 func (l *langfuseEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, texts []string) ([][]float32, error) {
-	return l.inner.BatchEmbedWithPool(ctx, l, texts)
+	// Keep the caller-provided outer wrapper in the batch execution path.
+	// Its BatchEmbed method will call back through this Langfuse wrapper, so
+	// tracing is retained while distributed admission is not bypassed.
+	return l.inner.BatchEmbedWithPool(ctx, model, texts)
 }
 
 func (l *langfuseEmbedder) GetModelName() string { return l.inner.GetModelName() }

@@ -13,7 +13,9 @@ metadata:
   labels:
     {{- include "weknora.componentLabels" (dict "component" "docreader" "context" .) | nindent 4 }}
 spec:
+  {{- if not .Values.docreader.autoscaling.enabled }}
   replicas: {{ .Values.docreader.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "docreader" "context" .) | nindent 6 }}
@@ -54,8 +56,24 @@ spec:
               value: {{ .Values.docreader.env.STORAGE_TYPE | quote }}
             - name: DOCREADER_HEALTH_GRPC_PORT
               value: {{ .Values.docreader.healthPort | quote }}
+            {{- with .Values.docreader.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.docreader.resources | nindent 12 }}
+          {{- with .Values.docreader.startupProbe }}
+          startupProbe:
+            exec:
+              command:
+                - grpc_health_probe
+                - -addr=127.0.0.1:{{ $.Values.docreader.healthPort }}
+                - -connect-timeout=1s
+                - -rpc-timeout=5s
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           # gRPC health check using grpc_health_probe
           livenessProbe:
             exec:
@@ -72,13 +90,22 @@ spec:
             exec:
               command:
                 - grpc_health_probe
-                - -addr=127.0.0.1:{{ .Values.docreader.healthPort }}
+                # Readiness checks the real parser gRPC executor. Liveness
+                # remains on the isolated health port so legitimate long
+                # parses do not cause a restart loop.
+                - -addr=127.0.0.1:50051
                 - -connect-timeout=1s
                 - -rpc-timeout=5s
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+      volumes:
+        - name: scratch
+          emptyDir:
+            {{- with .Values.docreader.scratch.sizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
       {{- with .Values.docreader.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

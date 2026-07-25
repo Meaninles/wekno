@@ -1,71 +1,70 @@
 package middleware
 
-import "testing"
+import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
 
-func TestSanitizeBody(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{
-			name: "camelCase apiKey",
-			in:   `{"modelName":"gpt-5.2","apiKey":"sk-secret-123","provider":"azure_openai"}`,
-			want: `{"modelName":"gpt-5.2","apiKey":"***","provider":"azure_openai"}`,
-		},
-		{
-			name: "snake_case api_key",
-			in:   `{"api_key":"sk-secret-123"}`,
-			want: `{"api_key":"***"}`,
-		},
-		{
-			name: "PascalCase APIKey",
-			in:   `{"APIKey":"sk-secret-123"}`,
-			want: `{"APIKey":"***"}`,
-		},
-		{
-			name: "secretKey camelCase",
-			in:   `{"secretKey":"abc","accessKeyId":"id"}`,
-			want: `{"secretKey":"***","accessKeyId":"id"}`,
-		},
-		{
-			name: "refreshToken / accessToken camelCase",
-			in:   `{"refreshToken":"rt","accessToken":"at"}`,
-			want: `{"refreshToken":"***","accessToken":"***"}`,
-		},
-		{
-			name: "password and token preserved as masked",
-			in:   `{"password":"p","token":"t"}`,
-			want: `{"password":"***","token":"***"}`,
-		},
-		{
-			name: "password variants masked",
-			in:   `{"confirm_password":"p1","new_password":"p2","encrypted_password":"cipher"}`,
-			want: `{"confirm_password":"***","new_password":"***","encrypted_password":"***"}`,
-		},
-		{
-			name: "temporary password response masked",
-			in:   `{"username":"new-user","temporary_password":"A1-secret"}`,
-			want: `{"username":"new-user","temporary_password":"***"}`,
-		},
-		{
-			name: "extra whitespace around colon",
-			in:   `{"apiKey"  :   "leak"}`,
-			want: `{"apiKey":"***"}`,
-		},
-		{
-			name: "non sensitive fields untouched",
-			in:   `{"baseUrl":"https://example.com","modelName":"gpt"}`,
-			want: `{"baseUrl":"https://example.com","modelName":"gpt"}`,
-		},
-	}
+	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/gin-gonic/gin"
+)
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeBody(tc.in)
-			if got != tc.want {
-				t.Errorf("sanitizeBody(%q)\n got: %s\nwant: %s", tc.in, got, tc.want)
-			}
+func TestLoggerNeverWritesRequestResponseOrQueryBodies(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var logs bytes.Buffer
+	logger.SetOutput(&logs)
+	defer logger.ConfigureFromEnv()
+
+	router := gin.New()
+	router.Use(RequestID(), Logger())
+	router.POST("/privacy", func(c *gin.Context) {
+		var body map[string]any
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"document": "response-document-canary",
+			"token":    "response-token-canary",
 		})
+	})
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/privacy?access_token=query-token-canary",
+		strings.NewReader(`{"document":"request-document-canary","api_key":"request-token-canary"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	output := logs.String()
+	for _, forbidden := range []string{
+		"request-document-canary",
+		"request-token-canary",
+		"response-document-canary",
+		"response-token-canary",
+		"query-token-canary",
+		"request_body",
+		"response_body",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("operational log leaked %q: %s", forbidden, output)
+		}
+	}
+	for _, required := range []string{
+		"path=/privacy",
+		"request_size=",
+		"response_size=",
+		"status_code=200",
+	} {
+		if !strings.Contains(output, required) {
+			t.Fatalf("operational log missing %q: %s", required, output)
+		}
 	}
 }

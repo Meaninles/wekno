@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/models/utils"
@@ -74,7 +75,7 @@ func (v *KeywordsVectorHybridRetrieveEngineService) Index(ctx context.Context,
 	params := make(map[string]any)
 	embeddingMap := make(map[string][]float32)
 	if slices.Contains(retrieverTypes, types.VectorRetrieverType) {
-		embedding, err := embedder.Embed(ctx, sanitizeForEmbedding(ctx, indexInfo.Content))
+		embedding, err := embedder.Embed(ctx, sanitizeForEmbedding(ctx, embedder, indexInfo.Content))
 		if err != nil {
 			return err
 		}
@@ -96,7 +97,7 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 	if slices.Contains(retrieverTypes, types.VectorRetrieverType) {
 		var contentList []string
 		for _, indexInfo := range indexInfoList {
-			contentList = append(contentList, sanitizeForEmbedding(ctx, indexInfo.Content))
+			contentList = append(contentList, sanitizeForEmbedding(ctx, embedder, indexInfo.Content))
 		}
 		embeddings, err := batchEmbedWithBackoff(ctx, embedder, contentList)
 		if err != nil {
@@ -158,7 +159,7 @@ func batchEmbedWithBackoff(ctx context.Context, embedder embedding.Embedder, con
 // pathologically large inputs cannot blow up the embedding API call. The
 // truncation point is char-based, not token-based, so it sits well above any
 // realistic token limit. We log a warning whenever truncation kicks in.
-func sanitizeForEmbedding(ctx context.Context, content string) string {
+func sanitizeForEmbedding(ctx context.Context, embedder embedding.Embedder, content string) string {
 	sanitized := content
 	// Scrubbing only matters when an inline base64 payload is present; skip the
 	// regex passes otherwise so the common (no-image) path stays cheap.
@@ -168,12 +169,19 @@ func sanitizeForEmbedding(ctx context.Context, content string) string {
 		}
 	}
 
-	if utf8.RuneCountInString(sanitized) <= safetyMaxChars {
+	maxRunes := safetyMaxChars
+	if tokenLimit := embedding.MaxInputTokens(embedder); tokenLimit > 0 {
+		language := chunker.DetectLanguage(sanitized)
+		if tokenRunes := chunker.CharsForTokenLimit(tokenLimit, language); tokenRunes > 0 && tokenRunes < maxRunes {
+			maxRunes = tokenRunes
+		}
+	}
+	if utf8.RuneCountInString(sanitized) <= maxRunes {
 		return sanitized
 	}
 	runes := []rune(sanitized)
-	logger.Warnf(ctx, "embedding input truncated: %d runes -> %d", len(runes), safetyMaxChars)
-	return string(runes[:safetyMaxChars])
+	logger.Warnf(ctx, "embedding input truncated by model token budget: %d runes -> %d", len(runes), maxRunes)
+	return string(runes[:maxRunes])
 }
 
 // concurrentBatchSave saves all batches concurrently without concurrency limit

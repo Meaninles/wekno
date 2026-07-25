@@ -9,6 +9,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -82,6 +83,30 @@ func (s *sessionService) KnowledgeQA(
 
 	// Resolve retrieval tenant scope using shared helper
 	retrievalTenantID := s.resolveRetrievalTenantID(ctx, req)
+	var retrievalConfig *types.RetrievalConfig
+	if tenant, tenantErr := s.tenantService.GetTenantByID(ctx, retrievalTenantID); tenantErr != nil {
+		logger.Warnf(
+			ctx,
+			"Failed to load tenant retrieval config for tenant %d: %v",
+			retrievalTenantID,
+			tenantErr,
+		)
+	} else if tenant != nil {
+		retrievalConfig = tenant.RetrievalConfig
+	}
+
+	embeddingTopK := s.cfg.Conversation.EmbeddingTopK
+	vectorThreshold := s.cfg.Conversation.VectorThreshold
+	keywordThreshold := s.cfg.Conversation.KeywordThreshold
+	rerankTopK := s.cfg.Conversation.RerankTopK
+	rerankThreshold := s.cfg.Conversation.RerankThreshold
+	if retrievalConfig != nil {
+		embeddingTopK = retrievalConfig.GetEffectiveEmbeddingTopK()
+		vectorThreshold = retrievalConfig.GetEffectiveVectorThreshold()
+		keywordThreshold = retrievalConfig.GetEffectiveKeywordThreshold()
+		rerankTopK = retrievalConfig.GetEffectiveRerankTopK()
+		rerankThreshold = retrievalConfig.GetEffectiveRerankThreshold()
+	}
 
 	// Build unified search targets (computed once, used throughout pipeline)
 	searchTargets, err := s.buildSearchTargets(ctx, retrievalTenantID, knowledgeBaseIDs, knowledgeIDs, req.TagScopes)
@@ -120,11 +145,11 @@ func (s *sessionService) KnowledgeQA(
 			KnowledgeBaseIDs:        knowledgeBaseIDs,
 			KnowledgeIDs:            knowledgeIDs,
 			SearchTargets:           searchTargets,
-			VectorThreshold:         s.cfg.Conversation.VectorThreshold,
-			KeywordThreshold:        s.cfg.Conversation.KeywordThreshold,
-			EmbeddingTopK:           s.cfg.Conversation.EmbeddingTopK,
-			RerankTopK:              s.cfg.Conversation.RerankTopK,
-			RerankThreshold:         s.cfg.Conversation.RerankThreshold,
+			VectorThreshold:         vectorThreshold,
+			KeywordThreshold:        keywordThreshold,
+			EmbeddingTopK:           embeddingTopK,
+			RerankTopK:              rerankTopK,
+			RerankThreshold:         rerankThreshold,
 			ChatModelID:             chatModelID,
 			SummaryConfig:           summaryConfig,
 			FallbackStrategy:        fallbackStrategy,
@@ -161,6 +186,34 @@ func (s *sessionService) KnowledgeQA(
 	// Apply custom agent overrides (system prompt, temperature, retrieval params,
 	// rewrite, fallback, FAQ strategy, history turns)
 	s.applyAgentOverridesToChatManage(ctx, req.CustomAgent, chatManage)
+	if chatManage.RerankModelID == "" {
+		configuredRerankModelID := ""
+		if retrievalConfig != nil {
+			configuredRerankModelID = retrievalConfig.RerankModelID
+		}
+		modelCtx := context.WithValue(ctx, types.TenantIDContextKey, retrievalTenantID)
+		models, modelErr := s.modelService.ListModels(modelCtx)
+		if modelErr != nil {
+			logger.Warnf(
+				ctx,
+				"Failed to list rerank models for tenant %d: %v",
+				retrievalTenantID,
+				modelErr,
+			)
+		} else {
+			chatManage.RerankModelID = chatretrieval.SelectRerankModelID(
+				configuredRerankModelID,
+				models,
+			)
+		}
+	}
+	logger.Infof(
+		ctx,
+		"Resolved retrieval policy: embedding_top_k=%d rerank_top_k=%d rerank_model_id=%s",
+		chatManage.EmbeddingTopK,
+		chatManage.RerankTopK,
+		chatManage.RerankModelID,
+	)
 
 	// Determine pipeline based on knowledge bases availability and web search setting
 	hasKB := len(knowledgeBaseIDs) > 0 || len(knowledgeIDs) > 0

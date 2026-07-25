@@ -33,7 +33,7 @@ func TestWithLLMTimeout_ShorterParentDeadline_Respected(t *testing.T) {
 	}
 }
 
-func TestWithLLMTimeout_LongerParentDeadline_NotTruncated(t *testing.T) {
+func TestWithLLMTimeout_LongerParentDeadline_IsCappedPerCall(t *testing.T) {
 	parent, parentCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer parentCancel()
 
@@ -44,8 +44,24 @@ func TestWithLLMTimeout_LongerParentDeadline_NotTruncated(t *testing.T) {
 	if !ok {
 		t.Fatalf("deadline must be set")
 	}
+	if remaining := time.Until(dl); remaining <= 0 || remaining > 50*time.Millisecond {
+		t.Fatalf("long workflow deadline must be capped by the per-call timeout, got remaining=%v", remaining)
+	}
+}
+
+func TestWithLLMTimeout_NonPositiveCeilingLeavesParentUnchanged(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer parentCancel()
+
+	ctx, cancel := withLLMTimeout(parent, 0)
+	defer cancel()
+
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatalf("parent deadline must remain visible")
+	}
 	if remaining := time.Until(dl); remaining < 5*time.Second {
-		t.Fatalf("parent longer deadline should NOT be truncated by default, got remaining=%v", remaining)
+		t.Fatalf("disabled ceiling must not shorten parent, got remaining=%v", remaining)
 	}
 }
 

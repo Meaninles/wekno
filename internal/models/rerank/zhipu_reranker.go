@@ -79,7 +79,7 @@ func NewZhipuReranker(config *RerankerConfig) (*ZhipuReranker, error) {
 		modelID:    config.ModelID,
 		apiKey:     apiKey,
 		baseURL:    baseURL,
-		client:     &http.Client{Timeout: 60 * time.Second},
+		client:     newRerankHTTPClient(60 * time.Second),
 		maxRetries: 3,
 	}, nil
 }

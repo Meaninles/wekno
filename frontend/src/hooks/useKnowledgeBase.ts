@@ -13,6 +13,7 @@ import { knowledgeStore } from "@/stores/knowledge";
 import { useUIStore } from "@/stores/ui";
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
+import { appendUniqueDocumentChunks } from '@/custom/modules/documentPreview/chunkPaging';
 
 export default function (knowledgeBaseId?: string) {
   const usemenuStore = knowledgeStore();
@@ -30,6 +31,7 @@ export default function (knowledgeBaseId?: string) {
     source: "",
     channel: "",
     file_type: "",
+    file_size: 0,
     description: "",
     summary_status: "",
     parse_status: "",
@@ -39,6 +41,8 @@ export default function (knowledgeBaseId?: string) {
     tags: [] as Array<{ id: string; name: string; color?: string }>,
   });
   let knowledgeListGeneration = 0;
+  let detailRequestGeneration = 0;
+  let activeDetailKnowledgeID = "";
   const getKnowled = (
     query: {
       page: number;
@@ -47,6 +51,7 @@ export default function (knowledgeBaseId?: string) {
       keyword?: string;
       file_type?: string;
       parse_status?: string;
+      workflow_status?: string;
       source?: string;
       start_time?: string;
       end_time?: string;
@@ -176,24 +181,35 @@ export default function (knowledgeBaseId?: string) {
       });
   };
   const getCardDetails = (item: any) => {
+    const targetKnowledgeID = String(item?.id || "");
+    if (!targetKnowledgeID) return;
+    const requestGeneration = ++detailRequestGeneration;
+    activeDetailKnowledgeID = targetKnowledgeID;
     Object.assign(details, {
       title: "",
       time: "",
       md: [],
-      id: "",
-      type: "",
+      id: targetKnowledgeID,
+      total: 0,
+      type: item?.type || "",
       source: "",
       channel: "",
-      file_type: "",
+      file_type: item?.file_type || "",
+      file_size: Number(item?.file_size || 0),
       description: "",
       summary_status: "",
-      parse_status: "",
+      parse_status: item?.parse_status || "",
       error_message: "",
+      chunkLoading: false,
       chunkLoadError: "",
       tags: item?.tags ? [...item.tags] : [],
     });
-    getKnowledgeDetails(item.id)
+    getKnowledgeDetails(targetKnowledgeID)
       .then((result: any) => {
+        if (
+          requestGeneration !== detailRequestGeneration
+          || activeDetailKnowledgeID !== targetKnowledgeID
+        ) return;
         if (result.success && result.data) {
           const { data } = result;
           Object.assign(details, {
@@ -204,6 +220,7 @@ export default function (knowledgeBaseId?: string) {
             source: data.source || '',
             channel: data.channel || '',
             file_type: data.file_type || '',
+            file_size: Number(data.file_size || 0),
             description: data.description || '',
             summary_status: data.summary_status || '',
             parse_status: data.parse_status || '',
@@ -213,25 +230,42 @@ export default function (knowledgeBaseId?: string) {
         }
       })
       .catch(() => {});
-    getfDetails(item.id, 1);
+    getfDetails(targetKnowledgeID, 1, requestGeneration);
   };
   
-  const getfDetails = (id: string, page: number) => {
+  const getfDetails = (
+    id: string,
+    page: number,
+    requestGeneration = detailRequestGeneration,
+  ) => {
+    if (
+      !id
+      || requestGeneration !== detailRequestGeneration
+      || activeDetailKnowledgeID !== id
+    ) return;
     details.chunkLoading = true;
     details.chunkLoadError = "";
     getKnowledgeDetailsCon(id, page)
       .then((result: any) => {
+        if (
+          requestGeneration !== detailRequestGeneration
+          || activeDetailKnowledgeID !== id
+        ) return;
         if (result.success && result.data) {
           const { data, total: totalResult } = result;
           if (page === 1) {
             details.md = data;
           } else {
-            details.md.push(...data);
+            details.md = appendUniqueDocumentChunks(details.md, data);
           }
           details.total = totalResult;
         }
       })
       .catch((err: any) => {
+        if (
+          requestGeneration !== detailRequestGeneration
+          || activeDetailKnowledgeID !== id
+        ) return;
         details.chunkLoadError = err?.message || t('knowledgeBase.chunkLoadFailed');
         console.error("[ChunkLoad] failed", {
           knowledgeId: id,
@@ -240,6 +274,10 @@ export default function (knowledgeBaseId?: string) {
         });
       })
       .finally(() => {
+        if (
+          requestGeneration !== detailRequestGeneration
+          || activeDetailKnowledgeID !== id
+        ) return;
         details.chunkLoading = false;
       });
   };

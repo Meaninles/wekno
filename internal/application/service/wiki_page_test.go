@@ -18,6 +18,42 @@ type wikiPageVersionFenceRepo struct {
 	autoUpdateCalls int
 }
 
+type pagedGraphRepo struct {
+	interfaces.WikiPageRepository
+	center  *types.WikiPage
+	nodes   []types.WikiGraphNode
+	offsets []int
+	limits  []int
+}
+
+func (r *pagedGraphRepo) GetBySlug(context.Context, string, string) (*types.WikiPage, error) {
+	return r.center, nil
+}
+
+func (r *pagedGraphRepo) GetGraphPageBySlug(context.Context, string, string) (*types.WikiPage, error) {
+	return r.center, nil
+}
+
+func (r *pagedGraphRepo) ListGraphNeighbors(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ []string,
+	limit int,
+	offset int,
+) ([]types.WikiGraphNode, int64, error) {
+	r.offsets = append(r.offsets, offset)
+	r.limits = append(r.limits, limit)
+	if offset >= len(r.nodes) {
+		return []types.WikiGraphNode{}, int64(len(r.nodes)), nil
+	}
+	end := offset + limit
+	if end > len(r.nodes) {
+		end = len(r.nodes)
+	}
+	return append([]types.WikiGraphNode(nil), r.nodes[offset:end]...), int64(len(r.nodes)), nil
+}
+
 func (r *wikiPageVersionFenceRepo) GetBySlug(context.Context, string, string) (*types.WikiPage, error) {
 	return r.current, nil
 }
@@ -79,6 +115,82 @@ func TestUpdateAutoLinkedContentRejectsStaleCallerBeforeCopyingContent(t *testin
 	assert.Zero(t, repo.autoUpdateCalls)
 	assert.Equal(t, "newer database body", current.Content)
 	assert.Equal(t, types.StringArray{"concept/live"}, current.OutLinks)
+}
+
+func TestGetGraphPagedEgoReturnsOnlyRequestedNeighborPageAndEdges(t *testing.T) {
+	repo := &pagedGraphRepo{
+		center: &types.WikiPage{
+			KnowledgeBaseID: "kb-graph",
+			Slug:            "entity/center",
+			Title:           "Center",
+			PageType:        types.WikiPageTypeEntity,
+			Status:          types.WikiPageStatusPublished,
+			InLinks:         types.StringArray{"entity/a", "entity/b", "entity/b"},
+			OutLinks:        types.StringArray{"entity/b", "entity/c", "entity/c"},
+		},
+		nodes: []types.WikiGraphNode{
+			{Slug: "entity/a", Title: "A", PageType: types.WikiPageTypeEntity, LinkCount: 4},
+			{Slug: "entity/b", Title: "B", PageType: types.WikiPageTypeEntity, LinkCount: 3},
+			{Slug: "entity/c", Title: "C", PageType: types.WikiPageTypeEntity, LinkCount: 2},
+		},
+	}
+	svc := &wikiPageService{repo: repo}
+
+	got, err := svc.GetGraph(context.Background(), &types.WikiGraphRequest{
+		KnowledgeBaseID: "kb-graph",
+		Mode:            types.WikiGraphModeEgo,
+		Center:          "entity/center",
+		Depth:           1,
+		Limit:           2,
+		Page:            2,
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Nodes, 2)
+	assert.Equal(t, "entity/center", got.Nodes[0].Slug)
+	assert.Equal(t, "entity/c", got.Nodes[1].Slug)
+	assert.Equal(t, []types.WikiGraphEdge{
+		{Source: "entity/center", Target: "entity/c"},
+	}, got.Edges, "duplicate link-array entries must not duplicate graph edges")
+	assert.Equal(t, 4, got.Meta.Total)
+	assert.Equal(t, 3, got.Meta.NeighborTotal)
+	assert.Equal(t, 1, got.Meta.NeighborReturned)
+	assert.Equal(t, 2, got.Meta.Page)
+	assert.Equal(t, 2, got.Meta.TotalPages)
+	assert.True(t, got.Meta.HasPrevious)
+	assert.False(t, got.Meta.HasMore)
+	assert.Equal(t, []int{2}, repo.offsets)
+	assert.Equal(t, []int{2}, repo.limits)
+}
+
+func TestGetGraphPagedEgoClampsPagePastEnd(t *testing.T) {
+	repo := &pagedGraphRepo{
+		center: &types.WikiPage{
+			KnowledgeBaseID: "kb-graph",
+			Slug:            "entity/center",
+			Title:           "Center",
+			PageType:        types.WikiPageTypeEntity,
+			Status:          types.WikiPageStatusPublished,
+		},
+		nodes: []types.WikiGraphNode{
+			{Slug: "entity/a", Title: "A", PageType: types.WikiPageTypeEntity},
+			{Slug: "entity/b", Title: "B", PageType: types.WikiPageTypeEntity},
+			{Slug: "entity/c", Title: "C", PageType: types.WikiPageTypeEntity},
+		},
+	}
+	svc := &wikiPageService{repo: repo}
+	got, err := svc.GetGraph(context.Background(), &types.WikiGraphRequest{
+		KnowledgeBaseID: "kb-graph",
+		Mode:            types.WikiGraphModeEgo,
+		Center:          "entity/center",
+		Depth:           1,
+		Limit:           2,
+		Page:            99,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Meta.Page)
+	assert.Equal(t, []int{196, 2}, repo.offsets, "service probes requested page then retries the last valid page")
+	require.Len(t, got.Nodes, 2)
+	assert.Equal(t, "entity/c", got.Nodes[1].Slug)
 }
 
 func TestParseOutLinks(t *testing.T) {

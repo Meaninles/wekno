@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -246,6 +247,9 @@ func removePartialOverlaps(ctx context.Context, results []*types.SearchResult) [
 			}
 
 			a, b := entries[i], entries[j]
+			if chatretrieval.PreserveBothForPartialOverlap(a.result, b.result) {
+				continue
+			}
 
 			shortIdx, longIdx := i, j
 			if len(a.norm) > len(b.norm) {

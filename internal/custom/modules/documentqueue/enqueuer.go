@@ -3,6 +3,7 @@ package documentqueue
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/hibiken/asynq"
 	"gorm.io/gorm"
@@ -86,6 +87,17 @@ func (e *Enqueuer) CommitPreparedReparse(
 	return e.coordinator.CommitPreparedReparse(ctx, binding, transition)
 }
 
+func (e *Enqueuer) CommitDocumentWorkflowCancellation(
+	ctx context.Context,
+	binding CancellationBinding,
+	updatedAt time.Time,
+) error {
+	if e == nil || e.coordinator == nil {
+		return errors.New("document queue coordinator is unavailable")
+	}
+	return e.coordinator.CommitWorkflowCancellation(ctx, binding, updatedAt)
+}
+
 func (e *Enqueuer) ActivateDocumentWorkflow(
 	ctx context.Context, binding WorkflowBinding,
 ) (*Workflow, bool, error) {
@@ -123,12 +135,19 @@ func (e *Enqueuer) ResumeDocumentWorkflow(
 	}
 	accepted := synthesizedTaskInfo(workflow)
 	switch workflow.State {
-	case StateLeased, StateCompleted, StateFailed, StateCancelled, StateSuperseded:
+	case StateLeased, StateWaitingExternal, StateCompleted, StateFailed, StateCancelled, StateSuperseded:
 		return accepted, nil
 	case StateQueued:
-		info, dispatchErr := e.coordinator.Dispatch(ctx, workflow)
+		// Activation is the durable acceptance boundary. Publish only the
+		// scheduler's current fair head; successful claims form an admission
+		// chain and fill all fleet slots without mirroring a thousand-document
+		// backlog into Redis.
+		info, dispatchErr := e.coordinator.dispatchNextQueued(ctx)
 		if dispatchErr == nil {
-			return info, nil
+			if info != nil && info.ID == workflowTaskID(workflow.ID, workflow.DispatchEpoch) {
+				return info, nil
+			}
+			return accepted, nil
 		}
 		if errors.Is(dispatchErr, asynq.ErrTaskIDConflict) {
 			return accepted, nil

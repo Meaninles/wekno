@@ -1,0 +1,21 @@
+[
+  {
+    "name": "nc-receivable-entity-mapping",
+    "query": "在财务部业务实体映射清单中，客户应收单和客户收款单对应的 NC 数据源英文表名分别是什么？它们的归口管理部门和更新周期是什么？",
+    "expected_source_substrings": [
+      "业务实体映射清单-财务部.xlsx"
+    ],
+    "required_evidence_groups": [
+      ["AR_RECBILL"],
+      ["AR_GATHERBILL"],
+      ["财务部"],
+      ["H: 财务部,I: 日", "更新周期为日", "更新周期：日", "更新周期是日", "每日更新", "日更新", "更新周期 日"]
+    ],
+    "required_answer_groups": [
+      ["AR_RECBILL"],
+      ["AR_GATHERBILL"],
+      ["财务部"],
+      ["更新周期为 **日**", "更新周期为日", "更新周期：日", "更新周期是日", "每日更新", "日更新"]
+    ]
+  }
+]

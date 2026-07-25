@@ -81,8 +81,15 @@ func (s *wikiPageService) CreatePage(ctx context.Context, page *types.WikiPage) 
 		return nil, fmt.Errorf("create wiki page: %w", err)
 	}
 
-	// Update inbound links on target pages
-	s.updateInLinks(ctx, page.KnowledgeBaseID, page.Slug, page.OutLinks)
+	// A source page may have linked to this slug before the target existed.
+	// Rebuild the new target's reverse links once, then merge this page into
+	// each of its own targets with row-local JSON mutations.
+	if err := s.repo.SyncInLinksForTarget(
+		ctx, page.TenantID, page.KnowledgeBaseID, page.Slug,
+	); err != nil {
+		logger.Warnf(ctx, "wiki: failed to initialize in_links for %s: %v", page.Slug, err)
+	}
+	s.updateInLinks(ctx, page.TenantID, page.KnowledgeBaseID, page.Slug, page.OutLinks)
 
 	return page, nil
 }
@@ -167,10 +174,19 @@ func (s *wikiPageService) UpdatePage(ctx context.Context, page *types.WikiPage) 
 		}
 	}
 
-	// Update inbound links: remove old, add new. If content didn't change,
-	// oldOutLinks == existing.OutLinks and these calls are effectively no-ops.
-	s.removeInLinks(ctx, existing.KnowledgeBaseID, existing.Slug, oldOutLinks)
-	s.updateInLinks(ctx, existing.KnowledgeBaseID, existing.Slug, existing.OutLinks)
+	// Remove only edges no longer present; re-adding every current edge is an
+	// idempotent self-heal for source-before-target creation order and older
+	// incomplete reverse-link data.
+	s.removeInLinks(
+		ctx,
+		existing.TenantID,
+		existing.KnowledgeBaseID,
+		existing.Slug,
+		wikiLinkDifference(oldOutLinks, existing.OutLinks),
+	)
+	s.updateInLinks(
+		ctx, existing.TenantID, existing.KnowledgeBaseID, existing.Slug, existing.OutLinks,
+	)
 
 	return existing, nil
 }
@@ -206,8 +222,16 @@ func (s *wikiPageService) UpdateAutoLinkedContent(ctx context.Context, page *typ
 		return fmt.Errorf("update auto-linked content: %w", err)
 	}
 
-	s.removeInLinks(ctx, existing.KnowledgeBaseID, existing.Slug, oldOutLinks)
-	s.updateInLinks(ctx, existing.KnowledgeBaseID, existing.Slug, existing.OutLinks)
+	s.removeInLinks(
+		ctx,
+		existing.TenantID,
+		existing.KnowledgeBaseID,
+		existing.Slug,
+		wikiLinkDifference(oldOutLinks, existing.OutLinks),
+	)
+	s.updateInLinks(
+		ctx, existing.TenantID, existing.KnowledgeBaseID, existing.Slug, existing.OutLinks,
+	)
 
 	return nil
 }
@@ -262,7 +286,7 @@ func (s *wikiPageService) DeletePage(ctx context.Context, kbID string, slug stri
 	}
 
 	// Remove inbound link references from pages this page links to
-	s.removeInLinks(ctx, kbID, slug, page.OutLinks)
+	s.removeInLinks(ctx, page.TenantID, kbID, slug, page.OutLinks)
 
 	// Delete the page
 	if err := s.repo.Delete(ctx, kbID, slug); err != nil {
@@ -451,11 +475,154 @@ func (s *wikiPageService) GetGraph(ctx context.Context, req *types.WikiGraphRequ
 		return nil, errors.New("wiki graph request is required")
 	}
 
+	mode := req.Mode
+	if mode == "" {
+		mode = types.WikiGraphModeOverview
+	}
+	// Browser ego requests are deliberately one-hop and bounded. Resolve
+	// them with a DB-side JSON neighbor query so latency/memory depend on the
+	// requested page size, not on the total number of Wiki pages.
+	if mode == types.WikiGraphModeEgo && req.Depth <= 1 && req.Limit > 0 {
+		return s.getPagedEgoGraph(ctx, req)
+	}
+
 	pages, err := s.repo.ListAll(ctx, req.KnowledgeBaseID)
 	if err != nil {
 		return nil, err
 	}
 	return computeGraphSubset(pages, req)
+}
+
+func (s *wikiPageService) getPagedEgoGraph(
+	ctx context.Context,
+	req *types.WikiGraphRequest,
+) (*types.WikiGraphData, error) {
+	if strings.TrimSpace(req.Center) == "" {
+		return nil, errors.New("ego graph requires a center slug")
+	}
+	center, err := s.repo.GetGraphPageBySlug(ctx, req.KnowledgeBaseID, req.Center)
+	if err != nil {
+		return nil, err
+	}
+	if center == nil || center.Status == types.WikiPageStatusArchived {
+		return nil, fmt.Errorf("ego center slug %q not found", req.Center)
+	}
+
+	if len(req.Types) > 0 {
+		allowed := false
+		for _, pageType := range req.Types {
+			if strings.TrimSpace(pageType) == center.PageType {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return &types.WikiGraphData{
+				Nodes: []types.WikiGraphNode{},
+				Edges: []types.WikiGraphEdge{},
+				Meta: types.WikiGraphMeta{
+					Mode:       types.WikiGraphModeEgo,
+					Center:     req.Center,
+					Depth:      1,
+					Page:       1,
+					PageSize:   req.Limit,
+					TotalPages: 1,
+				},
+			}, nil
+		}
+	}
+
+	page := req.Page
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * req.Limit
+	neighbors, neighborTotal, err := s.repo.ListGraphNeighbors(
+		ctx,
+		req.KnowledgeBaseID,
+		req.Center,
+		req.Types,
+		req.Limit,
+		offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	totalPages := 1
+	if neighborTotal > 0 {
+		totalPages = int((neighborTotal + int64(req.Limit) - 1) / int64(req.Limit))
+	}
+	if page > totalPages {
+		page = totalPages
+		offset = (page - 1) * req.Limit
+		neighbors, neighborTotal, err = s.repo.ListGraphNeighbors(
+			ctx,
+			req.KnowledgeBaseID,
+			req.Center,
+			req.Types,
+			req.Limit,
+			offset,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	centerNode := types.WikiGraphNode{
+		Slug:      center.Slug,
+		Title:     center.Title,
+		PageType:  center.PageType,
+		LinkCount: len(center.InLinks) + len(center.OutLinks),
+	}
+	nodes := make([]types.WikiGraphNode, 0, len(neighbors)+1)
+	nodes = append(nodes, centerNode)
+	nodes = append(nodes, neighbors...)
+
+	neighborSet := make(map[string]struct{}, len(neighbors))
+	for _, node := range neighbors {
+		neighborSet[node.Slug] = struct{}{}
+	}
+	edges := make([]types.WikiGraphEdge, 0, len(neighbors)*2)
+	edgeSeen := make(map[string]struct{}, len(neighbors)*2)
+	appendEdge := func(source, target string) {
+		key := source + "\x00" + target
+		if _, exists := edgeSeen[key]; exists {
+			return
+		}
+		edgeSeen[key] = struct{}{}
+		edges = append(edges, types.WikiGraphEdge{Source: source, Target: target})
+	}
+	for _, slug := range center.OutLinks {
+		if _, visible := neighborSet[slug]; visible {
+			appendEdge(center.Slug, slug)
+		}
+	}
+	for _, slug := range center.InLinks {
+		if _, visible := neighborSet[slug]; visible {
+			appendEdge(slug, center.Slug)
+		}
+	}
+
+	hasMore := int64(page*req.Limit) < neighborTotal
+	return &types.WikiGraphData{
+		Nodes: nodes,
+		Edges: edges,
+		Meta: types.WikiGraphMeta{
+			Mode:             types.WikiGraphModeEgo,
+			Total:            int(neighborTotal) + 1,
+			Returned:         len(nodes),
+			Truncated:        int64(len(neighbors)) < neighborTotal,
+			Center:           center.Slug,
+			Depth:            1,
+			Page:             page,
+			PageSize:         req.Limit,
+			TotalPages:       totalPages,
+			NeighborTotal:    int(neighborTotal),
+			NeighborReturned: len(neighbors),
+			HasPrevious:      page > 1,
+			HasMore:          hasMore,
+		},
+	}, nil
 }
 
 // computeGraphSubset is the pure I/O-free core of GetGraph. It takes the
@@ -806,6 +973,17 @@ func (s *wikiPageService) ListSlugsBySourceRef(ctx context.Context, kbID string,
 	return s.repo.ListSlugsBySourceRef(ctx, kbID, knowledgeID)
 }
 
+// ListSourceProvenanceBySourceRef keeps reparse citation replacement bounded:
+// only old slugs and chunk IDs cross the repository boundary, never page
+// content.
+func (s *wikiPageService) ListSourceProvenanceBySourceRef(
+	ctx context.Context,
+	kbID string,
+	knowledgeID string,
+) ([]types.WikiPageSourceProvenance, error) {
+	return s.repo.ListSourceProvenanceBySourceRef(ctx, kbID, knowledgeID)
+}
+
 // ListBySlugs is the lazy fetcher used by wiki ingest's batch context.
 // Returns lightweight projections (no content / source_refs / chunk_refs)
 // for the requested slugs, in a single IN query. Used in place of the
@@ -902,39 +1080,67 @@ func normalizeSlug(slug string) string {
 	return slug
 }
 
-// updateInLinks adds the source slug to the in_links of target pages
-func (s *wikiPageService) updateInLinks(ctx context.Context, kbID string, sourceSlug string, targets types.StringArray) {
+// updateInLinks merges the source slug into every target with a database-side
+// set-membership update. It never writes a stale full-page snapshot, so
+// independent source pages can safely converge on the same target.
+func (s *wikiPageService) updateInLinks(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	sourceSlug string,
+	targets types.StringArray,
+) {
 	for _, targetSlug := range targets {
-		targetPage, err := s.repo.GetBySlug(ctx, kbID, targetSlug)
-		if err != nil {
-			continue // target page may not exist yet
-		}
-		if !containsString(targetPage.InLinks, sourceSlug) {
-			targetPage.InLinks = append(targetPage.InLinks, sourceSlug)
-			targetPage.UpdatedAt = time.Now()
-			if err := s.repo.UpdateMeta(ctx, targetPage); err != nil {
-				logger.Warnf(ctx, "wiki: failed to update in_links for %s: %v", targetSlug, err)
-			}
+		if err := s.repo.AddInLink(ctx, tenantID, kbID, targetSlug, sourceSlug); err != nil {
+			logger.Warnf(ctx, "wiki: failed to add in_link %s -> %s: %v",
+				sourceSlug, targetSlug, err)
 		}
 	}
 }
 
-// removeInLinks removes the source slug from the in_links of target pages
-func (s *wikiPageService) removeInLinks(ctx context.Context, kbID string, sourceSlug string, targets types.StringArray) {
+// removeInLinks removes only this source membership from each target. Other
+// concurrent sources remain untouched.
+func (s *wikiPageService) removeInLinks(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	sourceSlug string,
+	targets types.StringArray,
+) {
 	for _, targetSlug := range targets {
-		targetPage, err := s.repo.GetBySlug(ctx, kbID, targetSlug)
-		if err != nil {
-			continue
-		}
-		newInLinks := removeString(targetPage.InLinks, sourceSlug)
-		if len(newInLinks) != len(targetPage.InLinks) {
-			targetPage.InLinks = newInLinks
-			targetPage.UpdatedAt = time.Now()
-			if err := s.repo.UpdateMeta(ctx, targetPage); err != nil {
-				logger.Warnf(ctx, "wiki: failed to update in_links for %s: %v", targetSlug, err)
-			}
+		if err := s.repo.RemoveInLink(ctx, tenantID, kbID, targetSlug, sourceSlug); err != nil {
+			logger.Warnf(ctx, "wiki: failed to remove in_link %s -> %s: %v",
+				sourceSlug, targetSlug, err)
 		}
 	}
+}
+
+func wikiLinkDifference(left, right types.StringArray) types.StringArray {
+	if len(left) == 0 {
+		return nil
+	}
+	rightSet := make(map[string]struct{}, len(right))
+	for _, slug := range right {
+		if slug != "" {
+			rightSet[slug] = struct{}{}
+		}
+	}
+	out := make(types.StringArray, 0, len(left))
+	seen := make(map[string]struct{}, len(left))
+	for _, slug := range left {
+		if slug == "" {
+			continue
+		}
+		if _, keep := rightSet[slug]; keep {
+			continue
+		}
+		if _, duplicate := seen[slug]; duplicate {
+			continue
+		}
+		seen[slug] = struct{}{}
+		out = append(out, slug)
+	}
+	return out
 }
 
 // deleteChunkForPage removes the synced chunk for a wiki page

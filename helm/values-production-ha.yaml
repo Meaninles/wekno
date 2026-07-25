@@ -1,0 +1,187 @@
+# Production high-availability profile for the complete document pipeline.
+#
+# Prerequisites:
+#   * at least three schedulable worker nodes in distinct hostname zones;
+#   * external HA PostgreSQL, Redis and Neo4j endpoints;
+#   * an existing Secret named weknora-production-secrets;
+#   * an existing Secret named weknora-obs with accessKey/secretKey;
+#   * Secrets postgres-client-tls and redis-client-tls with ca.crt (and
+#     client.crt/client.key when the services require mutual TLS);
+#   * metrics-server for HPA (Prometheus Operator only if ServiceMonitor=true).
+#
+# Never commit real credentials to this file.
+
+app:
+  replicaCount: 3
+  terminationGracePeriodSeconds: 180
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 9
+  topologySpread:
+    whenUnsatisfiable: DoNotSchedule
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  resources:
+    requests:
+      cpu: 1500m
+      memory: 3Gi
+      ephemeral-storage: 8Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+      ephemeral-storage: 32Gi
+  scratch:
+    sizeLimit: 24Gi
+  env:
+    GIN_MODE: release
+    RETRIEVE_DRIVER: postgres
+    STORAGE_TYPE: obs
+    LOCAL_STORAGE_BASE_DIR: /data/files
+    AUTO_RECOVER_DIRTY: "false"
+    STREAM_MANAGER_TYPE: redis
+    CONCURRENCY_POOL_SIZE: "8"
+    WEKNORA_ASYNQ_CONCURRENCY: "4"
+    # HPA can reach nine replicas: 9 * 8 = 72 application connections, leaving
+    # headroom on a 100-connection PostgreSQL/PgBouncer endpoint.
+    CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "8"
+    CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
+    WEKNORA_WIKI_MAP_TASK_CONCURRENCY: "4"
+    ENABLE_GRAPH_RAG: "true"
+    TZ: Asia/Shanghai
+  connections:
+    database:
+      host: postgres-ha.database.svc.cluster.local
+      port: "5432"
+      ssl:
+        mode: verify-full
+        rootCertFile: /etc/weknora/postgres-tls/ca.crt
+        certFile: ""
+        keyFile: ""
+    redis:
+      address: redis-ha.redis.svc.cluster.local:6380
+      db: "0"
+      prefix: "stream:"
+      tls:
+        enabled: true
+        caFile: /etc/weknora/redis-tls/ca.crt
+        certFile: ""
+        keyFile: ""
+        serverName: redis-ha.redis.svc.cluster.local
+        insecureSkipVerify: false
+    docreader:
+      address: docreader:50051
+    neo4j:
+      uri: bolt://neo4j-ha.database.svc.cluster.local:7687
+  extraEnv:
+    - name: OBS_ENDPOINT
+      value: https://obs.example.com
+    - name: OBS_REGION
+      value: region-id
+    - name: OBS_BUCKET_NAME
+      value: weknora-production
+    - name: OBS_PATH_PREFIX
+      value: weknora/
+    - name: OBS_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: weknora-obs
+          key: accessKey
+    - name: OBS_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: weknora-obs
+          key: secretKey
+    # These limits are cluster-wide because every app replica shares Redis.
+    # Tune them to the actual LiteLLM/provider quotas, not to pod count.
+    - name: CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY
+      value: "24"
+    - name: CUSTOM_MODEL_ADMISSION_EMBEDDING_CONCURRENCY
+      value: "24"
+    - name: CUSTOM_MODEL_ADMISSION_PARSER_CONCURRENCY
+      value: "18"
+    - name: CUSTOM_MODEL_ADMISSION_VLM_CONCURRENCY
+      value: "8"
+  extraVolumes:
+    - name: postgres-client-tls
+      secret:
+        secretName: postgres-client-tls
+    - name: redis-client-tls
+      secret:
+        secretName: redis-client-tls
+  extraVolumeMounts:
+    - name: postgres-client-tls
+      mountPath: /etc/weknora/postgres-tls
+      readOnly: true
+    - name: redis-client-tls
+      mountPath: /etc/weknora/redis-tls
+      readOnly: true
+
+docreader:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 9
+  topologySpread:
+    whenUnsatisfiable: DoNotSchedule
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  resources:
+    requests:
+      cpu: 1500m
+      memory: 3Gi
+      ephemeral-storage: 12Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+      ephemeral-storage: 48Gi
+  scratch:
+    sizeLimit: 40Gi
+  extraEnv:
+    - name: DOCREADER_GRPC_MAX_WORKERS
+      value: "4"
+    - name: DOCREADER_PDF_RENDER_PARALLELISM
+      value: "2"
+
+frontend:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Shared object storage is authoritative; this remains per-pod scratch only.
+dataFiles:
+  emptyDir:
+    sizeLimit: 16Gi
+  persistence:
+    enabled: false
+
+# Production worker HA depends on these shared services being HA too.
+postgresql:
+  enabled: false
+redis:
+  enabled: false
+neo4j:
+  enabled: false
+
+secrets:
+  existingSecret: weknora-production-secrets
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+
+ingress:
+  enabled: true
+  host: weknora.example.com
+  tls:
+    enabled: true
+    secretName: weknora-tls

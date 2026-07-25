@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
@@ -15,6 +16,7 @@ import (
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -104,19 +106,65 @@ func NewChunkExtractTask(
 	attempt int,
 	chunkIndex int,
 ) (bool, error) {
+	return NewChunkExtractBatchTask(
+		ctx,
+		client,
+		tenantID,
+		[]string{chunkID},
+		modelID,
+		knowledgeID,
+		knowledgeBaseID,
+		processingGeneration,
+		attempt,
+		chunkIndex,
+	)
+}
+
+// NewChunkExtractBatchTask creates one durable graph task for a bounded set of
+// adjacent source chunks. The batch owns one retry/finalization slot and one
+// model call while retaining every source chunk ID for graph provenance.
+func NewChunkExtractBatchTask(
+	ctx context.Context,
+	client interfaces.TaskEnqueuer,
+	tenantID uint64,
+	chunkIDs []string,
+	modelID string,
+	knowledgeID string,
+	knowledgeBaseID string,
+	processingGeneration string,
+	attempt int,
+	batchIndex int,
+) (bool, error) {
 	if strings.ToLower(os.Getenv("NEO4J_ENABLE")) != "true" {
 		logger.Warn(ctx, "NEO4J is not enabled, skip chunk extract task")
 		return false, nil
 	}
+	cleanIDs := make([]string, 0, len(chunkIDs))
+	seen := make(map[string]struct{}, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		chunkID = strings.TrimSpace(chunkID)
+		if chunkID == "" {
+			continue
+		}
+		if _, duplicate := seen[chunkID]; duplicate {
+			continue
+		}
+		seen[chunkID] = struct{}{}
+		cleanIDs = append(cleanIDs, chunkID)
+	}
+	if len(cleanIDs) == 0 {
+		return false, errors.New("graph extract batch requires at least one chunk")
+	}
 	taskPayload := types.ExtractChunkPayload{
 		TenantID:             tenantID,
-		ChunkID:              chunkID,
+		ChunkID:              cleanIDs[0],
+		ChunkIDs:             cleanIDs,
 		ModelID:              modelID,
 		KnowledgeID:          knowledgeID,
 		KnowledgeBaseID:      knowledgeBaseID,
 		ProcessingGeneration: processingGeneration,
 		Attempt:              attempt,
-		ChunkIndex:           chunkIndex,
+		ChunkIndex:           batchIndex,
 	}
 	langfuse.InjectTracing(ctx, &taskPayload)
 	payload, err := json.Marshal(taskPayload)
@@ -124,23 +172,27 @@ func NewChunkExtractTask(
 		return false, err
 	}
 	task := asynq.NewTask(types.TypeChunkExtract, payload)
-	info, err := client.Enqueue(
+	info, err := processownership.EnqueueStableTask(
+		ctx,
+		client,
 		task,
-		asynq.Queue(types.QueueGraph),
+		types.QueueGraph,
+		processownership.ExtractTaskID(knowledgeID, processingGeneration, batchIndex),
 		asynq.MaxRetry(3),
+		asynq.Timeout(processownership.GenerationTaskTimeout),
 		asynq.Retention(processownership.GenerationTaskRetention),
-		asynq.TaskID(processownership.ExtractTaskID(knowledgeID, processingGeneration, chunkIndex)),
 	)
 	if errors.Is(err, asynq.ErrTaskIDConflict) {
-		logger.Infof(ctx, "graph extract task already exists: knowledge=%s generation=%s chunk=%s",
-			knowledgeID, processingGeneration, chunkID)
+		logger.Infof(ctx, "graph extract task already exists: knowledge=%s generation=%s batch=%d",
+			knowledgeID, processingGeneration, batchIndex)
 		return true, nil
 	}
 	if err != nil {
 		logger.Errorf(ctx, "failed to enqueue task: %v", err)
 		return false, fmt.Errorf("failed to enqueue task: %v", err)
 	}
-	logger.Infof(ctx, "enqueued task: id=%s queue=%s chunk=%s", info.ID, info.Queue, chunkID)
+	logger.Infof(ctx, "enqueued task: id=%s queue=%s graph_batch=%d chunks=%d",
+		info.ID, info.Queue, batchIndex, len(cleanIDs))
 	return true, nil
 }
 
@@ -169,12 +221,15 @@ func NewDataTableSummaryTask(
 		return err
 	}
 	task := asynq.NewTask(types.TypeDataTableSummary, payload)
-	info, err := client.Enqueue(
+	info, err := processownership.EnqueueStableTask(
+		ctx,
+		client,
 		task,
-		asynq.Queue(types.QueueDefault),
+		types.QueueDefault,
+		processownership.DataTableSummaryTaskID(knowledgeID, processingGeneration),
 		asynq.MaxRetry(3),
+		asynq.Timeout(processownership.GenerationTaskTimeout),
 		asynq.Retention(processownership.GenerationTaskRetention),
-		asynq.TaskID(processownership.DataTableSummaryTaskID(knowledgeID, processingGeneration)),
 	)
 	if errors.Is(err, asynq.ErrTaskIDConflict) {
 		logger.Infof(ctx, "data-table summary task already exists for knowledge %s generation %s",
@@ -198,6 +253,7 @@ type ChunkExtractService struct {
 	knowledgeRepo     interfaces.KnowledgeRepository
 	chunkRepo         interfaces.ChunkRepository
 	graphEngine       interfaces.RetrieveGraphRepository
+	contentCache      *contentcache.Store
 	// spanTracker records this graph-extract task's subspan under the
 	// parent attempt's postprocess stage so the trace viewer shows real
 	// per-chunk graph extraction time rather than the upstream's enqueue.
@@ -212,6 +268,7 @@ func NewChunkExtractService(
 	knowledgeRepo interfaces.KnowledgeRepository,
 	chunkRepo interfaces.ChunkRepository,
 	graphEngine interfaces.RetrieveGraphRepository,
+	contentCache *contentcache.Store,
 	spanTracker SpanTracker,
 ) interfaces.TaskHandler {
 	return &ChunkExtractService{
@@ -221,6 +278,7 @@ func NewChunkExtractService(
 		knowledgeRepo:     knowledgeRepo,
 		chunkRepo:         chunkRepo,
 		graphEngine:       graphEngine,
+		contentCache:      contentCache,
 		spanTracker:       spanTracker,
 	}
 }
@@ -232,6 +290,56 @@ func (s *ChunkExtractService) tracker() SpanTracker {
 	return s.spanTracker
 }
 
+func graphPayloadChunkIDs(payload types.ExtractChunkPayload) []string {
+	ids := payload.ChunkIDs
+	if len(ids) == 0 && strings.TrimSpace(payload.ChunkID) != "" {
+		ids = []string{payload.ChunkID}
+	}
+	result := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func graphNodeSourceChunkIDs(nodeName string, chunks []*types.Chunk) []string {
+	if len(chunks) == 0 {
+		return nil
+	}
+	if len(chunks) == 1 {
+		return []string{chunks[0].ID}
+	}
+	needle := strings.ToLower(strings.TrimSpace(nodeName))
+	if needle != "" {
+		matched := make([]string, 0, len(chunks))
+		for _, chunk := range chunks {
+			if strings.Contains(strings.ToLower(chunk.Content), needle) {
+				matched = append(matched, chunk.ID)
+			}
+		}
+		if len(matched) > 0 {
+			return matched
+		}
+	}
+	// Some entities are normalized/aliased by the model and cannot be matched
+	// byte-for-byte. Retaining the bounded batch sources is safer than
+	// attaching a fabricated single source or dropping provenance.
+	result := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		result = append(result, chunk.ID)
+	}
+	return result
+}
+
 // Handle handles the chunk extraction task
 func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr error) {
 	var p types.ExtractChunkPayload
@@ -239,10 +347,15 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 		logger.Errorf(ctx, "failed to unmarshal task payload: %v", err)
 		return err
 	}
+	chunkIDs := graphPayloadChunkIDs(p)
+	if len(chunkIDs) > 0 {
+		p.ChunkID = chunkIDs[0]
+		p.ChunkIDs = chunkIDs
+	}
 	ctx = logger.WithRequestID(ctx, uuid.New().String())
 	ctx = logger.WithField(ctx, "extract", p.ChunkID)
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, p.TenantID)
-	if p.TenantID == 0 || strings.TrimSpace(p.ChunkID) == "" {
+	if p.TenantID == 0 || len(chunkIDs) == 0 {
 		return errors.New("graph extract: complete tenant and chunk identity is required")
 	}
 	// Pre-ownership graph payloads carried only chunk_id. Resolve their parent
@@ -300,7 +413,9 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 				types.SpanKindSubSpan,
 				types.JSONMap{
 					"chunk_id":    p.ChunkID,
-					"chunk_index": p.ChunkIndex,
+					"chunk_ids":   chunkIDs,
+					"chunk_count": len(chunkIDs),
+					"batch_index": p.ChunkIndex,
 					"model_id":    p.ModelID,
 				})
 		}
@@ -315,7 +430,7 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 		if finalizeErr := finalizeSubtaskDetached(ctx, s.knowledgeRepo, p.TenantID, p.KnowledgeID,
 			p.KnowledgeBaseID, p.ProcessingGeneration,
 			fmt.Sprintf("graph_chunk[%d]", p.ChunkIndex),
-			retErr, false, isFinalAsynqAttempt(ctx)); finalizeErr != nil {
+			retErr, handleErr, false, false, isFinalAsynqAttempt(ctx)); finalizeErr != nil {
 			retErr = errors.Join(retErr, finalizeErr)
 			handleErr = errors.Join(handleErr, finalizeErr)
 		}
@@ -330,9 +445,8 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 	}()
 
 	// Short-circuit when the parent knowledge has been cancelled / deleted.
-	// Each graph extract is per-chunk and runs one LLM call — the most
-	// expensive enrichment fan-out in the pipeline. Skipping on cancel
-	// is the whole point of the finalizing-state machinery above.
+	// Each graph batch runs one LLM call, so skipping on cancel avoids burning
+	// quota on all of its source chunks.
 	if p.KnowledgeID != "" && s.knowledgeRepo != nil {
 		k, kerr := s.knowledgeRepo.GetKnowledgeByID(ctx, p.TenantID, p.KnowledgeID)
 		if kerr != nil {
@@ -349,32 +463,61 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 		}
 		switch k.ParseStatus {
 		case types.ParseStatusCancelling, types.ParseStatusCancelled, types.ParseStatusDeleting:
-			logger.Infof(ctx, "graph extract: knowledge %s aborted (%s), skipping chunk %s",
-				p.KnowledgeID, k.ParseStatus, p.ChunkID)
+			logger.Infof(ctx, "graph extract: knowledge %s aborted (%s), skipping batch %d",
+				p.KnowledgeID, k.ParseStatus, p.ChunkIndex)
 			graphOut["skipped"] = "knowledge_" + k.ParseStatus
 			return nil
 		}
 	}
 
-	chunk, err := s.chunkRepo.GetChunkByID(ctx, p.TenantID, p.ChunkID)
-	if err != nil {
-		if errors.Is(err, apprepo.ErrChunkNotFound) {
-			graphOut["skipped"] = "chunk_not_found"
-			return nil
+	chunks := make([]*types.Chunk, 0, len(chunkIDs))
+	graphParts := make([]string, 0, len(chunkIDs))
+	for sourceIndex, chunkID := range chunkIDs {
+		chunk, chunkErr := s.chunkRepo.GetChunkByID(ctx, p.TenantID, chunkID)
+		if chunkErr != nil {
+			if errors.Is(chunkErr, apprepo.ErrChunkNotFound) {
+				current, fenceErr := validateEnrichmentGeneration(
+					ctx, s.knowledgeRepo, p.TenantID, p.KnowledgeID,
+					p.KnowledgeBaseID, p.ProcessingGeneration,
+				)
+				if fenceErr != nil {
+					handleErr = fenceErr
+					return fmt.Errorf("revalidate disappeared graph chunk: %w", fenceErr)
+				}
+				if !current {
+					graphOut["skipped"] = "generation_changed"
+					return nil
+				}
+			}
+			handleErr = chunkErr
+			return fmt.Errorf("get graph extraction chunk %s: %w", chunkID, chunkErr)
 		}
-		logger.Errorf(ctx, "failed to get chunk: %v", err)
-		handleErr = err
-		return fmt.Errorf("get graph extraction chunk: %w", err)
+		if chunk == nil || chunk.KnowledgeID != p.KnowledgeID ||
+			chunk.KnowledgeBaseID != p.KnowledgeBaseID {
+			handleErr = errors.New("graph extraction chunk parent identity mismatch")
+			return handleErr
+		}
+		chunks = append(chunks, chunk)
+		graphParts = append(graphParts, fmt.Sprintf(
+			"<source_chunk ordinal=\"%d\">\n%s\n</source_chunk>",
+			sourceIndex,
+			logicalChunkLLMContent(chunk, chunk.Content),
+		))
 	}
-	// Capture chunk content shape on output — lets traces answer "WHAT
-	// did the LLM call see?" without joining back to the chunk store.
-	// Preview is truncated to keep span rows reasonable.
-	graphInput := logicalChunkLLMContent(chunk, chunk.Content)
+	if len(chunks) == 0 {
+		graphOut["skipped"] = "no_source_chunks"
+		return nil
+	}
+	// Adjacent bounded chunks are intentionally presented in one prompt. This
+	// both reduces provider calls and lets the extractor see relationships
+	// that cross a chunk boundary.
+	graphInput := strings.Join(graphParts, "\n\n")
 	if gSpan != nil {
 		graphOut["chunk_chars"] = len([]rune(graphInput))
 		graphOut["chunk_preview"] = previewText(graphInput, 200)
+		graphOut["source_chunk_count"] = len(chunks)
 	}
-	kb, err := s.knowledgeBaseRepo.GetKnowledgeBaseByID(ctx, chunk.KnowledgeBaseID)
+	kb, err := s.knowledgeBaseRepo.GetKnowledgeBaseByID(ctx, chunks[0].KnowledgeBaseID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get knowledge base: %v", err)
 		handleErr = err
@@ -384,7 +527,7 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 	var processOverrides *types.KnowledgeProcessOverrides
 	knowledgeID := p.KnowledgeID
 	if knowledgeID == "" {
-		knowledgeID = chunk.KnowledgeID
+		knowledgeID = chunks[0].KnowledgeID
 	}
 	if knowledgeID != "" && s.knowledgeRepo != nil {
 		k, kerr := s.knowledgeRepo.GetKnowledgeByID(ctx, p.TenantID, knowledgeID)
@@ -431,26 +574,90 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 			},
 		},
 	}
-	extractor := chatpipeline.NewExtractor(chatModel, template)
-	graph, err := extractor.Extract(ctx, graphInput)
-	if err != nil {
-		handleErr = err
-		return err
+	templateJSON, _ := json.Marshal(template)
+	graphCacheKey := contentcache.Key{
+		TenantID:    p.TenantID,
+		Kind:        contentcache.KindGraph,
+		ContentHash: contentcache.Digest("graph-input-v2-batched", graphInput),
+		VersionHash: contentcache.Digest(
+			"graph-extractor-v2-batched",
+			chatModel.GetModelID(),
+			chatModel.GetModelName(),
+			string(templateJSON),
+		),
+	}
+	graphCacheRef := contentcache.Reference{
+		KnowledgeID:          p.KnowledgeID,
+		ProcessingGeneration: p.ProcessingGeneration,
+	}
+	var graph *types.GraphData
+	if s.contentCache != nil {
+		var cached types.GraphData
+		hit, cacheErr := s.contentCache.GetJSON(ctx, graphCacheKey, graphCacheRef, &cached)
+		if cacheErr != nil {
+			logger.Warnf(ctx, "graph extraction cache lookup failed: %v", cacheErr)
+			if errors.Is(cacheErr, contentcache.ErrCorruptPayload) {
+				evictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				if evictErr := s.contentCache.Evict(evictCtx, graphCacheKey); evictErr != nil {
+					logger.Warnf(ctx, "graph extraction cache eviction failed: %v", evictErr)
+				}
+				cancel()
+			}
+		} else if hit {
+			graph = &cached
+			graphOut["cache_hit"] = true
+		}
+	}
+	if graph == nil {
+		extractor := chatpipeline.NewExtractor(chatModel, template)
+		graph, err = extractor.Extract(ctx, graphInput)
+		if err != nil {
+			handleErr = err
+			return err
+		}
+		graphOut["cache_hit"] = false
+		if s.contentCache != nil {
+			cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			cacheErr := s.contentCache.PutJSON(
+				cacheCtx,
+				graphCacheKey,
+				graph,
+				30*24*time.Hour,
+				graphCacheRef,
+			)
+			cancel()
+			if cacheErr != nil && !errors.Is(cacheErr, contentcache.ErrPayloadTooLarge) {
+				logger.Warnf(ctx, "graph extraction cache persist failed: %v", cacheErr)
+			}
+		}
 	}
 
-	chunk, err = s.chunkRepo.GetChunkByID(ctx, p.TenantID, p.ChunkID)
-	if err != nil {
-		if errors.Is(err, apprepo.ErrChunkNotFound) {
-			logger.Infof(ctx, "graph ignore disappeared chunk %s", p.ChunkID)
-			graphOut["skipped"] = "chunk_disappeared"
-			return nil
+	reloadedChunks := make([]*types.Chunk, 0, len(chunks))
+	for _, sourceChunk := range chunks {
+		reloaded, reloadErr := s.chunkRepo.GetChunkByID(ctx, p.TenantID, sourceChunk.ID)
+		if reloadErr != nil {
+			if errors.Is(reloadErr, apprepo.ErrChunkNotFound) {
+				current, fenceErr := validateEnrichmentGeneration(
+					ctx, s.knowledgeRepo, p.TenantID, p.KnowledgeID,
+					p.KnowledgeBaseID, p.ProcessingGeneration,
+				)
+				if fenceErr != nil {
+					handleErr = fenceErr
+					return fmt.Errorf("revalidate disappeared graph batch: %w", fenceErr)
+				}
+				if !current {
+					graphOut["skipped"] = "generation_changed"
+					return nil
+				}
+			}
+			handleErr = reloadErr
+			return fmt.Errorf("reload graph extraction chunk %s: %w", sourceChunk.ID, reloadErr)
 		}
-		handleErr = err
-		return fmt.Errorf("reload graph extraction chunk %s: %w", p.ChunkID, err)
+		reloadedChunks = append(reloadedChunks, reloaded)
 	}
 
 	for _, node := range graph.Node {
-		node.Chunks = []string{chunk.ID}
+		node.Chunks = graphNodeSourceChunkIDs(node.Name, reloadedChunks)
 	}
 	currentGeneration, err = validateEnrichmentGeneration(
 		ctx, s.knowledgeRepo, p.TenantID, p.KnowledgeID,
@@ -465,7 +672,10 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 		return nil
 	}
 	if err = s.graphEngine.AddGraph(ctx,
-		types.NameSpace{KnowledgeBase: chunk.KnowledgeBaseID, Knowledge: chunk.KnowledgeID},
+		types.NameSpace{
+			KnowledgeBase: reloadedChunks[0].KnowledgeBaseID,
+			Knowledge:     reloadedChunks[0].KnowledgeID,
+		},
 		[]*types.GraphData{graph},
 	); err != nil {
 		logger.Errorf(ctx, "failed to add graph: %v", err)
@@ -606,7 +816,8 @@ func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) (re
 	}
 	skipFanIn := false
 	defer func() {
-		if skipFanIn || (retErr != nil && !isFinalAsynqAttempt(ctx)) {
+		if skipFanIn || isDurableTaskDeferred(retErr) ||
+			(retErr != nil && !isFinalAsynqAttempt(ctx)) {
 			return
 		}
 		if err := s.completeDataTableFanIn(ctx, payload, plan, completionStore); err != nil {
@@ -859,12 +1070,22 @@ func (s *DataTableSummaryService) processTableData(ctx context.Context, resource
 		)
 		switch {
 		case err == nil:
-			return s.processSplitTableData(ctx, resources, plan)
+			return s.processPersistedTableData(ctx, resources, plan)
 		case !errors.Is(err, gorm.ErrRecordNotFound):
 			return nil, fmt.Errorf("load physical split table plan: %w", err)
 		}
+
+		// Ordinary and physically split tables now share the same immutable
+		// generation-scoped source: the text chunks that the parser already
+		// committed. Reopening the original file here duplicated object-store
+		// I/O and made legacy XLS enrichment depend on DuckDB extensions that
+		// are deliberately disabled in hardened deployments.
+		return s.processPersistedTableData(ctx, resources, nil)
 	}
 
+	// A nil split manager is only retained for isolated/legacy construction.
+	// Production wiring always supplies it; keep the original reader path so a
+	// custom embedding of the service still has a functional fallback.
 	// 创建DuckDB会话并加载数据
 	sessionID := fmt.Sprintf("table_summary_%s", resources.knowledge.ID)
 	fileSvc := s.resolveFileServiceForKnowledge(ctx, resources)
@@ -920,11 +1141,12 @@ func (s *DataTableSummaryService) processTableData(ctx context.Context, resource
 	return chunks, nil
 }
 
-// processSplitTableData preserves the semantics of one logical workbook while
-// avoiding a second full-file materialisation after physical parsing. Samples
-// are selected over the immutable global chunk order and retain worksheet /
-// row / column coordinates in the LLM prompt.
-func (s *DataTableSummaryService) processSplitTableData(
+// processPersistedTableData preserves the semantics of one logical table while
+// avoiding a second full-file materialisation after parsing. Ordinary tables
+// and physically split workbooks both sample their immutable generation-
+// scoped chunk order; split plans additionally contribute exact sheet/range
+// coverage to the prompt.
+func (s *DataTableSummaryService) processPersistedTableData(
 	ctx context.Context,
 	resources *extractionResources,
 	plan *documentsplit.Plan,
@@ -940,14 +1162,29 @@ func (s *DataTableSummaryService) processSplitTableData(
 		maximumTableStrata,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("sample split logical table: %w", err)
+		return nil, fmt.Errorf("sample persisted logical table: %w", err)
 	}
-	parts, err := s.splitManager.ListParts(ctx, plan.ID)
-	if err != nil {
-		return nil, fmt.Errorf("load split table coverage: %w", err)
+	if total == 0 || len(samples) == 0 {
+		return nil, errors.New("sample persisted logical table: current generation has no text chunks")
+	}
+
+	corpusPlan := plan
+	var parts []*documentsplit.Part
+	if corpusPlan == nil {
+		corpusPlan = &documentsplit.Plan{
+			SourceName: resources.knowledge.FileName,
+			SourceType: strings.ToLower(strings.TrimSpace(resources.knowledge.FileType)),
+			SourceSize: resources.knowledge.FileSize,
+			PartCount:  1,
+		}
+	} else {
+		parts, err = s.splitManager.ListParts(ctx, corpusPlan.ID)
+		if err != nil {
+			return nil, fmt.Errorf("load split table coverage: %w", err)
+		}
 	}
 	corpus, err := documentsplit.BuildTableSummaryCorpus(
-		plan, resources.knowledge, samples, total, 24_000, parts...,
+		corpusPlan, resources.knowledge, samples, total, 24_000, parts...,
 	)
 	if err != nil {
 		return nil, err

@@ -17,15 +17,19 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
 NON_TERMINAL_STATUSES = {"pending", "processing", "finalizing", "waiting", "active"}
+FAILED_STAGE_STATUSES = {"failed", "error", "cancelled", "canceled", "degraded"}
 SUPPORTED_FIXTURE_SUFFIXES = {
     ".txt",
+    ".text",
     ".md",
+    ".markdown",
     ".csv",
     ".json",
     ".pdf",
@@ -40,8 +44,31 @@ SUPPORTED_FIXTURE_SUFFIXES = {
     ".png",
     ".jpg",
     ".jpeg",
+    ".gif",
+    ".bmp",
+    ".tiff",
     ".webp",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".flac",
+    ".ogg",
 }
+
+QUESTION_SOURCE_METADATA_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:根据|依据|参照|按照)\s*《[^》]+》|"
+    r"^\s*(?:根据|依据|参照)\s*[^，。！？?]{0,40}(?:制度|规定|办法|细则)(?:中|的|，|,)|"
+    r"原文件\s*第|原文\s*第|"
+    r"第\s*(?:\d+|[一二三四五六七八九十百千]+)\s*(?:页|组|段|chunk|分片)|"
+    r"第\s*(?:\d+|[一二三四五六七八九十百千]+)\s*条\s*(?:规定的?)?\s*(?:内容|要求|是什么|有哪些)|"
+    r"(?:根据|参照)\s*(?:第\s*(?:\d+|[一二三四五六七八九十百千]+)\s*(?:页|组|段)|"
+    r"上述(?:文档|片段|内容)|本(?:文|段|片段))|"
+    r"制度原文(?:中|里)?|"
+    r"(?:该|此|上述)\s*(?:文档|片段|chunk)\s*(?:中|里)?"
+    r")",
+    re.IGNORECASE,
+)
 
 WORKLOAD_PROFILE_SCHEMA_VERSION = 1
 GENERATED_WORKLOAD_TEMPLATE = "horizontal-processing-markdown-v1"
@@ -61,6 +88,7 @@ KB_WORKLOAD_FIELDS = (
     "wiki_config",
     "indexing_strategy",
 )
+DERIVATIVE_NAMES = {"summary", "questions", "graph", "wiki", "multimodal", "table"}
 
 
 class E2EFailure(RuntimeError):
@@ -133,6 +161,65 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def load_fixture_expectations(
+    path: Path,
+    fixture_paths: Sequence[Path],
+) -> dict[str, dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise E2EFailure(f"cannot load fixture manifest {path}: {exc}") from exc
+    raw_files = payload.get("files", []) if isinstance(payload, Mapping) else []
+    if not isinstance(raw_files, list):
+        raise E2EFailure("fixture manifest files must be an array")
+    expectations: dict[str, dict[str, Any]] = {}
+    for raw in raw_files:
+        if not isinstance(raw, Mapping):
+            raise E2EFailure("fixture manifest entries must be objects")
+        filename = str(raw.get("filename", "")).strip()
+        if not filename or filename in expectations or Path(filename).name != filename:
+            raise E2EFailure(f"fixture manifest has invalid/duplicate filename: {filename!r}")
+        expected = {
+            str(value).strip().lower()
+            for value in raw.get("expected_derivatives", [])
+            if str(value).strip()
+        } if isinstance(raw.get("expected_derivatives", []), list) else set()
+        unknown = expected - DERIVATIVE_NAMES
+        if unknown:
+            raise E2EFailure(f"fixture {filename!r} has unknown derivatives: {sorted(unknown)}")
+        expected_text = str(
+            first_value(raw, ("expected_chunk_text", "marker"), "")
+        ).strip()
+        expectations[filename] = {
+            "expected_derivatives": expected,
+            "expected_chunk_text": (expected_text,) if expected_text else (),
+        }
+    fixture_names = {fixture.name for fixture in fixture_paths}
+    if set(expectations) != fixture_names:
+        missing = sorted(fixture_names - set(expectations))
+        extra = sorted(set(expectations) - fixture_names)
+        raise E2EFailure(f"fixture manifest mismatch: missing={missing}, extra={extra}")
+    return expectations
+
+
+def fixture_expectation_for_filename(
+    uploaded_filename: str,
+    expectations: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    if not expectations:
+        return {}
+    matches = [
+        expectation
+        for filename, expectation in expectations.items()
+        if uploaded_filename == filename or uploaded_filename.endswith("-" + filename)
+    ]
+    if len(matches) != 1:
+        raise E2EFailure(
+            f"uploaded fixture {uploaded_filename!r} maps to {len(matches)} manifest entries"
+        )
+    return matches[0]
+
+
 def build_workload_profile(
     *,
     kb_id: str,
@@ -148,6 +235,7 @@ def build_workload_profile(
     wiki_timeout: float,
     poll_interval: float,
     skip_card_contract: bool,
+    question_retrieval_sample: int = 3,
     chaos_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the immutable workload identity used for scaling comparison.
@@ -213,6 +301,11 @@ def build_workload_profile(
         "verification": {
             "sample_documents": min(documents, max(1, verify_sample)),
             "wiki_timeout_seconds": float(wiki_timeout) if "wiki" in normalized_derivatives else None,
+            "question_retrieval_sample": (
+                max(0, int(question_retrieval_sample))
+                if "questions" in normalized_derivatives
+                else None
+            ),
             "poll_interval_seconds": float(poll_interval),
             "card_contract_enabled": not skip_card_contract,
         },
@@ -1047,6 +1140,106 @@ def generated_questions(chunk: Mapping[str, Any]) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def generated_question_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(first_value(value, ("question", "text", "content"), "")).strip()
+    return str(value).strip() if value is not None else ""
+
+
+def normalize_question_stem(question: str) -> str:
+    return "".join(character.casefold() for character in question if character.isalnum())
+
+
+def validate_generated_question_quality(
+    chunks: Sequence[Mapping[str, Any]],
+    *,
+    near_duplicate_ratio: float = 0.96,
+) -> dict[str, Any]:
+    """Validate persisted questions, not merely the LLM task status.
+
+    Numbering, whitespace and punctuation differences cannot make two stems
+    unique. Very high textual similarity is also rejected because concurrent
+    chunk batches commonly produce superficial paraphrases. The threshold is
+    intentionally conservative to avoid conflating distinct policy duties
+    which share a long organization or policy name.
+    """
+
+    questions: list[str] = []
+    for chunk in chunks:
+        questions.extend(
+            text
+            for text in (generated_question_text(value) for value in generated_questions(chunk))
+            if text
+        )
+    if not questions:
+        raise E2EFailure("no generated questions were persisted")
+
+    invalid: list[str] = []
+    exact_duplicates: list[tuple[str, str]] = []
+    near_duplicates: list[tuple[str, str, float]] = []
+    seen: dict[str, str] = {}
+    normalized: list[tuple[str, str]] = []
+    for question in questions:
+        stem = normalize_question_stem(question)
+        if (
+            len(question) < 6
+            or len(question) > 240
+            or len(stem) < 6
+            or QUESTION_SOURCE_METADATA_RE.search(question)
+            or not question.endswith(("?", "？"))
+        ):
+            invalid.append(question)
+            continue
+        previous = seen.get(stem)
+        if previous is not None:
+            exact_duplicates.append((previous, question))
+            continue
+        seen[stem] = question
+        normalized.append((stem, question))
+
+    # A quadratic pass is acceptable here because the production budget caps
+    # generated questions per document. Length bucketing avoids comparing
+    # clearly unrelated stems in large policy documents.
+    for index, (left_stem, left_question) in enumerate(normalized):
+        for right_stem, right_question in normalized[index + 1 :]:
+            length_ratio = min(len(left_stem), len(right_stem)) / max(len(left_stem), len(right_stem))
+            if length_ratio < near_duplicate_ratio:
+                continue
+            ratio = SequenceMatcher(None, left_stem, right_stem, autojunk=False).ratio()
+            if ratio >= near_duplicate_ratio:
+                near_duplicates.append((left_question, right_question, ratio))
+
+    if invalid:
+        raise E2EFailure(
+            "generated questions contain unnatural/source-generation wording: "
+            + json.dumps(invalid[:10], ensure_ascii=False)
+        )
+    if exact_duplicates:
+        raise E2EFailure(
+            "generated questions contain duplicate stems: "
+            + json.dumps(exact_duplicates[:10], ensure_ascii=False)
+        )
+    if near_duplicates:
+        raise E2EFailure(
+            "generated questions contain superficial paraphrases: "
+            + json.dumps(near_duplicates[:10], ensure_ascii=False)
+        )
+    return {
+        "questions": len(questions),
+        "unique_stems": len(seen),
+        "near_duplicate_ratio": near_duplicate_ratio,
+    }
+
+
+def wiki_page_substantive_text(page: Mapping[str, Any]) -> str:
+    values = [
+        first_value(page, ("title", "name"), ""),
+        first_value(page, ("summary", "description"), ""),
+        first_value(page, ("content", "markdown", "body"), ""),
+    ]
+    return "\n".join(str(value).strip() for value in values if str(value).strip())
+
+
 def graph_artifact_counts(span_nodes: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     """Return persisted graph node/relation counts from successful graph spans.
 
@@ -1079,6 +1272,61 @@ def graph_artifact_counts(span_nodes: Sequence[Mapping[str, Any]]) -> tuple[int,
     return nodes_added, relations_added
 
 
+def embedding_vector_evidence(
+    span_nodes: Sequence[Mapping[str, Any]],
+) -> dict[str, int] | None:
+    """Return durable vector-write evidence from the successful embedding stage.
+
+    A successful hybrid-search probe is not sufficient evidence that every
+    persisted text chunk was embedded: keyword retrieval can hide a partially
+    written vector index. The core embedding stage records both its planned
+    and committed counts, so E2E validation compares those counts with the
+    authoritative text chunks returned by the API.
+    """
+
+    matching: list[Mapping[str, Any]] = []
+    for node in span_nodes:
+        name = str(first_value(node, ("name", "span_name"), "")).strip().lower()
+        status = str(first_value(node, ("status",), "")).strip().lower()
+        if name == "embedding" and status in {"done", "completed", "success"}:
+            matching.append(node)
+    if not matching:
+        return None
+    if len(matching) != 1:
+        raise E2EFailure(
+            f"latest processing attempt has {len(matching)} successful embedding stages; expected exactly one"
+        )
+
+    node = matching[0]
+    raw_input = node.get("input")
+    raw_output = node.get("output")
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except json.JSONDecodeError:
+            raw_input = {}
+    if isinstance(raw_output, str):
+        try:
+            raw_output = json.loads(raw_output)
+        except json.JSONDecodeError:
+            raw_output = {}
+    if not isinstance(raw_input, Mapping) or not isinstance(raw_output, Mapping):
+        raise E2EFailure("successful embedding stage has no structured input/output evidence")
+
+    try:
+        planned = int(raw_input["chunks_to_embed"])
+        written = int(raw_output["vectors_written"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise E2EFailure(
+            "successful embedding stage is missing integer chunks_to_embed/vectors_written evidence"
+        ) from exc
+    if planned < 0 or written < 0:
+        raise E2EFailure(
+            f"embedding stage reported negative counts: planned={planned}, written={written}"
+        )
+    return {"chunks_to_embed": planned, "vectors_written": written}
+
+
 def source_refs_include(page: Mapping[str, Any], knowledge_id: str) -> bool:
     refs = page.get("source_refs", [])
     if isinstance(refs, str):
@@ -1098,12 +1346,18 @@ class ClusterE2ERunner:
         *,
         run_id: str | None = None,
         poll_interval: float = 2.0,
+        expected_derivatives: Iterable[str] = (),
     ) -> None:
         self.client = client
         self.kb_id = kb_id
         self.recorder = recorder
         self.run_id = run_id or f"doc-cluster-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         self.poll_interval = poll_interval
+        self.expected_derivatives = {
+            str(value).strip().lower()
+            for value in expected_derivatives
+            if str(value).strip()
+        }
         self.observations: dict[str, DocumentObservation] = {}
         self.max_waiting_total = 0
         self.max_active_total = 0
@@ -1358,6 +1612,44 @@ class ClusterE2ERunner:
             queue_position_from_status_api=len(api_backed),
         )
 
+    def _pipeline_terminal_status(self, item: Mapping[str, Any]) -> str:
+        parse_status = str(item.get("parse_status", "")).strip().lower()
+        if parse_status in TERMINAL_STATUSES - {"completed"}:
+            return parse_status
+        if parse_status != "completed":
+            return ""
+
+        enrichment_expected = bool(
+            self.expected_derivatives
+            & {"summary", "questions", "graph", "multimodal", "table"}
+        )
+        if enrichment_expected:
+            enrichment_status = str(item.get("enrichment_status", "")).strip().lower()
+            summary_status = str(item.get("summary_status", "")).strip().lower()
+            if (
+                enrichment_status in FAILED_STAGE_STATUSES
+                or (
+                    "summary" in self.expected_derivatives
+                    and summary_status in FAILED_STAGE_STATUSES
+                )
+            ):
+                return "failed"
+            if enrichment_status not in {"completed", "done"}:
+                return ""
+            try:
+                pending = int(item.get("pending_subtasks_count", 0))
+            except (TypeError, ValueError):
+                return ""
+            if pending != 0:
+                return ""
+        if "wiki" in self.expected_derivatives:
+            wiki_status = str(item.get("wiki_status", "")).strip().lower()
+            if wiki_status in FAILED_STAGE_STATUSES:
+                return "failed"
+            if wiki_status not in {"completed", "done"}:
+                return ""
+        return "completed"
+
     def _refresh_terminal_states(self) -> None:
         tracked = set(self.observations)
         listed = self.client.list_all_knowledge(self.kb_id)
@@ -1368,8 +1660,8 @@ class ClusterE2ERunner:
             if knowledge_id not in tracked:
                 continue
             found += 1
-            status = str(item.get("parse_status", "")).lower()
-            if status in TERMINAL_STATUSES:
+            status = self._pipeline_terminal_status(item)
+            if status:
                 observation = self.observations[knowledge_id]
                 if observation.terminal_monotonic is None:
                     observation.terminal_monotonic = now
@@ -1378,8 +1670,8 @@ class ClusterE2ERunner:
             missing = [key for key, obs in self.observations.items() if not obs.final_status]
             for knowledge_id in missing[:20]:
                 item = self.client.get_knowledge(knowledge_id)
-                status = str(item.get("parse_status", "")).lower()
-                if status in TERMINAL_STATUSES:
+                status = self._pipeline_terminal_status(item)
+                if status:
                     observation = self.observations[knowledge_id]
                     observation.terminal_monotonic = observation.terminal_monotonic or now
                     observation.final_status = status
@@ -1391,6 +1683,20 @@ class ClusterE2ERunner:
             snapshot = self.sample_queue()
             self.assert_queue_positions(snapshot)
             self._refresh_terminal_states()
+            failed = [
+                observation
+                for observation in self.observations.values()
+                if observation.final_status
+                and observation.final_status != "completed"
+            ]
+            if failed:
+                raise E2EFailure(
+                    "document pipeline failed before the rest of the batch completed: "
+                    + ", ".join(
+                        f"{observation.knowledge_id}={observation.final_status}"
+                        for observation in failed[:20]
+                    )
+                )
             terminal = sum(bool(obs.final_status) for obs in self.observations.values())
             if terminal != last_terminal:
                 self.recorder.emit("workload.progress", terminal=terminal, total=len(self.observations))
@@ -1559,6 +1865,8 @@ class ClusterE2ERunner:
         sample_limit: int,
         wiki_timeout: float,
         expected_chunk_text: Sequence[str] = (),
+        question_retrieval_sample: int = 3,
+        fixture_expectations: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         all_chunk_types = [
             "text",
@@ -1572,8 +1880,22 @@ class ClusterE2ERunner:
             "table_column",
         ]
         selected = list(knowledge_ids)[: max(1, sample_limit)]
+        wiki_selected: list[str] = []
         for knowledge_id in selected:
             observation = self.observations[knowledge_id]
+            fixture_expectation = fixture_expectation_for_filename(
+                observation.filename,
+                fixture_expectations or {},
+            )
+            document_expected = expected | set(
+                fixture_expectation.get("expected_derivatives", set())
+            )
+            document_expected_text = [
+                *expected_chunk_text,
+                *fixture_expectation.get("expected_chunk_text", ()),
+            ]
+            if "wiki" in document_expected:
+                wiki_selected.append(knowledge_id)
             knowledge = self.client.get_knowledge(knowledge_id)
             status = str(knowledge.get("parse_status", "")).lower()
             if status != "completed":
@@ -1593,28 +1915,75 @@ class ClusterE2ERunner:
             span_nodes = flatten_span_nodes(spans)
             span_names = [str(first_value(node, ("name", "span_name"), "")).lower() for node in span_nodes]
             chunk_types = {str(chunk.get("chunk_type", "")) for chunk in chunks}
+            vector_evidence = embedding_vector_evidence(span_nodes)
+            if vector_evidence is None:
+                # Physically split documents currently publish vectors from
+                # durable part rows rather than one whole-document embedding
+                # span. Their complete coverage is verified by the database
+                # audit in the large-document suite. Every ordinary document
+                # must expose the stronger per-attempt count evidence here.
+                is_physical_split = any(bool(chunk.get("source_locator")) for chunk in text_chunks)
+                if not is_physical_split:
+                    raise E2EFailure(
+                        f"completed document {knowledge_id} has no successful embedding-stage evidence"
+                    )
+            else:
+                persisted_text_count = len(text_chunks)
+                if (
+                    vector_evidence["chunks_to_embed"] != persisted_text_count
+                    or vector_evidence["vectors_written"] != persisted_text_count
+                ):
+                    raise E2EFailure(
+                        f"incomplete vector coverage for {knowledge_id}: "
+                        f"persisted_text_chunks={persisted_text_count}, "
+                        f"chunks_to_embed={vector_evidence['chunks_to_embed']}, "
+                        f"vectors_written={vector_evidence['vectors_written']}"
+                    )
 
-            missing_text = missing_chunk_texts(chunks, expected_chunk_text)
+            missing_text = missing_chunk_texts(chunks, document_expected_text)
             if missing_text:
                 raise E2EFailure(
                     f"persisted chunks for {knowledge_id} are missing expected text: {missing_text}"
                 )
 
-            if "summary" in expected:
+            if "summary" in document_expected:
                 summary_status = str(knowledge.get("summary_status", "")).lower()
                 if summary_status not in {"completed", "done"} and "summary" not in chunk_types:
                     raise E2EFailure(f"summary did not complete for {knowledge_id}: {summary_status!r}")
-            if "questions" in expected and not any(generated_questions(chunk) for chunk in text_chunks):
-                raise E2EFailure(f"no generated questions persisted for {knowledge_id}")
-            if "graph" in expected:
+            question_evidence: dict[str, Any] | None = None
+            if "questions" in document_expected:
+                question_evidence = validate_generated_question_quality(text_chunks)
+                question_texts = [
+                    generated_question_text(value)
+                    for chunk in text_chunks
+                    for value in generated_questions(chunk)
+                ]
+                verified_retrieval = 0
+                for question in [value for value in question_texts if value][: max(0, question_retrieval_sample)]:
+                    question_results = self.client.hybrid_search(
+                        self.kb_id,
+                        question,
+                        [knowledge_id],
+                    )
+                    if not any(
+                        str(item.get("knowledge_id", "")) == knowledge_id
+                        for item in question_results
+                    ):
+                        raise E2EFailure(
+                            f"generated question is not traceable through retrieval for "
+                            f"{knowledge_id}: {question!r}"
+                        )
+                    verified_retrieval += 1
+                question_evidence["retrieval_queries_verified"] = verified_retrieval
+            if "graph" in document_expected:
                 graph_nodes, graph_relations = graph_artifact_counts(span_nodes)
                 if graph_nodes + graph_relations <= 0 and not ({"entity", "relationship"} & chunk_types):
                     raise E2EFailure(
                         f"graph completed without persisted nodes/relations for {knowledge_id}"
                     )
-            if "multimodal" in expected and not ({"image_ocr", "image_caption"} & chunk_types):
+            if "multimodal" in document_expected and not ({"image_ocr", "image_caption"} & chunk_types):
                 raise E2EFailure(f"no multimodal child chunks for {knowledge_id}")
-            if "table" in expected and not ({"table_summary", "table_column"} & chunk_types):
+            if "table" in document_expected and not ({"table_summary", "table_column"} & chunk_types):
                 raise E2EFailure(f"no table-derived chunks for {knowledge_id}")
 
             # Stable count catches the most common crash/retry double-commit symptom.
@@ -1631,26 +2000,50 @@ class ClusterE2ERunner:
                 chunk_types=sorted(chunk_types),
                 search_results=len(search_results),
                 span_names=span_names,
-                graph_nodes=graph_nodes if "graph" in expected else None,
-                graph_relations=graph_relations if "graph" in expected else None,
-                expected_chunk_text=list(expected_chunk_text),
+                graph_nodes=graph_nodes if "graph" in document_expected else None,
+                graph_relations=graph_relations if "graph" in document_expected else None,
+                vector_evidence=vector_evidence,
+                question_evidence=question_evidence,
+                expected_derivatives=sorted(document_expected),
+                expected_chunk_text=list(document_expected_text),
             )
 
-        if "wiki" in expected:
+        if wiki_selected:
             deadline = time.monotonic() + wiki_timeout
-            missing = set(selected)
+            missing = set(wiki_selected)
+            pages: list[Mapping[str, Any]] = []
             while time.monotonic() < deadline and missing:
                 pages = self.client.list_wiki_pages(self.kb_id)
                 missing = {
                     knowledge_id
                     for knowledge_id in missing
-                    if not any(source_refs_include(page, knowledge_id) for page in pages)
+                    if not any(
+                        source_refs_include(page, knowledge_id)
+                        and len(normalize_question_stem(wiki_page_substantive_text(page))) >= 40
+                        for page in pages
+                    )
                 }
                 if missing:
                     time.sleep(max(2.0, self.poll_interval))
             if missing:
-                raise E2EFailure(f"Wiki did not ingest source documents within {wiki_timeout}s: {sorted(missing)}")
-            self.recorder.emit("wiki.outputs_passed", documents=len(selected))
+                raise E2EFailure(
+                    "Wiki did not produce substantive source-linked pages within "
+                    f"{wiki_timeout}s: {sorted(missing)}"
+                )
+            linked_pages = [
+                page
+                for page in pages
+                if any(source_refs_include(page, knowledge_id) for knowledge_id in wiki_selected)
+            ]
+            self.recorder.emit(
+                "wiki.outputs_passed",
+                documents=len(wiki_selected),
+                source_linked_pages=len(linked_pages),
+                substantive_pages=sum(
+                    len(normalize_question_stem(wiki_page_substantive_text(page))) >= 40
+                    for page in linked_pages
+                ),
+            )
 
     def result(self, started_monotonic: float, started_at: str) -> RunResult:
         finished = time.monotonic()

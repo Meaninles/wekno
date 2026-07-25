@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -129,12 +130,18 @@ func (p *PluginSearchEntity) OnEvent(ctx context.Context,
 
 	// Merge graph data
 	chatManage.GraphResult = &types.GraphData{
-		Node:     allNodes,
+		Node:     chatretrieval.RankGraphNodes(allNodes, entity),
 		Relation: allRelations,
 	}
 	logger.Infof(ctx, "Total entity search result: %d nodes, %d relations", len(allNodes), len(allRelations))
 
-	chunkIDs := filterSeenChunk(ctx, chatManage.GraphResult, chatManage.SearchResult)
+	graphChunkBudget := chatretrieval.GraphChunkBudget(chatManage.RerankTopK)
+	chunkIDs := filterSeenChunk(
+		ctx,
+		chatManage.GraphResult,
+		chatManage.SearchResult,
+		graphChunkBudget,
+	)
 	if len(chunkIDs) == 0 {
 		logger.Infof(ctx, "No new chunk found")
 		return next()
@@ -162,9 +169,20 @@ func (p *PluginSearchEntity) OnEvent(ctx context.Context,
 	for _, knowledge := range knowledges {
 		knowledgeMap[knowledge.ID] = knowledge
 	}
+	graphScore := chatretrieval.GraphSupplementScore(chatManage.SearchResult)
 	var entityResults []*types.SearchResult
 	for _, chunk := range chunks {
-		searchResult := chunk2SearchResult(chunk, knowledgeMap[chunk.KnowledgeID])
+		knowledge := knowledgeMap[chunk.KnowledgeID]
+		if knowledge == nil {
+			logger.Warnf(
+				ctx,
+				"Skipping graph chunk %s because knowledge %s is unavailable",
+				chunk.ID,
+				chunk.KnowledgeID,
+			)
+			continue
+		}
+		searchResult := chunk2SearchResult(chunk, knowledge, graphScore)
 		entityResults = append(entityResults, searchResult)
 	}
 	searchutil.EnrichSearchResultsImageInfo(ctx, p.chunkRepo, types.MustTenantIDFromContext(ctx), entityResults)
@@ -185,7 +203,15 @@ func (p *PluginSearchEntity) OnEvent(ctx context.Context,
 }
 
 // filterSeenChunk filters seen chunks from the graph
-func filterSeenChunk(ctx context.Context, graph *types.GraphData, searchResult []*types.SearchResult) []string {
+func filterSeenChunk(
+	ctx context.Context,
+	graph *types.GraphData,
+	searchResult []*types.SearchResult,
+	limit int,
+) []string {
+	if graph == nil || limit <= 0 {
+		return nil
+	}
 	seen := map[string]bool{}
 	for _, chunk := range searchResult {
 		seen[chunk.ID] = true
@@ -200,6 +226,10 @@ func filterSeenChunk(ctx context.Context, graph *types.GraphData, searchResult [
 			}
 			seen[chunkID] = true
 			chunkIDs = append(chunkIDs, chunkID)
+			if len(chunkIDs) >= limit {
+				logger.Infof(ctx, "filterSeenChunk: graph chunk budget reached (%d)", limit)
+				return chunkIDs
+			}
 		}
 	}
 	logger.Infof(ctx, "filterSeenChunk: new chunkIDs count: %d", len(chunkIDs))
@@ -207,7 +237,11 @@ func filterSeenChunk(ctx context.Context, graph *types.GraphData, searchResult [
 }
 
 // chunk2SearchResult converts a chunk to a search result
-func chunk2SearchResult(chunk *types.Chunk, knowledge *types.Knowledge) *types.SearchResult {
+func chunk2SearchResult(
+	chunk *types.Chunk,
+	knowledge *types.Knowledge,
+	score float64,
+) *types.SearchResult {
 	return &types.SearchResult{
 		ID:                chunk.ID,
 		Content:           chunk.Content,
@@ -217,7 +251,7 @@ func chunk2SearchResult(chunk *types.Chunk, knowledge *types.Knowledge) *types.S
 		StartAt:           chunk.StartAt,
 		EndAt:             chunk.EndAt,
 		Seq:               chunk.ChunkIndex,
-		Score:             1.0,
+		Score:             score,
 		MatchType:         types.MatchTypeGraph,
 		Metadata:          knowledge.GetMetadata(),
 		ChunkType:         string(chunk.ChunkType),

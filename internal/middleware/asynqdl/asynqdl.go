@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -72,6 +73,15 @@ func MiddlewareWithCallback(repo interfaces.TaskDeadLetterRepository, cb OnDeadL
 			err := next.ProcessTask(ctx, t)
 			if err == nil {
 				return nil
+			}
+			// Asynq's IsFailure hook retries provider outages without
+			// incrementing Retried. A task may nevertheless already be at its
+			// historical max retry when the outage is detected; never run the
+			// dead-letter callback in that case or it would permanently fail a
+			// document that Asynq is correctly keeping scheduled.
+			if modeladmission.IsModelWorkDeferred(err) ||
+				errors.Is(err, context.Canceled) {
+				return err
 			}
 			if !isFinalAttempt(ctx) {
 				return err

@@ -8,13 +8,18 @@ import "time"
 type WorkflowState string
 
 const (
-	StatePreparing  WorkflowState = "preparing"
-	StateQueued     WorkflowState = "queued"
-	StateLeased     WorkflowState = "leased"
-	StateCompleted  WorkflowState = "completed"
-	StateFailed     WorkflowState = "failed"
-	StateCancelled  WorkflowState = "cancelled"
-	StateSuperseded WorkflowState = "superseded"
+	StatePreparing WorkflowState = "preparing"
+	StateQueued    WorkflowState = "queued"
+	StateLeased    WorkflowState = "leased"
+	// StateWaitingExternal is a migration-only state written by versions that
+	// released a document slot while Wiki was pending. Recovery converts every
+	// non-terminal row back to queued; new code holds its lease through Wiki so
+	// downstream backlog stays bounded by document capacity.
+	StateWaitingExternal WorkflowState = "waiting_external"
+	StateCompleted       WorkflowState = "completed"
+	StateFailed          WorkflowState = "failed"
+	StateCancelled       WorkflowState = "cancelled"
+	StateSuperseded      WorkflowState = "superseded"
 )
 
 const StagePreparing = "preparing"
@@ -27,6 +32,19 @@ type ReparsePendingTransition struct {
 	EmbeddingModelID string
 	ErrorMessage     string
 	UpdatedAt        time.Time
+}
+
+// CancellationBinding identifies the exact durable workflow generation whose
+// business row and queue row must become cancelled in one transaction. Unlike
+// WorkflowBinding it deliberately omits ProcessingOwner: core processing
+// consumes that transient owner before the derivative/finalizing stages, while
+// processing_workflow_id remains the immutable generation binding.
+type CancellationBinding struct {
+	WorkflowID           string
+	TenantID             uint64
+	KnowledgeBaseID      string
+	KnowledgeID          string
+	ProcessingGeneration string
 }
 
 const (
@@ -94,6 +112,20 @@ type Instance struct {
 }
 
 func (Instance) TableName() string { return "custom_document_queue_instances" }
+
+// ScheduleGroup is the durable round-robin cursor for one tenant/knowledge-base
+// lane. Claims update it under the global PostgreSQL scheduler lock, allowing
+// late-arriving tenants and KBs to make progress even when Redis still contains
+// a large FIFO backlog from an earlier bulk upload.
+type ScheduleGroup struct {
+	TenantID        uint64    `json:"tenant_id" gorm:"primaryKey;not null"`
+	KnowledgeBaseID string    `json:"knowledge_base_id" gorm:"type:varchar(36);primaryKey;not null"`
+	LastAdmittedAt  time.Time `json:"last_admitted_at" gorm:"not null;index"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+func (ScheduleGroup) TableName() string { return "custom_document_queue_schedule_groups" }
 
 type QueueItem struct {
 	Position        int64      `json:"position"`

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -19,6 +20,7 @@ type repairRepoFake struct {
 	knowledge       *types.Knowledge
 	items           []string
 	completions     map[string]struct{}
+	outcomes        map[string]string
 	fail            error
 	documentRepairs []documentRepairCall
 }
@@ -56,8 +58,8 @@ func (r *repairRepoFake) FailDocumentProcessingGeneration(
 	return true, nil
 }
 
-func (r *repairRepoFake) FinalizeSubtaskGenerationItem(
-	_ context.Context, _ uint64, _, _, _, item string,
+func (r *repairRepoFake) FinalizeSubtaskGenerationItemOutcome(
+	_ context.Context, _ uint64, _, _, _, item, _, _ string,
 ) (int, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -111,6 +113,49 @@ func (r *repairRepoFake) KnowledgeFanoutCompletionExists(
 	defer r.mu.Unlock()
 	_, ok := r.completions[item]
 	return ok, nil
+}
+
+func (r *repairRepoFake) RecordGenerationOutcome(
+	_ context.Context,
+	_ uint64,
+	_, _, _ string,
+	item string,
+	status string,
+	_ string,
+) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fail != nil {
+		return false, r.fail
+	}
+	if r.outcomes == nil {
+		r.outcomes = make(map[string]string)
+	}
+	if _, exists := r.outcomes[item]; exists {
+		return false, nil
+	}
+	r.outcomes[item] = status
+	return true, nil
+}
+
+func (r *repairRepoFake) GetGenerationOutcomeAggregate(
+	context.Context, uint64, string, string, string,
+) (enrichmentoutcome.Aggregate, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var aggregate enrichmentoutcome.Aggregate
+	for _, status := range r.outcomes {
+		aggregate.Total++
+		switch status {
+		case enrichmentoutcome.StatusFailed:
+			aggregate.Failed++
+		case enrichmentoutcome.StatusDegraded:
+			aggregate.Degraded++
+		case enrichmentoutcome.StatusCompleted:
+			aggregate.Completed++
+		}
+	}
+	return aggregate, nil
 }
 
 type repairEnqueuerFake struct {
@@ -251,6 +296,12 @@ func TestRepairCompletesImageAndDataTableFanInThenEnqueuesPostProcess(t *testing
 	}
 	if len(enqueuer.ordered) != 1 || enqueuer.ordered[0].Type() != types.TypeKnowledgePostProcess {
 		t.Fatalf("enqueued tasks = %#v, want one postprocess task", enqueuer.ordered)
+	}
+	if repo.outcomes["multimodal.image[0]"] != enrichmentoutcome.StatusFailed {
+		t.Fatalf("image terminal outcome = %q, want failed", repo.outcomes["multimodal.image[0]"])
+	}
+	if repo.outcomes["datatable.summary"] != enrichmentoutcome.StatusFailed {
+		t.Fatalf("data-table terminal outcome = %q, want failed", repo.outcomes["datatable.summary"])
 	}
 }
 

@@ -49,6 +49,40 @@ def _xlsx_with_phantom_shared_strings() -> bytes:
         return out.getvalue()
 
 
+def _xlsx_with_wps_default_col_width_pt() -> bytes:
+    """Workbook carrying a WPS-only sheetFormatPr presentation attribute."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "任务名称"
+    ws["B1"] = "责任部门"
+    ws["A2"] = "排污许可申领"
+    ws["B2"] = "生态环境部"
+    bio = io.BytesIO()
+    wb.save(bio)
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(bio.getvalue()), "r") as zin:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info in zin.infolist():
+                data = zin.read(info.filename)
+                if info.filename == "xl/worksheets/sheet1.xml":
+                    data = data.replace(
+                        b"<sheetFormatPr ",
+                        b'<sheetFormatPr defaultColWidthPt="47.25" ',
+                        1,
+                    )
+                    data = data.replace(
+                        b"<sheetData>",
+                        (
+                            b'<cols><col width="16" customWidth="1" min="1" '
+                            b'max="1" widthPt="84"/></cols><sheetData>'
+                        ),
+                        1,
+                    )
+                zout.writestr(info, data)
+    return out.getvalue()
+
+
 class ExcelFormatDetectionTest(unittest.TestCase):
     def test_detect_xlsx_and_engine(self):
         wb = openpyxl.Workbook()
@@ -133,6 +167,23 @@ class XlsxRepairTest(unittest.TestCase):
             broken = out.getvalue()
 
         self.assertIsNone(repair_xlsx_bytes(broken))
+
+    def test_repair_removes_wps_only_default_column_width_points(self):
+        broken = _xlsx_with_wps_default_col_width_pt()
+        with self.assertRaisesRegex(TypeError, "defaultColWidthPt"):
+            openpyxl.load_workbook(io.BytesIO(broken), data_only=True)
+
+        repaired = repair_xlsx_bytes(broken)
+        self.assertIsNotNone(repaired)
+        workbook = openpyxl.load_workbook(io.BytesIO(repaired), data_only=True)
+        self.assertEqual(workbook.active["A2"].value, "排污许可申领")
+        self.assertEqual(workbook.active["B2"].value, "生态环境部")
+
+        document = ExcelParser(file_name="wps.xlsx", file_type="xlsx").parse_into_text(
+            broken
+        )
+        self.assertIn("排污许可申领", document.content)
+        self.assertIn("生态环境部", document.content)
 
 
 class XlsxMergeFillTest(unittest.TestCase):

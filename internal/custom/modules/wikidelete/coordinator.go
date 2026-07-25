@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -175,10 +176,10 @@ func (c *Coordinator) Prepare(ctx context.Context, requests []Request) error {
 }
 
 // Begin atomically claims active knowledge rows for deletion, removes obsolete
-// Wiki ingest work, and publishes a minimal executable retract. The Wiki
-// worker resolves pages and unscoped chunk IDs at run time, so this remains a
-// complete crash boundary without taking a stale pre-quiescence snapshot.
-// Prepare later refreshes the same row with richer post-barrier provenance.
+// Wiki ingest work, and persists a minimal retract intent. The service marks
+// that payload as held until active document writers have quiesced: it is a
+// complete crash-recovery boundary, not executable Wiki work. Prepare later
+// refreshes the same row with ready post-barrier provenance.
 func (c *Coordinator) Begin(ctx context.Context, intents []Intent) error {
 	if c == nil || c.db == nil {
 		return fmt.Errorf("%w: nil database", ErrInvalidRequest)
@@ -364,18 +365,12 @@ func (c *Coordinator) Finalize(
 			removedStorage += row.StorageSize
 		}
 
-		if err := tx.Exec("DELETE FROM knowledge_tag_relations WHERE knowledge_id IN ?", ids).Error; err != nil {
-			return fmt.Errorf("delete knowledge tag relations: %w", err)
-		}
-		// Knowledge rows are soft-deleted, so the ledger FK's ON DELETE CASCADE
-		// never fires. Remove all generations explicitly in this same final
-		// transaction; a failure must roll back the soft delete so recovery can
-		// retry without leaving permanent completion rows.
-		if err := tx.Exec(
-			"DELETE FROM knowledge_fanout_completions WHERE tenant_id = ? AND knowledge_id IN ?",
-			tenantID, ids,
-		).Error; err != nil {
-			return fmt.Errorf("delete knowledge fanout completions: %w", err)
+		// Knowledge rows are soft-deleted, so no FK cascade will run. Purge
+		// every derived relational artifact and release shared-cache references
+		// in this same transaction. Any failure leaves the deleting tombstone
+		// recoverable and prevents a misleading partially-finalized delete.
+		if err := knowledgepurge.DeleteSoftRowArtifacts(tx, tenantID, ids); err != nil {
+			return err
 		}
 		now := time.Now().UTC()
 		result := tx.Table("knowledges").

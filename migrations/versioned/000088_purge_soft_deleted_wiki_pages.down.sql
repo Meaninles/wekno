@@ -1,0 +1,2 @@
+-- Irreversible privacy cleanup: deleted Wiki prose is intentionally not
+-- reconstructed on downgrade.

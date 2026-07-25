@@ -57,6 +57,59 @@ func newCoordinatorDB(t *testing.T) *gorm.DB {
 			completed_at DATETIME NOT NULL,
 			PRIMARY KEY (tenant_id, knowledge_id, processing_generation, item_id)
 		)`,
+		`CREATE TABLE custom_enrichment_outcomes (
+			tenant_id INTEGER NOT NULL,
+			knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE custom_generated_question_claims (
+			tenant_id INTEGER NOT NULL,
+			knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE knowledge_processing_spans (
+			knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE custom_document_split_plans (
+			tenant_id INTEGER NOT NULL,
+			knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE custom_document_split_parts (
+			tenant_id INTEGER NOT NULL,
+			knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE wiki_log_entries (
+			tenant_id INTEGER NOT NULL,
+			knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE custom_content_cache_entries (
+			tenant_id INTEGER NOT NULL,
+			cache_kind TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			version_hash TEXT NOT NULL,
+			ref_count INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY (tenant_id, cache_kind, content_hash, version_hash)
+		)`,
+		`CREATE TABLE custom_content_cache_refs (
+			tenant_id INTEGER NOT NULL,
+			knowledge_id TEXT NOT NULL,
+			processing_generation TEXT NOT NULL,
+			cache_kind TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			version_hash TEXT NOT NULL
+		)`,
+		`CREATE TABLE embeddings (
+			knowledge_id TEXT NOT NULL,
+			knowledge_base_id TEXT,
+			source_id TEXT,
+			content TEXT NOT NULL DEFAULT '',
+			deleted_at DATETIME
+		)`,
+		`CREATE TABLE chunks (
+			tenant_id INTEGER NOT NULL,
+			knowledge_id TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			deleted_at DATETIME
+		)`,
 		`CREATE TABLE task_pending_ops (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER NOT NULL,

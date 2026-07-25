@@ -186,6 +186,76 @@ func TestProcessManualUpdateCommittedFanoutFailsClosedOnPlanMismatch(t *testing.
 	assert.Zero(t, enqueuer.attempts)
 }
 
+func finalizingRecoveryKnowledge(t *testing.T) *types.Knowledge {
+	t.Helper()
+	knowledge := committedFanoutKnowledge(t, "file")
+	knowledge.ParseStatus = types.ParseStatusFinalizing
+	knowledge.PendingSubtasksCount = 3
+	knowledge.ProcessingOwner = ""
+	plan, err := json.Marshal(durableEnrichmentFanout{
+		Stage:                durableEnrichmentPlanStage,
+		Version:              1,
+		TenantID:             knowledge.TenantID,
+		KnowledgeID:          knowledge.ID,
+		KnowledgeBaseID:      knowledge.KnowledgeBaseID,
+		ProcessingGeneration: knowledge.ProcessingGeneration,
+		TextChunkCount:       1,
+		SpawnSummary:         true,
+	})
+	require.NoError(t, err)
+	knowledge.ProcessingFanout = plan
+	return knowledge
+}
+
+func finalizingRecoveryDocumentTask(t *testing.T) *asynq.Task {
+	t.Helper()
+	payload, err := json.Marshal(types.DocumentProcessPayload{
+		TenantID:             7,
+		KnowledgeID:          "knowledge-1",
+		KnowledgeBaseID:      "kb-1",
+		ProcessingGeneration: "generation-1",
+		ProcessingOwner: processownership.DocumentOwner(
+			"knowledge-1", "generation-1",
+		),
+		Attempt: 1,
+	})
+	require.NoError(t, err)
+	return asynq.NewTask(types.TypeDocumentProcess, payload)
+}
+
+func TestProcessDocumentFinalizingReplaysDurablePostProcessPlan(t *testing.T) {
+	repo := &committedFanoutKnowledgeRepo{current: finalizingRecoveryKnowledge(t)}
+	enqueuer := &retryingFanoutEnqueuer{}
+	service := &knowledgeService{
+		repo:       repo,
+		tenantRepo: &committedFanoutTenantRepo{},
+		task:       enqueuer,
+	}
+
+	require.NoError(t, service.ProcessDocument(
+		context.Background(), finalizingRecoveryDocumentTask(t),
+	))
+	require.Equal(t, 1, enqueuer.attempts)
+	require.Equal(t, []string{types.TypeKnowledgePostProcess}, enqueuer.taskTypes)
+}
+
+func TestProcessDocumentFinalizingWithoutDurablePlanFailsClosed(t *testing.T) {
+	knowledge := finalizingRecoveryKnowledge(t)
+	knowledge.ProcessingFanout = nil
+	enqueuer := &retryingFanoutEnqueuer{}
+	service := &knowledgeService{
+		repo:       &committedFanoutKnowledgeRepo{current: knowledge},
+		tenantRepo: &committedFanoutTenantRepo{},
+		task:       enqueuer,
+	}
+
+	err := service.ProcessDocument(
+		context.Background(), finalizingRecoveryDocumentTask(t),
+	)
+	require.ErrorContains(t, err, "durable enrichment fanout is missing")
+	require.Zero(t, enqueuer.attempts)
+}
+
 func TestProcessManualUpdateStaleCommittedIdentityAcknowledgesWithoutReplay(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

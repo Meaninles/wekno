@@ -66,6 +66,14 @@ func (r *knowledgeRepository) RepairLegacyProcessing(
 		"processing_owner":       "",
 		"processing_fanout":      nil,
 		"pending_subtasks_count": 0,
+		"enrichment_status": gorm.Expr(
+			"CASE WHEN "+usableCoreSQL+" THEN ? ELSE ? END",
+			completeCore,
+			types.EnrichmentStatusDegraded,
+			types.EnrichmentStatusNone,
+		),
+		"wiki_status":        types.WikiStatusNone,
+		"wiki_error_message": "",
 		"error_message": gorm.Expr(
 			"CASE WHEN "+usableCoreSQL+" THEN '' ELSE ? END",
 			completeCore,

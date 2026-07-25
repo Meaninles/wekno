@@ -7,7 +7,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
 )
@@ -120,6 +122,60 @@ func TestMiddleware_FailureWithoutAsynqCtx_RecordsRow(t *testing.T) {
 	}
 	if row.FailedAt.IsZero() {
 		t.Error("failed_at: expected non-zero timestamp")
+	}
+}
+
+func TestMiddleware_ProviderOutageNeverDeadLettersOrRunsTerminalCallback(t *testing.T) {
+	repo := &fakeRepo{}
+	callbacks := 0
+	rawErr := errors.New("upstream unavailable")
+	providerErr := &modeladmission.ProviderUnavailableError{
+		Kind:       modeladmission.KindChat,
+		RetryAfter: time.Minute,
+		Cause:      rawErr,
+	}
+	mw := MiddlewareWithCallback(repo, func(context.Context, *asynq.Task, error) error {
+		callbacks++
+		return nil
+	})
+	wrapper := mw(asynq.HandlerFunc(func(context.Context, *asynq.Task) error {
+		return providerErr
+	}))
+	err := wrapper.ProcessTask(
+		context.Background(),
+		asynq.NewTask(types.TypeSummaryGeneration, []byte(`{"knowledge_id":"k-1"}`)),
+	)
+	if !errors.Is(err, modeladmission.ErrProviderUnavailable) ||
+		!errors.Is(err, rawErr) {
+		t.Fatalf("provider error was not preserved: %v", err)
+	}
+	if got := repo.rowCount(); got != 0 {
+		t.Fatalf("provider outage created %d dead-letter rows, want 0", got)
+	}
+	if callbacks != 0 {
+		t.Fatalf("provider outage ran terminal callback %d times, want 0", callbacks)
+	}
+}
+
+func TestMiddleware_ShutdownCancellationNeverDeadLetters(t *testing.T) {
+	repo := &fakeRepo{}
+	callbacks := 0
+	mw := MiddlewareWithCallback(repo, func(context.Context, *asynq.Task, error) error {
+		callbacks++
+		return nil
+	})
+	wrapper := mw(asynq.HandlerFunc(func(context.Context, *asynq.Task) error {
+		return context.Canceled
+	}))
+	err := wrapper.ProcessTask(
+		context.Background(),
+		asynq.NewTask(types.TypeChunkExtract, []byte(`{"knowledge_id":"k-1"}`)),
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation was not preserved: %v", err)
+	}
+	if got := repo.rowCount(); got != 0 || callbacks != 0 {
+		t.Fatalf("shutdown cancellation dead-lettered=%d callbacks=%d, want 0/0", got, callbacks)
 	}
 }
 

@@ -1,21 +1,77 @@
 <template>
   <div class="wiki-browser">
-    <!-- Graph view (full screen) -->
+    <!-- Graph view: paged node catalogue + bounded one-hop canvas -->
     <template v-if="view === 'graph'">
       <div class="wiki-graph">
-        <div ref="graphRef" class="wiki-graph-canvas"></div>
-
-        <!-- Graph Search Overlay -->
-        <div v-if="graphReady" class="wiki-graph-search-container">
-          <div class="wiki-graph-search-row">
-            <div class="wiki-graph-search">
-              <t-select v-model="graphSearchValue" filterable :options="graphSearchEffectiveOptions"
-                :loading="graphSearchLoading" :on-search="handleGraphRemoteSearch"
-                :placeholder="$t('knowledgeEditor.wikiBrowser.searchPlaceholder')" @change="handleGraphSearchSelect"
-                @enter="handleGraphSearchEnter" :popup-props="{ zIndex: 100 }" class="graph-search-select">
-                <template #prefixIcon><t-icon name="search" /></template>
-              </t-select>
+        <aside class="wiki-graph-node-panel">
+          <div class="wiki-graph-node-panel-header">
+            <div class="wiki-graph-node-panel-title">
+              <span>{{ $t('knowledgeEditor.wikiBrowser.graphNodeCatalogue') }}</span>
+              <span class="wiki-graph-node-total">{{ stats?.total_pages || 0 }}</span>
             </div>
+            <t-input v-model="graphListSearch" clearable
+              :placeholder="$t('knowledgeEditor.wikiBrowser.graphSearchNodes')">
+              <template #prefixIcon><t-icon name="search" /></template>
+            </t-input>
+          </div>
+
+          <div v-if="!graphListSearch.trim()" class="wiki-graph-category-tabs">
+            <button v-for="category in graphListCategories" :key="category.type" type="button"
+              :class="['wiki-graph-category-tab', { active: graphListType === category.type }]"
+              @click="selectGraphListType(category.type)">
+              <span class="legend-dot" :style="{ background: category.color }"></span>
+              <span class="wiki-graph-category-label">{{ category.label }}</span>
+              <span class="wiki-graph-category-count">{{ category.total }}</span>
+            </button>
+          </div>
+
+          <div class="wiki-graph-node-list">
+            <t-loading v-if="graphListLoading && graphListItems.length === 0" />
+            <RecycleScroller v-else-if="graphListItems.length > 0" class="wiki-graph-node-scroller"
+              :items="graphListItems" :item-size="56" key-field="id" :buffer="280" v-slot="{ item }">
+              <button type="button" :class="['wiki-graph-node-item', { active: graphCenter === item.slug }]"
+                :title="item.title" @click="navigateGraphCenter(item.slug)">
+                <span class="wiki-graph-node-item-main">
+                  <span class="wiki-graph-node-item-title">{{ item.title }}</span>
+                  <span v-if="graphListSearch.trim()" class="wiki-graph-node-item-type">
+                    {{ getTypeLabel(item.page_type) }}
+                  </span>
+                </span>
+                <t-icon name="chevron-right" />
+              </button>
+            </RecycleScroller>
+            <div v-else-if="!graphListLoading" class="wiki-graph-node-list-empty">
+              {{ $t('knowledgeEditor.wikiBrowser.graphNoMatchingNodes') }}
+            </div>
+          </div>
+
+          <div class="wiki-graph-node-pager">
+            <t-button size="small" variant="text" :disabled="graphListPage <= 1 || graphListLoading"
+              @click="loadGraphListPage(graphListPage - 1)">
+              <t-icon name="chevron-left" />
+            </t-button>
+            <span>{{ graphListPage }} / {{ graphListTotalPages }}</span>
+            <t-button size="small" variant="text"
+              :disabled="graphListPage >= graphListTotalPages || graphListLoading"
+              @click="loadGraphListPage(graphListPage + 1)">
+              <t-icon name="chevron-right" />
+            </t-button>
+          </div>
+        </aside>
+
+        <section class="wiki-graph-stage">
+          <div ref="graphRef" class="wiki-graph-canvas"></div>
+
+          <div class="wiki-graph-toolbar">
+            <t-button v-if="graphCenterHistory.length > 0" size="small" variant="outline"
+              @click="goBackGraphCenter">
+              <template #icon><t-icon name="arrow-left" /></template>
+              {{ $t('knowledgeEditor.wikiBrowser.graphBackCenter') }}
+            </t-button>
+            <div class="wiki-graph-toolbar-spacer"></div>
+            <t-button v-if="graphCenter" size="small" variant="outline" @click="openGraphDrawer(graphCenter)">
+              {{ $t('knowledgeEditor.wikiBrowser.graphViewDetails') }}
+            </t-button>
             <t-popup trigger="click" placement="bottom-right" :show-arrow="true"
               overlay-class-name="wiki-graph-help-popup">
               <div class="wiki-graph-help-trigger" role="button" tabindex="0"
@@ -34,126 +90,85 @@
                 </div>
               </template>
             </t-popup>
+            <div v-if="stats && stats.pending_issues > 0" class="wiki-global-issues-status graph-issues-badge"
+              @click="showGlobalIssuesDrawer = true">
+              <t-icon name="error-circle" style="color: var(--td-warning-color);" />
+              <span class="queue-text">{{ $t('knowledgeEditor.wikiBrowser.globalIssuesCount', {
+                count: stats.pending_issues
+              }) }}</span>
+            </div>
           </div>
-          <div v-if="stats && stats.pending_issues > 0" class="wiki-global-issues-status graph-issues-badge"
-            @click="showGlobalIssuesDrawer = true">
-            <t-icon name="error-circle" style="color: var(--td-warning-color);" />
-            <span class="queue-text">{{ $t('knowledgeEditor.wikiBrowser.globalIssuesCount', {
-              count:
-                stats.pending_issues
-            })
-            }}</span>
-          </div>
-        </div>
 
-        <!-- Legend Overlay -->
-        <div v-if="graphReady" class="wiki-graph-legend" :class="{ 'legend-shifted': graphDrawerVisible }">
-          <div class="legend-items">
-            <div class="legend-item clickable" :class="{ disabled: !graphFilterTypes.has('summary') }"
-              @click="toggleGraphFilterType('summary')">
-              <span class="legend-dot" style="background: #0052d9"></span>
-              {{ $t('knowledgeEditor.wikiBrowser.filterSummary') }}
+          <div v-if="graphReady" class="wiki-graph-legend" :class="{ 'legend-shifted': graphDrawerVisible }">
+            <div class="legend-items">
+              <div v-for="category in graphListCategories" :key="category.type" class="legend-item">
+                <span class="legend-dot" :style="{ background: category.color }"></span>
+                {{ category.label }}
+              </div>
             </div>
-            <div class="legend-item clickable" :class="{ disabled: !graphFilterTypes.has('entity') }"
-              @click="toggleGraphFilterType('entity')">
-              <span class="legend-dot" style="background: #2ba471"></span>
-              {{ $t('knowledgeEditor.wikiBrowser.filterEntity') }}
+            <div class="legend-divider"></div>
+            <div class="legend-actions">
+              <div class="legend-action" @click="fitGraphToView">
+                <span class="legend-action-icon"><t-icon name="focus" /></span>
+                <span>{{ $t('knowledgeEditor.wikiBrowser.fitView') }}</span>
+              </div>
+              <div class="legend-action" @click="toggleArrows">
+                <span class="legend-action-icon"><t-icon :name="showArrows ? 'browse-off' : 'browse'" /></span>
+                <span>{{ showArrows ? $t('knowledgeEditor.wikiBrowser.hideArrows') :
+                  $t('knowledgeEditor.wikiBrowser.showArrows') }}</span>
+              </div>
             </div>
-            <div class="legend-item clickable" :class="{ disabled: !graphFilterTypes.has('concept') }"
-              @click="toggleGraphFilterType('concept')">
-              <span class="legend-dot" style="background: #e37318"></span>
-              {{ $t('knowledgeEditor.wikiBrowser.filterConcept') }}
-            </div>
-            <div class="legend-item clickable" :class="{ disabled: !graphFilterTypes.has('synthesis') }"
-              @click="toggleGraphFilterType('synthesis')">
-              <span class="legend-dot" style="background: #0594fa"></span>
-              {{ $t('knowledgeEditor.wikiBrowser.filterSynthesis') }}
-            </div>
-            <div class="legend-item clickable" :class="{ disabled: !graphFilterTypes.has('comparison') }"
-              @click="toggleGraphFilterType('comparison')">
-              <span class="legend-dot" style="background: #d54941"></span>
-              {{ $t('knowledgeEditor.wikiBrowser.filterComparison') }}
-            </div>
-          </div>
-          <div class="legend-divider"></div>
-          <div class="legend-actions">
-            <div class="legend-action" @click="fitGraphToView" title="Fit to View">
-              <span class="legend-action-icon"><t-icon name="focus" /></span>
-              <span>{{ $t('knowledgeEditor.wikiBrowser.fitView') || '适应屏幕' }}</span>
-            </div>
-            <div class="legend-action" @click="toggleArrows">
-              <span class="legend-action-icon"><t-icon :name="showArrows ? 'browse-off' : 'browse'" /></span>
-              <span>{{ showArrows ? $t('knowledgeEditor.wikiBrowser.hideArrows') :
-                $t('knowledgeEditor.wikiBrowser.showArrows')
-              }}</span>
-            </div>
-            <div v-if="graphMode === 'ego' && graphFrontierCount > 0" class="legend-action" @click="growFrontier"
-              :title="$t('knowledgeEditor.wikiBrowser.growFrontierTitle', { count: graphFrontierCount })">
-              <span class="legend-action-icon"><t-icon name="chart-bubble" /></span>
-              <span>{{ $t('knowledgeEditor.wikiBrowser.growFrontier', { count: graphFrontierCount }) }}</span>
-            </div>
-            <div v-if="graphMode === 'ego'" class="legend-action" @click="loadGraph">
-              <span class="legend-action-icon"><t-icon name="rollback" /></span>
-              <span>{{ $t('knowledgeEditor.wikiBrowser.backToOverview') }}</span>
-            </div>
-          </div>
-          <template v-if="graphStatusCard">
-            <div class="wiki-graph-status-card">
+            <div v-if="graphStatusCard" class="wiki-graph-status-card">
               <div class="status-card-header">
                 <t-icon :name="graphStatusCard.icon" />
                 <span class="status-card-title">{{ graphStatusCard.title }}</span>
               </div>
-              <div class="status-card-primary" :title="graphStatusCard.primary">
-                {{ graphStatusCard.primary }}
-              </div>
-              <div v-if="graphStatusCard.secondary" class="status-card-secondary">
-                {{ graphStatusCard.secondary }}
+              <div class="status-card-primary" :title="graphStatusCard.primary">{{ graphStatusCard.primary }}</div>
+              <div v-if="graphStatusCard.secondary" class="status-card-secondary">{{ graphStatusCard.secondary }}</div>
+              <div v-if="graphNeighborTotalPages > 1" class="wiki-graph-neighbor-pager">
+                <t-button size="small" variant="text" :disabled="graphNeighborPage <= 1 || graphLoading"
+                  @click="loadGraphNeighborPage(graphNeighborPage - 1)">
+                  <t-icon name="chevron-left" />
+                </t-button>
+                <span>{{ graphNeighborPage }} / {{ graphNeighborTotalPages }}</span>
+                <t-button size="small" variant="text"
+                  :disabled="graphNeighborPage >= graphNeighborTotalPages || graphLoading"
+                  @click="loadGraphNeighborPage(graphNeighborPage + 1)">
+                  <t-icon name="chevron-right" />
+                </t-button>
               </div>
             </div>
-          </template>
-        </div>
-
-        <div v-if="!graphReady" class="wiki-reader-empty wiki-graph-empty">
-          <t-loading v-if="graphLoading" />
-          <div v-else class="wiki-empty-icon">
-            <t-icon name="chart-bubble" size="48px" />
           </div>
-          <p class="wiki-empty-desc">{{ graphLoading ? $t('knowledgeEditor.wikiBrowser.graphEmpty') :
-            $t('knowledgeEditor.wikiBrowser.graphNoData') }}</p>
-        </div>
 
-        <!-- Graph page detail drawer -->
-        <t-drawer v-model:visible="graphDrawerVisible" :header="graphDrawerPage?.title || ''" size="480px"
-          :footer="false" placement="right" :attach="false" :show-overlay="false" :close-btn="true" destroy-on-close
-          class="wiki-graph-drawer">
-          <template v-if="graphDrawerPage">
-            <div class="wiki-reader-meta" style="margin-bottom: 8px;">
-              <t-tag size="small" :theme="getTypeTheme(graphDrawerPage.page_type)" variant="light-outline">
-                {{ getTypeLabel(graphDrawerPage.page_type) }}
-              </t-tag>
-              <span class="wiki-reader-meta-text">{{ $t('knowledgeEditor.wikiBrowser.version', {
-                ver:
-                  graphDrawerPage.version
-              }) }}</span>
-              <t-button v-if="graphMode === 'ego' && graphCenter !== graphDrawerPage.slug" size="small"
-                variant="outline" theme="default" style="margin-left: auto;" :disabled="!graphDrawerCanBloom"
-                @click="loadBloomNeighbors(graphDrawerPage.slug)">
-                {{ $t('knowledgeEditor.wikiBrowser.bloomNeighbors') }}
-              </t-button>
-              <t-button v-if="graphMode !== 'ego' || graphCenter !== graphDrawerPage.slug" size="small"
-                variant="outline" theme="primary"
-                :style="graphMode === 'ego' && graphCenter !== graphDrawerPage.slug ? '' : 'margin-left: auto;'"
-                @click="loadEgoGraph(graphDrawerPage.slug)">
-                {{ $t('knowledgeEditor.wikiBrowser.expandNeighbors') }}
-              </t-button>
-            </div>
-            <div v-if="graphDrawerNeighborHint" class="wiki-drawer-neighbor-hint" style="margin-bottom: 16px;">
-              {{ graphDrawerNeighborHint }}
-            </div>
-            <div ref="drawerBodyRef" class="wiki-reader-body" v-html="graphDrawerContent"
-              @click="handleGraphDrawerClick"></div>
-          </template>
-        </t-drawer>
+          <div v-if="graphLoading || !graphReady" class="wiki-reader-empty wiki-graph-empty">
+            <t-loading v-if="graphLoading" />
+            <div v-else class="wiki-empty-icon"><t-icon name="chart-bubble" size="48px" /></div>
+            <p class="wiki-empty-desc">{{ graphLoading
+              ? $t('knowledgeEditor.wikiBrowser.graphEmpty')
+              : $t('knowledgeEditor.wikiBrowser.graphSelectNodeHint') }}</p>
+          </div>
+
+          <t-drawer v-model:visible="graphDrawerVisible" :header="graphDrawerPage?.title || ''" size="480px"
+            :footer="false" placement="right" attach=".wiki-graph-stage" :show-overlay="false" :close-btn="true" destroy-on-close
+            class="wiki-graph-drawer">
+            <template v-if="graphDrawerPage">
+              <div class="wiki-reader-meta" style="margin-bottom: 8px;">
+                <t-tag size="small" :theme="getTypeTheme(graphDrawerPage.page_type)" variant="light-outline">
+                  {{ getTypeLabel(graphDrawerPage.page_type) }}
+                </t-tag>
+                <span class="wiki-reader-meta-text">{{ $t('knowledgeEditor.wikiBrowser.version', {
+                  ver: graphDrawerPage.version
+                }) }}</span>
+                <t-button v-if="graphCenter !== graphDrawerPage.slug" size="small" variant="outline" theme="primary"
+                  style="margin-left: auto;" @click="navigateGraphCenter(graphDrawerPage.slug)">
+                  {{ $t('knowledgeEditor.wikiBrowser.graphSetAsCenter') }}
+                </t-button>
+              </div>
+              <div ref="drawerBodyRef" class="wiki-reader-body" v-html="graphDrawerContent"
+                @click="handleGraphDrawerClick"></div>
+            </template>
+          </t-drawer>
+        </section>
       </div>
     </template>
 
@@ -705,6 +720,11 @@ import WikiFolderActions from './WikiFolderActions.vue'
 import { createSessions } from '@/api/chat'
 import ChatView from '@/views/chat/index.vue'
 import {
+  clampGraphPage,
+  navigateGraphCenterState,
+  popGraphCenterState,
+} from '@/custom/modules/wikiGraph/navigation'
+import {
   listWikiPages,
   listWikiFolders,
   createWikiFolder,
@@ -896,6 +916,86 @@ const graphLoading = ref(false)
 const graphReady = ref(false)
 const showArrows = ref(true)
 
+// The graph catalogue is intentionally independent of the browser sidebar.
+// It keeps at most one 50-row page in memory/DOM, and every category/search
+// transition aborts the superseded request so fast typing cannot repaint the
+// list with stale results.
+const GRAPH_LIST_PAGE_SIZE = 50
+const GRAPH_LIST_TYPES = ['summary', 'entity', 'concept', 'synthesis', 'comparison'] as const
+const nodeColorMap: Record<string, string> = {
+  summary: '#0052d9', entity: '#2ba471', concept: '#e37318',
+  synthesis: '#0594fa', comparison: '#d54941', index: '#8c8c8c', log: '#8c8c8c',
+}
+const graphListSearch = ref('')
+const graphListType = ref<string>('summary')
+const graphListItems = ref<WikiPage[]>([])
+const graphListPage = ref(1)
+const graphListTotal = ref(0)
+const graphListLoading = ref(false)
+let graphListAbortController: AbortController | null = null
+let graphListRequestSeq = 0
+let graphListSearchTimer: ReturnType<typeof setTimeout> | null = null
+
+const graphListTotalPages = computed(() =>
+  Math.max(1, Math.ceil(graphListTotal.value / GRAPH_LIST_PAGE_SIZE)),
+)
+
+const graphListCategories = computed(() =>
+  GRAPH_LIST_TYPES.map(type => ({
+    type,
+    label: getTypeLabel(type),
+    color: nodeColorMap[type] || '#8c8c8c',
+    total: Number(stats.value?.pages_by_type?.[type] || 0),
+  })),
+)
+
+async function loadGraphListPage(requestedPage = 1) {
+  const page = Math.max(1, requestedPage)
+  graphListAbortController?.abort()
+  const controller = new AbortController()
+  graphListAbortController = controller
+  const seq = ++graphListRequestSeq
+  graphListLoading.value = true
+  try {
+    const keyword = graphListSearch.value.trim()
+    const res = await listWikiPages(props.knowledgeBaseId, {
+      page_type: keyword ? GRAPH_LIST_TYPES.join(',') : graphListType.value,
+      query: keyword || undefined,
+      projection: 'graph',
+      page,
+      page_size: GRAPH_LIST_PAGE_SIZE,
+      sort_by: 'title',
+      sort_order: 'asc',
+    }, { signal: controller.signal })
+    if (controller.signal.aborted || seq !== graphListRequestSeq) return
+    const body = (res as any)?.data || res as any || {}
+    graphListItems.value = Array.isArray(body.pages) ? body.pages : []
+    graphListTotal.value = Number(body.total || 0)
+    const totalPages = Math.max(1, Number(body.total_pages || Math.ceil(graphListTotal.value / GRAPH_LIST_PAGE_SIZE)))
+    graphListPage.value = Math.min(page, totalPages)
+  } catch (e) {
+    if (controller.signal.aborted || seq !== graphListRequestSeq) return
+    console.error('Failed to load graph node catalogue:', e)
+    graphListItems.value = []
+    graphListTotal.value = 0
+    graphListPage.value = 1
+  } finally {
+    if (seq === graphListRequestSeq) graphListLoading.value = false
+  }
+}
+
+function selectGraphListType(type: string) {
+  if (type === graphListType.value && graphListPage.value === 1) return
+  graphListType.value = type
+  loadGraphListPage(1)
+}
+
+watch(graphListSearch, () => {
+  if (graphListSearchTimer) clearTimeout(graphListSearchTimer)
+  graphListAbortController?.abort()
+  graphListSearchTimer = setTimeout(() => loadGraphListPage(1), 250)
+})
+
 // Graph filtering
 const graphFilterTypes = ref<Set<string>>(new Set(['summary', 'entity', 'concept', 'synthesis', 'comparison', 'index', 'log']))
 
@@ -906,9 +1006,15 @@ const graphFilterTypes = ref<Set<string>>(new Set(['summary', 'entity', 'concept
 // "back to overview" and show the truncation hint.
 const graphMode = ref<'overview' | 'ego'>('overview')
 const graphCenter = ref<string>('')
+const graphCenterHistory = ref<string[]>([])
 const GRAPH_OVERVIEW_LIMIT = 500
-const GRAPH_EGO_LIMIT = 500
+const GRAPH_EGO_LIMIT = 80
 const GRAPH_EGO_DEFAULT_DEPTH = 1
+let graphRequestAbortController: AbortController | null = null
+let graphRequestSeq = 0
+
+const graphNeighborPage = computed(() => Math.max(1, Number(graphData.value?.meta?.page || 1)))
+const graphNeighborTotalPages = computed(() => Math.max(1, Number(graphData.value?.meta?.total_pages || 1)))
 
 watch(showGlobalIssuesDrawer, async (val) => {
   if (val) {
@@ -1326,10 +1432,9 @@ const graphFrontierCount = computed(() => {
 // below is "most common → rarest"; users don't typically read past the
 // first few rows.
 const graphHelpRows = computed(() => [
-  { action: t('knowledgeEditor.wikiBrowser.helpClickAction'), desc: t('knowledgeEditor.wikiBrowser.helpClickDesc') },
-  { action: t('knowledgeEditor.wikiBrowser.helpDblClickAction'), desc: t('knowledgeEditor.wikiBrowser.helpDblClickDesc') },
-  { action: t('knowledgeEditor.wikiBrowser.helpShiftClickAction'), desc: t('knowledgeEditor.wikiBrowser.helpShiftClickDesc') },
-  { action: t('knowledgeEditor.wikiBrowser.helpHoverPlusAction'), desc: t('knowledgeEditor.wikiBrowser.helpHoverPlusDesc') },
+  { action: t('knowledgeEditor.wikiBrowser.graphHelpListAction'), desc: t('knowledgeEditor.wikiBrowser.graphHelpListDesc') },
+  { action: t('knowledgeEditor.wikiBrowser.graphHelpNeighborAction'), desc: t('knowledgeEditor.wikiBrowser.graphHelpNeighborDesc') },
+  { action: t('knowledgeEditor.wikiBrowser.graphHelpCenterAction'), desc: t('knowledgeEditor.wikiBrowser.graphHelpCenterDesc') },
   { action: t('knowledgeEditor.wikiBrowser.helpDragAction'), desc: t('knowledgeEditor.wikiBrowser.helpDragDesc') },
   { action: t('knowledgeEditor.wikiBrowser.helpPanAction'), desc: t('knowledgeEditor.wikiBrowser.helpPanDesc') },
   { action: t('knowledgeEditor.wikiBrowser.helpZoomAction'), desc: t('knowledgeEditor.wikiBrowser.helpZoomDesc') },
@@ -1346,10 +1451,14 @@ const graphStatusCard = computed((): { icon: string; title: string; primary: str
     // Subtract 1 so the count means "related nodes" (excluding the
     // center itself) — matches how users count "connections". If the
     // count is 0 the center is an isolated page.
-    const relatedCount = Math.max(0, meta.returned - 1)
+    const relatedCount = Math.max(0, Number(meta.neighbor_total ?? meta.returned - 1))
+    const relatedReturned = Math.max(0, Number(meta.neighbor_returned ?? meta.returned - 1))
     const secondaryParts: string[] = []
     if (typeLabel) secondaryParts.push(typeLabel)
-    secondaryParts.push(t('knowledgeEditor.wikiBrowser.cardRelatedNodes', { count: relatedCount }))
+    secondaryParts.push(t('knowledgeEditor.wikiBrowser.graphNeighborProgress', {
+      returned: relatedReturned,
+      total: relatedCount,
+    }))
     return {
       icon: 'focus',
       title: t('knowledgeEditor.wikiBrowser.cardEgoTitle'),
@@ -2727,6 +2836,19 @@ async function loadStats() {
     const res = await getWikiStats(props.knowledgeBaseId)
     stats.value = (res as any).data || res as any
 
+    if (props.view === 'graph' && stats.value) {
+      const currentHasPages = Number(stats.value.pages_by_type?.[graphListType.value] || 0) > 0
+      if (!currentHasPages) {
+        const firstNonEmpty = GRAPH_LIST_TYPES.find(type =>
+          Number(stats.value?.pages_by_type?.[type] || 0) > 0,
+        )
+        if (firstNonEmpty && firstNonEmpty !== graphListType.value) {
+          graphListType.value = firstNonEmpty
+          void loadGraphListPage(1)
+        }
+      }
+    }
+
     // Notify parent so it can reflect wiki status (e.g. indexing badge in the breadcrumb)
     if (stats.value) {
       emit('status-change', {
@@ -2791,49 +2913,31 @@ function graphFilterSelectsNothing(): boolean {
 }
 
 async function loadGraph() {
-  graphLoading.value = true
-  graphReady.value = false
-  graphMode.value = 'overview'
-  graphCenter.value = ''
-  if (graphFilterSelectsNothing()) {
-    // User has deselected every type — render an empty canvas without
-    // hitting the backend.
-    graphData.value = { nodes: [], edges: [], meta: { mode: 'overview', total: 0, returned: 0, truncated: false } }
-    await nextTick()
-    renderGraph()
-    graphLoading.value = false
+  if (graphListItems.value.length === 0) {
+    void loadGraphListPage(graphListPage.value)
+  }
+  const routedSlug = typeof route.query.slug === 'string' ? route.query.slug : ''
+  if (routedSlug && routedSlug !== graphCenter.value) {
+    await navigateGraphCenter(routedSlug, false)
     return
   }
-  try {
-    const res = await getWikiGraph(props.knowledgeBaseId, {
-      mode: 'overview',
-      limit: GRAPH_OVERVIEW_LIMIT,
-      types: graphFilterTypesToArray(),
-    })
-    graphData.value = (res as any).data || res as any
-    // Seed the search dropdown's empty-state with this overview snapshot
-    // so opening the select without typing shows the top-500 by link_count
-    // — matching what the old client-filter dropdown used to surface.
-    // We re-seed on every overview load so filter toggles / KB changes
-    // propagate; ego loads intentionally skip seeding so drilling into a
-    // neighborhood doesn't shrink the default dropdown to a 20-node subgraph.
-    setGraphSearchDefaultFromNodes(graphData.value?.nodes)
-    // Returning to overview clears accumulated bloom state; the next ego
-    // dive should start fresh rather than inherit an orphan generation map.
-    resetBloomGenerations(graphData.value?.nodes)
-    await nextTick()
-    renderGraph()
-    if (route.query.slug && typeof route.query.slug === 'string') {
-      graphSelectedSlug.value = null // reset first to ensure watch triggers
-      setTimeout(() => {
-        handleGraphSearchSelect(route.query.slug as string)
-      }, 300)
-    }
-  } catch (e) {
-    console.error('Failed to load graph:', e)
-  } finally {
-    graphLoading.value = false
+  if (graphCenter.value) {
+    await loadEgoGraph(graphCenter.value, GRAPH_EGO_DEFAULT_DEPTH, graphNeighborPage.value)
+    return
   }
+
+  graphRequestAbortController?.abort()
+  graphMode.value = 'overview'
+  graphData.value = {
+    nodes: [],
+    edges: [],
+    meta: { mode: 'overview', total: 0, returned: 0, truncated: false },
+  }
+  graphReady.value = false
+  graphLoading.value = false
+  graphSelectedSlug.value = null
+  graphNodes = []
+  if (graphRef.value) graphRef.value.innerHTML = ''
 }
 
 // loadEgoGraph fetches the neighborhood around a center slug and re-renders
@@ -2841,10 +2945,17 @@ async function loadGraph() {
 // so they can drill into a page on a 4万+ wiki without ever having to
 // download the full graph. Returning to the global top-N view is handled by
 // loadGraph() again.
-async function loadEgoGraph(slug: string, depth = GRAPH_EGO_DEFAULT_DEPTH) {
-  if (!slug) return
+async function loadEgoGraph(
+  slug: string,
+  depth = GRAPH_EGO_DEFAULT_DEPTH,
+  page = 1,
+): Promise<boolean> {
+  if (!slug) return false
+  graphRequestAbortController?.abort()
+  const controller = new AbortController()
+  graphRequestAbortController = controller
+  const seq = ++graphRequestSeq
   graphLoading.value = true
-  graphReady.value = false
   if (graphFilterSelectsNothing()) {
     graphData.value = { nodes: [], edges: [], meta: { mode: 'ego', total: 0, returned: 0, truncated: false, center: slug, depth } }
     graphMode.value = 'ego'
@@ -2853,7 +2964,7 @@ async function loadEgoGraph(slug: string, depth = GRAPH_EGO_DEFAULT_DEPTH) {
     await nextTick()
     renderGraph()
     graphLoading.value = false
-    return
+    return true
   }
   try {
     const res = await getWikiGraph(props.knowledgeBaseId, {
@@ -2861,8 +2972,10 @@ async function loadEgoGraph(slug: string, depth = GRAPH_EGO_DEFAULT_DEPTH) {
       center: slug,
       depth,
       limit: GRAPH_EGO_LIMIT,
+      page: Math.max(1, page),
       types: graphFilterTypesToArray(),
-    })
+    }, { signal: controller.signal })
+    if (controller.signal.aborted || seq !== graphRequestSeq) return false
     graphData.value = (res as any).data || res as any
     graphMode.value = 'ego'
     graphCenter.value = slug
@@ -2875,11 +2988,42 @@ async function loadEgoGraph(slug: string, depth = GRAPH_EGO_DEFAULT_DEPTH) {
     // After a fresh ego render, preselect the center so the highlight /
     // drawer context matches what the user just asked for.
     graphSelectedSlug.value = slug
+    return graphReady.value
   } catch (e) {
+    if (controller.signal.aborted || seq !== graphRequestSeq) return false
     console.error(`Failed to load ego graph for ${slug}:`, e)
+    return false
   } finally {
-    graphLoading.value = false
+    if (seq === graphRequestSeq) graphLoading.value = false
   }
+}
+
+async function navigateGraphCenter(slug: string, recordHistory = true) {
+  if (!slug) return
+  const nextState = navigateGraphCenterState({
+    center: graphCenter.value,
+    history: graphCenterHistory.value,
+  }, slug, recordHistory)
+  graphCenterHistory.value = nextState.history
+  graphDrawerVisible.value = false
+  await loadEgoGraph(nextState.center, GRAPH_EGO_DEFAULT_DEPTH, 1)
+}
+
+async function goBackGraphCenter() {
+  if (graphCenterHistory.value.length === 0) return
+  const nextState = popGraphCenterState({
+    center: graphCenter.value,
+    history: graphCenterHistory.value,
+  })
+  graphCenterHistory.value = nextState.history
+  graphDrawerVisible.value = false
+  await loadEgoGraph(nextState.center, GRAPH_EGO_DEFAULT_DEPTH, 1)
+}
+
+async function loadGraphNeighborPage(page: number) {
+  if (!graphCenter.value) return
+  const bounded = clampGraphPage(page, graphNeighborTotalPages.value)
+  await loadEgoGraph(graphCenter.value, GRAPH_EGO_DEFAULT_DEPTH, bounded)
 }
 
 // ─── Bloom: additive neighbor expansion ──────────────────────────────────
@@ -3370,12 +3514,6 @@ let graphPanZoomRef: {
 const graphHighlightSlug = ref<string | null>(null)
 const graphSelectedSlug = ref<string | null>(null)
 
-// Color map for node types
-const nodeColorMap: Record<string, string> = {
-  summary: '#0052d9', entity: '#2ba471', concept: '#e37318',
-  synthesis: '#0594fa', comparison: '#d54941', index: '#8c8c8c', log: '#8c8c8c',
-}
-
 // RenderGraphOpts tweaks how renderGraph initializes node positions when
 // repainting the canvas. The default (no opts) does a full layout reset —
 // every node gets a fresh circular starting position and the force
@@ -3398,6 +3536,8 @@ function renderGraph(opts: RenderGraphOpts = {}) {
   if (!container) return
   if (!data || !data.nodes?.length) {
     container.innerHTML = ''
+    graphNodes = []
+    graphReady.value = false
     return
   }
   const graph = data
@@ -3459,6 +3599,12 @@ function renderGraph(opts: RenderGraphOpts = {}) {
 
   // Build nodes
   const nodeMap = new Map<string, GNode>()
+  const centerSlug = graph.meta?.mode === 'ego' ? graph.meta.center || '' : ''
+  const neighborOrder = new Map<string, number>()
+  graph.nodes.filter(node => node.slug !== centerSlug).forEach((node, index) => {
+    neighborOrder.set(node.slug, index)
+  })
+  const neighborCount = Math.max(1, neighborOrder.size)
   graphNodes = graph.nodes.map((n, i) => {
     const prior = opts.preserveLayout ? priorCoords.get(n.slug) : undefined
     let x: number
@@ -3485,12 +3631,25 @@ function renderGraph(opts: RenderGraphOpts = {}) {
       vx = 0
       vy = 0
       pinned = false
+    } else if (centerSlug && n.slug === centerSlug) {
+      x = width / 2
+      y = height / 2
+      vx = 0
+      vy = 0
+      pinned = true
     } else {
-      // Full repaint — classic circular layout.
-      const angle = (2 * Math.PI * i) / graph.nodes.length
-      const r = Math.min(width, height) * 0.35
-      x = width / 2 + r * Math.cos(angle) + (Math.random() - 0.5) * 50
-      y = height / 2 + r * Math.sin(angle) + (Math.random() - 0.5) * 50
+      // Local graph: the selected page is fixed at the center. Neighbors
+      // are distributed across bounded concentric rings instead of squeezing
+      // as many as 80 labels onto one circle.
+      const order = neighborOrder.get(n.slug) ?? i
+      const ringCapacity = 20
+      const ring = Math.floor(order / ringCapacity)
+      const slot = order % ringCapacity
+      const nodesInRing = Math.min(ringCapacity, neighborCount - ring * ringCapacity)
+      const angle = (2 * Math.PI * slot) / Math.max(1, nodesInRing)
+      const r = Math.min(width, height) * Math.min(0.44, 0.17 + ring * 0.09)
+      x = width / 2 + r * Math.cos(angle) + (Math.random() - 0.5) * 24
+      y = height / 2 + r * Math.sin(angle) + (Math.random() - 0.5) * 24
       vx = 0
       vy = 0
       pinned = false
@@ -3606,6 +3765,11 @@ function renderGraph(opts: RenderGraphOpts = {}) {
   const nodeEls: { g: SVGGElement; circle: SVGCircleElement; text: SVGTextElement; activeRing: SVGCircleElement; node: GNode }[] = []
   for (const n of graphNodes) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    g.classList.add('graph-node')
+    g.setAttribute('data-graph-slug', n.slug)
+    g.setAttribute('role', 'button')
+    g.setAttribute('aria-label', n.title)
+    g.setAttribute('tabindex', '0')
     g.style.cursor = 'pointer'
 
     const r = nodeRadius(n)
@@ -3676,67 +3840,6 @@ function renderGraph(opts: RenderGraphOpts = {}) {
     text.textContent = n.title.length > 14 ? n.title.substring(0, 14) + '…' : n.title
     g.appendChild(text)
 
-    // Hover bloom button — the ⊕ badge floating off the node's upper-right.
-    // Invisible by default; fades in on mouseenter when bloom would
-    // actually do something (node has hidden neighbors and isn't the ego
-    // center / isn't on overview). Clicking it skips the drawer round-trip
-    // and pulls the neighbors straight onto the canvas.
-    //
-    // Stacking order note: this element has to come AFTER text so SVG's
-    // painter's algorithm draws it on top; the node-shadow filter and
-    // the drawer cover it otherwise.
-    let bloomBtn: SVGGElement | null = null
-    const bloomBtnEligible = !isEgoCenter && graph.meta?.mode === 'ego' && hiddenNeighbors > 0
-    if (bloomBtnEligible) {
-      bloomBtn = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-      bloomBtn.classList.add('node-bloom-btn')
-      bloomBtn.style.opacity = '0'
-      bloomBtn.style.transition = 'opacity 0.15s'
-      bloomBtn.style.pointerEvents = 'none' // lit up only on hover
-      bloomBtn.style.cursor = 'pointer'
-      // Position at 45° up-right of the node center, just past the
-      // expansion ring so it doesn't overlap the node glyph.
-      const btnOffset = r + 6
-      const btnX = Math.SQRT1_2 * btnOffset
-      const btnY = -Math.SQRT1_2 * btnOffset
-
-      const btnBg = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
-      btnBg.setAttribute('cx', String(btnX))
-      btnBg.setAttribute('cy', String(btnY))
-      btnBg.setAttribute('r', '8')
-      btnBg.setAttribute('fill', 'var(--td-bg-color-container, #fff)')
-      btnBg.setAttribute('stroke', 'var(--td-brand-color, #0052d9)')
-      btnBg.setAttribute('stroke-width', '1.5')
-      bloomBtn.appendChild(btnBg)
-
-      // ⊕ drawn as two short lines — cross-browser-safer than a text glyph
-      const btnCrossV = document.createElementNS('http://www.w3.org/2000/svg', 'line')
-      btnCrossV.setAttribute('x1', String(btnX))
-      btnCrossV.setAttribute('x2', String(btnX))
-      btnCrossV.setAttribute('y1', String(btnY - 4))
-      btnCrossV.setAttribute('y2', String(btnY + 4))
-      btnCrossV.setAttribute('stroke', 'var(--td-brand-color, #0052d9)')
-      btnCrossV.setAttribute('stroke-width', '1.8')
-      btnCrossV.setAttribute('stroke-linecap', 'round')
-      bloomBtn.appendChild(btnCrossV)
-
-      const btnCrossH = document.createElementNS('http://www.w3.org/2000/svg', 'line')
-      btnCrossH.setAttribute('x1', String(btnX - 4))
-      btnCrossH.setAttribute('x2', String(btnX + 4))
-      btnCrossH.setAttribute('y1', String(btnY))
-      btnCrossH.setAttribute('y2', String(btnY))
-      btnCrossH.setAttribute('stroke', 'var(--td-brand-color, #0052d9)')
-      btnCrossH.setAttribute('stroke-width', '1.8')
-      btnCrossH.setAttribute('stroke-linecap', 'round')
-      bloomBtn.appendChild(btnCrossH)
-
-      bloomBtn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        loadBloomNeighbors(n.slug)
-      })
-      g.appendChild(bloomBtn)
-    }
-
     // Hover highlight
     // We debounce the "leave" side so that quickly sliding the pointer from
     // one node to the next doesn't flash through the fully-unhighlighted state
@@ -3745,10 +3848,6 @@ function renderGraph(opts: RenderGraphOpts = {}) {
       if (graphHoverLeaveTimer) {
         clearTimeout(graphHoverLeaveTimer)
         graphHoverLeaveTimer = null
-      }
-      if (bloomBtn) {
-        bloomBtn.style.opacity = '1'
-        bloomBtn.style.pointerEvents = 'auto'
       }
       if (!graphSelectedSlug.value) {
         if (graphHighlightSlug.value === n.slug) return
@@ -3762,10 +3861,6 @@ function renderGraph(opts: RenderGraphOpts = {}) {
     })
     g.addEventListener('mouseleave', () => {
       if (graphHoverLeaveTimer) clearTimeout(graphHoverLeaveTimer)
-      if (bloomBtn) {
-        bloomBtn.style.opacity = '0'
-        bloomBtn.style.pointerEvents = 'none'
-      }
       graphHoverLeaveTimer = setTimeout(() => {
         graphHoverLeaveTimer = null
         if (!graphSelectedSlug.value) {
@@ -3778,73 +3873,42 @@ function renderGraph(opts: RenderGraphOpts = {}) {
       }, 60)
     })
 
-    // Single-click behaviour + keyboard-modifier shortcuts to skip the
-    // drawer round-trip for power-user navigation:
-    //
-    //   plain click  → select & open drawer (original behaviour)
-    //   shift+click  → bloom this node's neighbors onto the canvas
-    //   double-click → pivot to this node as the new ego center
-    //
-    // Drawer is by far the slower path (page fetch + render), so adding
-    // canvas-direct expand / bloom removes a 2-3 second round-trip from
-    // every exploration step. We still want shift+click to be
-    // discoverable, so the drawer's buttons remain — they're the
-    // keyboard-free fallback.
-    //
-    // Implementation note: we listen to click AND dblclick. The browser
-    // fires both click events of a dblclick too, but we debounce via
-    // `pendingSingleClick` — the first click sets a 220ms timer to open
-    // the drawer; dblclick arriving inside that window cancels the
-    // timer and runs expand instead. `event.detail` (click count) is
-    // less portable across synthetic events, so we track state explicitly.
-    let pendingSingleClick: ReturnType<typeof setTimeout> | null = null
+    // A related-node click is exactly the same operation as selecting that
+    // page from the catalogue: replace the canvas with its bounded one-hop
+    // neighborhood and retain the previous center in the back stack. Clicking
+    // the current center opens details instead.
+    const activateNode = () => {
+      if (n.slug === graphCenter.value) {
+        void openGraphDrawer(n.slug)
+      } else {
+        void navigateGraphCenter(n.slug)
+      }
+    }
+    let lastPointerActivationAt = 0
+    const activateFromPointer = () => {
+      lastPointerActivationAt = Date.now()
+      activateNode()
+    }
+    // Keep a semantic click fallback for browsers/assistive tooling that
+    // dispatch `click` directly without the mousedown/mouseup pair used by
+    // the drag detector. A real mouse sequence activates on mouseup below;
+    // the short guard prevents its subsequent click from navigating twice.
     g.addEventListener('click', (e) => {
       e.stopPropagation()
-
-      if (e.shiftKey) {
-        // Shift = Bloom. Skip the drawer entirely, skip selection — the
-        // user's intent is "bring in the neighbors", not "read this page".
-        // Center / isOverview cases are handled inside loadBloomNeighbors
-        // (center no-ops, overview pivots to ego).
-        if (pendingSingleClick) { clearTimeout(pendingSingleClick); pendingSingleClick = null }
-        loadBloomNeighbors(n.slug)
-        return
+      if (Date.now() - lastPointerActivationAt > 250) {
+        activateNode()
       }
-
-      if (pendingSingleClick) clearTimeout(pendingSingleClick)
-      pendingSingleClick = setTimeout(() => {
-        pendingSingleClick = null
-
-        // Select and highlight
-        graphSelectedSlug.value = n.slug
-        applyHighlight(n.slug, adjacency, nodeEls, edgeEls)
-
-        // Auto pan to center the node, shifted left for drawer
-        if (graphPanZoomRef) {
-          const container = graphRef.value
-          if (container) {
-            const width = container.clientWidth
-            const height = container.clientHeight
-            graphPanZoomRef.flyTo(
-              width / 2 - n.x * graphPanZoomRef.getScale() - 240,
-              height / 2 - n.y * graphPanZoomRef.getScale()
-            )
-          }
-        }
-
-        // Open drawer (it will handle drawer visibility and fetching content)
-        openGraphDrawer(n.slug)
-      }, 220)
     })
-
-    g.addEventListener('dblclick', (e) => {
-      e.stopPropagation()
-      if (pendingSingleClick) { clearTimeout(pendingSingleClick); pendingSingleClick = null }
-      loadEgoGraph(n.slug)
+    g.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        e.stopPropagation()
+        activateNode()
+      }
     })
 
     // Drag support
-    setupDrag(g, n, nodeMap, edgeEls, nodeEls, nodeRadius)
+    setupDrag(g, n, nodeMap, edgeEls, nodeEls, nodeRadius, activateFromPointer)
 
     nodeG.appendChild(g)
     nodeEls.push({ g, circle, text, activeRing, node: n })
@@ -3965,7 +4029,16 @@ function renderGraph(opts: RenderGraphOpts = {}) {
 
   applyGraphFilters()
 
-  graphAnimFrame = requestAnimationFrame(tick)
+  // Bounded one-hop views already have a deterministic center + multi-ring
+  // layout. Running the old force simulation here only burns CPU and makes a
+  // moving node difficult to click during the first few seconds. Keep the
+  // simulation solely for legacy overview/bloom views; ego nodes are stable
+  // and immediately interactive.
+  if (graph.meta?.mode !== 'ego') {
+    graphAnimFrame = requestAnimationFrame(tick)
+  } else {
+    graphAnimFrame = 0
+  }
   graphReady.value = true
 }
 
@@ -3994,9 +4067,11 @@ function setupDrag(
   edgeEls: { line: SVGLineElement; source: string; target: string; bidir: boolean }[],
   nodeEls: { g: SVGGElement; circle: SVGCircleElement; text: SVGTextElement; activeRing: SVGCircleElement; node: GNode }[],
   nodeRadius: (n: GNode) => number,
+  activateNode: () => void,
 ) {
   let dragging = false
   let startX = 0, startY = 0
+  let pointerStartX = 0, pointerStartY = 0
 
   function getPoint(e: MouseEvent | Touch) {
     const svg = graphSvg
@@ -4020,6 +4095,8 @@ function setupDrag(
     const p = getPoint(e)
     startX = p.x - node.x
     startY = p.y - node.y
+    pointerStartX = e.clientX
+    pointerStartY = e.clientY
     g.querySelector('circle')?.setAttribute('stroke', nodeColorMap[node.type] || '#8c8c8c')
     g.querySelector('circle')?.setAttribute('stroke-width', '3')
     window.addEventListener('mousemove', onMove)
@@ -4043,13 +4120,23 @@ function setupDrag(
     }
   }
 
-  function onEnd() {
+  function onEnd(e: MouseEvent) {
+    const wasDragging = dragging
     dragging = false
     // Keep pinned after drag so the node stays where user placed it
     g.querySelector('circle')?.setAttribute('stroke', '#fff')
     g.querySelector('circle')?.setAttribute('stroke-width', '2')
     window.removeEventListener('mousemove', onMove)
     window.removeEventListener('mouseup', onEnd)
+    // SVG group click dispatch is inconsistent across browser engines and
+    // can be swallowed by the drag listeners. Resolve tap-vs-drag from the
+    // pointer delta ourselves: a stationary mouseup activates the node,
+    // while an actual drag only repositions it.
+    if (wasDragging &&
+      Math.abs(e.clientX - pointerStartX) < 4 &&
+      Math.abs(e.clientY - pointerStartY) < 4) {
+      activateNode()
+    }
   }
 
   g.addEventListener('mousedown', onStart)
@@ -4347,53 +4434,7 @@ let graphAdjacencyRef = new Map<string, Set<string>>()
 // the target sits in the link_count ranking.
 async function handleGraphSearchSelect(value: string) {
   if (!value) return
-
-  let node = graphNodes.find(n => n.slug === value)
-  if (!node) {
-    // Target is outside the current subgraph — pivot to an ego view.
-    // loadEgoGraph repopulates graphNodes as a side effect.
-    await loadEgoGraph(value)
-    node = graphNodes.find(n => n.slug === value)
-    if (!node) {
-      // The slug truly does not exist in the KB (e.g. stale URL, deleted
-      // page). loadEgoGraph will have surfaced the backend error in the
-      // console; still open the drawer so the user sees the not-found
-      // page body rather than a silent no-op.
-      openGraphDrawer(value)
-      setTimeout(() => { graphSearchValue.value = '' }, 300)
-      return
-    }
-  }
-
-  // Under server-side filtering, every node currently in graphNodes has
-  // already passed the active type filter — there is no longer a path
-  // where we need to re-enable a filter to make the target visible.
-
-  if (graphPanZoomRef) {
-    const container = graphRef.value
-    if (container) {
-      const width = container.clientWidth
-      const height = container.clientHeight
-      // Center node while maintaining current scale, shifted left by 240px to account for the 480px drawer
-      const currentScale = graphPanZoomRef.getScale()
-      graphPanZoomRef.flyTo(
-        width / 2 - node.x * currentScale - 240,
-        height / 2 - node.y * currentScale
-      )
-    }
-  }
-
-  // Trigger highlight
-  graphSelectedSlug.value = value
-  graphHighlightSlug.value = value
-  if (graphNodeElsRef.length > 0) {
-    applyHighlight(value, graphAdjacencyRef, graphNodeElsRef, graphEdgeElsRef)
-  }
-
-  // Open drawer automatically when searching
-  openGraphDrawer(value)
-
-  // Clear search input after selection to be ready for next search
+  await navigateGraphCenter(value)
   setTimeout(() => { graphSearchValue.value = '' }, 300)
 }
 
@@ -4474,6 +4515,16 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  graphListAbortController?.abort()
+  graphRequestAbortController?.abort()
+  if (graphListSearchTimer) {
+    clearTimeout(graphListSearchTimer)
+    graphListSearchTimer = null
+  }
+  if (graphSearchDebounce) {
+    clearTimeout(graphSearchDebounce)
+    graphSearchDebounce = null
+  }
   if (statsTimer) {
     clearInterval(statsTimer)
   }
@@ -5544,6 +5595,207 @@ onUnmounted(() => {
   overflow: hidden;
   width: 100%;
   height: 100%;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.wiki-graph-node-panel {
+  width: 300px;
+  min-width: 260px;
+  max-width: 340px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex-shrink: 0;
+  border-right: 1px solid var(--td-component-stroke);
+  background: var(--td-bg-color-container);
+  z-index: 40;
+}
+
+.wiki-graph-node-panel-header {
+  padding: 14px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wiki-graph-node-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--td-text-color-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.wiki-graph-node-total,
+.wiki-graph-category-count {
+  color: var(--td-text-color-placeholder);
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.wiki-graph-category-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--td-component-stroke);
+}
+
+.wiki-graph-category-tab {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--td-text-color-secondary);
+  cursor: pointer;
+  text-align: left;
+
+  &:hover {
+    background: var(--td-bg-color-container-hover);
+    color: var(--td-text-color-primary);
+  }
+
+  &.active {
+    background: var(--td-brand-color-light);
+    color: var(--td-brand-color);
+  }
+}
+
+.wiki-graph-category-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.wiki-graph-node-list {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.wiki-graph-node-scroller {
+  width: 100%;
+  height: 100%;
+}
+
+.wiki-graph-node-item {
+  width: calc(100% - 16px);
+  height: 48px;
+  margin: 4px 8px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--td-text-color-secondary);
+  cursor: pointer;
+  text-align: left;
+
+  &:hover {
+    background: var(--td-bg-color-container-hover);
+  }
+
+  &.active {
+    background: var(--td-brand-color-light);
+    color: var(--td-brand-color);
+  }
+}
+
+.wiki-graph-node-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wiki-graph-node-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.wiki-graph-node-item-type {
+  color: var(--td-text-color-placeholder);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.wiki-graph-node-list-empty {
+  width: 100%;
+  align-self: center;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--td-text-color-placeholder);
+  font-size: 12px;
+}
+
+.wiki-graph-node-pager,
+.wiki-graph-neighbor-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--td-text-color-placeholder);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wiki-graph-node-pager {
+  min-height: 44px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--td-component-stroke);
+}
+
+.wiki-graph-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+
+.wiki-graph-toolbar {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+
+  > * {
+    pointer-events: auto;
+  }
+}
+
+.wiki-graph-toolbar-spacer {
+  flex: 1;
 }
 
 .wiki-graph-empty {
@@ -5679,7 +5931,7 @@ onUnmounted(() => {
 
 .wiki-graph-legend {
   position: absolute;
-  top: 16px;
+  top: 60px;
   right: 16px;
   background: var(--td-bg-color-container);
   border: 1px solid var(--td-component-stroke);
@@ -5691,7 +5943,17 @@ onUnmounted(() => {
   gap: 12px;
   z-index: 10;
   opacity: 0.95;
+  // The legend overlaps the upper-right part of the canvas. Descriptive
+  // labels/status must not swallow clicks meant for graph nodes underneath;
+  // explicit controls opt back in below.
+  pointer-events: none;
   transition: right 0.3s cubic-bezier(0.645, 0.045, 0.355, 1);
+}
+
+.wiki-graph-legend .legend-action,
+.wiki-graph-legend .wiki-graph-neighbor-pager,
+.wiki-graph-legend .wiki-graph-neighbor-pager :deep(button) {
+  pointer-events: auto;
 }
 
 .wiki-graph-legend.legend-shifted {
@@ -5823,6 +6085,12 @@ onUnmounted(() => {
     line-height: 14px;
     color: var(--td-text-color-secondary);
   }
+}
+
+.wiki-graph-neighbor-pager {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--td-component-stroke);
 }
 
 .wiki-drawer-neighbor-hint {

@@ -40,6 +40,7 @@ const (
 	defaultUniqueTTL   = 15 * time.Minute
 	defaultTaskTimeout = 2 * time.Hour
 	defaultMaxRetry    = 10
+	defaultMapLimit    = 1000
 )
 
 // Config controls the recovery loop. The defaults intentionally mirror the
@@ -228,6 +229,28 @@ type pendingScope struct {
 	ScopeID  string `gorm:"column:scope_id"`
 }
 
+type pendingMapRow struct {
+	ID       int64  `gorm:"column:id"`
+	TenantID uint64 `gorm:"column:tenant_id"`
+	ScopeID  string `gorm:"column:scope_id"`
+	DedupKey string `gorm:"column:dedup_key"`
+	Payload  []byte `gorm:"column:payload"`
+}
+
+type pendingMapDocument struct {
+	KnowledgeID          string `json:"knowledge_id,omitempty"`
+	ProcessingGeneration string `json:"processing_generation,omitempty"`
+}
+
+type mapTriggerPayload struct {
+	TenantID             uint64 `json:"tenant_id"`
+	KnowledgeBaseID      string `json:"knowledge_base_id"`
+	TaskMode             string `json:"task_mode"`
+	MapDedupKey          string `json:"map_dedup_key"`
+	KnowledgeID          string `json:"knowledge_id,omitempty"`
+	ProcessingGeneration string `json:"processing_generation,omitempty"`
+}
+
 // triggerPayload deliberately contains only stable queue identity. Request
 // tracing and locale belong to individual task_pending_ops rows; including
 // either here would defeat asynq.Unique coalescing during bulk uploads.
@@ -310,14 +333,127 @@ func (r *Recovery) RecoverNow(ctx context.Context) error {
 			recovered++
 		}
 	}
+	mapRecovered, mapErrors := r.recoverPendingMaps(ctx)
+	enqueueErrors = append(enqueueErrors, mapErrors...)
 
 	if recovered > 0 {
 		logger.Infof(ctx, "[wiki queue recovery] ensured triggers for %d/%d pending knowledge bases", recovered, len(scopes))
+	}
+	if mapRecovered > 0 {
+		logger.Infof(ctx, "[wiki queue recovery] ensured %d distributed Wiki Map wake-ups", mapRecovered)
 	}
 	if active > 0 {
 		logger.Debugf(ctx, "[wiki queue recovery] skipped %d active knowledge-base workers", active)
 	}
 	return errors.Join(enqueueErrors...)
+}
+
+// recoverPendingMaps republishes document-generation wake-ups whose durable
+// Map output is not ready yet. Multiple replicas may scan the same rows:
+// asynq.Unique coalesces identical payloads and the Map handler owns a second,
+// renewable per-document lease for correctness after uniqueness expiry.
+func (r *Recovery) recoverPendingMaps(ctx context.Context) (int, []error) {
+	var rows []pendingMapRow
+	err := r.db.WithContext(ctx).
+		Table("task_pending_ops").
+		Select("id, tenant_id, scope_id, dedup_key, payload").
+		Where(
+			"task_type = ? AND scope = ? AND op = ? AND map_ready_at IS NULL",
+			types.TypeWikiIngest,
+			wikiTaskScope,
+			"ingest",
+		).
+		Order("id ASC").
+		Limit(defaultMapLimit).
+		Scan(&rows).Error
+	if err != nil {
+		return 0, []error{fmt.Errorf("wiki queue recovery: list pending distributed Maps: %w", err)}
+	}
+
+	recovered := 0
+	var errs []error
+	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("wiki queue recovery: Map scan canceled: %w", err))
+			break
+		}
+		var document pendingMapDocument
+		if err := json.Unmarshal(row.Payload, &document); err != nil {
+			// Still publish the exact durable key. The worker will account the
+			// malformed row against its bounded per-op retry/dead-letter budget
+			// instead of letting it become an invisible queue head.
+			document = pendingMapDocument{}
+		}
+		payload, err := json.Marshal(mapTriggerPayload{
+			TenantID:             row.TenantID,
+			KnowledgeBaseID:      row.ScopeID,
+			TaskMode:             "map",
+			MapDedupKey:          row.DedupKey,
+			KnowledgeID:          document.KnowledgeID,
+			ProcessingGeneration: document.ProcessingGeneration,
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("wiki queue recovery: marshal Map row %d: %w", row.ID, err))
+			continue
+		}
+		published, err := r.enqueueMapIfActive(ctx, row, payload)
+		if err == nil && published {
+			recovered++
+			continue
+		}
+		if err == nil {
+			continue
+		}
+		errs = append(errs, fmt.Errorf(
+			"wiki queue recovery: enqueue Map row %d tenant=%d kb=%q: %w",
+			row.ID, row.TenantID, row.ScopeID, err,
+		))
+	}
+	return recovered, errs
+}
+
+func (r *Recovery) enqueueMapIfActive(
+	ctx context.Context,
+	row pendingMapRow,
+	payload []byte,
+) (bool, error) {
+	published := false
+	err := kbwritefence.WithActive(ctx, r.db, row.TenantID, row.ScopeID, func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Table("task_pending_ops").
+			Where(
+				"id = ? AND tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ? AND map_ready_at IS NULL",
+				row.ID,
+				row.TenantID,
+				types.TypeWikiIngest,
+				wikiTaskScope,
+				row.ScopeID,
+				"ingest",
+			).
+			Count(&count).Error; err != nil {
+			return fmt.Errorf("recheck distributed Map row: %w", err)
+		}
+		if count == 0 {
+			return nil
+		}
+		_, err := r.enqueuer.Enqueue(
+			asynq.NewTask(types.TypeWikiIngest, payload),
+			asynq.Queue(types.QueueWikiMap),
+			asynq.MaxRetry(r.config.MaxRetry),
+			asynq.Timeout(r.config.TaskTimeout),
+			asynq.ProcessIn(r.config.ProcessDelay),
+			asynq.Unique(30*time.Minute),
+		)
+		if err != nil && !errors.Is(err, asynq.ErrDuplicateTask) {
+			return err
+		}
+		published = true
+		return nil
+	})
+	if errors.Is(err, kbwritefence.ErrKnowledgeBaseUnavailable) {
+		return false, nil
+	}
+	return published, err
 }
 
 // enqueueTriggerIfActive closes the scan-to-publication race with whole-KB

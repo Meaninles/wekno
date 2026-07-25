@@ -220,6 +220,7 @@ export function listKnowledgeFiles(
     keyword?: string;
     file_type?: string;
     parse_status?: string;
+    workflow_status?: string;
     source?: string;
     start_time?: string;
     end_time?: string;
@@ -232,6 +233,7 @@ export function listKnowledgeFiles(
   if (params.keyword) query.append('keyword', params.keyword);
   if (params.file_type) query.append('file_type', params.file_type);
   if (params.parse_status) query.append('parse_status', params.parse_status);
+  if (params.workflow_status) query.append('workflow_status', params.workflow_status);
   if (params.source) query.append('source', params.source);
   if (params.start_time) query.append('start_time', params.start_time);
   if (params.end_time) query.append('end_time', params.end_time);
@@ -279,8 +281,12 @@ export function downKnowledgeDetails(id: string) {
   return getDown(`/api/v1/knowledge/${id}/download`);
 }
 
-export function previewKnowledgeFile(id: string) {
-  return getDown(`/api/v1/knowledge/${id}/preview`);
+export function previewKnowledgeFile(id: string, config: any = {}) {
+  return getDown(`/api/v1/knowledge/${id}/preview`, config);
+}
+
+export function getKnowledgePreviewPolicy(id: string, config: any = {}) {
+  return get(`/api/v1/knowledge/${id}/preview-policy`, config);
 }
 
 /** @param idsQueryString - query string with ids (e.g. ids=xxx&ids=yyy) */

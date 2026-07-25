@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +53,9 @@ CREATE TABLE IF NOT EXISTS knowledge_processing_spans (
     updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (knowledge_id, attempt, span_id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kpspan_one_root_per_attempt
+    ON knowledge_processing_spans(knowledge_id, attempt)
+    WHERE kind = 'root';
 `
 
 func setupSpanTrackerTest(t *testing.T) (SpanTracker, *gorm.DB) {
@@ -62,6 +69,45 @@ func setupSpanTrackerTest(t *testing.T) (SpanTracker, *gorm.DB) {
 	// table just to validate span behaviour.
 	repo := repository.NewKnowledgeSpanRepository(db)
 	return NewSpanTracker(repo, nil), db
+}
+
+func TestSpanTrackerPersistsExecutorIdentityForStagesAndSubspans(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := pipelineobs.WithExecution(
+		context.Background(),
+		"worker-cluster-a",
+		"boot-a",
+		"document:process",
+	)
+	root, attempt, err := tracker.OpenAttempt(ctx, "kid-executor", "trace-executor")
+	require.NoError(t, err)
+	stage := tracker.BeginStage(ctx, "kid-executor", attempt, types.StageEmbedding, nil)
+	require.NotNil(t, stage)
+
+	derivedCtx := pipelineobs.WithExecution(
+		context.Background(),
+		"worker-cluster-b",
+		"boot-b",
+		"question:generation",
+	)
+	child := tracker.BeginSubSpan(
+		derivedCtx,
+		stage,
+		"postprocess.questions.batch[0]",
+		types.SpanKindGeneration,
+		nil,
+	)
+	require.NotNil(t, child)
+
+	var rows []types.KnowledgeProcessingSpan
+	require.NoError(t, db.Order("id ASC").Find(&rows).Error)
+	require.Len(t, rows, 3)
+	require.Equal(t, root.SpanID, rows[0].SpanID)
+	require.Equal(t, "worker-cluster-a", rows[0].Metadata[pipelineobs.ExecutorInstanceIDMetadataKey])
+	require.Equal(t, "boot-a", rows[1].Metadata[pipelineobs.ExecutorBootIDMetadataKey])
+	require.Equal(t, "document:process", rows[1].Metadata[pipelineobs.ExecutorTaskTypeMetadataKey])
+	require.Equal(t, "worker-cluster-b", rows[2].Metadata[pipelineobs.ExecutorInstanceIDMetadataKey])
+	require.Equal(t, "question:generation", rows[2].Metadata[pipelineobs.ExecutorTaskTypeMetadataKey])
 }
 
 // TestSpanTracker_OpenAttempt_AllocatesFreshNumbers covers the contract
@@ -90,6 +136,136 @@ func TestSpanTracker_OpenAttempt_AllocatesFreshNumbers(t *testing.T) {
 		Where("knowledge_id = ? AND kind = 'root'", "kid").
 		Count(&count).Error)
 	assert.Equal(t, int64(2), count, "previous attempt's root must remain after reparse")
+
+	var previous types.KnowledgeProcessingSpan
+	require.NoError(t, db.Where(
+		"knowledge_id = ? AND attempt = ? AND kind = ?", "kid", 1, types.SpanKindRoot,
+	).Take(&previous).Error)
+	assert.Equal(t, types.SpanStatusCancelled, previous.Status,
+		"a newer attempt must terminalize a crash-orphaned previous root")
+	assert.Equal(t, "SUPERSEDED_ATTEMPT", previous.ErrorCode)
+}
+
+func TestSpanTrackerOpenAttemptSupersedesEveryOlderOpenAttempt(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// Simulate legacy history in which attempt 1 crashed and remained open,
+	// while two later attempts nevertheless reached terminal states. Closing
+	// only max(attempt)-1 would never touch the older orphan.
+	for _, row := range []*types.KnowledgeProcessingSpan{
+		{
+			KnowledgeID: "kid-old-orphan", Attempt: 1, SpanID: "root-1",
+			Name: "knowledge_processing", Kind: types.SpanKindRoot,
+			Status: types.SpanStatusRunning, StartedAt: &now,
+		},
+		{
+			KnowledgeID: "kid-old-orphan", Attempt: 1, SpanID: "child-1",
+			ParentSpanID: "root-1", Name: types.StageEmbedding,
+			Kind: types.SpanKindStage, Status: types.SpanStatusRunning, StartedAt: &now,
+		},
+		{
+			KnowledgeID: "kid-old-orphan", Attempt: 2, SpanID: "root-2",
+			Name: "knowledge_processing", Kind: types.SpanKindRoot,
+			Status: types.SpanStatusDone, StartedAt: &now, FinishedAt: &now,
+		},
+		{
+			KnowledgeID: "kid-old-orphan", Attempt: 3, SpanID: "root-3",
+			Name: "knowledge_processing", Kind: types.SpanKindRoot,
+			Status: types.SpanStatusFailed, StartedAt: &now, FinishedAt: &now,
+		},
+	} {
+		require.NoError(t, db.Create(row).Error)
+	}
+
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-old-orphan", "trace-4")
+	require.NoError(t, err)
+	require.Equal(t, 4, attempt)
+
+	var rows []types.KnowledgeProcessingSpan
+	require.NoError(t, db.
+		Where("knowledge_id = ?", "kid-old-orphan").
+		Order("attempt ASC, id ASC").
+		Find(&rows).Error)
+	require.Len(t, rows, 5)
+
+	byID := make(map[string]types.KnowledgeProcessingSpan, len(rows))
+	for _, row := range rows {
+		byID[row.SpanID] = row
+	}
+	assert.Equal(t, types.SpanStatusCancelled, byID["root-1"].Status)
+	assert.Equal(t, types.SpanStatusCancelled, byID["child-1"].Status)
+	assert.Equal(t, "SUPERSEDED_ATTEMPT", byID["root-1"].ErrorCode)
+	assert.NotNil(t, byID["root-1"].FinishedAt)
+	assert.Equal(t, types.SpanStatusDone, byID["root-2"].Status,
+		"terminal history must remain immutable")
+	assert.Equal(t, types.SpanStatusFailed, byID["root-3"].Status,
+		"terminal history must remain immutable")
+
+	var liveRoots int64
+	require.NoError(t, db.Model(&types.KnowledgeProcessingSpan{}).
+		Where("knowledge_id = ? AND kind = ? AND status = ?",
+			"kid-old-orphan", types.SpanKindRoot, types.SpanStatusRunning).
+		Count(&liveRoots).Error)
+	assert.Equal(t, int64(1), liveRoots)
+}
+
+func TestSpanTrackerConcurrentOpenAttemptAllocatesUniqueRoots(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	const callers = 24
+
+	var wg sync.WaitGroup
+	attempts := make(chan int, callers)
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, attempt, err := tracker.OpenAttempt(
+				context.Background(),
+				"kid-concurrent-open",
+				"",
+			)
+			if err != nil {
+				errs <- err
+				return
+			}
+			attempts <- attempt
+		}()
+	}
+	wg.Wait()
+	close(attempts)
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	gotAttempts := make([]int, 0, callers)
+	for attempt := range attempts {
+		gotAttempts = append(gotAttempts, attempt)
+	}
+	sort.Ints(gotAttempts)
+	require.Len(t, gotAttempts, callers)
+	for i, attempt := range gotAttempts {
+		assert.Equal(t, i+1, attempt)
+	}
+
+	var roots []types.KnowledgeProcessingSpan
+	require.NoError(t, db.
+		Where("knowledge_id = ? AND kind = ?", "kid-concurrent-open", types.SpanKindRoot).
+		Order("attempt ASC").
+		Find(&roots).Error)
+	require.Len(t, roots, callers)
+	for i, root := range roots {
+		assert.Equal(t, i+1, root.Attempt)
+		if i == len(roots)-1 {
+			assert.Equal(t, types.SpanStatusRunning, root.Status)
+			continue
+		}
+		assert.Equal(t, types.SpanStatusCancelled, root.Status)
+		assert.Equal(t, "SUPERSEDED_ATTEMPT", root.ErrorCode)
+	}
 }
 
 // TestSpanTracker_FailSpan_CascadesDownstream verifies that failing a

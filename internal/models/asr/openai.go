@@ -19,6 +19,12 @@ const (
 	asrDefaultTimeout = 300 * time.Second // audio transcription can be slow
 )
 
+func newASRHTTPClient(timeout time.Duration) *http.Client {
+	httpConfig := secutils.DefaultSSRFSafeHTTPClientConfig()
+	httpConfig.Timeout = timeout
+	return secutils.NewSSRFSafeHTTPClient(httpConfig)
+}
+
 // OpenAIASR implements ASR via an OpenAI-compatible audio transcriptions API.
 type OpenAIASR struct {
 	modelName string
@@ -35,7 +41,7 @@ func NewOpenAIASR(config *Config) (*OpenAIASR, error) {
 	if config.BaseURL != "" {
 		apiCfg.BaseURL = config.BaseURL
 	}
-	httpClient := &http.Client{Timeout: asrDefaultTimeout}
+	httpClient := newASRHTTPClient(asrDefaultTimeout)
 
 	// 注入用户自定义 HTTP header（类似 OpenAI Python SDK 的 extra_headers）
 	if len(config.CustomHeaders) > 0 {

@@ -83,6 +83,20 @@ func TestStringArrayValueScan(t *testing.T) {
 	if len(restored) != 3 || restored[0] != "a" || restored[1] != "b" || restored[2] != "c" {
 		t.Errorf("StringArray round-trip failed: got %v", restored)
 	}
+
+	var restoredFromSQLiteText StringArray
+	if err := restoredFromSQLiteText.Scan(string(b)); err != nil {
+		t.Fatalf("StringArray.Scan(string) error: %v", err)
+	}
+	if len(restoredFromSQLiteText) != 3 ||
+		restoredFromSQLiteText[0] != "a" ||
+		restoredFromSQLiteText[1] != "b" ||
+		restoredFromSQLiteText[2] != "c" {
+		t.Errorf(
+			"StringArray SQLite TEXT round-trip failed: got %v",
+			restoredFromSQLiteText,
+		)
+	}
 }
 
 func TestStringArrayEmpty(t *testing.T) {

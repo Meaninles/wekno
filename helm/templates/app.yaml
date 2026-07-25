@@ -13,7 +13,9 @@ metadata:
   labels:
     {{- include "weknora.componentLabels" (dict "component" "app" "context" .) | nindent 4 }}
 spec:
+  {{- if not .Values.app.autoscaling.enabled }}
   replicas: {{ .Values.app.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "app" "context" .) | nindent 6 }}
@@ -92,9 +94,9 @@ spec:
             - name: DB_DRIVER
               value: "postgres"
             - name: DB_HOST
-              value: "postgres"
+              value: {{ .Values.app.connections.database.host | quote }}
             - name: DB_PORT
-              value: "5432"
+              value: {{ .Values.app.connections.database.port | quote }}
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
@@ -110,9 +112,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "weknora.secretName" . }}
                   key: DB_NAME
+            - name: DB_SSLMODE
+              value: {{ .Values.app.connections.database.ssl.mode | quote }}
+            - name: DB_SSLROOTCERT
+              value: {{ .Values.app.connections.database.ssl.rootCertFile | quote }}
+            - name: DB_SSLCERT
+              value: {{ .Values.app.connections.database.ssl.certFile | quote }}
+            - name: DB_SSLKEY
+              value: {{ .Values.app.connections.database.ssl.keyFile | quote }}
             # Redis configuration
             - name: REDIS_ADDR
-              value: "redis:6379"
+              value: {{ .Values.app.connections.redis.address | quote }}
             - name: REDIS_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -125,9 +135,21 @@ spec:
                   name: {{ include "weknora.secretName" . }}
                   key: REDIS_PASSWORD
             - name: REDIS_DB
-              value: "0"
+              value: {{ .Values.app.connections.redis.db | quote }}
             - name: REDIS_PREFIX
-              value: "stream:"
+              value: {{ .Values.app.connections.redis.prefix | quote }}
+            - name: REDIS_TLS_ENABLED
+              value: {{ .Values.app.connections.redis.tls.enabled | quote }}
+            - name: REDIS_TLS_CA_FILE
+              value: {{ .Values.app.connections.redis.tls.caFile | quote }}
+            - name: REDIS_TLS_CERT_FILE
+              value: {{ .Values.app.connections.redis.tls.certFile | quote }}
+            - name: REDIS_TLS_KEY_FILE
+              value: {{ .Values.app.connections.redis.tls.keyFile | quote }}
+            - name: REDIS_TLS_SERVER_NAME
+              value: {{ .Values.app.connections.redis.tls.serverName | quote }}
+            - name: REDIS_TLS_INSECURE_SKIP_VERIFY
+              value: {{ .Values.app.connections.redis.tls.insecureSkipVerify | quote }}
             - name: STREAM_MANAGER_TYPE
               value: {{ .Values.app.env.STREAM_MANAGER_TYPE | quote }}
             # Security
@@ -155,18 +177,30 @@ spec:
               value: {{ .Values.app.env.LOCAL_STORAGE_BASE_DIR | quote }}
             # Document reader
             - name: DOCREADER_ADDR
-              value: "docreader:50051"
+              value: {{ .Values.app.connections.docreader.address | quote }}
             # Processing
             - name: AUTO_RECOVER_DIRTY
               value: {{ .Values.app.env.AUTO_RECOVER_DIRTY | quote }}
             - name: CONCURRENCY_POOL_SIZE
               value: {{ .Values.app.env.CONCURRENCY_POOL_SIZE | quote }}
+            - name: WEKNORA_ASYNQ_CONCURRENCY
+              value: {{ .Values.app.env.WEKNORA_ASYNQ_CONCURRENCY | quote }}
+            - name: CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS
+              value: {{ .Values.app.env.CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS | quote }}
+            - name: CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS
+              value: {{ .Values.app.env.CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS | quote }}
+            - name: WEKNORA_WIKI_MAP_TASK_CONCURRENCY
+              value: {{ .Values.app.env.WEKNORA_WIKI_MAP_TASK_CONCURRENCY | quote }}
             - name: ENABLE_GRAPH_RAG
               value: {{ .Values.app.env.ENABLE_GRAPH_RAG | quote }}
-            {{- if .Values.neo4j.enabled }}
+            - name: NEO4J_ENABLE
+              value: {{ ternary "true" "false" (or .Values.neo4j.enabled (eq (lower (toString .Values.app.env.ENABLE_GRAPH_RAG)) "true")) | quote }}
+            - name: WEKNORA_METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | quote }}
+            {{- if or .Values.neo4j.enabled (eq (lower (toString .Values.app.env.ENABLE_GRAPH_RAG)) "true") }}
             # Neo4j configuration (for GraphRAG)
             - name: NEO4J_URI
-              value: "bolt://neo4j:7687"
+              value: {{ .Values.app.connections.neo4j.uri | quote }}
             - name: NEO4J_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -185,15 +219,24 @@ spec:
           volumeMounts:
             - name: data-files
               mountPath: /data/files
+            - name: scratch
+              mountPath: /tmp
             {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
             - name: document-queue-kubernetes-api
               mountPath: /var/run/secrets/weknora-document-queue-kubernetes
               readOnly: true
             {{- end }}
+            {{- with .Values.app.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.app.resources | nindent 12 }}
           {{- with .Values.app.livenessProbe }}
           livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.app.startupProbe }}
+          startupProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.app.readinessProbe }}
@@ -206,8 +249,16 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.dataFiles.persistence.existingClaim | default (printf "%s-data-files" (include "weknora.fullname" .)) }}
           {{- else }}
-          emptyDir: {}
+          emptyDir:
+            {{- with .Values.dataFiles.emptyDir.sizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
           {{- end }}
+        - name: scratch
+          emptyDir:
+            {{- with .Values.app.scratch.sizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
         {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
         - name: document-queue-kubernetes-api
           projected:
@@ -221,6 +272,9 @@ spec:
                   items:
                     - key: ca.crt
                       path: ca.crt
+        {{- end }}
+        {{- with .Values.app.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- with .Values.app.nodeSelector }}
       nodeSelector:
@@ -252,6 +306,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "weknora.componentLabels" (dict "component" "app" "context" .) | nindent 4 }}
+  {{- with .Values.app.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.app.service.type }}
   selector:

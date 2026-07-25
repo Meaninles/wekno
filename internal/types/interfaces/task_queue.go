@@ -9,9 +9,9 @@ import (
 // TaskPendingOpsRepository persists rows for the generic task pending
 // queue (`task_pending_ops`). The queue is the durable replacement for
 // the Redis-list-backed wiki:pending:<kbID> queue. It is intentionally
-// stateless about consumer semantics: the (TaskType, Scope, ScopeID)
-// tuple is the only routing primitive the repository understands;
-// deduplication, batching, and retry policy live in the consumer.
+// stateless about most consumer semantics: the (TaskType, Scope, ScopeID)
+// tuple is the routing primitive. Services may additionally define partial
+// unique indexes for replay-safe durable intents (Wiki ingest is one).
 //
 // Concurrency model in this revision: PeekBatch does NOT take row locks.
 // Wiki ingest uses Redis/Lite for liveness serialization and a monotonically

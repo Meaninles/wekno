@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentpreview"
 	"github.com/Tencent/WeKnora/internal/custom/modules/fileguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
@@ -114,6 +115,16 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		return nil, types.NewStorageQuotaExceededError()
 	}
 
+	// Persist the upload-time structural preview admission result. The
+	// document-preview package owns the policy; this native create path only
+	// records its registration output alongside caller metadata.
+	metadata = documentpreview.AnnotateUploadMetadata(
+		metadata,
+		fileName,
+		guardReport.IsHeavy(),
+		guardReport.NeedsSplit(),
+	)
+
 	// Convert metadata to JSON format if provided
 	var metadataJSON types.JSON
 	if metadata != nil {
@@ -135,6 +146,9 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	eff := ResolveProcessConfig(kb, processOverrides)
 	if enableMultimodel != nil && (processOverrides == nil || processOverrides.EnableMultimodel == nil) {
 		eff.EnableMultimodel = *enableMultimodel
+	}
+	if eff.EnableMultimodel && !eff.VLMConfig.IsEnabled() {
+		return nil, werrors.NewBadRequestError("开启多模态处理需要设置VLM模型")
 	}
 
 	if processOverrides != nil {
@@ -1265,6 +1279,9 @@ func manualKnowledgeUpdateValues(knowledge *types.Knowledge) map[string]interfac
 		"processed_at":           knowledge.ProcessedAt,
 		"error_message":          knowledge.ErrorMessage,
 		"pending_subtasks_count": knowledge.PendingSubtasksCount,
+		"enrichment_status":      knowledge.EnrichmentStatus,
+		"wiki_status":            knowledge.WikiStatus,
+		"wiki_error_message":     knowledge.WikiErrorMessage,
 		"processing_generation":  knowledge.ProcessingGeneration,
 		"processing_owner":       knowledge.ProcessingOwner,
 		"processing_workflow_id": knowledge.ProcessingWorkflowID,
@@ -1338,7 +1355,12 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	eff := ResolveProcessConfig(kb, processOverrides)
 
 	// Manual content is markdown - chunk directly with Go chunker
-	chunkCfg := buildSplitterConfigFromChunking(eff.ChunkingConfig)
+	chunkCfg := s.applyEmbeddingTokenBudget(
+		ctx,
+		kb,
+		knowledge.Title,
+		buildSplitterConfigFromChunking(eff.ChunkingConfig),
+	)
 
 	var parsed []types.ParsedChunk
 	opts := ProcessChunksOptions{

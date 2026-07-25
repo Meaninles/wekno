@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -87,7 +88,7 @@ func NewAliyunReranker(config *RerankerConfig) (*AliyunReranker, error) {
 		modelID:   config.ModelID,
 		apiKey:    apiKey,
 		baseURL:   baseURL,
-		client:    &http.Client{},
+		client:    newRerankHTTPClient(60 * time.Second),
 	}, nil
 }
 

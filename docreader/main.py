@@ -30,6 +30,10 @@ from docreader.proto.docreader_pb2 import (
 )
 from docreader.utils.request import init_logging_request_id, request_id_context
 from weknora_document_splitter import split_rpc
+from weknora_document_splitter.image_normalizer import (
+    normalize_image_for_transport,
+    normalize_images_for_transport,
+)
 
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
@@ -76,25 +80,35 @@ def _resolve_images(
     if not images:
         return "", []
 
-    mime_map = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-    }
-
-    refs = []
+    decoded = []
     for ref_path, b64data in images.items():
         try:
             img_bytes = base64.b64decode(b64data)
         except Exception:
             img_bytes = b64data.encode("utf-8") if isinstance(b64data, str) else b64data
 
-        fname = os.path.basename(ref_path) or f"{uuid.uuid4().hex}.png"
-        ext = os.path.splitext(fname)[1].lower()
-        mime = mime_map.get(ext, "application/octet-stream")
+        decoded.append(
+            (
+                ref_path,
+                os.path.basename(ref_path) or f"{uuid.uuid4().hex}.png",
+                img_bytes,
+            )
+        )
+
+    normalized = normalize_images_for_transport(
+        [(fname, img_bytes) for _, fname, img_bytes in decoded]
+    )
+    refs = []
+    for (ref_path, _, _), (fname, mime, img_bytes, converted) in zip(
+        decoded, normalized
+    ):
+        if converted:
+            logger.info(
+                "Rasterized Office vector image %s to %s (%d bytes)",
+                ref_path,
+                fname,
+                len(img_bytes),
+            )
 
         refs.append(
             ImageRef(
@@ -108,22 +122,6 @@ def _resolve_images(
     logger.info("Resolved %d images (mode=inline)", len(refs))
     return "", refs
 
-
-def _mime_for_ref(ref_path: str) -> tuple[str, str]:
-    """Return (filename, mime_type) for an image reference path."""
-    mime_map = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-    }
-    fname = os.path.basename(ref_path) or f"{uuid.uuid4().hex}.png"
-    ext = os.path.splitext(fname)[1].lower()
-    return fname, mime_map.get(ext, "application/octet-stream")
-
-
 def _iter_image_refs(images: dict):
     """Yield ImageRef one at a time, freeing each source entry as we go.
 
@@ -133,14 +131,68 @@ def _iter_image_refs(images: dict):
     """
     import base64
 
-    for ref_path in list(images.keys()):
+    original_paths = list(images.keys())
+    # Office parsers expose EMF/WMF extensions accurately. Decode and
+    # normalize only those vectors as a batch; raster pages still stream one
+    # at a time so a large scanned PDF never duplicates every decoded image in
+    # memory.
+    office_paths = [
+        ref_path
+        for ref_path in original_paths
+        if os.path.splitext(ref_path)[1].lower()
+        in {".emf", ".x-emf", ".wmf", ".x-wmf"}
+    ]
+    decoded_vectors = []
+    for ref_path in office_paths:
         b64data = images.pop(ref_path)
         try:
             img_bytes = base64.b64decode(b64data)
         except Exception:
             img_bytes = b64data.encode("utf-8") if isinstance(b64data, str) else b64data
         del b64data
-        fname, mime = _mime_for_ref(ref_path)
+        decoded_vectors.append(
+            (
+                ref_path,
+                os.path.basename(ref_path) or f"{uuid.uuid4().hex}.png",
+                img_bytes,
+            )
+        )
+
+    normalized_vectors = normalize_images_for_transport(
+        [(fname, img_bytes) for _, fname, img_bytes in decoded_vectors]
+    )
+    batched = {
+        ref_path: normalized
+        for (ref_path, _, _), normalized in zip(
+            decoded_vectors, normalized_vectors
+        )
+    }
+
+    for ref_path in original_paths:
+        if ref_path in batched:
+            fname, mime, img_bytes, converted = batched.pop(ref_path)
+        else:
+            b64data = images.pop(ref_path)
+            try:
+                img_bytes = base64.b64decode(b64data)
+            except Exception:
+                img_bytes = (
+                    b64data.encode("utf-8")
+                    if isinstance(b64data, str)
+                    else b64data
+                )
+            del b64data
+            fname, mime, img_bytes, converted = normalize_image_for_transport(
+                os.path.basename(ref_path) or f"{uuid.uuid4().hex}.png",
+                img_bytes,
+            )
+        if converted:
+            logger.info(
+                "Rasterized Office vector image %s to %s (%d bytes)",
+                ref_path,
+                fname,
+                len(img_bytes),
+            )
         yield ImageRef(
             filename=fname,
             original_ref=ref_path,
@@ -308,6 +360,11 @@ def _create_docreader_server() -> grpc.Server:
     )
 
     docreader_pb2_grpc.add_DocReaderServicer_to_server(DocReaderServicer(), server)
+    # Register health on the actual parser server as well as on the isolated
+    # liveness server. Kubernetes readiness probes the main port so a wedged
+    # or completely saturated RPC executor is removed from the headless
+    # Service instead of continuing to receive new documents indefinitely.
+    health_pb2_grpc.add_HealthServicer_to_server(HealthServicer(), server)
 
     try:
         tls_credentials = load_tls_credentials()

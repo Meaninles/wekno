@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
+	"github.com/Tencent/WeKnora/internal/custom/modules/questiondedup"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -373,7 +375,11 @@ func TestFinalizeSubtaskGenerationConcurrentExactlyOnePromotes(t *testing.T) {
 
 func TestCleanupKnowledgeFanoutCompletionsBoundsReparseAndSoftDeleteLedger(t *testing.T) {
 	db := setupKnowledgeTestDB(t)
-	require.NoError(t, db.AutoMigrate(&types.KnowledgeFanoutCompletion{}))
+	require.NoError(t, db.AutoMigrate(
+		&types.KnowledgeFanoutCompletion{},
+		&enrichmentoutcome.Outcome{},
+		&questiondedup.Claim{},
+	))
 	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
 	ctx := context.Background()
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
 	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
@@ -45,6 +46,7 @@ type legacyCandidate struct {
 }
 
 type legacyChunkImage struct {
+	ID          string         `gorm:"column:id;primaryKey"`
 	TenantID    uint64         `gorm:"column:tenant_id"`
 	KnowledgeID string         `gorm:"column:knowledge_id"`
 	ImageInfo   string         `gorm:"column:image_info"`
@@ -568,6 +570,443 @@ func migrationOwnerReferencesImage(tx *gorm.DB, owner *types.Knowledge, filePath
 		}
 	}
 	return false, nil
+}
+
+func imageInfoReferencesPath(raw, filePath string) bool {
+	if strings.TrimSpace(raw) == "" || strings.TrimSpace(filePath) == "" {
+		return false
+	}
+	var images []*types.ImageInfo
+	if json.Unmarshal([]byte(raw), &images) != nil {
+		return false
+	}
+	for _, image := range images {
+		if image != nil && strings.TrimSpace(image.URL) == strings.TrimSpace(filePath) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateExactDerivedOwnerNamespace is intentionally stricter than the
+// repository-wide migration rule. The bulk migration may prove historical
+// tenant-scoped exports after a global alias/owner scan; a live reparse is only
+// allowed to adopt a path whose canonical key names this exact knowledge.
+func validateExactDerivedOwnerNamespace(
+	binding storagebinding.Binding,
+	filePath string,
+	tenantID uint64,
+	knowledgeID string,
+) error {
+	if err := validateOwnerNamespace(
+		binding, filePath, tenantID, knowledgeID, KindFanoutImage,
+	); err != nil {
+		return err
+	}
+	key, err := bindingObjectKey(binding, filePath)
+	if err != nil {
+		return err
+	}
+	prefix, err := plannedfile.NormalizePrefix(binding.PathPrefix)
+	if err != nil {
+		return err
+	}
+	relative := key
+	if prefix != "" {
+		marker := prefix + "/"
+		if !strings.HasPrefix(key, marker) {
+			return ErrBindingMismatch
+		}
+		relative = strings.TrimPrefix(key, marker)
+	}
+	parts := strings.Split(relative, "/")
+	if len(parts) != 3 ||
+		parts[0] != strconv.FormatUint(tenantID, 10) ||
+		parts[1] != strings.TrimSpace(knowledgeID) {
+		return fmt.Errorf(
+			"%w: live cleanup adoption requires the exact tenant/knowledge namespace",
+			ErrBindingMismatch,
+		)
+	}
+	return nil
+}
+
+// cleanupOwnerReferencesImage always includes soft-deleted chunks. Reparse
+// cleanup needs those rows as immutable evidence after an earlier generation
+// has already soft-deleted its active chunk set.
+func cleanupOwnerReferencesImage(
+	tx *gorm.DB,
+	owner *types.Knowledge,
+	filePath string,
+) (bool, error) {
+	if owner == nil {
+		return false, nil
+	}
+	if len(owner.ProcessingFanout) > 0 {
+		if plan, err := processownership.ParseFanoutPlan(owner.ProcessingFanout); err == nil {
+			for _, image := range plan.Images {
+				if strings.TrimSpace(image.ImageURL) == strings.TrimSpace(filePath) {
+					return true, nil
+				}
+			}
+		}
+	}
+	if !tx.Migrator().HasTable(&types.Chunk{}) {
+		return false, nil
+	}
+	var rows []legacyChunkImage
+	if err := tx.Unscoped().Model(&types.Chunk{}).
+		Select("tenant_id", "knowledge_id", "image_info", "deleted_at").
+		Where(
+			"tenant_id = ? AND knowledge_id = ? AND image_info <> ''",
+			owner.TenantID, owner.ID,
+		).
+		Find(&rows).Error; err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if imageInfoReferencesPath(row.ImageInfo, filePath) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func fanoutReferencesPath(raw types.JSON, filePath string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	plan, err := processownership.ParseFanoutPlan(raw)
+	if err != nil {
+		return false
+	}
+	for _, image := range plan.Images {
+		if strings.TrimSpace(image.ImageURL) == strings.TrimSpace(filePath) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureCleanupDerivedPathHasOneOwner rejects legacy corruption before signing
+// it into the durable ledger. The scan is deliberately bounded and only runs
+// for an unregistered legacy path; ordinary registered document processing
+// never pays this cost.
+func (r *Registry) ensureCleanupDerivedPathHasOneOwner(
+	tx *gorm.DB,
+	object Object,
+	binding storagebinding.Binding,
+	objectKeyValue string,
+) error {
+	if tx == nil {
+		return ErrInvalidObject
+	}
+	if tx.Migrator().HasTable(&types.Chunk{}) {
+		var batch []legacyChunkImage
+		err := tx.Unscoped().Model(&types.Chunk{}).
+			Select("id", "tenant_id", "knowledge_id", "image_info", "deleted_at").
+			Where("image_info <> '' AND (tenant_id <> ? OR knowledge_id <> ?)",
+				object.TenantID, object.KnowledgeID).
+			Order("id ASC").
+			FindInBatches(&batch, backfillBatchSize, func(_ *gorm.DB, _ int) error {
+				for _, row := range batch {
+					if imageInfoReferencesPath(row.ImageInfo, object.Path) {
+						return fmt.Errorf(
+							"%w: derived path is referenced by another knowledge",
+							ErrBindingMismatch,
+						)
+					}
+				}
+				return nil
+			}).Error
+		if err != nil {
+			return err
+		}
+	}
+
+	type fanoutOwner struct {
+		ID               string `gorm:"primaryKey"`
+		TenantID         uint64
+		ProcessingFanout types.JSON
+	}
+	var knowledgeBatch []fanoutOwner
+	if err := tx.Unscoped().Table("knowledges").
+		Select("id", "tenant_id", "processing_fanout").
+		Where(
+			"processing_fanout IS NOT NULL AND (tenant_id <> ? OR id <> ?)",
+			object.TenantID, object.KnowledgeID,
+		).
+		Order("id ASC").
+		FindInBatches(&knowledgeBatch, backfillBatchSize, func(_ *gorm.DB, _ int) error {
+			for _, owner := range knowledgeBatch {
+				if fanoutReferencesPath(owner.ProcessingFanout, object.Path) {
+					return fmt.Errorf(
+						"%w: derived path is present in another knowledge fanout",
+						ErrBindingMismatch,
+					)
+				}
+			}
+			return nil
+		}).Error; err != nil {
+		return err
+	}
+
+	targetPhysical := physicalObjectDigest(binding, objectKeyValue)
+	var ledgerBatch []*types.TaskPendingOp
+	return tx.Where("task_type = ?", TaskType).
+		Order("id ASC").
+		FindInBatches(&ledgerBatch, backfillBatchSize, func(_ *gorm.DB, _ int) error {
+			for _, row := range ledgerBatch {
+				persisted, err := decodeObject(row.Payload)
+				if err != nil {
+					return fmt.Errorf(
+						"decode auxiliary ownership row %d during cleanup adoption: %w",
+						row.ID, err,
+					)
+				}
+				if persisted.TenantID == object.TenantID &&
+					persisted.KnowledgeBaseID == object.KnowledgeBaseID &&
+					persisted.KnowledgeID == object.KnowledgeID &&
+					persisted.Path == object.Path {
+					continue
+				}
+				if persisted.Path == object.Path {
+					return fmt.Errorf(
+						"%w: derived path already belongs to another knowledge",
+						ErrBindingMismatch,
+					)
+				}
+				if persisted.Binding == nil {
+					continue
+				}
+				key, keyErr := bindingObjectKey(*persisted.Binding, persisted.Path)
+				if keyErr == nil &&
+					physicalObjectDigest(*persisted.Binding, key) == targetPhysical {
+					return fmt.Errorf(
+						"%w: derived physical object already belongs to another knowledge",
+						ErrBindingMismatch,
+					)
+				}
+			}
+			return nil
+		}).Error
+}
+
+func (r *Registry) revalidateCleanupTargetWithinMoveFence(
+	ctx context.Context,
+	tx *gorm.DB,
+	proven provenLegacyCandidate,
+) (storagebinding.Binding, string, error) {
+	object := proven.object
+	var tenant types.Tenant
+	if err := tx.Where("id = ?", object.TenantID).Take(&tenant).Error; err != nil {
+		return storagebinding.Binding{}, "", err
+	}
+	var kb types.KnowledgeBase
+	if err := tx.Unscoped().Where(
+		"tenant_id = ? AND id = ?", object.TenantID, object.KnowledgeBaseID,
+	).Take(&kb).Error; err != nil {
+		return storagebinding.Binding{}, "", err
+	}
+	provider, err := ProviderForPath(
+		object.Path, fallbackProviderForBackfill(&kb, &tenant),
+	)
+	if err != nil || provider != string(proven.binding.Provider) {
+		return storagebinding.Binding{}, "", errors.Join(errBackfillTargetChanged, err)
+	}
+	service, err := r.serviceForBackfill(ctx, &tenant, provider, object.Path)
+	if err != nil {
+		return storagebinding.Binding{}, "", errors.Join(errBackfillTargetChanged, err)
+	}
+	current, err := bindObjectToService(object, service)
+	if err != nil || current.Binding == nil {
+		return storagebinding.Binding{}, "", errors.Join(
+			errBackfillTargetChanged, err, ErrBindingMissing,
+		)
+	}
+	if err := validateExactDerivedOwnerNamespace(
+		*current.Binding, object.Path, object.TenantID, object.KnowledgeID,
+	); err != nil {
+		return storagebinding.Binding{}, "", errors.Join(errBackfillTargetChanged, err)
+	}
+	currentKey, err := bindingObjectKey(*current.Binding, object.Path)
+	if err != nil {
+		return storagebinding.Binding{}, "", errors.Join(errBackfillTargetChanged, err)
+	}
+	if physicalObjectDigest(proven.binding, proven.objectKey) !=
+		physicalObjectDigest(*current.Binding, currentKey) {
+		return storagebinding.Binding{}, "", errBackfillTargetChanged
+	}
+	return *current.Binding, currentKey, nil
+}
+
+// adoptLegacyDerivedCleanupPath signs one narrowly provable pre-registry image
+// into the ownership ledger. It never deletes provider data. The normal path
+// follows the tenant -> KB -> knowledge -> ledger lock order. A knowledge move
+// already owns the parent KB shared fence, so its variant skips an impossible
+// lock upgrade and still serializes on the knowledge/ledger rows.
+func (r *Registry) adoptLegacyDerivedCleanupPath(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	fallbackProvider string,
+	filePath string,
+	parentMoveFenceHeld bool,
+) error {
+	if r == nil || r.db == nil || tenantID == 0 ||
+		strings.TrimSpace(knowledgeBaseID) == "" ||
+		strings.TrimSpace(knowledgeID) == "" ||
+		strings.TrimSpace(filePath) == "" {
+		return ErrInvalidObject
+	}
+
+	var tenant types.Tenant
+	if err := r.db.WithContext(ctx).Where("id = ?", tenantID).Take(&tenant).Error; err != nil {
+		return err
+	}
+	var kb types.KnowledgeBase
+	if err := r.db.WithContext(ctx).Unscoped().Where(
+		"tenant_id = ? AND id = ?", tenantID, knowledgeBaseID,
+	).Take(&kb).Error; err != nil {
+		return err
+	}
+	var owner types.Knowledge
+	if err := r.db.WithContext(ctx).Unscoped().Where(
+		"tenant_id = ? AND knowledge_base_id = ? AND id = ?",
+		tenantID, knowledgeBaseID, knowledgeID,
+	).Take(&owner).Error; err != nil {
+		return err
+	}
+	if owner.DeletedAt.Valid {
+		return ErrKnowledgeFence
+	}
+	provider, err := ProviderForPath(filePath, fallbackProvider)
+	if err != nil {
+		return err
+	}
+	service, err := r.serviceForBackfill(ctx, &tenant, provider, filePath)
+	if err != nil {
+		return err
+	}
+	object := Object{
+		TenantID: tenantID, KnowledgeBaseID: strings.TrimSpace(knowledgeBaseID),
+		KnowledgeID:          strings.TrimSpace(knowledgeID),
+		ProcessingGeneration: owner.ProcessingGeneration,
+		Path:                 strings.TrimSpace(filePath), FallbackProvider: provider,
+		Kind: KindFanoutImage,
+	}
+	bound, err := bindObjectToService(object, service)
+	if err != nil || bound.Binding == nil {
+		return errors.Join(err, ErrBindingMissing)
+	}
+	if err := validateExactDerivedOwnerNamespace(
+		*bound.Binding, bound.Path, tenantID, knowledgeID,
+	); err != nil {
+		return err
+	}
+	key, err := bindingObjectKey(*bound.Binding, bound.Path)
+	if err != nil {
+		return err
+	}
+	proven := provenLegacyCandidate{
+		object: bound, binding: *bound.Binding, objectKey: key,
+	}
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var (
+			currentBinding storagebinding.Binding
+			currentKey     string
+			err            error
+		)
+		if parentMoveFenceHeld && tx.Dialector.Name() != "sqlite" {
+			currentBinding, currentKey, err =
+				r.revalidateCleanupTargetWithinMoveFence(ctx, tx, proven)
+		} else {
+			currentBinding, currentKey, err =
+				r.revalidateMigrationTarget(ctx, tx, proven)
+			if err == nil {
+				err = validateExactDerivedOwnerNamespace(
+					currentBinding, bound.Path, tenantID, knowledgeID,
+				)
+			}
+		}
+		if err != nil {
+			return err
+		}
+
+		ownerQuery := tx.Unscoped().Where(
+			"tenant_id = ? AND knowledge_base_id = ? AND id = ?",
+			tenantID, knowledgeBaseID, knowledgeID,
+		)
+		if tx.Dialector.Name() != "sqlite" {
+			ownerQuery = ownerQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var currentOwner types.Knowledge
+		if err := ownerQuery.Take(&currentOwner).Error; err != nil {
+			return err
+		}
+		if currentOwner.DeletedAt.Valid ||
+			currentOwner.ProcessingGeneration != owner.ProcessingGeneration {
+			return errBackfillTargetChanged
+		}
+		referenced, err := cleanupOwnerReferencesImage(tx, &currentOwner, bound.Path)
+		if err != nil {
+			return err
+		}
+		if !referenced {
+			return fmt.Errorf(
+				"%w: derived path is not referenced by the locked owner",
+				ErrBindingMismatch,
+			)
+		}
+		if err := r.ensureCleanupDerivedPathHasOneOwner(
+			tx, bound, currentBinding, currentKey,
+		); err != nil {
+			return err
+		}
+
+		bound.Binding = &currentBinding
+		bound.ProcessingGeneration = currentOwner.ProcessingGeneration
+		ledgerQuery := tx.Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ? AND dedup_key = ?",
+			tenantID, TaskType, types.TaskScopeKnowledgeBase, knowledgeBaseID,
+			operationOwned, objectKey(knowledgeID, bound.Path),
+		)
+		if tx.Dialector.Name() != "sqlite" {
+			ledgerQuery = ledgerQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var rows []*types.TaskPendingOp
+		if err := ledgerQuery.Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) > 0 {
+			for _, row := range rows {
+				persisted, decodeErr := decodeObject(row.Payload)
+				if decodeErr != nil ||
+					persisted.TenantID != bound.TenantID ||
+					persisted.KnowledgeBaseID != bound.KnowledgeBaseID ||
+					persisted.KnowledgeID != bound.KnowledgeID ||
+					persisted.Path != bound.Path ||
+					persisted.Kind != KindFanoutImage ||
+					persisted.Quarantined ||
+					!sameBinding(persisted.Binding, bound.Binding) {
+					return ErrBindingMismatch
+				}
+			}
+			return nil
+		}
+		payload, err := json.Marshal(bound)
+		if err != nil {
+			return err
+		}
+		return tx.Create(&types.TaskPendingOp{
+			TenantID: tenantID, TaskType: TaskType,
+			Scope: types.TaskScopeKnowledgeBase, ScopeID: knowledgeBaseID,
+			Op: operationOwned, DedupKey: objectKey(knowledgeID, bound.Path),
+			Payload: payload, EnqueuedAt: time.Now().UTC(),
+		}).Error
+	})
 }
 
 // adoptMigrationBinding is intentionally separate from Register: it may lock

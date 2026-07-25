@@ -15,7 +15,9 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/agent"
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
@@ -45,6 +47,23 @@ const (
 	// wikiActiveKeyPrefix is the Redis key for the "batch in progress" flag.
 	// Key format: wiki:active:{kbID} → "1" with TTL. Prevents concurrent batches.
 	wikiActiveKeyPrefix = "wiki:active:"
+
+	// wikiMapActiveKeyPrefix owns only one document-generation Map. Unlike the
+	// KB materialization lock, different keys may execute concurrently on
+	// different replicas.
+	wikiMapActiveKeyPrefix = "wiki:map:active:"
+
+	wikiTaskModeMap = "map"
+
+	// A Map wake-up starts promptly once the durable ingest row exists. The
+	// document's core parse/post-process generation is already committed at
+	// this boundary, so the old 30-second KB debounce is unnecessary here.
+	wikiMapInitialDelay = time.Second
+
+	// Map tasks are disposable wake-ups over PostgreSQL state. A long Unique
+	// lease coalesces recovery scans; the renewable per-document lock still
+	// protects correctness if this lease expires during an unusually long Map.
+	wikiMapUniqueTTL = 30 * time.Minute
 
 	// wikiIngestDelay is how long to wait after a document is added before
 	// the batch task fires. Debounces rapid uploads.
@@ -87,8 +106,9 @@ const (
 	wikiFollowUpDelay = 5 * time.Second
 
 	// wikiLockConflictDelay is the polling cadence while another worker owns
-	// the renewable per-KB lease. Each contender replaces itself with exactly
-	// one non-Unique delayed wake-up, without consuming an Asynq retry slot.
+	// the renewable per-KB lease. Contenders publish an alternating, Unique
+	// wake-up so a bulk-upload burst collapses to at most one successor instead
+	// of preserving a thundering herd forever.
 	wikiLockConflictDelay = 15 * time.Second
 
 	// wikiQueueSettlementTimeout bounds the independent context used for
@@ -191,6 +211,20 @@ type WikiIngestPayload struct {
 	TenantID        uint64 `json:"tenant_id"`
 	KnowledgeBaseID string `json:"knowledge_base_id"`
 	Language        string `json:"language,omitempty"`
+	// TaskMode="map" turns this otherwise KB-scoped wake-up into an exact
+	// document-generation Map wake-up. MapDedupKey is the canonical
+	// task_pending_ops key and is always resolved again from PostgreSQL.
+	TaskMode    string `json:"task_mode,omitempty"`
+	MapDedupKey string `json:"map_dedup_key,omitempty"`
+	KnowledgeID string `json:"knowledge_id,omitempty"`
+	// ProcessingGeneration is diagnostic/observability metadata. The pending
+	// row remains authoritative and must match before any model work.
+	ProcessingGeneration string `json:"processing_generation,omitempty"`
+	// WakePhase alternates between 0 and 1 for internally-produced successor
+	// signals. The next payload therefore has a different Asynq uniqueness
+	// digest from the currently-running task while all concurrent contenders
+	// still converge on the same successor digest.
+	WakePhase uint8 `json:"wake_phase,omitempty"`
 }
 
 // WikiRetractPayload is the asynq task payload for wiki content retraction
@@ -213,6 +247,14 @@ type WikiRetractPayload struct {
 const (
 	WikiOpIngest  = "ingest"
 	WikiOpRetract = "retract"
+
+	// A delete is claimed before active document writers are quiesced.  The
+	// intent row is the crash-recovery proof, but it must not be consumed by a
+	// Wiki worker until the post-quiescence page/chunk snapshot has replaced
+	// it with a ready plan.  Empty remains ready for rows written by older
+	// binaries and for move/manual retract producers.
+	wikiRetractPlanIntent = "intent"
+	wikiRetractPlanReady  = "ready"
 )
 
 // WikiPendingOp represents a single operation queued in task_pending_ops
@@ -244,10 +286,25 @@ type WikiPendingOp struct {
 	// cleanup. It is intentionally durable in the pending-op payload so a
 	// restart can re-check the authoritative knowledge location.
 	MoveTargetKnowledgeBaseID string `json:"move_target_knowledge_base_id,omitempty"`
+	// RetractPlanState is "intent" only during the delete claim/quiescence
+	// window. Such a row is deliberately invisible to normal Wiki consumers
+	// and is atomically refreshed to "ready" before the first model-backed
+	// retract. Empty is treated as ready for backward compatibility.
+	RetractPlanState string `json:"retract_plan_state,omitempty"`
 	// Prepared checkpoints the expensive Map phase before any page mutation.
 	// Retries after page/log/index/publication/settlement failures restore this
 	// plan instead of repeating extraction/summary/classification LLM calls.
 	Prepared *wikiPreparedIngest `json:"prepared,omitempty"`
+	// MapCheckpoint persists successful sub-stages inside Map. Extraction,
+	// summary and citation classification are independently resumable, so a
+	// timeout in one branch does not replay every earlier model call.
+	MapCheckpoint *wikiMapCheckpoint `json:"map_checkpoint,omitempty"`
+	// MapFinished is the durable hand-off from the horizontally scalable Map
+	// lane to the KB-serialized materialization lane. Prepared is non-nil when
+	// artifacts exist; a true MapFinished with nil Prepared represents a
+	// deliberate degraded/no-artifact outcome.
+	MapFinished      bool   `json:"map_finished,omitempty"`
+	MapOutcomeDetail string `json:"map_outcome_detail,omitempty"`
 	// AppliedPageSlugs is transactionally patched by the Wiki page repository
 	// together with each page mutation. It is scoped to this pending row and
 	// disappears naturally when queue settlement deletes the row.
@@ -301,6 +358,7 @@ type wikiIngestService struct {
 	// for the 5-docs-per-batch fan-out.
 	spanTracker  SpanTracker
 	splitManager *documentsplit.Manager
+	contentCache *contentcache.Store
 	// llmRetryPolicy is an optional test seam. Production uses the policy from
 	// the custom Wiki queue module; tests inject deterministic jitter/waits and
 	// never spend real time sleeping.
@@ -333,6 +391,7 @@ func NewWikiIngestService(
 	redisClient *redis.Client,
 	spanTracker SpanTracker,
 	splitManager *documentsplit.Manager,
+	contentCache *contentcache.Store,
 ) interfaces.TaskHandler {
 	svc := &wikiIngestService{
 		wikiService:    wikiService,
@@ -348,6 +407,7 @@ func NewWikiIngestService(
 		redisClient:    redisClient,
 		spanTracker:    spanTracker,
 		splitManager:   splitManager,
+		contentCache:   contentCache,
 	}
 	return svc
 }
@@ -394,6 +454,13 @@ func (s *wikiIngestService) beginWikiSubspan(ctx context.Context, knowledgeID st
 type WikiEnqueueResult struct {
 	PendingPersisted bool
 	TriggerScheduled bool
+	// MapScheduled is reported separately because the KB trigger and the
+	// document-local Map wake-up have independent recovery paths.
+	MapScheduled bool
+	// AlreadySettled means the exact generation is stale or already has a
+	// terminal Wiki outcome. The durable intent is satisfied without creating
+	// another queue row or trigger.
+	AlreadySettled bool
 }
 
 // EnqueueWikiIngest queues a document for wiki ingestion.
@@ -428,10 +495,9 @@ func EnqueueWikiIngest(
 	}
 	lang, _ := types.LanguageFromContext(ctx)
 
-	// Persist the pending op. A re-ingest of the same knowledge id while
-	// a previous op is still queued simply appends another row; the
-	// Duplicate producers for the same generation collapse together, while an
-	// older generation remains independently visible so the consumer can
+	// Persist the pending op. Duplicate producers for the same generation
+	// collapse at the database unique index; a different generation has a
+	// different key and remains independently visible so the consumer can
 	// terminally reject it without suppressing the authoritative row.
 	op := WikiPendingOp{
 		Op:                   WikiOpIngest,
@@ -447,7 +513,9 @@ func EnqueueWikiIngest(
 	if pendingRepo == nil {
 		persistErr = errors.New("wiki ingest: pending-op repository is nil")
 	} else {
-		if err := pendingRepo.Enqueue(ctx, &types.TaskPendingOp{
+		identity := wikiIngestIdentity(tenantID, kbID, knowledgeID, processingGeneration)
+		enqueueCtx := wikiingestguard.WithValidation(ctx, identity)
+		if err := pendingRepo.Enqueue(enqueueCtx, &types.TaskPendingOp{
 			TenantID: tenantID,
 			TaskType: wikiTaskType,
 			Scope:    wikiTaskScope,
@@ -456,10 +524,38 @@ func EnqueueWikiIngest(
 			DedupKey: dedupKey,
 			Payload:  payloadBytes,
 		}); err != nil {
+			if len(wikiingestguard.StaleIdentities(err)) > 0 {
+				// A completed/degraded/failed exact generation, or a producer
+				// delayed past reparse/delete, is an idempotent success. Do not
+				// wake the shared KB consumer: there is no new durable row.
+				result.PendingPersisted = true
+				result.AlreadySettled = true
+				return result, nil
+			}
 			logger.Warnf(ctx, "wiki ingest: failed to enqueue pending op for %s: %v", knowledgeID, err)
 			persistErr = fmt.Errorf("wiki ingest: persist pending op for %s: %w", knowledgeID, err)
 		} else {
 			result.PendingPersisted = true
+		}
+	}
+
+	var mapErr error
+	if result.PendingPersisted {
+		if _, ok := pendingRepo.(wikiDistributedMapRepository); ok {
+			mapPayload := WikiIngestPayload{
+				TenantID:             tenantID,
+				KnowledgeBaseID:      kbID,
+				TaskMode:             wikiTaskModeMap,
+				MapDedupKey:          dedupKey,
+				KnowledgeID:          knowledgeID,
+				ProcessingGeneration: processingGeneration,
+			}
+			mapErr = enqueueWikiMapTask(task, mapPayload, wikiMapInitialDelay)
+			if mapErr != nil {
+				logger.Warnf(ctx, "wiki ingest: failed to enqueue distributed Map for %s: %v", knowledgeID, mapErr)
+			} else {
+				result.MapScheduled = true
+			}
 		}
 	}
 
@@ -486,7 +582,7 @@ func EnqueueWikiIngest(
 	// failed to persist, but return every failure so the caller can retry. If
 	// the row persisted and only the trigger failed, the durable row remains
 	// untouched and the caller's retry (or another trigger) can recover it.
-	return result, errors.Join(persistErr, triggerErr)
+	return result, errors.Join(persistErr, mapErr, triggerErr)
 }
 
 // EnqueueWikiRetract queues a wiki retraction op (a delete cleanup).
@@ -512,6 +608,7 @@ func EnqueueWikiRetract(
 		Language:                  payload.Language,
 		SourceChunks:              payload.SourceChunks,
 		MoveTargetKnowledgeBaseID: payload.MoveTargetKnowledgeBaseID,
+		RetractPlanState:          wikiRetractPlanReady,
 	}
 	payloadBytes, err := json.Marshal(op)
 	if err != nil {
@@ -552,9 +649,9 @@ func EnqueueWikiRetract(
 
 // enqueueWikiTrigger publishes a KB-scoped wake-up signal. Initial ingest and
 // retract signals use asynq.Unique because task_pending_ops is the source of
-// truth; a duplicate signal carries no additional work. Follow-up signals do
-// not use Unique: they are enqueued by the currently-running unique task, and
-// would otherwise be rejected by that task's still-held uniqueness lock.
+// truth; a duplicate signal carries no additional work. Internal successors
+// alternate WikiIngestPayload.WakePhase, so they can also use Unique without
+// colliding with the currently-running signal.
 //
 // ErrDuplicateTask is therefore success for a unique trigger: it proves an
 // equivalent wake-up signal already exists. Every other enqueue error is
@@ -590,6 +687,37 @@ func enqueueWikiTrigger(
 		return fmt.Errorf("wiki ingest: enqueue trigger: %w", err)
 	}
 	return nil
+}
+
+func enqueueWikiMapTask(
+	task interfaces.TaskEnqueuer,
+	payload WikiIngestPayload,
+	delay time.Duration,
+) error {
+	if task == nil {
+		return errors.New("wiki ingest: task enqueuer is nil")
+	}
+	if payload.TenantID == 0 || strings.TrimSpace(payload.KnowledgeBaseID) == "" ||
+		strings.TrimSpace(payload.MapDedupKey) == "" {
+		return errors.New("wiki ingest: complete distributed Map identity is required")
+	}
+	payload.TaskMode = wikiTaskModeMap
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("wiki ingest: marshal distributed Map payload: %w", err)
+	}
+	_, err = task.Enqueue(
+		asynq.NewTask(types.TypeWikiIngest, payloadBytes),
+		asynq.Queue(types.QueueWikiMap),
+		asynq.MaxRetry(wikiIngestMaxRetry),
+		asynq.Timeout(wikiIngestTaskTimeout),
+		asynq.ProcessIn(delay),
+		asynq.Unique(wikiMapUniqueTTL),
+	)
+	if err == nil || errors.Is(err, asynq.ErrDuplicateTask) {
+		return nil
+	}
+	return fmt.Errorf("wiki ingest: enqueue distributed Map: %w", err)
 }
 
 // activeWikiKnowledgeBasePublisher is a mandatory durable-ingest capability of
@@ -633,6 +761,10 @@ func enqueueWikiTriggerFenced(
 // correctness boundary for follow-ups and for triggers whose uniqueness TTL
 // has expired while a long batch is still running.
 func (s *wikiIngestService) Handle(ctx context.Context, t *asynq.Task) error {
+	var payload WikiIngestPayload
+	if t != nil && json.Unmarshal(t.Payload(), &payload) == nil && payload.TaskMode == wikiTaskModeMap {
+		return s.ProcessWikiMap(ctx, t)
+	}
 	return s.ProcessWikiIngest(ctx, t)
 }
 
@@ -648,6 +780,20 @@ func (s *wikiIngestService) Handle(ctx context.Context, t *asynq.Task) error {
 // duplicates collapsed by the consumer were also drained from the
 // list once their canonical sibling had been processed.
 func (s *wikiIngestService) peekPendingList(ctx context.Context, kbID string, limit int) (ops []WikiPendingOp, peekedIDs []int64, retErr error) {
+	return s.peekPendingListIncludingRetractIntents(ctx, kbID, limit, false)
+}
+
+// peekPendingListIncludingRetractIntents has one terminal-cleanup escape
+// hatch. Normal workers exclude delete-intent retracts from both the returned
+// operations and acknowledgement IDs: the same PostgreSQL row will be
+// refreshed to a ready plan after active document writers quiesce. Terminal
+// KB deletion may include the rows because no target Wiki can survive.
+func (s *wikiIngestService) peekPendingListIncludingRetractIntents(
+	ctx context.Context,
+	kbID string,
+	limit int,
+	includeRetractIntents bool,
+) (ops []WikiPendingOp, peekedIDs []int64, retErr error) {
 	if s.pendingRepo == nil {
 		return nil, nil, errors.New("wiki ingest: pending-op repository is nil")
 	}
@@ -658,6 +804,36 @@ func (s *wikiIngestService) peekPendingList(ctx context.Context, kbID string, li
 	if err != nil {
 		return nil, nil, fmt.Errorf("wiki ingest: peek pending list for KB %s: %w", kbID, err)
 	}
+	return decodeWikiPendingRows(ctx, rows, includeRetractIntents)
+}
+
+// peekWikiCommitPendingList bypasses unprepared ingest rows in production.
+// Focused service tests use repositories without the distributed extension
+// and retain the historical in-process Map+Reduce behavior.
+func (s *wikiIngestService) peekWikiCommitPendingList(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	limit int,
+) (ops []WikiPendingOp, peekedIDs []int64, distributed bool, retErr error) {
+	repo, ok := s.pendingRepo.(wikiDistributedMapRepository)
+	if !ok || repo == nil {
+		ops, peekedIDs, retErr = s.peekPendingList(ctx, kbID, limit)
+		return ops, peekedIDs, false, retErr
+	}
+	rows, err := repo.PeekWikiCommitBatch(ctx, tenantID, kbID, limit)
+	if err != nil {
+		return nil, nil, true, fmt.Errorf("wiki ingest: peek commit-ready list for KB %s: %w", kbID, err)
+	}
+	ops, peekedIDs, err = decodeWikiPendingRows(ctx, rows, false)
+	return ops, peekedIDs, true, err
+}
+
+func decodeWikiPendingRows(
+	ctx context.Context,
+	rows []*types.TaskPendingOp,
+	includeRetractIntents bool,
+) (ops []WikiPendingOp, peekedIDs []int64, retErr error) {
 	if len(rows) == 0 {
 		return nil, nil, nil
 	}
@@ -665,7 +841,6 @@ func (s *wikiIngestService) peekPendingList(ctx context.Context, kbID string, li
 	all := make([]WikiPendingOp, 0, len(rows))
 	peekedIDs = make([]int64, 0, len(rows))
 	for _, r := range rows {
-		peekedIDs = append(peekedIDs, r.ID)
 		var op WikiPendingOp
 		if len(r.Payload) > 0 {
 			if err := json.Unmarshal(r.Payload, &op); err != nil {
@@ -694,6 +869,15 @@ func (s *wikiIngestService) peekPendingList(ctx context.Context, kbID string, li
 		}
 		op.dbID = r.ID
 		op.tenantID = r.TenantID
+		if op.Op == WikiOpRetract &&
+			op.RetractPlanState == wikiRetractPlanIntent &&
+			!includeRetractIntents {
+			// Do not acknowledge or retry this row. A normal delete path will
+			// UPSERT the complete ready payload into the same identity; a
+			// crashed path is resumed from knowledges.parse_status=deleting.
+			continue
+		}
+		peekedIDs = append(peekedIDs, r.ID)
 		all = append(all, op)
 	}
 
@@ -808,6 +992,22 @@ func (s *wikiIngestService) requeueFailedOps(ctx context.Context, payload WikiIn
 			lastError = fmt.Sprintf("exceeded wikiMaxFailRetries=%d (in-batch retries)", wikiMaxFailRetries)
 		} else {
 			lastError = fmt.Sprintf("%s (exceeded wikiMaxFailRetries=%d)", lastError, wikiMaxFailRetries)
+		}
+		// Record the terminal document-level outcome before removing the only
+		// durable queue row that carries this processing generation.  A
+		// transient status-write failure deliberately keeps the pending row in
+		// place so the next wake-up can retry both operations; archiving first
+		// would make a failed Wiki lane look permanently pending.
+		if statusErr := s.recordWikiGenerationStatus(
+			ctx,
+			payload,
+			op,
+			types.WikiStatusFailed,
+			lastError,
+		); statusErr != nil {
+			logger.Warnf(ctx, "wiki ingest: failed to record terminal status for op %s: %v", op.KnowledgeID, statusErr)
+			errs = append(errs, fmt.Errorf("record terminal Wiki status for pending row %d: %w", op.dbID, statusErr))
+			continue
 		}
 		deadLetter := &types.TaskDeadLetter{
 			TenantID:  payload.TenantID,
@@ -955,6 +1155,39 @@ type wikiPreparedIngest struct {
 	Pages    []types.WikiLogPageRef `json:"pages"`
 	MapStats types.JSONMap          `json:"map_stats,omitempty"`
 	Updates  []SlugUpdate           `json:"updates"`
+	// WikiSpan lets a Map worker on one replica hand the exact open span to a
+	// materialization worker on another replica. The latter closes the same
+	// row instead of creating a duplicate/cancelling the distributed Map span.
+	WikiSpan *wikiPreparedSpan `json:"wiki_span,omitempty"`
+}
+
+type wikiPreparedSpan struct {
+	KnowledgeID  string    `json:"knowledge_id"`
+	Attempt      int       `json:"attempt"`
+	SpanID       string    `json:"span_id"`
+	ParentSpanID string    `json:"parent_span_id"`
+	Name         string    `json:"name"`
+	Kind         string    `json:"kind"`
+	StartedAt    time.Time `json:"started_at"`
+}
+
+const wikiMapCheckpointVersion = 1
+
+type wikiMapCheckpoint struct {
+	Version                int                   `json:"version"`
+	ContentHash            string                `json:"content_hash"`
+	ExtractedEntities      []extractedItem       `json:"extracted_entities,omitempty"`
+	ExtractedConcepts      []extractedItem       `json:"extracted_concepts,omitempty"`
+	Pass0Failed            bool                  `json:"pass0_failed,omitempty"`
+	ExtractionDone         bool                  `json:"extraction_done,omitempty"`
+	SummaryContent         string                `json:"summary_content,omitempty"`
+	SummaryDone            bool                  `json:"summary_done,omitempty"`
+	Citations              map[string][]string   `json:"citations,omitempty"`
+	NewSlugs               []newSlugFromCitation `json:"new_slugs,omitempty"`
+	ClassificationBatches  int                   `json:"classification_batches,omitempty"`
+	ClassificationFailures int                   `json:"classification_failures,omitempty"`
+	ClassificationDegraded bool                  `json:"classification_degraded,omitempty"`
+	ClassificationDone     bool                  `json:"classification_done,omitempty"`
 }
 
 type wikiPendingPayloadCheckpointer interface {
@@ -965,6 +1198,75 @@ type wikiPendingPayloadCheckpointer interface {
 		knowledgeBaseID string,
 		payload []byte,
 	) (bool, error)
+}
+
+// wikiDistributedMapRepository is a production-only extension of the generic
+// pending-op repository. Keeping these Wiki-specific selectors structural
+// avoids coupling unrelated queue consumers while allowing focused service
+// tests to retain their small in-memory repositories.
+type wikiDistributedMapRepository interface {
+	GetWikiIngestByDedupKey(
+		context.Context, uint64, string, string,
+	) (*types.TaskPendingOp, error)
+	DeleteWikiIngestByDedupKey(context.Context, uint64, string, string) error
+	PeekWikiCommitBatch(
+		context.Context, uint64, string, int,
+	) ([]*types.TaskPendingOp, error)
+	CountWikiCommitReady(context.Context, uint64, string) (int64, error)
+	MarkWikiMapReady(
+		context.Context, int64, uint64, string, []byte,
+	) (bool, error)
+}
+
+type wikiGenerationStatusRepository interface {
+	UpdateWikiStatusGeneration(
+		context.Context, uint64, string, string, string, string, string,
+	) (bool, error)
+}
+
+func (s *wikiIngestService) recordWikiGenerationStatus(
+	ctx context.Context,
+	payload WikiIngestPayload,
+	op WikiPendingOp,
+	status string,
+	detail string,
+) error {
+	if op.Op != WikiOpIngest || op.KnowledgeID == "" || op.ProcessingGeneration == "" {
+		return nil
+	}
+	// Focused Wiki unit tests use interface-only stubs. Production wiring always
+	// provides the GORM knowledge repository; when it is present, lack of the
+	// generation-scoped extension is a hard configuration error.
+	if s.knowledgeRepo == nil {
+		return nil
+	}
+	statusRepo, ok := s.knowledgeRepo.(wikiGenerationStatusRepository)
+	if !ok || statusRepo == nil {
+		return errors.New("wiki ingest: knowledge repository does not support generation-scoped Wiki status")
+	}
+	updated, err := statusRepo.UpdateWikiStatusGeneration(
+		ctx,
+		payload.TenantID,
+		op.KnowledgeID,
+		payload.KnowledgeBaseID,
+		op.ProcessingGeneration,
+		status,
+		detail,
+	)
+	if err != nil {
+		return fmt.Errorf("wiki ingest: record status for knowledge %s: %w", op.KnowledgeID, err)
+	}
+	if !updated {
+		logger.Infof(
+			ctx,
+			"wiki ingest: status update skipped for stale generation knowledge=%s generation=%s",
+			op.KnowledgeID,
+			op.ProcessingGeneration,
+		)
+	} else {
+		pipelineobs.ObserveWikiOutcome(status)
+	}
+	return nil
 }
 
 // wikiDatabaseLeaseAcquirer is mandatory for the production durable ingest
@@ -1051,24 +1353,104 @@ func (s *wikiIngestService) checkpointPreparedWikiIngest(
 	if result == nil || op.dbID <= 0 {
 		return nil
 	}
-	checkpointer, ok := s.pendingRepo.(wikiPendingPayloadCheckpointer)
-	if !ok || checkpointer == nil {
-		return errors.New("wiki ingest: pending repository does not support durable payload checkpoints")
-	}
 	preparedUpdates := append([]SlugUpdate(nil), updates...)
 	for i := range preparedUpdates {
 		preparedUpdates[i].PageAlreadyApplied = false
 	}
+	op.MapCheckpoint = nil
+	op.MapFinished = true
+	op.MapOutcomeDetail = ""
 	op.Prepared = &wikiPreparedIngest{
 		DocTitle: result.DocTitle,
 		Summary:  result.Summary,
 		Pages:    append([]types.WikiLogPageRef(nil), result.Pages...),
 		MapStats: result.MapStats,
 		Updates:  preparedUpdates,
+		WikiSpan: preparedWikiSpan(result.WikiSpan),
+	}
+	return s.publishWikiMapReady(ctx, payload, op, "prepared map")
+}
+
+func preparedWikiSpan(span *Span) *wikiPreparedSpan {
+	if span == nil {
+		return nil
+	}
+	return &wikiPreparedSpan{
+		KnowledgeID:  span.KnowledgeID,
+		Attempt:      span.Attempt,
+		SpanID:       span.SpanID,
+		ParentSpanID: span.ParentSpanID,
+		Name:         span.Name,
+		Kind:         span.Kind,
+		StartedAt:    span.StartedAt,
+	}
+}
+
+func restoreWikiSpan(prepared *wikiPreparedSpan) *Span {
+	if prepared == nil || strings.TrimSpace(prepared.SpanID) == "" {
+		return nil
+	}
+	return &Span{
+		KnowledgeID:  prepared.KnowledgeID,
+		Attempt:      prepared.Attempt,
+		SpanID:       prepared.SpanID,
+		ParentSpanID: prepared.ParentSpanID,
+		Name:         prepared.Name,
+		Kind:         prepared.Kind,
+		StartedAt:    prepared.StartedAt,
+	}
+}
+
+func (s *wikiIngestService) checkpointWikiMapFinishedWithoutArtifacts(
+	ctx context.Context,
+	payload WikiIngestPayload,
+	op WikiPendingOp,
+	detail string,
+) error {
+	if op.dbID <= 0 {
+		return nil
+	}
+	op.MapCheckpoint = nil
+	op.Prepared = nil
+	op.MapFinished = true
+	op.MapOutcomeDetail = strings.TrimSpace(detail)
+	return s.publishWikiMapReady(ctx, payload, op, "no-artifact map")
+}
+
+func (s *wikiIngestService) checkpointWikiMapProgress(
+	ctx context.Context,
+	payload WikiIngestPayload,
+	op WikiPendingOp,
+	checkpoint *wikiMapCheckpoint,
+) error {
+	if op.dbID <= 0 {
+		return nil
+	}
+	if checkpoint == nil || checkpoint.Version != wikiMapCheckpointVersion ||
+		strings.TrimSpace(checkpoint.ContentHash) == "" {
+		return errors.New("wiki ingest: invalid partial map checkpoint")
+	}
+	op.Prepared = nil
+	op.MapCheckpoint = checkpoint
+	return s.persistWikiPendingOpPayload(ctx, payload, op, "partial map")
+}
+
+func (s *wikiIngestService) persistWikiPendingOpPayload(
+	ctx context.Context,
+	payload WikiIngestPayload,
+	op WikiPendingOp,
+	stage string,
+) error {
+	if op.dbID <= 0 {
+		return nil
+	}
+	checkpointer, ok := s.pendingRepo.(wikiPendingPayloadCheckpointer)
+	if !ok || checkpointer == nil {
+		return errors.New("wiki ingest: pending repository does not support durable payload checkpoints")
 	}
 	encoded, err := json.Marshal(op)
 	if err != nil {
-		return fmt.Errorf("wiki ingest: encode prepared map checkpoint: %w", err)
+		return fmt.Errorf("wiki ingest: encode %s checkpoint: %w", stage, err)
 	}
 	identity := wikiIngestIdentity(
 		payload.TenantID, payload.KnowledgeBaseID, op.KnowledgeID, op.ProcessingGeneration,
@@ -1078,7 +1460,43 @@ func (s *wikiIngestService) checkpointPreparedWikiIngest(
 		checkpointCtx, op.dbID, payload.TenantID, payload.KnowledgeBaseID, encoded,
 	)
 	if err != nil {
-		return fmt.Errorf("wiki ingest: persist prepared map checkpoint: %w", err)
+		return fmt.Errorf("wiki ingest: persist %s checkpoint: %w", stage, err)
+	}
+	if !updated {
+		return wikiingestguard.NewStaleIdentityError(identity)
+	}
+	return nil
+}
+
+func (s *wikiIngestService) publishWikiMapReady(
+	ctx context.Context,
+	payload WikiIngestPayload,
+	op WikiPendingOp,
+	stage string,
+) error {
+	if op.dbID <= 0 {
+		return nil
+	}
+	publisher, ok := s.pendingRepo.(wikiDistributedMapRepository)
+	if !ok || publisher == nil {
+		// Focused legacy tests intentionally use a narrow fake repository.
+		// Their in-process batch still consumes the row immediately, so the
+		// separate readiness selector is not involved.
+		return s.persistWikiPendingOpPayload(ctx, payload, op, stage)
+	}
+	encoded, err := json.Marshal(op)
+	if err != nil {
+		return fmt.Errorf("wiki ingest: encode %s checkpoint: %w", stage, err)
+	}
+	identity := wikiIngestIdentity(
+		payload.TenantID, payload.KnowledgeBaseID, op.KnowledgeID, op.ProcessingGeneration,
+	)
+	checkpointCtx := wikiingestguard.WithValidation(ctx, identity)
+	updated, err := publisher.MarkWikiMapReady(
+		checkpointCtx, op.dbID, payload.TenantID, payload.KnowledgeBaseID, encoded,
+	)
+	if err != nil {
+		return fmt.Errorf("wiki ingest: publish %s checkpoint: %w", stage, err)
 	}
 	if !updated {
 		return wikiingestguard.NewStaleIdentityError(identity)
@@ -1107,10 +1525,13 @@ func (s *wikiIngestService) restorePreparedWikiIngest(
 		updates[i].SourceOpID = op.dbID
 		_, updates[i].PageAlreadyApplied = applied[updates[i].Slug]
 	}
-	wikiSpan := s.beginWikiSubspan(ctx, op.KnowledgeID, types.JSONMap{
-		"knowledge_base_id": payload.KnowledgeBaseID,
-		"durable_resume":    true,
-	})
+	wikiSpan := restoreWikiSpan(op.Prepared.WikiSpan)
+	if wikiSpan == nil {
+		wikiSpan = s.beginWikiSubspan(ctx, op.KnowledgeID, types.JSONMap{
+			"knowledge_base_id": payload.KnowledgeBaseID,
+			"durable_resume":    true,
+		})
+	}
 	return &docIngestResult{
 		KnowledgeID:          op.KnowledgeID,
 		ProcessingGeneration: op.ProcessingGeneration,
@@ -1806,6 +2227,69 @@ func (s *wikiIngestService) getExistingPageSlugsForKnowledge(ctx context.Context
 		out[slug] = true
 	}
 	return out, nil
+}
+
+// getExistingPageProvenanceForKnowledge is the reparse-specific "before"
+// snapshot. Unlike ListPagesBySourceRef it never loads content; unlike the
+// slug-only lookup it retains old chunk citations so Reduce can replace this
+// document's exact contribution instead of accumulating stale generation IDs.
+func (s *wikiIngestService) getExistingPageProvenanceForKnowledge(
+	ctx context.Context,
+	kbID string,
+	knowledgeID string,
+) (map[string]bool, map[string]types.StringArray, error) {
+	rows, err := s.wikiService.ListSourceProvenanceBySourceRef(ctx, kbID, knowledgeID)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"wiki ingest: list existing page provenance for knowledge %s: %w",
+			knowledgeID, err,
+		)
+	}
+	if len(rows) == 0 {
+		return nil, nil, nil
+	}
+	slugs := make(map[string]bool, len(rows))
+	chunkRefs := make(map[string]types.StringArray, len(rows))
+	for _, row := range rows {
+		if row.Slug == "" || row.Slug == "index" || row.Slug == "log" {
+			continue
+		}
+		slugs[row.Slug] = true
+		if len(row.ChunkRefs) > 0 {
+			chunkRefs[row.Slug] = append(types.StringArray(nil), row.ChunkRefs...)
+		}
+	}
+	return slugs, chunkRefs, nil
+}
+
+func intersectWikiChunkRefsBySlug(
+	pageChunkRefs map[string]types.StringArray,
+	ownerChunkIDs []string,
+) map[string][]string {
+	if len(pageChunkRefs) == 0 || len(ownerChunkIDs) == 0 {
+		return nil
+	}
+	owned := make(map[string]struct{}, len(ownerChunkIDs))
+	for _, id := range ownerChunkIDs {
+		if id != "" {
+			owned[id] = struct{}{}
+		}
+	}
+	out := make(map[string][]string, len(pageChunkRefs))
+	for slug, refs := range pageChunkRefs {
+		seen := make(map[string]struct{}, len(refs))
+		for _, id := range refs {
+			if _, ok := owned[id]; !ok || id == "" {
+				continue
+			}
+			if _, duplicate := seen[id]; duplicate {
+				continue
+			}
+			seen[id] = struct{}{}
+			out[slug] = append(out[slug], id)
+		}
+	}
+	return out
 }
 
 // retractStalePages handles pages that were previously linked to this document
@@ -2627,7 +3111,12 @@ func (s *wikiIngestService) isWikiIngestGenerationStale(
 	}
 	switch kn.ParseStatus {
 	case types.ParseStatusProcessing, types.ParseStatusFinalizing, types.ParseStatusCompleted:
-		return false, nil
+		switch kn.WikiStatus {
+		case types.WikiStatusCompleted, types.WikiStatusDegraded, types.WikiStatusFailed:
+			return true, nil
+		default:
+			return false, nil
+		}
 	case types.ParseStatusPending:
 		return false, fmt.Errorf(
 			"wiki ingest: committed generation %s unexpectedly returned to pending for knowledge %s",

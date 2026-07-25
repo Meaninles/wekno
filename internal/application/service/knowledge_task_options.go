@@ -17,6 +17,10 @@ func assignNewDocumentProcessingIdentity(knowledge *types.Knowledge) {
 	knowledge.ProcessingOwner = processownership.DocumentOwner(knowledge.ID, knowledge.ProcessingGeneration)
 	knowledge.ProcessingWorkflowID = ""
 	knowledge.ProcessingFanout = nil
+	knowledge.PendingSubtasksCount = 0
+	knowledge.EnrichmentStatus = types.EnrichmentStatusNone
+	knowledge.WikiStatus = types.WikiStatusNone
+	knowledge.WikiErrorMessage = ""
 }
 
 func documentProcessOwnershipPayload(knowledge *types.Knowledge, payload *types.DocumentProcessPayload) {

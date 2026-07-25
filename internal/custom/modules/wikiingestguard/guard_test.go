@@ -28,6 +28,7 @@ CREATE TABLE knowledges (
   processing_generation TEXT NOT NULL,
   parse_status TEXT NOT NULL,
   processed_at DATETIME,
+  wiki_status TEXT NOT NULL DEFAULT 'pending',
   deleted_at DATETIME
 );
 CREATE TABLE task_pending_ops (
@@ -101,6 +102,32 @@ func TestValidateDoesNotTerminallyAcknowledgeIncompleteCurrentGeneration(t *test
 			require.Error(t, err)
 			require.Empty(t, StaleIdentities(err),
 				"incomplete current work must retry instead of being terminally acknowledged")
+		})
+	}
+}
+
+func TestValidateTerminallyAcknowledgesSettledWikiGeneration(t *testing.T) {
+	for _, status := range []string{
+		types.WikiStatusCompleted,
+		types.WikiStatusDegraded,
+		types.WikiStatusFailed,
+	} {
+		t.Run(status, func(t *testing.T) {
+			db := openGuardTestDB(t)
+			insertGuardKnowledge(t, db, "generation-1", types.ParseStatusFinalizing)
+			require.NoError(t, db.Exec(
+				"UPDATE knowledges SET wiki_status = ? WHERE id = ?",
+				status, "knowledge-1",
+			).Error)
+			identity := Identity{
+				TenantID: 42, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
+				ProcessingGeneration: "generation-1",
+			}
+
+			err := db.Transaction(func(tx *gorm.DB) error {
+				return Validate(WithValidation(context.Background(), identity), tx)
+			})
+			require.Equal(t, []Identity{identity}, StaleIdentities(err))
 		})
 	}
 }
@@ -234,11 +261,11 @@ func TestValidateScopePostgresLocksLeaseBeforeKnowledge(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"tenant_id", "knowledge_base_id", "epoch", "lease_token", "acquired_at", "updated_at",
 		}).AddRow(42, "kb-1", 9, lease.Token, time.Now(), time.Now()))
-	mock.ExpectQuery(`SELECT "id","tenant_id","knowledge_base_id","processing_generation","parse_status","processed_at","deleted_at" FROM "knowledges" WHERE id = \$1 LIMIT \$2 FOR SHARE`).
+	mock.ExpectQuery(`SELECT "id","tenant_id","knowledge_base_id","processing_generation","parse_status","processed_at","wiki_status","deleted_at" FROM "knowledges" WHERE id = \$1 LIMIT \$2 FOR SHARE`).
 		WithArgs("knowledge-1", 1).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "processed_at", "deleted_at",
-		}).AddRow("knowledge-1", 42, "kb-1", "generation-1", types.ParseStatusCompleted, time.Now(), nil))
+			"id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "processed_at", "wiki_status", "deleted_at",
+		}).AddRow("knowledge-1", 42, "kb-1", "generation-1", types.ParseStatusCompleted, time.Now(), types.WikiStatusPending, nil))
 	require.NoError(t, ValidateScope(ctx, db, 42, "kb-1"))
 	require.NoError(t, mock.ExpectationsWereMet())
 }

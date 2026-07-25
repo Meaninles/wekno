@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -21,7 +22,21 @@ type imageGenerationKnowledgeRepoStub struct {
 	knowledge      *types.Knowledge
 	calls          int
 	completed      map[string]struct{}
+	outcomes       map[string]string
 	rejectCanceled bool
+}
+
+type imageGenerationKBServiceStub struct {
+	interfaces.KnowledgeBaseService
+	kb  *types.KnowledgeBase
+	err error
+}
+
+func (s *imageGenerationKBServiceStub) GetKnowledgeBaseByIDOnly(
+	context.Context,
+	string,
+) (*types.KnowledgeBase, error) {
+	return s.kb, s.err
 }
 
 func (s *imageGenerationKnowledgeRepoStub) RecordKnowledgeFanoutCompletion(
@@ -76,6 +91,45 @@ func (s *imageGenerationKnowledgeRepoStub) KnowledgeFanoutCompletionExists(
 	return exists, nil
 }
 
+func (s *imageGenerationKnowledgeRepoStub) RecordGenerationOutcome(
+	ctx context.Context,
+	_ uint64,
+	_, _, _ string,
+	item string,
+	status string,
+	_ string,
+) (bool, error) {
+	if s.rejectCanceled && ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if s.outcomes == nil {
+		s.outcomes = make(map[string]string)
+	}
+	if _, exists := s.outcomes[item]; exists {
+		return false, nil
+	}
+	s.outcomes[item] = status
+	return true, nil
+}
+
+func (s *imageGenerationKnowledgeRepoStub) GetGenerationOutcomeAggregate(
+	context.Context, uint64, string, string, string,
+) (enrichmentoutcome.Aggregate, error) {
+	var aggregate enrichmentoutcome.Aggregate
+	for _, status := range s.outcomes {
+		aggregate.Total++
+		switch status {
+		case enrichmentoutcome.StatusFailed:
+			aggregate.Failed++
+		case enrichmentoutcome.StatusDegraded:
+			aggregate.Degraded++
+		case enrichmentoutcome.StatusCompleted:
+			aggregate.Completed++
+		}
+	}
+	return aggregate, nil
+}
+
 func (s *imageGenerationKnowledgeRepoStub) GetKnowledgeByID(context.Context, uint64, string) (*types.Knowledge, error) {
 	s.calls++
 	return s.knowledge, nil
@@ -117,6 +171,35 @@ func TestImageMultimodalMissingGenerationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestResolveImageVLMDisabledIsPermanentConfigurationFailure(t *testing.T) {
+	t.Parallel()
+
+	svc := &ImageMultimodalService{
+		kbService: &imageGenerationKBServiceStub{
+			kb: &types.KnowledgeBase{
+				ID:        "kb-1",
+				VLMConfig: types.VLMConfig{Enabled: false},
+			},
+		},
+	}
+	_, _, err := svc.resolveVLM(context.Background(), "kb-1", "")
+	if !errors.Is(err, errImageMultimodalVLMNotConfigured) {
+		t.Fatalf("resolveVLM() error = %v, want permanent VLM configuration failure", err)
+	}
+}
+
+func TestResolveImageVLMMissingKnowledgeBaseIsPermanentConfigurationFailure(t *testing.T) {
+	t.Parallel()
+
+	svc := &ImageMultimodalService{
+		kbService: &imageGenerationKBServiceStub{},
+	}
+	_, _, err := svc.resolveVLM(context.Background(), "missing-kb", "")
+	if !errors.Is(err, errImageMultimodalVLMNotConfigured) {
+		t.Fatalf("resolveVLM() error = %v, want permanent VLM configuration failure", err)
+	}
+}
+
 func TestStableImageChunkIDIsGenerationScoped(t *testing.T) {
 	payload := types.ImageMultimodalPayload{
 		TenantID: 42, KnowledgeID: "knowledge-1", KnowledgeBaseID: "kb-1",
@@ -132,6 +215,48 @@ func TestStableImageChunkIDIsGenerationScoped(t *testing.T) {
 	payload.ProcessingGeneration = "generation-2"
 	if nextGeneration := stableImageChunkID(payload, "ocr"); nextGeneration == first {
 		t.Fatal("different generations reused an image artifact ID")
+	}
+}
+
+func TestMultimodalChunkIndexInfoPreservesRetrievalFlags(t *testing.T) {
+	chunk := &types.Chunk{
+		ID:              "image-chunk",
+		KnowledgeID:     "knowledge",
+		KnowledgeBaseID: "knowledge-base",
+		Content:         "recognized image text",
+		IsEnabled:       true,
+		Flags:           types.ChunkFlagRecommended,
+	}
+
+	index := multimodalChunkIndexInfo(chunk)
+	if index.SourceID != chunk.ID || index.ChunkID != chunk.ID {
+		t.Fatalf("index identity = source %q chunk %q, want %q", index.SourceID, index.ChunkID, chunk.ID)
+	}
+	if !index.IsEnabled {
+		t.Fatal("multimodal index unexpectedly disabled")
+	}
+	if !index.IsRecommended {
+		t.Fatal("multimodal index lost recommended flag")
+	}
+}
+
+func TestTerminalImageFailureOutcomeSurvivesCancelledWorkerContext(t *testing.T) {
+	repo := &imageGenerationKnowledgeRepoStub{rejectCanceled: true}
+	svc := &ImageMultimodalService{knowledgeRepo: repo}
+	payload := types.ImageMultimodalPayload{
+		TenantID:             42,
+		KnowledgeID:          "knowledge-1",
+		KnowledgeBaseID:      "kb-1",
+		ProcessingGeneration: "generation-1",
+		ImageIndex:           3,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := svc.recordTerminalImageFailure(ctx, payload, errors.New("provider failed")); err != nil {
+		t.Fatalf("recordTerminalImageFailure() error = %v", err)
+	}
+	if status := repo.outcomes["multimodal.image[3]"]; status != enrichmentoutcome.StatusFailed {
+		t.Fatalf("terminal outcome = %q, want failed", status)
 	}
 }
 

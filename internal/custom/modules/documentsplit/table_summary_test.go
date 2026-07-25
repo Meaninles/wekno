@@ -64,3 +64,24 @@ func TestBuildTableSummaryCorpusBoundsLongSamples(t *testing.T) {
 	require.LessOrEqual(t, len([]rune(corpus.SampleDescription)), 12_000)
 	require.Contains(t, corpus.SampleDescription, "[…]")
 }
+
+func TestBuildTableSummaryCorpusInfersSchemaFromOrdinaryExcelRows(t *testing.T) {
+	plan := &Plan{
+		SourceName: "控制要求.xls", SourceType: "xls",
+		SourceSize: 4_096, PartCount: 1,
+	}
+	knowledge := &types.Knowledge{
+		FileName: "控制要求.xls", FileType: "xls", FileSize: 4_096,
+	}
+	samples := []*types.Chunk{{
+		ChunkIndex: 0,
+		Content:    "标识: WKN-FORMAT-XLS-7319,责任部门: 数字化管理部门,完成时限: 三个工作日,控制要求: 未经授权不得跳过安全检查",
+	}}
+
+	corpus, err := BuildTableSummaryCorpus(plan, knowledge, samples, 1, 8_000)
+	require.NoError(t, err)
+	require.Contains(t, corpus.SchemaDescription, "Observed parser fields")
+	require.Contains(t, corpus.SchemaDescription, "责任部门")
+	require.Contains(t, corpus.SchemaDescription, "控制要求")
+	require.Contains(t, corpus.SampleDescription, "WKN-FORMAT-XLS-7319")
+}

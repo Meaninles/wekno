@@ -129,18 +129,20 @@ func cleanupTestContext() context.Context {
 	return context.WithValue(ctx, types.TenantInfoContextKey, tenant)
 }
 
-func cleanupAuxRegistry(t *testing.T, fileSvc interfaces.FileService) *knowledgeaux.Registry {
+func cleanupAuxRegistry(t *testing.T, fileSvc interfaces.FileService) (*knowledgeaux.Registry, *gorm.DB) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:cleanup-aux-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&types.Tenant{}, &types.KnowledgeBase{}, &types.TaskPendingOp{}))
+	require.NoError(t, db.AutoMigrate(
+		&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.TaskPendingOp{},
+	))
 	require.NoError(t, db.Create(&types.Tenant{ID: 7, Name: "tenant"}).Error)
 	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb-1", TenantID: 7, Name: "kb"}).Error)
 	return knowledgeaux.NewWithResolver(db, func(
 		context.Context, *types.Tenant, string,
 	) (interfaces.FileService, string, error) {
 		return fileSvc, "local", nil
-	})
+	}), db
 }
 
 func TestCleanupKnowledgeResourcesFailsClosedWhenKBLookupFails(t *testing.T) {
@@ -148,12 +150,13 @@ func TestCleanupKnowledgeResourcesFailsClosedWhenKBLookupFails(t *testing.T) {
 	chunkRepo := &deleteImageInfoRepoStub{}
 	chunkSvc := &cleanupChunkServiceStub{repo: chunkRepo}
 	fileSvc := &cleanupFileServiceStub{}
+	auxRegistry, _ := cleanupAuxRegistry(t, fileSvc)
 	svc := &knowledgeService{
 		kbService:    &cleanupKBServiceStub{err: loadErr},
 		chunkRepo:    chunkRepo,
 		chunkService: chunkSvc,
 		fileSvc:      fileSvc,
-		auxObjects:   cleanupAuxRegistry(t, fileSvc),
+		auxObjects:   auxRegistry,
 		graphEngine:  cleanupGraphStub{},
 	}
 
@@ -173,22 +176,37 @@ func TestCleanupKnowledgeResourcesReturnsImageDeleteErrorAndRetainsRetrySnapshot
 	}}}
 	chunkSvc := &cleanupChunkServiceStub{repo: chunkRepo}
 	fileSvc := &cleanupFileServiceStub{deleteErr: imageDeleteErr}
+	auxRegistry, auxDB := cleanupAuxRegistry(t, fileSvc)
+	owner := &types.Knowledge{
+		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1",
+		Type: "file", ParseStatus: types.ParseStatusCompleted,
+		ProcessingGeneration: "generation-1",
+	}
+	require.NoError(t, auxDB.Create(owner).Error)
+	_, err := auxRegistry.Register(context.Background(), knowledgeaux.Object{
+		TenantID: 7, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
+		ProcessingGeneration: "generation-1",
+		Path:                 "local://7/knowledge-1/image.png",
+		FallbackProvider:     "local", Kind: knowledgeaux.KindFanoutImage,
+	}, fileSvc)
+	require.NoError(t, err)
 	svc := &knowledgeService{
 		kbService:    &cleanupKBServiceStub{kb: &types.KnowledgeBase{ID: "kb-1", TenantID: 7}},
 		chunkRepo:    chunkRepo,
 		chunkService: chunkSvc,
 		fileSvc:      fileSvc,
-		auxObjects:   cleanupAuxRegistry(t, fileSvc),
+		auxObjects:   auxRegistry,
 		graphEngine:  cleanupGraphStub{},
 	}
 	knowledge := &types.Knowledge{
 		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1", ParseStatus: types.ParseStatusCompleted,
+		ProcessingGeneration: "generation-1",
 	}
 
-	err := svc.cleanupKnowledgeResources(cleanupTestContext(), knowledge)
-	require.ErrorIs(t, err, knowledgeaux.ErrBindingMissing)
 	err = svc.cleanupKnowledgeResources(cleanupTestContext(), knowledge)
-	require.ErrorIs(t, err, knowledgeaux.ErrBindingMissing)
-	assert.Equal(t, 2, chunkSvc.deleteCalls)
-	assert.Zero(t, fileSvc.deleteCalls)
+	require.ErrorIs(t, err, imageDeleteErr)
+	err = svc.cleanupKnowledgeResources(cleanupTestContext(), knowledge)
+	require.ErrorIs(t, err, imageDeleteErr)
+	assert.Zero(t, chunkSvc.deleteCalls)
+	assert.Equal(t, 2, fileSvc.deleteCalls)
 }

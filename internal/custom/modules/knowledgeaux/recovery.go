@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 const (
 	defaultRecoveryInterval = time.Minute
 	defaultRecoveryTimeout  = 30 * time.Second
+	defaultRecoveryDelay    = 5 * time.Second
 	// Zero means the one-time migration is bounded by shutdown/caller
 	// cancellation only. A fixed default timeout can make a large database
 	// restart the full multi-pass scan forever without ever completing.
@@ -34,7 +36,9 @@ const (
 type RecoveryConfig struct {
 	ScanInterval      time.Duration
 	ScanTimeout       time.Duration
+	InitialDelay      time.Duration
 	BackfillTimeout   time.Duration
+	BackfillEnabled   bool
 	PendingOwnerGrace time.Duration
 	FAQEntriesMaxAge  time.Duration
 	FAQExportMaxAge   time.Duration
@@ -50,7 +54,9 @@ func DefaultRecoveryConfig() RecoveryConfig {
 	return RecoveryConfig{
 		ScanInterval:      defaultRecoveryInterval,
 		ScanTimeout:       defaultRecoveryTimeout,
+		InitialDelay:      envDuration("KNOWLEDGE_AUX_RECOVERY_INITIAL_DELAY", defaultRecoveryDelay),
 		BackfillTimeout:   backfillTimeout,
+		BackfillEnabled:   envBool("KNOWLEDGE_AUX_LEGACY_BACKFILL_ENABLED", false),
 		PendingOwnerGrace: defaultPendingOwnerGrace,
 		FAQEntriesMaxAge:  defaultFAQEntriesMaxAge,
 		FAQExportMaxAge:   defaultFAQExportMaxAge,
@@ -65,6 +71,9 @@ func (config RecoveryConfig) normalized() RecoveryConfig {
 	if config.ScanTimeout <= 0 {
 		config.ScanTimeout = defaults.ScanTimeout
 	}
+	if config.InitialDelay <= 0 {
+		config.InitialDelay = defaults.InitialDelay
+	}
 	if config.BackfillTimeout < 0 {
 		config.BackfillTimeout = defaults.BackfillTimeout
 	}
@@ -78,6 +87,30 @@ func (config RecoveryConfig) normalized() RecoveryConfig {
 		config.FAQExportMaxAge = defaults.FAQExportMaxAge
 	}
 	return config
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 type Recovery struct {
@@ -128,17 +161,7 @@ func (r *Recovery) Start(parent context.Context) {
 			}
 			r.mu.Unlock()
 		}()
-		r.runCycle(ctx)
-		ticker := time.NewTicker(r.config.ScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				r.runCycle(ctx)
-			}
-		}
+		r.runLeaderLoop(ctx)
 	}()
 }
 
@@ -157,7 +180,11 @@ func (r *Recovery) Stop() {
 }
 
 func (r *Recovery) runCycle(parent context.Context) {
-	if !r.bindingBackfillComplete() {
+	if !r.config.BackfillEnabled {
+		r.backfillMu.Lock()
+		r.backfillComplete = true
+		r.backfillMu.Unlock()
+	} else if !r.bindingBackfillComplete() {
 		if _, err := r.RunBackfill(parent); err != nil && parent.Err() == nil {
 			logger.Errorf(parent, "[knowledge aux] storage binding backfill retry failed: %v", err)
 		}

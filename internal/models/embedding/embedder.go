@@ -36,6 +36,29 @@ type EmbedderPooler interface {
 	BatchEmbedWithPool(ctx context.Context, model Embedder, texts []string) ([][]float32, error)
 }
 
+// InputTokenLimiter is an optional capability used by the chunking/indexing
+// pipeline to keep the complete embedding input (title + heading + content)
+// within the configured model window.
+type InputTokenLimiter interface {
+	GetMaxInputTokens() int
+}
+
+func MaxInputTokens(model Embedder) int {
+	if limiter, ok := model.(InputTokenLimiter); ok {
+		return limiter.GetMaxInputTokens()
+	}
+	return 0
+}
+
+type inputLimitedEmbedder struct {
+	Embedder
+	maxInputTokens int
+}
+
+func (e *inputLimitedEmbedder) GetMaxInputTokens() int {
+	return e.maxInputTokens
+}
+
 // EmbedderType represents the embedder type
 type EmbedderType string
 
@@ -96,6 +119,14 @@ func NewEmbedder(config Config, pooler EmbedderPooler, ollamaService *ollama.Oll
 	if langfuse.GetManager().Enabled() {
 		e = &langfuseEmbedder{inner: e}
 	}
+	maxInputTokens := config.TruncatePromptTokens
+	if maxInputTokens <= 0 {
+		// Existing providers already default their request-side truncation to
+		// roughly this value. Expose the same conservative budget to chunking
+		// instead of allowing a 7,500-rune chunk to be silently truncated.
+		maxInputTokens = 512
+	}
+	e = &inputLimitedEmbedder{Embedder: e, maxInputTokens: maxInputTokens}
 	return e, nil
 }
 

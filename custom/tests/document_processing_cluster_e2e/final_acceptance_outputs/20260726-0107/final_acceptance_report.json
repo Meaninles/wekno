@@ -1,0 +1,172 @@
+{
+  "generated_at": "2026-07-26T01:07:11+08:00",
+  "result": "passed",
+  "scope": "multi-instance document parsing, all derivative stages, durable queue, failure recovery, UI status/filter/preview/graph, and real dialogue recall",
+  "topology": {
+    "application_instances": 5,
+    "document_concurrency_per_instance": 4,
+    "total_document_capacity": 20,
+    "docreader_instances": 3,
+    "ready_application_instances": 5,
+    "healthy_docreader_instances": 3,
+    "application_restart_count": 0,
+    "docreader_restart_count": 0,
+    "oom_killed_instances": 0
+  },
+  "knowledge_bases": [
+    {
+      "name": "公司制度",
+      "id": "efee9ac7-b68b-413e-b09e-77501032a194",
+      "documents": 632,
+      "parse_completed": 632,
+      "summary_completed": 632,
+      "enrichment_completed": 632,
+      "wiki_completed": 632,
+      "not_fully_completed": 0,
+      "chunks": 7871,
+      "embeddings": 13267,
+      "generated_questions": 5396,
+      "documents_with_questions": 632,
+      "published_wiki_pages": 1660,
+      "wiki_referenced_documents": 632,
+      "preserved_for_user": true
+    },
+    {
+      "name": "数据资料",
+      "id": "d1f8c4cd-ec47-41c9-aa58-6592adbaecf6",
+      "documents": 11,
+      "parse_completed": 11,
+      "summary_completed": 11,
+      "enrichment_completed": 11,
+      "wiki_completed": 11,
+      "not_fully_completed": 0,
+      "chunks": 29608,
+      "embeddings": 30725,
+      "generated_questions": 1117,
+      "documents_with_questions": 11,
+      "published_wiki_pages": 53,
+      "wiki_referenced_documents": 11
+    },
+    {
+      "name": "全格式",
+      "id": "1651bae5-56f5-4d86-85a8-c3df8874f8ad",
+      "documents": 27,
+      "parse_completed": 27,
+      "summary_completed": 27,
+      "enrichment_completed": 27,
+      "wiki_completed": 27,
+      "not_fully_completed": 0,
+      "chunks": 74,
+      "embeddings": 101,
+      "generated_questions": 27,
+      "documents_with_questions": 27,
+      "published_wiki_pages": 53,
+      "wiki_referenced_documents": 27
+    }
+  ],
+  "durable_queue": {
+    "pending": 0,
+    "active": 0,
+    "scheduled": 0,
+    "retry": 0,
+    "aggregating": 0,
+    "latency_ms": 0,
+    "nonterminal_database_workflows": 0,
+    "expired_active_leases": 0,
+    "duplicate_processing_generations": 0,
+    "ready_instances": 5,
+    "workflow_terminal_counts": {
+      "completed": 2744,
+      "cancelled": 192,
+      "failed": 185,
+      "superseded": 1
+    },
+    "note": "Archived and failed queue counters are historical fault-injection/retry statistics; no current task remains queued or leased."
+  },
+  "final_browser_recall": {
+    "session_id": "7ece19c0-3b2e-43d2-ad7b-af7c6b81046c",
+    "agent_id": "9d6d0168-0234-4aca-bfe9-940e69a146ef",
+    "agent_enabled": true,
+    "model_id": "10659f1e-87c5-4ceb-bdc2-49232217c091",
+    "model_name": "deepseek-v4-flash-int8",
+    "model_display_name": "DeepSeek-V4-Flash-INT8 LiteLLM",
+    "agent_iterations": 2,
+    "tool_calls": 3,
+    "duration_ms": 18345,
+    "answer_completed": true,
+    "answer_content_length": 1028,
+    "evidence_checks": {
+      "classified_computers_cannot_access_internal_or_external_networks": true,
+      "classified_and_nonclassified_computers_cannot_cross_use_usb": true,
+      "unknown_or_unchecked_media_is_forbidden": true,
+      "p2p_long_duration_is_over_30_minutes": true
+    },
+    "answer_checks": {
+      "classified_computers_cannot_access_internal_or_external_networks": true,
+      "classified_and_nonclassified_computers_cannot_cross_use_usb": true,
+      "unknown_or_unchecked_media_is_forbidden": true,
+      "p2p_long_duration_is_over_30_minutes": true
+    },
+    "frontend_model_survived_route_transition": true,
+    "database_model_matches_frontend": true,
+    "prompt_content_changed": false,
+    "prompt_hash_before": "50b23cc61d1eac5c6d50cc0f017b9e4c",
+    "prompt_hash_after": "50b23cc61d1eac5c6d50cc0f017b9e4c"
+  },
+  "resource_snapshot": {
+    "application_memory_mib": [1001.0, 600.3, 596.1, 597.1, 650.8],
+    "docreader_memory_mib": [87.5, 100.5, 77.55],
+    "postgres_memory_gib": 2.214,
+    "redis_memory_mib": 29.57,
+    "neo4j_memory_mib": 761.1,
+    "litellm_memory_mib": 745.3,
+    "idle_cpu_percent_max": 0.82
+  },
+  "recent_log_audit": {
+    "window_minutes": 20,
+    "application_and_worker_errors": 0,
+    "docreader_errors": 0,
+    "panic_fatal_deadlock_race_or_oom_events": 0
+  },
+  "tests": {
+    "frontend_model_and_agent_state_regressions": "8/8 passed",
+    "frontend_type_check": "passed",
+    "frontend_production_build": "passed",
+    "targeted_go_race_tests": "passed",
+    "durable_failover": "passed",
+    "multi_user_multi_kb_recall": "passed",
+    "same_user_same_kb_recall": "passed",
+    "same_user_multi_kb_recall": "passed",
+    "browser_e2e": "passed"
+  },
+  "known_nonblocking_external_or_out_of_scope_findings": [
+    {
+      "component": "LiteLLM token counting",
+      "finding": "The proxy receives 405 from /v1/responses/input_tokens and falls back to its local tokenizer.",
+      "impact": "Log noise and a small token-counting overhead; chat and retrieval requests still return 200 and the final acceptance conversation completed.",
+      "reason_not_changed": "This is inside the upstream LiteLLM runtime rather than WeKnora parsing or retrieval code; changing it safely requires an upstream LiteLLM version/runtime change.",
+      "workaround": "Keep local-tokenizer fallback enabled and monitor the upstream LiteLLM fix."
+    },
+    {
+      "component": "LiteLLM aiohttp lifecycle",
+      "finding": "The upstream proxy occasionally logs an unclosed client-session warning.",
+      "impact": "No observed request failure, restart, OOM, or queue blockage in this run.",
+      "reason_not_changed": "The warning originates in the third-party LiteLLM container runtime and is not a WeKnora-owned client session.",
+      "workaround": "Monitor file descriptors and memory; adopt a LiteLLM release containing the upstream lifecycle fix."
+    },
+    {
+      "component": "Historical test data",
+      "finding": "Twenty-two old open processing spans remain in unrelated legacy test knowledge bases, while their current generations are terminal.",
+      "impact": "None on current recovery or scheduling because generation and latest-attempt fencing excludes them.",
+      "reason_not_changed": "Mutating unrelated historical user/test artifacts was outside the authorized target knowledge bases.",
+      "workaround": "Optionally archive those legacy test knowledge bases in a separate maintenance task."
+    },
+    {
+      "component": "Frontend bundle",
+      "finding": "Vite reports several chunks larger than 500 kB.",
+      "impact": "Potential first-load cost; no functional failure or large-document preview/graph freeze was observed after progressive loading changes.",
+      "reason_not_changed": "A broad bundle-splitting refactor is outside document parsing, queue reliability, and recall acceptance scope.",
+      "workaround": "Schedule route-level code splitting and manual vendor chunks as a separate frontend performance task."
+    }
+  ]
+}

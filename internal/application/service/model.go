@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/asr"
@@ -43,6 +46,8 @@ type modelService struct {
 	ollamaService *ollama.OllamaService
 	pooler        embedding.EmbedderPooler
 	tenantService interfaces.TenantService
+	admission     *modeladmission.Manager
+	contentCache  *contentcache.Store
 }
 
 // NewModelService creates a new model service instance
@@ -52,6 +57,8 @@ func NewModelService(repo interfaces.ModelRepository,
 	ollamaService *ollama.OllamaService,
 	pooler embedding.EmbedderPooler,
 	tenantService interfaces.TenantService,
+	admission *modeladmission.Manager,
+	contentCache *contentcache.Store,
 ) interfaces.ModelService {
 	return &modelService{
 		repo:          repo,
@@ -60,7 +67,31 @@ func NewModelService(repo interfaces.ModelRepository,
 		ollamaService: ollamaService,
 		pooler:        pooler,
 		tenantService: tenantService,
+		admission:     admission,
+		contentCache:  contentCache,
 	}
+}
+
+func embeddingContentCacheVersion(model *types.Model) string {
+	if model == nil {
+		return ""
+	}
+	// API keys and custom headers are credentials, not semantic model
+	// identity. The endpoint/model/provider/dimension and extra behavior are
+	// included so a backend or configuration switch cannot reuse old vectors.
+	extra, _ := json.Marshal(model.Parameters.ExtraConfig)
+	return contentcache.Digest(
+		"embedding-model-v1",
+		model.ID,
+		model.Name,
+		string(model.Source),
+		model.Parameters.Provider,
+		model.Parameters.BaseURL,
+		strconv.Itoa(model.Parameters.EmbeddingParameters.Dimension),
+		strconv.Itoa(model.Parameters.EmbeddingParameters.TruncatePromptTokens),
+		strconv.FormatBool(model.Parameters.EmbeddingParameters.SupportsDimensionOverride),
+		string(extra),
+	)
 }
 
 // decryptAppSecret 解密 AppSecret（如果为空或 cryptoSvc 为空则原样返回）
@@ -489,7 +520,16 @@ func (s *modelService) GetEmbeddingModel(ctx context.Context, modelId string) (e
 	}
 
 	logger.Info(ctx, "Embedding model initialized successfully")
-	return embedder, nil
+	admitted := modeladmission.WrapEmbedder(
+		s.admission,
+		modeladmission.SpecForModel(modeladmission.KindEmbedding, model, appSecret),
+		embedder,
+	)
+	return contentcache.WrapEmbedder(
+		s.contentCache,
+		embeddingContentCacheVersion(model),
+		admitted,
+	), nil
 }
 
 // GetEmbeddingModelForTenant retrieves and initializes an embedding model for a specific tenant
@@ -537,7 +577,16 @@ func (s *modelService) GetEmbeddingModelForTenant(ctx context.Context, modelId s
 	}
 
 	logger.Info(ctx, "Cross-tenant embedding model initialized successfully")
-	return embedder, nil
+	admitted := modeladmission.WrapEmbedder(
+		s.admission,
+		modeladmission.SpecForModel(modeladmission.KindEmbedding, model, appSecret),
+		embedder,
+	)
+	return contentcache.WrapEmbedder(
+		s.contentCache,
+		embeddingContentCacheVersion(model),
+		admitted,
+	), nil
 }
 
 // GetRerankModel retrieves and initializes a reranking model instance
@@ -566,7 +615,11 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
 	}
 
 	logger.Info(ctx, "Rerank model initialized successfully")
-	return reranker, nil
+	return modeladmission.WrapReranker(
+		s.admission,
+		modeladmission.SpecForModel(modeladmission.KindRerank, model, appSecret),
+		reranker,
+	), nil
 }
 
 // GetChatModel retrieves and initializes a chat model instance
@@ -608,7 +661,11 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
 		return nil, fmt.Errorf("%w for model %s: %w", ErrChatModelConfiguration, model.ID, err)
 	}
 
-	return chatModel, nil
+	return modeladmission.WrapChat(
+		s.admission,
+		modeladmission.SpecForModel(modeladmission.KindChat, model, appSecret),
+		chatModel,
+	), nil
 }
 
 // GetVLMModel retrieves and initializes a vision language model instance.
@@ -645,7 +702,11 @@ func (s *modelService) GetVLMModel(ctx context.Context, modelId string) (vlm.VLM
 		return nil, err
 	}
 
-	return vlmModel, nil
+	return modeladmission.WrapVLM(
+		s.admission,
+		modeladmission.SpecForModel(modeladmission.KindVLM, model, appSecret),
+		vlmModel,
+	), nil
 }
 
 // Note: default model selection logic has been removed; models no longer
@@ -683,7 +744,11 @@ func (s *modelService) GetASRModel(ctx context.Context, modelId string) (asr.ASR
 		return nil, err
 	}
 
-	return sttModel, nil
+	return modeladmission.WrapASR(
+		s.admission,
+		modeladmission.SpecForModel(modeladmission.KindASR, model, ""),
+		sttModel,
+	), nil
 }
 
 func formatModelInUseMessage(kbCount, agentCount int64) string {

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -15,9 +17,10 @@ import (
 
 type summaryFinalizerFailureRepo struct {
 	interfaces.KnowledgeRepository
-	knowledge   *types.Knowledge
-	finalizeErr error
-	casValues   map[string]interface{}
+	knowledge     *types.Knowledge
+	finalizeErr   error
+	casValues     map[string]interface{}
+	finalizeCalls int
 }
 
 func (r *summaryFinalizerFailureRepo) GetKnowledgeByID(
@@ -37,7 +40,18 @@ func (r *summaryFinalizerFailureRepo) FinalizeSubtaskGenerationItem(
 	string,
 	string,
 ) (int, bool, error) {
+	r.finalizeCalls++
 	return 1, false, r.finalizeErr
+}
+
+func (r *summaryFinalizerFailureRepo) FinalizeSubtaskGenerationItemOutcome(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID, knowledgeBaseID, generation, itemID, _, _ string,
+) (int, bool, error) {
+	return r.FinalizeSubtaskGenerationItem(
+		ctx, tenantID, knowledgeID, knowledgeBaseID, generation, itemID,
+	)
 }
 
 func (r *summaryFinalizerFailureRepo) CompareAndSwapKnowledgeProcessingGeneration(
@@ -114,6 +128,51 @@ func TestSummaryHandlerRetriesWhenDurableSubtaskFinalizerFails(t *testing.T) {
 		asynq.NewTask(types.TypeSummaryGeneration, payload),
 	)
 	require.ErrorIs(t, err, dbErr, "the task must not ACK before its durable slot is drained")
+}
+
+func TestProviderOutageNeverDrainsGenerationItemAtHistoricalFinalAttempt(t *testing.T) {
+	repo := &summaryFinalizerFailureRepo{}
+	providerErr := &modeladmission.ProviderUnavailableError{
+		Kind:       modeladmission.KindChat,
+		RetryAfter: time.Minute,
+		Cause:      errors.New("upstream 503"),
+	}
+	err := finalizeSubtaskDetached(
+		context.Background(),
+		repo,
+		7,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		"summary",
+		providerErr,
+		providerErr,
+		false,
+		false,
+		true,
+	)
+	require.NoError(t, err)
+	assert.Zero(t, repo.finalizeCalls)
+}
+
+func TestShutdownCancellationNeverDrainsGenerationItemAtHistoricalFinalAttempt(t *testing.T) {
+	repo := &summaryFinalizerFailureRepo{}
+	err := finalizeSubtaskDetached(
+		context.Background(),
+		repo,
+		7,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		"graph_chunk[0]",
+		context.Canceled,
+		context.Canceled,
+		false,
+		false,
+		true,
+	)
+	require.NoError(t, err)
+	assert.Zero(t, repo.finalizeCalls)
 }
 
 func TestSummaryWithoutModelClearsPendingStatusInExactGeneration(t *testing.T) {

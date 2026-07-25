@@ -79,6 +79,9 @@ func BuildTableSummaryCorpus(
 	coordinates := make([]tableCoordinate, len(samples))
 	for index, chunk := range samples {
 		coordinates[index] = parseTableCoordinate(chunk)
+		if strings.TrimSpace(coordinates[index].HeaderContext) == "" {
+			coordinates[index].HeaderContext = inferTableHeaderContext(chunk)
+		}
 	}
 	coverageCoordinates := coordinates
 	coverageIsComplete := false
@@ -218,6 +221,73 @@ func parseTableCoordinate(chunk *types.Chunk) tableCoordinate {
 		return coordinate
 	}
 	return parseTableLocator(chunk.SourceLocator)
+}
+
+// inferTableHeaderContext recovers a bounded schema hint from parser-emitted
+// rows when an ordinary (non-physically-split) table has no source locator.
+// ExcelParser emits "field: value" pairs, while CSV/Markdown parsers commonly
+// emit pipe-delimited rows. The hint is metadata only; the original sample is
+// still included verbatim in the bounded corpus for the model to inspect.
+func inferTableHeaderContext(chunk *types.Chunk) string {
+	if chunk == nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(chunk.Content), "\n")
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		fields := make([]string, 0, 16)
+		for _, pair := range strings.Split(line, ",") {
+			key, _, ok := strings.Cut(pair, ":")
+			key = strings.TrimSpace(key)
+			if !ok || key == "" || len([]rune(key)) > 80 || containsString(fields, key) {
+				continue
+			}
+			fields = append(fields, key)
+			if len(fields) == 16 {
+				break
+			}
+		}
+		if len(fields) >= 2 {
+			return "Observed parser fields: " + strings.Join(fields, ", ")
+		}
+
+		if strings.Count(line, "|") >= 2 {
+			cells := strings.Split(strings.Trim(line, "|"), "|")
+			fields = fields[:0]
+			for _, cell := range cells {
+				cell = strings.TrimSpace(cell)
+				if cell == "" || isMarkdownTableSeparator(cell) || containsString(fields, cell) {
+					continue
+				}
+				fields = append(fields, boundedHeadTail(cell, 80))
+				if len(fields) == 16 {
+					break
+				}
+			}
+			if len(fields) >= 2 {
+				return "Observed table header: " + strings.Join(fields, ", ")
+			}
+		}
+		break
+	}
+	return ""
+}
+
+func isMarkdownTableSeparator(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r != '-' && r != ':' && r != ' ' {
+			return false
+		}
+	}
+	return strings.Contains(value, "-")
 }
 
 func parseTableLocator(raw []byte) tableCoordinate {

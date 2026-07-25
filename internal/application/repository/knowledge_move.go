@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -71,6 +72,10 @@ func (r *knowledgeRepository) PrepareKnowledgeMoveReparseRecovery(
 			"processing_owner":       newOwner,
 			"processing_workflow_id": "",
 			"processing_fanout":      nil,
+			"pending_subtasks_count": 0,
+			"enrichment_status":      types.EnrichmentStatusNone,
+			"wiki_status":            types.WikiStatusNone,
+			"wiki_error_message":     "",
 			"error_message":          newMarker,
 			"updated_at":             updatedAt,
 		})
@@ -163,6 +168,14 @@ func (r *knowledgeRepository) FinalizeReuseVectorKnowledgeMove(
 			Update("knowledge_base_id", targetKnowledgeBaseID).Error; err != nil {
 			return err
 		}
+		if err := tx.Model(&enrichmentoutcome.Outcome{}).
+			Where(
+				"tenant_id = ? AND knowledge_id = ? AND knowledge_base_id = ?",
+				tenantID, knowledgeID, sourceKnowledgeBaseID,
+			).
+			Update("knowledge_base_id", targetKnowledgeBaseID).Error; err != nil {
+			return err
+		}
 		moved = true
 		return nil
 	})
@@ -233,6 +246,9 @@ func (r *knowledgeRepository) FinalizeReparseKnowledgeMove(
 					"description":            "",
 					"processed_at":           nil,
 					"pending_subtasks_count": 0,
+					"enrichment_status":      types.EnrichmentStatusNone,
+					"wiki_status":            types.WikiStatusNone,
+					"wiki_error_message":     "",
 					"processing_fanout":      nil,
 					"processing_workflow_id": processingWorkflowID,
 					"storage_size":           0,
@@ -267,6 +283,10 @@ func (r *knowledgeRepository) FinalizeReparseKnowledgeMove(
 
 			if err := tx.Where("tenant_id = ? AND knowledge_id = ?", tenantID, knowledgeID).
 				Delete(&types.KnowledgeFanoutCompletion{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("tenant_id = ? AND knowledge_id = ?", tenantID, knowledgeID).
+				Delete(&enrichmentoutcome.Outcome{}).Error; err != nil {
 				return err
 			}
 			moved = true
@@ -319,6 +339,9 @@ func (r *knowledgeRepository) FailKnowledgeMoveGeneration(
 			"parse_status":           types.ParseStatusFailed,
 			"error_message":          errorMessage,
 			"pending_subtasks_count": 0,
+			"enrichment_status":      types.EnrichmentStatusNone,
+			"wiki_status":            types.WikiStatusNone,
+			"wiki_error_message":     "",
 			"processing_owner":       "",
 			"processing_fanout":      nil,
 			"updated_at":             time.Now(),

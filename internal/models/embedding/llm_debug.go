@@ -29,7 +29,10 @@ func (d *debugEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]flo
 }
 
 func (d *debugEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, texts []string) ([][]float32, error) {
-	return d.inner.BatchEmbedWithPool(ctx, d, texts)
+	// Preserve an outer admission/caching wrapper supplied by the caller.
+	// Replacing model with d here bypassed those wrappers for every pooled
+	// provider batch.
+	return d.inner.BatchEmbedWithPool(ctx, model, texts)
 }
 
 func (d *debugEmbedder) GetModelName() string { return d.inner.GetModelName() }

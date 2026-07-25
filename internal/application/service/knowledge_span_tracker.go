@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
@@ -273,11 +274,23 @@ func (t *spanTracker) takeStart(spanID string) (time.Time, bool) {
 	return v, ok
 }
 
-func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTraceID string) (*Span, int, error) {
-	attempt, err := t.repo.NextAttempt(ctx, knowledgeID)
-	if err != nil {
-		return nil, 0, err
+func executionSpanMetadata(ctx context.Context, base types.JSONMap) types.JSONMap {
+	execution, ok := pipelineobs.ExecutionFromContext(ctx)
+	if !ok {
+		return base
 	}
+	if base == nil {
+		base = types.JSONMap{}
+	}
+	base[pipelineobs.ExecutorInstanceIDMetadataKey] = execution.InstanceID
+	base[pipelineobs.ExecutorBootIDMetadataKey] = execution.BootID
+	if execution.TaskType != "" {
+		base[pipelineobs.ExecutorTaskTypeMetadataKey] = execution.TaskType
+	}
+	return base
+}
+
+func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTraceID string) (*Span, int, error) {
 	now := time.Now()
 	rootID := newSpanID()
 	meta := types.JSONMap{}
@@ -285,9 +298,9 @@ func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTrac
 		// The frontend renders a "open in Langfuse" link from this.
 		meta["langfuse_trace_id"] = langfuseTraceID
 	}
+	meta = executionSpanMetadata(ctx, meta)
 	row := &types.KnowledgeProcessingSpan{
 		KnowledgeID: knowledgeID,
-		Attempt:     attempt,
 		SpanID:      rootID,
 		Name:        "knowledge_processing",
 		Kind:        types.SpanKindRoot,
@@ -295,9 +308,21 @@ func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTrac
 		Metadata:    meta,
 		StartedAt:   &now,
 	}
-	if err := t.repo.Upsert(ctx, row); err != nil {
+	attempt, superseded, err := t.repo.CreateNextAttemptRoot(
+		ctx,
+		row,
+		"SUPERSEDED_ATTEMPT",
+		"a newer document-processing attempt was accepted",
+	)
+	if err != nil {
 		logger.Warnf(ctx, "[SpanTracker] OpenAttempt failed kid=%s: %v", knowledgeID, err)
 		return nil, attempt, err
+	}
+	if superseded > 0 {
+		logger.Infof(ctx,
+			"[SpanTracker] OpenAttempt superseded %d orphaned span(s) across all older attempts for kid=%s attempt=%d",
+			superseded, knowledgeID, attempt,
+		)
 	}
 	t.recordStart(rootID, now)
 	t.touchKnowledgeHeartbeat(ctx, knowledgeID, types.SpanKindRoot)
@@ -374,6 +399,7 @@ func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attemp
 			Kind:         existing.Kind,
 			Status:       types.SpanStatusRunning,
 			Input:        input,
+			Metadata:     executionSpanMetadata(ctx, nil),
 			Output:       nil,
 			StartedAt:    &now,
 			FinishedAt:   nil,
@@ -406,6 +432,7 @@ func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attemp
 		Kind:         types.SpanKindStage,
 		Status:       types.SpanStatusRunning,
 		Input:        input,
+		Metadata:     executionSpanMetadata(ctx, nil),
 		StartedAt:    &now,
 	}
 	if err := t.repo.Upsert(ctx, row); err != nil {
@@ -453,6 +480,7 @@ func (t *spanTracker) BeginSubSpan(ctx context.Context, parent *Span, name, kind
 		Kind:         kind,
 		Status:       types.SpanStatusRunning,
 		Input:        input,
+		Metadata:     executionSpanMetadata(ctx, nil),
 		StartedAt:    &now,
 	}
 	if err := t.repo.Upsert(ctx, row); err != nil {

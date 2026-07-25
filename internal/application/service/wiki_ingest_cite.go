@@ -3,12 +3,15 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/agent"
+	"github.com/Tencent/WeKnora/internal/custom/modules/llmjson"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workloadbudget"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -31,21 +34,21 @@ const (
 // citationBatchResult is the JSON shape we expect back from one invocation of
 // WikiChunkCitationPrompt.
 type citationBatchResult struct {
-	Citations map[string][]string   `json:"citations"`
-	NewSlugs  []newSlugFromCitation `json:"new_slugs"`
+	Citations map[string]llmjson.StringList `json:"citations"`
+	NewSlugs  []newSlugFromCitation         `json:"new_slugs"`
 }
 
 // newSlugFromCitation is the shape of an entry in the "new_slugs" array of
 // WikiChunkCitationPrompt. Mirrors extractedItem but also carries a "type"
 // tag because this prompt emits entities and concepts in a single array.
 type newSlugFromCitation struct {
-	Type         string   `json:"type"`
-	Name         string   `json:"name"`
-	Slug         string   `json:"slug"`
-	Aliases      []string `json:"aliases"`
-	Description  string   `json:"description"`
-	Details      string   `json:"details"`
-	SourceChunks []string `json:"source_chunks"`
+	Type         string             `json:"type"`
+	Name         string             `json:"name"`
+	Slug         string             `json:"slug"`
+	Aliases      llmjson.StringList `json:"aliases"`
+	Description  string             `json:"description"`
+	Details      string             `json:"details"`
+	SourceChunks llmjson.StringList `json:"source_chunks"`
 }
 
 // citationPipelineOutcome carries the raw numbers produced by the Pass
@@ -270,9 +273,10 @@ func renderChunksXML(batch chunkBatch) string {
 // batches are merged into a single slug → union(chunk_id) map, and any
 // "new_slugs" that Pass 0 missed are collected separately.
 //
-// Returns (citations, newSlugs, batchCount). citations is keyed by slug and
-// contains real chunk UUIDs (already translated from batch aliases). newSlugs
-// likewise carry real chunk UUIDs in SourceChunks.
+// Returns (citations, newSlugs, batchCount, failedBatchCount, error).
+// A small failure ratio is surfaced as a degraded result; once the configured
+// threshold is reached the error makes the document retry instead of silently
+// acknowledging a materially incomplete Wiki.
 func (s *wikiIngestService) classifyChunkCitations(
 	ctx context.Context,
 	chatModel chat.Chat,
@@ -280,10 +284,10 @@ func (s *wikiIngestService) classifyChunkCitations(
 	chunks []*types.Chunk,
 	lang string,
 	batchCtx *WikiBatchContext,
-) (map[string][]string, []newSlugFromCitation, int) {
+) (map[string][]string, []newSlugFromCitation, int, int, error) {
 	batches := splitChunksIntoCitationBatches(chunks)
 	if len(batches) == 0 || strings.TrimSpace(candidatesXML) == "" {
-		return map[string][]string{}, nil, 0
+		return map[string][]string{}, nil, 0, 0, nil
 	}
 
 	// Merge state. Using sets keyed by (slug, chunkID) to dedup across
@@ -291,6 +295,8 @@ func (s *wikiIngestService) classifyChunkCitations(
 	var mu sync.Mutex
 	citationSet := make(map[string]map[string]bool) // slug → set of real chunk IDs
 	var newSlugsAll []newSlugFromCitation
+	failedBatches := 0
+	var failureErrors []error
 
 	eg, ectx := errgroup.WithContext(ctx)
 	eg.SetLimit(maxCitationBatchConcurrency)
@@ -307,6 +313,10 @@ func (s *wikiIngestService) classifyChunkCitations(
 			})
 			if err != nil {
 				logger.Warnf(ectx, "wiki ingest: citation batch %d failed: %v", batchIdx, err)
+				mu.Lock()
+				failedBatches++
+				failureErrors = append(failureErrors, fmt.Errorf("batch %d: %w", batchIdx, err))
+				mu.Unlock()
 				return nil // don't abort peer batches
 			}
 			raw = cleanLLMJSON(raw)
@@ -314,6 +324,13 @@ func (s *wikiIngestService) classifyChunkCitations(
 			var parsed citationBatchResult
 			if jerr := json.Unmarshal([]byte(raw), &parsed); jerr != nil {
 				logger.Warnf(ectx, "wiki ingest: citation batch %d parse failed: %v\nRaw: %s", batchIdx, jerr, raw)
+				mu.Lock()
+				failedBatches++
+				failureErrors = append(
+					failureErrors,
+					fmt.Errorf("batch %d response parse: %w", batchIdx, jerr),
+				)
+				mu.Unlock()
 				return nil
 			}
 
@@ -376,7 +393,15 @@ func (s *wikiIngestService) classifyChunkCitations(
 		out[slug] = ids
 	}
 
-	return out, newSlugsAll, len(batches)
+	if workloadbudget.FromEnv().WikiFailureExceeded(failedBatches, len(batches)) {
+		return out, newSlugsAll, len(batches), failedBatches, fmt.Errorf(
+			"wiki citation classification failure threshold exceeded (%d/%d): %w",
+			failedBatches,
+			len(batches),
+			errors.Join(failureErrors...),
+		)
+	}
+	return out, newSlugsAll, len(batches), failedBatches, nil
 }
 
 // resolveCitedChunks loads the content of every chunk referenced by the

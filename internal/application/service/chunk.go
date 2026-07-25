@@ -5,8 +5,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -93,9 +95,16 @@ func (s *chunkService) GetChunkByID(ctx context.Context, id string) (*types.Chun
 	logger.Infof(ctx, "Getting chunk by ID, ID: %s, tenant ID: %d", id, tenantID)
 	chunk, err := s.chunkRepository.GetChunkByID(ctx, tenantID, id)
 	if err != nil {
-		logger.ErrorWithFields(ctx, err, map[string]interface{}{
-			"tenant_id": tenantID,
-		})
+		if errors.Is(err, apprepo.ErrChunkNotFound) {
+			// Deterministic generated-chunk upserts intentionally probe before
+			// their first insert. Logging that expected miss as ERROR produced
+			// two false alarms per multimodal image under bulk ingestion.
+			logger.Debugf(ctx, "Chunk %s does not exist yet for tenant %d", id, tenantID)
+		} else {
+			logger.ErrorWithFields(ctx, err, map[string]interface{}{
+				"tenant_id": tenantID,
+			})
+		}
 		return nil, err
 	}
 

@@ -17,6 +17,13 @@ import (
 
 const FanoutPlanVersion = 1
 
+// PostProcessCompletionItem is the durable generation receipt written only
+// after the post-process orchestrator has published every child task and Wiki
+// intent. It lives in knowledge_fanout_completions under a reserved namespace
+// so a retained completed Asynq task can be distinguished from a crash that
+// happened part-way through publication.
+const PostProcessCompletionItem = "orchestration:postprocess"
+
 // GenerationTaskRetention keeps successful generation-scoped tasks visible to
 // Asynq long enough for a replay of the durable fan-out plan to observe the
 // same TaskID as a conflict. Without retention a completed task disappears
@@ -24,7 +31,11 @@ const FanoutPlanVersion = 1
 // enrichment slot from the same generation.
 const (
 	GenerationTaskRetention = 7 * 24 * time.Hour
-	FanInTTL                = 7 * 24 * time.Hour
+	// EnrichmentTaskTimeout includes distributed model-admission wait time.
+	// The task is durable and generation-fenced, so a short generic worker
+	// timeout only converts healthy provider saturation into retry churn.
+	GenerationTaskTimeout = 2 * time.Hour
+	FanInTTL              = 7 * 24 * time.Hour
 )
 
 // ImageFanout contains everything required to recreate one multimodal task
@@ -475,6 +486,14 @@ func EnqueuePostProcess(
 	enqueuer interfaces.TaskEnqueuer,
 	payload types.KnowledgePostProcessPayload,
 ) error {
+	return EnqueuePostProcessContext(context.Background(), enqueuer, payload)
+}
+
+func EnqueuePostProcessContext(
+	ctx context.Context,
+	enqueuer interfaces.TaskEnqueuer,
+	payload types.KnowledgePostProcessPayload,
+) error {
 	if enqueuer == nil {
 		return errors.New("postprocess task enqueuer is unavailable")
 	}
@@ -483,12 +502,15 @@ func EnqueuePostProcess(
 		return fmt.Errorf("marshal post-process payload: %w", err)
 	}
 	task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes)
-	if _, err := enqueuer.Enqueue(
+	if _, err := EnqueueStableTask(
+		ctx,
+		enqueuer,
 		task,
-		asynq.Queue(types.QueueDefault),
+		types.QueueDefault,
+		PostProcessTaskID(payload.KnowledgeID, payload.ProcessingGeneration),
 		asynq.MaxRetry(3),
+		asynq.Timeout(GenerationTaskTimeout),
 		asynq.Retention(GenerationTaskRetention),
-		asynq.TaskID(PostProcessTaskID(payload.KnowledgeID, payload.ProcessingGeneration)),
 	); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
 		return err
 	}
@@ -537,11 +559,24 @@ func DispatchFanout(
 		Attempt:              plan.Attempt,
 	}
 	hasDurableStore := len(completionStores) > 0 && completionStores[0] != nil
+	completedFanoutItems := make(map[string]struct{})
 	if hasDurableStore {
-		remaining, err := DurableFanoutRemaining(ctx, completionStores[0], redisClient, plan)
+		completed, err := completionStores[0].ListKnowledgeFanoutCompletions(
+			ctx,
+			plan.TenantID,
+			plan.KnowledgeID,
+			plan.KnowledgeBaseID,
+			plan.ProcessingGeneration,
+		)
 		if err != nil {
 			return fmt.Errorf("restore durable fan-in progress: %w", err)
 		}
+		validCompleted := validCompletedFanoutItems(plan, completed)
+		for _, item := range validCompleted {
+			completedFanoutItems[item] = struct{}{}
+		}
+		remaining := int64(plan.itemCount() - len(validCompleted))
+		mirrorFanoutCache(ctx, redisClient, plan, validCompleted)
 		if remaining <= 0 {
 			if err := EnqueuePostProcess(enqueuer, postProcessPayload); err != nil {
 				return fmt.Errorf("replay durable completed fan-in postprocess: %w", err)
@@ -591,34 +626,43 @@ func DispatchFanout(
 
 	var enqueueErr error
 	if plan.DataTable != nil {
-		payload := types.DataTableSummaryPayload{
-			TracingContext:       plan.Tracing,
-			TenantID:             plan.TenantID,
-			KnowledgeID:          plan.KnowledgeID,
-			KnowledgeBaseID:      plan.KnowledgeBaseID,
-			ProcessingGeneration: plan.ProcessingGeneration,
-			SummaryModel:         plan.DataTable.SummaryModel,
-			EmbeddingModel:       plan.DataTable.EmbeddingModel,
-			Language:             plan.Language,
-			Attempt:              plan.Attempt,
-		}
-		payloadBytes, err := json.Marshal(payload)
-		if err != nil {
-			enqueueErr = errors.Join(enqueueErr, fmt.Errorf("marshal data-table fanout: %w", err))
-		} else {
-			task := asynq.NewTask(types.TypeDataTableSummary, payloadBytes)
-			if _, err := enqueuer.Enqueue(
-				task,
-				asynq.Queue(types.QueueDefault),
-				asynq.MaxRetry(3),
-				asynq.Retention(GenerationTaskRetention),
-				asynq.TaskID(DataTableSummaryTaskID(plan.KnowledgeID, plan.ProcessingGeneration)),
-			); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
-				enqueueErr = errors.Join(enqueueErr, fmt.Errorf("enqueue data-table fanout: %w", err))
+		if _, completed := completedFanoutItems[DataTableFanoutItem()]; !completed {
+			payload := types.DataTableSummaryPayload{
+				TracingContext:       plan.Tracing,
+				TenantID:             plan.TenantID,
+				KnowledgeID:          plan.KnowledgeID,
+				KnowledgeBaseID:      plan.KnowledgeBaseID,
+				ProcessingGeneration: plan.ProcessingGeneration,
+				SummaryModel:         plan.DataTable.SummaryModel,
+				EmbeddingModel:       plan.DataTable.EmbeddingModel,
+				Language:             plan.Language,
+				Attempt:              plan.Attempt,
+			}
+			payloadBytes, err := json.Marshal(payload)
+			if err != nil {
+				enqueueErr = errors.Join(enqueueErr, fmt.Errorf("marshal data-table fanout: %w", err))
+			} else {
+				task := asynq.NewTask(types.TypeDataTableSummary, payloadBytes)
+				if _, err := EnqueueStableTask(
+					ctx,
+					enqueuer,
+					task,
+					types.QueueDefault,
+					DataTableSummaryTaskID(plan.KnowledgeID, plan.ProcessingGeneration),
+					asynq.MaxRetry(3),
+					asynq.Timeout(GenerationTaskTimeout),
+					asynq.Retention(GenerationTaskRetention),
+				); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+					enqueueErr = errors.Join(enqueueErr, fmt.Errorf("enqueue data-table fanout: %w", err))
+				}
 			}
 		}
 	}
+
 	for _, image := range plan.Images {
+		if _, completed := completedFanoutItems[ImageFanoutItem(image.Index)]; completed {
+			continue
+		}
 		payload := types.ImageMultimodalPayload{
 			TracingContext:       plan.Tracing,
 			TenantID:             plan.TenantID,
@@ -643,12 +687,15 @@ func DispatchFanout(
 			types.TypeImageMultimodal,
 			payloadBytes,
 		)
-		if _, err := enqueuer.Enqueue(
+		if _, err := EnqueueStableTask(
+			ctx,
+			enqueuer,
 			task,
-			asynq.Queue(types.QueueMultimodal),
+			types.QueueMultimodal,
+			ImageTaskID(plan.KnowledgeID, plan.ProcessingGeneration, image.Index),
 			asynq.MaxRetry(3),
+			asynq.Timeout(GenerationTaskTimeout),
 			asynq.Retention(GenerationTaskRetention),
-			asynq.TaskID(ImageTaskID(plan.KnowledgeID, plan.ProcessingGeneration, image.Index)),
 		); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
 			enqueueErr = errors.Join(enqueueErr, fmt.Errorf("enqueue image fanout %d: %w", image.Index, err))
 		}

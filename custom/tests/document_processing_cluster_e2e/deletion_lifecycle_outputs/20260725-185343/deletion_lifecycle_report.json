@@ -1,0 +1,14 @@
+{
+  "status": "failed",
+  "started_at": "2026-07-25T10:53:43.208462+00:00",
+  "knowledge_base_id": "1651bae5-56f5-4d86-85a8-c3df8874f8ad",
+  "scenarios": [
+    "pending",
+    "processing",
+    "finalizing",
+    "completed"
+  ],
+  "results": [],
+  "finished_at": "2026-07-25T10:53:44.317503+00:00",
+  "error": "GET http://127.0.0.1:8080/api/v1/knowledge/01f484e0-847e-4094-ba1d-c5fadedda8fa returned HTTP 500: {\"error\":{\"code\":1007,\"message\":\"Internal server error\"},\"success\":false}"
+}

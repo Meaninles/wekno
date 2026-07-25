@@ -23,6 +23,8 @@ func TestAsynqIsFailureFunc(t *testing.T) {
 		{name: "wrapped wiki lock conflict", err: fmt.Errorf("defer worker: %w", service.ErrWikiIngestConcurrent), want: false},
 		{name: "document lease conflict", err: documentqueue.ErrAlreadyLeased, want: false},
 		{name: "wrapped document lease conflict", err: fmt.Errorf("defer duplicate: %w", documentqueue.ErrAlreadyLeased), want: false},
+		{name: "document durable capacity", err: documentqueue.ErrInstanceCapacity, want: false},
+		{name: "wrapped document durable capacity", err: fmt.Errorf("defer capacity: %w", documentqueue.ErrInstanceCapacity), want: false},
 		{name: "document instance fenced", err: documentqueue.ErrInstanceFenced, want: false},
 		{name: "wrapped document instance fenced", err: fmt.Errorf("defer old boot: %w", documentqueue.ErrInstanceFenced), want: false},
 		{name: "real failure", err: realFailure, want: true},
@@ -42,6 +44,8 @@ func TestAsynqRetryDelayFuncUsesShortBudgetFreeDocumentOwnershipPoll(t *testing.
 	for _, err := range []error{
 		documentqueue.ErrAlreadyLeased,
 		fmt.Errorf("duplicate delivery: %w", documentqueue.ErrAlreadyLeased),
+		documentqueue.ErrInstanceCapacity,
+		fmt.Errorf("durable capacity: %w", documentqueue.ErrInstanceCapacity),
 		documentqueue.ErrInstanceFenced,
 		fmt.Errorf("old instance: %w", documentqueue.ErrInstanceFenced),
 	} {

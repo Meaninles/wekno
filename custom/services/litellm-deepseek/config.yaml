@@ -8,8 +8,12 @@ model_list:
       model: openai/deepseek-v4-flash-int8-anthropic-upstream
       api_base: http://127.0.0.1:4000/v1
       api_key: os.environ/LITELLM_MASTER_KEY
-      timeout: 600
-      stream_timeout: 600
+      # WeKnora owns durable, cross-Pod retries. Retrying again inside both
+      # layers of this local proxy multiplies one outage into long-lived
+      # requests and keeps document slots occupied.
+      max_retries: 0
+      timeout: 230
+      stream_timeout: 230
     model_info:
       mode: chat
       max_input_tokens: 200000
@@ -27,8 +31,9 @@ model_list:
       model: openai/deepseek-v4-flash-int8-anthropic-upstream
       api_base: http://127.0.0.1:4000/v1
       api_key: os.environ/LITELLM_MASTER_KEY
-      timeout: 600
-      stream_timeout: 600
+      max_retries: 0
+      timeout: 230
+      stream_timeout: 230
     model_info:
       mode: chat
       max_input_tokens: 200000
@@ -45,8 +50,9 @@ model_list:
       model: anthropic//models/DeepSeek-V4-Flash-INT8
       api_base: os.environ/DEEPSEEK_ANTHROPIC_API_BASE
       api_key: os.environ/DEEPSEEK_ANTHROPIC_API_KEY
-      timeout: 600
-      stream_timeout: 600
+      max_retries: 0
+      timeout: 230
+      stream_timeout: 230
     model_info:
       mode: chat
       max_input_tokens: 200000
@@ -64,8 +70,9 @@ model_list:
       model: hosted_vllm//models/DeepSeek-V4-Flash-INT8
       api_base: os.environ/DEEPSEEK_OPENAI_API_BASE
       api_key: os.environ/DEEPSEEK_OPENAI_API_KEY
-      timeout: 600
-      stream_timeout: 600
+      max_retries: 0
+      timeout: 230
+      stream_timeout: 230
     model_info:
       mode: chat
       max_input_tokens: 1048576
@@ -80,8 +87,9 @@ model_list:
       model: openai/Qwen3.6-27B-tool
       api_base: os.environ/QWEN_API_BASE
       api_key: os.environ/QWEN_API_KEY
-      timeout: 600
-      stream_timeout: 600
+      max_retries: 0
+      timeout: 230
+      stream_timeout: 230
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
@@ -102,3 +110,21 @@ litellm_settings:
     - stream_normalizer.stream_normalizer
   drop_params: true
   set_verbose: false
+  request_timeout: 230
+
+# The proxy is a transport gateway, not the durable retry owner. Cool an
+# unhealthy deployment quickly and let WeKnora's persisted workflow retry
+# later, after releasing the document slot.
+router_settings:
+  allowed_fails: 1
+  cooldown_time: 60
+  retry_policy:
+    AuthenticationErrorRetries: 0
+    TimeoutErrorRetries: 0
+    RateLimitErrorRetries: 0
+    ContentPolicyViolationErrorRetries: 0
+    InternalServerErrorRetries: 0
+  allowed_fails_policy:
+    AuthenticationErrorAllowedFails: 0
+    TimeoutErrorAllowedFails: 1
+    InternalServerErrorAllowedFails: 1

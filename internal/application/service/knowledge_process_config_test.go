@@ -262,6 +262,42 @@ func TestValidateProcessOverrides_NonMediaFileTypes(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestValidateProcessOverrides_DocumentMultimodalRequiresVLM(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	kb := &types.KnowledgeBase{VLMConfig: types.VLMConfig{Enabled: false}}
+	err := ValidateProcessOverrides(
+		context.Background(),
+		kb,
+		&types.KnowledgeProcessOverrides{EnableMultimodel: &enabled},
+		[]string{"docx", "pdf"},
+	)
+	require.Error(t, err)
+	var badReq *werrors.AppError
+	require.ErrorAs(t, err, &badReq)
+}
+
+func TestValidateProcessOverrides_DocumentMultimodalWithEffectiveVLM(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	kb := &types.KnowledgeBase{VLMConfig: types.VLMConfig{Enabled: false}}
+	err := ValidateProcessOverrides(
+		context.Background(),
+		kb,
+		&types.KnowledgeProcessOverrides{
+			EnableMultimodel: &enabled,
+			VLMConfig: &types.VLMConfig{
+				Enabled: true,
+				ModelID: "vlm-1",
+			},
+		},
+		[]string{"docx", "pdf"},
+	)
+	require.NoError(t, err)
+}
+
 func TestValidateProcessOverrides_COSIncompleteForImage(t *testing.T) {
 	t.Parallel()
 

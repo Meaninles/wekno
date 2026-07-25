@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/logprivacy"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/provider"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -164,16 +165,21 @@ func (c *RemoteAPIChat) buildOutbound(
 
 // logRequest 记录请求日志
 func (c *RemoteAPIChat) logRequest(ctx context.Context, req any, isStream bool) {
-	if jsonData, err := json.MarshalIndent(req, "", "  "); err == nil {
-		logger.Infof(ctx, "[LLM Request] model=%s, stream=%v, request:\n%s",
-			c.modelName, isStream, secutils.CompactImageDataURLForLog(string(jsonData)))
+	summary, err := logprivacy.SummarizeJSON(req)
+	if err != nil {
+		logger.Warnf(ctx, "[LLM Request] model=%s stream=%v summary_error=%v",
+			c.modelName, isStream, err)
+		return
 	}
+	logger.Infof(ctx,
+		"[LLM Request] model=%s stream=%v request_bytes=%d request_sha256=%s",
+		c.modelName, isStream, summary.Bytes, summary.SHA256)
 }
 
 // Chat 进行非流式聊天
 func (c *RemoteAPIChat) Chat(ctx context.Context, messages []Message, opts *ChatOptions) (*types.ChatResponse, error) {
-	// 仅在调用方未设置 deadline 时附加一个兜底超时，防止 hung 请求永久阻塞 worker；
-	// 调用方若显式设置了更短或更长的 deadline，都会被原样尊重。
+	// Enforce the single-call ceiling even when the parent is a much longer
+	// document-workflow context. A shorter caller deadline is preserved.
 	timeoutCtx, cancel := withLLMTimeout(ctx, defaultChatTimeout)
 	defer cancel()
 	responseMeta := &responseMetadata{}
@@ -224,8 +230,10 @@ func (c *RemoteAPIChat) chatWithRawHTTP(ctx context.Context, endpoint string, cu
 	if err := secutils.ValidateURLForSSRF(endpoint); err != nil {
 		return nil, fmt.Errorf("endpoint SSRF check failed: %w", err)
 	}
-	logger.Infof(ctx, "[LLM Request] Remote HTTP, endpoint=%s, model=%s, raw HTTP request:\n%s",
-		endpoint, c.modelName, secutils.CompactImageDataURLForLog(string(jsonData)))
+	summary := logprivacy.SummarizeBytes(jsonData)
+	logger.Infof(ctx,
+		"[LLM Request] Remote HTTP endpoint=%s model=%s stream=false request_bytes=%d request_sha256=%s",
+		logprivacy.SafeEndpoint(endpoint), c.modelName, summary.Bytes, summary.SHA256)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -237,9 +245,6 @@ func (c *RemoteAPIChat) chatWithRawHTTP(ctx context.Context, endpoint string, cu
 
 	// 注入用户自定义 header（保留头会在工具内部自动跳过）
 	secutils.ApplyCustomHeaders(httpReq, c.customHeaders)
-
-	logger.Infof(ctx, "[LLM Request] Remote HTTP, endpoint=%s, model=%s",
-		endpoint, c.modelName)
 
 	resp, err := rawHTTPClient.Do(httpReq)
 	if err != nil {
@@ -273,8 +278,9 @@ func (c *RemoteAPIChat) chatWithRawHTTP(ctx context.Context, endpoint string, cu
 
 // ChatStream 进行流式聊天
 func (c *RemoteAPIChat) ChatStream(ctx context.Context, messages []Message, opts *ChatOptions) (<-chan types.StreamResponse, error) {
-	// 仅在调用方未设置 deadline 时附加兜底超时；流式调用默认超时更长，
-	// 因为带思考/推理的模型可能数十秒甚至几分钟才产出首 token。
+	// Enforce the single-call stream ceiling while preserving a shorter caller
+	// deadline. Streaming remains longer because reasoning models may need
+	// several minutes before their first token.
 	timeoutCtx, cancel := withLLMTimeout(ctx, defaultStreamTimeout)
 	responseMeta := &responseMetadata{}
 	timeoutCtx = context.WithValue(timeoutCtx, responseMetadataContextKey{}, responseMeta)
@@ -358,12 +364,10 @@ func (c *RemoteAPIChat) chatStreamWithRawHTTP(ctx context.Context, endpoint stri
 		return nil, fmt.Errorf("endpoint SSRF check failed: %w", err)
 	}
 
-	if prettyJSON, pErr := json.MarshalIndent(customReq, "", "  "); pErr == nil {
-		logger.Infof(ctx, "[LLM Stream Request] endpoint=%s, model=%s, stream=true, request:\n%s",
-			endpoint, c.modelName, secutils.CompactImageDataURLForLog(string(prettyJSON)))
-	} else {
-		logger.Infof(ctx, "[LLM Stream] endpoint=%s, model=%s", endpoint, c.modelName)
-	}
+	summary := logprivacy.SummarizeBytes(jsonData)
+	logger.Infof(ctx,
+		"[LLM Stream Request] endpoint=%s model=%s stream=true request_bytes=%d request_sha256=%s",
+		logprivacy.SafeEndpoint(endpoint), c.modelName, summary.Bytes, summary.SHA256)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

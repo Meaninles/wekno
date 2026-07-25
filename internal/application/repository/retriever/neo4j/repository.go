@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -13,9 +15,16 @@ import (
 
 // Neo4jRepository is a repository for Neo4j
 type Neo4jRepository struct {
-	driver     neo4j.Driver
-	nodePrefix string
+	driver      neo4j.Driver
+	nodePrefix  string
+	schemaMu    sync.Mutex
+	schemaReady bool
 }
+
+const (
+	graphEntityBaseLabel          = "ENTITY"
+	graphEntityIdentityConstraint = "weknora_graph_entity_identity"
+)
 
 // NewNeo4jRepository creates a new Neo4j repository
 func NewNeo4jRepository(driver neo4j.Driver) interfaces.RetrieveGraphRepository {
@@ -29,7 +38,11 @@ func _remove_hyphen(s string) string {
 
 // Labels returns the labels for a namespace
 func (n *Neo4jRepository) Labels(namespace types.NameSpace) []string {
-	res := make([]string, 0)
+	// Every graph node carries a stable base label in addition to the
+	// knowledge-base/document labels. The base label is what allows Neo4j to
+	// enforce one (knowledge, name) node identity even when graph batches from
+	// several workers arrive concurrently.
+	res := []string{graphEntityBaseLabel}
 	for _, label := range namespace.Labels() {
 		res = append(res, n.nodePrefix+_remove_hyphen(label))
 	}
@@ -39,6 +52,13 @@ func (n *Neo4jRepository) Labels(namespace types.NameSpace) []string {
 // Label returns the label for a namespace
 func (n *Neo4jRepository) Label(namespace types.NameSpace) string {
 	labels := n.Labels(namespace)
+	// Read/delete queries intentionally match the namespace labels without
+	// requiring the new base label. That keeps reparsing able to remove graph
+	// nodes written before the identity constraint was introduced; all newly
+	// written nodes still receive the base label through Labels.
+	if len(labels) > 0 && labels[0] == graphEntityBaseLabel {
+		labels = labels[1:]
+	}
 	return strings.Join(labels, ":")
 }
 
@@ -48,11 +68,46 @@ func (n *Neo4jRepository) AddGraph(ctx context.Context, namespace types.NameSpac
 		logger.Warnf(ctx, "NOT SUPPORT RETRIEVE GRAPH")
 		return nil
 	}
+	if err := n.ensureGraphSchema(ctx); err != nil {
+		return err
+	}
 	for _, graph := range graphs {
+		if graph == nil {
+			continue
+		}
 		if err := n.addGraph(ctx, namespace, graph); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// ensureGraphSchema installs the shared entity identity constraint once per
+// process. CREATE ... IF NOT EXISTS is safe when several application replicas
+// initialize at the same time. We intentionally only mark the schema ready
+// after success so a temporary Neo4j outage is retried by the next task.
+func (n *Neo4jRepository) ensureGraphSchema(ctx context.Context) error {
+	n.schemaMu.Lock()
+	defer n.schemaMu.Unlock()
+	if n.schemaReady {
+		return nil
+	}
+
+	session := n.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	query := fmt.Sprintf(
+		"CREATE CONSTRAINT %s IF NOT EXISTS FOR (n:%s) REQUIRE (n.kg, n.name) IS UNIQUE",
+		graphEntityIdentityConstraint,
+		graphEntityBaseLabel,
+	)
+	result, err := session.Run(ctx, query, nil)
+	if err != nil {
+		return fmt.Errorf("ensure graph entity identity constraint: %w", err)
+	}
+	if _, err := result.Consume(ctx); err != nil {
+		return fmt.Errorf("commit graph entity identity constraint: %w", err)
+	}
+	n.schemaReady = true
 	return nil
 }
 
@@ -69,18 +124,23 @@ func (n *Neo4jRepository) addGraph(ctx context.Context, namespace types.NameSpac
 			SET node.chunks = apoc.coll.union(node.chunks, row.chunks)
 			RETURN distinct 'done' AS result
 		`
-		nodeData := []map[string]interface{}{}
+		nodeData := make([]map[string]interface{}, 0, len(graph.Node))
 		for _, node := range graph.Node {
+			if node == nil || strings.TrimSpace(node.Name) == "" {
+				continue
+			}
 			nodeData = append(nodeData, map[string]interface{}{
-				"name":         node.Name,
+				"name":         strings.TrimSpace(node.Name),
 				"knowledge_id": namespace.Knowledge,
 				"props":        map[string][]string{"attributes": node.Attributes},
 				"chunks":       node.Chunks,
 				"labels":       n.Labels(namespace),
 			})
 		}
-		if _, err := tx.Run(ctx, node_import_query, map[string]interface{}{"data": nodeData}); err != nil {
-			return nil, fmt.Errorf("failed to create nodes: %v", err)
+		if len(nodeData) > 0 {
+			if _, err := tx.Run(ctx, node_import_query, map[string]interface{}{"data": nodeData}); err != nil {
+				return nil, fmt.Errorf("failed to create nodes: %v", err)
+			}
 		}
 
 		// Relationship import query
@@ -91,19 +151,27 @@ func (n *Neo4jRepository) addGraph(ctx context.Context, namespace types.NameSpac
 			CALL apoc.merge.relationship(source, row.type, {}, row.attributes, target) YIELD rel
 			RETURN distinct 'done'
 		`
-		relData := []map[string]interface{}{}
+		relData := make([]map[string]interface{}, 0, len(graph.Relation))
 		for _, rel := range graph.Relation {
+			if rel == nil ||
+				strings.TrimSpace(rel.Node1) == "" ||
+				strings.TrimSpace(rel.Node2) == "" ||
+				strings.TrimSpace(rel.Type) == "" {
+				continue
+			}
 			relData = append(relData, map[string]interface{}{
-				"source":        rel.Node1,
-				"target":        rel.Node2,
+				"source":        strings.TrimSpace(rel.Node1),
+				"target":        strings.TrimSpace(rel.Node2),
 				"knowledge_id":  namespace.Knowledge,
-				"type":          rel.Type,
+				"type":          strings.TrimSpace(rel.Type),
 				"source_labels": n.Labels(namespace),
 				"target_labels": n.Labels(namespace),
 			})
 		}
-		if _, err := tx.Run(ctx, rel_import_query, map[string]interface{}{"data": relData}); err != nil {
-			return nil, fmt.Errorf("failed to create relationships: %v", err)
+		if len(relData) > 0 {
+			if _, err := tx.Run(ctx, rel_import_query, map[string]interface{}{"data": relData}); err != nil {
+				return nil, fmt.Errorf("failed to create relationships: %v", err)
+			}
 		}
 		return nil, nil
 	})
@@ -176,11 +244,41 @@ func (n *Neo4jRepository) SearchNode(
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
 		labelExpr := n.Label(namespace)
 		query := `
-			MATCH (n:` + labelExpr + `)-[r]-(m:` + labelExpr + `)
-			WHERE ANY(nodeText IN $nodes WHERE n.name CONTAINS nodeText)
-			RETURN n, r, m
+			MATCH (n:` + labelExpr + `)
+			WITH n, [
+				nodeText IN $nodes
+				WHERE size(trim(nodeText)) >= 2
+					AND toLower(n.name) CONTAINS toLower(trim(nodeText))
+			] AS matched_terms
+			WHERE size(matched_terms) > 0
+			WITH n,
+				CASE
+					WHEN any(nodeText IN matched_terms
+						WHERE toLower(n.name) = toLower(trim(nodeText)))
+					THEN 1 ELSE 0
+				END AS exact_match,
+				size(matched_terms) AS matched_count,
+				reduce(longest = 0, nodeText IN matched_terms |
+					CASE
+						WHEN size(trim(nodeText)) > longest
+						THEN size(trim(nodeText))
+						ELSE longest
+					END
+				) AS longest_term
+			ORDER BY exact_match DESC, matched_count DESC, longest_term DESC,
+				size(n.name) ASC, n.name ASC
+			LIMIT $anchor_limit
+			MATCH (n)-[r]-(m:` + labelExpr + `)
+			RETURN n, r, m, exact_match, matched_count, longest_term
+			ORDER BY exact_match DESC, matched_count DESC, longest_term DESC,
+				n.name ASC, m.name ASC
+			LIMIT $relation_limit
 		`
-		params := map[string]interface{}{"nodes": nodes}
+		params := map[string]interface{}{
+			"nodes":          nodes,
+			"anchor_limit":   chatretrieval.GraphAnchorLimit,
+			"relation_limit": chatretrieval.GraphRelationLimit,
+		}
 		result, err := tx.Run(ctx, query, params)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run query: %v", err)

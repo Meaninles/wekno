@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +40,22 @@ func auxiliaryPathsFromKnowledge(knowledge *types.Knowledge) ([]string, error) {
 	}
 	paths := make([]string, 0)
 	if len(knowledge.ProcessingFanout) > 0 {
+		// processing_fanout is a generation-scoped recovery envelope.  During
+		// core finalization it contains processownership.FanoutPlan (which may
+		// own extracted images); post-processing atomically replaces it with
+		// durableEnrichmentPlan.  The latter deliberately has a different
+		// schema and no auxiliary object paths.  Treating every non-empty
+		// envelope as the core plan makes deletion fail exactly while summary,
+		// questions, graph, or Wiki are active.
+		var envelope struct {
+			Stage string `json:"stage"`
+		}
+		if err := json.Unmarshal(knowledge.ProcessingFanout, &envelope); err != nil {
+			return nil, fmt.Errorf("decode processing fanout envelope for auxiliary cleanup: %w", err)
+		}
+		if strings.TrimSpace(envelope.Stage) == durableEnrichmentPlanStage {
+			return paths, nil
+		}
 		plan, err := processownership.ParseFanoutPlan(knowledge.ProcessingFanout)
 		if err != nil {
 			return nil, fmt.Errorf("decode processing fanout for auxiliary cleanup: %w", err)
@@ -511,6 +528,25 @@ func (s *knowledgeService) cleanupDerivedKnowledgeAuxiliary(
 	)
 }
 
+func (s *knowledgeService) prepareDerivedKnowledgeAuxiliary(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledge *types.Knowledge,
+	legacyPaths []string,
+) error {
+	if s.auxObjects == nil {
+		return errors.New("prepare knowledge auxiliary cleanup: registry is unavailable")
+	}
+	return s.auxObjects.PrepareDerivedCleanup(
+		ctx,
+		knowledge.TenantID,
+		knowledge.KnowledgeBaseID,
+		knowledge.ID,
+		effectiveAuxiliaryProvider(ctx, kb),
+		uniqueNonEmptyStrings(legacyPaths),
+	)
+}
+
 func (s *knowledgeService) cleanupDerivedKnowledgeAuxiliaryWithinMoveFence(
 	ctx context.Context,
 	kb *types.KnowledgeBase,
@@ -521,6 +557,25 @@ func (s *knowledgeService) cleanupDerivedKnowledgeAuxiliaryWithinMoveFence(
 		return errors.New("cleanup knowledge auxiliary objects: registry is unavailable")
 	}
 	return s.auxObjects.CleanupDerivedWithinMoveFence(
+		ctx,
+		knowledge.TenantID,
+		knowledge.KnowledgeBaseID,
+		knowledge.ID,
+		effectiveAuxiliaryProvider(ctx, kb),
+		uniqueNonEmptyStrings(legacyPaths),
+	)
+}
+
+func (s *knowledgeService) prepareDerivedKnowledgeAuxiliaryWithinMoveFence(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledge *types.Knowledge,
+	legacyPaths []string,
+) error {
+	if s.auxObjects == nil {
+		return errors.New("prepare knowledge auxiliary cleanup: registry is unavailable")
+	}
+	return s.auxObjects.PrepareDerivedCleanupWithinMoveFence(
 		ctx,
 		knowledge.TenantID,
 		knowledge.KnowledgeBaseID,

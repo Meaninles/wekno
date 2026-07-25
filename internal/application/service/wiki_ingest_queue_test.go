@@ -14,6 +14,7 @@ import (
 
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
@@ -68,6 +69,100 @@ type wikiQueuePendingRepoStub struct {
 // extension while preserving the generic queue interface.
 type wikiQueueNoLeasePendingRepo struct {
 	interfaces.TaskPendingOpsRepository
+}
+
+type wikiDistributedPendingRepoStub struct {
+	*wikiQueuePendingRepoStub
+}
+
+func (r *wikiDistributedPendingRepoStub) GetWikiIngestByDedupKey(
+	_ context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	dedupKey string,
+) (*types.TaskPendingOp, error) {
+	for _, row := range r.rows {
+		if row != nil && row.TenantID == tenantID && row.ScopeID == knowledgeBaseID &&
+			row.TaskType == types.TypeWikiIngest && row.Op == WikiOpIngest &&
+			row.DedupKey == dedupKey {
+			copyRow := *row
+			copyRow.Payload = slices.Clone(row.Payload)
+			return &copyRow, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *wikiDistributedPendingRepoStub) DeleteWikiIngestByDedupKey(
+	_ context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	dedupKey string,
+) error {
+	kept := r.rows[:0]
+	for _, row := range r.rows {
+		if row != nil && row.TenantID == tenantID && row.ScopeID == knowledgeBaseID &&
+			row.TaskType == types.TypeWikiIngest && row.Op == WikiOpIngest &&
+			row.DedupKey == dedupKey {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	r.rows = kept
+	return nil
+}
+
+func (r *wikiDistributedPendingRepoStub) PeekWikiCommitBatch(
+	_ context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	limit int,
+) ([]*types.TaskPendingOp, error) {
+	rows := make([]*types.TaskPendingOp, 0)
+	for _, row := range r.rows {
+		if row == nil || row.TenantID != tenantID || row.ScopeID != knowledgeBaseID {
+			continue
+		}
+		if row.Op == WikiOpIngest && row.MapReadyAt == nil {
+			continue
+		}
+		rows = append(rows, row)
+		if limit > 0 && len(rows) == limit {
+			break
+		}
+	}
+	return rows, nil
+}
+
+func (r *wikiDistributedPendingRepoStub) CountWikiCommitReady(
+	_ context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+) (int64, error) {
+	rows, err := r.PeekWikiCommitBatch(context.Background(), tenantID, knowledgeBaseID, 0)
+	return int64(len(rows)), err
+}
+
+func (r *wikiDistributedPendingRepoStub) MarkWikiMapReady(
+	_ context.Context,
+	id int64,
+	_ uint64,
+	_ string,
+	payload []byte,
+) (bool, error) {
+	r.checkpointCalls++
+	if r.checkpointErr != nil {
+		return false, r.checkpointErr
+	}
+	for _, row := range r.rows {
+		if row != nil && row.ID == id {
+			now := time.Now()
+			row.Payload = slices.Clone(payload)
+			row.MapReadyAt = &now
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *wikiQueuePendingRepoStub) AcquireWikiIngestLease(
@@ -410,6 +505,59 @@ func (s *wikiQueueKnowledgeServiceStub) mutateKnowledge(mutate func(*types.Knowl
 	}
 }
 
+func TestMapOneDocumentTerminalGenerationDoesNotOpenWikiSpan(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+	_, attempt, err := tracker.OpenAttempt(ctx, "knowledge-terminal-wiki", "trace-terminal-wiki")
+	require.NoError(t, err)
+	postprocess := tracker.BeginStage(
+		ctx,
+		"knowledge-terminal-wiki",
+		attempt,
+		types.StagePostProcess,
+		nil,
+	)
+	require.NotNil(t, postprocess)
+	tracker.EndSpan(ctx, postprocess, nil)
+
+	processedAt := time.Now().Add(-time.Minute)
+	svc := &wikiIngestService{
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID:                   "knowledge-terminal-wiki",
+			TenantID:             42,
+			KnowledgeBaseID:      "kb-1",
+			ProcessingGeneration: "generation-1",
+			ParseStatus:          types.ParseStatusCompleted,
+			ProcessedAt:          &processedAt,
+			WikiStatus:           types.WikiStatusCompleted,
+		}},
+		spanTracker: tracker,
+	}
+	result, updates, err := svc.mapOneDocument(
+		ctx,
+		nil,
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		WikiPendingOp{
+			Op:                   WikiOpIngest,
+			KnowledgeID:          "knowledge-terminal-wiki",
+			ProcessingGeneration: "generation-1",
+			tenantID:             42,
+		},
+		&WikiBatchContext{},
+	)
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Empty(t, updates)
+
+	var wikiSpans int64
+	require.NoError(t, db.Model(&types.KnowledgeProcessingSpan{}).
+		Where("knowledge_id = ? AND name LIKE ?",
+			"knowledge-terminal-wiki", "postprocess.wiki%").
+		Count(&wikiSpans).Error)
+	require.Zero(t, wikiSpans,
+		"a delayed terminal duplicate is a no-op and must not create a fresh running span")
+}
+
 type wikiQueuePageServiceStub struct {
 	interfaces.WikiPageService
 	getPage         *types.WikiPage
@@ -420,6 +568,8 @@ type wikiQueuePageServiceStub struct {
 	listErr         error
 	listSlugs       []string
 	listSlugsErr    error
+	listProvenance  []types.WikiPageSourceProvenance
+	provenanceErr   error
 	createErr       error
 	updateErr       error
 	deleteErr       error
@@ -445,6 +595,34 @@ func (s *wikiQueuePageServiceStub) ListPagesBySourceRef(context.Context, string,
 
 func (s *wikiQueuePageServiceStub) ListSlugsBySourceRef(context.Context, string, string) ([]string, error) {
 	return s.listSlugs, s.listSlugsErr
+}
+
+func (s *wikiQueuePageServiceStub) ListSourceProvenanceBySourceRef(
+	context.Context, string, string,
+) ([]types.WikiPageSourceProvenance, error) {
+	if s.provenanceErr != nil {
+		return nil, s.provenanceErr
+	}
+	if s.listProvenance != nil {
+		return slices.Clone(s.listProvenance), nil
+	}
+	if len(s.listPages) > 0 {
+		rows := make([]types.WikiPageSourceProvenance, 0, len(s.listPages))
+		for _, page := range s.listPages {
+			if page != nil {
+				rows = append(rows, types.WikiPageSourceProvenance{
+					Slug: page.Slug, PageType: page.PageType,
+					ChunkRefs: slices.Clone(page.ChunkRefs),
+				})
+			}
+		}
+		return rows, nil
+	}
+	rows := make([]types.WikiPageSourceProvenance, 0, len(s.listSlugs))
+	for _, slug := range s.listSlugs {
+		rows = append(rows, types.WikiPageSourceProvenance{Slug: slug})
+	}
+	return rows, nil
 }
 
 func (s *wikiQueuePageServiceStub) CreatePage(_ context.Context, page *types.WikiPage) (*types.WikiPage, error) {
@@ -532,6 +710,135 @@ func (e *wikiQueueTaskEnqueuerStub) Enqueue(
 		return nil, e.err
 	}
 	return &asynq.TaskInfo{ID: "test-task", Type: task.Type(), Queue: "low"}, nil
+}
+
+func TestEnqueueWikiIngestSchedulesDocumentMapAndKBCommitForDistributedRepository(t *testing.T) {
+	base := &wikiQueuePendingRepoStub{}
+	pending := &wikiDistributedPendingRepoStub{wikiQueuePendingRepoStub: base}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+
+	result, err := EnqueueWikiIngest(
+		context.Background(),
+		enqueuer,
+		pending,
+		42,
+		"kb-1",
+		"knowledge-1",
+		"generation-1",
+	)
+	require.NoError(t, err)
+	require.True(t, result.PendingPersisted)
+	require.True(t, result.MapScheduled)
+	require.True(t, result.TriggerScheduled)
+	require.Len(t, enqueuer.tasks, 2)
+
+	var mapPayload WikiIngestPayload
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &mapPayload))
+	assert.Equal(t, wikiTaskModeMap, mapPayload.TaskMode)
+	assert.Equal(t, "knowledge-1:generation-1", mapPayload.MapDedupKey)
+	var commitPayload WikiIngestPayload
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[1].Payload(), &commitPayload))
+	assert.Empty(t, commitPayload.TaskMode)
+	assert.Equal(t, "kb-1", commitPayload.KnowledgeBaseID)
+}
+
+func TestProcessWikiMapPublishesRecoveredCheckpointAndWakesCommit(t *testing.T) {
+	op := WikiPendingOp{
+		Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+		Prepared: &wikiPreparedIngest{
+			DocTitle: "Document", Summary: "summary", Updates: []SlugUpdate{},
+		},
+		MapFinished: true,
+	}
+	row := wikiPendingRow(91, op)
+	row.TenantID = 42
+	row.ScopeID = "kb-1"
+	row.DedupKey = "knowledge-1:generation-1"
+	base := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{row}}
+	pending := &wikiDistributedPendingRepoStub{wikiQueuePendingRepoStub: base}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: pending, task: enqueuer}
+	payload := WikiIngestPayload{
+		TenantID: 42, KnowledgeBaseID: "kb-1", TaskMode: wikiTaskModeMap,
+		MapDedupKey: "knowledge-1:generation-1",
+		KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+	}
+	encoded, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Handle(
+		context.Background(), asynq.NewTask(types.TypeWikiIngest, encoded),
+	))
+	require.NotNil(t, row.MapReadyAt)
+	require.Len(t, enqueuer.tasks, 1)
+	var commit WikiIngestPayload
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &commit))
+	assert.Empty(t, commit.TaskMode)
+	assert.Equal(t, uint8(1), commit.WakePhase)
+	assert.Equal(t, 1, base.checkpointCalls)
+}
+
+func TestProcessWikiMapDuplicateDeliveryUsesDocumentLeaseAndCoalescedSuccessor(t *testing.T) {
+	row := wikiPendingRow(92, WikiPendingOp{
+		Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+	})
+	row.TenantID = 42
+	row.ScopeID = "kb-1"
+	row.DedupKey = "knowledge-1:generation-1"
+	base := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{row}}
+	pending := &wikiDistributedPendingRepoStub{wikiQueuePendingRepoStub: base}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: pending, task: enqueuer}
+	payload := WikiIngestPayload{
+		TenantID: 42, KnowledgeBaseID: "kb-1", TaskMode: wikiTaskModeMap,
+		MapDedupKey: "knowledge-1:generation-1",
+	}
+	svc.liteLocks.Store("map:"+wikiMapActiveKey(payload), struct{}{})
+	defer svc.liteLocks.Delete("map:" + wikiMapActiveKey(payload))
+	encoded, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.ProcessWikiMap(
+		context.Background(), asynq.NewTask(types.TypeWikiIngest, encoded),
+	))
+	require.Nil(t, row.MapReadyAt)
+	require.Len(t, enqueuer.tasks, 1)
+	var successor WikiIngestPayload
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &successor))
+	assert.Equal(t, wikiTaskModeMap, successor.TaskMode)
+	assert.Equal(t, uint8(1), successor.WakePhase)
+	assert.Zero(t, base.checkpointCalls)
+}
+
+func TestDistributedWikiMapProviderRetryIsSpreadAfterCircuitBoundary(t *testing.T) {
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{task: enqueuer}
+	payload := WikiIngestPayload{
+		TenantID:        42,
+		KnowledgeBaseID: "kb-1",
+		MapDedupKey:     "knowledge-1:generation-1",
+	}
+	base := 5 * time.Minute
+	providerErr := &modeladmission.CircuitOpenError{
+		Kind:       modeladmission.KindChat,
+		RetryAfter: base,
+	}
+
+	require.NoError(t, svc.recordDistributedMapFailure(
+		context.Background(),
+		payload,
+		WikiPendingOp{KnowledgeID: "knowledge-1"},
+		providerErr,
+	))
+	require.Len(t, enqueuer.tasks, 1)
+	delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt)
+	require.True(t, ok)
+	require.GreaterOrEqual(t, delay, base)
+	require.Less(t, delay, base+modeladmission.ProviderRetrySpreadWindow(base))
+	require.Equal(t, delay, modeladmission.SpreadProviderRetry(
+		base,
+		"wiki-map\x0042\x00kb-1\x00knowledge-1:generation-1",
+	))
 }
 
 func (e *wikiQueueTaskEnqueuerStub) PrepareDocumentWorkflow(
@@ -1000,6 +1307,26 @@ func TestEnqueueWikiIngestRejectsMissingGenerationBeforePersistence(t *testing.T
 	require.Empty(t, enqueuer.tasks)
 }
 
+func TestEnqueueWikiIngestSettledGenerationDoesNotRecreateRowOrTrigger(t *testing.T) {
+	identity := wikiIngestIdentity(42, "kb-1", "knowledge-1", "generation-1")
+	repo := &wikiQueuePendingRepoStub{
+		enqueueErr: wikiingestguard.NewStaleIdentityError(identity),
+	}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+
+	result, err := EnqueueWikiIngest(
+		context.Background(), enqueuer, repo,
+		42, "kb-1", "knowledge-1", "generation-1",
+	)
+	require.NoError(t, err)
+	require.True(t, result.PendingPersisted,
+		"an already-settled generation satisfies the durable intent")
+	require.True(t, result.AlreadySettled)
+	require.False(t, result.TriggerScheduled)
+	require.Empty(t, repo.enqueued)
+	require.Empty(t, enqueuer.tasks)
+}
+
 func TestEnqueueWikiIngestTriggerFailureLeavesDurableRowAndReturnsError(t *testing.T) {
 	triggerErr := errors.New("redis unavailable")
 	repo := &wikiQueuePendingRepoStub{}
@@ -1139,7 +1466,7 @@ func TestSettleWikiQueueLostLeaseDoesNotMutateQueue(t *testing.T) {
 	}
 }
 
-func TestSettleWikiQueueActiveBatchUsesDetachedContextAndNonUniqueFollowUp(t *testing.T) {
+func TestSettleWikiQueueActiveBatchUsesDetachedContextAndAlternatingUniqueFollowUp(t *testing.T) {
 	repo := &wikiQueuePendingRepoStub{pendingCount: 3, incrCount: 1}
 	enqueuer := &wikiQueueTaskEnqueuerStub{}
 	svc := &wikiIngestService{pendingRepo: repo, task: enqueuer}
@@ -1170,15 +1497,18 @@ func TestSettleWikiQueueActiveBatchUsesDetachedContextAndNonUniqueFollowUp(t *te
 	if len(enqueuer.tasks) != 1 {
 		t.Fatalf("follow-up attempts = %d, want 1", len(enqueuer.tasks))
 	}
-	if hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
-		t.Fatal("follow-up must not carry Unique while current unique task is active")
+	if !hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
+		t.Fatal("alternating follow-up must carry Unique")
 	}
 	if delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt); !ok || delay != wikiFollowUpDelay {
 		t.Fatalf("follow-up delay = %v (ok=%v), want %v", delay, ok, wikiFollowUpDelay)
 	}
+	var followUpPayload WikiIngestPayload
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &followUpPayload))
+	require.Equal(t, uint8(1), followUpPayload.WakePhase)
 }
 
-func TestScheduleLockConflictFollowUpUsesFreshNonUniqueTask(t *testing.T) {
+func TestScheduleLockConflictFollowUpUsesAlternatingUniqueTask(t *testing.T) {
 	enqueuer := &wikiQueueTaskEnqueuerStub{}
 	svc := &wikiIngestService{task: enqueuer}
 	payload := WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-locked"}
@@ -1190,8 +1520,8 @@ func TestScheduleLockConflictFollowUpUsesFreshNonUniqueTask(t *testing.T) {
 	if !scheduled || len(enqueuer.tasks) != 1 {
 		t.Fatalf("scheduleLockConflictFollowUp() = %v, tasks=%d; want true, 1", scheduled, len(enqueuer.tasks))
 	}
-	if hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
-		t.Fatal("lock-conflict replacement must not carry Unique while the current signal is active")
+	if !hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
+		t.Fatal("lock-conflict replacement must carry Unique")
 	}
 	if delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt); !ok || delay != wikiLockConflictDelay {
 		t.Fatalf("lock-conflict delay = %v (ok=%v), want %v", delay, ok, wikiLockConflictDelay)
@@ -1200,9 +1530,51 @@ func TestScheduleLockConflictFollowUpUsesFreshNonUniqueTask(t *testing.T) {
 	if err := json.Unmarshal(enqueuer.tasks[0].Payload(), &decoded); err != nil {
 		t.Fatalf("decode replacement payload: %v", err)
 	}
-	if decoded != payload {
-		t.Fatalf("replacement payload = %+v, want %+v", decoded, payload)
+	if decoded.TenantID != payload.TenantID ||
+		decoded.KnowledgeBaseID != payload.KnowledgeBaseID ||
+		decoded.WakePhase != 1 {
+		t.Fatalf("replacement payload = %+v, want identity %+v phase=1", decoded, payload)
 	}
+
+	enqueuer.tasks = nil
+	enqueuer.opts = nil
+	payload.WakePhase = 1
+	scheduled, err = svc.scheduleLockConflictFollowUp(context.Background(), payload)
+	require.NoError(t, err)
+	require.True(t, scheduled)
+	require.Len(t, enqueuer.tasks, 1)
+	decoded = WikiIngestPayload{}
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &decoded))
+	require.Equal(t, uint8(0), decoded.WakePhase)
+}
+
+func TestWikiCommitProviderRetryIsSpreadAfterCircuitBoundary(t *testing.T) {
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{
+		pendingRepo: &wikiQueuePendingRepoStub{},
+		task:        enqueuer,
+	}
+	payload := WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"}
+	base := 5 * time.Minute
+	providerErr := &modeladmission.CircuitOpenError{
+		Kind:       modeladmission.KindChat,
+		RetryAfter: base,
+	}
+
+	scheduled, err := svc.scheduleProviderCircuitFollowUp(
+		context.Background(), payload, providerErr,
+	)
+	require.NoError(t, err)
+	require.True(t, scheduled)
+	require.Len(t, enqueuer.tasks, 1)
+	delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt)
+	require.True(t, ok)
+	require.GreaterOrEqual(t, delay, base)
+	require.Less(t, delay, base+modeladmission.ProviderRetrySpreadWindow(base))
+	require.Equal(t, delay, modeladmission.SpreadProviderRetry(
+		base,
+		"wiki-commit\x0042\x00kb-1",
+	))
 }
 
 func TestScheduleLockConflictFollowUpEnqueueFailureIsVisible(t *testing.T) {
@@ -1216,6 +1588,64 @@ func TestScheduleLockConflictFollowUpEnqueueFailureIsVisible(t *testing.T) {
 	if scheduled || !errors.Is(err, enqueueErr) {
 		t.Fatalf("scheduleLockConflictFollowUp() = (%v, %v), want (false, wrapped enqueue error)", scheduled, err)
 	}
+}
+
+func TestScheduleLockConflictFollowUpConcurrentRedisContractCoalesces(t *testing.T) {
+	if os.Getenv("WEKNORA_WIKI_TRIGGER_REDIS_CONTRACT") != "1" {
+		t.Skip("set WEKNORA_WIKI_TRIGGER_REDIS_CONTRACT=1 to run Redis contract")
+	}
+	opt := asynq.RedisClientOpt{
+		Addr:     os.Getenv("REDIS_ADDR"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       13,
+	}
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     opt.Addr,
+		Password: opt.Password,
+		DB:       opt.DB,
+	})
+	require.NoError(t, redisClient.FlushDB(context.Background()).Err())
+	t.Cleanup(func() {
+		_ = redisClient.FlushDB(context.Background()).Err()
+		_ = redisClient.Close()
+	})
+
+	client := asynq.NewClient(opt)
+	t.Cleanup(func() { _ = client.Close() })
+	svc := &wikiIngestService{task: client}
+	payload := WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-thundering-herd"}
+
+	const contenders = 128
+	var wg sync.WaitGroup
+	errs := make(chan error, contenders)
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scheduled, err := svc.scheduleLockConflictFollowUp(context.Background(), payload)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !scheduled {
+				errs <- errors.New("lock-conflict successor was not acknowledged")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	inspector := asynq.NewInspector(opt)
+	t.Cleanup(func() { _ = inspector.Close() })
+	tasks, err := inspector.ListScheduledTasks("low", asynq.PageSize(contenders))
+	require.NoError(t, err)
+	require.Len(t, tasks, 1, "all contenders must collapse to one delayed signal")
+	var decoded WikiIngestPayload
+	require.NoError(t, json.Unmarshal(tasks[0].Payload, &decoded))
+	require.Equal(t, uint8(1), decoded.WakePhase)
 }
 
 func TestSettleWikiQueueDeleteFailureReturnsErrorAndStillSchedulesRecovery(t *testing.T) {
@@ -1361,8 +1791,15 @@ func TestProcessWikiIngestWikiDisabledDrainsAllPendingBatches(t *testing.T) {
 	if len(enqueuer.tasks) != 1 {
 		t.Fatalf("follow-up tasks after first batch = %d, want 1", len(enqueuer.tasks))
 	}
-	if hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
-		t.Fatal("terminal-drain follow-up must not use Unique")
+	if !hasAsynqOption(enqueuer.opts[0], asynq.UniqueOpt) {
+		t.Fatal("terminal-drain follow-up must use Unique to coalesce concurrent wake-ups")
+	}
+	var followUpPayload WikiIngestPayload
+	if err := json.Unmarshal(enqueuer.tasks[0].Payload(), &followUpPayload); err != nil {
+		t.Fatalf("decode terminal-drain follow-up: %v", err)
+	}
+	if followUpPayload.WakePhase != 1 {
+		t.Fatalf("terminal-drain follow-up wake phase = %d, want 1", followUpPayload.WakePhase)
 	}
 
 	// Execute the scheduled follow-up directly. The second terminal batch must
@@ -1859,6 +2296,30 @@ func TestPeekPendingListMalformedRetractFallsBackToDurableColumns(t *testing.T) 
 	}
 }
 
+func TestPeekPendingListTerminalCleanupCanDrainHeldRetractIntent(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{
+		wikiPendingRow(92, WikiPendingOp{
+			Op:               WikiOpRetract,
+			KnowledgeID:      "knowledge-held",
+			RetractPlanState: wikiRetractPlanIntent,
+		}),
+	}}
+	svc := &wikiIngestService{pendingRepo: repo}
+
+	ops, ids, err := svc.peekPendingList(context.Background(), "kb-1", 5)
+	require.NoError(t, err)
+	assert.Empty(t, ops)
+	assert.Empty(t, ids)
+
+	ops, ids, err = svc.peekPendingListIncludingRetractIntents(
+		context.Background(), "kb-1", 5, true,
+	)
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	assert.Equal(t, wikiRetractPlanIntent, ops[0].RetractPlanState)
+	assert.Equal(t, []int64{92}, ids)
+}
+
 func TestWikiGenerationPreflightLateOldOpCannotSuppressCurrentGeneration(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	repo := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{
@@ -1892,6 +2353,30 @@ func TestWikiGenerationPreflightLateOldOpCannotSuppressCurrentGeneration(t *test
 	require.Len(t, processable, 1)
 	require.Equal(t, "generation-new", processable[0].ProcessingGeneration)
 	require.Equal(t, int64(1), processable[0].dbID)
+}
+
+func TestWikiGenerationPreflightSettledCurrentGenerationIsQueueNoop(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	svc := &wikiIngestService{
+		knowledgeSvc: &wikiQueueKnowledgeServiceStub{knowledge: &types.Knowledge{
+			ID: "knowledge-1", TenantID: 42, KnowledgeBaseID: "kb-1",
+			ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusFinalizing,
+			ProcessedAt: &now, WikiStatus: types.WikiStatusCompleted,
+		}},
+	}
+	op := WikiPendingOp{
+		Op: WikiOpIngest, KnowledgeID: "knowledge-1",
+		ProcessingGeneration: "generation-1", tenantID: 42, dbID: 99,
+	}
+
+	processable, failed, stale := svc.preflightWikiPendingOps(
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		[]WikiPendingOp{op},
+	)
+	require.Empty(t, processable)
+	require.Empty(t, failed)
+	require.Equal(t, 1, stale)
 }
 
 func TestProcessWikiIngestStaleGenerationIsTerminalWithoutFailCountRetry(t *testing.T) {
@@ -1955,6 +2440,159 @@ func TestRestorePreparedWikiIngestMarksOnlyDurablyAppliedSlugs(t *testing.T) {
 		assert.Equal(t, "generation-1", update.ProcessingGeneration)
 		assert.Equal(t, int64(77), update.SourceOpID)
 	}
+}
+
+func TestWikiMapSubstageCheckpointSurvivesAndPreparedPlanCompactsIt(t *testing.T) {
+	payload := WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"}
+	op := WikiPendingOp{
+		Op: WikiOpIngest, KnowledgeID: "knowledge-1",
+		ProcessingGeneration: "generation-1", dbID: 77,
+	}
+	pending := &wikiQueuePendingRepoStub{
+		rows: []*types.TaskPendingOp{wikiPendingRow(77, op)},
+	}
+	service := &wikiIngestService{pendingRepo: pending}
+	checkpoint := &wikiMapCheckpoint{
+		Version: wikiMapCheckpointVersion, ContentHash: "content-digest",
+		ExtractionDone: true,
+		ExtractedEntities: []extractedItem{{
+			Name: "Acme", Slug: "entity/acme",
+		}},
+		SummaryDone:    true,
+		SummaryContent: "SUMMARY: Acme",
+	}
+	require.NoError(t, service.checkpointWikiMapProgress(
+		context.Background(), payload, op, checkpoint,
+	))
+
+	var resumed WikiPendingOp
+	require.NoError(t, json.Unmarshal(pending.rows[0].Payload, &resumed))
+	require.NotNil(t, resumed.MapCheckpoint)
+	assert.True(t, resumed.MapCheckpoint.ExtractionDone)
+	assert.True(t, resumed.MapCheckpoint.SummaryDone)
+	assert.Nil(t, resumed.Prepared)
+
+	resumed.dbID = 77
+	require.NoError(t, service.checkpointPreparedWikiIngest(
+		context.Background(),
+		payload,
+		resumed,
+		&docIngestResult{
+			KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+			DocTitle: "Document", Summary: "Acme", SourceOpID: 77,
+		},
+		[]SlugUpdate{{Slug: "summary/knowledge-1", Type: types.WikiPageTypeSummary}},
+	))
+	var prepared WikiPendingOp
+	require.NoError(t, json.Unmarshal(pending.rows[0].Payload, &prepared))
+	require.NotNil(t, prepared.Prepared)
+	assert.Nil(t, prepared.MapCheckpoint, "final map plan should compact partial substage state")
+}
+
+func TestIntersectWikiChunkRefsBySlugKeepsOnlyOwnerEvidence(t *testing.T) {
+	got := intersectWikiChunkRefsBySlug(
+		map[string]types.StringArray{
+			"entity/shared": {"owned-old-1", "other-source", "owned-old-1", ""},
+			"concept/stale": {"owned-old-2"},
+			"entity/other":  {"other-source"},
+		},
+		[]string{"owned-old-1", "owned-old-2", "not-cited"},
+	)
+
+	assert.Equal(t, []string{"owned-old-1"}, got["entity/shared"])
+	assert.Equal(t, []string{"owned-old-2"}, got["concept/stale"])
+	_, retainedOtherSource := got["entity/other"]
+	assert.False(t, retainedOtherSource,
+		"a source document must never claim another document's page citation")
+}
+
+func TestAppendWikiReparseReconciliationCarriesPageScopedOldCitations(t *testing.T) {
+	updates, overlap, stale := appendWikiReparseReconciliation(
+		[]SlugUpdate{{
+			Slug: "entity/shared", Type: types.WikiPageTypeEntity,
+			KnowledgeID: "knowledge-1", SourceChunks: []string{"new-1"},
+		}},
+		map[string]bool{
+			"entity/shared":        true,
+			"concept/no-longer-in": true,
+			"summary/knowledge-1":  true,
+		},
+		map[string]bool{
+			"entity/shared":       true,
+			"summary/knowledge-1": true,
+		},
+		map[string][]string{
+			"entity/shared":        {"old-shared-1", "old-shared-2"},
+			"concept/no-longer-in": {"old-stale"},
+		},
+		"previous contribution",
+		"current document",
+		"Document",
+		"knowledge-1",
+		"English",
+	)
+
+	assert.Equal(t, 1, overlap)
+	assert.Equal(t, 1, stale)
+	require.Len(t, updates, 3,
+		"one addition, one overlap retract and one stale retract are expected")
+
+	var overlapRetract, staleRetract *SlugUpdate
+	for i := range updates {
+		switch {
+		case updates[i].Slug == "entity/shared" && updates[i].Type == "retract":
+			overlapRetract = &updates[i]
+		case updates[i].Slug == "concept/no-longer-in" && updates[i].Type == "retractStale":
+			staleRetract = &updates[i]
+		case strings.HasPrefix(updates[i].Slug, "summary/") && updates[i].Type == "retract":
+			t.Fatalf("summary pages are wholesale replacements and must not receive a retract: %+v", updates[i])
+		}
+	}
+	require.NotNil(t, overlapRetract)
+	assert.Equal(t, []string{"old-shared-1", "old-shared-2"}, overlapRetract.SourceChunks)
+	assert.Equal(t, "previous contribution", overlapRetract.RetractDocContent)
+	require.NotNil(t, staleRetract)
+	assert.Equal(t, []string{"old-stale"}, staleRetract.SourceChunks)
+	assert.Equal(t, "current document", staleRetract.RetractDocContent)
+}
+
+func TestWikiReparseChunkRefsReplaceOnlyTheCurrentDocumentGeneration(t *testing.T) {
+	current := types.StringArray{
+		"other-source-1",
+		"old-owned-1",
+		"old-owned-2",
+		"other-source-2",
+		"old-owned-1",
+	}
+	retracts := []SlugUpdate{{
+		Type:         "retract",
+		KnowledgeID:  "knowledge-1",
+		SourceChunks: []string{"old-owned-1", "old-owned-2"},
+	}}
+	additions := []SlugUpdate{{
+		Type:         types.WikiPageTypeEntity,
+		KnowledgeID:  "knowledge-1",
+		SourceChunks: []string{"new-owned-1", "new-owned-2", "new-owned-1"},
+	}}
+
+	replaced := mergeChunkRefs(
+		removeChunkRefsFromRetracts(current, retracts),
+		additions,
+	)
+	assert.Equal(t, types.StringArray{
+		"other-source-1",
+		"other-source-2",
+		"new-owned-1",
+		"new-owned-2",
+	}, replaced)
+
+	// A durable replay after the same replacement is idempotent: no old
+	// generation reappears and no new citation is duplicated.
+	replayed := mergeChunkRefs(
+		removeChunkRefsFromRetracts(replaced, retracts),
+		additions,
+	)
+	assert.Equal(t, replaced, replayed)
 }
 
 func TestReduceSlugUpdatesDurablyAppliedPageSkipsLLMAndPageMutation(t *testing.T) {
@@ -2186,6 +2824,9 @@ func TestProcessWikiIngestWikiDisabledReconcilesRetractBeforeAck(t *testing.T) {
 		logs.entries[0].SourceOpID == nil || *logs.entries[0].SourceOpID != 1 {
 		t.Fatalf("disabled-Wiki log entries = %+v, want idempotent retract event for op 1", logs.entries)
 	}
+	assert.Empty(t, logs.entries[0].DocTitle)
+	assert.Empty(t, logs.entries[0].Summary)
+	assert.Empty(t, logs.entries[0].PagesAffected)
 	if len(pending.rows) != 0 || !slices.Equal(pending.deletedIDs[0], []int64{1}) {
 		t.Fatalf("pending queue after deterministic retract = rows:%d deletes:%v", len(pending.rows), pending.deletedIDs)
 	}

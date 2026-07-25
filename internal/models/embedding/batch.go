@@ -2,6 +2,7 @@ package embedding
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -24,17 +25,44 @@ type textEmbedding struct {
 }
 
 func (e *batchEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return [][]float32{}, nil
+	}
+	if e == nil || e.pool == nil {
+		return nil, fmt.Errorf("embedding worker pool is not configured")
+	}
 	// Create goroutine pool for concurrent processing of document chunks
 	var wg sync.WaitGroup
-	var mu sync.Mutex  // For synchronizing access to error
-	var firstErr error // Record the first error that occurs
+	var errMu sync.Mutex
+	var firstErr error
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	setFirstError := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel()
+		}
+		errMu.Unlock()
+	}
+	getFirstError := func() error {
+		errMu.Lock()
+		defer errMu.Unlock()
+		return firstErr
+	}
 	batchSizeStr := os.Getenv("BATCH_EMBED_SIZE")
 	if batchSizeStr == "" {
 		batchSizeStr = "5"
 	}
 	batchSize, err := strconv.Atoi(batchSizeStr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse BATCH_EMBED_SIZE: %w", err)
+	}
+	if batchSize <= 0 {
+		return nil, fmt.Errorf("BATCH_EMBED_SIZE must be greater than zero")
 	}
 	textEmbeddings := utils.MapSlice(texts, func(text string) *textEmbedding {
 		return &textEmbedding{text: text}
@@ -45,29 +73,31 @@ func (e *batchEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, 
 		return func() {
 			defer wg.Done()
 			// If an error has already occurred, don't continue processing
-			if firstErr != nil {
+			if getFirstError() != nil {
 				return
 			}
 			// Embed text
-			embedding, err := model.BatchEmbed(ctx, utils.MapSlice(texts, func(text *textEmbedding) string {
+			embedding, err := model.BatchEmbed(workCtx, utils.MapSlice(texts, func(text *textEmbedding) string {
 				return text.text
 			}))
 			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
+				setFirstError(err)
 				return
 			}
-			mu.Lock()
+			if len(embedding) != len(texts) {
+				setFirstError(fmt.Errorf(
+					"embedding provider returned %d vectors for %d inputs",
+					len(embedding),
+					len(texts),
+				))
+				return
+			}
 			for i, text := range texts {
 				if text == nil {
 					continue
 				}
 				text.results = embedding[i]
 			}
-			mu.Unlock()
 		}
 	}
 
@@ -76,7 +106,10 @@ func (e *batchEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, 
 		wg.Add(1)
 		err := e.pool.Submit(processChunk(texts))
 		if err != nil {
-			return nil, err
+			// Submit did not transfer ownership of this WaitGroup slot.
+			wg.Done()
+			setFirstError(fmt.Errorf("submit embedding batch: %w", err))
+			break
 		}
 	}
 
@@ -84,8 +117,8 @@ func (e *batchEmbedder) BatchEmbedWithPool(ctx context.Context, model Embedder, 
 	wg.Wait()
 
 	// Check if any errors occurred
-	if firstErr != nil {
-		return nil, firstErr
+	if err := getFirstError(); err != nil {
+		return nil, err
 	}
 
 	results := utils.MapSlice(textEmbeddings, func(text *textEmbedding) []float32 {

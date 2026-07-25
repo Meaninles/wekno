@@ -196,3 +196,29 @@ func ResolveIngestParallelism(config *types.WikiConfig) (mapParallel, reducePara
 	return config.IngestMapParallelOrDefault(DefaultMapParallel),
 		config.IngestReduceParallelOrDefault(DefaultReduceParallel)
 }
+
+// ResolveIngestBatchSize bounds one durable settlement window to at most one
+// Map wave. A larger document count cannot increase Map throughput once every
+// Map worker is occupied; it only makes already-finished documents wait for
+// later waves before their Wiki status and document workflow can commit.
+//
+// Operators that have a dedicated high-capacity provider can still raise both
+// IngestBatchSize and IngestMapParallel together. The distributed model
+// admission layer remains the final provider-wide safety boundary.
+func ResolveIngestBatchSize(config *types.WikiConfig, fallback int) int {
+	if fallback <= 0 {
+		fallback = 1
+	}
+	batchSize := config.IngestBatchSizeOrDefault(fallback)
+	mapParallel, _ := ResolveIngestParallelism(config)
+	if mapParallel <= 0 {
+		mapParallel = 1
+	}
+	if batchSize > mapParallel {
+		return mapParallel
+	}
+	if batchSize <= 0 {
+		return 1
+	}
+	return batchSize
+}

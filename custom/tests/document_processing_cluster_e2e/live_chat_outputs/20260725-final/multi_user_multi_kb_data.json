@@ -1,0 +1,623 @@
+{
+  "generated_at": "2026-07-25T15:59:21.568640139Z",
+  "base_url": "http://127.0.0.1:8080/api/v1",
+  "tenant_id": 10263,
+  "knowledge_base_id": "d1f8c4cd-ec47-41c9-aa58-6592adbaecf6",
+  "knowledge_base_name": "数据资产资料",
+  "configured_summary_model_id": "f2182813-cbbb-51f9-a031-3863160e62c8",
+  "requested_model_id": "f2182813-cbbb-51f9-a031-3863160e62c8",
+  "model_name": "deepseek-v4-flash-int8",
+  "expected_model_name": "deepseek-v4-flash-int8",
+  "model_provider": "generic",
+  "model_endpoint_host": "host.docker.internal:14000",
+  "model_config_matched": true,
+  "knowledge_base_config_matched": true,
+  "cases": [
+    {
+      "name": "nc-receivable-entity-mapping",
+      "query": "在财务部业务实体映射清单中，客户应收单和客户收款单对应的 NC 数据源英文表名分别是什么？它们的归口管理部门和更新周期是什么？",
+      "session_id": "538f507d-295c-4067-8495-a4ef59620a2f",
+      "elapsed_ms": 8712,
+      "http_status": 200,
+      "stream_completed": true,
+      "answer_done": true,
+      "answer": "根据财务部业务实体映射清单中的信息：\n\n- **客户应收单**对应的 NC 数据源英文表名为 **AR_RECBILL**，归口管理部门为 **财务部**，更新周期为 **日**。\u003csrc id=\"S7\" /\u003e\n- **客户收款单**对应的 NC 数据源英文表名为 **AR_GATHERBILL**，归口管理部门为 **财务部**，更新周期为 **日**。\u003csrc id=\"S7\" /\u003e",
+      "hybrid_search_elapsed_ms": 853,
+      "hybrid_references": [
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 332,
+          "score": 0.015835777126099706,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PK_CURRTYPE,E: 币种,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PK_DEPTID,E: 部门,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PK_DEPTID_V,E: 部门,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 299,
+          "score": 0.014559386973180075,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: RECACCOUNT,E: 收款银行账户,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: RECECOUNTRYID,E: 收货国,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: ROWNO,E: 单据分录号,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,…"
+        },
+        {
+          "knowledge_id": "f63bf91b-53f6-434e-851a-4d03cfa28d60",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00635-1、业务部门数据盘点-财务部（股份）.docx",
+          "chunk_index": 14,
+          "score": 0.014337606837606837,
+          "match_type": "embedding",
+          "excerpt": "该图展示了NC系统中“应收应付管理”的业务流程。流程从“收付款协议”开始，分别生成“客户应收”和“供应商应付”，并进一步形成“收款合同”和“付款合同”。客户应收和供应商应付的数据汇入“收付款业务数据”，再分别生成“客户收款”和“供应商付款”。这些数据最终汇总至“应收应付汇总”，经过“并账”处理后，进入“核销”环节，完成整个应收应付管理闭环。"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 323,
+          "score": 0.013939393939393939,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: SIGNYEAR,E: 签字年度,G: VARCHAR2,H: 4,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: SRC_SYSCODE,E: 单据来源系统,G: NUMBER,H: 22,J: 单据所属系统代码,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: SUBJCODE,E: 科目,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 312,
+          "score": 0.013856362217017954,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: SETTLEMONEY,E: 收款金额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: SETTLENO,E: 结算清单号,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: SO_DEPTID,E: 业务部门,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_R…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 336,
+          "score": 0.013653846153846154,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SRC_BILLID,E: 源头单据主键,G: CHAR,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SRC_BILLTYPE,E: 源头单据类型,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SRC_ITEMID,E: 源头单据行主键,G: CHAR,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户…"
+        },
+        {
+          "knowledge_id": "6f2b784f-7a5e-45d8-9512-efbc9777a2de",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00638-4、部门资源清单-财务部.xlsx",
+          "chunk_index": 24,
+          "score": 0.013386509450320789,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: 线上,D: 记录应收单据的明细信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 客户收款单,C: 线上,D: 记录收款单据的主实体信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 客户收款单明细,C: 线上,D: 记录收款单据的明细信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 供应商应付单,C: 线上,D: 记录应付单据的主实体信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 供应商应付单明细,C: 线上,D: 记录应付单据的明细信息,E: 一般数据,F: 日\nA: 应收…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 335,
+          "score": 0.013097826086956522,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SCOMMENT,E: 摘要,G: VARCHAR2,H: 250,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SETT_ORG,E: 结算财务组织,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SETT_ORG_V,E: 结算财务组织版本,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 315,
+          "score": 0.012889457959880495,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: BILLYEAR,E: 单据会计年度,G: VARCHAR2,H: 4,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: COMMPAYBEGINDATE,E: 承付开始日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: COMMPAYENDDATE,E: 承付截止日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 321,
+          "score": 0.012063492063492064,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: PK_CURRTYPE,E: 币种,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: PK_FIORG,E: 废弃财务组织,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: PK_FIORG_V,E: 废弃财务组织版本,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 300,
+          "score": 0.011883167892594443,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: SO_ORDERTYPE,E: 销售订单类型,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: SO_ORG,E: 业务组织,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: SO_ORG_V,E: 业务组织版本,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBIL…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 333,
+          "score": 0.011821705426356589,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PK_PCORG_V,E: 利润中心版本,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PK_PSNDOC,E: 业务员,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PK_RECPAYTYPE,E: 收款业务类型,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 327,
+          "score": 0.011612272338344946,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DEF26,E: 自定义项26,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DEF27,E: 自定义项27,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DEF28,E: 自定义项28,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 303,
+          "score": 0.011463414634146341,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: CUSTOMER,E: 客户,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: CUSTVATCODE,E: 客户VAT注册码,G: VARCHAR2,H: 50,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: DEF1,E: 自定义项1,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_R…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 324,
+          "score": 0.01146110056925996,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: BILLDATE,E: 单据日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: BILLNO,E: 单据号,G: VARCHAR2,H: 40,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: BUSIDATE,E: 起算日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHER…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 0,
+          "score": 0.011245173745173745,
+          "match_type": "embedding",
+          "excerpt": "A: 业务过程,B: 比对最终实体,C: 比对处理情况,D: 业务实体名称,E: 数据类别\n（线上/线下）,F: 实体业务含义,G: 安全分类,H: 归口管理部门,I: 更新周期,J: 数据源英文表名,K: 数据源中文表名,L: 数据源系统名称,M: 是否跨业务域交互（是/否）\nA: 基础管理,B: 组织实体,D: 组织档案,E: 线上,F: 记录组织档案的相关信息,G: 一般信息,H: 财务部,I: 日,J: ORG_ORGS,K: 组织表,L: 茅台集团ERP系统(NC),O: 核心信息\nA: 基础管理,B: 组织版本信息,D: 组织档案,E: 线上…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 330,
+          "score": 0.011063094209161625,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: LOCAL_MONEY_CR,E: 组织本币金额(贷方),G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: LOCAL_NOTAX_CR,E: 组织本币无税金额(贷方),G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: LOCAL_PRICE,E: 本币单价,G: NUMBER,H: 22,K: 否,L: 否…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 317,
+          "score": 0.011052156242944231,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF21,E: 自定义项21,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF22,E: 自定义项22,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF23,E: 自定义项23,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GAT…"
+        },
+        {
+          "knowledge_id": "298570f3-3490-4671-8e3b-5e2dc5928684",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00636-2、数据资源（物理）信息采集清单-NC系统.xlsx",
+          "chunk_index": 19965,
+          "score": 0.0109375,
+          "match_type": "embedding",
+          "excerpt": "A: AR_RECITEM,B: 客户应收单行表,C: 69,D: LOCAL_TAXPRICE,E: 本币含税单价,F: NUMBER,G: 22,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 70,D: MATCUSTCODE,E: 客户物料码,F: VARCHAR2,G: 20,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 71,D: MATERIAL,E: 物料,F: VARCHAR2,G: 20,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 72,D: MATERIAL_SRC,E:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 322,
+          "score": 0.010863095238095238,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: SCOMMENT,E: 摘要,G: VARCHAR2,H: 250,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: SDDREVERSALDATE,E: 直接借记退回日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: SDDREVERSALER,E: 直接借记退回人,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 314,
+          "score": 0.010758283772302462,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: TS,E: 时间戳,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: VATCODE,E: VAT注册码,G: VARCHAR2,H: 50,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: ACCESSORYNUM,E: 附件张数,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 8,
+          "score": 0.010744810744810745,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 收付款协议项目,C: 增加业务实体,E: 线上,F: 记录收付款协议的详细信息,G: 一般信息,H: 财务部,I: 日,J: ARAP_TERMITEM,K: 收付款协议表 ,L: 茅台集团ERP系统(NC)\nA: 应收应付管理,B: 客户应收单,D: 应收单,E: 线上,F: 记录应收单据的信息,G: 一般信息,H: 财务部,I: 日,J: AR_RECBILL,K: 客户应收单表,L: 茅台集团ERP系统(NC)\nA: 应收应付管理,B: 客户应收单明细,D: 应收单,E: 线上,F: 记录应收单据的信息,G: 一般信息,H…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 316,
+          "score": 0.010722311396468698,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF10,E: 自定义项10,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF11,E: 自定义项11,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF12,E: 自定义项12,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GAT…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 320,
+          "score": 0.010638297872340425,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: LOCAL_MONEY,E: 组织本币金额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: MODIFIEDTIME,E: 最后修改时间,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: MODIFIER,E: 最后修改人,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 331,
+          "score": 0.010619665225584746,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: OBJTYPE,E: 往来对象,G: NUMBER,H: 22,J: 往来对象代码,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: OCCUPATIONMNY,E: 预占用原币余额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: ORDERCUBASDOC,E: 订单客户,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应…"
+        },
+        {
+          "knowledge_id": "833928b7-43a4-4d75-8b44-5be0bc5311ba",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00639-4、部门资源清单-财务部_确认.xlsx",
+          "chunk_index": 13,
+          "score": 0.010416666666666666,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 收付款协议项目,C: 线上,D: 记录收付款协议的详细信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 客户应收单,C: 线上,D: 记录应收单据主实体的信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 客户应收单明细,C: 线上,D: 记录应收单据的明细信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 客户收款单,C: 线上,D: 记录收款单据的主实体信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 客户收款单明细,C: 线上,D: 记录收款单据的明细信息,E: 一般数据,F: 日\nA: 应收应…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 308,
+          "score": 0.010203252032520324,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: NOTAX_DE,E: 借方原币无税金额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: OBJTYPE,E: 往来对象,G: NUMBER,H: 22,J: 往来对象代码,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: OCCUPATIONMNY,E: 预占用原币余额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 326,
+          "score": 0.010198609731876862,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DEF15,E: 自定义项15,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DEF16,E: 自定义项16,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DEF17,E: 自定义项17,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C…"
+        },
+        {
+          "knowledge_id": "f63bf91b-53f6-434e-851a-4d03cfa28d60",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00635-1、业务部门数据盘点-财务部（股份）.docx",
+          "chunk_index": 14,
+          "score": 0.010144927536231883,
+          "match_type": "embedding",
+          "excerpt": "# 业务流程图\n\n## 财务会计\n\n### 应收应付管理\n\n![](local://10263/f63bf91b-53f6-434e-851a-4d03cfa28d60/aae4aaeb-8c13-4733-9be9-5b40af491654.png)\n\n### 费用管理\n\n![](local://10263/f63bf91b-53f6-434e-851a-4d03cfa28d60/66b49cf7-0374-490c-bd42-78a093928481.png)\n\n### 固定资产\n\n![](local://10263/f63bf91b-53f6-43…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 309,
+          "score": 0.009848073792729246,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: PK_DEPTID_V,E: 部门,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: PK_FIORG,E: 废弃财务组织,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: PK_FIORG_V,E: 废弃财务组织版本,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C…"
+        },
+        {
+          "knowledge_id": "f63bf91b-53f6-434e-851a-4d03cfa28d60",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00635-1、业务部门数据盘点-财务部（股份）.docx",
+          "chunk_index": 13,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "| 6 | 内部交易信息 | 记录内部交易的相关信息 |\n\n## 生产制造\n\n### 主生产计划\n\n| **序号** | **业务活动名称** | **说明** |\n| --- | --- | --- |\n| 1 | 主生产计划 | 主生产计划是企业实际应用中常见的一种工具，是生产计划员基于预测或者客户需求，根据工厂能力情况，兼顾均衡、稳定原则，制定出的确定每一具体的最终产品在每一具体时间段内生产数量的计划 |\n\n### 生产任务管理\n\n| **序号** | **业务活动名称** | **说明** |\n| --- | --- | --- |\n| 1 |…"
+        },
+        {
+          "knowledge_id": "f63bf91b-53f6-434e-851a-4d03cfa28d60",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00635-1、业务部门数据盘点-财务部（股份）.docx",
+          "chunk_index": 15,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "# 业务实体\n\n## 基础管理\n\n### 组织管理\n\n| **名称** | **说明** | **主要属性** | **备注** |\n| --- | --- | --- | --- |\n| 组织档案 | 记录组织档案的相关信息 | 主要包括组织编码、组织名称、所属集团、电话、负责人、地址、版本号等 |  |\n| 部门档案 | 记录部门档案的基本信息 | 主要包括编码、名称、上级部门、部门级别、部门类型、电话、地址等 |  |\n\n### 人员管理\n\n| **名称** | **说明** | **主要属性** | **备注** |\n| --- | --- |…"
+        },
+        {
+          "knowledge_id": "298570f3-3490-4671-8e3b-5e2dc5928684",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00636-2、数据资源（物理）信息采集清单-NC系统.xlsx",
+          "chunk_index": 19966,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: AR_RECITEM,B: 客户应收单行表,C: 82,D: PK_BALATYPE,E: 结算方式,F: VARCHAR2,G: 20,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 83,D: PK_BATCHCODE,E: 批次号编码,F: VARCHAR2,G: 20,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 84,D: PK_BILLTYPE,E: 单据类型编码,F: VARCHAR2,G: 20,I: 否\nA: AR_RECITEM,B: 客户应收单行表,C: 85,D: PK_CURRTYPE…"
+        },
+        {
+          "knowledge_id": "298570f3-3490-4671-8e3b-5e2dc5928684",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00636-2、数据资源（物理）信息采集清单-NC系统.xlsx",
+          "chunk_index": 19964,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: AR_RECITEM,B: 客户应收单行表,C: 56,D: GLOBALTAX_DE,E: 全局本币税金(借方),F: NUMBER,G: 22,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 57,D: GROUPBALANCE,E: 集团本币余额,F: NUMBER,G: 22,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 58,D: GROUPDEBIT,E: 集团本币金额(借方),F: NUMBER,G: 22,I: 是\nA: AR_RECITEM,B: 客户应收单行表,C: 59,D: GROUPN…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 318,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF5,E: 自定义项5,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF6,E: 自定义项6,G: VARCHAR2,H: 255,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: DEF7,E: 自定义项7,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBIL…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 319,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: GROUPLOCAL,E: 集团本币金额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: INVOICENO,E: 发票号,G: VARCHAR2,H: 140,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: ISFLOWBILL,E: 是否流程单据,G: CHAR,H: 1,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_G…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 307,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: INVOICENO,E: 发票号,G: VARCHAR2,H: 140,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: LOCAL_MONEY_BAL,E: 组织本币余额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: LOCAL_MONEY_DE,E: 组织本币金额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 7,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 基础管理,B: 税种,D: 税种,E: 线上,F: 记录税种的相关信息,G: 一般信息,H: 财务部,I: 日,J: TXM_TAXKIND,K: 税种,L: 茅台集团ERP系统(NC)\nA: 基础管理,B: 币种,D: 币种,E: 线上,F: 记录币种的相关信息,G: 一般信息,H: 财务部,I: 日,J: BD_CURRTYPE,K: 币种,L: 茅台集团ERP系统(NC)\nA: 基础管理,B: 单据类型,C: 增加业务实体,E: 线上,F: 记录单据类型的相关信息,G: 一般信息,H: 财务部,I: 日,J: BD_BILLTYPE,K: 单…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 301,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: TAXRATE,E: 税率,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: TAXTYPE,E: 扣税类别,G: NUMBER,H: 22,J: 扣税类别代码,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: TOP_BILLID,E: 上层单据主键,G: CHAR,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 302,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: BILLCLASS,E: 单据大类,G: VARCHAR2,H: 2,J: 单据大类代码,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: BILLDATE,E: 单据日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: BILLNO,E: 单据编号,G: VARCHAR2,H: 40,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 1,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 基础管理,B: 人员类别,C: 增加业务实体,E: 线上,F: 记录人员类别信息,G: 一般信息,H: 财务部,I: 日,J: BD_PSNCL,K: 人员类别,L: 茅台集团ERP系统(NC)\nA: 基础管理,B: 联系人,C: 增加业务实体,E: 线上,F: 记录联系人的相关信息,G: 人员信息,H: 财务部,I: 日,J: BD_LINKMAN,K: 联系人,L: 茅台集团ERP系统(NC)\nA: 基础管理,B: 证件类别 ,C: 增加业务实体,E: 线上,F: 记录证件的类别信息,G: 一般信息,H: 财务部,I: 日,J: BD_PSNI…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 298,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: POSTPRICE,E: 报价单位含税单价,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: POSTPRICENOTAX,E: 报价单位无税单价,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: POSTQUANTITY,E: 报价单位数量,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 9,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 付款合同,D: 收付款合同,E: 线上,F: 记录收付款合同的相关信息,G: 一般信息,H: 财务部,I: 日,J: FCT_AP,K: 付款合同表,L: 茅台集团ERP系统(NC)\nA: 应收应付管理,B: 付款合同基本,D: 收付款合同,E: 线上,F: 记录收付款合同的相关信息,G: 一般信息,H: 财务部,I: 日,J: FCT_AP_B,K: 付款合同基本,L: 茅台集团ERP系统(NC)\nA: 应收应付管理,B: 付款合同变更历史,D: 收付款合同,E: 线上,F: 记录收付款合同的相关信息,G: 一般信息,H: 财…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 337,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: TOP_BILLTYPE,E: 上层单据类型,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: TOP_ITEMID,E: 上层单据行主键,G: CHAR,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: TOP_TRADETYPE,E: 上层交易类型,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 311,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: PURCHASEORDER,E: 订单号,G: VARCHAR2,H: 40,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: QUANTITY_BAL,E: 数量余额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: QUANTITY_DE,E: 借方数量,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 304,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: DEF19,E: 自定义项19,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: DEF2,E: 自定义项2,G: VARCHAR2,H: 200,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: DEF20,E: 自定义项20,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITE…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 329,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: GROUPAGENTRECEIVELOCAL,E: 托收集团本币,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: GROUPBALANCE,E: 集团本币余额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: GROUPCREBIT,E: 集团本币金额(贷方),G: NUMBER,H: 22,K: 否,L:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 310,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: PK_SSITEM,E: 事项审批单,G: CHAR,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: PK_SUBJCODE,E: 收支项目,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: PK_TRADETYPE,E: 应收类型CODE,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 313,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: SRC_TRADETYPE,E: 源头交易类型,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: SUBJCODE,E: 科目编码,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: TAXCODEID,E: 税码,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: A…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 325,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: COMMPAYTYPE,E: 承付型态,G: NUMBER,H: 22,J: 承付类型代码,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: CONFERNUM,E: 内部交易结算号,G: VARCHAR2,H: 60,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: CONTRACTNO,E: 合同号,G: VARCHAR2,H: 40,K: 否,L: 否\nA: 应收应…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 334,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PRICE,E: 单价,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PRODUCTLINE,E: 产品线,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: PROJECT,E: 项目,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GAT…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 328,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DIRECTION,E: 方向,G: NUMBER,H: 22,J: 方向类型代码,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: DR,E: 删除标识,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: EQUIPMENTCODE,E: 设备编码,G: VARCHAR2,H: 100,K: 否,L: 否\nA: 应收应付管理,B: 客户收款…"
+        },
+        {
+          "knowledge_id": "6f2b784f-7a5e-45d8-9512-efbc9777a2de",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00638-4、部门资源清单-财务部.xlsx",
+          "chunk_index": 25,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 并账明细,C: 线上,D: 记录收付款的并账明细信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 核销主实体,C: 线上,D: 记录应收应付业务核销数据信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 核销明细,C: 线上,D: 记录应收应付业务核销数据明细信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 月余额发生信息,C: 线上,D: 记录收付单据的月余额信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 收付单据类型 ,C: 线上,D: 记录收付单据的类型信息,E: 一般数据,F: 日\nA:…"
+        },
+        {
+          "knowledge_id": "6f2b784f-7a5e-45d8-9512-efbc9777a2de",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00638-4、部门资源清单-财务部.xlsx",
+          "chunk_index": 23,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 基础管理,B: 会计科目明细,C: 线上,D: 记录会计科目的详细信息,E: 一般数据,F: 日\nA: 基础管理,B: 科目,C: 线上,D: 记录科目的相关信息,E: 一般数据,F: 日\nA: 基础管理,B: 银行类别,C: 线上,D: 记录银行类别信息,E: 一般数据,F: 日\nA: 基础管理,B: 结算方式,C: 线上,D: 记录结算方式信息,E: 一般数据,F: 日\nA: 基础管理,B: 票据类型,C: 线上,D: 记录票据类型的信息,E: 一般数据,F: 日\nA: 基础管理,B: 仓库,C: 线上,D: 记录仓库的相关信息,E: 一般数据…"
+        },
+        {
+          "knowledge_id": "833928b7-43a4-4d75-8b44-5be0bc5311ba",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00639-4、部门资源清单-财务部_确认.xlsx",
+          "chunk_index": 12,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "3.一般数据\n数据一旦遭到篡改、破坏、泄露或者非法获取、非法利用，可能对企业合法权益造成轻微危害。\n4.可公开数据\n数据一旦遭到篡改、破坏、泄露或者非法获取、非法利用，不会对企业权益造成危害。\n5.人员数据\n根据《分级分类指南》匹配安全级别,K: 安全分类说明：\n1.核心数据\n数据一旦遭到篡改、破坏、泄露或者非法获取、非法利用，可能对企业合法权益造成严重危害，但不会危害国家安全或公共利益。\n2.重要数据\n数据一旦遭到篡改、破坏、泄露或者非法获取、非法利用，可能对企业合法权益造成一般危害。\n3.一般数据\n数据一旦遭到篡改、破坏、泄露或者非法获取、非法利用，…"
+        },
+        {
+          "knowledge_id": "833928b7-43a4-4d75-8b44-5be0bc5311ba",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00639-4、部门资源清单-财务部_确认.xlsx",
+          "chunk_index": 14,
+          "score": 0,
+          "match_type": "nearby_chunk",
+          "excerpt": "A: 应收应付管理,B: 收付业务数据,C: 线上,D: 记录收付款的业务数据信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 并账主实体,C: 线上,D: 记录收付款的并账信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 并账明细,C: 线上,D: 记录收付款的并账明细信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 核销主实体,C: 线上,D: 记录应收应付业务核销数据信息,E: 一般数据,F: 日\nA: 应收应付管理,B: 核销明细,C: 线上,D: 记录应收应付业务核销数据明细信息,E: 一般数据,F: 日\nA: 应收应付…"
+        }
+      ],
+      "hybrid_matched_source_checks": {
+        "业务实体映射清单-财务部.xlsx": true
+      },
+      "hybrid_matched_evidence_groups": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "hybrid_recall_ok": false,
+      "hybrid_diagnostic_notes": [
+        "retrieved evidence group 4 was not matched"
+      ],
+      "references": [
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 292,
+          "score": 0.7541208563240697,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: DEF2,E: 自定义项2,G: VARCHAR2,H: 200,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: DEF20,E: 自定义项20,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: DEF21,E: 自定义项21,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: DEF…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 298,
+          "score": 0.7466258201364149,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: POSTPRICE,E: 报价单位含税单价,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: POSTPRICENOTAX,E: 报价单位无税单价,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: POSTQUANTITY,E: 报价单位数量,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 0,
+          "score": 0.7265509712219239,
+          "match_type": "embedding",
+          "excerpt": "A: 业务过程,B: 比对最终实体,C: 比对处理情况,D: 业务实体名称,E: 数据类别\n（线上/线下）,F: 实体业务含义,G: 安全分类,H: 归口管理部门,I: 更新周期,J: 数据源英文表名,K: 数据源中文表名,L: 数据源系统名称,M: 是否跨业务域交互（是/否）\nA: 基础管理,B: 组织实体,D: 组织档案,E: 线上,F: 记录组织档案的相关信息,G: 一般信息,H: 财务部,I: 日,J: ORG_ORGS,K: 组织表,L: 茅台集团ERP系统(NC),O: 核心信息\nA: 基础管理,B: 组织版本信息,D: 组织档案,E: 线上…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 302,
+          "score": 0.6799172205890301,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: BILLCLASS,E: 单据大类,G: VARCHAR2,H: 2,J: 单据大类代码,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: BILLDATE,E: 单据日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: BILLNO,E: 单据编号,G: VARCHAR2,H: 40,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 295,
+          "score": 0.6428227975107592,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: LOCAL_PRICE,E: 本币单价,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: LOCAL_TAX_DE,E: 税额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBILL,D: LOCAL_TAXPRICE,E: 本币含税单价,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单,C: AR_RECBI…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 289,
+          "score": 0.6014941579444857,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 收付款协议表,C: ARAP_TERMITEM,D: PK_ORG,E: 主组织,G: CHAR,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 收付款协议表,C: ARAP_TERMITEM,D: PK_ORG_V,E: 主组织版本主键,G: CHAR,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 收付款协议表,C: ARAP_TERMITEM,D: PK_TERM_B,E: 协议表体PK,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 收付款协议表,C: ARAP_TE…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 8,
+          "score": 0.596648185808073,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 收付款协议项目,C: 增加业务实体,E: 线上,F: 记录收付款协议的详细信息,G: 一般信息,H: 财务部,I: 日,J: ARAP_TERMITEM,K: 收付款协议表 ,L: 茅台集团ERP系统(NC)\nA: 应收应付管理,B: 客户应收单,D: 应收单,E: 线上,F: 记录应收单据的信息,G: 一般信息,H: 财务部,I: 日,J: AR_RECBILL,K: 客户应收单表,L: 茅台集团ERP系统(NC)\nA: 应收应付管理,B: 客户应收单明细,D: 应收单,E: 线上,F: 记录应收单据的信息,G: 一般信息,H…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 335,
+          "score": 0.5952211409249681,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SCOMMENT,E: 摘要,G: VARCHAR2,H: 250,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SETT_ORG,E: 结算财务组织,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单明细,C: AR_GATHERITEM,D: SETT_ORG_V,E: 结算财务组织版本,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 320,
+          "score": 0.5288923868273254,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: LOCAL_MONEY,E: 组织本币金额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: MODIFIEDTIME,E: 最后修改时间,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: MODIFIER,E: 最后修改人,G: VARCHAR2,H: 20,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C:…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 315,
+          "score": 0.5064549738198362,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: BILLYEAR,E: 单据会计年度,G: VARCHAR2,H: 4,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: COMMPAYBEGINDATE,E: 承付开始日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款单,C: AR_GATHERBILL,D: COMMPAYENDDATE,E: 承付截止日期,G: CHAR,H: 19,K: 否,L: 否\nA: 应收应付管理,B: 客户收款…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 308,
+          "score": 0.4698723050702979,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: NOTAX_DE,E: 借方原币无税金额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: OBJTYPE,E: 往来对象,G: NUMBER,H: 22,J: 往来对象代码,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: OCCUPATIONMNY,E: 预占用原币余额,G: NUMBER,H: 22,K: 否,L: 否\nA: 应收应付管理,B: 客户应…"
+        },
+        {
+          "knowledge_id": "78495ab3-4dbd-4cf0-9888-966c7305270b",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00637-3、业务实体映射清单-财务部.xlsx",
+          "chunk_index": 305,
+          "score": 0.34422357501747775,
+          "match_type": "embedding",
+          "excerpt": "A: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: DEF3,E: 自定义项3,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: DEF30,E: 自定义项30,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,D: DEF4,E: 自定义项4,G: VARCHAR2,H: 101,K: 否,L: 否\nA: 应收应付管理,B: 客户应收单明细,C: AR_RECITEM,…"
+        }
+      ],
+      "matched_source_checks": {
+        "业务实体映射清单-财务部.xlsx": true
+      },
+      "matched_evidence_groups": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "matched_answer_groups": [
+        true,
+        true,
+        true,
+        false
+      ],
+      "answer_diagnostic_ok": false,
+      "answer_diagnostic_notes": [
+        "answer fact group 4 was not matched"
+      ],
+      "assistant_message_id": "01c6d1e7-5354-4847-93de-b50c93cc97bd",
+      "session_cleanup_ok": true,
+      "recall_passed": false,
+      "recall_failure_reasons": [
+        "retrieved evidence group 4 was not matched"
+      ],
+      "observed_response_types": [
+        "agent_query",
+        "answer",
+        "complete",
+        "references",
+        "tool_call",
+        "tool_result"
+      ]
+    }
+  ],
+  "recall_passed": false
+}

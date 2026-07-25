@@ -12,8 +12,11 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
@@ -68,6 +71,8 @@ type knowledgeService struct {
 	wikiDeleteCoord *wikidelete.Coordinator
 	auxObjects      *knowledgeaux.Registry
 	splitManager    *documentsplit.Manager
+	modelAdmission  *modeladmission.Manager
+	contentCache    *contentcache.Store
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -116,6 +121,8 @@ func NewKnowledgeService(
 	wikiDeleteCoord *wikidelete.Coordinator,
 	auxObjects *knowledgeaux.Registry,
 	splitManager *documentsplit.Manager,
+	modelAdmission *modeladmission.Manager,
+	contentCache *contentcache.Store,
 	spanTracker SpanTracker,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
@@ -145,6 +152,8 @@ func NewKnowledgeService(
 		wikiDeleteCoord: wikiDeleteCoord,
 		auxObjects:      auxObjects,
 		splitManager:    splitManager,
+		modelAdmission:  modelAdmission,
+		contentCache:    contentCache,
 		spanTracker:     spanTracker,
 	}, nil
 }
@@ -211,6 +220,15 @@ func taskRetryMetadata(ctx context.Context) (retryCount, maxRetry int, ok bool) 
 	return taskretry.Metadata(ctx)
 }
 
+// isDurableTaskDeferred identifies infrastructure interruptions that must
+// leave durable business counters and state untouched. context.Canceled is
+// included for pod shutdown/preemption; user cancellation is fenced by the
+// persisted knowledge status before model work reaches these paths.
+func isDurableTaskDeferred(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		modeladmission.IsModelWorkDeferred(err)
+}
+
 // finalizeSubtaskDetachedTimeout bounds the detached decrement so a wedged DB
 // connection can't hang a worker goroutine forever in its terminal defer.
 const finalizeSubtaskDetachedTimeout = 10 * time.Second
@@ -241,8 +259,17 @@ func finalizeSubtaskDetached(
 	tenantID uint64,
 	knowledgeID, knowledgeBaseID, processingGeneration, source string,
 	retErr error,
+	outcomeErr error,
+	degraded bool,
 	superseded, final bool,
 ) error {
+	// Provider outages are durable backpressure, even when this delivery had
+	// already reached its historical MaxRetry before the shared circuit
+	// opened. Asynq reschedules these errors without spending retry budget, so
+	// the generation item must remain pending as well.
+	if isDurableTaskDeferred(retErr) {
+		return nil
+	}
 	willDrain := repo != nil && tenantID != 0 && knowledgeID != "" && knowledgeBaseID != "" &&
 		processingGeneration != "" && !superseded && (retErr == nil || final)
 	if !willDrain {
@@ -251,13 +278,31 @@ func finalizeSubtaskDetached(
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout)
 	defer cancel()
 	finalizer, ok := repo.(interface {
-		FinalizeSubtaskGenerationItem(context.Context, uint64, string, string, string, string) (int, bool, error)
+		FinalizeSubtaskGenerationItemOutcome(
+			context.Context, uint64, string, string, string, string, string, string,
+		) (int, bool, error)
 	})
 	if !ok {
-		return fmt.Errorf("finalize subtask source=%s knowledge=%s: exactly-once finalizer unavailable", source, knowledgeID)
+		return fmt.Errorf(
+			"finalize subtask source=%s knowledge=%s: outcome-aware exactly-once finalizer unavailable",
+			source, knowledgeID,
+		)
 	}
-	if _, _, err := finalizer.FinalizeSubtaskGenerationItem(
+	outcomeStatus := enrichmentoutcome.StatusCompleted
+	outcomeDetail := ""
+	if outcomeErr != nil {
+		outcomeStatus = enrichmentoutcome.StatusFailed
+		outcomeDetail = outcomeErr.Error()
+	} else if retErr != nil {
+		outcomeStatus = enrichmentoutcome.StatusFailed
+		outcomeDetail = retErr.Error()
+	} else if degraded {
+		outcomeStatus = enrichmentoutcome.StatusDegraded
+		outcomeDetail = "enrichment completed with partial upstream failures"
+	}
+	if _, _, err := finalizer.FinalizeSubtaskGenerationItemOutcome(
 		dctx, tenantID, knowledgeID, knowledgeBaseID, processingGeneration, source,
+		outcomeStatus, outcomeDetail,
 	); err != nil {
 		return fmt.Errorf("finalize subtask decrement source=%s knowledge=%s: %w", source, knowledgeID, err)
 	}
@@ -510,6 +555,26 @@ func (s *knowledgeService) GetKnowledgeByID(ctx context.Context, id string) (*ty
 
 	logger.Infof(ctx, "Knowledge retrieved successfully, ID: %s, type: %s", knowledge.ID, knowledge.Type)
 	return knowledge, nil
+}
+
+// CountTextChunksByKnowledgeID is intentionally a narrow production-only
+// capability used by the browser preview admission guard. It asks the paged
+// chunk service for a one-row page so the database performs COUNT(*) without
+// loading document content into application memory.
+func (s *knowledgeService) CountTextChunksByKnowledgeID(ctx context.Context, id string) (int64, error) {
+	if s.chunkService == nil {
+		return 0, fmt.Errorf("chunk service is unavailable")
+	}
+	result, err := s.chunkService.ListPagedChunksByKnowledgeID(
+		ctx,
+		id,
+		&types.Pagination{Page: 1, PageSize: 1},
+		[]types.ChunkType{types.ChunkTypeText},
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.Total, nil
 }
 
 // GetKnowledgeByIDOnly retrieves knowledge by ID without tenant filter (for permission resolution).

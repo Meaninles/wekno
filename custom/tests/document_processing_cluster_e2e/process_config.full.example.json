@@ -1,4 +1,5 @@
 {
+  "enable_multimodel": true,
   "question_generation_config": {
     "enabled": true,
     "question_count": 1
@@ -6,23 +7,32 @@
   "graph_enabled": true,
   "extract_config": {
     "enabled": true,
-    "text": "Extract the main document, section and verification capability entities and their relationships.",
-    "tags": ["document", "section", "capability"],
+    "text": "《示例数据管理办法》规定：数据管理部负责执行访问审批，访问审批适用于生产数据查询。",
+    "tags": ["规定职责", "执行", "适用于", "依赖", "引用"],
     "nodes": [
       {
-        "name": "Document",
-        "attributes": ["name", "marker"]
+        "name": "《示例数据管理办法》",
+        "attributes": ["内部管理制度"]
       },
       {
-        "name": "Capability",
-        "attributes": ["name"]
+        "name": "数据管理部",
+        "attributes": ["责任部门"]
+      },
+      {
+        "name": "访问审批",
+        "attributes": ["管理流程"]
       }
     ],
     "relations": [
       {
-        "node1": "Document",
-        "node2": "Capability",
-        "type": "VERIFIES"
+        "node1": "《示例数据管理办法》",
+        "node2": "数据管理部",
+        "type": "规定职责"
+      },
+      {
+        "node1": "数据管理部",
+        "node2": "访问审批",
+        "type": "执行"
       }
     ]
   }

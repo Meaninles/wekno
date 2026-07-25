@@ -16,6 +16,7 @@ import (
 	"time"
 
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -41,8 +42,8 @@ type postProcessGenerationRepository interface {
 }
 
 type enrichmentGenerationRepository interface {
-	FinalizeSubtaskGenerationItem(
-		context.Context, uint64, string, string, string, string,
+	FinalizeSubtaskGenerationItemOutcome(
+		context.Context, uint64, string, string, string, string, string, string,
 	) (int, bool, error)
 }
 
@@ -78,6 +79,7 @@ type Service struct {
 	postProcess postProcessGenerationRepository
 	enrichment  enrichmentGenerationRepository
 	fanout      processownership.DurableFanoutCompletionStore
+	outcomes    enrichmentoutcome.GenerationStore
 	move        knowledgeMoveRepairer
 }
 
@@ -91,6 +93,7 @@ func New(
 	s.postProcess, _ = repo.(postProcessGenerationRepository)
 	s.enrichment, _ = repo.(enrichmentGenerationRepository)
 	s.fanout, _ = repo.(processownership.DurableFanoutCompletionStore)
+	s.outcomes, _ = repo.(enrichmentoutcome.GenerationStore)
 	return s
 }
 
@@ -177,19 +180,33 @@ func (s *Service) Repair(ctx context.Context, task *asynq.Task, taskErr error) e
 	case types.TypeKnowledgePostProcess:
 		return s.repairPostProcess(ctx, id, errText)
 	case types.TypeSummaryGeneration:
-		return s.repairEnrichmentSlot(ctx, id, "summary")
+		return s.repairEnrichmentSlot(ctx, id, "summary", errText)
 	case types.TypeQuestionGeneration:
 		item := "question_legacy"
 		if len(id.ChunkIDs) > 0 || id.ChunkID != "" {
 			item = fmt.Sprintf("question_batch[%d]", id.BatchIndex)
 		}
-		return s.repairEnrichmentSlot(ctx, id, item)
+		return s.repairEnrichmentSlot(ctx, id, item, errText)
 	case types.TypeChunkExtract:
-		return s.repairEnrichmentSlot(ctx, id, fmt.Sprintf("graph_chunk[%d]", id.ChunkIndex))
+		return s.repairEnrichmentSlot(
+			ctx, id, fmt.Sprintf("graph_chunk[%d]", id.ChunkIndex), errText,
+		)
 	case types.TypeImageMultimodal:
-		return s.repairCoreFanout(ctx, id, processownership.ImageFanoutItem(id.ImageIndex))
+		return s.repairCoreFanout(
+			ctx,
+			id,
+			processownership.ImageFanoutItem(id.ImageIndex),
+			fmt.Sprintf("multimodal.image[%d]", id.ImageIndex),
+			errText,
+		)
 	case types.TypeDataTableSummary:
-		return s.repairCoreFanout(ctx, id, processownership.DataTableFanoutItem())
+		return s.repairCoreFanout(
+			ctx,
+			id,
+			processownership.DataTableFanoutItem(),
+			"datatable.summary",
+			errText,
+		)
 	default:
 		return nil
 	}
@@ -265,6 +282,9 @@ func (s *Service) repairKnowledgeListReparse(ctx context.Context, task *asynq.Ta
 			"parse_status":           types.ParseStatusFailed,
 			"error_message":          message,
 			"pending_subtasks_count": 0,
+			"enrichment_status":      types.EnrichmentStatusNone,
+			"wiki_status":            types.WikiStatusNone,
+			"wiki_error_message":     "",
 			"processing_owner":       "",
 			"processing_fanout":      nil,
 		},
@@ -291,6 +311,9 @@ func (s *Service) repairDocument(ctx context.Context, taskType string, id identi
 			"parse_status":           types.ParseStatusFailed,
 			"error_message":          message,
 			"pending_subtasks_count": 0,
+			"enrichment_status":      types.EnrichmentStatusNone,
+			"wiki_status":            types.WikiStatusNone,
+			"wiki_error_message":     "",
 			"processing_owner":       "",
 			"processing_fanout":      nil,
 		},
@@ -325,22 +348,34 @@ func (s *Service) repairPostProcess(ctx context.Context, id identity, errText st
 	return nil
 }
 
-func (s *Service) repairEnrichmentSlot(ctx context.Context, id identity, item string) error {
+func (s *Service) repairEnrichmentSlot(
+	ctx context.Context,
+	id identity,
+	item string,
+	errText string,
+) error {
 	if s.enrichment == nil {
 		return errors.New("terminal repair: enrichment generation repository is unavailable")
 	}
-	if _, _, err := s.enrichment.FinalizeSubtaskGenerationItem(
+	if _, _, err := s.enrichment.FinalizeSubtaskGenerationItemOutcome(
 		ctx, id.TenantID, id.KnowledgeID, id.KnowledgeBaseID,
-		id.ProcessingGeneration, item,
+		id.ProcessingGeneration, item, "failed",
+		"terminal repair after task retry exhaustion: "+errText,
 	); err != nil {
 		return fmt.Errorf("terminal repair enrichment item %s: %w", item, err)
 	}
 	return nil
 }
 
-func (s *Service) repairCoreFanout(ctx context.Context, id identity, item string) error {
-	if s.repo == nil || s.fanout == nil {
-		return errors.New("terminal repair: durable core fanout repository is unavailable")
+func (s *Service) repairCoreFanout(
+	ctx context.Context,
+	id identity,
+	item string,
+	outcomeItem string,
+	errText string,
+) error {
+	if s.repo == nil || s.fanout == nil || s.outcomes == nil {
+		return errors.New("terminal repair: durable core fanout/outcome repository is unavailable")
 	}
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, id.TenantID, id.KnowledgeID)
 	if err != nil {
@@ -357,6 +392,18 @@ func (s *Service) repairCoreFanout(ctx context.Context, id identity, item string
 	plan, err := processownership.ParseFanoutPlan(knowledge.ProcessingFanout)
 	if err != nil {
 		return fmt.Errorf("terminal repair: parse durable fanout plan: %w", err)
+	}
+	if _, err := s.outcomes.RecordGenerationOutcome(
+		ctx,
+		id.TenantID,
+		id.KnowledgeID,
+		id.KnowledgeBaseID,
+		id.ProcessingGeneration,
+		outcomeItem,
+		enrichmentoutcome.StatusFailed,
+		"terminal repair after task retry exhaustion: "+errText,
+	); err != nil {
+		return fmt.Errorf("terminal repair core fanout outcome %s: %w", outcomeItem, err)
 	}
 	remaining, _, err := processownership.CompleteDurableFanoutItem(ctx, s.fanout, nil, plan, item)
 	if err != nil {

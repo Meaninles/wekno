@@ -16,6 +16,12 @@ _SST_REL_RE = re.compile(
     r'<Relationship[^>]*Type="[^"]*sharedStrings"[^>]*/>',
     re.IGNORECASE,
 )
+_UNSUPPORTED_SHEET_FORMAT_ATTR_RES = (
+    re.compile(rb'\s+defaultColWidthPt\s*=\s*"[^"]*"'),
+    re.compile(rb"\s+defaultColWidthPt\s*=\s*'[^']*'"),
+    re.compile(rb'\s+widthPt\s*=\s*"[^"]*"'),
+    re.compile(rb"\s+widthPt\s*=\s*'[^']*'"),
+)
 
 
 def repair_xlsx_bytes(content: bytes) -> bytes | None:
@@ -24,25 +30,39 @@ def repair_xlsx_bytes(content: bytes) -> bytes | None:
     Handles workbooks that reference ``xl/sharedStrings.xml`` in package
     metadata but omit the part (common with some exporters). When worksheets
     only use inline strings, manifest references are stripped so openpyxl can
-    read the file.
+    read the file. It also removes WPS-only worksheet presentation attributes
+    which current openpyxl versions reject before reading any cell values.
     """
     if not zipfile.is_zipfile(io.BytesIO(content)):
         return None
 
     with zipfile.ZipFile(io.BytesIO(content), "r") as zin:
         names = _normalized_names(zin.namelist())
+        transforms: list[Callable[[Dict[str, bytes]], Dict[str, bytes]]] = []
         sst_path = _find_shared_strings_path(names)
         if sst_path:
-            if sst_path == SST_PART:
-                return None
-            return _rewrite_zip(
-                zin, lambda files: _rename_shared_strings_part(files, sst_path)
-            )
-        if not _package_references_shared_strings(zin, names):
+            if sst_path != SST_PART:
+                transforms.append(
+                    lambda files: _rename_shared_strings_part(files, sst_path)
+                )
+        elif (
+            _package_references_shared_strings(zin, names)
+            and not _worksheets_use_shared_string_cells(zin, names)
+        ):
+            transforms.append(_strip_shared_strings_manifest)
+
+        if _worksheets_use_unsupported_sheet_format_attributes(zin, names):
+            transforms.append(_strip_unsupported_sheet_format_attributes)
+
+        if not transforms:
             return None
-        if _worksheets_use_shared_string_cells(zin, names):
-            return None
-        return _rewrite_zip(zin, _strip_shared_strings_manifest)
+
+        def apply_all(files: Dict[str, bytes]) -> Dict[str, bytes]:
+            for transform in transforms:
+                files = transform(files)
+            return files
+
+        return _rewrite_zip(zin, apply_all)
 
 
 def _normalized_names(namelist: Iterable[str]) -> Set[str]:
@@ -83,6 +103,31 @@ def _worksheets_use_shared_string_cells(
         if re.search(r'\bt="s"', sheet):
             return True
     return False
+
+
+def _worksheets_use_unsupported_sheet_format_attributes(
+    zin: zipfile.ZipFile, names: Set[str]
+) -> bool:
+    for name in names:
+        if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
+            continue
+        sheet = zin.read(name)
+        if any(pattern.search(sheet) for pattern in _UNSUPPORTED_SHEET_FORMAT_ATTR_RES):
+            return True
+    return False
+
+
+def _strip_unsupported_sheet_format_attributes(
+    files: Dict[str, bytes],
+) -> Dict[str, bytes]:
+    updated = dict(files)
+    for name, data in files.items():
+        if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
+            continue
+        for pattern in _UNSUPPORTED_SHEET_FORMAT_ATTR_RES:
+            data = pattern.sub(b"", data)
+        updated[name] = data
+    return updated
 
 
 def _rename_shared_strings_part(

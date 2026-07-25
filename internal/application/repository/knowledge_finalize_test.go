@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS knowledges (
     metadata TEXT,
     tag_id VARCHAR(36),
     summary_status VARCHAR(32) DEFAULT 'none',
+    enrichment_status VARCHAR(32) NOT NULL DEFAULT 'none',
+    wiki_status VARCHAR(32) NOT NULL DEFAULT 'none',
+    wiki_error_message TEXT NOT NULL DEFAULT '',
     last_faq_import_result TEXT DEFAULT NULL,
     channel VARCHAR(50) NOT NULL DEFAULT 'web',
     pending_subtasks_count INT NOT NULL DEFAULT 0,
@@ -350,4 +353,52 @@ func TestUpdateActiveDeletingKnowledgeColumns_GuardsStateAndSoftDelete(t *testin
 	assert.Equal(t, types.ParseStatusCompleted, status)
 	status, _ = reloadKnowledgeRow(t, db, deletedDeletingID)
 	assert.Equal(t, types.ParseStatusDeleting, status)
+}
+
+func TestUpdateWikiStatusGenerationIsExactAndDoesNotTouchLifecycle(t *testing.T) {
+	db := setupKnowledgeTestDB(t)
+	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
+	ctx := context.Background()
+
+	id := uuid.NewString()
+	kbID := uuid.NewString()
+	require.NoError(t, db.Exec(`
+		INSERT INTO knowledges (
+			id, tenant_id, knowledge_base_id, type, title, source,
+			parse_status, processing_generation, pending_subtasks_count,
+			wiki_status, wiki_error_message
+		) VALUES (?, 9, ?, 'document', 'wiki-status-test', 'manual',
+			'completed', 'generation-current', 0, 'pending', '')
+	`, id, kbID).Error)
+
+	updated, err := repo.UpdateWikiStatusGeneration(
+		ctx, 9, id, kbID, "generation-current",
+		types.WikiStatusDegraded, "one citation batch failed",
+	)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	// A delayed task from an older generation cannot overwrite the current
+	// outcome, even if all other identity fields are valid.
+	updated, err = repo.UpdateWikiStatusGeneration(
+		ctx, 9, id, kbID, "generation-stale",
+		types.WikiStatusFailed, "stale task",
+	)
+	require.NoError(t, err)
+	require.False(t, updated)
+
+	var got struct {
+		ParseStatus          string
+		ProcessingGeneration string
+		WikiStatus           string
+		WikiErrorMessage     string
+	}
+	require.NoError(t, db.Model(&types.Knowledge{}).
+		Select("parse_status", "processing_generation", "wiki_status", "wiki_error_message").
+		Where("id = ?", id).
+		Scan(&got).Error)
+	assert.Equal(t, types.ParseStatusCompleted, got.ParseStatus)
+	assert.Equal(t, "generation-current", got.ProcessingGeneration)
+	assert.Equal(t, types.WikiStatusDegraded, got.WikiStatus)
+	assert.Equal(t, "one citation batch failed", got.WikiErrorMessage)
 }

@@ -3,9 +3,16 @@ package fileguard
 import (
 	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"encoding/csv"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"hash/crc32"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime/multipart"
 	"path"
@@ -460,9 +467,51 @@ func analyze(fileName string, fileTypeHint string, size int64, open func() (read
 		}
 		defer ra.Close()
 		validateCSV(ra, &report)
+	case "jpg", "jpeg", "png", "gif":
+		ra, err := open()
+		if err != nil {
+			report.markHeavy("图片尺寸无法安全验证，浏览器原文件预览已禁用")
+			return report
+		}
+		defer ra.Close()
+		validateImagePreviewDimensions(ra, &report)
 	}
 
 	return report
+}
+
+func validateImagePreviewDimensions(ra readerAtSize, report *Report) {
+	config, format, err := image.DecodeConfig(io.NewSectionReader(ra, 0, ra.Size()))
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		report.metric("image_preview_dimensions_verified", false)
+		report.markHeavy("图片尺寸无法安全验证，浏览器原文件预览已禁用")
+		return
+	}
+	report.metric("image_preview_dimensions_verified", true)
+	report.metric("image_format", format)
+	report.metric("image_width", config.Width)
+	report.metric("image_height", config.Height)
+
+	const maxDimension = int64(16384)
+	const maxPixels = int64(40_000_000)
+	width, height := int64(config.Width), int64(config.Height)
+	if width > maxDimension || height > maxDimension || width > maxPixels/height {
+		report.markHeavy(
+			"图片解码尺寸过大（%d×%d），浏览器原文件预览已禁用",
+			config.Width,
+			config.Height,
+		)
+		return
+	}
+	pixels := width * height
+	report.metric("image_pixels", pixels)
+	if pixels > maxPixels {
+		report.markHeavy(
+			"图片解码像素超过安全预览上限（%d×%d），浏览器原文件预览已禁用",
+			config.Width,
+			config.Height,
+		)
+	}
 }
 
 func analyzeSizeOnly(fileName string, fileTypeHint string, size int64) Report {
@@ -584,10 +633,20 @@ func validateDOCX(zr *zip.Reader, fileBytes int64, report *Report) {
 		return
 	}
 
-	counters, err := scanDOCXXML(doc)
+	counters, recoveredTrailer, err := scanDOCXXML(doc)
 	if err != nil {
 		report.addIssueText("文件结构异常或已损坏，无法解析")
 		return
+	}
+	if recoveredTrailer {
+		// Some business DOCX producers leave an incomplete DEFLATE trailer
+		// even though word/document.xml is complete and well-formed. Python's
+		// zipfile and LibreOffice both recover these files, while Go's
+		// archive/zip reports ErrFormat only after the closing XML element.
+		// Admit them through the isolated heavy path; never suppress an error
+		// before a complete XML root has been observed.
+		report.metric("docx_recovered_zip_trailer", true)
+		report.markHeavy("Word 文档 ZIP 尾部校验异常但正文结构完整，使用隔离解析路径")
 	}
 	report.metric("docx_paragraphs", counters.paragraphs)
 	report.metric("docx_text_nodes", counters.textNodes)
@@ -642,46 +701,149 @@ type docxCounters struct {
 	pageBreakHints int64
 }
 
-func scanDOCXXML(f *zip.File) (docxCounters, error) {
+func scanDOCXXML(f *zip.File) (docxCounters, bool, error) {
 	rc, err := f.Open()
 	if err != nil {
-		return docxCounters{}, err
+		return docxCounters{}, false, err
 	}
-	defer rc.Close()
+	counters, recovered, scanErr := scanDOCXXMLReader(rc)
+	_ = rc.Close()
+	if scanErr == nil || !recoverableOfficeXMLTrailerError(scanErr) {
+		return counters, recovered, scanErr
+	}
 
+	// A malformed DEFLATE trailer can surface before archive/zip's checksum
+	// reader yields the final uncompressed block. Re-open the bounded raw
+	// entry and decode only the supported Office compression methods, then
+	// require exact declared length, matching CRC, and an independently
+	// well-formed XML parse before treating the trailer as recoverable.
+	raw, err := f.OpenRaw()
+	if err != nil {
+		return counters, false, scanErr
+	}
+	var decoded io.Reader
+	var closeDecoded func() error
+	switch f.Method {
+	case zip.Store:
+		decoded = raw
+		closeDecoded = func() error { return nil }
+	case zip.Deflate:
+		inflater := flate.NewReader(raw)
+		decoded = inflater
+		closeDecoded = inflater.Close
+	default:
+		return counters, false, scanErr
+	}
+	const maxRecoverableInflatedTail = 64 * 1024
+	inflated, readErr := io.ReadAll(io.LimitReader(
+		decoded,
+		int64(f.UncompressedSize64)+maxRecoverableInflatedTail+1,
+	))
+	_ = closeDecoded()
+	if readErr != nil && !recoverableOfficeXMLTrailerError(readErr) {
+		return counters, false, scanErr
+	}
+	if uint64(len(inflated)) < f.UncompressedSize64 ||
+		uint64(len(inflated)) > f.UncompressedSize64+maxRecoverableInflatedTail {
+		return counters, false, scanErr
+	}
+	content := inflated[:int(f.UncompressedSize64)]
+	if crc32.ChecksumIEEE(content) != f.CRC32 {
+		return counters, false, scanErr
+	}
+	recoveredCounters, _, parseErr := scanDOCXXMLReader(bytes.NewReader(content))
+	if parseErr != nil {
+		return counters, false, scanErr
+	}
+	return recoveredCounters, true, nil
+}
+
+func scanDOCXXMLReader(reader io.Reader) (docxCounters, bool, error) {
 	var c docxCounters
-	decoder := xml.NewDecoder(rc)
+	// Readers are allowed to return both data and a terminal error in the
+	// same call. archive/zip does this for a recoverable checksum/trailer
+	// anomaly. xml.Decoder otherwise reports the error before yielding an
+	// EndElement contained in those final bytes, so defer it by one read.
+	decoder := xml.NewDecoder(&deferredReadErrorReader{reader: reader})
+	depth := 0
+	rootSeen := false
+	rootClosed := false
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
-			return c, nil
+			if !rootSeen || !rootClosed {
+				return c, false, &xml.SyntaxError{Msg: "incomplete XML root"}
+			}
+			return c, false, nil
 		}
 		if err != nil {
-			return c, err
+			if rootClosed && recoverableOfficeXMLTrailerError(err) {
+				return c, true, nil
+			}
+			return c, false, err
 		}
-		start, ok := token.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		switch start.Name.Local {
-		case "p":
-			c.paragraphs++
-		case "t":
-			c.textNodes++
-		case "tbl":
-			c.tables++
-		case "tr":
-			c.tableRows++
-		case "tc":
-			c.tableCells++
-		case "lastRenderedPageBreak":
-			c.pageBreakHints++
-		case "br":
-			if attrValue(start.Attr, "type") == "page" {
+		switch typed := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				rootSeen = true
+				rootClosed = false
+			}
+			depth++
+			switch typed.Name.Local {
+			case "p":
+				c.paragraphs++
+			case "t":
+				c.textNodes++
+			case "tbl":
+				c.tables++
+			case "tr":
+				c.tableRows++
+			case "tc":
+				c.tableCells++
+			case "lastRenderedPageBreak":
 				c.pageBreakHints++
+			case "br":
+				if attrValue(typed.Attr, "type") == "page" {
+					c.pageBreakHints++
+				}
+			}
+		case xml.EndElement:
+			if depth > 0 {
+				depth--
+			}
+			if rootSeen && depth == 0 {
+				rootClosed = true
 			}
 		}
 	}
+}
+
+type deferredReadErrorReader struct {
+	reader  io.Reader
+	pending error
+}
+
+func (r *deferredReadErrorReader) Read(buffer []byte) (int, error) {
+	if r.pending != nil {
+		err := r.pending
+		r.pending = nil
+		return 0, err
+	}
+	n, err := r.reader.Read(buffer)
+	if n > 0 && err != nil {
+		r.pending = err
+		return n, nil
+	}
+	return n, err
+}
+
+func recoverableOfficeXMLTrailerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, zip.ErrFormat) ||
+		errors.Is(err, zip.ErrChecksum) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func validateXLSX(zr *zip.Reader, report *Report) {

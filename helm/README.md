@@ -201,8 +201,18 @@ helm install weknora ./helm \
 | `app.resources` | Resource limits | See values.yaml |
 | `app.env` | Environment variables | See values.yaml |
 | `app.extraEnv` | Additional env vars | `[]` |
+| `app.extraVolumes` / `app.extraVolumeMounts` | Mount external database/Redis CA or mTLS Secrets | `[]` |
+| `app.connections.database.ssl.mode` | PostgreSQL TLS mode; use `verify-full` in production | `disable` |
+| `app.connections.database.ssl.rootCertFile` | Mounted PostgreSQL CA path | `""` |
+| `app.connections.database.ssl.certFile` / `keyFile` | Optional PostgreSQL mTLS identity | `""` |
+| `app.connections.redis.tls.enabled` | Enable TLS for Redis | `false` |
+| `app.connections.redis.tls.caFile` | Mounted Redis CA path | `""` |
+| `app.connections.redis.tls.certFile` / `keyFile` | Optional Redis mTLS identity | `""` |
+| `app.connections.redis.tls.serverName` | Redis certificate DNS name | `""` |
 | `app.documentQueue.kubernetesRuntimeVerifier.enabled` | Verify exact terminated Pod UIDs before automatic cross-Pod takeover | `true` |
 | `app.documentQueue.kubernetesRuntimeVerifier.containerName` | App container whose current terminated state is authoritative | `app` |
+| `app.env.WEKNORA_ASYNQ_CONCURRENCY` | Complete document workflows admitted per app replica (runtime System Admin setting takes precedence) | `"4"` |
+| `app.env.WEKNORA_WIKI_MAP_TASK_CONCURRENCY` | Document-local Wiki Map consumers per app replica, isolated from ordinary derivatives | `"4"` |
 
 The app replicas share one durable PostgreSQL document-workflow outbox and one
 Redis delivery queue. Scaling `app.replicaCount` adds complete document workers;
@@ -214,7 +224,8 @@ proof after local handlers drain; an in-Pod container restart keeps the Pod UID
 and atomically adopts the old boot. By default, healthy replicas use a narrowly
 scoped projected service-account token to list Pods only in their namespace,
 match the exact immutable UID encoded in `instance_id`, and accept only the
-current `app` container's `terminated` state or terminal Pod phase. A
+current `app` container's `terminated` state, including its immutable
+`containerID` and `finishedAt`. A terminal Pod phase by itself is not accepted. A
 `deletionTimestamp`, missing UID/404, heartbeat age, or lease expiry is never
 termination proof. When Kubernetes cannot retain an explicit terminal status
 (notably some node-partition/forced-deletion cases), fence the node/runtime and
@@ -222,6 +233,12 @@ use the SystemAdmin-only
 `POST /api/v1/custom/document-queue/instances/termination-attestation` endpoint
 with the exact old `instance_id` and `boot_id`. Do not use pod-local file
 storage with multiple replicas.
+
+Every app replica also consumes the isolated `wiki_map` lane. Its per-replica
+consumer count scales with app replicas, while shared Redis model admission
+still caps aggregate provider/model/tenant concurrency. Keeping this lane
+separate prevents a large Wiki backlog from occupying the generic derivative
+worker pool.
 
 ### DocReader
 
@@ -235,7 +252,10 @@ For worker high availability, run at least two app replicas and two DocReader
 replicas across failure domains, with disruption budgets enabled. PostgreSQL,
 Redis, object storage and the selected vector/graph/model
 providers must also use their own HA deployments; worker scaling does not make
-those external dependencies highly available.
+those external dependencies highly available. The production HA values file
+uses PostgreSQL `verify-full` and Redis TLS and mounts their CA Secrets; replace
+the example service names and certificates with the endpoints you already
+operate rather than disabling verification.
 
 ### Frontend
 

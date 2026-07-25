@@ -161,6 +161,13 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 	if tenantID == 0 || userID == "" {
 		return nil, fmt.Errorf("tenant and user are required")
 	}
+	// Reject an explicitly reserved runtime name before demanding or
+	// extracting an archive. Besides producing the intended immutable-preset
+	// contract, this avoids doing attacker-controlled archive work for a name
+	// that can never be imported.
+	if IsReservedProfessionalSkillName(req.Name) {
+		return nil, fmt.Errorf("professional skill %q is system reserved", strings.TrimSpace(req.Name))
+	}
 	description, err := normalizeProfessionalDescription(req.Description)
 	if err != nil {
 		return nil, err

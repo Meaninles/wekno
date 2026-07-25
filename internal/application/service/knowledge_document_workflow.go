@@ -45,6 +45,14 @@ type documentReparseWorkflowCommitter interface {
 	) error
 }
 
+type documentWorkflowCancellationCommitter interface {
+	CommitDocumentWorkflowCancellation(
+		context.Context,
+		documentqueue.CancellationBinding,
+		time.Time,
+	) error
+}
+
 // preparedDocumentWorkflow is the handle for an exact immutable task/options
 // plan already persisted by the queue before a generation became ready.
 type preparedDocumentWorkflow struct {
@@ -109,6 +117,26 @@ func documentWorkflowBindingForKnowledge(
 	if binding.WorkflowID == "" || binding.KnowledgeBaseID == "" || binding.KnowledgeID == "" ||
 		binding.ProcessingGeneration == "" || binding.ProcessingOwner == "" {
 		return documentqueue.WorkflowBinding{}, errors.New("document workflow binding is incomplete")
+	}
+	return binding, nil
+}
+
+func documentCancellationBindingForKnowledge(
+	knowledge *types.Knowledge,
+) (documentqueue.CancellationBinding, error) {
+	if knowledge == nil {
+		return documentqueue.CancellationBinding{}, errors.New("document cancellation binding: knowledge is nil")
+	}
+	binding := documentqueue.CancellationBinding{
+		WorkflowID:           strings.TrimSpace(knowledge.ProcessingWorkflowID),
+		TenantID:             knowledge.TenantID,
+		KnowledgeBaseID:      strings.TrimSpace(knowledge.KnowledgeBaseID),
+		KnowledgeID:          strings.TrimSpace(knowledge.ID),
+		ProcessingGeneration: strings.TrimSpace(knowledge.ProcessingGeneration),
+	}
+	if binding.WorkflowID == "" || binding.KnowledgeBaseID == "" ||
+		binding.KnowledgeID == "" || binding.ProcessingGeneration == "" {
+		return documentqueue.CancellationBinding{}, errors.New("document cancellation binding is incomplete")
 	}
 	return binding, nil
 }
@@ -204,6 +232,35 @@ func (s *knowledgeService) commitPreparedReparseWorkflow(
 		return fmt.Errorf("commit prepared reparse workflow: %w", err)
 	}
 	return nil
+}
+
+// commitDocumentWorkflowCancellation publishes the terminal business state
+// together with the exact durable queue row. The boolean is false only for
+// non-document/legacy test enqueuers which do not expose the durable
+// coordinator; production document workflows always take the atomic path.
+func (s *knowledgeService) commitDocumentWorkflowCancellation(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	updatedAt time.Time,
+) (bool, error) {
+	if s == nil || s.task == nil || knowledge == nil ||
+		strings.TrimSpace(knowledge.ProcessingWorkflowID) == "" {
+		return false, nil
+	}
+	committer, ok := s.task.(documentWorkflowCancellationCommitter)
+	if !ok || committer == nil {
+		return false, nil
+	}
+	binding, err := documentCancellationBindingForKnowledge(knowledge)
+	if err != nil {
+		return true, err
+	}
+	if err := committer.CommitDocumentWorkflowCancellation(
+		ctx, binding, updatedAt,
+	); err != nil {
+		return true, fmt.Errorf("commit document workflow cancellation: %w", err)
+	}
+	return true, nil
 }
 
 // abortUnboundDocumentWorkflow is used only when the business transaction did

@@ -34,6 +34,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/container"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/runtime"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -67,6 +68,7 @@ func main() {
 		router *gin.Engine,
 		resourceCleaner interfaces.ResourceCleaner,
 		systemSettingSvc interfaces.SystemSettingService,
+		documentQueue *documentqueue.Coordinator,
 	) error {
 		// Create HTTP server
 		server := &http.Server{
@@ -95,6 +97,12 @@ func main() {
 		go func() {
 			sig := <-signals
 			logger.Infof(context.Background(), "Received signal: %v, starting server shutdown...", sig)
+
+			// Fence root-document admission before any HTTP draining. This is
+			// especially important in Kubernetes: a terminating pod must not
+			// claim another complete workflow while endpoint removal and
+			// graceful shutdown are propagating.
+			documentQueue.MarkDraining()
 
 			// Close listener first to release port immediately,
 			// so the next process can bind during our graceful drain.

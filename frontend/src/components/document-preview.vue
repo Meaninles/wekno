@@ -1,7 +1,10 @@
 // @ts-nocheck
 <script setup lang="ts">
 import { ref, shallowRef, watch, onUnmounted, nextTick, defineAsyncComponent } from 'vue';
-import { previewKnowledgeFile } from '@/api/knowledge-base/index';
+import {
+  getKnowledgePreviewPolicy,
+  previewKnowledgeFile,
+} from '@/api/knowledge-base/index';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
 import markedKatex from 'marked-katex-extension';
@@ -13,6 +16,13 @@ import {
   resolveDocumentPreviewType,
   type DocumentPreviewType,
 } from '@/utils/documentPreview';
+import {
+  DEFAULT_LOADER_BLOB_LIMIT,
+  blobExceedsAdmission,
+  boundedTextBlob,
+  evaluatePreviewAdmission,
+  unwrapKnowledgePreviewPolicy,
+} from '@/custom/modules/documentPreview/policy';
 
 
 const VueOfficePptx = defineAsyncComponent(() => import('@vue-office/pptx'));
@@ -25,7 +35,13 @@ const props = defineProps<{
   fileType: string;
   fileName: string;
   active: boolean;
-  blobLoader?: () => Promise<Blob>;
+  fileSize?: number | string;
+  chunkCount?: number | string;
+  parseStatus?: string;
+  blobLoader?: (signal?: AbortSignal) => Promise<Blob>;
+}>();
+const emit = defineEmits<{
+  (event: 'useChunks'): void;
 }>();
 
 const loading = ref(false);
@@ -40,7 +56,12 @@ const pptxData = shallowRef<ArrayBuffer | null>(null);
 const docxContainer = ref<HTMLElement | null>(null);
 const imageNaturalWidth = ref(0);
 const imageNaturalHeight = ref(0);
+const boundedPreview = ref(false);
+const boundedReason = ref('');
+const textTruncated = ref(false);
 let loadedForId = '';
+let activeController: AbortController | null = null;
+let loadGeneration = 0;
 
 const isFullscreen = ref(false);
 
@@ -211,25 +232,61 @@ async function loadPreview() {
   const id = props.sourceKey || props.knowledgeId;
   const ft = props.fileType;
   if (!id || !ft || (!props.blobLoader && !props.knowledgeId)) return;
-  if (loadedForId === id) return;
+  const loadKey = `${id}:${String(ft).toLowerCase()}`;
+  if (loadedForId === loadKey) return;
 
   cleanup();
+  const generation = ++loadGeneration;
+  const controller = new AbortController();
+  activeController = controller;
   loading.value = true;
   error.value = '';
   previewType.value = resolveDocumentPreviewType(ft);
 
   if (previewType.value === 'unsupported') {
     loading.value = false;
+    activeController = null;
     return;
   }
 
   try {
-    const rawBlob = props.blobLoader ? await props.blobLoader() : await previewKnowledgeFile(props.knowledgeId!);
+    let maxOriginalBytes = DEFAULT_LOADER_BLOB_LIMIT;
+    if (!props.blobLoader && props.knowledgeId) {
+      const payload = await getKnowledgePreviewPolicy(props.knowledgeId, {
+        signal: controller.signal,
+      });
+      if (generation !== loadGeneration || controller.signal.aborted) return;
+      const policy = unwrapKnowledgePreviewPolicy(payload);
+      const admission = evaluatePreviewAdmission(policy, {
+        fileType: ft,
+        fileSize: props.fileSize,
+        chunkCount: props.chunkCount,
+      });
+      maxOriginalBytes = admission.maxOriginalBytes || maxOriginalBytes;
+      if (admission.mode !== 'original') {
+        boundedPreview.value = true;
+        boundedReason.value = admission.reason;
+        loadedForId = loadKey;
+        return;
+      }
+    }
+
+    const rawBlob = props.blobLoader
+      ? await props.blobLoader(controller.signal)
+      : await previewKnowledgeFile(props.knowledgeId!, { signal: controller.signal });
+    if (generation !== loadGeneration || controller.signal.aborted) return;
     const blob = ensureDocumentPreviewBlobType(rawBlob, ft);
-    loadedForId = id;
+    if (blobExceedsAdmission(blob, maxOriginalBytes)) {
+      boundedPreview.value = true;
+      boundedReason.value = 'runtime_size_mismatch';
+      loadedForId = loadKey;
+      return;
+    }
+    loadedForId = loadKey;
 
     loading.value = false;
     await nextTick();
+    if (generation !== loadGeneration || controller.signal.aborted) return;
 
     switch (previewType.value) {
       case 'pdf': {
@@ -245,15 +302,23 @@ async function loadPreview() {
         break;
       }
       case 'excel': {
-        await renderExcel(blob, ft);
+        const bounded = String(ft).toLowerCase() === 'csv'
+          ? boundedTextBlob(blob)
+          : { blob, truncated: false };
+        textTruncated.value = bounded.truncated;
+        await renderExcel(bounded.blob, ft);
         break;
       }
       case 'text': {
-        await renderText(blob, ft);
+        const bounded = boundedTextBlob(blob);
+        textTruncated.value = bounded.truncated;
+        await renderText(bounded.blob, ft);
         break;
       }
       case 'markdown': {
-        await renderMarkdown(blob);
+        const bounded = boundedTextBlob(blob);
+        textTruncated.value = bounded.truncated;
+        await renderMarkdown(bounded.blob);
         break;
       }
       case 'pptx': {
@@ -266,14 +331,33 @@ async function loadPreview() {
       }
     }
   } catch (err: any) {
+    if (generation !== loadGeneration || controller.signal.aborted || err?.name === 'CanceledError') {
+      return;
+    }
+    if (err?.status === 413 || err?.error?.code === 'PREVIEW_REQUIRES_PAGED_CHUNKS') {
+      boundedPreview.value = true;
+      boundedReason.value = 'server_policy';
+      loadedForId = loadKey;
+      return;
+    }
     console.error('Document preview failed:', err);
     error.value = err?.message || t('preview.loadFailed');
   } finally {
-    loading.value = false;
+    if (generation === loadGeneration) {
+      loading.value = false;
+      if (activeController === controller) {
+        activeController = null;
+      }
+    }
   }
 }
 
 function cleanup() {
+  loadGeneration += 1;
+  if (activeController) {
+    activeController.abort();
+    activeController = null;
+  }
   if (blobUrl.value) {
     URL.revokeObjectURL(blobUrl.value);
     blobUrl.value = '';
@@ -285,6 +369,10 @@ function cleanup() {
   pptxData.value = null;
   imageNaturalWidth.value = 0;
   imageNaturalHeight.value = 0;
+  boundedPreview.value = false;
+  boundedReason.value = '';
+  textTruncated.value = false;
+  loading.value = false;
   loadedForId = '';
   if (docxContainer.value) {
     docxContainer.value.innerHTML = '';
@@ -296,6 +384,8 @@ watch(
   ([active]) => {
     if (active && (props.knowledgeId || props.blobLoader)) {
       loadPreview();
+    } else if (!active) {
+      cleanup();
     }
   },
   { immediate: true }
@@ -310,7 +400,7 @@ onUnmounted(() => {
 <template>
   <div class="document-preview" :class="{ 'is-fullscreen': isFullscreen }">
     <!-- Toolbar -->
-    <div class="preview-toolbar" v-if="!loading && !error && previewType !== 'unsupported'">
+    <div class="preview-toolbar" v-if="!loading && !error && !boundedPreview && previewType !== 'unsupported'">
       <t-space size="small">
         <t-tooltip :content="isFullscreen ? $t('preview.exitFullscreen') : $t('preview.fullscreen')" placement="bottom">
           <t-button theme="default" variant="text" shape="square" @click="toggleFullscreen">
@@ -332,6 +422,16 @@ onUnmounted(() => {
       <p>{{ error }}</p>
       <t-button theme="primary" size="small" @click="loadedForId = ''; loadPreview()">
         {{ $t('preview.retry') }}
+      </t-button>
+    </div>
+
+    <!-- Large/structurally-heavy documents never enter browser memory as one Blob. -->
+    <div v-else-if="boundedPreview" class="preview-bounded" :data-preview-reason="boundedReason">
+      <t-icon name="shield" size="42px" />
+      <p class="bounded-title">{{ $t('preview.safePreviewTitle') }}</p>
+      <p class="bounded-hint">{{ $t('preview.safePreviewHint') }}</p>
+      <t-button theme="primary" size="small" @click="emit('useChunks')">
+        {{ $t('preview.viewPagedContent') }}
       </t-button>
     </div>
 
@@ -369,16 +469,19 @@ onUnmounted(() => {
 
     <!-- Excel -->
     <div v-else-if="previewType === 'excel' && excelHtml" class="preview-excel">
+      <div v-if="textTruncated" class="preview-truncated">{{ $t('preview.truncatedHint') }}</div>
       <div class="excel-container" v-html="excelHtml" />
     </div>
 
     <!-- Markdown -->
     <div v-else-if="previewType === 'markdown' && markdownHtml" class="preview-markdown">
+      <div v-if="textTruncated" class="preview-truncated">{{ $t('preview.truncatedHint') }}</div>
       <div class="markdown-body" v-html="markdownHtml" />
     </div>
 
     <!-- Text / Code -->
     <div v-else-if="previewType === 'text' && highlightedCode" class="preview-text">
+      <div v-if="textTruncated" class="preview-truncated">{{ $t('preview.truncatedHint') }}</div>
       <pre class="code-preview"><code class="hljs" v-html="highlightedCode"></code></pre>
     </div>
 
@@ -540,6 +643,47 @@ onUnmounted(() => {
   gap: 12px;
   color: @error-color;
   p { margin: 0; font-size: 14px; color: @text-secondary; }
+}
+
+.preview-bounded {
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 36px 24px;
+  border: 1px solid @border-color;
+  border-radius: @border-radius;
+  background: @bg-subtle;
+  color: @accent;
+
+  .bounded-title {
+    margin: 2px 0 0;
+    color: @text-primary;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .bounded-hint {
+    max-width: 520px;
+    margin: 0 0 6px;
+    color: @text-secondary;
+    font-size: 13px;
+    line-height: 1.6;
+    text-align: center;
+  }
+}
+
+.preview-truncated {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 12px;
+  border-bottom: 1px solid @border-color;
+  background: var(--td-warning-color-light);
+  color: @text-secondary;
+  font-size: 12px;
 }
 
 .preview-unsupported {

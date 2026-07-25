@@ -2,7 +2,10 @@ package repository
 
 import (
 	"context"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,6 +84,71 @@ func setupWikiPagesTestDB(t *testing.T) *gorm.DB {
 		require.NoError(t, db.Create(&types.KnowledgeBase{ID: kbID, TenantID: 1, Name: kbID}).Error)
 	}
 	return db
+}
+
+func TestDeletePermanentlyRemovesWikiPageContent(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+	page := makeWikiPage("kb-a", "entity/private-delete", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	page.Content = "private generated prose"
+	page.Summary = "private summary"
+	page.SourceRefs = types.StringArray{"knowledge-private|Private document"}
+	require.NoError(t, repo.Create(ctx, page))
+
+	require.NoError(t, repo.Delete(ctx, page.KnowledgeBaseID, page.Slug))
+
+	var rawCount int64
+	require.NoError(t, db.Unscoped().Model(&types.WikiPage{}).
+		Where("id = ?", page.ID).Count(&rawCount).Error)
+	require.Zero(t, rawCount, "deleted Wiki content must not survive as a GORM tombstone")
+}
+
+func TestListSourceProvenanceBySourceRefUsesExactDocumentOwnership(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+
+	exact := makeWikiPage("kb-a", "entity/exact", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	exact.Content = strings.Repeat("large body must not be projected", 20)
+	exact.SourceRefs = types.StringArray{"source_%"}
+	exact.ChunkRefs = types.StringArray{"exact-old-1", "exact-old-2"}
+	require.NoError(t, repo.Create(ctx, exact))
+
+	legacyTitle := makeWikiPage("kb-a", "concept/legacy-title", types.WikiPageTypeConcept, types.WikiPageStatusPublished)
+	legacyTitle.Content = strings.Repeat("another large body", 20)
+	legacyTitle.SourceRefs = types.StringArray{"source_%|Legacy title"}
+	legacyTitle.ChunkRefs = types.StringArray{"legacy-old"}
+	require.NoError(t, repo.Create(ctx, legacyTitle))
+
+	likeNeighbour := makeWikiPage("kb-a", "entity/not-owned", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	likeNeighbour.SourceRefs = types.StringArray{"source-AB|Other document"}
+	likeNeighbour.ChunkRefs = types.StringArray{"other-source"}
+	require.NoError(t, repo.Create(ctx, likeNeighbour))
+
+	otherKB := makeWikiPage("kb-other", "entity/other-kb", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	otherKB.SourceRefs = types.StringArray{"source_%"}
+	otherKB.ChunkRefs = types.StringArray{"other-kb"}
+	require.NoError(t, repo.Create(ctx, otherKB))
+
+	rows, err := repo.ListSourceProvenanceBySourceRef(ctx, "kb-a", "source_%")
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "concept/legacy-title", rows[0].Slug)
+	assert.Equal(t, types.WikiPageTypeConcept, rows[0].PageType)
+	assert.Equal(t, types.StringArray{"legacy-old"}, rows[0].ChunkRefs)
+	assert.Equal(t, "entity/exact", rows[1].Slug)
+	assert.Equal(t, types.StringArray{"exact-old-1", "exact-old-2"}, rows[1].ChunkRefs)
+
+	slugs, err := repo.ListSlugsBySourceRef(ctx, "kb-a", "source_%")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"entity/exact", "concept/legacy-title"}, slugs)
+
+	fullPages, err := repo.ListBySourceRef(ctx, "kb-a", "source_%")
+	require.NoError(t, err)
+	require.Len(t, fullPages, 2)
+	assert.NotEmpty(t, fullPages[0].Content,
+		"the legacy full-row API remains available to callers that need page bodies")
 }
 
 func TestQuarantineForDeleteUnionsSourcesAndFencesStaleWriter(t *testing.T) {
@@ -275,6 +343,116 @@ func TestUpdateAutoLinkedContentRejectsVersionChangedByQuarantine(t *testing.T) 
 	assert.Equal(t, types.WikiPageStatusArchived, got.Status)
 }
 
+func TestAtomicInLinkMutationsMergeConcurrentSourcesWithoutVersionConflicts(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	// SQLite local mode has one writer. Keeping one connection also prevents
+	// :memory: from creating an independent database per goroutine; the test
+	// still exercises concurrent callers and is repeated under -race.
+	sqlDB.SetMaxOpenConns(1)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+
+	target := makeWikiPage(
+		"kb-a", "entity/atomic-target",
+		types.WikiPageTypeEntity, types.WikiPageStatusPublished,
+	)
+	require.NoError(t, repo.Create(ctx, target))
+
+	const sourceCount = 48
+	var wg sync.WaitGroup
+	for i := 0; i < sourceCount; i++ {
+		source := "entity/source-" + strconv.Itoa(i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			require.NoError(t, repo.AddInLink(
+				context.Background(), 1, "kb-a", target.Slug, source,
+			))
+			// Duplicate delivery must remain a set membership.
+			require.NoError(t, repo.AddInLink(
+				context.Background(), 1, "kb-a", target.Slug, source,
+			))
+		}()
+	}
+	wg.Wait()
+
+	got, err := repo.GetBySlug(ctx, "kb-a", target.Slug)
+	require.NoError(t, err)
+	assert.Len(t, got.InLinks, sourceCount)
+	assert.Equal(t, 1, got.Version,
+		"reverse-link bookkeeping must not advance the user revision")
+
+	for i := 0; i < sourceCount; i += 2 {
+		source := "entity/source-" + strconv.Itoa(i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			require.NoError(t, repo.RemoveInLink(
+				context.Background(), 1, "kb-a", target.Slug, source,
+			))
+			require.NoError(t, repo.RemoveInLink(
+				context.Background(), 1, "kb-a", target.Slug, source,
+			))
+		}()
+	}
+	wg.Wait()
+
+	got, err = repo.GetBySlug(ctx, "kb-a", target.Slug)
+	require.NoError(t, err)
+	assert.Len(t, got.InLinks, sourceCount/2)
+	for i := 0; i < sourceCount; i++ {
+		source := "entity/source-" + strconv.Itoa(i)
+		assert.Equal(t, i%2 == 1, slices.Contains(got.InLinks, source))
+	}
+	assert.Equal(t, 1, got.Version)
+}
+
+func TestSyncInLinksForTargetRepairsSourceBeforeTargetCreation(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+
+	for _, sourceSlug := range []string{"entity/source-b", "entity/source-a"} {
+		source := makeWikiPage(
+			"kb-a", sourceSlug,
+			types.WikiPageTypeEntity, types.WikiPageStatusPublished,
+		)
+		source.OutLinks = types.StringArray{"concept/future-target"}
+		require.NoError(t, repo.Create(ctx, source))
+	}
+	archived := makeWikiPage(
+		"kb-a", "entity/archived-source",
+		types.WikiPageTypeEntity, types.WikiPageStatusArchived,
+	)
+	archived.OutLinks = types.StringArray{"concept/future-target"}
+	require.NoError(t, repo.Create(ctx, archived))
+	otherKB := makeWikiPage(
+		"kb-other", "entity/other-kb-source",
+		types.WikiPageTypeEntity, types.WikiPageStatusPublished,
+	)
+	otherKB.OutLinks = types.StringArray{"concept/future-target"}
+	require.NoError(t, repo.Create(ctx, otherKB))
+
+	target := makeWikiPage(
+		"kb-a", "concept/future-target",
+		types.WikiPageTypeConcept, types.WikiPageStatusPublished,
+	)
+	require.NoError(t, repo.Create(ctx, target))
+	require.NoError(t, repo.SyncInLinksForTarget(
+		ctx, 1, "kb-a", target.Slug,
+	))
+
+	got, err := repo.GetBySlug(ctx, "kb-a", target.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, types.StringArray{
+		"entity/source-a",
+		"entity/source-b",
+	}, got.InLinks)
+	assert.Equal(t, 1, got.Version)
+}
+
 // makeWikiPage builds a minimal WikiPage suitable for insert. Title is
 // derived from the slug so ORDER BY title ASC yields a predictable
 // test ordering without callers having to spell out both fields.
@@ -342,6 +520,55 @@ func TestList_WikiPathSortReturnsCategorizedPagesFirst(t *testing.T) {
 	assert.Equal(t, "entity/999-child", got[0].Slug)
 	assert.Equal(t, "entity/000-root", got[1].Slug)
 	assert.Equal(t, "entity/001-root", got[2].Slug)
+}
+
+func TestList_DefaultHidesDeleteQuarantineButExplicitArchivedRemainsInspectable(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+
+	live := makeWikiPage(
+		"kb-quarantine",
+		"entity/live",
+		types.WikiPageTypeEntity,
+		types.WikiPageStatusPublished,
+	)
+	quarantined := makeWikiPage(
+		"kb-quarantine",
+		"entity/quarantined",
+		types.WikiPageTypeEntity,
+		types.WikiPageStatusPublished,
+	)
+	quarantined.SourceRefs = types.StringArray{"knowledge-being-deleted"}
+	require.NoError(t, repo.Create(ctx, live))
+	require.NoError(t, repo.Create(ctx, quarantined))
+	require.NoError(t, repo.QuarantineForDelete(
+		ctx,
+		quarantined.KnowledgeBaseID,
+		quarantined.Slug,
+		"knowledge-being-deleted",
+	))
+
+	pages, total, err := repo.List(ctx, &types.WikiPageListRequest{
+		KnowledgeBaseID: "kb-quarantine",
+		Page:            1,
+		PageSize:        20,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, total)
+	require.Len(t, pages, 1)
+	assert.Equal(t, live.Slug, pages[0].Slug)
+
+	archived, archivedTotal, err := repo.List(ctx, &types.WikiPageListRequest{
+		KnowledgeBaseID: "kb-quarantine",
+		Status:          types.WikiPageStatusArchived,
+		Page:            1,
+		PageSize:        20,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, archivedTotal)
+	require.Len(t, archived, 1)
+	assert.Equal(t, quarantined.Slug, archived[0].Slug)
 }
 
 // TestFolderTree_CRUDAndChildListing exercises the wiki_folders repository:
@@ -524,4 +751,118 @@ func TestListByTypeLight_ClampsLimit(t *testing.T) {
 	clampedEntries, _, err := repo.ListByTypeLight(ctx, "kb-cap", types.WikiPageTypeEntity, 5000, 0)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(clampedEntries), 200)
+}
+
+func TestListGraphNeighborsPaginatesFiltersAndNeverCrossesKnowledgeBase(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+
+	center := makeWikiPage("kb-a", "entity/center", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	center.InLinks = types.StringArray{"concept/c", "entity/a", "entity/archived", "entity/missing"}
+	center.OutLinks = types.StringArray{"entity/b", "concept/c", "entity/a", "entity/other-kb"}
+	require.NoError(t, repo.Create(ctx, center))
+
+	a := makeWikiPage("kb-a", "entity/a", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	a.InLinks = types.StringArray{"x/1", "x/2", "x/3"}
+	a.OutLinks = types.StringArray{"entity/center", "x/4"}
+	b := makeWikiPage("kb-a", "entity/b", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	b.OutLinks = types.StringArray{"entity/center"}
+	c := makeWikiPage("kb-a", "concept/c", types.WikiPageTypeConcept, types.WikiPageStatusPublished)
+	c.InLinks = types.StringArray{"entity/center", "x/5"}
+	archived := makeWikiPage("kb-a", "entity/archived", types.WikiPageTypeEntity, types.WikiPageStatusArchived)
+	otherKB := makeWikiPage("kb-other", "entity/other-kb", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	for _, page := range []*types.WikiPage{a, b, c, archived, otherKB} {
+		require.NoError(t, repo.Create(ctx, page))
+	}
+
+	first, total, err := repo.ListGraphNeighbors(ctx, "kb-a", center.Slug, nil, 2, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, first, 2)
+	assert.Equal(t, "entity/a", first[0].Slug, "highest-degree node must sort first")
+	assert.Equal(t, 5, first[0].LinkCount)
+	assert.Equal(t, "concept/c", first[1].Slug)
+
+	second, total, err := repo.ListGraphNeighbors(ctx, "kb-a", center.Slug, nil, 2, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, second, 1)
+	assert.Equal(t, "entity/b", second[0].Slug)
+
+	entities, total, err := repo.ListGraphNeighbors(
+		ctx,
+		"kb-a",
+		center.Slug,
+		[]string{types.WikiPageTypeEntity},
+		20,
+		0,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), total)
+	assert.Equal(t, []string{"entity/a", "entity/b"}, []string{entities[0].Slug, entities[1].Slug})
+}
+
+func TestGetGraphPageBySlugReturnsOnlyGraphProjection(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+
+	page := makeWikiPage("kb-a", "entity/large-center", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	page.Content = strings.Repeat("large body ", 10_000)
+	page.Summary = "summary must not be loaded"
+	page.SourceRefs = types.StringArray{"source-1"}
+	page.InLinks = types.StringArray{"entity/in"}
+	page.OutLinks = types.StringArray{"entity/out"}
+	require.NoError(t, repo.Create(ctx, page))
+
+	got, err := repo.GetGraphPageBySlug(ctx, "kb-a", page.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, page.Slug, got.Slug)
+	assert.Equal(t, page.Title, got.Title)
+	assert.Equal(t, page.PageType, got.PageType)
+	assert.Equal(t, page.Status, got.Status)
+	assert.Equal(t, page.InLinks, got.InLinks)
+	assert.Equal(t, page.OutLinks, got.OutLinks)
+	assert.Empty(t, got.Content)
+	assert.Empty(t, got.Summary)
+	assert.Empty(t, got.SourceRefs)
+	assert.Empty(t, got.PageMetadata)
+}
+
+func TestListGraphProjectionSearchesNamesAndDoesNotLoadBodies(t *testing.T) {
+	db := setupWikiPagesTestDB(t)
+	repo := NewWikiPageRepository(db)
+	ctx := context.Background()
+
+	target := makeWikiPage("kb-a", "entity/needle-slug", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	target.Title = "Needle Title"
+	target.Content = strings.Repeat("large body ", 10_000)
+	target.InLinks = types.StringArray{"entity/in"}
+	target.OutLinks = types.StringArray{"entity/out"}
+	require.NoError(t, repo.Create(ctx, target))
+
+	contentOnly := makeWikiPage("kb-a", "entity/content-only", types.WikiPageTypeEntity, types.WikiPageStatusPublished)
+	contentOnly.Title = "Unrelated"
+	contentOnly.Content = "Needle only exists in the body"
+	require.NoError(t, repo.Create(ctx, contentOnly))
+
+	pages, total, err := repo.List(ctx, &types.WikiPageListRequest{
+		KnowledgeBaseID: "kb-a",
+		PageType:        types.WikiPageTypeEntity,
+		Query:           "Needle",
+		Projection:      "graph",
+		Page:            1,
+		PageSize:        50,
+		SortBy:          "title",
+		SortOrder:       "asc",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total, "graph search must not scan/match page content")
+	require.Len(t, pages, 1)
+	assert.Equal(t, target.Slug, pages[0].Slug)
+	assert.Empty(t, pages[0].Content)
+	assert.Empty(t, pages[0].Summary)
+	assert.Empty(t, pages[0].InLinks)
+	assert.Empty(t, pages[0].OutLinks)
 }

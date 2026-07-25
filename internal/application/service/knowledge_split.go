@@ -417,7 +417,16 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		return errors.New("document split part payload has incomplete identity")
 	}
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
-	part, epoch, err := s.splitManager.ClaimPart(ctx, payload)
+	partCtx, cancelPart := context.WithCancel(ctx)
+	releaseExecution, err := s.splitManager.RegisterPartExecution(cancelPart)
+	if err != nil {
+		cancelPart()
+		return err
+	}
+	defer releaseExecution()
+	defer cancelPart()
+
+	part, epoch, err := s.splitManager.ClaimPart(partCtx, payload)
 	if errors.Is(err, documentsplit.ErrStalePart) ||
 		errors.Is(err, documentsplit.ErrPartLeased) {
 		return nil
@@ -447,7 +456,8 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		} else if releaseErr != nil && !errors.Is(releaseErr, documentsplit.ErrLeaseLost) {
 			retErr = releaseErr
 		}
-		if terminalAttempt && retErr != nil {
+		if terminalAttempt && retErr != nil &&
+			!isDurableTaskDeferred(retErr) {
 			if knowledge, loadErr := s.repo.GetKnowledgeByID(
 				context.WithoutCancel(ctx), payload.TenantID, payload.KnowledgeID,
 			); loadErr == nil && knowledge != nil &&
@@ -466,12 +476,12 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		}
 	}()
 
-	tenant, err := s.tenantRepo.GetTenantByID(ctx, payload.TenantID)
+	tenant, err := s.tenantRepo.GetTenantByID(partCtx, payload.TenantID)
 	if err != nil {
 		return fmt.Errorf("load split part tenant: %w", err)
 	}
-	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenant)
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	partCtx = context.WithValue(partCtx, types.TenantInfoContextKey, tenant)
+	knowledge, err := s.repo.GetKnowledgeByID(partCtx, payload.TenantID, payload.KnowledgeID)
 	if errors.Is(err, apprepo.ErrKnowledgeNotFound) {
 		return nil
 	}
@@ -484,13 +494,13 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		knowledge.ProcessingOwner == "" {
 		return nil
 	}
-	if err := s.heartbeatActiveProcessing(ctx, knowledge, "physical split part claimed"); err != nil {
+	if err := s.heartbeatActiveProcessing(partCtx, knowledge, "physical split part claimed"); err != nil {
 		if errors.Is(err, errKnowledgeStateFenceConflict) {
 			return nil
 		}
 		return err
 	}
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KnowledgeBaseID)
+	kb, err := s.kbService.GetKnowledgeBaseByID(partCtx, payload.KnowledgeBaseID)
 	if err != nil {
 		return fmt.Errorf("load split part knowledge base: %w", err)
 	}
@@ -498,7 +508,6 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		return errors.New("split part knowledge base identity mismatch")
 	}
 
-	partCtx, cancelPart := context.WithCancel(ctx)
 	heartbeatErr := make(chan error, 1)
 	heartbeatDone := make(chan struct{})
 	go func() {
@@ -539,6 +548,13 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		overrides, _ := knowledge.ProcessOverrides()
 		return overrides
 	}())
+	budgetedChunkConfig := s.applyEmbeddingTokenBudget(
+		partCtx,
+		kb,
+		knowledge.Title,
+		buildSplitterConfigFromChunking(eff.ChunkingConfig),
+	)
+	eff.ChunkingConfig.TokenLimit = budgetedChunkConfig.TokenLimit
 	result, storedImages, err := s.parsePhysicalDocumentPart(
 		partCtx, kb, knowledge, part, eff,
 	)
@@ -564,6 +580,9 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		}
 		return err
 	}
+	if err := s.splitManager.HeartbeatPart(partCtx, part.ID, epoch); err != nil {
+		return fmt.Errorf("fence split part before staging: %w", err)
+	}
 
 	var engine *retriever.CompositeRetrieveEngine
 	var embedder embedding.Embedder
@@ -587,12 +606,18 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 			return listErr
 		}
 		if len(oldIDs) > 0 {
+			if err := s.splitManager.HeartbeatPart(partCtx, part.ID, epoch); err != nil {
+				return fmt.Errorf("fence split part before replacing prior index: %w", err)
+			}
 			if deleteErr := engine.DeleteByChunkIDList(
 				partCtx, oldIDs, model.GetDimensions(), knowledge.Type,
 			); deleteErr != nil {
 				return fmt.Errorf("delete prior split part index: %w", deleteErr)
 			}
 		}
+	}
+	if err := s.splitManager.HeartbeatPart(partCtx, part.ID, epoch); err != nil {
+		return fmt.Errorf("fence split part before replacing chunks: %w", err)
 	}
 	if err := s.splitManager.DeletePartChunks(
 		partCtx, part.TenantID, part.KnowledgeID,
@@ -629,6 +654,9 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 			if len(indexInfo) == 0 {
 				continue
 			}
+			if err := s.splitManager.HeartbeatPart(partCtx, part.ID, epoch); err != nil {
+				return fmt.Errorf("fence split part before vector batch: %w", err)
+			}
 			storageBytes += engine.EstimateStorageSize(partCtx, embedder, indexInfo)
 			if err := engine.BatchIndex(partCtx, embedder, indexInfo); err != nil {
 				return fmt.Errorf("stage split part vector batch: %w", err)
@@ -647,6 +675,9 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 			return nil
 		}
 		return err
+	}
+	if err := s.splitManager.HeartbeatPart(partCtx, part.ID, epoch); err != nil {
+		return fmt.Errorf("fence split part before completion: %w", err)
 	}
 	_, err = s.splitManager.CompletePart(partCtx, part, epoch, documentsplit.PartCompletion{
 		MarkdownChars: markdownChars, ChunkCount: countTextChunks(chunks),
@@ -1219,7 +1250,8 @@ func (s *knowledgeService) ProcessDocumentSplitFinalize(
 		return err
 	}
 	defer func() {
-		if retErr == nil || !isLastRetry {
+		if retErr == nil || !isLastRetry ||
+			isDurableTaskDeferred(retErr) {
 			return
 		}
 		retErr = errors.Join(

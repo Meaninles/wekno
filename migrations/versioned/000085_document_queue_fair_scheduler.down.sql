@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS idx_custom_document_queue_group_state;
+DROP INDEX IF EXISTS idx_custom_document_queue_schedule_last_admitted;
+DROP TABLE IF EXISTS custom_document_queue_schedule_groups;

@@ -34,6 +34,11 @@ const (
 	// question batches from starving the lightweight tasks in the low queue
 	// (summary, deletes, wiki ingest).
 	QueueQuestion = "question"
+	// QueueWikiMap is a bounded per-replica lane for document-local Wiki Map
+	// work. Hundreds of Map wake-ups may exist at once, but they must not
+	// occupy every generic background worker while waiting for shared model
+	// admission. KB materialization remains on QueueLow.
+	QueueWikiMap = "wiki_map"
 )
 
 const (
@@ -60,10 +65,11 @@ const (
 // ExtractChunkPayload represents the extract chunk task payload
 type ExtractChunkPayload struct {
 	TracingContext
-	TenantID uint64 `json:"tenant_id"`
-	ChunkID  string `json:"chunk_id"`
-	ModelID  string `json:"model_id"`
-	// KnowledgeID + Attempt link the per-chunk extract back to the parent
+	TenantID uint64   `json:"tenant_id"`
+	ChunkID  string   `json:"chunk_id,omitempty"`
+	ChunkIDs []string `json:"chunk_ids,omitempty"`
+	ModelID  string   `json:"model_id"`
+	// KnowledgeID + Attempt link the graph batch back to the parent
 	// parse attempt's postprocess stage so the worker can record a
 	// postprocess.graph.chunk[i] subspan. 0 / "" means "skip span
 	// recording" for legacy in-flight tasks.
@@ -71,9 +77,9 @@ type ExtractChunkPayload struct {
 	KnowledgeBaseID      string `json:"knowledge_base_id,omitempty"`
 	ProcessingGeneration string `json:"processing_generation,omitempty"`
 	Attempt              int    `json:"attempt,omitempty"`
-	// ChunkIndex is the 0-based ordinal of this chunk inside the parent
-	// knowledge's text-chunk set, used as the subspan name suffix
-	// ("postprocess.graph.chunk[3]") so the timeline preserves order.
+	// ChunkIndex is the 0-based graph task ordinal. A task can contain several
+	// adjacent source chunks but still owns exactly one durable finalization
+	// slot, retry identity and trace subspan.
 	ChunkIndex int `json:"chunk_index,omitempty"`
 }
 

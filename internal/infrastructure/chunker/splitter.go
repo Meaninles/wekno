@@ -286,14 +286,18 @@ func SplitText(text string, cfg SplitterConfig) []Chunk {
 
 	// Step 1: Find protected spans
 	protected := protectedSpans(text)
+	maxUnitSize := 7500
+	if cfg.TokenLimit > 0 && chunkSize > 0 && chunkSize < maxUnitSize {
+		maxUnitSize = chunkSize
+	}
 
 	// Step 2: Split non-protected regions by separators, keep protected as atomic units.
 	// chunkSize is forwarded so splitBySeparators can recursively apply lower-priority
 	// separators to oversize pieces (Python-parity recursive split).
-	units := buildUnitsWithProtection(text, protected, separators, chunkSize)
+	units := buildUnitsWithProtectionLimit(text, protected, separators, chunkSize, maxUnitSize)
 
 	// Step 3: Merge units into chunks with overlap
-	return mergeUnits(units, chunkSize, chunkOverlap)
+	return mergeUnitsWithLimit(units, chunkSize, chunkOverlap, maxUnitSize)
 }
 
 // buildUnitsWithProtection splits text into units, preserving protected spans as atomic.
@@ -304,7 +308,19 @@ func SplitText(text string, cfg SplitterConfig) []Chunk {
 // chunkSize is forwarded to splitBySeparators so recursive splitting can keep pieces
 // under the budget when one separator alone leaves a piece oversize.
 func buildUnitsWithProtection(text string, protected []span, separators []string, chunkSize int) []splitUnit {
-	const maxProtectedSize = 7500 // Maximum size for a protected unit (留余量给标题等)
+	return buildUnitsWithProtectionLimit(text, protected, separators, chunkSize, 7500)
+}
+
+func buildUnitsWithProtectionLimit(
+	text string,
+	protected []span,
+	separators []string,
+	chunkSize int,
+	maxProtectedSize int,
+) []splitUnit {
+	if maxProtectedSize <= 0 {
+		maxProtectedSize = 7500
+	}
 
 	var units []splitUnit
 	bytePos := 0
@@ -393,11 +409,16 @@ func buildUnitsWithProtection(text string, protected []span, separators []string
 // Active contextual headers (e.g., Markdown table headers) are prepended to new
 // chunks so that every chunk carries its own header context.
 func mergeUnits(units []splitUnit, chunkSize, chunkOverlap int) []Chunk {
+	return mergeUnitsWithLimit(units, chunkSize, chunkOverlap, 7500)
+}
+
+func mergeUnitsWithLimit(units []splitUnit, chunkSize, chunkOverlap, absoluteMaxSize int) []Chunk {
 	if len(units) == 0 {
 		return nil
 	}
-
-	const absoluteMaxSize = 7500
+	if absoluteMaxSize <= 0 {
+		absoluteMaxSize = 7500
+	}
 
 	ht := newHeaderTracker()
 

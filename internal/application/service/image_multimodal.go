@@ -13,6 +13,9 @@ import (
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
+	"github.com/Tencent/WeKnora/internal/custom/modules/imageguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/utils/ollama"
@@ -52,6 +55,8 @@ const (
 	vlmCaptionPrompt = "Provide a brief and concise description of the main content of the image in Chinese"
 )
 
+var errImageMultimodalVLMNotConfigured = errors.New("image multimodal VLM is not configured")
+
 // ImageMultimodalService handles image:multimodal asynq tasks.
 // It reads images from storage (via FileService for provider:// URLs),
 // performs OCR and VLM caption, and creates child chunks.
@@ -72,6 +77,7 @@ type ImageMultimodalService struct {
 	// tenant's StorageEngineConfig.MinIO is empty). Mirrors the write-side
 	// fallback in knowledgeService.resolveFileService.
 	fileSvc interfaces.FileService
+	cache   *contentcache.Store
 
 	// spanTracker records this image's subspan under the parent attempt's
 	// multimodal stage. nil-safe — falls back to no-op via tracker().
@@ -90,6 +96,7 @@ func NewImageMultimodalService(
 	taskEnqueuer interfaces.TaskEnqueuer,
 	redisClient *redis.Client,
 	fileSvc interfaces.FileService,
+	cache *contentcache.Store,
 	spanTracker SpanTracker,
 ) interfaces.TaskHandler {
 	return &ImageMultimodalService{
@@ -104,6 +111,7 @@ func NewImageMultimodalService(
 		taskEnqueuer:   taskEnqueuer,
 		redisClient:    redisClient,
 		fileSvc:        fileSvc,
+		cache:          cache,
 		spanTracker:    spanTracker,
 	}
 }
@@ -229,7 +237,11 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 	// so we don't double-count and prematurely trigger post-process.
 	var handleErr error
 	skipFanIn := false
+	terminalFailure := false
 	defer func() {
+		providerDeferred := isDurableTaskDeferred(retErr) ||
+			isDurableTaskDeferred(handleErr)
+		terminalAttempt := terminalFailure || (!providerDeferred && isFinalAsynqAttempt(ctx))
 		// Finalize the image subspan with the actual outcome — not the
 		// finalize-counter outcome. The counter logic counts a "tried"
 		// image regardless of inner success; the span surface tells the
@@ -237,14 +249,24 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 		if imgSpan != nil {
 			if handleErr == nil {
 				tracker.EndSpan(ctx, imgSpan, imgOut)
-			} else if isFinalAsynqAttempt(ctx) {
+			} else if terminalAttempt {
 				tracker.FailSpan(ctx, imgSpan,
 					"MULTIMODAL_VLM_FAILED",
 					handleErr.Error(),
 					handleErr)
 			}
 		}
-		if !skipFanIn && (handleErr == nil || isFinalAsynqAttempt(ctx)) {
+		readyToFinalize := !skipFanIn && (handleErr == nil || terminalAttempt)
+		if readyToFinalize && handleErr != nil {
+			// A fan-in completion means "this stable item will never run
+			// again". Persist the terminal failure first so a crash, Redis
+			// loss or post-process replay cannot turn it into success.
+			if err := s.recordTerminalImageFailure(ctx, payload, handleErr); err != nil {
+				retErr = errors.Join(retErr, err)
+				readyToFinalize = false
+			}
+		}
+		if readyToFinalize {
 			if err := s.checkAndFinalizeAllImages(ctx, payload, plan, completionStore); err != nil {
 				retErr = errors.Join(retErr, err)
 			}
@@ -258,6 +280,14 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 	vlmModel, vlmCfg, err := s.resolveVLM(ctx, payload.KnowledgeBaseID, payload.KnowledgeID)
 	if err != nil {
 		handleErr = fmt.Errorf("resolve VLM: %w", err)
+		if errors.Is(err, errImageMultimodalVLMNotConfigured) {
+			// This is a deterministic configuration failure, not a transient
+			// provider outage. Finalize the durable fan-in immediately and tell
+			// asynq not to create a retry storm. The failed span preserves the
+			// actual reason for operators and callers.
+			terminalFailure = true
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, handleErr)
+		}
 		return handleErr
 	}
 	// Capture the resolved VLM model id (or "legacy_inline" for the
@@ -272,22 +302,53 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 
 	// Read image bytes. A provider:// URL must be resolved via FileService —
 	// it must NEVER be handed to the HTTP downloader (which would fail with
-	// "unsupported URL scheme"). On unrecoverable read failure for a single
-	// image, skip it (deferred finalize will count it).
+	// "unsupported URL scheme"). Read failures are retryable and become a
+	// durable terminal image failure when the retry budget is exhausted.
 	imgBytes, readErr := s.readImageBytes(ctx, payload)
 	if readErr != nil {
-		logger.Errorf(ctx, "[ImageMultimodal] Skip unreadable image %s: %v", payload.ImageURL, readErr)
-		imgOut["skipped"] = "unreadable_image"
+		logger.Errorf(ctx, "[ImageMultimodal] Cannot read image %s: %v", payload.ImageURL, readErr)
 		imgOut["read_error"] = readErr.Error()
-		return nil
+		handleErr = fmt.Errorf("read multimodal image: %w", readErr)
+		return handleErr
 	}
 	imgOut["image_bytes"] = len(imgBytes)
+	preparedImage, prepareErr := imageguard.PrepareForVLM(imgBytes)
+	if prepareErr != nil {
+		imgOut["image_prepare_error"] = prepareErr.Error()
+		handleErr = fmt.Errorf("prepare multimodal image for VLM: %w", prepareErr)
+		return handleErr
+	}
+	imgOut["image_format"] = preparedImage.Format
+	imgOut["image_width"] = preparedImage.Width
+	imgOut["image_height"] = preparedImage.Height
+	if preparedImage.Skip {
+		imgOut["vlm_skipped"] = preparedImage.SkipReason
+		imgOut["chunks_created"] = 0
+		logger.Infof(ctx,
+			"[ImageMultimodal] Skipping decorative image before VLM: url=%s dimensions=%dx%d reason=%s",
+			payload.ImageURL, preparedImage.Width, preparedImage.Height, preparedImage.SkipReason,
+		)
+		return nil
+	}
+	vlmImageBytes := preparedImage.Bytes
+	if preparedImage.Normalized {
+		imgOut["image_aspect_normalized"] = true
+		imgOut["prepared_image_width"] = preparedImage.PreparedWidth
+		imgOut["prepared_image_height"] = preparedImage.PreparedHeight
+		imgOut["prepared_image_bytes"] = len(vlmImageBytes)
+	}
 
 	imageInfo := types.ImageInfo{
 		URL:         payload.ImageURL,
 		OriginalURL: payload.ImageURL,
 	}
+	imageContentHash := contentcache.DigestBytes(imgBytes)
+	cacheRef := contentcache.Reference{
+		KnowledgeID:          payload.KnowledgeID,
+		ProcessingGeneration: payload.ProcessingGeneration,
+	}
 
+	var extractionErr error
 	if payload.EnableOCR {
 		prompt := vlmOCRPrompt
 		if payload.ImageSourceType == "scanned_pdf" {
@@ -298,32 +359,70 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			imgOut["ocr_prompt"] = "default"
 		}
 
-		ocrText, ocrErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, prompt)
-		if ocrErr != nil {
-			logger.Warnf(ctx, "[ImageMultimodal] OCR failed for %s: %v", payload.ImageURL, ocrErr)
-			imgOut["ocr_error"] = ocrErr.Error()
+		ocrKey := vlmTextCacheKey(
+			payload.TenantID, contentcache.KindOCR, imageContentHash,
+			vlmModel.GetModelID(), vlmModel.GetModelName(), prompt,
+		)
+		ocrText, cacheHit := s.cachedVLMText(ctx, ocrKey, cacheRef)
+		if cacheHit {
+			imgOut["ocr_cache_hit"] = true
 		} else {
-			ocrText = sanitizeOCRText(ocrText)
-			if ocrText != "" {
-				imageInfo.OCRText = ocrText
-				imgOut["ocr_chars"] = len([]rune(ocrText))
-				imgOut["ocr_preview"] = previewText(ocrText, 200)
+			var ocrErr error
+			ocrText, ocrErr = vlmModel.Predict(ctx, [][]byte{vlmImageBytes}, prompt)
+			if ocrErr != nil {
+				logger.Warnf(ctx, "[ImageMultimodal] OCR failed for %s: %v", payload.ImageURL, ocrErr)
+				imgOut["ocr_error"] = ocrErr.Error()
+				extractionErr = errors.Join(extractionErr, fmt.Errorf("OCR: %w", ocrErr))
 			} else {
-				logger.Warnf(ctx, "[ImageMultimodal] OCR returned empty/invalid content for %s, discarded", payload.ImageURL)
-				imgOut["ocr_chars"] = 0
-				imgOut["ocr_skipped"] = "empty_or_invalid"
+				ocrText = sanitizeOCRText(ocrText)
+				s.persistVLMText(ctx, ocrKey, cacheRef, ocrText)
 			}
+		}
+		if ocrText != "" {
+			imageInfo.OCRText = ocrText
+			imgOut["ocr_chars"] = len([]rune(ocrText))
+			imgOut["ocr_preview"] = previewText(ocrText, 200)
+		} else if imgOut["ocr_error"] == nil {
+			logger.Warnf(ctx, "[ImageMultimodal] OCR returned empty/invalid content for %s, discarded", payload.ImageURL)
+			imgOut["ocr_chars"] = 0
+			imgOut["ocr_skipped"] = "empty_or_invalid"
 		}
 	}
 
-	caption, capErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, vlmCaptionPrompt)
-	if capErr != nil {
-		logger.Warnf(ctx, "[ImageMultimodal] Caption failed for %s: %v", payload.ImageURL, capErr)
-		imgOut["caption_error"] = capErr.Error()
-	} else if caption != "" {
-		imageInfo.Caption = caption
-		imgOut["caption_chars"] = len([]rune(caption))
-		imgOut["caption_preview"] = previewText(caption, 200)
+	if payload.EnableCaption {
+		captionKey := vlmTextCacheKey(
+			payload.TenantID, contentcache.KindCaption, imageContentHash,
+			vlmModel.GetModelID(), vlmModel.GetModelName(), vlmCaptionPrompt,
+		)
+		caption, cacheHit := s.cachedVLMText(ctx, captionKey, cacheRef)
+		if cacheHit {
+			imgOut["caption_cache_hit"] = true
+		} else {
+			var capErr error
+			caption, capErr = vlmModel.Predict(ctx, [][]byte{vlmImageBytes}, vlmCaptionPrompt)
+			if capErr != nil {
+				logger.Warnf(ctx, "[ImageMultimodal] Caption failed for %s: %v", payload.ImageURL, capErr)
+				imgOut["caption_error"] = capErr.Error()
+				extractionErr = errors.Join(extractionErr, fmt.Errorf("caption: %w", capErr))
+			} else {
+				s.persistVLMText(ctx, captionKey, cacheRef, caption)
+			}
+		}
+		if caption != "" {
+			imageInfo.Caption = caption
+			imgOut["caption_chars"] = len([]rune(caption))
+			imgOut["caption_preview"] = previewText(caption, 200)
+		}
+	}
+
+	// Do not persist a partial OCR/caption result when another enabled
+	// operation failed. Successful calls are already cached, so the retry pays
+	// only for the failed operation and commits the image atomically once all
+	// enabled operations have returned successfully.
+	if extractionErr != nil {
+		imgOut["chunks_created"] = 0
+		handleErr = fmt.Errorf("multimodal extraction failed: %w", extractionErr)
+		return handleErr
 	}
 
 	// Build child chunks for OCR and caption results
@@ -378,8 +477,10 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 	imgOut["chunks_created"] = len(newChunks)
 
 	if len(newChunks) == 0 {
-		// Deferred finalize will count this image on success.
-		imgOut["skipped"] = "no_extracted_content"
+		// Both enabled model operations returned successfully but found no
+		// useful content. This is a legitimate decorative/blank image, not a
+		// provider failure.
+		imgOut["skipped"] = "empty_or_decorative_content"
 		return nil
 	}
 
@@ -438,6 +539,85 @@ func stableImageChunkID(payload types.ImageMultimodalPayload, kind string) strin
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
 }
 
+type vlmTextCacheValue struct {
+	Text string `json:"text"`
+}
+
+func vlmTextCacheKey(
+	tenantID uint64,
+	kind string,
+	imageContentHash string,
+	modelID string,
+	modelName string,
+	prompt string,
+) contentcache.Key {
+	return contentcache.Key{
+		TenantID:    tenantID,
+		Kind:        kind,
+		ContentHash: imageContentHash,
+		VersionHash: contentcache.Digest(
+			"vlm-text-v1",
+			modelID,
+			modelName,
+			prompt,
+		),
+	}
+}
+
+func (s *ImageMultimodalService) cachedVLMText(
+	ctx context.Context,
+	key contentcache.Key,
+	ref contentcache.Reference,
+) (string, bool) {
+	if s.cache == nil {
+		return "", false
+	}
+	var value vlmTextCacheValue
+	hit, err := s.cache.GetJSON(ctx, key, ref, &value)
+	if err == nil {
+		if hit && strings.TrimSpace(value.Text) == "" {
+			evictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			if evictErr := s.cache.Evict(evictCtx, key); evictErr != nil {
+				logger.Warnf(ctx, "[ImageMultimodal] empty VLM cache eviction failed: %v", evictErr)
+			}
+			cancel()
+			return "", false
+		}
+		return value.Text, hit
+	}
+	logger.Warnf(ctx, "[ImageMultimodal] VLM cache lookup failed kind=%s: %v", key.Kind, err)
+	if errors.Is(err, contentcache.ErrCorruptPayload) {
+		evictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if evictErr := s.cache.Evict(evictCtx, key); evictErr != nil {
+			logger.Warnf(ctx, "[ImageMultimodal] corrupt VLM cache eviction failed: %v", evictErr)
+		}
+	}
+	return "", false
+}
+
+func (s *ImageMultimodalService) persistVLMText(
+	ctx context.Context,
+	key contentcache.Key,
+	ref contentcache.Reference,
+	text string,
+) {
+	if s.cache == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.cache.PutJSON(
+		cacheCtx,
+		key,
+		vlmTextCacheValue{Text: text},
+		90*24*time.Hour,
+		ref,
+	); err != nil && !errors.Is(err, contentcache.ErrPayloadTooLarge) {
+		logger.Warnf(ctx, "[ImageMultimodal] VLM cache persist failed kind=%s: %v", key.Kind, err)
+	}
+}
+
 func (s *ImageMultimodalService) currentProcessingGeneration(
 	ctx context.Context,
 	payload types.ImageMultimodalPayload,
@@ -475,6 +655,35 @@ func isFinalAsynqAttempt(ctx context.Context) bool {
 		return false
 	}
 	return retried >= maxRetry
+}
+
+func (s *ImageMultimodalService) recordTerminalImageFailure(
+	ctx context.Context,
+	payload types.ImageMultimodalPayload,
+	cause error,
+) error {
+	store, ok := s.knowledgeRepo.(enrichmentoutcome.GenerationStore)
+	if !ok || store == nil {
+		return errors.New("record terminal multimodal outcome: generation outcome store is unavailable")
+	}
+	dctx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout,
+	)
+	defer cancel()
+	_, err := store.RecordGenerationOutcome(
+		dctx,
+		payload.TenantID,
+		payload.KnowledgeID,
+		payload.KnowledgeBaseID,
+		payload.ProcessingGeneration,
+		fmt.Sprintf("multimodal.image[%d]", payload.ImageIndex),
+		enrichmentoutcome.StatusFailed,
+		"terminal multimodal failure: "+cause.Error(),
+	)
+	if err != nil {
+		return fmt.Errorf("record terminal multimodal outcome: %w", err)
+	}
+	return nil
 }
 
 // indexChunks indexes the newly created multimodal chunks into the retrieval engine
@@ -537,14 +746,10 @@ func (s *ImageMultimodalService) indexChunks(
 
 	indexInfoList := make([]*types.IndexInfo, 0, len(chunks))
 	for _, chunk := range chunks {
-		indexInfoList = append(indexInfoList, &types.IndexInfo{
-			Content:         chunk.Content,
-			SourceID:        chunk.ID,
-			SourceType:      types.ChunkSourceType,
-			ChunkID:         chunk.ID,
-			KnowledgeID:     chunk.KnowledgeID,
-			KnowledgeBaseID: chunk.KnowledgeBaseID,
-		})
+		if chunk == nil {
+			continue
+		}
+		indexInfoList = append(indexInfoList, multimodalChunkIndexInfo(chunk))
 	}
 
 	if err := engine.BatchIndex(ctx, embeddingModel, indexInfoList); err != nil {
@@ -574,6 +779,19 @@ func (s *ImageMultimodalService) indexChunks(
 	return nil
 }
 
+func multimodalChunkIndexInfo(chunk *types.Chunk) *types.IndexInfo {
+	return &types.IndexInfo{
+		Content:         chunk.Content,
+		SourceID:        chunk.ID,
+		SourceType:      types.ChunkSourceType,
+		ChunkID:         chunk.ID,
+		KnowledgeID:     chunk.KnowledgeID,
+		KnowledgeBaseID: chunk.KnowledgeBaseID,
+		IsEnabled:       chunk.IsEnabled,
+		IsRecommended:   chunk.Flags.HasFlag(types.ChunkFlagRecommended),
+	}
+}
+
 // resolveVLM creates a vlm.VLM instance for the given knowledge base,
 // supporting both new-style (ModelID) and legacy (inline BaseURL) configs.
 // Per-upload process_overrides on the knowledge entry take precedence over KB defaults.
@@ -583,7 +801,11 @@ func (s *ImageMultimodalService) resolveVLM(ctx context.Context, kbID, knowledge
 		return nil, types.VLMConfig{}, fmt.Errorf("get knowledge base %s: %w", kbID, err)
 	}
 	if kb == nil {
-		return nil, types.VLMConfig{}, fmt.Errorf("knowledge base %s not found", kbID)
+		return nil, types.VLMConfig{}, fmt.Errorf(
+			"%w: knowledge base %s not found",
+			errImageMultimodalVLMNotConfigured,
+			kbID,
+		)
 	}
 
 	var processOverrides *types.KnowledgeProcessOverrides
@@ -594,7 +816,11 @@ func (s *ImageMultimodalService) resolveVLM(ctx context.Context, kbID, knowledge
 	}
 	vlmCfg := ResolveProcessConfig(kb, processOverrides).VLMConfig
 	if !vlmCfg.IsEnabled() {
-		return nil, types.VLMConfig{}, fmt.Errorf("VLM is not enabled for knowledge base %s", kbID)
+		return nil, types.VLMConfig{}, fmt.Errorf(
+			"%w for knowledge base %s",
+			errImageMultimodalVLMNotConfigured,
+			kbID,
+		)
 	}
 
 	// New-style: resolve model through ModelService

@@ -65,7 +65,7 @@ func (r *modelRepository) List(
 // Update updates a model
 func (r *modelRepository) Update(ctx context.Context, m *types.Model) error {
 	// Use Select to explicitly update all fields, including zero values like false
-	return r.db.WithContext(ctx).Debug().Model(&types.Model{}).Where(
+	return r.db.WithContext(ctx).Model(&types.Model{}).Where(
 		"id = ? AND tenant_id = ?", m.ID, m.TenantID,
 	).Select("*").Updates(m).Error
 }

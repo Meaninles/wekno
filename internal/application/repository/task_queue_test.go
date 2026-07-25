@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,8 +34,14 @@ CREATE TABLE IF NOT EXISTS task_pending_ops (
     payload     TEXT NOT NULL DEFAULT '{}',
     fail_count  INTEGER NOT NULL DEFAULT 0,
     enqueued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    claimed_at  DATETIME
+    claimed_at  DATETIME,
+    map_ready_at DATETIME
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_pending_ops_wiki_ingest
+    ON task_pending_ops (tenant_id, task_type, scope, scope_id, op, dedup_key)
+    WHERE task_type = 'wiki:ingest'
+      AND scope = 'knowledge_base'
+      AND op = 'ingest';
 `
 
 const taskDeadLettersTestDDL = `
@@ -57,6 +64,16 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     id         VARCHAR(64) PRIMARY KEY,
     tenant_id  INTEGER NOT NULL,
     deleted_at DATETIME
+);
+CREATE TABLE IF NOT EXISTS knowledges (
+    id                    VARCHAR(64) PRIMARY KEY,
+    tenant_id             INTEGER NOT NULL,
+    knowledge_base_id     VARCHAR(64) NOT NULL,
+    processing_generation VARCHAR(64) NOT NULL,
+    parse_status          VARCHAR(32) NOT NULL,
+    processed_at          DATETIME,
+    wiki_status           VARCHAR(32) NOT NULL DEFAULT 'pending',
+    deleted_at            DATETIME
 );
 `
 
@@ -85,6 +102,51 @@ func makePendingOp(taskType, scope, scopeID, op, dedup string, payload []byte) *
 		DedupKey: dedup,
 		Payload:  payload,
 	}
+}
+
+func TestTaskPendingOps_DistributedWikiMapPublishesReadyAtomicallyAndBypassesSlowHead(t *testing.T) {
+	db := setupTaskQueueTestDB(t)
+	repo := NewTaskPendingOpsRepository(db).(*taskPendingOpsRepository)
+	ctx := context.Background()
+	require.NoError(t, db.Exec(
+		`INSERT INTO knowledges
+		 (id, tenant_id, knowledge_base_id, processing_generation, parse_status, processed_at, wiki_status)
+		 VALUES
+		 ('slow', 1, 'kb-1', 'g-slow', 'completed', CURRENT_TIMESTAMP, 'pending'),
+		 ('ready', 1, 'kb-1', 'g-ready', 'completed', CURRENT_TIMESTAMP, 'pending')`,
+	).Error)
+
+	slowPayload := []byte(`{"op":"ingest","knowledge_id":"slow","processing_generation":"g-slow"}`)
+	readyPayload := []byte(`{"op":"ingest","knowledge_id":"ready","processing_generation":"g-ready","prepared":{"doc_title":"Ready","summary":"ok","pages":[],"updates":[]}}`)
+	require.NoError(t, repo.Enqueue(ctx, makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-1", "ingest", "slow:g-slow", slowPayload,
+	)))
+	require.NoError(t, repo.Enqueue(ctx, makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-1", "ingest", "ready:g-ready", readyPayload,
+	)))
+
+	row, err := repo.GetWikiIngestByDedupKey(ctx, 1, "kb-1", "ready:g-ready")
+	require.NoError(t, err)
+	require.NotNil(t, row)
+	validationCtx := wikiingestguard.WithValidation(ctx, wikiingestguard.Identity{
+		TenantID: 1, KnowledgeBaseID: "kb-1",
+		KnowledgeID: "ready", ProcessingGeneration: "g-ready",
+	})
+	updated, err := repo.MarkWikiMapReady(
+		validationCtx, row.ID, 1, "kb-1", readyPayload,
+	)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	batch, err := repo.PeekWikiCommitBatch(ctx, 1, "kb-1", 10)
+	require.NoError(t, err)
+	require.Len(t, batch, 1)
+	assert.Equal(t, "ready:g-ready", batch[0].DedupKey,
+		"an unprepared FIFO head must not block later ready documents")
+	require.NotNil(t, batch[0].MapReadyAt)
+	count, err := repo.CountWikiCommitReady(ctx, 1, "kb-1")
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, count)
 }
 
 // ---------------- TaskPendingOpsRepository ----------------
@@ -124,6 +186,102 @@ func TestTaskPendingOps_EnqueuePreservesExplicitTimestamp(t *testing.T) {
 	require.NoError(t, db.Table("task_pending_ops").
 		Select("enqueued_at").Where("id = ?", op.ID).Scan(&persisted).Error)
 	assert.True(t, persisted.Equal(want), "persisted timestamp = %s, want %s", persisted, want)
+}
+
+func TestTaskPendingOps_WikiIngestReplayPreservesCanonicalCheckpoint(t *testing.T) {
+	db := setupTaskQueueTestDB(t)
+	repo := NewTaskPendingOpsRepository(db)
+	ctx := context.Background()
+	dedupKey := "knowledge-1:generation-1"
+	checkpoint := []byte(`{"op":"ingest","knowledge_id":"knowledge-1","processing_generation":"generation-1","prepared":{"doc_title":"kept"}}`)
+
+	canonical := makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-1", "ingest", dedupKey, checkpoint,
+	)
+	require.NoError(t, repo.Enqueue(ctx, canonical))
+	require.NotZero(t, canonical.ID)
+
+	replay := makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-1", "ingest", dedupKey,
+		[]byte(`{"op":"ingest","knowledge_id":"knowledge-1","processing_generation":"generation-1"}`),
+	)
+	require.NoError(t, repo.Enqueue(ctx, replay))
+
+	var rows []types.TaskPendingOp
+	require.NoError(t, db.Find(&rows).Error)
+	require.Len(t, rows, 1)
+	assert.Equal(t, canonical.ID, rows[0].ID)
+	assert.JSONEq(t, string(checkpoint), string(rows[0].Payload),
+		"a plain recovery replay must not erase a durable Map checkpoint")
+}
+
+func TestTaskPendingOps_WikiIngestSettledGenerationCannotBeRecreated(t *testing.T) {
+	db := setupTaskQueueTestDB(t)
+	repo := NewTaskPendingOpsRepository(db)
+	now := time.Now().UTC()
+	require.NoError(t, db.Exec(
+		`INSERT INTO knowledges
+		 (id, tenant_id, knowledge_base_id, processing_generation, parse_status, processed_at, wiki_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"knowledge-1", 1, "kb-1", "generation-1",
+		types.ParseStatusFinalizing, now, types.WikiStatusCompleted,
+	).Error)
+	identity := wikiingestguard.Identity{
+		TenantID: 1, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
+		ProcessingGeneration: "generation-1",
+	}
+	op := makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-1", "ingest",
+		"knowledge-1:generation-1",
+		[]byte(`{"op":"ingest","knowledge_id":"knowledge-1","processing_generation":"generation-1"}`),
+	)
+
+	err := repo.Enqueue(wikiingestguard.WithValidation(context.Background(), identity), op)
+	require.Equal(t, []wikiingestguard.Identity{identity}, wikiingestguard.StaleIdentities(err))
+	var count int64
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Count(&count).Error)
+	require.Zero(t, count)
+}
+
+func TestTaskPendingOps_WikiIngestConcurrentReplayCreatesOneRow(t *testing.T) {
+	db := setupTaskQueueTestDB(t)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	// This fixture uses a private in-memory SQLite database. One connection
+	// keeps every goroutine on that schema while still exercising concurrent
+	// repository callers and the database uniqueness boundary.
+	sqlDB.SetMaxOpenConns(1)
+	repo := NewTaskPendingOpsRepository(db)
+
+	const producers = 32
+	start := make(chan struct{})
+	errs := make(chan error, producers)
+	var wg sync.WaitGroup
+	for i := 0; i < producers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- repo.Enqueue(context.Background(), makePendingOp(
+				types.TypeWikiIngest,
+				types.TaskScopeKnowledgeBase,
+				"kb-1",
+				"ingest",
+				"knowledge-1:generation-1",
+				[]byte(`{"op":"ingest","knowledge_id":"knowledge-1","processing_generation":"generation-1"}`),
+			))
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for enqueueErr := range errs {
+		require.NoError(t, enqueueErr)
+	}
+
+	var count int64
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Count(&count).Error)
+	assert.Equal(t, int64(1), count)
 }
 
 func TestTaskPendingOps_WikiEnqueueRejectsTombstonedKnowledgeBase(t *testing.T) {
@@ -528,9 +686,9 @@ func TestTaskPendingOps_DeleteByDedupKey_Filters(t *testing.T) {
 	repo := NewTaskPendingOpsRepository(db)
 	ctx := context.Background()
 
-	// Two ingests + one retract, all keyed on knowledge "k1"; one ingest
-	// for unrelated "k2".
-	require.NoError(t, repo.Enqueue(ctx, makePendingOp("wiki:ingest", "knowledge_base", "kb", "ingest", "k1", nil)))
+	// One ingest + one retract, both keyed on knowledge "k1"; one ingest
+	// for unrelated "k2". A second identical ingest cannot exist because the
+	// durable Wiki generation index now collapses it at INSERT time.
 	require.NoError(t, repo.Enqueue(ctx, makePendingOp("wiki:ingest", "knowledge_base", "kb", "ingest", "k1", nil)))
 	require.NoError(t, repo.Enqueue(ctx, makePendingOp("wiki:ingest", "knowledge_base", "kb", "retract", "k1", nil)))
 	require.NoError(t, repo.Enqueue(ctx, makePendingOp("wiki:ingest", "knowledge_base", "kb", "ingest", "k2", nil)))
@@ -539,7 +697,7 @@ func TestTaskPendingOps_DeleteByDedupKey_Filters(t *testing.T) {
 	err := repo.DeleteByDedupKey(ctx, "wiki:ingest", "knowledge_base", "kb", "", "")
 	assert.Error(t, err)
 	n, _ := repo.PendingCount(ctx, "wiki:ingest", "knowledge_base", "kb")
-	assert.Equal(t, int64(4), n)
+	assert.Equal(t, int64(3), n)
 
 	// Drop only "ingest" rows for k1; retract survives.
 	require.NoError(t, repo.DeleteByDedupKey(ctx, "wiki:ingest", "knowledge_base", "kb", "k1", "ingest"))

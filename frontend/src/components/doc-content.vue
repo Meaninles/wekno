@@ -8,7 +8,13 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
 import mermaid from "mermaid";
 import { onMounted, ref, nextTick, onUnmounted, watch, computed } from "vue";
-import { downKnowledgeDetails, deleteGeneratedQuestion, getChunkByIdOnly, previewKnowledgeFile } from "@/api/knowledge-base/index";
+import {
+  downKnowledgeDetails,
+  deleteGeneratedQuestion,
+  getChunkByIdOnly,
+  getKnowledgePreviewPolicy,
+  previewKnowledgeFile,
+} from "@/api/knowledge-base/index";
 import { MessagePlugin, DialogPlugin } from "tdesign-vue-next";
 import { sanitizeHTML, safeMarkdownToHTML, createSafeImage, isValidImageURL, hydrateProtectedFileImages, isValidURL } from '@/utils/security';
 import { normalizeSpuriousTablePrefixes } from '@/utils/markdownTableNormalize';
@@ -17,6 +23,18 @@ import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '@/stores/auth';
 import DocumentPreview from '@/components/document-preview.vue';
 import KnowledgeProcessingTimeline from '@/components/knowledge-processing-timeline.vue';
+import {
+  blobExceedsAdmission,
+  evaluatePreviewAdmission,
+  unwrapKnowledgePreviewPolicy,
+} from '@/custom/modules/documentPreview/policy';
+import {
+  DOCUMENT_CHUNK_PAGE_SIZE,
+  documentChunkPageCount,
+  nextDocumentChunkFetchPage,
+  shouldUsePagedChunkView,
+  sliceDocumentChunkPage,
+} from '@/custom/modules/documentPreview/chunkPaging';
 
 const { t } = useI18n();
 const authStore = useAuthStore();
@@ -305,10 +323,10 @@ const renderer = new marked.Renderer();
 let page = 1;
 let loadingChunks = false;
 let pendingRequestedPage: number | null = null;
+let pendingDisplayPage: number | null = null;
 let pendingChunksBeforeLoad = 0;
-const CHUNK_PAGE_SIZE = 25;
-/** Scroll container for the main doc drawer (not the first .t-drawer__body on the page). */
-let docScrollEl: HTMLElement | null = null;
+const chunkDisplayPage = ref(1);
+const chunkListRef = ref<HTMLElement | null>(null);
 let mdContentWrap = ref()
 // Drawer uses attach="body", so markdown nodes live outside mdContentWrap in the DOM.
 const docMarkdownRoot = ref<HTMLElement | null>(null)
@@ -395,44 +413,18 @@ const mergeChunks = (chunks: any[]): string => {
   return merged;
 };
 
-const findDocDrawerScrollEl = (): HTMLElement | null =>
-  document.querySelector('.doc-main-drawer .t-drawer__body') as HTMLElement | null;
-
-const unbindDrawerScroll = () => {
-  if (docScrollEl) {
-    docScrollEl.removeEventListener('scroll', handleDetailsScroll);
-    docScrollEl = null;
-  }
-};
-
-const bindDrawerScroll = () => {
-  unbindDrawerScroll();
-  docScrollEl = findDocDrawerScrollEl();
-  if (docScrollEl) {
-    docScrollEl.addEventListener('scroll', handleDetailsScroll, { passive: true });
-  }
-};
-
 onMounted(() => {
   loadTraceDrawerWidth();
   loadMainDrawerWidth();
   window.addEventListener('resize', onTraceDrawerWindowResize, { passive: true });
 });
 
-watch(() => props.visible, (visible) => {
-  if (visible) {
-    nextTick(() => {
-      bindDrawerScroll();
-      maybeLoadMoreChunks();
-    });
-  } else {
-    unbindDrawerScroll();
-  }
-});
 watch(() => props.details?.id, () => {
   page = 1;
+  chunkDisplayPage.value = 1;
   loadingChunks = false;
   pendingRequestedPage = null;
+  pendingDisplayPage = null;
   pendingChunksBeforeLoad = 0;
 });
 watch(() => props.details?.chunkLoading, (val) => {
@@ -440,26 +432,36 @@ watch(() => props.details?.chunkLoading, (val) => {
     if (pendingRequestedPage !== null) {
       const currentLength = props.details?.md?.length || 0;
       const hasError = Boolean(props.details?.chunkLoadError);
-      if (hasError && currentLength <= pendingChunksBeforeLoad) {
+      if (currentLength > pendingChunksBeforeLoad) {
+        if (pendingDisplayPage !== null) {
+          chunkDisplayPage.value = pendingDisplayPage;
+          nextTick(() => {
+            chunkListRef.value?.scrollIntoView({ block: 'start', behavior: 'auto' });
+          });
+        }
+      } else {
         page = Math.max(1, pendingRequestedPage - 1);
-        MessagePlugin.warning(props.details?.chunkLoadError);
+        if (hasError) {
+          MessagePlugin.warning(props.details?.chunkLoadError);
+        }
       }
     }
     pendingRequestedPage = null;
+    pendingDisplayPage = null;
     pendingChunksBeforeLoad = 0;
     loadingChunks = false;
-    if (props.visible) {
-      nextTick(() => maybeLoadMoreChunks());
-    }
   }
 });
 onUnmounted(() => {
   window.removeEventListener('resize', onTraceDrawerWindowResize);
   cleanupTraceDrawerResize();
   cleanupMainDrawerResize();
-  unbindDrawerScroll();
   if (audioBlobUrl.value) {
     URL.revokeObjectURL(audioBlobUrl.value);
+  }
+  if (audioPreviewController) {
+    audioPreviewController.abort();
+    audioPreviewController = null;
   }
 })
 const checkImage = (url) => {
@@ -530,9 +532,26 @@ const mergedContent = computed(() => {
   return '';
 });
 
-// 计算处理后的分块数据，避免在模板中频繁调用方法和 JSON.parse
+const chunkPageCount = computed(() =>
+  documentChunkPageCount(props.details?.total, DOCUMENT_CHUNK_PAGE_SIZE),
+);
+const loadedChunkPageCount = computed(() =>
+  documentChunkPageCount(props.details?.md?.length, DOCUMENT_CHUNK_PAGE_SIZE),
+);
+const hasPreviousChunkPage = computed(() => chunkDisplayPage.value > 1);
+const hasNextChunkPage = computed(() =>
+  chunkDisplayPage.value < chunkPageCount.value,
+);
+
+// 只处理当前页的分块。Markdown 转换本身开销较高，不能让超大文档一次
+// 处理、挂载全部 chunk；已经取回的历史页也只作为轻量缓存保留。
 const processedChunks = computed(() => {
-  return (props.details?.md || []).map((item: any, index: number) => {
+  const currentPageChunks = sliceDocumentChunkPage(
+    props.details?.md || [],
+    chunkDisplayPage.value,
+    DOCUMENT_CHUNK_PAGE_SIZE,
+  );
+  return currentPageChunks.map((item: any, index: number) => {
     return {
       original: item,
       processedContent: processMarkdown(item.content),
@@ -562,9 +581,32 @@ const canPreview = (): boolean => {
   return previewSupportedTypes.has(ft);
 };
 
+// 不支持原文件预览的超长内容也必须进入分页分块视图；否则“全文”
+// 会合并大量 Markdown 并一次性挂载，仍可能卡死浏览器。
+watch(
+  () => [props.details?.id, props.details?.total, props.details?.file_type],
+  () => {
+    if (
+      props.details?.id
+      && shouldUsePagedChunkView(props.details?.total, DOCUMENT_CHUNK_PAGE_SIZE)
+      && !canPreview()
+    ) {
+      viewMode.value = 'chunks';
+      chunkDisplayPage.value = 1;
+    }
+  },
+  { flush: 'post' },
+);
+
 // 当文档详情加载完成时，file 类型自动切换到「预览」；音频类型使用 merged + 播放器
 watch(() => props.details?.id, (newId) => {
   // 清理旧音频
+  if (audioPreviewController) {
+    audioPreviewController.abort();
+    audioPreviewController = null;
+  }
+  audioPreviewBounded.value = false;
+  audioLoading.value = false;
   if (audioBlobUrl.value) {
     URL.revokeObjectURL(audioBlobUrl.value);
     audioBlobUrl.value = '';
@@ -599,17 +641,56 @@ const isAudioFile = (fileType?: string): boolean => {
 };
 const audioBlobUrl = ref('');
 const audioLoading = ref(false);
+const audioPreviewBounded = ref(false);
+let audioPreviewController: AbortController | null = null;
 
 const loadAudioPreview = async () => {
   if (!props.details?.id || audioBlobUrl.value) return;
+  if (audioPreviewController) {
+    audioPreviewController.abort();
+  }
+  const controller = new AbortController();
+  audioPreviewController = controller;
   audioLoading.value = true;
+  audioPreviewBounded.value = false;
   try {
-    const blob = await previewKnowledgeFile(props.details.id);
+    const payload = await getKnowledgePreviewPolicy(props.details.id, {
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return;
+    const admission = evaluatePreviewAdmission(
+      unwrapKnowledgePreviewPolicy(payload),
+      {
+        fileType: props.details.file_type,
+        fileSize: props.details.file_size,
+        chunkCount: props.details.total,
+      },
+    );
+    if (admission.mode !== 'original') {
+      audioPreviewBounded.value = true;
+      return;
+    }
+    const blob = await previewKnowledgeFile(props.details.id, {
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return;
+    if (blobExceedsAdmission(blob, admission.maxOriginalBytes)) {
+      audioPreviewBounded.value = true;
+      return;
+    }
     audioBlobUrl.value = URL.createObjectURL(blob);
   } catch (err) {
+    if (controller.signal.aborted || (err as any)?.name === 'CanceledError') return;
+    if ((err as any)?.status === 413) {
+      audioPreviewBounded.value = true;
+      return;
+    }
     console.error('Audio preview load failed:', err);
   } finally {
-    audioLoading.value = false;
+    if (audioPreviewController === controller) {
+      audioPreviewController = null;
+      audioLoading.value = false;
+    }
   }
 };
 const runMarkdownPostRenderPipeline = async () => {
@@ -639,9 +720,6 @@ watch(() => props.details.md, () => {
 watch(() => viewMode.value, (mode) => {
   if ((mode === 'chunks' || mode === 'merged') && props.visible) {
     runMarkdownPostRenderPipeline();
-    if (mode === 'chunks') {
-      nextTick(() => maybeLoadMoreChunks());
-    }
   }
 }, { flush: 'post' });
 
@@ -1032,43 +1110,38 @@ const downloadFile = () => {
       MessagePlugin.error(t('file.downloadFailed'));
     });
 };
-const requestNextChunkPage = () => {
+const requestNextChunkPage = (targetDisplayPage: number) => {
   if (loadingChunks || props.details?.chunkLoading) return;
   const total = props.details?.total ?? 0;
   const loaded = props.details?.md?.length ?? 0;
-  if (loaded >= total || total === 0) return;
-  const pageNum = Math.ceil(total / CHUNK_PAGE_SIZE);
-  if (page + 1 > pageNum) return;
-  page++;
+  const nextPage = nextDocumentChunkFetchPage(
+    loaded,
+    total,
+    DOCUMENT_CHUNK_PAGE_SIZE,
+  );
+  if (nextPage === null || nextPage > chunkPageCount.value) return;
+  page = nextPage;
   loadingChunks = true;
   pendingRequestedPage = page;
+  pendingDisplayPage = targetDisplayPage;
   pendingChunksBeforeLoad = loaded;
   emit('getDoc', page);
 };
 
-/** When the list is shorter than the drawer, scroll never fires — prefetch until scrollable or done. */
-const maybeLoadMoreChunks = () => {
-  if (!props.visible || loadingChunks || props.details?.chunkLoading) return;
-  const el = docScrollEl || findDocDrawerScrollEl();
-  if (!el) return;
-  const loaded = props.details?.md?.length ?? 0;
-  const total = props.details?.total ?? 0;
-  if (loaded >= total) return;
-  const { scrollHeight, clientHeight } = el;
-  if (scrollHeight <= clientHeight + 8) {
-    requestNextChunkPage();
+const showChunkPage = (targetPage: number) => {
+  if (targetPage < 1 || targetPage > chunkPageCount.value) return;
+  if (targetPage <= loadedChunkPageCount.value) {
+    chunkDisplayPage.value = targetPage;
+    nextTick(() => {
+      chunkListRef.value?.scrollIntoView({ block: 'start', behavior: 'auto' });
+    });
+    return;
   }
+  requestNextChunkPage(targetPage);
 };
 
-const handleDetailsScroll = () => {
-  if (loadingChunks || props.details?.chunkLoading) return;
-  const el = docScrollEl || findDocDrawerScrollEl();
-  if (!el) return;
-  const { scrollTop, scrollHeight, clientHeight } = el;
-  if (scrollTop + clientHeight >= scrollHeight - 8) {
-    requestNextChunkPage();
-  }
-};
+const showPreviousChunkPage = () => showChunkPage(chunkDisplayPage.value - 1);
+const showNextChunkPage = () => showChunkPage(chunkDisplayPage.value + 1);
 </script>
 <template>
   <div class="doc_content" ref="mdContentWrap">
@@ -1217,7 +1290,8 @@ const handleDetailsScroll = () => {
                 class="view-mode-btn">
                 {{ $t('preview.tab') }}
               </t-button>
-              <t-button v-if="!canPreview()" size="small" :variant="viewMode === 'merged' ? 'base' : 'outline'"
+              <t-button v-if="!canPreview() && !shouldUsePagedChunkView(details.total, DOCUMENT_CHUNK_PAGE_SIZE)"
+                size="small" :variant="viewMode === 'merged' ? 'base' : 'outline'"
                 :theme="viewMode === 'merged' ? 'primary' : 'default'" @click="viewMode = 'merged'"
                 class="view-mode-btn">
                 {{ $t('knowledgeBase.viewMerged') }}
@@ -1236,6 +1310,10 @@ const handleDetailsScroll = () => {
               <t-loading size="small" />
               <span>{{ $t('preview.audioLoading') }}</span>
             </div>
+            <div v-else-if="audioPreviewBounded" class="audio-loading">
+              <t-icon name="info-circle" />
+              <span>{{ $t('preview.audioSafePreviewHint') }}</span>
+            </div>
             <audio v-else-if="audioBlobUrl" controls class="audio-player" :src="audioBlobUrl">
               {{ $t('preview.audioNotSupported') }}
             </audio>
@@ -1250,10 +1328,13 @@ const handleDetailsScroll = () => {
           <!-- 分块视图 -->
           <div v-else-if="viewMode === 'chunks'">
             <div v-if="!processedChunks.length" class="no_content">{{ $t('common.noData') }}</div>
-            <div v-else class="chunk-list">
-              <div class="chunk-item" v-for="(chunk, index) in processedChunks" :key="index">
+            <div v-else ref="chunkListRef" class="chunk-list" data-testid="document-chunk-page">
+              <div class="chunk-item" v-for="(chunk, index) in processedChunks"
+                :key="chunk.original?.id || `${chunkDisplayPage}-${index}`">
                 <div class="chunk-header">
-                  <span class="chunk-index">{{ $t('knowledgeBase.segment') }} {{ index + 1 }}</span>
+                  <span class="chunk-index">{{ $t('knowledgeBase.segment') }} {{
+                    (chunkDisplayPage - 1) * DOCUMENT_CHUNK_PAGE_SIZE + index + 1
+                  }}</span>
                   <div class="chunk-header-right">
                     <t-tag v-if="chunk.hasParent" size="small" theme="primary" variant="light">
                       {{ $t('knowledgeBase.childChunk') }}
@@ -1300,13 +1381,32 @@ const handleDetailsScroll = () => {
                   </div>
                 </div>
               </div>
+              <div v-if="chunkPageCount > 1" class="chunk-pagination" data-testid="document-chunk-pagination">
+                <t-button size="small" variant="outline" :disabled="!hasPreviousChunkPage || details.chunkLoading"
+                  @click="showPreviousChunkPage">
+                  {{ $t('knowledgeBase.previousChunkPage') }}
+                </t-button>
+                <span class="chunk-page-status">
+                  {{ $t('knowledgeBase.chunkPageStatus', {
+                    page: chunkDisplayPage,
+                    pages: chunkPageCount,
+                    loaded: details.md?.length || 0,
+                    total: details.total || 0,
+                  }) }}
+                </span>
+                <t-button size="small" theme="primary" :loading="details.chunkLoading"
+                  :disabled="!hasNextChunkPage || details.chunkLoading" @click="showNextChunkPage">
+                  {{ $t('knowledgeBase.nextChunkPage') }}
+                </t-button>
+              </div>
             </div>
           </div>
 
           <!-- 文档预览视图 -->
           <div v-else-if="viewMode === 'preview'">
             <DocumentPreview :knowledgeId="details.id" :fileType="details.file_type" :fileName="details.title"
-              :active="viewMode === 'preview'" />
+              :fileSize="details.file_size" :chunkCount="details.total" :parseStatus="details.parse_status"
+              :active="viewMode === 'preview'" @useChunks="viewMode = 'chunks'" />
           </div>
         </section>
       </div>
@@ -1707,6 +1807,29 @@ const handleDetailsScroll = () => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.chunk-pagination {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--td-bg-color-container) 94%, transparent);
+  box-shadow: 0 -2px 10px rgb(0 0 0 / 6%);
+  backdrop-filter: blur(8px);
+}
+
+.chunk-page-status {
+  min-width: 170px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  text-align: center;
 }
 
 .chunk-item {

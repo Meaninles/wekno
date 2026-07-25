@@ -20,17 +20,23 @@ type partialReparseChildEnqueuer struct {
 	failOnceFor string
 	failed      bool
 	conflicts   int
+	queues      []string
 }
 
 func (e *partialReparseChildEnqueuer) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var taskID string
+	var queue string
 	for _, opt := range opts {
 		if opt.Type() == asynq.TaskIDOpt {
 			taskID, _ = opt.Value().(string)
 		}
+		if opt.Type() == asynq.QueueOpt {
+			queue, _ = opt.Value().(string)
+		}
 	}
+	e.queues = append(e.queues, queue)
 	var payload types.KnowledgeListReparsePayload
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		return nil, err
@@ -132,6 +138,21 @@ func applyBatchReparseClaimValues(row *types.Knowledge, values map[string]interf
 	if value, ok := values["error_message"].(string); ok {
 		row.ErrorMessage = value
 	}
+	if value, ok := values["pending_subtasks_count"].(int); ok {
+		row.PendingSubtasksCount = value
+	}
+	if value, ok := values["summary_status"].(string); ok {
+		row.SummaryStatus = value
+	}
+	if value, ok := values["enrichment_status"].(string); ok {
+		row.EnrichmentStatus = value
+	}
+	if value, ok := values["wiki_status"].(string); ok {
+		row.WikiStatus = value
+	}
+	if value, ok := values["wiki_error_message"].(string); ok {
+		row.WikiErrorMessage = value
+	}
 	if value, ok := values["updated_at"].(time.Time); ok {
 		row.UpdatedAt = value
 	}
@@ -149,7 +170,11 @@ func newBatchReparseSnapshotFixture(t *testing.T) (*batchReparseSnapshotRepoFake
 		row := &types.Knowledge{
 			ID: id, TenantID: 42, KnowledgeBaseID: "kb-1",
 			ParseStatus: types.ParseStatusCompleted, ProcessingGeneration: "old-" + id,
-			UpdatedAt: time.Date(2026, 7, 22, 1, 2, 3, i*1000, time.UTC),
+			SummaryStatus:    types.SummaryStatusProcessing,
+			EnrichmentStatus: types.EnrichmentStatusPending,
+			WikiStatus:       types.WikiStatusPending,
+			WikiErrorMessage: "old wiki error",
+			UpdatedAt:        time.Date(2026, 7, 22, 1, 2, 3, i*1000, time.UTC),
 		}
 		rows[id] = row
 		snapshot, err := processownership.CaptureBatchReparseSnapshot(row)
@@ -196,6 +221,11 @@ func TestDispatchKnowledgeListReparseChildrenPartialRetryIsStable(t *testing.T) 
 	for _, id := range payload.KnowledgeIDs {
 		if seen[id] != 1 {
 			t.Fatalf("knowledge %s has %d durable child tasks, want exactly 1", id, seen[id])
+		}
+	}
+	for _, queue := range enqueuer.queues {
+		if queue != types.QueueCritical {
+			t.Fatalf("reparse child queue = %q, want %q", queue, types.QueueCritical)
 		}
 	}
 }
@@ -348,7 +378,47 @@ func batchReparseClaimTestValues(generation, owner string) map[string]interface{
 		"processing_generation":  generation,
 		"processing_owner":       owner,
 		"processing_workflow_id": "",
+		"pending_subtasks_count": 0,
+		"summary_status":         types.SummaryStatusNone,
+		"enrichment_status":      types.EnrichmentStatusNone,
+		"wiki_status":            types.WikiStatusNone,
+		"wiki_error_message":     "",
 		"error_message":          batchReparseMarker(batchReparsePreparing, generation, 0),
 		"updated_at":             time.Date(2026, 7, 22, 2, 0, 0, 0, time.UTC),
+	}
+}
+
+func TestBatchReparseGenerationClaimClearsAllPriorDerivativeState(t *testing.T) {
+	repo, payload := newBatchReparseSnapshotFixture(t)
+	id := payload.KnowledgeIDs[0]
+	expected := payload.ExpectedSnapshots[id]
+	generation, owner := processownership.BatchReparseIdentity(payload.TenantID, payload.BatchID, id)
+
+	swapped, err := claimBatchReparseExpectedSnapshot(
+		context.Background(),
+		repo,
+		expected,
+		batchReparseClaimTestValues(generation, owner),
+	)
+	if err != nil || !swapped {
+		t.Fatalf("generation claim = %v, %v; want true,nil", swapped, err)
+	}
+	current, err := repo.GetKnowledgeByID(context.Background(), payload.TenantID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.SummaryStatus != types.SummaryStatusNone ||
+		current.EnrichmentStatus != types.EnrichmentStatusNone ||
+		current.WikiStatus != types.WikiStatusNone ||
+		current.WikiErrorMessage != "" ||
+		current.PendingSubtasksCount != 0 {
+		t.Fatalf(
+			"new generation inherited old derivative state: summary=%q enrichment=%q wiki=%q wiki_error=%q pending=%d",
+			current.SummaryStatus,
+			current.EnrichmentStatus,
+			current.WikiStatus,
+			current.WikiErrorMessage,
+			current.PendingSubtasksCount,
+		)
 	}
 }

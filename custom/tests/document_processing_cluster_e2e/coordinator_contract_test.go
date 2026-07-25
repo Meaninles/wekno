@@ -45,8 +45,14 @@ func openQueueContractDB(t *testing.T) *gorm.DB {
 		processing_generation text NOT NULL,
 		processing_owner text NOT NULL DEFAULT '',
 		processing_workflow_id text NOT NULL DEFAULT '',
+		processing_fanout text NULL,
 		parse_status text NOT NULL DEFAULT 'pending',
 		pending_subtasks_count integer NOT NULL DEFAULT 0,
+		summary_status text NOT NULL DEFAULT 'none',
+		enrichment_status text NOT NULL DEFAULT 'none',
+		wiki_status text NOT NULL DEFAULT 'none',
+		wiki_error_message text NOT NULL DEFAULT '',
+		error_message text NOT NULL DEFAULT '',
 		processed_at datetime NULL,
 		updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		deleted_at datetime NULL,
@@ -54,7 +60,9 @@ func openQueueContractDB(t *testing.T) *gorm.DB {
 	)`).Error; err != nil {
 		t.Fatalf("create knowledge contract table: %v", err)
 	}
-	if err := db.AutoMigrate(&documentqueue.Workflow{}, &documentqueue.Instance{}); err != nil {
+	if err := db.AutoMigrate(
+		&documentqueue.Workflow{}, &documentqueue.Instance{}, &documentqueue.ScheduleGroup{},
+	); err != nil {
 		t.Fatalf("migrate document queue: %v", err)
 	}
 	return db
@@ -123,7 +131,9 @@ func openPostgresQueueContractDB(t *testing.T) *gorm.DB {
 		}
 		_ = baseSQL.Close()
 	})
-	if err := scoped.AutoMigrate(&documentqueue.Workflow{}, &documentqueue.Instance{}); err != nil {
+	if err := scoped.AutoMigrate(
+		&documentqueue.Workflow{}, &documentqueue.Instance{}, &documentqueue.ScheduleGroup{},
+	); err != nil {
 		t.Fatalf("migrate PostgreSQL document queue contract: %v", err)
 	}
 	if err := scoped.Exec(`CREATE TABLE knowledges (
@@ -133,8 +143,14 @@ func openPostgresQueueContractDB(t *testing.T) *gorm.DB {
 		processing_generation text NOT NULL,
 		processing_owner text NOT NULL DEFAULT '',
 		processing_workflow_id text NOT NULL DEFAULT '',
+		processing_fanout jsonb NULL,
 		parse_status text NOT NULL DEFAULT 'pending',
 		pending_subtasks_count integer NOT NULL DEFAULT 0,
+		summary_status text NOT NULL DEFAULT 'none',
+		enrichment_status text NOT NULL DEFAULT 'none',
+		wiki_status text NOT NULL DEFAULT 'none',
+		wiki_error_message text NOT NULL DEFAULT '',
+		error_message text NOT NULL DEFAULT '',
 		processed_at timestamptz NULL,
 		updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		deleted_at timestamptz NULL,
@@ -427,6 +443,124 @@ func TestPostgresConcurrentFirstRegistrationConvergesOnOneWorkflow(t *testing.T)
 	}
 	if rows != 1 {
 		t.Fatalf("PostgreSQL workflow row count = %d, want 1", rows)
+	}
+}
+
+func TestPostgresFairSchedulerDefersOldBacklogForLateKnowledgeBase(t *testing.T) {
+	db := openPostgresQueueContractDB(t)
+	first := documentqueue.NewCoordinatorWithConfig(
+		db, nil, "postgres-fair-a", "boot-a", 4, coordinatorConfig(),
+	)
+	second := documentqueue.NewCoordinatorWithConfig(
+		db, nil, "postgres-fair-b", "boot-b", 4, coordinatorConfig(),
+	)
+	if err := first.Start(context.Background()); err != nil {
+		t.Fatalf("start first fair coordinator: %v", err)
+	}
+	t.Cleanup(first.Stop)
+	if err := second.Start(context.Background()); err != nil {
+		t.Fatalf("start second fair coordinator: %v", err)
+	}
+	t.Cleanup(second.Stop)
+
+	create := func(tenantID uint64, kbID, knowledgeID, generation string) (*documentqueue.Workflow, []byte) {
+		t.Helper()
+		workflow, _, err := first.RegisterWorkflow(
+			context.Background(), types.TypeDocumentProcess,
+			rootPayload(t, tenantID, kbID, knowledgeID, generation, nil),
+		)
+		if err != nil {
+			t.Fatalf("register %s: %v", knowledgeID, err)
+		}
+		return workflow, bindContractWorkflow(t, db, workflow)
+	}
+	firstA, deliveryA1 := create(31, "kb-a", "a-1", "generation-a-1")
+	secondA, deliveryA2 := create(31, "kb-a", "a-2", "generation-a-2")
+	lateB, deliveryB := create(32, "kb-b", "b-1", "generation-b-1")
+	if _, err := first.Claim(context.Background(), types.TypeDocumentProcess, deliveryA1); err != nil {
+		t.Fatalf("claim first A workflow: %v", err)
+	}
+
+	if _, err := second.Claim(
+		context.Background(), types.TypeDocumentProcess, deliveryA2,
+	); !errors.Is(err, documentqueue.ErrFairnessDeferred) {
+		t.Fatalf("second A claim = %v, want ErrFairnessDeferred", err)
+	}
+	if _, err := second.Claim(
+		context.Background(), types.TypeDocumentProcess, deliveryB,
+	); err != nil {
+		t.Fatalf("late B claim: %v", err)
+	}
+
+	var currentA documentqueue.Workflow
+	if err := db.Where("id = ?", secondA.ID).Take(&currentA).Error; err != nil {
+		t.Fatalf("load deferred A workflow: %v", err)
+	}
+	if currentA.State != documentqueue.StateQueued ||
+		currentA.DispatchEpoch != secondA.DispatchEpoch+1 {
+		t.Fatalf("deferred A workflow = state %s epoch %d, want queued epoch %d",
+			currentA.State, currentA.DispatchEpoch, secondA.DispatchEpoch+1)
+	}
+	var currentFirstA, currentB documentqueue.Workflow
+	if err := db.Where("id = ?", firstA.ID).Take(&currentFirstA).Error; err != nil {
+		t.Fatalf("load active A workflow: %v", err)
+	}
+	if err := db.Where("id = ?", lateB.ID).Take(&currentB).Error; err != nil {
+		t.Fatalf("load active B workflow: %v", err)
+	}
+	if currentFirstA.State != documentqueue.StateLeased ||
+		currentB.State != documentqueue.StateLeased {
+		t.Fatalf("fair active states = A:%s B:%s, want leased/leased",
+			currentFirstA.State, currentB.State)
+	}
+}
+
+func TestPostgresClaimUsesCrossProcessSchedulerAdvisoryLock(t *testing.T) {
+	db := openPostgresQueueContractDB(t)
+	coordinator := documentqueue.NewCoordinatorWithConfig(
+		db, nil, "postgres-advisory", "boot-1", 1, coordinatorConfig(),
+	)
+	if err := coordinator.Start(context.Background()); err != nil {
+		t.Fatalf("start advisory coordinator: %v", err)
+	}
+	t.Cleanup(coordinator.Stop)
+	workflow, _, err := coordinator.RegisterWorkflow(
+		context.Background(), types.TypeDocumentProcess,
+		rootPayload(t, 33, "kb-advisory", "knowledge-advisory", "generation-1", nil),
+	)
+	if err != nil {
+		t.Fatalf("register advisory workflow: %v", err)
+	}
+	delivery := bindContractWorkflow(t, db, workflow)
+
+	lockTx := db.Begin()
+	if lockTx.Error != nil {
+		t.Fatalf("begin scheduler-lock transaction: %v", lockTx.Error)
+	}
+	const schedulerLockKey int64 = 0x574b4e4f524151
+	if err := lockTx.Exec("SELECT pg_advisory_xact_lock(?)", schedulerLockKey).Error; err != nil {
+		_ = lockTx.Rollback().Error
+		t.Fatalf("hold scheduler advisory lock: %v", err)
+	}
+
+	claimDone := make(chan error, 1)
+	go func() {
+		_, claimErr := coordinator.Claim(
+			context.Background(), types.TypeDocumentProcess, delivery,
+		)
+		claimDone <- claimErr
+	}()
+	select {
+	case claimErr := <-claimDone:
+		_ = lockTx.Rollback().Error
+		t.Fatalf("claim bypassed PostgreSQL scheduler lock: %v", claimErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := lockTx.Commit().Error; err != nil {
+		t.Fatalf("release scheduler advisory lock: %v", err)
+	}
+	if claimErr := <-claimDone; claimErr != nil {
+		t.Fatalf("claim after scheduler lock release: %v", claimErr)
 	}
 }
 

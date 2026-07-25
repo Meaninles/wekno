@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -238,4 +239,72 @@ func TestPrepareWikiDeleteQuarantinesSharedPageWithoutRemovingProvenance(t *test
 	assert.Equal(t, types.StringArray{"kid-shared", "surviving-source"}, pageRepo.quarantined[0].SourceRefs,
 		"source refs must remain until the durable reducer commits the safe body")
 	assert.Equal(t, types.StringArray{"chunk-deleted", "chunk-surviving"}, pageRepo.quarantined[0].ChunkRefs)
+}
+
+func TestWikiDeleteIntentIsHeldUntilReadyPlanReusesSameRow(t *testing.T) {
+	db := setupDeleteWikiDB(t)
+	knowledge := insertDeleteWikiKnowledge(t, db, "kid-interleaved")
+	coordinator := wikidelete.New(db)
+
+	intentPayload, err := json.Marshal(WikiPendingOp{
+		Op:               WikiOpRetract,
+		KnowledgeID:      knowledge.ID,
+		DocTitle:         "Policy",
+		RetractPlanState: wikiRetractPlanIntent,
+	})
+	require.NoError(t, err)
+	require.NoError(t, coordinator.Begin(context.Background(), []wikidelete.Intent{{
+		TenantID:        knowledge.TenantID,
+		KnowledgeID:     knowledge.ID,
+		KnowledgeBaseID: knowledge.KnowledgeBaseID,
+		PendingOp: &types.TaskPendingOp{
+			TenantID: knowledge.TenantID, TaskType: wikiTaskType, Scope: wikiTaskScope,
+			ScopeID: knowledge.KnowledgeBaseID, Op: WikiOpRetract,
+			DedupKey: knowledge.ID, Payload: intentPayload,
+		},
+	}}))
+
+	var intentRow types.TaskPendingOp
+	require.NoError(t, db.Where("dedup_key = ? AND op = ?", knowledge.ID, WikiOpRetract).
+		First(&intentRow).Error)
+	require.NotZero(t, intentRow.ID)
+	consumer := &wikiIngestService{
+		pendingRepo: &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{&intentRow}},
+	}
+	ops, ids, err := consumer.peekPendingList(context.Background(), knowledge.KnowledgeBaseID, 5)
+	require.NoError(t, err)
+	assert.Empty(t, ops, "intent must not start an early Wiki retract")
+	assert.Empty(t, ids, "intent must not be acknowledged while deletion is quiescing")
+
+	readyPayload, err := json.Marshal(WikiPendingOp{
+		Op:               WikiOpRetract,
+		KnowledgeID:      knowledge.ID,
+		DocTitle:         "Policy",
+		PageSlugs:        []string{"policy"},
+		SourceChunks:     []string{"chunk-1"},
+		RetractPlanState: wikiRetractPlanReady,
+	})
+	require.NoError(t, err)
+	require.NoError(t, coordinator.Prepare(context.Background(), []wikidelete.Request{{
+		TenantID:        knowledge.TenantID,
+		KnowledgeID:     knowledge.ID,
+		KnowledgeBaseID: knowledge.KnowledgeBaseID,
+		PendingOp: &types.TaskPendingOp{
+			TenantID: knowledge.TenantID, TaskType: wikiTaskType, Scope: wikiTaskScope,
+			ScopeID: knowledge.KnowledgeBaseID, Op: WikiOpRetract,
+			DedupKey: knowledge.ID, Payload: readyPayload,
+		},
+	}}))
+
+	var readyRows []*types.TaskPendingOp
+	require.NoError(t, db.Where("dedup_key = ? AND op = ?", knowledge.ID, WikiOpRetract).
+		Find(&readyRows).Error)
+	require.Len(t, readyRows, 1, "Begin and Prepare must share one durable queue identity")
+	assert.Equal(t, intentRow.ID, readyRows[0].ID, "ready plan must update rather than duplicate the intent")
+	consumer.pendingRepo = &wikiQueuePendingRepoStub{rows: readyRows}
+	ops, ids, err = consumer.peekPendingList(context.Background(), knowledge.KnowledgeBaseID, 5)
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	assert.Equal(t, wikiRetractPlanReady, ops[0].RetractPlanState)
+	assert.Equal(t, []int64{intentRow.ID}, ids)
 }

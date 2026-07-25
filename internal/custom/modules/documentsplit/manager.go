@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -43,11 +44,14 @@ type Manager struct {
 	db       *gorm.DB
 	enqueuer interfaces.TaskEnqueuer
 	config   Config
+	queue    *documentqueue.Coordinator
 	owner    string
 	// ownerPrefix is stable for one application-replica identity while owner
 	// also includes the process boot. The document-queue identity fence makes
 	// it safe for a new boot to reclaim only its own superseded leases.
 	ownerPrefix string
+	instanceID  string
+	bootID      string
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -56,12 +60,21 @@ type Manager struct {
 
 func NewManager(params ManagerParams) *Manager {
 	ownerPrefix, owner := splitWorkerIdentity(params.Queue)
+	instanceID := ""
+	bootID := ""
+	if params.Queue != nil {
+		instanceID = params.Queue.InstanceID()
+		bootID = params.Queue.BootID()
+	}
 	return &Manager{
 		db:          params.DB,
 		enqueuer:    params.Enqueuer,
 		config:      LoadConfig(),
+		queue:       params.Queue,
 		owner:       owner,
 		ownerPrefix: ownerPrefix,
+		instanceID:  instanceID,
+		bootID:      bootID,
 	}
 }
 
@@ -113,6 +126,20 @@ func (m *Manager) Owner() string {
 	return m.owner
 }
 
+// RegisterPartExecution keeps this process incarnation non-takeoverable until
+// the part handler has fully returned. It is lifecycle tracking rather than a
+// second concurrency limit: the root document workflow already owns the
+// configured per-instance document slot.
+func (m *Manager) RegisterPartExecution(cancel context.CancelFunc) (func(), error) {
+	if m == nil {
+		return nil, ErrLeaseLost
+	}
+	if m.queue == nil {
+		return func() {}, nil
+	}
+	return m.queue.RegisterAuxiliaryExecution(cancel)
+}
+
 func (m *Manager) Migrate(ctx context.Context) error {
 	if m == nil || m.db == nil {
 		return errors.New("document split: database is unavailable")
@@ -127,6 +154,14 @@ func (m *Manager) Migrate(ctx context.Context) error {
 	migrator := m.db.Migrator()
 	if !migrator.HasTable(&Plan{}) || !migrator.HasTable(&Part{}) {
 		return errors.New("document split schema is missing; run versioned migration 000077")
+	}
+	for _, field := range []string{"lease_instance_id", "lease_boot_id"} {
+		if !migrator.HasColumn(&Part{}, field) {
+			return fmt.Errorf(
+				"document split part column %s is missing; run versioned migration 000080",
+				field,
+			)
+		}
 	}
 	for _, field := range []string{
 		"processing_generation", "split_part_index", "source_locator",
@@ -437,6 +472,11 @@ func (m *Manager) DispatchPlan(ctx context.Context, planID string) error {
 }
 
 func (m *Manager) ClaimPart(ctx context.Context, payload PartPayload) (*Part, int64, error) {
+	if m.queue != nil {
+		if err := m.queue.AssertCurrentBoot(ctx, false); err != nil {
+			return nil, 0, err
+		}
+	}
 	var claimed Part
 	now := time.Now()
 	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -476,6 +516,8 @@ func (m *Manager) ClaimPart(ctx context.Context, payload PartPayload) (*Part, in
 		claimed.Attempt++
 		claimed.LeaseEpoch++
 		claimed.LeaseOwner = m.owner
+		claimed.LeaseInstanceID = m.instanceID
+		claimed.LeaseBootID = m.bootID
 		claimed.LeaseUntil = &until
 		claimed.LastProgressAt = now
 		claimed.UpdatedAt = now
@@ -483,7 +525,9 @@ func (m *Manager) ClaimPart(ctx context.Context, payload PartPayload) (*Part, in
 			Updates(map[string]interface{}{
 				"state": PartLeased, "attempt": claimed.Attempt,
 				"lease_epoch": claimed.LeaseEpoch, "lease_owner": claimed.LeaseOwner,
-				"lease_until": until, "last_progress_at": now, "updated_at": now,
+				"lease_instance_id": claimed.LeaseInstanceID,
+				"lease_boot_id":     claimed.LeaseBootID,
+				"lease_until":       until, "last_progress_at": now, "updated_at": now,
 				"version": gorm.Expr("version + 1"),
 			}).Error
 	})
@@ -494,10 +538,15 @@ func (m *Manager) ClaimPart(ctx context.Context, payload PartPayload) (*Part, in
 }
 
 func (m *Manager) HeartbeatPart(ctx context.Context, partID string, epoch int64) error {
+	if m.queue != nil {
+		if err := m.queue.AssertCurrentBoot(ctx, true); err != nil {
+			return errors.Join(ErrLeaseLost, err)
+		}
+	}
 	now := time.Now()
 	res := m.db.WithContext(ctx).Model(&Part{}).Where(
-		"id = ? AND state = ? AND lease_owner = ? AND lease_epoch = ?",
-		partID, PartLeased, m.owner, epoch,
+		"id = ? AND state = ? AND lease_owner = ? AND lease_instance_id = ? AND lease_boot_id = ? AND lease_epoch = ?",
+		partID, PartLeased, m.owner, m.instanceID, m.bootID, epoch,
 	).Updates(map[string]interface{}{
 		"lease_until":      now.Add(m.config.LeaseDuration),
 		"last_progress_at": now, "updated_at": now,
@@ -526,6 +575,11 @@ func (m *Manager) CompletePart(
 	if part == nil || completion.ChunkCount < 0 || completion.StorageBytes < 0 {
 		return false, ErrPlanIncomplete
 	}
+	if m.queue != nil {
+		if err := m.queue.AssertCurrentBoot(ctx, true); err != nil {
+			return false, errors.Join(ErrLeaseLost, err)
+		}
+	}
 	allComplete := false
 	completionMetrics := append(types.JSON(nil), part.Metrics...)
 	var metrics map[string]interface{}
@@ -540,10 +594,11 @@ func (m *Manager) CompletePart(
 	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
 		res := tx.Model(&Part{}).Where(
-			"id = ? AND state = ? AND lease_owner = ? AND lease_epoch = ?",
-			part.ID, PartLeased, m.owner, epoch,
+			"id = ? AND state = ? AND lease_owner = ? AND lease_instance_id = ? AND lease_boot_id = ? AND lease_epoch = ?",
+			part.ID, PartLeased, m.owner, m.instanceID, m.bootID, epoch,
 		).Updates(map[string]interface{}{
-			"state": PartCompleted, "lease_owner": "", "lease_until": nil,
+			"state": PartCompleted, "lease_owner": "", "lease_instance_id": "",
+			"lease_boot_id": "", "lease_until": nil,
 			"markdown_chars": completion.MarkdownChars, "draft_chunks": completion.ChunkCount,
 			"storage_bytes":  completion.StorageBytes,
 			"first_chunk_id": completion.FirstChunkID, "last_chunk_id": completion.LastChunkID,
@@ -646,6 +701,11 @@ func (m *Manager) ReleasePart(ctx context.Context, part *Part, epoch int64, caus
 	if part == nil {
 		return ErrLeaseLost
 	}
+	if m.queue != nil {
+		if err := m.queue.AssertCurrentBoot(ctx, true); err != nil {
+			return errors.Join(ErrLeaseLost, err)
+		}
+	}
 	message := "part processing failed"
 	if cause != nil {
 		message = cause.Error()
@@ -659,24 +719,50 @@ func (m *Manager) ReleasePart(ctx context.Context, part *Part, epoch int64, caus
 		if err := query.First(&current).Error; err != nil {
 			return err
 		}
-		if current.State != PartLeased || current.LeaseOwner != m.owner || current.LeaseEpoch != epoch {
+		if current.State != PartLeased ||
+			current.LeaseOwner != m.owner ||
+			current.LeaseInstanceID != m.instanceID ||
+			current.LeaseBootID != m.bootID ||
+			current.LeaseEpoch != epoch {
 			return ErrLeaseLost
 		}
 		now := time.Now()
 		nextState := PartQueued
 		var retryAt *time.Time
-		if current.Attempt >= m.config.MaxRetry {
+		refundAttempt := false
+		if providerDelay, deferred := modeladmission.ModelRetryAfter(cause); deferred {
+			// Provider outages are shared external backpressure, not failed
+			// document-part attempts. Keep the part durable, pause its siblings
+			// and refund the attempt claimed by this delivery.
+			nextState = PartPreparing
+			if providerDelay < m.config.RetryBackoffBase {
+				providerDelay = m.config.RetryBackoffBase
+			}
+			value := now.Add(providerDelay)
+			retryAt = &value
+			refundAttempt = true
+		} else if errors.Is(cause, context.Canceled) {
+			nextState = PartPreparing
+			value := now.Add(m.config.RetryBackoffBase)
+			retryAt = &value
+			refundAttempt = true
+		} else if current.Attempt >= m.config.MaxRetry {
 			nextState = PartFailed
 		} else if isTransientPartError(cause) {
 			nextState = PartPreparing
 			value := now.Add(m.retryBackoff(current.Attempt))
 			retryAt = &value
 		}
-		if err := tx.Model(&Part{}).Where("id = ?", part.ID).Updates(map[string]interface{}{
-			"state": nextState, "lease_owner": "", "lease_until": retryAt,
+		updates := map[string]interface{}{
+			"state": nextState, "lease_owner": "", "lease_instance_id": "",
+			"lease_boot_id": "", "lease_until": retryAt,
 			"last_error": message, "last_progress_at": now, "updated_at": now,
 			"version": gorm.Expr("version + 1"),
-		}).Error; err != nil {
+		}
+		if refundAttempt {
+			updates["attempt"] = gorm.Expr("CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END")
+		}
+		if err := tx.Model(&Part{}).Where("id = ?", part.ID).Updates(updates).Error; err != nil {
 			return err
 		}
 		if nextState == PartFailed {
@@ -1115,11 +1201,24 @@ func (m *Manager) recoverSupersededLocalBootLeases(ctx context.Context, now time
 	// Coordinator.Start has registered this exact boot before split recovery
 	// starts. Its stable-identity fence proves another live boot with this
 	// prefix cannot exist. Other replicas still observe the normal timeout.
-	return m.db.WithContext(ctx).Model(&Part{}).Where(
-		"state = ? AND lease_owner LIKE ? AND lease_owner <> ?",
-		PartLeased, m.ownerPrefix+"%", m.owner,
-	).Updates(map[string]interface{}{
-		"state": PartQueued, "lease_owner": "", "lease_until": nil,
+	query := m.db.WithContext(ctx).Model(&Part{}).Where("state = ?", PartLeased)
+	if m.instanceID != "" && m.bootID != "" {
+		query = query.Where(
+			"lease_instance_id = ? AND lease_boot_id <> '' AND lease_boot_id <> ?",
+			m.instanceID,
+			m.bootID,
+		)
+	} else {
+		// SQLite-only deterministic fixtures predate orchestration identity.
+		query = query.Where(
+			"lease_owner LIKE ? AND lease_owner <> ?",
+			m.ownerPrefix+"%",
+			m.owner,
+		)
+	}
+	return query.Updates(map[string]interface{}{
+		"state": PartQueued, "lease_owner": "", "lease_instance_id": "",
+		"lease_boot_id": "", "lease_until": nil,
 		// Planned restarts are not business parse failures. LeaseEpoch still
 		// advances on the next claim and fences any delayed old completion.
 		"attempt":          gorm.Expr("CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END"),
@@ -1129,35 +1228,109 @@ func (m *Manager) recoverSupersededLocalBootLeases(ctx context.Context, now time
 	}).Error
 }
 
+func (m *Manager) expiredPartTakeoverProven(ctx context.Context, part *Part) (bool, error) {
+	if m == nil || part == nil {
+		return false, nil
+	}
+	if m.queue == nil {
+		// The no-coordinator mode is only used by the single-process SQLite
+		// state-machine harness. Production construction always injects the
+		// durable document coordinator and therefore fails closed.
+		return m.db != nil && m.db.Dialector.Name() == "sqlite", nil
+	}
+	if part.LeaseInstanceID == "" || part.LeaseBootID == "" {
+		return false, nil
+	}
+	if part.LeaseInstanceID == m.instanceID {
+		// Same boot may still have a paused handler. A different boot is safe
+		// only because Coordinator registration already replaced/fenced the
+		// exact stable instance identity.
+		return part.LeaseBootID != m.bootID, nil
+	}
+	return m.queue.ProveInstanceBootTermination(
+		ctx,
+		part.LeaseInstanceID,
+		part.LeaseBootID,
+	)
+}
+
 func (m *Manager) recoverExpiredLeases(ctx context.Context, now time.Time) error {
+	var candidates []*Part
+	if err := m.db.WithContext(ctx).Where(
+		"state = ? AND lease_until < ?",
+		PartLeased,
+		now,
+	).Order("lease_until ASC, plan_id ASC, part_index ASC").
+		Limit(m.config.RecoveryBatchSize).
+		Find(&candidates).Error; err != nil {
+		return err
+	}
+	recoverable := make(map[string]*Part, len(candidates))
+	for _, part := range candidates {
+		proven, err := m.expiredPartTakeoverProven(ctx, part)
+		if err != nil {
+			return err
+		}
+		if proven {
+			recoverable[part.ID] = part
+		}
+	}
+	if len(recoverable) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(recoverable))
+	for id := range recoverable {
+		ids = append(ids, id)
+	}
+
 	// A crash on the final business attempt must not be returned to queued
 	// forever: no future ClaimPart is allowed to spend a fourth attempt.
 	// Resolve terminal expirations and their parent knowledge in the same
 	// transaction; retryable expirations are made claimable again afterwards.
 	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var terminal []*Part
+		var locked []*Part
 		query := tx.Where(
-			"state = ? AND lease_until < ? AND attempt >= ?",
-			PartLeased, now, m.config.MaxRetry,
+			"id IN ? AND state = ? AND lease_until < ?",
+			ids,
+			PartLeased,
+			now,
 		).Order("plan_id ASC, part_index ASC")
 		if tx.Dialector.Name() != "sqlite" {
 			query = query.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
 		}
-		if err := query.Find(&terminal).Error; err != nil {
+		if err := query.Find(&locked).Error; err != nil {
 			return err
+		}
+		terminal := make([]*Part, 0, len(locked))
+		retryable := make([]*Part, 0, len(locked))
+		for _, current := range locked {
+			expected := recoverable[current.ID]
+			if expected == nil ||
+				current.LeaseEpoch != expected.LeaseEpoch ||
+				current.LeaseOwner != expected.LeaseOwner ||
+				current.LeaseInstanceID != expected.LeaseInstanceID ||
+				current.LeaseBootID != expected.LeaseBootID {
+				continue
+			}
+			if current.Attempt >= m.config.MaxRetry {
+				terminal = append(terminal, current)
+			} else {
+				retryable = append(retryable, current)
+			}
 		}
 		planParts := make(map[string][]int)
 		if len(terminal) > 0 {
-			ids := make([]string, 0, len(terminal))
+			terminalIDs := make([]string, 0, len(terminal))
 			for _, part := range terminal {
-				ids = append(ids, part.ID)
+				terminalIDs = append(terminalIDs, part.ID)
 				planParts[part.PlanID] = append(planParts[part.PlanID], part.PartIndex)
 			}
 			if err := tx.Model(&Part{}).Where(
 				"id IN ? AND state = ? AND lease_until < ? AND attempt >= ?",
-				ids, PartLeased, now, m.config.MaxRetry,
+				terminalIDs, PartLeased, now, m.config.MaxRetry,
 			).Updates(map[string]interface{}{
-				"state": PartFailed, "lease_owner": "", "lease_until": nil,
+				"state": PartFailed, "lease_owner": "", "lease_instance_id": "",
+				"lease_boot_id": "", "lease_until": nil,
 				"last_error":       "worker lease expired after retry budget was exhausted",
 				"last_progress_at": now, "updated_at": now,
 				"version": gorm.Expr("version + 1"),
@@ -1205,19 +1378,30 @@ func (m *Manager) recoverExpiredLeases(ctx context.Context, now time.Time) error
 			).Updates(map[string]interface{}{
 				"parse_status": types.ParseStatusFailed, "error_message": message,
 				"pending_subtasks_count": 0, "processing_owner": "",
-				"updated_at": now,
+				"enrichment_status":  types.EnrichmentStatusNone,
+				"wiki_status":        types.WikiStatusNone,
+				"wiki_error_message": "",
+				"updated_at":         now,
 			}).Error; err != nil {
 				return err
 			}
 		}
 
-		// A delivery still running with a live heartbeat never matches this
-		// conditional update.
+		if len(retryable) == 0 {
+			return nil
+		}
+		retryableIDs := make([]string, 0, len(retryable))
+		for _, part := range retryable {
+			retryableIDs = append(retryableIDs, part.ID)
+		}
+		// A delivery still running with a live heartbeat or whose exact owner
+		// was not proven terminated never matches this bounded CAS.
 		return tx.Model(&Part{}).Where(
-			"state = ? AND lease_until < ? AND attempt < ?",
-			PartLeased, now, m.config.MaxRetry,
+			"id IN ? AND state = ? AND lease_until < ? AND attempt < ?",
+			retryableIDs, PartLeased, now, m.config.MaxRetry,
 		).Updates(map[string]interface{}{
-			"state": PartQueued, "lease_owner": "", "lease_until": nil,
+			"state": PartQueued, "lease_owner": "", "lease_instance_id": "",
+			"lease_boot_id": "", "lease_until": nil,
 			"last_error":       "worker lease expired; recovered",
 			"last_progress_at": now, "updated_at": now,
 			"version": gorm.Expr("version + 1"),

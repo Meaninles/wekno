@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	TaskType       = "knowledge:aux_object"
-	operationOwned = "owned"
+	TaskType                = "knowledge:aux_object"
+	operationOwned          = "owned"
+	operationDeleteComplete = "delete_complete"
 
 	KindFanoutImage     = "fanout_image"
 	KindFAQEntries      = "faq_entries"
@@ -74,8 +75,9 @@ type Object struct {
 }
 
 type registeredObject struct {
-	row    *types.TaskPendingOp
-	object Object
+	row            *types.TaskPendingOp
+	object         Object
+	deleteComplete bool
 }
 
 func PayloadBelongsToKnowledgeBase(payload []byte, tenantID uint64, knowledgeBaseID string) (bool, error) {
@@ -696,14 +698,45 @@ func (r *Registry) list(
 	knowledgeBaseID string,
 	knowledgeIDs []string,
 ) ([]registeredObject, error) {
+	return r.listByOperations(
+		ctx, tenantID, knowledgeBaseID, knowledgeIDs, []string{operationOwned},
+	)
+}
+
+// listForDelete includes delete-complete tombstones. They are exact,
+// persisted evidence that a previous delivery already removed the provider
+// object; ordinary readers must continue to see only live ownership rows.
+func (r *Registry) listForDelete(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeIDs []string,
+) ([]registeredObject, error) {
+	return r.listByOperations(
+		ctx,
+		tenantID,
+		knowledgeBaseID,
+		knowledgeIDs,
+		[]string{operationOwned, operationDeleteComplete},
+	)
+}
+
+func (r *Registry) listByOperations(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeIDs []string,
+	operations []string,
+) ([]registeredObject, error) {
 	knowledgeBaseID = strings.TrimSpace(knowledgeBaseID)
-	if r == nil || r.db == nil || tenantID == 0 || knowledgeBaseID == "" || len(knowledgeIDs) == 0 {
+	if r == nil || r.db == nil || tenantID == 0 || knowledgeBaseID == "" ||
+		len(knowledgeIDs) == 0 || len(operations) == 0 {
 		return nil, nil
 	}
 	var rows []*types.TaskPendingOp
 	query := r.db.WithContext(ctx).Where(
-		"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ?",
-		tenantID, TaskType, types.TaskScopeKnowledgeBase, knowledgeBaseID, operationOwned,
+		"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op IN ?",
+		tenantID, TaskType, types.TaskScopeKnowledgeBase, knowledgeBaseID, operations,
 	)
 	if len(knowledgeIDs) == 1 {
 		prefix := objectKeyPrefix(knowledgeIDs[0])
@@ -722,6 +755,10 @@ func (r *Registry) list(
 	for _, knowledgeID := range knowledgeIDs {
 		wanted[strings.TrimSpace(knowledgeID)] = struct{}{}
 	}
+	allowedOperations := make(map[string]struct{}, len(operations))
+	for _, operation := range operations {
+		allowedOperations[operation] = struct{}{}
+	}
 	result := make([]registeredObject, 0, len(rows))
 	for _, row := range rows {
 		object, err := decodeObject(row.Payload)
@@ -733,10 +770,15 @@ func (r *Registry) list(
 			objectKey(object.KnowledgeID, object.Path) != row.DedupKey {
 			return nil, fmt.Errorf("knowledge auxiliary ownership row %d is corrupt: %w", row.ID, errors.Join(err, ErrInvalidObject))
 		}
+		if _, allowed := allowedOperations[row.Op]; !allowed {
+			return nil, fmt.Errorf("knowledge auxiliary ownership row %d has an invalid operation", row.ID)
+		}
 		if _, ok := wanted[object.KnowledgeID]; !ok {
 			continue
 		}
-		result = append(result, registeredObject{row: row, object: object})
+		result = append(result, registeredObject{
+			row: row, object: object, deleteComplete: row.Op == operationDeleteComplete,
+		})
 	}
 	return result, nil
 }
@@ -852,6 +894,7 @@ type deleteTarget struct {
 	registered       bool
 	binding          *storagebinding.Binding
 	quarantined      bool
+	deleteComplete   bool
 }
 
 func (r *Registry) deleteTargets(
@@ -861,16 +904,21 @@ func (r *Registry) deleteTargets(
 	knowledgeID string,
 	targets []deleteTarget,
 	parentMoveFenceHeld bool,
+	retainDeleteProof bool,
 ) error {
 	if len(targets) == 0 {
 		return nil
 	}
-	tenant, err := r.tenant(ctx, tenantID)
-	if err != nil {
-		return err
-	}
+	var tenant *types.Tenant
 	var errs []error
 	for _, target := range targets {
+		// The exact owned row was atomically changed to delete_complete only
+		// after the provider acknowledged deletion. It is therefore both the
+		// retry idempotency key and the authority to skip an already-finished
+		// side effect. The final document transaction consumes this proof.
+		if target.deleteComplete {
+			continue
+		}
 		if !target.registered {
 			errs = append(errs, fmt.Errorf("%w: refusing unregistered legacy path %q", ErrBindingMissing, target.path))
 			continue
@@ -878,6 +926,14 @@ func (r *Registry) deleteTargets(
 		if target.quarantined {
 			errs = append(errs, fmt.Errorf("%w: refusing quarantined path", ErrBindingQuarantined))
 			continue
+		}
+		if tenant == nil {
+			var err error
+			tenant, err = r.tenant(ctx, tenantID)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
 		}
 		service, routeErr := r.resolveBound(ctx, tenant, target.path, target.binding)
 		if routeErr != nil {
@@ -940,7 +996,24 @@ func (r *Registry) deleteTargets(
 				return fmt.Errorf("delete auxiliary object %q: %w", target.path, err)
 			}
 			if len(ids) > 0 {
-				if err := tx.Where("id IN ?", ids).Delete(&types.TaskPendingOp{}).Error; err != nil {
+				if retainDeleteProof {
+					result := tx.Model(&types.TaskPendingOp{}).
+						Where("id IN ? AND op = ?", ids, operationOwned).
+						Updates(map[string]interface{}{
+							"op":          operationDeleteComplete,
+							"enqueued_at": time.Now().UTC(),
+							"claimed_at":  nil,
+						})
+					if result.Error != nil {
+						return fmt.Errorf("record auxiliary delete completion for %q: %w", target.path, result.Error)
+					}
+					if result.RowsAffected != int64(len(ids)) {
+						return fmt.Errorf(
+							"record auxiliary delete completion for %q: updated %d of %d ownership rows",
+							target.path, result.RowsAffected, len(ids),
+						)
+					}
+				} else if err := tx.Where("id IN ?", ids).Delete(&types.TaskPendingOp{}).Error; err != nil {
 					return fmt.Errorf("consume auxiliary ownership for %q: %w", target.path, err)
 				}
 			}
@@ -963,12 +1036,25 @@ func dedupeTargets(targets []deleteTarget) []deleteTarget {
 			continue
 		}
 		if index, exists := seen[target.path]; exists {
+			wasRegistered := result[index].registered
 			// A persisted per-object snapshot is more precise than a caller's
 			// legacy KB fallback, so retain the first non-empty snapshot.
 			if result[index].fallbackProvider == "" && target.fallbackProvider != "" {
 				result[index].fallbackProvider = target.fallbackProvider
 			}
 			result[index].registered = result[index].registered || target.registered
+			if target.registered {
+				if wasRegistered {
+					// Mixed owned/delete-complete duplicates fail toward one
+					// additional idempotent provider delete, never toward an
+					// unsafe skip. An unregistered legacy duplicate does not
+					// weaken a persisted completion proof.
+					result[index].deleteComplete =
+						result[index].deleteComplete && target.deleteComplete
+				} else {
+					result[index].deleteComplete = target.deleteComplete
+				}
+			}
 			if result[index].binding == nil && target.binding != nil {
 				binding := *target.binding
 				result[index].binding = &binding
@@ -1017,7 +1103,9 @@ func (r *Registry) DeletePaths(
 		}
 		targets = append(targets, target)
 	}
-	return r.deleteTargets(ctx, tenantID, knowledgeBaseID, knowledgeID, dedupeTargets(targets), false)
+	return r.deleteTargets(
+		ctx, tenantID, knowledgeBaseID, knowledgeID, dedupeTargets(targets), false, false,
+	)
 }
 
 // Abort is the compensating half of Reserve. It deletes the exact planned path
@@ -1054,7 +1142,7 @@ func isPersistentSourceKind(kind string) bool {
 	return kind == KindSourceFile || kind == KindCloneSourceFile
 }
 
-func (r *Registry) cleanupKnowledge(
+func (r *Registry) cleanupTargets(
 	ctx context.Context,
 	tenantID uint64,
 	knowledgeBaseID string,
@@ -1062,11 +1150,19 @@ func (r *Registry) cleanupKnowledge(
 	fallbackProvider string,
 	legacyPaths []string,
 	includePersistent bool,
-	parentMoveFenceHeld bool,
-) error {
-	objects, err := r.list(ctx, tenantID, knowledgeBaseID, []string{knowledgeID})
+	includeDeleteProofs bool,
+) ([]deleteTarget, error) {
+	var (
+		objects []registeredObject
+		err     error
+	)
+	if includeDeleteProofs {
+		objects, err = r.listForDelete(ctx, tenantID, knowledgeBaseID, []string{knowledgeID})
+	} else {
+		objects, err = r.list(ctx, tenantID, knowledgeBaseID, []string{knowledgeID})
+	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	targets := make([]deleteTarget, 0, len(objects)+len(legacyPaths))
 	references := make(map[string]struct{}, len(objects))
@@ -1080,6 +1176,7 @@ func (r *Registry) cleanupKnowledge(
 		targets = append(targets, deleteTarget{
 			path: registered.object.Path, fallbackProvider: registered.object.FallbackProvider,
 			registered: true, binding: registered.object.Binding, quarantined: registered.object.Quarantined,
+			deleteComplete: registered.deleteComplete,
 		})
 	}
 	for _, path := range legacyPaths {
@@ -1088,8 +1185,163 @@ func (r *Registry) cleanupKnowledge(
 		}
 		targets = append(targets, deleteTarget{path: path, fallbackProvider: fallbackProvider})
 	}
+	return dedupeTargets(targets), nil
+}
+
+// preflightDeleteTargets proves every target is durably owned and can still be
+// routed through its exact persisted storage binding. It deliberately performs
+// no provider mutation. Callers use it as the all-target validation barrier
+// before deleting any document artifact from any backend.
+func (r *Registry) preflightDeleteTargets(
+	ctx context.Context,
+	tenantID uint64,
+	targets []deleteTarget,
+) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	var tenant *types.Tenant
+	var errs []error
+	for _, target := range targets {
+		switch {
+		case target.deleteComplete:
+			continue
+		case !target.registered:
+			errs = append(errs, fmt.Errorf(
+				"%w: refusing unregistered legacy path %q", ErrBindingMissing, target.path,
+			))
+		case target.quarantined:
+			errs = append(errs, fmt.Errorf(
+				"%w: refusing quarantined path %q", ErrBindingQuarantined, target.path,
+			))
+		case target.binding == nil:
+			errs = append(errs, fmt.Errorf(
+				"%w: refusing unbound path %q", ErrBindingMissing, target.path,
+			))
+		default:
+			if tenant == nil {
+				var err error
+				tenant, err = r.tenant(ctx, tenantID)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			}
+			if _, routeErr := r.resolveBound(ctx, tenant, target.path, target.binding); routeErr != nil {
+				errs = append(errs, fmt.Errorf(
+					"preflight auxiliary object %q: %w", target.path, routeErr,
+				))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// prepareDerivedCleanup is the non-destructive half of reparse cleanup.
+// Registered objects are validated as one complete set. Narrowly provable
+// pre-registry image paths are first adopted into the durable ledger; adoption
+// is restricted to the exact tenant/knowledge namespace and to paths still
+// referenced by this owner's persisted (including soft-deleted) chunk
+// metadata. A failure returns before any provider DeleteFile call.
+func (r *Registry) prepareDerivedCleanup(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	fallbackProvider string,
+	legacyPaths []string,
+	parentMoveFenceHeld bool,
+) error {
+	targets, err := r.cleanupTargets(
+		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, false, false,
+	)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if target.registered {
+			continue
+		}
+		if err := r.adoptLegacyDerivedCleanupPath(
+			ctx,
+			tenantID,
+			knowledgeBaseID,
+			knowledgeID,
+			fallbackProvider,
+			target.path,
+			parentMoveFenceHeld,
+		); err != nil {
+			return fmt.Errorf("prepare legacy derived cleanup %q: %w", target.path, err)
+		}
+	}
+	// Reload after adoption. This makes the persisted ledger—not an in-memory
+	// binding guess—the sole authority consumed by the destructive half.
+	targets, err = r.cleanupTargets(
+		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, false, false,
+	)
+	if err != nil {
+		return err
+	}
+	return r.preflightDeleteTargets(ctx, tenantID, targets)
+}
+
+// PrepareDerivedCleanup validates and, where strictly provable, adopts every
+// derived cleanup target without deleting an object.
+func (r *Registry) PrepareDerivedCleanup(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	fallbackProvider string,
+	legacyPaths []string,
+) error {
+	return r.prepareDerivedCleanup(
+		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, false,
+	)
+}
+
+// PrepareDerivedCleanupWithinMoveFence is the move-scope counterpart. The
+// caller already holds the source/target KB shared fence, so adoption must not
+// attempt to upgrade that parent lock from a second connection.
+func (r *Registry) PrepareDerivedCleanupWithinMoveFence(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	fallbackProvider string,
+	legacyPaths []string,
+) error {
+	return r.prepareDerivedCleanup(
+		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, true,
+	)
+}
+
+func (r *Registry) cleanupKnowledge(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	fallbackProvider string,
+	legacyPaths []string,
+	includePersistent bool,
+	parentMoveFenceHeld bool,
+	retainDeleteProof bool,
+) error {
+	targets, err := r.cleanupTargets(
+		ctx,
+		tenantID,
+		knowledgeBaseID,
+		knowledgeID,
+		fallbackProvider,
+		legacyPaths,
+		includePersistent,
+		retainDeleteProof,
+	)
+	if err != nil {
+		return err
+	}
 	return r.deleteTargets(
-		ctx, tenantID, knowledgeBaseID, knowledgeID, dedupeTargets(targets), parentMoveFenceHeld,
+		ctx, tenantID, knowledgeBaseID, knowledgeID, targets, parentMoveFenceHeld, retainDeleteProof,
 	)
 }
 
@@ -1104,7 +1356,7 @@ func (r *Registry) CleanupDerived(
 	legacyPaths []string,
 ) error {
 	return r.cleanupKnowledge(
-		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, false, false,
+		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, false, false, false,
 	)
 }
 
@@ -1122,7 +1374,7 @@ func (r *Registry) CleanupDerivedWithinMoveFence(
 	legacyPaths []string,
 ) error {
 	return r.cleanupKnowledge(
-		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, false, true,
+		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, false, true, false,
 	)
 }
 
@@ -1137,7 +1389,7 @@ func (r *Registry) CleanupForDelete(
 	legacyPaths []string,
 ) error {
 	return r.cleanupKnowledge(
-		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, true, false,
+		ctx, tenantID, knowledgeBaseID, knowledgeID, fallbackProvider, legacyPaths, true, false, true,
 	)
 }
 
@@ -1151,10 +1403,14 @@ func (r *Registry) objectsForKnowledgeBase(
 	}
 	var rows []*types.TaskPendingOp
 	if err := r.db.WithContext(ctx).Where(
-		"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ?",
-		tenantID, TaskType, types.TaskScopeKnowledgeBase, knowledgeBaseID, operationOwned,
+		"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op IN ?",
+		tenantID,
+		TaskType,
+		types.TaskScopeKnowledgeBase,
+		knowledgeBaseID,
+		[]string{operationOwned, operationDeleteComplete},
 	).Order("id ASC").Find(&rows).Error; err != nil {
-		return nil, fmt.Errorf("list KB auxiliary ownership: %w", err)
+		return nil, fmt.Errorf("list KB auxiliary deletion evidence: %w", err)
 	}
 	grouped := make(map[string][]registeredObject)
 	for _, row := range rows {
@@ -1167,7 +1423,12 @@ func (r *Registry) objectsForKnowledgeBase(
 			objectKey(object.KnowledgeID, object.Path) != row.DedupKey {
 			return nil, fmt.Errorf("KB auxiliary ownership row %d is corrupt: %w", row.ID, errors.Join(err, ErrInvalidObject))
 		}
-		grouped[object.KnowledgeID] = append(grouped[object.KnowledgeID], registeredObject{row: row, object: object})
+		if row.Op != operationOwned && row.Op != operationDeleteComplete {
+			return nil, fmt.Errorf("KB auxiliary ownership row %d has an invalid operation", row.ID)
+		}
+		grouped[object.KnowledgeID] = append(grouped[object.KnowledgeID], registeredObject{
+			row: row, object: object, deleteComplete: row.Op == operationDeleteComplete,
+		})
 	}
 	return grouped, nil
 }
@@ -1192,13 +1453,41 @@ func (r *Registry) CleanupKnowledgeBase(
 			targets = append(targets, deleteTarget{
 				path: registered.object.Path, fallbackProvider: registered.object.FallbackProvider,
 				registered: true, binding: registered.object.Binding, quarantined: registered.object.Quarantined,
+				deleteComplete: registered.deleteComplete,
 			})
 		}
 		errs = append(errs, r.deleteTargets(
-			ctx, tenantID, knowledgeBaseID, knowledgeID, dedupeTargets(targets), false,
+			ctx, tenantID, knowledgeBaseID, knowledgeID, dedupeTargets(targets), false, true,
 		))
 	}
 	return errors.Join(errs...)
+}
+
+// PurgeKnowledgeBaseDeleteProofs consumes only provider-delete completion
+// tombstones after every other KB cleanup step has succeeded. Live ownership
+// rows are intentionally excluded: retaining them is the fail-closed recovery
+// path for an object whose external deletion was never proven.
+func (r *Registry) PurgeKnowledgeBaseDeleteProofs(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+) error {
+	knowledgeBaseID = strings.TrimSpace(knowledgeBaseID)
+	if r == nil || r.db == nil || tenantID == 0 || knowledgeBaseID == "" {
+		return ErrInvalidObject
+	}
+	result := r.db.WithContext(ctx).Where(
+		"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ?",
+		tenantID,
+		TaskType,
+		types.TaskScopeKnowledgeBase,
+		knowledgeBaseID,
+		operationDeleteComplete,
+	).Delete(&types.TaskPendingOp{})
+	if result.Error != nil {
+		return fmt.Errorf("purge KB auxiliary delete completion proofs: %w", result.Error)
+	}
+	return nil
 }
 
 func (r *Registry) CountKnowledgeBase(

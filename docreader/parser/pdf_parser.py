@@ -152,17 +152,63 @@ def _normalize_image_quality(quality: int) -> int:
     return min(95, max(1, quality))
 
 
-def _classify_page(image_area_ratio: float, text_len: int) -> str:
+def _classify_page(
+    image_area_ratio: float,
+    text_len: int,
+    visual_object_count: int = 0,
+) -> str:
     """Classify a page as ``"scanned"`` or ``"text"``.
 
     Image-area coverage is the primary signal; a sparse text layer combined with
-    some image content is the secondary signal.
+    visible non-text page objects is the secondary signal.  The latter covers
+    PDFs whose text and tables were converted to vector paths: they have no
+    extractable text layer or embedded bitmap, but are not blank.
     """
     if image_area_ratio >= SCAN_IMAGE_AREA_RATIO:
         return "scanned"
     if text_len < SCAN_MIN_CHARS_PER_PAGE and image_area_ratio >= _LOW_TEXT_IMAGE_RATIO:
         return "scanned"
+    if text_len < SCAN_MIN_CHARS_PER_PAGE and visual_object_count > 0:
+        return "scanned"
     return "text"
+
+
+def _page_visual_object_count(page, raw) -> int:
+    """Count visible non-text objects that overlap the page.
+
+    PDF generators sometimes outline every glyph and table cell as paths.  Such
+    pages report zero text and zero image area, so object presence is needed to
+    distinguish them from genuinely blank pages.  Bounds checks avoid treating
+    off-page helper objects as page content.
+    """
+    width, height = page.get_size()
+    if width <= 0 or height <= 0:
+        return 0
+
+    visual_types = {
+        raw.FPDF_PAGEOBJ_PATH,
+        raw.FPDF_PAGEOBJ_IMAGE,
+        raw.FPDF_PAGEOBJ_SHADING,
+        raw.FPDF_PAGEOBJ_FORM,
+    }
+    count = 0
+    for obj in page.get_objects():
+        try:
+            if obj.type not in visual_types:
+                continue
+            left, bottom, right, top = obj.get_bounds()
+            if (
+                right < 0
+                or top < 0
+                or left > width
+                or bottom > height
+                or (abs(right - left) < 1e-6 and abs(top - bottom) < 1e-6)
+            ):
+                continue
+            count += 1
+        except Exception:
+            continue
+    return count
 
 
 def _page_image_area_ratio(page, raw) -> float:
@@ -1441,7 +1487,12 @@ class PDFParser(BaseParser):
                 try:
                     plain = _extract_page_text(page)
                     ratio = _page_image_area_ratio(page, pdfium_r)
-                    cls = _classify_page(ratio, len(plain.strip()))
+                    visual_object_count = _page_visual_object_count(page, pdfium_r)
+                    cls = _classify_page(
+                        ratio,
+                        len(plain.strip()),
+                        visual_object_count,
+                    )
                     # Layout reconstruction only pays off (and is only spent) on
                     # native text pages; scanned pages are rendered, not read.
                     if cls == "text" and LAYOUT_ORDERING:

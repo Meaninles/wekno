@@ -209,6 +209,28 @@ func TestCompleteDurableFanoutLargePlanDoesNotListPerItem(t *testing.T) {
 	}
 }
 
+func TestDispatchFanoutSkipsDurablyCompletedItemsAfterRedisRetention(t *testing.T) {
+	plan := uniqueFanoutPlan()
+	store := &countingCompletionStore{
+		items: map[string]struct{}{
+			ImageFanoutItem(0): {},
+		},
+	}
+	enqueuer := &fanoutTestEnqueuer{}
+
+	if err := DispatchFanout(
+		context.Background(), enqueuer, nil, plan, store,
+	); err != nil {
+		t.Fatalf("DispatchFanout() error = %v", err)
+	}
+	if enqueuer.calls != 1 {
+		t.Fatalf("enqueued tasks = %d, want only the one incomplete image", enqueuer.calls)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("completion ledger list calls = %d, want 1", store.listCalls)
+	}
+}
+
 func TestDurableFanoutListsOnlyWhenRedisMirrorIsMissing(t *testing.T) {
 	ctx := context.Background()
 	client := fanoutTestRedis(t)

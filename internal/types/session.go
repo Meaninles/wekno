@@ -3,6 +3,7 @@ package types
 import (
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -167,11 +168,20 @@ func (c StringArray) Value() (driver.Value, error) {
 // Scan implements the sql.Scanner interface, used to convert database value to StringArray
 func (c *StringArray) Scan(value interface{}) error {
 	if value == nil {
+		*c = nil
 		return nil
 	}
-	b, ok := value.([]byte)
-	if !ok {
-		return nil
+	var b []byte
+	switch typed := value.(type) {
+	case []byte:
+		b = typed
+	case string:
+		// SQLite JSON functions return TEXT even when the original value was
+		// written through driver.Valuer as []byte. Accept both database
+		// representations so row-local JSON updates round-trip correctly.
+		b = []byte(typed)
+	default:
+		return fmt.Errorf("scan StringArray from unsupported type %T", value)
 	}
 	return json.Unmarshal(b, c)
 }

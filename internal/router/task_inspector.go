@@ -117,6 +117,7 @@ var queuesScanned = []string{
 	types.QueueMultimodal,
 	types.QueueGraph,
 	types.QueueQuestion,
+	types.QueueWikiMap,
 	documentsplit.QueuePart,
 }
 

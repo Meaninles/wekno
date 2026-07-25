@@ -220,6 +220,17 @@ type WikiPage struct {
 	DeletedAt gorm.DeletedAt `json:"deleted_at" gorm:"index"`
 }
 
+// WikiPageSourceProvenance is the bounded projection used when a document is
+// reparsed. It intentionally excludes page content and every presentation
+// field: the ingest pipeline only needs the old slug and chunk citations so it
+// can replace that document's contribution without loading multi-megabyte wiki
+// bodies.
+type WikiPageSourceProvenance struct {
+	Slug      string      `json:"slug" gorm:"column:slug"`
+	PageType  string      `json:"page_type" gorm:"column:page_type"`
+	ChunkRefs StringArray `json:"chunk_refs" gorm:"column:chunk_refs;type:json"`
+}
+
 // TableName specifies the database table name
 func (WikiPage) TableName() string {
 	return "wiki_pages"
@@ -350,9 +361,10 @@ type WikiConfig struct {
 
 	// IngestBatchSize controls how many pending ops a single batch
 	// processes before scheduling a follow-up. 0 falls back to the
-	// hard-coded default (5). Operators on large KBs (4w+ docs) can
-	// raise this to 10–20 to amortize the lock-acquire / index-rebuild
-	// overhead across more documents per round.
+	// hard-coded default (5). The effective settlement window is capped
+	// at IngestMapParallel so a larger configured batch cannot add serial
+	// Map waves and hold already-finished documents behind a slow tail.
+	// Operators with a dedicated provider may raise both values together.
 	IngestBatchSize int `yaml:"ingest_batch_size" json:"ingest_batch_size,omitempty"`
 
 	// IngestMapParallel sets the errgroup limit for the Map phase
@@ -420,6 +432,7 @@ type WikiPageListRequest struct {
 	PageType        string      `json:"page_type,omitempty"`      // filter by type
 	Status          string      `json:"status,omitempty"`         // filter by status
 	Query           string      `json:"query,omitempty"`          // full-text search
+	Projection      string      `json:"projection,omitempty"`     // "" = full page, "graph" = lightweight graph catalogue
 	FolderID        *string     `json:"folder_id,omitempty"`      // exact folder placement ("" = root)
 	CategoryPath    StringArray `json:"category_path,omitempty"`  // exact directory path
 	CategoryDepth   *int        `json:"category_depth,omitempty"` // exact directory depth, including 0 for root
@@ -463,6 +476,7 @@ type WikiGraphRequest struct {
 	Depth           int      // ego mode BFS depth, >= 1
 	Types           []string // optional page_type filter; empty = no filter
 	Limit           int      // max nodes to return; <= 0 means uncapped
+	Page            int      // ego neighbor page, 1-based; <= 0 defaults to 1
 }
 
 // WikiGraphData represents the link graph structure for visualization.
@@ -476,12 +490,19 @@ type WikiGraphData struct {
 // knowledge base graph. The frontend uses `Truncated` to decide whether to
 // surface a "showing X of Y" hint and to enable ego-expansion UI.
 type WikiGraphMeta struct {
-	Mode      string `json:"mode"`
-	Total     int    `json:"total"`            // total node count in the KB before filtering/limit
-	Returned  int    `json:"returned"`         // number of nodes actually returned
-	Truncated bool   `json:"truncated"`        // true when Returned < Total (after filters)
-	Center    string `json:"center,omitempty"` // populated in ego mode
-	Depth     int    `json:"depth,omitempty"`  // populated in ego mode
+	Mode             string `json:"mode"`
+	Total            int    `json:"total"`                       // total nodes addressable by this query
+	Returned         int    `json:"returned"`                    // nodes in this response (center included)
+	Truncated        bool   `json:"truncated"`                   // true when additional pages exist
+	Center           string `json:"center,omitempty"`            // populated in ego mode
+	Depth            int    `json:"depth,omitempty"`             // populated in ego mode
+	Page             int    `json:"page,omitempty"`              // 1-based neighbor page in paged ego mode
+	PageSize         int    `json:"page_size,omitempty"`         // neighbors per page (center excluded)
+	TotalPages       int    `json:"total_pages,omitempty"`       // neighbor pages in paged ego mode
+	NeighborTotal    int    `json:"neighbor_total,omitempty"`    // all live/type-visible one-hop neighbors
+	NeighborReturned int    `json:"neighbor_returned,omitempty"` // neighbors present in this response
+	HasPrevious      bool   `json:"has_previous,omitempty"`
+	HasMore          bool   `json:"has_more,omitempty"`
 }
 
 // WikiGraphNode represents a node in the wiki link graph

@@ -140,6 +140,44 @@ func newKBDeleteWorkerHarness(t *testing.T) (
 	require.NoError(t, db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_test_wiki_retract
 		ON task_pending_ops (tenant_id, task_type, scope, scope_id, op, dedup_key)
 		WHERE task_type = 'wiki:ingest' AND scope = 'knowledge_base' AND op = 'retract'`).Error)
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS custom_enrichment_outcomes (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_generated_question_claims (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS knowledge_processing_spans (
+			knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_split_plans (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_split_parts (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_content_cache_entries (
+			tenant_id INTEGER NOT NULL, cache_kind TEXT NOT NULL,
+			content_hash TEXT NOT NULL, version_hash TEXT NOT NULL,
+			ref_count INTEGER NOT NULL DEFAULT 0, updated_at DATETIME NOT NULL,
+			PRIMARY KEY (tenant_id, cache_kind, content_hash, version_hash)
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_content_cache_refs (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
+			processing_generation TEXT NOT NULL, cache_kind TEXT NOT NULL,
+			content_hash TEXT NOT NULL, version_hash TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS embeddings (
+			knowledge_id TEXT NOT NULL, knowledge_base_id TEXT,
+			source_id TEXT, content TEXT NOT NULL DEFAULT '', deleted_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS chunks (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '', deleted_at DATETIME
+		)`,
+	} {
+		require.NoError(t, db.Exec(statement).Error)
+	}
 
 	kb := &types.KnowledgeBase{ID: "kb-1", TenantID: 7, Name: "test"}
 	kb.SetStorageProvider("local")

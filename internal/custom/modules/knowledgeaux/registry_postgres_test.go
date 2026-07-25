@@ -133,6 +133,59 @@ func TestPostgresPersistentOwnershipMovesInKnowledgeTransaction(t *testing.T) {
 	require.Equal(t, "generation-2", moved.ProcessingGeneration)
 }
 
+func TestPostgresConcurrentDocumentDeleteRetainsOneCompletionProof(t *testing.T) {
+	db := openRegistryPostgresTestDB(t)
+	createPostgresOwner(t, db, "knowledge-1", "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/knowledge-1/source.md", "generation-1", KindSourceFile)
+	object.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.Knowledge{}).
+		Where("tenant_id = ? AND id = ?", 7, "knowledge-1").
+		Update("parse_status", types.ParseStatusDeleting).Error)
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			results <- registry.CleanupForDelete(
+				context.Background(),
+				7,
+				"kb-1",
+				"knowledge-1",
+				"local",
+				[]string{object.Path},
+			)
+		}()
+	}
+	close(start)
+	require.NoError(t, <-results)
+	require.NoError(t, <-results)
+	require.Equal(t, []string{object.Path}, local.deleted,
+		"row locking plus delete-complete transition must suppress a duplicate provider call")
+
+	var proof types.TaskPendingOp
+	require.NoError(t, db.Where(
+		"tenant_id = ? AND task_type = ? AND dedup_key = ?",
+		7, TaskType, objectKey("knowledge-1", object.Path),
+	).Take(&proof).Error)
+	require.Equal(t, operationDeleteComplete, proof.Op)
+
+	// This models a later graph/Wiki/finalizer failure and a third delivery.
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{object.Path},
+	))
+	require.Equal(t, []string{object.Path}, local.deleted)
+}
+
 func TestPostgresSharedCommitFenceAndExclusiveDelete(t *testing.T) {
 	t.Run("two commits on one KB run concurrently", func(t *testing.T) {
 		db := openRegistryPostgresTestDB(t)

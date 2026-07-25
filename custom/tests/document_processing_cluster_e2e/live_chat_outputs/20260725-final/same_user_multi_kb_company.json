@@ -1,0 +1,99 @@
+{
+  "generated_at": "2026-07-25T15:49:24.481849962Z",
+  "base_url": "http://127.0.0.1:8080/api/v1",
+  "tenant_id": 10000,
+  "knowledge_base_id": "efee9ac7-b68b-413e-b09e-77501032a194",
+  "knowledge_base_name": "公司制度",
+  "configured_summary_model_id": "10659f1e-87c5-4ceb-bdc2-49232217c091",
+  "requested_model_id": "10659f1e-87c5-4ceb-bdc2-49232217c091",
+  "model_name": "deepseek-v4-flash-int8",
+  "expected_model_name": "deepseek-v4-flash-int8",
+  "model_provider": "generic",
+  "model_endpoint_host": "host.docker.internal:14000",
+  "model_config_matched": true,
+  "knowledge_base_config_matched": true,
+  "cases": [
+    {
+      "name": "lightning-inspection-period",
+      "query": "根据公司制度，防雷装置通常多久检测一次？哪些具有爆炸和火灾危险的重点环境需要每半年检测？请明确列出文件中的示例。",
+      "session_id": "34dd646c-77e2-4538-a309-a1df03d74ec6",
+      "elapsed_ms": 7115,
+      "http_status": 200,
+      "stream_completed": true,
+      "answer_done": true,
+      "answer": "根据公司《防雷、防静电安全管理细则》的规定：\n\n- **防雷装置应当每年检测一次**。\u003csrc id=\"S1\" /\u003e\n- **具有爆炸和火灾危险环境的防雷装置应当每半年检测一次**。\u003csrc id=\"S1\" /\u003e\n\n文件中明确列举的需每半年检测的重点环境包括：\n- **勾贮中心酒库**\n- **制曲厂房**\n- **包装车间**\u003csrc id=\"S1\" /\u003e\u003csrc id=\"S2\" /\u003e",
+      "references": [
+        {
+          "knowledge_id": "5df3a473-9732-4d73-8ba8-cf56cba68f53",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00439-防雷、防静电安全管理细则.doc",
+          "chunk_index": 0,
+          "score": 0.7353161990575094,
+          "match_type": "embedding",
+          "excerpt": "贵州茅台酒股份有限公司\n\n防雷、防静电安全管理细则\n\n第一章 总 则\n\n第一条 为强化防雷、防静电安全管理，保障员工生命和公司财产安全，根据《中华人民共和国气象法》《中华人民共和国安全生产法》《建筑物防雷设计规范》《酒厂防火设计规范》《防雷减灾管理办法》《防止静电事故通用导则》等特制定本细则。\n\n第二条 术语解释\n\n（一）实行定期检测的防雷装置，是指外部防雷装置（由接闪器、引下线、接地装置组成）和内部防雷装置（由等电位连接系统、共用接地系统、屏蔽系统、合理布线系统及电涌保护器（SPD）组成）组成，用以防御雷电灾害的整个系统。\n\n（二）防静电装置，是指各类…"
+        },
+        {
+          "knowledge_id": "b694f3a8-2235-469a-8a54-deefe4933935",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00103-防雷、防静电安全管理细则.doc",
+          "chunk_index": 2,
+          "score": 0.7002183857202244,
+          "match_type": "embedding",
+          "excerpt": "（六） 负责收集本单位范围内股份公司新增安装、 改造及\n投用的设备、 设施、 建 （构） 筑物、 电气系统、 控制系统等资\n料 ， 对其中涉及防雷接地、 保护接地的 ， 要求立项单位出具接\n地电阻检测报告 ， 进行备案。\n第九条 立项单位\n（一） 负责第三方施工监管工作 ， 凡所属第三方单位进场\n施工 ， 必须对第三方进行防雷设施风险告知 ， 施工中如损坏防\n雷设备实施 ， 必须督促施工单位停工整改修复 ， 检测验收合格\n后方可复工 ， 并出具见证性材料进行备案。\n（二） 负责将本单位行业领域新增安装、 改造及投用的设\n备、 设施、 建 （构） 筑物、…"
+        },
+        {
+          "knowledge_id": "b694f3a8-2235-469a-8a54-deefe4933935",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00103-防雷、防静电安全管理细则.doc",
+          "chunk_index": 1,
+          "score": 0.47333710981888405,
+          "match_type": "embedding",
+          "excerpt": "同时施工、 同时投入使用。 涉及到大型建设工程、 重点工程、\n爆炸和火灾危险环境、 人员密集场所等项目应当对进行雷电灾\n害风险评估。\n（二） 负责新、 改、 扩建项目质保期内的防雷、 防静电装\n置问题整改验收。\n（三） 负责本单位新安装、 新改造、 新投用的设备、 设施\n建 （构） 筑物、 电气系统、 控制系统等 ， 凡涉及防雷接地、 保\n护接地的出具接地电阻检测报告 ， 报属地单位和安全管理部备\n案。\n（四） 负责第三方施工监管工作 ， 凡涉及所属项目第三方\n单位进场施工 ， 必须对第三方进行风险告知 ， 施工中如损坏防\n雷设备实施 ， 必须立即停工…"
+        },
+        {
+          "knowledge_id": "b694f3a8-2235-469a-8a54-deefe4933935",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00103-防雷、防静电安全管理细则.doc",
+          "chunk_index": 3,
+          "score": 0.3925879512169498,
+          "match_type": "embedding",
+          "excerpt": "实施防雷、 防静电维修、 评估的单位应具备相应资质。\n第四章 检查与考核\n第十四条 安全管理部根据公司安全生产考核要求 ， 定期组\n织相关单位对该制度进行检查、 督查、 考核。 引发安全事故的 ，\n按相关要求追责。\n第五章 附 则\n第十五条 本细则由安全管理部承担解释工作。\n第十六条 本细则自 2026 年 7 月 6 日正式发布实施 ， 自发布\n之日起原 2025 年版 《贵州茅台酒股份有限公司防雷、 防静电\n安全管理细则》 即时废止。\n附件 ： 各单位防雷防静电装置安全自查表 （检查示例）\n— 7 —\n\n附件1\n## 各单位防雷防静电装置安全自查表…"
+        },
+        {
+          "knowledge_id": "110e5e16-5630-4f47-b9c5-341dfa994e71",
+          "knowledge_title": "REAL-dual-real-20260724-233834-2560f2-00424-消防防雷防静电设备设施维修管理规定.docx",
+          "chunk_index": 1,
+          "score": 0.3545802520765551,
+          "match_type": "embedding",
+          "excerpt": "k)等固定设施。\n\n防雷装置：用于减少闪击击于建(构)筑物上或建(构)筑物附近造成的物质性损害和人身伤亡,由外部防雷装置和内部防雷装置组成。\n\n防静电设施：防静电设施的主要是设备及其他物质与静电场之间的接触,以阻止或减少因静电场而引起的设备故障或损害。\n\n第二章 管理职责\n\n第五条 安全管理部职责\n\n（一）统筹协调公司消防、防雷、防静电设备设施的维修维保工作；\n\n（二）建立健全公司消防、防雷、防静电设备设施全生命周期管理档案、台账；\n\n（三）制修订公司消防、防雷、防静电设备设施维修维保管理制度、流程；\n\n（四）组织开展消防、防雷、防静电设备设施相关培训。…"
+        }
+      ],
+      "matched_source_checks": {
+        "防雷、防静电安全管理细则": true
+      },
+      "matched_evidence_groups": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "matched_answer_groups": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "answer_diagnostic_ok": true,
+      "assistant_message_id": "60c7527c-cdff-4fd5-91d1-c012396cb6e1",
+      "session_cleanup_ok": true,
+      "recall_passed": true,
+      "observed_response_types": [
+        "agent_query",
+        "answer",
+        "complete",
+        "references",
+        "tool_call",
+        "tool_result"
+      ]
+    }
+  ],
+  "recall_passed": true
+}

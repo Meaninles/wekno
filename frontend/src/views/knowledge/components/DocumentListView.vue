@@ -5,6 +5,9 @@ import { formatFileSize, getFileIcon } from '@/utils/files';
 import { useTagChipsOverflow } from '@/composables/useTagChipsOverflow';
 import DocumentQueueBadge from '@/custom/modules/documentQueue/DocumentQueueBadge.vue';
 import type { DocumentQueueItemStatus } from '@/custom/modules/documentQueue/types';
+import KnowledgeWorkflowStatusBadge from '@/custom/modules/knowledgeWorkflowStatus/KnowledgeWorkflowStatusBadge.vue';
+import type { KnowledgeWorkflowFeatureSource } from '@/custom/modules/knowledgeWorkflowStatus/status';
+import { knowledgeNeedsStatusPolling } from '../wikiStatusRefresh';
 
 interface Tag {
   id: string;
@@ -21,6 +24,8 @@ interface KnowledgeItem {
   tags?: Tag[];
   parse_status?: string;
   summary_status?: string;
+  enrichment_status?: string;
+  wiki_status?: string;
   updated_at?: string;
   source?: string;
   description?: string;
@@ -36,6 +41,7 @@ const props = defineProps<{
   loading?: boolean;
   queueStatusById?: Record<string, DocumentQueueItemStatus>;
   queueWaitingTotal?: number;
+  workflowFeatureSource?: KnowledgeWorkflowFeatureSource | null;
 }>();
 
 const emit = defineEmits<{
@@ -92,58 +98,6 @@ const getSourceInfo = (item: KnowledgeItem): { icon: string; label: string } => 
   return { icon: 'upload', label: t('knowledgeBase.channelUpload') };
 };
 
-interface StatusInfo {
-  label: string;
-  theme: 'success' | 'warning' | 'danger' | 'primary' | 'default';
-  icon?: string;
-  spin?: boolean;
-}
-const computeStatus = (item: KnowledgeItem): StatusInfo => {
-  if (item.parse_status === 'pending' || item.parse_status === 'processing') {
-    return { label: t('knowledgeBase.statusProcessing'), theme: 'primary', icon: 'loading', spin: true };
-  }
-  // finalizing = primary parse done, enrichment subtasks still running.
-  // While in this phase, prefer the specific "summary generating" copy
-  // when summary is what's actually outstanding (preserves the old UX
-  // where this label was tied to completed+summary_pending). Otherwise
-  // fall back to the generic "finalizing" label — covers question gen
-  // and graph extract, which the user historically had no visibility on.
-  if (item.parse_status === 'finalizing') {
-    if (item.summary_status === 'pending' || item.summary_status === 'processing') {
-      return { label: t('knowledgeBase.generatingSummary'), theme: 'primary', icon: 'loading', spin: true };
-    }
-    return { label: t('knowledgeBase.statusFinalizing'), theme: 'primary', icon: 'loading', spin: true };
-  }
-  if (item.parse_status === 'failed') {
-    return { label: t('knowledgeBase.statusFailed'), theme: 'danger', icon: 'close-circle' };
-  }
-  if (item.parse_status === 'cancelled') {
-    return { label: t('knowledgeBase.statusCancelled'), theme: 'warning', icon: 'close-circle' };
-  }
-  if (item.parse_status === 'draft') {
-    return { label: t('knowledgeBase.statusDraft'), theme: 'warning' };
-  }
-  // Legacy completed+summary_pending path: kept as a defensive fallback
-  // for rows that bypassed finalizing (no enrichment configured, or
-  // upgraded mid-flight from a pre-finalizing build).
-  if (
-    item.parse_status === 'completed' &&
-    (item.summary_status === 'pending' || item.summary_status === 'processing')
-  ) {
-    return { label: t('knowledgeBase.generatingSummary'), theme: 'primary', icon: 'loading', spin: true };
-  }
-  if (item.parse_status === 'completed') {
-    return { label: t('knowledgeBase.statusCompleted'), theme: 'success' };
-  }
-  return { label: '--', theme: 'default' };
-};
-
-const statusByRow = computed(() => {
-  const map = new Map<string, StatusInfo>();
-  for (const item of props.items) map.set(item.id, computeStatus(item));
-  return map;
-});
-
 const allSelected = computed(() => {
   return props.items.length > 0 && props.items.every(i => props.selectedIds.has(i.id));
 });
@@ -192,6 +146,7 @@ const canCancelParse = (item: KnowledgeItem) =>
   CANCELABLE_PARSE_STATUSES.has(String(item.parse_status ?? ''));
 
 const isParseInFlight = (item: KnowledgeItem) => canCancelParse(item);
+const isDocumentWorkflowInFlight = (item: KnowledgeItem) => knowledgeNeedsStatusPolling(item);
 
 const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete', item: KnowledgeItem) => {
   moreOpen.value = null;
@@ -239,7 +194,7 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
           <div class="row-file-text">
             <span class="row-file-name" :title="item.file_name">{{ item.file_name }}</span>
             <DocumentQueueBadge
-              v-if="isParseInFlight(item)"
+              v-if="isDocumentWorkflowInFlight(item)"
               :status="queueStatusById?.[item.id]"
               :waiting-total="queueWaitingTotal"
             />
@@ -284,17 +239,11 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
         </div>
 
         <div class="cell cell-status">
-          <template v-if="statusByRow.get(item.id) as StatusInfo | undefined">
-            <t-tag v-if="statusByRow.get(item.id)!.label !== '--'" size="small" :theme="statusByRow.get(item.id)!.theme"
-              variant="light-outline" class="row-status-tag">
-              <template v-if="statusByRow.get(item.id)!.icon" #icon>
-                <t-icon :name="statusByRow.get(item.id)!.icon!"
-                  :class="{ 'icon-spin': statusByRow.get(item.id)!.spin }" />
-              </template>
-              {{ statusByRow.get(item.id)!.label }}
-            </t-tag>
-            <span v-else class="row-muted">--</span>
-          </template>
+          <KnowledgeWorkflowStatusBadge
+            :knowledge="item"
+            :feature-source="workflowFeatureSource"
+            compact
+          />
         </div>
 
         <div class="cell cell-time">

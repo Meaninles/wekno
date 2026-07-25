@@ -191,6 +191,7 @@ func KBIDFromChunkIDParam(param string, chunkService ChunkLookup) KBIDResolver {
 // before this refactor is useful.
 func isResourceNotFound(err error) bool {
 	return stderrors.Is(err, apprepo.ErrKnowledgeBaseNotFound) ||
+		stderrors.Is(err, apprepo.ErrKnowledgeNotFound) ||
 		stderrors.Is(err, ErrResourceNotFound) ||
 		strings.TrimSpace(err.Error()) == "chunk not found"
 }

@@ -8,6 +8,7 @@ templates:
     content: |
       You are a question generation assistant optimizing for search retrieval. Your goal is to generate the questions that <main_content> can BEST answer — the questions a user would ask when they truly need this information.
       Note: <surrounding_context> (if present) is only for helping you understand <main_content> better. Generate questions ONLY about <main_content>.
+      "Document name" is source context only. Never mention, quote, paraphrase, or refer to that file/document name in a generated question.
       
       {{context}}
       <main_content>
@@ -24,19 +25,25 @@ templates:
 
       ## Question Quality Rules
       - Focus on questions where this content provides a COMPLETE or SUBSTANTIAL answer, not just a passing mention
-      - Prioritize questions about the main theme, key concepts, how-tos, and conclusions — NOT trivial details or isolated facts
+      - For policies, procedures, contracts, and operating rules, prioritize useful requirements: responsibilities, authority, prerequisites, deadlines, numeric thresholds, prohibitions, exceptions, supervision/accountability, and key process decisions
+      - Numeric questions are useful when the number is an actionable deadline, threshold, limit, or approval condition; include enough business context so the question is not trivia
+      - For other content, prioritize the main theme, key concepts, how-tos, and conclusions — NOT trivial details or isolated facts
       - Questions should reflect real user search intent: "How to...", "What is...", "Why does...", "What are the best practices for..."
       - Each question must be self-contained: NO pronouns or references (e.g., "it", "this", "that document"); use specific names
-      - Questions should be at a level where someone would genuinely search for the answer, not quiz-style trivia
+      - Questions should be at a level where someone would genuinely search for the answer, not mechanical field-by-field table trivia
       - Each question should be concise and clear, within 30 words
+      - Questions in the same response must cover distinct information needs; do not emit duplicates or superficial paraphrases
+      - In batch mode, include one result object for every input chunk_index. If a record cannot support a genuinely useful question, keep the record and return an empty questions array instead of omitting it
 
       ## What NOT to Generate
       - Do NOT generate questions about minor details that are only briefly mentioned
-      - Do NOT generate questions that can be answered with a single word or number extracted from the text
+      - Do NOT mention source-location or generation metadata such as article/page/group/chunk/segment/chapter/section/clause/item/attachment numbers, file names, "the original file", "the policy text", "the above document", or "this passage"
+      - Do NOT ask what a numbered article/page/chapter/section/clause/item/attachment says; ask the underlying business question directly
+      - When the answer is found in an attachment, table, or process diagram, ask about its business rule or process meaning without revealing where the answer was located
       - Do NOT generate questions that are too broad to be meaningfully answered by this specific content
 
       ## Output
-      Generate {{question_count}} questions, one per line, no numbering or prefixes.
+      {{output_instructions}}
 
       ## CRITICAL: Language Rule
       - Generate questions in {{language}}

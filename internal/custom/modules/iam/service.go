@@ -517,6 +517,91 @@ func (s *Service) listDirectOrganizationUserLeaves(ctx context.Context, parentID
 }
 
 func (s *Service) refreshOrganizationSubtreeUserCounts(ctx context.Context) error {
+	if s.db.Dialector.Name() == "postgres" {
+		return s.refreshOrganizationSubtreeUserCountsPostgres(ctx)
+	}
+	return s.refreshOrganizationSubtreeUserCountsPortable(ctx)
+}
+
+// refreshOrganizationSubtreeUserCountsPostgres computes the whole hierarchy
+// and persists only changed rows in one set-based statement. Startup calls
+// Migrate on every replica, so the historical one-UPDATE-per-organization
+// implementation caused a multi-instance thundering herd and could keep new
+// pods unready for minutes. The path array also makes malformed cyclic
+// hierarchies finite while preserving the previous cycle-tolerant behaviour.
+func (s *Service) refreshOrganizationSubtreeUserCountsPostgres(ctx context.Context) error {
+	const query = `
+WITH RECURSIVE
+active_orgs AS (
+	SELECT external_id, COALESCE(parent_external_id, '') AS parent_external_id
+	FROM custom_iam_organizations
+	WHERE deleted_at IS NULL
+	  AND disabled = FALSE
+	  AND COALESCE(external_id, '') <> ''
+),
+direct_counts AS (
+	SELECT
+		iu.organization_external_id,
+		COUNT(DISTINCT iu.external_id)::bigint AS user_count
+	FROM custom_iam_users AS iu
+	WHERE iu.deleted_at IS NULL
+	  AND iu.disabled = FALSE
+	  AND COALESCE(iu.external_id, '') <> ''
+	  AND COALESCE(iu.organization_external_id, '') <> ''
+	  AND NOT (
+		COALESCE(iu.weknora_user_id, '') = ''
+		AND EXISTS (
+			SELECT 1
+			FROM users
+			WHERE users.deleted_at IS NULL
+			  AND users.username = iu.username
+		)
+	  )
+	GROUP BY iu.organization_external_id
+),
+org_closure(ancestor_id, descendant_id, path) AS (
+	SELECT
+		org.external_id,
+		org.external_id,
+		ARRAY[org.external_id::text]
+	FROM active_orgs AS org
+	UNION ALL
+	SELECT
+		parent.ancestor_id,
+		child.external_id,
+		parent.path || child.external_id::text
+	FROM org_closure AS parent
+	JOIN active_orgs AS child
+	  ON child.parent_external_id = parent.descendant_id
+	WHERE NOT child.external_id = ANY(parent.path)
+),
+totals AS (
+	SELECT
+		closure.ancestor_id,
+		COALESCE(SUM(direct.user_count), 0)::bigint AS user_count
+	FROM org_closure AS closure
+	LEFT JOIN direct_counts AS direct
+	  ON direct.organization_external_id = closure.descendant_id
+	GROUP BY closure.ancestor_id
+),
+desired AS (
+	SELECT
+		org.external_id,
+		COALESCE(totals.user_count, 0)::bigint AS user_count
+	FROM custom_iam_organizations AS org
+	LEFT JOIN totals ON totals.ancestor_id = org.external_id
+	WHERE org.deleted_at IS NULL
+)
+UPDATE custom_iam_organizations AS org
+SET subtree_user_count = desired.user_count
+FROM desired
+WHERE org.deleted_at IS NULL
+  AND org.external_id = desired.external_id
+  AND org.subtree_user_count IS DISTINCT FROM desired.user_count`
+	return s.db.WithContext(ctx).Exec(query).Error
+}
+
+func (s *Service) refreshOrganizationSubtreeUserCountsPortable(ctx context.Context) error {
 	type orgRow struct {
 		ExternalID       string
 		ParentExternalID string
@@ -596,21 +681,47 @@ func (s *Service) refreshOrganizationSubtreeUserCounts(ctx context.Context) erro
 		}
 	}
 
-	if err := s.db.WithContext(ctx).
-		Table("custom_iam_organizations").
-		Where("deleted_at IS NULL").
-		Update("subtree_user_count", 0).Error; err != nil {
-		return err
-	}
-	for orgID, count := range total {
-		if err := s.db.WithContext(ctx).
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.
 			Table("custom_iam_organizations").
-			Where("external_id = ? AND deleted_at IS NULL", orgID).
-			Update("subtree_user_count", count).Error; err != nil {
+			Where("deleted_at IS NULL").
+			Update("subtree_user_count", 0).Error; err != nil {
 			return err
 		}
-	}
-	return nil
+
+		// Keep the portable path below SQLite's common 999-variable limit.
+		// Each row consumes three bind variables: CASE id/count plus the IN id.
+		const batchSize = 250
+		ids := make([]string, 0, len(total))
+		for orgID := range total {
+			ids = append(ids, orgID)
+		}
+		sort.Strings(ids)
+		for start := 0; start < len(ids); start += batchSize {
+			end := min(start+batchSize, len(ids))
+			batch := ids[start:end]
+			var query strings.Builder
+			query.WriteString("UPDATE custom_iam_organizations SET subtree_user_count = CASE external_id ")
+			args := make([]any, 0, len(batch)*3)
+			for _, orgID := range batch {
+				query.WriteString("WHEN ? THEN ? ")
+				args = append(args, orgID, total[orgID])
+			}
+			query.WriteString("ELSE subtree_user_count END WHERE deleted_at IS NULL AND external_id IN (")
+			for index, orgID := range batch {
+				if index > 0 {
+					query.WriteByte(',')
+				}
+				query.WriteByte('?')
+				args = append(args, orgID)
+			}
+			query.WriteByte(')')
+			if err := tx.Exec(query.String(), args...).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Service) ListSpaceMemberCandidateUsers(ctx context.Context, spaceID, query string, iamOrgExternalIDs []string, directOnly bool, limit int) ([]SpaceMemberCandidateUser, error) {

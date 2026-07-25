@@ -77,5 +77,9 @@ spec:
   resources:
     requests:
       storage: {{ .Values.dataFiles.persistence.size }}
+  {{- if .Values.dataFiles.persistence.storageClass }}
+  storageClassName: {{ .Values.dataFiles.persistence.storageClass | quote }}
+  {{- else }}
   {{- include "weknora.storageClass" . | nindent 2 }}
+  {{- end }}
 {{- end }}

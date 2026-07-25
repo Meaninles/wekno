@@ -30,13 +30,15 @@ func (s *reparseSnapshotKnowledgeServiceFake) GetKnowledgeBatch(
 
 type reparseSnapshotEnqueuerFake struct {
 	task *asynq.Task
+	opts []asynq.Option
 	err  error
 }
 
 func (e *reparseSnapshotEnqueuerFake) Enqueue(
-	task *asynq.Task, _ ...asynq.Option,
+	task *asynq.Task, opts ...asynq.Option,
 ) (*asynq.TaskInfo, error) {
 	e.task = task
+	e.opts = append([]asynq.Option(nil), opts...)
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -69,6 +71,15 @@ func TestEnqueueKnowledgeListReparsePersistsExpectedSnapshotsInParentPayload(t *
 	}
 	if enqueuer.task == nil {
 		t.Fatal("parent task was not enqueued")
+	}
+	var queue string
+	for _, opt := range enqueuer.opts {
+		if opt.Type() == asynq.QueueOpt {
+			queue, _ = opt.Value().(string)
+		}
+	}
+	if queue != types.QueueCritical {
+		t.Fatalf("parent reparse queue = %q, want %q", queue, types.QueueCritical)
 	}
 	var payload types.KnowledgeListReparsePayload
 	if err := json.Unmarshal(enqueuer.task.Payload(), &payload); err != nil {

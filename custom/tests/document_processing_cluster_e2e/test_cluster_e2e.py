@@ -11,19 +11,27 @@ from pathlib import Path
 
 from custom.tests.document_processing_cluster_e2e.cluster_e2e import (
     APIClient,
+    ClusterE2ERunner,
     E2EFailure,
     QueueSnapshot,
     RunResult,
+    SUPPORTED_FIXTURE_SUFFIXES,
     WorkerInstance,
     build_workload_profile,
+    embedding_vector_evidence,
     generated_questions,
     graph_artifact_counts,
+    fixture_expectation_for_filename,
+    load_fixture_expectations,
     missing_chunk_texts,
+    normalize_question_stem,
     percentile,
     source_refs_include,
     summarize_instance_topology,
     validate_instance_topology,
+    validate_generated_question_quality,
     validate_performance,
+    wiki_page_substantive_text,
     workload_profile_fingerprint,
 )
 
@@ -301,6 +309,15 @@ class InstanceTopologyTests(unittest.TestCase):
 
 
 class WorkloadProfileTests(unittest.TestCase):
+    def test_fixture_allowlist_covers_all_27_backend_extensions(self) -> None:
+        expected = {
+            ".pdf", ".txt", ".text", ".docx", ".doc", ".epub", ".mhtml",
+            ".md", ".markdown", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+            ".bmp", ".tiff", ".csv", ".xlsx", ".xls", ".pptx", ".ppt",
+            ".json", ".mp3", ".wav", ".m4a", ".flac", ".ogg",
+        }
+        self.assertEqual(SUPPORTED_FIXTURE_SUFFIXES, expected)
+
     def test_generated_profile_changes_with_document_count_size_and_process_config(self) -> None:
         base = _workload_profile()
         reordered = _workload_profile(process_config={"b": 2, "a": 1})
@@ -351,6 +368,56 @@ class WorkloadProfileTests(unittest.TestCase):
             workload_profile_fingerprint(first_profile),
             workload_profile_fingerprint(second_profile),
         )
+
+    def test_fixture_manifest_requires_exact_fixture_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture = root / "sample.png"
+            fixture.write_bytes(b"image")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "sample.png",
+                                "expected_chunk_text": "VISION-7319",
+                                "expected_derivatives": ["multimodal"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            expectations = load_fixture_expectations(manifest, [fixture])
+        matched = fixture_expectation_for_filename(
+            "run-00001-sample.png",
+            expectations,
+        )
+        self.assertEqual(matched["expected_chunk_text"], ("VISION-7319",))
+        self.assertEqual(matched["expected_derivatives"], {"multimodal"})
+
+    def test_fixture_manifest_rejects_unknown_derivative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture = root / "sample.txt"
+            fixture.write_text("text", encoding="utf-8")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "files": [
+                            {
+                                "filename": "sample.txt",
+                                "expected_derivatives": ["imaginary"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(E2EFailure, "unknown derivatives"):
+                load_fixture_expectations(manifest, [fixture])
 
 
 class PerformanceComparisonTests(unittest.TestCase):
@@ -501,6 +568,124 @@ class PerformanceComparisonTests(unittest.TestCase):
 
 
 class OutputEvidenceTests(unittest.TestCase):
+    def test_pipeline_terminal_waits_for_all_requested_derivatives(self) -> None:
+        runner = ClusterE2ERunner(
+            None,  # type: ignore[arg-type]
+            "kb",
+            None,  # type: ignore[arg-type]
+            expected_derivatives={"summary", "questions", "graph", "wiki"},
+        )
+        core_only = {
+            "parse_status": "completed",
+            "enrichment_status": "pending",
+            "wiki_status": "pending",
+            "pending_subtasks_count": 3,
+        }
+        self.assertEqual(runner._pipeline_terminal_status(core_only), "")
+        enriched = {
+            **core_only,
+            "enrichment_status": "completed",
+            "pending_subtasks_count": 0,
+        }
+        self.assertEqual(runner._pipeline_terminal_status(enriched), "")
+        fully_done = {**enriched, "wiki_status": "completed"}
+        self.assertEqual(runner._pipeline_terminal_status(fully_done), "completed")
+
+    def test_pipeline_terminal_surfaces_core_failure_without_waiting_for_derivatives(self) -> None:
+        runner = ClusterE2ERunner(
+            None,  # type: ignore[arg-type]
+            "kb",
+            None,  # type: ignore[arg-type]
+            expected_derivatives={"summary", "questions", "graph", "wiki"},
+        )
+        self.assertEqual(
+            runner._pipeline_terminal_status(
+                {
+                    "parse_status": "failed",
+                    "enrichment_status": "pending",
+                    "wiki_status": "pending",
+                }
+            ),
+            "failed",
+        )
+
+    def test_pipeline_terminal_surfaces_derivative_failure_immediately(self) -> None:
+        runner = ClusterE2ERunner(
+            None,  # type: ignore[arg-type]
+            "kb",
+            None,  # type: ignore[arg-type]
+            expected_derivatives={"summary", "questions", "graph", "wiki"},
+        )
+        self.assertEqual(
+            runner._pipeline_terminal_status(
+                {
+                    "parse_status": "completed",
+                    "summary_status": "failed",
+                    "enrichment_status": "processing",
+                    "wiki_status": "pending",
+                }
+            ),
+            "failed",
+        )
+        self.assertEqual(
+            runner._pipeline_terminal_status(
+                {
+                    "parse_status": "completed",
+                    "summary_status": "completed",
+                    "enrichment_status": "completed",
+                    "wiki_status": "degraded",
+                    "pending_subtasks_count": 0,
+                }
+            ),
+            "failed",
+        )
+
+    def test_embedding_vector_evidence_requires_exact_successful_stage(self) -> None:
+        spans = [
+            {
+                "name": "embedding",
+                "status": "done",
+                "input": {"chunks_to_embed": 12},
+                "output": {"vectors_written": 12},
+            },
+            {
+                "name": "embedding.batch[0]",
+                "status": "done",
+                "input": {"chunks_to_embed": 99},
+                "output": {"vectors_written": 99},
+            },
+            {
+                "name": "embedding",
+                "status": "failed",
+                "input": {"chunks_to_embed": 88},
+                "output": {"vectors_written": 88},
+            },
+        ]
+        self.assertEqual(
+            embedding_vector_evidence(spans),
+            {"chunks_to_embed": 12, "vectors_written": 12},
+        )
+
+    def test_embedding_vector_evidence_accepts_json_encoded_payloads(self) -> None:
+        spans = [
+            {
+                "span_name": "embedding",
+                "status": "completed",
+                "input": '{"chunks_to_embed":"4"}',
+                "output": '{"vectors_written":"4"}',
+            }
+        ]
+        self.assertEqual(
+            embedding_vector_evidence(spans),
+            {"chunks_to_embed": 4, "vectors_written": 4},
+        )
+
+    def test_embedding_vector_evidence_rejects_missing_counts(self) -> None:
+        with self.assertRaisesRegex(E2EFailure, "missing integer"):
+            embedding_vector_evidence(
+                [{"name": "embedding", "status": "done", "input": {}, "output": {}}]
+            )
+
     def test_missing_chunk_texts_combines_chunk_types_case_insensitively(self) -> None:
         chunks = [
             {"chunk_type": "image_ocr", "content": "VISION CODE: 7319"},
@@ -512,6 +697,69 @@ class OutputEvidenceTests(unittest.TestCase):
     def test_generated_questions_accepts_json_metadata(self) -> None:
         chunk = {"metadata": '{"generated_questions":[{"id":"q1","question":"why"}]}' }
         self.assertEqual(len(generated_questions(chunk)), 1)
+
+    def test_generated_question_quality_accepts_natural_unique_questions(self) -> None:
+        chunks = [
+            {
+                "metadata": {
+                    "generated_questions": [
+                        {"id": "q1", "question": "采购审批必须在多长时间内完成？"},
+                        {"id": "q2", "question": "哪些情形禁止未经授权导出客户数据？"},
+                    ]
+                }
+            }
+        ]
+        evidence = validate_generated_question_quality(chunks)
+        self.assertEqual(evidence["questions"], 2)
+        self.assertEqual(evidence["unique_stems"], 2)
+
+    def test_generated_question_quality_rejects_source_metadata(self) -> None:
+        chunks = [
+            {
+                "metadata": {
+                    "generated_questions": [
+                        {"id": "q1", "question": "根据《采购管理办法》，准入条件有哪些？"}
+                    ]
+                }
+            }
+        ]
+        with self.assertRaisesRegex(E2EFailure, "source-generation wording"):
+            validate_generated_question_quality(chunks)
+
+    def test_generated_question_quality_rejects_punctuation_only_duplicates(self) -> None:
+        chunks = [
+            {
+                "metadata": {
+                    "generated_questions": [
+                        {"id": "q1", "question": "采购审批必须在多长时间内完成？"},
+                        {"id": "q2", "question": "采购审批必须在多长时间内完成?"},
+                    ]
+                }
+            }
+        ]
+        with self.assertRaisesRegex(E2EFailure, "duplicate stems"):
+            validate_generated_question_quality(chunks)
+
+    def test_generated_question_quality_rejects_near_identical_stems(self) -> None:
+        chunks = [
+            {
+                "metadata": {
+                    "generated_questions": [
+                        {"id": "q1", "question": "供应商发生重大变化时应在几个工作日内报告？"},
+                        {"id": "q2", "question": "供应商发生重大变动时应在几个工作日内报告？"},
+                    ]
+                }
+            }
+        ]
+        with self.assertRaisesRegex(E2EFailure, "superficial paraphrases"):
+            validate_generated_question_quality(chunks, near_duplicate_ratio=0.90)
+
+    def test_wiki_page_substantive_text_includes_title_summary_and_content(self) -> None:
+        page = {"title": "采购管理", "summary": "审批职责", "content": "具体办理条件和监督责任"}
+        text = wiki_page_substantive_text(page)
+        self.assertIn("采购管理", text)
+        self.assertIn("监督责任", text)
+        self.assertGreater(len(normalize_question_stem(text)), 10)
 
     def test_graph_artifact_counts_require_successful_graph_span_output(self) -> None:
         spans = [

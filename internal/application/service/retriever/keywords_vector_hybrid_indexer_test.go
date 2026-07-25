@@ -14,7 +14,10 @@ type capturingEmbedder struct {
 	embedding.Embedder
 	text       string
 	batchTexts []string
+	maxTokens  int
 }
+
+func (e *capturingEmbedder) GetMaxInputTokens() int { return e.maxTokens }
 
 func (e *capturingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	e.text = text
@@ -104,6 +107,26 @@ func TestBatchIndexTruncatesOversizedEmbeddingInput(t *testing.T) {
 	}
 	if got := len([]rune(embedder.batchTexts[0])); got > safetyMaxChars {
 		t.Fatalf("embedding input length = %d, want <= %d", got, safetyMaxChars)
+	}
+}
+
+func TestBatchIndexUsesModelTokenBudgetForCompleteInput(t *testing.T) {
+	ctx := context.Background()
+	embedder := &capturingEmbedder{maxTokens: 100}
+	service := &KeywordsVectorHybridRetrieveEngineService{indexRepository: &saveOnlyRepository{}}
+
+	err := service.BatchIndex(ctx, embedder, []*types.IndexInfo{{
+		Content:  strings.Repeat("english ", 200),
+		SourceID: "source-token-budget",
+	}}, []types.RetrieverType{types.VectorRetrieverType})
+	if err != nil {
+		t.Fatalf("BatchIndex returned error: %v", err)
+	}
+	if len(embedder.batchTexts) != 1 {
+		t.Fatalf("expected one embedding input, got %d", len(embedder.batchTexts))
+	}
+	if got := len([]rune(embedder.batchTexts[0])); got > 360 {
+		t.Fatalf("embedding input length = %d, want <= 360 for 100-token English budget", got)
 	}
 }
 

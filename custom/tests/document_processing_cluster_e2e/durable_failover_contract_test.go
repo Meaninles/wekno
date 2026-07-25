@@ -1022,3 +1022,156 @@ func TestDurableFailoverPostgresRestartTerminationRecoveryInterleaving(t *testin
 		t.Fatalf("old PostgreSQL delivery epoch was not fenced: %v", err)
 	}
 }
+
+func TestDurableFailoverPostgresCancellationRestartInterleaving(t *testing.T) {
+	db := openPostgresQueueContractDB(t)
+	const (
+		stableInstanceID = "pg-cancel-restart-stable-instance"
+		oldBootID        = "pg-cancel-restart-old-boot"
+		newBootID        = "pg-cancel-restart-new-boot"
+	)
+
+	oldBoot := newDurableContractCoordinator(t, db, nil, stableInstanceID, oldBootID)
+	if err := oldBoot.Start(context.Background()); err != nil {
+		t.Fatalf("start PostgreSQL cancellation old boot: %v", err)
+	}
+	t.Cleanup(oldBoot.Stop)
+	workflow, binding := prepareContractWorkflow(t, db, oldBoot, 112, "durable-postgres-cancel-restart")
+	if err := oldBoot.BindPreparedWorkflow(context.Background(), binding); err != nil {
+		t.Fatalf("bind PostgreSQL cancellation workflow: %v", err)
+	}
+	workflow, activated, err := oldBoot.ActivatePreparedWorkflow(context.Background(), binding)
+	if err != nil || !activated {
+		t.Fatalf("activate PostgreSQL cancellation workflow: activated=%v err=%v", activated, err)
+	}
+	oldDelivery := workflowDelivery(t, workflow)
+	if _, err := oldBoot.Claim(context.Background(), workflow.TaskType, oldDelivery); err != nil {
+		t.Fatalf("claim PostgreSQL cancellation workflow: %v", err)
+	}
+	if err := db.Table("knowledges").
+		Where("tenant_id = ? AND id = ?", workflow.TenantID, workflow.KnowledgeID).
+		Updates(map[string]any{
+			"parse_status":           types.ParseStatusCancelling,
+			"pending_subtasks_count": 9,
+			"summary_status":         types.SummaryStatusProcessing,
+			"enrichment_status":      types.EnrichmentStatusPending,
+			"wiki_status":            types.WikiStatusPending,
+			"wiki_error_message":     "stale wiki error",
+		}).Error; err != nil {
+		t.Fatalf("publish PostgreSQL cancellation intent: %v", err)
+	}
+	before := loadContractWorkflow(t, db, workflow.ID)
+
+	newBootConfig := coordinatorConfig()
+	newBootConfig.TrustStableInstanceRestart = true
+	newBoot := documentqueue.NewCoordinatorWithConfig(
+		db, nil, stableInstanceID, newBootID, 2, newBootConfig,
+	)
+	t.Cleanup(newBoot.Stop)
+	cancellation := documentqueue.CancellationBinding{
+		WorkflowID:           workflow.ID,
+		TenantID:             workflow.TenantID,
+		KnowledgeBaseID:      workflow.KnowledgeBaseID,
+		KnowledgeID:          workflow.KnowledgeID,
+		ProcessingGeneration: workflow.ProcessingGeneration,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type cancellationRaceResult struct {
+		operation string
+		err       error
+	}
+	start := make(chan struct{})
+	results := make(chan cancellationRaceResult, 2)
+	var ready sync.WaitGroup
+	var group sync.WaitGroup
+	ready.Add(2)
+	group.Add(2)
+	run := func(operation string, action func(context.Context) error) {
+		defer group.Done()
+		ready.Done()
+		select {
+		case <-start:
+			results <- cancellationRaceResult{operation: operation, err: action(ctx)}
+		case <-ctx.Done():
+			results <- cancellationRaceResult{operation: operation, err: ctx.Err()}
+		}
+	}
+	go run("same-instance restart adoption", newBoot.Start)
+	go run("exact-generation cancellation", func(ctx context.Context) error {
+		return oldBoot.CommitWorkflowCancellation(ctx, cancellation, time.Now())
+	})
+	ready.Wait()
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("PostgreSQL cancellation/restart interleaving deadlocked: %v", ctx.Err())
+	}
+	close(results)
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("%s: %v", result.operation, result.err)
+		}
+	}
+
+	persisted := loadContractWorkflow(t, db, workflow.ID)
+	if persisted.State != documentqueue.StateCancelled || persisted.Stage != "cancelled" {
+		t.Fatalf("PostgreSQL cancelled workflow was revived: %+v", persisted)
+	}
+	if persisted.OwnerInstanceID != "" || persisted.OwnerBootID != "" ||
+		persisted.LeaseUntil != nil || persisted.DispatchTaskID != "" {
+		t.Fatalf("PostgreSQL cancelled workflow retained execution ownership: %+v", persisted)
+	}
+	if persisted.DispatchEpoch < before.DispatchEpoch+1 ||
+		persisted.DispatchEpoch > before.DispatchEpoch+2 {
+		t.Fatalf("PostgreSQL cancellation/restart epoch = %d, want %d or %d",
+			persisted.DispatchEpoch, before.DispatchEpoch+1, before.DispatchEpoch+2)
+	}
+
+	var knowledge struct {
+		ParseStatus          string
+		ProcessingOwner      string
+		PendingSubtasksCount int
+		SummaryStatus        string
+		EnrichmentStatus     string
+		WikiStatus           string
+		WikiErrorMessage     string
+	}
+	if err := db.Table("knowledges").
+		Where("tenant_id = ? AND id = ?", workflow.TenantID, workflow.KnowledgeID).
+		Take(&knowledge).Error; err != nil {
+		t.Fatalf("load PostgreSQL cancelled knowledge: %v", err)
+	}
+	if knowledge.ParseStatus != types.ParseStatusCancelled ||
+		knowledge.ProcessingOwner != "" ||
+		knowledge.PendingSubtasksCount != 0 ||
+		knowledge.SummaryStatus != types.SummaryStatusNone ||
+		knowledge.EnrichmentStatus != types.EnrichmentStatusNone ||
+		knowledge.WikiStatus != types.WikiStatusNone ||
+		knowledge.WikiErrorMessage != "" {
+		t.Fatalf("PostgreSQL cancellation business state is not terminal: %+v", knowledge)
+	}
+
+	var generationRows int64
+	if err := db.Model(&documentqueue.Workflow{}).
+		Where("tenant_id = ? AND knowledge_id = ? AND processing_generation = ?",
+			workflow.TenantID, workflow.KnowledgeID, workflow.ProcessingGeneration).
+		Count(&generationRows).Error; err != nil {
+		t.Fatalf("count PostgreSQL cancellation workflow rows: %v", err)
+	}
+	if generationRows != 1 {
+		t.Fatalf("PostgreSQL cancellation generation has %d workflow rows, want one", generationRows)
+	}
+	if _, err := oldBoot.Claim(
+		context.Background(), workflow.TaskType, oldDelivery,
+	); !errors.Is(err, documentqueue.ErrInstanceFenced) {
+		t.Fatalf("old PostgreSQL cancellation boot was not fenced: %v", err)
+	}
+}

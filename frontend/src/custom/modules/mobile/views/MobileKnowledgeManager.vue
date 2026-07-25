@@ -24,10 +24,12 @@ import { openRouteInNewPage } from "@/custom/modules/knowledgeSearch/openRouteIn
 import {
   downloadBlob,
   formatFileSize,
-  isParseInFlight,
-  parseStatusClass,
-  parseStatusText,
 } from "../utils";
+import {
+  knowledgeHasDerivativeFailure,
+  knowledgeIsFullyComplete,
+  knowledgeNeedsStatusPolling,
+} from "@/views/knowledge/wikiStatusRefresh";
 
 type KnowledgeBaseRow = Record<string, any>;
 type KnowledgeFileRow = Record<string, any>;
@@ -82,7 +84,7 @@ const personalKnowledgeBases = computed(() => kbList.value.filter((item) => item
 const sharedKnowledgeBases = computed(() => kbList.value.filter((item) => item.group === "shared"));
 const selectedKb = computed(() => kbList.value.find((item) => item.id === selectedKbId.value) || null);
 const selectedCanEdit = computed(() => selectedKb.value?.canEditContent === true);
-const hasRunningParse = computed(() => fileList.value.some((item) => isParseInFlight(item.parse_status)));
+const hasRunningParse = computed(() => fileList.value.some((item) => knowledgeNeedsStatusPolling(item)));
 const topbarTitle = computed(() => selectedKb.value?.name || (searchOpen.value ? "搜索" : "知识库"));
 const normalizedSearchQuery = computed(() => searchQuery.value.trim());
 const knowledgeBaseById = computed(() => new Map(kbList.value.map((item) => [item.id, item])));
@@ -318,7 +320,7 @@ const loadFiles = async () => {
 
 async function refreshRunningStatuses() {
   clearPolling();
-  const running = fileList.value.filter((item) => isParseInFlight(item.parse_status));
+  const running = fileList.value.filter((item) => knowledgeNeedsStatusPolling(item));
   if (!running.length) return;
   const query = running.map((item) => `ids=${encodeURIComponent(item.id)}`).join("&");
   try {
@@ -329,6 +331,8 @@ async function refreshRunningStatuses() {
         if (!current) return;
         current.parse_status = next.parse_status;
         current.summary_status = next.summary_status;
+        current.enrichment_status = next.enrichment_status;
+        current.wiki_status = next.wiki_status;
         current.description = next.description;
         current.error_message = next.error_message;
       });
@@ -336,6 +340,29 @@ async function refreshRunningStatuses() {
   } finally {
     schedulePolling();
   }
+}
+
+function documentStatusText(item: KnowledgeFileRow) {
+  if (item.parse_status === "pending") return "待解析";
+  if (item.parse_status === "processing") return "解析中";
+  if (item.parse_status === "finalizing") return "整理中";
+  if (item.parse_status === "failed") return "解析失败";
+  if (item.parse_status === "cancelled") return "已取消";
+  if (item.parse_status === "draft") return "草稿";
+  if (knowledgeHasDerivativeFailure(item)) return "衍生处理失败";
+  if (knowledgeNeedsStatusPolling(item)) {
+    if (["pending", "processing"].includes(String(item.summary_status || ""))) return "生成摘要中";
+    return "优化中";
+  }
+  if (knowledgeIsFullyComplete(item)) return "已完成";
+  return item.parse_status || "未知";
+}
+
+function documentStatusClass(item: KnowledgeFileRow) {
+  if (knowledgeIsFullyComplete(item)) return "is-completed";
+  if (item.parse_status === "failed" || knowledgeHasDerivativeFailure(item)) return "is-failed";
+  if (knowledgeNeedsStatusPolling(item)) return "is-running";
+  return "is-muted";
 }
 
 const openKnowledgeBase = (kb: MobileKnowledgeBase) => {
@@ -768,8 +795,8 @@ onBeforeUnmount(() => {
                 {{ item.file_type || item.type || 'FILE' }}
                 <template v-if="item.file_size"> · {{ formatFileSize(item.file_size) }}</template>
               </span>
-              <em class="parse-status" :class="parseStatusClass(item.parse_status)">
-                {{ parseStatusText(item.parse_status, item.summary_status) }}
+              <em class="parse-status" :class="documentStatusClass(item)">
+                {{ documentStatusText(item) }}
               </em>
             </div>
             <div class="doc-actions">

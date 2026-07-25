@@ -1,0 +1,11 @@
+{
+  "status": "failed",
+  "started_at": "2026-07-25T11:32:22.222383+00:00",
+  "knowledge_base_id": "1651bae5-56f5-4d86-85a8-c3df8874f8ad",
+  "scenarios": [
+    "completed"
+  ],
+  "results": [],
+  "finished_at": "2026-07-25T11:37:56.163983+00:00",
+  "error": "daa29590-1a8e-439b-9238-5f4ea6945f23 remained visible after delete; status=deleting"
+}

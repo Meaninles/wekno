@@ -1,0 +1,30 @@
+{
+  "status": "passed",
+  "started_at": "2026-07-25T11:19:21.806334+00:00",
+  "knowledge_base_id": "1651bae5-56f5-4d86-85a8-c3df8874f8ad",
+  "scenarios": [
+    "completed"
+  ],
+  "results": [
+    {
+      "boundary": "completed",
+      "knowledge_id": "cde3fa2d-2567-44e8-b6b0-56179a28450d",
+      "attempt": 1,
+      "observed_before_delete": {
+        "parse_status": "completed",
+        "summary_status": "completed",
+        "enrichment_status": "completed",
+        "wiki_status": "completed",
+        "queue_state": "active",
+        "queue_owner": "worker-cluster-e2e-f",
+        "queue_epoch": 1
+      },
+      "delete_seconds": 2.1959080920059932,
+      "queue_state_after_delete": "none",
+      "chunks_after_delete": 0,
+      "retrieval_results_after_delete": 0,
+      "wiki_source_pages_after_delete": 0
+    }
+  ],
+  "finished_at": "2026-07-25T11:20:30.821091+00:00"
+}

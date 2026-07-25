@@ -48,16 +48,23 @@ func TestKubernetesRuntimeVerifierRequiresPositiveExactTermination(t *testing.T)
 			name:       "current app container terminated",
 			statusCode: http.StatusOK,
 			body: `{"metadata":{"name":"parser-pod","uid":"pod-uid"},"status":{"phase":"Running","containerStatuses":[` +
-				`{"name":"app","state":{"terminated":{"exitCode":137,"reason":"Error","finishedAt":"2026-07-22T10:00:00Z"}}}]}}`,
+				`{"name":"app","state":{"terminated":{"exitCode":137,"reason":"Error","finishedAt":"2026-07-22T10:00:00Z",` +
+				`"containerID":"containerd://sha256:deadbeef"}}}]}}`,
 			proven: true,
 			reason: "app_container_terminated",
 		},
 		{
-			name:       "pod terminal",
+			name:       "control plane terminal phase is not process fencing",
 			statusCode: http.StatusOK,
-			body:       `{"metadata":{"name":"parser-pod","uid":"pod-uid"},"status":{"phase":"Failed"}}`,
-			proven:     true,
-			reason:     "pod_terminal",
+			body:       `{"metadata":{"name":"parser-pod","uid":"pod-uid"},"status":{"phase":"Failed","reason":"NodeLost"}}`,
+			reason:     "pod_terminal_without_exact_container_termination",
+		},
+		{
+			name:       "terminated state without runtime identity is incomplete",
+			statusCode: http.StatusOK,
+			body: `{"metadata":{"name":"parser-pod","uid":"pod-uid"},"status":{"phase":"Failed","containerStatuses":[` +
+				`{"name":"app","state":{"terminated":{"exitCode":137,"finishedAt":"2026-07-22T10:00:00Z"}}}]}}`,
+			reason: "container_termination_evidence_incomplete",
 		},
 		{
 			name:       "deletion timestamp is only intent",
@@ -177,7 +184,9 @@ func TestKubernetesRuntimeVerifierFindsExactUIDAcrossListPages(t *testing.T) {
 		case 2:
 			require.Equal(t, "next+page/token", r.URL.Query().Get("continue"))
 			_, _ = fmt.Fprint(w, `{"metadata":{},"items":[`+
-				`{"metadata":{"name":"old-parser","uid":"old-uid"},"status":{"phase":"Succeeded"}}]}`)
+				`{"metadata":{"name":"old-parser","uid":"old-uid"},"status":{"phase":"Succeeded","containerStatuses":[`+
+				`{"name":"app","state":{"terminated":{"exitCode":0,"finishedAt":"2026-07-22T10:00:00Z",`+
+				`"containerID":"containerd://sha256:finished"}}}]}}]}`)
 		default:
 			t.Fatalf("unexpected Kubernetes list page %d", call)
 		}
@@ -194,6 +203,6 @@ func TestKubernetesRuntimeVerifierFindsExactUIDAcrossListPages(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, evidence.Proven)
-	require.Equal(t, "pod_terminal", evidence.Reason)
+	require.Equal(t, "app_container_terminated", evidence.Reason)
 	require.EqualValues(t, 2, requests.Load())
 }

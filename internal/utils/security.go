@@ -735,33 +735,132 @@ func ValidateStdioConfig(command string, args []string, envVars map[string]strin
 
 // SSRFSafeHTTPClientConfig contains configuration for the SSRF-safe HTTP client
 type SSRFSafeHTTPClientConfig struct {
-	Timeout            time.Duration
-	MaxRedirects       int
-	DisableKeepAlives  bool
-	DisableCompression bool
+	Timeout               time.Duration
+	MaxRedirects          int
+	DisableKeepAlives     bool
+	DisableCompression    bool
+	MaxIdleConns          int
+	MaxIdleConnsPerHost   int
+	MaxConnsPerHost       int
+	IdleConnTimeout       time.Duration
+	TLSHandshakeTimeout   time.Duration
+	ExpectContinueTimeout time.Duration
+	ForceAttemptHTTP2     bool
 }
 
 // DefaultSSRFSafeHTTPClientConfig returns the default configuration
 func DefaultSSRFSafeHTTPClientConfig() SSRFSafeHTTPClientConfig {
 	return SSRFSafeHTTPClientConfig{
-		Timeout:            30 * time.Second,
-		MaxRedirects:       10,
-		DisableKeepAlives:  false,
-		DisableCompression: false,
+		Timeout:               30 * time.Second,
+		MaxRedirects:          10,
+		DisableKeepAlives:     false,
+		DisableCompression:    false,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   32,
+		MaxConnsPerHost:       64,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:     true,
 	}
 }
 
 // ErrSSRFRedirectBlocked is returned when a redirect target is blocked due to SSRF protection
 var ErrSSRFRedirectBlocked = fmt.Errorf("redirect blocked: target URL failed SSRF validation")
 
-// NewSSRFSafeHTTPClient creates an HTTP client that validates redirect targets against SSRF protections.
-// This prevents SSRF attacks via HTTP redirects where an attacker's server redirects to internal services.
+type ssrfSafeTransportKey struct {
+	DisableKeepAlives     bool
+	DisableCompression    bool
+	MaxIdleConns          int
+	MaxIdleConnsPerHost   int
+	MaxConnsPerHost       int
+	IdleConnTimeout       time.Duration
+	TLSHandshakeTimeout   time.Duration
+	ExpectContinueTimeout time.Duration
+	ForceAttemptHTTP2     bool
+}
+
+var sharedSSRFSafeTransports sync.Map
+
+func normalizedSSRFSafeTransportKey(config SSRFSafeHTTPClientConfig) ssrfSafeTransportKey {
+	defaults := DefaultSSRFSafeHTTPClientConfig()
+	if config.MaxIdleConns <= 0 {
+		config.MaxIdleConns = defaults.MaxIdleConns
+	}
+	if config.MaxIdleConnsPerHost <= 0 {
+		config.MaxIdleConnsPerHost = defaults.MaxIdleConnsPerHost
+	}
+	if config.MaxConnsPerHost <= 0 {
+		config.MaxConnsPerHost = defaults.MaxConnsPerHost
+	}
+	if config.IdleConnTimeout <= 0 {
+		config.IdleConnTimeout = defaults.IdleConnTimeout
+	}
+	if config.TLSHandshakeTimeout <= 0 {
+		config.TLSHandshakeTimeout = defaults.TLSHandshakeTimeout
+	}
+	if config.ExpectContinueTimeout <= 0 {
+		config.ExpectContinueTimeout = defaults.ExpectContinueTimeout
+	}
+	// The zero value of ForceAttemptHTTP2 comes from legacy literal configs;
+	// keep HTTP/2 enabled unless callers explicitly supply a dedicated
+	// transport themselves.
+	if !config.ForceAttemptHTTP2 {
+		config.ForceAttemptHTTP2 = defaults.ForceAttemptHTTP2
+	}
+	return ssrfSafeTransportKey{
+		DisableKeepAlives:     config.DisableKeepAlives,
+		DisableCompression:    config.DisableCompression,
+		MaxIdleConns:          config.MaxIdleConns,
+		MaxIdleConnsPerHost:   config.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       config.MaxConnsPerHost,
+		IdleConnTimeout:       config.IdleConnTimeout,
+		TLSHandshakeTimeout:   config.TLSHandshakeTimeout,
+		ExpectContinueTimeout: config.ExpectContinueTimeout,
+		ForceAttemptHTTP2:     config.ForceAttemptHTTP2,
+	}
+}
+
+// SharedSSRFSafeHTTPTransport returns a process-wide transport for an
+// equivalent connection-pool configuration. Request timeout and redirect
+// policy intentionally do not participate in the key because they live on
+// http.Client. Reusing transports is required for keep-alive and HTTP/2 to
+// work; constructing one transport per model call leaks sockets under load.
+func SharedSSRFSafeHTTPTransport(config SSRFSafeHTTPClientConfig) *http.Transport {
+	key := normalizedSSRFSafeTransportKey(config)
+	if existing, ok := sharedSSRFSafeTransports.Load(key); ok {
+		return existing.(*http.Transport)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = SSRFSafeDialContext
+	transport.DisableKeepAlives = key.DisableKeepAlives
+	transport.DisableCompression = key.DisableCompression
+	transport.MaxIdleConns = key.MaxIdleConns
+	transport.MaxIdleConnsPerHost = key.MaxIdleConnsPerHost
+	transport.MaxConnsPerHost = key.MaxConnsPerHost
+	transport.IdleConnTimeout = key.IdleConnTimeout
+	transport.TLSHandshakeTimeout = key.TLSHandshakeTimeout
+	transport.ExpectContinueTimeout = key.ExpectContinueTimeout
+	transport.ForceAttemptHTTP2 = key.ForceAttemptHTTP2
+	actual, _ := sharedSSRFSafeTransports.LoadOrStore(key, transport)
+	return actual.(*http.Transport)
+}
+
+// NewSSRFSafeHTTPClient creates an HTTP client that validates redirect targets
+// against SSRF protections and shares its connection pool with equivalent
+// clients.
 func NewSSRFSafeHTTPClient(config SSRFSafeHTTPClientConfig) *http.Client {
-	transport := &http.Transport{
-		DisableKeepAlives:  config.DisableKeepAlives,
-		DisableCompression: config.DisableCompression,
-		// Dial with SSRF protection - validates resolved IPs before connecting
-		DialContext: SSRFSafeDialContext,
+	return NewSSRFSafeHTTPClientWithTransport(config, SharedSSRFSafeHTTPTransport(config))
+}
+
+// NewSSRFSafeHTTPClientWithTransport applies per-client timeout and redirect
+// policy to a caller-supplied, SSRF-safe transport.
+func NewSSRFSafeHTTPClientWithTransport(
+	config SSRFSafeHTTPClientConfig,
+	transport http.RoundTripper,
+) *http.Client {
+	if transport == nil {
+		transport = SharedSSRFSafeHTTPTransport(config)
 	}
 
 	return &http.Client{

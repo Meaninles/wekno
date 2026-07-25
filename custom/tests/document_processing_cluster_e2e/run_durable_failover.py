@@ -6,9 +6,10 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -67,6 +68,140 @@ class CommandResult:
     log: str
 
 
+class SplitScopeAPIClient:
+    """Separate tenant workload calls from system-admin control observations.
+
+    Read-only probes receive a short, narrowly-scoped transport retry window.
+    A killed API container can refuse or reset one connection while coming
+    back, and a durability test must not confuse that expected cold-start
+    edge with a lost document. Mutating calls are deliberately delegated
+    without retries: upload/delete/attestation must never be duplicated by
+    this adapter.
+    """
+
+    def __init__(
+        self,
+        workload: APIClient,
+        control: APIClient,
+        *,
+        read_retry_timeout: float = 30.0,
+        read_retry_interval: float = 0.5,
+    ) -> None:
+        self.workload = workload
+        self.control = control
+        self.read_retry_timeout = read_retry_timeout
+        self.read_retry_interval = read_retry_interval
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.workload, name)
+
+    @staticmethod
+    def _transient_read_error(exc: Exception) -> bool:
+        if isinstance(exc, APIError):
+            return exc.status in {502, 503, 504}
+        current: BaseException | None = exc
+        while current is not None:
+            if isinstance(
+                current,
+                (urllib.error.URLError, ConnectionError, TimeoutError),
+            ):
+                return True
+            current = current.__cause__
+        return False
+
+    def _retry_read(self, operation: str, call: Callable[[], Any]) -> Any:
+        deadline = time.monotonic() + self.read_retry_timeout
+        while True:
+            try:
+                return call()
+            except Exception as exc:
+                if (
+                    not self._transient_read_error(exc)
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+                time.sleep(self.read_retry_interval)
+
+    def system_info(self) -> Any:
+        return self._retry_read("system_info", self.workload.system_info)
+
+    def get_knowledge_base(self, kb_id: str) -> Mapping[str, Any]:
+        return self._retry_read(
+            "get_knowledge_base",
+            lambda: self.workload.get_knowledge_base(kb_id),
+        )
+
+    def get_knowledge(self, knowledge_id: str) -> Mapping[str, Any]:
+        return self._retry_read(
+            "get_knowledge",
+            lambda: self.workload.get_knowledge(knowledge_id),
+        )
+
+    def list_all_knowledge(self, kb_id: str) -> list[Mapping[str, Any]]:
+        return self._retry_read(
+            "list_all_knowledge",
+            lambda: self.workload.list_all_knowledge(kb_id),
+        )
+
+    def get_queue(self, knowledge_ids: Sequence[str]) -> QueueSnapshot:
+        return self._retry_read(
+            "get_queue",
+            lambda: self.workload.get_queue(knowledge_ids),
+        )
+
+    def get_instances(self, *, optional: bool = False) -> tuple[WorkerInstance, ...]:
+        return self._retry_read(
+            "get_instances",
+            lambda: self.control.get_instances(optional=optional),
+        )
+
+    def attest_instance_termination(self, instance_id: str, boot_id: str, proof: str) -> None:
+        self.control.attest_instance_termination(instance_id, boot_id, proof)
+
+    def system_setting(self, key: str) -> Mapping[str, Any]:
+        return self._retry_read(
+            "system_setting",
+            lambda: self.control.system_setting(key),
+        )
+
+    def get_spans(self, knowledge_id: str) -> Mapping[str, Any]:
+        return self._retry_read(
+            "get_spans",
+            lambda: self.workload.get_spans(knowledge_id),
+        )
+
+    def list_chunks(
+        self,
+        knowledge_id: str,
+        chunk_types: Sequence[str],
+    ) -> list[Mapping[str, Any]]:
+        return self._retry_read(
+            "list_chunks",
+            lambda: self.workload.list_chunks(knowledge_id, chunk_types),
+        )
+
+    def hybrid_search(
+        self,
+        kb_id: str,
+        query_text: str,
+        knowledge_ids: Sequence[str],
+    ) -> list[Mapping[str, Any]]:
+        return self._retry_read(
+            "hybrid_search",
+            lambda: self.workload.hybrid_search(
+                kb_id,
+                query_text,
+                knowledge_ids,
+            ),
+        )
+
+    def list_wiki_pages(self, kb_id: str) -> list[Mapping[str, Any]]:
+        return self._retry_read(
+            "list_wiki_pages",
+            lambda: self.workload.list_wiki_pages(kb_id),
+        )
+
+
 def parse_worker(value: str) -> WorkerTarget:
     instance_id, separator, container = value.partition("=")
     if not separator or not instance_id.strip() or not container.strip():
@@ -105,6 +240,16 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--base-url", default=os.getenv("WEKNORA_E2E_HOST", "http://localhost:8080"))
     p.add_argument("--token", default=os.getenv("WEKNORA_E2E_TOKEN", ""))
     p.add_argument("--auth-mode", choices=("api-key", "bearer"), default="api-key")
+    p.add_argument(
+        "--admin-token",
+        default=os.getenv("WEKNORA_E2E_ADMIN_TOKEN", ""),
+        help="system-admin token used only for control-plane observation; never persisted",
+    )
+    p.add_argument(
+        "--admin-auth-mode",
+        choices=("api-key", "bearer"),
+        default=os.getenv("WEKNORA_E2E_ADMIN_AUTH_MODE", "bearer"),
+    )
     p.add_argument("--kb-id", default=os.getenv("WEKNORA_E2E_KB_ID", ""))
     p.add_argument("--worker", action="append", type=parse_worker, default=[])
     p.add_argument("--fault-instance", default="")
@@ -797,9 +942,15 @@ def verify_scenario(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     runner.wait_for_completion(args.completion_timeout)
+    expected = {"summary", "questions", "graph", "wiki"}
     # Verify every faulted document, not a sample: duplicate IDs, post-terminal
     # count drift and failed vector retrieval are all double-write/lost-write evidence.
-    runner.verify_document_outputs(ids, expected=set(), sample_limit=len(ids), wiki_timeout=0)
+    runner.verify_document_outputs(
+        ids,
+        expected=expected,
+        sample_limit=len(ids),
+        wiki_timeout=args.completion_timeout,
+    )
     result = runner.result(started, started_at)
     validate_performance(
         result,
@@ -825,6 +976,7 @@ def run_scenario(
         recorder,
         run_id=f"durable-{scenario}-{int(time.time())}",
         poll_interval=args.poll_interval,
+        expected_derivatives={"summary", "questions", "graph", "wiki"},
     )
     workers: list[WorkerTarget] = args.worker
     controller = DockerController([worker.container for worker in workers], recorder)
@@ -1172,6 +1324,8 @@ def main() -> int:
             "base_url": args.base_url,
             "kb_id": args.kb_id,
             "auth_mode": args.auth_mode,
+            "admin_auth_mode": args.admin_auth_mode,
+            "split_scope_auth": bool(args.admin_token),
             "fault_instance": args.fault_instance,
             "redis_container": args.redis_container,
             "documents": args.documents,
@@ -1202,12 +1356,19 @@ def main() -> int:
                 raise E2EFailure(f"durability contracts failed: {failed}")
 
         if args.scenario:
-            client = APIClient(
+            workload_client = APIClient(
                 args.base_url,
                 args.token,
                 auth_mode=args.auth_mode,
                 timeout=60,
             )
+            control_client = APIClient(
+                args.base_url,
+                args.admin_token or args.token,
+                auth_mode=args.admin_auth_mode if args.admin_token else args.auth_mode,
+                timeout=60,
+            )
+            client = SplitScopeAPIClient(workload_client, control_client)
             for scenario in args.scenario:
                 result = run_scenario(args, scenario, run_dir, client)
                 report["scenarios"].append(result)

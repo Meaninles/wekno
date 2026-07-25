@@ -430,6 +430,54 @@ class DocumentSplitterQualityTest(unittest.TestCase):
             self.assertTrue(
                 all(part.locator["frame_count"] == 3 for part in image_parts)
             )
+            self.assertTrue(
+                all(
+                    part.locator["x_start"] == 0
+                    and part.locator["x_end"] == 320
+                    for part in image_parts
+                )
+            )
+
+    def test_raw_tiff_is_losslessly_normalized_before_byte_based_tiling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "raw.tiff"
+            image = Image.new("RGB", (1600, 900), "white")
+            image.save(source, format="TIFF", compression="raw")
+            self.assertGreater(source.stat().st_size, service._HARD_BYTES["tiff"])
+
+            output = root / "parts"
+            output.mkdir()
+            parts = service._split_image(
+                source,
+                output,
+                "tiff",
+                minimum_parts=3,
+                ratio=0.75,
+                policy=service.SplitPolicy(),
+            )
+
+            self.assertEqual(len(parts), 1)
+            part = parts[0]
+            self.assertEqual(part.file_type, "png")
+            self.assertLessEqual(
+                part.path.stat().st_size, service._HARD_BYTES["png"]
+            )
+            self.assertEqual(
+                part.locator,
+                {
+                    "kind": "image_tile",
+                    "frame_index": 1,
+                    "frame_count": 1,
+                    "x_start": 0,
+                    "y_start": 0,
+                    "x_end": 1600,
+                    "y_end": 900,
+                    "source_width": 1600,
+                    "source_height": 900,
+                },
+            )
+            self.assertTrue(part.metrics["normalized_whole_frame"])
 
     def test_epub_and_mhtml_do_not_duplicate_unreferenced_images(self):
         with tempfile.TemporaryDirectory() as tmp:

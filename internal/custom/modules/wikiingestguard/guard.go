@@ -193,7 +193,7 @@ func ValidateScope(ctx context.Context, tx *gorm.DB, tenantID uint64, knowledgeB
 		}
 		var row knowledgeIdentityRow
 		query := tx.Unscoped().Table("knowledges").
-			Select("id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "processed_at", "deleted_at").
+			Select("id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "processed_at", "wiki_status", "deleted_at").
 			Where("id = ?", identity.KnowledgeID)
 		if tx.Dialector.Name() != "sqlite" {
 			query = query.Clauses(clause.Locking{Strength: "SHARE"})
@@ -234,6 +234,12 @@ func ValidateScope(ctx context.Context, tx *gorm.DB, tenantID uint64, knowledgeB
 				"wiki ingest guard: unknown parse status %q for knowledge %s",
 				row.ParseStatus, identity.KnowledgeID,
 			)
+		}
+		if terminalWikiStatus(row.WikiStatus) {
+			// Status is committed before the queue row is acknowledged. A
+			// producer replay that arrives after acknowledgement must not be
+			// allowed to recreate and re-run the same generation.
+			stale = append(stale, identity)
 		}
 	}
 	if len(stale) > 0 {
@@ -303,6 +309,7 @@ type knowledgeIdentityRow struct {
 	ProcessingGeneration string
 	ParseStatus          string
 	ProcessedAt          *time.Time
+	WikiStatus           string
 	DeletedAt            gorm.DeletedAt
 }
 
@@ -318,6 +325,15 @@ func allowedParseStatus(status string) bool {
 func terminalParseStatus(status string) bool {
 	switch status {
 	case types.ParseStatusFailed, types.ParseStatusCancelling, types.ParseStatusCancelled, types.ParseStatusDeleting:
+		return true
+	default:
+		return false
+	}
+}
+
+func terminalWikiStatus(status string) bool {
+	switch status {
+	case types.WikiStatusCompleted, types.WikiStatusDegraded, types.WikiStatusFailed:
 		return true
 	default:
 		return false

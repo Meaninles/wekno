@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,6 +66,18 @@ func (r *cancelRaceKnowledgeRepository) CompareAndSwapKnowledgeProcessingGenerat
 	}
 	if count, ok := values["pending_subtasks_count"].(int); ok {
 		r.knowledge.PendingSubtasksCount = count
+	}
+	if status, ok := values["summary_status"].(string); ok {
+		r.knowledge.SummaryStatus = status
+	}
+	if status, ok := values["enrichment_status"].(string); ok {
+		r.knowledge.EnrichmentStatus = status
+	}
+	if status, ok := values["wiki_status"].(string); ok {
+		r.knowledge.WikiStatus = status
+	}
+	if message, ok := values["wiki_error_message"].(string); ok {
+		r.knowledge.WikiErrorMessage = message
 	}
 	if r.knowledge.ParseStatus == types.ParseStatusCancelling {
 		r.claimOnce.Do(func() { close(r.claimed) })
@@ -132,6 +146,10 @@ func TestCancelQuiescenceBlocksImmediateReparseUntilLateWriterExits(t *testing.T
 			ParseStatus:          types.ParseStatusProcessing,
 			ProcessingGeneration: "generation-1",
 			ProcessingOwner:      "document:knowledge-cancel-race:generation-1",
+			SummaryStatus:        types.SummaryStatusProcessing,
+			EnrichmentStatus:     types.EnrichmentStatusPending,
+			WikiStatus:           types.WikiStatusPending,
+			WikiErrorMessage:     "old pending error",
 		},
 		claimed: make(chan struct{}),
 	}
@@ -182,4 +200,67 @@ func TestCancelQuiescenceBlocksImmediateReparseUntilLateWriterExits(t *testing.T
 	require.Equal(t, types.ParseStatusCancelled, finished.ParseStatus)
 	require.Empty(t, finished.ProcessingOwner)
 	require.Equal(t, "generation-1", finished.ProcessingGeneration)
+	require.Equal(t, types.SummaryStatusNone, finished.SummaryStatus)
+	require.Equal(t, types.EnrichmentStatusNone, finished.EnrichmentStatus)
+	require.Equal(t, types.WikiStatusNone, finished.WikiStatus)
+	require.Empty(t, finished.WikiErrorMessage)
+}
+
+type disappearingTaskInspector struct {
+	interfaces.TaskInspector
+	mu              sync.Mutex
+	livenessCalls   int
+	cancellationIDs []string
+}
+
+func (i *disappearingTaskInspector) CancelTasksForKnowledge(
+	_ context.Context,
+	knowledgeID string,
+) (int, int, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.cancellationIDs = append(i.cancellationIDs, knowledgeID)
+	return 0, 0, nil
+}
+
+func (i *disappearingTaskInspector) DocumentLifecycleTaskKnowledgeIDs(
+	context.Context,
+	[]interfaces.KnowledgeTaskTarget,
+) (map[string]bool, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.livenessCalls++
+	if i.livenessCalls == 1 {
+		return nil, errors.Join(
+			errors.New("read snapshotted task"),
+			asynq.ErrTaskNotFound,
+		)
+	}
+	return map[string]bool{}, nil
+}
+
+func TestCancelQuiescenceRetriesSnapshottedTaskDisappearanceFailClosed(t *testing.T) {
+	inspector := &disappearingTaskInspector{}
+	knowledge := &types.Knowledge{
+		ID:              "knowledge-disappearing-task",
+		KnowledgeBaseID: "kb-1",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	require.NoError(t, quiesceKnowledgeDeletionWithInspector(
+		ctx,
+		inspector,
+		[]*types.Knowledge{knowledge},
+	))
+
+	inspector.mu.Lock()
+	defer inspector.mu.Unlock()
+	require.Equal(t, 3, inspector.livenessCalls,
+		"one unknown snapshot plus two empty snapshots are required")
+	require.Len(t, inspector.cancellationIDs, 2,
+		"unknown attribution must repeat cancellation for every target")
+	for _, id := range inspector.cancellationIDs {
+		require.Equal(t, knowledge.ID, id)
+	}
 }

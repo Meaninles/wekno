@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/gin-gonic/gin"
@@ -29,6 +30,38 @@ func (s *stubKBLookup) GetKnowledgeBaseByID(_ context.Context, id string) (*type
 		return kb, nil
 	}
 	return nil, apprepo.ErrKnowledgeBaseNotFound
+}
+
+type stubKnowledgeLookup struct {
+	knowledge *types.Knowledge
+	err       error
+}
+
+func (s *stubKnowledgeLookup) GetKnowledgeByIDOnly(
+	_ context.Context,
+	_ string,
+) (*types.Knowledge, error) {
+	return s.knowledge, s.err
+}
+
+func TestKBIDFromKnowledgeIDParam_DeletedKnowledgeIsNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "deleted-knowledge"}}
+	c.Request = httptest.NewRequest("GET", "/", nil)
+
+	resolver := KBIDFromKnowledgeIDParam(
+		"id",
+		&stubKnowledgeLookup{err: apprepo.ErrKnowledgeNotFound},
+	)
+	kbID, err := resolver(c)
+	require.Empty(t, kbID)
+	var appErr *apperrors.AppError
+	require.ErrorAs(t, err, &appErr)
+	require.Equal(t, 404, appErr.HTTPCode)
+	require.True(t, isResourceNotFound(apprepo.ErrKnowledgeNotFound))
+	require.Contains(t, err.Error(), "Knowledge not found")
 }
 
 // stubKBShareForGuard implements just the methods the guard touches —

@@ -1,0 +1,82 @@
+{
+  "generated_at": "2026-07-25T15:49:24.483784294Z",
+  "base_url": "http://127.0.0.1:8080/api/v1",
+  "tenant_id": 10000,
+  "knowledge_base_id": "dd96570e-afcb-4029-9f4d-40cc57193da1",
+  "knowledge_base_name": "Policy-1518-QwenVL-20260724-173541",
+  "configured_summary_model_id": "10659f1e-87c5-4ceb-bdc2-49232217c091",
+  "requested_model_id": "10659f1e-87c5-4ceb-bdc2-49232217c091",
+  "model_name": "deepseek-v4-flash-int8",
+  "expected_model_name": "deepseek-v4-flash-int8",
+  "model_provider": "generic",
+  "model_endpoint_host": "host.docker.internal:14000",
+  "model_config_matched": true,
+  "knowledge_base_config_matched": true,
+  "cases": [
+    {
+      "name": "terminal-security-controls",
+      "query": "按照终端安全管理规定，涉密计算机能否接入内外网？涉密与非涉密计算机之间能否交叉使用 U 盘？来源不明的移动存储介质如何处理？P2P 下载多长时间会被认定为长时间占用带宽？",
+      "session_id": "eee70e5f-bfb7-463f-a8d6-2df8280a9417",
+      "elapsed_ms": 12715,
+      "http_status": 200,
+      "stream_completed": true,
+      "answer_done": true,
+      "answer": "根据《终端安全管理规定》，相关问题的解答如下：\n\n1.  **涉密计算机能否接入内外网？**\n    涉密计算机**禁止上网**。\u003csrc id=\"S1\" /\u003e\n\n2.  **涉密与非涉密计算机之间能否交叉使用 U 盘？**\n    **严禁**交叉使用 U 盘等移动存储介质。\u003csrc id=\"S1\" /\u003e\n\n3.  **来源不明的移动存储介质如何处理？**\n    规定要求从不可靠渠道下载文件需先扫描，但未明确说明来源不明的移动存储介质的具体处理流程。不过，网络运行管理单位应建立介质安全管理制度，严格加强移动存储介质管理，并采取技术措施对移动存储介质接入网络行为进行监控，防止因移动存储介质使用导致的病毒木马传播。\u003csrc id=\"S2\" /\u003e\n\n4.  **P2P 下载多长时间会被认定为长时间占用带宽？**\n    规定中**未明确**P2P 下载多长时间会被认定为长时间占用带宽，但明确**禁止**使用 P2P 软件。\u003csrc id=\"S1\" /\u003e",
+      "references": [
+        {
+          "knowledge_id": "a84da509-5db0-4b2b-bb3e-541f73eaea12",
+          "knowledge_title": "doc-cluster-1784886490-158061-00001-policy-terminal-security.docx",
+          "chunk_index": 13,
+          "score": 0.7336928373264077,
+          "match_type": "embedding",
+          "excerpt": "# Summary\n根据贵州茅台酒股份有限公司发布的《终端安全管理规定》，该文件旨在健全公司办公终端的安全管理制度，确保用户终端安全、有序上网及计算机网络系统的正常使用。规定适用于公司及分、子公司所有办公终端和用户，要求严格遵守国家法律及公司规定，禁止利用网络从事危害国家安全、泄露秘密等违法活动。\n\n文件明确了组织职责：数字科技管理事业部负责终端管理，包括建立制度、分类分级管理、技术保障及问题处理；分、子公司需指定管理责任单位，其他部门设协调员。上网行为管理方面，新员工需通过MOUTAI认证客户端和茅台安全管家入网，涉密计算机禁止上网，严禁交叉使用U盘等…"
+        },
+        {
+          "knowledge_id": "3af66704-f133-4aca-8a42-2eb3029eac82",
+          "knowledge_title": "doc-cluster-1784886490-158061-00007-policy-network-security.docx",
+          "chunk_index": 10,
+          "score": 0.327073362366013,
+          "match_type": "embedding",
+          "excerpt": "第二十七条 网络运行管理单位应采取管理和技术措施防止外单位人员非授权访问公司敏感信息资产。\n\n第二十八条 网络运行单位应规范变更计划、变更操作审批流程、变更测试、变更恢复预案等工作。严格管理网络变更、网络重要操作、物理访问和网络接入申报和审批程序。\n\n第二十九条 网络运行管理单位应建立介质安全管理制度，严格加强移动存储介质管理，采取技术措施对移动存储介质接入网络行为进行监控，防止因移动存储介质使用导致的病毒木马传播。\n\n第三十条 网络终端采取集中管控、用户识别、访问控制、安全审计等措施，按照“谁使用谁负责”的原则，加强计算机等终端管理，落实终端安全管理责…"
+        }
+      ],
+      "matched_source_checks": {
+        "policy-terminal-security.docx": true
+      },
+      "matched_evidence_groups": [
+        true,
+        true,
+        false,
+        false
+      ],
+      "matched_answer_groups": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "answer_diagnostic_ok": false,
+      "answer_diagnostic_notes": [
+        "answer fact group 2 was not matched",
+        "answer fact group 3 was not matched",
+        "answer fact group 4 was not matched"
+      ],
+      "assistant_message_id": "d25965e2-56e8-4d32-96f0-53afc8de947d",
+      "session_cleanup_ok": true,
+      "recall_passed": false,
+      "recall_failure_reasons": [
+        "retrieved evidence group 3 was not matched",
+        "retrieved evidence group 4 was not matched"
+      ],
+      "observed_response_types": [
+        "agent_query",
+        "answer",
+        "complete",
+        "references",
+        "tool_call",
+        "tool_result"
+      ]
+    }
+  ],
+  "recall_passed": false
+}

@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -30,6 +31,8 @@ var (
 	ErrStaleDelivery            = errors.New("document queue: stale delivery")
 	ErrLeaseLost                = errors.New("document queue: execution lease lost")
 	ErrAlreadyLeased            = errors.New("document queue: workflow already leased")
+	ErrInstanceCapacity         = errors.New("document queue: durable instance capacity reached")
+	ErrFairnessDeferred         = errors.New("document queue: delivery deferred by fair scheduler")
 	ErrInstanceFenced           = errors.New("document queue: instance boot was fenced")
 	ErrInstanceIdentityConflict = errors.New("document queue: stable instance identity is already held by another boot")
 	ErrTerminationNotProven     = errors.New("document queue: exact instance termination is not proven")
@@ -40,6 +43,14 @@ var (
 const defaultDocumentConcurrency = 4
 const leaseMutationTimeout = 10 * time.Second
 const expiredRecoveryScanMultiplier = 10
+const maxTerminationProofBytes = 1024
+const documentSchedulerAdvisoryLock int64 = 0x574b4e4f524151
+
+// SQLite state-machine tests and multiple coordinators inside one process need
+// the same serialization guarantee that pg_advisory_xact_lock provides across
+// production Pods. The process mutex is intentionally acquired outside the
+// transaction; PostgreSQL still supplies the cross-process half.
+var documentSchedulerProcessMu sync.Mutex
 
 type CoordinatorParams struct {
 	dig.In
@@ -94,6 +105,9 @@ type Coordinator struct {
 	// recoverCycleHook is a deterministic test seam used to prove that a slow
 	// recovery scan cannot starve the independent heartbeat loop.
 	recoverCycleHook func(context.Context) error
+	// observeHook is a deterministic test seam for failures between a
+	// successful ownership CAS and the first business-handler invocation.
+	observeHook func(context.Context, *Lease) error
 }
 
 type expiredWorkflowCursor struct {
@@ -158,12 +172,40 @@ func NewCoordinatorWithConfig(
 	}
 	coordinator.runtimeVerifier, coordinator.runtimeVerifierInitErr = newKubernetesRuntimeVerifier(coordinator.config)
 	coordinator.redisOK.Store(client == nil)
+	pipelineobs.SetDocumentWorkerCapacity(capacity)
 	return coordinator
 }
 
 func (c *Coordinator) InstanceID() string { return c.instanceID }
 func (c *Coordinator) BootID() string     { return c.bootID }
 func (c *Coordinator) Capacity() int      { return c.capacity }
+
+// AssertCurrentBoot fences non-root workers (for example physical document
+// parts) against the same durable instance identity used by root workflows.
+// Claims require Ready; already-running work may finish while Draining or
+// Degraded, but a superseded boot can never keep writing.
+func (c *Coordinator) AssertCurrentBoot(ctx context.Context, allowDraining bool) error {
+	if c == nil || c.db == nil {
+		return nil
+	}
+	if c.fenced.Load() || (!allowDraining && (c.draining.Load() || !c.ready.Load())) {
+		return ErrInstanceFenced
+	}
+	states := []string{InstanceReady}
+	if allowDraining {
+		states = append(states, InstanceDraining, InstanceDegraded)
+	}
+	var count int64
+	if err := c.db.WithContext(ctx).Model(&Instance{}).
+		Where("instance_id = ? AND boot_id = ? AND state IN ?", c.instanceID, c.bootID, states).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("%w: instance=%s boot=%s", ErrInstanceFenced, c.instanceID, c.bootID)
+	}
+	return nil
+}
 
 // IsReady reports whether this boot can safely receive new work. A shared
 // dependency outage removes readiness but does not deliberately restart every
@@ -197,8 +239,9 @@ func (c *Coordinator) Migrate(ctx context.Context) error {
 	// retained only for deterministic unit-state-machine fixtures.
 	if c.db.Dialector.Name() != "sqlite" {
 		migrator := c.db.Migrator()
-		if !migrator.HasTable(&Workflow{}) || !migrator.HasTable(&Instance{}) {
-			return errors.New("document queue schema is missing; run versioned migration 000076")
+		if !migrator.HasTable(&Workflow{}) || !migrator.HasTable(&Instance{}) ||
+			!migrator.HasTable(&ScheduleGroup{}) {
+			return errors.New("document queue schema is missing; run versioned migrations through 000085")
 		}
 		for _, field := range []string{
 			"dispatch_epoch", "max_retry", "delegate_timeout_nanos", "workflow_timeout_nanos",
@@ -217,7 +260,7 @@ func (c *Coordinator) Migrate(ctx context.Context) error {
 	config := *db.Config
 	config.DisableForeignKeyConstraintWhenMigrating = true
 	db.Config = &config
-	return db.WithContext(ctx).AutoMigrate(&Workflow{}, &Instance{})
+	return db.WithContext(ctx).AutoMigrate(&Workflow{}, &Instance{}, &ScheduleGroup{})
 }
 
 // Start registers this process incarnation, atomically adopts unfinished work
@@ -342,6 +385,9 @@ func (c *Coordinator) ConfirmInstanceTermination(
 	if instanceID == "" || bootID == "" || proof == "" {
 		return fmt.Errorf("%w: instance_id, boot_id and proof are required", ErrTerminationNotProven)
 	}
+	if len(proof) > maxTerminationProofBytes {
+		return fmt.Errorf("%w: proof exceeds %d bytes", ErrTerminationNotProven, maxTerminationProofBytes)
+	}
 	now := time.Now()
 	err := c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var instance Instance
@@ -376,7 +422,7 @@ func (c *Coordinator) ConfirmInstanceTermination(
 		return err
 	}
 	logger.Warnf(ctx,
-		"[document queue] external termination attested instance=%s boot=%s proof=%s",
+		"[document queue] external termination attested instance=%q boot=%q proof=%q",
 		instanceID, bootID, proof,
 	)
 	return nil
@@ -399,35 +445,67 @@ func (c *Coordinator) confirmForeignRuntimeTermination(
 		!workflow.LeaseUntil.Before(now) {
 		return false, nil
 	}
-	stale, err := c.instanceIsStale(ctx, workflow.OwnerInstanceID, workflow.OwnerBootID, now)
+	return c.ProveInstanceBootTermination(
+		ctx, workflow.OwnerInstanceID, workflow.OwnerBootID,
+	)
+}
+
+// ProveInstanceBootTermination is shared by every durable worker tier. It
+// never treats an expired lease, a stale heartbeat, a missing Pod, or an
+// inactive Redis delivery as proof. A takeover is allowed only after the
+// durable instance row is Stopped, a trusted stable-identity restart replaced
+// the exact boot, or the Kubernetes runtime verifier proves that exact
+// container incarnation terminated.
+func (c *Coordinator) ProveInstanceBootTermination(
+	ctx context.Context,
+	instanceID string,
+	bootID string,
+) (bool, error) {
+	if c == nil || c.db == nil {
+		return false, nil
+	}
+	instanceID = strings.TrimSpace(instanceID)
+	bootID = strings.TrimSpace(bootID)
+	if instanceID == "" || bootID == "" || instanceID == c.instanceID {
+		return false, nil
+	}
+	proven, err := c.instanceTerminationProven(ctx, instanceID, bootID)
+	if err != nil || proven {
+		return proven, err
+	}
+	if c.runtimeVerifier == nil || !c.IsReady() {
+		return false, nil
+	}
+	now := time.Now()
+	stale, err := c.instanceIsStale(ctx, instanceID, bootID, now)
 	if err != nil || !stale {
 		return false, err
 	}
 	evidence, err := c.runtimeVerifier.VerifyTermination(
-		ctx, workflow.OwnerInstanceID, workflow.OwnerBootID,
+		ctx, instanceID, bootID,
 	)
 	if err != nil {
 		return false, fmt.Errorf(
 			"verify Kubernetes runtime termination for %s/%s: %w",
-			workflow.OwnerInstanceID, workflow.OwnerBootID, err,
+			instanceID, bootID, err,
 		)
 	}
 	if !evidence.Proven || strings.TrimSpace(evidence.Proof) == "" {
 		return false, nil
 	}
 	if err := c.ConfirmInstanceTermination(
-		ctx, workflow.OwnerInstanceID, workflow.OwnerBootID, evidence.Proof,
+		ctx, instanceID, bootID, evidence.Proof,
 	); err != nil {
 		if errors.Is(err, ErrStaleDelivery) {
 			// A trusted same-Pod restart may have replaced the boot after the API
 			// observation. Re-read the durable proof instead of overwriting it.
-			return c.instanceTerminationProven(ctx, workflow.OwnerInstanceID, workflow.OwnerBootID)
+			return c.instanceTerminationProven(ctx, instanceID, bootID)
 		}
 		return false, err
 	}
 	logger.Warnf(ctx,
-		"[document queue] Kubernetes runtime proved owner terminated instance=%s boot=%s reason=%s",
-		workflow.OwnerInstanceID, workflow.OwnerBootID, evidence.Reason,
+		"[document queue] Kubernetes runtime proved owner terminated instance=%q boot=%q reason=%q",
+		instanceID, bootID, evidence.Reason,
 	)
 	return true, nil
 }
@@ -666,6 +744,27 @@ func (c *Coordinator) reserveExecution(cancel context.CancelFunc) (string, error
 	key := "admission:" + uuid.NewString()
 	c.active[key] = cancel
 	return key, nil
+}
+
+// RegisterAuxiliaryExecution adds non-root work which can still mutate a
+// document (for example a physically split part) to the same process-lifetime
+// fence as root workflows. The returned release function is idempotent.
+//
+// Stop must not publish InstanceStopped while any registered handler is still
+// running: other replicas use that durable state as an immediate takeover
+// proof. Registration therefore tracks lifecycle only and deliberately does
+// not consume an additional document-capacity slot.
+func (c *Coordinator) RegisterAuxiliaryExecution(cancel context.CancelFunc) (func(), error) {
+	key, err := c.reserveExecution(cancel)
+	if err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.removeExecution(key)
+		})
+	}, nil
 }
 
 func (c *Coordinator) bindExecution(admissionKey string, lease *Lease, cancel context.CancelFunc) string {
@@ -1041,6 +1140,27 @@ func workflowKnowledgeBindingQuery(tx *gorm.DB, binding WorkflowBinding) *gorm.D
 	)
 }
 
+func validateCancellationBinding(workflow *Workflow, binding CancellationBinding) error {
+	if workflow == nil || workflow.ID != strings.TrimSpace(binding.WorkflowID) ||
+		workflow.TenantID != binding.TenantID ||
+		workflow.KnowledgeBaseID != strings.TrimSpace(binding.KnowledgeBaseID) ||
+		workflow.KnowledgeID != strings.TrimSpace(binding.KnowledgeID) ||
+		workflow.ProcessingGeneration != strings.TrimSpace(binding.ProcessingGeneration) {
+		return ErrWorkflowNotBound
+	}
+	identity, err := decodeIdentity(workflow.Payload)
+	if err != nil {
+		return fmt.Errorf("decode persisted workflow cancellation identity: %w", err)
+	}
+	if identity.TenantID != workflow.TenantID ||
+		identity.KnowledgeBaseID != workflow.KnowledgeBaseID ||
+		identity.KnowledgeID != workflow.KnowledgeID ||
+		identity.ProcessingGeneration != workflow.ProcessingGeneration {
+		return ErrWorkflowNotBound
+	}
+	return nil
+}
+
 // claimableKnowledgeBindingQuery accepts every durable whole-document resume
 // boundary, not only the first Pending delivery. A terminated worker may have
 // already claimed core processing, or committed the immutable fanout plan and
@@ -1049,10 +1169,12 @@ func claimableKnowledgeBindingQuery(tx *gorm.DB, binding WorkflowBinding) *gorm.
 	return workflowKnowledgeBindingQuery(tx, binding).Where(
 		`(parse_status = ? AND processing_owner = ?)
 		 OR (parse_status = ? AND (processing_owner = ? OR (processing_owner = '' AND processed_at IS NOT NULL)))
+		 OR (parse_status = ? AND processing_owner = '' AND processed_at IS NOT NULL)
 		 OR (parse_status = ? AND processing_owner = '' AND processed_at IS NOT NULL)`,
 		types.ParseStatusPending, binding.ProcessingOwner,
 		types.ParseStatusProcessing, binding.ProcessingOwner,
 		types.ParseStatusFinalizing,
+		types.ParseStatusCompleted,
 	)
 }
 
@@ -1172,7 +1294,7 @@ func (c *Coordinator) CommitPreparedReparse(
 		}
 		if alreadyBound == 1 {
 			switch workflow.State {
-			case StatePreparing, StateQueued, StateLeased:
+			case StatePreparing, StateQueued, StateLeased, StateWaitingExternal:
 				return nil
 			default:
 				return ErrStaleDelivery
@@ -1192,6 +1314,9 @@ func (c *Coordinator) CommitPreparedReparse(
 				"processed_at":           nil,
 				"embedding_model_id":     transition.EmbeddingModelID,
 				"pending_subtasks_count": 0,
+				"enrichment_status":      types.EnrichmentStatusNone,
+				"wiki_status":            types.WikiStatusNone,
+				"wiki_error_message":     "",
 				"error_message":          transition.ErrorMessage,
 				"processing_workflow_id": binding.WorkflowID,
 				"updated_at":             transition.UpdatedAt,
@@ -1201,6 +1326,123 @@ func (c *Coordinator) CommitPreparedReparse(
 		}
 		if result.RowsAffected != 1 {
 			return ErrWorkflowNotBound
+		}
+		return nil
+	})
+}
+
+// CommitWorkflowCancellation is the cancellation publication boundary for a
+// bound document generation. It locks workflow before knowledge, matching the
+// reparse/activation lock order, then cancels both rows atomically. A restart
+// adoption racing this transaction can therefore occur only before the fence
+// (and is overwritten) or after it (and no longer matches state=leased).
+//
+// Incrementing dispatch_epoch also makes every already-published Redis copy
+// stale. The caller still performs best-effort Redis cancellation afterwards,
+// but no stale copy can reacquire this workflow or run the business delegate.
+func (c *Coordinator) CommitWorkflowCancellation(
+	ctx context.Context,
+	binding CancellationBinding,
+	updatedAt time.Time,
+) error {
+	if c == nil || c.db == nil {
+		return errors.New("document queue: cancellation transaction is unavailable")
+	}
+	if updatedAt.IsZero() {
+		return errors.New("document queue: cancellation timestamp is required")
+	}
+	return c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var workflow Workflow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", strings.TrimSpace(binding.WorkflowID)).
+			Take(&workflow).Error; err != nil {
+			return err
+		}
+		if err := validateCancellationBinding(&workflow, binding); err != nil {
+			return err
+		}
+
+		var knowledgeState struct {
+			ParseStatus string
+		}
+		knowledgeQuery := tx.Table("knowledges").
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("parse_status").
+			Where(
+				"id = ? AND tenant_id = ? AND knowledge_base_id = ? AND processing_generation = ? AND processing_workflow_id = ? AND deleted_at IS NULL",
+				binding.KnowledgeID,
+				binding.TenantID,
+				binding.KnowledgeBaseID,
+				binding.ProcessingGeneration,
+				binding.WorkflowID,
+			)
+		if err := knowledgeQuery.Take(&knowledgeState).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrWorkflowNotBound
+			}
+			return err
+		}
+		if knowledgeState.ParseStatus != types.ParseStatusCancelling &&
+			knowledgeState.ParseStatus != types.ParseStatusCancelled {
+			return ErrWorkflowNotBound
+		}
+
+		if knowledgeState.ParseStatus == types.ParseStatusCancelling {
+			result := tx.Table("knowledges").
+				Where(
+					"id = ? AND tenant_id = ? AND knowledge_base_id = ? AND processing_generation = ? AND processing_workflow_id = ? AND parse_status = ? AND deleted_at IS NULL",
+					binding.KnowledgeID,
+					binding.TenantID,
+					binding.KnowledgeBaseID,
+					binding.ProcessingGeneration,
+					binding.WorkflowID,
+					types.ParseStatusCancelling,
+				).
+				Updates(map[string]interface{}{
+					"parse_status":           types.ParseStatusCancelled,
+					"error_message":          "用户已取消解析",
+					"pending_subtasks_count": 0,
+					"summary_status":         types.SummaryStatusNone,
+					"enrichment_status":      types.EnrichmentStatusNone,
+					"wiki_status":            types.WikiStatusNone,
+					"wiki_error_message":     "",
+					"processing_owner":       "",
+					"processing_fanout":      nil,
+					"updated_at":             updatedAt,
+				})
+			if result.Error != nil {
+				return fmt.Errorf("commit cancelled knowledge generation: %w", result.Error)
+			}
+			if result.RowsAffected != 1 {
+				return ErrWorkflowNotBound
+			}
+		}
+
+		if workflow.State == StateCancelled {
+			return nil
+		}
+		result := tx.Model(&Workflow{}).
+			Where("id = ? AND version = ?", workflow.ID, workflow.Version).
+			Updates(map[string]interface{}{
+				"state":              StateCancelled,
+				"stage":              "cancelled",
+				"dispatch_epoch":     gorm.Expr("dispatch_epoch + 1"),
+				"dispatch_task_id":   "",
+				"owner_instance_id":  "",
+				"owner_boot_id":      "",
+				"lease_until":        nil,
+				"last_dispatched_at": nil,
+				"last_heartbeat_at":  nil,
+				"completed_at":       updatedAt,
+				"last_error":         "cancelled by user",
+				"version":            gorm.Expr("version + 1"),
+				"updated_at":         updatedAt,
+			})
+		if result.Error != nil {
+			return fmt.Errorf("commit cancelled document workflow: %w", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return ErrStaleDelivery
 		}
 		return nil
 	})
@@ -1224,7 +1466,7 @@ func (c *Coordinator) activatePreparedWorkflowTx(tx *gorm.DB, binding WorkflowBi
 			// crossed the core/fanout boundary. Keep Resume and Claim on the same
 			// durable recovery predicate.
 			bindingQuery = claimableKnowledgeBindingQuery(tx, binding)
-		case StateLeased, StateCompleted, StateFailed, StateCancelled, StateSuperseded:
+		case StateLeased, StateWaitingExternal, StateCompleted, StateFailed, StateCancelled, StateSuperseded:
 			// Idempotent Resume must still prove the exact immutable generation
 			// and workflow relationship. The processing owner is intentionally
 			// absent after core commit and in terminal document states.
@@ -1413,11 +1655,26 @@ func (c *Coordinator) Dispatch(ctx context.Context, workflow *Workflow) (*asynq.
 
 func (c *Coordinator) recordDispatch(ctx context.Context, workflow *Workflow, taskID string) error {
 	now := time.Now()
-	result := c.db.WithContext(ctx).Model(&Workflow{}).
-		Where("id = ? AND state = ? AND dispatch_epoch = ?", workflow.ID, StateQueued, workflow.DispatchEpoch).
+	query := c.db.WithContext(ctx).Model(&Workflow{}).
+		Where("id = ? AND state = ? AND dispatch_epoch = ?", workflow.ID, StateQueued, workflow.DispatchEpoch)
+	if workflow.LastDispatchedAt == nil {
+		query = query.Where("last_dispatched_at IS NULL")
+	} else {
+		query = query.Where("last_dispatched_at = ?", *workflow.LastDispatchedAt)
+	}
+	result := query.
 		Updates(map[string]interface{}{
-			"dispatch_task_id":   taskID,
-			"dispatch_attempts":  gorm.Expr("dispatch_attempts + 1"),
+			"dispatch_task_id": taskID,
+			// Recovery is intentionally run by every replica. Re-publishing the
+			// same durable TaskID is a liveness probe, not a new delivery
+			// attempt; count only a newly recorded outbox identity. The
+			// last_dispatched_at compare-and-swap also makes one replica the
+			// publisher for a stale snapshot instead of letting the whole fleet
+			// hammer Redis with the same TaskID concurrently.
+			"dispatch_attempts": gorm.Expr(
+				"dispatch_attempts + CASE WHEN dispatch_task_id = ? THEN 0 ELSE 1 END",
+				taskID,
+			),
 			"last_dispatched_at": now, "updated_at": now,
 		})
 	if result.Error != nil {
@@ -1426,6 +1683,11 @@ func (c *Coordinator) recordDispatch(ctx context.Context, workflow *Workflow, ta
 	if result.RowsAffected != 1 {
 		return ErrStaleDelivery
 	}
+	if workflow.DispatchTaskID != taskID {
+		workflow.DispatchAttempts++
+	}
+	workflow.DispatchTaskID = taskID
+	workflow.LastDispatchedAt = &now
 	return nil
 }
 
@@ -1464,6 +1726,13 @@ func (c *Coordinator) reconcileQueuedTerminal(
 	if result.RowsAffected == 1 {
 		workflow.State = state
 		workflow.Stage = stage
+		if spanErr := c.reconcileTerminalAttemptSpans(
+			ctx, workflow.KnowledgeID, state, stage,
+		); spanErr != nil {
+			logger.Warnf(ctx,
+				"[document queue] queued terminal span reconciliation failed workflow=%s: %v",
+				workflow.ID, spanErr)
+		}
 		return true, synthesizedTaskInfo(workflow), nil
 	}
 	var current Workflow
@@ -1578,31 +1847,188 @@ func (c *Coordinator) RecoverNow(ctx context.Context) error {
 	if err := c.recoverPreparing(ctx); err != nil {
 		errs = append(errs, err)
 	}
-	now := time.Now()
-	staleDispatch := now.Add(-3 * c.config.RecoveryInterval)
-	var queued []Workflow
-	if err := c.db.WithContext(ctx).
-		Where("state = ? AND (last_dispatched_at IS NULL OR last_dispatched_at < ?)", StateQueued, staleDispatch).
-		Order("enqueued_at ASC, id ASC").Limit(c.config.RecoveryBatchSize).Find(&queued).Error; err != nil {
-		return fmt.Errorf("list queued document workflows: %w", err)
+	if err := c.recoverWaitingExternal(ctx); err != nil {
+		errs = append(errs, err)
 	}
-	for i := range queued {
-		terminal, _, terminalErr := c.reconcileQueuedTerminal(ctx, &queued[i])
-		if terminalErr != nil {
-			errs = append(errs, fmt.Errorf("reconcile queued workflow %s: %w", queued[i].ID, terminalErr))
-			continue
-		}
-		if terminal {
-			continue
-		}
-		_, err := c.Dispatch(ctx, &queued[i])
-		if err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) && !errors.Is(err, ErrStaleDelivery) {
-			errs = append(errs, fmt.Errorf("dispatch workflow %s: %w", queued[i].ID, err))
-		}
+	if err := c.reconcileTerminalSpanOrphans(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	now := time.Now()
+	if _, err := c.dispatchNextQueued(ctx); err != nil &&
+		!errors.Is(err, asynq.ErrTaskIDConflict) &&
+		!errors.Is(err, ErrStaleDelivery) {
+		errs = append(errs, err)
 	}
 
 	if err := c.recoverExpiredLeases(ctx, now); err != nil {
 		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// dispatchNextQueued publishes at most one fair queue head. A successful
+// Claim immediately calls this again, forming a short admission chain that
+// fills every replica without preloading Redis with the entire document
+// backlog. Keeping only the current head deliverable also prevents hundreds of
+// out-of-order tasks from repeatedly rotating epochs and hammering PostgreSQL.
+//
+// Terminal/superseded heads are reconciled in-place and skipped, bounded by the
+// recovery batch size, so an old terminal prefix cannot block live work.
+func (c *Coordinator) dispatchNextQueued(ctx context.Context) (*asynq.TaskInfo, error) {
+	if c == nil || c.db == nil || c.client == nil {
+		return nil, nil
+	}
+	staleDispatch := time.Now().Add(-3 * c.config.RecoveryInterval)
+	for scanned := 0; scanned < c.config.RecoveryBatchSize; scanned++ {
+		queued, err := c.listQueuedForDispatch(ctx, staleDispatch)
+		if err != nil {
+			return nil, fmt.Errorf("list queued document workflows: %w", err)
+		}
+		if len(queued) == 0 {
+			return nil, nil
+		}
+		workflow := &queued[0]
+		terminal, _, terminalErr := c.reconcileQueuedTerminal(ctx, workflow)
+		if terminalErr != nil {
+			return nil, fmt.Errorf("reconcile queued workflow %s: %w", workflow.ID, terminalErr)
+		}
+		if terminal {
+			continue
+		}
+		info, dispatchErr := c.Dispatch(ctx, workflow)
+		if dispatchErr != nil {
+			return nil, fmt.Errorf("dispatch workflow %s: %w", workflow.ID, dispatchErr)
+		}
+		return info, nil
+	}
+	return nil, nil
+}
+
+func (c *Coordinator) listQueuedForDispatch(ctx context.Context, staleDispatch time.Time) ([]Workflow, error) {
+	if c == nil || c.db == nil {
+		return nil, nil
+	}
+	var queued []Workflow
+	raw := `
+		WITH active_groups AS (
+			SELECT w.tenant_id, w.knowledge_base_id, COUNT(*) AS active_count
+			FROM custom_document_queue_workflows w
+			JOIN knowledges k ON k.id = w.knowledge_id
+			 AND k.tenant_id = w.tenant_id
+			 AND k.processing_generation = w.processing_generation
+			 AND k.deleted_at IS NULL
+			WHERE w.state = ?
+			GROUP BY w.tenant_id, w.knowledge_base_id
+		), ranked AS (
+			SELECT w.*,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY w.tenant_id, w.knowledge_base_id
+			           ORDER BY w.enqueued_at ASC, w.id ASC
+			       ) AS group_position,
+			       COALESCE(a.active_count, 0) AS active_count,
+			       sg.last_admitted_at AS schedule_last_admitted_at
+			FROM custom_document_queue_workflows w
+			LEFT JOIN active_groups a
+			  ON a.tenant_id = w.tenant_id
+			 AND a.knowledge_base_id = w.knowledge_base_id
+			LEFT JOIN custom_document_queue_schedule_groups sg
+			  ON sg.tenant_id = w.tenant_id
+			 AND sg.knowledge_base_id = w.knowledge_base_id
+			WHERE w.state = ?
+		), fair_head AS (
+			SELECT *
+			FROM ranked
+			ORDER BY group_position ASC,
+			         active_count ASC,
+			         CASE WHEN schedule_last_admitted_at IS NULL THEN 0 ELSE 1 END ASC,
+			         schedule_last_admitted_at ASC,
+			         enqueued_at ASC,
+			         id ASC
+			LIMIT 1
+		)
+		SELECT *
+		FROM fair_head
+		WHERE last_dispatched_at IS NULL OR last_dispatched_at < ?`
+	err := c.db.WithContext(ctx).Raw(
+		raw, StateLeased, StateQueued, staleDispatch,
+	).Scan(&queued).Error
+	return queued, err
+}
+
+func (c *Coordinator) recoverWaitingExternal(ctx context.Context) error {
+	if c == nil || c.db == nil {
+		return nil
+	}
+	var waiting []Workflow
+	if err := c.db.WithContext(ctx).
+		Where("state = ?", StateWaitingExternal).
+		Order("updated_at ASC, id ASC").
+		Limit(c.config.RecoveryBatchSize).
+		Find(&waiting).Error; err != nil {
+		return fmt.Errorf("list externally waiting document workflows: %w", err)
+	}
+	var errs []error
+	for i := range waiting {
+		workflow := &waiting[i]
+		lease := &Lease{
+			WorkflowID: workflow.ID, Epoch: workflow.DispatchEpoch,
+			TenantID: workflow.TenantID, KnowledgeID: workflow.KnowledgeID,
+			KnowledgeBaseID: workflow.KnowledgeBaseID, Generation: workflow.ProcessingGeneration,
+		}
+		snapshot, state, stage, terminal, err := c.observe(ctx, lease)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("observe externally waiting workflow %s: %w", workflow.ID, err))
+			continue
+		}
+		now := time.Now()
+		if terminal {
+			lastError := ""
+			if state == StateFailed && snapshot != nil {
+				lastError = strings.TrimSpace(snapshot.WikiErrorMessage)
+				if lastError == "" {
+					lastError = "required document derivative finished with status " + stage
+				}
+			}
+			result := c.db.WithContext(ctx).Model(&Workflow{}).
+				Where("id = ? AND state = ? AND version = ?",
+					workflow.ID, StateWaitingExternal, workflow.Version).
+				Updates(map[string]interface{}{
+					"state": state, "stage": stage, "completed_at": now,
+					"last_error": lastError, "version": gorm.Expr("version + 1"), "updated_at": now,
+				})
+			if result.Error != nil {
+				errs = append(errs, fmt.Errorf("finalize externally waiting workflow %s: %w", workflow.ID, result.Error))
+			} else if result.RowsAffected == 1 {
+				if spanErr := c.reconcileTerminalAttemptSpans(
+					ctx, workflow.KnowledgeID, state, stage,
+				); spanErr != nil {
+					errs = append(errs, fmt.Errorf(
+						"reconcile terminal spans for externally waiting workflow %s: %w",
+						workflow.ID, spanErr,
+					))
+				}
+			}
+			continue
+		}
+		// waiting_external was used by the earlier implementation to release a
+		// document slot while Wiki was still pending. That allowed hundreds of
+		// later documents to finish core work and recreate a large Wiki tail.
+		// Resume every non-terminal legacy row through the immutable root plan;
+		// Process detects a committed core generation and waits without calling
+		// the core delegate again.
+		result := c.db.WithContext(ctx).Model(&Workflow{}).
+			Where("id = ? AND state = ? AND version = ?",
+				workflow.ID, StateWaitingExternal, workflow.Version).
+			Updates(map[string]interface{}{
+				"state": StateQueued, "stage": "queued",
+				"dispatch_epoch":   gorm.Expr("dispatch_epoch + 1"),
+				"dispatch_task_id": "", "last_dispatched_at": nil,
+				"last_error": "external wait boundary no longer valid; resuming durable workflow",
+				"version":    gorm.Expr("version + 1"), "updated_at": now,
+			})
+		if result.Error != nil {
+			errs = append(errs, fmt.Errorf("resume invalid external wait workflow %s: %w", workflow.ID, result.Error))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -2035,6 +2461,107 @@ func (c *Coordinator) acquireSlot(ctx context.Context) (func(), error) {
 	}
 }
 
+func lockFairSchedulerTx(tx *gorm.DB) error {
+	if tx == nil || tx.Dialector.Name() != "postgres" {
+		return nil
+	}
+	return tx.Exec("SELECT pg_advisory_xact_lock(?)", documentSchedulerAdvisoryLock).Error
+}
+
+func fairNextWorkflowID(tx *gorm.DB) (string, error) {
+	if tx == nil {
+		return "", errors.New("document queue: fair scheduler transaction is unavailable")
+	}
+	type fairHead struct {
+		ID string
+	}
+	var head fairHead
+	raw := `
+		WITH current_work AS (
+			SELECT w.id, w.tenant_id, w.knowledge_base_id, w.state, w.enqueued_at
+			FROM custom_document_queue_workflows w
+			JOIN knowledges k ON k.id = w.knowledge_id
+			 AND k.tenant_id = w.tenant_id
+			 AND k.processing_generation = w.processing_generation
+			 AND k.deleted_at IS NULL
+			WHERE w.state IN (?, ?)
+		), group_stats AS (
+			SELECT tenant_id, knowledge_base_id,
+			       SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS active_count
+			FROM current_work
+			GROUP BY tenant_id, knowledge_base_id
+		), queued_heads AS (
+			SELECT id, tenant_id, knowledge_base_id, enqueued_at,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY tenant_id, knowledge_base_id
+			           ORDER BY enqueued_at ASC, id ASC
+			       ) AS group_position
+			FROM current_work
+			WHERE state = ?
+		)
+		SELECT q.id
+		FROM queued_heads q
+		JOIN group_stats g
+		  ON g.tenant_id = q.tenant_id
+		 AND g.knowledge_base_id = q.knowledge_base_id
+		LEFT JOIN custom_document_queue_schedule_groups sg
+		  ON sg.tenant_id = q.tenant_id
+		 AND sg.knowledge_base_id = q.knowledge_base_id
+		WHERE q.group_position = 1
+		ORDER BY g.active_count ASC,
+		         CASE WHEN sg.last_admitted_at IS NULL THEN 0 ELSE 1 END ASC,
+		         sg.last_admitted_at ASC,
+		         q.enqueued_at ASC,
+		         q.id ASC
+		LIMIT 1`
+	result := tx.Raw(raw, StateQueued, StateLeased, StateLeased, StateQueued).Scan(&head)
+	if result.Error != nil {
+		return "", result.Error
+	}
+	return strings.TrimSpace(head.ID), nil
+}
+
+func deferFairDeliveryTx(tx *gorm.DB, workflow *Workflow, now time.Time) error {
+	if tx == nil || workflow == nil {
+		return errors.New("document queue: fair deferral is unavailable")
+	}
+	result := tx.Model(&Workflow{}).
+		Where("id = ? AND state = ? AND dispatch_epoch = ?",
+			workflow.ID, StateQueued, workflow.DispatchEpoch).
+		Updates(map[string]interface{}{
+			"dispatch_epoch":     gorm.Expr("dispatch_epoch + 1"),
+			"dispatch_task_id":   "",
+			"last_dispatched_at": nil,
+			"last_error":         "delivery deferred for fair knowledge-base scheduling",
+			"version":            gorm.Expr("version + 1"),
+			"updated_at":         now,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrStaleDelivery
+	}
+	return nil
+}
+
+func recordScheduleAdmissionTx(tx *gorm.DB, workflow *Workflow, now time.Time) error {
+	if tx == nil || workflow == nil {
+		return errors.New("document queue: schedule admission is unavailable")
+	}
+	group := ScheduleGroup{
+		TenantID: workflow.TenantID, KnowledgeBaseID: workflow.KnowledgeBaseID,
+		LastAdmittedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "tenant_id"}, {Name: "knowledge_base_id"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"last_admitted_at": now,
+			"updated_at":       now,
+		}),
+	}).Create(&group).Error
+}
+
 // Claim is the single transition from queued to leased. A task that is
 // delivered twice while the first copy is active gets ErrAlreadyLeased even
 // when both copies run in the same process.
@@ -2058,7 +2585,10 @@ func (c *Coordinator) Claim(ctx context.Context, taskType string, payload []byte
 		identity.DocumentWorkflowEpoch = workflow.DispatchEpoch
 	}
 	var lease Lease
+	var fairnessDeferred bool
 	now := time.Now()
+	documentSchedulerProcessMu.Lock()
+	defer documentSchedulerProcessMu.Unlock()
 	err = c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var instance Instance
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -2070,6 +2600,9 @@ func (c *Coordinator) Claim(ctx context.Context, taskType string, payload []byte
 		}
 		if instance.BootID != c.bootID || instance.State != InstanceReady {
 			return ErrInstanceFenced
+		}
+		if err := lockFairSchedulerTx(tx); err != nil {
+			return fmt.Errorf("lock document fair scheduler: %w", err)
 		}
 		var workflow Workflow
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -2099,12 +2632,44 @@ func (c *Coordinator) Claim(ctx context.Context, taskType string, payload []byte
 			}
 			return ErrStaleDelivery
 		}
+		// The process-local semaphore is the fast-path admission gate, but it
+		// cannot be the authority after a database outage. A handler may return
+		// and release its local slot while its best-effort lease release fails,
+		// leaving a durable leased row owned by this exact boot. Without this
+		// transaction-level check the recovered process can claim another
+		// capacity worth of documents and temporarily own 2x (or more) its
+		// configured limit. The locked instance row serializes this count with
+		// every concurrent Claim from the same stable boot.
+		var durableLeases int64
+		if err := tx.Model(&Workflow{}).
+			Where("state = ? AND owner_instance_id = ? AND owner_boot_id = ?",
+				StateLeased, c.instanceID, c.bootID).
+			Count(&durableLeases).Error; err != nil {
+			return fmt.Errorf("count durable instance leases: %w", err)
+		}
+		if durableLeases >= int64(c.capacity) {
+			return ErrInstanceCapacity
+		}
 		var bound int64
 		if err := claimableKnowledgeBindingQuery(tx, binding).Count(&bound).Error; err != nil {
 			return err
 		}
 		if bound != 1 {
 			return ErrStaleDelivery
+		}
+		nextWorkflowID, err := fairNextWorkflowID(tx)
+		if err != nil {
+			return fmt.Errorf("select fair document workflow: %w", err)
+		}
+		if nextWorkflowID == "" {
+			return ErrStaleDelivery
+		}
+		if nextWorkflowID != workflow.ID {
+			if err := deferFairDeliveryTx(tx, &workflow, now); err != nil {
+				return err
+			}
+			fairnessDeferred = true
+			return nil
 		}
 		leaseUntil := now.Add(c.config.LeaseDuration)
 		updates := map[string]interface{}{
@@ -2125,6 +2690,9 @@ func (c *Coordinator) Claim(ctx context.Context, taskType string, payload []byte
 		if result.RowsAffected != 1 {
 			return ErrAlreadyLeased
 		}
+		if err := recordScheduleAdmissionTx(tx, &workflow, now); err != nil {
+			return fmt.Errorf("record document schedule admission: %w", err)
+		}
 		lease = Lease{
 			WorkflowID: workflow.ID, Epoch: workflow.DispatchEpoch,
 			TenantID: workflow.TenantID, KnowledgeID: workflow.KnowledgeID,
@@ -2135,8 +2703,25 @@ func (c *Coordinator) Claim(ctx context.Context, taskType string, payload []byte
 		return nil
 	})
 	if err != nil {
+		result := "error"
+		switch {
+		case errors.Is(err, ErrStaleDelivery):
+			result = "stale"
+		case errors.Is(err, ErrAlreadyLeased):
+			result = "already_leased"
+		case errors.Is(err, ErrInstanceCapacity):
+			result = "capacity"
+		case errors.Is(err, ErrInstanceFenced):
+			result = "fenced"
+		}
+		pipelineobs.ObserveDocumentWorkflow("claim", result)
 		return nil, err
 	}
+	if fairnessDeferred {
+		pipelineobs.ObserveDocumentWorkflow("claim", "fairness_deferred")
+		return nil, ErrFairnessDeferred
+	}
+	pipelineobs.ObserveDocumentWorkflow("claim", "success")
 	return &lease, nil
 }
 
@@ -2145,13 +2730,16 @@ type knowledgeSnapshot struct {
 	ProcessingGeneration string
 	ProcessingOwner      string
 	PendingSubtasksCount int
+	EnrichmentStatus     string
+	WikiStatus           string
+	WikiErrorMessage     string
 	UpdatedAt            time.Time
 }
 
 func (c *Coordinator) loadKnowledge(ctx context.Context, lease *Lease) (*knowledgeSnapshot, error) {
 	var snapshot knowledgeSnapshot
 	err := c.db.WithContext(ctx).Table("knowledges").
-		Select("parse_status, processing_generation, processing_owner, pending_subtasks_count, updated_at").
+		Select("parse_status, processing_generation, processing_owner, pending_subtasks_count, enrichment_status, wiki_status, wiki_error_message, updated_at").
 		Where("tenant_id = ? AND id = ? AND knowledge_base_id = ? AND deleted_at IS NULL",
 			lease.TenantID, lease.KnowledgeID, lease.KnowledgeBaseID).
 		Take(&snapshot).Error
@@ -2205,12 +2793,32 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 	}
 	switch snapshot.ParseStatus {
 	case types.ParseStatusCompleted:
+		switch snapshot.EnrichmentStatus {
+		case types.EnrichmentStatusPending:
+			return "", "derivatives", false, nil
+		case types.EnrichmentStatusFailed:
+			return StateFailed, "enrichment_failed", true, nil
+		case types.EnrichmentStatusDegraded:
+			return StateFailed, "enrichment_degraded", true, nil
+		}
 		pending, err := c.wikiPending(ctx, lease)
 		if err != nil {
 			return "", "wiki", false, err
 		}
 		if pending {
 			return "", "wiki", false, nil
+		}
+		switch snapshot.WikiStatus {
+		case types.WikiStatusPending:
+			// A Wiki worker persists its terminal generation status before
+			// acknowledging the durable pending row. If the row is temporarily
+			// absent while status is still pending, fail closed and let Wiki
+			// recovery repair the hand-off instead of reporting false success.
+			return "", "wiki", false, nil
+		case types.WikiStatusFailed:
+			return StateFailed, "wiki_failed", true, nil
+		case types.WikiStatusDegraded:
+			return StateFailed, "wiki_degraded", true, nil
 		}
 		return StateCompleted, "completed", true, nil
 	case types.ParseStatusFailed:
@@ -2220,6 +2828,12 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 	default:
 		return "", stageForKnowledge(snapshot), false, nil
 	}
+}
+
+func shouldAwaitCommittedDerivatives(snapshot *knowledgeSnapshot, stage string) bool {
+	return snapshot != nil &&
+		snapshot.ParseStatus == types.ParseStatusCompleted &&
+		stage == "wiki"
 }
 
 func (c *Coordinator) renew(ctx context.Context, lease *Lease, stage string, progressAt time.Time) error {
@@ -2240,11 +2854,14 @@ func (c *Coordinator) renew(ctx context.Context, lease *Lease, stage string, pro
 		)`, c.instanceID, c.bootID, []string{InstanceReady, InstanceDraining, InstanceDegraded}).
 		Updates(updates)
 	if result.Error != nil {
+		pipelineobs.ObserveDocumentWorkflow("renew", "error")
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
+		pipelineobs.ObserveDocumentWorkflow("renew", "lease_lost")
 		return ErrLeaseLost
 	}
+	pipelineobs.ObserveDocumentWorkflow("renew", "success")
 	return nil
 }
 
@@ -2265,12 +2882,166 @@ func (c *Coordinator) release(ctx context.Context, lease *Lease, cause error) er
 			"version": gorm.Expr("version + 1"), "updated_at": now,
 		})
 	if result.Error != nil {
+		pipelineobs.ObserveDocumentWorkflow("release", "error")
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
+		pipelineobs.ObserveDocumentWorkflow("release", "lease_lost")
 		return ErrLeaseLost
 	}
+	pipelineobs.ObserveDocumentWorkflow("release", "success")
 	return nil
+}
+
+// reconcileTerminalAttemptSpans enforces the observability side of the
+// document-level state machine: once the durable workflow for the current
+// generation is terminal, its latest processing attempt cannot legitimately
+// retain pending/running nodes. Abrupt pod termination can strand those rows
+// after the business writes have already committed; closing them here keeps
+// the trace API aligned with PostgreSQL's authoritative workflow outcome.
+//
+// Historical terminal rows are preserved verbatim. In particular, a failed
+// Wiki retry remains visible as history even when a later retry succeeds.
+func (c *Coordinator) reconcileTerminalAttemptSpans(
+	ctx context.Context,
+	knowledgeID string,
+	state WorkflowState,
+	stage string,
+) error {
+	if c == nil || c.db == nil || strings.TrimSpace(knowledgeID) == "" {
+		return nil
+	}
+	if !c.db.Migrator().HasTable(&types.KnowledgeProcessingSpan{}) {
+		// The lightweight state-machine tests intentionally migrate only the
+		// queue tables unless a test is exercising span reconciliation.
+		return nil
+	}
+
+	var attempt int
+	if err := c.db.WithContext(ctx).
+		Model(&types.KnowledgeProcessingSpan{}).
+		Where("knowledge_id = ?", knowledgeID).
+		Select("COALESCE(MAX(attempt), 0)").
+		Row().
+		Scan(&attempt); err != nil {
+		return fmt.Errorf("read latest processing attempt for %s: %w", knowledgeID, err)
+	}
+	if attempt <= 0 {
+		return nil
+	}
+
+	now := time.Now()
+	reason := fmt.Sprintf(
+		"document workflow reached terminal state %s at stage %s; stale open span reconciled",
+		state,
+		stage,
+	)
+	descendants := c.db.WithContext(ctx).
+		Model(&types.KnowledgeProcessingSpan{}).
+		Where("knowledge_id = ? AND attempt = ? AND kind <> ? AND status IN ?",
+			knowledgeID, attempt, types.SpanKindRoot,
+			[]string{types.SpanStatusPending, types.SpanStatusRunning}).
+		Updates(map[string]interface{}{
+			"status":        types.SpanStatusCancelled,
+			"error_code":    "DOCUMENT_WORKFLOW_TERMINAL",
+			"error_message": reason,
+			"finished_at":   now,
+			"updated_at":    now,
+		})
+	if descendants.Error != nil {
+		return fmt.Errorf("reconcile open processing spans for %s attempt %d: %w",
+			knowledgeID, attempt, descendants.Error)
+	}
+
+	rootStatus := types.SpanStatusCancelled
+	rootCode := "DOCUMENT_WORKFLOW_TERMINAL"
+	rootMessage := reason
+	switch state {
+	case StateCompleted:
+		rootStatus = types.SpanStatusDone
+		rootCode = ""
+		rootMessage = ""
+	case StateFailed:
+		rootStatus = types.SpanStatusFailed
+		rootCode = "DOCUMENT_WORKFLOW_FAILED"
+	}
+	root := c.db.WithContext(ctx).
+		Model(&types.KnowledgeProcessingSpan{}).
+		Where("knowledge_id = ? AND attempt = ? AND kind = ? AND status IN ?",
+			knowledgeID, attempt, types.SpanKindRoot,
+			[]string{types.SpanStatusPending, types.SpanStatusRunning}).
+		Updates(map[string]interface{}{
+			"status":        rootStatus,
+			"error_code":    rootCode,
+			"error_message": rootMessage,
+			"finished_at":   now,
+			"updated_at":    now,
+		})
+	if root.Error != nil {
+		return fmt.Errorf("reconcile processing root for %s attempt %d: %w",
+			knowledgeID, attempt, root.Error)
+	}
+	if descendants.RowsAffected+root.RowsAffected > 0 {
+		logger.Infof(ctx,
+			"[document queue] reconciled %d stale open span(s) for terminal workflow knowledge=%s attempt=%d state=%s",
+			descendants.RowsAffected+root.RowsAffected, knowledgeID, attempt, state)
+	}
+	return nil
+}
+
+// reconcileTerminalSpanOrphans is the restart/failover repair path for
+// workflows that became terminal before this invariant was introduced or
+// whose process died in the narrow interval between workflow commit and span
+// cleanup. The generation join is essential: an old terminal workflow must
+// never close spans belonging to a newer active reparse of the same document.
+func (c *Coordinator) reconcileTerminalSpanOrphans(ctx context.Context) error {
+	if c == nil || c.db == nil || !c.db.Migrator().HasTable(&types.KnowledgeProcessingSpan{}) {
+		return nil
+	}
+	type candidate struct {
+		KnowledgeID string
+		State       WorkflowState
+		Stage       string
+		UpdatedAt   time.Time
+	}
+	var candidates []candidate
+	err := c.db.WithContext(ctx).
+		Table("custom_document_queue_workflows AS w").
+		Select("DISTINCT w.knowledge_id, w.state, w.stage, w.updated_at").
+		Joins(`JOIN knowledges AS k
+			ON k.id = w.knowledge_id
+			AND k.tenant_id = w.tenant_id
+			AND k.processing_generation = w.processing_generation
+			AND k.deleted_at IS NULL`).
+		Where("w.state IN ?", []WorkflowState{
+			StateCompleted, StateFailed, StateCancelled, StateSuperseded,
+		}).
+		Where(`EXISTS (
+			SELECT 1
+			FROM knowledge_processing_spans AS s
+			WHERE s.knowledge_id = w.knowledge_id
+			  AND s.attempt = (
+				SELECT MAX(latest.attempt)
+				FROM knowledge_processing_spans AS latest
+				WHERE latest.knowledge_id = w.knowledge_id
+			  )
+			  AND s.status IN ?
+		)`, []string{types.SpanStatusPending, types.SpanStatusRunning}).
+		Order("w.updated_at ASC").
+		Limit(c.config.RecoveryBatchSize).
+		Scan(&candidates).Error
+	if err != nil {
+		return fmt.Errorf("list terminal workflows with open spans: %w", err)
+	}
+	var errs []error
+	for _, item := range candidates {
+		if err := c.reconcileTerminalAttemptSpans(
+			ctx, item.KnowledgeID, item.State, item.Stage,
+		); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (c *Coordinator) finish(ctx context.Context, lease *Lease, state WorkflowState, stage string) error {
@@ -2286,15 +3057,32 @@ func (c *Coordinator) finish(ctx context.Context, lease *Lease, state WorkflowSt
 			"version": gorm.Expr("version + 1"), "updated_at": now,
 		})
 	if result.Error != nil {
+		pipelineobs.ObserveDocumentWorkflow("finish", "error")
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
+		pipelineobs.ObserveDocumentWorkflow("finish", "lease_lost")
 		return ErrLeaseLost
 	}
+	if err := c.reconcileTerminalAttemptSpans(
+		mutationCtx, lease.KnowledgeID, state, stage,
+	); err != nil {
+		// Span rows are diagnostic and must never roll back an already durable
+		// business completion. Recovery retries this repair on every replica.
+		logger.Warnf(mutationCtx,
+			"[document queue] terminal span reconciliation failed workflow=%s knowledge=%s: %v",
+			lease.WorkflowID, lease.KnowledgeID, err)
+	}
+	pipelineobs.ObserveDocumentWorkflow("finish", string(state))
 	return nil
 }
 
 func (c *Coordinator) observe(ctx context.Context, lease *Lease) (*knowledgeSnapshot, WorkflowState, string, bool, error) {
+	if c.observeHook != nil {
+		if err := c.observeHook(ctx, lease); err != nil {
+			return nil, "", "", false, err
+		}
+	}
 	snapshot, err := c.loadKnowledge(ctx, lease)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, StateCancelled, "missing", true, nil
@@ -2306,10 +3094,11 @@ func (c *Coordinator) observe(ctx context.Context, lease *Lease) (*knowledgeSnap
 	return snapshot, state, stage, terminal, err
 }
 
-// Process wraps a root document/manual handler. The root delivery intentionally
-// stays active until every counted enrichment task and the durable Wiki ingest
-// row reaches terminal state; this is what turns asynq.concurrency into a
-// per-instance count of complete document workflows rather than task workers.
+// Process wraps a root document/manual handler. It owns one per-instance slot
+// until core parsing and every required derivative, including Wiki, reaches a
+// terminal state. This deliberately bounds downstream backlog to the fleet's
+// document capacity: later documents cannot consume core resources while an
+// unbounded tail of earlier Wiki work remains.
 func (c *Coordinator) Process(ctx context.Context, task *asynq.Task, delegate asynq.HandlerFunc) (retErr error) {
 	if delegate == nil {
 		return errors.New("document queue: root handler is unavailable")
@@ -2343,6 +3132,21 @@ func (c *Coordinator) Process(ctx context.Context, task *asynq.Task, delegate as
 	if err != nil {
 		return err
 	}
+	// Admit the next durable fair head only after this row owns a lease. This
+	// rapidly fills newly added replicas while keeping the Redis document lane
+	// bounded to approximately one pending wake-up instead of the whole
+	// PostgreSQL backlog. Failure is harmless: the recovery loop retries the
+	// outbox without failing work that already owns a lease.
+	if _, dispatchErr := c.dispatchNextQueued(execCtx); dispatchErr != nil &&
+		!errors.Is(dispatchErr, asynq.ErrTaskIDConflict) &&
+		!errors.Is(dispatchErr, ErrStaleDelivery) {
+		logger.Warnf(execCtx,
+			"[document queue] next fair delivery deferred after claim workflow=%s: %v",
+			lease.WorkflowID, dispatchErr,
+		)
+	}
+	pipelineobs.DocumentWorkerStarted()
+	defer pipelineobs.DocumentWorkerStopped()
 
 	activeKey = c.bindExecution(activeKey, lease, cancel)
 	defer func() {
@@ -2375,45 +3179,58 @@ func (c *Coordinator) Process(ctx context.Context, task *asynq.Task, delegate as
 		<-renewDone
 	}()
 
-	if snapshot, state, stage, terminal, observeErr := c.observe(execCtx, lease); observeErr == nil && terminal {
-		_ = snapshot
+	snapshot, state, stage, terminal, observeErr := c.observe(execCtx, lease)
+	if observeErr != nil {
+		if releaseErr := c.release(execCtx, lease, observeErr); releaseErr != nil {
+			return errors.Join(observeErr, releaseErr)
+		}
+		return observeErr
+	}
+	if terminal {
 		return c.finish(execCtx, lease, state, stage)
 	}
 
-	delegateCtx := execCtx
-	delegateCancel := func() {}
-	if lease.DelegateDeadline != nil {
-		delegateCtx, delegateCancel = context.WithDeadline(execCtx, *lease.DelegateDeadline)
-	}
-	if lease.DelegateTimeout > 0 {
-		if deadline, ok := delegateCtx.Deadline(); !ok || time.Now().Add(lease.DelegateTimeout).Before(deadline) {
-			delegateCancel()
-			delegateCtx, delegateCancel = context.WithTimeout(execCtx, lease.DelegateTimeout)
+	// A recovered workflow whose core and enrichment facts are already
+	// committed must not invoke the root parser again. It simply reacquires a
+	// document slot and waits for the durable Wiki intent to settle.
+	if !shouldAwaitCommittedDerivatives(snapshot, stage) {
+		delegateCtx := execCtx
+		delegateCancel := func() {}
+		if lease.DelegateDeadline != nil {
+			delegateCtx, delegateCancel = context.WithDeadline(execCtx, *lease.DelegateDeadline)
 		}
-	}
-	delegateReturned := make(chan struct{})
-	watchdogDone := c.watchDelegate(delegateCtx, delegateReturned, lease)
-	var delegateErr error
-	func() {
-		defer close(delegateReturned)
-		delegateErr = delegate(delegateCtx, task)
-	}()
-	<-watchdogDone
-	delegateCancel()
-	if delegateErr != nil {
-		select {
-		case lostErr := <-leaseLost:
-			return errors.Join(delegateErr, lostErr)
-		default:
+		if lease.DelegateTimeout > 0 {
+			if deadline, ok := delegateCtx.Deadline(); !ok || time.Now().Add(lease.DelegateTimeout).Before(deadline) {
+				delegateCancel()
+				delegateCtx, delegateCancel = context.WithTimeout(execCtx, lease.DelegateTimeout)
+			}
 		}
-		if releaseErr := c.release(execCtx, lease, delegateErr); releaseErr != nil {
-			return errors.Join(delegateErr, releaseErr)
+		delegateReturned := make(chan struct{})
+		watchdogDone := c.watchDelegate(delegateCtx, delegateReturned, lease)
+		var delegateErr error
+		func() {
+			defer close(delegateReturned)
+			delegateErr = delegate(delegateCtx, task)
+		}()
+		<-watchdogDone
+		delegateCancel()
+		if delegateErr != nil {
+			select {
+			case lostErr := <-leaseLost:
+				return errors.Join(delegateErr, lostErr)
+			default:
+			}
+			if releaseErr := c.release(execCtx, lease, delegateErr); releaseErr != nil {
+				return errors.Join(delegateErr, releaseErr)
+			}
+			return delegateErr
 		}
-		return delegateErr
 	}
 
 	ticker := time.NewTicker(c.config.WorkflowPollInterval)
 	defer ticker.Stop()
+	lastPersistedStage := ""
+	lastPersistedProgress := time.Time{}
 	for {
 		snapshot, state, stage, terminal, observeErr := c.observe(execCtx, lease)
 		if observeErr != nil {
@@ -2425,9 +3242,22 @@ func (c *Coordinator) Process(ctx context.Context, task *asynq.Task, delegate as
 		if terminal {
 			return c.finish(execCtx, lease, state, stage)
 		}
-		if err := c.renew(execCtx, lease, stage, snapshot.UpdatedAt); err != nil {
-			cancel()
-			return err
+		progressAt := time.Time{}
+		if snapshot != nil {
+			progressAt = snapshot.UpdatedAt
+		}
+		// Persist an actual stage/business-progress transition immediately so
+		// queue status and takeover diagnostics stay current. An unchanged fast
+		// observation remains read-only; renewLoop is the periodic lease writer.
+		// This avoids every document writing PostgreSQL twice per poll while
+		// retaining the state-machine transition that callers and tests rely on.
+		if stage != lastPersistedStage || !progressAt.Equal(lastPersistedProgress) {
+			if err := c.renew(execCtx, lease, stage, progressAt); err != nil {
+				cancel()
+				return err
+			}
+			lastPersistedStage = stage
+			lastPersistedProgress = progressAt
 		}
 		select {
 		case <-execCtx.Done():
@@ -2607,15 +3437,47 @@ func (c *Coordinator) QueueStatus(ctx context.Context, tenantID uint64, knowledg
 	}
 	var rows []positionRow
 	raw := `
-		WITH ranked AS (
-			SELECT w.tenant_id, w.knowledge_id, w.state, w.stage,
-			       ROW_NUMBER() OVER (ORDER BY w.enqueued_at ASC, w.id ASC) AS position
+		WITH active_groups AS (
+			SELECT w.tenant_id, w.knowledge_base_id, COUNT(*) AS active_count
 			FROM custom_document_queue_workflows w
 			JOIN knowledges k ON k.id = w.knowledge_id
 			 AND k.tenant_id = w.tenant_id
 			 AND k.processing_generation = w.processing_generation
 			 AND k.deleted_at IS NULL
 			WHERE w.state = ?
+			GROUP BY w.tenant_id, w.knowledge_base_id
+		), ranked_by_group AS (
+			SELECT w.tenant_id, w.knowledge_id, w.state, w.stage,
+			       w.enqueued_at, w.id, w.knowledge_base_id,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY w.tenant_id, w.knowledge_base_id
+			           ORDER BY w.enqueued_at ASC, w.id ASC
+			       ) AS group_position,
+			       COALESCE(a.active_count, 0) AS active_count,
+			       sg.last_admitted_at AS schedule_last_admitted_at
+			FROM custom_document_queue_workflows w
+			JOIN knowledges k ON k.id = w.knowledge_id
+			 AND k.tenant_id = w.tenant_id
+			 AND k.processing_generation = w.processing_generation
+			 AND k.deleted_at IS NULL
+			LEFT JOIN active_groups a
+			  ON a.tenant_id = w.tenant_id
+			 AND a.knowledge_base_id = w.knowledge_base_id
+			LEFT JOIN custom_document_queue_schedule_groups sg
+			  ON sg.tenant_id = w.tenant_id
+			 AND sg.knowledge_base_id = w.knowledge_base_id
+			WHERE w.state = ?
+		), ranked AS (
+			SELECT tenant_id, knowledge_id, state, stage,
+			       ROW_NUMBER() OVER (
+			           ORDER BY group_position ASC,
+			                    active_count ASC,
+			                    CASE WHEN schedule_last_admitted_at IS NULL THEN 0 ELSE 1 END ASC,
+			                    schedule_last_admitted_at ASC,
+			                    enqueued_at ASC,
+			                    id ASC
+			       ) AS position
+			FROM ranked_by_group
 		), selected AS (
 			SELECT tenant_id, knowledge_id, position, state, stage
 			FROM ranked
@@ -2631,7 +3493,9 @@ func (c *Coordinator) QueueStatus(ctx context.Context, tenantID uint64, knowledg
 		       totals.waiting_total
 		FROM totals
 		LEFT JOIN selected ON 1 = 1`
-	if err := c.db.WithContext(ctx).Raw(raw, StateQueued, tenantID, ids).Scan(&rows).Error; err != nil {
+	if err := c.db.WithContext(ctx).Raw(
+		raw, StateLeased, StateQueued, tenantID, ids,
+	).Scan(&rows).Error; err != nil {
 		return status, err
 	}
 	if len(rows) > 0 {
@@ -2646,7 +3510,8 @@ func (c *Coordinator) QueueStatus(ctx context.Context, tenantID uint64, knowledg
 	var active []Workflow
 	if err := c.db.WithContext(ctx).Table(Workflow{}.TableName()+" w").
 		Select("w.*").Joins(currentJoin).
-		Where("w.tenant_id = ? AND w.knowledge_id IN ? AND w.state = ?", tenantID, ids, StateLeased).
+		Where("w.tenant_id = ? AND w.knowledge_id IN ? AND w.state IN ?",
+			tenantID, ids, []WorkflowState{StateLeased, StateWaitingExternal}).
 		Order("w.created_at DESC").Find(&active).Error; err != nil {
 		return status, err
 	}

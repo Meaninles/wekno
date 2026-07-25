@@ -60,6 +60,12 @@ extract:
       2. **Extract valid relationships**: Based on the extracted entities and attributes, identify relationships that genuinely exist in the text, ensuring relationships are factually accurate with no false associations.
       3. **Clarify relationship subjects**: For each extracted relationship, clearly annotate the two associated entities to avoid subject confusion.
       4. **Supplement related attributes**: If the text contains supplementary information directly related to a relationship, include it as a related attribute of the relationship.
+
+      ## Hard Grounding Rules
+      1. The configured tags above are relationship types, not entity names or entity categories.
+      2. Example values demonstrate the output shape only. Never copy an example entity, attribute, or relationship into the answer unless that exact fact is explicitly present in the current input.
+      3. Every entity name must identify a concrete person, organization, policy, system, process, place, product, event, or named concept in the current input. Do not emit placeholders or generic category labels such as "Document", "Section", "Capability", "Entity", "Organization", "Responsibility", or "Control".
+      4. Relationship endpoints must be entities emitted from the current input, and every relationship must be directly supported by the current input.
     tags:
       - "Author"
       - "Alias"

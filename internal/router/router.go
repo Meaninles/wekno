@@ -13,6 +13,7 @@ import (
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
@@ -139,6 +140,11 @@ func NewRouter(params RouterParams) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
+	// Export only bounded operational labels: no tenant, document, endpoint,
+	// prompt or payload values are ever attached to these series.
+	if metricsEnabled() {
+		r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	}
 
 	// Swagger API 文档（仅在非生产环境下启用）
 	// 通过 GIN_MODE 环境变量判断：release 模式下禁用 Swagger
@@ -332,6 +338,7 @@ func RegisterKnowledgeRoutes(r *gin.RouterGroup, handler *handler.KnowledgeHandl
 		k.POST("/:id/reparse", g.OwnedKnowledgeKBOrAdmin(), g.KBAccessWriteFromKnowledgeIDParam("id"), handler.ReparseKnowledge)
 		k.POST("/:id/cancel-parse", g.OwnedKnowledgeKBOrAdmin(), g.KBAccessWriteFromKnowledgeIDParam("id"), handler.CancelKnowledgeParse)
 		k.GET("/:id/download", g.Viewer(), g.KBAccessReadFromKnowledgeIDParam("id"), handler.DownloadKnowledgeFile)
+		k.GET("/:id/preview-policy", g.Viewer(), g.KBAccessReadFromKnowledgeIDParam("id"), handler.GetKnowledgePreviewPolicy)
 		k.GET("/:id/preview", g.Viewer(), g.KBAccessReadFromKnowledgeIDParam("id"), handler.PreviewKnowledgeFile)
 		k.PUT("/image/:id/:chunk_id", g.OwnedKnowledgeKBOrAdmin(), g.KBAccessWriteFromKnowledgeIDParam("id"), handler.UpdateImageInfo)
 		// Batch / cross-KB ops stay Contributor-gated: there is no
@@ -1284,6 +1291,15 @@ func trustedProxies() []string {
 	return proxies
 }
 
+func metricsEnabled() bool {
+	raw, ok := os.LookupEnv("WEKNORA_METRICS_ENABLED")
+	if !ok {
+		return true
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	return err == nil && enabled
+}
+
 // embedChannelIDFromPath extracts the channel id from an /embed/:channelID path.
 func embedChannelIDFromPath(path string) string {
 	const prefix = "/embed/"
@@ -1369,7 +1385,11 @@ func serveFrontendStatic(r *gin.Engine) {
 			return
 		}
 		path := c.Request.URL.Path
-		if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/health") || strings.HasPrefix(path, "/swagger/") {
+		if strings.HasPrefix(path, "/api/") ||
+			path == "/health" ||
+			path == "/ready" ||
+			path == "/metrics" ||
+			strings.HasPrefix(path, "/swagger/") {
 			c.Next()
 			return
 		}

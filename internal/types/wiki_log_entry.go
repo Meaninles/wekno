@@ -97,9 +97,9 @@ type WikiLogEntry struct {
 	Action string `json:"action" gorm:"type:varchar(32)"`
 	// Knowledge ID the event was about (may be empty for KB-level events).
 	KnowledgeID string `json:"knowledge_id" gorm:"type:varchar(36);default:''"`
-	// Document title at the time of the event. Stored verbatim rather than
-	// joined at read time so deleted knowledge still has a human-readable
-	// label in the log.
+	// Document title at the time of the event. Successful deletion retracts
+	// intentionally leave this blank so the operation log cannot retain source
+	// content after knowledge deletion.
 	DocTitle string `json:"doc_title" gorm:"type:text"`
 	// One-line summary of the change, as it was when the event was logged.
 	Summary string `json:"summary" gorm:"type:text"`

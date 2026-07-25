@@ -46,7 +46,7 @@ func NewWeKnoraCloudReranker(config *RerankerConfig) (*WeKnoraCloudReranker, err
 		appID:           config.AppID,
 		apiKey:          config.AppSecret,
 		baseURL:         strings.TrimRight(config.BaseURL, "/"),
-		client:          &http.Client{Timeout: 60 * time.Second},
+		client:          newRerankHTTPClient(60 * time.Second),
 	}, nil
 }
 

@@ -1140,6 +1140,12 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 	if err := quiesceKnowledgeBaseWikiTasks(ctx, s.taskInspector, kbID); err != nil {
 		return err
 	}
+	if s.auxObjects == nil {
+		return errors.New("KB delete worker: auxiliary object registry is unavailable")
+	}
+	if err := s.auxObjects.PurgeKnowledgeBaseDeleteProofs(ctx, tenantID, kbID); err != nil {
+		return fmt.Errorf("KB delete worker: purge auxiliary delete completion proofs: %w", err)
+	}
 	if err := s.kbDeleteQueue.Complete(ctx, tenantID, kbID); err != nil {
 		return fmt.Errorf("KB delete worker: consume durable outbox intent: %w", err)
 	}

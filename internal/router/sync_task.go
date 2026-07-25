@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
 	"github.com/Tencent/WeKnora/internal/custom/modules/terminalrepair"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -700,25 +701,26 @@ type SyncTaskParams struct {
 func RegisterSyncHandlers(params SyncTaskParams) {
 	repairer := terminalrepair.New(params.KnowledgeService.GetRepository(), params.Executor, nil)
 	repairer.SetKnowledgeMoveRepairer(params.KnowledgeService)
-	params.Executor.RegisterHandler(types.TypeChunkExtract, params.ChunkExtractor.Handle)
-	params.Executor.RegisterHandler(types.TypeDataTableSummary, params.DataTableSummary.Handle)
-	params.Executor.RegisterHandler(types.TypeDocumentProcess, params.KnowledgeService.ProcessDocument)
-	params.Executor.RegisterHandler(documentsplit.TypePartProcess, params.KnowledgeService.ProcessDocumentSplitPart)
-	params.Executor.RegisterHandler(documentsplit.TypeFinalize, params.KnowledgeService.ProcessDocumentSplitFinalize)
-	params.Executor.RegisterHandler(types.TypeManualProcess, params.KnowledgeService.ProcessManualUpdate)
-	params.Executor.RegisterHandler(types.TypeFAQImport, params.KnowledgeService.ProcessFAQImport)
-	params.Executor.RegisterHandler(types.TypeQuestionGeneration, params.KnowledgeService.ProcessQuestionGeneration)
-	params.Executor.RegisterHandler(types.TypeSummaryGeneration, params.KnowledgeService.ProcessSummaryGeneration)
-	params.Executor.RegisterHandler(types.TypeKBClone, params.KnowledgeService.ProcessKBClone)
-	params.Executor.RegisterHandler(types.TypeKnowledgeMove, params.KnowledgeService.ProcessKnowledgeMove)
-	params.Executor.RegisterHandler(types.TypeKnowledgeListDelete, params.KnowledgeService.ProcessKnowledgeListDelete)
-	params.Executor.RegisterHandler(types.TypeKnowledgeListReparse, params.KnowledgeService.ProcessKnowledgeListReparse)
-	params.Executor.RegisterHandler(types.TypeIndexDelete, params.TagService.ProcessIndexDelete)
-	params.Executor.RegisterHandler(types.TypeKBDelete, params.KnowledgeBaseService.ProcessKBDelete)
-	params.Executor.RegisterHandler(types.TypeImageMultimodal, params.ImageMultimodal.Handle)
-	params.Executor.RegisterHandler(types.TypeKnowledgePostProcess, params.KnowledgePostProcess.Handle)
-	params.Executor.RegisterHandler(types.TypeDataSourceSync, params.DataSourceService.ProcessSync)
-	params.Executor.RegisterHandler(types.TypeWikiIngest, params.WikiIngest.Handle)
-	params.Executor.RegisterHandler(types.TypeKnowledgeTerminalRepair, repairer.Handle)
+	background := modeladmission.BackgroundTaskHandler
+	params.Executor.RegisterHandler(types.TypeChunkExtract, background(params.ChunkExtractor.Handle))
+	params.Executor.RegisterHandler(types.TypeDataTableSummary, background(params.DataTableSummary.Handle))
+	params.Executor.RegisterHandler(types.TypeDocumentProcess, background(params.KnowledgeService.ProcessDocument))
+	params.Executor.RegisterHandler(documentsplit.TypePartProcess, background(params.KnowledgeService.ProcessDocumentSplitPart))
+	params.Executor.RegisterHandler(documentsplit.TypeFinalize, background(params.KnowledgeService.ProcessDocumentSplitFinalize))
+	params.Executor.RegisterHandler(types.TypeManualProcess, background(params.KnowledgeService.ProcessManualUpdate))
+	params.Executor.RegisterHandler(types.TypeFAQImport, background(params.KnowledgeService.ProcessFAQImport))
+	params.Executor.RegisterHandler(types.TypeQuestionGeneration, background(params.KnowledgeService.ProcessQuestionGeneration))
+	params.Executor.RegisterHandler(types.TypeSummaryGeneration, background(params.KnowledgeService.ProcessSummaryGeneration))
+	params.Executor.RegisterHandler(types.TypeKBClone, background(params.KnowledgeService.ProcessKBClone))
+	params.Executor.RegisterHandler(types.TypeKnowledgeMove, background(params.KnowledgeService.ProcessKnowledgeMove))
+	params.Executor.RegisterHandler(types.TypeKnowledgeListDelete, background(params.KnowledgeService.ProcessKnowledgeListDelete))
+	params.Executor.RegisterHandler(types.TypeKnowledgeListReparse, background(params.KnowledgeService.ProcessKnowledgeListReparse))
+	params.Executor.RegisterHandler(types.TypeIndexDelete, background(params.TagService.ProcessIndexDelete))
+	params.Executor.RegisterHandler(types.TypeKBDelete, background(params.KnowledgeBaseService.ProcessKBDelete))
+	params.Executor.RegisterHandler(types.TypeImageMultimodal, background(params.ImageMultimodal.Handle))
+	params.Executor.RegisterHandler(types.TypeKnowledgePostProcess, background(params.KnowledgePostProcess.Handle))
+	params.Executor.RegisterHandler(types.TypeDataSourceSync, background(params.DataSourceService.ProcessSync))
+	params.Executor.RegisterHandler(types.TypeWikiIngest, background(params.WikiIngest.Handle))
+	params.Executor.RegisterHandler(types.TypeKnowledgeTerminalRepair, background(repairer.Handle))
 	logger.Infof(context.Background(), "[SyncTask] All task handlers registered (Lite mode, no Redis)")
 }

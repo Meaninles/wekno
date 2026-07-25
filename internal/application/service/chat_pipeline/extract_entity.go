@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/llmjson"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -159,6 +160,35 @@ type Extractor struct {
 	chatOpt  *chat.ChatOptions
 }
 
+var graphExtractionJSONSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "extractions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "entity": {"type": "string"},
+          "entity_attributes": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "entity1": {"type": "string"},
+          "entity2": {"type": "string"},
+          "relation": {"type": "string"}
+        },
+        "oneOf": [
+          {"required": ["entity"]},
+          {"required": ["entity1", "entity2", "relation"]}
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["extractions"],
+  "additionalProperties": false
+}`)
+
 // NewExtractor creates a new extractor
 func NewExtractor(
 	chatModel chat.Chat,
@@ -171,8 +201,9 @@ func NewExtractor(
 		template: template,
 		chatOpt: &chat.ChatOptions{
 			Temperature: 0.3,
-			MaxTokens:   4096,
+			MaxTokens:   8192,
 			Thinking:    &think,
+			Format:      graphExtractionJSONSchema,
 		},
 	}
 }
@@ -266,6 +297,13 @@ func (qa *QAPromptGenerator) System(ctx context.Context) string {
 			promptLines = append(promptLines, "")
 		}
 	}
+	promptLines = append(promptLines,
+		"## Structured Output Limits",
+		"- Return one complete valid JSON object and always close every string, array, and object.",
+		"- Return at most 48 extraction items in total. If the source contains more candidates, keep the most concrete and important named entities and directly supported relationships.",
+		"- Keep at most 4 concise attributes per entity; never copy long source passages into an attribute.",
+		"- Prefer fewer grounded items over a larger response that may be truncated.",
+	)
 	return strings.Join(promptLines, "\n")
 }
 
@@ -362,7 +400,11 @@ func (f *Formater) formatExtraction(nodes []*types.GraphNode, relations []*types
 	formatted := ""
 	switch f.formatType {
 	default:
-		formattedBytes, err := json.MarshalIndent(items, "", "  ")
+		formattedBytes, err := json.MarshalIndent(
+			map[string]interface{}{"extractions": items},
+			"",
+			"  ",
+		)
 		if err != nil {
 			return "", err
 		}
@@ -389,6 +431,24 @@ func (f *Formater) parseOutput(ctx context.Context, text string) ([]map[string]i
 	if f.formatType == FormatTypeJSON {
 		err = json.Unmarshal([]byte(content), &parsed)
 	}
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unexpected end") {
+		recovered, completeItems, recoveredOK := llmjson.RecoverTruncatedObjectArray(
+			[]byte(content),
+			"extractions",
+		)
+		if recoveredOK {
+			var recoveredParsed interface{}
+			if recoveredErr := json.Unmarshal(recovered, &recoveredParsed); recoveredErr == nil {
+				logger.Warnf(
+					ctx,
+					"recovered %d complete graph extraction items from an output-token-truncated JSON tail",
+					completeItems,
+				)
+				parsed = recoveredParsed
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse %s content: %s", strings.ToUpper(string(f.formatType)), err.Error())
 	}
@@ -398,7 +458,18 @@ func (f *Formater) parseOutput(ctx context.Context, text string) ([]map[string]i
 
 	var items []interface{}
 	if parsedMap, ok := parsed.(map[string]interface{}); ok {
-		items = []interface{}{parsedMap}
+		if wrapped, exists := parsedMap["extractions"]; exists {
+			wrappedItems, valid := wrapped.([]interface{})
+			if !valid {
+				return nil, errors.New("extractions must be a list")
+			}
+			items = wrappedItems
+		} else {
+			// Retain support for a single extraction object. This also keeps
+			// already-cached responses readable while new calls use the
+			// structured wrapper above.
+			items = []interface{}{parsedMap}
+		}
 	} else if parsedList, ok := parsed.([]interface{}); ok {
 		items = parsedList
 	} else {

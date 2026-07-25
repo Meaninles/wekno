@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -21,6 +23,17 @@ import (
 //     in memory rather than recursing through the DB.
 type KnowledgeSpanRepository interface {
 	Upsert(ctx context.Context, row *types.KnowledgeProcessingSpan) error
+	// CreateNextAttemptRoot atomically allocates the next per-document
+	// attempt, terminalizes every older pending/running span, and inserts the
+	// new root. PostgreSQL callers are serialized by a transaction-scoped
+	// advisory lock, so two application pods cannot allocate the same attempt.
+	// The returned count is the number of older open rows superseded.
+	CreateNextAttemptRoot(
+		ctx context.Context,
+		root *types.KnowledgeProcessingSpan,
+		supersedeErrorCode string,
+		supersedeReason string,
+	) (attempt int, superseded int64, err error)
 	NextAttempt(ctx context.Context, knowledgeID string) (int, error)
 	LatestAttempt(ctx context.Context, knowledgeID string) (int, error)
 	ListByAttempt(ctx context.Context, knowledgeID string, attempt int) ([]types.KnowledgeProcessingSpan, error)
@@ -47,6 +60,10 @@ type KnowledgeSpanRepository interface {
 
 type knowledgeSpanRepository struct {
 	db *gorm.DB
+	// SQLite cannot be shared by horizontally scaled pods and has no
+	// transaction-scoped advisory lock. Serializing allocation inside the
+	// single process gives its supported local mode the same invariant.
+	sqliteAttemptMu sync.Mutex
 }
 
 // NewKnowledgeSpanRepository wires the GORM-backed implementation.
@@ -102,6 +119,94 @@ func (r *knowledgeSpanRepository) Upsert(ctx context.Context, row *types.Knowled
 		},
 		DoUpdates: clause.AssignmentColumns(cols),
 	}).Create(row).Error
+}
+
+func (r *knowledgeSpanRepository) CreateNextAttemptRoot(
+	ctx context.Context,
+	root *types.KnowledgeProcessingSpan,
+	supersedeErrorCode string,
+	supersedeReason string,
+) (attempt int, superseded int64, err error) {
+	if root == nil || root.KnowledgeID == "" || root.SpanID == "" {
+		return 0, 0, errors.New(
+			"knowledgeSpanRepository.CreateNextAttemptRoot: knowledge_id and span_id required",
+		)
+	}
+	if root.Kind != types.SpanKindRoot {
+		return 0, 0, fmt.Errorf(
+			"knowledgeSpanRepository.CreateNextAttemptRoot: kind %q is not root",
+			root.Kind,
+		)
+	}
+	if supersedeErrorCode == "" {
+		supersedeErrorCode = "SUPERSEDED_ATTEMPT"
+	}
+	if supersedeReason == "" {
+		supersedeReason = "a newer document-processing attempt was accepted"
+	}
+
+	isSQLite := r.db != nil && r.db.Dialector != nil &&
+		r.db.Dialector.Name() == "sqlite"
+	if isSQLite {
+		r.sqliteAttemptMu.Lock()
+		defer r.sqliteAttemptMu.Unlock()
+	}
+
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+			// The lock key is stable across application pods yet namespaced
+			// away from unrelated advisory-lock users. It is released
+			// automatically on commit/rollback.
+			if lockErr := tx.Exec(
+				"SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+				"weknora:knowledge-span-attempt:"+root.KnowledgeID,
+			).Error; lockErr != nil {
+				return fmt.Errorf("lock knowledge span attempt allocation: %w", lockErr)
+			}
+		}
+
+		var maxAttempt int
+		if scanErr := tx.Model(&types.KnowledgeProcessingSpan{}).
+			Where("knowledge_id = ?", root.KnowledgeID).
+			Select("COALESCE(MAX(attempt), 0)").
+			Row().
+			Scan(&maxAttempt); scanErr != nil {
+			return fmt.Errorf("read latest knowledge span attempt: %w", scanErr)
+		}
+		attempt = maxAttempt + 1
+
+		now := time.Now()
+		result := tx.Model(&types.KnowledgeProcessingSpan{}).
+			Where(
+				"knowledge_id = ? AND attempt < ? AND status IN ?",
+				root.KnowledgeID,
+				attempt,
+				[]string{types.SpanStatusPending, types.SpanStatusRunning},
+			).
+			Updates(map[string]any{
+				"status":        types.SpanStatusCancelled,
+				"error_code":    supersedeErrorCode,
+				"error_message": supersedeReason,
+				"finished_at":   now,
+				"updated_at":    now,
+			})
+		if result.Error != nil {
+			return fmt.Errorf("supersede older knowledge spans: %w", result.Error)
+		}
+		superseded = result.RowsAffected
+
+		candidate := *root
+		candidate.Attempt = attempt
+		if createErr := tx.Create(&candidate).Error; createErr != nil {
+			return fmt.Errorf("create knowledge span attempt root: %w", createErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	root.Attempt = attempt
+	return attempt, superseded, nil
 }
 
 func (r *knowledgeSpanRepository) NextAttempt(ctx context.Context, knowledgeID string) (int, error) {

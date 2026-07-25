@@ -42,6 +42,9 @@ func setupKnowledgeMoveFinalizeDB(t *testing.T) *gorm.DB {
 			file_path TEXT NOT NULL DEFAULT '',
 			enable_status TEXT NOT NULL DEFAULT 'enabled', description TEXT,
 			processed_at DATETIME, pending_subtasks_count INTEGER NOT NULL DEFAULT 0,
+			enrichment_status TEXT NOT NULL DEFAULT 'none',
+			wiki_status TEXT NOT NULL DEFAULT 'none',
+			wiki_error_message TEXT NOT NULL DEFAULT '',
 			storage_size INTEGER NOT NULL DEFAULT 0, updated_at DATETIME,
 			deleted_at DATETIME
 		)`,
@@ -49,6 +52,13 @@ func setupKnowledgeMoveFinalizeDB(t *testing.T) *gorm.DB {
 			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
 			knowledge_base_id TEXT NOT NULL, processing_generation TEXT NOT NULL,
 			item_id TEXT NOT NULL, completed_at DATETIME NOT NULL,
+			PRIMARY KEY (tenant_id, knowledge_id, processing_generation, item_id)
+		)`,
+		`CREATE TABLE custom_enrichment_outcomes (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
+			knowledge_base_id TEXT NOT NULL, processing_generation TEXT NOT NULL,
+			item_id TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+			completed_at DATETIME NOT NULL,
 			PRIMARY KEY (tenant_id, knowledge_id, processing_generation, item_id)
 		)`,
 		`CREATE TABLE task_pending_ops (

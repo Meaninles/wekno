@@ -1,52 +1,64 @@
 package service
 
 import (
-	"context"
 	"testing"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/types"
-	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
-func TestAuxiliaryFileServiceForPathAllowsNilKBWithExplicitIdentity(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(
-		&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.TaskPendingOp{},
-	))
-	require.NoError(t, db.Create(&types.Tenant{ID: 7, Name: "tenant"}).Error)
-	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb-1", TenantID: 7, Name: "kb"}).Error)
-	require.NoError(t, db.Create(&types.Knowledge{
-		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1", Type: types.KnowledgeTypeFAQ,
-		ParseStatus: types.ParseStatusCompleted, ProcessingGeneration: "generation-1",
-	}).Error)
-	fileSvc := &cleanupFileServiceStub{}
-	registry := knowledgeaux.NewWithResolver(db, func(
-		context.Context, *types.Tenant, string,
-	) (interfaces.FileService, string, error) {
-		return fileSvc, "local", nil
+func TestAuxiliaryPathsFromKnowledgeReadsCoreImageFanout(t *testing.T) {
+	raw, err := processownership.MarshalFanoutPlan(processownership.FanoutPlan{
+		Version:              processownership.FanoutPlanVersion,
+		TenantID:             10001,
+		KnowledgeID:          "knowledge-a",
+		KnowledgeBaseID:      "kb-a",
+		ProcessingGeneration: "generation-a",
+		Images: []processownership.ImageFanout{{
+			ChunkID:  "chunk-a",
+			ImageURL: "local://10001/knowledge-a/image-a.png",
+			Index:    0,
+		}},
 	})
-	object := knowledgeaux.Object{
-		TenantID: 7, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
-		ProcessingGeneration: "generation-1", Path: "local://7/faq.json",
-		FallbackProvider: "local", Kind: knowledgeaux.KindFAQEntries,
-	}
-	_, err = registry.Register(context.Background(), object, fileSvc)
 	require.NoError(t, err)
-	svc := &knowledgeService{auxObjects: registry}
-	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(7))
 
-	resolved, err := svc.auxiliaryFileServiceForPath(
-		ctx, nil, "kb-1", "knowledge-1", object.Path,
-	)
+	paths, err := auxiliaryPathsFromKnowledge(&types.Knowledge{
+		ProcessingFanout: types.JSON(raw),
+	})
 	require.NoError(t, err)
-	require.Same(t, fileSvc, resolved)
-	_, err = svc.auxiliaryFileServiceForPath(ctx, nil, "", "knowledge-1", object.Path)
-	require.Error(t, err)
-	_, err = svc.auxiliaryFileServiceForPath(ctx, nil, "wrong-kb", "knowledge-1", object.Path)
-	require.ErrorIs(t, err, knowledgeaux.ErrReservationLost)
+	require.Equal(t, []string{"local://10001/knowledge-a/image-a.png"}, paths)
+}
+
+func TestAuxiliaryPathsFromKnowledgeIgnoresEnrichmentRecoveryEnvelope(t *testing.T) {
+	paths, err := auxiliaryPathsFromKnowledge(&types.Knowledge{
+		ProcessingFanout: types.JSON(`{
+			"stage":"enrichment",
+			"version":3,
+			"tenant_id":10001,
+			"knowledge_id":"knowledge-a",
+			"knowledge_base_id":"kb-a",
+			"processing_generation":"generation-a",
+			"text_chunk_count":181,
+			"graph_batch_count":23,
+			"question_batch_count":10
+		}`),
+	})
+	require.NoError(t, err)
+	require.Empty(t, paths)
+}
+
+func TestAuxiliaryPathsFromKnowledgeRejectsUnknownOrCorruptEnvelope(t *testing.T) {
+	for name, raw := range map[string]string{
+		"unknown-stage":   `{"stage":"future","version":99}`,
+		"corrupt-json":    `{"stage":`,
+		"incomplete-core": `{"version":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := auxiliaryPathsFromKnowledge(&types.Knowledge{
+				ProcessingFanout: types.JSON(raw),
+			})
+			require.Error(t, err)
+		})
+	}
 }

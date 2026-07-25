@@ -1,11 +1,71 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestCitationBatchResultAcceptsScalarListFields(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"citations":{"entity/version-management":"c000, c001"},
+		"new_slugs":[{
+			"type":"concept",
+			"name":"版本管理",
+			"slug":"concept/version-management",
+			"aliases":"版本管理, 版本迭代",
+			"description":"版本管理流程",
+			"details":"版本控制要求",
+			"source_chunks":"c000"
+		}]
+	}`
+	var got citationBatchResult
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !equalStrings([]string(got.Citations["entity/version-management"]), []string{"c000", "c001"}) {
+		t.Fatalf("citations = %v", got.Citations)
+	}
+	if len(got.NewSlugs) != 1 ||
+		!equalStrings([]string(got.NewSlugs[0].Aliases), []string{"版本管理", "版本迭代"}) ||
+		!equalStrings([]string(got.NewSlugs[0].SourceChunks), []string{"c000"}) {
+		t.Fatalf("new_slugs = %+v", got.NewSlugs)
+	}
+}
+
+type citationThresholdChatModel struct{}
+
+func (citationThresholdChatModel) Chat(
+	_ context.Context,
+	messages []chat.Message,
+	_ *chat.ChatOptions,
+) (*types.ChatResponse, error) {
+	if len(messages) > 0 && strings.Contains(messages[0].Content, "FAIL_CITATION_BATCH") {
+		return nil, errors.New("invalid arguments injected for citation batch")
+	}
+	return &types.ChatResponse{
+		Content: `{"citations":{"entity/acme":["c000"]},"new_slugs":[]}`,
+	}, nil
+}
+
+func (citationThresholdChatModel) ChatStream(
+	context.Context,
+	[]chat.Message,
+	*chat.ChatOptions,
+) (<-chan types.StreamResponse, error) {
+	return nil, errors.New("not used")
+}
+
+func (citationThresholdChatModel) GetModelName() string { return "citation-threshold" }
+func (citationThresholdChatModel) GetModelID() string   { return "citation-threshold" }
 
 // TestMergeCitationsIntoItems_PopulatesSourceChunksOnCandidates verifies that
 // citations returned by the chunk-classification pass are attached back onto
@@ -51,6 +111,57 @@ func TestMergeCitationsIntoItems_PopulatesSourceChunksOnCandidates(t *testing.T)
 	}
 	if uncited != 1 {
 		t.Errorf("uncited = %d, want 1", uncited)
+	}
+}
+
+func TestClassifyChunkCitationsEnforcesFailureThreshold(t *testing.T) {
+	makeChunks := func(count int) []*types.Chunk {
+		chunks := make([]*types.Chunk, 0, count)
+		for index := 0; index < count; index++ {
+			content := strings.Repeat("ordinary citation content ", 700)
+			if index == 0 {
+				content = "FAIL_CITATION_BATCH " + content
+			}
+			chunks = append(chunks, &types.Chunk{
+				ID:         string(rune('a' + index)),
+				ChunkIndex: index,
+				ChunkType:  types.ChunkTypeText,
+				Content:    content,
+			})
+		}
+		return chunks
+	}
+	service := &wikiIngestService{}
+	candidates := `- slug: entity/acme, type: entity, name: "Acme"`
+
+	_, _, attempted, failed, err := service.classifyChunkCitations(
+		context.Background(),
+		citationThresholdChatModel{},
+		candidates,
+		makeChunks(5),
+		"English",
+		&WikiBatchContext{},
+	)
+	if err == nil || attempted != 5 || failed != 1 {
+		t.Fatalf(
+			"threshold result = attempted:%d failed:%d err:%v, want 5/1/error",
+			attempted, failed, err,
+		)
+	}
+
+	_, _, attempted, failed, err = service.classifyChunkCitations(
+		context.Background(),
+		citationThresholdChatModel{},
+		candidates,
+		makeChunks(6),
+		"English",
+		&WikiBatchContext{},
+	)
+	if err != nil || attempted != 6 || failed != 1 {
+		t.Fatalf(
+			"degraded result = attempted:%d failed:%d err:%v, want 6/1/nil",
+			attempted, failed, err,
+		)
 	}
 }
 

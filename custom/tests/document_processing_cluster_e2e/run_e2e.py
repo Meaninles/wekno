@@ -16,7 +16,9 @@ if __package__ in {None, ""}:
         ClusterE2ERunner,
         DockerController,
         E2EFailure,
+        file_sha256,
         JsonlRecorder,
+        load_fixture_expectations,
         load_json_object,
         utc_now,
         validate_baseline_workload,
@@ -24,6 +26,7 @@ if __package__ in {None, ""}:
         validate_performance,
         workload_profile_fingerprint,
     )
+    from policy_corpus import evaluate_policy_corpus, load_policy_corpus  # type: ignore
 else:
     from .cluster_e2e import (
         APIClient,
@@ -31,7 +34,9 @@ else:
         ClusterE2ERunner,
         DockerController,
         E2EFailure,
+        file_sha256,
         JsonlRecorder,
+        load_fixture_expectations,
         load_json_object,
         utc_now,
         validate_baseline_workload,
@@ -39,6 +44,7 @@ else:
         validate_performance,
         workload_profile_fingerprint,
     )
+    from .policy_corpus import evaluate_policy_corpus, load_policy_corpus
 
 
 def csv_values(values: list[str]) -> list[str]:
@@ -77,6 +83,14 @@ def parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--process-config", type=Path, help="JSON per-upload process overrides")
     p.add_argument("--fixture", action="append", default=[], type=Path)
+    p.add_argument("--fixture-manifest", type=Path)
+    p.add_argument("--policy-manifest", type=Path)
+    p.add_argument("--policy-questions", type=Path)
+    p.add_argument("--policy-fixture-dir", type=Path)
+    p.add_argument("--policy-queries-per-source", type=int, default=2)
+    p.add_argument("--policy-recall-at-k", type=int, default=5)
+    p.add_argument("--min-policy-recall", type=float, default=0.90)
+    p.add_argument("--policy-query-concurrency", type=int, default=16)
     p.add_argument(
         "--expect-derived",
         action="append",
@@ -90,6 +104,12 @@ def parser() -> argparse.ArgumentParser:
         help="case-insensitive literal that must occur in persisted chunks; repeatable",
     )
     p.add_argument("--verify-sample", type=int, default=3)
+    p.add_argument(
+        "--question-retrieval-sample",
+        type=int,
+        default=3,
+        help="generated questions per verified document that must retrieve their source",
+    )
     p.add_argument("--wiki-timeout", type=float, default=1800.0)
     p.add_argument("--min-throughput", type=float, default=0.0)
     p.add_argument("--max-p95-processing-seconds", type=float, default=0.0)
@@ -147,8 +167,35 @@ def main() -> int:
     if args.instance_count < 0:
         print("ERROR: --instance-count cannot be negative", file=sys.stderr)
         return 2
+    if args.question_retrieval_sample < 0:
+        print("ERROR: --question-retrieval-sample cannot be negative", file=sys.stderr)
+        return 2
     if args.min_scaling_efficiency > 0 and not args.baseline_report:
         print("ERROR: --min-scaling-efficiency requires --baseline-report", file=sys.stderr)
+        return 2
+    policy_args = (args.policy_manifest, args.policy_questions, args.policy_fixture_dir)
+    if any(policy_args) and not all(policy_args):
+        print(
+            "ERROR: --policy-manifest, --policy-questions and --policy-fixture-dir "
+            "must be supplied together",
+            file=sys.stderr,
+        )
+        return 2
+    if args.fixture_manifest and all(policy_args):
+        print("ERROR: --fixture-manifest and --policy-* corpus mode cannot be combined", file=sys.stderr)
+        return 2
+    if (
+        args.policy_queries_per_source <= 0
+        or args.policy_recall_at_k <= 0
+        or args.policy_query_concurrency <= 0
+    ):
+        print(
+            "ERROR: policy query count, recall@k and query concurrency must be positive",
+            file=sys.stderr,
+        )
+        return 2
+    if not 0 < args.min_policy_recall <= 1:
+        print("ERROR: --min-policy-recall must be in (0, 1]", file=sys.stderr)
         return 2
 
     expected = set(csv_values(args.expect_derived))
@@ -156,6 +203,26 @@ def main() -> int:
     if unknown:
         print(f"ERROR: unknown --expect-derived values: {sorted(unknown)}", file=sys.stderr)
         return 2
+    policy_corpus = None
+    if all(policy_args):
+        policy_corpus = load_policy_corpus(
+            args.policy_manifest,
+            args.policy_questions,
+            args.policy_fixture_dir,
+            queries_per_source=args.policy_queries_per_source,
+        )
+        args.fixture = list(policy_corpus.fixture_paths)
+        args.documents = len(args.fixture)
+        args.verify_sample = args.documents
+        expected.update({"summary", "questions", "graph", "wiki"})
+    fixture_expectations: dict[str, dict[str, object]] = {}
+    if args.fixture_manifest:
+        fixture_expectations = load_fixture_expectations(
+            args.fixture_manifest,
+            args.fixture,
+        )
+        args.documents = len(args.fixture)
+        args.verify_sample = args.documents
     topology_required = bool(
         args.baseline_report
         or args.instance_count > 0
@@ -174,7 +241,13 @@ def main() -> int:
         queue_status_path=args.queue_status_path,
         instances_path=args.instances_path,
     )
-    runner = ClusterE2ERunner(client, args.kb_id, recorder, poll_interval=args.poll_interval)
+    runner = ClusterE2ERunner(
+        client,
+        args.kb_id,
+        recorder,
+        poll_interval=args.poll_interval,
+        expected_derivatives=expected,
+    )
     started_at = utc_now()
     report: dict[str, object] = {
         "run_id": runner.run_id,
@@ -186,8 +259,14 @@ def main() -> int:
             "upload_concurrency": args.upload_concurrency,
             "generated_size_kib": args.generated_size_kib,
             "expected_instance_count": args.instance_count or None,
-            "expect_derived": csv_values(args.expect_derived),
+            "expect_derived": sorted(expected),
             "expect_chunk_text": args.expect_chunk_text,
+            "question_retrieval_sample": args.question_retrieval_sample,
+            "policy_corpus": policy_corpus is not None,
+            "policy_query_concurrency": (
+                args.policy_query_concurrency if policy_corpus is not None else None
+            ),
+            "fixture_manifest": args.fixture_manifest is not None,
             "chaos": bool(args.worker_container),
         },
     }
@@ -241,8 +320,11 @@ def main() -> int:
             wiki_timeout=args.wiki_timeout,
             poll_interval=args.poll_interval,
             skip_card_contract=args.skip_card_contract,
+            question_retrieval_sample=args.question_retrieval_sample,
             chaos_config=chaos_config,
         )
+        if args.fixture_manifest:
+            workload_profile["fixture_manifest_sha256"] = file_sha256(args.fixture_manifest)
         report["workload_profile"] = workload_profile
         report["workload_fingerprint"] = workload_profile_fingerprint(workload_profile)
         if args.baseline_report:
@@ -298,7 +380,18 @@ def main() -> int:
             sample_limit=args.verify_sample,
             wiki_timeout=args.wiki_timeout,
             expected_chunk_text=args.expect_chunk_text,
+            question_retrieval_sample=args.question_retrieval_sample,
+            fixture_expectations=fixture_expectations,
         )
+        if policy_corpus is not None:
+            report["policy_corpus"] = evaluate_policy_corpus(
+                client,
+                runner,
+                policy_corpus,
+                recall_at_k=args.policy_recall_at_k,
+                min_recall=args.min_policy_recall,
+                query_concurrency=args.policy_query_concurrency,
+            )
         result = runner.result(started, workload_started_at)
         # Persist raw measurements before applying acceptance thresholds. A
         # threshold failure is still valuable performance evidence and must not

@@ -88,9 +88,13 @@ func verifyBaselineReliabilitySchema(t *testing.T, h sqliteHarness, up, down []b
 		"processing_workflow_id", "processing_fanout")
 	requireColumns(t, h, "wiki_log_entries", "source_op_id")
 	requireColumns(t, h, "users", "is_system_admin")
+	requireColumns(t, h, "task_pending_ops", "map_ready_at")
 
 	for _, index := range []string{
 		"idx_task_pending_ops_scope_op_dedup",
+		"idx_task_pending_ops_wiki_commit_ready",
+		"idx_task_pending_ops_wiki_map_pending",
+		"uq_task_pending_ops_wiki_ingest",
 		"uq_task_pending_ops_wiki_retract",
 		"uq_wiki_log_entries_source_op_id",
 		"idx_knowledges_processing_generation",
@@ -131,11 +135,16 @@ func verifyBaselineReliabilitySchema(t *testing.T, h sqliteHarness, up, down []b
 		VALUES (7, 'wiki:ingest', 'knowledge_base', 'kb-1', 'retract', 'knowledge-1', '{}');`
 	h.exec(t, retract, false)
 	h.exec(t, retract, true)
-	// Ingest rows intentionally remain repeatable across generations.
+	// One exact generation is idempotent; a new generation uses a distinct
+	// dedup key and remains independently queueable.
 	ingest := `INSERT INTO task_pending_ops
 		(tenant_id, task_type, scope, scope_id, op, dedup_key, payload)
-		VALUES (7, 'wiki:ingest', 'knowledge_base', 'kb-1', 'ingest', 'knowledge-1', '{}');`
-	h.exec(t, ingest+ingest, false)
+		VALUES (7, 'wiki:ingest', 'knowledge_base', 'kb-1', 'ingest', 'knowledge-1:generation-1', '{}');`
+	h.exec(t, ingest, false)
+	h.exec(t, ingest, true)
+	h.exec(t, `INSERT INTO task_pending_ops
+		(tenant_id, task_type, scope, scope_id, op, dedup_key, payload)
+		VALUES (7, 'wiki:ingest', 'knowledge_base', 'kb-1', 'ingest', 'knowledge-1:generation-2', '{}');`, false)
 	owned := `INSERT INTO task_pending_ops
 		(tenant_id, task_type, scope, scope_id, op, dedup_key, payload)
 		VALUES (7, 'knowledge:aux_object', 'knowledge_base', 'kb-1', 'owned', 'knowledge-1/path', '{}');`

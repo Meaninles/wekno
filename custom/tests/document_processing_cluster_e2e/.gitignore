@@ -1,3 +1,4 @@
 outputs/
 durable_failover_outputs/
 __pycache__/
+format_fixtures/

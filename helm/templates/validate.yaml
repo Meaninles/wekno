@@ -1,0 +1,39 @@
+{{/*
+Fail unsafe horizontal-scaling configurations at render time instead of
+allowing apparently healthy pods to corrupt or lose access to uploaded files.
+*/}}
+{{- $appMaxReplicas := int .Values.app.replicaCount }}
+{{- if .Values.app.autoscaling.enabled }}
+  {{- $appMaxReplicas = int .Values.app.autoscaling.maxReplicas }}
+{{- end }}
+{{- $storageType := lower (toString .Values.app.env.STORAGE_TYPE) }}
+{{- if and .Values.app.enabled (gt $appMaxReplicas 1) (eq $storageType "local") }}
+  {{- if not .Values.dataFiles.persistence.enabled }}
+    {{- fail "horizontal app scaling with STORAGE_TYPE=local requires a shared ReadWriteMany dataFiles PVC; use OBS/S3/COS/MinIO or enable an RWX PVC" }}
+  {{- end }}
+  {{- if not (has "ReadWriteMany" .Values.dataFiles.persistence.accessModes) }}
+    {{- fail "horizontal app scaling with STORAGE_TYPE=local and a ReadWriteOnce PVC is unsafe across Kubernetes nodes; use object storage or ReadWriteMany" }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.app.enabled (not .Values.postgresql.enabled) (eq (toString .Values.app.connections.database.host) "postgres") }}
+  {{- fail "postgresql.enabled=false requires app.connections.database.host to point at the external HA PostgreSQL service" }}
+{{- end }}
+{{- if and .Values.app.enabled (not .Values.redis.enabled) (eq (toString .Values.app.connections.redis.address) "redis:6379") }}
+  {{- fail "redis.enabled=false requires app.connections.redis.address to point at the external durable Redis service" }}
+{{- end }}
+{{- if and .Values.app.enabled (not .Values.docreader.enabled) (eq (toString .Values.app.connections.docreader.address) "docreader:50051") }}
+  {{- fail "docreader.enabled=false requires app.connections.docreader.address to point at an external DocReader pool" }}
+{{- end }}
+{{- if and .Values.app.enabled (eq (lower (toString .Values.app.env.ENABLE_GRAPH_RAG)) "true") (not .Values.neo4j.enabled) (eq (toString .Values.app.connections.neo4j.uri) "bolt://neo4j:7687") }}
+  {{- fail "ENABLE_GRAPH_RAG=true with neo4j.enabled=false requires app.connections.neo4j.uri to point at an external HA Neo4j service" }}
+{{- end }}
+{{- $dbSSLMode := lower (toString .Values.app.connections.database.ssl.mode) }}
+{{- if not (has $dbSSLMode (list "disable" "allow" "prefer" "require" "verify-ca" "verify-full")) }}
+  {{- fail "app.connections.database.ssl.mode must be disable, allow, prefer, require, verify-ca or verify-full" }}
+{{- end }}
+{{- if ne (empty .Values.app.connections.database.ssl.certFile) (empty .Values.app.connections.database.ssl.keyFile) }}
+  {{- fail "database ssl certFile and keyFile must be configured together" }}
+{{- end }}
+{{- if ne (empty .Values.app.connections.redis.tls.certFile) (empty .Values.app.connections.redis.tls.keyFile) }}
+  {{- fail "Redis TLS certFile and keyFile must be configured together" }}
+{{- end }}

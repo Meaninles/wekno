@@ -14,6 +14,9 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/taskdefer"
 	"github.com/Tencent/WeKnora/internal/custom/modules/terminalrepair"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/middleware/asynqdl"
@@ -107,12 +110,19 @@ const documentOwnershipConflictRetryDelay = 2 * time.Second
 // using RetryDelayFunc, but does not increment Retried. This preserves
 // low-latency ownership handoff without exhausting MaxRetry or creating
 // misleading task_dead_letters rows. All Redis, database, model, and payload
-// errors remain ordinary failures.
+// errors remain ordinary failures. Provider transport/rate-limit/outage
+// errors are also budget-free: the distributed circuit supplies their delay,
+// while malformed model output and deterministic document errors still spend
+// the normal retry budget.
 func asynqIsFailureFunc(err error) bool {
 	return err != nil &&
 		!errors.Is(err, service.ErrWikiIngestConcurrent) &&
 		!errors.Is(err, documentqueue.ErrAlreadyLeased) &&
-		!errors.Is(err, documentqueue.ErrInstanceFenced)
+		!errors.Is(err, documentqueue.ErrInstanceCapacity) &&
+		!errors.Is(err, documentqueue.ErrInstanceFenced) &&
+		!errors.Is(err, taskdefer.ErrOriginalTaskLive) &&
+		!modeladmission.IsModelWorkDeferred(err) &&
+		!errors.Is(err, context.Canceled)
 }
 
 // asynqRetryDelayFunc customizes per-task retry backoff.
@@ -125,22 +135,49 @@ func asynqIsFailureFunc(err error) bool {
 // they can take over promptly if the current owner disappears. The IsFailure
 // hook makes both forms of serialization wait budget-free.
 func asynqRetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
-	if errors.Is(e, documentqueue.ErrAlreadyLeased) || errors.Is(e, documentqueue.ErrInstanceFenced) {
+	if errors.Is(e, documentqueue.ErrAlreadyLeased) ||
+		errors.Is(e, documentqueue.ErrInstanceCapacity) ||
+		errors.Is(e, documentqueue.ErrInstanceFenced) {
 		return documentOwnershipConflictRetryDelay
 	}
 	if errors.Is(e, service.ErrWikiIngestConcurrent) {
 		return wikiIngestRetryDelay
 	}
+	if errors.Is(e, context.Canceled) {
+		return documentOwnershipConflictRetryDelay
+	}
+	if delay, ok := taskdefer.RetryDelay(e); ok {
+		return delay
+	}
+	if retryAfter, ok := modeladmission.ModelRetryAfter(e); ok {
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		return modeladmission.SpreadProviderRetry(retryAfter, providerRetryIdentity(t))
+	}
 	return asynq.DefaultRetryDelayFunc(n, e, t)
+}
+
+func providerRetryIdentity(t *asynq.Task) string {
+	if t == nil {
+		return ""
+	}
+	// The NUL separator prevents a task type suffix from being confused with a
+	// payload prefix. Asynq payloads are JSON in these queues.
+	return t.Type() + "\x00" + string(t.Payload())
 }
 
 // Background fanout workers use a private operational setting so changing the
 // Coordinator-owned document capacity cannot accidentally create hundreds of
 // summary/graph/VLM workers.
 const defaultBackgroundTaskConcurrency = 32
+const defaultControlTaskConcurrency = 2
+const defaultWikiMapTaskConcurrency = 4
 
 type AsynqServers struct {
 	Normal   *asynq.Server // background and legacy queues
+	WikiMap  *asynq.Server // bounded document-local Wiki Map lane
+	Control  *asynq.Server // lifecycle/repair control plane
 	Document *asynq.Server
 	Part     *asynq.Server
 }
@@ -161,35 +198,54 @@ type documentQueueReadiness interface {
 
 func startAsynqServers(
 	normal asynqServerLifecycle,
+	wikiMap asynqServerLifecycle,
+	control asynqServerLifecycle,
 	document asynqServerLifecycle,
 	part asynqServerLifecycle,
 	handler asynq.Handler,
 	readiness documentQueueReadiness,
 ) error {
-	if normal == nil || document == nil || part == nil {
-		return errors.New("background, document and document-part asynq servers are required")
+	if normal == nil || wikiMap == nil || control == nil || document == nil || part == nil {
+		return errors.New("background, Wiki Map, control, document and document-part asynq servers are required")
 	}
 	if err := normal.Start(handler); err != nil {
 		return fmt.Errorf("start background asynq server: %w", err)
 	}
+	if err := wikiMap.Start(handler); err != nil {
+		normal.Shutdown()
+		return fmt.Errorf("start Wiki Map asynq server: %w", err)
+	}
+	if err := control.Start(handler); err != nil {
+		wikiMap.Shutdown()
+		normal.Shutdown()
+		return fmt.Errorf("start control asynq server: %w", err)
+	}
 	if err := document.Start(handler); err != nil {
+		control.Shutdown()
+		wikiMap.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("start document workflow asynq server: %w", err)
 	}
 	if err := part.Start(handler); err != nil {
 		document.Shutdown()
+		control.Shutdown()
+		wikiMap.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("start document part asynq server: %w", err)
 	}
 	if readiness == nil {
 		part.Shutdown()
 		document.Shutdown()
+		control.Shutdown()
+		wikiMap.Shutdown()
 		normal.Shutdown()
 		return errors.New("mark document queue ready: coordinator is unavailable")
 	}
 	if err := readiness.MarkReady(context.Background()); err != nil {
 		part.Shutdown()
 		document.Shutdown()
+		control.Shutdown()
+		wikiMap.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("mark document queue ready: %w", err)
 	}
@@ -237,6 +293,7 @@ func documentRootHandler(
 
 func isDocumentQueueControlError(err error) bool {
 	return errors.Is(err, documentqueue.ErrAlreadyLeased) ||
+		errors.Is(err, documentqueue.ErrFairnessDeferred) ||
 		errors.Is(err, documentqueue.ErrInstanceFenced) ||
 		errors.Is(err, documentqueue.ErrLeaseLost)
 }
@@ -267,13 +324,50 @@ func NewAsynqServers(
 		asynq.Config{
 			Concurrency: backgroundConcurrency,
 			Queues: map[string]int{
-				types.QueueCritical:      6, // Highest priority queue
 				types.QueueDefault:       3, // Default priority queue
 				types.QueueLow:           1, // Lowest priority queue
 				types.QueueMultimodal:    1, // Isolated lane for high-volume slow VLM image tasks
 				types.QueueGraph:         1, // Isolated lane for high-volume slow graph-extraction tasks
 				types.QueueQuestion:      1, // Isolated lane for high-volume slow question-generation tasks
 				types.QueueDocumentHeavy: 1, // legacy in-flight root tasks; new work uses QueueDocument
+			},
+			RetryDelayFunc:  asynqRetryDelayFunc,
+			IsFailure:       asynqIsFailureFunc,
+			ShutdownTimeout: 30 * time.Second,
+		},
+	)
+	wikiMapConcurrency := defaultWikiMapTaskConcurrency
+	if raw := strings.TrimSpace(os.Getenv("WEKNORA_WIKI_MAP_TASK_CONCURRENCY")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			wikiMapConcurrency = parsed
+		}
+	}
+	log.Printf("asynq Wiki Map server starting with per-instance concurrency=%d", wikiMapConcurrency)
+	wikiMap := asynq.NewServer(
+		opt,
+		asynq.Config{
+			Concurrency: wikiMapConcurrency,
+			Queues: map[string]int{
+				types.QueueWikiMap: 1,
+			},
+			RetryDelayFunc:  asynqRetryDelayFunc,
+			IsFailure:       asynqIsFailureFunc,
+			ShutdownTimeout: 30 * time.Second,
+		},
+	)
+	// Lifecycle operations must remain available even when every background
+	// worker is occupied by long model calls. Reparse admission and terminal
+	// repair are short control-plane operations; isolating two workers per
+	// replica gives them bounded start latency without consuming a document
+	// parsing slot.
+	log.Printf("asynq control server starting with concurrency=%d redis_op_timeout=%dms",
+		defaultControlTaskConcurrency, readRedisOpTimeoutMs())
+	control := asynq.NewServer(
+		opt,
+		asynq.Config{
+			Concurrency: defaultControlTaskConcurrency,
+			Queues: map[string]int{
+				types.QueueCritical: 1,
 			},
 			RetryDelayFunc:  asynqRetryDelayFunc,
 			IsFailure:       asynqIsFailureFunc,
@@ -308,7 +402,10 @@ func NewAsynqServers(
 			ShutdownTimeout: 30 * time.Second,
 		},
 	)
-	return &AsynqServers{Normal: normal, Document: document, Part: part}
+	return &AsynqServers{
+		Normal: normal, WikiMap: wikiMap, Control: control,
+		Document: document, Part: part,
+	}
 }
 
 func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
@@ -336,6 +433,10 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 		params.KnowledgeService, params.TaskEnqueuer, terminalRepairer,
 	)
 	mux.Use(asynqdl.MiddlewareWithCallback(params.DeadLetterRepo, knowledgeFailer))
+	mux.Use(pipelineobs.AsynqExecutionMiddleware(
+		params.DocumentQueue.InstanceID(),
+		params.DocumentQueue.BootID(),
+	))
 
 	// Install Langfuse middleware BEFORE handler registration so every task
 	// type is automatically wrapped. When Langfuse is disabled the middleware
@@ -344,6 +445,11 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	// handler execution in a SPAN so all child generations (embedding / VLM /
 	// chat / rerank / ASR) nest correctly in the Langfuse UI.
 	mux.Use(langfuse.AsynqMiddleware())
+	mux.Use(modeladmission.AsynqMiddleware())
+	// Asynq archives before consulting IsFailure when Retried == MaxRetry.
+	// Persist a control-plane resume before ACKing a generation-scoped model
+	// task at that boundary.
+	mux.Use(taskdefer.Middleware(params.TaskEnqueuer))
 
 	// Register extract handlers - router will dispatch to appropriate handler
 	mux.HandleFunc(types.TypeChunkExtract, params.ChunkExtractor.Handle)
@@ -402,16 +508,18 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	// the exhausted business operation; it only persists the exact
 	// generation/item terminal transition.
 	mux.HandleFunc(types.TypeKnowledgeTerminalRepair, terminalRepairer.Handle)
+	mux.HandleFunc(taskdefer.TypeResume, taskdefer.NewHandler(params.TaskEnqueuer).Handle)
 
-	if params.Servers == nil || params.Servers.Normal == nil ||
+	if params.Servers == nil || params.Servers.Normal == nil || params.Servers.WikiMap == nil || params.Servers.Control == nil ||
 		params.Servers.Document == nil || params.Servers.Part == nil {
-		return nil, errors.New("could not run asynq servers: background, document and part servers are required")
+		return nil, errors.New("could not run asynq servers: background, Wiki Map, control, document and part servers are required")
 	}
 	if params.DocumentQueue == nil {
 		return nil, errors.New("could not run asynq servers: document queue coordinator is required")
 	}
 	if err := startAsynqServers(
-		params.Servers.Normal, params.Servers.Document, params.Servers.Part,
+		params.Servers.Normal, params.Servers.WikiMap, params.Servers.Control,
+		params.Servers.Document, params.Servers.Part,
 		mux, params.DocumentQueue,
 	); err != nil {
 		return nil, fmt.Errorf("could not run asynq servers: %w", err)
@@ -429,8 +537,14 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 			if params.Servers.Part != nil {
 				params.Servers.Part.Shutdown()
 			}
+			if params.Servers.WikiMap != nil {
+				params.Servers.WikiMap.Shutdown()
+			}
 			if params.Servers.Normal != nil {
 				params.Servers.Normal.Shutdown()
+			}
+			if params.Servers.Control != nil {
+				params.Servers.Control.Shutdown()
 			}
 			return nil
 		})

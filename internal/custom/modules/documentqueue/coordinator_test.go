@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,6 +27,7 @@ type queueTestKnowledge struct {
 	ProcessingGeneration string
 	ProcessingOwner      string
 	ProcessingWorkflowID string
+	ProcessingFanout     types.JSON `gorm:"type:json"`
 	ParseStatus          string
 	EnableStatus         string
 	Description          string
@@ -33,6 +35,10 @@ type queueTestKnowledge struct {
 	EmbeddingModelID     string
 	ErrorMessage         string
 	PendingSubtasksCount int
+	SummaryStatus        string
+	EnrichmentStatus     string
+	WikiStatus           string
+	WikiErrorMessage     string
 	UpdatedAt            time.Time
 	DeletedAt            gorm.DeletedAt
 }
@@ -66,13 +72,150 @@ func newQueueTestCoordinator(t *testing.T, instanceID, bootID string, capacity i
 }
 
 func workflowPayload(t *testing.T, tenantID uint64, knowledgeID, generation string) []byte {
+	return workflowPayloadForKB(t, tenantID, "kb-1", knowledgeID, generation)
+}
+
+func workflowPayloadForKB(
+	t *testing.T,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	generation string,
+) []byte {
 	t.Helper()
 	payload, err := json.Marshal(types.DocumentProcessPayload{
-		TenantID: tenantID, KnowledgeID: knowledgeID, KnowledgeBaseID: "kb-1",
+		TenantID: tenantID, KnowledgeID: knowledgeID, KnowledgeBaseID: knowledgeBaseID,
 		ProcessingGeneration: generation, ProcessingOwner: "owner-" + generation,
 	})
 	require.NoError(t, err)
 	return payload
+}
+
+func TestClaimFairnessLetsLateKnowledgeBaseRunBeforeOlderBacklog(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-fairness", "boot-1", 4)
+	type seed struct {
+		tenantID        uint64
+		knowledgeBaseID string
+		knowledgeID     string
+		generation      string
+	}
+	create := func(item seed, enqueuedAt time.Time) *Workflow {
+		t.Helper()
+		workflow, _, err := coordinator.RegisterWorkflow(
+			context.Background(),
+			types.TypeDocumentProcess,
+			workflowPayloadForKB(
+				t, item.tenantID, item.knowledgeBaseID, item.knowledgeID, item.generation,
+			),
+		)
+		require.NoError(t, err)
+		bindWorkflowForTest(t, coordinator, workflow)
+		require.NoError(t, coordinator.db.Model(&Workflow{}).Where("id = ?", workflow.ID).
+			Update("enqueued_at", enqueuedAt).Error)
+		require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(workflow).Error)
+		return workflow
+	}
+
+	base := time.Now().Add(-time.Hour)
+	firstA := create(seed{41, "kb-a", "a-1", "a-generation-1"}, base)
+	secondA := create(seed{41, "kb-a", "a-2", "a-generation-2"}, base.Add(time.Second))
+	lateB := create(seed{42, "kb-b", "b-1", "b-generation-1"}, base.Add(time.Minute))
+
+	leaseA, err := coordinator.Claim(
+		context.Background(), types.TypeDocumentProcess, deliveryPayload(t, firstA),
+	)
+	require.NoError(t, err)
+	require.Equal(t, firstA.ID, leaseA.WorkflowID)
+
+	// The UI position uses the same fair ordering as recovery: the late KB is
+	// next because KB A already owns one active document slot.
+	status, err := coordinator.QueueStatus(
+		context.Background(), secondA.TenantID, []string{secondA.KnowledgeID},
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, status.WaitingTotal)
+	require.EqualValues(t, 2, status.Items[secondA.KnowledgeID].Position)
+
+	oldEpoch := secondA.DispatchEpoch
+	_, err = coordinator.Claim(
+		context.Background(), types.TypeDocumentProcess, deliveryPayload(t, secondA),
+	)
+	require.ErrorIs(t, err, ErrFairnessDeferred)
+	var deferred Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", secondA.ID).Take(&deferred).Error)
+	require.Equal(t, StateQueued, deferred.State)
+	require.EqualValues(t, oldEpoch+1, deferred.DispatchEpoch)
+	require.Empty(t, deferred.DispatchTaskID)
+	require.Nil(t, deferred.LastDispatchedAt)
+
+	leaseB, err := coordinator.Claim(
+		context.Background(), types.TypeDocumentProcess, deliveryPayload(t, lateB),
+	)
+	require.NoError(t, err)
+	require.Equal(t, lateB.ID, leaseB.WorkflowID)
+
+	var groups []ScheduleGroup
+	require.NoError(t, coordinator.db.Order("tenant_id ASC").Find(&groups).Error)
+	require.Len(t, groups, 2)
+	require.Equal(t, firstA.TenantID, groups[0].TenantID)
+	require.Equal(t, lateB.TenantID, groups[1].TenantID)
+}
+
+func TestQueuedDispatchPublishesOnlyOneHeadAndDoesNotSkipItsLiveOutbox(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "bounded-dispatch", "boot-1", 4)
+	create := func(tenantID uint64, knowledgeBaseID, knowledgeID string, enqueuedAt time.Time) *Workflow {
+		t.Helper()
+		workflow, _, err := coordinator.RegisterWorkflow(
+			context.Background(),
+			types.TypeDocumentProcess,
+			workflowPayloadForKB(
+				t, tenantID, knowledgeBaseID, knowledgeID, knowledgeID+"-generation",
+			),
+		)
+		require.NoError(t, err)
+		bindWorkflowForTest(t, coordinator, workflow)
+		require.NoError(t, coordinator.db.Model(&Workflow{}).
+			Where("id = ?", workflow.ID).
+			Update("enqueued_at", enqueuedAt).Error)
+		require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(workflow).Error)
+		return workflow
+	}
+
+	base := time.Now().Add(-time.Hour)
+	head := create(501, "kb-a", "bounded-head", base)
+	_ = create(501, "kb-a", "bounded-second", base.Add(time.Second))
+	_ = create(502, "kb-b", "bounded-other-group", base.Add(2*time.Second))
+
+	queued, err := coordinator.listQueuedForDispatch(
+		context.Background(), time.Now().Add(-30*time.Second),
+	)
+	require.NoError(t, err)
+	require.Len(t, queued, 1, "only the current fair head may enter the Redis delivery lane")
+	require.Equal(t, head.ID, queued[0].ID)
+
+	now := time.Now()
+	require.NoError(t, coordinator.db.Model(&Workflow{}).Where("id = ?", head.ID).
+		Updates(map[string]interface{}{
+			"dispatch_task_id":   workflowTaskID(head.ID, head.DispatchEpoch),
+			"last_dispatched_at": now,
+		}).Error)
+
+	queued, err = coordinator.listQueuedForDispatch(
+		context.Background(), now.Add(-30*time.Second),
+	)
+	require.NoError(t, err)
+	require.Empty(t, queued,
+		"a live outbox for the fair head must block later rows instead of preloading them out of order")
+
+	stale := now.Add(-time.Minute)
+	require.NoError(t, coordinator.db.Model(&Workflow{}).Where("id = ?", head.ID).
+		Update("last_dispatched_at", stale).Error)
+	queued, err = coordinator.listQueuedForDispatch(
+		context.Background(), now.Add(-30*time.Second),
+	)
+	require.NoError(t, err)
+	require.Len(t, queued, 1)
+	require.Equal(t, head.ID, queued[0].ID)
 }
 
 func deliveryPayload(t *testing.T, workflow *Workflow) []byte {
@@ -108,6 +251,16 @@ func bindWorkflowForTest(t *testing.T, coordinator *Coordinator, workflow *Workf
 		"processing_workflow_id": binding.WorkflowID,
 		"parse_status":           types.ParseStatusPending,
 	}).Error)
+}
+
+func cancellationBindingForTest(workflow *Workflow) CancellationBinding {
+	return CancellationBinding{
+		WorkflowID:           workflow.ID,
+		TenantID:             workflow.TenantID,
+		KnowledgeBaseID:      workflow.KnowledgeBaseID,
+		KnowledgeID:          workflow.KnowledgeID,
+		ProcessingGeneration: workflow.ProcessingGeneration,
+	}
 }
 
 func TestConcurrentRegisterAndClaimHasExactlyOneWinner(t *testing.T) {
@@ -168,6 +321,70 @@ func TestConcurrentRegisterAndClaimHasExactlyOneWinner(t *testing.T) {
 	require.EqualValues(t, 1, winners.Load())
 }
 
+func TestConcurrentRecordDispatchHasOnePublisherWithoutInflatingAttempts(t *testing.T) {
+	first := newQueueTestCoordinator(t, "dispatch-racer-a", "boot-a", 1)
+	workflow, _, err := first.RegisterWorkflow(
+		context.Background(),
+		types.TypeDocumentProcess,
+		workflowPayload(t, 70, "knowledge-dispatch-race", "generation-1"),
+	)
+	require.NoError(t, err)
+	second := NewCoordinatorWithConfig(
+		first.db,
+		nil,
+		"dispatch-racer-b",
+		"boot-b",
+		1,
+		first.config,
+	)
+	taskID := workflowTaskID(workflow.ID, workflow.DispatchEpoch)
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wait sync.WaitGroup
+	snapshots := []Workflow{*workflow, *workflow}
+	for index, coordinator := range []*Coordinator{first, second} {
+		wait.Add(1)
+		go func(candidate *Coordinator, snapshot *Workflow) {
+			defer wait.Done()
+			<-start
+			errs <- candidate.recordDispatch(context.Background(), snapshot, taskID)
+		}(coordinator, &snapshots[index])
+	}
+	close(start)
+	wait.Wait()
+	close(errs)
+
+	var published, fenced int
+	for dispatchErr := range errs {
+		switch {
+		case dispatchErr == nil:
+			published++
+		case errors.Is(dispatchErr, ErrStaleDelivery):
+			fenced++
+		default:
+			require.NoError(t, dispatchErr)
+		}
+	}
+	require.Equal(t, 1, published)
+	require.Equal(t, 1, fenced)
+
+	var current Workflow
+	require.NoError(t, first.db.Where("id = ?", workflow.ID).Take(&current).Error)
+	require.Equal(t, taskID, current.DispatchTaskID)
+	require.Equal(t, 1, current.DispatchAttempts)
+	require.NotNil(t, current.LastDispatchedAt)
+	firstDispatchAt := *current.LastDispatchedAt
+
+	// A later recovery liveness probe for the same stable TaskID advances its
+	// outbox timestamp, but it is not a second logical delivery attempt.
+	time.Sleep(time.Millisecond)
+	require.NoError(t, first.recordDispatch(context.Background(), &current, taskID))
+	require.NoError(t, first.db.Where("id = ?", workflow.ID).Take(&current).Error)
+	require.Equal(t, 1, current.DispatchAttempts)
+	require.True(t, current.LastDispatchedAt.After(firstDispatchAt))
+}
+
 func TestClaimAcceptsDurableResumeBoundariesAfterOwnerTermination(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -180,6 +397,7 @@ func TestClaimAcceptsDurableResumeBoundariesAfterOwnerTermination(t *testing.T) 
 		{name: "core in progress original owner", status: types.ParseStatusProcessing, owner: "owner-generation-1", claimable: true},
 		{name: "core committed", status: types.ParseStatusProcessing, processedAt: true, claimable: true},
 		{name: "derivatives in progress", status: types.ParseStatusFinalizing, processedAt: true, claimable: true},
+		{name: "core and derivatives committed while wiki is pending", status: types.ParseStatusCompleted, processedAt: true, claimable: true},
 		{name: "empty owner before core commit", status: types.ParseStatusProcessing, claimable: false},
 		{name: "different owner", status: types.ParseStatusProcessing, owner: "another-owner", claimable: false},
 	}
@@ -245,6 +463,127 @@ func TestStableInstanceRestartAdoptsAndFencesPreviousBoot(t *testing.T) {
 	require.NoError(t, old.db.Where("instance_id = ?", "parser-0").Take(&instance).Error)
 	require.Equal(t, "boot-new", instance.BootID)
 	require.Equal(t, InstanceReady, instance.State)
+}
+
+func TestCancellationCommitAndStableRestartCannotReviveWorkflow(t *testing.T) {
+	for _, adoptBeforeCancel := range []bool{false, true} {
+		name := "cancel-before-restart"
+		if adoptBeforeCancel {
+			name = "restart-before-cancel"
+		}
+		t.Run(name, func(t *testing.T) {
+			old := newQueueTestCoordinator(t, "parser-cancel", "boot-old", 1)
+			workflow, _, err := old.RegisterWorkflow(
+				context.Background(),
+				types.TypeDocumentProcess,
+				workflowPayload(t, 10, "knowledge-cancel", "generation-cancel"),
+			)
+			require.NoError(t, err)
+			bindWorkflowForTest(t, old, workflow)
+			lease, err := old.Claim(
+				context.Background(),
+				types.TypeDocumentProcess,
+				deliveryPayload(t, workflow),
+			)
+			require.NoError(t, err)
+			require.NoError(t, old.db.Model(&queueTestKnowledge{}).
+				Where("id = ?", workflow.KnowledgeID).
+				Updates(map[string]interface{}{
+					"parse_status":           types.ParseStatusCancelling,
+					"pending_subtasks_count": 7,
+					"summary_status":         types.SummaryStatusProcessing,
+					"enrichment_status":      types.EnrichmentStatusPending,
+					"wiki_status":            types.WikiStatusPending,
+					"wiki_error_message":     "old error",
+				}).Error)
+
+			restarted := NewCoordinatorWithConfig(
+				old.db, nil, "parser-cancel", "boot-new", 1, old.config,
+			)
+			if adoptBeforeCancel {
+				require.NoError(t, restarted.registerAndAdopt(context.Background()))
+				require.NoError(t, restarted.MarkReady(context.Background()))
+				var adopted Workflow
+				require.NoError(t, old.db.Where("id = ?", workflow.ID).Take(&adopted).Error)
+				require.Equal(t, StateQueued, adopted.State)
+			}
+
+			now := time.Now()
+			require.NoError(t, old.CommitWorkflowCancellation(
+				context.Background(), cancellationBindingForTest(workflow), now,
+			))
+
+			if !adoptBeforeCancel {
+				require.NoError(t, restarted.registerAndAdopt(context.Background()))
+				require.NoError(t, restarted.MarkReady(context.Background()))
+			}
+
+			var persisted Workflow
+			require.NoError(t, old.db.Where("id = ?", workflow.ID).Take(&persisted).Error)
+			require.Equal(t, StateCancelled, persisted.State)
+			require.Equal(t, "cancelled", persisted.Stage)
+			require.Empty(t, persisted.OwnerInstanceID)
+			require.Empty(t, persisted.OwnerBootID)
+			require.Nil(t, persisted.LeaseUntil)
+			require.Empty(t, persisted.DispatchTaskID)
+			require.NotNil(t, persisted.CompletedAt)
+			expectedEpoch := lease.Epoch + 1
+			if adoptBeforeCancel {
+				expectedEpoch++
+			}
+			require.EqualValues(t, expectedEpoch, persisted.DispatchEpoch)
+
+			var knowledge queueTestKnowledge
+			require.NoError(t, old.db.Where("id = ?", workflow.KnowledgeID).Take(&knowledge).Error)
+			require.Equal(t, types.ParseStatusCancelled, knowledge.ParseStatus)
+			require.Zero(t, knowledge.PendingSubtasksCount)
+			require.Equal(t, types.SummaryStatusNone, knowledge.SummaryStatus)
+			require.Equal(t, types.EnrichmentStatusNone, knowledge.EnrichmentStatus)
+			require.Equal(t, types.WikiStatusNone, knowledge.WikiStatus)
+			require.Empty(t, knowledge.WikiErrorMessage)
+			require.Empty(t, knowledge.ProcessingOwner)
+
+			_, err = restarted.Claim(
+				context.Background(),
+				types.TypeDocumentProcess,
+				deliveryPayload(t, &persisted),
+			)
+			require.ErrorIs(t, err, ErrStaleDelivery)
+		})
+	}
+}
+
+func TestQueuedRecoveryIncludesAndTerminalizesSupersededGeneration(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-stale-queued", "boot-1", 1)
+	workflow, _, err := coordinator.RegisterWorkflow(
+		context.Background(),
+		types.TypeDocumentProcess,
+		workflowPayload(t, 12, "knowledge-stale-queued", "generation-old"),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, workflow)
+
+	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).
+		Where("id = ?", workflow.KnowledgeID).
+		Updates(map[string]interface{}{
+			"processing_generation":  "generation-new",
+			"processing_workflow_id": "workflow-new",
+			"processing_owner":       "owner-generation-new",
+			"parse_status":           types.ParseStatusPending,
+		}).Error)
+
+	queued, err := coordinator.listQueuedForDispatch(context.Background(), time.Now())
+	require.NoError(t, err)
+	require.Len(t, queued, 1)
+	require.Equal(t, workflow.ID, queued[0].ID)
+
+	terminal, _, err := coordinator.reconcileQueuedTerminal(context.Background(), &queued[0])
+	require.NoError(t, err)
+	require.True(t, terminal)
+	var persisted Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&persisted).Error)
+	require.Equal(t, StateSuperseded, persisted.State)
+	require.Equal(t, "superseded", persisted.Stage)
 }
 
 func TestCrossInstanceTakeoverRequiresTerminationProofBeyondStaleHeartbeat(t *testing.T) {
@@ -329,7 +668,18 @@ func TestTerminationAttestationRejectsFreshOrWrongBoot(t *testing.T) {
 	))
 }
 
-func TestProcessHoldsSlotUntilWikiDurableWorkDrains(t *testing.T) {
+func TestTerminationAttestationRejectsOversizedProof(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-proof-limit", "boot-current", 1)
+	err := coordinator.ConfirmInstanceTermination(
+		context.Background(),
+		"parser-proof-limit",
+		"boot-current",
+		strings.Repeat("x", maxTerminationProofBytes+1),
+	)
+	require.ErrorIs(t, err, ErrTerminationNotProven)
+}
+
+func TestProcessHoldsDocumentSlotUntilWikiDurableWorkDrains(t *testing.T) {
 	coordinator := newQueueTestCoordinator(t, "parser-wiki", "boot-1", 1)
 	now := time.Now()
 	knowledge := queueTestKnowledge{
@@ -343,34 +693,374 @@ func TestProcessHoldsSlotUntilWikiDurableWorkDrains(t *testing.T) {
 	require.NoError(t, err)
 	bindWorkflowForTest(t, coordinator, workflow)
 	task := asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, workflow))
-
-	deleteDelay := 80 * time.Millisecond
-	started := time.Now()
-	err = coordinator.Process(context.Background(), task, func(ctx context.Context, _ *asynq.Task) error {
-		dedupKey, keyErr := wikiqueue.IngestDedupKey(knowledge.ID, knowledge.ProcessingGeneration)
-		require.NoError(t, keyErr)
-		op := types.TaskPendingOp{
-			TenantID: 13, TaskType: types.TypeWikiIngest, Scope: types.TaskScopeKnowledgeBase,
-			ScopeID: "kb-1", Op: "ingest", DedupKey: dedupKey, Payload: []byte(`{}`),
-		}
-		require.NoError(t, coordinator.db.Create(&op).Error)
-		require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).Where("id = ?", knowledge.ID).
-			Updates(map[string]interface{}{
-				"parse_status":     types.ParseStatusCompleted,
-				"processing_owner": "", "updated_at": time.Now(),
-			}).Error)
-		go func() {
-			time.Sleep(deleteDelay)
-			_ = coordinator.db.Delete(&types.TaskPendingOp{}, op.ID).Error
-		}()
-		return nil
-	})
+	dedupKey, err := wikiqueue.IngestDedupKey(knowledge.ID, knowledge.ProcessingGeneration)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, time.Since(started), deleteDelay)
+
+	delegateCommitted := make(chan struct{})
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- coordinator.Process(context.Background(), task, func(ctx context.Context, _ *asynq.Task) error {
+			op := types.TaskPendingOp{
+				TenantID: 13, TaskType: types.TypeWikiIngest, Scope: types.TaskScopeKnowledgeBase,
+				ScopeID: "kb-1", Op: "ingest", DedupKey: dedupKey, Payload: []byte(`{}`),
+			}
+			if createErr := coordinator.db.Create(&op).Error; createErr != nil {
+				return createErr
+			}
+			if updateErr := coordinator.db.Model(&queueTestKnowledge{}).Where("id = ?", knowledge.ID).
+				Updates(map[string]interface{}{
+					"parse_status":      types.ParseStatusCompleted,
+					"processing_owner":  "",
+					"enrichment_status": types.EnrichmentStatusCompleted,
+					"wiki_status":       types.WikiStatusPending,
+					"updated_at":        time.Now(),
+				}).Error; updateErr != nil {
+				return updateErr
+			}
+			close(delegateCommitted)
+			return nil
+		})
+	}()
+	<-delegateCommitted
+	require.Eventually(t, func() bool {
+		var leased Workflow
+		if loadErr := coordinator.db.Where("id = ?", workflow.ID).Take(&leased).Error; loadErr != nil {
+			return false
+		}
+		return leased.State == StateLeased && leased.Stage == "wiki" &&
+			leased.OwnerInstanceID == coordinator.instanceID && leased.LeaseUntil != nil &&
+			len(coordinator.slots) == 1
+	}, time.Second, 5*time.Millisecond)
+	select {
+	case processErr := <-processDone:
+		t.Fatalf("document workflow returned before Wiki settled: %v", processErr)
+	default:
+	}
+
+	require.NoError(t, coordinator.db.Where(
+		"tenant_id = ? AND task_type = ? AND scope_id = ?",
+		knowledge.TenantID, types.TypeWikiIngest, knowledge.KnowledgeBaseID,
+	).Delete(&types.TaskPendingOp{}).Error)
+	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).Where("id = ?", knowledge.ID).
+		Updates(map[string]interface{}{
+			"wiki_status": types.WikiStatusCompleted,
+			"updated_at":  time.Now(),
+		}).Error)
+	select {
+	case processErr := <-processDone:
+		require.NoError(t, processErr)
+	case <-time.After(time.Second):
+		t.Fatal("document workflow did not finish after Wiki settled")
+	}
 	var finished Workflow
 	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
 	require.Equal(t, StateCompleted, finished.State)
 	require.Equal(t, "completed", finished.Stage)
+	require.Len(t, coordinator.slots, 0)
+}
+
+func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-span-reconcile", "boot-1", 1)
+	require.NoError(t, coordinator.db.AutoMigrate(&types.KnowledgeProcessingSpan{}))
+
+	knowledge := queueTestKnowledge{
+		ID: "knowledge-span-reconcile", TenantID: 131, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-current", ProcessingOwner: "owner-generation-current",
+		ParseStatus: types.ParseStatusPending, UpdatedAt: time.Now(),
+	}
+	require.NoError(t, coordinator.db.Create(&knowledge).Error)
+	workflow, _, err := coordinator.RegisterWorkflow(
+		context.Background(), types.TypeDocumentProcess,
+		workflowPayload(t, knowledge.TenantID, knowledge.ID, knowledge.ProcessingGeneration),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, workflow)
+	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).
+		Where("id = ?", knowledge.ID).
+		Updates(map[string]interface{}{
+			"parse_status":      types.ParseStatusCompleted,
+			"processing_owner":  "",
+			"processed_at":      time.Now(),
+			"enrichment_status": types.EnrichmentStatusCompleted,
+			"wiki_status":       types.WikiStatusCompleted,
+			"updated_at":        time.Now(),
+		}).Error)
+	require.NoError(t, coordinator.db.Model(&Workflow{}).
+		Where("id = ?", workflow.ID).
+		Updates(map[string]interface{}{
+			"state": StateCompleted, "stage": "completed",
+			"completed_at": time.Now(), "updated_at": time.Now(),
+		}).Error)
+
+	started := time.Now().Add(-time.Minute)
+	spans := []types.KnowledgeProcessingSpan{
+		{
+			KnowledgeID: knowledge.ID, Attempt: 1, SpanID: "old-attempt-root",
+			Name: "knowledge_processing", Kind: types.SpanKindRoot,
+			Status: types.SpanStatusRunning, StartedAt: &started,
+		},
+		{
+			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "latest-root",
+			Name: "knowledge_processing", Kind: types.SpanKindRoot,
+			Status: types.SpanStatusRunning, StartedAt: &started,
+		},
+		{
+			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "latest-wiki",
+			ParentSpanID: "latest-root", Name: "postprocess.wiki",
+			Kind: types.SpanKindSubSpan, Status: types.SpanStatusRunning,
+			StartedAt: &started,
+		},
+		{
+			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "latest-page",
+			ParentSpanID: "latest-wiki", Name: "postprocess.wiki.page[entity/acme]",
+			Kind: types.SpanKindSubSpan, Status: types.SpanStatusPending,
+			StartedAt: &started,
+		},
+		{
+			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "historical-failure",
+			ParentSpanID: "latest-root", Name: "postprocess.wiki",
+			Kind: types.SpanKindSubSpan, Status: types.SpanStatusFailed,
+			ErrorCode: "WIKI_MATERIALIZATION_FAILED", StartedAt: &started,
+			FinishedAt: &started,
+		},
+	}
+	require.NoError(t, coordinator.db.Create(&spans).Error)
+
+	require.NoError(t, coordinator.reconcileTerminalSpanOrphans(context.Background()))
+	require.NoError(t, coordinator.reconcileTerminalSpanOrphans(context.Background()),
+		"repeated multi-replica recovery must be idempotent")
+
+	var got []types.KnowledgeProcessingSpan
+	require.NoError(t, coordinator.db.
+		Where("knowledge_id = ?", knowledge.ID).
+		Order("attempt ASC, id ASC").
+		Find(&got).Error)
+	require.Len(t, got, len(spans))
+	byID := make(map[string]types.KnowledgeProcessingSpan, len(got))
+	for _, span := range got {
+		byID[span.SpanID] = span
+	}
+	require.Equal(t, types.SpanStatusRunning, byID["old-attempt-root"].Status,
+		"an older attempt is immutable history")
+	require.Equal(t, types.SpanStatusDone, byID["latest-root"].Status)
+	require.Equal(t, types.SpanStatusCancelled, byID["latest-wiki"].Status)
+	require.Equal(t, "DOCUMENT_WORKFLOW_TERMINAL", byID["latest-wiki"].ErrorCode)
+	require.NotNil(t, byID["latest-wiki"].FinishedAt)
+	require.Equal(t, types.SpanStatusCancelled, byID["latest-page"].Status)
+	require.Equal(t, types.SpanStatusFailed, byID["historical-failure"].Status,
+		"terminal history must not be rewritten")
+}
+
+func TestTerminalSpanRecoveryIgnoresSupersededWorkflowGeneration(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-span-generation", "boot-1", 1)
+	require.NoError(t, coordinator.db.AutoMigrate(&types.KnowledgeProcessingSpan{}))
+
+	knowledge := queueTestKnowledge{
+		ID: "knowledge-span-generation", TenantID: 132, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-old", ProcessingOwner: "owner-generation-old",
+		ParseStatus: types.ParseStatusPending, UpdatedAt: time.Now(),
+	}
+	require.NoError(t, coordinator.db.Create(&knowledge).Error)
+	workflow, _, err := coordinator.RegisterWorkflow(
+		context.Background(), types.TypeDocumentProcess,
+		workflowPayload(t, knowledge.TenantID, knowledge.ID, knowledge.ProcessingGeneration),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, workflow)
+	require.NoError(t, coordinator.db.Model(&Workflow{}).
+		Where("id = ?", workflow.ID).
+		Updates(map[string]interface{}{
+			"state": StateCompleted, "stage": "completed",
+			"completed_at": time.Now(), "updated_at": time.Now(),
+		}).Error)
+	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).
+		Where("id = ?", knowledge.ID).
+		Updates(map[string]interface{}{
+			"processing_generation": "generation-new",
+			"processing_owner":      "owner-generation-new",
+			"updated_at":            time.Now(),
+		}).Error)
+
+	started := time.Now().Add(-time.Minute)
+	require.NoError(t, coordinator.db.Create(&types.KnowledgeProcessingSpan{
+		KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "new-generation-root",
+		Name: "knowledge_processing", Kind: types.SpanKindRoot,
+		Status: types.SpanStatusRunning, StartedAt: &started,
+	}).Error)
+
+	require.NoError(t, coordinator.reconcileTerminalSpanOrphans(context.Background()))
+	var root types.KnowledgeProcessingSpan
+	require.NoError(t, coordinator.db.
+		Where("span_id = ?", "new-generation-root").
+		Take(&root).Error)
+	require.Equal(t, types.SpanStatusRunning, root.Status,
+		"an old terminal workflow must never close a newer generation's attempt")
+}
+
+func TestRecoverWaitingExternalRequeuesOnceAndSkipsCommittedCoreDelegate(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-legacy-wiki", "boot-1", 1)
+	knowledge := queueTestKnowledge{
+		ID: "knowledge-legacy-wiki", TenantID: 14, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ProcessingOwner: "owner-generation-1",
+		ParseStatus: types.ParseStatusPending, UpdatedAt: time.Now(),
+	}
+	require.NoError(t, coordinator.db.Create(&knowledge).Error)
+	workflow, _, err := coordinator.RegisterWorkflow(
+		context.Background(),
+		types.TypeDocumentProcess,
+		workflowPayload(t, knowledge.TenantID, knowledge.ID, knowledge.ProcessingGeneration),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, workflow)
+	dedupKey, err := wikiqueue.IngestDedupKey(knowledge.ID, knowledge.ProcessingGeneration)
+	require.NoError(t, err)
+	require.NoError(t, coordinator.db.Create(&types.TaskPendingOp{
+		TenantID: knowledge.TenantID, TaskType: types.TypeWikiIngest,
+		Scope: types.TaskScopeKnowledgeBase, ScopeID: knowledge.KnowledgeBaseID,
+		Op: "ingest", DedupKey: dedupKey, Payload: []byte(`{}`),
+	}).Error)
+	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).Where("id = ?", knowledge.ID).
+		Updates(map[string]interface{}{
+			"parse_status":      types.ParseStatusCompleted,
+			"processing_owner":  "",
+			"processed_at":      time.Now(),
+			"enrichment_status": types.EnrichmentStatusCompleted,
+			"wiki_status":       types.WikiStatusPending,
+			"updated_at":        time.Now(),
+		}).Error)
+	require.NoError(t, coordinator.db.Model(&Workflow{}).Where("id = ?", workflow.ID).
+		Updates(map[string]interface{}{
+			"state": StateWaitingExternal, "stage": "wiki",
+			"owner_instance_id": "", "owner_boot_id": "",
+			"lease_until": nil, "last_heartbeat_at": nil,
+		}).Error)
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(workflow).Error)
+	oldEpoch := workflow.DispatchEpoch
+
+	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
+	var resumed Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&resumed).Error)
+	require.Equal(t, StateQueued, resumed.State)
+	require.EqualValues(t, oldEpoch+1, resumed.DispatchEpoch)
+	require.Empty(t, resumed.DispatchTaskID)
+	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
+	var afterSecondRecovery Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&afterSecondRecovery).Error)
+	require.EqualValues(t, resumed.DispatchEpoch, afterSecondRecovery.DispatchEpoch,
+		"concurrent/repeated recovery must not publish a second logical epoch")
+
+	var delegateCalls atomic.Int32
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- coordinator.Process(
+			context.Background(),
+			asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, &resumed)),
+			func(context.Context, *asynq.Task) error {
+				delegateCalls.Add(1)
+				return errors.New("committed core delegate must not run")
+			},
+		)
+	}()
+	require.Eventually(t, func() bool {
+		var leased Workflow
+		if loadErr := coordinator.db.Where("id = ?", workflow.ID).Take(&leased).Error; loadErr != nil {
+			return false
+		}
+		return leased.State == StateLeased && leased.Stage == "wiki"
+	}, time.Second, 5*time.Millisecond)
+	require.Zero(t, delegateCalls.Load())
+
+	require.NoError(t, coordinator.db.Where(
+		"tenant_id = ? AND task_type = ? AND scope_id = ?",
+		knowledge.TenantID, types.TypeWikiIngest, knowledge.KnowledgeBaseID,
+	).Delete(&types.TaskPendingOp{}).Error)
+	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).Where("id = ?", knowledge.ID).
+		Updates(map[string]interface{}{
+			"wiki_status": types.WikiStatusCompleted,
+			"updated_at":  time.Now(),
+		}).Error)
+	select {
+	case processErr := <-processDone:
+		require.NoError(t, processErr)
+	case <-time.After(time.Second):
+		t.Fatal("resumed Wiki-only workflow did not finish")
+	}
+	require.Zero(t, delegateCalls.Load())
+}
+
+func TestProcessNeverMarksFailedOrDegradedDerivativesCompleted(t *testing.T) {
+	tests := []struct {
+		name             string
+		enrichmentStatus string
+		wikiStatus       string
+		wantStage        string
+	}{
+		{
+			name:             "enrichment failed",
+			enrichmentStatus: types.EnrichmentStatusFailed,
+			wikiStatus:       types.WikiStatusNone,
+			wantStage:        "enrichment_failed",
+		},
+		{
+			name:             "enrichment degraded",
+			enrichmentStatus: types.EnrichmentStatusDegraded,
+			wikiStatus:       types.WikiStatusNone,
+			wantStage:        "enrichment_degraded",
+		},
+		{
+			name:             "wiki failed",
+			enrichmentStatus: types.EnrichmentStatusCompleted,
+			wikiStatus:       types.WikiStatusFailed,
+			wantStage:        "wiki_failed",
+		},
+		{
+			name:             "wiki degraded",
+			enrichmentStatus: types.EnrichmentStatusCompleted,
+			wikiStatus:       types.WikiStatusDegraded,
+			wantStage:        "wiki_degraded",
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator := newQueueTestCoordinator(
+				t, fmt.Sprintf("parser-derivative-%d", index), "boot-1", 1,
+			)
+			knowledgeID := fmt.Sprintf("knowledge-derivative-%d", index)
+			generation := fmt.Sprintf("generation-%d", index)
+			require.NoError(t, coordinator.db.Create(&queueTestKnowledge{
+				ID: knowledgeID, TenantID: uint64(50 + index), KnowledgeBaseID: "kb-1",
+				ProcessingGeneration: generation, ProcessingOwner: "owner-" + generation,
+				ParseStatus: types.ParseStatusPending, UpdatedAt: time.Now(),
+			}).Error)
+			workflow, _, err := coordinator.RegisterWorkflow(
+				context.Background(), types.TypeDocumentProcess,
+				workflowPayload(t, uint64(50+index), knowledgeID, generation),
+			)
+			require.NoError(t, err)
+			bindWorkflowForTest(t, coordinator, workflow)
+
+			err = coordinator.Process(
+				context.Background(),
+				asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, workflow)),
+				func(context.Context, *asynq.Task) error {
+					return coordinator.db.Model(&queueTestKnowledge{}).
+						Where("id = ?", knowledgeID).
+						Updates(map[string]interface{}{
+							"parse_status":      types.ParseStatusCompleted,
+							"processing_owner":  "",
+							"enrichment_status": test.enrichmentStatus,
+							"wiki_status":       test.wikiStatus,
+							"updated_at":        time.Now(),
+						}).Error
+				},
+			)
+			require.NoError(t, err)
+			var finished Workflow
+			require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
+			require.Equal(t, StateFailed, finished.State)
+			require.Equal(t, test.wantStage, finished.Stage)
+		})
+	}
 }
 
 func TestQueuePositionIsGlobalBeforeTenantFiltering(t *testing.T) {
@@ -488,6 +1178,90 @@ func TestFencedBootCannotClaimOrRenew(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAssertCurrentBootDistinguishesClaimFromDrainAndSupersession(t *testing.T) {
+	old := newQueueTestCoordinator(t, "parser-current-boot", "boot-old", 2)
+	require.NoError(t, old.AssertCurrentBoot(context.Background(), false))
+	require.NoError(t, old.AssertCurrentBoot(context.Background(), true))
+
+	old.MarkDraining()
+	require.ErrorIs(t, old.AssertCurrentBoot(context.Background(), false), ErrInstanceFenced)
+	require.NoError(t, old.AssertCurrentBoot(context.Background(), true))
+
+	replacement := NewCoordinatorWithConfig(
+		old.db, nil, old.instanceID, "boot-new", old.capacity, old.config,
+	)
+	require.NoError(t, replacement.registerAndAdopt(context.Background()))
+	require.NoError(t, replacement.MarkReady(context.Background()))
+	require.ErrorIs(t, old.AssertCurrentBoot(context.Background(), true), ErrInstanceFenced)
+	require.NoError(t, replacement.AssertCurrentBoot(context.Background(), false))
+}
+
+func TestAuxiliaryExecutionPreventsPrematureStoppedProof(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-auxiliary", "boot-1", 1)
+	coordinator.config.ShutdownDrainTimeout = 500 * time.Millisecond
+	executionCtx, cancelExecution := context.WithCancel(context.Background())
+	releaseExecution, err := coordinator.RegisterAuxiliaryExecution(cancelExecution)
+	require.NoError(t, err)
+
+	stopDone := make(chan struct{})
+	go func() {
+		coordinator.Stop()
+		close(stopDone)
+	}()
+	require.Eventually(t, func() bool {
+		return errors.Is(executionCtx.Err(), context.Canceled)
+	}, 200*time.Millisecond, 5*time.Millisecond)
+	require.Eventually(t, func() bool {
+		var instance Instance
+		if err := coordinator.db.Where(
+			"instance_id = ?", coordinator.instanceID,
+		).Take(&instance).Error; err != nil {
+			return false
+		}
+		return instance.State == InstanceDraining
+	}, 200*time.Millisecond, 5*time.Millisecond)
+	select {
+	case <-stopDone:
+		t.Fatal("coordinator published stop before auxiliary handler returned")
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	releaseExecution()
+	releaseExecution() // release is deliberately idempotent
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("coordinator did not finish after auxiliary handler returned")
+	}
+	var stopped Instance
+	require.NoError(t, coordinator.db.Where(
+		"instance_id = ?", coordinator.instanceID,
+	).Take(&stopped).Error)
+	require.Equal(t, InstanceStopped, stopped.State)
+}
+
+func TestAuxiliaryExecutionDrainTimeoutFailsClosed(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-auxiliary-timeout", "boot-1", 1)
+	coordinator.config.ShutdownDrainTimeout = 20 * time.Millisecond
+	_, cancelExecution := context.WithCancel(context.Background())
+	releaseExecution, err := coordinator.RegisterAuxiliaryExecution(cancelExecution)
+	require.NoError(t, err)
+
+	coordinator.Stop()
+	var instance Instance
+	require.NoError(t, coordinator.db.Where(
+		"instance_id = ?", coordinator.instanceID,
+	).Take(&instance).Error)
+	require.Equal(t, InstanceDraining, instance.State)
+
+	releaseExecution()
+	coordinator.Stop()
+	require.NoError(t, coordinator.db.Where(
+		"instance_id = ?", coordinator.instanceID,
+	).Take(&instance).Error)
+	require.Equal(t, InstanceStopped, instance.State)
+}
+
 func TestAlreadyLeasedDeliveryRemainsRetryable(t *testing.T) {
 	coordinator := newQueueTestCoordinator(t, "parser-retry", "boot-1", 2)
 	payload := workflowPayload(t, 22, "knowledge-retry", "generation-1")
@@ -504,6 +1278,126 @@ func TestAlreadyLeasedDeliveryRemainsRetryable(t *testing.T) {
 			return nil
 		})
 	require.ErrorIs(t, err, ErrAlreadyLeased)
+}
+
+func TestClaimEnforcesDurableCapacityWhenLocalSlotWasReleased(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-durable-capacity", "boot-1", 1)
+
+	first, _, err := coordinator.RegisterWorkflow(
+		context.Background(),
+		types.TypeDocumentProcess,
+		workflowPayload(t, 220, "knowledge-capacity-first", "generation-first"),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, first)
+	second, _, err := coordinator.RegisterWorkflow(
+		context.Background(),
+		types.TypeDocumentProcess,
+		workflowPayload(t, 220, "knowledge-capacity-second", "generation-second"),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, second)
+
+	// A direct Claim intentionally leaves no process-local execution entry.
+	// This reproduces a handler whose DB release failed during a PostgreSQL
+	// outage after its in-memory semaphore slot had already been returned.
+	_, err = coordinator.Claim(
+		context.Background(), types.TypeDocumentProcess, deliveryPayload(t, first),
+	)
+	require.NoError(t, err)
+	require.False(t, coordinator.hasActiveExecution(first.ID, first.DispatchEpoch))
+
+	var delegateCalls atomic.Int32
+	err = coordinator.Process(
+		context.Background(),
+		asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, second)),
+		func(context.Context, *asynq.Task) error {
+			delegateCalls.Add(1)
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, ErrInstanceCapacity)
+	require.Zero(t, delegateCalls.Load())
+
+	var durableLeases int64
+	require.NoError(t, coordinator.db.Model(&Workflow{}).
+		Where("state = ? AND owner_instance_id = ? AND owner_boot_id = ?",
+			StateLeased, coordinator.instanceID, coordinator.bootID).
+		Count(&durableLeases).Error)
+	require.EqualValues(t, coordinator.capacity, durableLeases)
+
+	var stillQueued Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", second.ID).Take(&stillQueued).Error)
+	require.Equal(t, StateQueued, stillQueued.State)
+	require.Empty(t, stillQueued.OwnerInstanceID)
+	require.Equal(t, second.DispatchEpoch, stillQueued.DispatchEpoch)
+}
+
+func TestConcurrentProcessCannotExceedDurableCapacityWithOrphanedLeases(t *testing.T) {
+	const capacity = 4
+	coordinator := newQueueTestCoordinator(
+		t, "parser-concurrent-durable-capacity", "boot-1", capacity,
+	)
+	workflows := make([]*Workflow, 0, capacity*3)
+	for index := 0; index < capacity*3; index++ {
+		workflow, _, err := coordinator.RegisterWorkflow(
+			context.Background(),
+			types.TypeDocumentProcess,
+			workflowPayload(
+				t,
+				221,
+				fmt.Sprintf("knowledge-capacity-%02d", index),
+				fmt.Sprintf("generation-%02d", index),
+			),
+		)
+		require.NoError(t, err)
+		bindWorkflowForTest(t, coordinator, workflow)
+		workflows = append(workflows, workflow)
+	}
+
+	// Fill the durable allocation without occupying any local semaphore slot,
+	// matching the post-outage state that originally produced 2x capacity.
+	for index := 0; index < capacity; index++ {
+		_, err := coordinator.Claim(
+			context.Background(),
+			types.TypeDocumentProcess,
+			deliveryPayload(t, workflows[index]),
+		)
+		require.NoError(t, err)
+	}
+	require.Zero(t, coordinator.activeExecutionCount())
+
+	var delegateCalls atomic.Int32
+	errs := make(chan error, len(workflows)-capacity)
+	var wait sync.WaitGroup
+	for _, workflow := range workflows[capacity:] {
+		workflow := workflow
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errs <- coordinator.Process(
+				context.Background(),
+				asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, workflow)),
+				func(context.Context, *asynq.Task) error {
+					delegateCalls.Add(1)
+					return nil
+				},
+			)
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		require.ErrorIs(t, err, ErrInstanceCapacity)
+	}
+	require.Zero(t, delegateCalls.Load())
+
+	var durableLeases int64
+	require.NoError(t, coordinator.db.Model(&Workflow{}).
+		Where("state = ? AND owner_instance_id = ? AND owner_boot_id = ?",
+			StateLeased, coordinator.instanceID, coordinator.bootID).
+		Count(&durableLeases).Error)
+	require.EqualValues(t, capacity, durableLeases)
 }
 
 func TestDelegatePanicReleasesLease(t *testing.T) {
@@ -535,6 +1429,41 @@ func TestDelegatePanicReleasesLease(t *testing.T) {
 	require.Empty(t, released.OwnerInstanceID)
 	require.Contains(t, released.LastError, "panic")
 	require.False(t, coordinator.hasActiveExecution(workflow.ID, workflow.DispatchEpoch))
+}
+
+func TestInitialObserveFailureRequeuesWithoutRunningDelegate(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-observe-error", "boot-1", 1)
+	knowledge := queueTestKnowledge{
+		ID: "knowledge-observe-error", TenantID: 26, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ProcessingOwner: "owner-generation-1",
+		ParseStatus: types.ParseStatusPending, UpdatedAt: time.Now(),
+	}
+	require.NoError(t, coordinator.db.Create(&knowledge).Error)
+	workflow, _, err := coordinator.RegisterWorkflow(
+		context.Background(), types.TypeDocumentProcess,
+		workflowPayload(t, knowledge.TenantID, knowledge.ID, knowledge.ProcessingGeneration),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, workflow)
+
+	observeFailure := errors.New("temporary knowledge observation failure")
+	coordinator.observeHook = func(context.Context, *Lease) error { return observeFailure }
+	var delegateCalls atomic.Int32
+	err = coordinator.Process(
+		context.Background(),
+		asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, workflow)),
+		func(context.Context, *asynq.Task) error {
+			delegateCalls.Add(1)
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, observeFailure)
+	require.Zero(t, delegateCalls.Load())
+	var released Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&released).Error)
+	require.Equal(t, StateQueued, released.State)
+	require.Empty(t, released.OwnerInstanceID)
+	require.Contains(t, released.LastError, observeFailure.Error())
 }
 
 func TestRegistrationPersistsOriginalDeliveryBudget(t *testing.T) {

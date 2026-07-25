@@ -133,7 +133,7 @@ func openRegistryTestDB(t *testing.T) *gorm.DB {
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
-		&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.TaskPendingOp{},
+		&types.Tenant{}, &types.KnowledgeBase{}, &types.Knowledge{}, &types.Chunk{}, &types.TaskPendingOp{},
 	))
 	require.NoError(t, db.Create(&types.Tenant{ID: 7, Name: "tenant"}).Error)
 	require.NoError(t, db.Create(&types.KnowledgeBase{ID: "kb-1", TenantID: 7, Name: "kb"}).Error)
@@ -185,6 +185,15 @@ func countOwnership(t *testing.T, db *gorm.DB) int64 {
 	t.Helper()
 	var count int64
 	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).Count(&count).Error)
+	return count
+}
+
+func countAuxOperation(t *testing.T, db *gorm.DB, operation string) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).
+		Where("task_type = ? AND op = ?", TaskType, operation).
+		Count(&count).Error)
 	return count
 }
 
@@ -247,6 +256,103 @@ func TestCleanupKnowledgeRoutesMixedProvidersAndRetainsOnlyFailedPath(t *testing
 	require.NoError(t, registry.CleanupDerived(context.Background(), 7, "kb-1", "knowledge-1", "obs", nil))
 	require.Zero(t, countOwnership(t, db))
 	require.Equal(t, []string{"obs://bucket/image.png", "obs://bucket/image.png"}, obs.deleted)
+}
+
+func createLegacyImageChunk(
+	t *testing.T,
+	db *gorm.DB,
+	id string,
+	seqID int64,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	path string,
+	deleted bool,
+) {
+	t.Helper()
+	chunk := &types.Chunk{
+		ID: id, SeqID: seqID, TenantID: tenantID,
+		KnowledgeBaseID: knowledgeBaseID, KnowledgeID: knowledgeID,
+		ChunkType: types.ChunkTypeText, ImageInfo: fmt.Sprintf(`[{"url":%q}]`, path),
+	}
+	if deleted {
+		chunk.DeletedAt = gorm.DeletedAt{Time: time.Now().Add(-time.Minute), Valid: true}
+	}
+	require.NoError(t, db.Unscoped().Create(chunk).Error)
+}
+
+func TestPrepareDerivedCleanupAdoptsExactOwnerSoftDeletedImageBeforeDelete(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusProcessing, "generation-2")
+	path := "local://7/knowledge-1/legacy-image.png"
+	createLegacyImageChunk(t, db, "chunk-legacy-owner", 1001, 7, "kb-1", "knowledge-1", path, true)
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+
+	require.NoError(t, registry.PrepareDerivedCleanup(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{path},
+	))
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted, "preflight must never delete provider data")
+
+	require.NoError(t, registry.CleanupDerived(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{path},
+	))
+	require.Zero(t, countOwnership(t, db))
+	require.Equal(t, []string{path}, local.deleted)
+}
+
+func TestPrepareDerivedCleanupRejectsUnreferencedPathWithoutMutation(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusProcessing, "generation-2")
+	path := "local://7/knowledge-1/not-referenced.png"
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+
+	err := registry.PrepareDerivedCleanup(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{path},
+	)
+	require.ErrorIs(t, err, ErrBindingMismatch)
+	require.Zero(t, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+}
+
+func TestPrepareDerivedCleanupRejectsCrossKnowledgeReferenceWithoutMutation(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusProcessing, "generation-2")
+	require.NoError(t, db.Create(&types.Knowledge{
+		ID: "knowledge-2", TenantID: 7, KnowledgeBaseID: "kb-1",
+		Type: "file", ParseStatus: types.ParseStatusCompleted,
+		ProcessingGeneration: "generation-other",
+	}).Error)
+	path := "local://7/knowledge-1/shared-corrupt-image.png"
+	createLegacyImageChunk(t, db, "chunk-owner", 1002, 7, "kb-1", "knowledge-1", path, true)
+	createLegacyImageChunk(t, db, "chunk-other", 1003, 7, "kb-1", "knowledge-2", path, false)
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+
+	err := registry.PrepareDerivedCleanup(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{path},
+	)
+	require.ErrorIs(t, err, ErrBindingMismatch)
+	require.Zero(t, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+}
+
+func TestPrepareDerivedCleanupRejectsPathOutsideExactKnowledgeNamespace(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusProcessing, "generation-2")
+	path := "local://7/exports/legacy-image.png"
+	createLegacyImageChunk(t, db, "chunk-export", 1004, 7, "kb-1", "knowledge-1", path, true)
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+
+	err := registry.PrepareDerivedCleanup(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{path},
+	)
+	require.ErrorIs(t, err, ErrBindingMismatch)
+	require.Zero(t, countOwnership(t, db))
+	require.Empty(t, local.deleted)
 }
 
 func TestRecoveryCleansStaleFAQEntriesAfterPendingTaskCancellation(t *testing.T) {
@@ -384,10 +490,67 @@ func TestDerivedCleanupAndRecoveryNeverDeletePersistentSources(t *testing.T) {
 	require.NoError(t, registry.CleanupForDelete(
 		context.Background(), 7, "kb-1", "knowledge-1", "local", nil,
 	))
-	require.Zero(t, countOwnership(t, db))
+	require.EqualValues(t, 2, countOwnership(t, db))
+	require.EqualValues(t, 2, countAuxOperation(t, db, operationDeleteComplete))
 	require.ElementsMatch(t, []string{
 		"local://7/image.png", "local://7/source.pdf", "local://7/clone-source.pdf",
 	}, local.deleted)
+
+	// A later subsystem/finalizer failure re-delivers document cleanup. Exact
+	// delete-complete proofs make the retry a no-op instead of misclassifying
+	// the now-absent FilePath as an unregistered legacy object.
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{"local://7/source.pdf", "local://7/clone-source.pdf"},
+	))
+	require.ElementsMatch(t, []string{
+		"local://7/image.png", "local://7/source.pdf", "local://7/clone-source.pdf",
+	}, local.deleted, "retry must not issue a second provider delete")
+	require.EqualValues(t, 2, countAuxOperation(t, db, operationDeleteComplete))
+
+	require.NoError(t, registry.PurgeKnowledgeBaseDeleteProofs(
+		context.Background(), 7, "kb-1",
+	))
+	require.Zero(t, countOwnership(t, db))
+}
+
+func TestDeleteCompletionProofDoesNotAuthorizeAnotherLegacyPath(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusDeleting, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	source := objectFor("local://7/knowledge-1/source.pdf", "generation-1", KindSourceFile)
+	source.FallbackProvider = "local"
+
+	// Registration is generation-fenced once deleting starts, so create the
+	// ordinary ownership first and then enter the deletion state.
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Update("parse_status", types.ParseStatusCompleted).Error)
+	_, err := registry.Register(context.Background(), source)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Update("parse_status", types.ParseStatusDeleting).Error)
+
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{source.Path},
+	))
+	require.Equal(t, []string{source.Path}, local.deleted)
+
+	err = registry.CleanupForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{source.Path, "local://7/knowledge-1/unowned.txt"},
+	)
+	require.ErrorIs(t, err, ErrBindingMissing)
+	require.Equal(t, []string{source.Path}, local.deleted)
+	require.EqualValues(t, 1, countAuxOperation(t, db, operationDeleteComplete))
 }
 
 func TestCleanupSkipsClientReferenceForRegisteredFAQExport(t *testing.T) {

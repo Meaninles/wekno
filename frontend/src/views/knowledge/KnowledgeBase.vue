@@ -50,6 +50,8 @@ import UploadInfoDialog from '@/custom/modules/uploadInfo/UploadInfoDialog.vue';
 import { useUploadInfoStore, type UploadInfoBatchHandle } from '@/custom/modules/uploadInfo/store';
 import DocumentQueueBadge from '@/custom/modules/documentQueue/DocumentQueueBadge.vue';
 import { useDocumentQueueStatus } from '@/custom/modules/documentQueue/useDocumentQueueStatus';
+import KnowledgeWorkflowStatusBadge from '@/custom/modules/knowledgeWorkflowStatus/KnowledgeWorkflowStatusBadge.vue';
+import { knowledgeMatchesWorkflowFilter } from '@/custom/modules/knowledgeWorkflowStatus/status';
 import TagEditDialog from './components/TagEditDialog.vue';
 import KbTagManageDrawer from './components/KbTagManageDrawer.vue';
 import { useTagChipsOverflow } from '@/composables/useTagChipsOverflow';
@@ -58,6 +60,8 @@ import { useUploadConfirmStore, type UploadConfirmResult } from '@/stores/upload
 import WikiBrowser from './wiki/WikiBrowser.vue';
 import { getWikiStats } from '@/api/wiki';
 import {
+  knowledgeHasDerivativeFailure,
+  knowledgeIsFullyComplete,
   isKnowledgeParseInFlight,
   knowledgeNeedsStatusPolling,
   shouldRefreshWikiStatusAfterKnowledgePoll,
@@ -350,27 +354,16 @@ const documentQueueKnowledgeIds = computed(() =>
   cardList.value.map((item: KnowledgeCard) => item.id).filter(Boolean),
 );
 const documentQueuePollingEnabled = computed(() =>
-  cardList.value.some((item: KnowledgeCard) => isParseInFlight(item.parse_status)),
+  cardList.value.some((item: KnowledgeCard) => knowledgeNeedsStatusPolling(item)),
 );
 const {
   waitingTotal: documentQueueWaitingTotal,
   itemsById: documentQueueItems,
 } = useDocumentQueueStatus(documentQueueKnowledgeIds, documentQueuePollingEnabled);
 
-// Status line shown on the card body while parse is still in flight.
-function inFlightCardStatusText(item: KnowledgeCard): string {
-  if (item.parse_status === 'finalizing') {
-    if (item.summary_status === 'pending' || item.summary_status === 'processing') {
-      return t('knowledgeBase.generatingSummary');
-    }
-    return t('knowledgeBase.statusFinalizing');
-  }
-  return t('knowledgeBase.parsingInProgress');
-}
-
 function isTraceMenuVisible(item: KnowledgeCard): boolean {
   if (!item?.id) return false;
-  if (isParseInFlight(item.parse_status)) {
+  if (knowledgeNeedsStatusPolling(item)) {
     return true;
   }
   return traceAvailableById[item.id] === true;
@@ -379,7 +372,7 @@ function isTraceMenuVisible(item: KnowledgeCard): boolean {
 async function probeTraceAvailable(item: KnowledgeCard) {
   const id = item.id;
   if (!id || traceProbeInflight.has(id)) return;
-  if (isParseInFlight(item.parse_status)) {
+  if (knowledgeNeedsStatusPolling(item)) {
     traceAvailableById[id] = true;
     return;
   }
@@ -444,11 +437,26 @@ const pendingReparseAck = ref<Set<string>>(new Set());
 
 const applyOptimisticBatchReparse = (ids: string[]) => {
   const idSet = new Set(ids);
+  const optimisticStatus = {
+    parse_status: 'pending',
+    summary_status: 'none',
+    enrichment_status: 'none',
+    wiki_status: 'none',
+  };
+  if (!knowledgeMatchesWorkflowFilter(optimisticStatus, selectedParseStatus.value)) {
+    const before = cardList.value.length;
+    cardList.value = cardList.value.filter((card) => !idSet.has(card.id));
+    total.value = Math.max(0, total.value - (before - cardList.value.length));
+    for (const id of ids) pendingReparseAck.value.delete(id);
+    return;
+  }
   for (const card of cardList.value) {
     if (!idSet.has(card.id)) continue;
     pendingReparseAck.value.add(card.id);
     card.parse_status = 'pending';
     card.summary_status = undefined;
+    card.enrichment_status = undefined;
+    card.wiki_status = undefined;
     card.description = '';
     delete traceAvailableById[card.id];
     traceAvailableById[card.id] = true;
@@ -501,6 +509,9 @@ const confirmBatchReparse = async () => {
       clearSelection();
       batchMode.value = false;
       scheduleWikiStatusProbes();
+      if (selectedParseStatus.value) {
+        void loadKnowledgeFiles(kbId.value);
+      }
       void awaitBatchReparseReflection(ids);
     } else {
       MessagePlugin.error(res?.message || t('knowledgeBase.batchReparseFailed'));
@@ -579,8 +590,12 @@ const parseStatusOptions = computed(() => [
   { label: t('knowledgeBase.allParseStatuses'), value: '' },
   { label: t('knowledgeBase.parseStatusPending'), value: 'pending' },
   { label: t('knowledgeBase.parseStatusProcessing'), value: 'processing' },
+  { label: t('knowledgeWorkflowStatus.status.cancelling'), value: 'cancelling' },
+  { label: t('knowledgeWorkflowStatus.status.deleting'), value: 'deleting' },
   { label: t('knowledgeBase.parseStatusCompleted'), value: 'completed' },
   { label: t('knowledgeBase.parseStatusFailed'), value: 'failed' },
+  { label: t('knowledgeBase.statusCancelled'), value: 'cancelled' },
+  { label: t('knowledgeBase.statusDraft'), value: 'draft' },
 ]);
 const selectedSource = ref('');
 // Source filter combines ingestion channels and the "manual"/"url" virtual
@@ -611,7 +626,7 @@ const filterParams = computed(() => {
     tag_ids: selectedTagIds.value.length > 0 ? selectedTagIds.value.join(',') : undefined,
     keyword: docSearchKeyword.value ? docSearchKeyword.value.trim() : undefined,
     file_type: selectedFileType.value || undefined,
-    parse_status: selectedParseStatus.value || undefined,
+    workflow_status: selectedParseStatus.value || undefined,
     source: selectedSource.value || undefined,
     start_time: start ? `${start} 00:00:00` : undefined,
     end_time: end ? `${end} 23:59:59` : undefined,
@@ -1277,6 +1292,8 @@ type KnowledgeCard = {
   knowledge_base_id?: string;
   parse_status: string;
   summary_status?: string;
+  enrichment_status?: string;
+  wiki_status?: string;
   description?: string;
   file_name?: string;
   original_file_name?: string;
@@ -1315,6 +1332,7 @@ const updateStatus = (analyzeList: KnowledgeCard[]) => {
     batchQueryKnowledge(query).then((result: any) => {
       let hasChanges = false;
       let shouldRefreshWikiStatus = false;
+      const exitedCurrentFilter = new Set<string>();
       if (result.success && result.data) {
         (result.data as KnowledgeCard[]).forEach((item: KnowledgeCard) => {
           const index = cardList.value.findIndex(card => card.id == item.id);
@@ -1331,6 +1349,8 @@ const updateStatus = (analyzeList: KnowledgeCard[]) => {
 
           if (cardList.value[index].parse_status !== parseStatus ||
             cardList.value[index].summary_status !== item.summary_status ||
+            cardList.value[index].enrichment_status !== item.enrichment_status ||
+            cardList.value[index].wiki_status !== item.wiki_status ||
             cardList.value[index].description !== item.description) {
             shouldRefreshWikiStatus ||= shouldRefreshWikiStatusAfterKnowledgePoll(
               cardList.value[index],
@@ -1340,11 +1360,27 @@ const updateStatus = (analyzeList: KnowledgeCard[]) => {
             // Always update the card data
             cardList.value[index].parse_status = parseStatus;
             cardList.value[index].summary_status = item.summary_status;
+            cardList.value[index].enrichment_status = item.enrichment_status;
+            cardList.value[index].wiki_status = item.wiki_status;
             cardList.value[index].description = item.description;
             delete traceAvailableById[item.id];
             hasChanges = true;
           }
+          if (!knowledgeMatchesWorkflowFilter(
+            { ...item, parse_status: parseStatus },
+            selectedParseStatus.value,
+          )) {
+            exitedCurrentFilter.add(item.id);
+          }
         });
+      }
+      if (exitedCurrentFilter.size > 0) {
+        const before = cardList.value.length;
+        cardList.value = cardList.value.filter(
+          (card) => !exitedCurrentFilter.has(card.id),
+        );
+        total.value = Math.max(0, total.value - (before - cardList.value.length));
+        void loadKnowledgeFiles(kbId.value);
       }
       if (shouldRefreshWikiStatus) {
         void fetchWikiStatusOnce();
@@ -2644,7 +2680,7 @@ async function createNewSession(value: string): Promise<void> {
                 <div class="doc-filter-field">
                   <t-select v-model="selectedParseStatus" :options="parseStatusOptions"
                     :placeholder="$t('knowledgeBase.parseStatusFilter')" class="doc-type-select doc-filter-field__control"
-                    clearable>
+                    data-testid="knowledge-workflow-filter" clearable>
                     <template #prefixIcon>
                       <t-icon name="check-circle" size="16px" />
                     </template>
@@ -2854,13 +2890,8 @@ async function createNewSession(value: string): Promise<void> {
                             </template>
                           </t-popup>
                         </div>
-                        <div v-if="isParseInFlight(item.parse_status)" class="card-analyze card-analyze-trace">
-                          <t-icon name="loading" class="card-analyze-loading"></t-icon>
-                          <span class="card-analyze-txt card-analyze-trace-link" role="button" tabindex="0"
-                            :title="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)"
-                            @keydown.enter.stop="handleViewTrace(index, item)"
-                            @keydown.space.prevent.stop="handleViewTrace(index, item)">{{
-                              inFlightCardStatusText(item) }}</span>
+                        <div v-if="knowledgeNeedsStatusPolling(item)" class="card-analyze card-analyze-trace">
+                          <KnowledgeWorkflowStatusBadge :knowledge="item" :feature-source="kbInfo" compact />
                           <DocumentQueueBadge :status="documentQueueItems[item.id]"
                             :waiting-total="documentQueueWaitingTotal" />
                           <button type="button" class="card-analyze-trace-btn" :title="t('knowledgeStages.viewTrace')"
@@ -2868,31 +2899,24 @@ async function createNewSession(value: string): Promise<void> {
                             <t-icon name="chart-line" />
                           </button>
                         </div>
-                        <div v-else-if="item.parse_status === 'failed'" class="card-analyze failure card-analyze-trace">
-                          <t-icon name="close-circle" class="card-analyze-loading failure"></t-icon>
-                          <span class="card-analyze-txt failure card-analyze-trace-link" role="button" tabindex="0"
-                            :title="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)"
-                            @keydown.enter.stop="handleViewTrace(index, item)"
-                            @keydown.space.prevent.stop="handleViewTrace(index, item)">{{
-                              t('knowledgeBase.parsingFailed') }}</span>
+                        <div v-else-if="item.parse_status === 'failed' || knowledgeHasDerivativeFailure(item)"
+                          class="card-analyze failure card-analyze-trace">
+                          <KnowledgeWorkflowStatusBadge :knowledge="item" :feature-source="kbInfo" compact />
                           <button type="button" class="card-analyze-trace-btn" :title="t('knowledgeStages.viewTrace')"
                             :aria-label="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)">
                             <t-icon name="chart-bar" />
                           </button>
                         </div>
                         <div v-else-if="item.parse_status === 'draft'" class="card-draft">
-                          <t-tag size="small" theme="warning" variant="light-outline">{{ t('knowledgeBase.draft')
-                            }}</t-tag>
+                          <KnowledgeWorkflowStatusBadge :knowledge="item" :feature-source="kbInfo" compact />
                           <span class="card-draft-tip">{{ t('knowledgeBase.draftTip') }}</span>
                         </div>
-                        <div
-                          v-else-if="item.parse_status === 'completed' && (item.summary_status === 'pending' || item.summary_status === 'processing')"
-                          class="card-analyze">
-                          <t-icon name="loading" class="card-analyze-loading"></t-icon>
-                          <span class="card-analyze-txt">{{ t('knowledgeBase.generatingSummary') }}</span>
+                        <div v-else-if="knowledgeIsFullyComplete(item)" class="card-complete-state">
+                          <KnowledgeWorkflowStatusBadge :knowledge="item" :feature-source="kbInfo" compact />
+                          <div v-if="item.description" class="card-content-txt">{{ item.description }}</div>
                         </div>
-                        <div v-else-if="item.parse_status === 'completed'" class="card-content-txt">
-                          {{ item.description }}
+                        <div v-else class="card-analyze card-analyze-trace">
+                          <KnowledgeWorkflowStatusBadge :knowledge="item" :feature-source="kbInfo" compact />
                         </div>
                       </div>
                       <div class="card-bottom">
@@ -2965,13 +2989,15 @@ async function createNewSession(value: string): Promise<void> {
                       :style="{ left: cardPopoverPos.x + 'px', top: cardPopoverPos.y + 'px' }">
                       <template v-if="hoveredCardItem">
                         <div class="card-popover-title">{{ hoveredCardItem.file_name }}</div>
-                        <div v-if="isParseInFlight(hoveredCardItem.parse_status)" class="card-popover-status parsing">
+                        <div v-if="knowledgeNeedsStatusPolling(hoveredCardItem)" class="card-popover-status parsing">
                           <KnowledgeProcessingTimeline :knowledge-id="hoveredCardItem.id"
                             :parse-status="hoveredCardItem.parse_status" :auto-poll="false" :compact="true" />
                           <DocumentQueueBadge :status="documentQueueItems[hoveredCardItem.id]"
                             :waiting-total="documentQueueWaitingTotal" />
                         </div>
-                        <div v-else-if="hoveredCardItem.parse_status === 'failed'" class="card-popover-status failure">
+                        <div
+                          v-else-if="hoveredCardItem.parse_status === 'failed' || knowledgeHasDerivativeFailure(hoveredCardItem)"
+                          class="card-popover-status failure">
                           <KnowledgeProcessingTimeline :knowledge-id="hoveredCardItem.id"
                             :parse-status="hoveredCardItem.parse_status" :auto-poll="false" :compact="true" />
                         </div>
@@ -3026,6 +3052,7 @@ async function createNewSession(value: string): Promise<void> {
                   <DocumentListView :items="cardList" :selected-ids="selectedIds" :tag-list="tagList"
                     :can-edit="canEdit" :queue-status-by-id="documentQueueItems"
                     :queue-waiting-total="documentQueueWaitingTotal"
+                    :workflow-feature-source="kbInfo"
                     @open="(item: any) => openKnowledgeItem(item)" @toggle-row="toggleSelectRow"
                     @toggle-all="toggleSelectAll" @action="(action: any, item: any) => handleListAction(action, item)"
                     @tag-edit="(item: any) => openTagEditDialog(item)" />
@@ -4495,6 +4522,15 @@ async function createNewSession(value: string): Promise<void> {
     font-size: 12px;
     font-weight: 400;
     line-height: 19px;
+  }
+
+  .card-complete-state {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
   }
 
   .card-bottom {

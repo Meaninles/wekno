@@ -16,6 +16,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentpreview"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgesearch"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/errors"
@@ -38,6 +39,10 @@ type KnowledgeHandler struct {
 	agentShareService interfaces.AgentShareService
 	asynqClient       interfaces.TaskEnqueuer
 	spanRepo          repository.KnowledgeSpanRepository
+}
+
+type knowledgePreviewChunkCounter interface {
+	CountTextChunksByKnowledgeID(ctx context.Context, id string) (int64, error)
 }
 
 // NewKnowledgeHandler creates a new knowledge handler instance
@@ -305,7 +310,11 @@ func (h *KnowledgeHandler) enqueueKnowledgeListReparse(
 		return "", errors.NewBadRequestError("batch reparse request is too large")
 	}
 	task := asynq.NewTask(types.TypeKnowledgeListReparse, payloadBytes)
-	info, err := h.asynqClient.Enqueue(task, asynq.Queue("low"), asynq.MaxRetry(3))
+	info, err := h.asynqClient.Enqueue(
+		task,
+		asynq.Queue(types.QueueCritical),
+		asynq.MaxRetry(3),
+	)
 	if err != nil {
 		return "", fmt.Errorf("enqueue task: %w", err)
 	}
@@ -777,9 +786,15 @@ func buildSpanTree(knowledgeID string, attempt int, rows []types.KnowledgeProces
 	nodes := make(map[string]*types.SpanTreeNode, len(rows))
 	var rootRow *types.KnowledgeProcessingSpan
 	stageRowByName := map[string]*types.KnowledgeProcessingSpan{}
+	// Retries intentionally create a new subspan row for the same logical
+	// name. Only the newest row is eligible for `last_error`: an older Wiki
+	// materialization failure followed by a successful retry is useful trace
+	// history, but it is not the document's current error.
+	latestLogicalSpan := make(map[string]string, len(rows))
 	for i := range rows {
 		r := rows[i]
 		nodes[r.SpanID] = &types.SpanTreeNode{KnowledgeProcessingSpan: r}
+		latestLogicalSpan[r.Kind+"\x00"+r.Name] = r.SpanID
 		if r.Kind == types.SpanKindRoot && rootRow == nil {
 			cp := r
 			rootRow = &cp
@@ -790,6 +805,12 @@ func buildSpanTree(knowledgeID string, attempt int, rows []types.KnowledgeProces
 		}
 		if r.Status == types.SpanStatusRunning && r.Kind == types.SpanKindStage && currentStage == "" {
 			currentStage = r.Name
+		}
+	}
+	for i := range rows {
+		r := rows[i]
+		if latestLogicalSpan[r.Kind+"\x00"+r.Name] != r.SpanID {
+			continue
 		}
 		if r.Status == types.SpanStatusFailed {
 			cp := r
@@ -893,7 +914,8 @@ func buildSpanTree(knowledgeID string, attempt int, rows []types.KnowledgeProces
 // @Param        tag_ids       query     string  false  "标签ID筛选，逗号分隔（OR语义）"
 // @Param        keyword       query     string  false  "关键词搜索"
 // @Param        file_type     query     string  false  "文件类型筛选"
-// @Param        parse_status  query     string  false  "解析状态筛选 (pending/processing/completed/failed)"
+// @Param        parse_status     query     string  false  "核心解析状态筛选"
+// @Param        workflow_status  query     string  false  "完整工作流状态筛选 (pending/processing/cancelling/deleting/completed/failed/cancelled/draft)"
 // @Param        source        query     string  false  "来源/渠道筛选 (web/api/feishu/notion/yuque/wechat/...，或 manual/url 按 type 过滤)"
 // @Param        start_time    query     string  false  "更新时间起点，RFC3339 格式"
 // @Param        end_time      query     string  false  "更新时间终点，RFC3339 格式"
@@ -926,11 +948,12 @@ func (h *KnowledgeHandler) ListKnowledge(c *gin.Context) {
 	}
 
 	filter := types.KnowledgeListFilter{
-		TagIDs:      parseCommaSeparatedTagIDs(c.Query("tag_ids")),
-		Keyword:     c.Query("keyword"),
-		FileType:    c.Query("file_type"),
-		ParseStatus: c.Query("parse_status"),
-		Source:      c.Query("source"),
+		TagIDs:         parseCommaSeparatedTagIDs(c.Query("tag_ids")),
+		Keyword:        c.Query("keyword"),
+		FileType:       c.Query("file_type"),
+		ParseStatus:    c.Query("parse_status"),
+		WorkflowStatus: c.Query("workflow_status"),
+		Source:         c.Query("source"),
 	}
 	if raw := c.Query("start_time"); raw != "" {
 		t, err := parseFilterTime(raw)
@@ -951,12 +974,13 @@ func (h *KnowledgeHandler) ListKnowledge(c *gin.Context) {
 
 	logger.Infof(
 		ctx,
-		"Retrieving knowledge list under knowledge base, kb_id=%s tag_ids=%s keyword=%s file_type=%s parse_status=%s source=%s start_time=%s end_time=%s page=%d page_size=%d effectiveTenantID=%d",
+		"Retrieving knowledge list under knowledge base, kb_id=%s tag_ids=%s keyword=%s file_type=%s parse_status=%s workflow_status=%s source=%s start_time=%s end_time=%s page=%d page_size=%d effectiveTenantID=%d",
 		secutils.SanitizeForLog(kbID),
 		secutils.SanitizeForLog(strings.Join(filter.TagIDs, ",")),
 		secutils.SanitizeForLog(filter.Keyword),
 		secutils.SanitizeForLog(filter.FileType),
 		secutils.SanitizeForLog(filter.ParseStatus),
+		secutils.SanitizeForLog(filter.WorkflowStatus),
 		secutils.SanitizeForLog(filter.Source),
 		secutils.SanitizeForLog(c.Query("start_time")),
 		secutils.SanitizeForLog(c.Query("end_time")),
@@ -1350,6 +1374,49 @@ func mimeTypeByExt(filename string) string {
 	return "application/octet-stream"
 }
 
+// GetKnowledgePreviewPolicy returns the bounded browser-preview admission
+// result without opening the storage object. Large/heavy documents use the
+// already paginated parser chunks and therefore never enter browser memory as
+// one Blob.
+func (h *KnowledgeHandler) GetKnowledgePreviewPolicy(c *gin.Context) {
+	id := secutils.SanitizeForLog(c.Param("id"))
+	if id == "" {
+		c.Error(errors.NewBadRequestError("Knowledge ID cannot be empty"))
+		return
+	}
+	knowledge, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleViewer)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	policy := h.knowledgePreviewPolicy(effCtx, knowledge)
+	// Chunk count changes while parsing/rebuilding. A cached "original" decision
+	// could otherwise outlive the point at which the document becomes complex.
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": policy})
+}
+
+func (h *KnowledgeHandler) knowledgePreviewPolicy(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+) documentpreview.Policy {
+	chunkCount := int64(-1)
+	if counter, ok := h.kgService.(knowledgePreviewChunkCounter); ok {
+		count, err := counter.CountTextChunksByKnowledgeID(ctx, knowledge.ID)
+		if err != nil {
+			logger.Warnf(ctx, "Failed to count chunks for preview policy, knowledge=%s: %v", knowledge.ID, err)
+		} else {
+			chunkCount = count
+		}
+	}
+	return documentpreview.Decide(
+		knowledge.FileType,
+		knowledge.FileSize,
+		chunkCount,
+		knowledge.GetMetadata(),
+	)
+}
+
 // PreviewKnowledgeFile godoc
 // @Summary      预览知识文件
 // @Description  返回知识条目关联的原始文件，Content-Type 根据文件类型设置，用于浏览器内嵌预览
@@ -1371,9 +1438,21 @@ func (h *KnowledgeHandler) PreviewKnowledgeFile(c *gin.Context) {
 		return
 	}
 
-	_, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleViewer)
+	knowledge, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleViewer)
 	if err != nil {
 		c.Error(err)
+		return
+	}
+	policy := h.knowledgePreviewPolicy(effCtx, knowledge)
+	if !documentpreview.AllowsOriginal(policy) {
+		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "PREVIEW_REQUIRES_PAGED_CHUNKS",
+				"message": "Original-file preview is disabled for this document; use paged parsed content",
+				"details": policy,
+			},
+		})
 		return
 	}
 
@@ -1388,7 +1467,9 @@ func (h *KnowledgeHandler) PreviewKnowledgeFile(c *gin.Context) {
 	contentType := mimeTypeByExt(filename)
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filename}))
-	c.Header("Cache-Control", "private, max-age=3600")
+	// Do not let a previously admitted object bypass a newer paged-only policy
+	// after rebuild, deletion, or structural reclassification.
+	c.Header("Cache-Control", "private, no-store")
 
 	c.Stream(func(w io.Writer) bool {
 		if _, err := io.Copy(w, file); err != nil {

@@ -79,6 +79,15 @@ func ValidateProcessOverrides(
 
 	eff := ResolveProcessConfig(kb, overrides)
 
+	// Documents such as DOCX/PDF/PPTX can contain embedded images even though
+	// their top-level file type is not an image.  Accepting an explicit
+	// multimodal override without an effective VLM configuration would enqueue
+	// one deterministic failure per embedded image and burn every retry before
+	// the document workflow can advance.
+	if eff.EnableMultimodel && !eff.VLMConfig.IsEnabled() {
+		return werrors.NewBadRequestError("开启多模态处理需要设置VLM模型")
+	}
+
 	if hasImage {
 		if err := validateImageMultimodalConfig(ctx, kb); err != nil {
 			return err
@@ -108,6 +117,9 @@ func ApplyKnowledgeProcessOverrides(
 	eff := ResolveProcessConfig(kb, processOverrides)
 	if enableMultimodel != nil && (processOverrides == nil || processOverrides.EnableMultimodel == nil) {
 		eff.EnableMultimodel = *enableMultimodel
+	}
+	if eff.EnableMultimodel && !eff.VLMConfig.IsEnabled() {
+		return eff, werrors.NewBadRequestError("开启多模态处理需要设置VLM模型")
 	}
 	if processOverrides == nil {
 		return eff, nil

@@ -3,9 +3,15 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
+	"github.com/Tencent/WeKnora/internal/custom/modules/questiondedup"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -17,6 +23,15 @@ type fanoutCompletionRepository interface {
 	KnowledgeFanoutCompletionExists(context.Context, uint64, string, string, string, string) (bool, error)
 	CleanupKnowledgeFanoutCompletions(context.Context, uint64, string, string, string) error
 	FinalizeSubtaskGenerationItem(context.Context, uint64, string, string, string, string) (int, bool, error)
+	FinalizeSubtaskGenerationItemOutcome(
+		context.Context, uint64, string, string, string, string, string, string,
+	) (int, bool, error)
+	RecordGenerationOutcome(
+		context.Context, uint64, string, string, string, string, string, string,
+	) (bool, error)
+	GetGenerationOutcomeAggregate(
+		context.Context, uint64, string, string, string,
+	) (enrichmentoutcome.Aggregate, error)
 }
 
 func newFanoutCompletionRepository(t *testing.T) (*gorm.DB, fanoutCompletionRepository) {
@@ -26,14 +41,185 @@ func newFanoutCompletionRepository(t *testing.T) (*gorm.DB, fanoutCompletionRepo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&types.Knowledge{}, &types.KnowledgeFanoutCompletion{}); err != nil {
+	sqlDB, err := db.DB()
+	if err != nil {
 		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := db.AutoMigrate(
+		&types.Knowledge{},
+		&types.KnowledgeFanoutCompletion{},
+		&enrichmentoutcome.Outcome{},
+		&questiondedup.Claim{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS knowledge_tag_relations (knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS knowledge_processing_spans (knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_split_plans (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_split_parts (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS wiki_log_entries (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS custom_content_cache_entries (
+			tenant_id INTEGER NOT NULL, cache_kind TEXT NOT NULL,
+			content_hash TEXT NOT NULL, version_hash TEXT NOT NULL,
+			ref_count INTEGER NOT NULL DEFAULT 0, updated_at DATETIME NOT NULL,
+			PRIMARY KEY (tenant_id, cache_kind, content_hash, version_hash)
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_content_cache_refs (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
+			processing_generation TEXT NOT NULL, cache_kind TEXT NOT NULL,
+			content_hash TEXT NOT NULL, version_hash TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS embeddings (
+			knowledge_id TEXT NOT NULL, knowledge_base_id TEXT,
+			source_id TEXT,
+			content TEXT NOT NULL DEFAULT '', deleted_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS chunks (
+			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '', deleted_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS task_pending_ops (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL, task_type TEXT NOT NULL,
+			scope TEXT NOT NULL, scope_id TEXT NOT NULL,
+			op TEXT NOT NULL, dedup_key TEXT NOT NULL DEFAULT '',
+			payload JSON NOT NULL DEFAULT '{}',
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			enqueued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			claimed_at DATETIME
+		)`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	repo, ok := NewKnowledgeRepository(db).(fanoutCompletionRepository)
 	if !ok {
 		t.Fatal("knowledge repository does not expose durable fanout completion methods")
 	}
 	return db, repo
+}
+
+func TestGeneratedQuestionClaimsAreConcurrentGenerationScopedAndRetryStable(t *testing.T) {
+	db, baseRepo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 1)
+	repo, ok := baseRepo.(interface {
+		ClaimGeneratedQuestions(
+			context.Context, uint64, string, string, string, []questiondedup.Candidate,
+		) (map[string]string, bool, error)
+	})
+	require.True(t, ok)
+
+	const contenders = 32
+	var winners atomic.Int32
+	errCh := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for index := 0; index < contenders; index++ {
+		index := index
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			candidate, prepared := questiondedup.Prepare(
+				fmt.Sprintf("question_batch[%d]:chunk:0", index),
+				"采购审批必须在多长时间内完成？",
+			)
+			if !prepared {
+				errCh <- fmt.Errorf("candidate %d was rejected", index)
+				return
+			}
+			accepted, current, err := repo.ClaimGeneratedQuestions(
+				context.Background(), 42, "knowledge-1", "kb-1", "generation-1",
+				[]questiondedup.Candidate{candidate},
+			)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if !current {
+				errCh <- fmt.Errorf("candidate %d saw a stale generation", index)
+				return
+			}
+			if accepted[candidate.ClaimID] != "" {
+				winners.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	require.Equal(t, int32(1), winners.Load())
+
+	var stored questiondedup.Claim
+	require.NoError(t, db.Take(&stored).Error)
+	retryCandidate, prepared := questiondedup.Prepare(
+		stored.ClaimID,
+		"重试时模型生成了不同措辞，但同一个输出槽必须复用首次提交的问题？",
+	)
+	require.True(t, prepared)
+	accepted, current, err := repo.ClaimGeneratedQuestions(
+		context.Background(), 42, "knowledge-1", "kb-1", "generation-1",
+		[]questiondedup.Candidate{retryCandidate},
+	)
+	require.NoError(t, err)
+	require.True(t, current)
+	require.Equal(t, stored.Question, accepted[stored.ClaimID])
+	var retryStableCount int64
+	require.NoError(t, db.Model(&questiondedup.Claim{}).Count(&retryStableCount).Error)
+	require.Equal(t, int64(1), retryStableCount)
+
+	require.NoError(t, db.Model(&types.Knowledge{}).
+		Where("id = ?", "knowledge-1").
+		Updates(map[string]any{
+			"processing_generation": "generation-2",
+			"parse_status":          types.ParseStatusProcessing,
+		}).Error)
+	stale, current, err := repo.ClaimGeneratedQuestions(
+		context.Background(), 42, "knowledge-1", "kb-1", "generation-1",
+		[]questiondedup.Candidate{retryCandidate},
+	)
+	require.NoError(t, err)
+	require.False(t, current)
+	require.Empty(t, stale)
+}
+
+func TestGeneratedQuestionClaimsRejectSuperficialParaphrasesAcrossBatches(t *testing.T) {
+	db, baseRepo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 1)
+	repo := baseRepo.(interface {
+		ClaimGeneratedQuestions(
+			context.Context, uint64, string, string, string, []questiondedup.Candidate,
+		) (map[string]string, bool, error)
+	})
+
+	first, ok := questiondedup.Prepare("question_batch[0]:chunk-a:0", "采购审批必须在三个工作日内完成吗？")
+	require.True(t, ok)
+	second, ok := questiondedup.Prepare("question_batch[1]:chunk-b:0", "采购审批必须在五个工作日内完成吗？")
+	require.True(t, ok)
+
+	accepted, current, err := repo.ClaimGeneratedQuestions(
+		context.Background(), 42, "knowledge-1", "kb-1", "generation-1",
+		[]questiondedup.Candidate{first},
+	)
+	require.NoError(t, err)
+	require.True(t, current)
+	require.Equal(t, first.Question, accepted[first.ClaimID])
+
+	accepted, current, err = repo.ClaimGeneratedQuestions(
+		context.Background(), 42, "knowledge-1", "kb-1", "generation-1",
+		[]questiondedup.Candidate{second},
+	)
+	require.NoError(t, err)
+	require.True(t, current)
+	require.Empty(t, accepted)
+
+	var count int64
+	require.NoError(t, db.Model(&questiondedup.Claim{}).Count(&count).Error)
+	require.Equal(t, int64(1), count)
 }
 
 func insertFanoutKnowledge(t *testing.T, db *gorm.DB, generation, status string, pending int) {
@@ -45,6 +231,12 @@ func insertFanoutKnowledge(t *testing.T, db *gorm.DB, generation, status string,
 		ParseStatus:          status,
 		ProcessingGeneration: generation,
 		PendingSubtasksCount: pending,
+		EnrichmentStatus: func() string {
+			if status == types.ParseStatusFinalizing && pending > 0 {
+				return types.EnrichmentStatusPending
+			}
+			return types.EnrichmentStatusNone
+		}(),
 	}
 	if err := db.Create(knowledge).Error; err != nil {
 		t.Fatal(err)
@@ -85,6 +277,101 @@ func TestKnowledgeFanoutCompletionIsGenerationScopedAndIdempotent(t *testing.T) 
 	if err != nil || !exists {
 		t.Fatalf("generation-2 image exists = %v err=%v, want true/nil", exists, err)
 	}
+}
+
+func TestPostProcessCompletionReceiptIsFinalizingSafeAndExcludedFromCoreCount(t *testing.T) {
+	db, repo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 1)
+	ctx := context.Background()
+
+	inserted, err := repo.RecordKnowledgeFanoutCompletion(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1",
+		processownership.PostProcessCompletionItem,
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	count, err := repo.CountKnowledgeFanoutCompletions(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1",
+	)
+	require.NoError(t, err)
+	require.Zero(t, count, "orchestration receipts must not drain core fan-in")
+
+	exists, err := repo.KnowledgeFanoutCompletionExists(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1",
+		processownership.PostProcessCompletionItem,
+	)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	inserted, err = repo.RecordKnowledgeFanoutCompletion(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1", "image:0",
+	)
+	require.NoError(t, err)
+	require.False(t, inserted, "ordinary core items remain ineligible after finalizing")
+}
+
+func TestGenerationOutcomeIsImmutableFencedAndAggregated(t *testing.T) {
+	db, repo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusProcessing, 0)
+	ctx := context.Background()
+
+	inserted, err := repo.RecordGenerationOutcome(
+		ctx,
+		42,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		"multimodal.image[0]",
+		enrichmentoutcome.StatusFailed,
+		"vlm unavailable",
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	// A duplicate delivery cannot rewrite the first terminal fact.
+	inserted, err = repo.RecordGenerationOutcome(
+		ctx,
+		42,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		"multimodal.image[0]",
+		enrichmentoutcome.StatusCompleted,
+		"",
+	)
+	require.NoError(t, err)
+	require.False(t, inserted)
+
+	aggregate, err := repo.GetGenerationOutcomeAggregate(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1",
+	)
+	require.NoError(t, err)
+	require.Equal(t, enrichmentoutcome.Aggregate{
+		Total: 1, Failed: 1,
+	}, aggregate)
+	require.Equal(t, enrichmentoutcome.StatusFailed, aggregate.Status())
+
+	require.NoError(t, db.Model(&types.Knowledge{}).
+		Where("id = ?", "knowledge-1").
+		Update("processing_generation", "generation-2").Error)
+	inserted, err = repo.RecordGenerationOutcome(
+		ctx,
+		42,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		"multimodal.image[1]",
+		enrichmentoutcome.StatusFailed,
+		"stale worker",
+	)
+	require.NoError(t, err)
+	require.False(t, inserted)
+	aggregate, err = repo.GetGenerationOutcomeAggregate(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1",
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, aggregate.Total)
 }
 
 func TestKnowledgeFanoutCompletionRetentionAndStaleWorkerFence(t *testing.T) {
@@ -170,6 +457,129 @@ func TestFinalizeSubtaskGenerationItemDrainsExactlyOnce(t *testing.T) {
 	if knowledge.ParseStatus != types.ParseStatusCompleted || knowledge.PendingSubtasksCount != 0 {
 		t.Fatalf("knowledge lifecycle = status:%s pending:%d", knowledge.ParseStatus, knowledge.PendingSubtasksCount)
 	}
+}
+
+func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
+	db, repo := newFanoutCompletionRepository(t)
+	const descendants = 12
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, descendants)
+	ctx := context.Background()
+
+	var promoted atomic.Int32
+	errCh := make(chan error, descendants)
+	var wg sync.WaitGroup
+	for i := 0; i < descendants; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			status := enrichmentoutcome.StatusCompleted
+			if i == 3 {
+				status = enrichmentoutcome.StatusDegraded
+			}
+			if i == 8 {
+				status = enrichmentoutcome.StatusFailed
+			}
+			_, won, err := repo.FinalizeSubtaskGenerationItemOutcome(
+				ctx, 42, "knowledge-1", "kb-1", "generation-1",
+				fmt.Sprintf("question_batch[%d]", i), status, "diagnostic",
+			)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if won {
+				promoted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	if got := promoted.Load(); got != 1 {
+		t.Fatalf("promotion winners = %d, want 1", got)
+	}
+	var knowledge types.Knowledge
+	if err := db.Where("id = ?", "knowledge-1").Take(&knowledge).Error; err != nil {
+		t.Fatal(err)
+	}
+	if knowledge.ParseStatus != types.ParseStatusCompleted ||
+		knowledge.EnrichmentStatus != types.EnrichmentStatusDegraded {
+		t.Fatalf(
+			"lifecycle = parse:%s enrichment:%s, want completed/degraded",
+			knowledge.ParseStatus, knowledge.EnrichmentStatus,
+		)
+	}
+	var outcomeCount int64
+	if err := db.Model(&enrichmentoutcome.Outcome{}).Count(&outcomeCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if outcomeCount != descendants {
+		t.Fatalf("outcome rows = %d, want %d", outcomeCount, descendants)
+	}
+}
+
+func TestFinalizeSubtaskOutcomeAllFailedIsExplicitlyFailed(t *testing.T) {
+	db, repo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 2)
+	ctx := context.Background()
+	for _, item := range []string{"summary", "graph_chunk[0]"} {
+		if _, _, err := repo.FinalizeSubtaskGenerationItemOutcome(
+			ctx, 42, "knowledge-1", "kb-1", "generation-1",
+			item, enrichmentoutcome.StatusFailed, "upstream exhausted retries",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var knowledge types.Knowledge
+	if err := db.Where("id = ?", "knowledge-1").Take(&knowledge).Error; err != nil {
+		t.Fatal(err)
+	}
+	if knowledge.EnrichmentStatus != types.EnrichmentStatusFailed {
+		t.Fatalf("enrichment status = %s, want failed", knowledge.EnrichmentStatus)
+	}
+}
+
+func TestFinalizeSubtaskOutcomeFirstTerminalDeliveryIsImmutable(t *testing.T) {
+	db, repo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 2)
+	ctx := context.Background()
+
+	count, promoted, err := repo.FinalizeSubtaskGenerationItemOutcome(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1", "summary",
+		enrichmentoutcome.StatusCompleted, "first terminal result",
+	)
+	require.NoError(t, err)
+	require.False(t, promoted)
+	require.Equal(t, 1, count)
+
+	count, promoted, err = repo.FinalizeSubtaskGenerationItemOutcome(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1", "summary",
+		enrichmentoutcome.StatusFailed, "late duplicate must not rewrite",
+	)
+	require.NoError(t, err)
+	require.False(t, promoted)
+	require.Equal(t, 1, count, "duplicate delivery must not consume another counter slot")
+
+	var outcome enrichmentoutcome.Outcome
+	require.NoError(t, db.Where(
+		"tenant_id = ? AND knowledge_id = ? AND processing_generation = ? AND item_id = ?",
+		42, "knowledge-1", "generation-1", "summary",
+	).Take(&outcome).Error)
+	require.Equal(t, enrichmentoutcome.StatusCompleted, outcome.Status)
+	require.Equal(t, "first terminal result", outcome.Detail)
+
+	_, promoted, err = repo.FinalizeSubtaskGenerationItemOutcome(
+		ctx, 42, "knowledge-1", "kb-1", "generation-1", "graph_chunk[0]",
+		enrichmentoutcome.StatusCompleted, "",
+	)
+	require.NoError(t, err)
+	require.True(t, promoted)
+	var knowledge types.Knowledge
+	require.NoError(t, db.Where("id = ?", "knowledge-1").Take(&knowledge).Error)
+	require.Equal(t, types.EnrichmentStatusCompleted, knowledge.EnrichmentStatus)
 }
 
 func TestDeleteKnowledgeSoftDeleteExplicitlyClearsFanoutLedger(t *testing.T) {

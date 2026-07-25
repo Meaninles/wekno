@@ -57,6 +57,34 @@ app:
   # -- Number of replicas
   replicaCount: 1
 
+  # -- Horizontal autoscaling for complete document-processing replicas.
+  # Scale-down is intentionally conservative because a replica may own long
+  # document workflows; SIGTERM still drains/requeues them safely.
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 30
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 60
+          - type: Pods
+            value: 2
+            periodSeconds: 60
+        selectPolicy: Max
+      scaleDown:
+        stabilizationWindowSeconds: 600
+        policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 300
+        selectPolicy: Min
+
   # -- Pod termination budget. Covers HTTP drain plus the document and
   # background Asynq shutdown windows before Kubernetes sends SIGKILL.
   terminationGracePeriodSeconds: 120
@@ -97,9 +125,15 @@ app:
     requests:
       cpu: 100m
       memory: 256Mi
+      ephemeral-storage: 1Gi
     limits:
       cpu: "1"
       memory: 1Gi
+      ephemeral-storage: 10Gi
+
+  # -- Per-pod temporary workspace used by conversions and streamed parts.
+  scratch:
+    sizeLimit: 8Gi
 
   # -- Pod security context override
   podSecurityContext: {}
@@ -122,8 +156,51 @@ app:
     AUTO_RECOVER_DIRTY: "true"
     STREAM_MANAGER_TYPE: redis
     CONCURRENCY_POOL_SIZE: "5"
+    # -- Complete document workflows per app replica. The System Admin setting
+    # `asynq.concurrency` overrides this fallback at runtime.
+    WEKNORA_ASYNQ_CONCURRENCY: "4"
+    # -- Per-replica PostgreSQL pool. Keep
+    # maxReplicas * MAX_OPEN_CONNS plus a 20% operational reserve below the
+    # database server/proxy connection limit.
+    CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "10"
+    CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "4"
+    # -- Per-replica consumers for document-local Wiki Map work. This queue is
+    # isolated from ordinary derivatives so a large Wiki backlog cannot occupy
+    # the generic worker pool. Provider-wide limits remain enforced through
+    # the shared Redis model-admission layer.
+    WEKNORA_WIKI_MAP_TASK_CONCURRENCY: "4"
     ENABLE_GRAPH_RAG: "false"
     TZ: UTC
+
+  # -- Shared service endpoints. Override these when the bundled components
+  # are disabled. All app replicas must use the same PostgreSQL and Redis.
+  connections:
+    database:
+      host: postgres
+      port: "5432"
+      ssl:
+        # -- libpq mode: disable, allow, prefer, require, verify-ca, verify-full
+        mode: disable
+        rootCertFile: ""
+        certFile: ""
+        keyFile: ""
+    redis:
+      address: redis:6379
+      db: "0"
+      prefix: "stream:"
+      tls:
+        enabled: false
+        caFile: ""
+        certFile: ""
+        keyFile: ""
+        serverName: ""
+        insecureSkipVerify: false
+    docreader:
+      # Keep the dns:/// compatible service name; a headless Service exposes
+      # every ready parser endpoint to the client's round_robin balancer.
+      address: docreader:50051
+    neo4j:
+      uri: bolt://neo4j:7687
 
   # -- Additional environment variables
   extraEnv: []
@@ -174,10 +251,16 @@ app:
   # - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX
   #   value: "weknora/__weknora_claude_sdk_original_inputs__/"
 
+  # -- Additional pod volumes and mounts, for example external PostgreSQL and
+  # Redis CA/client-certificate Secrets.
+  extraVolumes: []
+  extraVolumeMounts: []
+
   # -- Service configuration
   service:
     type: ClusterIP
     port: 8080
+    annotations: {}
 
   # -- Liveness probe configuration
   livenessProbe:
@@ -188,6 +271,16 @@ app:
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 3
+
+  # -- Let migrations and dependency initialization complete without causing
+  # a restart loop. Liveness takes over only after startup succeeds once.
+  startupProbe:
+    httpGet:
+      path: /health
+      port: http
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 36
 
   # -- Readiness probe configuration
   readinessProbe:
@@ -319,6 +412,31 @@ docreader:
   # -- Number of replicas
   replicaCount: 1
 
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 15
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 60
+          - type: Pods
+            value: 2
+            periodSeconds: 60
+        selectPolicy: Max
+      scaleDown:
+        stabilizationWindowSeconds: 600
+        policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 300
+        selectPolicy: Min
+
   terminationGracePeriodSeconds: 60
 
   topologySpread:
@@ -344,9 +462,11 @@ docreader:
     requests:
       cpu: 100m
       memory: 256Mi
+      ephemeral-storage: 2Gi
     limits:
       cpu: 500m
       memory: 512Mi
+      ephemeral-storage: 20Gi
 
   # -- Container security context
   securityContext:
@@ -356,6 +476,15 @@ docreader:
   # -- Environment variables
   env:
     STORAGE_TYPE: local
+
+  # -- Extra parser environment variables, for example
+  # DOCREADER_GRPC_MAX_WORKERS and PDF_PROCESS_CONCURRENCY.
+  extraEnv: []
+
+  # -- Bounded per-pod conversion workspace. Large PDF/Office workloads must
+  # be sized together with node ephemeral storage and the container limits.
+  scratch:
+    sizeLimit: 16Gi
 
   # -- Service configuration
   service:
@@ -367,6 +496,12 @@ docreader:
 
   # -- Local-only gRPC health probe port inside the docreader container
   healthPort: 50052
+
+  startupProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 36
 
   # -- Node selector
   nodeSelector: {}
@@ -473,6 +608,10 @@ redis:
 # Data Files Storage
 # -----------------------------------------------------------------------------
 dataFiles:
+  # -- Local per-pod fallback only when persistence is disabled. Production
+  # horizontal deployments should use object storage rather than this path.
+  emptyDir:
+    sizeLimit: 8Gi
   persistence:
     # -- Enable persistence for uploaded files
     enabled: true
@@ -480,10 +619,26 @@ dataFiles:
     size: 10Gi
     # -- Use existing PVC (leave empty to create new)
     existingClaim: ""
+    # -- Optional component-specific class. This is commonly an RWX file
+    # storage class and should not be shared with database block volumes.
+    storageClass: ""
     # -- Local storage with multiple app replicas requires a RWX-capable
     # storage class. Prefer object storage for production horizontal scaling.
     accessModes:
       - ReadWriteOnce
+
+# -----------------------------------------------------------------------------
+# Metrics
+# -----------------------------------------------------------------------------
+metrics:
+  # -- Expose bounded-cardinality Prometheus metrics at the app /metrics path.
+  enabled: true
+  serviceMonitor:
+    # -- Requires the monitoring.coreos.com/v1 ServiceMonitor CRD.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    additionalLabels: {}
 
 # -----------------------------------------------------------------------------
 # Ingress Configuration

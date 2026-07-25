@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS knowledges (
     processing_owner VARCHAR(160) NOT NULL DEFAULT '',
     processing_fanout TEXT,
     summary_status  VARCHAR(32) NOT NULL DEFAULT 'none',
+    enrichment_status VARCHAR(32) NOT NULL DEFAULT 'none',
+    wiki_status VARCHAR(32) NOT NULL DEFAULT 'none',
+    wiki_error_message TEXT NOT NULL DEFAULT '',
     pending_subtasks_count INTEGER NOT NULL DEFAULT 0,
     error_message   TEXT,
     title           TEXT,
@@ -288,7 +291,7 @@ func newHousekeepingSvcWithInspector(db *gorm.DB, inspector interfaces.TaskInspe
 		// default of 2h+10min is just a constant scale factor.
 		DocumentProcessTimeout: 1 * time.Hour,
 	}}
-	return NewHousekeepingService(db, cfg, inspector)
+	return NewHousekeepingService(db, cfg, inspector, nil)
 }
 
 // TestHousekeeping_RecoversAbandoned exercises the happy path: a

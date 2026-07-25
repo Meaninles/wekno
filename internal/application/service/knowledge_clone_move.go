@@ -1495,6 +1495,9 @@ func (s *knowledgeService) RepairKnowledgeMoveDeadLetter(
 				"parse_status":           types.ParseStatusFailed,
 				"error_message":          message,
 				"pending_subtasks_count": 0,
+				"enrichment_status":      types.EnrichmentStatusNone,
+				"wiki_status":            types.WikiStatusNone,
+				"wiki_error_message":     "",
 				"processing_owner":       "",
 				"processing_fanout":      nil,
 				"updated_at":             time.Now(),
@@ -2143,6 +2146,10 @@ func (s *knowledgeService) moveOneKnowledge(
 				claimValues["processing_owner"] = knowledge.ProcessingOwner
 				claimValues["processing_fanout"] = nil
 				claimValues["processing_workflow_id"] = ""
+				claimValues["pending_subtasks_count"] = 0
+				claimValues["enrichment_status"] = types.EnrichmentStatusNone
+				claimValues["wiki_status"] = types.WikiStatusNone
+				claimValues["wiki_error_message"] = ""
 				claimValues["error_message"] = knowledgeMoveTargetCleanupMarker(
 					attemptID,
 					targetKB.ID,

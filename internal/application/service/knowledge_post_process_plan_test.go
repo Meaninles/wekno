@@ -7,10 +7,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 type postProcessWikiGateKnowledgeRepoStub struct {
@@ -23,6 +28,9 @@ type postProcessWikiGateKnowledgeRepoStub struct {
 	finalizeCalls        int
 	finalizedItems       []string
 	finalizeErr          error
+	generationOutcomes   enrichmentoutcome.Aggregate
+	completionErr        error
+	completionItems      map[string]struct{}
 }
 
 func (s *postProcessWikiGateKnowledgeRepoStub) GetKnowledgeByID(context.Context, uint64, string) (*types.Knowledge, error) {
@@ -53,6 +61,67 @@ func (s *postProcessWikiGateKnowledgeRepoStub) FinalizeSubtaskGenerationItem(
 	s.finalizeCalls++
 	s.finalizedItems = append(s.finalizedItems, itemID)
 	return 0, s.finalizeErr == nil, s.finalizeErr
+}
+
+func (s *postProcessWikiGateKnowledgeRepoStub) FinalizeSubtaskGenerationItemOutcome(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID, knowledgeBaseID, generation, itemID, _, _ string,
+) (int, bool, error) {
+	return s.FinalizeSubtaskGenerationItem(
+		ctx, tenantID, knowledgeID, knowledgeBaseID, generation, itemID,
+	)
+}
+
+func (s *postProcessWikiGateKnowledgeRepoStub) RecordGenerationOutcome(
+	context.Context, uint64, string, string, string, string, string, string,
+) (bool, error) {
+	return true, nil
+}
+
+func (s *postProcessWikiGateKnowledgeRepoStub) GetGenerationOutcomeAggregate(
+	context.Context, uint64, string, string, string,
+) (enrichmentoutcome.Aggregate, error) {
+	return s.generationOutcomes, nil
+}
+
+func (s *postProcessWikiGateKnowledgeRepoStub) RecordKnowledgeFanoutCompletion(
+	_ context.Context, _ uint64, _, _, _, itemID string,
+) (bool, error) {
+	if s.completionErr != nil {
+		return false, s.completionErr
+	}
+	if s.completionItems == nil {
+		s.completionItems = make(map[string]struct{})
+	}
+	if _, exists := s.completionItems[itemID]; exists {
+		return false, nil
+	}
+	s.completionItems[itemID] = struct{}{}
+	return true, nil
+}
+
+func (s *postProcessWikiGateKnowledgeRepoStub) ListKnowledgeFanoutCompletions(
+	context.Context, uint64, string, string, string,
+) ([]string, error) {
+	items := make([]string, 0, len(s.completionItems))
+	for item := range s.completionItems {
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (s *postProcessWikiGateKnowledgeRepoStub) CountKnowledgeFanoutCompletions(
+	context.Context, uint64, string, string, string,
+) (int64, error) {
+	return int64(len(s.completionItems)), nil
+}
+
+func (s *postProcessWikiGateKnowledgeRepoStub) KnowledgeFanoutCompletionExists(
+	_ context.Context, _ uint64, _, _, _, itemID string,
+) (bool, error) {
+	_, exists := s.completionItems[itemID]
+	return exists, nil
 }
 
 const postProcessTestGeneration = "generation-1"
@@ -95,6 +164,90 @@ func (e *firstTaskFailureEnqueuer) Enqueue(
 func (s *postProcessWikiGateChunkServiceStub) ListChunksByKnowledgeID(context.Context, string) ([]*types.Chunk, error) {
 	s.calls++
 	return s.chunks, nil
+}
+
+func TestOrdinaryGenerationEnrichmentPlanIncludesMultimodalChildren(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(
+		"file:ordinary-generation-enrichment?mode=memory&cache=shared",
+	), &gorm.Config{})
+	require.NoError(t, err)
+
+	manager := documentsplit.NewManagerWithConfig(
+		db, &wikiQueueTaskEnqueuerStub{}, documentsplit.Config{},
+	)
+	require.NoError(t, manager.Migrate(context.Background()))
+
+	const (
+		tenantID   = uint64(42)
+		knowledge  = "knowledge-image"
+		kbID       = "kb-image"
+		generation = "generation-image"
+	)
+	require.NoError(t, db.Create([]*types.Chunk{
+		{
+			ID: "text", TenantID: tenantID, KnowledgeID: knowledge,
+			KnowledgeBaseID: kbID, ProcessingGeneration: generation,
+			ChunkType: types.ChunkTypeText, ChunkIndex: 0, Content: "![image](local://image.png)",
+		},
+		{
+			ID: "ocr", TenantID: tenantID, KnowledgeID: knowledge,
+			KnowledgeBaseID: kbID, ProcessingGeneration: generation,
+			ChunkType: types.ChunkTypeImageOCR, ChunkIndex: 0, ParentChunkID: "text",
+			Content: "approval owner digital management department",
+		},
+		{
+			ID: "caption", TenantID: tenantID, KnowledgeID: knowledge,
+			KnowledgeBaseID: kbID, ProcessingGeneration: generation,
+			ChunkType: types.ChunkTypeImageCaption, ChunkIndex: 0, ParentChunkID: "text",
+			Content: "an approval notice with a deadline and security warning",
+		},
+	}).Error)
+
+	svc := &KnowledgePostProcessService{splitManager: manager}
+	payload := types.KnowledgePostProcessPayload{
+		TenantID: tenantID, KnowledgeID: knowledge, KnowledgeBaseID: kbID,
+		ProcessingGeneration: generation,
+	}
+	plan, generationBacked, err := svc.buildPagedSplitEnrichmentPlan(
+		context.Background(),
+		payload,
+		&types.KnowledgeBase{
+			ID: kbID, TenantID: tenantID, SummaryModelID: "graph-model",
+			IndexingStrategy: types.IndexingStrategy{
+				VectorEnabled: true, GraphEnabled: true, WikiEnabled: true,
+			},
+		},
+		types.EffectiveProcessConfig{
+			GraphEnabled: true,
+			QuestionGenerationConfig: types.QuestionGenerationConfig{
+				Enabled: true, QuestionCount: 1,
+			},
+		},
+		0,
+	)
+	require.NoError(t, err)
+	require.True(t, generationBacked)
+	require.Equal(t, 3, plan.TextChunkCount)
+	require.Equal(t, 1, plan.QuestionChunkCount)
+	require.Equal(t, 3, plan.GraphChunkCount)
+	require.Equal(t, 1, plan.GraphBatchCount)
+	require.True(t, plan.SpawnSummary)
+	require.True(t, plan.SpawnWiki)
+
+	selected, total, err := loadGenerationChunkStrata(
+		context.Background(), manager, tenantID, knowledge, generation,
+		[]types.ChunkType{
+			types.ChunkTypeText,
+			types.ChunkTypeImageOCR,
+			types.ChunkTypeImageCaption,
+		},
+		int64(plan.GraphChunkCount),
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, total)
+	require.ElementsMatch(t, []string{"text", "ocr", "caption"}, []string{
+		selected[0].ID, selected[1].ID, selected[2].ID,
+	})
 }
 
 func TestEnrichmentPlanFinalizationSubtaskCountExcludesWiki(t *testing.T) {
@@ -229,6 +382,80 @@ func TestKnowledgePostProcessNoSubtasksCompletionFailureIsRetried(t *testing.T) 
 	if knowledgeRepo.generationSwapCalls != 1 {
 		t.Fatalf("generation CAS calls = %d, want 1", knowledgeRepo.generationSwapCalls)
 	}
+}
+
+func TestKnowledgePostProcessNoSubtasksPreservesCoreFanoutFailure(t *testing.T) {
+	knowledgeRepo := &postProcessWikiGateKnowledgeRepoStub{
+		knowledge: &types.Knowledge{
+			ID:                   "knowledge-1",
+			TenantID:             42,
+			KnowledgeBaseID:      "kb-1",
+			ParseStatus:          types.ParseStatusProcessing,
+			ProcessingGeneration: postProcessTestGeneration,
+		},
+		generationOutcomes: enrichmentoutcome.Aggregate{Total: 1, Failed: 1},
+	}
+	svc := &KnowledgePostProcessService{
+		knowledgeRepo: knowledgeRepo,
+		kbService: &postProcessWikiGateKBServiceStub{kb: &types.KnowledgeBase{
+			ID:               "kb-1",
+			TenantID:         42,
+			IndexingStrategy: types.IndexingStrategy{},
+		}},
+		chunkService: &postProcessWikiGateChunkServiceStub{},
+		taskEnqueuer: &wikiQueueTaskEnqueuerStub{},
+		pendingRepo:  &wikiQueuePendingRepoStub{},
+	}
+	payload, _ := json.Marshal(types.KnowledgePostProcessPayload{
+		TenantID: 42, KnowledgeID: "knowledge-1", KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: postProcessTestGeneration,
+	})
+
+	if err := svc.Handle(
+		context.Background(),
+		asynq.NewTask(types.TypeKnowledgePostProcess, payload),
+	); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(knowledgeRepo.generationSwapValues) != 1 {
+		t.Fatalf("generation CAS values = %d, want 1", len(knowledgeRepo.generationSwapValues))
+	}
+	if got := knowledgeRepo.generationSwapValues[0]["enrichment_status"]; got != types.EnrichmentStatusFailed {
+		t.Fatalf("enrichment status = %v, want failed", got)
+	}
+	if _, ok := knowledgeRepo.completionItems[processownership.PostProcessCompletionItem]; !ok {
+		t.Fatal("successful post-process did not persist its generation receipt")
+	}
+}
+
+func TestKnowledgePostProcessCompletionReceiptFailureIsRetried(t *testing.T) {
+	receiptErr := errors.New("completion ledger unavailable")
+	knowledgeRepo := &postProcessWikiGateKnowledgeRepoStub{
+		knowledge: &types.Knowledge{
+			ID:                   "knowledge-1",
+			TenantID:             42,
+			KnowledgeBaseID:      "kb-1",
+			ParseStatus:          types.ParseStatusProcessing,
+			ProcessingGeneration: postProcessTestGeneration,
+		},
+		completionErr: receiptErr,
+	}
+	svc := &KnowledgePostProcessService{
+		knowledgeRepo: knowledgeRepo,
+		kbService: &postProcessWikiGateKBServiceStub{kb: &types.KnowledgeBase{
+			ID: "kb-1", TenantID: 42, IndexingStrategy: types.IndexingStrategy{},
+		}},
+		chunkService: &postProcessWikiGateChunkServiceStub{},
+		taskEnqueuer: &wikiQueueTaskEnqueuerStub{},
+		pendingRepo:  &wikiQueuePendingRepoStub{},
+	}
+	payload, _ := json.Marshal(types.KnowledgePostProcessPayload{
+		TenantID: 42, KnowledgeID: "knowledge-1", KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: postProcessTestGeneration,
+	})
+
+	err := svc.Handle(context.Background(), asynq.NewTask(types.TypeKnowledgePostProcess, payload))
+	require.ErrorIs(t, err, receiptErr)
 }
 
 func TestKnowledgePostProcessSetFinalizingFailureIsRetriedBeforeFanout(t *testing.T) {
@@ -444,6 +671,83 @@ func TestKnowledgePostProcessFinalizingReplayTaskIDConflictOwnsSlot(t *testing.T
 	if gotTaskID != wantTaskID {
 		t.Fatalf("summary TaskID = %q, want %q", gotTaskID, wantTaskID)
 	}
+}
+
+func TestKnowledgePostProcessVersion3ReplaysPagedQuestionsWithoutSummary(t *testing.T) {
+	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	require.NoError(t, db.AutoMigrate(&types.Chunk{}))
+	require.NoError(t, db.Create(&types.Chunk{
+		ID:                   "chunk-1",
+		SeqID:                1,
+		TenantID:             42,
+		KnowledgeID:          "knowledge-1",
+		KnowledgeBaseID:      "kb-1",
+		Content:              "durable question source",
+		ChunkIndex:           0,
+		ChunkType:            types.ChunkTypeText,
+		ProcessingGeneration: postProcessTestGeneration,
+	}).Error)
+
+	plan := durableEnrichmentFanout{
+		Stage:                durableEnrichmentPlanStage,
+		Version:              3,
+		TenantID:             42,
+		KnowledgeID:          "knowledge-1",
+		KnowledgeBaseID:      "kb-1",
+		ProcessingGeneration: postProcessTestGeneration,
+		TextChunkCount:       1,
+		SpawnSummary:         false,
+		QuestionCount:        1,
+		QuestionChunkCount:   1,
+		QuestionBatchCount:   1,
+	}
+	planBytes, err := json.Marshal(plan)
+	require.NoError(t, err)
+	repo := &postProcessWikiGateKnowledgeRepoStub{knowledge: &types.Knowledge{
+		ID:                   "knowledge-1",
+		TenantID:             42,
+		KnowledgeBaseID:      "kb-1",
+		ParseStatus:          types.ParseStatusFinalizing,
+		ProcessingGeneration: postProcessTestGeneration,
+		ProcessingFanout:     types.JSON(planBytes),
+		PendingSubtasksCount: 1,
+	}}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &KnowledgePostProcessService{
+		knowledgeRepo: repo,
+		taskEnqueuer:  enqueuer,
+		splitManager: documentsplit.NewManagerWithConfig(
+			db, nil, documentsplit.Config{},
+		),
+	}
+	payload, err := json.Marshal(types.KnowledgePostProcessPayload{
+		TenantID:             42,
+		KnowledgeID:          "knowledge-1",
+		KnowledgeBaseID:      "kb-1",
+		ProcessingGeneration: postProcessTestGeneration,
+		Attempt:              1,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Handle(
+		context.Background(),
+		asynq.NewTask(types.TypeKnowledgePostProcess, payload),
+	))
+	require.Len(t, enqueuer.tasks, 1)
+	require.Equal(t, types.TypeQuestionGeneration, enqueuer.tasks[0].Type())
+	var question types.QuestionGenerationPayload
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &question))
+	require.Equal(t, 0, question.BatchIndex)
+	require.Equal(t, []string{"chunk-1"}, question.ChunkIDs)
+	require.Zero(t, repo.finalizeCalls)
+	_, receiptRecorded := repo.completionItems[processownership.PostProcessCompletionItem]
+	require.True(t, receiptRecorded)
 }
 
 func TestKnowledgePostProcessReconciliationFailureReturnsForRetry(t *testing.T) {

@@ -1,4 +1,5 @@
 import { get, post, put, del } from "../../utils/request";
+import type { AxiosRequestConfig } from "axios";
 
 // encodeSlugPath encodes each segment of a hierarchical wiki slug (e.g.
 // "foo/bar baz?") so the URL is safe while preserving the "/" separators
@@ -72,6 +73,13 @@ export interface WikiGraphMeta {
   truncated: boolean;
   center?: string;
   depth?: number;
+  page?: number;
+  page_size?: number;
+  total_pages?: number;
+  neighbor_total?: number;
+  neighbor_returned?: number;
+  has_previous?: boolean;
+  has_more?: boolean;
 }
 
 export interface WikiGraphData {
@@ -110,13 +118,14 @@ export function listWikiPages(kbId: string, params?: {
   page_type?: string;
   status?: string;
   query?: string;
+  projection?: 'graph';
   category_path?: string;
   category_depth?: number;
   page?: number;
   page_size?: number;
   sort_by?: string;
   sort_order?: string;
-}) {
+}, config?: AxiosRequestConfig) {
   const query = new URLSearchParams();
   if (params) {
     Object.entries(params).forEach(([key, value]) => {
@@ -126,7 +135,7 @@ export function listWikiPages(kbId: string, params?: {
     });
   }
   const qs = query.toString();
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/pages${qs ? '?' + qs : ''}`);
+  return get(`/api/v1/knowledgebase/${kbId}/wiki/pages${qs ? '?' + qs : ''}`, config);
 }
 
 // listWikiFolders returns the direct child folders of parentId ("" = root),
@@ -277,6 +286,7 @@ export interface WikiGraphQueryParams {
   depth?: number;
   types?: string[];
   limit?: number;
+  page?: number;
 }
 
 // getWikiGraph fetches a slice of the wiki link graph. Without params the
@@ -284,29 +294,30 @@ export interface WikiGraphQueryParams {
 // `mode: 'ego', center: <slug>` to drill into a specific page's neighborhood.
 // For knowledge bases with tens of thousands of pages the overview cap is
 // what prevents the browser from choking on a 30MB payload / 100k SVG nodes.
-export function getWikiGraph(kbId: string, params?: WikiGraphQueryParams) {
+export function getWikiGraph(kbId: string, params?: WikiGraphQueryParams, config?: AxiosRequestConfig) {
   const query = new URLSearchParams();
   if (params) {
     if (params.mode) query.set('mode', params.mode);
     if (params.center) query.set('center', params.center);
     if (params.depth !== undefined) query.set('depth', String(params.depth));
     if (params.limit !== undefined) query.set('limit', String(params.limit));
+    if (params.page !== undefined) query.set('page', String(params.page));
     if (params.types && params.types.length > 0) {
       query.set('types', params.types.join(','));
     }
   }
   const qs = query.toString();
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/graph${qs ? '?' + qs : ''}`);
+  return get(`/api/v1/knowledgebase/${kbId}/wiki/graph${qs ? '?' + qs : ''}`, config);
 }
 
 export function getWikiStats(kbId: string) {
   return get(`/api/v1/knowledgebase/${kbId}/wiki/stats`);
 }
 
-export function searchWikiPages(kbId: string, q: string, limit?: number) {
+export function searchWikiPages(kbId: string, q: string, limit?: number, config?: AxiosRequestConfig) {
   const params = new URLSearchParams({ q });
   if (limit) params.set('limit', String(limit));
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/search?${params.toString()}`);
+  return get(`/api/v1/knowledgebase/${kbId}/wiki/search?${params.toString()}`, config);
 }
 
 export function listWikiIssues(kbId: string, slug?: string, status?: string) {

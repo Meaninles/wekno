@@ -16,15 +16,22 @@ func TestOpenAIEmbedderBatchEmbedOmitsDimensionsByDefault(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedderBatchEmbedSendsDimensionsWhenOverrideEnabled(t *testing.T) {
+func TestOpenAIEmbedderBatchEmbedOmitsServerDimensionsWhenOverrideEnabled(t *testing.T) {
 	requestBody := captureOpenAIEmbeddingRequest(t, "text-embedding-3-small", 256, true)
 
-	got, ok := requestBody["dimensions"]
-	if !ok {
-		t.Fatalf("expected request body to include dimensions, got %v", requestBody)
+	if _, ok := requestBody["dimensions"]; ok {
+		t.Fatalf("expected client-side dimension reduction, got server dimensions in %v", requestBody)
 	}
-	if got != float64(256) {
-		t.Fatalf("unexpected dimensions value: got %v want 256", got)
+}
+
+func TestOpenAIEmbedderApplyDimensionTruncatesAndNormalizes(t *testing.T) {
+	embedder := &OpenAIEmbedder{dimensions: 2, supportsDimensionOverride: true}
+	got := embedder.applyDimension([]float32{3, 4, 12})
+	if len(got) != 2 {
+		t.Fatalf("dimension-reduced vector length = %d, want 2", len(got))
+	}
+	if got[0] != 0.6 || got[1] != 0.8 {
+		t.Fatalf("dimension-reduced vector = %v, want [0.6 0.8]", got)
 	}
 }
 

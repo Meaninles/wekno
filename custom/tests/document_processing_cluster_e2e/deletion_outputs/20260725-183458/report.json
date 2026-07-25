@@ -1,0 +1,98 @@
+{
+  "run_id": "doc-cluster-1784975698-ce1d24",
+  "started_at": "2026-07-25T10:34:58.589618+00:00",
+  "config": {
+    "base_url": "http://127.0.0.1:8080",
+    "kb_id": "1651bae5-56f5-4d86-85a8-c3df8874f8ad",
+    "documents": 1,
+    "upload_concurrency": 1,
+    "generated_size_kib": 8,
+    "expected_instance_count": null,
+    "expect_derived": [
+      "graph",
+      "questions",
+      "summary",
+      "wiki"
+    ],
+    "expect_chunk_text": [],
+    "question_retrieval_sample": 1,
+    "policy_corpus": false,
+    "policy_query_concurrency": null,
+    "fixture_manifest": false,
+    "chaos": false
+  },
+  "instance_topology": {
+    "required": false,
+    "expected_healthy_ready_count": null,
+    "start": {
+      "api_instances_total": 0,
+      "healthy_ready_count": 0,
+      "healthy_ready_instances": []
+    },
+    "end": {
+      "api_instances_total": 0,
+      "healthy_ready_count": 0,
+      "healthy_ready_instances": []
+    },
+    "effective_healthy_ready_count": null
+  },
+  "workload_profile": {
+    "schema_version": 1,
+    "documents": 1,
+    "input": {
+      "kind": "generated_markdown",
+      "template": "horizontal-processing-markdown-v1",
+      "target_size_kib_per_document": 8
+    },
+    "upload_concurrency": 1,
+    "process_config_present": false,
+    "process_config_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+    "expected_derivatives": [
+      "graph",
+      "questions",
+      "summary",
+      "wiki"
+    ],
+    "expected_chunk_text": [],
+    "verification": {
+      "sample_documents": 1,
+      "wiki_timeout_seconds": 1800.0,
+      "question_retrieval_sample": 1,
+      "poll_interval_seconds": 1.0,
+      "card_contract_enabled": false
+    },
+    "knowledge_base": {
+      "id": "1651bae5-56f5-4d86-85a8-c3df8874f8ad",
+      "config_sha256": "84005c9b0ff60e148a0704876666e1dddc6692aebdbf7fe773cbb48d642b1de2"
+    },
+    "chaos": {
+      "enabled": false,
+      "mode": "none"
+    }
+  },
+  "workload_fingerprint": "5e9bd984780ed9c21e11e134ab0e5cb4e9fb6bc8b3599e6b1ea9a6fed3d8bd60",
+  "result": {
+    "run_id": "doc-cluster-1784975698-ce1d24",
+    "started_at": "2026-07-25T10:34:58.722122+00:00",
+    "finished_at": "2026-07-25T10:36:29.744233+00:00",
+    "documents": 1,
+    "completed": 1,
+    "failed": 0,
+    "cancelled": 0,
+    "wall_seconds": 91.03100000001723,
+    "throughput_docs_per_second": 0.010985268754598002,
+    "queue_wait_p50_seconds": 1.2179999999934807,
+    "queue_wait_p95_seconds": 1.2179999999934807,
+    "processing_p50_seconds": 86.32799999997951,
+    "processing_p95_seconds": 86.32799999997951,
+    "max_waiting_total": 1,
+    "max_active_total": 1,
+    "max_active_by_instance": {},
+    "owner_distribution": {
+      "weknora-app-dev": 1
+    },
+    "errors": []
+  },
+  "status": "passed",
+  "scaling": {}
+}

@@ -276,34 +276,36 @@ func (v *kubernetesRuntimeVerifier) terminationEvidenceForPod(
 	}
 	podName := strings.TrimSpace(pod.Metadata.Name)
 	phase := strings.TrimSpace(pod.Status.Phase)
-	if phase == "Succeeded" || phase == "Failed" {
-		return RuntimeTerminationEvidence{
-			Proven: true,
-			Proof: fmt.Sprintf(
-				"kubernetes:pod_terminal:%s/%s:%s:phase=%s",
-				identity.Namespace, podName, identity.UID, phase,
-			),
-			Reason: "pod_terminal",
-		}
-	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.Name != v.container || status.State.Terminated == nil {
 			continue
 		}
 		terminated := status.State.Terminated
+		// Pod phase alone is not runtime fencing evidence: during a node
+		// partition the control plane can synthesize Failed/NodeLost while the
+		// process is still executing on the isolated node. Only trust the
+		// current state of the exact application container, and require the
+		// immutable container runtime identity plus a real completion time.
+		if strings.TrimSpace(terminated.ContainerID) == "" || terminated.FinishedAt.IsZero() {
+			return RuntimeTerminationEvidence{Reason: "container_termination_evidence_incomplete"}
+		}
 		return RuntimeTerminationEvidence{
 			Proven: true,
 			Proof: fmt.Sprintf(
-				"kubernetes:container_terminated:%s/%s:%s:container=%s:exit=%d:finished=%s",
+				"kubernetes:container_terminated:%s/%s:%s:container=%s:container_id=%s:exit=%d:finished=%s",
 				identity.Namespace,
 				podName,
 				identity.UID,
 				v.container,
+				strings.TrimSpace(terminated.ContainerID),
 				terminated.ExitCode,
 				terminated.FinishedAt.UTC().Format(time.RFC3339Nano),
 			),
 			Reason: "app_container_terminated",
 		}
+	}
+	if phase == "Succeeded" || phase == "Failed" {
+		return RuntimeTerminationEvidence{Reason: "pod_terminal_without_exact_container_termination"}
 	}
 	// deletionTimestamp is intentionally ignored: it is intent to terminate,
 	// not evidence that the application process has stopped executing.

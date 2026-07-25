@@ -3,10 +3,89 @@ package fileguard
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"strings"
 	"testing"
 )
+
+type terminalErrorReader struct {
+	data   []byte
+	offset int
+	err    error
+	sent   bool
+}
+
+func (r *terminalErrorReader) Read(buffer []byte) (int, error) {
+	if r.offset < len(r.data) {
+		n := copy(buffer, r.data[r.offset:])
+		r.offset += n
+		return n, nil
+	}
+	if !r.sent {
+		r.sent = true
+		return 0, r.err
+	}
+	return 0, io.EOF
+}
+
+type sameReadTerminalErrorReader struct {
+	data []byte
+	err  error
+	sent bool
+}
+
+func (r *sameReadTerminalErrorReader) Read(buffer []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	r.sent = true
+	n := copy(buffer, r.data)
+	return n, r.err
+}
+
+func TestScanDOCXXMLAllowsOnlyRecoverableTrailerAfterCompleteRoot(t *testing.T) {
+	complete := []byte(
+		`<w:document xmlns:w="urn:test"><w:body><w:p><w:r><w:t>正文</w:t></w:r></w:p></w:body></w:document>`,
+	)
+	counters, recovered, err := scanDOCXXMLReader(&terminalErrorReader{
+		data: complete,
+		err:  zip.ErrFormat,
+	})
+	if err != nil || !recovered {
+		t.Fatalf("complete XML with recoverable ZIP trailer = recovered %v, err %v", recovered, err)
+	}
+	if counters.paragraphs != 1 || counters.textNodes != 1 {
+		t.Fatalf("unexpected counters: %#v", counters)
+	}
+	_, recovered, err = scanDOCXXMLReader(&sameReadTerminalErrorReader{
+		data: complete,
+		err:  zip.ErrFormat,
+	})
+	if err != nil || !recovered {
+		t.Fatalf("same-read trailer error = recovered %v, err %v", recovered, err)
+	}
+
+	_, recovered, err = scanDOCXXMLReader(&terminalErrorReader{
+		data: []byte(`<w:document xmlns:w="urn:test"><w:body><w:p>`),
+		err:  zip.ErrFormat,
+	})
+	if err == nil || recovered {
+		t.Fatalf("incomplete XML must fail: recovered %v, err %v", recovered, err)
+	}
+
+	sentinel := errors.New("untrusted reader failure")
+	_, recovered, err = scanDOCXXMLReader(&terminalErrorReader{
+		data: complete,
+		err:  sentinel,
+	})
+	if !errors.Is(err, sentinel) || recovered {
+		t.Fatalf("generic trailer error must fail: recovered %v, err %v", recovered, err)
+	}
+}
 
 func TestAnalyzeBytesDOCXRejectsUnsafeCompressionBeforeInflatingEntries(t *testing.T) {
 	var doc strings.Builder
@@ -203,6 +282,51 @@ func TestAnalyzeBytesSizeOnlyLimitRequestsSplit(t *testing.T) {
 	if !strings.Contains(msg, want) {
 		t.Fatalf("message missing %q: %s", want, msg)
 	}
+}
+
+func TestAnalyzeBytesImagePreviewDimensions(t *testing.T) {
+	safe := AnalyzeBytes("safe.png", "png", pngHeader(4000, 3000))
+	if safe.IsHeavy() {
+		t.Fatalf("safe image unexpectedly marked heavy: %v", safe.HeavyReasons)
+	}
+	if safe.Metrics["image_preview_dimensions_verified"] != true {
+		t.Fatalf("safe image dimensions were not verified: %#v", safe.Metrics)
+	}
+
+	oversized := AnalyzeBytes("oversized.png", "png", pngHeader(20000, 3000))
+	if !oversized.IsHeavy() {
+		t.Fatal("oversized image must disable original browser preview")
+	}
+	if !strings.Contains(strings.Join(oversized.HeavyReasons, "，"), "20000×3000") {
+		t.Fatalf("missing decoded dimensions: %v", oversized.HeavyReasons)
+	}
+
+	decompressionBombShape := AnalyzeBytes(
+		"too-many-pixels.png",
+		"png",
+		pngHeader(10000, 5000),
+	)
+	if !decompressionBombShape.IsHeavy() {
+		t.Fatal("image over the pixel budget must disable original browser preview")
+	}
+}
+
+func pngHeader(width, height uint32) []byte {
+	result := append([]byte(nil), []byte("\x89PNG\r\n\x1a\n")...)
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], width)
+	binary.BigEndian.PutUint32(ihdr[4:8], height)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 6 // RGBA
+	length := make([]byte, 4)
+	binary.BigEndian.PutUint32(length, uint32(len(ihdr)))
+	result = append(result, length...)
+	result = append(result, []byte("IHDR")...)
+	result = append(result, ihdr...)
+	checksumInput := append([]byte("IHDR"), ihdr...)
+	checksum := make([]byte, 4)
+	binary.BigEndian.PutUint32(checksum, crc32.ChecksumIEEE(checksumInput))
+	return append(result, checksum...)
 }
 
 func TestStructuralLimitDerivesUniformPartCountWithHeadroom(t *testing.T) {

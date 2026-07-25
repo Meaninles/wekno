@@ -2,10 +2,51 @@ package utils
 
 import (
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestSSRFSafeHTTPClientsShareConfiguredTransport(t *testing.T) {
+	firstConfig := DefaultSSRFSafeHTTPClientConfig()
+	firstConfig.Timeout = time.Second
+	firstConfig.MaxRedirects = 1
+	secondConfig := DefaultSSRFSafeHTTPClientConfig()
+	secondConfig.Timeout = 10 * time.Second
+	secondConfig.MaxRedirects = 8
+
+	first := NewSSRFSafeHTTPClient(firstConfig)
+	second := NewSSRFSafeHTTPClient(secondConfig)
+	if first.Transport != second.Transport {
+		t.Fatal("equivalent clients must share one connection pool")
+	}
+	transport, ok := first.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", first.Transport)
+	}
+	if transport.MaxIdleConns != 256 ||
+		transport.MaxIdleConnsPerHost != 32 ||
+		transport.MaxConnsPerHost != 64 {
+		t.Fatalf(
+			"unexpected connection pool limits: total=%d per_host=%d max_per_host=%d",
+			transport.MaxIdleConns,
+			transport.MaxIdleConnsPerHost,
+			transport.MaxConnsPerHost,
+		)
+	}
+	if transport.DialContext == nil || !transport.ForceAttemptHTTP2 {
+		t.Fatal("shared transport must retain SSRF-safe dialing and HTTP/2")
+	}
+
+	differentConfig := firstConfig
+	differentConfig.DisableCompression = true
+	different := NewSSRFSafeHTTPClient(differentConfig)
+	if first.Transport == different.Transport {
+		t.Fatal("different transport settings must not share a connection pool")
+	}
+}
 
 func TestSSRFSafeURL(t *testing.T) {
 	t.Parallel()

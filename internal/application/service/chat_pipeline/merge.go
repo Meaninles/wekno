@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -91,6 +92,7 @@ func (p *PluginMerge) OnEvent(ctx context.Context,
 	// Step 8: Final dedup — catches exact duplicates plus partial content overlaps
 	mergedChunks = p.dedup(ctx, "final_dedup", mergedChunks)
 	mergedChunks = removePartialOverlaps(ctx, mergedChunks)
+	chatretrieval.SortSearchResults(mergedChunks)
 
 	chatManage.MergeResult = mergedChunks
 	return next()

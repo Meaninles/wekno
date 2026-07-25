@@ -290,13 +290,14 @@ func (s *knowledgeService) buildWikiKnowledgeDeletionPlan(
 	}
 	lang, _ := types.LanguageFromContext(ctx)
 	op := WikiPendingOp{
-		Op:           WikiOpRetract,
-		KnowledgeID:  knowledge.ID,
-		DocTitle:     docTitle,
-		DocSummary:   docSummary,
-		Language:     lang,
-		PageSlugs:    stableStringUnion(knownSlugs),
-		SourceChunks: sourceChunks,
+		Op:               WikiOpRetract,
+		KnowledgeID:      knowledge.ID,
+		DocTitle:         docTitle,
+		DocSummary:       docSummary,
+		Language:         lang,
+		PageSlugs:        stableStringUnion(knownSlugs),
+		SourceChunks:     sourceChunks,
+		RetractPlanState: wikiRetractPlanReady,
 	}
 	payload, err := json.Marshal(op)
 	if err != nil {
@@ -523,7 +524,26 @@ func quiesceKnowledgeDeletionWithInspector(
 		}
 		live, err := taskInspector.DocumentLifecycleTaskKnowledgeIDs(waitCtx, targets)
 		if err != nil {
-			return fmt.Errorf("knowledge delete: inspect lifecycle task quiescence: %w", err)
+			if !errors.Is(err, asynq.ErrTaskNotFound) {
+				return fmt.Errorf("knowledge delete: inspect lifecycle task quiescence: %w", err)
+			}
+			// A task may finish between the queue's atomic live-ID snapshot
+			// and GetTaskInfo. That is neither proof of quiescence nor a
+			// terminal inspection failure: conservatively treat every target
+			// as live for this round, repeat cancellation, and require the
+			// normal two subsequent empty snapshots. This closes the
+			// parent-finished/child-enqueued cross-queue window without making
+			// users retry a cancellation request because of healthy queue
+			// progress.
+			logger.Debugf(
+				waitCtx,
+				"knowledge delete: live task disappeared during payload attribution; retrying quiescence snapshot: %v",
+				err,
+			)
+			live = make(map[string]bool, len(targets))
+			for _, target := range targets {
+				live[target.KnowledgeID] = true
+			}
 		}
 		if len(live) == 0 {
 			emptySnapshots++
@@ -658,11 +678,12 @@ func (s *knowledgeService) beginKnowledgeDeletionBatch(
 		}
 		lang, _ := types.LanguageFromContext(ctx)
 		payload, err := json.Marshal(WikiPendingOp{
-			Op:          WikiOpRetract,
-			KnowledgeID: knowledge.ID,
-			DocTitle:    docTitle,
-			DocSummary:  knowledge.Description,
-			Language:    lang,
+			Op:               WikiOpRetract,
+			KnowledgeID:      knowledge.ID,
+			DocTitle:         docTitle,
+			DocSummary:       knowledge.Description,
+			Language:         lang,
+			RetractPlanState: wikiRetractPlanIntent,
 		})
 		if err != nil {
 			return fmt.Errorf("begin knowledge deletion: encode minimal Wiki retract: %w", err)
@@ -681,21 +702,14 @@ func (s *knowledgeService) beginKnowledgeDeletionBatch(
 	if err := s.wikiDeleteCoord.Begin(ctx, intents); err != nil {
 		return fmt.Errorf("begin durable knowledge deletion: %w", err)
 	}
-	triggeredKBs := make(map[string]struct{})
 	for _, knowledge := range knowledges {
 		s.markKnowledgeDeletedForWiki(ctx, knowledge.KnowledgeBaseID, knowledge.ID)
-		if _, triggered := triggeredKBs[knowledge.KnowledgeBaseID]; triggered {
-			continue
-		}
-		triggeredKBs[knowledge.KnowledgeBaseID] = struct{}{}
-		if err := enqueueWikiTrigger(s.task, WikiIngestPayload{
-			TenantID: tenantID, KnowledgeBaseID: knowledge.KnowledgeBaseID,
-		}, wikiFollowUpDelay, true); err != nil {
-			// PostgreSQL is authoritative; wikiqueue.Recovery republishes a
-			// missing wake-up every minute.
-			logger.Warnf(ctx, "knowledge delete: minimal retract trigger degraded for KB %s: %v", knowledge.KnowledgeBaseID, err)
-		}
 	}
+	// Do not wake the Wiki consumer for the intent-only rows. The normal path
+	// refreshes them to ready plans and schedules one wake-up after quiescence;
+	// a crashed path is resumed by the durable deleting-row recovery scanner.
+	// Publishing here allowed the intent to be consumed between Begin and
+	// Prepare, forcing the same source through a second expensive retract.
 	return nil
 }
 
@@ -971,8 +985,6 @@ func (s *knowledgeService) cleanupKnowledgeResourcesWithMoveFence(
 ) error {
 	logger.GetLogger(ctx).Infof("Cleaning knowledge resources before manual update, knowledge ID: %s", knowledge.ID)
 
-	var cleanupErr error
-
 	if knowledge.ParseStatus == types.ManualKnowledgeStatusDraft && knowledge.StorageSize == 0 {
 		// Draft without indexed data, skip cleanup.
 		return nil
@@ -994,23 +1006,27 @@ func (s *knowledgeService) cleanupKnowledgeResourcesWithMoveFence(
 	if kb == nil {
 		return fmt.Errorf("cleanup knowledge resources: load source KB %s: service returned nil without error", knowledge.KnowledgeBaseID)
 	}
+
+	// Resolve every vector dependency before deleting anything. Model/provider
+	// configuration failures are deterministic and must leave the previous
+	// searchable generation intact.
+	var deleteVector func() error
 	if knowledge.EmbeddingModelID != "" {
 		retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
 			ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, kb.VectorStoreID)
 		if err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Error("Failed to init retrieve engine during cleanup")
-			cleanupErr = errors.Join(cleanupErr, err)
-		} else {
-			embeddingModel, modelErr := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
-			if modelErr != nil {
-				logger.GetLogger(ctx).WithField("error", modelErr).Error("Failed to get embedding model during cleanup")
-				cleanupErr = errors.Join(cleanupErr, modelErr)
-			} else {
-				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
-					logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge index")
-					cleanupErr = errors.Join(cleanupErr, err)
-				}
-			}
+			return err
+		}
+		embeddingModel, modelErr := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
+		if modelErr != nil {
+			logger.GetLogger(ctx).WithField("error", modelErr).Error("Failed to get embedding model during cleanup")
+			return modelErr
+		}
+		deleteVector = func() error {
+			return retrieveEngine.DeleteByKnowledgeIDList(
+				ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type,
+			)
 		}
 	}
 
@@ -1037,14 +1053,25 @@ func (s *knowledgeService) cleanupKnowledgeResourcesWithMoveFence(
 	}
 	imageURLs = uniqueNonEmptyStrings(append(imageURLs, metadataPaths...))
 
-	if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
-		logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge chunks")
-		cleanupErr = errors.Join(cleanupErr, err)
+	// Validation/adoption is a hard, non-destructive barrier. In particular,
+	// no vector, chunk, graph or provider object may be removed when one legacy
+	// path cannot be attributed to this exact document and storage binding.
+	var prepareErr error
+	if moveFenceHeld {
+		prepareErr = s.prepareDerivedKnowledgeAuxiliaryWithinMoveFence(ctx, kb, knowledge, imageURLs)
+	} else {
+		prepareErr = s.prepareDerivedKnowledgeAuxiliary(ctx, kb, knowledge, imageURLs)
+	}
+	if prepareErr != nil {
+		return prepareErr
 	}
 
 	// Source FilePath is intentionally absent: reparse/manual-update owns the
 	// original upload. Every derived object uses the same durable lifecycle as
-	// full deletion, including pre-fanout and FAQ artifacts.
+	// full deletion, including pre-fanout and FAQ artifacts. Provider cleanup
+	// runs before searchable data deletion, so a transient object-store error
+	// retains the old vectors/chunks/graph and a retry can converge from the
+	// durable ownership rows.
 	var derivedCleanupErr error
 	if moveFenceHeld {
 		derivedCleanupErr = s.cleanupDerivedKnowledgeAuxiliaryWithinMoveFence(ctx, kb, knowledge, imageURLs)
@@ -1052,17 +1079,25 @@ func (s *knowledgeService) cleanupKnowledgeResourcesWithMoveFence(
 		derivedCleanupErr = s.cleanupDerivedKnowledgeAuxiliary(ctx, kb, knowledge, imageURLs)
 	}
 	if derivedCleanupErr != nil {
-		cleanupErr = errors.Join(cleanupErr, derivedCleanupErr)
+		return derivedCleanupErr
+	}
+
+	if deleteVector != nil {
+		if err := deleteVector(); err != nil {
+			logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge index")
+			return err
+		}
+	}
+
+	if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
+		logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge chunks")
+		return err
 	}
 
 	namespace := types.NameSpace{KnowledgeBase: knowledge.KnowledgeBaseID, Knowledge: knowledge.ID}
 	if err := s.graphEngine.DelGraph(ctx, []types.NameSpace{namespace}); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge graph data")
-		cleanupErr = errors.Join(cleanupErr, err)
-	}
-
-	if cleanupErr != nil {
-		return cleanupErr
+		return err
 	}
 
 	if knowledge.StorageSize > 0 {

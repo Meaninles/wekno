@@ -16,6 +16,20 @@ const (
 	KnowledgeTypeFAQ = "faq"
 )
 
+const (
+	EnrichmentStatusNone      = "none"
+	EnrichmentStatusPending   = "pending"
+	EnrichmentStatusCompleted = "completed"
+	EnrichmentStatusDegraded  = "degraded"
+	EnrichmentStatusFailed    = "failed"
+
+	WikiStatusNone      = "none"
+	WikiStatusPending   = "pending"
+	WikiStatusCompleted = "completed"
+	WikiStatusDegraded  = "degraded"
+	WikiStatusFailed    = "failed"
+)
+
 // Channel constants identify through which channel a knowledge entry was ingested.
 // Aligned with Message.Channel values ("web", "api", "im") but allows finer granularity.
 const (
@@ -100,6 +114,9 @@ type KnowledgeListFilter struct {
 	FileType string
 	// ParseStatus filters by parse_status when non-empty (e.g. pending, processing, completed, failed).
 	ParseStatus string
+	// WorkflowStatus filters by the user-visible end-to-end document status.
+	// Unlike ParseStatus, it includes summary, questions/graph and Wiki.
+	WorkflowStatus string
 	// Source filters by ingestion channel when non-empty (web, api, feishu, notion, wechat, ...).
 	// The special values "manual" and "url" are routed to the `type` column to match
 	// FileType semantics, so callers can filter "manually created" / "URL imported" entries.
@@ -159,6 +176,13 @@ type Knowledge struct {
 	PendingSubtasksCount int `json:"pending_subtasks_count" gorm:"type:int;not null;default:0"`
 	// Summary status for async summary generation
 	SummaryStatus string `json:"summary_status"     gorm:"type:varchar(32);default:none"`
+	// EnrichmentStatus reports the aggregate outcome of optional summary,
+	// question and graph work without conflating it with core parse success.
+	EnrichmentStatus string `json:"enrichment_status" gorm:"type:varchar(32);not null;default:none"`
+	// WikiStatus is separate because Wiki is a durable KB-scoped background
+	// lane and intentionally does not hold the core document finalizer open.
+	WikiStatus       string `json:"wiki_status" gorm:"type:varchar(32);not null;default:none"`
+	WikiErrorMessage string `json:"wiki_error_message,omitempty" gorm:"type:text;not null;default:''"`
 	// Enable status of the knowledge
 	EnableStatus string `json:"enable_status"`
 	// ID of the embedding model
@@ -194,9 +218,10 @@ type Knowledge struct {
 }
 
 // KnowledgeFanoutCompletion is the durable, generation-scoped completion
-// ledger for core fan-out items (multimodal images and data-table summary).
-// Redis mirrors this state for fast fan-in, but correctness never depends on
-// a Redis key surviving restarts or TTL expiry.
+// ledger for core fan-out items (multimodal images and data-table summary) and
+// reserved orchestration receipts. Redis mirrors core fan-in state for speed,
+// but correctness never depends on a Redis key surviving restarts or TTL
+// expiry.
 type KnowledgeFanoutCompletion struct {
 	TenantID             uint64    `gorm:"primaryKey;column:tenant_id"`
 	KnowledgeID          string    `gorm:"primaryKey;column:knowledge_id"`

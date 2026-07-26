@@ -2,379 +2,426 @@
   <img alt="版本" src="https://img.shields.io/badge/version-0.6.3-2e6cc4?labelColor=d4eaf7" />
   <img alt="文档语言" src="https://img.shields.io/badge/docs-中文-5ac725" />
   <img alt="部署方式" src="https://img.shields.io/badge/deploy-Docker%20%2F%20Kubernetes-4e6b99" />
+  <img alt="持久文件" src="https://img.shields.io/badge/storage-MinIO%20%2F%20OBS-5a67d8" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-ffffff?labelColor=d4eaf7&color=2e6cc4" />
 </p>
 
-# WeKnora Agent 知识库平台
+# WeKnora Agent 企业知识平台
 
-本仓库是基于 WeKnora 深度二开的企业级 Agent 知识库平台。它不只是一个 RAG 问答系统，而是面向企业内部知识沉淀、智能体编排、数据分析、办公文档处理和多渠道发布的一体化工作台。
+本仓库是基于 WeKnora 深度二开的企业知识与智能体平台。当前版本已经不只是单
+实例 RAG 服务：它提供可水平扩展、可恢复的完整文档解析工作流，支持文档、向量、
+Wiki、知识图谱、问题生成、多模态和音频处理，并把知识检索、数据分析、办公文档
+生成、企业身份与多渠道发布统一到同一平台。
 
-平台以知识库为可信信息底座，以智能体为业务入口，把文档、FAQ、Wiki、外部内容源、数据库、MCP 工具、技能包、定时任务和企业身份体系连接起来。企业可以用它搭建制度问答、客服助手、销售/经营数据分析、文档生成、行业研究、内部门户客服、IM 机器人和自动报告等场景。
+> 当前代码的完整架构、状态语义、生产拓扑和文档地图见
+> [当前实现架构与文档索引](./docs/custom/当前实现架构与文档索引.md)。
+> 生产人员请直接从
+> [当前版本生产更新部署执行手册](./docs/custom/当前版本生产更新部署执行手册.md)
+> 开始，不能只使用上游 WeKnora 的部署说明或默认 Helm 值。
 
 ## 当前开发入口
 
 | 服务 | 地址 | 说明 |
-| --- | --- | --- |
-| 前端开发服务 | `http://localhost:5177` | 位于 `frontend/`，当前开发环境使用该入口访问界面。 |
-| 后端 API | `http://localhost:8080` | Docker Desktop 中 `app-dev` 容器对外端口。 |
-| 通用智能体旁路服务 | `http://127.0.0.1:8091/health` | Claude Agent SDK 运行时。 |
-| 文档处理智能体旁路服务 | `http://127.0.0.1:8093/health` | 预装 LibreOffice、Pandoc、PDF 和 Office 处理依赖。 |
-| Langfuse | `http://localhost:3000` | 启用 profile 后可查看链路追踪。 |
+|---|---|---|
+| 桌面前端 | `http://localhost:5177` | `frontend/` 开发服务 |
+| 后端 API | `http://localhost:8080` | Docker Desktop 的 `app-dev` |
+| general-agent | `http://127.0.0.1:8091/health` | 通用/数据/表格智能体旁路运行时 |
+| document-processing-agent | `http://127.0.0.1:8093/health` | Word、Excel、PDF、PPT 处理运行时 |
+| Langfuse | `http://localhost:3000` | 启用对应 profile 后可用 |
 
-## 平台定位
+## 平台能力
 
-平台围绕四个核心目标建设：
+| 领域 | 当前能力 |
+|---|---|
+| 企业知识 | 文档、FAQ、Wiki、文件夹、URL、手工 Markdown、外部内容源 |
+| 文档处理 | PDF、Word、Excel、PPT、网页、文本、图片、音频等；拆分、OCR、VLM、ASR |
+| 索引和衍生 | chunk、向量、关键词、摘要、问题生成、实体关系图谱、Wiki 页面 |
+| 检索问答 | 向量/关键词混合检索、Rerank、FAQ 优先、图谱、Wiki、来源引用 |
+| 智能体 | 快速问答、简单对话、智能推理、Wiki、数据、表格、通用、文档处理 |
+| 企业治理 | 多租户、RBAC、共享空间、SSO、组织同步、默认配置、审计、凭据加密 |
+| 工具与数据 | MCP、技能、Web 搜索、MySQL/PostgreSQL 只读分析、定时任务 |
+| 发布集成 | REST API、Embed、IM、移动 Web、Chrome 扩展、ClawHub |
 
-| 目标 | 平台能力 |
-| --- | --- |
-| 让企业知识可检索、可引用、可治理 | 文档知识库、FAQ、Wiki、图谱、标签、批量重解析、解析时间线、来源引用。 |
-| 让智能体能完成真实业务任务 | 快速问答、智能推理、通用智能体、数据分析智能体、表格分析智能体、文档处理智能体、MCP、技能和联网搜索。 |
-| 让企业资源安全协作 | 多租户 RBAC、共享空间、资源共享、统一身份认证、默认配置中心、审计和凭据加密。 |
-| 让能力可以被业务系统复用 | API、网页嵌入、IM 渠道、Chrome 插件、ClawHub 技能、定时任务。 |
+### 常见业务场景
 
-## 适用场景
+- 制度、流程、产品手册问答：文档知识库 + 快速问答，回答附来源。
+- 大量长文档阅读：Wiki + 分类页面 + 渐进式关联图。
+- 客服标准口径：FAQ + FAQ 优先策略 + 推荐问题。
+- 经营数据分析：受限数据库源 + 数据分析智能体 + 图表/报告。
+- CSV/Excel 即席分析：表格分析智能体 + 知识库文件或本轮附件。
+- Word、Excel、PDF、PPT 生成：文档处理智能体 + 企业模板/技能。
+- 复杂业务编排：通用智能体 + 知识库 + 数据库 + MCP + Web + 产物。
+- 日报/周报/月报：定时任务 + 固定上下文 + 指定智能体。
 
-| 场景 | 推荐方案 |
-| --- | --- |
-| 制度、流程、产品手册问答 | 文档知识库 + 快速问答或 RAG 智能体，回答必须带引用。 |
-| 客服或标准口径问答 | FAQ 知识库 + FAQ 优先策略 + 推荐问题。 |
-| 大量长文档结构化阅读 | Wiki 知识库 + Wiki 问答 + 页面链接图谱。 |
-| 企业经营数据分析 | MySQL/PostgreSQL 数据源 + 数据分析智能体 + 图表/报告输出。 |
-| CSV/Excel 即席分析 | 表格分析智能体 + 知识库表格或本轮附件 + 图表输出。 |
-| 生成 Word、Excel、PDF、PPT | 文档处理智能体 + 企业模板 + 专业技能。 |
-| 复杂业务编排 | 通用智能体 + 知识库 + 数据库 + MCP + 联网搜索 + 产物生成。 |
-| 每日/每周自动报告 | 定时任务 + 绑定智能体 + 固定上下文和提示词模板。 |
-| 网站、IM、业务系统集成 | 网页嵌入、API Principal、企业微信/飞书/Slack/Telegram 等 IM 渠道。 |
+## 架构
 
-## 核心能力
+### 1. 组件关系
 
-### 1. 企业知识库
+```mermaid
+flowchart TB
+    subgraph Access["访问层"]
+        Desktop["桌面 Web ×2"]
+        Mobile["移动 Web ×2"]
+        External["API / Embed / IM / Chrome"]
+    end
 
-- 支持文档知识库、FAQ 知识库和 Wiki 能力。
-- 支持 PDF、Word、Excel、PPT、Markdown、HTML、EPUB、MHTML、图片、音频、CSV、JSON 等资料。
-- 支持文件上传、文件夹上传、URL 导入、在线 Markdown、外部数据源同步。
-- 支持飞书、Notion、语雀、RSS 等内容源同步到知识库。
-- 支持向量检索、关键词检索、父子分块、Rerank、FAQ 优先、GraphRAG、Wiki 页面和知识图谱。
-- 支持上传确认时覆盖解析配置，包括解析器、分块、多模态、ASR、图谱和问题生成。
-- 支持批量删除、批量重解析、标签筛选、解析状态和解析时间线。
+    subgraph Control["Go app ×3：业务与控制边界"]
+        Auth["认证 / 租户 / RBAC"]
+        KB["知识库 / 检索 / API"]
+        DQ["文档级持久工作流"]
+        Agent["Agent 控制 / 工具 / 产物鉴权"]
+        Custom["IAM / 配置 / 文件夹 / 分享 / 技能 / 数据源"]
+    end
 
-### 2. 智能体工作台
+    subgraph Execution["执行层"]
+        DR["DocReader ×3"]
+        GA["general-agent ×2"]
+        DA["document-processing-agent ×2"]
+        Model["模型服务\nChat / Embedding / Rerank / VLM / ASR"]
+    end
 
-平台内置多类智能体，可直接使用，也可以复制后改造成业务智能体：
+    subgraph Data["状态与文件"]
+        PG["PostgreSQL / ParadeDB"]
+        Redis["Redis"]
+        Object["MinIO（开发）/ 私有 OBS（生产）"]
+        Neo4j["Neo4j"]
+    end
 
-| 智能体 | 用途 |
-| --- | --- |
-| 快速问答 | 稳定 RAG 问答，适合制度、手册、知识库查询。 |
-| 简单对话 | 通用对话、写作、临时文件和图片问题。 |
-| 智能推理 | ReAct 多步推理，编排知识库、工具、MCP 和联网搜索。 |
-| 维基问答 | 面向 Wiki 页面和目录的知识问答。 |
-| 数据分析 | 连接 MySQL/PostgreSQL，生成 SQL、指标解释和图表。 |
-| 表格分析 | 分析 CSV/Excel 知识库文件或对话附件，生成表格结论和图表。 |
-| 通用智能体 | 同时使用知识库、数据库、MCP、技能、联网搜索和产物生成。 |
-| 文档处理 | 生成或修改 Word、Excel、PDF、PPT 等办公文档，可按需绑定数据库源辅助分析。 |
+    Access --> Control
+    DQ --> DR
+    DQ --> Model
+    Agent --> GA
+    Agent --> DA
+    GA --> Agent
+    DA --> Agent
+    Control --> PG
+    DQ <--> Redis
+    Control --> Object
+    KB --> Neo4j
+```
 
-智能体配置覆盖模型、提示词、上下文模板、知识库范围、检索参数、数据库数据源、联网搜索、多模态、工具、MCP、技能、共享和集成渠道。
+架构的五条硬约束：
 
-### 3. 通用智能体与文档处理旁路服务
+1. 每个 app 副本都能完成一份文档的解析、向量化和全部启用衍生阶段。
+2. PostgreSQL 是文档工作流事实来源，Redis 是可重投的投递和集群准入层。
+3. Go app 是权限、租户、工具、MCP、业务数据库和持久化的唯一控制边界。
+4. 生产长期文件全部进入私有 OBS，app/DocReader/Agent 仅使用独立本地临时盘。
+5. 完整工作流成功才显示“已完成”，不能用主解析完成掩盖 Wiki/图谱/问题失败。
 
-本项目新增了 Claude Agent SDK 旁路服务运行时：
-
-- Go 后端负责权限、租户、密钥、MCP、工具执行、检索、数据库访问和结果持久化。
-- Python 旁路服务只负责智能体推理循环和动态工具调度，不直接连接 WeKnora 数据库、对象存储或 MCP 服务。
-- 工具调用统一回调 Go 后端，复用原生权限、审批、OAuth、审计和安全边界。
-- 通用智能体支持知识库检索、网络搜索、多模态、MCP、Skills、数据库工具和产物生成。
-- 文档处理智能体使用独立镜像，预装 LibreOffice、Pandoc、PDF 工具、中文字体和常用 Office/Python 库，适合企业文档生成与转换。
-
-### 4. 数据库分析
-
-数据库数据源用于数据分析智能体，也可供通用智能体和文档处理智能体按需使用，当前支持 MySQL 和 PostgreSQL：
-
-- 管理数据源连接、测试连接、刷新表和字段元数据。
-- 控制可见表范围、最大返回行数、最大扫描行数和查询超时。
-- 为表和字段补充业务描述，标记维度、指标、时间字段。
-- 支持敏感字段脱敏或隐藏。
-- 数据源可共享到共享空间，供具备权限的成员绑定到智能体。
-- 智能体运行时通过 `db_catalog`、`db_schema`、`db_query` 等只读工具查询。
-
-### 5. 技能中心
-
-平台支持两类技能：
-
-- 轻量技能：以提示词形式沉淀固定写作风格、行业术语、输出模板和审校规则。
-- 专业技能：以技能包形式导入，包含 `SKILL.md`、引用文件、脚本或模板，适合复杂工作流和行业方法论。
-
-技能可以配置到智能体，也可以在对话中临时选择。技能支持共享给共享空间或指定用户。
-
-### 6. 定时任务
-
-定时任务会按计划自动向指定智能体提问，并把结果写入真实会话：
-
-- 支持小时、每日、每周、每月调度。
-- 支持时区、运行用户、提示词模板、变量渲染预览。
-- 支持绑定知识库、文档、标签、MCP、技能、图片和附件上下文。
-- 支持立即运行、运行记录、跳转会话、失败信息和并发跳过策略。
-- 适合日报、周报、月报、指标监控、行业情报和知识库巡检。
-
-### 7. 企业协作与治理
-
-- 多租户/工作区体系，资源归属清晰。
-- 租户角色：viewer、contributor、admin、owner。
-- 共享空间支持跨租户共享知识库、智能体、技能和数据库数据源。
-- 支持统一身份认证 SSO 和组织人员同步。
-- 默认配置中心可向用户工作区下发模型、向量库、解析器、存储、联网搜索和 MCP 服务。
-- 系统自动维护“使用指南”共享知识库，让新老用户都能查看平台说明。
-- 答案反馈会记录点赞/点踩，并保存运行快照，便于后续质量分析。
-- 支持审计日志、凭据 AES-256-GCM 加密、SSRF 防护、MCP OAuth 和工具审批。
-
-### 8. 集成发布
-
-| 入口 | 说明 |
-| --- | --- |
-| REST API | 支持 API Key 和登录态调用，`agent-chat` 使用 SSE 流式响应。 |
-| API Principal | 支持 tenant、direct_header、signed_token，隔离外部用户会话和 MCP OAuth。 |
-| 网页嵌入 | 支持 iframe、Widget、安全模式 token exchange、域名白名单和限流。 |
-| IM 渠道 | 支持企业微信、飞书、Slack、Telegram、钉钉、Mattermost、微信、QQBot。 |
-| Chrome 插件 | 支持网页侧边栏问答、网页剪藏、Markdown 笔记和离线包安装。 |
-| ClawHub | 通过 `@lyingbug/weknora` 技能接入上传、URL 导入和混合搜索能力。 |
-
-## 架构概览
+### 2. 文档级水平扩展
 
 ```mermaid
 flowchart LR
-  U["用户入口<br/>Web / API / IM / Embed / Chrome"] --> F["前端工作台<br/>frontend"]
-  F --> B["Go 后端<br/>app-dev / API"]
-  B --> KB["知识底座<br/>文档 / FAQ / Wiki / 图谱 / 向量 / 关键词"]
-  B --> AG["Agent 运行时<br/>原生 Agent / 通用 Agent / 文档处理"]
-  AG --> SC["Python 旁路服务<br/>Claude Agent SDK"]
-  AG --> TOOL["工具层<br/>MCP / DB / Web Search / Skills / 文件产物"]
-  B --> GOV["企业治理<br/>RBAC / IAM / 默认配置 / 审计 / 凭据加密"]
-  B --> INFRA["基础设施<br/>PostgreSQL / Redis / MinIO / DocReader / Langfuse"]
+    In["上传 / 重建"] --> WF["PostgreSQL 持久工作流"]
+    WF --> Q["Redis / Asynq 投递"]
+    Q --> A1["app-1\n完整文档并发 4"]
+    Q --> A2["app-2\n完整文档并发 4"]
+    Q --> A3["app-3\n完整文档并发 4"]
+    A1 --> P["解析→分块→索引→衍生→终态"]
+    A2 --> P
+    A3 --> P
 ```
 
-## 当前二开情况与规范
+管理员的 `asynq.concurrency` 现在表示“单个 app 同时接纳的完整文档数”。生产
+使用 3 个 app、每实例 4，因此同时处理 12 份完整文档；等待文档在全局按文档
+排队，哪个实例先空闲就继续领取，而不是把不同任务类型分别堆成长队列。
 
-本项目已经在 WeKnora 原生能力上做了较多企业化二开。所有新增能力遵循 [二开目录结构规范](./docs/custom/二开目录结构规范.md)：大段业务逻辑放在 `custom/`、`internal/custom/`、`frontend/src/custom/`，原生代码只保留必要注册点、路由挂载、Hook 和少量类型字段。
+每份文档只有在启用项全部达到终态后才算完成：
 
-### 后端二开模块
+```text
+安全校验 → 原文入对象存储 → 解析/拆分 → chunk → 向量/关键词
+                                      └→ 多模态/VLM/ASR
+                                      └→ 摘要
+                                      └→ 问题生成
+                                      └→ 知识图谱
+                                      └→ Wiki
+                           → 完整性核验 → completed
+```
 
-后端统一入口位于 `internal/custom/bootstrap/bootstrap.go`。该入口负责创建二开服务、执行二开表迁移、注册路由、启动调度器，并把二开能力挂接到原生会话、Agent、技能、消息和工具链路中。
+文档卡片显示系统等待总量和该文档的全局位置；悬停展示各阶段的简洁明细。
+`none` 表示尚未开始或等待前置阶段，不是“已跳过”。只有显式关闭、不适用或有
+结构化跳过原因时才显示“已跳过”；异常必须显示失败或降级。
 
-| 模块 | 目录 | 当前职责 |
-| --- | --- | --- |
-| 统一注册入口 | `internal/custom/bootstrap/` | 注册二开处理器、服务、调度器、智能体运行器、技能扩展、消息增强和运行时工具。 |
-| 答案反馈 | `internal/custom/modules/answerfeedback/` | 支持回答点赞/点踩，记录消息反馈和运行快照，用于质量分析与后续训练数据沉淀。 |
-| 内置智能体默认值 | `internal/custom/modules/builtinagentdefaults/` | 管理内置智能体默认配置和恢复默认逻辑，避免环境相关模型、数据源、MCP 被误覆盖。 |
-| 默认配置中心 | `internal/custom/modules/configcenter/` | 支持系统管理员从源工作区选择模型、向量库、解析器、存储、联网搜索、MCP，并复制下发到用户工作区。 |
-| 数据库分析 | `internal/custom/modules/dbanalytics/` | 管理 MySQL/PostgreSQL 数据源、元数据、字段语义、脱敏规则、共享关系，并向智能体提供 `db_catalog`、`db_schema`、`db_query` 工具。 |
-| 文件安全校验 | `internal/custom/modules/fileguard/` | 对上传文件做类型、大小、压缩包、XML、CSV、Office 等安全与复杂度检查，区分轻量/重型文件处理路径。 |
-| 通用智能体 | `internal/custom/modules/generalagent/` | 将 `general-agent`、`document-processing-agent`、`data-analysis`、`table-analysis` 接入 Claude Agent SDK 旁路服务，负责运行时配置、工具回调、产物持久化和下载。 |
-| IAM/SSO | `internal/custom/modules/iam/` | 支持统一身份认证登录、组织人员同步、定时同步、手动同步、外部组织/用户映射和共享空间成员候选查询。 |
-| 定时会话 | `internal/custom/modules/scheduledchat/` | 支持按小时/日/周/月自动向智能体提问，保存运行记录，并将结果写入真实会话。 |
-| 会话状态 | `internal/custom/modules/sessionstate/` | 记录不同用户或 Principal 对会话的已读水位，给 Web 和移动端会话列表提供未读/生成中状态。 |
-| 对话分享 | `internal/custom/modules/chatshare/` | 将 Web 会话快照导出为登录态可见的分享链接，查看端不要求原会话权限，并屏蔽引用跳转。 |
-| 技能中心 | `internal/custom/modules/skillhub/` | 管理轻量技能和专业技能包，支持导入、下载、共享给空间/用户，并注入智能体运行上下文。 |
-| 来源引用增强 | `internal/custom/modules/sourcerefs/` | 抽取和整理回答中的来源引用信息，服务前端来源时间线展示。 |
-| 文本编码 | `internal/custom/modules/textencoding/` | 增强文本解码能力，减少上传资料因编码不一致导致的乱码或解析失败。 |
-| 使用指南 | `internal/custom/modules/userguide/` | 自动创建和维护“使用指南”共享空间/知识库，并把活跃用户纳入可见范围。 |
+详细状态机、稳定实例身份、boot ID、租约、execution epoch、终止证明和竞态边界
+见[文档解析水平扩展与故障恢复](./docs/custom/文档解析水平扩展与故障恢复.md)。
 
-当前二开 API 统一挂载在 `/api/v1/custom/*` 下，核心路由包括：
+### 3. 重启、故障和“不重复”
 
-- `/api/v1/custom/iam/*`：SSO、组织同步、空间成员候选。
-- `/api/v1/custom/config-center/*`：默认资源选择和下发。
-- `/api/v1/custom/skills/*`：轻量技能、专业技能、共享和下载。
-- `/api/v1/custom/scheduled-chat/*`：定时任务、运行记录和提示词预览。
-- `/api/v1/custom/session-state/*`：会话已读水位、未读状态和生成中状态。
-- `/api/v1/custom/chat-share/*`：创建对话分享、读取分享快照，并通过分享 token 代理读取图片/附件和下载通用智能体产物。
-- `/api/v1/custom/db-analytics/*`：数据库源、元数据、安全范围、共享和智能体绑定。
-- `/api/v1/custom/general-agent/*`：通用智能体产物下载和旁路服务工具回调。
-- `/api/v1/custom/answer-feedback/*`：回答反馈写入和查询。
+- Redis/Asynq 是 at-least-once 投递；generation、epoch、稳定任务 ID 和幂等提交
+  保证业务结果收敛。
+- 同一稳定实例重启后可识别上一个 boot 并继续处理自己领取的文档。
+- 实例心跳超时只是异常嫌疑，不能单独触发接管。
+- 只有租约、boot/epoch fencing 和可用时的 Kubernetes 精确终止/节点隔离证明
+  同时满足，其他实例才接管。
+- 旧实例的迟到任务不能写入新的 generation/epoch。
+- 解析中删除或重建会隔离旧 generation，并清理任务、chunk、索引、图谱、Wiki
+  引用和对象。
 
-### 前端二开模块
+这保证的是“持久接收、可恢复投递和受 fencing 的有效一次业务提交”，并不声称
+外部模型调用在进程崩溃边界绝对只发生一次。
 
-前端二开能力集中在 `frontend/src/custom/modules/`，页面入口尽量挂到现有设置页、信息源、智能体、对话和集成页面中。
+### 4. 集群级模型准入
 
-| 模块 | 目录 | 当前职责 |
-| --- | --- | --- |
-| 智能体置顶 | `agentPins/` | 增强智能体列表置顶和常用入口体验。 |
-| 答案反馈 | `answerfeedback/` | 在对话消息下方提供点赞/点踩组件，并调用后端反馈接口。 |
-| Chrome 插件 | `chrome-extension/` | 提供离线插件下载、安装指南、一键配置和浏览器扩展桥接逻辑。 |
-| 默认配置中心 | `configcenter/` | 系统管理员选择源用户资源、配置默认授权和批量下发。 |
-| 控制台过滤 | `consoleFilter/` | 降低前端开发环境中无关控制台噪声。 |
-| 对话分享 | `chatshare/` | 提供分享图标、分享页、登录回跳、受保护图片/附件代理和电脑/移动响应式查看。 |
-| 数据库分析 | `dbanalytics/` | 数据源管理界面，支持连接配置、元数据、表字段范围和共享管理。 |
-| 文档处理 | `documentprocessing/` | 文档处理智能体相关前端扩展入口。 |
-| IAM | `iam/` | IAM 同步设置、组织树、空间成员批量选择和候选用户检索。 |
-| 信息源页签 | `information-source/` | 扩展信息源页面导航，把知识库、数据源等入口组织到统一信息源视图。 |
-| 移动端 | `mobile/` | 提供移动端聊天、知识库管理、设置、来源引用、产物下载和同域 SSO 回跳适配。 |
-| 模型选项处理 | `model-options/` | 对模型下拉选项做去重和内置智能体托管模型隐藏处理。 |
-| 安全消息渲染 | `safeMessage/` | 增强消息渲染安全性和前端异常兜底。 |
-| 定时会话 | `scheduledchat/` | 定时任务列表、创建编辑、运行记录、立即运行和模板预览。 |
-| 会话状态 | `sessionState/` | 封装二开会话状态接口，供 Web 侧边栏和移动端抽屉展示未读提示。 |
-| 技能中心 | `skillhub/` | 轻量技能、专业技能、技能选择器、共享、下载和置顶。 |
-| 来源时间线 | `sourceReferences/` | 展示回答引用、检索来源、工具来源和时间线。 |
-| 上传信息 | `uploadInfo/` | 上传确认、解析配置覆盖、上传状态与批次信息展示。 |
+模型和解析器并发通过 Redis 在整个集群共享，不能乘以 app 副本数：
 
-### 旁路服务与运行时
+| 资源 | 集群并发 | 单租户 | 说明 |
+|---|---:|---:|---|
+| Chat | 24 | 12 | 保留 2 个交互槽位 |
+| Embedding | 32 | 16 | 批量向量化 |
+| Rerank | 24 | 12 | 检索重排 |
+| VLM | 4 | 2 | 图片/页面理解 |
+| ASR | 2 | 1 | 音频识别 |
+| Parser | 12 | 4 | 解析准入 |
 
-可独立运行的大段二开能力放在 `custom/services/`，通过 Docker Compose 与 Go 后端协作。
+DeepSeek V4 Flash 在 32 并发、每次实际生成 160 token 的容量测试中 32/32 成功，
+P95 5.655 秒；生产 Chat 取 24 保留约 25% 余量。该设置与每 app 的完整文档并发
+是两个不同层级。
 
-| 服务 | 目录 | 容器/端口 | 当前职责 |
-| --- | --- | --- | --- |
-| 通用智能体旁路服务 | `custom/services/general-agent/` | `weknora-custom-general-agent`，`127.0.0.1:8091` | 运行 `general-agent`、`data-analysis` 和 `table-analysis` 的 Claude Agent SDK 循环，接收 Go 后端下发的工具结构和上下文，工具执行统一回调 Go。 |
-| 文档处理智能体旁路服务 | `custom/services/document-processing-agent/` | `weknora-custom-document-processing-agent`，`127.0.0.1:8093` | 运行 `document-processing-agent`，在同一 SDK 应用基础上预装 LibreOffice、Pandoc、PDF/Office 处理库和中文字体，用于文档生成与转换。 |
-| 浏览器宿主实验目录 | `custom/services/browser-host/` | 当前保留日志与测试目录 | 为浏览器宿主类能力预留的旁路服务目录。 |
+### 5. 无 RWX 存储
 
-旁路服务的边界很明确：Python 不直接连接 WeKnora 数据库、对象存储、MCP 服务或业务数据源；Go 后端仍是权限、租户、密钥、OAuth、审批、检索、数据库查询、审计和持久化的唯一执行边界。
+| 内容 | 开发 | 生产 |
+|---|---|---|
+| 原始知识文件、衍生对象 | MinIO | 私有 OBS |
+| Agent 最终产物 | MinIO | 私有 OBS |
+| Agent 原文件中转 | MinIO 临时唯一前缀 | OBS 临时唯一前缀，生命周期 ≤24h |
+| app/DocReader/Agent 工作区 | 容器/节点本地临时盘 | 每 Pod 独立 `csi-local-topology` RWO |
+| 状态、chunk、向量、问题、Wiki | PostgreSQL | PostgreSQL/ParadeDB |
+| 实体关系 | Neo4j | Neo4j |
 
-### 迁移与数据表
+生产对象键按用途使用不同的部署级、namespace UUID 级唯一前缀，默认私有。Agent
+最终产物在 terminal 事件前由 app 写入对象存储并校验大小/SHA256，后续任意 app
+都能鉴权下载。对象存储不能挂载成 Office/PDF 的 POSIX 工作目录。
 
-二开迁移参考文件位于 `migrations/custom/`，编号从 `900000` 以后开始，当前包含：
+### 6. 大规模前端交互
 
-- `configcenter`：默认授权、用户授权和托管副本。
-- `dbanalytics`：数据库源、表字段元数据、共享关系。
-- `generalagent`：智能体产物和原始输入持久化。
-- `iam`：SSO/同步设置、外部组织、外部用户和同步记录。
-- `skillhub`：轻量技能、专业技能和共享关系。
-- `sessionstate`：当前通过 GORM AutoMigrate 维护 `custom_session_read_states`，暂未提供显式 SQL 文件。
-- `chatshare`：当前通过 GORM AutoMigrate 维护 `custom_chatshare_links` 和 `custom_chatshare_messages`，暂未提供显式 SQL 文件。
+- 文档列表：服务端完整状态筛选，支持等待、处理中、取消中、删除中、完成、失败、
+  取消、草稿；衍生失败会进入“失败”。
+- 知识库文件夹：服务端分页、渐进加载和搜索，不把全库树一次性载入。
+- 大文件预览：先取 preview policy，大文件分页/范围读取或下载，避免浏览器卡死。
+- Wiki 图：节点按类型分类、搜索和分页；选择节点只加载其一跳邻接图；点击关联
+  节点会以它为新中心继续加载，不展示整库全图。
 
-开发环境启动时，部分二开模块会通过 GORM AutoMigrate 保持表结构可用；生产发布如需显式 SQL 迁移，以 `migrations/custom/` 下的文件为准。
+### 7. Agent 双副本边界
 
-### 原生代码注册点
+`general-agent` 和 `document-processing-agent` 都支持两个或更多副本。一次 SDK
+运行固定在一个 Pod 的临时工作目录；Python 旁路服务不直接连接 WeKnora 数据库、
+业务数据库、MCP 或对象存储凭据。工具执行和最终产物上传都回到 Go app，因而：
 
-为了降低后续升级冲突，原生代码只保留少量稳定挂接点：
+- 请求不需要依赖 Agent 共享目录或粘性会话。
+- 已完成产物可以从任意 app 下载。
+- Agent Pod 崩溃不会损坏已提交产物；未提交运行按失败/重试处理。
+- 通用、数据分析、表格分析和文档处理各自的工具及安全特点保持不变。
 
-- `internal/container/container.go`：注册 `custombootstrap.NewHandlers`、启动二开 scheduler，并把二开服务注入容器。
-- `internal/router/router.go`：挂载 `/api/v1/custom` 路由和嵌入产物下载路由。
-- `internal/handler/auth.go`：在 `/auth/me` 等用户 provisioning 流程中调用二开 Hook。
-- `internal/middleware/auth.go`：放行 SSO public callback 等匿名入口。
-- `frontend/src/views/settings/Settings.vue`：挂载 IAM、默认配置中心等设置入口。
-- `frontend/src/views/auth/Login.vue`：在登录页显示可选统一身份认证入口。
-- `frontend/src/components/menu.vue`、`frontend/src/custom/modules/mobile/views/MobileChat.vue`：挂载电脑端和移动端对话分享入口。
-- `frontend/src/views/chat/components/botmsg.vue`、`frontend/src/views/chat/components/usermsg.vue`：支持分享模式下的只读消息渲染和文件代理。
+## 生产部署
 
-后续新增企业功能时，应优先新增独立二开模块，只在上述注册点或 `internal/custom/bootstrap/`、`frontend/src/custom/` 中扩展，不应把大段业务逻辑继续写入原生目录。
+### 目标拓扑
 
-## 本地开发启动
+当前生产最优落地配置不是“第一阶段/第二阶段”方案：
 
-### 环境要求
+| 节点 | 规格 | 目标工作负载 |
+|---|---|---|
+| `10.14.201.1` | 8C/32Gi + 500G | app、DocReader、两个 Agent、frontend、mobile-web 各 1 |
+| `10.14.201.2` | 8C/32Gi + 500G | 与 `.1` 相同 |
+| `10.14.201.7` | 8C/32Gi + 迁移后数据盘 | app、DocReader 各 1 |
+| `10.14.201.6` | 8C/16Gi | 保留 PostgreSQL、LiteLLM、Ingress 等 |
+| `10.14.201.54` | 8C/16Gi | 保留 Neo4j、Ingress 等 |
 
-- Docker Desktop
-- Docker Compose
+| 组件 | 副本 | request | limit | 临时卷 |
+|---|---:|---:|---:|---:|
+| app | 3 | 1.5C / 3Gi | 4C / 8Gi | 80Gi/Pod |
+| DocReader | 3 | 1.5C / 3Gi | 6C / 10Gi | 100Gi/Pod |
+| general-agent | 2 | 0.5C / 1Gi | 2C / 2Gi | 20Gi/Pod |
+| document-processing-agent | 2 | 1C / 1.5Gi | 3C / 4Gi | 40Gi/Pod |
+| frontend | 2 | 0.1C / 128Mi | 0.5C / 512Mi | 无 |
+| mobile-web | 2 | 0.05C / 64Mi | 0.3C / 512Mi | 无 |
+
+大临时卷 Deployment 使用 `maxSurge=0,maxUnavailable=1`，并按主机名打散。外部
+知识源原文件上限 2048 MiB；桌面/移动 Nginx 和 Ingress 的知识上传上限为
+2304 MiB，关闭 request buffering，读写超时 7200 秒；Agent 内部代理上限至少
+128 MiB。
+
+### 部署与迁移入口
+
+生产侧没有本对话上下文时，按以下顺序阅读和执行：
+
+1. [生产部署文件入口](./deploy/production/README.md)
+2. [当前版本生产更新部署执行手册](./docs/custom/当前版本生产更新部署执行手册.md)
+3. [无 RWX 目标方案与容量依据](./docs/custom/生产集群无RWX最优部署方案.md)
+4. [Helm Chart 说明](./helm/README.md)
+5. [`helm/values-production-ha.yaml`](./helm/values-production-ha.yaml)
+6. [多实例 API/E2E/故障验收](./custom/tests/document_processing_cluster_e2e/README.md)
+
+迁移不是简单 `helm upgrade`。执行手册覆盖：
+
+- 现网清单、配置、Secret、PostgreSQL、Neo4j 和 `/data/files` 备份。
+- 排空在途文档和 Agent 运行、移除业务入口、建立回滚点。
+- 构建同一 Git SHA 的 app/DocReader/Agent/Web/sandbox 镜像并推送 SWR。
+- 节点标签、本地 500G 数据盘、Everest 本地卷池和真实读写/回收验证。
+- 单迁移 app 串行执行数据库迁移和旧 Agent 产物迁移。
+- 盘点仍被数据库引用的 `/data/files`，上传 OBS，校验大小/SHA256，回填 URI。
+- 验证历史原文、图片和 Agent 产物可由任意 app 鉴权下载后，才释放旧卷。
+- 部署最终 3/3/2/2/2/2 副本，验证真实分流、故障接管和所有衍生任务。
+- 失败时按数据库/对象/清单的一致回滚点恢复，不能只回滚 Deployment。
+
+### 当前高可用边界
+
+app、DocReader、Agent 和 Web 层已经多副本，但现有 PostgreSQL、Neo4j、LiteLLM
+仍为单实例，Redis 主从没有自动切换，且集群仍是单 AZ。当前版本解决的是文档执行
+层水平扩展、单 Pod/解析节点故障恢复和无 RWX 文件共享，不能宣称整套系统没有
+单点。
+
+## 二开目录
+
+新增业务遵循[二开目录结构规范](./docs/custom/二开目录结构规范.md)：大段逻辑位于
+`custom/`、`internal/custom/` 和 `frontend/src/custom/`，上游目录只保留必要
+注册点、Hook 和少量字段。
+
+### 后端重点模块
+
+| 模块 | 目录 | 职责 |
+|---|---|---|
+| 统一注册 | `internal/custom/bootstrap/` | 二开服务、路由、迁移、调度器和 Hook |
+| 文档队列 | `internal/custom/modules/documentqueue/` | 持久工作流、实例、租约、epoch、接管 |
+| 模型准入 | `internal/custom/modules/modeladmission/` | Redis 集群/租户级模型与解析器并发 |
+| 大文档拆分 | `internal/custom/modules/documentsplit/` | 拆分、租约、重试、采样和预算 |
+| 产物存储 | `internal/custom/modules/artifactstore/` | 私有对象、校验、迁移和幂等提交 |
+| 文档状态 | `internal/custom/modules/knowledgeworkflowfilter/` | 完整工作流筛选 |
+| 文件夹 | `internal/custom/modules/knowledgefolders/` | 渐进目录、搜索、移动和上传 |
+| 预览 | `internal/custom/modules/documentpreview/` | 大文件预览策略 |
+| 生命周期 | `knowledgepurge/`、`terminalrepair/` | 删除、终态修复和跨存储清理 |
+| Agent | `internal/custom/modules/generalagent/` | 工具桥、运行控制、产物和下载 |
+| 企业能力 | `iam/`、`configcenter/`、`admin/` | SSO、组织、默认资源和系统管理 |
+| 协作能力 | `chatshare/`、`sessionstate/`、`answerfeedback/` | 分享、已读和反馈 |
+| 数据与技能 | `dbanalytics/`、`skillhub/`、`scheduledchat/` | 数据源、技能和定时任务 |
+
+完整模块目录说明见 [`internal/custom/README.md`](./internal/custom/README.md)。
+
+### 前端重点模块
+
+| 目录 | 职责 |
+|---|---|
+| `documentQueue/` | 系统等待总量与文档位置 |
+| `knowledgeWorkflowStatus/` | 完整状态、悬停明细、准确筛选 |
+| `knowledgeFolders/` | 文件夹、服务端搜索和渐进加载 |
+| `documentPreview/` | 大文件预览保护 |
+| `wikiGraph/` | 分类、分页、中心节点切换 |
+| `generalagent/`、`dbanalytics/`、`skillhub/` | Agent、数据分析和技能 |
+| `iam/`、`configcenter/`、`authSecurity/` | 企业身份和配置治理 |
+| `mobile/`、`chatshare/`、`sourceReferences/` | 移动端、分享和来源 |
+
+完整说明见 [`frontend/src/custom/README.md`](./frontend/src/custom/README.md)。
+
+## 本地开发
+
+### 环境
+
+- Docker Desktop / Docker Compose
 - Go
 - Node.js / npm
 
-### 启动基础设施
+### 启动
 
 ```bash
 cp .env.example .env
 make dev-start
 ```
 
-按需追加 profile：
+按需启用 profile：
 
 ```bash
-make dev-start DEV_ARGS="--minio --qdrant --neo4j"
-make dev-start DEV_ARGS="--full"
+make dev-start DEV_ARGS="--profile neo4j --profile minio --profile langfuse"
 ```
 
-### 启动后端容器
+开发后端入口：
 
 ```bash
-docker compose -f docker-compose.dev.yml -f docker-compose.dev.app.yml up -d --build app-dev
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d app-dev
+curl http://localhost:8080/health
 ```
 
-后端访问地址：
-
-```text
-http://localhost:8080
-```
-
-### 启动智能体旁路服务
+Agent 旁路服务：
 
 ```bash
-docker compose -f custom/docker-compose.general-agent.yml up -d --build
-```
-
-默认接入开发网络 `weknora_WeKnora-network-dev`。如果使用主 `docker-compose.yml` 生产栈，先启动主栈，再指定生产网络：
-
-```bash
-CUSTOM_GENERAL_AGENT_NETWORK=weknora_WeKnora-network docker compose -f custom/docker-compose.general-agent.yml up -d --build
-```
-
-生产环境还必须在 `.env` 中为 app 和两个旁路服务配置相同的 `CUSTOM_GENERAL_AGENT_API_KEY`。Agent 的本地目录只保存可丢弃的运行中间文件；最终产物必须在任务完成前写入私有对象存储。知识对象、Agent 最终产物、Claude SDK 原文件交付分别使用带部署标识和固定命名空间 UUID 的独立前缀，具体配置见 [无 RWX 生产部署方案](docs/custom/生产集群无RWX最优部署方案.md)。
-
-健康检查：
-
-```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  --profile agent up -d general-agent document-processing-agent
 curl http://127.0.0.1:8091/health
 curl http://127.0.0.1:8093/health
 ```
 
-### 启动前端
+前端：
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev -- --host 0.0.0.0 --port 5177
 ```
 
-前端访问地址：
-
-```text
-http://localhost:5177
-```
-
-### 修改后重启
-
-本项目要求修改后重新拉起受影响容器。常用命令：
+修改运行代码后，先停止本项目旧实例，再重建受影响容器；不能让旧进程和新容器
+同时占用端口：
 
 ```bash
-docker compose -f docker-compose.dev.yml -f docker-compose.dev.app.yml stop app-dev
-docker compose -f docker-compose.dev.yml -f docker-compose.dev.app.yml rm -f app-dev
-
-docker compose -f docker-compose.dev.yml -f docker-compose.dev.app.yml up -d --build app-dev
-docker compose -f custom/docker-compose.general-agent.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml stop <service>
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build <service>
 ```
 
-如果只改前端代码，重启前端开发服务即可；如果改 Go 后端、旁路服务、Dockerfile、环境变量或依赖，必须重新拉起对应容器。
+仅修改 Markdown 不影响运行镜像，无需重启业务容器，但仍应检查当前服务健康。
 
-## 配置与安全注意事项
+## 验证
 
-- 生产环境不要把 API Key、嵌入发布 Token、模型密钥或数据库密码放到浏览器或静态包。
-- 对公网网页嵌入建议使用安全模式，业务后端代持发布 Token，并换取短期 `ems_` 会话 Token。
-- 数据库分析只应开放必要表和字段，敏感字段设置为脱敏或隐藏。
-- Claude SDK 旁路服务的 `CUSTOM_GENERAL_AGENT_API_KEY` 必须与 Go 后端一致，工具回调地址按部署网络设置为 app 容器可访问地址。
-- MCP 有副作用或高风险工具应开启审批。
-- 统一身份认证部署在反向代理后时，需要正确透传 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto`。
-- 对话分享创建响应可通过 `FRONTEND_BASE_URL` 返回公网绝对链接；未配置时返回同域相对路径 `/share/chat/:token`。
-- 修改二开逻辑前先阅读 [二开目录结构规范](./docs/custom/二开目录结构规范.md)，避免把大段业务代码散落到原生目录。
+关键验收入口：
 
-## 重要文档
+```bash
+# 文档多实例、衍生任务、故障与容量
+python custom/tests/document_processing_cluster_e2e/run.py --help
 
-| 文档 | 内容 |
-| --- | --- |
-| [用户使用指南](./docs/custom/使用指南/用户使用指南.md) | 面向平台使用者、知识库维护者、空间管理员和系统管理员。 |
-| [智能体开发指南](./docs/custom/使用指南/智能体开发指南.md) | 面向智能体配置、调试、发布和集成开发。 |
-| [通用智能体方案](./docs/custom/通用智能体方案.md) | 通用智能体与 Claude Agent SDK 旁路服务的实现说明。 |
-| [统一身份认证与默认配置说明](./docs/custom/统一身份认证与默认配置实现说明.md) | IAM、SSO、组织同步和默认配置中心。 |
-| [对话分享实现说明](./docs/custom/对话分享功能实现说明.md) | 对话分享链接、权限边界、前后端实现和同域部署要求。 |
-| [二开目录结构规范](./docs/custom/二开目录结构规范.md) | 二开代码目录、注册点和命名约束。 |
-| [API 文档](./docs/api/README.md) | REST API 说明。 |
-| [MCP 配置说明](./mcp-server/MCP_CONFIG.md) | MCP 服务接入配置。 |
-| [常见问题](./docs/QA.md) | 运行和排错参考。 |
+# 前端
+cd frontend
+npm run type-check
+npm run test
+npm run build
 
-## 开发约定
+# Helm
+helm lint ./helm
+helm lint ./helm \
+  -f ./helm/values-production-ha.yaml \
+  -f ./deploy/production/values-site.example.yaml
+```
 
-- API 前缀统一使用 `/api/v1/custom/<module>/*`。
-- 二开表名前缀使用 `custom_<module>_*`。
-- 二开环境变量前缀使用 `CUSTOM_<MODULE>_*`。
-- 新增后端模块优先放入 `internal/custom/modules/<module>/`。
-- 新增前端模块优先放入 `frontend/src/custom/modules/<module>/`。
-- 可独立运行的大段能力优先放入 `custom/services/<module>/`。
-- 二开 migration 编号从 `900000` 以后开始。
-- 当前开发环境不要求兼容旧二开实现、旧数据库、旧存储或旧配置，禁止为了兼容旧实现而降级新能力。
+最终验收不能只检查 HTTP 200 或脚本摘要，要联合核对 PostgreSQL、向量字段、
+Neo4j、Wiki、对象存储、前端状态和真实召回。当前代表性结果：
+
+- 500/500 文档完成，约 4.10 docs/s。
+- 严格匹配的 100 文档测试，三 app 相对单 app 本地提升约 3.67 倍。
+- “公司制度”632/632 文档主解析和所有启用衍生阶段完成，保留供继续使用。
+- 最终报告：
+  [`final_acceptance_report.json`](./custom/tests/document_processing_cluster_e2e/final_acceptance_outputs/20260726-0107/final_acceptance_report.json)。
+
+## 文档
+
+| 主题 | 入口 |
+|---|---|
+| 当前架构与全量索引 | [当前实现架构与文档索引](./docs/custom/当前实现架构与文档索引.md) |
+| 用户操作 | [用户使用指南](./docs/custom/使用指南/用户使用指南.md) |
+| 智能体开发 | [智能体开发指南](./docs/custom/使用指南/智能体开发指南.md) |
+| 文档水平扩展 | [文档解析水平扩展与故障恢复](./docs/custom/文档解析水平扩展与故障恢复.md) |
+| 生产执行 | [当前版本生产更新部署执行手册](./docs/custom/当前版本生产更新部署执行手册.md) |
+| 生产架构 | [生产集群无 RWX 最优部署方案](./docs/custom/生产集群无RWX最优部署方案.md) |
+| API | [API 文档](./docs/api/README.md) |
+| Helm | [Helm Chart](./helm/README.md) |
+| 测试 | [二开测试索引](./custom/tests/README.md) |
+| 综合说明 | [系统介绍](./docs/custom/系统介绍说明.md) · [系统使用](./docs/custom/系统使用说明.md) · [智能体能力](./docs/custom/WeKnora智能体能力使用文档.md) |
+
+## 安全和维护
+
+- 不要把真实模型 Key、JWT、AES Key、OBS AK/SK 或内部 Agent Key 写入 Git。
+- Agent 产物必须私有；先校验 tenant/session 权限再流式下载或签发短时 URL。
+- 生产禁止同时启动多个 `AUTO_MIGRATE=true` 的 app。
+- 生产值文件必须复用现网数据库、Redis、Neo4j、OBS、SSO 和模型配置，不能以
+  “多副本”为由关闭原有功能。
+- 当前开发环境的二开无需兼容旧实现；生产历史数据迁移则必须按执行手册验证和
+  保留回滚点。
+- 不修改测试样本、技能指令和历史 CHANGELOG 来伪造“文档已同步”。
 
 ## License
 
-本项目沿用 WeKnora 原始开源协议，详见 [LICENSE](./LICENSE)。
+[MIT](./LICENSE)

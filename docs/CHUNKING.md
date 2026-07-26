@@ -3,6 +3,12 @@
 How WeKnora splits uploaded documents before embedding, why the defaults
 are what they are, and when to change them.
 
+This guide describes **logical text chunking**. Oversized source files first
+pass through a separate format-aware physical splitter so each DocReader
+request stays below the 50 MiB transport ceiling. The Go document workflow
+then publishes one generation-scoped logical chunk sequence across all parts;
+users do not see each physical part as an independent document.
+
 ## Why chunking matters
 
 Retrieval-Augmented Generation (RAG) works by embedding small slices of
@@ -11,12 +17,39 @@ slices back at query time. The way a document is sliced — chunk size,
 overlap, where the cuts fall — directly drives retrieval recall and the
 quality of the answers your LLM produces.
 
-Empirically (Vecta Feb-2026 benchmark across 50 academic papers):
-recursive splitting at ~512 tokens with ~15% overlap is the strongest
-single-knob baseline at 69% end-to-end accuracy, beating semantic
-chunking and over-engineered hybrids. WeKnora uses that as the
-foundation and layers smarter strategies on top when the document gives
-us structural cues.
+The default recursive baseline uses roughly 512 characters with about 15%
+overlap, then layers structure-aware strategies on top when the document
+provides reliable headings, pages, chapters, or visual separators. Always
+measure retrieval on the target corpus before changing a production knowledge
+base; a generic benchmark is not a substitute for corpus-specific recall.
+
+## Physical splitting for oversized sources
+
+The production splitter handles PDF, Word, PowerPoint, Excel/CSV, text,
+Markdown, JSON, EPUB/MHTML, raster images, and audio with format-specific
+boundaries. It:
+
+- writes source and parts to bounded local RWO scratch, not browser memory or
+  object-store mounts;
+- preserves immutable source identity, ordering, part hashes, source
+  coordinates, headings/continuation context, and table headers/key columns;
+- rejects atomic-unsplittable or unsafe inputs instead of silently dropping
+  content;
+- bounds part count, expansion ratio, per-document window, retries, and
+  conversion timeouts;
+- deduplicates overlapping audio transcript windows during logical
+  publication.
+
+Summary, questions, graph, and Wiki do not blindly fan out over every repetitive
+part. They use deterministic strata across the complete logical document
+(production defaults: question 256, graph 512; large tables 64/128). This
+bounds model work without changing the completion contract: every enabled
+stage must still reach a successful terminal state.
+
+See [`custom/services/document-splitter/README.md`](../custom/services/document-splitter/README.md)
+for format strategies and
+[`docs/custom/文档解析水平扩展与故障恢复.md`](./custom/文档解析水平扩展与故障恢复.md)
+for queue/retry semantics.
 
 ## Adaptive 3-tier chunking
 

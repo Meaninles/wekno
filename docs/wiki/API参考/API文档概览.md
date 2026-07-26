@@ -49,6 +49,9 @@ API Key 在 Web 页面完成账户注册后，前往账户信息页面获取。
 | 租户管理 | 创建和管理租户账户 | [tenant.md](../../api/tenant.md) |
 | 知识库管理 | 创建、查询和管理知识库 | [knowledge-base.md](../../api/knowledge-base.md) |
 | 知识管理 | 上传、检索和管理知识内容 | [knowledge.md](../../api/knowledge.md) |
+| 文档完整工作流 | 队列位置、状态筛选、预览策略、实例管理 | [document-workflow.md](../../api/document-workflow.md) |
+| 知识库文件夹 | 渐进列表、搜索、文件夹、移动和导入 | [knowledge-folders.md](../../api/knowledge-folders.md) |
+| Wiki 关联图 | overview、ego 中心图和邻居分页 | [knowledge-graph.md](../../api/knowledge-graph.md) |
 | 模型管理 | 配置和管理各种AI模型 | [model.md](../../api/model.md) |
 | 分块管理 | 管理知识的分块内容 | [chunk.md](../../api/chunk.md) |
 | 标签管理 | 管理知识库的标签分类 | [tag.md](../../api/tag.md) |

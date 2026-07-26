@@ -10,6 +10,32 @@
 - 产物生成只由 `enable_artifacts` 控制。通常最多返回 5 个产物；`knowledge-base-manager` 类型不限制产物数量。所有类型仍要求单次返回产物总大小小于 128MB，旁路服务会在前端持久化前应用对应规则。
 - `agent_type=document-processing-agent` 使用相邻的文档处理镜像，不使用本容器。
 
+## 多副本和产物
+
+生产部署两个副本并按主机名打散。一次 Claude SDK 运行从开始到 terminal 事件固定
+在同一个 Pod 的 `GENERAL_AGENT_RUN_ROOT` 内完成，不要求粘性会话或共享文件系统：
+
+1. 用户原文件由 Go app 写入独立的 MinIO/OBS 临时前缀并向 Agent 提供短时引用。
+2. Agent 使用本 Pod 的 RWO 临时目录进行随机读写和工具运行。
+3. 最终产物通过
+   `/api/v1/custom/general-agent/internal/artifacts/upload` 回传 Go app。
+4. Go app 写入私有对象存储，校验大小/SHA256并返回 artifact ID。
+5. 只有持久提交成功后 Agent 才发送 terminal 事件；之后任意 app 都能鉴权下载。
+6. 成功、失败、取消或 panic 后临时原文件被幂等删除，生产另配最长 24 小时的
+   前缀级生命周期兜底。
+
+本地开发使用 MinIO，生产使用 OBS。Agent 运行目录不得放到 OBS CSI/S3FS，也不
+使用 RWX。Pod 在产物提交前崩溃时，本轮运行失败/重试；半成品本地目录不被当作
+持久状态。
+
+对象键不包含用户名、原文件名或业务名称，并使用用途 + deployment + namespace
+UUID + tenant/run/artifact 的唯一私有路径。内部上传代理要允许 128 MiB，以覆盖
+协议允许的 `<128 MiB` 返回总量；面向用户的普通原附件业务上限仍为 50 MiB。
+
+双副本验收必须覆盖 `general-agent`、`knowledge-base-manager`、`data-analysis`
+和 `table-analysis`，并分别验证知识检索、MCP/Web、数据库只读分析、表格分析、
+产物下载/删除以及停止一个 Pod 后的新运行可用。
+
 本地 Docker：
 
 ```bash
@@ -26,6 +52,7 @@ curl http://127.0.0.1:8091/health
 
 - `CUSTOM_GENERAL_AGENT_API_KEY`：Go 后端与旁路服务之间的共享密钥。
 - `GENERAL_AGENT_RUN_ROOT`：旁路服务运行目录。
+- `CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL`：Go app 内部产物上传入口。
 - `CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS`：LLM 请求超时。
 - `CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS`：流式响应空闲超时。
 - `CUSTOM_GENERAL_AGENT_MAX_TURNS`：智能体配置未设置 `max_iterations` 时的兜底最大轮数。
@@ -40,3 +67,6 @@ curl http://127.0.0.1:8091/health
 - SQLite MCP。
 
 通用智能体只能通过 WeKnora 现有 MCP 配置（`mcp_selection_mode` / `mcp_services`）看到这些服务，旁路服务中不硬编码测试 MCP。
+
+生产副本、临时卷、Secret 和 OBS 配置见
+[生产更新部署执行手册](../../../docs/custom/当前版本生产更新部署执行手册.md)。

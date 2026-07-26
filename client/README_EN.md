@@ -1,5 +1,12 @@
 # WeKnora HTTP Client
 
+> A successful upload or reparse response means that the document was durably
+> accepted, not that every stage has finished. Documents are queued as complete
+> workflows; enabled vector, multimodal, summary, question/graph, and Wiki
+> stages must all succeed before final completion. See
+> [`docs/api/document-workflow.md`](../docs/api/document-workflow.md) for queue
+> positions and full-workflow filtering.
+
 This package provides a client library for interacting with WeKnora services, supporting all HTTP-based interface calls, making it easier for other modules to integrate with WeKnora services without having to write HTTP request code directly.
 
 ## Main Features

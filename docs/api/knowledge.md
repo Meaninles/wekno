@@ -1,5 +1,10 @@
 # 知识管理 API
 
+> 当前文档最终状态由主解析和启用的摘要、问题/图谱、Wiki 共同决定。队列位置、
+> `workflow_status` 筛选和大文件 preview policy 见
+> [文档完整工作流 API](./document-workflow.md)；知识库文件夹见
+> [知识库文件夹 API](./knowledge-folders.md)。
+
 [返回目录](./README.md)
 
 知识（Knowledge）是知识库下的一条可检索内容（来自文件、URL 或手工录入的 Markdown）。本文档涵盖知识的创建、查询、更新、删除、迁移与文件预览/下载等接口。
@@ -268,10 +273,11 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 | -------------- | ------- | ---- | --------------------------------------------------------------------------------------------------- |
 | `page`         | integer | 1    | 页码（从 1 开始）                                                                                   |
 | `page_size`    | integer | 20   | 每页条数                                                                                            |
-| `tag_id`       | string  | -    | 按标签 ID 过滤                                                                                      |
+| `tag_ids`      | string  | -    | 按标签 ID 过滤，多个 ID 用逗号分隔                                                                 |
 | `keyword`      | string  | -    | 按标题/内容关键词过滤                                                                               |
 | `file_type`    | string  | -    | 按单个文件扩展名过滤（如 `pdf`）；特殊值 `manual` / `url` 命中 `type` 列                              |
 | `parse_status` | string  | -    | 按解析状态过滤：`pending` / `processing` / `completed` / `failed`                                    |
+| `workflow_status` | string | - | 按完整工作流过滤：`pending` / `processing` / `cancelling` / `deleting` / `completed` / `failed` / `cancelled` / `draft` |
 | `source`       | string  | -    | 按来源/渠道过滤：`web` / `api` / `browser_extension` / `feishu` / `notion` / `yuque` / `wechat` 等； 特殊值 `manual` / `url` 命中 `type` 列 |
 | `start_time`   | string  | -    | 更新时间起点，接受 RFC3339 (`2024-05-01T00:00:00+08:00`) 或 `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DD`     |
 | `end_time`     | string  | -    | 更新时间终点，格式同 `start_time`                                                                   |
@@ -279,7 +285,7 @@ curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowle
 **请求**:
 
 ```curl
-curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge?page=1&page_size=1&tag_id=tag-00000001' \
+curl --location 'http://localhost:8080/api/v1/knowledge-bases/kb-00000001/knowledge?page=1&page_size=1&tag_ids=tag-00000001&workflow_status=completed' \
 --header 'X-API-Key: sk-xxxxx'
 ```
 
@@ -629,13 +635,38 @@ curl --location -OJ 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a
 
 响应体为文件二进制流。
 
+## GET `/knowledge/:id/preview-policy` - 查询安全预览方式
+
+在请求原始预览前必须先调用此接口。`mode=original` 才能继续请求
+`/knowledge/:id/preview`；`mode=paged_chunks` 表示客户端应显示分页解析内容或
+下载，不能把原始对象一次性读进浏览器。
+
+```json
+{
+  "success": true,
+  "data": {
+    "mode": "paged_chunks",
+    "reason": "file_too_large",
+    "file_type": "pdf",
+    "file_size": 52428800,
+    "chunk_count": 680,
+    "max_original_bytes": 25165824
+  }
+}
+```
+
+策略会综合文件类型、大小、结构预检和 chunk 数，响应使用
+`Cache-Control: private, no-store`。具体阈值见
+[文档完整工作流 API](./document-workflow.md#预览策略)。
+
 ## GET `/knowledge/:id/preview` - 内联预览文件
 
-返回原始文件用于浏览器**内嵌预览**：
+仅在 preview policy 允许时返回原始文件用于浏览器**内嵌预览**：
 
 - `Content-Type` 按文件扩展名映射（`.pdf` → `application/pdf`，`.png` → `image/png`，`.txt`/`.md`/`.json` 等 → 对应文本 MIME 并带 `charset=utf-8`，未知扩展名回落到 `application/octet-stream`）。
 - `Content-Disposition: inline; filename="<原文件名>"`，浏览器会内嵌渲染而非下载。
-- `Cache-Control: private, max-age=3600`。
+- `Cache-Control: private, no-store`，避免重建/删除或结构重新分类后复用旧准入。
+- 若策略要求分页，返回 `413`，错误码为 `PREVIEW_REQUIRES_PAGED_CHUNKS`。
 
 **请求**:
 
@@ -651,7 +682,7 @@ curl --location 'http://localhost:8080/api/v1/knowledge/4c4e7c1a-09cf-485b-a7b5-
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
 Content-Disposition: inline; filename="彗星.txt"
-Cache-Control: private, max-age=3600
+Cache-Control: private, no-store
 ```
 
 响应体为文件内容（按 `Content-Type` 解读）。

@@ -4,6 +4,13 @@ This guide is linked from the system info page when WeKnora's startup database
 migration fails. It covers the most common causes, how to diagnose them, and
 how to recover without losing data.
 
+> Multi-replica production is different from the single-process default:
+> migrations and existing-user backfills run on exactly one isolated
+> maintenance app with `AUTO_MIGRATE=true`; all serving app replicas use
+> `AUTO_MIGRATE=false`. Follow
+> [`docs/custom/当前版本生产更新部署执行手册.md`](./custom/当前版本生产更新部署执行手册.md)
+> instead of restarting all production app Pods to retry a migration.
+
 If none of these match your situation, jump to
 [Reporting an issue](#reporting-an-issue) at the bottom.
 
@@ -11,7 +18,9 @@ If none of these match your situation, jump to
 
 ## What "migration failed" means
 
-WeKnora auto-runs `golang-migrate` migrations on every startup. When a
+When migration is enabled, WeKnora runs `golang-migrate` during startup. The
+development/single-instance default enables it; production deliberately gates
+it to one maintenance replica. When a
 migration fails, the application **still finishes starting up** (so the UI
 remains reachable to help you diagnose the problem), but:
 
@@ -97,8 +106,15 @@ make migrate-up
 
 After that, restart WeKnora.
 
-Or set `AUTO_RECOVER_DIRTY=true` (the default in recent versions) and just
-restart — startup will perform the same `force` + retry automatically.
+For a disposable development/single-instance environment, setting
+`AUTO_RECOVER_DIRTY=true` may perform the same force + retry automatically.
+Do not enable it on all production app replicas. Establish the correct database
+backup/recovery point, then retry from one maintenance app.
+
+`AUTO_RECOVER_DIRTY` here concerns the native SQL migration dirty flag. The
+current document workflow has its own PostgreSQL leases, boot/epoch fencing and
+recovery; production `AUTO_RECOVER_DIRTY=false` does not disable document
+failure recovery.
 
 ### 3. Insufficient privileges on the database role
 

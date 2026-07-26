@@ -17,7 +17,10 @@ WeKnora 提供了一系列 RESTful API，用于创建和管理知识库、检索
 
 WeKnora 同时提供基于 OpenAPI 的 Swagger 文档。**启动服务后访问 `http://localhost:8080/swagger/index.html`**，可看到所有端点的完整参数、请求/响应 schema，并可直接在浏览器内试调——它随代码自动更新，是最准确的接口参考。
 
-本目录下的 markdown 文档提供更易读的示例与场景说明，与 swagger 同步维护；当二者出现差异时，以 swagger 为准。
+本目录下的 Markdown 提供场景、状态机和二开接口说明。原生端点字段冲突时优先
+核对当前 Swagger 和 handler；`/custom/*`、完整工作流、文件夹和渐进 Wiki 图还要
+以对应 Markdown、当前路由代码和自动化测试共同为准，因为部分二开路由不依赖
+Swagger 注解生成。
 
 > Swagger UI 仅在非 release 模式（`GIN_MODE != release`）下挂载；生产部署默认关闭。
 
@@ -74,6 +77,9 @@ WeKnora API 按功能分为以下几类：
 | 租户管理 | 创建和管理租户账户 | [tenant.md](./tenant.md) |
 | 知识库管理 | 创建、查询和管理知识库 | [knowledge-base.md](./knowledge-base.md) |
 | 知识管理 | 上传、检索和管理知识内容 | [knowledge.md](./knowledge.md) |
+| 文档完整工作流（二开） | 队列位置、完整状态筛选、实例与故障接管边界 | [document-workflow.md](./document-workflow.md) |
+| 知识库文件夹（二开） | 渐进列表、搜索、文件夹、移动和定向导入 | [knowledge-folders.md](./knowledge-folders.md) |
+| Wiki 关联图 | 分类目录、overview、中心节点 ego 图和邻居分页 | [knowledge-graph.md](./knowledge-graph.md) |
 | 模型管理 | 配置和管理各种AI模型 | [model.md](./model.md) |
 | 分块管理 | 管理知识的分块内容 | [chunk.md](./chunk.md) |
 | 标签管理 | 管理知识库的标签分类 | [tag.md](./tag.md) |

@@ -14,26 +14,32 @@ const (
 	defaultSidecarURL                   = "http://weknora-custom-general-agent:8091"
 	defaultDocumentProcessingSidecarURL = "http://weknora-custom-document-processing-agent:8091"
 	defaultToolCallbackURL              = "http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call"
+	defaultArtifactUploadURL            = "http://app-dev:8080/api/v1/custom/general-agent/internal/artifacts/upload"
 	displayTypeArtifacts                = "general_agent_artifacts"
+	artifactStorageStateUploading       = "uploading"
+	artifactStorageStateReady           = "ready"
+	artifactStorageStateMissing         = "missing"
+	artifactStorageStateCorrupt         = "corrupt"
 )
 
 type Artifact struct {
-	ID          string         `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID    uint64         `json:"tenant_id" gorm:"index;not null"`
-	UserID      string         `json:"user_id" gorm:"type:varchar(128);index;not null"`
-	RunID       string         `json:"run_id" gorm:"type:varchar(80);index;not null"`
-	SessionID   string         `json:"session_id" gorm:"type:varchar(36);index;not null"`
-	MessageID   string         `json:"message_id" gorm:"type:varchar(36);index"`
-	FileToken   string         `json:"file_token" gorm:"type:varchar(255);not null"`
-	FilePath    string         `json:"-" gorm:"type:text;not null"`
-	FileName    string         `json:"filename" gorm:"type:varchar(255);not null"`
-	FileType    string         `json:"file_type" gorm:"type:varchar(32);not null"`
-	FileSize    int64          `json:"file_size" gorm:"not null;default:0"`
-	SHA256      string         `json:"sha256" gorm:"type:varchar(64);not null"`
-	ContentType string         `json:"content_type" gorm:"type:varchar(128)"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+	ID           string         `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID     uint64         `json:"tenant_id" gorm:"index;not null"`
+	UserID       string         `json:"user_id" gorm:"type:varchar(128);index;not null"`
+	RunID        string         `json:"run_id" gorm:"type:varchar(80);index;not null"`
+	SessionID    string         `json:"session_id" gorm:"type:varchar(36);index;not null"`
+	MessageID    string         `json:"message_id" gorm:"type:varchar(36);index"`
+	FileToken    string         `json:"file_token" gorm:"type:varchar(255);not null"`
+	FilePath     string         `json:"-" gorm:"type:text;not null"`
+	StorageState string         `json:"-" gorm:"type:varchar(24);not null;default:ready;index"`
+	FileName     string         `json:"filename" gorm:"type:varchar(255);not null"`
+	FileType     string         `json:"file_type" gorm:"type:varchar(32);not null"`
+	FileSize     int64          `json:"file_size" gorm:"not null;default:0"`
+	SHA256       string         `json:"sha256" gorm:"type:varchar(64);not null"`
+	ContentType  string         `json:"content_type" gorm:"type:varchar(128)"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 func (Artifact) TableName() string { return "custom_general_agent_artifacts" }
@@ -195,6 +201,7 @@ type ChatPayload struct {
 	LLM                     *LLMConfig                  `json:"llm"`
 	ToolCallbackURL         string                      `json:"tool_callback_url"`
 	ToolCallbackAPIKey      string                      `json:"tool_callback_api_key,omitempty"`
+	ArtifactUploadURL       string                      `json:"artifact_upload_url"`
 	EnableArtifacts         bool                        `json:"enable_artifacts"`
 }
 
@@ -227,6 +234,9 @@ type SidecarArtifact struct {
 	FileSize    int64  `json:"file_size"`
 	SHA256      string `json:"sha256"`
 	ContentType string `json:"content_type"`
+	ArtifactID  string `json:"artifact_id,omitempty"`
+	DownloadURL string `json:"download_url,omitempty"`
+	Persisted   bool   `json:"persisted,omitempty"`
 }
 
 type ToolCallRequest struct {

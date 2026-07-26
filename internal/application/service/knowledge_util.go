@@ -15,6 +15,7 @@ import (
 	"time"
 
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
+	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -186,6 +187,12 @@ func (s *knowledgeService) buildStorageConfig(ctx context.Context, kb *types.Kno
 					out.AccessKeyID = os.Getenv("MINIO_ACCESS_KEY_ID")
 					out.SecretAccessKey = os.Getenv("MINIO_SECRET_ACCESS_KEY")
 				}
+				if out.BucketName == "" {
+					out.BucketName = os.Getenv("MINIO_BUCKET_NAME")
+				}
+				if out.PathPrefix == "" && sec.MinIO.Mode != "remote" {
+					out.PathPrefix, _ = objectnamespace.KnowledgePrefixFromEnv("minio")
+				}
 			}
 		case "cos":
 			if sec.COS != nil {
@@ -231,6 +238,26 @@ func (s *knowledgeService) buildStorageConfig(ctx context.Context, kb *types.Kno
 				out.SecretAccessKey = sec.KS3.SecretKey
 				out.BucketName = sec.KS3.BucketName
 				out.PathPrefix = sec.KS3.PathPrefix
+			}
+		case "obs":
+			if sec.OBS != nil &&
+				strings.TrimSpace(sec.OBS.Endpoint) != "" &&
+				strings.TrimSpace(sec.OBS.AccessKey) != "" &&
+				strings.TrimSpace(sec.OBS.SecretKey) != "" &&
+				strings.TrimSpace(sec.OBS.BucketName) != "" {
+				out.Endpoint = sec.OBS.Endpoint
+				out.Region = sec.OBS.Region
+				out.AccessKeyID = sec.OBS.AccessKey
+				out.SecretAccessKey = sec.OBS.SecretKey
+				out.BucketName = sec.OBS.BucketName
+				out.PathPrefix = sec.OBS.PathPrefix
+			} else {
+				out.Endpoint = os.Getenv("OBS_ENDPOINT")
+				out.Region = os.Getenv("OBS_REGION")
+				out.AccessKeyID = os.Getenv("OBS_ACCESS_KEY")
+				out.SecretAccessKey = os.Getenv("OBS_SECRET_KEY")
+				out.BucketName = os.Getenv("OBS_BUCKET_NAME")
+				out.PathPrefix, _ = objectnamespace.KnowledgePrefixFromEnv("obs")
 			}
 		}
 	}

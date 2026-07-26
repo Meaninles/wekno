@@ -102,10 +102,29 @@ spec:
             failureThreshold: 3
       volumes:
         - name: scratch
+          {{- if eq (.Values.docreader.scratch.volumeType | default "emptyDir") "ephemeral" }}
+          ephemeral:
+            volumeClaimTemplate:
+              {{- with .Values.docreader.scratch.ephemeral.annotations }}
+              metadata:
+                annotations:
+                  {{- toYaml . | nindent 18 }}
+              {{- end }}
+              spec:
+                accessModes:
+                  {{- toYaml .Values.docreader.scratch.ephemeral.accessModes | nindent 18 }}
+                {{- with .Values.docreader.scratch.ephemeral.storageClassName }}
+                storageClassName: {{ . | quote }}
+                {{- end }}
+                resources:
+                  requests:
+                    storage: {{ .Values.docreader.scratch.ephemeral.size }}
+          {{- else }}
           emptyDir:
             {{- with .Values.docreader.scratch.sizeLimit }}
             sizeLimit: {{ . }}
             {{- end }}
+          {{- end }}
       {{- with .Values.docreader.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

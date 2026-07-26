@@ -127,6 +127,17 @@ Return the mobile web image with tag.
 {{- end }}
 
 {{/*
+Return the custom agent images with tags.
+*/}}
+{{- define "weknora.generalAgent.image" -}}
+{{- printf "%s:%s" .Values.generalAgent.image.repository .Values.generalAgent.image.tag }}
+{{- end }}
+
+{{- define "weknora.documentProcessingAgent.image" -}}
+{{- printf "%s:%s" .Values.documentProcessingAgent.image.repository .Values.documentProcessingAgent.image.tag }}
+{{- end }}
+
+{{/*
 Return the docreader image with tag.
 */}}
 {{- define "weknora.docreader.image" -}}

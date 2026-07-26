@@ -36,6 +36,8 @@ type obsFileService struct {
 const obsProvider = "obs"
 
 var _ interfaces.PlannedFileService = (*obsFileService)(nil)
+var _ interfaces.PrivateObjectFileService = (*obsFileService)(nil)
+var _ interfaces.StreamingPrivateObjectFileService = (*obsFileService)(nil)
 
 type obsEndpointResolver struct {
 	url string
@@ -142,6 +144,112 @@ func (s *obsFileService) ReserveCopyPath(
 		return "", fmt.Errorf("obs copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
 	}
 	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+path.Ext(srcKey))
+}
+
+func (s *obsFileService) ReservePrivateObjectPath(segments ...string) (string, error) {
+	key, err := plannedfile.BuildKey(s.pathPrefix, segments...)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath(obsProvider, s.bucketName, key)
+}
+
+func (s *obsFileService) CommitPrivateObjectAtPath(
+	ctx context.Context,
+	data []byte,
+	filePath string,
+	contentType string,
+	sha256 string,
+) error {
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucketName),
+		Key:           aws.String(key),
+		Body:          bytes.NewReader(data),
+		ContentLength: aws.Int64(int64(len(data))),
+		ContentType:   aws.String(contentType),
+		Metadata: map[string]string{
+			"sha256": strings.ToLower(strings.TrimSpace(sha256)),
+		},
+		// Deliberately no ACL. Production must also enable bucket-default
+		// server-side encryption (SSE-OBS/KMS), which applies to this upload.
+	})
+	if err != nil {
+		return fmt.Errorf("private OBS object commit: %w", err)
+	}
+	return nil
+}
+
+func (s *obsFileService) CommitPrivateObjectStreamAtPath(
+	ctx context.Context,
+	reader io.Reader,
+	size int64,
+	filePath string,
+	contentType string,
+	sha256 string,
+) error {
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	if reader == nil || size < 0 {
+		return fmt.Errorf("private OBS stream commit: invalid source")
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucketName),
+		Key:           aws.String(key),
+		Body:          reader,
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String(contentType),
+		Metadata: map[string]string{
+			"sha256": strings.ToLower(strings.TrimSpace(sha256)),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("private OBS stream commit: %w", err)
+	}
+	return nil
+}
+
+func (s *obsFileService) VerifyPrivateObject(
+	ctx context.Context,
+	filePath string,
+	size int64,
+	sha256 string,
+) error {
+	key, err := s.plannedMainKey(filePath)
+	if err != nil {
+		return err
+	}
+	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("verify private OBS object: %w", err)
+	}
+	if head.ContentLength == nil || *head.ContentLength != size {
+		got := int64(-1)
+		if head.ContentLength != nil {
+			got = *head.ContentLength
+		}
+		return fmt.Errorf("verify private OBS object: size mismatch: got %d want %d", got, size)
+	}
+	wantSHA := strings.ToLower(strings.TrimSpace(sha256))
+	gotSHA := strings.ToLower(strings.TrimSpace(head.Metadata["sha256"]))
+	if wantSHA == "" || gotSHA != wantSHA {
+		return fmt.Errorf("verify private OBS object: sha256 metadata mismatch")
+	}
+	return nil
 }
 
 func (s *obsFileService) plannedMainKey(filePath string) (string, error) {

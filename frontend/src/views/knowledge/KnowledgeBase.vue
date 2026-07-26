@@ -319,7 +319,8 @@ const showKbDetailContextualGuide = computed(() => {
     && !isFAQ.value
     && canEdit.value
     && !docListLoading.value
-    && cardList.value.length === 0;
+    && cardList.value.length === 0
+    && !documentFiltersActive.value;
 });
 
 const onVisibleChange = (visible: boolean) => {
@@ -620,6 +621,25 @@ const sourceOptions = computed(() => [
 const updatedTimeRange = ref<string[]>([]);
 // Disable any date after today so users cannot filter into the future.
 const disableFutureDate = { after: new Date(new Date().setHours(23, 59, 59, 999)) };
+const documentFiltersActive = computed(() =>
+  selectedTagIds.value.length > 0
+  || docSearchKeyword.value.trim().length > 0
+  || selectedFileType.value.length > 0
+  || selectedParseStatus.value.length > 0
+  || selectedSource.value.length > 0
+  || updatedTimeRange.value.some((value) => String(value || '').trim().length > 0),
+);
+const clearDocumentFilters = () => {
+  selectedTagIds.value = [];
+  uiStore.clearSelectedTagIds();
+  tagFilterCleared.value = true;
+  docSearchKeyword.value = '';
+  selectedFileType.value = '';
+  selectedParseStatus.value = '';
+  selectedSource.value = '';
+  updatedTimeRange.value = [];
+  resetPage();
+};
 const filterParams = computed(() => {
   const [start, end] = updatedTimeRange.value || [];
   return {
@@ -3059,7 +3079,15 @@ async function createNewSession(value: string): Promise<void> {
                 </template>
                 <template v-else-if="!docListLoading">
                   <div class="doc-empty-state">
-                    <EmptyKnowledge />
+                    <div v-if="documentFiltersActive" class="doc-filter-empty" data-testid="document-filter-empty">
+                      <t-icon name="search" size="40px" class="doc-filter-empty__icon" />
+                      <span class="doc-filter-empty__title">{{ $t('knowledgeBase.filterNoResults') }}</span>
+                      <span class="doc-filter-empty__description">{{ $t('knowledgeBase.filterNoResultsHint') }}</span>
+                      <t-button size="small" variant="outline" @click="clearDocumentFilters">
+                        {{ $t('knowledgeBase.clearDocumentFilters') }}
+                      </t-button>
+                    </div>
+                    <EmptyKnowledge v-else />
                   </div>
                 </template>
               </div>
@@ -4135,6 +4163,32 @@ async function createNewSession(value: string): Promise<void> {
   justify-content: center;
   padding: 60px 20px;
   min-height: 100%;
+}
+
+.doc-filter-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: var(--td-text-color-placeholder);
+
+  &__icon {
+    margin-bottom: 14px;
+    color: var(--td-text-color-disabled);
+  }
+
+  &__title {
+    color: var(--td-text-color-secondary);
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 24px;
+  }
+
+  &__description {
+    margin: 6px 0 16px;
+    color: var(--td-text-color-placeholder);
+    font-size: 13px;
+    line-height: 20px;
+  }
 }
 
 

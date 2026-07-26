@@ -2,21 +2,20 @@ package generalagent
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"mime"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/custom/modules/artifactstore"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/event"
@@ -53,6 +52,9 @@ type Service struct {
 	client           *Client
 	documentClient   *Client
 	artifactRoot     string
+	artifactStore    *artifactstore.Store
+	artifactStoreErr error
+	housekeepingOnce sync.Once
 }
 
 func NewService(
@@ -69,6 +71,7 @@ func NewService(
 	if root == "" {
 		root = filepath.Join("custom", "general-agent-artifacts")
 	}
+	privateArtifactStore, artifactStoreErr := artifactstore.NewFromEnv()
 	return &Service{
 		db:               db,
 		sessionService:   sessionService,
@@ -81,6 +84,8 @@ func NewService(
 		client:           NewClientFromEnv(),
 		documentClient:   NewDocumentProcessingClientFromEnv(),
 		artifactRoot:     root,
+		artifactStore:    privateArtifactStore,
+		artifactStoreErr: artifactStoreErr,
 	}
 }
 
@@ -89,6 +94,18 @@ func (s *Service) Migrate(ctx context.Context) error {
 		return nil
 	}
 	if err := applyGeneralAgentMigrations(ctx, s.db); err != nil {
+		return err
+	}
+	if s.artifactStoreErr != nil {
+		return s.artifactStoreErr
+	}
+	if s.artifactStore == nil {
+		return errors.New("private artifact object storage is unavailable")
+	}
+	if err := s.artifactStore.CheckConnectivity(ctx); err != nil {
+		return fmt.Errorf("private artifact object storage connectivity: %w", err)
+	}
+	if err := s.migrateLegacyArtifacts(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -101,6 +118,13 @@ func (s *Service) clientForAgentType(agentType string) *Client {
 	return s.client
 }
 
+func (s *Service) ArtifactStore() *artifactstore.Store {
+	if s == nil {
+		return nil
+	}
+	return s.artifactStore
+}
+
 func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
 	if req == nil || req.CustomAgent == nil {
 		return errors.New("通用智能体需要有效的智能体配置")
@@ -108,6 +132,13 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if !types.IsClaudeSDKAgentType(req.CustomAgent.Config.AgentType) {
 		return fmt.Errorf("invalid agent_type for general-agent runner: %s", req.CustomAgent.Config.AgentType)
 	}
+	originalInputStorageURLs := make(map[string]struct{}, len(req.OriginalInputFiles)+len(req.KnowledgeIDs))
+	for _, item := range req.OriginalInputFiles {
+		if storageURL := strings.TrimSpace(item.StorageURL); storageURL != "" {
+			originalInputStorageURLs[storageURL] = struct{}{}
+		}
+	}
+	defer s.cleanupOriginalInputTransferObjects(ctx, originalInputStorageURLs)
 	if s.sessionService == nil || s.agentService == nil || s.modelService == nil || s.client == nil {
 		return errors.New("通用智能体后端依赖未初始化")
 	}
@@ -151,6 +182,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	agentConfig.ProfessionalSkillsEnabled = len(professionalSkills) > 0
 	agentConfig.AllowedProfessionalSkills = professionalSkillNames(professionalSkills)
 	originalInputFiles := s.originalInputFileSpecs(ctx, req, runID)
+	for _, item := range originalInputFiles {
+		if storageURL := strings.TrimSpace(item.StorageURL); storageURL != "" {
+			originalInputStorageURLs[storageURL] = struct{}{}
+		}
+	}
 	userID, _ := types.UserIDFromContext(ctx)
 	active := &activeRun{
 		runID:              runID,
@@ -193,6 +229,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		LLM:                     llm,
 		ToolCallbackURL:         toolCallbackURL(),
 		ToolCallbackAPIKey:      strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_API_KEY")),
+		ArtifactUploadURL:       artifactUploadURL(),
 		EnableArtifacts:         agentConfig.EnableArtifacts,
 	}
 
@@ -240,6 +277,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	artifactResults, err := s.persistArtifacts(ctx, sidecarClient, result.RunID, req, result.Artifacts)
 	if err != nil {
 		logger.Warnf(ctx, "general-agent persist artifacts failed: %v", err)
+		return fmt.Errorf("智能体产物未能安全写入对象存储，本次运行不能标记完成: %w", err)
 	}
 	artifactData, artifactOutput, emitArtifactResult := buildArtifactToolResult(result, artifactResults, err)
 	if emitArtifactResult {
@@ -1390,6 +1428,13 @@ func toolCallbackURL() string {
 	return defaultToolCallbackURL
 }
 
+func artifactUploadURL() string {
+	if v := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL")); v != "" {
+		return v
+	}
+	return defaultArtifactUploadURL
+}
+
 func generalAgentToolExecTimeout(config *types.AgentConfig) time.Duration {
 	timeout := envDurationSeconds("CUSTOM_GENERAL_AGENT_TOOL_EXEC_TIMEOUT_SEC", 15*time.Minute)
 	if config != nil && config.LLMCallTimeout > 0 {
@@ -1401,72 +1446,43 @@ func generalAgentToolExecTimeout(config *types.AgentConfig) time.Duration {
 	return timeout
 }
 
-func (s *Service) persistArtifacts(ctx context.Context, client *Client, runID string, req *types.QARequest, artifacts []SidecarArtifact) ([]ArtifactResult, error) {
+func (s *Service) persistArtifacts(ctx context.Context, _ *Client, runID string, req *types.QARequest, artifacts []SidecarArtifact) ([]ArtifactResult, error) {
 	artifacts = dedupeSidecarArtifactsByFilenameKeepLast(artifacts)
 	if len(artifacts) == 0 {
 		return nil, nil
 	}
-	if client == nil {
-		client = s.client
-	}
-	if s.db == nil {
-		return nil, errors.New("artifact database is not initialized")
+	if s.db == nil || s.artifactStore == nil {
+		return nil, errors.New("private artifact persistence is not initialized")
 	}
 	userID, _ := types.UserIDFromContext(ctx)
-	root := filepath.Join(s.artifactRoot, req.Session.ID, runID)
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, err
-	}
 	out := make([]ArtifactResult, 0, len(artifacts))
 	for _, item := range artifacts {
-		if item.FileToken == "" {
-			continue
+		if !item.Persisted || strings.TrimSpace(item.ArtifactID) == "" {
+			return out, fmt.Errorf("sidecar returned an artifact before private object persistence completed")
 		}
-		data, err := client.Download(ctx, runID, item.FileToken)
+		var row Artifact
+		err := s.db.WithContext(ctx).
+			Where(
+				"id = ? AND tenant_id = ? AND user_id = ? AND session_id = ? AND message_id = ? AND run_id = ? AND file_token = ? AND storage_state = ?",
+				item.ArtifactID,
+				tenantIDFromContext(ctx),
+				userID,
+				req.Session.ID,
+				req.AssistantMessageID,
+				runID,
+				item.FileToken,
+				artifactStorageStateReady,
+			).
+			First(&row).Error
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("load privately persisted artifact %s: %w", item.ArtifactID, err)
 		}
-		name := safeFileName(item.FileName)
-		if name == "" {
-			name = item.FileToken
+		if !s.artifactStore.Owns(row.FilePath) {
+			return out, fmt.Errorf("artifact %s is outside the private object namespace", row.ID)
 		}
-		sum := sha256.Sum256(data)
-		sha := hex.EncodeToString(sum[:])
-		fileType := strings.TrimPrefix(strings.ToLower(item.FileType), ".")
-		if fileType == "" {
-			fileType = strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
-		}
-		tokenDir := filepath.Join(root, safeFileName(item.FileToken))
-		if err := os.MkdirAll(tokenDir, 0o755); err != nil {
-			return out, err
-		}
-		path := filepath.Join(tokenDir, name)
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			return out, err
-		}
-		contentType := item.ContentType
-		if contentType == "" {
-			contentType = mime.TypeByExtension("." + fileType)
-		}
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
-		row := &Artifact{
-			TenantID:    tenantIDFromContext(ctx),
-			UserID:      userID,
-			RunID:       runID,
-			SessionID:   req.Session.ID,
-			MessageID:   req.AssistantMessageID,
-			FileToken:   item.FileToken,
-			FilePath:    path,
-			FileName:    name,
-			FileType:    fileType,
-			FileSize:    int64(len(data)),
-			SHA256:      sha,
-			ContentType: contentType,
-		}
-		if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
-			return out, err
+		if row.FileName != item.FileName || row.FileSize != item.FileSize ||
+			!strings.EqualFold(row.SHA256, item.SHA256) {
+			return out, fmt.Errorf("artifact %s result metadata does not match the committed object", row.ID)
 		}
 		out = append(out, ArtifactResult{
 			ArtifactID:  row.ID,
@@ -1474,7 +1490,7 @@ func (s *Service) persistArtifacts(ctx context.Context, client *Client, runID st
 			FileType:    row.FileType,
 			FileSize:    row.FileSize,
 			SHA256:      row.SHA256,
-			DownloadURL: "/api/v1/custom/general-agent/artifacts/" + row.ID + "/download",
+			DownloadURL: item.DownloadURL,
 		})
 	}
 	return out, nil

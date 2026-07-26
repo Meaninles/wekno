@@ -1562,3 +1562,25 @@ func TestDeadlineIgnoringDelegateTripsAndClearsLiveness(t *testing.T) {
 	require.Equal(t, StateQueued, released.State)
 	require.Empty(t, released.OwnerInstanceID)
 }
+
+func TestZeroCountFinalizingWikiStageDoesNotReinvokeCoreDelegate(t *testing.T) {
+	snapshot := &knowledgeSnapshot{
+		ParseStatus:          types.ParseStatusFinalizing,
+		PendingSubtasksCount: 0,
+		WikiStatus:           types.WikiStatusPending,
+	}
+	stage := stageForKnowledge(snapshot)
+	require.Equal(t, "wiki", stage)
+	require.True(t, shouldAwaitCommittedDerivatives(snapshot, stage))
+}
+
+func TestFinalizingWithDerivativeSlotsStillReportsDerivativeStage(t *testing.T) {
+	snapshot := &knowledgeSnapshot{
+		ParseStatus:          types.ParseStatusFinalizing,
+		PendingSubtasksCount: 1,
+		WikiStatus:           types.WikiStatusPending,
+	}
+	stage := stageForKnowledge(snapshot)
+	require.Equal(t, "derivatives", stage)
+	require.False(t, shouldAwaitCommittedDerivatives(snapshot, stage))
+}

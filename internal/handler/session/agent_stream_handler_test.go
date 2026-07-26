@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,5 +220,32 @@ func TestUserFacingAgentErrorMessageMapsMaxTurnsAndTimeout(t *testing.T) {
 	timeout := userFacingAgentErrorMessage(errors.New("API request timed out after API_TIMEOUT_MS"))
 	if timeout != "任务耗时过长，请将任务拆分为具体子任务逐个执行，或提高智能体LLM调用超时时间" {
 		t.Fatalf("timeout message = %q", timeout)
+	}
+
+	incompatible := userFacingAgentErrorMessage(errors.New(
+		"ResultMessage(result='API Error: Content block is not a text block', model_usage={'secret': 'internal'})",
+	))
+	if incompatible != "模型服务返回了不兼容的响应格式，请重试或切换模型" {
+		t.Fatalf("incompatible response message = %q", incompatible)
+	}
+	if strings.Contains(incompatible, "model_usage") {
+		t.Fatalf("internal model diagnostics leaked to user-facing error: %q", incompatible)
+	}
+
+	for _, transportErr := range []string{
+		"unexpected EOF",
+		"read tcp 10.0.0.1:1234: connection reset by peer",
+		"dial tcp 10.0.0.2:8091: connect: connection refused",
+		"write: broken pipe",
+		"general agent stream ended without result",
+		"general agent stream failed: status=504 body=<html>gateway timeout</html>",
+	} {
+		got := userFacingAgentErrorMessage(errors.New(transportErr))
+		if got != "智能体服务连接中断，请稍后重试" {
+			t.Fatalf("transport error %q mapped to %q", transportErr, got)
+		}
+		if strings.Contains(got, "10.0.0.") || strings.Contains(strings.ToLower(got), "status=") {
+			t.Fatalf("transport diagnostics leaked to user-facing error: %q", got)
+		}
 	}
 }

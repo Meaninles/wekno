@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
+	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -147,9 +149,11 @@ func (s *Service) createOriginalInputTransferObject(
 	}
 	downloadURL, err := fileService.GetFileURL(ctx, storageURL)
 	if err != nil {
+		cleanupOriginalInputTransferObject(ctx, fileService, storageURL)
 		return nil, err
 	}
 	if !isHTTPDownloadURL(downloadURL) {
+		cleanupOriginalInputTransferObject(ctx, fileService, storageURL)
 		return nil, fmt.Errorf("Claude SDK 原文件传输需要 HTTP(S) 对象下载 URL，当前得到 %q", downloadURL)
 	}
 	return &types.OriginalInputFile{
@@ -163,6 +167,38 @@ func (s *Service) createOriginalInputTransferObject(
 		DownloadURL: downloadURL,
 		StorageURL:  storageURL,
 	}, nil
+}
+
+func cleanupOriginalInputTransferObject(
+	ctx context.Context,
+	fileService interfaces.FileService,
+	storageURL string,
+) {
+	if fileService == nil || strings.TrimSpace(storageURL) == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := fileService.DeleteFile(cleanupCtx, storageURL); err != nil {
+		logger.Warnf(cleanupCtx, "[claude-original-input] cleanup failed: %v", err)
+	}
+}
+
+func (s *Service) cleanupOriginalInputTransferObjects(
+	ctx context.Context,
+	storageURLs map[string]struct{},
+) {
+	if len(storageURLs) == 0 {
+		return
+	}
+	fileService := resolveOriginalInputFileService(ctx, s.fileService)
+	if fileService == nil {
+		logger.Warnf(ctx, "[claude-original-input] cleanup skipped because transfer storage is unavailable")
+		return
+	}
+	for storageURL := range storageURLs {
+		cleanupOriginalInputTransferObject(ctx, fileService, storageURL)
+	}
 }
 
 func readOriginalInputBytes(reader io.Reader, maxBytes int64) ([]byte, error) {
@@ -255,6 +291,13 @@ func originalInputStorageProvider() string {
 }
 
 func newOriginalInputFileService(provider string) (interfaces.FileService, error) {
+	pathPrefix, err := objectnamespace.NormalizeAndValidate(
+		originalInputPathPrefix(),
+		objectnamespace.PurposeOriginalInputs,
+	)
+	if err != nil {
+		return nil, err
+	}
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "minio":
 		endpoint := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_ENDPOINT"))
@@ -285,7 +328,7 @@ func newOriginalInputFileService(provider string) (interfaces.FileService, error
 			secretKey,
 			bucket,
 			envBool("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_USE_SSL", false),
-			originalInputPathPrefix(),
+			pathPrefix,
 		)
 	case "obs":
 		endpoint := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_OBS_ENDPOINT"))
@@ -314,20 +357,14 @@ func newOriginalInputFileService(provider string) (interfaces.FileService, error
 		if endpoint == "" || accessKey == "" || secretKey == "" || bucket == "" {
 			return nil, fmt.Errorf("incomplete obs original input config")
 		}
-		return filesvc.NewObsFileService(endpoint, region, accessKey, secretKey, bucket, originalInputPathPrefix())
+		return filesvc.NewObsFileService(endpoint, region, accessKey, secretKey, bucket, pathPrefix)
 	default:
 		return nil, fmt.Errorf("unsupported original input provider %q", provider)
 	}
 }
 
 func originalInputPathPrefix() string {
-	prefix := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX"))
-	if prefix == "" {
-		// Keep Claude SDK original-file transfer objects visibly separate from
-		// normal uploaded files and knowledge objects.
-		prefix = "weknora/__weknora_claude_sdk_original_inputs__/"
-	}
-	return prefix
+	return strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX"))
 }
 
 func envBool(key string, fallback bool) bool {

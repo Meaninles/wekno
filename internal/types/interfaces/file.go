@@ -49,3 +49,43 @@ type PlannedFileService interface {
 	ReserveCopyPath(srcPath string, tenantID uint64, knowledgeID string) (string, error)
 	CommitCopyAtPath(ctx context.Context, srcPath string, dstPath string) error
 }
+
+// PrivateObjectFileService is the object-storage contract for durable,
+// access-controlled application artifacts. Unlike the historical SaveBytes
+// path (which some providers use for publicly renderable images), commits made
+// through this interface MUST remain private. The caller supplies an exact,
+// validated hierarchy so it can record the intent before performing remote
+// I/O and safely retry an uncertain upload.
+//
+// Implementations must store sha256 as private object metadata and Verify must
+// validate both the object length and that metadata without downloading the
+// whole object.
+type PrivateObjectFileService interface {
+	FileService
+	ReservePrivateObjectPath(segments ...string) (string, error)
+	CommitPrivateObjectAtPath(
+		ctx context.Context,
+		data []byte,
+		filePath string,
+		contentType string,
+		sha256 string,
+	) error
+	VerifyPrivateObject(ctx context.Context, filePath string, size int64, sha256 string) error
+}
+
+// StreamingPrivateObjectFileService is the bounded-memory extension used by
+// the one-shot local-to-object-store migration. The caller hashes the source
+// first, then reopens it and supplies the exact size and digest. Implementations
+// must write the digest as private metadata so VerifyPrivateObject can prove the
+// result without downloading multi-gigabyte source documents again.
+type StreamingPrivateObjectFileService interface {
+	PrivateObjectFileService
+	CommitPrivateObjectStreamAtPath(
+		ctx context.Context,
+		reader io.Reader,
+		size int64,
+		filePath string,
+		contentType string,
+		sha256 string,
+	) error
+}

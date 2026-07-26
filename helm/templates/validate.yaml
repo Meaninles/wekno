@@ -7,6 +7,20 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
   {{- $appMaxReplicas = int .Values.app.autoscaling.maxReplicas }}
 {{- end }}
 {{- $storageType := lower (toString .Values.app.env.STORAGE_TYPE) }}
+{{- $knowledgePrefix := "" }}
+{{- $originalInputPrefix := "" }}
+{{- range .Values.app.extraEnv }}
+  {{- $envName := toString .name }}
+  {{- if and (eq $storageType "minio") (eq $envName "MINIO_PATH_PREFIX") }}
+    {{- $knowledgePrefix = toString (.value | default "") }}
+  {{- end }}
+  {{- if and (eq $storageType "obs") (eq $envName "OBS_PATH_PREFIX") }}
+    {{- $knowledgePrefix = toString (.value | default "") }}
+  {{- end }}
+  {{- if eq $envName "CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX" }}
+    {{- $originalInputPrefix = toString (.value | default "") }}
+  {{- end }}
+{{- end }}
 {{- if and .Values.app.enabled (gt $appMaxReplicas 1) (eq $storageType "local") }}
   {{- if not .Values.dataFiles.persistence.enabled }}
     {{- fail "horizontal app scaling with STORAGE_TYPE=local requires a shared ReadWriteMany dataFiles PVC; use OBS/S3/COS/MinIO or enable an RWX PVC" }}
@@ -24,6 +38,14 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
 {{- if and .Values.app.enabled (not .Values.docreader.enabled) (eq (toString .Values.app.connections.docreader.address) "docreader:50051") }}
   {{- fail "docreader.enabled=false requires app.connections.docreader.address to point at an external DocReader pool" }}
 {{- end }}
+{{- if and .Values.app.enabled (has $storageType (list "minio" "obs")) }}
+  {{- if empty $knowledgePrefix }}
+    {{- fail (printf "STORAGE_TYPE=%s requires a literal %s_PATH_PREFIX in app.extraEnv" $storageType (upper $storageType)) }}
+  {{- end }}
+  {{- if not (regexMatch "^weknora/__weknora_private_knowledge_objects_v1__/deployment/[a-z]([a-z0-9-]{0,61}[a-z0-9])?/namespace/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/$" $knowledgePrefix) }}
+    {{- fail "knowledge object path prefix must be weknora/__weknora_private_knowledge_objects_v1__/deployment/<lowercase-dns-label>/namespace/<canonical-uuid>/" }}
+  {{- end }}
+{{- end }}
 {{- if and .Values.app.enabled (eq (lower (toString .Values.app.env.ENABLE_GRAPH_RAG)) "true") (not .Values.neo4j.enabled) (eq (toString .Values.app.connections.neo4j.uri) "bolt://neo4j:7687") }}
   {{- fail "ENABLE_GRAPH_RAG=true with neo4j.enabled=false requires app.connections.neo4j.uri to point at an external HA Neo4j service" }}
 {{- end }}
@@ -36,4 +58,49 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
 {{- end }}
 {{- if ne (empty .Values.app.connections.redis.tls.certFile) (empty .Values.app.connections.redis.tls.keyFile) }}
   {{- fail "Redis TLS certFile and keyFile must be configured together" }}
+{{- end }}
+{{- range $name, $scratch := dict "app" .Values.app.scratch "docreader" .Values.docreader.scratch "generalAgent" .Values.generalAgent.scratch "documentProcessingAgent" .Values.documentProcessingAgent.scratch }}
+  {{- $volumeType := ($scratch.volumeType | default "emptyDir") }}
+  {{- if not (has $volumeType (list "emptyDir" "ephemeral")) }}
+    {{- fail (printf "%s.scratch.volumeType must be emptyDir or ephemeral" $name) }}
+  {{- end }}
+  {{- if and (eq $volumeType "ephemeral") (empty $scratch.ephemeral.storageClassName) }}
+    {{- fail (printf "%s ephemeral scratch requires scratch.ephemeral.storageClassName" $name) }}
+  {{- end }}
+{{- end }}
+{{- if or .Values.generalAgent.enabled .Values.documentProcessingAgent.enabled }}
+  {{- if not .Values.app.agentIntegration.enabled }}
+    {{- fail "enabling an Agent pool requires app.agentIntegration.enabled=true" }}
+  {{- end }}
+{{- end }}
+{{- if .Values.app.agentIntegration.enabled }}
+  {{- $artifactProvider := lower (toString .Values.app.agentIntegration.artifactStorage.provider) }}
+  {{- if not (has $artifactProvider (list "minio" "obs")) }}
+    {{- fail "app.agentIntegration.artifactStorage.provider must be minio or obs" }}
+  {{- end }}
+  {{- if empty .Values.app.agentIntegration.artifactStorage.bucket }}
+    {{- fail "app.agentIntegration.artifactStorage.bucket is required" }}
+  {{- end }}
+  {{- if empty .Values.app.agentIntegration.artifactStorage.pathPrefix }}
+    {{- fail "app.agentIntegration.artifactStorage.pathPrefix is required" }}
+  {{- end }}
+  {{- $artifactPrefix := toString .Values.app.agentIntegration.artifactStorage.pathPrefix }}
+  {{- if not (regexMatch "^weknora/__weknora_private_agent_artifacts_v1__/deployment/[a-z]([a-z0-9-]{0,61}[a-z0-9])?/namespace/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/$" $artifactPrefix) }}
+    {{- fail "artifactStorage.pathPrefix must be weknora/__weknora_private_agent_artifacts_v1__/deployment/<lowercase-dns-label>/namespace/<canonical-uuid>/" }}
+  {{- end }}
+  {{- if and (has $storageType (list "minio" "obs")) (empty $originalInputPrefix) }}
+    {{- fail "object-backed Agent integration requires CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX in app.extraEnv" }}
+  {{- end }}
+  {{- if and (not (empty $originalInputPrefix)) (not (regexMatch "^weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/[a-z]([a-z0-9-]{0,61}[a-z0-9])?/namespace/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/$" $originalInputPrefix)) }}
+    {{- fail "original-input path prefix must be weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/<lowercase-dns-label>/namespace/<canonical-uuid>/" }}
+  {{- end }}
+  {{- if or (empty .Values.app.agentIntegration.apiKeySecret.name) (empty .Values.app.agentIntegration.apiKeySecret.key) }}
+    {{- fail "app.agentIntegration.apiKeySecret name and key are required" }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.generalAgent.enabled (or (empty .Values.generalAgent.apiKeySecret.name) (empty .Values.generalAgent.apiKeySecret.key)) }}
+  {{- fail "generalAgent.apiKeySecret name and key are required" }}
+{{- end }}
+{{- if and .Values.documentProcessingAgent.enabled (or (empty .Values.documentProcessingAgent.apiKeySecret.name) (empty .Values.documentProcessingAgent.apiKeySecret.key)) }}
+  {{- fail "documentProcessingAgent.apiKeySecret name and key are required" }}
 {{- end }}

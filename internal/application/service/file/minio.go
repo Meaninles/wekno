@@ -35,6 +35,8 @@ type minioFileService struct {
 }
 
 var _ interfaces.PlannedFileService = (*minioFileService)(nil)
+var _ interfaces.PrivateObjectFileService = (*minioFileService)(nil)
+var _ interfaces.StreamingPrivateObjectFileService = (*minioFileService)(nil)
 
 // newMinioClient creates a bare minioFileService with just the SDK client initialised.
 // Shared by NewMinioFileService (which also ensures the bucket exists) and
@@ -184,6 +186,112 @@ func (s *minioFileService) ReserveCopyPath(
 		return "", fmt.Errorf("minio copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
 	}
 	return s.ReserveFilePath(tenantID, knowledgeID, "copy"+path.Ext(srcKey))
+}
+
+func (s *minioFileService) ReservePrivateObjectPath(segments ...string) (string, error) {
+	key, err := plannedfile.BuildKey(s.pathPrefix, segments...)
+	if err != nil {
+		return "", err
+	}
+	return plannedfile.FormatBucketPath("minio", s.bucketName, key)
+}
+
+func (s *minioFileService) CommitPrivateObjectAtPath(
+	ctx context.Context,
+	data []byte,
+	filePath string,
+	contentType string,
+	sha256 string,
+) error {
+	key, err := s.parsePlannedMinioPath(filePath, true)
+	if err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = s.client.PutObject(
+		ctx,
+		s.bucketName,
+		key,
+		bytes.NewReader(data),
+		int64(len(data)),
+		minio.PutObjectOptions{
+			ContentType: contentType,
+			UserMetadata: map[string]string{
+				"sha256": strings.ToLower(strings.TrimSpace(sha256)),
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("private MinIO object commit: %w", err)
+	}
+	return nil
+}
+
+func (s *minioFileService) CommitPrivateObjectStreamAtPath(
+	ctx context.Context,
+	reader io.Reader,
+	size int64,
+	filePath string,
+	contentType string,
+	sha256 string,
+) error {
+	key, err := s.parsePlannedMinioPath(filePath, true)
+	if err != nil {
+		return err
+	}
+	if reader == nil || size < 0 {
+		return fmt.Errorf("private MinIO stream commit: invalid source")
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = s.client.PutObject(
+		ctx,
+		s.bucketName,
+		key,
+		reader,
+		size,
+		minio.PutObjectOptions{
+			ContentType: contentType,
+			UserMetadata: map[string]string{
+				"sha256": strings.ToLower(strings.TrimSpace(sha256)),
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("private MinIO stream commit: %w", err)
+	}
+	return nil
+}
+
+func (s *minioFileService) VerifyPrivateObject(
+	ctx context.Context,
+	filePath string,
+	size int64,
+	sha256 string,
+) error {
+	key, err := s.parsePlannedMinioPath(filePath, true)
+	if err != nil {
+		return err
+	}
+	info, err := s.client.StatObject(ctx, s.bucketName, key, minio.StatObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("verify private MinIO object: %w", err)
+	}
+	if info.Size != size {
+		return fmt.Errorf("verify private MinIO object: size mismatch: got %d want %d", info.Size, size)
+	}
+	wantSHA := strings.ToLower(strings.TrimSpace(sha256))
+	gotSHA := strings.ToLower(strings.TrimSpace(info.UserMetadata["X-Amz-Meta-Sha256"]))
+	if gotSHA == "" {
+		gotSHA = strings.ToLower(strings.TrimSpace(info.UserMetadata["Sha256"]))
+	}
+	if wantSHA == "" || gotSHA != wantSHA {
+		return fmt.Errorf("verify private MinIO object: sha256 metadata mismatch")
+	}
+	return nil
 }
 
 func (s *minioFileService) CommitFileAtPath(
@@ -371,28 +479,14 @@ func (s *minioFileService) CopyFile(ctx context.Context,
 
 // SaveBytes saves bytes data to MinIO and returns the file path.
 func (s *minioFileService) SaveBytes(ctx context.Context, data []byte, tenantID uint64, fileName string, temp bool) (string, error) {
-	safeName, err := utils.SafeFileName(fileName)
+	filePath, err := s.ReserveBytesPath(tenantID, fileName, temp)
 	if err != nil {
-		return "", fmt.Errorf("invalid file name: %w", err)
+		return "", err
 	}
-	ext := filepath.Ext(safeName)
-	var objectName string
-	if temp {
-		objectName = s.prefixedObjectName("temp/%d/%s%s", tenantID, uuid.New().String(), ext)
-	} else {
-		objectName = s.prefixedObjectName("%d/exports/%s%s", tenantID, uuid.New().String(), ext)
+	if err := s.CommitBytesAtPath(ctx, data, filePath); err != nil {
+		return "", err
 	}
-
-	// Upload bytes to MinIO
-	reader := bytes.NewReader(data)
-	_, err = s.client.PutObject(ctx, s.bucketName, objectName, reader, int64(len(data)), minio.PutObjectOptions{
-		ContentType: utils.GetContentTypeByExt(ext),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload bytes to MinIO: %w", err)
-	}
-
-	return fmt.Sprintf("minio://%s/%s", s.bucketName, objectName), nil
+	return filePath, nil
 }
 
 // GetFileURL returns a presigned download URL for the file

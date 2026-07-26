@@ -447,15 +447,17 @@ func (h *HousekeepingService) preserveWithoutInspector(
 //   - processing means the core DocReader/chunk/embed pipeline never reached
 //     a usable result, so an orphan is a genuine parse failure;
 //   - finalizing means core chunks and embeddings are already committed and
-//     only optional enrichment remains, so an orphan is degraded to completed
-//     rather than poisoning an otherwise searchable document.
+//     only optional enrichment remains, so an orphan whose Wiki lane is
+//     already terminal is degraded to completed rather than poisoning an
+//     otherwise searchable document.
 //
 // Every UPDATE repeats the cheap updated_at check and adds a correlated
 // NOT-EXISTS guard for a new span heartbeat. That guard closes the race
 // between the earlier probes and this write: if a worker makes progress in
 // that window, zero rows are changed and the next sweep reevaluates from fresh
-// state. Independent Wiki pending ops are deliberately not a guard because
-// Wiki owns no pending_subtasks_count slot and must not control parse_status.
+// state. A pending Wiki status is a final-completion guard even though Wiki
+// owns no pending_subtasks_count slot; the durable Wiki/root-workflow recovery
+// paths retain responsibility for settling that generation.
 func (h *HousekeepingService) recoverStuckKnowledge(
 	ctx context.Context,
 	candidates []types.Knowledge,
@@ -540,6 +542,7 @@ func (h *HousekeepingService) recoverStuckKnowledge(
 	if len(processingCompletedIDs) > 0 {
 		completedAt := time.Now()
 		res := h.guardedRecoveryQuery(ctx, processingCompletedIDs, types.ParseStatusProcessing, cutoff).
+			Where("COALESCE(wiki_status, '') <> ?", types.WikiStatusPending).
 			Updates(map[string]interface{}{
 				"parse_status":           types.ParseStatusCompleted,
 				"pending_subtasks_count": 0,
@@ -567,6 +570,7 @@ func (h *HousekeepingService) recoverStuckKnowledge(
 	if len(finalizingIDs) > 0 {
 		completedAt := time.Now()
 		res := h.guardedRecoveryQuery(ctx, finalizingIDs, types.ParseStatusFinalizing, cutoff).
+			Where("COALESCE(wiki_status, '') <> ?", types.WikiStatusPending).
 			Updates(map[string]interface{}{
 				"parse_status":           types.ParseStatusCompleted,
 				"pending_subtasks_count": 0,

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -59,20 +60,27 @@ func NewReadOnlyFileServiceFromStorageConfig(
 		return setStorageBindingIdentity(service, source, "none"), p, nil
 
 	case "minio":
-		if sec == nil || sec.MinIO == nil {
-			return nil, p, fmt.Errorf("missing minio config")
+		var cfg *types.MinIOEngineConfig
+		if sec != nil {
+			cfg = sec.MinIO
+		}
+		if cfg == nil {
+			if !strings.EqualFold(strings.TrimSpace(os.Getenv("STORAGE_TYPE")), "minio") {
+				return nil, p, fmt.Errorf("missing minio config")
+			}
+			cfg = &types.MinIOEngineConfig{Mode: "docker"}
 		}
 		endpoint, accessKey, secretKey := "", "", ""
 		credentialScope := storageBindingSourceGlobal
-		if strings.EqualFold(strings.TrimSpace(sec.MinIO.Mode), "remote") {
-			endpoint, accessKey, secretKey = sec.MinIO.Endpoint, sec.MinIO.AccessKeyID, sec.MinIO.SecretAccessKey
+		if strings.EqualFold(strings.TrimSpace(cfg.Mode), "remote") {
+			endpoint, accessKey, secretKey = cfg.Endpoint, cfg.AccessKeyID, cfg.SecretAccessKey
 			credentialScope = storageBindingSourceTenant
 		} else {
 			endpoint = os.Getenv("MINIO_ENDPOINT")
 			accessKey = os.Getenv("MINIO_ACCESS_KEY_ID")
 			secretKey = os.Getenv("MINIO_SECRET_ACCESS_KEY")
 		}
-		bucket := strings.TrimSpace(sec.MinIO.BucketName)
+		bucket := strings.TrimSpace(cfg.BucketName)
 		if bucket == "" {
 			bucket = strings.TrimSpace(os.Getenv("MINIO_BUCKET_NAME"))
 		}
@@ -80,9 +88,16 @@ func NewReadOnlyFileServiceFromStorageConfig(
 			strings.TrimSpace(secretKey) == "" || bucket == "" {
 			return nil, p, fmt.Errorf("incomplete minio config")
 		}
+		pathPrefix := strings.TrimSpace(cfg.PathPrefix)
+		if pathPrefix == "" && !strings.EqualFold(strings.TrimSpace(cfg.Mode), "remote") {
+			pathPrefix, err = objectnamespace.KnowledgePrefixFromEnv("minio")
+			if err != nil {
+				return nil, p, err
+			}
+		}
 		service, err = newMinioClient(
 			strings.TrimSpace(endpoint), strings.TrimSpace(accessKey), strings.TrimSpace(secretKey),
-			bucket, sec.MinIO.UseSSL, sec.MinIO.PathPrefix,
+			bucket, cfg.UseSSL, pathPrefix,
 		)
 		service = setStorageBindingIdentity(service, storageBindingSourceTenant, credentialScope)
 
@@ -171,12 +186,20 @@ func NewReadOnlyFileServiceFromStorageConfig(
 	case "obs":
 		endpoint, region, accessKey, secretKey, bucket, pathPrefix := "", "", "", "", "", ""
 		source := storageBindingSourceGlobal
-		if sec != nil && sec.OBS != nil {
+		useTenant := sec != nil && sec.OBS != nil &&
+			strings.TrimSpace(sec.OBS.Endpoint) != "" &&
+			strings.TrimSpace(sec.OBS.AccessKey) != "" &&
+			strings.TrimSpace(sec.OBS.SecretKey) != "" &&
+			strings.TrimSpace(sec.OBS.BucketName) != ""
+		if useTenant {
 			cfg := sec.OBS
 			endpoint, region, accessKey, secretKey = cfg.Endpoint, cfg.Region, cfg.AccessKey, cfg.SecretKey
 			bucket, pathPrefix = cfg.BucketName, cfg.PathPrefix
 			source = storageBindingSourceTenant
 		} else {
+			if !strings.EqualFold(strings.TrimSpace(os.Getenv("STORAGE_TYPE")), "obs") {
+				return nil, p, fmt.Errorf("missing obs config")
+			}
 			endpoint, region = os.Getenv("OBS_ENDPOINT"), os.Getenv("OBS_REGION")
 			accessKey, secretKey = os.Getenv("OBS_ACCESS_KEY"), os.Getenv("OBS_SECRET_KEY")
 			bucket, pathPrefix = os.Getenv("OBS_BUCKET_NAME"), os.Getenv("OBS_PATH_PREFIX")
@@ -185,7 +208,10 @@ func NewReadOnlyFileServiceFromStorageConfig(
 			region = "cn-north-4"
 		}
 		if strings.TrimSpace(pathPrefix) == "" {
-			pathPrefix = "weknora/"
+			pathPrefix, err = objectnamespace.KnowledgePrefixFromEnv("obs")
+			if err != nil {
+				return nil, p, err
+			}
 		}
 		service, err = newObsFileService(
 			strings.TrimSpace(endpoint), strings.TrimSpace(region), strings.TrimSpace(accessKey),

@@ -99,9 +99,10 @@ func NewHandlers(
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
-	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL)
 	dbAnalyticsService := dbanalytics.NewService(db, duckdb)
 	generalAgentService := generalagent.NewService(db, sessionService, agentService, messageService, modelService, knowledgeService, fileService, dbAnalyticsService)
+	chatShareService := chatshare.NewService(db, sessionService, tenantService, fileService, cfg.FrontendBaseURL)
+	chatShareService.SetArtifactStore(generalAgentService.ArtifactStore())
 	kbManagerService := kbmanager.NewService(
 		db,
 		knowledgeBaseService,
@@ -218,6 +219,7 @@ func NewHandlers(
 	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentDefaultsService.ApplyReferenceModelDefaults)
 	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
+	appservice.RegisterSessionDeletedHook(generalAgentService.DeleteSessionArtifacts)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
@@ -378,6 +380,9 @@ func StartSchedulers(handlers *Handlers) {
 	if handlers.kbManagerService != nil {
 		handlers.kbManagerService.Start()
 	}
+	if handlers.generalAgentService != nil {
+		handlers.generalAgentService.StartArtifactHousekeeping()
+	}
 }
 
 func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
@@ -403,6 +408,7 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 		generalAgentInternalRoutes := customPublic.Group("/general-agent/internal")
 		{
 			generalAgentInternalRoutes.POST("/tools/call", handlers.GeneralAgent.CallTool)
+			generalAgentInternalRoutes.POST("/artifacts/upload", handlers.GeneralAgent.UploadArtifact)
 		}
 		authSecurityRoutes := customPublic.Group("/auth-security")
 		{

@@ -182,6 +182,7 @@ class ChatPayload(BaseModel):
     llm: LLMConfig
     tool_callback_url: str
     tool_callback_api_key: str = ""
+    artifact_upload_url: str = ""
     enable_artifacts: bool = False
 
     @field_validator(
@@ -210,6 +211,9 @@ class SidecarArtifact(BaseModel):
     file_size: int
     sha256: str
     content_type: str = "application/octet-stream"
+    artifact_id: str = ""
+    download_url: str = ""
+    persisted: bool = False
 
 
 class ChatResult(BaseModel):

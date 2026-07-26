@@ -7,10 +7,10 @@ import test from 'node:test'
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, 'index.vue'), 'utf8')
 
-test('only scheduler-created sessions restore their saved agent selection', () => {
-  assert.match(source, /startsWith\('custom:scheduled-chat:'\)/)
+test('every existing session restores the agent and model that produced its history', () => {
   assert.match(
     source,
-    /if \(isScheduledChatSession\(sessionRes\?\.data\)\) \{[\s\S]*?applyLastRequestState\(lastState\)[\s\S]*?\} else \{[\s\S]*?applyConversationResourceState\(lastState\)/,
+    /const lastState = sessionRes\?\.data\?\.last_request_state;[\s\S]*?if \(lastState\) \{[\s\S]*?applyLastRequestState\(lastState\)/,
   )
+  assert.doesNotMatch(source, /isScheduledChatSession/)
 })

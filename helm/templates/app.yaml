@@ -197,6 +197,33 @@ spec:
               value: {{ ternary "true" "false" (or .Values.neo4j.enabled (eq (lower (toString .Values.app.env.ENABLE_GRAPH_RAG)) "true")) | quote }}
             - name: WEKNORA_METRICS_ENABLED
               value: {{ .Values.metrics.enabled | quote }}
+            {{- if .Values.app.agentIntegration.enabled }}
+            # All Agent Pods are disposable. Final deliverables are committed
+            # to this app's private object store before the run completes.
+            - name: CUSTOM_GENERAL_AGENT_URL
+              value: {{ .Values.app.agentIntegration.generalAgentURL | quote }}
+            - name: CUSTOM_DOCUMENT_PROCESSING_AGENT_URL
+              value: {{ .Values.app.agentIntegration.documentProcessingAgentURL | quote }}
+            - name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
+              value: {{ .Values.app.agentIntegration.toolCallbackURL | quote }}
+            - name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL
+              value: {{ .Values.app.agentIntegration.artifactUploadURL | quote }}
+            - name: CUSTOM_GENERAL_AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.app.agentIntegration.apiKeySecret.name | quote }}
+                  key: {{ .Values.app.agentIntegration.apiKeySecret.key | quote }}
+            - name: CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER
+              value: {{ .Values.app.agentIntegration.artifactStorage.provider | quote }}
+            - name: CUSTOM_GENERAL_AGENT_ARTIFACT_BUCKET
+              value: {{ .Values.app.agentIntegration.artifactStorage.bucket | quote }}
+            - name: CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX
+              value: {{ .Values.app.agentIntegration.artifactStorage.pathPrefix | quote }}
+            - name: CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_MISSING
+              value: {{ .Values.app.agentIntegration.artifactStorage.migrationAllowMissing | quote }}
+            - name: CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_INVALID
+              value: {{ .Values.app.agentIntegration.artifactStorage.migrationAllowInvalid | quote }}
+            {{- end }}
             {{- if or .Values.neo4j.enabled (eq (lower (toString .Values.app.env.ENABLE_GRAPH_RAG)) "true") }}
             # Neo4j configuration (for GraphRAG)
             - name: NEO4J_URI
@@ -255,10 +282,29 @@ spec:
             {{- end }}
           {{- end }}
         - name: scratch
+          {{- if eq (.Values.app.scratch.volumeType | default "emptyDir") "ephemeral" }}
+          ephemeral:
+            volumeClaimTemplate:
+              {{- with .Values.app.scratch.ephemeral.annotations }}
+              metadata:
+                annotations:
+                  {{- toYaml . | nindent 18 }}
+              {{- end }}
+              spec:
+                accessModes:
+                  {{- toYaml .Values.app.scratch.ephemeral.accessModes | nindent 18 }}
+                {{- with .Values.app.scratch.ephemeral.storageClassName }}
+                storageClassName: {{ . | quote }}
+                {{- end }}
+                resources:
+                  requests:
+                    storage: {{ .Values.app.scratch.ephemeral.size }}
+          {{- else }}
           emptyDir:
             {{- with .Values.app.scratch.sizeLimit }}
             sizeLimit: {{ . }}
             {{- end }}
+          {{- end }}
         {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
         - name: document-queue-kubernetes-api
           projected:

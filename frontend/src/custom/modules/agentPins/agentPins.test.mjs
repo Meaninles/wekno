@@ -7,11 +7,12 @@ import test from 'node:test'
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, 'agentPins.ts'), 'utf8')
 
-test('chat agent pins are scoped as a per-user UI preference', () => {
-  assert.match(source, /per-user UI preference/)
+test('chat agent pins are scoped by user and tenant and persisted as a user preference', () => {
   assert.match(source, /readUserId\(\)/)
+  assert.match(source, /effectiveTenantId/)
   assert.match(source, /WeKnora_\$\{readUserId\(\)\}_/)
-  assert.doesNotMatch(source, /updateAgent\(|createAgent\(|put\(|post\(/)
+  assert.match(source, /updateMyPreferences\(\{ chat_agent_pins: nextKeys \}\)/)
+  assert.doesNotMatch(source, /updateAgent\(|createAgent\(/)
 })
 
 test('pin sorting only moves pinned entries ahead and preserves original order inside buckets', () => {

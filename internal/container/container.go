@@ -65,6 +65,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/database"
@@ -754,12 +755,17 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			os.Getenv("MINIO_BUCKET_NAME") == "" {
 			return nil, fmt.Errorf("missing MinIO configuration")
 		}
-		svc, err := file.NewMinioFileService(
+		pathPrefix, err := objectnamespace.KnowledgePrefixFromEnv("minio")
+		if err != nil {
+			return nil, err
+		}
+		svc, err := file.NewMinioFileServiceWithPathPrefix(
 			os.Getenv("MINIO_ENDPOINT"),
 			os.Getenv("MINIO_ACCESS_KEY_ID"),
 			os.Getenv("MINIO_SECRET_ACCESS_KEY"),
 			os.Getenv("MINIO_BUCKET_NAME"),
 			strings.EqualFold(os.Getenv("MINIO_USE_SSL"), "true"),
+			pathPrefix,
 		)
 		return file.MarkGlobalStorageService(svc), err
 	case "cos":
@@ -828,9 +834,9 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 			return nil, fmt.Errorf("missing OBS configuration")
 		}
 		obsRegion := os.Getenv("OBS_REGION")
-		obsPathPrefix := os.Getenv("OBS_PATH_PREFIX")
-		if obsPathPrefix == "" {
-			obsPathPrefix = "weknora/"
+		obsPathPrefix, err := objectnamespace.KnowledgePrefixFromEnv("obs")
+		if err != nil {
+			return nil, err
 		}
 		svc, err := file.NewObsFileService(
 			os.Getenv("OBS_ENDPOINT"),

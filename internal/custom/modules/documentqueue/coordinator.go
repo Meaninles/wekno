@@ -2762,6 +2762,9 @@ func stageForKnowledge(snapshot *knowledgeSnapshot) string {
 		}
 		return "core"
 	case types.ParseStatusFinalizing:
+		if snapshot.PendingSubtasksCount == 0 && snapshot.WikiStatus == types.WikiStatusPending {
+			return "wiki"
+		}
 		return "derivatives"
 	case types.ParseStatusCancelling:
 		return "cancelling"
@@ -2831,9 +2834,14 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 }
 
 func shouldAwaitCommittedDerivatives(snapshot *knowledgeSnapshot, stage string) bool {
-	return snapshot != nil &&
-		snapshot.ParseStatus == types.ParseStatusCompleted &&
-		stage == "wiki"
+	if snapshot == nil || stage != "wiki" {
+		return false
+	}
+	if snapshot.ParseStatus == types.ParseStatusCompleted {
+		return true // backward-compatible recovery of pre-gate generations
+	}
+	return snapshot.ParseStatus == types.ParseStatusFinalizing &&
+		snapshot.PendingSubtasksCount == 0
 }
 
 func (c *Coordinator) renew(ctx context.Context, lease *Lease, stage string, progressAt time.Time) error {

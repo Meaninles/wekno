@@ -2460,12 +2460,18 @@ const removeKb = (kbId: string) => {
 }
 
 const handleStop = async () => {
-  if (!props.sessionId) {
+  // Snapshot both reactive props before notifying the parent. The synchronous
+  // stop-generation emit clears the in-flight UI state and can update
+  // assistantMessageId before the API call is evaluated.
+  const sessionId = props.sessionId;
+  const assistantMessageId = props.assistantMessageId;
+
+  if (!sessionId) {
     MessagePlugin.warning(t('input.messages.sessionMissing'));
     return;
   }
 
-  if (!props.assistantMessageId) {
+  if (!assistantMessageId) {
     console.error('[Stop] Assistant message ID is empty');
     MessagePlugin.warning(t('input.messages.messageMissing'));
     return;
@@ -2475,7 +2481,7 @@ const handleStop = async () => {
   emit('stop-generation');
 
   try {
-    await stopSession(props.sessionId, props.assistantMessageId);
+    await stopSession(sessionId, assistantMessageId);
     MessagePlugin.success(t('input.messages.stopSuccess'));
   } catch (error) {
     console.error('Failed to stop session:', error);

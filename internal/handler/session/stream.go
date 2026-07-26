@@ -116,11 +116,18 @@ func (h *Handler) ContinueStream(c *gin.Context) {
 	// Set headers for SSE
 	setSSEHeaders(c)
 
-	// Check if stream is already completed
+	// Check if stream has already reached a terminal state. A Done error is
+	// terminal just like "complete"; waiting for a later complete marker after
+	// a failed agent run leaves reconnecting clients polling forever.
 	streamCompleted := false
+	streamFailed := false
 	for _, evt := range events {
-		if evt.Type == "complete" {
+		if evt.Type == types.ResponseTypeComplete {
 			streamCompleted = true
+			break
+		}
+		if evt.Type == types.ResponseTypeError && evt.Done {
+			streamFailed = true
 			break
 		}
 	}
@@ -137,6 +144,10 @@ func (h *Handler) ContinueStream(c *gin.Context) {
 	if streamCompleted {
 		logger.Infof(ctx, "Stream already completed, session ID: %s, message ID: %s", sessionID, messageID)
 		sendCompletionEvent(c, message.RequestID)
+		return
+	}
+	if streamFailed {
+		logger.Infof(ctx, "Stream already failed, session ID: %s, message ID: %s", sessionID, messageID)
 		return
 	}
 
@@ -161,10 +172,14 @@ func (h *Handler) ContinueStream(c *gin.Context) {
 
 			// Send new events
 			streamCompletedNow := false
+			streamFailedNow := false
 			for _, evt := range newEvents {
 				// Check for completion event
-				if evt.Type == "complete" {
+				if evt.Type == types.ResponseTypeComplete {
 					streamCompletedNow = true
+				}
+				if evt.Type == types.ResponseTypeError && evt.Done {
+					streamFailedNow = true
 				}
 
 				response := buildStreamResponse(evt, message.RequestID)
@@ -179,6 +194,10 @@ func (h *Handler) ContinueStream(c *gin.Context) {
 			if streamCompletedNow {
 				logger.Infof(ctx, "Stream completed, session ID: %s, message ID: %s", sessionID, messageID)
 				sendCompletionEvent(c, message.RequestID)
+				return
+			}
+			if streamFailedNow {
+				logger.Infof(ctx, "Stream failed, session ID: %s, message ID: %s", sessionID, messageID)
 				return
 			}
 		}
@@ -343,6 +362,7 @@ func (h *Handler) handleAgentEventsForSSE(
 
 			// Send any new events
 			streamCompleted := false
+			streamFailed := false
 			titleReceived := false
 			for _, evt := range events {
 				// Check for stop event
@@ -377,8 +397,11 @@ func (h *Handler) handleAgentEventsForSSE(
 				response := buildStreamResponse(evt, requestID)
 
 				// Check for completion event
-				if evt.Type == "complete" {
+				if evt.Type == types.ResponseTypeComplete {
 					streamCompleted = true
+				}
+				if evt.Type == types.ResponseTypeError && evt.Done {
+					streamFailed = true
 				}
 
 				// Check for title event
@@ -398,6 +421,14 @@ func (h *Handler) handleAgentEventsForSSE(
 
 			// Update offset
 			lastOffset = newOffset
+
+			// A Done error is a terminal stream marker. The error response has
+			// already been flushed above, so close immediately instead of
+			// holding the SSE connection until the client times out.
+			if streamFailed {
+				log.Infof("Stream failed for session=%s, message=%s", sessionID, assistantMessageID)
+				return
+			}
 
 			// Check if stream is completed - wait for title event only if needed and not already received
 			if streamCompleted {

@@ -1,0 +1,110 @@
+name: weknora-service-replica-e2e
+
+x-agent-common: &agent-common
+  image: weknora-custom-general-agent:local
+  restart: unless-stopped
+  environment:
+    PORT: "8091"
+    CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
+    CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS:-600000}
+    CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS:-900000}
+    CUSTOM_GENERAL_AGENT_MAX_TURNS: ${CUSTOM_GENERAL_AGENT_MAX_TURNS:-30}
+    CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB: ${CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB:-20}
+    GENERAL_AGENT_RUN_ROOT: /tmp/weknora-general-agent-runs
+  networks:
+    - weknora-dev
+  cpus: 2
+  mem_limit: 2g
+  pids_limit: 256
+  stop_grace_period: 30s
+
+x-document-agent-common: &document-agent-common
+  image: weknora-custom-document-processing-agent:local
+  restart: unless-stopped
+  environment:
+    PORT: "8091"
+    CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
+    CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_API_TIMEOUT_MS:-600000}
+    CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS: ${CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS:-900000}
+    CUSTOM_GENERAL_AGENT_MAX_TURNS: ${CUSTOM_GENERAL_AGENT_MAX_TURNS:-30}
+    CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB: ${CUSTOM_GENERAL_AGENT_MAX_ARTIFACT_MB:-20}
+    GENERAL_AGENT_RUN_ROOT: /tmp/weknora-document-processing-agent-runs
+  networks:
+    - weknora-dev
+  cpus: 2
+  mem_limit: 2g
+  pids_limit: 256
+  stop_grace_period: 30s
+
+x-mobile-common: &mobile-common
+  image: weknora-mobile-web:local
+  restart: unless-stopped
+  environment:
+    APP_SCHEME: http
+    APP_HOST: app-dev
+    APP_PORT: "8080"
+    MAX_FILE_SIZE_MB: "50"
+    MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB: "2048"
+  networks:
+    - weknora-dev
+  cpus: 0.25
+  mem_limit: 192m
+  pids_limit: 64
+  stop_grace_period: 10s
+
+services:
+  general-agent-1:
+    <<: *agent-common
+    container_name: weknora-general-agent-e2e-1
+
+  general-agent-2:
+    <<: *agent-common
+    container_name: weknora-general-agent-e2e-2
+
+  document-agent-1:
+    <<: *document-agent-common
+    container_name: weknora-document-agent-e2e-1
+
+  document-agent-2:
+    <<: *document-agent-common
+    container_name: weknora-document-agent-e2e-2
+
+  mobile-web-1:
+    <<: *mobile-common
+    container_name: weknora-mobile-web-e2e-1
+
+  mobile-web-2:
+    <<: *mobile-common
+    container_name: weknora-mobile-web-e2e-2
+
+  replica-entry:
+    image: nginx:stable-alpine
+    container_name: weknora-service-replica-e2e-entry
+    restart: unless-stopped
+    depends_on:
+      - general-agent-1
+      - general-agent-2
+      - document-agent-1
+      - document-agent-2
+      - mobile-web-1
+      - mobile-web-2
+    volumes:
+      - ./load-balancer.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:8093:8093"
+      - "127.0.0.1:5180:80"
+    networks:
+      weknora-dev:
+        aliases:
+          - weknora-custom-general-agent
+          - weknora-custom-document-processing-agent
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    stop_grace_period: 10s
+
+networks:
+  weknora-dev:
+    external: true
+    name: weknora_WeKnora-network-dev

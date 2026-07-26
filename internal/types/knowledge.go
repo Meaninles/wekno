@@ -67,9 +67,9 @@ const (
 	// no lifecycle worker can still publish artifacts for the generation.
 	ParseStatusCancelling = "cancelling"
 	// ParseStatusCompleted indicates the knowledge has been processed
-	// successfully AND every enrichment subtask has reached a terminal
-	// state. No further resources will be spent on the document until
-	// the user explicitly re-parses it.
+	// successfully AND every enabled derivative, including the independently
+	// queued Wiki lane, has reached a terminal state. No further resources will
+	// be spent on the document until the user explicitly re-parses it.
 	ParseStatusCompleted = "completed"
 	// ParseStatusFailed indicates the knowledge processing failed
 	ParseStatusFailed = "failed"
@@ -170,9 +170,10 @@ type Knowledge struct {
 	// (multimodal images or direct post-process). A worker retry can replay it
 	// after the core commit without parsing or charging storage again.
 	ProcessingFanout JSON `json:"-" gorm:"type:json"`
-	// PendingSubtasksCount is the outstanding enrichment subtask count
-	// (summary + question + graph chunks). Only meaningful while
-	// ParseStatus == "finalizing"; defaults to 0 in any terminal state.
+	// PendingSubtasksCount is the outstanding per-document enrichment subtask
+	// count (summary + question + graph chunks). Wiki is tracked separately by
+	// WikiStatus, but ParseStatus remains finalizing until both this counter is
+	// zero and Wiki is terminal. The counter defaults to 0 in terminal states.
 	PendingSubtasksCount int `json:"pending_subtasks_count" gorm:"type:int;not null;default:0"`
 	// Summary status for async summary generation
 	SummaryStatus string `json:"summary_status"     gorm:"type:varchar(32);default:none"`
@@ -180,7 +181,8 @@ type Knowledge struct {
 	// question and graph work without conflating it with core parse success.
 	EnrichmentStatus string `json:"enrichment_status" gorm:"type:varchar(32);not null;default:none"`
 	// WikiStatus is separate because Wiki is a durable KB-scoped background
-	// lane and intentionally does not hold the core document finalizer open.
+	// lane. It does not consume a per-document counter slot, but pending Wiki
+	// work keeps the end-to-end document lifecycle in finalizing.
 	WikiStatus       string `json:"wiki_status" gorm:"type:varchar(32);not null;default:none"`
 	WikiErrorMessage string `json:"wiki_error_message,omitempty" gorm:"type:text;not null;default:''"`
 	// Enable status of the knowledge

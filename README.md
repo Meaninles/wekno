@@ -302,7 +302,7 @@ docker compose -f custom/docker-compose.general-agent.yml up -d --build
 CUSTOM_GENERAL_AGENT_NETWORK=weknora_WeKnora-network docker compose -f custom/docker-compose.general-agent.yml up -d --build
 ```
 
-生产环境还必须在 `.env` 中为 app 和两个旁路服务配置相同的 `CUSTOM_GENERAL_AGENT_API_KEY`；产物目录建议使用持久化路径 `CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT=/data/files/general-agent-artifacts`。
+生产环境还必须在 `.env` 中为 app 和两个旁路服务配置相同的 `CUSTOM_GENERAL_AGENT_API_KEY`。Agent 的本地目录只保存可丢弃的运行中间文件；最终产物必须在任务完成前写入私有对象存储。知识对象、Agent 最终产物、Claude SDK 原文件交付分别使用带部署标识和固定命名空间 UUID 的独立前缀，具体配置见 [无 RWX 生产部署方案](docs/custom/生产集群无RWX最优部署方案.md)。
 
 健康检查：
 

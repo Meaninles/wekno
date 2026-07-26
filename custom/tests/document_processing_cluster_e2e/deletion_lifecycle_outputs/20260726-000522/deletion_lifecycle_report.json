@@ -1,0 +1,90 @@
+{
+  "status": "passed",
+  "started_at": "2026-07-26T00:05:22.623546+00:00",
+  "knowledge_base_id": "24fb6322-fed9-4395-8146-5fb032af1e57",
+  "scenarios": [
+    "pending",
+    "processing",
+    "finalizing",
+    "completed"
+  ],
+  "results": [
+    {
+      "boundary": "pending",
+      "knowledge_id": "ffe463be-c1b1-421f-b98e-11d1533c4ade",
+      "attempt": 1,
+      "observed_before_delete": {
+        "parse_status": "pending",
+        "summary_status": "none",
+        "enrichment_status": "none",
+        "wiki_status": "none",
+        "queue_state": "waiting",
+        "queue_owner": "",
+        "queue_epoch": null
+      },
+      "delete_seconds": 3.567385029993602,
+      "queue_state_after_delete": "none",
+      "chunks_after_delete": 0,
+      "retrieval_results_after_delete": 0,
+      "wiki_source_pages_after_delete": 0
+    },
+    {
+      "boundary": "processing",
+      "knowledge_id": "19961547-06a7-4d20-8cbd-383ef5a7af40",
+      "attempt": 1,
+      "observed_before_delete": {
+        "parse_status": "processing",
+        "summary_status": "none",
+        "enrichment_status": "none",
+        "wiki_status": "none",
+        "queue_state": "active",
+        "queue_owner": "weknora-app-dev",
+        "queue_epoch": 1
+      },
+      "delete_seconds": 2.4414527460030513,
+      "queue_state_after_delete": "none",
+      "chunks_after_delete": 0,
+      "retrieval_results_after_delete": 0,
+      "wiki_source_pages_after_delete": 0
+    },
+    {
+      "boundary": "finalizing",
+      "knowledge_id": "ac1f4490-743a-4df8-9e73-3878a51e9cd2",
+      "attempt": 1,
+      "observed_before_delete": {
+        "parse_status": "finalizing",
+        "summary_status": "pending",
+        "enrichment_status": "pending",
+        "wiki_status": "pending",
+        "queue_state": "active",
+        "queue_owner": "weknora-app-dev",
+        "queue_epoch": 1
+      },
+      "delete_seconds": 3.087557070000912,
+      "queue_state_after_delete": "none",
+      "chunks_after_delete": 0,
+      "retrieval_results_after_delete": 0,
+      "wiki_source_pages_after_delete": 0
+    },
+    {
+      "boundary": "completed",
+      "knowledge_id": "12e0f76f-c043-4de9-8f44-b31b57dce96a",
+      "attempt": 1,
+      "observed_before_delete": {
+        "parse_status": "completed",
+        "summary_status": "completed",
+        "enrichment_status": "completed",
+        "wiki_status": "completed",
+        "queue_state": "active",
+        "queue_owner": "weknora-app-dev",
+        "queue_epoch": 1
+      },
+      "delete_seconds": 2.6899999500019476,
+      "queue_state_after_delete": "none",
+      "chunks_after_delete": 0,
+      "retrieval_results_after_delete": 0,
+      "wiki_source_pages_after_delete": 0
+    }
+  ],
+  "finished_at": "2026-07-26T00:11:42.582403+00:00"
+}

@@ -110,6 +110,11 @@ global:
 
 app:
   replicaCount: 3
+  env:
+    STORAGE_TYPE: obs
+  extraEnv:
+    - name: OBS_PATH_PREFIX
+      value: weknora/__weknora_private_knowledge_objects_v1__/deployment/prod-cce-wk-6a9d12b0/namespace/6a9d12b0-48d2-46b4-9e40-1a407860838d/
   topologySpread:
     whenUnsatisfiable: DoNotSchedule
   podDisruptionBudget:
@@ -135,12 +140,24 @@ docreader:
     enabled: true
     minAvailable: 2
 
-# With STORAGE_TYPE=local, all app replicas must see the same files. Use a
-# ReadWriteMany storage class, or preferably configure shared object storage.
+# Production horizontal scaling uses a private object store for all durable
+# objects. Each purpose has a disjoint deployment-scoped namespace; do not use
+# a generic `weknora/` root and do not reuse the namespace UUID in another
+# cluster, restore drill, or test environment.
+#
+# Claude SDK original-input transfer objects use only:
+#   <original-input-prefix>/temp/<tenant-id>/<transfer-uuid>.<ext>
+# They never contain source filenames or usernames. The app deletes them after
+# success, failure, cancellation, or panic. Configure an OBS lifecycle rule
+# scoped only to this original-input prefix with an expiration of at most 24
+# hours as the hard-kill fallback; never apply that rule to knowledge objects
+# or final Agent artifacts.
+
+# Local storage is disposable parse/Agent scratch only. The production profile
+# does not require or mount an RWX volume.
 dataFiles:
   persistence:
-    accessModes:
-      - ReadWriteMany
+    enabled: false
 
 postgresql:
   persistence:

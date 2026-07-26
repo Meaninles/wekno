@@ -10,6 +10,8 @@ import mimetypes
 import os
 import posixpath
 import re
+import shutil
+import time
 import unicodedata
 import uuid
 import zipfile
@@ -278,6 +280,74 @@ def call_tool_callback(payload: ChatPayload, tool_name: str, args: dict[str, Any
     except URLError as exc:
         raise RuntimeError(f"WeKnora tool callback failed: {exc}") from exc
     return json.loads(raw.decode("utf-8"))
+
+
+def upload_artifact_before_completion(
+    payload: ChatPayload,
+    artifact: SidecarArtifact,
+    artifact_path: Path,
+) -> SidecarArtifact:
+    """Durably hand one artifact to WeKnora before a terminal result is sent.
+
+    The raw body avoids Base64 amplification. The compact, URL-safe metadata
+    header is authenticated by the same internal key as tool callbacks.
+    """
+    upload_url = (payload.artifact_upload_url or "").strip()
+    if not upload_url:
+        raise RuntimeError("WeKnora private artifact upload URL is not configured")
+    if not artifact_path.is_file():
+        raise RuntimeError(f"artifact staging file is missing: {artifact.file_token}")
+    data = artifact_path.read_bytes()
+    metadata = {
+        "tenant_id": payload.tenant_id,
+        "user_id": payload.user_id,
+        "session_id": payload.session_id,
+        "run_id": payload.run_id,
+        "assistant_message_id": payload.assistant_message_id,
+        "file_token": artifact.file_token,
+        "filename": artifact.filename,
+        "file_type": artifact.file_type,
+        "file_size": artifact.file_size,
+        "sha256": artifact.sha256,
+        "content_type": artifact.content_type,
+    }
+    encoded_metadata = base64.urlsafe_b64encode(
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    max_attempts = env_int("CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_RETRIES", 3)
+    timeout = env_int("CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_TIMEOUT_SEC", 900)
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        req = urlrequest.Request(
+            upload_url,
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": artifact.content_type or "application/octet-stream",
+                "X-WeKnora-Artifact-Metadata": encoded_metadata,
+            },
+        )
+        if payload.tool_callback_api_key:
+            req.add_header("Authorization", f"Bearer {payload.tool_callback_api_key}")
+        try:
+            with urlrequest.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+            persisted = SidecarArtifact.model_validate_json(raw)
+            if (
+                not persisted.persisted
+                or not persisted.artifact_id
+                or persisted.file_token != artifact.file_token
+                or persisted.filename != artifact.filename
+                or persisted.file_size != artifact.file_size
+                or persisted.sha256.lower() != artifact.sha256.lower()
+            ):
+                raise RuntimeError("WeKnora returned inconsistent artifact persistence metadata")
+            return persisted
+        except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError) as exc:
+            last_error = exc
+            if attempt < max_attempts:
+                time.sleep(min(2 ** (attempt - 1), 4))
+    raise RuntimeError(f"WeKnora private artifact upload failed after {max_attempts} attempts: {last_error}")
 
 
 def safe_filename(name: str) -> str:
@@ -5100,6 +5170,8 @@ def user_facing_error_message(error: Any) -> str:
         return MAX_TURNS_USER_MESSAGE
     if any(token in lowered for token in ("timeout", "timed out", "deadline exceeded", "api_timeout_ms")):
         return TIMEOUT_USER_MESSAGE
+    if any(token in lowered for token in ("private artifact upload", "artifact persistence metadata")):
+        return "智能体产物保存失败，本次任务未完成，请稍后重试"
     return raw or "General agent runtime returned an error"
 
 
@@ -5149,6 +5221,12 @@ class GeneralAgentRunner:
         self.original_input_files: list[PreparedOriginalInputFile] = []
         self.original_input_manifest_path = ""
         self.original_input_failures: list[dict[str, str]] = []
+
+    def cleanup(self) -> None:
+        root = self.run_dir.parent.resolve()
+        target = self.run_dir.resolve()
+        if target != root and root in target.parents:
+            shutil.rmtree(target, ignore_errors=True)
 
     async def run(self) -> AsyncIterator[RunEvent]:
         try:
@@ -5640,12 +5718,23 @@ class GeneralAgentRunner:
         elif answer:
             yield RunEvent(type="answer_delta", content=answer)
         result_artifacts = self.artifacts.finalize_for_result()
+        persisted_artifacts: list[SidecarArtifact] = []
+        for artifact in result_artifacts:
+            artifact_path = self.artifacts.out_dir / artifact.file_token
+            persisted_artifacts.append(
+                await asyncio.to_thread(
+                    upload_artifact_before_completion,
+                    self.payload,
+                    artifact,
+                    artifact_path,
+                )
+            )
         yield RunEvent(
             type="result",
             data=ChatResult(
                 run_id=self.payload.run_id,
                 answer=answer,
-                artifacts=result_artifacts,
+                artifacts=persisted_artifacts,
                 artifact_notice=self.artifacts.notice,
                 artifact_original_count=self.artifacts.original_count,
                 artifact_returned_count=self.artifacts.returned_count,

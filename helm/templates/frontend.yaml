@@ -46,6 +46,10 @@ spec:
               value: {{ .Values.frontend.appHost | default "app" | quote }}
             - name: APP_PORT
               value: {{ .Values.frontend.appPort | default .Values.app.service.port | quote }}
+            - name: MAX_FILE_SIZE_MB
+              value: {{ .Values.frontend.maxFileSizeMB | quote }}
+            - name: MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB
+              value: {{ .Values.frontend.maxKnowledgeSourceFileSizeMB | quote }}
           ports:
             - containerPort: 80
               name: http
@@ -86,6 +90,15 @@ spec:
       {{- with .Values.frontend.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.frontend.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.frontend.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.frontend.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.frontend.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "weknora.componentSelectorLabels" (dict "component" "frontend" "context" .) | nindent 14 }}
       {{- end }}
       {{- with .Values.frontend.tolerations }}
       tolerations:

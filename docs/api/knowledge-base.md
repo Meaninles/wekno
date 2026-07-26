@@ -1,5 +1,10 @@
 # 知识库管理 API
 
+> 当前文档知识库可同时启用向量/关键词、VLM/ASR、摘要、问题生成、实体图谱和
+> Wiki。文档只有在所有启用阶段成功后才进入完整完成状态。文件夹和渐进列表见
+> [knowledge-folders.md](./knowledge-folders.md)，队列/状态见
+> [document-workflow.md](./document-workflow.md)。
+
 [返回目录](./README.md)
 
 **字段说明（知识库对象）**

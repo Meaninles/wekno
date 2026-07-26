@@ -2,6 +2,26 @@
 
 DocReader 是 WeKnora 项目中负责文档解析和处理的 gRPC 服务。它支持多种文档格式的读取、OCR 识别、多模态处理等功能。
 
+当前集群模式下 DocReader 是无状态解析执行器：三个副本通过 headless Service 暴露
+endpoint，每个 app 都可以调用任一副本。持久工作流、租约和完成判定由 Go app/
+PostgreSQL 管理；DocReader 本地目录只存可丢弃的解析临时文件。
+
+生产基线：
+
+```text
+replicas=3
+DOCREADER_GRPC_MAX_WORKERS=4
+DOCREADER_PDF_RENDER_PARALLELISM=4
+DOCREADER_PDF_RENDER_MAX_WORKERS=1
+DOCREADER_MARKITDOWN_MAX_WORKERS=1
+DOCREADER_ODL_MAX_WORKERS=1
+DOCREADER_GRPC_MAX_FILE_SIZE_MB=50
+scratch=100Gi RWO ephemeral per Pod
+```
+
+外部知识源可以大于 50 MiB；app/文档拆分器会把超大文档转换为可独立解析的部分，
+再送入 DocReader。不要通过把单次 gRPC 上限直接提高到 2 GiB 来绕过拆分保护。
+
 ## Docker Compose 环境变量配置
 
 在 `docker-compose.yml` 文件中，docreader 服务配置了以下环境变量：
@@ -61,11 +81,12 @@ docreader:
 
 - **说明**: 允许上传的最大文件大小（单位：MB）
 - **默认值**: `50` MB
-- **用途**: 限制 gRPC 服务接收的文件大小，防止过大的文件导致服务崩溃或性能问题
+- **用途**: 限制单次 gRPC 解析传输，防止超大 payload 导致服务崩溃或性能问题；
+  它不是知识源公网 2048 MiB 上限
 - **配置示例**:
   ```bash
   # .env 文件
-  MAX_FILE_SIZE_MB=100  # 允许最大 100MB 的文件
+  MAX_FILE_SIZE_MB=50  # 当前生产保持 50MB；更大的知识源先拆分
   ```
 
 ## 其他可配置的环境变量
@@ -83,6 +104,8 @@ docreader:
 
 - `DOCREADER_MARKITDOWN_MAX_WORKERS`: MarkItDown 解析的最大并发数（默认：1，设为 0 可关闭限流）
 - `DOCREADER_PDF_RENDER_MAX_WORKERS`: 扫描 PDF 渲染为图片的最大并发数（默认：1，设为 0 可关闭限流）
+- `DOCREADER_PDF_RENDER_PARALLELISM`: 单份 PDF 页渲染并行度（生产保持 4；与同时
+  处理 PDF 数量不是同一个概念）
 - `DOCREADER_PDF_RENDER_DPI`: 扫描 PDF 渲染 DPI（默认：200）
 - `DOCREADER_PDF_JPEG_QUALITY`: 扫描 PDF 输出 JPEG 质量（默认：90，范围会自动限制在 1-95）
 
@@ -156,7 +179,7 @@ docreader:
     - MINIO_ENDPOINT=minio:9000
     - MINIO_PUBLIC_ENDPOINT=http://192.168.1.100:9000
     - MINERU_ENDPOINT=http://mineru:8080
-    - MAX_FILE_SIZE_MB=100
+    - MAX_FILE_SIZE_MB=50
 ```
 
 ### 使用腾讯云 COS
@@ -201,7 +224,22 @@ docreader:
 
 ### 3. 文件上传失败？
 
-检查 `MAX_FILE_SIZE_MB` 配置，确保限制足够大。同时需要确保前端和后端服务的文件大小限制保持一致。
+先区分公网知识源上限和 DocReader 单次传输上限。生产公网知识源为 2048 MiB，
+入口为 2304 MiB；DocReader 单次仍是 50 MiB，超大文档应由拆分器处理。如果直接
+调用 DocReader 超过 50 MiB，应修正调用链，而不是无界调大 worker/gRPC 消息。
+
+### 4. 多副本中一个 Pod 退出会怎样？
+
+Service 会把新请求送到其余 ready endpoint；已经在退出 Pod 内但尚未提交的解析
+由文档持久工作流重试。app 只有在旧执行边界安全终止后才接管，避免迟到结果与新
+结果并发写入。验证不能只看副本数，要从日志/span 证明三个 DocReader 均收到过
+真实任务。
+
+### 5. 临时卷可以用 OBS 或 RWX 吗？
+
+不能把 OBS/S3 挂成 POSIX 解析工作目录。PDF 渲染、Office 转换、OCR 图片和解压
+需要本地随机读写。生产使用每 Pod 独立 100Gi `csi-local-topology` RWO 临时卷；
+持久原文和衍生对象由 app 写入私有 OBS，不需要 RWX。
 
 ## 服务健康检查
 

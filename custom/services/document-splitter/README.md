@@ -1,5 +1,9 @@
 # WeKnora production document splitter
 
+> This splitter is part of the complete per-document workflow. It does not own
+> a separate user-visible queue: the Go app keeps durable document ownership,
+> generation, leases, retry state, and final completion in PostgreSQL.
+
 This module is loaded by the bundled DocReader service through the small gRPC
 registration point in `docreader/main.py`. It accepts a streamed source file
 and produces a streamed ZIP archive containing:
@@ -37,3 +41,24 @@ retrieval and citations. Summary, Wiki, table description, generated
 questions and graph extraction operate over deterministic strata spanning the
 whole logical document, with smaller table-specific enrichment bounds to avoid
 turning repetitive rows into noisy duplicated output.
+
+## Production limits and recovery
+
+- Public knowledge-source files may be up to 2048 MiB, while each parser part
+  remains below the 50 MiB DocReader transport ceiling.
+- Split workers use a bounded global concurrency of 4 and a per-document
+  window of 4 in the current production profile.
+- A split lease, retry backoff, maximum part count (10,000), maximum expansion
+  ratio (12), and format-specific timeouts prevent one hostile or malformed
+  document from exhausting the fleet.
+- Question and graph derivation use deterministic strata (256/512 by default,
+  64/128 for large tables). Sampling bounds work, but enabled stages still have
+  to reach a success terminal state before the document is complete.
+- Temporary parts live on the app/DocReader local RWO scratch volume. Durable
+  source objects and committed derivatives live in MinIO (development) or
+  private OBS (production).
+- A worker crash before commit is retried by the durable workflow. Generation
+  and execution-epoch fencing rejects late results from an older attempt.
+
+The deployment and tuning baseline is documented in
+[`docs/custom/生产集群无RWX最优部署方案.md`](../../../docs/custom/生产集群无RWX最优部署方案.md).

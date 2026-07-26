@@ -2,6 +2,98 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-07-26
+
+### Document Processing and Reliability
+
+- **NEW**: Durable PostgreSQL-backed, per-document workflow queue. Every app
+  replica executes the complete parse → chunk → index → multimodal →
+  summary/questions/graph/Wiki chain; system-admin `asynq.concurrency` is now
+  the complete-document concurrency per app instance.
+- **NEW**: Stable instance identity, per-boot identity, leases, execution epochs,
+  generation fencing, Kubernetes exact-termination verification, controlled
+  termination attestation, graceful drain, same-instance restart recovery, and
+  safe cross-instance takeover.
+- **NEW**: Redis cluster-wide model admission with provider/model/tenant fairness
+  for Chat, Embedding, Rerank, VLM, ASR, and Parser; interactive Chat reserve.
+- **NEW**: Bounded physical splitting for oversized PDF/Office/table/text/web/
+  image/audio documents, format-aware manifests, deterministic enrichment
+  strata, task leases/retries, expansion and part-count protection.
+- **IMPROVED**: Full-workflow terminal reconciliation and workload budgets;
+  enabled summary, question/graph, Wiki, vector, VLM, and ASR work must converge
+  before a document is complete.
+- **FIXED**: At-least-once redelivery, stale boot results, concurrent recovery,
+  late generation writes, partial enrichment failures, stranded Wiki work, and
+  delete/reparse races now converge through idempotent/fenced persistence.
+
+### Multi-Replica and Storage
+
+- **NEW**: Production topology for three app/DocReader replicas and two
+  general-agent, document-processing-agent, frontend, and mobile-web replicas.
+- **NEW**: Private object-store Agent artifact handoff. Development uses MinIO;
+  production uses OBS with purpose/deployment/namespace-scoped unique keys,
+  size/SHA256 verification, tenant-scoped downloads, and idempotent migration.
+- **NEW**: Explicit offline `/data/files`→object-store migration command with
+  PostgreSQL advisory locking, app-heartbeat/queue drain gates, audit/apply
+  reports, required-object checks, reference rewriting, and final zero-local-
+  reference verification.
+- **CHANGED**: Production requires no RWX. Durable source/derived objects and
+  Agent artifacts live in private OBS; app, DocReader, and Agent workspaces use
+  independent disposable RWO local scratch.
+- **IMPROVED**: Agent services support two replicas without shared run
+  directories. Python remains isolated from WeKnora/business databases, MCP,
+  and object-store credentials; Go owns tools, authorization, and persistence.
+- **IMPROVED**: Helm supports headless DocReader endpoints, topology spread,
+  PDBs, no-surge rollout for large local scratch PVCs, runtime-verifier RBAC,
+  multi-replica custom Agents, desktop/mobile upload limits, and a reviewed
+  production profile.
+
+### Knowledge Management and UI
+
+- **NEW**: Knowledge-base management folders with closure-table hierarchy,
+  incremental list/search, subtree statistics, document movement, folder
+  uploads, URL/manual placement, and multi-instance-safe reconciliation.
+- **NEW**: Compact document queue badges show the global waiting total and each
+  visible document's true global position without leaking other tenant data.
+- **NEW**: Full-workflow status projection and accurate
+  pending/processing/cancelling/deleting/completed/failed/cancelled/draft
+  filters. Hover details expose parse/index/multimodal/summary/question/graph/
+  Wiki state without cluttering cards.
+- **FIXED**: Persisted derivative `none` is rendered as not-started/waiting while
+  prerequisites are incomplete, not as skipped. Explicit skip is reserved for
+  disabled/not-applicable/structured no-op work; execution anomalies fail.
+- **NEW**: Server-authoritative large-document preview policy. Unsafe originals
+  use paged parsed content instead of loading a full browser Blob.
+- **NEW**: Scalable Wiki graph browsing with categorized/paged node lists,
+  server search, bounded overview, paged ego neighborhoods, and click-to-pivot
+  from any related node.
+- **FIXED**: Deleting waiting, running, derivative-running, or completed
+  documents cancels/fences work and cleans relational search data, vector
+  content, graph data, Wiki references, and durable objects.
+
+### Production and Validation
+
+- **CHANGED**: Knowledge-source raw upload ceiling is 2048 MiB; frontend/mobile
+  and Ingress use a 2304 MiB ceiling with request buffering disabled and
+  7200-second timeouts. Ordinary attachments remain 50 MiB/80 MiB proxy, and
+  internal Agent artifact proxies require at least 128 MiB.
+- **TEST**: DeepSeek V4 Flash sustained 32/32 concurrent 160-token generations
+  at P95 5.655 s; production Chat admission is 24 to retain 25% headroom.
+- **TEST**: Three app replicas processed a matched 100-document workload at
+  ~4.50 docs/s versus ~1.23 docs/s for one app, and completed a 500-document
+  run at ~4.10 docs/s. These are local measurements, not production SLAs.
+- **TEST**: Retained “公司制度” validation corpus completed 632/632 documents
+  with all enabled derivatives, 7,871 chunks, 13,267 embeddings, 5,396
+  generated questions, 1,660 published Wiki pages, and 20,008 Neo4j
+  nodes/13,765 relationships.
+- **DOC**: Root README, architecture index, production migration/deployment
+  runbooks, Helm, API, user/developer guides, service/test READMEs, Wiki pages,
+  troubleshooting, and consolidated delivery documents synchronized to the
+  current implementation.
+- **CHANGED**: Removed the three generated binary PDF manuals; system
+  introduction, user guide, and Agent capability delivery manuals are now
+  maintained directly as reviewable Markdown.
+
 ## [0.6.3] - 2026-06-26
 
 ### New Features

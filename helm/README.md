@@ -34,27 +34,32 @@ helm install weknora ./helm \
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    I["Ingress / ELB / WAF"] --> F["frontend ×N"]
+    I --> M["mobile-web ×N"]
+    F --> A["Go app ×N"]
+    M --> A
+    A --> D["DocReader ×N"]
+    A --> G["general-agent ×N"]
+    A --> P["document-processing-agent ×N"]
+    A --> DB["PostgreSQL / ParadeDB"]
+    A <--> R["Redis delivery / stream / model admission"]
+    A --> O["MinIO / private OBS"]
+    A --> N["Neo4j"]
+    A --> L["LiteLLM / model providers"]
+    G --> A
+    P --> A
 ```
-                    ┌─────────────┐
-                    │   Ingress   │
-                    └──────┬──────┘
-                           │
-           ┌───────────────┴───────────────┐
-           │                               │
-           ▼                               ▼
-    ┌─────────────┐                 ┌─────────────┐
-    │  Frontend   │                 │   Backend   │
-    │  (Vue.js)   │                 │   (Go/Gin)  │
-    └─────────────┘                 └──────┬──────┘
-                                           │
-                    ┌──────────────────────┼──────────────────────┐
-                    │                      │                      │
-                    ▼                      ▼                      ▼
-             ┌─────────────┐        ┌─────────────┐        ┌─────────────┐
-             │  Docreader  │        │  PostgreSQL │        │    Redis    │
-             │   (gRPC)    │        │  (ParadeDB) │        │   (Queue)   │
-             └─────────────┘        └─────────────┘        └─────────────┘
-```
+
+Each app replica owns complete document workflows. PostgreSQL is the durable
+workflow source of truth; Redis/Asynq is an at-least-once delivery layer and
+also hosts cluster-wide model admission. Agent tool execution and artifact
+persistence return to Go; Python Agent Pods do not connect directly to the
+WeKnora database, MCP services, business databases, or object-store credentials.
+
+For the full state, storage, failure, and production topology, read
+[`docs/custom/当前实现架构与文档索引.md`](../docs/custom/当前实现架构与文档索引.md).
 
 ## Installation
 
@@ -101,91 +106,56 @@ helm install weknora ./helm \
 
 ### Production Installation
 
-For production, use a values file:
+The repository contains one reviewed profile for the current production CCE:
 
-```yaml
-# values-production.yaml
-global:
-  storageClass: "fast-ssd"
+- [`values-production-ha.yaml`](./values-production-ha.yaml): fixed topology,
+  capacity, OBS namespaces, RWO scratch, ingress limits, PDB and spread.
+- [`deploy/production/values-site.example.yaml`](../deploy/production/values-site.example.yaml):
+  copy to a protected workspace and replace SWR namespace/image SHA.
+- [`deploy/production/values-migration.example.yaml`](../deploy/production/values-migration.example.yaml):
+  one maintenance app for SQL and legacy-artifact migration.
 
-app:
-  replicaCount: 3
-  env:
-    STORAGE_TYPE: obs
-  extraEnv:
-    - name: OBS_PATH_PREFIX
-      value: weknora/__weknora_private_knowledge_objects_v1__/deployment/prod-cce-wk-6a9d12b0/namespace/6a9d12b0-48d2-46b4-9e40-1a407860838d/
-  topologySpread:
-    whenUnsatisfiable: DoNotSchedule
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 2
-  resources:
-    requests:
-      cpu: 500m
-      memory: 1Gi
-    limits:
-      cpu: 2
-      memory: 4Gi
+Target replicas are app/DocReader `3/3`, general-agent/document-processing-agent
+`2/2`, and frontend/mobile-web `2/2`. Every app admits four complete document
+workflows; cluster document capacity is 12. Durable files use private OBS, and
+each app/DocReader/Agent Pod gets its own `csi-local-topology` RWO ephemeral
+scratch volume. No RWX volume is required.
 
-# Every app replica is a complete document-processing worker. The administrator
-# setting `asynq.concurrency` is the per-replica complete-document concurrency.
-docreader:
-  replicaCount: 3
-  service:
-    headless: true
-  topologySpread:
-    whenUnsatisfiable: DoNotSchedule
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 2
-
-# Production horizontal scaling uses a private object store for all durable
-# objects. Each purpose has a disjoint deployment-scoped namespace; do not use
-# a generic `weknora/` root and do not reuse the namespace UUID in another
-# cluster, restore drill, or test environment.
-#
-# Claude SDK original-input transfer objects use only:
-#   <original-input-prefix>/temp/<tenant-id>/<transfer-uuid>.<ext>
-# They never contain source filenames or usernames. The app deletes them after
-# success, failure, cancellation, or panic. Configure an OBS lifecycle rule
-# scoped only to this original-input prefix with an expiration of at most 24
-# hours as the hard-kill fallback; never apply that rule to knowledge objects
-# or final Agent artifacts.
-
-# Local storage is disposable parse/Agent scratch only. The production profile
-# does not require or mount an RWX volume.
-dataFiles:
-  persistence:
-    enabled: false
-
-postgresql:
-  persistence:
-    size: 100Gi
-
-ingress:
-  enabled: true
-  host: weknora.company.com
-  tls:
-    enabled: true
-    secretName: weknora-tls
-
-mobileWeb:
-  enabled: true
-  image:
-    repository: registry.company.com/weknora-mobile-web
-    tag: v0.6.3
-
-secrets:
-  existingSecret: weknora-secrets  # Use pre-created secret
-```
+Render and validate:
 
 ```bash
-helm install weknora ./helm \
-  --namespace weknora \
-  --create-namespace \
-  -f values-production.yaml
+cp deploy/production/values-site.example.yaml /secure/values-site.yaml
+# Replace every REPLACE_* token in the protected copy.
+
+helm lint ./helm \
+  -f helm/values-production-ha.yaml \
+  -f /secure/values-site.yaml
+
+helm template weknora ./helm -n weknora \
+  -f helm/values-production-ha.yaml \
+  -f /secure/values-site.yaml \
+  > /secure/weknora-production.yaml
+
+grep -n 'REPLACE_' /secure/weknora-production.yaml
+kubectl apply --dry-run=server -f /secure/weknora-production.yaml
+kubectl diff -f /secure/weknora-production.yaml
 ```
+
+The existing production resources are not currently owned by an active Helm
+release. For that environment, **do not run `helm upgrade --install`, do not
+use `--prune`, and do not delete the existing PostgreSQL/Neo4j/Redis/LiteLLM
+Services or PVCs**. Follow the exact backup, drain, single-replica migration,
+`/data/files`→OBS verification, immutable-resource replacement, rollout,
+acceptance, and rollback sequence in:
+
+1. [`deploy/production/README.md`](../deploy/production/README.md)
+2. [`当前版本生产更新部署执行手册`](../docs/custom/当前版本生产更新部署执行手册.md)
+3. [`生产集群无 RWX 最优部署方案`](../docs/custom/生产集群无RWX最优部署方案.md)
+
+For a genuinely new cluster with no existing resources or data, the rendered
+profile may be installed as a Helm release after site-specific secrets,
+storage classes, external database/Redis/Neo4j/model services, and object
+prefixes have been independently reviewed.
 
 ## Configuration
 
@@ -280,6 +250,23 @@ the currently supplied internal plaintext endpoints; if the site security
 baseline requires encrypted east-west traffic, provide the real TLS endpoints
 and CA Secrets and switch PostgreSQL/Redis to verified TLS rather than using
 `insecureSkipVerify`.
+
+### Custom Agent Services
+
+| Parameter | Description | Production value |
+|---|---|---:|
+| `generalAgent.replicaCount` | General/data/table/KB-manager runtime Pods | `2` |
+| `generalAgent.scratch` | Per-Pod POSIX run workspace | `20Gi` RWO ephemeral |
+| `documentProcessingAgent.replicaCount` | Office document runtime Pods | `2` |
+| `documentProcessingAgent.scratch` | Per-Pod Office/PDF workspace | `40Gi` RWO ephemeral |
+| `app.agentIntegration.artifactStorage.provider` | Durable final artifacts | `obs` |
+| `app.agentIntegration.artifactStorage.pathPrefix` | Private deployment/namespace-scoped artifact root | unique production prefix |
+
+One SDK run stays in one Agent Pod. Before terminal completion, final artifacts
+are uploaded to the Go internal endpoint and committed to private object
+storage with size/SHA verification. Agent scratch is disposable; it must not
+be an OBS/S3 mount or RWX share. Any proxy on the internal artifact route must
+allow at least 128 MiB.
 
 ### Frontend
 
@@ -415,11 +402,20 @@ The chart follows CNCF security best practices:
 
 ## Upgrading
 
+For an ordinary Helm-owned installation:
+
 ```bash
 helm upgrade weknora ./helm \
   --namespace weknora \
-  --reuse-values
+  -f values-production.yaml
 ```
+
+Avoid `--reuse-values` when chart defaults or required security/storage fields
+changed; render and diff the complete effective values instead. The current
+production CCE is a migration from unmanaged resources and must use the
+dedicated execution runbook above, not this generic command. Run SQL/data
+migrations on exactly one maintenance app; all serving app replicas use
+`AUTO_MIGRATE=false`.
 
 ## Uninstalling
 
@@ -459,6 +455,21 @@ kubectl logs -n weknora -l app.kubernetes.io/component=frontend -f
 **Database connection errors**
 - Verify secrets are correct
 - Check PostgreSQL logs: `kubectl logs -n weknora -l app.kubernetes.io/component=database`
+
+**Knowledge uploads return 413**
+- The raw backend knowledge-source limit is 2048 MiB.
+- Frontend/mobile Nginx and Ingress must allow 2304 MiB, request buffering must
+  be off, and read/send timeouts must be 7200 seconds.
+- Check cloud ELB/WAF as well; a default 1 MiB limit in any layer fails before
+  the request reaches app.
+- Internal Agent artifact proxies need at least 128 MiB; ordinary user
+  attachments still use the 50 MiB business limit.
+
+**A failed app is not immediately taken over**
+- Heartbeat or lease expiry is not sufficient proof that an old process cannot
+  still write. Check boot/epoch, the exact Kubernetes container termination
+  verifier, and node fencing. Use the SystemAdmin termination-attestation API
+  only after the exact old boot is proved stopped.
 
 ## Contributing
 

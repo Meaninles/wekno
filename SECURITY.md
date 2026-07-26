@@ -44,3 +44,42 @@ We aim to:
 We kindly ask reporters to follow responsible disclosure practices and allow us reasonable time to address the issue before any public disclosure.
 
 Thank you for helping keep **WeKnora** and its users secure.
+
+## Current Deployment Security Boundaries
+
+The current enterprise fork adds multi-replica document and Agent services.
+Security reviews should include the following project-specific boundaries:
+
+- **Tenant authorization remains in Go.** Python Agent services do not connect
+  directly to the WeKnora database, business databases, MCP servers, or
+  object-store credentials. Every tool callback and artifact download is
+  re-authorized by tenant/session/run.
+- **Durable objects are private.** Development uses MinIO and production uses
+  OBS. Knowledge objects, Agent artifacts, and temporary Agent inputs use
+  separate deployment/namespace-scoped prefixes. Enterprise files must never
+  use `public-read`.
+- **Temporary inputs are bounded.** Object keys do not contain usernames or
+  source filenames; objects are deleted on success/failure/cancellation/panic,
+  with a prefix-only lifecycle of at most 24 hours as a hard-kill fallback.
+- **Internal Agent APIs require a dedicated key.** Do not reuse JWT, model
+  credentials, or OBS keys. Rotate through Kubernetes Secret management and
+  never log the value.
+- **Uploads are validated by the backend.** Raising Nginx/Ingress to 2304 MiB
+  only permits transport of a 2048 MiB knowledge source; it does not bypass
+  file type, archive/XML complexity, expansion-ratio, SSRF, or parser limits.
+- **Document takeover fails closed.** Heartbeat/lease expiry is not proof that
+  an old process stopped. The SystemAdmin termination-attestation endpoint must
+  only be used after the exact boot is terminated or its node/runtime is
+  fenced.
+- **Local scratch is disposable.** App, DocReader, and Agent Pods use isolated
+  RWO workspaces. Do not mount OBS/S3 as a POSIX workspace or introduce an RWX
+  share containing cross-tenant intermediate files.
+- **Secrets are not documentation.** Production values reference existing
+  Secrets; rendered Secret values, API keys, SSO credentials, database
+  passwords, and object-store keys must not be committed or pasted into issue
+  reports.
+
+Operational details are in
+[`docs/custom/当前版本生产更新部署执行手册.md`](./docs/custom/当前版本生产更新部署执行手册.md)
+and the architecture boundary is documented in
+[`docs/custom/当前实现架构与文档索引.md`](./docs/custom/当前实现架构与文档索引.md).

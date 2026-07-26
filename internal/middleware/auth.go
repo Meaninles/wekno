@@ -62,6 +62,9 @@ var noAuthAPI = map[string][]string{
 	// must not intercept this exact callback path, otherwise the sidecar cannot
 	// call back into WeKnora tools such as KB/Web/MCP/Skills/DB.
 	"/api/v1/custom/general-agent/internal/tools/call": {"POST"},
+	// Agent artifact delivery uses the same dedicated internal API key. Keep
+	// the bypass exact: no sibling path or other method becomes public.
+	"/api/v1/custom/general-agent/internal/artifacts/upload": {"POST"},
 	// MCP OAuth provider redirect: the third-party authorization server
 	// redirects the browser here without a WeKnora bearer token. The request
 	// is authenticated by the opaque, single-use `state` parameter instead.

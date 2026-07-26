@@ -41,6 +41,13 @@ import (
 )
 
 func main() {
+	if handled, err := runMaintenanceCommand(context.Background(), os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "maintenance command failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	// Set Gin mode
 	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)

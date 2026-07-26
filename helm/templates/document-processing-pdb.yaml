@@ -28,3 +28,33 @@ spec:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "docreader" "context" .) | nindent 6 }}
 {{- end }}
+{{- if and .Values.frontend.enabled .Values.frontend.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "weknora.fullname" . }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "frontend" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.frontend.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" "frontend" "context" .) | nindent 6 }}
+{{- end }}
+{{- if and .Values.mobileWeb.enabled .Values.mobileWeb.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "weknora.fullname" . }}-mobile-web
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "mobile-web" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.mobileWeb.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" "mobile-web" "context" .) | nindent 6 }}
+{{- end }}

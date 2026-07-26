@@ -22,6 +22,7 @@ import (
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
+	"github.com/Tencent/WeKnora/internal/custom/modules/artifactstore"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -43,21 +44,29 @@ type Service struct {
 	globalFileService interfaces.FileService
 	frontendBaseURL   string
 	localBaseDir      string
+	artifactStore     *artifactstore.Store
+}
+
+func (s *Service) SetArtifactStore(store *artifactstore.Store) {
+	if s != nil {
+		s.artifactStore = store
+	}
 }
 
 type artifactRow struct {
-	ID          string         `gorm:"column:id"`
-	TenantID    uint64         `gorm:"column:tenant_id"`
-	SessionID   string         `gorm:"column:session_id"`
-	MessageID   string         `gorm:"column:message_id"`
-	FilePath    string         `gorm:"column:file_path"`
-	FileName    string         `gorm:"column:file_name"`
-	FileType    string         `gorm:"column:file_type"`
-	FileSize    int64          `gorm:"column:file_size"`
-	SHA256      string         `gorm:"column:sha256"`
-	ContentType string         `gorm:"column:content_type"`
-	CreatedAt   time.Time      `gorm:"column:created_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"column:deleted_at"`
+	ID           string         `gorm:"column:id"`
+	TenantID     uint64         `gorm:"column:tenant_id"`
+	SessionID    string         `gorm:"column:session_id"`
+	MessageID    string         `gorm:"column:message_id"`
+	FilePath     string         `gorm:"column:file_path"`
+	StorageState string         `gorm:"column:storage_state"`
+	FileName     string         `gorm:"column:file_name"`
+	FileType     string         `gorm:"column:file_type"`
+	FileSize     int64          `gorm:"column:file_size"`
+	SHA256       string         `gorm:"column:sha256"`
+	ContentType  string         `gorm:"column:content_type"`
+	CreatedAt    time.Time      `gorm:"column:created_at"`
+	DeletedAt    gorm.DeletedAt `gorm:"column:deleted_at"`
 }
 
 type shareTurn struct {
@@ -841,11 +850,15 @@ func (s *Service) GetSharedArtifact(ctx context.Context, token string, artifactI
 
 	var row artifactRow
 	if err := s.db.WithContext(ctx).
-		Where("id = ? AND tenant_id = ? AND session_id = ? AND deleted_at IS NULL", artifactID, link.SourceTenantID, link.SessionID).
+		Where("id = ? AND tenant_id = ? AND session_id = ? AND storage_state = ? AND deleted_at IS NULL",
+			artifactID, link.SourceTenantID, link.SessionID, "ready").
 		First(&row).Error; err != nil {
 		return nil, err
 	}
-	reader, err := os.Open(row.FilePath)
+	if s.artifactStore == nil {
+		return nil, fmt.Errorf("private artifact object storage is unavailable")
+	}
+	reader, err := s.artifactStore.Open(ctx, row.FilePath)
 	if err != nil {
 		return nil, gorm.ErrRecordNotFound
 	}

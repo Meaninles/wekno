@@ -6,11 +6,13 @@ import (
 	"io"
 	"mime/multipart"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -195,6 +197,72 @@ func TestPlannedMinioAndS3OfflinePathContracts(t *testing.T) {
 			require.ErrorIs(t, err, ErrCrossBackendCopy)
 			require.Error(t, tc.service.CommitBytesAtPath(context.Background(), nil, tc.wrongPath))
 			require.Error(t, tc.service.CommitBytesAtPath(context.Background(), nil, tc.outsideNS))
+		})
+	}
+}
+
+func TestOriginalInputSameNameConcurrentReservationsAreUnique(t *testing.T) {
+	const (
+		reservations = 512
+		tenantID     = uint64(10000)
+		fileName     = "replica_document_input.txt"
+		prefix       = "weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/"
+	)
+	services := []struct {
+		name       string
+		service    interfaces.PlannedFileService
+		pathPrefix string
+	}{
+		{
+			name:       "minio",
+			service:    &minioFileService{bucketName: "private", pathPrefix: prefix},
+			pathPrefix: "minio://private/" + prefix + "temp/10000/",
+		},
+		{
+			name:       "obs",
+			service:    &obsFileService{bucketName: "private", pathPrefix: strings.TrimSuffix(prefix, "/")},
+			pathPrefix: "obs://private/" + prefix + "temp/10000/",
+		},
+	}
+
+	for _, tc := range services {
+		t.Run(tc.name, func(t *testing.T) {
+			results := make(chan string, reservations)
+			errors := make(chan error, reservations)
+			var wg sync.WaitGroup
+			for range reservations {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					reserved, err := tc.service.ReserveBytesPath(tenantID, fileName, true)
+					if err != nil {
+						errors <- err
+						return
+					}
+					results <- reserved
+				}()
+			}
+			wg.Wait()
+			close(results)
+			close(errors)
+
+			for err := range errors {
+				require.NoError(t, err)
+			}
+			seen := make(map[string]struct{}, reservations)
+			for reserved := range results {
+				require.True(t, strings.HasPrefix(reserved, tc.pathPrefix), reserved)
+				require.NotContains(t, reserved, "replica_document_input")
+				objectID, ext := strings.TrimSuffix(path.Base(reserved), path.Ext(reserved)), path.Ext(reserved)
+				require.Equal(t, ".txt", ext)
+				parsed, err := uuid.Parse(objectID)
+				require.NoError(t, err)
+				require.NotEqual(t, uuid.Nil, parsed)
+				_, duplicate := seen[reserved]
+				require.False(t, duplicate, "concurrent reservation returned duplicate object path %s", reserved)
+				seen[reserved] = struct{}{}
+			}
+			require.Len(t, seen, reservations)
 		})
 	}
 }

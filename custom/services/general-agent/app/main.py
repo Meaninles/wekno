@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,8 @@ async def chat_stream(request: Request, authorization: str | None = Header(defau
         except Exception as exc:
             err = RunEvent(type="error", message=user_facing_error_message(exc))
             yield err.model_dump_json(exclude_none=True) + "\n"
+        finally:
+            await asyncio.to_thread(runner.cleanup)
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 

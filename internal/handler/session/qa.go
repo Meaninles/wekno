@@ -105,6 +105,13 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestContext, *CreateKnowledgeQARequest, error) {
 	receivedAt := time.Now()
 	ctx := logger.CloneContext(c.Request.Context())
+	var originalInputFiles []types.OriginalInputFile
+	keepOriginalInputFiles := false
+	defer func() {
+		if !keepOriginalInputFiles {
+			h.cleanupClaudeOriginalInputFiles(ctx, originalInputFiles)
+		}
+	}()
 	requestID := secutils.SanitizeForLog(c.GetString(types.RequestIDContextKey.String()))
 	logger.Infof(ctx, "[%s] TTFB:start request_id=%s received_at=%d",
 		logPrefix, requestID, receivedAt.UnixMilli())
@@ -181,7 +188,6 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	// Process inline base64 images: decode and save to storage.
 	// VLM analysis for RAG paths is deferred to the pipeline rewrite step.
 	// For pure chat paths with non-vision models, VLM analysis runs here as fallback.
-	var originalInputFiles []types.OriginalInputFile
 	if len(request.Images) > 0 {
 		if customAgent == nil || !customAgent.Config.ImageUploadEnabled {
 			logger.Warnf(ctx, "[%s] Image upload is not enabled for this agent, rejecting %d images", logPrefix, len(request.Images))
@@ -309,6 +315,15 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		wg.Wait()
 		close(errChan)
 
+		// Preserve every successfully staged transfer object before checking
+		// attachment processing errors. A sibling attachment may fail after
+		// this object was already uploaded, and the parse-error defer must
+		// still be able to remove it.
+		for _, original := range originalAttachmentFiles {
+			if original.ID != "" {
+				originalInputFiles = append(originalInputFiles, original)
+			}
+		}
 		if len(errChan) > 0 {
 			err := <-errChan
 			logger.Errorf(ctx, "[%s] attachment processing failed: %v", logPrefix, err)
@@ -316,11 +331,6 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		}
 
 		logger.Infof(ctx, "[%s] all attachments processed", logPrefix)
-		for _, original := range originalAttachmentFiles {
-			if original.ID != "" {
-				originalInputFiles = append(originalInputFiles, original)
-			}
-		}
 	}
 
 	// Resolve enable_memory:
@@ -381,6 +391,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		reqAgentID:             request.AgentID,
 	}
 
+	keepOriginalInputFiles = true
 	return reqCtx, &request, nil
 }
 
@@ -755,6 +766,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			},
 		}); err != nil {
 			logger.Errorf(ctx, "Failed to emit agent query event: %v", err)
+			h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 			return
 		}
 	}
@@ -762,6 +774,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	// Create user message
 	userMsg, err := h.createUserMessage(ctx, sessionID, reqCtx.query, reqCtx.requestID, reqCtx.mentionedItems, convertImageAttachments(reqCtx.images), reqCtx.attachments, reqCtx.channel)
 	if err != nil {
+		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
@@ -770,6 +783,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	// Create assistant message
 	assistantMessagePtr, err := h.createAssistantMessage(ctx, reqCtx.assistantMessage)
 	if err != nil {
+		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
@@ -858,6 +872,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx)
 				logger.Infof(streamCtx.asyncCtx, "Agent QA service completed for session: %s", sessionID)
 			}
+			h.cleanupClaudeOriginalInputFiles(streamCtx.asyncCtx, reqCtx.originalInputFiles)
 		}()
 
 		// Run VLM image analysis if applicable
@@ -1054,11 +1069,26 @@ func userFacingAgentErrorMessage(err error) string {
 		strings.Contains(lower, "turncount") {
 		return "任务过于复杂，请将任务拆分为具体子任务逐个执行，或提高智能体最大迭代次数"
 	}
+	if lower == "eof" ||
+		strings.Contains(lower, "unexpected eof") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "server disconnected") ||
+		strings.Contains(lower, "stream ended without result") ||
+		strings.Contains(lower, "general agent stream failed: status=502") ||
+		strings.Contains(lower, "general agent stream failed: status=503") ||
+		strings.Contains(lower, "general agent stream failed: status=504") {
+		return "智能体服务连接中断，请稍后重试"
+	}
 	if strings.Contains(lower, "timeout") ||
 		strings.Contains(lower, "timed out") ||
 		strings.Contains(lower, "deadline exceeded") ||
 		strings.Contains(lower, "api_timeout_ms") {
 		return "任务耗时过长，请将任务拆分为具体子任务逐个执行，或提高智能体LLM调用超时时间"
+	}
+	if strings.Contains(lower, "content block is not a text block") {
+		return "模型服务返回了不兼容的响应格式，请重试或切换模型"
 	}
 	return raw
 }

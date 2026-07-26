@@ -52,6 +52,7 @@ func (h *Handler) DownloadArtifact(c *gin.Context) {
 	}
 	ctx := logger.CloneContext(c.Request.Context())
 	tenantID, _ := types.TenantIDFromContext(ctx)
+	userID, _ := types.UserIDFromContext(ctx)
 	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
 		c.Error(errors.NewBadRequestError("artifact id is required"))
@@ -59,12 +60,18 @@ func (h *Handler) DownloadArtifact(c *gin.Context) {
 	}
 	var row Artifact
 	if err := h.service.db.WithContext(ctx).
-		Where("id = ? AND tenant_id = ?", id, tenantID).
+		Where(
+			"id = ? AND tenant_id = ? AND user_id = ? AND storage_state = ?",
+			id,
+			tenantID,
+			userID,
+			artifactStorageStateReady,
+		).
 		First(&row).Error; err != nil {
 		c.Error(errors.NewNotFoundError("artifact not found"))
 		return
 	}
-	streamArtifact(c, row)
+	h.streamArtifact(c, row)
 }
 
 func (h *Handler) DownloadEmbedArtifact(c *gin.Context) {
@@ -100,16 +107,20 @@ func (h *Handler) DownloadEmbedArtifact(c *gin.Context) {
 	}
 	var row Artifact
 	if err := h.service.db.WithContext(ctx).
-		Where("id = ? AND tenant_id = ? AND session_id = ?", id, tenantID, sessionID).
+		Where("id = ? AND tenant_id = ? AND session_id = ? AND storage_state = ?", id, tenantID, sessionID, artifactStorageStateReady).
 		First(&row).Error; err != nil {
 		c.Error(errors.NewNotFoundError("artifact not found"))
 		return
 	}
-	streamArtifact(c, row)
+	h.streamArtifact(c, row)
 }
 
-func streamArtifact(c *gin.Context, row Artifact) {
-	f, err := os.Open(row.FilePath)
+func (h *Handler) streamArtifact(c *gin.Context, row Artifact) {
+	if h == nil || h.service == nil || h.service.artifactStore == nil {
+		c.Error(errors.NewInternalServerError("artifact object storage unavailable"))
+		return
+	}
+	f, err := h.service.artifactStore.Open(c.Request.Context(), row.FilePath)
 	if err != nil {
 		c.Error(errors.NewNotFoundError("artifact file not found"))
 		return

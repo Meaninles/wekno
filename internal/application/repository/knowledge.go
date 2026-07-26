@@ -792,10 +792,17 @@ func (r *knowledgeRepository) CompareAndSwapKnowledgeProcessingGeneration(
 	return result.RowsAffected == 1, nil
 }
 
-// UpdateWikiStatusGeneration records the asynchronous Wiki lane without
-// touching document parse timestamps or lifecycle ownership. The exact
-// generation predicate makes a delayed old Wiki batch harmless after reparse;
-// terminal cancel/delete rows are deliberately ineligible.
+// UpdateWikiStatusGeneration records the asynchronous Wiki lane and closes the
+// final document gate when every per-document enrichment slot has already
+// drained. Wiki remains a separately queued, KB-scoped pipeline, but a document
+// must not become completed while its exact generation is still pending Wiki
+// materialization.
+//
+// Status persistence and the guarded finalizing->completed promotion share one
+// transaction. This matters when the Wiki worker is the last finisher: a crash
+// after committing a terminal Wiki status but before promoting the document
+// would otherwise leave a zero-count generation stranded forever, because a
+// retry correctly treats that terminal Wiki operation as already settled.
 func (r *knowledgeRepository) UpdateWikiStatusGeneration(
 	ctx context.Context,
 	tenantID uint64,
@@ -817,28 +824,63 @@ func (r *knowledgeRepository) UpdateWikiStatusGeneration(
 	default:
 		return false, fmt.Errorf("update Wiki status generation: invalid status %q", status)
 	}
-	result := r.db.WithContext(ctx).
-		Model(&types.Knowledge{}).
-		Where(
-			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ? AND deleted_at IS NULL",
-			tenantID,
-			id,
-			expectedKnowledgeBaseID,
-			expectedGeneration,
-			[]string{
-				types.ParseStatusProcessing,
+	updated := false
+	now := time.Now()
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.
+			Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ? AND deleted_at IS NULL",
+				tenantID,
+				id,
+				expectedKnowledgeBaseID,
+				expectedGeneration,
+				[]string{
+					types.ParseStatusProcessing,
+					types.ParseStatusFinalizing,
+					types.ParseStatusCompleted,
+				},
+			).
+			UpdateColumns(map[string]interface{}{
+				"wiki_status":        status,
+				"wiki_error_message": enrichmentoutcome.NormalizeDetail(detail),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		updated = true
+
+		if status == types.WikiStatusPending {
+			return nil
+		}
+		promotion := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count = 0 AND wiki_status <> ? AND deleted_at IS NULL",
+				tenantID,
+				id,
+				expectedKnowledgeBaseID,
+				expectedGeneration,
 				types.ParseStatusFinalizing,
-				types.ParseStatusCompleted,
-			},
-		).
-		UpdateColumns(map[string]interface{}{
-			"wiki_status":        status,
-			"wiki_error_message": enrichmentoutcome.NormalizeDetail(detail),
-		})
-	if result.Error != nil {
-		return false, result.Error
-	}
-	return result.RowsAffected == 1, nil
+				types.WikiStatusPending,
+			).
+			Updates(map[string]interface{}{
+				"parse_status":      types.ParseStatusCompleted,
+				"processed_at":      now,
+				"processing_owner":  "",
+				"processing_fanout": nil,
+				"enrichment_status": gorm.Expr(
+					"CASE WHEN enrichment_status = ? THEN ? ELSE enrichment_status END",
+					types.EnrichmentStatusPending,
+					types.EnrichmentStatusDegraded,
+				),
+				"updated_at": now,
+			})
+		return promotion.Error
+	})
+	return updated, err
 }
 
 // RecordKnowledgeFanoutCompletion inserts one generation-scoped fan-out item
@@ -1304,9 +1346,10 @@ func (r *knowledgeRepository) UpdateActiveDeletingKnowledgeColumns(
 }
 
 // FinalizeSubtask atomically decrements pending_subtasks_count and, when
-// the counter reaches zero while parse_status is still 'finalizing',
-// flips the row to 'completed' in the same statement so concurrent
-// subtask completions can't race the promotion.
+// the counter reaches zero while parse_status is still 'finalizing' and Wiki
+// is no longer pending, flips the row to 'completed'. Concurrent derivative
+// and Wiki completions can arrive in either order; both sides attempt the same
+// guarded promotion and at most one wins.
 //
 // Returns (newCount, promoted, error). promoted is true iff this caller
 // was the one whose UPDATE flipped 'finalizing'→'completed'.
@@ -1334,7 +1377,25 @@ func (r *knowledgeRepository) FinalizeSubtask(
 		return 0, false, res.Error
 	}
 
-	// 2) Guarded promote. EVERY caller unconditionally attempts this after
+	// 2) Settle the enrichment aggregate even when Wiki is still pending. This
+	//    keeps the per-document derivative result truthful while the document
+	//    remains finalizing on the independent Wiki gate.
+	settleRes := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ? AND parse_status = ? AND pending_subtasks_count = 0",
+			id, types.ParseStatusFinalizing).
+		Updates(map[string]interface{}{
+			"enrichment_status": gorm.Expr(
+				"CASE WHEN enrichment_status = ? THEN ? ELSE enrichment_status END",
+				types.EnrichmentStatusPending,
+				types.EnrichmentStatusDegraded,
+			),
+			"updated_at": now,
+		})
+	if settleRes.Error != nil {
+		return 0, false, settleRes.Error
+	}
+
+	// 3) Guarded promote. EVERY caller unconditionally attempts this after
 	//    decrementing — we must NOT gate it on a separate SELECT of the
 	//    counter. That read can be served by a lagging read-replica (or a
 	//    stale connection snapshot) and return a non-zero value even after
@@ -1347,24 +1408,19 @@ func (r *knowledgeRepository) FinalizeSubtask(
 	//    caller whose decrement actually brought the counter to zero matches,
 	//    and cancel/delete cannot be clobbered by a late promote.
 	promoteRes := r.db.WithContext(ctx).Model(&types.Knowledge{}).
-		Where("id = ? AND parse_status = ? AND pending_subtasks_count = 0",
-			id, types.ParseStatusFinalizing).
+		Where("id = ? AND parse_status = ? AND pending_subtasks_count = 0 AND wiki_status <> ?",
+			id, types.ParseStatusFinalizing, types.WikiStatusPending).
 		Updates(map[string]interface{}{
 			"parse_status": types.ParseStatusCompleted,
 			"processed_at": now,
-			"enrichment_status": gorm.Expr(
-				"CASE WHEN enrichment_status = ? THEN ? ELSE enrichment_status END",
-				types.EnrichmentStatusPending,
-				types.EnrichmentStatusDegraded,
-			),
-			"updated_at": now,
+			"updated_at":   now,
 		})
 	if promoteRes.Error != nil {
 		return 0, false, promoteRes.Error
 	}
 	promoted := promoteRes.RowsAffected > 0
 
-	// 3) Best-effort re-read of the new count for diagnostics/return value
+	// 4) Best-effort re-read of the new count for diagnostics/return value
 	//    only. This read may be replica-stale and is intentionally NOT used
 	//    to decide whether to promote (see above). A read failure here does
 	//    not affect correctness, so we don't propagate it as an error.
@@ -1406,22 +1462,35 @@ func (r *knowledgeRepository) FinalizeSubtaskGeneration(
 		return 0, false, res.Error
 	}
 
-	promoteRes := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+	settleRes := r.db.WithContext(ctx).Model(&types.Knowledge{}).
 		Where(
 			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count = 0",
 			tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
 		).
 		Updates(map[string]interface{}{
-			"parse_status":      types.ParseStatusCompleted,
-			"processed_at":      now,
-			"processing_owner":  "",
-			"processing_fanout": nil,
 			"enrichment_status": gorm.Expr(
 				"CASE WHEN enrichment_status = ? THEN ? ELSE enrichment_status END",
 				types.EnrichmentStatusPending,
 				types.EnrichmentStatusDegraded,
 			),
 			"updated_at": now,
+		})
+	if settleRes.Error != nil {
+		return 0, false, settleRes.Error
+	}
+
+	promoteRes := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where(
+			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count = 0 AND wiki_status <> ?",
+			tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+			types.WikiStatusPending,
+		).
+		Updates(map[string]interface{}{
+			"parse_status":      types.ParseStatusCompleted,
+			"processed_at":      now,
+			"processing_owner":  "",
+			"processing_fanout": nil,
+			"updated_at":        now,
 		})
 	if promoteRes.Error != nil {
 		return 0, false, promoteRes.Error
@@ -1716,17 +1785,30 @@ func (r *knowledgeRepository) finalizeSubtaskGenerationItem(
 			aggregateStatus = types.EnrichmentStatusCompleted
 		}
 
-		promotion := tx.Model(&types.Knowledge{}).
+		settlement := tx.Model(&types.Knowledge{}).
 			Where(
 				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count = 0",
 				tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+			).
+			Updates(map[string]interface{}{
+				"enrichment_status": aggregateStatus,
+				"updated_at":        now,
+			})
+		if settlement.Error != nil {
+			return settlement.Error
+		}
+
+		promotion := tx.Model(&types.Knowledge{}).
+			Where(
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND pending_subtasks_count = 0 AND wiki_status <> ?",
+				tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
+				types.WikiStatusPending,
 			).
 			Updates(map[string]interface{}{
 				"parse_status":      types.ParseStatusCompleted,
 				"processed_at":      now,
 				"processing_owner":  "",
 				"processing_fanout": nil,
-				"enrichment_status": aggregateStatus,
 				"updated_at":        now,
 			})
 		if promotion.Error != nil {

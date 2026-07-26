@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -55,31 +56,46 @@ func NewFileServiceFromStorageConfig(
 		return setStorageBindingIdentity(NewLocalFileService(baseDir, externalURL), source, "none"), p, nil
 
 	case "minio":
-		if sec == nil || sec.MinIO == nil {
-			return nil, p, fmt.Errorf("missing minio config")
+		var cfg *types.MinIOEngineConfig
+		if sec != nil {
+			cfg = sec.MinIO
+		}
+		if cfg == nil {
+			if !strings.EqualFold(strings.TrimSpace(os.Getenv("STORAGE_TYPE")), "minio") {
+				return nil, p, fmt.Errorf("missing minio config")
+			}
+			cfg = &types.MinIOEngineConfig{Mode: "docker"}
 		}
 		var endpoint, accessKeyID, secretAccessKey string
-		if sec.MinIO.Mode == "remote" {
-			endpoint = strings.TrimSpace(sec.MinIO.Endpoint)
-			accessKeyID = strings.TrimSpace(sec.MinIO.AccessKeyID)
-			secretAccessKey = strings.TrimSpace(sec.MinIO.SecretAccessKey)
+		if cfg.Mode == "remote" {
+			endpoint = strings.TrimSpace(cfg.Endpoint)
+			accessKeyID = strings.TrimSpace(cfg.AccessKeyID)
+			secretAccessKey = strings.TrimSpace(cfg.SecretAccessKey)
 		} else {
 			endpoint = strings.TrimSpace(os.Getenv("MINIO_ENDPOINT"))
 			accessKeyID = strings.TrimSpace(os.Getenv("MINIO_ACCESS_KEY_ID"))
 			secretAccessKey = strings.TrimSpace(os.Getenv("MINIO_SECRET_ACCESS_KEY"))
 		}
-		bucketName := strings.TrimSpace(sec.MinIO.BucketName)
+		bucketName := strings.TrimSpace(cfg.BucketName)
 		if bucketName == "" {
 			bucketName = strings.TrimSpace(os.Getenv("MINIO_BUCKET_NAME"))
 		}
 		if endpoint == "" || accessKeyID == "" || secretAccessKey == "" || bucketName == "" {
 			return nil, p, fmt.Errorf("incomplete minio config")
 		}
+		pathPrefix := strings.TrimSpace(cfg.PathPrefix)
+		if pathPrefix == "" && cfg.Mode != "remote" {
+			var err error
+			pathPrefix, err = objectnamespace.KnowledgePrefixFromEnv("minio")
+			if err != nil {
+				return nil, p, err
+			}
+		}
 		svc, err := NewMinioFileServiceWithPathPrefix(
-			endpoint, accessKeyID, secretAccessKey, bucketName, sec.MinIO.UseSSL, sec.MinIO.PathPrefix,
+			endpoint, accessKeyID, secretAccessKey, bucketName, cfg.UseSSL, pathPrefix,
 		)
 		credentialScope := storageBindingSourceGlobal
-		if sec.MinIO.Mode == "remote" {
+		if cfg.Mode == "remote" {
 			credentialScope = storageBindingSourceTenant
 		}
 		svc = setStorageBindingIdentity(svc, storageBindingSourceTenant, credentialScope)
@@ -131,7 +147,12 @@ func NewFileServiceFromStorageConfig(
 	case "obs":
 		obsEndpoint, obsRegion, obsAccessKey, obsSecretKey, obsBucketName, obsPathPrefix := "", "", "", "", "", ""
 		source := storageBindingSourceGlobal
-		if sec != nil && sec.OBS != nil {
+		useTenant := sec != nil && sec.OBS != nil &&
+			strings.TrimSpace(sec.OBS.Endpoint) != "" &&
+			strings.TrimSpace(sec.OBS.AccessKey) != "" &&
+			strings.TrimSpace(sec.OBS.SecretKey) != "" &&
+			strings.TrimSpace(sec.OBS.BucketName) != ""
+		if useTenant {
 			obsEndpoint = strings.TrimSpace(sec.OBS.Endpoint)
 			obsRegion = strings.TrimSpace(sec.OBS.Region)
 			obsAccessKey = strings.TrimSpace(sec.OBS.AccessKey)
@@ -140,6 +161,9 @@ func NewFileServiceFromStorageConfig(
 			obsPathPrefix = strings.TrimSpace(sec.OBS.PathPrefix)
 			source = storageBindingSourceTenant
 		} else {
+			if !strings.EqualFold(strings.TrimSpace(os.Getenv("STORAGE_TYPE")), "obs") {
+				return nil, p, fmt.Errorf("missing obs config")
+			}
 			obsEndpoint = strings.TrimSpace(os.Getenv("OBS_ENDPOINT"))
 			obsRegion = strings.TrimSpace(os.Getenv("OBS_REGION"))
 			obsAccessKey = strings.TrimSpace(os.Getenv("OBS_ACCESS_KEY"))
@@ -148,7 +172,11 @@ func NewFileServiceFromStorageConfig(
 			obsPathPrefix = strings.TrimSpace(os.Getenv("OBS_PATH_PREFIX"))
 		}
 		if obsPathPrefix == "" {
-			obsPathPrefix = "weknora/"
+			var err error
+			obsPathPrefix, err = objectnamespace.KnowledgePrefixFromEnv("obs")
+			if err != nil {
+				return nil, p, err
+			}
 		}
 		if obsEndpoint == "" || obsAccessKey == "" || obsSecretKey == "" || obsBucketName == "" {
 			return nil, p, fmt.Errorf("incomplete obs config")

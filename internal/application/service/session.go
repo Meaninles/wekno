@@ -348,6 +348,7 @@ func (s *sessionService) DeleteSession(ctx context.Context, id string) error {
 	if rows == 0 {
 		return apperrors.ErrSessionNotFound
 	}
+	notifySessionDeleted(ctx, tenantID, userID, []string{id})
 
 	return nil
 }
@@ -405,6 +406,7 @@ func (s *sessionService) BatchDeleteSessions(ctx context.Context, ids []string) 
 		})
 		return err
 	}
+	notifySessionDeleted(ctx, tenantID, userID, visibleIDs)
 
 	return nil
 }
@@ -447,6 +449,11 @@ func (s *sessionService) DeleteAllSessions(ctx context.Context) error {
 		})
 		return err
 	}
+	deletedSessionIDs := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		deletedSessionIDs = append(deletedSessionIDs, session.ID)
+	}
+	notifySessionDeleted(ctx, tenantID, userID, deletedSessionIDs)
 
 	logger.Infof(ctx, "All sessions deleted for tenant %d", tenantID)
 	return nil

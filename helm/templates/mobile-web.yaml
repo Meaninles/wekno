@@ -48,6 +48,10 @@ spec:
               value: {{ .Values.mobileWeb.appHost | default "app" | quote }}
             - name: APP_PORT
               value: {{ .Values.mobileWeb.appPort | default .Values.app.service.port | quote }}
+            - name: MAX_FILE_SIZE_MB
+              value: {{ .Values.mobileWeb.maxFileSizeMB | quote }}
+            - name: MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB
+              value: {{ .Values.mobileWeb.maxKnowledgeSourceFileSizeMB | quote }}
           ports:
             - containerPort: 80
               name: http
@@ -87,6 +91,15 @@ spec:
       {{- with .Values.mobileWeb.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.mobileWeb.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.mobileWeb.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.mobileWeb.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.mobileWeb.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "weknora.componentSelectorLabels" (dict "component" "mobile-web" "context" .) | nindent 14 }}
       {{- end }}
       {{- with .Values.mobileWeb.tolerations }}
       tolerations:

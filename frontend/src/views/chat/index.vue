@@ -158,14 +158,6 @@ const inputFieldRef = ref();
 const getInputAttachments = () => inputFieldRef.value?.getUploadedAttachments?.() || [];
 const getInputImages = () => inputFieldRef.value?.getUploadedImages?.() || [];
 
-// Scheduled-chat sessions are created by the custom scheduler and carry a
-// stable provenance marker in Session.Description.  Only those sessions must
-// restore the agent that the task was configured with.  For ordinary chats we
-// intentionally retain the existing resource-only restore behaviour so that
-// opening a previous conversation does not replace the user's current agent.
-const isScheduledChatSession = (session) =>
-    String(session?.description || '').startsWith('custom:scheduled-chat:');
-
 const saveCurrentConversationDraft = () => {
     if (props.embeddedMode || !session_id.value) return;
     saveSessionDraftState(
@@ -182,11 +174,13 @@ const loadSessionResourceState = async (sid) => {
         const sessionRes = await getSession(sid);
         const lastState = sessionRes?.data?.last_request_state;
         if (lastState) {
-            if (isScheduledChatSession(sessionRes?.data)) {
-                useSettingsStoreInstance.applyLastRequestState(lastState);
-            } else {
-                useSettingsStoreInstance.applyConversationResourceState(lastState);
-            }
+            // An existing conversation is bound to the agent/model that
+            // produced its history. Restoring resources alone can display one
+            // agent while the next request is routed to another, which is both
+            // misleading and unsafe for specialised agents. Explicit route
+            // overrides are applied immediately afterwards when the caller
+            // intentionally wants a different agent.
+            useSettingsStoreInstance.applyLastRequestState(lastState);
         }
     } catch (error) {
         console.error('Failed to load session resource state:', error);

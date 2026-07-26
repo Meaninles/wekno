@@ -41,11 +41,10 @@ type KnowledgePostProcessService struct {
 //
 // Wiki is intentionally present in the plan but absent from
 // finalizationSubtaskCount. Wiki ingestion is a KB-scoped, durable background
-// pipeline with its own pending/active status; it must never keep an otherwise
-// usable document in parse_status=finalizing. This restores the lifecycle
-// contract introduced by migration 000056: pending_subtasks_count owns only
-// per-knowledge enrichment tasks that directly participate in document
-// finalization (summary, question generation and graph extraction).
+// pipeline with its own pending/active status, so it does not consume a
+// per-document counter slot. The final promotion nevertheless requires both
+// the counter to reach zero and WikiStatus to become terminal, ensuring the
+// end-to-end document is never reported completed while Wiki still runs.
 type enrichmentPlan struct {
 	spawnSummary       bool
 	questionBatchCount int
@@ -1152,9 +1151,9 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	// task drains; a slot whose task was never enqueued (graph with NEO4J
 	// off, a transient enqueue/marshal failure, a nil enqueuer) has no owner
 	// and would otherwise strand the row in "finalizing". Release exactly the
-	// shortfall — each release is a clamped decrement that promotes the row to
-	// "completed" if it brings the counter to zero. Wiki is not a document
-	// finalization owner and therefore never enters either tally. Safe against fast workers: shortfall slots have no draining
+	// shortfall — each release is a clamped decrement that can promote the row
+	// once the counter is zero and Wiki is terminal. Wiki never enters either
+	// tally because its own terminal status is the independent gate. Safe against fast workers: shortfall slots have no draining
 	// task, so total drains == seeded count regardless of ordering.
 	//
 	// Detached ctx: the same reasoning that motivates finalizeSubtaskDetached

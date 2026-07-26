@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
+	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -59,9 +61,11 @@ func createClaudeOriginalInputFromBytes(
 	}
 	downloadURL, err := fileService.GetFileURL(ctx, storageURL)
 	if err != nil {
+		cleanupPreparedOriginalInput(ctx, fileService, storageURL)
 		return nil, fmt.Errorf("create original file download url: %w", err)
 	}
 	if !isHTTPDownloadURL(downloadURL) {
+		cleanupPreparedOriginalInput(ctx, fileService, storageURL)
 		return nil, fmt.Errorf("original file transfer requires an HTTP(S) object download URL, got %q", downloadURL)
 	}
 	return &types.OriginalInputFile{
@@ -75,6 +79,47 @@ func createClaudeOriginalInputFromBytes(
 		DownloadURL: downloadURL,
 		StorageURL:  storageURL,
 	}, nil
+}
+
+func cleanupPreparedOriginalInput(
+	ctx context.Context,
+	fileService interfaces.FileService,
+	storageURL string,
+) {
+	if fileService == nil || strings.TrimSpace(storageURL) == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := fileService.DeleteFile(cleanupCtx, storageURL); err != nil {
+		logger.Warnf(cleanupCtx, "[claude-original-input] compensating cleanup failed: %v", err)
+	}
+}
+
+func (h *Handler) cleanupClaudeOriginalInputFiles(
+	ctx context.Context,
+	files []types.OriginalInputFile,
+) {
+	if len(files) == 0 {
+		return
+	}
+	fileService := resolveClaudeOriginalInputFileService(ctx, h.fileService)
+	if fileService == nil {
+		logger.Warnf(ctx, "[claude-original-input] cleanup skipped because transfer storage is unavailable")
+		return
+	}
+	seen := make(map[string]struct{}, len(files))
+	for _, item := range files {
+		storageURL := strings.TrimSpace(item.StorageURL)
+		if storageURL == "" {
+			continue
+		}
+		if _, ok := seen[storageURL]; ok {
+			continue
+		}
+		seen[storageURL] = struct{}{}
+		cleanupPreparedOriginalInput(ctx, fileService, storageURL)
+	}
 }
 
 func safeOriginalInputFileName(fileName string) (string, error) {
@@ -135,6 +180,13 @@ func claudeOriginalInputStorageProvider() string {
 }
 
 func newClaudeOriginalInputFileService(provider string) (interfaces.FileService, error) {
+	pathPrefix, err := objectnamespace.NormalizeAndValidate(
+		claudeOriginalInputPathPrefix(),
+		objectnamespace.PurposeOriginalInputs,
+	)
+	if err != nil {
+		return nil, err
+	}
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "minio":
 		endpoint := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_ENDPOINT"))
@@ -165,7 +217,7 @@ func newClaudeOriginalInputFileService(provider string) (interfaces.FileService,
 			secretKey,
 			bucket,
 			envBool("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_MINIO_USE_SSL", false),
-			claudeOriginalInputPathPrefix(),
+			pathPrefix,
 		)
 	case "obs":
 		endpoint := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_OBS_ENDPOINT"))
@@ -194,20 +246,14 @@ func newClaudeOriginalInputFileService(provider string) (interfaces.FileService,
 		if endpoint == "" || accessKey == "" || secretKey == "" || bucket == "" {
 			return nil, fmt.Errorf("incomplete obs original input config")
 		}
-		return filesvc.NewObsFileService(endpoint, region, accessKey, secretKey, bucket, claudeOriginalInputPathPrefix())
+		return filesvc.NewObsFileService(endpoint, region, accessKey, secretKey, bucket, pathPrefix)
 	default:
 		return nil, fmt.Errorf("unsupported original input provider %q", provider)
 	}
 }
 
 func claudeOriginalInputPathPrefix() string {
-	prefix := strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX"))
-	if prefix == "" {
-		// Keep Claude SDK original-file transfer objects visibly separate from
-		// normal uploaded files and knowledge objects.
-		prefix = "weknora/__weknora_claude_sdk_original_inputs__/"
-	}
-	return prefix
+	return strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX"))
 }
 
 func envBool(key string, fallback bool) bool {

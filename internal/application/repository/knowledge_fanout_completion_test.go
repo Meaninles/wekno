@@ -521,6 +521,57 @@ func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
 	}
 }
 
+func TestFinalizeSubtaskOutcomeSettlesBeforeWikiWithoutPrematureCompletion(t *testing.T) {
+	db, repo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 1)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Update("wiki_status", types.WikiStatusPending).Error)
+
+	count, promoted, err := repo.FinalizeSubtaskGenerationItemOutcome(
+		context.Background(),
+		42,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		"summary",
+		enrichmentoutcome.StatusCompleted,
+		"",
+	)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.False(t, promoted)
+
+	var waiting types.Knowledge
+	require.NoError(t, db.Where("id = ?", "knowledge-1").Take(&waiting).Error)
+	require.Equal(t, types.ParseStatusFinalizing, waiting.ParseStatus)
+	require.Equal(t, types.EnrichmentStatusCompleted, waiting.EnrichmentStatus)
+	require.Equal(t, types.WikiStatusPending, waiting.WikiStatus)
+
+	statusRepo, ok := repo.(interface {
+		UpdateWikiStatusGeneration(
+			context.Context, uint64, string, string, string, string, string,
+		) (bool, error)
+	})
+	require.True(t, ok)
+	updated, err := statusRepo.UpdateWikiStatusGeneration(
+		context.Background(),
+		42,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		types.WikiStatusCompleted,
+		"",
+	)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	var completed types.Knowledge
+	require.NoError(t, db.Where("id = ?", "knowledge-1").Take(&completed).Error)
+	require.Equal(t, types.ParseStatusCompleted, completed.ParseStatus)
+	require.Equal(t, types.EnrichmentStatusCompleted, completed.EnrichmentStatus)
+	require.Equal(t, types.WikiStatusCompleted, completed.WikiStatus)
+}
+
 func TestFinalizeSubtaskOutcomeAllFailedIsExplicitlyFailed(t *testing.T) {
 	db, repo := newFanoutCompletionRepository(t)
 	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 2)

@@ -133,7 +133,18 @@ app:
 
   # -- Per-pod temporary workspace used by conversions and streamed parts.
   scratch:
+    # emptyDir is suitable only when kubelet ephemeral storage is large
+    # enough. "ephemeral" creates one isolated RWO PVC per Pod and is the
+    # production choice when a node-local CSI/local-path StorageClass is
+    # backed by the dedicated parsing disk.
+    volumeType: emptyDir
     sizeLimit: 8Gi
+    ephemeral:
+      storageClassName: ""
+      size: 20Gi
+      accessModes:
+        - ReadWriteOnce
+      annotations: {}
 
   # -- Pod security context override
   podSecurityContext: {}
@@ -202,15 +213,34 @@ app:
     neo4j:
       uri: bolt://neo4j:7687
 
+  agentIntegration:
+    enabled: false
+    generalAgentURL: http://weknora-custom-general-agent:8091
+    documentProcessingAgentURL: http://weknora-custom-document-processing-agent:8091
+    toolCallbackURL: http://app:8080/api/v1/custom/general-agent/internal/tools/call
+    artifactUploadURL: http://app:8080/api/v1/custom/general-agent/internal/artifacts/upload
+    apiKeySecret:
+      name: general-agent-secret
+      key: apiKey
+    artifactStorage:
+      # Durable Agent artifacts support only private MinIO or OBS commits.
+      provider: ""
+      bucket: ""
+      # Generate this namespace UUID once per cluster/environment and then keep
+      # it stable. Restore drills and test clusters must use a different UUID.
+      # Do not put usernames, source filenames or customer data in this path.
+      pathPrefix: weknora/__weknora_private_agent_artifacts_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/
+      migrationAllowMissing: "false"
+      migrationAllowInvalid: "false"
+
   # -- Additional environment variables
   extraEnv: []
   # - name: OLLAMA_BASE_URL
   #   value: "http://ollama:11434"
-  # Claude SDK sidecars are not created by this chart. Deploy
-  # weknora-custom-general-agent and weknora-custom-document-processing-agent
-  # separately in the same namespace, then set the app-side connection vars.
-  # general-agent, data-analysis and table-analysis use the general sidecar;
-  # document-processing-agent uses the document-processing sidecar.
+  # The two Claude SDK sidecar pools can be deployed by this chart through
+  # generalAgent/documentProcessingAgent below. General, knowledge manager,
+  # data-analysis and table-analysis use the general pool; document-processing
+  # uses the document-processing pool.
   # - name: CUSTOM_GENERAL_AGENT_URL
   #   value: "http://weknora-custom-general-agent:8091"
   # - name: CUSTOM_DOCUMENT_PROCESSING_AGENT_URL
@@ -222,13 +252,22 @@ app:
   #       key: apiKey
   # - name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
   #   value: "http://app:8080/api/v1/custom/general-agent/internal/tools/call"
-  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_ROOT
-  #   value: "/data/files/general-agent-artifacts"
+  # Final artifacts are uploaded to the app's private object-store endpoint
+  # before a run is reported complete. Never place their durable root on RWX.
+  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL
+  #   value: "http://app:8080/api/v1/custom/general-agent/internal/artifacts/upload"
+  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER
+  #   value: "obs"
+  # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX
+  #   value: "weknora/__weknora_private_agent_artifacts_v1__/deployment/prod-cce-wk-opaqueid/namespace/replace-with-a-unique-rfc4122-uuid/"
   # Claude SDK original-file transfer compatibility:
   # If app.env.STORAGE_TYPE is "obs" and OBS_* are already configured here,
   # general-agent requests automatically reuse OBS with the dedicated prefix
-  # "weknora/__weknora_claude_sdk_original_inputs__/". The Python sidecar does
-  # not need OBS credentials; it only downloads backend-generated temporary URLs.
+  # shown below. The deployment label and non-zero UUID are stable
+  # infrastructure identities; use a different UUID in every independently
+  # managed cluster, restore drill, and test environment. The Python sidecar
+  # does not need OBS credentials; it only downloads backend-generated
+  # temporary URLs.
   # - name: OBS_ENDPOINT
   #   value: "https://obs.cn-north-4.myhuaweicloud.com"
   # - name: OBS_REGION
@@ -249,7 +288,7 @@ app:
   # - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_STORAGE_PROVIDER
   #   value: "obs"
   # - name: CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX
-  #   value: "weknora/__weknora_claude_sdk_original_inputs__/"
+  #   value: "weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/prod-cce-wk-opaqueid/namespace/replace-with-a-unique-rfc4122-uuid/"
 
   # -- Additional pod volumes and mounts, for example external PostgreSQL and
   # Redis CA/client-certificate Secrets.
@@ -310,6 +349,19 @@ frontend:
 
   # -- Number of replicas
   replicaCount: 1
+
+  maxFileSizeMB: "50"
+  maxKnowledgeSourceFileSizeMB: "2048"
+
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
 
   image:
     # -- Image repository
@@ -374,6 +426,19 @@ mobileWeb:
     limits:
       cpu: 200m
       memory: 256Mi
+
+  maxFileSizeMB: "50"
+  maxKnowledgeSourceFileSizeMB: "2048"
+
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
 
   # -- Container security context
   securityContext:
@@ -484,7 +549,14 @@ docreader:
   # -- Bounded per-pod conversion workspace. Large PDF/Office workloads must
   # be sized together with node ephemeral storage and the container limits.
   scratch:
+    volumeType: emptyDir
     sizeLimit: 16Gi
+    ephemeral:
+      storageClassName: ""
+      size: 40Gi
+      accessModes:
+        - ReadWriteOnce
+      annotations: {}
 
   # -- Service configuration
   service:
@@ -511,6 +583,108 @@ docreader:
 
   # -- Affinity rules
   affinity: {}
+
+# -----------------------------------------------------------------------------
+# Custom general-agent pool
+# -----------------------------------------------------------------------------
+generalAgent:
+  enabled: false
+  replicaCount: 2
+  terminationGracePeriodSeconds: 45
+  image:
+    repository: weknora-custom-general-agent
+    tag: local
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8091
+  apiKeySecret:
+    name: general-agent-secret
+    key: apiKey
+  env:
+    maxTurns: "30"
+    maxArtifactMB: "20"
+    apiTimeoutMS: "600000"
+    idleTimeoutMS: "900000"
+  extraEnv: []
+  scratch:
+    volumeType: emptyDir
+    sizeLimit: 4Gi
+    ephemeral:
+      storageClassName: ""
+      size: 20Gi
+      accessModes:
+        - ReadWriteOnce
+      annotations: {}
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "3"
+      memory: 4Gi
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+
+# -----------------------------------------------------------------------------
+# Custom document-processing-agent pool
+# -----------------------------------------------------------------------------
+documentProcessingAgent:
+  enabled: false
+  replicaCount: 2
+  terminationGracePeriodSeconds: 60
+  image:
+    repository: weknora-custom-document-processing-agent
+    tag: local
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8091
+  apiKeySecret:
+    name: general-agent-secret
+    key: apiKey
+  env:
+    maxTurns: "30"
+    maxArtifactMB: "20"
+    apiTimeoutMS: "600000"
+    idleTimeoutMS: "900000"
+  extraEnv: []
+  scratch:
+    volumeType: emptyDir
+    sizeLimit: 8Gi
+    ephemeral:
+      storageClassName: ""
+      size: 40Gi
+      accessModes:
+        - ReadWriteOnce
+      annotations: {}
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1536Mi
+    limits:
+      cpu: "4"
+      memory: 6Gi
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
 
 # -----------------------------------------------------------------------------
 # PostgreSQL (ParadeDB - Vector + BM25 Search)
@@ -663,7 +837,10 @@ ingress:
   # -- Additional annotations
   # Ref: https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    # Knowledge source uploads support 2 GiB. Keep every outer ELB and ingress
+    # hop at least this large. The separate internal Agent request ceiling is
+    # 128 MiB because a 50 MiB attachment expands in Base64 JSON.
+    nginx.ingress.kubernetes.io/proxy-body-size: "2g"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"

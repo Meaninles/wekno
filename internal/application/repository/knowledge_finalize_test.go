@@ -212,6 +212,109 @@ func TestFinalizeSubtask_DecrementClampedAtZero(t *testing.T) {
 	assert.Equal(t, 0, count, "pending_subtasks_count must be clamped at zero")
 }
 
+func TestFinalizeSubtaskWaitsForWikiAndWikiTerminalPromotes(t *testing.T) {
+	db := setupKnowledgeTestDB(t)
+	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
+	ctx := context.Background()
+
+	id := insertProcessingKnowledge(t, db)
+	var identity struct {
+		TenantID        uint64
+		KnowledgeBaseID string
+	}
+	require.NoError(t, db.Model(&types.Knowledge{}).
+		Select("tenant_id", "knowledge_base_id").
+		Where("id = ?", id).
+		Take(&identity).Error)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"processing_generation": "generation-wiki-last",
+			"wiki_status":           types.WikiStatusPending,
+			"enrichment_status":     types.EnrichmentStatusPending,
+		}).Error)
+	transitioned, err := repo.SetFinalizing(ctx, id, 1)
+	require.NoError(t, err)
+	require.True(t, transitioned)
+
+	count, promoted, err := repo.FinalizeSubtask(ctx, id)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.False(t, promoted, "pending Wiki must keep the document finalizing")
+
+	var waiting types.Knowledge
+	require.NoError(t, db.Where("id = ?", id).Take(&waiting).Error)
+	require.Equal(t, types.ParseStatusFinalizing, waiting.ParseStatus)
+	require.Equal(t, types.WikiStatusPending, waiting.WikiStatus)
+	require.Equal(t, types.EnrichmentStatusDegraded, waiting.EnrichmentStatus)
+
+	updated, err := repo.UpdateWikiStatusGeneration(
+		ctx,
+		identity.TenantID,
+		id,
+		identity.KnowledgeBaseID,
+		"generation-wiki-last",
+		types.WikiStatusCompleted,
+		"",
+	)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	var completed types.Knowledge
+	require.NoError(t, db.Where("id = ?", id).Take(&completed).Error)
+	require.Equal(t, types.ParseStatusCompleted, completed.ParseStatus)
+	require.Equal(t, types.WikiStatusCompleted, completed.WikiStatus)
+	require.Zero(t, completed.PendingSubtasksCount)
+	require.NotNil(t, completed.ProcessedAt)
+}
+
+func TestWikiTerminalFirstStillWaitsForLastSubtask(t *testing.T) {
+	db := setupKnowledgeTestDB(t)
+	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
+	ctx := context.Background()
+
+	id := insertProcessingKnowledge(t, db)
+	var identity struct {
+		TenantID        uint64
+		KnowledgeBaseID string
+	}
+	require.NoError(t, db.Model(&types.Knowledge{}).
+		Select("tenant_id", "knowledge_base_id").
+		Where("id = ?", id).
+		Take(&identity).Error)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"processing_generation": "generation-derivative-last",
+			"wiki_status":           types.WikiStatusPending,
+			"enrichment_status":     types.EnrichmentStatusPending,
+		}).Error)
+	transitioned, err := repo.SetFinalizing(ctx, id, 1)
+	require.NoError(t, err)
+	require.True(t, transitioned)
+
+	updated, err := repo.UpdateWikiStatusGeneration(
+		ctx,
+		identity.TenantID,
+		id,
+		identity.KnowledgeBaseID,
+		"generation-derivative-last",
+		types.WikiStatusCompleted,
+		"",
+	)
+	require.NoError(t, err)
+	require.True(t, updated)
+	status, count := reloadKnowledgeRow(t, db, id)
+	require.Equal(t, types.ParseStatusFinalizing, status)
+	require.Equal(t, 1, count)
+
+	count, promoted, err := repo.FinalizeSubtask(ctx, id)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.True(t, promoted, "the last derivative must promote after Wiki is terminal")
+	status, count = reloadKnowledgeRow(t, db, id)
+	require.Equal(t, types.ParseStatusCompleted, status)
+	require.Zero(t, count)
+}
+
 // TestUpdateKnowledge_DoesNotClobberPendingCounter is the regression test
 // for the original bug: a full-row Save with a stale in-memory counter
 // must not write that stale value back, otherwise it overwrites atomic

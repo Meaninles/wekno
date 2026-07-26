@@ -16,6 +16,7 @@ var generalAgentMigrationStatements = []string{
 		message_id VARCHAR(36),
 		file_token VARCHAR(255) NOT NULL,
 		file_path TEXT NOT NULL,
+		storage_state VARCHAR(24) NOT NULL DEFAULT 'ready',
 		file_name VARCHAR(255) NOT NULL,
 		file_type VARCHAR(32) NOT NULL,
 		file_size BIGINT NOT NULL DEFAULT 0,
@@ -29,11 +30,17 @@ var generalAgentMigrationStatements = []string{
 	`ALTER TABLE custom_general_agent_artifacts ADD COLUMN IF NOT EXISTS file_token VARCHAR(255)`,
 	`UPDATE custom_general_agent_artifacts SET file_token = id WHERE file_token IS NULL OR file_token = ''`,
 	`ALTER TABLE custom_general_agent_artifacts ALTER COLUMN file_token SET NOT NULL`,
+	`ALTER TABLE custom_general_agent_artifacts ADD COLUMN IF NOT EXISTS storage_state VARCHAR(24) NOT NULL DEFAULT 'ready'`,
+	`UPDATE custom_general_agent_artifacts SET storage_state = 'ready' WHERE storage_state IS NULL OR storage_state = ''`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_general_agent_artifacts_tenant_id ON custom_general_agent_artifacts (tenant_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_general_agent_artifacts_user_id ON custom_general_agent_artifacts (user_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_general_agent_artifacts_run_id ON custom_general_agent_artifacts (run_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_general_agent_artifacts_session_id ON custom_general_agent_artifacts (session_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_custom_general_agent_artifacts_deleted_at ON custom_general_agent_artifacts (deleted_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_custom_general_agent_artifacts_storage_state ON custom_general_agent_artifacts (storage_state)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS uq_custom_general_agent_artifact_delivery
+		ON custom_general_agent_artifacts (tenant_id, run_id, file_token)
+		WHERE deleted_at IS NULL`,
 	`UPDATE custom_agents
 		SET config = config - 'allowed_artifact_formats' - 'max_artifacts',
 		updated_at = NOW()

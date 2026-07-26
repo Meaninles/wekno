@@ -52,6 +52,12 @@ spec:
               value: {{ .Values.mobileWeb.maxFileSizeMB | quote }}
             - name: MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB
               value: {{ .Values.mobileWeb.maxKnowledgeSourceFileSizeMB | quote }}
+            - name: PROXY_MAX_BODY_SIZE_MB
+              value: {{ .Values.mobileWeb.proxyMaxBodySizeMB | quote }}
+            - name: PROXY_MAX_KNOWLEDGE_SOURCE_BODY_SIZE_MB
+              value: {{ .Values.mobileWeb.proxyMaxKnowledgeSourceBodySizeMB | quote }}
+            - name: PROXY_TIMEOUT_SECONDS
+              value: {{ .Values.mobileWeb.proxyTimeoutSeconds | quote }}
           ports:
             - containerPort: 80
               name: http

@@ -198,12 +198,12 @@
                   :key="file.id"
                   type="button"
                   class="file-result"
-                  :class="{ selected: isKnowledgeFileSelected(file.id) }"
-                  @click="toggleKnowledgeFile(file)"
+                  :class="{ selected: !file.isFolder && isKnowledgeFileSelected(file.id) }"
+                  @click="file.isFolder ? openScheduledFileFolder(file) : toggleKnowledgeFile(file)"
                 >
-                  <t-icon name="file" />
+                  <t-icon :name="file.isFolderBack ? 'chevron-left' : file.isFolder ? 'folder' : 'file'" />
                   <span>{{ file.name }}</span>
-                  <small>{{ file.kbName || '知识库文件' }}</small>
+                  <small>{{ file.isFolder ? `${file.folderDocumentCount || 0} 个文档 · ${file.folderPath || file.kbName || ''}` : (file.kbName || '知识库文件') }}</small>
                 </button>
               </div>
             </div>
@@ -318,6 +318,10 @@ import { useRouter } from 'vue-router'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { listAgents, type CustomAgent } from '@/api/agent'
 import { listKnowledgeBases, searchKnowledge } from '@/api/knowledge-base'
+import {
+  listKnowledgeFolderNodes,
+  searchAccessibleKnowledgeFolderNodes,
+} from '@/custom/modules/knowledgeFolders/api'
 import { useAuthStore } from '@/stores/auth'
 import SkillSelector from '@/custom/modules/skillhub/SkillSelector.vue'
 import {
@@ -354,6 +358,11 @@ interface SelectedKnowledgeFile {
   name: string
   kbId?: string
   kbName?: string
+  isFolder?: boolean
+  isFolderBack?: boolean
+  folderId?: string
+  folderPath?: string
+  folderDocumentCount?: number
 }
 
 const router = useRouter()
@@ -378,6 +387,7 @@ const selectedKnowledgeFiles = ref<SelectedKnowledgeFile[]>([])
 const fileSearchKeyword = ref('')
 const fileSearchResults = ref<SelectedKnowledgeFile[]>([])
 const fileSearching = ref(false)
+const fileFolderStack = ref<SelectedKnowledgeFile[]>([])
 const imageInput = ref<HTMLInputElement | null>(null)
 const attachmentInput = ref<HTMLInputElement | null>(null)
 
@@ -627,20 +637,99 @@ async function searchKnowledgeFiles() {
   try {
     const keyword = fileSearchKeyword.value.trim()
     const agentIDForSearch = sharedAgentIDForKnowledgeSearch()
-    const res: any = await searchKnowledge(keyword, 0, 20, undefined, {
-      agent_id: agentIDForSearch,
-      recent: !keyword,
-    })
+    fileFolderStack.value = []
+    const useFolderSearch = !!keyword && !agentIDForSearch
+    const res: any = useFolderSearch
+      ? await searchAccessibleKnowledgeFolderNodes({
+        keyword,
+        page: 1,
+        page_size: 20,
+        knowledge_base_ids: selectedKnowledgeBaseIds.value.join(',') || undefined,
+      })
+      : await searchKnowledge(keyword, 0, 20, undefined, {
+        agent_id: agentIDForSearch,
+        recent: !keyword,
+      })
     fileSearchResults.value = Array.isArray(res?.data)
-      ? res.data.map((item: any) => ({
-        id: item.id,
-        name: item.title || item.file_name || item.id,
-        kbId: item.knowledge_base_id || item.kb_id,
-        kbName: item.knowledge_base_name || '',
-      }))
+      ? res.data.map((item: any) => {
+        if (useFolderSearch && item?.node_type === 'folder' && item.folder) {
+          return {
+            id: `folder:${item.folder.id}`,
+            name: item.folder.name,
+            kbId: item.knowledge_base_id,
+            kbName: item.knowledge_base_name || '',
+            isFolder: true,
+            folderId: item.folder.id,
+            folderPath: item.folder.path,
+            folderDocumentCount: item.folder.stats?.subtree_document_count || 0,
+          }
+        }
+        const document = useFolderSearch ? item.document || {} : item
+        return {
+          id: document.id,
+          name: document.title || document.file_name || document.id,
+          kbId: item.knowledge_base_id || document.knowledge_base_id || document.kb_id,
+          kbName: item.knowledge_base_name || document.knowledge_base_name || '',
+        }
+      })
       : []
   } catch (e: any) {
     MessagePlugin.error(e?.message || '搜索文件失败')
+  } finally {
+    fileSearching.value = false
+  }
+}
+
+async function openScheduledFileFolder(item: SelectedKnowledgeFile) {
+  if (item.isFolderBack) {
+    fileFolderStack.value = fileFolderStack.value.slice(0, -1)
+    if (!fileFolderStack.value.length) {
+      await searchKnowledgeFiles()
+      return
+    }
+    item = fileFolderStack.value[fileFolderStack.value.length - 1]
+  } else {
+    fileFolderStack.value = [...fileFolderStack.value, item]
+  }
+  if (!item.kbId || !item.folderId) return
+  fileSearching.value = true
+  try {
+    const res: any = await listKnowledgeFolderNodes(item.kbId, {
+      folder_id: item.folderId,
+      page: 1,
+      page_size: 100,
+    })
+    const rows: SelectedKnowledgeFile[] = (Array.isArray(res?.data) ? res.data : []).map((node: any) => {
+      if (node?.node_type === 'folder' && node.folder) {
+        return {
+          id: `folder:${node.folder.id}`,
+          name: node.folder.name,
+          kbId: item.kbId,
+          kbName: item.kbName,
+          isFolder: true,
+          folderId: node.folder.id,
+          folderPath: node.folder.path,
+          folderDocumentCount: node.folder.stats?.subtree_document_count || 0,
+        }
+      }
+      const document = node.document || {}
+      return {
+        id: document.id,
+        name: document.title || document.file_name || document.id,
+        kbId: item.kbId,
+        kbName: item.kbName,
+      }
+    })
+    fileSearchResults.value = [{
+      id: `folder-back:${item.folderId}`,
+      name: fileFolderStack.value.length > 1 ? '返回上一级文件夹' : '返回搜索结果',
+      kbId: item.kbId,
+      kbName: item.kbName,
+      isFolder: true,
+      isFolderBack: true,
+    }, ...rows]
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || '加载文件夹失败')
   } finally {
     fileSearching.value = false
   }

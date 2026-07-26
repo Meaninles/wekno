@@ -61,11 +61,9 @@ test/data/mswag.txt
 *_key
 *_secret
 
-# 大的归档/压缩包
-packages/protoc-*.zip
-!packages/protoc-*-linux-x86_64.zip
-!packages/protoc-*-linux-aarch_64.zip
-!packages/protoc-*-linux-arm.zip
+# 大的非 Linux protoc 归档；Linux 离线包需要供 DocReader 镜像使用。
+packages/protoc-*-osx-*.zip
+packages/protoc-*-win*.zip
 
 # 本地测试脚本
 configure-ollama.sh
@@ -74,3 +72,11 @@ fix-docker.sh
 
 # 注意:不要排除 docs/ —— 里面的 docs.go / swagger.json 是 Go 代码依赖的 swagger 包
 # 注意:不要用 *.md 通配排除 —— skills/preloaded/**/SKILL.md 会被打进镜像给 agent 用
+
+# 不使用后续 ! 反向规则，使 BuildKit 可以直接跳过本地运行数据目录，
+# 避免 Windows 上为评估反向规则而遍历无权限的容器产物。
+.local-data
+.local-data/**
+**/.local-data/**
+*local-data*
+*local-data*/**

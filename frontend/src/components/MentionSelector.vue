@@ -189,7 +189,7 @@
           :disabled="isScrolling"
           :overlay-class-name="'mention-detail-popup'"
           :overlay-inner-class-name="'mention-detail-popup-wrap'"
-          @visible-change="(v: boolean) => v && fetchFileDetail(item)"
+          @visible-change="(v: boolean) => v && !item.isFolder && fetchFileDetail(item)"
         >
           <div
             class="mention-item"
@@ -199,13 +199,28 @@
           >
             <div class="icon-wrap">
               <div class="icon file-icon">
-                <t-icon name="file" />
+                <t-icon :name="item.isFolderBack ? 'chevron-left' : item.isFolder ? 'folder' : 'file'" />
               </div>
             </div>
-            <span class="name">{{ item.name }}</span>
+            <div class="item-main">
+              <span class="name">{{ item.name }}</span>
+              <span v-if="item.isFolder && !item.isFolderBack" class="count">
+                {{ item.folderDocumentCount || 0 }} 个文档
+              </span>
+            </div>
+            <t-icon v-if="item.isFolder && !item.isFolderBack" name="chevron-right" class="folder-arrow" />
           </div>
           <template #content>
             <div class="mention-detail-content">
+              <template v-if="item.isFolder">
+                <div class="detail-header">
+                  <span class="detail-name">{{ item.name }}</span>
+                </div>
+                <p v-if="item.folderPath" class="detail-desc">{{ item.folderPath }}</p>
+                <div v-if="!item.isFolderBack" class="detail-meta">
+                  <span>{{ item.folderDocumentCount || 0 }} 个嵌套文档，点击展开</span>
+                </div>
+              </template>
               <template v-if="detailCache[item.id]?.loading">
                 <div class="detail-loading"><t-loading size="small" /></div>
               </template>
@@ -783,6 +798,11 @@ const scrollToItem = (index: number) => {
   flex-shrink: 0;
   font-size: var(--td-font-size-mark-small, 12px);
   font-variant-numeric: tabular-nums;
+  color: var(--td-text-color-placeholder, #999);
+}
+
+.folder-arrow {
+  flex-shrink: 0;
   color: var(--td-text-color-placeholder, #999);
 }
 

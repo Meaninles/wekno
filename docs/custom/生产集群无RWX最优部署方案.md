@@ -1,5 +1,7 @@
 # 生产集群无 RWX 最优部署方案
 
+> 当前版本生产更新请直接使用[当前版本生产更新部署执行手册](./当前版本生产更新部署执行手册.md)。本文保留架构设计与容量依据；全系统 HA 等配套增强不作为本次上线前置。
+
 本文给出当前 WeKnora 二开代码在茅台生产 CCE 集群上的目标部署形态。它不是“第一阶段/第二阶段”路线图，而是一套完整的最终拓扑。对应 Helm 覆盖文件为 [`helm/values-production-ha.yaml`](../../helm/values-production-ha.yaml)。
 
 文档解析的状态机、重启续跑、跨实例接管及 effective-once 边界见[文档解析水平扩展与故障恢复](./文档解析水平扩展与故障恢复.md)。本文只补充生产环境的节点、容量、存储、入口和发布约束。
@@ -93,14 +95,20 @@ requests 后仍保留约 2.9 核和 18 GiB 调度余量；limits 后仍保留约
 
 | 类别 | 集群并发 | 单租户并发 | 依据 |
 |---|---:|---:|---|
-| Chat | 18 | 9 | 受控测试在 18 以上出现明显延迟拐点，并保留 2 个交互槽位 |
+| Chat | 24 | 12 | DeepSeek V4 Flash 在 32 并发、每请求实际生成 160 token 时 32/32 成功，P95 5.655 秒；运行上限 24 保留 25% 并发余量，并另保留 2 个交互槽位 |
 | Embedding | 32 | 16 | 独立模型、批处理快，避免向量化成为 12 文档槽位的瓶颈 |
 | Rerank | 24 | 12 | 独立模型，保留多租户公平性 |
 | VLM | 4 | 2 | 图像长调用，限制显存和超时放大 |
 | ASR | 2 | 1 | 音频调用重且数量相对少 |
 | Parser | 12 | 4 | 与 3×4 DocReader worker 对齐 |
 
-该配置是在现有实测信息下最大化资源且保留冗余的生产值。后续调整必须用同一批固定文档、相同模型和 P95/P99 延迟重新测量，不能仅因为增加 app Pod 就提高模型上限。
+该配置是在现有实测信息下最大化资源且保留冗余的生产值。Chat 原先的 `18`
+没有可复核的落盘依据，已经用
+[`20260726-deepseek-v4-flash.json`](../../custom/tests/model_capacity_reports/20260726-deepseek-v4-flash.json)
+重新校准。报告同时包含 1～32 并发短输出和 18/24/32 并发、每请求 160 token
+的受控结果；它不是任意长上下文的容量承诺，因此生产仍按 24 而不是实测边界 32。
+后续调整必须用同一批固定文档、相同模型和 P95/P99 延迟重新测量，不能仅因为增加
+app Pod 就提高模型上限。
 
 ## 无 RWX 存储设计
 
@@ -137,8 +145,8 @@ df -h
 要求：
 
 - StorageClass provisioner 为 Everest local CSI，`volumeBindingMode=WaitForFirstConsumer`，`reclaimPolicy=Delete`。
-- `.1/.2` 每台正常运行占 240 GiB；app 与 DocReader 同时滚动 surge 时最高约 420 GiB，因此每台本地卷池至少应有 430 GiB 可用。
-- `.7` 正常占 180 GiB、同时 surge 最高约 360 GiB。
+- `.1/.2` 每台正常运行占 240 GiB，`.7` 正常占 180 GiB。生产配置已将 app、DocReader 和两个 Agent 固定为 `maxSurge=0,maxUnavailable=1`，一次只替换一个 Pod，避免 500 GB 数据盘在滚动时额外申请整套临时卷。
+- 禁止同时手工滚动四类大临时卷 Deployment；500 GB 十进制磁盘格式化后约 465 GiB，正常态仍需保留 CSI、文件系统和故障处理余量。
 - 数据盘若仍作为 `/mnt/weknora-data` 普通文件系统或旧 `weknora-data-files` local PV 使用，不能同时假定它已属于 Everest LVM 池。必须先迁移、校验、卸载旧用途，再按 CCE 存储池方式配置。
 - 本地 PVC 只保存可重算数据。节点永久损坏时新 Pod 在其他节点创建新临时 PVC，由持久文档工作流重新执行未提交阶段。
 
@@ -221,9 +229,14 @@ weknora/__weknora_claude_sdk_original_inputs_v1__/
 
 入口不能继续使用 Nginx 默认 1 MiB：
 
-- 公网知识源最大为 2 GiB，因此云 ELB、Ingress controller 和任何 WAF/反向代理的请求上限都必须不小于 2 GiB。
-- Ingress 使用 `proxy-body-size: 2g` 且关闭 request buffering，避免 2 GiB 上传先完整落到 ingress 节点临时盘。
+- 后端公网知识源原文件最大为 2 GiB；云 ELB、Ingress controller、桌面/移动 Nginx
+  和任何 WAF/反向代理的请求体上限使用至少 2304 MiB，为 multipart 边界与元数据
+  留出余量，后端仍按 2 GiB 精确拒绝超限原文件。
+- Ingress 使用 `proxy-body-size: 2304m` 且关闭 request buffering，避免超大上传
+  先完整落到 ingress 节点临时盘。
 - app 与 DocReader 的普通解析传输上限仍为 50 MiB；超大文档先在 app 分卷，再传给 DocReader。
+- 桌面和移动 Nginx 的普通附件代理上限为 80 MiB，避免 50 MiB 原文件因 multipart
+  包装越过同为 50 MiB 的入口阈值；UI 和后端原文件限制仍为 50 MiB。
 - 如果未来在 app→Agent 的 ClusterIP 路径中插入 Nginx、Service Mesh sidecar 或 API gateway，该内部入口设置为 128 MiB。原因是单个 50 MiB 附件经过 Base64 和 JSON 后约 66.7 MiB，再加请求元数据、multipart/JSON 开销和合理余量。
 - 128 MiB 只适用于内部 Agent 请求，不能替代外部知识源 2 GiB 上限。
 
@@ -245,12 +258,12 @@ kubectl -n weknora create secret generic weknora-agent-internal \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-生产镜像必须使用不可变 tag 或 digest。最优方案是取得 SWR push 权限，将 app、frontend、mobile、两个 Agent、DocReader 和 sandbox 镜像统一推到内网 SWR，并通过 `default-secret` 拉取。当前没有 SWR push 凭据时，唯一可用的替代方式是把相同 digest 离线 load 到所有候选节点；这会限制故障漂移范围，不应被描述为镜像层高可用。
+生产镜像必须使用不可变 Git SHA tag，并记录 repo digest。SWR 已配置，app、frontend、mobile、两个 Agent、DocReader 和 sandbox 必须统一推到获批的业务 SWR 项目；Kubernetes Pod 通过 `default-secret` 拉取。
 
 每个 app 节点还必须有：
 
 - 可用的 `/var/run/docker.sock`。
-- 完全相同 digest 的 `weknora-sandbox-prod:v0.6.3`。
+- 完全相同 digest 的本次 Git SHA sandbox SWR 镜像；宿主 Docker 需要单独认证或预拉取。
 - 完全相同内容和权限的 `/app/skills/preloaded`。
 
 sandbox 是 `docker run --rm` 的单次运行，不保存跨请求会话，因此 app Service 不需要 sticky session。
@@ -261,16 +274,14 @@ sandbox 是 `docker run --rm` 的单次运行，不保存跨请求会话，因�
 helm lint ./helm -f ./helm/values-production-ha.yaml
 helm template weknora ./helm \
   -n weknora \
-  -f ./helm/values-production-ha.yaml > /tmp/weknora-rendered.yaml
-
-kubectl apply --dry-run=server -f /tmp/weknora-rendered.yaml
-helm upgrade --install weknora ./helm \
-  -n weknora \
   -f ./helm/values-production-ha.yaml \
-  --atomic --timeout 30m
+  -f /secure/values-site.yaml > /secure/weknora-rendered.yaml
+
+kubectl apply --dry-run=server -f /secure/weknora-rendered.yaml
+kubectl diff -f /secure/weknora-rendered.yaml
 ```
 
-应用更新前先备份 PostgreSQL、Neo4j、现有 Secret 和 Helm release values。`--atomic` 只能回滚 Kubernetes 对象，不能回滚已经提交的数据迁移，因此数据 migration 必须向前兼容本次发布或具有独立恢复方案。
+现网不是活动 Helm release，首次切换不能直接 `helm upgrade --install`。必须按完整运行手册备份、迁移、删除不可变 selector 的旧无状态 Deployment、重建 headless DocReader Service，再对渲染清单执行受控 `kubectl apply`；禁止 `--prune`。
 
 ## 部署后必须完成的验收
 
@@ -316,6 +327,5 @@ helm upgrade --install weknora ./helm \
 | Neo4j | 单实例、本地 RWO、单节点 | 图谱写入和图查询不可用 |
 | LiteLLM | 单实例 | Chat/Wiki/问题/图谱等模型调用受影响 |
 | 集群 | 全部节点同一 AZ | 不能抵抗 AZ 级故障 |
-| 业务镜像 | 尚无 SWR push 凭据时依赖离线预载 | 未预载节点不能接管 Pod |
 
 因此本方案实现的是：解析和 Agent/前端层的水平扩展、单 Pod/单解析节点故障恢复，以及无 RWX 的持久文件共享。它不能被表述为整套系统已经没有单点；要达到整系统 HA，仍需分别完成 Redis 自动切换、PostgreSQL HA、Neo4j HA、LiteLLM 多副本/外置以及跨 AZ 节点部署。

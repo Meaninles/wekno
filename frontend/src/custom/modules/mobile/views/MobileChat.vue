@@ -14,7 +14,16 @@ import {
   unpinSession,
 } from "@/api/chat";
 import { useStream } from "@/api/chat/streame";
-import { listKnowledgeFiles } from "@/api/knowledge-base";
+import {
+  listKnowledgeFolderNodes,
+  listKnowledgeFolderOptions,
+  searchKnowledgeFolderNodes,
+} from "@/custom/modules/knowledgeFolders/api";
+import type {
+  KnowledgeFolder,
+  KnowledgeFolderBreadcrumb,
+  KnowledgeFolderOption,
+} from "@/custom/modules/knowledgeFolders/types";
 import {
   BUILTIN_DATA_ANALYST_ID,
   BUILTIN_DOCUMENT_PROCESSING_ID,
@@ -100,8 +109,15 @@ const skillsAvailable = ref(true);
 const professionalSkillsAvailable = ref(false);
 const knowledgeFiles = ref<any[]>([]);
 const activeFileKbId = ref("");
+const activeFileFolderId = ref("");
+const activeFileFolders = ref<KnowledgeFolder[]>([]);
+const activeFileBreadcrumbs = ref<KnowledgeFolderBreadcrumb[]>([]);
+const activeFileFolderOptions = ref<KnowledgeFolderOption[]>([]);
+const activeFilePage = ref(1);
+const activeFileTotal = ref(0);
+const activeFilePageSize = 20;
+const fileSearchQuery = ref("");
 const fileListLoading = ref(false);
-const loadedFileKbIds = ref<Set<string>>(new Set());
 const pendingImages = ref<File[]>([]);
 const pendingAttachments = ref<MobileUploadAttachment[]>([]);
 const startedSessionIds = ref<Set<string>>(new Set());
@@ -117,6 +133,7 @@ let lastMessageScrollTop = 0;
 let programmaticScrollUntil = 0;
 let sessionsSyncing = false;
 let isHydratingConversationState = false;
+let fileSearchTimer: ReturnType<typeof setTimeout> | null = null;
 
 const { onChunk, startStream, stopStream, error } = useStream();
 
@@ -156,6 +173,11 @@ const resetMobileConversationState = () => {
   pendingImages.value = [];
   pendingAttachments.value = [];
   activeFileKbId.value = "";
+  activeFileFolderId.value = "";
+  activeFileFolders.value = [];
+  activeFileBreadcrumbs.value = [];
+  activeFilePage.value = 1;
+  fileSearchQuery.value = "";
 };
 
 const SCROLL_BOTTOM_THRESHOLD = 140;
@@ -764,31 +786,69 @@ const normalizeKnowledgeFile = (kbId: string, file: any) => {
 };
 
 const mergeKnowledgeFiles = (kbId: string, files: any[]) => {
+  const selected = new Set(selectedFileIds.value);
   knowledgeFiles.value = [
-    ...knowledgeFiles.value.filter((file) => file.kb_id !== kbId),
+    ...knowledgeFiles.value.filter((file) => file.kb_id !== kbId || selected.has(String(file.id))),
     ...files,
-  ];
+  ].filter((file, index, rows) =>
+    rows.findIndex((candidate) => String(candidate.id) === String(file.id)) === index,
+  );
 };
 
-const loadKnowledgeFilesForKb = async (kbId: string, force = false) => {
+const loadKnowledgeFilesForKb = async (kbId: string, _force = false) => {
   if (!kbId) return;
-  if (!force && loadedFileKbIds.value.has(kbId)) return;
   fileListLoading.value = true;
   try {
     const fileTypes = agentSupportedFileTypes.value;
-    const requests = fileTypes.length > 0
-      ? fileTypes.map((fileType) => listKnowledgeFiles(kbId, { page: 1, page_size: 100, file_type: fileType }))
-      : [listKnowledgeFiles(kbId, { page: 1, page_size: 100 })];
-    const responses = await Promise.all(requests.map((request) => request.catch(() => ({ data: [] }))));
+    const params = {
+      folder_id: activeFileFolderId.value || undefined,
+      page: activeFilePage.value,
+      page_size: activeFilePageSize,
+      keyword: fileSearchQuery.value.trim() || undefined,
+      file_type: fileTypes.length === 1 ? fileTypes[0] : undefined,
+    };
+    const [response, optionsResponse]: any[] = await Promise.all([
+      fileSearchQuery.value.trim()
+        ? searchKnowledgeFolderNodes(kbId, params)
+        : listKnowledgeFolderNodes(kbId, params),
+      listKnowledgeFolderOptions(kbId),
+    ]);
+    const nodes = responseList(response);
     const filesById = new Map<string, any>();
-    responses.flatMap(responseList).forEach((file: any) => {
+    activeFileFolders.value = nodes
+      .filter((node: any) => node?.node_type === "folder" && node.folder)
+      .map((node: any) => node.folder);
+    nodes
+      .filter((node: any) => node?.node_type === "document" && node.document)
+      .map((node: any) => node.document)
+      .forEach((file: any) => {
       const normalized = normalizeKnowledgeFile(kbId, file);
       if (normalized.id && isKnowledgeFileAllowedByAgent(normalized)) {
         filesById.set(String(normalized.id), normalized);
       }
     });
     mergeKnowledgeFiles(kbId, [...filesById.values()]);
-    loadedFileKbIds.value = new Set([...loadedFileKbIds.value, kbId]);
+    activeFileTotal.value = Number(response?.total || 0);
+    activeFileFolderOptions.value = Array.isArray(optionsResponse?.data) ? optionsResponse.data : [];
+    if (Array.isArray(response?.breadcrumbs)) {
+      activeFileBreadcrumbs.value = response.breadcrumbs;
+    } else if (activeFileFolderId.value) {
+      const current = activeFileFolderOptions.value.find((folder) => folder.id === activeFileFolderId.value);
+      activeFileBreadcrumbs.value = current
+        ? current.path.split("/").map((name, index, parts) => {
+          const path = parts.slice(0, index + 1).join("/");
+          const folder = activeFileFolderOptions.value.find((candidate) => candidate.path === path);
+          return { id: folder?.id || "", name };
+        }).filter((crumb) => crumb.id)
+        : [];
+    } else {
+      activeFileBreadcrumbs.value = [];
+    }
+    const lastPage = Math.max(1, Math.ceil(activeFileTotal.value / activeFilePageSize));
+    if (activeFilePage.value > lastPage) {
+      activeFilePage.value = lastPage;
+      await loadKnowledgeFilesForKb(kbId, true);
+    }
   } finally {
     fileListLoading.value = false;
   }
@@ -841,7 +901,6 @@ const loadKnowledgeChildren = async () => {
 
   if (!knowledgeBases.value.length) {
     knowledgeFiles.value = [];
-    loadedFileKbIds.value = new Set();
     return;
   }
 
@@ -1196,11 +1255,40 @@ const selectKnowledgeTab = (tab: KnowledgeSheetTab) => {
 
 const openFileKnowledgeBase = async (kbId: string) => {
   activeFileKbId.value = kbId;
+  activeFileFolderId.value = "";
+  activeFilePage.value = 1;
+  fileSearchQuery.value = "";
   await loadKnowledgeFilesForKb(kbId, true);
 };
 
 const backToFileKnowledgeBases = () => {
+  if (activeFileFolderId.value) {
+    const parent = activeFileBreadcrumbs.value.length > 1
+      ? activeFileBreadcrumbs.value[activeFileBreadcrumbs.value.length - 2]
+      : null;
+    activeFileFolderId.value = parent?.id || "";
+    activeFilePage.value = 1;
+    fileSearchQuery.value = "";
+    void loadKnowledgeFilesForKb(activeFileKbId.value, true);
+    return;
+  }
   activeFileKbId.value = "";
+  activeFileFolders.value = [];
+  activeFileBreadcrumbs.value = [];
+  fileSearchQuery.value = "";
+};
+
+const openFileFolder = async (folder: KnowledgeFolder | null) => {
+  activeFileFolderId.value = folder?.id || "";
+  activeFilePage.value = 1;
+  fileSearchQuery.value = "";
+  await loadKnowledgeFilesForKb(activeFileKbId.value, true);
+};
+
+const changeFilePage = async (page: number) => {
+  const lastPage = Math.max(1, Math.ceil(activeFileTotal.value / activeFilePageSize));
+  activeFilePage.value = Math.min(lastPage, Math.max(1, page));
+  await loadKnowledgeFilesForKb(activeFileKbId.value, true);
 };
 
 const selectedFileCountForKb = (kbId: string) => {
@@ -1527,6 +1615,16 @@ watch(inputValue, () => {
   void nextTick(autoGrow);
 }, { flush: "post" });
 
+watch(fileSearchQuery, () => {
+  if (fileSearchTimer) clearTimeout(fileSearchTimer);
+  if (!activeFileKbId.value) return;
+  fileSearchTimer = setTimeout(() => {
+    fileSearchTimer = null;
+    activeFilePage.value = 1;
+    void loadKnowledgeFilesForKb(activeFileKbId.value, true);
+  }, 280);
+});
+
 watch(hasProfessionalSkillTab, (hasTab) => {
   if (!hasTab && activeSkillTab.value === "professional") {
     activeSkillTab.value = "lightweight";
@@ -1536,7 +1634,6 @@ watch(hasProfessionalSkillTab, (hasTab) => {
 watch(
   () => agentSupportedFileTypes.value.join(","),
   async () => {
-    loadedFileKbIds.value = new Set();
     knowledgeFiles.value = [];
     pruneUnsupportedAttachments();
     await loadKnowledgeChildren();
@@ -1620,6 +1717,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   saveCurrentMobileDraft();
+  if (fileSearchTimer) clearTimeout(fileSearchTimer);
   clearRecoverPoll();
   stopStream();
   resetMobileConversationState();
@@ -1920,9 +2018,31 @@ onBeforeUnmount(() => {
           >
             <button type="button" @click="backToFileKnowledgeBases">
               <MobileIcon name="chevron-left" />
-              <span>{{ activeFileKnowledgeBase?.name || '返回知识库' }}</span>
+              <span>{{ activeFileBreadcrumbs.at(-1)?.name || activeFileKnowledgeBase?.name || '返回知识库' }}</span>
             </button>
-            <small>选择要引用的文件</small>
+            <small>文件夹仅用于浏览，选择文档后参与召回</small>
+          </div>
+
+          <div v-if="activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId"
+            class="file-picker-search">
+            <MobileIcon name="search" />
+            <input v-model.trim="fileSearchQuery" type="search" placeholder="搜索文件夹和文档"
+              aria-label="搜索文件夹和文档">
+            <button v-if="fileSearchQuery" type="button" aria-label="清空" @click="fileSearchQuery = ''">
+              <MobileIcon name="close" />
+            </button>
+          </div>
+
+          <div v-if="activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId"
+            class="file-picker-breadcrumbs">
+            <button type="button" :class="{ active: !activeFileFolderId }" @click="openFileFolder(null)">根目录</button>
+            <template v-for="crumb in activeFileBreadcrumbs" :key="crumb.id">
+              <MobileIcon name="chevron-right" />
+              <button type="button" :class="{ active: crumb.id === activeFileFolderId }"
+                @click="openFileFolder(activeFileFolderOptions.find((folder) => folder.id === crumb.id) as any)">
+                {{ crumb.name }}
+              </button>
+            </template>
           </div>
 
           <div
@@ -1931,6 +2051,18 @@ onBeforeUnmount(() => {
           >
             正在加载文件
           </div>
+
+          <button v-for="folder in activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && !fileListLoading ? activeFileFolders : []"
+            :key="`nested-folder:${folder.id}`" type="button"
+            class="sheet-row sheet-row--with-action sheet-row--folder" @click="openFileFolder(folder)">
+            <div class="sheet-row__main">
+              <span class="sheet-row__title-with-icon">
+                <MobileIcon name="folder" />{{ folder.name }}
+              </span>
+              <small>{{ folder.stats.subtree_document_count }} 个文档 · {{ folder.stats.direct_child_folder_count }} 个子文件夹</small>
+            </div>
+            <MobileIcon name="chevron-right" />
+          </button>
 
           <button
             v-for="file in activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && !fileListLoading ? activeFileRows : []"
@@ -1943,6 +2075,14 @@ onBeforeUnmount(() => {
             <span>{{ file.display_name || file.file_name }}</span>
             <small>{{ file.kb_name || '知识库文件' }}</small>
           </button>
+
+          <div v-if="activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && activeFileTotal > activeFilePageSize"
+            class="file-picker-pagination">
+            <button type="button" :disabled="activeFilePage <= 1" @click="changeFilePage(activeFilePage - 1)">上一页</button>
+            <span>{{ activeFilePage }} / {{ Math.ceil(activeFileTotal / activeFilePageSize) }}</span>
+            <button type="button" :disabled="activeFilePage >= Math.ceil(activeFileTotal / activeFilePageSize)"
+              @click="changeFilePage(activeFilePage + 1)">下一页</button>
+          </div>
 
           <div
             v-for="skill in activeSheet === 'skill' ? activeSkillRows : []"
@@ -1974,7 +2114,7 @@ onBeforeUnmount(() => {
               (activeSheet === 'model' && !chatModels.length) ||
               (activeSheet === 'context' && activeKnowledgeTab === 'kb' && !knowledgeBases.length) ||
               (activeSheet === 'context' && activeKnowledgeTab === 'file' && !activeFileKbId && !knowledgeBases.length) ||
-              (activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && !fileListLoading && !activeFileRows.length) ||
+              (activeSheet === 'context' && activeKnowledgeTab === 'file' && activeFileKbId && !fileListLoading && !activeFileRows.length && !activeFileFolders.length) ||
               (activeSheet === 'skill' && (!skillsAvailable || !activeSkillRows.length))
             "
             class="sheet-empty"
@@ -2426,6 +2566,97 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.35;
   padding-left: 24px;
+}
+
+.file-picker-search {
+  display: grid;
+  min-height: 40px;
+  grid-template-columns: 20px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #dce7e1;
+  border-radius: 10px;
+  color: #75877e;
+  padding: 0 8px 0 11px;
+}
+
+.file-picker-search input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #17261f;
+  font: inherit;
+  font-size: 14px;
+}
+
+.file-picker-search button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 13px;
+  background: #eef3f0;
+  color: #74857c;
+}
+
+.file-picker-breadcrumbs {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+}
+
+.file-picker-breadcrumbs button {
+  min-height: 28px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6c7e75;
+  padding: 0 7px;
+  font-size: 12px;
+}
+
+.file-picker-breadcrumbs button.active {
+  background: #edf8f2;
+  color: #078f49;
+  font-weight: 650;
+}
+
+.file-picker-breadcrumbs > :not(button) {
+  flex: 0 0 auto;
+  color: #9caaa3;
+}
+
+.file-picker-pagination {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px;
+}
+
+.file-picker-pagination button {
+  min-width: 68px;
+  height: 32px;
+  border: 1px solid #cfe0d7;
+  border-radius: 16px;
+  background: #fff;
+  color: #078f49;
+  font-size: 12px;
+}
+
+.file-picker-pagination button:disabled {
+  color: #9aaba3;
+  opacity: 0.55;
+}
+
+.file-picker-pagination span {
+  color: #708178;
+  font-size: 12px;
 }
 
 .sheet-row.selected {

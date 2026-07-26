@@ -10,6 +10,9 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
 ENV MAX_FILE_SIZE_MB=50
+ENV PROXY_MAX_BODY_SIZE_MB=80
+ENV PROXY_MAX_KNOWLEDGE_SOURCE_BODY_SIZE_MB=2304
+ENV PROXY_TIMEOUT_SECONDS=3600
 
 EXPOSE 80
 

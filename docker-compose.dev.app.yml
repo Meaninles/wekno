@@ -47,11 +47,11 @@ services:
       DUCKDB_SKIP_EXTENSION_LOAD: "true"
       CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: ${CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID:-weknora-app-dev}
       CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART: "true"
-      # Shared LiteLLM probe on 2026-07-25 stayed stable at 18 total calls and
-      # showed a sharp latency cliff above it. All replicas must use identical
-      # values because admission leases are coordinated through Redis.
-      CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY: ${CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY:-18}
-      CUSTOM_MODEL_ADMISSION_CHAT_PER_TENANT: ${CUSTOM_MODEL_ADMISSION_CHAT_PER_TENANT:-9}
+      # DeepSeek V4 Flash completed 32/32 concurrent 160-token generations
+      # (P95 5.655s) on 2026-07-26. Keep a 25% cluster headroom at 24; all
+      # replicas must use identical values because leases are shared in Redis.
+      CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY: ${CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY:-24}
+      CUSTOM_MODEL_ADMISSION_CHAT_PER_TENANT: ${CUSTOM_MODEL_ADMISSION_CHAT_PER_TENANT:-12}
       CUSTOM_MODEL_ADMISSION_INTERACTIVE_RESERVE: ${CUSTOM_MODEL_ADMISSION_INTERACTIVE_RESERVE:-2}
       # Keep one failed LiteLLM upstream from pinning document derivative
       # slots for the multi-hour document workflow deadline.

@@ -20,10 +20,7 @@ spec:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "general-agent" "context" .) | nindent 6 }}
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    {{- toYaml .Values.generalAgent.updateStrategy | nindent 4 }}
   template:
     metadata:
       labels:
@@ -187,10 +184,7 @@ spec:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "document-processing-agent" "context" .) | nindent 6 }}
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    {{- toYaml .Values.documentProcessingAgent.updateStrategy | nindent 4 }}
   template:
     metadata:
       labels:

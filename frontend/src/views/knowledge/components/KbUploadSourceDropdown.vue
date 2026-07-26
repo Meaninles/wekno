@@ -29,6 +29,8 @@
           theme="default"
           :class="['kb-upload-source-trigger', triggerClass]"
           :data-guide="dataGuide || undefined"
+          :aria-label="tooltipText"
+          :title="tooltipText"
           size="small"
         >
           <template #icon><t-icon :name="triggerIcon" size="16px" /></template>

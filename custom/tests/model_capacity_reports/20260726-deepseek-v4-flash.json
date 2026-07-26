@@ -1,0 +1,129 @@
+{
+  "generated_at": "2026-07-26T00:00:00+08:00",
+  "route": "local LiteLLM compatibility entry -> deepseek-v4-flash-int8",
+  "scope": "Controlled model-route capacity probe only; no knowledge-base document was created, rebuilt, or deleted.",
+  "method": {
+    "transport": "OpenAI-compatible non-streaming chat completions",
+    "temperature": 0,
+    "timeout_seconds": 240,
+    "start_barrier": true,
+    "unique_prompt_per_request": true,
+    "stop_conditions": [
+      "any non-200/error response",
+      "P95 greater than 30 seconds"
+    ]
+  },
+  "short_output_results": [
+    {
+      "concurrency": 1,
+      "requests": 1,
+      "ok": 1,
+      "errors": 0,
+      "p95_seconds": 0.83
+    },
+    {
+      "concurrency": 2,
+      "requests": 2,
+      "ok": 2,
+      "errors": 0,
+      "p95_seconds": 0.591
+    },
+    {
+      "concurrency": 4,
+      "requests": 4,
+      "ok": 4,
+      "errors": 0,
+      "p95_seconds": 0.538
+    },
+    {
+      "concurrency": 8,
+      "requests": 8,
+      "ok": 8,
+      "errors": 0,
+      "p95_seconds": 0.586
+    },
+    {
+      "concurrency": 12,
+      "requests": 12,
+      "ok": 12,
+      "errors": 0,
+      "p95_seconds": 0.973
+    },
+    {
+      "concurrency": 16,
+      "requests": 16,
+      "ok": 16,
+      "errors": 0,
+      "p95_seconds": 0.924
+    },
+    {
+      "concurrency": 18,
+      "requests": 18,
+      "ok": 18,
+      "errors": 0,
+      "p95_seconds": 1.122
+    },
+    {
+      "concurrency": 24,
+      "requests": 24,
+      "ok": 24,
+      "errors": 0,
+      "p95_seconds": 1.438
+    },
+    {
+      "concurrency": 32,
+      "requests": 32,
+      "ok": 32,
+      "errors": 0,
+      "p95_seconds": 1.584
+    }
+  ],
+  "generation_results": [
+    {
+      "concurrency": 18,
+      "requests": 18,
+      "ok": 18,
+      "errors": 0,
+      "completion_tokens_per_request": 160,
+      "wall_seconds": 4.673,
+      "p50_seconds": 4.661,
+      "p95_seconds": 4.671,
+      "max_seconds": 4.671
+    },
+    {
+      "concurrency": 24,
+      "requests": 24,
+      "ok": 24,
+      "errors": 0,
+      "completion_tokens_per_request": 160,
+      "wall_seconds": 4.653,
+      "p50_seconds": 4.64,
+      "p95_seconds": 4.65,
+      "max_seconds": 4.65
+    },
+    {
+      "concurrency": 32,
+      "requests": 32,
+      "ok": 32,
+      "errors": 0,
+      "completion_tokens_per_request": 160,
+      "wall_seconds": 5.662,
+      "p50_seconds": 5.646,
+      "p95_seconds": 5.655,
+      "max_seconds": 5.655
+    }
+  ],
+  "conclusion": {
+    "verified_concurrency": 32,
+    "production_cluster_concurrency": 24,
+    "capacity_reserve_percent": 25,
+    "per_tenant_concurrency": 12,
+    "interactive_reserve": 2,
+    "reason": "32 concurrent 160-token generations completed 32/32 without errors at P95 5.655s. A cluster ceiling of 24 leaves 25% concurrency headroom for longer prompts, longer outputs, model-service variance, and interactive traffic."
+  },
+  "limitations": [
+    "This is a controlled short-context probe, not a guarantee for arbitrarily long contexts or outputs.",
+    "The admission ceiling is cluster-wide and must not be multiplied by app replica count.",
+    "Production rollout must monitor model P95, provider queueing, timeout/error rate, and admission wait time."
+  ]
+}

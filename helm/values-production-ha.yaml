@@ -2,13 +2,18 @@
 #
 # This is the target production topology, not a staged rollout profile.
 # It assumes the prerequisites documented in
-# docs/custom/生产集群无RWX最优部署方案.md have been completed:
-#   - immutable release images are available on every eligible node (SWR is
-#     preferred; until push access exists, preload the exact same digest);
+# docs/custom/当前版本生产更新部署执行手册.md have been completed:
+#   - immutable release images have been pushed to the approved SWR project
+#     and the same sandbox digest is available to the host Docker daemon on
+#     every app node;
+#   - /app/skills/preloaded on every app node was exported from that exact app
+#     image and passed the per-node checks in the deployment runbook;
 #   - .1/.2/.7 have an Everest local-PV pool backed by their data disks and
-#     the csi-local-topology StorageClass has been verified;
+#     the csi-local-topology StorageClass has passed real write/read/reclaim;
 #   - the node labels used below exist;
 #   - weknora-agent-internal contains apiKey;
+#   - weknora-model-runtime was captured from the current production app and
+#     contains the existing Anthropic/LiteLLM runtime settings;
 #   - historical /data/files and Agent artifacts have passed the object-store
 #     migration audit.
 #
@@ -26,6 +31,13 @@ serviceAccount:
 app:
   enabled: true
   replicaCount: 3
+  # 80 GiB local scratch per Pod. Replace one Pod at a time so a rollout does
+  # not request a fourth scratch PVC or exceed a 500 GB node data disk.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   autoscaling:
     enabled: false
   terminationGracePeriodSeconds: 180
@@ -45,6 +57,13 @@ app:
     repository: weknora-app-prod
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
+  sandbox:
+    mode: docker
+    timeoutSeconds: "300"
+    # Pulled by the host Docker daemon through docker.sock, not by kubelet.
+    # Replace with the full immutable SWR reference and authenticate or
+    # pre-pull it on every app node.
+    dockerImage: weknora-sandbox-prod:horizontal-objectstore-20260726
   resources:
     # Test baseline: three cap=4 workers processed 500/500 documents at
     # ~4.10 docs/s. This request leaves ~3 CPU and ~18 GiB request headroom
@@ -68,6 +87,8 @@ app:
         everest.io/csi.volume-name-prefix: wk-app-tmp
   env:
     GIN_MODE: release
+    # Base SQL migrations are run exactly once by the maintenance replica.
+    AUTO_MIGRATE: "false"
     RETRIEVE_DRIVER: postgres
     STORAGE_TYPE: obs
     LOCAL_STORAGE_BASE_DIR: /data/files
@@ -134,6 +155,46 @@ app:
       migrationAllowMissing: "false"
       migrationAllowInvalid: "false"
   extraEnv:
+    # Preserve the current single-instance model runtime exactly. The
+    # deployment runbook captures these values from the live app without
+    # printing or committing the API key.
+    - name: ANTHROPIC_BASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: weknora-model-runtime
+          key: ANTHROPIC_BASE_URL
+    - name: ANTHROPIC_MODEL
+      valueFrom:
+        secretKeyRef:
+          name: weknora-model-runtime
+          key: ANTHROPIC_MODEL
+    - name: ANTHROPIC_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: weknora-model-runtime
+          key: ANTHROPIC_API_KEY
+    # These switches were not present in every historical deployment. When
+    # present, preserve them so sandbox network/model behavior is unchanged;
+    # when absent, the application keeps its existing secure defaults.
+    - name: ANTHROPIC_AUTH_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: weknora-model-runtime
+          key: ANTHROPIC_AUTH_TOKEN
+          optional: true
+    - name: WEKNORA_SANDBOX_ALLOW_NETWORK
+      valueFrom:
+        secretKeyRef:
+          name: weknora-model-runtime
+          key: WEKNORA_SANDBOX_ALLOW_NETWORK
+          optional: true
+    - name: WEKNORA_SANDBOX_PASSTHROUGH_ENV
+      valueFrom:
+        secretKeyRef:
+          name: weknora-model-runtime
+          key: WEKNORA_SANDBOX_PASSTHROUGH_ENV
+          optional: true
+
     # Ordinary knowledge files and generated private artifacts share the OBS
     # account but use disjoint, auditable prefixes.
     - name: OBS_ENDPOINT
@@ -234,8 +295,9 @@ app:
       value: "240"
 
     # Shared Redis leases make these cluster-wide limits; they must not be
-    # multiplied by the number of app replicas. The chat ceiling is based on
-    # the observed sharp latency cliff above 18 concurrent calls.
+    # multiplied by the number of app replicas. The DeepSeek V4 Flash route
+    # completed 32/32 concurrent 160-token generations at P95 5.655s; 24 keeps
+    # 25% concurrency headroom for longer prompts/outputs and provider jitter.
     - name: CUSTOM_MODEL_ADMISSION_ENABLED
       value: "true"
     - name: CUSTOM_MODEL_ADMISSION_FAIL_CLOSED
@@ -243,9 +305,9 @@ app:
     - name: CUSTOM_MODEL_ADMISSION_KEY_PREFIX
       value: "weknora:prod-cce-wk-6a9d12b0:model-admission:v1:"
     - name: CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY
-      value: "18"
+      value: "24"
     - name: CUSTOM_MODEL_ADMISSION_CHAT_PER_TENANT
-      value: "9"
+      value: "12"
     - name: CUSTOM_MODEL_ADMISSION_INTERACTIVE_RESERVE
       value: "2"
     - name: CUSTOM_MODEL_ADMISSION_EMBEDDING_CONCURRENCY
@@ -271,12 +333,6 @@ app:
 
     # Keep the existing Docker sandbox feature available on every app node.
     # Runs are one-shot (`docker run --rm`), so no session affinity is needed.
-    - name: WEKNORA_SANDBOX_MODE
-      value: docker
-    - name: WEKNORA_SANDBOX_TIMEOUT
-      value: "300"
-    - name: WEKNORA_SANDBOX_DOCKER_IMAGE
-      value: weknora-sandbox-prod:v0.6.3
     - name: SSRF_WHITELIST_EXTRA
       value: 10.0.11.36,10.0.11.37,weknora-litellm,weixin.moutai.com
   extraVolumes:
@@ -284,13 +340,28 @@ app:
       hostPath:
         path: /var/run/docker.sock
         type: Socket
+    # The sandbox image is pulled by the host Docker daemon rather than
+    # kubelet. Let appuser authenticate to the same SWR registry if node image
+    # GC removed the pre-pulled image.
+    - name: sandbox-registry-config
+      secret:
+        secretName: default-secret
+        defaultMode: 0444
+        items:
+          - key: .dockerconfigjson
+            path: config.json
     - name: sandbox-skills
       hostPath:
+        # Docker bind sources are resolved by the host daemon. Keep this exact
+        # host path in sync with the app image on every eligible app node.
         path: /app/skills/preloaded
         type: Directory
   extraVolumeMounts:
     - name: docker-socket
       mountPath: /var/run/docker.sock
+    - name: sandbox-registry-config
+      mountPath: /home/appuser/.docker
+      readOnly: true
     - name: sandbox-skills
       mountPath: /app/skills/preloaded
       readOnly: true
@@ -298,6 +369,11 @@ app:
 docreader:
   enabled: true
   replicaCount: 3
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   autoscaling:
     enabled: false
   terminationGracePeriodSeconds: 90
@@ -312,8 +388,10 @@ docreader:
   nodeSelector:
     weknora.io/document-worker: "true"
   image:
-    repository: wechatopenai/weknora-docreader
-    tag: v0.6.3-40e8ab8
+    # Build from this repository so parser and document-splitter fixes match
+    # the app. Replace with the approved SWR project path before rendering.
+    repository: weknora-docreader-prod
+    tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -343,7 +421,10 @@ docreader:
     - name: DOCREADER_GRPC_MAX_FILE_SIZE_MB
       value: "50"
     - name: DOCREADER_PDF_RENDER_PARALLELISM
-      value: "2"
+      # Keep the former production single-instance value. Three replicas raise
+      # aggregate PDF rendering parallelism from 4 to 12 without slowing one
+      # large document merely because it landed on a new worker.
+      value: "4"
     - name: DOCREADER_PDF_RENDER_MAX_WORKERS
       value: "1"
     - name: DOCREADER_MARKITDOWN_MAX_WORKERS
@@ -357,6 +438,11 @@ generalAgent:
   enabled: true
   replicaCount: 2
   terminationGracePeriodSeconds: 60
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   image:
     repository: weknora-custom-general-agent
     tag: horizontal-objectstore-20260726
@@ -400,6 +486,11 @@ documentProcessingAgent:
   enabled: true
   replicaCount: 2
   terminationGracePeriodSeconds: 90
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   image:
     repository: weknora-custom-document-processing-agent
     tag: horizontal-objectstore-20260726
@@ -448,6 +539,9 @@ frontend:
     pullPolicy: IfNotPresent
   maxFileSizeMB: "50"
   maxKnowledgeSourceFileSizeMB: "2048"
+  proxyMaxBodySizeMB: "80"
+  proxyMaxKnowledgeSourceBodySizeMB: "2304"
+  proxyTimeoutSeconds: "7200"
   resources:
     requests:
       cpu: 100m
@@ -475,6 +569,9 @@ mobileWeb:
     pullPolicy: IfNotPresent
   maxFileSizeMB: "50"
   maxKnowledgeSourceFileSizeMB: "2048"
+  proxyMaxBodySizeMB: "80"
+  proxyMaxKnowledgeSourceBodySizeMB: "2304"
+  proxyTimeoutSeconds: "7200"
   resources:
     requests:
       cpu: 50m
@@ -528,10 +625,10 @@ ingress:
     enabled: false
     secretName: ""
   annotations:
-    # Public knowledge-source upload ceiling. Every cloud ELB/reverse-proxy hop
-    # must be >=2 GiB too. If an internal proxy is later inserted in front of
-    # an Agent service, its separate body limit is 128 MiB.
-    nginx.ingress.kubernetes.io/proxy-body-size: "2g"
+    # 2304 MiB leaves framing headroom above the exact 2 GiB raw knowledge-file
+    # limit. Backend validation remains authoritative. An internal proxy placed
+    # in front of an Agent service still needs at least 128 MiB.
+    nginx.ingress.kubernetes.io/proxy-body-size: "2304m"
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"

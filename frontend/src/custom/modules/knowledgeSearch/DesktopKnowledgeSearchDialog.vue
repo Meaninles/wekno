@@ -138,30 +138,119 @@
           </div>
         </section>
 
-        <section class="result-panel document-panel" aria-label="文档搜索结果">
+        <section class="result-panel document-panel" aria-label="文件夹和文档搜索结果">
           <div class="panel-heading">
             <div>
-              <strong>文档</strong>
-              <span>按文档名称模糊搜索</span>
+              <strong>文件夹与文档</strong>
+              <span>文件夹可展开浏览，只有文档参与召回</span>
             </div>
-            <em v-if="visibleDocumentResults.length">{{ visibleDocumentResults.length }}</em>
+            <em v-if="visibleFolderResults.length || visibleDocumentResults.length">
+              {{ visibleFolderResults.length + visibleDocumentResults.length }}
+            </em>
           </div>
 
           <div v-if="!normalizedQuery" class="document-guide panel-state">
             <span class="guide-icon"><t-icon name="file-search" size="26px" /></span>
-            <strong>查找知识库文档</strong>
+            <strong>查找文件夹和知识库文档</strong>
             <span>输入至少 {{ searchPolicy.minLength }} 个字符开始搜索，结果按页加载。</span>
           </div>
           <div v-else-if="normalizedQuery.length < searchPolicy.minLength" class="panel-state">
-            再输入 {{ searchPolicy.minLength - normalizedQuery.length }} 个字符后搜索文档
+            再输入 {{ searchPolicy.minLength - normalizedQuery.length }} 个字符后搜索
           </div>
           <div v-else-if="documentSearchLoading" class="panel-state">
             <t-loading size="small" />
-            <span>正在搜索文档</span>
+            <span>正在搜索文件夹和文档</span>
           </div>
           <div v-else-if="documentSearchError" class="panel-state is-error">{{ documentSearchError }}</div>
-          <div v-else-if="!visibleDocumentResults.length" class="panel-state">没有匹配的文档</div>
+          <div v-else-if="!visibleFolderResults.length && !visibleDocumentResults.length" class="panel-state">
+            没有匹配的文件夹或文档
+          </div>
           <div v-else class="document-scroll">
+            <template v-for="item in visibleFolderResults" :key="item.id">
+              <button
+                type="button"
+                class="document-row folder-result-row"
+                :aria-expanded="expandedFolderOriginKey === item.id"
+                @click="toggleFolderResult(item)"
+              >
+                <span class="document-icon folder"><t-icon name="folder" size="18px" /></span>
+                <span class="row-copy">
+                  <strong :title="item.folder.path">{{ item.folder.name }}</strong>
+                  <small>{{ documentKnowledgeBaseName(item) }} · {{ item.folder.path }} ·
+                    {{ item.folder.stats.subtree_document_count }} 个文档</small>
+                </span>
+                <span
+                  v-if="knowledgeBaseById.get(String(item.knowledge_base_id || ''))"
+                  class="permission-tag compact"
+                  :class="`is-${knowledgeBaseById.get(String(item.knowledge_base_id || ''))?.access}`"
+                >
+                  {{ knowledgeBaseById.get(String(item.knowledge_base_id || ''))?.permissionLabel }}
+                </span>
+                <t-icon
+                  :name="expandedFolderOriginKey === item.id ? 'chevron-up' : 'chevron-down'"
+                  size="16px"
+                  class="row-chevron"
+                />
+              </button>
+              <div v-if="expandedFolderOriginKey === item.id" class="folder-browser">
+                <div class="folder-browser-toolbar">
+                  <nav class="folder-browser-crumbs" aria-label="搜索文件夹路径">
+                    <template v-for="(crumb, index) in expandedFolderBreadcrumbs" :key="crumb.id">
+                      <t-icon v-if="index" name="chevron-right" size="13px" />
+                      <button type="button" @click="openExpandedFolderBreadcrumb(crumb.id)">
+                        {{ crumb.name }}
+                      </button>
+                    </template>
+                  </nav>
+                  <button type="button" class="open-folder-location" @click="openExpandedFolderLocation">
+                    在知识库中打开
+                  </button>
+                </div>
+                <div v-if="expandedFolderLoading" class="folder-browser-state">
+                  <t-loading size="small" />
+                  <span>正在加载文件夹内容</span>
+                </div>
+                <div v-else-if="expandedFolderError" class="folder-browser-state is-error">
+                  {{ expandedFolderError }}
+                </div>
+                <div v-else-if="!expandedFolderNodes.length" class="folder-browser-state">
+                  当前文件夹暂无内容
+                </div>
+                <div v-else class="folder-browser-nodes">
+                  <button
+                    v-for="node in expandedFolderNodes"
+                    :key="`${node.node_type}-${node.folder?.id || node.document?.id}`"
+                    type="button"
+                    class="folder-browser-node"
+                    @click="node.node_type === 'folder' && node.folder
+                      ? enterExpandedFolder(node.folder)
+                      : openExpandedDocument(node)"
+                  >
+                    <span class="document-icon" :class="{ folder: node.node_type === 'folder' }">
+                      <t-icon :name="node.node_type === 'folder' ? 'folder' : 'file'" size="16px" />
+                    </span>
+                    <span class="row-copy">
+                      <strong>{{ node.node_type === 'folder'
+                        ? node.folder?.name
+                        : (node.document?.file_name || node.document?.title || '未命名文档') }}</strong>
+                      <small v-if="node.node_type === 'folder'">
+                        {{ node.folder?.stats.subtree_document_count || 0 }} 个文档
+                      </small>
+                      <small v-else>文档</small>
+                    </span>
+                    <t-icon name="chevron-right" size="14px" />
+                  </button>
+                </div>
+                <div v-if="expandedFolderTotalPages > 1" class="folder-browser-pagination">
+                  <button type="button" :disabled="expandedFolderPage <= 1"
+                    @click="changeExpandedFolderPage(expandedFolderPage - 1)">上一页</button>
+                  <span>{{ expandedFolderPage }} / {{ expandedFolderTotalPages }} 页 ·
+                    {{ expandedFolderTotal }} 项</span>
+                  <button type="button" :disabled="expandedFolderPage >= expandedFolderTotalPages"
+                    @click="changeExpandedFolderPage(expandedFolderPage + 1)">下一页</button>
+                </div>
+              </div>
+            </template>
             <button
               v-for="item in visibleDocumentResults"
               :key="item.id"
@@ -193,7 +282,7 @@
               class="load-more"
               @click="loadMoreDocuments"
             >
-              {{ documentSearchLoadingMore ? '正在加载' : '加载更多文档' }}
+              {{ documentSearchLoadingMore ? '正在加载' : '加载更多结果' }}
             </t-button>
           </div>
         </section>
@@ -206,7 +295,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { searchKnowledge } from '@/api/knowledge-base'
+import { searchAccessibleKnowledgeFolderNodes } from '@/custom/modules/knowledgeFolders/api'
 import { useAuthStore } from '@/stores/auth'
 import { useChatResourcesStore } from '@/stores/chatResources'
 import { useOrganizationStore } from '@/stores/organization'
@@ -221,6 +310,7 @@ import {
   normalizeKnowledgeSearchQuery,
 } from './searchPolicy'
 import { openRouteInNewPage } from './openRouteInNewPage'
+import { useSearchFolderBrowser } from './useSearchFolderBrowser'
 
 type KnowledgeDocumentRow = Record<string, any>
 
@@ -244,6 +334,23 @@ const documentSearchLoading = ref(false)
 const documentSearchLoadingMore = ref(false)
 const documentSearchHasMore = ref(false)
 const documentSearchError = ref('')
+const {
+  originKey: expandedFolderOriginKey,
+  knowledgeBaseId: expandedFolderKnowledgeBaseId,
+  currentFolder: expandedFolderCurrent,
+  breadcrumbs: expandedFolderBreadcrumbs,
+  nodes: expandedFolderNodes,
+  page: expandedFolderPage,
+  total: expandedFolderTotal,
+  totalPages: expandedFolderTotalPages,
+  loading: expandedFolderLoading,
+  error: expandedFolderError,
+  collapse: collapseExpandedFolder,
+  toggleRoot: toggleExpandedFolderRoot,
+  enterFolder: enterExpandedFolder,
+  openBreadcrumb: openExpandedFolderBreadcrumb,
+  changePage: changeExpandedFolderPage,
+} = useSearchFolderBrowser()
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let requestGeneration = 0
@@ -265,7 +372,14 @@ const filteredPersonal = computed(() => filteredCatalog.value.filter((item) => i
 const filteredShared = computed(() => filteredCatalog.value.filter((item) => item.group === 'shared'))
 const knowledgeBaseById = computed(() => new Map(catalog.value.map((item) => [item.id, item])))
 const visibleDocumentResults = computed(() =>
-  documentSearchResults.value.filter((item) => knowledgeBaseById.value.has(String(item.knowledge_base_id || ''))),
+  documentSearchResults.value.filter((item) =>
+    item.node_type !== 'folder' && knowledgeBaseById.value.has(String(item.knowledge_base_id || '')),
+  ),
+)
+const visibleFolderResults = computed(() =>
+  documentSearchResults.value.filter((item) =>
+    item.node_type === 'folder' && item.folder && knowledgeBaseById.value.has(String(item.knowledge_base_id || '')),
+  ),
 )
 
 const knowledgeDocumentCount = (kb: MobileKnowledgeBase) =>
@@ -296,6 +410,7 @@ const cancelSearch = () => {
 
 const clearSearchState = () => {
   cancelSearch()
+  collapseExpandedFolder()
   searchQuery.value = ''
   documentSearchResults.value = []
   documentSearchHasMore.value = false
@@ -332,15 +447,27 @@ const runDocumentSearch = async (
   else documentSearchLoading.value = true
   documentSearchError.value = ''
   try {
-    const response: any = await searchKnowledge(
+    const page = Math.floor(offset / searchPolicy.pageSize) + 1
+    const response: any = await searchAccessibleKnowledgeFolderNodes({
       keyword,
-      offset,
-      searchPolicy.pageSize,
-      undefined,
-      { include_total: false },
-    )
+      page,
+      page_size: searchPolicy.pageSize,
+    })
     if (generation !== requestGeneration || keyword !== normalizedQuery.value) return
-    const rows = Array.isArray(response?.data) ? response.data : []
+    const rows = (Array.isArray(response?.data) ? response.data : []).map((node: any) => {
+      if (node?.node_type === 'folder' && node.folder) {
+        return {
+          ...node,
+          id: `folder:${node.folder.id}`,
+        }
+      }
+      return {
+        ...(node?.document || {}),
+        node_type: 'document',
+        knowledge_base_id: node?.knowledge_base_id || node?.document?.knowledge_base_id,
+        knowledge_base_name: node?.knowledge_base_name,
+      }
+    })
     if (append) {
       const merged = new Map(documentSearchResults.value.map((item) => [String(item.id), item]))
       rows.forEach((item: KnowledgeDocumentRow) => merged.set(String(item.id), item))
@@ -348,7 +475,7 @@ const runDocumentSearch = async (
     } else {
       documentSearchResults.value = rows
     }
-    documentSearchHasMore.value = response?.has_more === true
+    documentSearchHasMore.value = page * searchPolicy.pageSize < Number(response?.total || 0)
   } catch (error: any) {
     if (generation !== requestGeneration) return
     documentSearchError.value = error?.message || '搜索文档失败'
@@ -362,6 +489,7 @@ const runDocumentSearch = async (
 
 const scheduleDocumentSearch = () => {
   cancelSearch()
+  collapseExpandedFolder()
   documentSearchResults.value = []
   documentSearchHasMore.value = false
   documentSearchError.value = ''
@@ -403,6 +531,37 @@ const openDocument = (item: KnowledgeDocumentRow) => {
   openRouteInNewPage(router, {
     path: `/platform/knowledge-bases/${kbId}`,
     query: { knowledge_id: knowledgeId },
+  })
+}
+
+const openFolderInKnowledgeBase = (kbId: string, folderId: string) => {
+  if (!kbId || !folderId || !knowledgeBaseById.value.has(kbId)) return
+  pins.touchRecent('kb', kbId)
+  openRouteInNewPage(router, {
+    path: `/platform/knowledge-bases/${kbId}`,
+    query: { folder_id: folderId },
+  })
+}
+
+const toggleFolderResult = async (item: KnowledgeDocumentRow) => {
+  const kbId = String(item.knowledge_base_id || '')
+  if (!kbId || !item.folder || !knowledgeBaseById.value.has(kbId)) return
+  await toggleExpandedFolderRoot(String(item.id), kbId, item.folder)
+}
+
+const openExpandedFolderLocation = () => {
+  openFolderInKnowledgeBase(
+    expandedFolderKnowledgeBaseId.value,
+    String(expandedFolderCurrent.value?.id || ''),
+  )
+}
+
+const openExpandedDocument = (node: any) => {
+  const document = node?.document || {}
+  openDocument({
+    ...document,
+    knowledge_base_id: expandedFolderKnowledgeBaseId.value,
+    knowledge_base_name: knowledgeBaseById.value.get(expandedFolderKnowledgeBaseId.value)?.name,
   })
 }
 
@@ -684,6 +843,11 @@ onBeforeUnmount(cancelSearch)
 .document-icon {
   color: var(--td-text-color-secondary);
   background: var(--td-bg-color-secondarycontainer);
+
+  &.folder {
+    color: var(--td-warning-color);
+    background: var(--td-warning-color-light);
+  }
 }
 
 .row-copy {
@@ -789,6 +953,127 @@ onBeforeUnmount(cancelSearch)
 
 .document-scroll {
   padding-bottom: 10px;
+}
+
+.folder-result-row[aria-expanded='true'] {
+  color: var(--td-brand-color);
+  background: var(--td-brand-color-light);
+}
+
+.folder-browser {
+  margin: 0 10px 10px;
+  border: 1px solid var(--td-component-stroke);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: var(--td-bg-color-secondarycontainer);
+  overflow: hidden;
+}
+
+.folder-browser-toolbar,
+.folder-browser-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--td-component-stroke);
+}
+
+.folder-browser-crumbs {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 2px;
+  overflow: hidden;
+
+  button {
+    max-width: 112px;
+    padding: 2px 4px;
+    border: 0;
+    color: var(--td-text-color-secondary);
+    background: transparent;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    &:hover {
+      color: var(--td-brand-color);
+    }
+  }
+}
+
+.open-folder-location,
+.folder-browser-pagination button {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 5px;
+  color: var(--td-text-color-secondary);
+  background: var(--td-bg-color-container);
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    color: var(--td-brand-color);
+    border-color: var(--td-brand-color);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+}
+
+.folder-browser-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 70px;
+  padding: 12px;
+  color: var(--td-text-color-placeholder);
+  font-size: 12px;
+
+  &.is-error {
+    color: var(--td-error-color);
+  }
+}
+
+.folder-browser-nodes {
+  padding: 4px;
+}
+
+.folder-browser-node {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 46px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--td-text-color-primary);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+
+  &:hover {
+    background: var(--td-bg-color-container);
+  }
+
+  .document-icon {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+.folder-browser-pagination {
+  border-top: 1px solid var(--td-component-stroke);
+  border-bottom: 0;
+  color: var(--td-text-color-placeholder);
+  font-size: 11px;
 }
 
 .load-more {

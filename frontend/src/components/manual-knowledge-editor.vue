@@ -616,12 +616,16 @@ const handleSave = async (targetStatus: ManualStatus) => {
       title: string
       content: string
       status: string
+      folder_id?: string
       tag_ids?: string[]
       process_config?: KnowledgeProcessOverrides
     } = {
       title: form.title.trim(),
       content: form.content,
       status: targetStatus,
+    }
+    if (mode.value === 'create' && uiStore.manualEditorFolderId) {
+      payload.folder_id = uiStore.manualEditorFolderId
     }
     if (tagIdsToUpload && tagIdsToUpload.length > 0) {
       payload.tag_ids = tagIdsToUpload

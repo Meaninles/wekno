@@ -1,0 +1,53 @@
+# Use only during the maintenance window, together with
+# helm/values-production-ha.yaml and the protected values-site.yaml.
+# Replace REPLACE_LEGACY_NODE_NAME with the Kubernetes node name for
+# 10.14.201.7. This replica is not a normal production worker.
+
+app:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  env:
+    AUTO_MIGRATE: "true"
+  topologySpread:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+  # The HTTP listener starts only after SQL and legacy-artifact migration.
+  # Do not let the ordinary three-minute startup window kill the one-off
+  # migration replica halfway through a large copy.
+  startupProbe:
+    httpGet:
+      path: /health
+      port: http
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 360
+  nodeSelector:
+    weknora.io/document-worker: "true"
+    kubernetes.io/hostname: REPLACE_LEGACY_NODE_NAME
+  # The migration process does not parse documents. Keep it off the Everest
+  # pool because the .7 data disk still backs the legacy PVC at this point.
+  scratch:
+    volumeType: emptyDir
+    sizeLimit: 2Gi
+
+dataFiles:
+  persistence:
+    enabled: true
+    existingClaim: weknora-data-files
+
+# Render only templates/app.yaml for the migration replica. These disables are
+# also defensive if an operator accidentally renders the whole chart.
+docreader:
+  enabled: false
+generalAgent:
+  enabled: false
+documentProcessingAgent:
+  enabled: false
+frontend:
+  enabled: false
+mobileWeb:
+  enabled: false
+ingress:
+  enabled: false

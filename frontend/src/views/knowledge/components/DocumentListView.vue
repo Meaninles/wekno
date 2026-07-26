@@ -8,6 +8,7 @@ import type { DocumentQueueItemStatus } from '@/custom/modules/documentQueue/typ
 import KnowledgeWorkflowStatusBadge from '@/custom/modules/knowledgeWorkflowStatus/KnowledgeWorkflowStatusBadge.vue';
 import type { KnowledgeWorkflowFeatureSource } from '@/custom/modules/knowledgeWorkflowStatus/status';
 import { knowledgeNeedsStatusPolling } from '../wikiStatusRefresh';
+import type { KnowledgeFolder } from '@/custom/modules/knowledgeFolders/types';
 
 interface Tag {
   id: string;
@@ -35,6 +36,7 @@ interface KnowledgeItem {
 
 const props = defineProps<{
   items: KnowledgeItem[];
+  folders?: KnowledgeFolder[];
   selectedIds: Set<string>;
   canEdit: boolean;
   tagList: Tag[];
@@ -48,8 +50,10 @@ const emit = defineEmits<{
   (e: 'open', item: KnowledgeItem): void;
   (e: 'toggle-row', id: string, checked: boolean, shiftKey: boolean): void;
   (e: 'toggle-all', checked: boolean): void;
-  (e: 'action', action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete', item: KnowledgeItem): void;
+  (e: 'action', action: 'edit' | 'reparse' | 'cancel-parse' | 'move-folder' | 'move' | 'delete', item: KnowledgeItem): void;
   (e: 'tag-edit', item: KnowledgeItem): void;
+  (e: 'open-folder', folder: KnowledgeFolder): void;
+  (e: 'folder-action', action: 'edit' | 'move' | 'delete', folder: KnowledgeFolder): void;
 }>();
 
 const { t } = useI18n();
@@ -116,7 +120,11 @@ const onRowCheckboxChange = (item: KnowledgeItem, checked: boolean, ctx?: { e?: 
 
 const moreOpen = ref<string | null>(null);
 const onMoreVisible = (id: string, visible: boolean) => {
-  moreOpen.value = visible ? id : null;
+  if (visible) {
+    moreOpen.value = id;
+  } else if (moreOpen.value === id) {
+    moreOpen.value = null;
+  }
 };
 
 // 吸顶检测：哨兵离开视口说明 header 已吸附在滚动容器顶部
@@ -148,10 +156,15 @@ const canCancelParse = (item: KnowledgeItem) =>
 const isParseInFlight = (item: KnowledgeItem) => canCancelParse(item);
 const isDocumentWorkflowInFlight = (item: KnowledgeItem) => knowledgeNeedsStatusPolling(item);
 
-const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete', item: KnowledgeItem) => {
+const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move-folder' | 'move' | 'delete', item: KnowledgeItem) => {
   moreOpen.value = null;
   item.isMore = false;
   emit('action', action, item);
+};
+
+const handleFolderAction = (action: 'edit' | 'move' | 'delete', folder: KnowledgeFolder) => {
+  moreOpen.value = null;
+  emit('folder-action', action, folder);
 };
 
 </script>
@@ -174,6 +187,102 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
     </div>
 
     <div class="doc-list-body">
+      <div v-for="folder in folders || []" :key="`folder-${folder.id}`" class="doc-list-row folder-row"
+        :class="{ 'menu-open': moreOpen === folder.id }" role="row" @click="emit('open-folder', folder)">
+        <div class="cell cell-check folder-chevron">
+          <t-icon name="chevron-right" size="16px" />
+        </div>
+        <div class="cell cell-name">
+          <span class="row-file-icon-wrap folder-icon-wrap">
+            <t-icon name="folder" />
+          </span>
+          <div class="row-file-text">
+            <span class="row-file-name" :title="folder.path">{{ folder.name }}</span>
+            <span v-if="folder.description" class="row-file-desc" :title="folder.description">
+              {{ folder.description }}
+            </span>
+            <span v-else-if="folder.path !== folder.name" class="row-file-desc">
+              {{ folder.path }}
+            </span>
+          </div>
+        </div>
+        <div class="cell cell-tag">
+          <t-tag size="small" variant="light-outline">{{ t('knowledgeFolders.folder') }}</t-tag>
+        </div>
+        <div class="cell cell-source">
+          <t-icon class="row-source-icon" name="folder-open" />
+          <span class="row-source-label">
+            {{ t('knowledgeFolders.childFolderCount', { count: folder.stats.direct_child_folder_count }) }}
+          </span>
+        </div>
+        <div class="cell cell-size">
+          <span class="row-mono">
+            {{ t('knowledgeFolders.documentCount', { count: folder.stats.subtree_document_count }) }}
+          </span>
+        </div>
+        <div class="cell cell-status">
+          <t-popup trigger="hover" placement="bottom" :show-arrow="true">
+            <span class="folder-status-summary" @click.stop>
+              <t-icon
+                :name="folder.stats.parse_pending_count || folder.stats.parse_running_count || folder.stats.enrichment_pending_task_count || folder.stats.wiki_pending_task_count ? 'time' : 'check-circle'"
+                size="14px"
+              />
+              {{ folder.stats.parse_pending_count + folder.stats.parse_running_count
+                + folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }}
+            </span>
+            <template #content>
+              <div class="folder-status-popover">
+                <div class="folder-status-title">{{ t('knowledgeFolders.taskOverview') }}</div>
+                <div class="folder-status-item">
+                  <span>{{ t('knowledgeFolders.parsePending') }}</span>
+                  <strong>{{ folder.stats.parse_pending_count }}</strong>
+                </div>
+                <div class="folder-status-item">
+                  <span>{{ t('knowledgeFolders.parseRunning') }}</span>
+                  <strong>{{ folder.stats.parse_running_count }}</strong>
+                </div>
+                <div class="folder-status-item">
+                  <span>{{ t('knowledgeFolders.derivativeTasks') }}</span>
+                  <strong>{{ folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }}</strong>
+                </div>
+                <div class="folder-status-item is-danger">
+                  <span>{{ t('knowledgeFolders.abnormalDocuments') }}</span>
+                  <strong>{{ folder.stats.abnormal_document_count }}</strong>
+                </div>
+              </div>
+            </template>
+          </t-popup>
+        </div>
+        <div class="cell cell-time">
+          <span class="row-mono">{{ formatTime(folder.updated_at) }}</span>
+        </div>
+        <div v-if="canEdit" class="cell cell-actions" @click.stop>
+          <t-popup placement="bottom-right" trigger="click" destroy-on-close
+            :visible="moreOpen === folder.id"
+            :on-visible-change="(v: boolean) => onMoreVisible(folder.id, v)">
+            <button class="row-more-btn" :class="{ active: moreOpen === folder.id }" type="button"
+              :aria-label="t('knowledgeBase.columnActions')">
+              <t-icon name="more" size="16px" />
+            </button>
+            <template #content>
+              <div class="row-menu">
+                <div class="row-menu-item" @click.stop="handleFolderAction('edit', folder)">
+                  <t-icon class="icon" name="edit" />
+                  <span>{{ t('knowledgeFolders.edit') }}</span>
+                </div>
+                <div class="row-menu-item" @click.stop="handleFolderAction('move', folder)">
+                  <t-icon class="icon" name="folder-move" />
+                  <span>{{ t('knowledgeFolders.move') }}</span>
+                </div>
+                <div class="row-menu-item danger" @click.stop="handleFolderAction('delete', folder)">
+                  <t-icon class="icon" name="delete" />
+                  <span>{{ t('knowledgeFolders.delete') }}</span>
+                </div>
+              </div>
+            </template>
+          </t-popup>
+        </div>
+      </div>
       <div v-for="item in items" :key="item.id" class="doc-list-row"
         :class="{ selected: selectedIds.has(item.id), 'menu-open': moreOpen === item.id }" :data-select-id="item.id"
         role="row" @click="emit('open', item)">
@@ -252,6 +361,7 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
 
         <div class="cell cell-actions" v-if="canEdit" @click.stop>
           <t-popup placement="bottom-right" trigger="click" destroy-on-close
+            :visible="moreOpen === item.id"
             :on-visible-change="(v: boolean) => onMoreVisible(item.id, v)">
             <button class="row-more-btn" :class="{ active: moreOpen === item.id }" type="button"
               :aria-label="t('knowledgeBase.columnActions')">
@@ -291,6 +401,10 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
                   <t-icon class="icon" name="swap" />
                   <span>{{ t('knowledgeBase.moveDocument') }}</span>
                 </div>
+                <div class="row-menu-item" @click.stop="handleAction('move-folder', item)">
+                  <t-icon class="icon" name="folder-open" />
+                  <span>{{ t('knowledgeFolders.moveDocumentHere') }}</span>
+                </div>
                 <t-popconfirm theme="warning"
                   :content="t('knowledgeBase.confirmDeleteDocument', { fileName: item.file_name || '' })"
                   :confirm-btn="{ content: t('knowledgeBase.confirmDelete'), theme: 'danger' }"
@@ -327,6 +441,7 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
   display: flex;
   flex-direction: column;
   width: 100%;
+  container-type: inline-size;
   background: var(--td-bg-color-container);
   border: 1px solid var(--td-component-stroke);
   border-radius: 9px;
@@ -351,6 +466,60 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
   align-items: center;
   column-gap: 0;
   padding: 0 16px;
+}
+
+.folder-row {
+  .folder-chevron {
+    color: var(--td-text-color-placeholder);
+  }
+
+  &:hover .folder-chevron {
+    color: var(--td-brand-color);
+  }
+}
+
+.folder-icon-wrap {
+  color: var(--td-warning-color-6);
+  background: var(--td-warning-color-1);
+}
+
+.folder-status-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 42px;
+  color: var(--td-text-color-secondary);
+  cursor: help;
+}
+
+.folder-status-popover {
+  width: 210px;
+  padding: 10px 12px;
+}
+
+.folder-status-title {
+  margin-bottom: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--td-text-color-primary);
+}
+
+.folder-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+
+  strong {
+    color: var(--td-text-color-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &.is-danger strong {
+    color: var(--td-error-color);
+  }
 }
 
 .doc-list-sticky-sentinel {
@@ -386,7 +555,7 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
   display: flex;
   flex-direction: column;
   border-radius: 0 0 8px 8px;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .doc-list-row {
@@ -446,6 +615,33 @@ const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'de
 
 .cell-actions {
   justify-content: flex-end;
+}
+
+@container (max-width: 820px) {
+  .doc-list-header,
+  .doc-list-row {
+    grid-template-columns: 40px minmax(180px, 1fr) 92px 80px 80px 44px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .cell-tag,
+  .cell-time {
+    display: none;
+  }
+}
+
+@container (max-width: 620px) {
+  .doc-list-header,
+  .doc-list-row {
+    grid-template-columns: 36px minmax(160px, 1fr) 78px 72px 40px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .cell-source {
+    display: none;
+  }
 }
 
 /* TDesign 勾选框：去掉空白 label、与表格行对齐 */

@@ -819,7 +819,8 @@ const processMarkdown = (markdownText) => {
 };
 const handleClose = () => {
   emit("closeDoc", false);
-  const scrollEl = docScrollEl || findDocDrawerScrollEl();
+  const drawerBody = docMarkdownRoot.value?.closest('.t-drawer__body') as HTMLElement | null;
+  const scrollEl = drawerBody ?? docMarkdownRoot.value;
   if (scrollEl) scrollEl.scrollTop = 0;
   viewMode.value = 'merged';
 };

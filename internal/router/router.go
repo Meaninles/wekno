@@ -252,7 +252,16 @@ func NewRouter(params RouterParams) *gin.Engine {
 		RegisterWeKnoraCloudRoutes(v1, params.WeKnoraCloudHandler, rbacGuards)
 		RegisterWikiPageRoutes(v1, params.WikiPageHandler, rbacGuards)
 		RegisterChunkerDebugRoutes(v1, rbacGuards)
-		custombootstrap.RegisterRoutes(v1, params.CustomHandlers, rbacGuards.SystemAdmin(), rbacGuards.OwnedAgentOrAdmin())
+		custombootstrap.RegisterRoutes(
+			v1,
+			params.CustomHandlers,
+			rbacGuards.SystemAdmin(),
+			rbacGuards.OwnedAgentOrAdmin(),
+			rbacGuards.Viewer(),
+			rbacGuards.OwnedKBOrAdmin(),
+			rbacGuards.KBAccessRead("id"),
+			rbacGuards.KBAccessWrite("id"),
+		)
 	}
 
 	return r

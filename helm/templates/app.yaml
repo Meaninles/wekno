@@ -20,10 +20,7 @@ spec:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "app" "context" .) | nindent 6 }}
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    {{- toYaml .Values.app.updateStrategy | nindent 4 }}
   template:
     metadata:
       labels:
@@ -88,6 +85,8 @@ spec:
             {{- end }}
             - name: GIN_MODE
               value: {{ .Values.app.env.GIN_MODE | quote }}
+            - name: AUTO_MIGRATE
+              value: {{ .Values.app.env.AUTO_MIGRATE | quote }}
             - name: TZ
               value: {{ .Values.app.env.TZ | quote }}
             # Database configuration
@@ -193,6 +192,12 @@ spec:
               value: {{ .Values.app.env.WEKNORA_WIKI_MAP_TASK_CONCURRENCY | quote }}
             - name: ENABLE_GRAPH_RAG
               value: {{ .Values.app.env.ENABLE_GRAPH_RAG | quote }}
+            - name: WEKNORA_SANDBOX_MODE
+              value: {{ .Values.app.sandbox.mode | quote }}
+            - name: WEKNORA_SANDBOX_TIMEOUT
+              value: {{ .Values.app.sandbox.timeoutSeconds | quote }}
+            - name: WEKNORA_SANDBOX_DOCKER_IMAGE
+              value: {{ .Values.app.sandbox.dockerImage | quote }}
             - name: NEO4J_ENABLE
               value: {{ ternary "true" "false" (or .Values.neo4j.enabled (eq (lower (toString .Values.app.env.ENABLE_GRAPH_RAG)) "true")) | quote }}
             - name: WEKNORA_METRICS_ENABLED

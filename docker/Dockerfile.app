@@ -47,6 +47,22 @@ ENV GO_VERSION=${GO_VERSION_ARG}
 RUN --mount=type=cache,target=/go/pkg/mod make build-prod
 RUN --mount=type=cache,target=/go/pkg/mod cp -r /go/pkg/mod/github.com/yanyiwu/ /app/yanyiwu/
 
+# Docker CLI extraction stage. The runtime only needs the client for the
+# host-socket sandbox, not containerd/runc/the Docker daemon.
+FROM debian:12.12-slim AS docker-cli
+
+ARG APK_MIRROR_ARG
+RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+        sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
+    fi && \
+    apt-get -o Acquire::Retries=3 update && \
+    mkdir -p /opt/docker-cli && \
+    cd /tmp && \
+    apt-get -o Acquire::Retries=3 download docker.io && \
+    dpkg-deb -x docker.io_*.deb /opt/docker-cli && \
+    /opt/docker-cli/usr/bin/docker --version && \
+    rm -f docker.io_*.deb
+
 # Final stage
 FROM debian:12.12-slim
 
@@ -103,6 +119,9 @@ COPY --from=builder /app/skills/professional ./skills/professional
 COPY --from=builder /app/skills/preloaded ./skills/_builtin
 COPY --from=builder /root/.duckdb /home/appuser/.duckdb
 COPY --from=builder /app/WeKnora .
+# Docker sandbox mode talks to the host daemon through docker.sock. Include
+# only the distribution-packaged CLI binary; no daemon or runtime runs in app.
+COPY --from=docker-cli /opt/docker-cli/usr/bin/docker /usr/local/bin/docker
 
 # Copy and make entrypoint script executable
 COPY --from=builder /app/scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh

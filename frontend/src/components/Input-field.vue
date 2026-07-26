@@ -9,6 +9,11 @@ import { useAuthStore } from '@/stores/auth';
 import { useUIStore } from '@/stores/ui';
 import { useMenuStore } from '@/stores/menu';
 import { listKnowledgeBases, searchKnowledge, batchQueryKnowledge, listKnowledgeTags } from '@/api/knowledge-base';
+import {
+  listKnowledgeFolderNodes,
+  searchAccessibleKnowledgeFolderNodes,
+} from '@/custom/modules/knowledgeFolders/api';
+import type { KnowledgeFolderBreadcrumb } from '@/custom/modules/knowledgeFolders/types';
 import { listMCPServices, type MCPService } from '@/api/mcp-service';
 import { stopSession } from '@/api/chat';
 import { useOrganizationStore } from '@/stores/organization';
@@ -502,9 +507,17 @@ const mentionGroupCounts = ref<Partial<Record<MentionItemType, number>>>({});
 // 当前 @ 会话可见的 KB ID 集合（含工具兼容性过滤），分页加载文件时复用，
 // 避免 append 请求把不兼容 KB 的文件漏进来。`null` 表示"不受限制"（非智能体场景）
 const mentionAllowedKbIds = ref<Set<string> | null>(null);
+const mentionAvailableKbIds = ref<string[]>([]);
 const mentionLoading = ref(false);
 const mentionOffset = ref(0);
 const MENTION_PAGE_SIZE = 20;
+const mentionFolderStack = ref<Array<{
+  kbId: string;
+  kbName: string;
+  folderId: string;
+  name: string;
+  breadcrumbs: KnowledgeFolderBreadcrumb[];
+}>>([]);
 
 // 共享智能体时用于标识「共享空间」的展示名（组织名或共享者），供 @ 列表与已选标签显示角标
 const sharedAgentOrgName = computed(() => {
@@ -1273,6 +1286,13 @@ const updateModelDropdownPosition = () => {
 // Mention Logic
 let lastMentionQuery = '';
 const loadMentionItems = async (q: string, resetIndex = true, append = false) => {
+  if (!append && q !== lastMentionQuery) {
+    mentionFolderStack.value = [];
+  }
+  if (mentionFolderStack.value.length > 0 && q === lastMentionQuery) {
+    await loadMentionFolderItems(append);
+    return;
+  }
   if (!append) {
     mentionOffset.value = 0;
   }
@@ -1366,6 +1386,7 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
     mentionAllowedKbIds.value = hasAgentConfig.value
       ? new Set(availableKbs.map((kb: any) => String(kb.id)))
       : null;
+    mentionAvailableKbIds.value = availableKbs.map((kb: any) => String(kb.id));
 
     if (!isDocumentProcessingAgent.value) {
       const kbs = availableKbs.filter((kb: any) =>
@@ -1401,19 +1422,43 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
       const fileTypesParam = agentSupportedFileTypes.value.length > 0 ? agentSupportedFileTypes.value : undefined;
       const sourceTenantId = settingsStore.selectedAgentSourceTenantId;
       const agentId = selectedAgentId.value;
-      const searchOptions = {
-        ...(sourceTenantId && agentId ? { agent_id: agentId } : {}),
-        recent: !fileSearchKeyword,
-      };
-      const res: any = await searchKnowledge(
-        fileSearchKeyword,
-        mentionOffset.value,
-        MENTION_PAGE_SIZE,
-        fileTypesParam,
-        searchOptions
-      );
+      const useAgentSearch = !!(sourceTenantId && agentId);
+      const useFolderSearch = !!fileSearchKeyword && !useAgentSearch && mentionAvailableKbIds.value.length > 0;
+      const res: any = useFolderSearch
+        ? await searchAccessibleKnowledgeFolderNodes({
+          keyword: fileSearchKeyword,
+          page: Math.floor(mentionOffset.value / MENTION_PAGE_SIZE) + 1,
+          page_size: MENTION_PAGE_SIZE,
+          knowledge_base_ids: mentionAvailableKbIds.value.join(','),
+        })
+        : await searchKnowledge(
+          fileSearchKeyword,
+          mentionOffset.value,
+          MENTION_PAGE_SIZE,
+          fileTypesParam,
+          {
+            ...(useAgentSearch ? { agent_id: agentId } : {}),
+            recent: !fileSearchKeyword,
+          },
+        );
       if (res.data && Array.isArray(res.data)) {
-        let files = res.data;
+        let files = useFolderSearch
+          ? res.data.map((node: any) => node?.node_type === 'folder'
+            ? {
+              ...node.folder,
+              id: `folder:${node.folder?.id}`,
+              folder_id: node.folder?.id,
+              title: node.folder?.name,
+              knowledge_base_id: node.knowledge_base_id,
+              knowledge_base_name: node.knowledge_base_name,
+              is_folder: true,
+            }
+            : {
+              ...(node.document || {}),
+              knowledge_base_id: node.knowledge_base_id || node.document?.knowledge_base_id,
+              knowledge_base_name: node.knowledge_base_name,
+            })
+          : res.data;
         const rawTotal = typeof res.total === 'number' ? res.total : undefined;
         const apiPageSize = res.data.length;
         // 按当前 @ 会话的兼容 KB 集合过滤：
@@ -1427,6 +1472,12 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
             const kbId = f.knowledge_base_id ?? f.kb_id;
             return kbId != null && allowed.has(String(kbId));
           });
+        }
+        if (fileTypesParam && fileTypesParam.length > 0) {
+          const allowedTypes = new Set(fileTypesParam.map((value: string) => value.toLowerCase()));
+          files = files.filter((file: any) =>
+            file.is_folder || allowedTypes.has(String(file.file_type || '').toLowerCase()),
+          );
         }
         const sharedKbOrgMap: Record<string, string> = {};
         (orgStore.sharedKnowledgeBases || []).forEach((s: any) => {
@@ -1445,7 +1496,11 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
             type: 'file' as const,
             kbName: f.knowledge_base_name || '',
             kbId: kbId || undefined,
-            orgName: fileOrgName || undefined
+            orgName: fileOrgName || undefined,
+            isFolder: f.is_folder === true,
+            folderPath: f.path,
+            folderDocumentCount: f.subtree_document_count ?? f.stats?.subtree_document_count,
+            folderId: f.folder_id,
           };
         });
         if (!append) {
@@ -1457,8 +1512,10 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
           }
         }
       }
-      mentionHasMore.value = res.has_more || false;
-      mentionOffset.value += fileItems.length;
+      mentionHasMore.value = useFolderSearch
+        ? mentionOffset.value + MENTION_PAGE_SIZE < Number(res.total || 0)
+        : (res.has_more || false);
+      mentionOffset.value += Array.isArray(res.data) ? res.data.length : fileItems.length;
     } catch (e) {
       console.error('[Mention] searchKnowledge error:', e);
       mentionHasMore.value = false;
@@ -1486,6 +1543,71 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
   }
   lastMentionQuery = q;
 };
+
+async function loadMentionFolderItems(append = false) {
+  const current = mentionFolderStack.value[mentionFolderStack.value.length - 1];
+  if (!current) return;
+  if (!append) mentionOffset.value = 0;
+  mentionLoading.value = true;
+  try {
+    const response: any = await listKnowledgeFolderNodes(current.kbId, {
+      folder_id: current.folderId,
+      page: Math.floor(mentionOffset.value / MENTION_PAGE_SIZE) + 1,
+      page_size: MENTION_PAGE_SIZE,
+    });
+    const nodes = Array.isArray(response?.data) ? response.data : [];
+    const allowedTypes = new Set(agentSupportedFileTypes.value.map((value: string) => value.toLowerCase()));
+    const rows: MentionItem[] = nodes.flatMap((node: any) => {
+      if (node?.node_type === 'folder' && node.folder) {
+        return [{
+          id: `folder:${node.folder.id}`,
+          name: node.folder.name,
+          type: 'file' as const,
+          kbId: current.kbId,
+          kbName: current.kbName,
+          isFolder: true,
+          folderId: node.folder.id,
+          folderPath: node.folder.path,
+          folderDocumentCount: node.folder.stats?.subtree_document_count || 0,
+        }];
+      }
+      if (node?.node_type !== 'document' || !node.document) return [];
+      const document = node.document;
+      if (
+        allowedTypes.size > 0 &&
+        !allowedTypes.has(String(document.file_type || '').toLowerCase())
+      ) return [];
+      return [{
+        id: document.id,
+        name: document.title || document.file_name,
+        type: 'file' as const,
+        kbId: current.kbId,
+        kbName: current.kbName,
+      }];
+    });
+    const backItem: MentionItem = {
+      id: `folder-back:${current.folderId}`,
+      name: mentionFolderStack.value.length > 1 ? '返回上一级文件夹' : `返回 ${current.kbName}`,
+      type: 'file',
+      kbId: current.kbId,
+      kbName: current.kbName,
+      isFolder: true,
+      isFolderBack: true,
+    };
+    mentionItems.value = append
+      ? [...mentionItems.value, ...rows]
+      : [backItem, ...rows];
+    mentionHasMore.value = mentionOffset.value + nodes.length < Number(response?.total || 0);
+    mentionOffset.value += nodes.length;
+    mentionGroupCounts.value = { file: Number(response?.total || 0) };
+    mentionActiveIndex.value = 0;
+  } catch (error) {
+    console.error('[Mention] load folder error:', error);
+    mentionHasMore.value = false;
+  } finally {
+    mentionLoading.value = false;
+  }
+}
 
 const loadMoreMentionItems = () => {
   if (mentionHasMore.value && !mentionLoading.value) {
@@ -1678,6 +1800,34 @@ const triggerMention = () => {
 };
 
 const onMentionSelect = (item: any) => {
+  if (item.type === 'file' && item.isFolder) {
+    if (item.isFolderBack) {
+      mentionFolderStack.value = mentionFolderStack.value.slice(0, -1);
+      mentionOffset.value = 0;
+      if (mentionFolderStack.value.length > 0) {
+        void loadMentionFolderItems(false);
+      } else {
+        void loadMentionItems(lastMentionQuery, true, false);
+      }
+      return;
+    }
+    const folderId = String(item.folderId || item.id || '').replace(/^folder:/, '');
+    const kbId = String(item.kbId || '');
+    if (!folderId || !kbId) return;
+    mentionFolderStack.value = [
+      ...mentionFolderStack.value,
+      {
+        kbId,
+        kbName: item.kbName || '知识库',
+        folderId,
+        name: item.name,
+        breadcrumbs: [],
+      },
+    ];
+    mentionOffset.value = 0;
+    void loadMentionFolderItems(false);
+    return;
+  }
   if (item.type === 'kb') {
     if (isDocumentProcessingAgent.value) {
       MessagePlugin.warning('文档处理智能体只支持选择具体文件，请输入关键词搜索文档');

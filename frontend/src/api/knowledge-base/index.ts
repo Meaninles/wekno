@@ -204,11 +204,12 @@ export function createManualKnowledge(
     title: string
     content: string
     status: string
+    folder_id?: string
     tag_ids?: string[]
     process_config?: KnowledgeProcessOverrides
   },
 ) {
-  return post(`/api/v1/knowledge-bases/${kbId}/knowledge/manual`, data);
+  return post(`/api/v1/custom/knowledge-folders/knowledge-bases/${kbId}/manual`, data);
 }
 
 export function listKnowledgeFiles(

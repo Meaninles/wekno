@@ -233,6 +233,11 @@ function openWorkflowDetail() {
   onVisibleChange(true)
 }
 
+function openWorkflowDetailFromTag(context?: { e?: MouseEvent }) {
+  context?.e?.stopPropagation()
+  openWorkflowDetail()
+}
+
 function scheduleWorkflowDetailClose() {
   if (detailCloseTimer) clearTimeout(detailCloseTimer)
   detailCloseTimer = setTimeout(() => {
@@ -270,7 +275,7 @@ onUnmounted(() => {
       @mouseleave="scheduleWorkflowDetailClose"
       @focus="openWorkflowDetail"
       @blur="scheduleWorkflowDetailClose"
-      @click.stop="openWorkflowDetail"
+      @click="openWorkflowDetailFromTag"
       @keydown.enter.prevent.stop="openWorkflowDetail"
       @keydown.space.prevent.stop="openWorkflowDetail"
     >

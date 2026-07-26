@@ -57,6 +57,15 @@ app:
   # -- Number of replicas
   replicaCount: 1
 
+  # -- Deployment rollout strategy. Production profiles backed by large
+  # per-Pod local ephemeral PVCs should normally use maxSurge=0 so a rollout
+  # cannot transiently reserve another complete scratch volume on the node.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
   # -- Horizontal autoscaling for complete document-processing replicas.
   # Scale-down is intentionally conservative because a replica may own long
   # document workflows; SIGTERM still drains/requeues them safely.
@@ -119,6 +128,14 @@ app:
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
+  # -- One-shot skill execution sandbox. In docker mode the app talks to the
+  # host daemon through a separately configured docker.sock mount; kubelet
+  # imagePullSecrets do not authenticate this host-daemon pull.
+  sandbox:
+    mode: docker
+    timeoutSeconds: "60"
+    dockerImage: wechatopenai/weknora-sandbox:latest
+
   # -- Resource requests and limits
   # Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
   resources:
@@ -159,6 +176,9 @@ app:
   # Ref: https://github.com/Tencent/WeKnora/blob/main/docker-compose.yml
   env:
     GIN_MODE: release
+    # -- Base SQL migration switch. Production runs migrations once in an
+    # isolated maintenance replica, then sets this to "false" for normal Pods.
+    AUTO_MIGRATE: "true"
     # -- Retrieval driver: postgres, elasticsearch_v7, elasticsearch_v8, qdrant
     RETRIEVE_DRIVER: postgres
     # -- Storage type: local, minio, cos, tos, s3
@@ -352,6 +372,11 @@ frontend:
 
   maxFileSizeMB: "50"
   maxKnowledgeSourceFileSizeMB: "2048"
+  # Reverse-proxy body ceilings include multipart/Base64 overhead; the UI and
+  # backend continue to enforce the raw-file limits above.
+  proxyMaxBodySizeMB: "80"
+  proxyMaxKnowledgeSourceBodySizeMB: "2304"
+  proxyTimeoutSeconds: "3600"
 
   topologySpread:
     enabled: true
@@ -429,6 +454,9 @@ mobileWeb:
 
   maxFileSizeMB: "50"
   maxKnowledgeSourceFileSizeMB: "2048"
+  proxyMaxBodySizeMB: "80"
+  proxyMaxKnowledgeSourceBodySizeMB: "2304"
+  proxyTimeoutSeconds: "3600"
 
   topologySpread:
     enabled: true
@@ -503,6 +531,12 @@ docreader:
         selectPolicy: Min
 
   terminationGracePeriodSeconds: 60
+
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
 
   topologySpread:
     enabled: true
@@ -591,10 +625,16 @@ generalAgent:
   enabled: false
   replicaCount: 2
   terminationGracePeriodSeconds: 45
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: weknora-custom-general-agent
     tag: local
     pullPolicy: IfNotPresent
+
   service:
     type: ClusterIP
     port: 8091
@@ -642,6 +682,11 @@ documentProcessingAgent:
   enabled: false
   replicaCount: 2
   terminationGracePeriodSeconds: 60
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: weknora-custom-document-processing-agent
     tag: local
@@ -837,10 +882,9 @@ ingress:
   # -- Additional annotations
   # Ref: https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/
   annotations:
-    # Knowledge source uploads support 2 GiB. Keep every outer ELB and ingress
-    # hop at least this large. The separate internal Agent request ceiling is
-    # 128 MiB because a 50 MiB attachment expands in Base64 JSON.
-    nginx.ingress.kubernetes.io/proxy-body-size: "2g"
+    # 2304 MiB leaves framing headroom above the backend's exact 2 GiB raw-file
+    # limit. The backend still rejects larger knowledge sources.
+    nginx.ingress.kubernetes.io/proxy-body-size: "2304m"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"

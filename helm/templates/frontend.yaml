@@ -50,6 +50,12 @@ spec:
               value: {{ .Values.frontend.maxFileSizeMB | quote }}
             - name: MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB
               value: {{ .Values.frontend.maxKnowledgeSourceFileSizeMB | quote }}
+            - name: PROXY_MAX_BODY_SIZE_MB
+              value: {{ .Values.frontend.proxyMaxBodySizeMB | quote }}
+            - name: PROXY_MAX_KNOWLEDGE_SOURCE_BODY_SIZE_MB
+              value: {{ .Values.frontend.proxyMaxKnowledgeSourceBodySizeMB | quote }}
+            - name: PROXY_TIMEOUT_SECONDS
+              value: {{ .Values.frontend.proxyTimeoutSeconds | quote }}
           ports:
             - containerPort: 80
               name: http

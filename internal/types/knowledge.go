@@ -137,6 +137,9 @@ type Knowledge struct {
 	TenantID uint64 `json:"tenant_id"`
 	// ID of the knowledge base
 	KnowledgeBaseID string `json:"knowledge_base_id"`
+	// FolderID is management-only placement metadata. An empty value means the
+	// knowledge-base root; retrieval intentionally ignores this field.
+	FolderID string `json:"folder_id,omitempty" gorm:"type:varchar(36);not null;default:'';index"`
 	// Tags holds the tags associated with this knowledge (populated on query, not persisted directly).
 	Tags []*KnowledgeTag `json:"tags"               gorm:"-"`
 	// InitialTagIDs is a create-only transaction input. The repository writes

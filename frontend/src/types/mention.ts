@@ -15,6 +15,11 @@ export interface MentionItem {
   serviceName?: string;
   skillName?: string;
   isAgentConfigured?: boolean;
+  isFolder?: boolean;
+  isFolderBack?: boolean;
+  folderPath?: string;
+  folderId?: string;
+  folderDocumentCount?: number;
 }
 
 export interface MentionRequestItem {

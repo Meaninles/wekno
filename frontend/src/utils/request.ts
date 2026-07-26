@@ -9,6 +9,7 @@ import {
 import i18n from '@/i18n'
 import { getApiBaseUrl } from './api-base';
 import { rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn';
+import { mobileSSOEntryForPath } from '@/custom/modules/mobile/authRedirect';
 
 const t = (key: string) => i18n.global.t(key)
 
@@ -92,7 +93,10 @@ function isPublicAuthRequest(url?: string): boolean {
 function uploadLimitForRequest(url?: string): number {
   if (
     url
-    && /^\/api\/v1\/knowledge-bases\/[^/]+\/knowledge\/file\/?(?:\?|$)/.test(url)
+    && (
+      /^\/api\/v1\/knowledge-bases\/[^/]+\/knowledge\/file\/?(?:\?|$)/.test(url)
+      || /^\/api\/v1\/custom\/knowledge-folders\/knowledge-bases\/[^/]+\/files\/?(?:\?|$)/.test(url)
+    )
   ) {
     return MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB;
   }
@@ -143,6 +147,14 @@ function isEmbedPage(): boolean {
 
 function redirectToLogin() {
   if (typeof window === 'undefined') return;
+  const mobileSSOEntry = mobileSSOEntryForPath(window.location.pathname);
+  if (mobileSSOEntry) {
+    // The mobile shell owns its authentication bootstrap. An expired JWT or
+    // refresh token must return to the mobile SSO flow, not the desktop login
+    // route (which may be served by a different Deployment).
+    window.location.replace(mobileSSOEntry);
+    return;
+  }
   if (window.location.pathname === '/login') return;
   // Embed 渠道用 Embed token 鉴权，匿名访问不应被踢到登录页
   if (isEmbedPage()) return;

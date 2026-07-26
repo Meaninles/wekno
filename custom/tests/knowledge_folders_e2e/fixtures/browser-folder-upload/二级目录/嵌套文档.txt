@@ -1,0 +1,2 @@
+WeKnora 文件夹浏览器上传 E2E 嵌套文档。
+标记：folder-upload-nested-20260726。

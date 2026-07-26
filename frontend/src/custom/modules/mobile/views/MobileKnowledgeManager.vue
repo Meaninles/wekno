@@ -7,9 +7,6 @@ import {
   delKnowledgeDetails,
   downKnowledgeDetails,
   listKnowledgeBases,
-  listKnowledgeFiles,
-  searchKnowledge,
-  uploadKnowledgeFile,
 } from "@/api/knowledge-base";
 import { useAuthStore } from "@/stores/auth";
 import { useEditorResourcesStore } from "@/stores/editorResources";
@@ -20,7 +17,7 @@ import {
   type MobileKnowledgeBase,
 } from "../knowledgeCatalog";
 import { KNOWLEDGE_DOCUMENT_SEARCH_POLICY } from "@/custom/modules/knowledgeSearch/searchPolicy";
-import { openRouteInNewPage } from "@/custom/modules/knowledgeSearch/openRouteInNewPage";
+import { useSearchFolderBrowser } from "@/custom/modules/knowledgeSearch/useSearchFolderBrowser";
 import {
   downloadBlob,
   formatFileSize,
@@ -30,6 +27,23 @@ import {
   knowledgeIsFullyComplete,
   knowledgeNeedsStatusPolling,
 } from "@/views/knowledge/wikiStatusRefresh";
+import {
+  createKnowledgeFolder,
+  deleteKnowledgeFolder,
+  listKnowledgeFolderNodes,
+  listKnowledgeFolderOptions,
+  moveKnowledgeDocumentsToFolder,
+  searchAccessibleKnowledgeFolderNodes,
+  searchKnowledgeFolderNodes,
+  updateKnowledgeFolder,
+  uploadKnowledgeFolderFile,
+} from "@/custom/modules/knowledgeFolders/api";
+import type {
+  KnowledgeFolder,
+  KnowledgeFolderBreadcrumb,
+  KnowledgeFolderNode,
+  KnowledgeFolderOption,
+} from "@/custom/modules/knowledgeFolders/types";
 
 type KnowledgeBaseRow = Record<string, any>;
 type KnowledgeFileRow = Record<string, any>;
@@ -46,10 +60,18 @@ const organizationStore = useOrganizationStore();
 
 const localKnowledgeBases = ref<KnowledgeBaseRow[]>([]);
 const fileList = ref<KnowledgeFileRow[]>([]);
+const folderList = ref<KnowledgeFolder[]>([]);
+const folderBreadcrumbs = ref<KnowledgeFolderBreadcrumb[]>([]);
+const currentFolderId = ref("");
+const nodePage = ref(1);
+const nodePageSize = 20;
+const nodeTotal = ref(0);
+const folderOptions = ref<KnowledgeFolderOption[]>([]);
 const selectedKbId = ref("");
 const loadingKbs = ref(false);
 const loadingFiles = ref(false);
 const uploadInputRef = ref<HTMLInputElement | null>(null);
+const folderUploadInputRef = ref<HTMLInputElement | null>(null);
 const uploading = ref(false);
 const personalExpanded = ref(true);
 const sharedExpanded = ref(true);
@@ -63,8 +85,34 @@ const documentSearchLoading = ref(false);
 const documentSearchLoadingMore = ref(false);
 const documentSearchHasMore = ref(false);
 const documentSearchError = ref("");
+const {
+  originKey: expandedSearchFolderOriginKey,
+  knowledgeBaseId: expandedSearchFolderKnowledgeBaseId,
+  currentFolder: expandedSearchFolderCurrent,
+  breadcrumbs: expandedSearchFolderBreadcrumbs,
+  nodes: expandedSearchFolderNodes,
+  page: expandedSearchFolderPage,
+  total: expandedSearchFolderTotal,
+  totalPages: expandedSearchFolderTotalPages,
+  loading: expandedSearchFolderLoading,
+  error: expandedSearchFolderError,
+  collapse: collapseExpandedSearchFolder,
+  toggleRoot: toggleExpandedSearchFolderRoot,
+  enterFolder: enterExpandedSearchFolder,
+  openBreadcrumb: openExpandedSearchFolderBreadcrumb,
+  changePage: changeExpandedSearchFolderPage,
+} = useSearchFolderBrowser();
 const detailFilterKeyword = ref("");
 const detailFocusDocumentId = ref("");
+const folderEditorVisible = ref(false);
+const folderEditorMode = ref<"create" | "edit" | "move">("create");
+const folderEditorTarget = ref<KnowledgeFolder | null>(null);
+const folderEditorSubmitting = ref(false);
+const folderEditorForm = reactive({ name: "", description: "", parent_id: "" });
+const documentMoveVisible = ref(false);
+const documentMoveTarget = ref<KnowledgeFileRow | null>(null);
+const documentMoveFolderId = ref("");
+const documentMoveSubmitting = ref(false);
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -85,7 +133,9 @@ const sharedKnowledgeBases = computed(() => kbList.value.filter((item) => item.g
 const selectedKb = computed(() => kbList.value.find((item) => item.id === selectedKbId.value) || null);
 const selectedCanEdit = computed(() => selectedKb.value?.canEditContent === true);
 const hasRunningParse = computed(() => fileList.value.some((item) => knowledgeNeedsStatusPolling(item)));
-const topbarTitle = computed(() => selectedKb.value?.name || (searchOpen.value ? "搜索" : "知识库"));
+const topbarTitle = computed(() =>
+  folderBreadcrumbs.value.at(-1)?.name || selectedKb.value?.name || (searchOpen.value ? "搜索" : "知识库"),
+);
 const normalizedSearchQuery = computed(() => searchQuery.value.trim());
 const knowledgeBaseById = computed(() => new Map(kbList.value.map((item) => [item.id, item])));
 const matchedKnowledgeBases = computed(() => {
@@ -94,8 +144,24 @@ const matchedKnowledgeBases = computed(() => {
   return kbList.value.filter((item) => item.name.toLocaleLowerCase().includes(keyword));
 });
 const visibleDocumentSearchResults = computed(() =>
-  documentSearchResults.value.filter((item) => knowledgeBaseById.value.has(String(item.knowledge_base_id || ""))),
+  documentSearchResults.value.filter((item) =>
+    item.node_type !== "folder" && knowledgeBaseById.value.has(String(item.knowledge_base_id || "")),
+  ),
 );
+const visibleFolderSearchResults = computed(() =>
+  documentSearchResults.value.filter((item) =>
+    item.node_type === "folder" && item.folder && knowledgeBaseById.value.has(String(item.knowledge_base_id || "")),
+  ),
+);
+const folderParentOptions = computed(() => {
+  const target = folderEditorTarget.value;
+  return [
+    { label: "知识库根目录", value: "" },
+    ...folderOptions.value
+      .filter((option) => !target || (option.id !== target.id && !option.path.startsWith(`${target.path}/`)))
+      .map((option) => ({ label: option.path, value: option.id })),
+  ];
+});
 const supportedFileTypes = computed<Set<string>>(() => {
   const engines = editorResources.parserEngines || [];
   if (!engines.length) return new Set<string>();
@@ -185,6 +251,7 @@ const cancelSearchRequests = () => {
 
 const clearSearchState = () => {
   cancelSearchRequests();
+  collapseExpandedSearchFolder();
   searchQuery.value = "";
   documentSearchResults.value = [];
   documentSearchHasMore.value = false;
@@ -249,6 +316,22 @@ const handleBack = () => {
     return;
   }
   if (selectedKbId.value) {
+    if (currentFolderId.value) {
+      const parent = folderBreadcrumbs.value.length > 1
+        ? folderBreadcrumbs.value[folderBreadcrumbs.value.length - 2]
+        : null;
+      currentFolderId.value = parent?.id || "";
+      nodePage.value = 1;
+      void router.replace({
+        name: "mobile-knowledge",
+        query: {
+          ...route.query,
+          folder_id: currentFolderId.value || undefined,
+        },
+      });
+      void loadFiles();
+      return;
+    }
     if (routeQueryString("from_search") === "1") {
       returnToPreservedSearch();
       return;
@@ -256,6 +339,9 @@ const handleBack = () => {
     clearPolling();
     selectedKbId.value = "";
     fileList.value = [];
+    folderList.value = [];
+    folderBreadcrumbs.value = [];
+    currentFolderId.value = "";
     detailFilterKeyword.value = "";
     detailFocusDocumentId.value = "";
     if (routeQueryString("kb")) {
@@ -297,19 +383,55 @@ const schedulePolling = () => {
 const loadFiles = async () => {
   if (!selectedKbId.value) {
     fileList.value = [];
+    folderList.value = [];
+    nodeTotal.value = 0;
     return;
   }
   loadingFiles.value = true;
   try {
-    const res: any = await listKnowledgeFiles(selectedKbId.value, {
-      page: 1,
-      page_size: 80,
+    const params = {
+      folder_id: currentFolderId.value || undefined,
+      page: nodePage.value,
+      page_size: nodePageSize,
       keyword: detailFilterKeyword.value || undefined,
-    });
-    fileList.value = (Array.isArray(res?.data) ? res.data : []).map((item: any) => ({
-      ...item,
-      display_name: documentDisplayName(item),
-    }));
+    };
+    const [res, optionsRes]: any[] = await Promise.all([
+      detailFilterKeyword.value
+        ? searchKnowledgeFolderNodes(selectedKbId.value, params)
+        : listKnowledgeFolderNodes(selectedKbId.value, params),
+      listKnowledgeFolderOptions(selectedKbId.value),
+    ]);
+    const nodes: KnowledgeFolderNode[] = Array.isArray(res?.data) ? res.data : [];
+    folderOptions.value = Array.isArray(optionsRes?.data) ? optionsRes.data : [];
+    folderList.value = nodes
+      .filter((node) => node.node_type === "folder" && node.folder)
+      .map((node) => node.folder as KnowledgeFolder);
+    fileList.value = nodes
+      .filter((node) => node.node_type === "document" && node.document)
+      .map((node) => ({
+        ...node.document,
+        display_name: documentDisplayName(node.document || {}),
+      }));
+    nodeTotal.value = Number(res?.total || 0);
+    const lastPage = Math.max(1, Math.ceil(nodeTotal.value / nodePageSize));
+    if (nodePage.value > lastPage) {
+      nodePage.value = lastPage;
+      return await loadFiles();
+    }
+    if (Array.isArray(res?.breadcrumbs)) {
+      folderBreadcrumbs.value = res.breadcrumbs;
+    } else if (currentFolderId.value) {
+      const current = folderOptions.value.find((option) => option.id === currentFolderId.value);
+      folderBreadcrumbs.value = current
+        ? current.path.split("/").map((name, index, parts) => {
+          const path = parts.slice(0, index + 1).join("/");
+          const option = folderOptions.value.find((candidate) => candidate.path === path);
+          return { id: option?.id || "", name };
+        }).filter((item) => item.id)
+        : [];
+    } else {
+      folderBreadcrumbs.value = [];
+    }
     schedulePolling();
   } catch (error: any) {
     MessagePlugin.error(error?.message || "加载文档失败");
@@ -366,7 +488,7 @@ function documentStatusClass(item: KnowledgeFileRow) {
 }
 
 const openKnowledgeBase = (kb: MobileKnowledgeBase) => {
-  openRouteInNewPage(router, {
+  void router.push({
     name: "mobile-knowledge",
     query: {
       returnTo: returnTo.value,
@@ -376,13 +498,80 @@ const openKnowledgeBase = (kb: MobileKnowledgeBase) => {
   });
 };
 
+const openFolder = async (folder: KnowledgeFolder | null) => {
+  currentFolderId.value = folder?.id || "";
+  nodePage.value = 1;
+  detailFilterKeyword.value = "";
+  detailFocusDocumentId.value = "";
+  await router.replace({
+    name: "mobile-knowledge",
+    query: {
+      ...route.query,
+      kb: selectedKbId.value,
+      folder_id: currentFolderId.value || undefined,
+      knowledge_id: undefined,
+      document_name: undefined,
+    },
+  });
+  await loadFiles();
+};
+
+const openSearchFolder = (item: KnowledgeFileRow) => {
+  const kbID = String(item.knowledge_base_id || "");
+  const folder = item.folder as KnowledgeFolder | undefined;
+  if (!kbID || !folder || !knowledgeBaseById.value.has(kbID)) {
+    MessagePlugin.warning("该文件夹所属知识库已不可用，请刷新后重试");
+    return;
+  }
+  void router.push({
+    name: "mobile-knowledge",
+    query: {
+      returnTo: returnTo.value,
+      kb: kbID,
+      folder_id: folder.id,
+      ...searchReturnQuery(),
+    },
+  });
+};
+
+const toggleSearchFolderResult = async (item: KnowledgeFileRow) => {
+  const kbID = String(item.knowledge_base_id || "");
+  const folder = item.folder as KnowledgeFolder | undefined;
+  if (!kbID || !folder || !knowledgeBaseById.value.has(kbID)) {
+    MessagePlugin.warning("该文件夹所属知识库已不可用，请刷新后重试");
+    return;
+  }
+  await toggleExpandedSearchFolderRoot(String(item.id), kbID, folder);
+};
+
+const openExpandedSearchFolderLocation = () => {
+  const kbID = expandedSearchFolderKnowledgeBaseId.value;
+  const folder = expandedSearchFolderCurrent.value;
+  if (!kbID || !folder || !knowledgeBaseById.value.has(kbID)) return;
+  openSearchFolder({
+    knowledge_base_id: kbID,
+    folder,
+  });
+};
+
+const openExpandedSearchDocument = (node: KnowledgeFolderNode) => {
+  const document = node.document || {};
+  openSearchDocument({
+    ...document,
+    knowledge_base_id: expandedSearchFolderKnowledgeBaseId.value,
+    knowledge_base_name: knowledgeBaseById.value.get(
+      expandedSearchFolderKnowledgeBaseId.value,
+    )?.name,
+  });
+};
+
 const openSearchDocument = (item: KnowledgeFileRow) => {
   const kbId = String(item.knowledge_base_id || "");
   if (!kbId || !knowledgeBaseById.value.has(kbId)) {
     MessagePlugin.warning("该文档所属知识库已不可用，请刷新后重试");
     return;
   }
-  openRouteInNewPage(router, {
+  void router.push({
     name: "mobile-knowledge",
     query: {
       returnTo: returnTo.value,
@@ -412,6 +601,7 @@ const applyRouteDetailTarget = () => {
   searchOpen.value = false;
   detailFilterKeyword.value = routeQueryString("document_name");
   detailFocusDocumentId.value = routeQueryString("knowledge_id");
+  currentFolderId.value = routeQueryString("folder_id");
   selectedKbId.value = kbId;
 };
 
@@ -431,18 +621,30 @@ const runDocumentSearch = async (
   else documentSearchLoading.value = true;
   documentSearchError.value = "";
   try {
-    const res: any = await searchKnowledge(
+    const page = Math.floor(offset / DOCUMENT_SEARCH_PAGE_SIZE) + 1;
+    const res: any = await searchAccessibleKnowledgeFolderNodes({
       keyword,
-      offset,
-      DOCUMENT_SEARCH_PAGE_SIZE,
-      undefined,
-      { include_total: false },
-    );
+      page,
+      page_size: DOCUMENT_SEARCH_PAGE_SIZE,
+    });
     if (generation !== searchRequestGeneration || keyword !== normalizedSearchQuery.value) return;
-    const rows = (Array.isArray(res?.data) ? res.data : []).map((item: any) => ({
-      ...item,
-      display_name: documentDisplayName(item),
-    }));
+    const rows = (Array.isArray(res?.data) ? res.data : []).map((node: any) => {
+      if (node?.node_type === "folder" && node.folder) {
+        return {
+          ...node,
+          id: `folder:${node.folder.id}`,
+          display_name: node.folder.name,
+        };
+      }
+      const document = node?.document || {};
+      return {
+        ...document,
+        node_type: "document",
+        knowledge_base_id: node?.knowledge_base_id || document.knowledge_base_id,
+        knowledge_base_name: node?.knowledge_base_name,
+        display_name: documentDisplayName(document),
+      };
+    });
     if (append) {
       const merged = new Map(documentSearchResults.value.map((item) => [String(item.id), item]));
       rows.forEach((item: KnowledgeFileRow) => merged.set(String(item.id), item));
@@ -450,7 +652,7 @@ const runDocumentSearch = async (
     } else {
       documentSearchResults.value = rows;
     }
-    documentSearchHasMore.value = res?.has_more === true;
+    documentSearchHasMore.value = page * DOCUMENT_SEARCH_PAGE_SIZE < Number(res?.total || 0);
   } catch (error: any) {
     if (generation !== searchRequestGeneration) return;
     documentSearchError.value = error?.message || "搜索文档失败";
@@ -464,6 +666,7 @@ const runDocumentSearch = async (
 
 const scheduleDocumentSearch = () => {
   cancelSearchRequests();
+  collapseExpandedSearchFolder();
   documentSearchResults.value = [];
   documentSearchHasMore.value = false;
   documentSearchError.value = "";
@@ -513,7 +716,12 @@ const handleUpload = async (event: Event) => {
   uploading.value = true;
   try {
     for (const file of validFiles) {
-      await uploadKnowledgeFile(selectedKbId.value, { file });
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+      await uploadKnowledgeFolderFile(selectedKbId.value, {
+        file,
+        folder_id: currentFolderId.value || undefined,
+        relative_path: relativePath || undefined,
+      });
     }
     MessagePlugin.success("上传已提交");
     await loadFiles();
@@ -558,12 +766,131 @@ const deleteFile = async (item: KnowledgeFileRow) => {
   }
 };
 
+const refreshFolderOptions = async () => {
+  if (!selectedKbId.value) return;
+  try {
+    const res: any = await listKnowledgeFolderOptions(selectedKbId.value);
+    folderOptions.value = Array.isArray(res?.data) ? res.data : [];
+  } catch {
+    folderOptions.value = [];
+  }
+};
+
+const openDocumentMove = async (item: KnowledgeFileRow) => {
+  await refreshFolderOptions();
+  documentMoveTarget.value = item;
+  documentMoveFolderId.value = String(item.folder_id || "");
+  documentMoveVisible.value = true;
+};
+
+const submitDocumentMove = async () => {
+  if (!selectedKbId.value || !documentMoveTarget.value) return;
+  documentMoveSubmitting.value = true;
+  try {
+    await moveKnowledgeDocumentsToFolder(
+      selectedKbId.value,
+      [String(documentMoveTarget.value.id)],
+      documentMoveFolderId.value,
+    );
+    MessagePlugin.success("文档已移动");
+    documentMoveVisible.value = false;
+    await loadFiles();
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "移动文档失败");
+  } finally {
+    documentMoveSubmitting.value = false;
+  }
+};
+
+const openFolderEditor = async (
+  mode: "create" | "edit" | "move",
+  folder: KnowledgeFolder | null = null,
+) => {
+  await refreshFolderOptions();
+  folderEditorMode.value = mode;
+  folderEditorTarget.value = folder;
+  folderEditorForm.name = folder?.name || "";
+  folderEditorForm.description = folder?.description || "";
+  folderEditorForm.parent_id = folder?.parent_id ?? currentFolderId.value;
+  folderEditorVisible.value = true;
+};
+
+const submitFolderEditor = async () => {
+  if (!selectedKbId.value) return;
+  if (folderEditorMode.value !== "move" && !folderEditorForm.name.trim()) {
+    MessagePlugin.warning("请输入文件夹名称");
+    return;
+  }
+  folderEditorSubmitting.value = true;
+  try {
+    if (folderEditorMode.value === "create") {
+      await createKnowledgeFolder(selectedKbId.value, {
+        parent_id: folderEditorForm.parent_id,
+        name: folderEditorForm.name.trim(),
+        description: folderEditorForm.description.trim(),
+      });
+      MessagePlugin.success("文件夹已创建");
+    } else if (folderEditorTarget.value) {
+      await updateKnowledgeFolder(
+        selectedKbId.value,
+        folderEditorTarget.value.id,
+        folderEditorMode.value === "move"
+          ? { parent_id: folderEditorForm.parent_id }
+          : {
+            parent_id: folderEditorForm.parent_id,
+            name: folderEditorForm.name.trim(),
+            description: folderEditorForm.description.trim(),
+          },
+      );
+      MessagePlugin.success(folderEditorMode.value === "move" ? "文件夹已移动" : "文件夹已更新");
+    }
+    folderEditorVisible.value = false;
+    await loadFiles();
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "文件夹操作失败");
+  } finally {
+    folderEditorSubmitting.value = false;
+  }
+};
+
+const removeFolder = async (folder: KnowledgeFolder) => {
+  if (!selectedCanEdit.value || !selectedKbId.value) return;
+  const nonEmpty = folder.stats.direct_child_folder_count > 0 || folder.stats.subtree_document_count > 0;
+  const message = nonEmpty
+    ? `“${folder.name}”中仍有内容，是否将内容移动到上一级后删除？`
+    : `确定删除空文件夹“${folder.name}”吗？`;
+  if (!window.confirm(message)) return;
+  try {
+    await deleteKnowledgeFolder(
+      selectedKbId.value,
+      folder.id,
+      nonEmpty ? "move_to_parent" : "reject",
+    );
+    MessagePlugin.success("文件夹已删除");
+    await loadFiles();
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "删除文件夹失败");
+  }
+};
+
+const goToNodePage = async (nextPage: number) => {
+  const lastPage = Math.max(1, Math.ceil(nodeTotal.value / nodePageSize));
+  nodePage.value = Math.min(lastPage, Math.max(1, nextPage));
+  await loadFiles();
+};
+
 watch(selectedKbId, () => {
   clearPolling();
+  nodePage.value = 1;
   void loadFiles();
 });
 
 watch(searchQuery, scheduleDocumentSearch);
+
+watch(
+  () => route.fullPath,
+  () => applyRouteDetailTarget(),
+);
 
 onMounted(async () => {
   await Promise.all([
@@ -646,6 +973,82 @@ onBeforeUnmount(() => {
 
         <section class="result-section">
           <div class="result-heading">
+            <strong>文件夹</strong>
+            <span v-if="visibleFolderSearchResults.length">已显示 {{ visibleFolderSearchResults.length }}</span>
+          </div>
+          <div v-if="normalizedSearchQuery.length < DOCUMENT_SEARCH_MIN_LENGTH" class="result-empty">
+            再输入 {{ DOCUMENT_SEARCH_MIN_LENGTH - normalizedSearchQuery.length }} 个字符后搜索文件夹
+          </div>
+          <div v-else-if="documentSearchLoading" class="result-empty">正在搜索文件夹</div>
+          <div v-else-if="documentSearchError" class="result-empty is-error">{{ documentSearchError }}</div>
+          <div v-else-if="!visibleFolderSearchResults.length" class="result-empty">没有匹配的文件夹</div>
+          <div v-else class="document-results">
+            <template v-for="item in visibleFolderSearchResults" :key="item.id">
+              <button type="button" class="document-result-row"
+                :aria-expanded="expandedSearchFolderOriginKey === item.id"
+                @click="toggleSearchFolderResult(item)">
+                <span class="doc-icon is-folder"><MobileIcon name="folder" /></span>
+                <span>
+                  <strong>{{ item.folder.name }}</strong>
+                  <small>{{ documentKnowledgeBaseName(item) }} · {{ item.folder.path }}</small>
+                </span>
+                <MobileIcon :name="expandedSearchFolderOriginKey === item.id ? 'chevron-up' : 'chevron-down'" />
+              </button>
+              <div v-if="expandedSearchFolderOriginKey === item.id" class="search-folder-browser">
+                <div class="search-folder-toolbar">
+                  <nav aria-label="搜索文件夹路径">
+                    <template v-for="(crumb, index) in expandedSearchFolderBreadcrumbs" :key="crumb.id">
+                      <MobileIcon v-if="index" name="chevron-right" />
+                      <button type="button" @click="openExpandedSearchFolderBreadcrumb(crumb.id)">
+                        {{ crumb.name }}
+                      </button>
+                    </template>
+                  </nav>
+                  <button type="button" @click="openExpandedSearchFolderLocation">打开</button>
+                </div>
+                <div v-if="expandedSearchFolderLoading" class="search-folder-state">正在加载文件夹内容</div>
+                <div v-else-if="expandedSearchFolderError" class="search-folder-state is-error">
+                  {{ expandedSearchFolderError }}
+                </div>
+                <div v-else-if="!expandedSearchFolderNodes.length" class="search-folder-state">
+                  当前文件夹暂无内容
+                </div>
+                <div v-else class="search-folder-nodes">
+                  <button v-for="node in expandedSearchFolderNodes"
+                    :key="`${node.node_type}-${node.folder?.id || node.document?.id}`"
+                    type="button" @click="node.node_type === 'folder' && node.folder
+                      ? enterExpandedSearchFolder(node.folder)
+                      : openExpandedSearchDocument(node)">
+                    <span class="doc-icon" :class="{ 'is-folder': node.node_type === 'folder' }">
+                      <MobileIcon :name="node.node_type === 'folder' ? 'folder' : 'file'" />
+                    </span>
+                    <span>
+                      <strong>{{ node.node_type === 'folder'
+                        ? node.folder?.name
+                        : (node.document?.file_name || node.document?.title || '未命名文档') }}</strong>
+                      <small v-if="node.node_type === 'folder'">
+                        {{ node.folder?.stats.subtree_document_count || 0 }} 个文档
+                      </small>
+                      <small v-else>文档</small>
+                    </span>
+                    <MobileIcon name="chevron-right" />
+                  </button>
+                </div>
+                <div v-if="expandedSearchFolderTotalPages > 1" class="search-folder-pagination">
+                  <button type="button" :disabled="expandedSearchFolderPage <= 1"
+                    @click="changeExpandedSearchFolderPage(expandedSearchFolderPage - 1)">上一页</button>
+                  <span>{{ expandedSearchFolderPage }} / {{ expandedSearchFolderTotalPages }} ·
+                    {{ expandedSearchFolderTotal }} 项</span>
+                  <button type="button" :disabled="expandedSearchFolderPage >= expandedSearchFolderTotalPages"
+                    @click="changeExpandedSearchFolderPage(expandedSearchFolderPage + 1)">下一页</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <section class="result-section">
+          <div class="result-heading">
             <strong>文档</strong>
             <span v-if="visibleDocumentSearchResults.length">已显示 {{ visibleDocumentSearchResults.length }}</span>
           </div>
@@ -670,17 +1073,12 @@ onBeforeUnmount(() => {
               </span>
               <MobileIcon name="chevron-right" />
             </button>
-            <button
-              v-if="documentSearchHasMore"
-              type="button"
-              class="load-more"
-              :disabled="documentSearchLoadingMore"
-              @click="loadMoreDocumentResults"
-            >
-              {{ documentSearchLoadingMore ? '正在加载' : '加载更多文档' }}
-            </button>
           </div>
         </section>
+        <button v-if="documentSearchHasMore" type="button" class="load-more search-load-more"
+          :disabled="documentSearchLoadingMore" @click="loadMoreDocumentResults">
+          {{ documentSearchLoadingMore ? '正在加载' : '加载更多结果' }}
+        </button>
       </template>
     </section>
 
@@ -747,16 +1145,28 @@ onBeforeUnmount(() => {
       <section v-if="selectedCanEdit" class="upload-card">
         <div>
           <strong>{{ selectedKb.name }}</strong>
-          <span>{{ selectedKb.permissionLabel }}，可上传和删除文档</span>
+          <span>{{ selectedKb.permissionLabel }}，可管理文件夹和文档</span>
         </div>
-        <button type="button" :disabled="uploading" @click="uploadInputRef?.click()">
-          <span v-if="uploading" class="busy-icon upload" aria-label="正在上传">
-            <MobileIcon name="upload" />
-          </span>
-          <MobileIcon v-else name="upload" />
-          <span>上传文档</span>
-        </button>
+        <div class="upload-actions">
+          <button type="button" class="secondary-action" @click="openFolderEditor('create')">
+            <MobileIcon name="folder-add" />
+            <span>新建文件夹</span>
+          </button>
+          <button type="button" class="primary-action" :disabled="uploading" @click="uploadInputRef?.click()">
+            <span v-if="uploading" class="busy-icon upload" aria-label="正在上传">
+              <MobileIcon name="upload" />
+            </span>
+            <MobileIcon v-else name="upload" />
+            <span>上传文档</span>
+          </button>
+          <button type="button" class="secondary-action" :disabled="uploading" @click="folderUploadInputRef?.click()">
+            <MobileIcon name="folder-open" />
+            <span>上传文件夹</span>
+          </button>
+        </div>
         <input ref="uploadInputRef" type="file" :accept="acceptFileTypes" multiple hidden @change="handleUpload">
+        <input ref="folderUploadInputRef" type="file" :accept="acceptFileTypes" webkitdirectory multiple hidden
+          @change="handleUpload">
       </section>
       <section v-else class="readonly-card" data-testid="mobile-kb-readonly-notice">
         <MobileIcon name="lock" />
@@ -767,19 +1177,61 @@ onBeforeUnmount(() => {
       </section>
 
       <section class="doc-section">
+        <nav class="folder-crumbs" aria-label="文件夹路径">
+          <button type="button" :class="{ active: !currentFolderId }" @click="openFolder(null)">
+            <MobileIcon name="home" />
+            <span>根目录</span>
+          </button>
+          <template v-for="crumb in folderBreadcrumbs" :key="crumb.id">
+            <MobileIcon name="chevron-right" />
+            <button type="button" :class="{ active: crumb.id === currentFolderId }"
+              @click="openFolder(folderOptions.find((option) => option.id === crumb.id) as any)">
+              {{ crumb.name }}
+            </button>
+          </template>
+        </nav>
         <div class="section-title-row">
-          <span>文档</span>
+          <span>文件夹与文档</span>
           <em class="permission-badge" :class="`is-${selectedKb.access}`">{{ selectedKb.permissionLabel }}</em>
         </div>
         <div v-if="detailFilterKeyword" class="detail-filter">
           <span>搜索定位：{{ detailFilterKeyword }}</span>
           <button type="button" @click="clearDetailFilter">查看全部</button>
         </div>
-        <div v-if="loadingFiles" class="empty-state">正在加载文档</div>
-        <div v-else-if="!fileList.length" class="empty-state">
-          {{ detailFilterKeyword ? '未找到定位文档，可查看全部文档' : '暂无文档' }}
+        <div v-if="loadingFiles" class="empty-state">正在加载内容</div>
+        <div v-else-if="!fileList.length && !folderList.length" class="empty-state">
+          {{ detailFilterKeyword ? '未找到匹配内容，可查看全部内容' : '当前文件夹暂无内容' }}
         </div>
         <div v-else class="doc-list">
+          <article v-for="folder in folderList" :key="`folder-${folder.id}`" class="doc-row folder-row"
+            @click="openFolder(folder)">
+            <div class="doc-icon is-folder">
+              <MobileIcon name="folder" />
+            </div>
+            <div class="doc-main">
+              <strong>{{ folder.name }}</strong>
+              <span>{{ folder.stats.subtree_document_count }} 个文档 ·
+                {{ folder.stats.direct_child_folder_count }} 个子文件夹</span>
+              <em class="parse-status"
+                :class="folder.stats.abnormal_document_count ? 'is-failed' : (folder.stats.parse_pending_count + folder.stats.parse_running_count + folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count ? 'is-running' : 'is-completed')">
+                解析 {{ folder.stats.parse_pending_count + folder.stats.parse_running_count }} ·
+                衍生 {{ folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }} ·
+                异常 {{ folder.stats.abnormal_document_count }}
+              </em>
+            </div>
+            <div v-if="selectedCanEdit" class="doc-actions folder-actions" @click.stop>
+              <button type="button" @click="openFolderEditor('edit', folder)">
+                <MobileIcon name="edit" /><span>编辑</span>
+              </button>
+              <button type="button" @click="openFolderEditor('move', folder)">
+                <MobileIcon name="swap" /><span>移动</span>
+              </button>
+              <button type="button" class="danger" @click="removeFolder(folder)">
+                <MobileIcon name="delete" /><span>删除</span>
+              </button>
+            </div>
+            <MobileIcon v-else name="chevron-right" />
+          </article>
           <article
             v-for="item in fileList"
             :key="item.id"
@@ -810,6 +1262,15 @@ onBeforeUnmount(() => {
               <button
                 v-if="selectedCanEdit"
                 type="button"
+                :disabled="!!busyMap[item.id]"
+                @click="openDocumentMove(item)"
+              >
+                <MobileIcon name="folder-open" />
+                <span>移动</span>
+              </button>
+              <button
+                v-if="selectedCanEdit"
+                type="button"
                 class="danger"
                 :disabled="!!busyMap[item.id]"
                 @click="deleteFile(item)"
@@ -823,8 +1284,73 @@ onBeforeUnmount(() => {
             </div>
           </article>
         </div>
+        <div v-if="nodeTotal > nodePageSize" class="mobile-pagination">
+          <button type="button" :disabled="nodePage <= 1" @click="goToNodePage(nodePage - 1)">上一页</button>
+          <span>{{ nodePage }} / {{ Math.ceil(nodeTotal / nodePageSize) }}</span>
+          <button type="button" :disabled="nodePage >= Math.ceil(nodeTotal / nodePageSize)"
+            @click="goToNodePage(nodePage + 1)">下一页</button>
+        </div>
       </section>
     </template>
+
+    <div v-if="folderEditorVisible" class="mobile-sheet-backdrop" @click.self="folderEditorVisible = false">
+      <section class="mobile-folder-sheet" role="dialog" aria-modal="true">
+        <header>
+          <strong>{{ folderEditorMode === 'create' ? '新建文件夹' : folderEditorMode === 'move' ? '移动文件夹' : '编辑文件夹' }}</strong>
+          <button type="button" aria-label="关闭" @click="folderEditorVisible = false">
+            <MobileIcon name="close" />
+          </button>
+        </header>
+        <label v-if="folderEditorMode !== 'move'">
+          <span>文件夹名称</span>
+          <input v-model.trim="folderEditorForm.name" maxlength="120" placeholder="请输入名称">
+        </label>
+        <label v-if="folderEditorMode !== 'move'">
+          <span>描述</span>
+          <textarea v-model="folderEditorForm.description" maxlength="1000" rows="3"
+            placeholder="选填，说明该文件夹的内容"></textarea>
+        </label>
+        <label>
+          <span>上级文件夹</span>
+          <select v-model="folderEditorForm.parent_id">
+            <option v-for="option in folderParentOptions" :key="option.value || 'root'" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+        <footer>
+          <button type="button" class="secondary" @click="folderEditorVisible = false">取消</button>
+          <button type="button" class="primary" :disabled="folderEditorSubmitting" @click="submitFolderEditor">
+            {{ folderEditorSubmitting ? '正在保存' : '保存' }}
+          </button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="documentMoveVisible" class="mobile-sheet-backdrop" @click.self="documentMoveVisible = false">
+      <section class="mobile-folder-sheet" role="dialog" aria-modal="true">
+        <header>
+          <strong>移动文档</strong>
+          <button type="button" aria-label="关闭" @click="documentMoveVisible = false">
+            <MobileIcon name="close" />
+          </button>
+        </header>
+        <p class="move-document-name">{{ documentMoveTarget?.display_name || documentMoveTarget?.file_name }}</p>
+        <label>
+          <span>目标文件夹</span>
+          <select v-model="documentMoveFolderId">
+            <option value="">知识库根目录</option>
+            <option v-for="folder in folderOptions" :key="folder.id" :value="folder.id">{{ folder.path }}</option>
+          </select>
+        </label>
+        <footer>
+          <button type="button" class="secondary" @click="documentMoveVisible = false">取消</button>
+          <button type="button" class="primary" :disabled="documentMoveSubmitting" @click="submitDocumentMove">
+            {{ documentMoveSubmitting ? '正在移动' : '确认移动' }}
+          </button>
+        </footer>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -1177,6 +1703,133 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.document-result-row[aria-expanded="true"] {
+  color: var(--mobile-accent);
+  background: #f2f7f4;
+}
+
+.search-folder-browser {
+  margin: 0 8px 8px;
+  border: 1px solid #dfe9e4;
+  border-top: 0;
+  border-radius: 0 0 9px 9px;
+  background: #f7faf8;
+  overflow: hidden;
+}
+
+.search-folder-toolbar,
+.search-folder-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 38px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #dfe9e4;
+}
+
+.search-folder-toolbar nav {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.search-folder-toolbar nav > button,
+.search-folder-toolbar > button,
+.search-folder-pagination button {
+  flex: none;
+  max-width: 112px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 5px;
+  color: #617269;
+  background: transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-folder-toolbar > button,
+.search-folder-pagination button {
+  border: 1px solid #d8e3dd;
+  background: #fff;
+}
+
+.search-folder-pagination button:disabled {
+  opacity: 0.42;
+}
+
+.search-folder-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 68px;
+  padding: 12px;
+  color: #7f8e87;
+  font-size: 12px;
+}
+
+.search-folder-state.is-error {
+  color: #bf3636;
+}
+
+.search-folder-nodes {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.search-folder-nodes > button {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  color: #6f8077;
+  background: transparent;
+  text-align: left;
+}
+
+.search-folder-nodes > button:active {
+  background: #edf5f0;
+}
+
+.search-folder-nodes > button > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.search-folder-nodes strong,
+.search-folder-nodes small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-folder-nodes strong {
+  color: #1d2d25;
+  font-size: 13px;
+}
+
+.search-folder-nodes small {
+  color: #7f8e87;
+  font-size: 11px;
+}
+
+.search-folder-pagination {
+  border-top: 1px solid #dfe9e4;
+  border-bottom: 0;
+  color: #7f8e87;
+  font-size: 11px;
+}
+
 .load-more {
   min-height: 44px;
   border: 0;
@@ -1200,15 +1853,11 @@ onBeforeUnmount(() => {
 }
 
 .upload-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 13px;
+  padding: 14px 12px 12px;
 }
 
-.upload-card div,
-.readonly-card div {
+.upload-card > div:first-child,
+.readonly-card > div {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -1239,18 +1888,64 @@ onBeforeUnmount(() => {
 .upload-card button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  height: 36px;
-  border: 0;
-  border-radius: 18px;
-  background: #07c160;
-  color: #fff;
-  padding: 0 13px;
+  min-width: 0;
+  height: 40px;
+  border: 1px solid #cfe5d9;
+  border-radius: 9px;
+  background: #f3faf6;
+  color: #078f49;
+  padding: 0 5px;
+  font-size: 13px;
   font-weight: 650;
+  white-space: nowrap;
+}
+
+.upload-card button.primary-action {
+  border-color: #07b859;
+  background: #07b859;
+  color: #fff;
+  box-shadow: 0 3px 9px rgb(7 184 89 / 18%);
 }
 
 .upload-card button:disabled {
+  border-color: #c7d6cf;
   background: #c7d6cf;
+  color: #fff;
+  box-shadow: none;
+}
+
+.upload-card .upload-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid #edf3f0;
+}
+
+@media (max-width: 350px) {
+  .upload-card button {
+    height: 48px;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+    line-height: 1.1;
+  }
+
+  .upload-card button > span:not(.busy-icon) {
+    width: 100%;
+    overflow: visible;
+    text-overflow: clip;
+  }
+}
+
+.search-load-more {
+  width: 100%;
+  margin-top: 10px;
+  border: 1px solid #dfe9e4;
+  border-radius: 10px;
 }
 
 .readonly-card {
@@ -1270,6 +1965,41 @@ onBeforeUnmount(() => {
 
 .doc-section {
   padding-bottom: 6px;
+}
+
+.folder-crumbs {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 3px;
+  overflow-x: auto;
+  border-bottom: 1px solid #edf1ef;
+  padding: 5px 9px;
+}
+
+.folder-crumbs > button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #667970;
+  padding: 0 7px;
+  font-size: 13px;
+}
+
+.folder-crumbs > button.active {
+  background: #edf8f2;
+  color: #078f49;
+  font-weight: 650;
+}
+
+.folder-crumbs > :not(button) {
+  flex: 0 0 auto;
+  color: #a0ada7;
 }
 
 .detail-filter {
@@ -1321,6 +2051,16 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 2px rgb(7 193 96 / 8%);
 }
 
+.doc-row.folder-row {
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  border-color: #e2ebe7;
+  background: #fbfdfc;
+}
+
+.doc-row.folder-row:active {
+  background: #eff8f3;
+}
+
 .doc-icon {
   display: grid;
   width: 32px;
@@ -1329,6 +2069,11 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   background: #fff4e7;
   color: #b56d13;
+}
+
+.doc-icon.is-folder {
+  background: #fff7e7;
+  color: #bc7613;
 }
 
 .doc-main {
@@ -1412,6 +2157,147 @@ onBeforeUnmount(() => {
 
 .doc-actions button:disabled {
   opacity: 0.62;
+}
+
+.folder-actions {
+  grid-column: 2 / 4;
+  flex-wrap: wrap;
+}
+
+.mobile-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid #edf1ef;
+  padding: 10px 12px 5px;
+}
+
+.mobile-pagination button {
+  min-width: 72px;
+  height: 34px;
+  border: 1px solid #cfe0d7;
+  border-radius: 17px;
+  background: #fff;
+  color: #078f49;
+  font-size: 13px;
+}
+
+.mobile-pagination button:disabled {
+  color: #9aaba3;
+  opacity: 0.58;
+}
+
+.mobile-pagination span {
+  color: #6d7e76;
+  font-size: 13px;
+}
+
+.mobile-sheet-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  background: rgb(16 30 23 / 38%);
+}
+
+.mobile-folder-sheet {
+  width: 100%;
+  border-radius: 18px 18px 0 0;
+  background: #fff;
+  padding: 12px 16px calc(env(safe-area-inset-bottom) + 18px);
+  box-shadow: 0 -12px 42px rgb(24 48 36 / 18%);
+}
+
+.mobile-folder-sheet header {
+  display: flex;
+  height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.mobile-folder-sheet header strong {
+  color: #17261f;
+  font-size: 18px;
+}
+
+.mobile-folder-sheet header button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 0;
+  border-radius: 17px;
+  background: #eef3f0;
+  color: #64766d;
+}
+
+.mobile-folder-sheet label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 14px;
+  color: #40534a;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.move-document-name {
+  overflow: hidden;
+  margin: 2px 0 8px;
+  color: #65776e;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-folder-sheet input,
+.mobile-folder-sheet textarea,
+.mobile-folder-sheet select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d7e3dd;
+  border-radius: 9px;
+  outline: 0;
+  background: #fff;
+  color: #17261f;
+  padding: 10px 11px;
+  font: inherit;
+  font-weight: 400;
+}
+
+.mobile-folder-sheet input:focus,
+.mobile-folder-sheet textarea:focus,
+.mobile-folder-sheet select:focus {
+  border-color: #58c88b;
+  box-shadow: 0 0 0 3px rgb(7 193 96 / 8%);
+}
+
+.mobile-folder-sheet footer {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.mobile-folder-sheet footer button {
+  height: 42px;
+  border-radius: 21px;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.mobile-folder-sheet footer .secondary {
+  border: 1px solid #d7e3dd;
+  background: #fff;
+  color: #53665d;
+}
+
+.mobile-folder-sheet footer .primary {
+  border: 1px solid #07c160;
+  background: #07c160;
+  color: #fff;
 }
 
 .busy-icon {

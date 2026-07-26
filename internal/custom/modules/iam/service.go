@@ -36,9 +36,16 @@ type Service struct {
 	mu        sync.Mutex
 	scheduler *cron.Cron
 	entryID   cron.EntryID
+	runMu     sync.Mutex
 }
 
-const syncRunTimeout = 30 * time.Minute
+const (
+	syncRunTimeout = 30 * time.Minute
+	// ASCII "WKIAMSYN". The transaction-scoped lock serializes the
+	// check-and-create section across app Pods without leaving a lease row
+	// behind when a process exits.
+	iamSyncAdvisoryLock int64 = 0x574B49414D53594E
+)
 
 var (
 	ErrIAMExternalUserNotFound       = errors.New("IAM external user not found")
@@ -984,43 +991,80 @@ func isUniqueConstraintError(err error) bool {
 }
 
 func (s *Service) RunSync(ctx context.Context, triggeredBy string, scopes ...SyncScope) (*SyncRun, error) {
-	if running, ok, err := s.currentRunningRun(ctx); err != nil {
-		return nil, err
-	} else if ok {
-		return running, nil
-	}
+	// SQLite and other non-Postgres development databases do not implement
+	// PostgreSQL advisory locks. Keep the in-process section serialized too;
+	// production additionally acquires the DB lock below for cross-Pod safety.
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
 	scope := SyncScope{}
 	if len(scopes) > 0 {
 		scope = scopes[0]
 	}
 
-	run := &SyncRun{
-		TriggeredBy: strings.TrimSpace(triggeredBy),
-		Status:      "running",
-		StartedAt:   time.Now(),
-		ScopeOrgID:  strings.TrimSpace(scope.OrganizationExternalID),
-	}
-	if run.TriggeredBy == "" {
-		run.TriggeredBy = "manual"
-	}
-	if run.ScopeOrgID != "" {
-		run.TriggeredBy = run.TriggeredBy + ":organization"
-		var org ExternalOrganization
-		if err := s.db.WithContext(ctx).Select("name").First(&org, "external_id = ?", run.ScopeOrgID).Error; err == nil {
-			run.ScopeOrgName = org.Name
+	var run *SyncRun
+	var alreadyRunning *SyncRun
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if tx.Dialector.Name() == "postgres" {
+			if err := tx.Exec(
+				"SELECT pg_advisory_xact_lock(?)",
+				iamSyncAdvisoryLock,
+			).Error; err != nil {
+				return fmt.Errorf("acquire IAM sync lock: %w", err)
+			}
 		}
-	}
-	if err := s.db.WithContext(ctx).Create(run).Error; err != nil {
+
+		current, ok, err := s.currentRunningRunWithDB(tx)
+		if err != nil {
+			return err
+		}
+		if ok {
+			alreadyRunning = current
+			return nil
+		}
+
+		run = &SyncRun{
+			TriggeredBy: strings.TrimSpace(triggeredBy),
+			Status:      "running",
+			StartedAt:   time.Now(),
+			ScopeOrgID:  strings.TrimSpace(scope.OrganizationExternalID),
+		}
+		if run.TriggeredBy == "" {
+			run.TriggeredBy = "manual"
+		}
+		if run.ScopeOrgID != "" {
+			run.TriggeredBy = run.TriggeredBy + ":organization"
+			var org ExternalOrganization
+			if err := tx.Select("name").First(
+				&org,
+				"external_id = ?",
+				run.ScopeOrgID,
+			).Error; err == nil {
+				run.ScopeOrgName = org.Name
+			}
+		}
+		if err := tx.Create(run).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&SyncSetting{}).Where("id = ?", 1).Updates(map[string]any{
+			"last_run_at":           run.StartedAt,
+			"last_status":           run.Status,
+			"last_message":          "running",
+			"last_run_triggered_by": run.TriggeredBy,
+		}).Error; err != nil {
+			logger.Warnf(ctx, "[custom iam] failed to update running sync status: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-
-	if err := s.db.WithContext(ctx).Model(&SyncSetting{}).Where("id = ?", 1).Updates(map[string]any{
-		"last_run_at":           run.StartedAt,
-		"last_status":           run.Status,
-		"last_message":          "running",
-		"last_run_triggered_by": run.TriggeredBy,
-	}).Error; err != nil {
-		logger.Warnf(ctx, "[custom iam] failed to update running sync status: %v", err)
+	if alreadyRunning != nil {
+		return alreadyRunning, nil
+	}
+	if run == nil {
+		return nil, errors.New("IAM sync reservation completed without a run")
 	}
 
 	go s.executeRun(run.ID)
@@ -1028,8 +1072,12 @@ func (s *Service) RunSync(ctx context.Context, triggeredBy string, scopes ...Syn
 }
 
 func (s *Service) currentRunningRun(ctx context.Context) (*SyncRun, bool, error) {
+	return s.currentRunningRunWithDB(s.db.WithContext(ctx))
+}
+
+func (s *Service) currentRunningRunWithDB(db *gorm.DB) (*SyncRun, bool, error) {
 	var run SyncRun
-	err := s.db.WithContext(ctx).Where("status = ?", "running").Order("started_at DESC").First(&run).Error
+	err := db.Where("status = ?", "running").Order("started_at DESC").First(&run).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, nil
 	}
@@ -1043,7 +1091,7 @@ func (s *Service) currentRunningRun(ctx context.Context) (*SyncRun, bool, error)
 	run.FinishedAt = &now
 	run.Status = "failed"
 	run.Message = "sync task timed out"
-	if err := s.db.WithContext(ctx).Save(&run).Error; err != nil {
+	if err := db.Save(&run).Error; err != nil {
 		return nil, false, err
 	}
 	return nil, false, nil

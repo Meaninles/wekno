@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
@@ -52,6 +54,7 @@ type Handlers struct {
 	Admin                *customadmin.Handler
 	AuthSecurity         *authsecurity.Handler
 	DocumentQueue        *documentqueue.Handler
+	KnowledgeFolders     *knowledgefolders.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -62,6 +65,7 @@ type Handlers struct {
 	dbAnalyticsService          *dbanalytics.Service
 	generalAgentService         *generalagent.Service
 	kbManagerService            *kbmanager.Service
+	knowledgeFolderService      *knowledgefolders.Service
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
 	sessionStateService         *sessionstate.Service
@@ -111,6 +115,12 @@ func NewHandlers(
 		tenantService,
 		generalAgentService,
 	)
+	knowledgeFolderService := knowledgefolders.NewService(
+		db,
+		knowledgeService,
+		knowledgeBaseService,
+		kbShareService,
+	)
 	iamService := iam.NewService(db, userService)
 	userGuideService := userguide.NewService(db, orgService, knowledgeBaseService, kbShareService)
 	scheduledChatService := scheduledchat.NewService(
@@ -129,44 +139,53 @@ func NewHandlers(
 	)
 	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
-	if err := configCenterService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := answerFeedbackService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := authSecurityService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := dbAnalyticsService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := generalAgentService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := kbManagerService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := iamService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := scheduledChatService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := sessionStateService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := skillHubService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := chatShareService.Migrate(ctx); err != nil {
-		return nil, err
-	}
-	if err := userGuideService.EnsureAllUsers(ctx); err != nil {
-		logger.Warnf(ctx, "[custom bootstrap] failed to provision guide KB for existing users: %v", err)
-	}
-	if err := builtinAgentDefaultsService.EnsureAllUsers(ctx); err != nil {
-		logger.Warnf(ctx, "[custom bootstrap] failed to provision built-in agent defaults for existing users: %v", err)
+	runMaintenance := customMigrationsEnabled()
+	if runMaintenance {
+		if err := configCenterService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := answerFeedbackService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := authSecurityService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := dbAnalyticsService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := generalAgentService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := kbManagerService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := knowledgeFolderService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := iamService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := scheduledChatService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := sessionStateService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := skillHubService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := chatShareService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := userGuideService.EnsureAllUsers(ctx); err != nil {
+			logger.Warnf(ctx, "[custom bootstrap] failed to provision guide KB for existing users: %v", err)
+		}
+		if err := builtinAgentDefaultsService.EnsureAllUsers(ctx); err != nil {
+			logger.Warnf(ctx, "[custom bootstrap] failed to provision built-in agent defaults for existing users: %v", err)
+		}
+	} else {
+		logger.Infof(ctx,
+			"[custom bootstrap] schema/data migrations and existing-user backfills disabled; maintenance replica must have completed them")
 	}
 	provisionUser := func(ctx context.Context, user *types.User) error {
 		baseCtx := context.Background()
@@ -312,6 +331,7 @@ func NewHandlers(
 		Admin:                       customadmin.NewHandler(adminService),
 		AuthSecurity:                authSecurityHandler,
 		DocumentQueue:               documentqueue.NewHandler(documentQueueCoordinator),
+		KnowledgeFolders:            knowledgefolders.NewHandler(knowledgeFolderService, knowledgeService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -321,12 +341,28 @@ func NewHandlers(
 		dbAnalyticsService:          dbAnalyticsService,
 		generalAgentService:         generalAgentService,
 		kbManagerService:            kbManagerService,
+		knowledgeFolderService:      knowledgeFolderService,
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
 		sessionStateService:         sessionStateService,
 		skillHubService:             skillHubService,
 		userGuideService:            userGuideService,
 	}, nil
+}
+
+// customMigrationsEnabled follows the native AUTO_MIGRATE contract by
+// default. CUSTOM_AUTO_MIGRATE is an explicit escape hatch for deployments
+// that intentionally manage native and custom schemas separately.
+//
+// Production runs one maintenance replica with AUTO_MIGRATE=true, then starts
+// all serving replicas with AUTO_MIGRATE=false. Without this gate every app
+// Pod would concurrently execute GORM DDL and data migrations during rollout.
+func customMigrationsEnabled() bool {
+	value, explicitlyConfigured := os.LookupEnv("CUSTOM_AUTO_MIGRATE")
+	if !explicitlyConfigured {
+		value = os.Getenv("AUTO_MIGRATE")
+	}
+	return strings.TrimSpace(strings.ToLower(value)) != "false"
 }
 
 func supportsDBAnalyticsRuntimeTools(agentType string) bool {
@@ -392,7 +428,16 @@ func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
 	embed.GET("/sessions/:session_id/artifacts/:id/download", handlers.GeneralAgent.DownloadEmbedArtifact)
 }
 
-func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.HandlerFunc, ownedAgentOrAdmin gin.HandlerFunc) {
+func RegisterRoutes(
+	v1 *gin.RouterGroup,
+	handlers *Handlers,
+	systemAdmin gin.HandlerFunc,
+	ownedAgentOrAdmin gin.HandlerFunc,
+	viewer gin.HandlerFunc,
+	ownedKBOrAdmin gin.HandlerFunc,
+	kbRead gin.HandlerFunc,
+	kbWrite gin.HandlerFunc,
+) {
 	if handlers == nil {
 		return
 	}
@@ -495,6 +540,29 @@ func RegisterRoutes(v1 *gin.RouterGroup, handlers *Handlers, systemAdmin gin.Han
 		{
 			documentQueueRoutes.GET("/status", handlers.DocumentQueue.Status)
 			documentQueueRoutes.POST("/status", handlers.DocumentQueue.StatusBatch)
+		}
+	}
+
+	if handlers.KnowledgeFolders != nil {
+		v1.GET(
+			"/custom/knowledge-folders/search",
+			viewer,
+			handlers.KnowledgeFolders.SearchAccessible,
+		)
+		folders := v1.Group("/custom/knowledge-folders/knowledge-bases/:id")
+		{
+			folders.GET("/nodes", viewer, kbRead, handlers.KnowledgeFolders.ListNodes)
+			folders.GET("/search", viewer, kbRead, handlers.KnowledgeFolders.SearchKnowledgeBase)
+			folders.GET("/folders/options", viewer, kbRead, handlers.KnowledgeFolders.ListFolderOptions)
+			folders.GET("/folders/:folder_id", viewer, kbRead, handlers.KnowledgeFolders.GetFolder)
+			folders.POST("/folders", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.CreateFolder)
+			folders.PATCH("/folders/:folder_id", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.UpdateFolder)
+			folders.PUT("/folders/:folder_id", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.UpdateFolder)
+			folders.DELETE("/folders/:folder_id", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.DeleteFolder)
+			folders.PUT("/documents/locations", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.MoveDocuments)
+			folders.POST("/files", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.UploadFile)
+			folders.POST("/urls", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.CreateFromURL)
+			folders.POST("/manual", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.CreateManual)
 		}
 	}
 

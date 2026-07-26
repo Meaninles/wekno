@@ -1,0 +1,41 @@
+# Copy this file to a protected operator workspace as values-site.yaml.
+# Replace every REPLACE_* token before rendering. Do not commit the resulting
+# site file if it contains internal topology or release information.
+
+app:
+  image:
+    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-app
+    tag: REPLACE_GIT_SHA
+    pullPolicy: IfNotPresent
+  sandbox:
+    dockerImage: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-sandbox:REPLACE_GIT_SHA
+
+docreader:
+  image:
+    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-docreader
+    tag: REPLACE_GIT_SHA
+    pullPolicy: IfNotPresent
+
+generalAgent:
+  image:
+    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-general-agent
+    tag: REPLACE_GIT_SHA
+    pullPolicy: IfNotPresent
+
+documentProcessingAgent:
+  image:
+    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-document-processing-agent
+    tag: REPLACE_GIT_SHA
+    pullPolicy: IfNotPresent
+
+frontend:
+  image:
+    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-frontend
+    tag: REPLACE_GIT_SHA
+    pullPolicy: IfNotPresent
+
+mobileWeb:
+  image:
+    repository: swr.cloud-mt-1.moutai.com.cn/REPLACE_SWR_NAMESPACE/weknora-mobile-web
+    tag: REPLACE_GIT_SHA
+    pullPolicy: IfNotPresent

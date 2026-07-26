@@ -45,6 +45,28 @@ x-mobile-common: &mobile-common
     APP_PORT: "8080"
     MAX_FILE_SIZE_MB: "50"
     MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB: "2048"
+    PROXY_MAX_BODY_SIZE_MB: "80"
+    PROXY_MAX_KNOWLEDGE_SOURCE_BODY_SIZE_MB: "2304"
+    PROXY_TIMEOUT_SECONDS: "7200"
+  networks:
+    - weknora-dev
+  cpus: 0.25
+  mem_limit: 192m
+  pids_limit: 64
+  stop_grace_period: 10s
+
+x-frontend-common: &frontend-common
+  image: weknora-frontend:local
+  restart: unless-stopped
+  environment:
+    APP_SCHEME: http
+    APP_HOST: app-dev
+    APP_PORT: "8080"
+    MAX_FILE_SIZE_MB: "50"
+    MAX_KNOWLEDGE_SOURCE_FILE_SIZE_MB: "2048"
+    PROXY_MAX_BODY_SIZE_MB: "80"
+    PROXY_MAX_KNOWLEDGE_SOURCE_BODY_SIZE_MB: "2304"
+    PROXY_TIMEOUT_SECONDS: "7200"
   networks:
     - weknora-dev
   cpus: 0.25
@@ -77,6 +99,14 @@ services:
     <<: *mobile-common
     container_name: weknora-mobile-web-e2e-2
 
+  frontend-web-1:
+    <<: *frontend-common
+    container_name: weknora-frontend-e2e-1
+
+  frontend-web-2:
+    <<: *frontend-common
+    container_name: weknora-frontend-e2e-2
+
   replica-entry:
     image: nginx:stable-alpine
     container_name: weknora-service-replica-e2e-entry
@@ -88,12 +118,15 @@ services:
       - document-agent-2
       - mobile-web-1
       - mobile-web-2
+      - frontend-web-1
+      - frontend-web-2
     volumes:
       - ./load-balancer.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "127.0.0.1:8091:8091"
       - "127.0.0.1:8093:8093"
       - "127.0.0.1:5180:80"
+      - "127.0.0.1:5181:81"
     networks:
       weknora-dev:
         aliases:

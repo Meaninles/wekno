@@ -1,0 +1,2 @@
+WeKnora 文件夹浏览器上传 E2E 根目录文档。
+标记：folder-upload-root-20260726。

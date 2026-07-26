@@ -213,8 +213,12 @@ helm install weknora ./helm \
 |-----------|-------------|---------|
 | `app.enabled` | Enable backend | `true` |
 | `app.replicaCount` | Number of replicas | `1` |
+| `app.updateStrategy` | Deployment rollout strategy; use no-surge replacement for large local scratch PVCs | `RollingUpdate, surge 1` |
 | `app.image.repository` | Image repository | `wechatopenai/weknora-app` |
 | `app.image.tag` | Image tag | `""` (uses appVersion) |
+| `app.sandbox.mode` | One-shot skill sandbox mode | `docker` |
+| `app.sandbox.timeoutSeconds` | Sandbox execution timeout | `"60"` |
+| `app.sandbox.dockerImage` | Image pulled by the host Docker daemon in docker mode | `wechatopenai/weknora-sandbox:latest` |
 | `app.resources` | Resource limits | See values.yaml |
 | `app.env` | Environment variables | See values.yaml |
 | `app.extraEnv` | Additional env vars | `[]` |
@@ -228,6 +232,7 @@ helm install weknora ./helm \
 | `app.connections.redis.tls.serverName` | Redis certificate DNS name | `""` |
 | `app.documentQueue.kubernetesRuntimeVerifier.enabled` | Verify exact terminated Pod UIDs before automatic cross-Pod takeover | `true` |
 | `app.documentQueue.kubernetesRuntimeVerifier.containerName` | App container whose current terminated state is authoritative | `app` |
+| `app.env.AUTO_MIGRATE` | Run base SQL migrations at startup; production should enable it only on one isolated maintenance replica | `"true"` |
 | `app.env.WEKNORA_ASYNQ_CONCURRENCY` | Complete document workflows admitted per app replica (runtime System Admin setting takes precedence) | `"4"` |
 | `app.env.WEKNORA_WIKI_MAP_TASK_CONCURRENCY` | Document-local Wiki Map consumers per app replica, isolated from ordinary derivatives | `"4"` |
 
@@ -263,16 +268,18 @@ worker pool.
 |-----------|-------------|---------|
 | `docreader.enabled` | Enable document parser | `true` |
 | `docreader.replicaCount` | Number of parser replicas | `1` |
+| `docreader.updateStrategy` | Deployment rollout strategy | `RollingUpdate, surge 1` |
 | `docreader.service.headless` | Expose all parser endpoints for gRPC round-robin | `true` |
 
 For worker high availability, run at least two app replicas and two DocReader
 replicas across failure domains, with disruption budgets enabled. PostgreSQL,
 Redis, object storage and the selected vector/graph/model
 providers must also use their own HA deployments; worker scaling does not make
-those external dependencies highly available. The production HA values file
-uses PostgreSQL `verify-full` and Redis TLS and mounts their CA Secrets; replace
-the example service names and certificates with the endpoints you already
-operate rather than disabling verification.
+those external dependencies highly available. The production profile retains
+the currently supplied internal plaintext endpoints; if the site security
+baseline requires encrypted east-west traffic, provide the real TLS endpoints
+and CA Secrets and switch PostgreSQL/Redis to verified TLS rather than using
+`insecureSkipVerify`.
 
 ### Frontend
 
@@ -282,6 +289,11 @@ operate rather than disabling verification.
 | `frontend.replicaCount` | Number of replicas | `1` |
 | `frontend.image.repository` | Image repository | `wechatopenai/weknora-ui` |
 | `frontend.image.tag` | Image tag | `latest` |
+| `frontend.maxFileSizeMB` | Raw ordinary-file limit exposed to the UI | `50` |
+| `frontend.maxKnowledgeSourceFileSizeMB` | Raw knowledge-source limit exposed to the UI | `2048` |
+| `frontend.proxyMaxBodySizeMB` | Nginx ordinary request-body ceiling including transport overhead | `80` |
+| `frontend.proxyMaxKnowledgeSourceBodySizeMB` | Nginx knowledge request-body ceiling including transport overhead | `2304` |
+| `frontend.proxyTimeoutSeconds` | Nginx API read/send timeout | `3600` |
 
 ### Mobile Web
 
@@ -308,6 +320,9 @@ host-relative `/share/chat/:token` path.
 | `mobileWeb.service.port` | Service port | `80` |
 | `mobileWeb.appHost` | Backend app service host | `app` |
 | `mobileWeb.appPort` | Backend app service port | `8080` |
+| `mobileWeb.proxyMaxBodySizeMB` | Nginx ordinary request-body ceiling including transport overhead | `80` |
+| `mobileWeb.proxyMaxKnowledgeSourceBodySizeMB` | Nginx knowledge request-body ceiling including transport overhead | `2304` |
+| `mobileWeb.proxyTimeoutSeconds` | Nginx API read/send timeout | `3600` |
 
 ### PostgreSQL (ParadeDB)
 

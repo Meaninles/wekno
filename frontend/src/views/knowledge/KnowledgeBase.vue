@@ -31,8 +31,6 @@ import {
   listKnowledgeTags,
   updateKnowledgeBaseTag,
   updateKnowledgeTagBatch,
-  uploadKnowledgeFile,
-  createKnowledgeFromURL,
   reparseKnowledge,
   cancelKnowledgeParse,
   batchDeleteKnowledge,
@@ -72,6 +70,22 @@ import { formatStringDate } from '@/utils';
 import { formatFileSize } from '@/utils/files';
 import { useMarqueeSelect } from '@/hooks/useMarqueeSelect';
 import type { ParserEngineInfo } from '@/api/system';
+import {
+  createKnowledgeFolder,
+  deleteKnowledgeFolder,
+  listKnowledgeFolderNodes,
+  listKnowledgeFolderOptions,
+  moveKnowledgeDocumentsToFolder,
+  searchKnowledgeFolderNodes,
+  updateKnowledgeFolder,
+  uploadKnowledgeFolderFile,
+  createKnowledgeFolderURL,
+} from '@/custom/modules/knowledgeFolders/api';
+import type {
+  KnowledgeFolder,
+  KnowledgeFolderBreadcrumb,
+  KnowledgeFolderOption,
+} from '@/custom/modules/knowledgeFolders/types';
 const route = useRoute();
 const { t } = useI18n();
 const kbId = computed(() => (route.params as any).kbId as string || '');
@@ -312,7 +326,7 @@ const canMutateKnowledge = computed(() => {
 const effectiveKBPermission = computed(() => orgStore.getKBPermission(kbId.value) || kbInfo.value?.my_permission || '');
 
 const knowledgeList = ref<Array<{ id: string; name: string; type?: string }>>([]);
-let { cardList, total, moreIndex, details, getKnowled, delKnowledge, openMore, onVisibleChange: _onVisibleChange, getCardDetails, getfDetails } = useKnowledgeBase(kbId.value)
+let { cardList, total, moreIndex, details, delKnowledge, openMore, onVisibleChange: _onVisibleChange, getCardDetails, getfDetails } = useKnowledgeBase(kbId.value)
 
 const showKbDetailContextualGuide = computed(() => {
   return Boolean(kbId.value)
@@ -398,12 +412,36 @@ const onCardMoreVisibleChange = (visible: boolean, item: KnowledgeCard) => {
 let isCardDetails = ref(false);
 let timeout: ReturnType<typeof setTimeout> | null = null;
 let knowledgeScroll = ref()
-let page = 1;
-let pageSize = 35;
-let scrollLoading = false;
-const resetPage = () => { page = 1; scrollLoading = false; };
+let pageSize = 20;
+const nodePage = ref(1);
+const nodePageSize = ref(20);
+const resetPage = () => {
+  nodePage.value = 1;
+};
 
-// Move state — inline in card menu
+const folderList = ref<KnowledgeFolder[]>([]);
+const folderBreadcrumbs = ref<KnowledgeFolderBreadcrumb[]>([]);
+const folderCardMenuOpen = ref('');
+const currentFolderId = ref(
+  typeof route.query.folder_id === 'string' ? route.query.folder_id : '',
+);
+const folderOptions = ref<KnowledgeFolderOption[]>([]);
+const folderDialogVisible = ref(false);
+const folderDialogMode = ref<'create' | 'edit' | 'move'>('create');
+const folderDialogTarget = ref<KnowledgeFolder | null>(null);
+const folderDialogSubmitting = ref(false);
+const folderForm = reactive({
+  name: '',
+  description: '',
+  parent_id: '',
+});
+const documentFolderDialogVisible = ref(false);
+const documentFolderTarget = ref<KnowledgeCard | null>(null);
+const documentFolderTargetID = ref('');
+const documentFolderSubmitting = ref(false);
+
+// Move state — inline in card menu, with a dialog for the list view.
+const listMoveDialogVisible = ref(false);
 const moveMenuMode = ref<'normal' | 'targets' | 'confirm'>('normal');
 const moveKnowledgeId = ref('');
 const moveTargetKbs = ref<any[]>([]);
@@ -419,8 +457,8 @@ type DocViewMode = 'grid' | 'list';
 const VIEW_MODE_KEY = 'weknora.kb.docs.viewMode';
 const initViewMode = (): DocViewMode => {
   try {
-    return localStorage.getItem(VIEW_MODE_KEY) === 'list' ? 'list' : 'grid';
-  } catch { return 'grid'; }
+    return localStorage.getItem(VIEW_MODE_KEY) === 'grid' ? 'grid' : 'list';
+  } catch { return 'list'; }
 };
 const viewMode = ref<DocViewMode>(initViewMode());
 watch(viewMode, (v) => {
@@ -843,13 +881,6 @@ function onTagEditConfirm(tagIds: string[]) {
     handleKnowledgeTagChange(tagEditTarget.value.id, tagIds);
   }
 }
-const getPageSize = () => {
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-  const itemHeight = 148;
-  let itemsInView = Math.floor(viewportHeight / itemHeight) * 5;
-  pageSize = Math.max(35, itemsInView);
-}
-getPageSize()
 // 直接调用 API 获取知识库文件列表
 const getTagName = (tagId?: string | number) => {
   if (!tagId && tagId !== 0) return '';
@@ -894,26 +925,290 @@ const getKnowledgeType = (item: any) => {
   return '--';
 }
 
-const loadKnowledgeFiles = (kbIdValue: string): Promise<void> => {
+let folderListGeneration = 0;
+const normalizeKnowledgeCard = (item: any): KnowledgeCard => {
+  const rawName = item.file_name || item.title || item.source || t('knowledgeBase.untitledDocument');
+  const dotIndex = rawName.lastIndexOf('.');
+  const displayName = dotIndex > 0 ? rawName.substring(0, dotIndex) : rawName;
+  const fileTypeSource = item.file_type || (item.type === 'manual' ? 'MANUAL' : '');
+  return {
+    ...item,
+    original_file_name: item.file_name,
+    display_name: displayName,
+    file_name: displayName,
+    updated_at: formatStringDate(new Date(item.updated_at)),
+    isMore: false,
+    file_type: fileTypeSource ? String(fileTypeSource).toLocaleUpperCase() : '',
+  };
+};
+
+const loadKnowledgeFiles = async (kbIdValue: string): Promise<void> => {
   if (!kbIdValue) return Promise.resolve();
   if (!isFAQ.value) {
     docListLoading.value = true;
   }
-  return getKnowled(
-    {
-      page: 1,
-      page_size: pageSize,
-      ...filterParams.value,
-    },
-    kbIdValue,
-  ).finally(() => {
+  const requestGeneration = ++folderListGeneration;
+  const params = {
+    folder_id: currentFolderId.value || undefined,
+    page: nodePage.value,
+    page_size: pageSize,
+    ...filterParams.value,
+  };
+  try {
+    const keyword = String(params.keyword || '').trim();
+    const result: any = keyword
+      ? await searchKnowledgeFolderNodes(kbIdValue, params)
+      : await listKnowledgeFolderNodes(kbIdValue, params);
+    if (requestGeneration !== folderListGeneration || !isCurrentKb(kbIdValue)) return;
+    const nodes = Array.isArray(result?.data) ? result.data : [];
+    folderList.value = nodes
+      .filter((node: any) => node?.node_type === 'folder' && node.folder)
+      .map((node: any) => node.folder);
+    cardList.value = nodes
+      .filter((node: any) => node?.node_type === 'document' && node.document)
+      .map((node: any) => normalizeKnowledgeCard(node.document));
+    total.value = Number(result?.total || 0);
+    const lastPage = Math.max(1, Math.ceil(total.value / nodePageSize.value));
+    if (nodePage.value > lastPage) {
+      nodePage.value = lastPage;
+      return loadKnowledgeFiles(kbIdValue);
+    }
+    folderBreadcrumbs.value = Array.isArray(result?.breadcrumbs) ? result.breadcrumbs : [];
+    if (keyword && currentFolderId.value) {
+      const currentOption = folderOptions.value.find((option) => option.id === currentFolderId.value);
+      folderBreadcrumbs.value = currentOption
+        ? currentOption.path.split('/').map((name, index, parts) => {
+          const path = parts.slice(0, index + 1).join('/');
+          const option = folderOptions.value.find((candidate) => candidate.path === path);
+          return { id: option?.id || '', name };
+        }).filter((item) => item.id)
+        : [];
+    }
+  } catch (error: any) {
+    if (requestGeneration !== folderListGeneration) return;
+    folderList.value = [];
+    cardList.value = [];
+    total.value = 0;
+    const status = error?.status || error?.code || error?.error?.code;
+    if (currentFolderId.value && Number(status) === 404) {
+      currentFolderId.value = '';
+      await router.replace({ query: { ...route.query, folder_id: undefined } });
+      return loadKnowledgeFiles(kbIdValue);
+    }
+  } finally {
     if (isCurrentKb(kbIdValue) && !isFAQ.value) {
       docListLoading.value = false;
     }
-  });
+  }
 };
 
 const isCurrentKb = (targetKbId: string) => targetKbId === kbId.value;
+
+const loadFolderOptions = async () => {
+  if (!kbId.value || isFAQ.value) {
+    folderOptions.value = [];
+    return;
+  }
+  try {
+    const result: any = await listKnowledgeFolderOptions(kbId.value);
+    folderOptions.value = Array.isArray(result?.data) ? result.data : [];
+  } catch {
+    folderOptions.value = [];
+  }
+};
+
+const folderParentOptions = computed(() => {
+  const target = folderDialogTarget.value;
+  return [
+    { label: t('knowledgeFolders.root'), value: '' },
+    ...folderOptions.value
+      .filter((option) => {
+        if (!target) return true;
+        return option.id !== target.id && !option.path.startsWith(`${target.path}/`);
+      })
+      .map((option) => ({
+        label: `${'　'.repeat(Math.max(0, option.depth - 1))}${option.path}`,
+        value: option.id,
+      })),
+  ];
+});
+
+const openFolder = async (folder: KnowledgeFolder | null) => {
+  currentFolderId.value = folder?.id || '';
+  docSearchKeyword.value = '';
+  resetPage();
+  clearSelection();
+  await router.replace({
+    query: {
+      ...route.query,
+      folder_id: currentFolderId.value || undefined,
+      knowledge_id: undefined,
+    },
+  });
+};
+
+const openCreateFolderDialog = async () => {
+  await loadFolderOptions();
+  folderDialogMode.value = 'create';
+  folderDialogTarget.value = null;
+  folderForm.name = '';
+  folderForm.description = '';
+  folderForm.parent_id = currentFolderId.value;
+  folderDialogVisible.value = true;
+};
+
+const openEditFolderDialog = async (folder: KnowledgeFolder) => {
+  await loadFolderOptions();
+  folderDialogMode.value = 'edit';
+  folderDialogTarget.value = folder;
+  folderForm.name = folder.name;
+  folderForm.description = folder.description || '';
+  folderForm.parent_id = folder.parent_id || '';
+  folderDialogVisible.value = true;
+};
+
+const openMoveFolderDialog = async (folder: KnowledgeFolder) => {
+  await loadFolderOptions();
+  folderDialogMode.value = 'move';
+  folderDialogTarget.value = folder;
+  folderForm.name = folder.name;
+  folderForm.description = folder.description || '';
+  folderForm.parent_id = folder.parent_id || '';
+  folderDialogVisible.value = true;
+};
+
+const submitFolderDialog = async () => {
+  const name = folderForm.name.trim();
+  if (folderDialogMode.value !== 'move' && !name) {
+    MessagePlugin.warning(t('knowledgeFolders.name'));
+    return;
+  }
+  if (!kbId.value) return;
+  folderDialogSubmitting.value = true;
+  try {
+    if (folderDialogMode.value === 'create') {
+      await createKnowledgeFolder(kbId.value, {
+        parent_id: folderForm.parent_id,
+        name,
+        description: folderForm.description.trim(),
+      });
+      MessagePlugin.success(t('knowledgeFolders.createSuccess'));
+    } else if (folderDialogTarget.value) {
+      const payload = folderDialogMode.value === 'move'
+        ? { parent_id: folderForm.parent_id }
+        : {
+          parent_id: folderForm.parent_id,
+          name,
+          description: folderForm.description.trim(),
+        };
+      await updateKnowledgeFolder(kbId.value, folderDialogTarget.value.id, payload);
+      MessagePlugin.success(
+        t(folderDialogMode.value === 'move' ? 'knowledgeFolders.moveSuccess' : 'knowledgeFolders.updateSuccess'),
+      );
+    }
+    folderDialogVisible.value = false;
+    await Promise.all([loadFolderOptions(), loadKnowledgeFiles(kbId.value)]);
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || t('common.operationFailed'));
+  } finally {
+    folderDialogSubmitting.value = false;
+  }
+};
+
+const deleteFolderNow = async (folder: KnowledgeFolder, mode: 'reject' | 'move_to_parent') => {
+  if (!kbId.value) return;
+  await deleteKnowledgeFolder(kbId.value, folder.id, mode);
+  MessagePlugin.success(t('knowledgeFolders.deleteSuccess'));
+  if (currentFolderId.value === folder.id) {
+    currentFolderId.value = folder.parent_id || '';
+    await router.replace({
+      query: { ...route.query, folder_id: currentFolderId.value || undefined },
+    });
+  }
+  resetPage();
+  await Promise.all([loadFolderOptions(), loadKnowledgeFiles(kbId.value)]);
+};
+
+const confirmDeleteFolder = (folder: KnowledgeFolder) => {
+  const nonEmpty = folder.stats.direct_child_folder_count > 0 || folder.stats.subtree_document_count > 0;
+  let dialog: ReturnType<typeof DialogPlugin.confirm> | undefined;
+  dialog = DialogPlugin.confirm({
+    header: t('knowledgeFolders.delete') as string,
+    body: nonEmpty
+      ? t('knowledgeFolders.deleteNonEmpty') as string
+      : `${t('knowledgeFolders.delete')} “${folder.name}”？`,
+    confirmBtn: {
+      content: t(nonEmpty ? 'knowledgeFolders.deleteMoveToParent' : 'common.confirm') as string,
+      theme: 'danger',
+    },
+    cancelBtn: { content: t('common.cancel') as string },
+    onConfirm: async () => {
+      try {
+        await deleteFolderNow(folder, nonEmpty ? 'move_to_parent' : 'reject');
+        dialog?.destroy();
+      } catch (error: any) {
+        MessagePlugin.error(error?.message || t('common.operationFailed'));
+      }
+    },
+  });
+};
+
+const handleFolderAction = (action: 'edit' | 'move' | 'delete', folder: KnowledgeFolder) => {
+  if (action === 'edit') return openEditFolderDialog(folder);
+  if (action === 'move') return openMoveFolderDialog(folder);
+  return confirmDeleteFolder(folder);
+};
+
+const handleFolderCardAction = (
+  action: 'edit' | 'move' | 'delete',
+  folder: KnowledgeFolder,
+) => {
+  folderCardMenuOpen.value = '';
+  handleFolderAction(action, folder);
+};
+
+const onFolderCardMenuVisibleChange = (folderID: string, visible: boolean) => {
+  if (visible) {
+    folderCardMenuOpen.value = folderID;
+  } else if (folderCardMenuOpen.value === folderID) {
+    folderCardMenuOpen.value = '';
+  }
+};
+
+const openDocumentFolderDialog = async (item: KnowledgeCard) => {
+  cardList.value.forEach((card) => { card.isMore = false; });
+  moreIndex.value = -1;
+  moveMenuMode.value = 'normal';
+  await loadFolderOptions();
+  documentFolderTarget.value = item;
+  documentFolderTargetID.value = String((item as any).folder_id || '');
+  documentFolderDialogVisible.value = true;
+};
+
+const submitDocumentFolderMove = async () => {
+  if (!kbId.value || !documentFolderTarget.value) return;
+  documentFolderSubmitting.value = true;
+  try {
+    await moveKnowledgeDocumentsToFolder(
+      kbId.value,
+      [documentFolderTarget.value.id],
+      documentFolderTargetID.value,
+    );
+    MessagePlugin.success(t('knowledgeFolders.moveSuccess'));
+    documentFolderDialogVisible.value = false;
+    resetPage();
+    await loadKnowledgeFiles(kbId.value);
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || t('common.operationFailed'));
+  } finally {
+    documentFolderSubmitting.value = false;
+  }
+};
+
+const onNodePageChange = async () => {
+  pageSize = nodePageSize.value;
+  await loadKnowledgeFiles(kbId.value);
+};
 
 const loadTags = async (kbIdValue: string, reset = false) => {
   if (!kbIdValue) {
@@ -1065,8 +1360,10 @@ const loadKnowledgeBaseInfo = async (targetKbId: string, force = false) => {
     uiStore.clearSelectedTagIds();
     if (!isFAQ.value) {
       loadKnowledgeFiles(targetKbId);
+      void loadFolderOptions();
     } else {
       cardList.value = [];
+      folderList.value = [];
       total.value = 0;
     }
     loadTags(targetKbId, true);
@@ -1136,6 +1433,9 @@ watch(() => kbId.value, (newKbId, oldKbId) => {
   if (newKbId !== oldKbId) {
     clearTraceAvailabilityCache();
     cardList.value = [];
+    folderList.value = [];
+    folderBreadcrumbs.value = [];
+    currentFolderId.value = typeof route.query.folder_id === 'string' ? route.query.folder_id : '';
     total.value = 0;
     docListLoading.value = true;
     resetPage();
@@ -1145,6 +1445,20 @@ watch(() => kbId.value, (newKbId, oldKbId) => {
   }
   loadKnowledgeBaseInfo(newKbId);
 }, { immediate: true });
+
+watch(
+  () => route.query.folder_id,
+  (folderID, oldFolderID) => {
+    const nextFolderID = typeof folderID === 'string' ? folderID : '';
+    if (nextFolderID === currentFolderId.value && folderID === oldFolderID) return;
+    currentFolderId.value = nextFolderID;
+    resetPage();
+    clearSelection();
+    if (kbId.value && !isFAQ.value) {
+      void loadKnowledgeFiles(kbId.value);
+    }
+  },
+);
 
 watch(selectedTagIds, (newVal, oldVal) => {
   if (oldVal === undefined) return;
@@ -1595,9 +1909,7 @@ const onReparseMenuClick = (index: number, item: KnowledgeCard) => {
   }
 };
 
-const handleMoveKnowledge = async (item: KnowledgeCard) => {
-  moveKnowledgeId.value = item.id;
-  moveMenuMode.value = 'targets';
+const loadMoveTargetsForCurrentKnowledgeBase = async () => {
   moveTargetsLoading.value = true;
   moveTargetKbs.value = [];
   try {
@@ -1608,6 +1920,28 @@ const handleMoveKnowledge = async (item: KnowledgeCard) => {
   } finally {
     moveTargetsLoading.value = false;
   }
+};
+
+const handleMoveKnowledge = async (item: KnowledgeCard) => {
+  moveKnowledgeId.value = item.id;
+  moveMenuMode.value = 'targets';
+  await loadMoveTargetsForCurrentKnowledgeBase();
+};
+
+const openListMoveKnowledgeDialog = async (item: KnowledgeCard) => {
+  moveKnowledgeId.value = item.id;
+  moveSelectedTargetId.value = '';
+  moveSelectedTargetName.value = '';
+  moveMode.value = 'reuse_vectors';
+  listMoveDialogVisible.value = true;
+  await loadMoveTargetsForCurrentKnowledgeBase();
+};
+
+const onListMoveTargetChange = (value: string | number) => {
+  const targetID = String(value || '');
+  moveSelectedTargetName.value = moveTargetKbs.value.find(
+    (target) => String(target.id) === targetID,
+  )?.name || '';
 };
 
 const handleMoveSelectTarget = (kb: any) => {
@@ -1639,6 +1973,7 @@ const handleMoveConfirm = async () => {
     MessagePlugin.info(t('knowledgeBase.moveStarted'));
     // Close the card menu
     moveMenuMode.value = 'normal';
+    listMoveDialogVisible.value = false;
     cardList.value.forEach(c => { c.isMore = false; });
 
     if (taskId) {
@@ -1740,11 +2075,7 @@ const uploadInfoStore = useUploadInfoStore();
 
 const getFolderUploadFileName = (file: File) => {
   const relativePath = (file as any).webkitRelativePath;
-  if (!relativePath) return undefined;
-  const pathParts = relativePath.split('/');
-  if (pathParts.length <= 2) return undefined;
-  const subPath = pathParts.slice(1, -1).join('/');
-  return `${subPath}/${file.name}`;
+  return relativePath || undefined;
 };
 
 const showUploadResultMessages = (
@@ -1795,7 +2126,7 @@ const executeUploadBatch = async (
   const totalCount = files.length;
   const hasFolderPaths = files.some((file) => {
     const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
-    return !!relativePath && relativePath.split('/').length > 2;
+    return !!relativePath;
   });
 
   for (const [index, file] of files.entries()) {
@@ -1808,16 +2139,22 @@ const executeUploadBatch = async (
         file: File
         tag_ids?: string[]
         fileName?: string
+        folder_id?: string
+        relative_path?: string
         process_config?: KnowledgeProcessOverrides
-      } = { file, tag_ids: tagIdsToUpload };
+      } = {
+        file,
+        tag_ids: tagIdsToUpload,
+        folder_id: currentFolderId.value || undefined,
+      };
 
-      const fileName = getFolderUploadFileName(file);
-      if (fileName) uploadData.fileName = fileName;
+      const relativePath = getFolderUploadFileName(file);
+      if (relativePath) uploadData.relative_path = relativePath;
       if (options.processConfig) {
         uploadData.process_config = options.processConfig;
       }
 
-      const responseData: any = await uploadKnowledgeFile(targetKbId, uploadData, (event: any) => {
+      const responseData: any = await uploadKnowledgeFolderFile(targetKbId, uploadData, (event: any) => {
         if (uploadInfoItemId) {
           uploadInfoStore.updateItemProgress(uploadInfoItemId, event?.loaded, event?.total);
         }
@@ -1888,8 +2225,9 @@ const executeUrlImport = async (
       uploadInfoStore.startItem(uploadInfoItemId);
       uploadInfoStore.markItemProcessing(uploadInfoItemId, t('knowledgeBase.uploadInfoFetchingUrl'));
     }
-    const responseData: any = await createKnowledgeFromURL(targetKbId, {
+    const responseData: any = await createKnowledgeFolderURL(targetKbId, {
       url,
+      folder_id: currentFolderId.value || undefined,
       tag_ids: tagIdsToUpload,
       process_config: processConfig,
     });
@@ -1946,7 +2284,7 @@ const handleUploadConfirmResult = async (result: UploadConfirmResult) => {
   if (files.length > 0) {
     const hasFolderPaths = files.some((file) => {
       const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
-      return !!relativePath && relativePath.split('/').length > 2;
+      return !!relativePath;
     });
     if (hasFolderPaths) {
       MessagePlugin.info(t('knowledgeBase.uploadingFolder', { total: files.length }));
@@ -1993,6 +2331,7 @@ const handleManualCreate = () => {
   uiStore.openManualEditor({
     mode: 'create',
     kbId: kbId.value,
+    folderId: currentFolderId.value || null,
     status: 'draft',
     onSuccess: manualEditorSuccess,
   });
@@ -2119,29 +2458,6 @@ const submitReparse = async (id: string, processConfig?: KnowledgeProcessOverrid
   }
 };
 
-const handleScroll = () => {
-  if (isFAQ.value) return;
-  if (docListLoading.value) return;
-  if (scrollLoading) return;
-  const currentKbId = kbId.value;
-  if (!currentKbId) return;
-  const element = knowledgeScroll.value;
-  if (element) {
-    let pageNum = Math.ceil(total.value / pageSize)
-    const { scrollTop, scrollHeight, clientHeight } = element;
-    if (scrollTop + clientHeight >= scrollHeight - 10) {
-      if (cardList.value.length < total.value && page < pageNum) {
-        page++;
-        scrollLoading = true;
-        getKnowled({ page, page_size: pageSize, ...filterParams.value }, currentKbId).finally(() => {
-          if (isCurrentKb(currentKbId)) {
-            scrollLoading = false;
-          }
-        });
-      }
-    }
-  }
-};
 const getDoc = (page: number) => {
   getfDetails(details.id, page)
 };
@@ -2295,14 +2611,15 @@ const confirmCancelParseKnowledge = async (item: KnowledgeCard) => {
 
 // Bridge list-view actions back to existing per-card handlers.
 const handleListAction = (
-  action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete',
+  action: 'edit' | 'reparse' | 'cancel-parse' | 'move-folder' | 'move' | 'delete',
   item: KnowledgeCard,
 ) => {
   const idx = (cardList.value || []).findIndex((i: KnowledgeCard) => i.id === item.id);
   if (action === 'edit') return handleManualEdit(idx, item);
   if (action === 'reparse') return confirmRebuildKnowledge(idx, item);
   if (action === 'cancel-parse') return confirmCancelParseKnowledge(item);
-  if (action === 'move') return handleMoveKnowledge(item);
+  if (action === 'move-folder') return openDocumentFolderDialog(item);
+  if (action === 'move') return openListMoveKnowledgeDialog(item);
   if (action === 'delete') return confirmDeleteKnowledge(idx, item);
 };
 
@@ -2588,6 +2905,21 @@ async function createNewSession(value: string): Promise<void> {
           </aside>
           <div class="tag-content">
             <div class="doc-card-area">
+              <div class="folder-navigation">
+                <button type="button" class="folder-breadcrumb-item"
+                  :class="{ active: !currentFolderId }" @click="openFolder(null)">
+                  <t-icon name="home" size="14px" />
+                  <span>{{ $t('knowledgeFolders.root') }}</span>
+                </button>
+                <template v-for="crumb in folderBreadcrumbs" :key="crumb.id">
+                  <t-icon name="chevron-right" size="14px" class="folder-breadcrumb-separator" />
+                  <button type="button" class="folder-breadcrumb-item"
+                    :class="{ active: crumb.id === currentFolderId }"
+                    @click="openFolder(folderOptions.find((folder) => folder.id === crumb.id) as any)">
+                    {{ crumb.name }}
+                  </button>
+                </template>
+              </div>
               <div class="doc-filter-bar">
                 <t-input v-model.trim="docSearchKeyword" :placeholder="$t('knowledgeBase.docSearchPlaceholder')"
                   clearable class="doc-search-input" @clear="loadKnowledgeFiles(kbId)"
@@ -2726,20 +3058,29 @@ async function createNewSession(value: string): Promise<void> {
                   </t-date-range-picker>
                 </div>
                 <div class="doc-view-toggle" role="group" :aria-label="$t('knowledgeBase.viewModeToggle')">
-                  <t-tooltip :content="$t('knowledgeBase.viewModeGrid')" placement="top">
-                    <button type="button" class="doc-view-toggle-btn" :class="{ active: viewMode === 'grid' }"
-                      @click="viewMode = 'grid'" :aria-pressed="viewMode === 'grid'">
-                      <t-icon name="view-module" size="16px" />
-                    </button>
-                  </t-tooltip>
                   <t-tooltip :content="$t('knowledgeBase.viewModeList')" placement="top">
                     <button type="button" class="doc-view-toggle-btn" :class="{ active: viewMode === 'list' }"
-                      @click="viewMode = 'list'" :aria-pressed="viewMode === 'list'">
+                      @click="viewMode = 'list'" :aria-pressed="viewMode === 'list'"
+                      :aria-label="$t('knowledgeBase.viewModeList')" :title="$t('knowledgeBase.viewModeList')">
                       <t-icon name="view-list" size="16px" />
+                    </button>
+                  </t-tooltip>
+                  <t-tooltip :content="$t('knowledgeBase.viewModeGrid')" placement="top">
+                    <button type="button" class="doc-view-toggle-btn" :class="{ active: viewMode === 'grid' }"
+                      @click="viewMode = 'grid'" :aria-pressed="viewMode === 'grid'"
+                      :aria-label="$t('knowledgeBase.viewModeGrid')" :title="$t('knowledgeBase.viewModeGrid')">
+                      <t-icon name="view-module" size="16px" />
                     </button>
                   </t-tooltip>
                 </div>
                 <div v-if="canEdit" class="doc-filter-actions">
+                  <t-tooltip :content="$t('knowledgeFolders.create')" placement="bottom">
+                    <button type="button" class="content-bar-icon-btn" data-testid="create-folder-button"
+                      :aria-label="$t('knowledgeFolders.create')" :title="$t('knowledgeFolders.create')"
+                      @click="openCreateFolderDialog">
+                      <t-icon name="folder-add" size="18px" />
+                    </button>
+                  </t-tooltip>
                   <UploadInfoButton trigger-class="content-bar-icon-btn" />
                   <KbUploadSourceDropdown ref="uploadSourceRef" :accept-file-types="acceptFileTypes"
                     :supported-file-types="[...supportedFileTypes]" include-manual trigger-icon="file-add"
@@ -2749,13 +3090,14 @@ async function createNewSession(value: string): Promise<void> {
                 </div>
               </div>
               <div class="doc-scroll-container"
-                :class="{ 'is-empty': !cardList.length && !docListLoading, 'is-marquee-active': docMarqueeVisible }"
-                ref="knowledgeScroll" @scroll="handleScroll" @mousedown="onDocMarqueeMouseDown">
+                :class="{ 'is-empty': !cardList.length && !folderList.length && !docListLoading, 'is-marquee-active': docMarqueeVisible }"
+                ref="knowledgeScroll" @mousedown="onDocMarqueeMouseDown">
                 <div v-if="docMarqueeVisible" class="doc-marquee-box"
                   :class="{ 'is-add': docMarqueeMode === 'add', 'is-subtract': docMarqueeMode === 'subtract' }"
                   :style="docMarqueeBoxStyle" aria-hidden="true" />
                 <!-- 文档骨架屏 -->
-                <div v-if="docListLoading && cardList.length === 0" class="doc-card-list doc-card-list-animated">
+                <div v-if="docListLoading && cardList.length === 0 && folderList.length === 0"
+                  class="doc-card-list doc-card-list-animated">
                   <div v-for="n in 8" :key="'doc-skel-' + n" class="knowledge-card knowledge-card-skeleton">
                     <div class="card-content">
                       <div class="card-content-nav">
@@ -2770,8 +3112,79 @@ async function createNewSession(value: string): Promise<void> {
                     </div>
                   </div>
                 </div>
-                <template v-else-if="cardList.length && viewMode === 'grid'">
+                <template v-else-if="(cardList.length || folderList.length) && viewMode === 'grid'">
                   <div class="doc-card-list doc-card-list-animated">
+                    <div v-for="folder in folderList" :key="`folder-${folder.id}`"
+                      class="knowledge-card knowledge-folder-card" @click="openFolder(folder)">
+                      <div class="card-content">
+                        <div class="card-content-nav">
+                          <span class="knowledge-folder-card__icon">
+                            <t-icon name="folder" size="20px" />
+                          </span>
+                          <span class="card-content-title" :title="folder.path">{{ folder.name }}</span>
+                          <t-popup v-if="canEdit" trigger="click" placement="bottom-right" destroy-on-close
+                            :visible="folderCardMenuOpen === folder.id"
+                            :on-visible-change="(visible: boolean) => onFolderCardMenuVisibleChange(folder.id, visible)">
+                            <button type="button" class="folder-card-more" @click.stop>
+                              <t-icon name="more" size="16px" />
+                            </button>
+                            <template #content>
+                              <div class="row-menu">
+                                <div class="row-menu-item" @click.stop="handleFolderCardAction('edit', folder)">
+                                  <t-icon class="icon" name="edit" />
+                                  <span>{{ $t('knowledgeFolders.edit') }}</span>
+                                </div>
+                                <div class="row-menu-item" @click.stop="handleFolderCardAction('move', folder)">
+                                  <t-icon class="icon" name="move" />
+                                  <span>{{ $t('knowledgeFolders.move') }}</span>
+                                </div>
+                                <div class="row-menu-item danger" @click.stop="handleFolderCardAction('delete', folder)">
+                                  <t-icon class="icon" name="delete" />
+                                  <span>{{ $t('knowledgeFolders.delete') }}</span>
+                                </div>
+                              </div>
+                            </template>
+                          </t-popup>
+                        </div>
+                        <div v-if="folder.description" class="card-content-txt">{{ folder.description }}</div>
+                        <div v-else-if="folder.path !== folder.name" class="card-content-txt">{{ folder.path }}</div>
+                        <t-popup trigger="hover" placement="bottom">
+                          <div class="knowledge-folder-card__stats" @click.stop>
+                            <span>
+                              {{ $t('knowledgeFolders.documentCount', { count: folder.stats.subtree_document_count }) }}
+                            </span>
+                            <span>
+                              {{ $t('knowledgeFolders.childFolderCount', { count: folder.stats.direct_child_folder_count }) }}
+                            </span>
+                          </div>
+                          <template #content>
+                            <div class="folder-status-popover">
+                              <div class="folder-status-title">{{ $t('knowledgeFolders.taskOverview') }}</div>
+                              <div class="folder-status-item">
+                                <span>{{ $t('knowledgeFolders.parsePending') }}</span>
+                                <strong>{{ folder.stats.parse_pending_count }}</strong>
+                              </div>
+                              <div class="folder-status-item">
+                                <span>{{ $t('knowledgeFolders.parseRunning') }}</span>
+                                <strong>{{ folder.stats.parse_running_count }}</strong>
+                              </div>
+                              <div class="folder-status-item">
+                                <span>{{ $t('knowledgeFolders.derivativeTasks') }}</span>
+                                <strong>{{ folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }}</strong>
+                              </div>
+                              <div class="folder-status-item is-danger">
+                                <span>{{ $t('knowledgeFolders.abnormalDocuments') }}</span>
+                                <strong>{{ folder.stats.abnormal_document_count }}</strong>
+                              </div>
+                            </div>
+                          </template>
+                        </t-popup>
+                      </div>
+                      <div class="card-bottom">
+                        <span class="card-time">{{ formatDocTime(folder.updated_at) }}</span>
+                        <span class="card-type">{{ $t('knowledgeFolders.folder') }}</span>
+                      </div>
+                    </div>
                     <!-- 现有文档卡片 -->
                     <div class="knowledge-card"
                       :class="{ 'is-selected': selectedIds.has(item.id), 'batch-mode': batchMode }"
@@ -2829,6 +3242,11 @@ async function createNewSession(value: string): Promise<void> {
                                   @click.stop="handleMoveKnowledge(item)">
                                   <t-icon class="icon" name="swap" />
                                   <span>{{ t('knowledgeBase.moveDocument') }}</span>
+                                </div>
+                                <div v-if="canEdit" class="card-menu-item"
+                                  @click.stop="openDocumentFolderDialog(item)">
+                                  <t-icon class="icon" name="folder-open" />
+                                  <span>{{ t('knowledgeFolders.moveDocumentHere') }}</span>
                                 </div>
                                 <div v-if="canMutateKnowledge" class="card-menu-item"
                                   @click.stop="handleEnterBatchFromCard(item)">
@@ -3068,14 +3486,15 @@ async function createNewSession(value: string): Promise<void> {
                     </div>
                   </Teleport>
                 </template>
-                <template v-else-if="cardList.length && viewMode === 'list'">
-                  <DocumentListView :items="cardList" :selected-ids="selectedIds" :tag-list="tagList"
+                <template v-else-if="(cardList.length || folderList.length) && viewMode === 'list'">
+                  <DocumentListView :items="cardList" :folders="folderList" :selected-ids="selectedIds" :tag-list="tagList"
                     :can-edit="canEdit" :queue-status-by-id="documentQueueItems"
                     :queue-waiting-total="documentQueueWaitingTotal"
                     :workflow-feature-source="kbInfo"
                     @open="(item: any) => openKnowledgeItem(item)" @toggle-row="toggleSelectRow"
                     @toggle-all="toggleSelectAll" @action="(action: any, item: any) => handleListAction(action, item)"
-                    @tag-edit="(item: any) => openTagEditDialog(item)" />
+                    @tag-edit="(item: any) => openTagEditDialog(item)"
+                    @open-folder="openFolder" @folder-action="handleFolderAction" />
                 </template>
                 <template v-else-if="!docListLoading">
                   <div class="doc-empty-state">
@@ -3090,6 +3509,11 @@ async function createNewSession(value: string): Promise<void> {
                     <EmptyKnowledge v-else />
                   </div>
                 </template>
+              </div>
+              <div v-if="total > 0" class="document-pagination">
+                <t-pagination v-model="nodePage" v-model:page-size="nodePageSize" :total="total"
+                  size="small" show-jumper show-page-number show-page-size
+                  :page-size-options="[20, 50, 100]" @change="onNodePageChange" />
               </div>
               <div class="doc-batch-bar-anchor" v-show="batchMode || selectedIds.size > 0">
                 <DocumentBatchBar :count="selectedIds.size" :delete-loading="batchDeleting"
@@ -3135,6 +3559,62 @@ async function createNewSession(value: string): Promise<void> {
     :is-faq="isFAQ"
     @changed="onTagManageChanged"
   />
+
+  <t-dialog v-model:visible="folderDialogVisible"
+    :header="$t(folderDialogMode === 'create' ? 'knowledgeFolders.create' : folderDialogMode === 'move' ? 'knowledgeFolders.move' : 'knowledgeFolders.edit')"
+    :confirm-btn="{ content: $t('common.confirm'), loading: folderDialogSubmitting }"
+    :cancel-btn="$t('common.cancel')" width="520px" @confirm="submitFolderDialog">
+    <div class="folder-dialog-form">
+      <t-form label-align="top">
+        <t-form-item v-if="folderDialogMode !== 'move'" :label="$t('knowledgeFolders.name')" required>
+          <t-input v-model="folderForm.name" maxlength="120" clearable
+            data-testid="folder-name-input" @enter="submitFolderDialog" />
+        </t-form-item>
+        <t-form-item v-if="folderDialogMode !== 'move'" :label="$t('knowledgeFolders.description')">
+          <t-textarea v-model="folderForm.description" :maxlength="1000" :autosize="{ minRows: 3, maxRows: 6 }" />
+        </t-form-item>
+        <t-form-item :label="$t('knowledgeFolders.parent')">
+          <t-select v-model="folderForm.parent_id" :options="folderParentOptions"
+            filterable data-testid="folder-parent-select" />
+        </t-form-item>
+      </t-form>
+    </div>
+  </t-dialog>
+
+  <t-dialog v-model:visible="listMoveDialogVisible" :header="$t('knowledgeBase.moveToKnowledgeBase')"
+    :confirm-btn="{
+      content: $t('knowledgeBase.moveConfirm'),
+      loading: moveSubmitting,
+      disabled: !moveSelectedTargetId || moveTargetsLoading,
+    }"
+    :cancel-btn="$t('common.cancel')" width="520px" @confirm="handleMoveConfirm">
+    <t-form label-align="top">
+      <t-form-item :label="$t('knowledgeBase.moveSelectTarget')">
+        <t-select v-model="moveSelectedTargetId"
+          :options="moveTargetKbs.map((target) => ({ label: target.name, value: target.id }))"
+          :loading="moveTargetsLoading" filterable clearable @change="onListMoveTargetChange" />
+      </t-form-item>
+      <t-form-item :label="$t('knowledgeBase.moveMode')">
+        <t-radio-group v-model="moveMode">
+          <t-radio value="reuse_vectors">{{ $t('knowledgeBase.moveModeReuseVectors') }}</t-radio>
+          <t-radio value="reparse">{{ $t('knowledgeBase.moveModeReparse') }}</t-radio>
+        </t-radio-group>
+      </t-form-item>
+    </t-form>
+  </t-dialog>
+
+  <t-dialog v-model:visible="documentFolderDialogVisible" :header="$t('knowledgeFolders.moveDocumentHere')"
+    :confirm-btn="{ content: $t('common.confirm'), loading: documentFolderSubmitting }"
+    :cancel-btn="$t('common.cancel')" width="500px" @confirm="submitDocumentFolderMove">
+    <t-form label-align="top">
+      <t-form-item :label="$t('knowledgeFolders.parent')">
+        <t-select v-model="documentFolderTargetID" :options="[
+          { label: $t('knowledgeFolders.root'), value: '' },
+          ...folderOptions.map((folder) => ({ label: folder.path, value: folder.id })),
+        ]" filterable />
+      </t-form-item>
+    </t-form>
+  </t-dialog>
 </template>
 <style>
 /* 下拉菜单容器样式已统一至 @/assets/dropdown-menu.less */
@@ -4163,6 +4643,162 @@ async function createNewSession(value: string): Promise<void> {
   justify-content: center;
   padding: 60px 20px;
   min-height: 100%;
+}
+
+.folder-navigation {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  gap: 3px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.folder-breadcrumb-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+
+  &:hover {
+    color: var(--td-brand-color);
+    background: var(--td-bg-color-secondarycontainer);
+  }
+
+  &.active {
+    color: var(--td-text-color-primary);
+    font-weight: 600;
+  }
+}
+
+.folder-breadcrumb-separator {
+  flex-shrink: 0;
+  color: var(--td-text-color-placeholder);
+}
+
+.knowledge-folder-card {
+  border-color: color-mix(in srgb, var(--td-warning-color-5) 34%, var(--td-component-stroke));
+
+  .card-content {
+    cursor: pointer;
+  }
+}
+
+.knowledge-folder-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  color: var(--td-warning-color-6);
+  background: var(--td-warning-color-1);
+}
+
+.folder-card-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--td-text-color-secondary);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--td-bg-color-secondarycontainer);
+    color: var(--td-text-color-primary);
+  }
+}
+
+.knowledge-folder-card__stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  cursor: help;
+}
+
+.folder-status-popover {
+  width: 210px;
+  padding: 10px 12px;
+}
+
+.folder-status-title {
+  margin-bottom: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--td-text-color-primary);
+}
+
+.folder-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+
+  strong {
+    color: var(--td-text-color-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &.is-danger strong {
+    color: var(--td-error-color);
+  }
+}
+
+.row-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  padding: 4px 6px;
+}
+
+.row-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  color: var(--td-text-color-primary);
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--td-bg-color-container-hover);
+  }
+
+  &.danger {
+    color: var(--td-error-color);
+  }
+}
+
+.document-pagination {
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  padding: 12px 2px 2px;
+}
+
+.folder-dialog-form {
+  padding-top: 4px;
 }
 
 .doc-filter-empty {

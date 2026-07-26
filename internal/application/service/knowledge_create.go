@@ -27,6 +27,15 @@ import (
 	"github.com/hibiken/asynq"
 )
 
+func applyKnowledgeFolderPlacement(ctx context.Context, knowledge *types.Knowledge) {
+	if knowledge == nil {
+		return
+	}
+	if folderID, ok := ctx.Value(types.KnowledgeFolderIDContextKey).(string); ok {
+		knowledge.FolderID = strings.TrimSpace(folderID)
+	}
+}
+
 // CreateKnowledgeFromFile creates a knowledge entry from an uploaded file
 func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	kbID string, file *multipart.FileHeader, metadata map[string]string, enableMultimodel *bool, customFileName string, tagIDs []string, channel string,
@@ -224,6 +233,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		EmbeddingModelID: kb.EmbeddingModelID,
 		Metadata:         metadataJSON,
 	}
+	applyKnowledgeFolderPlacement(ctx, knowledge)
 	assignNewDocumentProcessingIdentity(knowledge)
 
 	if processOverrides != nil {
@@ -399,6 +409,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 		UpdatedAt:        time.Now(),
 		EmbeddingModelID: kb.EmbeddingModelID,
 	}
+	applyKnowledgeFolderPlacement(ctx, knowledge)
 	assignNewDocumentProcessingIdentity(knowledge)
 
 	// Save knowledge record
@@ -618,6 +629,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		UpdatedAt:        time.Now(),
 		EmbeddingModelID: kb.EmbeddingModelID,
 	}
+	applyKnowledgeFolderPlacement(ctx, knowledge)
 	assignNewDocumentProcessingIdentity(knowledge)
 	if knowledge.Title == "" {
 		knowledge.Title = displayName
@@ -773,6 +785,7 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 		FileName:         fileName,
 		FileType:         types.KnowledgeTypeManual,
 	}
+	applyKnowledgeFolderPlacement(ctx, knowledge)
 	knowledge.ProcessingGeneration = uuid.NewString()
 	if err := knowledge.SetManualMetadata(meta); err != nil {
 		logger.Errorf(ctx, "Failed to set manual metadata: %v", err)
@@ -877,6 +890,7 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 		UpdatedAt:        time.Now(),
 		EmbeddingModelID: kb.EmbeddingModelID,
 	}
+	applyKnowledgeFolderPlacement(ctx, knowledge)
 	assignNewDocumentProcessingIdentity(knowledge)
 	passageQuestionCount := 3
 	passageQuestionsEnabled := false

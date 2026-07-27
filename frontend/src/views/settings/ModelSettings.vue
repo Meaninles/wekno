@@ -31,11 +31,6 @@
       </div>
     </div>
 
-    <DerivativeControlPanel
-      v-if="authStore.isSystemAdmin"
-      @changed="loadModels"
-    />
-
     <t-tabs v-model="activeTypeFilter" class="model-type-tabs" data-guide="settings-models">
       <t-tab-panel value="all" :label="`${$t('common.all')}(${allLegacyModels.length})`" />
       <t-tab-panel value="chat" :label="`${$t('modelSettings.typeShort.chat')}(${countByType('chat')})`" />
@@ -44,7 +39,19 @@
       <t-tab-panel value="rerank" :label="`${$t('modelSettings.typeShort.rerank')}(${countByType('rerank')})`" />
       <t-tab-panel value="vllm" :label="`${$t('modelSettings.typeShort.vllm')}(${countByType('vllm')})`" />
       <t-tab-panel value="asr" :label="`${$t('modelSettings.typeShort.asr')}(${countByType('asr')})`" />
+      <t-tab-panel
+        v-if="authStore.isSystemAdmin"
+        value="derivative"
+        :label="`${$t('modelSettings.typeShort.derivative')}(${countByType('derivative')})`"
+      />
     </t-tabs>
+
+    <DerivativeControlPanel
+      v-if="authStore.isSystemAdmin && activeTypeFilter === 'derivative'"
+      :tpm="derivativeConfig?.tpm"
+      :saving="savingDerivativeTPM"
+      @save="saveDerivativeTPM"
+    />
 
     <t-loading :loading="loading" size="small" class="model-list-loading">
       <div v-if="!loading && filteredModels.length === 0 && !authStore.hasRole('admin')" class="empty-state">
@@ -72,12 +79,12 @@
                 <t-icon name="lock-on" />
               </span>
               <t-tag
-                v-if="model.workloadScope === 'derivative_only'"
+                v-if="model._modelType === 'derivative'"
                 size="small"
-                theme="warning"
+                :theme="derivativeTagTheme(model)"
                 variant="light"
               >
-                衍生专用
+                {{ derivativeTagLabel(model) }}
               </t-tag>
               <div v-if="canManageModel(model)" class="model-card__actions" @click.stop>
                 <t-dropdown :options="getModelOptions(model._modelType, model)" placement="bottom-right" attach="body"
@@ -88,6 +95,7 @@
                   </t-button>
                 </t-dropdown>
                 <t-popconfirm
+                  v-if="canDeleteModel(model)"
                   :content="$t('modelSettings.confirmDelete', { name: modelDisplayName(model) })"
                   :confirm-btn="{ content: $t('common.delete'), theme: 'danger' }"
                   :cancel-btn="{ content: $t('common.cancel') }"
@@ -115,7 +123,7 @@
                 <span class="model-card__sep">·</span>
                 <span>{{ $t('model.editor.dimensionLabel') }} {{ model.dimension }}</span>
               </template>
-              <template v-if="model._modelType === 'chat' && model.supportsVision">
+              <template v-if="(model._modelType === 'chat' || model._modelType === 'derivative') && model.supportsVision">
                 <span class="model-card__sep">·</span>
                 <span class="model-card__vision" :title="$t('model.editor.supportsVisionLabel')"
                   :aria-label="$t('model.editor.supportsVisionLabel')">
@@ -126,7 +134,7 @@
           </div>
         </div>
         <button
-          v-if="authStore.hasRole('admin')"
+          v-if="canAddModel"
           type="button"
           class="model-card model-card--add"
           data-guide="settings-add-model"
@@ -157,11 +165,16 @@ import ModelEditorDialog from '@/components/ModelEditorDialog.vue'
 import ModelDebugDrawer from '@/components/ModelDebugDrawer.vue'
 import DerivativeControlPanel from '@/custom/modules/derivative-control/DerivativeControlPanel.vue'
 import { listModels, createModel, updateModel as updateModelAPI, deleteModel as deleteModelAPI, type ModelConfig } from '@/api/model'
+import { useDerivativeModelManagement } from '@/custom/modules/derivative-control/useDerivativeModelManagement'
+import {
+  modelManagementType,
+  type ModelManagementType,
+} from '@/custom/modules/derivative-control/modelPolicy'
 import { useAuthStore } from '@/stores/auth'
 
 const { t, te } = useI18n()
 const authStore = useAuthStore()
-type ModelType = 'chat' | 'embedding' | 'rerank' | 'vllm' | 'asr'
+type ModelType = ModelManagementType
 type FilterType = 'all' | ModelType
 
 const showDialog = ref(false)
@@ -170,25 +183,33 @@ const currentModelType = ref<ModelType>('chat')
 const editingModel = ref<any>(null)
 const loading = ref(true)
 const activeTypeFilter = ref<FilterType>('all')
+const {
+  config: derivativeConfig,
+  savingTPM: savingDerivativeTPM,
+  load: loadDerivativeConfig,
+  isPublished: isDerivativePublished,
+  isDefault: isDerivativeDefault,
+  tagLabel: derivativeTagLabel,
+  tagTheme: derivativeTagTheme,
+  saveTPM: saveDerivativeTPM,
+  publish: publishDerivative,
+  setDefault: setDerivativeDefault,
+  test: testDerivative,
+  confirmUnpublish: confirmUnpublishDerivative,
+} = useDerivativeModelManagement()
 
 // 模型列表数据
 const allModels = ref<ModelConfig[]>([])
 const builtinAgentDefaultsManagedBy = 'builtin_agent_defaults'
 const userVisibleModels = computed(() =>
-  allModels.value.filter(model => model.managed_by !== builtinAgentDefaultsManagedBy)
+  allModels.value.filter(model =>
+    model.managed_by !== builtinAgentDefaultsManagedBy
+    && (model.workload_scope !== 'derivative_only' || authStore.isSystemAdmin),
+  )
 )
 const interactiveVisibleModels = computed(() =>
   userVisibleModels.value.filter(model => model.workload_scope !== 'derivative_only')
 )
-
-// 后端 type → 前端分组 type 的映射
-const backendTypeToModelType: Record<string, ModelType> = {
-  KnowledgeQA: 'chat',
-  Embedding: 'embedding',
-  Rerank: 'rerank',
-  VLLM: 'vllm',
-  ASR: 'asr'
-}
 
 // 将后端模型格式转换为旧的前端格式（附带 _modelType 便于渲染）
 // apiKey is always blank here: the server's main GET response does not
@@ -196,8 +217,10 @@ const backendTypeToModelType: Record<string, ModelType> = {
 // secret fields). Credential read/write happens inside the editor dialog
 // via the dedicated /credentials subresource.
 function convertToLegacyFormat(model: ModelConfig) {
+  const modelType = modelManagementType(model)
   return {
     id: model.id!,
+    tenantID: model.tenant_id,
     name: model.name,
     displayName: model.display_name || '',
     source: model.source,
@@ -218,7 +241,7 @@ function convertToLegacyFormat(model: ModelConfig) {
     generalAgentClaudeBaseUrl: model.parameters.extra_config?.general_agent_claude_base_url || '',
     asrResponseFormat: model.parameters.extra_config?.asr_response_format || 'verbose_json',
     extraConfig: model.parameters.extra_config || {},
-    _modelType: backendTypeToModelType[model.type] || 'chat' as ModelType,
+    _modelType: modelType,
     // Preserve the credential metadata map so the editor dialog can render
     // the "Configured" state without an extra round-trip.
     credentials: model.credentials,
@@ -243,6 +266,7 @@ const typeIcon = (type: ModelType): string => {
     rerank: 'filter-sort',
     vllm: 'image',
     asr: 'sound',
+    derivative: 'task',
   }
   return map[type]
 }
@@ -253,7 +277,8 @@ const typeLabel = (type: ModelType) => {
     embedding: t('modelSettings.typeShort.embedding'),
     rerank: t('modelSettings.typeShort.rerank'),
     vllm: t('modelSettings.typeShort.vllm'),
-    asr: t('modelSettings.typeShort.asr')
+    asr: t('modelSettings.typeShort.asr'),
+    derivative: t('modelSettings.typeShort.derivative'),
   }
   return map[type]
 }
@@ -308,7 +333,8 @@ const emptyHint = computed(() => {
     embedding: t('modelSettings.embedding.empty'),
     rerank: t('modelSettings.rerank.empty'),
     vllm: t('modelSettings.vllm.empty'),
-    asr: t('modelSettings.asr.empty')
+    asr: t('modelSettings.asr.empty'),
+    derivative: t('modelSettings.derivative.empty'),
   }
   return map[activeTypeFilter.value as ModelType]
 })
@@ -319,6 +345,9 @@ const loadModels = async () => {
   try {
     const models = await listModels()
     allModels.value = models
+    if (authStore.isSystemAdmin) {
+      await loadDerivativeConfig()
+    }
   } catch (error: any) {
     console.error('加载模型列表失败:', error)
     MessagePlugin.error(error.message)
@@ -334,6 +363,11 @@ const openAddDialog = () => {
   showDialog.value = true
 }
 
+const canAddModel = computed(() =>
+  authStore.hasRole('admin')
+  && (activeTypeFilter.value !== 'derivative' || authStore.isSystemAdmin),
+)
+
 // 可点击打开编辑抽屉：管理员 + 非内置模型
 const isModelCardClickable = (model: any) =>
   authStore.hasRole('admin') && !model.isBuiltin
@@ -342,6 +376,10 @@ const isModelCardClickable = (model: any) =>
 const canManageModel = (model: any) =>
   authStore.hasRole('admin') && !model.isBuiltin
   && (model.workloadScope !== 'derivative_only' || authStore.isSystemAdmin)
+
+const canDeleteModel = (model: any) =>
+  canManageModel(model)
+  && (model._modelType !== 'derivative' || !isDerivativePublished(model))
 
 const onModelCardClick = (event: Event, type: ModelType, model: any) => {
   if (!isModelCardClickable(model)) return
@@ -438,7 +476,7 @@ const handleModelSave = async (modelData: any) => {
       delete extraConfig.region
     }
     if (
-      saveType === 'chat'
+      (saveType === 'chat' || saveType === 'derivative')
       && modelData.source === 'remote'
       && modelData.thinkingControl
     ) {
@@ -467,6 +505,7 @@ const handleModelSave = async (modelData: any) => {
       type: getModelType(saveType),
       source: modelData.source,
       description: '',
+      workload_scope: saveType === 'derivative' ? 'derivative_only' : 'interactive',
       parameters: {
         base_url: modelData.baseUrl?.trim() || '',
         ...apiKeyFields,
@@ -483,7 +522,7 @@ const handleModelSave = async (modelData: any) => {
         } : {}),
         ...(saveType === 'vllm' ? {
           supports_vision: true
-        } : saveType === 'chat' ? {
+        } : (saveType === 'chat' || saveType === 'derivative') ? {
           supports_vision: modelData.supportsVision ?? false
         } : {})
       }
@@ -494,7 +533,9 @@ const handleModelSave = async (modelData: any) => {
       MessagePlugin.success(t('modelSettings.toasts.updated'))
     } else {
       await createModel(apiModelData)
-      MessagePlugin.success(t('modelSettings.toasts.added'))
+      MessagePlugin.success(
+        saveType === 'derivative' ? '衍生任务模型已添加，可下发后使用' : t('modelSettings.toasts.added'),
+      )
     }
 
     showDialog.value = false
@@ -549,6 +590,30 @@ const getModelOptions = (type: ModelType, model: any) => {
     value: `copy-${type}-${model.id}`
   })
 
+  if (type === 'derivative') {
+    if (isDerivativePublished(model)) {
+      options.push({
+        content: '测试',
+        value: `test-${model.id}`,
+      })
+      if (!isDerivativeDefault(model)) {
+        options.push({
+          content: '设为默认',
+          value: `default-${model.id}`,
+        })
+      }
+      options.push({
+        content: '撤回',
+        value: `unpublish-${model.id}`,
+      })
+    } else {
+      options.push({
+        content: '下发',
+        value: `publish-${model.id}`,
+      })
+    }
+  }
+
   return options
 }
 
@@ -560,6 +625,14 @@ const handleMenuAction = (data: { value: string }, type: ModelType, model: any) 
     editModel(type, model)
   } else if (value.indexOf('copy-') === 0) {
     copyModel(type, model.id)
+  } else if (value.indexOf('publish-') === 0) {
+    publishDerivative(model)
+  } else if (value.indexOf('unpublish-') === 0) {
+    confirmUnpublishDerivative(model)
+  } else if (value.indexOf('default-') === 0) {
+    setDerivativeDefault(model)
+  } else if (value.indexOf('test-') === 0) {
+    testDerivative(model)
   }
 }
 
@@ -594,6 +667,7 @@ const copyModel = async (_type: ModelType, modelId: string) => {
       type: source.type,
       source: source.source,
       description: source.description || '',
+      workload_scope: source.workload_scope || 'interactive',
       parameters: JSON.parse(JSON.stringify(source.parameters || {}))
     }
 
@@ -613,7 +687,8 @@ function getModelType(type: ModelType): 'KnowledgeQA' | 'Embedding' | 'Rerank' |
     embedding: 'Embedding' as const,
     rerank: 'Rerank' as const,
     vllm: 'VLLM' as const,
-    asr: 'ASR' as const
+    asr: 'ASR' as const,
+    derivative: 'KnowledgeQA' as const,
   }
   return typeMap[type]
 }
@@ -870,6 +945,11 @@ onMounted(() => {
 .model-card--asr .model-card__badge {
   background: rgba(17, 128, 83, 0.1);
   color: #118053;
+}
+
+.model-card--derivative .model-card__badge {
+  background: rgba(87, 78, 173, 0.1);
+  color: #574EAD;
 }
 
 .model-card__body {

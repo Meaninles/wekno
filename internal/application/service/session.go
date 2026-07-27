@@ -510,7 +510,7 @@ func (s *sessionService) GenerateTitle(ctx context.Context,
 			if model == nil {
 				continue
 			}
-			if model.Type == types.ModelTypeKnowledgeQA {
+			if model.IsInteractiveChatModel() {
 				modelID = model.ID
 				logger.Infof(ctx, "Using first available KnowledgeQA model for title: %s", modelID)
 				break

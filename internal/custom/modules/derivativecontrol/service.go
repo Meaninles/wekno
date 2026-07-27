@@ -221,11 +221,6 @@ func (s *Service) Publish(
 		if reason := s.candidateReason(ctx, tx, model, false); reason != "" {
 			return apperrors.NewBadRequestError(reason)
 		}
-		if err := tx.WithContext(ctx).Model(&types.Model{}).
-			Where("id = ? AND tenant_id = ?", modelID, modelTenantID).
-			Update("workload_scope", types.ModelWorkloadDerivativeOnly).Error; err != nil {
-			return fmt.Errorf("reserve derivative model: %w", err)
-		}
 		assignment := &Assignment{
 			ModelID: modelID, ModelTenantID: modelTenantID,
 			PublishedBy: actor, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -508,10 +503,19 @@ func (s *Service) GuardModelMutation(
 		return nil
 	}
 
-	if existing != nil &&
-		existing.WorkloadScope.Normalize() == types.ModelWorkloadDerivativeOnly {
+	if target.WorkloadScope.Normalize() == types.ModelWorkloadDerivativeOnly {
 		if !types.IsSystemAdminFromContext(ctx) {
 			return apperrors.NewForbiddenError("衍生任务专用模型只能由系统管理员维护")
+		}
+		if operation == appservice.ModelMutationCreate {
+			if reason := s.candidateReason(ctx, s.db, target, false); reason != "" {
+				return apperrors.NewBadRequestError(reason)
+			}
+			return nil
+		}
+		if existing == nil ||
+			existing.WorkloadScope.Normalize() != types.ModelWorkloadDerivativeOnly {
+			return apperrors.NewBadRequestError("模型类型不能在对话模型与衍生任务模型之间切换")
 		}
 		if operation == appservice.ModelMutationDelete {
 			var count int64
@@ -655,7 +659,11 @@ func (s *Service) listPublished(
 func (s *Service) listCandidates(ctx context.Context, defaultModelID string) ([]Candidate, error) {
 	var models []types.Model
 	query := s.db.WithContext(ctx).
-		Where("type = ?", types.ModelTypeKnowledgeQA)
+		Where(
+			"type = ? AND workload_scope = ?",
+			types.ModelTypeKnowledgeQA,
+			types.ModelWorkloadDerivativeOnly,
+		)
 	// Model management itself is tenant-scoped. A system administrator can
 	// switch tenants when publishing another tenant's endpoint, while the
 	// resulting assignment remains platform-global. Keeping candidates scoped
@@ -697,7 +705,7 @@ func (s *Service) candidateReason(
 	ctx context.Context,
 	db *gorm.DB,
 	model *types.Model,
-	alreadyAssigned bool,
+	_ bool,
 ) string {
 	if model == nil {
 		return "模型不存在"
@@ -706,44 +714,20 @@ func (s *Service) candidateReason(
 		return "内置共享模型不能成为物理隔离的衍生模型"
 	}
 	if model.Type != types.ModelTypeKnowledgeQA {
-		return "只支持对话模型"
+		return "衍生任务模型必须使用对话兼容接口"
 	}
-	if model.Status != types.ModelStatusActive {
+	if model.Status != "" && model.Status != types.ModelStatusActive {
 		return "模型当前不是 active 状态"
 	}
 	if model.Source != types.ModelSourceRemote {
 		return "本地模型共用进程，无法证明物理隔离；请配置独立远程端点"
 	}
-	if alreadyAssigned &&
-		model.WorkloadScope.Normalize() != types.ModelWorkloadDerivativeOnly {
-		return "已下发模型未处于 derivative_only 专用状态"
+	if model.WorkloadScope.Normalize() != types.ModelWorkloadDerivativeOnly {
+		return "只能下发在“衍生任务”分类中创建的模型"
 	}
 	origin, err := modelOrigin(model)
 	if err != nil || origin == "" {
 		return "模型必须配置可识别的独立 Base URL"
-	}
-	if !alreadyAssigned &&
-		model.WorkloadScope.Normalize() == types.ModelWorkloadInteractive {
-		if s.kbRepo == nil {
-			return "无法验证知识库引用"
-		}
-		count, countErr := s.kbRepo.CountByModelID(ctx, model.TenantID, model.ID)
-		if countErr != nil {
-			return "无法验证知识库引用"
-		}
-		if count > 0 {
-			return fmt.Sprintf("模型仍被 %d 个知识库引用", count)
-		}
-		if s.agentRepo == nil {
-			return "无法验证 Agent 引用"
-		}
-		count, countErr = s.agentRepo.CountByModelID(ctx, model.TenantID, model.ID)
-		if countErr != nil {
-			return "无法验证 Agent 引用"
-		}
-		if count > 0 {
-			return fmt.Sprintf("模型仍被 %d 个 Agent 引用", count)
-		}
 	}
 	var interactive []types.Model
 	query := db.WithContext(ctx).

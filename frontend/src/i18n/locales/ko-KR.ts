@@ -2714,6 +2714,7 @@ export default {
       sourceRemote: "API",
       description: {
         chat: "대화용 대규모 언어 모델 설정",
+        derivative: "Wiki, 그래프, 요약 등 백그라운드 작업 전용 모델 설정",
         embedding: "텍스트 벡터화용 임베딩 모델 설정",
         rerank: "결과 재정렬용 모델 설정",
         vllm: "시각 이해 및 멀티모달용 비전 언어 모델 설정",
@@ -4378,6 +4379,7 @@ export default {
       rerank: "ReRank",
       vllm: "비전",
       asr: "음성",
+      derivative: "파생 작업",
     },
     actions: {
       addModel: "모델 추가",
@@ -4414,6 +4416,11 @@ export default {
       title: "ASR 음성 모델",
       desc: "음성 인식 및 오디오 전사를 위한 음성 인식 모델 설정 (예: OpenAI Whisper)",
       empty: "ASR 음성 모델 없음",
+    },
+    derivative: {
+      title: "파생 작업 모델",
+      desc: "백그라운드 파생 작업 전용 모델 설정",
+      empty: "파생 작업 모델 없음",
     },
     toasts: {
       nameRequired: "모델 이름은 비워둘 수 없습니다",

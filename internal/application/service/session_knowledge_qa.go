@@ -365,7 +365,7 @@ func (s *sessionService) selectChatModelID(
 		return "", fmt.Errorf("failed to list models: %w", err)
 	}
 	for _, model := range models {
-		if model != nil && model.Type == types.ModelTypeKnowledgeQA {
+		if model.IsInteractiveChatModel() {
 			logger.Infof(ctx, "Using first available KnowledgeQA model: %s", model.ID)
 			return model.ID, nil
 		}

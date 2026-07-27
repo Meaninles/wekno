@@ -160,7 +160,7 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 			if model.Type == types.ModelTypeEmbedding {
 				embeddingModelID = model.ID
 			}
-			if model.Type == types.ModelTypeKnowledgeQA {
+			if model.IsInteractiveChatModel() {
 				llmModelID = model.ID
 			}
 		}
@@ -239,7 +239,7 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 				if model == nil {
 					continue
 				}
-				if model.Type == types.ModelTypeKnowledgeQA {
+				if model.IsInteractiveChatModel() {
 					chatModelID = model.ID
 					break
 				}

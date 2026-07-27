@@ -44,12 +44,13 @@ func NewModelHandler(service interfaces.ModelService) *ModelHandler {
 // CreateModelRequest defines the structure for model creation requests
 // Contains all fields required to create a new model in the system
 type CreateModelRequest struct {
-	Name        string                `json:"name"        binding:"required"`
-	DisplayName string                `json:"display_name"`
-	Type        types.ModelType       `json:"type"        binding:"required"`
-	Source      types.ModelSource     `json:"source"      binding:"required"`
-	Description string                `json:"description"`
-	Parameters  types.ModelParameters `json:"parameters"  binding:"required"`
+	Name          string                   `json:"name"           binding:"required"`
+	DisplayName   string                   `json:"display_name"`
+	Type          types.ModelType          `json:"type"           binding:"required"`
+	Source        types.ModelSource        `json:"source"         binding:"required"`
+	Description   string                   `json:"description"`
+	Parameters    types.ModelParameters    `json:"parameters"     binding:"required"`
+	WorkloadScope types.ModelWorkloadScope `json:"workload_scope"`
 }
 
 // CreateModel godoc
@@ -95,13 +96,14 @@ func (h *ModelHandler) CreateModel(c *gin.Context) {
 	}
 
 	model := &types.Model{
-		TenantID:    tenantID,
-		Name:        secutils.SanitizeForLog(req.Name),
-		DisplayName: secutils.SanitizeForLog(req.DisplayName),
-		Type:        types.ModelType(secutils.SanitizeForLog(string(req.Type))),
-		Source:      req.Source,
-		Description: secutils.SanitizeForLog(req.Description),
-		Parameters:  req.Parameters,
+		TenantID:      tenantID,
+		Name:          secutils.SanitizeForLog(req.Name),
+		DisplayName:   secutils.SanitizeForLog(req.DisplayName),
+		Type:          types.ModelType(secutils.SanitizeForLog(string(req.Type))),
+		Source:        req.Source,
+		Description:   secutils.SanitizeForLog(req.Description),
+		Parameters:    req.Parameters,
+		WorkloadScope: req.WorkloadScope,
 	}
 
 	if err := h.service.CreateModel(ctx, model); err != nil {

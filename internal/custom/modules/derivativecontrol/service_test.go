@@ -14,6 +14,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	appservice "github.com/Tencent/WeKnora/internal/application/service"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -171,6 +172,12 @@ func remoteChatModel(id string, tenantID uint64, baseURL string) *types.Model {
 	}
 }
 
+func remoteDerivativeModel(id string, tenantID uint64, baseURL string) *types.Model {
+	model := remoteChatModel(id, tenantID, baseURL)
+	model.WorkloadScope = types.ModelWorkloadDerivativeOnly
+	return model
+}
+
 func appErrorStatus(err error) int {
 	appError, ok := apperrors.IsAppError(err)
 	if !ok {
@@ -181,10 +188,12 @@ func appErrorStatus(err error) int {
 
 func TestDerivativeControlAdminCandidatesFollowActiveTenant(t *testing.T) {
 	db, service, _, _, _ := newDerivativeServiceTest(t)
-	current := remoteChatModel("current-tenant-model", 10001, "http://current-derivative:4000/v1")
-	other := remoteChatModel("other-tenant-model", 10002, "http://other-derivative:4000/v1")
+	current := remoteDerivativeModel("current-tenant-model", 10001, "http://current-derivative:4000/v1")
+	other := remoteDerivativeModel("other-tenant-model", 10002, "http://other-derivative:4000/v1")
+	interactive := remoteChatModel("interactive-model", 10001, "http://interactive:4000/v1")
 	require.NoError(t, db.Create(current).Error)
 	require.NoError(t, db.Create(other).Error)
+	require.NoError(t, db.Create(interactive).Error)
 
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(10001))
 	config, err := service.AdminConfig(ctx)
@@ -207,8 +216,8 @@ func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) 
 	require.Empty(t, status.Models)
 
 	interactive := remoteChatModel("chat-model", 10001, "http://interactive-api:4000/v1")
-	conflicting := remoteChatModel("conflicting-model", 10002, "http://interactive-api:4000/openai")
-	dedicated := remoteChatModel("derivative-model", 10002, "http://derivative-api:4000/v1")
+	conflicting := remoteDerivativeModel("conflicting-model", 10002, "http://interactive-api:4000/openai")
+	dedicated := remoteDerivativeModel("derivative-model", 10002, "http://derivative-api:4000/v1")
 	require.NoError(t, db.Create(interactive).Error)
 	require.NoError(t, db.Create(conflicting).Error)
 	require.NoError(t, db.Create(dedicated).Error)
@@ -217,6 +226,10 @@ func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) 
 	require.Error(t, err)
 	require.Equal(t, 400, appErrorStatus(err))
 	require.Contains(t, err.Error(), "物理隔离")
+
+	err = service.Publish(ctx, interactive.ID, interactive.TenantID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "“衍生任务”分类")
 
 	require.NoError(t, service.Publish(ctx, dedicated.ID, dedicated.TenantID))
 	require.NoError(t, db.First(dedicated, "id = ?", dedicated.ID).Error)
@@ -288,23 +301,19 @@ func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) 
 	settings.mu.RUnlock()
 }
 
-func TestDerivativeControlGuardsReferencesAndRevocation(t *testing.T) {
-	db, service, _, kbReferences, agentReferences := newDerivativeServiceTest(t)
+func TestDerivativeControlRequiresDedicatedScopeAndGuardsRevocation(t *testing.T) {
+	db, service, _, _, _ := newDerivativeServiceTest(t)
 	ctx := context.WithValue(context.Background(), types.UserIDContextKey, "system-admin")
 	ctx = context.WithValue(ctx, types.SystemAdminContextKey, true)
-	model := remoteChatModel("derivative-model", 10001, "https://derivative.example/v1")
+	interactive := remoteChatModel("interactive-model", 10001, "https://interactive.example/v1")
+	model := remoteDerivativeModel("derivative-model", 10001, "https://derivative.example/v1")
+	require.NoError(t, db.Create(interactive).Error)
 	require.NoError(t, db.Create(model).Error)
 
-	kbReferences.count = 1
-	err := service.Publish(ctx, model.ID, model.TenantID)
+	err := service.Publish(ctx, interactive.ID, interactive.TenantID)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "知识库引用")
-	kbReferences.count = 0
-	agentReferences.count = 1
-	err = service.Publish(ctx, model.ID, model.TenantID)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Agent 引用")
-	agentReferences.count = 0
+	require.Contains(t, err.Error(), "“衍生任务”分类")
+
 	require.NoError(t, service.Publish(ctx, model.ID, model.TenantID))
 
 	// An idempotent publish must still revalidate live eligibility.
@@ -351,7 +360,7 @@ func TestDerivativeControlGuardsReferencesAndRevocation(t *testing.T) {
 }
 
 func TestDerivativeControlMutationPolicyFailsClosed(t *testing.T) {
-	_, service, _, _, _ := newDerivativeServiceTest(t)
+	db, service, _, _, _ := newDerivativeServiceTest(t)
 	dedicated := remoteChatModel("dedicated", 10001, "https://derive.example/v1")
 	dedicated.WorkloadScope = types.ModelWorkloadDerivativeOnly
 
@@ -360,4 +369,18 @@ func TestDerivativeControlMutationPolicyFailsClosed(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Equal(t, 403, appErrorStatus(err))
+
+	adminCtx := context.WithValue(context.Background(), types.SystemAdminContextKey, true)
+	err = service.GuardModelMutation(
+		adminCtx, appservice.ModelMutationCreate, nil, dedicated,
+	)
+	require.NoError(t, err)
+
+	interactive := remoteChatModel("chat", 10001, "https://derive.example/other-path")
+	require.NoError(t, db.Create(interactive).Error)
+	err = service.GuardModelMutation(
+		adminCtx, appservice.ModelMutationCreate, nil, dedicated,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "物理隔离")
 }

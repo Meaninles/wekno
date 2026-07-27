@@ -85,7 +85,7 @@ func (s *MemoryService) getChatModel(ctx context.Context) (chat.Chat, error) {
 
 	var modelID string
 	for _, model := range models {
-		if model.Type == types.ModelTypeKnowledgeQA {
+		if model.IsInteractiveChatModel() {
 			modelID = model.ID
 			break
 		}

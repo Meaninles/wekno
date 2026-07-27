@@ -174,6 +174,12 @@ spec:
               value: {{ .Values.app.env.STORAGE_TYPE | quote }}
             - name: LOCAL_STORAGE_BASE_DIR
               value: {{ .Values.app.env.LOCAL_STORAGE_BASE_DIR | quote }}
+            - name: CUSTOM_SKILLHUB_PROFESSIONAL_STORAGE_PROVIDER
+              value: {{ .Values.app.professionalSkillStorage.provider | quote }}
+            - name: CUSTOM_SKILLHUB_PROFESSIONAL_BUCKET
+              value: {{ .Values.app.professionalSkillStorage.bucket | quote }}
+            - name: CUSTOM_SKILLHUB_PROFESSIONAL_PATH_PREFIX
+              value: {{ .Values.app.professionalSkillStorage.pathPrefix | quote }}
             # Document reader
             - name: DOCREADER_ADDR
               value: {{ .Values.app.connections.docreader.address | quote }}

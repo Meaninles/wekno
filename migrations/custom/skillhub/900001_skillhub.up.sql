@@ -26,8 +26,13 @@ CREATE TABLE IF NOT EXISTS custom_professional_skills (
   tenant_id bigint NOT NULL,
   creator_id varchar(36) NOT NULL,
   name varchar(64) NOT NULL,
+  display_name varchar(255) NOT NULL DEFAULT '',
   description text NOT NULL,
   archive_file_name varchar(255),
+  object_path text NOT NULL DEFAULT '',
+  object_size bigint NOT NULL DEFAULT 0,
+  object_sha256 varchar(64) NOT NULL DEFAULT '',
+  file_count integer NOT NULL DEFAULT 0,
   created_at timestamp with time zone,
   updated_at timestamp with time zone,
   deleted_at timestamp with time zone

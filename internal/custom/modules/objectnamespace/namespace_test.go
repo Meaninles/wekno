@@ -14,6 +14,7 @@ func TestNormalizeAndValidate(t *testing.T) {
 		PurposeKnowledgeObjects,
 		PurposeAgentArtifacts,
 		PurposeOriginalInputs,
+		PurposeProfessionalSkills,
 	} {
 		prefix, err := NormalizeAndValidate(
 			"weknora/__weknora_"+string(purpose)+"_v1__/deployment/dev-local/namespace/"+testNamespaceID+"/",

@@ -253,6 +253,14 @@ app:
       migrationAllowMissing: "false"
       migrationAllowInvalid: "false"
 
+  # Uploaded professional skills are cluster state, not pod-local workspace
+  # data. Configure a private MinIO/OBS namespace whenever this feature is
+  # enabled; horizontal app scaling requires it.
+  professionalSkillStorage:
+    provider: ""
+    bucket: ""
+    pathPrefix: weknora/__weknora_private_professional_skills_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/
+
   # -- Additional environment variables
   extraEnv: []
   # - name: OLLAMA_BASE_URL

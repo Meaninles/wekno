@@ -56,6 +56,8 @@ type ProfessionalSkillDownload struct {
 	Path     string
 	Filename string
 	Cleanup  func()
+	Reader   io.ReadCloser
+	Size     int64
 }
 
 type professionalSkillIdentity struct {
@@ -80,7 +82,7 @@ type professionalSkillMarker struct {
 	DisplayName     string `json:"display_name,omitempty"`
 }
 
-func (s *Service) ListProfessionalForManage(ctx context.Context) ([]ProfessionalSkillListItem, error) {
+func (s *Service) legacyListProfessionalForManage(ctx context.Context) ([]ProfessionalSkillListItem, error) {
 	metadata, err := discoverProfessionalMetadata()
 	if err != nil {
 		return nil, err
@@ -152,7 +154,7 @@ func (s *Service) ListProfessionalForManage(ctx context.Context) ([]Professional
 	return out, nil
 }
 
-func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalSkillImportRequest) (*ProfessionalSkillListItem, error) {
+func (s *Service) legacyImportProfessionalSkill(ctx context.Context, req ProfessionalSkillImportRequest) (*ProfessionalSkillListItem, error) {
 	if !types.TenantRoleFromContext(ctx).HasPermission(types.TenantRoleContributor) {
 		return nil, fmt.Errorf("permission denied")
 	}
@@ -266,7 +268,7 @@ func (s *Service) ImportProfessionalSkill(ctx context.Context, req ProfessionalS
 	return &item, nil
 }
 
-func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req ProfessionalSkillUpdateRequest) (*ProfessionalSkillListItem, error) {
+func (s *Service) legacyUpdateProfessionalSkill(ctx context.Context, id string, req ProfessionalSkillUpdateRequest) (*ProfessionalSkillListItem, error) {
 	record, err := s.GetOwnedProfessionalForManage(ctx, id)
 	if err != nil {
 		return nil, err
@@ -409,7 +411,7 @@ func (s *Service) UpdateProfessionalSkill(ctx context.Context, id string, req Pr
 	return &item, nil
 }
 
-func (s *Service) DeleteProfessionalSkill(ctx context.Context, id string) error {
+func (s *Service) legacyDeleteProfessionalSkill(ctx context.Context, id string) error {
 	record, err := s.GetOwnedProfessionalForManage(ctx, id)
 	if err != nil {
 		return err
@@ -435,7 +437,7 @@ func (s *Service) DeleteProfessionalSkill(ctx context.Context, id string) error 
 	return os.RemoveAll(target)
 }
 
-func (s *Service) DownloadProfessionalSkill(ctx context.Context, id string) (*ProfessionalSkillDownload, error) {
+func (s *Service) legacyDownloadProfessionalSkill(ctx context.Context, id string) (*ProfessionalSkillDownload, error) {
 	record, err := s.GetOwnedProfessionalForManage(ctx, id)
 	if err != nil {
 		return nil, err
@@ -783,7 +785,10 @@ func (s *Service) professionalAccessByName(ctx context.Context) (map[string]prof
 	userID, _ := types.UserIDFromContext(ctx)
 	noAccessContext := tenantID == 0 && userID == ""
 	var records []ProfessionalSkill
-	if err := s.db.WithContext(ctx).Find(&records).Error; err != nil {
+	if err := s.db.WithContext(ctx).
+		Where("object_path <> ''").
+		Where("name NOT IN ?", ReservedProfessionalSkillNames()).
+		Find(&records).Error; err != nil {
 		return nil, err
 	}
 	byID := make(map[string]*ProfessionalSkill, len(records))
@@ -795,12 +800,7 @@ func (s *Service) professionalAccessByName(ctx context.Context) (map[string]prof
 			SourceTenantID: record.TenantID,
 			Permission:     types.OrgRoleViewer,
 		}
-		if IsReservedProfessionalSkillName(record.Name) {
-			entry.Accessible = true
-			entry.IsMine = true
-			entry.CanManage = false
-			entry.Permission = types.OrgRoleViewer
-		} else if noAccessContext {
+		if noAccessContext {
 			entry.Accessible = true
 		} else if tenantID != 0 && record.TenantID == tenantID {
 			canManage := record.CreatorID == userID || types.TenantRoleFromContext(ctx).HasPermission(types.TenantRoleAdmin)
@@ -819,76 +819,94 @@ func (s *Service) professionalAccessByName(ctx context.Context) (map[string]prof
 		ids = append(ids, record.ID)
 	}
 	if tenantID != 0 {
-		var orgShares []OrganizationShare
+		var organizationShareCount int64
 		if err := s.db.WithContext(ctx).
-			Preload("Organization").
-			Preload("SharedByUser").
-			Joins("JOIN organization_tenant_members otm ON otm.organization_id = custom_skill_org_shares.organization_id AND otm.tenant_id = ?", tenantID).
-			Where("custom_skill_org_shares.skill_id IN ?", ids).
-			Order("custom_skill_org_shares.created_at DESC").
-			Find(&orgShares).Error; err != nil {
+			Model(&OrganizationShare{}).
+			Where("skill_id IN ?", ids).
+			Count(&organizationShareCount).Error; err != nil {
 			return nil, err
 		}
-		for _, share := range orgShares {
-			record := byID[share.SkillID]
-			if record == nil {
-				continue
+		if organizationShareCount > 0 {
+			var orgShares []OrganizationShare
+			if err := s.db.WithContext(ctx).
+				Preload("Organization").
+				Preload("SharedByUser").
+				Joins("JOIN organization_tenant_members otm ON otm.organization_id = custom_skill_org_shares.organization_id AND otm.tenant_id = ?", tenantID).
+				Where("custom_skill_org_shares.skill_id IN ?", ids).
+				Order("custom_skill_org_shares.created_at DESC").
+				Find(&orgShares).Error; err != nil {
+				return nil, err
 			}
-			entry := out[record.Name]
-			if entry.IsMine {
-				continue
+			for _, share := range orgShares {
+				record := byID[share.SkillID]
+				if record == nil {
+					continue
+				}
+				entry := out[record.Name]
+				if entry.IsMine {
+					continue
+				}
+				entry.Accessible = true
+				entry.ShareID = share.ID
+				entry.ShareType = shareTypeOrganization
+				entry.OrganizationID = share.OrganizationID
+				entry.SharedByUserID = share.SharedByUserID
+				entry.SourceTenantID = share.SourceTenantID
+				entry.Permission = share.Permission
+				entry.SharedAt = &share.CreatedAt
+				if share.Organization != nil {
+					entry.OrganizationName = share.Organization.Name
+				}
+				if share.SharedByUser != nil {
+					entry.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
+				}
+				out[record.Name] = entry
 			}
-			entry.Accessible = true
-			entry.ShareID = share.ID
-			entry.ShareType = shareTypeOrganization
-			entry.OrganizationID = share.OrganizationID
-			entry.SharedByUserID = share.SharedByUserID
-			entry.SourceTenantID = share.SourceTenantID
-			entry.Permission = share.Permission
-			entry.SharedAt = &share.CreatedAt
-			if share.Organization != nil {
-				entry.OrganizationName = share.Organization.Name
-			}
-			if share.SharedByUser != nil {
-				entry.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
-			}
-			out[record.Name] = entry
 		}
 	}
 	if userID != "" {
-		var userShares []UserShare
+		var userShareCount int64
 		if err := s.db.WithContext(ctx).
-			Preload("TargetUser").
-			Preload("SharedByUser").
+			Model(&UserShare{}).
 			Where("skill_id IN ? AND target_user_id = ?", ids, userID).
-			Order("created_at DESC").
-			Find(&userShares).Error; err != nil {
+			Count(&userShareCount).Error; err != nil {
 			return nil, err
 		}
-		for _, share := range userShares {
-			record := byID[share.SkillID]
-			if record == nil {
-				continue
+		if userShareCount > 0 {
+			var userShares []UserShare
+			if err := s.db.WithContext(ctx).
+				Preload("TargetUser").
+				Preload("SharedByUser").
+				Where("skill_id IN ? AND target_user_id = ?", ids, userID).
+				Order("created_at DESC").
+				Find(&userShares).Error; err != nil {
+				return nil, err
 			}
-			entry := out[record.Name]
-			if entry.IsMine {
-				continue
+			for _, share := range userShares {
+				record := byID[share.SkillID]
+				if record == nil {
+					continue
+				}
+				entry := out[record.Name]
+				if entry.IsMine {
+					continue
+				}
+				entry.Accessible = true
+				entry.ShareID = share.ID
+				entry.ShareType = shareTypeUser
+				entry.TargetUserID = share.TargetUserID
+				entry.SharedByUserID = share.SharedByUserID
+				entry.SourceTenantID = share.SourceTenantID
+				entry.Permission = share.Permission
+				entry.SharedAt = &share.CreatedAt
+				if share.TargetUser != nil {
+					entry.TargetUsername = share.TargetUser.DisplayNameOrUsername()
+				}
+				if share.SharedByUser != nil {
+					entry.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
+				}
+				out[record.Name] = entry
 			}
-			entry.Accessible = true
-			entry.ShareID = share.ID
-			entry.ShareType = shareTypeUser
-			entry.TargetUserID = share.TargetUserID
-			entry.SharedByUserID = share.SharedByUserID
-			entry.SourceTenantID = share.SourceTenantID
-			entry.Permission = share.Permission
-			entry.SharedAt = &share.CreatedAt
-			if share.TargetUser != nil {
-				entry.TargetUsername = share.TargetUser.DisplayNameOrUsername()
-			}
-			if share.SharedByUser != nil {
-				entry.SharedByUsername = share.SharedByUser.DisplayNameOrUsername()
-			}
-			out[record.Name] = entry
 		}
 	}
 	return out, nil
@@ -915,16 +933,15 @@ func (s *Service) professionalItemFromAccess(entry professionalAccessEntry, file
 
 func (s *Service) professionalItemFromRecord(record ProfessionalSkill, isMine bool, shareID, shareType string, fileCount int, updatedAt *time.Time) ProfessionalSkillListItem {
 	systemReserved := IsReservedProfessionalSkillName(record.Name)
-	identity := professionalSkillIdentityForDir(filepath.Join(getProfessionalSkillsDir(), record.Name), record.Name)
-	description := record.Description
-	if description == "" {
-		description = identity.Description
+	displayName := strings.TrimSpace(record.DisplayName)
+	if displayName == "" {
+		displayName = record.Name
 	}
 	return ProfessionalSkillListItem{
 		ID:              record.ID,
 		Name:            record.Name,
-		DisplayName:     identity.DisplayName,
-		Description:     description,
+		DisplayName:     displayName,
+		Description:     record.Description,
 		Kind:            "professional",
 		FileCount:       fileCount,
 		Managed:         true,
@@ -942,7 +959,7 @@ func (s *Service) professionalItemFromRecord(record ProfessionalSkill, isMine bo
 }
 
 func (s *Service) professionalItemFromOrgShare(record ProfessionalSkill, share OrganizationShare, isMine bool) ProfessionalSkillListItem {
-	item := s.professionalItemFromRecord(record, isMine, share.ID, shareTypeOrganization, 0, professionalSkillUpdatedAt(filepath.Join(getProfessionalSkillsDir(), record.Name)))
+	item := s.professionalItemFromRecord(record, isMine, share.ID, shareTypeOrganization, record.FileCount, timePointer(record.UpdatedAt))
 	item.OrganizationID = share.OrganizationID
 	item.SharedByUserID = share.SharedByUserID
 	item.SourceTenantID = share.SourceTenantID
@@ -958,7 +975,7 @@ func (s *Service) professionalItemFromOrgShare(record ProfessionalSkill, share O
 }
 
 func (s *Service) professionalItemFromUserShare(record ProfessionalSkill, share UserShare, isMine bool) ProfessionalSkillListItem {
-	item := s.professionalItemFromRecord(record, isMine, share.ID, shareTypeUser, 0, professionalSkillUpdatedAt(filepath.Join(getProfessionalSkillsDir(), record.Name)))
+	item := s.professionalItemFromRecord(record, isMine, share.ID, shareTypeUser, record.FileCount, timePointer(record.UpdatedAt))
 	item.TargetUserID = share.TargetUserID
 	item.SharedByUserID = share.SharedByUserID
 	item.SourceTenantID = share.SourceTenantID

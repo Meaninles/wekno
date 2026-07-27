@@ -38,8 +38,13 @@ type ProfessionalSkill struct {
 	TenantID        uint64         `json:"tenant_id" gorm:"not null;index"`
 	CreatorID       string         `json:"creator_id" gorm:"type:varchar(36);not null;index"`
 	Name            string         `json:"name" gorm:"type:varchar(64);not null;uniqueIndex:idx_custom_professional_skill_name,where:deleted_at IS NULL"`
+	DisplayName     string         `json:"display_name" gorm:"type:varchar(255);not null;default:''"`
 	Description     string         `json:"description" gorm:"type:text;not null"`
 	ArchiveFileName string         `json:"archive_file_name" gorm:"type:varchar(255)"`
+	ObjectPath      string         `json:"-" gorm:"type:text;not null;default:''"`
+	ObjectSize      int64          `json:"-" gorm:"not null;default:0"`
+	ObjectSHA256    string         `json:"-" gorm:"type:varchar(64);not null;default:''"`
+	FileCount       int            `json:"file_count" gorm:"not null;default:0"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `json:"-" gorm:"index"`

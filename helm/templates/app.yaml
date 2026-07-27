@@ -304,6 +304,10 @@ spec:
                 resources:
                   requests:
                     storage: {{ .Values.app.scratch.ephemeral.size }}
+          {{- else if eq (.Values.app.scratch.volumeType | default "emptyDir") "hostPath" }}
+          hostPath:
+            path: {{ .Values.app.scratch.hostPath.path | default "/mnt/weknora-data/scratch-app" | quote }}
+            type: DirectoryOrCreate
           {{- else }}
           emptyDir:
             {{- with .Values.app.scratch.sizeLimit }}
@@ -313,7 +317,7 @@ spec:
         {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
         - name: document-queue-kubernetes-api
           projected:
-            defaultMode: 0440
+            defaultMode: 0444
             sources:
               - serviceAccountToken:
                   path: token

@@ -56,6 +56,7 @@ var rawHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		DialContext:         secutils.SSRFSafeDialContext,
+		TLSClientConfig:     secutils.LLMInsecureTLSConfig(),
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
 		MaxIdleConnsPerHost: 5,

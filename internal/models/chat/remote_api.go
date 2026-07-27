@@ -72,6 +72,18 @@ func NewRemoteAPIChat(chatConfig *ChatConfig) (*RemoteAPIChat, error) {
 		}
 	}
 
+	// Inject the SSRF-safe (and WEKNORA_LLM_INSECURE_TLS-aware) transport into
+	// the go-openai SDK client. Without this the SDK falls back to
+	// http.DefaultTransport (config.HTTPClient is &http.Client{} with a nil
+	// Transport after DefaultConfig), which both bypasses SSRF dial protection
+	// and fails TLS verification against internal gateways serving a
+	// self-signed certificate. Mirrors the vlm/asr client setup. The
+	// custom-header and response-metadata wrappers below wrap this client, so
+	// they preserve the injected transport.
+	config.HTTPClient = &http.Client{
+		Transport: secutils.SharedSSRFSafeHTTPTransport(secutils.DefaultSSRFSafeHTTPClientConfig()),
+	}
+
 	// 如果指定了 CustomHeaders，则给 SDK 使用的 HTTPClient 挂一层 RoundTripper，
 	// 在每个请求上自动注入这些 header（raw HTTP 路径会在发送前单独处理）。
 	if len(chatConfig.CustomHeaders) > 0 {

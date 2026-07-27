@@ -108,6 +108,10 @@ spec:
                 resources:
                   requests:
                     storage: {{ .Values.generalAgent.scratch.ephemeral.size }}
+          {{- else if eq (.Values.generalAgent.scratch.volumeType | default "emptyDir") "hostPath" }}
+          hostPath:
+            path: {{ .Values.generalAgent.scratch.hostPath.path | default "/mnt/weknora-data/scratch-general-agent" | quote }}
+            type: DirectoryOrCreate
           {{- else }}
           emptyDir:
             {{- with .Values.generalAgent.scratch.sizeLimit }}
@@ -272,6 +276,10 @@ spec:
                 resources:
                   requests:
                     storage: {{ .Values.documentProcessingAgent.scratch.ephemeral.size }}
+          {{- else if eq (.Values.documentProcessingAgent.scratch.volumeType | default "emptyDir") "hostPath" }}
+          hostPath:
+            path: {{ .Values.documentProcessingAgent.scratch.hostPath.path | default "/mnt/weknora-data/scratch-docproc-agent" | quote }}
+            type: DirectoryOrCreate
           {{- else }}
           emptyDir:
             {{- with .Values.documentProcessingAgent.scratch.sizeLimit }}

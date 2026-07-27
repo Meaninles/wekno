@@ -61,8 +61,8 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
 {{- end }}
 {{- range $name, $scratch := dict "app" .Values.app.scratch "docreader" .Values.docreader.scratch "generalAgent" .Values.generalAgent.scratch "documentProcessingAgent" .Values.documentProcessingAgent.scratch }}
   {{- $volumeType := ($scratch.volumeType | default "emptyDir") }}
-  {{- if not (has $volumeType (list "emptyDir" "ephemeral")) }}
-    {{- fail (printf "%s.scratch.volumeType must be emptyDir or ephemeral" $name) }}
+  {{- if not (has $volumeType (list "emptyDir" "ephemeral" "hostPath")) }}
+    {{- fail (printf "%s.scratch.volumeType must be emptyDir, ephemeral or hostPath" $name) }}
   {{- end }}
   {{- if and (eq $volumeType "ephemeral") (empty $scratch.ephemeral.storageClassName) }}
     {{- fail (printf "%s ephemeral scratch requires scratch.ephemeral.storageClassName" $name) }}

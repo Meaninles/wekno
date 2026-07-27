@@ -65,6 +65,11 @@ type KnowledgeBase struct {
 	EmbeddingModelID string `yaml:"embedding_model_id"      json:"embedding_model_id"`
 	// Summary model ID
 	SummaryModelID string `yaml:"summary_model_id"        json:"summary_model_id"`
+	// DerivativeModelID selects one of the platform models explicitly
+	// published for durable, non-interactive work (summary/question/Wiki/
+	// graph generation). Empty means the platform derivative default; it
+	// never means SummaryModelID.
+	DerivativeModelID string `yaml:"derivative_model_id" json:"derivative_model_id" gorm:"type:varchar(64);default:'';index"`
 	// VLM config
 	VLMConfig VLMConfig `yaml:"vlm_config"              json:"vlm_config"              gorm:"type:json"`
 	// ASR config (Automatic Speech Recognition)
@@ -138,6 +143,9 @@ type KnowledgeBaseConfig struct {
 	// IndexingStrategy controls which indexing pipelines are active.
 	// nil means "no change" when updating (preserves existing strategy).
 	IndexingStrategy *IndexingStrategy `yaml:"indexing_strategy"       json:"indexing_strategy"`
+	// DerivativeModelID is pointer-valued so an update can distinguish
+	// "leave unchanged" (nil) from "use the platform default" ("").
+	DerivativeModelID *string `yaml:"derivative_model_id,omitempty" json:"derivative_model_id,omitempty"`
 }
 
 // ParserEngineRule maps a set of file types to a specific parser engine.

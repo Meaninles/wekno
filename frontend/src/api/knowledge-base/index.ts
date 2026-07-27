@@ -60,6 +60,7 @@ export function createKnowledgeBase(data: {
   chunking_config?: any;
   embedding_model_id?: string;
   summary_model_id?: string;
+  derivative_model_id?: string;
   // Opt-in binding to a specific tenant-owned VectorStore. Omit (or
   // send undefined / empty string) to fall back to the env-configured
   // store. Immutable after creation — UpdateKnowledgeBase intentionally
@@ -112,6 +113,7 @@ export function updateKnowledgeBase(id: string, data: {
       max_pages_per_ingest?: number;
       extraction_granularity?: 'focused' | 'standard' | 'exhaustive';
     };
+    derivative_model_id?: string;
     indexing_strategy?: {
       vector_enabled: boolean;
       keyword_enabled: boolean;

@@ -13,13 +13,17 @@ export type AgentNotReadyReasonKey = 'summary_model' | 'rerank_model' | 'allowed
  */
 export function agentHasConfiguredChatModel(
   config: Pick<CustomAgentConfig, 'model_id'> | undefined,
-  models: Pick<ModelConfig, 'id' | 'type'>[],
+  models: Pick<ModelConfig, 'id' | 'type' | 'workload_scope'>[],
   sourceModelIsRemote = false,
 ): boolean {
   const modelID = config?.model_id?.trim()
   if (!modelID) return false
   if (sourceModelIsRemote) return true
-  return models.some(model => model.type === 'KnowledgeQA' && model.id === modelID)
+  return models.some(model =>
+    model.type === 'KnowledgeQA'
+    && model.workload_scope !== 'derivative_only'
+    && model.id === modelID,
+  )
 }
 
 /**
@@ -47,7 +51,7 @@ export function getAgentNotReadyReasonKeys(
     CustomAgentConfig,
     'model_id' | 'rerank_model_id' | 'kb_selection_mode' | 'allowed_tools' | 'agent_mode' | 'agent_type' | 'db_data_sources'
   > | undefined,
-  models: Pick<ModelConfig, 'id' | 'type'>[],
+  models: Pick<ModelConfig, 'id' | 'type' | 'workload_scope'>[],
   options: { isAgentMode: boolean; isSharedAgent: boolean },
 ): AgentNotReadyReasonKey[] {
   const reasons: AgentNotReadyReasonKey[] = []

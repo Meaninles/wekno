@@ -59,20 +59,30 @@
         </div>
       </div>
 
-      <!-- Wiki 合成模型 (仅当 Wiki 启用时显示) -->
-      <div v-if="wikiEnabled" class="setting-row">
+      <!-- 平台下发的衍生任务专用模型 -->
+      <div class="setting-row" data-testid="kb-derivative-model-row">
         <div class="setting-info">
-          <label>{{ $t('knowledgeEditor.wiki.synthesisModelLabel') }}</label>
-          <p class="desc">{{ $t('knowledgeEditor.wiki.synthesisModelTip') }}</p>
+          <label>衍生任务模型</label>
+          <p class="desc">
+            用于摘要、问题生成、知识图谱和 Wiki。这里只显示系统管理员下发的专用模型，
+            不会使用或回退到上面的对话模型。
+          </p>
+          <t-alert
+            v-if="!derivativeLoading && derivativeModels.length === 0"
+            theme="warning"
+            message="平台尚未下发衍生任务模型；向量检索仍可使用，衍生任务会等待管理员配置。"
+            style="margin-top: 8px"
+          />
         </div>
         <div class="setting-control">
           <ModelSelector
             model-type="KnowledgeQA"
-            :selected-model-id="config.wikiSynthesisModelId"
-            :all-models="allModels"
-            @update:selected-model-id="handleWikiModelChange"
-            @add-model="handleAddModel('knowledgeqa')"
-            :placeholder="$t('knowledgeEditor.wiki.synthesisModelPlaceholder')"
+            usage-scope="derivative"
+            :selected-model-id="config.derivativeModelId"
+            :all-models="derivativeModels"
+            :disabled="derivativeLoading || derivativeModels.length === 0"
+            @update:selected-model-id="handleDerivativeModelChange"
+            placeholder="选择管理员下发的衍生任务模型"
           />
         </div>
       </div>
@@ -82,16 +92,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useUIStore } from '@/stores/ui'
 import ModelSelector from '@/components/ModelSelector.vue'
-import { useI18n } from 'vue-i18n'
+import { getDerivativeStatus, type DerivativeModel } from '@/api/derivative-control'
 
 interface ModelConfig {
   llmModelId?: string
   embeddingModelId?: string
   vllmModelId?: string
-  wikiSynthesisModelId?: string
+  derivativeModelId?: string
 }
 
 interface Props {
@@ -109,10 +119,11 @@ const emit = defineEmits<{
 }>()
 
 const uiStore = useUIStore()
-const { t } = useI18n()
 
 const llmSelectorRef = ref<InstanceType<typeof ModelSelector>>()
 const embeddingSelectorRef = ref<InstanceType<typeof ModelSelector>>()
+const derivativeModels = ref<DerivativeModel[]>([])
+const derivativeLoading = ref(false)
 
 const handleLLMChange = (modelId: string) => {
   emit('update:config', {
@@ -128,16 +139,41 @@ const handleEmbeddingChange = (modelId: string) => {
   })
 }
 
-const handleWikiModelChange = (modelId: string) => {
+const handleDerivativeModelChange = (modelId: string) => {
   emit('update:config', {
     ...props.config,
-    wikiSynthesisModelId: modelId
+    derivativeModelId: modelId
   })
+}
+
+const loadDerivativeModels = async () => {
+  derivativeLoading.value = true
+  try {
+    const status = await getDerivativeStatus()
+    derivativeModels.value = status.models || []
+    const selectedIsPublished = derivativeModels.value.some(
+      model => model.id === props.config.derivativeModelId,
+    )
+    if (!selectedIsPublished) {
+      // Old KB rows may still carry a former conversation-model ID in the
+      // legacy Wiki field. Never keep that value selected: replace it with
+      // the platform derivative default, or clear it so the server can hold
+      // the task until an administrator publishes one.
+      handleDerivativeModelChange(status.default_model_id || '')
+    }
+  } catch (error) {
+    console.error('Failed to load derivative models', error)
+    derivativeModels.value = []
+  } finally {
+    derivativeLoading.value = false
+  }
 }
 
 const handleAddModel = (subSection: string) => {
   uiStore.openSettings('models', subSection)
 }
+
+onMounted(loadDerivativeModels)
 </script>
 
 <style lang="less" scoped>

@@ -441,19 +441,9 @@ func (s *wikiIngestService) ProcessWikiMap(ctx context.Context, task *asynq.Task
 			return s.wakeWikiCommitFromMap(mapCtx, payload)
 		}
 
-		modelID := ""
-		if kb.WikiConfig != nil {
-			modelID = kb.WikiConfig.SynthesisModelID
-		}
-		if modelID == "" {
-			modelID = kb.SummaryModelID
-		}
-		if modelID == "" {
-			return s.recordDistributedMapFailure(
-				mapCtx, payload, op, fmt.Errorf("no synthesis model configured for KB %s", kb.ID),
-			)
-		}
-		chatModel, err := s.modelService.GetChatModel(mapCtx, modelID)
+		chatModel, err := GetDerivativeChatModel(
+			mapCtx, s.modelService, kb.DerivativeModelID,
+		)
 		if err != nil {
 			if context.Cause(mapCtx) != nil {
 				return context.Cause(mapCtx)

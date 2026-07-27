@@ -556,7 +556,7 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 		return nil
 	}
 
-	chatModel, err := s.modelService.GetChatModel(ctx, p.ModelID)
+	chatModel, err := GetDerivativeChatModel(ctx, s.modelService, p.ModelID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get chat model: %v", err)
 		handleErr = err
@@ -980,7 +980,7 @@ func (s *DataTableSummaryService) prepareResources(
 	}
 
 	// 获取聊天模型（用于生成摘要）
-	chatModel, err := s.modelService.GetChatModel(ctx, payload.SummaryModel)
+	chatModel, err := GetDerivativeChatModel(ctx, s.modelService, payload.SummaryModel)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get chat model: %v", err)
 		return nil, err

@@ -39,6 +39,7 @@ export interface ModelConfig {
   is_builtin?: boolean;
   managed_by?: string;
   status?: string;
+  workload_scope?: 'interactive' | 'derivative_only';
   // Per-field configured? metadata from the main response. Absent for
   // builtin models.
   credentials?: Record<ModelCredentialField, { configured: boolean }>;

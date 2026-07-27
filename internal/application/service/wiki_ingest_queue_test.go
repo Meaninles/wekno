@@ -419,6 +419,16 @@ func (s *wikiQueueKBServiceStub) GetKnowledgeBaseByIDOnly(context.Context, strin
 	if copyKB.TenantID == 0 {
 		copyKB.TenantID = 42
 	}
+	// Legacy worker fixtures predate the dedicated control-plane field. Map
+	// their explicit Wiki/summary model into DerivativeModelID in test code
+	// only; production never performs this fallback at execution time.
+	if copyKB.DerivativeModelID == "" {
+		if copyKB.WikiConfig != nil && copyKB.WikiConfig.SynthesisModelID != "" {
+			copyKB.DerivativeModelID = copyKB.WikiConfig.SynthesisModelID
+		} else {
+			copyKB.DerivativeModelID = copyKB.SummaryModelID
+		}
+	}
 	return &copyKB, nil
 }
 
@@ -3254,7 +3264,7 @@ func TestProcessWikiIngestUnknownOpDeadLettersWithoutModel(t *testing.T) {
 	}
 }
 
-func TestProcessWikiIngestMissingSynthesisModelUsesBoundedOpDeadLetter(t *testing.T) {
+func TestProcessWikiIngestMissingDerivativeModelWaitsWithoutDeadLetter(t *testing.T) {
 	pending := &wikiQueuePendingRepoStub{
 		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
 			Op:          WikiOpIngest,
@@ -3275,18 +3285,20 @@ func TestProcessWikiIngestMissingSynthesisModelUsesBoundedOpDeadLetter(t *testin
 	}
 	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
 
-	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
-		t.Fatalf("missing-model settlement error = %v", err)
-	}
-	if len(pending.archived) != 1 || !strings.Contains(pending.archived[0].LastError, "no synthesis model configured") {
-		t.Fatalf("missing-model archive = %+v, want durable configuration cause", pending.archived)
+	err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	if !modeladmission.IsModelWorkDeferred(err) {
+		t.Fatalf("missing derivative model error = %v, want budget-free durable wait", err)
 	}
 	if pending.peekCalls != 1 {
-		t.Fatalf("missing-model path peek calls = %d, want 1 before configuration handling", pending.peekCalls)
+		t.Fatalf("missing-model path peek calls = %d, want 1", pending.peekCalls)
+	}
+	if len(pending.rows) != 1 || len(pending.incrementedIDs) != 0 || len(pending.archived) != 0 {
+		t.Fatalf("waiting model mutated queue: rows=%d increments=%v archives=%d",
+			len(pending.rows), pending.incrementedIDs, len(pending.archived))
 	}
 }
 
-func TestProcessWikiIngestMissingConfiguredModelUsesBoundedOpDeadLetter(t *testing.T) {
+func TestProcessWikiIngestUnavailablePublishedModelWaitsWithoutDeadLetter(t *testing.T) {
 	pending := &wikiQueuePendingRepoStub{
 		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
 			Op:          WikiOpIngest,
@@ -3309,15 +3321,17 @@ func TestProcessWikiIngestMissingConfiguredModelUsesBoundedOpDeadLetter(t *testi
 	}
 	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
 
-	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
-		t.Fatalf("missing configured model settlement error = %v", err)
+	err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	if !modeladmission.IsModelWorkDeferred(err) || !errors.Is(err, ErrModelNotFound) {
+		t.Fatalf("unavailable published model error = %v, want deferred not-found cause", err)
 	}
-	if len(pending.archived) != 1 || !strings.Contains(pending.archived[0].LastError, "model not found") {
-		t.Fatalf("missing configured model archive = %+v, want durable not-found cause", pending.archived)
+	if len(pending.rows) != 1 || len(pending.incrementedIDs) != 0 || len(pending.archived) != 0 {
+		t.Fatalf("unavailable model mutated queue: rows=%d increments=%v archives=%d",
+			len(pending.rows), pending.incrementedIDs, len(pending.archived))
 	}
 }
 
-func TestProcessWikiIngestInvalidModelConfigurationUsesBoundedOpDeadLetter(t *testing.T) {
+func TestProcessWikiIngestInvalidDedicatedModelWaitsForAdminRepair(t *testing.T) {
 	configurationErr := fmt.Errorf("%w: unsupported chat model source", ErrChatModelConfiguration)
 	pending := &wikiQueuePendingRepoStub{
 		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{
@@ -3341,17 +3355,13 @@ func TestProcessWikiIngestInvalidModelConfigurationUsesBoundedOpDeadLetter(t *te
 	}
 	payload, _ := json.Marshal(WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"})
 
-	if err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload)); err != nil {
-		t.Fatalf("invalid configuration settlement error = %v", err)
+	err := svc.ProcessWikiIngest(context.Background(), asynq.NewTask(types.TypeWikiIngest, payload))
+	if !modeladmission.IsModelWorkDeferred(err) || !errors.Is(err, ErrChatModelConfiguration) {
+		t.Fatalf("invalid dedicated model error = %v, want deferred configuration cause", err)
 	}
-	if len(pending.incrementedIDs) != 1 || pending.incrementedIDs[0] != 1 {
-		t.Fatalf("invalid configuration increments = %v, want pending row 1", pending.incrementedIDs)
-	}
-	if len(pending.archived) != 1 || !strings.Contains(pending.archived[0].LastError, "invalid chat model configuration") {
-		t.Fatalf("invalid configuration archive = %+v, want durable typed configuration cause", pending.archived)
-	}
-	if len(pending.rows) != 0 {
-		t.Fatalf("invalid configuration left %d pending rows after retry budget exhaustion", len(pending.rows))
+	if len(pending.rows) != 1 || len(pending.incrementedIDs) != 0 || len(pending.archived) != 0 {
+		t.Fatalf("invalid dedicated model mutated queue: rows=%d increments=%v archives=%d",
+			len(pending.rows), pending.incrementedIDs, len(pending.archived))
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-func TestBuildDocumentFanoutPlanSkipsOptionalTableEnrichmentWithoutSummaryModel(t *testing.T) {
+func TestBuildDocumentFanoutPlanUsesPlatformDerivativeDefaultWithoutKBOverride(t *testing.T) {
 	t.Parallel()
 
 	knowledge := &types.Knowledge{
@@ -27,8 +27,11 @@ func TestBuildDocumentFanoutPlanSkipsOptionalTableEnrichmentWithoutSummaryModel(
 	if err != nil {
 		t.Fatalf("buildDocumentFanoutPlan() error = %v", err)
 	}
-	if plan.DataTable != nil {
-		t.Fatalf("DataTable = %#v, want nil when optional summary model is not configured", plan.DataTable)
+	if plan.DataTable == nil {
+		t.Fatal("DataTable is nil, want durable work that resolves the platform derivative default at execution")
+	}
+	if plan.DataTable.SummaryModel != "" || plan.DataTable.EmbeddingModel != "embedding-1" {
+		t.Fatalf("DataTable = %#v, want empty derivative override plus embedding model", plan.DataTable)
 	}
 }
 
@@ -46,9 +49,10 @@ func TestBuildDocumentFanoutPlanPersistsCompleteTableEnrichment(t *testing.T) {
 		context.Background(),
 		knowledge,
 		&types.KnowledgeBase{
-			ID:               "kb-1",
-			SummaryModelID:   "summary-1",
-			EmbeddingModelID: "embedding-1",
+			ID:                "kb-1",
+			SummaryModelID:    "conversation-model",
+			DerivativeModelID: "derivative-1",
+			EmbeddingModelID:  "embedding-1",
 		},
 		ProcessChunksOptions{},
 		nil,
@@ -59,7 +63,7 @@ func TestBuildDocumentFanoutPlanPersistsCompleteTableEnrichment(t *testing.T) {
 	if plan.DataTable == nil {
 		t.Fatal("DataTable is nil, want durable table enrichment")
 	}
-	if plan.DataTable.SummaryModel != "summary-1" || plan.DataTable.EmbeddingModel != "embedding-1" {
+	if plan.DataTable.SummaryModel != "derivative-1" || plan.DataTable.EmbeddingModel != "embedding-1" {
 		t.Fatalf("DataTable = %#v", plan.DataTable)
 	}
 }

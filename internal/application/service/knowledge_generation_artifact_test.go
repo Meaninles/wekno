@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -79,6 +80,58 @@ func (s *summaryFinalizerFailureKBService) GetKnowledgeBaseByID(
 	return s.kb, nil
 }
 
+type emptySummaryChunkService struct {
+	interfaces.ChunkService
+}
+
+func (*emptySummaryChunkService) ListChunksByKnowledgeID(
+	context.Context,
+	string,
+) ([]*types.Chunk, error) {
+	return nil, nil
+}
+
+type oneSummaryChunkService struct {
+	interfaces.ChunkService
+}
+
+func (*oneSummaryChunkService) ListChunksByKnowledgeID(
+	context.Context,
+	string,
+) ([]*types.Chunk, error) {
+	return []*types.Chunk{{
+		ID: "chunk-1", ChunkType: types.ChunkTypeText, Content: "制度正文",
+	}}, nil
+}
+
+type derivativeWaitTestError struct{}
+
+func (derivativeWaitTestError) Error() string                  { return "derivative model is not configured" }
+func (derivativeWaitTestError) ModelWorkDeferred() bool        { return true }
+func (derivativeWaitTestError) ModelRetryAfter() time.Duration { return time.Minute }
+
+func installDerivativeWaitResolver(t *testing.T, requestedModelID *string) {
+	t.Helper()
+	derivativeModelHooks.Lock()
+	previous := derivativeModelHooks.resolver
+	derivativeModelHooks.resolver = func(
+		_ context.Context,
+		_ interfaces.ModelService,
+		modelID string,
+	) (chat.Chat, error) {
+		if requestedModelID != nil {
+			*requestedModelID = modelID
+		}
+		return nil, derivativeWaitTestError{}
+	}
+	derivativeModelHooks.Unlock()
+	t.Cleanup(func() {
+		derivativeModelHooks.Lock()
+		derivativeModelHooks.resolver = previous
+		derivativeModelHooks.Unlock()
+	})
+}
+
 func TestGenerationArtifactIDsAreStableAndGenerationScoped(t *testing.T) {
 	summaryID := summaryGenerationChunkID("knowledge-1", "generation-1")
 	require.NotEmpty(t, summaryID)
@@ -109,10 +162,11 @@ func TestSummaryHandlerRetriesWhenDurableSubtaskFinalizerFails(t *testing.T) {
 		finalizeErr: dbErr,
 	}
 	service := &knowledgeService{
-		repo: repo,
+		repo:         repo,
+		chunkService: &emptySummaryChunkService{},
 		kbService: &summaryFinalizerFailureKBService{kb: &types.KnowledgeBase{
 			ID:             "kb-1",
-			SummaryModelID: "", // terminal no-op body; the deferred drain still must persist
+			SummaryModelID: "", // No chunks: terminal no-op body; the deferred drain still must persist.
 		}},
 	}
 	payload, err := json.Marshal(types.SummaryGenerationPayload{
@@ -175,7 +229,9 @@ func TestShutdownCancellationNeverDrainsGenerationItemAtHistoricalFinalAttempt(t
 	assert.Zero(t, repo.finalizeCalls)
 }
 
-func TestSummaryWithoutModelClearsPendingStatusInExactGeneration(t *testing.T) {
+func TestSummaryWithoutDerivativeModelWaitsWithoutFallingBack(t *testing.T) {
+	requestedModelID := ""
+	installDerivativeWaitResolver(t, &requestedModelID)
 	repo := &summaryFinalizerFailureRepo{knowledge: &types.Knowledge{
 		ID:                   "knowledge-1",
 		TenantID:             7,
@@ -184,9 +240,11 @@ func TestSummaryWithoutModelClearsPendingStatusInExactGeneration(t *testing.T) {
 		ProcessingGeneration: "generation-1",
 	}}
 	service := &knowledgeService{
-		repo: repo,
+		repo:         repo,
+		chunkService: &oneSummaryChunkService{},
 		kbService: &summaryFinalizerFailureKBService{kb: &types.KnowledgeBase{
-			ID: "kb-1",
+			ID:             "kb-1",
+			SummaryModelID: "conversation-model-must-not-be-used",
 		}},
 	}
 	payload, err := json.Marshal(types.SummaryGenerationPayload{
@@ -196,9 +254,13 @@ func TestSummaryWithoutModelClearsPendingStatusInExactGeneration(t *testing.T) {
 		ProcessingGeneration: "generation-1",
 	})
 	require.NoError(t, err)
-	require.NoError(t, service.ProcessSummaryGeneration(
+	err = service.ProcessSummaryGeneration(
 		context.Background(), asynq.NewTask(types.TypeSummaryGeneration, payload),
-	))
+	)
+	require.Error(t, err)
+	assert.True(t, modeladmission.IsModelWorkDeferred(err))
+	assert.Empty(t, requestedModelID, "interactive SummaryModelID must never be used as a fallback")
 	require.NotNil(t, repo.casValues)
-	assert.Equal(t, types.SummaryStatusNone, repo.casValues["summary_status"])
+	assert.Equal(t, types.SummaryStatusProcessing, repo.casValues["summary_status"])
+	assert.Zero(t, repo.finalizeCalls, "a waiting derivative task must remain durable")
 }

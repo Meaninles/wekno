@@ -1207,25 +1207,23 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	}
 	lang := types.LanguageNameFromContext(ctx)
 
-	var synthesisModelID string
-	if kb.WikiConfig != nil {
-		synthesisModelID = kb.WikiConfig.SynthesisModelID
-	}
-	if synthesisModelID == "" {
-		synthesisModelID = kb.SummaryModelID
-	}
-	if synthesisModelID == "" {
-		for _, op := range pendingOps {
-			op.lastError = fmt.Sprintf("no synthesis model configured for KB %s", kb.ID)
-			preflightFailedOps = append(preflightFailedOps, op)
-		}
-		return settlePreflightFailures("missing_synthesis_model_ops_recorded")
-	}
-	chatModel, err := s.modelService.GetChatModel(ctx, synthesisModelID)
+	chatModel, err := GetDerivativeChatModel(
+		ctx, s.modelService, kb.DerivativeModelID,
+	)
 	if err != nil {
+		// A dedicated derivative model may be temporarily unavailable (for
+		// example, unpublished, isolated by policy, or waiting for its global
+		// TPM lease). Preserve that outer deferred-work classification before
+		// inspecting the wrapped cause: DeferredError intentionally unwraps to
+		// errors such as ErrModelNotFound for diagnostics, but those causes must
+		// not turn durable derivative work into a permanent dead letter.
+		if modeladmission.IsModelWorkDeferred(err) {
+			exitStatus = "derivative_model_deferred"
+			return fmt.Errorf("wiki ingest: get derivative chat model: %w", err)
+		}
 		if errors.Is(err, ErrModelNotFound) || errors.Is(err, ErrChatModelConfiguration) {
 			for _, op := range pendingOps {
-				op.lastError = fmt.Sprintf("synthesis model %s is permanently unavailable for KB %s: %v", synthesisModelID, kb.ID, err)
+				op.lastError = fmt.Sprintf("derivative model is permanently unavailable for KB %s: %v", kb.ID, err)
 				preflightFailedOps = append(preflightFailedOps, op)
 			}
 			return settlePreflightFailures("synthesis_model_permanent_error_ops_recorded")

@@ -12,7 +12,9 @@ export interface TenantModelReadiness {
 }
 
 export function evaluateTenantModelReadiness(models: ModelConfig[]): TenantModelReadiness {
-  const chatCount = models.filter((m) => m.type === 'KnowledgeQA').length
+  const chatCount = models.filter(
+    (m) => m.type === 'KnowledgeQA' && m.workload_scope !== 'derivative_only',
+  ).length
   const embeddingCount = models.filter((m) => m.type === 'Embedding').length
   const hasChat = chatCount > 0
   const hasEmbedding = embeddingCount > 0

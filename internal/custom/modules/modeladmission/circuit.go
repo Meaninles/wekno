@@ -92,6 +92,12 @@ func IsModelWorkDeferred(err error) bool {
 	if errors.As(err, &budgeted) && budgeted.ConsumesModelRetryBudget() {
 		return false
 	}
+	var explicitlyDeferred interface {
+		ModelWorkDeferred() bool
+	}
+	if errors.As(err, &explicitlyDeferred) && explicitlyDeferred.ModelWorkDeferred() {
+		return true
+	}
 	return IsProviderUnavailable(err) ||
 		errors.Is(err, ErrAdmissionBackendUnavailable) ||
 		errors.Is(err, ErrAdmissionLeaseLost)
@@ -114,6 +120,16 @@ func ProviderRetryAfter(err error) (time.Duration, bool) {
 // ModelRetryAfter returns the retry delay for every budget-free model
 // infrastructure error, including temporary Redis admission failures.
 func ModelRetryAfter(err error) (time.Duration, bool) {
+	var explicitlyDeferred interface {
+		ModelRetryAfter() time.Duration
+	}
+	if errors.As(err, &explicitlyDeferred) {
+		delay := explicitlyDeferred.ModelRetryAfter()
+		if delay < time.Second {
+			delay = time.Second
+		}
+		return delay, true
+	}
 	if retryAfter, ok := ProviderRetryAfter(err); ok {
 		return retryAfter, true
 	}

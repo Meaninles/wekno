@@ -31,6 +31,11 @@
       </div>
     </div>
 
+    <DerivativeControlPanel
+      v-if="authStore.isSystemAdmin"
+      @changed="loadModels"
+    />
+
     <t-tabs v-model="activeTypeFilter" class="model-type-tabs" data-guide="settings-models">
       <t-tab-panel value="all" :label="`${$t('common.all')}(${allLegacyModels.length})`" />
       <t-tab-panel value="chat" :label="`${$t('modelSettings.typeShort.chat')}(${countByType('chat')})`" />
@@ -66,6 +71,14 @@
                 :aria-label="$t('modelSettings.builtinTag')">
                 <t-icon name="lock-on" />
               </span>
+              <t-tag
+                v-if="model.workloadScope === 'derivative_only'"
+                size="small"
+                theme="warning"
+                variant="light"
+              >
+                衍生专用
+              </t-tag>
               <div v-if="canManageModel(model)" class="model-card__actions" @click.stop>
                 <t-dropdown :options="getModelOptions(model._modelType, model)" placement="bottom-right" attach="body"
                   trigger="click"
@@ -130,7 +143,7 @@
     <!-- 模型编辑器抽屉 -->
     <ModelEditorDialog v-model:visible="showDialog" :model-type="currentModelType" :model-data="editingModel"
       @confirm="handleModelSave" />
-    <ModelDebugDrawer v-model:visible="showDebugDrawer" :models="userVisibleModels" />
+    <ModelDebugDrawer v-model:visible="showDebugDrawer" :models="interactiveVisibleModels" />
 
   </div>
 </template>
@@ -142,6 +155,7 @@ import { AddIcon, PlayCircleIcon } from 'tdesign-icons-vue-next'
 import { useI18n } from 'vue-i18n'
 import ModelEditorDialog from '@/components/ModelEditorDialog.vue'
 import ModelDebugDrawer from '@/components/ModelDebugDrawer.vue'
+import DerivativeControlPanel from '@/custom/modules/derivative-control/DerivativeControlPanel.vue'
 import { listModels, createModel, updateModel as updateModelAPI, deleteModel as deleteModelAPI, type ModelConfig } from '@/api/model'
 import { useAuthStore } from '@/stores/auth'
 
@@ -162,6 +176,9 @@ const allModels = ref<ModelConfig[]>([])
 const builtinAgentDefaultsManagedBy = 'builtin_agent_defaults'
 const userVisibleModels = computed(() =>
   allModels.value.filter(model => model.managed_by !== builtinAgentDefaultsManagedBy)
+)
+const interactiveVisibleModels = computed(() =>
+  userVisibleModels.value.filter(model => model.workload_scope !== 'derivative_only')
 )
 
 // 后端 type → 前端分组 type 的映射
@@ -205,6 +222,7 @@ function convertToLegacyFormat(model: ModelConfig) {
     // Preserve the credential metadata map so the editor dialog can render
     // the "Configured" state without an extra round-trip.
     credentials: model.credentials,
+    workloadScope: model.workload_scope || 'interactive',
   }
 }
 
@@ -319,9 +337,11 @@ const openAddDialog = () => {
 // 可点击打开编辑抽屉：管理员 + 非内置模型
 const isModelCardClickable = (model: any) =>
   authStore.hasRole('admin') && !model.isBuiltin
+  && (model.workloadScope !== 'derivative_only' || authStore.isSystemAdmin)
 
 const canManageModel = (model: any) =>
   authStore.hasRole('admin') && !model.isBuiltin
+  && (model.workloadScope !== 'derivative_only' || authStore.isSystemAdmin)
 
 const onModelCardClick = (event: Event, type: ModelType, model: any) => {
   if (!isModelCardClickable(model)) return

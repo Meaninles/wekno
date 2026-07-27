@@ -28,7 +28,7 @@
       
       <!-- 添加模型选项（在底部） -->
       <t-option
-        v-if="!disabled"
+        v-if="!disabled && usageScope === 'interactive'"
         value="__add_model__"
         class="add-model-option"
       >
@@ -46,6 +46,7 @@ import { ref, computed, onMounted } from 'vue'
 import { listModels, type ModelConfig } from '@/api/model'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
+import { modelAllowedForUsage } from '@/custom/modules/derivative-control/modelPolicy'
 
 interface Props {
   modelType: 'KnowledgeQA' | 'Embedding' | 'Rerank' | 'VLLM' | 'ASR'
@@ -55,12 +56,14 @@ interface Props {
   status?: 'default' | 'success' | 'warning' | 'error'
   // 可选：外部传入的所有模型列表，如果提供则不调用API
   allModels?: ModelConfig[]
+  usageScope?: 'interactive' | 'derivative'
 }
 
 const props = withDefaults(defineProps<Props>(), {
   disabled: false,
   placeholder: '',
   status: 'default',
+  usageScope: 'interactive',
 })
 
 const emit = defineEmits<{
@@ -150,7 +153,9 @@ const dedupeModels = (list: ModelConfig[]) => {
 
 const models = computed(() => {
   const sourceModels = props.allModels && Array.isArray(props.allModels) ? props.allModels : loadedModels.value
-  return dedupeModels(sourceModels.filter(m => m.type === props.modelType))
+  return dedupeModels(sourceModels.filter(
+    m => m.type === props.modelType && modelAllowedForUsage(m, props.usageScope),
+  ))
 })
 
 const selectedModel = computed(() => {

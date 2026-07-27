@@ -85,6 +85,7 @@ export interface DownloadTask {
 export interface KBModelConfigRequest {
     llmModelId: string
     embeddingModelId: string
+    derivativeModelId: string
     vlm_config?: {
         enabled: boolean
         model_id?: string

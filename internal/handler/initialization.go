@@ -92,10 +92,11 @@ func NewInitializationHandler(
 
 // KBModelConfigRequest 知识库模型配置请求（简化版，只传模型ID）
 type KBModelConfigRequest struct {
-	LLMModelID       string           `json:"llmModelId"       binding:"required"`
-	EmbeddingModelID string           `json:"embeddingModelId"` // optional when RAG indexing is disabled
-	VLMConfig        *types.VLMConfig `json:"vlm_config"`
-	ASRConfig        *types.ASRConfig `json:"asr_config"`
+	LLMModelID        string           `json:"llmModelId"       binding:"required"`
+	EmbeddingModelID  string           `json:"embeddingModelId"` // optional when RAG indexing is disabled
+	DerivativeModelID string           `json:"derivativeModelId"`
+	VLMConfig         *types.VLMConfig `json:"vlm_config"`
+	ASRConfig         *types.ASRConfig `json:"asr_config"`
 
 	// 文档分块配置
 	DocumentSplitting struct {
@@ -269,6 +270,10 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 		c.Error(errors.NewBadRequestError("LLM模型不存在"))
 		return
 	}
+	if llmModel.WorkloadScope.Normalize() != types.ModelWorkloadInteractive {
+		c.Error(errors.NewBadRequestError("衍生任务专用模型不能作为知识库对话模型"))
+		return
+	}
 
 	// Embedding模型仅在需要时验证（RAG检索启用时）
 	if req.EmbeddingModelID != "" {
@@ -282,6 +287,7 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 
 	// 更新知识库的模型ID
 	kb.SummaryModelID = req.LLMModelID
+	kb.DerivativeModelID = strings.TrimSpace(req.DerivativeModelID)
 	if req.EmbeddingModelID != "" {
 		kb.EmbeddingModelID = req.EmbeddingModelID
 	}
@@ -419,6 +425,15 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 		kb.QuestionGenerationConfig = &types.QuestionGenerationConfig{Enabled: false}
 	}
 
+	if err := appservice.ValidateKnowledgeBaseModelPolicy(ctx, kb); err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+		} else {
+			c.Error(errors.NewBadRequestError(err.Error()))
+		}
+		return
+	}
+
 	// 保存更新后的知识库
 	if err := h.kbRepository.UpdateKnowledgeBase(ctx, kb); err != nil {
 		logger.Error(ctx, "Failed to update knowledge base", err)
@@ -480,6 +495,14 @@ func (h *InitializationHandler) InitializeByKB(c *gin.Context) {
 	}
 
 	h.applyKnowledgeBaseInitialization(kb, req, processedModels)
+	if err := appservice.ValidateKnowledgeBaseModelPolicy(ctx, kb); err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+		} else {
+			c.Error(errors.NewBadRequestError(err.Error()))
+		}
+		return
+	}
 
 	if err := h.kbRepository.UpdateKnowledgeBase(ctx, kb); err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{"kbId": utils.SanitizeForLog(kbIdStr)})
@@ -2326,8 +2349,9 @@ func (h *InitializationHandler) ExtractTextRelations(c *gin.Context) {
 		return
 	}
 
-	// 根据模型ID获取chat模型
-	chatModel, err := h.modelService.GetChatModel(ctx, req.ModelID)
+	// Only a platform-published derivative model may execute this
+	// non-interactive generation endpoint.
+	chatModel, err := appservice.GetDerivativeChatModel(ctx, h.modelService, req.ModelID)
 	if err != nil {
 		logger.Error(ctx, "获取模型失败", err)
 		c.Error(errors.NewBadRequestError("获取模型失败: " + err.Error()))
@@ -2410,7 +2434,7 @@ func (h *InitializationHandler) FabriText(c *gin.Context) {
 		return
 	}
 
-	chatModel, err := h.modelService.GetChatModel(ctx, req.ModelID)
+	chatModel, err := appservice.GetDerivativeChatModel(ctx, h.modelService, req.ModelID)
 	if err != nil {
 		logger.Error(ctx, "获取模型失败", err)
 		c.Error(errors.NewBadRequestError("获取模型失败: " + err.Error()))

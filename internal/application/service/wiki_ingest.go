@@ -17,11 +17,13 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/searchutil"
@@ -74,14 +76,6 @@ const (
 	// task_pending_ops and are picked up by the follow-up task.
 	wikiMaxDocsPerBatch = 5
 
-	// wikiMaxFailRetries is the maximum number of times a single document op
-	// may be re-attempted via requeueFailedOps before it is permanently
-	// archived to task_dead_letters. 5 retries ≈ five full batch cycles
-	// (each with a ~30 s delay), giving transient LLM errors a fair chance
-	// to recover without letting a persistently-broken doc clog the queue
-	// indefinitely.
-	wikiMaxFailRetries = 5
-
 	// wikiIngestMaxRetry controls the Asynq retry budget for genuine
 	// wiki:ingest failures. Per-KB lock conflicts do not return a handler error:
 	// they publish a fresh delayed wake-up and complete the current signal, so
@@ -91,8 +85,9 @@ const (
 
 	// wikiIngestTaskTimeout is the hard execution ceiling for a whole batch.
 	// Individual model calls are bounded much more tightly by
-	// wikiLLMCallTimeout, so this is capacity for a legitimately large batch,
-	// not permission for one upstream request to hang for hours.
+	// CUSTOM_WORK_RETRY_WIKI_CALL_TIMEOUT_SECONDS, so this is capacity for a
+	// legitimately large batch, not permission for one upstream request to
+	// hang for hours.
 	wikiIngestTaskTimeout = 2 * time.Hour
 
 	// wikiTriggerUniqueTTL coalesces the burst of identical per-KB trigger
@@ -147,19 +142,6 @@ const (
 	// A stalled Redis connection must cancel business work well before the
 	// 60-second lease can expire and admit another worker.
 	wikiActiveLockCommandTimeout = 5 * time.Second
-
-	// wikiLLMMaxAttempts is the total attempt count (initial + retries) for
-	// every LLM call routed through generateWithTemplate. 3 was chosen to
-	// absorb transient 504/timeouts from upstream gateways without
-	// materially prolonging task runtime when the remote is genuinely down.
-	wikiLLMMaxAttempts = 3
-
-	// wikiLLMCallTimeout bounds one upstream chat request. Production traces
-	// show legitimate page edits approaching six minutes, so ten minutes
-	// leaves headroom while still guaranteeing that a wedged provider yields
-	// control back to the retry/queue machinery. The outer batch context can
-	// always cancel this child sooner.
-	wikiLLMCallTimeout = 10 * time.Minute
 
 	// wikiTaskType is the task_type stamp used in task_pending_ops and
 	// task_dead_letters rows for this pipeline. Stable across the lifetime
@@ -329,8 +311,8 @@ type WikiPendingOp struct {
 //     "knowledge_base"): the per-document op queue. Replaces the
 //     legacy Redis wiki:pending:<kbID> list, which was vulnerable to
 //     24h TTL eviction at 4w-document scale.
-//   - task_dead_letters: in-batch failures that exhausted
-//     wikiMaxFailRetries land here. The asynq dead-letter middleware
+//   - task_dead_letters: in-batch failures that exhausted the configured
+//     Wiki attempt budget land here. The asynq dead-letter middleware
 //     also writes asynq-level archived rows here uniformly across
 //     every task type.
 //
@@ -945,10 +927,10 @@ func (s *wikiIngestService) trimPendingList(ctx context.Context, ids []int64) er
 //   - IncrFailCount on the source row. The repo returns the new total,
 //     so a single round trip handles both bookkeeping and retry-budget
 //     check.
-//   - If the count is <= wikiMaxFailRetries: leave the row in place.
-//     The next follow-up batch's PeekBatch will pick it up naturally
-//     (rows are ordered by id ASC and we never moved/touched it).
-//   - If the count exceeds the retry cap: atomically move the op into
+//   - If the count is below the configured maximum total attempts: leave the
+//     row in place. Retry selection rotates it behind lower-attempt and
+//     never-attempted rows, so it cannot monopolize the queue head.
+//   - If the count reaches the retry cap: atomically move the op into
 //     task_dead_letters via ArchiveToDeadLetter. The repository transaction
 //     rolls the pending-row delete back if archive insertion fails. Any DB
 //     failure is returned so the asynq trigger retries; silently swallowing
@@ -960,6 +942,7 @@ func (s *wikiIngestService) requeueFailedOps(ctx context.Context, payload WikiIn
 		}
 		return nil
 	}
+	maxAttempts := workretry.ConfigFromEnv().WikiMaxAttempts
 	var errs []error
 	for _, op := range ops {
 		if op.dbID == 0 {
@@ -973,15 +956,15 @@ func (s *wikiIngestService) requeueFailedOps(ctx context.Context, payload WikiIn
 			errs = append(errs, fmt.Errorf("increment fail count for pending row %d: %w", op.dbID, err))
 			continue
 		}
-		if count <= wikiMaxFailRetries {
-			logger.Infof(ctx, "wiki ingest: re-queued failed op %s (%s) for retry (attempt %d/%d)", op.KnowledgeID, op.DocTitle, count, wikiMaxFailRetries)
+		if count < maxAttempts {
+			logger.Infof(ctx, "wiki ingest: re-queued failed op %s (%s) for retry (attempt %d/%d)", op.KnowledgeID, op.DocTitle, count, maxAttempts)
 			continue
 		}
 
 		// Exhausted in-batch retries — archive and remove. Wiki enrichment
 		// is KB-scoped optional work and does not participate in a knowledge
 		// row's pending_subtasks_count.
-		logger.Warnf(ctx, "wiki ingest: dropping op %s (%s) after %d failures (limit %d)", op.KnowledgeID, op.DocTitle, count, wikiMaxFailRetries)
+		logger.Warnf(ctx, "wiki ingest: dropping op %s (%s) after %d failures (limit %d)", op.KnowledgeID, op.DocTitle, count, maxAttempts)
 		payloadBytes, marshalErr := json.Marshal(op)
 		if marshalErr != nil {
 			errs = append(errs, fmt.Errorf("marshal dead letter for pending row %d: %w", op.dbID, marshalErr))
@@ -989,9 +972,9 @@ func (s *wikiIngestService) requeueFailedOps(ctx context.Context, payload WikiIn
 		}
 		lastError := op.lastError
 		if lastError == "" {
-			lastError = fmt.Sprintf("exceeded wikiMaxFailRetries=%d (in-batch retries)", wikiMaxFailRetries)
+			lastError = fmt.Sprintf("reached Wiki max attempts=%d", maxAttempts)
 		} else {
-			lastError = fmt.Sprintf("%s (exceeded wikiMaxFailRetries=%d)", lastError, wikiMaxFailRetries)
+			lastError = fmt.Sprintf("%s (reached Wiki max attempts=%d)", lastError, maxAttempts)
 		}
 		// Record the terminal document-level outcome before removing the only
 		// durable queue row that carries this processing generation.  A
@@ -1198,6 +1181,39 @@ type wikiPendingPayloadCheckpointer interface {
 		knowledgeBaseID string,
 		payload []byte,
 	) (bool, error)
+}
+
+type wikiAttemptRotator interface {
+	TouchWikiAttempt(context.Context, int64) error
+}
+
+// rotateWikiAttempts moves budget-free circuit/admission rejects behind
+// untouched rows without changing their real-provider failure count. The
+// production repository implements this with task_pending_ops.claimed_at;
+// focused interface-only tests may omit the optional capability.
+func (s *wikiIngestService) rotateWikiAttempts(
+	ctx context.Context,
+	ops []WikiPendingOp,
+) error {
+	rotator, ok := s.pendingRepo.(wikiAttemptRotator)
+	if !ok || rotator == nil || len(ops) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(ops))
+	var errs []error
+	for _, op := range ops {
+		if op.dbID <= 0 {
+			continue
+		}
+		if _, duplicate := seen[op.dbID]; duplicate {
+			continue
+		}
+		seen[op.dbID] = struct{}{}
+		if err := rotator.TouchWikiAttempt(ctx, op.dbID); err != nil {
+			errs = append(errs, fmt.Errorf("rotate Wiki pending row %d: %w", op.dbID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // wikiDistributedMapRepository is a production-only extension of the generic
@@ -2870,7 +2886,8 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 // bounded exponential-backoff retries for transient infrastructure errors.
 //
 // Retry policy:
-//   - Up to wikiLLMMaxAttempts total attempts (initial + retries).
+//   - Inline attempts are configurable but default to one. Durable per-op
+//     retries provide the larger outer budget and queue fairness.
 //   - Only retry errors classified as transient by isTransientLLMError:
 //     HTTP 408/429/5xx, context deadline exceeded (when the parent ctx is
 //     still alive), or generic "timeout"/"connection reset" wording.
@@ -2905,10 +2922,18 @@ func (s *wikiIngestService) generateWithTemplate(ctx context.Context, chatModel 
 	if s != nil && s.llmRetryPolicy != nil {
 		retryPolicy = *s.llmRetryPolicy
 	}
+	retryConfig := workretry.ConfigFromEnv()
 
 	var lastErr error
-	for attempt := 1; attempt <= wikiLLMMaxAttempts; attempt++ {
-		callCtx, cancelCall := context.WithTimeout(ctx, wikiLLMCallTimeout)
+	sawProviderCallFailure := false
+	finishFailure := func(err error) error {
+		if err == nil || ctx.Err() != nil || !sawProviderCallFailure {
+			return err
+		}
+		return workretry.Consume(err)
+	}
+	for attempt := 1; attempt <= retryConfig.WikiInlineAttempts; attempt++ {
+		callCtx, cancelCall := context.WithTimeout(ctx, retryConfig.WikiCallTimeout)
 		response, err := chatModel.Chat(callCtx, []chat.Message{
 			{Role: "user", Content: prompt},
 		}, &chat.ChatOptions{
@@ -2920,14 +2945,17 @@ func (s *wikiIngestService) generateWithTemplate(ctx context.Context, chatModel 
 			return unmaskImageURLs(response.Content, urlMap), nil
 		}
 		lastErr = err
+		if modeladmission.IsProviderCallFailure(err) {
+			sawProviderCallFailure = true
+		}
 
 		// Abort immediately on non-retryable errors (4xx except 408/429,
 		// parse/marshal failures, tool-side bugs, etc.). Retrying a
 		// hard "invalid arguments" error just wastes the model's budget.
 		if !isTransientLLMError(ctx, err) {
-			return "", fmt.Errorf("LLM call failed: %w", err)
+			return "", finishFailure(fmt.Errorf("LLM call failed: %w", err))
 		}
-		if attempt == wikiLLMMaxAttempts {
+		if attempt == retryConfig.WikiInlineAttempts {
 			break
 		}
 
@@ -2937,12 +2965,16 @@ func (s *wikiIngestService) generateWithTemplate(ctx context.Context, chatModel 
 			backoffSource = "Retry-After"
 		}
 		logger.Warnf(ctx, "wiki ingest: LLM call failed (attempt %d/%d), retrying in %s (%s): %v",
-			attempt, wikiLLMMaxAttempts, backoff, backoffSource, err)
+			attempt, retryConfig.WikiInlineAttempts, backoff, backoffSource, err)
 		if waitErr := retryPolicy.WaitForRetry(ctx, backoff); waitErr != nil {
 			return "", fmt.Errorf("LLM call aborted during backoff: %w", waitErr)
 		}
 	}
-	return "", fmt.Errorf("LLM call failed after %d attempts: %w", wikiLLMMaxAttempts, lastErr)
+	return "", finishFailure(fmt.Errorf(
+		"LLM call failed after %d attempts: %w",
+		retryConfig.WikiInlineAttempts,
+		lastErr,
+	))
 }
 
 // isTransientLLMError reports whether an error from the chat provider

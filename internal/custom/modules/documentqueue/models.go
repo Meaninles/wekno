@@ -11,10 +11,11 @@ const (
 	StatePreparing WorkflowState = "preparing"
 	StateQueued    WorkflowState = "queued"
 	StateLeased    WorkflowState = "leased"
-	// StateWaitingExternal is a migration-only state written by versions that
-	// released a document slot while Wiki was pending. Recovery converts every
-	// non-terminal row back to queued; new code holds its lease through Wiki so
-	// downstream backlog stays bounded by document capacity.
+	// StateWaitingExternal means the core document commit and durable fan-out
+	// publication have completed, so the document slot is free while required
+	// derivatives (multimodal, summary, questions, graph or Wiki) converge in
+	// their own queues. The workflow row remains non-terminal and recovery keeps
+	// observing it, preserving the full-workflow status shown to users.
 	StateWaitingExternal WorkflowState = "waiting_external"
 	StateCompleted       WorkflowState = "completed"
 	StateFailed          WorkflowState = "failed"

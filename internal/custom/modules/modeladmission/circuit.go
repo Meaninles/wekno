@@ -33,9 +33,11 @@ func (e *CircuitOpenError) Unwrap() error {
 	return ErrProviderCircuitOpen
 }
 
-// ProviderUnavailableError wraps the provider's original error while marking
+// ProviderUnavailableError wraps a real provider call failure while marking
 // it as external backpressure. The cause remains discoverable through
 // errors.Is/errors.As, so status-code and transport diagnostics are preserved.
+// Durable business queues may add a structural workretry marker when that
+// real call must consume their own bounded attempt budget.
 type ProviderUnavailableError struct {
 	Kind       Kind
 	RetryAfter time.Duration
@@ -71,10 +73,25 @@ func IsProviderUnavailable(err error) bool {
 		errors.Is(err, ErrProviderUnavailable)
 }
 
+// IsProviderCallFailure distinguishes a request that reached the provider
+// from a CircuitOpenError rejected before any remote work began. Durable
+// business queues use this boundary to count real attempts without exhausting
+// their retry budget during a shared outage cooldown.
+func IsProviderCallFailure(err error) bool {
+	var providerErr *ProviderUnavailableError
+	return errors.As(err, &providerErr)
+}
+
 // IsModelWorkDeferred includes provider backpressure plus admission backend
 // and lease failures. All are infrastructure conditions that durable workers
 // must retry without consuming a document's business retry budget.
 func IsModelWorkDeferred(err error) bool {
+	var budgeted interface {
+		ConsumesModelRetryBudget() bool
+	}
+	if errors.As(err, &budgeted) && budgeted.ConsumesModelRetryBudget() {
+		return false
+	}
 	return IsProviderUnavailable(err) ||
 		errors.Is(err, ErrAdmissionBackendUnavailable) ||
 		errors.Is(err, ErrAdmissionLeaseLost)

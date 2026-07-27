@@ -170,6 +170,32 @@ func (s *wikiIngestService) settleWikiQueue(
 	trimIDs []int64,
 	failedOps []WikiPendingOp,
 ) (bool, error) {
+	return s.settleWikiQueueWithDeferrals(
+		parentCtx,
+		leaseCtx,
+		payload,
+		trimIDs,
+		failedOps,
+		nil,
+		nil,
+	)
+}
+
+// settleWikiQueueWithDeferrals extends normal settlement with provider work
+// that was rejected before a remote call began. Real provider failures remain
+// in failedOps and consume the bounded per-document budget. Deferred rows are
+// only rotated and kept durable; the follow-up honors the shared circuit's
+// retry window so one unavailable provider does not create a tight polling
+// loop or block successfully completed rows from being acknowledged.
+func (s *wikiIngestService) settleWikiQueueWithDeferrals(
+	parentCtx context.Context,
+	leaseCtx context.Context,
+	payload WikiIngestPayload,
+	trimIDs []int64,
+	failedOps []WikiPendingOp,
+	deferredOps []WikiPendingOp,
+	providerDeferredErr error,
+) (bool, error) {
 	// A context that was already cancelled before settlement means the
 	// business batch may be incomplete. Do not acknowledge or mutate any row;
 	// returning the error lets Asynq retry the same durable head safely.
@@ -195,7 +221,24 @@ func (s *wikiIngestService) settleWikiQueue(
 	if err := s.requeueFailedOps(settleCtx, payload, failedOps); err != nil {
 		errs = append(errs, fmt.Errorf("wiki ingest: record failed ops: %w", err))
 	}
-	followUpScheduled, err := s.scheduleFollowUp(settleCtx, payload)
+	if err := s.rotateWikiAttempts(settleCtx, deferredOps); err != nil {
+		errs = append(errs, fmt.Errorf("wiki ingest: rotate provider-deferred ops: %w", err))
+	}
+	followUpScheduled := false
+	var err error
+	if providerDeferredErr != nil {
+		followUpScheduled, err = s.scheduleProviderCircuitFollowUp(
+			settleCtx,
+			payload,
+			providerDeferredErr,
+		)
+	}
+	// Admission-backend failures have no provider Retry-After, and a provider
+	// signal may race circuit recovery. Fall back to the ordinary durable
+	// follow-up whenever no circuit-specific wake-up was published.
+	if err == nil && !followUpScheduled {
+		followUpScheduled, err = s.scheduleFollowUp(settleCtx, payload)
+	}
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -1215,6 +1258,21 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	// 1. MAP PHASE (Parallel extraction and generation of updates)
 	var mapMu sync.Mutex
 	failedOps := append([]WikiPendingOp(nil), preflightFailedOps...)
+	var deferredMu sync.Mutex
+	deferredKnowledgeIDs := make(map[string]struct{})
+	var providerDeferredErr error
+	recordProviderDeferred := func(stageErr error, knowledgeIDs ...string) {
+		deferredMu.Lock()
+		defer deferredMu.Unlock()
+		if providerDeferredErr == nil {
+			providerDeferredErr = stageErr
+		}
+		for _, knowledgeID := range knowledgeIDs {
+			if knowledgeID != "" {
+				deferredKnowledgeIDs[knowledgeID] = struct{}{}
+			}
+		}
+	}
 	slugUpdates := make(map[string][]SlugUpdate)
 	var docResults []*docIngestResult
 	cancelledRetractKnowledgeIDs := make(map[string]struct{})
@@ -1352,6 +1410,18 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 						op.KnowledgeID)
 					return nil
 				}
+				if mapCtx.Err() == nil && modeladmission.IsModelWorkDeferred(err) {
+					// No provider call completed for this document (for
+					// example a shared circuit reject). Keep only this row
+					// pending and let unrelated documents in the same batch
+					// finish. Settlement rotates it without consuming a real
+					// provider attempt.
+					recordProviderDeferred(err, op.KnowledgeID)
+					logger.Infof(mapCtx,
+						"wiki ingest: provider deferred Map for knowledge %s; keeping row pending",
+						op.KnowledgeID)
+					return nil
+				}
 				mapMu.Lock()
 				ingestFailed++
 				failedOp := op
@@ -1390,6 +1460,22 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 		})
 	}
 	if err := eg.Wait(); err != nil {
+		if modeladmission.IsModelWorkDeferred(err) {
+			settleCtx, cancel := newWikiQueueSettlementContext(ctx)
+			defer cancel()
+			if rotateErr := s.rotateWikiAttempts(settleCtx, pendingOps); rotateErr != nil {
+				exitStatus = "provider_deferred_rotation_failed"
+				return rotateErr
+			}
+			scheduled, scheduleErr := s.scheduleProviderCircuitFollowUp(settleCtx, payload, err)
+			followUpScheduled = scheduled
+			if scheduleErr != nil {
+				exitStatus = "provider_circuit_followup_failed"
+				return scheduleErr
+			}
+			exitStatus = "provider_circuit_open"
+			return nil
+		}
 		exitStatus = "map_phase_failed"
 		return fmt.Errorf("wiki ingest: map phase: %w", err)
 	}
@@ -1581,9 +1667,26 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 					return fmt.Errorf("reduce slug %s after context ended: %w", slug, err)
 				}
 				if modeladmission.IsModelWorkDeferred(err) {
-					// Abort the shared KB phase before settlement. Prepared
-					// document rows remain durable and no fail_count is spent.
-					return err
+					// A shared circuit/admission rejection happened before a
+					// provider call. Keep only the contributing rows pending
+					// and continue settling unrelated documents. This must not
+					// mask a real timeout from another concurrent slug: those
+					// failures still reach failedOps and consume their bounded
+					// attempt budget below.
+					contributors := make([]string, 0, len(updates))
+					reduceMu.Lock()
+					for _, update := range updates {
+						if update.Type == types.WikiPageTypeEntity ||
+							update.Type == types.WikiPageTypeConcept {
+							failedAdditionSlugs[slug] = struct{}{}
+						}
+						if update.KnowledgeID != "" {
+							contributors = append(contributors, update.KnowledgeID)
+						}
+					}
+					reduceMu.Unlock()
+					recordProviderDeferred(err, contributors...)
+					return nil
 				}
 				// Attribute an unclassified non-context failure to every live source
 				// op for this slug. This preserves partial-batch progress without
@@ -1636,6 +1739,10 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 		if modeladmission.IsModelWorkDeferred(err) {
 			settleCtx, cancel := newWikiQueueSettlementContext(ctx)
 			defer cancel()
+			if rotateErr := s.rotateWikiAttempts(settleCtx, pendingOps); rotateErr != nil {
+				exitStatus = "provider_deferred_rotation_failed"
+				return rotateErr
+			}
 			scheduled, scheduleErr := s.scheduleProviderCircuitFollowUp(settleCtx, payload, err)
 			followUpScheduled = scheduled
 			if scheduleErr != nil {
@@ -1667,6 +1774,36 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 
 	failedOps = mergeFailedWikiOps(failedOps, pendingOps, failedContributionKnowledgeIDs)
 	failedOps = removeTerminalStaleWikiOps(failedOps, terminalStaleKnowledgeIDs)
+	deferredMu.Lock()
+	deferredKnowledgeSnapshot := make(map[string]struct{}, len(deferredKnowledgeIDs))
+	for knowledgeID := range deferredKnowledgeIDs {
+		deferredKnowledgeSnapshot[knowledgeID] = struct{}{}
+	}
+	deferredMu.Unlock()
+	deferredOpsForSettlement := func() []WikiPendingOp {
+		candidates := mergeFailedWikiOps(nil, pendingOps, deferredKnowledgeSnapshot)
+		candidates = removeTerminalStaleWikiOps(candidates, terminalStaleKnowledgeIDs)
+		failedIDs := make(map[int64]struct{}, len(failedOps))
+		failedLogical := make(map[string]struct{}, len(failedOps))
+		for _, failedOp := range failedOps {
+			if failedOp.dbID > 0 {
+				failedIDs[failedOp.dbID] = struct{}{}
+			}
+			failedLogical[failedOp.Op+"\x00"+failedOp.KnowledgeID] = struct{}{}
+		}
+		filtered := candidates[:0]
+		for _, candidate := range candidates {
+			if _, failed := failedIDs[candidate.dbID]; candidate.dbID > 0 && failed {
+				continue
+			}
+			if _, failed := failedLogical[candidate.Op+"\x00"+candidate.KnowledgeID]; failed {
+				continue
+			}
+			filtered = append(filtered, candidate)
+		}
+		return filtered
+	}
+	deferredOps := deferredOpsForSettlement()
 	for i := range failedOps {
 		if failures := failedOpMessages[failedOps[i].KnowledgeID]; len(failures) > 0 {
 			failedOps[i].lastError = strings.Join(failures, "; ")
@@ -1674,6 +1811,11 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	}
 	failedKnowledgeIDs := make(map[string]struct{}, len(failedOps))
 	for _, op := range failedOps {
+		if op.KnowledgeID != "" {
+			failedKnowledgeIDs[op.KnowledgeID] = struct{}{}
+		}
+	}
+	for _, op := range deferredOps {
 		if op.KnowledgeID != "" {
 			failedKnowledgeIDs[op.KnowledgeID] = struct{}{}
 		}
@@ -1903,6 +2045,7 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	markTerminalStale(staleBeforeSettlement)
 	failedOps = mergeFailedWikiOps(failedOps, pendingOps, failedContributionKnowledgeIDs)
 	failedOps = removeTerminalStaleWikiOps(failedOps, terminalStaleKnowledgeIDs)
+	deferredOps = deferredOpsForSettlement()
 	for i := range failedOps {
 		if failures := failedOpMessages[failedOps[i].KnowledgeID]; len(failures) > 0 {
 			failedOps[i].lastError = strings.Join(failures, "; ")
@@ -1910,6 +2053,11 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	}
 	failedKnowledgeIDs = make(map[string]struct{}, len(failedOps))
 	for _, op := range failedOps {
+		if op.KnowledgeID != "" {
+			failedKnowledgeIDs[op.KnowledgeID] = struct{}{}
+		}
+	}
+	for _, op := range deferredOps {
 		if op.KnowledgeID != "" {
 			failedKnowledgeIDs[op.KnowledgeID] = struct{}{}
 		}
@@ -1934,6 +2082,20 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 		if failures := failedOpMessages[r.KnowledgeID]; len(failures) > 0 {
 			materializationErr := errors.New(strings.Join(failures, "; "))
 			s.tracker().FailSpan(ctx, r.WikiSpan, "WIKI_MATERIALIZATION_FAILED", materializationErr.Error(), materializationErr)
+			continue
+		}
+		if _, deferred := deferredKnowledgeSnapshot[r.KnowledgeID]; deferred {
+			deferredErr := providerDeferredErr
+			if deferredErr == nil {
+				deferredErr = errors.New("model work was deferred before provider execution")
+			}
+			s.tracker().FailSpan(
+				ctx,
+				r.WikiSpan,
+				"WIKI_PROVIDER_DEFERRED",
+				deferredErr.Error(),
+				deferredErr,
+			)
 			continue
 		}
 		writtenPages := make([]map[string]string, 0, len(r.Pages))
@@ -1971,8 +2133,8 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	// Build the trim set: rows that should be removed from
 	// task_pending_ops. We start from the full peekedIDs (every row we
 	// pulled, even ones de-duplicated by knowledge_id) and subtract
-	// any failed op's dbID — those need to stay in place so the
-	// requeueFailedOps path can decide between retry and dead-letter.
+	// any unsettled op's dbID. Real failures stay for retry/dead-letter;
+	// provider-deferred rows stay for budget-free rotation.
 	if err := batchFetchError(); err != nil {
 		exitStatus = "batch_lookup_failed"
 		return fmt.Errorf("wiki ingest: mandatory batch lookup failed during post-processing: %w", err)
@@ -2020,7 +2182,10 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 			return statusErr
 		}
 	}
-	trimIDs := wikiQueueTrimIDs(peekedIDs, failedOps)
+	unsettledOps := make([]WikiPendingOp, 0, len(failedOps)+len(deferredOps))
+	unsettledOps = append(unsettledOps, failedOps...)
+	unsettledOps = append(unsettledOps, deferredOps...)
+	trimIDs := wikiQueueTrimIDs(peekedIDs, unsettledOps)
 	if err := wikiWorkContextError(ctx); err != nil {
 		exitStatus = "postprocess_context_done"
 		return fmt.Errorf("wiki ingest: context ended before queue settlement: %w", err)
@@ -2029,7 +2194,15 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	// next wake-up using a detached, bounded context. All three operations are
 	// attempted even if one fails so that a transient delete error cannot also
 	// suppress recovery scheduling. Any failure is returned to asynq.
-	followUpScheduled, err = s.settleWikiQueue(ctx, leaseCtx, payload, trimIDs, failedOps)
+	followUpScheduled, err = s.settleWikiQueueWithDeferrals(
+		ctx,
+		leaseCtx,
+		payload,
+		trimIDs,
+		failedOps,
+		deferredOps,
+		providerDeferredErr,
+	)
 	if err != nil {
 		exitStatus = "queue_settlement_failed"
 		logger.Warnf(ctx, "wiki ingest: queue settlement failed for KB %s: %v", payload.KnowledgeBaseID, err)

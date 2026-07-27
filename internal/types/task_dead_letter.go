@@ -16,10 +16,10 @@ import (
 //     uniformly without per-handler instrumentation.
 //
 //  2. Service-level retry handlers insert directly when an in-batch
-//     retry counter exceeds the service-defined cap. Wiki ingest is the
+//     retry counter reaches the service-defined cap. Wiki ingest is the
 //     primary example: per-document ops accumulate fail_count in
-//     `task_pending_ops`, and once the count exceeds wikiMaxFailRetries
-//     the op is moved here instead of being requeued.
+//     `task_pending_ops`, and once the configured maximum is reached the op is
+//     moved here instead of being requeued.
 //
 // Operators query by (Scope, ScopeID) — e.g. "all dead letters for KB
 // abc" — or by TaskType — e.g. "all summary:generation failures in the

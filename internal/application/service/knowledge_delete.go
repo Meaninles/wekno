@@ -471,8 +471,9 @@ const (
 // sending an asynq cancellation is insufficient: an already-running worker
 // may still be inside a vector/chunk write. We therefore keep cancelling new
 // descendants and wait until Redis proves that no document-lifecycle task is
-// queued or active for any target. Wiki tasks are deliberately excluded; the
-// durable retract queue owns their independent cleanup.
+// queued or active for any target. Generic KB-scoped Wiki triggers and durable
+// retract work stay independent, but the exact document-generation Wiki Map
+// worker is deletion-owned and must cross this barrier before artifact purge.
 func (s *knowledgeService) quiesceKnowledgeDeletion(
 	ctx context.Context,
 	knowledges []*types.Knowledge,
@@ -490,6 +491,10 @@ func quiesceKnowledgeDeletionWithInspector(
 	}
 	if taskInspector == nil {
 		return errors.New("knowledge delete: task inspector unavailable for quiescence barrier")
+	}
+	deletionTaskInspector, ok := taskInspector.(interfaces.KnowledgeDeletionTaskInspector)
+	if !ok || deletionTaskInspector == nil {
+		return errors.New("knowledge delete: deletion task liveness inspector unavailable")
 	}
 
 	targets := make([]interfaces.KnowledgeTaskTarget, 0, len(knowledges))
@@ -522,7 +527,7 @@ func quiesceKnowledgeDeletionWithInspector(
 				return fmt.Errorf("knowledge delete: cancel lifecycle tasks for %s: %w", target.KnowledgeID, err)
 			}
 		}
-		live, err := taskInspector.DocumentLifecycleTaskKnowledgeIDs(waitCtx, targets)
+		live, err := deletionTaskInspector.DeletionTaskKnowledgeIDs(waitCtx, targets)
 		if err != nil {
 			if !errors.Is(err, asynq.ErrTaskNotFound) {
 				return fmt.Errorf("knowledge delete: inspect lifecycle task quiescence: %w", err)
@@ -951,6 +956,23 @@ func (s *knowledgeService) deleteKnowledgeListExpected(
 
 	if err = wg.Wait(); err != nil {
 		return err
+	}
+	// The live-task quiescence barrier above guarantees no document-owned
+	// worker can still publish a terminal record. Remove completed/archived
+	// root and derivative task metadata before finalizing the soft-delete
+	// tombstone; the durable PostgreSQL workflow remains as the audit trail.
+	taskHistoryPurger, ok := s.taskInspector.(interfaces.TaskHistoryPurger)
+	if !ok {
+		return errors.New("knowledge delete: terminal task-history purger unavailable")
+	}
+	for _, knowledgeID := range deleteIDs {
+		if _, err := taskHistoryPurger.PurgeTaskHistoryForKnowledge(ctx, knowledgeID); err != nil {
+			return fmt.Errorf(
+				"purge terminal task history for knowledge %s: %w",
+				knowledgeID,
+				err,
+			)
+		}
 	}
 	removedStorage, err := s.wikiDeleteCoord.Finalize(ctx, tenantInfo.ID, deleteIDs)
 	if err != nil {

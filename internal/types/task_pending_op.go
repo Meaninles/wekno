@@ -14,7 +14,7 @@ import (
 // pulls a batch with PeekBatch on that tuple, deduplicates by DedupKey
 // service-side if it cares, processes the ops, then DeleteByIDs the
 // consumed rows. FailCount is incremented per-row by IncrFailCount and
-// the consumer dead-letters the row once the count exceeds a service-
+// the consumer dead-letters the row once the count reaches a service-
 // defined cap.
 type TaskPendingOp struct {
 	// Auto-increment row id. Used by PeekBatch ordering and by
@@ -45,15 +45,13 @@ type TaskPendingOp struct {
 	Payload json.RawMessage `json:"payload" gorm:"type:jsonb;default:'{}'"`
 	// In-batch retry counter. Reset to 0 on successful consume.
 	FailCount int `json:"fail_count" gorm:"default:0"`
-	// Server-side enqueue time. NOT used for ordering (id is the cursor)
-	// but useful for ops queries like "rows older than 1h that never
-	// drained".
+	// Server-side enqueue time, useful for ops queries like "rows older than
+	// 1h that never drained".
 	EnqueuedAt time.Time `json:"enqueued_at"`
-	// Optional claim timestamp for future locking workflows. Not used
-	// in the current revision: Wiki consumers combine an external liveness
-	// lock with a database fencing epoch; other queues may use their own
-	// coordinator. Reserved so future row-claiming workers can adopt it
-	// without another migration.
+	// Last Wiki attempt/claim timestamp. Retry selection puts never-attempted
+	// rows first and rotates attempted rows by this value, preventing one
+	// poisoned FIFO head from monopolizing every batch. Correctness still
+	// comes from the external liveness lock plus database fencing epoch.
 	ClaimedAt *time.Time `json:"claimed_at,omitempty"`
 	// MapReadyAt is set only after the expensive, document-local Wiki Map
 	// phase has been durably checkpointed. Wiki commit workers select ingest

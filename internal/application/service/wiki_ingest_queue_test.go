@@ -19,6 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -39,6 +40,7 @@ type wikiQueuePendingRepoStub struct {
 	incrErr       error
 	countErr      error
 	checkpointErr error
+	touchErr      error
 
 	rows          []*types.TaskPendingOp
 	pendingCount  int64
@@ -59,6 +61,7 @@ type wikiQueuePendingRepoStub struct {
 	deleteCalls     int
 	countCalls      int
 	checkpointCalls int
+	touchedIDs      []int64
 	leaseMu         sync.Mutex
 	leaseEpoch      int64
 	leaseErr        error
@@ -294,6 +297,11 @@ func (r *wikiQueuePendingRepoStub) IncrFailCount(ctx context.Context, id int64) 
 		return 0, r.incrErr
 	}
 	return r.incrCount, nil
+}
+
+func (r *wikiQueuePendingRepoStub) TouchWikiAttempt(_ context.Context, id int64) error {
+	r.touchedIDs = append(r.touchedIDs, id)
+	return r.touchErr
 }
 
 func (r *wikiQueuePendingRepoStub) PendingCount(ctx context.Context, _, _, _ string) (int64, error) {
@@ -812,7 +820,8 @@ func TestProcessWikiMapDuplicateDeliveryUsesDocumentLeaseAndCoalescedSuccessor(t
 
 func TestDistributedWikiMapProviderRetryIsSpreadAfterCircuitBoundary(t *testing.T) {
 	enqueuer := &wikiQueueTaskEnqueuerStub{}
-	svc := &wikiIngestService{task: enqueuer}
+	pending := &wikiQueuePendingRepoStub{}
+	svc := &wikiIngestService{pendingRepo: pending, task: enqueuer}
 	payload := WikiIngestPayload{
 		TenantID:        42,
 		KnowledgeBaseID: "kb-1",
@@ -827,9 +836,11 @@ func TestDistributedWikiMapProviderRetryIsSpreadAfterCircuitBoundary(t *testing.
 	require.NoError(t, svc.recordDistributedMapFailure(
 		context.Background(),
 		payload,
-		WikiPendingOp{KnowledgeID: "knowledge-1"},
+		WikiPendingOp{KnowledgeID: "knowledge-1", dbID: 91},
 		providerErr,
 	))
+	require.Equal(t, []int64{91}, pending.touchedIDs)
+	require.Empty(t, pending.incrementedIDs)
 	require.Len(t, enqueuer.tasks, 1)
 	delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt)
 	require.True(t, ok)
@@ -839,6 +850,50 @@ func TestDistributedWikiMapProviderRetryIsSpreadAfterCircuitBoundary(t *testing.
 		base,
 		"wiki-map\x0042\x00kb-1\x00knowledge-1:generation-1",
 	))
+}
+
+func TestDistributedWikiMapRealProviderFailureConsumesAttemptBudget(t *testing.T) {
+	row := wikiPendingRow(92, WikiPendingOp{
+		Op: WikiOpIngest, KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+	})
+	row.TenantID = 42
+	row.ScopeID = "kb-1"
+	row.DedupKey = "knowledge-1:generation-1"
+	base := &wikiQueuePendingRepoStub{
+		rows:          []*types.TaskPendingOp{row},
+		incrCount:     1,
+		countFromRows: true,
+	}
+	pending := &wikiDistributedPendingRepoStub{wikiQueuePendingRepoStub: base}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: pending, task: enqueuer}
+	payload := WikiIngestPayload{
+		TenantID: 42, KnowledgeBaseID: "kb-1", TaskMode: wikiTaskModeMap,
+		MapDedupKey: "knowledge-1:generation-1",
+	}
+	providerErr := workretry.ConsumeProviderFailure(
+		&modeladmission.ProviderUnavailableError{
+			Kind:       modeladmission.KindChat,
+			RetryAfter: time.Minute,
+			Cause:      context.DeadlineExceeded,
+		},
+	)
+
+	require.NoError(t, svc.recordDistributedMapFailure(
+		context.Background(),
+		payload,
+		WikiPendingOp{
+			Op: WikiOpIngest, KnowledgeID: "knowledge-1",
+			ProcessingGeneration: "generation-1", dbID: row.ID,
+		},
+		providerErr,
+	))
+	require.Equal(t, []int64{row.ID}, base.incrementedIDs)
+	require.Empty(t, base.touchedIDs)
+	require.Len(t, enqueuer.tasks, 1)
+	delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt)
+	require.True(t, ok)
+	require.Equal(t, wikiFollowUpDelay, delay)
 }
 
 func (e *wikiQueueTaskEnqueuerStub) PrepareDocumentWorkflow(
@@ -1508,6 +1563,36 @@ func TestSettleWikiQueueActiveBatchUsesDetachedContextAndAlternatingUniqueFollow
 	require.Equal(t, uint8(1), followUpPayload.WakePhase)
 }
 
+func TestSettleWikiQueueSeparatesRealFailuresFromProviderDeferrals(t *testing.T) {
+	repo := &wikiQueuePendingRepoStub{pendingCount: 2, incrCount: 1}
+	enqueuer := &wikiQueueTaskEnqueuerStub{}
+	svc := &wikiIngestService{pendingRepo: repo, task: enqueuer}
+	circuitErr := &modeladmission.CircuitOpenError{
+		Kind:       modeladmission.KindChat,
+		RetryAfter: 3 * time.Minute,
+	}
+
+	followUp, err := svc.settleWikiQueueWithDeferrals(
+		context.Background(),
+		context.Background(),
+		WikiIngestPayload{TenantID: 42, KnowledgeBaseID: "kb-1"},
+		[]int64{10},
+		[]WikiPendingOp{{Op: WikiOpIngest, KnowledgeID: "timed-out", dbID: 11}},
+		[]WikiPendingOp{{Op: WikiOpIngest, KnowledgeID: "circuit-rejected", dbID: 12}},
+		circuitErr,
+	)
+	require.NoError(t, err)
+	require.True(t, followUp)
+	require.Equal(t, [][]int64{{10}}, repo.deletedIDs)
+	require.Equal(t, []int64{11}, repo.incrementedIDs)
+	require.Equal(t, []int64{12}, repo.touchedIDs)
+	require.Len(t, enqueuer.tasks, 1)
+	delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt)
+	require.True(t, ok)
+	require.GreaterOrEqual(t, delay, circuitErr.RetryAfter)
+	require.Less(t, delay, circuitErr.RetryAfter+modeladmission.ProviderRetrySpreadWindow(circuitErr.RetryAfter))
+}
+
 func TestScheduleLockConflictFollowUpUsesAlternatingUniqueTask(t *testing.T) {
 	enqueuer := &wikiQueueTaskEnqueuerStub{}
 	svc := &wikiIngestService{task: enqueuer}
@@ -1738,7 +1823,7 @@ func TestProcessWikiIngestRedisLockFailureIsFailClosed(t *testing.T) {
 func TestRequeueFailedOpsDeadLetterFailureKeepsPendingRow(t *testing.T) {
 	archiveErr := errors.New("archive insert failed")
 	pending := &wikiQueuePendingRepoStub{
-		incrCount:  wikiMaxFailRetries + 1,
+		incrCount:  workretry.DefaultWikiMaxAttempts,
 		archiveErr: archiveErr,
 	}
 	svc := &wikiIngestService{pendingRepo: pending}
@@ -2984,7 +3069,7 @@ func TestProcessWikiIngestWikiDisabledRetractFailureDeadLettersWithCause(t *test
 			KnowledgeID: "knowledge-1",
 		})},
 		countFromRows: true,
-		incrCount:     wikiMaxFailRetries + 1,
+		incrCount:     workretry.DefaultWikiMaxAttempts,
 	}
 	svc := &wikiIngestService{
 		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
@@ -3144,7 +3229,7 @@ func TestProcessWikiIngestUnknownOpDeadLettersWithoutModel(t *testing.T) {
 			KnowledgeID: "knowledge-1",
 		})},
 		countFromRows: true,
-		incrCount:     wikiMaxFailRetries + 1,
+		incrCount:     workretry.DefaultWikiMaxAttempts,
 	}
 	svc := &wikiIngestService{
 		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
@@ -3176,7 +3261,7 @@ func TestProcessWikiIngestMissingSynthesisModelUsesBoundedOpDeadLetter(t *testin
 			KnowledgeID: "knowledge-1",
 		})},
 		countFromRows: true,
-		incrCount:     wikiMaxFailRetries + 1,
+		incrCount:     workretry.DefaultWikiMaxAttempts,
 	}
 	svc := &wikiIngestService{
 		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
@@ -3208,7 +3293,7 @@ func TestProcessWikiIngestMissingConfiguredModelUsesBoundedOpDeadLetter(t *testi
 			KnowledgeID: "knowledge-1",
 		})},
 		countFromRows: true,
-		incrCount:     wikiMaxFailRetries + 1,
+		incrCount:     workretry.DefaultWikiMaxAttempts,
 	}
 	svc := &wikiIngestService{
 		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{
@@ -3240,7 +3325,7 @@ func TestProcessWikiIngestInvalidModelConfigurationUsesBoundedOpDeadLetter(t *te
 			KnowledgeID: "knowledge-1",
 		})},
 		countFromRows: true,
-		incrCount:     wikiMaxFailRetries + 1,
+		incrCount:     workretry.DefaultWikiMaxAttempts,
 	}
 	svc := &wikiIngestService{
 		kbService: &wikiQueueKBServiceStub{kb: &types.KnowledgeBase{

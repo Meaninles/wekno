@@ -47,6 +47,13 @@ func newPurgeDB(t *testing.T) *gorm.DB {
 			op TEXT NOT NULL, dedup_key TEXT NOT NULL,
 			payload JSON NOT NULL DEFAULT '{}'
 		)`,
+		`CREATE TABLE task_dead_letters (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL, task_type TEXT NOT NULL,
+			scope TEXT NOT NULL, scope_id TEXT NOT NULL,
+			related_id TEXT NOT NULL DEFAULT '',
+			payload JSON NOT NULL DEFAULT '{}'
+		)`,
 		`CREATE TABLE embeddings (
 			knowledge_id TEXT NOT NULL,
 			content TEXT NOT NULL, deleted_at DATETIME
@@ -119,6 +126,14 @@ func TestDeleteSoftRowArtifactsPurgesTargetAndReleasesSharedCache(t *testing.T) 
 		   'owned', 'target:unfinished-hash', '{}'),
 		  (7, 'knowledge:aux_object', 'knowledge_base', 'kb-other',
 		   'delete_complete', 'other:source-hash', '{}')`).Error)
+	require.NoError(t, db.Exec(`
+		INSERT INTO task_dead_letters
+		  (tenant_id, task_type, scope, scope_id, related_id, payload)
+		VALUES
+		  (7, 'summary:generation', 'knowledge_base', 'kb-target', 'target', '{}'),
+		  (7, 'chunk:extract', 'knowledge', 'target', '', '{}'),
+		  (7, 'summary:generation', 'knowledge_base', 'kb-target', 'other', '{}'),
+		  (8, 'summary:generation', 'knowledge_base', 'kb-target', 'target', '{}')`).Error)
 
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 		return DeleteSoftRowArtifacts(tx, 7, []string{"target"})
@@ -144,13 +159,14 @@ func TestDeleteSoftRowArtifactsPurgesTargetAndReleasesSharedCache(t *testing.T) 
 		require.EqualValues(t, 1, otherCount, table)
 	}
 
-	var sharedRefs, uniqueRefs int64
+	var sharedRefs int64
 	require.NoError(t, db.Table("custom_content_cache_entries").
 		Where("content_hash = ?", "shared").Select("ref_count").Scan(&sharedRefs).Error)
-	require.NoError(t, db.Table("custom_content_cache_entries").
-		Where("content_hash = ?", "unique").Select("ref_count").Scan(&uniqueRefs).Error)
 	require.EqualValues(t, 1, sharedRefs)
-	require.Zero(t, uniqueRefs)
+	var uniqueCount int64
+	require.NoError(t, db.Table("custom_content_cache_entries").
+		Where("content_hash = ?", "unique").Count(&uniqueCount).Error)
+	require.Zero(t, uniqueCount, "the final document reference must release the cached payload immediately")
 
 	var completedTarget, ownedTarget, completedOther int64
 	require.NoError(t, db.Table("task_pending_ops").
@@ -162,6 +178,21 @@ func TestDeleteSoftRowArtifactsPurgesTargetAndReleasesSharedCache(t *testing.T) 
 	require.Zero(t, completedTarget, "finalize consumes only the exact completed proof")
 	require.EqualValues(t, 1, ownedTarget, "unfinished ownership proof must remain recoverable")
 	require.EqualValues(t, 1, completedOther, "another document's proof must remain isolated")
+
+	var targetDeadLetters, otherDeadLetters, otherTenantDeadLetters int64
+	require.NoError(t, db.Table("task_dead_letters").
+		Where("tenant_id = ? AND (related_id = ? OR (scope = 'knowledge' AND scope_id = ?))",
+			7, "target", "target").
+		Count(&targetDeadLetters).Error)
+	require.NoError(t, db.Table("task_dead_letters").
+		Where("tenant_id = ? AND related_id = ?", 7, "other").
+		Count(&otherDeadLetters).Error)
+	require.NoError(t, db.Table("task_dead_letters").
+		Where("tenant_id = ? AND related_id = ?", 8, "target").
+		Count(&otherTenantDeadLetters).Error)
+	require.Zero(t, targetDeadLetters)
+	require.EqualValues(t, 1, otherDeadLetters)
+	require.EqualValues(t, 1, otherTenantDeadLetters)
 }
 
 func TestDeleteSoftRowArtifactsRollsBackWhenCacheEntryIsMissing(t *testing.T) {

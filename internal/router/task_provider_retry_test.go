@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,23 @@ func TestCircuitRejectIsRetryBudgetFreeButSemanticFailureIsNot(t *testing.T) {
 
 	semanticErr := errors.New("decode graph JSON: invalid character")
 	require.True(t, asynqIsFailureFunc(semanticErr))
+}
+
+func TestRealProviderFailureConsumesBoundedWorkRetryBudget(t *testing.T) {
+	providerErr := &modeladmission.ProviderUnavailableError{
+		Kind:       modeladmission.KindVLM,
+		RetryAfter: 30 * time.Second,
+		Cause:      errors.New("upstream request timed out"),
+	}
+	budgeted := workretry.ConsumeProviderFailure(providerErr)
+
+	require.True(t, asynqIsFailureFunc(budgeted))
+	delay := asynqRetryDelayFunc(
+		0,
+		budgeted,
+		asynq.NewTask(types.TypeImageMultimodal, []byte(`{"knowledge_id":"k"}`)),
+	)
+	require.GreaterOrEqual(t, delay, 30*time.Second)
 }
 
 func TestShutdownCancellationAndAdmissionBackendFailureAreBudgetFree(t *testing.T) {

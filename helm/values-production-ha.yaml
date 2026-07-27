@@ -291,8 +291,23 @@ app:
       value: 48h
     - name: WEKNORA_ASYNQ_TASK_CONCURRENCY
       value: "16"
+    # Slow VLM work has a dedicated Asynq server, so poison images cannot
+    # occupy the generic background worker pool.
+    - name: WEKNORA_MULTIMODAL_TASK_CONCURRENCY
+      value: "2"
+    - name: CUSTOM_WORK_RETRY_IMAGE_MAX_ATTEMPTS
+      value: "10"
+    - name: CUSTOM_WORK_RETRY_WIKI_MAX_ATTEMPTS
+      value: "10"
+    # A Wiki LLM timeout can consume 15 minutes. Retry through the durable
+    # per-document queue instead of repeating three times while holding the
+    # KB materialization lease.
+    - name: CUSTOM_WORK_RETRY_WIKI_INLINE_ATTEMPTS
+      value: "1"
+    - name: CUSTOM_WORK_RETRY_WIKI_CALL_TIMEOUT_SECONDS
+      value: "900"
     - name: WEKNORA_LLM_CHAT_TIMEOUT_SECONDS
-      value: "240"
+      value: "900"
 
     # Shared Redis leases make these cluster-wide limits; they must not be
     # multiplied by the number of app replicas. The DeepSeek V4 Flash route

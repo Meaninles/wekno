@@ -110,10 +110,11 @@ const documentOwnershipConflictRetryDelay = 2 * time.Second
 // using RetryDelayFunc, but does not increment Retried. This preserves
 // low-latency ownership handoff without exhausting MaxRetry or creating
 // misleading task_dead_letters rows. All Redis, database, model, and payload
-// errors remain ordinary failures. Provider transport/rate-limit/outage
-// errors are also budget-free: the distributed circuit supplies their delay,
-// while malformed model output and deterministic document errors still spend
-// the normal retry budget.
+// errors remain ordinary failures. Raw provider transport/rate-limit/outage
+// errors are budget-free for legacy handlers; long-running durable image/Wiki
+// handlers explicitly mark real remote calls so they spend their bounded
+// business budget while preserving Retry-After. Pre-call circuit rejects
+// remain budget-free.
 func asynqIsFailureFunc(err error) bool {
 	return err != nil &&
 		!errors.Is(err, service.ErrWikiIngestConcurrent) &&
@@ -169,17 +170,19 @@ func providerRetryIdentity(t *asynq.Task) string {
 
 // Background fanout workers use a private operational setting so changing the
 // Coordinator-owned document capacity cannot accidentally create hundreds of
-// summary/graph/VLM workers.
+// summary/graph workers. VLM images use a separate server below.
 const defaultBackgroundTaskConcurrency = 32
+const defaultMultimodalTaskConcurrency = 2
 const defaultControlTaskConcurrency = 2
 const defaultWikiMapTaskConcurrency = 4
 
 type AsynqServers struct {
-	Normal   *asynq.Server // background and legacy queues
-	WikiMap  *asynq.Server // bounded document-local Wiki Map lane
-	Control  *asynq.Server // lifecycle/repair control plane
-	Document *asynq.Server
-	Part     *asynq.Server
+	Normal     *asynq.Server // background and legacy queues
+	Multimodal *asynq.Server // slow VLM image lane
+	WikiMap    *asynq.Server // bounded document-local Wiki Map lane
+	Control    *asynq.Server // lifecycle/repair control plane
+	Document   *asynq.Server
+	Part       *asynq.Server
 }
 
 type documentWorkflowRouter interface {
@@ -198,6 +201,7 @@ type documentQueueReadiness interface {
 
 func startAsynqServers(
 	normal asynqServerLifecycle,
+	multimodal asynqServerLifecycle,
 	wikiMap asynqServerLifecycle,
 	control asynqServerLifecycle,
 	document asynqServerLifecycle,
@@ -205,24 +209,31 @@ func startAsynqServers(
 	handler asynq.Handler,
 	readiness documentQueueReadiness,
 ) error {
-	if normal == nil || wikiMap == nil || control == nil || document == nil || part == nil {
-		return errors.New("background, Wiki Map, control, document and document-part asynq servers are required")
+	if normal == nil || multimodal == nil || wikiMap == nil || control == nil || document == nil || part == nil {
+		return errors.New("background, multimodal, Wiki Map, control, document and document-part asynq servers are required")
 	}
 	if err := normal.Start(handler); err != nil {
 		return fmt.Errorf("start background asynq server: %w", err)
 	}
+	if err := multimodal.Start(handler); err != nil {
+		normal.Shutdown()
+		return fmt.Errorf("start multimodal asynq server: %w", err)
+	}
 	if err := wikiMap.Start(handler); err != nil {
+		multimodal.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("start Wiki Map asynq server: %w", err)
 	}
 	if err := control.Start(handler); err != nil {
 		wikiMap.Shutdown()
+		multimodal.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("start control asynq server: %w", err)
 	}
 	if err := document.Start(handler); err != nil {
 		control.Shutdown()
 		wikiMap.Shutdown()
+		multimodal.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("start document workflow asynq server: %w", err)
 	}
@@ -230,6 +241,7 @@ func startAsynqServers(
 		document.Shutdown()
 		control.Shutdown()
 		wikiMap.Shutdown()
+		multimodal.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("start document part asynq server: %w", err)
 	}
@@ -238,6 +250,7 @@ func startAsynqServers(
 		document.Shutdown()
 		control.Shutdown()
 		wikiMap.Shutdown()
+		multimodal.Shutdown()
 		normal.Shutdown()
 		return errors.New("mark document queue ready: coordinator is unavailable")
 	}
@@ -246,6 +259,7 @@ func startAsynqServers(
 		document.Shutdown()
 		control.Shutdown()
 		wikiMap.Shutdown()
+		multimodal.Shutdown()
 		normal.Shutdown()
 		return fmt.Errorf("mark document queue ready: %w", err)
 	}
@@ -326,10 +340,28 @@ func NewAsynqServers(
 			Queues: map[string]int{
 				types.QueueDefault:       3, // Default priority queue
 				types.QueueLow:           1, // Lowest priority queue
-				types.QueueMultimodal:    1, // Isolated lane for high-volume slow VLM image tasks
 				types.QueueGraph:         1, // Isolated lane for high-volume slow graph-extraction tasks
 				types.QueueQuestion:      1, // Isolated lane for high-volume slow question-generation tasks
 				types.QueueDocumentHeavy: 1, // legacy in-flight root tasks; new work uses QueueDocument
+			},
+			RetryDelayFunc:  asynqRetryDelayFunc,
+			IsFailure:       asynqIsFailureFunc,
+			ShutdownTimeout: 30 * time.Second,
+		},
+	)
+	multimodalConcurrency := defaultMultimodalTaskConcurrency
+	if raw := strings.TrimSpace(os.Getenv("WEKNORA_MULTIMODAL_TASK_CONCURRENCY")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			multimodalConcurrency = parsed
+		}
+	}
+	log.Printf("asynq multimodal server starting with per-instance concurrency=%d", multimodalConcurrency)
+	multimodal := asynq.NewServer(
+		opt,
+		asynq.Config{
+			Concurrency: multimodalConcurrency,
+			Queues: map[string]int{
+				types.QueueMultimodal: 1,
 			},
 			RetryDelayFunc:  asynqRetryDelayFunc,
 			IsFailure:       asynqIsFailureFunc,
@@ -403,8 +435,8 @@ func NewAsynqServers(
 		},
 	)
 	return &AsynqServers{
-		Normal: normal, WikiMap: wikiMap, Control: control,
-		Document: document, Part: part,
+		Normal: normal, Multimodal: multimodal, WikiMap: wikiMap,
+		Control: control, Document: document, Part: part,
 	}
 }
 
@@ -510,15 +542,16 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	mux.HandleFunc(types.TypeKnowledgeTerminalRepair, terminalRepairer.Handle)
 	mux.HandleFunc(taskdefer.TypeResume, taskdefer.NewHandler(params.TaskEnqueuer).Handle)
 
-	if params.Servers == nil || params.Servers.Normal == nil || params.Servers.WikiMap == nil || params.Servers.Control == nil ||
+	if params.Servers == nil || params.Servers.Normal == nil || params.Servers.Multimodal == nil ||
+		params.Servers.WikiMap == nil || params.Servers.Control == nil ||
 		params.Servers.Document == nil || params.Servers.Part == nil {
-		return nil, errors.New("could not run asynq servers: background, Wiki Map, control, document and part servers are required")
+		return nil, errors.New("could not run asynq servers: background, multimodal, Wiki Map, control, document and part servers are required")
 	}
 	if params.DocumentQueue == nil {
 		return nil, errors.New("could not run asynq servers: document queue coordinator is required")
 	}
 	if err := startAsynqServers(
-		params.Servers.Normal, params.Servers.WikiMap, params.Servers.Control,
+		params.Servers.Normal, params.Servers.Multimodal, params.Servers.WikiMap, params.Servers.Control,
 		params.Servers.Document, params.Servers.Part,
 		mux, params.DocumentQueue,
 	); err != nil {
@@ -539,6 +572,9 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 			}
 			if params.Servers.WikiMap != nil {
 				params.Servers.WikiMap.Shutdown()
+			}
+			if params.Servers.Multimodal != nil {
+				params.Servers.Multimodal.Shutdown()
 			}
 			if params.Servers.Normal != nil {
 				params.Servers.Normal.Shutdown()

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -110,6 +111,28 @@ func TestScheduleResumeTreatsUniqueOwnerAsDurableAcceptance(t *testing.T) {
 	require.ErrorIs(t, scheduleResume(
 		enqueuer, summaryTask(t), types.QueueLow, "stable-id", 3, time.Second,
 	), queueErr)
+}
+
+func TestScheduleResumeUpgradesHistoricalImageRetryBudget(t *testing.T) {
+	t.Setenv("CUSTOM_WORK_RETRY_IMAGE_MAX_ATTEMPTS", "10")
+	original := asynq.NewTask(
+		types.TypeImageMultimodal,
+		[]byte(`{"knowledge_id":"knowledge-1"}`),
+	)
+	enqueuer := &deferTestEnqueuer{}
+
+	require.NoError(t, scheduleResume(
+		enqueuer,
+		original,
+		types.QueueMultimodal,
+		"image:knowledge-1:generation-1:0",
+		3,
+		time.Second,
+	))
+	require.Len(t, enqueuer.tasks, 1)
+	var payload resumePayload
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &payload))
+	require.Equal(t, workretry.ConfigFromEnv().ImageMaxRetries(), payload.MaxRetry)
 }
 
 func TestResumeHandlerWaitsForLiveOriginalAndStopsAfterDurableCompletion(t *testing.T) {

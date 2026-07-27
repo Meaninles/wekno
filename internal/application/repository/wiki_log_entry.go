@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -87,13 +88,20 @@ func (r *wikiLogEntryRepository) AppendBatch(ctx context.Context, entries []*typ
 		} else if err := wikiingestguard.Validate(ctx, tx); err != nil {
 			return err
 		}
+		retained, err := knowledgepurge.RetainWikiLogsForActiveKnowledge(tx, entries)
+		if err != nil {
+			return err
+		}
+		if len(retained) == 0 {
+			return nil
+		}
 		if !queueBacked {
-			return tx.Create(&entries).Error
+			return tx.Create(&retained).Error
 		}
 		return tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "source_op_id"}},
 			DoNothing: true,
-		}).Create(&entries).Error
+		}).Create(&retained).Error
 	})
 }
 

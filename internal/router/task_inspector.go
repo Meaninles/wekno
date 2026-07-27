@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
@@ -89,6 +90,15 @@ type knowledgeBaseIDProbe struct {
 	KnowledgeBaseID string `json:"knowledge_base_id"`
 }
 
+type wikiMapKnowledgeProbe struct {
+	TaskMode     string   `json:"task_mode,omitempty"`
+	MapDedupKey  string   `json:"map_dedup_key,omitempty"`
+	KnowledgeID  string   `json:"knowledge_id,omitempty"`
+	KnowledgeIDs []string `json:"knowledge_ids,omitempty"`
+}
+
+const wikiMapTaskMode = "map"
+
 func wikiTaskKnowledgeBaseID(taskType string, payload []byte) (string, bool, error) {
 	if taskType != types.TypeWikiIngest {
 		return "", false, nil
@@ -121,7 +131,9 @@ var queuesScanned = []string{
 	documentsplit.QueuePart,
 }
 
-// taskTypesForKnowledgeCancel contains only single-document workers. A batch
+// taskTypesForKnowledgeCancel contains only single-document workers. Wiki
+// triggers are ordinarily KB-scoped, but task_mode="map" is an exact
+// document-generation worker and is recognized specially below. A batch
 // controller is indivisible at the Asynq layer: cancelling it for document A
 // would silently discard the requested work for B..Z. Batch controllers stay
 // visible to the lifecycle barrier below but are allowed to finish; their
@@ -136,6 +148,7 @@ var taskTypesForKnowledgeCancel = map[string]struct{}{
 	types.TypeChunkExtract:         {},
 	types.TypeDataTableSummary:     {},
 	types.TypeFAQImport:            {},
+	types.TypeWikiIngest:           {},
 	documentsplit.TypePartProcess:  {},
 	documentsplit.TypeFinalize:     {},
 }
@@ -146,6 +159,23 @@ var multiKnowledgeTaskTypes = map[string]struct{}{
 }
 
 var taskTypesForDocumentLifecycle = func() map[string]struct{} {
+	result := make(map[string]struct{}, len(taskTypesForKnowledgeCancel)+len(multiKnowledgeTaskTypes))
+	for taskType := range taskTypesForKnowledgeCancel {
+		// Wiki Map is deliberately absent from normal parsing/finalization
+		// liveness. It has its own deletion-only barrier below and must never
+		// retain a parser slot while the slow Wiki pipeline runs.
+		if taskType == types.TypeWikiIngest {
+			continue
+		}
+		result[taskType] = struct{}{}
+	}
+	for taskType := range multiKnowledgeTaskTypes {
+		result[taskType] = struct{}{}
+	}
+	return result
+}()
+
+var taskTypesForKnowledgeDeletion = func() map[string]struct{} {
 	result := make(map[string]struct{}, len(taskTypesForKnowledgeCancel)+len(multiKnowledgeTaskTypes))
 	for taskType := range taskTypesForKnowledgeCancel {
 		result[taskType] = struct{}{}
@@ -230,10 +260,47 @@ func (a *asynqTaskInspector) CancelTasksForKnowledge(
 		// Pending / Scheduled / Retry can all be deleted by task ID.
 		// Archived tasks are NOT touched: dead-letter rows are
 		// already final and should remain visible to operators.
-		deleted += a.deletePendingMatches(ctx, queue, knowledgeID)
-		deleted += a.deleteScheduledMatches(ctx, queue, knowledgeID)
-		deleted += a.deleteRetryMatches(ctx, queue, knowledgeID)
-		cancelled += a.cancelActiveMatches(ctx, queue, knowledgeID)
+		count, err := deleteCompactingTaskMatches(
+			ctx,
+			queue,
+			knowledgeID,
+			"pending",
+			a.inspector.ListPendingTasks,
+			a.inspector.DeleteTask,
+		)
+		deleted += count
+		if err != nil {
+			return deleted, cancelled, err
+		}
+		count, err = deleteCompactingTaskMatches(
+			ctx,
+			queue,
+			knowledgeID,
+			"scheduled",
+			a.inspector.ListScheduledTasks,
+			a.inspector.DeleteTask,
+		)
+		deleted += count
+		if err != nil {
+			return deleted, cancelled, err
+		}
+		count, err = deleteCompactingTaskMatches(
+			ctx,
+			queue,
+			knowledgeID,
+			"retry",
+			a.inspector.ListRetryTasks,
+			a.inspector.DeleteTask,
+		)
+		deleted += count
+		if err != nil {
+			return deleted, cancelled, err
+		}
+		count, err = a.cancelActiveMatches(ctx, queue, knowledgeID)
+		cancelled += count
+		if err != nil {
+			return deleted, cancelled, err
+		}
 	}
 
 	logger.Infof(ctx,
@@ -241,6 +308,134 @@ func (a *asynqTaskInspector) CancelTasksForKnowledge(
 		knowledgeID, deleted, cancelled,
 	)
 	return deleted, cancelled, nil
+}
+
+type terminalTaskPageLister func(
+	queue string, opts ...asynq.ListOption,
+) ([]*asynq.TaskInfo, error)
+
+type taskRecordDeleter func(queue, id string) error
+
+// PurgeTaskHistoryForKnowledge removes terminal Asynq records after document
+// deletion has proved that no matching worker remains live. Cancel and purge
+// are deliberately separate operations: user-initiated parse cancellation
+// keeps terminal operator history, while full document deletion removes every
+// document-owned root/derivative task record without touching the durable
+// PostgreSQL workflow audit row.
+func (a *asynqTaskInspector) PurgeTaskHistoryForKnowledge(
+	ctx context.Context, knowledgeID string,
+) (int, error) {
+	if a == nil || strings.TrimSpace(knowledgeID) == "" {
+		return 0, errors.New("task inspector: task-history purge requires a knowledge identity")
+	}
+	if a.syncTasks != nil {
+		// Lite mode has no terminal task store. Its live registry removes the
+		// record when the handler exits, which the caller already proved at the
+		// quiescence barrier.
+		return 0, nil
+	}
+	if a.inspector == nil {
+		return 0, errors.New("task inspector: task-history purge backend unavailable")
+	}
+
+	deleted := 0
+	for _, queue := range queuesScanned {
+		count, err := deleteCompactingTaskMatches(
+			ctx,
+			queue,
+			knowledgeID,
+			"completed",
+			a.inspector.ListCompletedTasks,
+			a.inspector.DeleteTask,
+		)
+		if err != nil {
+			return deleted, err
+		}
+		deleted += count
+
+		count, err = deleteCompactingTaskMatches(
+			ctx,
+			queue,
+			knowledgeID,
+			"archived",
+			a.inspector.ListArchivedTasks,
+			a.inspector.DeleteTask,
+		)
+		if err != nil {
+			return deleted, err
+		}
+		deleted += count
+	}
+	logger.Infof(
+		ctx,
+		"[TaskInspector] knowledge=%s terminal task history purged=%d",
+		knowledgeID,
+		deleted,
+	)
+	return deleted, nil
+}
+
+// deleteCompactingTaskMatches keeps the current page after any deletion
+// because Asynq's pending/scheduled/retry/terminal lists compact immediately.
+// Advancing unconditionally would skip the next page's former contents when
+// one document produced more than listPageSize derivatives.
+func deleteCompactingTaskMatches(
+	ctx context.Context,
+	queue string,
+	knowledgeID string,
+	state string,
+	list terminalTaskPageLister,
+	deleteTask taskRecordDeleter,
+) (int, error) {
+	deleted := 0
+	page := 1
+	for {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		tasks, err := list(queue, asynq.PageSize(listPageSize), asynq.Page(page))
+		if err != nil {
+			if errors.Is(err, asynq.ErrQueueNotFound) {
+				return deleted, nil
+			}
+			return deleted, fmt.Errorf(
+				"list %s tasks in queue %s: %w", state, queue, err,
+			)
+		}
+		if len(tasks) == 0 {
+			return deleted, nil
+		}
+
+		deletedOnPage := 0
+		for _, task := range tasks {
+			if err := ctx.Err(); err != nil {
+				return deleted, err
+			}
+			if !matchesKnowledge(task.Type, task.Payload, knowledgeID) {
+				continue
+			}
+			if err := deleteTask(queue, task.ID); err != nil {
+				// Retention expiry may remove a terminal record between list
+				// and delete. Its absence already satisfies the purge.
+				if errors.Is(err, asynq.ErrTaskNotFound) {
+					continue
+				}
+				return deleted, fmt.Errorf(
+					"delete %s task queue=%s type=%s id=%s: %w",
+					state, queue, task.Type, task.ID, err,
+				)
+			}
+			deleted++
+			deletedOnPage++
+		}
+		if deletedOnPage > 0 {
+			continue
+		}
+		if len(tasks) < listPageSize {
+			return deleted, nil
+		}
+		page++
+	}
 }
 
 // CancelWikiTasksForKnowledgeBase removes every disposable wiki:ingest
@@ -458,6 +653,38 @@ func (a *asynqTaskInspector) DocumentLifecycleTaskKnowledgeIDs(
 	}
 	if err := a.addAsynqQueuedKnowledgeIDsForTypes(
 		ctx, remaining, queued, taskTypesForDocumentLifecycle,
+	); err != nil {
+		return nil, err
+	}
+	return queued, nil
+}
+
+// DeletionTaskKnowledgeIDs includes the document-generation Wiki Map lane in
+// addition to normal lifecycle workers. It deliberately excludes generic
+// KB-scoped Wiki wake-ups and durable retract operations, neither of which
+// owns a parser slot or writes document-local parsing artifacts.
+func (a *asynqTaskInspector) DeletionTaskKnowledgeIDs(
+	ctx context.Context,
+	targets []interfaces.KnowledgeTaskTarget,
+) (map[string]bool, error) {
+	queued := make(map[string]bool)
+	if len(targets) == 0 {
+		return queued, nil
+	}
+	if a == nil {
+		return nil, errors.New("task inspector unavailable")
+	}
+
+	targetKBs, err := normalizeKnowledgeTaskTargets(targets)
+	if err != nil {
+		return nil, err
+	}
+	remaining := make(map[string]struct{}, len(targetKBs))
+	for knowledgeID := range targetKBs {
+		remaining[knowledgeID] = struct{}{}
+	}
+	if err := a.addAsynqQueuedKnowledgeIDsForTypes(
+		ctx, remaining, queued, taskTypesForKnowledgeDeletion,
 	); err != nil {
 		return nil, err
 	}
@@ -726,6 +953,36 @@ func taskKnowledgeIDsForTypesStrict(
 	if _, ok := taskTypes[taskType]; !ok {
 		return nil, false, nil
 	}
+	if taskType == types.TypeWikiIngest {
+		var probe wikiMapKnowledgeProbe
+		if err := json.Unmarshal(payload, &probe); err != nil {
+			return nil, true, fmt.Errorf("decode %s payload: %w", taskType, err)
+		}
+		switch probe.TaskMode {
+		case "":
+			// Ordinary Wiki tasks are disposable KB-scoped wake-ups. Their
+			// document identities live in PostgreSQL pending ops and they are
+			// intentionally independent from parser-slot liveness.
+			return nil, false, nil
+		case wikiMapTaskMode:
+			if len(probe.KnowledgeIDs) != 0 {
+				return nil, true, fmt.Errorf("%s map payload unexpectedly carries knowledge_ids", taskType)
+			}
+			if strings.TrimSpace(probe.KnowledgeID) == "" {
+				return nil, true, fmt.Errorf("%s map payload has no knowledge_id", taskType)
+			}
+			if strings.TrimSpace(probe.MapDedupKey) == "" {
+				return nil, true, fmt.Errorf("%s map payload has no map_dedup_key", taskType)
+			}
+			return []string{probe.KnowledgeID}, true, nil
+		default:
+			return nil, true, fmt.Errorf(
+				"%s payload has unsupported task_mode %q",
+				taskType,
+				probe.TaskMode,
+			)
+		}
+	}
 	var probe knowledgeIDsProbe
 	if err := json.Unmarshal(payload, &probe); err != nil {
 		return nil, true, fmt.Errorf("decode %s payload: %w", taskType, err)
@@ -772,130 +1029,52 @@ func normalizeStrictKnowledgeIDs(taskType string, values []string) ([]string, bo
 	return result, true, nil
 }
 
-func (a *asynqTaskInspector) deletePendingMatches(ctx context.Context, queue, knowledgeID string) int {
-	deleted := 0
-	page := 1
-	for {
-		tasks, err := a.inspector.ListPendingTasks(queue, asynq.PageSize(listPageSize), asynq.Page(page))
-		if err != nil {
-			if !errors.Is(err, asynq.ErrQueueNotFound) {
-				logger.Warnf(ctx, "[TaskInspector] list pending queue=%s page=%d: %v", queue, page, err)
-			}
-			return deleted
-		}
-		if len(tasks) == 0 {
-			return deleted
-		}
-		for _, t := range tasks {
-			if !matchesKnowledge(t.Type, t.Payload, knowledgeID) {
-				continue
-			}
-			if err := a.inspector.DeleteTask(queue, t.ID); err != nil {
-				logger.Warnf(ctx, "[TaskInspector] delete pending type=%s id=%s: %v", t.Type, t.ID, err)
-				continue
-			}
-			deleted++
-		}
-		if len(tasks) < listPageSize {
-			return deleted
-		}
-		page++
-	}
-}
-
-func (a *asynqTaskInspector) deleteScheduledMatches(ctx context.Context, queue, knowledgeID string) int {
-	deleted := 0
-	page := 1
-	for {
-		tasks, err := a.inspector.ListScheduledTasks(queue, asynq.PageSize(listPageSize), asynq.Page(page))
-		if err != nil {
-			if !errors.Is(err, asynq.ErrQueueNotFound) {
-				logger.Warnf(ctx, "[TaskInspector] list scheduled queue=%s page=%d: %v", queue, page, err)
-			}
-			return deleted
-		}
-		if len(tasks) == 0 {
-			return deleted
-		}
-		for _, t := range tasks {
-			if !matchesKnowledge(t.Type, t.Payload, knowledgeID) {
-				continue
-			}
-			if err := a.inspector.DeleteTask(queue, t.ID); err != nil {
-				logger.Warnf(ctx, "[TaskInspector] delete scheduled type=%s id=%s: %v", t.Type, t.ID, err)
-				continue
-			}
-			deleted++
-		}
-		if len(tasks) < listPageSize {
-			return deleted
-		}
-		page++
-	}
-}
-
-func (a *asynqTaskInspector) deleteRetryMatches(ctx context.Context, queue, knowledgeID string) int {
-	deleted := 0
-	page := 1
-	for {
-		tasks, err := a.inspector.ListRetryTasks(queue, asynq.PageSize(listPageSize), asynq.Page(page))
-		if err != nil {
-			if !errors.Is(err, asynq.ErrQueueNotFound) {
-				logger.Warnf(ctx, "[TaskInspector] list retry queue=%s page=%d: %v", queue, page, err)
-			}
-			return deleted
-		}
-		if len(tasks) == 0 {
-			return deleted
-		}
-		for _, t := range tasks {
-			if !matchesKnowledge(t.Type, t.Payload, knowledgeID) {
-				continue
-			}
-			if err := a.inspector.DeleteTask(queue, t.ID); err != nil {
-				logger.Warnf(ctx, "[TaskInspector] delete retry type=%s id=%s: %v", t.Type, t.ID, err)
-				continue
-			}
-			deleted++
-		}
-		if len(tasks) < listPageSize {
-			return deleted
-		}
-		page++
-	}
-}
-
 // cancelActiveMatches signals active workers to abort via
 // Inspector.CancelProcessing. The worker's ctx becomes Done() so the
 // next blocking call (or our checkpoint reads) bails. The DB-level
 // abort flag (parse_status=cancelled) remains the durable signal —
 // this is a latency optimization, not the correctness mechanism.
-func (a *asynqTaskInspector) cancelActiveMatches(ctx context.Context, queue, knowledgeID string) int {
+func (a *asynqTaskInspector) cancelActiveMatches(
+	ctx context.Context,
+	queue string,
+	knowledgeID string,
+) (int, error) {
 	cancelled := 0
 	page := 1
 	for {
+		if err := ctx.Err(); err != nil {
+			return cancelled, err
+		}
 		tasks, err := a.inspector.ListActiveTasks(queue, asynq.PageSize(listPageSize), asynq.Page(page))
 		if err != nil {
-			if !errors.Is(err, asynq.ErrQueueNotFound) {
-				logger.Warnf(ctx, "[TaskInspector] list active queue=%s page=%d: %v", queue, page, err)
+			if errors.Is(err, asynq.ErrQueueNotFound) {
+				return cancelled, nil
 			}
-			return cancelled
+			return cancelled, fmt.Errorf("list active tasks in queue %s: %w", queue, err)
 		}
 		if len(tasks) == 0 {
-			return cancelled
+			return cancelled, nil
 		}
 		for _, t := range tasks {
 			if !matchesKnowledge(t.Type, t.Payload, knowledgeID) {
 				continue
 			}
 			if err := a.inspector.CancelProcessing(t.ID); err != nil {
-				logger.Warnf(ctx, "[TaskInspector] cancel active type=%s id=%s: %v", t.Type, t.ID, err)
-				continue
+				if errors.Is(err, asynq.ErrTaskNotFound) {
+					continue
+				}
+				return cancelled, fmt.Errorf(
+					"cancel active task queue=%s type=%s id=%s: %w",
+					queue,
+					t.Type,
+					t.ID,
+					err,
+				)
 			}
 			cancelled++
 		}
 		if len(tasks) < listPageSize {
-			return cancelled
+			return cancelled, nil
 		}
 		page++
 	}

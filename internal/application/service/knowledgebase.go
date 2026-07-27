@@ -1098,6 +1098,26 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 			return chunkDeleteErr
 		}
 
+		// Every document-owned worker has crossed the live-task quiescence
+		// barrier above, so no new terminal record can be published now. Keep
+		// whole-KB deletion aligned with the single-document path by removing
+		// completed/archived Asynq metadata before the durable document
+		// tombstones are finalized. PostgreSQL workflow rows intentionally stay
+		// behind as the authoritative audit trail.
+		taskHistoryPurger, ok := s.taskInspector.(interfaces.TaskHistoryPurger)
+		if !ok {
+			return errors.New("KB delete worker: terminal task-history purger is unavailable")
+		}
+		for _, knowledgeID := range knowledgeIDs {
+			if _, err := taskHistoryPurger.PurgeTaskHistoryForKnowledge(ctx, knowledgeID); err != nil {
+				return fmt.Errorf(
+					"KB delete worker: purge terminal task history for knowledge %s: %w",
+					knowledgeID,
+					err,
+				)
+			}
+		}
+
 		removedStorage, err := s.wikiDeleteCoord.Finalize(ctx, tenantID, knowledgeIDs)
 		if err != nil {
 			return fmt.Errorf("KB delete worker: atomically finalize knowledge deletion: %w", err)

@@ -73,3 +73,27 @@ type TaskInspector interface {
 	// inspection error means unknown and must be handled fail-closed.
 	SummaryTaskKnowledgeIDs(ctx context.Context, targets []KnowledgeTaskTarget) (map[string]bool, error)
 }
+
+// TaskHistoryPurger is the deletion-only extension implemented by production
+// task inspectors. Keeping it separate from TaskInspector prevents ordinary
+// parse cancellation and read-only housekeeping implementations from being
+// forced to expose a destructive terminal-history operation.
+type TaskHistoryPurger interface {
+	// PurgeTaskHistoryForKnowledge removes completed / archived backend task
+	// records owned exclusively by one document. Callers must first prove live
+	// task quiescence. The durable PostgreSQL document workflow is outside this
+	// cleanup boundary and remains available as the audit trail.
+	PurgeTaskHistoryForKnowledge(ctx context.Context, knowledgeID string) (deleted int, err error)
+}
+
+// KnowledgeDeletionTaskInspector is the deletion-only liveness extension.
+// Normal document lifecycle probes intentionally ignore independent Wiki
+// work, while destructive deletion must additionally wait for the exact
+// document-generation Wiki Map worker so it cannot write artifacts after the
+// final purge.
+type KnowledgeDeletionTaskInspector interface {
+	// DeletionTaskKnowledgeIDs reports every live document-owned task that can
+	// still mutate a deletion target. KB-scoped Wiki triggers and durable
+	// retract work are excluded; exact task_mode="map" Wiki tasks are included.
+	DeletionTaskKnowledgeIDs(ctx context.Context, targets []KnowledgeTaskTarget) (map[string]bool, error)
+}

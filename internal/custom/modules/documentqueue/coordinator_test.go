@@ -679,7 +679,7 @@ func TestTerminationAttestationRejectsOversizedProof(t *testing.T) {
 	require.ErrorIs(t, err, ErrTerminationNotProven)
 }
 
-func TestProcessHoldsDocumentSlotUntilWikiDurableWorkDrains(t *testing.T) {
+func TestProcessReleasesDocumentSlotWhileWikiDurableWorkContinues(t *testing.T) {
 	coordinator := newQueueTestCoordinator(t, "parser-wiki", "boot-1", 1)
 	now := time.Now()
 	knowledge := queueTestKnowledge{
@@ -711,6 +711,7 @@ func TestProcessHoldsDocumentSlotUntilWikiDurableWorkDrains(t *testing.T) {
 				Updates(map[string]interface{}{
 					"parse_status":      types.ParseStatusCompleted,
 					"processing_owner":  "",
+					"processed_at":      time.Now(),
 					"enrichment_status": types.EnrichmentStatusCompleted,
 					"wiki_status":       types.WikiStatusPending,
 					"updated_at":        time.Now(),
@@ -722,20 +723,38 @@ func TestProcessHoldsDocumentSlotUntilWikiDurableWorkDrains(t *testing.T) {
 		})
 	}()
 	<-delegateCommitted
-	require.Eventually(t, func() bool {
-		var leased Workflow
-		if loadErr := coordinator.db.Where("id = ?", workflow.ID).Take(&leased).Error; loadErr != nil {
-			return false
-		}
-		return leased.State == StateLeased && leased.Stage == "wiki" &&
-			leased.OwnerInstanceID == coordinator.instanceID && leased.LeaseUntil != nil &&
-			len(coordinator.slots) == 1
-	}, time.Second, 5*time.Millisecond)
 	select {
 	case processErr := <-processDone:
-		t.Fatalf("document workflow returned before Wiki settled: %v", processErr)
-	default:
+		require.NoError(t, processErr)
+	case <-time.After(time.Second):
+		t.Fatal("document workflow did not release its slot after durable Wiki hand-off")
 	}
+
+	var waiting Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&waiting).Error)
+	require.Equal(t, StateWaitingExternal, waiting.State)
+	require.Equal(t, "wiki", waiting.Stage)
+	require.Empty(t, waiting.OwnerInstanceID)
+	require.Empty(t, waiting.OwnerBootID)
+	require.Nil(t, waiting.LeaseUntil)
+	require.Nil(t, waiting.LastHeartbeatAt)
+	require.Len(t, coordinator.slots, 0)
+
+	var stillParsing queueTestKnowledge
+	require.NoError(t, coordinator.db.Where("id = ?", knowledge.ID).Take(&stillParsing).Error)
+	require.Equal(t, types.ParseStatusCompleted, stillParsing.ParseStatus)
+	require.Equal(t, types.WikiStatusPending, stillParsing.WikiStatus,
+		"the derivative state must remain visible after the document slot is released")
+
+	status, err := coordinator.QueueStatus(
+		context.Background(), knowledge.TenantID, []string{knowledge.ID},
+	)
+	require.NoError(t, err)
+	require.Zero(t, status.ActiveTotal,
+		"waiting derivatives must not consume document parser capacity")
+	require.Equal(t, "active", status.Items[knowledge.ID].State,
+		"the API must retain a non-terminal workflow item without presenting a queue position")
+	require.Equal(t, "wiki", status.Items[knowledge.ID].Stage)
 
 	require.NoError(t, coordinator.db.Where(
 		"tenant_id = ? AND task_type = ? AND scope_id = ?",
@@ -746,17 +765,112 @@ func TestProcessHoldsDocumentSlotUntilWikiDurableWorkDrains(t *testing.T) {
 			"wiki_status": types.WikiStatusCompleted,
 			"updated_at":  time.Now(),
 		}).Error)
-	select {
-	case processErr := <-processDone:
-		require.NoError(t, processErr)
-	case <-time.After(time.Second):
-		t.Fatal("document workflow did not finish after Wiki settled")
-	}
+	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
 	var finished Workflow
 	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
 	require.Equal(t, StateCompleted, finished.State)
 	require.Equal(t, "completed", finished.Stage)
 	require.Len(t, coordinator.slots, 0)
+}
+
+func TestGraphDerivativesDoNotBlockTheNextCoreDocumentAtCapacityOne(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-graph-background", "boot-1", 1)
+	type document struct {
+		id         string
+		generation string
+	}
+	documents := []document{
+		{id: "knowledge-graph-background", generation: "generation-graph"},
+		{id: "knowledge-next-core", generation: "generation-next"},
+	}
+	workflows := make([]*Workflow, 0, len(documents))
+	for _, document := range documents {
+		require.NoError(t, coordinator.db.Create(&queueTestKnowledge{
+			ID: document.id, TenantID: 130, KnowledgeBaseID: "kb-1",
+			ProcessingGeneration: document.generation,
+			ProcessingOwner:      "owner-" + document.generation,
+			ParseStatus:          types.ParseStatusPending,
+			UpdatedAt:            time.Now(),
+		}).Error)
+		workflow, _, err := coordinator.RegisterWorkflow(
+			context.Background(), types.TypeDocumentProcess,
+			workflowPayload(t, 130, document.id, document.generation),
+		)
+		require.NoError(t, err)
+		bindWorkflowForTest(t, coordinator, workflow)
+		workflows = append(workflows, workflow)
+	}
+
+	require.NoError(t, coordinator.Process(
+		context.Background(),
+		asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, workflows[0])),
+		func(context.Context, *asynq.Task) error {
+			now := time.Now()
+			return coordinator.db.Model(&queueTestKnowledge{}).
+				Where("id = ?", documents[0].id).
+				Updates(map[string]interface{}{
+					"parse_status":           types.ParseStatusFinalizing,
+					"processing_owner":       "",
+					"processed_at":           now,
+					"pending_subtasks_count": 1,
+					"enrichment_status":      types.EnrichmentStatusPending,
+					"wiki_status":            types.WikiStatusNone,
+					"updated_at":             now,
+				}).Error
+		},
+	))
+
+	var graphWaiting Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflows[0].ID).Take(&graphWaiting).Error)
+	require.Equal(t, StateWaitingExternal, graphWaiting.State)
+	require.Equal(t, "derivatives", graphWaiting.Stage)
+	require.Len(t, coordinator.slots, 0)
+
+	var secondDelegateCalls atomic.Int32
+	require.NoError(t, coordinator.Process(
+		context.Background(),
+		asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, workflows[1])),
+		func(context.Context, *asynq.Task) error {
+			secondDelegateCalls.Add(1)
+			now := time.Now()
+			return coordinator.db.Model(&queueTestKnowledge{}).
+				Where("id = ?", documents[1].id).
+				Updates(map[string]interface{}{
+					"parse_status":      types.ParseStatusCompleted,
+					"processing_owner":  "",
+					"processed_at":      now,
+					"enrichment_status": types.EnrichmentStatusCompleted,
+					"wiki_status":       types.WikiStatusNone,
+					"updated_at":        now,
+				}).Error
+		},
+	))
+	require.EqualValues(t, 1, secondDelegateCalls.Load(),
+		"the next core parser must run while the first document's graph task is pending")
+
+	var firstKnowledge queueTestKnowledge
+	require.NoError(t, coordinator.db.Where("id = ?", documents[0].id).Take(&firstKnowledge).Error)
+	require.Equal(t, types.ParseStatusFinalizing, firstKnowledge.ParseStatus)
+	require.Equal(t, types.EnrichmentStatusPending, firstKnowledge.EnrichmentStatus)
+	require.Equal(t, 1, firstKnowledge.PendingSubtasksCount)
+
+	var secondFinished Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflows[1].ID).Take(&secondFinished).Error)
+	require.Equal(t, StateCompleted, secondFinished.State)
+
+	now := time.Now()
+	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).
+		Where("id = ?", documents[0].id).
+		Updates(map[string]interface{}{
+			"parse_status":           types.ParseStatusCompleted,
+			"pending_subtasks_count": 0,
+			"enrichment_status":      types.EnrichmentStatusCompleted,
+			"updated_at":             now,
+		}).Error)
+	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
+	var graphFinished Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflows[0].ID).Take(&graphFinished).Error)
+	require.Equal(t, StateCompleted, graphFinished.State)
 }
 
 func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T) {
@@ -897,10 +1011,10 @@ func TestTerminalSpanRecoveryIgnoresSupersededWorkflowGeneration(t *testing.T) {
 		"an old terminal workflow must never close a newer generation's attempt")
 }
 
-func TestRecoverWaitingExternalRequeuesOnceAndSkipsCommittedCoreDelegate(t *testing.T) {
-	coordinator := newQueueTestCoordinator(t, "parser-legacy-wiki", "boot-1", 1)
+func TestRecoverWaitingExternalPreservesDurableWikiStateUntilTerminal(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-waiting-wiki", "boot-1", 1)
 	knowledge := queueTestKnowledge{
-		ID: "knowledge-legacy-wiki", TenantID: 14, KnowledgeBaseID: "kb-1",
+		ID: "knowledge-waiting-wiki", TenantID: 14, KnowledgeBaseID: "kb-1",
 		ProcessingGeneration: "generation-1", ProcessingOwner: "owner-generation-1",
 		ParseStatus: types.ParseStatusPending, UpdatedAt: time.Now(),
 	}
@@ -938,37 +1052,20 @@ func TestRecoverWaitingExternalRequeuesOnceAndSkipsCommittedCoreDelegate(t *test
 	oldEpoch := workflow.DispatchEpoch
 
 	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
-	var resumed Workflow
-	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&resumed).Error)
-	require.Equal(t, StateQueued, resumed.State)
-	require.EqualValues(t, oldEpoch+1, resumed.DispatchEpoch)
-	require.Empty(t, resumed.DispatchTaskID)
+	var waiting Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&waiting).Error)
+	require.Equal(t, StateWaitingExternal, waiting.State)
+	require.Equal(t, "wiki", waiting.Stage)
+	require.EqualValues(t, oldEpoch, waiting.DispatchEpoch,
+		"derivative observation must not create a new root delivery epoch")
+	require.NotNil(t, waiting.LastProgressAt)
 	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
 	var afterSecondRecovery Workflow
 	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&afterSecondRecovery).Error)
-	require.EqualValues(t, resumed.DispatchEpoch, afterSecondRecovery.DispatchEpoch,
-		"concurrent/repeated recovery must not publish a second logical epoch")
-
-	var delegateCalls atomic.Int32
-	processDone := make(chan error, 1)
-	go func() {
-		processDone <- coordinator.Process(
-			context.Background(),
-			asynq.NewTask(types.TypeDocumentProcess, deliveryPayload(t, &resumed)),
-			func(context.Context, *asynq.Task) error {
-				delegateCalls.Add(1)
-				return errors.New("committed core delegate must not run")
-			},
-		)
-	}()
-	require.Eventually(t, func() bool {
-		var leased Workflow
-		if loadErr := coordinator.db.Where("id = ?", workflow.ID).Take(&leased).Error; loadErr != nil {
-			return false
-		}
-		return leased.State == StateLeased && leased.Stage == "wiki"
-	}, time.Second, 5*time.Millisecond)
-	require.Zero(t, delegateCalls.Load())
+	require.Equal(t, StateWaitingExternal, afterSecondRecovery.State)
+	require.EqualValues(t, oldEpoch, afterSecondRecovery.DispatchEpoch)
+	require.Greater(t, afterSecondRecovery.Version, waiting.Version,
+		"each healthy observation remains durably recorded without losing task identity")
 
 	require.NoError(t, coordinator.db.Where(
 		"tenant_id = ? AND task_type = ? AND scope_id = ?",
@@ -979,13 +1076,126 @@ func TestRecoverWaitingExternalRequeuesOnceAndSkipsCommittedCoreDelegate(t *test
 			"wiki_status": types.WikiStatusCompleted,
 			"updated_at":  time.Now(),
 		}).Error)
-	select {
-	case processErr := <-processDone:
-		require.NoError(t, processErr)
-	case <-time.After(time.Second):
-		t.Fatal("resumed Wiki-only workflow did not finish")
+	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
+	var finished Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
+	require.Equal(t, StateCompleted, finished.State)
+	require.Equal(t, "completed", finished.Stage)
+}
+
+func TestRecoverWaitingExternalRequeuesOnlyWhenCommittedCoreFenceIsMissing(t *testing.T) {
+	coordinator := newQueueTestCoordinator(t, "parser-unsafe-wait", "boot-1", 1)
+	knowledge := queueTestKnowledge{
+		ID: "knowledge-unsafe-wait", TenantID: 15, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ProcessingOwner: "owner-generation-1",
+		ParseStatus: types.ParseStatusProcessing, UpdatedAt: time.Now(),
 	}
-	require.Zero(t, delegateCalls.Load())
+	require.NoError(t, coordinator.db.Create(&knowledge).Error)
+	workflow, _, err := coordinator.RegisterWorkflow(
+		context.Background(), types.TypeDocumentProcess,
+		workflowPayload(t, knowledge.TenantID, knowledge.ID, knowledge.ProcessingGeneration),
+	)
+	require.NoError(t, err)
+	bindWorkflowForTest(t, coordinator, workflow)
+	require.NoError(t, coordinator.db.Model(&Workflow{}).Where("id = ?", workflow.ID).
+		Updates(map[string]interface{}{
+			"state": StateWaitingExternal, "stage": "core",
+			"owner_instance_id": "", "owner_boot_id": "",
+			"lease_until": nil, "last_heartbeat_at": nil,
+		}).Error)
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(workflow).Error)
+	oldEpoch := workflow.DispatchEpoch
+
+	require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
+	var resumed Workflow
+	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&resumed).Error)
+	require.Equal(t, StateQueued, resumed.State)
+	require.EqualValues(t, oldEpoch+1, resumed.DispatchEpoch)
+	require.Empty(t, resumed.DispatchTaskID)
+	require.Contains(t, resumed.LastError, "committed-core fence")
+}
+
+func TestRecoverWaitingExternalFinalizesDerivativeFailureAndDeletion(t *testing.T) {
+	tests := []struct {
+		name             string
+		parseStatus      string
+		enrichmentStatus string
+		wikiStatus       string
+		wantState        WorkflowState
+		wantStage        string
+	}{
+		{
+			name:             "graph derivative failed",
+			parseStatus:      types.ParseStatusCompleted,
+			enrichmentStatus: types.EnrichmentStatusFailed,
+			wikiStatus:       types.WikiStatusNone,
+			wantState:        StateFailed,
+			wantStage:        "enrichment_failed",
+		},
+		{
+			name:             "wiki derivative failed",
+			parseStatus:      types.ParseStatusCompleted,
+			enrichmentStatus: types.EnrichmentStatusCompleted,
+			wikiStatus:       types.WikiStatusFailed,
+			wantState:        StateFailed,
+			wantStage:        "wiki_failed",
+		},
+		{
+			name:             "document deleted during derivatives",
+			parseStatus:      types.ParseStatusDeleting,
+			enrichmentStatus: types.EnrichmentStatusPending,
+			wikiStatus:       types.WikiStatusPending,
+			wantState:        StateCancelled,
+			wantStage:        types.ParseStatusDeleting,
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator := newQueueTestCoordinator(
+				t, fmt.Sprintf("parser-wait-terminal-%d", index), "boot-1", 1,
+			)
+			now := time.Now()
+			knowledge := queueTestKnowledge{
+				ID:       fmt.Sprintf("knowledge-wait-terminal-%d", index),
+				TenantID: uint64(160 + index), KnowledgeBaseID: "kb-1",
+				ProcessingGeneration: "generation-1", ProcessingOwner: "",
+				ProcessedAt: &now, ParseStatus: test.parseStatus,
+				EnrichmentStatus: test.enrichmentStatus, WikiStatus: test.wikiStatus,
+				UpdatedAt: now,
+			}
+			require.NoError(t, coordinator.db.Create(&knowledge).Error)
+			workflow, _, err := coordinator.RegisterWorkflow(
+				context.Background(), types.TypeDocumentProcess,
+				workflowPayload(t, knowledge.TenantID, knowledge.ID, knowledge.ProcessingGeneration),
+			)
+			require.NoError(t, err)
+			bindWorkflowForTest(t, coordinator, workflow)
+			require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).
+				Where("id = ?", knowledge.ID).
+				Updates(map[string]interface{}{
+					"parse_status":      test.parseStatus,
+					"processing_owner":  "",
+					"processed_at":      now,
+					"enrichment_status": test.enrichmentStatus,
+					"wiki_status":       test.wikiStatus,
+					"updated_at":        now,
+				}).Error)
+			require.NoError(t, coordinator.db.Model(&Workflow{}).
+				Where("id = ?", workflow.ID).
+				Updates(map[string]interface{}{
+					"state": StateWaitingExternal, "stage": "derivatives",
+					"owner_instance_id": "", "owner_boot_id": "",
+					"lease_until": nil, "last_heartbeat_at": nil,
+				}).Error)
+
+			require.NoError(t, coordinator.recoverWaitingExternal(context.Background()))
+			var finished Workflow
+			require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
+			require.Equal(t, test.wantState, finished.State)
+			require.Equal(t, test.wantStage, finished.Stage)
+			require.NotNil(t, finished.CompletedAt)
+		})
+	}
 }
 
 func TestProcessNeverMarksFailedOrDegradedDerivativesCompleted(t *testing.T) {
@@ -1564,23 +1774,29 @@ func TestDeadlineIgnoringDelegateTripsAndClearsLiveness(t *testing.T) {
 }
 
 func TestZeroCountFinalizingWikiStageDoesNotReinvokeCoreDelegate(t *testing.T) {
+	now := time.Now()
 	snapshot := &knowledgeSnapshot{
 		ParseStatus:          types.ParseStatusFinalizing,
+		ProcessedAt:          &now,
 		PendingSubtasksCount: 0,
 		WikiStatus:           types.WikiStatusPending,
 	}
 	stage := stageForKnowledge(snapshot)
 	require.Equal(t, "wiki", stage)
 	require.True(t, shouldAwaitCommittedDerivatives(snapshot, stage))
+	require.True(t, coreCommittedForExternalWait(snapshot))
 }
 
 func TestFinalizingWithDerivativeSlotsStillReportsDerivativeStage(t *testing.T) {
+	now := time.Now()
 	snapshot := &knowledgeSnapshot{
 		ParseStatus:          types.ParseStatusFinalizing,
+		ProcessedAt:          &now,
 		PendingSubtasksCount: 1,
 		WikiStatus:           types.WikiStatusPending,
 	}
 	stage := stageForKnowledge(snapshot)
 	require.Equal(t, "derivatives", stage)
 	require.False(t, shouldAwaitCommittedDerivatives(snapshot, stage))
+	require.True(t, coreCommittedForExternalWait(snapshot))
 }

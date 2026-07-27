@@ -285,6 +285,55 @@ func TestTaskInspector_StrictSingleAndMultiKnowledgeIdentity(t *testing.T) {
 	}
 }
 
+func TestTaskInspector_WikiMapIsDeletionOnlyDocumentWork(t *testing.T) {
+	t.Parallel()
+
+	genericPayload := []byte(`{"tenant_id":7,"knowledge_base_id":"kb-a"}`)
+	mapPayload := []byte(
+		`{"tenant_id":7,"knowledge_base_id":"kb-a","task_mode":"map",` +
+			`"map_dedup_key":"kid-map:generation-1","knowledge_id":"kid-map",` +
+			`"processing_generation":"generation-1"}`,
+	)
+
+	ids, tracked, err := taskKnowledgeIDsForTypesStrict(
+		types.TypeWikiIngest,
+		genericPayload,
+		taskTypesForKnowledgeDeletion,
+	)
+	require.NoError(t, err)
+	require.False(t, tracked,
+		"a generic KB Wiki trigger must not become document-owned deletion work")
+	require.Empty(t, ids)
+
+	ids, tracked, err = taskKnowledgeIDsForTypesStrict(
+		types.TypeWikiIngest,
+		mapPayload,
+		taskTypesForKnowledgeDeletion,
+	)
+	require.NoError(t, err)
+	require.True(t, tracked)
+	require.Equal(t, []string{"kid-map"}, ids)
+
+	ids, tracked, err = taskKnowledgeIDsForTypesStrict(
+		types.TypeWikiIngest,
+		mapPayload,
+		taskTypesForDocumentLifecycle,
+	)
+	require.NoError(t, err)
+	require.False(t, tracked,
+		"slow Wiki Map work must never retain a normal document parser slot")
+	require.Empty(t, ids)
+
+	_, tracked, err = taskKnowledgeIDsForTypesStrict(
+		types.TypeWikiIngest,
+		[]byte(`{"task_mode":"map","knowledge_id":"kid-map"}`),
+		taskTypesForKnowledgeDeletion,
+	)
+	require.True(t, tracked)
+	require.ErrorContains(t, err, "map_dedup_key",
+		"a malformed document-owned Map task must make deletion liveness unknown")
+}
+
 func TestTaskInspector_BatchTaskIsVisibleButNotIndividuallyCancelable(t *testing.T) {
 	t.Parallel()
 	payload, err := json.Marshal(knowledgeIDsProbe{KnowledgeIDs: []string{"kid-a", "kid-b"}})
@@ -471,6 +520,138 @@ func TestLiteTaskInspectorKeepsCancelledActiveWorkerVisible(t *testing.T) {
 		live, probeErr := inspector.DocumentLifecycleTaskKnowledgeIDs(context.Background(), targets)
 		return probeErr == nil && len(live) == 0
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestLiteKnowledgeDeletePurgesEveryDocumentDerivativeTaskType(t *testing.T) {
+	executor := NewSyncTaskExecutor()
+	derivativeTypes := []string{
+		types.TypeImageMultimodal,
+		types.TypeKnowledgePostProcess,
+		types.TypeQuestionGeneration,
+		types.TypeSummaryGeneration,
+		types.TypeChunkExtract,
+		types.TypeDataTableSummary,
+	}
+	for _, taskType := range derivativeTypes {
+		executor.RegisterHandler(taskType, func(context.Context, *asynq.Task) error {
+			t.Fatal("a derivative scheduled behind deletion must never execute")
+			return nil
+		})
+		payload, err := json.Marshal(knowledgeIDsProbe{KnowledgeID: "kid-derivatives"})
+		require.NoError(t, err)
+		_, err = executor.Enqueue(
+			asynq.NewTask(taskType, payload),
+			asynq.ProcessIn(time.Hour),
+			asynq.TaskID("delete-derivative-"+taskType),
+			asynq.MaxRetry(0),
+		)
+		require.NoError(t, err)
+	}
+	executor.RegisterHandler(types.TypeWikiIngest, func(context.Context, *asynq.Task) error {
+		t.Fatal("a Wiki Map task scheduled behind deletion must never execute")
+		return nil
+	})
+	_, err := executor.Enqueue(
+		asynq.NewTask(types.TypeWikiIngest, []byte(
+			`{"tenant_id":7,"knowledge_base_id":"kb-A","task_mode":"map",`+
+				`"map_dedup_key":"kid-derivatives:generation-1",`+
+				`"knowledge_id":"kid-derivatives","processing_generation":"generation-1"}`,
+		)),
+		asynq.ProcessIn(time.Hour),
+		asynq.TaskID("delete-derivative-wiki-map"),
+		asynq.MaxRetry(0),
+	)
+	require.NoError(t, err)
+
+	inspector := NewNoopTaskInspector(nil, executor)
+	targets := []interfaces.KnowledgeTaskTarget{{
+		KnowledgeBaseID: "kb-A",
+		KnowledgeID:     "kid-derivatives",
+	}}
+	live, err := inspector.DocumentLifecycleTaskKnowledgeIDs(context.Background(), targets)
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"kid-derivatives": true}, live)
+	deletionInspector := inspector.(interfaces.KnowledgeDeletionTaskInspector)
+	live, err = deletionInspector.DeletionTaskKnowledgeIDs(context.Background(), targets)
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"kid-derivatives": true}, live)
+
+	deleted, cancelled, err := inspector.CancelTasksForKnowledge(
+		context.Background(), "kid-derivatives",
+	)
+	require.NoError(t, err)
+	require.Equal(t, len(derivativeTypes)+1, deleted)
+	require.Zero(t, cancelled)
+	require.Eventually(t, func() bool {
+		live, probeErr := deletionInspector.DeletionTaskKnowledgeIDs(
+			context.Background(), targets,
+		)
+		return probeErr == nil && len(live) == 0
+	}, time.Second, 10*time.Millisecond,
+		"delete must drain graph, Wiki Map, multimodal, summary and question descendants")
+}
+
+func TestDeleteCompactingTaskMatchesDoesNotSkipPages(t *testing.T) {
+	const (
+		knowledgeID = "kid-terminal-history"
+		matchCount  = 205
+	)
+	payload, err := json.Marshal(knowledgeIDsProbe{KnowledgeID: knowledgeID})
+	require.NoError(t, err)
+	otherPayload, err := json.Marshal(knowledgeIDsProbe{KnowledgeID: "kid-other"})
+	require.NoError(t, err)
+
+	order := make([]string, 0, matchCount+1)
+	remaining := make(map[string]*asynq.TaskInfo, matchCount+1)
+	for index := 0; index < matchCount; index++ {
+		id := fmt.Sprintf("terminal-%03d", index)
+		order = append(order, id)
+		remaining[id] = &asynq.TaskInfo{
+			ID:      id,
+			Type:    types.TypeChunkExtract,
+			Payload: payload,
+		}
+	}
+	order = append(order, "unrelated")
+	remaining["unrelated"] = &asynq.TaskInfo{
+		ID:      "unrelated",
+		Type:    types.TypeChunkExtract,
+		Payload: otherPayload,
+	}
+
+	list := func(_ string, _ ...asynq.ListOption) ([]*asynq.TaskInfo, error) {
+		page := make([]*asynq.TaskInfo, 0, listPageSize)
+		for _, id := range order {
+			if task := remaining[id]; task != nil {
+				page = append(page, task)
+				if len(page) == listPageSize {
+					break
+				}
+			}
+		}
+		return page, nil
+	}
+	deleteTask := func(_ string, id string) error {
+		if _, exists := remaining[id]; !exists {
+			return asynq.ErrTaskNotFound
+		}
+		delete(remaining, id)
+		return nil
+	}
+
+	deleted, err := deleteCompactingTaskMatches(
+		context.Background(),
+		types.QueueGraph,
+		knowledgeID,
+		"completed",
+		list,
+		deleteTask,
+	)
+	require.NoError(t, err)
+	require.Equal(t, matchCount, deleted)
+	require.Len(t, remaining, 1)
+	require.Contains(t, remaining, "unrelated",
+		"purging one deleted document must preserve another document's history")
 }
 
 func TestLiteCancellationOfOneBatchOwnerPreservesOtherDocuments(t *testing.T) {

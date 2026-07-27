@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
+	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -375,5 +376,22 @@ func TestImageTerminalFanInSurvivesCancelledWorkerContext(t *testing.T) {
 	}
 	if len(enqueuer.tasks) != 1 || enqueuer.tasks[0].Type() != types.TypeKnowledgePostProcess {
 		t.Fatalf("postprocess tasks = %d, want 1", len(enqueuer.tasks))
+	}
+}
+
+func TestImageFinalAttemptHonorsExpandedRetryBudgetAcrossRollout(t *testing.T) {
+	t.Setenv("CUSTOM_WORK_RETRY_IMAGE_MAX_ATTEMPTS", "10")
+
+	oldDelivery := taskretry.WithMetadata(context.Background(), 3, 3)
+	if isFinalAsynqAttempt(oldDelivery) {
+		t.Fatal("old MaxRetry delivery must remain incomplete for stable-task replay")
+	}
+	notYetFinal := taskretry.WithMetadata(context.Background(), 8, 9)
+	if isFinalAsynqAttempt(notYetFinal) {
+		t.Fatal("ninth total attempt must not terminally complete a ten-attempt budget")
+	}
+	final := taskretry.WithMetadata(context.Background(), 9, 9)
+	if !isFinalAsynqAttempt(final) {
+		t.Fatal("tenth total attempt must terminally complete the bounded image item")
 	}
 }

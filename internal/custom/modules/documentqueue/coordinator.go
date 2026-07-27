@@ -1978,6 +1978,24 @@ func (c *Coordinator) recoverWaitingExternal(ctx context.Context) error {
 		snapshot, state, stage, terminal, err := c.observe(ctx, lease)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("observe externally waiting workflow %s: %w", workflow.ID, err))
+			// Rotate an unobservable row to the back of the bounded scan so one
+			// transiently broken knowledge read cannot starve every later
+			// derivative workflow. The workflow stays waiting and the error is
+			// retained for operators; no business/task state is discarded.
+			now := time.Now()
+			result := c.db.WithContext(ctx).Model(&Workflow{}).
+				Where("id = ? AND state = ? AND version = ?",
+					workflow.ID, StateWaitingExternal, workflow.Version).
+				Updates(map[string]interface{}{
+					"last_error": err.Error(), "version": gorm.Expr("version + 1"),
+					"updated_at": now,
+				})
+			if result.Error != nil {
+				errs = append(errs, fmt.Errorf(
+					"rotate unobservable externally waiting workflow %s: %w",
+					workflow.ID, result.Error,
+				))
+			}
 			continue
 		}
 		now := time.Now()
@@ -2010,24 +2028,50 @@ func (c *Coordinator) recoverWaitingExternal(ctx context.Context) error {
 			}
 			continue
 		}
-		// waiting_external was used by the earlier implementation to release a
-		// document slot while Wiki was still pending. That allowed hundreds of
-		// later documents to finish core work and recreate a large Wiki tail.
-		// Resume every non-terminal legacy row through the immutable root plan;
-		// Process detects a committed core generation and waits without calling
-		// the core delegate again.
+		if !coreCommittedForExternalWait(snapshot) {
+			// A waiting row without the committed-core fence is unsafe: its
+			// root publisher may have crashed before all stable child tasks
+			// were emitted. Put only this exceptional row back through the
+			// immutable root plan; ordinary derivative waits never reacquire a
+			// document slot.
+			result := c.db.WithContext(ctx).Model(&Workflow{}).
+				Where("id = ? AND state = ? AND version = ?",
+					workflow.ID, StateWaitingExternal, workflow.Version).
+				Updates(map[string]interface{}{
+					"state": StateQueued, "stage": "queued",
+					"dispatch_epoch":   gorm.Expr("dispatch_epoch + 1"),
+					"dispatch_task_id": "", "last_dispatched_at": nil,
+					"last_error": "external wait lost its committed-core fence; resuming durable root plan",
+					"version":    gorm.Expr("version + 1"), "updated_at": now,
+				})
+			if result.Error != nil {
+				errs = append(errs, fmt.Errorf(
+					"resume unsafe externally waiting workflow %s: %w",
+					workflow.ID, result.Error,
+				))
+			}
+			continue
+		}
+
+		// Keep the exact workflow non-terminal while derivatives run. Updating
+		// updated_at rotates this row behind the rest of the bounded batch; the
+		// business timestamp is copied separately into last_progress_at.
+		updates := map[string]interface{}{
+			"stage": stage, "last_error": "",
+			"version": gorm.Expr("version + 1"), "updated_at": now,
+		}
+		if snapshot != nil && !snapshot.UpdatedAt.IsZero() {
+			updates["last_progress_at"] = snapshot.UpdatedAt
+		}
 		result := c.db.WithContext(ctx).Model(&Workflow{}).
 			Where("id = ? AND state = ? AND version = ?",
 				workflow.ID, StateWaitingExternal, workflow.Version).
-			Updates(map[string]interface{}{
-				"state": StateQueued, "stage": "queued",
-				"dispatch_epoch":   gorm.Expr("dispatch_epoch + 1"),
-				"dispatch_task_id": "", "last_dispatched_at": nil,
-				"last_error": "external wait boundary no longer valid; resuming durable workflow",
-				"version":    gorm.Expr("version + 1"), "updated_at": now,
-			})
+			Updates(updates)
 		if result.Error != nil {
-			errs = append(errs, fmt.Errorf("resume invalid external wait workflow %s: %w", workflow.ID, result.Error))
+			errs = append(errs, fmt.Errorf(
+				"refresh externally waiting workflow %s: %w",
+				workflow.ID, result.Error,
+			))
 		}
 	}
 	return errors.Join(errs...)
@@ -2729,6 +2773,7 @@ type knowledgeSnapshot struct {
 	ParseStatus          string
 	ProcessingGeneration string
 	ProcessingOwner      string
+	ProcessedAt          *time.Time
 	PendingSubtasksCount int
 	EnrichmentStatus     string
 	WikiStatus           string
@@ -2739,7 +2784,7 @@ type knowledgeSnapshot struct {
 func (c *Coordinator) loadKnowledge(ctx context.Context, lease *Lease) (*knowledgeSnapshot, error) {
 	var snapshot knowledgeSnapshot
 	err := c.db.WithContext(ctx).Table("knowledges").
-		Select("parse_status, processing_generation, processing_owner, pending_subtasks_count, enrichment_status, wiki_status, wiki_error_message, updated_at").
+		Select("parse_status, processing_generation, processing_owner, processed_at, pending_subtasks_count, enrichment_status, wiki_status, wiki_error_message, updated_at").
 		Where("tenant_id = ? AND id = ? AND knowledge_base_id = ? AND deleted_at IS NULL",
 			lease.TenantID, lease.KnowledgeID, lease.KnowledgeBaseID).
 		Take(&snapshot).Error
@@ -2834,7 +2879,7 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 }
 
 func shouldAwaitCommittedDerivatives(snapshot *knowledgeSnapshot, stage string) bool {
-	if snapshot == nil || stage != "wiki" {
+	if stage != "wiki" || !coreCommittedForExternalWait(snapshot) {
 		return false
 	}
 	if snapshot.ParseStatus == types.ParseStatusCompleted {
@@ -2842,6 +2887,25 @@ func shouldAwaitCommittedDerivatives(snapshot *knowledgeSnapshot, stage string) 
 	}
 	return snapshot.ParseStatus == types.ParseStatusFinalizing &&
 		snapshot.PendingSubtasksCount == 0
+}
+
+// coreCommittedForExternalWait is the durable hand-off fence between the
+// document queue and every descendant queue. processed_at proves chunks/indexes
+// committed, while the consumed processing_owner proves a retry may no longer
+// rebuild core artifacts. Process uses this only after the root delegate has
+// returned successfully, which additionally proves that the immutable fan-out
+// plan was published (or replayed) before the document slot is released.
+func coreCommittedForExternalWait(snapshot *knowledgeSnapshot) bool {
+	if snapshot == nil || snapshot.ProcessedAt == nil ||
+		strings.TrimSpace(snapshot.ProcessingOwner) != "" {
+		return false
+	}
+	switch snapshot.ParseStatus {
+	case types.ParseStatusProcessing, types.ParseStatusFinalizing, types.ParseStatusCompleted:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Coordinator) renew(ctx context.Context, lease *Lease, stage string, progressAt time.Time) error {
@@ -2898,6 +2962,40 @@ func (c *Coordinator) release(ctx context.Context, lease *Lease, cause error) er
 		return ErrLeaseLost
 	}
 	pipelineobs.ObserveDocumentWorkflow("release", "success")
+	return nil
+}
+
+func (c *Coordinator) parkWaitingExternal(
+	ctx context.Context,
+	lease *Lease,
+	stage string,
+	progressAt time.Time,
+) error {
+	now := time.Now()
+	updates := map[string]interface{}{
+		"state": StateWaitingExternal, "stage": stage,
+		"owner_instance_id": "", "owner_boot_id": "",
+		"lease_until": nil, "last_heartbeat_at": nil, "last_error": "",
+		"version": gorm.Expr("version + 1"), "updated_at": now,
+	}
+	if !progressAt.IsZero() {
+		updates["last_progress_at"] = progressAt
+	}
+	mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseMutationTimeout)
+	defer cancel()
+	result := c.db.WithContext(mutationCtx).Model(&Workflow{}).
+		Where("id = ? AND state = ? AND dispatch_epoch = ? AND owner_instance_id = ? AND owner_boot_id = ?",
+			lease.WorkflowID, StateLeased, lease.Epoch, c.instanceID, c.bootID).
+		Updates(updates)
+	if result.Error != nil {
+		pipelineobs.ObserveDocumentWorkflow("wait_external", "error")
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		pipelineobs.ObserveDocumentWorkflow("wait_external", "lease_lost")
+		return ErrLeaseLost
+	}
+	pipelineobs.ObserveDocumentWorkflow("wait_external", "success")
 	return nil
 }
 
@@ -3103,10 +3201,10 @@ func (c *Coordinator) observe(ctx context.Context, lease *Lease) (*knowledgeSnap
 }
 
 // Process wraps a root document/manual handler. It owns one per-instance slot
-// until core parsing and every required derivative, including Wiki, reaches a
-// terminal state. This deliberately bounds downstream backlog to the fleet's
-// document capacity: later documents cannot consume core resources while an
-// unbounded tail of earlier Wiki work remains.
+// only through the usable core commit and successful publication of the
+// immutable fan-out plan. Required derivatives keep the durable workflow and
+// user-visible lifecycle non-terminal, but run in their own queues without
+// preventing later documents from entering core parsing.
 func (c *Coordinator) Process(ctx context.Context, task *asynq.Task, delegate asynq.HandlerFunc) (retErr error) {
 	if delegate == nil {
 		return errors.New("document queue: root handler is unavailable")
@@ -3253,6 +3351,9 @@ func (c *Coordinator) Process(ctx context.Context, task *asynq.Task, delegate as
 		progressAt := time.Time{}
 		if snapshot != nil {
 			progressAt = snapshot.UpdatedAt
+		}
+		if coreCommittedForExternalWait(snapshot) {
+			return c.parkWaitingExternal(execCtx, lease, stage, progressAt)
 		}
 		// Persist an actual stage/business-progress transition immediately so
 		// queue status and takeover diagnostics stay current. An unchanged fast

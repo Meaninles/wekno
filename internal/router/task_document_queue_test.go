@@ -171,86 +171,95 @@ func TestDocumentServerConcurrencyComesFromCoordinatorCapacity(t *testing.T) {
 func TestAsynqServersBecomeReadyOnlyAfterAllWorkersStart(t *testing.T) {
 	events := []string{}
 	normal := &fakeAsynqServerLifecycle{name: "normal", events: &events}
+	multimodal := &fakeAsynqServerLifecycle{name: "multimodal", events: &events}
 	wikiMap := &fakeAsynqServerLifecycle{name: "wiki-map", events: &events}
 	control := &fakeAsynqServerLifecycle{name: "control", events: &events}
 	document := &fakeAsynqServerLifecycle{name: "document", events: &events}
 	part := &fakeAsynqServerLifecycle{name: "part", events: &events}
 	readiness := &fakeDocumentQueueReadiness{events: &events}
 	err := startAsynqServers(
-		normal, wikiMap, control, document, part,
+		normal, multimodal, wikiMap, control, document, part,
 		asynq.HandlerFunc(func(context.Context, *asynq.Task) error { return nil }), readiness,
 	)
 	if err != nil {
 		t.Fatalf("start servers: %v", err)
 	}
-	want := []string{"normal.start", "wiki-map.start", "control.start", "document.start", "part.start", "ready"}
+	want := []string{"normal.start", "multimodal.start", "wiki-map.start", "control.start", "document.start", "part.start", "ready"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("startup events = %v, want %v", events, want)
 	}
-	if normal.shutdowns != 0 || wikiMap.shutdowns != 0 || control.shutdowns != 0 || document.shutdowns != 0 ||
+	if normal.shutdowns != 0 || multimodal.shutdowns != 0 || wikiMap.shutdowns != 0 || control.shutdowns != 0 || document.shutdowns != 0 ||
 		part.shutdowns != 0 || readiness.calls != 1 {
-		t.Fatalf("success lifecycle counts: normal shutdown=%d wiki-map shutdown=%d control shutdown=%d document shutdown=%d part shutdown=%d ready=%d",
-			normal.shutdowns, wikiMap.shutdowns, control.shutdowns, document.shutdowns, part.shutdowns, readiness.calls)
+		t.Fatalf("success lifecycle counts: normal shutdown=%d multimodal shutdown=%d wiki-map shutdown=%d control shutdown=%d document shutdown=%d part shutdown=%d ready=%d",
+			normal.shutdowns, multimodal.shutdowns, wikiMap.shutdowns, control.shutdowns, document.shutdowns, part.shutdowns, readiness.calls)
 	}
 }
 
 func TestAsynqServerStartupFailureNeverMarksReadyAndRollsBack(t *testing.T) {
 	tests := []struct {
-		name         string
-		normalErr    error
-		wikiMapErr   error
-		controlErr   error
-		documentErr  error
-		partErr      error
-		readyErr     error
-		wantEvents   []string
-		wantNormal   int
-		wantWikiMap  int
-		wantControl  int
-		wantDocument int
-		wantPart     int
+		name           string
+		normalErr      error
+		multimodalErr  error
+		wikiMapErr     error
+		controlErr     error
+		documentErr    error
+		partErr        error
+		readyErr       error
+		wantEvents     []string
+		wantNormal     int
+		wantMultimodal int
+		wantWikiMap    int
+		wantControl    int
+		wantDocument   int
+		wantPart       int
 	}{
 		{
 			name: "background fails", normalErr: errors.New("normal failed"),
 			wantEvents: []string{"normal.start"},
 		},
 		{
-			name: "Wiki Map fails", wikiMapErr: errors.New("Wiki Map failed"),
-			wantEvents: []string{"normal.start", "wiki-map.start", "normal.shutdown"},
+			name: "multimodal fails", multimodalErr: errors.New("multimodal failed"),
+			wantEvents: []string{"normal.start", "multimodal.start", "normal.shutdown"},
 			wantNormal: 1,
 		},
 		{
+			name: "Wiki Map fails", wikiMapErr: errors.New("Wiki Map failed"),
+			wantEvents: []string{"normal.start", "multimodal.start", "wiki-map.start", "multimodal.shutdown", "normal.shutdown"},
+			wantNormal: 1, wantMultimodal: 1,
+		},
+		{
 			name: "control fails", controlErr: errors.New("control failed"),
-			wantEvents: []string{"normal.start", "wiki-map.start", "control.start", "wiki-map.shutdown", "normal.shutdown"},
-			wantNormal: 1, wantWikiMap: 1,
+			wantEvents: []string{"normal.start", "multimodal.start", "wiki-map.start", "control.start", "wiki-map.shutdown", "multimodal.shutdown", "normal.shutdown"},
+			wantNormal: 1, wantMultimodal: 1, wantWikiMap: 1,
 		},
 		{
 			name: "document fails", documentErr: errors.New("document failed"),
-			wantEvents: []string{"normal.start", "wiki-map.start", "control.start", "document.start", "control.shutdown", "wiki-map.shutdown", "normal.shutdown"},
-			wantNormal: 1, wantWikiMap: 1, wantControl: 1,
+			wantEvents: []string{"normal.start", "multimodal.start", "wiki-map.start", "control.start", "document.start", "control.shutdown", "wiki-map.shutdown", "multimodal.shutdown", "normal.shutdown"},
+			wantNormal: 1, wantMultimodal: 1, wantWikiMap: 1, wantControl: 1,
 		},
 		{
 			name: "part fails", partErr: errors.New("part failed"),
-			wantEvents: []string{"normal.start", "wiki-map.start", "control.start", "document.start", "part.start", "document.shutdown", "control.shutdown", "wiki-map.shutdown", "normal.shutdown"},
-			wantNormal: 1, wantWikiMap: 1, wantControl: 1, wantDocument: 1,
+			wantEvents: []string{"normal.start", "multimodal.start", "wiki-map.start", "control.start", "document.start", "part.start", "document.shutdown", "control.shutdown", "wiki-map.shutdown", "multimodal.shutdown", "normal.shutdown"},
+			wantNormal: 1, wantMultimodal: 1, wantWikiMap: 1, wantControl: 1, wantDocument: 1,
 		},
 		{
 			name: "ready persistence fails", readyErr: errors.New("database failed"),
-			wantEvents: []string{"normal.start", "wiki-map.start", "control.start", "document.start", "part.start", "ready", "part.shutdown", "document.shutdown", "control.shutdown", "wiki-map.shutdown", "normal.shutdown"},
-			wantNormal: 1, wantWikiMap: 1, wantControl: 1, wantDocument: 1, wantPart: 1,
+			wantEvents: []string{"normal.start", "multimodal.start", "wiki-map.start", "control.start", "document.start", "part.start", "ready", "part.shutdown", "document.shutdown", "control.shutdown", "wiki-map.shutdown", "multimodal.shutdown", "normal.shutdown"},
+			wantNormal: 1, wantMultimodal: 1, wantWikiMap: 1, wantControl: 1, wantDocument: 1, wantPart: 1,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			events := []string{}
 			normal := &fakeAsynqServerLifecycle{name: "normal", events: &events, startErr: test.normalErr}
+			multimodal := &fakeAsynqServerLifecycle{name: "multimodal", events: &events, startErr: test.multimodalErr}
 			wikiMap := &fakeAsynqServerLifecycle{name: "wiki-map", events: &events, startErr: test.wikiMapErr}
 			control := &fakeAsynqServerLifecycle{name: "control", events: &events, startErr: test.controlErr}
 			document := &fakeAsynqServerLifecycle{name: "document", events: &events, startErr: test.documentErr}
 			part := &fakeAsynqServerLifecycle{name: "part", events: &events, startErr: test.partErr}
 			readiness := &fakeDocumentQueueReadiness{events: &events, err: test.readyErr}
 			err := startAsynqServers(
-				normal, wikiMap, control, document, part,
+				normal, multimodal, wikiMap, control, document, part,
 				asynq.HandlerFunc(func(context.Context, *asynq.Task) error { return nil }),
 				readiness,
 			)
@@ -260,12 +269,13 @@ func TestAsynqServerStartupFailureNeverMarksReadyAndRollsBack(t *testing.T) {
 			if !reflect.DeepEqual(events, test.wantEvents) {
 				t.Fatalf("failure events = %v, want %v", events, test.wantEvents)
 			}
-			if normal.shutdowns != test.wantNormal || wikiMap.shutdowns != test.wantWikiMap || control.shutdowns != test.wantControl ||
+			if normal.shutdowns != test.wantNormal || multimodal.shutdowns != test.wantMultimodal ||
+				wikiMap.shutdowns != test.wantWikiMap || control.shutdowns != test.wantControl ||
 				document.shutdowns != test.wantDocument ||
 				part.shutdowns != test.wantPart {
-				t.Fatalf("shutdowns normal/wiki-map/control/document/part = %d/%d/%d/%d/%d, want %d/%d/%d/%d/%d",
-					normal.shutdowns, wikiMap.shutdowns, control.shutdowns, document.shutdowns, part.shutdowns,
-					test.wantNormal, test.wantWikiMap, test.wantControl, test.wantDocument, test.wantPart)
+				t.Fatalf("shutdowns normal/multimodal/wiki-map/control/document/part = %d/%d/%d/%d/%d/%d, want %d/%d/%d/%d/%d/%d",
+					normal.shutdowns, multimodal.shutdowns, wikiMap.shutdowns, control.shutdowns, document.shutdowns, part.shutdowns,
+					test.wantNormal, test.wantMultimodal, test.wantWikiMap, test.wantControl, test.wantDocument, test.wantPart)
 			}
 			wantReadyCalls := 0
 			if test.readyErr != nil {

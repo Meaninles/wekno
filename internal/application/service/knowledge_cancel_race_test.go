@@ -131,6 +131,13 @@ func (i *cancelRaceTaskInspector) DocumentLifecycleTaskKnowledgeIDs(
 	return live, nil
 }
 
+func (i *cancelRaceTaskInspector) DeletionTaskKnowledgeIDs(
+	ctx context.Context,
+	targets []interfaces.KnowledgeTaskTarget,
+) (map[string]bool, error) {
+	return i.DocumentLifecycleTaskKnowledgeIDs(ctx, targets)
+}
+
 func (i *cancelRaceTaskInspector) finishLateWrite() {
 	i.mu.Lock()
 	i.active = false
@@ -237,6 +244,13 @@ func (i *disappearingTaskInspector) DocumentLifecycleTaskKnowledgeIDs(
 		)
 	}
 	return map[string]bool{}, nil
+}
+
+func (i *disappearingTaskInspector) DeletionTaskKnowledgeIDs(
+	ctx context.Context,
+	targets []interfaces.KnowledgeTaskTarget,
+) (map[string]bool, error) {
+	return i.DocumentLifecycleTaskKnowledgeIDs(ctx, targets)
 }
 
 func TestCancelQuiescenceRetriesSnapshottedTaskDisappearanceFailClosed(t *testing.T) {

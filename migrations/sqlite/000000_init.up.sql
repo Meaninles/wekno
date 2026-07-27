@@ -134,6 +134,17 @@ CREATE INDEX IF NOT EXISTS idx_task_pending_ops_wiki_map_pending
       AND scope = 'knowledge_base'
       AND op = 'ingest'
       AND map_ready_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_task_pending_ops_wiki_retry_rotation
+    ON task_pending_ops (
+        scope_id,
+        tenant_id,
+        fail_count,
+        (CASE WHEN claimed_at IS NULL THEN 0 ELSE 1 END),
+        claimed_at,
+        id
+    )
+    WHERE task_type = 'wiki:ingest'
+      AND scope = 'knowledge_base';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_task_pending_ops_wiki_retract
     ON task_pending_ops(tenant_id, task_type, scope, scope_id, op, dedup_key)
     WHERE task_type = 'wiki:ingest'

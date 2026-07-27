@@ -229,6 +229,9 @@ func (s *Service) resolveTenantModelID(
 			sourceModelID, sourceModel.Type, expectedType,
 		)
 	}
+	if expectedType == types.ModelTypeKnowledgeQA && !sourceModel.IsInteractiveChatModel() {
+		return "", fmt.Errorf("reference model %s is reserved for derivative tasks", sourceModelID)
+	}
 	if sourceModel.IsBuiltin || sourceModel.TenantID == targetTenantID {
 		return sourceModel.ID, nil
 	}
@@ -261,20 +264,21 @@ func (s *Service) cloneModelForTenant(
 	cloneID := deterministicModelCloneID(targetTenantID, source.ID)
 	now := time.Now()
 	clone := &types.Model{
-		ID:          cloneID,
-		TenantID:    targetTenantID,
-		Name:        source.Name,
-		DisplayName: source.DisplayName,
-		Type:        source.Type,
-		Source:      source.Source,
-		Description: source.Description,
-		Parameters:  cloneModelParameters(source.Parameters),
-		IsDefault:   false,
-		IsBuiltin:   false,
-		ManagedBy:   modelCloneManagedBy,
-		Status:      source.Status,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:            cloneID,
+		TenantID:      targetTenantID,
+		Name:          source.Name,
+		DisplayName:   source.DisplayName,
+		Type:          source.Type,
+		Source:        source.Source,
+		Description:   source.Description,
+		Parameters:    cloneModelParameters(source.Parameters),
+		IsDefault:     false,
+		IsBuiltin:     false,
+		ManagedBy:     modelCloneManagedBy,
+		Status:        source.Status,
+		WorkloadScope: source.WorkloadScope.Normalize(),
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	action := ""

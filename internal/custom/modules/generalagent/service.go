@@ -649,7 +649,7 @@ func (s *Service) resolveLLMConfig(ctx context.Context, config *types.AgentConfi
 }
 
 func generalClaudeLLMConfigFromModel(model *types.Model) (*LLMConfig, error) {
-	if model == nil || model.Type != types.ModelTypeKnowledgeQA {
+	if !model.IsInteractiveChatModel() {
 		return nil, errors.New("通用智能体需要对话模型")
 	}
 	out := &LLMConfig{

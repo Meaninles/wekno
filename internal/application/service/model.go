@@ -141,10 +141,11 @@ func (s *modelService) resolveWeKnoraCloudCredentials(ctx context.Context, param
 // Remote models are immediately set to active status
 func (s *modelService) CreateModel(ctx context.Context, model *types.Model) error {
 	logger.Infof(ctx, "Creating model: %s, type: %s, source: %s", model.Name, model.Type, model.Source)
-	// Workload scope is a platform-owned control-plane field. The ordinary
-	// tenant model API may only create interactive candidates; a SystemAdmin
-	// can subsequently publish one through derivative-control.
-	model.WorkloadScope = types.ModelWorkloadInteractive
+	// The scope is selected when the model is created. The custom mutation
+	// guard below is authoritative: it only permits SystemAdmin callers to
+	// create derivative-only models and validates their endpoint isolation.
+	// Empty/legacy values normalize to interactive.
+	model.WorkloadScope = model.WorkloadScope.Normalize()
 
 	if model.TenantID == 0 {
 		tenantID, ok := types.TenantIDFromContext(ctx)

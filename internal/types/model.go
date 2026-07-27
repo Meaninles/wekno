@@ -52,6 +52,16 @@ func (s ModelWorkloadScope) Normalize() ModelWorkloadScope {
 	return ModelWorkloadInteractive
 }
 
+// IsInteractiveChatModel is the shared eligibility check for every
+// latency-sensitive chat/Agent selector. Derivative models intentionally
+// keep the KnowledgeQA wire format so they can reuse chat providers, but
+// must never be selected by type alone.
+func (m *Model) IsInteractiveChatModel() bool {
+	return m != nil &&
+		m.Type == ModelTypeKnowledgeQA &&
+		m.WorkloadScope.Normalize() == ModelWorkloadInteractive
+}
+
 // ModelSource represents the source of the model
 type ModelSource string
 
@@ -157,9 +167,10 @@ type Model struct {
 	ManagedBy string `yaml:"managed_by"  json:"managed_by,omitempty"  gorm:"type:varchar(32);default:''"`
 	// Model status, default: active, possible: downloading, download_failed
 	Status ModelStatus `yaml:"status"      json:"status"`
-	// WorkloadScope is backend-managed. Ordinary model CRUD deliberately does
-	// not accept it; only the platform derivative-model control plane may
-	// promote a model to derivative_only.
+	// WorkloadScope makes derivative models a separate configuration class.
+	// Creation as derivative_only is guarded by the platform control plane;
+	// updates preserve the stored scope, so a model can never drift between
+	// interactive and derivative use through ordinary edits.
 	WorkloadScope ModelWorkloadScope `yaml:"workload_scope" json:"workload_scope" gorm:"type:varchar(32);not null;default:'interactive';index"`
 	// Creation time of the model
 	CreatedAt time.Time `yaml:"created_at"  json:"created_at"`

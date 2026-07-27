@@ -3880,6 +3880,7 @@ export default {
       sourceRemote: 'API',
       description: {
         chat: 'Configure large language models for conversations',
+        derivative: 'Configure dedicated models for Wiki, graph, summary, and other background tasks',
         embedding: 'Configure embedding models for text vectorization',
         rerank: 'Configure models for result re-ranking',
         vllm: 'Configure vision-language models for multimodal understanding',
@@ -4479,6 +4480,7 @@ export default {
       rerank: 'ReRank',
       vllm: 'Vision',
       asr: 'Speech',
+      derivative: 'Derivative',
     },
     actions: {
       addModel: 'Add Model',
@@ -4515,6 +4517,11 @@ export default {
       title: 'ASR Speech Models',
       desc: 'Configure speech-to-text models for audio transcription (e.g. OpenAI Whisper)',
       empty: 'No ASR models'
+    },
+    derivative: {
+      title: 'Derivative Models',
+      desc: 'Configure models dedicated to background derivative tasks',
+      empty: 'No derivative models'
     },
     toasts: {
       nameRequired: 'Model name cannot be empty',

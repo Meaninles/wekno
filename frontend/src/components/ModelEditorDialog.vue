@@ -1,5 +1,5 @@
 <template>
-  <SettingDrawer :visible="dialogVisible" :title="isEdit ? $t('model.editor.editTitle') : $t('model.editor.addTitle')"
+  <SettingDrawer :visible="dialogVisible" :title="drawerTitle"
     :description="getModalDescription()" :icon="modelTypeIcon" :confirm-loading="saving"
     :confirm-disabled="formData.provider === 'weknoracloud' && wkcCredentialState !== 'configured'"
     @update:visible="(v: boolean) => dialogVisible = v" @confirm="handleConfirm" @cancel="handleCancel">
@@ -27,9 +27,9 @@
       </span>
     </template>
 
-    <t-form ref="formRef" :data="formData" :rules="rules" layout="vertical">
+    <t-form ref="formRef" :data="formData" :rules="rules" layout="vertical" autocomplete="off">
 
-      <section v-if="!isEdit" class="setting-drawer__section">
+      <section v-if="!isEdit && activeModelType !== 'derivative'" class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ $t('model.editor.sectionType') }}</h4>
         <div class="model-type-options" role="radiogroup" :aria-label="$t('model.editor.typeLabel')">
           <button
@@ -51,7 +51,7 @@
       <!--
         Section 1 — 模型来源 + 模型名称（来源直接决定下方字段，所以放一节）
       -->
-      <section class="setting-drawer__section">
+      <section v-if="activeModelType !== 'derivative'" class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ $t('model.editor.sectionSource') }}</h4>
 
         <div class="form-item">
@@ -84,7 +84,6 @@
               <span class="source-option__label">{{ $t('model.editor.sourceLocal') }}</span>
             </button>
           </div>
-
           <!-- ReRank模型不支持Ollama的提示信息 -->
           <div v-if="activeModelType === 'rerank'" class="ollama-unavailable-tip rerank-tip">
             <t-icon name="info-circle-filled" class="tip-icon info" />
@@ -212,18 +211,21 @@
           <div class="form-item">
             <label class="form-label required">{{ $t('model.modelName') }}</label>
             <t-input v-model="formData.modelName" :placeholder="getModelNamePlaceholder()"
+              name="model-name" autocomplete="off"
               :disabled="formData.provider === 'weknoracloud' && wkcCredentialState !== 'configured'" />
           </div>
 
           <div class="form-item">
             <label class="form-label">{{ $t('model.editor.displayNameLabel') }}</label>
-            <t-input v-model="formData.displayName" :placeholder="$t('model.editor.displayNamePlaceholder')" />
+            <t-input v-model="formData.displayName" :placeholder="$t('model.editor.displayNamePlaceholder')"
+              name="model-display-name" autocomplete="off" />
             <p class="form-desc">{{ $t('model.editor.displayNameDesc') }}</p>
           </div>
 
           <div v-if="formData.provider !== 'weknoracloud'" class="form-item">
             <label class="form-label required">{{ $t('model.editor.baseUrlLabel') }}</label>
-            <t-input v-model="formData.baseUrl" :placeholder="getBaseUrlPlaceholder()" />
+            <t-input v-model="formData.baseUrl" :placeholder="getBaseUrlPlaceholder()"
+              name="model-endpoint-url" autocomplete="url" spellcheck="false" />
           </div>
 
           <div v-if="formData.provider !== 'weknoracloud'" class="form-item">
@@ -245,7 +247,7 @@
               :meta="credentialMeta" />
             <t-input v-else v-model="formData.apiKey" :type="showApiKey ? 'text' : 'password'"
               :placeholder="isLkeapRerank ? $t('model.editor.lkeap.secretIdPlaceholder') : apiKeyPlaceholder"
-              class="api-key-input" autocomplete="off" spellcheck="false">
+              class="api-key-input" name="model-api-key" autocomplete="new-password" spellcheck="false">
               <template #prefix-icon><t-icon name="lock-on" /></template>
               <template #suffix-icon>
                 <t-icon
@@ -263,7 +265,8 @@
           <div v-if="isLkeapRerank && !isEdit" class="form-item">
             <label class="form-label required">{{ $t('model.editor.lkeap.secretKeyLabel') }}</label>
             <t-input v-model="formData.appSecret" type="password"
-              :placeholder="$t('model.editor.lkeap.secretKeyPlaceholder')" autocomplete="off" spellcheck="false">
+              :placeholder="$t('model.editor.lkeap.secretKeyPlaceholder')" name="model-app-secret"
+              autocomplete="new-password" spellcheck="false">
               <template #prefix-icon><t-icon name="lock-on" /></template>
             </t-input>
           </div>
@@ -307,7 +310,7 @@
 
       <!-- Section 3 — 高级选项（仅在有内容时渲染，避免空 section 出现底部分隔线） -->
       <section
-        v-if="activeModelType === 'embedding' || activeModelType === 'chat' || activeModelType === 'vllm' || activeModelType === 'asr'"
+        v-if="activeModelType === 'embedding' || isChatLikeModel || activeModelType === 'vllm' || activeModelType === 'asr'"
         class="setting-drawer__section"
       >
         <h4 class="setting-drawer__section-title">{{ $t('model.editor.sectionAdvanced') }}</h4>
@@ -340,7 +343,7 @@
         </div>
 
         <!-- Chat: supports vision toggle (VLLM models are inherently multimodal) -->
-        <div v-if="activeModelType === 'chat'" class="form-item">
+        <div v-if="isChatLikeModel" class="form-item">
           <label class="form-label">{{ $t('model.editor.supportsVisionLabel') }}</label>
           <div class="vision-toggle">
             <t-switch v-model="formData.supportsVision" />
@@ -459,7 +462,7 @@ interface ModelFormData {
   lkeapRegion?: string
 }
 
-type EditorModelType = 'chat' | 'embedding' | 'rerank' | 'vllm' | 'asr'
+type EditorModelType = 'chat' | 'embedding' | 'rerank' | 'vllm' | 'asr' | 'derivative'
 
 interface Props {
   visible: boolean
@@ -487,14 +490,34 @@ const isEdit = computed(() => !!props.modelData)
 const activeModelType = computed(() => (
   isEdit.value ? props.modelType : draftModelType.value
 ))
+const drawerTitle = computed(() => {
+  const title = isEdit.value ? t('model.editor.editTitle') : t('model.editor.addTitle')
+  return activeModelType.value === 'derivative'
+    ? `${title} · ${t('modelSettings.typeShort.derivative')}`
+    : title
+})
 
-const modelTypeChoices = computed(() => ([
-  { value: 'chat' as const, label: t('modelSettings.typeShort.chat'), icon: 'chat' },
-  { value: 'embedding' as const, label: t('modelSettings.typeShort.embedding'), icon: 'chart-bubble' },
-  { value: 'rerank' as const, label: t('modelSettings.typeShort.rerank'), icon: 'filter-sort' },
-  { value: 'vllm' as const, label: t('modelSettings.typeShort.vllm'), icon: 'image' },
-  { value: 'asr' as const, label: t('modelSettings.typeShort.asr'), icon: 'sound' },
-]))
+const modelTypeChoices = computed(() => {
+  if (props.modelType === 'derivative') {
+    return [
+      { value: 'derivative' as const, label: t('modelSettings.typeShort.derivative'), icon: 'task' },
+    ]
+  }
+  return [
+    { value: 'chat' as const, label: t('modelSettings.typeShort.chat'), icon: 'chat' },
+    { value: 'embedding' as const, label: t('modelSettings.typeShort.embedding'), icon: 'chart-bubble' },
+    { value: 'rerank' as const, label: t('modelSettings.typeShort.rerank'), icon: 'filter-sort' },
+    { value: 'vllm' as const, label: t('modelSettings.typeShort.vllm'), icon: 'image' },
+    { value: 'asr' as const, label: t('modelSettings.typeShort.asr'), icon: 'sound' },
+  ]
+})
+
+const isChatLikeModel = computed(() =>
+  activeModelType.value === 'chat' || activeModelType.value === 'derivative',
+)
+const providerModelType = computed(() =>
+  activeModelType.value === 'derivative' ? 'chat' : activeModelType.value,
+)
 
 // API 返回的 Provider 列表
 const apiProviderOptions = ref<ModelProviderOption[]>([])
@@ -628,7 +651,7 @@ const fallbackProviderOptions = computed(() => [
 const loadProviders = async () => {
   loadingProviders.value = true
   try {
-    const providers = await listModelProviders(activeModelType.value)
+    const providers = await listModelProviders(providerModelType.value)
     if (providers.length > 0) {
       apiProviderOptions.value = providers
     }
@@ -642,9 +665,10 @@ const loadProviders = async () => {
 // 根据当前模型类型过滤的 Provider 列表
 // API 返回的 defaultUrls/modelTypes 数据优先，但 label/description 使用 i18n
 const providerOptions = computed(() => {
+  let options: ModelProviderOption[]
   // API 数据可用时，用 API 的结构数据 + i18n 的显示文本
   if (apiProviderOptions.value.length > 0) {
-    return apiProviderOptions.value.map(p => ({
+    options = apiProviderOptions.value.map(p => ({
       ...p,
       label: te(`model.editor.providers.${p.value}.label`)
         ? t(`model.editor.providers.${p.value}.label`)
@@ -653,11 +677,19 @@ const providerOptions = computed(() => {
         ? t(`model.editor.providers.${p.value}.description`)
         : p.description,
     }))
+  } else {
+    // 回退到硬编码值，按 modelTypes 过滤
+    options = fallbackProviderOptions.value
+      .filter(p => p.modelTypes.includes(providerModelType.value))
+      .map(p => ({
+        ...p,
+        defaultUrls: p.defaultUrls as Record<string, string>,
+      }))
   }
-  // 回退到硬编码值，按 modelTypes 过滤
-  return fallbackProviderOptions.value.filter(p =>
-    p.modelTypes.includes(activeModelType.value)
-  )
+  // WeKnoraCloud 使用平台共享端点和凭证，不能作为物理隔离的衍生任务端点。
+  return activeModelType.value === 'derivative'
+    ? options.filter(p => p.value !== 'weknoracloud')
+    : options
 })
 
 const dialogVisible = computed({
@@ -666,7 +698,7 @@ const dialogVisible = computed({
 })
 
 const showThinkingControlField = computed(() =>
-  activeModelType.value === 'chat' && formData.value.source === 'remote',
+  isChatLikeModel.value && formData.value.source === 'remote',
 )
 
 const showGeneralAgentClaudeBaseUrlField = computed(() =>
@@ -695,7 +727,7 @@ const syncThinkingControlToForm = (force = false) => {
 }
 
 const applyThinkingControlFromModelData = () => {
-  if (!props.modelData || activeModelType.value !== 'chat' || formData.value.source !== 'remote') return
+  if (!props.modelData || !isChatLikeModel.value || formData.value.source !== 'remote') return
   thinkingControlManual.value = !!props.modelData.thinkingControl
   formData.value.thinkingControl = resolveThinkingControl(
     props.modelData.thinkingControl,
@@ -732,6 +764,7 @@ const modelTypeIcon = computed(() => {
     rerank: 'filter-sort',
     vllm: 'image',
     asr: 'sound',
+    derivative: 'task',
   }
   return map[activeModelType.value] || 'setting'
 })
@@ -972,6 +1005,9 @@ const selectModelType = async (type: EditorModelType) => {
   if (type === 'rerank') {
     formData.value.source = 'remote'
   }
+  if (type === 'derivative') {
+    formData.value.source = 'remote'
+  }
   if (type !== 'embedding') {
     formData.value.dimension = undefined
     formData.value.supportsDimensionOverride = false
@@ -979,7 +1015,7 @@ const selectModelType = async (type: EditorModelType) => {
     dimensionSuccess.value = false
     dimensionMessage.value = ''
   }
-  if (type !== 'chat') {
+  if (type !== 'chat' && type !== 'derivative') {
     formData.value.supportsVision = false
     thinkingControlManual.value = false
   }
@@ -1050,6 +1086,9 @@ watch(() => props.visible, (val) => {
       if (activeModelType.value === 'rerank') {
         formData.value.source = 'remote'
       }
+      if (activeModelType.value === 'derivative') {
+        formData.value.source = 'remote'
+      }
 
       // 如果当前 provider 是 WeKnoraCloud，检查凭证状态
       if (formData.value.provider === 'weknoracloud') {
@@ -1109,7 +1148,7 @@ const handleProviderChange = (value: string) => {
   const provider = providerOptions.value.find(opt => opt.value === value)
   if (provider && provider.defaultUrls) {
     // 根据当前模型类型获取对应的默认 URL
-    const defaultUrl = provider.defaultUrls[activeModelType.value]
+    const defaultUrl = provider.defaultUrls[providerModelType.value]
     if (defaultUrl) {
       formData.value.baseUrl = defaultUrl
     }
@@ -1126,7 +1165,7 @@ const handleProviderChange = (value: string) => {
     checkWkcCredentialStatus()
   }
   if (hydratingForm.value) return
-  if (activeModelType.value !== 'chat' || formData.value.source !== 'remote') return
+  if (!isChatLikeModel.value || formData.value.source !== 'remote') return
   if (!isEdit.value) {
     thinkingControlManual.value = false
     syncThinkingControlToForm(true)
@@ -1141,7 +1180,7 @@ watch(
   () => [formData.value.source, formData.value.provider, formData.value.modelName] as const,
   ([source, provider, modelName], [prevSource, prevProvider, prevModelName]) => {
     if (hydratingForm.value || isEdit.value) return
-    if (activeModelType.value !== 'chat' || source !== 'remote') return
+    if (!isChatLikeModel.value || source !== 'remote') return
     if (source === prevSource && provider === prevProvider && modelName === prevModelName) return
 
     const providerChanged = provider !== prevProvider
@@ -1349,7 +1388,8 @@ const checkRemoteAPI = async () => {
 
     switch (activeModelType.value) {
       case 'chat':
-        // 对话模型（KnowledgeQA）
+      case 'derivative':
+        // 对话兼容接口（对话模型 / 衍生任务模型）
         result = await checkRemoteModel({
           modelName: formData.value.modelName,
           baseUrl: formData.value.baseUrl || '',
@@ -1642,7 +1682,7 @@ watch(() => formData.value.source, () => {
     !hydratingForm.value
     && !isEdit.value
     && formData.value.source === 'remote'
-    && activeModelType.value === 'chat'
+    && isChatLikeModel.value
   ) {
     thinkingControlManual.value = false
     syncThinkingControlToForm(true)

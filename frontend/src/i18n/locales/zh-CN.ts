@@ -2818,6 +2818,7 @@ export default {
       sourceRemote: "API",
       description: {
         chat: "配置用于对话的大语言模型",
+        derivative: "配置仅用于 Wiki、图谱、摘要等后台任务的专用模型",
         embedding: "配置用于文本向量化的嵌入模型",
         rerank: "配置用于结果重排序的模型",
         vllm: "配置用于视觉理解和多模态的视觉语言模型",
@@ -4477,6 +4478,7 @@ export default {
       rerank: "ReRank",
       vllm: "视觉",
       asr: "语音",
+      derivative: "衍生任务",
     },
     actions: {
       addModel: "添加模型",
@@ -4513,6 +4515,11 @@ export default {
       title: "ASR 语音模型",
       desc: "配置用于语音识别和音频转录的语音转文本模型（如 OpenAI Whisper）",
       empty: "暂无 ASR 语音模型",
+    },
+    derivative: {
+      title: "衍生任务模型",
+      desc: "配置仅用于后台衍生任务的专用模型",
+      empty: "暂无衍生任务模型",
     },
     toasts: {
       nameRequired: "模型名称不能为空",

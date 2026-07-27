@@ -114,8 +114,12 @@ func guardModelMutation(
 	guard := derivativeModelHooks.mutationGuard
 	derivativeModelHooks.RUnlock()
 	if guard == nil {
-		if existing != nil &&
-			existing.WorkloadScope.Normalize() == types.ModelWorkloadDerivativeOnly {
+		target := proposed
+		if target == nil {
+			target = existing
+		}
+		if target != nil &&
+			target.WorkloadScope.Normalize() == types.ModelWorkloadDerivativeOnly {
 			return ErrDerivativeModelControlUnavailable
 		}
 		return nil

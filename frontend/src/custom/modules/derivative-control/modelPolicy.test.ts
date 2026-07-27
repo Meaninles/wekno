@@ -7,6 +7,7 @@ import {
   derivativeModels,
   interactiveModels,
   isDerivativeModel,
+  modelManagementType,
   modelAllowedForUsage,
 } from './modelPolicy.ts'
 
@@ -45,4 +46,6 @@ test('derivative-only models cannot leak into chat or agent selectors', () => {
   assert.deepEqual(derivativeModels([chat, derivative]).map(item => item.id), ['derivative'])
   assert.equal(modelAllowedForUsage(derivative, 'interactive'), false)
   assert.equal(modelAllowedForUsage(derivative, 'derivative'), true)
+  assert.equal(modelManagementType(chat), 'chat')
+  assert.equal(modelManagementType(derivative), 'derivative')
 })

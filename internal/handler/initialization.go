@@ -890,7 +890,9 @@ func extractModelIDs(processedModels []*types.Model) (embeddingModelID, llmModel
 		case types.ModelTypeEmbedding:
 			embeddingModelID = model.ID
 		case types.ModelTypeKnowledgeQA:
-			llmModelID = model.ID
+			if model.IsInteractiveChatModel() {
+				llmModelID = model.ID
+			}
 		case types.ModelTypeVLLM:
 			vlmModelID = model.ID
 		}
@@ -1421,6 +1423,9 @@ func (h *InitializationHandler) buildConfigResponse(ctx context.Context, models 
 
 		switch model.Type {
 		case types.ModelTypeKnowledgeQA:
+			if !model.IsInteractiveChatModel() {
+				continue
+			}
 			config["llm"] = map[string]interface{}{
 				"source":    string(model.Source),
 				"modelName": model.Name,

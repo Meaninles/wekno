@@ -30,7 +30,6 @@ export interface DerivativeCandidate extends ModelConfig {
   assigned: boolean
   eligible: boolean
   reason?: string
-  origin?: string
   is_derivative_default: boolean
 }
 

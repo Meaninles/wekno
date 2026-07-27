@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -66,7 +65,6 @@ type Candidate struct {
 	Assigned bool   `json:"assigned"`
 	Eligible bool   `json:"eligible"`
 	Reason   string `json:"reason,omitempty"`
-	Origin   string `json:"origin,omitempty"`
 }
 
 type Status struct {
@@ -205,7 +203,7 @@ func (s *Service) Publish(
 			if loadErr != nil {
 				return loadErr
 			}
-			if reason := s.candidateReason(ctx, tx, model, true); reason != "" {
+			if reason := candidateReason(model); reason != "" {
 				return apperrors.NewBadRequestError(reason)
 			}
 			return nil
@@ -218,7 +216,7 @@ func (s *Service) Publish(
 		if err != nil {
 			return err
 		}
-		if reason := s.candidateReason(ctx, tx, model, false); reason != "" {
+		if reason := candidateReason(model); reason != "" {
 			return apperrors.NewBadRequestError(reason)
 		}
 		assignment := &Assignment{
@@ -343,7 +341,7 @@ func (s *Service) SetDefault(ctx context.Context, modelID string) error {
 		if err != nil {
 			return err
 		}
-		if reason := s.candidateReason(ctx, tx, model, true); reason != "" {
+		if reason := candidateReason(model); reason != "" {
 			return apperrors.NewBadRequestError(reason)
 		}
 		if config.DefaultModelID == modelID {
@@ -429,9 +427,9 @@ func (s *Service) ResolveChatModel(
 			Cause:      err,
 		}
 	}
-	if reason := s.candidateReason(ctx, s.db, model, true); reason != "" {
+	if reason := candidateReason(model); reason != "" {
 		return nil, &DeferredError{
-			Reason:     "published derivative model failed its isolation policy: " + reason,
+			Reason:     "published derivative model is not eligible: " + reason,
 			RetryAfter: time.Minute,
 		}
 	}
@@ -469,23 +467,6 @@ func (s *Service) GuardChatModel(ctx context.Context, model *types.Model) error 
 		)
 	}
 
-	// Recheck endpoint isolation at use time. This closes the small race
-	// between publishing a derivative endpoint and concurrently creating an
-	// interactive model at the same origin, and also fails closed if an
-	// operator bypasses the API and writes a conflicting row directly.
-	origin, err := modelOrigin(model)
-	if err != nil || origin == "" {
-		return nil
-	}
-	assigned, err := s.assignedOrigins(ctx, s.db)
-	if err != nil {
-		return fmt.Errorf("verify interactive model endpoint isolation: %w", err)
-	}
-	if assigned[origin] {
-		return apperrors.NewBadRequestError(
-			"该模型端点已被衍生任务模型池独占，不能用于对话或 Agent",
-		)
-	}
 	return nil
 }
 
@@ -508,7 +489,7 @@ func (s *Service) GuardModelMutation(
 			return apperrors.NewForbiddenError("衍生任务专用模型只能由系统管理员维护")
 		}
 		if operation == appservice.ModelMutationCreate {
-			if reason := s.candidateReason(ctx, s.db, target, false); reason != "" {
+			if reason := candidateReason(target); reason != "" {
 				return apperrors.NewBadRequestError(reason)
 			}
 			return nil
@@ -529,27 +510,11 @@ func (s *Service) GuardModelMutation(
 			return nil
 		}
 		if operation == appservice.ModelMutationUpdate {
-			if reason := s.candidateReason(ctx, s.db, target, true); reason != "" {
+			if reason := candidateReason(target); reason != "" {
 				return apperrors.NewBadRequestError(reason)
 			}
 		}
 		return nil
-	}
-
-	if target.Type == types.ModelTypeKnowledgeQA &&
-		target.WorkloadScope.Normalize() == types.ModelWorkloadInteractive {
-		origin, err := modelOrigin(target)
-		if err == nil && origin != "" {
-			assignedOrigins, queryErr := s.assignedOrigins(ctx, s.db)
-			if queryErr != nil {
-				return queryErr
-			}
-			if assignedOrigins[origin] {
-				return apperrors.NewBadRequestError(
-					"该 API 地址已被衍生任务模型池独占，不能再创建或更新为对话模型",
-				)
-			}
-		}
 	}
 	return nil
 }
@@ -688,30 +653,20 @@ func (s *Service) listCandidates(ctx context.Context, defaultModelID string) ([]
 	out := make([]Candidate, 0, len(models))
 	for index := range models {
 		model := &models[index]
-		origin, _ := modelOrigin(model)
-		reason := s.candidateReason(ctx, s.db, model, assigned[model.ID])
+		reason := candidateReason(model)
 		out = append(out, Candidate{
 			PublishedModel: publishedModel(model, model.ID == defaultModelID),
 			Assigned:       assigned[model.ID],
 			Eligible:       reason == "",
 			Reason:         reason,
-			Origin:         origin,
 		})
 	}
 	return out, nil
 }
 
-func (s *Service) candidateReason(
-	ctx context.Context,
-	db *gorm.DB,
-	model *types.Model,
-	_ bool,
-) string {
+func candidateReason(model *types.Model) string {
 	if model == nil {
 		return "模型不存在"
-	}
-	if model.IsBuiltin {
-		return "内置共享模型不能成为物理隔离的衍生模型"
 	}
 	if model.Type != types.ModelTypeKnowledgeQA {
 		return "衍生任务模型必须使用对话兼容接口"
@@ -719,59 +674,10 @@ func (s *Service) candidateReason(
 	if model.Status != "" && model.Status != types.ModelStatusActive {
 		return "模型当前不是 active 状态"
 	}
-	if model.Source != types.ModelSourceRemote {
-		return "本地模型共用进程，无法证明物理隔离；请配置独立远程端点"
-	}
 	if model.WorkloadScope.Normalize() != types.ModelWorkloadDerivativeOnly {
 		return "只能下发在“衍生任务”分类中创建的模型"
 	}
-	origin, err := modelOrigin(model)
-	if err != nil || origin == "" {
-		return "模型必须配置可识别的独立 Base URL"
-	}
-	var interactive []types.Model
-	query := db.WithContext(ctx).
-		Where("type = ? AND status = ? AND id <> ?",
-			types.ModelTypeKnowledgeQA, types.ModelStatusActive, model.ID).
-		Where("workload_scope <> ? OR workload_scope IS NULL OR workload_scope = ''",
-			types.ModelWorkloadDerivativeOnly)
-	if err := query.Find(&interactive).Error; err != nil {
-		return "无法验证模型端点隔离"
-	}
-	for index := range interactive {
-		otherOrigin, originErr := modelOrigin(&interactive[index])
-		if originErr == nil && otherOrigin == origin {
-			return fmt.Sprintf(
-				"该端点仍被对话模型 %s 使用，无法保证物理隔离",
-				displayName(&interactive[index]),
-			)
-		}
-	}
 	return ""
-}
-
-func (s *Service) assignedOrigins(
-	ctx context.Context,
-	db *gorm.DB,
-) (map[string]bool, error) {
-	models, err := s.listPublished(ctx, db, "")
-	if err != nil {
-		return nil, err
-	}
-	origins := make(map[string]bool, len(models))
-	for _, published := range models {
-		var model types.Model
-		if err := db.WithContext(ctx).Where(
-			"id = ? AND tenant_id = ?", published.ID, published.TenantID,
-		).First(&model).Error; err != nil {
-			return nil, err
-		}
-		origin, originErr := modelOrigin(&model)
-		if originErr == nil && origin != "" {
-			origins[origin] = true
-		}
-	}
-	return origins, nil
 }
 
 func (s *Service) loadExactModel(
@@ -807,39 +713,6 @@ func publishedModel(model *types.Model, isDefault bool) PublishedModel {
 			SupportsVision: model.Parameters.SupportsVision,
 		},
 	}
-}
-
-func modelOrigin(model *types.Model) (string, error) {
-	if model == nil {
-		return "", errors.New("model is nil")
-	}
-	raw := strings.TrimSpace(model.Parameters.BaseURL)
-	if raw == "" {
-		return "", errors.New("base URL is empty")
-	}
-	if !strings.Contains(raw, "://") {
-		raw = "http://" + raw
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" {
-		return "", errors.New("base URL is invalid")
-	}
-	scheme := strings.ToLower(parsed.Scheme)
-	host := strings.ToLower(parsed.Host)
-	if scheme != "http" && scheme != "https" {
-		return "", errors.New("base URL scheme is unsupported")
-	}
-	return scheme + "://" + host, nil
-}
-
-func displayName(model *types.Model) string {
-	if model == nil {
-		return ""
-	}
-	if value := strings.TrimSpace(model.DisplayName); value != "" {
-		return value
-	}
-	return model.Name
 }
 
 func (s *Service) auditChange(

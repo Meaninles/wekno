@@ -190,7 +190,7 @@ func TestDerivativeControlAdminCandidatesFollowActiveTenant(t *testing.T) {
 	db, service, _, _, _ := newDerivativeServiceTest(t)
 	current := remoteDerivativeModel("current-tenant-model", 10001, "http://current-derivative:4000/v1")
 	other := remoteDerivativeModel("other-tenant-model", 10002, "http://other-derivative:4000/v1")
-	interactive := remoteChatModel("interactive-model", 10001, "http://interactive:4000/v1")
+	interactive := remoteChatModel("interactive-model", 10001, "http://current-derivative:4000/openai")
 	require.NoError(t, db.Create(current).Error)
 	require.NoError(t, db.Create(other).Error)
 	require.NoError(t, db.Create(interactive).Error)
@@ -204,7 +204,7 @@ func TestDerivativeControlAdminCandidatesFollowActiveTenant(t *testing.T) {
 	require.True(t, config.Candidates[0].Eligible)
 }
 
-func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) {
+func TestDerivativeControlPublishesSharedEndpointModelAndNeverFallsBack(t *testing.T) {
 	db, service, settings, _, _ := newDerivativeServiceTest(t)
 	ctx := context.WithValue(context.Background(), types.UserIDContextKey, "system-admin")
 	ctx = context.WithValue(ctx, types.SystemAdminContextKey, true)
@@ -216,29 +216,22 @@ func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) 
 	require.Empty(t, status.Models)
 
 	interactive := remoteChatModel("chat-model", 10001, "http://interactive-api:4000/v1")
-	conflicting := remoteDerivativeModel("conflicting-model", 10002, "http://interactive-api:4000/openai")
-	dedicated := remoteDerivativeModel("derivative-model", 10002, "http://derivative-api:4000/v1")
+	derivative := remoteDerivativeModel("derivative-model", 10002, "http://interactive-api:4000/openai")
 	require.NoError(t, db.Create(interactive).Error)
-	require.NoError(t, db.Create(conflicting).Error)
-	require.NoError(t, db.Create(dedicated).Error)
-
-	err = service.Publish(ctx, conflicting.ID, conflicting.TenantID)
-	require.Error(t, err)
-	require.Equal(t, 400, appErrorStatus(err))
-	require.Contains(t, err.Error(), "物理隔离")
+	require.NoError(t, db.Create(derivative).Error)
 
 	err = service.Publish(ctx, interactive.ID, interactive.TenantID)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "“衍生任务”分类")
 
-	require.NoError(t, service.Publish(ctx, dedicated.ID, dedicated.TenantID))
-	require.NoError(t, db.First(dedicated, "id = ?", dedicated.ID).Error)
-	require.Equal(t, types.ModelWorkloadDerivativeOnly, dedicated.WorkloadScope)
+	require.NoError(t, service.Publish(ctx, derivative.ID, derivative.TenantID))
+	require.NoError(t, db.First(derivative, "id = ?", derivative.ID).Error)
+	require.Equal(t, types.ModelWorkloadDerivativeOnly, derivative.WorkloadScope)
 
 	status, err = service.Status(ctx)
 	require.NoError(t, err)
 	require.True(t, status.Configured)
-	require.Equal(t, dedicated.ID, status.DefaultModelID)
+	require.Equal(t, derivative.ID, status.DefaultModelID)
 	require.Len(t, status.Models, 1)
 	require.True(t, status.Models[0].IsDefault)
 
@@ -246,19 +239,19 @@ func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) 
 		control: service,
 		models: map[string]*types.Model{
 			interactive.ID: interactive,
-			dedicated.ID:   dedicated,
+			derivative.ID:  derivative,
 		},
 	}
 	resolved, err := service.ResolveChatModel(ctx, modelService, "")
 	require.NoError(t, err)
-	require.Equal(t, dedicated.ID, resolved.GetModelID())
+	require.Equal(t, derivative.ID, resolved.GetModelID())
 	modelService.mu.Lock()
-	require.Equal(t, dedicated.TenantID, modelService.seenTenant)
+	require.Equal(t, derivative.TenantID, modelService.seenTenant)
 	modelService.mu.Unlock()
 
 	_, err = modelService.GetChatModel(
-		context.WithValue(context.Background(), types.TenantIDContextKey, dedicated.TenantID),
-		dedicated.ID,
+		context.WithValue(context.Background(), types.TenantIDContextKey, derivative.TenantID),
+		derivative.ID,
 	)
 	require.Error(t, err)
 	require.Equal(t, 400, appErrorStatus(err))
@@ -271,7 +264,7 @@ func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) 
 
 	require.NoError(t, service.ValidateKnowledgeBase(ctx, &types.KnowledgeBase{
 		TenantID: 10001, SummaryModelID: interactive.ID,
-		DerivativeModelID: dedicated.ID,
+		DerivativeModelID: derivative.ID,
 	}))
 	err = service.ValidateKnowledgeBase(ctx, &types.KnowledgeBase{
 		TenantID: 10001, SummaryModelID: interactive.ID,
@@ -280,18 +273,16 @@ func TestDerivativeControlPublishesIsolatedModelAndNeverFallsBack(t *testing.T) 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "已下发")
 	err = service.ValidateKnowledgeBase(ctx, &types.KnowledgeBase{
-		TenantID: 10002, SummaryModelID: dedicated.ID,
-		DerivativeModelID: dedicated.ID,
+		TenantID: 10002, SummaryModelID: derivative.ID,
+		DerivativeModelID: derivative.ID,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "不能作为知识库对话模型")
 
-	conflictAtRuntime := remoteChatModel(
-		"late-interactive-conflict", 10003, "http://derivative-api:4000/another-path",
+	sharedEndpointInteractive := remoteChatModel(
+		"late-interactive-model", 10003, "http://interactive-api:4000/another-path",
 	)
-	err = service.GuardChatModel(ctx, conflictAtRuntime)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "端点已被衍生任务模型池独占")
+	require.NoError(t, service.GuardChatModel(ctx, sharedEndpointInteractive))
 
 	value, err := service.UpdateTPM(ctx, 12_345)
 	require.NoError(t, err)
@@ -359,7 +350,7 @@ func TestDerivativeControlRequiresDedicatedScopeAndGuardsRevocation(t *testing.T
 	require.Contains(t, err.Error(), "no derivative model is configured")
 }
 
-func TestDerivativeControlMutationPolicyFailsClosed(t *testing.T) {
+func TestDerivativeControlMutationPolicyAllowsSharedEndpoints(t *testing.T) {
 	db, service, _, _, _ := newDerivativeServiceTest(t)
 	dedicated := remoteChatModel("dedicated", 10001, "https://derive.example/v1")
 	dedicated.WorkloadScope = types.ModelWorkloadDerivativeOnly
@@ -381,6 +372,5 @@ func TestDerivativeControlMutationPolicyFailsClosed(t *testing.T) {
 	err = service.GuardModelMutation(
 		adminCtx, appservice.ModelMutationCreate, nil, dedicated,
 	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "物理隔离")
+	require.NoError(t, err)
 }

@@ -349,7 +349,7 @@ app:
     # Keep the existing Docker sandbox feature available on every app node.
     # Runs are one-shot (`docker run --rm`), so no session affinity is needed.
     - name: SSRF_WHITELIST_EXTRA
-      value: 10.0.11.36,10.0.11.37,weknora-litellm,weixin.moutai.com
+      value: 10.0.11.36,10.0.11.37,weknora-litellm,weixin.moutai.com,llmgateway.moutai.com.cn
   extraVolumes:
     - name: docker-socket
       hostPath:

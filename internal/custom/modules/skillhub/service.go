@@ -34,7 +34,9 @@ const (
 var safePathPartPattern = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 type Service struct {
-	db *gorm.DB
+	db                   *gorm.DB
+	professionalStore    ProfessionalObjectStore
+	professionalStoreErr error
 }
 
 type organizationShareMigration struct {
@@ -70,9 +72,19 @@ func (userShareMigration) TableName() string {
 }
 
 func NewService(db *gorm.DB) *Service {
-	service := &Service{db: db}
-	registerProfessionalAccessResolver(service.professionalAccessByName)
-	return service
+	store, err := newProfessionalObjectStoreFromEnv()
+	return &Service{
+		db:                   db,
+		professionalStore:    store,
+		professionalStoreErr: err,
+	}
+}
+
+// NewServiceWithProfessionalStore is an explicit injection seam for tests and
+// maintenance tools. Production construction always uses NewService so it
+// cannot silently fall back to a pod-local directory.
+func NewServiceWithProfessionalStore(db *gorm.DB, store ProfessionalObjectStore) *Service {
+	return &Service{db: db, professionalStore: store}
 }
 
 func (s *Service) Migrate(ctx context.Context) error {
@@ -90,6 +102,63 @@ func (s *Service) Migrate(ctx context.Context) error {
 		if err := db.Migrator().DropIndex(&ProfessionalSkill{}, "idx_custom_professional_skills_name"); err != nil {
 			return err
 		}
+	}
+	if err := s.ValidateProfessionalStorage(ctx); err != nil {
+		return err
+	}
+	if s.professionalStore != nil {
+		if err := s.migrateLegacyProfessionalSkills(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateProfessionalStorage is called by both the one-off maintenance
+// replica and ordinary serving replicas. It prevents a rollout with existing
+// uploaded skills from appearing healthy when the shared object store was
+// omitted or is unreachable.
+func (s *Service) ValidateProfessionalStorage(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	migrator := s.db.WithContext(ctx).Migrator()
+	if !migrator.HasTable(&ProfessionalSkill{}) {
+		return fmt.Errorf("professional skill schema is missing; run the maintenance migration")
+	}
+	for _, field := range []string{
+		"DisplayName",
+		"ObjectPath",
+		"ObjectSize",
+		"ObjectSHA256",
+		"FileCount",
+	} {
+		if !migrator.HasColumn(&ProfessionalSkill{}, field) {
+			return fmt.Errorf(
+				"professional skill schema column %s is missing; run the maintenance migration",
+				field,
+			)
+		}
+	}
+	var professionalCount int64
+	if err := s.db.WithContext(ctx).
+		Model(&ProfessionalSkill{}).
+		Where("name NOT IN ?", ReservedProfessionalSkillNames()).
+		Count(&professionalCount).Error; err != nil {
+		return err
+	}
+	if professionalCount == 0 {
+		return nil
+	}
+	if s.professionalStore == nil {
+		return fmt.Errorf(
+			"%d professional skills require shared object storage, but it is unavailable: %w",
+			professionalCount,
+			s.professionalStoreErr,
+		)
+	}
+	if err := s.professionalStore.CheckConnectivity(ctx); err != nil {
+		return fmt.Errorf("check professional skill object storage: %w", err)
 	}
 	return nil
 }

@@ -29,6 +29,22 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
     {{- fail "horizontal app scaling with STORAGE_TYPE=local and a ReadWriteOnce PVC is unsafe across Kubernetes nodes; use object storage or ReadWriteMany" }}
   {{- end }}
 {{- end }}
+{{- $professionalProvider := lower (toString .Values.app.professionalSkillStorage.provider) }}
+{{- $professionalPrefix := toString .Values.app.professionalSkillStorage.pathPrefix }}
+{{- if and .Values.app.enabled (gt $appMaxReplicas 1) (not (has $professionalProvider (list "minio" "obs"))) }}
+  {{- fail "horizontal app scaling requires app.professionalSkillStorage.provider=minio|obs; uploaded professional skills cannot use pod-local storage" }}
+{{- end }}
+{{- if not (empty $professionalProvider) }}
+  {{- if not (has $professionalProvider (list "minio" "obs")) }}
+    {{- fail "app.professionalSkillStorage.provider must be minio or obs" }}
+  {{- end }}
+  {{- if empty .Values.app.professionalSkillStorage.bucket }}
+    {{- fail "app.professionalSkillStorage.bucket is required when professional skill storage is enabled" }}
+  {{- end }}
+  {{- if not (regexMatch "^weknora/__weknora_private_professional_skills_v1__/deployment/[a-z]([a-z0-9-]{0,61}[a-z0-9])?/namespace/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/$" $professionalPrefix) }}
+    {{- fail "professionalSkillStorage.pathPrefix must be weknora/__weknora_private_professional_skills_v1__/deployment/<lowercase-dns-label>/namespace/<canonical-uuid>/" }}
+  {{- end }}
+{{- end }}
 {{- if and .Values.app.enabled (not .Values.postgresql.enabled) (eq (toString .Values.app.connections.database.host) "postgres") }}
   {{- fail "postgresql.enabled=false requires app.connections.database.host to point at the external HA PostgreSQL service" }}
 {{- end }}

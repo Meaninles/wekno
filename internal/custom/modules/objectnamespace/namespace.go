@@ -17,14 +17,15 @@ import (
 type Purpose string
 
 const (
-	PurposeKnowledgeObjects Purpose = "private_knowledge_objects"
-	PurposeAgentArtifacts   Purpose = "private_agent_artifacts"
-	PurposeOriginalInputs   Purpose = "claude_sdk_original_inputs"
+	PurposeKnowledgeObjects   Purpose = "private_knowledge_objects"
+	PurposeAgentArtifacts     Purpose = "private_agent_artifacts"
+	PurposeOriginalInputs     Purpose = "claude_sdk_original_inputs"
+	PurposeProfessionalSkills Purpose = "private_professional_skills"
 )
 
 func root(purpose Purpose) (string, error) {
 	switch purpose {
-	case PurposeKnowledgeObjects, PurposeAgentArtifacts, PurposeOriginalInputs:
+	case PurposeKnowledgeObjects, PurposeAgentArtifacts, PurposeOriginalInputs, PurposeProfessionalSkills:
 		return "weknora/__weknora_" + string(purpose) + "_v1__/deployment", nil
 	default:
 		return "", fmt.Errorf("unsupported object namespace purpose %q", purpose)

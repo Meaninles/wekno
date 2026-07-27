@@ -41,20 +41,29 @@ const (
 )
 
 type Service struct {
-	db               *gorm.DB
-	sessionService   interfaces.SessionService
-	agentService     interfaces.AgentService
-	messageService   interfaces.MessageService
-	modelService     interfaces.ModelService
-	knowledgeService interfaces.KnowledgeService
-	fileService      interfaces.FileService
-	dbAnalytics      *dbanalytics.Service
-	client           *Client
-	documentClient   *Client
-	artifactRoot     string
-	artifactStore    *artifactstore.Store
-	artifactStoreErr error
-	housekeepingOnce sync.Once
+	db                 *gorm.DB
+	sessionService     interfaces.SessionService
+	agentService       interfaces.AgentService
+	messageService     interfaces.MessageService
+	modelService       interfaces.ModelService
+	knowledgeService   interfaces.KnowledgeService
+	fileService        interfaces.FileService
+	dbAnalytics        *dbanalytics.Service
+	client             *Client
+	documentClient     *Client
+	artifactRoot       string
+	artifactStore      *artifactstore.Store
+	artifactStoreErr   error
+	housekeepingOnce   sync.Once
+	professionalSkills professionalSkillProvider
+}
+
+type professionalSkillProvider interface {
+	ProfessionalPackages(
+		context.Context,
+		[]string,
+		bool,
+	) ([]skillhub.ProfessionalSkillPackage, error)
 }
 
 func NewService(
@@ -86,6 +95,12 @@ func NewService(
 		artifactRoot:     root,
 		artifactStore:    privateArtifactStore,
 		artifactStoreErr: artifactStoreErr,
+	}
+}
+
+func (s *Service) SetProfessionalSkillProvider(provider professionalSkillProvider) {
+	if s != nil {
+		s.professionalSkills = provider
 	}
 }
 
@@ -818,7 +833,10 @@ func (s *Service) professionalSkillSpecs(ctx context.Context, agent *types.Custo
 	if mode != "all" && (mode != "selected" || len(names) == 0) {
 		return nil, nil
 	}
-	packages, err := skillhub.ProfessionalPackages(ctx, names, mode == "all")
+	if s.professionalSkills == nil {
+		return nil, fmt.Errorf("professional skill provider is unavailable")
+	}
+	packages, err := s.professionalSkills.ProfessionalPackages(ctx, names, mode == "all")
 	if err != nil {
 		return nil, fmt.Errorf("load professional skills: %w", err)
 	}

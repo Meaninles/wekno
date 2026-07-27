@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,27 +152,29 @@ func TestDuplicateSkillNameErrorDetectionCoversDatabaseConstraints(t *testing.T)
 
 func TestProfessionalPackagesSelectsConfiguredSkills(t *testing.T) {
 	root := t.TempDir()
-	writeProfessionalSkill(t, root, "alpha-skill", "Alpha skill", "alpha body")
-	writeProfessionalSkill(t, root, "beta-skill", "Beta skill", "beta body")
+	writeProfessionalSkill(t, root, "anysearch-skill", "AnySearch skill", "search body")
+	writeProfessionalSkill(t, root, "find-skill-skillhub", "Find skill", "find body")
 	t.Setenv("WEKNORA_PROFESSIONAL_SKILLS_DIR", root)
 
 	metadata, err := ProfessionalMetadata(context.Background())
 	if err != nil {
 		t.Fatalf("ProfessionalMetadata returned error: %v", err)
 	}
-	if len(metadata) != 2 || metadata[0].Name != "alpha-skill" || metadata[1].Name != "beta-skill" {
-		t.Fatalf("metadata = %+v, want sorted alpha/beta skills", metadata)
+	if len(metadata) != 2 ||
+		metadata[0].Name != "anysearch-skill" ||
+		metadata[1].Name != "find-skill-skillhub" {
+		t.Fatalf("metadata = %+v, want sorted reserved skills", metadata)
 	}
 
-	packages, err := ProfessionalPackages(context.Background(), []string{"beta-skill"}, false)
+	packages, err := ProfessionalPackages(context.Background(), []string{"find-skill-skillhub"}, false)
 	if err != nil {
 		t.Fatalf("ProfessionalPackages returned error: %v", err)
 	}
 	if len(packages) != 1 {
 		t.Fatalf("packages len = %d, want 1", len(packages))
 	}
-	if packages[0].Name != "beta-skill" || packages[0].Description != "Beta skill" {
-		t.Fatalf("package metadata = %+v, want beta-skill", packages[0])
+	if packages[0].Name != "find-skill-skillhub" || packages[0].Description != "Find skill" {
+		t.Fatalf("package metadata = %+v, want find-skill-skillhub", packages[0])
 	}
 	if len(packages[0].Files) != 1 || packages[0].Files[0].Path != "SKILL.md" {
 		t.Fatalf("package files = %+v, want only SKILL.md", packages[0].Files)
@@ -180,8 +183,8 @@ func TestProfessionalPackagesSelectsConfiguredSkills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode skill content: %v", err)
 	}
-	if !strings.Contains(string(content), "beta body") {
-		t.Fatalf("packaged content = %q, want beta body", string(content))
+	if !strings.Contains(string(content), "find body") {
+		t.Fatalf("packaged content = %q, want find body", string(content))
 	}
 }
 
@@ -190,7 +193,7 @@ func TestImportProfessionalSkillDuplicateNameReturnsSentinel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	svc := NewService(db)
+	svc := NewServiceWithProfessionalStore(db, newMemoryProfessionalStore())
 	if err := svc.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate skillhub: %v", err)
 	}
@@ -360,7 +363,7 @@ func TestProfessionalSkillRelativePathValidationAllowsSafeUnicode(t *testing.T) 
 	}
 }
 
-func TestListProfessionalForManageAdoptsFilesystemSkill(t *testing.T) {
+func TestListProfessionalForManageIgnoresPodLocalUploadedSkill(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -368,9 +371,6 @@ func TestListProfessionalForManageAdoptsFilesystemSkill(t *testing.T) {
 	svc := NewService(db)
 	if err := svc.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate skillhub: %v", err)
-	}
-	if err := db.AutoMigrate(&types.User{}); err != nil {
-		t.Fatalf("migrate related tables: %v", err)
 	}
 	root := t.TempDir()
 	writeProfessionalSkill(t, root, "filesystem-skill", "Filesystem skill", "filesystem body")
@@ -383,72 +383,8 @@ func TestListProfessionalForManageAdoptsFilesystemSkill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListProfessionalForManage returned error: %v", err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("items len = %d, want 1", len(items))
-	}
-	item := items[0]
-	if item.ID == "" || !item.Managed || !item.CanManage || !item.CanDownload {
-		t.Fatalf("filesystem professional item = %+v, want manageable downloadable item", item)
-	}
-
-	download, err := svc.DownloadProfessionalSkill(ctx, item.ID)
-	if err != nil {
-		t.Fatalf("DownloadProfessionalSkill returned error: %v", err)
-	}
-	if download.Cleanup != nil {
-		defer download.Cleanup()
-	}
-	if download.Filename != "filesystem-skill.zip" {
-		t.Fatalf("download filename = %q, want filesystem-skill.zip", download.Filename)
-	}
-	zr, err := zip.OpenReader(download.Path)
-	if err != nil {
-		t.Fatalf("open generated zip: %v", err)
-	}
-	var names []string
-	for _, file := range zr.File {
-		names = append(names, file.Name)
-	}
-	_ = zr.Close()
-	if len(names) != 1 || names[0] != "SKILL.md" {
-		t.Fatalf("generated zip files = %+v, want SKILL.md", names)
-	}
-
-	if _, err := svc.ShareProfessionalToUser(ctx, item.ID, ShareUserRequest{
-		UserID:     "professional-target",
-		Permission: types.OrgRoleViewer,
-	}); err != nil {
-		t.Fatalf("ShareProfessionalToUser returned error: %v", err)
-	}
-	shares, err := svc.ListProfessionalShares(ctx, item.ID)
-	if err != nil {
-		t.Fatalf("ListProfessionalShares returned error: %v", err)
-	}
-	if len(shares.UserShares) != 1 {
-		t.Fatalf("user shares len = %d, want 1", len(shares.UserShares))
-	}
-
-	updated, err := svc.UpdateProfessionalSkill(ctx, item.ID, ProfessionalSkillUpdateRequest{
-		Name: "filesystem-skill-renamed",
-	})
-	if err != nil {
-		t.Fatalf("UpdateProfessionalSkill returned error: %v", err)
-	}
-	if updated.Name != "filesystem-skill-renamed" || !updated.CanDownload {
-		t.Fatalf("updated filesystem item = %+v, want renamed downloadable item", updated)
-	}
-	if _, err := os.Stat(filepath.Join(root, "filesystem-skill")); !os.IsNotExist(err) {
-		t.Fatalf("old filesystem skill directory still exists or stat failed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "filesystem-skill-renamed", "SKILL.md")); err != nil {
-		t.Fatalf("renamed filesystem skill missing SKILL.md: %v", err)
-	}
-
-	if err := svc.DeleteProfessionalSkill(ctx, item.ID); err != nil {
-		t.Fatalf("DeleteProfessionalSkill returned error: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "filesystem-skill-renamed")); !os.IsNotExist(err) {
-		t.Fatalf("deleted filesystem skill directory still exists or stat failed: %v", err)
+	if len(items) != 0 {
+		t.Fatalf("items = %+v, want non-reserved pod-local skill to be ignored", items)
 	}
 }
 
@@ -457,7 +393,8 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	svc := NewService(db)
+	store := newMemoryProfessionalStore()
+	svc := NewServiceWithProfessionalStore(db, store)
 	if err := svc.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate skillhub: %v", err)
 	}
@@ -492,24 +429,14 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if item.ID == "" || !item.CanManage || !item.CanDownload {
 		t.Fatalf("imported item permissions = %+v, want manageable and downloadable item", item)
 	}
-	if _, err := os.Stat(filepath.Join(root, "imported-skill", "SKILL.md")); err != nil {
-		t.Fatalf("SKILL.md was not extracted before runtime: %v", err)
+	if store.count() != 1 {
+		t.Fatalf("object store has %d objects after import, want 1", store.count())
 	}
-	originalSkillMD, err := os.ReadFile(filepath.Join(root, "imported-skill", "SKILL.md"))
-	if err != nil {
-		t.Fatalf("read imported original SKILL.md: %v", err)
-	}
-	if !strings.Contains(string(originalSkillMD), "name: package-name") {
-		t.Fatalf("import modified original SKILL.md:\n%s", string(originalSkillMD))
-	}
-	if _, err := os.Stat(filepath.Join(root, "imported-skill", "references", "checklist.md")); err != nil {
-		t.Fatalf("resource file was not extracted before runtime: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "imported-skill", "references", "7套新增风格规范.md")); err != nil {
-		t.Fatalf("unicode resource file was not extracted before runtime: %v", err)
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("pod-local professional directory changed: entries=%v err=%v", entries, err)
 	}
 
-	packages, err := ProfessionalPackages(context.Background(), []string{"imported-skill"}, false)
+	packages, err := svc.ProfessionalPackages(ctx, []string{"imported-skill"}, false)
 	if err != nil {
 		t.Fatalf("ProfessionalPackages returned error: %v", err)
 	}
@@ -550,15 +477,19 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DownloadProfessionalSkill returned error: %v", err)
 	}
-	if download.Filename != "skill.zip" {
-		t.Fatalf("download filename = %q, want skill.zip", download.Filename)
+	if download.Filename != "imported-skill.zip" {
+		t.Fatalf("download filename = %q, want imported-skill.zip", download.Filename)
 	}
-	downloaded, err := os.ReadFile(download.Path)
+	downloaded, err := io.ReadAll(download.Reader)
 	if err != nil {
-		t.Fatalf("read original package: %v", err)
+		t.Fatalf("read canonical package: %v", err)
 	}
-	if !bytes.Equal(downloaded, buf.Bytes()) {
-		t.Fatalf("downloaded original package content changed")
+	_ = download.Reader.Close()
+	if int64(len(downloaded)) != download.Size {
+		t.Fatalf("downloaded package size = %d, want %d", len(downloaded), download.Size)
+	}
+	if _, err := zip.NewReader(bytes.NewReader(downloaded), int64(len(downloaded))); err != nil {
+		t.Fatalf("downloaded canonical package is not a zip: %v", err)
 	}
 
 	updated, err := svc.UpdateProfessionalSkill(ctx, item.ID, ProfessionalSkillUpdateRequest{
@@ -572,21 +503,10 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if updated.Name != "updated-skill" || updated.Description != "updated display description" || updated.ArchiveFileName != "skill.zip" {
 		t.Fatalf("updated item = %+v, want renamed item retaining original archive", updated)
 	}
-	if _, err := os.Stat(filepath.Join(root, "imported-skill")); !os.IsNotExist(err) {
-		t.Fatalf("old skill directory still exists or stat failed: %v", err)
+	if store.count() != 1 {
+		t.Fatalf("metadata-only update changed object count to %d, want 1", store.count())
 	}
-	if _, err := os.Stat(filepath.Join(root, "updated-skill", professionalArchiveFile)); err != nil {
-		t.Fatalf("updated skill lost original archive: %v", err)
-	}
-	updatedSkillMD, err := os.ReadFile(filepath.Join(root, "updated-skill", "SKILL.md"))
-	if err != nil {
-		t.Fatalf("read updated SKILL.md: %v", err)
-	}
-	if !strings.Contains(string(updatedSkillMD), "name: package-name") ||
-		!strings.Contains(string(updatedSkillMD), "description: packaged description") {
-		t.Fatalf("updated original SKILL.md was unexpectedly changed:\n%s", string(updatedSkillMD))
-	}
-	updatedPackages, err := ProfessionalPackages(context.Background(), []string{"updated-skill"}, false)
+	updatedPackages, err := svc.ProfessionalPackages(ctx, []string{"updated-skill"}, false)
 	if err != nil {
 		t.Fatalf("ProfessionalPackages after update returned error: %v", err)
 	}
@@ -610,8 +530,8 @@ func TestImportProfessionalSkillExtractsPackageBeforeRuntime(t *testing.T) {
 	if err := svc.DeleteProfessionalSkill(ctx, item.ID); err != nil {
 		t.Fatalf("DeleteProfessionalSkill returned error: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "updated-skill")); !os.IsNotExist(err) {
-		t.Fatalf("deleted professional skill directory still exists or stat failed: %v", err)
+	if store.count() != 0 {
+		t.Fatalf("object store has %d objects after delete, want 0", store.count())
 	}
 }
 
@@ -620,7 +540,7 @@ func TestImportProfessionalSkillUsesSlugAndPreservesReadableName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	svc := NewService(db)
+	svc := NewServiceWithProfessionalStore(db, newMemoryProfessionalStore())
 	if err := svc.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate skillhub: %v", err)
 	}
@@ -659,15 +579,8 @@ Use this skill for Word documents.
 	if item.Name != "word-docx" || item.DisplayName != "word-docx" {
 		t.Fatalf("imported item = %+v, want slug name and slug display name", item)
 	}
-	if _, err := os.Stat(filepath.Join(root, "word-docx", "excel-xlsx (1).zip")); !os.IsNotExist(err) {
-		t.Fatalf("sibling archive outside skill root should not be copied into skill directory: %v", err)
-	}
-	originalSkillMD, err := os.ReadFile(filepath.Join(root, "word-docx", "SKILL.md"))
-	if err != nil {
-		t.Fatalf("read original SKILL.md: %v", err)
-	}
-	if !strings.Contains(string(originalSkillMD), "name: Word / DOCX") {
-		t.Fatalf("original SKILL.md was modified:\n%s", string(originalSkillMD))
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("pod-local professional directory changed: entries=%v err=%v", entries, err)
 	}
 
 	items, err := svc.ListProfessionalForManage(ctx)
@@ -678,7 +591,7 @@ Use this skill for Word documents.
 		t.Fatalf("managed items = %+v, want slug name", items)
 	}
 
-	packages, err := ProfessionalPackages(context.Background(), []string{"word-docx"}, false)
+	packages, err := svc.ProfessionalPackages(ctx, []string{"word-docx"}, false)
 	if err != nil {
 		t.Fatalf("ProfessionalPackages returned error: %v", err)
 	}

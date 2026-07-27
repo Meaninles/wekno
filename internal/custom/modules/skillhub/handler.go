@@ -2,6 +2,7 @@ package skillhub
 
 import (
 	"errors"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -108,10 +109,23 @@ func (h *Handler) DownloadProfessional(c *gin.Context) {
 		h.fail(c, err)
 		return
 	}
-	if download.Cleanup != nil {
-		defer download.Cleanup()
+	if download.Reader == nil {
+		h.fail(c, errors.New("professional skill download is unavailable"))
+		return
 	}
-	c.FileAttachment(download.Path, download.Filename)
+	defer download.Reader.Close()
+	c.DataFromReader(
+		http.StatusOK,
+		download.Size,
+		"application/zip",
+		download.Reader,
+		map[string]string{
+			"Content-Disposition": mime.FormatMediaType(
+				"attachment",
+				map[string]string{"filename": download.Filename},
+			),
+		},
+	)
 }
 
 func (h *Handler) DeleteProfessional(c *gin.Context) {

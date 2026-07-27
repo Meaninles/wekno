@@ -146,6 +146,7 @@ func NewHandlers(
 	)
 	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
+	generalAgentService.SetProfessionalSkillProvider(skillHubService)
 	derivativeControlService := derivativecontrol.NewService(
 		db,
 		redisClient,
@@ -205,6 +206,9 @@ func NewHandlers(
 		logger.Infof(ctx,
 			"[custom bootstrap] schema/data migrations and existing-user backfills disabled; maintenance replica must have completed them")
 	}
+	if err := skillHubService.ValidateProfessionalStorage(ctx); err != nil {
+		return nil, err
+	}
 	provisionUser := func(ctx context.Context, user *types.User) error {
 		baseCtx := context.Background()
 		if ctx != nil {
@@ -249,7 +253,7 @@ func NewHandlers(
 		})
 	})
 	appservice.RegisterAdditionalSkillLister(skillHubService.AdditionalMetadata)
-	appservice.RegisterProfessionalSkillLister(skillhub.ProfessionalMetadata)
+	appservice.RegisterProfessionalSkillLister(skillHubService.ProfessionalMetadata)
 	appservice.RegisterRuntimeSkillConfigurer(skillHubService.ConfigureRuntimeSkills)
 	appservice.RegisterSelectedSkillContextResolver(skillHubService.SelectedSkillContext)
 	appservice.RegisterAllSkillContextResolver(skillHubService.AllSkillContext)

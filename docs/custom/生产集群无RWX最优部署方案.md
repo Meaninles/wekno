@@ -11,7 +11,7 @@
 - 现有 5 个节点足以部署目标拓扑，不需要因为本次解析扩容再增加节点。
 - app、DocReader 各 3 副本，完整文档并发为每 app 4、集群 12。
 - general-agent、document-processing-agent、frontend、mobile-web 各 2 副本。
-- 不部署 RWX。原文、解析持久产物、Agent 最终产物全部进入私有 OBS；Pod 只保留可丢弃的本地解析工作区。
+- 不部署 RWX。原文、解析持久产物、Agent 最终产物和用户上传的专业技能包全部进入私有 OBS；Pod 只保留可丢弃的本地解析工作区。
 - `.1/.2/.7` 的数据盘必须先加入 Everest 本地卷池，Pod 通过 `csi-local-topology` 获得独立 RWO 临时 PVC。不能把 80–100 GiB 的工作区放到仅约 9–10 GiB 的 kubelet 根盘 `emptyDir`。
 - PostgreSQL、Neo4j、外置 Redis 和 LiteLLM 保留现有部署。它们仍分别存在单点或容量边界；解析层水平扩展不会自动消除这些单点。
 
@@ -181,6 +181,17 @@ weknora/__weknora_private_agent_artifacts_v1__/
   artifact/{artifact_uuid}/{artifact_uuid}.{ext}
 ```
 
+用户上传的专业技能使用独立私有根，数据库保存对象路径、大小、SHA256 和文件数；镜像内两个系统预置技能不进入该根：
+
+```text
+weknora/__weknora_private_professional_skills_v1__/
+  deployment/prod-cce-wk-6a9d12b0/
+  namespace/6a9d12b0-48d2-46b4-9e40-1a407860838d/
+  tenant/{tenant_id}/
+  skill/{skill_uuid}/
+  revision/{revision_uuid}/package.zip
+```
+
 设计约束：
 
 - deployment 名只使用小写 DNS label；生产值 `prod-cce-wk-6a9d12b0` 是不含客户或业务名称的基础设施标识，其中短后缀仅便于人工审计。namespace 才是该生产部署一次生成、终身稳定的 RFC 4122 UUID。
@@ -190,7 +201,7 @@ weknora/__weknora_private_agent_artifacts_v1__/
 - `artifact_uuid` 使不同产物不冲突；同一个 `(tenant, run, file_token)` 重试复用数据库预留的精确键，实现幂等。
 - 普通知识对象和临时对象使用随机 UUID 文件名；同名上传不会覆盖，跨租户、跨知识库也不会碰撞。
 - 历史本地对象迁移保留其 `tenant/相对路径` 并写入本部署的唯一知识对象根；相同旧路径表示同一逻辑对象，重试只校验并复用该键。
-- 三个用途允许共享同一个部署 UUID，因为用途根已经完全隔离；禁止让两个独立部署、测试集群或恢复演练复用同一个 `(bucket, purpose, deployment, namespace UUID)` 组合。
+- 各用途允许共享同一个部署 UUID，因为用途根已经完全隔离；禁止让两个独立部署、测试集群或恢复演练复用同一个 `(bucket, purpose, deployment, namespace UUID)` 组合。
 - bucket 必须为 private，禁止 `public-read`。通过 app 校验 tenant/session/user 权限后流式下载。
 - OBS 应在 bucket policy 开启默认服务端加密，访问日志和对象生命周期策略按公司合规要求配置。
 
@@ -224,6 +235,10 @@ weknora/__weknora_claude_sdk_original_inputs_v1__/
 9. 保留旧盘只读备份直至备份窗口结束；确认无回滚需求后再删除 PVC/PV。删除后不可依赖应用回滚到旧本地路径。
 
 当前代码对 Agent 产物执行上述锁、状态机、大小/SHA 校验和幂等迁移。知识文档主存储在生产已经是 OBS，但仍必须对现网约 98 MiB 历史目录做数据库引用清单，不能仅凭目录大小判断它已经无引用。
+
+专业技能切换时还必须让唯一的维护实例挂载或保留旧 `skills/professional` 目录，并配置
+`CUSTOM_SKILLHUB_PROFESSIONAL_STORAGE_PROVIDER`、`CUSTOM_SKILLHUB_PROFESSIONAL_BUCKET`
+和 `CUSTOM_SKILLHUB_PROFESSIONAL_PATH_PREFIX`。维护实例只迁移数据库中仍有效且本地包可验证的非预置技能；找不到旧包的记录保持不可用并记录明确告警，禁止从其他 Pod 的空目录伪造成功。迁移完成后应确认所有需要保留的记录均有非空 `object_path`，再启动多副本服务。此后上传、列表、下载和对话运行时均以数据库与该私有对象根为事实源，不再扫描 Pod 本地上传目录。
 
 ## 入口请求大小
 

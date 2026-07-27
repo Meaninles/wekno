@@ -154,6 +154,10 @@ app:
       pathPrefix: weknora/__weknora_private_agent_artifacts_v1__/deployment/prod-cce-wk-6a9d12b0/namespace/6a9d12b0-48d2-46b4-9e40-1a407860838d/
       migrationAllowMissing: "false"
       migrationAllowInvalid: "false"
+  professionalSkillStorage:
+    provider: obs
+    bucket: ap-weknora-obs-zhengshi-01
+    pathPrefix: weknora/__weknora_private_professional_skills_v1__/deployment/prod-cce-wk-6a9d12b0/namespace/6a9d12b0-48d2-46b4-9e40-1a407860838d/
   extraEnv:
     # Preserve the current single-instance model runtime exactly. The
     # deployment runbook captures these values from the live app without

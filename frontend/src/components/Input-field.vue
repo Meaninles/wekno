@@ -2844,7 +2844,7 @@ defineExpose({
               }) : $t('input.skill') }}</span>
             </template>
             <div ref="skillButtonRef" class="control-btn kb-btn skill-context-btn" data-guide="chat-skill-selector"
-              :class="{ 'active': selectedSkillContextCount > 0 }" @click.stop @mousedown.prevent="toggleSkillSelector">
+              :class="{ 'active': selectedSkillContextCount > 0 }" @click.stop="toggleSkillSelector">
               <t-icon name="lightbulb" class="control-icon" />
               <span v-if="selectedSkillContextCount > 0" class="kb-count">{{ selectedSkillContextCount }}</span>
             </div>

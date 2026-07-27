@@ -13,6 +13,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
@@ -278,7 +279,8 @@ func (s *wikiIngestService) recordDistributedMapFailure(
 	op WikiPendingOp,
 	mapErr error,
 ) error {
-	if retryAfter, ok := modeladmission.CircuitRetryAfter(mapErr); ok {
+	if retryAfter, ok := modeladmission.CircuitRetryAfter(mapErr); ok &&
+		!workretry.ConsumesBudget(mapErr) {
 		// Provider outages are external backpressure, not bad document
 		// attempts. Keep fail_count unchanged and replace this disposable
 		// wake-up with one scheduled after the shared circuit may probe again.
@@ -299,6 +301,9 @@ func (s *wikiIngestService) recordDistributedMapFailure(
 			wikiQueueSettlementTimeout,
 		)
 		defer cancel()
+		if err := s.rotateWikiAttempts(settleCtx, []WikiPendingOp{op}); err != nil {
+			return fmt.Errorf("wiki Map: rotate provider-deferred row: %w", err)
+		}
 		if err := s.scheduleDistributedMapRetry(settleCtx, payload, retryAfter); err != nil {
 			return fmt.Errorf("wiki Map: schedule provider-circuit retry: %w", err)
 		}

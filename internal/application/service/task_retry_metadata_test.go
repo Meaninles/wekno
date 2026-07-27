@@ -8,6 +8,7 @@ import (
 )
 
 func TestIsFinalAsynqAttemptUsesLiteRetryMetadata(t *testing.T) {
+	t.Setenv("CUSTOM_WORK_RETRY_IMAGE_MAX_ATTEMPTS", "3")
 	if isFinalAsynqAttempt(context.Background()) {
 		t.Fatal("plain context must not be treated as a final worker attempt")
 	}

@@ -84,7 +84,8 @@ CREATE INDEX IF NOT EXISTS idx_task_pending_ops_tenant
 --       inserts a row whenever a task's retry count equals MaxRetry on the
 --       way out — covers every asynq task type uniformly.
 --   (b) The wiki ingest service inserts a row directly when a per-document
---       op exceeds wikiMaxFailRetries inside a batch — these never escalate
+--       op reaches the configured Wiki attempt cap inside a batch — these
+--       never escalate
 --       to an asynq retry because they're handled inline.
 --
 -- Operations queries it by scope (e.g. all dead letters for a KB) or by

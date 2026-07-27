@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -693,7 +694,7 @@ func DispatchFanout(
 			task,
 			types.QueueMultimodal,
 			ImageTaskID(plan.KnowledgeID, plan.ProcessingGeneration, image.Index),
-			asynq.MaxRetry(3),
+			asynq.MaxRetry(workretry.ConfigFromEnv().ImageMaxRetries()),
 			asynq.Timeout(GenerationTaskTimeout),
 			asynq.Retention(GenerationTaskRetention),
 		); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {

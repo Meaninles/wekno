@@ -18,6 +18,7 @@ import (
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -192,6 +193,14 @@ func (s *Service) Repair(ctx context.Context, task *asynq.Task, taskErr error) e
 			ctx, id, fmt.Sprintf("graph_chunk[%d]", id.ChunkIndex), errText,
 		)
 	case types.TypeImageMultimodal:
+		// A rolling upgrade may archive an old delivery at its historical
+		// smaller MaxRetry. The image handler intentionally leaves fan-in open
+		// in that case so corefanout recovery can republish the stable task with
+		// the new bounded budget; terminal repair must make the same decision.
+		if maxRetry, ok := asynq.GetMaxRetry(ctx); ok &&
+			maxRetry < workretry.ConfigFromEnv().ImageMaxRetries() {
+			return nil
+		}
 		return s.repairCoreFanout(
 			ctx,
 			id,

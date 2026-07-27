@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -360,8 +361,9 @@ func TestGenerateWithTemplateMasksImageURLsBeforeLLM(t *testing.T) {
 	if model.deadline.IsZero() {
 		t.Fatal("chat model did not receive a per-call deadline")
 	}
-	if remaining := time.Until(model.deadline); remaining <= 0 || remaining > wikiLLMCallTimeout {
-		t.Fatalf("chat deadline remaining = %v, want (0, %v]", remaining, wikiLLMCallTimeout)
+	callTimeout := workretry.ConfigFromEnv().WikiCallTimeout
+	if remaining := time.Until(model.deadline); remaining <= 0 || remaining > callTimeout {
+		t.Fatalf("chat deadline remaining = %v, want (0, %v]", remaining, callTimeout)
 	}
 }
 

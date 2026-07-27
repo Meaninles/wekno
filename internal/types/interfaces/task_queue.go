@@ -16,18 +16,19 @@ import (
 // Concurrency model in this revision: PeekBatch does NOT take row locks.
 // Wiki ingest uses Redis/Lite for liveness serialization and a monotonically
 // increasing database epoch/token for correctness fencing at every mutation.
-// The reserved `claimed_at` column remains available for queues that later
-// adopt pessimistic row claiming.
+// Wiki uses `claimed_at` as a last-attempt timestamp for fair retry rotation;
+// it is not an ownership claim. Other consumers may still ignore it.
 type TaskPendingOpsRepository interface {
 	// Enqueue inserts a single op. The caller fills in TenantID, TaskType,
 	// Scope, ScopeID, Op, DedupKey, Payload; ID, FailCount, EnqueuedAt
 	// are server-side defaults.
 	Enqueue(ctx context.Context, op *types.TaskPendingOp) error
 
-	// PeekBatch returns up to `limit` rows for the given queue tuple,
-	// ordered by id ASC (FIFO within the queue). Rows are NOT removed —
-	// callers must DeleteByIDs once the ops have been processed (or
-	// IncrFailCount and leave them for the next pass).
+	// PeekBatch returns up to `limit` rows for the given queue tuple. Generic
+	// queues use id ASC; Wiki prioritizes lower fail_count and never-attempted
+	// rows before claimed_at/id so a poison row cannot block the queue. Rows
+	// are NOT removed — callers must DeleteByIDs once processed (or
+	// IncrFailCount and leave them for retry).
 	PeekBatch(ctx context.Context, taskType, scope, scopeID string, limit int) ([]*types.TaskPendingOp, error)
 
 	// DeleteByIDs removes the given rows. No-op for empty input. Used
@@ -42,9 +43,9 @@ type TaskPendingOpsRepository interface {
 	// transaction.
 	ArchiveToDeadLetter(ctx context.Context, pendingID int64, dl *types.TaskDeadLetter) error
 
-	// IncrFailCount increments fail_count for one row and returns the
-	// new value. Returns (0, nil) if the row does not exist (race with
-	// DeleteByIDs is benign).
+	// IncrFailCount increments fail_count and records the attempt timestamp for
+	// one row, returning the new value. Returns (0, nil) if the row does not
+	// exist (race with DeleteByIDs is benign).
 	IncrFailCount(ctx context.Context, id int64) (int, error)
 
 	// PendingCount returns the number of rows currently queued for the

@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -72,6 +74,7 @@ func TestWikiLLMRetryDelay(t *testing.T) {
 }
 
 func TestGenerateWithTemplateUsesRetryAfterWithoutSleeping(t *testing.T) {
+	t.Setenv("CUSTOM_WORK_RETRY_WIKI_INLINE_ATTEMPTS", "3")
 	model := &retrySequenceChatModel{
 		errs: []error{
 			&chat.HTTPStatusError{
@@ -116,6 +119,7 @@ func TestGenerateWithTemplateUsesRetryAfterWithoutSleeping(t *testing.T) {
 }
 
 func TestGenerateWithTemplateRetryWaitPreservesCancellation(t *testing.T) {
+	t.Setenv("CUSTOM_WORK_RETRY_WIKI_INLINE_ATTEMPTS", "2")
 	model := &retrySequenceChatModel{
 		errs: []error{&chat.HTTPStatusError{StatusCode: http.StatusTooManyRequests}},
 	}
@@ -132,6 +136,31 @@ func TestGenerateWithTemplateRetryWaitPreservesCancellation(t *testing.T) {
 	}
 	if model.calls != 1 {
 		t.Fatalf("Chat() calls = %d, want 1 after cancelled wait", model.calls)
+	}
+}
+
+func TestGenerateWithTemplateMarksRealProviderFailureAsBudgeted(t *testing.T) {
+	t.Setenv("CUSTOM_WORK_RETRY_WIKI_INLINE_ATTEMPTS", "1")
+	model := &retrySequenceChatModel{
+		errs: []error{&modeladmission.ProviderUnavailableError{
+			Kind:       modeladmission.KindChat,
+			RetryAfter: time.Minute,
+			Cause:      errors.New("provider timeout"),
+		}},
+	}
+	service := &wikiIngestService{}
+
+	_, err := service.generateWithTemplate(
+		context.Background(),
+		model,
+		"{{.Value}}",
+		map[string]string{"Value": "prompt"},
+	)
+	if !workretry.ConsumesBudget(err) {
+		t.Fatalf("generateWithTemplate() error = %v, want a budgeted provider attempt", err)
+	}
+	if modeladmission.IsModelWorkDeferred(err) {
+		t.Fatalf("budgeted provider attempt remained retry-budget-free: %v", err)
 	}
 }
 

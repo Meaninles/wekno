@@ -142,7 +142,10 @@ func (r *taskPendingOpsRepository) WithActiveWikiKnowledgeBase(
 }
 
 // PeekBatch returns up to `limit` rows for the (task_type, scope, scope_id)
-// tuple ordered by id ASC. Rows are not removed; callers must
+// tuple. Wiki work is ordered by the bounded-retry rotation
+// (lowest fail_count, never-attempted first, then oldest attempt/id) so a
+// poisoned head row cannot monopolize every batch. Other generic consumers
+// retain strict id ASC ordering. Rows are not removed; callers must
 // DeleteByIDs once they have been consumed (or IncrFailCount and leave
 // them for the next pass). `limit` <= 0 falls back to 1; we clamp the
 // upper bound generously so callers can pull large windows when they
@@ -159,11 +162,14 @@ func (r *taskPendingOpsRepository) PeekBatch(
 		limit = 1000
 	}
 	var ops []*types.TaskPendingOp
-	if err := r.db.WithContext(ctx).
-		Where("task_type = ? AND scope = ? AND scope_id = ?", taskType, scope, scopeID).
-		Order("id ASC").
-		Limit(limit).
-		Find(&ops).Error; err != nil {
+	query := r.db.WithContext(ctx).
+		Where("task_type = ? AND scope = ? AND scope_id = ?", taskType, scope, scopeID)
+	if taskType == types.TypeWikiIngest && scope == types.TaskScopeKnowledgeBase {
+		query = applyWikiRetryRotation(query)
+	} else {
+		query = query.Order("id ASC")
+	}
+	if err := query.Limit(limit).Find(&ops).Error; err != nil {
 		return nil, err
 	}
 	return ops, nil
@@ -238,6 +244,14 @@ func wikiCommitReadyPredicate(dialect string) string {
 		" OR op NOT IN ('ingest', 'retract')"
 }
 
+func applyWikiRetryRotation(query *gorm.DB) *gorm.DB {
+	return query.
+		Order("fail_count ASC").
+		Order("CASE WHEN claimed_at IS NULL THEN 0 ELSE 1 END ASC").
+		Order("claimed_at ASC").
+		Order("id ASC")
+}
+
 // PeekWikiCommitBatch returns only rows whose document-local work is ready for
 // the shared-KB materialization boundary. Unprepared ingest rows are
 // deliberately bypassed, so one slow document cannot head-of-line block
@@ -264,7 +278,7 @@ func (r *taskPendingOpsRepository) PeekWikiCommitBatch(
 			knowledgeBaseID,
 		).
 		Where(wikiCommitReadyPredicate(r.db.Dialector.Name())).
-		Order("id ASC").
+		Scopes(applyWikiRetryRotation).
 		Limit(limit).
 		Find(&ops).Error
 	if err != nil {
@@ -441,7 +455,8 @@ func (r *taskPendingOpsRepository) ArchiveToDeadLetter(
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return archive(tx, nil) })
 }
 
-// IncrFailCount atomically bumps fail_count for one row and returns the
+// IncrFailCount atomically bumps fail_count, records the attempt timestamp,
+// and returns the
 // new value. We use UPDATE ... RETURNING so the read+write happens in
 // one round trip and races between concurrent IncrFailCount callers
 // resolve to monotonic counts.
@@ -452,7 +467,8 @@ func (r *taskPendingOpsRepository) IncrFailCount(ctx context.Context, id int64) 
 	var newCount int
 	guarded, err := r.withWikiLeaseMutation(ctx, func(tx *gorm.DB, identity wikilease.Identity) error {
 		return tx.Raw(
-			`UPDATE task_pending_ops SET fail_count = fail_count + 1
+			`UPDATE task_pending_ops
+			 SET fail_count = fail_count + 1, claimed_at = CURRENT_TIMESTAMP
 			 WHERE id = ? AND tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ?
 			 RETURNING fail_count`,
 			id, identity.TenantID, types.TypeWikiIngest,
@@ -463,13 +479,45 @@ func (r *taskPendingOpsRepository) IncrFailCount(ctx context.Context, id int64) 
 		return newCount, err
 	}
 	err = r.db.WithContext(ctx).Raw(
-		`UPDATE task_pending_ops SET fail_count = fail_count + 1 WHERE id = ? RETURNING fail_count`,
+		`UPDATE task_pending_ops
+		 SET fail_count = fail_count + 1, claimed_at = CURRENT_TIMESTAMP
+		 WHERE id = ? RETURNING fail_count`,
 		id,
 	).Scan(&newCount).Error
 	if err != nil {
 		return 0, err
 	}
 	return newCount, nil
+}
+
+// TouchWikiAttempt rotates a budget-free Wiki delivery behind untouched work
+// without incrementing fail_count. It is used for circuit/admission rejects
+// that never reached the provider: later ready documents may continue, while
+// the rejected row remains durable for the scheduled follow-up.
+func (r *taskPendingOpsRepository) TouchWikiAttempt(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return errors.New("task pending ops: positive Wiki attempt id is required")
+	}
+	update := func(tx *gorm.DB, identity *wikilease.Identity) error {
+		query := tx.Model(&types.TaskPendingOp{}).Where("id = ?", id)
+		if identity != nil {
+			query = query.Where(
+				"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ?",
+				identity.TenantID,
+				types.TypeWikiIngest,
+				types.TaskScopeKnowledgeBase,
+				identity.KnowledgeBaseID,
+			)
+		}
+		return query.Update("claimed_at", time.Now().UTC()).Error
+	}
+	guarded, err := r.withWikiLeaseMutation(ctx, func(tx *gorm.DB, identity wikilease.Identity) error {
+		return update(tx, &identity)
+	})
+	if guarded {
+		return err
+	}
+	return update(r.db.WithContext(ctx), nil)
 }
 
 // PendingCount returns how many rows are currently queued for the

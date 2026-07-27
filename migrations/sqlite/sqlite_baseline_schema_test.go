@@ -94,6 +94,7 @@ func verifyBaselineReliabilitySchema(t *testing.T, h sqliteHarness, up, down []b
 		"idx_task_pending_ops_scope_op_dedup",
 		"idx_task_pending_ops_wiki_commit_ready",
 		"idx_task_pending_ops_wiki_map_pending",
+		"idx_task_pending_ops_wiki_retry_rotation",
 		"uq_task_pending_ops_wiki_ingest",
 		"uq_task_pending_ops_wiki_retract",
 		"uq_wiki_log_entries_source_op_id",

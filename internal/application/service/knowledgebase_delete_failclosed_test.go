@@ -61,6 +61,8 @@ func (s *kbDeleteTenantRepoStub) GetTenantByID(context.Context, uint64) (*types.
 type kbDeleteInspectorStub struct {
 	interfaces.TaskInspector
 	cancelErr        error
+	purgeErr         error
+	purgedIDs        []string
 	wikiLiveSequence []bool
 	wikiCancelCalls  int
 	wikiProbeCalls   int
@@ -74,6 +76,22 @@ func (s *kbDeleteInspectorStub) DocumentLifecycleTaskKnowledgeIDs(
 	context.Context, []interfaces.KnowledgeTaskTarget,
 ) (map[string]bool, error) {
 	return map[string]bool{}, nil
+}
+
+func (s *kbDeleteInspectorStub) DeletionTaskKnowledgeIDs(
+	context.Context, []interfaces.KnowledgeTaskTarget,
+) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+
+func (s *kbDeleteInspectorStub) PurgeTaskHistoryForKnowledge(
+	_ context.Context, knowledgeID string,
+) (int, error) {
+	s.purgedIDs = append(s.purgedIDs, knowledgeID)
+	if s.purgeErr != nil {
+		return 0, s.purgeErr
+	}
+	return 1, nil
 }
 
 func (s *kbDeleteInspectorStub) CancelWikiTasksForKnowledgeBase(
@@ -133,6 +151,7 @@ func newKBDeleteWorkerHarness(t *testing.T) (
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
 		&types.KnowledgeBase{}, &types.Knowledge{}, &types.TaskPendingOp{}, &types.Tenant{},
+		&types.TaskDeadLetter{},
 		&types.KnowledgeTagRelation{}, &types.KnowledgeFanoutCompletion{},
 		&types.WikiPage{}, &types.WikiFolder{}, &types.WikiPageIssue{}, &types.WikiLogEntry{},
 		&wikilease.Lease{},
@@ -247,6 +266,24 @@ func TestProcessKBDeleteQuiescenceFailureStopsBeforeExternalCleanup(t *testing.T
 	assert.Zero(t, chunks.deleteCalls)
 }
 
+func TestProcessKBDeleteTaskHistoryPurgeFailureStopsBeforeFinalize(t *testing.T) {
+	svc, db, payload, chunks, _, inspector, outbox := newKBDeleteWorkerHarness(t)
+	purgeErr := errors.New("redis terminal history unavailable")
+	inspector.purgeErr = purgeErr
+
+	err := svc.ProcessKBDelete(context.Background(), asynq.NewTask(types.TypeKBDelete, payload))
+	require.ErrorIs(t, err, purgeErr)
+	assert.Equal(t, 1, chunks.deleteCalls)
+	assert.Equal(t, []string{"knowledge-1"}, inspector.purgedIDs)
+
+	var knowledge types.Knowledge
+	require.NoError(t, db.First(&knowledge, "id = ?", "knowledge-1").Error)
+	assert.Equal(t, types.ParseStatusDeleting, knowledge.ParseStatus)
+	exists, inspectErr := outbox.IntentExists(context.Background(), 7, "kb-1", payload)
+	require.NoError(t, inspectErr)
+	assert.True(t, exists)
+}
+
 func TestProcessKBDeleteFinalizesStorageExactlyOnceAndConsumesOutbox(t *testing.T) {
 	svc, db, payload, chunks, _, inspector, outbox := newKBDeleteWorkerHarness(t)
 	require.NoError(t, db.Create(&types.WikiFolder{
@@ -271,6 +308,7 @@ func TestProcessKBDeleteFinalizesStorageExactlyOnceAndConsumesOutbox(t *testing.
 	require.NoError(t, svc.ProcessKBDelete(context.Background(), task))
 	require.NoError(t, svc.ProcessKBDelete(context.Background(), task))
 	assert.Equal(t, 1, chunks.deleteCalls)
+	assert.Equal(t, []string{"knowledge-1"}, inspector.purgedIDs)
 	assert.GreaterOrEqual(t, inspector.wikiCancelCalls, 6,
 		"first delivery must fence Wiki after claim and on both sides of the durable purge")
 

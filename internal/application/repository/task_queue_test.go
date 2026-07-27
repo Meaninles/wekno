@@ -408,6 +408,64 @@ func TestTaskPendingOps_PeekBatch_ScopedAndOrdered(t *testing.T) {
 	assert.Equal(t, "k6", got[0].DedupKey)
 }
 
+func TestTaskPendingOps_WikiRetryRotationBypassesPoisonedHead(t *testing.T) {
+	db := setupTaskQueueTestDB(t)
+	repo := NewTaskPendingOpsRepository(db).(*taskPendingOpsRepository)
+	ctx := context.Background()
+
+	poisoned := makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-A", "retract", "poisoned", nil,
+	)
+	attempted := makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-A", "retract", "attempted", nil,
+	)
+	fresh := makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-A", "retract", "fresh", nil,
+	)
+	require.NoError(t, repo.Enqueue(ctx, poisoned))
+	require.NoError(t, repo.Enqueue(ctx, attempted))
+	require.NoError(t, repo.Enqueue(ctx, fresh))
+	oldAttempt := time.Now().UTC().Add(-time.Hour)
+	recentAttempt := time.Now().UTC().Add(-time.Minute)
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).
+		Where("id = ?", poisoned.ID).
+		Updates(map[string]any{"fail_count": 2, "claimed_at": oldAttempt}).Error)
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).
+		Where("id = ?", attempted.ID).
+		Update("claimed_at", recentAttempt).Error)
+
+	got, err := repo.PeekBatch(
+		ctx, types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-A", 10,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{"fresh", "attempted", "poisoned"}, []string{
+		got[0].DedupKey, got[1].DedupKey, got[2].DedupKey,
+	})
+
+	commitReady, err := repo.PeekWikiCommitBatch(ctx, 1, "kb-A", 10)
+	require.NoError(t, err)
+	require.Len(t, commitReady, 3)
+	assert.Equal(t, []string{"fresh", "attempted", "poisoned"}, []string{
+		commitReady[0].DedupKey, commitReady[1].DedupKey, commitReady[2].DedupKey,
+	})
+
+	require.NoError(t, repo.TouchWikiAttempt(ctx, fresh.ID))
+	var touched types.TaskPendingOp
+	require.NoError(t, db.First(&touched, fresh.ID).Error)
+	require.NotNil(t, touched.ClaimedAt)
+	assert.WithinDuration(t, time.Now().UTC(), touched.ClaimedAt.UTC(), time.Second)
+
+	got, err = repo.PeekBatch(
+		ctx, types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-A", 10,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{"attempted", "fresh", "poisoned"}, []string{
+		got[0].DedupKey, got[1].DedupKey, got[2].DedupKey,
+	})
+}
+
 // TestTaskPendingOps_DeleteByIDs_RemovesOnlyTargets verifies the
 // delete-after-consume path. Empty input must be a no-op so the consumer
 // can call it unconditionally.
@@ -585,6 +643,8 @@ func TestTaskPendingOps_IncrFailCount_ReturnsNewValueAndPersists(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, 2, rows[0].FailCount)
+	require.NotNil(t, rows[0].ClaimedAt)
+	assert.WithinDuration(t, time.Now().UTC(), rows[0].ClaimedAt.UTC(), time.Second)
 }
 
 // TestTaskPendingOps_PendingCount_ScopedTuple confirms the count covers

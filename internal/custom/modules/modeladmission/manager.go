@@ -850,10 +850,10 @@ func (l *Lease) Finish(callErr error) {
 }
 
 // Complete reports the provider result and preserves the original provider
-// error while adding a typed, retry-budget-free classification for transport,
-// timeout, rate-limit and provider 5xx failures. Business handlers and Asynq
-// can therefore distinguish external backpressure from malformed model output
-// or deterministic document errors.
+// error while adding a typed external-backpressure classification for
+// transport, timeout, rate-limit and provider 5xx failures. Business handlers
+// can distinguish an actual remote call from a pre-call circuit rejection;
+// durable queues may then count the former in their bounded business budget.
 func (l *Lease) Complete(callErr error) error {
 	if l == nil || l.noop || l.manager == nil {
 		return callErr

@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_custom_document_queue_external_wait;

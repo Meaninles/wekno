@@ -19,9 +19,11 @@ type cacheReferenceGroup struct {
 }
 
 // DeleteSoftRowArtifacts removes all knowledge-scoped relational artifacts
-// in the caller's transaction. Shared immutable cache payloads are retained,
-// but their reference counts are decremented atomically; the bounded cache
-// sweeper can then reclaim entries whose count reaches zero.
+// in the caller's transaction. Shared immutable cache payloads are retained
+// while another document still references them. When deletion releases the
+// final reference, the immutable payload is removed in the same transaction
+// instead of waiting for the bounded cache sweeper, so document deletion does
+// not retain an otherwise-unowned copy of parsed or generated content.
 func DeleteSoftRowArtifacts(tx *gorm.DB, tenantID uint64, knowledgeIDs []string) error {
 	if tx == nil || tenantID == 0 {
 		return errors.New("knowledge purge requires a database transaction and tenant")
@@ -76,6 +78,17 @@ func DeleteSoftRowArtifacts(tx *gorm.DB, tenantID uint64, knowledgeIDs []string)
 				group.CacheKind, group.ContentHash, group.VersionHash,
 			)
 		}
+		if err := tx.Exec(`
+			DELETE FROM custom_content_cache_entries
+			 WHERE tenant_id = ?
+			   AND cache_kind = ?
+			   AND content_hash = ?
+			   AND version_hash = ?
+			   AND ref_count = 0`,
+			tenantID, group.CacheKind, group.ContentHash, group.VersionHash,
+		).Error; err != nil {
+			return fmt.Errorf("delete unreferenced knowledge content-cache entry: %w", err)
+		}
 	}
 
 	statements := []struct {
@@ -91,6 +104,12 @@ func DeleteSoftRowArtifacts(tx *gorm.DB, tenantID uint64, knowledgeIDs []string)
 		{"document split parts", "DELETE FROM custom_document_split_parts WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"document split plans", "DELETE FROM custom_document_split_plans WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"Wiki operation logs", "DELETE FROM wiki_log_entries WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
+		{"task dead letters", `DELETE FROM task_dead_letters
+			WHERE tenant_id = ?
+			  AND (
+			    related_id IN ?
+			    OR (scope = 'knowledge' AND scope_id IN ?)
+			  )`, []interface{}{tenantID, ids, ids}},
 		// Chunk cleanup is soft during the external-resource phase so a retry
 		// can still discover image provenance. Finalize runs only after vectors,
 		// objects, graph data, and Wiki quarantine have all succeeded, and it

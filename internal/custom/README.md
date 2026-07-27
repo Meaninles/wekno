@@ -28,7 +28,7 @@
 | 数据和技能 | `dbanalytics`、`skillhub`、`scheduledchat` |
 | 身份与治理 | `iam`、`authsecurity`、`admin`、`configcenter`、`connectiontls` |
 | 协作 | `chatshare`、`sessionstate`、`answerfeedback`、`sourcerefs` |
-| 安全/稳定性 | `fileguard`、`imageguard`、`logprivacy`、`taskretry`、`processownership` |
+| 安全/稳定性 | `fileguard`、`imageguard`、`logprivacy`、`taskretry`、`workretry`、`processownership` |
 | 内容与缓存 | `contentcache`、`knowledgeaux`、`knowledgesearch`、`textencoding` |
 
 ## 关键语义
@@ -37,6 +37,7 @@
 - PostgreSQL 是文档工作流事实来源，Redis 投递允许重复。
 - `none` 是衍生状态初始值，不能直接解释为跳过。
 - 多副本不得同时执行生产 DDL；正常 app 使用 `AUTO_MIGRATE=false`。
+- `workretry` 统一长耗时模型任务的有限次数策略；真实供应商调用失败计数，准入/断路器拒绝只轮转等待。
 - Python Agent 不直接连接数据库/MCP；工具与产物提交回到 Go。
 - 生产持久文件进入私有 OBS，本目录实现不得依赖 RWX。
 

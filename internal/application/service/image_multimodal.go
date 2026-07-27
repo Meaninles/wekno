@@ -16,7 +16,9 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/imageguard"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/utils/ollama"
 	"github.com/Tencent/WeKnora/internal/models/vlm"
@@ -239,9 +241,12 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 	skipFanIn := false
 	terminalFailure := false
 	defer func() {
-		providerDeferred := isDurableTaskDeferred(retErr) ||
-			isDurableTaskDeferred(handleErr)
-		terminalAttempt := terminalFailure || (!providerDeferred && isFinalAsynqAttempt(ctx))
+		providerDeferred := modeladmission.IsModelWorkDeferred(retErr) ||
+			modeladmission.IsModelWorkDeferred(handleErr)
+		cancelled := errors.Is(retErr, context.Canceled) ||
+			errors.Is(handleErr, context.Canceled)
+		terminalAttempt := terminalFailure ||
+			(!cancelled && isFinalAsynqAttempt(ctx))
 		// Finalize the image subspan with the actual outcome — not the
 		// finalize-counter outcome. The counter logic counts a "tried"
 		// image regardless of inner success; the span surface tells the
@@ -274,6 +279,17 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			logger.Infof(ctx,
 				"[ImageMultimodal] Skip finalize on retryable error for %s (will count on last attempt)",
 				payload.ImageURL)
+		}
+		if providerDeferred && terminalAttempt {
+			// At a fully consumed configured budget, a final pre-call circuit
+			// rejection must not let taskdefer ACK and recreate the stable task
+			// with a fresh retry counter. Fan-in is already terminally recorded;
+			// mark the returned error as budget-consuming so Asynq archives this
+			// exact delivery and the dead-letter repair remains idempotent.
+			if retErr == nil {
+				retErr = handleErr
+			}
+			retErr = workretry.Consume(retErr)
 		}
 	}()
 
@@ -421,7 +437,14 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 	// enabled operations have returned successfully.
 	if extractionErr != nil {
 		imgOut["chunks_created"] = 0
-		handleErr = fmt.Errorf("multimodal extraction failed: %w", extractionErr)
+		// A request that reached the provider consumes one bounded image
+		// attempt. Pure circuit/admission rejections remain budget-free because
+		// no image was actually processed. The marker preserves Retry-After for
+		// Asynq while allowing its Retried counter to advance.
+		handleErr = fmt.Errorf(
+			"multimodal extraction failed: %w",
+			workretry.ConsumeProviderFailure(extractionErr),
+		)
 		return handleErr
 	}
 
@@ -652,6 +675,14 @@ func (s *ImageMultimodalService) currentProcessingGeneration(
 func isFinalAsynqAttempt(ctx context.Context) bool {
 	retried, maxRetry, ok := taskRetryMetadata(ctx)
 	if !ok {
+		return false
+	}
+	// Rolling upgrades can leave scheduled tasks carrying the historical
+	// smaller retry budget. Let those deliveries archive without completing
+	// fan-in; corefanout recovery republishes the stable ID with the current
+	// budget. This avoids prematurely terminating an in-flight image merely
+	// because it was enqueued before the rollout.
+	if maxRetry < workretry.ConfigFromEnv().ImageMaxRetries() {
 		return false
 	}
 	return retried >= maxRetry

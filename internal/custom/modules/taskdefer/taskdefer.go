@@ -24,6 +24,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
+	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -131,6 +132,15 @@ func scheduleResume(
 	}
 	if original == nil {
 		return errors.New("durable model task resume original task is nil")
+	}
+	if original.Type() == types.TypeImageMultimodal {
+		// A wake-up created by an older binary may still carry the historical
+		// three-retry image budget. Upgrade only this durable image leaf when
+		// it is republished; other task policies remain exact.
+		configured := workretry.ConfigFromEnv().ImageMaxRetries()
+		if maxRetry < configured {
+			maxRetry = configured
+		}
 	}
 	payload := resumePayload{
 		Version:     resumePayloadVersion,

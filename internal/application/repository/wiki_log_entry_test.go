@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS wiki_log_entries (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_log_entries_source_op_id
     ON wiki_log_entries (source_op_id);
+CREATE TABLE IF NOT EXISTS knowledges (
+    id                VARCHAR(36) PRIMARY KEY,
+    tenant_id         INTEGER NOT NULL,
+    parse_status      VARCHAR(32) NOT NULL,
+    deleted_at        DATETIME
+);
 `
 
 func setupWikiLogTestDB(t *testing.T) *gorm.DB {
@@ -117,6 +123,40 @@ func TestWikiLogEntryRepository_AppendBatch_Empty(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&types.WikiLogEntry{}).Count(&count).Error)
 	assert.Equal(t, int64(0), count)
+}
+
+func TestWikiLogEntryRepository_AppendBatchSuppressesDeletionLateWrites(t *testing.T) {
+	db := setupWikiLogTestDB(t)
+	repo := NewWikiLogEntryRepository(db)
+	ctx := context.Background()
+	require.NoError(t, db.Exec(
+		`INSERT INTO knowledges (id, tenant_id, parse_status, deleted_at)
+		 VALUES (?, ?, ?, NULL), (?, ?, ?, NULL), (?, ?, ?, CURRENT_TIMESTAMP)`,
+		"active", 1, types.ParseStatusCompleted,
+		"deleting", 1, types.ParseStatusDeleting,
+		"deleted", 1, types.ParseStatusDeleting,
+	).Error)
+
+	active := makeLogEntry("kb-a", "retract_cancelled", "active", "Active source")
+	lateRetract := makeLogEntry("kb-a", "retract", "deleting", "")
+	lateIngest := makeLogEntry("kb-a", "ingest", "deleted", "Must not return")
+	legacyMissing := makeLogEntry("kb-a", "edit", "legacy-missing", "Legacy event")
+	require.NoError(t, repo.AppendBatch(ctx, []*types.WikiLogEntry{
+		active,
+		lateRetract,
+		lateIngest,
+		legacyMissing,
+	}))
+
+	var got []types.WikiLogEntry
+	require.NoError(t, db.Order("id ASC").Find(&got).Error)
+	require.Len(t, got, 2)
+	require.Equal(t, []string{"active", "legacy-missing"}, []string{
+		got[0].KnowledgeID,
+		got[1].KnowledgeID,
+	})
+	require.Zero(t, lateRetract.ID)
+	require.Zero(t, lateIngest.ID)
 }
 
 // TestWikiLogEntryRepository_AppendBatch_IdempotentBySourceOpID models the

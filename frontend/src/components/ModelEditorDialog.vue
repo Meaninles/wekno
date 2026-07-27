@@ -686,10 +686,7 @@ const providerOptions = computed(() => {
         defaultUrls: p.defaultUrls as Record<string, string>,
       }))
   }
-  // WeKnoraCloud 使用平台共享端点和凭证，不能作为物理隔离的衍生任务端点。
-  return activeModelType.value === 'derivative'
-    ? options.filter(p => p.value !== 'weknoracloud')
-    : options
+  return options
 })
 
 const dialogVisible = computed({

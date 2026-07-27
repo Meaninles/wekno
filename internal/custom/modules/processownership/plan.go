@@ -96,8 +96,7 @@ func (p FanoutPlan) Validate() error {
 			return fmt.Errorf("invalid image fanout entry %d", image.Index)
 		}
 	}
-	if p.DataTable != nil && (strings.TrimSpace(p.DataTable.SummaryModel) == "" ||
-		strings.TrimSpace(p.DataTable.EmbeddingModel) == "") {
+	if p.DataTable != nil && strings.TrimSpace(p.DataTable.EmbeddingModel) == "" {
 		return fmt.Errorf("invalid data-table fanout configuration")
 	}
 	return nil

@@ -342,7 +342,7 @@
                   <GraphSettings
                     v-if="formData"
                     :graph-extract="formData.nodeExtractConfig"
-                    :model-id="formData.modelConfig.llmModelId"
+                    :model-id="formData.modelConfig.derivativeModelId"
                     :all-models="allModels"
                     @update:graphExtract="handleNodeExtractUpdate"
                   />
@@ -598,7 +598,9 @@ const kbCreateNeedsEmbedding = computed(() => {
 const applyDefaultModelsIfEmpty = () => {
   if (!formData.value || props.mode !== 'create') return
   const pick = (type: ModelConfig['type']) => {
-    const list = allModels.value.filter((m) => m.type === type)
+    const list = allModels.value.filter(
+      (m) => m.type === type && (type !== 'KnowledgeQA' || m.workload_scope !== 'derivative_only'),
+    )
     return list.find((m) => m.is_default) || list[0]
   }
   const chat = pick('KnowledgeQA')
@@ -641,7 +643,7 @@ const initFormData = (type: 'document' | 'faq' = 'document') => {
     modelConfig: {
       llmModelId: '',
       embeddingModelId: '',
-      wikiSynthesisModelId: '',
+      derivativeModelId: '',
     },
     chunkingConfig: {
       chunkSize: 512,
@@ -754,7 +756,7 @@ const loadKBData = async () => {
       modelConfig: {
         llmModelId: kb.summary_model_id || '',
         embeddingModelId: kb.embedding_model_id || '',
-        wikiSynthesisModelId: kb.wiki_config?.synthesis_model_id || ''
+        derivativeModelId: kb.derivative_model_id || ''
       },
       chunkingConfig: {
         chunkSize: kb.chunking_config?.chunk_size || 512,
@@ -1072,7 +1074,8 @@ const buildSubmitData = () => {
         : {})
     },
     embedding_model_id: formData.value.modelConfig.embeddingModelId,
-    summary_model_id: formData.value.modelConfig.llmModelId
+    summary_model_id: formData.value.modelConfig.llmModelId,
+    derivative_model_id: formData.value.modelConfig.derivativeModelId || ''
   }
 
   // Vector-store binding. Only attach the field when the user actively
@@ -1133,7 +1136,7 @@ const buildSubmitData = () => {
   // wiki_config only holds wiki-specific tunables.
   if (formData.value.type !== 'faq') {
     data.wiki_config = {
-      synthesis_model_id: formData.value.modelConfig?.wikiSynthesisModelId || '',
+      synthesis_model_id: formData.value.modelConfig?.derivativeModelId || '',
       max_pages_per_ingest: formData.value.wikiConfig?.maxPagesPerIngest || 0,
       extraction_granularity: formData.value.wikiConfig?.extractionGranularity || 'standard',
     }
@@ -1230,12 +1233,13 @@ const doSubmit = async () => {
       }
       if (formData.value.wikiConfig && formData.value.type !== 'faq') {
         updateConfig.wiki_config = {
-          synthesis_model_id: formData.value.modelConfig?.wikiSynthesisModelId || '',
+          synthesis_model_id: formData.value.modelConfig?.derivativeModelId || '',
           max_pages_per_ingest: formData.value.wikiConfig.maxPagesPerIngest || 0,
           extraction_granularity: formData.value.wikiConfig.extractionGranularity || 'standard',
         }
       }
       if (formData.value.type !== 'faq') {
+        updateConfig.derivative_model_id = formData.value.modelConfig?.derivativeModelId || ''
         updateConfig.indexing_strategy = {
           vector_enabled: formData.value.indexingStrategy?.vectorEnabled ?? true,
           keyword_enabled: formData.value.indexingStrategy?.keywordEnabled ?? true,
@@ -1253,6 +1257,7 @@ const doSubmit = async () => {
       const config: KBModelConfigRequest = {
         llmModelId: data.summary_model_id,
         embeddingModelId: data.embedding_model_id,
+        derivativeModelId: data.derivative_model_id || '',
         vlm_config: data.vlm_config,
         asr_config: data.asr_config,
         documentSplitting: {

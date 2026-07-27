@@ -22,6 +22,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativecontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
@@ -55,6 +56,7 @@ type Handlers struct {
 	AuthSecurity         *authsecurity.Handler
 	DocumentQueue        *documentqueue.Handler
 	KnowledgeFolders     *knowledgefolders.Handler
+	DerivativeControl    *derivativecontrol.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -66,6 +68,7 @@ type Handlers struct {
 	generalAgentService         *generalagent.Service
 	kbManagerService            *kbmanager.Service
 	knowledgeFolderService      *knowledgefolders.Service
+	derivativeControlService    *derivativecontrol.Service
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
 	sessionStateService         *sessionstate.Service
@@ -96,6 +99,10 @@ func NewHandlers(
 	documentReader interfaces.DocumentReader,
 	imageResolver *docparser.ImageResolver,
 	documentQueueCoordinator *documentqueue.Coordinator,
+	systemSettingService interfaces.SystemSettingService,
+	auditLogService interfaces.AuditLogService,
+	kbRepository interfaces.KnowledgeBaseRepository,
+	customAgentRepository interfaces.CustomAgentRepository,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
@@ -139,8 +146,19 @@ func NewHandlers(
 	)
 	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
+	derivativeControlService := derivativecontrol.NewService(
+		db,
+		redisClient,
+		systemSettingService,
+		auditLogService,
+		kbRepository,
+		customAgentRepository,
+	)
 	runMaintenance := customMigrationsEnabled()
 	if runMaintenance {
+		if err := derivativeControlService.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := configCenterService.Migrate(ctx); err != nil {
 			return nil, err
 		}
@@ -239,6 +257,10 @@ func NewHandlers(
 	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
 	appservice.RegisterSessionDeletedHook(generalAgentService.DeleteSessionArtifacts)
+	appservice.RegisterDerivativeChatResolver(derivativeControlService.ResolveChatModel)
+	appservice.RegisterChatModelUsageGuard(derivativeControlService.GuardChatModel)
+	appservice.RegisterModelMutationGuard(derivativeControlService.GuardModelMutation)
+	appservice.RegisterKnowledgeBaseModelPolicy(derivativeControlService.ValidateKnowledgeBase)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
@@ -332,6 +354,7 @@ func NewHandlers(
 		AuthSecurity:                authSecurityHandler,
 		DocumentQueue:               documentqueue.NewHandler(documentQueueCoordinator),
 		KnowledgeFolders:            knowledgefolders.NewHandler(knowledgeFolderService, knowledgeService),
+		DerivativeControl:           derivativecontrol.NewHandler(derivativeControlService, modelService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -342,6 +365,7 @@ func NewHandlers(
 		generalAgentService:         generalAgentService,
 		kbManagerService:            kbManagerService,
 		knowledgeFolderService:      knowledgeFolderService,
+		derivativeControlService:    derivativeControlService,
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
 		sessionStateService:         sessionStateService,
@@ -443,6 +467,9 @@ func RegisterRoutes(
 	}
 	customPublic := v1.Group("/custom")
 	{
+		if handlers.DerivativeControl != nil {
+			customPublic.GET("/derivative-control/status", handlers.DerivativeControl.Status)
+		}
 		ssoRoutes := customPublic.Group("/iam/sso")
 		{
 			ssoRoutes.GET("/config", handlers.IAM.GetSSOConfig)
@@ -499,6 +526,18 @@ func RegisterRoutes(
 			{
 				documentQueueAdminRoutes.GET("/instances", handlers.DocumentQueue.Instances)
 				documentQueueAdminRoutes.POST("/instances/termination-attestation", handlers.DocumentQueue.AttestTermination)
+			}
+		}
+
+		if handlers.DerivativeControl != nil {
+			derivativeRoutes := custom.Group("/derivative-control")
+			{
+				derivativeRoutes.GET("/config", handlers.DerivativeControl.AdminConfig)
+				derivativeRoutes.POST("/models", handlers.DerivativeControl.Publish)
+				derivativeRoutes.DELETE("/models/:model_id", handlers.DerivativeControl.Unpublish)
+				derivativeRoutes.PUT("/default", handlers.DerivativeControl.SetDefault)
+				derivativeRoutes.PUT("/tpm", handlers.DerivativeControl.UpdateTPM)
+				derivativeRoutes.POST("/models/:model_id/test", handlers.DerivativeControl.Test)
 			}
 		}
 	}

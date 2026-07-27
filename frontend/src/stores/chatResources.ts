@@ -75,7 +75,9 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
   const kbDetailInflight = new Map<string, Promise<any | null>>()
 
   const validKnowledgeBases = computed(() => rawKnowledgeBases.value.filter(isKbModelReady))
-  const chatModels = computed(() => allModels.value.filter((m) => m.type === 'KnowledgeQA'))
+  const chatModels = computed(() => allModels.value.filter(
+    (m) => m.type === 'KnowledgeQA' && m.workload_scope !== 'derivative_only',
+  ))
 
   function resetResourceState() {
     loadedAt.value = {}

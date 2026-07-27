@@ -251,18 +251,16 @@ func buildDocumentFanoutPlan(
 	}
 	switch strings.ToLower(getFileType(knowledge.FileName)) {
 	case "csv", "xlsx", "xls":
-		// Table enrichment is optional. A KB without a summary model must
-		// still be able to parse, chunk and vectorize CSV/Excel documents.
-		// Persisting a half-configured durable fanout would make every retry
-		// fail after those core artifacts have already committed.
-		if strings.TrimSpace(kb.SummaryModelID) != "" && strings.TrimSpace(kb.EmbeddingModelID) != "" {
+		// Table enrichment uses the platform derivative model (or the KB's
+		// published override). It never borrows SummaryModelID.
+		if strings.TrimSpace(kb.EmbeddingModelID) != "" {
 			plan.DataTable = &processownership.DataTableFanout{
-				SummaryModel:   kb.SummaryModelID,
+				SummaryModel:   kb.DerivativeModelID,
 				EmbeddingModel: kb.EmbeddingModelID,
 			}
 		} else {
 			logger.Warnf(ctx,
-				"Skipping optional data-table enrichment for knowledge %s: summary/embedding model is incomplete",
+				"Skipping optional data-table enrichment for knowledge %s: embedding model is incomplete",
 				knowledge.ID,
 			)
 		}
@@ -1394,28 +1392,7 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 	// know it — debugging "summary stage took 60s" benefits hugely from
 	// seeing WHICH chat model was actually used (kb config drift, fall-
 	// throughs to a slow upstream, etc.).
-	summaryOut["model_id"] = kb.SummaryModelID
-
-	if kb.SummaryModelID == "" {
-		logger.Warn(ctx, "Knowledge base summary model ID is empty, skipping summary generation")
-		summaryOut["skipped"] = "no_summary_model"
-		if err := s.updateCurrentEnrichmentColumns(
-			ctx, payload.TenantID, payload.KnowledgeID, payload.KnowledgeBaseID,
-			payload.ProcessingGeneration,
-			map[string]interface{}{
-				"summary_status": types.SummaryStatusNone,
-				"updated_at":     time.Now(),
-			},
-			"clear summary status without configured model",
-		); err != nil {
-			if errors.Is(err, errKnowledgeStateFenceConflict) {
-				return nil
-			}
-			summaryErr = err
-			return fmt.Errorf("clear summary status without configured model: %w", err)
-		}
-		return nil
-	}
+	summaryOut["requested_derivative_model_id"] = kb.DerivativeModelID
 
 	// Get knowledge
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
@@ -1513,13 +1490,22 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 	})
 
 	// Initialize chat model for summary
-	chatModel, err := s.modelService.GetChatModel(ctx, kb.SummaryModelID)
+	chatModel, err := GetDerivativeChatModel(ctx, s.modelService, kb.DerivativeModelID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get chat model: %v", err)
+		if isDurableTaskDeferred(err) {
+			// Missing/unavailable derivative capacity is an operational wait,
+			// not a terminal document failure. Keep the generation durable and
+			// retry budget-free; importantly, never borrow SummaryModelID.
+			summaryOut["deferred"] = "derivative_model_unavailable"
+			summaryErr = err
+			return fmt.Errorf("failed to get derivative chat model: %w", err)
+		}
 		markSummaryFailed()
 		summaryErr = err
-		return fmt.Errorf("failed to get chat model: %w", err)
+		return fmt.Errorf("failed to get derivative chat model: %w", err)
 	}
+	summaryOut["model_id"] = chatModel.GetModelID()
 
 	// Generate summary
 	summary, err := s.getSummary(ctx, chatModel, knowledge, textChunks)
@@ -2009,13 +1995,13 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 	})
 
 	// Initialize chat model
-	chatModel, err := s.modelService.GetChatModel(ctx, kb.SummaryModelID)
+	chatModel, err := GetDerivativeChatModel(ctx, s.modelService, kb.DerivativeModelID)
 	if err != nil {
 		exitStatus = "get_chat_model_failed"
 		logger.Errorf(ctx, "Failed to get chat model: %v", err)
 		return fmt.Errorf("failed to get chat model: %w", err)
 	}
-	resolvedModelID = kb.SummaryModelID
+	resolvedModelID = chatModel.GetModelID()
 
 	// Initialize embedding model and retrieval engine
 	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
@@ -2427,13 +2413,13 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 		}
 	}
 
-	chatModel, err := s.modelService.GetChatModel(ctx, kb.SummaryModelID)
+	chatModel, err := GetDerivativeChatModel(ctx, s.modelService, kb.DerivativeModelID)
 	if err != nil {
 		exitStatus = "get_chat_model_failed"
 		logger.Errorf(ctx, "Failed to get chat model: %v", err)
 		return fmt.Errorf("failed to get chat model: %w", err)
 	}
-	resolvedModelID = kb.SummaryModelID
+	resolvedModelID = chatModel.GetModelID()
 
 	questionCount := payload.QuestionCount
 	if questionCount <= 0 {

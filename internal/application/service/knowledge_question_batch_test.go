@@ -141,7 +141,7 @@ func TestQuestionProviderCircuitRejectSkipsEmbeddingAndRetrieveInitialization(t 
 			Title: "制度",
 		}},
 		kbService: &questionBatchKBServiceStub{kb: &types.KnowledgeBase{
-			ID: "kb-1", TenantID: 42, SummaryModelID: "chat-1",
+			ID: "kb-1", TenantID: 42, SummaryModelID: "chat-1", DerivativeModelID: "chat-1",
 			EmbeddingModelID: "embedding-1",
 		}},
 		modelService: models,

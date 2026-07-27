@@ -2515,8 +2515,12 @@ const formData = ref(JSON.parse(JSON.stringify(defaultFormData)));
 const applyDefaultChatModelIfEmpty = () => {
   if (props.mode !== 'create' || !formData.value) return
   const chat =
-    allModels.value.find((m) => m.type === 'KnowledgeQA' && m.is_default)
-    || allModels.value.find((m) => m.type === 'KnowledgeQA')
+    allModels.value.find((m) =>
+      m.type === 'KnowledgeQA' && m.workload_scope !== 'derivative_only' && m.is_default,
+    )
+    || allModels.value.find((m) =>
+      m.type === 'KnowledgeQA' && m.workload_scope !== 'derivative_only',
+    )
   if (!formData.value.config.model_id && chat?.id) {
     formData.value.config.model_id = chat.id
   }

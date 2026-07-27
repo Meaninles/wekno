@@ -179,6 +179,14 @@ var registry = map[string]settingSpec{
 			"向量化以及摘要、问题、知识图谱、Wiki 等衍生阶段；增加实例即可水平扩展总吞吐。" +
 			"修改后需重启所有解析实例方可生效。",
 	},
+	"derivative.tpm": {
+		Type:     "int",
+		EnvName:  "WEKNORA_DERIVATIVE_TPM",
+		Default:  int64(20000),
+		Category: "models",
+		Description: "全平台所有租户、所有知识库衍生任务共享的持续 Token 预算（TPM）。" +
+			"默认 20000，修改后跨实例动态生效；普通对话不计入，也不能借用该预算。",
+	},
 }
 
 // systemSettingService wires the repository, audit log, and (P2)
@@ -1183,6 +1191,17 @@ func validateRegistryEntry(key string, rawValue any) error {
 		}
 		if n <= 0 {
 			return errors.New("concurrency must be a positive integer")
+		}
+	case "derivative.tpm":
+		n, err := coerceToPositiveInt64(rawValue)
+		if err != nil {
+			return err
+		}
+		if n < 100 {
+			return errors.New("derivative TPM must be at least 100")
+		}
+		if n > 2_000_000 {
+			return errors.New("derivative TPM must not exceed 2000000")
 		}
 	case "ssrf.whitelist":
 		// Coerce into the same shape encodeForType produced. We don't

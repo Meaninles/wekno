@@ -31,6 +31,27 @@ const (
 	ModelStatusDownloadFailed ModelStatus = "download_failed" // Model download failed
 )
 
+// ModelWorkloadScope separates latency-sensitive interactive traffic from
+// durable derivative work. A derivative-only model is never a valid choice
+// for chat, agents, model debugging, or a knowledge base's online LLM.
+//
+// The empty value is deliberately treated as interactive by Normalize so
+// rows created before the custom migration remain safe while the migration
+// backfills the explicit value.
+type ModelWorkloadScope string
+
+const (
+	ModelWorkloadInteractive    ModelWorkloadScope = "interactive"
+	ModelWorkloadDerivativeOnly ModelWorkloadScope = "derivative_only"
+)
+
+func (s ModelWorkloadScope) Normalize() ModelWorkloadScope {
+	if s == ModelWorkloadDerivativeOnly {
+		return ModelWorkloadDerivativeOnly
+	}
+	return ModelWorkloadInteractive
+}
+
 // ModelSource represents the source of the model
 type ModelSource string
 
@@ -136,6 +157,10 @@ type Model struct {
 	ManagedBy string `yaml:"managed_by"  json:"managed_by,omitempty"  gorm:"type:varchar(32);default:''"`
 	// Model status, default: active, possible: downloading, download_failed
 	Status ModelStatus `yaml:"status"      json:"status"`
+	// WorkloadScope is backend-managed. Ordinary model CRUD deliberately does
+	// not accept it; only the platform derivative-model control plane may
+	// promote a model to derivative_only.
+	WorkloadScope ModelWorkloadScope `yaml:"workload_scope" json:"workload_scope" gorm:"type:varchar(32);not null;default:'interactive';index"`
 	// Creation time of the model
 	CreatedAt time.Time `yaml:"created_at"  json:"created_at"`
 	// Last updated time of the model

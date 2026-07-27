@@ -141,15 +141,14 @@ func (p durableEnrichmentFanout) validate(payload types.KnowledgePostProcessPayl
 		}
 	}
 	for _, graphTask := range p.GraphTasks {
-		if len(graphTask.chunkIDs()) == 0 || graphTask.ModelID == "" || graphTask.ChunkIndex < 0 {
+		if len(graphTask.chunkIDs()) == 0 || graphTask.ChunkIndex < 0 {
 			return errors.New("durable enrichment fanout has invalid graph task")
 		}
 	}
 	if p.Version == 2 || p.Version == 3 {
 		if p.QuestionChunkCount < 0 || p.QuestionBatchCount < 0 ||
 			p.GraphChunkCount < 0 ||
-			(p.QuestionBatchCount > 0 && p.QuestionChunkCount == 0) ||
-			(p.GraphChunkCount > 0 && strings.TrimSpace(p.GraphModelID) == "") {
+			(p.QuestionBatchCount > 0 && p.QuestionChunkCount == 0) {
 			return errors.New("durable enrichment fanout has invalid paged counts")
 		}
 	}
@@ -387,9 +386,6 @@ func (s *KnowledgePostProcessService) buildPagedSplitEnrichmentPlan(
 				questionGenChunkBatchSize
 	}
 	if eff.GraphEnabled && textCount > 0 {
-		if strings.TrimSpace(kb.SummaryModelID) == "" {
-			return empty, true, errors.New("graph extraction model is not configured")
-		}
 		graphCap := textCount
 		if splitPlan != nil {
 			_, graphCap = splitEnrichmentStrataCaps(
@@ -410,7 +406,7 @@ func (s *KnowledgePostProcessService) buildPagedSplitEnrichmentPlan(
 			plan.GraphBatchSize = 1
 		}
 		plan.GraphBatchCount = budget.GraphTaskCount(plan.GraphChunkCount)
-		plan.GraphModelID = kb.SummaryModelID
+		plan.GraphModelID = kb.DerivativeModelID
 	}
 	if err := plan.validate(payload); err != nil {
 		return empty, true, err
@@ -831,9 +827,6 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 				durablePlan.QuestionBatchCount = len(durablePlan.QuestionBatches)
 			}
 			if eff.GraphEnabled {
-				if strings.TrimSpace(kb.SummaryModelID) == "" {
-					return errors.New("graph extraction model is not configured")
-				}
 				summaryTasks := 0
 				if durablePlan.SpawnSummary {
 					summaryTasks = 1
@@ -852,7 +845,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 					durablePlan.GraphBatchSize,
 				) {
 					durablePlan.GraphTasks = append(durablePlan.GraphTasks, durableGraphTask{
-						ChunkIDs: chunkIDs, ChunkIndex: batchIndex, ModelID: kb.SummaryModelID,
+						ChunkIDs: chunkIDs, ChunkIndex: batchIndex, ModelID: kb.DerivativeModelID,
 					})
 				}
 				durablePlan.GraphBatchCount = len(durablePlan.GraphTasks)

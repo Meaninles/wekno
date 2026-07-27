@@ -151,6 +151,9 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 			return nil, err
 		}
 	}
+	if err := ValidateKnowledgeBaseModelPolicy(ctx, kb); err != nil {
+		return nil, err
+	}
 
 	logger.Infof(ctx, "Creating knowledge base, ID: %s, tenant ID: %d, name: %s", kb.ID, kb.TenantID, kb.Name)
 
@@ -503,6 +506,9 @@ func (s *knowledgeBaseService) UpdateKnowledgeBase(ctx context.Context,
 		if config.WikiConfig != nil {
 			kb.WikiConfig = config.WikiConfig
 		}
+		if config.DerivativeModelID != nil {
+			kb.DerivativeModelID = strings.TrimSpace(*config.DerivativeModelID)
+		}
 		// Update indexing strategy — syncs to ExtractConfig for backward compat
 		if config.IndexingStrategy != nil {
 			if !config.IndexingStrategy.HasAnyIndexing() {
@@ -524,6 +530,9 @@ func (s *knowledgeBaseService) UpdateKnowledgeBase(ctx context.Context,
 	}
 	kb.UpdatedAt = time.Now()
 	kb.EnsureDefaults()
+	if err := ValidateKnowledgeBaseModelPolicy(ctx, kb); err != nil {
+		return nil, err
+	}
 
 	logger.Info(ctx, "Saving knowledge base update")
 	if err := s.repo.UpdateKnowledgeBase(ctx, kb); err != nil {
@@ -1372,6 +1381,7 @@ func (s *knowledgeBaseService) CopyKnowledgeBase(ctx context.Context,
 			ImageProcessingConfig: sourceKB.ImageProcessingConfig,
 			EmbeddingModelID:      sourceKB.EmbeddingModelID,
 			SummaryModelID:        sourceKB.SummaryModelID,
+			DerivativeModelID:     sourceKB.DerivativeModelID,
 			VLMConfig:             sourceKB.VLMConfig,
 			StorageProviderConfig: sourceKB.StorageProviderConfig,
 			StorageConfig:         sourceKB.StorageConfig,

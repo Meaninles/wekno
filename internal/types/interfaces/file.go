@@ -82,7 +82,7 @@ type StreamingPrivateObjectFileService interface {
 	PrivateObjectFileService
 	CommitPrivateObjectStreamAtPath(
 		ctx context.Context,
-		reader io.Reader,
+		reader io.ReadSeeker,
 		size int64,
 		filePath string,
 		contentType string,

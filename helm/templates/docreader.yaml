@@ -116,6 +116,10 @@ spec:
                 resources:
                   requests:
                     storage: {{ .Values.docreader.scratch.ephemeral.size }}
+          {{- else if eq (.Values.docreader.scratch.volumeType | default "emptyDir") "hostPath" }}
+          hostPath:
+            path: {{ .Values.docreader.scratch.hostPath.path | default "/mnt/weknora-data/scratch-docreader" | quote }}
+            type: DirectoryOrCreate
           {{- else }}
           emptyDir:
             {{- with .Values.docreader.scratch.sizeLimit }}

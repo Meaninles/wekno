@@ -628,12 +628,10 @@ func (m *Migrator) uploadOne(ctx context.Context, object sourceObject) (bool, er
 		return false, nil
 	}
 
-	uploadHash := sha256.New()
-	counting := &countingReader{reader: io.TeeReader(file, uploadHash)}
 	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(object.Path)))
 	err = m.target.CommitPrivateObjectStreamAtPath(
 		ctx,
-		counting,
+		file,
 		size,
 		destination,
 		contentType,
@@ -642,7 +640,19 @@ func (m *Migrator) uploadOne(ctx context.Context, object sourceObject) (bool, er
 	if err != nil {
 		return false, fmt.Errorf("upload local object %s: %w", scrubPath(object.Ref), err)
 	}
-	if counting.count != size || hex.EncodeToString(uploadHash.Sum(nil)) != digest {
+	// The OBS client may read the seekable source multiple times for SigV4
+	// signing, the actual upload and retries, leaving the file offset at an
+	// arbitrary position. Rewind and re-hash to prove the source did not
+	// change while the object was being uploaded. This replaces the former
+	// TeeReader + counting reader wrapper that hid the *os.File seekability
+	// from the S3 SDK and forced PutObject to fail with
+	// "request stream is not seekable".
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = m.target.DeleteFile(ctx, destination)
+		return false, fmt.Errorf("local object %s rewind after upload: %w", scrubPath(object.Ref), err)
+	}
+	postDigest, postSize, err := hashAndRewind(file)
+	if err != nil || postSize != size || postDigest != digest {
 		_ = m.target.DeleteFile(ctx, destination)
 		return false, fmt.Errorf("local object %s changed while uploading", scrubPath(object.Ref))
 	}

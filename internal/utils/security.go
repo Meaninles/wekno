@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"html"
 	"log"
@@ -396,10 +397,10 @@ func isSSRFSafeURL(rawURL string) (bool, string) {
 		return false, fmt.Sprintf("invalid URL format: %v", err)
 	}
 
-	// Only allow http and https
+	// Only allow http, https, ws, wss (WebSocket for IM channels)
 	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return false, fmt.Sprintf("invalid scheme: %s (only http/https allowed)", scheme)
+	if scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
+		return false, fmt.Sprintf("invalid scheme: %s (only http/https/ws/wss allowed)", scheme)
 	}
 
 	// Extract hostname
@@ -821,6 +822,23 @@ func normalizedSSRFSafeTransportKey(config SSRFSafeHTTPClientConfig) ssrfSafeTra
 	}
 }
 
+// LLMInsecureTLSConfig returns a *tls.Config that skips certificate
+// verification when WEKNORA_LLM_INSECURE_TLS=true (case-insensitive). This
+// unblocks outbound model calls to internal gateways that serve a self-signed
+// or private-CA certificate (e.g. an internal LiteLLM ingress using the
+// Kubernetes ingress controller's default fake certificate). Returns nil when
+// disabled so callers assigning to transport.TLSClientConfig keep Go's default
+// verification. Mirrors the OPENSEARCH_INSECURE_SKIP_VERIFY gating convention.
+// The value is read from the environment on each call; since model HTTP
+// transports are created lazily and cached, the flag is effectively fixed for
+// the process lifetime (the env is set at pod start and does not change).
+func LLMInsecureTLSConfig() *tls.Config {
+	if strings.EqualFold(os.Getenv("WEKNORA_LLM_INSECURE_TLS"), "true") {
+		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	}
+	return nil
+}
+
 // SharedSSRFSafeHTTPTransport returns a process-wide transport for an
 // equivalent connection-pool configuration. Request timeout and redirect
 // policy intentionally do not participate in the key because they live on
@@ -833,6 +851,9 @@ func SharedSSRFSafeHTTPTransport(config SSRFSafeHTTPClientConfig) *http.Transpor
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = SSRFSafeDialContext
+	if tlsCfg := LLMInsecureTLSConfig(); tlsCfg != nil {
+		transport.TLSClientConfig = tlsCfg
+	}
 	transport.DisableKeepAlives = key.DisableKeepAlives
 	transport.DisableCompression = key.DisableCompression
 	transport.MaxIdleConns = key.MaxIdleConns

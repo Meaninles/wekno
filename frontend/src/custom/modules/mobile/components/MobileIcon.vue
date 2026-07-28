@@ -84,6 +84,10 @@ const is = (current: string, names: string[]) => names.includes(current);
       <circle cx="16.5" cy="16.5" r="2.5" />
       <path d="m19 19 2 2" />
     </template>
+    <template v-else-if="is(name, ['eye', 'preview'])">
+      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </template>
 
     <template v-else-if="is(name, ['upload'])">
       <path d="M12 16V4" />

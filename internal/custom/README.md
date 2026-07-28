@@ -17,6 +17,7 @@
 | `knowledgeworkflowfilter` | 完整工作流状态筛选 |
 | `knowledgefolders` | 文件夹、渐进列表、搜索、移动和导入 |
 | `documentpreview` | 大文件预览策略 |
+| `mobiledocument` | 移动端短时签名下载与企业微信原生文件响应 |
 | `knowledgepurge` / `wikidelete` | 删除时清理关系库、对象、图谱和 Wiki |
 | `artifactstore` / `objectnamespace` / `storagemigration` | 私有对象、唯一前缀、校验和迁移 |
 

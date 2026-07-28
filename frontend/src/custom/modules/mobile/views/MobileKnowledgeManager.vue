@@ -5,7 +5,6 @@ import { MessagePlugin } from "tdesign-vue-next";
 import {
   batchQueryKnowledge,
   delKnowledgeDetails,
-  downKnowledgeDetails,
   listKnowledgeBases,
 } from "@/api/knowledge-base";
 import { useAuthStore } from "@/stores/auth";
@@ -18,10 +17,9 @@ import {
 } from "../knowledgeCatalog";
 import { KNOWLEDGE_DOCUMENT_SEARCH_POLICY } from "@/custom/modules/knowledgeSearch/searchPolicy";
 import { useSearchFolderBrowser } from "@/custom/modules/knowledgeSearch/useSearchFolderBrowser";
-import {
-  downloadBlob,
-  formatFileSize,
-} from "../utils";
+import { formatFileSize } from "../utils";
+import { downloadKnowledgeNatively } from "../documentDownload";
+import MobileDocumentPreviewSheet from "../components/MobileDocumentPreviewSheet.vue";
 import {
   knowledgeHasDerivativeFailure,
   knowledgeIsFullyComplete,
@@ -113,6 +111,7 @@ const documentMoveVisible = ref(false);
 const documentMoveTarget = ref<KnowledgeFileRow | null>(null);
 const documentMoveFolderId = ref("");
 const documentMoveSubmitting = ref(false);
+const previewItem = ref<KnowledgeFileRow | null>(null);
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -736,13 +735,20 @@ const downloadFile = async (item: KnowledgeFileRow) => {
   if (!item?.id || busyMap[item.id]) return;
   busyMap[item.id] = "downloading";
   try {
-    const blob = await downKnowledgeDetails(item.id);
-    downloadBlob(blob, item.original_file_name || item.file_name || item.title || "knowledge-file");
+    await downloadKnowledgeNatively(item.id);
   } catch (error: any) {
     MessagePlugin.error(error?.message || "下载失败");
   } finally {
     delete busyMap[item.id];
   }
+};
+
+const openDocumentPreview = (item: KnowledgeFileRow) => {
+  if (!item?.id) {
+    MessagePlugin.warning("该文档暂时无法预览");
+    return;
+  }
+  previewItem.value = item;
 };
 
 const deleteFile = async (item: KnowledgeFileRow) => {
@@ -1237,6 +1243,7 @@ onBeforeUnmount(() => {
             :key="item.id"
             class="doc-row"
             :class="{ focused: String(item.id) === detailFocusDocumentId }"
+            @click="openDocumentPreview(item)"
           >
             <div class="doc-icon">
               <MobileIcon name="file" />
@@ -1251,7 +1258,11 @@ onBeforeUnmount(() => {
                 {{ documentStatusText(item) }}
               </em>
             </div>
-            <div class="doc-actions">
+            <div class="doc-actions" @click.stop>
+              <button type="button" :disabled="!!busyMap[item.id]" @click="openDocumentPreview(item)">
+                <MobileIcon name="eye" />
+                <span>预览</span>
+              </button>
               <button type="button" :disabled="!!busyMap[item.id]" @click="downloadFile(item)">
                 <span v-if="busyMap[item.id] === 'downloading'" class="busy-icon download" aria-label="正在下载">
                   <MobileIcon name="download" />
@@ -1351,6 +1362,12 @@ onBeforeUnmount(() => {
         </footer>
       </section>
     </div>
+
+    <MobileDocumentPreviewSheet
+      v-if="previewItem"
+      :item="previewItem"
+      @close="previewItem = null"
+    />
   </main>
 </template>
 
@@ -2131,6 +2148,7 @@ onBeforeUnmount(() => {
 .doc-actions {
   display: flex;
   grid-column: 2;
+  flex-wrap: wrap;
   gap: 8px;
   padding-top: 2px;
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
+	"github.com/Tencent/WeKnora/internal/custom/modules/mobiledocument"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
@@ -56,6 +57,7 @@ type Handlers struct {
 	AuthSecurity         *authsecurity.Handler
 	DocumentQueue        *documentqueue.Handler
 	KnowledgeFolders     *knowledgefolders.Handler
+	MobileDocument       *mobiledocument.Handler
 	DerivativeControl    *derivativecontrol.Handler
 
 	configCenterService         *configcenter.Service
@@ -68,6 +70,7 @@ type Handlers struct {
 	generalAgentService         *generalagent.Service
 	kbManagerService            *kbmanager.Service
 	knowledgeFolderService      *knowledgefolders.Service
+	mobileDocumentService       *mobiledocument.Service
 	derivativeControlService    *derivativecontrol.Service
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
@@ -127,6 +130,10 @@ func NewHandlers(
 		knowledgeService,
 		knowledgeBaseService,
 		kbShareService,
+	)
+	mobileDocumentService := mobiledocument.NewService(
+		knowledgeService,
+		mobiledocument.LoadConfigFromEnv(),
 	)
 	iamService := iam.NewService(db, userService)
 	userGuideService := userguide.NewService(db, orgService, knowledgeBaseService, kbShareService)
@@ -358,6 +365,7 @@ func NewHandlers(
 		AuthSecurity:                authSecurityHandler,
 		DocumentQueue:               documentqueue.NewHandler(documentQueueCoordinator),
 		KnowledgeFolders:            knowledgefolders.NewHandler(knowledgeFolderService, knowledgeService),
+		MobileDocument:              mobiledocument.NewHandler(mobileDocumentService),
 		DerivativeControl:           derivativecontrol.NewHandler(derivativeControlService, modelService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
@@ -369,6 +377,7 @@ func NewHandlers(
 		generalAgentService:         generalAgentService,
 		kbManagerService:            kbManagerService,
 		knowledgeFolderService:      knowledgeFolderService,
+		mobileDocumentService:       mobileDocumentService,
 		derivativeControlService:    derivativeControlService,
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
@@ -456,6 +465,17 @@ func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
 	embed.GET("/sessions/:session_id/artifacts/:id/download", handlers.GeneralAgent.DownloadEmbedArtifact)
 }
 
+// RegisterPublicRoutes registers stateless capability URLs before the global
+// authentication middleware. The authenticated issuer route below performs
+// the tenant and knowledge-base permission checks.
+func RegisterPublicRoutes(r *gin.Engine, handlers *Handlers) {
+	if r == nil || handlers == nil || handlers.MobileDocument == nil {
+		return
+	}
+	r.GET("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+	r.HEAD("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+}
+
 func RegisterRoutes(
 	v1 *gin.RouterGroup,
 	handlers *Handlers,
@@ -465,6 +485,7 @@ func RegisterRoutes(
 	ownedKBOrAdmin gin.HandlerFunc,
 	kbRead gin.HandlerFunc,
 	kbWrite gin.HandlerFunc,
+	knowledgeRead gin.HandlerFunc,
 ) {
 	if handlers == nil {
 		return
@@ -607,6 +628,16 @@ func RegisterRoutes(
 			folders.POST("/urls", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.CreateFromURL)
 			folders.POST("/manual", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.CreateManual)
 		}
+	}
+
+	if handlers.MobileDocument != nil && viewer != nil && knowledgeRead != nil {
+		mobileDocuments := v1.Group("/custom/mobile-documents")
+		mobileDocuments.POST(
+			"/knowledge/:knowledge_id/download-link",
+			viewer,
+			knowledgeRead,
+			handlers.MobileDocument.CreateDownloadLink,
+		)
 	}
 
 	skillRoutes := v1.Group("/custom/skills")

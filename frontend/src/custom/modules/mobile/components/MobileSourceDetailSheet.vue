@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUpdated, ref, watch } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
-import { downKnowledgeDetails, getChunkByIdOnly, getKnowledgeDetails } from "@/api/knowledge-base";
+import { getChunkByIdOnly, getKnowledgeDetails } from "@/api/knowledge-base";
 import { getWikiPage, type WikiPage } from "@/api/wiki";
 import { useChatResourcesStore } from "@/stores/chatResources";
 import { hydrateProtectedFileImages } from "@/utils/security";
@@ -10,8 +10,9 @@ import {
   sourceTypeLabel,
   type SourceReferenceItem,
 } from "@/utils/sourceReferences";
-import { downloadBlob } from "../utils";
+import { downloadKnowledgeNatively } from "../documentDownload";
 import { renderMobileMarkdown } from "../mobileMarkdown";
+import MobileDocumentPreviewSheet from "./MobileDocumentPreviewSheet.vue";
 
 const props = defineProps<{
   item: SourceReferenceItem | null;
@@ -31,6 +32,7 @@ const resolvedKnowledgeId = ref("");
 const wikiPage = ref<WikiPage | null>(null);
 const wikiStack = ref<WikiPage[]>([]);
 const downloading = ref(false);
+const originalPreviewOpen = ref(false);
 const knowledgeBodyRef = ref<HTMLElement | null>(null);
 const knowledgeRenderVersion = ref(0);
 let knowledgeHydrationRun = 0;
@@ -97,6 +99,15 @@ const sourceLabel = computed(() => {
 const canDownloadKnowledge = computed(() =>
   isKnowledge.value && Boolean(knowledgeDetail.value?.id || props.item?.knowledgeId || resolvedKnowledgeId.value),
 );
+const originalPreviewItem = computed<Record<string, any> | null>(() => {
+  if (!canDownloadKnowledge.value) return null;
+  return {
+    ...(knowledgeDetail.value || {}),
+    id: knowledgeDetail.value?.id || props.item?.knowledgeId || resolvedKnowledgeId.value,
+    file_name: knowledgeDetail.value?.file_name || displayTitle.value,
+    title: knowledgeDetail.value?.title || displayTitle.value,
+  };
+});
 
 watch(
   () => props.item,
@@ -107,6 +118,7 @@ watch(
     wikiPage.value = null;
     wikiStack.value = [];
     error.value = "";
+    originalPreviewOpen.value = false;
     knowledgeRenderVersion.value += 1;
     if (!item) return;
     if (item.type === "knowledge") {
@@ -279,9 +291,7 @@ async function downloadKnowledge() {
   if (!id || downloading.value) return;
   downloading.value = true;
   try {
-    const result = await downKnowledgeDetails(id);
-    const blob = result instanceof Blob ? result : new Blob([result as any]);
-    downloadBlob(blob, displayTitle.value || "知识库文档");
+    await downloadKnowledgeNatively(id);
   } catch (err: any) {
     MessagePlugin.error(err?.message || "下载失败");
   } finally {
@@ -335,6 +345,15 @@ function pageTypeLabel(type?: string) {
           <MobileIcon :name="isWiki ? 'bookmark' : isWeb ? 'internet' : 'file'" />
         </span>
         <strong>{{ displayTitle }}</strong>
+        <button
+          v-if="originalPreviewItem"
+          type="button"
+          class="source-detail__icon-button"
+          aria-label="预览原文档"
+          @click="originalPreviewOpen = true"
+        >
+          <MobileIcon name="eye" />
+        </button>
         <button
           v-if="canDownloadKnowledge"
           type="button"
@@ -422,6 +441,12 @@ function pageTypeLabel(type?: string) {
           </section>
         </template>
       </main>
+
+      <MobileDocumentPreviewSheet
+        v-if="originalPreviewOpen && originalPreviewItem"
+        :item="originalPreviewItem"
+        @close="originalPreviewOpen = false"
+      />
     </section>
   </div>
 </template>
@@ -444,7 +469,7 @@ function pageTypeLabel(type?: string) {
 
 .source-detail__topbar {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px 38px;
+  grid-template-columns: 38px minmax(0, 1fr) 38px 38px 38px;
   align-items: center;
   gap: 6px;
   padding: calc(env(safe-area-inset-top) + 8px) 10px 8px;
@@ -484,7 +509,7 @@ function pageTypeLabel(type?: string) {
 }
 
 .source-detail__close-button {
-  grid-column: 4;
+  grid-column: 5;
 }
 
 .source-detail__icon-button.loading {

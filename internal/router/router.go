@@ -176,6 +176,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 
 	// Web embed 公开路由（使用 publish token 鉴权，不走全局 Auth）
 	RegisterEmbedPublicRoutes(r, params.EmbedChannelHandler, params.EmbedChannelService, params.TenantService, params.RedisClient, params.FileService, params.CustomHandlers)
+	custombootstrap.RegisterPublicRoutes(r, params.CustomHandlers)
 
 	// 认证中间件
 	r.Use(middleware.Auth(params.TenantService, params.UserService, params.TenantMemberService, params.Config))
@@ -261,6 +262,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 			rbacGuards.OwnedKBOrAdmin(),
 			rbacGuards.KBAccessRead("id"),
 			rbacGuards.KBAccessWrite("id"),
+			rbacGuards.KBAccessReadFromKnowledgeIDParam("knowledge_id"),
 		)
 	}
 

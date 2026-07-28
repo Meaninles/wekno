@@ -190,7 +190,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	query := s.buildEffectiveQuery(ctx, req)
 	lightMode, lightNames := configuredLightweightSkillSelection(req.CustomAgent)
 	selectedSkillContext := appservice.LightweightSkillContext(ctx, lightMode, lightNames, req.SkillNames)
-	professionalSkills, err := s.professionalSkillSpecs(ctx, req.CustomAgent)
+	professionalSkills, err := s.professionalSkillSpecs(
+		ctx,
+		req.CustomAgent,
+		req.ProfessionalSkillNames,
+	)
 	if err != nil {
 		return err
 	}
@@ -828,15 +832,55 @@ func configuredProfessionalSkillSelection(agent *types.CustomAgent) (string, []s
 	return mode, cloneStringSlice(agent.Config.SelectedProfessionalSkills)
 }
 
-func (s *Service) professionalSkillSpecs(ctx context.Context, agent *types.CustomAgent) ([]ProfessionalSkillSpec, error) {
-	mode, names := configuredProfessionalSkillSelection(agent)
-	if mode != "all" && (mode != "selected" || len(names) == 0) {
+func effectiveProfessionalSkillSelection(
+	agent *types.CustomAgent,
+	requested []string,
+) ([]string, bool) {
+	mode, configured := configuredProfessionalSkillSelection(agent)
+	requested = compactStrings(requested)
+	switch mode {
+	case "all":
+		if len(requested) > 0 {
+			return requested, false
+		}
+		return nil, true
+	case "selected":
+		configured = compactStrings(configured)
+		if len(configured) == 0 {
+			return nil, false
+		}
+		if len(requested) == 0 {
+			return configured, false
+		}
+		allowed := make(map[string]struct{}, len(configured))
+		for _, name := range configured {
+			allowed[name] = struct{}{}
+		}
+		names := make([]string, 0, len(requested))
+		for _, name := range requested {
+			if _, ok := allowed[name]; ok {
+				names = append(names, name)
+			}
+		}
+		return names, false
+	default:
+		return nil, false
+	}
+}
+
+func (s *Service) professionalSkillSpecs(
+	ctx context.Context,
+	agent *types.CustomAgent,
+	requested []string,
+) ([]ProfessionalSkillSpec, error) {
+	names, all := effectiveProfessionalSkillSelection(agent, requested)
+	if !all && len(names) == 0 {
 		return nil, nil
 	}
 	if s.professionalSkills == nil {
 		return nil, fmt.Errorf("professional skill provider is unavailable")
 	}
-	packages, err := s.professionalSkills.ProfessionalPackages(ctx, names, mode == "all")
+	packages, err := s.professionalSkills.ProfessionalPackages(ctx, names, all)
 	if err != nil {
 		return nil, fmt.Errorf("load professional skills: %w", err)
 	}
@@ -914,16 +958,17 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 		}
 	}
 	out["current_turn"] = map[string]any{
-		"user_request_verbatim":        req.Query,
-		"quoted_context":               req.QuotedContext,
-		"image_urls":                   cloneStringSlice(req.ImageURLs),
-		"image_description":            req.ImageDescription,
-		"attachments":                  attachmentSpecsWithoutContent(req.Attachments),
-		"selected_chat_skill_names":    cloneStringSlice(req.SkillNames),
-		"selected_chat_skill_context":  selectedSkillContext,
-		"selected_knowledge_base_ids":  cloneStringSlice(req.KnowledgeBaseIDs),
-		"selected_knowledge_file_ids":  cloneStringSlice(req.KnowledgeIDs),
-		"web_search_requested_in_chat": req.WebSearchEnabled,
+		"user_request_verbatim":                  req.Query,
+		"quoted_context":                         req.QuotedContext,
+		"image_urls":                             cloneStringSlice(req.ImageURLs),
+		"image_description":                      req.ImageDescription,
+		"attachments":                            attachmentSpecsWithoutContent(req.Attachments),
+		"selected_chat_skill_names":              cloneStringSlice(req.SkillNames),
+		"selected_chat_professional_skill_names": cloneStringSlice(req.ProfessionalSkillNames),
+		"selected_chat_skill_context":            selectedSkillContext,
+		"selected_knowledge_base_ids":            cloneStringSlice(req.KnowledgeBaseIDs),
+		"selected_knowledge_file_ids":            cloneStringSlice(req.KnowledgeIDs),
+		"web_search_requested_in_chat":           req.WebSearchEnabled,
 	}
 	if config != nil {
 		out["effective_configuration"] = map[string]any{

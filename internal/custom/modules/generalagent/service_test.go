@@ -7,9 +7,39 @@ import (
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
+	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+type recordingProfessionalSkillProvider struct {
+	names []string
+	all   bool
+	calls int
+}
+
+func (p *recordingProfessionalSkillProvider) ProfessionalPackages(
+	_ context.Context,
+	names []string,
+	all bool,
+) ([]skillhub.ProfessionalSkillPackage, error) {
+	p.names = append([]string(nil), names...)
+	p.all = all
+	p.calls++
+	packages := make([]skillhub.ProfessionalSkillPackage, 0, len(names))
+	for _, name := range names {
+		packages = append(packages, skillhub.ProfessionalSkillPackage{
+			Name:        name,
+			DisplayName: name,
+			Description: "test " + name,
+			Files: []skillhub.ProfessionalSkillFile{{
+				Path:          "SKILL.md",
+				ContentBase64: "dGVzdA==",
+			}},
+		})
+	}
+	return packages, nil
+}
 
 func TestDedupeSidecarArtifactsByFilenameKeepLast(t *testing.T) {
 	items := []SidecarArtifact{
@@ -219,12 +249,70 @@ func TestProfessionalSkillSpecsForDocumentProcessingAllowsNoProfessionalSkill(t 
 			AgentType:                       types.AgentTypeDocumentProcessingAgent,
 			ProfessionalSkillsSelectionMode: "none",
 		},
-	})
+	}, []string{"pro-a"})
 	if err != nil {
 		t.Fatalf("professionalSkillSpecs returned error: %v", err)
 	}
 	if len(specs) != 0 {
 		t.Fatalf("specs = %+v, want no professional skills", specs)
+	}
+}
+
+func TestProfessionalSkillSpecsNarrowsConfiguredAllowlistToChatSelection(t *testing.T) {
+	provider := &recordingProfessionalSkillProvider{}
+	svc := &Service{professionalSkills: provider}
+	agent := &types.CustomAgent{
+		Config: types.CustomAgentConfig{
+			ProfessionalSkillsSelectionMode: "selected",
+			SelectedProfessionalSkills:      []string{"pro-a", "pro-b"},
+		},
+	}
+
+	specs, err := svc.professionalSkillSpecs(
+		context.Background(),
+		agent,
+		[]string{" pro-b ", "outside-agent-allowlist", "pro-b"},
+	)
+	if err != nil {
+		t.Fatalf("professionalSkillSpecs returned error: %v", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", provider.calls)
+	}
+	if provider.all {
+		t.Fatalf("provider all = true, want a request-scoped package load")
+	}
+	if got := strings.Join(provider.names, ","); got != "pro-b" {
+		t.Fatalf("provider names = %q, want pro-b", got)
+	}
+	if len(specs) != 1 || specs[0].Name != "pro-b" {
+		t.Fatalf("specs = %+v, want only pro-b", specs)
+	}
+}
+
+func TestEffectiveProfessionalSkillSelectionPreservesAgentDefaultsWithoutChatSelection(t *testing.T) {
+	selectedAgent := &types.CustomAgent{
+		Config: types.CustomAgentConfig{
+			ProfessionalSkillsSelectionMode: "selected",
+			SelectedProfessionalSkills:      []string{"pro-a", "pro-b"},
+		},
+	}
+	names, all := effectiveProfessionalSkillSelection(selectedAgent, nil)
+	if all || strings.Join(names, ",") != "pro-a,pro-b" {
+		t.Fatalf("selected defaults = (%v, %v), want ([pro-a pro-b], false)", names, all)
+	}
+
+	allAgent := &types.CustomAgent{
+		Config: types.CustomAgentConfig{ProfessionalSkillsSelectionMode: "all"},
+	}
+	names, all = effectiveProfessionalSkillSelection(allAgent, nil)
+	if !all || len(names) != 0 {
+		t.Fatalf("all defaults = (%v, %v), want (nil, true)", names, all)
+	}
+
+	names, all = effectiveProfessionalSkillSelection(allAgent, []string{"pro-b", "pro-b"})
+	if all || strings.Join(names, ",") != "pro-b" {
+		t.Fatalf("all request scope = (%v, %v), want ([pro-b], false)", names, all)
 	}
 }
 

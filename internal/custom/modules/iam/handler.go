@@ -15,12 +15,17 @@ import (
 )
 
 type Handler struct {
-	service    *Service
-	orgService interfaces.OrganizationService
+	service      *Service
+	orgService   interfaces.OrganizationService
+	publicOrigin string
 }
 
-func NewHandler(service *Service, orgService interfaces.OrganizationService) *Handler {
-	return &Handler{service: service, orgService: orgService}
+func NewHandler(service *Service, orgService interfaces.OrganizationService, publicOrigin string) *Handler {
+	return &Handler{
+		service:      service,
+		orgService:   orgService,
+		publicOrigin: strings.TrimRight(strings.TrimSpace(publicOrigin), "/"),
+	}
 }
 
 func (h *Handler) GetSetting(c *gin.Context) {
@@ -154,7 +159,19 @@ func (h *Handler) GetSSOConfig(c *gin.Context) {
 }
 
 func (h *Handler) GetSSOAuthorizationURL(c *gin.Context) {
-	resp, err := h.service.GetSSOAuthorizationURL(c.Request.Context(), strings.TrimSpace(c.Query("redirect_uri")))
+	redirectURI := strings.TrimSpace(c.Query("redirect_uri"))
+	if h.publicOrigin != "" {
+		configuredRedirectURI := h.publicOrigin + ssoCallbackPath
+		if redirectURI != "" && redirectURI != configuredRedirectURI {
+			c.JSON(http.StatusBadRequest, SSOAuthURLResponse{
+				Success: false,
+				Message: "redirect_uri must match the configured IAM public callback URL",
+			})
+			return
+		}
+		redirectURI = configuredRedirectURI
+	}
+	resp, err := h.service.GetSSOAuthorizationURL(c.Request.Context(), redirectURI)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, SSOAuthURLResponse{Success: false, Message: err.Error()})
 		return
@@ -163,12 +180,12 @@ func (h *Handler) GetSSOAuthorizationURL(c *gin.Context) {
 }
 
 func (h *Handler) SSOEntry(c *gin.Context) {
-	redirectURI, err := ssoCallbackURLFromRequest(c.Request)
+	redirectURI, err := ssoCallbackURLFromRequest(c.Request, h.publicOrigin)
 	if err != nil {
 		c.Redirect(http.StatusFound, "/#oidc_error="+url.QueryEscape("entry_failed")+"&oidc_error_description="+url.QueryEscape(err.Error()))
 		return
 	}
-	frontendRedirect, err := ssoFrontendRedirectFromRequest(c.Request)
+	frontendRedirect, err := ssoFrontendRedirectFromRequest(c.Request, h.publicOrigin)
 	if err != nil {
 		c.Redirect(http.StatusFound, "/#oidc_error="+url.QueryEscape("entry_failed")+"&oidc_error_description="+url.QueryEscape(err.Error()))
 		return
@@ -219,16 +236,18 @@ func (h *Handler) SSOCallback(c *gin.Context) {
 	c.Redirect(http.StatusFound, ssoBrowserRedirect(frontendRedirect, url.Values{"oidc_result": {payload}}))
 }
 
-func ssoCallbackURLFromRequest(r *http.Request) (string, error) {
-	origin, err := externalOriginFromRequest(r)
+const ssoCallbackPath = "/api/v1/custom/iam/sso/callback"
+
+func ssoCallbackURLFromRequest(r *http.Request, publicOrigin string) (string, error) {
+	origin, err := ssoOriginFromRequest(r, publicOrigin)
 	if err != nil {
 		return "", err
 	}
-	return origin + "/api/v1/custom/iam/sso/callback", nil
+	return origin + ssoCallbackPath, nil
 }
 
-func ssoFrontendRedirectFromRequest(r *http.Request) (string, error) {
-	origin, err := externalOriginFromRequest(r)
+func ssoFrontendRedirectFromRequest(r *http.Request, publicOrigin string) (string, error) {
+	origin, err := ssoOriginFromRequest(r, publicOrigin)
 	if err != nil {
 		return "", err
 	}
@@ -245,6 +264,13 @@ func ssoFrontendRedirectFromRequest(r *http.Request) (string, error) {
 		return parsed.Scheme + "://" + formatHostPort(host, "5177") + "/", nil
 	}
 	return origin + "/", nil
+}
+
+func ssoOriginFromRequest(r *http.Request, publicOrigin string) (string, error) {
+	if origin := strings.TrimRight(strings.TrimSpace(publicOrigin), "/"); origin != "" {
+		return origin, nil
+	}
+	return externalOriginFromRequest(r)
 }
 
 func externalOriginFromRequest(r *http.Request) (string, error) {

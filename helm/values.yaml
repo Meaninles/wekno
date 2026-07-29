@@ -176,6 +176,10 @@ app:
   # Ref: https://github.com/Tencent/WeKnora/blob/main/docker-compose.yml
   env:
     GIN_MODE: release
+    # -- Canonical browser-visible SPA origin. IAM SSO uses this instead of
+    # inferring the public scheme from the internal proxy connection.
+    # Leave empty for local/request-derived development behavior.
+    FRONTEND_BASE_URL: ""
     # -- Base SQL migration switch. Production runs migrations once in an
     # isolated maintenance replica, then sets this to "false" for normal Pods.
     AUTO_MIGRATE: "true"

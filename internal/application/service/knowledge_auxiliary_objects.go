@@ -623,3 +623,23 @@ func (s *knowledgeService) auxiliaryFileServiceForPath(
 		ctx, tenantID, knowledgeBaseID, knowledgeID, path, effectiveAuxiliaryProvider(ctx, kb),
 	)
 }
+
+func (s *knowledgeService) sourceFileServiceForRead(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledgeBaseID string,
+	knowledgeID string,
+	path string,
+) (interfaces.FileService, error) {
+	if s.auxObjects == nil {
+		return nil, errors.New("resolve source file service for read: registry is unavailable")
+	}
+	knowledgeBaseID = strings.TrimSpace(knowledgeBaseID)
+	if knowledgeBaseID == "" {
+		return nil, errors.New("resolve source file service for read: knowledge base identity is unavailable")
+	}
+	tenantID := types.MustTenantIDFromContext(ctx)
+	return s.auxObjects.SourceFileServiceForRead(
+		ctx, tenantID, knowledgeBaseID, knowledgeID, path, effectiveAuxiliaryProvider(ctx, kb),
+	)
+}

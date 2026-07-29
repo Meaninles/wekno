@@ -727,7 +727,7 @@ func (s *knowledgeService) openKnowledgeFileForRecord(ctx context.Context, knowl
 
 	// Resolve KB-level file service with FilePath fallback protection
 	kb, _ := s.kbService.GetKnowledgeBaseByID(fileCtx, knowledge.KnowledgeBaseID)
-	resolvedFileService, err := s.auxiliaryFileServiceForPath(
+	resolvedFileService, err := s.sourceFileServiceForRead(
 		fileCtx, kb, knowledge.KnowledgeBaseID, knowledge.ID, knowledge.FilePath,
 	)
 	if err != nil {

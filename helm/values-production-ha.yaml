@@ -87,6 +87,9 @@ app:
         everest.io/csi.volume-name-prefix: wk-app-tmp
   env:
     GIN_MODE: release
+    # WAF terminates public TLS on 443 and forwards HTTP through ELB port 80.
+    # Browser-facing links and IAM OAuth callbacks must still use this origin.
+    FRONTEND_BASE_URL: "https://knora.moutai.com.cn"
     # Base SQL migrations are run exactly once by the maintenance replica.
     AUTO_MIGRATE: "false"
     RETRIEVE_DRIVER: postgres

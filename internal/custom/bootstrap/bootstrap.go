@@ -136,6 +136,10 @@ func NewHandlers(
 		mobiledocument.LoadConfigFromEnv(),
 	)
 	iamService := iam.NewService(db, userService)
+	iamPublicOrigin, err := iam.LoadPublicOrigin(cfg.FrontendBaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("load custom IAM public origin: %w", err)
+	}
 	userGuideService := userguide.NewService(db, orgService, knowledgeBaseService, kbShareService)
 	scheduledChatService := scheduledchat.NewService(
 		db,
@@ -352,7 +356,7 @@ func NewHandlers(
 	})
 	return &Handlers{
 		ConfigCenter:                configcenter.NewHandler(configCenterService),
-		IAM:                         iam.NewHandler(iamService, orgService),
+		IAM:                         iam.NewHandler(iamService, orgService, iamPublicOrigin),
 		ScheduledChat:               scheduledchat.NewHandler(scheduledChatService),
 		SessionState:                sessionstate.NewHandler(sessionStateService),
 		SkillHub:                    skillhub.NewHandler(skillHubService, db),

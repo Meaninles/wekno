@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -140,11 +141,102 @@ func TestSSOEntryStoresLocalMobileFrontendRedirect(t *testing.T) {
 	}
 }
 
+func TestSSOEntryConfiguredPublicOriginOverridesForwardedHTTP(t *testing.T) {
+	router := newSSOEntryTestRouterWithPublicOrigin(t, "https://knora.moutai.com.cn")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/custom/iam/sso/entry", nil)
+	req.Host = "app:8080"
+	req.Header.Set("X-Forwarded-Host", "knora.moutai.com.cn")
+	req.Header.Set("X-Forwarded-Proto", "http")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	parsed, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse location: %v", err)
+	}
+	if got, want := parsed.Query().Get("redirect_uri"), "https://knora.moutai.com.cn/api/v1/custom/iam/sso/callback"; got != want {
+		t.Fatalf("redirect_uri = %q, want %q", got, want)
+	}
+	payload, err := decodeSSOState(parsed.Query().Get("state"))
+	if err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if got, want := payload.FrontendRedirect, "https://knora.moutai.com.cn/"; got != want {
+		t.Fatalf("frontend_redirect = %q, want %q", got, want)
+	}
+}
+
+func TestSSOEntryConfiguredPublicOriginKeepsMobileRedirectHTTPS(t *testing.T) {
+	router := newSSOEntryTestRouterWithPublicOrigin(t, "https://knora.moutai.com.cn")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/custom/iam/sso/entry?client=mobile", nil)
+	req.Header.Set("X-Forwarded-Proto", "http")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	parsed, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse location: %v", err)
+	}
+	payload, err := decodeSSOState(parsed.Query().Get("state"))
+	if err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if got, want := payload.FrontendRedirect, "https://knora.moutai.com.cn/mobile/"; got != want {
+		t.Fatalf("frontend_redirect = %q, want %q", got, want)
+	}
+}
+
+func TestSSOAuthURLConfiguredPublicOriginRejectsDifferentRedirectURI(t *testing.T) {
+	router := newSSOEntryTestRouterWithPublicOrigin(t, "https://knora.moutai.com.cn")
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/custom/iam/sso/url?redirect_uri="+url.QueryEscape("http://knora.moutai.com.cn/api/v1/custom/iam/sso/callback"),
+		nil,
+	)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestSSOAuthURLConfiguredPublicOriginSuppliesCanonicalRedirectURI(t *testing.T) {
+	router := newSSOEntryTestRouterWithPublicOrigin(t, "https://knora.moutai.com.cn")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/custom/iam/sso/url", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var response SSOAuthURLResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	parsed, err := url.Parse(response.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("parse authorization URL: %v", err)
+	}
+	if got, want := parsed.Query().Get("redirect_uri"), "https://knora.moutai.com.cn/api/v1/custom/iam/sso/callback"; got != want {
+		t.Fatalf("redirect_uri = %q, want %q", got, want)
+	}
+}
+
 func TestSSOCallbackURLFromRequestDefaultsToHTTPSForPublicHost(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/custom/iam/sso/entry", nil)
 	req.Host = "knora.moutai.com.cn"
 
-	got, err := ssoCallbackURLFromRequest(req)
+	got, err := ssoCallbackURLFromRequest(req, "")
 	if err != nil {
 		t.Fatalf("ssoCallbackURLFromRequest returned error: %v", err)
 	}
@@ -155,6 +247,10 @@ func TestSSOCallbackURLFromRequestDefaultsToHTTPSForPublicHost(t *testing.T) {
 }
 
 func newSSOEntryTestRouter(t *testing.T) *gin.Engine {
+	return newSSOEntryTestRouterWithPublicOrigin(t, "")
+}
+
+func newSSOEntryTestRouterWithPublicOrigin(t *testing.T, publicOrigin string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -173,7 +269,8 @@ func newSSOEntryTestRouter(t *testing.T) *gin.Engine {
 		t.Fatalf("create setting: %v", err)
 	}
 	router := gin.New()
-	handler := NewHandler(NewService(db, nil), nil)
+	handler := NewHandler(NewService(db, nil), nil, publicOrigin)
 	router.GET("/api/v1/custom/iam/sso/entry", handler.SSOEntry)
+	router.GET("/api/v1/custom/iam/sso/url", handler.GetSSOAuthorizationURL)
 	return router
 }

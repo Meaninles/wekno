@@ -29,7 +29,7 @@
 | 数据和技能 | `dbanalytics`、`skillhub`、`scheduledchat` |
 | 身份与治理 | `iam`、`authsecurity`、`admin`、`configcenter`、`connectiontls` |
 | 协作 | `chatshare`、`sessionstate`、`answerfeedback`、`sourcerefs` |
-| 安全/稳定性 | `fileguard`、`imageguard`、`logprivacy`、`taskretry`、`workretry`、`processownership` |
+| 安全/稳定性 | `fileguard`、`imageguard`、`logprivacy`、`taskretry`、`workretry`、`processownership`、`vlmguard` |
 | 内容与缓存 | `contentcache`、`knowledgeaux`、`knowledgesearch`、`textencoding` |
 
 ## 关键语义

@@ -283,6 +283,7 @@ app、DocReader、Agent 和 Web 层已经多副本，但现有 PostgreSQL、Neo4
 | 统一注册 | `internal/custom/bootstrap/` | 二开服务、路由、迁移、调度器和 Hook |
 | 文档队列 | `internal/custom/modules/documentqueue/` | 持久工作流、实例、租约、epoch、接管 |
 | 模型准入 | `internal/custom/modules/modeladmission/` | Redis 集群/租户级模型与解析器并发 |
+| VLM 长尾保护 | `internal/custom/modules/vlmguard/` | 流式进度超时、重复输出检测和错误归因 |
 | 大文档拆分 | `internal/custom/modules/documentsplit/` | 拆分、租约、重试、采样和预算 |
 | 产物存储 | `internal/custom/modules/artifactstore/` | 私有对象、校验、迁移和幂等提交 |
 | 文档状态 | `internal/custom/modules/knowledgeworkflowfilter/` | 完整工作流筛选 |

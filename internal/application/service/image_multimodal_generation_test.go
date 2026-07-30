@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
+	"github.com/Tencent/WeKnora/internal/custom/modules/vlmguard"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -216,6 +217,67 @@ func TestStableImageChunkIDIsGenerationScoped(t *testing.T) {
 	payload.ProcessingGeneration = "generation-2"
 	if nextGeneration := stableImageChunkID(payload, "ocr"); nextGeneration == first {
 		t.Fatal("different generations reused an image artifact ID")
+	}
+}
+
+func TestCaptionIsShortCircuitedAfterOCRFailure(t *testing.T) {
+	requireCaption := func(enabled bool, extractionErr error, expected bool) {
+		t.Helper()
+		if actual := shouldRunImageCaption(enabled, extractionErr); actual != expected {
+			t.Fatalf(
+				"shouldRunImageCaption(enabled=%t, err=%v) = %t, want %t",
+				enabled,
+				extractionErr,
+				actual,
+				expected,
+			)
+		}
+	}
+
+	requireCaption(true, nil, true)
+	requireCaption(false, nil, false)
+	requireCaption(true, errors.New("OCR first-token timeout"), false)
+}
+
+func TestTruncatedOCRIsRetainedAsExplicitDegradedOutput(t *testing.T) {
+	partial, accepted := usableTruncatedOCR(
+		"已识别的有效前缀",
+		&vlmguard.Error{Kind: vlmguard.FailureOutputLimit},
+	)
+	if !accepted || partial != "已识别的有效前缀" {
+		t.Fatalf("usableTruncatedOCR() = %q, %t", partial, accepted)
+	}
+
+	for _, err := range []error{
+		&vlmguard.Error{Kind: vlmguard.FailureRunaway},
+		&vlmguard.Error{Kind: vlmguard.FailureIdleTimeout},
+		&vlmguard.Error{Kind: vlmguard.FailureStreamTruncated},
+	} {
+		if partial, accepted := usableTruncatedOCR("不应保留", err); accepted || partial != "" {
+			t.Fatalf("usableTruncatedOCR(%v) unexpectedly retained %q", err, partial)
+		}
+	}
+}
+
+func TestDegradedImageOutcomeIsPersisted(t *testing.T) {
+	repo := &imageGenerationKnowledgeRepoStub{}
+	svc := &ImageMultimodalService{knowledgeRepo: repo}
+	payload := types.ImageMultimodalPayload{
+		TenantID:             42,
+		KnowledgeID:          "knowledge-1",
+		KnowledgeBaseID:      "kb-1",
+		ProcessingGeneration: "generation-1",
+		ImageIndex:           3,
+	}
+	if err := svc.recordImageDegraded(
+		context.Background(),
+		payload,
+		"OCR output was truncated",
+	); err != nil {
+		t.Fatalf("recordImageDegraded() error = %v", err)
+	}
+	if status := repo.outcomes["multimodal.image[3]"]; status != enrichmentoutcome.StatusDegraded {
+		t.Fatalf("degraded outcome = %q, want degraded", status)
 	}
 }
 

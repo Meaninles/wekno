@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/vlmguard"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/redis/go-redis/v9"
 )
@@ -380,6 +381,10 @@ func classifyCircuitOutcome(lease *Lease, callErr error) circuitOutcome {
 			// The document/task deadline or shutdown cancelled the call; this
 			// is not evidence that the provider itself is unhealthy.
 			outcome = circuitAbandon
+		case explicitlyClassifiedVLMFailure(callErr, &outcome):
+			// A progress-aware VLM failure distinguishes an unavailable/stalled
+			// provider from a healthy provider that kept generating until a
+			// local budget, repetition guard or output limit was reached.
 		case isCircuitFailure(callErr):
 			outcome = circuitFailure
 		}
@@ -516,6 +521,9 @@ func isCircuitFailure(err error) bool {
 		errors.Is(err, ErrProviderCircuitOpen) {
 		return false
 	}
+	if failure, classified := vlmguard.ProviderCircuitFailure(err); classified {
+		return failure
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -559,6 +567,19 @@ func isCircuitFailure(err error) bool {
 		}
 	}
 	return false
+}
+
+func explicitlyClassifiedVLMFailure(err error, outcome *circuitOutcome) bool {
+	failure, classified := vlmguard.ProviderCircuitFailure(err)
+	if !classified {
+		return false
+	}
+	if failure {
+		*outcome = circuitFailure
+	} else {
+		*outcome = circuitAbandon
+	}
+	return true
 }
 
 func statusCodeFromText(message string) (int, bool) {

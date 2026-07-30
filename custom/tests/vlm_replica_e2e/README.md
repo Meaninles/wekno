@@ -62,6 +62,10 @@ Embedding 和摘要模型均使用生产 `llmgateway` 上的模型；两个本�
 embedding 行、executor identity、队列原子终态诊断和分布式 VLM 槽位，并通过
 正式删除 API 等待测试知识库的异步清理完成。
 
+派生任务被 admission 延后后可能留下历史 failed span，再由 durable retry
+成功收敛。验收以最新 attempt 中同名 span 的最新一行为准，历史失败仍写入报告，
+但只有最新结果失败才判定工作流失败。
+
 文档工作流的恢复源是共享 PostgreSQL，不是隔离 Redis。运行该场景前必须停止
 `WeKnora-app-dev` 和其他连接同一数据库的文档 worker，避免第三个实例参与；测试
 会严格要求 executor identity 只能是 A/B。runner 直接在 A 中执行：

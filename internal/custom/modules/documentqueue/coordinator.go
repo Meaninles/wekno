@@ -292,11 +292,27 @@ func (c *Coordinator) Migrate(ctx context.Context) error {
 		}
 		for _, field := range []string{
 			"dispatch_epoch", "max_retry", "delegate_timeout_nanos", "workflow_timeout_nanos",
-			"deadline_at", "retention_nanos", "lease_until", "plan_hash",
+			"deadline_at", "retention_nanos", "lease_until", "plan_hash", "terminal_diagnostic",
 		} {
 			if !migrator.HasColumn(&Workflow{}, field) {
-				return fmt.Errorf("document queue schema column %s is missing; run versioned migration 000076", field)
+				version := "000076"
+				if field == "terminal_diagnostic" {
+					version = "000091"
+				}
+				return fmt.Errorf(
+					"document queue schema column %s is missing; run versioned migration %s",
+					field,
+					version,
+				)
 			}
+		}
+		if !migrator.HasConstraint(
+			&Workflow{},
+			"ck_document_workflow_terminal_diagnostic",
+		) {
+			return errors.New(
+				"document queue terminal diagnostic constraint is missing; run versioned migration 000091",
+			)
 		}
 		if !migrator.HasColumn("knowledges", "processing_workflow_id") {
 			return errors.New("document queue schema column knowledges.processing_workflow_id is missing; run versioned migration 000076")

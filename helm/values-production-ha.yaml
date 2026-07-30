@@ -302,6 +302,20 @@ app:
     # occupy the generic background worker pool.
     - name: WEKNORA_MULTIMODAL_TASK_CONCURRENCY
       value: "2"
+    # Stream VLM responses end-to-end so a genuinely stalled request is
+    # distinguishable from a long but progressing OCR/caption generation.
+    - name: VLM_STREAMING_ENABLED
+      value: "true"
+    - name: VLM_FIRST_TOKEN_TIMEOUT_SECONDS
+      value: "180"
+    - name: VLM_STREAM_IDLE_TIMEOUT_SECONDS
+      value: "45"
+    - name: VLM_TOTAL_TIMEOUT_SECONDS
+      value: "360"
+    - name: VLM_OCR_MAX_TOKENS
+      value: "5000"
+    - name: VLM_CAPTION_MAX_TOKENS
+      value: "512"
     - name: CUSTOM_WORK_RETRY_IMAGE_MAX_ATTEMPTS
       value: "10"
     - name: CUSTOM_WORK_RETRY_WIKI_MAX_ATTEMPTS

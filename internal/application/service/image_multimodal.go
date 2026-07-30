@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/imageguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
+	"github.com/Tencent/WeKnora/internal/custom/modules/vlmguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/utils/ollama"
@@ -364,7 +365,10 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 		ProcessingGeneration: payload.ProcessingGeneration,
 	}
 
-	var extractionErr error
+	var (
+		extractionErr  error
+		degradedDetail string
+	)
 	if payload.EnableOCR {
 		prompt := vlmOCRPrompt
 		if payload.ImageSourceType == "scanned_pdf" {
@@ -384,11 +388,28 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			imgOut["ocr_cache_hit"] = true
 		} else {
 			var ocrErr error
-			ocrText, ocrErr = vlmModel.Predict(ctx, [][]byte{vlmImageBytes}, prompt)
+			ocrText, ocrErr = vlmModel.Predict(
+				vlmguard.WithOperation(ctx, vlmguard.OperationOCR),
+				[][]byte{vlmImageBytes},
+				prompt,
+			)
 			if ocrErr != nil {
-				logger.Warnf(ctx, "[ImageMultimodal] OCR failed for %s: %v", payload.ImageURL, ocrErr)
-				imgOut["ocr_error"] = ocrErr.Error()
-				extractionErr = errors.Join(extractionErr, fmt.Errorf("OCR: %w", ocrErr))
+				if partialOCR, accepted := usableTruncatedOCR(ocrText, ocrErr); accepted {
+					ocrText = partialOCR
+					degradedDetail = "OCR output reached the configured token limit; partial text was retained"
+					imgOut["ocr_truncated"] = true
+					imgOut["ocr_finish_reason"] = "length"
+					logger.Warnf(
+						ctx,
+						"[ImageMultimodal] OCR reached output limit for %s; retaining %d partial characters as degraded output",
+						payload.ImageURL,
+						len([]rune(ocrText)),
+					)
+				} else {
+					logger.Warnf(ctx, "[ImageMultimodal] OCR failed for %s: %v", payload.ImageURL, ocrErr)
+					imgOut["ocr_error"] = ocrErr.Error()
+					extractionErr = errors.Join(extractionErr, fmt.Errorf("OCR: %w", ocrErr))
+				}
 			} else {
 				ocrText = sanitizeOCRText(ocrText)
 				s.persistVLMText(ctx, ocrKey, cacheRef, ocrText)
@@ -405,7 +426,12 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 		}
 	}
 
-	if payload.EnableCaption {
+	// OCR and Caption share the same expensive image encoder. When OCR has
+	// already timed out, stalled or produced a runaway response, starting a
+	// second call immediately can overlap the abandoned upstream request and
+	// amplify the long tail. The successful retry cache preserves completed
+	// OCR work, so Caption safely resumes on the next task attempt.
+	if shouldRunImageCaption(payload.EnableCaption, extractionErr) {
 		captionKey := vlmTextCacheKey(
 			payload.TenantID, contentcache.KindCaption, imageContentHash,
 			vlmModel.GetModelID(), vlmModel.GetModelName(), vlmCaptionPrompt,
@@ -415,7 +441,11 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			imgOut["caption_cache_hit"] = true
 		} else {
 			var capErr error
-			caption, capErr = vlmModel.Predict(ctx, [][]byte{vlmImageBytes}, vlmCaptionPrompt)
+			caption, capErr = vlmModel.Predict(
+				vlmguard.WithOperation(ctx, vlmguard.OperationCaption),
+				[][]byte{vlmImageBytes},
+				vlmCaptionPrompt,
+			)
 			if capErr != nil {
 				logger.Warnf(ctx, "[ImageMultimodal] Caption failed for %s: %v", payload.ImageURL, capErr)
 				imgOut["caption_error"] = capErr.Error()
@@ -429,6 +459,8 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 			imgOut["caption_chars"] = len([]rune(caption))
 			imgOut["caption_preview"] = previewText(caption, 200)
 		}
+	} else if payload.EnableCaption {
+		imgOut["caption_skipped"] = "ocr_failed"
 	}
 
 	// Do not persist a partial OCR/caption result when another enabled
@@ -538,6 +570,13 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 		return handleErr
 	}
 	imgOut["indexed"] = true
+	if degradedDetail != "" {
+		if err := s.recordImageDegraded(ctx, payload, degradedDetail); err != nil {
+			handleErr = err
+			return handleErr
+		}
+		imgOut["degraded"] = degradedDetail
+	}
 
 	// Enqueue question generation for the caption/OCR content if KB has it enabled.
 	// During initial processChunks, question generation is skipped for image-type
@@ -547,6 +586,19 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 	// all images are processed before triggering summary/question generation.
 	// Deferred finalize handles the parent knowledge counter.
 	return nil
+}
+
+func shouldRunImageCaption(enabled bool, extractionErr error) bool {
+	return enabled && extractionErr == nil
+}
+
+func usableTruncatedOCR(text string, err error) (string, bool) {
+	kind, ok := vlmguard.FailureKindOf(err)
+	if !ok || kind != vlmguard.FailureOutputLimit {
+		return "", false
+	}
+	text = sanitizeOCRText(text)
+	return text, text != ""
 }
 
 func stableImageChunkID(payload types.ImageMultimodalPayload, kind string) string {
@@ -693,9 +745,36 @@ func (s *ImageMultimodalService) recordTerminalImageFailure(
 	payload types.ImageMultimodalPayload,
 	cause error,
 ) error {
+	return s.recordImageOutcome(
+		ctx,
+		payload,
+		enrichmentoutcome.StatusFailed,
+		"terminal multimodal failure: "+cause.Error(),
+	)
+}
+
+func (s *ImageMultimodalService) recordImageDegraded(
+	ctx context.Context,
+	payload types.ImageMultimodalPayload,
+	detail string,
+) error {
+	return s.recordImageOutcome(
+		ctx,
+		payload,
+		enrichmentoutcome.StatusDegraded,
+		detail,
+	)
+}
+
+func (s *ImageMultimodalService) recordImageOutcome(
+	ctx context.Context,
+	payload types.ImageMultimodalPayload,
+	status string,
+	detail string,
+) error {
 	store, ok := s.knowledgeRepo.(enrichmentoutcome.GenerationStore)
 	if !ok || store == nil {
-		return errors.New("record terminal multimodal outcome: generation outcome store is unavailable")
+		return errors.New("record multimodal outcome: generation outcome store is unavailable")
 	}
 	dctx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout,
@@ -708,11 +787,11 @@ func (s *ImageMultimodalService) recordTerminalImageFailure(
 		payload.KnowledgeBaseID,
 		payload.ProcessingGeneration,
 		fmt.Sprintf("multimodal.image[%d]", payload.ImageIndex),
-		enrichmentoutcome.StatusFailed,
-		"terminal multimodal failure: "+cause.Error(),
+		status,
+		detail,
 	)
 	if err != nil {
-		return fmt.Errorf("record terminal multimodal outcome: %w", err)
+		return fmt.Errorf("record multimodal outcome: %w", err)
 	}
 	return nil
 }

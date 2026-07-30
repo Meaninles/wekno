@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/vlmguard"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -102,9 +103,48 @@ func TestCircuitFailureClassification(t *testing.T) {
 		{errors.New("API request failed with status 503"), true},
 		{errors.New("invalid JSON in tool arguments"), false},
 		{context.Canceled, false},
+		{&vlmguard.Error{Kind: vlmguard.FailureFirstTokenTimeout}, true},
+		{&vlmguard.Error{Kind: vlmguard.FailureIdleTimeout}, true},
+		{&vlmguard.Error{Kind: vlmguard.FailureStreamTruncated}, true},
+		{&vlmguard.Error{Kind: vlmguard.FailureTotalBudget}, false},
+		{&vlmguard.Error{Kind: vlmguard.FailureRunaway}, false},
+		{&vlmguard.Error{Kind: vlmguard.FailureOutputLimit}, false},
 	}
 	for _, tt := range tests {
 		require.Equal(t, tt.want, isCircuitFailure(tt.err), tt.err)
+	}
+}
+
+func TestProgressAwareVLMFailureDoesNotPoisonProviderCircuit(t *testing.T) {
+	lease := &Lease{ctx: context.Background()}
+
+	require.Equal(
+		t,
+		circuitFailure,
+		classifyCircuitOutcome(
+			lease,
+			&vlmguard.Error{Kind: vlmguard.FailureFirstTokenTimeout},
+		),
+	)
+	require.Equal(
+		t,
+		circuitFailure,
+		classifyCircuitOutcome(
+			lease,
+			&vlmguard.Error{Kind: vlmguard.FailureStreamTruncated},
+		),
+	)
+	for _, kind := range []vlmguard.FailureKind{
+		vlmguard.FailureTotalBudget,
+		vlmguard.FailureRunaway,
+		vlmguard.FailureOutputLimit,
+	} {
+		require.Equal(
+			t,
+			circuitAbandon,
+			classifyCircuitOutcome(lease, &vlmguard.Error{Kind: kind}),
+			kind,
+		)
 	}
 }
 

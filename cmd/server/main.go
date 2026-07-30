@@ -41,6 +41,13 @@ import (
 )
 
 func main() {
+	if handled, err := runLegacySourceMigrationCommand(context.Background(), os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "maintenance command failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := runMaintenanceCommand(context.Background(), os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "maintenance command failed: %v\n", err)

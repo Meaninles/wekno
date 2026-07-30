@@ -45,6 +45,23 @@ type queueTestKnowledge struct {
 
 func (queueTestKnowledge) TableName() string { return "knowledges" }
 
+func requireWorkflowTerminalDiagnostic(
+	t *testing.T,
+	workflow Workflow,
+	status string,
+	errorCode string,
+	errorMessage string,
+) {
+	t.Helper()
+	require.NotEmpty(t, workflow.TerminalDiagnostic)
+	var diagnostic map[string]string
+	require.NoError(t, json.Unmarshal(workflow.TerminalDiagnostic, &diagnostic))
+	require.Equal(t, "workflow", diagnostic["source"])
+	require.Equal(t, status, diagnostic["status"])
+	require.Equal(t, errorCode, diagnostic["error_code"])
+	require.Equal(t, errorMessage, diagnostic["error_message"])
+}
+
 func newQueueTestCoordinator(t *testing.T, instanceID, bootID string, capacity int) *Coordinator {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_busy_timeout=5000", t.Name())
@@ -527,6 +544,13 @@ func TestCancellationCommitAndStableRestartCannotReviveWorkflow(t *testing.T) {
 			require.Nil(t, persisted.LeaseUntil)
 			require.Empty(t, persisted.DispatchTaskID)
 			require.NotNil(t, persisted.CompletedAt)
+			requireWorkflowTerminalDiagnostic(
+				t,
+				persisted,
+				types.SpanStatusCancelled,
+				"USER_CANCELLED",
+				"cancelled by user",
+			)
 			expectedEpoch := lease.Epoch + 1
 			if adoptBeforeCancel {
 				expectedEpoch++
@@ -584,6 +608,13 @@ func TestQueuedRecoveryIncludesAndTerminalizesSupersededGeneration(t *testing.T)
 	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&persisted).Error)
 	require.Equal(t, StateSuperseded, persisted.State)
 	require.Equal(t, "superseded", persisted.Stage)
+	requireWorkflowTerminalDiagnostic(
+		t,
+		persisted,
+		types.SpanStatusCancelled,
+		"DOCUMENT_WORKFLOW_CANCELLED",
+		"",
+	)
 }
 
 func TestCrossInstanceTakeoverRequiresTerminationProofBeyondStaleHeartbeat(t *testing.T) {
@@ -770,6 +801,7 @@ func TestProcessReleasesDocumentSlotWhileWikiDurableWorkContinues(t *testing.T) 
 	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
 	require.Equal(t, StateCompleted, finished.State)
 	require.Equal(t, "completed", finished.Stage)
+	requireWorkflowTerminalDiagnostic(t, finished, types.SpanStatusDone, "", "")
 	require.Len(t, coordinator.slots, 0)
 }
 
@@ -857,6 +889,7 @@ func TestGraphDerivativesDoNotBlockTheNextCoreDocumentAtCapacityOne(t *testing.T
 	var secondFinished Workflow
 	require.NoError(t, coordinator.db.Where("id = ?", workflows[1].ID).Take(&secondFinished).Error)
 	require.Equal(t, StateCompleted, secondFinished.State)
+	requireWorkflowTerminalDiagnostic(t, secondFinished, types.SpanStatusDone, "", "")
 
 	now := time.Now()
 	require.NoError(t, coordinator.db.Model(&queueTestKnowledge{}).
@@ -871,6 +904,7 @@ func TestGraphDerivativesDoNotBlockTheNextCoreDocumentAtCapacityOne(t *testing.T
 	var graphFinished Workflow
 	require.NoError(t, coordinator.db.Where("id = ?", workflows[0].ID).Take(&graphFinished).Error)
 	require.Equal(t, StateCompleted, graphFinished.State)
+	requireWorkflowTerminalDiagnostic(t, graphFinished, types.SpanStatusDone, "", "")
 }
 
 func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T) {
@@ -1081,6 +1115,7 @@ func TestRecoverWaitingExternalPreservesDurableWikiStateUntilTerminal(t *testing
 	require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
 	require.Equal(t, StateCompleted, finished.State)
 	require.Equal(t, "completed", finished.Stage)
+	requireWorkflowTerminalDiagnostic(t, finished, types.SpanStatusDone, "", "")
 }
 
 func TestRecoverWaitingExternalRequeuesOnlyWhenCommittedCoreFenceIsMissing(t *testing.T) {
@@ -1194,6 +1229,24 @@ func TestRecoverWaitingExternalFinalizesDerivativeFailureAndDeletion(t *testing.
 			require.Equal(t, test.wantState, finished.State)
 			require.Equal(t, test.wantStage, finished.Stage)
 			require.NotNil(t, finished.CompletedAt)
+			if test.wantState == StateFailed {
+				message := "required document derivative finished with status " + test.wantStage
+				requireWorkflowTerminalDiagnostic(
+					t,
+					finished,
+					types.SpanStatusFailed,
+					"DOCUMENT_WORKFLOW_FAILED",
+					message,
+				)
+			} else {
+				requireWorkflowTerminalDiagnostic(
+					t,
+					finished,
+					types.SpanStatusCancelled,
+					"DOCUMENT_WORKFLOW_CANCELLED",
+					"",
+				)
+			}
 		})
 	}
 }

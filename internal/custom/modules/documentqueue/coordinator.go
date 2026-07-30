@@ -46,6 +46,53 @@ const expiredRecoveryScanMultiplier = 10
 const maxTerminationProofBytes = 1024
 const documentSchedulerAdvisoryLock int64 = 0x574b4e4f524151
 
+func workflowTerminalDiagnostic(
+	state WorkflowState,
+	errorCode string,
+	errorMessage string,
+) types.JSON {
+	status := ""
+	defaultCode := ""
+	switch state {
+	case StateCompleted:
+		status = types.SpanStatusDone
+	case StateFailed:
+		status = types.SpanStatusFailed
+		defaultCode = "DOCUMENT_WORKFLOW_FAILED"
+	case StateCancelled, StateSuperseded:
+		status = types.SpanStatusCancelled
+		defaultCode = "DOCUMENT_WORKFLOW_CANCELLED"
+	default:
+		return nil
+	}
+	if strings.TrimSpace(errorCode) == "" {
+		errorCode = defaultCode
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"source":        "workflow",
+		"status":        status,
+		"error_code":    strings.TrimSpace(errorCode),
+		"error_message": strings.TrimSpace(errorMessage),
+	})
+	return types.JSON(payload)
+}
+
+func workflowTerminalError(
+	state WorkflowState,
+	stage string,
+	snapshot *knowledgeSnapshot,
+) string {
+	if state != StateFailed {
+		return ""
+	}
+	if snapshot != nil {
+		if message := strings.TrimSpace(snapshot.WikiErrorMessage); message != "" {
+			return message
+		}
+	}
+	return "required document derivative finished with status " + strings.TrimSpace(stage)
+}
+
 // SQLite state-machine tests and multiple coordinators inside one process need
 // the same serialization guarantee that pg_advisory_xact_lock provides across
 // production Pods. The process mutex is intentionally acquired outside the
@@ -1435,8 +1482,11 @@ func (c *Coordinator) CommitWorkflowCancellation(
 				"last_heartbeat_at":  nil,
 				"completed_at":       updatedAt,
 				"last_error":         "cancelled by user",
-				"version":            gorm.Expr("version + 1"),
-				"updated_at":         updatedAt,
+				"terminal_diagnostic": workflowTerminalDiagnostic(
+					StateCancelled, "USER_CANCELLED", "cancelled by user",
+				),
+				"version":    gorm.Expr("version + 1"),
+				"updated_at": updatedAt,
 			})
 		if result.Error != nil {
 			return fmt.Errorf("commit cancelled document workflow: %w", result.Error)
@@ -1580,6 +1630,9 @@ func (c *Coordinator) AbortPreparedWorkflow(
 			Updates(map[string]interface{}{
 				"state": StateCancelled, "stage": "cancelled", "completed_at": now,
 				"last_error": strings.TrimSpace(reason), "version": gorm.Expr("version + 1"), "updated_at": now,
+				"terminal_diagnostic": workflowTerminalDiagnostic(
+					StateCancelled, "DOCUMENT_WORKFLOW_CANCELLED", reason,
+				),
 			})
 		if result.Error != nil {
 			return result.Error
@@ -1709,16 +1762,18 @@ func (c *Coordinator) reconcileQueuedTerminal(
 		TenantID: workflow.TenantID, KnowledgeID: workflow.KnowledgeID,
 		KnowledgeBaseID: workflow.KnowledgeBaseID, Generation: workflow.ProcessingGeneration,
 	}
-	_, state, stage, terminal, err := c.observe(ctx, lease)
+	snapshot, state, stage, terminal, err := c.observe(ctx, lease)
 	if err != nil || !terminal {
 		return false, nil, err
 	}
 	now := time.Now()
+	lastError := workflowTerminalError(state, stage, snapshot)
 	result := c.db.WithContext(ctx).Model(&Workflow{}).
 		Where("id = ? AND state = ? AND dispatch_epoch = ?", workflow.ID, StateQueued, workflow.DispatchEpoch).
 		Updates(map[string]interface{}{
 			"state": state, "stage": stage, "completed_at": now,
-			"last_error": "", "version": gorm.Expr("version + 1"), "updated_at": now,
+			"last_error": lastError, "version": gorm.Expr("version + 1"), "updated_at": now,
+			"terminal_diagnostic": workflowTerminalDiagnostic(state, "", lastError),
 		})
 	if result.Error != nil {
 		return false, nil, result.Error
@@ -1777,6 +1832,9 @@ func (c *Coordinator) failArchivedWorkflow(
 		Updates(map[string]interface{}{
 			"state": StateFailed, "stage": "failed", "completed_at": now,
 			"last_error": reason, "version": gorm.Expr("version + 1"), "updated_at": now,
+			"terminal_diagnostic": workflowTerminalDiagnostic(
+				StateFailed, "DOCUMENT_WORKFLOW_FAILED", reason,
+			),
 		})
 	if result.Error != nil {
 		return nil, result.Error
@@ -2000,19 +2058,14 @@ func (c *Coordinator) recoverWaitingExternal(ctx context.Context) error {
 		}
 		now := time.Now()
 		if terminal {
-			lastError := ""
-			if state == StateFailed && snapshot != nil {
-				lastError = strings.TrimSpace(snapshot.WikiErrorMessage)
-				if lastError == "" {
-					lastError = "required document derivative finished with status " + stage
-				}
-			}
+			lastError := workflowTerminalError(state, stage, snapshot)
 			result := c.db.WithContext(ctx).Model(&Workflow{}).
 				Where("id = ? AND state = ? AND version = ?",
 					workflow.ID, StateWaitingExternal, workflow.Version).
 				Updates(map[string]interface{}{
 					"state": state, "stage": stage, "completed_at": now,
 					"last_error": lastError, "version": gorm.Expr("version + 1"), "updated_at": now,
+					"terminal_diagnostic": workflowTerminalDiagnostic(state, "", lastError),
 				})
 			if result.Error != nil {
 				errs = append(errs, fmt.Errorf("finalize externally waiting workflow %s: %w", workflow.ID, result.Error))
@@ -3152,6 +3205,7 @@ func (c *Coordinator) reconcileTerminalSpanOrphans(ctx context.Context) error {
 
 func (c *Coordinator) finish(ctx context.Context, lease *Lease, state WorkflowState, stage string) error {
 	now := time.Now()
+	lastError := workflowTerminalError(state, stage, nil)
 	mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseMutationTimeout)
 	defer cancel()
 	result := c.db.WithContext(mutationCtx).Model(&Workflow{}).
@@ -3160,6 +3214,7 @@ func (c *Coordinator) finish(ctx context.Context, lease *Lease, state WorkflowSt
 		Updates(map[string]interface{}{
 			"state": state, "stage": stage, "owner_instance_id": "", "owner_boot_id": "",
 			"lease_until": nil, "last_heartbeat_at": nil, "completed_at": now,
+			"last_error": lastError, "terminal_diagnostic": workflowTerminalDiagnostic(state, "", lastError),
 			"version": gorm.Expr("version + 1"), "updated_at": now,
 		})
 	if result.Error != nil {

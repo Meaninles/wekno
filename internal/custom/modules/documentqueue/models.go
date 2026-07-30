@@ -1,6 +1,10 @@
 package documentqueue
 
-import "time"
+import (
+	"time"
+
+	"github.com/Tencent/WeKnora/internal/types"
+)
 
 // WorkflowState is the durable state of one document processing generation.
 // Redis/Asynq is only a delivery mechanism; this row is the source of truth
@@ -88,9 +92,14 @@ type Workflow struct {
 	LastProgressAt       *time.Time    `json:"last_progress_at,omitempty" gorm:"index"`
 	CompletedAt          *time.Time    `json:"completed_at,omitempty"`
 	LastError            string        `json:"last_error,omitempty" gorm:"type:text"`
-	Version              int64         `json:"version" gorm:"not null;default:1"`
-	CreatedAt            time.Time     `json:"created_at"`
-	UpdatedAt            time.Time     `json:"updated_at"`
+	// TerminalDiagnostic is committed in the same SQL update as every terminal
+	// state. PostgreSQL enforces that completed/failed/cancelled/superseded
+	// workflows carry a matching durable diagnostic, so operators never have
+	// to infer the terminal outcome from compacted processing spans.
+	TerminalDiagnostic types.JSON `json:"terminal_diagnostic,omitempty" gorm:"type:jsonb"`
+	Version            int64      `json:"version" gorm:"not null;default:1"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 func (Workflow) TableName() string { return "custom_document_queue_workflows" }

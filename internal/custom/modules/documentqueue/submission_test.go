@@ -554,4 +554,11 @@ func TestFailedPreparedWorkflowTransitionRollsBackAndCanBeSafelyAborted(t *testi
 	var persisted Workflow
 	require.NoError(t, c.db.Where("id = ?", workflow.ID).Take(&persisted).Error)
 	require.Equal(t, StateCancelled, persisted.State)
+	requireWorkflowTerminalDiagnostic(
+		t,
+		persisted,
+		types.SpanStatusCancelled,
+		"DOCUMENT_WORKFLOW_CANCELLED",
+		"business transaction rolled back",
+	)
 }

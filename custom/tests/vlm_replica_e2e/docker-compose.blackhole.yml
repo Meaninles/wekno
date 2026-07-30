@@ -1,0 +1,11 @@
+services:
+  app-a:
+    extra_hosts:
+      # Loopback guarantees a local connection refusal even in enterprise
+      # networks that route or intercept documentation address ranges. The
+      # application still uses the real production URL/model/credential.
+      - "llmgateway.moutai.com.cn:127.0.0.1"
+
+  app-b:
+    extra_hosts:
+      - "llmgateway.moutai.com.cn:127.0.0.1"

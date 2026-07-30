@@ -1,0 +1,117 @@
+name: weknora-vlm-replica-e2e
+
+x-app-common: &app-common
+  image: weknora-dev-app:local
+  working_dir: /workspace
+  env_file:
+    - ../../../.env
+  environment: &app-environment
+    GIN_MODE: release
+    AUTO_MIGRATE: "false"
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DOCREADER_ADDR: docreader:50051
+    DOCREADER_TRANSPORT: grpc
+    MINIO_ENDPOINT: minio:9000
+    MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID:-minioadmin}
+    MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY:-minioadmin}
+    STORAGE_TYPE: minio
+    MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-weknora-original-inputs}
+    MINIO_PATH_PREFIX: ${MINIO_PATH_PREFIX:-weknora/__weknora_private_knowledge_objects_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+    CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER: minio
+    CUSTOM_GENERAL_AGENT_ARTIFACT_BUCKET: ${CUSTOM_GENERAL_AGENT_ARTIFACT_BUCKET:-weknora-original-inputs}
+    CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX: ${CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX:-weknora/__weknora_private_agent_artifacts_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+    CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_MISSING: "true"
+    CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_INVALID: "true"
+    CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_STORAGE_PROVIDER: minio
+    CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_BUCKET: ${CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_BUCKET:-weknora-original-inputs}
+    CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX: ${CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX:-weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+    CUSTOM_SKILLHUB_PROFESSIONAL_STORAGE_PROVIDER: minio
+    CUSTOM_SKILLHUB_PROFESSIONAL_BUCKET: ${CUSTOM_SKILLHUB_PROFESSIONAL_BUCKET:-weknora-original-inputs}
+    CUSTOM_SKILLHUB_PROFESSIONAL_PATH_PREFIX: ${CUSTOM_SKILLHUB_PROFESSIONAL_PATH_PREFIX:-weknora/__weknora_private_professional_skills_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+    REDIS_ADDR: redis:6379
+    REDIS_DB: ${VLM_E2E_REDIS_DB:-8}
+    STREAM_MANAGER_TYPE: redis
+    MILVUS_ADDRESS: milvus:19530
+    NEO4J_URI: bolt://neo4j:7687
+    QDRANT_HOST: qdrant
+    LOCAL_STORAGE_BASE_DIR: /workspace/.local-data/vlm-replica-e2e/files
+    DUCKDB_SKIP_EXTENSION_LOAD: "true"
+    CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART: "true"
+
+    # Both processes use one isolated Redis database and one key prefix. The
+    # limits intentionally match production.
+    CUSTOM_MODEL_ADMISSION_ENABLED: "true"
+    CUSTOM_MODEL_ADMISSION_FAIL_CLOSED: "true"
+    CUSTOM_MODEL_ADMISSION_KEY_PREFIX: ${VLM_E2E_KEY_PREFIX:-weknora:e2e:vlm-replica:}
+    CUSTOM_MODEL_ADMISSION_VLM_CONCURRENCY: "4"
+    CUSTOM_MODEL_ADMISSION_VLM_PER_TENANT: "2"
+    CUSTOM_MODEL_ADMISSION_VLM_RPM: "0"
+    CUSTOM_MODEL_ADMISSION_LEASE_SECONDS: ${VLM_E2E_LEASE_SECONDS:-45}
+    CUSTOM_MODEL_ADMISSION_HEARTBEAT_SECONDS: ${VLM_E2E_HEARTBEAT_SECONDS:-15}
+    CUSTOM_MODEL_ADMISSION_INTERACTIVE_WAIT_SECONDS: ${VLM_E2E_INTERACTIVE_WAIT_SECONDS:-30}
+    CUSTOM_MODEL_CIRCUIT_ENABLED: "true"
+    CUSTOM_MODEL_CIRCUIT_FAILURE_THRESHOLD: "3"
+    CUSTOM_MODEL_CIRCUIT_WINDOW_SECONDS: ${VLM_E2E_CIRCUIT_WINDOW_SECONDS:-600}
+    CUSTOM_MODEL_CIRCUIT_OPEN_SECONDS: ${VLM_E2E_CIRCUIT_OPEN_SECONDS:-60}
+    CUSTOM_MODEL_CIRCUIT_PROBE_SECONDS: ${VLM_E2E_CIRCUIT_PROBE_SECONDS:-300}
+
+    # Defaults are the production values. Fault-injection runs override only
+    # the wall-clock durations, not the state-machine behavior.
+    VLM_STREAMING_ENABLED: "true"
+    VLM_FIRST_TOKEN_TIMEOUT_SECONDS: ${VLM_E2E_FIRST_TOKEN_TIMEOUT_SECONDS:-180}
+    VLM_STREAM_IDLE_TIMEOUT_SECONDS: ${VLM_E2E_IDLE_TIMEOUT_SECONDS:-45}
+    VLM_TOTAL_TIMEOUT_SECONDS: ${VLM_E2E_TOTAL_TIMEOUT_SECONDS:-360}
+    VLM_OCR_MAX_TOKENS: "5000"
+    VLM_CAPTION_MAX_TOKENS: "512"
+
+    # The production WAF currently presents a private/self-signed chain.
+    WEKNORA_LLM_INSECURE_TLS: "true"
+    SSRF_WHITELIST_EXTRA: ${SSRF_WHITELIST_EXTRA:-searxng,qdrant,milvus,weaviate,doris-fe,host.docker.internal},llmgateway.moutai.com.cn
+  volumes:
+    - ../../..:/workspace
+    # The non-trimpath development binary resolves gojieba's runtime
+    # dictionaries from this module cache, exactly like app-dev.
+    - go-mod-cache-dev:/go/pkg/mod:ro
+  networks:
+    - weknora-dev
+  command: ["/workspace/.local-data/vlm-fix/weknora-server.next3"]
+  restart: "no"
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+    interval: 2s
+    timeout: 2s
+    retries: 30
+    start_period: 5s
+
+services:
+  app-a:
+    <<: *app-common
+    container_name: weknora-vlm-replica-e2e-a
+    hostname: weknora-vlm-replica-e2e-a
+    environment:
+      <<: *app-environment
+      CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: vlm-replica-e2e-a
+    ports:
+      - "127.0.0.1:${VLM_E2E_APP_A_PORT:-18091}:8080"
+
+  app-b:
+    <<: *app-common
+    container_name: weknora-vlm-replica-e2e-b
+    hostname: weknora-vlm-replica-e2e-b
+    environment:
+      <<: *app-environment
+      CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: vlm-replica-e2e-b
+    ports:
+      - "127.0.0.1:${VLM_E2E_APP_B_PORT:-18092}:8080"
+
+networks:
+  weknora-dev:
+    external: true
+    name: ${WEKNORA_DEV_NETWORK:-weknora_WeKnora-network-dev}
+
+volumes:
+  go-mod-cache-dev:
+    external: true
+    name: weknora_go-mod-cache-dev

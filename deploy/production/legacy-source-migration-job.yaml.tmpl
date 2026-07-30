@@ -1,0 +1,107 @@
+# This is an online, row-fenced migration. App replicas remain available.
+#
+# Render audit first:
+#   export MIGRATION_RUN_ID="$(date +%Y%m%d%H%M%S)"
+#   export MIGRATION_MODE=audit
+#   envsubst < deploy/production/legacy-source-migration-job.yaml.tmpl \
+#     > /secure/work/legacy-source-migration-audit.yaml
+#
+# Render apply only after audit succeeds by setting MIGRATION_MODE=apply.
+# The command never deletes historical OBS objects.
+#
+# Required variables:
+#   APP_IMAGE, KNOWLEDGE_OBJECT_PREFIX, MIGRATION_MODE, MIGRATION_RUN_ID
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: weknora-legacy-source-${MIGRATION_MODE}-${MIGRATION_RUN_ID}
+  namespace: weknora
+  labels:
+    app.kubernetes.io/name: weknora
+    app.kubernetes.io/component: legacy-source-migration
+spec:
+  activeDeadlineSeconds: 7200
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: weknora
+        app.kubernetes.io/component: legacy-source-migration
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: default-secret
+      containers:
+        - name: legacy-source-migration
+          image: ${APP_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/scripts/docker-entrypoint.sh
+          args:
+            - ./WeKnora
+            - legacy-source-migrate
+            - ${MIGRATION_MODE}
+            - --confirm-old-objects-retained
+          env:
+            - name: DB_DRIVER
+              value: postgres
+            - name: DB_HOST
+              value: postgres.weknora.svc.cluster.local
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: weknora-secrets
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: weknora-secrets
+                  key: DB_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: weknora-secrets
+                  key: DB_NAME
+            - name: DB_SSLMODE
+              value: disable
+            - name: STORAGE_TYPE
+              value: obs
+            - name: OBS_ENDPOINT
+              value: http://10.8.32.252
+            - name: OBS_REGION
+              value: us-east-1
+            - name: OBS_BUCKET_NAME
+              value: ap-weknora-obs-zhengshi-01
+            - name: OBS_PATH_PREFIX
+              value: ${KNOWLEDGE_OBJECT_PREFIX}
+            - name: OBS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: weknora-obs
+                  key: OBS_ACCESS_KEY
+            - name: OBS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: weknora-obs
+                  key: OBS_SECRET_KEY
+            - name: CUSTOM_LEGACY_SOURCE_MIGRATION_TEMP_DIR
+              value: /migration-tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+          volumeMounts:
+            - name: migration-tmp
+              mountPath: /migration-tmp
+      volumes:
+        - name: migration-tmp
+          emptyDir:
+            sizeLimit: 1Gi

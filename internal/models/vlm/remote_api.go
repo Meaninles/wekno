@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/vlmguard"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/provider"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -17,22 +18,19 @@ import (
 )
 
 const (
-	// defaultTimeout is the fallback HTTP timeout for a single VLM request.
-	// Dense scanned-PDF OCR (full-page text + layout extraction) can take well
-	// over a minute on slow endpoints, so this is intentionally generous and
-	// can be raised further via VLM_HTTP_TIMEOUT_SECONDS.
-	defaultTimeout = 180 * time.Second
-	defaultMaxToks = 5000
+	defaultTimeout = vlmguard.DefaultTotalTimeout
+	defaultMaxToks = vlmguard.DefaultMaxTokens
 	defaultTemp    = float32(0.1)
 )
 
-// vlmHTTPTimeout returns the HTTP client timeout for VLM requests, read from
-// the VLM_HTTP_TIMEOUT_SECONDS env var when set (and positive), falling back to
-// defaultTimeout otherwise. Shared by all OpenAI-compatible VLM backends.
+// vlmHTTPTimeout remains the compatibility timeout for non-OpenAI VLM
+// transports. OpenAI-compatible calls use progress-aware vlmguard deadlines.
 func vlmHTTPTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("VLM_HTTP_TIMEOUT_SECONDS")); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			return time.Duration(secs) * time.Second
+	for _, name := range []string{"VLM_TOTAL_TIMEOUT_SECONDS", "VLM_HTTP_TIMEOUT_SECONDS"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+				return time.Duration(seconds) * time.Second
+			}
 		}
 	}
 	return defaultTimeout
@@ -51,6 +49,7 @@ type RemoteAPIVLM struct {
 	client      *openai.Client
 	baseURL     string
 	temperature float32
+	guardConfig vlmguard.Config
 }
 
 // NewRemoteAPIVLM creates a remote-API backed VLM instance.
@@ -79,7 +78,10 @@ func NewRemoteAPIVLM(config *Config) (*RemoteAPIVLM, error) {
 			apiCfg.BaseURL = config.BaseURL
 		}
 	}
-	httpClient := newVLMHTTPClient(vlmHTTPTimeout())
+	// Per-request progress deadlines are enforced by vlmguard. A client-wide
+	// timeout cannot distinguish active long generation from a stalled call
+	// and may release admission while the upstream is still generating.
+	httpClient := newVLMHTTPClient(0)
 
 	// 注入用户自定义 HTTP header（类似 OpenAI Python SDK 的 extra_headers）
 	if len(config.CustomHeaders) > 0 {
@@ -105,11 +107,14 @@ func NewRemoteAPIVLM(config *Config) (*RemoteAPIVLM, error) {
 		client:      openai.NewClientWithConfig(apiCfg),
 		baseURL:     config.BaseURL,
 		temperature: temp,
+		guardConfig: vlmguard.ConfigFrom(config.Extra, temp),
 	}, nil
 }
 
 // Predict sends an image with a text prompt to the OpenAI-compatible API.
 func (v *RemoteAPIVLM) Predict(ctx context.Context, imgBytesList [][]byte, prompt string) (string, error) {
+	operation := vlmguard.OperationFromContext(ctx)
+	policy := v.guardConfig.Policy(operation)
 	var parts []openai.ChatMessagePart
 
 	// Add text prompt first
@@ -142,28 +147,68 @@ func (v *RemoteAPIVLM) Predict(ctx context.Context, imgBytesList [][]byte, promp
 				MultiContent: parts,
 			},
 		},
-		MaxTokens:   defaultMaxToks,
-		Temperature: v.temperature,
+		MaxTokens:   policy.MaxTokens,
+		Temperature: policy.Temperature,
 	}
 
 	totalImageSize := 0
 	for _, img := range imgBytesList {
 		totalImageSize += len(img)
 	}
-	logger.Infof(ctx, "[VLM] Calling OpenAI-compatible API, model=%s, baseURL=%s, numImages=%d, totalImageSize=%d",
-		v.modelName, v.baseURL, len(imgBytesList), totalImageSize)
+	logger.Infof(
+		ctx,
+		"[VLM] Calling OpenAI-compatible API, model=%s, baseURL=%s, operation=%s, "+
+			"numImages=%d, totalImageSize=%d, stream=%t, maxTokens=%d, "+
+			"firstTokenTimeout=%s, idleTimeout=%s, totalTimeout=%s",
+		v.modelName,
+		v.baseURL,
+		operation,
+		len(imgBytesList),
+		totalImageSize,
+		policy.Streaming,
+		policy.MaxTokens,
+		policy.FirstTokenTimeout,
+		policy.IdleTimeout,
+		policy.TotalTimeout,
+	)
 
-	resp, err := v.client.CreateChatCompletion(ctx, req)
+	result, err := vlmguard.Complete(ctx, v.client, req, policy)
 	if err != nil {
-		return "", fmt.Errorf("OpenAI VLM request: %w", err)
+		logger.Warnf(
+			ctx,
+			"[VLM] OpenAI request terminated, model=%s, operation=%s, streamed=%t, "+
+				"ttft=%s, duration=%s, lastProgressAge=%s, completionTokens=%d, "+
+				"responseChars=%d, finishReason=%s, error=%v",
+			v.modelName,
+			operation,
+			result.Streamed,
+			result.TTFT,
+			result.Duration,
+			result.LastProgressAge,
+			result.CompletionTokens,
+			len([]rune(result.Content)),
+			result.FinishReason,
+			err,
+		)
+		// Preserve partial streamed content for callers that can explicitly
+		// handle a typed terminal condition (notably OCR output truncation).
+		// Ordinary callers still treat the non-nil error as a failed request.
+		return result.Content, fmt.Errorf("OpenAI VLM request: %w", err)
 	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("OpenAI VLM returned no choices")
-	}
-
-	content := resp.Choices[0].Message.Content
-	logger.Infof(ctx, "[VLM] OpenAI response received, len=%d", len(content))
-	return content, nil
+	logger.Infof(
+		ctx,
+		"[VLM] OpenAI response received, model=%s, operation=%s, streamed=%t, "+
+			"ttft=%s, duration=%s, completionTokens=%d, responseChars=%d, finishReason=%s",
+		v.modelName,
+		operation,
+		result.Streamed,
+		result.TTFT,
+		result.Duration,
+		result.CompletionTokens,
+		len([]rune(result.Content)),
+		result.FinishReason,
+	)
+	return result.Content, nil
 }
 
 func (v *RemoteAPIVLM) GetModelName() string { return v.modelName }

@@ -22,6 +22,12 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 import xml.etree.ElementTree as ET
 
+from .final_delivery import (
+    CLAUDE_SDK_TERMINAL_CONTRACT,
+    ClaudeSDKTerminalCollector,
+    requires_passive_terminal_delivery,
+    uses_claude_sdk_terminal_projection,
+)
 from .schemas import ChatPayload, ChatResult, RunEvent, SidecarArtifact
 
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -5312,6 +5318,28 @@ class GeneralAgentRunner:
         env, model, settings = claude_auth_env(self.payload, self.config_dir)
         data_analysis_state: dict[str, Any] = {}
         data_analysis_final_answer_mode = is_structured_analysis_payload(self.payload)
+        passive_terminal_delivery_mode = requires_passive_terminal_delivery(
+            self.payload.runtime_config.agent_type
+        )
+        terminal_projection_mode = uses_claude_sdk_terminal_projection(
+            self.payload.runtime_config.agent_type
+        )
+        terminal_collector = ClaudeSDKTerminalCollector()
+        if terminal_projection_mode:
+            yield RunEvent(
+                id=f"final-delivery-active-{self.payload.run_id}",
+                type="progress",
+                content="正在分析上下文和可用工具",
+                message="正在分析上下文和可用工具",
+                data={
+                    "tool_name": "assistant_status",
+                    "tool_call_id": f"final-delivery-active-{self.payload.run_id}",
+                    "phase": "start",
+                    "message": "正在分析上下文和可用工具",
+                    "transient": True,
+                    "answer_contract": CLAUDE_SDK_TERMINAL_CONTRACT,
+                },
+            )
         if data_analysis_final_answer_mode:
             yield validation_progress_event(
                 analysis_display_intent_event_id(self.payload),
@@ -5568,6 +5596,8 @@ class GeneralAgentRunner:
                     yield stream_item
                     continue
                 message = stream_item
+                if passive_terminal_delivery_mode:
+                    terminal_collector.observe(message)
                 if message.__class__.__name__ == "ResultMessage":
                     if getattr(message, "is_error", False):
                         raise RuntimeError(user_facing_error_message(message))
@@ -5644,6 +5674,14 @@ class GeneralAgentRunner:
                             final_candidate_parts.extend(final_blocks)
                         reset_text_stream_state()
                         continue
+                    if passive_terminal_delivery_mode:
+                        pending_text = "".join(text_buffer_parts).strip()
+                        answer_text = final_block_text or pending_text
+                        progress = next_status_event("正在整理最终回答")
+                        if progress:
+                            yield progress
+                        reset_text_stream_state()
+                        continue
                     pending_text = "".join(text_buffer_parts).strip()
                     answer_text = final_block_text or pending_text
                     if answer_text:
@@ -5686,6 +5724,10 @@ class GeneralAgentRunner:
             answer = str(data_analysis_state.get("final_answer_content") or "").strip()
         elif data_analysis_final_answer_mode and data_analysis_state.get("validation_bypassed") and str(data_analysis_state.get("final_answer_last_candidate") or "").strip():
             answer = str(data_analysis_state.get("final_answer_last_candidate") or "").strip()
+        elif passive_terminal_delivery_mode:
+            answer = terminal_collector.answer()
+            if not answer:
+                answer = terminal_result_answer
         else:
             if text_buffer_parts and not data_analysis_final_answer_mode:
                 answer_text = "".join(text_buffer_parts).strip()
@@ -5707,7 +5749,7 @@ class GeneralAgentRunner:
                 answer = "".join(current_segment_delta_parts).strip()
             if not answer:
                 answer = "".join(all_delta_parts).strip()
-        if data_analysis_final_answer_mode and answer:
+        if (data_analysis_final_answer_mode or passive_terminal_delivery_mode) and answer:
             active_answer_id = ""
             for chunk in answer_replay_chunks(answer):
                 yield answer_delta_event(chunk)

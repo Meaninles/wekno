@@ -2,6 +2,15 @@ import { markRaw, nextTick, type Ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ensureRagPipelineHistoryStream } from '@/utils/rag-pipeline-history'
 import { normalizeUserFacingError } from '@/custom/modules/safeMessage/install'
+import {
+  addLiveInteractiveEvent,
+  clearLiveActiveAnswer,
+  ensureLiveAgentProjection,
+  resolveLiveInteractiveEvent,
+  setLiveActiveAnswer,
+  setLiveTerminalEvent,
+  upsertLiveProcessPreview,
+} from '@/custom/modules/agentstream/liveProcessPreview'
 
 export type ChatMessage = Record<string, unknown>
 
@@ -110,6 +119,11 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     if (!message || message.is_completed) return
     message.is_completed = true
     if (message.isAgentMode) {
+      setLiveTerminalEvent(message, {
+        type: 'stop',
+        timestamp: Date.now(),
+        reason: 'user_requested',
+      })
       if (!message.agentEventStream) message.agentEventStream = []
       const stream = message.agentEventStream as ChatMessage[]
       if (!stream.some((e) => e.type === 'stop')) {
@@ -217,6 +231,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     if (!message.agentEventStream) message.agentEventStream = []
     if (!message._eventMap) message._eventMap = new Map()
     if (!message._pendingToolCalls) message._pendingToolCalls = new Map()
+    ensureLiveAgentProjection(message)
     if (requestId) {
       if (!message.id) message.id = requestId
       if (!message.request_id) message.request_id = requestId
@@ -292,6 +307,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       }
     }
     if (retracted) {
+      clearLiveActiveAnswer(message)
       message.content = recomposeAgentAnswer(message)
       fullContent.value = String(message.content || '')
     }
@@ -341,6 +357,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     finalEvent.final_answer = true
     ;(message._eventMap as Map<string, ChatMessage>).set(String(finalEvent.event_id), finalEvent)
 
+    setLiveActiveAnswer(message, finalEvent)
     message.content = finalAnswer
     fullContent.value = finalAnswer
     return true
@@ -681,6 +698,12 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
             }
             stream.push(thinkingEvent)
             if (eventId) eventMap.set(eventId, thinkingEvent)
+            upsertLiveProcessPreview(
+              message,
+              `thinking:${eventId || 'active'}`,
+              '正在分析问题',
+              'running',
+            )
           }
           if (data.content) {
             thinkingEvent.content = String(thinkingEvent.content || '') + String(data.content)
@@ -694,6 +717,12 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
             thinkingEvent.duration_ms =
               dataPayload?.duration_ms || Date.now() - Number(thinkingEvent.startTime || Date.now())
             thinkingEvent.completed_at = dataPayload?.completed_at || Date.now()
+            upsertLiveProcessPreview(
+              message,
+              `thinking:${eventId || 'active'}`,
+              '问题分析完成',
+              'success',
+            )
             log('[Thinking] Event completed, duration:', thinkingEvent.duration_ms, 'ms')
           } else {
             console.warn('[Thinking] Received done for unknown event_id:', eventId)
@@ -704,7 +733,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       case 'tool_approval_required': {
         if (!message.agentEventStream) message.agentEventStream = []
         const d = dataPayload || {}
-        ;(message.agentEventStream as ChatMessage[]).push({
+        const approvalEvent = {
           type: 'tool_approval_required',
           pending_id: d.pending_id,
           service_name: d.service_name,
@@ -715,7 +744,9 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
           requested_at: d.requested_at,
           tool_call_id: d.tool_call_id,
           resolved: false,
-        })
+        }
+        ;(message.agentEventStream as ChatMessage[]).push(approvalEvent)
+        addLiveInteractiveEvent(message, approvalEvent)
         break
       }
       case 'tool_approval_resolved': {
@@ -731,12 +762,13 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
           ev.timed_out = d.timed_out
           ev.canceled = d.canceled
         }
+        resolveLiveInteractiveEvent(message, pid)
         break
       }
       case 'mcp_oauth_required': {
         if (!message.agentEventStream) message.agentEventStream = []
         const d = dataPayload || {}
-        ;(message.agentEventStream as ChatMessage[]).push({
+        const oauthEvent = {
           type: 'mcp_oauth_required',
           pending_id: d.pending_id,
           service_id: d.service_id,
@@ -746,7 +778,9 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
           requested_at: d.requested_at,
           tool_call_id: d.tool_call_id,
           resolved: false,
-        })
+        }
+        ;(message.agentEventStream as ChatMessage[]).push(oauthEvent)
+        addLiveInteractiveEvent(message, oauthEvent)
         break
       }
       case 'mcp_oauth_resolved': {
@@ -766,6 +800,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
             e.canceled = d.canceled
           }
         })
+        resolveLiveInteractiveEvent(message, pid, sid, d.authorized === true)
         break
       }
       case 'tool_call': {
@@ -818,10 +853,19 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
             stream.push(newToolCallEvent)
             pending.set(toolCallId, newToolCallEvent)
           }
+          upsertLiveProcessPreview(
+            message,
+            `tool:${toolCallId}`,
+            `正在调用 ${incomingToolName || '工具'}`,
+            'running',
+          )
         }
         break
       }
       case 'agent_progress': {
+        if (dataPayload?.answer_contract === 'claude-sdk-terminal-v1') {
+          message._usesClaudeSDKTerminalDelivery = true
+        }
         if (shouldSupersedeAgentAnswersForProgress(dataPayload)) {
           supersedeAgentAnswers(message)
         }
@@ -900,6 +944,12 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         } else {
           pending.set(toolCallId, toolCallEvent)
         }
+        upsertLiveProcessPreview(
+          message,
+          `progress:${toolCallId}`,
+          progressMessage,
+          phase === 'error' ? 'error' : progressDone ? 'success' : 'running',
+        )
         break
       }
       case 'tool_result':
@@ -973,6 +1023,14 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
             toolCallEvent.duration_ms = duration
             toolCallEvent.display_type = dataPayload.display_type
             toolCallEvent.tool_data = dataPayload
+            upsertLiveProcessPreview(
+              message,
+              `tool:${toolCallId || toolName || 'result'}`,
+              success
+                ? `已完成 ${toolName || '工具调用'}`
+                : `${toolName || '工具调用'}执行失败`,
+              success ? 'success' : 'error',
+            )
             log('[Tool Result] Updated event in stream')
           } else {
             console.warn('[Tool Result] No pending tool call found for', toolCallId || toolName)
@@ -980,6 +1038,11 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
           if (responseType === 'error' && !toolName) {
             const errorMsg = normalizeUserFacingError(data.content || t('chat.processError'))
             appendAgentErrorEvent(message, errorMsg, dataPayload)
+            setLiveTerminalEvent(message, {
+              type: 'error',
+              content: errorMsg,
+              done: true,
+            })
             message.content = errorMsg
             message.is_completed = true
             isReplying.value = false
@@ -1021,7 +1084,10 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         }
         if (data.content) {
           answerEvent.content = String(answerEvent.content || '') + String(data.content)
-          message.content = recomposeAgentAnswer(message)
+          if (!answerEvent.superseded) {
+            message.content = String(message.content || '') + String(data.content)
+          }
+          setLiveActiveAnswer(message, answerEvent)
           fullContent.value = String(message.content || '')
         }
         if (dataPayload?.is_fallback) {
@@ -1030,6 +1096,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         }
         if (data.done && !answerEvent.done) {
           answerEvent.done = true
+          setLiveActiveAnswer(message, answerEvent)
           onAgentAnswerDone?.(message)
           loading.value = false
           isReplying.value = false
@@ -1048,22 +1115,26 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         fullContent.value = ''
         currentAssistantMessageId.value = ''
         if (message.agentEventStream) {
-          ;(message.agentEventStream as ChatMessage[]).push({
+          const completeEvent = {
             type: 'agent_complete',
             total_duration_ms: dataPayload?.total_duration_ms || 0,
             total_steps: dataPayload?.total_steps || 0,
-          })
+          }
+          ;(message.agentEventStream as ChatMessage[]).push(completeEvent)
+          setLiveTerminalEvent(message, completeEvent)
         }
         break
       }
       case 'stop': {
         log('[Agent] Stop event received')
         if (!message.agentEventStream) message.agentEventStream = []
-        ;(message.agentEventStream as ChatMessage[]).push({
+        const stopEvent = {
           type: 'stop',
           timestamp: Date.now(),
           reason: dataPayload?.reason || 'user_requested',
-        })
+        }
+        ;(message.agentEventStream as ChatMessage[]).push(stopEvent)
+        setLiveTerminalEvent(message, stopEvent)
         message.is_completed = true
         loading.value = false
         isReplying.value = false

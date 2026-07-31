@@ -258,41 +258,54 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	lastAnswerID := ""
 	lastAnswerDone := false
 	var streamed strings.Builder
+	terminalDelivery := types.IsClaudeSDKAgentType(agentConfig.AgentType)
+	var terminalBuffer terminalDeliveryBuffer
 	result, err := sidecarClient.ChatStream(ctx, payload, func(evt StreamEvent) {
+		if terminalDelivery && terminalBuffer.append(evt) {
+			return
+		}
 		s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
 	})
 	if err != nil {
 		return err
 	}
-	finalAnswer := strings.TrimSpace(result.Answer)
-	if finalAnswer == "" {
-		finalAnswer = strings.TrimSpace(streamed.String())
+	if result == nil {
+		return fmt.Errorf("智能体最终结果为空")
 	}
-	if streamed.Len() == 0 && finalAnswer != "" {
-		lastAnswerID = fallbackAnswerID
-		lastAnswerDone = false
-		eventBus.Emit(ctx, event.Event{
-			ID:        fallbackAnswerID,
-			Type:      event.EventAgentFinalAnswer,
-			SessionID: sessionID,
-			RequestID: req.RequestID,
-			Data: event.AgentFinalAnswerData{
-				Content: finalAnswer,
-				Done:    false,
-			},
-		})
-	}
-	if lastAnswerID != "" && !lastAnswerDone {
-		eventBus.Emit(ctx, event.Event{
-			ID:        lastAnswerID,
-			Type:      event.EventAgentFinalAnswer,
-			SessionID: sessionID,
-			RequestID: req.RequestID,
-			Data: event.AgentFinalAnswerData{
-				Content: "",
-				Done:    true,
-			},
-		})
+	var finalAnswer string
+	if terminalDelivery {
+		finalAnswer = terminalBuffer.finalAnswer(result)
+	} else {
+		finalAnswer = strings.TrimSpace(result.Answer)
+		if finalAnswer == "" {
+			finalAnswer = strings.TrimSpace(streamed.String())
+		}
+		if streamed.Len() == 0 && finalAnswer != "" {
+			lastAnswerID = fallbackAnswerID
+			lastAnswerDone = false
+			eventBus.Emit(ctx, event.Event{
+				ID:        fallbackAnswerID,
+				Type:      event.EventAgentFinalAnswer,
+				SessionID: sessionID,
+				RequestID: req.RequestID,
+				Data: event.AgentFinalAnswerData{
+					Content: finalAnswer,
+					Done:    false,
+				},
+			})
+		}
+		if lastAnswerID != "" && !lastAnswerDone {
+			eventBus.Emit(ctx, event.Event{
+				ID:        lastAnswerID,
+				Type:      event.EventAgentFinalAnswer,
+				SessionID: sessionID,
+				RequestID: req.RequestID,
+				Data: event.AgentFinalAnswerData{
+					Content: "",
+					Done:    true,
+				},
+			})
+		}
 	}
 
 	artifactResults, err := s.persistArtifacts(ctx, sidecarClient, result.RunID, req, result.Artifacts)
@@ -343,6 +356,12 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 				Iteration:  artifactIteration,
 				Data:       artifactData,
 			},
+		})
+	}
+
+	if terminalDelivery {
+		terminalBuffer.replay(finalAnswer, fallbackAnswerID, func(evt StreamEvent) {
+			s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
 		})
 	}
 

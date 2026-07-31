@@ -218,6 +218,10 @@
         'streaming-steps-constrained': !answerEverStarted && !isConversationDone,
         'is-streaming-timeline': showStreamingTimeline
       }">
+      <LiveProcessPreview
+        v-if="showLiveProcessPreview"
+        :items="liveProcessPreviews"
+      />
       <template v-for="(event, index) in displayEvents" :key="getEventKey(event, index)">
         <div v-if="event && event.type" class="event-item" :class="{
           'event-answer': event.type === 'answer',
@@ -538,6 +542,11 @@ import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
 import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
 import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbackButtons.vue';
+import LiveProcessPreview from '@/custom/modules/agentstream/LiveProcessPreview.vue';
+import {
+  readLiveAgentProjection,
+  type LiveAgentProjection,
+} from '@/custom/modules/agentstream/liveProcessPreview';
 import { countGrepDocuments } from '@/utils/grepResultsGroup';
 import { getKnowledgeChunksSummaryHtml } from '@/utils/knowledgeChunksDisplay';
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
@@ -941,6 +950,7 @@ interface SessionData {
   request_id?: string;
   debugRequest?: Record<string, unknown>;
   isAgentMode?: boolean;
+  is_completed?: boolean;
   agentEventStream?: any[];
   tool_results?: any[];
   knowledge_references?: any[];
@@ -1005,6 +1015,15 @@ configureMarkedForChatMarkdown();
 
 // Event stream
 const eventStream = computed(() => props.session?.agentEventStream || []);
+const usesClaudeSDKTerminalDelivery = computed(
+  () =>
+    (props.session as unknown as Record<string, unknown>)?._usesClaudeSDKTerminalDelivery ===
+    true,
+);
+const liveProjection = computed<LiveAgentProjection | null>(() =>
+  readLiveAgentProjection(props.session as unknown as Record<string, unknown>),
+);
+const liveProcessPreviews = computed(() => liveProjection.value?.previews || []);
 
 const isRagPipelineToolCallEvent = (event: any): boolean => {
   return Boolean(
@@ -1120,6 +1139,18 @@ const showIntermediateSteps = ref(false);
 // count as "answer started", otherwise the answer-only view would stick after
 // the preamble was retracted.
 const hasAnswerStarted = computed(() => {
+  const projectedAnswer = liveProjection.value?.activeAnswer;
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !props.session?.is_completed &&
+    liveProjection.value
+  ) {
+    return Boolean(
+      projectedAnswer &&
+      projectedAnswer.superseded !== true &&
+      String(projectedAnswer.content || '').trim(),
+    );
+  }
   const stream = eventStream.value;
   if (!stream || !Array.isArray(stream)) return false;
   return stream.some((e: any) => e.type === 'answer' && !e.superseded && e.content && e.content.trim());
@@ -1132,6 +1163,13 @@ const hasAnswerStarted = computed(() => {
 // shrink back to the capped height (which would look like a jump). Once the
 // model starts producing answer-style text, give it full height to breathe.
 const answerEverStarted = computed(() => {
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !props.session?.is_completed &&
+    liveProjection.value
+  ) {
+    return liveProjection.value.answerEverStarted;
+  }
   const stream = eventStream.value;
   if (!stream || !Array.isArray(stream)) return false;
   return stream.some((e: any) => e.type === 'answer' && e.content && e.content.trim());
@@ -1153,6 +1191,12 @@ watch(eventStream, (stream) => {
 
 // Check if conversation is done (based on answer event with done=true or stop event)
 const isConversationDone = computed(() => {
+  if (props.session?.is_completed) return true;
+  const projection = usesClaudeSDKTerminalDelivery.value ? liveProjection.value : null;
+  if (projection?.terminalEvent) return true;
+  if (projection?.activeAnswer?.done === true && projection.activeAnswer.superseded !== true) {
+    return true;
+  }
   const stream = eventStream.value;
   if (!stream || stream.length === 0) {
     return false;
@@ -1188,6 +1232,15 @@ let streamingMermaidRenderTask: Promise<void> | null = null;
 let streamingMermaidRenderId = 0;
 
 const activeAnswerMarkdown = computed(() => {
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    liveProjection.value?.activeAnswer
+  ) {
+    return typeof liveProjection.value.activeAnswer.content === 'string'
+      ? liveProjection.value.activeAnswer.content
+      : '';
+  }
   const stream = eventStream.value;
   if (!stream?.length) return '';
   const source = isConversationDone.value ? buildFullEventList(stream) : stream;
@@ -1199,6 +1252,13 @@ const activeAnswerMarkdown = computed(() => {
 // The answer event whose text is currently streaming. The template renders the
 // smoothed typewriter text for this event and the raw content for any others.
 const activeAnswerEventRef = computed(() => {
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    liveProjection.value?.activeAnswer
+  ) {
+    return liveProjection.value.activeAnswer;
+  }
   const stream = eventStream.value;
   if (!stream?.length) return null;
   const source = isConversationDone.value ? buildFullEventList(stream) : stream;
@@ -1271,10 +1331,18 @@ watch(answerFullyRendered, (ready) => {
 });
 
 // Agent: dots until the turn completes. RAG: pipeline dots before answer; answer stream dots after.
+const showLiveProcessPreview = computed(
+  () =>
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    !props.ragMode &&
+    !shareMode.value,
+);
+
 const showAgentActivityIndicator = computed(() => {
   if (isConversationDone.value) return false;
   if (props.ragMode) return hasAnswerStarted.value || hasNonRagToolEvents.value;
-  return true;
+  return !showLiveProcessPreview.value;
 });
 
 const isStreamingTimelineEvent = (event: any): boolean => {
@@ -1810,6 +1878,28 @@ const displayEvents = computed(() => {
   const stream = eventStream.value;
   if (!stream || !Array.isArray(stream)) {
     return [];
+  }
+
+  // Live runs use the O(1) projection maintained by the stream handler. This
+  // avoids rebuilding the complete event tree for every token while still
+  // keeping approval/OAuth cards actionable and the current answer visible.
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    liveProjection.value
+  ) {
+    const interactive = liveProjection.value.interactiveEvents.filter(
+      (event: any) => event && event.resolved !== true,
+    );
+    const answer = liveProjection.value.activeAnswer;
+    if (
+      answer &&
+      answer.superseded !== true &&
+      (String(answer.content || '').trim() || answer.done === true)
+    ) {
+      return [...interactive, answer];
+    }
+    return interactive;
   }
 
   const result = buildFullEventList(stream);

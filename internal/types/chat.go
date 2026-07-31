@@ -53,6 +53,10 @@ type FunctionCall struct {
 // ChatResponse chat response
 type ChatResponse struct {
 	Content string `json:"content"`
+	// ProviderRequestID is the upstream completion/message identifier when the
+	// provider exposes one. Durable derivative checkpoints retain it for
+	// cross-system log correlation; it is never used as business identity.
+	ProviderRequestID string `json:"provider_request_id,omitempty"`
 	// ReasoningContent 是支持思考链的模型（DeepSeek thinking、小米 MiMo、vLLM reasoning 等）
 	// 在本轮输出的推理内容。需要在后续多轮请求中原样回传给那些严格校验的供应商。
 	ReasoningContent string        `json:"reasoning_content,omitempty"`

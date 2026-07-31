@@ -864,15 +864,20 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 		report.markHeavy("Excel 文件内部内容展开后超过重型阈值 40MB（当前 %s）", formatMB(stats.uncompressedBytes))
 	}
 	var worksheetXMLTotal int64
+	var rawTotalRows int64
 	var totalRows int64
 	var totalCells int64
+	var semanticCells int64
+	var styleOnlyCells int64
 	var formulaCells int64
 	var conditionalFormats int64
 	var mergeRanges int64
 	var mergedCoveredCells int64
 	var maxSheetXML *namedInt64
 	var maxSheetRows *namedInt64
+	var maxRawSheetRows *namedInt64
 	var maxSheetColumns *namedInt64
+	var maxRawSheetColumns *namedInt64
 	var scannedSheet bool
 
 	for _, f := range zr.File {
@@ -895,17 +900,26 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 			report.addIssueText("文件结构异常或已损坏，无法解析")
 			return
 		}
-		totalRows += c.rows
+		rawTotalRows += c.rows
+		totalRows += c.semanticRows
 		totalCells += c.cells
+		semanticCells += c.semanticCells
+		styleOnlyCells += c.cells - c.semanticCells
 		formulaCells += c.formulas
 		conditionalFormats += c.conditionalFormats
 		mergeRanges += c.mergeRanges
 		mergedCoveredCells += c.mergedCoveredCells
-		if maxSheetRows == nil || c.rows > maxSheetRows.value {
-			maxSheetRows = &namedInt64{name: sheetName, value: c.rows}
+		if maxSheetRows == nil || c.semanticRows > maxSheetRows.value {
+			maxSheetRows = &namedInt64{name: sheetName, value: c.semanticRows}
 		}
-		if maxSheetColumns == nil || c.maxColumn > maxSheetColumns.value {
-			maxSheetColumns = &namedInt64{name: sheetName, value: c.maxColumn}
+		if maxRawSheetRows == nil || c.rows > maxRawSheetRows.value {
+			maxRawSheetRows = &namedInt64{name: sheetName, value: c.rows}
+		}
+		if maxSheetColumns == nil || c.semanticMaxColumn > maxSheetColumns.value {
+			maxSheetColumns = &namedInt64{name: sheetName, value: c.semanticMaxColumn}
+		}
+		if maxRawSheetColumns == nil || c.rawMaxColumn > maxRawSheetColumns.value {
+			maxRawSheetColumns = &namedInt64{name: sheetName, value: c.rawMaxColumn}
 		}
 	}
 	if !scannedSheet {
@@ -915,7 +929,10 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 
 	report.metric("xlsx_worksheet_xml_total_bytes", worksheetXMLTotal)
 	report.metric("xlsx_total_rows", totalRows)
+	report.metric("xlsx_raw_total_rows", rawTotalRows)
 	report.metric("xlsx_total_cells", totalCells)
+	report.metric("xlsx_semantic_cells", semanticCells)
+	report.metric("xlsx_style_only_cells", styleOnlyCells)
 	report.metric("xlsx_formula_cells", formulaCells)
 	report.metric("xlsx_conditional_formats", conditionalFormats)
 	report.metric("xlsx_merge_ranges", mergeRanges)
@@ -928,9 +945,17 @@ func validateXLSX(zr *zip.Reader, report *Report) {
 		report.metric("xlsx_max_sheet_rows", maxSheetRows.value)
 		report.metric("xlsx_max_sheet_rows_name", maxSheetRows.name)
 	}
+	if maxRawSheetRows != nil {
+		report.metric("xlsx_raw_max_sheet_rows", maxRawSheetRows.value)
+		report.metric("xlsx_raw_max_sheet_rows_name", maxRawSheetRows.name)
+	}
 	if maxSheetColumns != nil {
 		report.metric("xlsx_max_sheet_columns", maxSheetColumns.value)
 		report.metric("xlsx_max_sheet_columns_name", maxSheetColumns.name)
+	}
+	if maxRawSheetColumns != nil {
+		report.metric("xlsx_raw_max_sheet_columns", maxRawSheetColumns.value)
+		report.metric("xlsx_raw_max_sheet_columns_name", maxRawSheetColumns.name)
 	}
 
 	if maxSheetXML != nil && maxSheetXML.value > limits.worksheetXMLMB*mb {
@@ -1330,13 +1355,21 @@ func saturatingAddInt64(left, right int64) int64 {
 }
 
 type worksheetCounters struct {
+	// rows/cells/rawMaxColumn describe the physical OOXML workload. Excel
+	// persists style-only cells (for example <c r="XFD6" s="12"/>) even
+	// though they carry no value. Those records still matter for archive and
+	// parser safety, but they must not expand the logical data range used by
+	// the format-aware splitter.
 	rows               int64
 	cells              int64
+	rawMaxColumn       int64
+	semanticRows       int64
+	semanticCells      int64
+	semanticMaxColumn  int64
 	formulas           int64
 	conditionalFormats int64
 	mergeRanges        int64
 	mergedCoveredCells int64
-	maxColumn          int64
 }
 
 func scanWorksheetXML(f *zip.File) (worksheetCounters, error) {
@@ -1347,6 +1380,8 @@ func scanWorksheetXML(f *zip.File) (worksheetCounters, error) {
 	defer rc.Close()
 
 	var c worksheetCounters
+	var currentRow int64
+	var lastSemanticRow int64 = -1
 	decoder := xml.NewDecoder(rc)
 	for {
 		token, err := decoder.Token()
@@ -1363,13 +1398,31 @@ func scanWorksheetXML(f *zip.File) (worksheetCounters, error) {
 		switch start.Name.Local {
 		case "row":
 			c.rows++
+			currentRow = c.rows
+			if explicit, parseErr := strconv.ParseInt(attrValue(start.Attr, "r"), 10, 64); parseErr == nil && explicit > 0 {
+				currentRow = explicit
+			}
 		case "c":
 			c.cells++
-			if col := cellColumn(attrValue(start.Attr, "r")); col > c.maxColumn {
-				c.maxColumn = col
+			column := cellColumn(attrValue(start.Attr, "r"))
+			if column > c.rawMaxColumn {
+				c.rawMaxColumn = column
 			}
-		case "f":
-			c.formulas++
+			semantic, formulas, cellErr := scanWorksheetCell(decoder)
+			if cellErr != nil {
+				return worksheetCounters{}, cellErr
+			}
+			c.formulas += formulas
+			if semantic {
+				c.semanticCells++
+				if column > c.semanticMaxColumn {
+					c.semanticMaxColumn = column
+				}
+				if currentRow != lastSemanticRow {
+					c.semanticRows++
+					lastSemanticRow = currentRow
+				}
+			}
 		case "conditionalFormatting":
 			c.conditionalFormats++
 		case "mergeCell":
@@ -1379,6 +1432,35 @@ func scanWorksheetXML(f *zip.File) (worksheetCounters, error) {
 			}
 		}
 	}
+}
+
+// scanWorksheetCell consumes one complete SpreadsheetML <c> element. A cell
+// is semantic when it contains a value, a formula, or an inline string. Merely
+// carrying a style/index attribute is physical workbook metadata and must not
+// widen the logical table. Presence is intentional here: zero, false, cached
+// error values and formulas whose cached result is empty are all real cells.
+func scanWorksheetCell(decoder *xml.Decoder) (semantic bool, formulas int64, err error) {
+	depth := 1
+	for depth > 0 {
+		token, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return false, 0, tokenErr
+		}
+		switch typed := token.(type) {
+		case xml.StartElement:
+			depth++
+			switch typed.Name.Local {
+			case "v", "is":
+				semantic = true
+			case "f":
+				semantic = true
+				formulas++
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return semantic, formulas, nil
 }
 
 type namedInt64 struct {

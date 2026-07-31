@@ -108,9 +108,16 @@ func ValidateClusterBudgetFromEnv() (ClusterBudget, error) {
 		if err != nil {
 			return ClusterBudget{}, err
 		}
-		rollingMax := 1
+		rollingFallback := 1
 		if role == RoleMigration {
-			rollingMax = 0
+			rollingFallback = 0
+		}
+		rollingMax, err := positiveIntWithFallback(
+			"CUSTOM_RUNTIME_"+prefix+"_ROLLING_MAX",
+			rollingFallback,
+		)
+		if err != nil {
+			return ClusterBudget{}, err
 		}
 		rows = append(rows, ReplicaBudget{
 			Role: role, Replicas: replicas, MaxOpen: maxOpen, RollingMax: rollingMax,

@@ -1,0 +1,191 @@
+{{/*
+Dedicated production workers. The API Deployment remains in app.yaml so the
+public Service, HPA, and existing release identity stay stable.
+*/}}
+{{- if and .Values.app.enabled .Values.app.runtimeRoles.enabled }}
+{{- $root := . }}
+{{- $roles := list
+  (dict "name" "parse-worker" "role" "parse-worker" "config" .Values.app.runtimeRoles.parseWorker)
+  (dict "name" "derivative-worker" "role" "derivative-worker" "config" .Values.app.runtimeRoles.derivativeWorker)
+  (dict "name" "wiki-worker" "role" "wiki-worker" "config" .Values.app.runtimeRoles.wikiWorker)
+  (dict "name" "maintenance" "role" "maintenance" "config" .Values.app.runtimeRoles.maintenance)
+}}
+{{- range $item := $roles }}
+{{- if $item.config.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weknora.fullname" $root }}-{{ $item.name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" $item.name "context" $root) | nindent 4 }}
+spec:
+  replicas: {{ $item.config.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 6 }}
+  strategy:
+    {{- toYaml $root.Values.app.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ $root.Values.app.terminationGracePeriodSeconds }}
+      {{- include "weknora.imagePullSecrets" $root | nindent 6 }}
+      serviceAccountName: {{ include "weknora.serviceAccountName" $root }}
+      automountServiceAccountToken: false
+      {{- with $root.Values.app.podSecurityContext | default $root.Values.global.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app
+          image: {{ include "weknora.app.image" $root }}
+          imagePullPolicy: {{ $root.Values.app.image.pullPolicy }}
+          {{- with $root.Values.app.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            {{- include "weknora.appRuntimeEnv" (dict "root" $root "role" $item.role "pool" $item.config "autoMigrate" false) | nindent 12 }}
+          volumeMounts:
+            - name: data-files
+              mountPath: /data/files
+            - name: scratch
+              mountPath: /tmp
+            {{- if $root.Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+            - name: document-queue-kubernetes-api
+              mountPath: /var/run/secrets/weknora-document-queue-kubernetes
+              readOnly: true
+            {{- end }}
+            {{- with $root.Values.app.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml $item.config.resources | nindent 12 }}
+          {{- with $root.Values.app.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.app.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.app.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- include "weknora.appRuntimeVolumes" $root | nindent 8 }}
+      {{- with $root.Values.app.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.app.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $root.Values.app.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $root.Values.app.topologySpread.maxSkew }}
+          topologyKey: {{ $root.Values.app.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ $root.Values.app.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 14 }}
+      {{- end }}
+      {{- with $root.Values.app.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{- if gt (int $item.config.replicaCount) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "weknora.fullname" $root }}-{{ $item.name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" $item.name "context" $root) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 6 }}
+---
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.app.runtimeRoles.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "weknora.fullname" . }}-migration
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "migration" "context" .) | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.app.runtimeRoles.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.app.runtimeRoles.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "weknora.componentSelectorLabels" (dict "component" "migration" "context" .) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- include "weknora.imagePullSecrets" . | nindent 6 }}
+      # The migration is a pre-install hook, so the chart-managed ServiceAccount
+      # does not exist yet on a fresh install. It needs no Kubernetes API access.
+      serviceAccountName: default
+      automountServiceAccountToken: false
+      {{- with .Values.app.podSecurityContext | default .Values.global.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app
+          image: {{ include "weknora.app.image" . }}
+          imagePullPolicy: {{ .Values.app.image.pullPolicy }}
+          {{- with .Values.app.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "weknora.appRuntimeEnv" (dict "root" . "role" "migration" "pool" .Values.app.runtimeRoles.migration "autoMigrate" true) | nindent 12 }}
+          volumeMounts:
+            - name: data-files
+              mountPath: /data/files
+            - name: scratch
+              mountPath: /tmp
+            {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+            - name: document-queue-kubernetes-api
+              mountPath: /var/run/secrets/weknora-document-queue-kubernetes
+              readOnly: true
+            {{- end }}
+            {{- with .Values.app.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.app.runtimeRoles.migration.resources | nindent 12 }}
+      volumes:
+        {{- include "weknora.appRuntimeVolumes" . | nindent 8 }}
+      {{- with .Values.app.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

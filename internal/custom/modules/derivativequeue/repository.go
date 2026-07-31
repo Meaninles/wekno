@@ -47,7 +47,95 @@ func (r *Repository) Migrate(ctx context.Context) error {
 	if r == nil || r.db == nil {
 		return errors.New("derivative queue database is unavailable")
 	}
-	return r.db.WithContext(ctx).AutoMigrate(&WorkItem{}, &Result{}, &ProviderCall{})
+	db := r.db.WithContext(ctx)
+	if db.Dialector.Name() != "postgres" {
+		return db.AutoMigrate(&WorkItem{}, &Result{}, &ProviderCall{})
+	}
+	if err := db.AutoMigrate(&WorkItem{}, &Result{}); err != nil {
+		return err
+	}
+	if !db.Migrator().HasTable(&ProviderCall{}) {
+		if err := db.AutoMigrate(&ProviderCall{}); err != nil {
+			return err
+		}
+	}
+	return migratePostgresProviderCalls(db)
+}
+
+// migratePostgresProviderCalls is the executable migration boundary for the
+// provider-response contract. Files under migrations/custom document the SQL
+// for operators, but the custom bootstrap does not scan those files; it calls
+// Repository.Migrate. Keep the real, idempotent upgrade here so an old
+// (work_item_id, request_hash) uniqueness constraint cannot silently prevent
+// durable attempt N+1 after a contract-invalid response.
+func migratePostgresProviderCalls(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		statements := []string{
+			`SELECT pg_advisory_xact_lock(hashtext('weknora.derivative_provider_calls.v2'))`,
+			`ALTER TABLE custom_derivative_provider_calls
+				ADD COLUMN IF NOT EXISTS attempt integer NOT NULL DEFAULT 1,
+				ADD COLUMN IF NOT EXISTS provider_request_id varchar(160) NOT NULL DEFAULT '',
+				ADD COLUMN IF NOT EXISTS processing_generation varchar(64) NOT NULL DEFAULT '',
+				ADD COLUMN IF NOT EXISTS disposition varchar(32) NOT NULL DEFAULT 'checkpointed',
+				ADD COLUMN IF NOT EXISTS validation_error text NOT NULL DEFAULT '',
+				ADD COLUMN IF NOT EXISTS validated_at timestamptz`,
+			`UPDATE custom_derivative_provider_calls AS calls
+			 SET processing_generation = items.processing_generation
+			 FROM custom_derivative_work_items AS items
+			 WHERE calls.work_item_id = items.id
+			   AND calls.processing_generation = ''`,
+			// Early builds used GORM's shorter index name for a two-column
+			// uniqueness rule. PostgreSQL permits that index to coexist with the
+			// newer three-column constraint, so merely upgrading the constraint
+			// leaves attempt N+1 blocked. Remove both possible legacy object forms
+			// before establishing the canonical constraint below.
+			`ALTER TABLE custom_derivative_provider_calls
+				DROP CONSTRAINT IF EXISTS uq_derivative_provider_call`,
+			`DROP INDEX IF EXISTS uq_derivative_provider_call`,
+			`DO $$
+			 DECLARE current_definition text;
+			 BEGIN
+			   SELECT pg_get_constraintdef(oid)
+			   INTO current_definition
+			   FROM pg_constraint
+			   WHERE conrelid = 'custom_derivative_provider_calls'::regclass
+			     AND conname = 'uq_custom_derivative_provider_call';
+			   IF current_definition IS DISTINCT FROM
+			      'UNIQUE (work_item_id, request_hash, attempt)' THEN
+			     ALTER TABLE custom_derivative_provider_calls
+			       DROP CONSTRAINT IF EXISTS uq_custom_derivative_provider_call;
+			     DROP INDEX IF EXISTS uq_custom_derivative_provider_call;
+			     ALTER TABLE custom_derivative_provider_calls
+			       ADD CONSTRAINT uq_custom_derivative_provider_call
+			       UNIQUE (work_item_id, request_hash, attempt);
+			   END IF;
+			 END $$`,
+			`DO $$
+			 BEGIN
+			   IF NOT EXISTS (
+			     SELECT 1 FROM pg_constraint
+			     WHERE conrelid = 'custom_derivative_provider_calls'::regclass
+			       AND conname = 'chk_custom_derivative_provider_call_disposition'
+			   ) THEN
+			     ALTER TABLE custom_derivative_provider_calls
+			       ADD CONSTRAINT chk_custom_derivative_provider_call_disposition
+			       CHECK (disposition IN ('checkpointed', 'accepted', 'invalid_contract'));
+			   END IF;
+			 END $$`,
+			`CREATE INDEX IF NOT EXISTS idx_custom_derivative_provider_calls_replay
+				ON custom_derivative_provider_calls
+				(work_item_id, request_hash, disposition, attempt DESC)`,
+			`CREATE INDEX IF NOT EXISTS idx_custom_derivative_provider_calls_generation
+				ON custom_derivative_provider_calls
+				(processing_generation, disposition, created_at)`,
+		}
+		for _, statement := range statements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("migrate derivative provider calls: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func (r *Repository) UpsertPlan(

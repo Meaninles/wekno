@@ -36,3 +36,38 @@ func TestValidateClusterBudgetRejectsRollingOverSeventyPercent(t *testing.T) {
 		t.Fatal("ValidateClusterBudget() accepted an unsafe rolling budget")
 	}
 }
+
+func TestValidateClusterBudgetFromEnvHonorsZeroSurgeRollout(t *testing.T) {
+	t.Setenv("CUSTOM_DATABASE_POOL_BUDGET_ENFORCED", "true")
+	t.Setenv("CUSTOM_POSTGRES_MAX_CONNECTIONS", "100")
+	for _, key := range []string{
+		"CUSTOM_RUNTIME_API_ROLLING_MAX",
+		"CUSTOM_RUNTIME_PARSE_WORKER_ROLLING_MAX",
+		"CUSTOM_RUNTIME_DERIVATIVE_WORKER_ROLLING_MAX",
+		"CUSTOM_RUNTIME_WIKI_WORKER_ROLLING_MAX",
+		"CUSTOM_RUNTIME_MAINTENANCE_ROLLING_MAX",
+		"CUSTOM_RUNTIME_MIGRATION_ROLLING_MAX",
+	} {
+		t.Setenv(key, "0")
+	}
+	t.Setenv("CUSTOM_RUNTIME_API_REPLICAS", "3")
+	t.Setenv("CUSTOM_RUNTIME_API_MAX_OPEN_CONNS", "6")
+	t.Setenv("CUSTOM_RUNTIME_PARSE_WORKER_REPLICAS", "3")
+	t.Setenv("CUSTOM_RUNTIME_PARSE_WORKER_MAX_OPEN_CONNS", "5")
+	t.Setenv("CUSTOM_RUNTIME_DERIVATIVE_WORKER_REPLICAS", "2")
+	t.Setenv("CUSTOM_RUNTIME_DERIVATIVE_WORKER_MAX_OPEN_CONNS", "4")
+	t.Setenv("CUSTOM_RUNTIME_WIKI_WORKER_REPLICAS", "2")
+	t.Setenv("CUSTOM_RUNTIME_WIKI_WORKER_MAX_OPEN_CONNS", "4")
+	t.Setenv("CUSTOM_RUNTIME_MAINTENANCE_REPLICAS", "2")
+	t.Setenv("CUSTOM_RUNTIME_MAINTENANCE_MAX_OPEN_CONNS", "3")
+	t.Setenv("CUSTOM_RUNTIME_MIGRATION_REPLICAS", "1")
+	t.Setenv("CUSTOM_RUNTIME_MIGRATION_MAX_OPEN_CONNS", "3")
+
+	got, err := ValidateClusterBudgetFromEnv()
+	if err != nil {
+		t.Fatalf("ValidateClusterBudgetFromEnv() error = %v", err)
+	}
+	if got.Steady != 58 || got.Rolling != 58 {
+		t.Fatalf("budget = steady:%d rolling:%d, want 58/58", got.Steady, got.Rolling)
+	}
+}

@@ -57,6 +57,88 @@ app:
   # -- Number of replicas
   replicaCount: 1
 
+  # -- Split the Go runtime into production capability roles. Disabled keeps
+  # the upstream single-process development topology. When enabled, this
+  # Deployment is the API role and separate Deployments own parse,
+  # derivative, Wiki, and maintenance work. A Helm hook Job runs migrations
+  # before install/upgrade and blocks the rollout on failure.
+  runtimeRoles:
+    enabled: false
+    environment: production
+    postgresMaxConnections: 100
+    redisNamespace: ""
+    parseWorker:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 6
+      maxIdleConns: 2
+      resources:
+        requests:
+          cpu: 1500m
+          memory: 3Gi
+          ephemeral-storage: 1Gi
+        limits:
+          cpu: "4"
+          memory: 6Gi
+          ephemeral-storage: 8Gi
+    derivativeWorker:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 4
+      maxIdleConns: 1
+      resources:
+        requests:
+          cpu: 750m
+          memory: 1536Mi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "2"
+          memory: 3Gi
+          ephemeral-storage: 4Gi
+    wikiWorker:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 4
+      maxIdleConns: 1
+      resources:
+        requests:
+          cpu: 750m
+          memory: 1536Mi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "2"
+          memory: 3Gi
+          ephemeral-storage: 4Gi
+    maintenance:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 3
+      maxIdleConns: 1
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+          ephemeral-storage: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+          ephemeral-storage: 2Gi
+    migration:
+      enabled: true
+      maxOpenConns: 3
+      maxIdleConns: 1
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral-storage: 4Gi
+
   # -- Deployment rollout strategy. Production profiles backed by large
   # per-Pod local ephemeral PVCs should normally use maxSurge=0 so a rollout
   # cannot transiently reserve another complete scratch volume on the node.

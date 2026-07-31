@@ -217,6 +217,10 @@ type modelDeferred interface {
 	ModelRetryAfter() time.Duration
 }
 
+type providerRetryRequired interface {
+	ProviderRetryRequired() bool
+}
+
 func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) error {
 	if errors.Is(cause, ErrGenerationFence) || errors.Is(cause, ErrLeaseLost) {
 		return nil
@@ -234,6 +238,13 @@ func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) 
 	if errors.Is(cause, context.Canceled) {
 		delay = 10 * time.Second
 		errorCode = "worker_interrupted"
+	}
+	forceProviderRetry := false
+	var providerRetry providerRetryRequired
+	if errors.As(cause, &providerRetry) && providerRetry.ProviderRetryRequired() {
+		forceProviderRetry = true
+		errorClass = "contract"
+		errorCode = "provider_response_rejected"
 	}
 	hasCalls, countErr := w.repository.hasProviderCalls(persistCtx, item.ID)
 	if countErr != nil {
@@ -255,6 +266,7 @@ func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) 
 	_, err := w.repository.RetryAfterFailure(
 		persistCtx, item.ID, item.LeaseToken,
 		errorClass, errorCode, cause.Error(), delay,
+		forceProviderRetry,
 	)
 	if hasCalls {
 		pipelineobs.DerivativeMaterializeRetry(item.WorkKind)

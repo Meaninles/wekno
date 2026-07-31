@@ -173,6 +173,7 @@ type checkpointReplayFailureHandler struct{}
 
 func (*checkpointReplayFailureHandler) Handle(ctx context.Context, _ *asynq.Task) error {
 	messages := []chat.Message{{Role: "user", Content: "stable replay request"}}
+	decodeErr := errors.New("decode structured response")
 	if _, found, err := LookupChatCheckpoint(ctx, "model-a", messages, nil); err != nil {
 		return err
 	} else if !found {
@@ -186,7 +187,10 @@ func (*checkpointReplayFailureHandler) Handle(ctx context.Context, _ *asynq.Task
 			return err
 		}
 	}
-	return errors.New("decode structured response")
+	if err := RejectChatCheckpoint(ctx, "model-a", messages, nil, decodeErr); err != nil {
+		return err
+	}
+	return ProviderContractRejected(decodeErr)
 }
 
 func TestWakePayloadContainsOnlyIdentityAndWorkerPersistsResultBeforeCompletion(t *testing.T) {
@@ -241,7 +245,7 @@ func TestWakePayloadContainsOnlyIdentityAndWorkerPersistsResultBeforeCompletion(
 	require.EqualValues(t, 1, callCount)
 }
 
-func TestCheckpointReplayFailureAdvancesMaterializationBudgetAfterWorkerContextCancellation(t *testing.T) {
+func TestContractRejectedCheckpointAdvancesProviderBudgetAndAllowsFreshCall(t *testing.T) {
 	repository, db := derivativeRepositoryForTest(t)
 	ctx := context.Background()
 	require.NoError(t, db.Create(&derivativeTestKnowledge{
@@ -264,8 +268,9 @@ func TestCheckpointReplayFailureAdvancesMaterializationBudgetAfterWorkerContextC
 	require.NoError(t, worker.Handle(ctx, enqueuer.task))
 	var first WorkItem
 	require.NoError(t, db.First(&first, "id = ?", rows[0].ID).Error)
-	require.Equal(t, StateMaterializeWait, first.State)
-	require.Equal(t, 1, first.MaterializeAttempts)
+	require.Equal(t, StateRetryWait, first.State)
+	require.Equal(t, 1, first.ProviderAttempts)
+	require.Zero(t, first.MaterializeAttempts)
 
 	require.NoError(t, db.Model(&WorkItem{}).Where("id = ?", first.ID).
 		Updates(map[string]any{
@@ -281,9 +286,15 @@ func TestCheckpointReplayFailureAdvancesMaterializationBudgetAfterWorkerContextC
 
 	var replayed WorkItem
 	require.NoError(t, db.First(&replayed, "id = ?", first.ID).Error)
-	require.Equal(t, StateMaterializeWait, replayed.State)
-	require.Equal(t, 2, replayed.MaterializeAttempts)
-	require.Equal(t, 1, replayed.ProviderAttempts)
+	require.Equal(t, StateRetryWait, replayed.State)
+	require.Zero(t, replayed.MaterializeAttempts)
+	require.Equal(t, 2, replayed.ProviderAttempts)
+	var calls []ProviderCall
+	require.NoError(t, db.Where("work_item_id = ?", first.ID).Order("attempt").Find(&calls).Error)
+	require.Len(t, calls, 2)
+	require.Equal(t, []int{1, 2}, []int{calls[0].Attempt, calls[1].Attempt})
+	require.Equal(t, ProviderCallInvalidContract, calls[0].Disposition)
+	require.Equal(t, ProviderCallInvalidContract, calls[1].Disposition)
 }
 
 func TestExpiredProviderLeaseWithoutCheckpointBecomesUnknown(t *testing.T) {

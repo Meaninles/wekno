@@ -27,8 +27,9 @@ func (c *RemoteAPIChat) parseCompletionResponse(resp *openai.ChatCompletionRespo
 	content := removeThinkingContent(choice.Message.Content)
 
 	response := &types.ChatResponse{
-		Content:      content,
-		FinishReason: string(choice.FinishReason),
+		Content:           content,
+		ProviderRequestID: resp.ID,
+		FinishReason:      string(choice.FinishReason),
 		Usage: types.TokenUsage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,

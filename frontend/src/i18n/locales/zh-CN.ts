@@ -840,6 +840,7 @@ export default {
       cancelling: "取消中",
       deleting: "删除中",
       completed: "已完成",
+      degraded: "已完成（部分增强降级）",
       failed: "执行失败",
       cancelled: "已取消",
       draft: "草稿",

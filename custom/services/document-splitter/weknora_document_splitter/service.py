@@ -418,103 +418,89 @@ def _split_xlsx(
 ) -> list[Part]:
     from openpyxl import Workbook, load_workbook
 
-    try:
-        workbook = load_workbook(
-            filename=source,
-            read_only=True,
-            data_only=True,
-            keep_links=False,
-        )
-    except Exception as exc:
-        raise SplitFailure("invalid_workbook", f"Excel workbook is malformed: {exc}") from exc
+    from .xlsx_semantic import inspect_xlsx_semantic_ranges
 
+    # minimum_parts is a compressed-file estimate supplied by the format
+    # guard. XLSX output is a normalised value stream rather than a byte slice,
+    # so forcing this scalar into both row and column axes can multiply a small
+    # sparse workbook into thousands of meaningless files. The format-specific
+    # hard limits below are the authoritative part boundaries.
+    _ = minimum_parts
     target_bytes = int(_HARD_BYTES["xlsx"] * ratio)
     target_rows = max(1, int(30_000 * ratio))
     target_cells = max(1, int(300_000 * ratio))
     target_columns = max(1, int(100 * ratio))
-    total_rows = sum(max(0, int(sheet.max_row or 0)) for sheet in workbook.worksheets)
-    # Honour a size-derived minimum by reducing the source-row window up
-    # front. Re-splitting generated workbooks would turn an injected
-    # continuation header into a fake source row and corrupt coordinates.
-    target_rows = min(
-        target_rows,
-        max(1, math.ceil(total_rows / max(1, minimum_parts))),
-    )
-    workbook.close()
-    merge_ranges_by_sheet = _xlsx_merge_ranges_by_sheet(source)
+    try:
+        bounds = inspect_xlsx_semantic_ranges(source)
+        merge_ranges_by_sheet = _xlsx_merge_ranges_by_sheet(source)
+        plans = _plan_xlsx_parts(
+            source,
+            bounds,
+            merge_ranges_by_sheet,
+            target_rows=target_rows,
+            target_cells=target_cells,
+            target_bytes=target_bytes,
+            target_columns=target_columns,
+        )
+    except SplitFailure:
+        raise
+    except Exception as exc:
+        raise SplitFailure(
+            "invalid_workbook", f"Excel workbook is malformed: {exc}"
+        ) from exc
+
+    if len(plans) > policy.max_parts:
+        raise SplitFailure(
+            "too_many_parts",
+            f"Excel split plan requires {len(plans)} parts, limit is {policy.max_parts}",
+        )
 
     parts: list[Part] = []
-    for sheet_index in range(_xlsx_sheet_count(source)):
-        probe = load_workbook(source, read_only=True, data_only=True, keep_links=False)
-        sheet = probe.worksheets[sheet_index]
-        max_column = max(1, int(sheet.max_column or 1))
-        sheet_name = sheet.title
-        probe.close()
-        sheet_merge_ranges = (
-            merge_ranges_by_sheet[sheet_index]
-            if sheet_index < len(merge_ranges_by_sheet)
-            else []
+    grouped_plans: dict[tuple[int, int, int], list[_XLSXPartPlan]] = {}
+    for plan in plans:
+        grouped_plans.setdefault(
+            (plan.sheet_index, plan.column_start, plan.column_end), []
+        ).append(plan)
+
+    for window_plans in grouped_plans.values():
+        first_plan = window_plans[0]
+        source_book = load_workbook(
+            source, read_only=True, data_only=True, keep_links=False
         )
-        anchor_column_count = min(3, max_column)
-        for col_start in range(1, max_column + 1, target_columns):
-            col_end = min(max_column, col_start + target_columns - 1)
-            repeated_anchor_count = (
-                anchor_column_count if col_start > anchor_column_count else 0
+        formula_book = (
+            load_workbook(source, read_only=True, data_only=False, keep_links=False)
+            if bounds[first_plan.sheet_index].formula_cells > 0
+            else None
+        )
+        try:
+            source_sheet = source_book.worksheets[first_plan.sheet_index]
+            formula_sheet = (
+                formula_book.worksheets[first_plan.sheet_index]
+                if formula_book is not None
+                else None
             )
-            source_book = load_workbook(
-                source, read_only=True, data_only=True, keep_links=False
-            )
-            source_sheet = source_book.worksheets[sheet_index]
-            selected_merges = [
-                merge_range
-                for merge_range in sheet_merge_ranges
-                if (
-                    merge_range[2] <= col_end
-                    and merge_range[3] >= col_start
-                )
-                or (
-                    repeated_anchor_count
-                    and merge_range[2] <= repeated_anchor_count
-                    and merge_range[3] >= 1
-                )
-            ]
-            merge_starts: dict[int, list[tuple[int, tuple[int, int, int, int]]]] = {}
-            merge_ends: dict[int, list[int]] = {}
-            for merge_index, merge_range in enumerate(selected_merges):
-                min_row, max_row, _min_column, _max_column = merge_range
-                merge_starts.setdefault(min_row, []).append(
-                    (merge_index, merge_range)
-                )
-                merge_ends.setdefault(max_row, []).append(merge_index)
-            active_merges: dict[int, tuple[int, int, int, int]] = {}
-            merge_values: dict[int, Any] = {}
-            header_values: tuple[Any, ...] | None = None
-            header_row_index = 0
+            plan_index = 0
             writer: Workbook | None = None
             target_sheet = None
             path: Path | None = None
-            part_row_start = 1
-            rows_written = 0
-            nonempty_cells = 0
-            estimated_bytes = 0
             header_context = ""
             header_repeated = False
-            last_source_row = 0
 
-            def start_writer(row_start: int) -> None:
-                nonlocal writer, target_sheet, path, part_row_start
+            def start_writer(plan: _XLSXPartPlan) -> None:
+                nonlocal writer, target_sheet, path
                 nonlocal header_context, header_repeated
                 writer = Workbook(write_only=True)
-                target_sheet = writer.create_sheet(title=_safe_sheet_title(sheet_name))
-                path = output / f"xlsx-{len(parts):06d}-{time.time_ns()}.xlsx"
-                part_row_start = row_start
-                header_context = _format_column_header_context(
-                    (header_values or ())[repeated_anchor_count:],
-                    col_start,
+                target_sheet = writer.create_sheet(
+                    title=_safe_sheet_title(plan.sheet_name)
                 )
-                if repeated_anchor_count:
+                path = output / f"xlsx-{len(parts):06d}-{time.time_ns()}.xlsx"
+                header_context = _format_column_header_context(
+                    plan.header_values[plan.repeated_anchor_count :],
+                    plan.column_start,
+                )
+                if plan.repeated_anchor_count:
                     anchor_context = _format_column_header_context(
-                        (header_values or ())[:repeated_anchor_count], 1
+                        plan.header_values[: plan.repeated_anchor_count], 1
                     )
                     if anchor_context:
                         header_context = (
@@ -524,16 +510,15 @@ def _split_xlsx(
                         )
                 header_repeated = (
                     bool(header_context)
-                    and header_row_index > 0
-                    and row_start > header_row_index
+                    and plan.header_row > 0
+                    and plan.row_start > plan.header_row
                 )
                 if header_repeated:
-                    target_sheet.append(list(header_values))
+                    target_sheet.append(list(plan.header_values))
 
-            def finish_writer(row_end: int) -> None:
-                nonlocal writer, target_sheet, path, rows_written, nonempty_cells, estimated_bytes
-                nonlocal last_source_row
-                if writer is None or path is None or rows_written <= 0:
+            def finish_writer(plan: _XLSXPartPlan) -> None:
+                nonlocal writer, target_sheet, path
+                if writer is None or path is None:
                     return
                 writer.save(path)
                 size = path.stat().st_size
@@ -541,7 +526,7 @@ def _split_xlsx(
                     path.unlink(missing_ok=True)
                     raise SplitFailure(
                         "atomic_excel_window_too_large",
-                        f"Excel row window {sheet_name}!{part_row_start}:{row_end} exceeds 10MB",
+                        f"Excel row window {plan.sheet_name}!{plan.row_start}:{plan.row_end} exceeds 10MB",
                     )
                 parts.append(
                     Part(
@@ -549,25 +534,27 @@ def _split_xlsx(
                         file_type="xlsx",
                         locator={
                             "kind": "sheet_range",
-                            "sheet": sheet_name,
-                            "row_start": part_row_start,
-                            "row_end": row_end,
-                            "column_start": col_start,
-                            "column_end": col_end,
+                            "sheet": plan.sheet_name,
+                            "row_start": plan.row_start,
+                            "row_end": plan.row_end,
+                            "column_start": plan.column_start,
+                            "column_end": plan.column_end,
                             "header_repeated": header_repeated,
-                            "header_row": header_row_index,
+                            "header_row": plan.header_row,
                             "header_context": header_context,
                             "anchor_columns": (
-                                list(range(1, repeated_anchor_count + 1))
-                                if repeated_anchor_count
+                                list(range(1, plan.repeated_anchor_count + 1))
+                                if plan.repeated_anchor_count
                                 else []
                             ),
-                            "merged_values_materialized": bool(selected_merges),
+                            "merged_values_materialized": bool(
+                                plan.selected_merges
+                            ),
                         },
                         metrics={
-                            "rows": rows_written,
-                            "cells": nonempty_cells,
-                            "estimated_uncompressed_bytes": estimated_bytes,
+                            "rows": plan.rows,
+                            "cells": plan.cells,
+                            "estimated_uncompressed_bytes": plan.estimated_bytes,
                             "file_bytes": size,
                         },
                     )
@@ -575,86 +562,42 @@ def _split_xlsx(
                 writer = None
                 target_sheet = None
                 path = None
-                rows_written = 0
-                nonempty_cells = 0
-                estimated_bytes = 0
-                last_source_row = 0
 
-            for row_index, row in enumerate(
-                source_sheet.iter_rows(
-                    min_col=1 if repeated_anchor_count else col_start,
-                    max_col=col_end,
-                ),
-                start=1,
+            for row_index, values in _iter_xlsx_window_rows(
+                source_sheet,
+                formula_sheet=formula_sheet,
+                column_start=first_plan.column_start,
+                column_end=first_plan.column_end,
+                repeated_anchor_count=first_plan.repeated_anchor_count,
+                selected_merges=first_plan.selected_merges,
+                max_row=window_plans[-1].row_end,
             ):
-                for merge_index, merge_range in merge_starts.get(
-                    row_index, ()
+                while (
+                    plan_index < len(window_plans)
+                    and row_index > window_plans[plan_index].row_end
                 ):
-                    active_merges[merge_index] = merge_range
-                raw_values = [cell.value for cell in row]
-                for merge_index, merge_range in active_merges.items():
-                    min_row, _max_row, min_column, max_column_for_merge = (
-                        merge_range
-                    )
-                    if row_index == min_row and min_column <= len(raw_values):
-                        merge_values[merge_index] = raw_values[min_column - 1]
-                    merged_value = merge_values.get(merge_index)
-                    if merged_value is None:
-                        continue
-                    for column in range(
-                        max(1, min_column),
-                        min(col_end, max_column_for_merge) + 1,
-                    ):
-                        if raw_values[column - 1] is None:
-                            raw_values[column - 1] = merged_value
-                if repeated_anchor_count:
-                    values = (
-                        tuple(raw_values[:repeated_anchor_count])
-                        + tuple(raw_values[col_start - 1 : col_end])
-                    )
-                else:
-                    values = tuple(raw_values)
-                for merge_index in merge_ends.get(row_index, ()):
-                    active_merges.pop(merge_index, None)
-                    merge_values.pop(merge_index, None)
-                # Some production workbooks start with one or more visually
-                # blank rows. Treat the first semantic row as the continuation
-                # header so later physical windows retain the same column
-                # meaning instead of losing it merely because A1 was empty.
-                if header_values is None and any(
-                    value is not None for value in values
-                ):
-                    header_values = values
-                    header_row_index = row_index
-                if not any(value is not None for value in values):
+                    finish_writer(window_plans[plan_index])
+                    plan_index += 1
+                if plan_index >= len(window_plans):
+                    break
+                plan = window_plans[plan_index]
+                if row_index < plan.row_start:
                     continue
-                row_cells = sum(value is not None for value in values)
-                row_bytes = sum(len(str(value).encode("utf-8")) for value in values if value is not None)
-                if row_bytes > 8 * _MB:
-                    source_book.close()
-                    raise SplitFailure(
-                        "atomic_excel_row_too_large",
-                        f"Excel row {sheet_name}!{row_index} is too large to split safely",
-                    )
                 if writer is None:
-                    start_writer(row_index)
-                if (
-                    rows_written > 0
-                    and (
-                        rows_written + 1 > target_rows
-                        or nonempty_cells + row_cells > target_cells
-                        or estimated_bytes + row_bytes > target_bytes
-                    )
-                ):
-                    finish_writer(last_source_row)
-                    start_writer(row_index)
+                    start_writer(plan)
                 target_sheet.append(list(values))
-                rows_written += 1
-                nonempty_cells += row_cells
-                estimated_bytes += row_bytes
-                last_source_row = row_index
-            finish_writer(last_source_row)
+            if plan_index < len(window_plans):
+                finish_writer(window_plans[plan_index])
+                plan_index += 1
+            if plan_index != len(window_plans):
+                raise SplitFailure(
+                    "unstable_workbook",
+                    "Excel workbook changed between planning and materialization",
+                )
+        finally:
             source_book.close()
+            if formula_book is not None:
+                formula_book.close()
 
     if not parts:
         raise SplitFailure("empty_workbook", "Excel workbook contains no rows")
@@ -670,6 +613,228 @@ def _split_xlsx(
         )
     )
     return parts
+
+
+@dataclass(frozen=True)
+class _XLSXPartPlan:
+    sheet_index: int
+    sheet_name: str
+    column_start: int
+    column_end: int
+    repeated_anchor_count: int
+    row_start: int
+    row_end: int
+    rows: int
+    cells: int
+    estimated_bytes: int
+    header_values: tuple[Any, ...]
+    header_row: int
+    selected_merges: tuple[tuple[int, int, int, int], ...]
+
+
+def _plan_xlsx_parts(
+    source: Path,
+    bounds: Sequence[Any],
+    merge_ranges_by_sheet: Sequence[Sequence[tuple[int, int, int, int]]],
+    *,
+    target_rows: int,
+    target_cells: int,
+    target_bytes: int,
+    target_columns: int,
+) -> list[_XLSXPartPlan]:
+    from openpyxl import load_workbook
+
+    plans: list[_XLSXPartPlan] = []
+    for sheet_index, sheet_bounds in enumerate(bounds):
+        max_column = int(sheet_bounds.semantic_max_column)
+        max_row = int(sheet_bounds.semantic_max_row)
+        if max_column <= 0 or max_row <= 0:
+            continue
+        sheet_merges = (
+            merge_ranges_by_sheet[sheet_index]
+            if sheet_index < len(merge_ranges_by_sheet)
+            else []
+        )
+        anchor_column_count = min(3, max_column)
+        for column_start in range(1, max_column + 1, target_columns):
+            column_end = min(max_column, column_start + target_columns - 1)
+            repeated_anchor_count = (
+                anchor_column_count
+                if column_start > anchor_column_count
+                else 0
+            )
+            selected_merges = tuple(
+                merge_range
+                for merge_range in sheet_merges
+                if (
+                    merge_range[2] <= column_end
+                    and merge_range[3] >= column_start
+                )
+                or (
+                    repeated_anchor_count
+                    and merge_range[2] <= repeated_anchor_count
+                    and merge_range[3] >= 1
+                )
+            )
+            source_book = load_workbook(
+                source, read_only=True, data_only=True, keep_links=False
+            )
+            formula_book = (
+                load_workbook(source, read_only=True, data_only=False, keep_links=False)
+                if sheet_bounds.formula_cells > 0
+                else None
+            )
+            try:
+                source_sheet = source_book.worksheets[sheet_index]
+                formula_sheet = (
+                    formula_book.worksheets[sheet_index]
+                    if formula_book is not None
+                    else None
+                )
+                header_values: tuple[Any, ...] = ()
+                header_row = 0
+                row_start = 0
+                row_end = 0
+                rows = 0
+                cells = 0
+                estimated_bytes = 0
+
+                def finish_plan() -> None:
+                    nonlocal row_start, row_end, rows, cells, estimated_bytes
+                    if rows <= 0:
+                        return
+                    plans.append(
+                        _XLSXPartPlan(
+                            sheet_index=sheet_index,
+                            sheet_name=sheet_bounds.name,
+                            column_start=column_start,
+                            column_end=column_end,
+                            repeated_anchor_count=repeated_anchor_count,
+                            row_start=row_start,
+                            row_end=row_end,
+                            rows=rows,
+                            cells=cells,
+                            estimated_bytes=estimated_bytes,
+                            header_values=header_values,
+                            header_row=header_row,
+                            selected_merges=selected_merges,
+                        )
+                    )
+                    row_start = 0
+                    row_end = 0
+                    rows = 0
+                    cells = 0
+                    estimated_bytes = 0
+
+                for row_index, values in _iter_xlsx_window_rows(
+                    source_sheet,
+                    formula_sheet=formula_sheet,
+                    column_start=column_start,
+                    column_end=column_end,
+                    repeated_anchor_count=repeated_anchor_count,
+                    selected_merges=selected_merges,
+                    max_row=max_row,
+                ):
+                    if not header_values:
+                        header_values = values
+                        header_row = row_index
+                    row_cells = sum(value is not None for value in values)
+                    row_bytes = sum(
+                        len(str(value).encode("utf-8"))
+                        for value in values
+                        if value is not None
+                    )
+                    if row_bytes > 8 * _MB:
+                        raise SplitFailure(
+                            "atomic_excel_row_too_large",
+                            f"Excel row {sheet_bounds.name}!{row_index} is too large to split safely",
+                        )
+                    if rows > 0 and (
+                        rows + 1 > target_rows
+                        or cells + row_cells > target_cells
+                        or estimated_bytes + row_bytes > target_bytes
+                    ):
+                        finish_plan()
+                    if rows == 0:
+                        row_start = row_index
+                    row_end = row_index
+                    rows += 1
+                    cells += row_cells
+                    estimated_bytes += row_bytes
+                finish_plan()
+            finally:
+                source_book.close()
+                if formula_book is not None:
+                    formula_book.close()
+    return plans
+
+
+def _iter_xlsx_window_rows(
+    source_sheet: Any,
+    *,
+    formula_sheet: Any | None,
+    column_start: int,
+    column_end: int,
+    repeated_anchor_count: int,
+    selected_merges: Sequence[tuple[int, int, int, int]],
+    max_row: int,
+) -> Iterator[tuple[int, tuple[Any, ...]]]:
+    merge_starts: dict[int, list[tuple[int, tuple[int, int, int, int]]]] = {}
+    merge_ends: dict[int, list[int]] = {}
+    for merge_index, merge_range in enumerate(selected_merges):
+        min_row, max_merge_row, _min_column, _max_column = merge_range
+        merge_starts.setdefault(min_row, []).append((merge_index, merge_range))
+        merge_ends.setdefault(max_merge_row, []).append(merge_index)
+    active_merges: dict[int, tuple[int, int, int, int]] = {}
+    merge_values: dict[int, Any] = {}
+
+    row_args = {
+        "min_row": 1,
+        "max_row": max_row,
+        "min_col": 1 if repeated_anchor_count else column_start,
+        "max_col": column_end,
+    }
+    formula_rows = (
+        formula_sheet.iter_rows(**row_args) if formula_sheet is not None else None
+    )
+    for row_index, row in enumerate(source_sheet.iter_rows(**row_args), start=1):
+        for merge_index, merge_range in merge_starts.get(row_index, ()):
+            active_merges[merge_index] = merge_range
+        raw_values = [cell.value for cell in row]
+        if formula_rows is not None:
+            formula_row = next(formula_rows)
+            for index, formula_cell in enumerate(formula_row):
+                formula = formula_cell.value
+                if (
+                    raw_values[index] is None
+                    and isinstance(formula, str)
+                    and formula.startswith("=")
+                ):
+                    raw_values[index] = formula
+        for merge_index, merge_range in active_merges.items():
+            min_row, _max_row, min_column, max_column_for_merge = merge_range
+            if row_index == min_row and min_column <= len(raw_values):
+                merge_values[merge_index] = raw_values[min_column - 1]
+            merged_value = merge_values.get(merge_index)
+            if merged_value is None:
+                continue
+            for column in range(
+                max(1, min_column), min(column_end, max_column_for_merge) + 1
+            ):
+                if raw_values[column - 1] is None:
+                    raw_values[column - 1] = merged_value
+        if repeated_anchor_count:
+            values = (
+                tuple(raw_values[:repeated_anchor_count])
+                + tuple(raw_values[column_start - 1 : column_end])
+            )
+        else:
+            values = tuple(raw_values)
+        for merge_index in merge_ends.get(row_index, ()):
+            active_merges.pop(merge_index, None)
+            merge_values.pop(merge_index, None)
+        if any(value is not None for value in values):
+            yield row_index, values
 
 
 def _xlsx_sheet_count(source: Path) -> int:

@@ -47,3 +47,14 @@ test('answer display ignores superseded answer events', () => {
   assert.match(source, /e\.type === 'answer' && !e\.superseded/)
   assert.match(source, /const answerEvents = result\.filter\(\(e: any\) => e\.type === 'answer' && !e\.superseded\)/)
 })
+
+test('Claude SDK live process output uses a bounded projection without rebuilding history', () => {
+  assert.match(source, /LiveProcessPreview/)
+  assert.match(source, /usesClaudeSDKTerminalDelivery/)
+  assert.match(source, /liveProjection\.value\.interactiveEvents/)
+  assert.match(
+    source,
+    /if \(\s*usesClaudeSDKTerminalDelivery\.value[\s\S]*!isConversationDone\.value[\s\S]*liveProjection\.value[\s\S]*\) \{[\s\S]*return interactive;/,
+  )
+  assert.match(source, /const result = buildFullEventList\(stream\);/)
+})

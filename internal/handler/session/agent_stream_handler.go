@@ -101,6 +101,7 @@ func (h *AgentStreamHandler) Subscribe() {
 	// Subscribe to all agent streaming events on the dedicated EventBus
 	h.eventBus.On(event.EventAgentThought, h.handleThought)
 	h.eventBus.On(event.EventAgentProgress, h.handleAgentProgress)
+	h.eventBus.On(event.EventChatQueueStatus, h.handleQueueStatus)
 	h.eventBus.On(event.EventAgentToolCall, h.handleToolCall)
 	h.eventBus.On(event.EventAgentToolResult, h.handleToolResult)
 	h.eventBus.On(event.EventAgentReferences, h.handleReferences)
@@ -113,6 +114,37 @@ func (h *AgentStreamHandler) Subscribe() {
 	h.eventBus.On(event.EventToolApprovalResolved, h.handleToolApprovalResolved)
 	h.eventBus.On(event.EventMCPOAuthRequired, h.handleMCPOAuthRequired)
 	h.eventBus.On(event.EventMCPOAuthResolved, h.handleMCPOAuthResolved)
+}
+
+// handleQueueStatus persists queue position updates so disconnected clients can
+// resume the same accepted conversation without losing the waiting UI.
+func (h *AgentStreamHandler) handleQueueStatus(ctx context.Context, evt event.Event) error {
+	data, ok := evt.Data.(event.ChatQueueStatusData)
+	if !ok {
+		return nil
+	}
+	metadata := map[string]interface{}{
+		"state":            data.State,
+		"model_id":         data.ModelID,
+		"resource_pool_id": data.ResourcePoolID,
+		"position":         data.Position,
+		"waiting":          data.Waiting,
+		"active":           data.Active,
+		"max_concurrent":   data.MaxConcurrent,
+		"max_waiting":      data.MaxWaiting,
+		"queued_at_unix":   data.QueuedAtUnix,
+	}
+	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
+		ID:        evt.ID,
+		Type:      types.ResponseTypeQueueStatus,
+		Content:   "",
+		Done:      data.State == "admitted",
+		Timestamp: time.Now(),
+		Data:      metadata,
+	}); err != nil {
+		logger.GetLogger(h.ctx).Error("Append chat queue status event failed", "error", err)
+	}
+	return nil
 }
 
 // handleThought handles agent thought events

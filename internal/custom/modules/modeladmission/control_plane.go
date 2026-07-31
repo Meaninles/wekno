@@ -18,9 +18,15 @@ import (
 )
 
 type ResourcePool struct {
-	ID                    string    `json:"id" gorm:"type:varchar(64);primaryKey"`
-	Name                  string    `json:"name" gorm:"type:varchar(128);not null"`
-	ResourceKind          string    `json:"resource_kind" gorm:"type:varchar(32);not null;index"`
+	ID           string `json:"id" gorm:"type:varchar(64);primaryKey"`
+	Name         string `json:"name" gorm:"type:varchar(128);not null"`
+	ResourceKind string `json:"resource_kind" gorm:"type:varchar(32);not null;index"`
+	// ChatMaxConcurrent and ChatMaxWaiting are conversation-level limits.
+	// nil means inherit the deployment-wide hot setting. They intentionally
+	// live beside the provider-call limits because a resource pool is the
+	// canonical identity of one actual model route across API replicas.
+	ChatMaxConcurrent     *int      `json:"chat_max_concurrent" gorm:"column:chat_max_concurrent"`
+	ChatMaxWaiting        *int      `json:"chat_max_waiting" gorm:"column:chat_max_waiting"`
 	MaxInflight           int       `json:"max_inflight" gorm:"not null"`
 	MaxBackgroundInflight int       `json:"max_background_inflight" gorm:"not null"`
 	InteractiveReserve    int       `json:"interactive_reserve" gorm:"not null"`
@@ -346,6 +352,69 @@ func (s *Store) Resolve(ctx context.Context, spec Spec, fallback Limit) (Resolve
 	return policy, nil
 }
 
+// ResolveResourcePool returns the control-plane pool for an actual model.
+// Reconciliation normally guarantees the binding exists. During the narrow
+// startup window before reconciliation (or for a newly-created model), the
+// deterministic auto-pool identity still keeps every API replica on the same
+// conversation queue while inheriting global queue limits.
+func (s *Store) ResolveResourcePool(
+	ctx context.Context,
+	model *types.Model,
+) (*ResourcePool, error) {
+	if model == nil {
+		return nil, errors.New("model is required")
+	}
+	fingerprint := RouteFingerprint(model)
+	fallback := &ResourcePool{
+		ID:           AutoPoolID(fingerprint),
+		Name:         actualModelName(model),
+		ResourceKind: string(kindForModelType(model.Type)),
+		State:        "enabled",
+	}
+	if s == nil || s.db == nil {
+		return fallback, nil
+	}
+
+	var binding ResourceBinding
+	err := s.db.WithContext(ctx).
+		Where("model_id = ? AND model_tenant_id = ?", model.ID, model.TenantID).
+		First(&binding).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return fallback, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load model resource binding: %w", err)
+	}
+
+	var pool ResourcePool
+	if err := s.db.WithContext(ctx).
+		Where("id = ?", binding.ResourcePoolID).
+		First(&pool).Error; err != nil {
+		return nil, fmt.Errorf("load model resource pool %s: %w", binding.ResourcePoolID, err)
+	}
+	if pool.State != "" && pool.State != "enabled" {
+		return nil, fmt.Errorf("model resource pool %s is %s", pool.ID, pool.State)
+	}
+	return &pool, nil
+}
+
+// GetResourcePool reloads one pool without using the admission-policy cache.
+// Chat queue waiters call this while polling so an administrator's limit edit
+// affects already-waiting conversations within one poll interval.
+func (s *Store) GetResourcePool(ctx context.Context, poolID string) (*ResourcePool, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("model admission database is unavailable")
+	}
+	var pool ResourcePool
+	if err := s.db.WithContext(ctx).Where("id = ?", poolID).First(&pool).Error; err != nil {
+		return nil, err
+	}
+	if pool.State != "" && pool.State != "enabled" {
+		return nil, fmt.Errorf("model resource pool %s is %s", pool.ID, pool.State)
+	}
+	return &pool, nil
+}
+
 func resolvedBuiltinPolicy(
 	poolID string,
 	policy builtinPolicyValue,
@@ -582,6 +651,14 @@ func ValidatePool(pool *ResourcePool) error {
 	}
 	if pool.MaxInflight < 1 || pool.MaxInflight > 1024 {
 		return errors.New("max_inflight must be between 1 and 1024")
+	}
+	if pool.ChatMaxConcurrent != nil &&
+		(*pool.ChatMaxConcurrent < 1 || *pool.ChatMaxConcurrent > 4096) {
+		return errors.New("chat_max_concurrent must be null or between 1 and 4096")
+	}
+	if pool.ChatMaxWaiting != nil &&
+		(*pool.ChatMaxWaiting < 0 || *pool.ChatMaxWaiting > 100000) {
+		return errors.New("chat_max_waiting must be null or between 0 and 100000")
 	}
 	if pool.MaxBackgroundInflight < 0 || pool.MaxBackgroundInflight > pool.MaxInflight {
 		return errors.New("max_background_inflight must be between 0 and max_inflight")

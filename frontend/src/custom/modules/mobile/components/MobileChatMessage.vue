@@ -32,6 +32,7 @@ import { renderMobileMarkdown } from "../mobileMarkdown";
 import type { MobileResourceChip } from "../utils";
 import { downloadBlob, formatFileSize } from "../utils";
 import type { GeneralAgentArtifactFile, GeneralAgentArtifactsData, StructuredAnalysisData } from "@/types/tool-results";
+import ChatQueueStatusCard from "@/custom/modules/chatqueue/ChatQueueStatusCard.vue";
 import {
   buildCitedSourceReferenceItems,
   buildSourceReferenceItems,
@@ -48,6 +49,7 @@ const props = defineProps<{
   shareMode?: boolean;
   shareToken?: string;
 }>();
+const emit = defineEmits<{ "cancel-queue": [messageId?: string] }>();
 
 type StructuredAnalysisBlock = {
   display_type: "structured_analysis_result";
@@ -1042,6 +1044,15 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-else class="assistant-card">
+        <ChatQueueStatusCard
+          v-if="
+            !message.is_completed &&
+            (message.queue_status?.state === 'waiting' ||
+              message.queue_status?.state === 'admitted')
+          "
+          :status="message.queue_status"
+          @cancel="emit('cancel-queue', message.id)"
+        />
         <div v-if="shouldShowThinking" class="thinking-card">
           <div class="thinking-title">正在思考</div>
           <div v-if="agentStepPreviews.length" class="thinking-steps">

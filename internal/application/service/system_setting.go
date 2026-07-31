@@ -187,6 +187,38 @@ var registry = map[string]settingSpec{
 		Description: "全平台所有租户、所有知识库衍生任务共享的持续 Token 预算（TPM）。" +
 			"默认 20000，修改后跨实例动态生效；普通对话不计入，也不能借用该预算。",
 	},
+	"chat.queue.enabled": {
+		Type:     "bool",
+		EnvName:  "WEKNORA_CHAT_QUEUE_ENABLED",
+		Default:  true,
+		Category: "chat_queue",
+		Description: "是否启用聊天模型的会话级并发队列。默认开启；修改后通过 Redis 通知所有 API 实例，" +
+			"无需重启。关闭时新对话不再占用会话并发槽。",
+	},
+	"chat.queue.default_max_concurrent": {
+		Type:     "int",
+		EnvName:  "WEKNORA_CHAT_QUEUE_DEFAULT_MAX_CONCURRENT",
+		Default:  int64(8),
+		Category: "chat_queue",
+		Description: "每个实际聊天模型资源池默认允许同时执行的最大会话数，范围 1–4096。" +
+			"资源池可单独覆盖；默认 8，修改后对新请求和正在等待的会话立即生效。",
+	},
+	"chat.queue.default_max_waiting": {
+		Type:     "int",
+		EnvName:  "WEKNORA_CHAT_QUEUE_DEFAULT_MAX_WAITING",
+		Default:  int64(500),
+		Category: "chat_queue",
+		Description: "每个实际聊天模型资源池默认允许等待的会话数，范围 0–100000。" +
+			"资源池可单独覆盖；达到上限时新请求会收到“系统队列已满”，且不会创建消息。",
+	},
+	"chat.queue.max_waiting_per_user": {
+		Type:     "int",
+		EnvName:  "WEKNORA_CHAT_QUEUE_MAX_WAITING_PER_USER",
+		Default:  int64(3),
+		Category: "chat_queue",
+		Description: "单个用户在全平台所有聊天模型队列中可同时等待的会话数，范围 1–1000。" +
+			"默认 3；达到上限时只拒绝该用户的新排队请求，不影响其已执行或已排队会话。",
+	},
 }
 
 // systemSettingService wires the repository, audit log, and (P2)
@@ -1202,6 +1234,30 @@ func validateRegistryEntry(key string, rawValue any) error {
 		}
 		if n > 2_000_000 {
 			return errors.New("derivative TPM must not exceed 2000000")
+		}
+	case "chat.queue.default_max_concurrent":
+		n, err := coerceToPositiveInt64(rawValue)
+		if err != nil {
+			return err
+		}
+		if n < 1 || n > 4096 {
+			return errors.New("chat queue max concurrent must be between 1 and 4096")
+		}
+	case "chat.queue.default_max_waiting":
+		n, err := coerceToPositiveInt64(rawValue)
+		if err != nil {
+			return err
+		}
+		if n < 0 || n > 100000 {
+			return errors.New("chat queue max waiting must be between 0 and 100000")
+		}
+	case "chat.queue.max_waiting_per_user":
+		n, err := coerceToPositiveInt64(rawValue)
+		if err != nil {
+			return err
+		}
+		if n < 1 || n > 1000 {
+			return errors.New("per-user chat queue limit must be between 1 and 1000")
 		}
 	case "ssrf.whitelist":
 		// Coerce into the same shape encodeForType produced. We don't

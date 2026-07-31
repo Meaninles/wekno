@@ -47,6 +47,7 @@ type qaRequestContext struct {
 	channel                string                    // Source channel: "web", "api", "im", etc.
 	attachments            types.MessageAttachments  // Processed file attachments
 	originalInputFiles     []types.OriginalInputFile // Runtime-only original file descriptors for Claude SDK agents
+	chatQueueTicket        ChatQueueTicket           // Conversation-level model-pool admission lease
 
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
@@ -515,7 +516,7 @@ type sseStreamContext struct {
 }
 
 // setupSSEStream sets up the SSE streaming context
-func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *sseStreamContext {
+func (h *Handler) setupSSEStream(reqCtx *qaRequestContext) *sseStreamContext {
 	// Set SSE headers
 	setSSEHeaders(reqCtx.c)
 
@@ -523,13 +524,7 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *
 	h.writeAgentQueryEvent(reqCtx.ctx, reqCtx.sessionID, reqCtx.assistantMessage.ID)
 
 	// Base context for async work: when using shared agent, use source tenant for model/KB/MCP resolution
-	baseCtx := reqCtx.ctx
-	if reqCtx.effectiveTenantID != 0 && h.tenantService != nil {
-		if tenant, err := h.tenantService.GetTenantByID(reqCtx.ctx, reqCtx.effectiveTenantID); err == nil && tenant != nil {
-			baseCtx = context.WithValue(context.WithValue(reqCtx.ctx, types.TenantIDContextKey, reqCtx.effectiveTenantID), types.TenantInfoContextKey, tenant)
-			logger.Infof(reqCtx.ctx, "Using effective tenant %d for shared agent (model/KB/MCP)", reqCtx.effectiveTenantID)
-		}
-	}
+	baseCtx := h.effectiveQAContext(reqCtx)
 
 	// Create EventBus and cancellable context
 	eventBus := event.NewEventBus()
@@ -560,18 +555,53 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *
 	h.setupStreamHandler(asyncCtx, reqCtx.sessionID, reqCtx.assistantMessage.ID,
 		reqCtx.requestID, reqCtx.receivedAt, reqCtx.assistantMessage, eventBus)
 
-	// Generate title if needed
-	if generateTitle && reqCtx.session.Title == "" {
-		// Use the same model as the conversation for title generation
-		modelID := ""
-		if reqCtx.customAgent != nil && reqCtx.customAgent.Config.ModelID != "" {
-			modelID = reqCtx.customAgent.Config.ModelID
-		}
-		logger.Infof(reqCtx.ctx, "Session has no title, starting async title generation, session ID: %s, model: %s", reqCtx.sessionID, modelID)
-		h.sessionService.GenerateTitleAsync(asyncCtx, reqCtx.session, reqCtx.query, modelID, eventBus)
-	}
-
 	return streamCtx
+}
+
+func (h *Handler) effectiveQAContext(reqCtx *qaRequestContext) context.Context {
+	baseCtx := reqCtx.ctx
+	if reqCtx.effectiveTenantID != 0 && h.tenantService != nil {
+		if tenant, err := h.tenantService.GetTenantByID(
+			reqCtx.ctx, reqCtx.effectiveTenantID,
+		); err == nil && tenant != nil {
+			baseCtx = context.WithValue(
+				context.WithValue(
+					reqCtx.ctx, types.TenantIDContextKey, reqCtx.effectiveTenantID,
+				),
+				types.TenantInfoContextKey,
+				tenant,
+			)
+			logger.Infof(
+				reqCtx.ctx,
+				"Using effective tenant %d for shared agent (model/KB/MCP)",
+				reqCtx.effectiveTenantID,
+			)
+		}
+	}
+	return baseCtx
+}
+
+func (h *Handler) startTitleGeneration(
+	reqCtx *qaRequestContext,
+	streamCtx *sseStreamContext,
+	generateTitle bool,
+) {
+	if !generateTitle || reqCtx.session.Title != "" {
+		return
+	}
+	modelID := ""
+	if reqCtx.customAgent != nil && reqCtx.customAgent.Config.ModelID != "" {
+		modelID = reqCtx.customAgent.Config.ModelID
+	}
+	logger.Infof(
+		reqCtx.ctx,
+		"Session has no title, starting async title generation, session ID: %s, model: %s",
+		reqCtx.sessionID,
+		modelID,
+	)
+	h.sessionService.GenerateTitleAsync(
+		streamCtx.asyncCtx, reqCtx.session, reqCtx.query, modelID, streamCtx.eventBus,
+	)
 }
 
 // SearchKnowledge godoc
@@ -747,6 +777,36 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	ctx := reqCtx.ctx
 	sessionID := reqCtx.sessionID
 
+	agentModelID := ""
+	if reqCtx.customAgent != nil {
+		agentModelID = reqCtx.customAgent.Config.ModelID
+	}
+	principalID := types.SessionOwnerIDFromContext(ctx)
+	if principalID == "" && reqCtx.session != nil {
+		principalID = reqCtx.session.UserID
+	}
+	queueCtx := h.effectiveQAContext(reqCtx)
+	queueTenantID := reqCtx.session.TenantID
+	if reqCtx.effectiveTenantID != 0 {
+		queueTenantID = reqCtx.effectiveTenantID
+	}
+	ticket, rejection, queueErr := reserveChatQueue(queueCtx, ChatQueueAdmissionRequest{
+		TenantID:         queueTenantID,
+		PrincipalID:      principalID,
+		RequestID:        reqCtx.requestID,
+		SessionID:        reqCtx.sessionID,
+		SummaryModelID:   reqCtx.summaryModelID,
+		AgentModelID:     agentModelID,
+		KnowledgeBaseIDs: append([]string(nil), reqCtx.knowledgeBaseIDs...),
+		KnowledgeIDs:     append([]string(nil), reqCtx.knowledgeIDs...),
+	})
+	if rejection != nil || queueErr != nil {
+		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
+		writeChatQueueRejection(reqCtx.c, rejection, queueErr)
+		return
+	}
+	reqCtx.chatQueueTicket = ticket
+
 	// Persist the input-bar state used for this request so reopening the
 	// session can rehydrate agent / model / KB / web-search / MCP selections.
 	// This is a pure UI memo (no behavioural effect) and runs in a goroutine
@@ -767,6 +827,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			},
 		}); err != nil {
 			logger.Errorf(ctx, "Failed to emit agent query event: %v", err)
+			if ticket != nil {
+				ticket.Cancel(context.WithoutCancel(ctx))
+			}
 			h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 			return
 		}
@@ -775,6 +838,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	// Create user message
 	userMsg, err := h.createUserMessage(ctx, sessionID, reqCtx.query, reqCtx.requestID, reqCtx.mentionedItems, convertImageAttachments(reqCtx.images), reqCtx.attachments, reqCtx.channel)
 	if err != nil {
+		if ticket != nil {
+			ticket.Cancel(context.WithoutCancel(ctx))
+		}
 		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
@@ -784,6 +850,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	// Create assistant message
 	assistantMessagePtr, err := h.createAssistantMessage(ctx, reqCtx.assistantMessage)
 	if err != nil {
+		if ticket != nil {
+			ticket.Cancel(context.WithoutCancel(ctx))
+		}
 		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
@@ -797,7 +866,23 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	}
 
 	// Setup SSE stream
-	streamCtx := h.setupSSEStream(reqCtx, generateTitle)
+	streamCtx := h.setupSSEStream(reqCtx)
+
+	// A conversation slot belongs to the whole stream, not just the initial
+	// service call. KnowledgeQA may return while its pipeline still streams,
+	// therefore only terminal events release the cross-replica lease.
+	if ticket != nil {
+		var releaseOnce sync.Once
+		release := func(_ context.Context, _ event.Event) error {
+			releaseOnce.Do(func() {
+				ticket.Release(context.WithoutCancel(streamCtx.asyncCtx))
+			})
+			return nil
+		}
+		streamCtx.eventBus.On(event.EventAgentComplete, release)
+		streamCtx.eventBus.On(event.EventError, release)
+		streamCtx.eventBus.On(event.EventStop, release)
+	}
 
 	// Normal mode: register completion handler on EventAgentFinalAnswer
 	// (Agent mode handles completion in the defer block instead)
@@ -858,6 +943,16 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				logger.ErrorWithFields(streamCtx.asyncCtx,
 					errors.NewInternalServerError(fmt.Sprintf("%s service panicked: %v\n%s", stageName, r, string(buf))),
 					map[string]interface{}{"session_id": sessionID})
+				streamCtx.eventBus.Emit(context.WithoutCancel(streamCtx.asyncCtx), event.Event{
+					Type:      event.EventError,
+					SessionID: sessionID,
+					Data: event.ErrorData{
+						Error:     "对话执行发生内部错误，请稍后重试",
+						ErrorCode: "CHAT_EXECUTION_PANIC",
+						Stage:     "chat_execution",
+						SessionID: sessionID,
+					},
+				})
 			}
 			// Agent mode: complete the assistant message in defer (normal mode does it via event handler)
 			if mode == qaModeAgent {
@@ -875,6 +970,58 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			}
 			h.cleanupClaudeOriginalInputFiles(streamCtx.asyncCtx, reqCtx.originalInputFiles)
 		}()
+
+		if ticket != nil {
+			waitErr := ticket.Wait(streamCtx.asyncCtx, func(snapshot ChatQueueSnapshot) {
+				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
+					Type:      event.EventChatQueueStatus,
+					SessionID: sessionID,
+					RequestID: reqCtx.requestID,
+					Data: event.ChatQueueStatusData{
+						State:          snapshot.State,
+						ModelID:        snapshot.ModelID,
+						ResourcePoolID: snapshot.ResourcePoolID,
+						Position:       snapshot.Position,
+						Waiting:        snapshot.Waiting,
+						Active:         snapshot.Active,
+						MaxConcurrent:  snapshot.MaxConcurrent,
+						MaxWaiting:     snapshot.MaxWaiting,
+						QueuedAtUnix:   snapshot.QueuedAtUnix,
+					},
+				})
+			})
+			if waitErr != nil {
+				if streamCtx.asyncCtx.Err() != nil {
+					logger.Infof(
+						streamCtx.asyncCtx,
+						"Queued QA cancelled before admission for session: %s",
+						sessionID,
+					)
+					return
+				}
+				logger.Errorf(
+					streamCtx.asyncCtx,
+					"Chat queue wait failed for session %s: %v",
+					sessionID,
+					waitErr,
+				)
+				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
+					Type:      event.EventError,
+					SessionID: sessionID,
+					Data: event.ErrorData{
+						Error:     "聊天排队等待失败，请稍后重试",
+						ErrorCode: "CHAT_QUEUE_WAIT_FAILED",
+						Stage:     "chat_queue_wait",
+						SessionID: sessionID,
+					},
+				})
+				return
+			}
+		}
+
+		// Title generation is deliberately delayed until the conversation is
+		// admitted so queued turns consume no model capacity.
+		h.startTitleGeneration(reqCtx, streamCtx, generateTitle)
 
 		// Run VLM image analysis if applicable
 		h.runVLMAnalysisIfNeeded(streamCtx, reqCtx, mode)

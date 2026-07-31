@@ -226,7 +226,8 @@ func (h *Handler) UpdateResourcePool(c *gin.Context) {
 	result := h.db().WithContext(c).Model(&ResourcePool{}).
 		Where("id = ? AND policy_version = ?", input.ID, expected).
 		Select(
-			"name", "resource_kind", "max_inflight", "max_background_inflight",
+			"name", "resource_kind", "chat_max_concurrent", "chat_max_waiting",
+			"max_inflight", "max_background_inflight",
 			"interactive_reserve", "tenant_guaranteed", "tenant_burst",
 			"document_guaranteed", "document_burst", "rpm", "tpm", "token_burst",
 			"request_timeout_seconds", "circuit_threshold", "circuit_window_seconds",
@@ -325,6 +326,8 @@ func (h *Handler) ResetResourcePool(c *gin.Context) {
 		}
 	}
 	old.MaxInflight = policy.limit.Concurrency
+	old.ChatMaxConcurrent = nil
+	old.ChatMaxWaiting = nil
 	old.MaxBackgroundInflight = policy.limit.Background
 	old.InteractiveReserve = policy.reserve
 	old.TenantBurst = policy.limit.PerTenant
@@ -336,6 +339,8 @@ func (h *Handler) ResetResourcePool(c *gin.Context) {
 	old.UpdatedAt = time.Now().UTC()
 	result := h.db().WithContext(c).Model(&ResourcePool{}).
 		Where("id = ? AND policy_version = ?", old.ID, expected).Updates(map[string]any{
+		"chat_max_concurrent":     nil,
+		"chat_max_waiting":        nil,
 		"max_inflight":            old.MaxInflight,
 		"max_background_inflight": old.MaxBackgroundInflight,
 		"interactive_reserve":     old.InteractiveReserve,

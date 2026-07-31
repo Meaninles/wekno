@@ -654,7 +654,7 @@ func enqueueWikiTrigger(
 	}
 	t := asynq.NewTask(types.TypeWikiIngest, payloadBytes)
 	opts := []asynq.Option{
-		asynq.Queue("low"),
+		asynq.Queue(types.QueueWikiControl),
 		asynq.MaxRetry(wikiIngestMaxRetry),
 		asynq.Timeout(wikiIngestTaskTimeout),
 		asynq.ProcessIn(delay),

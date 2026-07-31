@@ -61,7 +61,11 @@ var genericOmitFieldsOnUpdate = []string{
 	"ProcessingWorkflowID",
 	"ProcessingFanout",
 	"PendingSubtasksCount",
+	"CoreStatus",
+	"CoreCompletedAt",
 	"EnrichmentStatus",
+	"EnrichmentCompletedAt",
+	"EnrichmentErrorSummary",
 	"WikiStatus",
 	"WikiErrorMessage",
 	"ProcessedAt",
@@ -75,6 +79,8 @@ var atomicFinalizeOmitFields = []string{
 	"PendingSubtasksCount",
 	"ProcessingWorkflowID",
 	"EnrichmentStatus",
+	"EnrichmentCompletedAt",
+	"EnrichmentErrorSummary",
 	"WikiStatus",
 	"WikiErrorMessage",
 }
@@ -85,6 +91,77 @@ var terminalKnowledgeStatuses = []string{
 	types.ParseStatusCancelling,
 	types.ParseStatusCancelled,
 	types.ParseStatusDeleting,
+}
+
+func normalizeKnowledgeLifecycleOnCreate(knowledge *types.Knowledge) {
+	if knowledge == nil || knowledge.CoreStatus != "" {
+		return
+	}
+	switch knowledge.ParseStatus {
+	case types.ParseStatusProcessing:
+		knowledge.CoreStatus = types.CoreStatusProcessing
+	case types.ParseStatusFinalizing, types.ParseStatusCompleted:
+		knowledge.CoreStatus = types.CoreStatusReady
+		completedAt := knowledge.UpdatedAt
+		if completedAt.IsZero() {
+			completedAt = time.Now()
+		}
+		knowledge.CoreCompletedAt = &completedAt
+	case types.ParseStatusFailed:
+		knowledge.CoreStatus = types.CoreStatusFailed
+	default:
+		knowledge.CoreStatus = types.CoreStatusPending
+	}
+}
+
+// normalizeKnowledgeLifecycleValues derives the public core/enrichment clocks
+// at the repository boundary. Callers still own the guarded state transition;
+// this function only keeps its related observability columns atomic with it.
+func normalizeKnowledgeLifecycleValues(values map[string]interface{}) {
+	if len(values) == 0 {
+		return
+	}
+	now := time.Now()
+	if updatedAt, ok := values["updated_at"].(time.Time); ok && !updatedAt.IsZero() {
+		now = updatedAt
+	}
+	if status, ok := values["parse_status"].(string); ok {
+		switch status {
+		case types.ParseStatusPending:
+			values["core_status"] = types.CoreStatusPending
+			values["core_completed_at"] = nil
+		case types.ParseStatusProcessing:
+			values["core_status"] = types.CoreStatusProcessing
+			values["core_completed_at"] = nil
+		case types.ParseStatusFinalizing:
+			// Core readiness is committed at the exact chunk/index transaction
+			// boundary. Later enrichment/finalizer transitions must preserve
+			// that earlier clock instead of moving it forward.
+		case types.ParseStatusCompleted:
+			// Synchronous FAQ/manual paths may have no separate indexed-core
+			// commit. Their terminal CAS is the readiness boundary.
+			if _, explicit := values["core_status"]; !explicit {
+				values["core_status"] = types.CoreStatusReady
+			}
+			if _, explicit := values["core_completed_at"]; !explicit {
+				values["core_completed_at"] = now
+			}
+		case types.ParseStatusFailed:
+			values["core_status"] = types.CoreStatusFailed
+			values["core_completed_at"] = nil
+		}
+	}
+	if status, ok := values["enrichment_status"].(string); ok {
+		switch status {
+		case types.EnrichmentStatusCompleted, types.EnrichmentStatusDegraded, types.EnrichmentStatusFailed:
+			if _, explicit := values["enrichment_completed_at"]; !explicit {
+				values["enrichment_completed_at"] = now
+			}
+		default:
+			values["enrichment_completed_at"] = nil
+			values["enrichment_error_summary"] = ""
+		}
+	}
 }
 
 // knowledgeRepository implements knowledge base and knowledge repository interface
@@ -102,6 +179,7 @@ func (r *knowledgeRepository) CreateKnowledge(ctx context.Context, knowledge *ty
 	if knowledge == nil {
 		return errors.New("create knowledge: knowledge is nil")
 	}
+	normalizeKnowledgeLifecycleOnCreate(knowledge)
 	return kbwritefence.WithActive(
 		ctx, r.db, knowledge.TenantID, knowledge.KnowledgeBaseID,
 		func(tx *gorm.DB) error {
@@ -126,6 +204,7 @@ func (r *knowledgeRepository) CreateKnowledgeTx(
 	if tx == nil || knowledge == nil {
 		return errors.New("create knowledge in transaction: dependencies are unavailable")
 	}
+	normalizeKnowledgeLifecycleOnCreate(knowledge)
 	if err := tx.WithContext(ctx).Create(knowledge).Error; err != nil {
 		return fmt.Errorf("create knowledge in transaction: %w", err)
 	}
@@ -305,6 +384,7 @@ func (r *knowledgeRepository) FinalizeKnowledgeWithStorage(
 	if storageDelta < 0 {
 		return false, errors.New("finalize knowledge storage: storage delta cannot be negative")
 	}
+	normalizeKnowledgeLifecycleOnCreate(knowledge)
 
 	var finalized bool
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -583,6 +663,7 @@ func (r *knowledgeRepository) UpdateKnowledgeColumns(
 	if len(values) == 0 {
 		return nil
 	}
+	normalizeKnowledgeLifecycleValues(values)
 	query := r.db.WithContext(ctx).Model(&types.Knowledge{}).
 		Where("id = ? AND parse_status <> ?", id, types.ParseStatusDeleting)
 	if nextStatus, ok := values["parse_status"]; ok {
@@ -617,6 +698,7 @@ func (r *knowledgeRepository) CompareAndSwapKnowledgeState(
 	if len(values) == 0 {
 		return false, errors.New("compare-and-swap knowledge state: update values are required")
 	}
+	normalizeKnowledgeLifecycleValues(values)
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
 		Where(
@@ -655,6 +737,7 @@ func (r *knowledgeRepository) CompareAndSwapKnowledgeGeneration(
 	if len(values) == 0 {
 		return false, errors.New("compare-and-swap knowledge generation: update values are required")
 	}
+	normalizeKnowledgeLifecycleValues(values)
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
 		Where(
@@ -691,6 +774,7 @@ func (r *knowledgeRepository) CompareAndSwapDocumentProcessing(
 	if len(values) == 0 {
 		return false, errors.New("compare-and-swap document processing: update values are required")
 	}
+	normalizeKnowledgeLifecycleValues(values)
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
 		Where(
@@ -732,6 +816,7 @@ func (r *knowledgeRepository) CompareAndSwapBatchReparseSnapshot(
 	if len(values) == 0 {
 		return false, errors.New("compare-and-swap batch reparse snapshot: update values are required")
 	}
+	normalizeKnowledgeLifecycleValues(values)
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
 		Where(
@@ -775,6 +860,7 @@ func (r *knowledgeRepository) CompareAndSwapKnowledgeProcessingGeneration(
 			return false, fmt.Errorf("compare-and-swap processing generation: terminal status %q is not allowed", status)
 		}
 	}
+	normalizeKnowledgeLifecycleValues(values)
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
 		Where(
@@ -1205,6 +1291,7 @@ func (r *knowledgeRepository) FailDocumentProcessingGeneration(
 		expectedGeneration == "" || expectedOwner == "" || len(values) == 0 {
 		return false, errors.New("fail document processing generation: complete expected identity is required")
 	}
+	normalizeKnowledgeLifecycleValues(values)
 	result := r.db.WithContext(ctx).
 		Model(&types.Knowledge{}).
 		Where("tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND processed_at IS NULL",
@@ -1286,6 +1373,7 @@ func (r *knowledgeRepository) FinalizeKnowledgeWithStorageOwned(
 	if storageDelta < 0 {
 		return false, errors.New("finalize owned knowledge storage: storage delta cannot be negative")
 	}
+	normalizeKnowledgeLifecycleOnCreate(knowledge)
 
 	var finalized bool
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -1784,6 +1872,23 @@ func (r *knowledgeRepository) finalizeSubtaskGenerationItem(
 		default:
 			aggregateStatus = types.EnrichmentStatusCompleted
 		}
+		errorSummary := ""
+		if aggregateStatus == types.EnrichmentStatusFailed ||
+			aggregateStatus == types.EnrichmentStatusDegraded {
+			var details []string
+			if err := tx.Model(&enrichmentoutcome.Outcome{}).
+				Where(
+					"tenant_id = ? AND knowledge_id = ? AND knowledge_base_id = ? AND processing_generation = ? AND status IN ? AND detail <> ''",
+					tenantID, id, expectedKnowledgeBaseID, expectedGeneration,
+					[]string{enrichmentoutcome.StatusFailed, enrichmentoutcome.StatusDegraded},
+				).
+				Order("completed_at ASC").
+				Limit(8).
+				Pluck("detail", &details).Error; err != nil {
+				return err
+			}
+			errorSummary = enrichmentoutcome.NormalizeDetail(strings.Join(details, "; "))
+		}
 
 		settlement := tx.Model(&types.Knowledge{}).
 			Where(
@@ -1791,8 +1896,10 @@ func (r *knowledgeRepository) finalizeSubtaskGenerationItem(
 				tenantID, id, expectedKnowledgeBaseID, expectedGeneration, types.ParseStatusFinalizing,
 			).
 			Updates(map[string]interface{}{
-				"enrichment_status": aggregateStatus,
-				"updated_at":        now,
+				"enrichment_status":        aggregateStatus,
+				"enrichment_completed_at":  now,
+				"enrichment_error_summary": errorSummary,
+				"updated_at":               now,
 			})
 		if settlement.Error != nil {
 			return settlement.Error

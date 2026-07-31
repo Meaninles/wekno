@@ -506,6 +506,10 @@ func EnqueuePostProcessContext(
 		ctx,
 		enqueuer,
 		task,
+		// The orchestrator only converts the already-committed fanout plan
+		// into PostgreSQL-authoritative derivative WorkItems. Keep it on the
+		// parse/background lane so a full derivative-worker outage cannot
+		// strand the plan in Redis before durable leaf rows exist.
 		types.QueueDefault,
 		PostProcessTaskID(payload.KnowledgeID, payload.ProcessingGeneration),
 		asynq.MaxRetry(3),
@@ -647,7 +651,7 @@ func DispatchFanout(
 					ctx,
 					enqueuer,
 					task,
-					types.QueueDefault,
+					types.QueueDerivative,
 					DataTableSummaryTaskID(plan.KnowledgeID, plan.ProcessingGeneration),
 					asynq.MaxRetry(3),
 					asynq.Timeout(GenerationTaskTimeout),

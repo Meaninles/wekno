@@ -100,6 +100,42 @@ func TestSemanticModelFailureStillConsumesNormalRetryBudget(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestAdmissionGrantedHookRunsOnlyAfterCapacityIsAcquired(t *testing.T) {
+	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
+	spec := Spec{Kind: KindChat, Domain: "hook-boundary", TenantID: 1}
+	firstLease, err := manager.Acquire(context.Background(), spec)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	ctx := WithAdmissionGrantedHook(context.Background(), func(context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	wrapped := WrapChat(manager, spec, &streamTestChat{})
+	_, err = wrapped.Chat(ctx, nil, nil)
+	require.Error(t, err)
+	require.Zero(t, calls.Load())
+
+	firstLease.Release()
+	_, err = wrapped.Chat(ctx, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, calls.Load())
+}
+
+func TestAdmissionGrantedHookFailureReleasesCapacityWithoutCallingProvider(t *testing.T) {
+	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
+	spec := Spec{Kind: KindChat, Domain: "hook-failure", TenantID: 1}
+	hookErr := errors.New("persist durable provider boundary")
+	ctx := WithAdmissionGrantedHook(context.Background(), func(context.Context) error {
+		return hookErr
+	})
+	wrapped := WrapChat(manager, spec, &streamTestChat{})
+
+	_, err := wrapped.Chat(ctx, nil, nil)
+	require.ErrorIs(t, err, hookErr)
+	require.EqualValues(t, 0, manager.Snapshot().InFlight)
+}
+
 func TestChatStreamHoldsAdmissionUntilProducerCloses(t *testing.T) {
 	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
 	inner := &streamTestChat{stream: make(chan types.StreamResponse, 1)}

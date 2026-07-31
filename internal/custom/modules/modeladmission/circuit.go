@@ -276,12 +276,15 @@ func (m *Manager) acquireCircuit(
 	spec Spec,
 	keys leaseKeys,
 	token string,
+	policy circuitPolicy,
 ) (bool, error) {
-	if m == nil || !m.config.CircuitEnabled {
+	if m == nil || !policy.enabled {
 		return false, nil
 	}
 	if m.redis != nil {
-		allowed, retryAfter, probe, err := m.acquireCircuitRedis(ctx, keys, token)
+		allowed, retryAfter, probe, err := m.acquireCircuitRedis(
+			ctx, keys, token, policy,
+		)
 		if err == nil {
 			if !allowed {
 				m.circuitReject.Add(1)
@@ -294,20 +297,21 @@ func (m *Manager) acquireCircuit(
 			return false, fmt.Errorf("%w: circuit state: %v", ErrAdmissionBackendUnavailable, err)
 		}
 	}
-	return m.acquireCircuitLocal(spec, token)
+	return m.acquireCircuitLocal(spec, token, policy)
 }
 
 func (m *Manager) acquireCircuitRedis(
 	ctx context.Context,
 	keys leaseKeys,
 	token string,
+	policy circuitPolicy,
 ) (bool, time.Duration, bool, error) {
 	result, err := circuitGateScript.Run(
 		ctx,
 		m.redis,
 		[]string{keys.circuit, keys.probe, keys.total},
 		token,
-		m.config.CircuitProbeTTL.Milliseconds(),
+		policy.probeTTL.Milliseconds(),
 	).Slice()
 	if err != nil {
 		return false, 0, false, err
@@ -330,7 +334,11 @@ func (m *Manager) acquireCircuitRedis(
 	return allowed == 1, time.Duration(retryMillis) * time.Millisecond, probe == 1, nil
 }
 
-func (m *Manager) acquireCircuitLocal(spec Spec, token string) (bool, error) {
+func (m *Manager) acquireCircuitLocal(
+	spec Spec,
+	token string,
+	policy circuitPolicy,
+) (bool, error) {
 	m.localMu.Lock()
 	defer m.localMu.Unlock()
 
@@ -350,14 +358,14 @@ func (m *Manager) acquireCircuitLocal(spec Spec, token string) (bool, error) {
 			return false, &CircuitOpenError{Kind: spec.Kind, RetryAfter: time.Until(state.probeUntil)}
 		}
 		state.probeToken = token
-		state.probeUntil = now.Add(m.config.CircuitProbeTTL)
+		state.probeUntil = now.Add(policy.probeTTL)
 		return true, nil
 	}
 	return false, nil
 }
 
 func circuitAccountKey(spec Spec) string {
-	return string(spec.Kind) + ":" + spec.Domain
+	return spec.Domain
 }
 
 type circuitOutcome string
@@ -393,13 +401,15 @@ func classifyCircuitOutcome(lease *Lease, callErr error) circuitOutcome {
 }
 
 func (m *Manager) recordCircuitResult(lease *Lease, callErr error) {
-	if m == nil || lease == nil || !m.config.CircuitEnabled {
+	if m == nil || lease == nil || !lease.circuitPolicy.enabled {
 		return
 	}
 	outcome := classifyCircuitOutcome(lease, callErr)
 
 	if m.redis != nil {
-		opened, err := m.recordCircuitRedis(lease.keys, lease.token, outcome)
+		opened, err := m.recordCircuitRedis(
+			lease.keys, lease.token, outcome, lease.circuitPolicy,
+		)
 		if err == nil {
 			if opened {
 				m.circuitOpened.Add(1)
@@ -408,7 +418,9 @@ func (m *Manager) recordCircuitResult(lease *Lease, callErr error) {
 		}
 		m.backendErrors.Add(1)
 	}
-	if m.recordCircuitLocal(lease.spec, lease.token, outcome) {
+	if m.recordCircuitLocal(
+		lease.spec, lease.token, outcome, lease.circuitPolicy,
+	) {
 		m.circuitOpened.Add(1)
 	}
 }
@@ -417,8 +429,9 @@ func (m *Manager) recordCircuitRedis(
 	keys leaseKeys,
 	token string,
 	outcome circuitOutcome,
+	policy circuitPolicy,
 ) (bool, error) {
-	retention := 2 * (m.config.CircuitWindow + m.config.CircuitOpen + m.config.CircuitProbeTTL)
+	retention := 2 * (policy.window + policy.open + policy.probeTTL)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	result, err := circuitResultScript.Run(
@@ -427,9 +440,9 @@ func (m *Manager) recordCircuitRedis(
 		[]string{keys.circuit, keys.probe},
 		token,
 		string(outcome),
-		m.config.CircuitThreshold,
-		m.config.CircuitWindow.Milliseconds(),
-		m.config.CircuitOpen.Milliseconds(),
+		policy.threshold,
+		policy.window.Milliseconds(),
+		policy.open.Milliseconds(),
 		retention.Milliseconds(),
 	).Slice()
 	if err != nil {
@@ -445,7 +458,12 @@ func (m *Manager) recordCircuitRedis(
 	return opened == 1, nil
 }
 
-func (m *Manager) recordCircuitLocal(spec Spec, token string, outcome circuitOutcome) bool {
+func (m *Manager) recordCircuitLocal(
+	spec Spec,
+	token string,
+	outcome circuitOutcome,
+	policy circuitPolicy,
+) bool {
 	m.localMu.Lock()
 	defer m.localMu.Unlock()
 
@@ -473,26 +491,26 @@ func (m *Manager) recordCircuitLocal(spec Spec, token string, outcome circuitOut
 		state.probeToken = ""
 		state.probeUntil = time.Time{}
 		state.failures = 0
-		state.windowUntil = now.Add(m.config.CircuitWindow)
-		state.openUntil = now.Add(m.config.CircuitOpen)
+		state.windowUntil = now.Add(policy.window)
+		state.openUntil = now.Add(policy.open)
 		return true
 	}
 	if !state.windowUntil.After(now) {
 		state.failures = 1
-		state.windowUntil = now.Add(m.config.CircuitWindow)
+		state.windowUntil = now.Add(policy.window)
 	} else {
 		state.failures++
 	}
-	if state.failures >= m.config.CircuitThreshold {
+	if state.failures >= policy.threshold {
 		state.failures = 0
-		state.openUntil = now.Add(m.config.CircuitOpen)
+		state.openUntil = now.Add(policy.open)
 		return true
 	}
 	return false
 }
 
 func (m *Manager) abandonCircuitProbe(spec Spec, keys leaseKeys, token string) {
-	if m == nil || !m.config.CircuitEnabled || token == "" {
+	if m == nil || token == "" {
 		return
 	}
 	if m.redis != nil {

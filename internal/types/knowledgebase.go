@@ -427,8 +427,26 @@ func (c VLMConfig) IsEnabled() bool {
 // These generated questions will be indexed separately to improve recall
 type QuestionGenerationConfig struct {
 	Enabled bool `yaml:"enabled"  json:"enabled"`
-	// Number of questions to generate per chunk (default: 3, max: 10)
+	// Number of questions to generate per chunk (default: 1, max: 3).
 	QuestionCount int `yaml:"question_count" json:"question_count"`
+}
+
+const (
+	DefaultQuestionGenerationCount = 1
+	MaxQuestionGenerationCount     = 3
+)
+
+// NormalizeQuestionGenerationCount is the backend safety boundary shared by
+// API defaults, persisted configuration, and worker payloads. It prevents an
+// old client or direct API call from bypassing the UI's maximum.
+func NormalizeQuestionGenerationCount(count int) int {
+	if count <= 0 {
+		return DefaultQuestionGenerationCount
+	}
+	if count > MaxQuestionGenerationCount {
+		return MaxQuestionGenerationCount
+	}
+	return count
 }
 
 // Value implements the driver.Valuer interface
@@ -572,6 +590,17 @@ func (kb *KnowledgeBase) EnsureDefaults() {
 		}
 	}
 
+	if kb.Type == KnowledgeBaseTypeDocument {
+		if kb.QuestionGenerationConfig == nil {
+			kb.QuestionGenerationConfig = &QuestionGenerationConfig{
+				Enabled: true, QuestionCount: DefaultQuestionGenerationCount,
+			}
+		} else {
+			kb.QuestionGenerationConfig.QuestionCount =
+				NormalizeQuestionGenerationCount(kb.QuestionGenerationConfig.QuestionCount)
+		}
+	}
+
 	// Ensure IndexingStrategy has defaults.
 	// For existing rows where indexing_strategy is NULL, GORM Scan() returns
 	// DefaultIndexingStrategy() (vector+keyword=true). This block handles the
@@ -582,6 +611,17 @@ func (kb *KnowledgeBase) EnsureDefaults() {
 	// Sync legacy ExtractConfig.Enabled → IndexingStrategy.GraphEnabled
 	if kb.ExtractConfig != nil && kb.ExtractConfig.Enabled && !kb.IndexingStrategy.GraphEnabled {
 		kb.IndexingStrategy.GraphEnabled = true
+	}
+	// IndexingStrategy is the public create/update API. Keep the internal
+	// extractor switch in lockstep on every construction path, not only the
+	// update service; otherwise a newly-created graph KB silently skips graph
+	// fan-out until it is edited once.
+	if kb.IndexingStrategy.GraphEnabled {
+		if kb.ExtractConfig == nil {
+			kb.ExtractConfig = &ExtractConfig{Enabled: true}
+		} else {
+			kb.ExtractConfig.Enabled = true
+		}
 	}
 }
 

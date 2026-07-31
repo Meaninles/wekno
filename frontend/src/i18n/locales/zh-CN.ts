@@ -830,6 +830,7 @@ export default {
   },
   knowledgeWorkflowStatus: {
     title: "完整处理状态",
+    coreReadyEnriching: "核心可检索，增强处理中",
     unknown: "状态未知",
     detailsUnavailable: "暂时无法读取分项状态",
     hoverHint: "悬停时按需读取最新分项状态，不会持续轮询",
@@ -4002,7 +4003,7 @@ export default {
         label: "AI 问题生成",
         description: "解析文档时调用大模型为每个分块生成相关问题，提高检索召回率。启用后会增加文档解析耗时。",
         countLabel: "生成问题数量",
-        countDescription: "每个文档分块生成的问题数量（1-10）",
+        countDescription: "每个文档分块生成的问题数量（1-3，默认 1）",
       },
       multimodal: {
         label: "多模态功能",

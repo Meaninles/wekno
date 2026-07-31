@@ -32,8 +32,8 @@
           <div class="setting-control">
             <t-input-number
               v-model="localQuestionGeneration.questionCount"
-              :min="1"
-              :max="10"
+              :min="MIN_QUESTION_COUNT"
+              :max="MAX_QUESTION_COUNT"
               :step="1"
               theme="normal"
               @change="handleQuestionGenerationChange"
@@ -50,6 +50,9 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+
+const MIN_QUESTION_COUNT = 1
+const MAX_QUESTION_COUNT = 3
 
 interface QuestionGenerationConfig {
   enabled: boolean
@@ -71,24 +74,46 @@ const emit = defineEmits<{
   'update:questionGeneration': [value: QuestionGenerationConfig]
 }>()
 
+const normalizeQuestionCount = (value: unknown): number => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) {
+    return MIN_QUESTION_COUNT
+  }
+  return Math.min(
+    MAX_QUESTION_COUNT,
+    Math.max(MIN_QUESTION_COUNT, Math.trunc(numeric)),
+  )
+}
+
 const localQuestionGeneration = ref<QuestionGenerationConfig>(
-  props.questionGeneration || { enabled: false, questionCount: 3 }
+  props.questionGeneration
+    ? {
+        ...props.questionGeneration,
+        questionCount: normalizeQuestionCount(props.questionGeneration.questionCount),
+      }
+    : { enabled: true, questionCount: MIN_QUESTION_COUNT }
 )
 
 watch(() => props.questionGeneration, (newVal) => {
   if (newVal) {
-    localQuestionGeneration.value = { ...newVal }
+    localQuestionGeneration.value = {
+      ...newVal,
+      questionCount: normalizeQuestionCount(newVal.questionCount),
+    }
   }
 }, { deep: true })
 
 const handleQuestionGenerationToggle = () => {
   if (!localQuestionGeneration.value.enabled) {
-    localQuestionGeneration.value.questionCount = 3
+    localQuestionGeneration.value.questionCount = MIN_QUESTION_COUNT
   }
   emit('update:questionGeneration', localQuestionGeneration.value)
 }
 
 const handleQuestionGenerationChange = () => {
+  localQuestionGeneration.value.questionCount = normalizeQuestionCount(
+    localQuestionGeneration.value.questionCount,
+  )
   emit('update:questionGeneration', localQuestionGeneration.value)
 }
 </script>

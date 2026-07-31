@@ -512,7 +512,7 @@ func (r *Recovery) enqueueTrigger(scope pendingScope) error {
 	task := asynq.NewTask(types.TypeWikiIngest, payload)
 	_, err = r.enqueuer.Enqueue(
 		task,
-		asynq.Queue(types.QueueLow),
+		asynq.Queue(types.QueueWikiControl),
 		asynq.MaxRetry(r.config.MaxRetry),
 		asynq.Timeout(r.config.TaskTimeout),
 		asynq.ProcessIn(r.config.ProcessDelay),

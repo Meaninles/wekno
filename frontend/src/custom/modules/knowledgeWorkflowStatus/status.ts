@@ -1,5 +1,6 @@
 export type KnowledgePollStatus = {
   parse_status?: string
+  core_status?: string
   summary_status?: string
   enrichment_status?: string
   wiki_status?: string

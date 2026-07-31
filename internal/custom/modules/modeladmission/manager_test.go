@@ -90,7 +90,7 @@ func TestAdmissionMaxWaitCapsLongerParentDeadline(t *testing.T) {
 	require.Less(t, time.Since(started), 300*time.Millisecond)
 }
 
-func TestBackgroundAdmissionWithoutConfiguredMaxWaitInheritsTaskLifetime(t *testing.T) {
+func TestBackgroundAdmissionIsNonBlockingAndReturnsRetryAfter(t *testing.T) {
 	config := testConfig(Limit{Concurrency: 1, PerTenant: 1})
 	config.BackgroundMaxWait = 0
 	manager := newManagerWithConfig(nil, config)
@@ -98,29 +98,17 @@ func TestBackgroundAdmissionWithoutConfiguredMaxWaitInheritsTaskLifetime(t *test
 	first, err := manager.Acquire(WithBackground(context.Background()), spec)
 	require.NoError(t, err)
 
-	acquired := make(chan error, 1)
-	go func() {
-		lease, acquireErr := manager.Acquire(
-			WithBackground(context.Background()),
-			spec,
-		)
-		if lease != nil {
-			lease.Release()
-		}
-		acquired <- acquireErr
-	}()
+	started := time.Now()
+	_, err = manager.Acquire(WithBackground(context.Background()), spec)
+	var deferred *AdmissionDeferredError
+	require.ErrorAs(t, err, &deferred)
+	require.GreaterOrEqual(t, deferred.RetryAfter, time.Second)
+	require.Less(t, time.Since(started), 50*time.Millisecond)
 
-	// This exceeds the short max-wait used by testConfig. With a durable
-	// background task there must be no synthetic timeout while the parent
-	// context remains live.
-	time.Sleep(150 * time.Millisecond)
-	select {
-	case err := <-acquired:
-		t.Fatalf("background waiter returned before capacity was released: %v", err)
-	default:
-	}
 	first.Release()
-	require.NoError(t, <-acquired)
+	next, err := manager.Acquire(WithBackground(context.Background()), spec)
+	require.NoError(t, err)
+	next.Release()
 }
 
 func TestBackgroundAdmissionPreservesInteractiveReserve(t *testing.T) {
@@ -134,7 +122,7 @@ func TestBackgroundAdmissionPreservesInteractiveReserve(t *testing.T) {
 	blockedCtx, cancel := context.WithTimeout(WithBackground(context.Background()), 50*time.Millisecond)
 	defer cancel()
 	_, err = manager.Acquire(blockedCtx, spec)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
 
 	interactive, err := manager.Acquire(context.Background(), spec)
 	require.NoError(t, err)
@@ -183,7 +171,8 @@ func TestSpecForModelIsStableScopedAndDoesNotExposeSecret(t *testing.T) {
 
 	otherSecret := *model
 	otherSecret.Parameters.APIKey = "another-secret"
-	require.NotEqual(t, first.Domain, SpecForModel(KindChat, &otherSecret, "").Domain)
+	require.Equal(t, first.Domain, SpecForModel(KindChat, &otherSecret, "").Domain)
+	require.Equal(t, first.Domain, SpecForModel(KindEmbedding, &otherSecret, "").Domain)
 	require.False(t, strings.Contains(first.Domain, model.Parameters.APIKey))
 }
 

@@ -14,9 +14,10 @@ import (
 )
 
 type fanoutTestEnqueuer struct {
-	calls  int
-	failAt int
-	err    error
+	calls     int
+	failAt    int
+	err       error
+	lastQueue string
 }
 
 type countingCompletionStore struct {
@@ -65,12 +66,32 @@ func (s *countingCompletionStore) KnowledgeFanoutCompletionExists(
 	return exists, nil
 }
 
-func (e *fanoutTestEnqueuer) Enqueue(task *asynq.Task, _ ...asynq.Option) (*asynq.TaskInfo, error) {
+func (e *fanoutTestEnqueuer) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
 	e.calls++
+	for _, opt := range opts {
+		if opt != nil && opt.Type() == asynq.QueueOpt {
+			e.lastQueue, _ = opt.Value().(string)
+		}
+	}
 	if e.failAt > 0 && e.calls == e.failAt {
 		return nil, e.err
 	}
 	return &asynq.TaskInfo{ID: fmt.Sprintf("task-%d", e.calls), Type: task.Type(), Queue: types.QueueDefault}, nil
+}
+
+func TestEnqueuePostProcessUsesParseOrchestratorQueue(t *testing.T) {
+	enqueuer := &fanoutTestEnqueuer{}
+	err := EnqueuePostProcessContext(context.Background(), enqueuer, types.KnowledgePostProcessPayload{
+		TenantID: 42, KnowledgeID: "knowledge-1", KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", Attempt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enqueuer.lastQueue != types.QueueDefault {
+		t.Fatalf("postprocess queue = %q, want parse/background queue %q",
+			enqueuer.lastQueue, types.QueueDefault)
+	}
 }
 
 func fanoutTestRedis(t *testing.T) *redis.Client {

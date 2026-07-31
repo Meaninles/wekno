@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -96,11 +97,16 @@ func NewService(
 	audit interfaces.AuditLogService,
 	kbRepo interfaces.KnowledgeBaseRepository,
 	agentRepo interfaces.CustomAgentRepository,
+	admissionManagers ...*modeladmission.Manager,
 ) *Service {
+	var admissionManager *modeladmission.Manager
+	if len(admissionManagers) > 0 {
+		admissionManager = admissionManagers[0]
+	}
 	return &Service{
 		db: db, settings: settings, audit: audit,
 		kbRepo: kbRepo, agentRepo: agentRepo,
-		limiter: NewLimiter(rdb, settings),
+		limiter: NewLimiterWithAdmission(rdb, settings, admissionManager),
 	}
 }
 
@@ -444,7 +450,7 @@ func (s *Service) ResolveChatModel(
 			RetryAfter: time.Minute, Cause: err,
 		}
 	}
-	return s.limiter.Wrap(instance), nil
+	return s.limiter.WrapForModel(instance, model), nil
 }
 
 func (s *Service) GuardChatModel(ctx context.Context, model *types.Model) error {

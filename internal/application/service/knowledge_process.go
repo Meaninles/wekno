@@ -208,10 +208,9 @@ func (s *knowledgeService) processDocumentFromPassage(ctx context.Context,
 	var opts ProcessChunksOptions
 	if kb.QuestionGenerationConfig != nil && kb.QuestionGenerationConfig.Enabled {
 		opts.EnableQuestionGeneration = true
-		opts.QuestionCount = kb.QuestionGenerationConfig.QuestionCount
-		if opts.QuestionCount <= 0 {
-			opts.QuestionCount = 3
-		}
+		opts.QuestionCount = types.NormalizeQuestionGenerationCount(
+			kb.QuestionGenerationConfig.QuestionCount,
+		)
 	}
 	return s.processChunks(ctx, kb, knowledge, chunks, opts)
 }
@@ -334,6 +333,8 @@ func finalizeIndexedKnowledgeState(
 	knowledge.EnableStatus = "enabled"
 	knowledge.StorageSize = totalStorageSize
 	knowledge.ProcessedAt = &now
+	knowledge.CoreStatus = types.CoreStatusReady
+	knowledge.CoreCompletedAt = &now
 	knowledge.UpdatedAt = now
 }
 
@@ -2027,13 +2028,7 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 		return fmt.Errorf("failed to init retrieve engine: %w", err)
 	}
 
-	questionCount := payload.QuestionCount
-	if questionCount <= 0 {
-		questionCount = 3
-	}
-	if questionCount > 10 {
-		questionCount = 10
-	}
+	questionCount := types.NormalizeQuestionGenerationCount(payload.QuestionCount)
 
 	// Collect image info for all text chunks so question generation can
 	// see caption / OCR text instead of bare image links.
@@ -2421,13 +2416,7 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 	}
 	resolvedModelID = chatModel.GetModelID()
 
-	questionCount := payload.QuestionCount
-	if questionCount <= 0 {
-		questionCount = 3
-	}
-	if questionCount > 10 {
-		questionCount = 10
-	}
+	questionCount := types.NormalizeQuestionGenerationCount(payload.QuestionCount)
 
 	// Fetch the batch chunks (in payload order) plus the two boundary
 	// neighbors so we can rebuild the same surrounding context the legacy
@@ -3197,6 +3186,8 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 func processingFailureValuesPreservingStorage(message string, now time.Time) map[string]interface{} {
 	return map[string]interface{}{
 		"parse_status":           types.ParseStatusFailed,
+		"core_status":            types.CoreStatusFailed,
+		"core_completed_at":      nil,
 		"error_message":          message,
 		"pending_subtasks_count": 0,
 		"summary_status":         types.SummaryStatusNone,
@@ -3728,10 +3719,9 @@ func (s *knowledgeService) prepareReparseDocumentWorkflow(
 	if knowledge == nil || kb == nil {
 		return nil, errors.New("prepare document reparse workflow: knowledge and knowledge base are required")
 	}
-	questionCount := effective.QuestionGenerationConfig.QuestionCount
-	if questionCount <= 0 {
-		questionCount = 3
-	}
+	questionCount := types.NormalizeQuestionGenerationCount(
+		effective.QuestionGenerationConfig.QuestionCount,
+	)
 	lang, _ := types.LanguageFromContext(ctx)
 	payload := types.DocumentProcessPayload{
 		TenantID:                 knowledge.TenantID,

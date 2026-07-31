@@ -15,18 +15,51 @@ func (s *Service) StartArtifactHousekeeping() {
 	if s == nil {
 		return
 	}
-	s.housekeepingOnce.Do(func() {
-		go func() {
-			ctx := context.Background()
-			s.runArtifactHousekeeping(ctx)
-			interval := time.Duration(envInt("CUSTOM_GENERAL_AGENT_ARTIFACT_HOUSEKEEPING_SECONDS", 60)) * time.Second
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for range ticker.C {
+	s.housekeepingMu.Lock()
+	if s.housekeepingCancel != nil {
+		s.housekeepingMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.housekeepingCancel = cancel
+	s.housekeepingDone = done
+	s.housekeepingMu.Unlock()
+	go func() {
+		defer close(done)
+		s.runArtifactHousekeeping(ctx)
+		interval := time.Duration(envInt("CUSTOM_GENERAL_AGENT_ARTIFACT_HOUSEKEEPING_SECONDS", 60)) * time.Second
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
 				s.runArtifactHousekeeping(ctx)
 			}
-		}()
-	})
+		}
+	}()
+}
+
+func (s *Service) StopArtifactHousekeeping() {
+	if s == nil {
+		return
+	}
+	s.housekeepingMu.Lock()
+	cancel, done := s.housekeepingCancel, s.housekeepingDone
+	s.housekeepingMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+	s.housekeepingMu.Lock()
+	if s.housekeepingDone == done {
+		s.housekeepingCancel, s.housekeepingDone = nil, nil
+	}
+	s.housekeepingMu.Unlock()
 }
 
 func (s *Service) runArtifactHousekeeping(ctx context.Context) {

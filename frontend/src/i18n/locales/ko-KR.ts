@@ -3895,7 +3895,7 @@ export default {
         description:
           "문서 파싱 시 대규모 모델을 호출하여 각 청크에 대한 관련 질문을 생성하여 검색 재현율을 향상시킵니다. 활성화하면 문서 파싱 시간이 증가합니다.",
         countLabel: "생성 질문 수",
-        countDescription: "각 문서 청크에서 생성할 질문 수 (1-10)",
+        countDescription: "각 문서 청크에서 생성할 질문 수 (1-3, 기본값 1)",
       },
       multimodal: {
         label: "멀티모달 기능",

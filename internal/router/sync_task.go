@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
@@ -694,6 +695,7 @@ type SyncTaskParams struct {
 	ImageMultimodal      interfaces.TaskHandler `name:"imageMultimodal"`
 	KnowledgePostProcess interfaces.TaskHandler `name:"knowledgePostProcess"`
 	WikiIngest           interfaces.TaskHandler `name:"wikiIngest"`
+	DerivativeWorker     *derivativequeue.Worker
 }
 
 // RegisterSyncHandlers registers all task handlers on the SyncTaskExecutor.
@@ -722,5 +724,8 @@ func RegisterSyncHandlers(params SyncTaskParams) {
 	params.Executor.RegisterHandler(types.TypeDataSourceSync, background(params.DataSourceService.ProcessSync))
 	params.Executor.RegisterHandler(types.TypeWikiIngest, background(params.WikiIngest.Handle))
 	params.Executor.RegisterHandler(types.TypeKnowledgeTerminalRepair, background(repairer.Handle))
+	if params.DerivativeWorker != nil {
+		params.Executor.RegisterHandler(derivativequeue.TypeWake, background(params.DerivativeWorker.Handle))
+	}
 	logger.Infof(context.Background(), "[SyncTask] All task handlers registered (Lite mode, no Redis)")
 }

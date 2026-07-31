@@ -54,7 +54,9 @@ type Service struct {
 	artifactRoot       string
 	artifactStore      *artifactstore.Store
 	artifactStoreErr   error
-	housekeepingOnce   sync.Once
+	housekeepingMu     sync.Mutex
+	housekeepingCancel context.CancelFunc
+	housekeepingDone   chan struct{}
 	professionalSkills professionalSkillProvider
 }
 

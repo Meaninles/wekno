@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -221,6 +222,31 @@ func TestShutdownCancellationNeverDrainsGenerationItemAtHistoricalFinalAttempt(t
 		"graph_chunk[0]",
 		context.Canceled,
 		context.Canceled,
+		false,
+		false,
+		true,
+	)
+	require.NoError(t, err)
+	assert.Zero(t, repo.finalizeCalls)
+}
+
+func TestDurableDerivativeHandlerLeavesGenerationItemForPlanFinalizer(t *testing.T) {
+	repo := &summaryFinalizerFailureRepo{}
+	ctx := derivativequeue.WithExecution(
+		context.Background(),
+		&derivativequeue.Repository{},
+		&derivativequeue.WorkItem{ID: "work-1", LeaseToken: "lease-1"},
+	)
+	err := finalizeSubtaskDetached(
+		ctx,
+		repo,
+		7,
+		"knowledge-1",
+		"kb-1",
+		"generation-1",
+		"summary",
+		nil,
+		nil,
 		false,
 		false,
 		true,

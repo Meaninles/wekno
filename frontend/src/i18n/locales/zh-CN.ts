@@ -2562,6 +2562,14 @@ export default {
           concurrency: "单实例文档解析并发",
           heavy_document_concurrency: "重型文档并发（高级）",
         },
+        chat: {
+          queue: {
+            enabled: "启用聊天会话排队",
+            default_max_concurrent: "每模型默认最大并发会话",
+            default_max_waiting: "每模型默认最大排队会话",
+            max_waiting_per_user: "单用户最大排队会话",
+          },
+        },
       },
       keyDescriptions: {
         auth: {
@@ -2590,6 +2598,14 @@ export default {
           heavy_document_concurrency:
             "单个解析实例内的重型文档并发保护上限，仅在文档命中文件大小或结构重型阈值时使用。" +
             "日常总并发请设置上方“单实例文档解析并发”；本项通常无需调整，修改后需重启所有解析实例。",
+        },
+        chat: {
+          queue: {
+            enabled: "默认开启。按实际聊天模型资源池跨 API 实例统一排队，关闭后新对话不再受会话级并发限制。",
+            default_max_concurrent: "每个实际聊天模型默认可同时执行的会话数，范围 1–4096；资源池可单独覆盖，修改后动态生效。",
+            default_max_waiting: "每个实际聊天模型默认可等待的会话数，范围 0–100000；达到上限时不会创建消息。",
+            max_waiting_per_user: "单个用户跨所有聊天模型可同时等待的会话数，范围 1–1000；默认 3。",
+          },
         },
       },
       enumLabels: {

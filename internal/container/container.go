@@ -55,6 +55,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
 	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/connectiontls"
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
@@ -220,6 +221,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewKnowledgeTagService))
 	must(container.Provide(embedding.NewBatchEmbedder))
 	must(container.Provide(modeladmission.NewManager))
+	must(container.Provide(chatqueue.NewManager))
 	must(container.Provide(derivativequeue.NewRepositoryWithAdmission))
 	must(container.Provide(service.NewModelService))
 	must(container.Provide(service.NewDatasetService))

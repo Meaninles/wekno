@@ -8,6 +8,11 @@ import {
   type StreamRequestMeta,
 } from '@/utils/chatRequestDebug';
 import { normalizeUserFacingError } from '@/custom/modules/safeMessage/install';
+import {
+  ChatQueueHTTPError,
+  readChatQueueRejection,
+  type ChatQueueRejection,
+} from '@/custom/modules/chatqueue/types';
 
 
 
@@ -28,6 +33,7 @@ export function useStream() {
   const isStreaming = ref(false)      // 流状态
   const isLoading = ref(false)        // 初始加载
   const error = ref<string | null>(null)// 错误信息
+  const queueRejection = ref<ChatQueueRejection | null>(null)
   const lastStreamRequest = ref<StreamRequestMeta | null>(null)
   let controller = new AbortController()
   let streamGeneration = 0
@@ -42,6 +48,7 @@ export function useStream() {
     // 重置状态
     output.value = '';
     error.value = null;
+    queueRejection.value = null;
     isStreaming.value = true;
     isLoading.value = true;
 
@@ -162,7 +169,11 @@ export function useStream() {
         openWhenHidden: true,
 
         onopen: async (res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (!res.ok) {
+            const rejection = await readChatQueueRejection(res)
+            if (rejection) throw new ChatQueueHTTPError(rejection)
+            throw new Error(`HTTP ${res.status}`)
+          }
           isLoading.value = false;
         },
 
@@ -177,6 +188,7 @@ export function useStream() {
         },
 
         onerror: (err) => {
+          if (err instanceof ChatQueueHTTPError) throw err
           throw new Error(`${i18n.global.t('error.streamFailed')}: ${err}`);
         },
 
@@ -185,7 +197,12 @@ export function useStream() {
         },
       });
     } catch (err) {
-      error.value = normalizeUserFacingError(err)
+      if (err instanceof ChatQueueHTTPError) {
+        queueRejection.value = err.rejection
+        error.value = err.rejection.message
+      } else {
+        error.value = normalizeUserFacingError(err)
+      }
       stopStream()
     }
   }
@@ -214,6 +231,7 @@ export function useStream() {
     isStreaming,     // 是否在流式传输中
     isLoading,       // 初始连接状态
     error,
+    queueRejection,
     lastStreamRequest,
     onChunk,
     startStream,     // 启动流

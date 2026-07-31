@@ -211,6 +211,49 @@ func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {
 	}
 }
 
+func TestHandleQueueStatusAppendsReplayableEvent(t *testing.T) {
+	stream := &recordingStreamManager{}
+	handler := NewAgentStreamHandler(
+		context.Background(),
+		"session-1",
+		"assistant-1",
+		"request-1",
+		time.Time{},
+		&types.Message{ID: "assistant-1", SessionID: "session-1"},
+		stream,
+		event.NewEventBus(),
+	)
+
+	err := handler.handleQueueStatus(context.Background(), event.Event{
+		ID:   "queue-1",
+		Type: event.EventChatQueueStatus,
+		Data: event.ChatQueueStatusData{
+			State:          "waiting",
+			ModelID:        "model-1",
+			ResourcePoolID: "pool-1",
+			Position:       3,
+			Waiting:        7,
+			Active:         2,
+			MaxConcurrent:  2,
+			MaxWaiting:     20,
+			QueuedAtUnix:   123,
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleQueueStatus returned error: %v", err)
+	}
+	if len(stream.events) != 1 {
+		t.Fatalf("stream events = %d, want 1", len(stream.events))
+	}
+	got := stream.events[0]
+	if got.Type != types.ResponseTypeQueueStatus || got.Done {
+		t.Fatalf("queue stream event = %#v", got)
+	}
+	if got.Data["position"] != int64(3) || got.Data["resource_pool_id"] != "pool-1" {
+		t.Fatalf("queue metadata = %#v", got.Data)
+	}
+}
+
 func TestUserFacingAgentErrorMessageMapsMaxTurnsAndTimeout(t *testing.T) {
 	maxTurns := userFacingAgentErrorMessage(errors.New("Claude result subtype=error_max_turns maxTurns=30 turnCount=31"))
 	if maxTurns != "任务过于复杂，请将任务拆分为具体子任务逐个执行，或提高智能体最大迭代次数" {

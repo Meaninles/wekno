@@ -3,7 +3,7 @@
     <header class="admission-panel__header">
       <div>
         <h3>实际模型资源池</h3>
-        <p>并发、TPM 和熔断按 provider + 规范化地址 + 实际模型独立生效；修改即时热更新。</p>
+        <p>模型调用并发、对话会话并发、排队、TPM 和熔断均按实际模型资源池独立生效；修改即时热更新。</p>
       </div>
       <div class="admission-panel__actions">
         <t-tag theme="primary" variant="light">{{ pools.length }} 个资源池</t-tag>
@@ -30,6 +30,8 @@
                 <th>实际模型 / 类型</th>
                 <th>状态</th>
                 <th>总并发</th>
+                <th>对话并发</th>
+                <th>对话排队</th>
                 <th>后台并发</th>
                 <th>交互预留</th>
                 <th>文档突发</th>
@@ -49,6 +51,28 @@
                   <t-select v-model="pool.state" size="small" :options="stateOptions" />
                 </td>
                 <td><t-input-number v-model="pool.max_inflight" :min="1" :max="1024" size="small" /></td>
+                <td>
+                  <t-input-number
+                    v-if="pool.resource_kind === 'chat'"
+                    v-model="pool.chat_max_concurrent"
+                    :min="1"
+                    :max="4096"
+                    placeholder="继承全局"
+                    size="small"
+                  />
+                  <span v-else>—</span>
+                </td>
+                <td>
+                  <t-input-number
+                    v-if="pool.resource_kind === 'chat'"
+                    v-model="pool.chat_max_waiting"
+                    :min="0"
+                    :max="100000"
+                    placeholder="继承全局"
+                    size="small"
+                  />
+                  <span v-else>—</span>
+                </td>
                 <td><t-input-number v-model="pool.max_background_inflight" :min="0" :max="pool.max_inflight" size="small" /></td>
                 <td><t-input-number v-model="pool.interactive_reserve" :min="0" :max="pool.max_inflight" size="small" /></td>
                 <td><t-input-number v-model="pool.document_burst" :min="1" :max="pool.max_inflight" size="small" /></td>

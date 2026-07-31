@@ -3630,6 +3630,14 @@ export default {
           concurrency: 'Document concurrency per instance',
           heavy_document_concurrency: 'Heavy document concurrency (advanced)',
         },
+        chat: {
+          queue: {
+            enabled: 'Enable chat conversation queue',
+            default_max_concurrent: 'Default concurrent conversations per model',
+            default_max_waiting: 'Default waiting conversations per model',
+            max_waiting_per_user: 'Maximum queued conversations per user',
+          },
+        },
       },
       keyDescriptions: {
         auth: {
@@ -3651,6 +3659,14 @@ export default {
             'Number of documents each full processing instance may handle concurrently. One slot follows a document through parsing, chunking, vectorization, and related derived work; adding instances scales total system throughput horizontally. Restart every processing instance after changing this value.',
           heavy_document_concurrency:
             'Per-instance safety cap for documents that hit file-size or structural heavy thresholds. Use "Document concurrency per instance" for normal capacity planning; this advanced value rarely needs adjustment and requires all processing instances to restart.',
+        },
+        chat: {
+          queue: {
+            enabled: 'Enabled by default. Conversations queue across API replicas by actual chat-model resource pool; disabling removes conversation-level admission for new turns.',
+            default_max_concurrent: 'Default simultaneously executing conversations per actual chat model, from 1 to 4096. A resource pool may override it and updates take effect dynamically.',
+            default_max_waiting: 'Default waiting conversations per actual chat model, from 0 to 100000. No message is created when this limit is reached.',
+            max_waiting_per_user: 'Maximum conversations one user may have waiting across all chat models, from 1 to 1000. Default: 3.',
+          },
         },
       },
       enumLabels: {

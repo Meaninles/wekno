@@ -2650,6 +2650,13 @@ defineExpose({
     query.value = text;
     nextTick(() => createSession(text));
   },
+  restoreQuery(text: string) {
+    query.value = text || '';
+    nextTick(() => {
+      const textarea = getTextareaEl();
+      textarea?.focus();
+    });
+  },
   setUploadedImages,
   getUploadedImages,
   clearUploadedImages,

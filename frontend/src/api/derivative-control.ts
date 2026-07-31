@@ -49,6 +49,8 @@ export interface ModelResourcePool {
   id: string
   name: string
   resource_kind: string
+  chat_max_concurrent: number | null
+  chat_max_waiting: number | null
   max_inflight: number
   max_background_inflight: number
   interactive_reserve: number

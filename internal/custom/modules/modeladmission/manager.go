@@ -459,6 +459,29 @@ func (m *Manager) ResolvePolicy(ctx context.Context, spec Spec) (ResolvedPolicy,
 	return m.store.Resolve(ctx, spec, fallback)
 }
 
+// ResolveResourcePool exposes the model-to-pool control-plane decision to
+// conversation-level admission without coupling that module to GORM.
+func (m *Manager) ResolveResourcePool(
+	ctx context.Context,
+	model *types.Model,
+) (*ResourcePool, error) {
+	if m == nil || m.store == nil {
+		if model == nil {
+			return nil, errors.New("model admission manager is unavailable")
+		}
+		return (&Store{}).ResolveResourcePool(ctx, model)
+	}
+	return m.store.ResolveResourcePool(ctx, model)
+}
+
+// GetResourcePool reloads a pool for hot conversation-queue policy updates.
+func (m *Manager) GetResourcePool(ctx context.Context, poolID string) (*ResourcePool, error) {
+	if m == nil || m.store == nil {
+		return nil, errors.New("model admission control plane is unavailable")
+	}
+	return m.store.GetResourcePool(ctx, poolID)
+}
+
 func (m *Manager) circuitPolicyFor(resolved ResolvedPolicy) circuitPolicy {
 	policy := circuitPolicy{
 		enabled:   m != nil && m.config.CircuitEnabled,

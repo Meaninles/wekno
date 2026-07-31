@@ -58,6 +58,20 @@ type ChatData struct {
 	Extra       map[string]interface{} `json:"extra,omitempty"`
 }
 
+// ChatQueueStatusData is emitted after a conversation has been accepted into
+// the FIFO queue and whenever its position changes or it is admitted.
+type ChatQueueStatusData struct {
+	State          string `json:"state"`
+	ModelID        string `json:"model_id"`
+	ResourcePoolID string `json:"resource_pool_id"`
+	Position       int64  `json:"position"`
+	Waiting        int64  `json:"waiting"`
+	Active         int64  `json:"active"`
+	MaxConcurrent  int    `json:"max_concurrent"`
+	MaxWaiting     int    `json:"max_waiting"`
+	QueuedAtUnix   int64  `json:"queued_at_unix,omitempty"`
+}
+
 // ErrorData represents error event data
 type ErrorData struct {
 	Error     string                 `json:"error"`

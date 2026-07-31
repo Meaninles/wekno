@@ -19,6 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
@@ -114,6 +115,7 @@ func NewHandlers(
 	customAgentRepository interfaces.CustomAgentRepository,
 	profile runtimeprofile.Profile,
 	admissionManager *modeladmission.Manager,
+	chatQueueManager *chatqueue.Manager,
 	derivativeQueueRepository *derivativequeue.Repository,
 	processingTraceRepository *processingtrace.Repository,
 ) (*Handlers, error) {
@@ -298,6 +300,7 @@ func NewHandlers(
 	appservice.RegisterKnowledgeBaseModelPolicy(derivativeControlService.ValidateKnowledgeBase)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
+	sessionhandler.RegisterChatQueueAdmissionHook(chatQueueManager.Admit)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeKnowledgeBaseManager, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeDocumentProcessingAgent, generalAgentService.Run)

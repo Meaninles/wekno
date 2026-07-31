@@ -109,6 +109,8 @@ const (
 	ResponseTypeMCPOAuthResolved ResponseType = "mcp_oauth_resolved"
 	// AgentProgress reports user-visible generic progress from custom agent runtimes.
 	ResponseTypeAgentProgress ResponseType = "agent_progress"
+	// QueueStatus reports accepted FIFO waiting/admission state for a chat conversation.
+	ResponseTypeQueueStatus ResponseType = "queue_status"
 )
 
 // StreamResponse stream response

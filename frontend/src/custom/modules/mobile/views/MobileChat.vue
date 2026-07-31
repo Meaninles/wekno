@@ -49,6 +49,8 @@ import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
 import { skillPinKey, useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
+import ChatQueueRejectionBanner from "@/custom/modules/chatqueue/ChatQueueRejectionBanner.vue";
+import type { ChatQueueRejection } from "@/custom/modules/chatqueue/types";
 import MobileResourceRail from "../components/MobileResourceRail.vue";
 import {
   agentLabel,
@@ -135,7 +137,14 @@ let sessionsSyncing = false;
 let isHydratingConversationState = false;
 let fileSearchTimer: ReturnType<typeof setTimeout> | null = null;
 
-const { onChunk, startStream, stopStream, error } = useStream();
+const { onChunk, startStream, stopStream, error, queueRejection } = useStream();
+const queueRejectionNotice = ref<ChatQueueRejection | null>(null);
+let pendingQueueDraft: {
+  message: ChatMessage;
+  query: string;
+  images: File[];
+  attachments: MobileUploadAttachment[];
+} | null = null;
 
 const toDraftAttachments = (attachments: MobileUploadAttachment[] = pendingAttachments.value): AttachmentFile[] =>
   attachments
@@ -1458,10 +1467,16 @@ const buildMentionedItems = (): MobileMentionItem[] => {
 const sendMessage = async () => {
   const value = inputValue.value.trim();
   if (!value || isReplying.value) return;
+  const composerSnapshot = {
+    query: inputValue.value,
+    images: [...pendingImages.value],
+    attachments: pendingAttachments.value.map((attachment) => ({ ...attachment })),
+  };
   let outgoingSessionId = "";
   try {
     loading.value = true;
     isReplying.value = true;
+    queueRejectionNotice.value = null;
     const agentEnabled = settingsStore.isAgentStreamMode;
     const effectiveProfessionalSkillNames = agentEnabled ? selectedProfessionalSkillNames.value : [];
 
@@ -1497,7 +1512,7 @@ const sendMessage = async () => {
     const requestQuery = `${professionalPrefix}${value}`;
     const mentionedItems = buildMentionedItems();
 
-    messagesList.push({
+    const optimisticUserMessage = {
       role: "user",
       content: requestQuery,
       mentioned_items: mentionedItems,
@@ -1508,7 +1523,12 @@ const sendMessage = async () => {
         file_type: `.${item.name.split(".").pop()?.toLowerCase() || ""}`,
       })),
       channel: "web",
-    });
+    };
+    messagesList.push(optimisticUserMessage);
+    pendingQueueDraft = {
+      message: optimisticUserMessage,
+      ...composerSnapshot,
+    };
 
     await clearComposerInput();
     saveSessionDraftState(
@@ -1666,6 +1686,24 @@ watch(error, (message) => {
     }
     return;
   }
+  if (queueRejection.value) {
+    queueRejectionNotice.value = queueRejection.value;
+    if (pendingQueueDraft) {
+      const index = messagesList.indexOf(pendingQueueDraft.message);
+      if (index >= 0) messagesList.splice(index, 1);
+      pendingImages.value = [...pendingQueueDraft.images];
+      pendingAttachments.value = pendingQueueDraft.attachments.map((attachment) => ({ ...attachment }));
+      inputValue.value = pendingQueueDraft.query;
+      pendingQueueDraft = null;
+      void nextTick(() => {
+        autoGrow();
+        textareaRef.value?.focus();
+      });
+    }
+    loading.value = false;
+    isReplying.value = false;
+    return;
+  }
   MessagePlugin.error(message);
   loading.value = false;
   isReplying.value = false;
@@ -1675,6 +1713,9 @@ watch(error, (message) => {
 onChunk((data) => {
   if (isResumingStream.value) {
     isResumingStream.value = false;
+  }
+  if (data.response_type === "agent_query") {
+    pendingQueueDraft = null;
   }
   if (data.response_type === "session_title") {
     const title = data.content || data.data?.title;
@@ -1759,11 +1800,16 @@ onBeforeUnmount(() => {
           v-for="(message, index) in messagesList"
           :key="message.id || message.request_id || index"
           :message="message"
+          @cancel-queue="stopGenerating"
         />
       </template>
     </section>
 
     <footer class="mobile-composer">
+      <ChatQueueRejectionBanner
+        :rejection="queueRejectionNotice"
+        @close="queueRejectionNotice = null"
+      />
       <MobileResourceRail :items="selectedResourceChips" @remove="removeChip" @clear="clearSelectedResources" />
 
       <div class="config-rail">

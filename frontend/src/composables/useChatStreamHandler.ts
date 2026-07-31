@@ -1136,6 +1136,39 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       return
     }
 
+    if (data.response_type === 'queue_status') {
+      let queueMessage = resolveActiveAssistantMessage(data)
+      if (!queueMessage) {
+        const assistantId =
+          (data.assistant_message_id as string | undefined) ||
+          currentAssistantMessageId.value ||
+          (data.id as string | undefined)
+        queueMessage = {
+          id: assistantId,
+          request_id: data.id,
+          role: 'assistant',
+          content: '',
+          isAgentMode: true,
+          isRagMode: !isAgentStreamSession(),
+          is_completed: false,
+          agentEventStream: [],
+          knowledge_references: [],
+        }
+        messagesList.push(queueMessage)
+        onMessageCreated?.(queueMessage)
+      }
+      ensureAgentMessageShell(queueMessage, data.id as string | undefined)
+      queueMessage.queue_status = {
+        ...((queueMessage.queue_status as ChatMessage | undefined) || {}),
+        ...((data.data as ChatMessage | undefined) || {}),
+      }
+      loading.value = false
+      isReplying.value = true
+      onMessageUpdated?.(queueMessage, data)
+      scrollToBottom(true)
+      return
+    }
+
     const isAgentOnlyResponse =
       data.response_type === 'thinking' ||
       data.response_type === 'tool_call' ||

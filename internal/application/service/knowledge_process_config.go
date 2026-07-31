@@ -42,6 +42,8 @@ func ResolveProcessConfig(kb *types.KnowledgeBase, overrides *types.KnowledgePro
 	if overrides.QuestionGenerationConfig != nil {
 		eff.QuestionGenerationConfig = *overrides.QuestionGenerationConfig
 	}
+	eff.QuestionGenerationConfig.QuestionCount =
+		types.NormalizeQuestionGenerationCount(eff.QuestionGenerationConfig.QuestionCount)
 	if overrides.GraphEnabled != nil {
 		eff.GraphEnabled = *overrides.GraphEnabled
 	}
@@ -154,9 +156,13 @@ func reparseFileTypes(k *types.Knowledge) []string {
 
 func defaultQuestionGenerationConfig(kb *types.KnowledgeBase) types.QuestionGenerationConfig {
 	if kb == nil || kb.QuestionGenerationConfig == nil {
-		return types.QuestionGenerationConfig{}
+		return types.QuestionGenerationConfig{
+			Enabled: true, QuestionCount: types.DefaultQuestionGenerationCount,
+		}
 	}
-	return *kb.QuestionGenerationConfig
+	config := *kb.QuestionGenerationConfig
+	config.QuestionCount = types.NormalizeQuestionGenerationCount(config.QuestionCount)
+	return config
 }
 
 func derefExtractConfig(cfg *types.ExtractConfig) types.ExtractConfig {

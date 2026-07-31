@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
@@ -26,14 +28,15 @@ import (
 // KnowledgePostProcessService acts as an orchestrator for all post-processing tasks
 // after a document has been parsed and split into chunks (including multimodal OCR/Caption).
 type KnowledgePostProcessService struct {
-	knowledgeRepo interfaces.KnowledgeRepository
-	kbService     interfaces.KnowledgeBaseService
-	chunkService  interfaces.ChunkService
-	taskEnqueuer  interfaces.TaskEnqueuer
-	pendingRepo   interfaces.TaskPendingOpsRepository
-	redisClient   *redis.Client
-	spanTracker   SpanTracker
-	splitManager  *documentsplit.Manager
+	knowledgeRepo   interfaces.KnowledgeRepository
+	kbService       interfaces.KnowledgeBaseService
+	chunkService    interfaces.ChunkService
+	taskEnqueuer    interfaces.TaskEnqueuer
+	pendingRepo     interfaces.TaskPendingOpsRepository
+	redisClient     *redis.Client
+	spanTracker     SpanTracker
+	splitManager    *documentsplit.Manager
+	derivativeQueue *derivativequeue.Repository
 }
 
 // enrichmentPlan describes the asynchronous work spawned after the primary
@@ -125,6 +128,7 @@ type durableEnrichmentFanout struct {
 	GraphBatchCount      int                    `json:"graph_batch_count,omitempty"`
 	GraphBatchSize       int                    `json:"graph_batch_size,omitempty"`
 	GraphModelID         string                 `json:"graph_model_id,omitempty"`
+	DerivativeModelID    string                 `json:"derivative_model_id,omitempty"`
 }
 
 func (p durableEnrichmentFanout) validate(payload types.KnowledgePostProcessPayload) error {
@@ -256,15 +260,50 @@ func NewKnowledgePostProcessService(
 	spanTracker SpanTracker,
 	splitManager *documentsplit.Manager,
 ) interfaces.TaskHandler {
+	return newKnowledgePostProcessService(
+		knowledgeRepo, kbService, chunkService, taskEnqueuer, pendingRepo,
+		redisClient, spanTracker, splitManager, nil,
+	)
+}
+
+func NewKnowledgePostProcessServiceWithDurableQueue(
+	knowledgeRepo interfaces.KnowledgeRepository,
+	kbService interfaces.KnowledgeBaseService,
+	chunkService interfaces.ChunkService,
+	taskEnqueuer interfaces.TaskEnqueuer,
+	pendingRepo interfaces.TaskPendingOpsRepository,
+	redisClient *redis.Client,
+	spanTracker SpanTracker,
+	splitManager *documentsplit.Manager,
+	derivativeQueue *derivativequeue.Repository,
+) interfaces.TaskHandler {
+	return newKnowledgePostProcessService(
+		knowledgeRepo, kbService, chunkService, taskEnqueuer, pendingRepo,
+		redisClient, spanTracker, splitManager, derivativeQueue,
+	)
+}
+
+func newKnowledgePostProcessService(
+	knowledgeRepo interfaces.KnowledgeRepository,
+	kbService interfaces.KnowledgeBaseService,
+	chunkService interfaces.ChunkService,
+	taskEnqueuer interfaces.TaskEnqueuer,
+	pendingRepo interfaces.TaskPendingOpsRepository,
+	redisClient *redis.Client,
+	spanTracker SpanTracker,
+	splitManager *documentsplit.Manager,
+	derivativeQueue *derivativequeue.Repository,
+) interfaces.TaskHandler {
 	return &KnowledgePostProcessService{
-		knowledgeRepo: knowledgeRepo,
-		kbService:     kbService,
-		chunkService:  chunkService,
-		taskEnqueuer:  taskEnqueuer,
-		pendingRepo:   pendingRepo,
-		redisClient:   redisClient,
-		spanTracker:   spanTracker,
-		splitManager:  splitManager,
+		knowledgeRepo:   knowledgeRepo,
+		kbService:       kbService,
+		chunkService:    chunkService,
+		taskEnqueuer:    taskEnqueuer,
+		pendingRepo:     pendingRepo,
+		redisClient:     redisClient,
+		spanTracker:     spanTracker,
+		splitManager:    splitManager,
+		derivativeQueue: derivativeQueue,
 	}
 }
 
@@ -349,17 +388,14 @@ func (s *KnowledgePostProcessService) buildPagedSplitEnrichmentPlan(
 		ProcessingGeneration: payload.ProcessingGeneration,
 		Language:             payload.Language, Attempt: attempt, Tracing: payload.TracingContext,
 		TextChunkCount: int(textCount), SpawnSummary: textCount > 0,
-		SpawnWiki: kb.IndexingStrategy.WikiEnabled && textCount > 0,
+		SpawnWiki:         kb.IndexingStrategy.WikiEnabled && textCount > 0,
+		DerivativeModelID: kb.DerivativeModelID,
 	}
 	budget := workloadbudget.FromEnv()
 	if plan.SpawnSummary && kb.NeedsEmbeddingModel() && eff.QuestionGenerationConfig.Enabled {
-		plan.QuestionCount = eff.QuestionGenerationConfig.QuestionCount
-		if plan.QuestionCount <= 0 {
-			plan.QuestionCount = 3
-		}
-		if plan.QuestionCount > 10 {
-			plan.QuestionCount = 10
-		}
+		plan.QuestionCount = types.NormalizeQuestionGenerationCount(
+			eff.QuestionGenerationConfig.QuestionCount,
+		)
 		questionCap := plainCount
 		if splitPlan != nil {
 			questionCap, _ = splitEnrichmentStrataCaps(
@@ -417,6 +453,7 @@ func (s *KnowledgePostProcessService) buildPagedSplitEnrichmentPlan(
 func (s *KnowledgePostProcessService) enqueuePagedSplitQuestionTasks(
 	ctx context.Context,
 	payload types.KnowledgePostProcessPayload,
+	modelID string,
 	questionCount int,
 	attempt int,
 	expectedChunks int,
@@ -470,7 +507,7 @@ func (s *KnowledgePostProcessService) enqueuePagedSplitQuestionTasks(
 			}
 		}
 		accepted, enqueueErr := s.enqueueQuestionGenerationTasks(
-			ctx, payload, questionCount, attempt, []durableQuestionBatch{batch},
+			ctx, payload, modelID, questionCount, attempt, []durableQuestionBatch{batch},
 		)
 		enqueued += accepted
 		if enqueueErr != nil {
@@ -519,8 +556,8 @@ func (s *KnowledgePostProcessService) enqueuePagedSplitGraphTasks(
 	enqueued := 0
 	var unowned []string
 	for position, chunk := range selected {
-		ok, enqueueErr := NewChunkExtractTask(
-			ctx, s.taskEnqueuer, payload.TenantID, chunk.ID, modelID,
+		ok, enqueueErr := s.enqueueDurableGraphBatchTask(
+			ctx, payload.TenantID, []string{chunk.ID}, modelID,
 			payload.KnowledgeID, payload.KnowledgeBaseID,
 			payload.ProcessingGeneration, attempt, position,
 		)
@@ -580,9 +617,8 @@ func (s *KnowledgePostProcessService) enqueuePagedSplitGraphBatchTasks(
 	var unowned []string
 	batches := graphChunkIDBatches(selected, batchSize)
 	for batchIndex, chunkIDs := range batches {
-		ok, enqueueErr := NewChunkExtractBatchTask(
+		ok, enqueueErr := s.enqueueDurableGraphBatchTask(
 			ctx,
-			s.taskEnqueuer,
 			payload.TenantID,
 			chunkIDs,
 			modelID,
@@ -613,6 +649,68 @@ func (s *KnowledgePostProcessService) enqueuePagedSplitGraphBatchTasks(
 		)
 	}
 	return enqueued, unowned, nil
+}
+
+func (s *KnowledgePostProcessService) enqueueDurableGraphBatchTask(
+	ctx context.Context,
+	tenantID uint64,
+	chunkIDs []string,
+	modelID string,
+	knowledgeID string,
+	knowledgeBaseID string,
+	processingGeneration string,
+	attempt int,
+	batchIndex int,
+) (bool, error) {
+	if s.derivativeQueue == nil {
+		return NewChunkExtractBatchTask(
+			ctx, s.taskEnqueuer, tenantID, chunkIDs, modelID,
+			knowledgeID, knowledgeBaseID, processingGeneration, attempt, batchIndex,
+		)
+	}
+	if strings.ToLower(strings.TrimSpace(os.Getenv("NEO4J_ENABLE"))) != "true" {
+		logger.Warn(ctx, "NEO4J is not enabled, skip durable graph work item")
+		return false, nil
+	}
+	cleanIDs := make([]string, 0, len(chunkIDs))
+	seen := make(map[string]struct{}, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		chunkID = strings.TrimSpace(chunkID)
+		if chunkID == "" {
+			continue
+		}
+		if _, duplicate := seen[chunkID]; duplicate {
+			continue
+		}
+		seen[chunkID] = struct{}{}
+		cleanIDs = append(cleanIDs, chunkID)
+	}
+	if len(cleanIDs) == 0 {
+		return false, errors.New("durable graph extract batch requires at least one chunk")
+	}
+	taskPayload := types.ExtractChunkPayload{
+		TenantID: tenantID, ChunkID: cleanIDs[0], ChunkIDs: cleanIDs,
+		ModelID: modelID, KnowledgeID: knowledgeID, KnowledgeBaseID: knowledgeBaseID,
+		ProcessingGeneration: processingGeneration,
+		Attempt:              attempt, ChunkIndex: batchIndex,
+	}
+	langfuse.InjectTracing(ctx, &taskPayload)
+	raw, err := json.Marshal(taskPayload)
+	if err != nil {
+		return false, err
+	}
+	rows, err := s.derivativeQueue.PublishPlan(
+		ctx,
+		s.taskEnqueuer,
+		[]derivativequeue.PlanItem{{
+			TenantID: tenantID, KnowledgeBaseID: knowledgeBaseID,
+			KnowledgeID: knowledgeID, ProcessingGeneration: processingGeneration,
+			ProcessingAttempt: attempt, ItemID: fmt.Sprintf("graph_chunk[%d]", batchIndex),
+			WorkKind: derivativequeue.WorkGraph, Payload: types.JSON(raw),
+			ModelID: modelID, Priority: 30, QueueLane: derivativequeue.DefaultLane,
+		}},
+	)
+	return len(rows) == 1, err
 }
 
 // Handle implements asynq handler for TypeKnowledgePostProcess.
@@ -767,16 +865,13 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 				TextChunkCount:       len(textChunks),
 				SpawnSummary:         len(textChunks) > 0,
 				SpawnWiki:            kb.IndexingStrategy.WikiEnabled && len(textChunks) > 0,
+				DerivativeModelID:    kb.DerivativeModelID,
 			}
 			budget := workloadbudget.FromEnv()
 			if durablePlan.SpawnSummary && kb.NeedsEmbeddingModel() && eff.QuestionGenerationConfig.Enabled {
-				questionCount := eff.QuestionGenerationConfig.QuestionCount
-				if questionCount <= 0 {
-					questionCount = 3
-				}
-				if questionCount > 10 {
-					questionCount = 10
-				}
+				questionCount := types.NormalizeQuestionGenerationCount(
+					eff.QuestionGenerationConfig.QuestionCount,
+				)
 				durablePlan.QuestionCount = questionCount
 				var questionChunks []*types.Chunk
 				for _, chunk := range textChunks {
@@ -1044,7 +1139,9 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	enqueuedQuestionCount := 0
 	unownedItems := make([]string, 0)
 	if willSpawnSummary {
-		enqueuedSummary, err = s.enqueueSummaryGenerationTask(ctx, payload, attempt)
+		enqueuedSummary, err = s.enqueueSummaryGenerationTask(
+			ctx, payload, durablePlan.DerivativeModelID, attempt,
+		)
 		if err != nil {
 			return fmt.Errorf("enqueue durable summary fanout: %w", err)
 		}
@@ -1068,13 +1165,14 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		}
 		if durablePlan.Version == 2 || durablePlan.Version == 3 {
 			enqueuedQuestionCount, err = s.enqueuePagedSplitQuestionTasks(
-				ctx, payload, durablePlan.QuestionCount, attempt,
+				ctx, payload, durablePlan.DerivativeModelID, durablePlan.QuestionCount, attempt,
 				durablePlan.QuestionChunkCount,
 				durablePlan.QuestionBatchCount,
 			)
 		} else {
 			enqueuedQuestionCount, err = s.enqueueQuestionGenerationTasks(
-				ctx, payload, durablePlan.QuestionCount, attempt, durablePlan.QuestionBatches,
+				ctx, payload, durablePlan.DerivativeModelID,
+				durablePlan.QuestionCount, attempt, durablePlan.QuestionBatches,
 			)
 		}
 		if err != nil {
@@ -1121,8 +1219,8 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 			unownedItems = append(unownedItems, pagedUnowned...)
 		} else {
 			for _, graphTask := range durablePlan.GraphTasks {
-				ok, err := NewChunkExtractBatchTask(
-					ctx, s.taskEnqueuer, payload.TenantID, graphTask.chunkIDs(), graphTask.ModelID,
+				ok, err := s.enqueueDurableGraphBatchTask(
+					ctx, payload.TenantID, graphTask.chunkIDs(), graphTask.ModelID,
 					payload.KnowledgeID, payload.KnowledgeBaseID, payload.ProcessingGeneration,
 					attempt, graphTask.ChunkIndex,
 				)
@@ -1137,6 +1235,33 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 				}
 			}
 		}
+	}
+
+	// The generation finalizer is a durable, non-counted Work Item. It may be
+	// delivered immediately, but it defers without provider budget until every
+	// sibling reaches a terminal PostgreSQL state. It then reconciles each
+	// immutable outcome and repairs a crash between the last decrement and the
+	// guarded document promotion.
+	enqueuedFinalizer := false
+	if s.derivativeQueue != nil && expectedSubtasks > 0 {
+		rows, publishErr := s.derivativeQueue.PublishPlan(
+			ctx,
+			s.taskEnqueuer,
+			[]derivativequeue.PlanItem{{
+				TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID,
+				KnowledgeID:          payload.KnowledgeID,
+				ProcessingGeneration: payload.ProcessingGeneration,
+				ProcessingAttempt:    attempt,
+				ItemID:               "finalizer",
+				WorkKind:             derivativequeue.WorkFinalizer,
+				Payload:              types.JSON(`{}`),
+				Priority:             -10,
+			}},
+		)
+		if publishErr != nil {
+			return fmt.Errorf("enqueue durable derivative finalizer: %w", publishErr)
+		}
+		enqueuedFinalizer = len(rows) == 1
 	}
 
 	// Reconcile the seeded counter against what was actually enqueued.
@@ -1217,6 +1342,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		"enqueued_graph_count":     enqueuedGraphCount,
 		"graph_source_chunk_count": durablePlan.GraphChunkCount,
 		"graph_batch_count":        graphChunkCount,
+		"enqueued_finalizer":       enqueuedFinalizer,
 		"core_outcomes_total":      generationOutcomes.Total,
 		"core_outcomes_failed":     generationOutcomes.Failed,
 		"core_outcomes_degraded":   generationOutcomes.Degraded,
@@ -1281,6 +1407,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 func (s *KnowledgePostProcessService) enqueueSummaryGenerationTask(
 	ctx context.Context,
 	payload types.KnowledgePostProcessPayload,
+	modelID string,
 	attempt int,
 ) (bool, error) {
 	if s.taskEnqueuer == nil {
@@ -1301,13 +1428,31 @@ func (s *KnowledgePostProcessService) enqueueSummaryGenerationTask(
 		logger.Warnf(ctx, "[KnowledgePostProcess] Failed to marshal summary generation payload: %v", err)
 		return false, err
 	}
+	if s.derivativeQueue != nil {
+		rows, publishErr := s.derivativeQueue.PublishPlan(
+			ctx,
+			s.taskEnqueuer,
+			[]derivativequeue.PlanItem{{
+				TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID,
+				KnowledgeID:          payload.KnowledgeID,
+				ProcessingGeneration: payload.ProcessingGeneration,
+				ProcessingAttempt:    attempt, ItemID: "summary",
+				WorkKind: derivativequeue.WorkSummary, Payload: types.JSON(payloadBytes),
+				ModelID: modelID, Priority: 50, QueueLane: derivativequeue.DefaultLane,
+			}},
+		)
+		if publishErr != nil {
+			return false, publishErr
+		}
+		return len(rows) == 1, nil
+	}
 
 	task := asynq.NewTask(types.TypeSummaryGeneration, payloadBytes)
 	if _, err := processownership.EnqueueStableTask(
 		ctx,
 		s.taskEnqueuer,
 		task,
-		types.QueueLow,
+		types.QueueDerivative,
 		processownership.SummaryTaskID(payload.KnowledgeID, payload.ProcessingGeneration),
 		asynq.MaxRetry(3),
 		asynq.Timeout(processownership.GenerationTaskTimeout),
@@ -1350,6 +1495,7 @@ const postprocessQuestionGroupSpanName = "postprocess.question"
 func (s *KnowledgePostProcessService) enqueueQuestionGenerationTasks(
 	ctx context.Context,
 	payload types.KnowledgePostProcessPayload,
+	modelID string,
 	questionCount int,
 	attempt int,
 	batches []durableQuestionBatch,
@@ -1360,12 +1506,7 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationTasks(
 		}
 		return 0, errors.New("question task enqueuer is unavailable")
 	}
-	if questionCount <= 0 {
-		questionCount = 3
-	}
-	if questionCount > 10 {
-		questionCount = 10
-	}
+	questionCount = types.NormalizeQuestionGenerationCount(questionCount)
 
 	totalChunks := 0
 	enqueued := 0
@@ -1392,6 +1533,28 @@ func (s *KnowledgePostProcessService) enqueueQuestionGenerationTasks(
 		if err != nil {
 			logger.Warnf(ctx, "[KnowledgePostProcess] Failed to marshal question generation payload for batch %d: %v", currentBatchIndex, err)
 			return enqueued, err
+		}
+		if s.derivativeQueue != nil {
+			rows, publishErr := s.derivativeQueue.PublishPlan(
+				ctx,
+				s.taskEnqueuer,
+				[]derivativequeue.PlanItem{{
+					TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID,
+					KnowledgeID:          payload.KnowledgeID,
+					ProcessingGeneration: payload.ProcessingGeneration,
+					ProcessingAttempt:    attempt,
+					ItemID:               fmt.Sprintf("question_batch[%d]", currentBatchIndex),
+					WorkKind:             derivativequeue.WorkQuestion, Payload: types.JSON(payloadBytes),
+					ModelID: modelID, Priority: 40, QueueLane: derivativequeue.DefaultLane,
+				}},
+			)
+			if publishErr != nil {
+				return enqueued, publishErr
+			}
+			if len(rows) == 1 {
+				enqueued++
+			}
+			continue
 		}
 
 		task := asynq.NewTask(types.TypeQuestionGeneration, payloadBytes)

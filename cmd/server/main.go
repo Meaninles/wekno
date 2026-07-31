@@ -31,10 +31,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/container"
+	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/runtime"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -64,6 +67,24 @@ func main() {
 
 	// Build dependency injection container
 	c := container.BuildContainer(runtime.GetContainer())
+	profile := runtimeprofile.MustLoadFromEnv()
+	if profile.Role == runtimeprofile.RoleMigration {
+		err := c.Invoke(func(
+			_ *custombootstrap.Handlers,
+			resourceCleaner interfaces.ResourceCleaner,
+		) error {
+			logger.Infof(context.Background(), "migration role completed successfully")
+			errs := resourceCleaner.Cleanup(context.Background())
+			if len(errs) > 0 {
+				return fmt.Errorf("migration cleanup failed: %v", errs)
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Fatalf(context.Background(), "migration role failed: %v", err)
+		}
+		return
+	}
 
 	// One-shot bootstrap hooks (e.g. promote env-named user to system
 	// admin). Best-effort: never aborts startup — see bootstrap.go.
@@ -76,10 +97,43 @@ func main() {
 		resourceCleaner interfaces.ResourceCleaner,
 		systemSettingSvc interfaces.SystemSettingService,
 		documentQueue *documentqueue.Coordinator,
+		profile runtimeprofile.Profile,
 	) error {
+		handler := http.Handler(router)
+		if !profile.ServesAPI() {
+			health := gin.New()
+			health.GET("/health", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{
+					"status": "ok",
+					"role":   profile.Role,
+				})
+			})
+			health.GET("/ready", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{
+					"status": "ready",
+					"role":   profile.Role,
+				})
+			})
+			// Worker metrics are served by the same lightweight listener as
+			// health probes. Without this route, the role that actually owns
+			// model admission and queue execution is invisible while API
+			// replicas export only their process-local zero values.
+			health.GET("/metrics", gin.WrapH(promhttp.Handler()))
+			health.GET("/api/v1/custom/runtime-profile/status", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{
+					"role":              profile.Role,
+					"serves_api":        profile.ServesAPI(),
+					"parse_worker":      profile.RunsParseWorker(),
+					"derivative_worker": profile.RunsDerivativeWorker(),
+					"wiki_worker":       profile.RunsWikiWorker(),
+					"maintenance":       profile.RunsMaintenance(),
+				})
+			})
+			handler = health
+		}
 		// Create HTTP server
 		server := &http.Server{
-			Handler: router,
+			Handler: handler,
 		}
 
 		addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -95,8 +149,10 @@ func main() {
 		// effort: an error here only warns (Redis may legitimately be
 		// disabled in lite-mode deployments — the service no-ops in
 		// that case anyway).
-		if err := systemSettingSvc.SubscribeRedis(ctx); err != nil {
-			logger.Warnf(ctx, "[system_settings] subscribe failed: %v", err)
+		if profile.ServesAPI() {
+			if err := systemSettingSvc.SubscribeRedis(ctx); err != nil {
+				logger.Warnf(ctx, "[system_settings] subscribe failed: %v", err)
+			}
 		}
 
 		signals := make(chan os.Signal, 1)
@@ -109,7 +165,9 @@ func main() {
 			// especially important in Kubernetes: a terminating pod must not
 			// claim another complete workflow while endpoint removal and
 			// graceful shutdown are propagating.
-			documentQueue.MarkDraining()
+			if profile.RunsParseWorker() {
+				documentQueue.MarkDraining()
+			}
 
 			// Close listener first to release port immediately,
 			// so the next process can bind during our graceful drain.

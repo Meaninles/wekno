@@ -828,6 +828,7 @@ export default {
 
   knowledgeWorkflowStatus: {
     title: 'Full processing status',
+    coreReadyEnriching: 'Core searchable, enrichment running',
     unknown: 'Unknown',
     detailsUnavailable: 'Stage details are temporarily unavailable',
     hoverHint: 'Latest stage details are loaded on hover without continuous polling',
@@ -3158,7 +3159,7 @@ export default {
         label: 'AI Question Generation',
         description: 'Generate related questions for each chunk using LLM during document parsing to improve retrieval recall. Enabling this will increase document parsing time.',
         countLabel: 'Question Count',
-        countDescription: 'Number of questions to generate per document chunk (1-10)',
+        countDescription: 'Questions generated per document chunk (1-3, default 1)',
       },
       multimodal: {
         label: 'Multimodal Feature',

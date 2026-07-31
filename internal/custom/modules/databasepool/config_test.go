@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -21,6 +22,38 @@ func TestConfigurePostgresDefaultsBoundEveryReplica(t *testing.T) {
 	}
 	if got := db.Stats().MaxOpenConnections; got != 12 {
 		t.Fatalf("MaxOpenConnections = %d, want 12", got)
+	}
+}
+
+func TestRoleDefaultsMatchClusterBudget(t *testing.T) {
+	clearPoolEnv(t)
+	tests := []struct {
+		role runtimeprofile.Role
+		open int
+		idle int
+	}{
+		{runtimeprofile.RoleAPI, 6, 2},
+		{runtimeprofile.RoleParseWorker, 6, 2},
+		{runtimeprofile.RoleDerivativeWorker, 4, 1},
+		{runtimeprofile.RoleWikiWorker, 3, 1},
+		{runtimeprofile.RoleMaintenance, 2, 1},
+		{runtimeprofile.RoleMigration, 1, 1},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.role), func(t *testing.T) {
+			db := openSQLiteForPoolTest(t)
+			cfg, err := ConfigureFromEnv(
+				db,
+				"postgres",
+				runtimeprofile.Profile{Role: tt.role},
+			)
+			if err != nil {
+				t.Fatalf("ConfigureFromEnv() error = %v", err)
+			}
+			if cfg.MaxOpenConns != tt.open || cfg.MaxIdleConns != tt.idle {
+				t.Fatalf("config = %+v, want open=%d idle=%d", cfg, tt.open, tt.idle)
+			}
+		})
 	}
 }
 

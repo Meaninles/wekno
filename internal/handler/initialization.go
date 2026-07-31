@@ -410,16 +410,11 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 
 	// 更新问题生成配置
 	if req.QuestionGeneration.Enabled {
-		questionCount := req.QuestionGeneration.QuestionCount
-		if questionCount <= 0 {
-			questionCount = 3
-		}
-		if questionCount > 10 {
-			questionCount = 10
-		}
 		kb.QuestionGenerationConfig = &types.QuestionGenerationConfig{
-			Enabled:       true,
-			QuestionCount: questionCount,
+			Enabled: true,
+			QuestionCount: types.NormalizeQuestionGenerationCount(
+				req.QuestionGeneration.QuestionCount,
+			),
 		}
 	} else {
 		kb.QuestionGenerationConfig = &types.QuestionGenerationConfig{Enabled: false}

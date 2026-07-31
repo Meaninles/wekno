@@ -23,12 +23,17 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativecontrol"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
+	"github.com/Tencent/WeKnora/internal/custom/modules/maintenance"
 	"github.com/Tencent/WeKnora/internal/custom/modules/mobiledocument"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
@@ -59,6 +64,7 @@ type Handlers struct {
 	KnowledgeFolders     *knowledgefolders.Handler
 	MobileDocument       *mobiledocument.Handler
 	DerivativeControl    *derivativecontrol.Handler
+	ModelAdmission       *modeladmission.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -106,6 +112,10 @@ func NewHandlers(
 	auditLogService interfaces.AuditLogService,
 	kbRepository interfaces.KnowledgeBaseRepository,
 	customAgentRepository interfaces.CustomAgentRepository,
+	profile runtimeprofile.Profile,
+	admissionManager *modeladmission.Manager,
+	derivativeQueueRepository *derivativequeue.Repository,
+	processingTraceRepository *processingtrace.Repository,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
@@ -165,10 +175,20 @@ func NewHandlers(
 		auditLogService,
 		kbRepository,
 		customAgentRepository,
+		admissionManager,
 	)
-	runMaintenance := customMigrationsEnabled()
+	runMaintenance := profile.RunsMigration() && customMigrationsEnabled()
 	if runMaintenance {
+		if err := admissionManager.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := derivativeControlService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := derivativeQueueRepository.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := processingTraceRepository.Migrate(ctx); err != nil {
 			return nil, err
 		}
 		if err := configCenterService.Migrate(ctx); err != nil {
@@ -371,6 +391,7 @@ func NewHandlers(
 		KnowledgeFolders:            knowledgefolders.NewHandler(knowledgeFolderService, knowledgeService),
 		MobileDocument:              mobiledocument.NewHandler(mobileDocumentService),
 		DerivativeControl:           derivativecontrol.NewHandler(derivativeControlService, modelService),
+		ModelAdmission:              modeladmission.NewHandler(admissionManager),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -390,6 +411,12 @@ func NewHandlers(
 		userGuideService:            userGuideService,
 	}, nil
 }
+
+// Initialize forces construction of the custom control plane before any
+// serving or worker loop starts. dig providers are lazy; without this barrier
+// a derivative worker can consume a wake before the package-level model
+// resolver/guards registered by NewHandlers exist.
+func Initialize(*Handlers) {}
 
 // customMigrationsEnabled follows the native AUTO_MIGRATE contract by
 // default. CUSTOM_AUTO_MIGRATE is an explicit escape hatch for deployments
@@ -460,6 +487,67 @@ func StartSchedulers(handlers *Handlers) {
 	if handlers.generalAgentService != nil {
 		handlers.generalAgentService.StartArtifactHousekeeping()
 	}
+}
+
+// StartAPIWorkers starts process-local consumers that receive work directly
+// from API handlers. They are intentionally not leader-elected: every API
+// replica has its own in-memory feedback queue.
+func StartAPIWorkers(handlers *Handlers) {
+	if handlers != nil && handlers.answerFeedbackService != nil {
+		handlers.answerFeedbackService.Start()
+	}
+}
+
+// RegisterMaintenanceSchedulers binds every durable/global scheduler to the
+// same PostgreSQL session-leader token as derivative dispatch and recovery.
+// A standby starts none of these loops; loss of the leader connection stops
+// them before the next election.
+func RegisterMaintenanceSchedulers(
+	handlers *Handlers,
+	coordinator *maintenance.Coordinator,
+) error {
+	if handlers == nil || coordinator == nil {
+		return nil
+	}
+	return coordinator.Register(maintenance.Hook{
+		Name: "custom-schedulers",
+		Start: func(ctx context.Context) error {
+			if handlers.iamService != nil {
+				if err := handlers.iamService.StartScheduler(ctx); err != nil {
+					return fmt.Errorf("start IAM scheduler: %w", err)
+				}
+			}
+			if handlers.scheduledChatService != nil {
+				if err := handlers.scheduledChatService.StartScheduler(ctx); err != nil {
+					if handlers.iamService != nil {
+						handlers.iamService.StopScheduler()
+					}
+					return fmt.Errorf("start scheduled chat scheduler: %w", err)
+				}
+			}
+			if handlers.kbManagerService != nil {
+				handlers.kbManagerService.Start()
+			}
+			if handlers.generalAgentService != nil {
+				handlers.generalAgentService.StartArtifactHousekeeping()
+			}
+			return nil
+		},
+		Stop: func() {
+			if handlers.generalAgentService != nil {
+				handlers.generalAgentService.StopArtifactHousekeeping()
+			}
+			if handlers.kbManagerService != nil {
+				handlers.kbManagerService.Stop()
+			}
+			if handlers.scheduledChatService != nil {
+				handlers.scheduledChatService.StopScheduler()
+			}
+			if handlers.iamService != nil {
+				handlers.iamService.StopScheduler()
+			}
+		},
+	})
 }
 
 func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
@@ -567,6 +655,31 @@ func RegisterRoutes(
 				derivativeRoutes.PUT("/default", handlers.DerivativeControl.SetDefault)
 				derivativeRoutes.PUT("/tpm", handlers.DerivativeControl.UpdateTPM)
 				derivativeRoutes.POST("/models/:model_id/test", handlers.DerivativeControl.Test)
+			}
+		}
+
+		if handlers.ModelAdmission != nil {
+			admissionRoutes := custom.Group("/derivative-control")
+			{
+				admissionRoutes.GET("/resource-pools", handlers.ModelAdmission.ListResourcePools)
+				admissionRoutes.POST("/resource-pools", handlers.ModelAdmission.CreateResourcePool)
+				admissionRoutes.PUT("/resource-pools/:id", handlers.ModelAdmission.UpdateResourcePool)
+				admissionRoutes.POST("/resource-pools/:id/drain", handlers.ModelAdmission.DrainResourcePool)
+				admissionRoutes.POST("/resource-pools/:id/reset", handlers.ModelAdmission.ResetResourcePool)
+				admissionRoutes.DELETE("/resource-pools/:id", handlers.ModelAdmission.DeleteResourcePool)
+				admissionRoutes.GET("/quota-pools", handlers.ModelAdmission.ListQuotaPools)
+				admissionRoutes.POST("/quota-pools", handlers.ModelAdmission.CreateQuotaPool)
+				admissionRoutes.PUT("/quota-pools/:id", handlers.ModelAdmission.UpdateQuotaPool)
+				admissionRoutes.GET("/gateway-pools", handlers.ModelAdmission.ListGatewayPools)
+				admissionRoutes.POST("/gateway-pools", handlers.ModelAdmission.CreateGatewayPool)
+				admissionRoutes.PUT("/gateway-pools/:id", handlers.ModelAdmission.UpdateGatewayPool)
+				admissionRoutes.GET("/bindings", handlers.ModelAdmission.ListBindings)
+				admissionRoutes.PUT("/bindings/:model_id", handlers.ModelAdmission.PutBinding)
+				admissionRoutes.GET("/templates", handlers.ModelAdmission.ListTemplates)
+				admissionRoutes.PUT("/templates/:kind", handlers.ModelAdmission.PutTemplate)
+				admissionRoutes.GET("/queue/status", handlers.ModelAdmission.QueueStatus)
+				admissionRoutes.GET("/audits", handlers.ModelAdmission.ListAudits)
+				admissionRoutes.POST("/reconcile", handlers.ModelAdmission.Reconcile)
 			}
 		}
 	}

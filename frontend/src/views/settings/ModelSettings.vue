@@ -48,9 +48,6 @@
 
     <DerivativeControlPanel
       v-if="authStore.isSystemAdmin && activeTypeFilter === 'derivative'"
-      :tpm="derivativeConfig?.tpm"
-      :saving="savingDerivativeTPM"
-      @save="saveDerivativeTPM"
     />
 
     <t-loading :loading="loading" size="small" class="model-list-loading">
@@ -185,13 +182,11 @@ const loading = ref(true)
 const activeTypeFilter = ref<FilterType>('all')
 const {
   config: derivativeConfig,
-  savingTPM: savingDerivativeTPM,
   load: loadDerivativeConfig,
   isPublished: isDerivativePublished,
   isDefault: isDerivativeDefault,
   tagLabel: derivativeTagLabel,
   tagTheme: derivativeTagTheme,
-  saveTPM: saveDerivativeTPM,
   publish: publishDerivative,
   setDefault: setDerivativeDefault,
   test: testDerivative,

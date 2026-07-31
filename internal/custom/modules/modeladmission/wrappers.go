@@ -48,6 +48,10 @@ func (w *admittedChat) Chat(
 	if err != nil {
 		return nil, err
 	}
+	if err := runAdmissionGrantedHook(lease.Context()); err != nil {
+		lease.Release()
+		return nil, err
+	}
 	response, callErr := w.inner.Chat(lease.Context(), messages, options)
 	return response, finishLease(lease, callErr)
 }
@@ -59,6 +63,10 @@ func (w *admittedChat) ChatStream(
 ) (<-chan types.StreamResponse, error) {
 	lease, err := w.manager.Acquire(ctx, w.spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := runAdmissionGrantedHook(lease.Context()); err != nil {
+		lease.Release()
 		return nil, err
 	}
 	stream, callErr := w.inner.ChatStream(lease.Context(), messages, options)

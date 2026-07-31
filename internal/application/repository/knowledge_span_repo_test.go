@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,6 +210,49 @@ func TestKnowledgeSpanRepo_ListAttemptIsolation(t *testing.T) {
 	require.Len(t, a2, 1)
 
 	all, err := repo.ListByAttempt(ctx, kid, 0)
+	require.Error(t, err)
+	assert.Nil(t, all, "attempt=0 must not scan every historical attempt")
+}
+
+func TestKnowledgeSpanRepo_V2DualWriteUsesOneLogicalRowPerRetry(t *testing.T) {
+	db, err := gorm.Open(
+		sqlite.Open("file:knowledge-span-v2-dual-write?mode=memory&cache=shared"),
+		&gorm.Config{},
+	)
 	require.NoError(t, err)
-	assert.Len(t, all, 2, "attempt=0 returns all attempts (used by housekeeping)")
+	require.NoError(t, db.Exec(spansTestDDL).Error)
+	v2 := processingtrace.NewRepository(db)
+	require.NoError(t, v2.Migrate(context.Background()))
+	repo := NewKnowledgeSpanRepositoryWithV2(db, v2)
+
+	ctx := context.Background()
+	started := time.Now().UTC().Add(-time.Second)
+	row := &types.KnowledgeProcessingSpan{
+		KnowledgeID: "knowledge-v2",
+		Attempt:     3,
+		SpanID:      "delivery-specific-id-1",
+		Name:        "postprocess.question.batch[0]",
+		Kind:        types.SpanKindSubSpan,
+		Status:      types.SpanStatusRunning,
+		StartedAt:   &started,
+	}
+	require.NoError(t, repo.Upsert(ctx, row))
+
+	// A redelivery uses another legacy delivery span ID. V2 must fold it into
+	// the same stable logical key and record that a real business attempt ran.
+	row.ID = 0
+	row.SpanID = "delivery-specific-id-2"
+	require.NoError(t, repo.Upsert(ctx, row))
+	finished := time.Now().UTC()
+	row.Status = types.SpanStatusDone
+	row.FinishedAt = &finished
+	require.NoError(t, repo.Upsert(ctx, row))
+
+	page, err := v2.List(ctx, row.KnowledgeID, row.Attempt, 500, nil)
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "derivative:question_batch:0", page.Items[0].LogicalKey)
+	assert.Equal(t, types.SpanStatusDone, page.Items[0].Status)
+	assert.Equal(t, 2, page.Items[0].RealAttemptCount)
+	assert.Nil(t, page.NextCursor)
 }

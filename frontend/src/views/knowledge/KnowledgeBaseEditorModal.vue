@@ -686,7 +686,7 @@ const initFormData = (type: 'document' | 'faq' = 'document') => {
     },
     questionGenerationConfig: {
       enabled: true,
-      questionCount: 3
+      questionCount: 1
     },
     wikiConfig: {
       synthesisModelId: '',
@@ -795,8 +795,8 @@ const loadKBData = async () => {
         relations: kb.extract_config?.relations || []
       },
       questionGenerationConfig: {
-        enabled: kb.question_generation_config?.enabled || false,
-        questionCount: kb.question_generation_config?.question_count || 3
+        enabled: kb.question_generation_config?.enabled ?? true,
+        questionCount: kb.question_generation_config?.question_count || 1
       },
       wikiConfig: {
         synthesisModelId: kb.wiki_config?.synthesis_model_id || '',
@@ -1121,7 +1121,7 @@ const buildSubmitData = () => {
   if (formData.value.questionGenerationConfig?.enabled) {
     data.question_generation_config = {
       enabled: true,
-      question_count: formData.value.questionGenerationConfig.questionCount || 3
+      question_count: formData.value.questionGenerationConfig.questionCount || 1
     }
   }
 
@@ -1287,8 +1287,8 @@ const doSubmit = async () => {
           relations: data.extract_config?.relations || []
         },
         questionGeneration: {
-          enabled: data.question_generation_config?.enabled || false,
-          questionCount: data.question_generation_config?.question_count || 3
+          enabled: data.question_generation_config?.enabled ?? true,
+          questionCount: data.question_generation_config?.question_count || 1
         }
       }
 

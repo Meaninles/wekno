@@ -2,11 +2,14 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -60,6 +63,7 @@ type KnowledgeSpanRepository interface {
 
 type knowledgeSpanRepository struct {
 	db *gorm.DB
+	v2 *processingtrace.Repository
 	// SQLite cannot be shared by horizontally scaled pods and has no
 	// transaction-scoped advisory lock. Serializing allocation inside the
 	// single process gives its supported local mode the same invariant.
@@ -69,6 +73,16 @@ type knowledgeSpanRepository struct {
 // NewKnowledgeSpanRepository wires the GORM-backed implementation.
 func NewKnowledgeSpanRepository(db *gorm.DB) KnowledgeSpanRepository {
 	return &knowledgeSpanRepository{db: db}
+}
+
+// NewKnowledgeSpanRepositoryWithV2 is the production constructor. The legacy
+// table remains a compatibility mirror during the local rollout, while all
+// new business progress is also written to the logical-key V2 table.
+func NewKnowledgeSpanRepositoryWithV2(
+	db *gorm.DB,
+	v2 *processingtrace.Repository,
+) KnowledgeSpanRepository {
+	return &knowledgeSpanRepository{db: db, v2: v2}
 }
 
 func (r *knowledgeSpanRepository) Upsert(ctx context.Context, row *types.KnowledgeProcessingSpan) error {
@@ -111,14 +125,83 @@ func (r *knowledgeSpanRepository) Upsert(ctx context.Context, row *types.Knowled
 	if row.Metadata != nil {
 		cols = append(cols, "metadata")
 	}
-	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "knowledge_id"},
 			{Name: "attempt"},
 			{Name: "span_id"},
 		},
 		DoUpdates: clause.AssignmentColumns(cols),
-	}).Create(row).Error
+	}).Create(row).Error; err != nil {
+		return err
+	}
+	return r.upsertV2(ctx, row)
+}
+
+func (r *knowledgeSpanRepository) upsertV2(
+	ctx context.Context,
+	row *types.KnowledgeProcessingSpan,
+) error {
+	if r == nil || r.v2 == nil || row == nil {
+		return nil
+	}
+	logicalKey := spanV2LogicalKey(row.Kind, row.Name)
+	parentKey := ""
+	if row.ParentSpanID != "" {
+		var parent types.KnowledgeProcessingSpan
+		if err := r.db.WithContext(ctx).
+			Where("knowledge_id = ? AND attempt = ? AND span_id = ?",
+				row.KnowledgeID, row.Attempt, row.ParentSpanID).
+			Take(&parent).Error; err == nil {
+			parentKey = spanV2LogicalKey(parent.Kind, parent.Name)
+		}
+	}
+	summary := func(value types.JSONMap) string {
+		if value == nil {
+			return ""
+		}
+		raw, _ := json.Marshal(value)
+		return string(raw)
+	}
+	started := row.CreatedAt
+	if row.StartedAt != nil {
+		started = *row.StartedAt
+	}
+	progressAt := row.UpdatedAt
+	if progressAt.IsZero() {
+		progressAt = time.Now()
+	}
+	return r.v2.RecordBusinessProgress(ctx, processingtrace.Upsert{
+		KnowledgeID: row.KnowledgeID, Attempt: row.Attempt,
+		LogicalKey: logicalKey, ParentLogicalKey: parentKey,
+		Name: row.Name, Kind: row.Kind, Status: row.Status,
+		InputSummary: summary(row.Input), OutputSummary: summary(row.Output),
+		LastErrorCode: row.ErrorCode, LastErrorMessage: row.ErrorMessage,
+		StartedAt: started, LastBusinessProgressAt: &progressAt,
+		FinishedAt:           row.FinishedAt,
+		IncrementRealAttempt: row.Status == types.SpanStatusRunning,
+	})
+}
+
+func spanV2LogicalKey(kind, name string) string {
+	switch {
+	case kind == types.SpanKindRoot:
+		return "root"
+	case kind == types.SpanKindStage:
+		return "stage:" + name
+	case name == "postprocess.summary":
+		return "derivative:summary"
+	case strings.HasPrefix(name, "postprocess.question.batch["):
+		index := strings.TrimSuffix(strings.TrimPrefix(name, "postprocess.question.batch["), "]")
+		return "derivative:question_batch:" + index
+	case strings.HasPrefix(name, "postprocess.graph.chunk["):
+		index := strings.TrimSuffix(strings.TrimPrefix(name, "postprocess.graph.chunk["), "]")
+		return "derivative:graph_batch:" + index
+	case strings.HasPrefix(name, "postprocess.wiki"):
+		return "wiki:" + name
+	default:
+		return kind + ":" + name
+	}
 }
 
 func (r *knowledgeSpanRepository) CreateNextAttemptRoot(
@@ -206,6 +289,16 @@ func (r *knowledgeSpanRepository) CreateNextAttemptRoot(
 		return 0, 0, err
 	}
 	root.Attempt = attempt
+	if r.v2 != nil {
+		if _, mirrorErr := r.v2.SupersedeOlderAttempts(
+			ctx, root.KnowledgeID, attempt, supersedeErrorCode, supersedeReason,
+		); mirrorErr != nil {
+			return 0, 0, fmt.Errorf("supersede V2 knowledge spans: %w", mirrorErr)
+		}
+		if mirrorErr := r.upsertV2(ctx, root); mirrorErr != nil {
+			return 0, 0, fmt.Errorf("create V2 knowledge span attempt root: %w", mirrorErr)
+		}
+	}
 	return attempt, superseded, nil
 }
 
@@ -232,17 +325,20 @@ func (r *knowledgeSpanRepository) LatestAttempt(ctx context.Context, knowledgeID
 
 func (r *knowledgeSpanRepository) ListByAttempt(ctx context.Context, knowledgeID string, attempt int) ([]types.KnowledgeProcessingSpan, error) {
 	if knowledgeID == "" {
-		return nil, nil
+		return nil, errors.New("knowledgeSpanRepository.ListByAttempt: knowledge_id required")
+	}
+	if attempt < 1 {
+		return nil, errors.New("knowledgeSpanRepository.ListByAttempt: positive attempt required")
 	}
 	var rows []types.KnowledgeProcessingSpan
-	q := r.db.WithContext(ctx).Where("knowledge_id = ?", knowledgeID)
-	if attempt > 0 {
-		q = q.Where("attempt = ?", attempt)
-	}
+	q := r.db.WithContext(ctx).
+		Where("knowledge_id = ? AND attempt = ?", knowledgeID, attempt)
 	// id ASC keeps the natural insertion order — useful for stable
 	// rendering of fan-out subspans (e.g. multimodal.image[0..N] in
-	// the order they were enqueued).
-	err := q.Order("id ASC").Find(&rows).Error
+	// the order they were enqueued). The hard limit prevents the legacy
+	// trace table from creating an unbounded API/database read; Span V2
+	// exposes cursor pagination for administrative history.
+	err := q.Order("id ASC").Limit(500).Find(&rows).Error
 	return rows, err
 }
 
@@ -270,6 +366,7 @@ func (r *knowledgeSpanRepository) GetSpan(ctx context.Context, knowledgeID strin
 func (r *knowledgeSpanRepository) CancelDescendants(ctx context.Context, knowledgeID string, attempt int, parentSpanID, reason string) (int64, error) {
 	frontier := []string{parentSpanID}
 	var totalAffected int64
+	var logicalKeys []string
 	for depth := 0; depth < 16 && len(frontier) > 0; depth++ {
 		var nextFrontier []string
 		// Find children of every span currently on the frontier
@@ -292,6 +389,7 @@ func (r *knowledgeSpanRepository) CancelDescendants(ctx context.Context, knowled
 		for _, c := range children {
 			ids = append(ids, c.SpanID)
 			nextFrontier = append(nextFrontier, c.SpanID)
+			logicalKeys = append(logicalKeys, spanV2LogicalKey(c.Kind, c.Name))
 		}
 		res := r.db.WithContext(ctx).Model(&types.KnowledgeProcessingSpan{}).
 			Where("knowledge_id = ? AND attempt = ? AND span_id IN ?", knowledgeID, attempt, ids).
@@ -305,6 +403,13 @@ func (r *knowledgeSpanRepository) CancelDescendants(ctx context.Context, knowled
 		}
 		totalAffected += res.RowsAffected
 		frontier = nextFrontier
+	}
+	if r.v2 != nil && len(logicalKeys) > 0 {
+		if _, err := r.v2.CancelOpen(
+			ctx, knowledgeID, attempt, logicalKeys, "UPSTREAM_FAILED", reason,
+		); err != nil {
+			return totalAffected, err
+		}
 	}
 	return totalAffected, nil
 }
@@ -336,6 +441,13 @@ func (r *knowledgeSpanRepository) CancelAllOpenSpans(
 	if res.Error != nil {
 		return 0, res.Error
 	}
+	if r.v2 != nil {
+		if _, err := r.v2.CancelOpen(
+			ctx, knowledgeID, attempt, nil, errorCode, reason,
+		); err != nil {
+			return res.RowsAffected, err
+		}
+	}
 	return res.RowsAffected, nil
 }
 
@@ -359,6 +471,13 @@ func (r *knowledgeSpanRepository) CancelOpenSpansByName(
 		})
 	if res.Error != nil {
 		return 0, res.Error
+	}
+	if r.v2 != nil {
+		if _, err := r.v2.CancelOpenByName(
+			ctx, knowledgeID, attempt, name, errorCode, reason,
+		); err != nil {
+			return res.RowsAffected, err
+		}
 	}
 	return res.RowsAffected, nil
 }

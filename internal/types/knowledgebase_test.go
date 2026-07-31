@@ -34,6 +34,45 @@ func TestParseProviderScheme(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseQuestionGenerationDefaultsAndCap(t *testing.T) {
+	kb := &KnowledgeBase{Type: KnowledgeBaseTypeDocument}
+	kb.EnsureDefaults()
+	if kb.QuestionGenerationConfig == nil ||
+		!kb.QuestionGenerationConfig.Enabled ||
+		kb.QuestionGenerationConfig.QuestionCount != DefaultQuestionGenerationCount {
+		t.Fatalf("unexpected question-generation defaults: %#v", kb.QuestionGenerationConfig)
+	}
+
+	kb.QuestionGenerationConfig.QuestionCount = 99
+	kb.EnsureDefaults()
+	if kb.QuestionGenerationConfig.QuestionCount != MaxQuestionGenerationCount {
+		t.Fatalf(
+			"question count was not capped: got %d want %d",
+			kb.QuestionGenerationConfig.QuestionCount,
+			MaxQuestionGenerationCount,
+		)
+	}
+}
+
+func TestKnowledgeBaseGraphStrategyEnablesExtractorOnCreate(t *testing.T) {
+	kb := &KnowledgeBase{
+		Type: KnowledgeBaseTypeDocument,
+		IndexingStrategy: IndexingStrategy{
+			VectorEnabled: true,
+			GraphEnabled:  true,
+		},
+	}
+
+	kb.EnsureDefaults()
+
+	if kb.ExtractConfig == nil || !kb.ExtractConfig.Enabled || !kb.IsGraphEnabled() {
+		t.Fatalf(
+			"graph indexing strategy did not normalize extractor config: %#v",
+			kb.ExtractConfig,
+		)
+	}
+}
+
 func TestInferStorageFromFilePath(t *testing.T) {
 	tests := []struct {
 		input string

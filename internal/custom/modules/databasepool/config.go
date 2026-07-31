@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 )
 
 const (
@@ -27,10 +30,29 @@ type Config struct {
 	ConnMaxIdleTime time.Duration
 }
 
-func DefaultConfig() Config {
+func DefaultConfig(profiles ...runtimeprofile.Profile) Config {
+	role := runtimeprofile.RoleDevAll
+	if len(profiles) > 0 && profiles[0].Valid() {
+		role = profiles[0].Role
+	}
+	maxOpen, maxIdle := 12, 4
+	switch role {
+	case runtimeprofile.RoleAPI:
+		maxOpen, maxIdle = 6, 2
+	case runtimeprofile.RoleParseWorker:
+		maxOpen, maxIdle = 6, 2
+	case runtimeprofile.RoleDerivativeWorker:
+		maxOpen, maxIdle = 4, 1
+	case runtimeprofile.RoleWikiWorker:
+		maxOpen, maxIdle = 3, 1
+	case runtimeprofile.RoleMaintenance:
+		maxOpen, maxIdle = 2, 1
+	case runtimeprofile.RoleMigration:
+		maxOpen, maxIdle = 1, 1
+	}
 	return Config{
-		MaxOpenConns:    12,
-		MaxIdleConns:    4,
+		MaxOpenConns:    maxOpen,
+		MaxIdleConns:    maxIdle,
 		ConnMaxLifetime: 10 * time.Minute,
 		ConnMaxIdleTime: 2 * time.Minute,
 	}
@@ -39,7 +61,11 @@ func DefaultConfig() Config {
 // ConfigureFromEnv applies a finite, per-replica connection budget. Invalid
 // explicit settings fail startup instead of silently falling back to an
 // unbounded or surprising pool.
-func ConfigureFromEnv(db *sql.DB, driver string) (Config, error) {
+func ConfigureFromEnv(
+	db *sql.DB,
+	driver string,
+	profiles ...runtimeprofile.Profile,
+) (Config, error) {
 	if db == nil {
 		return Config{}, fmt.Errorf("database pool: nil database")
 	}
@@ -52,21 +78,30 @@ func ConfigureFromEnv(db *sql.DB, driver string) (Config, error) {
 			ConnMaxLifetime: 10 * time.Minute,
 		}
 		apply(db, cfg)
+		pipelineobs.RegisterDBPool(metricRole(profiles...), db)
 		return cfg, nil
 	case "postgres":
-		cfg, err := loadPostgresConfig()
+		cfg, err := loadPostgresConfig(profiles...)
 		if err != nil {
 			return Config{}, err
 		}
 		apply(db, cfg)
+		pipelineobs.RegisterDBPool(metricRole(profiles...), db)
 		return cfg, nil
 	default:
 		return Config{}, fmt.Errorf("database pool: unsupported driver %q", driver)
 	}
 }
 
-func loadPostgresConfig() (Config, error) {
-	cfg := DefaultConfig()
+func metricRole(profiles ...runtimeprofile.Profile) string {
+	if len(profiles) > 0 && profiles[0].Valid() {
+		return string(profiles[0].Role)
+	}
+	return string(runtimeprofile.RoleDevAll)
+}
+
+func loadPostgresConfig(profiles ...runtimeprofile.Profile) (Config, error) {
+	cfg := DefaultConfig(profiles...)
 	var err error
 
 	if cfg.MaxOpenConns, err = positiveIntEnv(maxOpenConnsEnv, cfg.MaxOpenConns); err != nil {

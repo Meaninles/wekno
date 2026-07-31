@@ -17,6 +17,11 @@ const (
 )
 
 const (
+	CoreStatusPending    = "pending"
+	CoreStatusProcessing = "processing"
+	CoreStatusReady      = "ready"
+	CoreStatusFailed     = "failed"
+
 	EnrichmentStatusNone      = "none"
 	EnrichmentStatusPending   = "pending"
 	EnrichmentStatusCompleted = "completed"
@@ -158,6 +163,11 @@ type Knowledge struct {
 	Channel string `json:"channel"            gorm:"type:varchar(50);default:'web'"`
 	// Parse status of the knowledge
 	ParseStatus string `json:"parse_status"`
+	// CoreStatus is independent from optional derivative enrichment. Once it
+	// becomes ready, chunks and embeddings are safe to retrieve even while
+	// summary/question/graph work is still running.
+	CoreStatus      string     `json:"core_status" gorm:"type:varchar(32);not null;default:pending"`
+	CoreCompletedAt *time.Time `json:"core_completed_at,omitempty"`
 	// ProcessingGeneration is a durable, unique identity for one parse run.
 	// It is deliberately independent from FileHash: uploaded content may stay
 	// unchanged across reparses while ownership must still advance.
@@ -182,7 +192,9 @@ type Knowledge struct {
 	SummaryStatus string `json:"summary_status"     gorm:"type:varchar(32);default:none"`
 	// EnrichmentStatus reports the aggregate outcome of optional summary,
 	// question and graph work without conflating it with core parse success.
-	EnrichmentStatus string `json:"enrichment_status" gorm:"type:varchar(32);not null;default:none"`
+	EnrichmentStatus       string     `json:"enrichment_status" gorm:"type:varchar(32);not null;default:none"`
+	EnrichmentCompletedAt  *time.Time `json:"enrichment_completed_at,omitempty"`
+	EnrichmentErrorSummary string     `json:"enrichment_error_summary,omitempty" gorm:"type:text;not null;default:''"`
 	// WikiStatus is separate because Wiki is a durable KB-scoped background
 	// lane. It does not consume a per-document counter slot, but pending Wiki
 	// work keeps the end-to-end document lifecycle in finalizing.

@@ -59,13 +59,17 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
 	"github.com/Tencent/WeKnora/internal/custom/modules/databasepool"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentrecovery"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/maintenance"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/database"
@@ -116,6 +120,12 @@ import (
 func BuildContainer(container *dig.Container) *dig.Container {
 	ctx := context.Background()
 	logger.Debugf(ctx, "[Container] Starting container initialization...")
+	profile := runtimeprofile.MustLoadFromEnv()
+	if _, err := runtimeprofile.ValidateClusterBudgetFromEnv(); err != nil {
+		panic(err)
+	}
+	must(container.Provide(func() runtimeprofile.Profile { return profile }))
+	logger.Infof(ctx, "[Container] runtime role=%s", profile.Role)
 
 	// Register resource cleaner for proper cleanup of resources
 	must(container.Provide(NewResourceCleaner, dig.As(new(interfaces.ResourceCleaner))))
@@ -158,7 +168,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewAuditLogRepository))
 	must(container.Provide(repository.NewKnowledgeBaseRepository))
 	must(container.Provide(repository.NewKnowledgeRepository))
-	must(container.Provide(repository.NewKnowledgeSpanRepository))
+	must(container.Provide(processingtrace.NewRepository))
+	must(container.Provide(repository.NewKnowledgeSpanRepositoryWithV2))
 	must(container.Provide(repository.NewChunkRepository))
 	must(container.Provide(repository.NewKnowledgeTagRepository))
 	must(container.Provide(repository.NewSessionRepository))
@@ -209,6 +220,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewKnowledgeTagService))
 	must(container.Provide(embedding.NewBatchEmbedder))
 	must(container.Provide(modeladmission.NewManager))
+	must(container.Provide(derivativequeue.NewRepositoryWithAdmission))
 	must(container.Provide(service.NewModelService))
 	must(container.Provide(service.NewDatasetService))
 	must(container.Provide(service.NewEvaluationService))
@@ -220,7 +232,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewChunkExtractService, dig.Name("chunkExtractor")))
 	must(container.Provide(service.NewDataTableSummaryService, dig.Name("dataTableSummary")))
 	must(container.Provide(service.NewImageMultimodalService, dig.Name("imageMultimodal")))
-	must(container.Provide(service.NewKnowledgePostProcessService, dig.Name("knowledgePostProcess")))
+	must(container.Provide(service.NewKnowledgePostProcessServiceWithDurableQueue, dig.Name("knowledgePostProcess")))
+	must(container.Provide(derivativequeue.NewWorker))
 
 	must(container.Provide(service.NewMessageService))
 	must(container.Provide(service.NewMCPServiceService))
@@ -309,6 +322,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(knowledgeaux.NewRecovery))
 	must(container.Provide(wikidelete.New))
 	must(container.Provide(wikidelete.NewRecovery))
+	must(container.Provide(maintenance.NewCoordinator))
 
 	// Chat pipeline components for processing chat requests
 	logger.Debugf(ctx, "[Container] Registering chat pipeline plugins...")
@@ -318,12 +332,18 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(initConnectorRegistry))
 	must(container.Provide(datasource.NewScheduler))
 	must(container.Provide(service.NewDataSourceService))
-	must(container.Invoke(startDataSourceScheduler))
+	if profile.StartsSchedulers() {
+		must(container.Invoke(registerDataSourceScheduler))
+	}
 	logger.Debugf(ctx, "[Container] Data source sync framework registered")
-	must(container.Invoke(startAuditLogRetention))
+	if profile.StartsSchedulers() {
+		must(container.Invoke(registerAuditLogRetention))
+	}
 	logger.Debugf(ctx, "[Container] Audit log retention runner registered")
 	must(container.Provide(service.NewHousekeepingService))
-	must(container.Invoke(startHousekeepingService))
+	if profile.StartsSchedulers() {
+		must(container.Invoke(registerHousekeepingService))
+	}
 	logger.Debugf(ctx, "[Container] Knowledge housekeeping runner registered")
 	must(container.Provide(chatpipeline.NewEventManager))
 	must(container.Invoke(chatpipeline.NewPluginSearch))
@@ -351,7 +371,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewTenantInvitationHandler))
 	must(container.Provide(handler.NewAuditLogHandler))
 	must(container.Provide(handler.NewKnowledgeBaseHandler))
-	must(container.Provide(handler.NewKnowledgeHandler))
+	must(container.Provide(handler.NewKnowledgeHandlerWithV2))
 	must(container.Provide(handler.NewChunkHandler))
 	must(container.Provide(handler.NewFAQHandler))
 	must(container.Provide(handler.NewTagHandler))
@@ -389,7 +409,15 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewEmbedChannelHandler))
 	must(container.Provide(handler.NewWeKnoraCloudHandler))
 	must(container.Provide(custombootstrap.NewHandlers))
-	must(container.Invoke(custombootstrap.StartSchedulers))
+	// Providers are lazy. Force custom hook/control-plane construction before
+	// RunAsynqServer can consume queued work during process startup.
+	must(container.Invoke(custombootstrap.Initialize))
+	if profile.ServesAPI() {
+		must(container.Invoke(custombootstrap.StartAPIWorkers))
+	}
+	if profile.StartsSchedulers() {
+		must(container.Invoke(custombootstrap.RegisterMaintenanceSchedulers))
+	}
 	logger.Debugf(ctx, "[Container] HTTP handlers registered")
 
 	// Wire the chat package's local image resolver so multimodal chat can read
@@ -400,13 +428,15 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// Router configuration
 	logger.Debugf(ctx, "[Container] Registering router and starting task server...")
 	must(container.Provide(router.NewRouter))
-	if redisAvailable {
+	if redisAvailable && profile.RunsAnyWorker() {
 		// The durable coordinator must register/adopt its boot before a worker
 		// can receive an old delivery. RunAsynqServer registers later in the
 		// cleanup stack, so workers drain before the coordinator heartbeat stops.
-		must(container.Invoke(documentqueue.Start))
+		if profile.RunsParseWorker() {
+			must(container.Invoke(documentqueue.Start))
+		}
 		must(container.Invoke(router.RunAsynqServer))
-	} else {
+	} else if !redisAvailable && profile.RunsAnyWorker() {
 		// Lite still exposes queue status and uses the same durable state-machine
 		// fixtures. Start/migrate the coordinator even though task execution is
 		// synchronous and no Redis consumer is created.
@@ -415,15 +445,14 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	}
 	// Split recovery starts only after its handlers are registered. PostgreSQL
 	// plans are authoritative and missing Redis wake-ups are republished here.
-	must(container.Invoke(documentsplit.Start))
+	if profile.RunsParseWorker() {
+		must(container.Invoke(documentsplit.Start))
+	}
 	// Start only after the async server / Lite handlers are registered so the
 	// recovery module's immediate scan always has a consumer.
-	must(container.Invoke(corefanout.StartRecovery))
-	must(container.Invoke(enrichmentrecovery.StartRecovery))
-	must(container.Invoke(wikiqueue.StartRecovery))
-	must(container.Invoke(kbdeletequeue.StartRecovery))
-	must(container.Invoke(knowledgeaux.StartRecovery))
-	must(container.Invoke(wikidelete.StartRecovery))
+	if profile.RunsMaintenance() {
+		must(container.Invoke(maintenance.Start))
+	}
 
 	logger.Infof(ctx, "[Container] Container initialization completed successfully")
 	return container
@@ -523,7 +552,7 @@ func initRedisClient() (*redis.Client, error) {
 // Returns:
 //   - Configured database connection
 //   - Error if connection fails
-func initDatabase(cfg *config.Config) (*gorm.DB, error) {
+func initDatabase(cfg *config.Config, profile runtimeprofile.Profile) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	var migrateDSN string
 	var sqliteDBPath string
@@ -620,7 +649,7 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
 	}
-	poolConfig, err := databasepool.ConfigureFromEnv(sqlDB, db.Dialector.Name())
+	poolConfig, err := databasepool.ConfigureFromEnv(sqlDB, db.Dialector.Name(), profile)
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +671,14 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 	// Run database migrations automatically (optional, can be disabled via env var)
 	// To disable auto-migration, set AUTO_MIGRATE=false
 	// To enable auto-recovery from dirty state, set AUTO_RECOVER_DIRTY=true
-	if os.Getenv("AUTO_MIGRATE") != "false" {
+	autoMigrate := os.Getenv("AUTO_MIGRATE") != "false"
+	if autoMigrate && !profile.RunsMigration() {
+		return nil, fmt.Errorf(
+			"AUTO_MIGRATE must be false for runtime role %s; run a dedicated migration role",
+			profile.Role,
+		)
+	}
+	if autoMigrate {
 		logger.Infof(context.Background(), "Running database migrations...")
 
 		autoRecover := os.Getenv("AUTO_RECOVER_DIRTY") != "false"
@@ -1470,14 +1506,16 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
 }
 
 // startDataSourceScheduler starts the data source cron scheduler and registers cleanup.
-func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interfaces.ResourceCleaner) {
-	if err := scheduler.Start(context.Background()); err != nil {
-		logger.Warnf(context.Background(), "[Container] data source scheduler start failed: %v", err)
-	}
-
-	cleaner.RegisterWithName("DataSourceScheduler", func() error {
-		scheduler.Stop()
-		return nil
+func registerDataSourceScheduler(
+	scheduler *datasource.Scheduler,
+	coordinator *maintenance.Coordinator,
+) error {
+	return coordinator.Register(maintenance.Hook{
+		Name: "data-source-scheduler",
+		Start: func(context.Context) error {
+			return scheduler.Start(context.Background())
+		},
+		Stop: scheduler.Stop,
 	})
 }
 
@@ -1486,16 +1524,19 @@ func startDataSourceScheduler(scheduler *datasource.Scheduler, cleaner interface
 // "processing" past a configurable threshold (see HousekeepingService for
 // rationale). Best-effort: a startup error is logged but does NOT abort the
 // container — the rest of the system stays usable.
-func startHousekeepingService(svc *service.HousekeepingService, cleaner interfaces.ResourceCleaner) {
+func registerHousekeepingService(
+	svc *service.HousekeepingService,
+	coordinator *maintenance.Coordinator,
+) error {
 	if svc == nil {
-		return
-	}
-	if err := svc.Start(context.Background()); err != nil {
-		logger.Warnf(context.Background(), "[Container] housekeeping start failed: %v", err)
-	}
-	cleaner.RegisterWithName("KnowledgeHousekeeping", func() error {
-		svc.Stop()
 		return nil
+	}
+	return coordinator.Register(maintenance.Hook{
+		Name: "knowledge-housekeeping",
+		Start: func(context.Context) error {
+			return svc.Start(context.Background())
+		},
+		Stop: svc.Stop,
 	})
 }
 
@@ -1508,12 +1549,16 @@ func startHousekeepingService(svc *service.HousekeepingService, cleaner interfac
 // retention_days <= 0 is the configured way to disable retention;
 // the runner short-circuits Start() on that path so we don't need
 // to gate the wiring here.
-func startAuditLogRetention(
-	runner *service.AuditLogRetentionRunner, cleaner interfaces.ResourceCleaner,
-) {
-	runner.Start(context.Background())
-	cleaner.RegisterWithName("AuditLogRetentionRunner", func() error {
-		runner.Stop()
-		return nil
+func registerAuditLogRetention(
+	runner *service.AuditLogRetentionRunner,
+	coordinator *maintenance.Coordinator,
+) error {
+	return coordinator.Register(maintenance.Hook{
+		Name: "audit-log-retention",
+		Start: func(context.Context) error {
+			runner.Start(context.Background())
+			return nil
+		},
+		Stop: runner.Stop,
 	})
 }

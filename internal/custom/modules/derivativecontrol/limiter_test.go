@@ -71,43 +71,21 @@ func (c *blockingChat) ChatStream(
 func (c *blockingChat) GetModelName() string { return c.id }
 func (c *blockingChat) GetModelID() string   { return c.id }
 
-func TestLimiterSerializesAllLocalDerivativeCalls(t *testing.T) {
-	settings := &derivativeSettingsStub{tpm: 60_000}
-	limiter := NewLimiter(nil, settings)
-	inner := &blockingChat{
-		id: "derivative", started: make(chan struct{}), release: make(chan struct{}),
-		usage: 2,
-	}
-	wrapped := limiter.Wrap(inner)
+func TestLimiterDoesNotCreateGlobalLocalLease(t *testing.T) {
+	limiter := NewLimiter(nil, &derivativeSettingsStub{tpm: 60_000})
 
-	firstDone := make(chan error, 1)
-	go func() {
-		_, err := wrapped.Chat(
-			context.Background(),
-			[]chat.Message{{Role: "user", Content: "first"}},
-			&chat.ChatOptions{MaxTokens: 1},
-		)
-		firstDone <- err
-	}()
-	select {
-	case <-inner.started:
-	case <-time.After(time.Second):
-		t.Fatal("first call did not start")
-	}
+	first, err := limiter.acquire(context.Background(), "actual-model-a")
+	require.NoError(t, err)
+	second, err := limiter.acquire(context.Background(), "actual-model-a")
+	require.NoError(t, err)
+	third, err := limiter.acquire(context.Background(), "actual-model-b")
+	require.NoError(t, err)
 
-	_, err := wrapped.Chat(
-		context.Background(),
-		[]chat.Message{{Role: "user", Content: "second"}},
-		&chat.ChatOptions{MaxTokens: 1},
-	)
-	var deferred *DeferredError
-	require.ErrorAs(t, err, &deferred)
-	require.Contains(t, deferred.Reason, "another derivative model call")
-
-	close(inner.release)
-	require.NoError(t, <-firstDone)
-	require.EqualValues(t, 1, inner.max.Load())
-	require.EqualValues(t, 1, limiter.Snapshot(context.Background()).Deferred)
+	first.release()
+	second.release()
+	third.release()
+	require.EqualValues(t, 3, limiter.Snapshot(context.Background()).Acquired)
+	require.EqualValues(t, 0, limiter.Snapshot(context.Background()).Deferred)
 }
 
 func redisForDerivativeTest(t *testing.T) *redis.Client {
@@ -131,19 +109,19 @@ func redisForDerivativeTest(t *testing.T) *redis.Client {
 	return client
 }
 
-func cleanLimiterKeys(t *testing.T, client *redis.Client, limiter *Limiter) {
+func cleanLimiterKeys(t *testing.T, client *redis.Client, limiter *Limiter, poolKeys ...string) {
 	t.Helper()
-	require.NoError(t, client.Del(
-		context.Background(), limiter.key("active"), limiter.key("pace"),
-	).Err())
+	keys := make([]string, 0, len(poolKeys))
+	for _, poolKey := range poolKeys {
+		keys = append(keys, limiter.key("pool:"+poolKey+":pace"))
+	}
+	require.NoError(t, client.Del(context.Background(), keys...).Err())
 	t.Cleanup(func() {
-		_ = client.Del(
-			context.Background(), limiter.key("active"), limiter.key("pace"),
-		).Err()
+		_ = client.Del(context.Background(), keys...).Err()
 	})
 }
 
-func TestLimiterRedisLeaseAndTPMAreSharedAcrossInstances(t *testing.T) {
+func TestLimiterRedisTPMIsSharedPerActualModelAndIndependentAcrossModels(t *testing.T) {
 	client := redisForDerivativeTest(t)
 	t.Setenv(
 		"WEKNORA_REDIS_NAMESPACE",
@@ -152,31 +130,29 @@ func TestLimiterRedisLeaseAndTPMAreSharedAcrossInstances(t *testing.T) {
 	settings := &derivativeSettingsStub{tpm: 60_000}
 	first := NewLimiter(client, settings)
 	second := NewLimiter(client, settings)
-	cleanLimiterKeys(t, client, first)
+	cleanLimiterKeys(t, client, first, "actual-model-a", "actual-model-b")
 
-	firstLease, err := first.acquire(context.Background())
-	require.NoError(t, err)
-	_, err = second.acquire(context.Background())
-	var deferred *DeferredError
-	require.ErrorAs(t, err, &deferred)
-	require.GreaterOrEqual(t, deferred.RetryAfter, busyRetryFloor)
-	firstLease.release()
-
-	firstLease, err = first.acquire(context.Background())
+	firstLease, err := first.acquire(context.Background(), "actual-model-a")
 	require.NoError(t, err)
 	require.NoError(t, firstLease.pace(context.Background(), 120))
 	firstLease.release()
 
-	secondLease, err := second.acquire(context.Background())
+	secondLease, err := second.acquire(context.Background(), "actual-model-a")
 	require.NoError(t, err)
 	err = secondLease.pace(context.Background(), 120)
+	var deferred *DeferredError
 	require.ErrorAs(t, err, &deferred)
 	require.Greater(t, deferred.RetryAfter, 50*time.Millisecond)
 	require.LessOrEqual(t, deferred.RetryAfter, 150*time.Millisecond)
 	secondLease.release()
 
+	independentLease, err := second.acquire(context.Background(), "actual-model-b")
+	require.NoError(t, err)
+	require.NoError(t, independentLease.pace(context.Background(), 120))
+	independentLease.release()
+
 	time.Sleep(140 * time.Millisecond)
-	secondLease, err = second.acquire(context.Background())
+	secondLease, err = second.acquire(context.Background(), "actual-model-a")
 	require.NoError(t, err)
 	require.NoError(t, secondLease.pace(context.Background(), 120))
 	secondLease.release()
@@ -190,7 +166,9 @@ func TestLimiterActualUsageAndTimeoutExtendGlobalPacing(t *testing.T) {
 	)
 	settings := &derivativeSettingsStub{tpm: 60_000}
 	limiter := NewLimiter(client, settings)
-	cleanLimiterKeys(t, client, limiter)
+	quickPool := poolKeyForName("quick")
+	timeoutPool := poolKeyForName("timeout")
+	cleanLimiterKeys(t, client, limiter, quickPool, timeoutPool)
 
 	quick := limiter.Wrap(&blockingChat{id: "quick", usage: 120})
 	_, err := quick.Chat(
@@ -199,14 +177,15 @@ func TestLimiterActualUsageAndTimeoutExtendGlobalPacing(t *testing.T) {
 		&chat.ChatOptions{MaxTokens: 1},
 	)
 	require.NoError(t, err)
-	nextRaw, err := client.Get(context.Background(), limiter.key("pace")).Result()
+	nextRaw, err := client.Get(
+		context.Background(), limiter.key("pool:"+quickPool+":pace"),
+	).Result()
 	require.NoError(t, err)
 	nextAt, err := strconv.ParseInt(nextRaw, 10, 64)
 	require.NoError(t, err)
 	require.Greater(t, nextAt-time.Now().UnixMilli(), int64(50))
 	require.Less(t, nextAt-time.Now().UnixMilli(), int64(250))
 
-	require.NoError(t, client.Del(context.Background(), limiter.key("pace")).Err())
 	timeoutModel := limiter.Wrap(&blockingChat{
 		id: "timeout", err: context.DeadlineExceeded,
 	})
@@ -216,7 +195,9 @@ func TestLimiterActualUsageAndTimeoutExtendGlobalPacing(t *testing.T) {
 		&chat.ChatOptions{MaxTokens: 1},
 	)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	nextRaw, err = client.Get(context.Background(), limiter.key("pace")).Result()
+	nextRaw, err = client.Get(
+		context.Background(), limiter.key("pool:"+timeoutPool+":pace"),
+	).Result()
 	require.NoError(t, err)
 	nextAt, err = strconv.ParseInt(nextRaw, 10, 64)
 	require.NoError(t, err)
@@ -235,10 +216,13 @@ func TestLimiterRedisFailureFailsClosed(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 	limiter := NewLimiter(client, &derivativeSettingsStub{tpm: 20_000})
 
-	_, err := limiter.acquire(context.Background())
+	lease, err := limiter.acquire(context.Background(), "actual-model")
+	require.NoError(t, err)
+	err = lease.pace(context.Background(), 1)
 	var deferred *DeferredError
 	require.ErrorAs(t, err, &deferred)
-	require.Contains(t, deferred.Reason, "Redis admission failed")
+	require.Contains(t, deferred.Reason, "TPM pacing failed closed")
 	require.NotNil(t, deferred.Cause)
 	require.False(t, errors.Is(err, context.Canceled))
+	lease.release()
 }

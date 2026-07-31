@@ -13,6 +13,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
@@ -263,6 +264,14 @@ func finalizeSubtaskDetached(
 	degraded bool,
 	superseded, final bool,
 ) error {
+	// A durable derivative work item owns its business outcome until the
+	// non-counted finalizer has observed every PostgreSQL sibling in a
+	// terminal state. Letting the reused native handler decrement here can
+	// clear processing_generation before the durable finalizer is claimed,
+	// making that finalizer cancel itself on its own generation fence.
+	if derivativequeue.IsDurableExecution(ctx) {
+		return nil
+	}
 	// Provider outages are durable backpressure, even when this delivery had
 	// already reached its historical MaxRetry before the shared circuit
 	// opened. Asynq reschedules these errors without spending retry budget, so

@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentpreview"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgesearch"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -39,6 +40,23 @@ type KnowledgeHandler struct {
 	agentShareService interfaces.AgentShareService
 	asynqClient       interfaces.TaskEnqueuer
 	spanRepo          repository.KnowledgeSpanRepository
+	spanV2            *processingtrace.Repository
+}
+
+func NewKnowledgeHandlerWithV2(
+	kgService interfaces.KnowledgeService,
+	kbService interfaces.KnowledgeBaseService,
+	kbShareService interfaces.KBShareService,
+	agentShareService interfaces.AgentShareService,
+	asynqClient interfaces.TaskEnqueuer,
+	spanRepo repository.KnowledgeSpanRepository,
+	spanV2 *processingtrace.Repository,
+) *KnowledgeHandler {
+	handler := NewKnowledgeHandler(
+		kgService, kbService, kbShareService, agentShareService, asynqClient, spanRepo,
+	)
+	handler.spanV2 = spanV2
+	return handler
 }
 
 type knowledgePreviewChunkCounter interface {
@@ -712,7 +730,43 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 
 	rows := []types.KnowledgeProcessingSpan{}
 	currentAttempt := 0
-	if h.spanRepo != nil {
+	var nextCursor string
+	if h.spanV2 != nil {
+		if requestedAttempt == 0 {
+			latest, lerr := h.spanV2.LatestAttempt(ctx, knowledge.ID)
+			if lerr != nil {
+				logger.Warnf(ctx, "spans V2 LatestAttempt failed for %s: %v", knowledge.ID, lerr)
+			} else {
+				currentAttempt = latest
+			}
+		} else {
+			currentAttempt = requestedAttempt
+		}
+		if currentAttempt > 0 {
+			limit := 500
+			if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+				if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 {
+					limit = parsed
+				}
+			}
+			var cursor *processingtrace.Cursor
+			if raw := strings.TrimSpace(c.Query("cursor")); raw != "" {
+				cursor = &processingtrace.Cursor{LogicalKey: raw}
+			}
+			page, listErr := h.spanV2.List(ctx, knowledge.ID, currentAttempt, limit, cursor)
+			if listErr != nil {
+				logger.Warnf(ctx, "spans V2 List failed kid=%s attempt=%d: %v",
+					knowledge.ID, currentAttempt, listErr)
+			} else {
+				rows = processingV2LegacyRows(page.Items)
+				if page.NextCursor != nil {
+					nextCursor = page.NextCursor.LogicalKey
+				}
+			}
+		}
+	}
+	// Compatibility fallback for attempts created before Span V2 was enabled.
+	if len(rows) == 0 && h.spanRepo != nil {
 		if requestedAttempt == 0 {
 			latest, lerr := h.spanRepo.LatestAttempt(ctx, knowledge.ID)
 			if lerr != nil {
@@ -750,6 +804,9 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 		"current_stage":   currentStageName,
 		"trace":           tree,
 	}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
 	if lastErr != nil {
 		resp["last_error"] = gin.H{
 			"stage":       lastErr.Name,
@@ -762,6 +819,33 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 		"success": true,
 		"data":    resp,
 	})
+}
+
+func processingV2LegacyRows(spans []processingtrace.Span) []types.KnowledgeProcessingSpan {
+	rows := make([]types.KnowledgeProcessingSpan, 0, len(spans))
+	spanIDByKey := make(map[string]string, len(spans))
+	for _, span := range spans {
+		spanIDByKey[span.LogicalKey] = span.SpanID
+	}
+	for _, span := range spans {
+		started := span.StartedAt
+		row := types.KnowledgeProcessingSpan{
+			KnowledgeID: span.KnowledgeID, Attempt: span.Attempt,
+			SpanID: span.SpanID, ParentSpanID: spanIDByKey[span.ParentLogicalKey],
+			Name: span.Name, Kind: span.Kind, Status: span.Status,
+			ErrorCode: span.LastErrorCode, ErrorMessage: span.LastErrorMessage,
+			StartedAt: &started, FinishedAt: span.FinishedAt,
+			DurationMs: span.DurationMS, CreatedAt: span.CreatedAt, UpdatedAt: span.UpdatedAt,
+		}
+		if span.InputSummary != "" {
+			_ = json.Unmarshal([]byte(span.InputSummary), &row.Input)
+		}
+		if span.OutputSummary != "" {
+			_ = json.Unmarshal([]byte(span.OutputSummary), &row.Output)
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // buildSpanTree assembles a flat list of span rows into a parent-child

@@ -1176,6 +1176,14 @@ func TestRecoverWaitingExternalFinalizesDerivativeFailureAndDeletion(t *testing.
 			wantStage:        "wiki_failed",
 		},
 		{
+			name:             "graph derivative degraded",
+			parseStatus:      types.ParseStatusCompleted,
+			enrichmentStatus: types.EnrichmentStatusDegraded,
+			wikiStatus:       types.WikiStatusNone,
+			wantState:        StateCompleted,
+			wantStage:        "completed_degraded_enrichment",
+		},
+		{
 			name:             "document deleted during derivatives",
 			parseStatus:      types.ParseStatusDeleting,
 			enrichmentStatus: types.EnrichmentStatusPending,
@@ -1238,6 +1246,10 @@ func TestRecoverWaitingExternalFinalizesDerivativeFailureAndDeletion(t *testing.
 					"DOCUMENT_WORKFLOW_FAILED",
 					message,
 				)
+			} else if test.wantState == StateCompleted {
+				requireWorkflowTerminalDiagnostic(
+					t, finished, types.SpanStatusDone, "", "",
+				)
 			} else {
 				requireWorkflowTerminalDiagnostic(
 					t,
@@ -1251,36 +1263,41 @@ func TestRecoverWaitingExternalFinalizesDerivativeFailureAndDeletion(t *testing.
 	}
 }
 
-func TestProcessNeverMarksFailedOrDegradedDerivativesCompleted(t *testing.T) {
+func TestProcessDistinguishesFailedAndDegradedDerivatives(t *testing.T) {
 	tests := []struct {
 		name             string
 		enrichmentStatus string
 		wikiStatus       string
+		wantState        WorkflowState
 		wantStage        string
 	}{
 		{
 			name:             "enrichment failed",
 			enrichmentStatus: types.EnrichmentStatusFailed,
 			wikiStatus:       types.WikiStatusNone,
+			wantState:        StateFailed,
 			wantStage:        "enrichment_failed",
 		},
 		{
 			name:             "enrichment degraded",
 			enrichmentStatus: types.EnrichmentStatusDegraded,
 			wikiStatus:       types.WikiStatusNone,
-			wantStage:        "enrichment_degraded",
+			wantState:        StateCompleted,
+			wantStage:        "completed_degraded_enrichment",
 		},
 		{
 			name:             "wiki failed",
 			enrichmentStatus: types.EnrichmentStatusCompleted,
 			wikiStatus:       types.WikiStatusFailed,
+			wantState:        StateFailed,
 			wantStage:        "wiki_failed",
 		},
 		{
 			name:             "wiki degraded",
 			enrichmentStatus: types.EnrichmentStatusCompleted,
 			wikiStatus:       types.WikiStatusDegraded,
-			wantStage:        "wiki_degraded",
+			wantState:        StateCompleted,
+			wantStage:        "completed_degraded_wiki",
 		},
 	}
 	for index, test := range tests {
@@ -1320,7 +1337,7 @@ func TestProcessNeverMarksFailedOrDegradedDerivativesCompleted(t *testing.T) {
 			require.NoError(t, err)
 			var finished Workflow
 			require.NoError(t, coordinator.db.Where("id = ?", workflow.ID).Take(&finished).Error)
-			require.Equal(t, StateFailed, finished.State)
+			require.Equal(t, test.wantState, finished.State)
 			require.Equal(t, test.wantStage, finished.Stage)
 		})
 	}

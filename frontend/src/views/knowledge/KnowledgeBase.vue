@@ -632,6 +632,7 @@ const parseStatusOptions = computed(() => [
   { label: t('knowledgeWorkflowStatus.status.cancelling'), value: 'cancelling' },
   { label: t('knowledgeWorkflowStatus.status.deleting'), value: 'deleting' },
   { label: t('knowledgeBase.parseStatusCompleted'), value: 'completed' },
+  { label: t('knowledgeWorkflowStatus.status.degraded'), value: 'degraded' },
   { label: t('knowledgeBase.parseStatusFailed'), value: 'failed' },
   { label: t('knowledgeBase.statusCancelled'), value: 'cancelled' },
   { label: t('knowledgeBase.statusDraft'), value: 'draft' },

@@ -15,6 +15,7 @@ import (
 
 	docclient "github.com/Tencent/WeKnora/docreader/client"
 	"github.com/Tencent/WeKnora/docreader/proto"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"google.golang.org/grpc"
@@ -129,10 +130,11 @@ func (p *GRPCDocumentReader) Split(
 			return nil, fmt.Errorf("gRPC document split receive: %w", recvErr)
 		}
 		if remoteErr := frame.GetError(); remoteErr != nil {
-			return nil, fmt.Errorf(
-				"document split rejected code=%s retryable=%t: %s",
-				remoteErr.GetCode(), remoteErr.GetRetryable(), remoteErr.GetMessage(),
-			)
+			return nil, &documentsplit.RemoteError{
+				Code:      remoteErr.GetCode(),
+				Message:   remoteErr.GetMessage(),
+				Retryable: remoteErr.GetRetryable(),
+			}
 		}
 		if header := frame.GetHeader(); header != nil {
 			if result != nil || received != 0 {

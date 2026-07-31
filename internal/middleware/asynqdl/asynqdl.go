@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -83,7 +84,8 @@ func MiddlewareWithCallback(repo interfaces.TaskDeadLetterRepository, cb OnDeadL
 				errors.Is(err, context.Canceled) {
 				return err
 			}
-			if !isFinalAttempt(ctx) {
+			permanent := documentsplit.IsPermanent(err)
+			if !permanent && !isFinalAttempt(ctx) {
 				return err
 			}
 			attempts := 0
@@ -106,8 +108,15 @@ func MiddlewareWithCallback(repo interfaces.TaskDeadLetterRepository, cb OnDeadL
 				// into asynq's worker goroutine.
 				if callbackErr := safeInvokeCallback(ctx, t, err, cb); callbackErr != nil {
 					logger.Warnf(ctx, "asynq dead-letter callback failed for %s: %v", t.Type(), callbackErr)
+					// A terminal business failure may still require a durable state
+					// repair. Do not attach SkipRetry until that callback succeeds;
+					// Asynq must retry the repair path instead of acknowledging a
+					// document that remains stuck in processing.
 					return errors.Join(err, callbackErr)
 				}
+			}
+			if permanent {
+				return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
 			}
 			return err
 		})

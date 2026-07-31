@@ -999,7 +999,7 @@ func buildSpanTree(knowledgeID string, attempt int, rows []types.KnowledgeProces
 // @Param        keyword       query     string  false  "关键词搜索"
 // @Param        file_type     query     string  false  "文件类型筛选"
 // @Param        parse_status     query     string  false  "核心解析状态筛选"
-// @Param        workflow_status  query     string  false  "完整工作流状态筛选 (pending/processing/cancelling/deleting/completed/failed/cancelled/draft)"
+// @Param        workflow_status  query     string  false  "完整工作流状态筛选 (pending/processing/cancelling/deleting/completed/degraded/failed/cancelled/draft)"
 // @Param        source        query     string  false  "来源/渠道筛选 (web/api/feishu/notion/yuque/wechat/...，或 manual/url 按 type 过滤)"
 // @Param        start_time    query     string  false  "更新时间起点，RFC3339 格式"
 // @Param        end_time      query     string  false  "更新时间终点，RFC3339 格式"

@@ -317,8 +317,9 @@ func (c *AnthropicChat) parseResponse(resp *anthropicResponse) *types.ChatRespon
 	inputTokens := resp.Usage.InputTokens
 	outputTokens := resp.Usage.OutputTokens
 	return &types.ChatResponse{
-		Content:      strings.Join(parts, ""),
-		FinishReason: resp.StopReason,
+		Content:           strings.Join(parts, ""),
+		ProviderRequestID: resp.ID,
+		FinishReason:      resp.StopReason,
 		Usage: types.TokenUsage{
 			PromptTokens:     inputTokens,
 			CompletionTokens: outputTokens,

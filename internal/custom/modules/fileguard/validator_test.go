@@ -250,6 +250,36 @@ func TestAnalyzeBytesXLSXAllowsBusinessInventoryShapeAsHeavy(t *testing.T) {
 	}
 }
 
+func TestAnalyzeBytesXLSXStyleOnlyTailDoesNotExpandSemanticRange(t *testing.T) {
+	sheet := `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>` +
+		`<row r="1"><c r="A1" t="inlineStr"><is><t>业务编号</t></is></c>` +
+		`<c r="B1"><v>0</v></c><c r="XFD1" s="17"/></row>` +
+		`<row r="2"><c r="A2"><f>1+1</f><v>2</v></c><c r="XFB2" s="17"/></row>` +
+		`</sheetData></worksheet>`
+	report := AnalyzeBytes("style-tail.xlsx", "xlsx", zipBytes(t, map[string]string{
+		"xl/worksheets/sheet1.xml": sheet,
+	}))
+
+	if report.NeedsSplit() {
+		t.Fatalf("style-only tail requested a physical split: reasons=%v metrics=%v", report.SplitReasons, report.Metrics)
+	}
+	if got := report.Metrics["xlsx_max_sheet_columns"]; got != int64(2) {
+		t.Fatalf("semantic max columns = %#v, want 2", got)
+	}
+	if got := report.Metrics["xlsx_raw_max_sheet_columns"]; got != int64(16384) {
+		t.Fatalf("raw max columns = %#v, want 16384", got)
+	}
+	if got := report.Metrics["xlsx_semantic_cells"]; got != int64(3) {
+		t.Fatalf("semantic cells = %#v, want 3", got)
+	}
+	if got := report.Metrics["xlsx_style_only_cells"]; got != int64(2) {
+		t.Fatalf("style-only cells = %#v, want 2", got)
+	}
+	if got := report.Metrics["xlsx_formula_cells"]; got != int64(1) {
+		t.Fatalf("formula cells = %#v, want 1", got)
+	}
+}
+
 func TestValidateBytesXLSXDoesNotDoubleCountPictures(t *testing.T) {
 	files := map[string]string{
 		"xl/worksheets/sheet1.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>`,

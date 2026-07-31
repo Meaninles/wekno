@@ -31,6 +31,37 @@ serviceAccount:
 app:
   enabled: true
   replicaCount: 3
+  runtimeRoles:
+    enabled: true
+    environment: production
+    postgresMaxConnections: 100
+    redisNamespace: prod-cce-wk-6a9d12b0
+    parseWorker:
+      enabled: true
+      replicaCount: 3
+      maxOpenConns: 5
+      maxIdleConns: 2
+    derivativeWorker:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 4
+      maxIdleConns: 1
+    wikiWorker:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 4
+      maxIdleConns: 1
+    maintenance:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 3
+      maxIdleConns: 1
+    migration:
+      enabled: true
+      maxOpenConns: 3
+      maxIdleConns: 1
+      backoffLimit: 0
+      activeDeadlineSeconds: 7200
   # 80 GiB local scratch per Pod. Replace one Pod at a time so a rollout does
   # not request a fourth scratch PVC or exceed a 500 GB node data disk.
   updateStrategy:
@@ -101,7 +132,7 @@ app:
     # Complete document workflows per app instance. The system-admin
     # asynq.concurrency setting is authoritative at runtime.
     WEKNORA_ASYNQ_CONCURRENCY: "4"
-    CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "8"
+    CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "6"
     CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
     WEKNORA_WIKI_MAP_TASK_CONCURRENCY: "4"
     ENABLE_GRAPH_RAG: "true"

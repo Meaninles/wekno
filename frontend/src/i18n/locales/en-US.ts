@@ -838,6 +838,7 @@ export default {
       cancelling: 'Cancelling',
       deleting: 'Deleting',
       completed: 'Completed',
+      degraded: 'Completed with degraded enrichment',
       failed: 'Failed',
       cancelled: 'Cancelled',
       draft: 'Draft',

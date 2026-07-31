@@ -16,6 +16,27 @@ import (
 
 type executionContextKey struct{}
 
+type providerContractRejectedError struct{ cause error }
+
+func (e *providerContractRejectedError) Error() string {
+	return fmt.Sprintf("provider response contract rejected: %v", e.cause)
+}
+
+func (e *providerContractRejectedError) Unwrap() error { return e.cause }
+func (e *providerContractRejectedError) ProviderRetryRequired() bool {
+	return true
+}
+
+// ProviderContractRejected marks a deterministic response-validation error as
+// requiring a fresh provider attempt. This remains true even when another
+// request in the same batch has a valid replayable checkpoint.
+func ProviderContractRejected(cause error) error {
+	if cause == nil {
+		cause = errors.New("provider response violated the materialization contract")
+	}
+	return &providerContractRejectedError{cause: cause}
+}
+
 type executionContext struct {
 	repository *Repository
 	workItemID string
@@ -153,9 +174,46 @@ func CheckpointChatResponse(
 		execution.leaseToken,
 		requestHash,
 		strings.TrimSpace(modelID),
+		strings.TrimSpace(response.ProviderRequestID),
 		raw,
 	)
 	return err
+}
+
+// RejectChatCheckpoint preserves an invalid provider response for audit while
+// removing it from the replay set. This is only for deterministic response
+// contract failures discovered after the limiter checkpointed the successful
+// HTTP response; transport and downstream materialization errors must leave
+// the checkpoint replayable.
+func RejectChatCheckpoint(
+	ctx context.Context,
+	modelID string,
+	messages []chat.Message,
+	options *chat.ChatOptions,
+	cause error,
+) error {
+	execution, ok := executionFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	requestHash, err := chatRequestHash(modelID, messages, options)
+	if err != nil {
+		return err
+	}
+	detail := "provider response violated the materialization contract"
+	if cause != nil {
+		detail = cause.Error()
+	}
+	if err := execution.repository.RejectProviderCall(
+		ctx,
+		execution.workItemID,
+		execution.leaseToken,
+		requestHash,
+		detail,
+	); err != nil {
+		return fmt.Errorf("reject durable provider response checkpoint: %w", err)
+	}
+	return nil
 }
 
 func providerStarted(ctx context.Context) bool {

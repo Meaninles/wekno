@@ -49,7 +49,12 @@ func (r *Repository) GetProviderCall(
 ) (*ProviderCall, error) {
 	var row ProviderCall
 	err := r.db.WithContext(ctx).
-		Where("work_item_id = ? AND request_hash = ?", workItemID, requestHash).
+		Where(
+			"work_item_id = ? AND request_hash = ? AND disposition IN ?",
+			workItemID, requestHash,
+			[]string{ProviderCallCheckpointed, ProviderCallAccepted},
+		).
+		Order("attempt DESC").
 		First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -83,7 +88,7 @@ func (r *Repository) FinalizerSiblings(
 
 func (r *Repository) SaveProviderCall(
 	ctx context.Context,
-	workItemID, leaseToken, requestHash, modelID string,
+	workItemID, leaseToken, requestHash, modelID, providerRequestID string,
 	response []byte,
 ) (*ProviderCall, error) {
 	if !json.Valid(response) {
@@ -94,20 +99,7 @@ func (r *Repository) SaveProviderCall(
 	}
 	now := time.Now().UTC()
 	sum := sha256.Sum256(response)
-	row := ProviderCall{
-		ID: uuid.NewSHA1(
-			uuid.NameSpaceOID,
-			[]byte(workItemID+"\x00"+requestHash),
-		).String(),
-		WorkItemID:         workItemID,
-		RequestHash:        requestHash,
-		ProviderRequestKey: "derivative-" + workItemID + ":" + requestHash[:min(16, len(requestHash))],
-		ModelID:            modelID,
-		Response:           append(types.JSON(nil), response...),
-		ResponseSize:       int64(len(response)),
-		ContentChecksum:    hex.EncodeToString(sum[:]),
-		CreatedAt:          now,
-	}
+	var row ProviderCall
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var item WorkItem
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -121,28 +113,110 @@ func (r *Repository) SaveProviderCall(
 		if err := verifyGeneration(tx, item); err != nil {
 			return err
 		}
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+		var replayable ProviderCall
+		replayErr := tx.Where(
+			"work_item_id = ? AND request_hash = ? AND disposition IN ?",
+			workItemID, requestHash,
+			[]string{ProviderCallCheckpointed, ProviderCallAccepted},
+		).Order("attempt DESC").First(&replayable).Error
+		if replayErr == nil {
+			if replayable.ContentChecksum != hex.EncodeToString(sum[:]) {
+				return errors.New("provider checkpoint changed without contract rejection")
+			}
+			row = replayable
+			return nil
+		}
+		if !errors.Is(replayErr, gorm.ErrRecordNotFound) {
+			return replayErr
+		}
+		var maximum struct{ Attempt int }
+		if err := tx.Model(&ProviderCall{}).
+			Select("COALESCE(MAX(attempt), 0) AS attempt").
+			Where("work_item_id = ? AND request_hash = ?", workItemID, requestHash).
+			Scan(&maximum).Error; err != nil {
 			return err
 		}
-		var persisted ProviderCall
-		if err := tx.Where(
-			"work_item_id = ? AND request_hash = ?", workItemID, requestHash,
-		).First(&persisted).Error; err != nil {
-			return err
+		attempt := maximum.Attempt + 1
+		row = ProviderCall{
+			ID: uuid.NewSHA1(
+				uuid.NameSpaceOID,
+				[]byte(fmt.Sprintf("%s\x00%s\x00%d", workItemID, requestHash, attempt)),
+			).String(),
+			WorkItemID:  workItemID,
+			RequestHash: requestHash,
+			Attempt:     attempt,
+			ProviderRequestKey: fmt.Sprintf(
+				"derivative-%s:%s:%d",
+				workItemID, requestHash[:min(16, len(requestHash))], attempt,
+			),
+			ProviderRequestID:    truncate(providerRequestID, 160),
+			ProcessingGeneration: item.ProcessingGeneration,
+			ModelID:              modelID,
+			Response:             append(types.JSON(nil), response...),
+			ResponseSize:         int64(len(response)),
+			ContentChecksum:      hex.EncodeToString(sum[:]),
+			Disposition:          ProviderCallCheckpointed,
+			CreatedAt:            now,
 		}
-		if persisted.ContentChecksum != row.ContentChecksum {
-			return errors.New("provider checkpoint hash collision or non-idempotent response")
-		}
-		row = persisted
-		return nil
+		return tx.Create(&row).Error
 	})
 	return &row, err
+}
+
+// RejectProviderCall marks the latest replayable response for one request as
+// a deterministic contract failure. It remains immutable audit evidence but
+// is no longer replayed; the next durable provider attempt may create attempt
+// N+1 for the same request hash.
+func (r *Repository) RejectProviderCall(
+	ctx context.Context,
+	workItemID, leaseToken, requestHash, validationError string,
+) error {
+	now := time.Now().UTC()
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var item WorkItem
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND lease_token = ?", workItemID, leaseToken).
+			First(&item).Error; err != nil {
+			return ErrLeaseLost
+		}
+		if item.State != StateProviderRunning {
+			return ErrInvalidState
+		}
+		if err := verifyGeneration(tx, item); err != nil {
+			return err
+		}
+		var call ProviderCall
+		if err := tx.Where(
+			"work_item_id = ? AND request_hash = ? AND disposition IN ?",
+			workItemID, requestHash,
+			[]string{ProviderCallCheckpointed, ProviderCallAccepted},
+		).Order("attempt DESC").First(&call).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&ProviderCall{}).
+			Where("id = ? AND disposition IN ?", call.ID,
+				[]string{ProviderCallCheckpointed, ProviderCallAccepted}).
+			Updates(map[string]any{
+				"disposition":      ProviderCallInvalidContract,
+				"validation_error": truncate(validationError, 4096),
+				"validated_at":     now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrInvalidState
+		}
+		return nil
+	})
 }
 
 func (r *Repository) hasProviderCalls(ctx context.Context, workItemID string) (bool, error) {
 	var count int64
 	err := r.db.WithContext(ctx).Model(&ProviderCall{}).
-		Where("work_item_id = ?", workItemID).Limit(1).Count(&count).Error
+		Where("work_item_id = ? AND disposition IN ?", workItemID,
+			[]string{ProviderCallCheckpointed, ProviderCallAccepted}).
+		Limit(1).Count(&count).Error
 	return count > 0, err
 }
 
@@ -160,15 +234,19 @@ func (r *Repository) SealProviderExecution(
 		return nil, err
 	}
 	type callReceipt struct {
-		ID              string `json:"id"`
-		RequestHash     string `json:"request_hash"`
-		ResponseSize    int64  `json:"response_size"`
-		ContentChecksum string `json:"content_checksum"`
+		ID                string `json:"id"`
+		RequestHash       string `json:"request_hash"`
+		Attempt           int    `json:"attempt"`
+		Disposition       string `json:"disposition"`
+		ProviderRequestID string `json:"provider_request_id,omitempty"`
+		ResponseSize      int64  `json:"response_size"`
+		ContentChecksum   string `json:"content_checksum"`
 	}
 	receipts := make([]callReceipt, 0, len(calls))
 	for _, call := range calls {
 		receipts = append(receipts, callReceipt{
-			ID: call.ID, RequestHash: call.RequestHash,
+			ID: call.ID, RequestHash: call.RequestHash, Attempt: call.Attempt,
+			Disposition: call.Disposition, ProviderRequestID: call.ProviderRequestID,
 			ResponseSize: call.ResponseSize, ContentChecksum: call.ContentChecksum,
 		})
 	}
@@ -266,6 +344,7 @@ func (r *Repository) RetryAfterFailure(
 	ctx context.Context,
 	workItemID, leaseToken, errorClass, errorCode, message string,
 	retryAfter time.Duration,
+	forceProviderRetry bool,
 ) (terminal bool, err error) {
 	if retryAfter < time.Second {
 		retryAfter = time.Second
@@ -280,14 +359,17 @@ func (r *Repository) RetryAfterFailure(
 		}
 		hasCalls := false
 		var count int64
-		if err := tx.Model(&ProviderCall{}).Where("work_item_id = ?", row.ID).Count(&count).Error; err != nil {
+		if err := tx.Model(&ProviderCall{}).
+			Where("work_item_id = ? AND disposition IN ?", row.ID,
+				[]string{ProviderCallCheckpointed, ProviderCallAccepted}).
+			Count(&count).Error; err != nil {
 			return err
 		}
 		hasCalls = count > 0
 		attempts := row.ProviderAttempts
 		maxAttempts := MaxProviderAttempts
 		nextState := StateRetryWait
-		if hasCalls {
+		if hasCalls && !forceProviderRetry {
 			attempts = row.MaterializeAttempts + 1
 			maxAttempts = MaxMaterializeAttempts
 			nextState = StateMaterializeWait
@@ -304,7 +386,7 @@ func (r *Repository) RetryAfterFailure(
 			"last_error_message": truncate(message, 4096),
 			"version":            gorm.Expr("version + 1"), "updated_at": now,
 		}
-		if hasCalls {
+		if hasCalls && !forceProviderRetry {
 			updates["materialize_attempts"] = attempts
 		}
 		if terminal {

@@ -34,6 +34,10 @@ const (
 	WorkFinalizer  = "finalizer"
 	DefaultLane    = "normal"
 	MaxPayloadSize = 256 * 1024
+
+	ProviderCallCheckpointed    = "checkpointed"
+	ProviderCallAccepted        = "accepted"
+	ProviderCallInvalidContract = "invalid_contract"
 )
 
 type WorkItem struct {
@@ -112,15 +116,21 @@ func (Result) TableName() string { return "custom_derivative_results" }
 // redelivery replays it and therefore never pays for the same provider call
 // twice.
 type ProviderCall struct {
-	ID                 string     `json:"id" gorm:"type:uuid;primaryKey"`
-	WorkItemID         string     `json:"work_item_id" gorm:"type:uuid;not null;uniqueIndex:uq_derivative_provider_call,priority:1;index"`
-	RequestHash        string     `json:"request_hash" gorm:"type:varchar(64);not null;uniqueIndex:uq_derivative_provider_call,priority:2"`
-	ProviderRequestKey string     `json:"provider_request_key" gorm:"type:varchar(190);not null;uniqueIndex"`
-	ModelID            string     `json:"model_id" gorm:"type:varchar(64);not null;default:''"`
-	Response           types.JSON `json:"response" gorm:"type:jsonb;not null"`
-	ResponseSize       int64      `json:"response_size" gorm:"not null;default:0"`
-	ContentChecksum    string     `json:"content_checksum" gorm:"type:varchar(64);not null"`
-	CreatedAt          time.Time  `json:"created_at" gorm:"not null"`
+	ID                   string     `json:"id" gorm:"type:uuid;primaryKey"`
+	WorkItemID           string     `json:"work_item_id" gorm:"type:uuid;not null;uniqueIndex:uq_custom_derivative_provider_call,priority:1;index"`
+	RequestHash          string     `json:"request_hash" gorm:"type:varchar(64);not null;uniqueIndex:uq_custom_derivative_provider_call,priority:2"`
+	Attempt              int        `json:"attempt" gorm:"not null;default:1;uniqueIndex:uq_custom_derivative_provider_call,priority:3"`
+	ProviderRequestKey   string     `json:"provider_request_key" gorm:"type:varchar(190);not null;uniqueIndex"`
+	ProviderRequestID    string     `json:"provider_request_id" gorm:"type:varchar(160);not null;default:''"`
+	ProcessingGeneration string     `json:"processing_generation" gorm:"type:varchar(64);not null;default:'';index"`
+	ModelID              string     `json:"model_id" gorm:"type:varchar(64);not null;default:''"`
+	Response             types.JSON `json:"response" gorm:"type:jsonb;not null"`
+	ResponseSize         int64      `json:"response_size" gorm:"not null;default:0"`
+	ContentChecksum      string     `json:"content_checksum" gorm:"type:varchar(64);not null"`
+	Disposition          string     `json:"disposition" gorm:"type:varchar(32);not null;default:'checkpointed';index"`
+	ValidationError      string     `json:"validation_error" gorm:"type:text;not null;default:''"`
+	CreatedAt            time.Time  `json:"created_at" gorm:"not null"`
+	ValidatedAt          *time.Time `json:"validated_at,omitempty"`
 }
 
 func (ProviderCall) TableName() string { return "custom_derivative_provider_calls" }

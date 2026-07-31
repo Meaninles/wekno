@@ -3,7 +3,8 @@ FROM weknora-dev-app:local AS builder
 WORKDIR /workspace
 COPY . .
 
-RUN /usr/local/go/bin/go build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    /usr/local/go/bin/go build \
     -ldflags="-X 'google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn'" \
     -o /out/weknora-runtime-e2e ./cmd/server
 

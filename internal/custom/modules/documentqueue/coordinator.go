@@ -2916,7 +2916,7 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 		case types.EnrichmentStatusFailed:
 			return StateFailed, "enrichment_failed", true, nil
 		case types.EnrichmentStatusDegraded:
-			return StateFailed, "enrichment_degraded", true, nil
+			return StateCompleted, "completed_degraded_enrichment", true, nil
 		}
 		pending, err := c.wikiPending(ctx, lease)
 		if err != nil {
@@ -2935,7 +2935,7 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 		case types.WikiStatusFailed:
 			return StateFailed, "wiki_failed", true, nil
 		case types.WikiStatusDegraded:
-			return StateFailed, "wiki_degraded", true, nil
+			return StateCompleted, "completed_degraded_wiki", true, nil
 		}
 		return StateCompleted, "completed", true, nil
 	case types.ParseStatusFailed:

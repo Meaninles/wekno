@@ -87,52 +87,28 @@
                               :checked="formData.indexingStrategy.vectorEnabled"
                               :disabled="isIndexingLocked"
                               class="indexing-check-box"
-                            >{{ $t('knowledgeEditor.indexing.searchTitle') }}</t-checkbox>
-                            <p class="indexing-check-desc">{{ $t('knowledgeEditor.indexing.searchDesc') }}</p>
-                          </div>
-                          <div
-                            class="indexing-check-item"
-                            :class="{ 'is-checked': formData.indexingStrategy.wikiEnabled, 'is-disabled': isIndexingLocked }"
-                            @click="toggleWikiIndexing"
-                          >
-                            <t-checkbox
-                              :checked="formData.indexingStrategy.wikiEnabled"
-                              :disabled="isIndexingLocked"
-                              class="indexing-check-box"
                             >
                               <span class="indexing-check-title">
-                                {{ $t('knowledgeEditor.indexing.wikiTitle') }}
-                                <span class="indexing-new-badge">NEW</span>
+                                {{ $t('knowledgeEditor.indexing.searchTitle') }}
+                                <span class="indexing-recommended-badge">
+                                  {{ $t('knowledgeEditor.indexing.recommended') }}
+                                </span>
                               </span>
                             </t-checkbox>
-                            <p class="indexing-check-desc">{{ $t('knowledgeEditor.indexing.wikiDesc') }}</p>
+                            <p class="indexing-check-desc">{{ $t('knowledgeEditor.indexing.searchDesc') }}</p>
                           </div>
                         </div>
+                        <WikiIndexingDisclosure
+                          :wiki-enabled="formData.indexingStrategy.wikiEnabled"
+                          :locked="isIndexingLocked"
+                          :resolved-granularity="resolvedGranularity"
+                          :granularity-hint="granularityHint"
+                          @toggle-wiki="toggleWikiIndexing"
+                          @change-granularity="handleGranularityChange"
+                        />
                         <p v-if="isIndexingLocked" class="form-tip locked-tip">
                           {{ $t('knowledgeEditor.indexing.lockedTip') }}
                         </p>
-                      </div>
-
-                      <!-- Wiki 提取粒度 (仅当 Wiki 启用时显示) -->
-                      <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled" class="form-item">
-                        <label class="form-label">{{ $t('knowledgeEditor.wiki.extractionGranularityLabel') }}</label>
-                        <p class="form-tip">{{ $t('knowledgeEditor.wiki.extractionGranularityTip') }}</p>
-                        <t-radio-group
-                          :value="resolvedGranularity"
-                          class="granularity-radio-group"
-                          @change="handleGranularityChange"
-                        >
-                          <t-radio-button value="focused">
-                            {{ $t('knowledgeEditor.wiki.granularityFocused') }}
-                          </t-radio-button>
-                          <t-radio-button value="standard">
-                            {{ $t('knowledgeEditor.wiki.granularityStandard') }}
-                          </t-radio-button>
-                          <t-radio-button value="exhaustive">
-                            {{ $t('knowledgeEditor.wiki.granularityExhaustive') }}
-                          </t-radio-button>
-                        </t-radio-group>
-                        <p class="form-tip granularity-hint">{{ granularityHint }}</p>
                       </div>
 
                       <div class="form-item" data-guide="kb-create-name">
@@ -413,6 +389,7 @@ import ModelSelector from '@/components/ModelSelector.vue'
 import GraphSettings from './settings/GraphSettings.vue'
 import KBShareSettings from './settings/KBShareSettings.vue'
 import DataSourceSettings from './settings/DataSourceSettings.vue'
+import WikiIndexingDisclosure from '@/custom/modules/wikiActivation/components/WikiIndexingDisclosure.vue'
 import { useI18n } from 'vue-i18n'
 
 const uiStore = useUIStore()
@@ -1725,18 +1702,6 @@ watch(
   }
 }
 
-.granularity-radio-group {
-  margin-top: 4px;
-}
-
-.granularity-hint {
-  margin-top: 8px;
-  line-height: 1.6;
-  color: var(--td-text-color-secondary);
-  white-space: normal;
-  word-break: break-word;
-}
-
 .indexing-checks {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -1800,7 +1765,7 @@ watch(
   gap: 6px;
 }
 
-.indexing-new-badge {
+.indexing-recommended-badge {
   display: inline-flex;
   align-items: center;
   padding: 0 6px;
@@ -1809,7 +1774,6 @@ watch(
   font-size: 10px;
   font-weight: 600;
   line-height: 1;
-  letter-spacing: 0.4px;
   color: var(--td-brand-color);
   background: var(--td-brand-color-light);
 }

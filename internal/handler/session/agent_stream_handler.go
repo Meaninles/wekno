@@ -740,9 +740,10 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		Done:      true,
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
-			"total_steps":       data.TotalSteps,
-			"total_duration_ms": data.TotalDurationMs,
-			"final_answer":      h.assistantMessage.Content,
+			"total_steps":          data.TotalSteps,
+			"total_duration_ms":    data.TotalDurationMs,
+			"final_answer":         h.assistantMessage.Content,
+			"knowledge_references": h.knowledgeRefs,
 		},
 	}); err != nil {
 		logger.GetLogger(h.ctx).Errorf("Append complete event to stream failed: %v", err)

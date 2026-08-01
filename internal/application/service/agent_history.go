@@ -118,27 +118,17 @@ func LoadAgentHistory(
 }
 
 // buildUserHistoryMessage converts a stored user message into the chat.Message
-// form that should appear in LLM history. It prefers RenderedContent (which
-// already contains any retrieval-context augmentation from prior turns) and
-// falls back to Content. When the user uploaded images, the captions extracted
-// during ingestion are appended so subsequent turns retain a textual reference
-// to those images even after the binary payload is gone.
+// form that should appear in LLM history. Only the original Content is replayed:
+// RenderedContent contains a prior turn's evidence envelope and request-local
+// citation IDs, which must never become evidence for a later turn. Image and
+// attachment context is reconstructed from its canonical stored fields.
 func buildUserHistoryMessage(m *types.Message) chat.Message {
-	content := m.RenderedContent
-	if content == "" {
-		content = m.Content
+	content := m.Content
+	if captions := extractImageCaptionsFromMessage(m.Images); captions != "" {
+		content += "\n\n[用户上传图片内容]\n" + captions
 	}
-	// Only append fallbacks when RenderedContent is absent — when present, it
-	// already carries the augmented version persisted by the original turn.
-	// Agent-mode turns do not persist RenderedContent (scope envelopes are
-	// injected only for the current LLM call, not replayed from history).
-	if m.RenderedContent == "" {
-		if captions := extractImageCaptionsFromMessage(m.Images); captions != "" {
-			content += "\n\n[用户上传图片内容]\n" + captions
-		}
-		if len(m.Attachments) > 0 {
-			content += m.Attachments.BuildPrompt()
-		}
+	if len(m.Attachments) > 0 {
+		content += m.Attachments.BuildPrompt()
 	}
 	return chat.Message{Role: "user", Content: content}
 }

@@ -16,10 +16,9 @@ import (
 )
 
 // Coordinator fences PostgreSQL-authoritative derivative work before a
-// document tombstone physically purges its supporting rows. It also repairs
-// residue left by older completed KB deletions. Redis cleanup is delegated to
-// the production TaskInspector through an exact-ID extension; no shared queue
-// history scan is performed here.
+// document tombstone physically purges its supporting rows. Redis cleanup is
+// delegated to the production TaskInspector through an exact-ID extension;
+// no shared queue history scan is performed here.
 type Coordinator struct {
 	db        *gorm.DB
 	inspector interfaces.TaskInspector
@@ -193,72 +192,6 @@ func (c *Coordinator) QuiesceDerivativeTasks(
 		tenantID, kbID, len(ids), len(rows), deleted,
 	)
 	return nil
-}
-
-type residueCandidate struct {
-	TenantID        uint64
-	KnowledgeBaseID string
-}
-
-// SweepCompletedKnowledgeBases repairs only KB tombstones whose durable
-// delete outbox has already been consumed. It therefore cannot race the main
-// deletion worker. This is a compatibility cleanup for residue produced by
-// older builds and a crash-recovery safety net for the new ordered cleanup.
-func (c *Coordinator) SweepCompletedKnowledgeBases(ctx context.Context, limit int) (int, error) {
-	if c == nil || c.db == nil {
-		return 0, errors.New("knowledge purge: residue sweep database is unavailable")
-	}
-	if limit <= 0 || limit > 100 {
-		limit = 10
-	}
-	jsonKB := "json_extract(payload, '$.expected_snapshot.knowledge_base_id')"
-	if c.db.Dialector.Name() == "postgres" {
-		jsonKB = "payload->'expected_snapshot'->>'knowledge_base_id'"
-	}
-	query := fmt.Sprintf(`
-		SELECT residue.tenant_id, residue.knowledge_base_id
-		FROM (
-			SELECT tenant_id, knowledge_base_id FROM custom_derivative_work_items
-			UNION
-			SELECT tenant_id, knowledge_base_id FROM custom_document_queue_workflows
-			UNION
-			SELECT tenant_id, knowledge_base_id FROM custom_document_queue_schedule_groups
-			UNION
-			SELECT tenant_id, %s AS knowledge_base_id
-			  FROM task_dead_letters
-			 WHERE %s IS NOT NULL
-		) AS residue
-		JOIN knowledge_bases AS kb
-		  ON kb.tenant_id = residue.tenant_id
-		 AND kb.id = residue.knowledge_base_id
-		 AND kb.deleted_at IS NOT NULL
-		WHERE NOT EXISTS (
-			SELECT 1 FROM task_pending_ops AS pending
-			 WHERE pending.tenant_id = residue.tenant_id
-			   AND pending.task_type = ?
-			   AND pending.scope = ?
-			   AND pending.scope_id = residue.knowledge_base_id
-		)
-		ORDER BY residue.tenant_id, residue.knowledge_base_id
-		LIMIT ?`, jsonKB, jsonKB)
-	var candidates []residueCandidate
-	if err := c.db.WithContext(ctx).Raw(
-		query, types.TypeKBDelete, types.TaskScopeKnowledgeBase, limit,
-	).Scan(&candidates).Error; err != nil {
-		return 0, fmt.Errorf("knowledge purge: list completed KB residue: %w", err)
-	}
-	cleaned := 0
-	var sweepErr error
-	for _, candidate := range candidates {
-		if err := c.CleanupCompletedKnowledgeBase(
-			ctx, candidate.TenantID, candidate.KnowledgeBaseID,
-		); err != nil {
-			sweepErr = errors.Join(sweepErr, err)
-			continue
-		}
-		cleaned++
-	}
-	return cleaned, sweepErr
 }
 
 // CleanupCompletedKnowledgeBase removes relational and queue history left

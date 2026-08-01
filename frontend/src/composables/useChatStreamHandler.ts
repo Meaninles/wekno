@@ -162,12 +162,10 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
 
   const extractKnowledgeReferences = (data: ChatMessage) => {
     const dataPayload = data.data as ChatMessage | undefined
-    const refs =
-      data.knowledge_references ||
-      dataPayload?.references ||
-      dataPayload?.knowledge_references ||
-      []
-    return Array.isArray(refs) ? refs : []
+    const refs = data.knowledge_references
+      ?? dataPayload?.references
+      ?? dataPayload?.knowledge_references
+    return Array.isArray(refs) ? refs : undefined
   }
 
   /** Match the in-flight assistant row by request id or assistant message id. */
@@ -191,7 +189,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
 
   const applyKnowledgeReferences = (data: ChatMessage) => {
     const refs = extractKnowledgeReferences(data)
-    if (!refs.length) return undefined
+    if (!refs) return undefined
 
     let message = resolveActiveAssistantMessage(data)
     const created = !message
@@ -1107,6 +1105,9 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       }
       case 'complete': {
         log('[Agent] Complete event received')
+        // Completion is authoritative, including an intentional empty list:
+        // replace pre-answer retrieval candidates with actually cited sources.
+        applyKnowledgeReferences(data)
         normalizeFinalAnswerFromComplete(message, dataPayload)
         loading.value = false
         isReplying.value = false

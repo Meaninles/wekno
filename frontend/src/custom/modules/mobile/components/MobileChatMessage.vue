@@ -747,7 +747,7 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
     sourceLabel: el.getAttribute("data-source-label") || sourceTypeLabel(type),
     snippet: "",
     count: 1,
-    icon: type === "web" ? "internet" : type === "wiki" ? "browse" : type === "data_source" ? "server" : "file",
+    icon: type === "web" ? "internet" : type === "wiki" ? "browse" : "file",
     url,
     knowledgeBaseId,
     knowledgeId,
@@ -969,10 +969,6 @@ const openCitationSource = (item: SourceReferenceItem) => {
   selectedCitationItem.value = null;
   if (item.type === "web") {
     if (item.url) openExternalUrl(item.url);
-    return;
-  }
-  if (item.type === "data_source") {
-    MessagePlugin.info("移动端暂不支持查看数据源详情");
     return;
   }
   detailItem.value = item;

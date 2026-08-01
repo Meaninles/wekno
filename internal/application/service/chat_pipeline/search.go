@@ -154,24 +154,6 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 	return ErrSearchNothing
 }
 
-// getSearchResultFromHistory retrieves relevant knowledge references from chat history
-func getSearchResultFromHistory(chatManage *types.ChatManage) []*types.SearchResult {
-	if len(chatManage.History) == 0 {
-		return nil
-	}
-	// Search history in reverse chronological order
-	for i := len(chatManage.History) - 1; i >= 0; i-- {
-		if len(chatManage.History[i].KnowledgeReferences) > 0 {
-			// Mark all references as history matches
-			for _, reference := range chatManage.History[i].KnowledgeReferences {
-				reference.MatchType = types.MatchTypeHistory
-			}
-			return chatManage.History[i].KnowledgeReferences
-		}
-	}
-	return nil
-}
-
 func removeDuplicateResults(results []*types.SearchResult) []*types.SearchResult {
 	seen := make(map[string]bool)
 	contentSig := make(map[string]string) // sig -> first chunk ID

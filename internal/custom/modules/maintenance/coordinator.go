@@ -19,7 +19,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentrecovery"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
-	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
@@ -49,7 +48,6 @@ type Params struct {
 	WikiQueue            *wikiqueue.Recovery
 	KBDelete             *kbdeletequeue.Recovery
 	KnowledgeAux         *knowledgeaux.Recovery
-	KnowledgePurge       *knowledgepurge.Coordinator
 	WikiDelete           *wikidelete.Recovery
 }
 
@@ -337,11 +335,6 @@ func (c *Coordinator) runRetention(ctx context.Context) {
 		retentionCtx, now, now.Add(-30*24*time.Hour), 5000,
 	); err != nil {
 		logger.Warnf(ctx, "[maintenance leader] derivative retention skipped: %v", err)
-	}
-	if cleaned, err := c.params.KnowledgePurge.SweepCompletedKnowledgeBases(retentionCtx, 10); err != nil {
-		logger.Warnf(ctx, "[maintenance leader] completed KB residue cleanup incomplete: %v", err)
-	} else if cleaned > 0 {
-		logger.Infof(ctx, "[maintenance leader] completed KB residue cleaned=%d", cleaned)
 	}
 }
 

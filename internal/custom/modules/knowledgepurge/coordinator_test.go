@@ -165,9 +165,9 @@ func TestCleanupCompletedKnowledgeBasePurgesExecutionResidueButKeepsTombstones(t
 		now, now, now).Error)
 
 	capture := &derivativePurgerCapture{}
-	cleaned, err := NewCoordinator(db, capture).SweepCompletedKnowledgeBases(context.Background(), 10)
-	require.NoError(t, err)
-	require.Equal(t, 1, cleaned)
+	require.NoError(t, NewCoordinator(db, capture).CleanupCompletedKnowledgeBase(
+		context.Background(), 7, "kb-1",
+	))
 
 	for _, table := range []string{
 		"custom_derivative_work_items", "custom_derivative_provider_calls",

@@ -1,4 +1,4 @@
-export type SourceReferenceKind = 'knowledge' | 'wiki' | 'web' | 'data_source'
+export type SourceReferenceKind = 'knowledge' | 'wiki' | 'web'
 
 export type SourceReference = {
   id?: string
@@ -39,8 +39,7 @@ export type SourceReferenceItem = {
 }
 
 const CITATION_ID_RE = /^S(\d+)$/i
-const SRC_TAG_RE = /<src\b([^>]*?)\s*\/?>/gi
-const SRC_ID_ATTR_RE = /\b(?:id|source_id|sourceId)\s*=\s*"([^"]*)"/i
+const SRC_TAG_RE = /<src\s+id="(S[1-9][0-9]*)"\s*\/>/g
 
 export function getSourceReferenceKind(ref: SourceReference): SourceReferenceKind {
   const metadataType = ref.metadata?.source_type
@@ -92,8 +91,8 @@ export function buildSourceReferenceItems(
     const chunkIndex = numberValue(ref.chunk_index ?? metadata.chunk_index)
     const startAt = numberValue(ref.start_at ?? metadata.start_at)
     const endAt = numberValue(ref.end_at ?? metadata.end_at)
-    const sourceId = metadata.source_id || stripDataSourceID(ref.id || '')
-    const title = normalizeDisplayText(sourceTitle(ref, type, url, slug, sourceId))
+    const sourceId = metadata.source_id || ''
+    const title = normalizeDisplayText(sourceTitle(ref, type, url, slug))
     const sourceLabel = normalizeDisplayText(sourceLabelFor(ref, type, url))
 
     grouped.set(key, {
@@ -123,7 +122,6 @@ export function buildSourceReferenceItems(
         knowledgeId,
         chunkId,
         slug,
-        sourceId,
       }),
     })
   }
@@ -172,8 +170,7 @@ export function extractSourceCitationIds(content: string): string[] {
   SRC_TAG_RE.lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = SRC_TAG_RE.exec(String(content || ''))) !== null) {
-    const attrMatch = (match[1] || '').match(SRC_ID_ATTR_RE)
-    const id = attrMatch?.[1]?.trim()
+    const id = match[1]
     if (!id || seen.has(id)) continue
     seen.add(id)
     ids.push(id)
@@ -184,7 +181,6 @@ export function extractSourceCitationIds(content: string): string[] {
 export function sourceTypeLabel(type: SourceReferenceKind): string {
   if (type === 'web') return '网页'
   if (type === 'wiki') return 'Wiki'
-  if (type === 'data_source') return '数据源'
   return '知识库文档片段'
 }
 
@@ -255,9 +251,6 @@ function fallbackSourceKey(ref: SourceReference, type: SourceReferenceKind): str
     const kbId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
     return `wiki:${kbId}:${slug || ref.knowledge_title || ref.id || ''}`
   }
-  if (type === 'data_source') {
-    return `data_source:${metadata.source_id || stripDataSourceID(ref.id || '') || metadata.source_name || ref.id || ''}`
-  }
   const kbId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
   const knowledgeId = ref.knowledge_id || metadata.knowledge_id || ''
   const chunkId = knowledgeChunkId(ref, type)
@@ -265,7 +258,7 @@ function fallbackSourceKey(ref: SourceReference, type: SourceReferenceKind): str
   return `knowledge:${kbId}:${knowledgeId || ref.knowledge_title || ref.knowledge_filename || ref.id || ''}`
 }
 
-function sourceTitle(ref: SourceReference, type: SourceReferenceKind, url: string, slug: string, sourceId: string): string {
+function sourceTitle(ref: SourceReference, type: SourceReferenceKind, url: string, slug: string): string {
   const metadata = ref.metadata || {}
   return metadata.citation_title
     || metadata.source_name
@@ -274,7 +267,6 @@ function sourceTitle(ref: SourceReference, type: SourceReferenceKind, url: strin
     || ref.knowledge_filename
     || (type === 'wiki' ? slug : '')
     || (type === 'web' ? hostFromUrl(url) || url : '')
-    || (type === 'data_source' ? sourceId : '')
     || ref.id
     || sourceTypeLabel(type)
 }
@@ -283,14 +275,12 @@ function sourceLabelFor(ref: SourceReference, type: SourceReferenceKind, url: st
   const metadata = ref.metadata || {}
   if (type === 'web') return hostFromUrl(url) || metadata.source || '网页'
   if (type === 'wiki') return metadata.knowledge_base_name || 'Wiki'
-  if (type === 'data_source') return metadata.database_type || metadata.source_name || '数据源'
   return metadata.knowledge_base_name || metadata.source_name || '知识库文档片段'
 }
 
 function iconForSourceType(type: SourceReferenceKind): string {
   if (type === 'web') return 'internet'
   if (type === 'wiki') return 'browse'
-  if (type === 'data_source') return 'server'
   return 'file'
 }
 
@@ -302,12 +292,10 @@ function isClickable(
     knowledgeId: string
     chunkId: string
     slug: string
-    sourceId: string
   },
 ): boolean {
   if (type === 'web') return Boolean(info.url)
   if (type === 'wiki') return Boolean(info.knowledgeBaseId && info.slug)
-  if (type === 'data_source') return Boolean(info.sourceId)
   return Boolean(info.chunkId || info.knowledgeId || info.knowledgeBaseId)
 }
 
@@ -375,17 +363,6 @@ function numberValue(value: unknown): number | null {
 
 function stripWikiID(value: string): string {
   return value.replace(/^wiki:[^:]*:/, '')
-}
-
-function stripDataSourceID(value: string): string {
-  return value.replace(/^data_source:/, '')
-}
-
-function hasLegacyInlineCitation(content: string): boolean {
-  const text = String(content || '')
-  return /<kb\b([^>]*?)\s*\/?>/i.test(text)
-    || /<web\b([^>]*?)\s*\/?>/i.test(text)
-    || /\[\[([^\]]+)\]\]/.test(text)
 }
 
 function renumberSourceItems(items: SourceReferenceItem[]): SourceReferenceItem[] {

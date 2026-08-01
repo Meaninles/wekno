@@ -52,6 +52,6 @@ test('agent complete normalizes live answers to backend final answer', () => {
   assert.match(source, /message\.content = finalAnswer/)
   assert.match(
     source,
-    /case 'complete': \{[\s\S]*normalizeFinalAnswerFromComplete\(message, dataPayload\)/,
+    /case 'complete': \{[\s\S]*applyKnowledgeReferences\(data\)[\s\S]*normalizeFinalAnswerFromComplete\(message, dataPayload\)/,
   )
 })

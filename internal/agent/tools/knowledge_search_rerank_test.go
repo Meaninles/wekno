@@ -8,7 +8,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-func TestFilterRerankRankResults_thresholdAndFallback(t *testing.T) {
+func TestFilterRerankRankResults_strictThreshold(t *testing.T) {
 	t.Parallel()
 	rankResults := []rerank.RankResult{
 		{Index: 0, RelevanceScore: 0.05},
@@ -24,8 +24,8 @@ func TestFilterRerankRankResults_thresholdAndFallback(t *testing.T) {
 		{Index: 1, RelevanceScore: 0.20},
 	}
 	filtered = filterRerankRankResults(rankResults, 0.3)
-	if len(filtered) != 1 || filtered[0].Index != 1 {
-		t.Fatalf("expected fallback top score, got %#v", filtered)
+	if len(filtered) != 0 {
+		t.Fatalf("expected below-threshold results to stay filtered, got %#v", filtered)
 	}
 
 	rankResults = []rerank.RankResult{

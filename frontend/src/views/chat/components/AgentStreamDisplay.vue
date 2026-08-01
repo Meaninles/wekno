@@ -2122,7 +2122,7 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
     sourceLabel: el.getAttribute('data-source-label') || sourceTypeLabel(type),
     snippet: '',
     count: 1,
-    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : type === 'data_source' ? 'server' : 'file',
+    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : 'file',
     url: el.getAttribute('data-url') || '',
     knowledgeBaseId,
     knowledgeId,

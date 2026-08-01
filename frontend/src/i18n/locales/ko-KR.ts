@@ -146,7 +146,7 @@ export default {
         },
         indexing: {
           title: "색인 기능",
-          desc: "벡터·키워드 검색이 기본으로 켜져 있습니다. Wiki·지식 그래프도 선택할 수 있습니다. 검색 방식은 하나 이상 유지하세요.",
+          desc: "기본 RAG 검색은 대부분의 Q&A 시나리오에 적합합니다. 고급 인덱싱은 일반적으로 필요하지 않으며, 검색 방식은 하나 이상 유지하세요.",
         },
         navModels: {
           title: "모델 구성(필수)",
@@ -3431,7 +3431,7 @@ export default {
       typeDocument: "문서",
       typeFAQ: "Q&A",
       typeDescription:
-        "FAQ 유형은 구조화된 Q&A 데이터에 적합합니다. 문서 유형은 파일 파싱과 청킹을 지원합니다. Wiki 유형은 LLM을 통해 상호 연결된 지식 페이지를 자동으로 구축합니다.",
+        "FAQ 유형은 구조화된 Q&A 데이터에 적합합니다. 문서 유형은 파일 파싱, 청킹 및 검색을 지원합니다.",
       nameLabel: "지식베이스 이름",
       namePlaceholder: "지식베이스 이름을 입력해주세요",
       descriptionLabel: "지식베이스 설명",
@@ -3457,11 +3457,16 @@ export default {
     },
     indexing: {
       title: "인덱싱 전략",
-      description: "문서 업로드 후 처리 파이프라인을 구성합니다. 각 인덱싱 방식을 독립적으로 켜거나 끌 수 있습니다",
+      description: "RAG 검색은 대부분의 Q&A에 적합합니다. 비용이 높은 인덱스가 필요할 때만 고급 옵션을 펼치세요.",
       searchTitle: "RAG 검색",
       searchDesc: "문서를 청크 분할, 벡터화, 키워드 인덱싱하여 하이브리드 검색을 지원합니다",
+      recommended: "권장",
+      advancedTitle: "고급 인덱싱",
+      advancedDesc: "추가 모델 호출이 필요하며 일반적으로 켤 필요가 없습니다",
+      advancedEnabledSummary: "Wiki 사용 중 · {granularity}",
       wikiTitle: "Wiki 지식베이스",
       wikiDesc: "상호 연결된 Wiki 지식 페이지를 자동 생성하여 구조화된 지식 체계를 구축합니다",
+      wikiCostDesc: "Wiki는 모델을 호출해 연결된 페이지를 생성하고 계속 유지하므로 문서가 많을수록 처리 비용이 증가합니다. 디렉터리형 읽기나 문서 간 지식 구성이 필요할 때만 켜고, 일반 Q&A에는 RAG를 사용하세요.",
       graphTitle: "지식 그래프",
       graphDesc: "엔티티와 관계를 추출하여 지식 그래프를 구축하고 그래프 검색을 지원합니다",
       atLeastOne: "최소 하나의 인덱싱 전략을 활성화해야 합니다",

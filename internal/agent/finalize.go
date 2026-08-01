@@ -85,7 +85,7 @@ User question: %s
 
 Requirements:
 1. Answer based on the actually retrieved content
-2. When citation_sources are provided, cite factual statements inline with <src id="S1" /> using the exact source id. For knowledge-base sources, each id represents a specific document fragment, not the whole document; cite the fragment whose content directly supports the sentence or paragraph. Do not invent source ids and do not expose internal chunk_id or knowledge_id values in the user-facing answer.
+2. When citation_sources are provided, cite factual statements inline using exactly <src id="S1" /> with an exact returned id. This is the only citation tag: never emit <source>, <citation>, <doc>, <kb>, <wiki>, <web>, [[...]], numeric context ids, chunk ids, slugs, or URLs as citations. For knowledge-base sources, each id represents one specific document fragment, not the whole document; cite only the fragment whose content directly supports the adjacent sentence or paragraph. Place tags on the same line immediately after the supported text, use each supporting source once per paragraph, and never collect citations at the bottom. Do not invent, guess, or substitute source ids and do not expose internal identifiers in the user-facing answer.
 3. Organize the answer in a structured format
 4. If information is insufficient, honestly state so
 5. IMPORTANT: Respond in the same language as the user's question

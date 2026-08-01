@@ -168,6 +168,10 @@ func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
 	if got := complete.Data["final_answer"]; got != "streamed final answer" {
 		t.Fatalf("complete final_answer = %q, want streamed final answer", got)
 	}
+	refs, ok := complete.Data["knowledge_references"].([]*types.SearchResult)
+	if !ok || len(refs) != 0 {
+		t.Fatalf("complete knowledge_references = %#v, want authoritative empty slice", complete.Data["knowledge_references"])
+	}
 }
 
 func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {

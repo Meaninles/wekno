@@ -83,7 +83,6 @@ type AdminConfig struct {
 
 type Service struct {
 	db        *gorm.DB
-	settings  interfaces.SystemSettingService
 	audit     interfaces.AuditLogService
 	kbRepo    interfaces.KnowledgeBaseRepository
 	agentRepo interfaces.CustomAgentRepository
@@ -104,7 +103,7 @@ func NewService(
 		admissionManager = admissionManagers[0]
 	}
 	return &Service{
-		db: db, settings: settings, audit: audit,
+		db: db, audit: audit,
 		kbRepo: kbRepo, agentRepo: agentRepo,
 		limiter: NewLimiterWithAdmission(rdb, settings, admissionManager),
 	}
@@ -364,20 +363,6 @@ func (s *Service) SetDefault(ctx context.Context, modelID string) error {
 	}
 	s.auditChange(ctx, "set_default", modelID, nil)
 	return nil
-}
-
-func (s *Service) UpdateTPM(ctx context.Context, value int64) (int64, error) {
-	if s.settings == nil {
-		return 0, errors.New("system setting service is unavailable")
-	}
-	row, err := s.settings.Update(ctx, "derivative.tpm", value)
-	if err != nil {
-		return 0, apperrors.NewBadRequestError(err.Error())
-	}
-	if row == nil {
-		return s.limiter.TPM(ctx), nil
-	}
-	return s.limiter.TPM(ctx), nil
 }
 
 type derivativeAuthorization struct {

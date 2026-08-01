@@ -99,27 +99,6 @@ func (h *Handler) SetDefault(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": config})
 }
 
-type tpmRequest struct {
-	TPM int64 `json:"tpm" binding:"required"`
-}
-
-func (h *Handler) UpdateTPM(c *gin.Context) {
-	var request tpmRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.Error(apperrors.NewBadRequestError(err.Error()))
-		return
-	}
-	value, err := h.service.UpdateTPM(c.Request.Context(), request.TPM)
-	if err != nil {
-		h.writeError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data":    gin.H{"tpm": value},
-	})
-}
-
 type testRequest struct {
 	Prompt string `json:"prompt"`
 }

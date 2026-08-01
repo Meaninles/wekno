@@ -878,8 +878,9 @@ export default {
       on: 'on',
       off: 'off',
     },
-    attempt: 'Attempt {n}',
-    attemptLatest: 'Attempt {n} (latest)',
+    attempt: 'Processing run {n}',
+    attemptLatest: 'Processing run {n} (latest)',
+    attemptHelp: 'An upload or manual reparse creates a new processing run; automatic task retries stay in the same run.',
     retry: 'Retry parsing',
     refresh: 'Refresh now',
     copy: 'Copy',
@@ -911,7 +912,7 @@ export default {
       stagesProgress: 'Current stage',
       stage: 'Stage',
       status: 'Status',
-      attempt: 'Attempt',
+      attempt: 'Processing run',
       updated: 'Updated',
     },
     tab: {
@@ -3634,7 +3635,6 @@ export default {
         chat: {
           queue: {
             enabled: 'Enable chat conversation queue',
-            default_max_concurrent: 'Default concurrent conversations per model',
             default_max_waiting: 'Default waiting conversations per model',
             max_waiting_per_user: 'Maximum queued conversations per user',
           },
@@ -3664,7 +3664,6 @@ export default {
         chat: {
           queue: {
             enabled: 'Enabled by default. Conversations queue across API replicas by actual chat-model resource pool; disabling removes conversation-level admission for new turns.',
-            default_max_concurrent: 'Default simultaneously executing conversations per actual chat model, from 1 to 4096. A resource pool may override it and updates take effect dynamically.',
             default_max_waiting: 'Default waiting conversations per actual chat model, from 0 to 100000. No message is created when this limit is reached.',
             max_waiting_per_user: 'Maximum conversations one user may have waiting across all chat models, from 1 to 1000. Default: 3.',
           },

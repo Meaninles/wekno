@@ -7,7 +7,6 @@ const baseUrl = String(
 const token = String(process.env.WEKNORA_QUEUE_E2E_TOKEN || '')
 const settingKeys = [
   'chat.queue.enabled',
-  'chat.queue.default_max_concurrent',
   'chat.queue.default_max_waiting',
   'chat.queue.max_waiting_per_user',
 ]
@@ -284,23 +283,27 @@ async function restoreSettings() {
   }
 }
 
-function resourcePoolBody(pool, chatMaxConcurrent, chatMaxWaiting) {
+function resourcePoolBody(pool, maxInflight, chatMaxWaiting) {
+  const total = maxInflight == null ? Number(pool.max_inflight) : Number(maxInflight)
+  const reserve = Math.min(Number(pool.interactive_reserve), Math.max(0, total - 1))
+  const background = Math.max(1, total - reserve)
+  const tenant = Math.min(Math.max(1, Number(pool.tenant_burst)), total)
   return {
     id: String(pool.id),
     name: String(pool.name),
     resource_kind: String(pool.resource_kind),
-    chat_max_concurrent: chatMaxConcurrent,
+    chat_max_concurrent: null,
     chat_max_waiting: chatMaxWaiting,
-    max_inflight: Number(pool.max_inflight),
-    max_background_inflight: Number(pool.max_background_inflight),
-    interactive_reserve: Number(pool.interactive_reserve),
-    tenant_guaranteed: Number(pool.tenant_guaranteed),
-    tenant_burst: Number(pool.tenant_burst),
-    document_guaranteed: Number(pool.document_guaranteed),
-    document_burst: Number(pool.document_burst),
+    max_inflight: total,
+    max_background_inflight: background,
+    interactive_reserve: reserve,
+    tenant_guaranteed: 1,
+    tenant_burst: tenant,
+    document_guaranteed: 1,
+    document_burst: Math.min(Math.max(1, Number(pool.document_burst)), tenant, background),
     rpm: Number(pool.rpm),
     tpm: Number(pool.tpm),
-    token_burst: Number(pool.token_burst),
+    token_burst: 0,
     request_timeout_seconds: Number(pool.request_timeout_seconds),
     circuit_threshold: Number(pool.circuit_threshold),
     circuit_window_seconds: Number(pool.circuit_window_seconds),
@@ -313,7 +316,7 @@ async function setPoolLimits(poolId, concurrent, waiting) {
   const current = poolCurrents.get(poolId)
   assert(current, `resource pool ${poolId} is tracked`)
   const response = await request(
-    `/api/v1/custom/derivative-control/resource-pools/${encodeURIComponent(poolId)}`,
+    `/api/v1/custom/capacity-control/resource-pools/${encodeURIComponent(poolId)}`,
     {
       method: 'PUT',
       body: resourcePoolBody(current, concurrent, waiting),
@@ -332,12 +335,12 @@ async function restorePools() {
       const current = poolCurrents.get(poolId)
       if (!current) continue
       const response = await request(
-        `/api/v1/custom/derivative-control/resource-pools/${encodeURIComponent(poolId)}`,
+        `/api/v1/custom/capacity-control/resource-pools/${encodeURIComponent(poolId)}`,
         {
           method: 'PUT',
           body: resourcePoolBody(
             backup,
-            backup.chat_max_concurrent ?? null,
+            backup.max_inflight,
             backup.chat_max_waiting ?? null,
           ),
           headers: { 'If-Match': `"${current.policy_version}"` },
@@ -639,10 +642,6 @@ async function run() {
     defaults.find((candidate) => candidate.key === key)?.value
   assert(settingValue('chat.queue.enabled') === true, 'queue defaults enabled')
   assert(
-    Number(settingValue('chat.queue.default_max_concurrent')) === 8,
-    'default maximum concurrent conversations is 8',
-  )
-  assert(
     Number(settingValue('chat.queue.default_max_waiting')) === 500,
     'default model-pool waiting capacity is 500',
   )
@@ -651,10 +650,6 @@ async function run() {
     'default single-user waiting capacity is 3',
   )
 
-  await request(
-    '/api/v1/system/admin/settings/chat.queue.default_max_concurrent',
-    { method: 'PUT', body: { value: 0 }, expected: [400] },
-  )
   await request(
     '/api/v1/system/admin/settings/chat.queue.default_max_waiting',
     { method: 'PUT', body: { value: -1 }, expected: [400] },
@@ -669,14 +664,14 @@ async function run() {
   const bindings = dataOf(
     (
       await request(
-        '/api/v1/custom/derivative-control/bindings',
+        '/api/v1/custom/capacity-control/bindings',
       )
     ).payload,
   )
   const pools = dataOf(
     (
       await request(
-        '/api/v1/custom/derivative-control/resource-pools',
+        '/api/v1/custom/capacity-control/resource-pools',
       )
     ).payload,
   )
@@ -742,10 +737,9 @@ async function run() {
   )
 
   await setSetting('chat.queue.enabled', true)
-  await setSetting('chat.queue.default_max_concurrent', 1)
   await setSetting('chat.queue.default_max_waiting', 2)
   await setSetting('chat.queue.max_waiting_per_user', 20)
-  await setPoolLimits(primary.pool.id, null, null)
+  await setPoolLimits(primary.pool.id, 1, null)
 
   const inherited = await probeRequests(
     requestsFor(primary.model.id, 6),

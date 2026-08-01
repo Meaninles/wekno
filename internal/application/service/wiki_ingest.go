@@ -2669,6 +2669,16 @@ func (s *wikiIngestService) publishDraftPages(
 		}
 		page, err := s.wikiService.GetPageBySlug(ctx, kbID, slug)
 		if err != nil {
+			// A retract-only reduce may intentionally delete the final-owner page.
+			// The slug still participates in the publication barrier so its owning
+			// pending operation is settled only after all downstream work completes.
+			// In that desired end state there is no draft page left to publish, and
+			// treating the authoritative not-found as a retryable publication error
+			// makes a successful delete look like a failed Wiki task.
+			if errors.Is(err, repository.ErrWikiPageNotFound) && wikiUpdatesAreRetractOnly(updates) {
+				logger.Infof(ctx, "wiki ingest: page %s already absent after retract; publication settled", slug)
+				continue
+			}
 			failures[slug] = fmt.Errorf("get page for publication: %w", err)
 			continue
 		}
@@ -2690,6 +2700,18 @@ func (s *wikiIngestService) publishDraftPages(
 		}
 	}
 	return failures
+}
+
+func wikiUpdatesAreRetractOnly(updates []SlugUpdate) bool {
+	if len(updates) == 0 {
+		return false
+	}
+	for _, update := range updates {
+		if update.Type != "retract" && update.Type != "retractStale" {
+			return false
+		}
+	}
+	return true
 }
 
 // writeDedupItemXML renders a single entity/concept entry as a structured XML

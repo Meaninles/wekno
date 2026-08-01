@@ -1478,9 +1478,11 @@ const processConfigLines = computed<string[]>(() => {
             </template>
           </p>
 
-          <div v-if="attemptTabs.length > 0" class="kp-attempts">
+          <div v-if="attemptTabs.length > 0" class="kp-attempts" :title="t('knowledgeStages.attemptHelp')">
             <button v-for="tab in attemptTabs" :key="tab.n" type="button" class="kp-attempt"
-              :class="{ 'kp-attempt-active': tab.active }" @click="onAttemptChange(tab.n)">
+              :class="{ 'kp-attempt-active': tab.active }"
+              :aria-label="t(tab.n === data?.latest_attempt ? 'knowledgeStages.attemptLatest' : 'knowledgeStages.attempt', { n: tab.n })"
+              @click="onAttemptChange(tab.n)">
               <span class="kp-attempt-num kp-mono">#{{ tab.n }}</span>
               <span class="kp-attempt-glyph" :class="attemptGlyph(tab.status).cls">{{ attemptGlyph(tab.status).ch
                 }}</span>

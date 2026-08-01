@@ -791,9 +791,10 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 
 	// Close the multimodal stage span (parent enqueued it as "running"
 	// and we never see the per-image fan-in here other than by reaching
-	// post-process). If the parent skipped multimodal entirely, the
-	// stage row will already be in "skipped" state and EndSpan is a
-	// no-op for missing rows. Per-image success/failure counts are NOT
+	// post-process). LookupStage returns the persisted status and EndSpan
+	// preserves every terminal state, so a text-only document that already
+	// marked multimodal as skipped cannot be rewritten to done here.
+	// Per-image success/failure counts are NOT
 	// aggregated here — the frontend already walks the children when
 	// rendering the multimodal stage detail and counts them itself,
 	// avoiding an extra query path.

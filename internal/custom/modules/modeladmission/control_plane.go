@@ -180,7 +180,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.seedBuiltinTemplates(ctx); err != nil {
 		return err
 	}
-	return s.ReconcileModels(ctx)
+	if err := s.ReconcileModels(ctx); err != nil {
+		return err
+	}
+	return s.normalizeCapacityPolicies(ctx)
 }
 
 func (s *Store) ReconcileModels(ctx context.Context) error {
@@ -312,7 +315,7 @@ func (s *Store) Resolve(ctx context.Context, spec Spec, fallback Limit) (Resolve
 		PoolID: pool.ID, QuotaPoolID: binding.QuotaPoolID, GatewayPoolID: binding.GatewayPoolID,
 		Limit: Limit{
 			Concurrency: pool.MaxInflight,
-			Background:  pool.MaxBackgroundInflight,
+			Background:  EffectiveBackgroundLimit(pool.MaxInflight, pool.InteractiveReserve),
 			RPM:         pool.RPM,
 			PerTenant:   pool.TenantBurst,
 			PerDocument: pool.DocumentBurst,
@@ -624,7 +627,7 @@ func templatePolicy(template AdmissionTemplate, callKind Kind) builtinPolicyValu
 		kind: policyKind,
 		limit: Limit{
 			Concurrency: template.MaxInflight,
-			Background:  template.MaxBackgroundInflight,
+			Background:  EffectiveBackgroundLimit(template.MaxInflight, template.InteractiveReserve),
 			RPM:         template.RPM,
 			PerTenant:   template.TenantBurst,
 			PerDocument: template.DocumentBurst,
@@ -635,6 +638,76 @@ func templatePolicy(template AdmissionTemplate, callKind Kind) builtinPolicyValu
 }
 
 var safePoolID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$`)
+
+// EffectiveBackgroundLimit compiles the background ceiling from the two
+// operator-owned concurrency values. MaxBackgroundInflight remains persisted
+// as a materialized value for diagnostics and optimistic updates, but is no
+// longer an independent knob that can disagree with interactive reserve.
+func EffectiveBackgroundLimit(maxInflight, interactiveReserve int) int {
+	if maxInflight <= 0 {
+		return 0
+	}
+	background := maxInflight - interactiveReserve
+	if background < 1 {
+		return 1
+	}
+	return background
+}
+
+// NormalizePool removes redundant/no-op capacity inputs and materializes the
+// derived values before validation. This is intentionally applied server-side
+// so API clients cannot recreate the old conflicting configuration graph.
+func NormalizePool(pool *ResourcePool) error {
+	if pool == nil {
+		return errors.New("resource pool is required")
+	}
+	pool.ChatMaxConcurrent = nil
+	pool.MaxBackgroundInflight = EffectiveBackgroundLimit(
+		pool.MaxInflight, pool.InteractiveReserve,
+	)
+	pool.TenantGuaranteed = 1
+	pool.DocumentGuaranteed = 1
+	pool.TokenBurst = 0
+	return ValidatePool(pool)
+}
+
+// NormalizeTemplate applies the same compiler used by concrete pools.
+func NormalizeTemplate(row *AdmissionTemplate) error {
+	if row == nil {
+		return errors.New("admission template is required")
+	}
+	row.MaxBackgroundInflight = EffectiveBackgroundLimit(
+		row.MaxInflight, row.InteractiveReserve,
+	)
+	if strings.TrimSpace(row.Kind) == "" {
+		return errors.New("template kind is required")
+	}
+	if row.MaxInflight < 1 || row.MaxInflight > 1024 {
+		return errors.New("max_inflight must be between 1 and 1024")
+	}
+	if row.InteractiveReserve < 0 || row.InteractiveReserve >= row.MaxInflight {
+		return errors.New("interactive_reserve must be between 0 and max_inflight - 1")
+	}
+	if row.TenantBurst < 1 || row.TenantBurst > row.MaxInflight {
+		return errors.New("tenant_burst must be between 1 and max_inflight")
+	}
+	if row.DocumentBurst < 1 || row.DocumentBurst > row.TenantBurst ||
+		row.DocumentBurst > row.MaxBackgroundInflight {
+		return errors.New("document_burst must not exceed tenant_burst or effective background concurrency")
+	}
+	if row.RPM < 0 || row.TPM < 0 {
+		return errors.New("rpm and tpm cannot be negative")
+	}
+	if row.RequestTimeoutSeconds < 1 || row.RequestTimeoutSeconds > 7200 {
+		return errors.New("request_timeout_seconds must be between 1 and 7200")
+	}
+	if row.CircuitThreshold < 1 || row.CircuitThreshold > 100 ||
+		row.CircuitWindowSeconds < 1 || row.CircuitWindowSeconds > 86400 ||
+		row.CircuitOpenSeconds < 1 || row.CircuitOpenSeconds > 86400 {
+		return errors.New("invalid circuit breaker policy")
+	}
+	return nil
+}
 
 func ValidatePool(pool *ResourcePool) error {
 	if pool == nil {
@@ -660,11 +733,11 @@ func ValidatePool(pool *ResourcePool) error {
 		(*pool.ChatMaxWaiting < 0 || *pool.ChatMaxWaiting > 100000) {
 		return errors.New("chat_max_waiting must be null or between 0 and 100000")
 	}
-	if pool.MaxBackgroundInflight < 0 || pool.MaxBackgroundInflight > pool.MaxInflight {
-		return errors.New("max_background_inflight must be between 0 and max_inflight")
+	if pool.MaxBackgroundInflight != EffectiveBackgroundLimit(pool.MaxInflight, pool.InteractiveReserve) {
+		return errors.New("max_background_inflight must equal max_inflight - interactive_reserve")
 	}
-	if pool.InteractiveReserve < 0 || pool.InteractiveReserve > pool.MaxInflight {
-		return errors.New("interactive_reserve must be between 0 and max_inflight")
+	if pool.InteractiveReserve < 0 || pool.InteractiveReserve >= pool.MaxInflight {
+		return errors.New("interactive_reserve must be between 0 and max_inflight - 1")
 	}
 	if pool.TenantBurst < 1 || pool.TenantBurst > pool.MaxInflight {
 		return errors.New("tenant_burst must be between 1 and max_inflight")
@@ -672,8 +745,9 @@ func ValidatePool(pool *ResourcePool) error {
 	if pool.TenantGuaranteed < 1 || pool.TenantGuaranteed > pool.TenantBurst {
 		return errors.New("tenant_guaranteed must be between 1 and tenant_burst")
 	}
-	if pool.DocumentBurst < 1 || pool.DocumentBurst > pool.MaxInflight {
-		return errors.New("document_burst must be between 1 and max_inflight")
+	if pool.DocumentBurst < 1 || pool.DocumentBurst > pool.TenantBurst ||
+		pool.DocumentBurst > pool.MaxBackgroundInflight {
+		return errors.New("document_burst must not exceed tenant_burst or effective background concurrency")
 	}
 	if pool.DocumentGuaranteed < 1 || pool.DocumentGuaranteed > pool.DocumentBurst {
 		return errors.New("document_guaranteed must be between 1 and document_burst")
@@ -701,4 +775,79 @@ func ValidatePool(pool *ResourcePool) error {
 		return errors.New("state must be enabled, draining, or disabled")
 	}
 	return nil
+}
+
+// normalizeCapacityPolicies upgrades persisted rows to the canonical shape.
+// It runs only on the maintenance/migration replica. Runtime resolution also
+// derives the background value, so serving replicas are correct during a
+// rolling rollout before this materialized cleanup completes.
+func (s *Store) normalizeCapacityPolicies(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return errors.New("model admission database is unavailable")
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var pools []ResourcePool
+		if err := tx.Find(&pools).Error; err != nil {
+			return err
+		}
+		for index := range pools {
+			row := &pools[index]
+			if row.MaxInflight < 1 {
+				continue
+			}
+			if row.InteractiveReserve < 0 {
+				row.InteractiveReserve = 0
+			}
+			if row.InteractiveReserve >= row.MaxInflight {
+				row.InteractiveReserve = row.MaxInflight - 1
+			}
+			row.MaxBackgroundInflight = EffectiveBackgroundLimit(row.MaxInflight, row.InteractiveReserve)
+			row.TenantBurst = min(max(row.TenantBurst, 1), row.MaxInflight)
+			row.DocumentBurst = min(max(row.DocumentBurst, 1), row.TenantBurst, row.MaxBackgroundInflight)
+			row.ChatMaxConcurrent = nil
+			row.TenantGuaranteed = 1
+			row.DocumentGuaranteed = 1
+			row.TokenBurst = 0
+			if err := tx.Model(&ResourcePool{}).Where("id = ?", row.ID).Updates(map[string]any{
+				"chat_max_concurrent":     nil,
+				"max_background_inflight": row.MaxBackgroundInflight,
+				"interactive_reserve":     row.InteractiveReserve,
+				"tenant_guaranteed":       1,
+				"tenant_burst":            row.TenantBurst,
+				"document_guaranteed":     1,
+				"document_burst":          row.DocumentBurst,
+				"token_burst":             0,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		var templates []AdmissionTemplate
+		if err := tx.Find(&templates).Error; err != nil {
+			return err
+		}
+		for index := range templates {
+			row := &templates[index]
+			if row.MaxInflight < 1 {
+				continue
+			}
+			if row.InteractiveReserve < 0 {
+				row.InteractiveReserve = 0
+			}
+			if row.InteractiveReserve >= row.MaxInflight {
+				row.InteractiveReserve = row.MaxInflight - 1
+			}
+			row.MaxBackgroundInflight = EffectiveBackgroundLimit(row.MaxInflight, row.InteractiveReserve)
+			row.TenantBurst = min(max(row.TenantBurst, 1), row.MaxInflight)
+			row.DocumentBurst = min(max(row.DocumentBurst, 1), row.TenantBurst, row.MaxBackgroundInflight)
+			if err := tx.Model(&AdmissionTemplate{}).Where("kind = ?", row.Kind).Updates(map[string]any{
+				"max_background_inflight": row.MaxBackgroundInflight,
+				"interactive_reserve":     row.InteractiveReserve,
+				"tenant_burst":            row.TenantBurst,
+				"document_burst":          row.DocumentBurst,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

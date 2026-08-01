@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -13,8 +14,6 @@ type testSettings struct{}
 
 func (testSettings) GetInt(_ context.Context, key, _ string, def int64) int64 {
 	switch key {
-	case "chat.queue.default_max_concurrent":
-		return 1
 	case "chat.queue.default_max_waiting":
 		return 10
 	case "chat.queue.max_waiting_per_user":
@@ -45,6 +44,17 @@ func newLocalTestManager() *Manager {
 		localPools:       make(map[string]*localPool),
 		localUserWaiting: make(map[string]map[string]int64),
 		poolCache:        make(map[string]cachedPool),
+	}
+}
+
+func TestResourcePoolTotalIsTheOnlyChatExecutionLimit(t *testing.T) {
+	manager := &Manager{settings: testSettings{}}
+	legacy := 1
+	policy := manager.policyWithPool(context.Background(), &modeladmission.ResourcePool{
+		MaxInflight: 4, ChatMaxConcurrent: &legacy,
+	})
+	if policy.MaxConcurrent != 4 {
+		t.Fatalf("MaxConcurrent = %d, want resource-pool total 4", policy.MaxConcurrent)
 	}
 }
 

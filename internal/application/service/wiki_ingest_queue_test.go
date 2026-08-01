@@ -3232,6 +3232,36 @@ func TestPublishDraftPagesReportsReadFailure(t *testing.T) {
 	}
 }
 
+func TestPublishDraftPagesSettlesRetractOnlyPageAlreadyDeleted(t *testing.T) {
+	pages := &wikiQueuePageServiceStub{getErr: apprepo.ErrWikiPageNotFound}
+	svc := &wikiIngestService{wikiService: pages}
+	updates := map[string][]SlugUpdate{
+		"entity/acme": {
+			{Slug: "entity/acme", Type: "retract", KnowledgeID: "knowledge-1"},
+			{Slug: "entity/acme", Type: "retractStale", KnowledgeID: "knowledge-1"},
+		},
+	}
+
+	failures := svc.publishDraftPages(
+		context.Background(), 42, "kb-1", []string{"entity/acme"}, updates,
+	)
+
+	require.Empty(t, failures)
+	require.Equal(t, 1, pages.getCalls)
+}
+
+func TestWikiUpdatesAreRetractOnlyRejectsMissingAndMixedUpdates(t *testing.T) {
+	require.False(t, wikiUpdatesAreRetractOnly(nil))
+	require.False(t, wikiUpdatesAreRetractOnly([]SlugUpdate{
+		{Type: "retract"},
+		{Type: types.WikiPageTypeEntity},
+	}))
+	require.True(t, wikiUpdatesAreRetractOnly([]SlugUpdate{
+		{Type: "retract"},
+		{Type: "retractStale"},
+	}))
+}
+
 func TestProcessWikiIngestUnknownOpDeadLettersWithoutModel(t *testing.T) {
 	pending := &wikiQueuePendingRepoStub{
 		rows: []*types.TaskPendingOp{wikiPendingRow(1, WikiPendingOp{

@@ -7,7 +7,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -66,6 +68,19 @@ func (citationThresholdChatModel) ChatStream(
 
 func (citationThresholdChatModel) GetModelName() string { return "citation-threshold" }
 func (citationThresholdChatModel) GetModelID() string   { return "citation-threshold" }
+
+type citationDeferredChatModel struct{}
+
+func (citationDeferredChatModel) Chat(context.Context, []chat.Message, *chat.ChatOptions) (*types.ChatResponse, error) {
+	return nil, &modeladmission.AdmissionDeferredError{
+		Kind: modeladmission.KindChat, PoolID: "test", RetryAfter: time.Second,
+	}
+}
+func (citationDeferredChatModel) ChatStream(context.Context, []chat.Message, *chat.ChatOptions) (<-chan types.StreamResponse, error) {
+	return nil, errors.New("not used")
+}
+func (citationDeferredChatModel) GetModelName() string { return "citation-deferred" }
+func (citationDeferredChatModel) GetModelID() string   { return "citation-deferred" }
 
 // TestMergeCitationsIntoItems_PopulatesSourceChunksOnCandidates verifies that
 // citations returned by the chunk-classification pass are attached back onto
@@ -162,6 +177,22 @@ func TestClassifyChunkCitationsEnforcesFailureThreshold(t *testing.T) {
 			"degraded result = attempted:%d failed:%d err:%v, want 6/1/nil",
 			attempted, failed, err,
 		)
+	}
+}
+
+func TestClassifyChunkCitationsDoesNotCountCapacityWaitAsFailedBatch(t *testing.T) {
+	service := &wikiIngestService{}
+	chunks := []*types.Chunk{{
+		ID: "chunk", ChunkIndex: 0, ChunkType: types.ChunkTypeText,
+		Content: "capacity wait must remain scheduler state",
+	}}
+	_, _, attempted, failed, err := service.classifyChunkCitations(
+		context.Background(), citationDeferredChatModel{},
+		`- slug: entity/acme, type: entity, name: "Acme"`,
+		chunks, "English", &WikiBatchContext{},
+	)
+	if attempted != 1 || failed != 0 || !modeladmission.IsModelWorkDeferred(err) {
+		t.Fatalf("deferred result = attempted:%d failed:%d err:%v", attempted, failed, err)
 	}
 }
 

@@ -110,23 +110,27 @@ async function createIsolatedAgent(modelId) {
   return agent
 }
 
-function resourcePoolBody(pool, chatMaxConcurrent) {
+function resourcePoolBody(pool, maxInflight) {
+  const total = Number(maxInflight)
+  const reserve = Math.min(Number(pool.interactive_reserve), Math.max(0, total - 1))
+  const background = Math.max(1, total - reserve)
+  const tenant = Math.min(Math.max(1, Number(pool.tenant_burst)), total)
   return {
     id: String(pool.id),
     name: String(pool.name),
     resource_kind: String(pool.resource_kind),
-    chat_max_concurrent: chatMaxConcurrent,
+    chat_max_concurrent: null,
     chat_max_waiting: pool.chat_max_waiting ?? null,
-    max_inflight: Number(pool.max_inflight),
-    max_background_inflight: Number(pool.max_background_inflight),
-    interactive_reserve: Number(pool.interactive_reserve),
-    tenant_guaranteed: Number(pool.tenant_guaranteed),
-    tenant_burst: Number(pool.tenant_burst),
-    document_guaranteed: Number(pool.document_guaranteed),
-    document_burst: Number(pool.document_burst),
+    max_inflight: total,
+    max_background_inflight: background,
+    interactive_reserve: reserve,
+    tenant_guaranteed: 1,
+    tenant_burst: tenant,
+    document_guaranteed: 1,
+    document_burst: Math.min(Math.max(1, Number(pool.document_burst)), tenant, background),
     rpm: Number(pool.rpm),
     tpm: Number(pool.tpm),
-    token_burst: Number(pool.token_burst),
+    token_burst: 0,
     request_timeout_seconds: Number(pool.request_timeout_seconds),
     circuit_threshold: Number(pool.circuit_threshold),
     circuit_window_seconds: Number(pool.circuit_window_seconds),
@@ -137,8 +141,8 @@ function resourcePoolBody(pool, chatMaxConcurrent) {
 
 async function setModelConcurrency(modelId, minimumConcurrency) {
   const [bindings, pools] = await Promise.all([
-    request('/api/v1/custom/derivative-control/bindings'),
-    request('/api/v1/custom/derivative-control/resource-pools'),
+    request('/api/v1/custom/capacity-control/bindings'),
+    request('/api/v1/custom/capacity-control/resource-pools'),
   ])
   assert(Array.isArray(bindings) && Array.isArray(pools), 'model resource policy is listable')
   const binding = bindings.find((candidate) => candidate.model_id === modelId)
@@ -149,10 +153,10 @@ async function setModelConcurrency(modelId, minimumConcurrency) {
   poolCurrent = structuredClone(pool)
   const desired = Math.max(
     minimumConcurrency,
-    Number(pool.chat_max_concurrent || 0),
+    Number(pool.max_inflight || 0),
   )
   const response = await fetch(
-    `${baseUrl}/api/v1/custom/derivative-control/resource-pools/${encodeURIComponent(pool.id)}`,
+    `${baseUrl}/api/v1/custom/capacity-control/resource-pools/${encodeURIComponent(pool.id)}`,
     {
       method: 'PUT',
       headers: {
@@ -167,7 +171,7 @@ async function setModelConcurrency(modelId, minimumConcurrency) {
   assert(response.status === 200, `resource pool concurrency update returned ${response.status}`)
   poolCurrent = dataOf(payload)
   assert(
-    Number(poolCurrent.chat_max_concurrent) >= minimumConcurrency,
+    Number(poolCurrent.max_inflight) >= minimumConcurrency && poolCurrent.chat_max_concurrent == null,
     `model concurrency is at least ${minimumConcurrency}`,
   )
 }
@@ -397,7 +401,7 @@ async function cleanup() {
   if (poolBackup?.id && poolCurrent?.policy_version) {
     try {
       const response = await fetch(
-        `${baseUrl}/api/v1/custom/derivative-control/resource-pools/${encodeURIComponent(poolBackup.id)}`,
+        `${baseUrl}/api/v1/custom/capacity-control/resource-pools/${encodeURIComponent(poolBackup.id)}`,
         {
           method: 'PUT',
           headers: {
@@ -408,7 +412,7 @@ async function cleanup() {
           body: JSON.stringify(
             resourcePoolBody(
               poolBackup,
-              poolBackup.chat_max_concurrent ?? null,
+              poolBackup.max_inflight,
             ),
           ),
         },

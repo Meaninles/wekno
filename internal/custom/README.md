@@ -11,6 +11,7 @@
 | `documentqueue` | 文档级持久工作流、实例/boot、租约、epoch fencing、接管和队列位置 |
 | `documentsplit` | 超大文档拆分、任务租约、重试、代表性采样 |
 | `modeladmission` | Redis 集群级 Chat/Embedding/Rerank/VLM/ASR/Parser 准入 |
+| `capacitycontrol` | 实际模型资源池有效值编译、跨模块冲突检查和独立管理 API |
 | `chatqueue` | 按实际聊天模型资源池的会话级 FIFO、个人等待上限、跨 API 租约和热配置 |
 | `workloadbudget` | 问题、图谱和下游任务工作量上限 |
 | `pipelineobs` | 文档阶段进度与运行观测 |
@@ -36,7 +37,7 @@
 ## 关键语义
 
 - `asynq.concurrency` 是每 app 的完整文档并发，不是内部任务线程总数。
-- 聊天会话并发按实际模型资源池计算；API 副本数不会乘大上限，单用户等待上限跨模型池合计。
+- 实际模型资源池是模型调用、聊天会话和后台文档 fan-out 的唯一并发真源；API/worker 副本数不会乘大上限。
 - PostgreSQL 是文档工作流事实来源，Redis 投递允许重复。
 - `none` 是衍生状态初始值，不能直接解释为跳过。
 - 多副本不得同时执行生产 DDL；正常 app 使用 `AUTO_MIGRATE=false`。

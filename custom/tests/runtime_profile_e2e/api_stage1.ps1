@@ -165,9 +165,9 @@ try {
     $password = $null
     Pass "local captcha, RSA password transport, and system-admin authentication"
 
-    $pools = Invoke-Api -Method Get -Path "/api/v1/custom/derivative-control/resource-pools"
-    $bindings = Invoke-Api -Method Get -Path "/api/v1/custom/derivative-control/bindings"
-    $templates = Invoke-Api -Method Get -Path "/api/v1/custom/derivative-control/templates"
+    $pools = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/resource-pools"
+    $bindings = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/bindings"
+    $templates = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/templates"
     Assert-True ($pools.Json.data.Count -ge 1) "resource pools are reconciled"
     Assert-True ($bindings.Json.data.Count -ge 1) "model bindings are reconciled"
     Assert-True ($templates.Json.data.Count -ge 1) "admission templates are seeded"
@@ -195,32 +195,32 @@ try {
         circuit_open_seconds = 60
         state = "enabled"
     }
-    $created = Invoke-Api -Method Post -Path "/api/v1/custom/derivative-control/resource-pools" -Body $poolBody -ExpectedStatus 201
+    $created = Invoke-Api -Method Post -Path "/api/v1/custom/capacity-control/resource-pools" -Body $poolBody -ExpectedStatus 201
     $script:CreatedPoolId = $poolId
     $script:CreatedPoolVersion = [int]$created.Json.data.policy_version
     Assert-True ($script:CreatedPoolVersion -eq 1) "new resource pool starts at policy version 1"
 
     $poolBody.max_inflight = 5
     $poolBody.max_background_inflight = 4
-    $updated = Invoke-Api -Method Put -Path "/api/v1/custom/derivative-control/resource-pools/$poolId" `
+    $updated = Invoke-Api -Method Put -Path "/api/v1/custom/capacity-control/resource-pools/$poolId" `
         -Body $poolBody -ExtraHeaders @{ "If-Match" = "1" }
     Assert-True ($updated.Json.data.policy_version -eq 2) "resource pool update advances policy version"
     $script:CreatedPoolVersion = 2
 
-    Invoke-Api -Method Put -Path "/api/v1/custom/derivative-control/resource-pools/$poolId" `
+    Invoke-Api -Method Put -Path "/api/v1/custom/capacity-control/resource-pools/$poolId" `
         -Body $poolBody -ExtraHeaders @{ "If-Match" = "1" } -ExpectedStatus 409 | Out-Null
-    $drained = Invoke-Api -Method Post -Path "/api/v1/custom/derivative-control/resource-pools/$poolId/drain" `
+    $drained = Invoke-Api -Method Post -Path "/api/v1/custom/capacity-control/resource-pools/$poolId/drain" `
         -ExtraHeaders @{ "If-Match" = "2" }
     Assert-True ($drained.Json.success -eq $true) "resource pool enters draining state"
     $script:CreatedPoolVersion = 3
-    Invoke-Api -Method Delete -Path "/api/v1/custom/derivative-control/resource-pools/$poolId" `
+    Invoke-Api -Method Delete -Path "/api/v1/custom/capacity-control/resource-pools/$poolId" `
         -ExtraHeaders @{ "If-Match" = "3" } | Out-Null
     $script:CreatedPoolId = ""
-    $audits = Invoke-Api -Method Get -Path "/api/v1/custom/derivative-control/audits"
+    $audits = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/audits"
     Assert-True (($audits.Json.data | Where-Object { $_.resource_id -eq $poolId -and $_.action -eq "delete" }).Count -eq 1) "pool deletion is audited"
     Pass "resource pool create, hot update, optimistic conflict, drain, delete, and audit"
 
-    $queue = Invoke-Api -Method Get -Path "/api/v1/custom/derivative-control/queue/status"
+    $queue = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/queue/status"
     Assert-True ($queue.Json.data.PSObject.Properties.Name -contains "work_items") "queue status exposes durable work item aggregation"
     Assert-True ($queue.Json.data.resource_pools -ge 1) "queue status exposes resource pool count"
     Pass "durable queue and admission status API"
@@ -253,11 +253,11 @@ finally {
     if (-not [string]::IsNullOrWhiteSpace($script:CreatedPoolId)) {
         try {
             if ($script:CreatedPoolVersion -lt 3) {
-                Invoke-Api -Method Post -Path "/api/v1/custom/derivative-control/resource-pools/$($script:CreatedPoolId)/drain" `
+                Invoke-Api -Method Post -Path "/api/v1/custom/capacity-control/resource-pools/$($script:CreatedPoolId)/drain" `
                     -ExtraHeaders @{ "If-Match" = "$($script:CreatedPoolVersion)" } | Out-Null
                 $script:CreatedPoolVersion++
             }
-            Invoke-Api -Method Delete -Path "/api/v1/custom/derivative-control/resource-pools/$($script:CreatedPoolId)" `
+            Invoke-Api -Method Delete -Path "/api/v1/custom/capacity-control/resource-pools/$($script:CreatedPoolId)" `
                 -ExtraHeaders @{ "If-Match" = "$($script:CreatedPoolVersion)" } -ExpectedStatus @(200, 404) | Out-Null
         }
         catch {

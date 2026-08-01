@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/agent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/llmjson"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/workloadbudget"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -297,9 +298,10 @@ func (s *wikiIngestService) classifyChunkCitations(
 	var newSlugsAll []newSlugFromCitation
 	failedBatches := 0
 	var failureErrors []error
+	var deferredError error
 
 	eg, ectx := errgroup.WithContext(ctx)
-	eg.SetLimit(maxCitationBatchConcurrency)
+	eg.SetLimit(modeladmission.EffectiveChatParallelism(ctx, chatModel, maxCitationBatchConcurrency))
 
 	for bi := range batches {
 		batch := batches[bi]
@@ -312,6 +314,17 @@ func (s *wikiIngestService) classifyChunkCitations(
 				"Language":       lang,
 			})
 			if err != nil {
+				// Capacity/quota pacing is scheduler state, not a failed Wiki
+				// batch. Bubble it to the durable task after peers finish so the
+				// task is delayed without raising the document's failure ratio.
+				if modeladmission.IsModelWorkDeferred(err) {
+					mu.Lock()
+					if deferredError == nil {
+						deferredError = err
+					}
+					mu.Unlock()
+					return nil
+				}
 				logger.Warnf(ectx, "wiki ingest: citation batch %d failed: %v", batchIdx, err)
 				mu.Lock()
 				failedBatches++
@@ -374,6 +387,9 @@ func (s *wikiIngestService) classifyChunkCitations(
 		})
 	}
 	_ = eg.Wait()
+	if deferredError != nil {
+		return nil, nil, len(batches), failedBatches, deferredError
+	}
 
 	// Build a stable chunk-order so the final citations come out in document order.
 	chunkOrder := make(map[string]int, len(chunks))

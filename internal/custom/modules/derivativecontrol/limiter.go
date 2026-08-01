@@ -98,7 +98,6 @@ return next_at
 
 type Limiter struct {
 	rdb       *redis.Client
-	settings  interfaces.SystemSettingService
 	admission *modeladmission.Manager
 	estimate  *agenttoken.Estimator
 
@@ -123,30 +122,22 @@ func NewLimiter(rdb *redis.Client, settings interfaces.SystemSettingService) *Li
 
 func NewLimiterWithAdmission(
 	rdb *redis.Client,
-	settings interfaces.SystemSettingService,
+	_ interfaces.SystemSettingService,
 	admission *modeladmission.Manager,
 ) *Limiter {
 	estimator, _ := agenttoken.NewEstimator()
 	return &Limiter{
-		rdb: rdb, settings: settings, admission: admission, estimate: estimator,
+		rdb: rdb, admission: admission, estimate: estimator,
 		localNext: make(map[string]time.Time),
 	}
 }
 
 func (l *Limiter) TPM(ctx context.Context) int64 {
-	value := DefaultTPM
-	if l != nil && l.settings != nil {
-		value = l.settings.GetInt(
-			ctx, "derivative.tpm", "WEKNORA_DERIVATIVE_TPM", DefaultTPM,
-		)
-	}
-	if value < minTPM {
-		return minTPM
-	}
-	if value > maxTPM {
-		return maxTPM
-	}
-	return value
+	// Persisted models always resolve TPM from their actual-model resource
+	// pool. This fallback exists only for tests/bootstrapping callers without
+	// a model record and is deliberately not another operator-owned setting.
+	_ = ctx
+	return DefaultTPM
 }
 
 func (l *Limiter) Snapshot(ctx context.Context) LimiterSnapshot {
@@ -242,6 +233,9 @@ type limitedChat struct {
 
 func (w *limitedChat) GetModelName() string { return w.inner.GetModelName() }
 func (w *limitedChat) GetModelID() string   { return w.inner.GetModelID() }
+func (w *limitedChat) ModelAdmissionParallelism(ctx context.Context, requested int) int {
+	return modeladmission.EffectiveChatParallelism(ctx, w.inner, requested)
+}
 
 func (w *limitedChat) Chat(
 	ctx context.Context,

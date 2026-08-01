@@ -88,6 +88,11 @@ type Config struct {
 	InteractiveReserve int
 	InteractiveMaxWait time.Duration
 	BackgroundMaxWait  time.Duration
+	WorkWindowEnabled  bool
+	WorkPrefetchFactor int
+	DerivativeWeight   int
+	WikiWeight         int
+	DispatchLease      time.Duration
 	CircuitEnabled     bool
 	CircuitThreshold   int
 	CircuitWindow      time.Duration
@@ -120,11 +125,16 @@ func ConfigFromEnv() Config {
 		// deadline turns healthy provider saturation into a false task
 		// failure. Zero therefore means "inherit the task context"; operators
 		// can still opt into a finite bound explicitly.
-		BackgroundMaxWait: envOptionalDurationSeconds("CUSTOM_MODEL_ADMISSION_BACKGROUND_WAIT_SECONDS", 0),
-		CircuitEnabled:    envBool("CUSTOM_MODEL_CIRCUIT_ENABLED", true),
-		CircuitThreshold:  envInt("CUSTOM_MODEL_CIRCUIT_FAILURE_THRESHOLD", 3),
-		CircuitWindow:     envDurationSeconds("CUSTOM_MODEL_CIRCUIT_WINDOW_SECONDS", defaultCircuitFailureWindow),
-		CircuitOpen:       envDurationSeconds("CUSTOM_MODEL_CIRCUIT_OPEN_SECONDS", defaultCircuitOpenDuration),
+		BackgroundMaxWait:  envOptionalDurationSeconds("CUSTOM_MODEL_ADMISSION_BACKGROUND_WAIT_SECONDS", 0),
+		WorkWindowEnabled:  envBool("CUSTOM_MODEL_WORK_WINDOW_ENABLED", true),
+		WorkPrefetchFactor: envInt("CUSTOM_MODEL_WORK_PREFETCH_FACTOR", 2),
+		DerivativeWeight:   envInt("CUSTOM_MODEL_WORK_DERIVATIVE_WEIGHT", 2),
+		WikiWeight:         envInt("CUSTOM_MODEL_WORK_WIKI_WEIGHT", 1),
+		DispatchLease:      envDurationSeconds("CUSTOM_MODEL_WORK_DISPATCH_LEASE_SECONDS", 120*time.Second),
+		CircuitEnabled:     envBool("CUSTOM_MODEL_CIRCUIT_ENABLED", true),
+		CircuitThreshold:   envInt("CUSTOM_MODEL_CIRCUIT_FAILURE_THRESHOLD", 3),
+		CircuitWindow:      envDurationSeconds("CUSTOM_MODEL_CIRCUIT_WINDOW_SECONDS", defaultCircuitFailureWindow),
+		CircuitOpen:        envDurationSeconds("CUSTOM_MODEL_CIRCUIT_OPEN_SECONDS", defaultCircuitOpenDuration),
 		// A half-open probe may legitimately run for the full per-call model
 		// timeout. Its ownership TTL must outlive that request so another Pod
 		// cannot start a concurrent probe.
@@ -332,13 +342,17 @@ func normalizeEndpoint(raw string) string {
 }
 
 type Stats struct {
-	Waiting       int64
-	InFlight      int64
-	Acquired      uint64
-	BackendErrors uint64
-	LeaseLost     uint64
-	CircuitOpened uint64
-	CircuitReject uint64
+	Waiting              int64
+	InFlight             int64
+	WorkActive           int64
+	WorkDerivativeActive int64
+	WorkWikiActive       int64
+	WorkDeferred         uint64
+	Acquired             uint64
+	BackendErrors        uint64
+	LeaseLost            uint64
+	CircuitOpened        uint64
+	CircuitReject        uint64
 }
 
 type circuitPolicy struct {
@@ -353,26 +367,39 @@ type Manager struct {
 	redis  *redis.Client
 	config Config
 
-	waiting       atomic.Int64
-	inFlight      atomic.Int64
-	acquired      atomic.Uint64
-	backendErrors atomic.Uint64
-	leaseLost     atomic.Uint64
-	circuitOpened atomic.Uint64
-	circuitReject atomic.Uint64
+	waiting              atomic.Int64
+	inFlight             atomic.Int64
+	workActive           atomic.Int64
+	workDerivativeActive atomic.Int64
+	workWikiActive       atomic.Int64
+	workDeferred         atomic.Uint64
+	acquired             atomic.Uint64
+	backendErrors        atomic.Uint64
+	leaseLost            atomic.Uint64
+	circuitOpened        atomic.Uint64
+	circuitReject        atomic.Uint64
 
 	localMu        sync.Mutex
 	localAccounts  map[string]*localAccount
 	localTenants   map[string]int
 	localDocuments map[string]int
 	localCircuits  map[string]*localCircuit
+	localWork      map[string]*localWorkState
 	store          *Store
 }
 
 type localAccount struct {
 	active           int
 	backgroundActive int
+	laneActive       [2]int
+	laneWaitUntil    [2]time.Time
 	rateTimestamps   []time.Time
+}
+
+type localWorkState struct {
+	active    [2]int
+	waitUntil [2]time.Time
+	tokens    map[string]WorkLane
 }
 
 func NewManager(redisClient *redis.Client, db *gorm.DB) *Manager {
@@ -416,6 +443,7 @@ func newManagerWithConfig(redisClient *redis.Client, config Config) *Manager {
 		localTenants:   make(map[string]int),
 		localDocuments: make(map[string]int),
 		localCircuits:  make(map[string]*localCircuit),
+		localWork:      make(map[string]*localWorkState),
 	}
 }
 
@@ -483,6 +511,19 @@ func (m *Manager) GetResourcePool(ctx context.Context, poolID string) (*Resource
 	return m.store.GetResourcePool(ctx, poolID)
 }
 
+// SchedulerPolicy returns the hot background scheduling policy. Tests and
+// Lite callers without a control-plane store receive the same deterministic
+// defaults used to seed production.
+func (m *Manager) SchedulerPolicy(ctx context.Context) (SchedulerPolicy, error) {
+	if m == nil {
+		return SchedulerPolicy{}, errors.New("model admission manager is unavailable")
+	}
+	if m.store == nil {
+		return DefaultSchedulerPolicy(), nil
+	}
+	return m.store.SchedulerPolicy(ctx)
+}
+
 func (m *Manager) circuitPolicyFor(resolved ResolvedPolicy) circuitPolicy {
 	policy := circuitPolicy{
 		enabled:   m != nil && m.config.CircuitEnabled,
@@ -511,13 +552,17 @@ func (m *Manager) Snapshot() Stats {
 		return Stats{}
 	}
 	return Stats{
-		Waiting:       m.waiting.Load(),
-		InFlight:      m.inFlight.Load(),
-		Acquired:      m.acquired.Load(),
-		BackendErrors: m.backendErrors.Load(),
-		LeaseLost:     m.leaseLost.Load(),
-		CircuitOpened: m.circuitOpened.Load(),
-		CircuitReject: m.circuitReject.Load(),
+		Waiting:              m.waiting.Load(),
+		InFlight:             m.inFlight.Load(),
+		WorkActive:           m.workActive.Load(),
+		WorkDerivativeActive: m.workDerivativeActive.Load(),
+		WorkWikiActive:       m.workWikiActive.Load(),
+		WorkDeferred:         m.workDeferred.Load(),
+		Acquired:             m.acquired.Load(),
+		BackendErrors:        m.backendErrors.Load(),
+		LeaseLost:            m.leaseLost.Load(),
+		CircuitOpened:        m.circuitOpened.Load(),
+		CircuitReject:        m.circuitReject.Load(),
 	}
 }
 
@@ -533,12 +578,37 @@ local lease_ms = tonumber(ARGV[6])
 local rate_window_ms = tonumber(ARGV[7])
 local background = tonumber(ARGV[8])
 local document_limit = tonumber(ARGV[9])
+local lane = ARGV[10]
+local derivative_limit = tonumber(ARGV[11])
+local wiki_limit = tonumber(ARGV[12])
+local waiter_ms = tonumber(ARGV[13])
 
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
-redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now)
-redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', now)
+for index = 1, 4 do
+  redis.call('ZREMRANGEBYSCORE', KEYS[index], '-inf', now)
+end
+for index = 6, 9 do
+  redis.call('ZREMRANGEBYSCORE', KEYS[index], '-inf', now)
+end
 redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now - rate_window_ms)
+
+local lane_active = nil
+local lane_waiting = nil
+local other_waiting = nil
+local lane_limit = 0
+if background == 1 and lane == 'derivative' then
+  lane_active = KEYS[6]
+  lane_waiting = KEYS[8]
+  other_waiting = KEYS[9]
+  lane_limit = derivative_limit
+elseif background == 1 and lane == 'wiki' then
+  lane_active = KEYS[7]
+  lane_waiting = KEYS[9]
+  other_waiting = KEYS[8]
+  lane_limit = wiki_limit
+end
+if lane_waiting then
+  redis.call('ZADD', lane_waiting, now + waiter_ms, token)
+end
 
 local total_count = redis.call('ZCARD', KEYS[1])
 local background_count = redis.call('ZCARD', KEYS[2])
@@ -559,6 +629,13 @@ end
 if allowed and rpm > 0 then
   allowed = rate_count < rpm
 end
+if allowed and lane_active and lane_limit > 0 then
+  local lane_count = redis.call('ZCARD', lane_active)
+  local other_wait_count = redis.call('ZCARD', other_waiting)
+  if lane_count >= lane_limit and other_wait_count > 0 then
+    allowed = false
+  end
+end
 
 if allowed then
   local expires = now + lease_ms
@@ -575,7 +652,11 @@ if allowed then
   if rpm > 0 then
     redis.call('ZADD', KEYS[5], now, token)
   end
-  for index = 1, 5 do
+  if lane_active then
+    redis.call('ZREM', lane_waiting, token)
+    redis.call('ZADD', lane_active, expires, token)
+  end
+  for index = 1, 9 do
     redis.call('PEXPIRE', KEYS[index], math.max(lease_ms * 2, rate_window_ms + 1000))
   end
   return {1, 0}
@@ -602,7 +683,7 @@ local token = ARGV[1]
 local lease_ms = tonumber(ARGV[2])
 local expires = now + lease_ms
 local renewed = 0
-for index = 1, 4 do
+for index = 1, 6 do
   if redis.call('ZSCORE', KEYS[index], token) then
     redis.call('ZADD', KEYS[index], 'XX', expires, token)
     -- The sorted-set key has its own TTL in addition to every member's
@@ -619,20 +700,24 @@ return renewed
 var releaseScript = redis.NewScript(`
 local token = ARGV[1]
 local removed = 0
-for index = 1, 4 do
+for index = 1, 8 do
   removed = removed + redis.call('ZREM', KEYS[index], token)
 end
 return removed
 `)
 
 type leaseKeys struct {
-	total      string
-	background string
-	tenant     string
-	document   string
-	rate       string
-	circuit    string
-	probe      string
+	total             string
+	background        string
+	tenant            string
+	document          string
+	rate              string
+	circuit           string
+	probe             string
+	derivativeActive  string
+	wikiActive        string
+	derivativeWaiting string
+	wikiWaiting       string
 }
 
 func (m *Manager) keys(spec Spec) leaseKeys {
@@ -651,13 +736,17 @@ func (m *Manager) keys(spec Spec) leaseKeys {
 		rateSuffix = ":rpm"
 	}
 	return leaseKeys{
-		total:      base + ":total",
-		background: base + ":background",
-		tenant:     base + ":tenant:" + strconv.FormatUint(spec.TenantID, 10),
-		document:   base + ":document:" + documentKey(spec.KnowledgeID),
-		rate:       base + rateSuffix,
-		circuit:    base + ":circuit",
-		probe:      base + ":circuit-probe",
+		total:             base + ":total",
+		background:        base + ":background",
+		tenant:            base + ":tenant:" + strconv.FormatUint(spec.TenantID, 10),
+		document:          base + ":document:" + documentKey(spec.KnowledgeID),
+		rate:              base + rateSuffix,
+		circuit:           base + ":circuit",
+		probe:             base + ":circuit-probe",
+		derivativeActive:  base + ":lane:active:derivative",
+		wikiActive:        base + ":lane:active:wiki",
+		derivativeWaiting: base + ":lane:waiting:derivative",
+		wikiWaiting:       base + ":lane:waiting:wiki",
 	}
 }
 
@@ -671,7 +760,25 @@ func documentKey(knowledgeID string) string {
 }
 
 func (k leaseKeys) redisKeys() []string {
-	return []string{k.total, k.background, k.tenant, k.document, k.rate}
+	return []string{
+		k.total, k.background, k.tenant, k.document, k.rate,
+		k.derivativeActive, k.wikiActive, k.derivativeWaiting, k.wikiWaiting,
+	}
+}
+
+func (k leaseKeys) renewKeys() []string {
+	return []string{
+		k.total, k.background, k.tenant, k.document,
+		k.derivativeActive, k.wikiActive,
+	}
+}
+
+func (k leaseKeys) releaseKeys() []string {
+	return []string{
+		k.total, k.background, k.tenant, k.document,
+		k.derivativeActive, k.wikiActive,
+		k.derivativeWaiting, k.wikiWaiting,
+	}
 }
 
 func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
@@ -701,6 +808,38 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 	}
 
 	background := isBackground(ctx)
+	lane := workLaneFromContext(ctx, spec)
+	schedulerPolicy := DefaultSchedulerPolicy()
+	schedulerEnabled := false
+	if background && lane.valid() {
+		var schedulerErr error
+		schedulerPolicy, schedulerEnabled, schedulerErr = m.schedulerPolicyForAcquire(ctx)
+		if schedulerErr != nil {
+			m.backendErrors.Add(1)
+			pipelineobs.ModelPoolRejected(spec.Domain, "backend_error")
+			return nil, fmt.Errorf("%w: resolve scheduler policy: %v", ErrAdmissionBackendUnavailable, schedulerErr)
+		}
+	}
+	var workLease *WorkLease
+	if background && schedulerEnabled && lane.valid() &&
+		!hasTaskWorkLease(ctx, spec.Domain, lane) {
+		var workErr error
+		workLease, workErr = m.acquireWorkWindow(
+			ctx, spec.Domain, lane, m.backgroundLimit(limit), schedulerPolicy,
+		)
+		if workErr != nil {
+			pipelineobs.ModelPoolRejected(spec.Domain, "work_window")
+			return nil, workErr
+		}
+		if workLease != nil {
+			ctx = workLease.Context()
+			defer func() {
+				if workLease != nil {
+					workLease.Release()
+				}
+			}()
+		}
+	}
 	startedAt := time.Now()
 	metricResult := "error"
 	defer func() {
@@ -709,6 +848,9 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 	maxWait := m.config.InteractiveMaxWait
 	if background {
 		maxWait = m.config.BackgroundMaxWait
+		if schedulerEnabled && schedulerPolicy.BackgroundMaxWaitSeconds > 0 {
+			maxWait = time.Duration(schedulerPolicy.BackgroundMaxWaitSeconds) * time.Second
+		}
 	}
 	waitCtx := ctx
 	cancelWait := func() {}
@@ -733,6 +875,10 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 	token := uuid.NewString()
 	keys := m.keys(spec)
 	circuitPolicy := m.circuitPolicyFor(resolved)
+	providerLane := WorkLane("")
+	if schedulerEnabled {
+		providerLane = lane
+	}
 	for {
 		var (
 			acquired bool
@@ -741,7 +887,9 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 			err      error
 		)
 		if m.redis != nil {
-			acquired, retry, err = m.tryAcquireRedis(waitCtx, keys, token, limit, background)
+			acquired, retry, err = m.tryAcquireRedis(
+				waitCtx, keys, token, limit, background, providerLane, schedulerPolicy,
+			)
 			if err != nil {
 				m.backendErrors.Add(1)
 				if m.config.FailClosed {
@@ -754,7 +902,9 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 			local = true
 		}
 		if local {
-			acquired, retry = m.tryAcquireLocal(spec, limit, background)
+			acquired, retry = m.tryAcquireLocal(
+				spec, limit, background, providerLane, schedulerPolicy,
+			)
 		}
 		if acquired {
 			// Claim the provider circuit only after admission capacity is
@@ -764,7 +914,7 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 				waitCtx, spec, keys, token, circuitPolicy,
 			)
 			if circuitErr != nil {
-				m.releaseAcquired(spec, keys, token, background, local)
+				m.releaseAcquired(spec, keys, token, background, providerLane, local)
 				if errors.Is(circuitErr, ErrProviderCircuitOpen) {
 					metricResult = "circuit_open"
 					pipelineobs.ModelPoolRejected(spec.Domain, "circuit_open")
@@ -789,13 +939,16 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 				keys,
 				token,
 				background,
+				providerLane,
 				local,
 				expectedRedisLeaseKeys(
-					limit, m.backgroundLimit(limit), background, spec.KnowledgeID,
+					limit, m.backgroundLimit(limit), background, spec.KnowledgeID, providerLane,
 				),
 				circuitProbe,
 				circuitPolicy,
 			)
+			lease.work = workLease
+			workLease = nil
 			if err := m.acquireAuxiliaryDimensions(
 				ctx, lease, spec, resolved, background,
 			); err != nil {
@@ -910,7 +1063,9 @@ func (m *Manager) tryAcquireDimension(
 		err      error
 	)
 	if !local {
-		acquired, retry, err = m.tryAcquireRedis(ctx, keys, token, limit, background)
+		acquired, retry, err = m.tryAcquireRedis(
+			ctx, keys, token, limit, background, "", DefaultSchedulerPolicy(),
+		)
 		if err != nil {
 			m.backendErrors.Add(1)
 			if m.config.FailClosed {
@@ -920,15 +1075,17 @@ func (m *Manager) tryAcquireDimension(
 		}
 	}
 	if local {
-		acquired, retry = m.tryAcquireLocal(spec, limit, background)
+		acquired, retry = m.tryAcquireLocal(
+			spec, limit, background, "", DefaultSchedulerPolicy(),
+		)
 	}
 	if !acquired {
 		return nil, retry, nil
 	}
 	lease := m.newLease(
-		ctx, spec, keys, token, background, local,
+		ctx, spec, keys, token, background, "", local,
 		expectedRedisLeaseKeys(
-			limit, m.backgroundLimit(limit), background, spec.KnowledgeID,
+			limit, m.backgroundLimit(limit), background, spec.KnowledgeID, "",
 		),
 		false,
 		circuitPolicy{enabled: false},
@@ -949,6 +1106,8 @@ func (m *Manager) tryAcquireRedis(
 	token string,
 	limit Limit,
 	background bool,
+	lane WorkLane,
+	scheduler SchedulerPolicy,
 ) (bool, time.Duration, error) {
 	backgroundLimit := m.backgroundLimit(limit)
 	backgroundValue := 0
@@ -959,6 +1118,10 @@ func (m *Manager) tryAcquireRedis(
 	if strings.TrimSpace(keys.document) == "" ||
 		strings.HasSuffix(keys.document, ":document:none") {
 		documentLimit = 0
+	}
+	derivativeLimit, wikiLimit := 0, 0
+	if background && lane.valid() {
+		derivativeLimit, wikiLimit = laneShares(backgroundLimit, scheduler)
 	}
 	result, err := acquireScript.Run(
 		ctx,
@@ -973,6 +1136,10 @@ func (m *Manager) tryAcquireRedis(
 		time.Minute.Milliseconds(),
 		backgroundValue,
 		documentLimit,
+		string(lane),
+		derivativeLimit,
+		wikiLimit,
+		int64(5*time.Second/time.Millisecond),
 	).Slice()
 	if err != nil {
 		return false, 0, err
@@ -1007,6 +1174,7 @@ func expectedRedisLeaseKeys(
 	backgroundLimit int,
 	background bool,
 	knowledgeID string,
+	lane WorkLane,
 ) int64 {
 	expected := int64(1) // The total lease set is always populated.
 	if backgroundLimit > 0 && background {
@@ -1016,6 +1184,9 @@ func expectedRedisLeaseKeys(
 		expected++
 	}
 	if limit.PerDocument > 0 && strings.TrimSpace(knowledgeID) != "" {
+		expected++
+	}
+	if background && lane.valid() {
 		expected++
 	}
 	return expected
@@ -1038,6 +1209,8 @@ func (m *Manager) tryAcquireLocal(
 	spec Spec,
 	limit Limit,
 	background bool,
+	lane WorkLane,
+	scheduler SchedulerPolicy,
 ) (bool, time.Duration) {
 	m.localMu.Lock()
 	defer m.localMu.Unlock()
@@ -1064,6 +1237,19 @@ func (m *Manager) tryAcquireLocal(
 	}
 	account.rateTimestamps = validRates
 	backgroundLimit := m.backgroundLimit(limit)
+	if background && lane.valid() {
+		index := lane.index()
+		other := 1 - index
+		derivativeLimit, wikiLimit := laneShares(backgroundLimit, scheduler)
+		laneLimit := derivativeLimit
+		if lane == WorkLaneWiki {
+			laneLimit = wikiLimit
+		}
+		account.laneWaitUntil[index] = now.Add(5 * time.Second)
+		if account.laneActive[index] >= laneLimit && account.laneWaitUntil[other].After(now) {
+			return false, 25 * time.Millisecond
+		}
+	}
 	switch {
 	case limit.Concurrency > 0 && account.active >= limit.Concurrency:
 		return false, 25 * time.Millisecond
@@ -1079,6 +1265,11 @@ func (m *Manager) tryAcquireLocal(
 	account.active++
 	if background {
 		account.backgroundActive++
+		if lane.valid() {
+			index := lane.index()
+			account.laneActive[index]++
+			account.laneWaitUntil[index] = time.Time{}
+		}
 	}
 	m.localTenants[tenantKey]++
 	if documentLimit > 0 {
@@ -1090,7 +1281,7 @@ func (m *Manager) tryAcquireLocal(
 	return true, 0
 }
 
-func (m *Manager) releaseLocal(spec Spec, background bool) {
+func (m *Manager) releaseLocal(spec Spec, background bool, lane WorkLane) {
 	m.localMu.Lock()
 	defer m.localMu.Unlock()
 	accountKey := spec.Domain
@@ -1103,6 +1294,12 @@ func (m *Manager) releaseLocal(spec Spec, background bool) {
 		}
 		if background && account.backgroundActive > 0 {
 			account.backgroundActive--
+		}
+		if background && lane.valid() {
+			index := lane.index()
+			if account.laneActive[index] > 0 {
+				account.laneActive[index]--
+			}
 		}
 	}
 	if m.localTenants[tenantKey] > 1 {
@@ -1127,17 +1324,18 @@ func (m *Manager) releaseAcquired(
 	keys leaseKeys,
 	token string,
 	background bool,
+	lane WorkLane,
 	local bool,
 ) {
 	if local {
-		m.releaseLocal(spec, background)
+		m.releaseLocal(spec, background, lane)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	err := releaseScript.Run(
 		ctx,
 		m.redis,
-		[]string{keys.total, keys.background, keys.tenant, keys.document},
+		keys.releaseKeys(),
 		token,
 	).Err()
 	cancel()
@@ -1152,6 +1350,7 @@ type Lease struct {
 	keys             leaseKeys
 	token            string
 	background       bool
+	lane             WorkLane
 	local            bool
 	noop             bool
 	expectedRenewals int64
@@ -1169,6 +1368,7 @@ type Lease struct {
 	resultRecorded    atomic.Bool
 	lost              atomic.Bool
 	providerStartedAt time.Time
+	work              *WorkLease
 }
 
 func newNoopLease(ctx context.Context) *Lease {
@@ -1181,6 +1381,7 @@ func (m *Manager) newLease(
 	keys leaseKeys,
 	token string,
 	background bool,
+	lane WorkLane,
 	local bool,
 	expectedRenewals int64,
 	circuitProbe bool,
@@ -1193,6 +1394,7 @@ func (m *Manager) newLease(
 		keys:              keys,
 		token:             token,
 		background:        background,
+		lane:              lane,
 		local:             local,
 		expectedRenewals:  expectedRenewals,
 		circuitProbe:      circuitProbe,
@@ -1291,7 +1493,7 @@ func (l *Lease) heartbeat() {
 			renewed, err := renewScript.Run(
 				ctx,
 				l.manager.redis,
-				[]string{l.keys.total, l.keys.background, l.keys.tenant, l.keys.document},
+				l.keys.renewKeys(),
 				l.token,
 				l.manager.config.LeaseTTL.Milliseconds(),
 			).Int64()
@@ -1328,19 +1530,22 @@ func (l *Lease) Release() {
 		}
 	})
 	l.once.Do(func() {
+		if l.work != nil {
+			l.work.Release()
+		}
 		for _, extra := range l.extras {
 			extra.Release()
 		}
 		close(l.done)
 		l.cancel(context.Canceled)
 		if l.local {
-			l.manager.releaseLocal(l.spec, l.background)
+			l.manager.releaseLocal(l.spec, l.background, l.lane)
 		} else {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			err := releaseScript.Run(
 				ctx,
 				l.manager.redis,
-				[]string{l.keys.total, l.keys.background, l.keys.tenant, l.keys.document},
+				l.keys.releaseKeys(),
 				l.token,
 			).Err()
 			cancel()

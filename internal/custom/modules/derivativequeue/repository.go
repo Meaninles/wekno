@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,16 +21,18 @@ import (
 )
 
 var (
-	ErrStaleDispatch   = errors.New("stale derivative dispatch")
-	ErrLeaseLost       = errors.New("derivative work-item lease lost")
-	ErrGenerationFence = errors.New("derivative processing generation changed")
-	ErrInvalidState    = errors.New("invalid derivative work-item state transition")
+	ErrStaleDispatch      = errors.New("stale derivative dispatch")
+	ErrLeaseLost          = errors.New("derivative work-item lease lost")
+	ErrGenerationFence    = errors.New("derivative processing generation changed")
+	ErrInvalidState       = errors.New("invalid derivative work-item state transition")
+	ErrDispatchWindowFull = errors.New("derivative dispatch window is full")
 )
 
 type Repository struct {
-	db        *gorm.DB
-	admission *modeladmission.Manager
-	fair      fairSelector
+	db         *gorm.DB
+	admission  *modeladmission.Manager
+	fair       fairSelector
+	dispatchMu sync.Mutex
 }
 
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
@@ -53,6 +56,11 @@ func (r *Repository) Migrate(ctx context.Context) error {
 	}
 	if err := db.AutoMigrate(&WorkItem{}, &Result{}); err != nil {
 		return err
+	}
+	if err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_derivative_pool_active_window
+		ON custom_derivative_work_items (resource_pool_id, state, dispatch_lease_until)
+		WHERE work_kind <> 'finalizer'`).Error; err != nil {
+		return fmt.Errorf("migrate derivative dispatch window index: %w", err)
 	}
 	if !db.Migrator().HasTable(&ProviderCall{}) {
 		if err := db.AutoMigrate(&ProviderCall{}); err != nil {
@@ -206,9 +214,36 @@ func (r *Repository) MarkDispatched(
 	id string,
 	expectedVersion uint64,
 ) (WakePayload, error) {
+	return r.markDispatched(ctx, id, expectedVersion, "", 0, 0, 2*time.Minute)
+}
+
+func (r *Repository) markDispatched(
+	ctx context.Context,
+	id string,
+	expectedVersion uint64,
+	expectedPool string,
+	totalWindow int,
+	laneShare int,
+	dispatchLease time.Duration,
+) (WakePayload, error) {
+	if dispatchLease <= 0 {
+		dispatchLease = 2 * time.Minute
+	}
+	if r.db.Dialector.Name() != "postgres" {
+		r.dispatchMu.Lock()
+		defer r.dispatchMu.Unlock()
+	}
 	now := time.Now().UTC()
+	leaseUntil := now.Add(dispatchLease)
 	var payload WakePayload
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if totalWindow > 0 && strings.TrimSpace(expectedPool) != "" && tx.Dialector.Name() == "postgres" {
+			if err := tx.Exec(
+				"SELECT pg_advisory_xact_lock(?)", modeladmission.DispatchAdvisoryKey(expectedPool),
+			).Error; err != nil {
+				return err
+			}
+		}
 		var row WorkItem
 		if err := lockRow(tx, id, &row); err != nil {
 			return err
@@ -216,8 +251,52 @@ func (r *Repository) MarkDispatched(
 		if row.Version != expectedVersion ||
 			(row.State != StateQueued && row.State != StateRetryWait &&
 				row.State != StateMaterializeWait && row.State != StateFinalizeWait) ||
-			row.NextAttemptAt.After(now) {
+			row.NextAttemptAt.After(now) ||
+			(row.DispatchLeaseUntil != nil && row.DispatchLeaseUntil.After(now)) {
 			return ErrInvalidState
+		}
+		if totalWindow > 0 && strings.TrimSpace(expectedPool) != "" {
+			if row.ResourcePoolID != expectedPool {
+				return ErrInvalidState
+			}
+			var derivativeActive int64
+			if err := tx.Model(&WorkItem{}).
+				Where(
+					`resource_pool_id = ? AND work_kind <> ? AND (
+						state IN ? OR (
+							state IN ? AND dispatch_lease_until IS NOT NULL AND dispatch_lease_until > ?
+						)
+					)`,
+					expectedPool, WorkFinalizer,
+					[]string{StateLeased, StateAdmitted, StateProviderRunning, StateProviderSucceeded, StateMaterializing},
+					[]string{StateQueued, StateRetryWait}, now,
+				).Count(&derivativeActive).Error; err != nil {
+				return err
+			}
+			wikiActive := int64(0)
+			wikiDemand := int64(0)
+			if tx.Migrator().HasTable("task_pending_ops") &&
+				tx.Migrator().HasColumn("task_pending_ops", "map_dispatch_lease_until") &&
+				tx.Migrator().HasColumn("task_pending_ops", "map_resource_pool_id") {
+				if err := tx.Table("task_pending_ops").Where(
+					"task_type = ? AND scope = ? AND op = ? AND map_ready_at IS NULL AND map_resource_pool_id = ? AND map_dispatch_lease_until > ?",
+					types.TypeWikiIngest, "knowledge_base", "ingest", expectedPool, now,
+				).Count(&wikiActive).Error; err != nil {
+					return err
+				}
+				if err := tx.Table("task_pending_ops").Where(
+					"task_type = ? AND scope = ? AND op = ? AND map_ready_at IS NULL AND map_resource_pool_id = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND (map_dispatch_lease_until IS NULL OR map_dispatch_lease_until <= ?)",
+					types.TypeWikiIngest, "knowledge_base", "ingest", expectedPool, now, now,
+				).Count(&wikiDemand).Error; err != nil {
+					return err
+				}
+			}
+			if derivativeActive+wikiActive >= int64(totalWindow) {
+				return ErrDispatchWindowFull
+			}
+			if laneShare > 0 && derivativeActive >= int64(laneShare) && wikiDemand > 0 {
+				return ErrDispatchWindowFull
+			}
 		}
 		epoch := row.DispatchEpoch + 1
 		taskID := fmt.Sprintf("derivative:%s:%d", row.ID, epoch)
@@ -225,7 +304,8 @@ func (r *Repository) MarkDispatched(
 			Where("id = ? AND version = ?", row.ID, row.Version).
 			Updates(map[string]any{
 				"dispatch_epoch": epoch, "dispatch_task_id": taskID,
-				"version": row.Version + 1, "updated_at": now,
+				"dispatch_lease_until": leaseUntil,
+				"version":              row.Version + 1, "updated_at": now,
 			})
 		if result.Error != nil {
 			return result.Error
@@ -237,6 +317,22 @@ func (r *Repository) MarkDispatched(
 		return nil
 	})
 	return payload, err
+}
+
+func (r *Repository) releaseDispatchReservation(
+	ctx context.Context,
+	id string,
+	epoch uint64,
+) error {
+	result := r.db.WithContext(ctx).Model(&WorkItem{}).
+		Where("id = ? AND dispatch_epoch = ? AND state IN ?", id, epoch,
+			[]string{StateQueued, StateRetryWait, StateMaterializeWait, StateFinalizeWait}).
+		Updates(map[string]any{
+			"dispatch_lease_until": nil,
+			"version":              gorm.Expr("version + 1"),
+			"updated_at":           time.Now().UTC(),
+		})
+	return result.Error
 }
 
 func (r *Repository) Claim(
@@ -284,7 +380,8 @@ func (r *Repository) Claim(
 			Updates(map[string]any{
 				"state": StateLeased, "owner_instance_id": strings.TrimSpace(owner),
 				"lease_token": token, "lease_until": leaseUntil,
-				"last_heartbeat_at": now, "version": row.Version + 1,
+				"dispatch_lease_until": nil,
+				"last_heartbeat_at":    now, "version": row.Version + 1,
 				"updated_at": now,
 			})
 		if result.Error != nil {
@@ -334,6 +431,64 @@ func (r *Repository) DeferWithoutProviderAttempt(
 		return ErrLeaseLost
 	}
 	return nil
+}
+
+// DeferForAdmission yields a claimed work item without consuming any
+// provider, materialization, finalization, Asynq, or document-attempt budget.
+// It also supports a multi-call handler that already checkpointed an earlier
+// provider response: waiting for capacity before its next call is scheduling,
+// not a failed materialization attempt.
+func (r *Repository) DeferForAdmission(
+	ctx context.Context,
+	id, leaseToken, errorCode, message string,
+	retryAfter time.Duration,
+) error {
+	if retryAfter < time.Second {
+		retryAfter = time.Second
+	}
+	now := time.Now().UTC()
+	next := now.Add(retryAfter)
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row WorkItem
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND lease_token = ?", id, leaseToken).
+			First(&row).Error; err != nil {
+			return ErrLeaseLost
+		}
+		switch row.State {
+		case StateLeased:
+		case StateProviderRunning, StateProviderSucceeded, StateMaterializing:
+			var checkpoints int64
+			if err := tx.Model(&ProviderCall{}).
+				Where("work_item_id = ? AND disposition IN ?", row.ID,
+					[]string{ProviderCallCheckpointed, ProviderCallAccepted}).
+				Count(&checkpoints).Error; err != nil {
+				return err
+			}
+			if checkpoints == 0 {
+				return ErrInvalidState
+			}
+		default:
+			return ErrInvalidState
+		}
+		result := tx.Model(&WorkItem{}).
+			Where("id = ? AND version = ? AND lease_token = ?", row.ID, row.Version, leaseToken).
+			Updates(map[string]any{
+				"state": StateQueued, "next_attempt_at": next,
+				"owner_instance_id": "", "lease_token": "", "lease_until": nil,
+				"last_error_class":   "admission",
+				"last_error_code":    truncate(errorCode, 64),
+				"last_error_message": truncate(message, 4096),
+				"version":            gorm.Expr("version + 1"), "updated_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrLeaseLost
+		}
+		return nil
+	})
 }
 
 func (r *Repository) BeginProvider(
@@ -464,7 +619,7 @@ func validatePlanItem(item PlanItem) error {
 		return errors.New("derivative plan item_id is required")
 	}
 	switch item.WorkKind {
-	case WorkSummary, WorkQuestion, WorkGraph, WorkFinalizer:
+	case WorkSummary, WorkQuestion, WorkGraph, WorkDataTable, WorkFinalizer:
 		return nil
 	default:
 		return fmt.Errorf("unsupported derivative work kind %q", item.WorkKind)
@@ -499,7 +654,7 @@ func verifyGeneration(tx *gorm.DB, row WorkItem) error {
 		return ErrGenerationFence
 	}
 	switch knowledge.ParseStatus {
-	case types.ParseStatusFinalizing, types.ParseStatusProcessing:
+	case types.ParseStatusFinalizing, types.ParseStatusProcessing, types.ParseStatusCompleted:
 		return nil
 	default:
 		return ErrGenerationFence

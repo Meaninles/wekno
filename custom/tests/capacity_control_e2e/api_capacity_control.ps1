@@ -9,6 +9,8 @@ $ErrorActionPreference = "Stop"
 $script:Token = ""
 $script:OriginalPasswordHash = ""
 $script:Pool = $null
+$script:OriginalSchedulerPolicy = $null
+$script:SchedulerPolicy = $null
 $script:Passed = [System.Collections.Generic.List[string]]::new()
 $runId = Get-Date -Format "yyyyMMddHHmmss"
 
@@ -170,7 +172,47 @@ try {
     Assert-True ($initial.Json.data.source_of_truth -eq "actual_model_resource_pool") "effective report identifies the source of truth"
     Assert-True ($initial.Json.data.runtime.capacity_wait_counts_as_failure -eq $false) "capacity waits are not failures"
     Assert-True ([int]$initial.Json.data.runtime.background_consumer_slots -ge 1) "worker topology is compiled"
-    Pass "effective policy and worker-topology report"
+    Assert-True ($initial.Json.data.runtime.instances.Count -ge 1) "live topology comes from instance heartbeats"
+    Pass "effective policy, Redis runtime, and heartbeat topology report"
+
+    $scheduler = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/scheduler-policy"
+    $script:OriginalSchedulerPolicy = $scheduler.Json.data.PSObject.Copy()
+    $script:SchedulerPolicy = $scheduler.Json.data
+    $schedulerVersion = [int]$script:SchedulerPolicy.policy_version
+    $invalidSchedulerPolicies = @(
+        @{ prefetch_factor = 0; derivative_weight = 2; wiki_weight = 1; background_max_wait_seconds = 30; dispatch_lease_seconds = 120 },
+        @{ prefetch_factor = 2; derivative_weight = 0; wiki_weight = 1; background_max_wait_seconds = 30; dispatch_lease_seconds = 120 },
+        @{ prefetch_factor = 2; derivative_weight = 2; wiki_weight = 1; background_max_wait_seconds = 0; dispatch_lease_seconds = 120 },
+        @{ prefetch_factor = 2; derivative_weight = 2; wiki_weight = 1; background_max_wait_seconds = 30; dispatch_lease_seconds = 20 }
+    )
+    foreach ($body in $invalidSchedulerPolicies) {
+        Invoke-Api -Method Put -Path "/api/v1/custom/capacity-control/scheduler-policy" `
+            -Body $body -ExtraHeaders @{ "If-Match" = "`"$schedulerVersion`"" } -ExpectedStatus 400 | Out-Null
+    }
+    $schedulerAfterReject = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/scheduler-policy"
+    Assert-True ([int]$schedulerAfterReject.Json.data.policy_version -eq $schedulerVersion) "invalid scheduler writes do not mutate the singleton"
+    Pass "scheduler conflict matrix is rejected atomically"
+
+    $schedulerProfiles = @(
+        @{ prefetch_factor = 1; derivative_weight = 1; wiki_weight = 1; background_max_wait_seconds = 5; dispatch_lease_seconds = 30 },
+        @{ prefetch_factor = 3; derivative_weight = 3; wiki_weight = 1; background_max_wait_seconds = 45; dispatch_lease_seconds = 180 },
+        @{ prefetch_factor = 2; derivative_weight = 2; wiki_weight = 1; background_max_wait_seconds = 30; dispatch_lease_seconds = 120 }
+    )
+    foreach ($profile in $schedulerProfiles) {
+        $previousVersion = [int]$script:SchedulerPolicy.policy_version
+        $updatedScheduler = Invoke-Api -Method Put -Path "/api/v1/custom/capacity-control/scheduler-policy" `
+            -Body $profile -ExtraHeaders @{ "If-Match" = "`"$previousVersion`"" }
+        $script:SchedulerPolicy = $updatedScheduler.Json.data
+        Assert-True ([int]$script:SchedulerPolicy.policy_version -eq ($previousVersion + 1)) "scheduler policy version advances"
+        foreach ($field in $profile.Keys) {
+            Assert-True ([int]$script:SchedulerPolicy.$field -eq [int]$profile[$field]) "scheduler field $field is hot"
+        }
+        1..4 | ForEach-Object {
+            $replicaRead = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/scheduler-policy"
+            Assert-True ([int]$replicaRead.Json.data.policy_version -eq [int]$script:SchedulerPolicy.policy_version) "scheduler is consistent through API replica $_"
+        }
+    }
+    Pass "scheduler profiles hot-update consistently across API replicas"
 
     $valid = Invoke-Api -Method Post -Path "/api/v1/custom/capacity-control/validate" -Body (New-PoolBody 4 1 4 2 20000)
     Assert-True ($valid.Json.data.valid -eq $true) "valid profile passes"
@@ -226,6 +268,7 @@ try {
             Assert-True ($null -ne $row) "profile is visible through load-balanced API replica $_"
             Assert-True ([int]$row.effective.provider_total -eq $profile.Total) "effective total is hot"
             Assert-True ([int]$row.effective.background_max -eq ($profile.Total - $profile.Reserve)) "effective background is hot"
+            Assert-True ([int]$row.effective.work_window -eq (($profile.Total - $profile.Reserve) * [int]$script:SchedulerPolicy.prefetch_factor)) "work window follows scheduler prefetch"
             Assert-True ([int]$row.effective.document_max -eq $profile.Document) "effective document cap is hot"
         }
     }
@@ -249,6 +292,14 @@ finally {
                 -ExtraHeaders @{ "If-Match" = "`"$($script:Pool.policy_version)`"" } | Out-Null
         }
         catch { Write-Warning "capacity test pool cleanup failed: $($_.Exception.Message)" }
+    }
+    if ($null -ne $script:OriginalSchedulerPolicy -and $null -ne $script:SchedulerPolicy) {
+        try {
+            Invoke-Api -Method Put -Path "/api/v1/custom/capacity-control/scheduler-policy" `
+                -Body $script:OriginalSchedulerPolicy `
+                -ExtraHeaders @{ "If-Match" = "`"$($script:SchedulerPolicy.policy_version)`"" } | Out-Null
+        }
+        catch { Write-Warning "scheduler policy cleanup failed: $($_.Exception.Message)" }
     }
     Restore-LocalAdminPassword
 }

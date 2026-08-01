@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
@@ -180,6 +181,8 @@ func (r *knowledgeSpanRepository) upsertV2(
 		StartedAt: started, LastBusinessProgressAt: &progressAt,
 		FinishedAt:           row.FinishedAt,
 		IncrementRealAttempt: row.Status == types.SpanStatusRunning,
+		DecrementRealAttempt: row.Status == types.SpanStatusPending &&
+			!modeladmission.ProviderExecutionStarted(ctx),
 	})
 }
 

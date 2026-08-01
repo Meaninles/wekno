@@ -78,6 +78,62 @@ type wikiDistributedPendingRepoStub struct {
 	*wikiQueuePendingRepoStub
 }
 
+func (r *wikiDistributedPendingRepoStub) ClaimWikiMapDispatch(
+	_ context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	dedupKey string,
+	epoch uint64,
+	lease time.Duration,
+) (*types.TaskPendingOp, error) {
+	for _, row := range r.rows {
+		if row == nil || row.TenantID != tenantID || row.ScopeID != knowledgeBaseID ||
+			row.TaskType != types.TypeWikiIngest || row.Op != WikiOpIngest ||
+			row.DedupKey != dedupKey || row.MapReadyAt != nil || row.MapDispatchEpoch != epoch {
+			continue
+		}
+		until := time.Now().UTC().Add(lease)
+		row.MapDispatchLeaseUntil = &until
+		copyRow := *row
+		copyRow.Payload = slices.Clone(row.Payload)
+		return &copyRow, nil
+	}
+	return nil, nil
+}
+
+func (r *wikiDistributedPendingRepoStub) RenewWikiMapDispatch(
+	_ context.Context,
+	id int64,
+	epoch uint64,
+	lease time.Duration,
+) (bool, error) {
+	for _, row := range r.rows {
+		if row != nil && row.ID == id && row.MapReadyAt == nil && row.MapDispatchEpoch == epoch {
+			until := time.Now().UTC().Add(lease)
+			row.MapDispatchLeaseUntil = &until
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *wikiDistributedPendingRepoStub) DeferWikiMapDispatch(
+	_ context.Context,
+	id int64,
+	epoch uint64,
+	delay time.Duration,
+) error {
+	for _, row := range r.rows {
+		if row != nil && row.ID == id && row.MapReadyAt == nil && row.MapDispatchEpoch == epoch {
+			next := time.Now().UTC().Add(delay)
+			row.NextAttemptAt = &next
+			row.MapDispatchTaskID = ""
+			row.MapDispatchLeaseUntil = nil
+		}
+	}
+	return nil
+}
+
 func (r *wikiDistributedPendingRepoStub) GetWikiIngestByDedupKey(
 	_ context.Context,
 	tenantID uint64,
@@ -162,6 +218,8 @@ func (r *wikiDistributedPendingRepoStub) MarkWikiMapReady(
 			now := time.Now()
 			row.Payload = slices.Clone(payload)
 			row.MapReadyAt = &now
+			row.MapDispatchTaskID = ""
+			row.MapDispatchLeaseUntil = nil
 			return true, nil
 		}
 	}
@@ -730,7 +788,7 @@ func (e *wikiQueueTaskEnqueuerStub) Enqueue(
 	return &asynq.TaskInfo{ID: "test-task", Type: task.Type(), Queue: "low"}, nil
 }
 
-func TestEnqueueWikiIngestSchedulesDocumentMapAndKBCommitForDistributedRepository(t *testing.T) {
+func TestEnqueueWikiIngestPersistsDocumentMapAndSchedulesOnlyKBCommit(t *testing.T) {
 	base := &wikiQueuePendingRepoStub{}
 	pending := &wikiDistributedPendingRepoStub{wikiQueuePendingRepoStub: base}
 	enqueuer := &wikiQueueTaskEnqueuerStub{}
@@ -748,14 +806,12 @@ func TestEnqueueWikiIngestSchedulesDocumentMapAndKBCommitForDistributedRepositor
 	require.True(t, result.PendingPersisted)
 	require.True(t, result.MapScheduled)
 	require.True(t, result.TriggerScheduled)
-	require.Len(t, enqueuer.tasks, 2)
-
-	var mapPayload WikiIngestPayload
-	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &mapPayload))
-	assert.Equal(t, wikiTaskModeMap, mapPayload.TaskMode)
-	assert.Equal(t, "knowledge-1:generation-1", mapPayload.MapDedupKey)
+	require.Len(t, enqueuer.tasks, 1,
+		"the bounded PostgreSQL dispatcher, not the upload request, publishes Map wake-ups")
+	require.Len(t, base.enqueued, 1)
+	assert.Equal(t, "knowledge-1:generation-1", base.enqueued[0].DedupKey)
 	var commitPayload WikiIngestPayload
-	require.NoError(t, json.Unmarshal(enqueuer.tasks[1].Payload(), &commitPayload))
+	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &commitPayload))
 	assert.Empty(t, commitPayload.TaskMode)
 	assert.Equal(t, "kb-1", commitPayload.KnowledgeBaseID)
 }
@@ -772,14 +828,17 @@ func TestProcessWikiMapPublishesRecoveredCheckpointAndWakesCommit(t *testing.T) 
 	row.TenantID = 42
 	row.ScopeID = "kb-1"
 	row.DedupKey = "knowledge-1:generation-1"
+	row.MapDispatchEpoch = 1
+	row.MapDispatchTaskID = "wiki-map:91:1"
 	base := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{row}}
 	pending := &wikiDistributedPendingRepoStub{wikiQueuePendingRepoStub: base}
 	enqueuer := &wikiQueueTaskEnqueuerStub{}
 	svc := &wikiIngestService{pendingRepo: pending, task: enqueuer}
 	payload := WikiIngestPayload{
 		TenantID: 42, KnowledgeBaseID: "kb-1", TaskMode: wikiTaskModeMap,
-		MapDedupKey: "knowledge-1:generation-1",
-		KnowledgeID: "knowledge-1", ProcessingGeneration: "generation-1",
+		MapDedupKey:      "knowledge-1:generation-1",
+		MapDispatchEpoch: 1,
+		KnowledgeID:      "knowledge-1", ProcessingGeneration: "generation-1",
 	}
 	encoded, err := json.Marshal(payload)
 	require.NoError(t, err)
@@ -803,13 +862,16 @@ func TestProcessWikiMapDuplicateDeliveryUsesDocumentLeaseAndCoalescedSuccessor(t
 	row.TenantID = 42
 	row.ScopeID = "kb-1"
 	row.DedupKey = "knowledge-1:generation-1"
+	row.MapDispatchEpoch = 1
+	row.MapDispatchTaskID = "wiki-map:92:1"
 	base := &wikiQueuePendingRepoStub{rows: []*types.TaskPendingOp{row}}
 	pending := &wikiDistributedPendingRepoStub{wikiQueuePendingRepoStub: base}
 	enqueuer := &wikiQueueTaskEnqueuerStub{}
 	svc := &wikiIngestService{pendingRepo: pending, task: enqueuer}
 	payload := WikiIngestPayload{
 		TenantID: 42, KnowledgeBaseID: "kb-1", TaskMode: wikiTaskModeMap,
-		MapDedupKey: "knowledge-1:generation-1",
+		MapDedupKey:      "knowledge-1:generation-1",
+		MapDispatchEpoch: 1,
 	}
 	svc.liteLocks.Store("map:"+wikiMapActiveKey(payload), struct{}{})
 	defer svc.liteLocks.Delete("map:" + wikiMapActiveKey(payload))
@@ -820,11 +882,12 @@ func TestProcessWikiMapDuplicateDeliveryUsesDocumentLeaseAndCoalescedSuccessor(t
 		context.Background(), asynq.NewTask(types.TypeWikiIngest, encoded),
 	))
 	require.Nil(t, row.MapReadyAt)
-	require.Len(t, enqueuer.tasks, 1)
-	var successor WikiIngestPayload
-	require.NoError(t, json.Unmarshal(enqueuer.tasks[0].Payload(), &successor))
-	assert.Equal(t, wikiTaskModeMap, successor.TaskMode)
-	assert.Equal(t, uint8(1), successor.WakePhase)
+	require.Empty(t, enqueuer.tasks,
+		"a document-lock conflict must return to the durable due queue, not schedule Redis work")
+	require.NotNil(t, row.NextAttemptAt)
+	assert.True(t, row.NextAttemptAt.After(time.Now().UTC()))
+	assert.Empty(t, row.MapDispatchTaskID)
+	assert.Nil(t, row.MapDispatchLeaseUntil)
 	assert.Zero(t, base.checkpointCalls)
 }
 
@@ -869,6 +932,8 @@ func TestDistributedWikiMapRealProviderFailureConsumesAttemptBudget(t *testing.T
 	row.TenantID = 42
 	row.ScopeID = "kb-1"
 	row.DedupKey = "knowledge-1:generation-1"
+	row.MapDispatchEpoch = 1
+	row.MapDispatchTaskID = "wiki-map:92:1"
 	base := &wikiQueuePendingRepoStub{
 		rows:          []*types.TaskPendingOp{row},
 		incrCount:     1,
@@ -879,7 +944,8 @@ func TestDistributedWikiMapRealProviderFailureConsumesAttemptBudget(t *testing.T
 	svc := &wikiIngestService{pendingRepo: pending, task: enqueuer}
 	payload := WikiIngestPayload{
 		TenantID: 42, KnowledgeBaseID: "kb-1", TaskMode: wikiTaskModeMap,
-		MapDedupKey: "knowledge-1:generation-1",
+		MapDedupKey:      "knowledge-1:generation-1",
+		MapDispatchEpoch: 1,
 	}
 	providerErr := workretry.ConsumeProviderFailure(
 		&modeladmission.ProviderUnavailableError{
@@ -900,10 +966,11 @@ func TestDistributedWikiMapRealProviderFailureConsumesAttemptBudget(t *testing.T
 	))
 	require.Equal(t, []int64{row.ID}, base.incrementedIDs)
 	require.Empty(t, base.touchedIDs)
-	require.Len(t, enqueuer.tasks, 1)
-	delay, ok := optionDuration(enqueuer.opts[0], asynq.ProcessInOpt)
-	require.True(t, ok)
-	require.Equal(t, wikiFollowUpDelay, delay)
+	require.Empty(t, enqueuer.tasks)
+	require.NotNil(t, row.NextAttemptAt)
+	assert.WithinDuration(t, time.Now().UTC().Add(wikiFollowUpDelay), *row.NextAttemptAt, time.Second)
+	assert.Empty(t, row.MapDispatchTaskID)
+	assert.Nil(t, row.MapDispatchLeaseUntil)
 }
 
 func (e *wikiQueueTaskEnqueuerStub) PrepareDocumentWorkflow(

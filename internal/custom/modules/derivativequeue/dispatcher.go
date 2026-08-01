@@ -24,6 +24,43 @@ const (
 	dispatchCooldown = 5 * time.Second
 )
 
+type dispatchSetting struct {
+	total int
+	share int
+	lease time.Duration
+	err   error
+}
+
+func (r *Repository) dispatchSettings(
+	ctx context.Context,
+	item WorkItem,
+) (int, int, time.Duration, error) {
+	if item.WorkKind == WorkFinalizer || item.State == StateMaterializeWait || item.State == StateFinalizeWait ||
+		r == nil || r.admission == nil || strings.TrimSpace(item.ResourcePoolID) == "" {
+		return 0, 0, 2 * time.Minute, nil
+	}
+	return r.admission.DispatchLimits(
+		ctx, item.ResourcePoolID, modeladmission.WorkLaneDerivative,
+	)
+}
+
+func (r *Repository) dispatchSettingsCached(
+	ctx context.Context,
+	item WorkItem,
+	cache map[string]dispatchSetting,
+) (int, int, time.Duration, error) {
+	if item.WorkKind == WorkFinalizer || item.State == StateMaterializeWait || item.State == StateFinalizeWait ||
+		r == nil || r.admission == nil || strings.TrimSpace(item.ResourcePoolID) == "" {
+		return 0, 0, 2 * time.Minute, nil
+	}
+	if setting, ok := cache[item.ResourcePoolID]; ok {
+		return setting.total, setting.share, setting.lease, setting.err
+	}
+	total, share, lease, err := r.dispatchSettings(ctx, item)
+	cache[item.ResourcePoolID] = dispatchSetting{total: total, share: share, lease: lease, err: err}
+	return total, share, lease, err
+}
+
 func (r *Repository) hydrateRoute(ctx context.Context, item *PlanItem) error {
 	if item == nil {
 		return errors.New("derivative plan item is required")
@@ -109,6 +146,7 @@ func (r *Repository) PublishPlan(
 	if err != nil {
 		return nil, err
 	}
+	settings := make(map[string]dispatchSetting)
 	for index := range rows {
 		switch rows[index].State {
 		case StateCompleted, StateCancelled, StateFailed, StateProviderUnknown:
@@ -117,19 +155,28 @@ func (r *Repository) PublishPlan(
 		if rows[index].NextAttemptAt.After(time.Now().UTC()) {
 			continue
 		}
-		wake, markErr := r.MarkDispatched(ctx, rows[index].ID, rows[index].Version)
-		if errors.Is(markErr, ErrInvalidState) {
+		total, share, lease, settingsErr := r.dispatchSettingsCached(ctx, rows[index], settings)
+		if settingsErr != nil {
+			return rows, settingsErr
+		}
+		wake, markErr := r.markDispatched(
+			ctx, rows[index].ID, rows[index].Version,
+			rows[index].ResourcePoolID, total, share, lease,
+		)
+		if errors.Is(markErr, ErrInvalidState) || errors.Is(markErr, ErrDispatchWindowFull) {
 			continue
 		}
 		if markErr != nil {
 			return rows, markErr
 		}
-		if err := enqueueWake(enqueuer, wake); err != nil &&
-			!errors.Is(err, asynq.ErrTaskIDConflict) {
+		if err := enqueueWake(enqueuer, wake); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+			_ = r.releaseDispatchReservation(context.WithoutCancel(ctx), rows[index].ID, wake.DispatchEpoch)
 			return rows, fmt.Errorf("enqueue derivative wake: %w", err)
 		}
 		rows[index].DispatchEpoch = wake.DispatchEpoch
 		rows[index].DispatchTaskID = wakeTaskID(wake)
+		dispatchUntil := time.Now().UTC().Add(lease)
+		rows[index].DispatchLeaseUntil = &dispatchUntil
 		rows[index].Version++
 	}
 	return rows, nil
@@ -150,7 +197,6 @@ func enqueueWake(enqueuer interfaces.TaskEnqueuer, wake WakePayload) error {
 		asynq.TaskID(wakeTaskID(wake)),
 		asynq.MaxRetry(0),
 		asynq.Timeout(30*time.Minute),
-		asynq.Retention(24*time.Hour),
 	)
 	return err
 }
@@ -176,25 +222,33 @@ func (r *Repository) DispatchDue(
 		fetchLimit = 4000
 	}
 	if err := r.db.WithContext(ctx).
-		Where("state IN ? AND next_attempt_at <= ? AND updated_at <= ?",
+		Where("state IN ? AND next_attempt_at <= ? AND updated_at <= ? AND (dispatch_lease_until IS NULL OR dispatch_lease_until <= ?)",
 			[]string{StateQueued, StateRetryWait, StateMaterializeWait, StateFinalizeWait},
-			now, now.Add(-dispatchCooldown)).
+			now, now.Add(-dispatchCooldown), now).
 		Order("next_attempt_at, created_at").
 		Limit(fetchLimit).Find(&candidates).Error; err != nil {
 		return 0, err
 	}
 	candidates = r.fair.selectCandidates(candidates, limit, now)
 	dispatched := 0
+	settings := make(map[string]dispatchSetting)
 	for _, candidate := range candidates {
-		wake, err := r.MarkDispatched(ctx, candidate.ID, candidate.Version)
-		if errors.Is(err, ErrInvalidState) {
+		total, share, lease, settingsErr := r.dispatchSettingsCached(ctx, candidate, settings)
+		if settingsErr != nil {
+			return dispatched, settingsErr
+		}
+		wake, err := r.markDispatched(
+			ctx, candidate.ID, candidate.Version,
+			candidate.ResourcePoolID, total, share, lease,
+		)
+		if errors.Is(err, ErrInvalidState) || errors.Is(err, ErrDispatchWindowFull) {
 			continue
 		}
 		if err != nil {
 			return dispatched, err
 		}
-		if err := enqueueWake(enqueuer, wake); err != nil &&
-			!errors.Is(err, asynq.ErrTaskIDConflict) {
+		if err := enqueueWake(enqueuer, wake); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+			_ = r.releaseDispatchReservation(context.WithoutCancel(ctx), candidate.ID, wake.DispatchEpoch)
 			return dispatched, err
 		}
 		dispatched++

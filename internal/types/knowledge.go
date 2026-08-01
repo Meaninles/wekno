@@ -59,22 +59,18 @@ const (
 	// ParseStatusProcessing indicates the knowledge is being processed
 	// (DocReader / chunking / embedding stage).
 	ParseStatusProcessing = "processing"
-	// ParseStatusFinalizing indicates the primary parse has finished but
-	// enrichment subtasks (summary, question generation, graph extract)
-	// are still in flight. The user-facing intuition behind this state is
-	// "the document is queryable for vector search but is still spending
-	// resources" — cancel-parse can interrupt enrichment from here.
-	// pending_subtasks_count holds the outstanding subtask count; the
-	// last subtask to finish atomically promotes the row to completed.
+	// ParseStatusFinalizing is the short durable publication barrier between
+	// core indexing and parse completion. Post-process persists every optional
+	// derivative/Wiki intent and its receipt before promoting the row; it does
+	// not wait for those background branches to execute.
 	ParseStatusFinalizing = "finalizing"
 	// ParseStatusCancelling is the durable user-cancel intent. The row stays
 	// here, retaining its processing owner, until queue inspection proves that
 	// no lifecycle worker can still publish artifacts for the generation.
 	ParseStatusCancelling = "cancelling"
-	// ParseStatusCompleted indicates the knowledge has been processed
-	// successfully AND every enabled derivative, including the independently
-	// queued Wiki lane, has reached a terminal state. No further resources will
-	// be spent on the document until the user explicitly re-parses it.
+	// ParseStatusCompleted indicates the primary parse, chunks, indexes and
+	// durable downstream publication are complete. Optional derivative and
+	// Wiki work may still run and report through their independent statuses.
 	ParseStatusCompleted = "completed"
 	// ParseStatusFailed indicates the knowledge processing failed
 	ParseStatusFailed = "failed"
@@ -183,10 +179,9 @@ type Knowledge struct {
 	// (multimodal images or direct post-process). A worker retry can replay it
 	// after the core commit without parsing or charging storage again.
 	ProcessingFanout JSON `json:"-" gorm:"type:json"`
-	// PendingSubtasksCount is the outstanding per-document enrichment subtask
-	// count (summary + question + graph chunks). Wiki is tracked separately by
-	// WikiStatus, but ParseStatus remains finalizing until both this counter is
-	// zero and Wiki is terminal. The counter defaults to 0 in terminal states.
+	// PendingSubtasksCount is the outstanding optional per-document enrichment
+	// count (table metadata + summary + question + graph). It may remain
+	// positive after ParseStatusCompleted; Wiki is tracked separately.
 	PendingSubtasksCount int `json:"pending_subtasks_count" gorm:"type:int;not null;default:0"`
 	// Summary status for async summary generation
 	SummaryStatus string `json:"summary_status"     gorm:"type:varchar(32);default:none"`
@@ -196,8 +191,8 @@ type Knowledge struct {
 	EnrichmentCompletedAt  *time.Time `json:"enrichment_completed_at,omitempty"`
 	EnrichmentErrorSummary string     `json:"enrichment_error_summary,omitempty" gorm:"type:text;not null;default:''"`
 	// WikiStatus is separate because Wiki is a durable KB-scoped background
-	// lane. It does not consume a per-document counter slot, but pending Wiki
-	// work keeps the end-to-end document lifecycle in finalizing.
+	// lane. It neither consumes a per-document counter slot nor gates the core
+	// parse lifecycle.
 	WikiStatus       string `json:"wiki_status" gorm:"type:varchar(32);not null;default:none"`
 	WikiErrorMessage string `json:"wiki_error_message,omitempty" gorm:"type:text;not null;default:''"`
 	// Enable status of the knowledge
@@ -235,7 +230,7 @@ type Knowledge struct {
 }
 
 // KnowledgeFanoutCompletion is the durable, generation-scoped completion
-// ledger for core fan-out items (multimodal images and data-table summary) and
+// ledger for core fan-out items (multimodal images), derivative completions and
 // reserved orchestration receipts. Redis mirrors core fan-in state for speed,
 // but correctness never depends on a Redis key surviving restarts or TTL
 // expiry.

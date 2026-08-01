@@ -256,3 +256,50 @@ func TestKnowledgeSpanRepo_V2DualWriteUsesOneLogicalRowPerRetry(t *testing.T) {
 	assert.Equal(t, 2, page.Items[0].RealAttemptCount)
 	assert.Nil(t, page.NextCursor)
 }
+
+func TestKnowledgeSpanRepo_V2CapacityYieldDoesNotCountAsRealAttempt(t *testing.T) {
+	db, err := gorm.Open(
+		sqlite.Open("file:knowledge-span-v2-capacity-yield?mode=memory&cache=shared"),
+		&gorm.Config{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(spansTestDDL).Error)
+	v2 := processingtrace.NewRepository(db)
+	require.NoError(t, v2.Migrate(context.Background()))
+	repo := NewKnowledgeSpanRepositoryWithV2(db, v2)
+
+	ctx := context.Background()
+	started := time.Now().UTC()
+	row := &types.KnowledgeProcessingSpan{
+		KnowledgeID: "knowledge-capacity-yield", Attempt: 1,
+		SpanID: "delivery-1", Name: "postprocess.summary",
+		Kind: types.SpanKindSubSpan, Status: types.SpanStatusRunning,
+		StartedAt: &started,
+	}
+	require.NoError(t, repo.Upsert(ctx, row))
+	row.Status = types.SpanStatusPending
+	row.Output = types.JSONMap{"deferred": true, "reason": "model_capacity"}
+	require.NoError(t, repo.Upsert(ctx, row))
+
+	page, err := v2.List(ctx, row.KnowledgeID, row.Attempt, 500, nil)
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, types.SpanStatusPending, page.Items[0].Status)
+	require.Zero(t, page.Items[0].RealAttemptCount)
+	require.Nil(t, page.Items[0].FinishedAt)
+	require.Zero(t, page.Items[0].DurationMS)
+
+	row.ID = 0
+	row.SpanID = "delivery-2"
+	row.Status = types.SpanStatusRunning
+	row.Output = nil
+	require.NoError(t, repo.Upsert(ctx, row))
+	finished := time.Now().UTC()
+	row.Status = types.SpanStatusDone
+	row.FinishedAt = &finished
+	require.NoError(t, repo.Upsert(ctx, row))
+	page, err = v2.List(ctx, row.KnowledgeID, row.Attempt, 500, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.SpanStatusDone, page.Items[0].Status)
+	require.Equal(t, 1, page.Items[0].RealAttemptCount)
+}

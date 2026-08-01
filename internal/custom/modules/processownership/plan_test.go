@@ -124,6 +124,36 @@ func uniqueFanoutPlan() FanoutPlan {
 	}
 }
 
+func TestDataTableMetadataIsHandoffOnlyAndDoesNotGateCoreFanIn(t *testing.T) {
+	plan := FanoutPlan{
+		Version:              FanoutPlanVersion,
+		TenantID:             42,
+		KnowledgeID:          "table-1",
+		KnowledgeBaseID:      "kb-1",
+		ProcessingGeneration: "generation-1",
+		DataTable: &DataTableFanout{
+			SummaryModel: "model-1", EmbeddingModel: "embedding-1",
+		},
+	}
+	if got := plan.itemCount(); got != 0 {
+		t.Fatalf("core fan-in items = %d, want 0", got)
+	}
+	if plan.containsItem(DataTableFanoutItem()) {
+		t.Fatal("table metadata unexpectedly participates in core fan-in")
+	}
+	raw, err := MarshalFanoutPlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := ParseFanoutPlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.DataTable == nil || restored.DataTable.EmbeddingModel != "embedding-1" {
+		t.Fatal("table derivative handoff was lost while removing the core gate")
+	}
+}
+
 func cleanupFanoutPlan(t *testing.T, client *redis.Client, plan FanoutPlan) {
 	t.Helper()
 	t.Cleanup(func() {

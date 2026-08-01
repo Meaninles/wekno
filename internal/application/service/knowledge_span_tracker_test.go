@@ -110,6 +110,32 @@ func TestSpanTrackerPersistsExecutorIdentityForStagesAndSubspans(t *testing.T) {
 	require.Equal(t, "question:generation", rows[2].Metadata[pipelineobs.ExecutorTaskTypeMetadataKey])
 }
 
+func TestSpanTrackerDeferralReturnsLeafToPendingWithoutCascade(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-deferred", "")
+	require.NoError(t, err)
+	stage := tracker.BeginStage(ctx, "kid-deferred", attempt, types.StagePostProcess, nil)
+	leaf := tracker.BeginSubSpan(ctx, stage, "postprocess.summary", types.SpanKindSubSpan, nil)
+	child := tracker.BeginSubSpan(ctx, leaf, "provider.call", types.SpanKindGeneration, nil)
+	require.NotNil(t, child)
+
+	tracker.DeferSpan(ctx, leaf, "model_capacity", errors.New("pool busy"))
+
+	var leafRow types.KnowledgeProcessingSpan
+	require.NoError(t, db.Where("span_id = ?", leaf.SpanID).Take(&leafRow).Error)
+	require.Equal(t, types.SpanStatusPending, leafRow.Status)
+	require.Nil(t, leafRow.FinishedAt)
+	require.Zero(t, leafRow.DurationMs)
+	require.Empty(t, leafRow.ErrorCode)
+	require.Equal(t, true, leafRow.Output["deferred"])
+
+	var childRow types.KnowledgeProcessingSpan
+	require.NoError(t, db.Where("span_id = ?", child.SpanID).Take(&childRow).Error)
+	require.Equal(t, types.SpanStatusRunning, childRow.Status,
+		"a control-plane yield must not cascade-cancel descendants")
+}
+
 // TestSpanTracker_OpenAttempt_AllocatesFreshNumbers covers the contract
 // that drives reparse history: each OpenAttempt must hand out a strictly
 // increasing attempt number per knowledge, and previous attempts'

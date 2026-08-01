@@ -106,6 +106,12 @@ type SpanTracker interface {
 	// error_detail (truncated to 8 KB) for admin views.
 	FailSpan(ctx context.Context, span *Span, errorCode, errorMessage string, errorDetail error)
 
+	// DeferSpan returns a running leaf to pending when durable execution
+	// yielded to capacity, circuit, shutdown, or another control-plane wait.
+	// It is deliberately non-terminal: no descendant cancellation and no
+	// user-visible business failure is recorded.
+	DeferSpan(ctx context.Context, span *Span, reason string, detail error)
+
 	// SkipSpan marks an intentionally not-run span (e.g. multimodal
 	// on a text-only document). Distinct from cancelled — skipped is
 	// "we chose not to" while cancelled is "an upstream broke".
@@ -549,7 +555,7 @@ func (t *spanTracker) EndSpan(ctx context.Context, span *Span, output types.JSON
 }
 
 func (t *spanTracker) FailSpan(ctx context.Context, span *Span, errorCode, errorMessage string, errorDetail error) {
-	if span == nil {
+	if !spanCanTransitionToDone(span) {
 		return
 	}
 	now := time.Now()
@@ -610,6 +616,47 @@ func (t *spanTracker) FailSpan(ctx context.Context, span *Span, errorCode, error
 		}
 	}
 	t.touchKnowledgeHeartbeat(ctx, span.KnowledgeID, span.Kind)
+}
+
+func (t *spanTracker) DeferSpan(ctx context.Context, span *Span, reason string, detail error) {
+	if !spanCanTransitionToDone(span) {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "control_plane_wait"
+	}
+	output := types.JSONMap{
+		"deferred": true,
+		"reason":   reason,
+	}
+	if detail != nil {
+		message := detail.Error()
+		if len(message) > 1024 {
+			message = message[:1024]
+		}
+		output["detail"] = message
+	}
+	// Drop the in-process timer for this invocation. The next durable wake-up
+	// opens a fresh physical span while V2 keeps one stable logical row.
+	_, _ = t.takeStart(span.SpanID)
+	row := &types.KnowledgeProcessingSpan{
+		KnowledgeID:  span.KnowledgeID,
+		Attempt:      span.Attempt,
+		SpanID:       span.SpanID,
+		ParentSpanID: span.ParentSpanID,
+		Name:         span.Name,
+		Kind:         span.Kind,
+		Status:       types.SpanStatusPending,
+		Output:       output,
+		StartedAt:    &span.StartedAt,
+		DurationMs:   0,
+	}
+	if err := t.repo.Upsert(ctx, row); err != nil {
+		logger.Warnf(ctx, "[SpanTracker] DeferSpan failed span=%s: %v", span.SpanID, err)
+		return
+	}
+	span.Status = types.SpanStatusPending
 }
 
 func (t *spanTracker) SkipSpan(ctx context.Context, span *Span, reason string) {
@@ -946,6 +993,7 @@ func (noopSpanTracker) BeginSubSpan(_ context.Context, _ *Span, _, _ string, _ t
 }
 func (noopSpanTracker) EndSpan(_ context.Context, _ *Span, _ types.JSONMap)            {}
 func (noopSpanTracker) FailSpan(_ context.Context, _ *Span, _, _ string, _ error)      {}
+func (noopSpanTracker) DeferSpan(_ context.Context, _ *Span, _ string, _ error)        {}
 func (noopSpanTracker) SkipSpan(_ context.Context, _ *Span, _ string)                  {}
 func (noopSpanTracker) LookupStage(_ context.Context, _ string, _ int, _ string) *Span { return nil }
 func (noopSpanTracker) LookupSpanByName(_ context.Context, _ string, _ int, _ string) *Span {

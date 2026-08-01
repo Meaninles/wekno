@@ -20,8 +20,9 @@
       </div>
       <div class="summary-card"><span>实际资源池</span><strong>{{ report.summary.pools }}</strong></div>
       <div class="summary-card"><span>模型绑定</span><strong>{{ report.summary.bindings }}</strong></div>
-      <div class="summary-card"><span>等待 / 在途</span><strong>{{ admissionValue('Waiting') }} / {{ admissionValue('InFlight') }}</strong></div>
-      <div class="summary-card"><span>消费槽位（后台 / Wiki）</span><strong>{{ report.runtime.background_consumer_slots }} / {{ report.runtime.wiki_consumer_slots }}</strong></div>
+      <div class="summary-card"><span>模型调用在途（后台 / 总计）</span><strong>{{ totalPoolRuntime('provider_background') }} / {{ totalPoolRuntime('provider_inflight') }}</strong></div>
+      <div class="summary-card"><span>执行窗口在用（衍生 / Wiki）</span><strong>{{ totalPoolRuntime('work_derivative_active') }} / {{ totalPoolRuntime('work_wiki_active') }}</strong></div>
+      <div class="summary-card"><span>在线实例（衍生 / Wiki / 解析）</span><strong>{{ report.runtime.derivative_replicas }} / {{ report.runtime.wiki_replicas }} / {{ report.runtime.parse_replicas }}</strong></div>
       <div class="summary-card"><span>错误 / 提醒</span><strong>{{ report.summary.errors }} / {{ report.summary.warnings }}</strong></div>
     </div>
 
@@ -35,6 +36,46 @@
     </div>
 
     <t-tabs v-model="activeTab" class="capacity-tabs">
+      <t-tab-panel value="scheduler" label="调度与实例">
+        <div class="principle-note">
+          <strong>执行窗口独立于实例数量：</strong>
+          每个实际模型池的后台执行窗口 = 后台并发 × 预取系数；衍生任务和 Wiki 按权重公平共享，另一侧空闲时可借用全部容量。容量等待只会让耐久任务延期，不增加解析次数或业务失败次数。
+        </div>
+        <article v-if="schedulerPolicy" class="config-card scheduler-card">
+          <header class="config-card__header">
+            <div class="pool-name">
+              <strong>全局后台调度策略</strong>
+              <small>数据库热配置 · v{{ schedulerPolicy.policy_version }} · 修改后所有实例自动生效</small>
+            </div>
+            <t-button size="small" :loading="savingID === 'scheduler-policy'" @click="saveSchedulerPolicy">保存</t-button>
+          </header>
+          <div class="config-grid scheduler-grid">
+            <div class="config-field"><span class="field-label">预取系数<small>执行窗口 = 后台并发 × 此值</small></span><t-input-number v-model="schedulerPolicy.prefetch_factor" :min="1" :max="8" size="small" /></div>
+            <div class="config-field"><span class="field-label">衍生任务权重</span><t-input-number v-model="schedulerPolicy.derivative_weight" :min="1" :max="100" size="small" /></div>
+            <div class="config-field"><span class="field-label">Wiki 权重</span><t-input-number v-model="schedulerPolicy.wiki_weight" :min="1" :max="100" size="small" /></div>
+            <div class="config-field"><span class="field-label">容量等待上限<small>秒；超时后无损延期</small></span><t-input-number v-model="schedulerPolicy.background_max_wait_seconds" :min="1" :max="300" size="small" /></div>
+            <div class="config-field"><span class="field-label">派发租约<small>秒；租约内禁止重复唤醒</small></span><t-input-number v-model="schedulerPolicy.dispatch_lease_seconds" :min="30" :max="900" size="small" /></div>
+            <div class="config-field"><span class="field-label">当前公平比例</span><div class="read-only-value">{{ schedulerPolicy.derivative_weight }} : {{ schedulerPolicy.wiki_weight }}（可借用）</div></div>
+          </div>
+        </article>
+
+        <div v-if="report" class="runtime-section">
+          <div class="section-heading">
+            <div><strong>在线运行实例</strong><small>每 10 秒心跳，超过 {{ report.runtime.instance_stale_after_seconds }} 秒自动剔除；心跳仅用于可观测性，执行窗口保证全局正确性。</small></div>
+            <span>消费槽位：衍生 {{ report.runtime.background_consumer_slots }} / Wiki {{ report.runtime.wiki_consumer_slots }} / 解析 {{ report.runtime.parse_consumer_slots }}</span>
+          </div>
+          <div class="instance-grid">
+            <article v-for="instance in report.runtime.instances" :key="instance.instance_id" class="instance-card">
+              <strong>{{ instance.role }}</strong>
+              <small>{{ instance.instance_id }}</small>
+              <span>衍生 {{ instance.derivative_concurrency }} · Wiki {{ instance.wiki_concurrency }} · 解析 {{ instance.parse_concurrency }}</span>
+              <span>心跳 {{ formatTime(instance.last_heartbeat_at) }}</span>
+            </article>
+            <t-empty v-if="!report.runtime.instances.length && !loading" description="暂无在线实例心跳" />
+          </div>
+        </div>
+      </t-tab-panel>
+
       <t-tab-panel value="pools" label="容量策略">
         <div class="principle-note">
           <strong>一个并发真源：</strong>
@@ -90,6 +131,9 @@
             <div class="effective-values">
               <span>模型调用 <b>{{ pool.effective.provider_total }}</b></span>
               <span>后台 <b>{{ pool.effective.background_max }}</b></span>
+              <span>执行窗口 <b>{{ pool.runtime.work_active }} / {{ pool.effective.work_window }}</b></span>
+              <span>公平份额 <b>{{ pool.effective.derivative_share }} : {{ pool.effective.wiki_share }}</b></span>
+              <span>后台调用 <b>{{ pool.runtime.provider_background }} / {{ pool.effective.background_max }}</b></span>
               <span>租户 <b>{{ pool.effective.tenant_max }}</b></span>
               <span>单文档 <b>{{ pool.effective.document_max }}</b></span>
               <span>聊天会话 <b>{{ pool.effective.chat_sessions }}</b></span>
@@ -165,6 +209,7 @@ import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import {
   drainModelResourcePool,
   getCapacityEffectiveReport,
+  getModelSchedulerPolicy,
   listModelAdmissionAudits,
   listModelAdmissionTemplates,
   listModelGatewayPools,
@@ -174,6 +219,7 @@ import {
   reconcileModelResourcePools,
   resetModelResourcePool,
   updateModelAdmissionTemplate,
+  updateModelSchedulerPolicy,
   updateModelResourceBinding,
   updateModelResourcePool,
   validateCapacityPool,
@@ -185,9 +231,10 @@ import {
   type ModelQuotaPool,
   type ModelResourceBinding,
   type ModelResourcePool,
+  type ModelSchedulerPolicy,
 } from '@/api/capacity-control'
 
-const activeTab = ref('pools')
+const activeTab = ref('scheduler')
 const loading = ref(false)
 const reconciling = ref(false)
 const savingID = ref('')
@@ -201,6 +248,7 @@ const templates = ref<ModelAdmissionTemplate[]>([])
 const quotaPools = ref<ModelQuotaPool[]>([])
 const gatewayPools = ref<ModelGatewayPool[]>([])
 const audits = ref<ModelAdmissionAudit[]>([])
+const schedulerPolicy = ref<ModelSchedulerPolicy | null>(null)
 
 const stateOptions = [
   { label: '启用', value: 'enabled' },
@@ -227,7 +275,8 @@ const filteredBindings = computed(() => {
 })
 
 const backgroundFor = (pool: ModelResourcePool) => Math.max(1, pool.max_inflight - pool.interactive_reserve)
-const admissionValue = (key: string) => report.value?.runtime?.admission?.[key] ?? report.value?.runtime?.admission?.[key.toLowerCase()] ?? 0
+const totalPoolRuntime = (key: keyof CapacityPoolReport['runtime']) => (report.value?.pools || [])
+  .reduce((total, pool) => total + Number(pool.runtime?.[key] || 0), 0)
 const moduleLabel = (value: string) => ({ question_batch: '问题批次', wiki_citation: 'Wiki 引用', graph_entity: '图谱实体', graph_relation: '图谱关系' }[value] || value)
 const poolIssues = (pool: CapacityPoolReport) => pool.issues || []
 const poolGrants = (pool: CapacityPoolReport) => pool.module_grants || []
@@ -241,6 +290,12 @@ function normalizeEffectiveReport(value: CapacityEffectiveReport): CapacityEffec
     issues: value.issues || [],
     pools: (value.pools || []).map(pool => ({
       ...pool,
+      runtime: pool.runtime || {
+        provider_inflight: 0, provider_background: 0, provider_derivative: 0, provider_wiki: 0,
+        provider_derivative_waiting: 0, provider_wiki_waiting: 0,
+        work_active: 0, work_derivative_active: 0, work_wiki_active: 0,
+        work_derivative_waiting: 0, work_wiki_waiting: 0,
+      },
       issues: pool.issues || [],
       module_grants: pool.module_grants || [],
       quota_pool_ids: pool.quota_pool_ids || [],
@@ -253,9 +308,9 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [poolRows, bindingRows, templateRows, quotaRows, gatewayRows, auditRows, effective] = await Promise.all([
+    const [poolRows, bindingRows, templateRows, quotaRows, gatewayRows, auditRows, effective, scheduler] = await Promise.all([
       listModelResourcePools(), listModelResourceBindings(), listModelAdmissionTemplates(),
-      listModelQuotaPools(), listModelGatewayPools(), listModelAdmissionAudits(), getCapacityEffectiveReport(),
+      listModelQuotaPools(), listModelGatewayPools(), listModelAdmissionAudits(), getCapacityEffectiveReport(), getModelSchedulerPolicy(),
     ])
     pools.value = poolRows
     bindings.value = bindingRows
@@ -264,10 +319,25 @@ async function load() {
     gatewayPools.value = gatewayRows
     audits.value = auditRows
     report.value = normalizeEffectiveReport(effective)
+    schedulerPolicy.value = scheduler
   } catch (caught: any) {
     error.value = caught?.message || '加载容量控制配置失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function saveSchedulerPolicy() {
+  if (!schedulerPolicy.value) return
+  savingID.value = 'scheduler-policy'
+  try {
+    schedulerPolicy.value = await updateModelSchedulerPolicy(schedulerPolicy.value)
+    await load()
+    MessagePlugin.success('全局调度策略已热更新')
+  } catch (caught: any) {
+    MessagePlugin.error(caught?.message || '保存调度策略失败')
+  } finally {
+    savingID.value = ''
   }
 }
 
@@ -378,6 +448,18 @@ onMounted(load)
 .list-toolbar > span { flex: 0 0 auto; color: var(--td-text-color-secondary); font-size: 12px; }
 .config-card-list, .binding-card-list { display: grid; gap: 12px; padding: 2px 0 12px; }
 .template-card-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; padding-bottom: 12px; }
+.scheduler-card { margin: 12px 0; }
+.scheduler-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.runtime-section { margin: 18px 0 12px; }
+.section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: var(--td-text-color-secondary); font-size: 12px; }
+.section-heading strong, .section-heading small { display: block; }
+.section-heading strong { color: var(--td-text-color-primary); font-size: 15px; }
+.section-heading small { margin-top: 4px; }
+.instance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.instance-card { min-width: 0; padding: 12px; border: 1px solid var(--td-component-stroke); border-radius: 8px; background: var(--td-bg-color-container); }
+.instance-card strong, .instance-card small, .instance-card span { display: block; overflow-wrap: anywhere; }
+.instance-card small { margin: 3px 0 8px; color: var(--td-text-color-placeholder); }
+.instance-card span { margin-top: 3px; color: var(--td-text-color-secondary); font-size: 12px; }
 .config-card { min-width: 0; padding: 14px; border: 1px solid var(--td-component-stroke); border-radius: 10px; background: var(--td-bg-color-container); }
 .config-card__header { justify-content: space-between; margin-bottom: 13px; }
 .pool-name { min-width: 0; strong, small { display: block; } strong { overflow-wrap: anywhere; } small { margin-top: 3px; color: var(--td-text-color-placeholder); font-size: 11px; overflow-wrap: anywhere; } }
@@ -405,6 +487,7 @@ onMounted(load)
 @media (max-width: 760px) {
   .page-header { align-items: flex-start; flex-direction: column; }
   .summary-grid, .template-card-list { grid-template-columns: 1fr; }
+  .section-heading { align-items: flex-start; flex-direction: column; }
   .config-card__header { align-items: flex-start; }
   .audit-row { grid-template-columns: 1fr; gap: 3px; }
 }

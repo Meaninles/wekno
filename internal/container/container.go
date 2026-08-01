@@ -70,6 +70,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeinstances"
 	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
@@ -221,6 +222,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewKnowledgeTagService))
 	must(container.Provide(embedding.NewBatchEmbedder))
 	must(container.Provide(modeladmission.NewManager))
+	must(container.Provide(runtimeinstances.NewRegistry))
 	must(container.Provide(chatqueue.NewManager))
 	must(container.Provide(derivativequeue.NewRepositoryWithAdmission))
 	must(container.Provide(service.NewModelService))
@@ -317,7 +319,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// services; this is the sole provider registration point.
 	must(container.Provide(corefanout.NewRecovery))
 	must(container.Provide(enrichmentrecovery.NewRecovery))
-	must(container.Provide(wikiqueue.NewRecovery))
+	must(container.Provide(wikiqueue.NewRecoveryWithAdmission))
 	must(container.Provide(kbdeletequeue.New))
 	must(container.Provide(kbdeletequeue.NewRecovery))
 	must(container.Provide(knowledgeaux.New))
@@ -414,6 +416,10 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// Providers are lazy. Force custom hook/control-plane construction before
 	// RunAsynqServer can consume queued work during process startup.
 	must(container.Invoke(custombootstrap.Initialize))
+	// Runtime heartbeats are observability/soft-balancing state. Start them
+	// before any task consumer and register cleanup first so workers drain
+	// before their instance is marked stopped.
+	must(container.Invoke(runtimeinstances.Start))
 	if profile.ServesAPI() {
 		must(container.Invoke(custombootstrap.StartAPIWorkers))
 	}

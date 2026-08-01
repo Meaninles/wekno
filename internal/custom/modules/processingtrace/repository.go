@@ -68,6 +68,33 @@ func (r *Repository) Migrate(ctx context.Context) error {
 	`).Error; err != nil {
 		return fmt.Errorf("create knowledge core retrieval index: %w", err)
 	}
+	// Builds before the core/derivative lifecycle split left a document in
+	// finalizing until optional work (and, historically, Wiki) terminated. The
+	// post-process receipt proves every downstream intent was durably published,
+	// so these generations can be promoted without dropping counters or outcome
+	// state. Run on every migration; the predicate makes it idempotent.
+	if db.Migrator().HasTable("knowledge_fanout_completions") {
+		if err := db.Exec(`
+			UPDATE knowledges
+			SET parse_status = 'completed',
+				processing_owner = '',
+				processing_fanout = NULL,
+				processed_at = COALESCE(processed_at, CURRENT_TIMESTAMP),
+				updated_at = CURRENT_TIMESTAMP
+			WHERE parse_status = 'finalizing'
+			  AND EXISTS (
+				SELECT 1
+				FROM knowledge_fanout_completions AS completion
+				WHERE completion.tenant_id = knowledges.tenant_id
+				  AND completion.knowledge_id = knowledges.id
+				  AND completion.knowledge_base_id = knowledges.knowledge_base_id
+				  AND completion.processing_generation = knowledges.processing_generation
+				  AND completion.item_id = 'orchestration:postprocess'
+			  )
+		`).Error; err != nil {
+			return fmt.Errorf("promote receipt-backed legacy finalizing generations: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -100,15 +127,25 @@ func (r *Repository) RecordBusinessProgress(ctx context.Context, input Upsert) e
 	}
 	if input.FinishedAt != nil {
 		updates["duration_ms"] = input.FinishedAt.Sub(started).Milliseconds()
+	} else if input.Status == "pending" || input.Status == "running" {
+		updates["duration_ms"] = int64(0)
 	}
 	if input.IncrementRealAttempt {
 		updates["real_attempt_count"] = gorm.Expr("custom_processing_spans_v2.real_attempt_count + 1")
+	} else if input.DecrementRealAttempt {
+		updates["real_attempt_count"] = gorm.Expr(
+			"CASE WHEN custom_processing_spans_v2.real_attempt_count > 0 THEN custom_processing_spans_v2.real_attempt_count - 1 ELSE 0 END",
+		)
+	}
+	initialAttempts := 1
+	if input.DecrementRealAttempt {
+		initialAttempts = 0
 	}
 	row := Span{
 		KnowledgeID: input.KnowledgeID, Attempt: input.Attempt,
 		LogicalKey: input.LogicalKey, SpanID: spanID,
 		ParentLogicalKey: input.ParentLogicalKey, Name: input.Name,
-		Kind: input.Kind, Status: input.Status, RealAttemptCount: 1,
+		Kind: input.Kind, Status: input.Status, RealAttemptCount: initialAttempts,
 		InputSummary:     truncate(input.InputSummary, 4096),
 		OutputSummary:    truncate(input.OutputSummary, 4096),
 		LastErrorCode:    truncate(input.LastErrorCode, 64),

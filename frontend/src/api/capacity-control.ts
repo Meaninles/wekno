@@ -60,6 +60,32 @@ export interface ModelAdmissionTemplate {
   policy_version: number
 }
 
+export interface ModelSchedulerPolicy {
+  id: number
+  prefetch_factor: number
+  derivative_weight: number
+  wiki_weight: number
+  background_max_wait_seconds: number
+  dispatch_lease_seconds: number
+  policy_version: number
+  updated_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RuntimeInstance {
+  instance_id: string
+  boot_id: string
+  role: string
+  state: string
+  derivative_concurrency: number
+  wiki_concurrency: number
+  parse_concurrency: number
+  started_at: string
+  last_heartbeat_at: string
+  stopped_at?: string
+}
+
 export interface ModelQuotaPool {
   id: string
   name: string
@@ -123,9 +149,25 @@ export interface CapacityPoolReport {
     provider_total: number
     interactive_reserved: number
     background_max: number
+    work_window: number
+    derivative_share: number
+    wiki_share: number
     tenant_max: number
     document_max: number
     chat_sessions: number
+  }
+  runtime: {
+    provider_inflight: number
+    provider_background: number
+    provider_derivative: number
+    provider_wiki: number
+    provider_derivative_waiting: number
+    provider_wiki_waiting: number
+    work_active: number
+    work_derivative_active: number
+    work_wiki_active: number
+    work_derivative_waiting: number
+    work_wiki_waiting: number
   }
   module_grants: CapacityModuleGrant[]
   issues: CapacityIssue[]
@@ -148,12 +190,15 @@ export interface CapacityEffectiveReport {
     scheduler: string
     background_wait_mode: string
     capacity_wait_counts_as_failure: boolean
-    background_workers_per_instance: number
-    wiki_workers_per_instance: number
+    scheduler_policy: ModelSchedulerPolicy
+    instances: RuntimeInstance[]
+    instance_stale_after_seconds: number
     derivative_replicas: number
     wiki_replicas: number
+    parse_replicas: number
     background_consumer_slots: number
     wiki_consumer_slots: number
+    parse_consumer_slots: number
     admission: Record<string, number>
   }
   pools: CapacityPoolReport[]
@@ -171,6 +216,20 @@ const base = '/api/v1/custom/capacity-control'
 
 export async function getCapacityEffectiveReport(): Promise<CapacityEffectiveReport> {
   const response = await get(`${base}/effective`) as unknown as ApiResponse<CapacityEffectiveReport>
+  return response.data
+}
+
+export async function getModelSchedulerPolicy(): Promise<ModelSchedulerPolicy> {
+  const response = await get(`${base}/scheduler-policy`) as unknown as ApiResponse<ModelSchedulerPolicy>
+  return response.data
+}
+
+export async function updateModelSchedulerPolicy(policy: ModelSchedulerPolicy): Promise<ModelSchedulerPolicy> {
+  const response = await put(
+    `${base}/scheduler-policy`,
+    policy,
+    { headers: { 'If-Match': String(policy.policy_version) } },
+  ) as unknown as ApiResponse<ModelSchedulerPolicy>
   return response.data
 }
 

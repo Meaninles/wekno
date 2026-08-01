@@ -25,9 +25,10 @@ type mockChat struct {
 	mu        sync.Mutex
 	responses []mockResponse
 	callCount int
+	options   []*chat.ChatOptions
 }
 
-func (m *mockChat) ChatStream(_ context.Context, _ []chat.Message, _ *chat.ChatOptions) (<-chan types.StreamResponse, error) {
+func (m *mockChat) ChatStream(_ context.Context, _ []chat.Message, opts *chat.ChatOptions) (<-chan types.StreamResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.callCount >= len(m.responses) {
@@ -35,6 +36,12 @@ func (m *mockChat) ChatStream(_ context.Context, _ []chat.Message, _ *chat.ChatO
 	}
 	resp := m.responses[m.callCount]
 	m.callCount++
+	if opts == nil {
+		m.options = append(m.options, nil)
+	} else {
+		copyOpts := *opts
+		m.options = append(m.options, &copyOpts)
+	}
 
 	ch := make(chan types.StreamResponse, len(resp.chunks))
 	for _, chunk := range resp.chunks {
@@ -361,6 +368,10 @@ func TestStreamFinalAnswerToEventBus_EmitsDoneWhenProviderEndsWithEmptyChunk(t *
 	err := engine.streamFinalAnswerToEventBus(context.Background(), "test query", state, "sess-1")
 
 	require.NoError(t, err)
+	require.Len(t, mock.options, 1)
+	require.NotNil(t, mock.options[0])
+	require.NotNil(t, mock.options[0].Thinking)
+	assert.False(t, *mock.options[0].Thinking, "final answer synthesis must explicitly disable thinking")
 	require.Len(t, finalAnswerEvents, 2)
 	assert.Equal(t, "final answer", finalAnswerEvents[0].Content)
 	assert.False(t, finalAnswerEvents[0].Done)

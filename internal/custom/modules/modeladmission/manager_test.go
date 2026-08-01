@@ -162,6 +162,69 @@ func TestLocalAdmissionEnforcesRPM(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestWorkWindowIsGlobalWorkConservingAndBounded(t *testing.T) {
+	config := testConfig(Limit{Concurrency: 3, Background: 3, PerTenant: 3})
+	config.WorkWindowEnabled = true
+	config.WorkPrefetchFactor = 2
+	config.DerivativeWeight = 2
+	config.WikiWeight = 1
+	manager := newManagerWithConfig(nil, config)
+	policy := schedulerPolicyFromConfig(config)
+	require.Equal(t, 6, WorkWindow(3, policy))
+	require.Equal(t, 4, LaneWorkWindow(3, WorkLaneDerivative, policy))
+	require.Equal(t, 2, LaneWorkWindow(3, WorkLaneWiki, policy))
+
+	leases := make([]*WorkLease, 0, 6)
+	for index := 0; index < 6; index++ {
+		lease, err := manager.acquireWorkWindow(
+			context.Background(), "shared-pool", WorkLaneDerivative, 3, policy,
+		)
+		require.NoError(t, err, "derivative must borrow Wiki's idle share")
+		leases = append(leases, lease)
+	}
+	_, err := manager.acquireWorkWindow(
+		context.Background(), "shared-pool", WorkLaneDerivative, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
+	require.EqualValues(t, 6, manager.Snapshot().WorkActive)
+	for _, lease := range leases {
+		lease.Release()
+	}
+	require.EqualValues(t, 0, manager.Snapshot().WorkActive)
+}
+
+func TestWorkWindowRestoresWeightedShareWhenOtherLaneWaits(t *testing.T) {
+	config := testConfig(Limit{Concurrency: 3, Background: 3, PerTenant: 3})
+	config.WorkWindowEnabled = true
+	manager := newManagerWithConfig(nil, config)
+	policy := schedulerPolicyFromConfig(config)
+
+	derivative := make([]*WorkLease, 0, 4)
+	for index := 0; index < 4; index++ {
+		lease, err := manager.acquireWorkWindow(context.Background(), "fair-pool", WorkLaneDerivative, 3, policy)
+		require.NoError(t, err)
+		derivative = append(derivative, lease)
+	}
+	wiki := make([]*WorkLease, 0, 2)
+	for index := 0; index < 2; index++ {
+		lease, err := manager.acquireWorkWindow(context.Background(), "fair-pool", WorkLaneWiki, 3, policy)
+		require.NoError(t, err)
+		wiki = append(wiki, lease)
+	}
+	_, err := manager.acquireWorkWindow(context.Background(), "fair-pool", WorkLaneWiki, 3, policy)
+	require.ErrorIs(t, err, ErrAdmissionDeferred, "a denied Wiki request must publish a waiter marker")
+	wiki[0].Release()
+	_, err = manager.acquireWorkWindow(context.Background(), "fair-pool", WorkLaneDerivative, 3, policy)
+	require.ErrorIs(t, err, ErrAdmissionDeferred, "derivative may not steal Wiki's reserved share while Wiki waits")
+	replacement, err := manager.acquireWorkWindow(context.Background(), "fair-pool", WorkLaneWiki, 3, policy)
+	require.NoError(t, err)
+	replacement.Release()
+	wiki[1].Release()
+	for _, lease := range derivative {
+		lease.Release()
+	}
+}
+
 func TestSpecForModelIsStableScopedAndDoesNotExposeSecret(t *testing.T) {
 	model := &types.Model{
 		ID:       "model-id",
@@ -240,6 +303,30 @@ func TestRedisLeaseLosesFenceWhenAnyRequiredMemberDisappears(t *testing.T) {
 		return errors.Is(context.Cause(lease.Context()), ErrAdmissionLeaseLost)
 	}, time.Second, 10*time.Millisecond)
 	require.ErrorIs(t, lease.FencingError(), ErrAdmissionLeaseLost)
+}
+
+func TestRedisAdmissionDoesNotEraseRPMWindowWhileCleaningLeases(t *testing.T) {
+	address := strings.TrimSpace(os.Getenv("WEKNORA_TEST_REDIS_ADDR"))
+	if address == "" {
+		t.Skip("WEKNORA_TEST_REDIS_ADDR is not configured")
+	}
+	client := configuredRedisTestClient(address)
+	t.Cleanup(func() { _ = client.Close() })
+	require.NoError(t, client.Ping(context.Background()).Err())
+
+	config := testConfig(Limit{Concurrency: 2, RPM: 1, PerTenant: 2})
+	config.KeyPrefix = "test:model-admission:" + uuid.NewString() + ":"
+	manager := newManagerWithConfig(client, config)
+	spec := Spec{Kind: KindChat, Domain: "rpm-window", TenantID: 100}
+	first, err := manager.Acquire(context.Background(), spec)
+	require.NoError(t, err)
+	first.Release()
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	_, err = manager.Acquire(waitCtx, spec)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.EqualValues(t, 1, client.ZCard(context.Background(), manager.keys(spec).rate).Val())
 }
 
 func TestRedisHeartbeatRefreshesLeaseSetTTL(t *testing.T) {

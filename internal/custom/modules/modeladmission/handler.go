@@ -503,6 +503,76 @@ func (h *Handler) ListTemplates(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
 }
 
+func (h *Handler) GetSchedulerPolicy(c *gin.Context) {
+	// Management reads bypass the one-second worker hot-path cache so a write
+	// followed through a load balancer is immediately consistent on every API
+	// replica.
+	var policy SchedulerPolicy
+	if err := h.db().WithContext(c).Where("id = ?", 1).First(&policy).Error; err != nil {
+		h.internal(c, err)
+		return
+	}
+	if err := NormalizeSchedulerPolicy(&policy); err != nil {
+		h.internal(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": policy})
+}
+
+func (h *Handler) PutSchedulerPolicy(c *gin.Context) {
+	expected, err := ifMatchVersion(c)
+	if err != nil {
+		c.Error(apperrors.NewBadRequestError(err.Error()))
+		return
+	}
+	var input SchedulerPolicy
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.Error(apperrors.NewBadRequestError(err.Error()))
+		return
+	}
+	if err := NormalizeSchedulerPolicy(&input); err != nil {
+		c.Error(apperrors.NewBadRequestError(err.Error()))
+		return
+	}
+	var old SchedulerPolicy
+	if err := h.db().WithContext(c).Where("id = ?", 1).First(&old).Error; err != nil {
+		h.internal(c, err)
+		return
+	}
+	if old.PolicyVersion != expected {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "error": "policy_version conflict"})
+		return
+	}
+	input.ID = 1
+	input.PolicyVersion = expected + 1
+	input.CreatedAt = old.CreatedAt
+	input.UpdatedAt = time.Now().UTC()
+	input.UpdatedBy, _ = types.UserIDFromContext(c.Request.Context())
+	result := h.db().WithContext(c).Model(&SchedulerPolicy{}).
+		Where("id = ? AND policy_version = ?", 1, expected).
+		Updates(map[string]any{
+			"prefetch_factor":             input.PrefetchFactor,
+			"derivative_weight":           input.DerivativeWeight,
+			"wiki_weight":                 input.WikiWeight,
+			"background_max_wait_seconds": input.BackgroundMaxWaitSeconds,
+			"dispatch_lease_seconds":      input.DispatchLeaseSeconds,
+			"policy_version":              input.PolicyVersion,
+			"updated_by":                  input.UpdatedBy,
+			"updated_at":                  input.UpdatedAt,
+		})
+	if result.Error != nil {
+		h.internal(c, result.Error)
+		return
+	}
+	if result.RowsAffected != 1 {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "error": "policy_version conflict"})
+		return
+	}
+	h.audit(c, "update", "scheduler_policy", "1", old, input, input.PolicyVersion)
+	h.invalidate()
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": input})
+}
+
 func (h *Handler) PutTemplate(c *gin.Context) {
 	expected, err := ifMatchVersionAllowCreate(c)
 	if err != nil {

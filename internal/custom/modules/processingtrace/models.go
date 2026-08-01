@@ -11,7 +11,7 @@ type Span struct {
 	Name                   string     `json:"name" gorm:"type:varchar(160);not null"`
 	Kind                   string     `json:"kind" gorm:"type:varchar(32);not null"`
 	Status                 string     `json:"status" gorm:"type:varchar(32);not null;index"`
-	RealAttemptCount       int        `json:"real_attempt_count" gorm:"not null;default:1"`
+	RealAttemptCount       int        `json:"real_attempt_count" gorm:"not null;default:0"`
 	InputSummary           string     `json:"input_summary" gorm:"type:text;not null;default:''"`
 	OutputSummary          string     `json:"output_summary" gorm:"type:text;not null;default:''"`
 	LastErrorCode          string     `json:"last_error_code" gorm:"type:varchar(64);not null;default:''"`
@@ -55,6 +55,7 @@ type Upsert struct {
 	LastBusinessProgressAt *time.Time
 	FinishedAt             *time.Time
 	IncrementRealAttempt   bool
+	DecrementRealAttempt   bool
 }
 
 type Cursor struct {

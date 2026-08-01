@@ -34,7 +34,12 @@ CREATE TABLE task_pending_ops (
     fail_count  INTEGER NOT NULL DEFAULT 0,
     enqueued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     claimed_at  DATETIME,
-    map_ready_at DATETIME
+    map_ready_at DATETIME,
+    next_attempt_at DATETIME,
+    map_resource_pool_id VARCHAR(64) NOT NULL DEFAULT '',
+    map_dispatch_epoch INTEGER NOT NULL DEFAULT 0,
+    map_dispatch_task_id VARCHAR(190) NOT NULL DEFAULT '',
+    map_dispatch_lease_until DATETIME
 );`
 
 const recoveryKnowledgeBasesTestDDL = `
@@ -220,7 +225,7 @@ func TestRecoverNowPublishesOneStableTriggerPerPendingKnowledgeBase(t *testing.T
 		string(maps[1].task.Payload()))
 
 	wantOptions := map[asynq.OptionType]any{
-		asynq.QueueOpt:     types.QueueLow,
+		asynq.QueueOpt:     types.QueueWikiControl,
 		asynq.MaxRetryOpt:  defaultMaxRetry,
 		asynq.TimeoutOpt:   defaultTaskTimeout,
 		asynq.ProcessInOpt: defaultProcessDelay,
@@ -453,4 +458,136 @@ func TestRecoverNowRejectsMissingDependencies(t *testing.T) {
 	var payload triggerPayload
 	require.NoError(t, json.Unmarshal([]byte(`{"tenant_id":1,"knowledge_base_id":"kb"}`), &payload))
 	assert.Equal(t, triggerPayload{TenantID: 1, KnowledgeBaseID: "kb"}, payload)
+}
+
+func TestMapDispatchReservationBoundsPoolAndPublishesFencedWake(t *testing.T) {
+	db := newRecoveryTestDB(t)
+	for index := 1; index <= 3; index++ {
+		insertPendingOp(
+			t, db, 7, types.TypeWikiIngest, types.TaskScopeKnowledgeBase,
+			"kb-a", "ingest",
+		)
+		require.NoError(t, db.Exec(
+			`UPDATE task_pending_ops
+			 SET dedup_key = ?, payload = ?
+			 WHERE id = ?`,
+			fmt.Sprintf("knowledge-%d:g-1", index),
+			fmt.Sprintf(`{"knowledge_id":"knowledge-%d","processing_generation":"g-1"}`, index),
+			index,
+		).Error)
+	}
+
+	var candidates []pendingMapRow
+	require.NoError(t, db.Table("task_pending_ops").
+		Select("id, tenant_id, scope_id, dedup_key, payload, map_resource_pool_id, map_dispatch_epoch, map_dispatch_lease_until").
+		Order("id").Scan(&candidates).Error)
+	require.Len(t, candidates, 3)
+
+	enqueuer := &recordingEnqueuer{}
+	recovery := &Recovery{db: db, enqueuer: enqueuer, config: DefaultConfig()}
+	first, err := recovery.reserveMapDispatch(
+		context.Background(), candidates[0], "pool-a", 2, 2, time.Minute,
+	)
+	require.NoError(t, err)
+	second, err := recovery.reserveMapDispatch(
+		context.Background(), candidates[1], "pool-a", 2, 2, time.Minute,
+	)
+	require.NoError(t, err)
+	_, err = recovery.reserveMapDispatch(
+		context.Background(), candidates[2], "pool-a", 2, 2, time.Minute,
+	)
+	require.ErrorIs(t, err, errMapDispatchWindowFull)
+
+	require.EqualValues(t, 1, first.MapDispatchEpoch)
+	require.EqualValues(t, 1, second.MapDispatchEpoch)
+	require.NoError(t, recovery.enqueueReservedMap(first))
+	calls := enqueuer.snapshot()
+	require.Len(t, calls, 1)
+	assert.Equal(t, types.TypeWikiIngest, calls[0].task.Type())
+	assert.JSONEq(t,
+		`{"tenant_id":7,"knowledge_base_id":"kb-a","task_mode":"map","map_dedup_key":"knowledge-1:g-1","map_dispatch_epoch":1,"knowledge_id":"knowledge-1","processing_generation":"g-1"}`,
+		string(calls[0].task.Payload()),
+	)
+	wantOptions := map[asynq.OptionType]any{
+		asynq.QueueOpt:     types.QueueWikiMap,
+		asynq.TaskIDOpt:    "wiki-map:1:1",
+		asynq.MaxRetryOpt:  0,
+		asynq.TimeoutOpt:   defaultTaskTimeout,
+		asynq.ProcessInOpt: defaultProcessDelay,
+	}
+	for optionType, want := range wantOptions {
+		got, ok := optionValue(calls[0].opts, optionType)
+		require.Truef(t, ok, "missing asynq option %v", optionType)
+		assert.Equal(t, want, got)
+	}
+	_, hasUnique := optionValue(calls[0].opts, asynq.UniqueOpt)
+	assert.False(t, hasUnique, "the database epoch, not a Redis uniqueness TTL, fences Map wake-ups")
+
+	require.NoError(t, db.Table("task_pending_ops").Where("id = ?", first.ID).
+		Update("map_dispatch_lease_until", time.Now().UTC().Add(-time.Second)).Error)
+	third, err := recovery.reserveMapDispatch(
+		context.Background(), candidates[2], "pool-a", 2, 2, time.Minute,
+	)
+	require.NoError(t, err, "an expired reservation must immediately free one pool slot")
+	require.EqualValues(t, 1, third.MapDispatchEpoch)
+
+	require.NoError(t, recovery.releaseMapDispatchReservation(
+		context.Background(), second.ID, second.MapDispatchEpoch,
+	))
+	firstAgain, err := recovery.reserveMapDispatch(
+		context.Background(), candidates[0], "pool-a", 2, 2, time.Minute,
+	)
+	require.NoError(t, err, "a failed publication must release its reservation")
+	require.EqualValues(t, 2, firstAgain.MapDispatchEpoch)
+}
+
+func TestMapDispatchProtectsDerivativeShareAndBorrowsWhenDerivativeIsIdle(t *testing.T) {
+	db := newRecoveryTestDB(t)
+	for index := 1; index <= 2; index++ {
+		insertPendingOp(
+			t, db, 7, types.TypeWikiIngest, types.TaskScopeKnowledgeBase,
+			"kb-a", "ingest",
+		)
+		require.NoError(t, db.Table("task_pending_ops").Where("id = ?", index).
+			Updates(map[string]any{
+				"dedup_key":            fmt.Sprintf("knowledge-%d:g-1", index),
+				"map_resource_pool_id": "pool-a",
+			}).Error)
+	}
+	require.NoError(t, db.Exec(`
+		CREATE TABLE custom_derivative_work_items (
+			id TEXT PRIMARY KEY,
+			resource_pool_id TEXT NOT NULL,
+			work_kind TEXT NOT NULL,
+			state TEXT NOT NULL,
+			next_attempt_at DATETIME NOT NULL,
+			dispatch_lease_until DATETIME
+		)
+	`).Error)
+	require.NoError(t, db.Exec(`
+		INSERT INTO custom_derivative_work_items
+			(id, resource_pool_id, work_kind, state, next_attempt_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, "derivative-1", "pool-a", "summary", "queued", time.Now().UTC().Add(-time.Second)).Error)
+
+	var candidates []pendingMapRow
+	require.NoError(t, db.Table("task_pending_ops").
+		Select("id, tenant_id, scope_id, dedup_key, payload, map_resource_pool_id, map_dispatch_epoch, map_dispatch_lease_until").
+		Order("id").Scan(&candidates).Error)
+	require.Len(t, candidates, 2)
+	recovery := &Recovery{db: db, enqueuer: &recordingEnqueuer{}, config: DefaultConfig()}
+	_, err := recovery.reserveMapDispatch(
+		context.Background(), candidates[0], "pool-a", 3, 1, time.Minute,
+	)
+	require.NoError(t, err)
+	_, err = recovery.reserveMapDispatch(
+		context.Background(), candidates[1], "pool-a", 3, 1, time.Minute,
+	)
+	require.ErrorIs(t, err, errMapDispatchWindowFull)
+
+	require.NoError(t, db.Exec("DELETE FROM custom_derivative_work_items").Error)
+	_, err = recovery.reserveMapDispatch(
+		context.Background(), candidates[1], "pool-a", 3, 1, time.Minute,
+	)
+	require.NoError(t, err, "Wiki lane should borrow the idle derivative share")
 }

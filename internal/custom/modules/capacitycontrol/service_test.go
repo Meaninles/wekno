@@ -35,6 +35,9 @@ func TestCompilePoolReportsEffectiveModuleGrants(t *testing.T) {
 		RouteFingerprint: "same-physical-route",
 	}})
 	require.Equal(t, 3, row.Effective.BackgroundMax)
+	require.Equal(t, 6, row.Effective.WorkWindow)
+	require.Equal(t, 4, row.Effective.DerivativeShare)
+	require.Equal(t, 2, row.Effective.WikiShare)
 	require.Equal(t, 2, row.Effective.DocumentMax)
 	require.Equal(t, 4, row.Effective.ChatSessions)
 	require.Len(t, row.ModuleGrants, 4)

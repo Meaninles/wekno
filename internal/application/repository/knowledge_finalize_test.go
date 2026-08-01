@@ -115,16 +115,12 @@ func insertKnowledgeWithStatus(t *testing.T, db *gorm.DB, status string, deleted
 	return id
 }
 
-// TestFinalizeSubtask_Concurrent_ExactlyOnePromote spawns N goroutines that
+// TestFinalizeSubtask_Concurrent_DrainsWithoutPromotingCore spawns N goroutines that
 // each call FinalizeSubtask after SetFinalizing(N), and asserts:
 //   - the counter ends at zero,
-//   - parse_status is "completed",
-//   - exactly one caller observed promoted=true.
-//
-// This is the behavior the original "stuck pending_subtasks_count" bug
-// violated: clobbered counters meant some callers saw a non-zero value
-// after the true count had reached zero, and none of them promoted.
-func TestFinalizeSubtask_Concurrent_ExactlyOnePromote(t *testing.T) {
+//   - parse_status remains owned by post-process,
+//   - no derivative caller reports a core promotion.
+func TestFinalizeSubtask_Concurrent_DrainsWithoutPromotingCore(t *testing.T) {
 	db := setupKnowledgeTestDB(t)
 	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
 	ctx := context.Background()
@@ -154,11 +150,10 @@ func TestFinalizeSubtask_Concurrent_ExactlyOnePromote(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.Equal(t, int32(1), promoteWins.Load(),
-		"exactly one caller must observe promoted=true even under concurrent decrements")
+	assert.Equal(t, int32(0), promoteWins.Load())
 
 	status, count := reloadKnowledgeRow(t, db, id)
-	assert.Equal(t, types.ParseStatusCompleted, status)
+	assert.Equal(t, types.ParseStatusFinalizing, status)
 	assert.Equal(t, 0, count)
 }
 
@@ -186,6 +181,28 @@ func TestFinalizeSubtask_PartialDecrement_StaysFinalizing(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+func TestFinalizeSubtask_DrainsAfterCoreAlreadyCompleted(t *testing.T) {
+	db := setupKnowledgeTestDB(t)
+	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
+	ctx := context.Background()
+
+	id := insertProcessingKnowledge(t, db)
+	transitioned, err := repo.SetFinalizing(ctx, id, 2)
+	require.NoError(t, err)
+	require.True(t, transitioned)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", id).
+		Update("parse_status", types.ParseStatusCompleted).Error)
+
+	for i := 0; i < 2; i++ {
+		_, promoted, err := repo.FinalizeSubtask(ctx, id)
+		require.NoError(t, err)
+		require.False(t, promoted)
+	}
+	status, count := reloadKnowledgeRow(t, db, id)
+	require.Equal(t, types.ParseStatusCompleted, status)
+	require.Zero(t, count)
+}
+
 // TestFinalizeSubtask_DecrementClampedAtZero verifies the safety-net
 // clamp on the decrement: extra calls past the seeded count must not
 // underflow pending_subtasks_count below zero. (Reconciliation's
@@ -199,10 +216,11 @@ func TestFinalizeSubtask_DecrementClampedAtZero(t *testing.T) {
 	_, err := repo.SetFinalizing(ctx, id, 1)
 	require.NoError(t, err)
 
-	// First decrement drains the only slot and promotes.
+	// First decrement drains the only derivative slot without owning core
+	// lifecycle completion.
 	_, promoted, err := repo.FinalizeSubtask(ctx, id)
 	require.NoError(t, err)
-	assert.True(t, promoted)
+	assert.False(t, promoted)
 
 	// Subsequent decrements must be no-ops, not underflow.
 	for i := 0; i < 3; i++ {
@@ -212,11 +230,11 @@ func TestFinalizeSubtask_DecrementClampedAtZero(t *testing.T) {
 	}
 
 	status, count := reloadKnowledgeRow(t, db, id)
-	assert.Equal(t, types.ParseStatusCompleted, status)
+	assert.Equal(t, types.ParseStatusFinalizing, status)
 	assert.Equal(t, 0, count, "pending_subtasks_count must be clamped at zero")
 }
 
-func TestFinalizeSubtaskWaitsForWikiAndWikiTerminalPromotes(t *testing.T) {
+func TestWikiTerminalDoesNotPromoteCoreLifecycle(t *testing.T) {
 	db := setupKnowledgeTestDB(t)
 	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
 	ctx := context.Background()
@@ -243,7 +261,7 @@ func TestFinalizeSubtaskWaitsForWikiAndWikiTerminalPromotes(t *testing.T) {
 	count, promoted, err := repo.FinalizeSubtask(ctx, id)
 	require.NoError(t, err)
 	require.Zero(t, count)
-	require.False(t, promoted, "pending Wiki must keep the document finalizing")
+	require.False(t, promoted)
 
 	var waiting types.Knowledge
 	require.NoError(t, db.Where("id = ?", id).Take(&waiting).Error)
@@ -263,15 +281,15 @@ func TestFinalizeSubtaskWaitsForWikiAndWikiTerminalPromotes(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, updated)
 
-	var completed types.Knowledge
-	require.NoError(t, db.Where("id = ?", id).Take(&completed).Error)
-	require.Equal(t, types.ParseStatusCompleted, completed.ParseStatus)
-	require.Equal(t, types.WikiStatusCompleted, completed.WikiStatus)
-	require.Zero(t, completed.PendingSubtasksCount)
-	require.NotNil(t, completed.ProcessedAt)
+	var settled types.Knowledge
+	require.NoError(t, db.Where("id = ?", id).Take(&settled).Error)
+	require.Equal(t, types.ParseStatusFinalizing, settled.ParseStatus)
+	require.Equal(t, types.WikiStatusCompleted, settled.WikiStatus)
+	require.Zero(t, settled.PendingSubtasksCount)
+	require.Nil(t, settled.ProcessedAt)
 }
 
-func TestWikiTerminalFirstStillWaitsForLastSubtask(t *testing.T) {
+func TestWikiAndDerivativeCompletionAreIndependentOfCoreLifecycle(t *testing.T) {
 	db := setupKnowledgeTestDB(t)
 	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
 	ctx := context.Background()
@@ -313,9 +331,9 @@ func TestWikiTerminalFirstStillWaitsForLastSubtask(t *testing.T) {
 	count, promoted, err := repo.FinalizeSubtask(ctx, id)
 	require.NoError(t, err)
 	require.Zero(t, count)
-	require.True(t, promoted, "the last derivative must promote after Wiki is terminal")
+	require.False(t, promoted)
 	status, count = reloadKnowledgeRow(t, db, id)
-	require.Equal(t, types.ParseStatusCompleted, status)
+	require.Equal(t, types.ParseStatusFinalizing, status)
 	require.Zero(t, count)
 }
 

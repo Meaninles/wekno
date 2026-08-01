@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -35,7 +36,12 @@ CREATE TABLE IF NOT EXISTS task_pending_ops (
     fail_count  INTEGER NOT NULL DEFAULT 0,
     enqueued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     claimed_at  DATETIME,
-    map_ready_at DATETIME
+    map_ready_at DATETIME,
+    next_attempt_at DATETIME,
+    map_resource_pool_id VARCHAR(64) NOT NULL DEFAULT '',
+    map_dispatch_epoch INTEGER NOT NULL DEFAULT 0,
+    map_dispatch_task_id VARCHAR(190) NOT NULL DEFAULT '',
+    map_dispatch_lease_until DATETIME
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_task_pending_ops_wiki_ingest
     ON task_pending_ops (tenant_id, task_type, scope, scope_id, op, dedup_key)
@@ -147,6 +153,66 @@ func TestTaskPendingOps_DistributedWikiMapPublishesReadyAtomicallyAndBypassesSlo
 	count, err := repo.CountWikiCommitReady(ctx, 1, "kb-1")
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, count)
+}
+
+func TestTaskPendingOps_WikiMapDispatchClaimIsEpochAndTaskFenced(t *testing.T) {
+	db := setupTaskQueueTestDB(t)
+	repo := NewTaskPendingOpsRepository(db).(*taskPendingOpsRepository)
+	ctx := context.Background()
+	payload := []byte(`{"op":"ingest","knowledge_id":"ready","processing_generation":"g-ready"}`)
+	op := makePendingOp(
+		types.TypeWikiIngest, types.TaskScopeKnowledgeBase, "kb-1",
+		"ingest", "ready:g-ready", payload,
+	)
+	require.NoError(t, repo.Enqueue(ctx, op))
+	require.NoError(t, db.Table("task_pending_ops").Where("id = ?", op.ID).Updates(map[string]any{
+		"map_resource_pool_id":     "pool-a",
+		"map_dispatch_epoch":       3,
+		"map_dispatch_task_id":     fmt.Sprintf("wiki-map:%d:3", op.ID),
+		"map_dispatch_lease_until": time.Now().UTC().Add(time.Minute),
+	}).Error)
+	var dispatched types.TaskPendingOp
+	require.NoError(t, db.First(&dispatched, "id = ?", op.ID).Error)
+	require.Equal(t, fmt.Sprintf("wiki-map:%d:3", op.ID), dispatched.MapDispatchTaskID)
+	require.EqualValues(t, 3, dispatched.MapDispatchEpoch)
+	var claimable int64
+	require.NoError(t, db.Table("task_pending_ops").Where(
+		"id = ? AND map_dispatch_epoch = ? AND map_dispatch_task_id = ? AND map_ready_at IS NULL",
+		op.ID, 3, fmt.Sprintf("wiki-map:%d:3", op.ID),
+	).Count(&claimable).Error)
+	require.EqualValues(t, 1, claimable)
+
+	claimed, err := repo.ClaimWikiMapDispatch(
+		ctx, 1, "kb-1", "ready:g-ready", 3, 2*time.Minute,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	assert.EqualValues(t, 3, claimed.MapDispatchEpoch)
+	assert.Equal(t, fmt.Sprintf("wiki-map:%d:3", op.ID), claimed.MapDispatchTaskID)
+	stale, err := repo.ClaimWikiMapDispatch(
+		ctx, 1, "kb-1", "ready:g-ready", 2, time.Minute,
+	)
+	require.NoError(t, err)
+	require.Nil(t, stale)
+
+	renewed, err := repo.RenewWikiMapDispatch(ctx, op.ID, 3, time.Minute)
+	require.NoError(t, err)
+	require.True(t, renewed)
+	require.NoError(t, repo.DeferWikiMapDispatch(ctx, op.ID, 3, time.Minute))
+
+	var deferred types.TaskPendingOp
+	require.NoError(t, db.First(&deferred, "id = ?", op.ID).Error)
+	require.NotNil(t, deferred.NextAttemptAt)
+	assert.Empty(t, deferred.MapDispatchTaskID)
+	assert.Nil(t, deferred.MapDispatchLeaseUntil)
+	assert.EqualValues(t, 0, deferred.FailCount)
+
+	obsolete, err := repo.ClaimWikiMapDispatch(
+		ctx, 1, "kb-1", "ready:g-ready", 3, time.Minute,
+	)
+	require.NoError(t, err)
+	require.Nil(t, obsolete,
+		"clearing the durable task credential must invalidate an old Redis copy even before the epoch advances")
 }
 
 // ---------------- TaskPendingOpsRepository ----------------

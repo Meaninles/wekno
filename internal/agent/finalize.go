@@ -102,10 +102,14 @@ Now generate the final answer:`, query)
 	logger.Debugf(ctx, "[Agent][FinalAnswer] AnswerID: %s", answerID)
 	answerDoneEmitted := false
 
+	thinking := false
 	llmResult, err := e.streamLLMToEventBus(
 		ctx,
 		messages,
-		&chat.ChatOptions{Temperature: e.config.Temperature}, // Thinking disabled for final answer synthesis
+		&chat.ChatOptions{
+			Temperature: e.config.Temperature,
+			Thinking:    &thinking,
+		},
 		func(chunk *types.StreamResponse, fullContent string) {
 			// Defensive filter: only emit answer content, skip thinking chunks
 			if chunk.ResponseType == types.ResponseTypeThinking {

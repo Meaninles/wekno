@@ -35,11 +35,13 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/mobiledocument"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeinstances"
 	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/custom/modules/userguide"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/handler"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
@@ -120,6 +122,7 @@ func NewHandlers(
 	chatQueueManager *chatqueue.Manager,
 	derivativeQueueRepository *derivativequeue.Repository,
 	processingTraceRepository *processingtrace.Repository,
+	runtimeInstanceRegistry *runtimeinstances.Registry,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
@@ -184,6 +187,9 @@ func NewHandlers(
 	capacityControlService := capacitycontrol.NewService(db, admissionManager)
 	runMaintenance := profile.RunsMigration() && customMigrationsEnabled()
 	if runMaintenance {
+		if err := runtimeInstanceRegistry.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := admissionManager.Migrate(ctx); err != nil {
 			return nil, err
 		}
@@ -191,6 +197,9 @@ func NewHandlers(
 			return nil, err
 		}
 		if err := derivativeQueueRepository.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := wikiqueue.Migrate(ctx, db); err != nil {
 			return nil, err
 		}
 		if err := processingTraceRepository.Migrate(ctx); err != nil {
@@ -687,6 +696,8 @@ func RegisterRoutes(
 				admissionRoutes.PUT("/bindings/:model_id", handlers.ModelAdmission.PutBinding)
 				admissionRoutes.GET("/templates", handlers.ModelAdmission.ListTemplates)
 				admissionRoutes.PUT("/templates/:kind", handlers.ModelAdmission.PutTemplate)
+				admissionRoutes.GET("/scheduler-policy", handlers.ModelAdmission.GetSchedulerPolicy)
+				admissionRoutes.PUT("/scheduler-policy", handlers.ModelAdmission.PutSchedulerPolicy)
 				admissionRoutes.GET("/queue/status", handlers.ModelAdmission.QueueStatus)
 				admissionRoutes.GET("/audits", handlers.ModelAdmission.ListAudits)
 				admissionRoutes.POST("/reconcile", handlers.ModelAdmission.Reconcile)

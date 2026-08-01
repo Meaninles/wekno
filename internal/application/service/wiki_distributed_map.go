@@ -20,6 +20,11 @@ import (
 	"github.com/hibiken/asynq"
 )
 
+const (
+	wikiMapDispatchLease = 45 * time.Second
+	wikiMapDispatchRenew = 15 * time.Second
+)
+
 // newWikiBatchContext builds the lazy KB lookups shared by both a distributed
 // single-document Map worker and the later KB materialization worker. Its
 // error collector is mandatory: lookup failures return empty fallback values
@@ -273,6 +278,21 @@ func (s *wikiIngestService) wakeWikiCommitFromMap(
 	return enqueueWikiTriggerFenced(ctx, s.pendingRepo, s.task, commit, time.Second, true)
 }
 
+func (s *wikiIngestService) deferDistributedMapDelivery(
+	ctx context.Context,
+	payload WikiIngestPayload,
+	rowID int64,
+	delay time.Duration,
+) (bool, error) {
+	repo, ok := s.pendingRepo.(wikiMapDispatchRepository)
+	if !ok || repo == nil || payload.MapDispatchEpoch == 0 || rowID <= 0 {
+		return false, nil
+	}
+	return true, repo.DeferWikiMapDispatch(
+		ctx, rowID, payload.MapDispatchEpoch, delay,
+	)
+}
+
 func (s *wikiIngestService) recordDistributedMapFailure(
 	ctx context.Context,
 	payload WikiIngestPayload,
@@ -301,14 +321,22 @@ func (s *wikiIngestService) recordDistributedMapFailure(
 			wikiQueueSettlementTimeout,
 		)
 		defer cancel()
-		if err := s.rotateWikiAttempts(settleCtx, []WikiPendingOp{op}); err != nil {
-			return fmt.Errorf("wiki Map: rotate provider-deferred row: %w", err)
+		handled, err := s.deferDistributedMapDelivery(
+			settleCtx, payload, op.dbID, retryAfter,
+		)
+		if err != nil {
+			return fmt.Errorf("wiki Map: defer provider wait: %w", err)
 		}
-		if err := s.scheduleDistributedMapRetry(settleCtx, payload, retryAfter); err != nil {
-			return fmt.Errorf("wiki Map: schedule provider-circuit retry: %w", err)
+		if !handled {
+			if err := s.rotateWikiAttempts(settleCtx, []WikiPendingOp{op}); err != nil {
+				return fmt.Errorf("wiki Map: rotate provider-deferred row: %w", err)
+			}
+			if err := s.scheduleDistributedMapRetry(settleCtx, payload, retryAfter); err != nil {
+				return fmt.Errorf("wiki Map: schedule provider retry: %w", err)
+			}
 		}
 		logger.Infof(ctx,
-			"wiki Map: provider circuit open for knowledge %s; deferred without consuming fail_count for %s",
+			"wiki Map: provider work deferred for knowledge %s without consuming fail_count for %s",
 			op.KnowledgeID, retryAfter)
 		return nil
 	}
@@ -331,8 +359,16 @@ func (s *wikiIngestService) recordDistributedMapFailure(
 	if row == nil {
 		return nil
 	}
-	if err := s.scheduleDistributedMapRetry(settleCtx, payload, wikiFollowUpDelay); err != nil {
-		return fmt.Errorf("wiki Map: schedule failed-row retry: %w", err)
+	handled, err := s.deferDistributedMapDelivery(
+		settleCtx, payload, row.ID, wikiFollowUpDelay,
+	)
+	if err != nil {
+		return fmt.Errorf("wiki Map: defer failed row: %w", err)
+	}
+	if !handled {
+		if err := s.scheduleDistributedMapRetry(settleCtx, payload, wikiFollowUpDelay); err != nil {
+			return fmt.Errorf("wiki Map: schedule failed-row retry: %w", err)
+		}
 	}
 	return nil
 }
@@ -341,6 +377,7 @@ func (s *wikiIngestService) recordDistributedMapFailure(
 // Shared Wiki page writes are deliberately absent; successful output is
 // atomically marked ready and a KB commit wake-up performs materialization.
 func (s *wikiIngestService) ProcessWikiMap(ctx context.Context, task *asynq.Task) error {
+	ctx = modeladmission.WithWorkLane(ctx, modeladmission.WorkLaneWiki)
 	var payload WikiIngestPayload
 	if task == nil {
 		return errors.New("wiki Map: task is nil")
@@ -353,29 +390,43 @@ func (s *wikiIngestService) ProcessWikiMap(ctx context.Context, task *asynq.Task
 		strings.TrimSpace(payload.MapDedupKey) == "" {
 		return errors.New("wiki Map: complete task identity is required")
 	}
+	// Epoch zero identifies the old eager-publication protocol. PostgreSQL has
+	// the durable row and the bounded dispatcher will issue a fresh epoch; ACK
+	// this obsolete Redis copy without rotating or republishing it.
+	if payload.MapDispatchEpoch == 0 {
+		return nil
+	}
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
 	if queueName, known := asynq.GetQueueName(ctx); known && queueName != types.QueueWikiMap {
-		// Rolling upgrades may leave Map wake-ups in the historical low queue.
-		// Forward durably and ACK the disposable old copy before doing any DB or
-		// model work, so legacy backlog cannot refill the generic worker pool.
-		return enqueueWikiMapTask(s.task, payload, 0)
+		return nil
 	}
 
 	mapRepo, ok := s.pendingRepo.(wikiDistributedMapRepository)
 	if !ok || mapRepo == nil {
 		return errors.New("wiki Map: pending repository does not support distributed Map")
 	}
+	dispatchRepo, ok := s.pendingRepo.(wikiMapDispatchRepository)
+	if !ok || dispatchRepo == nil {
+		return errors.New("wiki Map: pending repository does not support durable dispatch fencing")
+	}
+	row, err := dispatchRepo.ClaimWikiMapDispatch(
+		ctx, payload.TenantID, payload.KnowledgeBaseID, payload.MapDedupKey,
+		payload.MapDispatchEpoch, wikiMapDispatchLease,
+	)
+	if err != nil {
+		return fmt.Errorf("wiki Map: claim dispatch epoch: %w", err)
+	}
+	if row == nil {
+		return nil
+	}
+	execCtx, cancelExecution := context.WithCancelCause(ctx)
+	heartbeatDone := make(chan struct{})
+	go s.heartbeatWikiMapDispatch(
+		execCtx, cancelExecution, dispatchRepo, row.ID,
+		payload.MapDispatchEpoch, heartbeatDone,
+	)
 
 	process := func(mapCtx context.Context) error {
-		row, err := mapRepo.GetWikiIngestByDedupKey(
-			mapCtx, payload.TenantID, payload.KnowledgeBaseID, payload.MapDedupKey,
-		)
-		if err != nil {
-			return fmt.Errorf("wiki Map: load pending row: %w", err)
-		}
-		if row == nil {
-			return nil
-		}
 		op, err := decodeDistributedWikiMapOp(row)
 		if err != nil {
 			if context.Cause(mapCtx) != nil {
@@ -478,14 +529,52 @@ func (s *wikiIngestService) ProcessWikiMap(ctx context.Context, task *asynq.Task
 		return s.wakeWikiCommitFromMap(mapCtx, payload)
 	}
 
-	err := s.withWikiMapLease(ctx, payload, process)
+	err = s.withWikiMapLease(execCtx, payload, process)
+	cancelExecution(nil)
+	<-heartbeatDone
 	if errors.Is(err, ErrWikiIngestConcurrent) {
-		// Replace this disposable contender with one alternating Unique wake-up
-		// instead of consuming an Asynq retry/dead-letter budget.
-		if scheduleErr := s.scheduleDistributedMapRetry(ctx, payload, wikiLockConflictDelay); scheduleErr != nil {
-			return scheduleErr
+		if deferErr := dispatchRepo.DeferWikiMapDispatch(
+			context.WithoutCancel(ctx), row.ID, payload.MapDispatchEpoch,
+			wikiLockConflictDelay,
+		); deferErr != nil {
+			return fmt.Errorf("wiki Map: defer document-lock conflict: %w", deferErr)
 		}
 		return nil
 	}
 	return err
+}
+
+func (s *wikiIngestService) heartbeatWikiMapDispatch(
+	ctx context.Context,
+	cancel context.CancelCauseFunc,
+	repo wikiMapDispatchRepository,
+	rowID int64,
+	epoch uint64,
+	done chan<- struct{},
+) {
+	defer close(done)
+	ticker := time.NewTicker(wikiMapDispatchRenew)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			renewCtx, renewCancel := context.WithTimeout(
+				context.WithoutCancel(ctx), 5*time.Second,
+			)
+			renewed, err := repo.RenewWikiMapDispatch(
+				renewCtx, rowID, epoch, wikiMapDispatchLease,
+			)
+			renewCancel()
+			if err != nil {
+				cancel(fmt.Errorf("wiki Map: renew dispatch lease: %w", err))
+				return
+			}
+			if !renewed {
+				cancel(errors.New("wiki Map: dispatch epoch ownership lost"))
+				return
+			}
+		}
+	}
 }

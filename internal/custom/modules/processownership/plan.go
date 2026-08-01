@@ -143,6 +143,8 @@ func ImageTaskID(knowledgeID, generation string, index int) string {
 	return fmt.Sprintf("image:%s:%s:%d", knowledgeID, generation, index)
 }
 
+// DataTableSummaryTaskID is retained for draining tasks emitted by builds
+// before table metadata moved into the durable derivative outbox.
 func DataTableSummaryTaskID(knowledgeID, generation string) string {
 	return "datatable-summary:" + knowledgeID + ":" + generation
 }
@@ -171,23 +173,19 @@ func ImageFanoutItem(index int) string {
 	return fmt.Sprintf("image:%d", index)
 }
 
-func DataTableFanoutItem() string {
-	return "datatable"
-}
+// DataTableFanoutItem is a legacy completion-ledger key. New generations do
+// not include it in the core fan-in.
+func DataTableFanoutItem() string { return "datatable" }
 
 func (p FanoutPlan) itemCount() int {
-	count := len(p.Images)
-	if p.DataTable != nil {
-		count++
-	}
-	return count
+	// Only multimodal work can add primary searchable content and therefore
+	// belongs to the core fan-in. DataTable is carried in this durable handoff
+	// envelope, but post-process publishes it as ordinary derivative work.
+	return len(p.Images)
 }
 
 func (p FanoutPlan) itemIDs() []string {
 	items := make([]string, 0, p.itemCount())
-	if p.DataTable != nil {
-		items = append(items, DataTableFanoutItem())
-	}
 	for _, image := range p.Images {
 		items = append(items, ImageFanoutItem(image.Index))
 	}
@@ -195,9 +193,6 @@ func (p FanoutPlan) itemIDs() []string {
 }
 
 func (p FanoutPlan) containsItem(item string) bool {
-	if item == DataTableFanoutItem() {
-		return p.DataTable != nil
-	}
 	const imagePrefix = "image:"
 	if !strings.HasPrefix(item, imagePrefix) {
 		return false
@@ -629,39 +624,6 @@ func DispatchFanout(
 	}
 
 	var enqueueErr error
-	if plan.DataTable != nil {
-		if _, completed := completedFanoutItems[DataTableFanoutItem()]; !completed {
-			payload := types.DataTableSummaryPayload{
-				TracingContext:       plan.Tracing,
-				TenantID:             plan.TenantID,
-				KnowledgeID:          plan.KnowledgeID,
-				KnowledgeBaseID:      plan.KnowledgeBaseID,
-				ProcessingGeneration: plan.ProcessingGeneration,
-				SummaryModel:         plan.DataTable.SummaryModel,
-				EmbeddingModel:       plan.DataTable.EmbeddingModel,
-				Language:             plan.Language,
-				Attempt:              plan.Attempt,
-			}
-			payloadBytes, err := json.Marshal(payload)
-			if err != nil {
-				enqueueErr = errors.Join(enqueueErr, fmt.Errorf("marshal data-table fanout: %w", err))
-			} else {
-				task := asynq.NewTask(types.TypeDataTableSummary, payloadBytes)
-				if _, err := EnqueueStableTask(
-					ctx,
-					enqueuer,
-					task,
-					types.QueueDerivative,
-					DataTableSummaryTaskID(plan.KnowledgeID, plan.ProcessingGeneration),
-					asynq.MaxRetry(3),
-					asynq.Timeout(GenerationTaskTimeout),
-					asynq.Retention(GenerationTaskRetention),
-				); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
-					enqueueErr = errors.Join(enqueueErr, fmt.Errorf("enqueue data-table fanout: %w", err))
-				}
-			}
-		}
-	}
 
 	for _, image := range plan.Images {
 		if _, completed := completedFanoutItems[ImageFanoutItem(image.Index)]; completed {

@@ -125,20 +125,23 @@ DocReader 为填充合并单元格使用 `openpyxl.load_workbook(..., data_only=
 
 ### 3.5 派生任务可靠性和状态分离
 
-- summary、question batch、finalizer 使用持久化 work item 和 provider-call 尝试账本。
+- 表格元数据、summary、question batch、graph、finalizer 使用持久化 work item 和 provider-call 尝试账本；Wiki Map 使用独立的 PostgreSQL outbox epoch/lease。
 - provider 成功响应先 checkpoint，再物化，避免工作进程退出后重复付费调用。
 - admission/全局锁等待属于排队，可重新调度；不会消耗为真正 provider 失败准备的次数。
 - 合同错误、真实空响应和基础设施错误有独立错误类别。
 - 删除旧二列唯一索引，保留三列 `(work_item_id, request_hash, attempt)` 唯一约束。
 - 问题解析接受规范对象、裸数组、Markdown fence 和可证明安全的截断恢复。
 - 使用 `r_` 加 16 个十六进制字符的稳定请求 ID，在当前 batch 内做碰撞检查，不要求模型复述 UUID。
-- 正文可用状态为 `core_status=ready`；派生任务最终失败显示 `enrichment_status=degraded`，不再把整篇文档显示为解析失败。
+- 正文可用状态为 `core_status=ready`。postprocess 只用短暂的 `finalizing` 作为“精确衍生计划和 Wiki 意图已持久化”的提交屏障；代次回执写入后立即提交 `parse_status=completed`，不等待任何模型富化结果。
+- 派生任务继续在独立计数和状态上运行；最终失败显示 `enrichment_status=degraded`，Wiki 使用独立 `wiki_status`，均不再把整篇文档显示为解析中或解析失败。
 
 涉及：
 
 - `internal/custom/modules/derivativequeue/`
+- `internal/custom/modules/wikiqueue/`
 - `internal/custom/modules/questioncontract/`
 - `migrations/custom/derivativequeue/900002_provider_call_contract_attempts.up.sql`
+- `migrations/custom/processingtrace/900003_uncouple_core_parse_from_derivatives.up.sql`
 - `frontend/src/custom/modules/knowledgeWorkflowStatus/`
 
 ### 3.6 生产运行角色隔离

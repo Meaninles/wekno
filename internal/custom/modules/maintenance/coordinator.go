@@ -310,6 +310,9 @@ func (c *Coordinator) runWork(ctx context.Context) {
 	); err != nil {
 		logger.Warnf(ctx, "[maintenance leader] derivative dispatch failed: %v", err)
 	}
+	if _, err := c.params.WikiQueue.DispatchMaps(scanCtx, 1000); err != nil {
+		logger.Warnf(ctx, "[maintenance leader] Wiki Map dispatch failed: %v", err)
+	}
 	if err := c.params.DerivativeRepository.RefreshMetrics(scanCtx); err != nil {
 		logger.Warnf(ctx, "[maintenance leader] derivative metrics refresh failed: %v", err)
 	}

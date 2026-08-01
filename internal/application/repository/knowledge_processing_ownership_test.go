@@ -119,9 +119,18 @@ func TestCompareAndSwapKnowledgeProcessingGenerationRequiresGenerationAndActiveS
 	require.NoError(t, err)
 	assert.True(t, swapped)
 
-	_, err = repo.CompareAndSwapKnowledgeProcessingGeneration(
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", id).
+		Update("parse_status", types.ParseStatusCompleted).Error)
+	swapped, err = repo.CompareAndSwapKnowledgeProcessingGeneration(
 		context.Background(), 7, id, kbID, "generation-1",
 		[]string{types.ParseStatusCompleted}, map[string]interface{}{"summary_status": "completed"},
+	)
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	_, err = repo.CompareAndSwapKnowledgeProcessingGeneration(
+		context.Background(), 7, id, kbID, "generation-1",
+		[]string{types.ParseStatusCompleted}, map[string]interface{}{"parse_status": types.ParseStatusProcessing},
 	)
 	require.Error(t, err)
 }
@@ -335,12 +344,12 @@ func TestFinalizeSubtaskGenerationRejectsStaleGenerationWithoutDecrement(t *test
 	assert.Equal(t, 2, storedCount)
 }
 
-func TestFinalizeSubtaskGenerationConcurrentExactlyOnePromotes(t *testing.T) {
+func TestFinalizeSubtaskGenerationConcurrentDrainsAfterCoreCompletion(t *testing.T) {
 	db := setupKnowledgeTestDB(t)
 	repo := NewKnowledgeRepository(db).(*knowledgeRepository)
 	const descendants = 12
 	id, kbID := insertOwnedProcessingKnowledge(
-		t, db, types.ParseStatusFinalizing, "generation-1", "", descendants, nil,
+		t, db, types.ParseStatusCompleted, "generation-1", "", descendants, time.Now(),
 	)
 
 	var promoteWins atomic.Int32
@@ -367,7 +376,7 @@ func TestFinalizeSubtaskGenerationConcurrentExactlyOnePromotes(t *testing.T) {
 	for err := range errCh {
 		require.NoError(t, err)
 	}
-	assert.EqualValues(t, 1, promoteWins.Load())
+	assert.EqualValues(t, 0, promoteWins.Load())
 	status, count := reloadKnowledgeRow(t, db, id)
 	assert.Equal(t, types.ParseStatusCompleted, status)
 	assert.Zero(t, count)

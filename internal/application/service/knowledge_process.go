@@ -1377,7 +1377,9 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 			return
 		}
 		if summaryErr != nil {
-			s.failPostprocessSubspan(ctx, span, "SUMMARY_FAILED", summaryErr.Error(), summaryErr)
+			if !s.deferPostprocessSubspanIfNeeded(ctx, span, summaryErr, retErr) {
+				s.failPostprocessSubspan(ctx, span, "SUMMARY_FAILED", summaryErr.Error(), summaryErr)
+			}
 		} else {
 			s.endPostprocessSubspan(ctx, span, summaryOut)
 		}
@@ -1895,7 +1897,9 @@ func (s *knowledgeService) processQuestionGenerationForKnowledge(ctx context.Con
 				if qErr != nil {
 					msg = qErr.Error()
 				}
-				s.failPostprocessSubspan(ctx, qSpan, "QUESTION_FAILED", msg, detailErr)
+				if !s.deferPostprocessSubspanIfNeeded(ctx, qSpan, qErr, retErr) {
+					s.failPostprocessSubspan(ctx, qSpan, "QUESTION_FAILED", msg, detailErr)
+				}
 			} else {
 				s.endPostprocessSubspan(ctx, qSpan, out)
 			}
@@ -2337,7 +2341,9 @@ func (s *knowledgeService) processQuestionGenerationForChunks(ctx context.Contex
 				if qErr != nil {
 					msg = qErr.Error()
 				}
-				s.failPostprocessSubspan(ctx, qSpan, "QUESTION_FAILED", msg, qErr)
+				if !s.deferPostprocessSubspanIfNeeded(ctx, qSpan, qErr, retErr) {
+					s.failPostprocessSubspan(ctx, qSpan, "QUESTION_FAILED", msg, qErr)
+				}
 			} else {
 				s.endPostprocessSubspan(ctx, qSpan, out)
 			}

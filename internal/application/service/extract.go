@@ -28,7 +28,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
-	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -439,7 +438,9 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 			return
 		}
 		if handleErr != nil {
-			s.tracker().FailSpan(ctx, gSpan, "GRAPH_EXTRACT_FAILED", handleErr.Error(), handleErr)
+			if !deferTrackedSpanIfDurableWait(ctx, s.tracker(), gSpan, handleErr, retErr) {
+				s.tracker().FailSpan(ctx, gSpan, "GRAPH_EXTRACT_FAILED", handleErr.Error(), handleErr)
+			}
 		} else {
 			s.tracker().EndSpan(ctx, gSpan, graphOut)
 		}
@@ -729,8 +730,6 @@ type DataTableSummaryService struct {
 	retrieveEngine       interfaces.RetrieveEngineRegistry
 	ownership            retriever.TenantStoreOwnership
 	sqlDB                *sql.DB
-	taskEnqueuer         interfaces.TaskEnqueuer
-	redisClient          *redis.Client
 	splitManager         *documentsplit.Manager
 }
 
@@ -746,8 +745,6 @@ func NewDataTableSummaryService(
 	retrieveEngine interfaces.RetrieveEngineRegistry,
 	ownership retriever.TenantStoreOwnership,
 	sqlDB *sql.DB,
-	taskEnqueuer interfaces.TaskEnqueuer,
-	redisClient *redis.Client,
 	splitManager *documentsplit.Manager,
 ) interfaces.TaskHandler {
 	return &DataTableSummaryService{
@@ -761,15 +758,13 @@ func NewDataTableSummaryService(
 		retrieveEngine:       retrieveEngine,
 		ownership:            ownership,
 		sqlDB:                sqlDB,
-		taskEnqueuer:         taskEnqueuer,
-		redisClient:          redisClient,
 		splitManager:         splitManager,
 	}
 }
 
 // Handle implements the TaskHandler interface for table extraction
 // 整体流程：初始化 -> 准备资源 -> 加载数据 -> 生成摘要 -> 创建索引
-func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) (retErr error) {
+func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) error {
 	// 1. 解析任务并初始化上下文
 	var payload DataTableSummaryPayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
@@ -797,35 +792,6 @@ func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) (re
 		logger.Infof(ctx, "data-table summary: stale generation for %s, skipping", payload.KnowledgeID)
 		return nil
 	}
-	plan, err := processownership.ParseFanoutPlan(knowledge.ProcessingFanout)
-	if err != nil {
-		return fmt.Errorf("load data-table durable fanout plan: %w", err)
-	}
-	completionStore, ok := s.knowledgeRepo.(processownership.DurableFanoutCompletionStore)
-	if !ok || completionStore == nil {
-		return errors.New("data-table summary: durable fanout completion repository is unavailable")
-	}
-	item := processownership.DataTableFanoutItem()
-	done, _, err := processownership.DurableFanoutItemCompleted(
-		ctx, completionStore, s.redisClient, plan, item,
-	)
-	if err != nil {
-		return fmt.Errorf("read durable data-table fan-in completion: %w", err)
-	}
-	if done {
-		return s.replayDataTableFanIn(ctx, payload, plan, completionStore)
-	}
-	skipFanIn := false
-	defer func() {
-		if skipFanIn || isDurableTaskDeferred(retErr) ||
-			(retErr != nil && !isFinalAsynqAttempt(ctx)) {
-			return
-		}
-		if err := s.completeDataTableFanIn(ctx, payload, plan, completionStore); err != nil {
-			retErr = errors.Join(retErr, err)
-		}
-	}()
-
 	logger.Infof(ctx, "Processing table extraction for knowledge: %s", payload.KnowledgeID)
 
 	// 2. 准备所有必需的资源（知识、模型、引擎等）
@@ -844,7 +810,6 @@ func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) (re
 		return fmt.Errorf("revalidate data-table generation: %w", err)
 	}
 	if !current {
-		skipFanIn = true
 		logger.Infof(ctx, "data-table summary: generation changed before chunk write for %s, skipping", payload.KnowledgeID)
 		return nil
 	}
@@ -874,80 +839,10 @@ func (s *DataTableSummaryService) currentDataTableGeneration(
 		knowledge.TenantID == payload.TenantID &&
 		knowledge.KnowledgeBaseID == payload.KnowledgeBaseID &&
 		knowledge.ProcessingGeneration == payload.ProcessingGeneration &&
-		(knowledge.ParseStatus == types.ParseStatusPending || knowledge.ParseStatus == types.ParseStatusProcessing)
+		(knowledge.ParseStatus == types.ParseStatusProcessing ||
+			knowledge.ParseStatus == types.ParseStatusFinalizing ||
+			knowledge.ParseStatus == types.ParseStatusCompleted)
 	return knowledge, current, nil
-}
-
-func (s *DataTableSummaryService) replayDataTableFanIn(
-	ctx context.Context,
-	payload types.DataTableSummaryPayload,
-	plan processownership.FanoutPlan,
-	completionStore processownership.DurableFanoutCompletionStore,
-) error {
-	remaining, err := processownership.DurableFanoutRemaining(
-		ctx, completionStore, s.redisClient, plan,
-	)
-	if err != nil {
-		return fmt.Errorf("replay data-table fan-in: %w", err)
-	}
-	if remaining > 0 {
-		return nil
-	}
-	if err := s.enqueueDataTablePostProcess(payload); err != nil {
-		return fmt.Errorf("replay data-table postprocess enqueue: %w", err)
-	}
-	return processownership.ClearFanIn(
-		ctx, s.redisClient, payload.KnowledgeID, payload.ProcessingGeneration,
-	)
-}
-
-func (s *DataTableSummaryService) completeDataTableFanIn(
-	ctx context.Context,
-	payload types.DataTableSummaryPayload,
-	plan processownership.FanoutPlan,
-	completionStore processownership.DurableFanoutCompletionStore,
-) error {
-	completionCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout,
-	)
-	defer cancel()
-	remaining, _, err := processownership.CompleteDurableFanoutItem(
-		completionCtx,
-		completionStore,
-		s.redisClient,
-		plan,
-		processownership.DataTableFanoutItem(),
-	)
-	if err != nil {
-		return fmt.Errorf("complete data-table fan-in: %w", err)
-	}
-	if remaining > 0 {
-		return nil
-	}
-	if err := s.enqueueDataTablePostProcess(payload); err != nil {
-		return fmt.Errorf("enqueue postprocess after data-table fan-in: %w", err)
-	}
-	if err := processownership.ClearFanIn(
-		completionCtx, s.redisClient, payload.KnowledgeID, payload.ProcessingGeneration,
-	); err != nil {
-		logger.Warnf(ctx, "failed to clear completed data-table fan-in keys for %s: %v",
-			payload.KnowledgeID, err)
-	}
-	return nil
-}
-
-func (s *DataTableSummaryService) enqueueDataTablePostProcess(
-	payload types.DataTableSummaryPayload,
-) error {
-	return processownership.EnqueuePostProcess(s.taskEnqueuer, types.KnowledgePostProcessPayload{
-		TracingContext:       payload.TracingContext,
-		TenantID:             payload.TenantID,
-		KnowledgeID:          payload.KnowledgeID,
-		KnowledgeBaseID:      payload.KnowledgeBaseID,
-		ProcessingGeneration: payload.ProcessingGeneration,
-		Language:             payload.Language,
-		Attempt:              payload.Attempt,
-	})
 }
 
 // extractionResources 封装提取过程所需的所有资源

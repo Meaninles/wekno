@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -198,7 +199,12 @@ func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
 	for _, item := range mapSlice(data["results"]) {
 		rawURL := stringValue(item["url"])
 		title := firstNonEmpty(stringValue(item["title"]), hostFromURL(rawURL), rawURL)
-		content := firstNonEmpty(stringValue(item["snippet"]), stringValue(item["summary"]), stringValue(item["content"]))
+		content := firstNonEmpty(
+			stringValue(item["raw_content"]),
+			stringValue(item["content"]),
+			stringValue(item["snippet"]),
+			stringValue(item["summary"]),
+		)
 		if rawURL == "" || content == "" {
 			continue
 		}
@@ -252,7 +258,7 @@ func extractWikiReferences(output string) []*types.SearchResult {
 func extractStructuredAnalysisReference(data map[string]interface{}, output string) *types.SearchResult {
 	query := stringValue(data["query"])
 	rows := data["rows"]
-	if query == "" || len(mapSlice(rows)) == 0 {
+	if query == "" || sliceLength(rows) == 0 {
 		return nil
 	}
 	snapshot := map[string]interface{}{
@@ -265,9 +271,9 @@ func extractStructuredAnalysisReference(data map[string]interface{}, output stri
 	if err != nil {
 		return nil
 	}
-	content := strings.TrimSpace(output)
-	if content == "" {
-		content = string(raw)
+	content := string(raw)
+	if summary := strings.TrimSpace(output); summary != "" {
+		content = summary + "\n\n" + content
 	}
 	sum := sha256.Sum256(raw)
 	evidenceID := fmt.Sprintf("query-%x", sum[:16])
@@ -356,6 +362,17 @@ func mapSlice(value interface{}) []map[string]interface{} {
 		}
 		return out
 	}
+}
+
+func sliceLength(value interface{}) int {
+	if value == nil {
+		return 0
+	}
+	v := reflect.ValueOf(value)
+	if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
+		return 0
+	}
+	return v.Len()
 }
 
 func stringSlice(value interface{}) []string {

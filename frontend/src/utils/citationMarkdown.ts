@@ -10,16 +10,16 @@ import {
 /**
  * Citation tags accepted from model output.
  *
- * `<src/>` is the canonical protocol. `<kb/>` and `<web/>` remain supported by
- * their existing renderers; model output must never invent a `<doc/>` tag.
+ * `<src id="Sx" />` is the canonical protocol. Existing `<kb/>` and `<web/>`
+ * renderers remain isolated legacy paths; malformed `<src>` variants are not
+ * interpreted or repaired.
  */
-export const KB_WEB_TAG_RE = /<(?:kb|web|src)\b[^>]*?\s*\/?>/gi
+export const KB_WEB_TAG_RE = /<(?:kb|web)\b[^>]*?\s*\/?>|<src\s+id="S[1-9][0-9]*"\s*\/>/g
 const KB_TAG_ATTR_RE = /<kb\b([^>]*?)\s*\/?>/g
 const WEB_TAG_ATTR_RE = /<web\b([^>]*?)\s*\/?>/g
-const SRC_TAG_ATTR_RE = /<src\b([^>]*?)\s*\/?>/g
+const SRC_TAG_ATTR_RE = /<src\s+id="(S[1-9][0-9]*)"\s*\/>/g
 
 const ATTRIBUTE_REGEX = /([\w-]+)\s*=\s*"([^"]*)"/g
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
  * Hide a citation tag while the typewriter has only emitted part of it.
@@ -37,10 +37,11 @@ export function stripIncompleteCitationTag(content: string): string {
   const tail = content.slice(start)
   if (tail.includes('>')) return content
 
-  const isCitationPrefix = tail === '<'
-    || /^<k(?:b(?:\s[\s\S]*)?)?$/i.test(tail)
-    || /^<w(?:e(?:b(?:\s[\s\S]*)?)?)?$/i.test(tail)
-    || /^<s(?:r(?:c(?:\s[\s\S]*)?)?)?$/i.test(tail)
+  const partial = tail.match(/^<\/?([a-z]*)(?:\s[\s\S]*)?$/i)
+  const partialName = partial?.[1]?.toLowerCase() || ''
+  const isCitationPrefix = tail === '<' || tail === '</' || (Boolean(partialName) && [
+    'src', 'source', 'citation', 'doc', 'kb', 'wiki', 'web',
+  ].some((name) => name.startsWith(partialName)))
 
   return isCitationPrefix ? content.slice(0, start) : content
 }
@@ -104,7 +105,7 @@ export function resolveCitationChunkId(
   if (!raw) return ''
 
   const list = (refs || []).filter((r) => r && r.chunk_type !== 'web_search')
-  if (!list.length) return UUID_RE.test(raw) ? raw : ''
+  if (!list.length) return ''
 
   const kbId = String(attrs.kbId || '').trim()
   const exact = list.find((ref) => {
@@ -144,12 +145,10 @@ export function preprocessCitationTags(
 ): string {
   if (!contentStr.trim()) return ''
 
-  const replaceSourceTag = (_match: string, attrString: string): string => {
-      const attrs = parseTagAttributes(attrString)
-      const sourceId = attrs.id || attrs.source_id || attrs.sourceId || ''
-      const item = findSourceReferenceItem(refs, sourceId)
-      if (!item) return ''
-      return renderSourceCitation(item, sourceId, sourceCitationNumberById)
+  const replaceSourceTag = (_match: string, sourceId: string): string => {
+    const item = findSourceReferenceItem(refs, sourceId)
+    if (!item) return ''
+    return renderSourceCitation(item, sourceId, sourceCitationNumberById)
   }
 
   return contentStr

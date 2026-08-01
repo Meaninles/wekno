@@ -35,13 +35,12 @@ func (p *PluginMerge) ActivationEvents() []types.EventType {
 // The merge pipeline is:
 //  1. Select input (rerank or search fallback)
 //  2. Deduplicate by ID and content signature
-//  3. Inject relevant history references
-//  4. Resolve parent chunks (child → parent content)
-//  5. Group by knowledge source + chunk type, merge overlapping ranges
-//  6. Populate FAQ answers
-//  7. Expand short contexts with neighboring chunks
-//     7.5. Re-merge overlapping ranges introduced by expansion
-//  8. Final deduplication (ID + signature + partial content overlap)
+//  3. Resolve parent chunks (child → parent content)
+//  4. Group by knowledge source + chunk type, merge overlapping ranges
+//  5. Populate FAQ answers
+//  6. Expand short contexts with neighboring chunks
+//     6.5. Re-merge overlapping ranges introduced by expansion
+//  7. Final deduplication (ID + signature + partial content overlap)
 func (p *PluginMerge) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
@@ -59,9 +58,6 @@ func (p *PluginMerge) OnEvent(ctx context.Context,
 	// Step 2: Initial dedup
 	searchResult = p.dedup(ctx, "dedup_summary", searchResult)
 
-	// Step 3: Inject history references
-	searchResult = p.injectHistoryResults(ctx, chatManage, searchResult)
-
 	pipelineInfo(ctx, "Merge", "candidate_ready", map[string]interface{}{
 		"chunk_cnt": len(searchResult),
 	})
@@ -74,22 +70,26 @@ func (p *PluginMerge) OnEvent(ctx context.Context,
 		return next()
 	}
 
-	// Step 4: Resolve parent chunks
+	// Historical references are deliberately not injected. Citation evidence
+	// is turn-local and must have passed the current query's retrieval/rerank
+	// gates; conversation history supplies language context, never sources.
+
+	// Step 3: Resolve parent chunks
 	searchResult = p.resolveParentChunks(ctx, chatManage, searchResult)
 
-	// Step 5: Group by knowledge/chunkType and merge overlapping ranges
+	// Step 4: Group by knowledge/chunkType and merge overlapping ranges
 	mergedChunks := p.groupAndMergeOverlapping(ctx, searchResult)
 
-	// Step 6: Populate FAQ answers
+	// Step 5: Populate FAQ answers
 	mergedChunks = p.populateFAQAnswers(ctx, chatManage, mergedChunks)
 
-	// Step 7: Expand short contexts
+	// Step 6: Expand short contexts
 	mergedChunks = p.expandShortContextWithNeighbors(ctx, chatManage, mergedChunks)
 
-	// Step 7.5: Re-merge overlapping ranges introduced by expansion
+	// Step 6.5: Re-merge overlapping ranges introduced by expansion
 	mergedChunks = p.groupAndMergeOverlapping(ctx, mergedChunks)
 
-	// Step 8: Final dedup — catches exact duplicates plus partial content overlaps
+	// Step 7: Final dedup — catches exact duplicates plus partial content overlaps
 	mergedChunks = p.dedup(ctx, "final_dedup", mergedChunks)
 	mergedChunks = removePartialOverlaps(ctx, mergedChunks)
 	chatretrieval.SortSearchResults(mergedChunks)
@@ -125,25 +125,6 @@ func (p *PluginMerge) dedup(ctx context.Context, label string, results []*types.
 		})
 	}
 	return out
-}
-
-// injectHistoryResults appends relevant history references to the current results
-// and deduplicates the combined set.
-func (p *PluginMerge) injectHistoryResults(
-	ctx context.Context,
-	chatManage *types.ChatManage,
-	current []*types.SearchResult,
-) []*types.SearchResult {
-	historyResults := filterHistoryResults(ctx, chatManage, current)
-	if len(historyResults) == 0 {
-		return current
-	}
-	pipelineInfo(ctx, "Merge", "history_inject", map[string]interface{}{
-		"session_id":   chatManage.SessionID,
-		"history_hits": len(historyResults),
-	})
-	combined := append(current, historyResults...)
-	return removeDuplicateResults(combined)
 }
 
 // groupAndMergeOverlapping groups chunks by KnowledgeID + ChunkType, then merges

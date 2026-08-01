@@ -132,61 +132,26 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 
 	// Only call rerank model if there are candidates
 	if len(candidatesToRerank) > 0 {
-		// Single rerank call with RewriteQuery, use threshold degradation if no results
-		originalThreshold := chatManage.RerankThreshold
+		// One configured rerank request is the relevance gate. Retrying with a
+		// lower threshold both adds latency and admits evidence that the owner
+		// explicitly configured the model to reject.
 		var rerankErr error
 		rerankResp, rerankErr = p.rerank(ctx, chatManage, rerankModel, chatManage.RewriteQuery, passages, candidatesToRerank)
 
 		if rerankErr != nil {
-			// Rerank API failed — fallback to original retrieval results so the
-			// pipeline can still return something useful to the caller.
-			pipelineWarn(ctx, "Rerank", "api_error_fallback", map[string]interface{}{
+			pipelineError(ctx, "Rerank", "api_error", map[string]interface{}{
 				"error":         rerankErr.Error(),
 				"candidate_cnt": len(candidatesToRerank),
 			})
-			chatManage.SearchResult = append(directLoadResults, candidatesToRerank...)
 			spanOutput = map[string]interface{}{
-				"stage":           "api_error_fallback",
+				"stage":           "api_error",
 				"candidate_count": len(candidatesToRerank),
 				"error":           rerankErr.Error(),
 			}
-			return next()
+			spanErr = rerankErr
+			return ErrRerank.WithError(rerankErr)
 		}
 		rawRerankResp = append([]rerank.RankResult(nil), rerankResp...)
-
-		// If no results and threshold is high enough, try with lower threshold
-		if len(rerankResp) == 0 && originalThreshold > 0.3 {
-			thresholdDegraded = true
-			degradedThreshold := originalThreshold * 0.7
-			if degradedThreshold < 0.3 {
-				degradedThreshold = 0.3
-			}
-			pipelineWarn(ctx, "Rerank", "threshold_degrade", map[string]interface{}{
-				"original":      originalThreshold,
-				"degraded":      degradedThreshold,
-				"candidate_cnt": len(candidatesToRerank),
-				"reason":        "no results above original threshold, retrying with lower threshold",
-			})
-			chatManage.RerankThreshold = degradedThreshold
-			rerankResp, rerankErr = p.rerank(ctx, chatManage, rerankModel, chatManage.RewriteQuery, passages, candidatesToRerank)
-			// Restore original threshold
-			chatManage.RerankThreshold = originalThreshold
-			if rerankErr != nil {
-				pipelineWarn(ctx, "Rerank", "api_error_fallback", map[string]interface{}{
-					"error":         rerankErr.Error(),
-					"candidate_cnt": len(candidatesToRerank),
-				})
-				chatManage.SearchResult = append(directLoadResults, candidatesToRerank...)
-				spanOutput = map[string]interface{}{
-					"stage":              "api_error_fallback",
-					"candidate_count":    len(candidatesToRerank),
-					"threshold_degraded": thresholdDegraded,
-					"error":              rerankErr.Error(),
-				}
-				return next()
-			}
-			rawRerankResp = append([]rerank.RankResult(nil), rerankResp...)
-		}
 	}
 
 	pipelineInfo(ctx, "Rerank", "model_response", map[string]interface{}{
@@ -202,7 +167,7 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 
 	// Process reranked results
 	for _, rr := range rerankResp {
-		if rr.Index >= len(candidatesToRerank) {
+		if rr.Index < 0 || rr.Index >= len(candidatesToRerank) {
 			continue
 		}
 		sr := candidatesToRerank[rr.Index]
@@ -381,7 +346,7 @@ func (p *PluginRerank) rerank(ctx context.Context,
 	})
 	logged := min(5, len(rerankResp))
 	for i := range logged {
-		if rerankResp[i].Index < len(candidates) {
+		if rerankResp[i].Index >= 0 && rerankResp[i].Index < len(candidates) {
 			pipelineInfo(ctx, "Rerank", "top_score", map[string]interface{}{
 				"rank":        i + 1,
 				"score":       rerankResp[i].RelevanceScore,
@@ -403,32 +368,12 @@ func (p *PluginRerank) rerank(ctx context.Context,
 	// Filter results based on threshold
 	rankFilter := []rerank.RankResult{}
 	for _, result := range rerankResp {
-		if result.Index >= len(candidates) {
+		if result.Index < 0 || result.Index >= len(candidates) {
 			continue
 		}
 		if result.RelevanceScore >= chatManage.RerankThreshold {
 			rankFilter = append(rankFilter, result)
 		}
-	}
-
-	// Fallback: if threshold filtering removed all results but the top candidate
-	// still has a reasonable score, keep it as a safety net. Skip fallback entirely
-	// when the best score is too low — forcing irrelevant results is worse than
-	// returning nothing and letting the caller handle the empty-result case.
-	const fallbackMinScore = 0.15
-	if len(rankFilter) == 0 && len(rerankResp) > 0 && rerankResp[0].RelevanceScore >= fallbackMinScore {
-		rankFilter = rerankResp[:1]
-		pipelineInfo(ctx, "Rerank", "fallback_top1", map[string]interface{}{
-			"reason":    "all_below_threshold",
-			"threshold": chatManage.RerankThreshold,
-			"top_score": rerankResp[0].RelevanceScore,
-		})
-	} else if len(rankFilter) == 0 {
-		pipelineInfo(ctx, "Rerank", "fallback_skip", map[string]interface{}{
-			"reason":    "top_score_too_low",
-			"threshold": chatManage.RerankThreshold,
-			"top_score": safeTopScore(rerankResp),
-		})
 	}
 
 	return rankFilter, nil
@@ -440,13 +385,6 @@ func ensureMetadata(m map[string]string) map[string]string {
 		return make(map[string]string)
 	}
 	return m
-}
-
-func safeTopScore(results []rerank.RankResult) float64 {
-	if len(results) == 0 {
-		return 0
-	}
-	return results[0].RelevanceScore
 }
 
 // compositeScore calculates the composite score for a search result

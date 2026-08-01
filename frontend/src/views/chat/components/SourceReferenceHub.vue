@@ -282,12 +282,6 @@ function activateItem(item: SourceReferenceItem) {
     void openWikiDrawer(item.knowledgeBaseId, item.slug)
     return
   }
-  if (item.type === 'data_source' && item.sourceId) {
-    openRouteInNewTab({
-      path: '/platform/data-sources',
-      query: { source_id: item.sourceId },
-    })
-  }
 }
 
 function itemFromElement(el: HTMLElement): SourceReferenceItem | null {
@@ -310,7 +304,7 @@ function itemFromElement(el: HTMLElement): SourceReferenceItem | null {
     sourceLabel: el.getAttribute('data-source-label') || sourceTypeLabel(type),
     snippet: '',
     count: 1,
-    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : type === 'data_source' ? 'server' : 'file',
+    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : 'file',
     url,
     knowledgeBaseId,
     knowledgeId,

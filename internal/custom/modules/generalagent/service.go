@@ -360,12 +360,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		})
 	}
 
-	if terminalDelivery {
-		terminalBuffer.replay(finalAnswer, fallbackAnswerID, func(evt StreamEvent) {
-			s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
-		})
-	}
-
 	allRefs := active.snapshotSourceReferences()
 	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
@@ -373,6 +367,13 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
 	}
 	finalAnswer = filteredAnswer
+	if terminalDelivery {
+		// Replay the exact locally validated string that will be persisted. This
+		// is a deterministic filter only; it never triggers model regeneration.
+		terminalBuffer.replay(finalAnswer, fallbackAnswerID, func(evt StreamEvent) {
+			s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
+		})
+	}
 	steps := active.snapshotSteps(finalAnswer)
 	eventBus.Emit(ctx, event.Event{
 		Type:      event.EventAgentComplete,

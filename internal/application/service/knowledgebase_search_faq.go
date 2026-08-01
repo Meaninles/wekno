@@ -158,6 +158,7 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 			for _, result := range newResults {
 				if _, ok := newChunks[result.ChunkID]; !ok {
 					filteredOutChunks[result.ChunkID] = struct{}{}
+				}
 			}
 		}
 

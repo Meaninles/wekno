@@ -326,8 +326,11 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 			len(deduplicatedBeforeRerank), t.rerankThreshold(), queries)
 		rerankedResults, err := t.rerankResults(ctx, rerankQuery, deduplicatedBeforeRerank)
 		if err != nil {
-			logger.Warnf(ctx, "[Tool][KnowledgeSearch] Rerank failed, using original results: %v", err)
-			filteredResults = deduplicatedBeforeRerank
+			logger.Errorf(ctx, "[Tool][KnowledgeSearch] Rerank failed: %v", err)
+			return &types.ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("rerank failed: %v", err),
+			}, err
 		} else {
 			filteredResults = rerankedResults
 			logger.Infof(ctx, "[Tool][KnowledgeSearch] Rerank completed successfully: %d results",
@@ -638,19 +641,6 @@ func (t *KnowledgeSearchTool) rerankResults(
 
 	if t.rerankModel != nil {
 		reranked, err = t.rerankWithModel(ctx, query, results)
-		if err != nil || len(reranked) == 0 {
-			if err != nil {
-				logger.Warnf(ctx, "[Tool][KnowledgeSearch] Rerank model failed, falling back to chat model: %v", err)
-			} else {
-				logger.Warnf(ctx, "[Tool][KnowledgeSearch] Rerank model returned no results above threshold, falling back to chat model")
-			}
-			err = nil
-			if t.chatModel != nil {
-				reranked, err = t.rerankWithLLM(ctx, query, results)
-			} else if len(reranked) == 0 {
-				reranked = results
-			}
-		}
 	} else if t.chatModel != nil {
 		reranked, err = t.rerankWithLLM(ctx, query, results)
 	} else {
@@ -809,13 +799,7 @@ Output only the scores, no explanations or additional text.`,
 			MaxTokens:   maxTokens,
 		})
 		if err != nil {
-			logger.Warnf(ctx, "[Tool][KnowledgeSearch] LLM rerank batch %d-%d failed: %v, using original scores",
-				batchStart+1, batchEnd, err)
-			// Use original scores for this batch on error
-			for i := batchStart; i < batchEnd; i++ {
-				allScores[i] = results[i].Score
-			}
-			continue
+			return nil, fmt.Errorf("LLM rerank batch %d-%d failed: %w", batchStart+1, batchEnd, err)
 		}
 
 		logger.Infof(ctx, "[Tool][KnowledgeSearch] LLM rerank batch %d-%d response: %s",
@@ -824,18 +808,12 @@ Output only the scores, no explanations or additional text.`,
 		// Parse scores from response
 		batchScores, err := t.parseScoresFromResponse(response.Content, len(batch))
 		if err != nil {
-			logger.Warnf(
-				ctx,
-				"[Tool][KnowledgeSearch] Failed to parse LLM scores for batch %d-%d: %v, using original scores",
+			return nil, fmt.Errorf(
+				"parse LLM rerank batch %d-%d: %w",
 				batchStart+1,
 				batchEnd,
 				err,
 			)
-			// Use original scores for this batch on parsing error
-			for i := batchStart; i < batchEnd; i++ {
-				allScores[i] = results[i].Score
-			}
-			continue
 		}
 
 		// Store scores for this batch
@@ -920,18 +898,8 @@ func (t *KnowledgeSearchTool) parseScoresFromResponse(responseText string, expec
 		return nil, fmt.Errorf("no valid scores found in response")
 	}
 
-	// If we got fewer scores than expected, pad with last score or 0.5
-	for len(scores) < expectedCount {
-		if len(scores) > 0 {
-			scores = append(scores, scores[len(scores)-1])
-		} else {
-			scores = append(scores, 0.5)
-		}
-	}
-
-	// Truncate if we got more scores than expected
-	if len(scores) > expectedCount {
-		scores = scores[:expectedCount]
+	if len(scores) != expectedCount {
+		return nil, fmt.Errorf("expected %d scores, got %d", expectedCount, len(scores))
 	}
 
 	return scores, nil
@@ -974,8 +942,6 @@ func (t *KnowledgeSearchTool) rerankThreshold() float64 {
 	return 0.3
 }
 
-const agentRerankFallbackMinScore = 0.15
-
 func filterRerankRankResults(rankResults []rerank.RankResult, threshold float64) []rerank.RankResult {
 	if len(rankResults) == 0 {
 		return nil
@@ -984,17 +950,6 @@ func filterRerankRankResults(rankResults []rerank.RankResult, threshold float64)
 	for _, r := range rankResults {
 		if r.RelevanceScore >= threshold {
 			filtered = append(filtered, r)
-		}
-	}
-	if len(filtered) == 0 {
-		top := rankResults[0]
-		for _, r := range rankResults[1:] {
-			if r.RelevanceScore > top.RelevanceScore {
-				top = r
-			}
-		}
-		if top.RelevanceScore >= agentRerankFallbackMinScore {
-			return []rerank.RankResult{top}
 		}
 	}
 	return filtered

@@ -449,7 +449,7 @@ test('buildCitedSourceReferenceItems only returns sources cited by answer text',
     '答案只引用了第五个来源。<src id="S5" /> <src id="S5" />',
   )
 
-  assert.deepEqual(extractSourceCitationIds('A <src id="S5" /> B <src source_id="S1" />'), ['S5', 'S1'])
+  assert.deepEqual(extractSourceCitationIds('A <src id="S5" /> B <src source_id="S1" />'), ['S5'])
   assert.equal(items.length, 1)
   assert.equal(items[0].citationId, 'S5')
   assert.equal(items[0].number, 1)
@@ -516,6 +516,7 @@ test('buildCitedSourceReferenceItems returns only explicit, valid citations', ()
   assert.equal(buildCitedSourceReferenceItems(refs, '没有显式引用。').length, 0)
   assert.equal(buildCitedSourceReferenceItems(refs, '已有旧标签 <kb doc="x" chunk_id="1" />').length, 0)
   assert.deepEqual(extractSourceCitationIds('错误格式 <doc source_id="S2" />'), [])
+  assert.deepEqual(extractSourceCitationIds('错误格式 <src source_id="S2" />'), [])
 })
 
 test('resolveCitationChunkId accepts only an exact message-bound chunk id', () => {

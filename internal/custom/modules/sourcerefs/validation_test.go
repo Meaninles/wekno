@@ -43,6 +43,18 @@ func TestFilterAnswerCitationsDoesNotInterpretCodeExamples(t *testing.T) {
 	}
 }
 
+func TestFilterAnswerCitationsDropsMalformedOpeningClosingAndIncompleteTags(t *testing.T) {
+	answer := `甲。<src id="S1"></src>乙。</doc><source id="S1" />丙。<src id="S1"`
+	filtered, refs, report := FilterAnswerCitations(answer, citationTestRefs())
+	if strings.Contains(filtered, "<src") || strings.Contains(filtered, "</src") ||
+		strings.Contains(filtered, "</doc") || strings.Contains(filtered, "<source") {
+		t.Fatalf("malformed citation markup survived: %q", filtered)
+	}
+	if len(refs) != 0 || report.ForbiddenTags < 3 || report.IncompleteTags != 1 {
+		t.Fatalf("unexpected malformed-tag report: %#v", report)
+	}
+}
+
 func TestStripCitationProtocolPreventsStaleSourceIDsInHistory(t *testing.T) {
 	content := `事实。<src id="S2" /> [[ops/guide|运维指南]]`
 	got := StripCitationProtocol(content)

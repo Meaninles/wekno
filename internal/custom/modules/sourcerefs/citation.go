@@ -87,10 +87,16 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 			id = fmt.Sprintf("S%d", r.next)
 			r.next++
 			r.byKey[key] = id
-			r.sources[id] = citationSourceFromRef(id, ref)
 		}
+		currentSource := citationSourceFromRef(id, ref)
+		if previous := r.sources[id]; previous != nil && previous.Title != "" {
+			// A later deep read of the same URL/chunk refreshes the evidence
+			// snapshot without downgrading a useful title discovered earlier.
+			currentSource.Title = previous.Title
+		}
+		r.sources[id] = currentSource
 		ref.Metadata[MetadataCitationID] = id
-		if src := r.sources[id]; src != nil {
+		if src := currentSource; src != nil {
 			ref.Metadata[MetadataCitationTitle] = src.Title
 			if src.Type != "" {
 				ref.Metadata["source_type"] = src.Type

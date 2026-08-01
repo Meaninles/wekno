@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -187,6 +188,7 @@ func buildAssistantHistoryMessages(m *types.Message) []chat.Message {
 	}
 
 	finalContent := agentHistoryThinkTagRegex.ReplaceAllString(m.Content, "")
+	finalContent = sourcerefs.StripCitationProtocol(finalContent)
 	finalContent = strings.TrimSpace(finalContent)
 	if finalContent != "" {
 		msgs = append(msgs, chat.Message{Role: "assistant", Content: finalContent})

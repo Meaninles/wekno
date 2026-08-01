@@ -260,6 +260,15 @@ func (r *activeRun) filterNewSourceReferences(refs []*types.SearchResult) []*typ
 	return out
 }
 
+func (r *activeRun) snapshotSourceReferences() []*types.SearchResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sources == nil {
+		return nil
+	}
+	return r.sources.SnapshotReferences()
+}
+
 func (r *activeRun) toolTimeoutFor(toolName string) time.Duration {
 	timeout := r.toolExecTimeout
 	if timeout <= 0 {

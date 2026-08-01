@@ -1,14 +1,19 @@
 /** Shared citation tag preprocessing for chat markdown (QA + agent). */
 import {
   buildCitedSourceReferenceItems,
-  buildSourceReferenceItems,
   findSourceReferenceItem,
   getSourceReferenceKind,
   type SourceReference,
+  type SourceReferenceItem,
 } from './sourceReferences.ts'
 
-/** Self-closing or unclosed `<kb/>` / `<web/>` / `<src/>` tags from model output. */
-export const KB_WEB_TAG_RE = /<(?:kb|web|src)\b[^>]*?\s*\/?>/g
+/**
+ * Citation tags accepted from model output.
+ *
+ * `<src/>` is the canonical protocol. `<kb/>` and `<web/>` remain supported by
+ * their existing renderers; model output must never invent a `<doc/>` tag.
+ */
+export const KB_WEB_TAG_RE = /<(?:kb|web|src)\b[^>]*?\s*\/?>/gi
 const KB_TAG_ATTR_RE = /<kb\b([^>]*?)\s*\/?>/g
 const WEB_TAG_ATTR_RE = /<web\b([^>]*?)\s*\/?>/g
 const SRC_TAG_ATTR_RE = /<src\b([^>]*?)\s*\/?>/g
@@ -79,17 +84,6 @@ function truncateMiddle(text: string, maxLength = 13): string {
   return `${start}...${end}`
 }
 
-function normalizeDocTitle(title: string): string {
-  return title.trim().toLowerCase()
-}
-
-function docTitlesMatch(a: string, b: string): boolean {
-  if (!a || !b) return false
-  const na = normalizeDocTitle(a)
-  const nb = normalizeDocTitle(b)
-  return na === nb || na.includes(nb) || nb.includes(na)
-}
-
 function sourceType(ref: CitationKnowledgeRef): string {
   return getSourceReferenceKind(ref)
 }
@@ -100,96 +94,46 @@ function findSourceRef(sourceId: string, refs?: CitationKnowledgeRef[] | null): 
   return (refs || []).find((ref) => ref?.metadata?.citation_id === id)
 }
 
-function hasInlineCitation(content: string, refs?: CitationKnowledgeRef[] | null): boolean {
-  if (/<kb\b([^>]*?)\s*\/?>/i.test(content)
-    || /<web\b([^>]*?)\s*\/?>/i.test(content)
-    || /\[\[([^\]]+)\]\]/.test(content)) {
-    return true
-  }
-  const srcTags = content.matchAll(/<src\b([^>]*?)\s*\/?>/gi)
-  for (const match of srcTags) {
-    const attrs = parseTagAttributes(match[1] || '')
-    const sourceId = attrs.id || attrs.source_id || attrs.sourceId || ''
-    if (findSourceRef(sourceId, refs)) return true
-  }
-  return false
-}
-
-export function appendFallbackSourceCitations(
-  content: string,
-  refs?: CitationKnowledgeRef[] | null,
-): string {
-  if (!content.trim() || hasInlineCitation(content, refs)) return content
-  const sourceItems = buildSourceReferenceItems(refs)
-    .filter((item) => item.type !== 'data_source' && item.citationId)
-  if (!sourceItems.length) return content
-  const tags = sourceItems
-    .slice(0, 6)
-    .map((item) => `<src id="${item.citationId}" />`)
-    .join(' ')
-  return `${content.trimEnd()}\n\n来源：${tags}`
-}
-
-/** Map model context index (1, FAQ-1, DOC-2) to the real chunk UUID from retrieval results. */
+/** Resolve only an exact, message-bound chunk identifier. */
 export function resolveCitationChunkId(
   rawChunkId: string,
   attrs: { doc?: string; kbId?: string },
   refs?: CitationKnowledgeRef[] | null,
 ): string {
   const raw = String(rawChunkId || '').trim()
-  if (!raw || UUID_RE.test(raw)) return raw
+  if (!raw) return ''
 
   const list = (refs || []).filter((r) => r && r.chunk_type !== 'web_search')
-  if (!list.length) return raw
+  if (!list.length) return UUID_RE.test(raw) ? raw : ''
 
-  const doc = (attrs.doc || '').trim()
-  const kbId = (attrs.kbId || '').trim()
+  const kbId = String(attrs.kbId || '').trim()
+  const exact = list.find((ref) => {
+    if (kbId && ref.knowledge_base_id && ref.knowledge_base_id !== kbId) return false
+    return String(ref.id || '').trim() === raw
+      || String(ref.metadata?.chunk_id || '').trim() === raw
+  })
+  return exact?.metadata?.chunk_id || exact?.id || ''
+}
 
-  if (doc) {
-    const byDoc = list.find(
-      (r) =>
-        docTitlesMatch(doc, r.knowledge_title || '') ||
-        docTitlesMatch(doc, r.knowledge_filename || ''),
-    )
-    if (byDoc?.id) return byDoc.id
-  }
-
-  const faqMatch = raw.match(/^FAQ-(\d+)$/i)
-  if (faqMatch) {
-    const faqRefs = list.filter((r) => r.chunk_type === 'faq')
-    const hit = faqRefs[parseInt(faqMatch[1], 10) - 1]
-    if (hit?.id) return hit.id
-  }
-
-  const docMatch = raw.match(/^DOC-(\d+)$/i)
-  if (docMatch) {
-    const docRefs = list.filter((r) => r.chunk_type !== 'faq')
-    const hit = docRefs[parseInt(docMatch[1], 10) - 1]
-    if (hit?.id) return hit.id
-  }
-
-  const num = parseInt(raw, 10)
-  if (!Number.isNaN(num) && String(num) === raw) {
-    const byPos = list[num - 1]
-    if (byPos?.id) return byPos.id
-    const byChunkIndex = list.find((r) => r.chunk_index === num || r.chunk_index === num - 1)
-    if (byChunkIndex?.id) return byChunkIndex.id
-  }
-
-  if (kbId) {
-    const scoped = list.filter((r) => r.knowledge_base_id === kbId)
-    if (doc) {
-      const byDoc = scoped.find(
-        (r) =>
-          docTitlesMatch(doc, r.knowledge_title || '') ||
-          docTitlesMatch(doc, r.knowledge_filename || ''),
-      )
-      if (byDoc?.id) return byDoc.id
-    }
-    if (scoped.length === 1 && scoped[0].id) return scoped[0].id
-  }
-
-  return raw
+function renderSourceCitation(
+  item: SourceReferenceItem,
+  sourceId: string,
+  sourceCitationNumberById?: Map<string, number>,
+): string {
+  const safeSourceId = escapeHtml(item.citationId || sourceId)
+  const displayNumber = sourceCitationNumberById?.get(item.citationId) || item.number
+  const safeNumber = escapeHtml(String(displayNumber))
+  const safeType = escapeHtml(item.type)
+  const safeTitle = escapeHtml(item.title)
+  const safeSourceLabel = escapeHtml(item.sourceLabel)
+  const safeKbId = escapeHtml(item.knowledgeBaseId)
+  const safeKnowledgeId = escapeHtml(item.knowledgeId)
+  const safeChunkId = escapeHtml(item.chunkId)
+  const safeChunkIndex = item.chunkIndex === null ? '' : escapeHtml(String(item.chunkIndex))
+  const safeSlug = escapeHtml(item.slug)
+  const safeUrl = escapeHtml(item.url)
+  const safeDataSourceId = escapeHtml(item.sourceId)
+  return `<span class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-chunk-id="${safeChunkId}" data-chunk-index="${safeChunkIndex}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" role="button" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"><span class="citation-number">${safeNumber}</span></span>`
 }
 
 /** Convert <web/> / <kb/> / [[wiki]] tags into inline citation HTML. */
@@ -200,28 +144,16 @@ export function preprocessCitationTags(
 ): string {
   if (!contentStr.trim()) return ''
 
-  return contentStr
-    .replace(SRC_TAG_ATTR_RE, (_m, attrString: string) => {
+  const replaceSourceTag = (_match: string, attrString: string): string => {
       const attrs = parseTagAttributes(attrString)
       const sourceId = attrs.id || attrs.source_id || attrs.sourceId || ''
       const item = findSourceReferenceItem(refs, sourceId)
       if (!item) return ''
+      return renderSourceCitation(item, sourceId, sourceCitationNumberById)
+  }
 
-      const safeSourceId = escapeHtml(item.citationId || sourceId)
-      const displayNumber = sourceCitationNumberById?.get(item.citationId) || item.number
-      const safeNumber = escapeHtml(String(displayNumber))
-      const safeType = escapeHtml(item.type)
-      const safeTitle = escapeHtml(item.title)
-      const safeSourceLabel = escapeHtml(item.sourceLabel)
-      const safeKbId = escapeHtml(item.knowledgeBaseId)
-      const safeKnowledgeId = escapeHtml(item.knowledgeId)
-      const safeChunkId = escapeHtml(item.chunkId)
-      const safeChunkIndex = item.chunkIndex === null ? '' : escapeHtml(String(item.chunkIndex))
-      const safeSlug = escapeHtml(item.slug)
-      const safeUrl = escapeHtml(item.url)
-      const safeDataSourceId = escapeHtml(item.sourceId)
-      return `<span class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-chunk-id="${safeChunkId}" data-chunk-index="${safeChunkIndex}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" role="button" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"><span class="citation-number">${safeNumber}</span></span>`
-    })
+  return contentStr
+    .replace(SRC_TAG_ATTR_RE, replaceSourceTag)
     .replace(WEB_TAG_ATTR_RE, (_m, attrString: string) => {
       const attrs = parseTagAttributes(attrString)
       const url = attrs.url || ''
@@ -279,7 +211,7 @@ export function extractCitationHtmlPlaceholders(
 ): { content: string; htmlSnippets: string[] } {
   const htmlSnippets: string[] = []
   const sourceCitationNumberById = new Map(
-    buildCitedSourceReferenceItems(refs, contentStr, false)
+    buildCitedSourceReferenceItems(refs, contentStr)
       .map((item) => [item.citationId, item.number] as const),
   )
   const storeHtml = (html: string): string => {

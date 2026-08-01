@@ -110,6 +110,25 @@ func newCoordinatorDB(t *testing.T) *gorm.DB {
 			content TEXT NOT NULL DEFAULT '',
 			deleted_at DATETIME
 		)`,
+		`CREATE TABLE task_dead_letters (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id INTEGER NOT NULL,
+			task_type TEXT NOT NULL, scope TEXT NOT NULL, scope_id TEXT NOT NULL,
+			related_id TEXT NOT NULL DEFAULT '', payload JSON NOT NULL DEFAULT '{}'
+		)`,
+		`CREATE TABLE custom_derivative_work_items (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE custom_derivative_provider_calls (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE custom_derivative_results (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE custom_document_queue_workflows (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
 		`CREATE TABLE task_pending_ops (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER NOT NULL,

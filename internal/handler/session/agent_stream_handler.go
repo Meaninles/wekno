@@ -9,6 +9,7 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -471,42 +472,7 @@ func (h *AgentStreamHandler) handleReferences(ctx context.Context, evt event.Eve
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Extract knowledge references
-	// Try to cast directly to []*types.SearchResult first
-	if searchResults, ok := data.References.([]*types.SearchResult); ok {
-		h.knowledgeRefs = append(h.knowledgeRefs, searchResults...)
-	} else if refs, ok := data.References.([]interface{}); ok {
-		// Fallback: convert from []interface{}
-		for _, ref := range refs {
-			if sr, ok := ref.(*types.SearchResult); ok {
-				h.knowledgeRefs = append(h.knowledgeRefs, sr)
-			} else if refMap, ok := ref.(map[string]interface{}); ok {
-				// Parse from map if needed
-				searchResult := &types.SearchResult{
-					ID:                   getString(refMap, "id"),
-					Content:              getString(refMap, "content"),
-					Score:                getFloat64(refMap, "score"),
-					KnowledgeID:          getString(refMap, "knowledge_id"),
-					KnowledgeTitle:       getString(refMap, "knowledge_title"),
-					ChunkIndex:           int(getFloat64(refMap, "chunk_index")),
-					KnowledgeDescription: getString(refMap, "knowledge_description"),
-					KnowledgeBaseID:      getString(refMap, "knowledge_base_id"),
-				}
-
-				if meta, ok := refMap["metadata"].(map[string]interface{}); ok {
-					metadata := make(map[string]string)
-					for k, v := range meta {
-						if strVal, ok := v.(string); ok {
-							metadata[k] = strVal
-						}
-					}
-					searchResult.Metadata = metadata
-				}
-
-				h.knowledgeRefs = append(h.knowledgeRefs, searchResult)
-			}
-		}
-	}
+	h.knowledgeRefs = mergeCitationReferences(h.knowledgeRefs, data.References)
 
 	// Update assistant message references
 	h.assistantMessage.KnowledgeReferences = h.knowledgeRefs
@@ -692,27 +658,31 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 	defer h.mu.Unlock()
 
 	// Update assistant message with final data
-	if data.MessageID == h.assistantMessageID {
+	if data.MessageID == "" || data.MessageID == h.assistantMessageID {
 		// h.assistantMessage.Content = data.FinalAnswer
 		h.assistantMessage.IsCompleted = true
 		h.assistantMessage.AgentDurationMs = data.TotalDurationMs
 
-		// Update knowledge references if provided
-		if len(data.KnowledgeRefs) > 0 {
-			knowledgeRefs := make([]*types.SearchResult, 0, len(data.KnowledgeRefs))
-			for _, ref := range data.KnowledgeRefs {
-				if sr, ok := ref.(*types.SearchResult); ok {
-					knowledgeRefs = append(knowledgeRefs, sr)
-				}
-			}
-			h.assistantMessage.KnowledgeReferences = knowledgeRefs
+		availableRefs := h.knowledgeRefs
+		if data.KnowledgeRefsAuthoritative {
+			availableRefs = data.KnowledgeRefs
+		} else if len(data.KnowledgeRefs) > 0 {
+			availableRefs = mergeCitationReferences(availableRefs, data.KnowledgeRefs)
 		}
-
-		if data.FinalAnswer != "" {
-			h.assistantMessage.Content = data.FinalAnswer
-		} else {
-			h.assistantMessage.Content = h.finalAnswer
+		finalAnswer := data.FinalAnswer
+		if finalAnswer == "" {
+			finalAnswer = h.finalAnswer
 		}
+		filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(finalAnswer, availableRefs)
+		if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
+			logger.GetLogger(h.ctx).Warnf(
+				"Filtered invalid completion citations: forbidden=%d incomplete=%d unknown=%v",
+				report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs,
+			)
+		}
+		h.assistantMessage.Content = filteredAnswer
+		h.knowledgeRefs = citedRefs
+		h.assistantMessage.KnowledgeReferences = types.References(citedRefs)
 
 		// Update agent steps if provided
 		if data.AgentSteps != nil {
@@ -737,7 +707,7 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
 			ID:        fallbackID,
 			Type:      types.ResponseTypeAnswer,
-			Content:   data.FinalAnswer,
+			Content:   h.assistantMessage.Content,
 			Done:      false,
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
@@ -779,6 +749,36 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 	}
 
 	return nil
+}
+
+func mergeCitationReferences(existing, incoming []*types.SearchResult) []*types.SearchResult {
+	out := make([]*types.SearchResult, 0, len(existing)+len(incoming))
+	positions := make(map[string]int, len(existing)+len(incoming))
+	appendOrReplace := func(ref *types.SearchResult) {
+		if ref == nil {
+			return
+		}
+		key := sourcerefs.CitationKey(ref)
+		if key == "" {
+			key = "citation-id:" + sourcerefs.CitationID(ref)
+		}
+		if key == "citation-id:" {
+			return
+		}
+		if index, ok := positions[key]; ok {
+			out[index] = ref
+			return
+		}
+		positions[key] = len(out)
+		out = append(out, ref)
+	}
+	for _, ref := range existing {
+		appendOrReplace(ref)
+	}
+	for _, ref := range incoming {
+		appendOrReplace(ref)
+	}
+	return out
 }
 
 func (h *AgentStreamHandler) hasStreamedAnswerEventLocked(ctx context.Context) bool {

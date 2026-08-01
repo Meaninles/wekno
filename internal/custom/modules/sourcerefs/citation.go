@@ -2,12 +2,15 @@ package sourcerefs
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -16,6 +19,8 @@ const (
 	MetadataCitationID    = "citation_id"
 	MetadataCitationTitle = "citation_title"
 	MetadataChunkID       = "chunk_id"
+	MetadataEvidenceHash  = "evidence_hash"
+	MetadataObservedAt    = "evidence_observed_at"
 )
 
 type CitationSource struct {
@@ -32,12 +37,16 @@ type CitationSource struct {
 	SourceLocator   types.JSON `json:"source_locator,omitempty"`
 	Slug            string     `json:"slug,omitempty"`
 	URL             string     `json:"url,omitempty"`
+	EvidenceHash    string     `json:"evidence_hash,omitempty"`
+	ObservedAt      string     `json:"observed_at,omitempty"`
 }
 
 type Registry struct {
+	mu      sync.RWMutex
 	next    int
 	byKey   map[string]string
 	sources map[string]*CitationSource
+	refs    map[string]*types.SearchResult
 }
 
 func NewRegistry() *Registry {
@@ -45,6 +54,7 @@ func NewRegistry() *Registry {
 		next:    1,
 		byKey:   map[string]string{},
 		sources: map[string]*CitationSource{},
+		refs:    map[string]*types.SearchResult{},
 	}
 }
 
@@ -57,6 +67,9 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 	if r == nil {
 		return nil
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	out := make([]*CitationSource, 0)
 	seenOut := map[string]bool{}
 	for _, ref := range refs {
@@ -67,6 +80,8 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 		if key == "" {
 			continue
 		}
+		ensureMetadata(ref)
+		ensureEvidenceSnapshotMetadata(ref)
 		id := r.byKey[key]
 		if id == "" {
 			id = fmt.Sprintf("S%d", r.next)
@@ -74,7 +89,6 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 			r.byKey[key] = id
 			r.sources[id] = citationSourceFromRef(id, ref)
 		}
-		ensureMetadata(ref)
 		ref.Metadata[MetadataCitationID] = id
 		if src := r.sources[id]; src != nil {
 			ref.Metadata[MetadataCitationTitle] = src.Title
@@ -102,11 +116,41 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 					ref.Metadata["source_locator"] = string(src.SourceLocator)
 				}
 			}
+			if src.EvidenceHash != "" {
+				ref.Metadata[MetadataEvidenceHash] = src.EvidenceHash
+			}
+			if src.ObservedAt != "" {
+				ref.Metadata[MetadataObservedAt] = src.ObservedAt
+			}
 		}
+		r.refs[id] = cloneSearchResult(ref)
 		if !seenOut[id] {
 			seenOut[id] = true
 			out = append(out, r.sources[id])
 		}
+	}
+	return out
+}
+
+// SnapshotReferences returns immutable, citation-id ordered evidence snapshots.
+// Callers use this as the authoritative completion payload instead of relying
+// on append-only reference events that may be serialized through Redis.
+func (r *Registry) SnapshotReferences() []*types.SearchResult {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.refs))
+	for id := range r.refs {
+		ids = append(ids, id)
+	}
+	sort.SliceStable(ids, func(i, j int) bool {
+		return citationOrdinal(ids[i]) < citationOrdinal(ids[j])
+	})
+	out := make([]*types.SearchResult, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, cloneSearchResult(r.refs[id]))
 	}
 	return out
 }
@@ -266,6 +310,8 @@ func citationSourceFromRef(id string, ref *types.SearchResult) *CitationSource {
 		Title:           sourceTitle(ref),
 		KnowledgeID:     firstNonEmpty(ref.KnowledgeID, ref.Metadata["knowledge_id"]),
 		KnowledgeBaseID: firstNonEmpty(ref.KnowledgeBaseID, ref.Metadata["knowledge_base_id"]),
+		EvidenceHash:    strings.TrimSpace(ref.Metadata[MetadataEvidenceHash]),
+		ObservedAt:      strings.TrimSpace(ref.Metadata[MetadataObservedAt]),
 	}
 	switch sourceType {
 	case SourceTypeWiki:
@@ -366,6 +412,40 @@ func ensureMetadata(ref *types.SearchResult) {
 	}
 }
 
+func ensureEvidenceSnapshotMetadata(ref *types.SearchResult) {
+	if ref == nil {
+		return
+	}
+	ensureMetadata(ref)
+	if strings.TrimSpace(ref.Metadata[MetadataEvidenceHash]) == "" {
+		hash := sha256.New()
+		_, _ = hash.Write([]byte(strings.TrimSpace(ref.Content)))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write(ref.SourceLocator)
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(CitationKey(ref)))
+		ref.Metadata[MetadataEvidenceHash] = fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	}
+	if strings.TrimSpace(ref.Metadata[MetadataObservedAt]) == "" {
+		ref.Metadata[MetadataObservedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+}
+
+func cloneSearchResult(ref *types.SearchResult) *types.SearchResult {
+	if ref == nil {
+		return nil
+	}
+	clone := *ref
+	if ref.Metadata != nil {
+		clone.Metadata = make(map[string]string, len(ref.Metadata))
+		for key, value := range ref.Metadata {
+			clone.Metadata[key] = value
+		}
+	}
+	clone.SourceLocator = append(types.JSON(nil), ref.SourceLocator...)
+	return &clone
+}
+
 func knowledgeChunkID(ref *types.SearchResult) string {
 	if ref == nil {
 		return ""
@@ -384,8 +464,12 @@ func knowledgeChunkID(ref *types.SearchResult) string {
 
 func normalizedKey(parts ...string) string {
 	cleaned := make([]string, 0, len(parts))
-	for _, part := range parts {
-		cleaned = append(cleaned, strings.ToLower(strings.TrimSpace(part)))
+	for i, part := range parts {
+		value := strings.TrimSpace(part)
+		if i == 0 {
+			value = strings.ToLower(value)
+		}
+		cleaned = append(cleaned, value)
 	}
 	return strings.Join(cleaned, ":")
 }
@@ -397,10 +481,12 @@ func normalizeURL(raw string) string {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
-		return strings.ToLower(raw)
+		return raw
 	}
 	parsed.Fragment = ""
-	return strings.ToLower(parsed.String())
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	return parsed.String()
 }
 
 func xmlAttr(value string) string {

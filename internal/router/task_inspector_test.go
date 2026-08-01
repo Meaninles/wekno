@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -780,6 +781,69 @@ func TestParseLiveTaskIDSnapshot(t *testing.T) {
 	assert.Error(t, err, "unexpected Redis response shapes must fail closed")
 }
 
+func TestDerivativeTaskIDMayMatchUsesExactWorkItemAndEpochRange(t *testing.T) {
+	work := map[string]uint64{"work-1": 3}
+	legacy := map[string]struct{}{"datatable-summary:knowledge-1:generation-1": {}}
+	require.True(t, derivativeTaskIDMayMatch("derivative:work-1:1", work, legacy))
+	require.True(t, derivativeTaskIDMayMatch("derivative:work-1:3", work, legacy))
+	require.False(t, derivativeTaskIDMayMatch("derivative:work-1:4", work, legacy))
+	require.False(t, derivativeTaskIDMayMatch("derivative:work-10:1", work, legacy))
+	require.False(t, derivativeTaskIDMayMatch("derivative:work-1:not-a-number", work, legacy))
+	require.True(t, derivativeTaskIDMayMatch("datatable-summary:knowledge-1:generation-1", work, legacy))
+}
+
+func TestLiteDerivativeHistoryPurgeCancelsLiveAndRemovesOnlyExactTerminalIDs(t *testing.T) {
+	executor := NewSyncTaskExecutor()
+	started := make(chan struct{})
+	executor.RegisterHandler(derivativequeue.TypeWake, func(ctx context.Context, _ *asynq.Task) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	raw, err := json.Marshal(derivativequeue.WakePayload{WorkItemID: "work-1", DispatchEpoch: 3})
+	require.NoError(t, err)
+	_, err = executor.Enqueue(
+		asynq.NewTask(derivativequeue.TypeWake, raw),
+		asynq.Queue(types.QueueDerivative),
+		asynq.TaskID("derivative:work-1:3"),
+		asynq.MaxRetry(0),
+	)
+	require.NoError(t, err)
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("derivative handler did not start")
+	}
+
+	legacyID := "datatable-summary:knowledge-1:generation-1"
+	executor.mu.Lock()
+	executor.retained["derivative:work-1:1"] = time.Now().Add(time.Hour)
+	executor.archived["derivative:work-1:2"] = time.Now().Add(time.Hour)
+	executor.retained[legacyID] = time.Now().Add(time.Hour)
+	executor.retained["derivative:work-other:1"] = time.Now().Add(time.Hour)
+	executor.mu.Unlock()
+
+	purger, ok := NewNoopTaskInspector(nil, executor).(interfaces.DerivativeTaskHistoryPurger)
+	require.True(t, ok)
+	deleted, err := purger.QuiesceAndPurgeDerivativeTaskHistory(
+		context.Background(),
+		[]interfaces.DerivativeTaskHistoryTarget{
+			{WorkItemID: "work-1", DispatchEpoch: 3},
+			{LegacyTaskID: legacyID},
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 3, deleted)
+
+	executor.mu.RLock()
+	defer executor.mu.RUnlock()
+	require.NotContains(t, executor.tasks, "derivative:work-1:3")
+	require.NotContains(t, executor.retained, "derivative:work-1:1")
+	require.NotContains(t, executor.archived, "derivative:work-1:2")
+	require.NotContains(t, executor.retained, legacyID)
+	require.Contains(t, executor.retained, "derivative:work-other:1")
+}
+
 func TestRedisLiveTaskSnapshotterIntegration(t *testing.T) {
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
@@ -815,4 +879,54 @@ func TestRedisLiveTaskSnapshotterIntegration(t *testing.T) {
 	_, err = liveTaskSnapshotScript.Run(ctx, client, keys, 3).Result()
 	assert.Error(t, err,
 		"an oversized atomic snapshot must fail closed before any unbounded range read")
+}
+
+func TestDerivativeTerminalPurgeScriptsIntegration(t *testing.T) {
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		t.Skip("REDIS_ADDR is not configured")
+	}
+	db, _ := strconv.Atoi(os.Getenv("REDIS_DB"))
+	client := redis.NewClient(&redis.Options{
+		Addr: redisAddr, Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"), DB: db,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Ping(ctx).Err())
+
+	queue := fmt.Sprintf("derivative_purge_test_%d", time.Now().UnixNano())
+	prefix := "asynq:{" + queue + "}:"
+	completed, archived, taskPrefix := prefix+"completed", prefix+"archived", prefix+"t:"
+	cleanupKeys := []string{completed, archived}
+	for _, id := range []string{
+		"derivative:work-1:1", "derivative:work-1:2", "derivative:work-1:3",
+		"derivative:work-other:1", "datatable-summary:knowledge-1:generation-1",
+	} {
+		cleanupKeys = append(cleanupKeys, taskPrefix+id)
+		require.NoError(t, client.HSet(ctx, taskPrefix+id, "state", "completed").Err())
+		require.NoError(t, client.ZAdd(ctx, completed, redis.Z{Score: 1, Member: id}).Err())
+	}
+	t.Cleanup(func() { _ = client.Del(context.Background(), cleanupKeys...).Err() })
+
+	deleted, err := derivativeTerminalRangePurgeScript.Run(
+		ctx, client, []string{completed, archived}, taskPrefix, "work-1", 1, 3,
+	).Int()
+	require.NoError(t, err)
+	require.Equal(t, 3, deleted)
+	for epoch := 1; epoch <= 3; epoch++ {
+		id := fmt.Sprintf("derivative:work-1:%d", epoch)
+		require.Zero(t, client.Exists(ctx, taskPrefix+id).Val())
+		require.ErrorIs(t, client.ZScore(ctx, completed, id).Err(), redis.Nil)
+	}
+	require.EqualValues(t, 1, client.Exists(ctx, taskPrefix+"derivative:work-other:1").Val())
+
+	legacyID := "datatable-summary:knowledge-1:generation-1"
+	deleted, err = derivativeTerminalIDsPurgeScript.Run(
+		ctx, client, []string{completed, archived}, taskPrefix, legacyID,
+	).Int()
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.Zero(t, client.Exists(ctx, taskPrefix+legacyID).Val())
 }

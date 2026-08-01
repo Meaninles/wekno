@@ -25,6 +25,8 @@ func classifyRetrievalResults(ctx context.Context, retrieveResults []*types.Retr
 			keywordResults = append(keywordResults, retrieveResult.Results...)
 		}
 	}
+	slices.SortFunc(vectorResults, sortByScoreDesc)
+	slices.SortFunc(keywordResults, sortByScoreDesc)
 	return
 }
 
@@ -54,6 +56,12 @@ func sortByScoreDesc(a, b *types.IndexWithScore) int {
 	if a.Score > b.Score {
 		return -1
 	} else if a.Score < b.Score {
+		return 1
+	}
+	if a.ChunkID < b.ChunkID {
+		return -1
+	}
+	if a.ChunkID > b.ChunkID {
 		return 1
 	}
 	return 0

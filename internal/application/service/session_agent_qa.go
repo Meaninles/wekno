@@ -260,6 +260,7 @@ func (s *sessionService) buildAgentConfig(
 		MaxIterations:               customAgent.Config.MaxIterations,
 		AgentType:                   customAgent.Config.AgentType,
 		Temperature:                 customAgent.Config.Temperature,
+		MaxCompletionTokens:         customAgent.Config.MaxCompletionTokens,
 		WebSearchEnabled:            customAgent.Config.WebSearchEnabled && req.WebSearchEnabled,
 		WebSearchMaxResults:         customAgent.Config.WebSearchMaxResults,
 		WebSearchProviderID:         customAgent.Config.WebSearchProviderID,

@@ -66,6 +66,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentrecovery"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/maintenance"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/objectnamespace"
@@ -313,6 +314,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 		// already handles.
 		must(container.Provide(router.NewNoopTaskInspector))
 	}
+	must(container.Provide(knowledgepurge.NewCoordinator))
 	must(container.Provide(documentsplit.NewManager))
 	// Custom Wiki queue recovery republishes a missing Redis wake-up for any
 	// durable PostgreSQL pending-op. Keep the implementation outside native

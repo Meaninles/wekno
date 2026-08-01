@@ -172,7 +172,6 @@ const referenceContent = computed(() => {
 const items = computed(() => buildCitedSourceReferenceItems(
   props.session?.knowledge_references,
   referenceContent.value,
-  Boolean(props.session?.is_completed),
 ))
 
 const allItems = computed(() => buildSourceReferenceItems(props.session?.knowledge_references))

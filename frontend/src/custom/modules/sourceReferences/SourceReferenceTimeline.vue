@@ -44,7 +44,7 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-type SourceKind = 'knowledge' | 'wiki' | 'web' | 'data_source'
+type SourceKind = 'knowledge' | 'wiki' | 'web'
 
 type SourceReference = {
   id?: string
@@ -160,39 +160,14 @@ const webRows = computed<SourceRow[]>(() => {
   return rows
 })
 
-const dataSourceRows = computed<SourceRow[]>(() => {
-  const rows: SourceRow[] = []
-  const seen = new Set<string>()
-  for (const ref of references.value) {
-    if (sourceKind(ref) !== 'data_source') continue
-    const metadata = ref.metadata || {}
-    const sourceId = metadata.source_id || ref.id?.replace(/^data_source:/, '') || ''
-    const title = metadata.source_name || ref.knowledge_title || sourceId || '数据源'
-    const key = `data_source:${sourceId || title}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    rows.push({
-      key,
-      type: 'data_source',
-      title,
-      meta: metadata.database_type || '数据源',
-      icon: 'server',
-      clickable: Boolean(sourceId),
-      sourceId,
-    })
-  }
-  return rows
-})
-
 const sourceRows = computed(() => [
   ...knowledgeRows.value,
   ...wikiRows.value,
   ...webRows.value,
-  ...dataSourceRows.value,
 ])
 
 const totalCount = computed(() =>
-  knowledgeRows.value.length + wikiRows.value.length + webRows.value.length + dataSourceRows.value.length,
+  knowledgeRows.value.length + wikiRows.value.length + webRows.value.length,
 )
 
 const headerText = computed(() => {
@@ -200,7 +175,6 @@ const headerText = computed(() => {
   if (knowledgeRows.value.length) parts.push(`${knowledgeRows.value.length}篇文档`)
   if (wikiRows.value.length) parts.push(`${wikiRows.value.length}个Wiki页面`)
   if (webRows.value.length) parts.push(`${webRows.value.length}条网页`)
-  if (dataSourceRows.value.length) parts.push(`${dataSourceRows.value.length}个数据源`)
   return parts.length > 0 ? `引用了${joinChinese(parts)}` : `引用了${totalCount.value}个来源`
 })
 
@@ -208,10 +182,10 @@ function sourceKind(ref: SourceReference): SourceKind {
   const metadataType = ref.metadata?.source_type
   if (metadataType === 'wiki') return 'wiki'
   if (metadataType === 'web') return 'web'
-  if (metadataType === 'data_source') return 'data_source'
+  if (metadataType === 'data_source') return 'knowledge'
   if (ref.chunk_type === 'wiki_page') return 'wiki'
   if (ref.chunk_type === 'web_search') return 'web'
-  if (ref.chunk_type === 'data_source') return 'data_source'
+  if (ref.chunk_type === 'data_source') return 'knowledge'
   return 'knowledge'
 }
 
@@ -244,12 +218,6 @@ function activateItem(item: SourceRow) {
       query: { tab: 'graph', slug: item.slug },
     })
     return
-  }
-  if (item.type === 'data_source' && item.sourceId) {
-    router.push({
-      path: '/platform/data-sources',
-      query: { source_id: item.sourceId },
-    })
   }
 }
 

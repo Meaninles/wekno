@@ -466,6 +466,20 @@ const (
 	knowledgeDeleteQuiescePoll    = 250 * time.Millisecond
 )
 
+type knowledgeDeletionResidueCoordinator interface {
+	QuiesceDerivativeTasks(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeBaseID string,
+		knowledgeIDs []string,
+	) error
+	CleanupCompletedKnowledgeBase(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeBaseID string,
+	) error
+}
+
 // quiesceKnowledgeDeletion establishes a hard hand-off between document
 // workers and destructive cleanup. Merely setting parse_status=deleting or
 // sending an asynq cancellation is insufficient: an already-running worker
@@ -837,6 +851,22 @@ func (s *knowledgeService) deleteKnowledgeListExpected(
 		}
 		knowledgeBases[knowledge.KnowledgeBaseID] = kb
 	}
+	if s.purgeCoordinator == nil {
+		return errors.New("knowledge delete batch: derivative residue coordinator is unavailable")
+	}
+	deleteIDsByKB := make(map[string][]string, len(knowledgeBases))
+	for _, knowledge := range knowledgeList {
+		deleteIDsByKB[knowledge.KnowledgeBaseID] = append(
+			deleteIDsByKB[knowledge.KnowledgeBaseID], knowledge.ID,
+		)
+	}
+	for kbID, scopedIDs := range deleteIDsByKB {
+		if err := s.purgeCoordinator.QuiesceDerivativeTasks(
+			ctx, tenantInfo.ID, kbID, scopedIDs,
+		); err != nil {
+			return fmt.Errorf("knowledge delete batch: quiesce derivative tasks for KB %s: %w", kbID, err)
+		}
+	}
 
 	// Read through soft deletes on every retry. Failure is a hard boundary:
 	// finalizing without this snapshot would orphan extracted image objects.
@@ -960,7 +990,8 @@ func (s *knowledgeService) deleteKnowledgeListExpected(
 	// The live-task quiescence barrier above guarantees no document-owned
 	// worker can still publish a terminal record. Remove completed/archived
 	// root and derivative task metadata before finalizing the soft-delete
-	// tombstone; the durable PostgreSQL workflow remains as the audit trail.
+	// tombstone; derivative response payloads and durable workflow execution
+	// rows are removed atomically by the finalizer below.
 	taskHistoryPurger, ok := s.taskInspector.(interfaces.TaskHistoryPurger)
 	if !ok {
 		return errors.New("knowledge delete: terminal task-history purger unavailable")

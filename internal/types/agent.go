@@ -13,16 +13,17 @@ const DefaultMaxContextTokens = 200000
 // AgentConfig represents the full agent configuration (used at tenant level and runtime)
 // This includes all configuration parameters for agent execution
 type AgentConfig struct {
-	AgentID        string   `json:"agent_id,omitempty"`        // Runtime custom/built-in agent ID
-	AgentTenantID  uint64   `json:"-"`                         // Runtime source tenant for shared custom agents
-	MaxIterations  int      `json:"max_iterations"`            // Maximum number of ReAct iterations
-	AllowedTools   []string `json:"allowed_tools"`             // List of allowed tool names
-	AgentType      string   `json:"agent_type,omitempty"`      // Smart-reasoning preset type
-	Temperature    float64  `json:"temperature"`               // LLM temperature for agent
-	KnowledgeBases []string `json:"knowledge_bases"`           // Accessible knowledge base IDs
-	KnowledgeIDs   []string `json:"knowledge_ids"`             // Accessible knowledge IDs (individual documents)
-	DBDataSources  []string `json:"db_data_sources,omitempty"` // Accessible database analytics source IDs
-	SystemPrompt   string   `json:"system_prompt,omitempty"`   // Unified system prompt (uses web_search_status placeholder for dynamic behavior)
+	AgentID             string   `json:"agent_id,omitempty"`              // Runtime custom/built-in agent ID
+	AgentTenantID       uint64   `json:"-"`                               // Runtime source tenant for shared custom agents
+	MaxIterations       int      `json:"max_iterations"`                  // Maximum number of ReAct iterations
+	AllowedTools        []string `json:"allowed_tools"`                   // List of allowed tool names
+	AgentType           string   `json:"agent_type,omitempty"`            // Smart-reasoning preset type
+	Temperature         float64  `json:"temperature"`                     // LLM temperature for agent
+	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"` // Maximum output tokens for each agent model call
+	KnowledgeBases      []string `json:"knowledge_bases"`                 // Accessible knowledge base IDs
+	KnowledgeIDs        []string `json:"knowledge_ids"`                   // Accessible knowledge IDs (individual documents)
+	DBDataSources       []string `json:"db_data_sources,omitempty"`       // Accessible database analytics source IDs
+	SystemPrompt        string   `json:"system_prompt,omitempty"`         // Unified system prompt (uses web_search_status placeholder for dynamic behavior)
 	// DocumentTemplate is scoped to AgentTypeDocumentProcessingAgent and carries
 	// template requirement/reference files into the Claude SDK sidecar.
 	DocumentTemplate *DocumentTemplateConfig `json:"document_template,omitempty"`

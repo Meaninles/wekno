@@ -672,10 +672,12 @@ func cancelStaleRow(tx *gorm.DB, row WorkItem, now time.Time) error {
 		Updates(map[string]any{
 			"state": StateCancelled, "completed_at": now,
 			"owner_instance_id": "", "lease_token": "", "lease_until": nil,
-			"last_error_class":   "generation_fence",
-			"last_error_code":    "generation_changed",
-			"last_error_message": "processing generation or document lifecycle changed",
-			"version":            row.Version + 1, "updated_at": now,
+			"dispatch_lease_until": nil,
+			"last_heartbeat_at":    nil,
+			"last_error_class":     "generation_fence",
+			"last_error_code":      "generation_changed",
+			"last_error_message":   "processing generation or document lifecycle changed",
+			"version":              row.Version + 1, "updated_at": now,
 		})
 	if result.Error != nil {
 		return result.Error

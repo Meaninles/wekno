@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -916,6 +917,18 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					return nil
 				}
 				completionHandled = true
+				filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
+					streamCtx.assistantMessage.Content,
+					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+				)
+				if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+					logger.Warnf(streamCtx.asyncCtx,
+						"Knowledge QA filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+						citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
+					)
+				}
+				streamCtx.assistantMessage.Content = filteredAnswer
+				streamCtx.assistantMessage.KnowledgeReferences = types.References(citedRefs)
 
 				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
 				updateCtx := context.WithValue(streamCtx.asyncCtx, types.TenantIDContextKey, reqCtx.session.TenantID)
@@ -923,7 +936,13 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
 					Type:      event.EventAgentComplete,
 					SessionID: sessionID,
-					Data:      event.AgentCompleteData{FinalAnswer: streamCtx.assistantMessage.Content},
+					Data: event.AgentCompleteData{
+						FinalAnswer:                streamCtx.assistantMessage.Content,
+						KnowledgeRefs:              citedRefs,
+						KnowledgeRefsAuthoritative: true,
+						MessageID:                  streamCtx.assistantMessage.ID,
+						RequestID:                  reqCtx.requestID,
+					},
 				})
 			}
 			return nil

@@ -46,10 +46,13 @@ export function getSourceReferenceKind(ref: SourceReference): SourceReferenceKin
   const metadataType = ref.metadata?.source_type
   if (metadataType === 'wiki') return 'wiki'
   if (metadataType === 'web') return 'web'
-  if (metadataType === 'data_source') return 'data_source'
+  // Query/table evidence is rendered through the existing document-fragment
+  // presentation. The user-facing citation taxonomy remains exactly three
+  // kinds: document fragment, Wiki, and webpage.
+  if (metadataType === 'data_source') return 'knowledge'
   if (ref.chunk_type === 'wiki_page') return 'wiki'
   if (ref.chunk_type === 'web_search') return 'web'
-  if (ref.chunk_type === 'data_source') return 'data_source'
+  if (ref.chunk_type === 'data_source') return 'knowledge'
   return 'knowledge'
 }
 
@@ -142,7 +145,6 @@ export function findSourceReferenceItem(
 export function buildCitedSourceReferenceItems(
   refs: SourceReference[] | null | undefined,
   content: string,
-  includeFallback: boolean,
 ): SourceReferenceItem[] {
   const allItems = buildSourceReferenceItems(refs)
   if (!allItems.length) return []
@@ -161,13 +163,7 @@ export function buildCitedSourceReferenceItems(
     seen.add(item.key)
     citedItems.push(item)
   }
-  if (citedItems.length > 0) return renumberSourceItems(citedItems)
-
-  if (!includeFallback || hasLegacyInlineCitation(content)) return []
-  return allItems
-    .filter((item) => item.type !== 'data_source' && item.citationId)
-    .slice(0, 6)
-    .map((item, index) => ({ ...item, number: index + 1 }))
+  return citedItems.length > 0 ? renumberSourceItems(citedItems) : []
 }
 
 export function extractSourceCitationIds(content: string): string[] {

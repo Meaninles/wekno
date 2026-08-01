@@ -1,5 +1,7 @@
 package event
 
+import "github.com/Tencent/WeKnora/internal/types"
+
 // EventData contains common event data structures for different stages
 
 // QueryData represents query-related event data
@@ -148,15 +150,19 @@ type AgentQueryData struct {
 
 // AgentCompleteData represents agent completion event data
 type AgentCompleteData struct {
-	SessionID       string                 `json:"session_id"`
-	TotalSteps      int                    `json:"total_steps"`
-	FinalAnswer     string                 `json:"final_answer"`
-	KnowledgeRefs   []interface{}          `json:"knowledge_refs,omitempty"` // []*types.SearchResult
-	AgentSteps      interface{}            `json:"agent_steps,omitempty"`    // []types.AgentStep - detailed execution steps
-	TotalDurationMs int64                  `json:"total_duration_ms"`
-	MessageID       string                 `json:"message_id,omitempty"` // Assistant message ID
-	RequestID       string                 `json:"request_id,omitempty"`
-	Extra           map[string]interface{} `json:"extra,omitempty"`
+	SessionID     string                `json:"session_id"`
+	TotalSteps    int                   `json:"total_steps"`
+	FinalAnswer   string                `json:"final_answer"`
+	KnowledgeRefs []*types.SearchResult `json:"knowledge_refs,omitempty"`
+	// KnowledgeRefsAuthoritative distinguishes an intentional empty cited set
+	// from an older producer that omitted the field. Completion handlers must
+	// replace append-only interim references when this flag is true.
+	KnowledgeRefsAuthoritative bool                   `json:"knowledge_refs_authoritative,omitempty"`
+	AgentSteps                 interface{}            `json:"agent_steps,omitempty"` // []types.AgentStep - detailed execution steps
+	TotalDurationMs            int64                  `json:"total_duration_ms"`
+	MessageID                  string                 `json:"message_id,omitempty"` // Assistant message ID
+	RequestID                  string                 `json:"request_id,omitempty"`
+	Extra                      map[string]interface{} `json:"extra,omitempty"`
 }
 
 // === Streaming Event Data Structures ===
@@ -205,8 +211,8 @@ type AgentToolResultData struct {
 
 // AgentReferencesData represents knowledge references data
 type AgentReferencesData struct {
-	References interface{} `json:"references"` // []*types.SearchResult
-	Iteration  int         `json:"iteration"`
+	References []*types.SearchResult `json:"references"`
+	Iteration  int                   `json:"iteration"`
 }
 
 // AgentFinalAnswerData represents final answer streaming data

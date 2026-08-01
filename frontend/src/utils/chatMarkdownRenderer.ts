@@ -3,7 +3,6 @@ import markedKatex from 'marked-katex-extension'
 import type { Tokens } from 'marked'
 
 import {
-  appendFallbackSourceCitations,
   collapseStandaloneCitationParagraphs,
   extractCitationHtmlPlaceholders,
   joinCitationTagsToPreviousLine,
@@ -351,9 +350,7 @@ export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMark
 
   configureMarkedForChatMarkdown()
 
-  const sourceSafeText = options.streaming
-    ? rawText
-    : appendFallbackSourceCitations(rawText, options.knowledgeReferences)
+  const sourceSafeText = rawText
   const streamingSafeText = options.streaming
     ? stripTrailingStreamingListMarker(stripTrailingStreamingHorizontalRule(rawText))
     : sourceSafeText

@@ -81,9 +81,34 @@ type TaskInspector interface {
 type TaskHistoryPurger interface {
 	// PurgeTaskHistoryForKnowledge removes completed / archived backend task
 	// records owned exclusively by one document. Callers must first prove live
-	// task quiescence. The durable PostgreSQL document workflow is outside this
-	// cleanup boundary and remains available as the audit trail.
+	// task quiescence. PostgreSQL execution rows are outside this Redis cleanup
+	// boundary and are removed atomically by the document deletion finalizer.
 	PurgeTaskHistoryForKnowledge(ctx context.Context, knowledgeID string) (deleted int, err error)
+}
+
+// DerivativeTaskHistoryTarget is the exact Redis identity range emitted for
+// one PostgreSQL-authoritative derivative work item. DispatchEpoch is a high
+// water mark: every durable wake for the item has the deterministic ID
+// "derivative:<work_item_id>:<epoch>" for 1 <= epoch <= DispatchEpoch.
+// LegacyTaskID optionally names the generation-scoped datatable task emitted
+// before table enrichment moved to the durable derivative queue.
+type DerivativeTaskHistoryTarget struct {
+	WorkItemID    string
+	DispatchEpoch uint64
+	LegacyTaskID  string
+}
+
+// DerivativeTaskHistoryPurger is the deletion-only exact cleanup extension.
+// The derivative queue payload intentionally contains only work_item_id, so a
+// normal knowledge-id payload scan cannot attribute or cancel these wakes.
+// Implementations must cancel matching live handlers, prove quiescence, and
+// remove only the supplied deterministic terminal task IDs; a full scan of
+// the shared derivative queue is expressly outside this contract.
+type DerivativeTaskHistoryPurger interface {
+	QuiesceAndPurgeDerivativeTaskHistory(
+		ctx context.Context,
+		targets []DerivativeTaskHistoryTarget,
+	) (deleted int, err error)
 }
 
 // KnowledgeDeletionTaskInspector is the deletion-only liveness extension.

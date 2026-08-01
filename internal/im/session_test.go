@@ -240,10 +240,11 @@ func TestApplyIMCompleteDataToMessage(t *testing.T) {
 	}}
 
 	applyIMCompleteDataToMessage(msg, event.AgentCompleteData{
-		MessageID:       "assistant-1",
-		TotalDurationMs: 1234,
-		KnowledgeRefs:   []interface{}{ref},
-		AgentSteps:      steps,
+		MessageID:                  "assistant-1",
+		TotalDurationMs:            1234,
+		KnowledgeRefs:              []*types.SearchResult{ref},
+		KnowledgeRefsAuthoritative: true,
+		AgentSteps:                 steps,
 	})
 
 	if !msg.IsCompleted {

@@ -129,6 +129,20 @@ type kbDeleteWakeStub struct {
 	err   error
 }
 
+type kbDeleteResidueStub struct{}
+
+func (*kbDeleteResidueStub) QuiesceDerivativeTasks(
+	context.Context, uint64, string, []string,
+) error {
+	return nil
+}
+
+func (*kbDeleteResidueStub) CleanupCompletedKnowledgeBase(
+	context.Context, uint64, string,
+) error {
+	return nil
+}
+
 func (s *kbDeleteWakeStub) Enqueue(*asynq.Task, ...asynq.Option) (*asynq.TaskInfo, error) {
 	s.calls++
 	if s.err != nil {
@@ -194,6 +208,24 @@ func newKBDeleteWorkerHarness(t *testing.T) (
 			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
 			content TEXT NOT NULL DEFAULT '', deleted_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_work_items (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_provider_calls (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_results (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_queue_workflows (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_queue_schedule_groups (
+			tenant_id INTEGER NOT NULL, knowledge_base_id TEXT NOT NULL,
+			PRIMARY KEY (tenant_id, knowledge_base_id)
+		)`,
 	} {
 		require.NoError(t, db.Exec(statement).Error)
 	}
@@ -221,16 +253,17 @@ func newKBDeleteWorkerHarness(t *testing.T) (
 	inspector := &kbDeleteInspectorStub{}
 	wake := &kbDeleteWakeStub{}
 	svc := &knowledgeBaseService{
-		repo:            repository.NewKnowledgeBaseRepository(db),
-		kgRepo:          &kbDeleteKnowledgeRepoStub{db: db},
-		chunkRepo:       chunkRepo,
-		tenantRepo:      &kbDeleteTenantRepoStub{tenant: tenant},
-		graphEngine:     graph,
-		asynqClient:     wake,
-		taskInspector:   inspector,
-		kbDeleteQueue:   outbox,
-		wikiDeleteCoord: wikidelete.New(db),
-		auxObjects:      knowledgeaux.NewWithResolver(db, nil),
+		repo:             repository.NewKnowledgeBaseRepository(db),
+		kgRepo:           &kbDeleteKnowledgeRepoStub{db: db},
+		chunkRepo:        chunkRepo,
+		tenantRepo:       &kbDeleteTenantRepoStub{tenant: tenant},
+		graphEngine:      graph,
+		asynqClient:      wake,
+		taskInspector:    inspector,
+		kbDeleteQueue:    outbox,
+		wikiDeleteCoord:  wikidelete.New(db),
+		auxObjects:       knowledgeaux.NewWithResolver(db, nil),
+		purgeCoordinator: &kbDeleteResidueStub{},
 	}
 	return svc, db, payloadBytes, chunkRepo, graph, inspector, outbox
 }

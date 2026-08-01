@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/artifactstore"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	modelprovider "github.com/Tencent/WeKnora/internal/models/provider"
@@ -365,19 +366,28 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		})
 	}
 
+	allRefs := active.snapshotSourceReferences()
+	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
+	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+		logger.Warnf(ctx, "general-agent filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
+	}
+	finalAnswer = filteredAnswer
 	steps := active.snapshotSteps(finalAnswer)
 	eventBus.Emit(ctx, event.Event{
 		Type:      event.EventAgentComplete,
 		SessionID: sessionID,
 		RequestID: req.RequestID,
 		Data: event.AgentCompleteData{
-			SessionID:       sessionID,
-			FinalAnswer:     finalAnswer,
-			AgentSteps:      steps,
-			TotalSteps:      len(steps),
-			TotalDurationMs: time.Since(start).Milliseconds(),
-			MessageID:       req.AssistantMessageID,
-			RequestID:       req.RequestID,
+			SessionID:                  sessionID,
+			FinalAnswer:                finalAnswer,
+			KnowledgeRefs:              citedRefs,
+			KnowledgeRefsAuthoritative: true,
+			AgentSteps:                 steps,
+			TotalSteps:                 len(steps),
+			TotalDurationMs:            time.Since(start).Milliseconds(),
+			MessageID:                  req.AssistantMessageID,
+			RequestID:                  req.RequestID,
 		},
 	})
 	return nil
@@ -815,6 +825,9 @@ func (s *Service) buildHistory(ctx context.Context, req *types.QARequest, config
 			continue
 		}
 		content := strings.TrimSpace(msg.Content)
+		if role == "assistant" {
+			content = strings.TrimSpace(sourcerefs.StripCitationProtocol(content))
+		}
 		if content == "" {
 			continue
 		}

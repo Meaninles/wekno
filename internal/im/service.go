@@ -17,6 +17,7 @@ import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -646,17 +647,26 @@ func createIMAssistantMessagePayload(sessionID, requestID string) *types.Message
 	}
 }
 
-func collectIMKnowledgeReferences(dst *[]*types.SearchResult, refs interface{}) {
-	switch v := refs.(type) {
-	case []*types.SearchResult:
-		*dst = append(*dst, v...)
-	case []interface{}:
-		for _, ref := range v {
-			if sr, ok := ref.(*types.SearchResult); ok {
-				*dst = append(*dst, sr)
+func collectIMKnowledgeReferences(dst *[]*types.SearchResult, refs []*types.SearchResult) {
+	if dst == nil {
+		return
+	}
+	seen := make(map[string]bool, len(*dst)+len(refs))
+	out := make([]*types.SearchResult, 0, len(*dst)+len(refs))
+	for _, group := range [][]*types.SearchResult{*dst, refs} {
+		for _, ref := range group {
+			if ref == nil {
+				continue
 			}
+			key := sourcerefs.CitationKey(ref)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, ref)
 		}
 	}
+	*dst = out
 }
 
 func sanitizeIMAgentSteps(raw interface{}) types.AgentSteps {
@@ -679,12 +689,12 @@ func applyIMCompleteDataToMessage(msg *types.Message, data event.AgentCompleteDa
 	}
 	msg.IsCompleted = true
 	msg.AgentDurationMs = data.TotalDurationMs
-	if len(data.KnowledgeRefs) > 0 {
-		refs := make([]*types.SearchResult, 0, len(data.KnowledgeRefs))
+	if data.KnowledgeRefsAuthoritative {
+		msg.KnowledgeReferences = types.References(data.KnowledgeRefs)
+	} else if len(data.KnowledgeRefs) > 0 {
+		refs := []*types.SearchResult(msg.KnowledgeReferences)
 		collectIMKnowledgeReferences(&refs, data.KnowledgeRefs)
-		if len(refs) > 0 {
-			msg.KnowledgeReferences = types.References(refs)
-		}
+		msg.KnowledgeReferences = types.References(refs)
 	}
 	if steps := sanitizeIMAgentSteps(data.AgentSteps); len(steps) > 0 {
 		msg.AgentSteps = steps

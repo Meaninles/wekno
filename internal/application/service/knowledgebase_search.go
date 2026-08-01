@@ -258,7 +258,7 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 	// timeout surfaced as ErrVectorStoreUnavailable) must surface to the
 	// caller rather than be silently converted to a truncated chunk list.
 	deduplicatedChunks, err = s.applyFAQPostProcessing(
-		ctx, kb, deduplicatedChunks, vectorResults, groups, params, matchCount)
+		ctx, kbs, deduplicatedChunks, vectorResults, groups, params, matchCount)
 	if err != nil {
 		return nil, err
 	}

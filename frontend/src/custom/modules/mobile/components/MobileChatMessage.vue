@@ -322,7 +322,6 @@ const sourceReferenceItems = computed(() => props.shareMode
   : buildCitedSourceReferenceItems(
     Array.isArray(props.message.knowledge_references) ? props.message.knowledge_references : [],
     answerMarkdown.value,
-    Boolean(props.message.is_completed),
   )
 );
 

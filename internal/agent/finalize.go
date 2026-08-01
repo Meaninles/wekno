@@ -107,8 +107,9 @@ Now generate the final answer:`, query)
 		ctx,
 		messages,
 		&chat.ChatOptions{
-			Temperature: e.config.Temperature,
-			Thinking:    &thinking,
+			Temperature:         e.config.Temperature,
+			MaxCompletionTokens: e.config.MaxCompletionTokens,
+			Thinking:            &thinking,
 		},
 		func(chunk *types.StreamResponse, fullContent string) {
 			// Defensive filter: only emit answer content, skip thinking chunks
@@ -284,23 +285,25 @@ func (e *AgentEngine) handleMaxIterations(
 func (e *AgentEngine) emitCompletionEvent(
 	ctx context.Context, state *types.AgentState, sessionID, messageID string, startTime time.Time,
 ) {
-	// Convert knowledge refs to interface{} slice for event data
-	knowledgeRefsInterface := make([]interface{}, 0, len(state.KnowledgeRefs))
-	for _, ref := range state.KnowledgeRefs {
-		knowledgeRefsInterface = append(knowledgeRefsInterface, ref)
+	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
+	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
+		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs)
 	}
-
+	state.FinalAnswer = filteredAnswer
+	state.KnowledgeRefs = citedRefs
 	e.eventBus.Emit(ctx, event.Event{
 		ID:        generateEventID("complete"),
 		Type:      event.EventAgentComplete,
 		SessionID: sessionID,
 		Data: event.AgentCompleteData{
-			FinalAnswer:     state.FinalAnswer,
-			KnowledgeRefs:   knowledgeRefsInterface,
-			AgentSteps:      state.RoundSteps, // Include detailed execution steps for message storage
-			TotalSteps:      len(state.RoundSteps),
-			TotalDurationMs: time.Since(startTime).Milliseconds(),
-			MessageID:       messageID, // Include message ID for proper message update
+			FinalAnswer:                state.FinalAnswer,
+			KnowledgeRefs:              citedRefs,
+			KnowledgeRefsAuthoritative: true,
+			AgentSteps:                 state.RoundSteps, // Include detailed execution steps for message storage
+			TotalSteps:                 len(state.RoundSteps),
+			TotalDurationMs:            time.Since(startTime).Milliseconds(),
+			MessageID:                  messageID, // Include message ID for proper message update
 		},
 	})
 

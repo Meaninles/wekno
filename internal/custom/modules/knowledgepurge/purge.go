@@ -3,6 +3,7 @@
 package knowledgepurge
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -104,6 +105,23 @@ func DeleteSoftRowArtifacts(tx *gorm.DB, tenantID uint64, knowledgeIDs []string)
 		{"document split parts", "DELETE FROM custom_document_split_parts WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"document split plans", "DELETE FROM custom_document_split_plans WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"Wiki operation logs", "DELETE FROM wiki_log_entries WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
+		// Durable derivative responses and workflow payloads may contain the
+		// complete generated output or source path. They are execution state,
+		// not an audit record for a document the user deleted. Explicit child
+		// deletion keeps this correct even on an installation whose historical
+		// foreign key was created without ON DELETE CASCADE.
+		{"derivative results", `DELETE FROM custom_derivative_results
+			WHERE work_item_id IN (
+				SELECT id FROM custom_derivative_work_items
+				 WHERE tenant_id = ? AND knowledge_id IN ?
+			)`, []interface{}{tenantID, ids}},
+		{"derivative provider calls", `DELETE FROM custom_derivative_provider_calls
+			WHERE work_item_id IN (
+				SELECT id FROM custom_derivative_work_items
+				 WHERE tenant_id = ? AND knowledge_id IN ?
+			)`, []interface{}{tenantID, ids}},
+		{"derivative work items", "DELETE FROM custom_derivative_work_items WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
+		{"document queue workflows", "DELETE FROM custom_document_queue_workflows WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"task dead letters", `DELETE FROM task_dead_letters
 			WHERE tenant_id = ?
 			  AND (
@@ -130,6 +148,9 @@ func DeleteSoftRowArtifacts(tx *gorm.DB, tenantID uint64, knowledgeIDs []string)
 			return fmt.Errorf("delete %s: %w", statement.name, err)
 		}
 	}
+	if err := deletePayloadDeadLetters(tx, tenantID, "", ids); err != nil {
+		return err
+	}
 	// Provider deletion is an external side effect. CleanupForDelete changes
 	// each exact ownership row into a durable delete-complete proof so a crash
 	// or a later subsystem failure can retry without treating the now-absent
@@ -150,6 +171,128 @@ func DeleteSoftRowArtifacts(tx *gorm.DB, tenantID uint64, knowledgeIDs []string)
 		).Error; err != nil {
 			return fmt.Errorf("delete knowledge auxiliary completion proofs: %w", err)
 		}
+	}
+	return nil
+}
+
+// DeleteKnowledgeBaseArtifacts removes KB-scoped queue scheduling and any
+// defensive leftovers not reachable through an individual knowledge finalize.
+// Callers must first fence and purge exact Redis derivative task IDs.
+func DeleteKnowledgeBaseArtifacts(
+	tx *gorm.DB,
+	tenantID uint64,
+	knowledgeBaseID string,
+) error {
+	if tx == nil || tenantID == 0 || strings.TrimSpace(knowledgeBaseID) == "" {
+		return errors.New("knowledge-base purge requires a transaction and complete identity")
+	}
+	kbID := strings.TrimSpace(knowledgeBaseID)
+	var ids []string
+	if err := tx.Unscoped().Table("knowledges").
+		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
+		Pluck("id", &ids).Error; err != nil {
+		return fmt.Errorf("list KB knowledge tombstones for residue purge: %w", err)
+	}
+	statements := []struct {
+		name  string
+		query string
+		args  []interface{}
+	}{
+		{"KB derivative results", `DELETE FROM custom_derivative_results
+			WHERE work_item_id IN (
+				SELECT id FROM custom_derivative_work_items
+				 WHERE tenant_id = ? AND knowledge_base_id = ?
+			)`, []interface{}{tenantID, kbID}},
+		{"KB derivative provider calls", `DELETE FROM custom_derivative_provider_calls
+			WHERE work_item_id IN (
+				SELECT id FROM custom_derivative_work_items
+				 WHERE tenant_id = ? AND knowledge_base_id = ?
+			)`, []interface{}{tenantID, kbID}},
+		{"KB derivative work items", "DELETE FROM custom_derivative_work_items WHERE tenant_id = ? AND knowledge_base_id = ?", []interface{}{tenantID, kbID}},
+		{"KB document queue workflows", "DELETE FROM custom_document_queue_workflows WHERE tenant_id = ? AND knowledge_base_id = ?", []interface{}{tenantID, kbID}},
+		{"KB document queue schedule group", "DELETE FROM custom_document_queue_schedule_groups WHERE tenant_id = ? AND knowledge_base_id = ?", []interface{}{tenantID, kbID}},
+		{"KB durable task operations", "DELETE FROM task_pending_ops WHERE tenant_id = ? AND scope = 'knowledge_base' AND scope_id = ?", []interface{}{tenantID, kbID}},
+		{"KB-scoped task dead letters", "DELETE FROM task_dead_letters WHERE tenant_id = ? AND scope = 'knowledge_base' AND scope_id = ?", []interface{}{tenantID, kbID}},
+	}
+	for _, statement := range statements {
+		if err := tx.Exec(statement.query, statement.args...).Error; err != nil {
+			return fmt.Errorf("delete %s: %w", statement.name, err)
+		}
+	}
+	if err := deletePayloadDeadLetters(tx, tenantID, kbID, ids); err != nil {
+		return err
+	}
+	return nil
+}
+
+type deadLetterPayloadRow struct {
+	ID      uint64
+	Payload []byte
+}
+
+type deadLetterIdentityProbe struct {
+	KnowledgeID      string   `json:"knowledge_id"`
+	KnowledgeIDs     []string `json:"knowledge_ids"`
+	KnowledgeBaseID  string   `json:"knowledge_base_id"`
+	ExpectedSnapshot struct {
+		KnowledgeBaseID string `json:"knowledge_base_id"`
+	} `json:"expected_snapshot"`
+}
+
+// deletePayloadDeadLetters covers batch controllers whose dead-letter scope is
+// tenant-wide and whose only ownership evidence lives inside JSON payload.
+// Decode-and-delete by primary key avoids dialect-specific JSON expressions
+// and false positives from substring matching.
+func deletePayloadDeadLetters(
+	tx *gorm.DB,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeIDs []string,
+) error {
+	wanted := make(map[string]struct{}, len(knowledgeIDs))
+	for _, id := range knowledgeIDs {
+		wanted[id] = struct{}{}
+	}
+	var rows []deadLetterPayloadRow
+	query := tx.Table("task_dead_letters").
+		Select("id, payload").
+		Where("tenant_id = ? AND task_type IN ?", tenantID, []string{"knowledge:list_reparse", "knowledge:move"})
+	if err := query.Find(&rows).Error; err != nil {
+		return fmt.Errorf("list batch task dead letters: %w", err)
+	}
+	deleteIDs := make([]uint64, 0)
+	for _, row := range rows {
+		var probe deadLetterIdentityProbe
+		if err := json.Unmarshal(row.Payload, &probe); err != nil {
+			// Malformed dead letters stay visible to operators rather than being
+			// guessed away during deletion.
+			continue
+		}
+		match := false
+		if _, ok := wanted[probe.KnowledgeID]; ok && probe.KnowledgeID != "" {
+			match = true
+		}
+		for _, id := range probe.KnowledgeIDs {
+			if _, ok := wanted[id]; ok {
+				match = true
+				break
+			}
+		}
+		if knowledgeBaseID != "" &&
+			(probe.KnowledgeBaseID == knowledgeBaseID || probe.ExpectedSnapshot.KnowledgeBaseID == knowledgeBaseID) {
+			match = true
+		}
+		if match {
+			deleteIDs = append(deleteIDs, row.ID)
+		}
+	}
+	if len(deleteIDs) == 0 {
+		return nil
+	}
+	if err := tx.Exec(
+		"DELETE FROM task_dead_letters WHERE tenant_id = ? AND id IN ?", tenantID, deleteIDs,
+	).Error; err != nil {
+		return fmt.Errorf("delete batch task dead letters: %w", err)
 	}
 	return nil
 }

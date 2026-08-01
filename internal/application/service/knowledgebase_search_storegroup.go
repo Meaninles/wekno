@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
@@ -97,8 +98,21 @@ func (s *knowledgeBaseService) resolveStoreGroups(
 		buckets[key] = append(buckets[key], kb)
 	}
 
+	keys := make([]partitionKey, 0, len(buckets))
+	for key := range buckets {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].tenantID != keys[j].tenantID {
+			return keys[i].tenantID < keys[j].tenantID
+		}
+		return keys[i].storeID < keys[j].storeID
+	})
+
 	groups := make([]*storeGroup, 0, len(buckets))
-	for key, groupKBs := range buckets {
+	for _, key := range keys {
+		groupKBs := buckets[key]
+		sort.SliceStable(groupKBs, func(i, j int) bool { return groupKBs[i].ID < groupKBs[j].ID })
 		var storeIDPtr *string
 		if key.storeID != "" {
 			sid := key.storeID

@@ -17,6 +17,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
@@ -48,32 +49,33 @@ var (
 // knowledgeService implements the knowledge service interface
 // service 实现知识服务接口
 type knowledgeService struct {
-	config          *config.Config
-	retrieveEngine  interfaces.RetrieveEngineRegistry
-	ownership       retriever.TenantStoreOwnership
-	repo            interfaces.KnowledgeRepository
-	kbService       interfaces.KnowledgeBaseService
-	tenantRepo      interfaces.TenantRepository
-	tenantService   interfaces.TenantService
-	documentReader  interfaces.DocumentReader
-	chunkService    interfaces.ChunkService
-	chunkRepo       interfaces.ChunkRepository
-	tagRepo         interfaces.KnowledgeTagRepository
-	tagService      interfaces.KnowledgeTagService
-	fileSvc         interfaces.FileService
-	modelService    interfaces.ModelService
-	task            interfaces.TaskEnqueuer
-	taskInspector   interfaces.TaskInspector
-	graphEngine     interfaces.RetrieveGraphRepository
-	redisClient     *redis.Client
-	kbShareService  interfaces.KBShareService
-	imageResolver   *docparser.ImageResolver
-	taskPendingRepo interfaces.TaskPendingOpsRepository
-	wikiDeleteCoord *wikidelete.Coordinator
-	auxObjects      *knowledgeaux.Registry
-	splitManager    *documentsplit.Manager
-	modelAdmission  *modeladmission.Manager
-	contentCache    *contentcache.Store
+	config           *config.Config
+	retrieveEngine   interfaces.RetrieveEngineRegistry
+	ownership        retriever.TenantStoreOwnership
+	repo             interfaces.KnowledgeRepository
+	kbService        interfaces.KnowledgeBaseService
+	tenantRepo       interfaces.TenantRepository
+	tenantService    interfaces.TenantService
+	documentReader   interfaces.DocumentReader
+	chunkService     interfaces.ChunkService
+	chunkRepo        interfaces.ChunkRepository
+	tagRepo          interfaces.KnowledgeTagRepository
+	tagService       interfaces.KnowledgeTagService
+	fileSvc          interfaces.FileService
+	modelService     interfaces.ModelService
+	task             interfaces.TaskEnqueuer
+	taskInspector    interfaces.TaskInspector
+	graphEngine      interfaces.RetrieveGraphRepository
+	redisClient      *redis.Client
+	kbShareService   interfaces.KBShareService
+	imageResolver    *docparser.ImageResolver
+	taskPendingRepo  interfaces.TaskPendingOpsRepository
+	wikiDeleteCoord  *wikidelete.Coordinator
+	auxObjects       *knowledgeaux.Registry
+	splitManager     *documentsplit.Manager
+	modelAdmission   *modeladmission.Manager
+	contentCache     *contentcache.Store
+	purgeCoordinator knowledgeDeletionResidueCoordinator
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -124,38 +126,40 @@ func NewKnowledgeService(
 	splitManager *documentsplit.Manager,
 	modelAdmission *modeladmission.Manager,
 	contentCache *contentcache.Store,
+	purgeCoordinator *knowledgepurge.Coordinator,
 	spanTracker SpanTracker,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
-		config:          config,
-		repo:            repo,
-		kbService:       kbService,
-		tenantRepo:      tenantRepo,
-		tenantService:   tenantService,
-		documentReader:  documentReader,
-		chunkService:    chunkService,
-		chunkRepo:       chunkRepo,
-		tagRepo:         tagRepo,
-		tagService:      tagService,
-		fileSvc:         fileSvc,
-		modelService:    modelService,
-		task:            task,
-		taskInspector:   taskInspector,
-		graphEngine:     graphEngine,
-		retrieveEngine:  retrieveEngine,
-		ownership:       ownership,
-		redisClient:     redisClient,
-		kbShareService:  kbShareService,
-		imageResolver:   imageResolver,
-		wikiRepo:        wikiRepo,
-		wikiService:     wikiService,
-		taskPendingRepo: taskPendingRepo,
-		wikiDeleteCoord: wikiDeleteCoord,
-		auxObjects:      auxObjects,
-		splitManager:    splitManager,
-		modelAdmission:  modelAdmission,
-		contentCache:    contentCache,
-		spanTracker:     spanTracker,
+		config:           config,
+		repo:             repo,
+		kbService:        kbService,
+		tenantRepo:       tenantRepo,
+		tenantService:    tenantService,
+		documentReader:   documentReader,
+		chunkService:     chunkService,
+		chunkRepo:        chunkRepo,
+		tagRepo:          tagRepo,
+		tagService:       tagService,
+		fileSvc:          fileSvc,
+		modelService:     modelService,
+		task:             task,
+		taskInspector:    taskInspector,
+		graphEngine:      graphEngine,
+		retrieveEngine:   retrieveEngine,
+		ownership:        ownership,
+		redisClient:      redisClient,
+		kbShareService:   kbShareService,
+		imageResolver:    imageResolver,
+		wikiRepo:         wikiRepo,
+		wikiService:      wikiService,
+		taskPendingRepo:  taskPendingRepo,
+		wikiDeleteCoord:  wikiDeleteCoord,
+		auxObjects:       auxObjects,
+		splitManager:     splitManager,
+		modelAdmission:   modelAdmission,
+		contentCache:     contentCache,
+		purgeCoordinator: purgeCoordinator,
+		spanTracker:      spanTracker,
 	}, nil
 }
 

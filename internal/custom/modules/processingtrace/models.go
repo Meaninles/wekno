@@ -14,8 +14,10 @@ type Span struct {
 	RealAttemptCount       int        `json:"real_attempt_count" gorm:"not null;default:0"`
 	InputSummary           string     `json:"input_summary" gorm:"type:text;not null;default:''"`
 	OutputSummary          string     `json:"output_summary" gorm:"type:text;not null;default:''"`
+	MetadataSummary        string     `json:"metadata_summary" gorm:"type:text;not null;default:''"`
 	LastErrorCode          string     `json:"last_error_code" gorm:"type:varchar(64);not null;default:''"`
 	LastErrorMessage       string     `json:"last_error_message" gorm:"type:text;not null;default:''"`
+	LastErrorDetail        string     `json:"-" gorm:"type:text;not null;default:''"`
 	StartedAt              time.Time  `json:"started_at" gorm:"not null"`
 	LastBusinessProgressAt *time.Time `json:"last_business_progress_at,omitempty"`
 	FinishedAt             *time.Time `json:"finished_at,omitempty"`
@@ -49,8 +51,10 @@ type Upsert struct {
 	Status                 string
 	InputSummary           string
 	OutputSummary          string
+	MetadataSummary        string
 	LastErrorCode          string
 	LastErrorMessage       string
+	LastErrorDetail        string
 	StartedAt              time.Time
 	LastBusinessProgressAt *time.Time
 	FinishedAt             *time.Time

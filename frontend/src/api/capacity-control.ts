@@ -152,6 +152,10 @@ export interface CapacityPoolReport {
     work_window: number
     derivative_share: number
     wiki_share: number
+    wiki_map_work_share: number
+    wiki_commit_work_share: number
+    wiki_map_provider_share: number
+    wiki_commit_provider_share: number
     tenant_max: number
     document_max: number
     chat_sessions: number
@@ -161,13 +165,21 @@ export interface CapacityPoolReport {
     provider_background: number
     provider_derivative: number
     provider_wiki: number
+    provider_wiki_map: number
+    provider_wiki_commit: number
     provider_derivative_waiting: number
     provider_wiki_waiting: number
+    provider_wiki_map_waiting: number
+    provider_wiki_commit_waiting: number
     work_active: number
     work_derivative_active: number
     work_wiki_active: number
+    work_wiki_map_active: number
+    work_wiki_commit_active: number
     work_derivative_waiting: number
     work_wiki_waiting: number
+    work_wiki_map_waiting: number
+    work_wiki_commit_waiting: number
   }
   module_grants: CapacityModuleGrant[]
   issues: CapacityIssue[]

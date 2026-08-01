@@ -2,6 +2,7 @@ package modeladmission
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 )
 
@@ -9,8 +10,15 @@ type admissionGrantedHookKey struct{}
 type providerExecutionStateKey struct{}
 
 type providerExecutionState struct {
-	started atomic.Bool
-	parent  *providerExecutionState
+	started   atomic.Bool
+	parent    *providerExecutionState
+	mu        sync.Mutex
+	observers []*providerStartObserver
+}
+
+type providerStartObserver struct {
+	fn      func(context.Context)
+	started bool
 }
 
 // WithProviderExecutionTracking creates a task-local marker shared by every
@@ -32,6 +40,54 @@ func ProviderExecutionStarted(ctx context.Context) bool {
 	}
 	state, _ := ctx.Value(providerExecutionStateKey{}).(*providerExecutionState)
 	return state != nil && state.started.Load()
+}
+
+// RegisterProviderStartObserver attaches best-effort observability work to the
+// exact boundary after admission succeeds and before the provider is called.
+// Unlike the durable admission-granted hook, observer failures cannot block or
+// alter the model request. The returned bool is false when the context is not
+// execution-tracked; callers can still persist a terminal result later.
+func RegisterProviderStartObserver(ctx context.Context, observer func(context.Context)) bool {
+	if ctx == nil || observer == nil {
+		return false
+	}
+	state, _ := ctx.Value(providerExecutionStateKey{}).(*providerExecutionState)
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	state.observers = append(state.observers, &providerStartObserver{fn: observer})
+	state.mu.Unlock()
+	return true
+}
+
+func runProviderStartObservers(ctx context.Context) {
+	state, _ := ctx.Value(providerExecutionStateKey{}).(*providerExecutionState)
+	if state == nil {
+		return
+	}
+	chain := make([]*providerExecutionState, 0, 4)
+	for current := state; current != nil; current = current.parent {
+		chain = append(chain, current)
+	}
+	// Parents are aggregate business spans. Start them before their child so
+	// parent lookup succeeds even when both were prepared lazily.
+	for i := len(chain) - 1; i >= 0; i-- {
+		current := chain[i]
+		current.mu.Lock()
+		pending := make([]func(context.Context), 0, len(current.observers))
+		for _, observer := range current.observers {
+			if observer == nil || observer.started || observer.fn == nil {
+				continue
+			}
+			observer.started = true
+			pending = append(pending, observer.fn)
+		}
+		current.mu.Unlock()
+		for _, observer := range pending {
+			observer(ctx)
+		}
+	}
 }
 
 func ensureProviderExecutionTracking(ctx context.Context) context.Context {
@@ -71,6 +127,7 @@ func runAdmissionGrantedHook(ctx context.Context) error {
 			return err
 		}
 	}
+	runProviderStartObservers(ctx)
 	if state, _ := ctx.Value(providerExecutionStateKey{}).(*providerExecutionState); state != nil {
 		for current := state; current != nil; current = current.parent {
 			current.started.Store(true)

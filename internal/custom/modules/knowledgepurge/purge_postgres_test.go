@@ -64,7 +64,7 @@ func openPurgePostgresDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE custom_generated_question_claims (
 			tenant_id BIGINT NOT NULL, knowledge_id VARCHAR(64) NOT NULL
 		)`,
-		`CREATE TABLE knowledge_processing_spans (knowledge_id VARCHAR(64) NOT NULL)`,
+		`CREATE TABLE custom_processing_spans_v2 (knowledge_id VARCHAR(64) NOT NULL)`,
 		`CREATE TABLE custom_document_split_parts (
 			tenant_id BIGINT NOT NULL, knowledge_id VARCHAR(64) NOT NULL
 		)`,

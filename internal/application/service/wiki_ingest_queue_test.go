@@ -626,7 +626,7 @@ func TestMapOneDocumentTerminalGenerationDoesNotOpenWikiSpan(t *testing.T) {
 	require.Empty(t, updates)
 
 	var wikiSpans int64
-	require.NoError(t, db.Model(&types.KnowledgeProcessingSpan{}).
+	require.NoError(t, db.Table("custom_processing_spans_v2").
 		Where("knowledge_id = ? AND name LIKE ?",
 			"knowledge-terminal-wiki", "postprocess.wiki%").
 		Count(&wikiSpans).Error)

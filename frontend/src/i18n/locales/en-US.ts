@@ -3032,8 +3032,8 @@ export default {
       title: 'Model Configuration',
       description: 'Select appropriate AI models for the knowledge base',
       llmLabel: 'LLM Model',
-      llmDesc: 'Large language model used for summarization and abstract generation (optional)',
-      llmPlaceholder: 'Select an LLM model (optional)',
+      llmDesc: 'Large language model used to generate answers from knowledge base search results',
+      llmPlaceholder: 'Select a knowledge base QA model',
       embeddingLabel: 'Embedding Model',
       embeddingDesc: 'Embedding model used for text vectorization',
       embeddingPlaceholder: 'Select an embedding model',
@@ -4391,7 +4391,7 @@ export default {
     },
     chatModel: {
       label: 'LLM Model',
-      desc: 'Large language model used for summarization and abstract generation'
+      desc: 'Large language model used to generate answers from search results'
     },
     rerankModel: {
       label: 'ReRank Model',

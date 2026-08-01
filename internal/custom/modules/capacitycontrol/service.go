@@ -41,15 +41,19 @@ type ConfiguredCapacity struct {
 }
 
 type EffectiveCapacity struct {
-	ProviderTotal       int `json:"provider_total"`
-	InteractiveReserved int `json:"interactive_reserved"`
-	BackgroundMax       int `json:"background_max"`
-	WorkWindow          int `json:"work_window"`
-	DerivativeShare     int `json:"derivative_share"`
-	WikiShare           int `json:"wiki_share"`
-	TenantMax           int `json:"tenant_max"`
-	DocumentMax         int `json:"document_max"`
-	ChatSessions        int `json:"chat_sessions"`
+	ProviderTotal           int `json:"provider_total"`
+	InteractiveReserved     int `json:"interactive_reserved"`
+	BackgroundMax           int `json:"background_max"`
+	WorkWindow              int `json:"work_window"`
+	DerivativeShare         int `json:"derivative_share"`
+	WikiShare               int `json:"wiki_share"`
+	WikiMapWorkShare        int `json:"wiki_map_work_share"`
+	WikiCommitWorkShare     int `json:"wiki_commit_work_share"`
+	WikiMapProviderShare    int `json:"wiki_map_provider_share"`
+	WikiCommitProviderShare int `json:"wiki_commit_provider_share"`
+	TenantMax               int `json:"tenant_max"`
+	DocumentMax             int `json:"document_max"`
+	ChatSessions            int `json:"chat_sessions"`
 }
 
 type ModuleGrant struct {
@@ -166,7 +170,7 @@ func (s *Service) Compile(ctx context.Context) (Report, error) {
 		Healthy:       true,
 		SourceOfTruth: "actual_model_resource_pool",
 		Runtime: RuntimeReport{
-			Scheduler:                   "redis_resource_pool_work_window",
+			Scheduler:                   "derived_hierarchical_work_conserving_fairness",
 			BackgroundWaitMode:          "bounded_wait_then_budget_free_durable_yield",
 			CapacityWaitCountsAsFailure: false,
 			SchedulerPolicy:             schedulerPolicy,
@@ -261,6 +265,14 @@ func compilePool(
 	workWindow := modeladmission.WorkWindow(background, schedulerPolicy)
 	derivativeShare := modeladmission.LaneWorkWindow(background, modeladmission.WorkLaneDerivative, schedulerPolicy)
 	wikiShare := modeladmission.LaneWorkWindow(background, modeladmission.WorkLaneWiki, schedulerPolicy)
+	wikiProviderShare := modeladmission.LaneProviderWindow(
+		background, modeladmission.WorkLaneWiki, schedulerPolicy,
+	)
+	// Surface the protected values under full derivative/Wiki contention. When
+	// derivative is idle, Wiki borrows the larger global window and these stage
+	// limits expand automatically; no additional persisted knobs are required.
+	wikiMapWorkShare, wikiCommitWorkShare := modeladmission.WikiStageShares(wikiShare)
+	wikiMapProviderShare, wikiCommitProviderShare := modeladmission.WikiStageShares(wikiProviderShare)
 	tenant := minPositive(pool.TenantBurst, pool.MaxInflight)
 	document := minPositive(pool.DocumentBurst, tenant, background)
 	chatSessions := pool.MaxInflight
@@ -296,6 +308,8 @@ func compilePool(
 			ProviderTotal: pool.MaxInflight, InteractiveReserved: pool.InteractiveReserve,
 			BackgroundMax: background, WorkWindow: workWindow,
 			DerivativeShare: derivativeShare, WikiShare: wikiShare,
+			WikiMapWorkShare: wikiMapWorkShare, WikiCommitWorkShare: wikiCommitWorkShare,
+			WikiMapProviderShare: wikiMapProviderShare, WikiCommitProviderShare: wikiCommitProviderShare,
 			TenantMax: tenant, DocumentMax: document,
 			ChatSessions: chatSessions,
 		},

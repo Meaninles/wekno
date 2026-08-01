@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/assert"
@@ -51,27 +53,22 @@ CREATE TABLE IF NOT EXISTS knowledges (
 `
 
 const housekeepingSpansDDL = `
-CREATE TABLE IF NOT EXISTS knowledge_processing_spans (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS custom_processing_spans_v2 (
     knowledge_id    VARCHAR(64) NOT NULL,
     attempt         INTEGER     NOT NULL DEFAULT 1,
+    logical_key     VARCHAR(190) NOT NULL,
     span_id         VARCHAR(64) NOT NULL,
-    parent_span_id  VARCHAR(64),
-    name            VARCHAR(64) NOT NULL,
-    kind            VARCHAR(16) NOT NULL,
-    status          VARCHAR(16) NOT NULL,
-    input           TEXT,
-    output          TEXT,
-    metadata        TEXT,
-    error_code      VARCHAR(64),
-    error_message   TEXT,
-    error_detail    TEXT,
+    parent_logical_key VARCHAR(190) NOT NULL DEFAULT '',
+    name            VARCHAR(160) NOT NULL,
+    kind            VARCHAR(32) NOT NULL,
+    status          VARCHAR(32) NOT NULL,
     started_at      DATETIME,
     finished_at     DATETIME,
     duration_ms     BIGINT,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (knowledge_id, attempt, span_id)
+    PRIMARY KEY (knowledge_id, attempt, logical_key),
+    UNIQUE (span_id)
 );
 `
 
@@ -100,6 +97,17 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 `
 
+const housekeepingDerivativeWorkDDL = `
+CREATE TABLE IF NOT EXISTS custom_derivative_work_items (
+    tenant_id INTEGER NOT NULL DEFAULT 0,
+    knowledge_base_id VARCHAR(64) NOT NULL,
+    knowledge_id VARCHAR(64) NOT NULL,
+    processing_generation VARCHAR(64) NOT NULL DEFAULT '',
+    work_kind VARCHAR(32) NOT NULL,
+    state VARCHAR(32) NOT NULL
+);
+`
+
 func setupHousekeepingDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -108,6 +116,7 @@ func setupHousekeepingDB(t *testing.T) *gorm.DB {
 	require.NoError(t, db.Exec(housekeepingSpansDDL).Error)
 	require.NoError(t, db.Exec(housekeepingPendingOpsDDL).Error)
 	require.NoError(t, db.Exec(housekeepingChunksDDL).Error)
+	require.NoError(t, db.Exec(housekeepingDerivativeWorkDDL).Error)
 	return db
 }
 
@@ -128,10 +137,14 @@ func insertSpan(t *testing.T, db *gorm.DB, kid string, attempt int, spanID, stat
 
 func insertNamedSpan(t *testing.T, db *gorm.DB, kid string, attempt int, spanID, name, status string, updatedAt time.Time) {
 	t.Helper()
+	kind := types.SpanKindStage
+	if strings.HasPrefix(name, "postprocess.wiki") {
+		kind = types.SpanKindSubSpan
+	}
 	require.NoError(t, db.Exec(
-		`INSERT INTO knowledge_processing_spans (knowledge_id, attempt, span_id, name, kind, status, updated_at)
-		 VALUES (?, ?, ?, ?, 'stage', ?, ?)`,
-		kid, attempt, spanID, name, status, updatedAt,
+		`INSERT INTO custom_processing_spans_v2 (knowledge_id, attempt, logical_key, span_id, name, kind, status, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		kid, attempt, processingtrace.LogicalKey(kind, name), spanID, name, kind, status, updatedAt,
 	).Error)
 }
 
@@ -140,6 +153,15 @@ func setSummaryProcessing(t *testing.T, db *gorm.DB, id string, updatedAt time.T
 	require.NoError(t, db.Exec(
 		`UPDATE knowledges SET summary_status = ?, updated_at = ? WHERE id = ?`,
 		types.SummaryStatusProcessing, updatedAt, id,
+	).Error)
+}
+
+func insertDurableSummaryWork(t *testing.T, db *gorm.DB, id, state string) {
+	t.Helper()
+	require.NoError(t, db.Exec(
+		`INSERT INTO custom_derivative_work_items
+		 (tenant_id, knowledge_base_id, knowledge_id, processing_generation, work_kind, state)
+		 VALUES (0, 'kb-test', ?, '', 'summary', ?)`, id, state,
 	).Error)
 }
 
@@ -868,6 +890,7 @@ func TestHousekeeping_SummaryLiveTaskPreserves(t *testing.T) {
 			stale := time.Now().Add(-3 * time.Hour)
 			insertKnowledge(t, db, "kid-summary-live", types.ParseStatusCompleted, stale)
 			setSummaryProcessing(t, db, "kid-summary-live", stale)
+			insertDurableSummaryWork(t, db, "kid-summary-live", "retry_wait")
 
 			inspector := &scriptedTaskInspector{summaryResults: tt.results}
 			svc := newHousekeepingSvcWithInspector(db, inspector)
@@ -878,7 +901,8 @@ func TestHousekeeping_SummaryLiveTaskPreserves(t *testing.T) {
 				`SELECT summary_status FROM knowledges WHERE id = ?`, "kid-summary-live",
 			).Row().Scan(&status))
 			assert.Equal(t, types.SummaryStatusProcessing, status)
-			assert.Equal(t, tt.calls, inspector.summaryCalls)
+			assert.Zero(t, inspector.summaryCalls,
+				"Redis task inspection is not a summary-liveness authority")
 		})
 	}
 }
@@ -911,6 +935,7 @@ func TestHousekeeping_SummaryProbeErrorPreserves(t *testing.T) {
 			stale := time.Now().Add(-3 * time.Hour)
 			insertKnowledge(t, db, "kid-summary-error", types.ParseStatusCompleted, stale)
 			setSummaryProcessing(t, db, "kid-summary-error", stale)
+			insertDurableSummaryWork(t, db, "kid-summary-error", "queued")
 
 			inspector := &scriptedTaskInspector{summaryResults: tt.results}
 			newHousekeepingSvcWithInspector(db, inspector).runSweep(context.Background())
@@ -920,7 +945,7 @@ func TestHousekeeping_SummaryProbeErrorPreserves(t *testing.T) {
 				`SELECT summary_status FROM knowledges WHERE id = ?`, "kid-summary-error",
 			).Row().Scan(&status))
 			assert.Equal(t, types.SummaryStatusProcessing, status)
-			assert.Equal(t, tt.calls, inspector.summaryCalls)
+			assert.Zero(t, inspector.summaryCalls)
 		})
 	}
 }
@@ -958,16 +983,12 @@ func TestHousekeeping_SummaryFinalUpdateGuardsRace(t *testing.T) {
 			stale := time.Now().Add(-3 * time.Hour)
 			insertKnowledge(t, db, "kid-summary-race", types.ParseStatusCompleted, stale)
 			setSummaryProcessing(t, db, "kid-summary-race", stale)
+			tt.lateUpdate(t, db, stale)
 
 			inspector := &scriptedTaskInspector{
 				summaryResults: []queueProbeResult{
 					{queued: map[string]bool{}},
 					{queued: map[string]bool{}},
-				},
-				onSummaryProbe: func(call int) {
-					if call == 2 {
-						tt.lateUpdate(t, db, stale)
-					}
 				},
 			}
 			newHousekeepingSvcWithInspector(db, inspector).runSweep(context.Background())
@@ -978,7 +999,7 @@ func TestHousekeeping_SummaryFinalUpdateGuardsRace(t *testing.T) {
 			).Row().Scan(&status))
 			assert.Equal(t, tt.wantStatus, status,
 				"late state progress must make the guarded UPDATE affect zero rows")
-			assert.Equal(t, 2, inspector.summaryCalls)
+			assert.Zero(t, inspector.summaryCalls)
 		})
 	}
 }
@@ -1000,5 +1021,5 @@ func TestHousekeeping_SummaryOrphanRecoversAfterTwoProbes(t *testing.T) {
 		`SELECT summary_status FROM knowledges WHERE id = ?`, "kid-summary-orphan",
 	).Row().Scan(&status))
 	assert.Equal(t, types.SummaryStatusFailed, status)
-	assert.Equal(t, 2, inspector.summaryCalls)
+	assert.Zero(t, inspector.summaryCalls)
 }

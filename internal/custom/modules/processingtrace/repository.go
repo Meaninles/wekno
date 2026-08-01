@@ -20,6 +20,40 @@ type Repository struct{ db *gorm.DB }
 
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
+// LogicalKey returns the stable storage identity for one business span. The
+// display name is deliberately kept separate from the row identity so a
+// retry/redelivery updates the same row instead of creating delivery history.
+func LogicalKey(kind, name string) string {
+	switch {
+	case kind == "root":
+		return "root"
+	case kind == "stage":
+		return "stage:" + name
+	case name == "postprocess.summary":
+		return "derivative:summary"
+	case strings.HasPrefix(name, "postprocess.question.batch["):
+		index := strings.TrimSuffix(strings.TrimPrefix(name, "postprocess.question.batch["), "]")
+		return "derivative:question_batch:" + index
+	case strings.HasPrefix(name, "postprocess.graph.chunk["):
+		index := strings.TrimSuffix(strings.TrimPrefix(name, "postprocess.graph.chunk["), "]")
+		return "derivative:graph_batch:" + index
+	case strings.HasPrefix(name, "postprocess.wiki"):
+		return "wiki:" + name
+	default:
+		return kind + ":" + name
+	}
+}
+
+// DeterministicSpanID is stable for the lifetime of one logical span. It is
+// also used by in-memory handles, which lets children name a parent before the
+// parent has been persisted by the provider-start observer.
+func DeterministicSpanID(knowledgeID string, attempt int, logicalKey string) string {
+	return uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte(fmt.Sprintf("%s\x00%d\x00%s", knowledgeID, attempt, logicalKey)),
+	).String()
+}
+
 func (r *Repository) Migrate(ctx context.Context) error {
 	if r == nil || r.db == nil {
 		return errors.New("processing trace database is unavailable")
@@ -111,19 +145,26 @@ func (r *Repository) RecordBusinessProgress(ctx context.Context, input Upsert) e
 	if started.IsZero() {
 		started = now
 	}
-	spanID := uuid.NewSHA1(
-		uuid.NameSpaceOID,
-		[]byte(fmt.Sprintf("%s\x00%d\x00%s", input.KnowledgeID, input.Attempt, input.LogicalKey)),
-	).String()
+	spanID := DeterministicSpanID(input.KnowledgeID, input.Attempt, input.LogicalKey)
 	updates := map[string]any{
 		"parent_logical_key": input.ParentLogicalKey,
 		"name":               input.Name, "kind": input.Kind, "status": input.Status,
-		"input_summary":             truncate(input.InputSummary, 4096),
-		"output_summary":            truncate(input.OutputSummary, 4096),
 		"last_error_code":           truncate(input.LastErrorCode, 64),
 		"last_error_message":        truncate(input.LastErrorMessage, 4096),
+		"last_error_detail":         truncate(input.LastErrorDetail, 8192),
 		"last_business_progress_at": input.LastBusinessProgressAt,
 		"finished_at":               input.FinishedAt, "updated_at": now,
+	}
+	// Begin/End/Fail callers intentionally send sparse payloads. Empty content
+	// therefore means "preserve the previous value", not "erase it".
+	if strings.TrimSpace(input.InputSummary) != "" {
+		updates["input_summary"] = truncate(input.InputSummary, 4096)
+	}
+	if strings.TrimSpace(input.OutputSummary) != "" {
+		updates["output_summary"] = truncate(input.OutputSummary, 4096)
+	}
+	if strings.TrimSpace(input.MetadataSummary) != "" {
+		updates["metadata_summary"] = truncate(input.MetadataSummary, 4096)
 	}
 	if input.FinishedAt != nil {
 		updates["duration_ms"] = input.FinishedAt.Sub(started).Milliseconds()
@@ -137,9 +178,9 @@ func (r *Repository) RecordBusinessProgress(ctx context.Context, input Upsert) e
 			"CASE WHEN custom_processing_spans_v2.real_attempt_count > 0 THEN custom_processing_spans_v2.real_attempt_count - 1 ELSE 0 END",
 		)
 	}
-	initialAttempts := 1
-	if input.DecrementRealAttempt {
-		initialAttempts = 0
+	initialAttempts := 0
+	if input.IncrementRealAttempt {
+		initialAttempts = 1
 	}
 	row := Span{
 		KnowledgeID: input.KnowledgeID, Attempt: input.Attempt,
@@ -148,20 +189,15 @@ func (r *Repository) RecordBusinessProgress(ctx context.Context, input Upsert) e
 		Kind: input.Kind, Status: input.Status, RealAttemptCount: initialAttempts,
 		InputSummary:     truncate(input.InputSummary, 4096),
 		OutputSummary:    truncate(input.OutputSummary, 4096),
+		MetadataSummary:  truncate(input.MetadataSummary, 4096),
 		LastErrorCode:    truncate(input.LastErrorCode, 64),
 		LastErrorMessage: truncate(input.LastErrorMessage, 4096),
+		LastErrorDetail:  truncate(input.LastErrorDetail, 8192),
 		StartedAt:        started, LastBusinessProgressAt: input.LastBusinessProgressAt,
 		FinishedAt: input.FinishedAt, CreatedAt: now, UpdatedAt: now,
 	}
 	if input.FinishedAt != nil {
 		row.DurationMS = input.FinishedAt.Sub(started).Milliseconds()
-	}
-	var existing int64
-	if err := r.db.WithContext(ctx).Model(&Span{}).
-		Where("knowledge_id = ? AND attempt = ? AND logical_key = ?",
-			input.KnowledgeID, input.Attempt, input.LogicalKey).
-		Count(&existing).Error; err != nil {
-		return err
 	}
 	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{
@@ -171,12 +207,40 @@ func (r *Repository) RecordBusinessProgress(ctx context.Context, input Upsert) e
 	}).Create(&row).Error; err != nil {
 		return err
 	}
-	if existing == 0 {
-		pipelineobs.ProcessingSpanInserted()
-	} else {
-		pipelineobs.ProcessingSpanUpdated()
-	}
+	// Exact insert-vs-update classification previously issued a COUNT before
+	// every write, doubling trace query volume and racing concurrent upserts.
+	// Row cardinality is refreshed separately; count this as an update event
+	// and let the periodic gauge expose inserts without an extra hot-path read.
+	pipelineobs.ProcessingSpanUpdated()
 	return nil
+}
+
+func (r *Repository) GetBySpanID(ctx context.Context, knowledgeID string, attempt int, spanID string) (*Span, error) {
+	var row Span
+	err := r.db.WithContext(ctx).
+		Where("knowledge_id = ? AND attempt = ? AND span_id = ?", knowledgeID, attempt, spanID).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (r *Repository) GetByLogicalKey(ctx context.Context, knowledgeID string, attempt int, logicalKey string) (*Span, error) {
+	var row Span
+	err := r.db.WithContext(ctx).
+		Where("knowledge_id = ? AND attempt = ? AND logical_key = ?", knowledgeID, attempt, logicalKey).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
 }
 
 func (r *Repository) List(
@@ -222,6 +286,74 @@ func (r *Repository) LatestAttempt(ctx context.Context, knowledgeID string) (int
 		Where("knowledge_id = ?", strings.TrimSpace(knowledgeID)).
 		Select("COALESCE(MAX(attempt), 0)").Scan(&attempt).Error
 	return attempt, err
+}
+
+// AllocateAttemptRoot serializes per-document attempt allocation and creates
+// the V2 root in the same transaction. No legacy trace row participates in
+// allocation, so the old physical-delivery table can be removed safely.
+func (r *Repository) AllocateAttemptRoot(
+	ctx context.Context,
+	input Upsert,
+	errorCode, reason string,
+) (Span, int64, error) {
+	if r == nil || r.db == nil || strings.TrimSpace(input.KnowledgeID) == "" {
+		return Span{}, 0, errors.New("processing trace repository and knowledge_id are required")
+	}
+	var root Span
+	var superseded int64
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+			if err := tx.Exec(
+				"SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+				"weknora:processing-trace-attempt:"+input.KnowledgeID,
+			).Error; err != nil {
+				return fmt.Errorf("lock processing trace attempt: %w", err)
+			}
+		}
+		var maxAttempt int
+		if err := tx.Model(&Span{}).
+			Where("knowledge_id = ?", input.KnowledgeID).
+			Select("COALESCE(MAX(attempt), 0)").Scan(&maxAttempt).Error; err != nil {
+			return fmt.Errorf("read latest processing trace attempt: %w", err)
+		}
+		attempt := maxAttempt + 1
+		now := time.Now().UTC()
+		result := tx.Model(&Span{}).
+			Where("knowledge_id = ? AND attempt < ? AND status IN ?",
+				input.KnowledgeID, attempt, []string{"pending", "running"}).
+			Updates(map[string]any{
+				"status": "cancelled", "last_error_code": truncate(errorCode, 64),
+				"last_error_message": truncate(reason, 4096),
+				"finished_at":        now, "updated_at": now,
+			})
+		if result.Error != nil {
+			return fmt.Errorf("supersede older processing traces: %w", result.Error)
+		}
+		superseded = result.RowsAffected
+		started := input.StartedAt
+		if started.IsZero() {
+			started = now
+		}
+		root = Span{
+			KnowledgeID: input.KnowledgeID, Attempt: attempt, LogicalKey: "root",
+			SpanID:           DeterministicSpanID(input.KnowledgeID, attempt, "root"),
+			ParentLogicalKey: "", Name: input.Name, Kind: input.Kind, Status: input.Status,
+			RealAttemptCount: 1,
+			InputSummary:     truncate(input.InputSummary, 4096),
+			OutputSummary:    truncate(input.OutputSummary, 4096),
+			MetadataSummary:  truncate(input.MetadataSummary, 4096),
+			LastErrorCode:    truncate(input.LastErrorCode, 64),
+			LastErrorMessage: truncate(input.LastErrorMessage, 4096),
+			LastErrorDetail:  truncate(input.LastErrorDetail, 8192),
+			StartedAt:        started, LastBusinessProgressAt: input.LastBusinessProgressAt,
+			FinishedAt: input.FinishedAt, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := tx.Create(&root).Error; err != nil {
+			return fmt.Errorf("create processing trace root: %w", err)
+		}
+		return nil
+	})
+	return root, superseded, err
 }
 
 func (r *Repository) SupersedeOlderAttempts(

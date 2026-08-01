@@ -13,45 +13,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// spansTestDDL mirrors migration 000053 for SQLite — same column order
-// minus the JSONB type (SQLite stores JSON as TEXT, the JSONMap Scanner
-// handles the round trip transparently). Inlined for the same reason
-// knowledgebase_sqlite_test.go inlines its DDL: GORM AutoMigrate doesn't
-// reproduce our PostgreSQL-flavoured schema cleanly.
-const spansTestDDL = `
-CREATE TABLE IF NOT EXISTS knowledge_processing_spans (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    knowledge_id    VARCHAR(64) NOT NULL,
-    attempt         INTEGER     NOT NULL DEFAULT 1,
-    span_id         VARCHAR(64) NOT NULL,
-    parent_span_id  VARCHAR(64),
-    name            VARCHAR(64) NOT NULL,
-    kind            VARCHAR(16) NOT NULL,
-    status          VARCHAR(16) NOT NULL,
-    input           TEXT,
-    output          TEXT,
-    metadata        TEXT,
-    error_code      VARCHAR(64),
-    error_message   TEXT,
-    error_detail    TEXT,
-    started_at      DATETIME,
-    finished_at     DATETIME,
-    duration_ms     BIGINT,
-    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (knowledge_id, attempt, span_id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_kpspan_one_root_per_attempt
-    ON knowledge_processing_spans(knowledge_id, attempt)
-    WHERE kind = 'root';
-`
-
 func setupSpanTestRepo(t *testing.T) (KnowledgeSpanRepository, *gorm.DB) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.Exec(spansTestDDL).Error)
-	return NewKnowledgeSpanRepository(db), db
+	v2 := processingtrace.NewRepository(db)
+	require.NoError(t, v2.Migrate(context.Background()))
+	return NewKnowledgeSpanRepositoryWithV2(db, v2), db
 }
 
 // TestKnowledgeSpanRepo_UpsertAndList covers the round-trip: a Begin
@@ -128,17 +96,18 @@ func TestKnowledgeSpanRepo_CancelDescendants(t *testing.T) {
 
 	// Tree: chunking → embedding (running) → batch[0] (running)
 	//                → multimodal (running) → image[0] (done)
-	for _, r := range []*types.KnowledgeProcessingSpan{
-		{KnowledgeID: kid, Attempt: 1, SpanID: "chunking", Name: types.StageChunking, Kind: types.SpanKindStage, Status: types.SpanStatusRunning, StartedAt: &now},
-		{KnowledgeID: kid, Attempt: 1, SpanID: "embedding", ParentSpanID: "chunking", Name: types.StageEmbedding, Kind: types.SpanKindStage, Status: types.SpanStatusRunning, StartedAt: &now},
-		{KnowledgeID: kid, Attempt: 1, SpanID: "batch0", ParentSpanID: "embedding", Name: "embedding.batch[0]", Kind: types.SpanKindGeneration, Status: types.SpanStatusRunning, StartedAt: &now},
-		{KnowledgeID: kid, Attempt: 1, SpanID: "multimodal", ParentSpanID: "chunking", Name: types.StageMultimodal, Kind: types.SpanKindStage, Status: types.SpanStatusRunning, StartedAt: &now},
-		{KnowledgeID: kid, Attempt: 1, SpanID: "image0", ParentSpanID: "multimodal", Name: "multimodal.image[0]", Kind: types.SpanKindGeneration, Status: types.SpanStatusDone, StartedAt: &now},
-	} {
-		require.NoError(t, repo.Upsert(ctx, r))
-	}
+	chunking := &types.KnowledgeProcessingSpan{KnowledgeID: kid, Attempt: 1, SpanID: "input-id", Name: types.StageChunking, Kind: types.SpanKindStage, Status: types.SpanStatusRunning, StartedAt: &now}
+	require.NoError(t, repo.Upsert(ctx, chunking))
+	embedding := &types.KnowledgeProcessingSpan{KnowledgeID: kid, Attempt: 1, SpanID: "input-id", ParentSpanID: chunking.SpanID, Name: types.StageEmbedding, Kind: types.SpanKindStage, Status: types.SpanStatusRunning, StartedAt: &now}
+	require.NoError(t, repo.Upsert(ctx, embedding))
+	batch := &types.KnowledgeProcessingSpan{KnowledgeID: kid, Attempt: 1, SpanID: "input-id", ParentSpanID: embedding.SpanID, Name: "embedding.batch[0]", Kind: types.SpanKindGeneration, Status: types.SpanStatusRunning, StartedAt: &now}
+	require.NoError(t, repo.Upsert(ctx, batch))
+	multimodal := &types.KnowledgeProcessingSpan{KnowledgeID: kid, Attempt: 1, SpanID: "input-id", ParentSpanID: chunking.SpanID, Name: types.StageMultimodal, Kind: types.SpanKindStage, Status: types.SpanStatusRunning, StartedAt: &now}
+	require.NoError(t, repo.Upsert(ctx, multimodal))
+	image := &types.KnowledgeProcessingSpan{KnowledgeID: kid, Attempt: 1, SpanID: "input-id", ParentSpanID: multimodal.SpanID, Name: "multimodal.image[0]", Kind: types.SpanKindGeneration, Status: types.SpanStatusDone, StartedAt: &now}
+	require.NoError(t, repo.Upsert(ctx, image))
 
-	affected, err := repo.CancelDescendants(ctx, kid, 1, "chunking", "test reason")
+	affected, err := repo.CancelDescendants(ctx, kid, 1, chunking.SpanID, "test reason")
 	require.NoError(t, err)
 	// Expected cancellations: embedding, batch0, multimodal (3 rows).
 	// The done image0 is terminal and left alone.
@@ -148,42 +117,13 @@ func TestKnowledgeSpanRepo_CancelDescendants(t *testing.T) {
 	require.NoError(t, err)
 	statusBy := map[string]string{}
 	for _, r := range rows {
-		statusBy[r.SpanID] = r.Status
+		statusBy[r.Name] = r.Status
 	}
-	assert.Equal(t, types.SpanStatusRunning, statusBy["chunking"], "the failed span itself stays untouched (FailSpan layer flips it)")
-	assert.Equal(t, types.SpanStatusCancelled, statusBy["embedding"])
-	assert.Equal(t, types.SpanStatusCancelled, statusBy["batch0"])
-	assert.Equal(t, types.SpanStatusCancelled, statusBy["multimodal"])
-	assert.Equal(t, types.SpanStatusDone, statusBy["image0"], "terminal states must not be touched")
-}
-
-func TestKnowledgeSpanRepo_CancelOpenSpansByName(t *testing.T) {
-	repo, _ := setupSpanTestRepo(t)
-	ctx := context.Background()
-	kid := "kid-supersede"
-	now := time.Now()
-
-	for _, r := range []*types.KnowledgeProcessingSpan{
-		{KnowledgeID: kid, Attempt: 1, SpanID: "sum-old", Name: "postprocess.summary", Kind: types.SpanKindSubSpan, Status: types.SpanStatusRunning, StartedAt: &now},
-		{KnowledgeID: kid, Attempt: 1, SpanID: "sum-done", Name: "postprocess.summary", Kind: types.SpanKindSubSpan, Status: types.SpanStatusDone, StartedAt: &now},
-		{KnowledgeID: kid, Attempt: 1, SpanID: "q-old", Name: "postprocess.question", Kind: types.SpanKindSubSpan, Status: types.SpanStatusRunning, StartedAt: &now},
-	} {
-		require.NoError(t, repo.Upsert(ctx, r))
-	}
-
-	affected, err := repo.CancelOpenSpansByName(ctx, kid, 1, "postprocess.summary", "TASK_SUPERSEDED", "retry")
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), affected)
-
-	rows, err := repo.ListByAttempt(ctx, kid, 1)
-	require.NoError(t, err)
-	statusBy := map[string]string{}
-	for _, r := range rows {
-		statusBy[r.SpanID] = r.Status
-	}
-	assert.Equal(t, types.SpanStatusCancelled, statusBy["sum-old"])
-	assert.Equal(t, types.SpanStatusDone, statusBy["sum-done"])
-	assert.Equal(t, types.SpanStatusRunning, statusBy["q-old"])
+	assert.Equal(t, types.SpanStatusRunning, statusBy[types.StageChunking], "the failed span itself stays untouched (FailSpan layer flips it)")
+	assert.Equal(t, types.SpanStatusCancelled, statusBy[types.StageEmbedding])
+	assert.Equal(t, types.SpanStatusCancelled, statusBy["embedding.batch[0]"])
+	assert.Equal(t, types.SpanStatusCancelled, statusBy[types.StageMultimodal])
+	assert.Equal(t, types.SpanStatusDone, statusBy["multimodal.image[0]"], "terminal states must not be touched")
 }
 
 // TestKnowledgeSpanRepo_ListAttemptIsolation guarantees that different
@@ -214,13 +154,12 @@ func TestKnowledgeSpanRepo_ListAttemptIsolation(t *testing.T) {
 	assert.Nil(t, all, "attempt=0 must not scan every historical attempt")
 }
 
-func TestKnowledgeSpanRepo_V2DualWriteUsesOneLogicalRowPerRetry(t *testing.T) {
+func TestKnowledgeSpanRepo_UsesOneLogicalRowPerRetry(t *testing.T) {
 	db, err := gorm.Open(
 		sqlite.Open("file:knowledge-span-v2-dual-write?mode=memory&cache=shared"),
 		&gorm.Config{},
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.Exec(spansTestDDL).Error)
 	v2 := processingtrace.NewRepository(db)
 	require.NoError(t, v2.Migrate(context.Background()))
 	repo := NewKnowledgeSpanRepositoryWithV2(db, v2)
@@ -240,7 +179,6 @@ func TestKnowledgeSpanRepo_V2DualWriteUsesOneLogicalRowPerRetry(t *testing.T) {
 
 	// A redelivery uses another legacy delivery span ID. V2 must fold it into
 	// the same stable logical key and record that a real business attempt ran.
-	row.ID = 0
 	row.SpanID = "delivery-specific-id-2"
 	require.NoError(t, repo.Upsert(ctx, row))
 	finished := time.Now().UTC()
@@ -257,13 +195,12 @@ func TestKnowledgeSpanRepo_V2DualWriteUsesOneLogicalRowPerRetry(t *testing.T) {
 	assert.Nil(t, page.NextCursor)
 }
 
-func TestKnowledgeSpanRepo_V2CapacityYieldDoesNotCountAsRealAttempt(t *testing.T) {
+func TestKnowledgeSpanRepo_V2FirstRealExecutionCountsOnce(t *testing.T) {
 	db, err := gorm.Open(
 		sqlite.Open("file:knowledge-span-v2-capacity-yield?mode=memory&cache=shared"),
 		&gorm.Config{},
 	)
 	require.NoError(t, err)
-	require.NoError(t, db.Exec(spansTestDDL).Error)
 	v2 := processingtrace.NewRepository(db)
 	require.NoError(t, v2.Migrate(context.Background()))
 	repo := NewKnowledgeSpanRepositoryWithV2(db, v2)
@@ -276,23 +213,12 @@ func TestKnowledgeSpanRepo_V2CapacityYieldDoesNotCountAsRealAttempt(t *testing.T
 		Kind: types.SpanKindSubSpan, Status: types.SpanStatusRunning,
 		StartedAt: &started,
 	}
-	require.NoError(t, repo.Upsert(ctx, row))
-	row.Status = types.SpanStatusPending
-	row.Output = types.JSONMap{"deferred": true, "reason": "model_capacity"}
-	require.NoError(t, repo.Upsert(ctx, row))
-
+	// Capacity waits never call the repository. The provider-start observer is
+	// the first write boundary, so V2 must remain empty until this Upsert.
 	page, err := v2.List(ctx, row.KnowledgeID, row.Attempt, 500, nil)
 	require.NoError(t, err)
-	require.Len(t, page.Items, 1)
-	require.Equal(t, types.SpanStatusPending, page.Items[0].Status)
-	require.Zero(t, page.Items[0].RealAttemptCount)
-	require.Nil(t, page.Items[0].FinishedAt)
-	require.Zero(t, page.Items[0].DurationMS)
+	require.Empty(t, page.Items)
 
-	row.ID = 0
-	row.SpanID = "delivery-2"
-	row.Status = types.SpanStatusRunning
-	row.Output = nil
 	require.NoError(t, repo.Upsert(ctx, row))
 	finished := time.Now().UTC()
 	row.Status = types.SpanStatusDone

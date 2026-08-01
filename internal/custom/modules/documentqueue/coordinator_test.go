@@ -16,6 +16,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -909,7 +910,7 @@ func TestGraphDerivativesDoNotBlockTheNextCoreDocumentAtCapacityOne(t *testing.T
 
 func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T) {
 	coordinator := newQueueTestCoordinator(t, "parser-span-reconcile", "boot-1", 1)
-	require.NoError(t, coordinator.db.AutoMigrate(&types.KnowledgeProcessingSpan{}))
+	require.NoError(t, coordinator.db.AutoMigrate(&processingtrace.Span{}))
 
 	knowledge := queueTestKnowledge{
 		ID: "knowledge-span-reconcile", TenantID: 131, KnowledgeBaseID: "kb-1",
@@ -941,34 +942,34 @@ func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T)
 		}).Error)
 
 	started := time.Now().Add(-time.Minute)
-	spans := []types.KnowledgeProcessingSpan{
+	spans := []processingtrace.Span{
 		{
-			KnowledgeID: knowledge.ID, Attempt: 1, SpanID: "old-attempt-root",
+			KnowledgeID: knowledge.ID, Attempt: 1, LogicalKey: "root", SpanID: "old-attempt-root",
 			Name: "knowledge_processing", Kind: types.SpanKindRoot,
-			Status: types.SpanStatusRunning, StartedAt: &started,
+			Status: types.SpanStatusRunning, StartedAt: started,
 		},
 		{
-			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "latest-root",
+			KnowledgeID: knowledge.ID, Attempt: 2, LogicalKey: "root", SpanID: "latest-root",
 			Name: "knowledge_processing", Kind: types.SpanKindRoot,
-			Status: types.SpanStatusRunning, StartedAt: &started,
+			Status: types.SpanStatusRunning, StartedAt: started,
 		},
 		{
-			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "latest-wiki",
-			ParentSpanID: "latest-root", Name: "postprocess.wiki",
+			KnowledgeID: knowledge.ID, Attempt: 2, LogicalKey: "wiki:postprocess.wiki", SpanID: "latest-wiki",
+			ParentLogicalKey: "root", Name: "postprocess.wiki",
 			Kind: types.SpanKindSubSpan, Status: types.SpanStatusRunning,
-			StartedAt: &started,
+			StartedAt: started,
 		},
 		{
-			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "latest-page",
-			ParentSpanID: "latest-wiki", Name: "postprocess.wiki.page[entity/acme]",
+			KnowledgeID: knowledge.ID, Attempt: 2, LogicalKey: "wiki:postprocess.wiki.page[entity/acme]", SpanID: "latest-page",
+			ParentLogicalKey: "wiki:postprocess.wiki", Name: "postprocess.wiki.page[entity/acme]",
 			Kind: types.SpanKindSubSpan, Status: types.SpanStatusPending,
-			StartedAt: &started,
+			StartedAt: started,
 		},
 		{
-			KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "historical-failure",
-			ParentSpanID: "latest-root", Name: "postprocess.wiki",
+			KnowledgeID: knowledge.ID, Attempt: 2, LogicalKey: "subspan:historical.failure", SpanID: "historical-failure",
+			ParentLogicalKey: "root", Name: "historical.failure",
 			Kind: types.SpanKindSubSpan, Status: types.SpanStatusFailed,
-			ErrorCode: "WIKI_MATERIALIZATION_FAILED", StartedAt: &started,
+			LastErrorCode: "WIKI_MATERIALIZATION_FAILED", StartedAt: started,
 			FinishedAt: &started,
 		},
 	}
@@ -978,13 +979,13 @@ func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T)
 	require.NoError(t, coordinator.reconcileTerminalSpanOrphans(context.Background()),
 		"repeated multi-replica recovery must be idempotent")
 
-	var got []types.KnowledgeProcessingSpan
+	var got []processingtrace.Span
 	require.NoError(t, coordinator.db.
 		Where("knowledge_id = ?", knowledge.ID).
-		Order("attempt ASC, id ASC").
+		Order("attempt ASC, logical_key ASC").
 		Find(&got).Error)
 	require.Len(t, got, len(spans))
-	byID := make(map[string]types.KnowledgeProcessingSpan, len(got))
+	byID := make(map[string]processingtrace.Span, len(got))
 	for _, span := range got {
 		byID[span.SpanID] = span
 	}
@@ -992,7 +993,7 @@ func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T)
 		"an older attempt is immutable history")
 	require.Equal(t, types.SpanStatusDone, byID["latest-root"].Status)
 	require.Equal(t, types.SpanStatusCancelled, byID["latest-wiki"].Status)
-	require.Equal(t, "DOCUMENT_WORKFLOW_TERMINAL", byID["latest-wiki"].ErrorCode)
+	require.Equal(t, "DOCUMENT_WORKFLOW_TERMINAL", byID["latest-wiki"].LastErrorCode)
 	require.NotNil(t, byID["latest-wiki"].FinishedAt)
 	require.Equal(t, types.SpanStatusCancelled, byID["latest-page"].Status)
 	require.Equal(t, types.SpanStatusFailed, byID["historical-failure"].Status,
@@ -1001,7 +1002,7 @@ func TestRecoveryClosesOnlyCurrentGenerationLatestAttemptOpenSpans(t *testing.T)
 
 func TestTerminalSpanRecoveryIgnoresSupersededWorkflowGeneration(t *testing.T) {
 	coordinator := newQueueTestCoordinator(t, "parser-span-generation", "boot-1", 1)
-	require.NoError(t, coordinator.db.AutoMigrate(&types.KnowledgeProcessingSpan{}))
+	require.NoError(t, coordinator.db.AutoMigrate(&processingtrace.Span{}))
 
 	knowledge := queueTestKnowledge{
 		ID: "knowledge-span-generation", TenantID: 132, KnowledgeBaseID: "kb-1",
@@ -1030,14 +1031,14 @@ func TestTerminalSpanRecoveryIgnoresSupersededWorkflowGeneration(t *testing.T) {
 		}).Error)
 
 	started := time.Now().Add(-time.Minute)
-	require.NoError(t, coordinator.db.Create(&types.KnowledgeProcessingSpan{
-		KnowledgeID: knowledge.ID, Attempt: 2, SpanID: "new-generation-root",
+	require.NoError(t, coordinator.db.Create(&processingtrace.Span{
+		KnowledgeID: knowledge.ID, Attempt: 2, LogicalKey: "root", SpanID: "new-generation-root",
 		Name: "knowledge_processing", Kind: types.SpanKindRoot,
-		Status: types.SpanStatusRunning, StartedAt: &started,
+		Status: types.SpanStatusRunning, StartedAt: started,
 	}).Error)
 
 	require.NoError(t, coordinator.reconcileTerminalSpanOrphans(context.Background()))
-	var root types.KnowledgeProcessingSpan
+	var root processingtrace.Span
 	require.NoError(t, coordinator.db.
 		Where("span_id = ?", "new-generation-root").
 		Take(&root).Error)

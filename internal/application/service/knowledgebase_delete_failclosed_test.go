@@ -166,7 +166,7 @@ func newKBDeleteWorkerHarness(t *testing.T) (
 		`CREATE TABLE IF NOT EXISTS custom_generated_question_claims (
 			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS knowledge_processing_spans (
+		`CREATE TABLE IF NOT EXISTS custom_processing_spans_v2 (
 			knowledge_id TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS custom_document_split_plans (

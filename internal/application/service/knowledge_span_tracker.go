@@ -33,7 +33,9 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/google/uuid"
@@ -41,11 +43,9 @@ import (
 )
 
 const (
-	// knowledge_processing_spans.name is VARCHAR(64) in both the PostgreSQL
-	// and SQLite schemas. Subspan names can contain caller-controlled
-	// identifiers (Wiki slugs, file names, etc.), so enforce the storage
-	// invariant before every subspan write instead of relying on each caller
-	// to remember the database limit.
+	// Keep subspan names compact for readable operator views. Caller-controlled
+	// identifiers (Wiki slugs, file names, etc.) may be unbounded, so retain the
+	// exact value in the input summary and use a deterministic display name.
 	spanNameMaxRunes = 64
 
 	// Six SHA-256 bytes (12 hex characters) leave a useful readable prefix
@@ -71,6 +71,11 @@ type Span struct {
 	Kind         string
 	Status       string
 	StartedAt    time.Time
+	Input        types.JSONMap
+	Metadata     types.JSONMap
+
+	persistMu sync.Mutex
+	persisted bool
 }
 
 // SpanTracker is the only public surface — kept as an interface so tests
@@ -222,10 +227,13 @@ func (t *spanTracker) touchKnowledgeHeartbeat(ctx context.Context, knowledgeID, 
 	}
 }
 
+func stableSpanID(knowledgeID string, attempt int, kind, name string) string {
+	return processingtrace.DeterministicSpanID(
+		knowledgeID, attempt, processingtrace.LogicalKey(kind, name),
+	)
+}
+
 func newSpanID() string {
-	// Stripping the dashes saves 4 bytes per row — JSON parsers don't
-	// care, and operators paste these into queries / Langfuse where a
-	// hex-only ID is friendlier.
 	return strings.ReplaceAll(uuid.NewString(), "-", "")
 }
 
@@ -299,7 +307,6 @@ func executionSpanMetadata(ctx context.Context, base types.JSONMap) types.JSONMa
 
 func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTraceID string) (*Span, int, error) {
 	now := time.Now()
-	rootID := newSpanID()
 	meta := types.JSONMap{}
 	if langfuseTraceID != "" {
 		// The frontend renders a "open in Langfuse" link from this.
@@ -308,12 +315,14 @@ func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTrac
 	meta = executionSpanMetadata(ctx, meta)
 	row := &types.KnowledgeProcessingSpan{
 		KnowledgeID: knowledgeID,
-		SpanID:      rootID,
-		Name:        "knowledge_processing",
-		Kind:        types.SpanKindRoot,
-		Status:      types.SpanStatusRunning,
-		Metadata:    meta,
-		StartedAt:   &now,
+		// The V2 repository assigns the deterministic root id after it has
+		// atomically allocated the attempt number.
+		SpanID:    newSpanID(),
+		Name:      "knowledge_processing",
+		Kind:      types.SpanKindRoot,
+		Status:    types.SpanStatusRunning,
+		Metadata:  meta,
+		StartedAt: &now,
 	}
 	attempt, superseded, err := t.repo.CreateNextAttemptRoot(
 		ctx,
@@ -331,6 +340,7 @@ func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTrac
 			superseded, knowledgeID, attempt,
 		)
 	}
+	rootID := row.SpanID
 	t.recordStart(rootID, now)
 	t.touchKnowledgeHeartbeat(ctx, knowledgeID, types.SpanKindRoot)
 	return &Span{
@@ -341,6 +351,8 @@ func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTrac
 		Kind:        types.SpanKindRoot,
 		Status:      types.SpanStatusRunning,
 		StartedAt:   now,
+		Metadata:    meta,
+		persisted:   true,
 	}, attempt, nil
 }
 
@@ -429,9 +441,12 @@ func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attemp
 			Kind:         existing.Kind,
 			Status:       types.SpanStatusRunning,
 			StartedAt:    now,
+			Input:        input,
+			Metadata:     row.Metadata,
+			persisted:    true,
 		}
 	}
-	id := newSpanID()
+	id := stableSpanID(knowledgeID, attempt, types.SpanKindStage, stage)
 	row := &types.KnowledgeProcessingSpan{
 		KnowledgeID:  knowledgeID,
 		Attempt:      attempt,
@@ -460,6 +475,9 @@ func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attemp
 		Kind:         types.SpanKindStage,
 		Status:       types.SpanStatusRunning,
 		StartedAt:    now,
+		Input:        input,
+		Metadata:     row.Metadata,
+		persisted:    true,
 	}
 }
 
@@ -471,17 +489,9 @@ func (t *spanTracker) BeginSubSpan(ctx context.Context, parent *Span, name, kind
 	if kind != types.SpanKindGeneration && kind != types.SpanKindSubSpan {
 		kind = types.SpanKindSubSpan
 	}
-	// Asynq retry / server restart can re-run the same handler while the
-	// previous invocation's span is still status=running (worker died
-	// without EndSpan). Cancel same-name open rows so the UI shows one
-	// logical subspan per (attempt, name) instead of duplicate stripes.
-	if _, err := t.repo.CancelOpenSpansByName(ctx, parent.KnowledgeID, parent.Attempt, name,
-		"TASK_SUPERSEDED", "superseded by a new run of the same subtask"); err != nil {
-		logger.Warnf(ctx, "[SpanTracker] supersede %s before BeginSubSpan failed: %v", name, err)
-	}
 	now := time.Now()
-	id := newSpanID()
-	row := &types.KnowledgeProcessingSpan{
+	id := stableSpanID(parent.KnowledgeID, parent.Attempt, kind, name)
+	span := &Span{
 		KnowledgeID:  parent.KnowledgeID,
 		Attempt:      parent.Attempt,
 		SpanID:       id,
@@ -491,25 +501,43 @@ func (t *spanTracker) BeginSubSpan(ctx context.Context, parent *Span, name, kind
 		Status:       types.SpanStatusRunning,
 		Input:        input,
 		Metadata:     executionSpanMetadata(ctx, nil),
-		StartedAt:    &now,
-	}
-	if err := t.repo.Upsert(ctx, row); err != nil {
-		logger.Warnf(ctx, "[SpanTracker] BeginSubSpan failed parent=%s name=%s: %v",
-			parent.SpanID, name, err)
-		return nil
-	}
-	t.recordStart(id, now)
-	t.touchKnowledgeHeartbeat(ctx, parent.KnowledgeID, kind)
-	return &Span{
-		KnowledgeID:  parent.KnowledgeID,
-		Attempt:      parent.Attempt,
-		SpanID:       id,
-		ParentSpanID: parent.SpanID,
-		Name:         name,
-		Kind:         kind,
-		Status:       types.SpanStatusRunning,
 		StartedAt:    now,
 	}
+	// Merely preparing model work is not business progress. Persist this span
+	// only after the shared admission layer has granted capacity and committed
+	// the durable provider-running transition. If admission/circuit/pacing
+	// defers the call, this observer is never run and the database sees zero
+	// span writes.
+	modeladmission.RegisterProviderStartObserver(ctx, func(observerCtx context.Context) {
+		t.startPreparedSubSpan(observerCtx, span)
+	})
+	return span
+}
+
+func (t *spanTracker) startPreparedSubSpan(ctx context.Context, span *Span) {
+	if span == nil {
+		return
+	}
+	span.persistMu.Lock()
+	defer span.persistMu.Unlock()
+	if span.persisted {
+		return
+	}
+	now := time.Now()
+	row := &types.KnowledgeProcessingSpan{
+		KnowledgeID: span.KnowledgeID, Attempt: span.Attempt, SpanID: span.SpanID,
+		ParentSpanID: span.ParentSpanID, Name: span.Name, Kind: span.Kind,
+		Status: types.SpanStatusRunning, Input: span.Input, Metadata: span.Metadata,
+		StartedAt: &now,
+	}
+	if err := t.repo.Upsert(ctx, row); err != nil {
+		logger.Warnf(ctx, "[SpanTracker] provider-start span failed parent=%s name=%s: %v",
+			span.ParentSpanID, span.Name, err)
+		return
+	}
+	span.StartedAt = now
+	span.persisted = true
+	t.recordStart(span.SpanID, now)
 }
 
 func spanCanTransitionToDone(span *Span) bool {
@@ -541,7 +569,9 @@ func (t *spanTracker) EndSpan(ctx context.Context, span *Span, output types.JSON
 		Name:         span.Name,
 		Kind:         span.Kind,
 		Status:       types.SpanStatusDone,
+		Input:        span.Input,
 		Output:       output,
+		Metadata:     span.Metadata,
 		StartedAt:    &span.StartedAt,
 		FinishedAt:   &now,
 		DurationMs:   dur,
@@ -550,6 +580,9 @@ func (t *spanTracker) EndSpan(ctx context.Context, span *Span, output types.JSON
 		logger.Warnf(ctx, "[SpanTracker] EndSpan failed span=%s: %v", span.SpanID, err)
 		return
 	}
+	span.persistMu.Lock()
+	span.persisted = true
+	span.persistMu.Unlock()
 	span.Status = types.SpanStatusDone
 	t.touchKnowledgeHeartbeat(ctx, span.KnowledgeID, span.Kind)
 }
@@ -578,6 +611,8 @@ func (t *spanTracker) FailSpan(ctx context.Context, span *Span, errorCode, error
 		Name:         span.Name,
 		Kind:         span.Kind,
 		Status:       types.SpanStatusFailed,
+		Input:        span.Input,
+		Metadata:     span.Metadata,
 		ErrorCode:    strings.TrimSpace(errorCode),
 		ErrorMessage: errorMessage,
 		ErrorDetail:  detail,
@@ -588,6 +623,9 @@ func (t *spanTracker) FailSpan(ctx context.Context, span *Span, errorCode, error
 	if err := t.repo.Upsert(ctx, row); err != nil {
 		logger.Warnf(ctx, "[SpanTracker] FailSpan failed span=%s: %v", span.SpanID, err)
 	} else {
+		span.persistMu.Lock()
+		span.persisted = true
+		span.persistMu.Unlock()
 		span.Status = types.SpanStatusFailed
 	}
 	// Cascade: anything downstream of this span gets cancelled. The
@@ -622,40 +660,12 @@ func (t *spanTracker) DeferSpan(ctx context.Context, span *Span, reason string, 
 	if !spanCanTransitionToDone(span) {
 		return
 	}
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "control_plane_wait"
-	}
-	output := types.JSONMap{
-		"deferred": true,
-		"reason":   reason,
-	}
-	if detail != nil {
-		message := detail.Error()
-		if len(message) > 1024 {
-			message = message[:1024]
-		}
-		output["detail"] = message
-	}
-	// Drop the in-process timer for this invocation. The next durable wake-up
-	// opens a fresh physical span while V2 keeps one stable logical row.
+	// Admission, pacing, circuit, retry-after and shutdown are control-plane
+	// waits owned by the durable Work Item. They must not create or update a
+	// business span. If the provider had already started, leave its stable row
+	// for the next real execution or terminal workflow reconciler instead of
+	// manufacturing a pending/failed business outcome.
 	_, _ = t.takeStart(span.SpanID)
-	row := &types.KnowledgeProcessingSpan{
-		KnowledgeID:  span.KnowledgeID,
-		Attempt:      span.Attempt,
-		SpanID:       span.SpanID,
-		ParentSpanID: span.ParentSpanID,
-		Name:         span.Name,
-		Kind:         span.Kind,
-		Status:       types.SpanStatusPending,
-		Output:       output,
-		StartedAt:    &span.StartedAt,
-		DurationMs:   0,
-	}
-	if err := t.repo.Upsert(ctx, row); err != nil {
-		logger.Warnf(ctx, "[SpanTracker] DeferSpan failed span=%s: %v", span.SpanID, err)
-		return
-	}
 	span.Status = types.SpanStatusPending
 }
 
@@ -672,6 +682,8 @@ func (t *spanTracker) SkipSpan(ctx context.Context, span *Span, reason string) {
 		Name:         span.Name,
 		Kind:         span.Kind,
 		Status:       types.SpanStatusSkipped,
+		Input:        span.Input,
+		Metadata:     span.Metadata,
 		ErrorMessage: reason,
 		StartedAt:    &span.StartedAt,
 		FinishedAt:   &now,
@@ -679,6 +691,9 @@ func (t *spanTracker) SkipSpan(ctx context.Context, span *Span, reason string) {
 	if err := t.repo.Upsert(ctx, row); err != nil {
 		logger.Warnf(ctx, "[SpanTracker] SkipSpan failed span=%s: %v", span.SpanID, err)
 	} else {
+		span.persistMu.Lock()
+		span.persisted = true
+		span.persistMu.Unlock()
 		span.Status = types.SpanStatusSkipped
 	}
 	t.touchKnowledgeHeartbeat(ctx, span.KnowledgeID, span.Kind)
@@ -709,6 +724,9 @@ func (t *spanTracker) LookupStage(ctx context.Context, knowledgeID string, attem
 			Kind:         r.Kind,
 			Status:       r.Status,
 			StartedAt:    started,
+			Input:        r.Input,
+			Metadata:     r.Metadata,
+			persisted:    true,
 		}
 	}
 	return nil
@@ -743,6 +761,9 @@ func (t *spanTracker) LookupSpanByName(ctx context.Context, knowledgeID string, 
 			Kind:         r.Kind,
 			Status:       r.Status,
 			StartedAt:    started,
+			Input:        r.Input,
+			Metadata:     r.Metadata,
+			persisted:    true,
 		}
 	}
 	return nil

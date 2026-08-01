@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/agent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/llmjson"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikicontract"
 	"github.com/Tencent/WeKnora/internal/custom/modules/workloadbudget"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -96,28 +97,26 @@ func (s *wikiIngestService) extractCandidateSlugs(
 	}
 
 	granularity := batchCtx.ExtractionGranularity.Normalize()
-	raw, err := s.generateWithTemplate(ctx, chatModel, agent.WikiCandidateSlugPrompt, map[string]string{
-		"Content":             content,
-		"Language":            lang,
-		"PreviousSlugs":       prevSlugsText,
-		"Granularity":         string(granularity),
-		"GranularityGuidance": agent.WikiGranularityGuidance(string(granularity)),
-	})
+	result, err := s.generateCombinedExtraction(
+		ctx, chatModel, "candidate slug extraction",
+		agent.WikiCandidateSlugPrompt, map[string]string{
+			"Content":             content,
+			"Language":            lang,
+			"PreviousSlugs":       prevSlugsText,
+			"Granularity":         string(granularity),
+			"GranularityGuidance": agent.WikiGranularityGuidance(string(granularity)),
+		},
+	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("candidate slug extraction failed: %w", err)
 	}
 
-	raw = cleanLLMJSON(raw)
-
-	var result combinedExtraction
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		logger.Warnf(ctx, "wiki ingest: failed to parse candidate slug JSON: %v\nRaw: %s", err, raw)
-		return nil, nil, nil, fmt.Errorf("parse candidate slug JSON: %w", err)
-	}
-
-	result.Entities, result.Concepts = s.deduplicateExtractedBatch(
+	result.Entities, result.Concepts, err = s.deduplicateExtractedBatch(
 		ctx, chatModel, kbID, result.Entities, result.Concepts,
 	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("candidate deduplication failed: %w", err)
+	}
 
 	slugItems := make(map[string]extractedItem, len(result.Entities)+len(result.Concepts))
 	for _, item := range result.Entities {
@@ -132,6 +131,66 @@ func (s *wikiIngestService) extractCandidateSlugs(
 	}
 
 	return result.Entities, result.Concepts, slugItems, nil
+}
+
+const wikiExtractionRepairPrompt = `The prior model response below was intended to be a Wiki extraction JSON object but violated the output contract.
+Repair structure only; do not add facts that are absent from the response.
+Return exactly one object with arrays "entities" and "concepts". Each item must contain name, slug, aliases, description, and details.
+Return no Markdown and no explanation.
+
+<invalid_response>
+{{.Raw}}
+</invalid_response>
+
+Language: {{.Language}}`
+
+// generateCombinedExtraction applies the strict provider schema on the first
+// call and allows exactly one structure-only repair. Transport/provider errors
+// remain discoverable through errors.Join so the durable scheduler can defer
+// them instead of incorrectly switching to a second prompt on the same route.
+func (s *wikiIngestService) generateCombinedExtraction(
+	ctx context.Context,
+	chatModel chat.Chat,
+	label string,
+	prompt string,
+	data map[string]string,
+) (combinedExtraction, error) {
+	var result combinedExtraction
+	schema := wikicontract.ExtractionSchema()
+	raw, err := s.generateWithTemplateFormat(ctx, chatModel, prompt, data, schema)
+	if err != nil {
+		return result, err
+	}
+	raw = cleanLLMJSON(raw)
+	parseErr := json.Unmarshal([]byte(raw), &result)
+	if parseErr == nil {
+		return result, nil
+	}
+	logger.Warnf(ctx, "wiki ingest: %s contract invalid, running one repair: %v", label, parseErr)
+	repaired, repairErr := s.generateWithTemplateFormat(
+		ctx,
+		chatModel,
+		wikiExtractionRepairPrompt,
+		map[string]string{
+			"Raw":      raw,
+			"Language": data["Language"],
+		},
+		schema,
+	)
+	if repairErr != nil {
+		return combinedExtraction{}, errors.Join(
+			fmt.Errorf("parse %s JSON: %w", label, parseErr),
+			fmt.Errorf("repair %s JSON: %w", label, repairErr),
+		)
+	}
+	repaired = cleanLLMJSON(repaired)
+	if err := json.Unmarshal([]byte(repaired), &result); err != nil {
+		return combinedExtraction{}, errors.Join(
+			fmt.Errorf("parse %s JSON: %w", label, parseErr),
+			fmt.Errorf("parse repaired %s JSON: %w", label, err),
+		)
+	}
+	return result, nil
 }
 
 // chunkBatch groups chunks that will be sent in a single WikiChunkCitationPrompt call.

@@ -29,3 +29,9 @@ func TestRepetitionDetectorAllowsLongNonRepeatingOCR(t *testing.T) {
 	var detector repetitionDetector
 	require.False(t, detector.Observe(builder.String()))
 }
+
+func TestRepetitionDetectorRejectsEmptyMarkdownTableTail(t *testing.T) {
+	content := strings.Repeat("有效正文内容", 80) + "\n" + strings.Repeat("| | | |\n", 20)
+	var detector repetitionDetector
+	require.True(t, detector.Observe(content))
+}

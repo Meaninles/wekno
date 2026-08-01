@@ -377,7 +377,7 @@ func (s *wikiIngestService) recordDistributedMapFailure(
 // Shared Wiki page writes are deliberately absent; successful output is
 // atomically marked ready and a KB commit wake-up performs materialization.
 func (s *wikiIngestService) ProcessWikiMap(ctx context.Context, task *asynq.Task) error {
-	ctx = modeladmission.WithWorkLane(ctx, modeladmission.WorkLaneWiki)
+	ctx = modeladmission.WithWorkLane(ctx, modeladmission.WorkLaneWikiMap)
 	var payload WikiIngestPayload
 	if task == nil {
 		return errors.New("wiki Map: task is nil")

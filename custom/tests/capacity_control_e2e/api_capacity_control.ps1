@@ -163,6 +163,23 @@ function Assert-Canonical([object]$Pool, [int]$Total, [int]$Reserve, [int]$Tenan
     Assert-True ([long]$Pool.token_burst -eq 0) "unused token burst is cleared"
 }
 
+function Get-WeightedWikiShare([int]$Total, [int]$DerivativeWeight, [int]$WikiWeight) {
+    if ($Total -le 0) { return 0 }
+    if ($Total -eq 1) { return 1 }
+    $derivative = [int][Math]::Ceiling(($Total * $DerivativeWeight) / ($DerivativeWeight + $WikiWeight))
+    if ($derivative -lt 1) { $derivative = 1 }
+    if ($derivative -ge $Total) { $derivative = $Total - 1 }
+    return $Total - $derivative
+}
+
+function Get-WikiStageShares([int]$Total) {
+    if ($Total -le 0) { return [pscustomobject]@{ Map = 0; Commit = 0 } }
+    if ($Total -eq 1) { return [pscustomobject]@{ Map = 1; Commit = 1 } }
+    $commit = [Math]::Max(1, [Math]::Floor($Total / 3))
+    $map = [Math]::Max(1, $Total - $commit)
+    return [pscustomobject]@{ Map = [int]$map; Commit = [int]$commit }
+}
+
 try {
     Invoke-Api -Method Get -Path "/health" -Anonymous | Out-Null
     Login-LocalAdmin
@@ -173,6 +190,12 @@ try {
     Assert-True ($initial.Json.data.runtime.capacity_wait_counts_as_failure -eq $false) "capacity waits are not failures"
     Assert-True ([int]$initial.Json.data.runtime.background_consumer_slots -ge 1) "worker topology is compiled"
     Assert-True ($initial.Json.data.runtime.instances.Count -ge 1) "live topology comes from instance heartbeats"
+    foreach ($row in $initial.Json.data.pools) {
+        Assert-True ($null -ne $row.effective.wiki_map_work_share) "Wiki Map work share is compiled"
+        Assert-True ($null -ne $row.effective.wiki_commit_work_share) "Wiki Commit work share is compiled"
+        Assert-True ($null -ne $row.runtime.work_wiki_map_active) "Wiki Map runtime is observable"
+        Assert-True ($null -ne $row.runtime.work_wiki_commit_active) "Wiki Commit runtime is observable"
+    }
     Pass "effective policy, Redis runtime, and heartbeat topology report"
 
     $scheduler = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/scheduler-policy"
@@ -270,9 +293,22 @@ try {
             Assert-True ([int]$row.effective.background_max -eq ($profile.Total - $profile.Reserve)) "effective background is hot"
             Assert-True ([int]$row.effective.work_window -eq (($profile.Total - $profile.Reserve) * [int]$script:SchedulerPolicy.prefetch_factor)) "work window follows scheduler prefetch"
             Assert-True ([int]$row.effective.document_max -eq $profile.Document) "effective document cap is hot"
+
+            $background = $profile.Total - $profile.Reserve
+            $workWindow = $background * [int]$script:SchedulerPolicy.prefetch_factor
+            $wikiWork = Get-WeightedWikiShare $workWindow `
+                ([int]$script:SchedulerPolicy.derivative_weight) ([int]$script:SchedulerPolicy.wiki_weight)
+            $wikiProvider = Get-WeightedWikiShare $background `
+                ([int]$script:SchedulerPolicy.derivative_weight) ([int]$script:SchedulerPolicy.wiki_weight)
+            $workStages = Get-WikiStageShares $wikiWork
+            $providerStages = Get-WikiStageShares $wikiProvider
+            Assert-True ([int]$row.effective.wiki_map_work_share -eq $workStages.Map) "Wiki Map work share is auto-derived"
+            Assert-True ([int]$row.effective.wiki_commit_work_share -eq $workStages.Commit) "Wiki Commit work share is auto-derived"
+            Assert-True ([int]$row.effective.wiki_map_provider_share -eq $providerStages.Map) "Wiki Map provider share is auto-derived"
+            Assert-True ([int]$row.effective.wiki_commit_provider_share -eq $providerStages.Commit) "Wiki Commit provider share is auto-derived"
         }
     }
-    Pass "three valid profiles hot-update and read consistently across API replicas"
+    Pass "three valid profiles hot-update and automatically recompile stage shares across API replicas"
 
     Invoke-Api -Method Put -Path "/api/v1/custom/capacity-control/resource-pools/$($script:Pool.id)" `
         -Body (New-PoolBody 4 1 4 2 20000) `

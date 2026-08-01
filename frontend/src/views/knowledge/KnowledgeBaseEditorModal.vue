@@ -595,21 +595,30 @@ const kbCreateNeedsEmbedding = computed(() => {
   return Boolean(s?.vectorEnabled || s?.keywordEnabled)
 })
 
+const pickDefaultModel = (type: ModelConfig['type']) => {
+  const list = allModels.value.filter(
+    (m) => m.type === type && (type !== 'KnowledgeQA' || m.workload_scope !== 'derivative_only'),
+  )
+  return list.find((m) => m.is_default) || list[0]
+}
+
 const applyDefaultModelsIfEmpty = () => {
   if (!formData.value || props.mode !== 'create') return
-  const pick = (type: ModelConfig['type']) => {
-    const list = allModels.value.filter(
-      (m) => m.type === type && (type !== 'KnowledgeQA' || m.workload_scope !== 'derivative_only'),
-    )
-    return list.find((m) => m.is_default) || list[0]
-  }
-  const chat = pick('KnowledgeQA')
-  const embedding = pick('Embedding')
+  const chat = pickDefaultModel('KnowledgeQA')
+  const embedding = pickDefaultModel('Embedding')
+  const vllm = pickDefaultModel('VLLM')
   if (!formData.value.modelConfig.llmModelId && chat?.id) {
     formData.value.modelConfig.llmModelId = chat.id
   }
   if (!formData.value.modelConfig.embeddingModelId && embedding?.id) {
     formData.value.modelConfig.embeddingModelId = embedding.id
+  }
+  if (
+    formData.value.multimodalConfig.enabled &&
+    !formData.value.multimodalConfig.vllmModelId &&
+    vllm?.id
+  ) {
+    formData.value.multimodalConfig.vllmModelId = vllm.id
   }
 }
 
@@ -618,14 +627,24 @@ watch(
   (newType, oldType) => {
     if (!formData.value) return
     if (newType === 'faq') {
+      if (props.mode === 'create') {
+        formData.value.multimodalConfig.enabled = false
+        formData.value.multimodalConfig.vllmModelId = ''
+      }
       if (!formData.value.faqConfig) {
         formData.value.faqConfig = { indexMode: 'question_only', questionIndexMode: 'separate' }
       }
       if (!['basic', 'models', 'faq'].includes(currentSection.value)) {
         currentSection.value = 'faq'
       }
-    } else if (oldType === 'faq' && currentSection.value === 'faq') {
-      currentSection.value = 'basic'
+    } else if (oldType === 'faq') {
+      if (props.mode === 'create') {
+        formData.value.multimodalConfig.enabled = true
+        applyDefaultModelsIfEmpty()
+      }
+      if (currentSection.value === 'faq') {
+        currentSection.value = 'basic'
+      }
     }
   }
 )
@@ -662,7 +681,9 @@ const initFormData = (type: 'document' | 'faq' = 'document') => {
     },
     storageProvider: '' as string,
     multimodalConfig: {
-      enabled: false,
+      // Document knowledge bases start with image understanding enabled.
+      // FAQ knowledge bases do not run the document parsing pipeline.
+      enabled: type === 'document',
       vllmModelId: ''
     },
     asrConfig: {
@@ -930,8 +951,16 @@ const handleParserEngineRulesUpdate = (rules: any[]) => {
 }
 
 const handleMultimodalToggle = () => {
-  if (formData.value && !formData.value.multimodalConfig.enabled) {
+  if (!formData.value) return
+  if (!formData.value.multimodalConfig.enabled) {
     formData.value.multimodalConfig.vllmModelId = ''
+    return
+  }
+  if (!formData.value.multimodalConfig.vllmModelId) {
+    const vllm = pickDefaultModel('VLLM')
+    if (vllm?.id) {
+      formData.value.multimodalConfig.vllmModelId = vllm.id
+    }
   }
 }
 
@@ -1418,6 +1447,7 @@ watch(
   async (visible, previous) => {
     if (!visible && previous && props.visible) {
       await loadAllModels(true)
+      applyDefaultModelsIfEmpty()
     }
   }
 )

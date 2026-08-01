@@ -44,6 +44,10 @@ type executionContext struct {
 
 	startMu sync.Mutex
 	started bool
+
+	outcomeMu     sync.Mutex
+	outcomeStatus string
+	outcomeDetail string
 }
 
 // WithExecution attaches the durable provider checkpoint boundary to the
@@ -75,6 +79,30 @@ func executionFromContext(ctx context.Context) (*executionContext, bool) {
 func IsDurableExecution(ctx context.Context) bool {
 	_, ok := executionFromContext(ctx)
 	return ok
+}
+
+// MarkOutcomeDegraded records a non-retryable semantic shortfall on the
+// current durable work item. The handler still completes normally, while the
+// generation finalizer projects a truthful degraded enrichment status.
+func MarkOutcomeDegraded(ctx context.Context, detail string) {
+	execution, ok := executionFromContext(ctx)
+	if !ok {
+		return
+	}
+	execution.outcomeMu.Lock()
+	defer execution.outcomeMu.Unlock()
+	execution.outcomeStatus = "degraded"
+	execution.outcomeDetail = truncate(strings.TrimSpace(detail), 2000)
+}
+
+func outcomeFromContext(ctx context.Context) (string, string) {
+	execution, ok := executionFromContext(ctx)
+	if !ok {
+		return "", ""
+	}
+	execution.outcomeMu.Lock()
+	defer execution.outcomeMu.Unlock()
+	return execution.outcomeStatus, execution.outcomeDetail
 }
 
 func chatRequestHash(modelID string, messages []chat.Message, options *chat.ChatOptions) (string, error) {

@@ -1,0 +1,2 @@
+-- Irreversible by design: a completed primary parse must not be coupled back
+-- to optional derivative or Wiki execution.

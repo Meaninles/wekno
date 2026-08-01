@@ -32,12 +32,38 @@ type admittedChat struct {
 	inner   chat.Chat
 }
 
+var _ ChatTaskWorkAware = (*admittedChat)(nil)
+
 // ChatParallelismAware is implemented by admission-aware wrappers so business
 // fan-out can size its local errgroup from the same hot resource-pool policy.
 // The provider semaphore remains authoritative; this is an efficiency hint
 // that prevents one document from creating excess waiting goroutines.
 type ChatParallelismAware interface {
 	ModelAdmissionParallelism(context.Context, int) int
+}
+
+// ChatTaskWorkAware exposes the task-level background window through wrapper
+// stacks (for example the derivative token limiter wrapped around admittedChat).
+// Callers should use AcquireChatTaskWork instead of asserting this directly.
+type ChatTaskWorkAware interface {
+	AcquireModelTaskWork(context.Context, WorkLane) (context.Context, func(), error)
+}
+
+// AcquireChatTaskWork claims one durable execution slot for all model calls
+// made while processing a task/document. Models without admission wrapping are
+// intentionally a no-op (Lite/tests or admission disabled).
+func AcquireChatTaskWork(
+	ctx context.Context,
+	model chat.Chat,
+	lane WorkLane,
+) (context.Context, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if aware, ok := model.(ChatTaskWorkAware); ok {
+		return aware.AcquireModelTaskWork(ctx, lane)
+	}
+	return ctx, func() {}, nil
 }
 
 // EffectiveChatParallelism returns a safe per-document background fan-out.
@@ -76,6 +102,13 @@ func (w *admittedChat) ModelAdmissionParallelism(ctx context.Context, requested 
 		return 1
 	}
 	return effective
+}
+
+func (w *admittedChat) AcquireModelTaskWork(
+	ctx context.Context,
+	lane WorkLane,
+) (context.Context, func(), error) {
+	return w.manager.AcquireTaskWork(ctx, w.spec, lane)
 }
 
 func WrapChat(manager *Manager, spec Spec, inner chat.Chat) chat.Chat {
@@ -193,6 +226,10 @@ func (w *admittedEmbedder) Embed(ctx context.Context, text string) ([]float32, e
 	if err != nil {
 		return nil, err
 	}
+	if err := runAdmissionGrantedHook(lease.Context()); err != nil {
+		lease.Release()
+		return nil, err
+	}
 	response, callErr := w.inner.Embed(lease.Context(), text)
 	return response, finishLease(lease, callErr)
 }
@@ -200,6 +237,10 @@ func (w *admittedEmbedder) Embed(ctx context.Context, text string) ([]float32, e
 func (w *admittedEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]float32, error) {
 	lease, err := w.manager.Acquire(ctx, w.spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := runAdmissionGrantedHook(lease.Context()); err != nil {
+		lease.Release()
 		return nil, err
 	}
 	response, callErr := w.inner.BatchEmbed(lease.Context(), texts)
@@ -246,6 +287,10 @@ func (w *admittedReranker) Rerank(
 	if err != nil {
 		return nil, err
 	}
+	if err := runAdmissionGrantedHook(lease.Context()); err != nil {
+		lease.Release()
+		return nil, err
+	}
 	response, callErr := w.inner.Rerank(lease.Context(), query, documents)
 	return response, finishLease(lease, callErr)
 }
@@ -275,6 +320,10 @@ func (w *admittedVLM) Predict(
 	if err != nil {
 		return "", err
 	}
+	if err := runAdmissionGrantedHook(lease.Context()); err != nil {
+		lease.Release()
+		return "", err
+	}
 	response, callErr := w.inner.Predict(lease.Context(), images, prompt)
 	return response, finishLease(lease, callErr)
 }
@@ -302,6 +351,10 @@ func (w *admittedASR) Transcribe(
 ) (*asr.TranscriptionResult, error) {
 	lease, err := w.manager.Acquire(ctx, w.spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := runAdmissionGrantedHook(lease.Context()); err != nil {
+		lease.Release()
 		return nil, err
 	}
 	response, callErr := w.inner.Transcribe(lease.Context(), audioBytes, fileName)

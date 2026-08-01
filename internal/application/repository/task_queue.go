@@ -208,6 +208,105 @@ func (r *taskPendingOpsRepository) GetWikiIngestByDedupKey(
 	return &op, nil
 }
 
+// ClaimWikiMapDispatch validates the disposable wake-up epoch and extends its
+// database reservation into a short renewable execution lease. A stale Redis
+// message returns nil and is safe to ACK; PostgreSQL remains authoritative.
+func (r *taskPendingOpsRepository) ClaimWikiMapDispatch(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	dedupKey string,
+	epoch uint64,
+	lease time.Duration,
+) (*types.TaskPendingOp, error) {
+	if tenantID == 0 || strings.TrimSpace(knowledgeBaseID) == "" ||
+		strings.TrimSpace(dedupKey) == "" || epoch == 0 {
+		return nil, nil
+	}
+	if lease <= 0 {
+		lease = 45 * time.Second
+	}
+	var op types.TaskPendingOp
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ? AND dedup_key = ? AND map_ready_at IS NULL AND map_dispatch_epoch = ? AND map_dispatch_task_id <> ''",
+			tenantID, types.TypeWikiIngest, types.TaskScopeKnowledgeBase,
+			knowledgeBaseID, "ingest", dedupKey, epoch,
+		).Clauses(clause.Locking{Strength: "UPDATE"}).First(&op).Error; err != nil {
+			return err
+		}
+		expectedTaskID := fmt.Sprintf("wiki-map:%d:%d", op.ID, epoch)
+		result := tx.Table("task_pending_ops").
+			Where(
+				"id = ? AND map_dispatch_epoch = ? AND map_dispatch_task_id = ? AND map_ready_at IS NULL",
+				op.ID, epoch, expectedTaskID,
+			).
+			Update("map_dispatch_lease_until", time.Now().UTC().Add(lease))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		op.MapDispatchEpoch = epoch
+		op.MapDispatchTaskID = expectedTaskID
+		until := time.Now().UTC().Add(lease)
+		op.MapDispatchLeaseUntil = &until
+		return nil
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &op, nil
+}
+
+func (r *taskPendingOpsRepository) RenewWikiMapDispatch(
+	ctx context.Context,
+	id int64,
+	epoch uint64,
+	lease time.Duration,
+) (bool, error) {
+	if id <= 0 || epoch == 0 {
+		return false, nil
+	}
+	if lease <= 0 {
+		lease = 45 * time.Second
+	}
+	result := r.db.WithContext(ctx).Table("task_pending_ops").
+		Where("id = ? AND map_dispatch_epoch = ? AND map_ready_at IS NULL", id, epoch).
+		Update("map_dispatch_lease_until", time.Now().UTC().Add(lease))
+	return result.RowsAffected == 1, result.Error
+}
+
+// DeferWikiMapDispatch returns a row to the PostgreSQL due queue without
+// changing fail_count. This is used for capacity/circuit waits and disposable
+// lock conflicts; the maintenance dispatcher publishes a fresh epoch later.
+func (r *taskPendingOpsRepository) DeferWikiMapDispatch(
+	ctx context.Context,
+	id int64,
+	epoch uint64,
+	delay time.Duration,
+) error {
+	if id <= 0 || epoch == 0 {
+		return nil
+	}
+	if delay < time.Second {
+		delay = time.Second
+	}
+	now := time.Now().UTC()
+	return r.db.WithContext(ctx).Table("task_pending_ops").
+		Where("id = ? AND map_dispatch_epoch = ? AND map_ready_at IS NULL", id, epoch).
+		Updates(map[string]any{
+			"claimed_at":               now,
+			"next_attempt_at":          now.Add(delay),
+			"map_dispatch_task_id":     "",
+			"map_dispatch_lease_until": nil,
+		}).Error
+}
+
 // DeleteWikiIngestByDedupKey terminally removes one stale generation using
 // the same complete identity as the distributed Map lookup. It is safe to
 // race KB deletion (both remove the row) and cannot touch another tenant even
@@ -364,7 +463,8 @@ func (r *taskPendingOpsRepository) MarkWikiMapReady(
 		now := time.Now().UTC()
 		result := tx.Exec(
 			`UPDATE task_pending_ops
-			 SET payload = ?, map_ready_at = ?
+			 SET payload = ?, map_ready_at = ?,
+			     map_dispatch_task_id = '', map_dispatch_lease_until = NULL
 			 WHERE id = ? AND tenant_id = ? AND task_type = ?
 			   AND scope = ? AND scope_id = ? AND op = ?`,
 			payload,

@@ -31,6 +31,7 @@ const (
 	WorkSummary    = "summary"
 	WorkQuestion   = "question_batch"
 	WorkGraph      = "graph_batch"
+	WorkDataTable  = "datatable_metadata"
 	WorkFinalizer  = "finalizer"
 	DefaultLane    = "normal"
 	MaxPayloadSize = 256 * 1024
@@ -59,11 +60,12 @@ type WorkItem struct {
 	GatewayPoolID  string `json:"gateway_pool_id" gorm:"type:varchar(64);not null;default:''"`
 	PolicyVersion  uint64 `json:"policy_version" gorm:"not null;default:0"`
 
-	State          string `json:"state" gorm:"type:varchar(32);not null;index:idx_derivative_due,priority:1;index:idx_derivative_pool_due,priority:2;index:idx_derivative_lease,priority:1"`
-	Priority       int    `json:"priority" gorm:"not null;default:0;index:idx_derivative_due,priority:3,sort:desc"`
-	QueueLane      string `json:"queue_lane" gorm:"type:varchar(24);not null;default:'normal'"`
-	DispatchEpoch  uint64 `json:"dispatch_epoch" gorm:"not null;default:0"`
-	DispatchTaskID string `json:"dispatch_task_id" gorm:"type:varchar(190);not null;default:''"`
+	State              string     `json:"state" gorm:"type:varchar(32);not null;index:idx_derivative_due,priority:1;index:idx_derivative_pool_due,priority:2;index:idx_derivative_lease,priority:1"`
+	Priority           int        `json:"priority" gorm:"not null;default:0;index:idx_derivative_due,priority:3,sort:desc"`
+	QueueLane          string     `json:"queue_lane" gorm:"type:varchar(24);not null;default:'normal'"`
+	DispatchEpoch      uint64     `json:"dispatch_epoch" gorm:"not null;default:0"`
+	DispatchTaskID     string     `json:"dispatch_task_id" gorm:"type:varchar(190);not null;default:''"`
+	DispatchLeaseUntil *time.Time `json:"dispatch_lease_until,omitempty" gorm:"index:idx_derivative_dispatch_lease"`
 
 	OwnerInstanceID string     `json:"owner_instance_id" gorm:"type:varchar(160);not null;default:''"`
 	LeaseToken      string     `json:"-" gorm:"type:varchar(64);not null;default:''"`

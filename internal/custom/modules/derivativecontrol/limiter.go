@@ -231,10 +231,19 @@ type limitedChat struct {
 	model   *types.Model
 }
 
+var _ modeladmission.ChatTaskWorkAware = (*limitedChat)(nil)
+
 func (w *limitedChat) GetModelName() string { return w.inner.GetModelName() }
 func (w *limitedChat) GetModelID() string   { return w.inner.GetModelID() }
 func (w *limitedChat) ModelAdmissionParallelism(ctx context.Context, requested int) int {
 	return modeladmission.EffectiveChatParallelism(ctx, w.inner, requested)
+}
+
+func (w *limitedChat) AcquireModelTaskWork(
+	ctx context.Context,
+	lane modeladmission.WorkLane,
+) (context.Context, func(), error) {
+	return modeladmission.AcquireChatTaskWork(ctx, w.inner, lane)
 }
 
 func (w *limitedChat) Chat(

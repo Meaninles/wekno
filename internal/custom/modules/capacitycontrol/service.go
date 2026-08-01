@@ -6,15 +6,14 @@ package capacitycontrol
 import (
 	"context"
 	"errors"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeinstances"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -45,6 +44,9 @@ type EffectiveCapacity struct {
 	ProviderTotal       int `json:"provider_total"`
 	InteractiveReserved int `json:"interactive_reserved"`
 	BackgroundMax       int `json:"background_max"`
+	WorkWindow          int `json:"work_window"`
+	DerivativeShare     int `json:"derivative_share"`
+	WikiShare           int `json:"wiki_share"`
 	TenantMax           int `json:"tenant_max"`
 	DocumentMax         int `json:"document_max"`
 	ChatSessions        int `json:"chat_sessions"`
@@ -58,32 +60,36 @@ type ModuleGrant struct {
 }
 
 type PoolReport struct {
-	ID             string             `json:"id"`
-	Name           string             `json:"name"`
-	ResourceKind   string             `json:"resource_kind"`
-	State          string             `json:"state"`
-	PolicyVersion  uint64             `json:"policy_version"`
-	BindingCount   int                `json:"binding_count"`
-	RouteCount     int                `json:"route_count"`
-	Configured     ConfiguredCapacity `json:"configured"`
-	Effective      EffectiveCapacity  `json:"effective"`
-	ModuleGrants   []ModuleGrant      `json:"module_grants"`
-	Issues         []Issue            `json:"issues"`
-	QuotaPoolIDs   []string           `json:"quota_pool_ids"`
-	GatewayPoolIDs []string           `json:"gateway_pool_ids"`
+	ID             string                          `json:"id"`
+	Name           string                          `json:"name"`
+	ResourceKind   string                          `json:"resource_kind"`
+	State          string                          `json:"state"`
+	PolicyVersion  uint64                          `json:"policy_version"`
+	BindingCount   int                             `json:"binding_count"`
+	RouteCount     int                             `json:"route_count"`
+	Configured     ConfiguredCapacity              `json:"configured"`
+	Effective      EffectiveCapacity               `json:"effective"`
+	Runtime        modeladmission.PoolRuntimeStats `json:"runtime"`
+	ModuleGrants   []ModuleGrant                   `json:"module_grants"`
+	Issues         []Issue                         `json:"issues"`
+	QuotaPoolIDs   []string                        `json:"quota_pool_ids"`
+	GatewayPoolIDs []string                        `json:"gateway_pool_ids"`
 }
 
 type RuntimeReport struct {
-	Scheduler                    string               `json:"scheduler"`
-	BackgroundWaitMode           string               `json:"background_wait_mode"`
-	CapacityWaitCountsAsFailure  bool                 `json:"capacity_wait_counts_as_failure"`
-	BackgroundWorkersPerInstance int                  `json:"background_workers_per_instance"`
-	WikiWorkersPerInstance       int                  `json:"wiki_workers_per_instance"`
-	DerivativeReplicas           int                  `json:"derivative_replicas"`
-	WikiReplicas                 int                  `json:"wiki_replicas"`
-	BackgroundConsumerSlots      int                  `json:"background_consumer_slots"`
-	WikiConsumerSlots            int                  `json:"wiki_consumer_slots"`
-	Admission                    modeladmission.Stats `json:"admission"`
+	Scheduler                   string                         `json:"scheduler"`
+	BackgroundWaitMode          string                         `json:"background_wait_mode"`
+	CapacityWaitCountsAsFailure bool                           `json:"capacity_wait_counts_as_failure"`
+	SchedulerPolicy             modeladmission.SchedulerPolicy `json:"scheduler_policy"`
+	Instances                   []runtimeinstances.Instance    `json:"instances"`
+	InstanceStaleAfterSeconds   int                            `json:"instance_stale_after_seconds"`
+	DerivativeReplicas          int                            `json:"derivative_replicas"`
+	WikiReplicas                int                            `json:"wiki_replicas"`
+	ParseReplicas               int                            `json:"parse_replicas"`
+	BackgroundConsumerSlots     int                            `json:"background_consumer_slots"`
+	WikiConsumerSlots           int                            `json:"wiki_consumer_slots"`
+	ParseConsumerSlots          int                            `json:"parse_consumer_slots"`
+	Admission                   modeladmission.Stats           `json:"admission"`
 }
 
 type Summary struct {
@@ -125,6 +131,23 @@ func (s *Service) Compile(ctx context.Context) (Report, error) {
 	if err := s.db.WithContext(ctx).Order("model_tenant_id, model_id").Find(&bindings).Error; err != nil {
 		return Report{}, err
 	}
+	schedulerPolicy := modeladmission.DefaultSchedulerPolicy()
+	if s.db.Migrator().HasTable(&modeladmission.SchedulerPolicy{}) {
+		if err := s.db.WithContext(ctx).Where("id = ?", 1).First(&schedulerPolicy).Error; err != nil {
+			return Report{}, err
+		}
+		if err := modeladmission.NormalizeSchedulerPolicy(&schedulerPolicy); err != nil {
+			return Report{}, err
+		}
+	}
+	instances := make([]runtimeinstances.Instance, 0)
+	if s.db.Migrator().HasTable(&runtimeinstances.Instance{}) {
+		var err error
+		instances, err = runtimeinstances.ListActive(ctx, s.db)
+		if err != nil {
+			return Report{}, err
+		}
+	}
 
 	byPool := make(map[string][]modeladmission.ResourceBinding)
 	routePools := make(map[string]map[string]struct{})
@@ -143,23 +166,45 @@ func (s *Service) Compile(ctx context.Context) (Report, error) {
 		Healthy:       true,
 		SourceOfTruth: "actual_model_resource_pool",
 		Runtime: RuntimeReport{
-			Scheduler:                    "redis_resource_pool_admission",
-			BackgroundWaitMode:           "wait_in_scheduler_until_task_context_or_explicit_yield",
-			CapacityWaitCountsAsFailure:  false,
-			BackgroundWorkersPerInstance: positiveEnv("WEKNORA_ASYNQ_TASK_CONCURRENCY", 32),
-			WikiWorkersPerInstance:       positiveEnv("WEKNORA_WIKI_MAP_TASK_CONCURRENCY", 4),
+			Scheduler:                   "redis_resource_pool_work_window",
+			BackgroundWaitMode:          "bounded_wait_then_budget_free_durable_yield",
+			CapacityWaitCountsAsFailure: false,
+			SchedulerPolicy:             schedulerPolicy,
+			Instances:                   instances,
+			InstanceStaleAfterSeconds:   int(runtimeinstances.StaleAfter / time.Second),
 		},
 	}
-	report.Runtime.DerivativeReplicas = positiveEnv("CUSTOM_RUNTIME_DERIVATIVE_WORKER_REPLICAS", 1)
-	report.Runtime.WikiReplicas = positiveEnv("CUSTOM_RUNTIME_WIKI_WORKER_REPLICAS", 1)
-	report.Runtime.BackgroundConsumerSlots = report.Runtime.BackgroundWorkersPerInstance * report.Runtime.DerivativeReplicas
-	report.Runtime.WikiConsumerSlots = report.Runtime.WikiWorkersPerInstance * report.Runtime.WikiReplicas
+	for _, instance := range instances {
+		if instance.DerivativeConcurrency > 0 {
+			report.Runtime.DerivativeReplicas++
+			report.Runtime.BackgroundConsumerSlots += instance.DerivativeConcurrency
+		}
+		if instance.WikiConcurrency > 0 {
+			report.Runtime.WikiReplicas++
+			report.Runtime.WikiConsumerSlots += instance.WikiConcurrency
+		}
+		if instance.ParseConcurrency > 0 {
+			report.Runtime.ParseReplicas++
+			report.Runtime.ParseConsumerSlots += instance.ParseConcurrency
+		}
+	}
 	if s.admission != nil {
 		report.Runtime.Admission = s.admission.Snapshot()
 	}
 
 	for index := range pools {
-		poolReport := CompilePool(pools[index], byPool[pools[index].ID])
+		poolReport := compilePool(pools[index], byPool[pools[index].ID], schedulerPolicy)
+		if s.admission != nil {
+			runtimeStats, statsErr := s.admission.PoolRuntimeSnapshot(ctx, pools[index].ID)
+			if statsErr != nil {
+				poolReport.Issues = append(poolReport.Issues, Issue{
+					Severity: "warning", Code: "runtime_snapshot_unavailable", Scope: "pool:" + pools[index].ID,
+					Message: "实时执行窗口暂时无法读取：" + statsErr.Error(),
+				})
+			} else {
+				poolReport.Runtime = runtimeStats
+			}
+		}
 		report.Pools = append(report.Pools, poolReport)
 		for _, issue := range poolReport.Issues {
 			countIssue(&report, issue)
@@ -204,7 +249,18 @@ func (s *Service) Compile(ctx context.Context) (Report, error) {
 }
 
 func CompilePool(pool modeladmission.ResourcePool, bindings []modeladmission.ResourceBinding) PoolReport {
+	return compilePool(pool, bindings, modeladmission.DefaultSchedulerPolicy())
+}
+
+func compilePool(
+	pool modeladmission.ResourcePool,
+	bindings []modeladmission.ResourceBinding,
+	schedulerPolicy modeladmission.SchedulerPolicy,
+) PoolReport {
 	background := modeladmission.EffectiveBackgroundLimit(pool.MaxInflight, pool.InteractiveReserve)
+	workWindow := modeladmission.WorkWindow(background, schedulerPolicy)
+	derivativeShare := modeladmission.LaneWorkWindow(background, modeladmission.WorkLaneDerivative, schedulerPolicy)
+	wikiShare := modeladmission.LaneWorkWindow(background, modeladmission.WorkLaneWiki, schedulerPolicy)
 	tenant := minPositive(pool.TenantBurst, pool.MaxInflight)
 	document := minPositive(pool.DocumentBurst, tenant, background)
 	chatSessions := pool.MaxInflight
@@ -238,7 +294,9 @@ func CompilePool(pool modeladmission.ResourcePool, bindings []modeladmission.Res
 		},
 		Effective: EffectiveCapacity{
 			ProviderTotal: pool.MaxInflight, InteractiveReserved: pool.InteractiveReserve,
-			BackgroundMax: background, TenantMax: tenant, DocumentMax: document,
+			BackgroundMax: background, WorkWindow: workWindow,
+			DerivativeShare: derivativeShare, WikiShare: wikiShare,
+			TenantMax: tenant, DocumentMax: document,
 			ChatSessions: chatSessions,
 		},
 		QuotaPoolIDs: sortedSet(quotas), GatewayPoolIDs: sortedSet(gateways),
@@ -322,18 +380,6 @@ func sortedSet(values map[string]struct{}) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-func positiveEnv(name string, fallback int) int {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < 1 {
-		return fallback
-	}
-	return value
 }
 
 func countIssue(report *Report, issue Issue) {

@@ -388,7 +388,7 @@ func TestStablePostProcessDurablePublicationReceiptPreventsReplay(t *testing.T) 
 	require.Equal(t, asynq.TaskStateCompleted, info.State)
 }
 
-func TestStablePostProcessReceiptRequiresAllCountedSlotsToDrain(t *testing.T) {
+func TestStablePostProcessReceiptPreventsReplayWhileCountedSlotsDrain(t *testing.T) {
 	enqueuer := &Enqueuer{coordinator: newQueueTestCoordinator(
 		t, "stable-postprocess-pending", "boot-1", 1,
 	)}
@@ -416,19 +416,6 @@ func TestStablePostProcessReceiptRequiresAllCountedSlotsToDrain(t *testing.T) {
 	)
 
 	required, complete, err := stableTaskCompletionProof(
-		context.Background(),
-		enqueuer.coordinator.db,
-		task.Type(),
-		task.Payload(),
-	)
-	require.NoError(t, err)
-	require.True(t, required)
-	require.False(t, complete)
-
-	require.NoError(t, enqueuer.coordinator.db.Model(&queueTestKnowledge{}).
-		Where("id = ?", knowledgeID).
-		Update("pending_subtasks_count", 0).Error)
-	required, complete, err = stableTaskCompletionProof(
 		context.Background(),
 		enqueuer.coordinator.db,
 		task.Type(),

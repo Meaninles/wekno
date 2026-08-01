@@ -45,6 +45,7 @@ type Worker struct {
 	repository       *Repository
 	knowledgeService interfaces.KnowledgeService
 	chunkExtractor   interfaces.TaskHandler
+	dataTableSummary interfaces.TaskHandler
 	knowledgeRepo    interfaces.KnowledgeRepository
 	owner            string
 }
@@ -55,6 +56,7 @@ type WorkerParams struct {
 	Repository       *Repository
 	KnowledgeService interfaces.KnowledgeService
 	ChunkExtractor   interfaces.TaskHandler `name:"chunkExtractor"`
+	DataTableSummary interfaces.TaskHandler `name:"dataTableSummary"`
 }
 
 func NewWorker(params WorkerParams) *Worker {
@@ -65,9 +67,10 @@ func NewWorker(params WorkerParams) *Worker {
 	}
 	return &Worker{
 		repository: params.Repository, knowledgeService: params.KnowledgeService,
-		chunkExtractor: params.ChunkExtractor,
-		knowledgeRepo:  params.KnowledgeService.GetRepository(),
-		owner:          owner + ":" + uuid.NewString(),
+		chunkExtractor:   params.ChunkExtractor,
+		dataTableSummary: params.DataTableSummary,
+		knowledgeRepo:    params.KnowledgeService.GetRepository(),
+		owner:            owner + ":" + uuid.NewString(),
 	}
 }
 
@@ -95,12 +98,33 @@ func (w *Worker) Handle(ctx context.Context, task *asynq.Task) error {
 	}
 
 	execCtx := WithExecution(ctx, w.repository, item)
+	execCtx = modeladmission.WithWorkLane(execCtx, modeladmission.WorkLaneDerivative)
 	execCtx = modeladmission.WithAdmissionGrantedHook(
 		execCtx,
 		func(hookCtx context.Context) error {
 			return BeginProviderForContext(hookCtx)
 		},
 	)
+	if item.WorkKind != WorkFinalizer && w.repository.admission != nil {
+		var releaseTaskWork func()
+		execCtx, releaseTaskWork, err = w.repository.admission.AcquireTaskWork(
+			execCtx,
+			modeladmission.Spec{
+				Kind:           modeladmission.KindDerivative,
+				Domain:         item.ResourcePoolID,
+				TenantID:       item.TenantID,
+				ModelID:        item.ModelID,
+				ModelTenantID:  item.ModelTenantID,
+				DerivativeOnly: true,
+				KnowledgeID:    item.KnowledgeID,
+			},
+			modeladmission.WorkLaneDerivative,
+		)
+		if err != nil {
+			return w.deferFailure(execCtx, item, err)
+		}
+		defer releaseTaskWork()
+	}
 	execCtx, cancel := context.WithCancel(execCtx)
 	defer cancel()
 	heartbeatDone := make(chan struct{})
@@ -168,6 +192,11 @@ func (w *Worker) execute(ctx context.Context, item *WorkItem) error {
 		if w.chunkExtractor != nil {
 			handler = w.chunkExtractor.Handle
 		}
+	case WorkDataTable:
+		taskType = types.TypeDataTableSummary
+		if w.dataTableSummary != nil {
+			handler = w.dataTableSummary.Handle
+		}
 	case WorkFinalizer:
 		return w.reconcileFinalizer(ctx, item)
 	default:
@@ -234,6 +263,16 @@ func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) 
 		delay = deferred.ModelRetryAfter()
 		errorClass = "admission"
 		errorCode = "model_deferred"
+		if err := w.repository.DeferForAdmission(
+			persistCtx, item.ID, item.LeaseToken,
+			errorCode, cause.Error(), delay,
+		); err == nil || errors.Is(err, ErrLeaseLost) {
+			return nil
+		} else if !errors.Is(err, ErrInvalidState) {
+			logger.Errorf(ctx, "[derivative queue] persist budget-free admission defer failed work_item=%s: %v",
+				item.ID, err)
+			return nil
+		}
 	}
 	if errors.Is(cause, context.Canceled) {
 		delay = 10 * time.Second
@@ -278,9 +317,9 @@ func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) 
 		return nil
 	}
 	// The leaf only persists its terminal work-item state. The plan finalizer
-	// is the sole owner of generation reconciliation and document promotion;
-	// otherwise the last failing leaf can clear processing_generation before
-	// the finalizer is claimed.
+	// is the sole owner of generation outcome reconciliation; core parse
+	// completion is already independent and processing_generation remains the
+	// fence for every late artifact write.
 	return nil
 }
 

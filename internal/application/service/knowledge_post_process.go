@@ -42,12 +42,9 @@ type KnowledgePostProcessService struct {
 // enrichmentPlan describes the asynchronous work spawned after the primary
 // document parse has produced its chunks and search indexes.
 //
-// Wiki is intentionally present in the plan but absent from
-// finalizationSubtaskCount. Wiki ingestion is a KB-scoped, durable background
-// pipeline with its own pending/active status, so it does not consume a
-// per-document counter slot. The final promotion nevertheless requires both
-// the counter to reach zero and WikiStatus to become terminal, ensuring the
-// end-to-end document is never reported completed while Wiki still runs.
+// Wiki is intentionally present in the plan but absent from the derivative
+// counter. It has its own durable KB-scoped lifecycle and never gates core
+// document completion.
 type enrichmentPlan struct {
 	spawnSummary       bool
 	questionBatchCount int
@@ -107,28 +104,29 @@ func graphChunkIDBatches(chunks []*types.Chunk, batchSize int) [][]string {
 // processing->finalizing CAS, so a retry never recomputes children from a KB
 // config or chunk set that may have changed since the counter was seeded.
 type durableEnrichmentFanout struct {
-	Stage                string                 `json:"stage"`
-	Version              int                    `json:"version"`
-	TenantID             uint64                 `json:"tenant_id"`
-	KnowledgeID          string                 `json:"knowledge_id"`
-	KnowledgeBaseID      string                 `json:"knowledge_base_id"`
-	ProcessingGeneration string                 `json:"processing_generation"`
-	Language             string                 `json:"language,omitempty"`
-	Attempt              int                    `json:"attempt,omitempty"`
-	Tracing              types.TracingContext   `json:"tracing,omitempty"`
-	TextChunkCount       int                    `json:"text_chunk_count"`
-	SpawnSummary         bool                   `json:"spawn_summary"`
-	SpawnWiki            bool                   `json:"spawn_wiki"`
-	QuestionCount        int                    `json:"question_count,omitempty"`
-	QuestionBatches      []durableQuestionBatch `json:"question_batches,omitempty"`
-	GraphTasks           []durableGraphTask     `json:"graph_tasks,omitempty"`
-	QuestionChunkCount   int                    `json:"question_chunk_count,omitempty"`
-	QuestionBatchCount   int                    `json:"question_batch_count,omitempty"`
-	GraphChunkCount      int                    `json:"graph_chunk_count,omitempty"`
-	GraphBatchCount      int                    `json:"graph_batch_count,omitempty"`
-	GraphBatchSize       int                    `json:"graph_batch_size,omitempty"`
-	GraphModelID         string                 `json:"graph_model_id,omitempty"`
-	DerivativeModelID    string                 `json:"derivative_model_id,omitempty"`
+	Stage                string                            `json:"stage"`
+	Version              int                               `json:"version"`
+	TenantID             uint64                            `json:"tenant_id"`
+	KnowledgeID          string                            `json:"knowledge_id"`
+	KnowledgeBaseID      string                            `json:"knowledge_base_id"`
+	ProcessingGeneration string                            `json:"processing_generation"`
+	Language             string                            `json:"language,omitempty"`
+	Attempt              int                               `json:"attempt,omitempty"`
+	Tracing              types.TracingContext              `json:"tracing,omitempty"`
+	TextChunkCount       int                               `json:"text_chunk_count"`
+	SpawnSummary         bool                              `json:"spawn_summary"`
+	SpawnWiki            bool                              `json:"spawn_wiki"`
+	QuestionCount        int                               `json:"question_count,omitempty"`
+	QuestionBatches      []durableQuestionBatch            `json:"question_batches,omitempty"`
+	GraphTasks           []durableGraphTask                `json:"graph_tasks,omitempty"`
+	QuestionChunkCount   int                               `json:"question_chunk_count,omitempty"`
+	QuestionBatchCount   int                               `json:"question_batch_count,omitempty"`
+	GraphChunkCount      int                               `json:"graph_chunk_count,omitempty"`
+	GraphBatchCount      int                               `json:"graph_batch_count,omitempty"`
+	GraphBatchSize       int                               `json:"graph_batch_size,omitempty"`
+	GraphModelID         string                            `json:"graph_model_id,omitempty"`
+	DerivativeModelID    string                            `json:"derivative_model_id,omitempty"`
+	DataTable            *processownership.DataTableFanout `json:"data_table,omitempty"`
 }
 
 func (p durableEnrichmentFanout) validate(payload types.KnowledgePostProcessPayload) error {
@@ -165,25 +163,32 @@ func (p durableEnrichmentFanout) validate(payload types.KnowledgePostProcessPayl
 				(p.GraphChunkCount+p.GraphBatchSize-1)/max(1, p.GraphBatchSize))) {
 		return errors.New("durable enrichment fanout has invalid graph batch counts")
 	}
+	if p.DataTable != nil && strings.TrimSpace(p.DataTable.EmbeddingModel) == "" {
+		return errors.New("durable enrichment fanout has invalid data-table model configuration")
+	}
 	return nil
 }
 
 func (p durableEnrichmentFanout) subtaskCount() int {
+	dataTableCount := 0
+	if p.DataTable != nil {
+		dataTableCount = 1
+	}
 	if p.Version == 3 {
-		count := p.QuestionBatchCount + p.GraphBatchCount
+		count := p.QuestionBatchCount + p.GraphBatchCount + dataTableCount
 		if p.SpawnSummary {
 			count++
 		}
 		return count
 	}
 	if p.Version == 2 {
-		count := p.QuestionBatchCount + p.GraphChunkCount
+		count := p.QuestionBatchCount + p.GraphChunkCount + dataTableCount
 		if p.SpawnSummary {
 			count++
 		}
 		return count
 	}
-	count := len(p.QuestionBatches) + len(p.GraphTasks)
+	count := len(p.QuestionBatches) + len(p.GraphTasks) + dataTableCount
 	if p.SpawnSummary {
 		count++
 	}
@@ -819,6 +824,26 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 			return err
 		}
 	} else {
+		// The core plan is the durable handoff envelope. Multimodal items have
+		// already drained before this handler runs; table metadata is copied
+		// into the derivative plan so it no longer blocks that core fan-in.
+		var dataTable *processownership.DataTableFanout
+		if len(knowledge.ProcessingFanout) > 0 {
+			corePlan, err := processownership.ParseFanoutPlan(knowledge.ProcessingFanout)
+			if err != nil {
+				return fmt.Errorf("decode core fanout handoff: %w", err)
+			}
+			if corePlan.TenantID != payload.TenantID ||
+				corePlan.KnowledgeID != payload.KnowledgeID ||
+				corePlan.KnowledgeBaseID != payload.KnowledgeBaseID ||
+				corePlan.ProcessingGeneration != payload.ProcessingGeneration {
+				return errors.New("core fanout handoff identity mismatch")
+			}
+			if corePlan.DataTable != nil {
+				copy := *corePlan.DataTable
+				dataTable = &copy
+			}
+		}
 		// The first processing pass snapshots the exact KB configuration and
 		// chunk IDs. The resulting task set is persisted by the lifecycle CAS
 		// and is the only source used by finalizing replays.
@@ -947,6 +972,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 				durablePlan.GraphBatchCount = len(durablePlan.GraphTasks)
 			}
 		}
+		durablePlan.DataTable = dataTable
 		if err := durablePlan.validate(payload); err != nil {
 			return err
 		}
@@ -958,6 +984,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 
 	willSpawnSummary := durablePlan.SpawnSummary
 	willSpawnWiki := durablePlan.SpawnWiki
+	willSpawnDataTable := durablePlan.DataTable != nil
 	questionBatchCount := len(durablePlan.QuestionBatches)
 	graphChunkCount := len(durablePlan.GraphTasks)
 	if durablePlan.Version == 2 {
@@ -978,92 +1005,55 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	// fill a fan-out interrupted between lifecycle commit and task enqueue.
 	enteredFinalizing := false
 
-	switch {
-	case replayingFinalizing:
+	if replayingFinalizing {
 		enteredFinalizing = true
 		logger.Infof(ctx,
 			"[KnowledgePostProcess] Replaying stable enrichment fan-out for %s generation %s.",
 			payload.KnowledgeID, payload.ProcessingGeneration)
-	case expectedSubtasks == 0 && !willSpawnWiki:
-		// Nothing to enrich. The exact processing generation is consumed by
-		// the same CAS that clears its durable core fan-out plan. A terminal
-		// core fan-out failure must remain externally visible even though
-		// there are no later summary/question/graph slots to aggregate it.
+	} else {
+		// First persist the exact derivative plan and counters behind a
+		// short-lived finalizing barrier. Core completion is committed only
+		// after every outbox intent and the post-process receipt are durable.
 		now := time.Now()
-		enrichmentStatus := types.EnrichmentStatusNone
-		switch generationOutcomes.Status() {
-		case enrichmentoutcome.StatusFailed:
-			enrichmentStatus = types.EnrichmentStatusFailed
-		case enrichmentoutcome.StatusDegraded:
-			enrichmentStatus = types.EnrichmentStatusDegraded
-		case enrichmentoutcome.StatusCompleted:
-			enrichmentStatus = types.EnrichmentStatusCompleted
+		enrichmentStatus := types.EnrichmentStatusPending
+		if expectedSubtasks == 0 {
+			enrichmentStatus = types.EnrichmentStatusNone
+			switch generationOutcomes.Status() {
+			case enrichmentoutcome.StatusFailed:
+				enrichmentStatus = types.EnrichmentStatusFailed
+			case enrichmentoutcome.StatusDegraded:
+				enrichmentStatus = types.EnrichmentStatusDegraded
+			case enrichmentoutcome.StatusCompleted:
+				enrichmentStatus = types.EnrichmentStatusCompleted
+			}
 		}
-		updates := map[string]interface{}{
-			"parse_status":           types.ParseStatusCompleted,
-			"pending_subtasks_count": 0,
-			"enrichment_status":      enrichmentStatus,
-			"wiki_status":            types.WikiStatusNone,
-			"wiki_error_message":     "",
-			"processing_owner":       "",
-			"processing_fanout":      nil,
-			"processed_at":           now,
-			"updated_at":             now,
-		}
-		if durablePlan.TextChunkCount > 0 {
-			updates["summary_status"] = types.SummaryStatusNone
-		}
-		completed, err := compareAndSwapProcessingGeneration(
-			ctx, s.knowledgeRepo, payload.TenantID, payload.KnowledgeID,
-			payload.KnowledgeBaseID, payload.ProcessingGeneration,
-			[]string{types.ParseStatusProcessing}, updates,
-		)
-		if err != nil {
-			wrapped := fmt.Errorf("mark knowledge %s completed with no enrichment subtasks: %w", payload.KnowledgeID, err)
-			s.tracker().FailSpan(ctx, postSpan, "POSTPROCESS_COMPLETE_FAILED", wrapped.Error(), wrapped)
-			s.tracker().FinalizeAttempt(ctx, payload.KnowledgeID, attempt,
-				types.SpanStatusFailed, nil, "POSTPROCESS_COMPLETE_FAILED", wrapped.Error())
-			return wrapped
-		}
-		if !completed {
-			logger.Infof(ctx, "[KnowledgePostProcess] Completion CAS lost for %s generation %s, skipping fan-out.",
-				payload.KnowledgeID, payload.ProcessingGeneration)
-			return nil
-		}
-		logger.Infof(ctx, "[KnowledgePostProcess] Knowledge %s marked completed (no enrichment subtasks).",
-			payload.KnowledgeID)
-	default:
-		// Flip the exact processing generation to finalizing and seed the
-		// counter in one statement. summary_status and processing_fanout are
-		// part of this CAS so an old postprocess task cannot mutate a new run.
 		summaryStatus := types.SummaryStatusNone
 		if willSpawnSummary {
 			summaryStatus = types.SummaryStatusPending
 		}
+		updates := map[string]interface{}{
+			"parse_status":           types.ParseStatusFinalizing,
+			"pending_subtasks_count": expectedSubtasks,
+			"enrichment_status":      enrichmentStatus,
+			"wiki_status": func() string {
+				if willSpawnWiki {
+					return types.WikiStatusPending
+				}
+				return types.WikiStatusNone
+			}(),
+			"wiki_error_message": "",
+			"summary_status":     summaryStatus,
+			"processing_owner":   "",
+			"processing_fanout":  types.JSON(durablePlanBytes),
+			"updated_at":         now,
+		}
+		if expectedSubtasks == 0 && enrichmentStatus != types.EnrichmentStatusNone {
+			updates["enrichment_completed_at"] = now
+		}
 		promoted, err := compareAndSwapProcessingGeneration(
 			ctx, s.knowledgeRepo, payload.TenantID, payload.KnowledgeID,
 			payload.KnowledgeBaseID, payload.ProcessingGeneration,
-			[]string{types.ParseStatusProcessing}, map[string]interface{}{
-				"parse_status":           types.ParseStatusFinalizing,
-				"pending_subtasks_count": expectedSubtasks,
-				"enrichment_status": func() string {
-					if expectedSubtasks > 0 {
-						return types.EnrichmentStatusPending
-					}
-					return types.EnrichmentStatusNone
-				}(),
-				"wiki_status": func() string {
-					if willSpawnWiki {
-						return types.WikiStatusPending
-					}
-					return types.WikiStatusNone
-				}(),
-				"wiki_error_message": "",
-				"summary_status":     summaryStatus,
-				"processing_owner":   "",
-				"processing_fanout":  types.JSON(durablePlanBytes),
-				"updated_at":         time.Now(),
-			},
+			[]string{types.ParseStatusProcessing}, updates,
 		)
 		if err != nil {
 			wrapped := fmt.Errorf("set knowledge %s finalizing: %w", payload.KnowledgeID, err)
@@ -1095,10 +1085,9 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		}
 	}
 
-	// Wiki persistence happens only after the exact generation CAS. For a
-	// Wiki-only plan we deliberately use finalizing with a zero counter until
-	// the durable pending row exists; a failed persistence retry can then
-	// replay the stored plan instead of losing Wiki work behind a completed row.
+	// Wiki persistence happens after the exact generation CAS and before the
+	// core completion commit. A failed persistence therefore replays the
+	// stored plan without losing Wiki work behind a completed row.
 	if willSpawnWiki {
 		wikiResult, wikiErr := EnqueueWikiIngest(
 			ctx,
@@ -1135,7 +1124,23 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		}
 	}
 
-	// 4. Spawn Summary and Question Tasks
+	// 4. Publish optional derivative work. Table metadata now uses the same
+	// PostgreSQL-authoritative outbox and capacity window as all other LLM
+	// enrichment; it is no longer a core fan-in task.
+	enqueuedDataTable := false
+	if willSpawnDataTable {
+		enqueuedDataTable, err = s.enqueueDataTableSummaryTask(
+			ctx, payload, durablePlan.DataTable, attempt,
+		)
+		if err != nil {
+			return fmt.Errorf("enqueue durable data-table metadata work: %w", err)
+		}
+		if !enqueuedDataTable {
+			return errors.New("enqueue durable data-table metadata work: no work item was persisted")
+		}
+	}
+
+	// Spawn Summary and Question Tasks.
 	enqueuedSummary := false
 	enqueuedQuestionCount := 0
 	unownedItems := make([]string, 0)
@@ -1241,8 +1246,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	// The generation finalizer is a durable, non-counted Work Item. It may be
 	// delivered immediately, but it defers without provider budget until every
 	// sibling reaches a terminal PostgreSQL state. It then reconciles each
-	// immutable outcome and repairs a crash between the last decrement and the
-	// guarded document promotion.
+	// immutable outcome and settles the independent enrichment aggregate.
 	enqueuedFinalizer := false
 	if s.derivativeQueue != nil && expectedSubtasks > 0 {
 		rows, publishErr := s.derivativeQueue.PublishPlan(
@@ -1266,13 +1270,12 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	}
 
 	// Reconcile the seeded counter against what was actually enqueued.
-	// summary/question/graph each own a counted slot that ONLY their own
+	// table/summary/question/graph each own a counted slot that ONLY their own
 	// task drains; a slot whose task was never enqueued (graph with NEO4J
 	// off, a transient enqueue/marshal failure, a nil enqueuer) has no owner
-	// and would otherwise strand the row in "finalizing". Release exactly the
-	// shortfall — each release is a clamped decrement that can promote the row
-	// once the counter is zero and Wiki is terminal. Wiki never enters either
-	// tally because its own terminal status is the independent gate. Safe against fast workers: shortfall slots have no draining
+	// and would otherwise leave enrichment_status permanently pending. Release
+	// exactly the shortfall; Wiki never enters either tally because it has an
+	// independent durable status. Safe against fast workers: shortfall slots have no draining
 	// task, so total drains == seeded count regardless of ordering.
 	//
 	// Detached ctx: the same reasoning that motivates finalizeSubtaskDetached
@@ -1311,10 +1314,8 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 				}
 			}
 		}
-		// A prior decrement may have reached zero but crashed before its
-		// guarded promotion statement. A replay with no shortfall still runs
-		// the generation finalizer once; its decrement is clamped and its
-		// independent zero-count promotion repairs that state.
+		// A replay with a zero counter still runs the generation settlement once
+		// so a crash after the final decrement cannot leave enrichment pending.
 		if expectedSubtasks == 0 || (replayingFinalizing && knowledge.PendingSubtasksCount <= 0) {
 			rctx, cancel := context.WithTimeout(
 				context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout)
@@ -1334,6 +1335,7 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 
 	postOutput := types.JSONMap{
 		"chunks_total":             durablePlan.TextChunkCount,
+		"enqueued_data_table":      enqueuedDataTable,
 		"enqueued_summary":         enqueuedSummary,
 		"enqueued_question":        enqueuedQuestionCount > 0,
 		"enqueued_question_count":  enqueuedQuestionCount,
@@ -1391,6 +1393,52 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 		return wrapped
 	}
 	postOutput["fanout_receipt"] = true
+
+	// The primary document lifecycle closes here, after every optional branch
+	// has a durable intent. Derivative and Wiki outcomes continue updating
+	// their own status columns and counters, but can no longer keep the core
+	// parse in finalizing or turn a searchable document into a parse failure.
+	completedAt := time.Now()
+	completed, completeErr := compareAndSwapProcessingGeneration(
+		ctx,
+		s.knowledgeRepo,
+		payload.TenantID,
+		payload.KnowledgeID,
+		payload.KnowledgeBaseID,
+		payload.ProcessingGeneration,
+		[]string{types.ParseStatusFinalizing},
+		map[string]interface{}{
+			"parse_status":      types.ParseStatusCompleted,
+			"processing_owner":  "",
+			"processing_fanout": nil,
+			"processed_at":      completedAt,
+			"updated_at":        completedAt,
+		},
+	)
+	if completeErr != nil {
+		wrapped := fmt.Errorf("commit core parse completion for %s: %w", payload.KnowledgeID, completeErr)
+		s.tracker().FailSpan(ctx, postSpan, "POSTPROCESS_COMPLETE_FAILED", wrapped.Error(), wrapped)
+		s.tracker().FinalizeAttempt(ctx, payload.KnowledgeID, attempt,
+			types.SpanStatusFailed, nil, "POSTPROCESS_COMPLETE_FAILED", wrapped.Error())
+		return wrapped
+	}
+	if !completed {
+		current, currentErr := s.knowledgeRepo.GetKnowledgeByID(
+			ctx, payload.TenantID, payload.KnowledgeID,
+		)
+		if currentErr != nil && !errors.Is(currentErr, apprepo.ErrKnowledgeNotFound) {
+			return fmt.Errorf("verify core parse completion for %s: %w", payload.KnowledgeID, currentErr)
+		}
+		if current == nil || current.KnowledgeBaseID != payload.KnowledgeBaseID ||
+			current.ProcessingGeneration != payload.ProcessingGeneration ||
+			current.ParseStatus != types.ParseStatusCompleted {
+			logger.Infof(ctx,
+				"[KnowledgePostProcess] Core completion fence changed for %s generation %s; skipping stale completion.",
+				payload.KnowledgeID, payload.ProcessingGeneration)
+			return nil
+		}
+	}
+	postOutput["core_parse_committed"] = true
 	s.tracker().EndSpan(ctx, postSpan, postOutput)
 	// Close the root span — the parse pipeline is done. Async
 	// downstream stages (summary/question/wiki/graph) record their
@@ -1400,6 +1448,53 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 	s.tracker().FinalizeAttempt(ctx, payload.KnowledgeID, attempt,
 		types.SpanStatusDone, postOutput, "", "")
 	return nil
+}
+
+func (s *KnowledgePostProcessService) enqueueDataTableSummaryTask(
+	ctx context.Context,
+	payload types.KnowledgePostProcessPayload,
+	config *processownership.DataTableFanout,
+	attempt int,
+) (bool, error) {
+	if config == nil {
+		return false, nil
+	}
+	if s.derivativeQueue == nil {
+		return false, errors.New("durable derivative queue is unavailable")
+	}
+	taskPayload := types.DataTableSummaryPayload{
+		TracingContext:       payload.TracingContext,
+		TenantID:             payload.TenantID,
+		KnowledgeID:          payload.KnowledgeID,
+		KnowledgeBaseID:      payload.KnowledgeBaseID,
+		ProcessingGeneration: payload.ProcessingGeneration,
+		SummaryModel:         config.SummaryModel,
+		EmbeddingModel:       config.EmbeddingModel,
+		Language:             payload.Language,
+		Attempt:              attempt,
+	}
+	langfuse.InjectTracing(ctx, &taskPayload)
+	raw, err := json.Marshal(taskPayload)
+	if err != nil {
+		return false, err
+	}
+	rows, err := s.derivativeQueue.PublishPlan(
+		ctx,
+		s.taskEnqueuer,
+		[]derivativequeue.PlanItem{{
+			TenantID: payload.TenantID, KnowledgeBaseID: payload.KnowledgeBaseID,
+			KnowledgeID:          payload.KnowledgeID,
+			ProcessingGeneration: payload.ProcessingGeneration,
+			ProcessingAttempt:    attempt,
+			ItemID:               "datatable_metadata",
+			WorkKind:             derivativequeue.WorkDataTable,
+			Payload:              types.JSON(raw),
+			ModelID:              config.SummaryModel,
+			Priority:             45,
+			QueueLane:            derivativequeue.DefaultLane,
+		}},
+	)
+	return len(rows) == 1, err
 }
 
 // enqueueSummaryGenerationTask enqueues the summary task. Returns true only

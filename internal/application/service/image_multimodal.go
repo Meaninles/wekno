@@ -255,6 +255,8 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 		if imgSpan != nil {
 			if handleErr == nil {
 				tracker.EndSpan(ctx, imgSpan, imgOut)
+			} else if providerDeferred {
+				tracker.DeferSpan(ctx, imgSpan, "model_or_infrastructure_wait", handleErr)
 			} else if terminalAttempt {
 				tracker.FailSpan(ctx, imgSpan,
 					"MULTIMODAL_VLM_FAILED",

@@ -57,14 +57,8 @@ const (
 
 	wikiTaskModeMap = "map"
 
-	// A Map wake-up starts promptly once the durable ingest row exists. The
-	// document's core parse/post-process generation is already committed at
-	// this boundary, so the old 30-second KB debounce is unnecessary here.
-	wikiMapInitialDelay = time.Second
-
-	// Map tasks are disposable wake-ups over PostgreSQL state. A long Unique
-	// lease coalesces recovery scans; the renewable per-document lock still
-	// protects correctness if this lease expires during an unusually long Map.
+	// Used only by the admission-free test/Lite fallback. Production Map
+	// wake-ups use a database dispatch epoch and TaskID rather than Unique TTL.
 	wikiMapUniqueTTL = 30 * time.Minute
 
 	// wikiIngestDelay is how long to wait after a document is added before
@@ -199,6 +193,10 @@ type WikiIngestPayload struct {
 	TaskMode    string `json:"task_mode,omitempty"`
 	MapDedupKey string `json:"map_dedup_key,omitempty"`
 	KnowledgeID string `json:"knowledge_id,omitempty"`
+	// MapDispatchEpoch fences every disposable wake-up against the durable
+	// PostgreSQL outbox reservation. Epoch zero is an obsolete pre-dispatch
+	// signal and is acknowledged without touching the row.
+	MapDispatchEpoch uint64 `json:"map_dispatch_epoch,omitempty"`
 	// ProcessingGeneration is diagnostic/observability metadata. The pending
 	// row remains authoritative and must match before any model work.
 	ProcessingGeneration string `json:"processing_generation,omitempty"`
@@ -524,20 +522,11 @@ func EnqueueWikiIngest(
 	var mapErr error
 	if result.PendingPersisted {
 		if _, ok := pendingRepo.(wikiDistributedMapRepository); ok {
-			mapPayload := WikiIngestPayload{
-				TenantID:             tenantID,
-				KnowledgeBaseID:      kbID,
-				TaskMode:             wikiTaskModeMap,
-				MapDedupKey:          dedupKey,
-				KnowledgeID:          knowledgeID,
-				ProcessingGeneration: processingGeneration,
-			}
-			mapErr = enqueueWikiMapTask(task, mapPayload, wikiMapInitialDelay)
-			if mapErr != nil {
-				logger.Warnf(ctx, "wiki ingest: failed to enqueue distributed Map for %s: %v", knowledgeID, mapErr)
-			} else {
-				result.MapScheduled = true
-			}
+			// PostgreSQL is the only backlog. The maintenance dispatcher assigns a
+			// bounded pool/lane reservation and publishes a fenced epoch within its
+			// five-second control-plane tick; never eagerly mirror every document
+			// into Redis here.
+			result.MapScheduled = true
 		}
 	}
 
@@ -1232,6 +1221,18 @@ type wikiDistributedMapRepository interface {
 	MarkWikiMapReady(
 		context.Context, int64, uint64, string, []byte,
 	) (bool, error)
+}
+
+type wikiMapDispatchRepository interface {
+	ClaimWikiMapDispatch(
+		context.Context, uint64, string, string, uint64, time.Duration,
+	) (*types.TaskPendingOp, error)
+	RenewWikiMapDispatch(
+		context.Context, int64, uint64, time.Duration,
+	) (bool, error)
+	DeferWikiMapDispatch(
+		context.Context, int64, uint64, time.Duration,
+	) error
 }
 
 type wikiGenerationStatusRepository interface {

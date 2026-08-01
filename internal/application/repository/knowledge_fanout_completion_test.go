@@ -447,14 +447,14 @@ func TestFinalizeSubtaskGenerationItemDrainsExactlyOnce(t *testing.T) {
 	count, promoted, err = repo.FinalizeSubtaskGenerationItem(
 		ctx, 42, "knowledge-1", "kb-1", "generation-1", "question_batch[0]",
 	)
-	if err != nil || !promoted || count != 0 {
+	if err != nil || promoted || count != 0 {
 		t.Fatalf("final distinct drain = count:%d promoted:%v err:%v", count, promoted, err)
 	}
 	var knowledge types.Knowledge
 	if err := db.Where("id = ?", "knowledge-1").Take(&knowledge).Error; err != nil {
 		t.Fatal(err)
 	}
-	if knowledge.ParseStatus != types.ParseStatusCompleted || knowledge.PendingSubtasksCount != 0 {
+	if knowledge.ParseStatus != types.ParseStatusFinalizing || knowledge.PendingSubtasksCount != 0 {
 		t.Fatalf("knowledge lifecycle = status:%s pending:%d", knowledge.ParseStatus, knowledge.PendingSubtasksCount)
 	}
 }
@@ -462,7 +462,7 @@ func TestFinalizeSubtaskGenerationItemDrainsExactlyOnce(t *testing.T) {
 func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
 	db, repo := newFanoutCompletionRepository(t)
 	const descendants = 12
-	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, descendants)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusCompleted, descendants)
 	ctx := context.Background()
 
 	var promoted atomic.Int32
@@ -498,8 +498,8 @@ func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
 	for err := range errCh {
 		t.Fatal(err)
 	}
-	if got := promoted.Load(); got != 1 {
-		t.Fatalf("promotion winners = %d, want 1", got)
+	if got := promoted.Load(); got != 0 {
+		t.Fatalf("promotion winners = %d, want 0", got)
 	}
 	var knowledge types.Knowledge
 	if err := db.Where("id = ?", "knowledge-1").Take(&knowledge).Error; err != nil {
@@ -521,9 +521,9 @@ func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
 	}
 }
 
-func TestFinalizeSubtaskOutcomeSettlesBeforeWikiWithoutPrematureCompletion(t *testing.T) {
+func TestFinalizeSubtaskOutcomeAndWikiSettleAfterCoreCompletion(t *testing.T) {
 	db, repo := newFanoutCompletionRepository(t)
-	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 1)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusCompleted, 1)
 	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
 		Update("wiki_status", types.WikiStatusPending).Error)
 
@@ -543,7 +543,7 @@ func TestFinalizeSubtaskOutcomeSettlesBeforeWikiWithoutPrematureCompletion(t *te
 
 	var waiting types.Knowledge
 	require.NoError(t, db.Where("id = ?", "knowledge-1").Take(&waiting).Error)
-	require.Equal(t, types.ParseStatusFinalizing, waiting.ParseStatus)
+	require.Equal(t, types.ParseStatusCompleted, waiting.ParseStatus)
 	require.Equal(t, types.EnrichmentStatusCompleted, waiting.EnrichmentStatus)
 	require.Equal(t, types.WikiStatusPending, waiting.WikiStatus)
 
@@ -627,7 +627,7 @@ func TestFinalizeSubtaskOutcomeFirstTerminalDeliveryIsImmutable(t *testing.T) {
 		enrichmentoutcome.StatusCompleted, "",
 	)
 	require.NoError(t, err)
-	require.True(t, promoted)
+	require.False(t, promoted)
 	var knowledge types.Knowledge
 	require.NoError(t, db.Where("id = ?", "knowledge-1").Take(&knowledge).Error)
 	require.Equal(t, types.EnrichmentStatusCompleted, knowledge.EnrichmentStatus)

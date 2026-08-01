@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -26,6 +27,19 @@ type derivativeTestKnowledge struct {
 }
 
 func (derivativeTestKnowledge) TableName() string { return "knowledges" }
+
+type derivativeTestWikiDemand struct {
+	ID                    int64 `gorm:"primaryKey"`
+	TaskType              string
+	Scope                 string
+	Op                    string
+	MapReadyAt            *time.Time
+	MapResourcePoolID     string
+	MapDispatchLeaseUntil *time.Time
+	NextAttemptAt         *time.Time
+}
+
+func (derivativeTestWikiDemand) TableName() string { return "task_pending_ops" }
 
 func derivativeRepositoryForTest(t *testing.T) (*Repository, *gorm.DB) {
 	t.Helper()
@@ -111,6 +125,118 @@ func TestAdmissionDeferralDoesNotConsumeProviderAttempt(t *testing.T) {
 	require.Equal(t, StateQueued, row.State)
 	require.Zero(t, row.ProviderAttempts)
 	require.Empty(t, row.LeaseToken)
+}
+
+func TestAdmissionDeferralAfterCheckpointDoesNotConsumeAnyRetryBudget(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	require.NoError(t, db.Create(&derivativeTestKnowledge{
+		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusFinalizing,
+	}).Error)
+	rows, err := repository.UpsertPlan(ctx, []PlanItem{derivativePlan()})
+	require.NoError(t, err)
+	wake, err := repository.MarkDispatched(ctx, rows[0].ID, rows[0].Version)
+	require.NoError(t, err)
+	claimed, err := repository.Claim(ctx, wake, "worker-a", time.Minute)
+	require.NoError(t, err)
+	running, err := repository.BeginProvider(ctx, claimed.ID, claimed.LeaseToken)
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&ProviderCall{
+		ID: "00000000-0000-0000-0000-000000000001", WorkItemID: running.ID,
+		RequestHash: "hash-1", Attempt: 1, ProviderRequestKey: "provider-key-1",
+		ProcessingGeneration: "generation-1", Response: types.JSON(`{"ok":true}`),
+		ContentChecksum: "checksum-1", Disposition: ProviderCallCheckpointed,
+		CreatedAt: time.Now().UTC(),
+	}).Error)
+
+	require.NoError(t, repository.DeferForAdmission(
+		ctx, running.ID, running.LeaseToken, "model_deferred", "pool is busy", time.Second,
+	))
+	var row WorkItem
+	require.NoError(t, db.First(&row, "id = ?", running.ID).Error)
+	require.Equal(t, StateQueued, row.State)
+	require.Equal(t, 1, row.ProviderAttempts)
+	require.Zero(t, row.MaterializeAttempts)
+	require.Zero(t, row.FinalizeAttempts)
+	require.Empty(t, row.LeaseToken)
+}
+
+func TestDispatchLeasePreventsDuplicateWakeUntilExpiry(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	rows, err := repository.UpsertPlan(ctx, []PlanItem{derivativePlan()})
+	require.NoError(t, err)
+
+	first, err := repository.markDispatched(ctx, rows[0].ID, rows[0].Version, "pool-a", 2, 2, time.Minute)
+	require.NoError(t, err)
+	_, err = repository.markDispatched(ctx, rows[0].ID, rows[0].Version+1, "pool-a", 2, 2, time.Minute)
+	require.ErrorIs(t, err, ErrInvalidState)
+
+	require.NoError(t, db.Model(&WorkItem{}).Where("id = ?", rows[0].ID).
+		Update("dispatch_lease_until", time.Now().UTC().Add(-time.Second)).Error)
+	var current WorkItem
+	require.NoError(t, db.First(&current, "id = ?", rows[0].ID).Error)
+	second, err := repository.markDispatched(ctx, current.ID, current.Version, "pool-a", 2, 2, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, first.DispatchEpoch+1, second.DispatchEpoch)
+}
+
+func TestDispatchWindowBoundsPublishedModelWork(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	firstPlan := derivativePlan()
+	secondPlan := derivativePlan()
+	secondPlan.ItemID = "question:batch:1"
+	rows, err := repository.UpsertPlan(ctx, []PlanItem{firstPlan, secondPlan})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	_, err = repository.markDispatched(ctx, rows[0].ID, rows[0].Version, "pool-a", 1, 1, time.Minute)
+	require.NoError(t, err)
+	_, err = repository.markDispatched(ctx, rows[1].ID, rows[1].Version, "pool-a", 1, 1, time.Minute)
+	require.ErrorIs(t, err, ErrDispatchWindowFull)
+
+	require.NoError(t, db.Model(&WorkItem{}).Where("id = ?", rows[0].ID).
+		Update("dispatch_lease_until", time.Now().UTC().Add(-time.Second)).Error)
+	_, err = repository.markDispatched(ctx, rows[1].ID, rows[1].Version, "pool-a", 1, 1, time.Minute)
+	require.NoError(t, err)
+}
+
+func TestDispatchWindowProtectsWikiShareAndBorrowsWhenWikiIsIdle(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	require.NoError(t, db.AutoMigrate(&derivativeTestWikiDemand{}))
+	now := time.Now().UTC().Add(-time.Second)
+	require.NoError(t, db.Create(&derivativeTestWikiDemand{
+		ID: 1, TaskType: types.TypeWikiIngest, Scope: "knowledge_base", Op: "ingest",
+		MapResourcePoolID: "pool-a", NextAttemptAt: &now,
+	}).Error)
+
+	plans := make([]PlanItem, 0, 3)
+	for index := 0; index < 3; index++ {
+		item := derivativePlan()
+		item.ItemID = fmt.Sprintf("question:batch:%d", index)
+		plans = append(plans, item)
+	}
+	rows, err := repository.UpsertPlan(ctx, plans)
+	require.NoError(t, err)
+	for index := 0; index < 2; index++ {
+		_, err = repository.markDispatched(
+			ctx, rows[index].ID, rows[index].Version, "pool-a", 3, 2, time.Minute,
+		)
+		require.NoError(t, err)
+	}
+	_, err = repository.markDispatched(
+		ctx, rows[2].ID, rows[2].Version, "pool-a", 3, 2, time.Minute,
+	)
+	require.ErrorIs(t, err, ErrDispatchWindowFull)
+
+	require.NoError(t, db.Delete(&derivativeTestWikiDemand{}, 1).Error)
+	_, err = repository.markDispatched(
+		ctx, rows[2].ID, rows[2].Version, "pool-a", 3, 2, time.Minute,
+	)
+	require.NoError(t, err, "derivative lane should borrow the idle Wiki share")
 }
 
 func TestGenerationFenceCancelsOldWork(t *testing.T) {

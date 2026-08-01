@@ -59,6 +59,14 @@ type TaskPendingOp struct {
 	// replica while keeping shared KB page materialization serialized.
 	// Non-Wiki queues and Wiki retract rows ignore this column.
 	MapReadyAt *time.Time `json:"map_ready_at,omitempty" gorm:"->"`
+	// Wiki Map dispatch is a database outbox reservation. Only a bounded
+	// number of rows per actual model resource pool receive an epoch/lease and
+	// become disposable Asynq wake-ups; all remaining rows stay here.
+	NextAttemptAt         *time.Time `json:"next_attempt_at,omitempty" gorm:"->"`
+	MapResourcePoolID     string     `json:"map_resource_pool_id,omitempty" gorm:"->"`
+	MapDispatchEpoch      uint64     `json:"map_dispatch_epoch,omitempty" gorm:"->"`
+	MapDispatchTaskID     string     `json:"map_dispatch_task_id,omitempty" gorm:"->"`
+	MapDispatchLeaseUntil *time.Time `json:"map_dispatch_lease_until,omitempty" gorm:"->"`
 }
 
 // TableName binds TaskPendingOp to the `task_pending_ops` table.

@@ -844,6 +844,7 @@ func (s *wikiIngestService) resolveRetractSlugSet(
 }
 
 func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task) (retErr error) {
+	ctx = modeladmission.WithWorkLane(ctx, modeladmission.WorkLaneWiki)
 	taskStartedAt := time.Now()
 	retryCount, maxRetry, _ := taskRetryMetadata(ctx)
 
@@ -1231,6 +1232,35 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 		exitStatus = "get_chat_model_failed"
 		return fmt.Errorf("wiki ingest: get chat model: %w", err)
 	}
+
+	taskCtx, releaseTaskWork, taskWorkErr := modeladmission.AcquireChatTaskWork(
+		ctx, chatModel, modeladmission.WorkLaneWiki,
+	)
+	if taskWorkErr != nil {
+		if !modeladmission.IsModelWorkDeferred(taskWorkErr) {
+			exitStatus = "task_work_admission_failed"
+			return fmt.Errorf("wiki ingest: acquire task work capacity: %w", taskWorkErr)
+		}
+		// No provider call has started. Remove only terminally stale rows,
+		// preserve preflight failures on their normal bounded budget, and rotate
+		// every processable row without consuming its Wiki fail_count.
+		protected := make([]WikiPendingOp, 0, len(preflightFailedOps)+len(pendingOps))
+		protected = append(protected, preflightFailedOps...)
+		protected = append(protected, pendingOps...)
+		trimIDs := wikiQueueTrimIDs(peekedIDs, protected)
+		followUpScheduled, err = s.settleWikiQueueWithDeferrals(
+			ctx, leaseCtx, payload, trimIDs,
+			preflightFailedOps, pendingOps, taskWorkErr,
+		)
+		if err != nil {
+			exitStatus = "task_work_deferred_settlement_failed"
+			return err
+		}
+		exitStatus = "task_work_deferred"
+		return nil
+	}
+	ctx = taskCtx
+	defer releaseTaskWork()
 
 	// Resolve per-KB tunables once. WikiConfig.IngestBatchSize /
 	// IngestMapParallel / IngestReduceParallel let operators on
@@ -2087,13 +2117,7 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 			if deferredErr == nil {
 				deferredErr = errors.New("model work was deferred before provider execution")
 			}
-			s.tracker().FailSpan(
-				ctx,
-				r.WikiSpan,
-				"WIKI_PROVIDER_DEFERRED",
-				deferredErr.Error(),
-				deferredErr,
-			)
+			s.tracker().DeferSpan(ctx, r.WikiSpan, "model_or_infrastructure_wait", deferredErr)
 			continue
 		}
 		writtenPages := make([]map[string]string, 0, len(r.Pages))
@@ -2248,6 +2272,10 @@ func (s *wikiIngestService) mapOneDocument(
 		logger.Infof(ctx, "wiki ingest: knowledge %s generation %s is stale, skip map", knowledgeID, op.ProcessingGeneration)
 		return nil, nil, nil
 	}
+	// Isolate provider-attempt accounting per document while retaining the
+	// parent batch marker. A busy neighbour in the same Wiki batch must not make
+	// this document's capacity-only yield look like a real model attempt.
+	ctx = modeladmission.WithProviderExecutionTracking(ctx)
 
 	// Open a postprocess.wiki subspan under the parent attempt's
 	// postprocess stage so the actual per-doc work (LLM extraction +
@@ -2397,6 +2425,19 @@ func (s *wikiIngestService) mapOneDocument(
 			logger.Infof(ctx, "wiki ingest: restored shared Map cache for knowledge %s", knowledgeID)
 		}
 	}
+	if !(mapCheckpoint.ExtractionDone && mapCheckpoint.SummaryDone && mapCheckpoint.ClassificationDone) {
+		var releaseTaskWork func()
+		ctx, releaseTaskWork, err = modeladmission.AcquireChatTaskWork(
+			ctx, chatModel, modeladmission.WorkLaneWiki,
+		)
+		if err != nil {
+			if !deferTrackedSpanIfDurableWait(ctx, s.tracker(), wikiSpan, err) {
+				s.tracker().FailSpan(ctx, wikiSpan, "WIKI_TASK_ADMISSION_FAILED", err.Error(), err)
+			}
+			return nil, nil, err
+		}
+		defer releaseTaskWork()
+	}
 
 	// Pass 0: lightweight candidate slug extraction (skeleton only).
 	// On failure we fall back to the legacy single-shot extractor so the doc
@@ -2407,7 +2448,8 @@ func (s *wikiIngestService) mapOneDocument(
 		slugItems         map[string]extractedItem
 		pass0Failed       bool
 	)
-	extractSpan := s.tracker().BeginSubSpan(ctx, wikiSpan, "postprocess.wiki.extract", types.SpanKindSubSpan, types.JSONMap{
+	extractCtx := modeladmission.WithProviderExecutionTracking(ctx)
+	extractSpan := s.tracker().BeginSubSpan(extractCtx, wikiSpan, "postprocess.wiki.extract", types.SpanKindSubSpan, types.JSONMap{
 		"content_chars": utf8.RuneCountInString(content),
 		"old_pages":     len(oldPageSlugs),
 	})
@@ -2430,14 +2472,19 @@ func (s *wikiIngestService) mapOneDocument(
 	} else {
 		logger.Infof(ctx, "wiki ingest: pass 0 — extracting candidate slugs for %s", knowledgeID)
 		extractedEntities, extractedConcepts, slugItems, err = s.extractCandidateSlugs(
-			ctx, chatModel, payload.KnowledgeBaseID, content, lang, oldPageSlugs, batchCtx,
+			extractCtx, chatModel, payload.KnowledgeBaseID, content, lang, oldPageSlugs, batchCtx,
 		)
 		if err != nil {
-			if isTransientLLMError(ctx, err) || modeladmission.IsModelWorkDeferred(err) {
+			if modeladmission.IsModelWorkDeferred(err) {
+				deferTrackedSpanIfDurableWait(extractCtx, s.tracker(), extractSpan, err)
+				deferTrackedSpanIfDurableWait(ctx, s.tracker(), wikiSpan, err)
+				return nil, nil, err
+			}
+			if isTransientLLMError(ctx, err) {
 				// The legacy extractor uses the same provider. Falling back on
 				// transport/rate-limit/circuit failures only doubles pressure
 				// and burns the document's durable Wiki retry budget.
-				s.tracker().FailSpan(ctx, extractSpan, "EXTRACT_PROVIDER_UNAVAILABLE", err.Error(), err)
+				s.tracker().FailSpan(extractCtx, extractSpan, "EXTRACT_PROVIDER_UNAVAILABLE", err.Error(), err)
 				s.tracker().FailSpan(ctx, wikiSpan, "EXTRACT_PROVIDER_UNAVAILABLE", err.Error(), err)
 				return nil, nil, err
 			}
@@ -2463,7 +2510,7 @@ func (s *wikiIngestService) mapOneDocument(
 			return nil, nil, err
 		}
 	}
-	s.tracker().EndSpan(ctx, extractSpan, types.JSONMap{
+	s.tracker().EndSpan(extractCtx, extractSpan, types.JSONMap{
 		"entities":         len(extractedEntities),
 		"concepts":         len(extractedConcepts),
 		"pass0_fallback":   pass0Failed,
@@ -2523,13 +2570,15 @@ func (s *wikiIngestService) mapOneDocument(
 	// Both calls run in parallel goroutines under the same wikiSpan
 	// parent — their subspans will visually overlap in the trace view,
 	// which correctly reflects their wall-clock concurrency.
-	summarySpan := s.tracker().BeginSubSpan(ctx, wikiSpan, "postprocess.wiki.summary", types.SpanKindSubSpan, types.JSONMap{
+	summaryCtx := modeladmission.WithProviderExecutionTracking(ctx)
+	summarySpan := s.tracker().BeginSubSpan(summaryCtx, wikiSpan, "postprocess.wiki.summary", types.SpanKindSubSpan, types.JSONMap{
 		"content_chars":   utf8.RuneCountInString(content),
 		"extracted_slugs": len(summaryExtractedPages),
 	})
 	var classifySpan *Span
+	classifyCtx := modeladmission.WithProviderExecutionTracking(ctx)
 	if !pass0Failed {
-		classifySpan = s.tracker().BeginSubSpan(ctx, wikiSpan, "postprocess.wiki.classify", types.SpanKindSubSpan, types.JSONMap{
+		classifySpan = s.tracker().BeginSubSpan(classifyCtx, wikiSpan, "postprocess.wiki.classify", types.SpanKindSubSpan, types.JSONMap{
 			"chunks":     len(chunks),
 			"candidates": len(extractedEntities) + len(extractedConcepts),
 		})
@@ -2541,7 +2590,7 @@ func (s *wikiIngestService) mapOneDocument(
 		defer wg.Done()
 		if summaryAlreadyDone {
 			sumLine, sumBody := splitSummaryLine(summaryContent)
-			s.tracker().EndSpan(ctx, summarySpan, types.JSONMap{
+			s.tracker().EndSpan(summaryCtx, summarySpan, types.JSONMap{
 				"chars":          utf8.RuneCountInString(summaryContent),
 				"summary_line":   previewText(sumLine, 160),
 				"body_preview":   previewText(sumBody, 320),
@@ -2549,16 +2598,18 @@ func (s *wikiIngestService) mapOneDocument(
 			})
 			return
 		}
-		summaryContent, summaryErr = s.generateWithTemplate(ctx, chatModel, agent.WikiSummaryPrompt, map[string]string{
+		summaryContent, summaryErr = s.generateWithTemplate(summaryCtx, chatModel, agent.WikiSummaryPrompt, map[string]string{
 			"Content":        content,
 			"Language":       lang,
 			"ExtractedSlugs": slugListing,
 		})
 		if summaryErr != nil {
-			s.tracker().FailSpan(ctx, summarySpan, "SUMMARY_FAILED", summaryErr.Error(), summaryErr)
+			if !deferTrackedSpanIfDurableWait(summaryCtx, s.tracker(), summarySpan, summaryErr) {
+				s.tracker().FailSpan(summaryCtx, summarySpan, "SUMMARY_FAILED", summaryErr.Error(), summaryErr)
+			}
 		} else {
 			sumLine, sumBody := splitSummaryLine(summaryContent)
-			s.tracker().EndSpan(ctx, summarySpan, types.JSONMap{
+			s.tracker().EndSpan(summaryCtx, summarySpan, types.JSONMap{
 				"chars":        utf8.RuneCountInString(summaryContent),
 				"summary_line": previewText(sumLine, 160),
 				"body_preview": previewText(sumBody, 320),
@@ -2569,7 +2620,7 @@ func (s *wikiIngestService) mapOneDocument(
 		defer wg.Done()
 		if classificationAlreadyDone {
 			if classifySpan != nil {
-				s.tracker().EndSpan(ctx, classifySpan, types.JSONMap{
+				s.tracker().EndSpan(classifyCtx, classifySpan, types.JSONMap{
 					"cited_slugs":      len(citations),
 					"new_slugs":        len(newSlugs),
 					"batches":          batchCount,
@@ -2590,15 +2641,17 @@ func (s *wikiIngestService) mapOneDocument(
 		}
 		candidatesXML := renderCandidateSlugsXML(extractedEntities, extractedConcepts)
 		citations, newSlugs, batchCount, classificationFailures, classificationErr =
-			s.classifyChunkCitations(ctx, chatModel, candidatesXML, chunks, lang, batchCtx)
+			s.classifyChunkCitations(classifyCtx, chatModel, candidatesXML, chunks, lang, batchCtx)
 		if classificationErr != nil {
-			s.tracker().FailSpan(
-				ctx, classifySpan, "CLASSIFICATION_FAILED",
-				classificationErr.Error(), classificationErr,
-			)
+			if !deferTrackedSpanIfDurableWait(classifyCtx, s.tracker(), classifySpan, classificationErr) {
+				s.tracker().FailSpan(
+					classifyCtx, classifySpan, "CLASSIFICATION_FAILED",
+					classificationErr.Error(), classificationErr,
+				)
+			}
 			return
 		}
-		s.tracker().EndSpan(ctx, classifySpan, types.JSONMap{
+		s.tracker().EndSpan(classifyCtx, classifySpan, types.JSONMap{
 			"cited_slugs":      len(citations),
 			"new_slugs":        len(newSlugs),
 			"batches":          batchCount,
@@ -2633,7 +2686,9 @@ func (s *wikiIngestService) mapOneDocument(
 	}
 	if stageErr := errors.Join(summaryErr, classificationErr); stageErr != nil {
 		logger.Errorf(ctx, "wiki ingest: incomplete map stages for %s, will requeue: %v", knowledgeID, stageErr)
-		s.tracker().FailSpan(ctx, wikiSpan, "MAP_STAGE_FAILED", stageErr.Error(), stageErr)
+		if !deferTrackedSpanIfDurableWait(ctx, s.tracker(), wikiSpan, stageErr) {
+			s.tracker().FailSpan(ctx, wikiSpan, "MAP_STAGE_FAILED", stageErr.Error(), stageErr)
+		}
 		return nil, nil, fmt.Errorf("wiki map stage: %w", stageErr)
 	}
 	if s.contentCache != nil &&
@@ -3008,7 +3063,9 @@ func (s *wikiIngestService) reduceSlugUpdates(
 			return
 		}
 		if err != nil {
-			s.tracker().FailSpan(ctx, pageSpan, "REDUCE_FAILED", err.Error(), err)
+			if !deferTrackedSpanIfDurableWait(ctx, s.tracker(), pageSpan, err) {
+				s.tracker().FailSpan(ctx, pageSpan, "REDUCE_FAILED", err.Error(), err)
+			}
 			return
 		}
 		if !changed {

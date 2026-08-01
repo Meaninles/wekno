@@ -6,7 +6,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| `services/` | general-agent、document-processing-agent、文档拆分器、模型旁路等独立服务 |
+| `services/` | general-agent、document-processing-agent、文档拆分器、LiteLLM 生产非 GLM 镜像等独立服务 |
 | `tests/` | 多实例文档、知识库文件夹、模型容量、迁移和 Agent 验收 |
 | `document-templates/` | Word/Excel/PDF/PPT 生成模板与运行时指令 |
 

@@ -230,6 +230,33 @@ func isDurableTaskDeferred(err error) bool {
 		modeladmission.IsModelWorkDeferred(err)
 }
 
+// deferTrackedSpanIfDurableWait keeps control-plane waits out of the business
+// failure surface. The V2 bridge also uses the task-local provider marker to
+// roll back the speculative real-attempt increment only when no provider call
+// started during this invocation.
+func deferTrackedSpanIfDurableWait(
+	ctx context.Context,
+	tracker SpanTracker,
+	span *Span,
+	errs ...error,
+) bool {
+	if tracker == nil || span == nil {
+		return false
+	}
+	for _, err := range errs {
+		if !isDurableTaskDeferred(err) {
+			continue
+		}
+		reason := "model_or_infrastructure_wait"
+		if errors.Is(err, context.Canceled) {
+			reason = "worker_interrupted"
+		}
+		tracker.DeferSpan(ctx, span, reason, err)
+		return true
+	}
+	return false
+}
+
 // finalizeSubtaskDetachedTimeout bounds the detached decrement so a wedged DB
 // connection can't hang a worker goroutine forever in its terminal defer.
 const finalizeSubtaskDetachedTimeout = 10 * time.Second
@@ -432,6 +459,12 @@ func (s *knowledgeService) failPostprocessSubspan(
 		return
 	}
 	s.tracker().FailSpan(ctx, span, code, msg, err)
+}
+
+func (s *knowledgeService) deferPostprocessSubspanIfNeeded(
+	ctx context.Context, span *Span, errs ...error,
+) bool {
+	return deferTrackedSpanIfDurableWait(ctx, s.tracker(), span, errs...)
 }
 
 // getParserEngineOverridesFromContext returns parser engine overrides from tenant in context (e.g. MinerU endpoint, API key).

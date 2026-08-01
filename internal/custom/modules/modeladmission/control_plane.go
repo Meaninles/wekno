@@ -110,6 +110,55 @@ type AdmissionTemplate struct {
 
 func (AdmissionTemplate) TableName() string { return "custom_model_admission_templates" }
 
+// SchedulerPolicy is the single hot-configured policy for background model
+// work. Provider capacity remains owned by ResourcePool; these values only
+// control how much work may wait in front of that capacity and how derivative
+// and Wiki work share it.
+type SchedulerPolicy struct {
+	ID                       uint64    `json:"id" gorm:"primaryKey"`
+	PrefetchFactor           int       `json:"prefetch_factor" gorm:"not null;default:2"`
+	DerivativeWeight         int       `json:"derivative_weight" gorm:"not null;default:2"`
+	WikiWeight               int       `json:"wiki_weight" gorm:"not null;default:1"`
+	BackgroundMaxWaitSeconds int       `json:"background_max_wait_seconds" gorm:"not null;default:30"`
+	DispatchLeaseSeconds     int       `json:"dispatch_lease_seconds" gorm:"not null;default:120"`
+	PolicyVersion            uint64    `json:"policy_version" gorm:"not null;default:1"`
+	UpdatedBy                string    `json:"updated_by" gorm:"type:varchar(36);not null;default:''"`
+	CreatedAt                time.Time `json:"created_at" gorm:"not null"`
+	UpdatedAt                time.Time `json:"updated_at" gorm:"not null"`
+}
+
+func (SchedulerPolicy) TableName() string { return "custom_model_scheduler_policies" }
+
+func DefaultSchedulerPolicy() SchedulerPolicy {
+	now := time.Now().UTC()
+	return SchedulerPolicy{
+		ID: 1, PrefetchFactor: 2, DerivativeWeight: 2, WikiWeight: 1,
+		BackgroundMaxWaitSeconds: 30, DispatchLeaseSeconds: 120,
+		PolicyVersion: 1, CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+func NormalizeSchedulerPolicy(policy *SchedulerPolicy) error {
+	if policy == nil {
+		return errors.New("scheduler policy is required")
+	}
+	policy.ID = 1
+	if policy.PrefetchFactor < 1 || policy.PrefetchFactor > 8 {
+		return errors.New("prefetch_factor must be between 1 and 8")
+	}
+	if policy.DerivativeWeight < 1 || policy.DerivativeWeight > 100 ||
+		policy.WikiWeight < 1 || policy.WikiWeight > 100 {
+		return errors.New("derivative_weight and wiki_weight must be between 1 and 100")
+	}
+	if policy.BackgroundMaxWaitSeconds < 1 || policy.BackgroundMaxWaitSeconds > 300 {
+		return errors.New("background_max_wait_seconds must be between 1 and 300")
+	}
+	if policy.DispatchLeaseSeconds < 30 || policy.DispatchLeaseSeconds > 900 {
+		return errors.New("dispatch_lease_seconds must be between 30 and 900")
+	}
+	return nil
+}
+
 type AdmissionAudit struct {
 	ID            uint64    `json:"id" gorm:"primaryKey;autoIncrement"`
 	ActorID       string    `json:"actor_id" gorm:"type:varchar(36);not null;default:''"`
@@ -146,9 +195,11 @@ type ResolvedPolicy struct {
 type Store struct {
 	db *gorm.DB
 
-	mu       sync.Mutex
-	cache    map[string]cachedPolicy
-	cacheTTL time.Duration
+	mu                 sync.Mutex
+	cache              map[string]cachedPolicy
+	cacheTTL           time.Duration
+	scheduler          SchedulerPolicy
+	schedulerExpiresAt time.Time
 }
 
 type cachedPolicy struct {
@@ -173,17 +224,103 @@ func (s *Store) Migrate(ctx context.Context) error {
 		&QuotaPool{},
 		&GatewayPool{},
 		&AdmissionTemplate{},
+		&SchedulerPolicy{},
 		&AdmissionAudit{},
 	); err != nil {
 		return fmt.Errorf("migrate model admission control plane: %w", err)
 	}
+	if err := migrateSchedulerPolicyConstraints(s.db.WithContext(ctx)); err != nil {
+		return err
+	}
 	if err := s.seedBuiltinTemplates(ctx); err != nil {
+		return err
+	}
+	if err := s.seedSchedulerPolicy(ctx); err != nil {
 		return err
 	}
 	if err := s.ReconcileModels(ctx); err != nil {
 		return err
 	}
 	return s.normalizeCapacityPolicies(ctx)
+}
+
+func migrateSchedulerPolicyConstraints(db *gorm.DB) error {
+	if db == nil || db.Dialector.Name() != "postgres" {
+		return nil
+	}
+	statements := []string{
+		`SELECT pg_advisory_xact_lock(hashtext('weknora.model_scheduler_policy.v1'))`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_custom_model_scheduler_policy_singleton') THEN
+				ALTER TABLE custom_model_scheduler_policies ADD CONSTRAINT chk_custom_model_scheduler_policy_singleton CHECK (id = 1);
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_custom_model_scheduler_prefetch') THEN
+				ALTER TABLE custom_model_scheduler_policies ADD CONSTRAINT chk_custom_model_scheduler_prefetch CHECK (prefetch_factor BETWEEN 1 AND 8);
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_custom_model_scheduler_weights') THEN
+				ALTER TABLE custom_model_scheduler_policies ADD CONSTRAINT chk_custom_model_scheduler_weights CHECK (derivative_weight BETWEEN 1 AND 100 AND wiki_weight BETWEEN 1 AND 100);
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_custom_model_scheduler_wait') THEN
+				ALTER TABLE custom_model_scheduler_policies ADD CONSTRAINT chk_custom_model_scheduler_wait CHECK (background_max_wait_seconds BETWEEN 1 AND 300);
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_custom_model_scheduler_dispatch') THEN
+				ALTER TABLE custom_model_scheduler_policies ADD CONSTRAINT chk_custom_model_scheduler_dispatch CHECK (dispatch_lease_seconds BETWEEN 30 AND 900);
+			END IF;
+		END $$`,
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, statement := range statements {
+			if err := tx.Exec(statement).Error; err != nil {
+				return fmt.Errorf("migrate model scheduler policy constraints: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func (s *Store) seedSchedulerPolicy(ctx context.Context) error {
+	policy := DefaultSchedulerPolicy()
+	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&policy).Error; err != nil {
+		return fmt.Errorf("seed model scheduler policy: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SchedulerPolicy(ctx context.Context) (SchedulerPolicy, error) {
+	if s == nil || s.db == nil {
+		return DefaultSchedulerPolicy(), nil
+	}
+	now := time.Now()
+	s.mu.Lock()
+	if s.scheduler.ID == 1 && now.Before(s.schedulerExpiresAt) {
+		policy := s.scheduler
+		s.mu.Unlock()
+		return policy, nil
+	}
+	s.mu.Unlock()
+
+	var policy SchedulerPolicy
+	err := s.db.WithContext(ctx).Where("id = ?", 1).First(&policy).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		policy = DefaultSchedulerPolicy()
+		if createErr := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).
+			Create(&policy).Error; createErr != nil {
+			return SchedulerPolicy{}, createErr
+		}
+		err = s.db.WithContext(ctx).Where("id = ?", 1).First(&policy).Error
+	}
+	if err != nil {
+		return SchedulerPolicy{}, err
+	}
+	if err := NormalizeSchedulerPolicy(&policy); err != nil {
+		return SchedulerPolicy{}, fmt.Errorf("invalid scheduler policy: %w", err)
+	}
+	s.mu.Lock()
+	s.scheduler = policy
+	s.schedulerExpiresAt = now.Add(s.cacheTTL)
+	s.mu.Unlock()
+	return policy, nil
 }
 
 func (s *Store) ReconcileModels(ctx context.Context) error {
@@ -452,6 +589,7 @@ func (s *Store) Invalidate() {
 	}
 	s.mu.Lock()
 	s.cache = make(map[string]cachedPolicy)
+	s.schedulerExpiresAt = time.Time{}
 	s.mu.Unlock()
 }
 

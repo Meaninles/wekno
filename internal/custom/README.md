@@ -10,14 +10,15 @@
 |---|---|
 | `documentqueue` | 文档级持久工作流、实例/boot、租约、epoch fencing、接管和队列位置 |
 | `documentsplit` | 超大文档拆分、任务租约、重试、代表性采样 |
-| `modeladmission` | Redis 集群级模型准入、后台执行窗口和衍生/Wiki 公平调度 |
+| `modeladmission` | Redis 集群级模型准入、后台执行窗口、衍生/Wiki 公平调度及 Wiki Map/Commit 自动分配 |
 | `capacitycontrol` | 实际模型资源池有效值编译、跨模块冲突检查和独立管理 API |
 | `runtimeinstances` | 通用运行角色/能力心跳和在线实例可观测性 |
 | `derivativequeue` | 衍生任务 PostgreSQL outbox、派发租约、provider checkpoint 和恢复 |
-| `wikiqueue` | Wiki Map PostgreSQL outbox、跨队列派发窗口、epoch/lease 和缺失 wake 恢复 |
+| `wikiqueue` | Wiki Map PostgreSQL outbox、Commit-aware Map 派发上限、epoch/lease 和缺失 wake 恢复 |
 | `chatqueue` | 按实际聊天模型资源池的会话级 FIFO、个人等待上限、跨 API 租约和热配置 |
 | `workloadbudget` | 问题、图谱和下游任务工作量上限 |
 | `pipelineobs` | 文档阶段进度与运行观测 |
+| `processingtrace` | V2 逻辑业务 span 唯一存储、稳定逻辑键与尝试分配 |
 | `enrichmentoutcome` / `terminalrepair` | 衍生结果收敛和终态修复 |
 | `knowledgeworkflowfilter` | 完整工作流状态筛选 |
 | `knowledgefolders` | 文件夹、渐进列表、搜索、移动和导入 |
@@ -41,7 +42,11 @@
 
 - `asynq.concurrency` 是每 app 的完整文档并发，不是内部任务线程总数。
 - 实际模型资源池是模型调用、聊天会话和后台文档 fan-out 的唯一并发真源；后台执行窗口按资源池容量计算，与 API/worker 副本数无关。
+- Wiki Map/Commit 的 task/provider 份额从有效资源池容量自动派生并空闲借用，只作为只读有效值展示，不增加管理员配置项。
+- Wiki 单任务内部的 Map/Reduce LLM fan-out 自动裁剪到阶段保底；知识库并发值只是期望上限，不需要随资源池容量手工同步。
 - derivative/Wiki 容量等待是无损调度延期，不增加解析次数、provider attempt 或业务失败预算。
+- 模型工作在准入成功、即将调用 provider 时才启动子 span；排队、限速、断路和重投等待对业务 span 零写入。
+- `custom_processing_spans_v2` 是唯一权威表；每个 `(knowledge, attempt, logical_key)` 只保留一行，重试只累加真实执行次数。
 - `parse_status=completed` 只等待核心索引和全部可选分支的持久化意图；表格元数据、摘要、问题、图谱和 Wiki 的运行/失败只更新独立富化状态。
 - PostgreSQL 是文档工作流事实来源，Redis 投递允许重复。
 - `none` 是衍生状态初始值，不能直接解释为跳过。

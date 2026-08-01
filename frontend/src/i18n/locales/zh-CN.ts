@@ -3894,8 +3894,8 @@ export default {
       title: "模型配置",
       description: "为知识库选择合适的 AI 模型",
       llmLabel: "LLM 大语言模型",
-      llmDesc: "用于总结和摘要的大语言模型",
-      llmPlaceholder: "请选择 LLM 模型（可选）",
+      llmDesc: "用于基于知识库检索结果生成回答的大语言模型",
+      llmPlaceholder: "请选择知识库问答模型",
       embeddingLabel: "Embedding 嵌入模型",
       embeddingDesc: "用于文本向量化的嵌入模型",
       embeddingPlaceholder: "请选择 Embedding 模型",
@@ -4387,7 +4387,7 @@ export default {
     },
     chatModel: {
       label: "LLM 模型",
-      desc: "用于总结和摘要的大语言模型",
+      desc: "用于基于检索结果生成回答的大语言模型",
     },
     rerankModel: {
       label: "ReRank 模型",

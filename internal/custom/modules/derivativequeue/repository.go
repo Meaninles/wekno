@@ -285,8 +285,14 @@ func (r *Repository) markDispatched(
 					return err
 				}
 				if err := tx.Table("task_pending_ops").Where(
-					"task_type = ? AND scope = ? AND op = ? AND map_ready_at IS NULL AND map_resource_pool_id = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND (map_dispatch_lease_until IS NULL OR map_dispatch_lease_until <= ?)",
-					types.TypeWikiIngest, "knowledge_base", "ingest", expectedPool, now, now,
+					`task_type = ? AND scope = ? AND map_resource_pool_id = ? AND (
+						(op = ? AND map_ready_at IS NOT NULL) OR
+						(op = ? AND map_ready_at IS NULL AND
+						 (next_attempt_at IS NULL OR next_attempt_at <= ?) AND
+						 (map_dispatch_lease_until IS NULL OR map_dispatch_lease_until <= ?))
+					)`,
+					types.TypeWikiIngest, "knowledge_base", expectedPool,
+					"ingest", "ingest", now, now,
 				).Count(&wikiDemand).Error; err != nil {
 					return err
 				}

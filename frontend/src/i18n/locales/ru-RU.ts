@@ -3941,7 +3941,7 @@ export default {
     },
     chatModel: {
       label: 'LLM Model',
-      desc: 'Large language model used for summarization and abstract generation'
+      desc: 'Large language model used to generate answers from search results'
     },
     rerankModel: {
       label: 'ReRank Model',

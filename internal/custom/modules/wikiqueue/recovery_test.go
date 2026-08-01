@@ -541,6 +541,53 @@ func TestMapDispatchReservationBoundsPoolAndPublishesFencedWake(t *testing.T) {
 	require.EqualValues(t, 2, firstAgain.MapDispatchEpoch)
 }
 
+func TestFairMapCandidatesBalanceProjectedWorkAcrossKnowledgeBases(t *testing.T) {
+	db := newRecoveryTestDB(t)
+	now := time.Now().UTC()
+	for index := 0; index < 4; index++ {
+		insertPendingOp(
+			t, db, 7, types.TypeWikiIngest, types.TaskScopeKnowledgeBase,
+			"kb-older", "ingest",
+		)
+		insertPendingOp(
+			t, db, 7, types.TypeWikiIngest, types.TaskScopeKnowledgeBase,
+			"kb-newer", "ingest",
+		)
+	}
+	require.NoError(t, db.Table("task_pending_ops").Where("scope_id = ?", "kb-older").
+		Updates(map[string]any{"enqueued_at": now.Add(-2 * time.Hour)}).Error)
+	require.NoError(t, db.Table("task_pending_ops").Where("scope_id = ?", "kb-newer").
+		Updates(map[string]any{"enqueued_at": now.Add(-time.Hour)}).Error)
+
+	// Two older-KB rows are already running. The next four projected slots must
+	// first catch the newer KB up to the same in-flight level, then alternate.
+	require.NoError(t, db.Exec(`
+		UPDATE task_pending_ops
+		   SET map_dispatch_lease_until = ?
+		 WHERE id IN (
+		       SELECT id FROM task_pending_ops
+		        WHERE scope_id = ? ORDER BY id LIMIT 2
+		 )`, now.Add(time.Minute), "kb-older").Error)
+	recovery := &Recovery{db: db, config: DefaultConfig()}
+	rows, err := recovery.listFairMapCandidates(context.Background(), now, 4)
+	require.NoError(t, err)
+	require.Len(t, rows, 4)
+	assert.Equal(t, []string{"kb-newer", "kb-newer", "kb-older", "kb-newer"}, []string{
+		rows[0].ScopeID, rows[1].ScopeID, rows[2].ScopeID, rows[3].ScopeID,
+	})
+
+	// With no active reservations, the older scope wins each deterministic
+	// tie, but both scopes still receive one row per round.
+	require.NoError(t, db.Table("task_pending_ops").Where("1 = 1").
+		Update("map_dispatch_lease_until", now.Add(-time.Second)).Error)
+	rows, err = recovery.listFairMapCandidates(context.Background(), now, 4)
+	require.NoError(t, err)
+	require.Len(t, rows, 4)
+	assert.Equal(t, []string{"kb-older", "kb-newer", "kb-older", "kb-newer"}, []string{
+		rows[0].ScopeID, rows[1].ScopeID, rows[2].ScopeID, rows[3].ScopeID,
+	})
+}
+
 func TestMapDispatchProtectsDerivativeShareAndBorrowsWhenDerivativeIsIdle(t *testing.T) {
 	db := newRecoveryTestDB(t)
 	for index := 1; index <= 2; index++ {
@@ -590,4 +637,93 @@ func TestMapDispatchProtectsDerivativeShareAndBorrowsWhenDerivativeIsIdle(t *tes
 		context.Background(), candidates[1], "pool-a", 3, 1, time.Minute,
 	)
 	require.NoError(t, err, "Wiki lane should borrow the idle derivative share")
+}
+
+func TestMapDispatchLeavesAutomaticallyDerivedCommitWindowWhenReadyWorkExists(t *testing.T) {
+	db := newRecoveryTestDB(t)
+	for index := 1; index <= 6; index++ {
+		insertPendingOp(
+			t, db, 7, types.TypeWikiIngest, types.TaskScopeKnowledgeBase,
+			"kb-a", "ingest",
+		)
+		require.NoError(t, db.Table("task_pending_ops").Where("id = ?", index).
+			Updates(map[string]any{
+				"dedup_key":            fmt.Sprintf("knowledge-%d:g-1", index),
+				"map_resource_pool_id": "pool-a",
+			}).Error)
+	}
+	readyAt := time.Now().UTC()
+	require.NoError(t, db.Table("task_pending_ops").Where("id = ?", 6).
+		Update("map_ready_at", readyAt).Error)
+
+	var candidates []pendingMapRow
+	require.NoError(t, db.Table("task_pending_ops").
+		Select("id, tenant_id, scope_id, dedup_key, payload, map_resource_pool_id, map_dispatch_epoch, map_dispatch_lease_until").
+		Where("map_ready_at IS NULL").Order("id").Scan(&candidates).Error)
+	require.Len(t, candidates, 5)
+	recovery := &Recovery{db: db, enqueuer: &recordingEnqueuer{}, config: DefaultConfig()}
+
+	// A six-slot global window automatically derives Map:Commit=4:2. Map may
+	// borrow all six only while there is no commit-ready durable demand.
+	for index := 0; index < 4; index++ {
+		_, err := recovery.reserveMapDispatch(
+			context.Background(), candidates[index], "pool-a", 6, 6, time.Minute,
+		)
+		require.NoError(t, err)
+	}
+	_, err := recovery.reserveMapDispatch(
+		context.Background(), candidates[4], "pool-a", 6, 6, time.Minute,
+	)
+	require.ErrorIs(t, err, errMapDispatchWindowFull)
+}
+
+func TestMapDispatchSubdividesContendedWikiShareForCommit(t *testing.T) {
+	db := newRecoveryTestDB(t)
+	for index := 1; index <= 4; index++ {
+		insertPendingOp(
+			t, db, 7, types.TypeWikiIngest, types.TaskScopeKnowledgeBase,
+			"kb-a", "ingest",
+		)
+		require.NoError(t, db.Table("task_pending_ops").Where("id = ?", index).
+			Updates(map[string]any{
+				"dedup_key":            fmt.Sprintf("knowledge-%d:g-1", index),
+				"map_resource_pool_id": "pool-a",
+			}).Error)
+	}
+	readyAt := time.Now().UTC()
+	require.NoError(t, db.Table("task_pending_ops").Where("id = ?", 4).
+		Update("map_ready_at", readyAt).Error)
+	require.NoError(t, db.Exec(`
+		CREATE TABLE custom_derivative_work_items (
+			id TEXT PRIMARY KEY,
+			resource_pool_id TEXT NOT NULL,
+			work_kind TEXT NOT NULL,
+			state TEXT NOT NULL,
+			next_attempt_at DATETIME NOT NULL,
+			dispatch_lease_until DATETIME
+		)
+	`).Error)
+	require.NoError(t, db.Exec(`
+		INSERT INTO custom_derivative_work_items
+			(id, resource_pool_id, work_kind, state, next_attempt_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, "derivative-1", "pool-a", "summary", "queued", time.Now().UTC().Add(-time.Second)).Error)
+
+	var candidates []pendingMapRow
+	require.NoError(t, db.Table("task_pending_ops").
+		Select("id, tenant_id, scope_id, dedup_key, payload, map_resource_pool_id, map_dispatch_epoch, map_dispatch_lease_until").
+		Where("map_ready_at IS NULL").Order("id").Scan(&candidates).Error)
+	require.Len(t, candidates, 3)
+	recovery := &Recovery{db: db, enqueuer: &recordingEnqueuer{}, config: DefaultConfig()}
+
+	// The global six-slot window protects two Wiki slots while derivative also
+	// waits. Those two slots are automatically split 1:1 for Map and Commit.
+	_, err := recovery.reserveMapDispatch(
+		context.Background(), candidates[0], "pool-a", 6, 2, time.Minute,
+	)
+	require.NoError(t, err)
+	_, err = recovery.reserveMapDispatch(
+		context.Background(), candidates[1], "pool-a", 6, 2, time.Minute,
+	)
+	require.ErrorIs(t, err, errMapDispatchWindowFull)
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikillm"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -1143,7 +1144,7 @@ type wikiPreparedSpan struct {
 	StartedAt    time.Time `json:"started_at"`
 }
 
-const wikiMapCheckpointVersion = 1
+const wikiMapCheckpointVersion = 2
 
 type wikiMapCheckpoint struct {
 	Version                int                   `json:"version"`
@@ -1151,6 +1152,8 @@ type wikiMapCheckpoint struct {
 	ExtractedEntities      []extractedItem       `json:"extracted_entities,omitempty"`
 	ExtractedConcepts      []extractedItem       `json:"extracted_concepts,omitempty"`
 	Pass0Failed            bool                  `json:"pass0_failed,omitempty"`
+	Pass0ErrorClass        string                `json:"pass0_error_class,omitempty"`
+	Pass0ErrorMessage      string                `json:"pass0_error_message,omitempty"`
 	ExtractionDone         bool                  `json:"extraction_done,omitempty"`
 	SummaryContent         string                `json:"summary_content,omitempty"`
 	SummaryDone            bool                  `json:"summary_done,omitempty"`
@@ -2760,12 +2763,12 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 	chatModel chat.Chat,
 	kbID string,
 	entities, concepts []extractedItem,
-) ([]extractedItem, []extractedItem) {
+) ([]extractedItem, []extractedItem, error) {
 	if len(entities) == 0 && len(concepts) == 0 {
-		return entities, concepts
+		return entities, concepts, nil
 	}
 	if s.wikiService == nil {
-		return entities, concepts
+		return entities, concepts, nil
 	}
 
 	// Build the candidate set: for each new item, ask the repo for
@@ -2810,7 +2813,7 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 		// No similar existing pages — nothing to merge against. The
 		// items pass through unchanged.
 		logger.Infof(ctx, "wiki ingest: no similar existing pages found for %d new items", len(entities)+len(concepts))
-		return entities, concepts
+		return entities, concepts, nil
 	}
 	logger.Infof(ctx, "wiki ingest: %d similar existing pages selected for %d new items",
 		len(candidatePages), len(entities)+len(concepts))
@@ -2820,7 +2823,7 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 		writeDedupItemXML(&existingBuf, p.Slug, p.Title, p.PageType, []string(p.Aliases))
 	}
 	if existingBuf.Len() == 0 {
-		return entities, concepts
+		return entities, concepts, nil
 	}
 
 	var newBuf strings.Builder
@@ -2836,8 +2839,7 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 		"ExistingPages": existingBuf.String(),
 	})
 	if err != nil {
-		logger.Warnf(ctx, "wiki ingest: deduplication LLM call failed: %v", err)
-		return entities, concepts
+		return nil, nil, fmt.Errorf("wiki deduplication model call failed: %w", err)
 	}
 
 	dedupeJSON = cleanLLMJSON(dedupeJSON)
@@ -2847,11 +2849,11 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 	}
 	if err := json.Unmarshal([]byte(dedupeJSON), &dedupeResult); err != nil {
 		logger.Warnf(ctx, "wiki ingest: failed to parse dedup JSON: %v\nRaw: %s", err, dedupeJSON)
-		return entities, concepts
+		return entities, concepts, nil
 	}
 
 	if len(dedupeResult.Merges) == 0 {
-		return entities, concepts
+		return entities, concepts, nil
 	}
 
 	// Build the existing-slug set from the candidate map: anything not
@@ -2902,7 +2904,7 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 		}
 	}
 
-	return entities, concepts
+	return entities, concepts, nil
 }
 
 // generateWithTemplate executes a prompt template and calls the LLM with
@@ -2927,6 +2929,16 @@ func (s *wikiIngestService) deduplicateExtractedBatch(
 // summary page permanently. Retries plus failedOps requeuing (see
 // mapOneDocument) turn those events into at-most-a-few-minute hiccups.
 func (s *wikiIngestService) generateWithTemplate(ctx context.Context, chatModel chat.Chat, promptTpl string, data map[string]string) (string, error) {
+	return s.generateWithTemplateFormat(ctx, chatModel, promptTpl, data, nil)
+}
+
+func (s *wikiIngestService) generateWithTemplateFormat(
+	ctx context.Context,
+	chatModel chat.Chat,
+	promptTpl string,
+	data map[string]string,
+	format json.RawMessage,
+) (string, error) {
 	tmpl, err := template.New("wiki").Parse(promptTpl)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
@@ -2962,6 +2974,7 @@ func (s *wikiIngestService) generateWithTemplate(ctx context.Context, chatModel 
 		}, &chat.ChatOptions{
 			Temperature: 0.3,
 			Thinking:    &thinking,
+			Format:      format,
 		})
 		cancelCall()
 		if err == nil {
@@ -3016,50 +3029,7 @@ func (s *wikiIngestService) generateWithTemplate(ctx context.Context, chatModel 
 //     ("timeout", "connection reset", "EOF") that providers surface
 //     without a structured status code.
 func isTransientLLMError(ctx context.Context, err error) bool {
-	if err == nil {
-		return false
-	}
-	// Never retry after the parent ctx itself expired — the task is
-	// being cancelled and the next attempt would just fail again.
-	if ctx.Err() != nil {
-		return false
-	}
-
-	if status, ok := chat.HTTPStatusCode(err); ok {
-		return status == 408 || status == 429 || status >= 500
-	}
-
-	msg := err.Error()
-	// Providers that bubble HTTP status up formatted as
-	// "API request failed with status NNN: ..." — match that first.
-	for _, s := range []string{
-		"status 408", "status 429",
-		"status 500", "status 501", "status 502", "status 503", "status 504",
-		"status 520", "status 521", "status 522", "status 523", "status 524",
-	} {
-		if strings.Contains(msg, s) {
-			return true
-		}
-	}
-
-	lower := strings.ToLower(msg)
-	for _, s := range []string{
-		"timeout",
-		"timed out",
-		"connection reset",
-		"connection refused",
-		"broken pipe",
-		"no such host", // DNS hiccup
-		"i/o timeout",
-		"unexpected eof",
-		"tls handshake",
-		"context deadline exceeded", // nested per-call deadline
-	} {
-		if strings.Contains(lower, s) {
-			return true
-		}
-	}
-	return false
+	return wikillm.IsTransient(ctx, err)
 }
 
 // --- Helpers ---

@@ -39,7 +39,7 @@
       <t-tab-panel value="scheduler" label="调度与实例">
         <div class="principle-note">
           <strong>执行窗口独立于实例数量：</strong>
-          每个实际模型池的后台执行窗口 = 后台并发 × 预取系数；衍生任务和 Wiki 按权重公平共享，另一侧空闲时可借用全部容量。容量等待只会让耐久任务延期，不增加解析次数或业务失败次数。
+          每个实际模型池的后台执行窗口 = 后台并发 × 预取系数；衍生任务和 Wiki 按权重公平共享，Wiki 内部的 Map/提交保底由系统自动推导，任一侧空闲时都可借用容量。下方保底值表示各层都有积压时的保证值，不需要单独配置；容量等待只会让耐久任务延期，不增加解析次数或业务失败次数。
         </div>
         <article v-if="schedulerPolicy" class="config-card scheduler-card">
           <header class="config-card__header">
@@ -133,6 +133,9 @@
               <span>后台 <b>{{ pool.effective.background_max }}</b></span>
               <span>执行窗口 <b>{{ pool.runtime.work_active }} / {{ pool.effective.work_window }}</b></span>
               <span>公平份额 <b>{{ pool.effective.derivative_share }} : {{ pool.effective.wiki_share }}</b></span>
+              <span>Wiki 执行（Map / 提交） <b>{{ pool.runtime.work_wiki_map_active }} / {{ pool.runtime.work_wiki_commit_active }}</b></span>
+              <span>Wiki 自动保底（执行） <b>{{ pool.effective.wiki_map_work_share }} : {{ pool.effective.wiki_commit_work_share }}</b></span>
+              <span>Wiki 自动保底（模型） <b>{{ pool.effective.wiki_map_provider_share }} : {{ pool.effective.wiki_commit_provider_share }}</b></span>
               <span>后台调用 <b>{{ pool.runtime.provider_background }} / {{ pool.effective.background_max }}</b></span>
               <span>租户 <b>{{ pool.effective.tenant_max }}</b></span>
               <span>单文档 <b>{{ pool.effective.document_max }}</b></span>
@@ -292,9 +295,13 @@ function normalizeEffectiveReport(value: CapacityEffectiveReport): CapacityEffec
       ...pool,
       runtime: pool.runtime || {
         provider_inflight: 0, provider_background: 0, provider_derivative: 0, provider_wiki: 0,
+        provider_wiki_map: 0, provider_wiki_commit: 0,
         provider_derivative_waiting: 0, provider_wiki_waiting: 0,
+        provider_wiki_map_waiting: 0, provider_wiki_commit_waiting: 0,
         work_active: 0, work_derivative_active: 0, work_wiki_active: 0,
+        work_wiki_map_active: 0, work_wiki_commit_active: 0,
         work_derivative_waiting: 0, work_wiki_waiting: 0,
+        work_wiki_map_waiting: 0, work_wiki_commit_waiting: 0,
       },
       issues: pool.issues || [],
       module_grants: pool.module_grants || [],

@@ -239,6 +239,14 @@ func (w *limitedChat) ModelAdmissionParallelism(ctx context.Context, requested i
 	return modeladmission.EffectiveChatParallelism(ctx, w.inner, requested)
 }
 
+func (w *limitedChat) ModelAdmissionLaneParallelism(
+	ctx context.Context,
+	requested int,
+	lane modeladmission.WorkLane,
+) int {
+	return modeladmission.EffectiveChatLaneParallelism(ctx, w.inner, requested, lane)
+}
+
 func (w *limitedChat) AcquireModelTaskWork(
 	ctx context.Context,
 	lane modeladmission.WorkLane,

@@ -31,6 +31,7 @@ const (
 	defaultFAQEntriesMaxAge                = 24 * time.Hour
 	defaultFAQExportMaxAge                 = 7 * 24 * time.Hour
 	defaultPendingOwnerGrace               = time.Hour
+	defaultRecoveryBatchSize               = 200
 )
 
 type RecoveryConfig struct {
@@ -42,6 +43,7 @@ type RecoveryConfig struct {
 	PendingOwnerGrace time.Duration
 	FAQEntriesMaxAge  time.Duration
 	FAQExportMaxAge   time.Duration
+	BatchSize         int
 }
 
 func DefaultRecoveryConfig() RecoveryConfig {
@@ -60,6 +62,7 @@ func DefaultRecoveryConfig() RecoveryConfig {
 		PendingOwnerGrace: defaultPendingOwnerGrace,
 		FAQEntriesMaxAge:  defaultFAQEntriesMaxAge,
 		FAQExportMaxAge:   defaultFAQExportMaxAge,
+		BatchSize:         envPositiveInt("KNOWLEDGE_AUX_RECOVERY_BATCH_SIZE", defaultRecoveryBatchSize),
 	}
 }
 
@@ -86,6 +89,12 @@ func (config RecoveryConfig) normalized() RecoveryConfig {
 	if config.FAQExportMaxAge <= 0 {
 		config.FAQExportMaxAge = defaults.FAQExportMaxAge
 	}
+	if config.BatchSize <= 0 {
+		config.BatchSize = defaults.BatchSize
+	}
+	if config.BatchSize > 1000 {
+		config.BatchSize = 1000
+	}
 	return config
 }
 
@@ -108,6 +117,18 @@ func envBool(name string, fallback bool) bool {
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envPositiveInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
 		return fallback
 	}
 	return parsed
@@ -332,6 +353,14 @@ func (r *Recovery) recoverRow(ctx context.Context, row *types.TaskPendingOp, now
 	}
 
 	return r.registry.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if tx.Dialector.Name() == "postgres" {
+			// Recovery is periodic and idempotent. Never let a contended live
+			// document consume the whole maintenance deadline; advance the
+			// cursor and revisit it after wraparound.
+			if err := tx.Exec("SET LOCAL lock_timeout = '500ms'").Error; err != nil {
+				return fmt.Errorf("knowledge auxiliary recovery: set lock timeout: %w", err)
+			}
+		}
 		kbDeleted, kbErr := kbwritefence.LockExisting(tx, object.TenantID, object.KnowledgeBaseID)
 		kbMissing := errors.Is(kbErr, kbwritefence.ErrKnowledgeBaseUnavailable)
 		if kbErr != nil && !kbMissing {
@@ -413,6 +442,110 @@ func (r *Recovery) recoverRow(ctx context.Context, row *types.TaskPendingOp, now
 	})
 }
 
+type recoveryKnowledgeBase struct {
+	ID        string
+	TenantID  uint64
+	DeletedAt gorm.DeletedAt
+}
+
+type recoveryPreparedRow struct {
+	row     *types.TaskPendingOp
+	object  Object
+	recover bool
+	err     error
+}
+
+func recoveryIdentity(tenantID uint64, id string) string {
+	return strconv.FormatUint(tenantID, 10) + "\x00" + strings.TrimSpace(id)
+}
+
+// prepareRecoveryRows performs two set-based snapshot reads. The overwhelmingly
+// common live rows are proven retained here without opening one transaction
+// per ledger entry. A race can only postpone cleanup: every possible deletion
+// is revalidated under the existing KB/knowledge/ledger locks in recoverRow.
+func (r *Recovery) prepareRecoveryRows(
+	ctx context.Context,
+	rows []*types.TaskPendingOp,
+	now time.Time,
+) ([]recoveryPreparedRow, error) {
+	prepared := make([]recoveryPreparedRow, len(rows))
+	knowledgeIDs := make([]string, 0, len(rows))
+	knowledgeBaseIDs := make([]string, 0, len(rows))
+	for index, row := range rows {
+		prepared[index].row = row
+		if row == nil {
+			prepared[index].err = errors.New("knowledge auxiliary recovery: nil ownership row")
+			continue
+		}
+		object, err := decodeObject(row.Payload)
+		if err != nil {
+			prepared[index].err = fmt.Errorf("knowledge auxiliary recovery: decode row %d: %w", row.ID, err)
+			continue
+		}
+		if err := validateObject(object); err != nil || object.TenantID != row.TenantID ||
+			row.Scope != types.TaskScopeKnowledgeBase || object.KnowledgeBaseID != row.ScopeID ||
+			objectKey(object.KnowledgeID, object.Path) != row.DedupKey {
+			prepared[index].err = fmt.Errorf(
+				"knowledge auxiliary recovery: row %d is corrupt: %w",
+				row.ID, errors.Join(err, ErrInvalidObject),
+			)
+			continue
+		}
+		if object.Quarantined {
+			prepared[index].err = fmt.Errorf(
+				"knowledge auxiliary recovery: row %d: %w", row.ID, ErrBindingQuarantined,
+			)
+			continue
+		}
+		prepared[index].object = object
+		knowledgeIDs = append(knowledgeIDs, object.KnowledgeID)
+		knowledgeBaseIDs = append(knowledgeBaseIDs, object.KnowledgeBaseID)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var owners []recoveryKnowledge
+	if len(knowledgeIDs) > 0 {
+		if err := r.registry.db.WithContext(ctx).Unscoped().Table("knowledges").
+			Select("id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "last_faq_import_result", "deleted_at").
+			Where("id IN ?", knowledgeIDs).
+			Find(&owners).Error; err != nil {
+			return nil, fmt.Errorf("knowledge auxiliary recovery: snapshot owners: %w", err)
+		}
+	}
+	var knowledgeBases []recoveryKnowledgeBase
+	if len(knowledgeBaseIDs) > 0 {
+		if err := r.registry.db.WithContext(ctx).Unscoped().Table("knowledge_bases").
+			Select("id", "tenant_id", "deleted_at").
+			Where("id IN ?", knowledgeBaseIDs).
+			Find(&knowledgeBases).Error; err != nil {
+			return nil, fmt.Errorf("knowledge auxiliary recovery: snapshot knowledge bases: %w", err)
+		}
+	}
+	ownerByID := make(map[string]*recoveryKnowledge, len(owners))
+	for index := range owners {
+		owner := &owners[index]
+		ownerByID[recoveryIdentity(owner.TenantID, owner.ID)] = owner
+	}
+	kbByID := make(map[string]*recoveryKnowledgeBase, len(knowledgeBases))
+	for index := range knowledgeBases {
+		kb := &knowledgeBases[index]
+		kbByID[recoveryIdentity(kb.TenantID, kb.ID)] = kb
+	}
+	for index := range prepared {
+		item := &prepared[index]
+		if item.err != nil || item.row == nil {
+			continue
+		}
+		object := item.object
+		kb := kbByID[recoveryIdentity(object.TenantID, object.KnowledgeBaseID)]
+		owner := ownerByID[recoveryIdentity(object.TenantID, object.KnowledgeID)]
+		item.recover = kb == nil || kb.DeletedAt.Valid ||
+			r.shouldDelete(now, item.row, object, owner)
+	}
+	return prepared, nil
+}
+
 func (r *Recovery) RecoverNow(ctx context.Context) error {
 	if r == nil || r.registry == nil || r.registry.db == nil {
 		return errors.New("knowledge auxiliary recovery dependencies are unavailable")
@@ -425,7 +558,7 @@ func (r *Recovery) RecoverNow(ctx context.Context) error {
 		err := r.registry.db.WithContext(ctx).Where(
 			"task_type = ? AND scope = ? AND op = ? AND id > ?",
 			TaskType, types.TaskScopeKnowledgeBase, operationOwned, after,
-		).Order("id ASC").Limit(1000).Find(&rows).Error
+		).Order("id ASC").Limit(r.config.BatchSize).Find(&rows).Error
 		return rows, err
 	}
 	rows, err := readPage(r.recoveryCursor)
@@ -439,17 +572,43 @@ func (r *Recovery) RecoverNow(ctx context.Context) error {
 			return fmt.Errorf("knowledge auxiliary recovery: wrap ownership scan: %w", err)
 		}
 	}
-	if len(rows) > 0 {
-		// Advance even when one row is corrupt/quarantined or its provider is
-		// temporarily unavailable; otherwise that row can starve every higher ID.
-		r.recoveryCursor = rows[len(rows)-1].ID
-	}
 	now := time.Now().UTC()
-	var errs []error
-	for _, row := range rows {
-		if err := r.recoverRow(ctx, row, now); err != nil {
-			errs = append(errs, err)
+	prepared, prepareErr := r.prepareRecoveryRows(ctx, rows, now)
+	if prepareErr != nil {
+		return errors.Join(cleanupErr, prepareErr)
+	}
+	const maxReportedErrors = 16
+	var reported []error
+	errorCount := 0
+	for _, item := range prepared {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(cleanupErr, errors.Join(reported...), err)
+		}
+		row := item.row
+		if item.err != nil {
+			errorCount++
+			if len(reported) < maxReportedErrors {
+				reported = append(reported, item.err)
+			}
+		} else if item.recover {
+			if err := r.recoverRow(ctx, row, now); err != nil {
+				errorCount++
+				if len(reported) < maxReportedErrors {
+					reported = append(reported, err)
+				}
+			}
+		}
+		// Advance only after this exact row was inspected. If the context ends,
+		// the first unprocessed row remains ahead of the cursor for next cycle.
+		if row != nil {
+			r.recoveryCursor = row.ID
 		}
 	}
-	return errors.Join(cleanupErr, errors.Join(errs...))
+	if errorCount > len(reported) {
+		reported = append(reported, fmt.Errorf(
+			"knowledge auxiliary recovery: %d additional row error(s) suppressed",
+			errorCount-len(reported),
+		))
+	}
+	return errors.Join(cleanupErr, errors.Join(reported...))
 }

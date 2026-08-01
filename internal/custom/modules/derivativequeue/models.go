@@ -81,6 +81,12 @@ type WorkItem struct {
 	LastErrorClass   string    `json:"last_error_class" gorm:"type:varchar(32);not null;default:''"`
 	LastErrorCode    string    `json:"last_error_code" gorm:"type:varchar(64);not null;default:''"`
 	LastErrorMessage string    `json:"last_error_message" gorm:"type:text;not null;default:''"`
+	// OutcomeStatus is the business result of a successfully materialized
+	// derivative. It is independent from State: completed work may still be
+	// degraded when a bounded semantic recovery could not cover every
+	// eligible source record.
+	OutcomeStatus string `json:"outcome_status" gorm:"type:varchar(16);not null;default:''"`
+	OutcomeDetail string `json:"outcome_detail" gorm:"type:text;not null;default:''"`
 
 	ResultID    *string    `json:"result_id,omitempty" gorm:"type:uuid"`
 	Version     uint64     `json:"version" gorm:"not null;default:1"`

@@ -1143,12 +1143,12 @@ func (r *knowledgeRepository) ClaimGeneratedQuestions(
 		query := tx.Model(&types.Knowledge{}).
 			Select("id").
 			Where(
-				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status = ? AND deleted_at IS NULL",
+				"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ? AND deleted_at IS NULL",
 				tenantID,
 				knowledgeID,
 				knowledgeBaseID,
 				processingGeneration,
-				types.ParseStatusFinalizing,
+				[]string{types.ParseStatusFinalizing, types.ParseStatusCompleted},
 			)
 		if tx.Dialector.Name() != "sqlite" {
 			// Fuzzy stem arbitration must be serialized per document

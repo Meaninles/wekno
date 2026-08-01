@@ -278,6 +278,22 @@ func (r *Repository) CompleteMaterialization(
 	ctx context.Context,
 	workItemID, leaseToken string,
 ) error {
+	return r.CompleteMaterializationOutcome(ctx, workItemID, leaseToken, "", "")
+}
+
+// CompleteMaterializationOutcome commits both the durable execution state
+// and its business outcome. A generation fence is terminal cancellation, not
+// a retryable materialization failure; persist that cancellation while the
+// row is locked so the finalizer can never wait forever on a stale item.
+func (r *Repository) CompleteMaterializationOutcome(
+	ctx context.Context,
+	workItemID, leaseToken, outcomeStatus, outcomeDetail string,
+) error {
+	outcomeStatus = strings.TrimSpace(outcomeStatus)
+	if outcomeStatus != "" && outcomeStatus != "degraded" {
+		return fmt.Errorf("complete derivative materialization: invalid outcome %q", outcomeStatus)
+	}
+	outcomeDetail = truncate(strings.TrimSpace(outcomeDetail), 2000)
 	now := time.Now().UTC()
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row WorkItem
@@ -290,6 +306,9 @@ func (r *Repository) CompleteMaterialization(
 			return ErrInvalidState
 		}
 		if err := verifyGeneration(tx, row); err != nil {
+			if errors.Is(err, ErrGenerationFence) {
+				return cancelStaleRow(tx, row, now)
+			}
 			return err
 		}
 		updates := map[string]any{
@@ -298,6 +317,7 @@ func (r *Repository) CompleteMaterialization(
 			"finalize_attempts":    gorm.Expr("finalize_attempts + 1"),
 			"owner_instance_id":    "", "lease_token": "", "lease_until": nil,
 			"last_error_class": "", "last_error_code": "", "last_error_message": "",
+			"outcome_status": outcomeStatus, "outcome_detail": outcomeDetail,
 			"version": gorm.Expr("version + 1"), "updated_at": now,
 		}
 		result := tx.Model(&WorkItem{}).

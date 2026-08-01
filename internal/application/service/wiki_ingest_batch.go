@@ -20,6 +20,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiingestguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikillm"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -92,7 +93,7 @@ func (s *wikiIngestService) scheduleProviderCircuitFollowUp(
 		return false, fmt.Errorf("wiki ingest: enqueue provider-circuit follow-up: %w", err)
 	}
 	logger.Infof(ctx,
-		"wiki ingest: provider circuit open; deferred KB %s without consuming per-document fail_count for %s",
+		"wiki ingest: model work deferred; deferred KB %s without consuming per-document fail_count for %s",
 		payload.KnowledgeBaseID, retryAfter)
 	return true, nil
 }
@@ -394,6 +395,33 @@ func wikiMapStatsInt(stats types.JSONMap, key string) int {
 	return 0
 }
 
+func wikiMapStatsString(stats types.JSONMap, key string) string {
+	if len(stats) == 0 {
+		return ""
+	}
+	value, ok := stats[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func truncateWikiCheckpointError(message string) string {
+	const limit = 1200
+	runes := []rune(strings.TrimSpace(message))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "…"
+}
+
 func wikiMapContentCacheKey(
 	tenantID uint64,
 	knowledgeID string,
@@ -431,7 +459,7 @@ func wikiMapContentCacheKey(
 			processingGeneration,
 		),
 		VersionHash: contentcache.Digest(
-			"wiki-map-v3",
+			"wiki-map-v4-structured-citations",
 			modelID,
 			modelName,
 			language,
@@ -844,7 +872,7 @@ func (s *wikiIngestService) resolveRetractSlugSet(
 }
 
 func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task) (retErr error) {
-	ctx = modeladmission.WithWorkLane(ctx, modeladmission.WorkLaneWiki)
+	ctx = modeladmission.WithWorkLane(ctx, modeladmission.WorkLaneWikiCommit)
 	taskStartedAt := time.Now()
 	retryCount, maxRetry, _ := taskRetryMetadata(ctx)
 
@@ -1234,7 +1262,7 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	}
 
 	taskCtx, releaseTaskWork, taskWorkErr := modeladmission.AcquireChatTaskWork(
-		ctx, chatModel, modeladmission.WorkLaneWiki,
+		ctx, chatModel, modeladmission.WorkLaneWikiCommit,
 	)
 	if taskWorkErr != nil {
 		if !modeladmission.IsModelWorkDeferred(taskWorkErr) {
@@ -1261,13 +1289,25 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 	}
 	ctx = taskCtx
 	defer releaseTaskWork()
+	// Per-KB values are desired ceilings. The actual local LLM fan-out is
+	// automatically clipped to the hot resource pool's hierarchical guarantee,
+	// so an operator never has to keep Wiki reduce_parallel in sync with model
+	// capacity, derivative/Wiki weights, or replica count. Distributed Map has
+	// already finished its provider work; its commit-side parallelism is DB-only.
+	if !distributedMap {
+		mapParallel = modeladmission.EffectiveChatLaneParallelism(
+			ctx, chatModel, mapParallel, modeladmission.WorkLaneWikiMap,
+		)
+	}
+	reduceParallel = modeladmission.EffectiveChatLaneParallelism(
+		ctx, chatModel, reduceParallel, modeladmission.WorkLaneWikiCommit,
+	)
+	loggedMapPar = mapParallel
+	loggedReducePar = reduceParallel
 
 	// Resolve per-KB tunables once. WikiConfig.IngestBatchSize /
-	// IngestMapParallel / IngestReduceParallel let operators on
-	// 4w-document KBs raise the throughput knob (more docs per batch +
-	// more concurrent LLM calls) without a code deploy. Zero falls back to
-	// conservative provider-safe defaults; explicit per-KB values remain
-	// authoritative and are not capped.
+	// IngestMapParallel / IngestReduceParallel remain workload ceilings;
+	// effective model fan-out is compiled above from the shared pool.
 	logger.Infof(ctx, "wiki ingest: batch processing %d ops for KB %s", len(pendingOps), payload.KnowledgeBaseID)
 
 	// Resolve extraction granularity once per batch. Historical rows with
@@ -1501,7 +1541,7 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 				exitStatus = "provider_circuit_followup_failed"
 				return scheduleErr
 			}
-			exitStatus = "provider_circuit_open"
+			exitStatus = "model_work_deferred"
 			return nil
 		}
 		exitStatus = "map_phase_failed"
@@ -1690,8 +1730,8 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 		egReduce.Go(func() error {
 			changed, affectedType, additionFailed, err := s.reduceSlugUpdates(reduceCtx, chatModel, payload.KnowledgeBaseID, slug, updates, payload.TenantID, batchCtx, kidToWikiSpan)
 			if err != nil {
-				logger.Warnf(reduceCtx, "wiki ingest: reduce failed for slug %s: %v", slug, err)
 				if reduceCtx.Err() != nil {
+					logger.Warnf(reduceCtx, "wiki ingest: reduce stopped for slug %s after context ended: %v", slug, err)
 					return fmt.Errorf("reduce slug %s after context ended: %w", slug, err)
 				}
 				if modeladmission.IsModelWorkDeferred(err) {
@@ -1714,8 +1754,13 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 					}
 					reduceMu.Unlock()
 					recordProviderDeferred(err, contributors...)
+					logger.Infof(reduceCtx,
+						"wiki ingest: reduce deferred for slug %s without business failure: %v",
+						slug, err,
+					)
 					return nil
 				}
+				logger.Warnf(reduceCtx, "wiki ingest: reduce failed for slug %s: %v", slug, err)
 				// Attribute an unclassified non-context failure to every live source
 				// op for this slug. This preserves partial-batch progress without
 				// silently acknowledging documents whose page write failed.
@@ -1777,7 +1822,7 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 				exitStatus = "provider_circuit_followup_failed"
 				return scheduleErr
 			}
-			exitStatus = "provider_circuit_open"
+			exitStatus = "model_work_deferred"
 			return nil
 		}
 		exitStatus = "reduce_phase_failed"
@@ -2193,7 +2238,12 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 			}
 		case wikiMapStatsBool(result.MapStats, "pass0_fallback"):
 			status = types.WikiStatusDegraded
-			detail = "candidate extraction used the reduced-quality fallback path"
+			detail = wikiMapStatsString(result.MapStats, "pass0_error_message")
+			if detail == "" {
+				detail = "candidate extraction used the reduced-quality fallback path"
+			} else {
+				detail = "candidate extraction fallback: " + detail
+			}
 		case wikiMapStatsBool(result.MapStats, "classify_degraded"):
 			status = types.WikiStatusDegraded
 			failures := wikiMapStatsInt(result.MapStats, "classify_failures")
@@ -2231,7 +2281,15 @@ func (s *wikiIngestService) ProcessWikiIngest(ctx context.Context, t *asynq.Task
 		return err
 	}
 
-	logger.Infof(ctx, "wiki ingest: batch completed for KB %s, %d ops, %d pages affected", payload.KnowledgeBaseID, len(pendingOps), len(allPagesAffected))
+	if len(deferredOps) > 0 {
+		exitStatus = "completed_with_model_work_deferred"
+		logger.Infof(ctx,
+			"wiki ingest: batch settled for KB %s with %d provider-deferred op(s), %d ops, %d pages affected",
+			payload.KnowledgeBaseID, len(deferredOps), len(pendingOps), len(allPagesAffected),
+		)
+	} else {
+		logger.Infof(ctx, "wiki ingest: batch completed for KB %s, %d ops, %d pages affected", payload.KnowledgeBaseID, len(pendingOps), len(allPagesAffected))
+	}
 
 	// The queue is now durably settled, but a task whose hard deadline fired
 	// must still be reported as an error. Returning nil here was the false
@@ -2428,7 +2486,7 @@ func (s *wikiIngestService) mapOneDocument(
 	if !(mapCheckpoint.ExtractionDone && mapCheckpoint.SummaryDone && mapCheckpoint.ClassificationDone) {
 		var releaseTaskWork func()
 		ctx, releaseTaskWork, err = modeladmission.AcquireChatTaskWork(
-			ctx, chatModel, modeladmission.WorkLaneWiki,
+			ctx, chatModel, modeladmission.WorkLaneWikiMap,
 		)
 		if err != nil {
 			if !deferTrackedSpanIfDurableWait(ctx, s.tracker(), wikiSpan, err) {
@@ -2447,6 +2505,8 @@ func (s *wikiIngestService) mapOneDocument(
 		extractedConcepts []extractedItem
 		slugItems         map[string]extractedItem
 		pass0Failed       bool
+		pass0ErrorClass   string
+		pass0ErrorMessage string
 	)
 	extractCtx := modeladmission.WithProviderExecutionTracking(ctx)
 	extractSpan := s.tracker().BeginSubSpan(extractCtx, wikiSpan, "postprocess.wiki.extract", types.SpanKindSubSpan, types.JSONMap{
@@ -2457,6 +2517,8 @@ func (s *wikiIngestService) mapOneDocument(
 		extractedEntities = append([]extractedItem(nil), mapCheckpoint.ExtractedEntities...)
 		extractedConcepts = append([]extractedItem(nil), mapCheckpoint.ExtractedConcepts...)
 		pass0Failed = mapCheckpoint.Pass0Failed
+		pass0ErrorClass = mapCheckpoint.Pass0ErrorClass
+		pass0ErrorMessage = mapCheckpoint.Pass0ErrorMessage
 		slugItems = make(map[string]extractedItem, len(extractedEntities)+len(extractedConcepts))
 		for _, item := range extractedEntities {
 			if item.Slug != "" && item.Name != "" {
@@ -2475,21 +2537,32 @@ func (s *wikiIngestService) mapOneDocument(
 			extractCtx, chatModel, payload.KnowledgeBaseID, content, lang, oldPageSlugs, batchCtx,
 		)
 		if err != nil {
+			failureClass := wikillm.Classify(ctx, err)
 			if modeladmission.IsModelWorkDeferred(err) {
 				deferTrackedSpanIfDurableWait(extractCtx, s.tracker(), extractSpan, err)
 				deferTrackedSpanIfDurableWait(ctx, s.tracker(), wikiSpan, err)
 				return nil, nil, err
 			}
-			if isTransientLLMError(ctx, err) {
-				// The legacy extractor uses the same provider. Falling back on
-				// transport/rate-limit/circuit failures only doubles pressure
-				// and burns the document's durable Wiki retry budget.
+			if failureClass == wikillm.ClassProviderTransient {
+				// The legacy extractor uses the same provider. A second prompt
+				// would double pressure; persist the real provider failure and let
+				// the durable Wiki queue retry after its directed delay.
 				s.tracker().FailSpan(extractCtx, extractSpan, "EXTRACT_PROVIDER_UNAVAILABLE", err.Error(), err)
 				s.tracker().FailSpan(ctx, wikiSpan, "EXTRACT_PROVIDER_UNAVAILABLE", err.Error(), err)
 				return nil, nil, err
 			}
+			if failureClass == wikillm.ClassProviderPermanent ||
+				failureClass == wikillm.ClassCancelled {
+				// A second prompt against the same route cannot repair an
+				// invalid credential/model route or a cancelled task.
+				s.tracker().FailSpan(extractCtx, extractSpan, "EXTRACT_PROVIDER_CONFIGURATION", err.Error(), err)
+				s.tracker().FailSpan(ctx, wikiSpan, "EXTRACT_PROVIDER_CONFIGURATION", err.Error(), err)
+				return nil, nil, err
+			}
 			logger.Warnf(ctx, "wiki ingest: pass 0 failed for %s (%v) — falling back to legacy extractor", knowledgeID, err)
 			pass0Failed = true
+			pass0ErrorClass = string(failureClass)
+			pass0ErrorMessage = truncateWikiCheckpointError(err.Error())
 			extractedEntities, extractedConcepts, slugItems, err = s.extractEntitiesAndConceptsNoUpsert(
 				ctx, chatModel, payload.KnowledgeBaseID, content, lang, oldPageSlugs, batchCtx,
 			)
@@ -2503,6 +2576,8 @@ func (s *wikiIngestService) mapOneDocument(
 		mapCheckpoint.ExtractedEntities = append([]extractedItem(nil), extractedEntities...)
 		mapCheckpoint.ExtractedConcepts = append([]extractedItem(nil), extractedConcepts...)
 		mapCheckpoint.Pass0Failed = pass0Failed
+		mapCheckpoint.Pass0ErrorClass = pass0ErrorClass
+		mapCheckpoint.Pass0ErrorMessage = pass0ErrorMessage
 		mapCheckpoint.ExtractionDone = true
 		if err := s.checkpointWikiMapProgress(ctx, payload, op, mapCheckpoint); err != nil {
 			s.tracker().FailSpan(ctx, extractSpan, "EXTRACT_CHECKPOINT_FAILED", err.Error(), err)
@@ -2511,12 +2586,14 @@ func (s *wikiIngestService) mapOneDocument(
 		}
 	}
 	s.tracker().EndSpan(extractCtx, extractSpan, types.JSONMap{
-		"entities":         len(extractedEntities),
-		"concepts":         len(extractedConcepts),
-		"pass0_fallback":   pass0Failed,
-		"durable_resume":   mapCheckpointRestored,
-		"entities_preview": previewExtractedItems(extractedEntities, 8),
-		"concepts_preview": previewExtractedItems(extractedConcepts, 8),
+		"entities":          len(extractedEntities),
+		"concepts":          len(extractedConcepts),
+		"pass0_fallback":    pass0Failed,
+		"pass0_error_class": pass0ErrorClass,
+		"pass0_error":       pass0ErrorMessage,
+		"durable_resume":    mapCheckpointRestored,
+		"entities_preview":  previewExtractedItems(extractedEntities, 8),
+		"concepts_preview":  previewExtractedItems(extractedConcepts, 8),
 	})
 
 	// Build slug listing for Summary's wiki-link input.
@@ -2577,17 +2654,13 @@ func (s *wikiIngestService) mapOneDocument(
 	})
 	var classifySpan *Span
 	classifyCtx := modeladmission.WithProviderExecutionTracking(ctx)
-	if !pass0Failed {
-		classifySpan = s.tracker().BeginSubSpan(classifyCtx, wikiSpan, "postprocess.wiki.classify", types.SpanKindSubSpan, types.JSONMap{
-			"chunks":     len(chunks),
-			"candidates": len(extractedEntities) + len(extractedConcepts),
-		})
-	}
+	classifySpan = s.tracker().BeginSubSpan(classifyCtx, wikiSpan, "postprocess.wiki.classify", types.SpanKindSubSpan, types.JSONMap{
+		"chunks":         len(chunks),
+		"candidates":     len(extractedEntities) + len(extractedConcepts),
+		"pass0_fallback": pass0Failed,
+	})
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
+	runSummary := func() {
 		if summaryAlreadyDone {
 			sumLine, sumBody := splitSummaryLine(summaryContent)
 			s.tracker().EndSpan(summaryCtx, summarySpan, types.JSONMap{
@@ -2615,9 +2688,8 @@ func (s *wikiIngestService) mapOneDocument(
 				"body_preview": previewText(sumBody, 320),
 			})
 		}
-	}()
-	go func() {
-		defer wg.Done()
+	}
+	runClassification := func() {
 		if classificationAlreadyDone {
 			if classifySpan != nil {
 				s.tracker().EndSpan(classifyCtx, classifySpan, types.JSONMap{
@@ -2632,13 +2704,10 @@ func (s *wikiIngestService) mapOneDocument(
 			}
 			return
 		}
-		// Skip citation pass when Pass 0 has fallen back to the legacy path —
-		// the legacy output already contains paraphrased Details, so chunk
-		// citations would be redundant and we'd spend LLM calls for nothing.
-		if pass0Failed {
-			citations = map[string][]string{}
-			return
-		}
+		// Even the legacy extraction path must classify concrete source chunks.
+		// Details are prose, not provenance; skipping this pass created Wiki
+		// pages with zero chunk_refs and made a recoverable extraction-format
+		// deviation look like permanent evidence loss.
 		candidatesXML := renderCandidateSlugsXML(extractedEntities, extractedConcepts)
 		citations, newSlugs, batchCount, classificationFailures, classificationErr =
 			s.classifyChunkCitations(classifyCtx, chatModel, candidatesXML, chunks, lang, batchCtx)
@@ -2660,8 +2729,29 @@ func (s *wikiIngestService) mapOneDocument(
 			"top_cited":        topCitedSlugs(citations, 8),
 			"new_slugs_sample": previewNewSlugs(newSlugs, 8),
 		})
-	}()
-	wg.Wait()
+	}
+	mapStageParallel := modeladmission.EffectiveChatLaneParallelism(
+		ctx, chatModel, 2, modeladmission.WorkLaneWikiMap,
+	)
+	if mapStageParallel >= 2 {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			runSummary()
+		}()
+		go func() {
+			defer wg.Done()
+			runClassification()
+		}()
+		wg.Wait()
+	} else {
+		// One task must not manufacture capacity pressure against its own
+		// stage guarantee. Other durable Map tasks still fill every borrowable
+		// global slot, so this preserves throughput while removing futile waits.
+		runSummary()
+		runClassification()
+	}
 
 	checkpointChanged := false
 	if !summaryAlreadyDone && summaryErr == nil {
@@ -2685,8 +2775,15 @@ func (s *wikiIngestService) mapOneDocument(
 		}
 	}
 	if stageErr := errors.Join(summaryErr, classificationErr); stageErr != nil {
-		logger.Errorf(ctx, "wiki ingest: incomplete map stages for %s, will requeue: %v", knowledgeID, stageErr)
-		if !deferTrackedSpanIfDurableWait(ctx, s.tracker(), wikiSpan, stageErr) {
+		if deferTrackedSpanIfDurableWait(ctx, s.tracker(), wikiSpan, stageErr) {
+			logger.Infof(
+				ctx,
+				"wiki ingest: map stages deferred for %s without business failure: %v",
+				knowledgeID,
+				stageErr,
+			)
+		} else {
+			logger.Errorf(ctx, "wiki ingest: incomplete map stages for %s, will requeue: %v", knowledgeID, stageErr)
 			s.tracker().FailSpan(ctx, wikiSpan, "MAP_STAGE_FAILED", stageErr.Error(), stageErr)
 		}
 		return nil, nil, fmt.Errorf("wiki map stage: %w", stageErr)
@@ -2882,22 +2979,24 @@ func (s *wikiIngestService) mapOneDocument(
 	// "wiki processing for this knowledge" time the user sees in the
 	// trace viewer, not just the LLM extraction slice.
 	mapStats := types.JSONMap{
-		"doc_title":         previewText(docTitle, 120),
-		"chunks":            len(chunks),
-		"candidate_slugs":   len(slugItems),
-		"cited_chunks":      len(citedChunkSet),
-		"uncited_slugs":     uncited,
-		"new_slugs":         len(newSlugs),
-		"updates":           len(updates),
-		"reparse_slugs":     reparseOverlap,
-		"stale_slugs":       staleCount,
-		"extracted_pages":   len(extractedPages),
-		"summary_chars":     utf8.RuneCountInString(docSummary),
-		"pass0_fallback":    pass0Failed,
-		"classify_batches":  batchCount,
-		"classify_failures": classificationFailures,
-		"classify_degraded": classificationFailures > 0,
-		"summary_preview":   previewText(docSummaryLine, 160),
+		"doc_title":           previewText(docTitle, 120),
+		"chunks":              len(chunks),
+		"candidate_slugs":     len(slugItems),
+		"cited_chunks":        len(citedChunkSet),
+		"uncited_slugs":       uncited,
+		"new_slugs":           len(newSlugs),
+		"updates":             len(updates),
+		"reparse_slugs":       reparseOverlap,
+		"stale_slugs":         staleCount,
+		"extracted_pages":     len(extractedPages),
+		"summary_chars":       utf8.RuneCountInString(docSummary),
+		"pass0_fallback":      pass0Failed,
+		"pass0_error_class":   pass0ErrorClass,
+		"pass0_error_message": pass0ErrorMessage,
+		"classify_batches":    batchCount,
+		"classify_failures":   classificationFailures,
+		"classify_degraded":   classificationFailures > 0,
+		"summary_preview":     previewText(docSummaryLine, 160),
 	}
 
 	for i := range updates {
@@ -2944,21 +3043,16 @@ func (s *wikiIngestService) extractEntitiesAndConceptsNoUpsert(
 		prevSlugsText = "(none — this is a new document)"
 	}
 
-	extractionJSON, err := s.generateWithTemplate(ctx, chatModel, agent.WikiKnowledgeExtractPrompt, map[string]string{
-		"Content":       content,
-		"Language":      lang,
-		"PreviousSlugs": prevSlugsText,
-	})
+	result, err := s.generateCombinedExtraction(
+		ctx, chatModel, "legacy combined extraction",
+		agent.WikiKnowledgeExtractPrompt, map[string]string{
+			"Content":       content,
+			"Language":      lang,
+			"PreviousSlugs": prevSlugsText,
+		},
+	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("combined extraction failed: %w", err)
-	}
-
-	extractionJSON = cleanLLMJSON(extractionJSON)
-
-	var result combinedExtraction
-	if err := json.Unmarshal([]byte(extractionJSON), &result); err != nil {
-		logger.Warnf(ctx, "wiki ingest: failed to parse combined extraction JSON: %v\nRaw: %s", err, extractionJSON)
-		return nil, nil, nil, fmt.Errorf("parse combined extraction JSON: %w", err)
 	}
 
 	// Dedup pre-filter is dispatched against the wiki page repo via
@@ -2966,9 +3060,12 @@ func (s *wikiIngestService) extractEntitiesAndConceptsNoUpsert(
 	// lands the dedup pre-filter degrades to "no dedup" which is the
 	// safe default — the LLM merge call simply doesn't get a candidate
 	// list and the items pass through unchanged.
-	result.Entities, result.Concepts = s.deduplicateExtractedBatch(
+	result.Entities, result.Concepts, err = s.deduplicateExtractedBatch(
 		ctx, chatModel, kbID, result.Entities, result.Concepts,
 	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("candidate deduplication failed: %w", err)
+	}
 
 	slugItems := make(map[string]extractedItem)
 	for _, item := range result.Entities {

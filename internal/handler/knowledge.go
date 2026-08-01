@@ -758,35 +758,13 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 				logger.Warnf(ctx, "spans V2 List failed kid=%s attempt=%d: %v",
 					knowledge.ID, currentAttempt, listErr)
 			} else {
-				rows = processingV2LegacyRows(page.Items)
+				rows = processingV2Rows(page.Items)
 				if page.NextCursor != nil {
 					nextCursor = page.NextCursor.LogicalKey
 				}
 			}
 		}
 	}
-	// Compatibility fallback for attempts created before Span V2 was enabled.
-	if len(rows) == 0 && h.spanRepo != nil {
-		if requestedAttempt == 0 {
-			latest, lerr := h.spanRepo.LatestAttempt(ctx, knowledge.ID)
-			if lerr != nil {
-				logger.Warnf(ctx, "spans LatestAttempt failed for %s: %v", knowledge.ID, lerr)
-			} else {
-				currentAttempt = latest
-			}
-		} else {
-			currentAttempt = requestedAttempt
-		}
-		if currentAttempt > 0 {
-			rows, err = h.spanRepo.ListByAttempt(ctx, knowledge.ID, currentAttempt)
-			if err != nil {
-				logger.Warnf(ctx, "spans ListByAttempt failed kid=%s attempt=%d: %v",
-					knowledge.ID, currentAttempt, err)
-				rows = nil
-			}
-		}
-	}
-
 	// Build tree: index by SpanID, then attach to parents. Stages
 	// missing from the DB are synthesized as "pending" placeholders
 	// under a synthetic (or real, if present) root so the timeline
@@ -821,7 +799,7 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 	})
 }
 
-func processingV2LegacyRows(spans []processingtrace.Span) []types.KnowledgeProcessingSpan {
+func processingV2Rows(spans []processingtrace.Span) []types.KnowledgeProcessingSpan {
 	rows := make([]types.KnowledgeProcessingSpan, 0, len(spans))
 	spanIDByKey := make(map[string]string, len(spans))
 	for _, span := range spans {
@@ -842,6 +820,9 @@ func processingV2LegacyRows(spans []processingtrace.Span) []types.KnowledgeProce
 		}
 		if span.OutputSummary != "" {
 			_ = json.Unmarshal([]byte(span.OutputSummary), &row.Output)
+		}
+		if span.MetadataSummary != "" {
+			_ = json.Unmarshal([]byte(span.MetadataSummary), &row.Metadata)
 		}
 		rows = append(rows, row)
 	}

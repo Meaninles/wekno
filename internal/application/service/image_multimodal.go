@@ -17,6 +17,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/imageguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/ocrrecovery"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/custom/modules/vlmguard"
 	"github.com/Tencent/WeKnora/internal/custom/modules/workretry"
@@ -42,6 +43,8 @@ const (
 		"4. Organize content in the original reading order.\n" +
 		"5. Output ONLY the extracted text content. Do NOT include any HTML tags, reasoning, or unrelated comments.\n" +
 		"6. If there is absolutely no recognizable text content in the image, reply ONLY with: No text content.\n" +
+		"7. Never output Markdown rows whose cells are all blank. Stop the table immediately after the last row containing recognizable characters.\n" +
+		"8. Do not invent rows, columns, or placeholder cells that are not visibly present in the image.\n" +
 		"</instructions>"
 	vlmOCRScannedPDFPrompt = "<system_prompt>\n" +
 		"You are an OCR and document layout extraction assistant. The input image is a page from a scanned PDF document.\n" +
@@ -54,6 +57,8 @@ const (
 		"4. If there are mathematical formulas, use LaTeX format wrapped in $ or $$.\n" +
 		"5. Output ONLY the extracted text content. Do NOT include any HTML tags, reasoning, or unrelated comments.\n" +
 		"6. If there is absolutely no recognizable text content in the image, reply ONLY with: No text content.\n" +
+		"7. Never output Markdown rows whose cells are all blank. Stop the table immediately after the last row containing recognizable characters.\n" +
+		"8. Do not invent rows, columns, or placeholder cells that are not visibly present in the image.\n" +
 		"</instructions>"
 	vlmCaptionPrompt = "Provide a brief and concise description of the main content of the image in Chinese"
 )
@@ -367,10 +372,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 		ProcessingGeneration: payload.ProcessingGeneration,
 	}
 
-	var (
-		extractionErr  error
-		degradedDetail string
-	)
+	var extractionErr error
 	if payload.EnableOCR {
 		prompt := vlmOCRPrompt
 		if payload.ImageSourceType == "scanned_pdf" {
@@ -396,17 +398,44 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 				prompt,
 			)
 			if ocrErr != nil {
-				if partialOCR, accepted := usableTruncatedOCR(ocrText, ocrErr); accepted {
-					ocrText = partialOCR
-					degradedDetail = "OCR output reached the configured token limit; partial text was retained"
-					imgOut["ocr_truncated"] = true
-					imgOut["ocr_finish_reason"] = "length"
-					logger.Warnf(
+				if recoverableOCRFailure(ocrErr) {
+					imgOut["ocr_initial_failure"] = ocrErr.Error()
+					imgOut["ocr_recovery_attempted"] = true
+					recovery, recoveryErr := ocrrecovery.Recover(
 						ctx,
-						"[ImageMultimodal] OCR reached output limit for %s; retaining %d partial characters as degraded output",
-						payload.ImageURL,
-						len([]rune(ocrText)),
+						vlmImageBytes,
+						prompt,
+						func(callCtx context.Context, images [][]byte, tilePrompt string) (string, error) {
+							return vlmModel.Predict(
+								vlmguard.WithOperation(callCtx, vlmguard.OperationOCR),
+								images,
+								tilePrompt,
+							)
+						},
 					)
+					imgOut["ocr_recovery_calls"] = recovery.Calls
+					imgOut["ocr_recovery_leaf_tiles"] = recovery.LeafTiles
+					imgOut["ocr_empty_rows_trimmed"] = recovery.EmptyRowsTrimmed
+					if recoveryErr != nil {
+						logger.Warnf(ctx,
+							"[ImageMultimodal] OCR bounded tile recovery failed for %s: %v",
+							payload.ImageURL, recoveryErr,
+						)
+						imgOut["ocr_recovery_error"] = recoveryErr.Error()
+						extractionErr = errors.Join(
+							extractionErr,
+							fmt.Errorf("OCR recovery after %v: %w", ocrErr, recoveryErr),
+						)
+						ocrText = ""
+					} else {
+						ocrText = sanitizeOCRText(recovery.Text)
+						imgOut["ocr_recovered"] = true
+						logger.Infof(ctx,
+							"[ImageMultimodal] OCR recovered by %d complete tile call(s) for %s",
+							recovery.Calls, payload.ImageURL,
+						)
+						s.persistVLMText(ctx, ocrKey, cacheRef, ocrText)
+					}
 				} else {
 					logger.Warnf(ctx, "[ImageMultimodal] OCR failed for %s: %v", payload.ImageURL, ocrErr)
 					imgOut["ocr_error"] = ocrErr.Error()
@@ -572,14 +601,6 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) (
 		return handleErr
 	}
 	imgOut["indexed"] = true
-	if degradedDetail != "" {
-		if err := s.recordImageDegraded(ctx, payload, degradedDetail); err != nil {
-			handleErr = err
-			return handleErr
-		}
-		imgOut["degraded"] = degradedDetail
-	}
-
 	// Enqueue question generation for the caption/OCR content if KB has it enabled.
 	// During initial processChunks, question generation is skipped for image-type
 	// knowledge because the text chunk is just a markdown reference. Now that we
@@ -594,13 +615,9 @@ func shouldRunImageCaption(enabled bool, extractionErr error) bool {
 	return enabled && extractionErr == nil
 }
 
-func usableTruncatedOCR(text string, err error) (string, bool) {
+func recoverableOCRFailure(err error) bool {
 	kind, ok := vlmguard.FailureKindOf(err)
-	if !ok || kind != vlmguard.FailureOutputLimit {
-		return "", false
-	}
-	text = sanitizeOCRText(text)
-	return text, text != ""
+	return ok && (kind == vlmguard.FailureOutputLimit || kind == vlmguard.FailureRunaway)
 }
 
 func stableImageChunkID(payload types.ImageMultimodalPayload, kind string) string {
@@ -633,7 +650,7 @@ func vlmTextCacheKey(
 		Kind:        kind,
 		ContentHash: imageContentHash,
 		VersionHash: contentcache.Digest(
-			"vlm-text-v1",
+			"vlm-text-v2-bounded-tiles",
 			modelID,
 			modelName,
 			prompt,

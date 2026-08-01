@@ -148,8 +148,10 @@ func (w *Worker) Handle(ctx context.Context, task *asynq.Task) error {
 		); err != nil {
 			return w.deferFailure(execCtx, item, err)
 		}
-		if err := w.repository.CompleteMaterialization(
+		outcomeStatus, outcomeDetail := outcomeFromContext(execCtx)
+		if err := w.repository.CompleteMaterializationOutcome(
 			context.WithoutCancel(ctx), item.ID, item.LeaseToken,
+			outcomeStatus, outcomeDetail,
 		); err != nil {
 			return w.deferFailure(execCtx, item, err)
 		}
@@ -225,6 +227,10 @@ func (w *Worker) reconcileFinalizer(ctx context.Context, item *WorkItem) error {
 			// A generation change cancels the finalizer itself at Claim. A
 			// same-generation cancellation is an explicit degraded outcome.
 			status, detail = "failed", "derivative work item was cancelled"
+		case StateCompleted:
+			if sibling.OutcomeStatus == "degraded" {
+				status, detail = "degraded", sibling.OutcomeDetail
+			}
 		}
 		if err := w.finalize(ctx, &sibling, status, detail); err != nil {
 			return err

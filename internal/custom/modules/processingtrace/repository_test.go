@@ -132,13 +132,24 @@ func TestLogicalSpanRetriesUpdateOneRow(t *testing.T) {
 	require.NoError(t, repository.RecordBusinessProgress(ctx, Upsert{
 		KnowledgeID: "knowledge-1", Attempt: 2, LogicalKey: "derivative:question_batch:0",
 		Name: "question batch 0", Kind: "derivative", Status: "running",
-		StartedAt: started, LastBusinessProgressAt: &progress,
+		StartedAt: started, LastBusinessProgressAt: &progress, IncrementRealAttempt: true,
 	}))
 	finished := time.Now().UTC()
 	require.NoError(t, repository.RecordBusinessProgress(ctx, Upsert{
 		KnowledgeID: "knowledge-1", Attempt: 2, LogicalKey: "derivative:question_batch:0",
 		Name: "question batch 0", Kind: "derivative", Status: "failed",
-		StartedAt: started, FinishedAt: &finished, IncrementRealAttempt: true,
+		StartedAt: started, FinishedAt: &finished,
+		LastErrorCode: "provider_500", LastErrorMessage: "retryable",
+	}))
+	require.NoError(t, repository.RecordBusinessProgress(ctx, Upsert{
+		KnowledgeID: "knowledge-1", Attempt: 2, LogicalKey: "derivative:question_batch:0",
+		Name: "question batch 0", Kind: "derivative", Status: "running",
+		StartedAt: started, IncrementRealAttempt: true,
+	}))
+	require.NoError(t, repository.RecordBusinessProgress(ctx, Upsert{
+		KnowledgeID: "knowledge-1", Attempt: 2, LogicalKey: "derivative:question_batch:0",
+		Name: "question batch 0", Kind: "derivative", Status: "failed",
+		StartedAt: started, FinishedAt: &finished,
 		LastErrorCode: "provider_500", LastErrorMessage: "retryable",
 	}))
 	var rows []Span

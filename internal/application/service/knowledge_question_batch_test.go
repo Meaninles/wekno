@@ -293,7 +293,7 @@ func TestGenerateQuestionsBatchUsesOneStructuredModelCall(t *testing.T) {
 				`{{question_count}} {{doc_name}} {{language}} {{output_instructions}}`,
 		},
 	}}
-	result, err := svc.generateQuestionsBatchWithContext(
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
 		context.Background(),
 		model,
 		[]questionBatchInput{
@@ -306,6 +306,7 @@ func TestGenerateQuestionsBatchUsesOneStructuredModelCall(t *testing.T) {
 		2,
 	)
 	require.NoError(t, err)
+	require.Zero(t, coverage.UnresolvedEligible)
 	require.Equal(t, 1, model.calls)
 	require.Equal(t, []string{"审批职责由谁承担？"}, result["chunk-0"])
 	require.Equal(t, []string{"办理时限不得超过多久？"}, result["chunk-1"])
@@ -330,7 +331,7 @@ func TestGenerateQuestionsBatchRecoversOnlyOmittedRecordsOnce(t *testing.T) {
 				`{{question_count}} {{doc_name}} {{language}} {{output_instructions}}`,
 		},
 	}}
-	result, err := svc.generateQuestionsBatchWithContext(
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
 		context.Background(),
 		model,
 		[]questionBatchInput{
@@ -343,7 +344,8 @@ func TestGenerateQuestionsBatchRecoversOnlyOmittedRecordsOnce(t *testing.T) {
 		2,
 	)
 	require.NoError(t, err)
-	require.Equal(t, 2, model.calls)
+	require.Equal(t, 1, model.calls)
+	require.Equal(t, 1, coverage.LowInformation)
 	require.Equal(t, []string{"审批职责由谁承担？"}, result["chunk-0"])
 	require.Contains(t, result, "chunk-1")
 	require.Empty(t, result["chunk-1"])
@@ -360,7 +362,7 @@ func TestGenerateQuestionsBatchRepeatedOmissionBecomesSemanticEmpty(t *testing.T
 			GenerateQuestionsPrompt: `{{content}} {{output_instructions}}`,
 		},
 	}}
-	result, err := svc.generateQuestionsBatchWithContext(
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
 		context.Background(),
 		model,
 		[]questionBatchInput{{RecordID: "chunk-7", Content: "空白模板。"}},
@@ -370,9 +372,55 @@ func TestGenerateQuestionsBatchRepeatedOmissionBecomesSemanticEmpty(t *testing.T
 		1,
 	)
 	require.NoError(t, err)
-	require.Equal(t, 2, model.calls)
+	require.Equal(t, 1, model.calls)
+	require.Equal(t, 1, coverage.LowInformation)
 	require.Contains(t, result, "chunk-7")
 	require.Empty(t, result["chunk-7"])
+}
+
+func TestGenerateQuestionsBatchRecoversExplicitEmptySubstantiveRecord(t *testing.T) {
+	model := &questionBatchChatStub{responses: []string{
+		`{"results":[{"record_id":"chunk-8","questions":[]}]}`,
+		`{"results":[{"record_id":"chunk-8","questions":["该制度规定由哪个部门负责审批？"]}]}`,
+	}}
+	svc := &knowledgeService{config: &config.Config{
+		Conversation: &config.ConversationConfig{
+			GenerateQuestionsPrompt: `{{content}} {{output_instructions}}`,
+		},
+	}}
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
+		context.Background(), model,
+		[]questionBatchInput{{RecordID: "chunk-8", Content: "申请材料应当由综合管理部门在三个工作日内完成审批。"}},
+		"", "", "测试制度", 1,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, model.calls)
+	require.Equal(t, 1, coverage.Eligible)
+	require.Equal(t, 1, coverage.Recovered)
+	require.Zero(t, coverage.UnresolvedEligible)
+	require.Equal(t, []string{"该制度规定由哪个部门负责审批？"}, result["chunk-8"])
+	require.Contains(t, model.messages[0].Content, "Coverage Recovery Pass")
+}
+
+func TestGenerateQuestionsBatchMarksSubstantiveRepeatedEmptyUnresolved(t *testing.T) {
+	model := &questionBatchChatStub{responses: []string{
+		`{"results":[{"record_id":"chunk-9","questions":[]}]}`,
+		`{"results":[{"record_id":"chunk-9","questions":[]}]}`,
+	}}
+	svc := &knowledgeService{config: &config.Config{
+		Conversation: &config.ConversationConfig{
+			GenerateQuestionsPrompt: `{{content}} {{output_instructions}}`,
+		},
+	}}
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
+		context.Background(), model,
+		[]questionBatchInput{{RecordID: "chunk-9", Content: "合同金额超过十万元时，应由分管负责人审批。"}},
+		"", "", "测试制度", 1,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, model.calls)
+	require.Equal(t, 1, coverage.UnresolvedEligible)
+	require.Empty(t, result["chunk-9"])
 }
 
 func TestGraphChunkIDBatchesAreBoundedStableAndComplete(t *testing.T) {

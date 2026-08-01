@@ -193,6 +193,199 @@ func TestWorkWindowIsGlobalWorkConservingAndBounded(t *testing.T) {
 	require.EqualValues(t, 0, manager.Snapshot().WorkActive)
 }
 
+func TestWikiStageSharesAreDerivedAndNeverRequireOperatorTuning(t *testing.T) {
+	tests := []struct {
+		total      int
+		wantMap    int
+		wantCommit int
+	}{
+		{total: 0, wantMap: 0, wantCommit: 0},
+		{total: 1, wantMap: 1, wantCommit: 1},
+		{total: 2, wantMap: 1, wantCommit: 1},
+		{total: 3, wantMap: 2, wantCommit: 1},
+		{total: 4, wantMap: 3, wantCommit: 1},
+		{total: 6, wantMap: 4, wantCommit: 2},
+		{total: 9, wantMap: 6, wantCommit: 3},
+	}
+	for _, test := range tests {
+		wikiMap, wikiCommit := WikiStageShares(test.total)
+		require.Equal(t, test.wantMap, wikiMap, "total=%d", test.total)
+		require.Equal(t, test.wantCommit, wikiCommit, "total=%d", test.total)
+	}
+}
+
+func TestWorkWindowReservesWikiCommitProgressAfterMapBorrowing(t *testing.T) {
+	config := testConfig(Limit{Concurrency: 3, Background: 3, PerTenant: 3})
+	config.WorkWindowEnabled = true
+	manager := newManagerWithConfig(nil, config)
+	policy := schedulerPolicyFromConfig(config)
+
+	maps := make([]*WorkLease, 0, 6)
+	for index := 0; index < 6; index++ {
+		lease, err := manager.acquireWorkWindow(
+			context.Background(), "wiki-stage-pool", WorkLaneWikiMap, 3, policy,
+		)
+		require.NoError(t, err, "Map must borrow idle commit capacity")
+		maps = append(maps, lease)
+	}
+
+	_, err := manager.acquireWorkWindow(
+		context.Background(), "wiki-stage-pool", WorkLaneWikiCommit, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
+	maps[0].Release()
+
+	_, err = manager.acquireWorkWindow(
+		context.Background(), "wiki-stage-pool", WorkLaneWikiMap, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred,
+		"Map may not reclaim a released slot while commit is waiting")
+	commit, err := manager.acquireWorkWindow(
+		context.Background(), "wiki-stage-pool", WorkLaneWikiCommit, 3, policy,
+	)
+	require.NoError(t, err)
+	commit.Release()
+	for _, lease := range maps[1:] {
+		lease.Release()
+	}
+}
+
+func TestProviderWindowReservesWikiCommitProgressAfterMapBorrowing(t *testing.T) {
+	limit := Limit{Concurrency: 3, Background: 3, PerTenant: 3}
+	config := testConfig(limit)
+	manager := newManagerWithConfig(nil, config)
+	policy := schedulerPolicyFromConfig(config)
+	spec := Spec{Kind: KindDerivative, Domain: "wiki-provider-stage", TenantID: 7}
+
+	for index := 0; index < 3; index++ {
+		acquired, _ := manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiMap, policy)
+		require.True(t, acquired, "Map must borrow idle commit provider capacity")
+	}
+	acquired, _ := manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiCommit, policy)
+	require.False(t, acquired)
+	manager.releaseLocal(spec, true, WorkLaneWikiMap)
+
+	acquired, _ = manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiMap, policy)
+	require.False(t, acquired, "Map may not reclaim a provider slot while commit waits")
+	acquired, _ = manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiCommit, policy)
+	require.True(t, acquired)
+
+	manager.releaseLocal(spec, true, WorkLaneWikiCommit)
+	manager.releaseLocal(spec, true, WorkLaneWikiMap)
+	manager.releaseLocal(spec, true, WorkLaneWikiMap)
+}
+
+func TestWikiStagesAreSubdividedInsideContendedTopLevelShare(t *testing.T) {
+	config := testConfig(Limit{Concurrency: 3, Background: 3, PerTenant: 3})
+	config.WorkWindowEnabled = true
+	manager := newManagerWithConfig(nil, config)
+	policy := schedulerPolicyFromConfig(config)
+
+	derivative := make([]*WorkLease, 0, 4)
+	for index := 0; index < 4; index++ {
+		lease, err := manager.acquireWorkWindow(
+			context.Background(), "nested-work", WorkLaneDerivative, 3, policy,
+		)
+		require.NoError(t, err)
+		derivative = append(derivative, lease)
+	}
+	maps := make([]*WorkLease, 0, 2)
+	for index := 0; index < 2; index++ {
+		lease, err := manager.acquireWorkWindow(
+			context.Background(), "nested-work", WorkLaneWikiMap, 3, policy,
+		)
+		require.NoError(t, err)
+		maps = append(maps, lease)
+	}
+	_, err := manager.acquireWorkWindow(
+		context.Background(), "nested-work", WorkLaneDerivative, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred, "publish derivative demand")
+	_, err = manager.acquireWorkWindow(
+		context.Background(), "nested-work", WorkLaneWikiCommit, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred, "publish commit demand")
+
+	maps[0].Release()
+	_, err = manager.acquireWorkWindow(
+		context.Background(), "nested-work", WorkLaneWikiMap, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred,
+		"Map must not reclaim both protected Wiki slots while commit waits")
+	commit, err := manager.acquireWorkWindow(
+		context.Background(), "nested-work", WorkLaneWikiCommit, 3, policy,
+	)
+	require.NoError(t, err)
+	commit.Release()
+	maps[1].Release()
+	for _, lease := range derivative {
+		lease.Release()
+	}
+
+	provider := newManagerWithConfig(nil, config)
+	limit := Limit{Concurrency: 3, Background: 3, PerTenant: 3}
+	spec := Spec{Kind: KindDerivative, Domain: "nested-provider", TenantID: 7}
+	for index := 0; index < 2; index++ {
+		acquired, _ := provider.tryAcquireLocal(spec, limit, true, WorkLaneDerivative, policy)
+		require.True(t, acquired)
+	}
+	acquired, _ := provider.tryAcquireLocal(spec, limit, true, WorkLaneWikiMap, policy)
+	require.True(t, acquired)
+	acquired, _ = provider.tryAcquireLocal(spec, limit, true, WorkLaneDerivative, policy)
+	require.False(t, acquired, "publish derivative provider demand")
+	acquired, _ = provider.tryAcquireLocal(spec, limit, true, WorkLaneWikiCommit, policy)
+	require.False(t, acquired, "publish commit provider demand")
+	provider.releaseLocal(spec, true, WorkLaneWikiMap)
+	acquired, _ = provider.tryAcquireLocal(spec, limit, true, WorkLaneWikiMap, policy)
+	require.False(t, acquired,
+		"the single protected Wiki provider slot must hand off to waiting commit")
+	acquired, _ = provider.tryAcquireLocal(spec, limit, true, WorkLaneWikiCommit, policy)
+	require.True(t, acquired)
+	provider.releaseLocal(spec, true, WorkLaneWikiCommit)
+	provider.releaseLocal(spec, true, WorkLaneDerivative)
+	provider.releaseLocal(spec, true, WorkLaneDerivative)
+}
+
+func TestSingleSlotAutomaticallyHandsOffFromWikiMapToWaitingCommit(t *testing.T) {
+	config := testConfig(Limit{Concurrency: 1, Background: 1, PerTenant: 1})
+	config.WorkWindowEnabled = true
+	config.WorkPrefetchFactor = 1
+	manager := newManagerWithConfig(nil, config)
+	policy := schedulerPolicyFromConfig(config)
+
+	mapWork, err := manager.acquireWorkWindow(
+		context.Background(), "single-work", WorkLaneWikiMap, 1, policy,
+	)
+	require.NoError(t, err)
+	_, err = manager.acquireWorkWindow(
+		context.Background(), "single-work", WorkLaneWikiCommit, 1, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
+	mapWork.Release()
+	_, err = manager.acquireWorkWindow(
+		context.Background(), "single-work", WorkLaneWikiMap, 1, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
+	commitWork, err := manager.acquireWorkWindow(
+		context.Background(), "single-work", WorkLaneWikiCommit, 1, policy,
+	)
+	require.NoError(t, err)
+	commitWork.Release()
+
+	limit := Limit{Concurrency: 1, Background: 1, PerTenant: 1}
+	spec := Spec{Kind: KindDerivative, Domain: "single-provider", TenantID: 7}
+	acquired, _ := manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiMap, policy)
+	require.True(t, acquired)
+	acquired, _ = manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiCommit, policy)
+	require.False(t, acquired)
+	manager.releaseLocal(spec, true, WorkLaneWikiMap)
+	acquired, _ = manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiMap, policy)
+	require.False(t, acquired)
+	acquired, _ = manager.tryAcquireLocal(spec, limit, true, WorkLaneWikiCommit, policy)
+	require.True(t, acquired)
+	manager.releaseLocal(spec, true, WorkLaneWikiCommit)
+}
+
 func TestWorkWindowRestoresWeightedShareWhenOtherLaneWaits(t *testing.T) {
 	config := testConfig(Limit{Concurrency: 3, Background: 3, PerTenant: 3})
 	config.WorkWindowEnabled = true
@@ -221,6 +414,53 @@ func TestWorkWindowRestoresWeightedShareWhenOtherLaneWaits(t *testing.T) {
 	replacement.Release()
 	wiki[1].Release()
 	for _, lease := range derivative {
+		lease.Release()
+	}
+}
+
+func TestWorkWindowWaitingReservationCoversDeferredRetry(t *testing.T) {
+	config := testConfig(Limit{Concurrency: 3, Background: 3, PerTenant: 3})
+	config.WorkWindowEnabled = true
+	manager := newManagerWithConfig(nil, config)
+	policy := schedulerPolicyFromConfig(config)
+
+	wiki := make([]*WorkLease, 0, 6)
+	for index := 0; index < 6; index++ {
+		lease, err := manager.acquireWorkWindow(
+			context.Background(), "waiter-ttl-pool", WorkLaneWiki, 3, policy,
+		)
+		require.NoError(t, err)
+		wiki = append(wiki, lease)
+	}
+
+	_, err := manager.acquireWorkWindow(
+		context.Background(), "waiter-ttl-pool", WorkLaneDerivative, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
+	var deferred *AdmissionDeferredError
+	require.ErrorAs(t, err, &deferred)
+	require.Equal(t, workAdmissionRetryAfter, deferred.RetryAfter)
+
+	manager.localMu.Lock()
+	waitRemaining := time.Until(
+		manager.localWork["waiter-ttl-pool"].waitUntil[WorkLaneDerivative.index()],
+	)
+	manager.localMu.Unlock()
+	require.GreaterOrEqual(t, waitRemaining, workAdmissionRetryAfter,
+		"the protected-share waiter must remain visible through the next durable retry")
+
+	wiki[0].Release()
+	_, err = manager.acquireWorkWindow(
+		context.Background(), "waiter-ttl-pool", WorkLaneWiki, 3, policy,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred,
+		"the borrowing lane must not reclaim a released slot while derivative is waiting")
+	replacement, err := manager.acquireWorkWindow(
+		context.Background(), "waiter-ttl-pool", WorkLaneDerivative, 3, policy,
+	)
+	require.NoError(t, err)
+	replacement.Release()
+	for _, lease := range wiki[1:] {
 		lease.Release()
 	}
 }

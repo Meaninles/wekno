@@ -57,7 +57,7 @@ func newFanoutCompletionRepository(t *testing.T) (*gorm.DB, fanoutCompletionRepo
 	}
 	for _, statement := range []string{
 		`CREATE TABLE IF NOT EXISTS knowledge_tag_relations (knowledge_id TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS knowledge_processing_spans (knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS custom_processing_spans_v2 (knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS custom_document_split_plans (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS custom_document_split_parts (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS wiki_log_entries (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
@@ -220,6 +220,25 @@ func TestGeneratedQuestionClaimsRejectSuperficialParaphrasesAcrossBatches(t *tes
 	var count int64
 	require.NoError(t, db.Model(&questiondedup.Claim{}).Count(&count).Error)
 	require.Equal(t, int64(1), count)
+}
+
+func TestGeneratedQuestionClaimsRemainCurrentAfterCoreCompletion(t *testing.T) {
+	db, baseRepo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusCompleted, 1)
+	repo := baseRepo.(interface {
+		ClaimGeneratedQuestions(
+			context.Context, uint64, string, string, string, []questiondedup.Candidate,
+		) (map[string]string, bool, error)
+	})
+	candidate, ok := questiondedup.Prepare("question_batch[0]:chunk-a:0", "制度规定由哪个部门负责审批？")
+	require.True(t, ok)
+	accepted, current, err := repo.ClaimGeneratedQuestions(
+		context.Background(), 42, "knowledge-1", "kb-1", "generation-1",
+		[]questiondedup.Candidate{candidate},
+	)
+	require.NoError(t, err)
+	require.True(t, current)
+	require.Equal(t, candidate.Question, accepted[candidate.ClaimID])
 }
 
 func insertFanoutKnowledge(t *testing.T, db *gorm.DB, generation, status string, pending int) {

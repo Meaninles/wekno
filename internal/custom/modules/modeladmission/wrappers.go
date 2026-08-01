@@ -42,6 +42,14 @@ type ChatParallelismAware interface {
 	ModelAdmissionParallelism(context.Context, int) int
 }
 
+// ChatLaneParallelismAware lets hierarchical consumers size their internal
+// fan-out from the same compiled lane/stage guarantee enforced by Redis. The
+// value is a safe local ceiling, not another operator setting; independent
+// tasks may still borrow idle global capacity through normal admission.
+type ChatLaneParallelismAware interface {
+	ModelAdmissionLaneParallelism(context.Context, int, WorkLane) int
+}
+
 // ChatTaskWorkAware exposes the task-level background window through wrapper
 // stacks (for example the derivative token limiter wrapped around admittedChat).
 // Callers should use AcquireChatTaskWork instead of asserting this directly.
@@ -78,6 +86,26 @@ func EffectiveChatParallelism(ctx context.Context, model chat.Chat, requested in
 	return requested
 }
 
+// EffectiveChatLaneParallelism additionally clips one task's local fan-out to
+// its automatically derived provider lane/stage guarantee. This keeps a Wiki
+// Commit task configured with reduce_parallel=2 from spawning two calls when
+// the effective Commit guarantee is one, which would otherwise turn the
+// second goroutine into a predictable capacity deferral and redundant retry.
+func EffectiveChatLaneParallelism(
+	ctx context.Context,
+	model chat.Chat,
+	requested int,
+	lane WorkLane,
+) int {
+	if requested < 1 {
+		requested = 1
+	}
+	if aware, ok := model.(ChatLaneParallelismAware); ok {
+		return aware.ModelAdmissionLaneParallelism(ctx, requested, lane)
+	}
+	return EffectiveChatParallelism(ctx, model, requested)
+}
+
 func (w *admittedChat) ModelAdmissionParallelism(ctx context.Context, requested int) int {
 	if requested < 1 {
 		requested = 1
@@ -97,6 +125,45 @@ func (w *admittedChat) ModelAdmissionParallelism(ctx context.Context, requested 
 		if limit > 0 && limit < effective {
 			effective = limit
 		}
+	}
+	if effective < 1 {
+		return 1
+	}
+	return effective
+}
+
+func (w *admittedChat) ModelAdmissionLaneParallelism(
+	ctx context.Context,
+	requested int,
+	lane WorkLane,
+) int {
+	effective := w.ModelAdmissionParallelism(ctx, requested)
+	if !lane.valid() {
+		return effective
+	}
+	resolved, err := w.manager.ResolvePolicy(ctx, w.spec)
+	if err != nil {
+		return 1
+	}
+	scheduler, enabled, err := w.manager.schedulerPolicyForAcquire(ctx)
+	if err != nil {
+		return 1
+	}
+	if !enabled {
+		return effective
+	}
+	capacity := LaneProviderWindow(
+		w.manager.backgroundLimit(resolved.Limit), lane, scheduler,
+	)
+	if lane.stagedWiki() {
+		wikiMap, wikiCommit := WikiStageShares(capacity)
+		capacity = wikiMap
+		if lane == WorkLaneWikiCommit {
+			capacity = wikiCommit
+		}
+	}
+	if capacity > 0 && capacity < effective {
+		effective = capacity
 	}
 	if effective < 1 {
 		return 1

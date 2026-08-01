@@ -33,7 +33,7 @@ func newPurgeDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE knowledge_fanout_completions (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE custom_enrichment_outcomes (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE custom_generated_question_claims (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
-		`CREATE TABLE knowledge_processing_spans (knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE custom_processing_spans_v2 (knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE custom_document_split_parts (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE custom_document_split_plans (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE wiki_log_entries (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
@@ -104,7 +104,7 @@ func TestDeleteSoftRowArtifactsPurgesTargetAndReleasesSharedCache(t *testing.T) 
 		"INSERT INTO knowledge_tag_relations (knowledge_id) VALUES ('target'), ('other')",
 	).Error)
 	require.NoError(t, db.Exec(
-		"INSERT INTO knowledge_processing_spans (knowledge_id) VALUES ('target'), ('other')",
+		"INSERT INTO custom_processing_spans_v2 (knowledge_id) VALUES ('target'), ('other')",
 	).Error)
 	require.NoError(t, db.Exec(
 		"INSERT INTO embeddings (knowledge_id, content, deleted_at) "+
@@ -144,7 +144,7 @@ func TestDeleteSoftRowArtifactsPurgesTargetAndReleasesSharedCache(t *testing.T) 
 		"knowledge_fanout_completions",
 		"custom_enrichment_outcomes",
 		"custom_generated_question_claims",
-		"knowledge_processing_spans",
+		"custom_processing_spans_v2",
 		"custom_document_split_parts",
 		"custom_document_split_plans",
 		"wiki_log_entries",
@@ -205,7 +205,7 @@ func TestDeleteSoftRowArtifactsRollsBackWhenCacheEntryIsMissing(t *testing.T) {
 		  (tenant_id, knowledge_id, processing_generation, cache_kind, content_hash, version_hash)
 		VALUES (7, 'target', 'g1', 'summary', 'missing', 'v1')`).Error)
 	require.NoError(t, db.Exec(
-		"INSERT INTO knowledge_processing_spans (knowledge_id) VALUES ('target')",
+		"INSERT INTO custom_processing_spans_v2 (knowledge_id) VALUES ('target')",
 	).Error)
 
 	err := db.Transaction(func(tx *gorm.DB) error {
@@ -215,7 +215,7 @@ func TestDeleteSoftRowArtifactsRollsBackWhenCacheEntryIsMissing(t *testing.T) {
 
 	var refCount, spanCount int64
 	require.NoError(t, db.Table("custom_content_cache_refs").Count(&refCount).Error)
-	require.NoError(t, db.Table("knowledge_processing_spans").Count(&spanCount).Error)
+	require.NoError(t, db.Table("custom_processing_spans_v2").Count(&spanCount).Error)
 	require.EqualValues(t, 1, refCount, "failed purge must roll back reference deletion")
 	require.EqualValues(t, 1, spanCount, "failed purge must not partially delete derived rows")
 }

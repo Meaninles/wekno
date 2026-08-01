@@ -257,6 +257,67 @@ func TestGenerationFenceCancelsOldWork(t *testing.T) {
 	require.Equal(t, StateCancelled, row.State)
 }
 
+func TestMaterializationGenerationFencePersistsTerminalCancellation(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	require.NoError(t, db.Create(&derivativeTestKnowledge{
+		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusCompleted,
+	}).Error)
+	rows, err := repository.UpsertPlan(ctx, []PlanItem{derivativePlan()})
+	require.NoError(t, err)
+	wake, err := repository.MarkDispatched(ctx, rows[0].ID, rows[0].Version)
+	require.NoError(t, err)
+	claimed, err := repository.Claim(ctx, wake, "worker-a", time.Minute)
+	require.NoError(t, err)
+	running, err := repository.BeginProvider(ctx, claimed.ID, claimed.LeaseToken)
+	require.NoError(t, err)
+	_, err = repository.SaveProviderResult(ctx, running.ID, running.LeaseToken, ProviderResult{
+		Content: `{"results":[]}`,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&derivativeTestKnowledge{}).
+		Where("id = ?", "knowledge-1").
+		Update("processing_generation", "generation-2").Error)
+	require.NoError(t, repository.CompleteMaterializationOutcome(
+		ctx, running.ID, running.LeaseToken, "degraded", "coverage incomplete",
+	))
+	var row WorkItem
+	require.NoError(t, db.First(&row, "id = ?", running.ID).Error)
+	require.Equal(t, StateCancelled, row.State)
+	require.Equal(t, "generation_changed", row.LastErrorCode)
+	require.Empty(t, row.LeaseToken)
+}
+
+func TestCompletedMaterializationPersistsDegradedBusinessOutcome(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	require.NoError(t, db.Create(&derivativeTestKnowledge{
+		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusCompleted,
+	}).Error)
+	rows, err := repository.UpsertPlan(ctx, []PlanItem{derivativePlan()})
+	require.NoError(t, err)
+	wake, err := repository.MarkDispatched(ctx, rows[0].ID, rows[0].Version)
+	require.NoError(t, err)
+	claimed, err := repository.Claim(ctx, wake, "worker-a", time.Minute)
+	require.NoError(t, err)
+	running, err := repository.BeginProvider(ctx, claimed.ID, claimed.LeaseToken)
+	require.NoError(t, err)
+	_, err = repository.SaveProviderResult(ctx, running.ID, running.LeaseToken, ProviderResult{
+		Content: `{"results":[]}`,
+	})
+	require.NoError(t, err)
+	require.NoError(t, repository.CompleteMaterializationOutcome(
+		ctx, running.ID, running.LeaseToken, "degraded", "coverage incomplete",
+	))
+	var row WorkItem
+	require.NoError(t, db.First(&row, "id = ?", running.ID).Error)
+	require.Equal(t, StateCompleted, row.State)
+	require.Equal(t, "degraded", row.OutcomeStatus)
+	require.Equal(t, "coverage incomplete", row.OutcomeDetail)
+}
+
 type derivativeWakeCapture struct {
 	task *asynq.Task
 	opts []asynq.Option

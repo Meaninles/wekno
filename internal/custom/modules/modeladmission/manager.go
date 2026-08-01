@@ -347,6 +347,8 @@ type Stats struct {
 	WorkActive           int64
 	WorkDerivativeActive int64
 	WorkWikiActive       int64
+	WorkWikiMapActive    int64
+	WorkWikiCommitActive int64
 	WorkDeferred         uint64
 	Acquired             uint64
 	BackendErrors        uint64
@@ -372,6 +374,8 @@ type Manager struct {
 	workActive           atomic.Int64
 	workDerivativeActive atomic.Int64
 	workWikiActive       atomic.Int64
+	workWikiMapActive    atomic.Int64
+	workWikiCommitActive atomic.Int64
 	workDeferred         atomic.Uint64
 	acquired             atomic.Uint64
 	backendErrors        atomic.Uint64
@@ -389,17 +393,25 @@ type Manager struct {
 }
 
 type localAccount struct {
-	active           int
-	backgroundActive int
-	laneActive       [2]int
-	laneWaitUntil    [2]time.Time
-	rateTimestamps   []time.Time
+	active             int
+	backgroundActive   int
+	laneActive         [2]int
+	laneWaitUntil      [2]time.Time
+	laneWaitSince      [2]time.Time
+	wikiStageActive    [2]int
+	wikiStageWaitUntil [2]time.Time
+	wikiStageWaitSince [2]time.Time
+	rateTimestamps     []time.Time
 }
 
 type localWorkState struct {
-	active    [2]int
-	waitUntil [2]time.Time
-	tokens    map[string]WorkLane
+	active             [2]int
+	waitUntil          [2]time.Time
+	waitSince          [2]time.Time
+	wikiStageActive    [2]int
+	wikiStageWaitUntil [2]time.Time
+	wikiStageWaitSince [2]time.Time
+	tokens             map[string]WorkLane
 }
 
 func NewManager(redisClient *redis.Client, db *gorm.DB) *Manager {
@@ -557,6 +569,8 @@ func (m *Manager) Snapshot() Stats {
 		WorkActive:           m.workActive.Load(),
 		WorkDerivativeActive: m.workDerivativeActive.Load(),
 		WorkWikiActive:       m.workWikiActive.Load(),
+		WorkWikiMapActive:    m.workWikiMapActive.Load(),
+		WorkWikiCommitActive: m.workWikiCommitActive.Load(),
 		WorkDeferred:         m.workDeferred.Load(),
 		Acquired:             m.acquired.Load(),
 		BackendErrors:        m.backendErrors.Load(),
@@ -583,10 +597,28 @@ local derivative_limit = tonumber(ARGV[11])
 local wiki_limit = tonumber(ARGV[12])
 local waiter_ms = tonumber(ARGV[13])
 
+local function wiki_stage_limits(capacity)
+  if capacity <= 0 then
+    return 0, 0
+  end
+  if capacity == 1 then
+    return 1, 1
+  end
+  local commit_limit = math.floor(capacity / 3)
+  if commit_limit < 1 then
+    commit_limit = 1
+  end
+  local map_limit = capacity - commit_limit
+  if map_limit < 1 then
+    map_limit = 1
+  end
+  return map_limit, commit_limit
+end
+
 for index = 1, 4 do
   redis.call('ZREMRANGEBYSCORE', KEYS[index], '-inf', now)
 end
-for index = 6, 9 do
+for index = 6, 13 do
   redis.call('ZREMRANGEBYSCORE', KEYS[index], '-inf', now)
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now - rate_window_ms)
@@ -595,19 +627,37 @@ local lane_active = nil
 local lane_waiting = nil
 local other_waiting = nil
 local lane_limit = 0
+local wiki_family = lane == 'wiki' or lane == 'wiki_map' or lane == 'wiki_commit'
 if background == 1 and lane == 'derivative' then
   lane_active = KEYS[6]
   lane_waiting = KEYS[8]
   other_waiting = KEYS[9]
   lane_limit = derivative_limit
-elseif background == 1 and lane == 'wiki' then
+elseif background == 1 and wiki_family then
   lane_active = KEYS[7]
   lane_waiting = KEYS[9]
   other_waiting = KEYS[8]
   lane_limit = wiki_limit
 end
+
+local stage_active = nil
+local stage_waiting = nil
+local other_stage_waiting = nil
+local stage_limit = 0
+if background == 1 and lane == 'wiki_map' then
+  stage_active = KEYS[10]
+  stage_waiting = KEYS[12]
+  other_stage_waiting = KEYS[13]
+elseif background == 1 and lane == 'wiki_commit' then
+  stage_active = KEYS[11]
+  stage_waiting = KEYS[13]
+  other_stage_waiting = KEYS[12]
+end
 if lane_waiting then
-  redis.call('ZADD', lane_waiting, now + waiter_ms, token)
+  redis.call('ZADD', lane_waiting, 'NX', now + waiter_ms, token)
+end
+if stage_waiting then
+  redis.call('ZADD', stage_waiting, 'NX', now + waiter_ms, token)
 end
 
 local total_count = redis.call('ZCARD', KEYS[1])
@@ -615,6 +665,7 @@ local background_count = redis.call('ZCARD', KEYS[2])
 local tenant_count = redis.call('ZCARD', KEYS[3])
 local document_count = redis.call('ZCARD', KEYS[4])
 local rate_count = redis.call('ZCARD', KEYS[5])
+local family_other_wait_count = 0
 
 local allowed = total_limit <= 0 or total_count < total_limit
 if allowed and background == 1 and background_limit > 0 then
@@ -632,7 +683,48 @@ end
 if allowed and lane_active and lane_limit > 0 then
   local lane_count = redis.call('ZCARD', lane_active)
   local other_wait_count = redis.call('ZCARD', other_waiting)
+	  family_other_wait_count = other_wait_count
+  if background_limit == 1 and other_wait_count > 0 then
+    local own_oldest = redis.call('ZRANGE', lane_waiting, 0, 0, 'WITHSCORES')
+    local other_oldest = redis.call('ZRANGE', other_waiting, 0, 0, 'WITHSCORES')
+    if own_oldest[2] and other_oldest[2] and tonumber(other_oldest[2]) < tonumber(own_oldest[2]) then
+      allowed = false
+    end
+  end
   if lane_count >= lane_limit and other_wait_count > 0 then
+    allowed = false
+  end
+end
+if stage_active then
+  -- Under derivative contention Wiki is subdivided inside its protected
+  -- family share. Without derivative demand it may borrow the full provider
+  -- window, and the stage limits expand without a configuration change.
+  local stage_capacity = background_limit
+  if family_other_wait_count > 0 then
+    stage_capacity = lane_limit
+  end
+  local map_limit, commit_limit = wiki_stage_limits(stage_capacity)
+  if lane == 'wiki_map' then
+    stage_limit = map_limit
+  else
+    stage_limit = commit_limit
+  end
+end
+if allowed and stage_active and stage_limit > 0 then
+  local stage_count = redis.call('ZCARD', stage_active)
+  local other_stage_wait_count = redis.call('ZCARD', other_stage_waiting)
+  local stage_capacity = background_limit
+  if family_other_wait_count > 0 then
+    stage_capacity = lane_limit
+  end
+  if stage_capacity == 1 and other_stage_wait_count > 0 then
+    local own_stage_oldest = redis.call('ZRANGE', stage_waiting, 0, 0, 'WITHSCORES')
+    local other_stage_oldest = redis.call('ZRANGE', other_stage_waiting, 0, 0, 'WITHSCORES')
+    if own_stage_oldest[2] and other_stage_oldest[2] and tonumber(other_stage_oldest[2]) < tonumber(own_stage_oldest[2]) then
+      allowed = false
+    end
+  end
+  if stage_count >= stage_limit and other_stage_wait_count > 0 then
     allowed = false
   end
 end
@@ -656,7 +748,11 @@ if allowed then
     redis.call('ZREM', lane_waiting, token)
     redis.call('ZADD', lane_active, expires, token)
   end
-  for index = 1, 9 do
+  if stage_active then
+    redis.call('ZREM', stage_waiting, token)
+    redis.call('ZADD', stage_active, expires, token)
+  end
+  for index = 1, 13 do
     redis.call('PEXPIRE', KEYS[index], math.max(lease_ms * 2, rate_window_ms + 1000))
   end
   return {1, 0}
@@ -683,7 +779,7 @@ local token = ARGV[1]
 local lease_ms = tonumber(ARGV[2])
 local expires = now + lease_ms
 local renewed = 0
-for index = 1, 6 do
+for index = 1, #KEYS do
   if redis.call('ZSCORE', KEYS[index], token) then
     redis.call('ZADD', KEYS[index], 'XX', expires, token)
     -- The sorted-set key has its own TTL in addition to every member's
@@ -700,7 +796,7 @@ return renewed
 var releaseScript = redis.NewScript(`
 local token = ARGV[1]
 local removed = 0
-for index = 1, 8 do
+for index = 1, #KEYS do
   removed = removed + redis.call('ZREM', KEYS[index], token)
 end
 return removed
@@ -718,6 +814,10 @@ type leaseKeys struct {
 	wikiActive        string
 	derivativeWaiting string
 	wikiWaiting       string
+	wikiMapActive     string
+	wikiCommitActive  string
+	wikiMapWaiting    string
+	wikiCommitWaiting string
 }
 
 func (m *Manager) keys(spec Spec) leaseKeys {
@@ -747,6 +847,10 @@ func (m *Manager) keys(spec Spec) leaseKeys {
 		wikiActive:        base + ":lane:active:wiki",
 		derivativeWaiting: base + ":lane:waiting:derivative",
 		wikiWaiting:       base + ":lane:waiting:wiki",
+		wikiMapActive:     base + ":lane:active:wiki-map",
+		wikiCommitActive:  base + ":lane:active:wiki-commit",
+		wikiMapWaiting:    base + ":lane:waiting:wiki-map",
+		wikiCommitWaiting: base + ":lane:waiting:wiki-commit",
 	}
 }
 
@@ -763,6 +867,7 @@ func (k leaseKeys) redisKeys() []string {
 	return []string{
 		k.total, k.background, k.tenant, k.document, k.rate,
 		k.derivativeActive, k.wikiActive, k.derivativeWaiting, k.wikiWaiting,
+		k.wikiMapActive, k.wikiCommitActive, k.wikiMapWaiting, k.wikiCommitWaiting,
 	}
 }
 
@@ -770,6 +875,7 @@ func (k leaseKeys) renewKeys() []string {
 	return []string{
 		k.total, k.background, k.tenant, k.document,
 		k.derivativeActive, k.wikiActive,
+		k.wikiMapActive, k.wikiCommitActive,
 	}
 }
 
@@ -778,6 +884,8 @@ func (k leaseKeys) releaseKeys() []string {
 		k.total, k.background, k.tenant, k.document,
 		k.derivativeActive, k.wikiActive,
 		k.derivativeWaiting, k.wikiWaiting,
+		k.wikiMapActive, k.wikiCommitActive,
+		k.wikiMapWaiting, k.wikiCommitWaiting,
 	}
 }
 
@@ -1188,6 +1296,9 @@ func expectedRedisLeaseKeys(
 	}
 	if background && lane.valid() {
 		expected++
+		if lane.stagedWiki() {
+			expected++
+		}
 	}
 	return expected
 }
@@ -1238,16 +1349,55 @@ func (m *Manager) tryAcquireLocal(
 	account.rateTimestamps = validRates
 	backgroundLimit := m.backgroundLimit(limit)
 	if background && lane.valid() {
-		index := lane.index()
+		index := lane.familyIndex()
 		other := 1 - index
 		derivativeLimit, wikiLimit := laneShares(backgroundLimit, scheduler)
 		laneLimit := derivativeLimit
-		if lane == WorkLaneWiki {
+		if lane.family() == WorkLaneWiki {
 			laneLimit = wikiLimit
 		}
+		if !account.laneWaitUntil[index].After(now) {
+			account.laneWaitSince[index] = now
+		}
 		account.laneWaitUntil[index] = now.Add(5 * time.Second)
+		stageIndex, staged := lane.wikiStageIndex()
+		stageLimit := 0
+		if staged {
+			if !account.wikiStageWaitUntil[stageIndex].After(now) {
+				account.wikiStageWaitSince[stageIndex] = now
+			}
+			account.wikiStageWaitUntil[stageIndex] = now.Add(5 * time.Second)
+		}
+		if backgroundLimit == 1 && account.laneWaitUntil[other].After(now) &&
+			!account.laneWaitSince[other].IsZero() &&
+			(account.laneWaitSince[index].IsZero() ||
+				account.laneWaitSince[other].Before(account.laneWaitSince[index])) {
+			return false, 25 * time.Millisecond
+		}
 		if account.laneActive[index] >= laneLimit && account.laneWaitUntil[other].After(now) {
 			return false, 25 * time.Millisecond
+		}
+		if staged {
+			stageCapacity := backgroundLimit
+			if account.laneWaitUntil[other].After(now) {
+				stageCapacity = laneLimit
+			}
+			wikiMapLimit, wikiCommitLimit := WikiStageShares(stageCapacity)
+			stageLimit = wikiMapLimit
+			if lane == WorkLaneWikiCommit {
+				stageLimit = wikiCommitLimit
+			}
+			otherStage := 1 - stageIndex
+			if stageCapacity == 1 && account.wikiStageWaitUntil[otherStage].After(now) &&
+				!account.wikiStageWaitSince[otherStage].IsZero() &&
+				(account.wikiStageWaitSince[stageIndex].IsZero() ||
+					account.wikiStageWaitSince[otherStage].Before(account.wikiStageWaitSince[stageIndex])) {
+				return false, 25 * time.Millisecond
+			}
+			if account.wikiStageActive[stageIndex] >= stageLimit &&
+				account.wikiStageWaitUntil[otherStage].After(now) {
+				return false, 25 * time.Millisecond
+			}
 		}
 	}
 	switch {
@@ -1266,9 +1416,15 @@ func (m *Manager) tryAcquireLocal(
 	if background {
 		account.backgroundActive++
 		if lane.valid() {
-			index := lane.index()
+			index := lane.familyIndex()
 			account.laneActive[index]++
 			account.laneWaitUntil[index] = time.Time{}
+			account.laneWaitSince[index] = time.Time{}
+			if stageIndex, staged := lane.wikiStageIndex(); staged {
+				account.wikiStageActive[stageIndex]++
+				account.wikiStageWaitUntil[stageIndex] = time.Time{}
+				account.wikiStageWaitSince[stageIndex] = time.Time{}
+			}
 		}
 	}
 	m.localTenants[tenantKey]++
@@ -1296,9 +1452,13 @@ func (m *Manager) releaseLocal(spec Spec, background bool, lane WorkLane) {
 			account.backgroundActive--
 		}
 		if background && lane.valid() {
-			index := lane.index()
+			index := lane.familyIndex()
 			if account.laneActive[index] > 0 {
 				account.laneActive[index]--
+			}
+			if stageIndex, staged := lane.wikiStageIndex(); staged &&
+				account.wikiStageActive[stageIndex] > 0 {
+				account.wikiStageActive[stageIndex]--
 			}
 		}
 	}

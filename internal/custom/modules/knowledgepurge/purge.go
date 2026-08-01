@@ -100,7 +100,7 @@ func DeleteSoftRowArtifacts(tx *gorm.DB, tenantID uint64, knowledgeIDs []string)
 		{"fanout completions", "DELETE FROM knowledge_fanout_completions WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"enrichment outcomes", "DELETE FROM custom_enrichment_outcomes WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"generated question claims", "DELETE FROM custom_generated_question_claims WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
-		{"processing spans", "DELETE FROM knowledge_processing_spans WHERE knowledge_id IN ?", []interface{}{ids}},
+		{"processing spans", "DELETE FROM custom_processing_spans_v2 WHERE knowledge_id IN ?", []interface{}{ids}},
 		{"document split parts", "DELETE FROM custom_document_split_parts WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"document split plans", "DELETE FROM custom_document_split_plans WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},
 		{"Wiki operation logs", "DELETE FROM wiki_log_entries WHERE tenant_id = ? AND knowledge_id IN ?", []interface{}{tenantID, ids}},

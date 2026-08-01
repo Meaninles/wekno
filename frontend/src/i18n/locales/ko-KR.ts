@@ -3769,8 +3769,8 @@ export default {
       title: "모델 설정",
       description: "지식베이스에 적합한 AI 모델 선택",
       llmLabel: "LLM 대규모 언어 모델",
-      llmDesc: "요약 및 개요를 위한 대규모 언어 모델",
-      llmPlaceholder: "LLM 모델을 선택해주세요 (선택)",
+      llmDesc: "지식베이스 검색 결과를 기반으로 답변을 생성하는 대규모 언어 모델",
+      llmPlaceholder: "지식베이스 질의응답 모델을 선택해주세요",
       embeddingLabel: "Embedding 임베딩 모델",
       embeddingDesc: "텍스트 벡터화를 위한 임베딩 모델",
       embeddingPlaceholder: "Embedding 모델을 선택해주세요",
@@ -4271,7 +4271,7 @@ export default {
     },
     chatModel: {
       label: "LLM 모델",
-      desc: "요약 및 개요를 위한 대규모 언어 모델",
+      desc: "검색 결과를 기반으로 답변을 생성하는 대규모 언어 모델",
     },
     rerankModel: {
       label: "ReRank 모델",

@@ -65,7 +65,7 @@ func newCoordinatorDB(t *testing.T) *gorm.DB {
 			tenant_id INTEGER NOT NULL,
 			knowledge_id TEXT NOT NULL
 		)`,
-		`CREATE TABLE knowledge_processing_spans (
+		`CREATE TABLE custom_processing_spans_v2 (
 			knowledge_id TEXT NOT NULL
 		)`,
 		`CREATE TABLE custom_document_split_plans (

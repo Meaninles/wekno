@@ -32,6 +32,52 @@ type admittedChat struct {
 	inner   chat.Chat
 }
 
+// ChatParallelismAware is implemented by admission-aware wrappers so business
+// fan-out can size its local errgroup from the same hot resource-pool policy.
+// The provider semaphore remains authoritative; this is an efficiency hint
+// that prevents one document from creating excess waiting goroutines.
+type ChatParallelismAware interface {
+	ModelAdmissionParallelism(context.Context, int) int
+}
+
+// EffectiveChatParallelism returns a safe per-document background fan-out.
+// Wrappers that are not admission-aware keep their requested local limit.
+func EffectiveChatParallelism(ctx context.Context, model chat.Chat, requested int) int {
+	if requested < 1 {
+		requested = 1
+	}
+	if aware, ok := model.(ChatParallelismAware); ok {
+		return aware.ModelAdmissionParallelism(ctx, requested)
+	}
+	return requested
+}
+
+func (w *admittedChat) ModelAdmissionParallelism(ctx context.Context, requested int) int {
+	if requested < 1 {
+		requested = 1
+	}
+	policy, err := w.manager.ResolvePolicy(ctx, w.spec)
+	if err != nil {
+		return 1
+	}
+	limits := []int{
+		policy.Limit.Concurrency,
+		policy.Limit.Background,
+		policy.Limit.PerTenant,
+		policy.Limit.PerDocument,
+	}
+	effective := requested
+	for _, limit := range limits {
+		if limit > 0 && limit < effective {
+			effective = limit
+		}
+	}
+	if effective < 1 {
+		return 1
+	}
+	return effective
+}
+
 func WrapChat(manager *Manager, spec Spec, inner chat.Chat) chat.Chat {
 	if inner == nil || manager == nil || !manager.config.Enabled {
 		return inner

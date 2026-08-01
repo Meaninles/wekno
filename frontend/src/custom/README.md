@@ -10,6 +10,7 @@
 |---|---|
 | `documentQueue` | 系统等待总量、每份文档的全局队列位置 |
 | `chatqueue` | 聊天已接受排队卡、个人上限/系统满结构化提示和取消操作 |
+| `capacity-control` | 系统管理员独立容量页、有效值/冲突、资源池、模板、绑定和审计 |
 | `knowledgeWorkflowStatus` | 主解析和衍生阶段总状态、悬停明细、准确筛选 |
 | `knowledgeFolders` | 文件夹、分页、渐进加载、搜索和移动 |
 | `documentPreview` | preview policy、大文件安全预览 |

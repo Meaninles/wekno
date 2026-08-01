@@ -361,43 +361,16 @@ app:
     - name: WEKNORA_LLM_CHAT_TIMEOUT_SECONDS
       value: "900"
 
-    # Shared Redis leases make these cluster-wide limits; they must not be
-    # multiplied by the number of app replicas. The DeepSeek V4 Flash route
-    # completed 32/32 concurrent 160-token generations at P95 5.655s; 24 keeps
-    # 25% concurrency headroom for longer prompts/outputs and provider jitter.
+    # Bound models read concurrency/RPM/TPM from the actual-model resource
+    # pools managed by the Capacity Control page. Environment concurrency
+    # values are deliberately absent so they cannot look authoritative while
+    # being shadowed by persisted route policies.
     - name: CUSTOM_MODEL_ADMISSION_ENABLED
       value: "true"
     - name: CUSTOM_MODEL_ADMISSION_FAIL_CLOSED
       value: "true"
     - name: CUSTOM_MODEL_ADMISSION_KEY_PREFIX
       value: "weknora:prod-cce-wk-6a9d12b0:model-admission:v1:"
-    - name: CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY
-      value: "24"
-    - name: CUSTOM_MODEL_ADMISSION_CHAT_PER_TENANT
-      value: "12"
-    - name: CUSTOM_MODEL_ADMISSION_INTERACTIVE_RESERVE
-      value: "2"
-    - name: CUSTOM_MODEL_ADMISSION_EMBEDDING_CONCURRENCY
-      value: "32"
-    - name: CUSTOM_MODEL_ADMISSION_EMBEDDING_PER_TENANT
-      value: "16"
-    - name: CUSTOM_MODEL_ADMISSION_RERANK_CONCURRENCY
-      value: "24"
-    - name: CUSTOM_MODEL_ADMISSION_RERANK_PER_TENANT
-      value: "12"
-    - name: CUSTOM_MODEL_ADMISSION_VLM_CONCURRENCY
-      value: "4"
-    - name: CUSTOM_MODEL_ADMISSION_VLM_PER_TENANT
-      value: "2"
-    - name: CUSTOM_MODEL_ADMISSION_ASR_CONCURRENCY
-      value: "2"
-    - name: CUSTOM_MODEL_ADMISSION_ASR_PER_TENANT
-      value: "1"
-    - name: CUSTOM_MODEL_ADMISSION_PARSER_CONCURRENCY
-      value: "12"
-    - name: CUSTOM_MODEL_ADMISSION_PARSER_PER_TENANT
-      value: "4"
-
     # Keep the existing Docker sandbox feature available on every app node.
     # Runs are one-shot (`docker run --rm`), so no session affinity is needed.
     - name: SSRF_WHITELIST_EXTRA

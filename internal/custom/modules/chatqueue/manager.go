@@ -354,15 +354,6 @@ func (m *Manager) basePolicy(ctx context.Context) queuePolicy {
 	policy.Enabled = m.settings.GetBool(
 		ctx, "chat.queue.enabled", "WEKNORA_CHAT_QUEUE_ENABLED", true,
 	)
-	policy.MaxConcurrent = boundedInt(
-		m.settings.GetInt(
-			ctx,
-			"chat.queue.default_max_concurrent",
-			"WEKNORA_CHAT_QUEUE_DEFAULT_MAX_CONCURRENT",
-			defaultMaxConcurrent,
-		),
-		1, 4096, defaultMaxConcurrent,
-	)
 	policy.MaxWaiting = boundedInt(
 		m.settings.GetInt(
 			ctx,
@@ -392,15 +383,16 @@ func (m *Manager) policyWithPool(
 	if pool == nil {
 		return policy
 	}
-	if pool.ChatMaxConcurrent != nil {
-		policy.MaxConcurrent = boundedInt(
-			int64(*pool.ChatMaxConcurrent), 1, 4096, policy.MaxConcurrent,
-		)
-	}
 	if pool.ChatMaxWaiting != nil {
 		policy.MaxWaiting = boundedInt(
 			int64(*pool.ChatMaxWaiting), 0, 100000, policy.MaxWaiting,
 		)
+	}
+	// A conversation queue admits exactly the actual provider-pool total.
+	// This removes the former second concurrency knob; platform chat settings
+	// now own only queue enablement and waiting-room fairness.
+	if pool.MaxInflight > 0 {
+		policy.MaxConcurrent = pool.MaxInflight
 	}
 	return policy
 }

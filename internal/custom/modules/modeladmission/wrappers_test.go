@@ -63,6 +63,21 @@ func (c *failingTestChat) ChatStream(
 func (*failingTestChat) GetModelName() string { return "failing-test" }
 func (*failingTestChat) GetModelID() string   { return "failing-test-id" }
 
+func TestEffectiveChatParallelismUsesHotDocumentGrant(t *testing.T) {
+	config := testConfig(Limit{
+		Concurrency: 8, Background: 3, PerTenant: 4, PerDocument: 2,
+	})
+	manager := newManagerWithConfig(nil, config)
+	wrapped := WrapChat(
+		manager,
+		Spec{Kind: KindChat, Domain: "fanout", TenantID: 1},
+		&streamTestChat{},
+	)
+	require.Equal(t, 2, EffectiveChatParallelism(context.Background(), wrapped, 4))
+	require.Equal(t, 1, EffectiveChatParallelism(context.Background(), wrapped, 1))
+	require.Equal(t, 4, EffectiveChatParallelism(context.Background(), &streamTestChat{}, 4))
+}
+
 func TestProviderTransportFailureIsTypedWithoutLosingCause(t *testing.T) {
 	config := testConfig(Limit{Concurrency: 1, PerTenant: 1})
 	manager := newManagerWithConfig(nil, config)

@@ -44,9 +44,10 @@ var (
 	ErrProviderUnavailable         = errors.New("model provider temporarily unavailable")
 )
 
-// AdmissionDeferredError is returned before a provider call. Durable workers
-// ACK and reschedule at RetryAfter without consuming a provider-attempt
-// budget; no business processing span is created for this control-plane wait.
+// AdmissionDeferredError is returned before a provider call only when an
+// operator configured a finite background wait or an auxiliary quota/gateway
+// dimension asks the durable task to yield. Ordinary pool saturation waits in
+// the scheduler and never enters business retry/failure accounting.
 type AdmissionDeferredError struct {
 	Kind       Kind
 	PoolID     string
@@ -805,16 +806,6 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 			}
 			return lease, nil
 		}
-		if background {
-			metricResult = "deferred"
-			pipelineobs.ModelPoolRejected(spec.Domain, "capacity")
-			if retry < time.Second {
-				retry = time.Second
-			}
-			return nil, &AdmissionDeferredError{
-				Kind: spec.Kind, PoolID: spec.Domain, RetryAfter: retry,
-			}
-		}
 		if retry < 25*time.Millisecond {
 			retry = 25 * time.Millisecond
 		}
@@ -830,6 +821,14 @@ func (m *Manager) Acquire(ctx context.Context, spec Spec) (*Lease, error) {
 				metricResult = "cancelled"
 			}
 			pipelineobs.ModelPoolRejected(spec.Domain, metricResult)
+			if background && maxWait > 0 && ctx.Err() == nil {
+				if retry < time.Second {
+					retry = time.Second
+				}
+				return nil, &AdmissionDeferredError{
+					Kind: spec.Kind, PoolID: spec.Domain, RetryAfter: retry,
+				}
+			}
 			return nil, fmt.Errorf("wait for %s model admission: %w", spec.Kind, waitCtx.Err())
 		case <-timer.C:
 		}

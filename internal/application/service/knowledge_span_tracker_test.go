@@ -344,6 +344,57 @@ func TestSpanTracker_LookupStage_FindsAcrossProcesses(t *testing.T) {
 	assert.Nil(t, other, "LookupStage(missing) must return nil")
 }
 
+func TestSpanTracker_EndSpanPreservesPersistedSkippedStage(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-skipped-multimodal", "")
+	require.NoError(t, err)
+	multimodal := tracker.BeginStage(ctx, "kid-skipped-multimodal", attempt, types.StageMultimodal, nil)
+	require.NotNil(t, multimodal)
+	tracker.SkipSpan(ctx, multimodal, "no_images")
+
+	// Simulate the post-process worker running in another process: it does not
+	// own the original handle and must rely on the persisted stage state.
+	lookedUp := tracker.LookupStage(ctx, "kid-skipped-multimodal", attempt, types.StageMultimodal)
+	require.NotNil(t, lookedUp)
+	require.Equal(t, types.SpanStatusSkipped, lookedUp.Status)
+	tracker.EndSpan(ctx, lookedUp, types.JSONMap{"terminal_outcomes": 0})
+
+	var stored types.KnowledgeProcessingSpan
+	require.NoError(t, db.Where(
+		"knowledge_id = ? AND attempt = ? AND name = ?",
+		"kid-skipped-multimodal", attempt, types.StageMultimodal,
+	).Take(&stored).Error)
+	require.Equal(t, types.SpanStatusSkipped, stored.Status)
+	require.Equal(t, "no_images", stored.ErrorMessage)
+	require.Nil(t, stored.Output)
+}
+
+func TestSpanTracker_EndSpanStillCompletesRunningLookup(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-running-multimodal", "")
+	require.NoError(t, err)
+	require.NotNil(t, tracker.BeginStage(
+		ctx, "kid-running-multimodal", attempt, types.StageMultimodal, nil,
+	))
+
+	lookedUp := tracker.LookupStage(ctx, "kid-running-multimodal", attempt, types.StageMultimodal)
+	require.NotNil(t, lookedUp)
+	require.Equal(t, types.SpanStatusRunning, lookedUp.Status)
+	tracker.EndSpan(ctx, lookedUp, types.JSONMap{"terminal_outcomes": 1})
+
+	var stored types.KnowledgeProcessingSpan
+	require.NoError(t, db.Where(
+		"knowledge_id = ? AND attempt = ? AND name = ?",
+		"kid-running-multimodal", attempt, types.StageMultimodal,
+	).Take(&stored).Error)
+	require.Equal(t, types.SpanStatusDone, stored.Status)
+	require.EqualValues(t, 1, stored.Output["terminal_outcomes"])
+}
+
 // TestSpanTracker_BeginSubSpan_HangsUnderParent confirms multimodal /
 // embedding fan-out subspans reference the parent stage's span_id —
 // the structural invariant the buildSpanTree handler walks.

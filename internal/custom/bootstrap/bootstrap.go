@@ -19,6 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
+	"github.com/Tencent/WeKnora/internal/custom/modules/capacitycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
@@ -66,6 +67,7 @@ type Handlers struct {
 	MobileDocument       *mobiledocument.Handler
 	DerivativeControl    *derivativecontrol.Handler
 	ModelAdmission       *modeladmission.Handler
+	CapacityControl      *capacitycontrol.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -179,6 +181,7 @@ func NewHandlers(
 		customAgentRepository,
 		admissionManager,
 	)
+	capacityControlService := capacitycontrol.NewService(db, admissionManager)
 	runMaintenance := profile.RunsMigration() && customMigrationsEnabled()
 	if runMaintenance {
 		if err := admissionManager.Migrate(ctx); err != nil {
@@ -395,6 +398,7 @@ func NewHandlers(
 		MobileDocument:              mobiledocument.NewHandler(mobileDocumentService),
 		DerivativeControl:           derivativecontrol.NewHandler(derivativeControlService, modelService),
 		ModelAdmission:              modeladmission.NewHandler(admissionManager),
+		CapacityControl:             capacitycontrol.NewHandler(capacityControlService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -656,14 +660,17 @@ func RegisterRoutes(
 				derivativeRoutes.POST("/models", handlers.DerivativeControl.Publish)
 				derivativeRoutes.DELETE("/models/:model_id", handlers.DerivativeControl.Unpublish)
 				derivativeRoutes.PUT("/default", handlers.DerivativeControl.SetDefault)
-				derivativeRoutes.PUT("/tpm", handlers.DerivativeControl.UpdateTPM)
 				derivativeRoutes.POST("/models/:model_id/test", handlers.DerivativeControl.Test)
 			}
 		}
 
 		if handlers.ModelAdmission != nil {
-			admissionRoutes := custom.Group("/derivative-control")
+			admissionRoutes := custom.Group("/capacity-control")
 			{
+				if handlers.CapacityControl != nil {
+					admissionRoutes.GET("/effective", handlers.CapacityControl.Effective)
+					admissionRoutes.POST("/validate", handlers.CapacityControl.Validate)
+				}
 				admissionRoutes.GET("/resource-pools", handlers.ModelAdmission.ListResourcePools)
 				admissionRoutes.POST("/resource-pools", handlers.ModelAdmission.CreateResourcePool)
 				admissionRoutes.PUT("/resource-pools/:id", handlers.ModelAdmission.UpdateResourcePool)

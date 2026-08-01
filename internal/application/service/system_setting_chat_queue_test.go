@@ -14,11 +14,6 @@ func TestChatQueueSettingsHaveHotSafeDefaultsAndBounds(t *testing.T) {
 		invalid    []any
 	}{
 		{
-			key: "chat.queue.default_max_concurrent", defaultVal: int64(8),
-			valid:   []any{int64(1), int64(8), int64(4096)},
-			invalid: []any{int64(0), int64(4097), "8"},
-		},
-		{
 			key: "chat.queue.default_max_waiting", defaultVal: int64(500),
 			valid:   []any{int64(0), int64(500), int64(100000)},
 			invalid: []any{int64(-1), int64(100001), "500"},

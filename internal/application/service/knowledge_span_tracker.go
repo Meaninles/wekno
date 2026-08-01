@@ -69,6 +69,7 @@ type Span struct {
 	ParentSpanID string
 	Name         string
 	Kind         string
+	Status       string
 	StartedAt    time.Time
 }
 
@@ -332,6 +333,7 @@ func (t *spanTracker) OpenAttempt(ctx context.Context, knowledgeID, langfuseTrac
 		SpanID:      rootID,
 		Name:        "knowledge_processing",
 		Kind:        types.SpanKindRoot,
+		Status:      types.SpanStatusRunning,
 		StartedAt:   now,
 	}, attempt, nil
 }
@@ -419,6 +421,7 @@ func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attemp
 			ParentSpanID: existing.ParentSpanID,
 			Name:         existing.Name,
 			Kind:         existing.Kind,
+			Status:       types.SpanStatusRunning,
 			StartedAt:    now,
 		}
 	}
@@ -449,6 +452,7 @@ func (t *spanTracker) BeginStage(ctx context.Context, knowledgeID string, attemp
 		ParentSpanID: rootID,
 		Name:         stage,
 		Kind:         types.SpanKindStage,
+		Status:       types.SpanStatusRunning,
 		StartedAt:    now,
 	}
 }
@@ -497,12 +501,28 @@ func (t *spanTracker) BeginSubSpan(ctx context.Context, parent *Span, name, kind
 		ParentSpanID: parent.SpanID,
 		Name:         name,
 		Kind:         kind,
+		Status:       types.SpanStatusRunning,
 		StartedAt:    now,
 	}
 }
 
-func (t *spanTracker) EndSpan(ctx context.Context, span *Span, output types.JSONMap) {
+func spanCanTransitionToDone(span *Span) bool {
 	if span == nil {
+		return false
+	}
+	switch span.Status {
+	case "", types.SpanStatusPending, types.SpanStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *spanTracker) EndSpan(ctx context.Context, span *Span, output types.JSONMap) {
+	// A cross-process lookup carries the persisted status. Never turn an
+	// intentionally skipped, failed, cancelled, or already-completed span into
+	// done merely because a downstream coordinator reached its barrier.
+	if !spanCanTransitionToDone(span) {
 		return
 	}
 	now := time.Now()
@@ -522,7 +542,9 @@ func (t *spanTracker) EndSpan(ctx context.Context, span *Span, output types.JSON
 	}
 	if err := t.repo.Upsert(ctx, row); err != nil {
 		logger.Warnf(ctx, "[SpanTracker] EndSpan failed span=%s: %v", span.SpanID, err)
+		return
 	}
+	span.Status = types.SpanStatusDone
 	t.touchKnowledgeHeartbeat(ctx, span.KnowledgeID, span.Kind)
 }
 
@@ -559,6 +581,8 @@ func (t *spanTracker) FailSpan(ctx context.Context, span *Span, errorCode, error
 	}
 	if err := t.repo.Upsert(ctx, row); err != nil {
 		logger.Warnf(ctx, "[SpanTracker] FailSpan failed span=%s: %v", span.SpanID, err)
+	} else {
+		span.Status = types.SpanStatusFailed
 	}
 	// Cascade: anything downstream of this span gets cancelled. The
 	// reason string is what the UI surfaces under each cancelled
@@ -607,6 +631,8 @@ func (t *spanTracker) SkipSpan(ctx context.Context, span *Span, reason string) {
 	}
 	if err := t.repo.Upsert(ctx, row); err != nil {
 		logger.Warnf(ctx, "[SpanTracker] SkipSpan failed span=%s: %v", span.SpanID, err)
+	} else {
+		span.Status = types.SpanStatusSkipped
 	}
 	t.touchKnowledgeHeartbeat(ctx, span.KnowledgeID, span.Kind)
 }
@@ -634,6 +660,7 @@ func (t *spanTracker) LookupStage(ctx context.Context, knowledgeID string, attem
 			ParentSpanID: r.ParentSpanID,
 			Name:         r.Name,
 			Kind:         r.Kind,
+			Status:       r.Status,
 			StartedAt:    started,
 		}
 	}
@@ -667,6 +694,7 @@ func (t *spanTracker) LookupSpanByName(ctx context.Context, knowledgeID string, 
 			ParentSpanID: r.ParentSpanID,
 			Name:         r.Name,
 			Kind:         r.Kind,
+			Status:       r.Status,
 			StartedAt:    started,
 		}
 	}

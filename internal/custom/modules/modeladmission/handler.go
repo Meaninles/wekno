@@ -183,7 +183,7 @@ func (h *Handler) CreateResourcePool(c *gin.Context) {
 		c.Error(apperrors.NewBadRequestError(err.Error()))
 		return
 	}
-	if err := ValidatePool(&pool); err != nil {
+	if err := NormalizePool(&pool); err != nil {
 		c.Error(apperrors.NewBadRequestError(err.Error()))
 		return
 	}
@@ -211,7 +211,7 @@ func (h *Handler) UpdateResourcePool(c *gin.Context) {
 		return
 	}
 	input.ID = c.Param("id")
-	if err := ValidatePool(&input); err != nil {
+	if err := NormalizePool(&input); err != nil {
 		c.Error(apperrors.NewBadRequestError(err.Error()))
 		return
 	}
@@ -330,10 +330,13 @@ func (h *Handler) ResetResourcePool(c *gin.Context) {
 	old.ChatMaxWaiting = nil
 	old.MaxBackgroundInflight = policy.limit.Background
 	old.InteractiveReserve = policy.reserve
+	old.TenantGuaranteed = 1
 	old.TenantBurst = policy.limit.PerTenant
+	old.DocumentGuaranteed = 1
 	old.DocumentBurst = policy.limit.PerDocument
 	old.RPM = policy.limit.RPM
 	old.TPM = policy.tpm
+	old.TokenBurst = 0
 	old.State = "enabled"
 	old.PolicyVersion = expected + 1
 	old.UpdatedAt = time.Now().UTC()
@@ -344,10 +347,13 @@ func (h *Handler) ResetResourcePool(c *gin.Context) {
 		"max_inflight":            old.MaxInflight,
 		"max_background_inflight": old.MaxBackgroundInflight,
 		"interactive_reserve":     old.InteractiveReserve,
+		"tenant_guaranteed":       old.TenantGuaranteed,
 		"tenant_burst":            old.TenantBurst,
+		"document_guaranteed":     old.DocumentGuaranteed,
 		"document_burst":          old.DocumentBurst,
 		"rpm":                     old.RPM,
 		"tpm":                     old.TPM,
+		"token_burst":             old.TokenBurst,
 		"request_timeout_seconds": old.RequestTimeoutSeconds,
 		"circuit_threshold":       old.CircuitThreshold,
 		"circuit_window_seconds":  old.CircuitWindowSeconds,
@@ -509,9 +515,8 @@ func (h *Handler) PutTemplate(c *gin.Context) {
 		return
 	}
 	row.Kind = strings.TrimSpace(c.Param("kind"))
-	if row.Kind == "" || row.MaxInflight < 1 ||
-		row.MaxBackgroundInflight < 0 || row.MaxBackgroundInflight > row.MaxInflight {
-		c.Error(apperrors.NewBadRequestError("invalid admission template"))
+	if err := NormalizeTemplate(&row); err != nil {
+		c.Error(apperrors.NewBadRequestError(err.Error()))
 		return
 	}
 	var old AdmissionTemplate

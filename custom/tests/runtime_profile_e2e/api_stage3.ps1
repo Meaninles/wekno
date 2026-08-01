@@ -403,7 +403,7 @@ function Set-PoolLimit {
     $body.document_guaranteed = 1
     $body.document_burst = [Math]::Min($MaxInflight, 2)
     $updated = Invoke-Api -Method Put `
-        -Path "/api/v1/custom/derivative-control/resource-pools/$($Pool.id)" `
+        -Path "/api/v1/custom/capacity-control/resource-pools/$($Pool.id)" `
         -Body $body -ExtraHeaders @{ "If-Match" = "$ExpectedVersion" }
     return $updated.Json.data
 }
@@ -593,12 +593,12 @@ try {
     Start-LocalContainers -Names @($apiReplicas[0])
     Pass "single API replica loss and recovery behind the three-replica load balancer"
 
-    $bindings = @((Invoke-Api -Method Get -Path "/api/v1/custom/derivative-control/bindings").Json.data)
+    $bindings = @((Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/bindings").Json.data)
     $binding = $bindings | Where-Object {
         $_.model_id -eq $adminModels.First.id -and [long]$_.model_tenant_id -eq 10000
     } | Select-Object -First 1
     Assert-True ($null -ne $binding) "selected derivative model has an exact-route admission binding"
-    $pools = @((Invoke-Api -Method Get -Path "/api/v1/custom/derivative-control/resource-pools").Json.data)
+    $pools = @((Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/resource-pools").Json.data)
     $pool = $pools | Where-Object { $_.id -eq $binding.resource_pool_id } | Select-Object -First 1
     Assert-True ($null -ne $pool) "selected derivative model resource pool exists"
     $script:PoolBackup = $pool
@@ -848,7 +848,7 @@ finally {
         try {
             $body = Pool-Body -Pool $script:PoolBackup
             Invoke-Api -Method Put `
-                -Path "/api/v1/custom/derivative-control/resource-pools/$($script:PoolBackup.id)" `
+                -Path "/api/v1/custom/capacity-control/resource-pools/$($script:PoolBackup.id)" `
                 -Body $body -ExtraHeaders @{ "If-Match" = "$($script:PoolCurrentVersion)" } | Out-Null
         }
         catch {

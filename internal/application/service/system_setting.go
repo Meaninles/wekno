@@ -179,14 +179,6 @@ var registry = map[string]settingSpec{
 			"向量化以及摘要、问题、知识图谱、Wiki 等衍生阶段；增加实例即可水平扩展总吞吐。" +
 			"修改后需重启所有解析实例方可生效。",
 	},
-	"derivative.tpm": {
-		Type:     "int",
-		EnvName:  "WEKNORA_DERIVATIVE_TPM",
-		Default:  int64(20000),
-		Category: "models",
-		Description: "全平台所有租户、所有知识库衍生任务共享的持续 Token 预算（TPM）。" +
-			"默认 20000，修改后跨实例动态生效；普通对话不计入，也不能借用该预算。",
-	},
 	"chat.queue.enabled": {
 		Type:     "bool",
 		EnvName:  "WEKNORA_CHAT_QUEUE_ENABLED",
@@ -194,14 +186,6 @@ var registry = map[string]settingSpec{
 		Category: "chat_queue",
 		Description: "是否启用聊天模型的会话级并发队列。默认开启；修改后通过 Redis 通知所有 API 实例，" +
 			"无需重启。关闭时新对话不再占用会话并发槽。",
-	},
-	"chat.queue.default_max_concurrent": {
-		Type:     "int",
-		EnvName:  "WEKNORA_CHAT_QUEUE_DEFAULT_MAX_CONCURRENT",
-		Default:  int64(8),
-		Category: "chat_queue",
-		Description: "每个实际聊天模型资源池默认允许同时执行的最大会话数，范围 1–4096。" +
-			"资源池可单独覆盖；默认 8，修改后对新请求和正在等待的会话立即生效。",
 	},
 	"chat.queue.default_max_waiting": {
 		Type:     "int",
@@ -671,6 +655,13 @@ func (s *systemSettingService) List(ctx context.Context) ([]*types.SystemSetting
 	}
 	sort.Strings(extraKeys)
 	for _, key := range extraKeys {
+		if key == "derivative.concurrency" || key == "derivative.tpm" ||
+			key == "chat.queue.default_max_concurrent" {
+			// Capacity is now owned by the actual-model resource pool. Keep
+			// legacy rows intact for audit/diagnostics, but never render them as
+			// writable settings that appear to affect bound models.
+			continue
+		}
 		out = append(out, byKey[key])
 	}
 	return out, nil
@@ -1223,25 +1214,6 @@ func validateRegistryEntry(key string, rawValue any) error {
 		}
 		if n <= 0 {
 			return errors.New("concurrency must be a positive integer")
-		}
-	case "derivative.tpm":
-		n, err := coerceToPositiveInt64(rawValue)
-		if err != nil {
-			return err
-		}
-		if n < 100 {
-			return errors.New("derivative TPM must be at least 100")
-		}
-		if n > 2_000_000 {
-			return errors.New("derivative TPM must not exceed 2000000")
-		}
-	case "chat.queue.default_max_concurrent":
-		n, err := coerceToPositiveInt64(rawValue)
-		if err != nil {
-			return err
-		}
-		if n < 1 || n > 4096 {
-			return errors.New("chat queue max concurrent must be between 1 and 4096")
 		}
 	case "chat.queue.default_max_waiting":
 		n, err := coerceToPositiveInt64(rawValue)

@@ -90,7 +90,7 @@ func TestAdmissionMaxWaitCapsLongerParentDeadline(t *testing.T) {
 	require.Less(t, time.Since(started), 300*time.Millisecond)
 }
 
-func TestBackgroundAdmissionIsNonBlockingAndReturnsRetryAfter(t *testing.T) {
+func TestBackgroundAdmissionWaitsForCapacityWithoutBusinessRetry(t *testing.T) {
 	config := testConfig(Limit{Concurrency: 1, PerTenant: 1})
 	config.BackgroundMaxWait = 0
 	manager := newManagerWithConfig(nil, config)
@@ -98,17 +98,35 @@ func TestBackgroundAdmissionIsNonBlockingAndReturnsRetryAfter(t *testing.T) {
 	first, err := manager.Acquire(WithBackground(context.Background()), spec)
 	require.NoError(t, err)
 
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		first.Release()
+		close(released)
+	}()
+	started := time.Now()
+	next, err := manager.Acquire(WithBackground(context.Background()), spec)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, time.Since(started), 35*time.Millisecond)
+	<-released
+	next.Release()
+}
+
+func TestFiniteBackgroundWaitYieldsWithoutFailureBudget(t *testing.T) {
+	config := testConfig(Limit{Concurrency: 1, PerTenant: 1})
+	config.BackgroundMaxWait = 35 * time.Millisecond
+	manager := newManagerWithConfig(nil, config)
+	spec := Spec{Kind: KindChat, Domain: "finite-background-wait", TenantID: 100}
+	first, err := manager.Acquire(WithBackground(context.Background()), spec)
+	require.NoError(t, err)
+	defer first.Release()
+
 	started := time.Now()
 	_, err = manager.Acquire(WithBackground(context.Background()), spec)
 	var deferred *AdmissionDeferredError
 	require.ErrorAs(t, err, &deferred)
-	require.GreaterOrEqual(t, deferred.RetryAfter, time.Second)
-	require.Less(t, time.Since(started), 50*time.Millisecond)
-
-	first.Release()
-	next, err := manager.Acquire(WithBackground(context.Background()), spec)
-	require.NoError(t, err)
-	next.Release()
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
+	require.GreaterOrEqual(t, time.Since(started), 30*time.Millisecond)
 }
 
 func TestBackgroundAdmissionPreservesInteractiveReserve(t *testing.T) {
@@ -122,7 +140,7 @@ func TestBackgroundAdmissionPreservesInteractiveReserve(t *testing.T) {
 	blockedCtx, cancel := context.WithTimeout(WithBackground(context.Background()), 50*time.Millisecond)
 	defer cancel()
 	_, err = manager.Acquire(blockedCtx, spec)
-	require.ErrorIs(t, err, ErrAdmissionDeferred)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	interactive, err := manager.Acquire(context.Background(), spec)
 	require.NoError(t, err)

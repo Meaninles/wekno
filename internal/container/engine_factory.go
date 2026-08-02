@@ -31,6 +31,7 @@ import (
 	weaviateRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/weaviate"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/tencent/vectordatabase-sdk-go/tcvectordb"
@@ -41,10 +42,15 @@ import (
 // injected into VectorStoreService for dynamic registry updates. The
 // EngineFactory type itself is unchanged — the audit sink is captured in the
 // closure rather than added to the signature.
-func NewEngineFactory(db *gorm.DB, cfg *config.Config, auditSvc interfaces.AuditLogService) interfaces.EngineFactory {
+func NewEngineFactory(
+	db *gorm.DB,
+	cfg *config.Config,
+	auditSvc interfaces.AuditLogService,
+	dependencyControl *dependencycontrol.Service,
+) interfaces.EngineFactory {
 	sink := newAuditSinkAdapter(auditSvc)
 	return func(ctx context.Context, store types.VectorStore) (interfaces.RetrieveEngineService, error) {
-		return createEngineServiceFromStore(ctx, store, db, cfg, sink)
+		return createEngineServiceFromStore(ctx, store, db, cfg, sink, dependencyControl)
 	}
 }
 
@@ -57,10 +63,11 @@ func createEngineServiceFromStore(
 	db *gorm.DB,
 	cfg *config.Config,
 	auditSink openSearchRepo.AuditSink,
+	dependencyControls ...*dependencycontrol.Service,
 ) (interfaces.RetrieveEngineService, error) {
 	switch store.EngineType {
 	case types.PostgresRetrieverEngineType:
-		return createPostgresEngine(store, db)
+		return createPostgresEngine(store, db, dependencyControls...)
 	case types.ElasticsearchRetrieverEngineType:
 		return createElasticsearchEngine(store, cfg)
 	case types.QdrantRetrieverEngineType:
@@ -109,10 +116,16 @@ func createOpenSearchEngine(
 	return retriever.NewKVHybridRetrieveEngine(repo, types.OpenSearchRetrieverEngineType), nil
 }
 
-func createPostgresEngine(store types.VectorStore, db *gorm.DB) (interfaces.RetrieveEngineService, error) {
+func createPostgresEngine(
+	store types.VectorStore, db *gorm.DB, dependencyControls ...*dependencycontrol.Service,
+) (interfaces.RetrieveEngineService, error) {
 	if store.ConnectionConfig.UseDefaultConnection {
 		repo := postgresRepo.NewPostgresRetrieveEngineRepository(db)
-		return retriever.NewKVHybridRetrieveEngine(repo, types.PostgresRetrieverEngineType), nil
+		engine := retriever.NewKVHybridRetrieveEngine(repo, types.PostgresRetrieverEngineType)
+		if len(dependencyControls) > 0 {
+			engine = dependencycontrol.WrapPostgresEngine(engine, dependencyControls[0])
+		}
+		return engine, nil
 	}
 	// Phase 1: only UseDefaultConnection is supported.
 	// Custom connections require connection pool management and migration handling.

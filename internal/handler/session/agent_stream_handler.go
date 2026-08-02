@@ -33,6 +33,7 @@ type AgentStreamHandler struct {
 
 	// State tracking
 	knowledgeRefs   []*types.SearchResult
+	retrievalTried  bool
 	finalAnswer     string
 	answerSegments  []*answerSegment     // Per-answer-event-ID accumulation, so superseded preambles can be dropped
 	eventStartTimes map[string]time.Time // Track start time for duration calculation
@@ -261,6 +262,13 @@ func (h *AgentStreamHandler) handleToolCall(ctx context.Context, evt event.Event
 	}
 
 	h.mu.Lock()
+	if sourcerefs.IsRetrievalToolName(data.ToolName) {
+		h.retrievalTried = true
+		h.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
+			h.knowledgeRefs,
+			true,
+		)
+	}
 	// Track start time for this tool call (use tool_call_id as key)
 	h.eventStartTimes[data.ToolCallID] = time.Now()
 	if !data.PreserveAnswer {
@@ -476,6 +484,10 @@ func (h *AgentStreamHandler) handleReferences(ctx context.Context, evt event.Eve
 
 	// Update assistant message references
 	h.assistantMessage.KnowledgeReferences = h.knowledgeRefs
+	h.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
+		h.knowledgeRefs,
+		h.retrievalTried,
+	)
 
 	// Append references event to stream
 	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
@@ -663,6 +675,16 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		h.assistantMessage.IsCompleted = true
 		h.assistantMessage.AgentDurationMs = data.TotalDurationMs
 
+		// Count inspected evidence before the final citation filter narrows the
+		// stored reference list to sources actually cited in the answer.
+		retrievalEvidence := mergeCitationReferences(h.knowledgeRefs, data.KnowledgeRefs)
+		retrievalAttempted := h.retrievalTried || data.RetrievalStats.Attempted
+		derivedStats := sourcerefs.RetrievalStatsFromReferences(retrievalEvidence, retrievalAttempted)
+		if data.RetrievalStats.Total > derivedStats.Total {
+			derivedStats = sourcerefs.NormalizeRetrievalStats(data.RetrievalStats)
+		}
+		h.assistantMessage.RetrievalStats = derivedStats
+
 		availableRefs := h.knowledgeRefs
 		if data.KnowledgeRefsAuthoritative {
 			availableRefs = data.KnowledgeRefs
@@ -690,6 +712,11 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 				h.assistantMessage.AgentSteps = agenttools.SanitizeAgentStepsForStorage(steps)
 			}
 		}
+		h.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsForAgentSteps(
+			h.assistantMessage.RetrievalStats,
+			h.assistantMessage.AgentSteps,
+		)
+		h.assistantMessage.AgentToolCount = sourcerefs.AgentToolCallCount(h.assistantMessage.AgentSteps)
 	}
 
 	// Fallback: if no answer events were streamed but we have a final answer,
@@ -744,6 +771,9 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 			"total_duration_ms":    data.TotalDurationMs,
 			"final_answer":         h.assistantMessage.Content,
 			"knowledge_references": h.knowledgeRefs,
+			"retrieval_stats":      h.assistantMessage.RetrievalStats,
+			"agent_mode":           h.assistantMessage.AgentMode,
+			"agent_tool_count":     h.assistantMessage.AgentToolCount,
 		},
 	}); err != nil {
 		logger.GetLogger(h.ctx).Errorf("Append complete event to stream failed: %v", err)

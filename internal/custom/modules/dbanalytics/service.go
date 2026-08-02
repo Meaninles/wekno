@@ -1403,11 +1403,22 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 	if eligible, _ := chart["eligible"].(bool); eligible {
 		displayMode = "chart_only"
 	}
+	queriedSourceNames := make([]string, 0)
+	seenSourceIDs := make(map[string]struct{})
+	for _, table := range queryTables {
+		if _, seen := seenSourceIDs[table.SourceID]; seen {
+			continue
+		}
+		seenSourceIDs[table.SourceID] = struct{}{}
+		if source, ok := sources[table.SourceID]; ok {
+			queriedSourceNames = append(queriedSourceNames, displaySourceName(&source))
+		}
+	}
 	return map[string]any{
 		"display_type":    DisplayTypeStructuredAnalysis,
 		"display_mode":    displayMode,
 		"analysis_type":   "database",
-		"source":          map[string]any{"type": "database", "source_count": len(sources)},
+		"source":          map[string]any{"type": "database", "source_count": len(seenSourceIDs), "source_names": queriedSourceNames},
 		"query":           querySQL,
 		"columns":         cols,
 		"rows":            resultRows,

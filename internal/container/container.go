@@ -60,6 +60,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
 	"github.com/Tencent/WeKnora/internal/custom/modules/databasepool"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
@@ -142,6 +143,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(initRedisClient))
 	must(container.Provide(initAntsPool))
 	must(container.Provide(contentcache.NewStore))
+	must(container.Provide(dependencycontrol.NewService))
 
 	must(container.Invoke(registerLangfuseCleanup))
 
@@ -942,6 +944,7 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 //   - Error if initialization fails
 func initRetrieveEngineRegistry(
 	db *gorm.DB, cfg *config.Config, auditSvc interfaces.AuditLogService,
+	dependencyControl *dependencycontrol.Service,
 ) (interfaces.RetrieveEngineRegistry, error) {
 	registry := retriever.NewRetrieveEngineRegistry()
 	retrieveDriver := strings.Split(os.Getenv("RETRIEVE_DRIVER"), ",")
@@ -953,8 +956,11 @@ func initRetrieveEngineRegistry(
 
 	if slices.Contains(retrieveDriver, "postgres") {
 		postgresRepo := postgresRepo.NewPostgresRetrieveEngineRepository(db)
+		postgresEngine := retriever.NewKVHybridRetrieveEngine(
+			postgresRepo, types.PostgresRetrieverEngineType,
+		)
 		if err := registry.Register(
-			retriever.NewKVHybridRetrieveEngine(postgresRepo, types.PostgresRetrieverEngineType),
+			dependencycontrol.WrapPostgresEngine(postgresEngine, dependencyControl),
 		); err != nil {
 			log.Errorf("Register postgres retrieve engine failed: %v", err)
 		} else {

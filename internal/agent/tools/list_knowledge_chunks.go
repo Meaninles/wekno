@@ -242,19 +242,19 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	formattedChunks := make([]map[string]interface{}, 0, len(chunks))
 	for idx, c := range chunks {
 		chunkData := map[string]interface{}{
-			"seq":             idx + 1,
-			"chunk_id":        c.ID,
-			"chunk_index":     c.ChunkIndex,
-			"content":         c.Content,
-			"chunk_type":      c.ChunkType,
-			"knowledge_id":    c.KnowledgeID,
-			"knowledge_base":  c.KnowledgeBaseID,
-			"start_at":        c.StartAt,
-			"end_at":          c.EndAt,
-			"parent_chunk_id": c.ParentChunkID,
+			"seq":               idx + 1,
+			"chunk_id":          c.ID,
+			"chunk_index":       c.ChunkIndex,
+			"content":           c.Content,
+			"chunk_type":        c.ChunkType,
+			"knowledge_id":      c.KnowledgeID,
+			"knowledge_base_id": c.KnowledgeBaseID,
+			"start_at":          c.StartAt,
+			"end_at":            c.EndAt,
+			"parent_chunk_id":   c.ParentChunkID,
 		}
-		if locator := sourcerefs.ModelSourceLocator(c.SourceLocator); locator != "" {
-			chunkData["source_locator"] = json.RawMessage(locator)
+		if len(c.SourceLocator) > 0 && json.Valid(c.SourceLocator) {
+			chunkData["source_locator"] = json.RawMessage(append([]byte(nil), c.SourceLocator...))
 		}
 
 		appendFAQChunkData(chunkData, c)
@@ -350,17 +350,19 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 
 	formattedChunks := []map[string]interface{}{
 		{
-			"seq":            1,
-			"chunk_id":       chunk.ID,
-			"chunk_index":    chunk.ChunkIndex,
-			"content":        chunk.Content,
-			"chunk_type":     chunk.ChunkType,
-			"knowledge_id":   chunk.KnowledgeID,
-			"knowledge_base": chunk.KnowledgeBaseID,
+			"seq":               1,
+			"chunk_id":          chunk.ID,
+			"chunk_index":       chunk.ChunkIndex,
+			"content":           chunk.Content,
+			"chunk_type":        chunk.ChunkType,
+			"knowledge_id":      chunk.KnowledgeID,
+			"knowledge_base_id": chunk.KnowledgeBaseID,
+			"start_at":          chunk.StartAt,
+			"end_at":            chunk.EndAt,
 		},
 	}
-	if locator := sourcerefs.ModelSourceLocator(chunk.SourceLocator); locator != "" {
-		formattedChunks[0]["source_locator"] = json.RawMessage(locator)
+	if len(chunk.SourceLocator) > 0 && json.Valid(chunk.SourceLocator) {
+		formattedChunks[0]["source_locator"] = json.RawMessage(append([]byte(nil), chunk.SourceLocator...))
 	}
 	appendFAQChunkData(formattedChunks[0], chunk)
 	normalizeFAQChunkDataMap(formattedChunks[0], chunk)

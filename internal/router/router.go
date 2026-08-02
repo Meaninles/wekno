@@ -21,7 +21,9 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/config"
 	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/handler"
 	"github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -91,6 +93,8 @@ type RouterParams struct {
 	WikiPageHandler              *handler.WikiPageHandler
 	CustomHandlers               *custombootstrap.Handlers
 	DocumentQueue                *documentqueue.Coordinator `optional:"true"`
+	DependencyControl            *dependencycontrol.Service
+	RuntimeProfile               runtimeprofile.Profile
 }
 
 // NewRouter 创建新的路由
@@ -134,8 +138,18 @@ func NewRouter(params RouterParams) *gin.Engine {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 	r.GET("/ready", func(c *gin.Context) {
-		if params.DocumentQueue != nil && !params.DocumentQueue.IsReady() {
+		// A dedicated API replica does not own parse leases, so its readiness
+		// must not depend on a local document coordinator that is intentionally
+		// not started for this role. Dev-all keeps the combined-process check.
+		if params.RuntimeProfile.RunsParseWorker() &&
+			params.DocumentQueue != nil && !params.DocumentQueue.IsReady() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
+			return
+		}
+		if ready, reason := params.DependencyControl.ReadyFor(params.RuntimeProfile); !ready {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status": "not_ready", "dependency": reason,
+			})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})

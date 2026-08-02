@@ -372,6 +372,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			Role:        "assistant",
 			RequestID:   c.GetString(types.RequestIDContextKey.String()),
 			IsCompleted: false,
+			AgentMode:   request.AgentEnabled,
 			Channel:     request.Channel,
 		},
 		knowledgeBaseIDs:       secutils.SanitizeForLogArray(kbIDs),
@@ -539,7 +540,14 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext) *sseStreamContext {
 	}
 
 	// Setup stop event handler
-	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel)
+	h.setupStopEventHandler(
+		eventBus,
+		reqCtx.sessionID,
+		reqCtx.session.TenantID,
+		reqCtx.assistantMessage,
+		reqCtx.receivedAt,
+		cancel,
+	)
 
 	// Watch for stop events independently of the client SSE connection so a
 	// user-requested stop reliably cancels generation even when the client
@@ -591,7 +599,9 @@ func (h *Handler) startTitleGeneration(
 		return
 	}
 	modelID := ""
-	if reqCtx.customAgent != nil && reqCtx.customAgent.Config.ModelID != "" {
+	if reqCtx.summaryModelID != "" {
+		modelID = reqCtx.summaryModelID
+	} else if reqCtx.customAgent != nil && reqCtx.customAgent.Config.ModelID != "" {
 		modelID = reqCtx.customAgent.Config.ModelID
 	}
 	logger.Infof(
@@ -889,6 +899,33 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	// (Agent mode handles completion in the defer block instead)
 	if mode == qaModeNormal {
 		var completionHandled bool
+		var quickAnswerHistoryMu sync.Mutex
+
+		// The RAG pipeline emits its query-understanding and retrieval stages as
+		// tool events. Persist the same canonical events that the live SSE client
+		// receives so a history reload does not have to guess whether a knowledge
+		// search happened (or lose its query/result status altogether).
+		streamCtx.eventBus.On(event.EventAgentToolCall, func(ctx context.Context, evt event.Event) error {
+			data, ok := evt.Data.(event.AgentToolCallData)
+			if !ok || data.ToolCallID == "" || data.ToolName == "" {
+				return nil
+			}
+			quickAnswerHistoryMu.Lock()
+			recordQuickAnswerToolCall(streamCtx.assistantMessage, data)
+			quickAnswerHistoryMu.Unlock()
+			return nil
+		})
+
+		streamCtx.eventBus.On(event.EventAgentToolResult, func(ctx context.Context, evt event.Event) error {
+			data, ok := evt.Data.(event.AgentToolResultData)
+			if !ok || data.ToolName == "" {
+				return nil
+			}
+			quickAnswerHistoryMu.Lock()
+			recordQuickAnswerToolResult(streamCtx.assistantMessage, data)
+			quickAnswerHistoryMu.Unlock()
+			return nil
+		})
 
 		// Persist reasoning_content into agent_steps so historical reload can
 		// reconstruct the thinking card (same shape as Agent-mode steps).
@@ -899,7 +936,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			if !ok || data.Content == "" {
 				return nil
 			}
+			quickAnswerHistoryMu.Lock()
 			appendQuickAnswerReasoning(streamCtx.assistantMessage, data.Content)
+			quickAnswerHistoryMu.Unlock()
 			return nil
 		})
 
@@ -917,6 +956,15 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					return nil
 				}
 				completionHandled = true
+				// Preserve inspected-source telemetry before final citation
+				// filtering replaces the candidate references with cited-only
+				// references. This path persists before the generic completion
+				// handler runs, so it must set the durable fields here.
+				streamCtx.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
+					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+					sourcerefs.AgentStepsAttemptedRetrieval(streamCtx.assistantMessage.AgentSteps),
+				)
+				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
 				filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
 					streamCtx.assistantMessage.Content,
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
@@ -932,7 +980,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 
 				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
 				updateCtx := context.WithValue(streamCtx.asyncCtx, types.TenantIDContextKey, reqCtx.session.TenantID)
+				quickAnswerHistoryMu.Lock()
 				h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx)
+				quickAnswerHistoryMu.Unlock()
 				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
 					Type:      event.EventAgentComplete,
 					SessionID: sessionID,
@@ -942,6 +992,8 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 						KnowledgeRefsAuthoritative: true,
 						MessageID:                  streamCtx.assistantMessage.ID,
 						RequestID:                  reqCtx.requestID,
+						TotalDurationMs:            streamCtx.assistantMessage.AgentDurationMs,
+						RetrievalStats:             streamCtx.assistantMessage.RetrievalStats,
 					},
 				})
 			}
@@ -1038,10 +1090,6 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			}
 		}
 
-		// Title generation is deliberately delayed until the conversation is
-		// admitted so queued turns consume no model capacity.
-		h.startTitleGeneration(reqCtx, streamCtx, generateTitle)
-
 		// Run VLM image analysis if applicable
 		h.runVLMAnalysisIfNeeded(streamCtx, reqCtx, mode)
 
@@ -1058,13 +1106,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			if qaReq.CustomAgent != nil {
 				if runner := agentQARunnerFor(qaReq.CustomAgent.Config.AgentType); runner != nil {
 					stageName = "custom_agent_execution"
-					serviceErr = runner(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
-				} else {
-					serviceErr = h.sessionService.AgentQA(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
 				}
-			} else {
-				serviceErr = h.sessionService.AgentQA(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
 			}
+			serviceErr = RunAgentQA(streamCtx.asyncCtx, h.sessionService, qaReq, streamCtx.eventBus)
 		}
 
 		if serviceErr != nil {
@@ -1091,6 +1135,12 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				})
 			}
 		}
+
+		// Title generation is auxiliary. Start it only after the answer path has
+		// returned so it cannot compete with the user's answer for local-model
+		// admission or inference capacity. The SSE handler keeps only its existing
+		// short grace window; title generation never extends answer completion.
+		h.startTitleGeneration(reqCtx, streamCtx, generateTitle)
 	}()
 
 	// Handle SSE events (blocking)
@@ -1214,14 +1264,70 @@ func appendQuickAnswerReasoning(msg *types.Message, content string) {
 	if content == "" {
 		return
 	}
-	if len(msg.AgentSteps) == 0 {
-		msg.AgentSteps = types.AgentSteps{{
-			Iteration: 0,
-			Timestamp: time.Now(),
-			ToolCalls: make([]types.ToolCall, 0),
-		}}
+	step := ensureQuickAnswerStep(msg, 0)
+	step.ReasoningContent += content
+}
+
+func ensureQuickAnswerStep(msg *types.Message, iteration int) *types.AgentStep {
+	for i := range msg.AgentSteps {
+		if msg.AgentSteps[i].Iteration == iteration {
+			return &msg.AgentSteps[i]
+		}
 	}
-	msg.AgentSteps[0].ReasoningContent += content
+	msg.AgentSteps = append(msg.AgentSteps, types.AgentStep{
+		Iteration: iteration,
+		Timestamp: time.Now(),
+		ToolCalls: make([]types.ToolCall, 0),
+	})
+	return &msg.AgentSteps[len(msg.AgentSteps)-1]
+}
+
+func recordQuickAnswerToolCall(msg *types.Message, data event.AgentToolCallData) {
+	step := ensureQuickAnswerStep(msg, data.Iteration)
+	for i := range step.ToolCalls {
+		if step.ToolCalls[i].ID != data.ToolCallID {
+			continue
+		}
+		step.ToolCalls[i].Name = data.ToolName
+		step.ToolCalls[i].Args = data.Arguments
+		return
+	}
+	step.ToolCalls = append(step.ToolCalls, types.ToolCall{
+		ID:   data.ToolCallID,
+		Name: data.ToolName,
+		Args: data.Arguments,
+	})
+}
+
+func recordQuickAnswerToolResult(msg *types.Message, data event.AgentToolResultData) {
+	step := ensureQuickAnswerStep(msg, data.Iteration)
+	toolIndex := -1
+	for i := range step.ToolCalls {
+		if data.ToolCallID != "" && step.ToolCalls[i].ID == data.ToolCallID {
+			toolIndex = i
+			break
+		}
+	}
+	if toolIndex < 0 {
+		step.ToolCalls = append(step.ToolCalls, types.ToolCall{
+			ID:   data.ToolCallID,
+			Name: data.ToolName,
+			Args: map[string]interface{}{},
+		})
+		toolIndex = len(step.ToolCalls) - 1
+	}
+
+	toolCall := &step.ToolCalls[toolIndex]
+	if toolCall.Name == "" {
+		toolCall.Name = data.ToolName
+	}
+	toolCall.Duration = data.Duration
+	toolCall.Result = &types.ToolResult{
+		Success: data.Success,
+		Output:  data.Output,
+		Data:    data.Data,
+		Error:   data.Error,
+	}
 }
 
 func userFacingAgentErrorMessage(err error) string {

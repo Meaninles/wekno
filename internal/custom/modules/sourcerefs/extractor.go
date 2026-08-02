@@ -88,14 +88,18 @@ func extractKnowledgeReferences(data map[string]interface{}) []*types.SearchResu
 
 	switch displayType {
 	case "search_results":
-		for _, item := range mapSlice(data["results"]) {
-			refs = append(refs, knowledgeRefFromMap(item, data))
+		for index, item := range mapSlice(data["results"]) {
+			ref := knowledgeRefFromMap(item, data)
+			setToolResultPosition(ref, item, index+1)
+			refs = append(refs, ref)
 		}
 	case "grep_results":
 		chunks := mapSlice(data["chunk_results"])
 		if len(chunks) > 0 {
-			for _, item := range chunks {
-				refs = append(refs, knowledgeRefFromMap(item, data))
+			for index, item := range chunks {
+				ref := knowledgeRefFromMap(item, data)
+				setToolResultPosition(ref, item, index+1)
+				refs = append(refs, ref)
 			}
 			break
 		}
@@ -104,11 +108,15 @@ func extractKnowledgeReferences(data map[string]interface{}) []*types.SearchResu
 	case "knowledge_chunks_list":
 		chunks := mapSlice(data["chunks"])
 		if len(chunks) == 0 {
-			refs = append(refs, knowledgeRefFromMap(data, data))
+			ref := knowledgeRefFromMap(data, data)
+			setToolResultPosition(ref, data, 1)
+			refs = append(refs, ref)
 			break
 		}
-		for _, item := range chunks {
-			refs = append(refs, knowledgeRefFromMap(item, data))
+		for index, item := range chunks {
+			ref := knowledgeRefFromMap(item, data)
+			setToolResultPosition(ref, item, index+1)
+			refs = append(refs, ref)
 		}
 	}
 
@@ -148,7 +156,7 @@ func knowledgeRefFromMap(item map[string]interface{}, parent map[string]interfac
 	metadata := map[string]string{
 		"source_type": SourceTypeKnowledge,
 	}
-	copySelectedMetadata(metadata, item, "source_query", "query_type", "knowledge_base_type", "file_name", "file_type", "chunk_count")
+	copySelectedMetadata(metadata, item, "source_query", "query_type", "knowledge_base_type", "knowledge_base_name", "file_name", "file_type", "chunk_count")
 	return &types.SearchResult{
 		ID:                id,
 		Content:           content,
@@ -157,10 +165,25 @@ func knowledgeRefFromMap(item map[string]interface{}, parent map[string]interfac
 		KnowledgeBaseID:   firstNonEmpty(stringValue(item["knowledge_base_id"]), stringValue(parent["knowledge_base_id"])),
 		KnowledgeFilename: firstNonEmpty(stringValue(item["knowledge_filename"]), stringValue(item["file_name"])),
 		ChunkIndex:        intValue(firstNonEmptyValue(item["chunk_index"], item["index"])),
+		StartAt:           intValue(item["start_at"]),
+		EndAt:             intValue(item["end_at"]),
 		Score:             floatValue(item["score"]),
 		ChunkType:         chunkType,
 		Metadata:          metadata,
 		SourceLocator:     jsonValue(item["source_locator"]),
+	}
+}
+
+func setToolResultPosition(ref *types.SearchResult, item map[string]interface{}, fallback int) {
+	if ref == nil {
+		return
+	}
+	position := intValue(firstNonEmptyValue(item["result_index"], item["seq"], item["rank"]))
+	if position <= 0 {
+		position = fallback
+	}
+	if position > 0 {
+		ref.Metadata["tool_result_position"] = fmt.Sprintf("%d", position)
 	}
 }
 
@@ -196,7 +219,7 @@ func jsonValue(value interface{}) types.JSON {
 
 func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
 	var refs []*types.SearchResult
-	for _, item := range mapSlice(data["results"]) {
+	for index, item := range mapSlice(data["results"]) {
 		rawURL := stringValue(item["url"])
 		title := firstNonEmpty(stringValue(item["title"]), hostFromURL(rawURL), rawURL)
 		content := firstNonEmpty(
@@ -213,6 +236,11 @@ func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
 			"url":         rawURL,
 		}
 		copySelectedMetadata(metadata, item, "source", "published_at", "prompt", "method")
+		position := intValue(firstNonEmptyValue(item["result_index"], item["rank"]))
+		if position <= 0 {
+			position = index + 1
+		}
+		metadata["tool_result_position"] = fmt.Sprintf("%d", position)
 		refs = append(refs, &types.SearchResult{
 			ID:             firstNonEmpty(rawURL, title),
 			Content:        content,
@@ -280,9 +308,38 @@ func extractStructuredAnalysisReference(data map[string]interface{}, output stri
 	analysisType := firstNonEmpty(stringValue(data["analysis_type"]), "table")
 	knowledgeID := ""
 	title := "查询结果"
+	dataSourceKeys := make([]string, 0)
+	dataSourceCount := 0
 	if source, ok := data["source"].(map[string]interface{}); ok {
 		knowledgeID = stringValue(source["knowledge_id"])
 		title = firstNonEmpty(stringValue(source["table_name"]), title)
+		if knowledgeID != "" {
+			dataSourceKeys = append(dataSourceKeys, knowledgeID)
+		}
+		for _, name := range stringSlice(source["source_names"]) {
+			if name = strings.TrimSpace(name); name != "" {
+				dataSourceKeys = append(dataSourceKeys, name)
+			}
+		}
+		dataSourceCount = intValue(source["source_count"])
+	}
+	dataSourceKeys = uniqueStrings(dataSourceKeys)
+	if dataSourceCount < len(dataSourceKeys) {
+		dataSourceCount = len(dataSourceKeys)
+	}
+	metadata := map[string]string{
+		"source_type":     SourceTypeData,
+		"evidence_origin": analysisType + "_query",
+		"query":           query,
+		MetadataChunkID:   evidenceID,
+	}
+	if len(dataSourceKeys) > 0 {
+		if encoded, err := json.Marshal(dataSourceKeys); err == nil {
+			metadata["data_source_keys"] = string(encoded)
+		}
+	}
+	if dataSourceCount > 0 {
+		metadata["data_source_count"] = fmt.Sprintf("%d", dataSourceCount)
 	}
 	return &types.SearchResult{
 		ID:             evidenceID,
@@ -290,13 +347,25 @@ func extractStructuredAnalysisReference(data map[string]interface{}, output stri
 		KnowledgeID:    knowledgeID,
 		KnowledgeTitle: title,
 		ChunkType:      "data_query_result",
-		Metadata: map[string]string{
-			"source_type":     SourceTypeKnowledge,
-			"evidence_origin": analysisType + "_query",
-			"query":           query,
-			MetadataChunkID:   evidenceID,
-		},
+		Metadata:       metadata,
 	}
+}
+
+func uniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func firstSubmatch(re *regexp.Regexp, value string) string {

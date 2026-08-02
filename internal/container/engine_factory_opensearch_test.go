@@ -94,7 +94,7 @@ func TestInitRetrieveEngineRegistry_OpenSearchEnvPath(t *testing.T) {
 	t.Setenv("RETRIEVE_DRIVER", "opensearch")
 	t.Setenv("OPENSEARCH_ADDR", ts.URL)
 
-	registry, err := initRetrieveEngineRegistry(db, &config.Config{}, &fakeAuditSvc{})
+	registry, err := initRetrieveEngineRegistry(db, &config.Config{}, &fakeAuditSvc{}, nil)
 	if err != nil {
 		t.Fatalf("initRetrieveEngineRegistry: %v", err)
 	}

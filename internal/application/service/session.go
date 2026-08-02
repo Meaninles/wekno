@@ -4,9 +4,10 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
-	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sessiontitle"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -499,12 +500,13 @@ func (s *sessionService) GenerateTitle(ctx context.Context,
 		return "", stderrors.New("no user message found")
 	}
 
-	// Use provided modelID, or fallback to first available KnowledgeQA model
+	// Use provided modelID, or fallback to first available interactive model.
+	// Model selection or generation failure never triggers a second model call;
+	// the local fallback below guarantees a durable non-empty title.
 	if modelID == "" {
 		models, err := s.modelService.ListModels(ctx)
 		if err != nil {
-			logger.ErrorWithFields(ctx, err, nil)
-			return "", fmt.Errorf("failed to list models: %w", err)
+			logger.Warnf(ctx, "Unable to list title models, using local fallback: %v", err)
 		}
 		for _, model := range models {
 			if model == nil {
@@ -517,55 +519,68 @@ func (s *sessionService) GenerateTitle(ctx context.Context,
 			}
 		}
 		if modelID == "" {
-			logger.Error(ctx, "No KnowledgeQA model found")
-			return "", stderrors.New("no KnowledgeQA model available for title generation")
+			logger.Warn(ctx, "No interactive model found for title, using local fallback")
 		}
 	} else {
 		logger.Infof(ctx, "Using specified model for title generation: %s", modelID)
 	}
 
-	chatModel, err := s.modelService.GetChatModel(ctx, modelID)
-	if err != nil {
-		logger.ErrorWithFields(ctx, err, map[string]interface{}{
-			"model_id": modelID,
-		})
-		return "", err
+	title := sessiontitle.Fallback(message.Content)
+	if modelID != "" {
+		if titleModel, modelErr := s.modelService.GetChatModel(ctx, modelID); modelErr != nil {
+			logger.Warnf(ctx, "Unable to load title model %s, using local fallback: %v", modelID, modelErr)
+		} else {
+			titlePrompt := types.RenderPromptPlaceholders(s.cfg.Conversation.GenerateSessionTitlePrompt, types.PlaceholderValues{
+				"language": types.LanguageNameFromContext(ctx),
+			})
+			thinking := false
+			response, generateErr := titleModel.Chat(ctx, []chat.Message{
+				{Role: "system", Content: titlePrompt},
+				{Role: "user", Content: message.Content},
+			}, &chat.ChatOptions{
+				Temperature:         0.3,
+				MaxCompletionTokens: 64,
+				Thinking:            &thinking,
+			})
+			if generateErr != nil {
+				logger.Warnf(ctx, "Title model failed, using local fallback: %v", generateErr)
+			} else if normalized := sessiontitle.NormalizeModelTitle(response.Content); normalized != "" {
+				title = normalized
+			} else {
+				logger.Warnf(ctx, "Title model returned empty/thinking-only content; using local fallback")
+			}
+		}
 	}
 
-	// Prepare messages for title generation
-	titlePrompt := types.RenderPromptPlaceholders(s.cfg.Conversation.GenerateSessionTitlePrompt, types.PlaceholderValues{
-		"language": types.LanguageNameFromContext(ctx),
-	})
-	var chatMessages []chat.Message
-	chatMessages = append(chatMessages,
-		chat.Message{Role: "system", Content: titlePrompt},
+	// The model may have consumed the caller's entire auxiliary timeout. Title
+	// persistence is a short, local database operation and must still commit the
+	// already-derived deterministic fallback in that case. WithoutCancel keeps
+	// tenant/request values while preventing an expired model context from
+	// silently leaving the session titled "New conversation" forever.
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer persistCancel()
+	updated, err := s.sessionRepo.UpdateTitleIfEmpty(
+		persistCtx, session.TenantID, session.UserID, session.ID, title,
 	)
-	chatMessages = append(chatMessages,
-		chat.Message{Role: "user", Content: message.Content},
-	)
-
-	// Call model to generate title
-	thinking := false
-	response, err := chatModel.Chat(ctx, chatMessages, &chat.ChatOptions{
-		Temperature: 0.3,
-		Thinking:    &thinking,
-	})
 	if err != nil {
-		logger.ErrorWithFields(ctx, err, nil)
+		logger.ErrorWithFields(persistCtx, err, nil)
 		return "", err
 	}
-
-	// Process and store the generated title
-	session.Title = strings.TrimPrefix(response.Content, "<think>\n\n</think>")
-
-	// Update session with new title
-	_, err = s.sessionRepo.Update(ctx, session, session.UserID)
-	if err != nil {
-		logger.ErrorWithFields(ctx, err, nil)
-		return "", err
+	if !updated {
+		current, getErr := s.sessionRepo.Get(
+			persistCtx, session.TenantID, session.UserID, session.ID,
+		)
+		if getErr != nil {
+			return "", getErr
+		}
+		title = current.Title
 	}
+	if title == "" {
+		return "", stderrors.New("session title remained empty after generation")
+	}
+	session.Title = title
 
-	return session.Title, nil
+	return title, nil
 }
 
 // GenerateTitleAsync generates a title for the session asynchronously
@@ -601,6 +616,10 @@ func (s *sessionService) GenerateTitleAsync(
 		if langfuseTrace != nil {
 			bgCtx = context.WithValue(bgCtx, types.LangfuseTraceContextKey, langfuseTrace)
 		}
+		// Title generation is auxiliary and must never leak a long-lived model
+		// request after the answer has finished.
+		bgCtx, cancel := context.WithTimeout(bgCtx, 20*time.Second)
+		defer cancel()
 
 		// Skip if title already exists
 		if session.Title != "" {
@@ -623,10 +642,11 @@ func (s *sessionService) GenerateTitleAsync(
 			return
 		}
 
-		// Emit title update event - BUG FIX: use bgCtx instead of ctx
-		// The original ctx is from the HTTP request and may be cancelled by the time we get here
+		// The model timeout must not suppress the already-persisted title event.
+		eventCtx, eventCancel := context.WithTimeout(context.WithoutCancel(bgCtx), 5*time.Second)
+		defer eventCancel()
 		if eventBus != nil {
-			if err := eventBus.Emit(bgCtx, event.Event{
+			if err := eventBus.Emit(eventCtx, event.Event{
 				Type:      event.EventSessionTitle,
 				SessionID: session.ID,
 				Data: event.SessionTitleData{
@@ -634,11 +654,11 @@ func (s *sessionService) GenerateTitleAsync(
 					Title:     title,
 				},
 			}); err != nil {
-				logger.ErrorWithFields(bgCtx, err, map[string]interface{}{
+				logger.ErrorWithFields(eventCtx, err, map[string]interface{}{
 					"session_id": session.ID,
 				})
 			} else {
-				logger.Infof(bgCtx, "Title update event emitted successfully, session ID: %s, title: %s", session.ID, title)
+				logger.Infof(eventCtx, "Title update event emitted successfully, session ID: %s, title: %s", session.ID, title)
 			}
 		}
 	}()

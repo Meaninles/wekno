@@ -7,19 +7,13 @@ import {
   type SourceReferenceItem,
 } from './sourceReferences.ts'
 
-/**
- * Citation tags accepted from model output.
- *
- * `<src id="Sx" />` is the canonical protocol. Existing `<kb/>` and `<web/>`
- * renderers remain isolated legacy paths; malformed `<src>` variants are not
- * interpreted or repaired.
- */
-export const KB_WEB_TAG_RE = /<(?:kb|web)\b[^>]*?\s*\/?>|<src\s+id="S[1-9][0-9]*"\s*\/>/g
-const KB_TAG_ATTR_RE = /<kb\b([^>]*?)\s*\/?>/g
-const WEB_TAG_ATTR_RE = /<web\b([^>]*?)\s*\/?>/g
-const SRC_TAG_ATTR_RE = /<src\s+id="(S[1-9][0-9]*)"\s*\/>/g
-
-const ATTRIBUTE_REGEX = /([\w-]+)\s*=\s*"([^"]*)"/g
+/** The only citation tag accepted from model output. */
+export const SOURCE_CITATION_TAG_RE = /<src id="S[1-9][0-9]*" \/>/g
+const SRC_TAG_ATTR_RE = /<src id="(S[1-9][0-9]*)" \/>/g
+const SOURCE_CITATION_TAG_EXACT_RE = /^<src id="S[1-9][0-9]*" \/>$/
+const CITATION_LIKE_TAG_RE = /<\/?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*>/gi
+const MARKDOWN_CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
+const WIKI_HANDLE_RE = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g
 
 /**
  * Hide a citation tag while the typewriter has only emitted part of it.
@@ -57,32 +51,12 @@ export type CitationKnowledgeRef = SourceReference & {
   metadata?: Record<string, string>
 }
 
-function parseTagAttributes(attrString: string): Record<string, string> {
-  const attributes: Record<string, string> = {}
-  if (!attrString) return attributes
-  ATTRIBUTE_REGEX.lastIndex = 0
-  let match: RegExpExecArray | null
-  while ((match = ATTRIBUTE_REGEX.exec(attrString)) !== null) {
-    attributes[match[1]] = match[2]
-  }
-  return attributes
-}
-
 function escapeHtml(text: string): string {
   return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-}
-
-function truncateMiddle(text: string, maxLength = 13): string {
-  if (!text) return ''
-  if (text.length <= maxLength) return text
-  const half = Math.floor((maxLength - 3) / 2)
-  const start = text.slice(0, half + ((maxLength - 3) % 2))
-  const end = text.slice(-half)
-  return `${start}...${end}`
 }
 
 function sourceType(ref: CitationKnowledgeRef): string {
@@ -116,6 +90,36 @@ export function resolveCitationChunkId(
   return exact?.metadata?.chunk_id || exact?.id || ''
 }
 
+/**
+ * Filter unsupported citation syntax during streaming. Final responses are
+ * filtered by the backend authority as well; this keeps an invalid completed
+ * tag from flashing before that final event arrives. Code examples remain
+ * literal text and are never treated as citations.
+ */
+export function stripUnsupportedCitationTags(content: string): string {
+  if (!content) return content
+
+  const filterSegment = (segment: string): string => segment
+    .replace(CITATION_LIKE_TAG_RE, (tag) => (
+      SOURCE_CITATION_TAG_EXACT_RE.test(tag) ? tag : ''
+    ))
+    .replace(WIKI_HANDLE_RE, (_value, slug: string, label?: string) => (
+      String(label || slug || '').trim()
+    ))
+
+  let output = ''
+  let start = 0
+  MARKDOWN_CODE_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = MARKDOWN_CODE_RE.exec(content)) !== null) {
+    output += filterSegment(content.slice(start, match.index))
+    output += match[0]
+    start = match.index + match[0].length
+  }
+  output += filterSegment(content.slice(start))
+  return output
+}
+
 function renderSourceCitation(
   item: SourceReferenceItem,
   sourceId: string,
@@ -137,7 +141,7 @@ function renderSourceCitation(
   return `<span class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-chunk-id="${safeChunkId}" data-chunk-index="${safeChunkIndex}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" role="button" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"><span class="citation-number">${safeNumber}</span></span>`
 }
 
-/** Convert <web/> / <kb/> / [[wiki]] tags into inline citation HTML. */
+/** Convert canonical source handles into inline citation HTML. */
 export function preprocessCitationTags(
   contentStr: string,
   refs?: CitationKnowledgeRef[] | null,
@@ -151,54 +155,7 @@ export function preprocessCitationTags(
     return renderSourceCitation(item, sourceId, sourceCitationNumberById)
   }
 
-  return contentStr
-    .replace(SRC_TAG_ATTR_RE, replaceSourceTag)
-    .replace(WEB_TAG_ATTR_RE, (_m, attrString: string) => {
-      const attrs = parseTagAttributes(attrString)
-      const url = attrs.url || ''
-      const title = attrs.title || ''
-      if (!url) return ''
-
-      let domain = url
-      try {
-        const u = new URL(url)
-        const host = u.hostname || ''
-        const parts = host.split('.')
-        domain = parts.length >= 2 ? parts.slice(-2).join('.') : host || url
-      } catch {
-        // keep original
-      }
-      const safeTitle = escapeHtml(title)
-      const safeUrl = escapeHtml(url)
-      return `<a class="citation citation-web" data-url="${safeUrl}" href="${safeUrl}" target="_blank" rel="noopener noreferrer"><span class="citation-icon citation-icon--web" aria-hidden="true"></span><span class="citation-domain">${domain}</span><span class="citation-tip"><span class="tip-title">${safeTitle}</span><span class="tip-url">${safeUrl}</span></span></a>`
-    })
-    .replace(KB_TAG_ATTR_RE, (_m, attrString: string) => {
-      const attrs = parseTagAttributes(attrString)
-      const doc = attrs.doc || ''
-      const rawChunkId = attrs.chunk_id || attrs.chunkId || ''
-      const kbId = attrs.kb_id || attrs.kbId || ''
-      const chunkId = resolveCitationChunkId(rawChunkId, { doc, kbId }, refs)
-      if (!doc || !chunkId) return ''
-
-      const safeDoc = escapeHtml(doc)
-      const safeKbId = escapeHtml(kbId)
-      const safeChunkId = escapeHtml(chunkId)
-      const displayDoc = escapeHtml(truncateMiddle(doc))
-      return `<span class="citation citation-kb" data-kb-id="${safeKbId}" data-chunk-id="${safeChunkId}" data-doc="${safeDoc}" role="button" tabindex="0"><span class="citation-icon citation-icon--book" aria-hidden="true"></span><span class="citation-text">${displayDoc}</span><span class="citation-tip"><span class="tip-loading">…</span></span></span>`
-    })
-    .replace(/\[\[([^\]]+)\]\]/g, (match, inner: string) => {
-      const pipeIdx = inner.indexOf('|')
-      const slug = pipeIdx > 0 ? inner.substring(0, pipeIdx).trim() : inner.trim()
-      if (!slug) return match
-      let display = slug
-      if (pipeIdx > 0) {
-        display = inner.substring(pipeIdx + 1).trim()
-      } else {
-        const parts = slug.split('/')
-        display = parts.length > 1 ? parts.slice(1).join('/') : slug
-      }
-      return `<a href="#" class="wiki-content-link citation-wiki" data-slug="${escapeHtml(slug)}">${escapeHtml(display)}</a>`
-    })
+  return contentStr.replace(SRC_TAG_ATTR_RE, replaceSourceTag)
 }
 
 const HTML_PLACEHOLDER_RE = /@@WEKNORA_HTML_PLACEHOLDER_(\d+)@@/g
@@ -219,9 +176,10 @@ export function extractCitationHtmlPlaceholders(
     return `@@WEKNORA_HTML_PLACEHOLDER_${idx}@@`
   }
 
-  const content = contentStr
-    .replace(KB_WEB_TAG_RE, (match) => storeHtml(preprocessCitationTags(match, refs, sourceCitationNumberById)))
-    .replace(/\[\[([^\]]+)\]\]/g, (match) => storeHtml(preprocessCitationTags(match, refs, sourceCitationNumberById)))
+  const content = contentStr.replace(
+    SOURCE_CITATION_TAG_RE,
+    (match) => storeHtml(preprocessCitationTags(match, refs, sourceCitationNumberById)),
+  )
 
   return { content, htmlSnippets }
 }
@@ -249,26 +207,26 @@ export function joinCitationTagsToPreviousLine(content: string): string {
   while (result !== prev) {
     prev = result
     result = result.replace(
-      /(<(?:kb|web|src)\b[^>]*?\s*\/?>)\s*\n+\s*(<(?:kb|web|src)\b)/gi,
+      /(<src\b[^>]*?\s*\/?>)\s*\n+\s*(<src\b)/gi,
       '$1 $2',
     )
   }
 
   // Blank lines before citations: join to the previous content. Fenced-code
   // delimiters are the only exception because ``` / ~~~ must stay on their own line.
-  result = result.replace(/\n[ \t]*\n+([ \t]*<(?:kb|web|src)\b)/gi, (match, kbStart, offset, full) => {
+  result = result.replace(/\n[ \t]*\n+([ \t]*<src\b)/gi, (match, srcStart, offset, full) => {
     const before = full.slice(0, offset)
     const lastLine = before.split('\n').filter((line: string) => line.trim()).pop() || ''
     if (isFencedCodeDelimiterLine(lastLine)) {
-      return `\n\n${kbStart}`
+      return `\n\n${srcStart}`
     }
-    return ` ${kbStart.trimStart()}`
+    return ` ${srcStart.trimStart()}`
   })
 
   // Single newline before citation when it follows text or another citation (not after a blank line)
   result = result.replace(
-    /(?<!\n)(<(?:kb|web|src)\b[^>]*?\s*\/?>|[ \t]*\S[^\n]*?)\n([ \t]*<(?:kb|web|src)\b)/g,
-    (match, beforePart: string, kbStart: string, offset: number, full: string) => {
+    /(?<!\n)(<src\b[^>]*?\s*\/?>|[ \t]*\S[^\n]*?)\n([ \t]*<src\b)/g,
+    (match, beforePart: string, srcStart: string, offset: number, full: string) => {
       // Resolve the full preceding line: lazy capture + lookbehind can grab only a
       // partial line (e.g. ``` captured as ``), which would skip the fence check.
       const lineStart = full.lastIndexOf('\n', offset - 1) + 1
@@ -276,7 +234,7 @@ export function joinCitationTagsToPreviousLine(content: string): string {
       if (isFencedCodeDelimiterLine(fullPrevLine)) {
         return match
       }
-      return `${beforePart} ${kbStart.trimStart()}`
+      return `${beforePart} ${srcStart.trimStart()}`
     },
   )
 
@@ -307,10 +265,10 @@ export function collapseStandaloneCitationParagraphs(html: string): string {
   return result
 }
 
-/** Preserve raw <kb>/<web> tags before sanitizers that would strip them. */
+/** Preserve canonical source handles before markdown transformations. */
 export function preserveCitationTags(contentStr: string): { text: string; tags: string[] } {
   const tags: string[] = []
-  const text = contentStr.replace(KB_WEB_TAG_RE, (match) => {
+  const text = contentStr.replace(SOURCE_CITATION_TAG_RE, (match) => {
     const idx = tags.length
     tags.push(match)
     return `\x00TAG${idx}\x00`

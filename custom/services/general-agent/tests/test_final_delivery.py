@@ -13,7 +13,7 @@ from app.final_delivery import (  # noqa: E402
     requires_passive_terminal_delivery,
     uses_claude_sdk_terminal_projection,
 )
-from app.runner import runtime_summary, tool_catalog  # noqa: E402
+from app.runner import FINAL_ANSWER_SOURCE_CITATION_RULE, runtime_summary, tool_catalog  # noqa: E402
 from app.schemas import ChatPayload, LLMConfig, RuntimeConfigSpec  # noqa: E402
 
 
@@ -84,6 +84,11 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
         self.assertIn("final_answer", tool_catalog(structured))
         self.assertIn("final_answer", runtime_summary(structured))
 
+    def test_structured_final_answer_uses_the_shared_source_handle(self):
+        self.assertIn("source_references", FINAL_ANSWER_SOURCE_CITATION_RULE)
+        self.assertIn("cite_exactly", FINAL_ANSWER_SOURCE_CITATION_RULE)
+        self.assertIn('<src id="S1" />', FINAL_ANSWER_SOURCE_CITATION_RULE)
+
     def test_same_message_id_tool_use_invalidates_earlier_text_despite_new_uuid(self):
         collector = ClaudeSDKTerminalCollector()
         collector.observe(
@@ -127,6 +132,35 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
 
         self.assertTrue(collector.frozen)
         self.assertTrue(collector.assistant_matches_result)
+        self.assertEqual(collector.answer(), "这是工具之后的完整最终回答。")
+
+    def test_gateway_reused_message_id_does_not_discard_post_tool_answer(self):
+        collector = ClaudeSDKTerminalCollector()
+        collector.observe(
+            AssistantMessage(
+                content=[TextBlock("我先查询制度。")],
+                message_id="gateway-shared-message",
+                uuid="callback-preamble",
+            )
+        )
+        collector.observe(
+            AssistantMessage(
+                content=[ToolUseBlock("tool-1", "lookup_policy", {})],
+                message_id="gateway-shared-message",
+                uuid="callback-tool",
+            )
+        )
+        collector.observe(
+            AssistantMessage(
+                content=[TextBlock("这是工具之后的完整最终回答。")],
+                message_id="gateway-shared-message",
+                uuid="callback-final",
+            )
+        )
+        collector.observe(ResultMessage(None))
+
+        self.assertTrue(collector.frozen)
+        self.assertEqual(collector.candidate_answer(), "这是工具之后的完整最终回答。")
         self.assertEqual(collector.answer(), "这是工具之后的完整最终回答。")
 
     def test_success_result_is_authoritative_without_regeneration_on_mismatch(self):

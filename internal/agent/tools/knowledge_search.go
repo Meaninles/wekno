@@ -74,6 +74,10 @@ Avoid:
   These should reflect the meaning or topic you want embeddings to capture.
 - knowledge_base_ids (optional): limit the search scope.
 
+When multiple knowledge bases are available and the user names one, resolve
+that name from the system-provided knowledge-base list and pass only its ID in
+knowledge_base_ids. A document title does not prove knowledge-base membership.
+
 ## Output
 Returns chunks ranked by semantic similarity, reranked when applicable.  
 Results represent conceptual relevance, not literal keyword overlap.`,
@@ -293,7 +297,7 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 	// Execute concurrent search using pre-computed search targets
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Starting concurrent search with %d search targets",
 		len(searchTargets))
-	kbTypeMap := t.getKnowledgeBaseTypes(ctx, kbIDs)
+	kbTypeMap, kbNameMap := t.getKnowledgeBaseInfo(ctx, kbIDs)
 
 	allResults := t.concurrentSearchByTargets(ctx, queries, searchTargets,
 		topK, vectorThreshold, keywordThreshold, kbTypeMap)
@@ -414,7 +418,7 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 
 	// Build output
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Formatting output with %d final results", len(deduplicatedResults))
-	result, err := t.formatOutput(ctx, deduplicatedResults, kbIDs, queries)
+	result, err := t.formatOutput(ctx, deduplicatedResults, kbIDs, queries, kbNameMap)
 	if err != nil {
 		logger.Errorf(ctx, "[Tool][KnowledgeSearch] Failed to format output: %v", err)
 		return result, err
@@ -423,9 +427,12 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 	return result, nil
 }
 
-// getKnowledgeBaseTypes fetches knowledge base types for the given IDs
-func (t *KnowledgeSearchTool) getKnowledgeBaseTypes(ctx context.Context, kbIDs []string) map[string]string {
+// getKnowledgeBaseInfo fetches model-visible type/name provenance for each KB.
+// Both values come from the same already-required lookup, so adding the name
+// does not add a retrieval or model round trip.
+func (t *KnowledgeSearchTool) getKnowledgeBaseInfo(ctx context.Context, kbIDs []string) (map[string]string, map[string]string) {
 	kbTypeMap := make(map[string]string, len(kbIDs))
+	kbNameMap := make(map[string]string, len(kbIDs))
 
 	for _, kbID := range kbIDs {
 		if kbID == "" {
@@ -442,9 +449,10 @@ func (t *KnowledgeSearchTool) getKnowledgeBaseTypes(ctx context.Context, kbIDs [
 		}
 
 		kbTypeMap[kbID] = kb.Type
+		kbNameMap[kbID] = kb.Name
 	}
 
-	return kbTypeMap
+	return kbTypeMap, kbNameMap
 }
 
 // concurrentSearchByTargets executes hybrid search using pre-computed search targets.
@@ -1058,6 +1066,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 	results []*searchResultWithMeta,
 	kbsToSearch []string,
 	queries []string,
+	kbNameMap map[string]string,
 ) (*types.ToolResult, error) {
 	if len(results) == 0 {
 		data := map[string]interface{}{
@@ -1085,7 +1094,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 	// Count results by KB
 	kbCounts := make(map[string]int)
 	for _, r := range results {
-		kbCounts[r.KnowledgeID]++
+		kbCounts[r.KnowledgeBaseID]++
 	}
 
 	// Format individual results as XML. Tag names are kept in sync with
@@ -1113,6 +1122,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 	knowledgeTitleMap := make(map[string]string)
 
 	for i, result := range results {
+		knowledgeBaseName := kbNameMap[result.KnowledgeBaseID]
 		var faqMeta *types.FAQChunkMetadata
 		if result.KnowledgeBaseType == types.KnowledgeBaseTypeFAQ {
 			meta, err := t.getFAQMetadata(ctx, result.ID, faqMetadataCache)
@@ -1167,23 +1177,25 @@ func (t *KnowledgeSearchTool) formatOutput(
 			// content in context already, so re-emitting it only burns tokens.
 			if isFAQ {
 				ob.WriteString(fmt.Sprintf(
-					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
+					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
 				))
 			} else {
 				ob.WriteString(fmt.Sprintf(
-					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
+					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeID),
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
@@ -1205,23 +1217,25 @@ func (t *KnowledgeSearchTool) formatOutput(
 		} else {
 			if isFAQ {
 				ob.WriteString(fmt.Sprintf(
-					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
+					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
 				))
 			} else {
 				ob.WriteString(fmt.Sprintf(
-					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
+					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeID),
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
@@ -1275,15 +1289,18 @@ func (t *KnowledgeSearchTool) formatOutput(
 			"content":             result.Content,
 			"knowledge_id":        result.KnowledgeID,
 			"knowledge_title":     result.KnowledgeTitle,
+			"knowledge_base_id":   result.KnowledgeBaseID,
+			"knowledge_base_name": knowledgeBaseName,
 			"match_type":          result.MatchType,
 			"source_query":        result.SourceQuery,
 			"query_type":          result.QueryType,
 			"knowledge_base_type": result.KnowledgeBaseType,
+			"score":               result.Score,
 		})
 
 		last := formattedResults[len(formattedResults)-1]
-		if locator := sourcerefs.ModelSourceLocator(result.SourceLocator); locator != "" {
-			last["source_locator"] = json.RawMessage(locator)
+		if len(result.SourceLocator) > 0 && json.Valid(result.SourceLocator) {
+			last["source_locator"] = json.RawMessage(append([]byte(nil), result.SourceLocator...))
 		}
 
 		if result.ImageInfo != "" {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,7 +223,34 @@ func TestRenderUserTurnContent_IncludesScopeBlocks(t *testing.T) {
 	out := engine.RenderUserTurnContent("sess-1", "hello")
 	assert.Contains(t, out, "<runtime_context")
 	assert.Contains(t, out, "<must_use>")
-	assert.Contains(t, out, "hello")
+	assert.Contains(t, out, `<user_request verbatim="true" priority="highest">hello</user_request>`)
+	assert.Contains(t, out, "Previous conversation messages are background context")
+	assert.Greater(t, strings.Index(out, "<user_request"), strings.Index(out, "<runtime_context"))
+}
+
+func TestBuildMessagesWithLLMContext_CurrentTurnRemainsAuthoritative(t *testing.T) {
+	engine := &AgentEngine{config: &types.AgentConfig{}}
+	history := []chat.Message{
+		{Role: "user", Content: "old procurement question"},
+		{Role: "assistant", Content: "long old procurement answer"},
+	}
+	messages := engine.buildMessagesWithLLMContext(
+		"system",
+		"new reserve-fund question",
+		"session-1",
+		history,
+		nil,
+	)
+
+	require.Len(t, messages, 4)
+	assert.Equal(t, "old procurement question", messages[1].Content)
+	assert.Equal(t, "long old procurement answer", messages[2].Content)
+	assert.Contains(t, messages[3].Content, "new reserve-fund question")
+	assert.NotContains(t, messages[3].Content, "old procurement question")
+	assert.True(t, strings.HasSuffix(
+		messages[3].Content,
+		`<user_request verbatim="true" priority="highest">new reserve-fund question</user_request>`,
+	))
 }
 
 func TestBuildMustUseBlock_MultiWordServicePrefix(t *testing.T) {

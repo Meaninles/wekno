@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,21 +25,24 @@ const (
 )
 
 type CitationSource struct {
-	ID              string     `json:"id"`
-	Type            string     `json:"type"`
-	Title           string     `json:"title"`
-	Granularity     string     `json:"granularity,omitempty"`
-	KnowledgeID     string     `json:"knowledge_id,omitempty"`
-	KnowledgeBaseID string     `json:"knowledge_base_id,omitempty"`
-	ChunkID         string     `json:"chunk_id,omitempty"`
-	ChunkIndex      int        `json:"chunk_index,omitempty"`
-	StartAt         int        `json:"start_at,omitempty"`
-	EndAt           int        `json:"end_at,omitempty"`
-	SourceLocator   types.JSON `json:"source_locator,omitempty"`
-	Slug            string     `json:"slug,omitempty"`
-	URL             string     `json:"url,omitempty"`
-	EvidenceHash    string     `json:"evidence_hash,omitempty"`
-	ObservedAt      string     `json:"observed_at,omitempty"`
+	ID                string     `json:"id"`
+	CiteExactly       string     `json:"cite_exactly"`
+	Type              string     `json:"type"`
+	Title             string     `json:"title"`
+	Granularity       string     `json:"granularity,omitempty"`
+	KnowledgeID       string     `json:"knowledge_id,omitempty"`
+	KnowledgeBaseID   string     `json:"knowledge_base_id,omitempty"`
+	KnowledgeBaseName string     `json:"knowledge_base_name,omitempty"`
+	ChunkID           string     `json:"chunk_id,omitempty"`
+	ChunkIndex        int        `json:"chunk_index,omitempty"`
+	StartAt           int        `json:"start_at,omitempty"`
+	EndAt             int        `json:"end_at,omitempty"`
+	ResultPosition    int        `json:"result_position,omitempty"`
+	SourceLocator     types.JSON `json:"source_locator,omitempty"`
+	Slug              string     `json:"slug,omitempty"`
+	URL               string     `json:"url,omitempty"`
+	EvidenceHash      string     `json:"evidence_hash,omitempty"`
+	ObservedAt        string     `json:"observed_at,omitempty"`
 }
 
 type Registry struct {
@@ -109,6 +113,9 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 			}
 			if src.KnowledgeBaseID != "" {
 				ref.Metadata["knowledge_base_id"] = src.KnowledgeBaseID
+			}
+			if src.KnowledgeBaseName != "" {
+				ref.Metadata["knowledge_base_name"] = src.KnowledgeBaseName
 			}
 			if src.KnowledgeID != "" {
 				ref.Metadata["knowledge_id"] = src.KnowledgeID
@@ -202,82 +209,127 @@ func CitationID(ref *types.SearchResult) string {
 	return strings.TrimSpace(ref.Metadata[MetadataCitationID])
 }
 
-func ContextCitationAttrs(ref *types.SearchResult) string {
-	if ref == nil {
-		return ""
-	}
-	id := CitationID(ref)
-	if id == "" {
-		return ""
-	}
-	title := sourceTitle(ref)
-	parts := []string{
-		fmt.Sprintf(`source_id="%s"`, xmlAttr(id)),
-		fmt.Sprintf(`source_type="%s"`, xmlAttr(SourceTypeFromRef(ref))),
-	}
-	if title != "" {
-		parts = append(parts, fmt.Sprintf(`source_title="%s"`, xmlAttr(title)))
-	}
-	if SourceTypeFromRef(ref) == SourceTypeKnowledge {
-		parts = append(parts, `source_granularity="document_fragment"`)
-		if chunkID := knowledgeChunkID(ref); chunkID != "" {
-			parts = append(parts, fmt.Sprintf(`chunk_id="%s"`, xmlAttr(chunkID)))
-			parts = append(parts, fmt.Sprintf(`chunk_index="%d"`, ref.ChunkIndex))
-		}
-		if locator := sourceLocatorAttribute(ref.SourceLocator); locator != "" {
-			parts = append(parts, fmt.Sprintf(`source_locator="%s"`, xmlAttr(locator)))
-		}
-	}
-	return " " + strings.Join(parts, " ")
-}
-
+// RenderCitationCatalog gives the model one copyable, positive citation shape.
+// It intentionally avoids XML <source>/<document> entries and internal chunk
+// identifiers, which can prime models to emit malformed citation tags.
 func RenderCitationCatalog(refs []*types.SearchResult) string {
 	sources := SourcesFromReferences(refs)
 	if len(sources) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("<citation_sources>\n")
+	b.WriteString("[AVAILABLE_CITATIONS]\n")
 	for _, src := range sources {
 		if src == nil {
 			continue
 		}
-		attrs := []string{
-			fmt.Sprintf(`id="%s"`, xmlAttr(src.ID)),
-			fmt.Sprintf(`type="%s"`, xmlAttr(src.Type)),
-			fmt.Sprintf(`title="%s"`, xmlAttr(src.Title)),
+		fmt.Fprintf(&b, "- evidence_id=%s | cite_exactly=%s | type=%s | title=%q",
+			src.ID, src.CiteExactly, promptEvidenceType(src.Type), promptField(src.Title))
+		if collection := promptField(src.KnowledgeBaseName); collection != "" {
+			fmt.Fprintf(&b, " | collection=%q", collection)
 		}
-		switch src.Type {
-		case SourceTypeKnowledge:
-			attrs = append(attrs, `granularity="document_fragment"`)
-			if src.KnowledgeBaseID != "" {
-				attrs = append(attrs, fmt.Sprintf(`knowledge_base_id="%s"`, xmlAttr(src.KnowledgeBaseID)))
-			}
-			if src.KnowledgeID != "" {
-				attrs = append(attrs, fmt.Sprintf(`knowledge_id="%s"`, xmlAttr(src.KnowledgeID)))
-			}
-			if src.ChunkID != "" {
-				attrs = append(attrs, fmt.Sprintf(`chunk_id="%s"`, xmlAttr(src.ChunkID)))
-				attrs = append(attrs, fmt.Sprintf(`chunk_index="%d"`, src.ChunkIndex))
-			}
-			if locator := sourceLocatorAttribute(src.SourceLocator); locator != "" {
-				attrs = append(attrs, fmt.Sprintf(`source_locator="%s"`, xmlAttr(locator)))
-			}
-		case SourceTypeWiki:
-			if src.Slug != "" {
-				attrs = append(attrs, fmt.Sprintf(`slug="%s"`, xmlAttr(src.Slug)))
-			}
-		case SourceTypeWeb:
-			if src.URL != "" {
-				attrs = append(attrs, fmt.Sprintf(`url="%s"`, xmlAttr(src.URL)))
-			}
-		}
-		b.WriteString("<source ")
-		b.WriteString(strings.Join(attrs, " "))
-		b.WriteString(" />\n")
+		b.WriteString("\n")
 	}
-	b.WriteString("</citation_sources>")
+	b.WriteString("[/AVAILABLE_CITATIONS]")
 	return b.String()
+}
+
+// RenderEvidenceBlock associates one claim-bearing snapshot with its citation
+// ID without exposing alternate XML tag shapes to the model.
+func RenderEvidenceBlock(ref *types.SearchResult, content string, annotations map[string]string) string {
+	if ref == nil || strings.TrimSpace(content) == "" {
+		return ""
+	}
+	id := CitationID(ref)
+	if id == "" {
+		return ""
+	}
+	fields := []string{
+		"id=" + promptField(id),
+		"type=" + promptEvidenceType(SourceTypeFromRef(ref)),
+	}
+	if title := promptField(sourceTitle(ref)); title != "" {
+		fields = append(fields, fmt.Sprintf("title=%q", title))
+	}
+	if collection := promptField(ref.Metadata["knowledge_base_name"]); collection != "" {
+		fields = append(fields, fmt.Sprintf("collection=%q", collection))
+	}
+	keys := make([]string, 0, len(annotations))
+	for key := range annotations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := promptField(annotations[key])
+		if key == "" || value == "" {
+			continue
+		}
+		fields = append(fields, promptField(key)+"="+value)
+	}
+	return "[EVIDENCE " + strings.Join(fields, " ") + "]\n" + strings.TrimSpace(content) + "\n[/EVIDENCE]"
+}
+
+const generationContractMarker = "[WEKNORA_CITATION_OUTPUT]"
+
+var (
+	legacyCitationInstructionBlockRE = regexp.MustCompile(
+		`(?ms)^[ \t]*\*[ \t]+\*\*Sourced \(Inline Citations\):\*\*.*?^[ \t]*(\*[ \t]+\*\*Structured:\*\*)`,
+	)
+	legacyCitationExampleLineRE = regexp.MustCompile(
+		`(?mi)^.*<(?:kb|web)\b[^>]*(?:/?>)?.*(?:\r?\n|$)`,
+	)
+)
+
+const generationContract = `[WEKNORA_CITATION_OUTPUT]
+The last user message is the current task. A prior turn's output format, ending, or citation constraint is inactive unless the current message repeats or explicitly refers to it. When AVAILABLE_CITATIONS or source_references are present, cite only claims directly supported by the matching evidence. Copy its cite_exactly value verbatim immediately after the supported sentence or paragraph. The only valid citation shape is <src id="S1" />; change only the S-number to an available ID. The S-number is opaque: never derive it from rank, sequence, chunk_index, result position, page, row, or line numbers. Never use another citation element, attribute, identifier, URL, footnote, or bibliography. Do not cite search/catalog-only metadata. A document title and its collection membership are different facts: claim that a document belongs to a named collection only when current evidence exposes that collection name or the current scope has exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, but do not cite pure framing, analysis, or transitions, and do not repeat the same source within one paragraph.
+[/WEKNORA_CITATION_OUTPUT]`
+
+// EnsureGenerationContract applies the shared first-pass generation contract
+// once. It is prompt-only and never performs validation or regeneration.
+func EnsureGenerationContract(prompt string) string {
+	prompt = removeLegacyCitationInstructions(prompt)
+	if strings.Contains(prompt, generationContractMarker) {
+		return prompt
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return generationContract
+	}
+	return strings.TrimSpace(prompt) + "\n\n" + generationContract
+}
+
+// removeLegacyCitationInstructions removes obsolete model-facing citation
+// syntax before the single canonical contract is appended. Persisted custom
+// and built-in agent prompts can outlive code-owned templates; leaving old
+// <kb>/<web> examples in the same system message directly teaches the model
+// to emit tags that the strict output validator must reject.
+func removeLegacyCitationInstructions(prompt string) string {
+	if !strings.Contains(prompt, "<kb ") && !strings.Contains(prompt, "<web ") {
+		return prompt
+	}
+	prompt = legacyCitationInstructionBlockRE.ReplaceAllString(prompt, "$1")
+	prompt = legacyCitationExampleLineRE.ReplaceAllString(prompt, "")
+	return strings.TrimSpace(prompt)
+}
+
+func canonicalCitationTag(id string) string {
+	return fmt.Sprintf(`<src id="%s" />`, id)
+}
+
+func promptEvidenceType(sourceType string) string {
+	if sourceType == SourceTypeKnowledge || sourceType == SourceTypeData {
+		return "document_fragment"
+	}
+	return promptField(sourceType)
+}
+
+func promptField(value string) string {
+	return strings.TrimSpace(strings.NewReplacer(
+		"\r", " ",
+		"\n", " ",
+		"|", "/",
+		"[", "(",
+		"]", ")",
+	).Replace(value))
 }
 
 func SourcesFromReferences(refs []*types.SearchResult) []*CitationSource {
@@ -311,13 +363,18 @@ func SourcesFromReferences(refs []*types.SearchResult) []*CitationSource {
 func citationSourceFromRef(id string, ref *types.SearchResult) *CitationSource {
 	sourceType := SourceTypeFromRef(ref)
 	src := &CitationSource{
-		ID:              id,
-		Type:            sourceType,
-		Title:           sourceTitle(ref),
-		KnowledgeID:     firstNonEmpty(ref.KnowledgeID, ref.Metadata["knowledge_id"]),
-		KnowledgeBaseID: firstNonEmpty(ref.KnowledgeBaseID, ref.Metadata["knowledge_base_id"]),
-		EvidenceHash:    strings.TrimSpace(ref.Metadata[MetadataEvidenceHash]),
-		ObservedAt:      strings.TrimSpace(ref.Metadata[MetadataObservedAt]),
+		ID:                id,
+		CiteExactly:       canonicalCitationTag(id),
+		Type:              sourceType,
+		Title:             sourceTitle(ref),
+		KnowledgeID:       firstNonEmpty(ref.KnowledgeID, ref.Metadata["knowledge_id"]),
+		KnowledgeBaseID:   firstNonEmpty(ref.KnowledgeBaseID, ref.Metadata["knowledge_base_id"]),
+		KnowledgeBaseName: strings.TrimSpace(ref.Metadata["knowledge_base_name"]),
+		EvidenceHash:      strings.TrimSpace(ref.Metadata[MetadataEvidenceHash]),
+		ObservedAt:        strings.TrimSpace(ref.Metadata[MetadataObservedAt]),
+	}
+	if position, err := strconv.Atoi(strings.TrimSpace(ref.Metadata["tool_result_position"])); err == nil && position > 0 {
+		src.ResultPosition = position
 	}
 	switch sourceType {
 	case SourceTypeWiki:

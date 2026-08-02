@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -322,12 +323,40 @@ func (h *Handler) setupStopEventHandler(
 	sessionID string,
 	sessionTenantID uint64,
 	assistantMessage *types.Message,
+	receivedAt time.Time,
 	cancel context.CancelFunc,
 ) {
 	eventBus.On(event.EventStop, func(ctx context.Context, evt event.Event) error {
 		logger.Infof(ctx, "Received stop event, cancelling async operations for session: %s", sessionID)
 		cancel()
-		// Preserve whatever has been streamed so far; do not overwrite Content.
+		assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
+			[]*types.SearchResult(assistantMessage.KnowledgeReferences),
+			assistantMessage.RetrievalStats.Attempted || sourcerefs.AgentStepsAttemptedRetrieval(assistantMessage.AgentSteps),
+		)
+		assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsForAgentSteps(
+			assistantMessage.RetrievalStats,
+			assistantMessage.AgentSteps,
+		)
+		assistantMessage.AgentToolCount = sourcerefs.AgentToolCallCount(assistantMessage.AgentSteps)
+		if !receivedAt.IsZero() {
+			assistantMessage.AgentDurationMs = time.Since(receivedAt).Milliseconds()
+		}
+		// Preserve whatever has been streamed so far, but apply the same local
+		// citation protocol filter used by normal completion. A stopped stream can
+		// end midway through a tag; persisting that raw tail would reintroduce it
+		// on reload. This never repairs a tag or asks the model to regenerate.
+		filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(
+			assistantMessage.Content,
+			[]*types.SearchResult(assistantMessage.KnowledgeReferences),
+		)
+		assistantMessage.Content = filtered
+		assistantMessage.KnowledgeReferences = types.References(citedRefs)
+		if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
+			logger.Warnf(ctx,
+				"Stopped QA filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+				report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs,
+			)
+		}
 		// Use session's tenant for message update (ctx may have effectiveTenantID when using shared agent).
 		// Use WithoutCancel so the GORM UPDATE survives the upcoming ctx.Done triggered by cancel()/client disconnect.
 		updateCtx := context.WithValue(

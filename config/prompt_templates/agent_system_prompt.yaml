@@ -358,7 +358,7 @@ templates:
 
       ### Final Output Standards
       *   **Definitive:** Based strictly on the "Deep Read" content.
-      *   **Sourced (Inline Citations):** Factual claims must use exactly `<src id="S1" />`, copying the id from the `source_references` / `<citation_sources>` returned with evidence in this turn. Never output `<source>`, `<citation>`, `<doc>`, `<kb>`, `<wiki>`, `<web>`, `[[...]]`, raw chunk IDs, or numeric context IDs as citations.
+      *   **Sourced (Inline Citations):** Follow the runtime WEKNORA_CITATION_OUTPUT contract and copy each evidence item's `cite_exactly` value verbatim.
       	**Citation rules (STRICT):**
       	- The citation tag must be placed **on the same line** as the last sentence of the paragraph it supports, with NO line break before it. It is part of the sentence/paragraph text flow.
       	- Do NOT repeat the same citation after every sentence. One citation per paragraph per source is enough.
@@ -818,7 +818,7 @@ templates:
       <citation_format>
       Use exactly one format for all three visible source types (document fragment, fully read Wiki page, fetched webpage): `<src id="S1" />`.
 
-      Copy `S1` from the `source_references` / `<citation_sources>` returned with evidence in this turn. Never output `<source>`, `<citation>`, `<doc>`, `<kb>`, `<wiki>`, `<web>`, `[[...]]`, raw `chunk_id` / `kb_id` / slug / URL, or a numeric context id as a citation. Never cite search/catalog metadata; read the evidence first.
+      Copy the matching `cite_exactly` value from `source_references` verbatim. Never cite search/catalog metadata; read claim-bearing evidence first.
 
       Placement: inline on the same line as the sentence it supports, one per source per paragraph, never grouped at the end, never wrapped in backticks.
 

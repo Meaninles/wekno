@@ -18,14 +18,15 @@ import {
   joinCitationTagsToPreviousLine,
   resolveCitationChunkId,
   stripIncompleteCitationTag,
+  stripUnsupportedCitationTags,
 } from './citationMarkdown.ts'
 import {
   buildCitedSourceReferenceItems,
   extractSourceCitationIds,
+  getSourceReferenceKind,
   type SourceReference,
 } from './sourceReferences.ts'
 
-const SAMPLE_DOC = 'example-report.docx'
 const SAMPLE_CHUNK_A = '00000001-0000-4000-8000-000000000001'
 const SAMPLE_CHUNK_B = '00000002-0000-4000-8000-000000000002'
 const SAMPLE_CHUNK_C = '00000003-0000-4000-8000-000000000003'
@@ -60,6 +61,15 @@ test('stripIncompleteCitationTag hides only an unfinished streaming citation tai
 
   assert.equal(stripIncompleteCitationTag(prefix + complete), prefix + complete)
   assert.equal(stripIncompleteCitationTag('Value < 5'), 'Value < 5')
+})
+
+test('unsupported citation syntax is filtered instead of rendered during streaming', () => {
+  const input = '甲。<kb doc="a.pdf" chunk_id="1" />乙。<web url="https://example.com" />丙。<src id="S1" />'
+  assert.equal(stripUnsupportedCitationTags(input), '甲。乙。丙。<src id="S1" />')
+  assert.equal(
+    stripUnsupportedCitationTags('示例：`<kb doc="a.pdf" />`'),
+    '示例：`<kb doc="a.pdf" />`',
+  )
 })
 
 test('stripTrailingStreamingHorizontalRule hides an ambiguous trailing rule only mid-stream', () => {
@@ -267,7 +277,7 @@ test('renderChatMarkdown preserves citations, math, and sanitized output through
 
   const html = renderChatMarkdown(
     [
-      'See <kb doc="sample-product-guide.pdf" chunk_id="chunk-1" kb_id="kb-1"/>',
+      'See <src id="S1" />',
       '',
       'Formula: \\(E=mc^2\\)',
       '',
@@ -289,7 +299,7 @@ test('renderChatMarkdown preserves citations, math, and sanitized output through
     },
   )
 
-  assert.match(html, /class="citation citation-kb"/)
+  assert.match(html, /class="citation citation-source citation-source--knowledge"/)
   assert.match(html, /data-chunk-id="chunk-1"/)
   assert.match(html, /katex/)
   assert.match(html, /<div class="chat-markdown-table"><table>/)
@@ -418,6 +428,19 @@ test('renderChatMarkdown drops invalid source ids without substituting another s
   assert.doesNotMatch(html, /data-source-id="S1"/)
 })
 
+test('source references preserve exactly the three visible citation kinds', () => {
+  const scenarios: Array<[SourceReference, 'knowledge' | 'wiki' | 'web']> = [
+    [{ id: 'chunk-1', chunk_type: 'text', metadata: { source_type: 'knowledge' } }, 'knowledge'],
+    [{ id: 'wiki:kb:page', chunk_type: 'wiki_page', metadata: { source_type: 'wiki', slug: 'page' } }, 'wiki'],
+    [{ id: 'https://example.com', chunk_type: 'web_search', metadata: { source_type: 'web', url: 'https://example.com' } }, 'web'],
+    [{ id: 'query-result', chunk_type: 'data_source', metadata: { source_type: 'data_source' } }, 'knowledge'],
+  ]
+
+  for (const [reference, expected] of scenarios) {
+    assert.equal(getSourceReferenceKind(reference), expected)
+  }
+})
+
 test('renderChatMarkdown rejects non-protocol doc tags instead of guessing a citation', () => {
   const renderer = createChatMarkdownRenderer()
   const raw = '这一结论来自管理办法。<doc id="1" source_id="S1" source_title="投资管理办法.docx" chunk_id="chunk-1" />'
@@ -517,6 +540,8 @@ test('buildCitedSourceReferenceItems returns only explicit, valid citations', ()
   assert.equal(buildCitedSourceReferenceItems(refs, '已有旧标签 <kb doc="x" chunk_id="1" />').length, 0)
   assert.deepEqual(extractSourceCitationIds('错误格式 <doc source_id="S2" />'), [])
   assert.deepEqual(extractSourceCitationIds('错误格式 <src source_id="S2" />'), [])
+  assert.deepEqual(extractSourceCitationIds('缺少规范空格 <src id="S2"/>'), [])
+  assert.deepEqual(extractSourceCitationIds('多余空格 <src  id="S2" />'), [])
 })
 
 test('resolveCitationChunkId accepts only an exact message-bound chunk id', () => {
@@ -551,18 +576,18 @@ test('renderChatMarkdown preserves chunk UUIDs when escapeMarkdown strips UUIDs 
   )
 
   const html = renderChatMarkdown(
-    `Sample text <kb doc="sample-topic.pdf" chunk_id="${chunkId}" />`,
+    'Sample text <src id="S1" />',
     {
       renderer,
       escapeMarkdown: stripUuids,
       sanitizeHtml: (html) => html,
       knowledgeReferences: [
-        { id: chunkId, knowledge_id: 'doc-1', knowledge_title: 'sample-topic.pdf' },
+        { id: chunkId, knowledge_id: 'doc-1', knowledge_title: 'sample-topic.pdf', metadata: { citation_id: 'S1' } },
       ],
     },
   )
 
-  assert.match(html, /class="citation citation-kb"/)
+  assert.match(html, /class="citation citation-source citation-source--knowledge"/)
   assert.match(html, new RegExp(`data-chunk-id="${chunkId}"`))
 })
 
@@ -587,17 +612,18 @@ test('renderChatMarkdown does not guess indexed chunk ids from titles or positio
 
   assert.doesNotMatch(html, /citation-kb/)
   assert.doesNotMatch(html, /data-chunk-id="2"/)
+  assert.doesNotMatch(html, /<kb/)
 })
 
 test('joinCitationTagsToPreviousLine removes blank lines before citation tags', () => {
-  const input = 'Setup is complete.\n\n<kb doc="faq.pdf" chunk_id="1" />'
-  assert.equal(joinCitationTagsToPreviousLine(input), 'Setup is complete. <kb doc="faq.pdf" chunk_id="1" />')
+  const input = 'Setup is complete.\n\n<src id="S1" />'
+  assert.equal(joinCitationTagsToPreviousLine(input), 'Setup is complete. <src id="S1" />')
 })
 
 test('joinCitationTagsToPreviousLine inlines consecutive citation tags across single newlines', () => {
-  const tag1 = `<kb doc="${SAMPLE_DOC}" chunk_id="${SAMPLE_CHUNK_A}" />`
-  const tag2 = `<kb doc="${SAMPLE_DOC}" chunk_id="${SAMPLE_CHUNK_B}" />`
-  const tag3 = `<kb doc="${SAMPLE_DOC}" chunk_id="${SAMPLE_CHUNK_C}" />`
+  const tag1 = '<src id="S1" />'
+  const tag2 = '<src id="S2" />'
+  const tag3 = '<src id="S3" />'
   const input = `${tag1}\n${tag2}\n${tag3}`
   assert.equal(joinCitationTagsToPreviousLine(input), `${tag1} ${tag2} ${tag3}`)
 })
@@ -609,28 +635,28 @@ test('renderChatMarkdown inlines consecutive citation tags across newlines', () 
   })
   const html = renderChatMarkdown(
     [
-      `<kb doc="${SAMPLE_DOC}" chunk_id="${SAMPLE_CHUNK_A}" />`,
-      `<kb doc="${SAMPLE_DOC}" chunk_id="${SAMPLE_CHUNK_B}" />`,
-      `<kb doc="${SAMPLE_DOC}" chunk_id="${SAMPLE_CHUNK_C}" />`,
+      '<src id="S1" />',
+      '<src id="S2" />',
+      '<src id="S3" />',
     ].join('\n'),
     {
       renderer,
       escapeMarkdown: (text) => text,
       sanitizeHtml: (html) => html,
       knowledgeReferences: [
-        { id: SAMPLE_CHUNK_A, knowledge_id: 'doc-1' },
-        { id: SAMPLE_CHUNK_B, knowledge_id: 'doc-1' },
-        { id: SAMPLE_CHUNK_C, knowledge_id: 'doc-1' },
+        { id: SAMPLE_CHUNK_A, knowledge_id: 'doc-1', metadata: { citation_id: 'S1' } },
+        { id: SAMPLE_CHUNK_B, knowledge_id: 'doc-1', metadata: { citation_id: 'S2' } },
+        { id: SAMPLE_CHUNK_C, knowledge_id: 'doc-1', metadata: { citation_id: 'S3' } },
       ],
     },
   )
 
-  assert.equal((html.match(/citation-kb/g) || []).length, 3)
-  assert.doesNotMatch(html, /<\/p>\s*<p>\s*<span class="citation citation-kb"/)
+  assert.equal((html.match(/citation-source--knowledge/g) || []).length, 3)
+  assert.doesNotMatch(html, /<\/p>\s*<p>\s*<span class="citation citation-source"/)
 })
 
 test('joinCitationTagsToPreviousLine appends an indented citation to the preceding list item', () => {
-  const tag = '<kb doc="阅读之星全国青少年阅读风采展示活动.pdf" chunk_id="chunk-1" />'
+  const tag = '<src id="S1" />'
   const input = [
     '#### 5️⃣ 阅读之星培养基地',
     '- 每个组别冠亚季军及前十强所在的学校，将获得 **"阅读之星培养基地"** 奖牌',
@@ -651,26 +677,26 @@ test('renderChatMarkdown renders a citation after a list item inline in that ite
     imageRenderer: ({ href, text }) => `<img src="${href}" alt="${text}">`,
     isValidImageUrl: () => true,
   })
-  const tag = '<kb doc="阅读之星全国青少年阅读风采展示活动.pdf" chunk_id="chunk-1" />'
+  const tag = '<src id="S1" />'
   const html = renderChatMarkdown(`- 培养基地奖牌\n\n  ${tag}`, {
     renderer,
     escapeMarkdown: (text) => text,
     sanitizeHtml: (value) => value,
-    knowledgeReferences: [{ id: 'chunk-1', knowledge_id: 'doc-1' }],
+    knowledgeReferences: [{ id: 'chunk-1', knowledge_id: 'doc-1', metadata: { citation_id: 'S1' } }],
   })
 
-  assert.match(html, /<li>培养基地奖牌 <span class="citation citation-kb"/)
-  assert.doesNotMatch(html, /<\/ul>\s*<p>\s*<span class="citation citation-kb"/)
+  assert.match(html, /<li>培养基地奖牌 <span class="citation citation-source citation-source--knowledge"/)
+  assert.doesNotMatch(html, /<\/ul>\s*<p>\s*<span class="citation citation-source"/)
 })
 
 test('joinCitationTagsToPreviousLine does not merge citations onto fenced code closing delimiter', () => {
-  const tag = '<kb doc="guide.pdf" chunk_id="1" />'
+  const tag = '<src id="S1" />'
   const input = '```bash\nunzip setup.zip\n```\n\n' + tag
   assert.equal(joinCitationTagsToPreviousLine(input), '```bash\nunzip setup.zip\n```\n\n' + tag)
 })
 
 test('joinCitationTagsToPreviousLine does not merge citations onto an unlabeled closing fence on a single newline', () => {
-  const tag = '<kb doc="guide.pdf" chunk_id="1" />'
+  const tag = '<src id="S1" />'
   const input = '```\nAPR = principal\n```\n' + tag
   assert.equal(joinCitationTagsToPreviousLine(input), '```\nAPR = principal\n```\n' + tag)
 })

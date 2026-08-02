@@ -160,6 +160,7 @@ type AgentCompleteData struct {
 	KnowledgeRefsAuthoritative bool                   `json:"knowledge_refs_authoritative,omitempty"`
 	AgentSteps                 interface{}            `json:"agent_steps,omitempty"` // []types.AgentStep - detailed execution steps
 	TotalDurationMs            int64                  `json:"total_duration_ms"`
+	RetrievalStats             types.RetrievalStats   `json:"retrieval_stats"`
 	MessageID                  string                 `json:"message_id,omitempty"` // Assistant message ID
 	RequestID                  string                 `json:"request_id,omitempty"`
 	Extra                      map[string]interface{} `json:"extra,omitempty"`

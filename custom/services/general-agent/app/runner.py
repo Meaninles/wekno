@@ -240,11 +240,21 @@ def mcp_tool_result(result: dict[str, Any]) -> dict[str, Any]:
         if block is not None:
             content.append(block)
 
+    source_references = result.get("source_references") or []
+    raw_data = result.get("data") or {}
+    annotated_output = _annotate_evidence_output(str(result.get("output") or ""), source_references)
+    if isinstance(raw_data, dict) and str(raw_data.get("display_type") or "") == "structured_analysis_result":
+        handles = [_canonical_source_handle(source) for source in source_references]
+        handles = [handle for handle in handles if handle]
+        if len(handles) == 1:
+            marker = f"citation_handle_for_this_evidence: {handles[0]}"
+            if marker not in annotated_output:
+                annotated_output = f"{annotated_output.rstrip()}\n{marker}".lstrip()
     summary = {
         "success": success,
-        "output": _truncate_text(str(result.get("output") or "")),
-        "data": result.get("data") or {},
-        "source_references": result.get("source_references") or [],
+        "output": _truncate_text(annotated_output),
+        "source_references": source_references,
+        "data": _attach_evidence_handles(raw_data, source_references),
         "images": image_meta,
     }
     if error:
@@ -1205,6 +1215,13 @@ class ArtifactStore:
         return kept
 
 
+FINAL_ANSWER_SOURCE_CITATION_RULE = (
+    'When an evidence-producing tool returned source_references, content must copy each matching '
+    'cite_exactly value (for example <src id="S1" />) verbatim immediately after the factual '
+    'sentence or paragraph it supports.'
+)
+
+
 def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_analysis_state: dict[str, Any] | None = None):
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -1363,14 +1380,14 @@ def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_an
 
         @tool(
             "final_answer",
-            f"Submit the final user-visible {agent_label} answer. This is mandatory for this agent: do not end with natural-language text directly. When chart output is present, the runtime validates output rules such as placeholders and chart_ids alignment, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
+            f"Submit the final user-visible {agent_label} answer. This is mandatory for this agent: do not end with natural-language text directly. {FINAL_ANSWER_SOURCE_CITATION_RULE} When chart output is present, the runtime validates output rules such as placeholders and chart_ids alignment, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
             {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Complete final answer in the user's language. Include {{chart:<id>}} placeholders only for charts that should appear in the final answer.",
+                        "description": f"Complete final answer in the user's language. {FINAL_ANSWER_SOURCE_CITATION_RULE} Include {{{{chart:<id>}}}} placeholders only for charts that should appear in the final answer.",
                     },
                     "chart_ids": {
                         "type": "array",
@@ -2710,7 +2727,11 @@ def build_system_prompt(
             "block lists local paths. For file inspection, modification, conversion, image/audio handling, or "
             "document-preservation work, use those listed local paths as authoritative originals. If only "
             "<original_input_files_unavailable> is present for a file, continue with WeKnora's extracted attachment "
-            "text, image descriptions, knowledge retrieval, and tools."
+            "text, image descriptions, knowledge retrieval, and tools. A local Read/Bash result is not a citeable "
+            "document fragment. When user-visible text asserts facts drawn from a selected WeKnora knowledge file, "
+            "also use an available WeKnora knowledge-retrieval tool for the relevant passages before writing that "
+            "text, then copy only the returned fragment source handles beside the claims they support. This extra "
+            "retrieval is unnecessary for pure file transformation or delivery statements that make no source-content claims."
         )
     artifact_review_policy = ""
     if payload.runtime_config.agent_type == "document-processing-agent" and payload.enable_artifacts:
@@ -2746,6 +2767,7 @@ Context contract:
 - visible_context: the frontend/user-facing context that WeKnora can show or that corresponds to visible user choices: agent name, model display information, selected knowledge bases/files, data sources, MCP services, Skills, current uploaded files/images, quoted context and relevant configuration. Sensitive credentials and internal callback details are intentionally excluded.
 - tool_catalog: a human-readable explanation of the same tools that are exposed to you through the SDK/MCP tool interface. Use the actual tool interface for calls.
 - conversation_history: previous user/assistant messages from this WeKnora session when multi-turn context is enabled. It is background context, not the current user request.
+- Turn-scoped output formats, suffixes, citation instructions, or one-time constraints from conversation_history are expired unless the current user_request explicitly repeats or refers to them.
 - selected_skill_context: Skill guidance selected in WeKnora for this run. Treat it as capability/context guidance, not as text typed by the user.
 - quoted_context: message content the user quoted in the WeKnora frontend. It is reference context for the current turn, not a rewrite of the current request.
 - image_description: WeKnora's derived description of user-uploaded images when available. It is auxiliary visual context.
@@ -2764,8 +2786,9 @@ Available capabilities:
 - For artifacts: {artifact_return_policy} create_artifact only registers existing files.
 - If you create artifacts, mention their filenames. If not, answer in text.
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
+- Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. This is still one generation run; do not request or perform a second validation or regeneration pass.
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
-- Source citation contract: when WeKnora tool results include `source_references`, those entries are the only source handles you may cite. For any factual answer grounded in knowledge-base documents, fully read Wiki pages, or web results, cite the supporting source inline using exactly `<src id="S1" />`, with the exact id returned in `source_references`. This is the only citation tag: never emit `<source>`, `<citation>`, `<doc>`, `<kb>`, `<wiki>`, `<web>`, `[[...]]`, numeric context ids, chunk ids, slugs, or URLs as citations. Search/catalog entries without claim-bearing content are not evidence. For knowledge-base sources, each returned id represents a specific document fragment, not the whole document; cite the fragment whose content directly supports the paragraph or sentence. Place each tag immediately after the sentence or paragraph it supports, on the same line. Do not invent, guess, or substitute ids; do not cite a source that was not returned by a tool in this run; do not collect citations at the bottom. If multiple sources/fragments materially support one paragraph, include each applicable `<src id="..." />` tag once. Before replying, perform one local self-review of citation syntax, placement, support, and reasonable completeness, then deliver without making a separate validation/regeneration model request.
+- Source citation contract: when a WeKnora tool result includes `source_references`, those entries are the only evidence handles you may cite. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports. The only valid citation shape is `<src id="S1" />`; change only the S-number by copying an available handle. Never use another citation element, attribute, identifier, URL, footnote, or bibliography. Search/catalog entries without claim-bearing content are not evidence. Each knowledge source is one specific document fragment, not the whole document. A document title and its knowledge-base/collection membership are different facts: claim membership only when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, but do not cite pure framing, analysis, or transitions; do not repeat the same source within one paragraph, and include multiple handles only when each materially supports that paragraph. Generate the answer once; the runtime never asks the model to validate or regenerate citations.
 - Artifact review: if you produce artifacts, review them from the user's perspective before final delivery, including format, layout, colors, typography, font sizes, readability, aesthetics, and fit to the original request. If you find issues, make one correction pass.
 - Review limit: perform the review-and-correction step at most once. If the review finds no issue, deliver the final answer directly; if it finds issues, correct them once and then deliver the result.
 {artifact_review_policy}
@@ -2795,7 +2818,8 @@ def build_prompt(
     parts.append(
         "The exact current task is the user's verbatim prompt in <user_request verbatim=\"true\" priority=\"highest\"> below. "
         "Read that block first and keep it as the goal of this run. "
-        "All WeKnora visible context is supporting context; do not let it replace or distract from the user's current prompt."
+        "All WeKnora visible context is supporting context; do not let it replace or distract from the user's current prompt. "
+        "Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired unless this user_request explicitly repeats or refers to them."
     )
     parts.append("</current_task_priority>")
     parts.append("<user_request verbatim=\"true\" priority=\"highest\">")
@@ -2912,6 +2936,7 @@ def build_prompt(
     parts.append("<task_reminder>")
     parts.append(
         "Now execute the exact user_request shown at the top. "
+        "Do not carry forward an earlier turn's output format, suffix, citation instruction, or one-time constraint unless this user_request explicitly repeats or refers to it. "
         "If document_template_preflight is present, complete it before creating final document files or registering artifacts. "
         "Use the WeKnora context only as supporting information and available capability descriptions. "
         "Use the configured user language for every user-visible output, and do not start background tasks."
@@ -3715,6 +3740,110 @@ def hook_permission_output(decision: str, reason: str = "") -> dict[str, Any]:
     if reason:
         out["hookSpecificOutput"]["permissionDecisionReason"] = reason
     return out
+
+
+def _canonical_source_handle(source: Any) -> str:
+    if not isinstance(source, dict):
+        return ""
+    handle = str(source.get("cite_exactly") or "").strip()
+    return handle if re.fullmatch(r'<src id="S[1-9][0-9]*" />', handle) else ""
+
+
+def _attach_evidence_handles(data: Any, sources: Any) -> Any:
+    """Place each opaque handle beside its evidence without copying evidence.
+
+    The Go runtime registers handles authoritatively. This transport-only
+    projection deep-copies the model-visible tool data and adds one canonical
+    field to matching chunk/page/URL objects. Persisted tool output and UI data
+    remain unchanged. The operation is local, linear, and adds no model turn.
+    """
+    source_list = [source for source in sources if isinstance(source, dict) and _canonical_source_handle(source)]
+    projected = copy.deepcopy(data)
+
+    # Tool payloads can contain hundreds of evidence nodes. Index the opaque
+    # registry once so projection stays O(nodes + sources), rather than
+    # comparing every node with every source.
+    indexes: dict[str, dict[str, list[int]]] = {
+        "chunk": {},
+        "url": {},
+        "slug": {},
+    }
+    for source_index, source in enumerate(source_list):
+        for kind, field in (("chunk", "chunk_id"), ("url", "url"), ("slug", "slug")):
+            key = str(source.get(field) or "").strip()
+            if key:
+                indexes[kind].setdefault(key, []).append(source_index)
+
+    def matching_source_indexes(node: dict[str, Any]) -> set[int]:
+        matches: set[int] = set()
+        for field in ("chunk_id", "faq_id"):
+            key = str(node.get(field) or "").strip()
+            matches.update(indexes["chunk"].get(key, ()))
+        for field in ("url", "source_url"):
+            key = str(node.get(field) or "").strip()
+            matches.update(indexes["url"].get(key, ()))
+        for field in ("slug", "page_slug"):
+            key = str(node.get(field) or "").strip()
+            matches.update(indexes["slug"].get(key, ()))
+        node_id = str(node.get("id") or "").strip()
+        if node_id:
+            matches.update(indexes["chunk"].get(node_id, ()))
+            matches.update(indexes["url"].get(node_id, ()))
+        return matches
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            matches = matching_source_indexes(value)
+            if len(matches) == 1:
+                value["citation_handle_for_this_evidence"] = _canonical_source_handle(source_list[next(iter(matches))])
+            for child in list(value.values()):
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(projected)
+    if (
+        isinstance(projected, dict)
+        and len(source_list) == 1
+        and str(projected.get("display_type") or "") == "structured_analysis_result"
+    ):
+        projected = {
+            "citation_handle_for_this_evidence": _canonical_source_handle(source_list[0]),
+            **projected,
+        }
+    return projected
+
+
+def _annotate_evidence_output(output: str, sources: Any) -> str:
+    """Put Wiki handles inside their matching page blocks.
+
+    Knowledge and web evidence are structured maps and are handled above. Wiki
+    pages are an XML-like text payload, so their slug is the stable local
+    anchor. Unmatched sources remain available in the authoritative
+    source_references array; no evidence or handle is invented here.
+    """
+    annotated = output
+    insertions: list[tuple[int, str]] = []
+    for source in (sources if isinstance(sources, list) else []):
+        if not isinstance(source, dict) or str(source.get("type") or "") != "wiki":
+            continue
+        slug = str(source.get("slug") or "").strip()
+        handle = _canonical_source_handle(source)
+        if not slug or not handle:
+            continue
+        anchor = f"[[{slug}|"
+        anchor_at = annotated.find(anchor)
+        if anchor_at < 0:
+            continue
+        block_at = annotated.rfind("<wiki_page>", 0, anchor_at)
+        if block_at < 0:
+            continue
+        insert_at = block_at + len("<wiki_page>")
+        insertions.append((insert_at, f"\n<citation_handle_for_this_evidence>{handle}</citation_handle_for_this_evidence>"))
+    for insert_at, marker in sorted(insertions, reverse=True):
+        annotated = annotated[:insert_at] + marker + annotated[insert_at:]
+    return annotated
 
 
 async def block_background_bash_hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:

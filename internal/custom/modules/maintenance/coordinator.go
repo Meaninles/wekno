@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentrecovery"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
@@ -49,6 +50,7 @@ type Params struct {
 	KBDelete             *kbdeletequeue.Recovery
 	KnowledgeAux         *knowledgeaux.Recovery
 	WikiDelete           *wikidelete.Recovery
+	DependencyControl    *dependencycontrol.Service
 }
 
 type Coordinator struct {
@@ -71,7 +73,15 @@ type Hook struct {
 }
 
 func NewCoordinator(params Params) *Coordinator {
-	return &Coordinator{params: params}
+	c := &Coordinator{params: params}
+	if params.DependencyControl != nil {
+		c.hooks = append(c.hooks, Hook{
+			Name:  "dependency-control",
+			Start: params.DependencyControl.Start,
+			Stop:  params.DependencyControl.Stop,
+		})
+	}
+	return c
 }
 
 func (c *Coordinator) Register(hook Hook) error {
@@ -298,6 +308,9 @@ func (c *Coordinator) stopHooks(hooks []Hook) {
 }
 
 func (c *Coordinator) runWork(ctx context.Context) {
+	if c.params.DependencyControl != nil && c.params.DependencyControl.IsRepairing() {
+		return
+	}
 	scanCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	_, err := c.params.DerivativeRepository.RecoverExpiredLeases(scanCtx, 500)
@@ -339,6 +352,9 @@ func (c *Coordinator) runRetention(ctx context.Context) {
 }
 
 func (c *Coordinator) runNextRecovery(ctx context.Context) {
+	if c.params.DependencyControl != nil && c.params.DependencyControl.IsRepairing() {
+		return
+	}
 	scans := []struct {
 		name string
 		run  func(context.Context) error

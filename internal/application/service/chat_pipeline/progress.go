@@ -61,6 +61,19 @@ func LastConsolidatedRetrievalStage(eventList []types.EventType, chatManage *typ
 	return last
 }
 
+// ShouldEndRetrievalProgress closes the user-visible retrieval lifecycle at
+// the normal final stage or at the first early-exit error. Pipelines return
+// immediately on ErrSearchNothing and other stage errors, so waiting only for
+// the configured final stage would leave the tool call permanently pending
+// and omit its zero-result/failure status from chat history.
+func ShouldEndRetrievalProgress(
+	currentStage types.EventType,
+	lastStage types.EventType,
+	stageErr *PluginError,
+) bool {
+	return currentStage == lastStage || stageErr != nil
+}
+
 // BeginRetrievalProgress emits a single pending retrieval tool_call.
 func BeginRetrievalProgress(ctx context.Context, chatManage *types.ChatManage) *StageProgress {
 	if chatManage == nil || chatManage.EventBus == nil {
@@ -167,6 +180,12 @@ func EndRetrievalProgress(
 	}
 
 	count := retrievalResultCount(chatManage)
+	// A stage error means the earlier candidates were not accepted as usable
+	// retrieval output. Do not report stale pre-rerank/search counts as found
+	// results when the pipeline is actually taking its no-result/failure path.
+	if stageErr != nil {
+		count = 0
+	}
 	success := stageErr == nil || stageErr == ErrSearchNothing
 	output := ""
 	if success {
@@ -174,7 +193,10 @@ func EndRetrievalProgress(
 			if progress.toolName == webRetrievalProgressTool {
 				output = "未找到网络搜索结果"
 			} else {
-				output = "未检索到相关内容"
+				// Keep the no-result terminal state neutral in the UI. A zero
+				// result is still a completed retrieval, while the count remains
+				// available as structured data for diagnostics and persistence.
+				output = "检索完成"
 			}
 		} else if progress.toolName == webRetrievalProgressTool {
 			output = fmt.Sprintf("找到 %d 个网络搜索结果", count)

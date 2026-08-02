@@ -337,6 +337,7 @@ func (h *Handler) handleAgentEventsForSSE(
 	defer ticker.Stop()
 
 	lastOffset := 0
+	titleReceived := false
 	log := logger.GetLogger(ctx)
 
 	log.Infof("Starting pull-based SSE streaming for session=%s, message=%s", sessionID, assistantMessageID)
@@ -363,7 +364,6 @@ func (h *Handler) handleAgentEventsForSSE(
 			// Send any new events
 			streamCompleted := false
 			streamFailed := false
-			titleReceived := false
 			for _, evt := range events {
 				// Check for stop event
 				if evt.Type == types.ResponseType(event.EventStop) {
@@ -434,18 +434,25 @@ func (h *Handler) handleAgentEventsForSSE(
 			if streamCompleted {
 				if waitForTitle && !titleReceived {
 					log.Infof("Stream completed for session=%s, message=%s, waiting for title event", sessionID, assistantMessageID)
-					// Wait up to 3 seconds for title event after completion
-					titleTimeout := time.After(3 * time.Second)
+					// The answer completion event has already been flushed. Keep only
+					// a very small grace window for a concurrently finishing title;
+					// title generation started before QA and empty/error responses now
+					// fall back locally, so the historical fixed three-second delay is
+					// unnecessary.
+					titleTimeout := time.NewTimer(500 * time.Millisecond)
+					poll := time.NewTicker(50 * time.Millisecond)
 				titleWaitLoop:
 					for {
 						select {
-						case <-titleTimeout:
+						case <-titleTimeout.C:
 							log.Info("Title wait timeout, closing stream")
 							break titleWaitLoop
 						case <-c.Request.Context().Done():
 							log.Info("Connection closed while waiting for title")
+							titleTimeout.Stop()
+							poll.Stop()
 							return
-						default:
+						case <-poll.C:
 							// Check for new events (title event)
 							events, newOff, err := h.streamManager.GetEvents(c.Request.Context(), sessionID, assistantMessageID, lastOffset)
 							if err != nil {
@@ -459,17 +466,17 @@ func (h *Handler) handleAgentEventsForSSE(
 									c.Writer.Flush()
 									// If we got the title, we can exit
 									if evt.Type == types.ResponseTypeSessionTitle {
+										titleReceived = true
 										log.Infof("Title event received: %s", evt.Content)
 										break titleWaitLoop
 									}
 								}
 								lastOffset = newOff
-							} else {
-								// No events, wait a bit before checking again
-								time.Sleep(100 * time.Millisecond)
 							}
 						}
 					}
+					titleTimeout.Stop()
+					poll.Stop()
 				} else {
 					log.Infof("Stream completed for session=%s, message=%s", sessionID, assistantMessageID)
 				}

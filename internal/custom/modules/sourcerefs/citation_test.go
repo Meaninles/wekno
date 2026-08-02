@@ -17,6 +17,7 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 			ChunkIndex:      0,
 			ChunkType:       "text",
 			SourceLocator:   types.JSON(`{"kind":"sheet_range","sheet":"资产目录","row_start":90001,"row_end":91000}`),
+			Metadata:        map[string]string{"knowledge_base_name": "公司制度1", "tool_result_position": "1"},
 		},
 		{
 			ID:              "chunk-2",
@@ -47,6 +48,9 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 	if got := sources[0].Granularity; got != "document_fragment" {
 		t.Fatalf("first source granularity = %q, want document_fragment", got)
 	}
+	if got := sources[0].KnowledgeBaseName; got != "公司制度1" {
+		t.Fatalf("source knowledge base name = %q, want 公司制度1", got)
+	}
 	if got := refs[1].Metadata[MetadataChunkID]; got != "chunk-2" {
 		t.Fatalf("second metadata chunk id = %q, want chunk-2", got)
 	}
@@ -56,13 +60,18 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 	if got := refs[0].Metadata["source_locator"]; !strings.Contains(got, `"sheet":"资产目录"`) {
 		t.Fatalf("citation metadata source locator was lost: %q", got)
 	}
-	if catalog := RenderCitationCatalog(refs); !strings.Contains(catalog, `granularity="document_fragment"`) ||
-		!strings.Contains(catalog, `chunk_id="chunk-1"`) ||
-		!strings.Contains(catalog, `source_locator="{&quot;kind&quot;:&quot;sheet_range&quot;`) {
-		t.Fatalf("catalog should mark knowledge sources as document fragments with chunk ids, got %s", catalog)
+	if catalog := RenderCitationCatalog(refs); !strings.Contains(catalog, `cite_exactly=<src id="S1" />`) ||
+		!strings.Contains(catalog, `type=document_fragment`) || !strings.Contains(catalog, `collection="公司制度1"`) ||
+		strings.Contains(catalog, `tool_result_position`) || strings.Contains(catalog, `chunk_id=`) ||
+		strings.Contains(catalog, `<source `) {
+		t.Fatalf("catalog should expose only the exact positive citation shape and compact evidence metadata, got %s", catalog)
 	}
-	if attrs := ContextCitationAttrs(refs[0]); !strings.Contains(attrs, `source_granularity="document_fragment"`) || !strings.Contains(attrs, `chunk_id="chunk-1"`) {
-		t.Fatalf("context attrs should mark citation as document fragment, got %s", attrs)
+	if block := RenderEvidenceBlock(refs[0], "claim-bearing content", map[string]string{"match": "exact"}); !strings.Contains(block, `[EVIDENCE id=S1 type=document_fragment`) ||
+		!strings.Contains(block, `collection="公司制度1"`) || !strings.Contains(block, `match=exact`) || strings.Contains(block, `chunk_id`) || strings.Contains(block, `<document`) {
+		t.Fatalf("evidence block should use the citation id without alternate XML citation shapes, got %s", block)
+	}
+	if got := sources[0].CiteExactly; got != `<src id="S1" />` {
+		t.Fatalf("cite_exactly = %q, want canonical source tag", got)
 	}
 }
 
@@ -116,5 +125,47 @@ func TestAssignCitationIDsUsesDistinctWikiSlug(t *testing.T) {
 	}
 	if sources[0].Slug != "ops/bastion" {
 		t.Fatalf("slug = %q, want ops/bastion", sources[0].Slug)
+	}
+}
+
+func TestEnsureGenerationContractIsSharedAndIdempotent(t *testing.T) {
+	got := EnsureGenerationContract("You are an assistant.")
+	if !strings.Contains(got, generationContractMarker) ||
+		!strings.Contains(got, `The only valid citation shape is <src id="S1" />`) ||
+		!strings.Contains(got, `never derive it from rank, sequence, chunk_index, result position`) ||
+		!strings.Contains(got, `A prior turn's output format, ending, or citation constraint is inactive`) ||
+		!strings.Contains(got, `each paragraph containing substantive evidence-derived facts`) {
+		t.Fatalf("generation contract missing canonical positive instruction: %s", got)
+	}
+	if twice := EnsureGenerationContract(got); twice != got {
+		t.Fatalf("generation contract should only be appended once: %s", twice)
+	}
+}
+
+func TestEnsureGenerationContractRemovesPersistedLegacyCitationInstructions(t *testing.T) {
+	legacy := `### Final Output Standards
+*   **Definitive:** Use retrieved content.
+*   **Sourced (Inline Citations):** Factual claims must use <kb doc="A" chunk_id="x" /> or <web url="https://example.com" />.
+	**Citation rules (STRICT):**
+	- CORRECT: claim.<kb doc="A" chunk_id="x" />
+	- WRONG: <web url="https://example.com" />
+*   **Structured:** Clear hierarchy.
+*   **Tools:** Keep <web_search> protocol metadata.`
+
+	got := EnsureGenerationContract(legacy)
+	if strings.Contains(got, `<kb `) || strings.Contains(got, `<web `) {
+		t.Fatalf("legacy citation syntax remained model-visible: %s", got)
+	}
+	for _, expected := range []string{
+		`*   **Structured:** Clear hierarchy.`,
+		`<web_search> protocol metadata`,
+		`The only valid citation shape is <src id="S1" />`,
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("normalized prompt missing %q: %s", expected, got)
+		}
+	}
+	if twice := EnsureGenerationContract(got); twice != got {
+		t.Fatalf("legacy normalization is not idempotent:\nfirst=%s\nsecond=%s", got, twice)
 	}
 }

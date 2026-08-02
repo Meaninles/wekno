@@ -23,6 +23,9 @@ test('rag pipeline persists and collapses after the answer arrives', () => {
   assert.match(source, /collapsedSummaryHtml/)
   assert.match(source, /hasThinking\.value/)
   assert.match(source, /const visible = computed\([\s\S]*showPrePipelineWait\.value/)
+  assert.match(source, /retrievalStep\?\.title/)
+  assert.match(source, /retrievalStatsFromMessage/)
+  assert.match(source, /agentStream\.ragPipeline\.retrievalSummary/)
 })
 
 test('rag pipeline toggles expand and collapse from the root header', () => {
@@ -57,6 +60,14 @@ test('rag pipeline places search result summaries before the done row', () => {
   const doneIndex = source.indexOf('agent-step-done')
   assert.ok(summaryIndex > -1 && doneIndex > -1)
   assert.ok(summaryIndex < doneIndex)
+})
+
+test('completed quick answers use authoritative retrieved-document count and duration', () => {
+  assert.match(source, /props\.session\?\.is_completed && retrievalStats\.value/)
+  assert.match(source, /retrievalStats\.value\.total/)
+  assert.match(source, /noRetrievalSummary/)
+  assert.match(source, /totalDurationMs/)
+  assert.doesNotMatch(source, /referenceDocCount/)
 })
 
 test('done row appears only after the full turn completes', () => {

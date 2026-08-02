@@ -9,7 +9,8 @@
 | 模块 | 作用 |
 |---|---|
 | `documentqueue` | 文档级持久工作流、实例/boot、租约、epoch fencing、接管和队列位置 |
-| `documentsplit` | 超大文档拆分、任务租约、重试、代表性采样 |
+| `documentsplit` | 超大文档拆分、投递/执行双 epoch、重启恢复、业务失败预算和代表性采样 |
+| `dependencycontrol` | PostgreSQL/ParadeDB 共享能力断路、持久健康状态、索引校验和自动修复 |
 | `modeladmission` | Redis 集群级模型准入、后台执行窗口、衍生/Wiki 公平调度及 Wiki Map/Commit 自动分配 |
 | `capacitycontrol` | 实际模型资源池有效值编译、跨模块冲突检查和独立管理 API |
 | `runtimeinstances` | 通用运行角色/能力心跳和在线实例可观测性 |
@@ -49,6 +50,7 @@
 - `custom_processing_spans_v2` 是唯一权威表；每个 `(knowledge, attempt, logical_key)` 只保留一行，重试只累加真实执行次数。
 - `parse_status=completed` 只等待核心索引和全部可选分支的持久化意图；表格元数据、摘要、问题、图谱和 Wiki 的运行/失败只更新独立富化状态。
 - PostgreSQL 是文档工作流事实来源，Redis 投递允许重复。
+- 物理 part 的执行次数、业务失败次数和 Redis 投递代次是三个独立计数；进程重启、租约恢复和依赖等待不消耗业务失败预算。
 - `none` 是衍生状态初始值，不能直接解释为跳过。
 - 多副本不得同时执行生产 DDL；正常 app 使用 `AUTO_MIGRATE=false`。
 - `workretry` 统一长耗时模型任务的有限次数策略；真实供应商调用失败计数，准入/断路器拒绝只轮转等待。

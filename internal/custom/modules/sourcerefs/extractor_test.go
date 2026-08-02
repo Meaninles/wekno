@@ -22,7 +22,8 @@ func TestExtractFromToolResultRequiresClaimBearingEvidence(t *testing.T) {
 				"display_type": "search_results",
 				"results": []interface{}{map[string]interface{}{
 					"chunk_id": "chunk-1", "knowledge_id": "doc-1", "knowledge_base_id": "kb-1",
-					"knowledge_title": "制度", "content": "审批上限为十万元。",
+					"knowledge_base_name": "公司制度1", "knowledge_title": "制度", "content": "审批上限为十万元。",
+					"result_index": 3, "start_at": 12, "end_at": 24,
 				}},
 			}},
 			wantType: SourceTypeKnowledge,
@@ -51,6 +52,20 @@ func TestExtractFromToolResultRequiresClaimBearingEvidence(t *testing.T) {
 			want:     1,
 		},
 		{
+			name:     "wiki source document returns citable fragments",
+			toolName: "wiki_read_source_doc",
+			result: &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"display_type": "knowledge_chunks_list",
+				"chunks": []interface{}{map[string]interface{}{
+					"chunk_id": "chunk-source-1", "knowledge_id": "doc-source-1",
+					"knowledge_base_id": "kb-1", "knowledge_title": "采购管理办法",
+					"chunk_index": 4, "content": "采购金额达到三十万元时应履行对应审批流程。",
+				}},
+			}},
+			wantType: SourceTypeKnowledge,
+			want:     1,
+		},
+		{
 			name:     "partially successful web fetch keeps raw fetched evidence",
 			toolName: "web_fetch",
 			result: &types.ToolResult{Success: false, Data: map[string]interface{}{
@@ -73,10 +88,14 @@ func TestExtractFromToolResultRequiresClaimBearingEvidence(t *testing.T) {
 			toolName: "db_query",
 			result: &types.ToolResult{Success: true, Output: "共 2 行", Data: map[string]interface{}{
 				"display_type": "structured_analysis_result", "query": "select region, total from sales",
+				"analysis_type": "database",
+				"source": map[string]interface{}{
+					"type": "database", "source_count": 1, "source_names": []interface{}{"销售库"},
+				},
 				"columns": []interface{}{"region", "total"},
 				"rows":    []interface{}{[]interface{}{"华东", 12}, []interface{}{"华南", 8}},
 			}},
-			wantType: SourceTypeKnowledge,
+			wantType: SourceTypeData,
 			want:     1,
 		},
 	}
@@ -89,6 +108,13 @@ func TestExtractFromToolResultRequiresClaimBearingEvidence(t *testing.T) {
 			}
 			if tc.want > 0 && SourceTypeFromRef(refs[0]) != tc.wantType {
 				t.Fatalf("source type = %q, want %q", SourceTypeFromRef(refs[0]), tc.wantType)
+			}
+			if tc.name == "knowledge search fragment" && refs[0].Metadata["knowledge_base_name"] != "公司制度1" {
+				t.Fatalf("knowledge-base provenance was lost: %#v", refs[0])
+			}
+			if tc.name == "knowledge search fragment" &&
+				(refs[0].Metadata["tool_result_position"] != "3" || refs[0].StartAt != 12 || refs[0].EndAt != 24) {
+				t.Fatalf("fragment position or coordinates were lost: %#v", refs[0])
 			}
 		})
 	}

@@ -7,6 +7,8 @@ import {
   getQueryText,
   getRagPipelineStepTitle,
   getWikiPageText,
+  isKnowledgeSearchToolName,
+  isWebSearchToolName,
 } from './agent-tool-display.ts'
 
 const t = (key, params) => {
@@ -29,6 +31,14 @@ test('getAgentToolIconName maps rag pipeline tools', () => {
   assert.equal(getAgentToolIconName('query_understand'), 'ai-search')
   assert.equal(getAgentToolIconName('knowledge_search'), 'data-search')
   assert.equal(getAgentToolIconName('web_search'), 'internet')
+  assert.equal(getAgentToolIconName('mcp__weknora__knowledge_search'), 'data-search')
+})
+
+test('tool classifiers recognize native and namespaced agent capabilities', () => {
+  assert.equal(isKnowledgeSearchToolName('knowledge_search'), true)
+  assert.equal(isKnowledgeSearchToolName('mcp__weknora__knowledge_search'), true)
+  assert.equal(isKnowledgeSearchToolName('grep_chunks'), false)
+  assert.equal(isWebSearchToolName('mcp__weknora__web_search'), true)
 })
 
 test('getAgentToolIconName maps Wiki tools to semantic search and reading icons', () => {
@@ -58,12 +68,36 @@ test('getWikiPageText supports persisted slugs arrays', () => {
   assert.equal(getWikiPageText('{"slug":"index"}'), 'index')
 })
 
-test('getKnowledgeSearchSummaryHtml includes file count when present', () => {
+test('successful knowledge search hides counts and uses a neutral completion state', () => {
   const html = getKnowledgeSearchSummaryHtml(t, {
     results: [{}, {}],
     kb_counts: { a: 1, b: 2 },
   })
-  assert.match(html, /found <strong>2<\/strong> from <strong>2<\/strong> files/)
+  assert.equal(html, '')
+  assert.equal(
+    getRagPipelineStepTitle(t, {
+      tool_name: 'knowledge_search',
+      pending: false,
+      success: true,
+      arguments: { query: '投资管理办法' },
+      tool_data: { count: 2, results: [{}, {}] },
+    }),
+    'agentStream.ragPipeline.searchDone',
+  )
+})
+
+test('zero-result knowledge search uses a neutral completion state', () => {
+  assert.equal(getKnowledgeSearchSummaryHtml(t, { count: 0, results: [] }), '')
+  assert.equal(
+    getRagPipelineStepTitle(t, {
+      tool_name: 'knowledge_search',
+      pending: false,
+      success: true,
+      arguments: { query: '不存在的内部编号' },
+      tool_data: { count: 0, results: [] },
+    }),
+    'agentStream.ragPipeline.searchDone',
+  )
 })
 
 test('getWebSearchSummaryHtml uses web result wording', () => {

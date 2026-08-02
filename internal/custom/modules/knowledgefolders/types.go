@@ -61,6 +61,7 @@ type FolderStats struct {
 	EnrichmentPendingTaskCount int64     `json:"enrichment_pending_task_count" gorm:"not null;default:0"`
 	WikiPendingTaskCount       int64     `json:"wiki_pending_task_count" gorm:"not null;default:0"`
 	AbnormalDocumentCount      int64     `json:"abnormal_document_count" gorm:"not null;default:0"`
+	FailedDocumentCount        int64     `json:"failed_document_count" gorm:"not null;default:0"`
 	UpdatedAt                  time.Time `json:"stats_updated_at"`
 }
 

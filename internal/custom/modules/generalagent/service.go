@@ -259,12 +259,10 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	lastAnswerID := ""
 	lastAnswerDone := false
 	var streamed strings.Builder
-	terminalDelivery := types.IsClaudeSDKAgentType(agentConfig.AgentType)
-	var terminalBuffer terminalDeliveryBuffer
 	result, err := sidecarClient.ChatStream(ctx, payload, func(evt StreamEvent) {
-		if terminalDelivery && terminalBuffer.append(evt) {
-			return
-		}
+		// Stream answer deltas immediately. Canonical <src> handles are valid
+		// user-visible output; completion later publishes the authoritative,
+		// locally filtered answer without any validation/regeneration request.
 		s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
 	})
 	if err != nil {
@@ -273,40 +271,35 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if result == nil {
 		return fmt.Errorf("智能体最终结果为空")
 	}
-	var finalAnswer string
-	if terminalDelivery {
-		finalAnswer = terminalBuffer.finalAnswer(result)
-	} else {
-		finalAnswer = strings.TrimSpace(result.Answer)
-		if finalAnswer == "" {
-			finalAnswer = strings.TrimSpace(streamed.String())
-		}
-		if streamed.Len() == 0 && finalAnswer != "" {
-			lastAnswerID = fallbackAnswerID
-			lastAnswerDone = false
-			eventBus.Emit(ctx, event.Event{
-				ID:        fallbackAnswerID,
-				Type:      event.EventAgentFinalAnswer,
-				SessionID: sessionID,
-				RequestID: req.RequestID,
-				Data: event.AgentFinalAnswerData{
-					Content: finalAnswer,
-					Done:    false,
-				},
-			})
-		}
-		if lastAnswerID != "" && !lastAnswerDone {
-			eventBus.Emit(ctx, event.Event{
-				ID:        lastAnswerID,
-				Type:      event.EventAgentFinalAnswer,
-				SessionID: sessionID,
-				RequestID: req.RequestID,
-				Data: event.AgentFinalAnswerData{
-					Content: "",
-					Done:    true,
-				},
-			})
-		}
+	finalAnswer := strings.TrimSpace(result.Answer)
+	if finalAnswer == "" {
+		finalAnswer = strings.TrimSpace(streamed.String())
+	}
+	if streamed.Len() == 0 && finalAnswer != "" {
+		lastAnswerID = fallbackAnswerID
+		lastAnswerDone = false
+		eventBus.Emit(ctx, event.Event{
+			ID:        fallbackAnswerID,
+			Type:      event.EventAgentFinalAnswer,
+			SessionID: sessionID,
+			RequestID: req.RequestID,
+			Data: event.AgentFinalAnswerData{
+				Content: finalAnswer,
+				Done:    false,
+			},
+		})
+	}
+	if lastAnswerID != "" && !lastAnswerDone {
+		eventBus.Emit(ctx, event.Event{
+			ID:        lastAnswerID,
+			Type:      event.EventAgentFinalAnswer,
+			SessionID: sessionID,
+			RequestID: req.RequestID,
+			Data: event.AgentFinalAnswerData{
+				Content: "",
+				Done:    true,
+			},
+		})
 	}
 
 	artifactResults, err := s.persistArtifacts(ctx, sidecarClient, result.RunID, req, result.Artifacts)
@@ -367,13 +360,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
 	}
 	finalAnswer = filteredAnswer
-	if terminalDelivery {
-		// Replay the exact locally validated string that will be persisted. This
-		// is a deterministic filter only; it never triggers model regeneration.
-		terminalBuffer.replay(finalAnswer, fallbackAnswerID, func(evt StreamEvent) {
-			s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
-		})
-	}
 	steps := active.snapshotSteps(finalAnswer)
 	eventBus.Emit(ctx, event.Event{
 		Type:      event.EventAgentComplete,

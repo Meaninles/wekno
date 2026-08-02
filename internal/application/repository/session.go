@@ -278,6 +278,25 @@ func (r *sessionRepository) Update(ctx context.Context, session *types.Session, 
 	return res.RowsAffected, res.Error
 }
 
+// UpdateTitleIfEmpty atomically writes an automatic title only while the row
+// is still untitled. This prevents a slow title request from overwriting a
+// manual rename or another request's title.
+func (r *sessionRepository) UpdateTitleIfEmpty(
+	ctx context.Context,
+	tenantID uint64,
+	userID, sessionID, title string,
+) (bool, error) {
+	query := r.db.WithContext(ctx).
+		Model(&types.Session{}).
+		Where("tenant_id = ? AND id = ? AND (title IS NULL OR title = '')", tenantID, sessionID)
+	query = applySessionUserScope(query, userID)
+	result := query.Updates(map[string]interface{}{
+		"title":      title,
+		"updated_at": time.Now(),
+	})
+	return result.RowsAffected > 0, result.Error
+}
+
 // SetOwnerID assigns sessions.user_id for a tenant-scoped row.
 func (r *sessionRepository) SetOwnerID(ctx context.Context, tenantID uint64, id, ownerID string) (int64, error) {
 	res := r.db.WithContext(ctx).

@@ -30,7 +30,7 @@ templates:
       ## Output Format
       - Output your final result in Markdown format with images when applicable
       - Ensure the output is concise yet comprehensive, well-organized, clear, and non-repetitive
-      - When retrieved information includes `<citation_sources>`, cite factual statements inline using exactly `<src id="S1" />`, with an id copied from that list. This is the only citation-tag syntax: never output `<source>`, `<citation>`, `<doc>`, `<kb>`, `<wiki>`, `<web>`, `[[...]]`, a numeric context id, a chunk id, or a hand-written source list as a citation. Each id denotes one exact evidence snapshot (a document fragment, a fully read Wiki page, or a fetched webpage). Put each tag immediately after the sentence or paragraph it directly supports. Use one tag per supporting source per paragraph; cite multiple sources only when each materially supports the claim. Never invent, guess, substitute, or collect uncited sources at the bottom. Search/catalog metadata alone is not evidence and must not be cited.
+      - Follow the runtime WEKNORA_CITATION_OUTPUT contract whenever AVAILABLE_CITATIONS are present.
 
       ## CRITICAL: Language Rule
       - ALWAYS respond in {{language}}

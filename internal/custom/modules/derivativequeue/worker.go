@@ -285,6 +285,17 @@ func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) 
 		errorCode = "worker_interrupted"
 	}
 	forceProviderRetry := false
+	if modeladmission.IsProviderCallFailure(cause) {
+		forceProviderRetry = true
+		errorClass = "provider"
+		errorCode = "provider_call_failed"
+	}
+	var exhausted *ProviderAttemptsExhaustedError
+	if errors.As(cause, &exhausted) {
+		forceProviderRetry = true
+		errorClass = "provider"
+		errorCode = "provider_attempts_exhausted"
+	}
 	var providerRetry providerRetryRequired
 	if errors.As(cause, &providerRetry) && providerRetry.ProviderRetryRequired() {
 		forceProviderRetry = true
@@ -297,7 +308,7 @@ func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) 
 			item.ID, countErr)
 		hasCalls = providerStarted(ctx)
 	}
-	if !providerStarted(ctx) && !hasCalls {
+	if !forceProviderRetry && !providerStarted(ctx) && !hasCalls {
 		err := w.repository.DeferWithoutProviderAttempt(
 			persistCtx, item.ID, item.LeaseToken,
 			errorClass, errorCode, cause.Error(), delay,
@@ -313,7 +324,7 @@ func (w *Worker) deferFailure(ctx context.Context, item *WorkItem, cause error) 
 		errorClass, errorCode, cause.Error(), delay,
 		forceProviderRetry,
 	)
-	if hasCalls {
+	if hasCalls && !forceProviderRetry {
 		pipelineobs.DerivativeMaterializeRetry(item.WorkKind)
 	}
 	if err != nil {

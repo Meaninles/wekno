@@ -21,12 +21,36 @@ import (
 )
 
 var (
-	ErrStaleDispatch      = errors.New("stale derivative dispatch")
-	ErrLeaseLost          = errors.New("derivative work-item lease lost")
-	ErrGenerationFence    = errors.New("derivative processing generation changed")
-	ErrInvalidState       = errors.New("invalid derivative work-item state transition")
-	ErrDispatchWindowFull = errors.New("derivative dispatch window is full")
+	ErrStaleDispatch             = errors.New("stale derivative dispatch")
+	ErrLeaseLost                 = errors.New("derivative work-item lease lost")
+	ErrGenerationFence           = errors.New("derivative processing generation changed")
+	ErrInvalidState              = errors.New("invalid derivative work-item state transition")
+	ErrProviderAttemptsExhausted = errors.New("derivative provider attempts exhausted")
+	ErrDispatchWindowFull        = errors.New("derivative dispatch window is full")
 )
+
+// ProviderAttemptsExhaustedError separates a consumed provider-call budget
+// from an invalid lifecycle transition. Workers must terminalize this on the
+// provider retry dimension even when earlier provider checkpoints exist.
+type ProviderAttemptsExhaustedError struct {
+	WorkKind string
+	Attempts int
+	Limit    int
+}
+
+func (e *ProviderAttemptsExhaustedError) Error() string {
+	if e == nil {
+		return ErrProviderAttemptsExhausted.Error()
+	}
+	return fmt.Sprintf(
+		"%s: work_kind=%s attempts=%d limit=%d",
+		ErrProviderAttemptsExhausted, e.WorkKind, e.Attempts, e.Limit,
+	)
+}
+
+func (e *ProviderAttemptsExhaustedError) Unwrap() error {
+	return ErrProviderAttemptsExhausted
+}
 
 type Repository struct {
 	db         *gorm.DB
@@ -508,8 +532,16 @@ func (r *Repository) BeginProvider(
 			Where("id = ? AND lease_token = ?", id, leaseToken).First(&row).Error; err != nil {
 			return ErrLeaseLost
 		}
-		if row.State != StateLeased || row.ProviderAttempts >= 4 {
+		if row.State != StateLeased {
 			return ErrInvalidState
+		}
+		limit := maxProviderAttempts(row.WorkKind)
+		if row.ProviderAttempts >= limit {
+			return &ProviderAttemptsExhaustedError{
+				WorkKind: row.WorkKind,
+				Attempts: row.ProviderAttempts,
+				Limit:    limit,
+			}
 		}
 		if err := verifyGeneration(tx, row); err != nil {
 			return err

@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_custom_document_split_part_failure_budget;
+ALTER TABLE custom_document_split_parts DROP COLUMN failure_attempts;

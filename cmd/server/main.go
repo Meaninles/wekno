@@ -36,6 +36,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/container"
 	custombootstrap "github.com/Tencent/WeKnora/internal/custom/bootstrap"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -97,6 +98,7 @@ func main() {
 		resourceCleaner interfaces.ResourceCleaner,
 		systemSettingSvc interfaces.SystemSettingService,
 		documentQueue *documentqueue.Coordinator,
+		dependencyControl *dependencycontrol.Service,
 		profile runtimeprofile.Profile,
 	) error {
 		handler := http.Handler(router)
@@ -109,6 +111,13 @@ func main() {
 				})
 			})
 			health.GET("/ready", func(c *gin.Context) {
+				if ready, reason := dependencyControl.ReadyFor(profile); !ready {
+					c.JSON(http.StatusServiceUnavailable, gin.H{
+						"status": "not_ready", "role": profile.Role,
+						"dependency": reason,
+					})
+					return
+				}
 				c.JSON(http.StatusOK, gin.H{
 					"status": "ready",
 					"role":   profile.Role,
@@ -120,6 +129,7 @@ func main() {
 			// replicas export only their process-local zero values.
 			health.GET("/metrics", gin.WrapH(promhttp.Handler()))
 			health.GET("/api/v1/custom/runtime-profile/status", func(c *gin.Context) {
+				dependencyReady, dependencyReason := dependencyControl.ReadyFor(profile)
 				c.JSON(http.StatusOK, gin.H{
 					"role":              profile.Role,
 					"serves_api":        profile.ServesAPI(),
@@ -127,6 +137,8 @@ func main() {
 					"derivative_worker": profile.RunsDerivativeWorker(),
 					"wiki_worker":       profile.RunsWikiWorker(),
 					"maintenance":       profile.RunsMaintenance(),
+					"dependency_ready":  dependencyReady,
+					"dependency_reason": dependencyReason,
 				})
 			})
 			handler = health

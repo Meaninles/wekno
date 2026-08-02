@@ -14,20 +14,17 @@
                     <span class="tag_name">{{ item.name }}</span>
                 </span>
             </div>
+            <SourceReferenceHub
+                v-if="!shareMode && (session.is_completed || session.knowledge_references?.length)"
+                ref="sourceReferenceHub"
+                :session="session" :content="answerText" :embedded-mode="embeddedMode" />
+            <CompletedSimpleRunSummary v-if="!session.isRagMode && !session.isAgentMode" :message="session" />
             <div v-if="session.isRagMode" class="rag-answer-stack">
                 <RagPipelineProgress :session="session" :embedded-mode="embeddedMode" />
-                <SourceReferenceHub
-                    v-if="!shareMode && (session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks))"
-                    ref="sourceReferenceHub"
-                    :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay v-if="session.isAgentMode" :session="session" :session-id="sessionId"
                     :user-query="userQuery" :rag-mode="true" :share-mode="shareMode" />
             </div>
             <template v-else>
-                <SourceReferenceHub
-                    v-if="!shareMode && (session.knowledge_references?.length || (!session.isAgentMode && hasInlineWikiLinks))"
-                    ref="sourceReferenceHub"
-                    :session="session" :content="answerText" :embedded-mode="embeddedMode" />
                 <AgentStreamDisplay :session="session" :session-id="sessionId" :user-query="userQuery"
                     :share-mode="shareMode" v-if="session.isAgentMode" />
             </template>
@@ -86,6 +83,7 @@ import deepThink from './deepThink.vue';
 import AgentStreamDisplay from './AgentStreamDisplay.vue';
 import RagPipelineProgress from './RagPipelineProgress.vue';
 import SourceReferenceHub from './SourceReferenceHub.vue';
+import CompletedSimpleRunSummary from '@/custom/modules/sourcerefs/CompletedSimpleRunSummary.vue';
 import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
 import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
@@ -235,8 +233,6 @@ const hasActualContent = computed(() => {
     const text = props.content || props.session?.content || '';
     return text && text.trim().length > 0;
 });
-
-const hasInlineWikiLinks = computed(() => /\[\[[^\]]+\]\]/.test(answerText.value || ''));
 
 // 获取实际内容
 const getActualContent = () => {

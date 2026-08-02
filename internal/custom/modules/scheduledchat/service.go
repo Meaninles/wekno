@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -697,7 +698,12 @@ func (s *Service) executeRun(runID string) {
 				_ = eventBus.Emit(runCtx, event.Event{
 					Type:      event.EventAgentComplete,
 					SessionID: session.ID,
-					Data:      event.AgentCompleteData{FinalAnswer: assistantMsg.Content},
+					Data: event.AgentCompleteData{
+						FinalAnswer:                assistantMsg.Content,
+						KnowledgeRefs:              []*types.SearchResult(assistantMsg.KnowledgeReferences),
+						KnowledgeRefsAuthoritative: true,
+						MessageID:                  assistantMsg.ID,
+					},
 				})
 				complete()
 			}
@@ -1085,6 +1091,13 @@ func (s *Service) disableTaskAfterAuthFailure(ctx context.Context, task *Task, r
 }
 
 func (s *Service) completeAssistantMessage(ctx context.Context, assistantMessage *types.Message, userQuery string) {
+	report := filterScheduledAssistantCitations(assistantMessage)
+	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
+		logger.Warnf(ctx,
+			"[custom scheduledchat] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs,
+		)
+	}
 	assistantMessage.UpdatedAt = time.Now()
 	assistantMessage.IsCompleted = true
 	if err := s.messageService.UpdateMessage(ctx, assistantMessage); err != nil {
@@ -1095,6 +1108,19 @@ func (s *Service) completeAssistantMessage(ctx context.Context, assistantMessage
 		bgCtx := context.WithoutCancel(ctx)
 		go s.messageService.IndexMessageToKB(bgCtx, userQuery, assistantMessage.Content, assistantMessage.ID, assistantMessage.SessionID)
 	}
+}
+
+func filterScheduledAssistantCitations(assistantMessage *types.Message) sourcerefs.CitationValidationReport {
+	if assistantMessage == nil {
+		return sourcerefs.CitationValidationReport{}
+	}
+	filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(
+		assistantMessage.Content,
+		[]*types.SearchResult(assistantMessage.KnowledgeReferences),
+	)
+	assistantMessage.Content = filtered
+	assistantMessage.KnowledgeReferences = types.References(citedRefs)
+	return report
 }
 
 func (s *Service) writeAgentQueryEvent(ctx context.Context, sessionID, assistantMessageID string) {

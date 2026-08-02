@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/agent/skills"
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/mcp"
@@ -474,6 +475,16 @@ func (s *agentService) registerTools(
 	chatModel chat.Chat,
 	sessionID string,
 ) error {
+	documentSearchTargets, err := sourcerefs.DocumentSearchTargets(
+		ctx,
+		s.db,
+		config.SearchTargets,
+		config.KnowledgeIDs,
+	)
+	if err != nil {
+		return err
+	}
+
 	// Source of truth policy:
 	//   - `config.AllowedTools` is the explicit, user-editable whitelist —
 	//     populated by the agent-type preset on create and freely editable
@@ -676,23 +687,23 @@ func (s *agentService) registerTools(
 				s.knowledgeBaseService,
 				s.knowledgeService,
 				s.chunkService,
-				config.SearchTargets,
+				documentSearchTargets,
 				rerankModel,
 				chatModel,
 				config,
 				s.cfg,
 			)
 		case tools.ToolGrepChunks:
-			toolToRegister = tools.NewGrepChunksTool(s.db, config.SearchTargets)
-			logger.Infof(ctx, "Registered grep_chunks tool with searchTargets: %d targets", len(config.SearchTargets))
+			toolToRegister = tools.NewGrepChunksTool(s.db, documentSearchTargets)
+			logger.Infof(ctx, "Registered grep_chunks tool with documentSearchTargets: %d targets", len(documentSearchTargets))
 		case tools.ToolListKnowledgeChunks:
-			toolToRegister = tools.NewListKnowledgeChunksTool(s.knowledgeService, s.chunkService, config.SearchTargets)
+			toolToRegister = tools.NewListKnowledgeChunksTool(s.knowledgeService, s.chunkService, documentSearchTargets)
 		case tools.ToolQueryKnowledgeGraph:
 			toolToRegister = tools.NewQueryKnowledgeGraphTool(s.knowledgeBaseService)
 		case tools.ToolGetDocumentInfo:
-			toolToRegister = tools.NewGetDocumentInfoTool(s.knowledgeService, s.chunkService, config.SearchTargets)
+			toolToRegister = tools.NewGetDocumentInfoTool(s.knowledgeService, s.chunkService, documentSearchTargets)
 		case tools.ToolDatabaseQuery:
-			toolToRegister = tools.NewDatabaseQueryTool(s.db, config.SearchTargets)
+			toolToRegister = tools.NewDatabaseQueryTool(s.db, documentSearchTargets)
 		case tools.ToolWebSearch:
 			toolToRegister = tools.NewWebSearchTool(
 				s.webSearchService,

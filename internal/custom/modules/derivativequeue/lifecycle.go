@@ -18,10 +18,22 @@ import (
 )
 
 const (
-	MaxProviderAttempts    = 4
-	MaxMaterializeAttempts = 8
-	MaxFinalizeAttempts    = 20
+	MaxProviderAttempts         = 4
+	MaxQuestionProviderAttempts = 6
+	MaxMaterializeAttempts      = 8
+	MaxFinalizeAttempts         = 20
 )
+
+func maxProviderAttempts(workKind string) int {
+	if workKind == WorkQuestion {
+		// A durable question batch can make one initial request plus four
+		// five-record recovery requests. The sixth delivery is reserved for
+		// one genuine provider retry instead of making normal recovery exhaust
+		// the generic four-attempt budget.
+		return MaxQuestionProviderAttempts
+	}
+	return MaxProviderAttempts
+}
 
 func (r *Repository) Get(ctx context.Context, id string) (*WorkItem, error) {
 	if r == nil || r.db == nil {
@@ -387,7 +399,7 @@ func (r *Repository) RetryAfterFailure(
 		}
 		hasCalls = count > 0
 		attempts := row.ProviderAttempts
-		maxAttempts := MaxProviderAttempts
+		maxAttempts := maxProviderAttempts(row.WorkKind)
 		nextState := StateRetryWait
 		if hasCalls && !forceProviderRetry {
 			attempts = row.MaterializeAttempts + 1

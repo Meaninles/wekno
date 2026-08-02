@@ -20,6 +20,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
+	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
 	mcppkg "github.com/Tencent/WeKnora/internal/mcp"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -48,14 +49,14 @@ const (
 	agentCompleteWaitTimeout = 10 * time.Second
 )
 
-// imCitationTagRe matches inline citation tags produced by the agent pipeline.
-// These tags are rendered as interactive UI in the web frontend but are meaningless
-// in IM platforms, so they must be stripped before sending.
-var imCitationTagRe = regexp.MustCompile(`<(?:kb|web)\b[^>]*/?>`)
-
-// stripIMCitationTags removes <kb .../> and <web .../> inline citation tags from s.
+// stripIMCitationTags removes the internal citation protocol before content is
+// sent to IM platforms. The web clients render canonical source handles using
+// message-bound reference metadata; IM clients do not have that renderer.
+//
+// This is intentionally a strict removal operation. It never rewrites malformed
+// tags into canonical citations and never performs a second model request.
 func stripIMCitationTags(s string) string {
-	return imCitationTagRe.ReplaceAllString(s, "")
+	return sourcerefs.StripCitationProtocol(s)
 }
 
 // imageXMLBlockRe matches <image ...>...</image> blocks produced by
@@ -166,10 +167,11 @@ func findIncompleteMarkdownImage(s string) int {
 	return loc[0]
 }
 
-// incompleteXMLTagRe matches the opening of an <image…>, <kb…>, or <web…> tag
-// that reaches the end of the string without a closing '>'.
+// incompleteXMLTagRe matches an XML/citation tag prefix that reaches the end of
+// the current stream chunk. Holding it back prevents partial internal protocol
+// text from briefly leaking into IM clients before cleanIMContent can remove it.
 var incompleteXMLTagRe = regexp.MustCompile(
-	`<(?:image|image_original|image_caption|image_ocr|kb|web)[^>]*$`,
+	`(?i)</?(?:image|image_original|image_caption|image_ocr|src|source|citation|doc|document|kb|wiki|web)\b[^>]*$`,
 )
 
 // findIncompleteXMLTag returns the byte offset of a potentially truncated XML
@@ -204,7 +206,7 @@ func formatIMOutboundAnswer(ctx context.Context, raw string, tenant *types.Tenan
 
 // cleanIMContent applies all IM-specific content transformations:
 //  1. Collapse <image> XML blocks back to plain markdown
-//  2. Strip <kb/> and <web/> citation tags
+//  2. Strip the internal citation protocol (canonical and malformed tags)
 //  3. Rewrite provider:// URLs to HTTP URLs (scheme-aware per tenant config)
 func cleanIMContent(ctx context.Context, content string, tenant *types.Tenant, defaultFileSvc interfaces.FileService) string {
 	content = stripImageXMLTags(content)
@@ -699,6 +701,18 @@ func applyIMCompleteDataToMessage(msg *types.Message, data event.AgentCompleteDa
 	if steps := sanitizeIMAgentSteps(data.AgentSteps); len(steps) > 0 {
 		msg.AgentSteps = steps
 	}
+}
+
+func filterIMStoredAnswer(answer string, msg *types.Message) (string, sourcerefs.CitationValidationReport) {
+	if msg == nil {
+		return answer, sourcerefs.CitationValidationReport{}
+	}
+	filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(
+		answer,
+		[]*types.SearchResult(msg.KnowledgeReferences),
+	)
+	msg.KnowledgeReferences = types.References(citedRefs)
+	return filtered, report
 }
 
 // waitForIMAgentComplete blocks until EventAgentComplete, ctx cancellation, or timeout.
@@ -2294,7 +2308,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			logger.Debugf(qaCtx, "[IM] QuotedContext set: length=%d", len(req.QuotedContext))
 		}
 		if useAgent {
-			err = s.sessionService.AgentQA(qaCtx, req, eventBus)
+			err = sessionhandler.RunAgentQA(qaCtx, s.sessionService, req, eventBus)
 		} else {
 			err = s.sessionService.KnowledgeQA(qaCtx, req, eventBus)
 		}
@@ -2368,6 +2382,14 @@ loop:
 	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	bufMu.Unlock()
 
+	answer, citationReport := filterIMStoredAnswer(answer, assistantMsg)
+	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+		logger.Warnf(ctx,
+			"[IM] filtered invalid stored citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
+		)
+	}
+
 	finalDisplay := cleanIMContent(ctx, FormatIMFinalFromParts(parts), tenant, s.defaultFileSvc)
 	if noVisibleContent || finalDisplay == "" {
 		fallback := "抱歉，我暂时无法回答这个问题。"
@@ -2375,7 +2397,7 @@ loop:
 			fallback = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 		}
 		finalDisplay = fallback
-		if answer == "" {
+		if strings.TrimSpace(answer) == "" {
 			answer = fallback
 		}
 	}
@@ -2550,7 +2572,7 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 			logger.Debugf(ctx, "[IM] QuotedContext set: length=%d", len(req.QuotedContext))
 		}
 		if useAgent {
-			err = s.sessionService.AgentQA(ctx, req, eventBus)
+			err = sessionhandler.RunAgentQA(ctx, s.sessionService, req, eventBus)
 		} else {
 			err = s.sessionService.KnowledgeQA(ctx, req, eventBus)
 		}
@@ -2591,6 +2613,16 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		return "", qaError
 	}
 	if answer == "" {
+		answer = "抱歉，我暂时无法回答这个问题。"
+	}
+	answer, citationReport := filterIMStoredAnswer(answer, assistantMsg)
+	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+		logger.Warnf(ctx,
+			"[IM] filtered invalid stored citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
+		)
+	}
+	if strings.TrimSpace(answer) == "" {
 		answer = "抱歉，我暂时无法回答这个问题。"
 	}
 	if notice := s.buildIMMCPAuthNotice(ctx, authServices); notice != "" {

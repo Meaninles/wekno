@@ -10,6 +10,7 @@ import {
   restoreCitationHtmlPlaceholders,
   restoreCitationTags,
   stripIncompleteCitationTag,
+  stripUnsupportedCitationTags,
   type CitationKnowledgeRef,
 } from './citationMarkdown.ts'
 
@@ -354,7 +355,7 @@ export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMark
   const streamingSafeText = options.streaming
     ? stripTrailingStreamingListMarker(stripTrailingStreamingHorizontalRule(rawText))
     : sourceSafeText
-  const citationSafeText = stripIncompleteCitationTag(streamingSafeText)
+  const citationSafeText = stripUnsupportedCitationTags(stripIncompleteCitationTag(streamingSafeText))
   const { text: tagSafe, tags } = preserveCitationTags(citationSafeText)
   const imageSafe = replaceIncompleteImageWithPlaceholder(tagSafe)
   const mathSafe = preprocessMathDelimiters(imageSafe)
@@ -371,8 +372,8 @@ export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMark
     ? options.prepareMarkdown(balancedInline, options.cachedMermaidSvgHtml)
     : balancedInline
   const flankingSafeMarkdown = repairFlankingEmphasis(preparedMarkdown)
-  // Convert <kb>/<web>/wiki tags to HTML placeholders before escapeMarkdown so
-  // agent sanitizers (e.g. UUID stripping) cannot damage chunk_id attributes.
+  // Convert canonical source handles to HTML placeholders before escapeMarkdown
+  // so agent sanitizers cannot damage their opaque IDs.
   const { content: markdownWithPlaceholders, htmlSnippets } =
     extractCitationHtmlPlaceholders(flankingSafeMarkdown, options.knowledgeReferences)
   const escapedMarkdown = options.escapeMarkdown(markdownWithPlaceholders)

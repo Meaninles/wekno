@@ -805,6 +805,9 @@ func (s *Service) transferAggregateTx(
 		"abnormal_document_count": nonNegativeExpr(
 			"abnormal_document_count", sign*stats.AbnormalDocumentCount,
 		),
+		"failed_document_count": nonNegativeExpr(
+			"failed_document_count", sign*stats.FailedDocumentCount,
+		),
 		"updated_at": time.Now(),
 	}).Error
 }
@@ -1289,6 +1292,65 @@ type statVector struct {
 	enrichment int64
 	wiki       int64
 	abnormal   int64
+	failed     int64
+}
+
+var folderStatsDerivativeSuccess = map[string]struct{}{
+	"":          {},
+	"none":      {},
+	"completed": {},
+	"done":      {},
+	"skipped":   {},
+}
+
+func normalizedFolderStatsStatus(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
+// knowledgeHasTerminalWorkflowFailure mirrors the user-visible workflow
+// projection: an optional branch failure remains recoverable while any
+// derivative branch is still active, and only becomes a document failure once
+// all branches have settled. A degraded branch is abnormal, but not failed.
+func knowledgeHasTerminalWorkflowFailure(knowledge types.Knowledge) bool {
+	parseStatus := normalizedFolderStatsStatus(knowledge.ParseStatus)
+	if parseStatus == types.ParseStatusFailed {
+		return true
+	}
+	if parseStatus != types.ParseStatusCompleted {
+		return false
+	}
+
+	statuses := []string{
+		normalizedFolderStatsStatus(knowledge.SummaryStatus),
+		normalizedFolderStatsStatus(knowledge.EnrichmentStatus),
+		normalizedFolderStatsStatus(knowledge.WikiStatus),
+	}
+	for _, status := range statuses {
+		if status == types.SummaryStatusPending || status == types.SummaryStatusProcessing {
+			return false
+		}
+	}
+	for _, status := range statuses {
+		if status == types.EnrichmentStatusDegraded || status == types.WikiStatusDegraded {
+			continue
+		}
+		if _, ok := folderStatsDerivativeSuccess[status]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func knowledgeHasAbnormalSignal(knowledge types.Knowledge) bool {
+	parseStatus := normalizedFolderStatsStatus(knowledge.ParseStatus)
+	enrichmentStatus := normalizedFolderStatsStatus(knowledge.EnrichmentStatus)
+	wikiStatus := normalizedFolderStatsStatus(knowledge.WikiStatus)
+	return parseStatus == types.ParseStatusFailed ||
+		parseStatus == types.ParseStatusCancelled ||
+		enrichmentStatus == types.EnrichmentStatusFailed ||
+		enrichmentStatus == types.EnrichmentStatusDegraded ||
+		wikiStatus == types.WikiStatusFailed ||
+		wikiStatus == types.WikiStatusDegraded
 }
 
 func vectorForKnowledge(knowledge types.Knowledge) statVector {
@@ -1306,12 +1368,9 @@ func vectorForKnowledge(knowledge types.Knowledge) statVector {
 	if knowledge.WikiStatus == types.WikiStatusPending {
 		vector.wiki = 1
 	}
-	if knowledge.ParseStatus == types.ParseStatusFailed ||
-		knowledge.ParseStatus == types.ParseStatusCancelled ||
-		knowledge.EnrichmentStatus == types.EnrichmentStatusFailed ||
-		knowledge.EnrichmentStatus == types.EnrichmentStatusDegraded ||
-		knowledge.WikiStatus == types.WikiStatusFailed ||
-		knowledge.WikiStatus == types.WikiStatusDegraded {
+	if knowledgeHasTerminalWorkflowFailure(knowledge) {
+		vector.failed = 1
+	} else if knowledgeHasAbnormalSignal(knowledge) {
 		vector.abnormal = 1
 	}
 	return vector
@@ -1324,6 +1383,7 @@ func (v *statVector) add(other statVector) {
 	v.enrichment += other.enrichment
 	v.wiki += other.wiki
 	v.abnormal += other.abnormal
+	v.failed += other.failed
 }
 
 func (s *Service) reconcileScope(ctx context.Context, tenantID uint64, kbID string) error {
@@ -1386,6 +1446,7 @@ func (s *Service) reconcileScope(ctx context.Context, tenantID uint64, kbID stri
 				"enrichment_pending_task_count": value.enrichment,
 				"wiki_pending_task_count":       value.wiki,
 				"abnormal_document_count":       value.abnormal,
+				"failed_document_count":         value.failed,
 				"updated_at":                    time.Now(),
 			}).Error; err != nil {
 				return err

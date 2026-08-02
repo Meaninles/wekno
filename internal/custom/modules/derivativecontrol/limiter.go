@@ -27,7 +27,7 @@ const (
 	minTPM                   int64 = 100
 	maxTPM                   int64 = 2_000_000
 	defaultOutputReservation       = 4_096
-	timeoutSafetyCooldown          = 10 * time.Minute
+	timeoutSafetyCooldown          = 60 * time.Second
 	failureSafetyCooldown          = 30 * time.Second
 )
 
@@ -584,7 +584,10 @@ func (l *limiterLease) finish(reserved, actual int, callErr error) {
 			}
 		}
 	}
-	if callErr == nil {
+	// Errors raised by admission hooks, durable queue state checks, checkpoint
+	// persistence, or an already-open circuit did not reach the provider and
+	// must never pause every task sharing this model pool.
+	if callErr == nil || !modeladmission.IsProviderCallFailure(callErr) {
 		return
 	}
 	cooldown := failureSafetyCooldown

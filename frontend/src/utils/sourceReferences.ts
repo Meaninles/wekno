@@ -39,7 +39,7 @@ export type SourceReferenceItem = {
 }
 
 const CITATION_ID_RE = /^S(\d+)$/i
-const SRC_TAG_RE = /<src\s+id="(S[1-9][0-9]*)"\s*\/>/g
+const SRC_TAG_RE = /<src id="(S[1-9][0-9]*)" \/>/g
 
 export function getSourceReferenceKind(ref: SourceReference): SourceReferenceKind {
   const metadataType = ref.metadata?.source_type

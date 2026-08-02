@@ -124,6 +124,52 @@ func TestFolderStatsFollowStatusAndLocationChanges(t *testing.T) {
 	require.Zero(t, parent.Stats.ParseRunningCount)
 }
 
+func TestFolderStatsSeparateAbnormalAndTerminalFailedDocuments(t *testing.T) {
+	service, ctx := newFolderTestService(t)
+	folder, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{Name: "状态拆分"})
+	require.NoError(t, err)
+
+	// A failed derivative branch is still only abnormal while another branch
+	// remains active; the document-level workflow has not reached failed yet.
+	createTestKnowledge(
+		t, service, folder.ID, "doc-retrying", types.ParseStatusCompleted, 1,
+		types.WikiStatusPending, types.EnrichmentStatusFailed,
+	)
+	createTestKnowledge(
+		t, service, folder.ID, "doc-degraded", types.ParseStatusCompleted, 0,
+		types.WikiStatusCompleted, types.EnrichmentStatusDegraded,
+	)
+	createTestKnowledge(
+		t, service, folder.ID, "doc-failed", types.ParseStatusFailed, 0,
+		types.WikiStatusNone, types.EnrichmentStatusNone,
+	)
+
+	folder, err = service.GetFolder(ctx, "kb-1", folder.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), folder.Stats.AbnormalDocumentCount)
+	require.Equal(t, int64(1), folder.Stats.FailedDocumentCount)
+
+	// Once the remaining branch settles, the failed derivative becomes a true
+	// document-level failure and moves between the two counters atomically.
+	require.NoError(t, service.db.Model(&types.Knowledge{}).
+		Where("id = ?", "doc-retrying").
+		Updates(map[string]any{
+			"pending_subtasks_count": 0,
+			"wiki_status":            types.WikiStatusCompleted,
+		}).Error)
+	folder, err = service.GetFolder(ctx, "kb-1", folder.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), folder.Stats.AbnormalDocumentCount)
+	require.Equal(t, int64(2), folder.Stats.FailedDocumentCount)
+
+	// Reconciliation uses the same projection as the incremental trigger.
+	require.NoError(t, service.ReconcileAll(ctx))
+	folder, err = service.GetFolder(ctx, "kb-1", folder.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), folder.Stats.AbnormalDocumentCount)
+	require.Equal(t, int64(2), folder.Stats.FailedDocumentCount)
+}
+
 func TestFolderMoveCycleAndDeleteModes(t *testing.T) {
 	service, ctx := newFolderTestService(t)
 	parent, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{Name: "父级"})

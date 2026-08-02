@@ -41,7 +41,7 @@ func TestConfigSeparatesRenewableLeaseFromTaskDeadline(t *testing.T) {
 	require.Equal(t, 10*time.Minute, cfg.TaskTimeout)
 }
 
-func TestProviderOutageRefundsSplitPartAttemptAtRetryLimit(t *testing.T) {
+func TestProviderOutageDoesNotSpendSplitPartFailureBudget(t *testing.T) {
 	ctx := context.Background()
 	db := newManagerTestDB(t)
 	manager := NewManagerWithConfig(db, &splitEnqueuerStub{}, Config{
@@ -68,7 +68,8 @@ func TestProviderOutageRefundsSplitPartAttemptAtRetryLimit(t *testing.T) {
 	var stored Part
 	require.NoError(t, db.First(&stored, "id = ?", claimed.ID).Error)
 	require.Equal(t, PartPreparing, stored.State)
-	require.Equal(t, 0, stored.Attempt, "provider outage must refund the claimed business attempt")
+	require.Equal(t, 1, stored.Attempt, "execution history must remain observable")
+	require.Zero(t, stored.FailureAttempts, "provider outage must not spend the business failure budget")
 	require.NotNil(t, stored.LeaseUntil)
 	require.Greater(t, time.Until(*stored.LeaseUntil), 20*time.Second)
 	var storedPlan Plan
@@ -77,7 +78,7 @@ func TestProviderOutageRefundsSplitPartAttemptAtRetryLimit(t *testing.T) {
 	require.Zero(t, storedPlan.FailedParts)
 }
 
-func TestShutdownCancellationRefundsSplitPartAttemptAtRetryLimit(t *testing.T) {
+func TestShutdownCancellationDoesNotSpendSplitPartFailureBudget(t *testing.T) {
 	ctx := context.Background()
 	db := newManagerTestDB(t)
 	manager := NewManagerWithConfig(db, &splitEnqueuerStub{}, Config{
@@ -99,7 +100,8 @@ func TestShutdownCancellationRefundsSplitPartAttemptAtRetryLimit(t *testing.T) {
 	var stored Part
 	require.NoError(t, db.First(&stored, "id = ?", claimed.ID).Error)
 	require.Equal(t, PartPreparing, stored.State)
-	require.Equal(t, 0, stored.Attempt)
+	require.Equal(t, 1, stored.Attempt)
+	require.Zero(t, stored.FailureAttempts)
 	require.NotNil(t, stored.LeaseUntil)
 	var storedPlan Plan
 	require.NoError(t, db.First(&storedPlan, "id = ?", created.ID).Error)
@@ -107,12 +109,50 @@ func TestShutdownCancellationRefundsSplitPartAttemptAtRetryLimit(t *testing.T) {
 	require.Zero(t, storedPlan.FailedParts)
 }
 
-func TestPartTaskIDAdvancesWithLeaseDeliveryEpoch(t *testing.T) {
+func TestPartTaskIDAdvancesWithDispatchEpoch(t *testing.T) {
 	first := PartTaskID("plan", 7, 1)
 	recovery := PartTaskID("plan", 7, 2)
 	require.NotEqual(t, first, recovery)
 	require.Equal(t, first, PartTaskID("plan", 7, 1))
 	require.Contains(t, recovery, "delivery:000002")
+}
+
+func TestMissingWakeupRotatesDispatchWithoutConsumingExecutionOrFailure(t *testing.T) {
+	ctx := context.Background()
+	db := newManagerTestDB(t)
+	enqueuer := &splitEnqueuerStub{}
+	manager := NewManagerWithConfig(db, enqueuer, Config{
+		PartConcurrency: 1, PerDocumentWindow: 1, MaxRetry: 1,
+		LeaseDuration: time.Minute, RecoveryInterval: time.Second,
+		RecoveryBatchSize: 20, ArchiveMaxParts: 100, FinalizeBatchSize: 10,
+	})
+	plan, parts := newManagerTestPlan(1)
+	created, err := manager.CreatePlan(ctx, plan, parts)
+	require.NoError(t, err)
+	require.NoError(t, manager.DispatchPlan(ctx, created.ID))
+
+	var first Part
+	require.NoError(t, db.First(&first, "id = ?", parts[0].ID).Error)
+	require.Equal(t, int64(1), first.DispatchEpoch)
+	require.Zero(t, first.Attempt)
+	require.Zero(t, first.FailureAttempts)
+	require.NoError(t, db.Model(&Part{}).Where("id = ?", first.ID).
+		Update("dispatch_lease_until", time.Now().Add(-time.Second)).Error)
+
+	require.NoError(t, manager.redispatchStaleQueued(ctx, created.ID))
+	var replaced Part
+	require.NoError(t, db.First(&replaced, "id = ?", first.ID).Error)
+	require.Equal(t, int64(2), replaced.DispatchEpoch)
+	require.Zero(t, replaced.Attempt)
+	require.Zero(t, replaced.FailureAttempts)
+	require.Equal(t, 2, enqueuer.count(TypePartProcess))
+
+	_, _, err = manager.ClaimPart(ctx, payloadForEpoch(&replaced, 1))
+	require.ErrorIs(t, err, ErrStalePart)
+	claimed, _, err := manager.ClaimPart(ctx, payloadForEpoch(&replaced, 2))
+	require.NoError(t, err)
+	require.Equal(t, 1, claimed.Attempt)
+	require.Zero(t, claimed.FailureAttempts)
 }
 
 type splitEnqueuerStub struct {
@@ -462,18 +502,21 @@ func TestManagerRestartImmediatelyReclaimsSameInstanceOldBoot(t *testing.T) {
 
 	var recovered Part
 	require.NoError(t, db.First(&recovered, "id = ?", claimed.ID).Error)
-	require.Equal(t, PartQueued, recovered.State)
-	require.Equal(t, 0, recovered.Attempt)
+	require.Equal(t, PartPreparing, recovered.State)
+	require.Equal(t, 1, recovered.Attempt)
+	require.Zero(t, recovered.FailureAttempts)
 	require.Equal(t, int64(1), recovered.LeaseEpoch)
 	require.Empty(t, recovered.LeaseOwner)
 	require.Nil(t, recovered.LeaseUntil)
 	require.Contains(t, recovered.LastError, "boot superseded")
+	require.NoError(t, restarted.DispatchPlan(ctx, created.ID))
 
 	reclaimed, epoch, err := restarted.ClaimPart(
-		ctx, payloadForEpoch(parts[0], claimed.LeaseEpoch+1),
+		ctx, payloadForEpoch(parts[0], recovered.DispatchEpoch+1),
 	)
 	require.NoError(t, err)
-	require.Equal(t, 1, reclaimed.Attempt)
+	require.Equal(t, 2, reclaimed.Attempt)
+	require.Zero(t, reclaimed.FailureAttempts)
 	require.Equal(t, int64(2), epoch)
 	_, err = restarted.CompletePart(ctx, reclaimed, epoch, PartCompletion{
 		MarkdownChars: 42, ChunkCount: 1, FirstChunkID: "first", LastChunkID: "last",
@@ -527,10 +570,11 @@ func TestExpiredPartWaitsForExactOwnerTerminationAndFencesPausedOwner(t *testing
 	require.NoError(t, survivor.recoverExpiredLeases(ctx, time.Now()))
 	var recovered Part
 	require.NoError(t, db.First(&recovered, "id = ?", claimed.ID).Error)
-	require.Equal(t, PartQueued, recovered.State)
+	require.Equal(t, PartPreparing, recovered.State)
 	require.Empty(t, recovered.LeaseOwner)
 	require.Empty(t, recovered.LeaseInstanceID)
 	require.Empty(t, recovered.LeaseBootID)
+	require.NoError(t, survivor.DispatchPlan(ctx, created.ID))
 
 	// A paused handler from the dead boot can no longer heartbeat, complete,
 	// or release the replacement's work.
@@ -542,7 +586,7 @@ func TestExpiredPartWaitsForExactOwnerTerminationAndFencesPausedOwner(t *testing
 	require.ErrorIs(t, owner.ReleasePart(ctx, claimed, oldEpoch, errors.New("late")), ErrLeaseLost)
 
 	reclaimed, newEpoch, err := survivor.ClaimPart(
-		ctx, payloadForEpoch(parts[0], oldEpoch+1),
+		ctx, payloadForEpoch(parts[0], recovered.DispatchEpoch+1),
 	)
 	require.NoError(t, err)
 	require.Equal(t, oldEpoch+1, newEpoch)
@@ -599,10 +643,11 @@ func TestConcurrentSurvivorsRecoverExpiredPartOnlyOnce(t *testing.T) {
 	}
 	var recovered Part
 	require.NoError(t, db.First(&recovered, "id = ?", claimed.ID).Error)
-	require.Equal(t, PartQueued, recovered.State)
+	require.Equal(t, PartPreparing, recovered.State)
 	require.Equal(t, oldEpoch, recovered.LeaseEpoch)
+	require.NoError(t, first.DispatchPlan(ctx, created.ID))
 
-	payload := payloadForEpoch(parts[0], oldEpoch+1)
+	payload := payloadForEpoch(parts[0], recovered.DispatchEpoch+1)
 	var winners atomic.Int32
 	for _, survivor := range []*Manager{first, second} {
 		_, _, claimErr := survivor.ClaimPart(ctx, payload)
@@ -688,9 +733,10 @@ func TestManagerTransientRetryUsesSinglePartProbe(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Model(&Part{}).Where("id = ?", parts[0].ID).Updates(
 		map[string]interface{}{
-			"attempt":     1,
-			"last_error":  "HTTP 429 Too Many Requests",
-			"lease_until": time.Now().Add(-time.Second),
+			"attempt":             1,
+			"backpressure_events": 1,
+			"last_error":          "HTTP 429 Too Many Requests",
+			"lease_until":         time.Now().Add(-time.Second),
 		},
 	).Error)
 
@@ -731,7 +777,7 @@ func TestManagerTransientRetryUsesSinglePartProbe(t *testing.T) {
 	require.EqualValues(t, 1, queued)
 }
 
-func TestManagerRecoveryFailsTerminalExpiredLeaseAndKnowledge(t *testing.T) {
+func TestManagerRecoveryNeverTurnsExpiredLeaseIntoBusinessFailure(t *testing.T) {
 	ctx := context.Background()
 	db := newManagerTestDB(t)
 	require.NoError(t, db.Exec(`
@@ -779,12 +825,14 @@ func TestManagerRecoveryFailsTerminalExpiredLeaseAndKnowledge(t *testing.T) {
 
 	var storedPart Part
 	require.NoError(t, db.First(&storedPart, "id = ?", claimed.ID).Error)
-	require.Equal(t, PartFailed, storedPart.State)
-	require.Contains(t, storedPart.LastError, "retry budget")
+	require.Equal(t, PartQueued, storedPart.State)
+	require.Contains(t, storedPart.LastError, "lease expired")
+	require.Equal(t, 1, storedPart.Attempt)
+	require.Zero(t, storedPart.FailureAttempts)
 	var storedPlan Plan
 	require.NoError(t, db.First(&storedPlan, "id = ?", created.ID).Error)
-	require.Equal(t, PlanFailed, storedPlan.State)
-	require.Equal(t, 1, storedPlan.FailedParts)
+	require.NotEqual(t, PlanFailed, storedPlan.State)
+	require.Zero(t, storedPlan.FailedParts)
 	var knowledge struct {
 		ParseStatus string
 		Owner       string `gorm:"column:processing_owner"`
@@ -793,9 +841,49 @@ func TestManagerRecoveryFailsTerminalExpiredLeaseAndKnowledge(t *testing.T) {
 	require.NoError(t, db.Table("knowledges").Select(
 		"parse_status, processing_owner, error_message",
 	).Where("id = ?", created.KnowledgeID).Scan(&knowledge).Error)
-	require.Equal(t, types.ParseStatusFailed, knowledge.ParseStatus)
-	require.Empty(t, knowledge.Owner)
-	require.Contains(t, knowledge.Error, "expired")
+	require.Equal(t, types.ParseStatusProcessing, knowledge.ParseStatus)
+	require.Equal(t, created.ProcessingOwner, knowledge.Owner)
+	require.Empty(t, knowledge.Error)
+}
+
+func TestBusinessFailuresAloneConsumeSplitPartRetryBudget(t *testing.T) {
+	ctx := context.Background()
+	db := newManagerTestDB(t)
+	manager := NewManagerWithConfig(db, &splitEnqueuerStub{}, Config{
+		PartConcurrency: 1, PerDocumentWindow: 1, MaxRetry: 2,
+		LeaseDuration: time.Minute, RecoveryInterval: time.Second,
+		RetryBackoffBase: time.Second, RetryBackoffMax: time.Minute,
+		RecoveryBatchSize: 20, ArchiveMaxParts: 100, FinalizeBatchSize: 10,
+	})
+	plan, parts := newManagerTestPlan(1)
+	created, err := manager.CreatePlan(ctx, plan, parts)
+	require.NoError(t, err)
+	require.NoError(t, manager.DispatchPlan(ctx, created.ID))
+
+	claimed, epoch, err := manager.ClaimPart(ctx, payloadFor(parts[0]))
+	require.NoError(t, err)
+	outcome, err := manager.ReleasePartWithOutcome(ctx, claimed, epoch, errors.New("invalid workbook structure"))
+	require.NoError(t, err)
+	require.False(t, outcome.Terminal)
+	require.Equal(t, 1, outcome.FailureAttempts)
+
+	require.NoError(t, db.Model(&Part{}).Where("id = ?", claimed.ID).
+		Update("lease_until", time.Now().Add(-time.Second)).Error)
+	var retry Part
+	require.NoError(t, db.First(&retry, "id = ?", claimed.ID).Error)
+	require.NoError(t, manager.DispatchPlan(ctx, created.ID))
+	reclaimed, newEpoch, err := manager.ClaimPart(ctx, payloadForEpoch(&retry, retry.LeaseEpoch+1))
+	require.NoError(t, err)
+	outcome, err = manager.ReleasePartWithOutcome(ctx, reclaimed, newEpoch, errors.New("invalid workbook structure"))
+	require.NoError(t, err)
+	require.True(t, outcome.Terminal)
+	require.Equal(t, 2, outcome.FailureAttempts)
+
+	var stored Part
+	require.NoError(t, db.First(&stored, "id = ?", claimed.ID).Error)
+	require.Equal(t, PartFailed, stored.State)
+	require.Equal(t, 2, stored.Attempt)
+	require.Equal(t, 2, stored.FailureAttempts)
 }
 
 func TestManagerPublishGenerationAtomicallySwapsLogicalChunks(t *testing.T) {

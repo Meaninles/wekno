@@ -730,15 +730,17 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 
 	rows := []types.KnowledgeProcessingSpan{}
 	currentAttempt := 0
+	latestAttempt := 0
 	var nextCursor string
 	if h.spanV2 != nil {
+		latest, lerr := h.spanV2.LatestAttempt(ctx, knowledge.ID)
+		if lerr != nil {
+			logger.Warnf(ctx, "spans V2 LatestAttempt failed for %s: %v", knowledge.ID, lerr)
+		} else {
+			latestAttempt = latest
+		}
 		if requestedAttempt == 0 {
-			latest, lerr := h.spanV2.LatestAttempt(ctx, knowledge.ID)
-			if lerr != nil {
-				logger.Warnf(ctx, "spans V2 LatestAttempt failed for %s: %v", knowledge.ID, lerr)
-			} else {
-				currentAttempt = latest
-			}
+			currentAttempt = latestAttempt
 		} else {
 			currentAttempt = requestedAttempt
 		}
@@ -776,8 +778,12 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 	tree, currentStageName, lastErr := buildSpanTree(knowledge.ID, currentAttempt, rows, knowledge.ParseStatus)
 
 	resp := gin.H{
-		"knowledge_id":    knowledge.ID,
-		"parse_status":    knowledge.ParseStatus,
+		"knowledge_id": knowledge.ID,
+		"parse_status": knowledge.ParseStatus,
+		// attempt/latest_attempt are the public parse-run contract used by
+		// the timeline. current_attempt is retained as a compatible alias.
+		"attempt":         currentAttempt,
+		"latest_attempt":  latestAttempt,
 		"current_attempt": currentAttempt,
 		"current_stage":   currentStageName,
 		"trace":           tree,
@@ -787,10 +793,13 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 	}
 	if lastErr != nil {
 		resp["last_error"] = gin.H{
-			"stage":       lastErr.Name,
-			"code":        lastErr.ErrorCode,
-			"message":     lastErr.ErrorMessage,
-			"finished_at": lastErr.FinishedAt,
+			"name":          lastErr.Name,
+			"error_code":    lastErr.ErrorCode,
+			"error_message": lastErr.ErrorMessage,
+			"stage":         lastErr.Name,
+			"code":          lastErr.ErrorCode,
+			"message":       lastErr.ErrorMessage,
+			"finished_at":   lastErr.FinishedAt,
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{

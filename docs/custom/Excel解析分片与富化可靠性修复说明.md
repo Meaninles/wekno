@@ -208,6 +208,38 @@ part 数下降来自忽略纯样式尾部和纠正二维规划，不是删除真
 5. 选择生产失败样本手动重建；缓存 v4 会自动绕开旧结果，无需删除全部缓存。
 6. 观察 split plan/part、parse cache hit version、provider disposition、enrichment degraded 和 Wiki terminal 指标。
 
+### 5.1 PostgreSQL/ParadeDB 索引损坏与重启恢复
+
+`expected to deserialize valid SegmentMetaEntryHeader: UnexpectedEnd` 不是 Excel 内容错误，
+而是共享 PostgreSQL/ParadeDB 关键词索引 `public.embeddings_search_idx` 的物理段损坏。
+同一个损坏索引会让任意文档在向量批处理的关键词落库阶段失败，重建文档本身不能修复它。
+
+当前实现采用两层恢复：
+
+- `dependencycontrol` 只对精确的 `SegmentMetaEntryHeader + UnexpectedEnd` 签名打开共享依赖断路器；普通业务错误和无关的 PostgreSQL `XX000` 不会被误判。
+- maintenance 在 PostgreSQL boot 变化或断路状态下执行 `pdb.verify_index`；校验失败时使用 `REINDEX INDEX CONCURRENTLY` 重建，复验全部通过后才恢复 parse-worker readiness。
+- 断路、修复和 PostgreSQL 网络/重启错误是基础设施等待，不增加物理 part 的业务失败次数。
+- Redis 投递代次 `dispatch_epoch`、执行租约代次 `lease_epoch`、执行诊断次数 `attempt` 和真实业务失败次数 `failure_attempts` 分开存储。旧投递即使延迟到达也会被 epoch 拒绝。
+- 同一稳定实例的新 boot 可以精确接管旧 boot 的 part；未知时长的计划内或意外重启都依赖持久租约恢复，不靠固定重启时间窗口，也不回退执行次数来伪装恢复。
+
+用户界面的“解析次数”只表示上传或手动重建产生的文档处理代次。part 内部重投、
+worker 重启和共享依赖等待都不再显示成新的解析次数；失败详情同时返回稳定的
+`name/error_code/error_message` 字段，并保留原字段别名。
+
+2026-08-02 使用原失败文档 `数据资源（物理）信息采集清单-NC系统.xlsx` 执行真实 API 重建：
+25/25 个物理 part 均完成，原先 part 1 的索引反序列化错误未复现。处理中重启一个
+parse-worker 后，被中断的 part 22 和 24 自动换到新 boot，执行次数为 2、
+`failure_attempts=0`，随后完成。这证明重启恢复不会把基础设施中断算成第六次业务失败。
+第一次验收运行在更晚的最终切代配额校验处因租户已超过 10GB 存储配额而停止；这是与
+原索引损坏相互独立的业务配额结果，不影响上述跨阶段验收。
+
+随后通过 SystemAdmin API 将本地默认及现有租户配额调整为 20GB，并再次调用文档重建
+API。第 7 次解析在约 9 分钟内完成：split plan 为 `completed`，25/25 parts 完成、
+`failed_parts=0`，所有 part 均为 `execution_attempts=1/failure_attempts=0`；文档最终为
+`parse_status=completed/core_status=ready`。发布代次包含 75,460 个连续编号的正文 chunk
+和 5,501 个父上下文 chunk，共 80,961 个 chunk，正文 API 报告 75,460 条且全部启用。
+原 `SegmentMetaEntryHeader/UnexpectedEnd` 和配额错误均未再次出现。
+
 ## 6. 不采用的方案
 
 - 不提高 `max_parts=10000` 来掩盖问题：会让 92 行表产生一万多个无意义文件。

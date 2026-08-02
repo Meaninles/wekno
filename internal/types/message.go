@@ -244,8 +244,20 @@ type Message struct {
 	IsFallback bool `json:"is_fallback,omitempty"`
 	// AnswerFeedback is the current caller's lightweight like/dislike state for this answer.
 	AnswerFeedback string `json:"answer_feedback,omitempty" gorm:"-"`
-	// Agent total execution duration in milliseconds (from query start to answer start)
+	// Total turn duration in milliseconds (request accepted to completion/stop).
 	AgentDurationMs int64 `json:"agent_duration_ms,omitempty" gorm:"column:agent_duration_ms;default:0"`
+	// AgentMode records the request execution mode independently of AgentSteps.
+	// A user may stop a ReAct run before its first tool call is persisted, so
+	// inferring the mode from a non-empty step list loses authoritative UI state.
+	AgentMode bool `json:"agent_mode" gorm:"column:agent_mode;not null;default:false"`
+	// AgentToolCount is the authoritative number of non-retrieval tool calls in
+	// this run. Retrieval calls are represented by RetrievalStats instead.
+	AgentToolCount int `json:"agent_tool_count" gorm:"column:agent_tool_count;not null;default:0"`
+	// RetrievalStats is the authoritative, run-scoped count of claim-bearing
+	// sources that were exposed to the answering model. It is intentionally
+	// independent from KnowledgeReferences, which contains only sources that
+	// survived final citation filtering.
+	RetrievalStats RetrievalStats `json:"retrieval_stats" gorm:"type:jsonb;column:retrieval_stats;not null;default:'{}'"`
 	// RenderedContent stores the full RAG-augmented user message (with retrieved context)
 	// sent to the LLM. Used to preserve retrieval context across conversation turns.
 	// Empty for non-retrieval intents or assistant messages.
@@ -261,6 +273,51 @@ type Message struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// Soft delete timestamp
 	DeletedAt gorm.DeletedAt `json:"deleted_at"            gorm:"index"`
+}
+
+// RetrievalStats summarizes unique sources actually inspected during one
+// answer. Vector retrieval counts documents once even when several chunks were
+// inspected; structured analysis counts database/table sources separately so
+// clients do not mislabel them as documents.
+type RetrievalStats struct {
+	Attempted   bool `json:"attempted"`
+	Documents   int  `json:"documents"`
+	Wiki        int  `json:"wiki"`
+	Web         int  `json:"web"`
+	DataSources int  `json:"data_sources"`
+	Total       int  `json:"total"`
+	// Unit tells every client which noun to use even when Total is zero.
+	// The JSONB schema stays extensible and does not couple presentation to a
+	// particular built-in agent ID.
+	Unit string `json:"unit,omitempty"`
+}
+
+// Value implements driver.Valuer for PostgreSQL JSONB and SQLite JSON text.
+func (r RetrievalStats) Value() (driver.Value, error) {
+	return json.Marshal(r)
+}
+
+// Scan implements sql.Scanner for PostgreSQL JSONB and SQLite JSON text.
+func (r *RetrievalStats) Scan(value interface{}) error {
+	if value == nil {
+		*r = RetrievalStats{}
+		return nil
+	}
+	var raw []byte
+	switch typed := value.(type) {
+	case []byte:
+		raw = typed
+	case string:
+		raw = []byte(typed)
+	default:
+		*r = RetrievalStats{}
+		return nil
+	}
+	if len(raw) == 0 {
+		*r = RetrievalStats{}
+		return nil
+	}
+	return json.Unmarshal(raw, r)
 }
 
 // AgentSteps represents a collection of agent execution steps

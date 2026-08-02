@@ -80,15 +80,6 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 	// through the context template so runtime metadata (current_time, etc.) is injected.
 	if !chatManage.NeedsRetrieval() {
 		userContent := safeQuery
-		if rewrite := strings.TrimSpace(chatManage.RewriteQuery); rewrite != "" {
-			if safeRewrite, ok := utils.ValidateInput(rewrite); ok {
-				userContent = safeRewrite
-			} else {
-				pipelineWarn(ctx, "IntoChatMessage", "invalid_rewrite_query_fallback", map[string]interface{}{
-					"session_id": chatManage.SessionID,
-				})
-			}
-		}
 		if chatManage.ImageDescription != "" && !chatManage.ChatModelSupportsVision {
 			userContent += "\n\n[用户上传图片内容]\n" + chatManage.ImageDescription
 		}
@@ -131,32 +122,29 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 		contextsBuilder.WriteString(catalog)
 		contextsBuilder.WriteString("\n")
 	}
-	docHeader := buildDocumentHeader(allResults)
-	if docHeader != "" {
-		contextsBuilder.WriteString(docHeader)
-		contextsBuilder.WriteString("\n")
-	}
 
 	// Build contexts string based on FAQ priority strategy
 	if chatManage.FAQPriorityEnabled && len(faqResults) > 0 {
-		contextsBuilder.WriteString("<source type=\"faq\" priority=\"high\">\n")
+		contextsBuilder.WriteString("[EVIDENCE_GROUP type=faq priority=high]\n")
 		for i, result := range faqResults {
 			passage := getEnrichedPassageForChat(ctx, result)
+			annotations := map[string]string{}
 			if hasHighConfidenceFAQ && i == 0 {
-				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"FAQ-%d\" match=\"exact\"%s>%s</context>\n", i+1, sourcerefs.ContextCitationAttrs(result), passage))
-			} else {
-				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"FAQ-%d\"%s>%s</context>\n", i+1, sourcerefs.ContextCitationAttrs(result), passage))
+				annotations["match"] = "exact"
 			}
+			contextsBuilder.WriteString(sourcerefs.RenderEvidenceBlock(result, passage, annotations))
+			contextsBuilder.WriteString("\n")
 		}
-		contextsBuilder.WriteString("</source>\n")
+		contextsBuilder.WriteString("[/EVIDENCE_GROUP]\n")
 
 		if len(docResults) > 0 {
-			contextsBuilder.WriteString("<source type=\"document\" priority=\"supplementary\">\n")
-			for i, result := range docResults {
+			contextsBuilder.WriteString("[EVIDENCE_GROUP type=document_fragment priority=supplementary]\n")
+			for _, result := range docResults {
 				passage := getEnrichedPassageForChat(ctx, result)
-				contextsBuilder.WriteString(fmt.Sprintf("<context id=\"DOC-%d\"%s>%s</context>\n", i+1, sourcerefs.ContextCitationAttrs(result), passage))
+				contextsBuilder.WriteString(sourcerefs.RenderEvidenceBlock(result, passage, nil))
+				contextsBuilder.WriteString("\n")
 			}
-			contextsBuilder.WriteString("</source>")
+			contextsBuilder.WriteString("[/EVIDENCE_GROUP]")
 		}
 	} else {
 		for i, result := range chatManage.MergeResult {
@@ -164,7 +152,7 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 			if i > 0 {
 				contextsBuilder.WriteString("\n")
 			}
-			contextsBuilder.WriteString(fmt.Sprintf("<context id=\"%d\"%s>%s</context>", i+1, sourcerefs.ContextCitationAttrs(result), passage))
+			contextsBuilder.WriteString(sourcerefs.RenderEvidenceBlock(result, passage, nil))
 		}
 	}
 
@@ -205,9 +193,9 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 	return next()
 }
 
-// persistRenderedContent asynchronously writes the RAG-augmented UserContent back
-// to the user message so that subsequent conversation turns can see the full
-// retrieval context in history.
+// persistRenderedContent asynchronously stores the exact prompt envelope used
+// for this turn for diagnostics. History reconstruction intentionally reads the
+// original user Content, never this request-local retrieval/citation envelope.
 func (p *PluginIntoChatMessage) persistRenderedContent(ctx context.Context, chatManage *types.ChatManage) {
 	if chatManage.UserMessageID == "" || chatManage.UserContent == "" {
 		pipelineInfo(ctx, "IntoChatMessage", "persist_rendered_content_skip", map[string]interface{}{
@@ -238,59 +226,6 @@ func (p *PluginIntoChatMessage) persistRenderedContent(ctx context.Context, chat
 			})
 		}
 	}()
-}
-
-// buildDocumentHeader generates a document metadata section listing each unique
-// knowledge document (by KnowledgeID) with its title and description.
-// Returns an empty string when no meaningful metadata is available.
-func buildDocumentHeader(results []*types.SearchResult) string {
-	type docMeta struct {
-		title       string
-		description string
-	}
-
-	seen := make(map[string]struct{})
-	var docs []docMeta
-
-	for _, r := range results {
-		if r.KnowledgeID == "" {
-			continue
-		}
-		if _, ok := seen[r.KnowledgeID]; ok {
-			continue
-		}
-		seen[r.KnowledgeID] = struct{}{}
-
-		title := r.KnowledgeTitle
-		if title == "" {
-			title = r.KnowledgeFilename
-		}
-		if title == "" {
-			continue
-		}
-
-		docs = append(docs, docMeta{
-			title:       title,
-			description: r.KnowledgeDescription,
-		})
-	}
-
-	if len(docs) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	b.WriteString("<documents>\n")
-	for _, d := range docs {
-		b.WriteString("<document>\n")
-		b.WriteString(fmt.Sprintf("<title>%s</title>\n", d.title))
-		if d.description != "" {
-			b.WriteString(fmt.Sprintf("<description>%s</description>\n", d.description))
-		}
-		b.WriteString("</document>\n")
-	}
-	b.WriteString("</documents>")
-	return b.String()
 }
 
 // getEnrichedPassageForChat 合并Content和ImageInfo的文本内容，为聊天消息准备

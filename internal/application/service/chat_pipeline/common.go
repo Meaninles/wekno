@@ -76,6 +76,10 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 		"language": chatManage.Language,
 		"contexts": chatManage.RenderedContexts,
 	})
+	// Apply the same lightweight contract to every normal-QA turn. It is inert
+	// when no evidence handles exist, while keeping current-turn precedence and
+	// citation syntax consistent for present and future retrieval paths.
+	systemPrompt = sourcerefs.EnsureGenerationContract(systemPrompt)
 
 	chatMessages := []chat.Message{
 		{Role: "system", Content: systemPrompt},

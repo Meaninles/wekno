@@ -576,7 +576,8 @@ func NewWikiSearchTool(
 			ToolWikiSearch,
 			`Search wiki pages using PostgreSQL POSIX regular expressions (~* operator, case-insensitive).
 STRONGLY PREFER using regex to search for multiple concepts at once rather than simple plain text queries.
-Returns matching pages with titles, slugs, and summaries (each tagged with its knowledge_base_id).
+Returns catalog matches with titles, slugs, and navigation summaries (each tagged with its knowledge_base_id).
+This tool does NOT return claim-bearing evidence or citation handles. Before writing any factual conclusion from a match, call wiki_read_page for the selected slug and use only that page's full content and citation handle.
 Examples:
 - Alternation (RECOMMENDED): "stardust|skyvault" (matches either word)
 - Multiple terms (RECOMMENDED): "psionic.*engine" (matches both words in order)
@@ -705,6 +706,7 @@ func (t *wikiSearchTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "<search_results count=\"%d\" query=\"%s\">\n", len(allHits), query)
+		sb.WriteString("<catalog_only>These matches are navigation metadata, not claim-bearing evidence and have no citation handles. Call wiki_read_page for the selected slug before making any factual claim from it.</catalog_only>\n")
 		for _, h := range allHits {
 			p := h.page
 			key := seenLinkKey(h.kbID, p.Slug)

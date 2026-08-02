@@ -7,6 +7,7 @@ export interface KnowledgeFolderStats {
   enrichment_pending_task_count: number
   wiki_pending_task_count: number
   abnormal_document_count: number
+  failed_document_count: number
   stats_updated_at?: string
 }
 

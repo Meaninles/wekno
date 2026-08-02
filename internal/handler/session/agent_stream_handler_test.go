@@ -174,6 +174,129 @@ func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
 	}
 }
 
+func TestHandleCompleteAuthoritativelyFiltersStreamedCitationProtocol(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	ref := &types.SearchResult{
+		ID:       "chunk-1",
+		Content:  "supported claim",
+		Metadata: map[string]string{"citation_id": "S1"},
+	}
+	if err := handler.handleReferences(context.Background(), event.Event{
+		Type: event.EventAgentReferences,
+		Data: event.AgentReferencesData{References: []*types.SearchResult{ref}},
+	}); err != nil {
+		t.Fatalf("handleReferences returned error: %v", err)
+	}
+	raw := `supported claim<src id="S1" /> malformed<doc source_id="S1" />`
+	if err := handler.handleFinalAnswer(context.Background(), event.Event{
+		ID:   "answer-1",
+		Type: event.EventAgentFinalAnswer,
+		Data: event.AgentFinalAnswerData{Content: raw, Done: true},
+	}); err != nil {
+		t.Fatalf("handleFinalAnswer returned error: %v", err)
+	}
+	if err := handler.handleComplete(context.Background(), event.Event{
+		ID:   "complete-1",
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID:                  "assistant-1",
+			FinalAnswer:                raw,
+			KnowledgeRefs:              []*types.SearchResult{ref},
+			KnowledgeRefsAuthoritative: true,
+		},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+
+	want := `supported claim<src id="S1" /> malformed`
+	if msg.Content != want {
+		t.Fatalf("assistant content = %q, want %q", msg.Content, want)
+	}
+	if len(msg.KnowledgeReferences) != 1 || msg.KnowledgeReferences[0].Metadata["citation_id"] != "S1" {
+		t.Fatalf("assistant references = %#v, want cited S1 only", msg.KnowledgeReferences)
+	}
+	complete := stream.events[len(stream.events)-1]
+	if got := complete.Data["final_answer"]; got != want {
+		t.Fatalf("complete final_answer = %q, want filtered authoritative answer %q", got, want)
+	}
+}
+
+func TestHandleCompleteKeepsRetrievedDocumentsSeparateFromCitedFragments(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	if err := handler.handleToolCall(context.Background(), event.Event{
+		Type: event.EventAgentToolCall,
+		Data: event.AgentToolCallData{ToolCallID: "search-1", ToolName: "knowledge_search"},
+	}); err != nil {
+		t.Fatalf("handleToolCall returned error: %v", err)
+	}
+	refs := []*types.SearchResult{
+		{ID: "chunk-1", KnowledgeID: "doc-1", Content: "claim one", Metadata: map[string]string{"citation_id": "S1"}},
+		{ID: "chunk-2", KnowledgeID: "doc-1", Content: "claim two", Metadata: map[string]string{"citation_id": "S2"}},
+	}
+	if err := handler.handleReferences(context.Background(), event.Event{
+		Type: event.EventAgentReferences,
+		Data: event.AgentReferencesData{References: refs},
+	}); err != nil {
+		t.Fatalf("handleReferences returned error: %v", err)
+	}
+	answer := `claim one<src id="S1" />`
+	if err := handler.handleComplete(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID:                  "assistant-1",
+			FinalAnswer:                answer,
+			KnowledgeRefs:              refs[:1],
+			KnowledgeRefsAuthoritative: true,
+		},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+
+	if len(msg.KnowledgeReferences) != 1 {
+		t.Fatalf("cited fragment count = %d, want 1", len(msg.KnowledgeReferences))
+	}
+	if got := msg.RetrievalStats; !got.Attempted || got.Documents != 1 || got.Total != 1 {
+		t.Fatalf("retrieval stats = %+v, want one unique document", got)
+	}
+	complete := stream.events[len(stream.events)-1]
+	stats, ok := complete.Data["retrieval_stats"].(types.RetrievalStats)
+	if !ok || stats.Total != 1 {
+		t.Fatalf("completion retrieval_stats = %#v", complete.Data["retrieval_stats"])
+	}
+}
+
+func TestHandleCompletePreservesZeroResultRetrievalAttempt(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	_ = handler.handleToolCall(context.Background(), event.Event{
+		Type: event.EventAgentToolCall,
+		Data: event.AgentToolCallData{ToolCallID: "search-1", ToolName: "knowledge_search"},
+	})
+	if err := handler.handleComplete(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{MessageID: "assistant-1", FinalAnswer: "没有可用资料"},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+	if !msg.RetrievalStats.Attempted || msg.RetrievalStats.Total != 0 {
+		t.Fatalf("retrieval stats = %+v, want attempted zero-result retrieval", msg.RetrievalStats)
+	}
+}
+
 func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {
 	stream := &recordingStreamManager{}
 	handler := NewAgentStreamHandler(

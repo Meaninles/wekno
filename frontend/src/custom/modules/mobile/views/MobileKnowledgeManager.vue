@@ -1219,10 +1219,10 @@ onBeforeUnmount(() => {
               <span>{{ folder.stats.subtree_document_count }} 个文档 ·
                 {{ folder.stats.direct_child_folder_count }} 个子文件夹</span>
               <em class="parse-status"
-                :class="folder.stats.abnormal_document_count ? 'is-failed' : (folder.stats.parse_pending_count + folder.stats.parse_running_count + folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count ? 'is-running' : 'is-completed')">
+                :class="folder.stats.abnormal_document_count + folder.stats.failed_document_count ? 'is-failed' : (folder.stats.parse_pending_count + folder.stats.parse_running_count + folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count ? 'is-running' : 'is-completed')">
                 解析 {{ folder.stats.parse_pending_count + folder.stats.parse_running_count }} ·
                 衍生 {{ folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }} ·
-                异常 {{ folder.stats.abnormal_document_count }}
+                异常 {{ folder.stats.abnormal_document_count + folder.stats.failed_document_count }}
               </em>
             </div>
             <div v-if="selectedCanEdit" class="doc-actions folder-actions" @click.stop>

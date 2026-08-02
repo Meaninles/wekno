@@ -1,6 +1,6 @@
 import { markRaw, nextTick, type Ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ensureRagPipelineHistoryStream } from '@/utils/rag-pipeline-history'
+import { ensureRagPipelineHistoryStream, shouldRestoreQuickAnswerHistory } from '@/utils/rag-pipeline-history'
 import { normalizeUserFacingError } from '@/custom/modules/safeMessage/install'
 import {
   addLiveInteractiveEvent,
@@ -261,8 +261,32 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
   }
 
   /** Quick-answer sessions: restore flags lost after history reload. */
-  const restoreQuickAnswerFlags = (item: ChatMessage) => {
-    if (isAgentStreamSession() || item.role !== 'assistant') return
+  const restoreQuickAnswerFlags = (item: ChatMessage, pairedUser?: ChatMessage) => {
+    if (!shouldRestoreQuickAnswerHistory(item)) return
+
+    const existingStream = Array.isArray(item.agentEventStream)
+      ? item.agentEventStream as Array<Record<string, unknown>>
+      : []
+    const hasPersistedPipeline = existingStream.some((event) =>
+      event.type === 'tool_call' &&
+      (event.tool_name === 'query_understand' ||
+        event.tool_name === 'knowledge_search' ||
+        event.tool_name === 'search_knowledge' ||
+        event.tool_name === 'web_search'),
+    )
+    const hasReferences = Array.isArray(item.knowledge_references) && item.knowledge_references.length > 0
+    const mentions = Array.isArray(pairedUser?.mentioned_items)
+      ? pairedUser.mentioned_items as ChatMessage[]
+      : []
+    const hasRetrievalMention = mentions.some((mention) =>
+      ['kb', 'file', 'tag'].includes(String(mention.type || '')),
+    )
+    const hasAttachments = Array.isArray(pairedUser?.attachments) && pairedUser.attachments.length > 0
+    if (!hasPersistedPipeline && !hasReferences && !hasRetrievalMention && !hasAttachments) {
+      item.isRagMode = false
+      return
+    }
+
     item.isRagMode = true
     if (
       item.agent_steps &&
@@ -272,7 +296,10 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       item.isAgentMode = true
       item.hideContent = true
     }
-    ensureRagPipelineHistoryStream(item as Parameters<typeof ensureRagPipelineHistoryStream>[0])
+    ensureRagPipelineHistoryStream(
+      item as Parameters<typeof ensureRagPipelineHistoryStream>[0],
+      String(pairedUser?.content || ''),
+    )
     if (item.isRagMode && item.agentEventStream) {
       item.agentEventStream = markRaw(item.agentEventStream as object)
     }
@@ -475,6 +502,12 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     newScrollHeight?: number,
   ) => {
     const chatlist = [...data]
+    const usersByRequestID = new Map<string, ChatMessage>()
+    for (const message of chatlist) {
+      if (message.role === 'user' && message.request_id) {
+        usersByRequestID.set(String(message.request_id), message)
+      }
+    }
     const existingIds = new Set(messagesList.map((m) => m.id).filter(Boolean))
     const processed: ChatMessage[] = []
 
@@ -483,7 +516,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       if (item.id && existingIds.has(item.id)) continue
       if (item.id) existingIds.add(item.id)
 
-      item.isAgentMode = false
+	  item.isAgentMode = item.agent_mode === true
       const willContinueStream = preserveIncompleteStreamReactive && !item.is_completed
       if (willContinueStream) {
         item.agentEventStream = item.agentEventStream || []
@@ -510,7 +543,14 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         item.hideContent = true
       }
 
-      restoreQuickAnswerFlags(item)
+      restoreQuickAnswerFlags(
+        item,
+        item.request_id
+          ? usersByRequestID.get(String(item.request_id)) || messagesList.find(
+              (message) => message.role === 'user' && message.request_id === item.request_id,
+            )
+          : undefined,
+      )
 
       if (item.content) {
         const content = String(item.content)
@@ -633,6 +673,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         role: 'assistant',
         content: '',
         isAgentMode: true,
+		agent_mode: isAgentStreamSession(),
         isRagMode: !isAgentStreamSession(),
         agentEventStream: [],
         _eventMap: new Map(),
@@ -1109,6 +1150,13 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         // replace pre-answer retrieval candidates with actually cited sources.
         applyKnowledgeReferences(data)
         normalizeFinalAnswerFromComplete(message, dataPayload)
+		if (dataPayload?.retrieval_stats && typeof dataPayload.retrieval_stats === 'object') {
+		  message.retrieval_stats = { ...(dataPayload.retrieval_stats as Record<string, unknown>) }
+		}
+		message.agent_duration_ms = Number(dataPayload?.total_duration_ms) || 0
+		message.agent_mode = dataPayload?.agent_mode === true || message.agent_mode === true
+		message.agent_tool_count = Math.max(0, Math.trunc(Number(dataPayload?.agent_tool_count) || 0))
+		if (message.agent_mode === true) message.isAgentMode = true
         loading.value = false
         isReplying.value = false
         message.is_completed = true
@@ -1120,6 +1168,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
             type: 'agent_complete',
             total_duration_ms: dataPayload?.total_duration_ms || 0,
             total_steps: dataPayload?.total_steps || 0,
+			retrieval_stats: message.retrieval_stats,
           }
           ;(message.agentEventStream as ChatMessage[]).push(completeEvent)
           setLiveTerminalEvent(message, completeEvent)
@@ -1188,6 +1237,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
           role: 'assistant',
           content: '',
           isAgentMode: true,
+		  agent_mode: isAgentStreamSession(),
           isRagMode: !isAgentStreamSession(),
           is_completed: false,
           agentEventStream: [],
@@ -1221,6 +1271,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
           role: 'assistant',
           content: '',
           isAgentMode: true,
+		  agent_mode: isAgentStreamSession(),
           isRagMode: !isAgentStreamSession(),
           is_completed: false,
           agentEventStream: [],

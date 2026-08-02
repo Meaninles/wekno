@@ -261,6 +261,28 @@ func TestApplyIMCompleteDataToMessage(t *testing.T) {
 	}
 }
 
+func TestFilterIMStoredAnswerKeepsOnlyCanonicalCitedReferences(t *testing.T) {
+	msg := &types.Message{
+		KnowledgeReferences: types.References{
+			&types.SearchResult{ID: "chunk-1", Content: "supported", Metadata: map[string]string{"citation_id": "S1"}},
+			&types.SearchResult{ID: "chunk-2", Content: "unused", Metadata: map[string]string{"citation_id": "S2"}},
+		},
+	}
+	answer, report := filterIMStoredAnswer(
+		`supported<src id="S1" /> malformed<doc source_id="S2" /> unknown<src id="S9" />`,
+		msg,
+	)
+	if !strings.Contains(answer, `<src id="S1" />`) || strings.Contains(answer, "<doc") || strings.Contains(answer, "S9") {
+		t.Fatalf("stored IM answer was not strictly filtered: %q", answer)
+	}
+	if len(msg.KnowledgeReferences) != 1 || msg.KnowledgeReferences[0].Metadata["citation_id"] != "S1" {
+		t.Fatalf("stored IM refs should contain only the actually cited source: %#v", msg.KnowledgeReferences)
+	}
+	if report.ForbiddenTags != 1 || len(report.UnknownIDs) != 1 || report.UnknownIDs[0] != "S9" {
+		t.Fatalf("unexpected IM citation report: %#v", report)
+	}
+}
+
 func TestPickIMStoredAnswerPrefersFirstNonEmpty(t *testing.T) {
 	got := pickIMStoredAnswer("", "outer", "live", "complete")
 	if got != "outer" {

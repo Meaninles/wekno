@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -86,6 +87,38 @@ func TestLimiterDoesNotCreateGlobalLocalLease(t *testing.T) {
 	third.release()
 	require.EqualValues(t, 3, limiter.Snapshot(context.Background()).Acquired)
 	require.EqualValues(t, 0, limiter.Snapshot(context.Background()).Deferred)
+}
+
+func TestLimiterInternalErrorDoesNotCreateSharedCooldown(t *testing.T) {
+	limiter := NewLimiter(nil, &derivativeSettingsStub{tpm: 60_000})
+	lease, err := limiter.acquire(context.Background(), "internal-error")
+	require.NoError(t, err)
+	lease.callStarted = time.Now()
+	lease.finish(1, 1, errors.New("admission hook rejected internal state"))
+	lease.release()
+
+	limiter.localMu.Lock()
+	_, exists := limiter.localNext["internal-error"]
+	limiter.localMu.Unlock()
+	require.False(t, exists)
+}
+
+func TestLimiterRealProviderTimeoutUsesBoundedSharedCooldown(t *testing.T) {
+	limiter := NewLimiter(nil, &derivativeSettingsStub{tpm: 60_000})
+	lease, err := limiter.acquire(context.Background(), "provider-timeout")
+	require.NoError(t, err)
+	lease.callStarted = time.Now()
+	lease.finish(1, 1, &modeladmission.ProviderUnavailableError{
+		Kind: modeladmission.KindDerivative, Cause: context.DeadlineExceeded,
+	})
+	lease.release()
+
+	limiter.localMu.Lock()
+	next, exists := limiter.localNext["provider-timeout"]
+	limiter.localMu.Unlock()
+	require.True(t, exists)
+	require.Greater(t, time.Until(next), 50*time.Second)
+	require.LessOrEqual(t, time.Until(next), 61*time.Second)
 }
 
 func redisForDerivativeTest(t *testing.T) *redis.Client {
@@ -187,7 +220,9 @@ func TestLimiterActualUsageAndTimeoutExtendGlobalPacing(t *testing.T) {
 	require.Less(t, nextAt-time.Now().UnixMilli(), int64(250))
 
 	timeoutModel := limiter.Wrap(&blockingChat{
-		id: "timeout", err: context.DeadlineExceeded,
+		id: "timeout", err: &modeladmission.ProviderUnavailableError{
+			Kind: modeladmission.KindDerivative, Cause: context.DeadlineExceeded,
+		},
 	})
 	_, err = timeoutModel.Chat(
 		context.Background(),
@@ -201,8 +236,8 @@ func TestLimiterActualUsageAndTimeoutExtendGlobalPacing(t *testing.T) {
 	require.NoError(t, err)
 	nextAt, err = strconv.ParseInt(nextRaw, 10, 64)
 	require.NoError(t, err)
-	require.Greater(t, nextAt-time.Now().UnixMilli(), int64((9 * time.Minute).Milliseconds()))
-	require.LessOrEqual(t, nextAt-time.Now().UnixMilli(), int64((11 * time.Minute).Milliseconds()))
+	require.Greater(t, nextAt-time.Now().UnixMilli(), int64((50 * time.Second).Milliseconds()))
+	require.LessOrEqual(t, nextAt-time.Now().UnixMilli(), int64((61 * time.Second).Milliseconds()))
 }
 
 func TestLimiterRedisFailureFailsClosed(t *testing.T) {

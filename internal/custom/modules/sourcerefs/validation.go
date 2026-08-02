@@ -9,9 +9,9 @@ import (
 )
 
 var (
-	citationLikeTagRE   = regexp.MustCompile(`(?i)</?(?:src|source|citation|doc|kb|wiki|web)\b[^>]*>`)
-	incompleteTagTailRE = regexp.MustCompile(`(?is)</?(?:src|source|citation|doc|kb|wiki|web)\b[^>]*$`)
-	canonicalSourceRE   = regexp.MustCompile(`^<src\s+id="(S[1-9][0-9]*)"\s*/>$`)
+	citationLikeTagRE   = regexp.MustCompile(`(?i)</?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*>`)
+	incompleteTagTailRE = regexp.MustCompile(`(?is)</?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*$`)
+	canonicalSourceRE   = regexp.MustCompile(`^<src id="(S[1-9][0-9]*)" />$`)
 	protectedCodeRE     = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
 	wikiHandleRE        = regexp.MustCompile(`\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]`)
 )

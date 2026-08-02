@@ -26,6 +26,7 @@ test('agent progress messages are rendered as visible tool titles', () => {
 test('rag mode still renders non-rag tool calls while delegating rag pipeline rows', () => {
   assert.match(source, /RAG_PIPELINE_TOOL_NAMES/)
   assert.match(source, /hasNonRagToolEvents/)
+  assert.match(source, /props\.ragMode && props\.session\?\.agent_mode !== true/)
   assert.match(source, /if \(props\.ragMode && !hasNonRagToolEvents\.value\)/)
   assert.match(source, /if \(isRagDelegatedEvent\(e\)\) return false/)
   assert.match(source, /RAG_PIPELINE_TOOL_NAMES\.has\(event\.tool_name\)/)
@@ -46,6 +47,24 @@ test('event list helpers are hoisted for initial history render', () => {
 test('answer display ignores superseded answer events', () => {
   assert.match(source, /e\.type === 'answer' && !e\.superseded/)
   assert.match(source, /const answerEvents = result\.filter\(\(e: any\) => e\.type === 'answer' && !e\.superseded\)/)
+})
+
+test('collapsed agent summary uses inspected-source counts for every agent runtime', () => {
+  assert.match(source, /retrievalStatsFromMessage/)
+  assert.match(source, /if \(retrievalStats\.value\)/)
+  assert.match(source, /agent\.retrievedDocuments/)
+  assert.match(source, /agent\.noRetrievedDocuments/)
+  assert.match(source, /agent\.noToolCalls/)
+  assert.match(source, /hasSteps \|\| retrievalStats\.value !== null/)
+  assert.match(source, /isEvidenceRetrievalToolName\(e\.tool_name\)/)
+  assert.doesNotMatch(source, /knowledgeSearchCallsCount/)
+  assert.doesNotMatch(source, /agentStream\.summary\.searchKb/)
+})
+
+test('zero-result knowledge retrieval renders as neutral completion', () => {
+  assert.match(source, /getKnowledgeSearchSummaryHtml/)
+  assert.match(source, /agentStream\.ragPipeline\.searchDone/)
+  assert.match(source, /getSearchResultsSummary\(event\)/)
 })
 
 test('Claude SDK live process output uses a bounded projection without rebuilding history', () => {

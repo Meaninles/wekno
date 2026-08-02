@@ -109,7 +109,14 @@ class ClaudeSDKTerminalCollector:
             self.candidates.clear()
             return
 
-        if text and message_key not in self.operational_message_ids:
+        # Some OpenAI/Anthropic compatibility gateways reuse one provider
+        # message_id across several assistant turns.  The tool-bearing
+        # callback above already clears every candidate observed before that
+        # tool boundary, so permanently rejecting the reused id would also
+        # discard the legitimate text-only answer from the next turn.  Keep
+        # operational_message_ids as diagnostics, but scope invalidation to
+        # the callback that actually contains the tool.
+        if text:
             self.candidates[message_key] = self.candidates.get(message_key, "") + text
 
     def _observe_result(self, message: Any) -> None:
@@ -142,4 +149,3 @@ class ClaudeSDKTerminalCollector:
         if self.terminal_result:
             return self.terminal_result
         return self.candidate_answer()
-

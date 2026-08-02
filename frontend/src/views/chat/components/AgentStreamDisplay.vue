@@ -133,12 +133,12 @@
                   </div>
 
                   <div
-                    v-if="!event.pending && (event.tool_name === 'search_knowledge' || event.tool_name === 'knowledge_search') && event.tool_data"
+                    v-if="!event.pending && isKnowledgeSearchToolName(event.tool_name) && event.tool_data && getSearchResultsSummary(event)"
                     class="search-results-summary-fixed">
                     <div class="results-summary-text" v-html="getSearchResultsSummary(event)"></div>
                   </div>
 
-                  <div v-if="!event.pending && event.tool_name === 'web_search' && event.tool_data"
+                  <div v-if="!event.pending && isWebSearchToolName(event.tool_name) && event.tool_data"
                     class="search-results-summary-fixed">
                     <div class="results-summary-text"
                       v-html="t('agent.webSearchFound', { count: getResultsCount(event.tool_data) })">
@@ -383,12 +383,12 @@
                 </div>
 
                 <div
-                  v-if="!event.pending && (event.tool_name === 'search_knowledge' || event.tool_name === 'knowledge_search') && event.tool_data"
+                  v-if="!event.pending && isKnowledgeSearchToolName(event.tool_name) && event.tool_data && getSearchResultsSummary(event)"
                   class="search-results-summary-fixed">
                   <div class="results-summary-text" v-html="getSearchResultsSummary(event)"></div>
                 </div>
 
-                <div v-if="!event.pending && event.tool_name === 'web_search' && event.tool_data"
+                <div v-if="!event.pending && isWebSearchToolName(event.tool_name) && event.tool_data"
                   class="search-results-summary-fixed">
                   <div class="results-summary-text"
                     v-html="t('agent.webSearchFound', { count: getResultsCount(event.tool_data) })">
@@ -544,6 +544,14 @@ import picturePreview from '@/components/picture-preview.vue';
 import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbackButtons.vue';
 import LiveProcessPreview from '@/custom/modules/agentstream/LiveProcessPreview.vue';
 import {
+  agentToolCountFromMessage,
+  formatCompletedRunDuration,
+  isSimpleCompletedConversation,
+  isEvidenceRetrievalToolName,
+  retrievalStatsFromMessage,
+  usesDataSourceRetrievalUnit,
+} from '@/custom/modules/sourcerefs/retrievalSummary';
+import {
   readLiveAgentProjection,
   type LiveAgentProjection,
 } from '@/custom/modules/agentstream/liveProcessPreview';
@@ -568,7 +576,13 @@ import {
 } from '@/utils/security';
 import { unwrapFinalAnswerWrappers, thinkingEqualsAnswer } from '@/utils/finalAnswer';
 import { getAgentToolIconName } from '@/utils/agent-tool-icons';
-import { getQueryText, getWikiPageText } from '@/utils/agent-tool-display';
+import {
+  getKnowledgeSearchSummaryHtml,
+  getQueryText,
+  getWikiPageText,
+  isKnowledgeSearchToolName,
+  isWebSearchToolName,
+} from '@/utils/agent-tool-display';
 import {
   buildManualMarkdown,
   copyTextToClipboard,
@@ -651,6 +665,8 @@ const TOOL_NAME_KEYS: Record<string, string> = {
 
 const getLocalizedToolName = (toolName?: string | null): string => {
   if (!toolName) return t('agent.toolFallback');
+  if (isKnowledgeSearchToolName(toolName)) return t('agentStream.tools.searchKnowledge');
+  if (isWebSearchToolName(toolName)) return t('agentStream.tools.webSearch');
   const key = TOOL_NAME_KEYS[toolName];
   if (key) return t(key);
 
@@ -950,10 +966,20 @@ interface SessionData {
   request_id?: string;
   debugRequest?: Record<string, unknown>;
   isAgentMode?: boolean;
+  agent_mode?: boolean;
   is_completed?: boolean;
   agentEventStream?: any[];
   tool_results?: any[];
   knowledge_references?: any[];
+  retrieval_stats?: {
+    attempted?: boolean;
+    documents?: number;
+    wiki?: number;
+    web?: number;
+    data_sources?: number;
+    total?: number;
+  };
+  agent_duration_ms?: number;
   answer_feedback?: 'like' | 'dislike' | '';
 }
 
@@ -1449,27 +1475,46 @@ const reasoningRoundsCount = computed(() => {
   return intermediateEvents.value.filter((e: any) => e.type === 'thinking').length;
 });
 
-const toolCallsCount = computed(() => {
-  if (!hasAnswerStarted.value && !isConversationDone.value) return 0;
-  return intermediateEvents.value.filter((e: any) => e.type === 'tool_call').length;
+const otherToolCallsCount = computed(() => {
+	if (!hasAnswerStarted.value && !isConversationDone.value) return 0;
+	if (isConversationDone.value) {
+		return agentToolCountFromMessage(props.session as Record<string, any>);
+	}
+	return intermediateEvents.value.filter(
+		(e: any) => e.type === 'tool_call' && !isEvidenceRetrievalToolName(e.tool_name)
+	).length;
 });
 
+const retrievalStats = computed(() => retrievalStatsFromMessage(props.session as Record<string, any>));
+
 const intermediateStepsSummary = computed(() => {
-  if (!eventStream.value) {
+  if (!eventStream.value && !isConversationDone.value) {
     return '';
   }
 
   const rounds = reasoningRoundsCount.value;
-  const tools = toolCallsCount.value;
-  const elapsed = agentDurationMs.value;
+  const tools = otherToolCallsCount.value;
+  const elapsed = Number(props.session?.agent_duration_ms) || agentDurationMs.value;
+
+  if (isSimpleCompletedConversation(props.session as Record<string, any>)) {
+    return elapsed > 0
+      ? t('agent.durationSuffix', { duration: formatCompletedRunDuration(elapsed) })
+      : '';
+  }
 
   const parts: string[] = [];
   if (rounds > 0) {
     parts.push(t('agent.reasoningRounds', { rounds }));
   }
-  if (tools > 0) {
-    parts.push(t('agent.toolCalls', { tools }));
+  if (retrievalStats.value) {
+    const isDataSource = usesDataSourceRetrievalUnit(retrievalStats.value);
+    parts.push(retrievalStats.value.total > 0
+      ? t(isDataSource ? 'agent.retrievedDataSources' : 'agent.retrievedDocuments', {
+          count: retrievalStats.value.total,
+        })
+      : t(isDataSource ? 'agent.noRetrievedDataSources' : 'agent.noRetrievedDocuments'));
   }
+  parts.push(tools > 0 ? t('agent.toolCalls', { tools }) : t('agent.noToolCalls'));
   // Fallback to a generic step count if neither bucket has anything (shouldn't
   // normally happen once the tree is shown).
   if (parts.length === 0) {
@@ -1477,7 +1522,7 @@ const intermediateStepsSummary = computed(() => {
   }
 
   if (elapsed > 0) {
-    parts.push(t('agent.durationSuffix', { duration: formatDuration(elapsed) }));
+    parts.push(t('agent.durationSuffix', { duration: formatCompletedRunDuration(elapsed) }));
   }
 
   return parts.join(t('agent.stepSummarySeparator'));
@@ -1492,9 +1537,13 @@ const intermediateStepsSummaryHtml = computed(() => {
 // conversation is done. In RAG quick-answer mode, RagPipelineProgress owns the
 // retrieval timeline; keep AgentStreamDisplay for additional tool/skill calls.
 const shouldShowCollapsedSteps = computed(() => {
+  // isAgentMode is also used internally to reuse this renderer for restored
+  // quick-answer pipelines. Tool telemetry belongs only to a real ReAct turn,
+  // whose backend-authoritative per-message flag is agent_mode=true.
+  if (props.ragMode && props.session?.agent_mode !== true) return false
   if (props.ragMode && !hasNonRagToolEvents.value) return false
   const hasSteps = intermediateStepsCount.value > 0;
-  return hasSteps && isConversationDone.value;
+  return isConversationDone.value && (hasSteps || retrievalStats.value !== null);
 });
 
 // Check if event is a "deep thinking" type (either streaming thinking or thinking tool call)
@@ -2051,13 +2100,13 @@ const hasResults = (event: any): boolean => {
   const toolName = event.tool_name;
 
   // For knowledge search tools
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+  if (isKnowledgeSearchToolName(toolName)) {
     const count = event.tool_data.results?.length || event.tool_data.count || 0;
     return count > 0;
   }
 
   // For web search tools
-  if (toolName === 'web_search') {
+  if (isWebSearchToolName(toolName)) {
     const count = event.tool_data.results?.length || event.tool_data.count || 0;
     return count > 0;
   }
@@ -2550,7 +2599,7 @@ const getToolSummary = (event: any): string => {
   const toolData = event.tool_data;
 
   // For search tools, don't return summary here - it will be displayed in SearchResults component
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+  if (isKnowledgeSearchToolName(toolName)) {
     return '';
   } else if (toolName === 'get_document_info') {
     if (toolData?.title) {
@@ -2664,21 +2713,7 @@ function maskIconStyle(src: string, size = 18): Record<string, string> {
 
 // Get search results summary text (returns HTML with colored numbers)
 const getSearchResultsSummary = (event: any): string => {
-  if (!event || !event.tool_data) return '';
-
-  const toolData = event.tool_data;
-  const count = Number(toolData.results?.length ?? toolData.count ?? 0) || 0;
-  if (count === 0) return t('agentStream.search.noResults');
-
-  // Build summary text
-  let summary = '';
-  const kbCount = toolData.kb_counts ? Object.keys(toolData.kb_counts).length : 0;
-  if (kbCount > 0) {
-    summary = t('agentStream.search.foundResultsFromFiles', { count: `<strong>${count}</strong>`, files: `<strong>${kbCount}</strong>` });
-  } else {
-    summary = t('agentStream.search.foundResults', { count: `<strong>${count}</strong>` });
-  }
-  return summary;
+  return getKnowledgeSearchSummaryHtml(t, event?.tool_data);
 };
 
 // Get web search results summary text
@@ -2745,9 +2780,17 @@ const getToolTitle = (event: any): string => {
   }
 
   const toolName = event.tool_name;
-  const isSearchTool = toolName === 'search_knowledge' || toolName === 'knowledge_search' || toolName === 'wiki_search';
-  const isWebSearchTool = toolName === 'web_search';
+  const isSearchTool = isKnowledgeSearchToolName(toolName) || toolName === 'wiki_search';
+  const isWebSearchTool = isWebSearchToolName(toolName);
   const isGrepTool = toolName === 'grep_chunks';
+
+  if (
+    isKnowledgeSearchToolName(toolName) &&
+    event.success === true &&
+    !getKnowledgeSearchSummaryHtml(t, event.tool_data)
+  ) {
+    return t('agentStream.ragPipeline.searchDone');
+  }
 
   // For search tools, use description with query text
   if (isSearchTool) {
@@ -2856,12 +2899,12 @@ const getToolDescription = (event: any): string => {
   const success = event.success === true;
   const toolName = event.tool_name;
 
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+  if (isKnowledgeSearchToolName(toolName)) {
     return success ? t('agentStream.toolStatus.searchKb') : t('agentStream.toolStatus.searchKbFailed');
   } else if (toolName === 'wiki_search' || toolName === 'wiki_read_page') {
     const localizedName = getLocalizedToolName(toolName);
     return success ? localizedName : t('agentStream.toolStatus.calledFailed', { name: localizedName });
-  } else if (toolName === 'web_search') {
+  } else if (isWebSearchToolName(toolName)) {
     return success ? t('agentStream.toolStatus.webSearch') : t('agentStream.toolStatus.webSearchFailed');
   } else if (toolName === 'grep_chunks') {
     return success ? t('agentStream.toolStatus.grepSearch') : t('agentStream.toolStatus.grepSearchFailed');

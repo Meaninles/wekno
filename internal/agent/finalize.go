@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
@@ -22,6 +21,7 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 	state *types.AgentState,
 	sessionID string,
 ) error {
+	e.syncCitationReferences(state)
 	totalToolCalls := countTotalToolCalls(state.RoundSteps)
 	logger.Infof(ctx, "[Agent][FinalAnswer] Synthesizing from %d steps, %d tool calls",
 		len(state.RoundSteps), totalToolCalls)
@@ -85,7 +85,7 @@ User question: %s
 
 Requirements:
 1. Answer based on the actually retrieved content
-2. When citation_sources are provided, cite factual statements inline using exactly <src id="S1" /> with an exact returned id. This is the only citation tag: never emit <source>, <citation>, <doc>, <kb>, <wiki>, <web>, [[...]], numeric context ids, chunk ids, slugs, or URLs as citations. For knowledge-base sources, each id represents one specific document fragment, not the whole document; cite only the fragment whose content directly supports the adjacent sentence or paragraph. Place tags on the same line immediately after the supported text, use each supporting source once per paragraph, and never collect citations at the bottom. Do not invent, guess, or substitute source ids and do not expose internal identifiers in the user-facing answer.
+2. When AVAILABLE_CITATIONS are provided, copy the matching cite_exactly value verbatim immediately after each directly supported sentence or paragraph. The only valid shape is <src id="S1" />, changing only the S-number to an available ID. Never use another citation syntax or expose internal identifiers. Each document source is one specific fragment, so cite only the fragment that supports the adjacent claim; use a reasonable minimum and do not collect citations at the bottom.
 3. Organize the answer in a structured format
 4. If information is insufficient, honestly state so
 5. IMPORTANT: Respond in the same language as the user's question
@@ -170,11 +170,23 @@ func prepareFinalAnswerCitationContext(state *types.AgentState) (string, []*type
 		return "", nil
 	}
 
-	refs := collectToolSourceReferences(state)
+	refs := state.KnowledgeRefs
+	if len(refs) == 0 {
+		refs = collectToolSourceReferences(state)
+	}
 	if len(refs) == 0 {
 		return "", nil
 	}
-	sourcerefs.AssignCitationIDs(refs)
+	missingHandle := false
+	for _, ref := range refs {
+		if sourcerefs.CitationID(ref) == "" {
+			missingHandle = true
+			break
+		}
+	}
+	if missingHandle {
+		sourcerefs.AssignCitationIDs(refs)
+	}
 	mergeStateKnowledgeReferences(state, refs)
 	return renderFinalAnswerCitationContext(refs), refs
 }
@@ -221,42 +233,11 @@ func mergeStateKnowledgeReferences(state *types.AgentState, refs []*types.Search
 }
 
 func renderFinalAnswerCitationContext(refs []*types.SearchResult) string {
-	if len(refs) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	if catalog := sourcerefs.RenderCitationCatalog(refs); catalog != "" {
-		b.WriteString(catalog)
-		b.WriteString("\n")
-	}
-	b.WriteString("<citation_contexts>\n")
-	for _, ref := range refs {
-		if ref == nil {
-			continue
-		}
-		attrs := sourcerefs.ContextCitationAttrs(ref)
-		if attrs == "" {
-			continue
-		}
-		content := strings.TrimSpace(ref.Content)
-		if content == "" {
-			content = strings.TrimSpace(ref.KnowledgeTitle)
-		}
-		if content == "" {
-			continue
-		}
-		b.WriteString(fmt.Sprintf("<context%s>%s</context>\n", attrs, escapeCitationXMLText(content)))
-	}
-	b.WriteString("</citation_contexts>")
-	return b.String()
-}
-
-func escapeCitationXMLText(s string) string {
-	return strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-	).Replace(s)
+	// Every claim-bearing tool result is already present in the final-answer
+	// message list and carries its adjacent canonical handle. Repeating all
+	// evidence here doubled prompt tokens and final-answer latency. The compact
+	// catalog is sufficient to remind the model which opaque handles exist.
+	return sourcerefs.RenderCitationCatalog(refs)
 }
 
 // handleMaxIterations generates a final answer when the agent loop exhausted all iterations
@@ -285,6 +266,7 @@ func (e *AgentEngine) handleMaxIterations(
 func (e *AgentEngine) emitCompletionEvent(
 	ctx context.Context, state *types.AgentState, sessionID, messageID string, startTime time.Time,
 ) {
+	e.syncCitationReferences(state)
 	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
 		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",

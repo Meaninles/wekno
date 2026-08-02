@@ -2,6 +2,7 @@ package scheduledchat
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,28 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestFilterScheduledAssistantCitationsUsesAuthoritativeCitedReferences(t *testing.T) {
+	message := &types.Message{
+		Content: `有效结论。<src id="S1" /> 错误标签。<doc source_id="S2" /> 未知引用。<src id="S9" />`,
+		KnowledgeReferences: types.References{
+			&types.SearchResult{ID: "chunk-1", Content: "有效结论。", Metadata: map[string]string{"citation_id": "S1"}},
+			&types.SearchResult{ID: "chunk-2", Content: "其他结论。", Metadata: map[string]string{"citation_id": "S2"}},
+		},
+	}
+
+	report := filterScheduledAssistantCitations(message)
+	if !strings.Contains(message.Content, `<src id="S1" />`) ||
+		strings.Contains(message.Content, "<doc") || strings.Contains(message.Content, "S9") {
+		t.Fatalf("scheduled answer was not strictly filtered: %q", message.Content)
+	}
+	if len(message.KnowledgeReferences) != 1 || message.KnowledgeReferences[0].Metadata["citation_id"] != "S1" {
+		t.Fatalf("scheduled references should contain only the actually cited source: %#v", message.KnowledgeReferences)
+	}
+	if report.ForbiddenTags != 1 || len(report.UnknownIDs) != 1 || report.UnknownIDs[0] != "S9" {
+		t.Fatalf("unexpected scheduled citation report: %#v", report)
+	}
+}
 
 func TestNextRunAfterMonthlySkipsInvalidDates(t *testing.T) {
 	loc, err := time.LoadLocation("Asia/Shanghai")

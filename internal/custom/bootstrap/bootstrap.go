@@ -24,9 +24,11 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativecontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
@@ -40,6 +42,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/userguide"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/handler"
@@ -113,6 +116,7 @@ func NewHandlers(
 	documentReader interfaces.DocumentReader,
 	imageResolver *docparser.ImageResolver,
 	documentQueueCoordinator *documentqueue.Coordinator,
+	splitManager *documentsplit.Manager,
 	systemSettingService interfaces.SystemSettingService,
 	auditLogService interfaces.AuditLogService,
 	kbRepository interfaces.KnowledgeBaseRepository,
@@ -123,6 +127,7 @@ func NewHandlers(
 	derivativeQueueRepository *derivativequeue.Repository,
 	processingTraceRepository *processingtrace.Repository,
 	runtimeInstanceRegistry *runtimeinstances.Registry,
+	dependencyControl *dependencycontrol.Service,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
@@ -187,7 +192,16 @@ func NewHandlers(
 	capacityControlService := capacitycontrol.NewService(db, admissionManager)
 	runMaintenance := profile.RunsMigration() && customMigrationsEnabled()
 	if runMaintenance {
+		if err := splitManager.ApplyMigrations(ctx); err != nil {
+			return nil, err
+		}
+		if err := sourcerefs.Migrate(ctx, db); err != nil {
+			return nil, err
+		}
 		if err := runtimeInstanceRegistry.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := dependencyControl.Migrate(ctx); err != nil {
 			return nil, err
 		}
 		if err := admissionManager.Migrate(ctx); err != nil {

@@ -86,6 +86,9 @@ type SessionRepository interface {
 	// session (agent, model, KB scope, etc.) so the chat UI can restore it
 	// when the session is reopened. Scope rules match Update.
 	UpdateLastRequestState(ctx context.Context, tenantID uint64, userID string, sessionID string, state *types.SessionLastRequestState) (int64, error)
+	// UpdateTitleIfEmpty atomically installs an automatically generated title
+	// without overwriting a manual title or another concurrent generator.
+	UpdateTitleIfEmpty(ctx context.Context, tenantID uint64, userID, sessionID, title string) (bool, error)
 	// SetPinned pins or unpins a session row scoped by tenant.
 	// userID, when non-empty, is enforced so users cannot pin sessions they don't own.
 	// Returns the number of rows affected; 0 means the session doesn't exist or is

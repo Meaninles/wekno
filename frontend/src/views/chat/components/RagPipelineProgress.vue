@@ -173,8 +173,16 @@ import {
   getKnowledgeSearchSummaryHtml,
   getRagPipelineStepTitle,
   getWebSearchSummaryHtml,
+  isKnowledgeSearchToolName,
+  isWebSearchToolName,
 } from '@/utils/agent-tool-display'
 import { RAG_PIPELINE_TOOL_NAMES } from '@/utils/rag-pipeline-history'
+import {
+  formatCompletedRunDuration,
+  isSimpleCompletedConversation,
+  retrievalStatsFromMessage,
+  usesDataSourceRetrievalUnit,
+} from '@/custom/modules/sourcerefs/retrievalSummary'
 
 const props = defineProps<{
   session?: {
@@ -182,6 +190,15 @@ const props = defineProps<{
     content?: string
     knowledge_references?: Array<{ chunk_type?: string; knowledge_id?: string; knowledge_title?: string }>
     is_completed?: boolean
+    agent_duration_ms?: number
+    retrieval_stats?: {
+      attempted?: boolean
+      documents?: number
+      wiki?: number
+      web?: number
+      data_sources?: number
+      total?: number
+    }
   }
   embeddedMode?: boolean
 }>()
@@ -190,6 +207,19 @@ const { t } = useI18n()
 const userExpanded = ref(false)
 const thinkingExpanded = ref(true)
 const rootElement = ref<HTMLElement | null>(null)
+const retrievalStats = computed(() => retrievalStatsFromMessage(props.session as Record<string, any> | undefined))
+const simpleConversation = computed(() =>
+  isSimpleCompletedConversation(props.session as Record<string, any> | undefined),
+)
+
+const totalDurationMs = computed(() => {
+  const persisted = Number(props.session?.agent_duration_ms) || 0
+  if (persisted > 0) return persisted
+  const stream = props.session?.agentEventStream
+  if (!Array.isArray(stream)) return 0
+  const complete = [...stream].reverse().find((event) => event.type === 'agent_complete')
+  return Number(complete?.total_duration_ms) || 0
+})
 
 const thinkingContent = computed(() => {
   const stream = props.session?.agentEventStream
@@ -252,6 +282,7 @@ const steps = computed(() => {
 
       return {
         id: String(event.tool_call_id || `${toolName}-${event.timestamp || 0}`),
+        toolName,
         pending,
         iconName: getAgentToolIconName(toolName),
         title: getRagPipelineStepTitle(t, {
@@ -273,7 +304,7 @@ const allStepsDone = computed(
 const showCollapsedRoot = computed(
   () =>
     (hasAnswer.value || Boolean(props.session?.is_completed)) &&
-    (steps.value.length > 0 || hasThinking.value),
+    (steps.value.length > 0 || hasThinking.value || retrievalStats.value !== null),
 )
 
 const showExpandedTimeline = computed(() => {
@@ -316,55 +347,41 @@ const isThinkingStreaming = computed(
 )
 
 const visible = computed(
-  () => steps.value.length > 0 || showPrePipelineWait.value || showThinkingStep.value,
+  () => steps.value.length > 0 || showPrePipelineWait.value || showThinkingStep.value || retrievalStats.value !== null,
 )
 
-const referenceDocCount = computed(() => {
-  const refs = props.session?.knowledge_references ?? []
-  const keys = new Set<string>()
-  for (const item of refs) {
-    if (item.chunk_type === 'web_search') continue
-    keys.add(item.knowledge_id || item.knowledge_title || 'doc')
-  }
-  return keys.size
-})
-
-const referenceWebCount = computed(() => {
-  const refs = props.session?.knowledge_references ?? []
-  return refs.filter((item) => item.chunk_type === 'web_search').length
-})
-
 const collapsedSummaryHtml = computed(() => {
+  if (simpleConversation.value) {
+    return t('agent.durationSuffix', { duration: `<strong>${formatCompletedRunDuration(totalDurationMs.value)}</strong>` })
+  }
+  if (props.session?.is_completed && retrievalStats.value) {
+    const dataSourceUnit = usesDataSourceRetrievalUnit(retrievalStats.value)
+    const hasResults = retrievalStats.value.total > 0
+    return t(
+      hasResults
+        ? (dataSourceUnit
+            ? 'agentStream.ragPipeline.dataSourceRetrievalSummary'
+            : 'agentStream.ragPipeline.retrievalSummary')
+        : (dataSourceUnit
+            ? 'agentStream.ragPipeline.noDataSourceRetrievalSummary'
+            : 'agentStream.ragPipeline.noRetrievalSummary'),
+      {
+        count: `<strong>${retrievalStats.value.total}</strong>`,
+        duration: `<strong>${formatCompletedRunDuration(totalDurationMs.value)}</strong>`,
+      },
+    )
+  }
   if (steps.value.length === 0) {
     return hasThinking.value ? t('agentStream.toolStatus.thinkingDone') : ''
   }
 
-  const parts: string[] = [t('agentStream.ragPipeline.searchDone')]
-  const docCount = referenceDocCount.value
-  const webCount = referenceWebCount.value
-
-  if (docCount > 0 && webCount > 0) {
-    parts.push(
-      t('agentStream.ragPipeline.referencedDocAndWeb', {
-        docCount: `<strong>${docCount}</strong>`,
-        webCount: `<strong>${webCount}</strong>`,
-      }),
-    )
-  } else if (docCount > 0) {
-    parts.push(
-      t('agentStream.ragPipeline.referencedDocs', {
-        count: `<strong>${docCount}</strong>`,
-      }),
-    )
-  } else if (webCount > 0) {
-    parts.push(
-      t('agentStream.ragPipeline.referencedWebs', {
-        count: `<strong>${webCount}</strong>`,
-      }),
-    )
+  const retrievalStep = [...steps.value].reverse().find((step) =>
+    isKnowledgeSearchToolName(step.toolName) || isWebSearchToolName(step.toolName),
+  )
+  if (retrievalStep && isKnowledgeSearchToolName(retrievalStep.toolName)) {
+    return retrievalStep.title || t('agentStream.ragPipeline.searchDone')
   }
-
-  return parts.join(t('agent.stepSummarySeparator'))
+  return retrievalStep?.title || t('agentStream.ragPipeline.searchDone')
 })
 
 function toggleExpanded() {

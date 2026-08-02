@@ -13,6 +13,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -125,6 +126,52 @@ func TestAdmissionDeferralDoesNotConsumeProviderAttempt(t *testing.T) {
 	require.Equal(t, StateQueued, row.State)
 	require.Zero(t, row.ProviderAttempts)
 	require.Empty(t, row.LeaseToken)
+}
+
+func TestQuestionProviderBudgetAllowsRecoveryAndClassifiesExhaustion(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	require.Equal(t, MaxQuestionProviderAttempts, maxProviderAttempts(WorkQuestion))
+	require.Equal(t, MaxProviderAttempts, maxProviderAttempts(WorkGraph))
+	require.NoError(t, db.Create(&derivativeTestKnowledge{
+		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusFinalizing,
+	}).Error)
+	rows, err := repository.UpsertPlan(ctx, []PlanItem{derivativePlan()})
+	require.NoError(t, err)
+	wake, err := repository.MarkDispatched(ctx, rows[0].ID, rows[0].Version)
+	require.NoError(t, err)
+	claimed, err := repository.Claim(ctx, wake, "worker-a", time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&WorkItem{}).Where("id = ?", claimed.ID).
+		Update("provider_attempts", MaxQuestionProviderAttempts-1).Error)
+
+	running, err := repository.BeginProvider(ctx, claimed.ID, claimed.LeaseToken)
+	require.NoError(t, err)
+	require.Equal(t, MaxQuestionProviderAttempts, running.ProviderAttempts)
+
+	// Simulate the next durable delivery at the boundary. Exhaustion is a
+	// provider-budget result, not a generic lifecycle error.
+	require.NoError(t, db.Model(&WorkItem{}).Where("id = ?", running.ID).
+		Update("state", StateLeased).Error)
+	_, err = repository.BeginProvider(ctx, running.ID, running.LeaseToken)
+	require.ErrorIs(t, err, ErrProviderAttemptsExhausted)
+	var exhausted *ProviderAttemptsExhaustedError
+	require.ErrorAs(t, err, &exhausted)
+	require.Equal(t, WorkQuestion, exhausted.WorkKind)
+	require.Equal(t, MaxQuestionProviderAttempts, exhausted.Attempts)
+	require.Equal(t, MaxQuestionProviderAttempts, exhausted.Limit)
+
+	terminal, err := repository.RetryAfterFailure(
+		ctx, running.ID, running.LeaseToken,
+		"provider", "provider_attempts_exhausted", err.Error(), time.Second, true,
+	)
+	require.NoError(t, err)
+	require.True(t, terminal)
+	var row WorkItem
+	require.NoError(t, db.First(&row, "id = ?", running.ID).Error)
+	require.Equal(t, StateFailed, row.State)
+	require.Zero(t, row.MaterializeAttempts)
 }
 
 func TestAdmissionDeferralAfterCheckpointDoesNotConsumeAnyRetryBudget(t *testing.T) {
@@ -380,6 +427,26 @@ func (*checkpointReplayFailureHandler) Handle(ctx context.Context, _ *asynq.Task
 	return ProviderContractRejected(decodeErr)
 }
 
+type checkpointThenProviderFailureHandler struct{}
+
+func (*checkpointThenProviderFailureHandler) Handle(ctx context.Context, _ *asynq.Task) error {
+	messages := []chat.Message{{Role: "user", Content: "first recovery request"}}
+	if err := BeginProviderForContext(ctx); err != nil {
+		return err
+	}
+	if err := CheckpointChatResponse(
+		ctx, "model-a", messages, nil,
+		&types.ChatResponse{Content: `{"questions":["q1"]}`},
+	); err != nil {
+		return err
+	}
+	return &modeladmission.ProviderUnavailableError{
+		Kind:       modeladmission.KindDerivative,
+		RetryAfter: 15 * time.Second,
+		Cause:      context.DeadlineExceeded,
+	}
+}
+
 func TestWakePayloadContainsOnlyIdentityAndWorkerPersistsResultBeforeCompletion(t *testing.T) {
 	repository, db := derivativeRepositoryForTest(t)
 	ctx := context.Background()
@@ -482,6 +549,37 @@ func TestContractRejectedCheckpointAdvancesProviderBudgetAndAllowsFreshCall(t *t
 	require.Equal(t, []int{1, 2}, []int{calls[0].Attempt, calls[1].Attempt})
 	require.Equal(t, ProviderCallInvalidContract, calls[0].Disposition)
 	require.Equal(t, ProviderCallInvalidContract, calls[1].Disposition)
+}
+
+func TestProviderCallFailureAfterCheckpointUsesProviderRetryBudget(t *testing.T) {
+	repository, db := derivativeRepositoryForTest(t)
+	ctx := context.Background()
+	require.NoError(t, db.Create(&derivativeTestKnowledge{
+		ID: "knowledge-1", TenantID: 7, KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", ParseStatus: types.ParseStatusFinalizing,
+	}).Error)
+	enqueuer := &derivativeWakeCapture{}
+	rows, err := repository.PublishPlan(ctx, enqueuer, []PlanItem{{
+		TenantID: 7, KnowledgeBaseID: "kb-1", KnowledgeID: "knowledge-1",
+		ProcessingGeneration: "generation-1", ProcessingAttempt: 1,
+		ItemID: "graph_chunk[0]", WorkKind: WorkGraph, Payload: types.JSON(`{}`),
+		ModelID: "model-a", ModelTenantID: 9, ResourcePoolID: "pool-a",
+	}})
+	require.NoError(t, err)
+	worker := &Worker{
+		repository:     repository,
+		chunkExtractor: &checkpointThenProviderFailureHandler{},
+		owner:          "worker-test",
+	}
+
+	require.NoError(t, worker.Handle(ctx, enqueuer.task))
+	var row WorkItem
+	require.NoError(t, db.First(&row, "id = ?", rows[0].ID).Error)
+	require.Equal(t, StateRetryWait, row.State)
+	require.Equal(t, 1, row.ProviderAttempts)
+	require.Zero(t, row.MaterializeAttempts)
+	require.Equal(t, "provider", row.LastErrorClass)
+	require.Equal(t, "provider_call_failed", row.LastErrorCode)
 }
 
 func TestExpiredProviderLeaseWithoutCheckpointBecomesUnknown(t *testing.T) {

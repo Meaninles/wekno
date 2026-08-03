@@ -20,20 +20,42 @@
     </button>
 
     <Transition name="wiki-disclosure">
-      <div v-if="expanded" class="wiki-panel" data-testid="wiki-indexing-panel">
+      <div
+        v-if="expanded"
+        class="wiki-panel"
+        :class="{ 'is-unavailable': !wikiAvailable }"
+        data-testid="wiki-indexing-panel"
+      >
         <div class="wiki-panel-header">
           <div class="wiki-panel-copy">
             <label class="wiki-title">{{ $t('knowledgeEditor.indexing.wikiTitle') }}</label>
             <p class="wiki-desc">{{ $t('knowledgeEditor.indexing.wikiDesc') }}</p>
           </div>
-          <t-switch
-            :model-value="wikiEnabled"
-            :disabled="locked"
-            :aria-label="$t('knowledgeEditor.indexing.wikiTitle')"
-            data-testid="wiki-indexing-switch"
-            size="medium"
-            @change="emit('toggle-wiki')"
-          />
+          <t-tooltip
+            v-if="!wikiAvailable"
+            :content="$t('knowledgeEditor.indexing.wikiUnavailable')"
+            placement="top"
+          >
+            <span class="wiki-disabled-switch">
+              <t-switch
+                :model-value="wikiEnabled"
+                disabled
+                :aria-label="$t('knowledgeEditor.indexing.wikiTitle')"
+                data-testid="wiki-indexing-switch"
+                size="medium"
+              />
+            </span>
+          </t-tooltip>
+          <span v-else class="wiki-switch">
+            <t-switch
+              :model-value="wikiEnabled"
+              :disabled="locked"
+              :aria-label="$t('knowledgeEditor.indexing.wikiTitle')"
+              data-testid="wiki-indexing-switch"
+              size="medium"
+              @change="emit('toggle-wiki')"
+            />
+          </span>
         </div>
 
         <div class="wiki-cost-note">
@@ -80,6 +102,7 @@ type Granularity = 'focused' | 'standard' | 'exhaustive'
 const props = defineProps<{
   wikiEnabled: boolean
   locked: boolean
+  wikiAvailable: boolean
   resolvedGranularity: Granularity
   granularityHint: string
 }>()
@@ -179,6 +202,13 @@ watch(
   border: 1px solid var(--td-component-stroke);
   border-radius: 8px;
   background: var(--td-bg-color-container);
+
+  &.is-unavailable {
+    .wiki-panel-copy,
+    .wiki-cost-note {
+      opacity: 0.58;
+    }
+  }
 }
 
 .wiki-panel-header {
@@ -190,6 +220,17 @@ watch(
 
 .wiki-panel-copy {
   min-width: 0;
+}
+
+.wiki-disabled-switch,
+.wiki-switch {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 2px;
+}
+
+.wiki-disabled-switch {
+  cursor: not-allowed;
 }
 
 .wiki-title,

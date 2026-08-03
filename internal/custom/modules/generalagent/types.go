@@ -247,10 +247,11 @@ type ToolCallRequest struct {
 }
 
 type ToolCallResponse struct {
-	Success          bool                         `json:"success"`
-	Output           string                       `json:"output"`
-	Error            string                       `json:"error,omitempty"`
-	Data             map[string]interface{}       `json:"data,omitempty"`
-	Images           []string                     `json:"images,omitempty"`
-	SourceReferences []*sourcerefs.CitationSource `json:"source_references,omitempty"`
+	Success                bool                         `json:"success"`
+	Output                 string                       `json:"output"`
+	Error                  string                       `json:"error,omitempty"`
+	Data                   map[string]interface{}       `json:"data,omitempty"`
+	Images                 []string                     `json:"images,omitempty"`
+	SourceReferences       []*sourcerefs.CitationSource `json:"source_references,omitempty"`
+	CitationOutputContract string                       `json:"citation_output_contract,omitempty"`
 }

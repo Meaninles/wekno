@@ -290,6 +290,10 @@ type RetrievalStats struct {
 	// The JSONB schema stays extensible and does not couple presentation to a
 	// particular built-in agent ID.
 	Unit string `json:"unit,omitempty"`
+	// SimpleConversation keeps truthful inspected-source telemetry while
+	// allowing every client to suppress it for a plain default-chat answer
+	// that neither explicitly requested nor cited evidence.
+	SimpleConversation bool `json:"simple_conversation,omitempty"`
 }
 
 // Value implements driver.Valuer for PostgreSQL JSONB and SQLite JSON text.

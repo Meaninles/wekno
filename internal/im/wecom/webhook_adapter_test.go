@@ -64,7 +64,7 @@ func TestSplitWeComMarkdownUsesUTF8ByteLimit(t *testing.T) {
 }
 
 func TestSplitWeComMarkdownDoesNotBreakCitationLinks(t *testing.T) {
-	link := `[\[1\]](https://knora.example.com/platform/knowledge-bases/kb-1?chunk_id=chunk-1&knowledge_id=doc-1)`
+	link := `[[1](https://knora.example.com/platform/knowledge-bases/kb-1?chunk_id=chunk-1&knowledge_id=doc-1)]`
 	content := strings.Repeat("甲", 655) + "结论" + link + "。后续正文继续说明审批要求。"
 	chunks := SplitApplicationMarkdown(content)
 	if len(chunks) < 2 {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -92,4 +93,19 @@ func (e *AgentEngine) syncCitationReferences(state *types.AgentState) []*types.S
 		state.KnowledgeRefs = refs
 	}
 	return state.KnowledgeRefs
+}
+
+// prepareCitationAwareGenerationMessages places the current-turn terminal
+// citation reminder at the final model-input boundary once evidence exists.
+// It edits a shallow copy so persisted ReAct history and tool outputs remain
+// unchanged, and it does not add another model request or alter tool choice.
+func (e *AgentEngine) prepareCitationAwareGenerationMessages(messages []chat.Message) []chat.Message {
+	refs := e.citationState.snapshot()
+	if len(messages) == 0 || !sourcerefs.HasCitableReferences(refs) {
+		return messages
+	}
+	out := append([]chat.Message(nil), messages...)
+	last := len(out) - 1
+	out[last].Content = sourcerefs.PlaceTerminalCitationInstruction(out[last].Content, refs)
+	return out
 }

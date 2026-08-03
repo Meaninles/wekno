@@ -662,6 +662,10 @@ const selectedFiles = computed(() => {
   });
 });
 
+const hasUnresolvedSelectedFiles = () => selectedFileIds.value.some(
+  (id: string) => !fileList.value.some(file => file.id === id && String(file.name || '').trim()),
+);
+
 const skillMentionItems = computed<MentionItem[]>(() => {
   return selectedSkillNames.value
     .filter((name: string) => isSkillAllowedByAgent(name))
@@ -2108,6 +2112,18 @@ const createSession = async (val: string) => {
       settingsStore.selectedAgentSourceTenantId ?? undefined,
     );
     return;
+  }
+
+  // A restored session can contain selected file IDs before their titles have
+  // finished hydrating. Resolve them at the send boundary so a transient
+  // "Loading..." presentation value is never persisted into the user message
+  // or propagated to any agent/IM integration.
+  if (hasUnresolvedSelectedFiles()) {
+    await loadFiles();
+    if (hasUnresolvedSelectedFiles()) {
+      MessagePlugin.warning(t('input.messages.fileInfoLoading'));
+      return;
+    }
   }
   const rawProfessionalSkillNames = settingsStore.settings.selectedProfessionalSkillNames || [];
   const effectiveProfessionalSkillNames = selectedProfessionalSkillNames.value;

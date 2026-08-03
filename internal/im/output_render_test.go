@@ -38,10 +38,10 @@ func TestRenderFinalOutboundUsesOneBoundaryForEveryPlatform(t *testing.T) {
 		dialect   imoutput.Dialect
 		contains  string
 	}{
-		{name: "wecom application full", platform: PlatformWeCom, dialect: imoutput.DialectMarkdown, contains: `[\[1\]](`},
-		{name: "wecom bot stream", platform: PlatformWeCom, streaming: true, dialect: imoutput.DialectMarkdown, contains: `[\[1\]](`},
-		{name: "feishu full", platform: PlatformFeishu, dialect: imoutput.DialectPlain, contains: "结论。[1]"},
-		{name: "feishu card stream", platform: PlatformFeishu, streaming: true, dialect: imoutput.DialectMarkdown, contains: `[\[1\]](`},
+		{name: "wecom application full", platform: PlatformWeCom, dialect: imoutput.DialectWeCom, contains: `[[1](`},
+		{name: "wecom bot stream", platform: PlatformWeCom, streaming: true, dialect: imoutput.DialectWeCom, contains: `[[1](`},
+		{name: "feishu full", platform: PlatformFeishu, dialect: imoutput.DialectFeishu, contains: `[[1](`},
+		{name: "feishu card stream", platform: PlatformFeishu, streaming: true, dialect: imoutput.DialectFeishu, contains: `[[1](`},
 		{name: "slack", platform: PlatformSlack, streaming: true, dialect: imoutput.DialectSlack, contains: "|[1]>"},
 		{name: "telegram", platform: PlatformTelegram, streaming: true, dialect: imoutput.DialectMarkdown, contains: `[\[1\]](`},
 		{name: "dingtalk", platform: PlatformDingtalk, dialect: imoutput.DialectMarkdown, contains: `[\[1\]](`},
@@ -92,7 +92,7 @@ func TestRenderFinalOutboundAlwaysConvertsValidatedReferences(t *testing.T) {
 	result := service.RenderFinalOutbound(
 		context.Background(), "结论。<src id=\"S1\" />", refs, nil, PlatformWeCom, true,
 	)
-	if result.Content != `结论。[\[1\]](https://example.com)` || len(result.References) != 1 {
+	if result.Content != `结论。[[1](https://example.com)]` || len(result.References) != 1 {
 		t.Fatalf("always-on output=%q refs=%#v", result.Content, result.References)
 	}
 }
@@ -121,7 +121,7 @@ func TestStreamingKeepsCanonicalProtocolHiddenUntilFinalReplace(t *testing.T) {
 	}
 
 	final := service.RenderFinalOutbound(context.Background(), raw, refs, nil, PlatformWeCom, true)
-	if !strings.Contains(final.Content, `[\[1\]](https://example.com/source)`) ||
+	if !strings.Contains(final.Content, `[[1](https://example.com/source)]`) ||
 		strings.Contains(final.Content, "参考来源") ||
 		strings.Contains(final.Content, "<src") {
 		t.Fatalf("final replace did not render stable clickable references: %q", final.Content)

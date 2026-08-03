@@ -14,6 +14,7 @@ import {
   unpinSession,
 } from "@/api/chat";
 import { useStream } from "@/api/chat/streame";
+import { getKnowledgeDetails } from "@/api/knowledge-base";
 import {
   listKnowledgeFolderNodes,
   listKnowledgeFolderOptions,
@@ -567,7 +568,9 @@ const selectedResourceChips = computed<MobileResourceChip[]>(() => {
   }
   for (const fileId of selectedAllowedFileIds.value) {
     const file = knowledgeFiles.value.find((item) => item.id === fileId);
-    pushUniqueChip(chips, seen, { id: fileId, type: "file", name: file?.file_name || file?.display_name || fileId });
+    const name = knowledgeFileDisplayName(file);
+    if (!name) continue;
+    pushUniqueChip(chips, seen, { id: fileId, type: "file", name });
   }
   for (const name of selectedSkillNames.value) {
     pushUniqueChip(chips, seen, { id: `skill:${name}`, type: "skill", name }, `skill-name:${name}`);
@@ -794,6 +797,48 @@ const normalizeKnowledgeFile = (kbId: string, file: any) => {
   };
 };
 
+const knowledgeFileDisplayName = (file: any) => String(
+  file?.file_name || file?.display_name || file?.title || file?.source || "",
+).trim();
+
+const resolveSelectedKnowledgeFileDetails = async () => {
+  const unresolvedIds = selectedFileIds.value.filter((fileId) => {
+    const file = knowledgeFileById.value.get(String(fileId));
+    return !file || !knowledgeFileDisplayName(file);
+  });
+  if (unresolvedIds.length === 0) return true;
+
+  const resolvedFiles = (await Promise.all(unresolvedIds.map(async (fileId) => {
+    try {
+      const response: any = await getKnowledgeDetails(fileId, { agent_id: selectedAgentId.value });
+      const file = response?.data || response;
+      if (!file?.id || !knowledgeFileDisplayName(file)) return null;
+      const kbId = String(
+        file.knowledge_base_id
+        || file.kb_id
+        || settingsStore.settings.selectedFileKbMap?.[fileId]
+        || "",
+      );
+      return normalizeKnowledgeFile(kbId, file);
+    } catch (error) {
+      console.warn(`[mobile] failed to resolve selected file ${fileId}`, error);
+      return null;
+    }
+  }))).filter(Boolean);
+
+  const filesById = new Map<string, any>();
+  knowledgeFiles.value.forEach((file) => {
+    if (file?.id) filesById.set(String(file.id), file);
+  });
+  resolvedFiles.forEach((file: any) => filesById.set(String(file.id), file));
+  knowledgeFiles.value = [...filesById.values()];
+
+  return selectedFileIds.value.every((fileId) => {
+    const file = filesById.get(String(fileId));
+    return !!file && !!knowledgeFileDisplayName(file);
+  });
+};
+
 const mergeKnowledgeFiles = (kbId: string, files: any[]) => {
   const selected = new Set(selectedFileIds.value);
   knowledgeFiles.value = [
@@ -922,6 +967,7 @@ const hydrateMobileConversationState = async (sessionId: string) => {
   try {
     if (!sessionId) {
       await loadKnowledgeChildren();
+      await resolveSelectedKnowledgeFileDetails();
       return;
     }
 
@@ -942,6 +988,7 @@ const hydrateMobileConversationState = async (sessionId: string) => {
       (draft?.images || []).filter((file): file is File => file instanceof File),
     );
     await loadKnowledgeChildren();
+    await resolveSelectedKnowledgeFileDetails();
   } finally {
     isHydratingConversationState = false;
   }
@@ -1447,9 +1494,11 @@ const buildMentionedItems = (): MobileMentionItem[] => {
   });
   selectedAllowedFileIds.value.forEach((id) => {
     const file = knowledgeFiles.value.find((item) => item.id === id);
+    const name = knowledgeFileDisplayName(file);
+    if (!file || !name) return;
     mentioned.push({
       id,
-      name: file?.display_name || file?.file_name || id,
+      name,
       type: "file",
       kb_id: file?.kb_id || settingsStore.settings.selectedFileKbMap?.[id],
       kb_name: file?.kb_name,
@@ -1477,6 +1526,12 @@ const sendMessage = async () => {
     loading.value = true;
     isReplying.value = true;
     queueRejectionNotice.value = null;
+    if (!await resolveSelectedKnowledgeFileDetails()) {
+      MessagePlugin.warning("文件信息仍在加载，请稍后重试");
+      loading.value = false;
+      isReplying.value = false;
+      return;
+    }
     const agentEnabled = settingsStore.isAgentStreamMode;
     const effectiveProfessionalSkillNames = agentEnabled ? selectedProfessionalSkillNames.value : [];
 

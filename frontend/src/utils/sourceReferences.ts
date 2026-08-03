@@ -3,6 +3,7 @@ export type SourceReferenceKind = 'knowledge' | 'wiki' | 'web'
 export type SourceReference = {
   id?: string
   content?: string
+  matched_content?: string
   knowledge_id?: string
   knowledge_title?: string
   knowledge_filename?: string
@@ -69,7 +70,15 @@ export function buildSourceReferenceItems(
     const citationId = metadata.citation_id || ''
     const key = citationId || fallbackSourceKey(ref, type)
     if (!key) continue
-    const fullContent = referenceContent(ref.content || '')
+    // A parent-child retrieval result keeps the larger parent context in
+    // `content`, while `id`/`chunk_id` point at the exact matched child. The
+    // citation detail must therefore display `matched_content`; otherwise the
+    // badge opens the right chunk coordinate but previews an unrelated part of
+    // the same parent document.
+    const displayContent = type === 'knowledge'
+      ? ref.matched_content || ref.content || ''
+      : ref.content || ''
+    const fullContent = referenceContent(displayContent)
 
     if (!firstSeen.has(key)) {
       firstSeen.set(key, seenIndex++)
@@ -79,7 +88,7 @@ export function buildSourceReferenceItems(
     if (existing) {
       existing.count += 1
       mergeReferenceContent(existing, fullContent)
-      if (!existing.snippet) existing.snippet = summarizeContent(ref.content || '')
+      if (!existing.snippet) existing.snippet = summarizeContent(displayContent)
       continue
     }
 
@@ -104,7 +113,7 @@ export function buildSourceReferenceItems(
       sourceLabel,
       content: fullContent,
       fragmentCount: fullContent ? 1 : 0,
-      snippet: summarizeContent(ref.content || ''),
+      snippet: summarizeContent(displayContent),
       count: 1,
       icon: iconForSourceType(type),
       url,

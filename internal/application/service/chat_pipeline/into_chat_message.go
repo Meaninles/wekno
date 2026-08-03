@@ -178,6 +178,12 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 		userContent += chatManage.Attachments.BuildPrompt()
 	}
 
+	// Keep the evidence-aware terminal contract immediately before generation.
+	// This is still the same single model request: it only makes the already
+	// registered, adjacent citation handles salient at the point where the model
+	// writes its user-visible answer.
+	userContent = sourcerefs.PlaceTerminalCitationInstruction(userContent, allResults)
+
 	// Set formatted content back to chat management
 	chatManage.UserContent = userContent
 	pipelineInfo(ctx, "IntoChatMessage", "output", map[string]interface{}{

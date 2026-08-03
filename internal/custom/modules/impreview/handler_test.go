@@ -20,7 +20,7 @@ func TestPreviewStreamingMatchesWeComApplicationAndBotModes(t *testing.T) {
 }
 
 func TestBuildTransportPreviewUsesRealWeComApplicationAndBotShapes(t *testing.T) {
-	longContent := strings.Repeat("制度要求。", 500) + `[\[1\]](https://example.com)`
+	longContent := strings.Repeat("制度要求。", 500) + `[[1](https://example.com)]`
 	application := buildTransportPreview("wecom", "webhook", longContent)
 	if len(application) < 2 || application[0].Kind != "application_markdown" {
 		t.Fatalf("unexpected application payloads: %#v", application)

@@ -359,6 +359,10 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		logger.Warnf(ctx, "general-agent filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
 			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
 	}
+	if citationReport.EvidenceAvailableUncited {
+		logger.Warnf(ctx, "general-agent final answer omitted all current-turn citation handles: available=%d",
+			citationReport.AvailableCount)
+	}
 	finalAnswer = filteredAnswer
 	steps := active.snapshotSteps(finalAnswer)
 	eventBus.Emit(ctx, event.Event{

@@ -49,28 +49,20 @@ func AttachToolResultSources(result *types.ToolResult, sources []*CitationSource
 	result.Data["source_references"] = sources
 }
 
-// AppendCitationCatalog adds only the copyable canonical handles to the
-// model-visible tool output. The evidence itself remains in the original tool
-// output, so this adds negligible prompt size and no duplicated source text.
+// AppendCitationCatalog adds only copyable canonical handles to model-visible
+// tool evidence. The shared terminal instruction is deliberately placed later
+// at the generation boundary, so each model sees it exactly once and after all
+// evidence rather than once per tool result.
 func AppendCitationCatalog(output string, refs []*types.SearchResult) string {
 	annotated, unresolved := AttachCitationHandlesToEvidence(output, refs)
 	catalog := RenderCitationCatalog(unresolved)
-	if strings.Contains(output, "[CITATION_USE]") {
-		return annotated
-	}
 	if catalog != "" && !strings.Contains(output, "[AVAILABLE_CITATIONS]") {
 		if strings.TrimSpace(annotated) == "" {
 			return catalog
 		}
 		return strings.TrimRight(annotated, "\r\n") + "\n\n" + catalog
 	}
-	if strings.TrimSpace(annotated) == "" {
-		return citationUseInstruction
-	}
-	if len(refs) == 0 {
-		return annotated
-	}
-	return strings.TrimRight(annotated, "\r\n") + "\n\n" + citationUseInstruction
+	return annotated
 }
 
 // AttachCitationHandlesToEvidence places each run-scoped handle immediately

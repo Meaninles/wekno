@@ -67,11 +67,44 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 		t.Fatalf("catalog should expose only the exact positive citation shape and compact evidence metadata, got %s", catalog)
 	}
 	if block := RenderEvidenceBlock(refs[0], "claim-bearing content", map[string]string{"match": "exact"}); !strings.Contains(block, `[EVIDENCE id=S1 type=document_fragment`) ||
-		!strings.Contains(block, `collection="公司制度1"`) || !strings.Contains(block, `match=exact`) || strings.Contains(block, `chunk_id`) || strings.Contains(block, `<document`) {
+		!strings.Contains(block, `collection="公司制度1"`) || !strings.Contains(block, `match=exact`) ||
+		!strings.Contains(block, `citation_handle_for_this_evidence: <src id="S1" />`) ||
+		strings.Contains(block, `chunk_id`) || strings.Contains(block, `<document`) {
 		t.Fatalf("evidence block should use the citation id without alternate XML citation shapes, got %s", block)
 	}
 	if got := sources[0].CiteExactly; got != `<src id="S1" />` {
 		t.Fatalf("cite_exactly = %q, want canonical source tag", got)
+	}
+}
+
+func TestPlaceTerminalCitationInstructionIsEvidenceAwareIdempotentAndLast(t *testing.T) {
+	refs := []*types.SearchResult{{
+		ID:              "chunk-1",
+		KnowledgeID:     "doc-1",
+		KnowledgeBaseID: "kb-1",
+		Content:         "claim",
+		Metadata:        map[string]string{},
+	}}
+	AssignCitationIDs(refs)
+
+	content := citationUseInstruction + "\n\n[EVIDENCE]\nclaim\n[/EVIDENCE]"
+	got := PlaceTerminalCitationInstruction(content, refs)
+	if strings.Count(got, "[CITATION_USE]") != 1 {
+		t.Fatalf("terminal instruction should occur once: %s", got)
+	}
+	if !strings.HasSuffix(got, citationUseInstruction) {
+		t.Fatalf("terminal instruction should be last: %s", got)
+	}
+	if twice := PlaceTerminalCitationInstruction(got, refs); twice != got {
+		t.Fatalf("terminal instruction placement is not idempotent:\nfirst=%s\nsecond=%s", got, twice)
+	}
+	if !strings.Contains(got, "The handle must appear in the final user-visible answer") {
+		t.Fatalf("terminal instruction does not require a visible final citation: %s", got)
+	}
+
+	dataRef := &types.SearchResult{Metadata: map[string]string{"source_type": SourceTypeData}}
+	if noEvidence := PlaceTerminalCitationInstruction("plain answer", []*types.SearchResult{dataRef}); noEvidence != "plain answer" {
+		t.Fatalf("data sources must not activate the citation contract: %s", noEvidence)
 	}
 }
 

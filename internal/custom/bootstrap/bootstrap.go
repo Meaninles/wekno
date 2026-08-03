@@ -46,6 +46,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/userguide"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiaccess"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/handler"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
@@ -78,6 +79,7 @@ type Handlers struct {
 	CapacityControl      *capacitycontrol.Handler
 	IMPreview            *impreview.Handler
 	IMReference          *imoutput.ReferenceHandler
+	WikiAccess           *wikiaccess.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -97,6 +99,7 @@ type Handlers struct {
 	sessionStateService         *sessionstate.Service
 	skillHubService             *skillhub.Service
 	userGuideService            *userguide.Service
+	wikiAccessService           *wikiaccess.Service
 }
 
 func NewHandlers(
@@ -139,6 +142,7 @@ func NewHandlers(
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
 	adminService := customadmin.NewService(db, userService)
+	wikiAccessService := wikiaccess.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
@@ -235,6 +239,9 @@ func NewHandlers(
 		if err := configCenterService.Migrate(ctx); err != nil {
 			return nil, err
 		}
+		if err := wikiAccessService.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := answerFeedbackService.Migrate(ctx); err != nil {
 			return nil, err
 		}
@@ -314,6 +321,7 @@ func NewHandlers(
 	handler.RegisterCustomRegisterSecurityHook(authSecurityHandler.PrepareRegister)
 	handler.RegisterCustomPasswordChangeSecurityHook(authSecurityHandler.PreparePasswordChange)
 	handler.RegisterCustomPasswordChangeGuardHook(authSecurityHandler.GuardPasswordChange)
+	handler.RegisterCustomKnowledgeBaseWikiSelectionGuard(wikiAccessService.GuardWikiSelection)
 	adminService.SetProvisioner(provisionUser)
 	iamService.SetProvisioner(provisionUser)
 	handler.RegisterCustomPendingOrganizationMemberGrantHook(func(ctx context.Context, req handler.CustomPendingOrganizationMemberGrantRequest) error {
@@ -437,6 +445,7 @@ func NewHandlers(
 		CapacityControl:             capacitycontrol.NewHandler(capacityControlService),
 		IMPreview:                   impreview.NewHandler(imService, sessionService, messageService, customAgentService, tenantService),
 		IMReference:                 imoutput.NewReferenceHandler(imReferenceService),
+		WikiAccess:                  wikiaccess.NewHandler(wikiAccessService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -455,6 +464,7 @@ func NewHandlers(
 		sessionStateService:         sessionStateService,
 		skillHubService:             skillHubService,
 		userGuideService:            userGuideService,
+		wikiAccessService:           wikiAccessService,
 	}, nil
 }
 
@@ -641,6 +651,9 @@ func RegisterRoutes(
 	}
 	customPublic := v1.Group("/custom")
 	{
+		if handlers.WikiAccess != nil && viewer != nil {
+			customPublic.GET("/wiki-access/me", viewer, handlers.WikiAccess.GetCurrent)
+		}
 		if handlers.DerivativeControl != nil {
 			customPublic.GET("/derivative-control/status", handlers.DerivativeControl.Status)
 		}
@@ -693,6 +706,14 @@ func RegisterRoutes(
 			adminRoutes.POST("/users", handlers.Admin.CreateLocalAccount)
 			adminRoutes.PUT("/users-active", handlers.Admin.BatchSetUsersActive)
 			adminRoutes.PUT("/users/:id/active", handlers.Admin.SetUserActive)
+		}
+
+		if handlers.WikiAccess != nil {
+			wikiAccessRoutes := custom.Group("/wiki-access")
+			{
+				wikiAccessRoutes.GET("/users", handlers.WikiAccess.SearchUsers)
+				wikiAccessRoutes.PUT("/users/:user_id", handlers.WikiAccess.SetUser)
+			}
 		}
 
 		if handlers.DocumentQueue != nil {

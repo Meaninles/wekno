@@ -499,6 +499,29 @@ test('buildCitedSourceReferenceItems keeps saved reference content for detail vi
   assert.match(items[0].snippet, /行业地位/)
 })
 
+test('knowledge citation details prefer the exact matched child over parent retrieval context', () => {
+  const exactChild = '第三十二条 采购方式有招标采购、询比采购、竞价采购、谈判采购、框架协议采购和单源采购六种。'
+  const items = buildCitedSourceReferenceItems(
+    [
+      {
+        id: 'chunk-32',
+        content: '第十七条 集中采购与分散采购的分类说明。',
+        matched_content: exactChild,
+        knowledge_id: 'doc-1',
+        knowledge_base_id: 'kb-1',
+        knowledge_title: '采购管理办法.docx',
+        metadata: { citation_id: 'S1', source_type: 'knowledge', chunk_id: 'chunk-32' },
+      },
+    ],
+    '采购方式共有六种。<src id="S1" />',
+  )
+
+  assert.equal(items.length, 1)
+  assert.equal(items[0].content, exactChild)
+  assert.match(items[0].snippet, /第三十二条/)
+  assert.doesNotMatch(items[0].snippet, /第十七条/)
+})
+
 test('buildCitedSourceReferenceItems keeps multiple fragments with duplicated citation id', () => {
   const items = buildCitedSourceReferenceItems(
     [

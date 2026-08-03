@@ -3,6 +3,7 @@ package im
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStripThinkBlocks(t *testing.T) {
@@ -19,7 +20,7 @@ func TestStripThinkBlocks(t *testing.T) {
 			want:  "The answer is 42.",
 		},
 		{
-			name: "multiline think with tools",
+			name:  "multiline think with tools",
 			input: "<think>\n让我先搜索知识库\n正在调用 搜索关键词...\n搜索关键词：「文明」\n</think>\n\n文明6是一款策略游戏。",
 			want:  "文明6是一款策略游戏。",
 		},
@@ -131,7 +132,7 @@ func TestFormatIMAgentIntermediate_answerFirstBeforeTools(t *testing.T) {
 
 func TestFormatIMAgentIntermediate_retractIntoThinkOnTools(t *testing.T) {
 	parts := IMStreamParts{
-		Mode: IMStreamModeAgent,
+		Mode:       IMStreamModeAgent,
 		AgentInner: "好的，让我先搜索知识库。\n",
 		AgentToolSteps: []IMToolStep{
 			{ToolName: "grep_chunks", Pending: true},
@@ -155,7 +156,7 @@ func TestFormatIMAgentIntermediate_retractIntoThinkOnTools(t *testing.T) {
 
 func TestFormatIMAgentIntermediate_newAnswerAfterTools(t *testing.T) {
 	parts := IMStreamParts{
-		Mode: IMStreamModeAgent,
+		Mode:       IMStreamModeAgent,
 		AgentInner: "好的，让我搜索\n",
 		AgentToolSteps: []IMToolStep{
 			{ToolName: "knowledge_search", Success: true, Arguments: map[string]any{"query": "文明6"}},
@@ -171,6 +172,54 @@ func TestFormatIMAgentIntermediate_newAnswerAfterTools(t *testing.T) {
 	}
 	if !strings.Contains(got, "文明6") {
 		t.Fatalf("tool query should remain in think block, got: %q", got)
+	}
+}
+
+func TestFormatIMUserVisibleIntermediate_agentHidesToolsBehindTimedWaiting(t *testing.T) {
+	parts := IMStreamParts{
+		Mode:       IMStreamModeAgent,
+		AgentInner: "正在分析用户问题",
+		AgentToolSteps: []IMToolStep{
+			{ToolName: "knowledge_search", Pending: true, Arguments: map[string]any{"query": "内部检索词"}},
+		},
+	}
+
+	got := FormatIMUserVisibleIntermediate(parts, true, 12*time.Second)
+	if got != "正在处理，请稍候 · 已用 10 秒" {
+		t.Fatalf("agent waiting display = %q", got)
+	}
+	for _, forbidden := range []string{"knowledge_search", "内部检索词", "正在分析用户问题", "思考过程"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("agent waiting display leaked %q: %q", forbidden, got)
+		}
+	}
+}
+
+func TestFormatIMUserVisibleIntermediate_agentStreamsAnswerWithoutProcess(t *testing.T) {
+	parts := IMStreamParts{
+		Mode:           IMStreamModeAgent,
+		AgentInner:     "内部思考",
+		AgentToolSteps: []IMToolStep{{ToolName: "grep_chunks", Success: true}},
+		LiveAnswer:     "这是正在生成的回答。",
+	}
+
+	got := FormatIMUserVisibleIntermediate(parts, true, 20*time.Second)
+	if got != "这是正在生成的回答。" {
+		t.Fatalf("live answer display = %q", got)
+	}
+}
+
+func TestFormatIMUserVisibleIntermediate_quickQARetainsExistingPipelineWithoutTimer(t *testing.T) {
+	parts := IMStreamParts{
+		Mode: IMStreamModeQuickQA,
+		PipelineToolSteps: []IMToolStep{
+			{ToolName: "knowledge_search", Pending: true},
+		},
+	}
+
+	got := FormatIMUserVisibleIntermediate(parts, false, 30*time.Second)
+	if !strings.Contains(got, "知识库") || strings.Contains(got, "已用") {
+		t.Fatalf("quick QA display changed unexpectedly: %q", got)
 	}
 }
 
@@ -238,7 +287,7 @@ func TestFormatIMQuickQA_collapsesToAnswerWhenStreaming(t *testing.T) {
 
 func TestFormatIMFinalFromParts_agentAnswerOnly(t *testing.T) {
 	parts := IMStreamParts{
-		Mode: IMStreamModeAgent,
+		Mode:       IMStreamModeAgent,
 		AgentInner: "好的，让我搜索\n",
 		AgentToolSteps: []IMToolStep{
 			{ToolName: "grep_chunks", Pending: true},
@@ -258,11 +307,11 @@ func TestFormatIMFinalFromParts_agentAnswerOnly(t *testing.T) {
 
 func TestFormatIMFinalFromParts_usesAnswerOnly(t *testing.T) {
 	parts := IMStreamParts{
-		Mode:           IMStreamModeQuickQA,
+		Mode:              IMStreamModeQuickQA,
 		PipelineToolSteps: []IMToolStep{{ToolName: "query_understand", Success: true}},
-		ReasoningInner: "推理中",
-		AgentToolSteps: []IMToolStep{{ToolName: "grep_chunks", Pending: true}},
-		Answer:         "文明6是一款策略游戏。",
+		ReasoningInner:    "推理中",
+		AgentToolSteps:    []IMToolStep{{ToolName: "grep_chunks", Pending: true}},
+		Answer:            "文明6是一款策略游戏。",
 	}
 	got := FormatIMFinalFromParts(parts)
 	if got != "文明6是一款策略游戏。" {

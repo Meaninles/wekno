@@ -17,6 +17,8 @@ type Dialect string
 
 const (
 	DialectMarkdown Dialect = "markdown"
+	DialectWeCom    Dialect = "wecom_markdown"
+	DialectFeishu   Dialect = "feishu_markdown"
 	DialectSlack    Dialect = "slack_mrkdwn"
 	DialectPlain    Dialect = "plain_text"
 )
@@ -109,14 +111,17 @@ func Render(answer string, refs []*types.SearchResult, options Options) Result {
 // documented ReplyMessage Markdown contract automatically.
 func ResolveDialect(platform string, streaming bool) Dialect {
 	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case "wecom":
+		return DialectWeCom
+	case "feishu":
+		// Feishu text messages and streaming-card Markdown both support
+		// Markdown links. Keep one dialect so fallback from streaming does not
+		// silently turn clickable citations into plain numbers.
+		return DialectFeishu
 	case "slack":
 		return DialectSlack
 	case "wechat", "qqbot":
 		return DialectPlain
-	case "feishu":
-		if !streaming {
-			return DialectPlain
-		}
 	}
 	return DialectMarkdown
 }
@@ -187,6 +192,13 @@ func renderInlineReference(reference Reference, dialect Dialect) string {
 		return fmt.Sprintf("<%s|[%d]>", escapeSlackURL(reference.Target), reference.Number)
 	case DialectPlain:
 		return fmt.Sprintf("[%d]", reference.Number)
+	case DialectWeCom, DialectFeishu:
+		// Put the literal brackets outside the link label. WeCom does not
+		// preserve CommonMark-style escaped brackets inside link text, while
+		// both WeCom and Feishu understand an ordinary Markdown link. The
+		// visible result is therefore exactly "[1]" without relying on nested
+		// escaping; clicking the number opens the exact source target.
+		return fmt.Sprintf("[[%d](%s)]", reference.Number, escapeMarkdownURL(reference.Target))
 	default:
 		// Escaped inner brackets render a clickable citation whose visible
 		// label is "[1]" and cannot be mistaken for legacy [[wiki]] syntax by

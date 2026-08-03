@@ -16,6 +16,7 @@
 | `documentPreview` | preview policy、大文件安全预览 |
 | `wikiGraph` | 分类列表、搜索、分页、ego 图和中心节点切换 |
 | `wikiActivation` | Wiki 高成本索引能力的二级入口、启用状态提示和提取粒度面板 |
+| `wikiAccess` | Wiki 选择权查询、默认灰态提示和系统管理员按用户授权页 |
 | `generalagent` / `dbanalytics` / `skillhub` | Agent 产物、数据分析和技能 |
 | `iam` / `configcenter` / `authSecurity` | SSO、组织、默认资源和认证安全 |
 | `mobile` / `chatshare` / `sourceReferences` | 移动端多格式文档预览、原生下载、分享和来源展示 |

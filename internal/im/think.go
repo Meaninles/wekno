@@ -3,6 +3,9 @@ package im
 import (
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
 )
 
 // StreamDisplayPhase controls how raw IM stream content is rendered.
@@ -146,6 +149,19 @@ func FormatIMIntermediateFromParts(parts IMStreamParts, agentInProgress bool) st
 	}
 	_ = agentInProgress
 	return formatIMAgentIntermediate(parts)
+}
+
+// FormatIMUserVisibleIntermediate keeps raw ReAct/Claude SDK reasoning and
+// tool telemetry internal. Quick QA deliberately retains its existing compact
+// retrieval pipeline because it is not a timed agent run.
+func FormatIMUserVisibleIntermediate(parts IMStreamParts, agentInProgress bool, elapsed time.Duration) string {
+	if parts.Mode == IMStreamModeAgent && agentInProgress {
+		if live := strings.TrimSpace(parts.LiveAnswer); live != "" {
+			return live
+		}
+		return imoutput.FormatRunWaiting(elapsed)
+	}
+	return FormatIMIntermediateFromParts(parts, agentInProgress)
 }
 
 // FormatIMFinalFromParts returns the final replace frame (answer-only for all modes).

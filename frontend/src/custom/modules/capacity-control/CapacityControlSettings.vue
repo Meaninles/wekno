@@ -113,6 +113,16 @@
                 <t-input-number v-if="pool.resource_kind === 'chat'" v-model="pool.chat_max_waiting" :min="0" :max="100000" placeholder="继承" size="small" />
                 <div v-else class="read-only-value read-only-value--muted">不适用</div>
               </div>
+              <div class="config-field">
+                <span class="field-label">IM 回答并发<small>独立于网页对话</small></span>
+                <t-input-number v-if="pool.resource_kind === 'chat'" v-model="pool.im_max_concurrent" :min="1" :max="pool.max_inflight" size="small" />
+                <div v-else class="read-only-value read-only-value--muted">不适用</div>
+              </div>
+              <div class="config-field">
+                <span class="field-label">IM 等待队列<small>跨 API 副本</small></span>
+                <t-input-number v-if="pool.resource_kind === 'chat'" v-model="pool.im_max_waiting" :min="0" :max="100000" size="small" />
+                <div v-else class="read-only-value read-only-value--muted">不适用</div>
+              </div>
             </div>
           </article>
           <t-empty v-if="!filteredPools.length && !loading" description="没有匹配的资源池" />
@@ -140,6 +150,7 @@
               <span>租户 <b>{{ pool.effective.tenant_max }}</b></span>
               <span>单文档 <b>{{ pool.effective.document_max }}</b></span>
               <span>聊天会话 <b>{{ pool.effective.chat_sessions }}</b></span>
+              <span v-if="pool.resource_kind === 'chat'">IM 回答 <b>{{ pool.effective.im_chat_sessions }}</b></span>
             </div>
             <div v-if="poolGrants(pool).length" class="grant-list">
               <span v-for="grant in poolGrants(pool)" :key="grant.module">
@@ -169,6 +180,16 @@
               <div class="config-field"><span class="field-label">文档上限</span><t-input-number v-model="template.document_burst" :min="1" :max="Math.max(1, Math.min(template.tenant_burst, template.max_inflight - template.interactive_reserve))" size="small" /></div>
               <div class="config-field"><span class="field-label">RPM<small>0 = 不限</small></span><t-input-number v-model="template.rpm" :min="0" size="small" /></div>
               <div class="config-field"><span class="field-label">TPM<small>0 = 不限</small></span><t-input-number v-model="template.tpm" :min="0" :step="1000" size="small" /></div>
+              <div class="config-field">
+                <span class="field-label">IM 回答并发</span>
+                <t-input-number v-if="template.kind === 'chat'" v-model="template.im_max_concurrent" :min="1" :max="template.max_inflight" size="small" />
+                <div v-else class="read-only-value read-only-value--muted">不适用</div>
+              </div>
+              <div class="config-field">
+                <span class="field-label">IM 等待队列</span>
+                <t-input-number v-if="template.kind === 'chat'" v-model="template.im_max_waiting" :min="0" :max="100000" size="small" />
+                <div v-else class="read-only-value read-only-value--muted">不适用</div>
+              </div>
             </div>
           </article>
         </div>
@@ -352,6 +373,8 @@ function canonicalInput(pool: ModelResourcePool): ModelResourcePool {
   return {
     ...pool,
     chat_max_concurrent: null,
+    im_max_concurrent: pool.resource_kind === 'chat' ? pool.im_max_concurrent : 0,
+    im_max_waiting: pool.resource_kind === 'chat' ? pool.im_max_waiting : 0,
     max_background_inflight: backgroundFor(pool),
     tenant_guaranteed: 1,
     document_guaranteed: 1,

@@ -38,6 +38,8 @@ type ConfiguredCapacity struct {
 	RPM                int   `json:"rpm"`
 	TPM                int64 `json:"tpm"`
 	ChatMaxWaiting     *int  `json:"chat_max_waiting"`
+	IMMaxConcurrent    int   `json:"im_max_concurrent"`
+	IMMaxWaiting       int   `json:"im_max_waiting"`
 }
 
 type EffectiveCapacity struct {
@@ -54,6 +56,7 @@ type EffectiveCapacity struct {
 	TenantMax               int `json:"tenant_max"`
 	DocumentMax             int `json:"document_max"`
 	ChatSessions            int `json:"chat_sessions"`
+	IMChatSessions          int `json:"im_chat_sessions"`
 }
 
 type ModuleGrant struct {
@@ -303,6 +306,7 @@ func compilePool(
 			MaxInflight: pool.MaxInflight, InteractiveReserve: pool.InteractiveReserve,
 			TenantBurst: pool.TenantBurst, DocumentBurst: pool.DocumentBurst,
 			RPM: pool.RPM, TPM: pool.TPM, ChatMaxWaiting: pool.ChatMaxWaiting,
+			IMMaxConcurrent: pool.IMMaxConcurrent, IMMaxWaiting: pool.IMMaxWaiting,
 		},
 		Effective: EffectiveCapacity{
 			ProviderTotal: pool.MaxInflight, InteractiveReserved: pool.InteractiveReserve,
@@ -311,7 +315,7 @@ func compilePool(
 			WikiMapWorkShare: wikiMapWorkShare, WikiCommitWorkShare: wikiCommitWorkShare,
 			WikiMapProviderShare: wikiMapProviderShare, WikiCommitProviderShare: wikiCommitProviderShare,
 			TenantMax: tenant, DocumentMax: document,
-			ChatSessions: chatSessions,
+			ChatSessions: chatSessions, IMChatSessions: pool.IMMaxConcurrent,
 		},
 		QuotaPoolIDs: sortedSet(quotas), GatewayPoolIDs: sortedSet(gateways),
 	}
@@ -345,6 +349,14 @@ func compilePool(
 	}
 	if pool.ChatMaxConcurrent != nil {
 		add("warning", "redundant_chat_concurrency", "对话执行并发已统一由资源池总并发约束；该旧覆盖值会被服务端清除。")
+	}
+	if pool.ResourceKind == string(modeladmission.KindChat) {
+		if pool.IMMaxConcurrent < 1 || pool.IMMaxConcurrent > pool.MaxInflight {
+			add("error", "invalid_im_concurrency", "IM 回答并发必须在 1 到总并发之间。")
+		}
+		if pool.IMMaxWaiting < 0 || pool.IMMaxWaiting > 100000 {
+			add("error", "invalid_im_waiting", "IM 回答等待队列必须在 0 到 100000 之间。")
+		}
 	}
 	if pool.TenantGuaranteed != 1 || pool.DocumentGuaranteed != 1 || pool.TokenBurst != 0 {
 		add("warning", "legacy_noop_fields", "检测到旧的保证值/Token 突发值；这些字段不再是独立配置。")

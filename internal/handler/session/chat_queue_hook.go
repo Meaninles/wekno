@@ -20,6 +20,9 @@ const (
 // The custom queue module owns all queue logic; the session handler only
 // supplies already-authorized request context and renders the result.
 type ChatQueueAdmissionRequest struct {
+	// Surface selects an independent conversation-capacity domain. Empty is
+	// the normal Web conversation queue; IM integrations pass "im".
+	Surface          string
 	TenantID         uint64
 	PrincipalID      string
 	RequestID        string
@@ -32,6 +35,7 @@ type ChatQueueAdmissionRequest struct {
 
 // ChatQueueSnapshot is sent through SSE while an accepted conversation waits.
 type ChatQueueSnapshot struct {
+	Surface        string `json:"surface"`
 	State          string `json:"state"`
 	ModelID        string `json:"model_id"`
 	ResourcePoolID string `json:"resource_pool_id"`
@@ -46,6 +50,7 @@ type ChatQueueSnapshot struct {
 // ChatQueueRejection is returned before user/assistant messages are persisted.
 // This lets clients preserve the composer draft without creating ghost turns.
 type ChatQueueRejection struct {
+	Surface        string `json:"surface,omitempty"`
 	Code           string `json:"code"`
 	Message        string `json:"message"`
 	ModelID        string `json:"model_id,omitempty"`

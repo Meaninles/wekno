@@ -31,6 +31,8 @@ const (
 	defaultMaxConcurrent = 8
 	defaultMaxWaiting    = 500
 	defaultPerUser       = 3
+	defaultIMConcurrent  = 1
+	defaultIMMaxWaiting  = 50
 
 	queuePollInterval = 500 * time.Millisecond
 	activeLeaseTTL    = 90 * time.Second
@@ -39,12 +41,18 @@ const (
 	defaultMaxWait    = time.Hour
 )
 
+const (
+	SurfaceWeb = "web"
+	SurfaceIM  = "im"
+)
+
 var (
 	errTicketMissing = errors.New("chat queue ticket no longer exists")
 	errWaitExpired   = errors.New("chat queue wait timeout")
 )
 
 type queuePolicy struct {
+	Surface       string
 	Enabled       bool
 	MaxConcurrent int
 	MaxWaiting    int
@@ -138,7 +146,8 @@ func (m *Manager) Admit(
 	if m == nil {
 		return nil, unavailableRejection("聊天排队服务未初始化"), errors.New("chat queue manager is nil")
 	}
-	if !m.basePolicy(ctx).Enabled {
+	surface := normalizeSurface(request.Surface)
+	if !m.basePolicyForSurface(ctx, surface).Enabled {
 		return nil, nil, nil
 	}
 
@@ -154,7 +163,7 @@ func (m *Manager) Admit(
 	if err != nil {
 		return nil, unavailableRejection("聊天模型资源池当前不可用，请稍后重试"), err
 	}
-	policy := m.policyWithPool(ctx, pool)
+	policy := m.policyWithPool(ctx, pool, surface)
 	if !policy.Enabled {
 		return nil, nil, nil
 	}
@@ -163,11 +172,16 @@ func (m *Manager) Admit(
 	if principal == "" {
 		principal = fmt.Sprintf("tenant:%d:anonymous", request.TenantID)
 	}
+	principalMaterial := principal
+	if surface == SurfaceIM {
+		principalMaterial = SurfaceIM + "\x00" + principal
+	}
 	ticket := &Ticket{
 		manager:       m,
 		token:         uuid.NewString(),
-		principalHash: digest(principal),
+		principalHash: digest(principalMaterial),
 		poolID:        pool.ID,
+		surface:       surface,
 		modelID:       model.ID,
 		initialPool:   clonePool(pool),
 		queuedAt:      time.Now().UTC(),
@@ -212,6 +226,7 @@ func rejectionFor(
 	policy queuePolicy,
 ) *sessionhandler.ChatQueueRejection {
 	rejection := &sessionhandler.ChatQueueRejection{
+		Surface:        ticket.surface,
 		ModelID:        ticket.modelID,
 		ResourcePoolID: ticket.poolID,
 		Waiting:        result.waiting,
@@ -375,12 +390,41 @@ func (m *Manager) basePolicy(ctx context.Context) queuePolicy {
 	return policy
 }
 
+func (m *Manager) basePolicyForSurface(ctx context.Context, surface string) queuePolicy {
+	policy := m.basePolicy(ctx)
+	if normalizeSurface(surface) == SurfaceIM {
+		// IM capacity is an explicit resource-pool contract. It must not be
+		// disabled by the Web conversation-queue switch.
+		policy.Enabled = true
+		policy.MaxConcurrent = defaultIMConcurrent
+		policy.MaxWaiting = defaultIMMaxWaiting
+	}
+	policy.Surface = normalizeSurface(surface)
+	return policy
+}
+
 func (m *Manager) policyWithPool(
 	ctx context.Context,
 	pool *modeladmission.ResourcePool,
+	surface string,
 ) queuePolicy {
-	policy := m.basePolicy(ctx)
+	policy := m.basePolicyForSurface(ctx, surface)
 	if pool == nil {
+		if policy.Surface == SurfaceIM {
+			policy.MaxConcurrent = defaultIMConcurrent
+			policy.MaxWaiting = defaultIMMaxWaiting
+		}
+		return policy
+	}
+	if policy.Surface == SurfaceIM {
+		policy.MaxConcurrent = pool.IMMaxConcurrent
+		if policy.MaxConcurrent < 1 {
+			policy.MaxConcurrent = defaultIMConcurrent
+		}
+		policy.MaxWaiting = pool.IMMaxWaiting
+		if policy.MaxWaiting < 0 {
+			policy.MaxWaiting = defaultIMMaxWaiting
+		}
 		return policy
 	}
 	if pool.ChatMaxWaiting != nil {
@@ -410,7 +454,7 @@ func (m *Manager) livePolicy(ctx context.Context, ticket *Ticket) (queuePolicy, 
 			return queuePolicy{}, err
 		}
 	}
-	return m.policyWithPool(ctx, pool), nil
+	return m.policyWithPool(ctx, pool, ticket.surface), nil
 }
 
 // cachedResourcePool bounds hot-policy reloads to one database read per pool
@@ -451,6 +495,13 @@ func digest(value string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+func normalizeSurface(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), SurfaceIM) {
+		return SurfaceIM
+	}
+	return SurfaceWeb
+}
+
 type queueKeys struct {
 	active   string
 	waiting  string
@@ -461,11 +512,17 @@ type queueKeys struct {
 
 func (m *Manager) keys(ticket *Ticket) queueKeys {
 	poolDigest := digest(ticket.poolID)
+	poolPrefix := m.keyPrefix + "pool:" + poolDigest + ":"
+	userPrefix := m.keyPrefix + "user:"
+	if ticket.surface == SurfaceIM {
+		poolPrefix += "surface:im:"
+		userPrefix = m.keyPrefix + "surface:im:user:"
+	}
 	return queueKeys{
-		active:   m.keyPrefix + "pool:" + poolDigest + ":active",
-		waiting:  m.keyPrefix + "pool:" + poolDigest + ":waiting",
-		meta:     m.keyPrefix + "pool:" + poolDigest + ":wait-meta",
-		user:     m.keyPrefix + "user:" + ticket.principalHash + ":waiting",
+		active:   poolPrefix + "active",
+		waiting:  poolPrefix + "waiting",
+		meta:     poolPrefix + "wait-meta",
+		user:     userPrefix + ticket.principalHash + ":waiting",
 		sequence: m.keyPrefix + "sequence",
 	}
 }
@@ -682,7 +739,7 @@ func (m *Manager) admitLocal(
 	m.localMu.Lock()
 	defer m.localMu.Unlock()
 	m.cleanupLocalUser(ticket.principalHash, now)
-	pool := m.localPool(ticket.poolID)
+	pool := m.localPool(ticket.localPoolID())
 	m.cleanupLocalPool(pool, now)
 	active := int64(len(pool.active))
 	waiting := int64(len(pool.waiting))
@@ -772,7 +829,7 @@ func (m *Manager) promoteLocal(
 	now := time.Now().UnixMilli()
 	m.localMu.Lock()
 	defer m.localMu.Unlock()
-	pool := m.localPool(ticket.poolID)
+	pool := m.localPool(ticket.localPoolID())
 	m.cleanupLocalPool(pool, now)
 	waiter, ok := pool.waiters[ticket.token]
 	if !ok {
@@ -823,6 +880,7 @@ type Ticket struct {
 	token         string
 	principalHash string
 	poolID        string
+	surface       string
 	modelID       string
 	initialPool   *modeladmission.ResourcePool
 	queuedAt      time.Time
@@ -837,6 +895,13 @@ type Ticket struct {
 	stopHeartbeat chan struct{}
 }
 
+func (t *Ticket) localPoolID() string {
+	if t != nil && t.surface == SurfaceIM {
+		return t.poolID + "\x00im"
+	}
+	return t.poolID
+}
+
 func (t *Ticket) Queued() bool { return t != nil && t.queued }
 
 func (t *Ticket) snapshot(
@@ -845,6 +910,7 @@ func (t *Ticket) snapshot(
 	policy queuePolicy,
 ) sessionhandler.ChatQueueSnapshot {
 	return sessionhandler.ChatQueueSnapshot{
+		Surface:        t.surface,
 		State:          state,
 		ModelID:        t.modelID,
 		ResourcePoolID: t.poolID,
@@ -959,7 +1025,7 @@ func (t *Ticket) renewActive() {
 	expiry := time.Now().Add(activeLeaseTTL).UnixMilli()
 	if t.local {
 		t.manager.localMu.Lock()
-		if pool := t.manager.localPools[t.poolID]; pool != nil {
+		if pool := t.manager.localPools[t.localPoolID()]; pool != nil {
 			if _, ok := pool.active[t.token]; ok {
 				pool.active[t.token] = expiry
 			}
@@ -997,7 +1063,7 @@ func (t *Ticket) finish(ctx context.Context) {
 		close(t.stopHeartbeat)
 		if t.local {
 			t.manager.localMu.Lock()
-			if pool := t.manager.localPools[t.poolID]; pool != nil {
+			if pool := t.manager.localPools[t.localPoolID()]; pool != nil {
 				delete(pool.active, t.token)
 				delete(pool.waiters, t.token)
 				next := pool.waiting[:0]

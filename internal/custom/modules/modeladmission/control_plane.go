@@ -27,6 +27,8 @@ type ResourcePool struct {
 	// canonical identity of one actual model route across API replicas.
 	ChatMaxConcurrent     *int      `json:"chat_max_concurrent" gorm:"column:chat_max_concurrent"`
 	ChatMaxWaiting        *int      `json:"chat_max_waiting" gorm:"column:chat_max_waiting"`
+	IMMaxConcurrent       int       `json:"im_max_concurrent" gorm:"not null;default:1"`
+	IMMaxWaiting          int       `json:"im_max_waiting" gorm:"not null;default:50"`
 	MaxInflight           int       `json:"max_inflight" gorm:"not null"`
 	MaxBackgroundInflight int       `json:"max_background_inflight" gorm:"not null"`
 	InteractiveReserve    int       `json:"interactive_reserve" gorm:"not null"`
@@ -94,6 +96,8 @@ type AdmissionTemplate struct {
 	MaxInflight           int       `json:"max_inflight" gorm:"not null"`
 	MaxBackgroundInflight int       `json:"max_background_inflight" gorm:"not null"`
 	InteractiveReserve    int       `json:"interactive_reserve" gorm:"not null"`
+	IMMaxConcurrent       int       `json:"im_max_concurrent" gorm:"not null;default:1"`
+	IMMaxWaiting          int       `json:"im_max_waiting" gorm:"not null;default:50"`
 	TenantBurst           int       `json:"tenant_burst" gorm:"not null"`
 	DocumentBurst         int       `json:"document_burst" gorm:"not null"`
 	RPM                   int       `json:"rpm" gorm:"not null;default:0"`
@@ -362,6 +366,8 @@ func (s *Store) ReconcileModels(ctx context.Context) error {
 			}
 			pool := ResourcePool{
 				ID: poolID, Name: actualModelName(model), ResourceKind: resourceKind,
+				IMMaxConcurrent:       policy.imMaxConcurrent,
+				IMMaxWaiting:          policy.imMaxWaiting,
 				MaxInflight:           policy.limit.Concurrency,
 				MaxBackgroundInflight: policy.limit.Background,
 				InteractiveReserve:    policy.reserve,
@@ -381,6 +387,8 @@ func (s *Store) ReconcileModels(ctx context.Context) error {
 				Where("id = ? AND policy_version = 1", pool.ID).
 				Updates(map[string]any{
 					"name": pool.Name, "resource_kind": pool.ResourceKind,
+					"im_max_concurrent":       pool.IMMaxConcurrent,
+					"im_max_waiting":          pool.IMMaxWaiting,
 					"max_inflight":            pool.MaxInflight,
 					"max_background_inflight": pool.MaxBackgroundInflight,
 					"interactive_reserve":     pool.InteractiveReserve,
@@ -617,10 +625,12 @@ func (s *Store) put(key string, policy ResolvedPolicy) {
 }
 
 type builtinPolicyValue struct {
-	kind    Kind
-	limit   Limit
-	reserve int
-	tpm     int64
+	kind            Kind
+	limit           Limit
+	reserve         int
+	imMaxConcurrent int
+	imMaxWaiting    int
+	tpm             int64
 }
 
 func builtinPolicy(kind Kind, derivative bool) builtinPolicyValue {
@@ -636,7 +646,7 @@ func builtinPolicy(kind Kind, derivative bool) builtinPolicyValue {
 		return builtinPolicyValue{
 			kind:    kind,
 			limit:   Limit{Concurrency: 4, Background: 3, PerTenant: 4, PerDocument: 2},
-			reserve: 1,
+			reserve: 1, imMaxConcurrent: 1, imMaxWaiting: 50,
 		}
 	case KindEmbedding, KindRerank:
 		return builtinPolicyValue{
@@ -710,6 +720,8 @@ func (s *Store) seedBuiltinTemplates(ctx context.Context) error {
 		policy := builtinPolicy(kind, kind == KindDerivative)
 		rows = append(rows, AdmissionTemplate{
 			Kind:                  kind.String(),
+			IMMaxConcurrent:       policy.imMaxConcurrent,
+			IMMaxWaiting:          policy.imMaxWaiting,
 			MaxInflight:           policy.limit.Concurrency,
 			MaxBackgroundInflight: policy.limit.Background,
 			InteractiveReserve:    policy.reserve,
@@ -770,8 +782,10 @@ func templatePolicy(template AdmissionTemplate, callKind Kind) builtinPolicyValu
 			PerTenant:   template.TenantBurst,
 			PerDocument: template.DocumentBurst,
 		},
-		reserve: template.InteractiveReserve,
-		tpm:     template.TPM,
+		reserve:         template.InteractiveReserve,
+		imMaxConcurrent: template.IMMaxConcurrent,
+		imMaxWaiting:    template.IMMaxWaiting,
+		tpm:             template.TPM,
 	}
 }
 
@@ -799,7 +813,12 @@ func NormalizePool(pool *ResourcePool) error {
 	if pool == nil {
 		return errors.New("resource pool is required")
 	}
+	pool.ResourceKind = strings.TrimSpace(pool.ResourceKind)
 	pool.ChatMaxConcurrent = nil
+	if pool.ResourceKind != string(KindChat) {
+		pool.IMMaxConcurrent = 0
+		pool.IMMaxWaiting = 0
+	}
 	pool.MaxBackgroundInflight = EffectiveBackgroundLimit(
 		pool.MaxInflight, pool.InteractiveReserve,
 	)
@@ -814,10 +833,15 @@ func NormalizeTemplate(row *AdmissionTemplate) error {
 	if row == nil {
 		return errors.New("admission template is required")
 	}
+	row.Kind = strings.TrimSpace(row.Kind)
 	row.MaxBackgroundInflight = EffectiveBackgroundLimit(
 		row.MaxInflight, row.InteractiveReserve,
 	)
-	if strings.TrimSpace(row.Kind) == "" {
+	if row.Kind != string(KindChat) {
+		row.IMMaxConcurrent = 0
+		row.IMMaxWaiting = 0
+	}
+	if row.Kind == "" {
 		return errors.New("template kind is required")
 	}
 	if row.MaxInflight < 1 || row.MaxInflight > 1024 {
@@ -825,6 +849,14 @@ func NormalizeTemplate(row *AdmissionTemplate) error {
 	}
 	if row.InteractiveReserve < 0 || row.InteractiveReserve >= row.MaxInflight {
 		return errors.New("interactive_reserve must be between 0 and max_inflight - 1")
+	}
+	if row.Kind == string(KindChat) {
+		if row.IMMaxConcurrent < 1 || row.IMMaxConcurrent > row.MaxInflight {
+			return errors.New("im_max_concurrent must be between 1 and max_inflight for chat templates")
+		}
+		if row.IMMaxWaiting < 0 || row.IMMaxWaiting > 100000 {
+			return errors.New("im_max_waiting must be between 0 and 100000")
+		}
 	}
 	if row.TenantBurst < 1 || row.TenantBurst > row.MaxInflight {
 		return errors.New("tenant_burst must be between 1 and max_inflight")
@@ -870,6 +902,16 @@ func ValidatePool(pool *ResourcePool) error {
 	if pool.ChatMaxWaiting != nil &&
 		(*pool.ChatMaxWaiting < 0 || *pool.ChatMaxWaiting > 100000) {
 		return errors.New("chat_max_waiting must be null or between 0 and 100000")
+	}
+	if pool.ResourceKind == string(KindChat) {
+		if pool.IMMaxConcurrent < 1 || pool.IMMaxConcurrent > pool.MaxInflight {
+			return errors.New("im_max_concurrent must be between 1 and max_inflight for chat pools")
+		}
+		if pool.IMMaxWaiting < 0 || pool.IMMaxWaiting > 100000 {
+			return errors.New("im_max_waiting must be between 0 and 100000")
+		}
+	} else if pool.IMMaxConcurrent != 0 || pool.IMMaxWaiting != 0 {
+		return errors.New("IM conversation limits only apply to chat pools")
 	}
 	if pool.MaxBackgroundInflight != EffectiveBackgroundLimit(pool.MaxInflight, pool.InteractiveReserve) {
 		return errors.New("max_background_inflight must equal max_inflight - interactive_reserve")
@@ -940,6 +982,13 @@ func (s *Store) normalizeCapacityPolicies(ctx context.Context) error {
 				row.InteractiveReserve = row.MaxInflight - 1
 			}
 			row.MaxBackgroundInflight = EffectiveBackgroundLimit(row.MaxInflight, row.InteractiveReserve)
+			if row.ResourceKind == string(KindChat) {
+				row.IMMaxConcurrent = min(max(row.IMMaxConcurrent, 1), row.MaxInflight)
+				row.IMMaxWaiting = min(max(row.IMMaxWaiting, 0), 100000)
+			} else {
+				row.IMMaxConcurrent = 0
+				row.IMMaxWaiting = 0
+			}
 			row.TenantBurst = min(max(row.TenantBurst, 1), row.MaxInflight)
 			row.DocumentBurst = min(max(row.DocumentBurst, 1), row.TenantBurst, row.MaxBackgroundInflight)
 			row.ChatMaxConcurrent = nil
@@ -948,6 +997,8 @@ func (s *Store) normalizeCapacityPolicies(ctx context.Context) error {
 			row.TokenBurst = 0
 			if err := tx.Model(&ResourcePool{}).Where("id = ?", row.ID).Updates(map[string]any{
 				"chat_max_concurrent":     nil,
+				"im_max_concurrent":       row.IMMaxConcurrent,
+				"im_max_waiting":          row.IMMaxWaiting,
 				"max_background_inflight": row.MaxBackgroundInflight,
 				"interactive_reserve":     row.InteractiveReserve,
 				"tenant_guaranteed":       1,
@@ -975,9 +1026,18 @@ func (s *Store) normalizeCapacityPolicies(ctx context.Context) error {
 				row.InteractiveReserve = row.MaxInflight - 1
 			}
 			row.MaxBackgroundInflight = EffectiveBackgroundLimit(row.MaxInflight, row.InteractiveReserve)
+			if row.Kind == string(KindChat) {
+				row.IMMaxConcurrent = min(max(row.IMMaxConcurrent, 1), row.MaxInflight)
+				row.IMMaxWaiting = min(max(row.IMMaxWaiting, 0), 100000)
+			} else {
+				row.IMMaxConcurrent = 0
+				row.IMMaxWaiting = 0
+			}
 			row.TenantBurst = min(max(row.TenantBurst, 1), row.MaxInflight)
 			row.DocumentBurst = min(max(row.DocumentBurst, 1), row.TenantBurst, row.MaxBackgroundInflight)
 			if err := tx.Model(&AdmissionTemplate{}).Where("kind = ?", row.Kind).Updates(map[string]any{
+				"im_max_concurrent":       row.IMMaxConcurrent,
+				"im_max_waiting":          row.IMMaxWaiting,
 				"max_background_inflight": row.MaxBackgroundInflight,
 				"interactive_reserve":     row.InteractiveReserve,
 				"tenant_burst":            row.TenantBurst,

@@ -17,6 +17,7 @@ import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
@@ -360,6 +361,10 @@ type Service struct {
 
 	// modelService is used to obtain the chat model for generating smart notification replies.
 	modelService interfaces.ModelService
+
+	// chatQueue provides the per-model, cross-replica IM conversation slots.
+	// Its IM surface is independent from the normal Web conversation counters.
+	chatQueue *chatqueue.Manager
 
 	// oauthManager builds MCP OAuth authorization URLs so IM users can authorize
 	// OAuth-enabled MCP services out-of-band (IM cannot resolve the in-conversation
@@ -815,6 +820,7 @@ func NewService(
 	knowledgeService interfaces.KnowledgeService,
 	kbService interfaces.KnowledgeBaseService,
 	modelService interfaces.ModelService,
+	chatQueue *chatqueue.Manager,
 	streamManager interfaces.StreamManager,
 	defaultFileSvc interfaces.FileService,
 	oauthManager *mcppkg.OAuthManager,
@@ -846,6 +852,7 @@ func NewService(
 		knowledgeService: knowledgeService,
 		kbService:        kbService,
 		modelService:     modelService,
+		chatQueue:        chatQueue,
 		streamManager:    streamManager,
 		defaultFileSvc:   defaultFileSvc,
 		frontendBaseURL:  frontendBaseURL,
@@ -1584,6 +1591,14 @@ func (s *Service) executeQARequest(req *qaRequest) {
 		return
 	}
 
+	chatTicket, admitted := s.acquireIMAnswerSlot(ctx, req)
+	if !admitted {
+		return
+	}
+	if chatTicket != nil {
+		defer chatTicket.Release(context.WithoutCancel(ctx))
+	}
+
 	// NOTE: StreamManager-based stop detection is started inside handleMessageStream /
 	// runQA after the assistant message is created (that's when we have the
 	// sessionID + messageID needed to poll StreamManager).
@@ -1628,6 +1643,105 @@ func (s *Service) executeQARequest(req *qaRequest) {
 
 	logger.Infof(ctx, "[IM] Reply sent: channel=%s platform=%s user=%s answer_len=%d",
 		req.channelID, req.msg.Platform, req.msg.UserID, len(answer))
+}
+
+// acquireIMAnswerSlot applies the same model-resource-pool conversation
+// admission used by Web chat, but in an independent Redis surface. The ticket
+// is acquired before selecting streaming/non-streaming or agent type, so every
+// IM adapter and Claude SDK sidecar shares the same capacity contract.
+func (s *Service) acquireIMAnswerSlot(
+	ctx context.Context,
+	req *qaRequest,
+) (sessionhandler.ChatQueueTicket, bool) {
+	if s == nil || s.chatQueue == nil {
+		logger.Errorf(ctx, "[IM] answer admission unavailable")
+		_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{
+			Content: "IM 回答容量服务暂时不可用，请稍后再试。",
+			IsFinal: true,
+		})
+		return nil, false
+	}
+
+	tenantID := req.session.TenantID
+	if effectiveTenantID, ok := types.TenantIDFromContext(ctx); ok && effectiveTenantID != 0 {
+		tenantID = effectiveTenantID
+	}
+	agentModelID, summaryModelID, knowledgeBaseIDs := imAnswerAdmissionHints(req)
+	ticket, rejection, err := s.chatQueue.Admit(ctx, sessionhandler.ChatQueueAdmissionRequest{
+		Surface:          chatqueue.SurfaceIM,
+		TenantID:         tenantID,
+		PrincipalID:      req.userKey,
+		RequestID:        req.msg.MessageID,
+		SessionID:        req.session.ID,
+		SummaryModelID:   summaryModelID,
+		AgentModelID:     agentModelID,
+		KnowledgeBaseIDs: knowledgeBaseIDs,
+	})
+	if err != nil || rejection != nil {
+		message := "当前 IM 回答服务繁忙，请稍后再试。"
+		if rejection != nil && strings.TrimSpace(rejection.Message) != "" {
+			message = rejection.Message
+		}
+		logger.Warnf(ctx, "[IM] answer admission rejected: rejection=%+v err=%v", rejection, err)
+		_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{Content: message, IsFinal: true})
+		return nil, false
+	}
+	if ticket == nil {
+		logger.Errorf(ctx, "[IM] answer admission returned no ticket")
+		_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{
+			Content: "IM 回答容量服务暂时不可用，请稍后再试。",
+			IsFinal: true,
+		})
+		return nil, false
+	}
+	if !ticket.Queued() {
+		return ticket, true
+	}
+
+	_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{
+		Content: "收到，当前 IM 回答正在排队，请稍候 ⏳",
+		IsFinal: true,
+	})
+	if err := ticket.Wait(ctx, nil); err != nil {
+		ticket.Cancel(context.WithoutCancel(ctx))
+		logger.Warnf(ctx, "[IM] answer admission wait failed: %v", err)
+		if !errors.Is(err, context.Canceled) {
+			_ = req.adapter.SendReply(context.WithoutCancel(ctx), req.msg, &ReplyMessage{
+				Content: "IM 回答等待超时，请重新发送。",
+				IsFinal: true,
+			})
+		}
+		return nil, false
+	}
+	return ticket, true
+}
+
+func imAnswerAdmissionHints(req *qaRequest) (string, string, []string) {
+	if req == nil {
+		return "", "", nil
+	}
+	agentModelID := ""
+	knowledgeBaseIDs := []string(nil)
+	if req.agent != nil {
+		agentModelID = strings.TrimSpace(req.agent.Config.ModelID)
+		knowledgeBaseIDs = append(knowledgeBaseIDs, req.agent.Config.KnowledgeBases...)
+	}
+	summaryModelID := ""
+	if req.session != nil && req.session.LastRequestState != nil {
+		// The channel's current agent is authoritative. LastRequestState may
+		// still describe the previous agent while an asynchronous state update
+		// is being persisted, so use it only as a missing-config fallback.
+		if agentModelID == "" {
+			summaryModelID = strings.TrimSpace(req.session.LastRequestState.ModelID)
+		}
+		if len(knowledgeBaseIDs) == 0 {
+			knowledgeBaseIDs = append(
+				knowledgeBaseIDs,
+				req.session.LastRequestState.KnowledgeBaseIDs...,
+			)
+		}
+	}
+	return agentModelID, summaryModelID, knowledgeBaseIDs
 }
 
 // handleCommand executes a slash-command and sends the result back to the user.

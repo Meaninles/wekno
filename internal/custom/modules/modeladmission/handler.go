@@ -227,6 +227,7 @@ func (h *Handler) UpdateResourcePool(c *gin.Context) {
 		Where("id = ? AND policy_version = ?", input.ID, expected).
 		Select(
 			"name", "resource_kind", "chat_max_concurrent", "chat_max_waiting",
+			"im_max_concurrent", "im_max_waiting",
 			"max_inflight", "max_background_inflight",
 			"interactive_reserve", "tenant_guaranteed", "tenant_burst",
 			"document_guaranteed", "document_burst", "rpm", "tpm", "token_burst",
@@ -319,6 +320,8 @@ func (h *Handler) ResetResourcePool(c *gin.Context) {
 	if h.manager != nil && h.manager.store != nil {
 		if template, ok := h.manager.store.template(c.Request.Context(), old.ResourceKind); ok {
 			policy = templatePolicy(template, Kind(old.ResourceKind))
+			old.IMMaxConcurrent = template.IMMaxConcurrent
+			old.IMMaxWaiting = template.IMMaxWaiting
 			old.RequestTimeoutSeconds = template.RequestTimeoutSeconds
 			old.CircuitThreshold = template.CircuitThreshold
 			old.CircuitWindowSeconds = template.CircuitWindowSeconds
@@ -328,6 +331,10 @@ func (h *Handler) ResetResourcePool(c *gin.Context) {
 	old.MaxInflight = policy.limit.Concurrency
 	old.ChatMaxConcurrent = nil
 	old.ChatMaxWaiting = nil
+	if old.ResourceKind == string(KindChat) && old.IMMaxConcurrent < 1 {
+		old.IMMaxConcurrent = policy.imMaxConcurrent
+		old.IMMaxWaiting = policy.imMaxWaiting
+	}
 	old.MaxBackgroundInflight = policy.limit.Background
 	old.InteractiveReserve = policy.reserve
 	old.TenantGuaranteed = 1
@@ -344,6 +351,8 @@ func (h *Handler) ResetResourcePool(c *gin.Context) {
 		Where("id = ? AND policy_version = ?", old.ID, expected).Updates(map[string]any{
 		"chat_max_concurrent":     nil,
 		"chat_max_waiting":        nil,
+		"im_max_concurrent":       old.IMMaxConcurrent,
+		"im_max_waiting":          old.IMMaxWaiting,
 		"max_inflight":            old.MaxInflight,
 		"max_background_inflight": old.MaxBackgroundInflight,
 		"interactive_reserve":     old.InteractiveReserve,

@@ -14,6 +14,8 @@ export interface ModelResourcePool {
   resource_kind: string
   chat_max_concurrent: number | null
   chat_max_waiting: number | null
+  im_max_concurrent: number
+  im_max_waiting: number
   max_inflight: number
   max_background_inflight: number
   interactive_reserve: number
@@ -49,6 +51,8 @@ export interface ModelAdmissionTemplate {
   max_inflight: number
   max_background_inflight: number
   interactive_reserve: number
+  im_max_concurrent: number
+  im_max_waiting: number
   tenant_burst: number
   document_burst: number
   rpm: number
@@ -144,6 +148,8 @@ export interface CapacityPoolReport {
     rpm: number
     tpm: number
     chat_max_waiting: number | null
+    im_max_concurrent: number
+    im_max_waiting: number
   }
   effective: {
     provider_total: number
@@ -159,6 +165,7 @@ export interface CapacityPoolReport {
     tenant_max: number
     document_max: number
     chat_sessions: number
+    im_chat_sessions: number
   }
   runtime: {
     provider_inflight: number

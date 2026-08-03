@@ -52,23 +52,91 @@ func TestResourcePoolTotalIsTheOnlyChatExecutionLimit(t *testing.T) {
 	legacy := 1
 	policy := manager.policyWithPool(context.Background(), &modeladmission.ResourcePool{
 		MaxInflight: 4, ChatMaxConcurrent: &legacy,
-	})
+	}, SurfaceWeb)
 	if policy.MaxConcurrent != 4 {
 		t.Fatalf("MaxConcurrent = %d, want resource-pool total 4", policy.MaxConcurrent)
 	}
 }
 
+func TestIMPolicyUsesIndependentConfiguredLimits(t *testing.T) {
+	manager := &Manager{settings: testSettings{}}
+	pool := &modeladmission.ResourcePool{
+		MaxInflight: 4, IMMaxConcurrent: 2, IMMaxWaiting: 7,
+	}
+	web := manager.policyWithPool(context.Background(), pool, SurfaceWeb)
+	im := manager.policyWithPool(context.Background(), pool, SurfaceIM)
+	if web.MaxConcurrent != 4 || im.MaxConcurrent != 2 || im.MaxWaiting != 7 {
+		t.Fatalf("web=%+v im=%+v", web, im)
+	}
+}
+
 func newLocalTestTicket(manager *Manager, token, principal string) *Ticket {
+	return newLocalSurfaceTicket(manager, token, principal, SurfaceWeb)
+}
+
+func newLocalSurfaceTicket(manager *Manager, token, principal, surface string) *Ticket {
 	return &Ticket{
 		manager:       manager,
 		token:         token,
 		principalHash: principal,
 		poolID:        "pool-a",
+		surface:       normalizeSurface(surface),
 		modelID:       "model-a",
 		local:         true,
 		queuedAt:      time.Now().UTC(),
 		stopHeartbeat: make(chan struct{}),
 	}
+}
+
+func TestLocalWebAndIMSlotsAreIndependent(t *testing.T) {
+	manager := newLocalTestManager()
+	policy := queuePolicy{Enabled: true, MaxConcurrent: 1, MaxWaiting: 10, MaxPerUser: 3}
+	web := newLocalSurfaceTicket(manager, "web", "web-user", SurfaceWeb)
+	im := newLocalSurfaceTicket(manager, "im", "im-user", SurfaceIM)
+	imOverflow := newLocalSurfaceTicket(manager, "im-overflow", "im-user-2", SurfaceIM)
+
+	if got, _ := manager.admitLocal(web, policy); got.code != 1 {
+		t.Fatalf("web admission = %#v", got)
+	}
+	if got, _ := manager.admitLocal(im, policy); got.code != 1 {
+		t.Fatalf("IM must not share Web active counter: %#v", got)
+	}
+	if got, _ := manager.admitLocal(imOverflow, policy); got.code != 0 || got.position != 1 {
+		t.Fatalf("IM overflow = %#v, want queued", got)
+	}
+	web.Cancel(context.Background())
+	im.Cancel(context.Background())
+	imOverflow.Cancel(context.Background())
+}
+
+func TestLoweredIMLimitDoesNotInterruptActiveTickets(t *testing.T) {
+	manager := newLocalTestManager()
+	initial := queuePolicy{Surface: SurfaceIM, Enabled: true, MaxConcurrent: 2, MaxWaiting: 10, MaxPerUser: 3}
+	lowered := initial
+	lowered.MaxConcurrent = 1
+	first := newLocalSurfaceTicket(manager, "first", "user-1", SurfaceIM)
+	second := newLocalSurfaceTicket(manager, "second", "user-2", SurfaceIM)
+	waiter := newLocalSurfaceTicket(manager, "waiter", "user-3", SurfaceIM)
+
+	if got, _ := manager.admitLocal(first, initial); got.code != 1 {
+		t.Fatalf("first admission = %#v", got)
+	}
+	if got, _ := manager.admitLocal(second, initial); got.code != 1 {
+		t.Fatalf("second admission at exact limit = %#v", got)
+	}
+	if got, _ := manager.admitLocal(waiter, initial); got.code != 0 {
+		t.Fatalf("over-limit admission = %#v, want queued", got)
+	}
+	waiter.queued = true
+	first.Cancel(context.Background())
+	if got, _ := manager.promoteLocal(waiter, lowered); got.code != 0 {
+		t.Fatalf("lowered limit interrupted/over-admitted active work: %#v", got)
+	}
+	second.Cancel(context.Background())
+	if got, _ := manager.promoteLocal(waiter, lowered); got.code != 1 {
+		t.Fatalf("waiter did not enter after active drained to lowered limit: %#v", got)
+	}
+	waiter.Cancel(context.Background())
 }
 
 func TestLocalQueueEnforcesFIFOAndReleasesSlot(t *testing.T) {

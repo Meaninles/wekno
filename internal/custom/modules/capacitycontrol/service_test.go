@@ -20,6 +20,7 @@ import (
 func validPool() modeladmission.ResourcePool {
 	return modeladmission.ResourcePool{
 		ID: "pool-chat", Name: "Qwen", ResourceKind: "chat",
+		IMMaxConcurrent: 1, IMMaxWaiting: 50,
 		MaxInflight: 4, MaxBackgroundInflight: 3, InteractiveReserve: 1,
 		TenantGuaranteed: 1, TenantBurst: 4,
 		DocumentGuaranteed: 1, DocumentBurst: 2,
@@ -44,6 +45,7 @@ func TestCompilePoolReportsEffectiveModuleGrants(t *testing.T) {
 	require.Equal(t, 1, row.Effective.WikiCommitProviderShare)
 	require.Equal(t, 2, row.Effective.DocumentMax)
 	require.Equal(t, 4, row.Effective.ChatSessions)
+	require.Equal(t, 1, row.Effective.IMChatSessions)
 	require.Len(t, row.ModuleGrants, 4)
 	require.Equal(t, 2, row.ModuleGrants[1].Effective)
 	require.NotContains(t, severities(row.Issues), "error")

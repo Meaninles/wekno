@@ -126,13 +126,23 @@ function Restore-LocalAdminPassword {
         -c "UPDATE users SET password_hash = '$($script:OriginalPasswordHash)', updated_at = NOW() WHERE username = '$safeUsername';" | Out-Null
 }
 
-function New-PoolBody([int]$Total, [int]$Reserve, [int]$Tenant, [int]$Document, [long]$TPM) {
+function New-PoolBody(
+    [int]$Total,
+    [int]$Reserve,
+    [int]$Tenant,
+    [int]$Document,
+    [long]$TPM,
+    [int]$IMConcurrent = 1,
+    [int]$IMWaiting = 50
+) {
     return @{
         id = "capacity-e2e-$runId"
         name = "Capacity API acceptance $runId"
         resource_kind = "chat"
         chat_max_concurrent = 999
         chat_max_waiting = 7
+        im_max_concurrent = $IMConcurrent
+        im_max_waiting = $IMWaiting
         max_inflight = $Total
         max_background_inflight = 999
         interactive_reserve = $Reserve
@@ -151,7 +161,16 @@ function New-PoolBody([int]$Total, [int]$Reserve, [int]$Tenant, [int]$Document, 
     }
 }
 
-function Assert-Canonical([object]$Pool, [int]$Total, [int]$Reserve, [int]$Tenant, [int]$Document, [long]$TPM) {
+function Assert-Canonical(
+    [object]$Pool,
+    [int]$Total,
+    [int]$Reserve,
+    [int]$Tenant,
+    [int]$Document,
+    [long]$TPM,
+    [int]$IMConcurrent = 1,
+    [int]$IMWaiting = 50
+) {
     Assert-True ([int]$Pool.max_inflight -eq $Total) "total is effective"
     Assert-True ([int]$Pool.interactive_reserve -eq $Reserve) "reserve is effective"
     Assert-True ([int]$Pool.max_background_inflight -eq ($Total - $Reserve)) "background is derived"
@@ -159,6 +178,8 @@ function Assert-Canonical([object]$Pool, [int]$Total, [int]$Reserve, [int]$Tenan
     Assert-True ([int]$Pool.document_burst -eq $Document) "document limit is effective"
     Assert-True ([long]$Pool.tpm -eq $TPM) "TPM is effective"
     Assert-True ($null -eq $Pool.chat_max_concurrent) "legacy chat concurrency is cleared"
+    Assert-True ([int]$Pool.im_max_concurrent -eq $IMConcurrent) "IM concurrency is effective"
+    Assert-True ([int]$Pool.im_max_waiting -eq $IMWaiting) "IM waiting room is effective"
     Assert-True ([int]$Pool.tenant_guaranteed -eq 1 -and [int]$Pool.document_guaranteed -eq 1) "no-op guarantee fields are canonical"
     Assert-True ([long]$Pool.token_burst -eq 0) "unused token burst is cleared"
 }
@@ -195,6 +216,10 @@ try {
         Assert-True ($null -ne $row.effective.wiki_commit_work_share) "Wiki Commit work share is compiled"
         Assert-True ($null -ne $row.runtime.work_wiki_map_active) "Wiki Map runtime is observable"
         Assert-True ($null -ne $row.runtime.work_wiki_commit_active) "Wiki Commit runtime is observable"
+        if ($row.resource_kind -eq "chat") {
+            Assert-True ($null -ne $row.configured.im_max_concurrent) "IM concurrency is reported"
+            Assert-True ($null -ne $row.effective.im_chat_sessions) "IM effective slots are reported"
+        }
     }
     Pass "effective policy, Redis runtime, and heartbeat topology report"
 
@@ -245,7 +270,9 @@ try {
         (New-PoolBody 4 4 4 1 20000),
         (New-PoolBody 4 1 5 1 20000),
         (New-PoolBody 4 1 1 2 20000),
-        (New-PoolBody 2 1 2 2 20000)
+        (New-PoolBody 2 1 2 2 20000),
+        (New-PoolBody 2 1 2 1 20000 3 50),
+        (New-PoolBody 2 1 2 1 20000 1 -1)
     )
     foreach ($body in $invalidProfiles) {
         $result = Invoke-Api -Method Post -Path "/api/v1/custom/capacity-control/validate" -Body $body
@@ -272,18 +299,18 @@ try {
     Pass "conflicting writes are rejected without partial mutation"
 
     $profiles = @(
-        @{ Total = 1; Reserve = 0; Tenant = 1; Document = 1; TPM = [long]0 },
-        @{ Total = 2; Reserve = 1; Tenant = 1; Document = 1; TPM = [long]20000 },
-        @{ Total = 8; Reserve = 2; Tenant = 6; Document = 3; TPM = [long]120000 }
+        @{ Total = 1; Reserve = 0; Tenant = 1; Document = 1; TPM = [long]0; IM = 1; IMWaiting = 0 },
+        @{ Total = 2; Reserve = 1; Tenant = 1; Document = 1; TPM = [long]20000; IM = 2; IMWaiting = 2 },
+        @{ Total = 8; Reserve = 2; Tenant = 6; Document = 3; TPM = [long]120000; IM = 3; IMWaiting = 20 }
     )
     foreach ($profile in $profiles) {
         $previousVersion = [int]$script:Pool.policy_version
         $updated = Invoke-Api -Method Put -Path "/api/v1/custom/capacity-control/resource-pools/$($script:Pool.id)" `
-            -Body (New-PoolBody $profile.Total $profile.Reserve $profile.Tenant $profile.Document $profile.TPM) `
+            -Body (New-PoolBody $profile.Total $profile.Reserve $profile.Tenant $profile.Document $profile.TPM $profile.IM $profile.IMWaiting) `
             -ExtraHeaders @{ "If-Match" = "`"$previousVersion`"" }
         $script:Pool = $updated.Json.data
         Assert-True ([int]$script:Pool.policy_version -eq ($previousVersion + 1)) "policy version advances"
-        Assert-Canonical $script:Pool $profile.Total $profile.Reserve $profile.Tenant $profile.Document $profile.TPM
+        Assert-Canonical $script:Pool $profile.Total $profile.Reserve $profile.Tenant $profile.Document $profile.TPM $profile.IM $profile.IMWaiting
 
         1..4 | ForEach-Object {
             $effective = Invoke-Api -Method Get -Path "/api/v1/custom/capacity-control/effective"
@@ -293,6 +320,8 @@ try {
             Assert-True ([int]$row.effective.background_max -eq ($profile.Total - $profile.Reserve)) "effective background is hot"
             Assert-True ([int]$row.effective.work_window -eq (($profile.Total - $profile.Reserve) * [int]$script:SchedulerPolicy.prefetch_factor)) "work window follows scheduler prefetch"
             Assert-True ([int]$row.effective.document_max -eq $profile.Document) "effective document cap is hot"
+            Assert-True ([int]$row.effective.im_chat_sessions -eq $profile.IM) "effective IM slots are hot"
+            Assert-True ([int]$row.configured.im_max_waiting -eq $profile.IMWaiting) "IM waiting room is hot"
 
             $background = $profile.Total - $profile.Reserve
             $workWindow = $background * [int]$script:SchedulerPolicy.prefetch_factor

@@ -84,7 +84,7 @@ test('tool rows use line icon names instead of legacy asset masks', () => {
 
 test('rag mode delegates pre-answer loading to pipeline and keeps dots while answer streams', () => {
   assert.match(source, /if \(props\.ragMode\) return hasAnswerStarted\.value \|\| hasNonRagToolEvents\.value/)
-  assert.match(source, /v-if="!ragMode \|\| displayEvents\.length > 0 \|\| showAgentActivityIndicator \|\| shouldMountRunWaitingIndicator"/)
+  assert.match(source, /v-if="!ragMode \|\| displayEvents\.length > 0 \|\| showAgentActivityIndicator"/)
 })
 
 test('rag mode keeps delegated pipeline rows out of the answer stream component', () => {
@@ -97,10 +97,9 @@ test('rag mode keeps delegated pipeline rows out of the answer stream component'
   )
 })
 
-test('completed root summary is static and has no expand chevron', () => {
-  assert.match(source, /class="action-card tree-root is-static"/)
-  assert.doesNotMatch(source, /tree-root-summary[\s\S]*class="action-show-icon"/)
-  assert.doesNotMatch(source, /showIntermediateSteps \? 'chevron-down' : 'chevron-right'/)
+test('only the collapsed root summary shows an expand chevron', () => {
+  assert.match(source, /tree-root-summary[\s\S]*class="action-show-icon"/)
+  assert.match(source, /showIntermediateSteps \? 'chevron-down' : 'chevron-right'/)
   assert.doesNotMatch(source, /isEventExpanded\(event\.tool_call_id\) \? 'chevron/)
   assert.doesNotMatch(source, /isEventExpanded\(event\.event_id\) \? 'chevron/)
 })
@@ -109,8 +108,9 @@ test('pending tool rows do not render an extra axis dot', () => {
   assert.doesNotMatch(source, /&\.action-pending\s*\{[\s\S]*&::after/)
 })
 
-test('timed agent mode suppresses the legacy timeline dots', () => {
+test('agent mode keeps gray timeline dots for the full turn', () => {
   assert.match(source, /if \(isConversationDone\.value\) return false/)
-  assert.match(source, /if \(usesTimedWaitingProjection\.value\) return false/)
-  assert.match(source, /RunWaitingIndicator/)
+  assert.match(source, /if \(props\.ragMode && !hasNonRagToolEvents\.value\) return false/)
+  assert.match(source, /return true;\s*\}\);/)
+  assert.match(source, /chat-timeline-loading\.less/)
 })

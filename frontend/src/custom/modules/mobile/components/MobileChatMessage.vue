@@ -33,8 +33,6 @@ import type { MobileResourceChip } from "../utils";
 import { downloadBlob, formatFileSize } from "../utils";
 import type { GeneralAgentArtifactFile, GeneralAgentArtifactsData, StructuredAnalysisData } from "@/types/tool-results";
 import ChatQueueStatusCard from "@/custom/modules/chatqueue/ChatQueueStatusCard.vue";
-import RunWaitingIndicator from "@/custom/modules/agentstream/RunWaitingIndicator.vue";
-import { usesTimedRunWaiting } from "@/custom/modules/agentstream/runWaiting";
 import {
   agentToolCountFromMessage,
   formatCompletedRunDuration,
@@ -187,23 +185,8 @@ const agentStepPreviews = computed(() => {
   return steps.slice(-2);
 });
 
-const usesTimedWaitingProjection = computed(() => usesTimedRunWaiting(props.message));
-const shouldMountRunWaitingIndicator = computed(() =>
-  !props.shareMode &&
-  isAssistant.value &&
-  usesTimedWaitingProjection.value &&
-  !props.message.is_completed,
-);
-const showRunWaitingIndicator = computed(() =>
-  shouldMountRunWaitingIndicator.value &&
-  !String(props.message.content || "").trim(),
-);
 const shouldShowThinking = computed(() => {
-  return !props.shareMode &&
-    isAssistant.value &&
-    props.message.isAgentMode &&
-    !usesTimedWaitingProjection.value &&
-    !props.message.is_completed;
+  return !props.shareMode && isAssistant.value && props.message.isAgentMode && !props.message.is_completed;
 });
 
 const isStructuredAnalysisData = (value: any): value is StructuredAnalysisData => {
@@ -1129,10 +1112,6 @@ onBeforeUnmount(() => {
           <span>未引用参考资料</span>
         </div>
         <div v-if="completedAgentSummary" class="mobile-run-summary">{{ completedAgentSummary }}</div>
-        <RunWaitingIndicator
-          v-if="shouldMountRunWaitingIndicator"
-          v-show="showRunWaitingIndicator"
-        />
         <div v-if="shouldShowThinking" class="thinking-card">
           <div class="thinking-title">正在思考</div>
           <div v-if="agentStepPreviews.length" class="thinking-steps">
@@ -1144,7 +1123,7 @@ onBeforeUnmount(() => {
           <div v-else class="thinking-preview">{{ latestAgentPreview }}</div>
         </div>
 
-        <template v-if="!shouldShowThinking && !showRunWaitingIndicator">
+        <template v-if="!shouldShowThinking">
           <template v-for="segment in answerSegments" :key="segment.key">
             <div
               v-if="segment.kind === 'markdown'"

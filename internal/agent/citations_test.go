@@ -8,6 +8,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -45,5 +46,54 @@ func TestNativeAgentNaturalCompletionKeepsCanonicalToolCitation(t *testing.T) {
 	}
 	if len(state.KnowledgeRefs) != 1 || sourcerefs.CitationID(state.KnowledgeRefs[0]) != "S1" {
 		t.Fatalf("completion references are not authoritative: %#v", state.KnowledgeRefs)
+	}
+}
+
+func TestNativeAgentPlacesTerminalCitationInstructionAtGenerationBoundary(t *testing.T) {
+	engine := &AgentEngine{eventBus: event.NewEventBus()}
+	engine.citationState.reset()
+	result := &types.ToolResult{
+		Success: true,
+		Output:  `<knowledge_chunks><chunk chunk_id="chunk-1"><content>证据</content></chunk></knowledge_chunks>`,
+		Data: map[string]interface{}{
+			"display_type":    "knowledge_chunks_list",
+			"knowledge_id":    "doc-1",
+			"knowledge_title": "制度.docx",
+			"chunks": []map[string]interface{}{{
+				"seq": 1, "chunk_id": "chunk-1", "knowledge_id": "doc-1",
+				"knowledge_base_id": "kb-1", "content": "证据",
+			}},
+		},
+	}
+	engine.exposeToolResultReferences(context.Background(), "session-1", "list_knowledge_chunks", result)
+
+	original := []chat.Message{
+		{Role: "user", Content: "问题"},
+		{Role: "tool", Content: result.Output, Name: "list_knowledge_chunks"},
+	}
+	prepared := engine.prepareCitationAwareGenerationMessages(original)
+	if !strings.HasSuffix(prepared[len(prepared)-1].Content, sourcerefs.TerminalCitationInstruction()) {
+		t.Fatalf("terminal citation instruction is not adjacent to generation: %s", prepared[len(prepared)-1].Content)
+	}
+	if strings.Count(prepared[len(prepared)-1].Content, "[CITATION_USE]") != 1 {
+		t.Fatalf("terminal citation instruction was duplicated: %s", prepared[len(prepared)-1].Content)
+	}
+	if original[len(original)-1].Content != result.Output {
+		t.Fatalf("generation preparation mutated persisted tool output")
+	}
+
+	preparedAgain := engine.prepareCitationAwareGenerationMessages(prepared)
+	if preparedAgain[len(preparedAgain)-1].Content != prepared[len(prepared)-1].Content {
+		t.Fatalf("generation preparation is not idempotent")
+	}
+}
+
+func TestNativeAgentDoesNotAddTerminalCitationInstructionWithoutEvidence(t *testing.T) {
+	engine := &AgentEngine{}
+	engine.citationState.reset()
+	messages := []chat.Message{{Role: "user", Content: "你好"}}
+	prepared := engine.prepareCitationAwareGenerationMessages(messages)
+	if prepared[0].Content != "你好" || strings.Contains(prepared[0].Content, "[CITATION_USE]") {
+		t.Fatalf("no-evidence conversation was changed: %#v", prepared)
 	}
 }

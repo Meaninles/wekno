@@ -134,6 +134,27 @@ class RunnerProgressTest(unittest.TestCase):
         summary = json.loads(result["content"][0]["text"])
         self.assertNotIn("citation_handle_for_this_evidence", summary["data"]["results"][0])
 
+    def test_mcp_tool_result_keeps_shared_terminal_contract_as_final_field(self):
+        contract = (
+            "[CITATION_USE]\n"
+            "Put matching citation handles in the user-visible answer itself.\n"
+            "[/CITATION_USE]"
+        )
+        result = mcp_tool_result(
+            {
+                "success": True,
+                "output": "evidence",
+                "data": {"results": [{"chunk_id": "chunk-1", "content": "fact"}]},
+                "source_references": [
+                    {"type": "knowledge", "chunk_id": "chunk-1", "cite_exactly": '<src id="S1" />'},
+                ],
+                "citation_output_contract": contract,
+            }
+        )
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(summary["citation_output_contract"], contract)
+        self.assertEqual(next(reversed(summary)), "citation_output_contract")
+
     def test_mcp_tool_result_does_not_choose_between_ambiguous_evidence_handles(self):
         result = mcp_tool_result(
             {

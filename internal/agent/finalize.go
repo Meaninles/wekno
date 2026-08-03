@@ -91,6 +91,7 @@ Requirements:
 5. IMPORTANT: Respond in the same language as the user's question
 
 Now generate the final answer:`, query)
+	finalPrompt = sourcerefs.PlaceTerminalCitationInstruction(finalPrompt, citationRefs)
 
 	messages = append(messages, chat.Message{
 		Role:    "user",
@@ -274,6 +275,10 @@ func (e *AgentEngine) emitCompletionEvent(
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
 		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
 			report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs)
+	}
+	if report.EvidenceAvailableUncited {
+		logger.Warnf(ctx, "[Agent][Citations] final answer omitted all current-turn citation handles: available=%d",
+			report.AvailableCount)
 	}
 	state.FinalAnswer = filteredAnswer
 	state.KnowledgeRefs = citedRefs

@@ -61,7 +61,6 @@ func TestRegisterToolResultExposesStableFragmentHandleAndCoordinates(t *testing.
 	for _, expected := range []string{
 		`chunk_id="chunk-531">`,
 		`citation_handle_for_this_evidence: <src id="S1" />`,
-		`[CITATION_USE] In the final answer, copy each matching cite_exactly or citation_handle_for_this_evidence verbatim`,
 	} {
 		if !strings.Contains(result.Output, expected) {
 			t.Fatalf("model-visible handle missing %q: %s", expected, result.Output)
@@ -69,6 +68,9 @@ func TestRegisterToolResultExposesStableFragmentHandleAndCoordinates(t *testing.
 	}
 	if strings.Contains(result.Output, "tool_result_position") || strings.Contains(result.Output, "[AVAILABLE_CITATIONS]") {
 		t.Fatalf("resolved evidence should be annotated inline without an ordinal/catalog ambiguity: %s", result.Output)
+	}
+	if strings.Contains(result.Output, "[CITATION_USE]") {
+		t.Fatalf("terminal contract must be added once at generation time, not per tool result: %s", result.Output)
 	}
 
 	second := &types.ToolResult{Success: true, Data: result.Data}

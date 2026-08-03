@@ -4,14 +4,11 @@
     <!-- Collapsed intermediate steps (tree root) -->
     <div v-if="shouldShowCollapsedSteps" class="tree-container">
       <div class="tool-event">
-        <div class="action-card tree-root" @click="toggleIntermediateSteps">
+        <div class="action-card tree-root is-static">
           <div class="action-header">
             <div class="action-title">
               <span class="action-title-icon icon-mask" :style="maskIconStyle(agentIcon)" aria-hidden="true" />
               <span class="action-name tree-root-summary" v-html="intermediateStepsSummaryHtml"></span>
-              <div class="action-show-icon">
-                <t-icon :name="showIntermediateSteps ? 'chevron-down' : 'chevron-right'" />
-              </div>
             </div>
           </div>
         </div>
@@ -213,14 +210,14 @@
     </div>
 
     <!-- Event Stream (non-tree mode: before answer starts, or answer events) -->
-    <div v-if="!ragMode || displayEvents.length > 0 || showAgentActivityIndicator" ref="streamingStepsContainer"
+    <div v-if="!ragMode || displayEvents.length > 0 || showAgentActivityIndicator || shouldMountRunWaitingIndicator" ref="streamingStepsContainer"
       class="streaming-steps-container" :class="{
         'streaming-steps-constrained': !answerEverStarted && !isConversationDone,
         'is-streaming-timeline': showStreamingTimeline
       }">
-      <LiveProcessPreview
-        v-if="showLiveProcessPreview"
-        :items="liveProcessPreviews"
+      <RunWaitingIndicator
+        v-if="shouldMountRunWaitingIndicator"
+        v-show="showRunWaitingIndicator"
       />
       <template v-for="(event, index) in displayEvents" :key="getEventKey(event, index)">
         <div v-if="event && event.type" class="event-item" :class="{
@@ -542,7 +539,7 @@ import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
 import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
 import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbackButtons.vue';
-import LiveProcessPreview from '@/custom/modules/agentstream/LiveProcessPreview.vue';
+import RunWaitingIndicator from '@/custom/modules/agentstream/RunWaitingIndicator.vue';
 import {
   agentToolCountFromMessage,
   formatCompletedRunDuration,
@@ -556,6 +553,7 @@ import {
   readLiveAgentProjection,
   type LiveAgentProjection,
 } from '@/custom/modules/agentstream/liveProcessPreview';
+import { usesTimedRunWaiting } from '@/custom/modules/agentstream/runWaiting';
 import { countGrepDocuments } from '@/utils/grepResultsGroup';
 import { getKnowledgeChunksSummaryHtml } from '@/utils/knowledgeChunksDisplay';
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
@@ -1050,7 +1048,9 @@ const usesClaudeSDKTerminalDelivery = computed(
 const liveProjection = computed<LiveAgentProjection | null>(() =>
   readLiveAgentProjection(props.session as unknown as Record<string, unknown>),
 );
-const liveProcessPreviews = computed(() => liveProjection.value?.previews || []);
+const usesTimedWaitingProjection = computed(() =>
+  usesTimedRunWaiting(props.session as unknown as Record<string, unknown>),
+);
 
 const isRagPipelineToolCallEvent = (event: any): boolean => {
   return Boolean(
@@ -1357,19 +1357,22 @@ watch(answerFullyRendered, (ready) => {
   });
 });
 
-// Agent: dots until the turn completes. RAG: pipeline dots before answer; answer stream dots after.
-const showLiveProcessPreview = computed(
+const shouldMountRunWaitingIndicator = computed(
   () =>
-    usesClaudeSDKTerminalDelivery.value &&
+    usesTimedWaitingProjection.value &&
     !isConversationDone.value &&
-    !props.ragMode &&
     !shareMode.value,
+);
+
+const showRunWaitingIndicator = computed(
+  () => shouldMountRunWaitingIndicator.value && !hasAnswerStarted.value,
 );
 
 const showAgentActivityIndicator = computed(() => {
   if (isConversationDone.value) return false;
+  if (usesTimedWaitingProjection.value) return false;
   if (props.ragMode) return hasAnswerStarted.value || hasNonRagToolEvents.value;
-  return !showLiveProcessPreview.value;
+  return true;
 });
 
 const isStreamingTimelineEvent = (event: any): boolean => {
@@ -1931,18 +1934,38 @@ const displayEvents = computed(() => {
     return [];
   }
 
-  // Live runs use the O(1) projection maintained by the stream handler. This
-  // avoids rebuilding the complete event tree for every token while still
-  // keeping approval/OAuth cards actionable and the current answer visible.
+  // ReAct and Claude SDK runs expose only actionable interaction cards and the
+  // current answer. Thinking, retrieval queries, tool names and raw tool output
+  // remain in the internal stream for completion statistics and diagnostics.
   if (
-    usesClaudeSDKTerminalDelivery.value &&
-    !isConversationDone.value &&
-    liveProjection.value
+    usesTimedWaitingProjection.value &&
+    !isConversationDone.value
   ) {
-    const interactive = liveProjection.value.interactiveEvents.filter(
-      (event: any) => event && event.resolved !== true,
+    if (usesClaudeSDKTerminalDelivery.value && liveProjection.value) {
+      const interactive = liveProjection.value.interactiveEvents.filter(
+        (event: any) => event && event.resolved !== true,
+      );
+      const answer = liveProjection.value.activeAnswer;
+      if (
+        answer &&
+        answer.superseded !== true &&
+        (String(answer.content || '').trim() || answer.done === true)
+      ) {
+        return [...interactive, answer];
+      }
+      return interactive;
+    }
+
+    const projected = buildFullEventList(stream);
+    const interactive = projected.filter((event: any) =>
+      event &&
+      event.resolved !== true &&
+      (event.type === 'tool_approval_required' || event.type === 'mcp_oauth_required'),
     );
-    const answer = liveProjection.value.activeAnswer;
+    const answers = projected.filter(
+      (event: any) => event?.type === 'answer' && event.superseded !== true,
+    );
+    const answer = answers.find((event: any) => event.done !== true) ?? answers[answers.length - 1];
     if (
       answer &&
       answer.superseded !== true &&
@@ -3114,6 +3137,10 @@ const handleAddToKnowledge = (answerEvent: any) => {
   cursor: pointer;
   color: var(--td-text-color-secondary);
   margin-bottom: 0;
+}
+
+.tree-root.is-static {
+  cursor: default;
 }
 
 .tree-root-summary {

@@ -326,7 +326,7 @@ def load_completed_assistant(api: API, session_id: str, wait_seconds: float = 8.
         time.sleep(0.2)
 
 
-def load_generated_title(api: API, session_id: str, wait_seconds: float = 8.0) -> str:
+def load_generated_title(api: API, session_id: str, wait_seconds: float = 30.0) -> str:
     deadline = time.monotonic() + wait_seconds
     title = ""
     while True:

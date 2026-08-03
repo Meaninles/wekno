@@ -101,6 +101,7 @@
                         <WikiIndexingDisclosure
                           :wiki-enabled="formData.indexingStrategy.wikiEnabled"
                           :locked="isIndexingLocked"
+                          :wiki-available="wikiAccessAllowed"
                           :resolved-granularity="resolvedGranularity"
                           :granularity-hint="granularityHint"
                           @toggle-wiki="toggleWikiIndexing"
@@ -390,6 +391,7 @@ import GraphSettings from './settings/GraphSettings.vue'
 import KBShareSettings from './settings/KBShareSettings.vue'
 import DataSourceSettings from './settings/DataSourceSettings.vue'
 import WikiIndexingDisclosure from '@/custom/modules/wikiActivation/components/WikiIndexingDisclosure.vue'
+import { getCurrentWikiAccess } from '@/custom/modules/wikiAccess/api'
 import { useI18n } from 'vue-i18n'
 
 const uiStore = useUIStore()
@@ -465,6 +467,19 @@ const dsCount = ref(0)
 // that predate per-KB ownership tracking; those KBs have no "owner" and
 // only tenant Admin+ can mutate their share settings.
 const kbCreatorId = ref<string>('')
+// Wiki selection is deny-by-default until the dedicated capability endpoint
+// confirms an explicit per-user grant.
+const wikiAccessAllowed = ref(false)
+
+const loadWikiAccess = async () => {
+  wikiAccessAllowed.value = false
+  try {
+    const response = await getCurrentWikiAccess()
+    wikiAccessAllowed.value = response.data?.wiki_enabled === true
+  } catch (error) {
+    console.error('Failed to load Wiki access permission:', error)
+  }
+}
 
 // Backend gate for /knowledge-bases/:id/shares (POST/PUT/DELETE) is
 // g.OwnedKBOrAdmin(): only the KB creator or tenant Admin+ may mutate
@@ -890,6 +905,7 @@ const toggleVectorIndexing = () => {
 const toggleWikiIndexing = () => {
   if (!formData.value) return
   if (isIndexingLocked.value) return
+  if (!wikiAccessAllowed.value) return
   formData.value.indexingStrategy.wikiEnabled = !formData.value.indexingStrategy.wikiEnabled
 }
 
@@ -1375,6 +1391,7 @@ const resetState = () => {
   loading.value = false
   chunkingDirty.value = false
   kbCreatorId.value = ''
+  wikiAccessAllowed.value = false
 }
 
 // 关闭弹窗
@@ -1397,7 +1414,7 @@ watch(() => props.visible, async (newVal) => {
     }
     
     // 加载模型列表与租户默认存储引擎（创建 KB 时即使用，不依赖是否打开「存储引擎」Tab）
-    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider()])
+    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider(), loadWikiAccess()])
     
     // 根据模式加载数据
     if (props.mode === 'edit' && props.kbId) {

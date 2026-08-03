@@ -45,6 +45,69 @@ func TestRetrievalStatsKeepsAttemptedZeroResult(t *testing.T) {
 	}
 }
 
+func TestHasConfiguredEvidenceScopeSeparatesPlainChatFromZeroResultRetrieval(t *testing.T) {
+	if HasConfiguredEvidenceScope(nil, nil, 0, false, nil) {
+		t.Fatal("plain model-only chat must not be presented as a retrieval attempt")
+	}
+	if !HasConfiguredEvidenceScope([]string{"kb-1"}, nil, 0, false, nil) {
+		t.Fatal("explicit knowledge base is a configured evidence scope")
+	}
+	if !HasConfiguredEvidenceScope(nil, []string{"doc-1"}, 0, false, nil) {
+		t.Fatal("explicit document is a configured evidence scope")
+	}
+	if !HasConfiguredEvidenceScope(nil, nil, 1, false, nil) {
+		t.Fatal("explicit tag scope is a configured evidence scope")
+	}
+	if !HasConfiguredEvidenceScope(nil, nil, 0, true, nil) {
+		t.Fatal("enabled web search is a configured evidence scope")
+	}
+}
+
+func TestHasConfiguredEvidenceScopeMirrorsAgentKBPolicy(t *testing.T) {
+	selected := &types.CustomAgent{Config: types.CustomAgentConfig{
+		KBSelectionMode: "selected",
+		KnowledgeBases:  []string{"kb-1"},
+	}}
+	if !HasConfiguredEvidenceScope(nil, nil, 0, false, selected) {
+		t.Fatal("selected agent knowledge base is a configured evidence scope")
+	}
+
+	builtinQuick := &types.CustomAgent{IsBuiltin: true, Config: types.CustomAgentConfig{
+		KBSelectionMode: "all",
+	}}
+	if HasConfiguredEvidenceScope(nil, nil, 0, false, builtinQuick) {
+		t.Fatal("implicit built-in scope without inspected evidence is a simple conversation")
+	}
+	if !HasConfiguredEvidenceScope([]string{"kb-1"}, nil, 0, false, builtinQuick) {
+		t.Fatal("explicit KB selection remains visible for a built-in entry agent")
+	}
+
+	onMention := &types.CustomAgent{Config: types.CustomAgentConfig{
+		KBSelectionMode:             "selected",
+		KnowledgeBases:              []string{"kb-1"},
+		RetrieveKBOnlyWhenMentioned: true,
+	}}
+	if HasConfiguredEvidenceScope(nil, nil, 0, false, onMention) {
+		t.Fatal("mention-only agent without a mention must remain a simple conversation")
+	}
+	if !HasConfiguredEvidenceScope([]string{"kb-1"}, nil, 0, false, onMention) {
+		t.Fatal("mention-only agent with an explicit KB has an evidence scope")
+	}
+
+	none := &types.CustomAgent{Config: types.CustomAgentConfig{KBSelectionMode: "none"}}
+	if HasConfiguredEvidenceScope([]string{"stale-kb"}, nil, 0, false, none) {
+		t.Fatal("KBSelectionMode=none ignores request knowledge targets")
+	}
+
+	data := &types.CustomAgent{Config: types.CustomAgentConfig{
+		KBSelectionMode: "none",
+		DBDataSources:   []string{"source-1"},
+	}}
+	if !HasConfiguredEvidenceScope(nil, nil, 0, false, data) {
+		t.Fatal("configured data source is an evidence scope")
+	}
+}
+
 func TestRetrievalToolClassificationIncludesDataInspectionTools(t *testing.T) {
 	for _, name := range []string{
 		"knowledge_search", "grep_chunks", "wiki_read_page", "web_fetch",
@@ -99,7 +162,10 @@ func TestRetrievalStatsForAgentStepsCountsUniqueDataSources(t *testing.T) {
 func TestAgentToolCallCountExcludesRetrievalAndFinalAnswer(t *testing.T) {
 	steps := types.AgentSteps{
 		{ToolCalls: []types.ToolCall{
-			{Name: "prepare_original_input_file"},
+			{Name: "prepare_original_input_file", Result: &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"agent_progress": true,
+				"display_type":   "agent_progress",
+			}}},
 			{Name: "grep_chunks"},
 			{Name: "wiki_search"},
 			{Name: "web_fetch"},
@@ -107,8 +173,20 @@ func TestAgentToolCallCountExcludesRetrievalAndFinalAnswer(t *testing.T) {
 			{Name: "final_answer"},
 		}},
 	}
-	if got := AgentToolCallCount(steps); got != 3 {
-		t.Fatalf("tool count = %d, want preparation + wiki catalog + Bash", got)
+	if got := AgentToolCallCount(steps); got != 2 {
+		t.Fatalf("tool count = %d, want wiki catalog + Bash", got)
+	}
+}
+
+func TestAgentToolCallCountExcludesSemanticProgressFromFutureAgents(t *testing.T) {
+	steps := types.AgentSteps{{ToolCalls: []types.ToolCall{
+		{Name: "future_agent_transport_step", Result: &types.ToolResult{Success: true, Data: map[string]interface{}{
+			"display_type": "agent_progress",
+		}}},
+		{Name: "mcp__example__real_tool"},
+	}}}
+	if got := AgentToolCallCount(steps); got != 1 {
+		t.Fatalf("tool count = %d, want only the real user-visible tool", got)
 	}
 }
 

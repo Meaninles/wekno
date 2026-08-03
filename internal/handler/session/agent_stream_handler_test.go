@@ -297,6 +297,33 @@ func TestHandleCompletePreservesZeroResultRetrievalAttempt(t *testing.T) {
 	}
 }
 
+func TestHandleCompleteHonorsAuthoritativePlainChatRetrievalStats(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	_ = handler.handleToolCall(context.Background(), event.Event{
+		Type: event.EventAgentToolCall,
+		Data: event.AgentToolCallData{ToolCallID: "fixed-pipeline-search", ToolName: "knowledge_search"},
+	})
+	if err := handler.handleComplete(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID:                   "assistant-1",
+			FinalAnswer:                 "42",
+			RetrievalStats:              types.RetrievalStats{},
+			RetrievalStatsAuthoritative: true,
+		},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+	if msg.RetrievalStats.Attempted || msg.RetrievalStats.Total != 0 {
+		t.Fatalf("retrieval stats = %+v, want authoritative plain-chat zero state", msg.RetrievalStats)
+	}
+}
+
 func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {
 	stream := &recordingStreamManager{}
 	handler := NewAgentStreamHandler(

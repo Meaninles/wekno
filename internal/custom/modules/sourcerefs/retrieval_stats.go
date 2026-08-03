@@ -2,6 +2,7 @@ package sourcerefs
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -319,6 +320,61 @@ func AgentStepsAttemptedRetrieval(steps types.AgentSteps) bool {
 	return false
 }
 
+// HasConfiguredEvidenceScope reports whether a normal (non-ReAct) answer had
+// any user- or agent-configured source it could meaningfully retrieve from.
+// The quick-answer pipeline always emits a knowledge_search progress step,
+// even for a plain model-only conversation. Treating that transport step as a
+// real retrieval would make simple conversations claim "未检索文档" despite
+// having no selected knowledge source. Keep the decision beside the shared
+// retrieval telemetry rules so Web, mobile, embed and future agent types all
+// consume the same persisted truth.
+func HasConfiguredEvidenceScope(
+	knowledgeBaseIDs, knowledgeIDs []string,
+	tagScopeCount int,
+	webSearchEnabled bool,
+	customAgent *types.CustomAgent,
+) bool {
+	if webSearchEnabled {
+		return true
+	}
+
+	// A custom agent configured with no KB capability ignores even stale or
+	// forged request targets; mirror the runtime resolver here.
+	if customAgent != nil && customAgent.Config.KBSelectionMode == "none" {
+		return len(customAgent.Config.DBDataSources) > 0
+	}
+
+	if len(knowledgeBaseIDs) > 0 || len(knowledgeIDs) > 0 || tagScopeCount > 0 {
+		return true
+	}
+	if customAgent == nil {
+		return false
+	}
+	if len(customAgent.Config.DBDataSources) > 0 {
+		return true
+	}
+	// Built-in entry agents are default chat surfaces, not an explicit source
+	// selection. Quick Answer may search its tenant-wide scope speculatively;
+	// when reranking supplies no evidence to the model, the completed turn is a
+	// simple model conversation and should show only its duration. Explicit
+	// KB/file/tag selections and actual inspected references are handled above
+	// and by RetrievalStatsFromReferences respectively.
+	if customAgent.IsBuiltin {
+		return false
+	}
+	if customAgent.Config.RetrieveKBOnlyWhenMentioned {
+		return false
+	}
+	switch customAgent.Config.KBSelectionMode {
+	case "all":
+		return true
+	case "selected", "":
+		return len(customAgent.Config.KnowledgeBases) > 0
+	default:
+		return len(customAgent.Config.KnowledgeBases) > 0
+	}
+}
+
 // AgentToolCallCount reports user-visible ReAct tool usage without counting
 // retrieval calls a second time. Retrieval breadth is already represented by
 // RetrievalStats, while file preparation, MCP, skills and other tools remain
@@ -327,11 +383,31 @@ func AgentToolCallCount(steps types.AgentSteps) int {
 	count := 0
 	for _, step := range steps {
 		for _, call := range step.ToolCalls {
-			if strings.EqualFold(strings.TrimSpace(call.Name), "final_answer") || IsRetrievalToolName(call.Name) {
+			if strings.EqualFold(strings.TrimSpace(call.Name), "final_answer") ||
+				IsRetrievalToolName(call.Name) || isInternalProgressToolCall(call) {
 				continue
 			}
 			count++
 		}
 	}
 	return count
+}
+
+// isInternalProgressToolCall keeps transport/progress bookkeeping out of the
+// user-visible tool count. General-agent sidecars use these synthetic calls to
+// report preparation progress, but the model did not choose or invoke them as
+// answer tools. Prefer the semantic result marker so future agent types can
+// reuse the rule without adding another name-specific exception.
+func isInternalProgressToolCall(call types.ToolCall) bool {
+	name := strings.ToLower(strings.TrimSpace(call.Name))
+	if name == "general_agent_progress" || strings.HasPrefix(name, "prepare_original_input_file") {
+		return true
+	}
+	if call.Result == nil || call.Result.Data == nil {
+		return false
+	}
+	if progress, ok := call.Result.Data["agent_progress"].(bool); ok && progress {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(call.Result.Data["display_type"])), "agent_progress")
 }

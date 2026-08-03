@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // imStreamDisplayState mirrors the display buffers in handleMessageStream for lifecycle tests.
@@ -54,7 +55,7 @@ func (s *imStreamDisplayState) parts() IMStreamParts {
 }
 
 func (s *imStreamDisplayState) intermediate() string {
-	return FormatIMIntermediateFromParts(s.parts(), s.useAgent && !s.agentDone)
+	return FormatIMUserVisibleIntermediate(s.parts(), s.useAgent && !s.agentDone, 10*time.Second)
 }
 
 func (s *imStreamDisplayState) final() string {
@@ -81,11 +82,11 @@ func TestIMStreamLifecycle_agentToolRetract(t *testing.T) {
 		step.Pending = true
 	})
 	duringTools := state.intermediate()
-	if !strings.Contains(duringTools, "思考过程") {
-		t.Fatalf("after retract should show think block, got: %q", duringTools)
+	if duringTools != "正在处理，请稍候 · 已用 10 秒" {
+		t.Fatalf("after retract should return to one timed waiting status, got: %q", duringTools)
 	}
-	if !strings.Contains(duringTools, "好的，让我先搜索知识库") {
-		t.Fatalf("retracted preamble missing, got: %q", duringTools)
+	if strings.Contains(duringTools, "搜索知识库") || strings.Contains(duringTools, "grep_chunks") {
+		t.Fatalf("internal process leaked, got: %q", duringTools)
 	}
 
 	upsertIMToolStep(&state.agentToolSteps, state.agentToolIdx, "tool-1", func(step *IMToolStep) {

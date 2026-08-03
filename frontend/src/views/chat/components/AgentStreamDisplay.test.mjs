@@ -15,12 +15,13 @@ test('terminal error events stop agent activity and render visibly', () => {
   assert.match(source, /terminalError/)
 })
 
-test('agent progress messages are rendered as visible tool titles', () => {
-  assert.match(source, /event\.agent_progress_history/)
-  assert.match(source, /getAgentProgressMessage/)
-  assert.match(source, /event\?\.agent_progress\?\.message/)
-  assert.match(source, /event\?\.tool_data\?\.agent_progress_message/)
-  assert.match(source, /if \(agentProgressMessage\)/)
+test('ReAct and Claude SDK live telemetry is replaced by one timed waiting projection', () => {
+  assert.match(source, /RunWaitingIndicator/)
+  assert.match(source, /usesTimedRunWaiting/)
+  assert.match(source, /usesTimedWaitingProjection\.value/)
+  assert.match(source, /event\.type === 'tool_approval_required'/)
+  assert.match(source, /event\.type === 'mcp_oauth_required'/)
+  assert.match(source, /event\?\.type === 'answer' && event\.superseded !== true/)
 })
 
 test('rag mode still renders non-rag tool calls while delegating rag pipeline rows', () => {
@@ -67,8 +68,8 @@ test('zero-result knowledge retrieval renders as neutral completion', () => {
   assert.match(source, /getSearchResultsSummary\(event\)/)
 })
 
-test('Claude SDK live process output uses a bounded projection without rebuilding history', () => {
-  assert.match(source, /LiveProcessPreview/)
+test('Claude SDK live output keeps only interactive events and the active answer', () => {
+  assert.doesNotMatch(source, /<LiveProcessPreview/)
   assert.match(source, /usesClaudeSDKTerminalDelivery/)
   assert.match(source, /liveProjection\.value\.interactiveEvents/)
   assert.match(
@@ -76,4 +77,10 @@ test('Claude SDK live process output uses a bounded projection without rebuildin
     /if \(\s*usesClaudeSDKTerminalDelivery\.value[\s\S]*!isConversationDone\.value[\s\S]*liveProjection\.value[\s\S]*\) \{[\s\S]*return interactive;/,
   )
   assert.match(source, /const result = buildFullEventList\(stream\);/)
+})
+
+test('completed agent summary is static and cannot expose the raw tool tree', () => {
+  assert.match(source, /class="action-card tree-root is-static"/)
+  assert.doesNotMatch(source, /class="action-card tree-root" @click="toggleIntermediateSteps"/)
+  assert.doesNotMatch(source, /showIntermediateSteps \? 'chevron-down' : 'chevron-right'/)
 })

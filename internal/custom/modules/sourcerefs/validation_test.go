@@ -43,6 +43,21 @@ func TestFilterAnswerCitationsDoesNotInterpretCodeExamples(t *testing.T) {
 	}
 }
 
+func TestFilterAnswerCitationsReportsEvidenceAvailableButUncited(t *testing.T) {
+	filtered, refs, report := FilterAnswerCitations("基于证据生成的正文。", citationTestRefs())
+	if filtered != "基于证据生成的正文。" || len(refs) != 0 {
+		t.Fatalf("uncited answer should remain readable without invented references: filtered=%q refs=%#v", filtered, refs)
+	}
+	if report.AvailableCount != 2 || !report.EvidenceAvailableUncited {
+		t.Fatalf("missing all-citations observability: %#v", report)
+	}
+
+	_, _, citedReport := FilterAnswerCitations("甲事实。<src id=\"S1\" />", citationTestRefs())
+	if citedReport.AvailableCount != 2 || citedReport.EvidenceAvailableUncited {
+		t.Fatalf("valid citation should clear the omission signal: %#v", citedReport)
+	}
+}
+
 func TestFilterAnswerCitationsDropsMalformedOpeningClosingAndIncompleteTags(t *testing.T) {
 	answer := `甲。<src id="S1"></src>乙。</doc><source id="S1" /><document source_id="S2" />` +
 		`无空格。<src id="S1"/> 多余空格。<src  id="S1" />丙。<src id="S1"`

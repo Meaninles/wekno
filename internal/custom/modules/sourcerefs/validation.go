@@ -19,10 +19,12 @@ var (
 // CitationValidationReport records deterministic protocol filtering. It is
 // deliberately local-only: callers must not trigger another model request.
 type CitationValidationReport struct {
-	CitedIDs       []string `json:"cited_ids,omitempty"`
-	UnknownIDs     []string `json:"unknown_ids,omitempty"`
-	ForbiddenTags  int      `json:"forbidden_tags,omitempty"`
-	IncompleteTags int      `json:"incomplete_tags,omitempty"`
+	CitedIDs                 []string `json:"cited_ids,omitempty"`
+	UnknownIDs               []string `json:"unknown_ids,omitempty"`
+	AvailableCount           int      `json:"available_count,omitempty"`
+	EvidenceAvailableUncited bool     `json:"evidence_available_uncited,omitempty"`
+	ForbiddenTags            int      `json:"forbidden_tags,omitempty"`
+	IncompleteTags           int      `json:"incomplete_tags,omitempty"`
 }
 
 // FilterAnswerCitations keeps only canonical, registry-backed <src id="Sx" />
@@ -43,7 +45,7 @@ func FilterAnswerCitations(
 		byID[id] = append(byID[id], ref)
 	}
 
-	var report CitationValidationReport
+	report := CitationValidationReport{AvailableCount: len(byID)}
 	seenCited := make(map[string]bool)
 	seenUnknown := make(map[string]bool)
 	filtered := transformOutsideMarkdownCode(answer, func(segment string) string {
@@ -91,6 +93,7 @@ func FilterAnswerCitations(
 	for _, id := range report.CitedIDs {
 		citedRefs = append(citedRefs, byID[id]...)
 	}
+	report.EvidenceAvailableUncited = report.AvailableCount > 0 && len(report.CitedIDs) == 0 && strings.TrimSpace(filtered) != ""
 	return filtered, citedRefs, report
 }
 

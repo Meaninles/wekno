@@ -241,6 +241,7 @@ def mcp_tool_result(result: dict[str, Any]) -> dict[str, Any]:
             content.append(block)
 
     source_references = result.get("source_references") or []
+    citation_output_contract = str(result.get("citation_output_contract") or "").strip()
     raw_data = result.get("data") or {}
     annotated_output = _annotate_evidence_output(str(result.get("output") or ""), source_references)
     if isinstance(raw_data, dict) and str(raw_data.get("display_type") or "") == "structured_analysis_result":
@@ -259,6 +260,12 @@ def mcp_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     }
     if error:
         summary["error"] = error
+    # Keep the run-scoped terminal reminder as the final text field. Go emits
+    # it after the first citable document/Wiki/web result and keeps emitting it
+    # for later tools, so every Claude SDK agent type sees the same citation
+    # requirement immediately before it decides to finish the run.
+    if citation_output_contract:
+        summary["citation_output_contract"] = citation_output_contract
 
     # Put text first so non-vision models still receive the full structured
     # result, then append actual image blocks for clients that can consume them.

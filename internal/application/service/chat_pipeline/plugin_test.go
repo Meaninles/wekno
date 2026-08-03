@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -109,10 +110,16 @@ func TestIntoChatMessage_WithMergeResults(t *testing.T) {
 		`[AVAILABLE_CITATIONS]`,
 		`cite_exactly=<src id="S1" />`,
 		`[EVIDENCE id=S1 type=document_fragment`,
+		`citation_handle_for_this_evidence: <src id="S1" />`,
+		`[CITATION_USE]`,
+		`The handle must appear in the final user-visible answer`,
 	} {
 		if !contains(cm.UserContent, expected) {
 			t.Errorf("UserContent should contain %q, got: %s", expected, cm.UserContent)
 		}
+	}
+	if !strings.HasSuffix(cm.UserContent, sourcerefs.TerminalCitationInstruction()) {
+		t.Errorf("terminal citation instruction should be the final model-visible block, got: %s", cm.UserContent)
 	}
 	for _, forbidden := range []string{`<source `, `<context `, `<document`, `source_id=`, `chunk_id=`} {
 		if contains(cm.UserContent, forbidden) {

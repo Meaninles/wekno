@@ -157,13 +157,18 @@ type AgentCompleteData struct {
 	// KnowledgeRefsAuthoritative distinguishes an intentional empty cited set
 	// from an older producer that omitted the field. Completion handlers must
 	// replace append-only interim references when this flag is true.
-	KnowledgeRefsAuthoritative bool                   `json:"knowledge_refs_authoritative,omitempty"`
-	AgentSteps                 interface{}            `json:"agent_steps,omitempty"` // []types.AgentStep - detailed execution steps
-	TotalDurationMs            int64                  `json:"total_duration_ms"`
-	RetrievalStats             types.RetrievalStats   `json:"retrieval_stats"`
-	MessageID                  string                 `json:"message_id,omitempty"` // Assistant message ID
-	RequestID                  string                 `json:"request_id,omitempty"`
-	Extra                      map[string]interface{} `json:"extra,omitempty"`
+	KnowledgeRefsAuthoritative bool                 `json:"knowledge_refs_authoritative,omitempty"`
+	AgentSteps                 interface{}          `json:"agent_steps,omitempty"` // []types.AgentStep - detailed execution steps
+	TotalDurationMs            int64                `json:"total_duration_ms"`
+	RetrievalStats             types.RetrievalStats `json:"retrieval_stats"`
+	// RetrievalStatsAuthoritative means the producer already classified
+	// whether this run had a meaningful configured retrieval scope. This is
+	// needed by normal QA because its fixed progress pipeline emits an empty
+	// knowledge_search step even for a plain model-only conversation.
+	RetrievalStatsAuthoritative bool                   `json:"retrieval_stats_authoritative,omitempty"`
+	MessageID                   string                 `json:"message_id,omitempty"` // Assistant message ID
+	RequestID                   string                 `json:"request_id,omitempty"`
+	Extra                       map[string]interface{} `json:"extra,omitempty"`
 }
 
 // === Streaming Event Data Structures ===

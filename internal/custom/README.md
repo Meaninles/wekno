@@ -34,7 +34,7 @@
 |---|---|
 | Agent | `generalagent`、`builtinagentdefaults`、`kbmanager`、`chatretrieval` |
 | 数据和技能 | `dbanalytics`、`skillhub`、`scheduledchat` |
-| 身份与治理 | `iam`、`authsecurity`、`admin`、`configcenter`、`connectiontls` |
+| 身份与治理 | `iam`、`authsecurity`、`admin`、`configcenter`、`wikiaccess`、`connectiontls` |
 | 协作 | `chatshare`、`sessionstate`、`answerfeedback`、`sourcerefs`、`imoutput`、`impreview` |
 | 安全/稳定性 | `fileguard`、`imageguard`、`logprivacy`、`taskretry`、`workretry`、`processownership`、`vlmguard` |
 | 内容与缓存 | `contentcache`、`knowledgeaux`、`knowledgesearch`、`textencoding` |

@@ -678,10 +678,13 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		// Count inspected evidence before the final citation filter narrows the
 		// stored reference list to sources actually cited in the answer.
 		retrievalEvidence := mergeCitationReferences(h.knowledgeRefs, data.KnowledgeRefs)
-		retrievalAttempted := h.retrievalTried || data.RetrievalStats.Attempted
-		derivedStats := sourcerefs.RetrievalStatsFromReferences(retrievalEvidence, retrievalAttempted)
-		if data.RetrievalStats.Total > derivedStats.Total {
-			derivedStats = sourcerefs.NormalizeRetrievalStats(data.RetrievalStats)
+		derivedStats := sourcerefs.NormalizeRetrievalStats(data.RetrievalStats)
+		if !data.RetrievalStatsAuthoritative {
+			retrievalAttempted := h.retrievalTried || data.RetrievalStats.Attempted
+			derivedStats = sourcerefs.RetrievalStatsFromReferences(retrievalEvidence, retrievalAttempted)
+			if data.RetrievalStats.Total > derivedStats.Total {
+				derivedStats = sourcerefs.NormalizeRetrievalStats(data.RetrievalStats)
+			}
 		}
 		h.assistantMessage.RetrievalStats = derivedStats
 
@@ -716,10 +719,12 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		case types.AgentSteps:
 			completionSteps = steps
 		}
-		h.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsForAgentSteps(
-			h.assistantMessage.RetrievalStats,
-			completionSteps,
-		)
+		if !data.RetrievalStatsAuthoritative {
+			h.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsForAgentSteps(
+				h.assistantMessage.RetrievalStats,
+				completionSteps,
+			)
+		}
 		h.assistantMessage.AgentToolCount = sourcerefs.AgentToolCallCount(completionSteps)
 		if data.AgentSteps != nil {
 			h.assistantMessage.AgentSteps = types.AgentSteps(

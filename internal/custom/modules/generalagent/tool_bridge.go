@@ -206,13 +206,18 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 	if err != nil {
 		logger.Warnf(run.ctx, "general-agent tool %s failed: %v", req.ToolName, err)
 	}
+	citationOutputContract := ""
+	if run.hasCitableEvidence() {
+		citationOutputContract = sourcerefs.TerminalCitationInstruction()
+	}
 	return &ToolCallResponse{
-		Success:          result.Success,
-		Output:           result.Output,
-		Error:            result.Error,
-		Data:             result.Data,
-		Images:           result.Images,
-		SourceReferences: sourceReferences,
+		Success:                result.Success,
+		Output:                 result.Output,
+		Error:                  result.Error,
+		Data:                   result.Data,
+		Images:                 result.Images,
+		SourceReferences:       sourceReferences,
+		CitationOutputContract: citationOutputContract,
 	}, nil
 }
 
@@ -259,6 +264,12 @@ func (r *activeRun) snapshotSourceReferences() []*types.SearchResult {
 		return nil
 	}
 	return r.sources.SnapshotReferences()
+}
+
+func (r *activeRun) hasCitableEvidence() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.refSeen) > 0
 }
 
 func (r *activeRun) toolTimeoutFor(toolName string) time.Duration {

@@ -231,12 +231,48 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("[/AVAILABLE_CITATIONS]")
-	b.WriteString("\n")
-	b.WriteString(citationUseInstruction)
 	return b.String()
 }
 
-const citationUseInstruction = "[CITATION_USE] In the final answer, copy each matching cite_exactly or citation_handle_for_this_evidence verbatim immediately after the sentence or paragraph supported by that evidence. [/CITATION_USE]"
+const citationUseInstruction = `[CITATION_USE]
+For each factual sentence or compact group of adjacent claims based on current-turn evidence, copy the matching citation_handle_for_this_evidence verbatim immediately after the supported sentence or paragraph. When one evidence item supports a whole list, cite once after the final list item rather than after the introductory text. Use the minimum sufficient handles: if overlapping evidence items state the same fact, choose the single most direct one instead of citing them all. The handle must appear in the final user-visible answer. Do not repeat a handle unnecessarily and do not attach one to unsupported text.
+[/CITATION_USE]`
+
+// TerminalCitationInstruction returns the single shared, positive final-output
+// reminder used by every model runtime. Keeping it here prevents native RAG,
+// ReAct and sidecar agents from drifting into different citation protocols.
+// The reminder is generation-only: it never validates, rewrites or regenerates
+// an answer.
+func TerminalCitationInstruction() string {
+	return citationUseInstruction
+}
+
+// HasCitableReferences reports whether refs contain at least one of the three
+// user-visible citation types: document fragment, Wiki page or web page. Data
+// sources remain retrieval telemetry and never activate the citation protocol.
+func HasCitableReferences(refs []*types.SearchResult) bool {
+	for _, ref := range refs {
+		if IsSupportedCitationReference(ref) {
+			return true
+		}
+	}
+	return false
+}
+
+// PlaceTerminalCitationInstruction keeps the current-turn citation reminder at
+// the end of the model-visible content, where it remains salient after long
+// evidence blocks. It is idempotent and adds nothing to no-evidence turns.
+func PlaceTerminalCitationInstruction(content string, refs []*types.SearchResult) string {
+	if !HasCitableReferences(refs) {
+		return content
+	}
+	withoutExisting := strings.ReplaceAll(content, citationUseInstruction, "")
+	withoutExisting = strings.TrimSpace(withoutExisting)
+	if withoutExisting == "" {
+		return citationUseInstruction
+	}
+	return withoutExisting + "\n\n" + citationUseInstruction
+}
 
 // RenderEvidenceBlock associates one claim-bearing snapshot with its citation
 // ID without exposing alternate XML tag shapes to the model.
@@ -270,7 +306,9 @@ func RenderEvidenceBlock(ref *types.SearchResult, content string, annotations ma
 		}
 		fields = append(fields, promptField(key)+"="+value)
 	}
-	return "[EVIDENCE " + strings.Join(fields, " ") + "]\n" + strings.TrimSpace(content) + "\n[/EVIDENCE]"
+	return "[EVIDENCE " + strings.Join(fields, " ") + "]\n" +
+		"citation_handle_for_this_evidence: " + canonicalCitationTag(id) + "\n" +
+		strings.TrimSpace(content) + "\n[/EVIDENCE]"
 }
 
 const generationContractMarker = "[WEKNORA_CITATION_OUTPUT]"

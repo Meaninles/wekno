@@ -962,7 +962,14 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				// handler runs, so it must set the durable fields here.
 				streamCtx.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-					sourcerefs.AgentStepsAttemptedRetrieval(streamCtx.assistantMessage.AgentSteps),
+					sourcerefs.AgentStepsAttemptedRetrieval(streamCtx.assistantMessage.AgentSteps) &&
+						sourcerefs.HasConfiguredEvidenceScope(
+							reqCtx.knowledgeBaseIDs,
+							reqCtx.knowledgeIDs,
+							len(reqCtx.tagScopes),
+							reqCtx.webSearchEnabled,
+							reqCtx.customAgent,
+						),
 				)
 				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
 				filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
@@ -975,8 +982,22 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 						citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
 					)
 				}
+				if citationReport.EvidenceAvailableUncited {
+					logger.Warnf(streamCtx.asyncCtx,
+						"Knowledge QA final answer omitted all current-turn citation handles: available=%d",
+						citationReport.AvailableCount,
+					)
+				}
 				streamCtx.assistantMessage.Content = filteredAnswer
 				streamCtx.assistantMessage.KnowledgeReferences = types.References(citedRefs)
+				streamCtx.assistantMessage.RetrievalStats.SimpleConversation =
+					len(citedRefs) == 0 && !sourcerefs.HasConfiguredEvidenceScope(
+						reqCtx.knowledgeBaseIDs,
+						reqCtx.knowledgeIDs,
+						len(reqCtx.tagScopes),
+						reqCtx.webSearchEnabled,
+						reqCtx.customAgent,
+					)
 
 				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
 				updateCtx := context.WithValue(streamCtx.asyncCtx, types.TenantIDContextKey, reqCtx.session.TenantID)
@@ -987,13 +1008,14 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					Type:      event.EventAgentComplete,
 					SessionID: sessionID,
 					Data: event.AgentCompleteData{
-						FinalAnswer:                streamCtx.assistantMessage.Content,
-						KnowledgeRefs:              citedRefs,
-						KnowledgeRefsAuthoritative: true,
-						MessageID:                  streamCtx.assistantMessage.ID,
-						RequestID:                  reqCtx.requestID,
-						TotalDurationMs:            streamCtx.assistantMessage.AgentDurationMs,
-						RetrievalStats:             streamCtx.assistantMessage.RetrievalStats,
+						FinalAnswer:                 streamCtx.assistantMessage.Content,
+						KnowledgeRefs:               citedRefs,
+						KnowledgeRefsAuthoritative:  true,
+						MessageID:                   streamCtx.assistantMessage.ID,
+						RequestID:                   reqCtx.requestID,
+						TotalDurationMs:             streamCtx.assistantMessage.AgentDurationMs,
+						RetrievalStats:              streamCtx.assistantMessage.RetrievalStats,
+						RetrievalStatsAuthoritative: true,
 					},
 				})
 			}

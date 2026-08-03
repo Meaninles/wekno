@@ -2182,6 +2182,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	// A hard pipeline deadline would kill multi-round agent reasoning prematurely.
 	qaCtx, qaCancel := context.WithCancel(ctx)
 	defer qaCancel()
+	runStartedAt := time.Now()
 
 	useAgent := customAgent != nil && customAgent.IsAgentMode()
 	eventBus := event.NewEventBus()
@@ -2493,13 +2494,14 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	ticker := time.NewTicker(streamFlushInterval)
 	defer ticker.Stop()
 
+	lastStreamDisplay := ""
 	flush := func() {
 		bufMu.Lock()
 		parts := getStreamParts()
 		agentRunning := useAgent && !agentDone
 		bufMu.Unlock()
 
-		displaySource := FormatIMIntermediateFromParts(parts, agentRunning)
+		displaySource := FormatIMUserVisibleIntermediate(parts, agentRunning, time.Since(runStartedAt))
 		if displaySource == "" {
 			return
 		}
@@ -2509,10 +2511,20 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		}
 
 		display := cleanIMContent(ctx, displaySource, tenant, s.defaultFileSvc)
+		if display == "" || display == lastStreamDisplay {
+			return
+		}
 		if err := streamer.UpdateStreamContent(ctx, msg, streamID, display); err != nil {
 			logger.Warnf(ctx, "[IM] UpdateStreamContent failed: %v", err)
+			return
 		}
+		lastStreamDisplay = display
 	}
+
+	// ReAct and Claude SDK runs receive one immediate, stable waiting frame.
+	// Quick QA has no synthetic timer and therefore remains silent until its
+	// existing retrieval/answer stream produces real content.
+	flush()
 
 loop:
 	for {

@@ -165,7 +165,6 @@ type CustomAgentConfig struct {
 	Thinking *bool `yaml:"thinking" json:"thinking"`
 	// Whether the general-agent sidecar may create downloadable artifacts.
 	EnableArtifacts bool `yaml:"enable_artifacts" json:"enable_artifacts"`
-
 	// ===== Agent Mode Settings =====
 	// Maximum iterations for ReAct loop (only for agent type)
 	MaxIterations int `yaml:"max_iterations" json:"max_iterations"`

@@ -323,10 +323,14 @@ const handleSourceCitationClick = (e) => {
     if (type === 'knowledge') {
         const kbId = sourceEl.getAttribute('data-kb-id') || '';
         const knowledgeId = sourceEl.getAttribute('data-knowledge-id') || '';
+        const chunkId = sourceEl.getAttribute('data-chunk-id') || '';
         if (kbId) {
             openRouteInNewTab({
                 path: `/platform/knowledge-bases/${kbId}`,
-                query: knowledgeId ? { knowledge_id: knowledgeId } : {},
+                query: knowledgeId ? {
+                    knowledge_id: knowledgeId,
+                    chunk_id: chunkId || undefined,
+                } : {},
             });
         }
     }

@@ -6,6 +6,7 @@ import {
   formatCompletedRunDuration,
   isSimpleCompletedConversation,
   isEvidenceRetrievalToolName,
+  retrievalDisplayCount,
   retrievalStatsFromMessage,
   usesDataSourceRetrievalUnit,
 } from './retrievalSummary.ts'
@@ -25,6 +26,7 @@ test('retrieval stats are read from the backend authority without reference infe
     unit: 'documents',
   })
   assert.equal(usesDataSourceRetrievalUnit(stats), false)
+  assert.equal(retrievalDisplayCount(stats), 4)
 })
 
 test('structured analysis uses the data-source retrieval unit', () => {
@@ -32,6 +34,15 @@ test('structured analysis uses the data-source retrieval unit', () => {
     retrieval_stats: { attempted: true, documents: 0, wiki: 0, web: 0, data_sources: 2, total: 2 },
   })
   assert.equal(usesDataSourceRetrievalUnit(stats), true)
+  assert.equal(retrievalDisplayCount(stats), 2)
+})
+
+test('mixed telemetry never labels document/wiki/web counts as data sources', () => {
+  const stats = retrievalStatsFromMessage({
+    retrieval_stats: { attempted: true, documents: 2, wiki: 1, web: 1, data_sources: 2, total: 6 },
+  })
+  assert.equal(usesDataSourceRetrievalUnit(stats), true)
+  assert.equal(retrievalDisplayCount(stats), 2)
 })
 
 test('backend unit preserves data-source wording for zero results', () => {
@@ -50,7 +61,10 @@ test('backend unit preserves data-source wording for zero results', () => {
 })
 
 test('retrieval tool classification covers native and Claude SDK namespaced tools', () => {
-  for (const name of ['knowledge_search', 'wiki_read_page', 'web_fetch', 'db_query', 'mcp__knowledge_search']) {
+  for (const name of [
+    'knowledge_search', 'wiki_read_page', 'web_fetch', 'db_catalog', 'db_schema',
+    'table_schema', 'db_query', 'mcp__knowledge_search',
+  ]) {
     assert.equal(isEvidenceRetrievalToolName(name), true, name)
   }
   for (const name of ['wiki_search', 'get_document_info', 'thinking', 'mcp__create_ticket']) {

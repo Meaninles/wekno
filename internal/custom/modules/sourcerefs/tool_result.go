@@ -18,7 +18,13 @@ func RegisterToolResult(
 	if registry == nil || result == nil {
 		return nil, nil
 	}
-	refs := ExtractFromToolResult(toolName, result)
+	extracted := ExtractFromToolResult(toolName, result)
+	refs := make([]*types.SearchResult, 0, len(extracted))
+	for _, ref := range extracted {
+		if IsSupportedCitationReference(ref) {
+			refs = append(refs, ref)
+		}
+	}
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -49,13 +55,22 @@ func AttachToolResultSources(result *types.ToolResult, sources []*CitationSource
 func AppendCitationCatalog(output string, refs []*types.SearchResult) string {
 	annotated, unresolved := AttachCitationHandlesToEvidence(output, refs)
 	catalog := RenderCitationCatalog(unresolved)
-	if catalog == "" || strings.Contains(output, "[AVAILABLE_CITATIONS]") {
+	if strings.Contains(output, "[CITATION_USE]") {
 		return annotated
 	}
-	if strings.TrimSpace(annotated) == "" {
-		return catalog
+	if catalog != "" && !strings.Contains(output, "[AVAILABLE_CITATIONS]") {
+		if strings.TrimSpace(annotated) == "" {
+			return catalog
+		}
+		return strings.TrimRight(annotated, "\r\n") + "\n\n" + catalog
 	}
-	return strings.TrimRight(annotated, "\r\n") + "\n\n" + catalog
+	if strings.TrimSpace(annotated) == "" {
+		return citationUseInstruction
+	}
+	if len(refs) == 0 {
+		return annotated
+	}
+	return strings.TrimRight(annotated, "\r\n") + "\n\n" + citationUseInstruction
 }
 
 // AttachCitationHandlesToEvidence places each run-scoped handle immediately

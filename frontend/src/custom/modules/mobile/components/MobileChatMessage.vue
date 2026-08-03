@@ -37,6 +37,7 @@ import {
   agentToolCountFromMessage,
   formatCompletedRunDuration,
   isSimpleCompletedConversation,
+  retrievalDisplayCount,
   retrievalStatsFromMessage,
   usesDataSourceRetrievalUnit,
 } from "@/custom/modules/sourcerefs/retrievalSummary";
@@ -360,8 +361,9 @@ const completedAgentSummary = computed(() => {
     if (rounds > 0) parts.push(`思考 ${rounds} 轮`);
     if (stats) {
       const dataSourceUnit = usesDataSourceRetrievalUnit(stats);
-      parts.push(stats.total > 0
-        ? (dataSourceUnit ? `已检索 ${stats.total} 个数据源` : `已检索 ${stats.total} 份文档`)
+      const count = retrievalDisplayCount(stats);
+      parts.push(count > 0
+        ? (dataSourceUnit ? `已检索 ${count} 个数据源` : `已检索 ${count} 份文档`)
         : (dataSourceUnit ? "未检索数据源" : "未检索文档"));
     }
 	parts.push(tools > 0 ? `调用 ${tools} 次工具` : "未调用工具");
@@ -370,8 +372,9 @@ const completedAgentSummary = computed(() => {
   }
   if (stats) {
     const dataSourceUnit = usesDataSourceRetrievalUnit(stats);
-    const inspected = stats.total > 0
-      ? (dataSourceUnit ? `已检索 ${stats.total} 个数据源` : `已检索 ${stats.total} 份文档`)
+    const count = retrievalDisplayCount(stats);
+    const inspected = count > 0
+      ? (dataSourceUnit ? `已检索 ${count} 个数据源` : `已检索 ${count} 份文档`)
       : (dataSourceUnit ? "未检索数据源" : "未检索文档");
     return `检索完成，${inspected}${duration ? `，耗时 ${duration}` : ""}`;
   }

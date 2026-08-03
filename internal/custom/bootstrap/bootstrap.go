@@ -31,6 +31,8 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
+	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
+	"github.com/Tencent/WeKnora/internal/custom/modules/impreview"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
 	"github.com/Tencent/WeKnora/internal/custom/modules/maintenance"
@@ -47,6 +49,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/handler"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
+	imPkg "github.com/Tencent/WeKnora/internal/im"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/middleware"
@@ -73,6 +76,8 @@ type Handlers struct {
 	DerivativeControl    *derivativecontrol.Handler
 	ModelAdmission       *modeladmission.Handler
 	CapacityControl      *capacitycontrol.Handler
+	IMPreview            *impreview.Handler
+	IMReference          *imoutput.ReferenceHandler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -85,6 +90,7 @@ type Handlers struct {
 	kbManagerService            *kbmanager.Service
 	knowledgeFolderService      *knowledgefolders.Service
 	mobileDocumentService       *mobiledocument.Service
+	imReferenceService          *imoutput.ReferenceService
 	derivativeControlService    *derivativecontrol.Service
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
@@ -95,6 +101,7 @@ type Handlers struct {
 
 func NewHandlers(
 	cfg *config.Config,
+	imService *imPkg.Service,
 	db *gorm.DB,
 	duckdb *sql.DB,
 	redisClient *redis.Client,
@@ -156,6 +163,12 @@ func NewHandlers(
 	mobileDocumentService := mobiledocument.NewService(
 		knowledgeService,
 		mobiledocument.LoadConfigFromEnv(),
+	)
+	imReferenceService := imoutput.NewReferenceService(
+		db,
+		knowledgeService,
+		imoutput.NewReferenceSignerFromEnv(),
+		cfg.FrontendBaseURL,
 	)
 	iamService := iam.NewService(db, userService)
 	iamPublicOrigin, err := iam.LoadPublicOrigin(cfg.FrontendBaseURL)
@@ -422,6 +435,8 @@ func NewHandlers(
 		DerivativeControl:           derivativecontrol.NewHandler(derivativeControlService, modelService),
 		ModelAdmission:              modeladmission.NewHandler(admissionManager),
 		CapacityControl:             capacitycontrol.NewHandler(capacityControlService),
+		IMPreview:                   impreview.NewHandler(imService, sessionService, messageService, customAgentService, tenantService),
+		IMReference:                 imoutput.NewReferenceHandler(imReferenceService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -433,6 +448,7 @@ func NewHandlers(
 		kbManagerService:            kbManagerService,
 		knowledgeFolderService:      knowledgeFolderService,
 		mobileDocumentService:       mobileDocumentService,
+		imReferenceService:          imReferenceService,
 		derivativeControlService:    derivativeControlService,
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
@@ -588,14 +604,25 @@ func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
 }
 
 // RegisterPublicRoutes registers stateless capability URLs before the global
-// authentication middleware. The authenticated issuer route below performs
-// the tenant and knowledge-base permission checks.
+// authentication middleware. IM capabilities are issued only at the final
+// outbound boundary from references already bound to an authenticated message.
 func RegisterPublicRoutes(r *gin.Engine, handlers *Handlers) {
-	if r == nil || handlers == nil || handlers.MobileDocument == nil {
+	if r == nil || handlers == nil {
 		return
 	}
-	r.GET("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
-	r.HEAD("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+	if handlers.MobileDocument != nil {
+		r.GET("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+		r.HEAD("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+	}
+	// IM citations use a dedicated capability boundary registered before the
+	// normal Web authentication middleware. No knowledge-base or Wiki API is
+	// made public by these exact routes.
+	if handlers.IMReference != nil {
+		r.GET(imoutput.ReferenceRedirectPath, handlers.IMReference.Redirect)
+		r.GET(imoutput.ReferenceDataPath, handlers.IMReference.Data)
+		r.GET(imoutput.ReferenceOriginalPath, handlers.IMReference.Original)
+		r.HEAD(imoutput.ReferenceOriginalPath, handlers.IMReference.Original)
+	}
 }
 
 func RegisterRoutes(
@@ -723,6 +750,13 @@ func RegisterRoutes(
 		builtinAgentDefaultRoutes := v1.Group("/custom/builtin-agent-defaults", ownedAgentOrAdmin)
 		{
 			builtinAgentDefaultRoutes.POST("/agents/:id/reset", handlers.BuiltinAgentDefaults.Reset)
+		}
+	}
+
+	if handlers.IMPreview != nil && viewer != nil {
+		imOutputRoutes := v1.Group("/custom/im-output", viewer)
+		{
+			imOutputRoutes.POST("/preview", handlers.IMPreview.Preview)
 		}
 	}
 

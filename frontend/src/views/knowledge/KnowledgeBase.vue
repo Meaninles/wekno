@@ -1545,18 +1545,23 @@ const pendingKnowledgeId = ref<string | null>(
   (route.query.knowledge_id as string) || null
 );
 
+// Citation links keep the exact fragment coordinate instead of degrading to a
+// whole-document route. DocContent renders this chunk in a highlighted card.
+const citationFocusChunkId = computed(() => {
+  const routedKnowledgeId = typeof route.query.knowledge_id === 'string' ? route.query.knowledge_id : '';
+  const routedChunkId = typeof route.query.chunk_id === 'string' ? route.query.chunk_id : '';
+  return routedKnowledgeId && routedKnowledgeId === details.id ? routedChunkId : '';
+});
+
 const tryAutoOpenDocument = () => {
-  if (!pendingKnowledgeId.value || !cardList.value?.length) return;
+  if (!pendingKnowledgeId.value) return;
   const targetId = pendingKnowledgeId.value;
   pendingKnowledgeId.value = null;
   const card = cardList.value.find((c: KnowledgeCard) => c.id === targetId);
-  if (card) {
-    nextTick(() => openCardDetails(card));
-  } else {
-    nextTick(() => {
-      openCardDetails({ id: targetId } as KnowledgeCard);
-    });
-  }
+  // A cited document may live inside a nested folder and therefore be absent
+  // from the currently loaded root page. The detail API is ID-addressable, so
+  // the deep link must not depend on the visible list containing the document.
+  nextTick(() => openCardDetails(card || ({ id: targetId } as KnowledgeCard)));
 };
 
 // React to later ?knowledge_id= changes on the same KB route (no remount).
@@ -1585,6 +1590,7 @@ const handleOpenKnowledgeEvent = (e: Event) => {
 onMounted(() => {
   loadKnowledgeList();
   editorResources.ensureParserEngines();
+  tryAutoOpenDocument();
 
   window.addEventListener('knowledgeFileUploaded', handleFileUploaded as EventListener);
   window.addEventListener('openURLImportDialog', handleOpenURLImportDialog as EventListener);
@@ -1606,7 +1612,7 @@ watch(() => cardList.value, (newValue) => {
   docListLoading.value = false;
 
   // Auto-open document if navigated with ?knowledge_id=xxx
-  if (pendingKnowledgeId.value && newValue?.length) {
+  if (pendingKnowledgeId.value) {
     tryAutoOpenDocument();
   }
 
@@ -3532,6 +3538,7 @@ async function createNewSession(value: string): Promise<void> {
 
       <!-- DocContent drawer (shared by documents tab and wiki source refs) -->
       <DocContent ref="docContentRef" :visible="isCardDetails" :details="details" :canEditKB="canEdit"
+        :focusChunkId="citationFocusChunkId"
         @closeDoc="closeDoc" @getDoc="getDoc">
       </DocContent>
     </div>

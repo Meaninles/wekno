@@ -184,6 +184,26 @@ export function sourceTypeLabel(type: SourceReferenceKind): string {
   return '知识库文档片段'
 }
 
+/**
+ * Build the same exact target used by IM final-output rendering. Document
+ * citations require a concrete chunk; missing coordinates never downgrade to
+ * a whole-document link.
+ */
+export function buildSourceReferenceHref(item: SourceReferenceItem): string {
+  if (item.type === 'web') return isHttpUrl(item.url) ? item.url : ''
+  if (item.type === 'wiki') {
+    if (!item.knowledgeBaseId || !item.slug) return ''
+    const query = new URLSearchParams({ tab: 'graph', slug: item.slug })
+    return `/platform/knowledge-bases/${encodeURIComponent(item.knowledgeBaseId)}?${query.toString()}`
+  }
+  if (!item.knowledgeBaseId || !item.knowledgeId || !item.chunkId) return ''
+  const query = new URLSearchParams({
+    knowledge_id: item.knowledgeId,
+    chunk_id: item.chunkId,
+  })
+  return `/platform/knowledge-bases/${encodeURIComponent(item.knowledgeBaseId)}?${query.toString()}`
+}
+
 export function hostFromUrl(value?: string): string {
   if (!value) return ''
   try {

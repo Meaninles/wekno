@@ -548,6 +548,7 @@ import {
   formatCompletedRunDuration,
   isSimpleCompletedConversation,
   isEvidenceRetrievalToolName,
+  retrievalDisplayCount,
   retrievalStatsFromMessage,
   usesDataSourceRetrievalUnit,
 } from '@/custom/modules/sourcerefs/retrievalSummary';
@@ -1508,9 +1509,10 @@ const intermediateStepsSummary = computed(() => {
   }
   if (retrievalStats.value) {
     const isDataSource = usesDataSourceRetrievalUnit(retrievalStats.value);
-    parts.push(retrievalStats.value.total > 0
+    const retrievalCount = retrievalDisplayCount(retrievalStats.value);
+    parts.push(retrievalCount > 0
       ? t(isDataSource ? 'agent.retrievedDataSources' : 'agent.retrievedDocuments', {
-          count: retrievalStats.value.total,
+          count: retrievalCount,
         })
       : t(isDataSource ? 'agent.noRetrievedDataSources' : 'agent.noRetrievedDocuments'));
   }
@@ -2272,7 +2274,10 @@ const openKnowledgeDocumentInNewTab = () => {
   if (!knowledgeDrawer.value.knowledgeBaseId || !knowledgeDrawer.value.knowledgeId) return;
   router.push({
     path: `/platform/knowledge-bases/${knowledgeDrawer.value.knowledgeBaseId}`,
-    query: { knowledge_id: knowledgeDrawer.value.knowledgeId },
+    query: {
+      knowledge_id: knowledgeDrawer.value.knowledgeId,
+      chunk_id: knowledgeDrawer.value.chunkId || undefined,
+    },
   });
 };
 

@@ -17,7 +17,11 @@ const EVIDENCE_RETRIEVAL_TOOLS = [
   'wiki_read_source_doc',
   'web_search',
   'web_fetch',
+  'list_data_sources',
+  'db_catalog',
+  'db_schema',
   'data_analysis',
+  'table_schema',
   'table_analysis',
   'db_query',
 ] as const
@@ -39,6 +43,13 @@ export function retrievalStatsFromMessage(message: Record<string, any> | undefin
 /** Structured table/database evidence is a data source, never a document. */
 export function usesDataSourceRetrievalUnit(stats: RetrievalStats | null | undefined): boolean {
   return Boolean(stats && (stats.unit === 'data_sources' || stats.dataSources > 0))
+}
+
+/** The visible noun and count must describe the same underlying source kind. */
+export function retrievalDisplayCount(stats: RetrievalStats | null | undefined): number {
+  if (!stats) return 0
+  if (usesDataSourceRetrievalUnit(stats)) return Math.max(0, Math.trunc(stats.dataSources))
+  return Math.max(0, Math.trunc(stats.documents + stats.wiki + stats.web))
 }
 
 export function isEvidenceRetrievalToolName(toolName: unknown): boolean {

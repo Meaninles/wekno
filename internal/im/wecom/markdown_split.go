@@ -2,11 +2,14 @@ package wecom
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
 
 const wecomMarkdownMaxBytes = 2048
+
+var weComMarkdownLinkRE = regexp.MustCompile(`\[(?:\\.|[^\]\r\n])*\]\((?:\\.|[^)\r\n])*\)`)
 
 // splitWeComMarkdown splits an application Markdown message into payloads that
 // fit WeCom's 2048-byte UTF-8 limit. It prefers paragraph, line, sentence, and
@@ -33,6 +36,13 @@ func splitWeComMarkdown(content string) []string {
 		}
 		bodyLimit = nextBodyLimit
 	}
+}
+
+// SplitApplicationMarkdown exposes the exact application-message partitioning
+// used by SendReply. The custom read-only preview API calls this function so a
+// simulated payload cannot drift from the real WeCom application transport.
+func SplitApplicationMarkdown(content string) []string {
+	return splitWeComMarkdown(content)
 }
 
 func wecomMarkdownPartPrefix(part, total int) string {
@@ -74,18 +84,45 @@ func preferredWeComMarkdownCut(content string, maxBytes int) int {
 	minPreferred := cut / 2
 
 	if idx := strings.LastIndex(prefix, "\n\n"); idx >= minPreferred {
-		return idx + 2
+		return avoidWeComMarkdownLinkCut(content, idx+2, maxBytes)
 	}
 	if idx := strings.LastIndex(prefix, "\n"); idx >= minPreferred {
-		return idx + 1
+		return avoidWeComMarkdownLinkCut(content, idx+1, maxBytes)
 	}
 	if idx := strings.LastIndexAny(prefix, "。！？；.!?;"); idx >= minPreferred {
 		_, size := utf8.DecodeRuneInString(prefix[idx:])
-		return idx + size
+		return avoidWeComMarkdownLinkCut(content, idx+size, maxBytes)
 	}
 	if idx := strings.LastIndexAny(prefix, " \t"); idx >= minPreferred {
-		return idx + 1
+		return avoidWeComMarkdownLinkCut(content, idx+1, maxBytes)
 	}
 
+	return avoidWeComMarkdownLinkCut(content, cut, maxBytes)
+}
+
+// avoidWeComMarkdownLinkCut treats each inline Markdown link as one transport
+// token. Normal references are much smaller than the platform limit, so moving
+// the boundary to the start of the link preserves clickability without adding
+// another message or model pass.
+func avoidWeComMarkdownLinkCut(content string, cut, maxBytes int) int {
+	if cut <= 0 || cut >= len(content) {
+		return cut
+	}
+	for _, span := range weComMarkdownLinkRE.FindAllStringIndex(content, -1) {
+		if span[0] >= cut {
+			break
+		}
+		if span[0] < cut && cut < span[1] {
+			if span[0] > 0 {
+				return span[0]
+			}
+			if span[1] <= maxBytes {
+				return span[1]
+			}
+			// A single link longer than WeCom's entire payload limit cannot be
+			// kept atomic. Retain the UTF-8-safe transport boundary.
+			return cut
+		}
+	}
 	return cut
 }

@@ -200,6 +200,9 @@ func collectToolSourceReferences(state *types.AgentState) []*types.SearchResult 
 				continue
 			}
 			for _, ref := range sourcerefs.ExtractFromToolResult(toolCall.Name, toolCall.Result) {
+				if !sourcerefs.IsSupportedCitationReference(ref) {
+					continue
+				}
 				key := sourcerefs.ReferenceKey(ref)
 				if key == "" || seen[key] {
 					continue

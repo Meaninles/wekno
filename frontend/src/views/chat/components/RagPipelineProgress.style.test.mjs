@@ -64,7 +64,7 @@ test('rag pipeline places search result summaries before the done row', () => {
 
 test('completed quick answers use authoritative retrieved-document count and duration', () => {
   assert.match(source, /props\.session\?\.is_completed && retrievalStats\.value/)
-  assert.match(source, /retrievalStats\.value\.total/)
+  assert.match(source, /retrievalDisplayCount\(retrievalStats\.value\)/)
   assert.match(source, /noRetrievalSummary/)
   assert.match(source, /totalDurationMs/)
   assert.doesNotMatch(source, /referenceDocCount/)

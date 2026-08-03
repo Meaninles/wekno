@@ -45,8 +45,11 @@ func TestRetrievalStatsKeepsAttemptedZeroResult(t *testing.T) {
 	}
 }
 
-func TestRetrievalToolClassificationExcludesCatalogOnlyTools(t *testing.T) {
-	for _, name := range []string{"knowledge_search", "grep_chunks", "wiki_read_page", "web_fetch", "table_analysis", "db_query"} {
+func TestRetrievalToolClassificationIncludesDataInspectionTools(t *testing.T) {
+	for _, name := range []string{
+		"knowledge_search", "grep_chunks", "wiki_read_page", "web_fetch",
+		"table_schema", "table_analysis", "db_catalog", "db_schema", "db_query",
+	} {
 		if !IsRetrievalToolName(name) {
 			t.Fatalf("%s should be a retrieval tool", name)
 		}
@@ -55,6 +58,41 @@ func TestRetrievalToolClassificationExcludesCatalogOnlyTools(t *testing.T) {
 		if IsRetrievalToolName(name) {
 			t.Fatalf("%s should not count as inspected evidence", name)
 		}
+	}
+}
+
+func TestRetrievalStatsForAgentStepsCountsUniqueDataSources(t *testing.T) {
+	steps := types.AgentSteps{
+		{ToolCalls: []types.ToolCall{{
+			Name: "mcp__weknora__db_catalog",
+			Result: &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"display_type": "db_catalog",
+				"sources": []interface{}{
+					map[string]interface{}{"id": "db-1", "name": "销售库"},
+					map[string]interface{}{"id": "db-2", "name": "库存库"},
+				},
+			}},
+		}}},
+		{ToolCalls: []types.ToolCall{{
+			Name: "mcp__weknora__db_schema",
+			Result: &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"display_type": "db_schema",
+				"tables": []interface{}{
+					map[string]interface{}{"source_id": "db-1", "table_name": "orders"},
+				},
+			}},
+		}}},
+		{ToolCalls: []types.ToolCall{{
+			Name: "table_schema",
+			Result: &types.ToolResult{Success: true, Data: map[string]interface{}{
+				"data_source_ids": []string{"file-1"},
+			}},
+		}}},
+	}
+
+	got := RetrievalStatsForAgentSteps(types.RetrievalStats{}, steps)
+	if !got.Attempted || got.Unit != RetrievalUnitDataSources || got.DataSources != 3 || got.Total != 3 {
+		t.Fatalf("stats = %+v, want three unique inspected data sources", got)
 	}
 }
 

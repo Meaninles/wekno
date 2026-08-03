@@ -12,7 +12,11 @@ import { consumePendingTenantSwitchToast } from '@/utils/tenantSwitch'
 import { useRoleLabel } from '@/composables/useRoleLabel'
 import { notifyLoginSuccess } from '@/utils/loginNotify'
 import { renderWorkspaceNotifyContent } from '@/utils/workspaceNotifyContent'
-import { consumeShareReturnPath } from '@/custom/modules/chatshare/authReturn'
+import {
+  consumeAuthReturnPath,
+  normalizeAuthReturnPath,
+  rememberAuthReturnPath,
+} from '@/custom/modules/authreturn/authReturn'
 
 // TDesign locale configs
 import enUSConfig from 'tdesign-vue-next/esm/locale/en_US'
@@ -90,7 +94,7 @@ const syncOIDCUserContext = async () => {
   }
 }
 
-const persistOIDCLoginResponse = async (response: any) => {
+const persistOIDCLoginResponse = async (response: any, explicitReturnPath = '') => {
   if (!response.token) {
     throw new Error(response.message || 'OIDC login failed')
   }
@@ -103,7 +107,7 @@ const persistOIDCLoginResponse = async (response: any) => {
   await syncOIDCUserContext()
 
   await nextTick()
-  router.replace(consumeShareReturnPath() || '/platform/knowledge-bases')
+  router.replace(normalizeAuthReturnPath(explicitReturnPath) || consumeAuthReturnPath() || '/platform/knowledge-bases')
 }
 
 const handleGlobalOIDCCallback = async () => {
@@ -115,11 +119,15 @@ const handleGlobalOIDCCallback = async () => {
   const oidcErrorDescription = params.get('oidc_error_description')
   const oidcResult = params.get('oidc_result')
 
+  const callbackReturnPath = normalizeAuthReturnPath(`${window.location.pathname}${window.location.search}`)
+
   if (!oidcError && !oidcResult) return
 
   if (oidcError) {
-    clearOIDCCallbackState('/login')
-    await router.replace('/login')
+    const returnTo = rememberAuthReturnPath(callbackReturnPath)
+    const loginTarget = returnTo ? `/login?${new URLSearchParams({ returnTo }).toString()}` : '/login'
+    clearOIDCCallbackState(loginTarget)
+    await router.replace(loginTarget)
     MessagePlugin.error(oidcErrorDescription || 'OIDC login failed')
     return
   }
@@ -134,8 +142,8 @@ const handleGlobalOIDCCallback = async () => {
 
     const response = decodeOIDCResult(oidcResult)
     if (response.success) {
-      clearOIDCCallbackState('/')
-      await persistOIDCLoginResponse(response)
+      clearOIDCCallbackState(callbackReturnPath || '/')
+      await persistOIDCLoginResponse(response, callbackReturnPath)
       notifyLoginSuccess(response, t, tm, formatRole, roleIcon)
       return
     }

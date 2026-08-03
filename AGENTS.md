@@ -2,6 +2,8 @@
 
 本项目位于 `C:\weknora`，Docker Desktop 中后端 `app-dev` 对外端口为 `http://localhost:8080`，前端开发服务位于 `frontend/` 并通过 `http://localhost:5177` 访问。
 
+本地移动端固定通过 `http://localhost:5177/mobile/` 访问，不使用 `5178` 端口。
+
 本项目做二开时，目录结构和原生代码修改边界必须先参考 `docs/custom/二开目录结构规范.md`；大段二开逻辑放到 `custom/` 或 `internal/custom/`，原生代码只保留必要注册点。
 
 每次有修改后，必须在 Docker Desktop 中重新拉起受影响容器，确保用户可直接打开浏览器查看。

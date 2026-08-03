@@ -19,6 +19,21 @@ const (
 	SourceTypeData      = "data_source"
 )
 
+// IsSupportedCitationReference is the single inline-citation boundary. The
+// product exposes exactly document fragments, Wiki pages, and web pages;
+// structured data is reported only through retrieval statistics.
+func IsSupportedCitationReference(ref *types.SearchResult) bool {
+	if ref == nil {
+		return false
+	}
+	switch SourceTypeFromRef(ref) {
+	case SourceTypeKnowledge, SourceTypeWiki, SourceTypeWeb:
+		return true
+	default:
+		return false
+	}
+}
+
 var (
 	wikiLinkRE    = regexp.MustCompile(`\[\[([^\]|\n]+)\|([^\]\n]+)\]\]`)
 	wikiPageRE    = regexp.MustCompile(`(?s)<wiki_page>.*?</wiki_page>`)

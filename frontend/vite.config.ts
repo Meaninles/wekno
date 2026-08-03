@@ -48,6 +48,33 @@ function embedHtmlDevFallback(): Plugin {
   }
 }
 
+/** Dev parity with nginx: serve mobile.html for /mobile/* on port 5177. */
+function mobileHtmlDevFallback(): Plugin {
+  return {
+    name: 'mobile-html-dev-fallback',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        const raw = req.url ?? ''
+        const qIdx = raw.indexOf('?')
+        const path = qIdx >= 0 ? raw.slice(0, qIdx) : raw
+        const qs = qIdx >= 0 ? raw.slice(qIdx) : ''
+        const relativePath = path.startsWith('/mobile/') ? path.slice('/mobile/'.length) : ''
+        const acceptsHTML = req.headers.accept?.includes('text/html') ?? false
+        const isMobileHistoryRoute = acceptsHTML && (
+          path === '/mobile'
+          || path === '/mobile/'
+          || (path.startsWith('/mobile/') && !relativePath.split('/').at(-1)?.includes('.'))
+        )
+        if (isMobileHistoryRoute) {
+          req.url = `/mobile.html${qs}`
+        }
+        next()
+      })
+    },
+  }
+}
+
 function silenceViteClientDebug(): Plugin {
   const debugMethod = ['console', 'debug'].join('.')
   const mutedClientDebugLines = [
@@ -186,6 +213,7 @@ export default defineConfig({
     vueJsx(),
     silenceViteClientDebug(),
     embedHtmlDevFallback(),
+    mobileHtmlDevFallback(),
   ],
   resolve: {
     alias: {

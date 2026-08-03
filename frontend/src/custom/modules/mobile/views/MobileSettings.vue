@@ -1,23 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
-
-type PermissionStateText = "已授权" | "未授权" | "询问时授权" | "不支持检测";
 
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
-
-const cameraState = ref<PermissionStateText>("不支持检测");
-const storageState = ref<PermissionStateText>("询问时授权");
-
-const normalizePermission = (state?: PermissionState): PermissionStateText => {
-  if (state === "granted") return "已授权";
-  if (state === "denied") return "未授权";
-  if (state === "prompt") return "询问时授权";
-  return "不支持检测";
-};
 
 const returnTo = computed(() => {
   const raw = Array.isArray(route.query.returnTo) ? route.query.returnTo[0] : route.query.returnTo;
@@ -38,19 +26,6 @@ const openKnowledgeManager = () => {
   });
 };
 
-const refreshPermissions = async () => {
-  storageState.value = "询问时授权";
-  try {
-    const permissions = navigator.permissions;
-    if (!permissions?.query) return;
-    const camera = await permissions.query({ name: "camera" as PermissionName });
-    cameraState.value = normalizePermission(camera.state);
-  } catch {
-    cameraState.value = "不支持检测";
-  }
-};
-
-onMounted(refreshPermissions);
 </script>
 
 <template>
@@ -68,7 +43,6 @@ onMounted(refreshPermissions);
       <div class="account-info">
         <strong>{{ accountDisplayName }}</strong>
       </div>
-      <em>统一身份认证</em>
     </section>
 
     <section class="settings-section">
@@ -76,32 +50,12 @@ onMounted(refreshPermissions);
         <span class="row-icon"><MobileIcon name="folder" /></span>
         <span class="row-text">
           <strong>知识库管理</strong>
-          <small>上传、下载、删除文档</small>
+          <small>新增、编辑、共享知识库及管理文档</small>
         </span>
         <MobileIcon name="chevron-right" />
       </button>
     </section>
 
-    <section class="settings-section">
-      <div class="section-title">手机权限</div>
-      <div class="settings-row">
-        <span class="row-icon"><MobileIcon name="image" /></span>
-        <span class="row-text">
-          <strong>相册与拍照</strong>
-          <small>用于聊天图片上传</small>
-        </span>
-        <em class="status-chip">{{ cameraState }}</em>
-      </div>
-      <div class="settings-row">
-        <span class="row-icon"><MobileIcon name="file" /></span>
-        <span class="row-text">
-          <strong>文件选择</strong>
-          <small>用于聊天附件和知识库文档上传</small>
-        </span>
-        <em class="status-chip">{{ storageState }}</em>
-      </div>
-      <button type="button" class="refresh-button" @click="refreshPermissions">刷新权限状态</button>
-    </section>
   </main>
 </template>
 
@@ -138,7 +92,7 @@ onMounted(refreshPermissions);
 
 .account-card {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) auto;
+  grid-template-columns: 46px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   margin: 8px 12px 14px;
@@ -184,30 +138,12 @@ onMounted(refreshPermissions);
   font-size: 13px;
 }
 
-.account-card em,
-.status-chip {
-  border-radius: 999px;
-  background: #eef9f3;
-  color: #078f49;
-  font-size: 12px;
-  font-style: normal;
-  padding: 5px 8px;
-  white-space: nowrap;
-}
-
 .settings-section {
   margin: 0 12px 14px;
   border: 1px solid #dfe9e4;
   border-radius: 8px;
   background: #fff;
   padding: 6px;
-}
-
-.section-title {
-  color: #73847c;
-  font-size: 13px;
-  font-weight: 650;
-  padding: 8px 8px 4px;
 }
 
 .settings-row {
@@ -262,14 +198,4 @@ onMounted(refreshPermissions);
   font-size: 13px;
 }
 
-.refresh-button {
-  width: calc(100% - 16px);
-  height: 38px;
-  margin: 6px 8px 8px;
-  border: 1px solid #bfe8cf;
-  border-radius: 8px;
-  background: #f6fcf8;
-  color: #078f49;
-  font-weight: 650;
-}
 </style>

@@ -3,12 +3,11 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import DocumentPreview from "@/components/document-preview.vue";
 import {
+  downloadPublicReferenceOriginalNatively,
   formatReferenceFileType,
-  formatReferenceTime,
   formatSourceLocator,
   loadPublicReference,
   loadPublicReferenceOriginal,
-  publicReferenceOriginalURL,
   publicReferenceToken,
   type PublicReferenceView,
   wikiPageTypeLabel,
@@ -35,7 +34,6 @@ const fragmentHtml = computed(() => renderMobileMarkdown(fragment.value?.content
 const wikiHtml = computed(() => renderMobileMarkdown(wiki.value?.content || wiki.value?.summary));
 const sourceLocator = computed(() => formatSourceLocator(fragment.value?.source_locator));
 const fileType = computed(() => formatReferenceFileType(documentInfo.value));
-const originalURL = computed(() => publicReferenceOriginalURL(token.value));
 
 watch(token, () => void loadReference(), { immediate: true });
 
@@ -84,28 +82,17 @@ function showCitation() {
   void router.replace({ path: route.path, query: { token: token.value } });
 }
 
-function goBack() {
-  if (originalMode.value) {
-    showCitation();
-    return;
-  }
-  window.history.back();
+function downloadOriginal() {
+  downloadPublicReferenceOriginalNatively(token.value);
 }
 
-function openOriginalInBrowser() {
-  window.open(originalURL.value, "_blank", "noopener,noreferrer");
-}
 </script>
 
 <template>
   <main class="mobile-public-reference" data-testid="mobile-public-reference">
     <header class="mobile-public-reference__topbar">
-      <button type="button" aria-label="返回" @click="goBack">
-        <MobileIcon name="chevron-left" />
-      </button>
       <div>
         <strong>{{ originalMode ? '原文档' : reference?.title || '引用来源' }}</strong>
-        <small>IM 引用只读页</small>
       </div>
       <span class="brand-mark">W</span>
     </header>
@@ -125,7 +112,6 @@ function openOriginalInBrowser() {
         <div v-if="!originalMode" class="mobile-reference-title">
           <span>文档分片</span>
           <h1>{{ reference.title }}</h1>
-          <p>仅展示本次 IM 回答实际引用的内容。</p>
         </div>
 
         <template v-if="!originalMode">
@@ -134,7 +120,6 @@ function openOriginalInBrowser() {
             <div><span>类型</span><strong>{{ fileType }}</strong></div>
             <div><span>分片</span><strong>第 {{ fragment.chunk_index + 1 }} 个</strong></div>
             <div v-if="sourceLocator"><span>位置</span><strong>{{ sourceLocator }}</strong></div>
-            <div v-if="documentInfo.created_at"><span>时间</span><strong>{{ formatReferenceTime(documentInfo.created_at) }}</strong></div>
           </section>
 
           <section class="mobile-content-card">
@@ -151,7 +136,7 @@ function openOriginalInBrowser() {
         <template v-else>
           <div class="mobile-original-actions">
             <button type="button" @click="showCitation">返回引用分片</button>
-            <button type="button" @click="openOriginalInBrowser">浏览器中打开</button>
+            <button type="button" @click="downloadOriginal">下载</button>
           </div>
           <div class="mobile-original-preview" data-testid="mobile-public-original">
             <DocumentPreview
@@ -173,7 +158,6 @@ function openOriginalInBrowser() {
             <em v-if="wiki.version">v{{ wiki.version }}</em>
           </div>
           <h1>{{ wiki.title || reference.title }}</h1>
-          <p v-if="wiki.updated_at">更新于 {{ formatReferenceTime(wiki.updated_at) }}</p>
         </div>
         <p v-if="wiki.summary" class="mobile-wiki-summary">{{ wiki.summary }}</p>
         <section class="mobile-content-card">
@@ -197,7 +181,7 @@ function openOriginalInBrowser() {
   top: 0;
   display: grid;
   min-height: calc(58px + env(safe-area-inset-top));
-  grid-template-columns: 40px minmax(0, 1fr) 36px;
+  grid-template-columns: minmax(0, 1fr) 36px;
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid #e2eae5;
@@ -206,23 +190,9 @@ function openOriginalInBrowser() {
   backdrop-filter: blur(14px);
 }
 
-.mobile-public-reference__topbar button {
-  display: grid;
-  width: 36px;
-  height: 36px;
-  place-items: center;
-  border: 0;
-  border-radius: 10px;
-  background: #f0f4f2;
-  color: #20332a;
-  font-size: 20px;
-}
-
 .mobile-public-reference__topbar div { min-width: 0; }
-.mobile-public-reference__topbar strong,
-.mobile-public-reference__topbar small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-public-reference__topbar strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-public-reference__topbar strong { font-size: 16px; font-weight: 620; }
-.mobile-public-reference__topbar small { color: #77877f; font-size: 11px; margin-top: 1px; }
 
 .brand-mark {
   display: grid;
@@ -270,8 +240,7 @@ function openOriginalInBrowser() {
   font-size: 12px;
   padding: 2px 7px;
 }
-.mobile-reference-title h1 { margin: 12px 0 6px; font-size: 23px; font-weight: 660; line-height: 1.4; }
-.mobile-reference-title p { margin: 0; color: #718079; font-size: 13px; line-height: 1.6; }
+.mobile-reference-title h1 { margin: 12px 0 0; font-size: 23px; font-weight: 660; line-height: 1.4; }
 .wiki-chips { display: flex; align-items: center; gap: 8px; }
 .wiki-chips em { border-radius: 5px; background: #e9eeeb; color: #617169; font-size: 12px; font-style: normal; padding: 3px 7px; }
 
@@ -312,7 +281,15 @@ function openOriginalInBrowser() {
 }
 
 .mobile-original-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-.mobile-original-actions button { height: 42px; border: 1px solid #d7e2dc; border-radius: 11px; background: #fff; color: #26372f; }
+.mobile-original-actions button {
+  display: grid;
+  height: 42px;
+  place-items: center;
+  border: 1px solid #d7e2dc;
+  border-radius: 11px;
+  background: #fff;
+  color: #26372f;
+}
 .mobile-original-preview { min-height: calc(100dvh - 132px); overflow: hidden; border: 1px solid #e0e8e3; border-radius: 14px; background: #fff; }
 .mobile-original-preview :deep(.document-preview) { min-height: calc(100dvh - 145px); }
 .mobile-wiki-summary { margin: 0 0 14px; border-left: 3px solid #07c160; color: #405149; font-size: 15px; line-height: 1.8; padding: 13px 15px; }

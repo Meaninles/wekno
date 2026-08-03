@@ -16,3 +16,17 @@ test('mobile composer auto-grows after DOM value updates', () => {
   assert.match(source, /watch\(inputValue,\s*\(\) => \{\s*void nextTick\(autoGrow\);\s*\},\s*\{ flush: "post" \},?\s*\)/)
   assert.match(source, /const COMPOSER_MIN_HEIGHT = 28/)
 })
+
+test('mobile composer keeps knowledge base as the second config shortcut', () => {
+  const configRail = source.slice(
+    source.indexOf('<div class="config-rail">'),
+    source.indexOf('<div class="input-row">'),
+  )
+  const agentPosition = configRail.indexOf("openSheet('agent')")
+  const knowledgePosition = configRail.indexOf("openSheet('context')")
+  const webPosition = configRail.indexOf('toggleWebSearch')
+
+  assert.ok(agentPosition >= 0)
+  assert.ok(knowledgePosition > agentPosition)
+  assert.ok(webPosition > knowledgePosition)
+})

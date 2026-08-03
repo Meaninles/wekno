@@ -51,6 +51,28 @@ func TestReferenceHandlerOriginalUsesSameDocumentCapability(t *testing.T) {
 	assertPublicReferenceHeaders(t, recorder)
 }
 
+func TestReferenceHandlerOriginalDownloadUsesAttachmentWithoutChangingCapability(t *testing.T) {
+	service, _, _ := newReferenceTestService(t)
+	token := issueServiceToken(t, service.signer, &sourcerefs.CitationSource{
+		Type: sourcerefs.SourceTypeKnowledge, KnowledgeBaseID: "kb-1", KnowledgeID: "doc-1", ChunkID: "chunk-1",
+	}, 7)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(
+		http.MethodGet,
+		ReferenceOriginalPath+"?download=1&token="+url.QueryEscape(token),
+		nil,
+	)
+	NewReferenceHandler(service).Original(ctx)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "original document" {
+		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment;") {
+		t.Fatalf("Content-Disposition=%q", got)
+	}
+	assertPublicReferenceHeaders(t, recorder)
+}
+
 func TestReferenceHandlerNeverAcceptsUnsignedCoordinates(t *testing.T) {
 	service, _, _ := newReferenceTestService(t)
 	handler := NewReferenceHandler(service)

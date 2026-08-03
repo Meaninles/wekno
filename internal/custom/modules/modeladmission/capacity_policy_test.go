@@ -9,6 +9,7 @@ import (
 func canonicalTestPool() ResourcePool {
 	return ResourcePool{
 		ID: "pool", Name: "route", ResourceKind: "chat",
+		IMMaxConcurrent: 1, IMMaxWaiting: 50,
 		MaxInflight: 4, InteractiveReserve: 1,
 		TenantBurst: 4, DocumentBurst: 2,
 		RequestTimeoutSeconds: 900,

@@ -109,9 +109,13 @@ func (h *ReferenceHandler) Original(c *gin.Context) {
 
 	fileName := cleanReferenceFilename(file.FileName)
 	contentType := referenceContentType(fileName, file.FileType)
+	disposition := "inline"
+	if strings.TrimSpace(c.Query("download")) == "1" {
+		disposition = "attachment"
+	}
 	setPublicReferenceHeaders(c)
 	c.Header("Content-Type", contentType)
-	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": fileName}))
+	c.Header("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": fileName}))
 	c.Header("Content-Security-Policy", "sandbox")
 	c.Header("X-Content-Type-Options", "nosniff")
 	if file.FileSize > 0 {

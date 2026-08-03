@@ -398,12 +398,20 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <Teleport to="body" :disabled="!isFullscreen">
   <div class="document-preview" :class="{ 'is-fullscreen': isFullscreen }">
     <!-- Toolbar -->
     <div class="preview-toolbar" v-if="!loading && !error && !boundedPreview && previewType !== 'unsupported'">
       <t-space size="small">
         <t-tooltip :content="isFullscreen ? $t('preview.exitFullscreen') : $t('preview.fullscreen')" placement="bottom">
-          <t-button theme="default" variant="text" shape="square" @click="toggleFullscreen">
+          <t-button
+            theme="default"
+            variant="text"
+            shape="square"
+            :aria-label="isFullscreen ? $t('preview.exitFullscreen') : $t('preview.fullscreen')"
+            data-testid="document-preview-fullscreen-toggle"
+            @click="toggleFullscreen"
+          >
             <template #icon><t-icon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" /></template>
           </t-button>
         </t-tooltip>
@@ -496,6 +504,7 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+  </Teleport>
 </template>
 
 <style scoped lang="less">

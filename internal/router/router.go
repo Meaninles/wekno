@@ -1161,8 +1161,11 @@ func RegisterOrganizationRoutes(r *gin.RouterGroup, orgHandler *handler.Organiza
 		kbShares.GET("", g.Viewer(), orgHandler.ListKBShares)
 		// Update share permission
 		kbShares.PUT("/:share_id", g.OwnedKBOrAdmin(), orgHandler.UpdateSharePermission)
-		// Remove share
-		kbShares.DELETE("/:share_id", g.OwnedKBOrAdmin(), orgHandler.RemoveShare)
+		// Removing a share is also allowed for an Admin of the target
+		// organization. The service performs that three-way authorization
+		// (original sharer / source-tenant Admin / target-org Admin), so the
+		// route must not reject a target-org Admin before the service runs.
+		kbShares.DELETE("/:share_id", g.Viewer(), orgHandler.RemoveShare)
 	}
 
 	// Agent sharing routes — same rationale as KB shares: 分享/取消分享

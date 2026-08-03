@@ -83,6 +83,25 @@ export function publicReferenceOriginalURL(token: string): string {
   return publicReferenceURL(REFERENCE_ORIGINAL_PATH, token);
 }
 
+export function publicReferenceDownloadURL(token: string): string {
+  const url = new URL(publicReferenceOriginalURL(token), window.location.href);
+  url.searchParams.set("download", "1");
+  return url.toString();
+}
+
+export function downloadPublicReferenceOriginalNatively(
+  token: string,
+  navigate: (url: string) => void = (url) => window.location.assign(url),
+): void {
+  if (!token) throw new Error("引用地址缺少访问凭证");
+
+  // Keep this as a top-level navigation to a signed server response. WeCom's
+  // desktop and mobile WebViews cannot hand page-local blob: URLs to their
+  // system download process, while Content-Disposition: attachment works in
+  // both WeCom and ordinary external browsers without opening another page.
+  navigate(publicReferenceDownloadURL(token));
+}
+
 export function formatReferenceTime(value?: string): string {
   if (!value) return "";
   const date = new Date(value);

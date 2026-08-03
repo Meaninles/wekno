@@ -3,12 +3,11 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import DocumentPreview from "@/components/document-preview.vue";
 import {
+  downloadPublicReferenceOriginalNatively,
   formatReferenceFileType,
-  formatReferenceTime,
   formatSourceLocator,
   loadPublicReference,
   loadPublicReferenceOriginal,
-  publicReferenceOriginalURL,
   publicReferenceToken,
   type PublicReferenceView,
   wikiPageTypeLabel,
@@ -34,7 +33,6 @@ const fragmentHtml = computed(() => renderPublicReferenceMarkdown(fragment.value
 const wikiHtml = computed(() => renderPublicReferenceMarkdown(wiki.value?.content || wiki.value?.summary));
 const sourceLocator = computed(() => formatSourceLocator(fragment.value?.source_locator));
 const fileType = computed(() => formatReferenceFileType(documentInfo.value));
-const originalURL = computed(() => publicReferenceOriginalURL(token.value));
 
 watch(token, () => void loadReference(), { immediate: true });
 
@@ -73,12 +71,8 @@ function showCitation() {
   void router.replace({ path: route.path, query: { token: token.value } });
 }
 
-function goBack() {
-  if (originalMode.value) {
-    showCitation();
-    return;
-  }
-  window.history.back();
+function downloadOriginal() {
+  downloadPublicReferenceOriginalNatively(token.value);
 }
 
 function documentHeadReferrerMeta(): HTMLMetaElement {
@@ -100,11 +94,9 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
 <template>
   <div class="public-reference-page" data-testid="desktop-public-reference">
     <header class="public-reference-header">
-      <button type="button" class="back-button" aria-label="返回" @click="goBack">←</button>
       <a class="brand" href="/" aria-label="WeKnora 首页">
         <span>W</span><strong>WEKNORA</strong>
       </a>
-      <div class="public-label">IM 引用只读页</div>
     </header>
 
     <main class="public-reference-main">
@@ -123,8 +115,6 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
             <span v-if="wiki?.version" class="version-chip">v{{ wiki.version }}</span>
           </div>
           <h1>{{ reference.title }}</h1>
-          <p v-if="isDocument">此页面仅展示 IM 回答实际引用的分片及其对应原文档。</p>
-          <p v-else>此页面仅展示 IM 回答实际引用的 Wiki 页面。</p>
         </section>
 
         <section v-if="isDocument && documentInfo && fragment" class="reader-card">
@@ -133,14 +123,17 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
               <span>{{ fileType }}</span>
               <span>第 {{ fragment.chunk_index + 1 }} 个分片</span>
               <span v-if="sourceLocator">{{ sourceLocator }}</span>
-              <span v-if="documentInfo.created_at">{{ formatReferenceTime(documentInfo.created_at) }}</span>
             </div>
             <div class="reader-actions">
               <button v-if="!originalMode" type="button" class="primary-action" @click="showOriginal">
                 查看原文档
               </button>
               <button v-else type="button" @click="showCitation">返回引用分片</button>
-              <a v-if="originalMode" :href="originalURL" target="_blank" rel="noopener noreferrer">浏览器中打开</a>
+              <button
+                v-if="originalMode"
+                type="button"
+                @click="downloadOriginal"
+              >下载</button>
             </div>
           </header>
 
@@ -160,7 +153,6 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
         <article v-else-if="wiki" class="reader-card wiki-reader">
           <header class="wiki-meta">
             <span>{{ wikiPageTypeLabel(wiki.page_type) }}</span>
-            <span v-if="wiki.updated_at">更新于 {{ formatReferenceTime(wiki.updated_at) }}</span>
             <code>{{ wiki.slug }}</code>
           </header>
           <p v-if="wiki.summary" class="wiki-summary">{{ wiki.summary }}</p>
@@ -183,26 +175,13 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
   position: sticky;
   z-index: 10;
   top: 0;
-  display: grid;
+  display: flex;
   min-height: 64px;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 14px;
   border-bottom: 1px solid #e3eae6;
   background: rgb(255 255 255 / 96%);
   padding: 0 28px;
   backdrop-filter: blur(14px);
-}
-
-.back-button {
-  width: 36px;
-  height: 36px;
-  border: 0;
-  border-radius: 9px;
-  background: #f0f4f2;
-  color: #24372f;
-  cursor: pointer;
-  font-size: 20px;
 }
 
 .brand {
@@ -225,7 +204,6 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
 }
 
 .brand strong { font-size: 17px; letter-spacing: .08em; }
-.public-label { color: #718079; font-size: 13px; }
 
 .public-reference-main {
   width: min(1120px, calc(100% - 48px));
@@ -264,8 +242,7 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
 .state-card.error p { margin: 0; }
 
 .reference-title-card { padding: 28px 32px; }
-.reference-title-card h1 { margin: 14px 0 8px; font-size: 28px; line-height: 1.35; }
-.reference-title-card p { margin: 0; color: #718079; font-size: 14px; }
+.reference-title-card h1 { margin: 14px 0 0; font-size: 28px; line-height: 1.35; }
 
 .type-chip,
 .version-chip {
@@ -323,7 +300,6 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
 
 @media (max-width: 720px) {
   .public-reference-header { padding: 0 14px; }
-  .public-label { display: none; }
   .public-reference-main { width: calc(100% - 24px); padding-top: 18px; }
   .reference-title-card { padding: 22px; }
   .reader-card__header { align-items: flex-start; flex-direction: column; }

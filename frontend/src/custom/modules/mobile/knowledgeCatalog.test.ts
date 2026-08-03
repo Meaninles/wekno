@@ -17,6 +17,7 @@ function shared(id: string, permission: string, org = '产品组'): SharedKnowle
     share_id: `share-${id}-${permission}`,
     shared_at: '2026-07-13T00:00:00Z',
     source_tenant_id: 8,
+    organization_id: `org-${org}`,
   }
 }
 
@@ -60,6 +61,7 @@ test('maps organization admin/editor/viewer to manage/edit/view', () => {
   assert.equal(rows.find((row) => row.id === 'edit')?.permissionLabel, '可编辑')
   assert.equal(rows.find((row) => row.id === 'view')?.permissionLabel, '仅查看')
   assert.equal(rows.find((row) => row.id === 'view')?.canEditContent, false)
+  assert.equal(rows.find((row) => row.id === 'view')?.organization_id, 'org-产品组')
 })
 
 test('local row wins over a share-back duplicate', () => {

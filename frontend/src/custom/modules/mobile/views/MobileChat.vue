@@ -1872,6 +1872,11 @@ onBeforeUnmount(() => {
           <MobileIcon name="user-talk" />
           <span>{{ agentLabel(selectedAgent) }}</span>
         </button>
+        <button type="button" class="config-pill" @click="openSheet('context')">
+          <MobileIcon name="folder" />
+          <span>知识库</span>
+          <em v-if="selectedKnowledgeContextCount">{{ selectedKnowledgeContextCount }}</em>
+        </button>
         <button
           type="button"
           class="config-pill"
@@ -1896,11 +1901,6 @@ onBeforeUnmount(() => {
           <MobileIcon name="lightbulb" />
           <span>技能</span>
           <em v-if="selectedSkillContextCount">{{ selectedSkillContextCount }}</em>
-        </button>
-        <button type="button" class="config-pill" @click="openSheet('context')">
-          <MobileIcon name="folder" />
-          <span>知识库</span>
-          <em v-if="selectedKnowledgeContextCount">{{ selectedKnowledgeContextCount }}</em>
         </button>
         <button type="button" class="config-pill" @click="openSheet('model')">
           <MobileIcon name="cpu" />

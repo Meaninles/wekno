@@ -37,6 +37,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
 	"github.com/Tencent/WeKnora/internal/custom/modules/maintenance"
 	"github.com/Tencent/WeKnora/internal/custom/modules/mobiledocument"
+	"github.com/Tencent/WeKnora/internal/custom/modules/mobileknowledge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeinstances"
@@ -74,6 +75,7 @@ type Handlers struct {
 	DocumentQueue        *documentqueue.Handler
 	KnowledgeFolders     *knowledgefolders.Handler
 	MobileDocument       *mobiledocument.Handler
+	MobileKnowledge      *mobileknowledge.Handler
 	DerivativeControl    *derivativecontrol.Handler
 	ModelAdmission       *modeladmission.Handler
 	CapacityControl      *capacitycontrol.Handler
@@ -92,6 +94,7 @@ type Handlers struct {
 	kbManagerService            *kbmanager.Service
 	knowledgeFolderService      *knowledgefolders.Service
 	mobileDocumentService       *mobiledocument.Service
+	mobileKnowledgeService      *mobileknowledge.Service
 	imReferenceService          *imoutput.ReferenceService
 	derivativeControlService    *derivativecontrol.Service
 	iamService                  *iam.Service
@@ -168,6 +171,7 @@ func NewHandlers(
 		knowledgeService,
 		mobiledocument.LoadConfigFromEnv(),
 	)
+	mobileKnowledgeService := mobileknowledge.NewService(db)
 	imReferenceService := imoutput.NewReferenceService(
 		db,
 		knowledgeService,
@@ -440,6 +444,7 @@ func NewHandlers(
 		DocumentQueue:               documentqueue.NewHandler(documentQueueCoordinator),
 		KnowledgeFolders:            knowledgefolders.NewHandler(knowledgeFolderService, knowledgeService),
 		MobileDocument:              mobiledocument.NewHandler(mobileDocumentService),
+		MobileKnowledge:             mobileknowledge.NewHandler(mobileKnowledgeService),
 		DerivativeControl:           derivativecontrol.NewHandler(derivativeControlService, modelService),
 		ModelAdmission:              modeladmission.NewHandler(admissionManager),
 		CapacityControl:             capacitycontrol.NewHandler(capacityControlService),
@@ -457,6 +462,7 @@ func NewHandlers(
 		kbManagerService:            kbManagerService,
 		knowledgeFolderService:      knowledgeFolderService,
 		mobileDocumentService:       mobileDocumentService,
+		mobileKnowledgeService:      mobileKnowledgeService,
 		imReferenceService:          imReferenceService,
 		derivativeControlService:    derivativeControlService,
 		iamService:                  iamService,
@@ -844,6 +850,16 @@ func RegisterRoutes(
 			viewer,
 			knowledgeRead,
 			handlers.MobileDocument.CreateDownloadLink,
+		)
+	}
+
+	if handlers.MobileKnowledge != nil && viewer != nil && kbRead != nil {
+		mobileKnowledge := v1.Group("/custom/mobile-knowledge/knowledge-bases/:id")
+		mobileKnowledge.GET(
+			"/share-targets",
+			viewer,
+			kbRead,
+			handlers.MobileKnowledge.ListShareTargets,
 		)
 	}
 

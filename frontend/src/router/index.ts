@@ -2,7 +2,12 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { autoSetup, getCurrentUser, userInfoFromApi } from '@/api/auth'
-import { consumeShareReturnPath, rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn'
+import {
+  consumeAuthReturnPath,
+  iamSSOEntryForReturnPath,
+  isWeComUserAgent,
+  rememberAuthReturnPath,
+} from '@/custom/modules/authreturn/authReturn'
 
 /** Lite /桌面 WebView 硬刷新时可能只打开 `/`，用 session 记住上次页面以便恢复 */
 const LITE_LAST_PATH_KEY = 'weknora_lite_last_path'
@@ -55,6 +60,14 @@ const router = createRouter({
       name: "login",
       component: () => import("../views/auth/Login.vue"),
       meta: { requiresAuth: false, requiresInit: false }
+    },
+    {
+      path: "/im-reference",
+      name: "imPublicReference",
+      component: () => import("../custom/modules/imoutput/views/PublicReferenceView.vue"),
+      // This isolated page accepts only a server-signed IM capability. Normal
+      // Web chat, knowledge-base, Wiki, and mobile routes remain authenticated.
+      meta: { requiresAuth: false, requiresInit: false },
     },
     // Embed chat is a separate entry (embed.html + embed-main.ts), not this SPA.
     {
@@ -339,7 +352,7 @@ router.beforeEach(async (to, from, next) => {
   if (to.meta.requiresAuth === false || to.meta.requiresInit === false) {
     // 如果已登录用户访问登录页面，重定向到知识库列表页面
     if (to.path === '/login' && authStore.isLoggedIn) {
-      next(consumeShareReturnPath(to.query.returnTo) || '/platform/knowledge-bases')
+      next(consumeAuthReturnPath(to.query.returnTo) || '/platform/knowledge-bases')
       return
     }
     next()
@@ -371,8 +384,13 @@ router.beforeEach(async (to, from, next) => {
           markAutoSetupFailed()
         }
       }
-      const shareReturnTo = rememberShareReturnPath(to.fullPath)
-      next(shareReturnTo ? { path: '/login', query: { returnTo: shareReturnTo } } : '/login')
+      const authReturnTo = rememberAuthReturnPath(to.fullPath)
+      if (authReturnTo && isWeComUserAgent()) {
+        window.location.replace(iamSSOEntryForReturnPath(authReturnTo))
+        next(false)
+        return
+      }
+      next(authReturnTo ? { path: '/login', query: { returnTo: authReturnTo } } : '/login')
       return
     }
   }

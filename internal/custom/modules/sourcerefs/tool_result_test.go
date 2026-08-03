@@ -58,7 +58,11 @@ func TestRegisterToolResultExposesStableFragmentHandleAndCoordinates(t *testing.
 		t.Fatalf("structured source_references missing: %#v", result.Data["source_references"])
 	}
 	result.Output = AppendCitationCatalog(result.Output, refs)
-	for _, expected := range []string{`chunk_id="chunk-531">`, `citation_handle_for_this_evidence: <src id="S1" />`} {
+	for _, expected := range []string{
+		`chunk_id="chunk-531">`,
+		`citation_handle_for_this_evidence: <src id="S1" />`,
+		`[CITATION_USE] In the final answer, copy each matching cite_exactly or citation_handle_for_this_evidence verbatim`,
+	} {
 		if !strings.Contains(result.Output, expected) {
 			t.Fatalf("model-visible handle missing %q: %s", expected, result.Output)
 		}
@@ -71,6 +75,26 @@ func TestRegisterToolResultExposesStableFragmentHandleAndCoordinates(t *testing.
 	secondRefs, secondSources := RegisterToolResult(registry, "list_knowledge_chunks", second)
 	if len(secondRefs) != 1 || len(secondSources) != 1 || CitationID(secondRefs[0]) != "S1" {
 		t.Fatalf("same fragment did not retain S1: refs=%#v sources=%#v", secondRefs, secondSources)
+	}
+}
+
+func TestRegisterToolResultDoesNotCreateStructuredDataCitation(t *testing.T) {
+	registry := NewRegistry()
+	result := &types.ToolResult{
+		Success: true,
+		Output:  "query result",
+		Data: map[string]interface{}{
+			"display_type": "structured_analysis_result",
+			"query":        "select count(*) from orders",
+			"rows":         []interface{}{map[string]interface{}{"count": 1}},
+			"source": map[string]interface{}{
+				"source_ids": []string{"db-1"},
+			},
+		},
+	}
+	refs, sources := RegisterToolResult(registry, "db_query", result)
+	if len(refs) != 0 || len(sources) != 0 || len(registry.SnapshotReferences()) != 0 {
+		t.Fatalf("structured data escaped the three-type citation boundary: refs=%#v sources=%#v", refs, sources)
 	}
 }
 

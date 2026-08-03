@@ -1,6 +1,7 @@
 /** Shared citation tag preprocessing for chat markdown (QA + agent). */
 import {
   buildCitedSourceReferenceItems,
+  buildSourceReferenceHref,
   findSourceReferenceItem,
   getSourceReferenceKind,
   type SourceReference,
@@ -138,7 +139,12 @@ function renderSourceCitation(
   const safeSlug = escapeHtml(item.slug)
   const safeUrl = escapeHtml(item.url)
   const safeDataSourceId = escapeHtml(item.sourceId)
-  return `<span class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-chunk-id="${safeChunkId}" data-chunk-index="${safeChunkIndex}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" role="button" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"><span class="citation-number">${safeNumber}</span></span>`
+  const safeHref = escapeHtml(buildSourceReferenceHref(item))
+  const attributes = `class="citation citation-source citation-source--${safeType}" data-source-id="${safeSourceId}" data-citation-number="${safeNumber}" data-source-type="${safeType}" data-title="${safeTitle}" data-source-label="${safeSourceLabel}" data-kb-id="${safeKbId}" data-knowledge-id="${safeKnowledgeId}" data-chunk-id="${safeChunkId}" data-chunk-index="${safeChunkIndex}" data-slug="${safeSlug}" data-url="${safeUrl}" data-data-source-id="${safeDataSourceId}" tabindex="0" aria-label="引用 ${safeNumber}：${safeTitle}" title="${safeTitle}"`
+  if (safeHref) {
+    return `<a ${attributes} href="${safeHref}"><span class="citation-number">${safeNumber}</span></a>`
+  }
+  return `<span ${attributes} role="button"><span class="citation-number">${safeNumber}</span></span>`
 }
 
 /** Convert canonical source handles into inline citation HTML. */

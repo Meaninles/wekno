@@ -682,11 +682,17 @@ test('renderChatMarkdown renders a citation after a list item inline in that ite
     renderer,
     escapeMarkdown: (text) => text,
     sanitizeHtml: (value) => value,
-    knowledgeReferences: [{ id: 'chunk-1', knowledge_id: 'doc-1', metadata: { citation_id: 'S1' } }],
+    knowledgeReferences: [{
+      id: 'chunk-1',
+      knowledge_id: 'doc-1',
+      knowledge_base_id: 'kb-1',
+      metadata: { citation_id: 'S1', chunk_id: 'chunk-1' },
+    }],
   })
 
-  assert.match(html, /<li>培养基地奖牌 <span class="citation citation-source citation-source--knowledge"/)
-  assert.doesNotMatch(html, /<\/ul>\s*<p>\s*<span class="citation citation-source"/)
+  assert.match(html, /<li>培养基地奖牌 <a class="citation citation-source citation-source--knowledge"/)
+  assert.match(html, /href="\/platform\/knowledge-bases\/kb-1\?knowledge_id=doc-1&amp;chunk_id=chunk-1|href="\/platform\/knowledge-bases\/kb-1\?chunk_id=chunk-1&amp;knowledge_id=doc-1/)
+  assert.doesNotMatch(html, /<\/ul>\s*<p>\s*<(?:span|a) class="citation citation-source"/)
 })
 
 test('joinCitationTagsToPreviousLine does not merge citations onto fenced code closing delimiter', () => {

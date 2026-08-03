@@ -77,7 +77,7 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 	out := make([]*CitationSource, 0)
 	seenOut := map[string]bool{}
 	for _, ref := range refs {
-		if ref == nil {
+		if !IsSupportedCitationReference(ref) {
 			continue
 		}
 		key := CitationKey(ref)
@@ -231,8 +231,12 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("[/AVAILABLE_CITATIONS]")
+	b.WriteString("\n")
+	b.WriteString(citationUseInstruction)
 	return b.String()
 }
+
+const citationUseInstruction = "[CITATION_USE] In the final answer, copy each matching cite_exactly or citation_handle_for_this_evidence verbatim immediately after the sentence or paragraph supported by that evidence. [/CITATION_USE]"
 
 // RenderEvidenceBlock associates one claim-bearing snapshot with its citation
 // ID without exposing alternate XML tag shapes to the model.
@@ -336,7 +340,7 @@ func SourcesFromReferences(refs []*types.SearchResult) []*CitationSource {
 	sourcesByID := map[string]*CitationSource{}
 	var ids []string
 	for _, ref := range refs {
-		if ref == nil {
+		if !IsSupportedCitationReference(ref) {
 			continue
 		}
 		id := CitationID(ref)

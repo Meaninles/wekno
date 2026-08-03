@@ -706,17 +706,26 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		h.knowledgeRefs = citedRefs
 		h.assistantMessage.KnowledgeReferences = types.References(citedRefs)
 
-		// Update agent steps if provided
-		if data.AgentSteps != nil {
-			if steps, ok := data.AgentSteps.([]types.AgentStep); ok {
-				h.assistantMessage.AgentSteps = agenttools.SanitizeAgentStepsForStorage(steps)
-			}
+		// Derive source and tool telemetry from the unsanitized completion steps.
+		// Structured-data source coordinates may be compacted for replay, but the
+		// authoritative count must reflect exactly what the tool inspected.
+		completionSteps := h.assistantMessage.AgentSteps
+		switch steps := data.AgentSteps.(type) {
+		case []types.AgentStep:
+			completionSteps = types.AgentSteps(steps)
+		case types.AgentSteps:
+			completionSteps = steps
 		}
 		h.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsForAgentSteps(
 			h.assistantMessage.RetrievalStats,
-			h.assistantMessage.AgentSteps,
+			completionSteps,
 		)
-		h.assistantMessage.AgentToolCount = sourcerefs.AgentToolCallCount(h.assistantMessage.AgentSteps)
+		h.assistantMessage.AgentToolCount = sourcerefs.AgentToolCallCount(completionSteps)
+		if data.AgentSteps != nil {
+			h.assistantMessage.AgentSteps = types.AgentSteps(
+				agenttools.SanitizeAgentStepsForStorage([]types.AgentStep(completionSteps)),
+			)
+		}
 	}
 
 	// Fallback: if no answer events were streamed but we have a final answer,

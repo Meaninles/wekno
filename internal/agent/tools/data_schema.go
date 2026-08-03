@@ -84,8 +84,9 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			Success: true,
 			Output:  output,
 			Data: map[string]interface{}{
-				"summary": output,
-				"schema":  schema,
+				"summary":         output,
+				"schema":          schema,
+				"data_source_ids": []string{input.KnowledgeID},
 			},
 		}, nil
 	}
@@ -153,8 +154,9 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		Success: true,
 		Output:  output,
 		Data: map[string]interface{}{
-			"summary": summaryContent,
-			"columns": columnContent,
+			"summary":         summaryContent,
+			"columns":         columnContent,
+			"data_source_ids": []string{input.KnowledgeID},
 		},
 	}, nil
 }

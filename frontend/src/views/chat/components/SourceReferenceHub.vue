@@ -449,7 +449,10 @@ function openKnowledgeDocumentInNewTab() {
   if (!knowledgeDrawer.value.knowledgeBaseId || !knowledgeDrawer.value.knowledgeId) return
   router.push({
     path: `/platform/knowledge-bases/${knowledgeDrawer.value.knowledgeBaseId}`,
-    query: { knowledge_id: knowledgeDrawer.value.knowledgeId },
+    query: {
+      knowledge_id: knowledgeDrawer.value.knowledgeId,
+      chunk_id: knowledgeDrawer.value.chunkId || undefined,
+    },
   })
 }
 

@@ -43,7 +43,6 @@ export interface CustomAgentConfig {
   max_completion_tokens?: number;   // 最大生成token数（普通模式）
   thinking?: boolean;                      // 是否启用思考模式（支持扩展思考的模型）
   enable_artifacts?: boolean;       // 通用智能体是否允许生成产物
-
   // ===== Agent模式设置 =====
   max_iterations?: number;          // 最大迭代次数
   llm_call_timeout?: number;        // LLM调用超时时间（秒）

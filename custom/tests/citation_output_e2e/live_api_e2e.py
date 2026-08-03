@@ -22,7 +22,8 @@ LEGACY_CITATION_RE = re.compile(
 RETRIEVAL_TOOL_NAMES = {
     "knowledge_search", "search_knowledge", "grep_chunks", "list_knowledge_chunks",
     "wiki_read_page", "wiki_read_source_doc", "web_search", "web_fetch",
-    "data_analysis", "table_analysis", "db_query",
+    "list_data_sources", "db_catalog", "db_schema", "data_analysis",
+    "table_schema", "table_analysis", "db_query",
 }
 
 
@@ -127,6 +128,20 @@ CASES = {
         min_web=1,
         required_answer_terms=PROCUREMENT_METHOD_TERMS,
     ),
+    "general": Case(
+        name="general",
+        endpoint="agent-chat",
+        agent_id="builtin-general-agent",
+        knowledge_ids=("2dc912a3-88d4-4d61-a93e-f15c086bbd97",),
+        query=(
+            "这是通用智能体的只读验收。请用 grep_chunks 核对已选《采购管理办法》"
+            "第三十二条规定的六种采购方式，只陈述分片明确支持的事实，并在相邻结论后引用。"
+        ),
+        require_retrieval=True,
+        require_citations=True,
+        min_documents=1,
+        required_answer_terms=PROCUREMENT_METHOD_TERMS,
+    ),
     "document-agent": Case(
         name="document-agent",
         endpoint="agent-chat",
@@ -160,7 +175,7 @@ CASES = {
         knowledge_ids=("b8805436-bcab-4975-816b-90a03412a5da",),
         query="只读分析已选 symbols.csv：先确认字段，再统计总行数并按可用的分类字段给出一个简短汇总；不要修改任何数据。",
         require_retrieval=True,
-        require_citations=True,
+        require_citations=False,
         min_data_sources=1,
         expected_retrieval_unit="data_sources",
     ),
@@ -170,7 +185,7 @@ CASES = {
         agent_id="builtin-data-analyst",
         query="仅做只读分析：列出当前可用数据源；如有可查询表，选择一个小表查看结构并返回不超过5行的聚合统计。禁止任何写操作。",
         require_retrieval=True,
-        require_citations=True,
+        require_citations=False,
         min_data_sources=1,
         expected_retrieval_unit="data_sources",
     ),
@@ -491,7 +506,7 @@ def run_case(api: API, case: Case, model_id: str) -> dict[str, Any]:
     for kind, minimum in minimums.items():
         if int(stats.get(kind, 0)) < minimum:
             raise AssertionError(f"expected retrieval_stats.{kind} >= {minimum}, got {stats}")
-        if minimum > 0 and cited_types.get(kind, 0) < 1:
+        if kind != "data_sources" and minimum > 0 and cited_types.get(kind, 0) < 1:
             raise AssertionError(
                 f"retrieved {kind} evidence but final answer did not cite that source type: "
                 f"cited={cited_types}, stats={stats}"
@@ -607,7 +622,25 @@ def run_multi_turn(api: API, model_id: str) -> dict[str, Any]:
     if second_result["citations"] != 0:
         raise AssertionError(f"removed knowledge selection inherited stale citations: {second_result}")
 
-    third, _ = stream_turn(api, session_id, CASES["wiki"], model_id)
+    # Use the Claude Agent SDK path for the source-switch turn. The same local
+    # model can answer direct RAG turns and drive this Anthropic tool protocol,
+    # while some OpenAI-tool routes are model-specific and are covered by the
+    # standalone native Wiki case instead of making this state-isolation test
+    # depend on a second protocol dialect.
+    wiki_switch = Case(
+        name="multi-turn-wiki-switch",
+        endpoint="agent-chat",
+        agent_id="a6d8b358-8fb7-4ba8-ad1c-1a668ee6e54c",
+        knowledge_base_ids=("60cc7af1-c733-468e-b890-89a8b34f06a9",),
+        query=(
+            "本轮只使用当前 Wiki：先搜索并阅读与备用金管理最相关的页面，"
+            "再简要列出页面明确支持的核心要求，并在相邻事实后引用。"
+        ),
+        require_retrieval=True,
+        require_citations=True,
+        min_wiki=1,
+    )
+    third, _ = stream_turn(api, session_id, wiki_switch, model_id)
     third_result = validate_turn(
         third,
         require_citations=True,

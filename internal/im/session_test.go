@@ -294,23 +294,29 @@ func TestPickIMStoredAnswerPrefersFirstNonEmpty(t *testing.T) {
 	}
 }
 
-func TestMergeIMAgentAnswerBuffersUsesLiveThenComplete(t *testing.T) {
+func TestMergeIMAgentAnswerBuffersPrefersCompleteFinal(t *testing.T) {
 	var builder, outer, live strings.Builder
+	builder.WriteString("streamed draft")
+	outer.WriteString("outer draft")
 	live.WriteString("live answer")
 
 	mergeIMAgentAnswerBuffers(&builder, &outer, &live, "complete final")
-	if builder.String() != "live answer" {
-		t.Fatalf("builder = %q, want live answer", builder.String())
+	if builder.String() != "complete final" {
+		t.Fatalf("builder = %q, want complete final", builder.String())
 	}
-	if outer.String() != "live answer" {
-		t.Fatalf("outer = %q, want live answer", outer.String())
+	if outer.String() != "complete final" {
+		t.Fatalf("outer = %q, want complete final", outer.String())
+	}
+	if live.Len() != 0 {
+		t.Fatalf("live answer was not cleared: %q", live.String())
 	}
 
 	builder.Reset()
 	outer.Reset()
 	live.Reset()
-	mergeIMAgentAnswerBuffers(&builder, &outer, &live, "complete final")
-	if builder.String() != "complete final" {
-		t.Fatalf("builder = %q, want complete final", builder.String())
+	live.WriteString("live fallback")
+	mergeIMAgentAnswerBuffers(&builder, &outer, &live, "")
+	if builder.String() != "live fallback" || outer.String() != "live fallback" {
+		t.Fatalf("fallback buffers = (%q, %q), want live fallback", builder.String(), outer.String())
 	}
 }

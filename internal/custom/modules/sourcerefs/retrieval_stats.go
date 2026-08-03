@@ -131,18 +131,148 @@ func NormalizeRetrievalStats(stats types.RetrievalStats) types.RetrievalStats {
 // and future agents automatically reuse the same behavior.
 func RetrievalStatsForAgentSteps(stats types.RetrievalStats, steps types.AgentSteps) types.RetrievalStats {
 	stats = NormalizeRetrievalStats(stats)
-	if stats.Total > 0 {
-		return stats
-	}
+	dataSourceIDs := make(map[string]struct{})
+	declaredDataSourceCount := 0
+	dataSourceToolSeen := stats.Unit == RetrievalUnitDataSources || stats.DataSources > 0
 	for _, step := range steps {
 		for _, call := range step.ToolCalls {
-			if IsDataSourceToolName(call.Name) {
-				stats.Unit = RetrievalUnitDataSources
-				return stats
+			if !IsDataSourceToolName(call.Name) {
+				continue
+			}
+			dataSourceToolSeen = true
+			if call.Result == nil || !call.Result.Success {
+				continue
+			}
+			stats.Attempted = true
+			ids, declared := dataSourceIdentities(call.Result.Data)
+			for _, id := range ids {
+				dataSourceIDs[id] = struct{}{}
+			}
+			if declared > declaredDataSourceCount {
+				declaredDataSourceCount = declared
 			}
 		}
 	}
-	return stats
+	if len(dataSourceIDs) > stats.DataSources {
+		stats.DataSources = len(dataSourceIDs)
+	}
+	if declaredDataSourceCount > stats.DataSources {
+		stats.DataSources = declaredDataSourceCount
+	}
+	if dataSourceToolSeen {
+		stats.Unit = RetrievalUnitDataSources
+	}
+	return NormalizeRetrievalStats(stats)
+}
+
+// dataSourceIdentities reads compact, authoritative source coordinates from
+// structured-data tool results. It intentionally understands only the output
+// contract of data tools; a knowledge_id appearing in a document-search result
+// must never be counted as a database/table source.
+func dataSourceIdentities(data map[string]interface{}) ([]string, int) {
+	if data == nil {
+		return nil, 0
+	}
+	identities := make(map[string]struct{})
+	add := func(value interface{}) {
+		identity := strings.TrimSpace(stringValue(value))
+		if identity != "" {
+			identities[identity] = struct{}{}
+		}
+	}
+	addList := func(value interface{}) {
+		for _, identity := range interfaceStringSlice(value) {
+			add(identity)
+		}
+	}
+
+	addList(data["data_source_ids"])
+	addList(data["source_ids"])
+	declared := intValue(data["data_source_count"])
+
+	if source, ok := interfaceMap(data["source"]); ok {
+		add(source["data_source_id"])
+		add(source["source_id"])
+		add(source["knowledge_id"])
+		addList(source["data_source_ids"])
+		addList(source["source_ids"])
+		// Some connectors expose only stable display names. They still identify
+		// the actually queried sources more accurately than an anonymous count.
+		if len(identities) == 0 {
+			addList(source["source_names"])
+			add(source["source_name"])
+		}
+		if count := intValue(source["source_count"]); count > declared {
+			declared = count
+		}
+	}
+
+	for _, table := range interfaceMapSlice(data["tables"]) {
+		add(table["source_id"])
+	}
+	for _, source := range interfaceMapSlice(data["sources"]) {
+		before := len(identities)
+		add(source["source_id"])
+		add(source["id"])
+		if len(identities) == before {
+			add(source["name"])
+		}
+	}
+
+	out := make([]string, 0, len(identities))
+	for identity := range identities {
+		out = append(out, identity)
+	}
+	return out, declared
+}
+
+func interfaceMap(value interface{}) (map[string]interface{}, bool) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return typed, true
+	case map[string]string:
+		out := make(map[string]interface{}, len(typed))
+		for key, item := range typed {
+			out[key] = item
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func interfaceMapSlice(value interface{}) []map[string]interface{} {
+	switch typed := value.(type) {
+	case []map[string]interface{}:
+		return typed
+	case []interface{}:
+		out := make([]map[string]interface{}, 0, len(typed))
+		for _, item := range typed {
+			if mapped, ok := interfaceMap(item); ok {
+				out = append(out, mapped)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func interfaceStringSlice(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(stringValue(item)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // IsDataSourceToolName recognizes structured-data catalog/schema/query tools.
@@ -164,10 +294,12 @@ func IsDataSourceToolName(name string) bool {
 // claim-bearing document, Wiki, web, or structured-data evidence. Catalog-only
 // tools such as wiki_search and get_document_info intentionally do not count.
 func IsRetrievalToolName(name string) bool {
+	if IsDataSourceToolName(name) {
+		return true
+	}
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "knowledge_search", "search_knowledge", "grep_chunks", "list_knowledge_chunks",
-		"wiki_read_page", "wiki_read_source_doc", "web_search", "web_fetch",
-		"data_analysis", "table_analysis", "db_query":
+		"wiki_read_page", "wiki_read_source_doc", "web_search", "web_fetch":
 		return true
 	default:
 		return false

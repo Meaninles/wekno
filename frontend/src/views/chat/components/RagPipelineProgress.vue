@@ -180,6 +180,7 @@ import { RAG_PIPELINE_TOOL_NAMES } from '@/utils/rag-pipeline-history'
 import {
   formatCompletedRunDuration,
   isSimpleCompletedConversation,
+  retrievalDisplayCount,
   retrievalStatsFromMessage,
   usesDataSourceRetrievalUnit,
 } from '@/custom/modules/sourcerefs/retrievalSummary'
@@ -356,7 +357,8 @@ const collapsedSummaryHtml = computed(() => {
   }
   if (props.session?.is_completed && retrievalStats.value) {
     const dataSourceUnit = usesDataSourceRetrievalUnit(retrievalStats.value)
-    const hasResults = retrievalStats.value.total > 0
+    const retrievalCount = retrievalDisplayCount(retrievalStats.value)
+    const hasResults = retrievalCount > 0
     return t(
       hasResults
         ? (dataSourceUnit
@@ -366,7 +368,7 @@ const collapsedSummaryHtml = computed(() => {
             ? 'agentStream.ragPipeline.noDataSourceRetrievalSummary'
             : 'agentStream.ragPipeline.noRetrievalSummary'),
       {
-        count: `<strong>${retrievalStats.value.total}</strong>`,
+        count: `<strong>${retrievalCount}</strong>`,
         duration: `<strong>${formatCompletedRunDuration(totalDurationMs.value)}</strong>`,
       },
     )

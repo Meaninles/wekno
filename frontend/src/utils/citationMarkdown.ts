@@ -15,6 +15,7 @@ const SOURCE_CITATION_TAG_EXACT_RE = /^<src id="S[1-9][0-9]*" \/>$/
 const CITATION_LIKE_TAG_RE = /<\/?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*>/gi
 const MARKDOWN_CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
 const WIKI_HANDLE_RE = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g
+const ADJACENT_SAME_CITATION_RE = /(<src id="(S[1-9][0-9]*)" \/>)(\s*)<src id="\2" \/>/g
 
 /**
  * Hide a citation tag while the typewriter has only emitted part of it.
@@ -100,13 +101,20 @@ export function resolveCitationChunkId(
 export function stripUnsupportedCitationTags(content: string): string {
   if (!content) return content
 
-  const filterSegment = (segment: string): string => segment
-    .replace(CITATION_LIKE_TAG_RE, (tag) => (
+  const filterSegment = (segment: string): string => {
+    let filtered = segment.replace(CITATION_LIKE_TAG_RE, (tag) => (
       SOURCE_CITATION_TAG_EXACT_RE.test(tag) ? tag : ''
     ))
     .replace(WIKI_HANDLE_RE, (_value, slug: string, label?: string) => (
       String(label || slug || '').trim()
     ))
+    let previous = ''
+    while (filtered !== previous) {
+      previous = filtered
+      filtered = filtered.replace(ADJACENT_SAME_CITATION_RE, '$1')
+    }
+    return filtered
+  }
 
   let output = ''
   let start = 0

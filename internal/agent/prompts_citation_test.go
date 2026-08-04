@@ -12,7 +12,7 @@ func TestBuildSystemPromptAppliesCitationContractToCustomKnowledgeAgent(t *testi
 		"Custom agent instructions.",
 	)
 	if !strings.Contains(prompt, "[WEKNORA_CITATION_OUTPUT]") ||
-		!strings.Contains(prompt, `The only valid citation shape is <src id="S1" />`) {
+		!strings.Contains(prompt, `Copy the matching cite_exactly value verbatim`) {
 		t.Fatalf("custom knowledge agent did not receive the shared citation contract: %s", prompt)
 	}
 	if strings.Count(prompt, "[WEKNORA_CITATION_OUTPUT]") != 1 {

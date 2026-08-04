@@ -144,6 +144,29 @@ type SearchResult struct {
 	// For FAQ: this is the matched question text (standard or similar question)
 	MatchedContent string `json:"matched_content,omitempty"`
 
+	// MatchedSourceID identifies the concrete index record that matched. It is
+	// deliberately internal-only: generated-question vectors and other
+	// retrieval aids may point at a real document chunk, but they are not source
+	// evidence and must never be serialized as citation content.
+	MatchedSourceID string `json:"-" gorm:"-"`
+
+	// MatchOrigin classifies the retrieval text (chunk_body,
+	// generated_question, faq_question, auxiliary). Like MatchedSourceID it is
+	// diagnostic retrieval provenance, not user-visible evidence.
+	MatchOrigin string `json:"-" gorm:"-"`
+
+	// SourceTenantID is the owner tenant of the resolved source chunk. It stays
+	// internal and lets exact-evidence resolution safely read chunks returned
+	// from authorized shared-knowledge searches without treating the request
+	// tenant as the storage owner.
+	SourceTenantID uint64 `json:"-" gorm:"-"`
+
+	// EvidenceContent is the immutable, exact claim-bearing snapshot represented
+	// by ID/chunk_id. SearchResult.Content may be expanded or merged for model
+	// context; citation persistence and every presentation surface must use this
+	// field instead. It is populated only after exact evidence resolution.
+	EvidenceContent string `json:"evidence_content,omitempty" gorm:"-"`
+
 	// KnowledgeDescription is the description of the knowledge document
 	KnowledgeDescription string `json:"knowledge_description,omitempty"`
 

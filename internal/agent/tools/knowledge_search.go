@@ -1091,6 +1091,20 @@ func (t *KnowledgeSearchTool) formatOutput(
 		}, nil
 	}
 
+	exactInputs := make([]*types.SearchResult, 0, len(results))
+	for _, result := range results {
+		if result != nil && result.SearchResult != nil {
+			exactInputs = append(exactInputs, result.SearchResult)
+		}
+	}
+	tenantID, _ := types.TenantIDFromContext(ctx)
+	exactReferences, err := sourcerefs.ResolveQuickAnswerEvidence(
+		ctx, t.chunkService.GetRepository(), tenantID, exactInputs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve exact knowledge-search evidence: %w", err)
+	}
+
 	// Count results by KB
 	kbCounts := make(map[string]int)
 	for _, r := range results {
@@ -1258,7 +1272,11 @@ func (t *KnowledgeSearchTool) formatOutput(
 			if snippet != "" {
 				ob.WriteString(fmt.Sprintf("<match_snippet>%s</match_snippet>\n", xmlEscape(snippet)))
 			}
-			ob.WriteString(fmt.Sprintf("<content>%s</content>\n", result.Content))
+			exactModelContent := renderKnowledgeSearchExactEvidence(result, exactReferences)
+			if strings.TrimSpace(exactModelContent) == "" && strings.TrimSpace(result.Content) != "" {
+				return nil, fmt.Errorf("render exact knowledge-search evidence for result %s", result.ID)
+			}
+			ob.WriteString(fmt.Sprintf("<content>%s</content>\n", exactModelContent))
 
 			if result.ImageInfo != "" {
 				var imageInfos []types.ImageInfo
@@ -1377,10 +1395,57 @@ func (t *KnowledgeSearchTool) formatOutput(
 	}
 
 	return &types.ToolResult{
-		Success: true,
-		Output:  output,
-		Data:    data,
+		Success:          true,
+		Output:           output,
+		Data:             data,
+		SourceReferences: sourcerefs.CitableReferences(exactReferences),
 	}, nil
+}
+
+func renderKnowledgeSearchExactEvidence(
+	result *searchResultWithMeta,
+	exactReferences []*types.SearchResult,
+) string {
+	if result == nil || result.SearchResult == nil {
+		return ""
+	}
+	allowedIDs := make(map[string]struct{}, len(result.SubChunkID)+1)
+	allowedIDs[result.ID] = struct{}{}
+	for _, id := range result.SubChunkID {
+		allowedIDs[id] = struct{}{}
+	}
+	var builder strings.Builder
+	for _, ref := range exactReferences {
+		if ref == nil || ref.KnowledgeID != result.KnowledgeID {
+			continue
+		}
+		matches := false
+		switch {
+		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText):
+			matches = ref.ParentChunkID == result.ParentChunkID
+		case result.ParentChunkID != "" &&
+			(result.ChunkType == string(types.ChunkTypeImageOCR) || result.ChunkType == string(types.ChunkTypeImageCaption)):
+			matches = ref.ID == result.ParentChunkID
+		default:
+			_, matches = allowedIDs[ref.ID]
+		}
+		if !matches || strings.TrimSpace(ref.EvidenceContent) == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		if sourcerefs.IsSupportedCitationReference(ref) {
+			fmt.Fprintf(&builder, "[EXACT_FRAGMENT chunk_id=\"%s\"]\n", ref.ID)
+			builder.WriteString(strings.TrimSpace(ref.EvidenceContent))
+			builder.WriteString("\n[/EXACT_FRAGMENT]")
+		} else {
+			builder.WriteString("[ANALYSIS_CONTEXT]\n")
+			builder.WriteString(strings.TrimSpace(ref.EvidenceContent))
+			builder.WriteString("\n[/ANALYSIS_CONTEXT]")
+		}
+	}
+	return builder.String()
 }
 
 func writeModelSourceLocator(builder *strings.Builder, locator types.JSON) {

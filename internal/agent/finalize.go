@@ -85,7 +85,7 @@ User question: %s
 
 Requirements:
 1. Answer based on the actually retrieved content
-2. When AVAILABLE_CITATIONS are provided, copy the matching cite_exactly value verbatim immediately after each directly supported sentence or paragraph. The only valid shape is <src id="S1" />, changing only the S-number to an available ID. Never use another citation syntax or expose internal identifiers. Each document source is one specific fragment, so cite only the fragment that supports the adjacent claim; use a reasonable minimum and do not collect citations at the bottom.
+2. When AVAILABLE_CITATIONS are provided, copy the matching cite_exactly value verbatim immediately after each directly supported sentence or paragraph. Each document source is one specific fragment, so choose the fragment that supports the adjacent claim and use a reasonable minimum.
 3. Organize the answer in a structured format
 4. If information is insufficient, honestly state so
 5. IMPORTANT: Respond in the same language as the user's question

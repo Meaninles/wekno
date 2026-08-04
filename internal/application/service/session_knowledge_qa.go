@@ -1176,16 +1176,20 @@ func (s *sessionService) consumeFallbackStream(
 // `references` SSE event. Must run before CHAT_COMPLETION_STREAM so citations
 // arrive while the connection is still open (complete closes the stream).
 func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatManage) {
-	if chatManage == nil || chatManage.EventBus == nil || len(chatManage.MergeResult) == 0 {
+	if chatManage == nil || chatManage.EventBus == nil {
 		return
 	}
-	logger.Infof(ctx, "Emitting references event with %d results (pre-answer)", len(chatManage.MergeResult))
+	refs := sourcerefs.CitableReferences(chatManage.CitationResult)
+	if len(refs) == 0 {
+		return
+	}
+	logger.Infof(ctx, "Emitting references event with %d exact evidence fragments (pre-answer)", len(refs))
 	if err := chatManage.EventBus.Emit(ctx, types.Event{
 		ID:        generateEventID("references"),
 		Type:      types.EventType(event.EventAgentReferences),
 		SessionID: chatManage.SessionID,
 		Data: event.AgentReferencesData{
-			References: chatManage.MergeResult,
+			References: refs,
 		},
 	}); err != nil {
 		logger.Errorf(ctx, "Failed to emit references event: %v", err)

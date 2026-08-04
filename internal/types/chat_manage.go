@@ -108,9 +108,13 @@ type PipelineState struct {
 	Intent       QueryIntent `json:"intent,omitempty"`
 	History      []*History  `json:"history,omitempty"`
 
-	SearchResult         []*SearchResult   `json:"-"`
-	RerankResult         []*SearchResult   `json:"-"`
-	MergeResult          []*SearchResult   `json:"-"`
+	SearchResult []*SearchResult `json:"-"`
+	RerankResult []*SearchResult `json:"-"`
+	MergeResult  []*SearchResult `json:"-"`
+	// CitationResult contains exact, independently citable evidence units. It is
+	// intentionally separate from MergeResult, whose Content may contain parent,
+	// neighbor or overlap-expanded model context.
+	CitationResult       []*SearchResult   `json:"-"`
 	Entity               []string          `json:"-"`
 	EntityKBIDs          []string          `json:"-"`
 	EntityKnowledge      map[string]string `json:"-"`

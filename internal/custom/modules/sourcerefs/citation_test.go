@@ -11,6 +11,7 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 	refs := []*types.SearchResult{
 		{
 			ID:              "chunk-1",
+			Content:         "第一段证据",
 			KnowledgeID:     "doc-1",
 			KnowledgeBaseID: "kb-1",
 			KnowledgeTitle:  "堡垒机",
@@ -21,6 +22,7 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 		},
 		{
 			ID:              "chunk-2",
+			Content:         "第二段证据",
 			KnowledgeID:     "doc-1",
 			KnowledgeBaseID: "kb-1",
 			KnowledgeTitle:  "堡垒机",
@@ -69,6 +71,7 @@ func TestAssignCitationIDsSeparatesKnowledgeChunksWithinDocument(t *testing.T) {
 	if block := RenderEvidenceBlock(refs[0], "claim-bearing content", map[string]string{"match": "exact"}); !strings.Contains(block, `[EVIDENCE id=S1 type=document_fragment`) ||
 		!strings.Contains(block, `collection="公司制度1"`) || !strings.Contains(block, `match=exact`) ||
 		!strings.Contains(block, `citation_handle_for_this_evidence: <src id="S1" />`) ||
+		strings.Index(block, `citation_handle_for_this_evidence`) < strings.Index(block, "claim-bearing content") ||
 		strings.Contains(block, `chunk_id`) || strings.Contains(block, `<document`) {
 		t.Fatalf("evidence block should use the citation id without alternate XML citation shapes, got %s", block)
 	}
@@ -83,6 +86,7 @@ func TestPlaceTerminalCitationInstructionIsEvidenceAwareIdempotentAndLast(t *tes
 		KnowledgeID:     "doc-1",
 		KnowledgeBaseID: "kb-1",
 		Content:         "claim",
+		ChunkType:       string(types.ChunkTypeText),
 		Metadata:        map[string]string{},
 	}}
 	AssignCitationIDs(refs)
@@ -108,10 +112,11 @@ func TestPlaceTerminalCitationInstructionIsEvidenceAwareIdempotentAndLast(t *tes
 	}
 }
 
-func TestAssignCitationIDsFallsBackToDocumentWhenNoChunkID(t *testing.T) {
+func TestAssignCitationIDsRejectsDocumentLevelKnowledgeWithoutFragment(t *testing.T) {
 	refs := []*types.SearchResult{
 		{
 			ID:              "doc-1",
+			Content:         "只有文档级内容",
 			KnowledgeID:     "doc-1",
 			KnowledgeBaseID: "kb-1",
 			KnowledgeTitle:  "堡垒机",
@@ -119,6 +124,7 @@ func TestAssignCitationIDsFallsBackToDocumentWhenNoChunkID(t *testing.T) {
 		},
 		{
 			ID:              "doc-1",
+			Content:         "只有文档级内容",
 			KnowledgeID:     "doc-1",
 			KnowledgeBaseID: "kb-1",
 			KnowledgeTitle:  "堡垒机",
@@ -127,14 +133,8 @@ func TestAssignCitationIDsFallsBackToDocumentWhenNoChunkID(t *testing.T) {
 	}
 
 	sources := AssignCitationIDs(refs)
-	if len(sources) != 1 {
-		t.Fatalf("sources len = %d, want 1", len(sources))
-	}
-	if got := refs[1].Metadata[MetadataCitationID]; got != "S1" {
-		t.Fatalf("second citation id = %q, want S1", got)
-	}
-	if got := refs[0].Metadata[MetadataChunkID]; got != "" {
-		t.Fatalf("metadata chunk id = %q, want empty", got)
+	if len(sources) != 0 || CitationID(refs[0]) != "" || CitationID(refs[1]) != "" {
+		t.Fatalf("document-level knowledge escaped the fragment citation boundary: %#v", sources)
 	}
 }
 
@@ -142,6 +142,7 @@ func TestAssignCitationIDsUsesDistinctWikiSlug(t *testing.T) {
 	refs := []*types.SearchResult{
 		{
 			ID:              "wiki:kb-1:ops/bastion",
+			Content:         "堡垒机页面正文",
 			KnowledgeBaseID: "kb-1",
 			KnowledgeTitle:  "堡垒机",
 			ChunkType:       "wiki_page",
@@ -164,8 +165,8 @@ func TestAssignCitationIDsUsesDistinctWikiSlug(t *testing.T) {
 func TestEnsureGenerationContractIsSharedAndIdempotent(t *testing.T) {
 	got := EnsureGenerationContract("You are an assistant.")
 	if !strings.Contains(got, generationContractMarker) ||
-		!strings.Contains(got, `The only valid citation shape is <src id="S1" />`) ||
-		!strings.Contains(got, `never derive it from rank, sequence, chunk_index, result position`) ||
+		!strings.Contains(got, `Copy the matching cite_exactly value verbatim`) ||
+		!strings.Contains(got, `Treat each S-number as an opaque evidence handle`) ||
 		!strings.Contains(got, `A prior turn's output format, ending, or citation constraint is inactive`) ||
 		!strings.Contains(got, `each paragraph containing substantive evidence-derived facts`) {
 		t.Fatalf("generation contract missing canonical positive instruction: %s", got)
@@ -175,30 +176,11 @@ func TestEnsureGenerationContractIsSharedAndIdempotent(t *testing.T) {
 	}
 }
 
-func TestEnsureGenerationContractRemovesPersistedLegacyCitationInstructions(t *testing.T) {
-	legacy := `### Final Output Standards
-*   **Definitive:** Use retrieved content.
-*   **Sourced (Inline Citations):** Factual claims must use <kb doc="A" chunk_id="x" /> or <web url="https://example.com" />.
-	**Citation rules (STRICT):**
-	- CORRECT: claim.<kb doc="A" chunk_id="x" />
-	- WRONG: <web url="https://example.com" />
-*   **Structured:** Clear hierarchy.
-*   **Tools:** Keep <web_search> protocol metadata.`
-
-	got := EnsureGenerationContract(legacy)
-	if strings.Contains(got, `<kb `) || strings.Contains(got, `<web `) {
-		t.Fatalf("legacy citation syntax remained model-visible: %s", got)
-	}
-	for _, expected := range []string{
-		`*   **Structured:** Clear hierarchy.`,
-		`<web_search> protocol metadata`,
-		`The only valid citation shape is <src id="S1" />`,
-	} {
-		if !strings.Contains(got, expected) {
-			t.Fatalf("normalized prompt missing %q: %s", expected, got)
+func TestGenerationContractContainsOnlyTheCanonicalPositiveProtocol(t *testing.T) {
+	got := EnsureGenerationContract("You are an assistant.")
+	for _, forbidden := range []string{`<kb `, `<web `, `Never use another citation`, `CORRECT:`, `WRONG:`} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("generation prompt primes an obsolete or negative citation form %q: %s", forbidden, got)
 		}
-	}
-	if twice := EnsureGenerationContract(got); twice != got {
-		t.Fatalf("legacy normalization is not idempotent:\nfirst=%s\nsecond=%s", got, twice)
 	}
 }

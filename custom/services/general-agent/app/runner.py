@@ -1225,7 +1225,11 @@ class ArtifactStore:
 FINAL_ANSWER_SOURCE_CITATION_RULE = (
     'When an evidence-producing tool returned source_references, content must copy each matching '
     'cite_exactly value (for example <src id="S1" />) verbatim immediately after the factual '
-    'sentence or paragraph it supports.'
+    'sentence or paragraph it supports. Select that handle by matching the actual words and facts '
+    'in its evidence block to the claim. When one evidence item supports a whole list, select the '
+    'evidence block that contains the listed facts and place its handle once immediately after the '
+    'final list item. An evidence-based final answer is complete '
+    'only when its supported claims carry their matching handles.'
 )
 
 
@@ -2795,7 +2799,7 @@ Available capabilities:
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
 - Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. This is still one generation run; do not request or perform a second validation or regeneration pass.
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
-- Source citation contract: when a WeKnora tool result includes `source_references`, those entries are the only evidence handles you may cite. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports. The only valid citation shape is `<src id="S1" />`; change only the S-number by copying an available handle. Never use another citation element, attribute, identifier, URL, footnote, or bibliography. Search/catalog entries without claim-bearing content are not evidence. Each knowledge source is one specific document fragment, not the whole document. A document title and its knowledge-base/collection membership are different facts: claim membership only when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, but do not cite pure framing, analysis, or transitions; do not repeat the same source within one paragraph, and include multiple handles only when each materially supports that paragraph. Generate the answer once; the runtime never asks the model to validate or regenerate citations.
+- Source citation contract: a WeKnora tool result's `source_references` are claim-bearing evidence handles. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports; each supplied value uses the canonical form `<src id="S1" />` with its own S-number. Treat each S-number as an opaque handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. Each knowledge source is one specific document fragment. A document title and its knowledge-base/collection membership are different facts: claim membership when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited. Generate the answer once; the runtime never asks the model to validate or regenerate citations.
 - Artifact review: if you produce artifacts, review them from the user's perspective before final delivery, including format, layout, colors, typography, font sizes, readability, aesthetics, and fit to the original request. If you find issues, make one correction pass.
 - Review limit: perform the review-and-correction step at most once. If the review finds no issue, deliver the final answer directly; if it finds issues, correct them once and then deliver the result.
 {artifact_review_policy}
@@ -3846,8 +3850,11 @@ def _annotate_evidence_output(output: str, sources: Any) -> str:
         block_at = annotated.rfind("<wiki_page>", 0, anchor_at)
         if block_at < 0:
             continue
+        block_end = annotated.find("</wiki_page>", block_at)
+        if block_end >= 0 and f"citation_handle_for_this_evidence: {handle}" in annotated[block_at:block_end]:
+            continue
         insert_at = block_at + len("<wiki_page>")
-        insertions.append((insert_at, f"\n<citation_handle_for_this_evidence>{handle}</citation_handle_for_this_evidence>"))
+        insertions.append((insert_at, f"\ncitation_handle_for_this_evidence: {handle}"))
     for insert_at, marker in sorted(insertions, reverse=True):
         annotated = annotated[:insert_at] + marker + annotated[insert_at:]
     return annotated

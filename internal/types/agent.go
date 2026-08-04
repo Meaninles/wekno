@@ -229,6 +229,13 @@ type ToolResult struct {
 	Data    map[string]interface{} `json:"data,omitempty"`   // Structured data for programmatic use
 	Error   string                 `json:"error,omitempty"`  // Error message if execution failed
 	Images  []string               `json:"images,omitempty"` // Base64 data URIs from tool (e.g. MCP image content)
+
+	// SourceReferences carries authoritative, claim-bearing source snapshots
+	// from a tool to the shared citation registry. It is deliberately excluded
+	// from generic tool JSON: every chat/agent/IM surface receives references
+	// through the dedicated references event and final message projection.
+	// Tools that do not populate it continue through the shared result extractor.
+	SourceReferences []*SearchResult `json:"-"`
 }
 
 // ToolCall represents a single tool invocation within an agent step

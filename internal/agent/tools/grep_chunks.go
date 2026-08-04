@@ -206,8 +206,9 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	output := t.formatOutput(ctx, finalResults, queries, compiled)
 
 	return &types.ToolResult{
-		Success: true,
-		Output:  output,
+		Success:          true,
+		Output:           output,
+		SourceReferences: buildGrepSourceReferences(finalResults, compiled),
 		Data: map[string]interface{}{
 			"query":              query,
 			"queries":            queries, // legacy alias for older frontends
@@ -223,6 +224,45 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			"display_type":       "grep_results",
 		},
 	}, nil
+}
+
+// buildGrepSourceReferences keeps the display/model payload compact while
+// binding each grep hit to its real physical chunk. A text hit stores the full
+// DB chunk; an FAQ stores the authoritative question/answer excerpt that the
+// model actually read because question-only FAQ indexes omit answers in the
+// chunk body.
+func buildGrepSourceReferences(results []chunkWithTitle, compiled []*regexp.Regexp) []*types.SearchResult {
+	refs := make([]*types.SearchResult, 0, len(results))
+	for _, result := range results {
+		content := result.Content
+		if result.ChunkType == types.ChunkTypeFAQ {
+			content = extractChunkMatchSnippet(&result.Chunk, compiled)
+		}
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		refs = append(refs, &types.SearchResult{
+			ID:                result.ID,
+			Content:           content,
+			EvidenceContent:   content,
+			KnowledgeID:       result.KnowledgeID,
+			KnowledgeTitle:    result.KnowledgeTitle,
+			KnowledgeBaseID:   result.KnowledgeBaseID,
+			KnowledgeFilename: result.KnowledgeTitle,
+			ChunkIndex:        result.ChunkIndex,
+			StartAt:           result.StartAt,
+			EndAt:             result.EndAt,
+			ChunkType:         string(result.ChunkType),
+			ParentChunkID:     result.ParentChunkID,
+			SourceTenantID:    result.TenantID,
+			SourceLocator:     append(types.JSON(nil), result.SourceLocator...),
+			ChunkMetadata:     append(types.JSON(nil), result.Metadata...),
+			Metadata: map[string]string{
+				"source_type": sourcerefs.SourceTypeKnowledge,
+			},
+		})
+	}
+	return refs
 }
 
 type chunkWithTitle struct {

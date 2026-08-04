@@ -80,8 +80,8 @@ func TestIntoChatMessage_WithMergeResults(t *testing.T) {
 		},
 		PipelineState: types.PipelineState{
 			MergeResult: []*types.SearchResult{
-				{ID: "chunk-a", KnowledgeID: "doc-a", KnowledgeTitle: "A", Content: "chunk A content"},
-				{ID: "chunk-b", KnowledgeID: "doc-b", KnowledgeTitle: "B", Content: "chunk B content"},
+				{ID: "chunk-a", KnowledgeID: "doc-a", KnowledgeBaseID: "kb-a", KnowledgeTitle: "A", Content: "chunk A content", MatchedContent: "generated retrieval question", ChunkType: string(types.ChunkTypeText)},
+				{ID: "chunk-b", KnowledgeID: "doc-b", KnowledgeBaseID: "kb-b", KnowledgeTitle: "B", Content: "chunk B content", ChunkType: string(types.ChunkTypeText)},
 			},
 		},
 	}
@@ -105,6 +105,9 @@ func TestIntoChatMessage_WithMergeResults(t *testing.T) {
 	}
 	if !contains(cm.UserContent, "chunk A content") {
 		t.Errorf("UserContent should contain chunk A, got: %s", cm.UserContent)
+	}
+	if contains(cm.UserContent, "generated retrieval question") || len(cm.CitationResult) != 2 || cm.CitationResult[0].EvidenceContent != "chunk A content" {
+		t.Errorf("retrieval aids must not become model or presentation evidence: content=%s refs=%#v", cm.UserContent, cm.CitationResult)
 	}
 	for _, expected := range []string{
 		`[AVAILABLE_CITATIONS]`,

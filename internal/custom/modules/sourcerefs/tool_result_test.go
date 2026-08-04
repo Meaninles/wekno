@@ -69,6 +69,12 @@ func TestRegisterToolResultExposesStableFragmentHandleAndCoordinates(t *testing.
 	if strings.Contains(result.Output, "tool_result_position") || strings.Contains(result.Output, "[AVAILABLE_CITATIONS]") {
 		t.Fatalf("resolved evidence should be annotated inline without an ordinal/catalog ambiguity: %s", result.Output)
 	}
+	contentAt := strings.Index(result.Output, "5.3.1要求")
+	handleAt := strings.Index(result.Output, `citation_handle_for_this_evidence: <src id="S1" />`)
+	closeAt := strings.Index(result.Output, "</chunk>")
+	if contentAt < 0 || handleAt < contentAt || closeAt < handleAt {
+		t.Fatalf("handle must follow its evidence and remain inside the chunk: %s", result.Output)
+	}
 	if strings.Contains(result.Output, "[CITATION_USE]") {
 		t.Fatalf("terminal contract must be added once at generation time, not per tool result: %s", result.Output)
 	}
@@ -185,6 +191,33 @@ Content: 网页内容`
 		if !strings.Contains(annotated, expected) {
 			t.Fatalf("missing %q from annotated output: %s", expected, annotated)
 		}
+	}
+}
+
+func TestAttachCitationHandlePrefersExactFragmentBoundary(t *testing.T) {
+	ref := &types.SearchResult{
+		ID: "child-2", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+		Content: "第二段", EvidenceContent: "第二段", ChunkType: string(types.ChunkTypeText),
+		Metadata: map[string]string{"source_type": SourceTypeKnowledge},
+	}
+	AssignCitationIDs([]*types.SearchResult{ref})
+	output := `<chunk chunk_id="child-2">
+<content>[EXACT_FRAGMENT chunk_id="child-1"]
+第一段
+[/EXACT_FRAGMENT]
+[EXACT_FRAGMENT chunk_id="child-2"]
+第二段
+[/EXACT_FRAGMENT]</content>
+</chunk>`
+	annotated, unresolved := AttachCitationHandlesToEvidence(output, []*types.SearchResult{ref})
+	if len(unresolved) != 0 {
+		t.Fatalf("exact fragment handle was unresolved: %#v", unresolved)
+	}
+	marker := `citation_handle_for_this_evidence: <src id="S1" />`
+	exactAt := strings.Index(annotated, `[EXACT_FRAGMENT chunk_id="child-2"]`)
+	markerAt := strings.Index(annotated, marker)
+	if exactAt < 0 || markerAt < exactAt {
+		t.Fatalf("handle attached to aggregate wrapper instead of exact child: %s", annotated)
 	}
 }
 

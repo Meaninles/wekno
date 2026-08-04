@@ -120,25 +120,53 @@ func TestExtractFromToolResultRequiresClaimBearingEvidence(t *testing.T) {
 	}
 }
 
+func TestExtractFromToolResultPrefersAuthoritativeInternalReferences(t *testing.T) {
+	exact := &types.SearchResult{
+		ID: "chunk-32", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+		ChunkType: string(types.ChunkTypeText), Content: "第三十二条真实分片", EvidenceContent: "第三十二条真实分片",
+		Metadata: map[string]string{"source_type": SourceTypeKnowledge},
+	}
+	result := &types.ToolResult{
+		Success:          true,
+		SourceReferences: []*types.SearchResult{exact},
+		Data: map[string]interface{}{
+			"display_type": "grep_results",
+			"chunk_results": []interface{}{map[string]interface{}{
+				"chunk_id": "chunk-32", "knowledge_id": "doc-1", "knowledge_base_id": "kb-1",
+				"match_snippet": "仅供界面展示的短预览",
+			}},
+		},
+	}
+	refs := ExtractFromToolResult("grep_chunks", result)
+	if len(refs) != 1 || refs[0].EvidenceContent != exact.EvidenceContent || refs[0].Content == "仅供界面展示的短预览" {
+		t.Fatalf("display-oriented snippet replaced exact evidence: %#v", refs)
+	}
+}
+
 func TestRegistryRefreshesEvidenceSnapshotWithoutChangingHandle(t *testing.T) {
 	registry := NewRegistry()
 	first := &types.SearchResult{
 		ID: "https://Example.com/CaseSensitive", Content: "搜索摘要", KnowledgeTitle: "原始网页标题",
-		ChunkType: "web_search", Metadata: map[string]string{"source_type": SourceTypeWeb, "url": "https://Example.com/CaseSensitive"},
+		ChunkType: "web_search", Metadata: map[string]string{"source_type": SourceTypeWeb, "url": "https://Example.com/CaseSensitive", MetadataEvidenceLevel: "search_snippet"},
 	}
 	registry.Register([]*types.SearchResult{first})
 	firstHash := first.Metadata[MetadataEvidenceHash]
 	second := &types.SearchResult{
 		ID: "https://example.com/CaseSensitive", Content: "完整网页正文", KnowledgeTitle: "example.com",
-		ChunkType: "web_search", Metadata: map[string]string{"source_type": SourceTypeWeb, "url": "https://example.com/CaseSensitive"},
+		ChunkType: "web_search", Metadata: map[string]string{"source_type": SourceTypeWeb, "url": "https://example.com/CaseSensitive", MetadataEvidenceLevel: "full_page"},
 	}
 	sources := registry.Register([]*types.SearchResult{second})
+	lateSnippet := &types.SearchResult{
+		ID: "https://example.com/CaseSensitive", Content: "后续较短摘要", KnowledgeTitle: "example.com",
+		ChunkType: "web_search", Metadata: map[string]string{"source_type": SourceTypeWeb, "url": "https://example.com/CaseSensitive", MetadataEvidenceLevel: "search_snippet"},
+	}
+	registry.Register([]*types.SearchResult{lateSnippet})
 	snapshots := registry.SnapshotReferences()
-	if CitationID(first) != "S1" || CitationID(second) != "S1" || len(snapshots) != 1 {
+	if CitationID(first) != "S1" || CitationID(second) != "S1" || CitationID(lateSnippet) != "S1" || len(snapshots) != 1 {
 		t.Fatalf("same normalized URL did not retain one handle: first=%q second=%q snapshots=%d", CitationID(first), CitationID(second), len(snapshots))
 	}
 	if snapshots[0].Content != "完整网页正文" || snapshots[0].Metadata[MetadataEvidenceHash] == firstHash {
-		t.Fatalf("latest evidence snapshot was not retained: %#v", snapshots[0])
+		t.Fatalf("highest-quality evidence snapshot was not retained: %#v", snapshots[0])
 	}
 	if len(sources) != 1 || sources[0].Title != "原始网页标题" {
 		t.Fatalf("useful source title was downgraded: %#v", sources)

@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weknora-postgres
+  namespace: weknora
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres
+          resources:
+            requests:
+              cpu: "3"
+              memory: 8Gi
+            limits:
+              cpu: "6"
+              memory: 12Gi
+          volumeMounts:
+            - name: postgres-shm
+              mountPath: /dev/shm
+      volumes:
+        - name: postgres-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi

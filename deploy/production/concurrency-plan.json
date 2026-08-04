@@ -1,0 +1,323 @@
+{
+  "schema_version": 2,
+  "generated_for": "2026-08-04 stop-the-world production release",
+  "constraints": {
+    "reuse_existing_nodes_only": true,
+    "database_backup_required": true,
+    "file_backup_required": false,
+    "source_objects_must_remain_unchanged": true,
+    "postgres_max_connections": 100,
+    "postgres_connection_budget_percent": 60,
+    "primary_chat_running_limit": 48,
+    "primary_chat_waiting_limit": 52,
+    "primary_chat_admitted_limit": 100
+  },
+  "document_pipeline": {
+    "parse_replicas": 3,
+    "document_workflows_per_parse_replica": 4,
+    "docreader_replicas": 3,
+    "docreader_workers_per_replica": 4,
+    "split_workers_per_parse_replica": 4,
+    "split_per_document_window": 4,
+    "derivative_replicas": 2,
+    "derivative_consumers_per_replica": 18,
+    "wiki_replicas": 2,
+    "wiki_consumers_per_replica": 6,
+    "multimodal_consumers_per_parse_replica": 4,
+    "embedding_pool_size_per_parse_replica": 12,
+    "embedding_batch_size": 5
+  },
+  "model_scheduler": {
+    "prefetch_factor": 2,
+    "derivative_weight": 3,
+    "wiki_weight": 1,
+    "background_max_wait_seconds": 30,
+    "dispatch_lease_seconds": 120
+  },
+  "model_routes": [
+    {
+      "key": "qwen27_chat",
+      "model": "Qwen3.6-27B",
+      "resource_kinds": ["chat"],
+      "name_regex": "(?i)(^|/models/)Qwen3\\.6-27B$",
+      "use": "primary interactive chat",
+      "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
+      "evidence_status": "verified",
+      "verified_concurrency": 128,
+      "target_fraction": 0.25,
+      "target": {
+        "chat_max_concurrent": null,
+        "chat_max_waiting": 36,
+        "im_max_concurrent": 2,
+        "im_max_waiting": 0,
+        "max_inflight": 32,
+        "interactive_reserve": 28,
+        "max_background_inflight": 4,
+        "tenant_guaranteed": 1,
+        "tenant_burst": 32,
+        "document_guaranteed": 1,
+        "document_burst": 2,
+        "rpm": 0,
+        "tpm": 0,
+        "token_burst": 0,
+        "request_timeout_seconds": 900,
+        "circuit_threshold": 3,
+        "circuit_window_seconds": 600,
+        "circuit_open_seconds": 60,
+        "state": "enabled"
+      }
+    },
+    {
+      "key": "deepseek_v4_flash_chat",
+      "model": "DeepSeek-V4-Flash",
+      "resource_kinds": ["chat"],
+      "name_regex": "(?i)(^|/models/)DeepSeek-V4-Flash$",
+      "use": "secondary interactive chat",
+      "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
+      "evidence_status": "verified",
+      "verified_concurrency": 64,
+      "target_fraction": 0.25,
+      "target": {
+        "chat_max_concurrent": null,
+        "chat_max_waiting": 16,
+        "im_max_concurrent": 2,
+        "im_max_waiting": 0,
+        "max_inflight": 16,
+        "interactive_reserve": 14,
+        "max_background_inflight": 2,
+        "tenant_guaranteed": 1,
+        "tenant_burst": 16,
+        "document_guaranteed": 1,
+        "document_burst": 2,
+        "rpm": 0,
+        "tpm": 0,
+        "token_burst": 0,
+        "request_timeout_seconds": 900,
+        "circuit_threshold": 3,
+        "circuit_window_seconds": 600,
+        "circuit_open_seconds": 60,
+        "state": "enabled"
+      }
+    },
+    {
+      "key": "qwen35_chat_derivative",
+      "model": "Qwen3.6-35B-A3B",
+      "resource_kinds": ["chat", "derivative"],
+      "name_regex": "(?i)(^|/models/)Qwen3\\.6-35B-A3B$",
+      "use": "interactive fallback and durable derivative work",
+      "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
+      "evidence_status": "verified",
+      "verified_concurrency": 64,
+      "target_fraction": 0.5,
+      "target": {
+        "chat_max_concurrent": null,
+        "chat_max_waiting": 0,
+        "max_inflight": 32,
+        "interactive_reserve": 8,
+        "max_background_inflight": 24,
+        "tenant_guaranteed": 1,
+        "tenant_burst": 32,
+        "document_guaranteed": 1,
+        "document_burst": 4,
+        "rpm": 0,
+        "tpm": 0,
+        "token_burst": 0,
+        "request_timeout_seconds": 900,
+        "circuit_threshold": 3,
+        "circuit_window_seconds": 600,
+        "circuit_open_seconds": 60,
+        "state": "enabled"
+      }
+    },
+    {
+      "key": "qwen3_embedding",
+      "model": "Qwen3-Embedding-8B",
+      "resource_kinds": ["embedding"],
+      "name_regex": "(?i)(^|/models/)Qwen3-Embedding-8B$",
+      "use": "document embedding",
+      "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
+      "evidence_status": "verified",
+      "verified_concurrency": 128,
+      "target_fraction": 0.5,
+      "target": {
+        "chat_max_concurrent": null,
+        "chat_max_waiting": null,
+        "max_inflight": 64,
+        "interactive_reserve": 0,
+        "max_background_inflight": 64,
+        "tenant_guaranteed": 1,
+        "tenant_burst": 32,
+        "document_guaranteed": 1,
+        "document_burst": 8,
+        "rpm": 0,
+        "tpm": 0,
+        "token_burst": 0,
+        "request_timeout_seconds": 300,
+        "circuit_threshold": 3,
+        "circuit_window_seconds": 600,
+        "circuit_open_seconds": 60,
+        "state": "enabled"
+      }
+    },
+    {
+      "key": "bge_reranker",
+      "model": "bge-reranker-v2-m3",
+      "resource_kinds": ["rerank"],
+      "name_regex": "(?i)(^|/models/)bge-reranker-v2-m3$",
+      "use": "interactive retrieval reranking",
+      "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
+      "evidence_status": "verified",
+      "verified_concurrency": 128,
+      "target_fraction": 0.5,
+      "target": {
+        "chat_max_concurrent": null,
+        "chat_max_waiting": null,
+        "max_inflight": 64,
+        "interactive_reserve": 0,
+        "max_background_inflight": 64,
+        "tenant_guaranteed": 1,
+        "tenant_burst": 64,
+        "document_guaranteed": 1,
+        "document_burst": 2,
+        "rpm": 0,
+        "tpm": 0,
+        "token_burst": 0,
+        "request_timeout_seconds": 300,
+        "circuit_threshold": 3,
+        "circuit_window_seconds": 600,
+        "circuit_open_seconds": 60,
+        "state": "enabled"
+      }
+    },
+    {
+      "key": "qwen3_vl",
+      "model": "Qwen3-VL-32B",
+      "resource_kinds": ["vlm"],
+      "name_regex": "(?i)(^|/models/)Qwen3-VL-32B$",
+      "use": "document OCR and image caption",
+      "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
+      "evidence_status": "verified",
+      "verified_concurrency": 32,
+      "target_fraction": 0.5,
+      "target": {
+        "chat_max_concurrent": null,
+        "chat_max_waiting": null,
+        "max_inflight": 16,
+        "interactive_reserve": 0,
+        "max_background_inflight": 16,
+        "tenant_guaranteed": 1,
+        "tenant_burst": 16,
+        "document_guaranteed": 1,
+        "document_burst": 4,
+        "rpm": 0,
+        "tpm": 0,
+        "token_burst": 0,
+        "request_timeout_seconds": 360,
+        "circuit_threshold": 3,
+        "circuit_window_seconds": 600,
+        "circuit_open_seconds": 60,
+        "state": "enabled"
+      }
+    },
+    {
+      "key": "qwen25_omni_asr",
+      "model": "Qwen2.5-Omni-7B",
+      "resource_kinds": ["asr"],
+      "name_regex": "(?i)(^|/models/)Qwen2\\.5-Omni-7B$",
+      "use": "audio transcription",
+      "evidence": "deploy/production/llmgateway-capacity-evidence-20260804.json",
+      "evidence_status": "verified",
+      "verified_concurrency": 16,
+      "target_fraction": 0.5,
+      "target": {
+        "chat_max_concurrent": null,
+        "chat_max_waiting": null,
+        "max_inflight": 8,
+        "interactive_reserve": 0,
+        "max_background_inflight": 8,
+        "tenant_guaranteed": 1,
+        "tenant_burst": 8,
+        "document_guaranteed": 1,
+        "document_burst": 2,
+        "rpm": 0,
+        "tpm": 0,
+        "token_burst": 0,
+        "request_timeout_seconds": 300,
+        "circuit_threshold": 3,
+        "circuit_window_seconds": 600,
+        "circuit_open_seconds": 60,
+        "state": "enabled"
+      }
+    }
+  ],
+  "database_connections": {
+    "steady_components": [
+      {"name": "api", "replicas": 3, "max_open_per_replica": 6},
+      {"name": "parse", "replicas": 3, "max_open_per_replica": 5},
+      {"name": "derivative", "replicas": 2, "max_open_per_replica": 4},
+      {"name": "wiki", "replicas": 2, "max_open_per_replica": 4},
+      {"name": "maintenance", "replicas": 2, "max_open_per_replica": 3}
+    ],
+    "migration_job_max_open": 3
+  },
+  "nodes": [
+    {
+      "name": "10.14.201.1",
+      "allocatable": {"cpu_m": 7910, "memory_mib": 28469.715},
+      "fixed_cluster_requests": {"cpu_m": 330, "memory_mib": 400},
+      "workloads": [
+        {"name": "api", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 1500, "memory_limit_mib": 3072},
+        {"name": "parse", "cpu_request_m": 1000, "memory_request_mib": 2048, "cpu_limit_m": 3000, "memory_limit_mib": 5120},
+        {"name": "docreader", "cpu_request_m": 750, "memory_request_mib": 1024, "cpu_limit_m": 4000, "memory_limit_mib": 4096},
+        {"name": "derivative", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
+        {"name": "maintenance", "cpu_request_m": 150, "memory_request_mib": 384, "cpu_limit_m": 750, "memory_limit_mib": 1024},
+        {"name": "general-agent", "cpu_request_m": 250, "memory_request_mib": 768, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
+        {"name": "document-agent", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 2500, "memory_limit_mib": 4096},
+        {"name": "frontend", "cpu_request_m": 100, "memory_request_mib": 128, "cpu_limit_m": 500, "memory_limit_mib": 512},
+        {"name": "mobile-web", "cpu_request_m": 50, "memory_request_mib": 64, "cpu_limit_m": 300, "memory_limit_mib": 512}
+      ]
+    },
+    {
+      "name": "10.14.201.2",
+      "allocatable": {"cpu_m": 7910, "memory_mib": 28469.684},
+      "fixed_cluster_requests": {"cpu_m": 330, "memory_mib": 400},
+      "workloads": [
+        {"name": "api", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 1500, "memory_limit_mib": 3072},
+        {"name": "parse", "cpu_request_m": 1000, "memory_request_mib": 2048, "cpu_limit_m": 3000, "memory_limit_mib": 5120},
+        {"name": "docreader", "cpu_request_m": 750, "memory_request_mib": 1024, "cpu_limit_m": 4000, "memory_limit_mib": 4096},
+        {"name": "wiki", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
+        {"name": "maintenance", "cpu_request_m": 150, "memory_request_mib": 384, "cpu_limit_m": 750, "memory_limit_mib": 1024},
+        {"name": "general-agent", "cpu_request_m": 250, "memory_request_mib": 768, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
+        {"name": "document-agent", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 2500, "memory_limit_mib": 4096},
+        {"name": "frontend", "cpu_request_m": 100, "memory_request_mib": 128, "cpu_limit_m": 500, "memory_limit_mib": 512},
+        {"name": "mobile-web", "cpu_request_m": 50, "memory_request_mib": 64, "cpu_limit_m": 300, "memory_limit_mib": 512}
+      ]
+    },
+    {
+      "name": "10.14.201.7",
+      "allocatable": {"cpu_m": 7910, "memory_mib": 28469.699},
+      "fixed_cluster_requests": {"cpu_m": 330, "memory_mib": 400},
+      "workloads": [
+        {"name": "api", "cpu_request_m": 500, "memory_request_mib": 1280, "cpu_limit_m": 1500, "memory_limit_mib": 3072},
+        {"name": "parse", "cpu_request_m": 1000, "memory_request_mib": 2048, "cpu_limit_m": 3000, "memory_limit_mib": 5120},
+        {"name": "docreader", "cpu_request_m": 750, "memory_request_mib": 1024, "cpu_limit_m": 4000, "memory_limit_mib": 4096},
+        {"name": "derivative", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048},
+        {"name": "wiki", "cpu_request_m": 500, "memory_request_mib": 1024, "cpu_limit_m": 1500, "memory_limit_mib": 2048}
+      ]
+    },
+    {
+      "name": "10.14.201.6",
+      "allocatable": {"cpu_m": 7910, "memory_mib": 13165.699},
+      "fixed_cluster_requests": {"cpu_m": 2110, "memory_mib": 3124},
+      "workloads": [
+        {"name": "postgres", "cpu_request_m": 3000, "memory_request_mib": 8192, "cpu_limit_m": 6000, "memory_limit_mib": 12288}
+      ]
+    },
+    {
+      "name": "10.14.201.54",
+      "allocatable": {"cpu_m": 7910, "memory_mib": 13165.711},
+      "fixed_cluster_requests": {"cpu_m": 2610, "memory_mib": 3636},
+      "workloads": []
+    }
+  ]
+}

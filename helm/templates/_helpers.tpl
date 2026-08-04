@@ -104,44 +104,68 @@ Secret name - supports existing secret
 {{- end }}
 
 {{/*
-Return the app image with tag.
-Defaults to Chart.appVersion if tag is not specified.
+Return the app image pinned by digest when configured, otherwise by tag.
+Defaults to Chart.appVersion if neither digest nor tag is specified.
 */}}
 {{- define "weknora.app.image" -}}
+{{- if .Values.app.image.digest }}
+{{- printf "%s@%s" .Values.app.image.repository .Values.app.image.digest }}
+{{- else }}
 {{- $tag := default .Chart.AppVersion .Values.app.image.tag }}
 {{- printf "%s:%s" .Values.app.image.repository $tag }}
+{{- end }}
 {{- end }}
 
 {{/*
 Return the frontend image with tag.
 */}}
 {{- define "weknora.frontend.image" -}}
+{{- if .Values.frontend.image.digest }}
+{{- printf "%s@%s" .Values.frontend.image.repository .Values.frontend.image.digest }}
+{{- else }}
 {{- printf "%s:%s" .Values.frontend.image.repository .Values.frontend.image.tag }}
+{{- end }}
 {{- end }}
 
 {{/*
 Return the mobile web image with tag.
 */}}
 {{- define "weknora.mobileWeb.image" -}}
+{{- if .Values.mobileWeb.image.digest }}
+{{- printf "%s@%s" .Values.mobileWeb.image.repository .Values.mobileWeb.image.digest }}
+{{- else }}
 {{- printf "%s:%s" .Values.mobileWeb.image.repository .Values.mobileWeb.image.tag }}
+{{- end }}
 {{- end }}
 
 {{/*
 Return the custom agent images with tags.
 */}}
 {{- define "weknora.generalAgent.image" -}}
+{{- if .Values.generalAgent.image.digest }}
+{{- printf "%s@%s" .Values.generalAgent.image.repository .Values.generalAgent.image.digest }}
+{{- else }}
 {{- printf "%s:%s" .Values.generalAgent.image.repository .Values.generalAgent.image.tag }}
+{{- end }}
 {{- end }}
 
 {{- define "weknora.documentProcessingAgent.image" -}}
+{{- if .Values.documentProcessingAgent.image.digest }}
+{{- printf "%s@%s" .Values.documentProcessingAgent.image.repository .Values.documentProcessingAgent.image.digest }}
+{{- else }}
 {{- printf "%s:%s" .Values.documentProcessingAgent.image.repository .Values.documentProcessingAgent.image.tag }}
+{{- end }}
 {{- end }}
 
 {{/*
 Return the docreader image with tag.
 */}}
 {{- define "weknora.docreader.image" -}}
+{{- if .Values.docreader.image.digest }}
+{{- printf "%s@%s" .Values.docreader.image.repository .Values.docreader.image.digest }}
+{{- else }}
 {{- printf "%s:%s" .Values.docreader.image.repository .Values.docreader.image.tag }}
+{{- end }}
 {{- end }}
 
 {{/*

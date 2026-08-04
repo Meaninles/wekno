@@ -64,6 +64,10 @@ app:
   # before install/upgrade and blocks the rollout on failure.
   runtimeRoles:
     enabled: false
+    # Render worker/DocReader/Agent Deployments at zero replicas while keeping
+    # the declared target topology and DB budget intact. Production uses this
+    # as a recovery gate after migration, then applies the normal manifest.
+    startSuspended: false
     environment: production
     postgresMaxConnections: 100
     redisNamespace: ""
@@ -72,6 +76,10 @@ app:
       replicaCount: 2
       maxOpenConns: 6
       maxIdleConns: 2
+      scratch: {}
+      nodeSelector: {}
+      affinity: {}
+      tolerations: []
       resources:
         requests:
           cpu: 1500m
@@ -86,6 +94,10 @@ app:
       replicaCount: 2
       maxOpenConns: 4
       maxIdleConns: 1
+      scratch: {}
+      nodeSelector: {}
+      affinity: {}
+      tolerations: []
       resources:
         requests:
           cpu: 750m
@@ -100,6 +112,10 @@ app:
       replicaCount: 2
       maxOpenConns: 4
       maxIdleConns: 1
+      scratch: {}
+      nodeSelector: {}
+      affinity: {}
+      tolerations: []
       resources:
         requests:
           cpu: 750m
@@ -114,6 +130,10 @@ app:
       replicaCount: 2
       maxOpenConns: 3
       maxIdleConns: 1
+      scratch: {}
+      nodeSelector: {}
+      affinity: {}
+      tolerations: []
       resources:
         requests:
           cpu: 250m
@@ -125,10 +145,20 @@ app:
           ephemeral-storage: 2Gi
     migration:
       enabled: true
+      # -- Render the Job. Set false only when producing the post-migration
+      # workload manifest for a non-Helm, explicit-gate release.
+      render: true
+      # -- Optional immutable release identifier. Required by the production
+      # kubectl workflow so every migration is represented by a new Job.
+      jobNameSuffix: ""
       maxOpenConns: 3
       maxIdleConns: 1
       backoffLimit: 0
       activeDeadlineSeconds: 3600
+      scratch: {}
+      nodeSelector: {}
+      affinity: {}
+      tolerations: []
       resources:
         requests:
           cpu: "1"
@@ -205,6 +235,8 @@ app:
   image:
     # -- Image repository
     repository: wechatopenai/weknora-app
+    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
+    digest: ""
     # -- Image tag (defaults to Chart.appVersion if empty)
     tag: ""
     # -- Image pull policy
@@ -244,6 +276,9 @@ app:
       accessModes:
         - ReadWriteOnce
       annotations: {}
+    hostPath:
+      path: /mnt/weknora-data/scratch-app
+      type: DirectoryOrCreate
 
   # -- Pod security context override
   podSecurityContext: {}
@@ -485,6 +520,8 @@ frontend:
   image:
     # -- Image repository
     repository: wechatopenai/weknora-ui
+    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
+    digest: ""
     # -- Image tag
     tag: latest
     # -- Image pull policy
@@ -532,6 +569,8 @@ mobileWeb:
   image:
     # -- Image repository
     repository: weknora-mobile-web
+    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
+    digest: ""
     # -- Image tag
     tag: local
     # -- Image pull policy
@@ -645,6 +684,8 @@ docreader:
   image:
     # -- Image repository
     repository: wechatopenai/weknora-docreader
+    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
+    digest: ""
     # -- Image tag
     tag: latest
     # -- Image pull policy
@@ -685,6 +726,9 @@ docreader:
       accessModes:
         - ReadWriteOnce
       annotations: {}
+    hostPath:
+      path: /mnt/weknora-data/scratch-docreader
+      type: DirectoryOrCreate
 
   # -- Service configuration
   service:
@@ -702,6 +746,18 @@ docreader:
     periodSeconds: 5
     timeoutSeconds: 3
     failureThreshold: 36
+
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
 
   # -- Node selector
   nodeSelector: {}
@@ -726,6 +782,8 @@ generalAgent:
       maxUnavailable: 0
   image:
     repository: weknora-custom-general-agent
+    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
+    digest: ""
     tag: local
     pullPolicy: IfNotPresent
 
@@ -750,6 +808,9 @@ generalAgent:
       accessModes:
         - ReadWriteOnce
       annotations: {}
+    hostPath:
+      path: /mnt/weknora-data/scratch-general-agent
+      type: DirectoryOrCreate
   resources:
     requests:
       cpu: 500m
@@ -783,6 +844,8 @@ documentProcessingAgent:
       maxUnavailable: 0
   image:
     repository: weknora-custom-document-processing-agent
+    # -- OCI digest (sha256:...). When set, it takes precedence over tag.
+    digest: ""
     tag: local
     pullPolicy: IfNotPresent
   service:
@@ -806,6 +869,9 @@ documentProcessingAgent:
       accessModes:
         - ReadWriteOnce
       annotations: {}
+    hostPath:
+      path: /mnt/weknora-data/scratch-document-agent
+      type: DirectoryOrCreate
   resources:
     requests:
       cpu: "1"
@@ -846,6 +912,12 @@ postgresql:
     limits:
       cpu: 500m
       memory: 512Mi
+
+  # -- Dedicated POSIX shared memory. PostgreSQL parallel queries can exhaust
+  # the container runtime's 64 MiB default /dev/shm even with ample RAM.
+  sharedMemory:
+    enabled: true
+    sizeLimit: 512Mi
 
   # -- Container security context
   # Note: PostgreSQL requires specific user permissions

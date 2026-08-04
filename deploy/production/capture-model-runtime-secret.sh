@@ -13,7 +13,7 @@ source_deployment="${2:-weknora-app}"
 source_container="${3:-app}"
 target_secret="${4:-weknora-model-runtime}"
 
-for command_name in kubectl jq base64 mktemp; do
+for command_name in kubectl python3 base64 mktemp; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     echo "required command not found: ${command_name}" >&2
     exit 1
@@ -22,11 +22,14 @@ done
 
 validate_target_secret() {
   kubectl -n "${namespace}" get secret "${target_secret}" -o json |
-    jq -e '
-      (.data.ANTHROPIC_BASE_URL // "" | length) > 0 and
-      (.data.ANTHROPIC_MODEL // "" | length) > 0 and
-      (.data.ANTHROPIC_API_KEY // "" | length) > 0
-    ' >/dev/null
+    python3 -c '
+import json, sys
+data = json.load(sys.stdin).get("data", {})
+required = ("ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY")
+missing = [name for name in required if not data.get(name)]
+if missing:
+    raise SystemExit("target model runtime Secret is missing mandatory key(s): " + ",".join(missing))
+' >/dev/null
 }
 
 if kubectl -n "${namespace}" get secret "${target_secret}" >/dev/null 2>&1; then
@@ -34,6 +37,14 @@ if kubectl -n "${namespace}" get secret "${target_secret}" >/dev/null 2>&1; then
   echo "preserving existing ${namespace}/${target_secret}; mandatory keys are present"
   exit 0
 fi
+
+# jq is needed only for the one-time conversion of a legacy Deployment. A
+# release host that already has the dedicated Secret can validate and preserve
+# it without installing another host package.
+command -v jq >/dev/null 2>&1 || {
+  echo "required command not found for legacy Deployment conversion: jq" >&2
+  exit 1
+}
 
 temporary_directory="$(mktemp -d)"
 cleanup() {

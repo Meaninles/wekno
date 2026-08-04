@@ -1,53 +1,34 @@
-# Use only during the maintenance window, together with
-# helm/values-production-ha.yaml and the protected values-site.yaml.
-# Replace REPLACE_LEGACY_NODE_NAME with the Kubernetes node name for
-# 10.14.201.7. This replica is not a normal production worker.
+# Render only helm/templates/app-migration-job.yaml during the maintenance
+# window. The normal workload manifest keeps the migration contract enabled
+# but must set migration.render=false so no Job is mixed into the apply set.
+# This Job changes PostgreSQL only; /data/files is not mounted or copied.
 
 app:
-  replicaCount: 1
-  autoscaling:
-    enabled: false
-  env:
-    AUTO_MIGRATE: "true"
-  topologySpread:
-    enabled: false
-  podDisruptionBudget:
-    enabled: false
-  # The HTTP listener starts only after SQL and legacy-artifact migration.
-  # Do not let the ordinary three-minute startup window kill the one-off
-  # migration replica halfway through a large copy.
-  startupProbe:
-    httpGet:
-      path: /health
-      port: http
-    periodSeconds: 5
-    timeoutSeconds: 3
-    failureThreshold: 360
-  nodeSelector:
-    weknora.io/document-worker: "true"
-    kubernetes.io/hostname: REPLACE_LEGACY_NODE_NAME
-  # The migration process does not parse documents. Keep it off the Everest
-  # pool because the .7 data disk still backs the legacy PVC at this point.
-  scratch:
-    volumeType: emptyDir
-    sizeLimit: 2Gi
+  runtimeRoles:
+    enabled: true
+    migration:
+      enabled: true
+      render: true
+      jobNameSuffix: REPLACE_RELEASE_ID
+      nodeSelector:
+        kubernetes.io/hostname: "10.14.201.7"
+      scratch:
+        volumeType: hostPath
+        hostPath:
+          path: /mnt/weknora-data/weknora-v2-scratch/migration
+          # Release preparation creates this directory first. Fail closed if
+          # it is missing instead of silently writing to the node root disk.
+          type: Directory
+      backoffLimit: 0
+      activeDeadlineSeconds: 7200
+  documentQueue:
+    kubernetesRuntimeVerifier:
+      enabled: false
 
+# Compatibility storage only. Durable files remain unchanged in their current
+# PostgreSQL-backed location and are deliberately outside this migration.
 dataFiles:
   persistence:
-    enabled: true
-    existingClaim: weknora-data-files
-
-# Render only templates/app.yaml for the migration replica. These disables are
-# also defensive if an operator accidentally renders the whole chart.
-docreader:
-  enabled: false
-generalAgent:
-  enabled: false
-documentProcessingAgent:
-  enabled: false
-frontend:
-  enabled: false
-mobileWeb:
-  enabled: false
-ingress:
-  enabled: false
+    enabled: false
+  emptyDir:
+    sizeLimit: 1Gi

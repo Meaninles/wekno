@@ -14,7 +14,7 @@ spec:
       {{- include "weknora.componentSelectorLabels" (dict "component" "app" "context" .) | nindent 6 }}
 ---
 {{- end }}
-{{- if and .Values.docreader.enabled .Values.docreader.podDisruptionBudget.enabled }}
+{{- if and .Values.docreader.enabled .Values.docreader.podDisruptionBudget.enabled (not (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended)) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

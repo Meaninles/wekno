@@ -254,7 +254,15 @@ therefore need the same database, object-store, model, and encryption config.
 {{- end }}
 
 {{- define "weknora.appRuntimeVolumes" -}}
-{{- $root := . -}}
+{{- $root := .root -}}
+{{- $role := .role | default (dict) -}}
+{{- $globalScratch := $root.Values.app.scratch -}}
+{{- $roleScratch := $role.scratch | default (dict) -}}
+{{- $globalEphemeral := $globalScratch.ephemeral | default (dict) -}}
+{{- $roleEphemeral := $roleScratch.ephemeral | default (dict) -}}
+{{- $globalHostPath := $globalScratch.hostPath | default (dict) -}}
+{{- $roleHostPath := $roleScratch.hostPath | default (dict) -}}
+{{- $volumeType := $roleScratch.volumeType | default ($globalScratch.volumeType | default "emptyDir") -}}
 - name: data-files
   {{- if $root.Values.dataFiles.persistence.enabled }}
   persistentVolumeClaim:
@@ -266,28 +274,28 @@ therefore need the same database, object-store, model, and encryption config.
     {{- end }}
   {{- end }}
 - name: scratch
-  {{- if eq ($root.Values.app.scratch.volumeType | default "emptyDir") "ephemeral" }}
+  {{- if eq $volumeType "ephemeral" }}
   ephemeral:
     volumeClaimTemplate:
-      {{- with $root.Values.app.scratch.ephemeral.annotations }}
+      {{- with ($roleEphemeral.annotations | default $globalEphemeral.annotations) }}
       metadata:
         annotations:
           {{- toYaml . | nindent 10 }}
       {{- end }}
       spec:
         accessModes:
-          {{- toYaml $root.Values.app.scratch.ephemeral.accessModes | nindent 10 }}
-        storageClassName: {{ $root.Values.app.scratch.ephemeral.storageClassName | quote }}
+          {{- toYaml ($roleEphemeral.accessModes | default $globalEphemeral.accessModes) | nindent 10 }}
+        storageClassName: {{ $roleEphemeral.storageClassName | default $globalEphemeral.storageClassName | quote }}
         resources:
           requests:
-            storage: {{ $root.Values.app.scratch.ephemeral.size }}
-  {{- else if eq ($root.Values.app.scratch.volumeType | default "emptyDir") "hostPath" }}
+            storage: {{ $roleEphemeral.size | default $globalEphemeral.size }}
+  {{- else if eq $volumeType "hostPath" }}
   hostPath:
-    path: {{ $root.Values.app.scratch.hostPath.path | default "/mnt/weknora-data/scratch-app" | quote }}
-    type: DirectoryOrCreate
+    path: {{ $roleHostPath.path | default ($globalHostPath.path | default "/mnt/weknora-data/scratch-app") | quote }}
+    type: {{ $roleHostPath.type | default ($globalHostPath.type | default "DirectoryOrCreate") }}
   {{- else }}
   emptyDir:
-    {{- with $root.Values.app.scratch.sizeLimit }}
+    {{- with ($roleScratch.sizeLimit | default $globalScratch.sizeLimit) }}
     sizeLimit: {{ . }}
     {{- end }}
   {{- end }}

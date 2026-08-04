@@ -1,16 +1,20 @@
-FROM node:22-alpine AS build
+ARG BASE_IMAGE_REGISTRY_ARG=docker.io/library
+FROM ${BASE_IMAGE_REGISTRY_ARG}/node:22-alpine AS build
 
 WORKDIR /app
 
+ARG NPM_REGISTRY_ARG=https://mirrors.tencent.com/npm
+ARG NODE_OPTIONS_ARG=--max-old-space-size=6144
+ENV NODE_OPTIONS=${NODE_OPTIONS_ARG}
 COPY package*.json ./
 COPY packages ./packages
-RUN npm ci
+RUN npm config set registry "$NPM_REGISTRY_ARG" && npm ci --prefer-offline
 
 COPY . .
 RUN npm run build:mobile
 RUN npm run build
 
-FROM nginx:stable-alpine
+FROM ${BASE_IMAGE_REGISTRY_ARG}/nginx:stable-alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY --from=build /app/dist-mobile /usr/share/nginx/html/mobile

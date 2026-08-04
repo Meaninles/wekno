@@ -372,7 +372,7 @@ spec:
           {{- else if eq (.Values.app.scratch.volumeType | default "emptyDir") "hostPath" }}
           hostPath:
             path: {{ .Values.app.scratch.hostPath.path | default "/mnt/weknora-data/scratch-app" | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.app.scratch.hostPath.type | default "DirectoryOrCreate" }}
           {{- else }}
           emptyDir:
             {{- with .Values.app.scratch.sizeLimit }}

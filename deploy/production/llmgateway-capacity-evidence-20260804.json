@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "tested_at": "2026-08-04",
+  "scope": {
+    "gateway": "https://llmgateway.moutai.com.cn/v1",
+    "method": "All requests used the exact active production model names through the production LiteLLM gateway. Direct upstream model-node results are excluded.",
+    "gateway_replicas": 3,
+    "gateway_restart_count_after_tests": 0
+  },
+  "primary_chat_admission": {
+    "meaning": "The limit of 100 includes both running and waiting conversations for the two primary chat pools.",
+    "running_total": 48,
+    "waiting_total": 52,
+    "admitted_total": 100,
+    "pools": [
+      {
+        "model": "Qwen3.6-27B",
+        "max_inflight": 32,
+        "chat_max_waiting": 36,
+        "maximum_running_plus_waiting": 68
+      },
+      {
+        "model": "DeepSeek-V4-Flash",
+        "max_inflight": 16,
+        "chat_max_waiting": 16,
+        "maximum_running_plus_waiting": 32
+      }
+    ],
+    "implementation_note": "Conversation counters are resource-pool scoped. Splitting 52 waiting slots as 36+16 is the no-code configuration that guarantees the two primary pools sum to 100; idle waiting capacity cannot be borrowed across pools."
+  },
+  "capacity_tests": [
+    {
+      "model": "Qwen3.6-27B",
+      "kind": "chat",
+      "request_shape": "unique approximately 4K-word context, streaming, max_tokens=256",
+      "runs": [
+        {
+          "concurrency": 64,
+          "ok": 64,
+          "failed": 0,
+          "ttft_p50_s": 59.886,
+          "ttft_p95_s": 105.533,
+          "total_p50_s": 103.223,
+          "total_p95_s": 112.572,
+          "wall_s": 113.12
+        },
+        {
+          "concurrency": 128,
+          "ok": 128,
+          "failed": 0,
+          "ttft_p50_s": 105.515,
+          "ttft_p95_s": 202.665,
+          "total_p50_s": 153.637,
+          "total_p95_s": 218.709,
+          "wall_s": 219.583
+        }
+      ],
+      "target_max_inflight": 32,
+      "rationale": "The selected production ceiling is 25% of the verified stable 128-way run to protect latency and leave capacity for other applications."
+    },
+    {
+      "model": "DeepSeek-V4-Flash",
+      "kind": "chat",
+      "request_shape": "unique approximately 4K-word context, streaming, max_tokens=256",
+      "runs": [
+        {
+          "concurrency": 64,
+          "ok": 64,
+          "failed": 0,
+          "ttft_p50_s": 24.581,
+          "ttft_p95_s": 53.72,
+          "total_p50_s": 39.08,
+          "total_p95_s": 59.773,
+          "wall_s": 60.334
+        }
+      ],
+      "target_max_inflight": 16,
+      "rationale": "The selected production ceiling is 25% of the verified stable 64-way run to protect latency and leave capacity for other applications."
+    },
+    {
+      "model": "Qwen3.6-35B-A3B",
+      "kind": "chat_and_derivative",
+      "request_shape": "unique approximately 4K-word context, streaming, max_tokens=256",
+      "runs": [
+        {
+          "concurrency": 64,
+          "ok": 64,
+          "failed": 0,
+          "ttft_p50_s": 35.582,
+          "ttft_p95_s": 74.004,
+          "total_p50_s": 90.051,
+          "total_p95_s": 93.154,
+          "wall_s": 93.709
+        }
+      ],
+      "target_max_inflight": 32,
+      "target_interactive_reserve": 8,
+      "target_max_background_inflight": 24,
+      "target_chat_max_waiting": 0
+    },
+    {
+      "model": "Qwen3-Embedding-8B",
+      "kind": "embedding",
+      "request_shape": "5 document chunks per request",
+      "runs": [
+        {
+          "concurrency": 128,
+          "ok": 128,
+          "failed": 0,
+          "latency_p50_s": 14.5266,
+          "latency_p95_s": 25.9965,
+          "wall_s": 27.1997
+        }
+      ],
+      "target_max_inflight": 64
+    },
+    {
+      "model": "bge-reranker-v2-m3",
+      "kind": "rerank",
+      "request_shape": "30 candidate documents per request, top_n=10",
+      "runs": [
+        {
+          "concurrency": 128,
+          "ok": 128,
+          "failed": 0,
+          "latency_p50_s": 2.4541,
+          "latency_p95_s": 4.2439,
+          "wall_s": 4.7435
+        }
+      ],
+      "target_max_inflight": 64
+    },
+    {
+      "model": "Qwen3-VL-32B",
+      "kind": "vlm",
+      "request_shape": "three real images downloaded from China-accessible Canva China CDN and Alibaba Cloud Hangzhou OSS, 24 KiB to 1.60 MiB, streaming, max_tokens=128",
+      "runs": [
+        {
+          "concurrency": 32,
+          "ok": 32,
+          "failed": 0,
+          "ttft_p50_s": 4.806,
+          "ttft_p95_s": 5.8,
+          "total_p50_s": 8.213,
+          "total_p95_s": 9.025,
+          "wall_s": 9.204
+        }
+      ],
+      "target_max_inflight": 16
+    },
+    {
+      "model": "Qwen2.5-Omni-7B",
+      "kind": "asr",
+      "request_shape": "distinct 10-second and 20-second segments cut from a public Mandarin WAV on Alibaba Cloud Hangzhou OSS; WeKnora audio_url data-URI format",
+      "runs": [
+        {
+          "concurrency": 8,
+          "ok": 8,
+          "failed": 0,
+          "latency_p50_s": 1.744,
+          "latency_p95_s": 2.235,
+          "wall_s": 2.306,
+          "transcript_chars_min": 79,
+          "transcript_chars_max": 103
+        },
+        {
+          "concurrency": 16,
+          "ok": 16,
+          "failed": 0,
+          "latency_p50_s": 2.112,
+          "latency_p95_s": 3.437,
+          "wall_s": 3.615,
+          "transcript_chars_min": 31,
+          "transcript_chars_max": 61,
+          "segment_duration_s": 10,
+          "distinct_segments": 16
+        }
+      ],
+      "target_max_inflight": 8,
+      "rationale": "The selected production ceiling is half of the verified stable 16-way run."
+    }
+  ],
+  "coupled_worker_targets": {
+    "scheduler_prefetch_factor": 2,
+    "derivative_weight": 3,
+    "wiki_weight": 1,
+    "qwen35_background_provider_capacity": 24,
+    "task_work_window": 48,
+    "derivative_task_window": 36,
+    "wiki_task_window": 12,
+    "fixed_derivative_replicas": 2,
+    "derivative_consumers_per_replica": 18,
+    "fixed_wiki_replicas": 2,
+    "wiki_consumers_per_replica": 6,
+    "fixed_parse_replicas": 3,
+    "multimodal_consumers_per_parse_replica": 4,
+    "document_workflows_per_parse_replica": 4,
+    "docreader_workers_per_replica": 4,
+    "embedding_batch_size": 5,
+    "embedding_pool_size_per_parse_replica": 12
+  },
+  "status": {
+    "production_configuration_applied": false,
+    "temporary_load_generators_must_be_removed": true
+  }
+}

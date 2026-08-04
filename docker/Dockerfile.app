@@ -1,5 +1,6 @@
 # Build stage
-FROM golang:1.26-bookworm AS builder
+ARG BASE_IMAGE_REGISTRY_ARG=docker.io/library
+FROM ${BASE_IMAGE_REGISTRY_ARG}/golang:1.26-bookworm AS builder
 
 WORKDIR /app
 
@@ -22,12 +23,17 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
     apt-get -o Acquire::Retries=3 install -y git build-essential libsqlite3-dev
 
 # Install migrate tool
-RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+ARG MIGRATE_VERSION_ARG=v4.19.1
+RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@${MIGRATE_VERSION_ARG}
 
 # Copy go mod and sum files
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd/download cmd/download
+# Production preparation can preload the exact DuckDB extensions from the
+# current immutable app image. The download helper still validates them by
+# installing/loading both extensions and remains the fallback for dev builds.
+COPY packages/duckdb/ /root/.duckdb/
 RUN go run cmd/download/duckdb/duckdb.go
 COPY . .
 
@@ -49,32 +55,55 @@ RUN --mount=type=cache,target=/go/pkg/mod cp -r /go/pkg/mod/github.com/yanyiwu/ 
 
 # Docker CLI extraction stage. The runtime only needs the client for the
 # host-socket sandbox, not containerd/runc/the Docker daemon.
-FROM debian:12.12-slim AS docker-cli
+FROM ${BASE_IMAGE_REGISTRY_ARG}/debian:12.12-slim AS docker-cli
 
 ARG APK_MIRROR_ARG
-RUN if [ -n "$APK_MIRROR_ARG" ]; then \
-        sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
+COPY packages/docker-cli/ /opt/preloaded-docker-cli/
+RUN mkdir -p /opt/docker-cli/usr/bin && \
+    if [ -x /opt/preloaded-docker-cli/docker ]; then \
+        cp /opt/preloaded-docker-cli/docker /opt/docker-cli/usr/bin/docker; \
+    else \
+        apt-get -o Acquire::Retries=3 update && \
+        apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates && \
+        if [ -n "$APK_MIRROR_ARG" ]; then \
+            sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
+        fi && \
+        apt-get -o Acquire::Retries=3 update && \
+        cd /tmp && \
+        apt-get -o Acquire::Retries=3 download docker.io && \
+        dpkg-deb -x docker.io_*.deb /opt/docker-cli && \
+        rm -f docker.io_*.deb; \
     fi && \
-    apt-get -o Acquire::Retries=3 update && \
-    mkdir -p /opt/docker-cli && \
-    cd /tmp && \
-    apt-get -o Acquire::Retries=3 download docker.io && \
-    dpkg-deb -x docker.io_*.deb /opt/docker-cli && \
+    chmod 0755 /opt/docker-cli/usr/bin/docker && \
     /opt/docker-cli/usr/bin/docker --version && \
-    rm -f docker.io_*.deb
+    rm -rf /opt/preloaded-docker-cli /var/lib/apt/lists/*
 
 # Final stage
-FROM debian:12.12-slim
+FROM ${BASE_IMAGE_REGISTRY_ARG}/debian:12.12-slim
 
 WORKDIR /app
 
 ARG APK_MIRROR_ARG
+ARG PIP_INDEX_URL_ARG=https://mirrors.tencent.com/pypi/simple
+ARG UV_VERSION_ARG=0.11.32
+ARG PIP_VERSION_ARG=26.1.2
+ARG SETUPTOOLS_VERSION_ARG=83.0.0
+ARG WHEEL_VERSION_ARG=0.47.0
+ARG PACKAGING_VERSION_ARG=26.2
+
+COPY packages/uv/ /opt/python-build-tools/
+COPY packages/python-build-tools/ /opt/python-build-tools/
 
 # Create a non-root user first
 RUN useradd -m -s /bin/bash appuser
 
-# First, install ca-certificates without mirror to ensure HTTPS works
-RUN apt-get -o Acquire::Retries=3 update && \
+# Seed the trust bundle from the approved internal Go base so the first APT
+# request can use the HTTPS mirror without contacting deb.debian.org.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+        sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
+    fi && \
+    apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
@@ -91,12 +120,27 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
         nodejs npm \
         gosu \
         ffmpeg && \
-    python3 -m pip install --break-system-packages --upgrade pip setuptools wheel && \
+    if [ "$(find /opt/python-build-tools -maxdepth 1 -type f -name '*.whl' | wc -l)" -ge 5 ]; then \
+        python3 -m pip install --no-index --find-links /opt/python-build-tools \
+            --break-system-packages --upgrade \
+            "pip==$PIP_VERSION_ARG" \
+            "setuptools==$SETUPTOOLS_VERSION_ARG" \
+            "wheel==$WHEEL_VERSION_ARG" \
+            "packaging==$PACKAGING_VERSION_ARG" \
+            "uv==$UV_VERSION_ARG"; \
+    else \
+        PIP_INDEX_URL="$PIP_INDEX_URL_ARG" python3 -m pip install \
+            --break-system-packages --upgrade \
+            "pip==$PIP_VERSION_ARG" \
+            "setuptools==$SETUPTOOLS_VERSION_ARG" \
+            "wheel==$WHEEL_VERSION_ARG" \
+            "packaging==$PACKAGING_VERSION_ARG" \
+            "uv==$UV_VERSION_ARG"; \
+    fi && \
+    /usr/local/bin/uvx --version && \
+    rm -rf /opt/python-build-tools && \
     mkdir -p /home/appuser/.local/bin && \
-    curl -LsSf https://astral.sh/uv/install.sh | CARGO_HOME=/home/appuser/.cargo UV_INSTALL_DIR=/home/appuser/.local/bin sh && \
     chown -R appuser:appuser /home/appuser && \
-    ln -sf /home/appuser/.local/bin/uvx /usr/local/bin/uvx && \
-    chmod +x /usr/local/bin/uvx && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

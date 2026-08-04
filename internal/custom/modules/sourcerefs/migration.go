@@ -3,10 +3,20 @@ package sourcerefs
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/gorm"
+)
+
+var (
+	storedLegacyCitationBlockRE = regexp.MustCompile(
+		`(?ms)^[ \t]*\*[ \t]+\*\*Sourced \(Inline Citations\):\*\*.*?^[ \t]*(\*[ \t]+\*\*Structured:\*\*)`,
+	)
+	storedLegacyCitationLineRE = regexp.MustCompile(
+		`(?mi)^.*<(?:kb|web)\b[^>]*(?:/?>)?.*(?:\r?\n|$)`,
+	)
 )
 
 // Migrate installs the durable retrieval summary used by every chat runtime.
@@ -57,10 +67,16 @@ func migrateStoredAgentCitationPrompts(ctx context.Context, db *gorm.DB) error {
 	for i := range agents {
 		agent := &agents[i]
 		prompt := agent.Config.SystemPrompt
-		if !strings.Contains(prompt, "<kb ") && !strings.Contains(prompt, "<web ") {
+		hasRetiredSyntax := strings.Contains(prompt, "<kb ") || strings.Contains(prompt, "<web ")
+		hasManagedContract := strings.Contains(prompt, generationContractMarker)
+		if !hasRetiredSyntax && !hasManagedContract {
 			continue
 		}
-		agent.Config.SystemPrompt = EnsureGenerationContract(prompt)
+		if hasRetiredSyntax {
+			prompt = storedLegacyCitationBlockRE.ReplaceAllString(prompt, "$1")
+			prompt = storedLegacyCitationLineRE.ReplaceAllString(prompt, "")
+		}
+		agent.Config.SystemPrompt = EnsureGenerationContract(strings.TrimSpace(prompt))
 		if err := db.WithContext(ctx).Unscoped().
 			Model(&types.CustomAgent{}).
 			Where("id = ? AND tenant_id = ?", agent.ID, agent.TenantID).

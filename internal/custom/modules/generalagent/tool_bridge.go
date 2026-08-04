@@ -227,6 +227,12 @@ func (r *activeRun) registerSourceReferences(toolName string, result *types.Tool
 		r.sources = sourcerefs.NewRegistry()
 	}
 	refs, sources := sourcerefs.RegisterToolResult(r.sources, toolName, result)
+	if len(refs) > 0 {
+		// Use the same shared model-visible annotation as the native ReAct loop.
+		// The sidecar transport only serializes this result; it does not infer or
+		// convert a second citation protocol.
+		result.Output = sourcerefs.AppendCitationCatalog(result.Output, refs)
+	}
 	if r.refSeen == nil {
 		r.refSeen = make(map[string]bool, len(refs))
 	}

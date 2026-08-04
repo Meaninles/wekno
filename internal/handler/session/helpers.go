@@ -211,41 +211,12 @@ func buildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.St
 			response.KnowledgeReferences = refs
 		} else if refs, ok := refsData.([]*types.SearchResult); ok {
 			response.KnowledgeReferences = types.References(refs)
-		} else if refs, ok := refsData.([]interface{}); ok {
-			// Handle case where data was serialized/deserialized (e.g., from Redis)
-			searchResults := make([]*types.SearchResult, 0, len(refs))
-			for _, ref := range refs {
-				if refMap, ok := ref.(map[string]interface{}); ok {
-					sr := &types.SearchResult{
-						ID:                   getString(refMap, "id"),
-						Content:              getString(refMap, "content"),
-						KnowledgeID:          getString(refMap, "knowledge_id"),
-						ChunkIndex:           int(getFloat64(refMap, "chunk_index")),
-						KnowledgeTitle:       getString(refMap, "knowledge_title"),
-						StartAt:              int(getFloat64(refMap, "start_at")),
-						EndAt:                int(getFloat64(refMap, "end_at")),
-						Seq:                  int(getFloat64(refMap, "seq")),
-						Score:                getFloat64(refMap, "score"),
-						ChunkType:            getString(refMap, "chunk_type"),
-						ParentChunkID:        getString(refMap, "parent_chunk_id"),
-						ImageInfo:            getString(refMap, "image_info"),
-						KnowledgeFilename:    getString(refMap, "knowledge_filename"),
-						KnowledgeSource:      getString(refMap, "knowledge_source"),
-						KnowledgeDescription: getString(refMap, "knowledge_description"),
-						KnowledgeBaseID:      getString(refMap, "knowledge_base_id"),
-					}
-					if meta, ok := refMap["metadata"].(map[string]interface{}); ok {
-						sr.Metadata = make(map[string]string, len(meta))
-						for k, v := range meta {
-							if strVal, ok := v.(string); ok {
-								sr.Metadata[k] = strVal
-							}
-						}
-					}
-					searchResults = append(searchResults, sr)
-				}
-			}
-			response.KnowledgeReferences = types.References(searchResults)
+		} else {
+			// Redis and other stream relays deserialize reference payloads into
+			// generic maps. Round-trip through the shared decoder so immutable
+			// evidence content, source locators and future SearchResult fields are
+			// preserved instead of being silently dropped by a hand-written subset.
+			response.KnowledgeReferences = types.References(sourcerefs.DecodeSearchResults(refsData))
 		}
 	}
 

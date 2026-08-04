@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +21,7 @@ const (
 	MetadataChunkID       = "chunk_id"
 	MetadataEvidenceHash  = "evidence_hash"
 	MetadataObservedAt    = "evidence_observed_at"
+	MetadataEvidenceLevel = "evidence_level"
 )
 
 type CitationSource struct {
@@ -80,6 +80,10 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 		if !IsSupportedCitationReference(ref) {
 			continue
 		}
+		ensureExactEvidenceContent(ref)
+		if strings.TrimSpace(ref.EvidenceContent) == "" {
+			continue
+		}
 		key := CitationKey(ref)
 		if key == "" {
 			continue
@@ -92,7 +96,14 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 			r.next++
 			r.byKey[key] = id
 		}
-		currentSource := citationSourceFromRef(id, ref)
+		selectedRef := ref
+		if previousRef := r.refs[id]; previousRef != nil &&
+			evidenceSnapshotPriority(ref) < evidenceSnapshotPriority(previousRef) {
+			// Tool order is not a quality order. A later web_search call must not
+			// replace an already fetched page with a shorter search snippet.
+			selectedRef = previousRef
+		}
+		currentSource := citationSourceFromRef(id, selectedRef)
 		if previous := r.sources[id]; previous != nil && previous.Title != "" {
 			// A later deep read of the same URL/chunk refreshes the evidence
 			// snapshot without downgrading a useful title discovered earlier.
@@ -136,13 +147,36 @@ func (r *Registry) Register(refs []*types.SearchResult) []*CitationSource {
 				ref.Metadata[MetadataObservedAt] = src.ObservedAt
 			}
 		}
-		r.refs[id] = cloneSearchResult(ref)
+		if selectedRef == ref {
+			r.refs[id] = canonicalEvidenceSnapshot(ref)
+		}
 		if !seenOut[id] {
 			seenOut[id] = true
 			out = append(out, r.sources[id])
 		}
 	}
 	return out
+}
+
+func evidenceSnapshotPriority(ref *types.SearchResult) int {
+	if ref == nil {
+		return 0
+	}
+	if SourceTypeFromRef(ref) != SourceTypeWeb {
+		return 10
+	}
+	switch strings.TrimSpace(ref.Metadata[MetadataEvidenceLevel]) {
+	case "full_page":
+		return 4
+	case "fetched_content":
+		return 3
+	case "fetched_summary", "result_content":
+		return 2
+	case "search_snippet":
+		return 1
+	default:
+		return 1
+	}
 }
 
 // SnapshotReferences returns immutable, citation-id ordered evidence snapshots.
@@ -235,7 +269,7 @@ func RenderCitationCatalog(refs []*types.SearchResult) string {
 }
 
 const citationUseInstruction = `[CITATION_USE]
-For each factual sentence or compact group of adjacent claims based on current-turn evidence, copy the matching citation_handle_for_this_evidence verbatim immediately after the supported sentence or paragraph. When one evidence item supports a whole list, cite once after the final list item rather than after the introductory text. Use the minimum sufficient handles: if overlapping evidence items state the same fact, choose the single most direct one instead of citing them all. The handle must appear in the final user-visible answer. Do not repeat a handle unnecessarily and do not attach one to unsupported text.
+Complete the original user's answer using the current-turn evidence. For each factual sentence or compact group of adjacent claims, copy the matching citation_handle_for_this_evidence verbatim immediately after the supported sentence or paragraph. Select that handle by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. The handle must appear in the final user-visible answer. Use the minimum sufficient handles: choose the single most direct evidence when sources overlap, keep every handle adjacent to the claim it supports, and leave framing, transitions, analysis, and unsupported text without a handle.
 [/CITATION_USE]`
 
 // TerminalCitationInstruction returns the single shared, positive final-output
@@ -307,50 +341,35 @@ func RenderEvidenceBlock(ref *types.SearchResult, content string, annotations ma
 		fields = append(fields, promptField(key)+"="+value)
 	}
 	return "[EVIDENCE " + strings.Join(fields, " ") + "]\n" +
+		strings.TrimSpace(content) + "\n" +
 		"citation_handle_for_this_evidence: " + canonicalCitationTag(id) + "\n" +
-		strings.TrimSpace(content) + "\n[/EVIDENCE]"
+		"[/EVIDENCE]"
 }
 
 const generationContractMarker = "[WEKNORA_CITATION_OUTPUT]"
 
-var (
-	legacyCitationInstructionBlockRE = regexp.MustCompile(
-		`(?ms)^[ \t]*\*[ \t]+\*\*Sourced \(Inline Citations\):\*\*.*?^[ \t]*(\*[ \t]+\*\*Structured:\*\*)`,
-	)
-	legacyCitationExampleLineRE = regexp.MustCompile(
-		`(?mi)^.*<(?:kb|web)\b[^>]*(?:/?>)?.*(?:\r?\n|$)`,
-	)
-)
-
 const generationContract = `[WEKNORA_CITATION_OUTPUT]
-The last user message is the current task. A prior turn's output format, ending, or citation constraint is inactive unless the current message repeats or explicitly refers to it. When AVAILABLE_CITATIONS or source_references are present, cite only claims directly supported by the matching evidence. Copy its cite_exactly value verbatim immediately after the supported sentence or paragraph. The only valid citation shape is <src id="S1" />; change only the S-number to an available ID. The S-number is opaque: never derive it from rank, sequence, chunk_index, result position, page, row, or line numbers. Never use another citation element, attribute, identifier, URL, footnote, or bibliography. Do not cite search/catalog-only metadata. A document title and its collection membership are different facts: claim that a document belongs to a named collection only when current evidence exposes that collection name or the current scope has exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, but do not cite pure framing, analysis, or transitions, and do not repeat the same source within one paragraph.
+The last user message is the current task. A prior turn's output format, ending, or citation constraint is inactive unless the current message repeats or explicitly refers to it. When AVAILABLE_CITATIONS or source_references are present, cite claims directly supported by the matching claim-bearing evidence. Copy the matching cite_exactly value verbatim immediately after the supported sentence or paragraph; each supplied value uses the canonical form <src id="S1" /> with its own available S-number. Treat each S-number as an opaque evidence handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. A document title and its collection membership are different facts: claim that a document belongs to a named collection when current evidence exposes that collection name or the current scope has exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited.
 [/WEKNORA_CITATION_OUTPUT]`
 
 // EnsureGenerationContract applies the shared first-pass generation contract
 // once. It is prompt-only and never performs validation or regeneration.
 func EnsureGenerationContract(prompt string) string {
-	prompt = removeLegacyCitationInstructions(prompt)
-	if strings.Contains(prompt, generationContractMarker) {
-		return prompt
+	if start := strings.Index(prompt, generationContractMarker); start >= 0 {
+		endMarker := "[/WEKNORA_CITATION_OUTPUT]"
+		if relativeEnd := strings.Index(prompt[start:], endMarker); relativeEnd >= 0 {
+			end := start + relativeEnd + len(endMarker)
+			withoutCurrent := strings.TrimSpace(prompt[:start] + prompt[end:])
+			if withoutCurrent == "" {
+				return generationContract
+			}
+			return withoutCurrent + "\n\n" + generationContract
+		}
 	}
 	if strings.TrimSpace(prompt) == "" {
 		return generationContract
 	}
 	return strings.TrimSpace(prompt) + "\n\n" + generationContract
-}
-
-// removeLegacyCitationInstructions removes obsolete model-facing citation
-// syntax before the single canonical contract is appended. Persisted custom
-// and built-in agent prompts can outlive code-owned templates; leaving old
-// <kb>/<web> examples in the same system message directly teaches the model
-// to emit tags that the strict output validator must reject.
-func removeLegacyCitationInstructions(prompt string) string {
-	if !strings.Contains(prompt, "<kb ") && !strings.Contains(prompt, "<web ") {
-		return prompt
-	}
-	prompt = legacyCitationInstructionBlockRE.ReplaceAllString(prompt, "$1")
-	prompt = legacyCitationExampleLineRE.ReplaceAllString(prompt, "")
-	return strings.TrimSpace(prompt)
 }
 
 func canonicalCitationTag(id string) string {
@@ -522,9 +541,10 @@ func ensureEvidenceSnapshotMetadata(ref *types.SearchResult) {
 		return
 	}
 	ensureMetadata(ref)
+	ensureExactEvidenceContent(ref)
 	if strings.TrimSpace(ref.Metadata[MetadataEvidenceHash]) == "" {
 		hash := sha256.New()
-		_, _ = hash.Write([]byte(strings.TrimSpace(ref.Content)))
+		_, _ = hash.Write([]byte(strings.TrimSpace(ref.EvidenceContent)))
 		_, _ = hash.Write([]byte{0})
 		_, _ = hash.Write(ref.SourceLocator)
 		_, _ = hash.Write([]byte{0})
@@ -534,6 +554,30 @@ func ensureEvidenceSnapshotMetadata(ref *types.SearchResult) {
 	if strings.TrimSpace(ref.Metadata[MetadataObservedAt]) == "" {
 		ref.Metadata[MetadataObservedAt] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+}
+
+func ensureExactEvidenceContent(ref *types.SearchResult) {
+	if ref == nil || strings.TrimSpace(ref.EvidenceContent) != "" {
+		return
+	}
+	ref.EvidenceContent = ref.Content
+}
+
+// canonicalEvidenceSnapshot is the only shape allowed to leave the citation
+// registry. Retrieval-only matched text and aggregate merge membership are
+// removed, while Content mirrors EvidenceContent for non-updated API consumers.
+func canonicalEvidenceSnapshot(ref *types.SearchResult) *types.SearchResult {
+	clone := cloneSearchResult(ref)
+	if clone == nil {
+		return nil
+	}
+	ensureExactEvidenceContent(clone)
+	clone.Content = clone.EvidenceContent
+	clone.MatchedContent = ""
+	clone.MatchedSourceID = ""
+	clone.MatchOrigin = ""
+	clone.SubChunkID = nil
+	return clone
 }
 
 func cloneSearchResult(ref *types.SearchResult) *types.SearchResult {
@@ -548,6 +592,8 @@ func cloneSearchResult(ref *types.SearchResult) *types.SearchResult {
 		}
 	}
 	clone.SourceLocator = append(types.JSON(nil), ref.SourceLocator...)
+	clone.ChunkMetadata = append(types.JSON(nil), ref.ChunkMetadata...)
+	clone.SubChunkID = append([]string(nil), ref.SubChunkID...)
 	return &clone
 }
 

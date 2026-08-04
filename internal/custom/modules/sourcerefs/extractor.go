@@ -27,8 +27,19 @@ func IsSupportedCitationReference(ref *types.SearchResult) bool {
 		return false
 	}
 	switch SourceTypeFromRef(ref) {
-	case SourceTypeKnowledge, SourceTypeWiki, SourceTypeWeb:
-		return true
+	case SourceTypeKnowledge:
+		return (ref.ChunkType == string(types.ChunkTypeText) ||
+			ref.ChunkType == string(types.ChunkTypeFAQ)) &&
+			strings.TrimSpace(firstNonEmpty(ref.KnowledgeBaseID, ref.Metadata["knowledge_base_id"])) != "" &&
+			strings.TrimSpace(firstNonEmpty(ref.KnowledgeID, ref.Metadata["knowledge_id"])) != "" &&
+			knowledgeChunkID(ref) != ""
+	case SourceTypeWiki:
+		return strings.TrimSpace(ref.KnowledgeBaseID) != "" && strings.TrimSpace(ref.Metadata["slug"]) != ""
+	case SourceTypeWeb:
+		rawURL := firstNonEmpty(ref.Metadata["url"], ref.ID)
+		parsed, err := url.Parse(rawURL)
+		scheme := strings.ToLower(parsed.Scheme)
+		return err == nil && parsed.Host != "" && (scheme == "http" || scheme == "https")
 	default:
 		return false
 	}
@@ -46,7 +57,16 @@ var (
 // SearchResult reference shape so the current SSE and message storage pipeline
 // can persist and replay them without a schema migration.
 func ExtractFromToolResult(toolName string, result *types.ToolResult) []*types.SearchResult {
-	if result == nil || result.Data == nil {
+	if result == nil {
+		return nil
+	}
+	if len(result.SourceReferences) > 0 {
+		// An executing tool can expose an internal exact snapshot without
+		// inflating its model/UI payload. This path is authoritative; combining
+		// it with display-oriented snippets would recreate ambiguous references.
+		return uniqueReferences(result.SourceReferences)
+	}
+	if result.Data == nil {
 		return nil
 	}
 
@@ -56,7 +76,8 @@ func ExtractFromToolResult(toolName string, result *types.ToolResult) []*types.S
 
 	switch {
 	case displayType == "web_search_results" || displayType == "web_fetch_results" || name == "web_search" || name == "web_fetch":
-		refs = append(refs, extractWebReferences(result.Data)...)
+		isFetch := displayType == "web_fetch_results" || name == "web_fetch"
+		refs = append(refs, extractWebReferences(result.Data, isFetch)...)
 	case name == "wiki_read_page":
 		refs = append(refs, extractWikiReferences(result.Output)...)
 	case displayType == "structured_analysis_result" && result.Success:
@@ -232,7 +253,7 @@ func jsonValue(value interface{}) types.JSON {
 	return nil
 }
 
-func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
+func extractWebReferences(data map[string]interface{}, isFetch bool) []*types.SearchResult {
 	var refs []*types.SearchResult
 	for index, item := range mapSlice(data["results"]) {
 		rawURL := stringValue(item["url"])
@@ -247,8 +268,9 @@ func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
 			continue
 		}
 		metadata := map[string]string{
-			"source_type": SourceTypeWeb,
-			"url":         rawURL,
+			"source_type":         SourceTypeWeb,
+			"url":                 rawURL,
+			MetadataEvidenceLevel: webEvidenceLevel(item, isFetch),
 		}
 		copySelectedMetadata(metadata, item, "source", "published_at", "prompt", "method")
 		position := intValue(firstNonEmptyValue(item["result_index"], item["rank"]))
@@ -265,6 +287,22 @@ func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
 		})
 	}
 	return refs
+}
+
+func webEvidenceLevel(item map[string]interface{}, isFetch bool) string {
+	if strings.TrimSpace(stringValue(item["raw_content"])) != "" {
+		return "full_page"
+	}
+	if isFetch {
+		if strings.TrimSpace(stringValue(item["content"])) != "" {
+			return "fetched_content"
+		}
+		return "fetched_summary"
+	}
+	if strings.TrimSpace(stringValue(item["content"])) != "" {
+		return "result_content"
+	}
+	return "search_snippet"
 }
 
 func extractWikiReferences(output string) []*types.SearchResult {

@@ -56,3 +56,22 @@ func TestAggregateByKnowledge_mergesChunksFromSameDocument(t *testing.T) {
 		t.Fatalf("doc-2 chunk hits = %d, want 1", byID["doc-2"].ChunkHitCount)
 	}
 }
+
+func TestBuildGrepSourceReferencesUsesPhysicalChunkBody(t *testing.T) {
+	compiled := []*regexp.Regexp{regexp.MustCompile(`第三十二条`)}
+	results := []chunkWithTitle{{
+		Chunk: types.Chunk{
+			ID: "chunk-32", TenantID: 42, KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+			ChunkType: types.ChunkTypeText, ChunkIndex: 32, StartAt: 100, EndAt: 180,
+			Content: "第三十一条……\n第三十二条 六种采购方式……\n第三十三条……",
+		},
+		KnowledgeTitle: "采购管理办法.docx",
+	}}
+	refs := buildGrepSourceReferences(results, compiled)
+	if len(refs) != 1 || refs[0].ID != "chunk-32" || refs[0].EvidenceContent != results[0].Content {
+		t.Fatalf("grep source did not retain the exact DB chunk: %#v", refs)
+	}
+	if refs[0].MatchedContent != "" || refs[0].SourceTenantID != 42 || refs[0].ChunkType != string(types.ChunkTypeText) {
+		t.Fatalf("grep source identity/provenance is invalid: %#v", refs[0])
+	}
+}

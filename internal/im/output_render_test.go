@@ -22,6 +22,9 @@ func TestRenderFinalOutboundUsesOneBoundaryForEveryPlatform(t *testing.T) {
 		KnowledgeID:     "doc-1",
 		KnowledgeBaseID: "kb-1",
 		KnowledgeTitle:  "制度",
+		Content:         "制度分片内容",
+		EvidenceContent: "制度分片内容",
+		ChunkType:       string(types.ChunkTypeText),
 		Metadata: map[string]string{
 			sourcerefs.MetadataCitationID:    "S1",
 			sourcerefs.MetadataCitationTitle: "制度分片",
@@ -82,7 +85,7 @@ func TestRenderFinalOutboundUsesOneBoundaryForEveryPlatform(t *testing.T) {
 func TestRenderFinalOutboundAlwaysConvertsValidatedReferences(t *testing.T) {
 	service := &Service{frontendBaseURL: "https://knora.example.com"}
 	refs := []*types.SearchResult{{
-		ID: "https://example.com",
+		ID: "https://example.com", Content: "网页证据", EvidenceContent: "网页证据", ChunkType: "web_search",
 		Metadata: map[string]string{
 			sourcerefs.MetadataCitationID: "S1",
 			"source_type":                 sourcerefs.SourceTypeWeb,
@@ -100,7 +103,7 @@ func TestRenderFinalOutboundAlwaysConvertsValidatedReferences(t *testing.T) {
 func TestStreamingKeepsCanonicalProtocolHiddenUntilFinalReplace(t *testing.T) {
 	service := &Service{frontendBaseURL: "https://knora.example.com"}
 	refs := []*types.SearchResult{{
-		ID: "https://example.com/source",
+		ID: "https://example.com/source", Content: "网页来源正文", EvidenceContent: "网页来源正文", ChunkType: "web_search",
 		Metadata: map[string]string{
 			sourcerefs.MetadataCitationID:    "S1",
 			sourcerefs.MetadataCitationTitle: "网页来源",

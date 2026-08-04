@@ -15,8 +15,8 @@ func TestFilterScheduledAssistantCitationsUsesAuthoritativeCitedReferences(t *te
 	message := &types.Message{
 		Content: `有效结论。<src id="S1" /> 错误标签。<doc source_id="S2" /> 未知引用。<src id="S9" />`,
 		KnowledgeReferences: types.References{
-			&types.SearchResult{ID: "chunk-1", Content: "有效结论。", Metadata: map[string]string{"citation_id": "S1"}},
-			&types.SearchResult{ID: "chunk-2", Content: "其他结论。", Metadata: map[string]string{"citation_id": "S2"}},
+			&types.SearchResult{ID: "chunk-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), Content: "有效结论。", EvidenceContent: "有效结论。", Metadata: map[string]string{"citation_id": "S1", "chunk_id": "chunk-1", "source_type": "knowledge"}},
+			&types.SearchResult{ID: "chunk-2", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), Content: "其他结论。", EvidenceContent: "其他结论。", Metadata: map[string]string{"citation_id": "S2", "chunk_id": "chunk-2", "source_type": "knowledge"}},
 		},
 	}
 

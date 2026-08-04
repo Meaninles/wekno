@@ -15,11 +15,16 @@ import (
 // PluginIntoChatMessage handles the transformation of search results into chat messages
 type PluginIntoChatMessage struct {
 	messageService interfaces.MessageService
+	chunkRepo      interfaces.ChunkRepository
 }
 
 // NewPluginIntoChatMessage creates and registers a new PluginIntoChatMessage instance
-func NewPluginIntoChatMessage(eventManager *EventManager, messageService interfaces.MessageService) *PluginIntoChatMessage {
-	res := &PluginIntoChatMessage{messageService: messageService}
+func NewPluginIntoChatMessage(
+	eventManager *EventManager,
+	messageService interfaces.MessageService,
+	chunkRepo interfaces.ChunkRepository,
+) *PluginIntoChatMessage {
+	res := &PluginIntoChatMessage{messageService: messageService, chunkRepo: chunkRepo}
 	eventManager.Register(res)
 	return res
 }
@@ -38,34 +43,6 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 		"merge_result_cnt": len(chatManage.MergeResult),
 		"template_len":     len(chatManage.SummaryConfig.ContextTemplate),
 	})
-
-	// Separate FAQ and document results when FAQ priority is enabled
-	var faqResults, docResults []*types.SearchResult
-	var hasHighConfidenceFAQ bool
-
-	if chatManage.FAQPriorityEnabled {
-		for _, result := range chatManage.MergeResult {
-			if result.ChunkType == string(types.ChunkTypeFAQ) {
-				faqResults = append(faqResults, result)
-				// Check if this FAQ has high confidence (above direct answer threshold)
-				if result.Score >= chatManage.FAQDirectAnswerThreshold && !hasHighConfidenceFAQ {
-					hasHighConfidenceFAQ = true
-					pipelineInfo(ctx, "IntoChatMessage", "high_confidence_faq", map[string]interface{}{
-						"chunk_id":  result.ID,
-						"score":     fmt.Sprintf("%.4f", result.Score),
-						"threshold": chatManage.FAQDirectAnswerThreshold,
-					})
-				}
-			} else {
-				docResults = append(docResults, result)
-			}
-		}
-		pipelineInfo(ctx, "IntoChatMessage", "faq_separation", map[string]interface{}{
-			"faq_count":           len(faqResults),
-			"doc_count":           len(docResults),
-			"has_high_confidence": hasHighConfidenceFAQ,
-		})
-	}
 
 	// 验证用户查询的安全性
 	safeQuery, isValid := utils.ValidateInput(chatManage.Query)
@@ -109,12 +86,54 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 		return next()
 	}
 
+	tenantID, _ := types.TenantIDFromContext(ctx)
+	if tenantID == 0 {
+		tenantID = chatManage.TenantID
+	}
+	exactEvidence, err := sourcerefs.ResolveQuickAnswerEvidence(
+		ctx, p.chunkRepo, tenantID, chatManage.MergeResult,
+	)
+	if err != nil {
+		pipelineWarn(ctx, "IntoChatMessage", "exact_evidence_resolve_failed", map[string]interface{}{
+			"session_id": chatManage.SessionID,
+			"error":      err.Error(),
+		})
+		return ErrTemplateExecute.WithError(err)
+	}
+	chatManage.CitationResult = exactEvidence
+	sourcerefs.AssignCitationIDs(chatManage.CitationResult)
+
+	// FAQ priority is evaluated on exact evidence, never on aggregate parent or
+	// neighbor context. Score is copied from the originating retrieval result.
+	var faqResults, docResults []*types.SearchResult
+	var hasHighConfidenceFAQ bool
+	if chatManage.FAQPriorityEnabled {
+		for _, result := range chatManage.CitationResult {
+			if result.ChunkType == string(types.ChunkTypeFAQ) {
+				faqResults = append(faqResults, result)
+				if result.Score >= chatManage.FAQDirectAnswerThreshold && !hasHighConfidenceFAQ {
+					hasHighConfidenceFAQ = true
+					pipelineInfo(ctx, "IntoChatMessage", "high_confidence_faq", map[string]interface{}{
+						"chunk_id":  result.ID,
+						"score":     fmt.Sprintf("%.4f", result.Score),
+						"threshold": chatManage.FAQDirectAnswerThreshold,
+					})
+				}
+			} else {
+				docResults = append(docResults, result)
+			}
+		}
+		pipelineInfo(ctx, "IntoChatMessage", "faq_separation", map[string]interface{}{
+			"faq_count":           len(faqResults),
+			"doc_count":           len(docResults),
+			"has_high_confidence": hasHighConfidenceFAQ,
+		})
+	}
+
 	var contextsBuilder strings.Builder
 
-	sourcerefs.AssignCitationIDs(chatManage.MergeResult)
-
 	// Collect unique document metadata (title + description), once per knowledge
-	allResults := chatManage.MergeResult
+	allResults := chatManage.CitationResult
 	if chatManage.FAQPriorityEnabled && len(faqResults) > 0 {
 		allResults = append(faqResults, docResults...)
 	}
@@ -132,7 +151,7 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 			if hasHighConfidenceFAQ && i == 0 {
 				annotations["match"] = "exact"
 			}
-			contextsBuilder.WriteString(sourcerefs.RenderEvidenceBlock(result, passage, annotations))
+			contextsBuilder.WriteString(renderExactModelContext(result, passage, annotations))
 			contextsBuilder.WriteString("\n")
 		}
 		contextsBuilder.WriteString("[/EVIDENCE_GROUP]\n")
@@ -141,18 +160,18 @@ func (p *PluginIntoChatMessage) OnEvent(ctx context.Context,
 			contextsBuilder.WriteString("[EVIDENCE_GROUP type=document_fragment priority=supplementary]\n")
 			for _, result := range docResults {
 				passage := getEnrichedPassageForChat(ctx, result)
-				contextsBuilder.WriteString(sourcerefs.RenderEvidenceBlock(result, passage, nil))
+				contextsBuilder.WriteString(renderExactModelContext(result, passage, nil))
 				contextsBuilder.WriteString("\n")
 			}
 			contextsBuilder.WriteString("[/EVIDENCE_GROUP]")
 		}
 	} else {
-		for i, result := range chatManage.MergeResult {
+		for i, result := range chatManage.CitationResult {
 			passage := getEnrichedPassageForChat(ctx, result)
 			if i > 0 {
 				contextsBuilder.WriteString("\n")
 			}
-			contextsBuilder.WriteString(sourcerefs.RenderEvidenceBlock(result, passage, nil))
+			contextsBuilder.WriteString(renderExactModelContext(result, passage, nil))
 		}
 	}
 
@@ -248,6 +267,19 @@ func getEnrichedPassageForChat(ctx context.Context, result *types.SearchResult) 
 
 	// 处理图片信息并与内容合并
 	return enrichContentWithImageInfo(ctx, result.Content, result.ImageInfo)
+}
+
+func renderExactModelContext(result *types.SearchResult, passage string, annotations map[string]string) string {
+	if sourcerefs.IsSupportedCitationReference(result) {
+		return sourcerefs.RenderEvidenceBlock(result, passage, annotations)
+	}
+	if strings.TrimSpace(passage) == "" {
+		return ""
+	}
+	// Structured analysis is useful model context but is not one of the three
+	// user-visible citation types. Keep it explicitly outside the citation
+	// protocol so data-source runs cannot masquerade as document fragments.
+	return "[ANALYSIS_CONTEXT]\n" + strings.TrimSpace(passage) + "\n[/ANALYSIS_CONTEXT]"
 }
 
 // enrichContentWithImageInfo delegates to the shared searchutil implementation.

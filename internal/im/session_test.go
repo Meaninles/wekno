@@ -264,8 +264,32 @@ func TestApplyIMCompleteDataToMessage(t *testing.T) {
 func TestFilterIMStoredAnswerKeepsOnlyCanonicalCitedReferences(t *testing.T) {
 	msg := &types.Message{
 		KnowledgeReferences: types.References{
-			&types.SearchResult{ID: "chunk-1", Content: "supported", Metadata: map[string]string{"citation_id": "S1"}},
-			&types.SearchResult{ID: "chunk-2", Content: "unused", Metadata: map[string]string{"citation_id": "S2"}},
+			&types.SearchResult{
+				ID:              "chunk-1",
+				KnowledgeID:     "knowledge-1",
+				KnowledgeBaseID: "kb-1",
+				Content:         "supported",
+				EvidenceContent: "supported",
+				ChunkType:       string(types.ChunkTypeText),
+				Metadata: map[string]string{
+					"citation_id": "S1",
+					"source_type": "knowledge",
+					"chunk_id":    "chunk-1",
+				},
+			},
+			&types.SearchResult{
+				ID:              "chunk-2",
+				KnowledgeID:     "knowledge-1",
+				KnowledgeBaseID: "kb-1",
+				Content:         "unused",
+				EvidenceContent: "unused",
+				ChunkType:       string(types.ChunkTypeText),
+				Metadata: map[string]string{
+					"citation_id": "S2",
+					"source_type": "knowledge",
+					"chunk_id":    "chunk-2",
+				},
+			},
 		},
 	}
 	answer, report := filterIMStoredAnswer(

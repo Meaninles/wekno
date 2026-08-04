@@ -171,13 +171,26 @@ func citationRef(id, sourceType string, metadata map[string]string) *types.Searc
 	for key, value := range metadata {
 		copyMetadata[key] = value
 	}
-	return &types.SearchResult{
+	ref := &types.SearchResult{
 		ID:              copyMetadata["chunk_id"],
 		KnowledgeID:     copyMetadata["knowledge_id"],
 		KnowledgeBaseID: copyMetadata["knowledge_base_id"],
 		KnowledgeTitle:  copyMetadata[sourcerefs.MetadataCitationTitle],
+		Content:         "真实证据 " + id,
+		EvidenceContent: "真实证据 " + id,
 		Metadata:        copyMetadata,
 	}
+	switch sourceType {
+	case sourcerefs.SourceTypeKnowledge:
+		ref.ChunkType = string(types.ChunkTypeText)
+	case sourcerefs.SourceTypeWiki:
+		ref.ID = "wiki:" + copyMetadata["knowledge_base_id"] + ":" + copyMetadata["slug"]
+		ref.ChunkType = "wiki_page"
+	case sourcerefs.SourceTypeWeb:
+		ref.ID = copyMetadata["url"]
+		ref.ChunkType = "web_search"
+	}
+	return ref
 }
 
 func testRenderOptions(platform string, streaming bool) Options {

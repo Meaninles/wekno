@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -182,9 +183,9 @@ func TestHandleCompleteAuthoritativelyFiltersStreamedCitationProtocol(t *testing
 		msg, stream, event.NewEventBus(),
 	)
 	ref := &types.SearchResult{
-		ID:       "chunk-1",
-		Content:  "supported claim",
-		Metadata: map[string]string{"citation_id": "S1"},
+		ID: "chunk-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+		ChunkType: string(types.ChunkTypeText), Content: "supported claim", EvidenceContent: "supported claim",
+		Metadata: map[string]string{"citation_id": "S1", "chunk_id": "chunk-1", "source_type": sourcerefs.SourceTypeKnowledge},
 	}
 	if err := handler.handleReferences(context.Background(), event.Event{
 		Type: event.EventAgentReferences,
@@ -240,8 +241,8 @@ func TestHandleCompleteKeepsRetrievedDocumentsSeparateFromCitedFragments(t *test
 		t.Fatalf("handleToolCall returned error: %v", err)
 	}
 	refs := []*types.SearchResult{
-		{ID: "chunk-1", KnowledgeID: "doc-1", Content: "claim one", Metadata: map[string]string{"citation_id": "S1"}},
-		{ID: "chunk-2", KnowledgeID: "doc-1", Content: "claim two", Metadata: map[string]string{"citation_id": "S2"}},
+		{ID: "chunk-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), Content: "claim one", EvidenceContent: "claim one", Metadata: map[string]string{"citation_id": "S1", "chunk_id": "chunk-1", "source_type": sourcerefs.SourceTypeKnowledge}},
+		{ID: "chunk-2", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), Content: "claim two", EvidenceContent: "claim two", Metadata: map[string]string{"citation_id": "S2", "chunk_id": "chunk-2", "source_type": sourcerefs.SourceTypeKnowledge}},
 	}
 	if err := handler.handleReferences(context.Background(), event.Event{
 		Type: event.EventAgentReferences,

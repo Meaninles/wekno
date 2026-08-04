@@ -117,7 +117,7 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(summary["data"]["results"][0]["citation_handle_for_this_evidence"], '<src id="S7" />')
         self.assertEqual(summary["data"]["results"][1]["citation_handle_for_this_evidence"], '<src id="S9" />')
         self.assertIn(
-            "<citation_handle_for_this_evidence><src id=\"S8\" /></citation_handle_for_this_evidence>",
+            'citation_handle_for_this_evidence: <src id="S8" />',
             summary["output"],
         )
 
@@ -1519,7 +1519,8 @@ EOF""",
         self.assertIn("Review limit", prompt)
         self.assertIn("user's original verbatim request", prompt)
         self.assertIn("Copy the matching `cite_exactly` value verbatim", prompt)
-        self.assertIn('The only valid citation shape is `<src id="S1" />`', prompt)
+        self.assertIn('each supplied value uses the canonical form `<src id="S1" />`', prompt)
+        self.assertNotIn("Never use another citation", prompt)
         self.assertIn("Generate the answer once", prompt)
         self.assertIn("never asks the model to validate or regenerate citations", prompt)
         self.assertIn("after the last tool result, always finish this same run", prompt)
@@ -1575,7 +1576,8 @@ EOF""",
                 self.assertIn("network security of this system or any related system's runtime environment", prompt)
                 self.assertIn("destructive filesystem or database operations", prompt)
                 self.assertIn("Copy the matching `cite_exactly` value verbatim", prompt)
-                self.assertIn('The only valid citation shape is `<src id="S1" />`', prompt)
+                self.assertIn('each supplied value uses the canonical form `<src id="S1" />`', prompt)
+                self.assertNotIn("Never use another citation", prompt)
                 self.assertIn("Generate the answer once", prompt)
 
     def test_build_system_prompt_limits_professional_skill_reads_to_current_run(self):

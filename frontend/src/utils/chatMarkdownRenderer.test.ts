@@ -67,6 +67,22 @@ test('unsupported citation syntax is filtered instead of rendered during streami
   const input = '甲。<kb doc="a.pdf" chunk_id="1" />乙。<web url="https://example.com" />丙。<src id="S1" />'
   assert.equal(stripUnsupportedCitationTags(input), '甲。乙。丙。<src id="S1" />')
   assert.equal(
+    stripUnsupportedCitationTags('<src id="S1" /><src id="S1" /><src id="S2" /><src id="S2" /><src id="S3" /><src id="S3" />'),
+    '<src id="S1" /><src id="S2" /><src id="S3" />',
+  )
+  assert.equal(
+    stripUnsupportedCitationTags('<src id="S1" /><src id="S2" /><src id="S2" /><src id="S3" /><src id="S2" /><src id="S2" />'),
+    '<src id="S1" /><src id="S2" /><src id="S3" /><src id="S2" />',
+  )
+  assert.equal(
+    stripUnsupportedCitationTags('<src id="S1" /><src id="S1" /><src id="S2" /><src id="S2" /><src id="S2" /><src id="S3" /><src id="S4" /><src id="S4" /><src id="S4" /><src id="S3" /><src id="S2" /><src id="S2" /><src id="S2" /><src id="S2" /><src id="S2" />'),
+    '<src id="S1" /><src id="S2" /><src id="S3" /><src id="S4" /><src id="S3" /><src id="S2" />',
+  )
+  assert.equal(
+    stripUnsupportedCitationTags('`<src id="S1" /><src id="S1" />`'),
+    '`<src id="S1" /><src id="S1" />`',
+  )
+  assert.equal(
     stripUnsupportedCitationTags('示例：`<kb doc="a.pdf" />`'),
     '示例：`<kb doc="a.pdf" />`',
   )
@@ -294,7 +310,7 @@ test('renderChatMarkdown preserves citations, math, and sanitized output through
       escapeMarkdown: (text) => text,
       sanitizeHtml: (html) => html.replace(/javascript:alert\(1\)/g, ''),
       knowledgeReferences: [
-        { id: 'chunk-1', knowledge_id: 'doc-1', metadata: { citation_id: 'S1', chunk_id: 'chunk-1' } },
+        { id: 'chunk-1', knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', metadata: { citation_id: 'S1', chunk_id: 'chunk-1' } },
       ],
     },
   )
@@ -383,11 +399,11 @@ test('renderChatMarkdown renumbers source citations by answer usage order', () =
           metadata: { citation_id: 'S1', source_type: 'web', url: 'https://example.com/a' },
         },
         {
-          id: 'doc-1',
+          id: 'chunk-5',
           knowledge_id: 'doc-1',
           knowledge_base_id: 'kb-1',
           knowledge_title: '报告.pdf',
-          metadata: { citation_id: 'S5', source_type: 'knowledge' },
+          metadata: { citation_id: 'S5', source_type: 'knowledge', chunk_id: 'chunk-5' },
         },
       ],
     },
@@ -429,11 +445,11 @@ test('renderChatMarkdown drops invalid source ids without substituting another s
 })
 
 test('source references preserve exactly the three visible citation kinds', () => {
-  const scenarios: Array<[SourceReference, 'knowledge' | 'wiki' | 'web']> = [
+  const scenarios: Array<[SourceReference, 'knowledge' | 'wiki' | 'web' | '']> = [
     [{ id: 'chunk-1', chunk_type: 'text', metadata: { source_type: 'knowledge' } }, 'knowledge'],
     [{ id: 'wiki:kb:page', chunk_type: 'wiki_page', metadata: { source_type: 'wiki', slug: 'page' } }, 'wiki'],
     [{ id: 'https://example.com', chunk_type: 'web_search', metadata: { source_type: 'web', url: 'https://example.com' } }, 'web'],
-    [{ id: 'query-result', chunk_type: 'data_source', metadata: { source_type: 'data_source' } }, 'knowledge'],
+    [{ id: 'query-result', chunk_type: 'data_source', metadata: { source_type: 'data_source' } }, ''],
   ]
 
   for (const [reference, expected] of scenarios) {
@@ -467,7 +483,7 @@ test('buildCitedSourceReferenceItems only returns sources cited by answer text',
   const items = buildCitedSourceReferenceItems(
     [
       { id: 'web-1', chunk_type: 'web_search', metadata: { citation_id: 'S1', source_type: 'web', url: 'https://example.com/a' } },
-      { id: 'doc-1', knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', knowledge_title: '报告.pdf', metadata: { citation_id: 'S5', source_type: 'knowledge' } },
+      { id: 'chunk-5', knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', knowledge_title: '报告.pdf', metadata: { citation_id: 'S5', source_type: 'knowledge', chunk_id: 'chunk-5' } },
     ],
     '答案只引用了第五个来源。<src id="S5" /> <src id="S5" />',
   )
@@ -484,7 +500,7 @@ test('buildCitedSourceReferenceItems keeps saved reference content for detail vi
     [
       {
         id: 'chunk-1',
-        content: savedContent,
+        evidence_content: savedContent,
         knowledge_id: 'doc-1',
         knowledge_base_id: 'kb-1',
         knowledge_title: '光模块报告.pdf',
@@ -499,14 +515,15 @@ test('buildCitedSourceReferenceItems keeps saved reference content for detail vi
   assert.match(items[0].snippet, /行业地位/)
 })
 
-test('knowledge citation details prefer the exact matched child over parent retrieval context', () => {
+test('knowledge citation details use only the immutable exact evidence snapshot', () => {
   const exactChild = '第三十二条 采购方式有招标采购、询比采购、竞价采购、谈判采购、框架协议采购和单源采购六种。'
   const items = buildCitedSourceReferenceItems(
     [
       {
         id: 'chunk-32',
         content: '第十七条 集中采购与分散采购的分类说明。',
-        matched_content: exactChild,
+        evidence_content: exactChild,
+        matched_content: '项目立项决策后的采购流程和要求是什么？',
         knowledge_id: 'doc-1',
         knowledge_base_id: 'kb-1',
         knowledge_title: '采购管理办法.docx',
@@ -527,7 +544,7 @@ test('buildCitedSourceReferenceItems keeps multiple fragments with duplicated ci
     [
       {
         id: 'chunk-1',
-        content: '第一段文档片段内容，用于说明平台模式。',
+        evidence_content: '第一段文档片段内容，用于说明平台模式。',
         knowledge_id: 'doc-1',
         knowledge_base_id: 'kb-1',
         knowledge_title: '智能体开发指南.md',
@@ -535,7 +552,7 @@ test('buildCitedSourceReferenceItems keeps multiple fragments with duplicated ci
       },
       {
         id: 'chunk-2',
-        content: '第二段文档片段内容，用于说明配置步骤。',
+        evidence_content: '第二段文档片段内容，用于说明配置步骤。',
         knowledge_id: 'doc-1',
         knowledge_base_id: 'kb-1',
         knowledge_title: '智能体开发指南.md',
@@ -605,7 +622,15 @@ test('renderChatMarkdown preserves chunk UUIDs when escapeMarkdown strips UUIDs 
       escapeMarkdown: stripUuids,
       sanitizeHtml: (html) => html,
       knowledgeReferences: [
-        { id: chunkId, knowledge_id: 'doc-1', knowledge_title: 'sample-topic.pdf', metadata: { citation_id: 'S1' } },
+        {
+          id: chunkId,
+          knowledge_id: 'doc-1',
+          knowledge_base_id: 'kb-1',
+          knowledge_title: 'sample-topic.pdf',
+          chunk_type: 'text',
+          evidence_content: 'Sample text',
+          metadata: { citation_id: 'S1', chunk_id: chunkId },
+        },
       ],
     },
   )
@@ -667,9 +692,9 @@ test('renderChatMarkdown inlines consecutive citation tags across newlines', () 
       escapeMarkdown: (text) => text,
       sanitizeHtml: (html) => html,
       knowledgeReferences: [
-        { id: SAMPLE_CHUNK_A, knowledge_id: 'doc-1', metadata: { citation_id: 'S1' } },
-        { id: SAMPLE_CHUNK_B, knowledge_id: 'doc-1', metadata: { citation_id: 'S2' } },
-        { id: SAMPLE_CHUNK_C, knowledge_id: 'doc-1', metadata: { citation_id: 'S3' } },
+        { id: SAMPLE_CHUNK_A, knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', metadata: { citation_id: 'S1', chunk_id: SAMPLE_CHUNK_A } },
+        { id: SAMPLE_CHUNK_B, knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', metadata: { citation_id: 'S2', chunk_id: SAMPLE_CHUNK_B } },
+        { id: SAMPLE_CHUNK_C, knowledge_id: 'doc-1', knowledge_base_id: 'kb-1', metadata: { citation_id: 'S3', chunk_id: SAMPLE_CHUNK_C } },
       ],
     },
   )

@@ -105,7 +105,15 @@ func (e *AgentEngine) prepareCitationAwareGenerationMessages(messages []chat.Mes
 		return messages
 	}
 	out := append([]chat.Message(nil), messages...)
-	last := len(out) - 1
-	out[last].Content = sourcerefs.PlaceTerminalCitationInstruction(out[last].Content, refs)
+	reminder := sourcerefs.TerminalCitationInstruction()
+	if out[len(out)-1].Role == "user" && out[len(out)-1].Content == reminder {
+		return out
+	}
+	// Keep the final-output contract in its own terminal user message. Appending
+	// it inside a tool payload makes some OpenAI-compatible local models treat it
+	// as retrieved evidence instead of an instruction, which measurably lowers
+	// citation presence and list-placement adherence. This adds no model call and
+	// leaves the retrieved content and tool-selection flow untouched.
+	out = append(out, chat.Message{Role: "user", Content: reminder})
 	return out
 }

@@ -96,6 +96,14 @@ func AttachCitationHandlesToEvidence(
 			}
 			continue
 		}
+		if SourceTypeFromRef(ref) == SourceTypeKnowledge {
+			var inserted bool
+			annotated, inserted = attachKnowledgeCitationHandle(annotated, ref, marker)
+			if !inserted {
+				unresolved = append(unresolved, ref)
+			}
+			continue
+		}
 
 		inserted := false
 		for _, anchor := range evidenceOutputAnchors(ref) {
@@ -120,6 +128,48 @@ func AttachCitationHandlesToEvidence(
 	return annotated, unresolved
 }
 
+// attachKnowledgeCitationHandle places the handle after the physical evidence
+// body, matching the position expected in the final answer. Local models tend
+// to mirror the demonstrated order; placing a handle immediately after the
+// fragment improves list-end placement and avoids ordinal-based selection.
+func attachKnowledgeCitationHandle(output string, ref *types.SearchResult, marker string) (string, bool) {
+	for _, anchor := range evidenceOutputAnchors(ref) {
+		anchorAt := strings.Index(output, anchor)
+		if anchorAt < 0 {
+			continue
+		}
+		closing := "</chunk>"
+		switch {
+		case strings.HasPrefix(anchor, "[EXACT_FRAGMENT"):
+			closing = "[/EXACT_FRAGMENT]"
+		case strings.HasPrefix(anchor, `faq_id="`):
+			closing = "</faq>"
+		}
+		if relativeClose := strings.Index(output[anchorAt:], closing); relativeClose >= 0 {
+			insertAt := anchorAt + relativeClose
+			return output[:insertAt] + markerInsertion(output, insertAt, marker) + output[insertAt:], true
+		}
+
+		// Compact tool outputs may expose the exact anchor without a closing
+		// block. Keep those supported and bind the handle to the anchor line.
+		lineEndOffset := strings.IndexByte(output[anchorAt:], '\n')
+		if lineEndOffset < 0 {
+			return output + "\n" + marker, true
+		}
+		insertAt := anchorAt + lineEndOffset + 1
+		return output[:insertAt] + marker + "\n" + output[insertAt:], true
+	}
+	return output, false
+}
+
+func markerInsertion(output string, insertAt int, marker string) string {
+	prefix := "\n"
+	if insertAt > 0 && output[insertAt-1] == '\n' {
+		prefix = ""
+	}
+	return prefix + marker + "\n"
+}
+
 // attachWikiCitationHandle binds a handle to the wiki_page whose own metadata
 // link identifies the referenced slug. Wiki outputs contain many cross-links;
 // searching the whole output for the first [[slug|...]] occurrence can attach
@@ -136,12 +186,12 @@ func attachWikiCitationHandle(output string, ref *types.SearchResult, marker str
 			!strings.Contains(block, "<link>[["+slug+"]]</link>") {
 			continue
 		}
-		openOffset := strings.Index(block, "<wiki_page>")
-		if openOffset < 0 {
+		closeOffset := strings.LastIndex(block, "</wiki_page>")
+		if closeOffset < 0 {
 			return output, false
 		}
-		insertAt := bounds[0] + openOffset + len("<wiki_page>")
-		return output[:insertAt] + "\n" + marker + output[insertAt:], true
+		insertAt := bounds[0] + closeOffset
+		return output[:insertAt] + markerInsertion(output, insertAt, marker) + output[insertAt:], true
 	}
 	return output, false
 }
@@ -159,6 +209,7 @@ func evidenceOutputAnchors(ref *types.SearchResult) []string {
 		chunkID := knowledgeChunkID(ref)
 		if chunkID != "" {
 			return []string{
+				`[EXACT_FRAGMENT chunk_id="` + chunkID + `"]`,
 				`chunk_id="` + chunkID + `"`,
 				`faq_id="` + chunkID + `"`,
 			}

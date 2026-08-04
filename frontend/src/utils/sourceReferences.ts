@@ -3,6 +3,7 @@ export type SourceReferenceKind = 'knowledge' | 'wiki' | 'web'
 export type SourceReference = {
   id?: string
   content?: string
+  evidence_content?: string
   matched_content?: string
   knowledge_id?: string
   knowledge_title?: string
@@ -42,17 +43,14 @@ export type SourceReferenceItem = {
 const CITATION_ID_RE = /^S(\d+)$/i
 const SRC_TAG_RE = /<src id="(S[1-9][0-9]*)" \/>/g
 
-export function getSourceReferenceKind(ref: SourceReference): SourceReferenceKind {
+export function getSourceReferenceKind(ref: SourceReference): SourceReferenceKind | '' {
   const metadataType = ref.metadata?.source_type
   if (metadataType === 'wiki') return 'wiki'
   if (metadataType === 'web') return 'web'
-  // Query/table evidence is rendered through the existing document-fragment
-  // presentation. The user-facing citation taxonomy remains exactly three
-  // kinds: document fragment, Wiki, and webpage.
-  if (metadataType === 'data_source') return 'knowledge'
+  if (metadataType === 'data_source') return ''
   if (ref.chunk_type === 'wiki_page') return 'wiki'
   if (ref.chunk_type === 'web_search') return 'web'
-  if (ref.chunk_type === 'data_source') return 'knowledge'
+  if (ref.chunk_type === 'data_source' || ref.chunk_type === 'data_query_result') return ''
   return 'knowledge'
 }
 
@@ -66,18 +64,16 @@ export function buildSourceReferenceItems(
   for (const ref of refs || []) {
     if (!ref) continue
     const type = getSourceReferenceKind(ref)
+    if (!type || !hasExactReferenceIdentity(ref, type)) continue
     const metadata = ref.metadata || {}
     const citationId = metadata.citation_id || ''
     const key = citationId || fallbackSourceKey(ref, type)
     if (!key) continue
-    // A parent-child retrieval result keeps the larger parent context in
-    // `content`, while `id`/`chunk_id` point at the exact matched child. The
-    // citation detail must therefore display `matched_content`; otherwise the
-    // badge opens the right chunk coordinate but previews an unrelated part of
-    // the same parent document.
-    const displayContent = type === 'knowledge'
-      ? ref.matched_content || ref.content || ''
-      : ref.content || ''
+    // The backend emits an immutable evidence snapshot whose content and exact
+    // location describe the same source unit. Retrieval matched text (including
+    // generated questions) and aggregate model context are intentionally never
+    // presentation fallbacks.
+    const displayContent = ref.evidence_content || ''
     const fullContent = referenceContent(displayContent)
 
     if (!firstSeen.has(key)) {
@@ -325,7 +321,22 @@ function isClickable(
 ): boolean {
   if (type === 'web') return Boolean(info.url)
   if (type === 'wiki') return Boolean(info.knowledgeBaseId && info.slug)
-  return Boolean(info.chunkId || info.knowledgeId || info.knowledgeBaseId)
+  return Boolean(info.knowledgeBaseId && info.knowledgeId && info.chunkId)
+}
+
+function hasExactReferenceIdentity(ref: SourceReference, type: SourceReferenceKind): boolean {
+  const metadata = ref.metadata || {}
+  if (type === 'web') {
+    return isHttpUrl(metadata.url || (isHttpUrl(ref.id) ? ref.id : ''))
+  }
+  if (type === 'wiki') {
+    const knowledgeBaseId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
+    const slug = metadata.slug || stripWikiID(ref.id || '')
+    return Boolean(knowledgeBaseId && slug)
+  }
+  const knowledgeBaseId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
+  const knowledgeId = ref.knowledge_id || metadata.knowledge_id || ''
+  return Boolean(knowledgeBaseId && knowledgeId && knowledgeChunkId(ref, type))
 }
 
 function nearestReferenceTarget(candidates: HTMLElement[], origin?: Element | null): HTMLElement | null {

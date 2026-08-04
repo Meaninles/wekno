@@ -44,6 +44,8 @@ class Case:
     min_data_sources: int = 0
     expected_retrieval_unit: str = "documents"
     required_answer_terms: tuple[str, ...] = ()
+    required_evidence_terms: tuple[str, ...] = ()
+    max_citations: int = 12
     forbidden_tools: tuple[str, ...] = ()
 
 
@@ -68,6 +70,8 @@ CASES = {
         require_citations=True,
         min_documents=1,
         required_answer_terms=PROCUREMENT_METHOD_TERMS,
+        required_evidence_terms=PROCUREMENT_METHOD_TERMS,
+        max_citations=4,
     ),
     "smart": Case(
         name="smart",
@@ -79,6 +83,8 @@ CASES = {
         require_citations=True,
         min_documents=1,
         required_answer_terms=PROCUREMENT_METHOD_TERMS,
+        required_evidence_terms=PROCUREMENT_METHOD_TERMS,
+        max_citations=4,
     ),
     "web": Case(
         name="web",
@@ -127,6 +133,7 @@ CASES = {
         min_wiki=1,
         min_web=1,
         required_answer_terms=PROCUREMENT_METHOD_TERMS,
+        required_evidence_terms=PROCUREMENT_METHOD_TERMS,
     ),
     "general": Case(
         name="general",
@@ -141,6 +148,8 @@ CASES = {
         require_citations=True,
         min_documents=1,
         required_answer_terms=PROCUREMENT_METHOD_TERMS,
+        required_evidence_terms=PROCUREMENT_METHOD_TERMS,
+        max_citations=6,
     ),
     "document-agent": Case(
         name="document-agent",
@@ -150,12 +159,18 @@ CASES = {
         query=(
             "这是文档处理智能体的只读问答任务，不生成或修改文件。"
             "请先用 grep_chunks 检索已选《采购管理办法》的相关分片，"
-            "再总结采购方式和审批注意事项，并把工具返回的分片引用准确放在相邻事实后。"
+            "逐项保留第三十二条规定的六种采购方式的正式类别名称，"
+            "再总结审批注意事项，并把工具返回的分片引用准确放在相邻事实后。"
         ),
         require_retrieval=True,
         require_citations=True,
         min_documents=1,
         required_answer_terms=PROCUREMENT_METHOD_TERMS,
+        required_evidence_terms=PROCUREMENT_METHOD_TERMS,
+        # This intentionally broad report can contain dozens of independently
+        # supported approval facts. Keep a finite ceiling, but do not reject
+        # correct unique citations merely because the answer is long.
+        max_citations=40,
     ),
     "custom-rag": Case(
         name="custom-rag",
@@ -167,6 +182,8 @@ CASES = {
         require_citations=True,
         min_documents=1,
         required_answer_terms=PROCUREMENT_METHOD_TERMS,
+        required_evidence_terms=PROCUREMENT_METHOD_TERMS,
+        max_citations=4,
     ),
     "table": Case(
         name="table",
@@ -364,6 +381,12 @@ def assert_canonical_citations(message: dict[str, Any], require: bool) -> tuple[
     if any(citation_id not in reference_ids for citation_id in ids):
         raise AssertionError(f"body citation has no matching reference: body={ids}, refs={sorted(reference_ids)}")
     used = list(dict.fromkeys(ids))
+    # Adjacent equal handles are presentation duplicates and must be collapsed
+    # by the shared deterministic output filter, regardless of run length.
+    citation_matches = list(CANONICAL_SRC_RE.finditer(content))
+    for previous, current in zip(citation_matches, citation_matches[1:]):
+        if previous.group(1) == current.group(1) and not content[previous.end() : current.start()].strip():
+            raise AssertionError(f"adjacent duplicate citation survived: {previous.group(1)}")
     cited_reference_ids = [
         str((reference.get("metadata") or {}).get("citation_id") or "")
         for reference in references
@@ -379,6 +402,40 @@ def assert_canonical_citations(message: dict[str, Any], require: bool) -> tuple[
             "uncited references survived final projection: "
             f"body={used}, reference_count={len(references)}"
         )
+    for reference in references:
+        if not isinstance(reference, dict):
+            raise AssertionError(f"invalid source reference: {reference!r}")
+        metadata = reference.get("metadata") if isinstance(reference.get("metadata"), dict) else {}
+        evidence = str(reference.get("evidence_content") or "").strip()
+        if not evidence:
+            raise AssertionError(f"citation has no immutable exact evidence snapshot: {reference!r}")
+        if str(reference.get("content") or "").strip() != evidence:
+            raise AssertionError("citation content diverged from evidence_content")
+        if str(reference.get("matched_content") or "").strip():
+            raise AssertionError("retrieval matched text leaked into a citation snapshot")
+        if reference.get("sub_chunk_id"):
+            raise AssertionError("aggregate merge membership leaked into a citation snapshot")
+        source_type = str(metadata.get("source_type") or "")
+        chunk_type = str(reference.get("chunk_type") or "")
+        if source_type == "knowledge":
+            chunk_id = str(metadata.get("chunk_id") or reference.get("id") or "").strip()
+            knowledge_id = str(reference.get("knowledge_id") or metadata.get("knowledge_id") or "").strip()
+            knowledge_base_id = str(reference.get("knowledge_base_id") or metadata.get("knowledge_base_id") or "").strip()
+            if chunk_type not in {"text", "faq"} or not (chunk_id and knowledge_id and knowledge_base_id):
+                raise AssertionError(f"inexact document-fragment identity survived: {reference!r}")
+            if str(reference.get("id") or "").strip() != chunk_id:
+                raise AssertionError(f"document content and chunk identity diverged: {reference!r}")
+        elif source_type == "wiki":
+            if chunk_type != "wiki_page" or not str(metadata.get("slug") or "").strip() or not str(
+                reference.get("knowledge_base_id") or metadata.get("knowledge_base_id") or ""
+            ).strip():
+                raise AssertionError(f"inexact Wiki identity survived: {reference!r}")
+        elif source_type == "web":
+            url = str(metadata.get("url") or reference.get("id") or "").strip()
+            if chunk_type != "web_search" or not re.match(r"^https?://[^/]+", url, re.IGNORECASE):
+                raise AssertionError(f"inexact webpage identity survived: {reference!r}")
+        else:
+            raise AssertionError(f"unsupported fourth citation type survived: {source_type!r}")
     for match in CANONICAL_SRC_RE.finditer(content):
         nearby_claim = re.sub(r"\s+", "", content[max(0, match.start() - 80) : match.start()])
         if len(re.findall(r"[\w\u3400-\u9fff]", nearby_claim)) < 2:
@@ -449,11 +506,19 @@ def validate_execution_metadata(message: dict[str, Any], expect_agent_mode: bool
     for step in message.get("agent_steps") or []:
         for call in step.get("tool_calls") or []:
             name = str(call.get("name") or "").strip().lower()
+            result = call.get("result") if isinstance(call.get("result"), dict) else {}
+            result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            is_internal_progress = (
+                name == "general_agent_progress"
+                or name.startswith("prepare_original_input_file")
+                or result_data.get("agent_progress") is True
+                or str(result_data.get("display_type") or "").strip().lower() == "agent_progress"
+            )
             is_retrieval = any(
                 name == canonical or name.endswith(f"__{canonical}") or name.endswith(f"_{canonical}")
                 for canonical in RETRIEVAL_TOOL_NAMES
             )
-            if name != "final_answer" and not is_retrieval:
+            if name != "final_answer" and not is_retrieval and not is_internal_progress:
                 derived += 1
     if authoritative != derived:
         raise AssertionError(
@@ -494,6 +559,31 @@ def run_case(api: API, case: Case, model_id: str) -> dict[str, Any]:
     if int(message.get("agent_duration_ms") or 0) <= 0:
         raise AssertionError("authoritative duration was not persisted")
     used, references = assert_canonical_citations(message, case.require_citations)
+    if len(used) > case.max_citations:
+        raise AssertionError(f"unreasonably many citations: {len(used)} > {case.max_citations}")
+    if case.required_evidence_terms:
+        cited_evidence = [str(reference.get("evidence_content") or "") for reference in references]
+        if not any(all(term in evidence for term in case.required_evidence_terms) for evidence in cited_evidence):
+            raise AssertionError(
+                "no cited exact fragment contains all required source facts: "
+                f"required={case.required_evidence_terms}, lengths={[len(value) for value in cited_evidence]}"
+            )
+        final_fact_at = max(answer.rfind(term) for term in case.required_answer_terms)
+        supporting_ids = {
+            str((reference.get("metadata") or {}).get("citation_id") or "")
+            for reference in references
+            if all(term in str(reference.get("evidence_content") or "") for term in case.required_evidence_terms)
+        }
+        supporting_positions = [
+            match.start()
+            for match in CANONICAL_SRC_RE.finditer(answer)
+            if match.group(1) in supporting_ids
+        ]
+        if final_fact_at >= 0 and (not supporting_positions or max(supporting_positions) < final_fact_at):
+            raise AssertionError(
+                "citation for a compact factual list is not placed after its final supported item: "
+                f"last_fact_at={final_fact_at}, citation_positions={supporting_positions}"
+            )
     stats = validate_stats(message, case.require_retrieval, case.expected_retrieval_unit)
     tool_count = validate_execution_metadata(message, case.endpoint == "agent-chat")
     cited_types = cited_reference_type_counts(references, used)
@@ -522,6 +612,7 @@ def run_case(api: API, case: Case, model_id: str) -> dict[str, Any]:
         "tools": called_tools,
         "citations": len(used),
         "references": len(references),
+        "evidence_lengths": [len(str(reference.get("evidence_content") or "")) for reference in references],
         "cited_types": cited_types,
         "retrieval_stats": stats,
         "duration_ms": int(message.get("agent_duration_ms") or 0),

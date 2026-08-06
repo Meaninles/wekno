@@ -45,7 +45,6 @@ import {
   listKnowledgeFolderOptions,
   moveKnowledgeDocumentsToFolder,
   searchAccessibleKnowledgeFolderNodes,
-  searchKnowledgeFolderNodes,
   updateKnowledgeFolder,
   uploadKnowledgeFolderFile,
 } from "@/custom/modules/knowledgeFolders/api";
@@ -433,9 +432,7 @@ const loadFiles = async () => {
       keyword: detailFilterKeyword.value || undefined,
     };
     const [res, optionsRes]: any[] = await Promise.all([
-      detailFilterKeyword.value
-        ? searchKnowledgeFolderNodes(selectedKbId.value, params)
-        : listKnowledgeFolderNodes(selectedKbId.value, params),
+			listKnowledgeFolderNodes(selectedKbId.value, params),
       listKnowledgeFolderOptions(selectedKbId.value),
     ]);
     const nodes: KnowledgeFolderNode[] = Array.isArray(res?.data) ? res.data : [];
@@ -746,7 +743,6 @@ const removeKnowledgeBaseFromSpace = async (row: MobileKnowledgeShareSpaceRow) =
 const openFolder = async (folder: KnowledgeFolder | null) => {
   currentFolderId.value = folder?.id || "";
   nodePage.value = 1;
-  detailFilterKeyword.value = "";
   detailFocusDocumentId.value = "";
   await router.replace({
     name: "mobile-knowledge",
@@ -755,7 +751,7 @@ const openFolder = async (folder: KnowledgeFolder | null) => {
       kb: selectedKbId.value,
       folder_id: currentFolderId.value || undefined,
       knowledge_id: undefined,
-      document_name: undefined,
+			document_name: detailFilterKeyword.value || undefined,
     },
   });
   await loadFiles();
@@ -1109,16 +1105,12 @@ const removeFolder = async (folder: KnowledgeFolder) => {
   if (!selectedCanEdit.value || !selectedKbId.value) return;
   const nonEmpty = folder.stats.direct_child_folder_count > 0 || folder.stats.subtree_document_count > 0;
   const message = nonEmpty
-    ? `“${folder.name}”中仍有内容，是否将内容移动到上一级后删除？`
-    : `确定删除空文件夹“${folder.name}”吗？`;
+		? `确定删除“${folder.name}”及其中的全部文档和子文件夹吗？此操作不可撤销。`
+		: `确定删除空文件夹“${folder.name}”吗？`;
   if (!window.confirm(message)) return;
   try {
-    await deleteKnowledgeFolder(
-      selectedKbId.value,
-      folder.id,
-      nonEmpty ? "move_to_parent" : "reject",
-    );
-    MessagePlugin.success("文件夹已删除");
+		await deleteKnowledgeFolder(selectedKbId.value, folder.id);
+		MessagePlugin.success("文件夹删除任务已提交");
     await loadFiles();
   } catch (error: any) {
     MessagePlugin.error(error?.message || "删除文件夹失败");

@@ -22,6 +22,7 @@ type Service struct {
 	knowledgeService     interfaces.KnowledgeService
 	knowledgeBaseService interfaces.KnowledgeBaseService
 	kbShareService       interfaces.KBShareService
+	taskEnqueuer         interfaces.TaskEnqueuer
 }
 
 func NewService(
@@ -29,12 +30,18 @@ func NewService(
 	knowledgeService interfaces.KnowledgeService,
 	knowledgeBaseService interfaces.KnowledgeBaseService,
 	kbShareService interfaces.KBShareService,
+	taskEnqueuer ...interfaces.TaskEnqueuer,
 ) *Service {
+	var enqueuer interfaces.TaskEnqueuer
+	if len(taskEnqueuer) > 0 {
+		enqueuer = taskEnqueuer[0]
+	}
 	return &Service{
 		db:                   db,
 		knowledgeService:     knowledgeService,
 		knowledgeBaseService: knowledgeBaseService,
 		kbShareService:       kbShareService,
+		taskEnqueuer:         enqueuer,
 	}
 }
 
@@ -43,7 +50,10 @@ func (s *Service) Migrate(ctx context.Context) error {
 		return errors.New("knowledge folders: database is unavailable")
 	}
 	db := s.db.WithContext(ctx)
-	if err := db.AutoMigrate(&Folder{}, &FolderClosure{}, &FolderStats{}); err != nil {
+	if err := db.AutoMigrate(
+		&Folder{}, &FolderClosure{}, &FolderStats{},
+		&FolderDeleteOperation{}, &FolderDeleteOperationItem{},
+	); err != nil {
 		return fmt.Errorf("migrate knowledge folder tables: %w", err)
 	}
 	if !db.Migrator().HasColumn(&types.Knowledge{}, "FolderID") {
@@ -113,8 +123,9 @@ func pathFor(parentPath, name string) string {
 
 func (s *Service) scopedFolder(tx *gorm.DB, tenantID uint64, kbID, folderID string) *gorm.DB {
 	return tx.Where(
-		"tenant_id = ? AND knowledge_base_id = ? AND id = ?",
+		"tenant_id = ? AND knowledge_base_id = ? AND id = ? AND delete_status <> ?",
 		tenantID, strings.TrimSpace(kbID), strings.TrimSpace(folderID),
+		FolderDeleteStatusDeleting,
 	)
 }
 
@@ -329,9 +340,22 @@ func (s *Service) ListNodes(
 		}
 	}
 	folderQuery := s.db.WithContext(ctx).Model(&Folder{}).
-		Where("tenant_id = ? AND knowledge_base_id = ? AND parent_id = ?", tenantID, kbID, strings.TrimSpace(parentID))
-	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
-		folderQuery = folderQuery.Where("LOWER(name) LIKE ? ESCAPE '\\'", likePattern(keyword))
+		Where(
+			"tenant_id = ? AND knowledge_base_id = ? AND parent_id = ? AND delete_status <> ?",
+			tenantID, kbID, strings.TrimSpace(parentID), FolderDeleteStatusDeleting,
+		)
+	if hasDocumentFilter(filter) {
+		matchingAncestors := s.applyDocumentFilter(
+			s.db.WithContext(ctx).Model(&types.Knowledge{}).
+				Select("matching_closure.ancestor_id").
+				Joins(`JOIN custom_knowledge_folder_closure AS matching_closure
+					ON matching_closure.tenant_id = knowledges.tenant_id
+					AND matching_closure.knowledge_base_id = knowledges.knowledge_base_id
+					AND matching_closure.descendant_id = knowledges.folder_id`).
+				Where("knowledges.tenant_id = ? AND knowledges.knowledge_base_id = ?", tenantID, kbID),
+			filter,
+		).Group("matching_closure.ancestor_id")
+		folderQuery = folderQuery.Where("id IN (?)", matchingAncestors)
 	}
 	var folderTotal int64
 	if err := folderQuery.Count(&folderTotal).Error; err != nil {
@@ -398,6 +422,9 @@ func likePattern(value string) string {
 }
 
 func (s *Service) applyDocumentFilter(query *gorm.DB, filter types.KnowledgeListFilter) *gorm.DB {
+	// Deleting documents leave every management list synchronously while their
+	// native storage/vector/Wiki cleanup continues in the background.
+	query = query.Where("knowledges.parse_status <> ?", types.ParseStatusDeleting)
 	if len(filter.TagIDs) > 0 {
 		query = query.Where(
 			"knowledges.id IN (SELECT knowledge_id FROM knowledge_tag_relations WHERE tag_id IN (?))",
@@ -441,6 +468,17 @@ func (s *Service) applyDocumentFilter(query *gorm.DB, filter types.KnowledgeList
 		query = query.Where("knowledges.updated_at <= ?", filter.UpdatedTo)
 	}
 	return query
+}
+
+func hasDocumentFilter(filter types.KnowledgeListFilter) bool {
+	return len(filter.TagIDs) > 0 ||
+		strings.TrimSpace(filter.Keyword) != "" ||
+		strings.TrimSpace(filter.FileType) != "" ||
+		strings.TrimSpace(filter.ParseStatus) != "" ||
+		strings.TrimSpace(filter.WorkflowStatus) != "" ||
+		strings.TrimSpace(filter.Source) != "" ||
+		!filter.UpdatedFrom.IsZero() ||
+		!filter.UpdatedTo.IsZero()
 }
 
 func (s *Service) folderViews(ctx context.Context, folders []Folder) ([]FolderView, error) {
@@ -865,84 +903,6 @@ func uniqueNonEmpty(values []string) []string {
 	return result
 }
 
-func (s *Service) DeleteFolder(
-	ctx context.Context,
-	kbID, folderID, mode string,
-) error {
-	tenantID, err := tenantIDFromContext(ctx)
-	if err != nil {
-		return err
-	}
-	mode = strings.TrimSpace(strings.ToLower(mode))
-	if mode == "" {
-		mode = "reject"
-	}
-	if mode != "reject" && mode != "move_to_parent" {
-		return ErrFolderDeleteMode
-	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		folder, err := s.findFolder(tx, tenantID, kbID, folderID, true)
-		if err != nil {
-			return err
-		}
-		var stats FolderStats
-		if err := tx.Where("folder_id = ?", folder.ID).First(&stats).Error; err != nil {
-			return err
-		}
-		if mode == "reject" && (stats.SubtreeDocumentCount > 0 || stats.DirectChildFolderCount > 0) {
-			return ErrFolderNotEmpty
-		}
-		if mode == "move_to_parent" {
-			var children []Folder
-			if err := tx.Where(
-				"tenant_id = ? AND knowledge_base_id = ? AND parent_id = ?",
-				tenantID, kbID, folder.ID,
-			).Order("sort_order ASC, id ASC").Find(&children).Error; err != nil {
-				return err
-			}
-			for index := range children {
-				child := children[index]
-				if err := s.moveFolderTx(tx, tenantID, kbID, &child, folder.ParentID); err != nil {
-					return err
-				}
-			}
-			if err := tx.Model(&types.Knowledge{}).
-				Where("tenant_id = ? AND knowledge_base_id = ? AND folder_id = ?", tenantID, kbID, folder.ID).
-				Update("folder_id", folder.ParentID).Error; err != nil {
-				return err
-			}
-		}
-		var remainingDocs int64
-		if err := tx.Model(&types.Knowledge{}).
-			Where("tenant_id = ? AND knowledge_base_id = ? AND folder_id = ?", tenantID, kbID, folder.ID).
-			Count(&remainingDocs).Error; err != nil {
-			return err
-		}
-		var remainingChildren int64
-		if err := tx.Model(&Folder{}).
-			Where("tenant_id = ? AND knowledge_base_id = ? AND parent_id = ?", tenantID, kbID, folder.ID).
-			Count(&remainingChildren).Error; err != nil {
-			return err
-		}
-		if remainingDocs > 0 || remainingChildren > 0 {
-			return ErrFolderNotEmpty
-		}
-		if folder.ParentID != "" {
-			if err := updateDirectChildCount(tx, folder.ParentID, -1); err != nil {
-				return err
-			}
-		}
-		if err := tx.Where("ancestor_id = ? OR descendant_id = ?", folder.ID, folder.ID).
-			Delete(&FolderClosure{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("folder_id = ?", folder.ID).Delete(&FolderStats{}).Error; err != nil {
-			return err
-		}
-		return tx.Delete(&Folder{}, "id = ?", folder.ID).Error
-	})
-}
-
 func (s *Service) ListFolderOptions(ctx context.Context, kbID string) ([]FolderOption, error) {
 	tenantID, err := tenantIDFromContext(ctx)
 	if err != nil {
@@ -950,7 +910,7 @@ func (s *Service) ListFolderOptions(ctx context.Context, kbID string) ([]FolderO
 	}
 	var folders []Folder
 	if err := s.db.WithContext(ctx).
-		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
+		Where("tenant_id = ? AND knowledge_base_id = ? AND delete_status <> ?", tenantID, kbID, FolderDeleteStatusDeleting).
 		Order("depth ASC, sort_order ASC, normalized_name ASC").
 		Find(&folders).Error; err != nil {
 		return nil, err
@@ -999,7 +959,7 @@ func (s *Service) SearchKnowledgeBase(
 	filter.Keyword = keyword
 	pattern := likePattern(keyword)
 	folderQuery := s.db.WithContext(ctx).Model(&Folder{}).
-		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
+		Where("tenant_id = ? AND knowledge_base_id = ? AND delete_status <> ?", tenantID, kbID, FolderDeleteStatusDeleting).
 		Where(
 			"(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(path) LIKE ? ESCAPE '\\' OR LOWER(description) LIKE ? ESCAPE '\\')",
 			pattern, pattern, pattern,
@@ -1115,7 +1075,7 @@ func (s *Service) SearchAccessible(
 	pattern := likePattern(keyword)
 	folderQuery := applyAccessibleScope(
 		s.db.WithContext(ctx).Model(&Folder{}), scopes,
-	).Where(
+	).Where("delete_status <> ?", FolderDeleteStatusDeleting).Where(
 		"(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(path) LIKE ? ESCAPE '\\' OR LOWER(description) LIKE ? ESCAPE '\\')",
 		pattern, pattern, pattern,
 	)
@@ -1354,6 +1314,9 @@ func knowledgeHasAbnormalSignal(knowledge types.Knowledge) bool {
 }
 
 func vectorForKnowledge(knowledge types.Knowledge) statVector {
+	if knowledge.ParseStatus == types.ParseStatusDeleting {
+		return statVector{}
+	}
 	vector := statVector{documents: 1}
 	if knowledge.ParseStatus == types.ParseStatusPending {
 		vector.pending = 1
@@ -1389,7 +1352,10 @@ func (v *statVector) add(other statVector) {
 func (s *Service) reconcileScope(ctx context.Context, tenantID uint64, kbID string) error {
 	var folders []Folder
 	if err := s.db.WithContext(ctx).
-		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, kbID).
+		Where(
+			"tenant_id = ? AND knowledge_base_id = ? AND delete_status <> ?",
+			tenantID, kbID, FolderDeleteStatusDeleting,
+		).
 		Find(&folders).Error; err != nil {
 		return err
 	}
@@ -1398,7 +1364,10 @@ func (s *Service) reconcileScope(ctx context.Context, tenantID uint64, kbID stri
 	}
 	var documents []types.Knowledge
 	if err := s.db.WithContext(ctx).
-		Where("tenant_id = ? AND knowledge_base_id = ? AND folder_id <> ''", tenantID, kbID).
+		Where(
+			"tenant_id = ? AND knowledge_base_id = ? AND folder_id <> '' AND parse_status <> ?",
+			tenantID, kbID, types.ParseStatusDeleting,
+		).
 		Find(&documents).Error; err != nil {
 		return err
 	}

@@ -1241,6 +1241,15 @@ func (s *knowledgeService) ProcessKnowledgeListDelete(ctx context.Context, t *as
 		logger.Errorf(ctx, "Failed to delete knowledge list: %v", err)
 		return err
 	}
+	if err := notifyKnowledgeDeleteCompleted(
+		ctx,
+		payload.TenantID,
+		strings.TrimSpace(payload.ExpectedKnowledgeBaseID),
+		payload.KnowledgeIDs,
+	); err != nil {
+		logger.Errorf(ctx, "Failed to finalize custom knowledge deletion resources: %v", err)
+		return err
+	}
 
 	logger.Infof(ctx, "Successfully deleted %d knowledge items", len(payload.KnowledgeIDs))
 	return nil

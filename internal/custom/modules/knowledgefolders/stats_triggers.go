@@ -46,6 +46,33 @@ func (s *Service) ensureStatsTriggers(ctx context.Context) error {
 
 func (s *Service) ensurePostgresStatsTriggers(ctx context.Context) error {
 	sql := fmt.Sprintf(`
+CREATE OR REPLACE FUNCTION custom_knowledge_folder_validate_placement()
+RETURNS trigger AS $$
+BEGIN
+	IF COALESCE(NEW.folder_id, '') = '' THEN
+		RETURN NEW;
+	END IF;
+	PERFORM 1
+	FROM custom_knowledge_folders AS folder
+	WHERE folder.id = NEW.folder_id
+	  AND folder.tenant_id = NEW.tenant_id
+	  AND folder.knowledge_base_id = NEW.knowledge_base_id
+	  AND folder.delete_status <> 'deleting'
+	FOR KEY SHARE;
+	IF NOT FOUND THEN
+		RAISE EXCEPTION 'knowledge folder is missing or deleting'
+			USING ERRCODE = '23503';
+	END IF;
+	RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_validate_placement ON knowledges;
+CREATE TRIGGER trigger_custom_knowledge_folder_validate_placement
+BEFORE INSERT OR UPDATE OF folder_id ON knowledges
+FOR EACH ROW
+EXECUTE FUNCTION custom_knowledge_folder_validate_placement();
+
 CREATE OR REPLACE FUNCTION custom_knowledge_folder_apply_delta(
 	p_folder_id varchar,
 	p_documents bigint,
@@ -94,7 +121,7 @@ DECLARE
 	old_failed bigint := 0;
 	new_failed bigint := 0;
 BEGIN
-	IF TG_OP <> 'INSERT' AND OLD.deleted_at IS NULL AND COALESCE(OLD.folder_id, '') <> '' THEN
+	IF TG_OP <> 'INSERT' AND OLD.deleted_at IS NULL AND COALESCE(OLD.folder_id, '') <> '' AND OLD.parse_status <> 'deleting' THEN
 		old_active := 1;
 		old_pending := CASE WHEN OLD.parse_status = 'pending' THEN 1 ELSE 0 END;
 		old_running := CASE WHEN OLD.parse_status IN ('processing', 'cancelling') THEN 1 ELSE 0 END;
@@ -109,7 +136,7 @@ BEGIN
 		);
 	END IF;
 
-	IF TG_OP <> 'DELETE' AND NEW.deleted_at IS NULL AND COALESCE(NEW.folder_id, '') <> '' THEN
+	IF TG_OP <> 'DELETE' AND NEW.deleted_at IS NULL AND COALESCE(NEW.folder_id, '') <> '' AND NEW.parse_status <> 'deleting' THEN
 		new_active := 1;
 		new_pending := CASE WHEN NEW.parse_status = 'pending' THEN 1 ELSE 0 END;
 		new_running := CASE WHEN NEW.parse_status IN ('processing', 'cancelling') THEN 1 ELSE 0 END;
@@ -153,6 +180,13 @@ BEGIN
 	END IF;
 	target_tenant_id := OLD.tenant_id;
 	target_kb_id := OLD.id;
+	DELETE FROM custom_knowledge_folder_delete_items
+	WHERE operation_id IN (
+		SELECT id FROM custom_knowledge_folder_delete_operations
+		WHERE tenant_id = target_tenant_id AND knowledge_base_id = target_kb_id
+	);
+	DELETE FROM custom_knowledge_folder_delete_operations
+	WHERE tenant_id = target_tenant_id AND knowledge_base_id = target_kb_id;
 	DELETE FROM custom_knowledge_folder_closure
 	WHERE tenant_id = target_tenant_id AND knowledge_base_id = target_kb_id;
 	DELETE FROM custom_knowledge_folder_stats
@@ -184,7 +218,7 @@ EXECUTE FUNCTION custom_knowledge_folder_cleanup_knowledge_base();
 func (s *Service) ensureSQLiteStatsTriggers(ctx context.Context) error {
 	statUpdate := func(prefix string, sign int) string {
 		folder := prefix + ".folder_id"
-		active := prefix + ".deleted_at IS NULL AND COALESCE(" + folder + ", '') <> ''"
+		active := prefix + ".deleted_at IS NULL AND COALESCE(" + folder + ", '') <> '' AND " + prefix + ".parse_status <> 'deleting'"
 		multiplier := ""
 		if sign < 0 {
 			multiplier = "-"
@@ -218,8 +252,36 @@ AND %s;`,
 DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_insert;
 DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_delete;
 DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_update;
+DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_validate_placement_insert;
+DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_validate_placement_update;
 DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_cleanup_kb_delete;
 DROP TRIGGER IF EXISTS trigger_custom_knowledge_folder_cleanup_kb_update;
+
+CREATE TRIGGER trigger_custom_knowledge_folder_validate_placement_insert
+BEFORE INSERT ON knowledges
+WHEN COALESCE(NEW.folder_id, '') <> '' AND NOT EXISTS (
+	SELECT 1 FROM custom_knowledge_folders AS folder
+	WHERE folder.id = NEW.folder_id
+	  AND folder.tenant_id = NEW.tenant_id
+	  AND folder.knowledge_base_id = NEW.knowledge_base_id
+	  AND folder.delete_status <> 'deleting'
+)
+BEGIN
+	SELECT RAISE(ABORT, 'knowledge folder is missing or deleting');
+END;
+
+CREATE TRIGGER trigger_custom_knowledge_folder_validate_placement_update
+BEFORE UPDATE OF folder_id ON knowledges
+WHEN COALESCE(NEW.folder_id, '') <> '' AND NOT EXISTS (
+	SELECT 1 FROM custom_knowledge_folders AS folder
+	WHERE folder.id = NEW.folder_id
+	  AND folder.tenant_id = NEW.tenant_id
+	  AND folder.knowledge_base_id = NEW.knowledge_base_id
+	  AND folder.delete_status <> 'deleting'
+)
+BEGIN
+	SELECT RAISE(ABORT, 'knowledge folder is missing or deleting');
+END;
 
 CREATE TRIGGER trigger_custom_knowledge_folder_insert
 AFTER INSERT ON knowledges
@@ -242,6 +304,13 @@ END;
 CREATE TRIGGER trigger_custom_knowledge_folder_cleanup_kb_delete
 AFTER DELETE ON knowledge_bases
 BEGIN
+	DELETE FROM custom_knowledge_folder_delete_items
+	WHERE operation_id IN (
+		SELECT id FROM custom_knowledge_folder_delete_operations
+		WHERE tenant_id = OLD.tenant_id AND knowledge_base_id = OLD.id
+	);
+	DELETE FROM custom_knowledge_folder_delete_operations
+	WHERE tenant_id = OLD.tenant_id AND knowledge_base_id = OLD.id;
 	DELETE FROM custom_knowledge_folder_closure
 	WHERE tenant_id = OLD.tenant_id AND knowledge_base_id = OLD.id;
 	DELETE FROM custom_knowledge_folder_stats
@@ -254,6 +323,13 @@ CREATE TRIGGER trigger_custom_knowledge_folder_cleanup_kb_update
 AFTER UPDATE OF deleted_at ON knowledge_bases
 WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
 BEGIN
+	DELETE FROM custom_knowledge_folder_delete_items
+	WHERE operation_id IN (
+		SELECT id FROM custom_knowledge_folder_delete_operations
+		WHERE tenant_id = OLD.tenant_id AND knowledge_base_id = OLD.id
+	);
+	DELETE FROM custom_knowledge_folder_delete_operations
+	WHERE tenant_id = OLD.tenant_id AND knowledge_base_id = OLD.id;
 	DELETE FROM custom_knowledge_folder_closure
 	WHERE tenant_id = OLD.tenant_id AND knowledge_base_id = OLD.id;
 	DELETE FROM custom_knowledge_folder_stats

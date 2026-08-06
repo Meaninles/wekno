@@ -12,7 +12,7 @@
 | `chatqueue` | 聊天已接受排队卡、个人上限/系统满结构化提示和取消操作 |
 | `capacity-control` | 系统管理员独立容量页、有效值/冲突、资源池、模板、绑定和审计 |
 | `knowledgeWorkflowStatus` | 主解析和衍生阶段总状态、悬停明细、准确筛选 |
-| `knowledgeFolders` | 文件夹、分页、渐进加载、搜索和移动 |
+| `knowledgeFolders` | 文件夹、筛选祖先树、递归删除进度及知识库/文件夹任务悬浮概况 |
 | `documentPreview` | preview policy、PDF.js 本地 worker/WASM/CMap/字体、懒渲染和大文件安全预览 |
 | `wikiGraph` | 分类列表、搜索、分页、ego 图和中心节点切换 |
 | `wikiActivation` | Wiki 高成本索引能力的二级入口、启用状态提示和提取粒度面板 |

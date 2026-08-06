@@ -22,7 +22,7 @@
 | `processingtrace` | V2 逻辑业务 span 唯一存储、稳定逻辑键与尝试分配 |
 | `enrichmentoutcome` / `terminalrepair` | 衍生结果收敛和终态修复 |
 | `knowledgeworkflowfilter` | 完整工作流状态筛选 |
-| `knowledgefolders` | 文件夹、渐进列表、搜索、移动和导入 |
+| `knowledgefolders` | 文件夹、筛选祖先树、持久递归删除、整库任务统计、移动和导入 |
 | `documentpreview` | 大文件预览策略、分片图片授权和移动端原文能力 |
 | `mobiledocument` | 移动端短时签名下载与企业微信原生文件响应 |
 | `knowledgepurge` / `wikidelete` | 删除时清理关系库、对象、图谱和 Wiki |

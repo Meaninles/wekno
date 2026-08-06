@@ -16,20 +16,22 @@ const (
 // Folder is a management-only hierarchy node. It deliberately owns no
 // retrieval fields: documents remain the only retrievable knowledge objects.
 type Folder struct {
-	ID              string    `json:"id" gorm:"type:varchar(36);primaryKey"`
-	TenantID        uint64    `json:"tenant_id" gorm:"not null;index:idx_custom_knowledge_folder_scope,priority:1;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:1"`
-	KnowledgeBaseID string    `json:"knowledge_base_id" gorm:"type:varchar(36);not null;index:idx_custom_knowledge_folder_scope,priority:2;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:2"`
-	ParentID        string    `json:"parent_id" gorm:"type:varchar(36);not null;default:'';index:idx_custom_knowledge_folder_scope,priority:3;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:3"`
-	Name            string    `json:"name" gorm:"type:varchar(255);not null"`
-	NormalizedName  string    `json:"-" gorm:"type:varchar(255);not null;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:4"`
-	Description     string    `json:"description" gorm:"type:text;not null;default:''"`
-	Path            string    `json:"path" gorm:"type:varchar(4096);not null;default:'';index"`
-	Depth           int       `json:"depth" gorm:"not null;default:1;index"`
-	SortOrder       int       `json:"sort_order" gorm:"not null;default:0;index"`
-	CreatedBy       string    `json:"created_by,omitempty" gorm:"type:varchar(36);not null;default:''"`
-	UpdatedBy       string    `json:"updated_by,omitempty" gorm:"type:varchar(36);not null;default:''"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                string    `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID          uint64    `json:"tenant_id" gorm:"not null;index:idx_custom_knowledge_folder_scope,priority:1;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:1"`
+	KnowledgeBaseID   string    `json:"knowledge_base_id" gorm:"type:varchar(36);not null;index:idx_custom_knowledge_folder_scope,priority:2;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:2"`
+	ParentID          string    `json:"parent_id" gorm:"type:varchar(36);not null;default:'';index:idx_custom_knowledge_folder_scope,priority:3;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:3"`
+	Name              string    `json:"name" gorm:"type:varchar(255);not null"`
+	NormalizedName    string    `json:"-" gorm:"type:varchar(255);not null;uniqueIndex:idx_custom_knowledge_folder_sibling,priority:4"`
+	Description       string    `json:"description" gorm:"type:text;not null;default:''"`
+	Path              string    `json:"path" gorm:"type:varchar(4096);not null;default:'';index"`
+	Depth             int       `json:"depth" gorm:"not null;default:1;index"`
+	SortOrder         int       `json:"sort_order" gorm:"not null;default:0;index"`
+	CreatedBy         string    `json:"created_by,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	UpdatedBy         string    `json:"updated_by,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	DeleteStatus      string    `json:"delete_status,omitempty" gorm:"type:varchar(24);not null;default:'';index"`
+	DeleteOperationID string    `json:"delete_operation_id,omitempty" gorm:"type:varchar(36);not null;default:'';index"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 func (Folder) TableName() string { return "custom_knowledge_folders" }
@@ -66,6 +68,60 @@ type FolderStats struct {
 }
 
 func (FolderStats) TableName() string { return "custom_knowledge_folder_stats" }
+
+type KnowledgeBaseTaskStats struct {
+	DocumentCount              int64 `json:"document_count"`
+	ParsePendingCount          int64 `json:"parse_pending_count"`
+	ParseRunningCount          int64 `json:"parse_running_count"`
+	EnrichmentPendingTaskCount int64 `json:"enrichment_pending_task_count"`
+	WikiPendingTaskCount       int64 `json:"wiki_pending_task_count"`
+	AbnormalDocumentCount      int64 `json:"abnormal_document_count"`
+	FailedDocumentCount        int64 `json:"failed_document_count"`
+}
+
+const (
+	FolderDeleteStatusDeleting = "deleting"
+
+	FolderDeleteOperationPending   = "pending"
+	FolderDeleteOperationRunning   = "running"
+	FolderDeleteOperationCompleted = "completed"
+	FolderDeleteOperationFailed    = "failed"
+)
+
+// FolderDeleteOperation is the durable owner of one recursive folder delete.
+// Documents are still deleted by the native knowledge:list_delete pipeline;
+// this row only coordinates visibility, retries and bottom-up folder cleanup.
+type FolderDeleteOperation struct {
+	ID                   string     `json:"id" gorm:"type:varchar(36);primaryKey"`
+	TenantID             uint64     `json:"tenant_id" gorm:"not null;index:idx_custom_folder_delete_scope,priority:1"`
+	KnowledgeBaseID      string     `json:"knowledge_base_id" gorm:"type:varchar(36);not null;index:idx_custom_folder_delete_scope,priority:2"`
+	RootFolderID         string     `json:"root_folder_id" gorm:"type:varchar(36);not null;index"`
+	RootFolderName       string     `json:"root_folder_name" gorm:"type:varchar(255);not null"`
+	ParentFolderID       string     `json:"parent_folder_id" gorm:"type:varchar(36);not null;default:''"`
+	RequestedBy          string     `json:"requested_by,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	Status               string     `json:"status" gorm:"type:varchar(24);not null;index"`
+	TotalDocumentCount   int64      `json:"total_document_count" gorm:"not null;default:0"`
+	DeletedDocumentCount int64      `json:"deleted_document_count" gorm:"not null;default:0"`
+	LastError            string     `json:"last_error,omitempty" gorm:"type:text;not null;default:''"`
+	DispatchedAt         *time.Time `json:"dispatched_at,omitempty"`
+	CompletedAt          *time.Time `json:"completed_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+func (FolderDeleteOperation) TableName() string {
+	return "custom_knowledge_folder_delete_operations"
+}
+
+type FolderDeleteOperationItem struct {
+	OperationID string    `json:"operation_id" gorm:"type:varchar(36);primaryKey"`
+	KnowledgeID string    `json:"knowledge_id" gorm:"type:varchar(36);primaryKey;index"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (FolderDeleteOperationItem) TableName() string {
+	return "custom_knowledge_folder_delete_items"
+}
 
 type FolderView struct {
 	Folder

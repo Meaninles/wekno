@@ -1,0 +1,79 @@
+{{/*
+The database migration is physically isolated from the workload manifest so
+non-Helm production releases can render and run it as an explicit gate before
+any Deployment is applied. Render this file alone for the migration phase and
+disable app.runtimeRoles.migration for the workload phase.
+*/}}
+{{- if and .Values.app.enabled .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.migration.enabled (ne (toString .Values.app.runtimeRoles.migration.render) "false") }}
+{{- $migration := .Values.app.runtimeRoles.migration }}
+{{- $nodeSelector := $migration.nodeSelector | default .Values.app.nodeSelector }}
+{{- $affinity := $migration.affinity | default .Values.app.affinity }}
+{{- $tolerations := $migration.tolerations | default .Values.app.tolerations }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "weknora.fullname" . }}-migration{{- with $migration.jobNameSuffix }}-{{ . | kebabcase }}{{- end }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" "migration" "context" .) | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ $migration.backoffLimit }}
+  activeDeadlineSeconds: {{ $migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "weknora.componentSelectorLabels" (dict "component" "migration" "context" .) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- include "weknora.imagePullSecrets" . | nindent 6 }}
+      # This one-shot process needs no Kubernetes API access.
+      serviceAccountName: default
+      automountServiceAccountToken: false
+      {{- with .Values.app.podSecurityContext | default .Values.global.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app
+          image: {{ include "weknora.app.image" . }}
+          imagePullPolicy: {{ .Values.app.image.pullPolicy }}
+          {{- with .Values.app.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "weknora.appRuntimeEnv" (dict "root" . "role" "migration" "pool" $migration "autoMigrate" true) | nindent 12 }}
+          volumeMounts:
+            - name: data-files
+              mountPath: /data/files
+            - name: scratch
+              mountPath: /tmp
+            {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+            - name: document-queue-kubernetes-api
+              mountPath: /var/run/secrets/weknora-document-queue-kubernetes
+              readOnly: true
+            {{- end }}
+            {{- with .Values.app.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml $migration.resources | nindent 12 }}
+      volumes:
+        {{- include "weknora.appRuntimeVolumes" (dict "root" . "role" $migration) | nindent 8 }}
+      {{- with $nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

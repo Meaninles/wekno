@@ -6,13 +6,16 @@
 
 | 目录 | 内容 |
 |---|---|
-| `services/` | general-agent、document-processing-agent、文档拆分器、模型旁路等独立服务 |
+| `services/` | general-agent、document-processing-agent、文档拆分器、DocReader 进程隔离运行时及模型网关辅助镜像 |
 | `tests/` | 多实例文档、知识库文件夹、模型容量、迁移和 Agent 验收 |
 | `document-templates/` | Word/Excel/PDF/PPT 生成模板与运行时指令 |
 
 后端 Go 模块位于 [`internal/custom/`](../internal/custom/README.md)，前端二开位于
 [`frontend/src/custom/`](../frontend/src/custom/README.md)。当前总体架构见
 [当前实现架构与文档索引](../docs/custom/当前实现架构与文档索引.md)。
+
+`services/weknora_docreader_runtime/` 负责 DocReader 单请求进程组隔离、硬超时与完整
+进程树清理；它通过 Dockerfile 注入运行镜像，不把大段二开逻辑堆入上游解析器入口。
 
 测试数据和模板不是普通说明文档，不能在全量文档更新时批量改写。独立服务的
 README 应明确其多副本、临时盘、对象存储和 Go 控制边界。

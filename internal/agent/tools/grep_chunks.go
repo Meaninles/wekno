@@ -32,7 +32,9 @@ Use this to locate candidate chunks by exact identifiers, error codes, product n
 
 ## Deep read after grep:
 - **FAQ hit** (chunk type faq): call list_knowledge_chunks with **faq_id** from the grep result (NOT the parent knowledge_id).
-- **Document hit**: call list_knowledge_chunks with **knowledge_id**, or get_document_info with **knowledge_ids**.`,
+- **Document hit (preferred)**: call list_knowledge_chunks with the exact **chunk_id** from the grep result, so the cited evidence remains local to the matching claim.
+- Use **knowledge_id** only when the user actually asks to read or paginate the whole document; do not load every chunk merely to verify one matching provision.
+- Use get_document_info with **knowledge_ids** only for document-level metadata, not for claim-bearing content.`,
 	schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -204,8 +206,9 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	output := t.formatOutput(ctx, finalResults, queries, compiled)
 
 	return &types.ToolResult{
-		Success: true,
-		Output:  output,
+		Success:          true,
+		Output:           output,
+		SourceReferences: buildGrepSourceReferences(finalResults, compiled),
 		Data: map[string]interface{}{
 			"query":              query,
 			"queries":            queries, // legacy alias for older frontends
@@ -221,6 +224,45 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			"display_type":       "grep_results",
 		},
 	}, nil
+}
+
+// buildGrepSourceReferences keeps the display/model payload compact while
+// binding each grep hit to its real physical chunk. A text hit stores the full
+// DB chunk; an FAQ stores the authoritative question/answer excerpt that the
+// model actually read because question-only FAQ indexes omit answers in the
+// chunk body.
+func buildGrepSourceReferences(results []chunkWithTitle, compiled []*regexp.Regexp) []*types.SearchResult {
+	refs := make([]*types.SearchResult, 0, len(results))
+	for _, result := range results {
+		content := result.Content
+		if result.ChunkType == types.ChunkTypeFAQ {
+			content = extractChunkMatchSnippet(&result.Chunk, compiled)
+		}
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		refs = append(refs, &types.SearchResult{
+			ID:                result.ID,
+			Content:           content,
+			EvidenceContent:   content,
+			KnowledgeID:       result.KnowledgeID,
+			KnowledgeTitle:    result.KnowledgeTitle,
+			KnowledgeBaseID:   result.KnowledgeBaseID,
+			KnowledgeFilename: result.KnowledgeTitle,
+			ChunkIndex:        result.ChunkIndex,
+			StartAt:           result.StartAt,
+			EndAt:             result.EndAt,
+			ChunkType:         string(result.ChunkType),
+			ParentChunkID:     result.ParentChunkID,
+			SourceTenantID:    result.TenantID,
+			SourceLocator:     append(types.JSON(nil), result.SourceLocator...),
+			ChunkMetadata:     append(types.JSON(nil), result.Metadata...),
+			Metadata: map[string]string{
+				"source_type": sourcerefs.SourceTypeKnowledge,
+			},
+		})
+	}
+	return refs
 }
 
 type chunkWithTitle struct {
@@ -681,6 +723,8 @@ type grepChunkResult struct {
 	ChunkType       string     `json:"chunk_type"`
 	Index           int        `json:"index,omitempty"`
 	ChunkIndex      int        `json:"chunk_index,omitempty"`
+	StartAt         int        `json:"start_at,omitempty"`
+	EndAt           int        `json:"end_at,omitempty"`
 	FAQQuestion     string     `json:"faq_question,omitempty"`
 	TitleMatch      bool       `json:"title_match,omitempty"`
 	MatchSnippet    string     `json:"match_snippet,omitempty"`
@@ -703,6 +747,8 @@ func buildGrepChunkResults(results []chunkWithTitle, compiled []*regexp.Regexp) 
 			MatchSnippet:    extractChunkMatchSnippet(&r.Chunk, compiled),
 			SourceLocator:   append(types.JSON(nil), r.SourceLocator...),
 			Score:           r.MatchScore,
+			StartAt:         r.StartAt,
+			EndAt:           r.EndAt,
 		}
 		if r.ChunkType == types.ChunkTypeFAQ {
 			item.FAQID = r.ID

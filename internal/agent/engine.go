@@ -49,6 +49,7 @@ type AgentEngine struct {
 	memoryConsolidator   *agentmemory.Consolidator // Memory consolidator for LLM-powered summarization (optional)
 	lastUsage            types.TokenUsage          // Token usage from the most recent LLM call
 	lastSentMsgCount     int                       // Number of messages sent in the most recent LLM call
+	citationState        agentCitationState        // Stable source handles for this execution
 }
 
 // ImageDescriberFunc generates a text description of an image.
@@ -113,12 +114,16 @@ func (e *AgentEngine) systemPromptOptions(ctx context.Context) *BuildSystemPromp
 }
 
 func (e *AgentEngine) buildSystemPrompt(ctx context.Context) string {
-	return BuildSystemPromptWithOptions(
+	prompt := BuildSystemPromptWithOptions(
 		e.knowledgeBasesInfo,
 		e.config.WebSearchEnabled,
 		e.systemPromptOptions(ctx),
 		e.systemPromptTemplate,
 	)
+	if skillContext := strings.TrimSpace(e.config.LightweightSkillContext); skillContext != "" {
+		prompt += "\n\n" + skillContext
+	}
+	return prompt
 }
 
 // NewAgentEngineWithSkills creates a new agent engine with skills support
@@ -191,6 +196,7 @@ func (e *AgentEngine) Execute(
 	llmContext []chat.Message,
 	imageURLs ...[]string,
 ) (*types.AgentState, error) {
+	e.citationState.reset()
 	logger.Infof(ctx, "[Agent] Starting execution: session=%s, message=%s, query_len=%d, context_msgs=%d",
 		sessionID, messageID, len(query), len(llmContext))
 	// Ensure tools are cleaned up after execution

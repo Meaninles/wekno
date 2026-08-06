@@ -123,10 +123,11 @@ func (e *AgentEngine) streamThinkingToEventBus(
 
 	parallelToolCalls := true
 	opts := &chat.ChatOptions{
-		Temperature:       e.config.Temperature,
-		Tools:             tools,
-		Thinking:          e.config.Thinking,
-		ParallelToolCalls: &parallelToolCalls,
+		Temperature:         e.config.Temperature,
+		MaxCompletionTokens: e.config.MaxCompletionTokens,
+		Tools:               tools,
+		Thinking:            e.config.Thinking,
+		ParallelToolCalls:   &parallelToolCalls,
 	}
 
 	pendingToolCalls := make(map[string]bool)
@@ -333,6 +334,7 @@ func (e *AgentEngine) callLLMWithRetry(
 	state *types.AgentState, query string, iteration int, sessionID string,
 ) (*types.ChatResponse, error) {
 	round := iteration + 1
+	messages = e.prepareCitationAwareGenerationMessages(messages)
 
 	// Log message summary; only detail the tail messages to avoid repeating what prior rounds already logged
 	const maxDetailMsgs = 4

@@ -99,6 +99,21 @@ type knowledgeBaseAPIResponse struct {
 	Data    types.KnowledgeBase `json:"data"`
 }
 
+type multiStringFlag []string
+
+func (values *multiStringFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *multiStringFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("file path cannot be empty")
+	}
+	*values = append(*values, value)
+	return nil
+}
+
 func requiredEnv(name string) (string, error) {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -594,6 +609,17 @@ func main() {
 			"",
 			"run nonaudio/audio/status through the resumable Python harness using the decrypted tenant key",
 		)
+		productionXLSXLocalE2E = flag.Bool(
+			"production-xlsx-local-e2e",
+			false,
+			"upload real XLSX files through the local API and audit split/content completeness",
+		)
+		productionXLSXFiles  multiStringFlag
+		productionXLSXReport = flag.String(
+			"production-xlsx-report",
+			".tmp/production-xlsx-local-e2e-report.json",
+			"sanitized JSON report written by the real XLSX local E2E",
+		)
 		supportedFormatsFixtureDir = flag.String(
 			"supported-formats-fixture-dir",
 			"/workspace/.local-data/e2e-fixtures/all-supported-formats-20260725-v1",
@@ -680,6 +706,11 @@ func main() {
 			"small audio file used by the ASR probe",
 		)
 	)
+	flag.Var(
+		&productionXLSXFiles,
+		"production-xlsx-file",
+		"XLSX path to upload; repeat for each file",
+	)
 	flag.Parse()
 	if strings.TrimSpace(*kbID) == "" {
 		fmt.Fprintln(os.Stderr, "-knowledge-base-id is required")
@@ -695,6 +726,9 @@ func main() {
 	}
 	if strings.TrimSpace(*supportedFormatsPhase) != "" {
 		requestCount = 20
+	}
+	if *productionXLSXLocalE2E {
+		requestCount = 100
 	}
 	if strings.TrimSpace(*reparseIDs) != "" {
 		requestCount = 2
@@ -714,6 +748,33 @@ func main() {
 		os.Exit(1)
 	}
 	client := &http.Client{Timeout: *timeout}
+	if *productionXLSXLocalE2E {
+		if len(productionXLSXFiles) == 0 {
+			fmt.Fprintln(os.Stderr, "at least one -production-xlsx-file is required")
+			os.Exit(2)
+		}
+		childArgs := []string{
+			"custom/tests/document_processing_cluster_e2e/run_production_xlsx_local_e2e.py",
+			"--base-url", *baseURL,
+			"--kb-id", *kbID,
+			"--report", *productionXLSXReport,
+		}
+		for _, file := range productionXLSXFiles {
+			childArgs = append(childArgs, "--file", file)
+		}
+		command := exec.CommandContext(ctx, *pythonBinary, childArgs...)
+		command.Env = append(
+			os.Environ(),
+			"WEKNORA_E2E_TENANT_API_KEY="+apiKey,
+		)
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if err := command.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *deletionLifecycle {
 		command := exec.CommandContext(
 			ctx,

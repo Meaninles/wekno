@@ -1,5 +1,31 @@
 import type { ComposerTranslation } from 'vue-i18n'
 
+function normalizedToolName(toolName: unknown): string {
+  return typeof toolName === 'string' ? toolName.trim().toLowerCase() : ''
+}
+
+/**
+ * Sidecar runtimes may preserve the MCP namespace in a tool event while the
+ * native agent emits the canonical short name. Treat both as the same
+ * capability so every agent type gets the same user-facing retrieval UI.
+ */
+export function isKnowledgeSearchToolName(toolName: unknown): boolean {
+  const name = normalizedToolName(toolName)
+  return name === 'knowledge_search' ||
+    name === 'search_knowledge' ||
+    name.endsWith('__knowledge_search') ||
+    name.endsWith('__search_knowledge') ||
+    name.endsWith('_knowledge_search') ||
+    name.endsWith('_search_knowledge')
+}
+
+export function isWebSearchToolName(toolName: unknown): boolean {
+  const name = normalizedToolName(toolName)
+  return name === 'web_search' ||
+    name.endsWith('__web_search') ||
+    name.endsWith('_web_search')
+}
+
 function collectQueryStrings(value: unknown): string[] {
   if (value == null) return []
 
@@ -72,25 +98,13 @@ export function getWikiPageText(args: unknown): string {
 }
 
 export function getKnowledgeSearchSummaryHtml(
-  t: ComposerTranslation,
-  toolData: Record<string, unknown> | null | undefined,
+  _t: ComposerTranslation,
+  _toolData: Record<string, unknown> | null | undefined,
 ): string {
-  if (!toolData) return ''
-
-  const results = toolData.results
-  const count = (Array.isArray(results) ? results.length : 0) || Number(toolData.count) || 0
-  if (count === 0) return t('agentStream.search.noResults')
-
-  const kbCounts = toolData.kb_counts
-  const kbCount = kbCounts && typeof kbCounts === 'object' ? Object.keys(kbCounts).length : 0
-  if (kbCount > 0) {
-    return t('agentStream.search.foundResultsFromFiles', {
-      count: `<strong>${count}</strong>`,
-      files: `<strong>${kbCount}</strong>`,
-    })
-  }
-
-  return t('agentStream.search.foundResults', { count: `<strong>${count}</strong>` })
+  // Retrieval counts are diagnostic details rather than useful answer
+  // content. Keep every successful knowledge lookup neutral and stable: the
+  // step title alone says that retrieval completed, regardless of hit count.
+  return ''
 }
 
 export function getWebSearchSummaryHtml(
@@ -101,7 +115,7 @@ export function getWebSearchSummaryHtml(
 
   const results = toolData.results
   const count = (Array.isArray(results) ? results.length : 0) || Number(toolData.count) || 0
-  if (count === 0) return t('agentStream.search.noResults')
+  if (count === 0) return ''
 
   return t('agentStream.search.webResults', { count: `<strong>${count}</strong>` })
 }
@@ -127,20 +141,22 @@ export function getRagPipelineStepTitle(t: ComposerTranslation, event: RagPipeli
       : t('agentStream.toolStatus.queryUnderstandDone')
   }
 
-  if (toolName === 'knowledge_search' || toolName === 'search_knowledge') {
+  if (isKnowledgeSearchToolName(toolName)) {
     if (pending) {
       return query
         ? t('agentStream.ragPipeline.searchingWithQuery', { query })
         : t('agentStream.ragPipeline.searching')
     }
 
-    const baseTitle = event.success === false
-      ? t('agentStream.toolStatus.searchKbFailed')
-      : t('agentStream.toolStatus.searchKb')
+    if (event.success !== false) {
+      return t('agentStream.ragPipeline.searchDone')
+    }
+
+    const baseTitle = t('agentStream.toolStatus.searchKbFailed')
     return query ? `${baseTitle}：「${query}」` : baseTitle
   }
 
-  if (toolName === 'web_search') {
+  if (isWebSearchToolName(toolName)) {
     const baseTitle = event.success === false
       ? t('agentStream.toolStatus.webSearchFailed')
       : t('agentStream.toolStatus.webSearch')

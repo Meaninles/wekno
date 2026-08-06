@@ -185,6 +185,7 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 		result.Error = err.Error()
 		result.Success = false
 	}
+	sourceReferences := run.registerSourceReferences(req.ToolName, result)
 	run.recordToolCall(iteration, toolCallID, req.ToolName, args, result, durationMs)
 
 	run.eventBus.Emit(run.ctx, event.Event{
@@ -202,27 +203,52 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 			Data:       result.Data,
 		},
 	})
-	sourceReferences := run.registerSourceReferences(req.ToolName, result)
 	if err != nil {
 		logger.Warnf(run.ctx, "general-agent tool %s failed: %v", req.ToolName, err)
 	}
+	citationOutputContract := ""
+	if run.hasCitableEvidence() {
+		citationOutputContract = sourcerefs.TerminalCitationInstruction()
+	}
 	return &ToolCallResponse{
-		Success:          result.Success,
-		Output:           result.Output,
-		Error:            result.Error,
-		Data:             result.Data,
-		Images:           result.Images,
-		SourceReferences: sourceReferences,
+		Success:                result.Success,
+		Output:                 result.Output,
+		Error:                  result.Error,
+		Data:                   result.Data,
+		Images:                 result.Images,
+		SourceReferences:       sourceReferences,
+		CitationOutputContract: citationOutputContract,
 	}, nil
 }
 
 func (r *activeRun) registerSourceReferences(toolName string, result *types.ToolResult) []*sourcerefs.CitationSource {
-	refs := sourcerefs.ExtractFromToolResult(toolName, result)
+	r.mu.Lock()
+	if r.sources == nil {
+		r.sources = sourcerefs.NewRegistry()
+	}
+	refs, sources := sourcerefs.RegisterToolResult(r.sources, toolName, result)
+	if len(refs) > 0 {
+		// Use the same shared model-visible annotation as the native ReAct loop.
+		// The sidecar transport only serializes this result; it does not infer or
+		// convert a second citation protocol.
+		result.Output = sourcerefs.AppendCitationCatalog(result.Output, refs)
+	}
+	if r.refSeen == nil {
+		r.refSeen = make(map[string]bool, len(refs))
+	}
+	newRefs := make([]*types.SearchResult, 0, len(refs))
+	for _, ref := range refs {
+		key := sourcerefs.ReferenceKey(ref)
+		if key == "" || r.refSeen[key] {
+			continue
+		}
+		r.refSeen[key] = true
+		newRefs = append(newRefs, ref)
+	}
+	r.mu.Unlock()
 	if len(refs) == 0 {
 		return nil
 	}
-
-	newRefs := r.filterNewSourceReferences(refs)
 	if len(newRefs) > 0 {
 		r.eventBus.Emit(r.ctx, event.Event{
 			Type:      event.EventAgentReferences,
@@ -234,30 +260,22 @@ func (r *activeRun) registerSourceReferences(toolName string, result *types.Tool
 		})
 	}
 
-	return sourcerefs.SourcesFromReferences(refs)
+	return sources
 }
 
-func (r *activeRun) filterNewSourceReferences(refs []*types.SearchResult) []*types.SearchResult {
+func (r *activeRun) snapshotSourceReferences() []*types.SearchResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	if r.sources == nil {
-		r.sources = sourcerefs.NewRegistry()
+		return nil
 	}
-	r.sources.Register(refs)
-	if r.refSeen == nil {
-		r.refSeen = make(map[string]bool, len(refs))
-	}
-	out := make([]*types.SearchResult, 0, len(refs))
-	for _, ref := range refs {
-		key := sourcerefs.ReferenceKey(ref)
-		if key == "" || r.refSeen[key] {
-			continue
-		}
-		r.refSeen[key] = true
-		out = append(out, ref)
-	}
-	return out
+	return r.sources.SnapshotReferences()
+}
+
+func (r *activeRun) hasCitableEvidence() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.refSeen) > 0
 }
 
 func (r *activeRun) toolTimeoutFor(toolName string) time.Duration {

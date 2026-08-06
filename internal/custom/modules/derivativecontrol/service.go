@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -82,7 +83,6 @@ type AdminConfig struct {
 
 type Service struct {
 	db        *gorm.DB
-	settings  interfaces.SystemSettingService
 	audit     interfaces.AuditLogService
 	kbRepo    interfaces.KnowledgeBaseRepository
 	agentRepo interfaces.CustomAgentRepository
@@ -96,11 +96,16 @@ func NewService(
 	audit interfaces.AuditLogService,
 	kbRepo interfaces.KnowledgeBaseRepository,
 	agentRepo interfaces.CustomAgentRepository,
+	admissionManagers ...*modeladmission.Manager,
 ) *Service {
+	var admissionManager *modeladmission.Manager
+	if len(admissionManagers) > 0 {
+		admissionManager = admissionManagers[0]
+	}
 	return &Service{
-		db: db, settings: settings, audit: audit,
+		db: db, audit: audit,
 		kbRepo: kbRepo, agentRepo: agentRepo,
-		limiter: NewLimiter(rdb, settings),
+		limiter: NewLimiterWithAdmission(rdb, settings, admissionManager),
 	}
 }
 
@@ -360,20 +365,6 @@ func (s *Service) SetDefault(ctx context.Context, modelID string) error {
 	return nil
 }
 
-func (s *Service) UpdateTPM(ctx context.Context, value int64) (int64, error) {
-	if s.settings == nil {
-		return 0, errors.New("system setting service is unavailable")
-	}
-	row, err := s.settings.Update(ctx, "derivative.tpm", value)
-	if err != nil {
-		return 0, apperrors.NewBadRequestError(err.Error())
-	}
-	if row == nil {
-		return s.limiter.TPM(ctx), nil
-	}
-	return s.limiter.TPM(ctx), nil
-}
-
 type derivativeAuthorization struct {
 	ModelID  string
 	TenantID uint64
@@ -444,7 +435,7 @@ func (s *Service) ResolveChatModel(
 			RetryAfter: time.Minute, Cause: err,
 		}
 	}
-	return s.limiter.Wrap(instance), nil
+	return s.limiter.WrapForModel(instance, model), nil
 }
 
 func (s *Service) GuardChatModel(ctx context.Context, model *types.Model) error {

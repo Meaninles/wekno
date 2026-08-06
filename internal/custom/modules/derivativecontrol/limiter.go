@@ -2,7 +2,7 @@ package derivativecontrol
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	agenttoken "github.com/Tencent/WeKnora/internal/agent/token"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -26,10 +27,7 @@ const (
 	minTPM                   int64 = 100
 	maxTPM                   int64 = 2_000_000
 	defaultOutputReservation       = 4_096
-	leaseTTL                       = 45 * time.Second
-	leaseHeartbeat                 = 10 * time.Second
-	busyRetryFloor                 = 2 * time.Second
-	timeoutSafetyCooldown          = 10 * time.Minute
+	timeoutSafetyCooldown          = 60 * time.Second
 	failureSafetyCooldown          = 30 * time.Second
 )
 
@@ -65,28 +63,6 @@ func (e *DeferredError) delay() time.Duration {
 }
 
 var (
-	acquireLeaseScript = redis.NewScript(`
-local ok = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])
-if ok then
-  return {1, tonumber(ARGV[2])}
-end
-local ttl = redis.call('PTTL', KEYS[1])
-if ttl < 0 then ttl = 2000 end
-return {0, ttl}
-`)
-	renewLeaseScript = redis.NewScript(`
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  redis.call('PEXPIRE', KEYS[1], ARGV[2])
-  return 1
-end
-return 0
-`)
-	releaseLeaseScript = redis.NewScript(`
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-`)
 	paceScript = redis.NewScript(`
 local clock = redis.call('TIME')
 local now = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
@@ -121,13 +97,12 @@ return next_at
 )
 
 type Limiter struct {
-	rdb      *redis.Client
-	settings interfaces.SystemSettingService
-	estimate *agenttoken.Estimator
+	rdb       *redis.Client
+	admission *modeladmission.Manager
+	estimate  *agenttoken.Estimator
 
-	localMu     sync.Mutex
-	localActive bool
-	localNext   time.Time
+	localMu   sync.Mutex
+	localNext map[string]time.Time
 
 	acquired atomic.Uint64
 	deferred atomic.Uint64
@@ -142,24 +117,27 @@ type LimiterSnapshot struct {
 }
 
 func NewLimiter(rdb *redis.Client, settings interfaces.SystemSettingService) *Limiter {
+	return NewLimiterWithAdmission(rdb, settings, nil)
+}
+
+func NewLimiterWithAdmission(
+	rdb *redis.Client,
+	_ interfaces.SystemSettingService,
+	admission *modeladmission.Manager,
+) *Limiter {
 	estimator, _ := agenttoken.NewEstimator()
-	return &Limiter{rdb: rdb, settings: settings, estimate: estimator}
+	return &Limiter{
+		rdb: rdb, admission: admission, estimate: estimator,
+		localNext: make(map[string]time.Time),
+	}
 }
 
 func (l *Limiter) TPM(ctx context.Context) int64 {
-	value := DefaultTPM
-	if l != nil && l.settings != nil {
-		value = l.settings.GetInt(
-			ctx, "derivative.tpm", "WEKNORA_DERIVATIVE_TPM", DefaultTPM,
-		)
-	}
-	if value < minTPM {
-		return minTPM
-	}
-	if value > maxTPM {
-		return maxTPM
-	}
-	return value
+	// Persisted models always resolve TPM from their actual-model resource
+	// pool. This fallback exists only for tests/bootstrapping callers without
+	// a model record and is deliberately not another operator-owned setting.
+	_ = ctx
+	return DefaultTPM
 }
 
 func (l *Limiter) Snapshot(ctx context.Context) LimiterSnapshot {
@@ -171,15 +149,9 @@ func (l *Limiter) Snapshot(ctx context.Context) LimiterSnapshot {
 		snapshot.Mode = "redis"
 		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
-		exists, err := l.rdb.Exists(probeCtx, l.key("active")).Result()
-		if err == nil {
-			snapshot.Active = exists > 0
-		}
+		_, _ = l.rdb.Ping(probeCtx).Result()
 		return snapshot
 	}
-	l.localMu.Lock()
-	snapshot.Active = l.localActive
-	l.localMu.Unlock()
 	return snapshot
 }
 
@@ -187,25 +159,119 @@ func (l *Limiter) Wrap(inner chat.Chat) chat.Chat {
 	if l == nil || inner == nil {
 		return inner
 	}
-	return &limitedChat{limiter: l, inner: inner}
+	return l.wrapForPool(inner, poolKeyForName(inner.GetModelName()), nil)
+}
+
+func (l *Limiter) WrapForModel(inner chat.Chat, model *types.Model) chat.Chat {
+	if l == nil || inner == nil {
+		return inner
+	}
+	return l.wrapForPool(inner, poolKeyForModel(model), model)
+}
+
+func (l *Limiter) tokenBudgets(
+	ctx context.Context,
+	fallbackPoolKey string,
+	model *types.Model,
+) ([]tokenBudget, error) {
+	if l != nil && l.admission != nil && model != nil {
+		policy, err := l.admission.ResolvePolicy(
+			ctx,
+			modeladmission.SpecForModel(modeladmission.KindDerivative, model, ""),
+		)
+		if err != nil {
+			return nil, &DeferredError{
+				Reason:     "derivative token policy is temporarily unavailable",
+				RetryAfter: 15 * time.Second,
+				Cause:      err,
+			}
+		}
+		budgets := make([]tokenBudget, 0, 2)
+		if policy.QuotaTPM > 0 && strings.TrimSpace(policy.QuotaPoolID) != "" {
+			budgets = append(budgets, tokenBudget{
+				key: "quota:" + policy.QuotaPoolID,
+				tpm: policy.QuotaTPM,
+			})
+		}
+		if policy.TPM > 0 {
+			poolID := strings.TrimSpace(policy.PoolID)
+			if poolID == "" {
+				poolID = fallbackPoolKey
+			}
+			budgets = append(budgets, tokenBudget{
+				key: "resource:" + poolID,
+				tpm: policy.TPM,
+			})
+		}
+		return budgets, nil
+	}
+	// Compatibility for callers that do not have a persisted model record.
+	// Production derivative resolution always takes the branch above.
+	return []tokenBudget{{
+		key: "resource:" + fallbackPoolKey,
+		tpm: l.TPM(ctx),
+	}}, nil
+}
+
+func (l *Limiter) wrapForPool(
+	inner chat.Chat,
+	poolKey string,
+	model *types.Model,
+) chat.Chat {
+	if l == nil || inner == nil {
+		return inner
+	}
+	return &limitedChat{limiter: l, inner: inner, poolKey: poolKey, model: model}
 }
 
 type limitedChat struct {
 	limiter *Limiter
 	inner   chat.Chat
+	poolKey string
+	model   *types.Model
 }
+
+var _ modeladmission.ChatTaskWorkAware = (*limitedChat)(nil)
 
 func (w *limitedChat) GetModelName() string { return w.inner.GetModelName() }
 func (w *limitedChat) GetModelID() string   { return w.inner.GetModelID() }
+func (w *limitedChat) ModelAdmissionParallelism(ctx context.Context, requested int) int {
+	return modeladmission.EffectiveChatParallelism(ctx, w.inner, requested)
+}
+
+func (w *limitedChat) ModelAdmissionLaneParallelism(
+	ctx context.Context,
+	requested int,
+	lane modeladmission.WorkLane,
+) int {
+	return modeladmission.EffectiveChatLaneParallelism(ctx, w.inner, requested, lane)
+}
+
+func (w *limitedChat) AcquireModelTaskWork(
+	ctx context.Context,
+	lane modeladmission.WorkLane,
+) (context.Context, func(), error) {
+	return modeladmission.AcquireChatTaskWork(ctx, w.inner, lane)
+}
 
 func (w *limitedChat) Chat(
 	ctx context.Context,
 	messages []chat.Message,
 	options *chat.ChatOptions,
 ) (*types.ChatResponse, error) {
+	if checkpoint, ok, err := derivativequeue.LookupChatCheckpoint(
+		ctx, w.inner.GetModelID(), messages, options,
+	); err != nil {
+		return nil, err
+	} else if ok {
+		return checkpoint, nil
+	}
 	reservation := w.limiter.estimateTokens(messages, options)
-	charged := min(reservation, int(w.limiter.TPM(ctx)))
-	lease, err := w.limiter.acquire(ctx)
+	budgets, err := w.limiter.tokenBudgets(ctx, w.poolKey, w.model)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := w.limiter.acquireBudgets(ctx, budgets)
 	if err != nil {
 		return nil, err
 	}
@@ -230,10 +296,20 @@ func (w *limitedChat) Chat(
 	if actual <= 0 {
 		// OpenAI-compatible proxies do not always return usage. Charging the
 		// conservative reservation keeps such responses inside the same
-		// global budget instead of silently treating them as zero-token calls.
+		// actual-model and quota budgets instead of treating them as zero.
 		actual = reservation
 	}
-	lease.finish(charged, actual, callErr)
+	lease.finish(reservation, actual, callErr)
+	if callErr == nil && response != nil {
+		checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		checkpointErr := derivativequeue.CheckpointChatResponse(
+			checkpointCtx, w.inner.GetModelID(), messages, options, response,
+		)
+		cancel()
+		if checkpointErr != nil {
+			return nil, checkpointErr
+		}
+	}
 	if lost := context.Cause(lease.ctx); lost != nil && ctx.Err() == nil {
 		return response, &DeferredError{
 			Reason:     "derivative limiter lease was lost",
@@ -250,8 +326,11 @@ func (w *limitedChat) ChatStream(
 	options *chat.ChatOptions,
 ) (<-chan types.StreamResponse, error) {
 	reservation := w.limiter.estimateTokens(messages, options)
-	charged := min(reservation, int(w.limiter.TPM(ctx)))
-	lease, err := w.limiter.acquire(ctx)
+	budgets, err := w.limiter.tokenBudgets(ctx, w.poolKey, w.model)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := w.limiter.acquireBudgets(ctx, budgets)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +345,7 @@ func (w *limitedChat) ChatStream(
 		options,
 	)
 	if err != nil {
-		lease.finish(charged, 0, err)
+		lease.finish(reservation, 0, err)
 		lease.release()
 		return nil, err
 	}
@@ -280,7 +359,7 @@ func (w *limitedChat) ChatStream(
 			if actual <= 0 {
 				actual = reservation
 			}
-			lease.finish(charged, actual, streamErr)
+			lease.finish(reservation, actual, streamErr)
 		}()
 		for {
 			select {
@@ -359,83 +438,62 @@ func (l *Limiter) estimateTokens(messages []chat.Message, options *chat.ChatOpti
 
 type limiterLease struct {
 	limiter *Limiter
-	token   string
 	ctx     context.Context
 	cancel  context.CancelCauseFunc
 	local   bool
-	stop    chan struct{}
 	once    sync.Once
 
 	callStarted time.Time
+	budgets     []tokenBudget
 }
 
-func (l *Limiter) acquire(ctx context.Context) (*limiterLease, error) {
-	token := randomToken()
+type tokenBudget struct {
+	key string
+	tpm int64
+}
+
+func (l *Limiter) acquire(ctx context.Context, poolKey string) (*limiterLease, error) {
+	return l.acquireBudgets(ctx, []tokenBudget{{
+		key: poolKey,
+		tpm: l.TPM(ctx),
+	}})
+}
+
+func (l *Limiter) acquireBudgets(
+	ctx context.Context,
+	budgets []tokenBudget,
+) (*limiterLease, error) {
 	leaseCtx, cancel := context.WithCancelCause(ctx)
 	lease := &limiterLease{
-		limiter: l, token: token, ctx: leaseCtx, cancel: cancel,
-		stop: make(chan struct{}),
+		limiter: l, ctx: leaseCtx, cancel: cancel, budgets: budgets,
 	}
-	if l.rdb == nil {
-		l.localMu.Lock()
-		if l.localActive {
-			l.localMu.Unlock()
-			l.deferred.Add(1)
-			cancel(nil)
-			return nil, &DeferredError{
-				Reason:     "another derivative model call is active",
-				RetryAfter: busyRetryFloor,
-			}
-		}
-		l.localActive = true
-		l.localMu.Unlock()
-		lease.local = true
-		l.acquired.Add(1)
-		return lease, nil
-	}
-
-	result, err := acquireLeaseScript.Run(
-		ctx, l.rdb, []string{l.key("active")},
-		token, leaseTTL.Milliseconds(),
-	).Slice()
-	if err != nil {
-		cancel(nil)
-		l.deferred.Add(1)
-		return nil, &DeferredError{
-			Reason:     "derivative limiter Redis admission failed",
-			RetryAfter: 15 * time.Second,
-			Cause:      err,
-		}
-	}
-	acquired, _ := resultInt64(result, 0)
-	ttlMs, _ := resultInt64(result, 1)
-	if acquired != 1 {
-		cancel(nil)
-		l.deferred.Add(1)
-		retry := time.Duration(ttlMs) * time.Millisecond
-		if retry < busyRetryFloor {
-			retry = busyRetryFloor
-		}
-		return nil, &DeferredError{
-			Reason:     "another derivative model call is active",
-			RetryAfter: retry,
-		}
-	}
+	lease.local = l.rdb == nil
 	l.acquired.Add(1)
-	go lease.heartbeat()
 	return lease, nil
 }
 
 func (l *limiterLease) pace(ctx context.Context, estimatedTokens int) error {
-	tpm := l.limiter.TPM(ctx)
+	for _, budget := range l.budgets {
+		if err := l.paceBudget(ctx, budget, estimatedTokens); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *limiterLease) paceBudget(
+	ctx context.Context,
+	budget tokenBudget,
+	estimatedTokens int,
+) error {
+	tpm := clampTPM(budget.tpm)
 	charged := int64(estimatedTokens)
 	if charged < 1 {
 		charged = 1
 	}
 	// One request may legitimately exceed a minute's token budget (large Wiki
-	// rewrites). Serialize it and charge one full minute up front; actual
-	// overage is added as debt after a fast response. A long-running response
-	// naturally amortizes its tokens while holding the global lease.
+	// rewrites). Charge one full minute up front; actual overage is added as
+	// debt after a fast response. Each actual-model pool paces independently.
 	if charged > tpm {
 		charged = tpm
 	}
@@ -448,15 +506,16 @@ func (l *limiterLease) pace(ctx context.Context, estimatedTokens int) error {
 	if l.local {
 		l.limiter.localMu.Lock()
 		now := time.Now()
-		if l.limiter.localNext.After(now) {
-			wait = time.Until(l.limiter.localNext)
+		next := l.limiter.localNext[budget.key]
+		if next.After(now) {
+			wait = time.Until(next)
 		} else {
-			l.limiter.localNext = now.Add(interval)
+			l.limiter.localNext[budget.key] = now.Add(interval)
 		}
 		l.limiter.localMu.Unlock()
 	} else {
 		result, err := paceScript.Run(
-			ctx, l.limiter.rdb, []string{l.limiter.key("pace")},
+			ctx, l.limiter.rdb, []string{l.limiter.key("pool:" + budget.key + ":pace")},
 			interval.Milliseconds(),
 		).Slice()
 		if err != nil {
@@ -480,79 +539,97 @@ func (l *limiterLease) pace(ctx context.Context, estimatedTokens int) error {
 	if err := context.Cause(l.ctx); err != nil {
 		return err
 	}
-	// Do not occupy an Asynq worker and the global active lease while waiting
+	// Do not occupy an Asynq worker or a model-admission lease while waiting
 	// for a long token interval or provider cooldown. The caller's durable
 	// task is rescheduled without consuming its retry budget. paceScript does
 	// not reserve a new interval on this branch, so repeated early wakeups
 	// cannot create phantom TPM debt.
 	return &DeferredError{
-		Reason:     "global derivative TPM budget is pacing this request",
+		Reason:     "derivative model TPM pool is pacing this request",
 		RetryAfter: wait,
 	}
+}
+
+func clampTPM(value int64) int64 {
+	if value < minTPM {
+		return minTPM
+	}
+	if value > maxTPM {
+		return maxTPM
+	}
+	return value
 }
 
 func (l *limiterLease) finish(reserved, actual int, callErr error) {
 	if l == nil || l.limiter == nil {
 		return
 	}
-	tpm := l.limiter.TPM(context.Background())
-	if actual > reserved {
-		required := time.Duration(
-			(int64(actual)*int64(time.Minute) + tpm - 1) / tpm,
-		)
-		started := l.callStarted
-		if started.IsZero() {
-			started = time.Now()
-		}
-		remaining := required - time.Since(started)
-		if remaining > 0 {
-			// pace() already reserved the initial estimate. Extending to the
-			// remaining total-duration target (rather than blindly adding the
-			// overage) credits time the provider spent generating the result
-			// and avoids throttling far below the configured TPM.
-			l.limiter.extendCooldown(remaining)
+	for _, budget := range l.budgets {
+		tpm := clampTPM(budget.tpm)
+		charged := min(reserved, int(tpm))
+		if actual > charged {
+			required := time.Duration(
+				(int64(actual)*int64(time.Minute) + tpm - 1) / tpm,
+			)
+			started := l.callStarted
+			if started.IsZero() {
+				started = time.Now()
+			}
+			remaining := required - time.Since(started)
+			if remaining > 0 {
+				// pace() already reserved the initial estimate. Extending to the
+				// remaining total-duration target (rather than blindly adding the
+				// overage) credits time the provider spent generating the result.
+				l.limiter.extendCooldown(budget.key, remaining)
+			}
 		}
 	}
-	if callErr == nil {
+	// Errors raised by admission hooks, durable queue state checks, checkpoint
+	// persistence, or an already-open circuit did not reach the provider and
+	// must never pause every task sharing this model pool.
+	if callErr == nil || !modeladmission.IsProviderCallFailure(callErr) {
 		return
 	}
 	cooldown := failureSafetyCooldown
 	if isTimeoutLike(callErr) {
 		cooldown = timeoutSafetyCooldown
 	}
-	l.limiter.extendCooldown(cooldown)
+	for _, budget := range l.budgets {
+		l.limiter.extendCooldown(budget.key, cooldown)
+	}
 }
 
-func (l *Limiter) addDebt(debt time.Duration) {
+func (l *Limiter) addDebt(poolKey string, debt time.Duration) {
 	if debt <= 0 {
 		return
 	}
 	if l.rdb == nil {
 		l.localMu.Lock()
 		now := time.Now()
-		if l.localNext.Before(now) {
-			l.localNext = now
+		next := l.localNext[poolKey]
+		if next.Before(now) {
+			next = now
 		}
-		l.localNext = l.localNext.Add(debt)
+		l.localNext[poolKey] = next.Add(debt)
 		l.localMu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, _ = addDebtScript.Run(
-		ctx, l.rdb, []string{l.key("pace")}, debt.Milliseconds(),
+		ctx, l.rdb, []string{l.key("pool:" + poolKey + ":pace")}, debt.Milliseconds(),
 	).Result()
 }
 
-func (l *Limiter) extendCooldown(cooldown time.Duration) {
+func (l *Limiter) extendCooldown(poolKey string, cooldown time.Duration) {
 	if cooldown <= 0 {
 		return
 	}
 	if l.rdb == nil {
 		l.localMu.Lock()
 		target := time.Now().Add(cooldown)
-		if l.localNext.Before(target) {
-			l.localNext = target
+		if l.localNext[poolKey].Before(target) {
+			l.localNext[poolKey] = target
 		}
 		l.localMu.Unlock()
 		return
@@ -560,35 +637,8 @@ func (l *Limiter) extendCooldown(cooldown time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, _ = extendPaceScript.Run(
-		ctx, l.rdb, []string{l.key("pace")}, cooldown.Milliseconds(),
+		ctx, l.rdb, []string{l.key("pool:" + poolKey + ":pace")}, cooldown.Milliseconds(),
 	).Result()
-}
-
-func (l *limiterLease) heartbeat() {
-	ticker := time.NewTicker(leaseHeartbeat)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-l.stop:
-			return
-		case <-l.ctx.Done():
-			return
-		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			ok, err := renewLeaseScript.Run(
-				ctx, l.limiter.rdb, []string{l.limiter.key("active")},
-				l.token, leaseTTL.Milliseconds(),
-			).Int()
-			cancel()
-			if err != nil || ok != 1 {
-				if err == nil {
-					err = errors.New("derivative limiter lease ownership changed")
-				}
-				l.cancel(err)
-				return
-			}
-		}
-	}
 }
 
 func (l *limiterLease) release() {
@@ -596,19 +646,7 @@ func (l *limiterLease) release() {
 		return
 	}
 	l.once.Do(func() {
-		close(l.stop)
 		l.cancel(nil)
-		if l.local {
-			l.limiter.localMu.Lock()
-			l.limiter.localActive = false
-			l.limiter.localMu.Unlock()
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, _ = releaseLeaseScript.Run(
-			ctx, l.limiter.rdb, []string{l.limiter.key("active")}, l.token,
-		).Result()
 	})
 }
 
@@ -620,12 +658,20 @@ func (l *Limiter) key(suffix string) string {
 	return base
 }
 
-func randomToken() string {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err == nil {
-		return hex.EncodeToString(raw[:])
+func poolKeyForModel(model *types.Model) string {
+	if model == nil {
+		return poolKeyForName("")
 	}
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return digestPoolKey(modeladmission.RouteFingerprint(model))
+}
+
+func poolKeyForName(name string) string {
+	return digestPoolKey(strings.ToLower(strings.TrimSpace(name)))
+}
+
+func digestPoolKey(material string) string {
+	sum := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(sum[:16])
 }
 
 func resultInt64(values []interface{}, index int) (int64, bool) {

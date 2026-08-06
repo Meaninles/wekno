@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -292,11 +293,27 @@ func (c *Coordinator) Migrate(ctx context.Context) error {
 		}
 		for _, field := range []string{
 			"dispatch_epoch", "max_retry", "delegate_timeout_nanos", "workflow_timeout_nanos",
-			"deadline_at", "retention_nanos", "lease_until", "plan_hash",
+			"deadline_at", "retention_nanos", "lease_until", "plan_hash", "terminal_diagnostic",
 		} {
 			if !migrator.HasColumn(&Workflow{}, field) {
-				return fmt.Errorf("document queue schema column %s is missing; run versioned migration 000076", field)
+				version := "000076"
+				if field == "terminal_diagnostic" {
+					version = "000091"
+				}
+				return fmt.Errorf(
+					"document queue schema column %s is missing; run versioned migration %s",
+					field,
+					version,
+				)
 			}
+		}
+		if !migrator.HasConstraint(
+			&Workflow{},
+			"ck_document_workflow_terminal_diagnostic",
+		) {
+			return errors.New(
+				"document queue terminal diagnostic constraint is missing; run versioned migration 000091",
+			)
 		}
 		if !migrator.HasColumn("knowledges", "processing_workflow_id") {
 			return errors.New("document queue schema column knowledges.processing_workflow_id is missing; run versioned migration 000076")
@@ -2900,7 +2917,7 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 		case types.EnrichmentStatusFailed:
 			return StateFailed, "enrichment_failed", true, nil
 		case types.EnrichmentStatusDegraded:
-			return StateFailed, "enrichment_degraded", true, nil
+			return StateCompleted, "completed_degraded_enrichment", true, nil
 		}
 		pending, err := c.wikiPending(ctx, lease)
 		if err != nil {
@@ -2919,7 +2936,7 @@ func (c *Coordinator) terminalState(ctx context.Context, lease *Lease, snapshot 
 		case types.WikiStatusFailed:
 			return StateFailed, "wiki_failed", true, nil
 		case types.WikiStatusDegraded:
-			return StateFailed, "wiki_degraded", true, nil
+			return StateCompleted, "completed_degraded_wiki", true, nil
 		}
 		return StateCompleted, "completed", true, nil
 	case types.ParseStatusFailed:
@@ -3070,7 +3087,7 @@ func (c *Coordinator) reconcileTerminalAttemptSpans(
 	if c == nil || c.db == nil || strings.TrimSpace(knowledgeID) == "" {
 		return nil
 	}
-	if !c.db.Migrator().HasTable(&types.KnowledgeProcessingSpan{}) {
+	if !c.db.Migrator().HasTable(&processingtrace.Span{}) {
 		// The lightweight state-machine tests intentionally migrate only the
 		// queue tables unless a test is exercising span reconciliation.
 		return nil
@@ -3078,7 +3095,7 @@ func (c *Coordinator) reconcileTerminalAttemptSpans(
 
 	var attempt int
 	if err := c.db.WithContext(ctx).
-		Model(&types.KnowledgeProcessingSpan{}).
+		Model(&processingtrace.Span{}).
 		Where("knowledge_id = ?", knowledgeID).
 		Select("COALESCE(MAX(attempt), 0)").
 		Row().
@@ -3096,16 +3113,16 @@ func (c *Coordinator) reconcileTerminalAttemptSpans(
 		stage,
 	)
 	descendants := c.db.WithContext(ctx).
-		Model(&types.KnowledgeProcessingSpan{}).
+		Model(&processingtrace.Span{}).
 		Where("knowledge_id = ? AND attempt = ? AND kind <> ? AND status IN ?",
 			knowledgeID, attempt, types.SpanKindRoot,
 			[]string{types.SpanStatusPending, types.SpanStatusRunning}).
 		Updates(map[string]interface{}{
-			"status":        types.SpanStatusCancelled,
-			"error_code":    "DOCUMENT_WORKFLOW_TERMINAL",
-			"error_message": reason,
-			"finished_at":   now,
-			"updated_at":    now,
+			"status":             types.SpanStatusCancelled,
+			"last_error_code":    "DOCUMENT_WORKFLOW_TERMINAL",
+			"last_error_message": reason,
+			"finished_at":        now,
+			"updated_at":         now,
 		})
 	if descendants.Error != nil {
 		return fmt.Errorf("reconcile open processing spans for %s attempt %d: %w",
@@ -3125,16 +3142,16 @@ func (c *Coordinator) reconcileTerminalAttemptSpans(
 		rootCode = "DOCUMENT_WORKFLOW_FAILED"
 	}
 	root := c.db.WithContext(ctx).
-		Model(&types.KnowledgeProcessingSpan{}).
+		Model(&processingtrace.Span{}).
 		Where("knowledge_id = ? AND attempt = ? AND kind = ? AND status IN ?",
 			knowledgeID, attempt, types.SpanKindRoot,
 			[]string{types.SpanStatusPending, types.SpanStatusRunning}).
 		Updates(map[string]interface{}{
-			"status":        rootStatus,
-			"error_code":    rootCode,
-			"error_message": rootMessage,
-			"finished_at":   now,
-			"updated_at":    now,
+			"status":             rootStatus,
+			"last_error_code":    rootCode,
+			"last_error_message": rootMessage,
+			"finished_at":        now,
+			"updated_at":         now,
 		})
 	if root.Error != nil {
 		return fmt.Errorf("reconcile processing root for %s attempt %d: %w",
@@ -3154,7 +3171,7 @@ func (c *Coordinator) reconcileTerminalAttemptSpans(
 // cleanup. The generation join is essential: an old terminal workflow must
 // never close spans belonging to a newer active reparse of the same document.
 func (c *Coordinator) reconcileTerminalSpanOrphans(ctx context.Context) error {
-	if c == nil || c.db == nil || !c.db.Migrator().HasTable(&types.KnowledgeProcessingSpan{}) {
+	if c == nil || c.db == nil || !c.db.Migrator().HasTable(&processingtrace.Span{}) {
 		return nil
 	}
 	type candidate struct {
@@ -3177,11 +3194,11 @@ func (c *Coordinator) reconcileTerminalSpanOrphans(ctx context.Context) error {
 		}).
 		Where(`EXISTS (
 			SELECT 1
-			FROM knowledge_processing_spans AS s
+			FROM custom_processing_spans_v2 AS s
 			WHERE s.knowledge_id = w.knowledge_id
 			  AND s.attempt = (
 				SELECT MAX(latest.attempt)
-				FROM knowledge_processing_spans AS latest
+				FROM custom_processing_spans_v2 AS latest
 				WHERE latest.knowledge_id = w.knowledge_id
 			  )
 			  AND s.status IN ?

@@ -317,7 +317,6 @@ func TestRecoverNowPartialEnqueueReplayIsIdempotentAcrossReplicas(t *testing.T) 
 	require.NoError(t, first.RecoverNow(context.Background()))
 
 	want := []string{
-		processownership.DataTableSummaryTaskID(plan.KnowledgeID, plan.ProcessingGeneration),
 		processownership.ImageTaskID(plan.KnowledgeID, plan.ProcessingGeneration, 0),
 		processownership.ImageTaskID(plan.KnowledgeID, plan.ProcessingGeneration, 1),
 	}

@@ -126,6 +126,20 @@ func (s *postProcessWikiGateKnowledgeRepoStub) KnowledgeFanoutCompletionExists(
 
 const postProcessTestGeneration = "generation-1"
 
+func TestDurableEnrichmentPlanCountsDataTableMetadata(t *testing.T) {
+	plan := durableEnrichmentFanout{
+		Stage: durableEnrichmentPlanStage, Version: 3,
+		TenantID: 42, KnowledgeID: "knowledge-1", KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: postProcessTestGeneration,
+		DataTable: &processownership.DataTableFanout{
+			SummaryModel: "model-1", EmbeddingModel: "embedding-1",
+		},
+	}
+	if got := plan.subtaskCount(); got != 1 {
+		t.Fatalf("derivative subtask count = %d, want one table metadata item", got)
+	}
+}
+
 type postProcessWikiGateKBServiceStub struct {
 	interfaces.KnowledgeBaseService
 	kb    *types.KnowledgeBase
@@ -379,8 +393,8 @@ func TestKnowledgePostProcessNoSubtasksCompletionFailureIsRetried(t *testing.T) 
 	if !errors.Is(err, updateErr) {
 		t.Fatalf("Handle() error = %v, want completion update error", err)
 	}
-	if knowledgeRepo.generationSwapCalls != 1 {
-		t.Fatalf("generation CAS calls = %d, want 1", knowledgeRepo.generationSwapCalls)
+	if knowledgeRepo.generationSwapCalls != 2 {
+		t.Fatalf("generation CAS calls = %d, want finalizing plan plus core completion", knowledgeRepo.generationSwapCalls)
 	}
 }
 
@@ -417,8 +431,8 @@ func TestKnowledgePostProcessNoSubtasksPreservesCoreFanoutFailure(t *testing.T) 
 	); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
-	if len(knowledgeRepo.generationSwapValues) != 1 {
-		t.Fatalf("generation CAS values = %d, want 1", len(knowledgeRepo.generationSwapValues))
+	if len(knowledgeRepo.generationSwapValues) != 2 {
+		t.Fatalf("generation CAS values = %d, want finalizing plan plus core completion", len(knowledgeRepo.generationSwapValues))
 	}
 	if got := knowledgeRepo.generationSwapValues[0]["enrichment_status"]; got != types.EnrichmentStatusFailed {
 		t.Fatalf("enrichment status = %v, want failed", got)
@@ -537,8 +551,8 @@ func TestKnowledgePostProcessPersistedWikiRowContinuesWhenTriggerFails(t *testin
 	if len(pendingRepo.enqueued) != 1 {
 		t.Fatalf("persisted Wiki rows = %d, want 1", len(pendingRepo.enqueued))
 	}
-	if knowledgeRepo.generationSwapCalls != 1 {
-		t.Fatalf("finalizing generation CAS calls = %d, want 1", knowledgeRepo.generationSwapCalls)
+	if knowledgeRepo.generationSwapCalls != 2 {
+		t.Fatalf("generation CAS calls = %d, want finalizing plan plus core completion", knowledgeRepo.generationSwapCalls)
 	}
 	if knowledgeRepo.finalizeCalls != 0 {
 		t.Fatalf("durably enqueued summary slot releases = %d, want 0", knowledgeRepo.finalizeCalls)
@@ -652,8 +666,8 @@ func TestKnowledgePostProcessFinalizingReplayTaskIDConflictOwnsSlot(t *testing.T
 	if err := svc.Handle(context.Background(), asynq.NewTask(types.TypeKnowledgePostProcess, payload)); err != nil {
 		t.Fatalf("Handle() replay error = %v", err)
 	}
-	if knowledgeRepo.generationSwapCalls != 0 {
-		t.Fatalf("replay generation CAS calls = %d, want 0", knowledgeRepo.generationSwapCalls)
+	if knowledgeRepo.generationSwapCalls != 1 {
+		t.Fatalf("replay generation CAS calls = %d, want core completion only", knowledgeRepo.generationSwapCalls)
 	}
 	if knowledgeRepo.finalizeCalls != 0 {
 		t.Fatalf("TaskID conflict released %d slot(s), want 0", knowledgeRepo.finalizeCalls)

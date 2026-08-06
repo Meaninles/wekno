@@ -113,6 +113,7 @@
       :header="previewTitle"
       width="80vw"
       attach="body"
+      :z-index="1900"
       :footer="false"
       destroy-on-close
     >

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
@@ -83,7 +82,7 @@ func TestStableDataTableChunkIDIsGenerationScoped(t *testing.T) {
 	}
 }
 
-func TestDataTableTerminalFanInSurvivesCancelledWorkerContext(t *testing.T) {
+func TestDataTableGenerationRemainsWritableAfterCoreCompletion(t *testing.T) {
 	payload := types.DataTableSummaryPayload{
 		TenantID:             42,
 		KnowledgeID:          "knowledge-cancelled-table",
@@ -92,29 +91,20 @@ func TestDataTableTerminalFanInSurvivesCancelledWorkerContext(t *testing.T) {
 		SummaryModel:         "summary-model",
 		EmbeddingModel:       "embedding-model",
 	}
-	plan := processownership.FanoutPlan{
-		Version:              processownership.FanoutPlanVersion,
+	knowledgeService := &dataTableKnowledgeServiceStub{knowledge: &types.Knowledge{
+		ID:                   payload.KnowledgeID,
 		TenantID:             payload.TenantID,
-		KnowledgeID:          payload.KnowledgeID,
 		KnowledgeBaseID:      payload.KnowledgeBaseID,
 		ProcessingGeneration: payload.ProcessingGeneration,
-		DataTable: &processownership.DataTableFanout{
-			SummaryModel: payload.SummaryModel, EmbeddingModel: payload.EmbeddingModel,
-		},
+		ParseStatus:          types.ParseStatusCompleted,
+	}}
+	svc := &DataTableSummaryService{knowledgeService: knowledgeService}
+	_, current, err := svc.currentDataTableGeneration(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("currentDataTableGeneration() error = %v", err)
 	}
-	store := &imageGenerationKnowledgeRepoStub{rejectCanceled: true}
-	enqueuer := &wikiQueueTaskEnqueuerStub{}
-	svc := &DataTableSummaryService{taskEnqueuer: enqueuer}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := svc.completeDataTableFanIn(ctx, payload, plan, store); err != nil {
-		t.Fatalf("terminal data-table fan-in on cancelled worker context: %v", err)
-	}
-	if _, completed := store.completed[processownership.DataTableFanoutItem()]; !completed {
-		t.Fatal("cancelled worker context lost durable data-table completion")
-	}
-	if len(enqueuer.tasks) != 1 || enqueuer.tasks[0].Type() != types.TypeKnowledgePostProcess {
-		t.Fatalf("postprocess tasks = %d, want 1", len(enqueuer.tasks))
+	if !current {
+		t.Fatal("completed core generation was incorrectly fenced from derivative table metadata")
 	}
 }
 

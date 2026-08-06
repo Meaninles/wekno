@@ -14,6 +14,7 @@ import {
   unpinSession,
 } from "@/api/chat";
 import { useStream } from "@/api/chat/streame";
+import { getKnowledgeDetails } from "@/api/knowledge-base";
 import {
   listKnowledgeFolderNodes,
   listKnowledgeFolderOptions,
@@ -49,6 +50,8 @@ import ShareIcon from "@/custom/modules/chatshare/components/ShareIcon.vue";
 import { skillPinKey, useChatSkillPins, type SkillPinKind } from "@/custom/modules/skillhub/skillPins";
 import type { AttachmentFile } from "@/components/AttachmentUpload.vue";
 import MobileChatMessage from "../components/MobileChatMessage.vue";
+import ChatQueueRejectionBanner from "@/custom/modules/chatqueue/ChatQueueRejectionBanner.vue";
+import type { ChatQueueRejection } from "@/custom/modules/chatqueue/types";
 import MobileResourceRail from "../components/MobileResourceRail.vue";
 import {
   agentLabel,
@@ -135,7 +138,14 @@ let sessionsSyncing = false;
 let isHydratingConversationState = false;
 let fileSearchTimer: ReturnType<typeof setTimeout> | null = null;
 
-const { onChunk, startStream, stopStream, error } = useStream();
+const { onChunk, startStream, stopStream, error, queueRejection } = useStream();
+const queueRejectionNotice = ref<ChatQueueRejection | null>(null);
+let pendingQueueDraft: {
+  message: ChatMessage;
+  query: string;
+  images: File[];
+  attachments: MobileUploadAttachment[];
+} | null = null;
 
 const toDraftAttachments = (attachments: MobileUploadAttachment[] = pendingAttachments.value): AttachmentFile[] =>
   attachments
@@ -558,7 +568,9 @@ const selectedResourceChips = computed<MobileResourceChip[]>(() => {
   }
   for (const fileId of selectedAllowedFileIds.value) {
     const file = knowledgeFiles.value.find((item) => item.id === fileId);
-    pushUniqueChip(chips, seen, { id: fileId, type: "file", name: file?.file_name || file?.display_name || fileId });
+    const name = knowledgeFileDisplayName(file);
+    if (!name) continue;
+    pushUniqueChip(chips, seen, { id: fileId, type: "file", name });
   }
   for (const name of selectedSkillNames.value) {
     pushUniqueChip(chips, seen, { id: `skill:${name}`, type: "skill", name }, `skill-name:${name}`);
@@ -785,6 +797,48 @@ const normalizeKnowledgeFile = (kbId: string, file: any) => {
   };
 };
 
+const knowledgeFileDisplayName = (file: any) => String(
+  file?.file_name || file?.display_name || file?.title || file?.source || "",
+).trim();
+
+const resolveSelectedKnowledgeFileDetails = async () => {
+  const unresolvedIds = selectedFileIds.value.filter((fileId) => {
+    const file = knowledgeFileById.value.get(String(fileId));
+    return !file || !knowledgeFileDisplayName(file);
+  });
+  if (unresolvedIds.length === 0) return true;
+
+  const resolvedFiles = (await Promise.all(unresolvedIds.map(async (fileId) => {
+    try {
+      const response: any = await getKnowledgeDetails(fileId, { agent_id: selectedAgentId.value });
+      const file = response?.data || response;
+      if (!file?.id || !knowledgeFileDisplayName(file)) return null;
+      const kbId = String(
+        file.knowledge_base_id
+        || file.kb_id
+        || settingsStore.settings.selectedFileKbMap?.[fileId]
+        || "",
+      );
+      return normalizeKnowledgeFile(kbId, file);
+    } catch (error) {
+      console.warn(`[mobile] failed to resolve selected file ${fileId}`, error);
+      return null;
+    }
+  }))).filter(Boolean);
+
+  const filesById = new Map<string, any>();
+  knowledgeFiles.value.forEach((file) => {
+    if (file?.id) filesById.set(String(file.id), file);
+  });
+  resolvedFiles.forEach((file: any) => filesById.set(String(file.id), file));
+  knowledgeFiles.value = [...filesById.values()];
+
+  return selectedFileIds.value.every((fileId) => {
+    const file = filesById.get(String(fileId));
+    return !!file && !!knowledgeFileDisplayName(file);
+  });
+};
+
 const mergeKnowledgeFiles = (kbId: string, files: any[]) => {
   const selected = new Set(selectedFileIds.value);
   knowledgeFiles.value = [
@@ -913,6 +967,7 @@ const hydrateMobileConversationState = async (sessionId: string) => {
   try {
     if (!sessionId) {
       await loadKnowledgeChildren();
+      await resolveSelectedKnowledgeFileDetails();
       return;
     }
 
@@ -933,6 +988,7 @@ const hydrateMobileConversationState = async (sessionId: string) => {
       (draft?.images || []).filter((file): file is File => file instanceof File),
     );
     await loadKnowledgeChildren();
+    await resolveSelectedKnowledgeFileDetails();
   } finally {
     isHydratingConversationState = false;
   }
@@ -1438,9 +1494,11 @@ const buildMentionedItems = (): MobileMentionItem[] => {
   });
   selectedAllowedFileIds.value.forEach((id) => {
     const file = knowledgeFiles.value.find((item) => item.id === id);
+    const name = knowledgeFileDisplayName(file);
+    if (!file || !name) return;
     mentioned.push({
       id,
-      name: file?.display_name || file?.file_name || id,
+      name,
       type: "file",
       kb_id: file?.kb_id || settingsStore.settings.selectedFileKbMap?.[id],
       kb_name: file?.kb_name,
@@ -1458,10 +1516,22 @@ const buildMentionedItems = (): MobileMentionItem[] => {
 const sendMessage = async () => {
   const value = inputValue.value.trim();
   if (!value || isReplying.value) return;
+  const composerSnapshot = {
+    query: inputValue.value,
+    images: [...pendingImages.value],
+    attachments: pendingAttachments.value.map((attachment) => ({ ...attachment })),
+  };
   let outgoingSessionId = "";
   try {
     loading.value = true;
     isReplying.value = true;
+    queueRejectionNotice.value = null;
+    if (!await resolveSelectedKnowledgeFileDetails()) {
+      MessagePlugin.warning("文件信息仍在加载，请稍后重试");
+      loading.value = false;
+      isReplying.value = false;
+      return;
+    }
     const agentEnabled = settingsStore.isAgentStreamMode;
     const effectiveProfessionalSkillNames = agentEnabled ? selectedProfessionalSkillNames.value : [];
 
@@ -1497,7 +1567,7 @@ const sendMessage = async () => {
     const requestQuery = `${professionalPrefix}${value}`;
     const mentionedItems = buildMentionedItems();
 
-    messagesList.push({
+    const optimisticUserMessage = {
       role: "user",
       content: requestQuery,
       mentioned_items: mentionedItems,
@@ -1508,7 +1578,12 @@ const sendMessage = async () => {
         file_type: `.${item.name.split(".").pop()?.toLowerCase() || ""}`,
       })),
       channel: "web",
-    });
+    };
+    messagesList.push(optimisticUserMessage);
+    pendingQueueDraft = {
+      message: optimisticUserMessage,
+      ...composerSnapshot,
+    };
 
     await clearComposerInput();
     saveSessionDraftState(
@@ -1666,6 +1741,24 @@ watch(error, (message) => {
     }
     return;
   }
+  if (queueRejection.value) {
+    queueRejectionNotice.value = queueRejection.value;
+    if (pendingQueueDraft) {
+      const index = messagesList.indexOf(pendingQueueDraft.message);
+      if (index >= 0) messagesList.splice(index, 1);
+      pendingImages.value = [...pendingQueueDraft.images];
+      pendingAttachments.value = pendingQueueDraft.attachments.map((attachment) => ({ ...attachment }));
+      inputValue.value = pendingQueueDraft.query;
+      pendingQueueDraft = null;
+      void nextTick(() => {
+        autoGrow();
+        textareaRef.value?.focus();
+      });
+    }
+    loading.value = false;
+    isReplying.value = false;
+    return;
+  }
   MessagePlugin.error(message);
   loading.value = false;
   isReplying.value = false;
@@ -1675,6 +1768,9 @@ watch(error, (message) => {
 onChunk((data) => {
   if (isResumingStream.value) {
     isResumingStream.value = false;
+  }
+  if (data.response_type === "agent_query") {
+    pendingQueueDraft = null;
   }
   if (data.response_type === "session_title") {
     const title = data.content || data.data?.title;
@@ -1759,17 +1855,27 @@ onBeforeUnmount(() => {
           v-for="(message, index) in messagesList"
           :key="message.id || message.request_id || index"
           :message="message"
+          @cancel-queue="stopGenerating"
         />
       </template>
     </section>
 
     <footer class="mobile-composer">
+      <ChatQueueRejectionBanner
+        :rejection="queueRejectionNotice"
+        @close="queueRejectionNotice = null"
+      />
       <MobileResourceRail :items="selectedResourceChips" @remove="removeChip" @clear="clearSelectedResources" />
 
       <div class="config-rail">
         <button type="button" class="config-pill" @click="openSheet('agent')">
           <MobileIcon name="user-talk" />
           <span>{{ agentLabel(selectedAgent) }}</span>
+        </button>
+        <button type="button" class="config-pill" @click="openSheet('context')">
+          <MobileIcon name="folder" />
+          <span>知识库</span>
+          <em v-if="selectedKnowledgeContextCount">{{ selectedKnowledgeContextCount }}</em>
         </button>
         <button
           type="button"
@@ -1795,11 +1901,6 @@ onBeforeUnmount(() => {
           <MobileIcon name="lightbulb" />
           <span>技能</span>
           <em v-if="selectedSkillContextCount">{{ selectedSkillContextCount }}</em>
-        </button>
-        <button type="button" class="config-pill" @click="openSheet('context')">
-          <MobileIcon name="folder" />
-          <span>知识库</span>
-          <em v-if="selectedKnowledgeContextCount">{{ selectedKnowledgeContextCount }}</em>
         </button>
         <button type="button" class="config-pill" @click="openSheet('model')">
           <MobileIcon name="cpu" />

@@ -61,6 +61,15 @@
             </div>
         </transition>
         <div class="input-container" :class="{ 'is-embedded': embeddedMode }">
+            <ChatQueueStatusCard
+                v-if="currentQueueStatus"
+                :status="currentQueueStatus"
+                @cancel="currentQueueMessage && handleQueueCancel(currentQueueMessage.id)"
+            />
+            <ChatQueueRejectionBanner
+                :rejection="queueRejectionNotice"
+                @close="queueRejectionNotice = null"
+            />
             <InputField ref="inputFieldRef"
                 @send-msg="(query, modelId, mentionedItems, imageFiles, attachmentFiles) => sendMsg(query, modelId, mentionedItems, imageFiles, attachmentFiles)"
                 @stop-generation="handleStopGeneration" :isReplying="isReplying" :sessionId="session_id"
@@ -79,7 +88,7 @@ import InputField from '../../components/Input-field.vue';
 import botmsg from './components/botmsg.vue';
 import usermsg from './components/usermsg.vue';
 import ChatQuestionLocator from '@/custom/modules/chatQuestionLocator/ChatQuestionLocator.vue';
-import { getMessageList, getSession } from "@/api/chat/index";
+import { getMessageList, getSession, stopSession } from "@/api/chat/index";
 import { useStream } from '../../api/chat/streame'
 import { markSessionRead } from '@/custom/modules/sessionState/api';
 import { useMenuStore } from '@/stores/menu';
@@ -94,6 +103,9 @@ import { useStickyBottomOnResize } from '@/composables/useStickyBottomOnResize';
 import { clearCitationChunkCache } from '@/utils/citationChunkCache';
 import { isAgentStreamAgentId } from '@/utils/agent-mode';
 import { getSessionDraftState, saveSessionDraftState } from '@/custom/modules/sessionState/draftState';
+import ChatQueueRejectionBanner from '@/custom/modules/chatqueue/ChatQueueRejectionBanner.vue';
+import ChatQueueStatusCard from '@/custom/modules/chatqueue/ChatQueueStatusCard.vue';
+import { useChatQueueAdmittedNotice } from '@/custom/modules/chatqueue/useChatQueueAdmittedNotice';
 
 const props = defineProps({
     session_id: { type: String, default: '' },
@@ -117,7 +129,16 @@ const uiStore = useUIStore();
 const { navigateToKnowledgeBaseList } = useKnowledgeBaseCreationNavigation();
 const { t } = useI18n();
 const { firstQuery, firstMentionedItems, firstModelId, firstImageFiles, firstAttachmentFiles } = storeToRefs(usemenuStore);
-const { onChunk, error, startStream, stopStream, lastStreamRequest } = useStream();
+const {
+    onChunk,
+    error,
+    queueRejection,
+    startStream,
+    stopStream,
+    lastStreamRequest,
+} = useStream();
+const queueRejectionNotice = ref(null);
+let pendingQueueDraft = null;
 /** Snapshot of the in-flight HTTP request for attaching to the next assistant message. */
 const pendingStreamDebug = ref(null);
 
@@ -145,6 +166,11 @@ const attachStreamDebugToMessage = (message) => {
 };
 const route = useRoute();
 const session_id = ref(props.session_id || route.params.chatid);
+const {
+    admittedStatus: admittedQueueStatus,
+    capture: captureAdmittedQueueStatus,
+    clear: clearAdmittedQueueStatus,
+} = useChatQueueAdmittedNotice(session_id);
 
 const markCurrentSessionRead = () => {
     if (props.embeddedMode || !session_id.value) return;
@@ -417,11 +443,13 @@ const {
         }
     },
     onAgentQuery: (data, existingMessage) => {
+        pendingQueueDraft = null;
         pendingStreamDebug.value = buildStreamDebugPayload();
         if (existingMessage) attachStreamDebugToMessage(existingMessage);
     },
     onMessageCreated: (message) => attachStreamDebugToMessage(message),
     onMessageUpdated: (message, payload) => {
+        captureAdmittedQueueStatus(payload);
         attachStreamDebugToMessage(message);
         if (payload?.is_completed) pendingStreamDebug.value = null;
     },
@@ -437,6 +465,23 @@ const {
 
 const showGlobalTypingIndicator = computed(() =>
     shouldShowGlobalTypingIndicator(messagesList, loading.value, isImRecovering.value),
+);
+const currentQueueMessage = computed(() => {
+    for (let index = messagesList.length - 1; index >= 0; index -= 1) {
+        const message = messagesList[index];
+        const state = message?.queue_status?.state;
+        if (
+            message?.role === 'assistant' &&
+            !message?.is_completed &&
+            state === 'waiting'
+        ) {
+            return message;
+        }
+    }
+    return null;
+});
+const currentQueueStatus = computed(
+    () => currentQueueMessage.value?.queue_status || admittedQueueStatus.value,
 );
 
 const getmsgList = (data, isScrollType = false, scrollHeight) => {
@@ -484,12 +529,28 @@ const handleStopGeneration = () => {
     // 保留 currentAssistantMessageId，Input-field 仍需用它调用 stop API
 };
 
+const handleQueueCancel = async (messageId) => {
+    stopStream();
+    markInFlightAssistantStopped(messageId);
+    loading.value = false;
+    isReplying.value = false;
+    currentAssistantMessageId.value = '';
+    if (!session_id.value || !messageId) return;
+    try {
+        await stopSession(String(session_id.value), String(messageId));
+    } catch (err) {
+        console.error('[Chat Queue] cancel failed:', err);
+        MessagePlugin.error('取消排队失败，请重试');
+    }
+};
+
 const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = [], attachmentFiles = []) => {
     stopStream();
     prepareForNewOutgoingMessage();
     isReplying.value = true;
     loading.value = true;
     markCurrentSessionRead();
+    queueRejectionNotice.value = null;
 
     // Convert images to base64 data URIs for backend processing and local display
     let imageAttachments = [];
@@ -558,7 +619,14 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     const requestQuery = professionalSkillPrefix ? `${professionalSkillPrefix}\n${value}` : value;
 
     // 将@提及的知识库和文件信息存入用户消息
-    messagesList.push({ content: requestQuery, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' });
+    const optimisticUserMessage = { content: requestQuery, role: 'user', mentioned_items: mentionedItems, images: userImages, attachments: attachmentFiles.map(a => ({ file_name: a.name, file_size: a.size, file_type: '.' + a.name.split('.').pop()?.toLowerCase() })), channel: 'web' };
+    messagesList.push(optimisticUserMessage);
+    pendingQueueDraft = {
+        message: optimisticUserMessage,
+        query: value,
+        images: [...imageFiles],
+        attachments: attachmentFiles.map((attachment) => ({ ...attachment })),
+    };
     userHasScrolledUp.value = false;
     scrollToBottom(true);
 
@@ -700,6 +768,21 @@ watch(error, (newError) => {
         recoverIncompleteMessage();
         return;
     }
+    if (queueRejection.value) {
+        queueRejectionNotice.value = queueRejection.value;
+        if (pendingQueueDraft) {
+            const index = messagesList.indexOf(pendingQueueDraft.message);
+            if (index >= 0) messagesList.splice(index, 1);
+            inputFieldRef.value?.setUploadedAttachments?.(pendingQueueDraft.attachments || []);
+            inputFieldRef.value?.setUploadedImages?.(pendingQueueDraft.images || []);
+            inputFieldRef.value?.restoreQuery?.(pendingQueueDraft.query);
+            pendingQueueDraft = null;
+        }
+        isReplying.value = false;
+        loading.value = false;
+        currentAssistantMessageId.value = '';
+        return;
+    }
     MessagePlugin.error(newError);
     isReplying.value = false;
     loading.value = false;
@@ -793,6 +876,7 @@ onMounted(async () => {
 })
 const clearData = () => {
     stopStream();
+    clearAdmittedQueueStatus();
     isReplying.value = false;
     fullContent.value = '';
     // Stop any IM-reply recovery poll for the session we're leaving/switching.

@@ -31,7 +31,7 @@ test('resolves every user-visible workflow state', () => {
       summary_status: 'completed',
       enrichment_status: 'degraded',
       wiki_status: 'completed',
-    }, 'failed'],
+    }, 'degraded'],
     [{
       parse_status: 'completed',
       summary_status: 'completed',
@@ -65,6 +65,22 @@ test('keeps a mixed active/failed derivative workflow processing', () => {
   }
   assert.equal(knowledgeHasDerivativeFailure(item), false)
   assert.equal(resolveKnowledgeWorkflowStatus(item), 'processing')
+})
+
+test('distinguishes completed degradation from a hard derivative failure', () => {
+  assert.equal(resolveKnowledgeWorkflowStatus({
+    parse_status: 'completed',
+    summary_status: 'completed',
+    enrichment_status: 'degraded',
+    wiki_status: 'completed',
+  }), 'degraded')
+  assert.equal(resolveKnowledgeDetailStatus('degraded', 'completed', true), 'degraded')
+  assert.equal(resolveKnowledgeWorkflowStatus({
+    parse_status: 'completed',
+    summary_status: 'failed',
+    enrichment_status: 'degraded',
+    wiki_status: 'completed',
+  }), 'failed')
 })
 
 test('keeps status-filter membership mutually exclusive during live transitions', () => {

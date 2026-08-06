@@ -7,6 +7,7 @@ export interface KnowledgeFolderStats {
   enrichment_pending_task_count: number
   wiki_pending_task_count: number
   abnormal_document_count: number
+  failed_document_count: number
   stats_updated_at?: string
 }
 
@@ -71,4 +72,36 @@ export interface KnowledgeFolderListParams {
   source?: string
   start_time?: string
   end_time?: string
+}
+
+export type KnowledgeFolderDeleteOperationStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+
+export interface KnowledgeFolderDeleteOperation {
+  id: string
+  knowledge_base_id: string
+  root_folder_id: string
+  root_folder_name: string
+  parent_folder_id: string
+  status: KnowledgeFolderDeleteOperationStatus
+  total_document_count: number
+  deleted_document_count: number
+  last_error?: string
+  dispatched_at?: string
+  completed_at?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface KnowledgeBaseTaskStats {
+  document_count: number
+  parse_pending_count: number
+  parse_running_count: number
+  enrichment_pending_task_count: number
+  wiki_pending_task_count: number
+  abnormal_document_count: number
+  failed_document_count: number
 }

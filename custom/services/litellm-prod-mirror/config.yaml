@@ -1,0 +1,72 @@
+model_list:
+  # Only locally reachable production deployments are activated. Every kept
+  # entry is otherwise identical to the production snapshot.
+  - model_name: DeepSeek-V4-Flash-INT8-local
+    litellm_params:
+      model: hosted_vllm//models/DeepSeek-V4-Flash-INT8
+      api_base: http://10.0.11.36:30000/v1
+      api_key: none
+      drop_params: true
+    model_info: {mode: chat, supports_function_calling: true, max_tokens: 1048576}
+
+  - model_name: Qwen3.6-27B-tool-local
+    litellm_params:
+      model: hosted_vllm//models/Qwen3.6-27B
+      api_base: http://10.0.11.37:30005/v1
+      api_key: os.environ/UPSTREAM_KEY_QWEN27B_TOOL
+      drop_params: true
+    model_info: {mode: chat, supports_function_calling: true, supports_reasoning: true, max_tokens: 262144}
+
+  - model_name: Qwen3-VL-32B-local
+    litellm_params:
+      model: hosted_vllm//models/Qwen3-VL-32B-Instruct
+      api_base: http://10.0.11.36:30004/v1
+      api_key: none
+      drop_params: true
+    model_info: {mode: chat, supports_vision: true, max_tokens: 262144}
+  - model_name: Qwen2.5-Omni-7B-local
+    litellm_params:
+      model: hosted_vllm//models/Qwen2.5-Omni-7B
+      api_base: http://10.0.11.37:30002/v1
+      api_key: none
+      drop_params: true
+    model_info: {mode: chat, supports_vision: true, max_tokens: 32768}
+
+  - model_name: Qwen3-Embedding-8B-local
+    litellm_params:
+      model: hosted_vllm//models/Qwen3-Embedding-8B
+      api_base: http://10.0.11.36:30002/v1
+      api_key: none
+    model_info: {mode: embedding, max_tokens: 8192}
+
+  - model_name: bge-reranker-v2-m3-local
+    litellm_params:
+      model: hosted_vllm//models/bge-reranker-v2-m3
+      api_base: http://10.0.11.36:30003/v1
+      api_key: none
+    model_info: {mode: rerank, max_tokens: 8192}
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  drop_params: true
+  STORE_MODEL_IN_DB: false
+  allow_requests_on_db_unavailable: true
+  database_connection_pool_limit: 20
+  proxy_batch_write_at: 60
+  enable_drain_endpoint: true
+  drain_endpoint_token: os.environ/DRAIN_TOKEN
+  health_check_details: false
+
+router_settings:
+  routing_strategy: simple-shuffle
+  redis_host: os.environ/REDIS_HOST
+  redis_port: os.environ/REDIS_PORT
+  redis_password: os.environ/REDIS_PASSWORD
+  num_retries: 2
+  retry_after: 1
+
+litellm_settings:
+  cache: false
+  request_timeout: 600
+  json_logs: true
+  set_verbose: false

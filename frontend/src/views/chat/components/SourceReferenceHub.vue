@@ -1,17 +1,21 @@
 <template>
-  <div v-if="items.length" ref="rootElement" class="source-reference-hub" :class="{ 'is-embedded': embeddedMode }">
-    <button type="button" class="source-reference-trigger" @click.stop="togglePanel">
+  <div v-if="!simpleConversation && (items.length || session?.is_completed)" ref="rootElement" class="source-reference-hub" :class="{ 'is-embedded': embeddedMode }">
+    <button v-if="items.length" type="button" class="source-reference-trigger" @click.stop="togglePanel">
       <t-icon class="source-reference-trigger__icon" name="file-search" />
-      <span class="source-reference-trigger__text">引用 {{ items.length }} 条参考资料</span>
+      <span class="source-reference-trigger__text">{{ t('chat.citedReferences', { count: items.length }) }}</span>
       <t-icon class="source-reference-trigger__arrow" name="chevron-right" />
     </button>
+    <div v-else class="source-reference-trigger is-empty" role="status">
+      <t-icon class="source-reference-trigger__icon" name="file-search" />
+      <span class="source-reference-trigger__text">{{ t('chat.noCitedReferences') }}</span>
+    </div>
 
     <Teleport to="body">
       <div v-if="panelVisible" ref="panelElement" class="source-reference-panel" role="dialog" aria-modal="false"
-        aria-label="全部参考资料">
+        :aria-label="t('chat.allReferences')">
         <div class="source-reference-panel__header">
-          <span>全部参考资料</span>
-          <button type="button" class="source-reference-panel__close" aria-label="关闭" @click="panelVisible = false">
+          <span>{{ t('chat.allReferences') }}</span>
+          <button type="button" class="source-reference-panel__close" :aria-label="t('common.close')" @click="panelVisible = false">
             <t-icon name="close" />
           </button>
         </div>
@@ -101,6 +105,7 @@ import {
   type SourceReferenceItem,
   type SourceReferenceKind,
 } from '@/utils/sourceReferences'
+import { isSimpleCompletedConversation } from '@/custom/modules/sourcerefs/retrievalSummary'
 
 type SessionWithReferences = {
   content?: string
@@ -172,8 +177,9 @@ const referenceContent = computed(() => {
 const items = computed(() => buildCitedSourceReferenceItems(
   props.session?.knowledge_references,
   referenceContent.value,
-  Boolean(props.session?.is_completed),
 ))
+
+const simpleConversation = computed(() => isSimpleCompletedConversation(props.session as Record<string, any>))
 
 const allItems = computed(() => buildSourceReferenceItems(props.session?.knowledge_references))
 
@@ -283,12 +289,6 @@ function activateItem(item: SourceReferenceItem) {
     void openWikiDrawer(item.knowledgeBaseId, item.slug)
     return
   }
-  if (item.type === 'data_source' && item.sourceId) {
-    openRouteInNewTab({
-      path: '/platform/data-sources',
-      query: { source_id: item.sourceId },
-    })
-  }
 }
 
 function itemFromElement(el: HTMLElement): SourceReferenceItem | null {
@@ -311,7 +311,7 @@ function itemFromElement(el: HTMLElement): SourceReferenceItem | null {
     sourceLabel: el.getAttribute('data-source-label') || sourceTypeLabel(type),
     snippet: '',
     count: 1,
-    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : type === 'data_source' ? 'server' : 'file',
+    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : 'file',
     url,
     knowledgeBaseId,
     knowledgeId,
@@ -449,7 +449,10 @@ function openKnowledgeDocumentInNewTab() {
   if (!knowledgeDrawer.value.knowledgeBaseId || !knowledgeDrawer.value.knowledgeId) return
   router.push({
     path: `/platform/knowledge-bases/${knowledgeDrawer.value.knowledgeBaseId}`,
-    query: { knowledge_id: knowledgeDrawer.value.knowledgeId },
+    query: {
+      knowledge_id: knowledgeDrawer.value.knowledgeId,
+      chunk_id: knowledgeDrawer.value.chunkId || undefined,
+    },
   })
 }
 
@@ -609,6 +612,14 @@ defineExpose({
   &:focus-visible {
     outline: 2px solid var(--td-component-border);
     outline-offset: 2px;
+  }
+}
+
+.source-reference-trigger.is-empty {
+  cursor: default;
+
+  &:hover {
+    color: var(--td-text-color-secondary);
   }
 }
 

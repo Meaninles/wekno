@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -47,6 +48,7 @@ type qaRequestContext struct {
 	channel                string                    // Source channel: "web", "api", "im", etc.
 	attachments            types.MessageAttachments  // Processed file attachments
 	originalInputFiles     []types.OriginalInputFile // Runtime-only original file descriptors for Claude SDK agents
+	chatQueueTicket        ChatQueueTicket           // Conversation-level model-pool admission lease
 
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
@@ -370,6 +372,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 			Role:        "assistant",
 			RequestID:   c.GetString(types.RequestIDContextKey.String()),
 			IsCompleted: false,
+			AgentMode:   request.AgentEnabled,
 			Channel:     request.Channel,
 		},
 		knowledgeBaseIDs:       secutils.SanitizeForLogArray(kbIDs),
@@ -515,7 +518,7 @@ type sseStreamContext struct {
 }
 
 // setupSSEStream sets up the SSE streaming context
-func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *sseStreamContext {
+func (h *Handler) setupSSEStream(reqCtx *qaRequestContext) *sseStreamContext {
 	// Set SSE headers
 	setSSEHeaders(reqCtx.c)
 
@@ -523,13 +526,7 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *
 	h.writeAgentQueryEvent(reqCtx.ctx, reqCtx.sessionID, reqCtx.assistantMessage.ID)
 
 	// Base context for async work: when using shared agent, use source tenant for model/KB/MCP resolution
-	baseCtx := reqCtx.ctx
-	if reqCtx.effectiveTenantID != 0 && h.tenantService != nil {
-		if tenant, err := h.tenantService.GetTenantByID(reqCtx.ctx, reqCtx.effectiveTenantID); err == nil && tenant != nil {
-			baseCtx = context.WithValue(context.WithValue(reqCtx.ctx, types.TenantIDContextKey, reqCtx.effectiveTenantID), types.TenantInfoContextKey, tenant)
-			logger.Infof(reqCtx.ctx, "Using effective tenant %d for shared agent (model/KB/MCP)", reqCtx.effectiveTenantID)
-		}
-	}
+	baseCtx := h.effectiveQAContext(reqCtx)
 
 	// Create EventBus and cancellable context
 	eventBus := event.NewEventBus()
@@ -543,7 +540,14 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *
 	}
 
 	// Setup stop event handler
-	h.setupStopEventHandler(eventBus, reqCtx.sessionID, reqCtx.session.TenantID, reqCtx.assistantMessage, cancel)
+	h.setupStopEventHandler(
+		eventBus,
+		reqCtx.sessionID,
+		reqCtx.session.TenantID,
+		reqCtx.assistantMessage,
+		reqCtx.receivedAt,
+		cancel,
+	)
 
 	// Watch for stop events independently of the client SSE connection so a
 	// user-requested stop reliably cancels generation even when the client
@@ -560,18 +564,55 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool) *
 	h.setupStreamHandler(asyncCtx, reqCtx.sessionID, reqCtx.assistantMessage.ID,
 		reqCtx.requestID, reqCtx.receivedAt, reqCtx.assistantMessage, eventBus)
 
-	// Generate title if needed
-	if generateTitle && reqCtx.session.Title == "" {
-		// Use the same model as the conversation for title generation
-		modelID := ""
-		if reqCtx.customAgent != nil && reqCtx.customAgent.Config.ModelID != "" {
-			modelID = reqCtx.customAgent.Config.ModelID
-		}
-		logger.Infof(reqCtx.ctx, "Session has no title, starting async title generation, session ID: %s, model: %s", reqCtx.sessionID, modelID)
-		h.sessionService.GenerateTitleAsync(asyncCtx, reqCtx.session, reqCtx.query, modelID, eventBus)
-	}
-
 	return streamCtx
+}
+
+func (h *Handler) effectiveQAContext(reqCtx *qaRequestContext) context.Context {
+	baseCtx := reqCtx.ctx
+	if reqCtx.effectiveTenantID != 0 && h.tenantService != nil {
+		if tenant, err := h.tenantService.GetTenantByID(
+			reqCtx.ctx, reqCtx.effectiveTenantID,
+		); err == nil && tenant != nil {
+			baseCtx = context.WithValue(
+				context.WithValue(
+					reqCtx.ctx, types.TenantIDContextKey, reqCtx.effectiveTenantID,
+				),
+				types.TenantInfoContextKey,
+				tenant,
+			)
+			logger.Infof(
+				reqCtx.ctx,
+				"Using effective tenant %d for shared agent (model/KB/MCP)",
+				reqCtx.effectiveTenantID,
+			)
+		}
+	}
+	return baseCtx
+}
+
+func (h *Handler) startTitleGeneration(
+	reqCtx *qaRequestContext,
+	streamCtx *sseStreamContext,
+	generateTitle bool,
+) {
+	if !generateTitle || reqCtx.session.Title != "" {
+		return
+	}
+	modelID := ""
+	if reqCtx.summaryModelID != "" {
+		modelID = reqCtx.summaryModelID
+	} else if reqCtx.customAgent != nil && reqCtx.customAgent.Config.ModelID != "" {
+		modelID = reqCtx.customAgent.Config.ModelID
+	}
+	logger.Infof(
+		reqCtx.ctx,
+		"Session has no title, starting async title generation, session ID: %s, model: %s",
+		reqCtx.sessionID,
+		modelID,
+	)
+	h.sessionService.GenerateTitleAsync(
+		streamCtx.asyncCtx, reqCtx.session, reqCtx.query, modelID, streamCtx.eventBus,
+	)
 }
 
 // SearchKnowledge godoc
@@ -747,6 +788,36 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	ctx := reqCtx.ctx
 	sessionID := reqCtx.sessionID
 
+	agentModelID := ""
+	if reqCtx.customAgent != nil {
+		agentModelID = reqCtx.customAgent.Config.ModelID
+	}
+	principalID := types.SessionOwnerIDFromContext(ctx)
+	if principalID == "" && reqCtx.session != nil {
+		principalID = reqCtx.session.UserID
+	}
+	queueCtx := h.effectiveQAContext(reqCtx)
+	queueTenantID := reqCtx.session.TenantID
+	if reqCtx.effectiveTenantID != 0 {
+		queueTenantID = reqCtx.effectiveTenantID
+	}
+	ticket, rejection, queueErr := reserveChatQueue(queueCtx, ChatQueueAdmissionRequest{
+		TenantID:         queueTenantID,
+		PrincipalID:      principalID,
+		RequestID:        reqCtx.requestID,
+		SessionID:        reqCtx.sessionID,
+		SummaryModelID:   reqCtx.summaryModelID,
+		AgentModelID:     agentModelID,
+		KnowledgeBaseIDs: append([]string(nil), reqCtx.knowledgeBaseIDs...),
+		KnowledgeIDs:     append([]string(nil), reqCtx.knowledgeIDs...),
+	})
+	if rejection != nil || queueErr != nil {
+		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
+		writeChatQueueRejection(reqCtx.c, rejection, queueErr)
+		return
+	}
+	reqCtx.chatQueueTicket = ticket
+
 	// Persist the input-bar state used for this request so reopening the
 	// session can rehydrate agent / model / KB / web-search / MCP selections.
 	// This is a pure UI memo (no behavioural effect) and runs in a goroutine
@@ -767,6 +838,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			},
 		}); err != nil {
 			logger.Errorf(ctx, "Failed to emit agent query event: %v", err)
+			if ticket != nil {
+				ticket.Cancel(context.WithoutCancel(ctx))
+			}
 			h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 			return
 		}
@@ -775,6 +849,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	// Create user message
 	userMsg, err := h.createUserMessage(ctx, sessionID, reqCtx.query, reqCtx.requestID, reqCtx.mentionedItems, convertImageAttachments(reqCtx.images), reqCtx.attachments, reqCtx.channel)
 	if err != nil {
+		if ticket != nil {
+			ticket.Cancel(context.WithoutCancel(ctx))
+		}
 		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
@@ -784,6 +861,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	// Create assistant message
 	assistantMessagePtr, err := h.createAssistantMessage(ctx, reqCtx.assistantMessage)
 	if err != nil {
+		if ticket != nil {
+			ticket.Cancel(context.WithoutCancel(ctx))
+		}
 		h.cleanupClaudeOriginalInputFiles(ctx, reqCtx.originalInputFiles)
 		reqCtx.c.Error(errors.NewInternalServerError(err.Error()))
 		return
@@ -797,12 +877,55 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 	}
 
 	// Setup SSE stream
-	streamCtx := h.setupSSEStream(reqCtx, generateTitle)
+	streamCtx := h.setupSSEStream(reqCtx)
+
+	// A conversation slot belongs to the whole stream, not just the initial
+	// service call. KnowledgeQA may return while its pipeline still streams,
+	// therefore only terminal events release the cross-replica lease.
+	if ticket != nil {
+		var releaseOnce sync.Once
+		release := func(_ context.Context, _ event.Event) error {
+			releaseOnce.Do(func() {
+				ticket.Release(context.WithoutCancel(streamCtx.asyncCtx))
+			})
+			return nil
+		}
+		streamCtx.eventBus.On(event.EventAgentComplete, release)
+		streamCtx.eventBus.On(event.EventError, release)
+		streamCtx.eventBus.On(event.EventStop, release)
+	}
 
 	// Normal mode: register completion handler on EventAgentFinalAnswer
 	// (Agent mode handles completion in the defer block instead)
 	if mode == qaModeNormal {
 		var completionHandled bool
+		var quickAnswerHistoryMu sync.Mutex
+
+		// The RAG pipeline emits its query-understanding and retrieval stages as
+		// tool events. Persist the same canonical events that the live SSE client
+		// receives so a history reload does not have to guess whether a knowledge
+		// search happened (or lose its query/result status altogether).
+		streamCtx.eventBus.On(event.EventAgentToolCall, func(ctx context.Context, evt event.Event) error {
+			data, ok := evt.Data.(event.AgentToolCallData)
+			if !ok || data.ToolCallID == "" || data.ToolName == "" {
+				return nil
+			}
+			quickAnswerHistoryMu.Lock()
+			recordQuickAnswerToolCall(streamCtx.assistantMessage, data)
+			quickAnswerHistoryMu.Unlock()
+			return nil
+		})
+
+		streamCtx.eventBus.On(event.EventAgentToolResult, func(ctx context.Context, evt event.Event) error {
+			data, ok := evt.Data.(event.AgentToolResultData)
+			if !ok || data.ToolName == "" {
+				return nil
+			}
+			quickAnswerHistoryMu.Lock()
+			recordQuickAnswerToolResult(streamCtx.assistantMessage, data)
+			quickAnswerHistoryMu.Unlock()
+			return nil
+		})
 
 		// Persist reasoning_content into agent_steps so historical reload can
 		// reconstruct the thinking card (same shape as Agent-mode steps).
@@ -813,7 +936,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			if !ok || data.Content == "" {
 				return nil
 			}
+			quickAnswerHistoryMu.Lock()
 			appendQuickAnswerReasoning(streamCtx.assistantMessage, data.Content)
+			quickAnswerHistoryMu.Unlock()
 			return nil
 		})
 
@@ -831,14 +956,67 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					return nil
 				}
 				completionHandled = true
+				// Preserve inspected-source telemetry before final citation
+				// filtering replaces the candidate references with cited-only
+				// references. This path persists before the generic completion
+				// handler runs, so it must set the durable fields here.
+				streamCtx.assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
+					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+					sourcerefs.AgentStepsAttemptedRetrieval(streamCtx.assistantMessage.AgentSteps) &&
+						sourcerefs.HasConfiguredEvidenceScope(
+							reqCtx.knowledgeBaseIDs,
+							reqCtx.knowledgeIDs,
+							len(reqCtx.tagScopes),
+							reqCtx.webSearchEnabled,
+							reqCtx.customAgent,
+						),
+				)
+				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
+				filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
+					streamCtx.assistantMessage.Content,
+					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+				)
+				if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+					logger.Warnf(streamCtx.asyncCtx,
+						"Knowledge QA filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+						citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
+					)
+				}
+				if citationReport.EvidenceAvailableUncited {
+					logger.Warnf(streamCtx.asyncCtx,
+						"Knowledge QA final answer omitted all current-turn citation handles: available=%d",
+						citationReport.AvailableCount,
+					)
+				}
+				streamCtx.assistantMessage.Content = filteredAnswer
+				streamCtx.assistantMessage.KnowledgeReferences = types.References(citedRefs)
+				streamCtx.assistantMessage.RetrievalStats.SimpleConversation =
+					len(citedRefs) == 0 && !sourcerefs.HasConfiguredEvidenceScope(
+						reqCtx.knowledgeBaseIDs,
+						reqCtx.knowledgeIDs,
+						len(reqCtx.tagScopes),
+						reqCtx.webSearchEnabled,
+						reqCtx.customAgent,
+					)
 
 				logger.Infof(streamCtx.asyncCtx, "Knowledge QA service completed for session: %s", sessionID)
 				updateCtx := context.WithValue(streamCtx.asyncCtx, types.TenantIDContextKey, reqCtx.session.TenantID)
+				quickAnswerHistoryMu.Lock()
 				h.completeAssistantMessage(updateCtx, streamCtx.assistantMessage, reqCtx.query, reqCtx)
+				quickAnswerHistoryMu.Unlock()
 				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
 					Type:      event.EventAgentComplete,
 					SessionID: sessionID,
-					Data:      event.AgentCompleteData{FinalAnswer: streamCtx.assistantMessage.Content},
+					Data: event.AgentCompleteData{
+						FinalAnswer:                 streamCtx.assistantMessage.Content,
+						KnowledgeRefs:               citedRefs,
+						KnowledgeRefsAuthoritative:  true,
+						MessageID:                   streamCtx.assistantMessage.ID,
+						RequestID:                   reqCtx.requestID,
+						TotalDurationMs:             streamCtx.assistantMessage.AgentDurationMs,
+						RetrievalStats:              streamCtx.assistantMessage.RetrievalStats,
+						RetrievalStatsAuthoritative: true,
+					},
 				})
 			}
 			return nil
@@ -858,6 +1036,16 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				logger.ErrorWithFields(streamCtx.asyncCtx,
 					errors.NewInternalServerError(fmt.Sprintf("%s service panicked: %v\n%s", stageName, r, string(buf))),
 					map[string]interface{}{"session_id": sessionID})
+				streamCtx.eventBus.Emit(context.WithoutCancel(streamCtx.asyncCtx), event.Event{
+					Type:      event.EventError,
+					SessionID: sessionID,
+					Data: event.ErrorData{
+						Error:     "对话执行发生内部错误，请稍后重试",
+						ErrorCode: "CHAT_EXECUTION_PANIC",
+						Stage:     "chat_execution",
+						SessionID: sessionID,
+					},
+				})
 			}
 			// Agent mode: complete the assistant message in defer (normal mode does it via event handler)
 			if mode == qaModeAgent {
@@ -876,6 +1064,54 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			h.cleanupClaudeOriginalInputFiles(streamCtx.asyncCtx, reqCtx.originalInputFiles)
 		}()
 
+		if ticket != nil {
+			waitErr := ticket.Wait(streamCtx.asyncCtx, func(snapshot ChatQueueSnapshot) {
+				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
+					Type:      event.EventChatQueueStatus,
+					SessionID: sessionID,
+					RequestID: reqCtx.requestID,
+					Data: event.ChatQueueStatusData{
+						State:          snapshot.State,
+						ModelID:        snapshot.ModelID,
+						ResourcePoolID: snapshot.ResourcePoolID,
+						Position:       snapshot.Position,
+						Waiting:        snapshot.Waiting,
+						Active:         snapshot.Active,
+						MaxConcurrent:  snapshot.MaxConcurrent,
+						MaxWaiting:     snapshot.MaxWaiting,
+						QueuedAtUnix:   snapshot.QueuedAtUnix,
+					},
+				})
+			})
+			if waitErr != nil {
+				if streamCtx.asyncCtx.Err() != nil {
+					logger.Infof(
+						streamCtx.asyncCtx,
+						"Queued QA cancelled before admission for session: %s",
+						sessionID,
+					)
+					return
+				}
+				logger.Errorf(
+					streamCtx.asyncCtx,
+					"Chat queue wait failed for session %s: %v",
+					sessionID,
+					waitErr,
+				)
+				streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
+					Type:      event.EventError,
+					SessionID: sessionID,
+					Data: event.ErrorData{
+						Error:     "聊天排队等待失败，请稍后重试",
+						ErrorCode: "CHAT_QUEUE_WAIT_FAILED",
+						Stage:     "chat_queue_wait",
+						SessionID: sessionID,
+					},
+				})
+				return
+			}
+		}
+
 		// Run VLM image analysis if applicable
 		h.runVLMAnalysisIfNeeded(streamCtx, reqCtx, mode)
 
@@ -892,13 +1128,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 			if qaReq.CustomAgent != nil {
 				if runner := agentQARunnerFor(qaReq.CustomAgent.Config.AgentType); runner != nil {
 					stageName = "custom_agent_execution"
-					serviceErr = runner(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
-				} else {
-					serviceErr = h.sessionService.AgentQA(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
 				}
-			} else {
-				serviceErr = h.sessionService.AgentQA(streamCtx.asyncCtx, qaReq, streamCtx.eventBus)
 			}
+			serviceErr = RunAgentQA(streamCtx.asyncCtx, h.sessionService, qaReq, streamCtx.eventBus)
 		}
 
 		if serviceErr != nil {
@@ -925,6 +1157,12 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				})
 			}
 		}
+
+		// Title generation is auxiliary. Start it only after the answer path has
+		// returned so it cannot compete with the user's answer for local-model
+		// admission or inference capacity. The SSE handler keeps only its existing
+		// short grace window; title generation never extends answer completion.
+		h.startTitleGeneration(reqCtx, streamCtx, generateTitle)
 	}()
 
 	// Handle SSE events (blocking)
@@ -1048,14 +1286,70 @@ func appendQuickAnswerReasoning(msg *types.Message, content string) {
 	if content == "" {
 		return
 	}
-	if len(msg.AgentSteps) == 0 {
-		msg.AgentSteps = types.AgentSteps{{
-			Iteration: 0,
-			Timestamp: time.Now(),
-			ToolCalls: make([]types.ToolCall, 0),
-		}}
+	step := ensureQuickAnswerStep(msg, 0)
+	step.ReasoningContent += content
+}
+
+func ensureQuickAnswerStep(msg *types.Message, iteration int) *types.AgentStep {
+	for i := range msg.AgentSteps {
+		if msg.AgentSteps[i].Iteration == iteration {
+			return &msg.AgentSteps[i]
+		}
 	}
-	msg.AgentSteps[0].ReasoningContent += content
+	msg.AgentSteps = append(msg.AgentSteps, types.AgentStep{
+		Iteration: iteration,
+		Timestamp: time.Now(),
+		ToolCalls: make([]types.ToolCall, 0),
+	})
+	return &msg.AgentSteps[len(msg.AgentSteps)-1]
+}
+
+func recordQuickAnswerToolCall(msg *types.Message, data event.AgentToolCallData) {
+	step := ensureQuickAnswerStep(msg, data.Iteration)
+	for i := range step.ToolCalls {
+		if step.ToolCalls[i].ID != data.ToolCallID {
+			continue
+		}
+		step.ToolCalls[i].Name = data.ToolName
+		step.ToolCalls[i].Args = data.Arguments
+		return
+	}
+	step.ToolCalls = append(step.ToolCalls, types.ToolCall{
+		ID:   data.ToolCallID,
+		Name: data.ToolName,
+		Args: data.Arguments,
+	})
+}
+
+func recordQuickAnswerToolResult(msg *types.Message, data event.AgentToolResultData) {
+	step := ensureQuickAnswerStep(msg, data.Iteration)
+	toolIndex := -1
+	for i := range step.ToolCalls {
+		if data.ToolCallID != "" && step.ToolCalls[i].ID == data.ToolCallID {
+			toolIndex = i
+			break
+		}
+	}
+	if toolIndex < 0 {
+		step.ToolCalls = append(step.ToolCalls, types.ToolCall{
+			ID:   data.ToolCallID,
+			Name: data.ToolName,
+			Args: map[string]interface{}{},
+		})
+		toolIndex = len(step.ToolCalls) - 1
+	}
+
+	toolCall := &step.ToolCalls[toolIndex]
+	if toolCall.Name == "" {
+		toolCall.Name = data.ToolName
+	}
+	toolCall.Duration = data.Duration
+	toolCall.Result = &types.ToolResult{
+		Success: data.Success,
+		Output:  data.Output,
+		Data:    data.Data,
+		Error:   data.Error,
+	}
 }
 
 func userFacingAgentErrorMessage(err error) string {

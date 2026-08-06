@@ -79,6 +79,78 @@ func TestSSOEntryStoresLocalFrontendRedirect(t *testing.T) {
 	}
 }
 
+func TestSSOEntryStoresExactCitationDeepLink(t *testing.T) {
+	router := newSSOEntryTestRouterWithPublicOrigin(t, "https://knora.moutai.com.cn")
+	returnTo := "/platform/knowledge-bases/kb-1?knowledge_id=doc-1&chunk_id=chunk-1"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/custom/iam/sso/entry?return_to="+url.QueryEscape(returnTo),
+		nil,
+	)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	parsed, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse location: %v", err)
+	}
+	payload, err := decodeSSOState(parsed.Query().Get("state"))
+	if err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	want := "https://knora.moutai.com.cn" + returnTo
+	if payload.FrontendRedirect != want {
+		t.Fatalf("frontend_redirect = %q, want %q", payload.FrontendRedirect, want)
+	}
+	if got := ssoBrowserRedirect(payload.FrontendRedirect, url.Values{"oidc_result": {"payload"}}); got != want+"#oidc_result=payload" {
+		t.Fatalf("browser redirect = %q, want citation deep link", got)
+	}
+}
+
+func TestSSOEntryStoresExactMobileCitationDeepLink(t *testing.T) {
+	router := newSSOEntryTestRouterWithPublicOrigin(t, "https://knora.moutai.com.cn")
+	returnTo := "/mobile/reference?type=wiki&knowledge_base_id=kb-1&slug=concept%2Freserve"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/custom/iam/sso/entry?client=mobile&return_to="+url.QueryEscape(returnTo),
+		nil,
+	)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	parsed, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse location: %v", err)
+	}
+	payload, err := decodeSSOState(parsed.Query().Get("state"))
+	if err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	want := "https://knora.moutai.com.cn" + returnTo
+	if payload.FrontendRedirect != want {
+		t.Fatalf("frontend_redirect = %q, want %q", payload.FrontendRedirect, want)
+	}
+}
+
+func TestNormalizeSSOReturnPathRejectsOpenRedirects(t *testing.T) {
+	for _, value := range []string{
+		"https://evil.example/steal",
+		"//evil.example/steal",
+		"/api/v1/users",
+		"/platform/knowledge-bases/kb#oidc_result=fake",
+	} {
+		if got, err := normalizeSSOReturnPath(value); err == nil || got != "" {
+			t.Fatalf("normalizeSSOReturnPath(%q) = %q, %v; want rejection", value, got, err)
+		}
+	}
+}
+
 func TestSSOEntryStoresMobileFrontendRedirect(t *testing.T) {
 	router := newSSOEntryTestRouter(t)
 

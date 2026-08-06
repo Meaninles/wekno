@@ -17,6 +17,7 @@ import {
 type KnowledgeStatusItem = {
   id: string
   parse_status?: string
+  core_status?: string
   summary_status?: string
   enrichment_status?: string
   wiki_status?: string
@@ -50,6 +51,14 @@ const statusPresentation = computed(() => {
     case 'pending':
       return { label: t('knowledgeBase.statusPending'), theme: 'warning', icon: 'time' }
     case 'processing':
+      if (String(props.knowledge.core_status ?? '').toLowerCase() === 'ready') {
+        return {
+          label: t('knowledgeWorkflowStatus.coreReadyEnriching'),
+          theme: 'primary',
+          icon: 'loading',
+          spin: true,
+        }
+      }
       return { label: t('knowledgeBase.statusProcessing'), theme: 'primary', icon: 'loading', spin: true }
     case 'cancelling':
       return { label: t('knowledgeWorkflowStatus.status.cancelling'), theme: 'warning', icon: 'loading', spin: true }
@@ -57,6 +66,8 @@ const statusPresentation = computed(() => {
       return { label: t('knowledgeWorkflowStatus.status.deleting'), theme: 'warning', icon: 'loading', spin: true }
     case 'completed':
       return { label: t('knowledgeBase.statusCompleted'), theme: 'success', icon: 'check-circle' }
+    case 'degraded':
+      return { label: t('knowledgeWorkflowStatus.status.degraded'), theme: 'warning', icon: 'info-circle' }
     case 'failed':
       return { label: t('knowledgeBase.statusFailed'), theme: 'danger', icon: 'close-circle' }
     case 'cancelled':
@@ -370,6 +381,7 @@ onUnmounted(() => {
   white-space: nowrap;
 
   &.is-completed { color: var(--td-success-color); }
+  &.is-degraded { color: var(--td-warning-color); }
   &.is-failed { color: var(--td-error-color); }
   &.is-processing { color: var(--td-brand-color); }
   &.is-pending,

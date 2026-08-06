@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { MessagePlugin } from "tdesign-vue-next";
 import zhCNConfig from "tdesign-vue-next/esm/locale/zh_CN";
 import { getCurrentUser, userInfoFromApi } from "@/api/auth";
 import { useAuthStore } from "@/stores/auth";
+import {
+  mobileRouterPathForLocation,
+  mobileSSOEntryForPath,
+} from "./authRedirect";
 
 const router = useRouter();
+const route = useRoute();
 const authStore = useAuthStore();
 
 const booting = ref(true);
@@ -14,6 +19,9 @@ const redirecting = ref(false);
 const bootMessage = ref("正在进入企业微信工作台");
 
 const tdGlobalConfig = computed(() => zhCNConfig);
+// Only the capability-backed IM reference route is public. Every other mobile
+// route keeps the existing IAM bootstrap and account/tenant checks.
+const isPublicReferenceRoute = computed(() => route.name === "mobile-reference");
 
 const decodeOIDCResult = (encoded: string) => {
   const normalized = encoded.replace(/-/g, "+").replace(/_/g, "/");
@@ -64,6 +72,7 @@ const syncOIDCUserContext = async () => {
 };
 
 const handleOIDCCallback = async () => {
+	const callbackRoute = mobileRouterPathForLocation(window.location.pathname, window.location.search);
   const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
   if (!hash) return false;
 
@@ -75,18 +84,18 @@ const handleOIDCCallback = async () => {
   if (!oidcError && !oidcResult) return false;
 
   if (oidcError) {
-    clearOIDCCallbackState("/chat");
+	clearOIDCCallbackState(callbackRoute);
     throw new Error(oidcErrorDescription || oidcError || "统一身份认证失败");
   }
 
   if (!oidcResult) {
-    clearOIDCCallbackState("/chat");
+	clearOIDCCallbackState(callbackRoute);
     throw new Error("统一身份认证失败");
   }
 
   const response = decodeOIDCResult(oidcResult);
   if (!response.success || !response.token) {
-    clearOIDCCallbackState("/chat");
+	clearOIDCCallbackState(callbackRoute);
     throw new Error(response.message || "统一身份认证失败");
   }
 
@@ -96,9 +105,9 @@ const handleOIDCCallback = async () => {
   }
 
   await syncOIDCUserContext();
-  clearOIDCCallbackState("/chat");
+	clearOIDCCallbackState(callbackRoute);
   await nextTick();
-  await router.replace("/chat");
+	await router.replace(callbackRoute);
   return true;
 };
 
@@ -106,10 +115,18 @@ const redirectToEnterpriseSSO = () => {
   if (redirecting.value) return;
   redirecting.value = true;
   bootMessage.value = "正在跳转统一身份认证";
-  window.location.replace("/api/v1/custom/iam/sso/entry?client=mobile");
+	window.location.replace(
+		mobileSSOEntryForPath(window.location.pathname, window.location.search) ||
+		"/api/v1/custom/iam/sso/entry?client=mobile",
+	);
 };
 
 const bootstrap = async () => {
+  if (isPublicReferenceRoute.value) {
+    booting.value = false;
+    redirecting.value = false;
+    return;
+  }
   booting.value = true;
   try {
     await handleOIDCCallback();
@@ -135,13 +152,25 @@ const bootstrap = async () => {
   }
 };
 
+watch(
+  () => route.name,
+  () => {
+    if (isPublicReferenceRoute.value) {
+      booting.value = false;
+      redirecting.value = false;
+    } else if (!authStore.isLoggedIn) {
+      void bootstrap();
+    }
+  },
+);
+
 onMounted(bootstrap);
 </script>
 
 <template>
   <t-config-provider :globalConfig="tdGlobalConfig">
     <div class="mobile-shell">
-      <RouterView v-if="!booting && authStore.isLoggedIn" />
+      <RouterView v-if="isPublicReferenceRoute || (!booting && authStore.isLoggedIn)" />
       <div v-else class="mobile-boot">
         <div class="mobile-boot__mark">W</div>
         <div class="mobile-boot__title">WeKnora</div>

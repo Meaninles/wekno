@@ -1,0 +1,8 @@
+# Local verification image: reuse the already-installed upstream DocReader
+# runtime and replace only the custom splitter package. This keeps local E2E
+# reproducible when Docker Hub is unavailable; production images must still be
+# built from docker/Dockerfile.docreader so all dependencies are immutable.
+FROM wechatopenai/weknora-docreader:latest
+
+COPY custom/services/document-splitter/weknora_document_splitter /app/weknora_document_splitter
+COPY docreader/parser/xlsx_merge.py /app/docreader/parser/xlsx_merge.py

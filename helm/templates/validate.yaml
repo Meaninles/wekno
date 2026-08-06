@@ -120,3 +120,49 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
 {{- if and .Values.documentProcessingAgent.enabled (or (empty .Values.documentProcessingAgent.apiKeySecret.name) (empty .Values.documentProcessingAgent.apiKeySecret.key)) }}
   {{- fail "documentProcessingAgent.apiKeySecret name and key are required" }}
 {{- end }}
+{{- if and .Values.app.enabled .Values.app.runtimeRoles.enabled }}
+  {{- if ne (lower (toString .Values.app.runtimeRoles.environment)) "production" }}
+    {{- fail "app.runtimeRoles.environment must be production when split runtime roles are enabled" }}
+  {{- end }}
+  {{- if ne (lower (toString .Values.app.env.AUTO_MIGRATE)) "false" }}
+    {{- fail "split runtime Deployments require app.env.AUTO_MIGRATE=false; migrations run only in the blocking hook Job" }}
+  {{- end }}
+  {{- if .Values.app.autoscaling.enabled }}
+    {{- fail "split runtime roles require app.autoscaling.enabled=false so the declared database connection budget matches actual API replicas" }}
+  {{- end }}
+  {{- if ne (toString .Values.app.updateStrategy.rollingUpdate.maxSurge) "0" }}
+    {{- fail "split runtime roles require app.updateStrategy.rollingUpdate.maxSurge=0; the startup connection budget declares zero rollout surge" }}
+  {{- end }}
+  {{- if empty .Values.app.runtimeRoles.redisNamespace }}
+    {{- fail "app.runtimeRoles.redisNamespace is required so all roles share one explicit Redis namespace" }}
+  {{- end }}
+  {{- if not .Values.app.runtimeRoles.migration.enabled }}
+    {{- fail "split runtime roles require the blocking migration hook Job" }}
+  {{- end }}
+  {{- if empty .Values.secrets.existingSecret }}
+    {{- fail "the pre-install migration hook requires secrets.existingSecret to reference a pre-provisioned Secret" }}
+  {{- end }}
+  {{- $maxConnections := int .Values.app.runtimeRoles.postgresMaxConnections }}
+  {{- if le $maxConnections 0 }}
+    {{- fail "app.runtimeRoles.postgresMaxConnections must be positive" }}
+  {{- end }}
+  {{- $apiOpen := int .Values.app.env.CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS }}
+  {{- $steady := mul (int .Values.app.replicaCount) $apiOpen }}
+  {{- range $name, $role := dict "parseWorker" .Values.app.runtimeRoles.parseWorker "derivativeWorker" .Values.app.runtimeRoles.derivativeWorker "wikiWorker" .Values.app.runtimeRoles.wikiWorker "maintenance" .Values.app.runtimeRoles.maintenance }}
+    {{- if not $role.enabled }}
+      {{- fail (printf "split runtime role %s must be enabled" $name) }}
+    {{- end }}
+    {{- if or (le (int $role.replicaCount) 0) (le (int $role.maxOpenConns) 0) (lt (int $role.maxIdleConns) 0) (gt (int $role.maxIdleConns) (int $role.maxOpenConns)) }}
+      {{- fail (printf "invalid replica/database pool settings for split runtime role %s" $name) }}
+    {{- end }}
+    {{- $steady = add $steady (mul (int $role.replicaCount) (int $role.maxOpenConns)) }}
+  {{- end }}
+  {{- if or (le $apiOpen 0) (le (int .Values.app.runtimeRoles.migration.maxOpenConns) 0) }}
+    {{- fail "API and migration maxOpenConns must be positive" }}
+  {{- end }}
+  {{- $steady = add $steady (int .Values.app.runtimeRoles.migration.maxOpenConns) }}
+  {{- $steadyLimit := div (mul $maxConnections 60) 100 }}
+  {{- if gt $steady $steadyLimit }}
+    {{- fail (printf "split runtime database connection budget %d exceeds 60%% of PostgreSQL max_connections (%d)" $steady $steadyLimit) }}
+  {{- end }}
+{{- end }}

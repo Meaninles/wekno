@@ -124,7 +124,53 @@ func TestFolderStatsFollowStatusAndLocationChanges(t *testing.T) {
 	require.Zero(t, parent.Stats.ParseRunningCount)
 }
 
-func TestFolderMoveCycleAndDeleteModes(t *testing.T) {
+func TestFolderStatsSeparateAbnormalAndTerminalFailedDocuments(t *testing.T) {
+	service, ctx := newFolderTestService(t)
+	folder, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{Name: "状态拆分"})
+	require.NoError(t, err)
+
+	// A failed derivative branch is still only abnormal while another branch
+	// remains active; the document-level workflow has not reached failed yet.
+	createTestKnowledge(
+		t, service, folder.ID, "doc-retrying", types.ParseStatusCompleted, 1,
+		types.WikiStatusPending, types.EnrichmentStatusFailed,
+	)
+	createTestKnowledge(
+		t, service, folder.ID, "doc-degraded", types.ParseStatusCompleted, 0,
+		types.WikiStatusCompleted, types.EnrichmentStatusDegraded,
+	)
+	createTestKnowledge(
+		t, service, folder.ID, "doc-failed", types.ParseStatusFailed, 0,
+		types.WikiStatusNone, types.EnrichmentStatusNone,
+	)
+
+	folder, err = service.GetFolder(ctx, "kb-1", folder.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), folder.Stats.AbnormalDocumentCount)
+	require.Equal(t, int64(1), folder.Stats.FailedDocumentCount)
+
+	// Once the remaining branch settles, the failed derivative becomes a true
+	// document-level failure and moves between the two counters atomically.
+	require.NoError(t, service.db.Model(&types.Knowledge{}).
+		Where("id = ?", "doc-retrying").
+		Updates(map[string]any{
+			"pending_subtasks_count": 0,
+			"wiki_status":            types.WikiStatusCompleted,
+		}).Error)
+	folder, err = service.GetFolder(ctx, "kb-1", folder.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), folder.Stats.AbnormalDocumentCount)
+	require.Equal(t, int64(2), folder.Stats.FailedDocumentCount)
+
+	// Reconciliation uses the same projection as the incremental trigger.
+	require.NoError(t, service.ReconcileAll(ctx))
+	folder, err = service.GetFolder(ctx, "kb-1", folder.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), folder.Stats.AbnormalDocumentCount)
+	require.Equal(t, int64(2), folder.Stats.FailedDocumentCount)
+}
+
+func TestFolderMoveCycleAndRecursiveDelete(t *testing.T) {
 	service, ctx := newFolderTestService(t)
 	parent, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{Name: "父级"})
 	require.NoError(t, err)
@@ -138,21 +184,79 @@ func TestFolderMoveCycleAndDeleteModes(t *testing.T) {
 	_, err = service.UpdateFolder(ctx, "kb-1", parent.ID, UpdateFolderRequest{ParentID: &badParent})
 	require.ErrorIs(t, err, ErrFolderCycle)
 
-	require.ErrorIs(t, service.DeleteFolder(ctx, "kb-1", child.ID, "reject"), ErrFolderNotEmpty)
-	require.NoError(t, service.DeleteFolder(ctx, "kb-1", child.ID, "move_to_parent"))
+	operation, err := service.RequestDeleteFolder(ctx, "kb-1", child.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), operation.TotalDocumentCount)
+	require.Equal(t, FolderDeleteOperationPending, operation.Status)
 
-	grandchild, err = service.GetFolder(ctx, "kb-1", grandchild.ID)
-	require.NoError(t, err)
-	require.Equal(t, parent.ID, grandchild.ParentID)
-	require.Equal(t, "父级/孙级", grandchild.Path)
-	parent, err = service.GetFolder(ctx, "kb-1", parent.ID)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), parent.Stats.SubtreeDocumentCount)
-	require.Equal(t, int64(1), parent.Stats.DirectChildFolderCount)
 	_, err = service.GetFolder(ctx, "kb-1", child.ID)
 	require.ErrorIs(t, err, ErrFolderNotFound)
+	_, err = service.GetFolder(ctx, "kb-1", grandchild.ID)
+	require.ErrorIs(t, err, ErrFolderNotFound)
+	var deleting types.Knowledge
+	require.NoError(t, service.db.Where("id = ?", "doc-deep").First(&deleting).Error)
+	require.Equal(t, types.ParseStatusDeleting, deleting.ParseStatus)
 
-	require.ErrorIs(t, service.DeleteFolder(ctx, "kb-1", grandchild.ID, "erase"), ErrFolderDeleteMode)
+	parent, err = service.GetFolder(ctx, "kb-1", parent.ID)
+	require.NoError(t, err)
+	require.Zero(t, parent.Stats.SubtreeDocumentCount)
+	require.Zero(t, parent.Stats.DirectChildFolderCount)
+
+	require.NoError(t, service.db.Delete(&types.Knowledge{}, "id = ?", "doc-deep").Error)
+	require.NoError(t, service.OnKnowledgeDeleteCompleted(ctx, 7, "kb-1", []string{"doc-deep"}))
+	operation, err = service.getDeleteOperation(ctx, 7, "kb-1", operation.ID)
+	require.NoError(t, err)
+	require.Equal(t, FolderDeleteOperationCompleted, operation.Status)
+	var remainingFolders int64
+	require.NoError(t, service.db.Model(&Folder{}).
+		Where("id IN ?", []string{child.ID, grandchild.ID}).Count(&remainingFolders).Error)
+	require.Zero(t, remainingFolders)
+}
+
+func TestListNodesProjectsMatchingDocumentsThroughAncestorFolders(t *testing.T) {
+	service, ctx := newFolderTestService(t)
+	matchingRoot, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{Name: "匹配树"})
+	require.NoError(t, err)
+	matchingChild, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{ParentID: matchingRoot.ID, Name: "深层"})
+	require.NoError(t, err)
+	nonMatchingRoot, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{Name: "其它树"})
+	require.NoError(t, err)
+	createTestKnowledge(t, service, matchingChild.ID, "failed-deep", types.ParseStatusFailed, 0, types.WikiStatusNone, types.EnrichmentStatusNone)
+	createTestKnowledge(t, service, nonMatchingRoot.ID, "completed-other", types.ParseStatusCompleted, 0, types.WikiStatusCompleted, types.EnrichmentStatusCompleted)
+
+	filter := types.KnowledgeListFilter{WorkflowStatus: "failed"}
+	rootPage, err := service.ListNodes(ctx, "kb-1", "", 1, 20, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rootPage.Total)
+	require.Len(t, rootPage.Data, 1)
+	require.Equal(t, matchingRoot.ID, rootPage.Data[0].Folder.ID)
+
+	childPage, err := service.ListNodes(ctx, "kb-1", matchingRoot.ID, 1, 20, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), childPage.Total)
+	require.Equal(t, matchingChild.ID, childPage.Data[0].Folder.ID)
+
+	documentPage, err := service.ListNodes(ctx, "kb-1", matchingChild.ID, 1, 20, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), documentPage.Total)
+	require.Equal(t, "failed-deep", documentPage.Data[0].Document.ID)
+}
+
+func TestKnowledgeBaseTaskStatsIncludeRootAndExcludeDeleting(t *testing.T) {
+	service, ctx := newFolderTestService(t)
+	folder, err := service.CreateFolder(ctx, "kb-1", CreateFolderRequest{Name: "任务"})
+	require.NoError(t, err)
+	createTestKnowledge(t, service, "", "root-pending", types.ParseStatusPending, 0, types.WikiStatusNone, types.EnrichmentStatusNone)
+	createTestKnowledge(t, service, folder.ID, "folder-running", types.ParseStatusProcessing, 2, types.WikiStatusPending, types.EnrichmentStatusPending)
+	createTestKnowledge(t, service, folder.ID, "hidden-deleting", types.ParseStatusDeleting, 0, types.WikiStatusNone, types.EnrichmentStatusNone)
+
+	stats, err := service.GetKnowledgeBaseTaskStats(ctx, "kb-1")
+	require.NoError(t, err)
+	require.Equal(t, int64(2), stats.DocumentCount)
+	require.Equal(t, int64(1), stats.ParsePendingCount)
+	require.Equal(t, int64(1), stats.ParseRunningCount)
+	require.Equal(t, int64(2), stats.EnrichmentPendingTaskCount)
+	require.Equal(t, int64(1), stats.WikiPendingTaskCount)
 }
 
 func TestFolderValidationIsolationAndDuplicateHandling(t *testing.T) {
@@ -185,15 +289,22 @@ func TestKnowledgeBaseDeletionCleansFolderMetadata(t *testing.T) {
 		t, service, folder.ID, "doc-cleanup", types.ParseStatusCompleted, 0,
 		types.WikiStatusCompleted, types.EnrichmentStatusCompleted,
 	)
+	operation, err := service.RequestDeleteFolder(ctx, "kb-1", folder.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, operation.ID)
 
 	require.NoError(t, service.db.Delete(&types.KnowledgeBase{}, "id = ?", "kb-1").Error)
-	var folderCount, closureCount, statsCount int64
+	var folderCount, closureCount, statsCount, operationCount, itemCount int64
 	require.NoError(t, service.db.Model(&Folder{}).Where("knowledge_base_id = ?", "kb-1").Count(&folderCount).Error)
 	require.NoError(t, service.db.Model(&FolderClosure{}).Where("knowledge_base_id = ?", "kb-1").Count(&closureCount).Error)
 	require.NoError(t, service.db.Model(&FolderStats{}).Where("knowledge_base_id = ?", "kb-1").Count(&statsCount).Error)
+	require.NoError(t, service.db.Model(&FolderDeleteOperation{}).Where("knowledge_base_id = ?", "kb-1").Count(&operationCount).Error)
+	require.NoError(t, service.db.Model(&FolderDeleteOperationItem{}).Where("operation_id = ?", operation.ID).Count(&itemCount).Error)
 	require.Zero(t, folderCount)
 	require.Zero(t, closureCount)
 	require.Zero(t, statsCount)
+	require.Zero(t, operationCount)
+	require.Zero(t, itemCount)
 }
 
 func TestRecursiveSearchFindsFoldersAndDocumentsAndHonorsScope(t *testing.T) {

@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -195,6 +198,12 @@ var summaryTaskTypes = map[string]struct{}{
 // snapshot per queue below.
 const listPageSize = 100
 
+const (
+	derivativeDeleteQuiesceTimeout = 30 * time.Second
+	derivativeDeleteQuiescePoll    = 250 * time.Millisecond
+	derivativeTerminalPurgeBatch   = uint64(1000)
+)
+
 // maxAtomicSnapshotTasks bounds the amount of work performed by one Redis Lua
 // invocation. A snapshot larger than this is reported as an inspection error,
 // which makes housekeeping fail closed. This trades automatic stale-row repair
@@ -372,6 +381,276 @@ func (a *asynqTaskInspector) PurgeTaskHistoryForKnowledge(
 		knowledgeID,
 		deleted,
 	)
+	return deleted, nil
+}
+
+// derivativeTerminalRangePurgeScript removes deterministic durable-wake
+// history without walking the shared derivative queue. All keys share the
+// queue hash tag, so the script is also safe with Redis Cluster. The work-item
+// row is fenced before this runs; only completed/archived records are removed
+// here, while live records cross the Inspector cancellation barrier first.
+var derivativeTerminalRangePurgeScript = redis.NewScript(`
+local removed = 0
+local task_prefix = ARGV[1]
+local work_item_id = ARGV[2]
+local first_epoch = tonumber(ARGV[3])
+local last_epoch = tonumber(ARGV[4])
+for epoch = first_epoch, last_epoch do
+    local id = "derivative:" .. work_item_id .. ":" .. tostring(epoch)
+    local terminal = redis.call("ZREM", KEYS[1], id) + redis.call("ZREM", KEYS[2], id)
+    local body = redis.call("UNLINK", task_prefix .. id)
+    if terminal > 0 or body > 0 then
+        removed = removed + 1
+    end
+end
+return removed
+`)
+
+var derivativeTerminalIDsPurgeScript = redis.NewScript(`
+local removed = 0
+local task_prefix = ARGV[1]
+for index = 2, #ARGV do
+    local id = ARGV[index]
+    local terminal = redis.call("ZREM", KEYS[1], id) + redis.call("ZREM", KEYS[2], id)
+    local body = redis.call("UNLINK", task_prefix .. id)
+    if terminal > 0 or body > 0 then
+        removed = removed + 1
+    end
+end
+return removed
+`)
+
+// QuiesceAndPurgeDerivativeTaskHistory closes the deletion blind spot caused
+// by durable derivative wakes carrying work_item_id rather than knowledge_id.
+// It never scans completed history: the caller supplies PostgreSQL's exact
+// work-item/epoch high-water marks and legacy generation task IDs.
+func (a *asynqTaskInspector) QuiesceAndPurgeDerivativeTaskHistory(
+	ctx context.Context,
+	targets []interfaces.DerivativeTaskHistoryTarget,
+) (int, error) {
+	workEpochs, legacyIDs, err := normalizeDerivativePurgeTargets(targets)
+	if err != nil {
+		return 0, err
+	}
+	if len(workEpochs) == 0 && len(legacyIDs) == 0 {
+		return 0, nil
+	}
+	if a == nil {
+		return 0, errors.New("task inspector: derivative task-history purge backend unavailable")
+	}
+	if a.syncTasks != nil {
+		return a.syncTasks.quiesceAndPurgeDerivativeTasks(ctx, workEpochs, legacyIDs)
+	}
+	if a.inspector == nil || a.taskInfo == nil || a.snapshotter == nil || a.activeKeys == nil {
+		return 0, errors.New("task inspector: derivative task-history purge backend unavailable")
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, derivativeDeleteQuiesceTimeout)
+	ticker := time.NewTicker(derivativeDeleteQuiescePoll)
+	emptySnapshots := 0
+	for {
+		live, cancelErr := a.cancelDerivativeLiveTasks(waitCtx, workEpochs, legacyIDs)
+		if cancelErr != nil {
+			ticker.Stop()
+			cancel()
+			return 0, cancelErr
+		}
+		if !live {
+			emptySnapshots++
+			if emptySnapshots >= 2 {
+				break
+			}
+		} else {
+			emptySnapshots = 0
+		}
+		select {
+		case <-waitCtx.Done():
+			ticker.Stop()
+			cancel()
+			return 0, fmt.Errorf("task inspector: derivative tasks did not quiesce: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+	ticker.Stop()
+	cancel()
+
+	deleted, err := a.purgeDerivativeTerminalIDs(ctx, workEpochs, legacyIDs)
+	if err != nil {
+		return deleted, err
+	}
+	logger.Infof(ctx,
+		"[TaskInspector] derivative terminal history purged=%d work_items=%d legacy_tasks=%d",
+		deleted, len(workEpochs), len(legacyIDs),
+	)
+	return deleted, nil
+}
+
+func normalizeDerivativePurgeTargets(
+	targets []interfaces.DerivativeTaskHistoryTarget,
+) (map[string]uint64, map[string]struct{}, error) {
+	workEpochs := make(map[string]uint64, len(targets))
+	legacyIDs := make(map[string]struct{}, len(targets))
+	for index, target := range targets {
+		workItemID := strings.TrimSpace(target.WorkItemID)
+		legacyTaskID := strings.TrimSpace(target.LegacyTaskID)
+		if workItemID == "" && legacyTaskID == "" {
+			return nil, nil, fmt.Errorf("task inspector: derivative purge target %d has no identity", index)
+		}
+		if workItemID != "" && target.DispatchEpoch > workEpochs[workItemID] {
+			workEpochs[workItemID] = target.DispatchEpoch
+		}
+		if legacyTaskID != "" {
+			legacyIDs[legacyTaskID] = struct{}{}
+		}
+	}
+	return workEpochs, legacyIDs, nil
+}
+
+func (a *asynqTaskInspector) cancelDerivativeLiveTasks(
+	ctx context.Context,
+	workEpochs map[string]uint64,
+	legacyIDs map[string]struct{},
+) (bool, error) {
+	ids, err := a.snapshotter.LiveTaskIDs(ctx, types.QueueDerivative)
+	if err != nil {
+		return false, fmt.Errorf("snapshot derivative tasks: %w", err)
+	}
+	live := false
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		if !derivativeTaskIDMayMatch(id, workEpochs, legacyIDs) {
+			continue
+		}
+		info, err := a.taskInfo.GetTaskInfo(types.QueueDerivative, id)
+		if err != nil {
+			if errors.Is(err, asynq.ErrTaskNotFound) {
+				// The next atomic snapshot supplies the proof. Do not fail a
+				// deletion merely because a healthy task completed between calls.
+				live = true
+				continue
+			}
+			return false, fmt.Errorf("read derivative task id=%s: %w", id, err)
+		}
+		matches, err := derivativeTaskInfoMatches(info, workEpochs, legacyIDs)
+		if err != nil {
+			return false, fmt.Errorf("inspect derivative task id=%s: %w", id, err)
+		}
+		if !matches {
+			continue
+		}
+		live = true
+		if info.State == asynq.TaskStateActive {
+			if err := a.inspector.CancelProcessing(info.ID); err != nil && !errors.Is(err, asynq.ErrTaskNotFound) {
+				return false, fmt.Errorf("cancel active derivative task id=%s: %w", info.ID, err)
+			}
+			continue
+		}
+		if err := a.inspector.DeleteTask(types.QueueDerivative, info.ID); err != nil && !errors.Is(err, asynq.ErrTaskNotFound) {
+			return false, fmt.Errorf("delete live derivative task id=%s state=%s: %w", info.ID, info.State, err)
+		}
+	}
+	return live, nil
+}
+
+func derivativeTaskIDMayMatch(
+	taskID string,
+	workEpochs map[string]uint64,
+	legacyIDs map[string]struct{},
+) bool {
+	if _, match := legacyIDs[taskID]; match {
+		return true
+	}
+	const prefix = "derivative:"
+	if !strings.HasPrefix(taskID, prefix) {
+		return false
+	}
+	remainder := strings.TrimPrefix(taskID, prefix)
+	separator := strings.LastIndexByte(remainder, ':')
+	if separator <= 0 || separator == len(remainder)-1 {
+		return false
+	}
+	maximum, match := workEpochs[remainder[:separator]]
+	if !match {
+		return false
+	}
+	epoch, err := strconv.ParseUint(remainder[separator+1:], 10, 64)
+	return err == nil && epoch > 0 && epoch <= maximum
+}
+
+func derivativeTaskInfoMatches(
+	info *asynq.TaskInfo,
+	workEpochs map[string]uint64,
+	legacyIDs map[string]struct{},
+) (bool, error) {
+	if info == nil {
+		return false, errors.New("task info is nil")
+	}
+	if _, legacy := legacyIDs[info.ID]; legacy {
+		return info.Type == types.TypeDataTableSummary, nil
+	}
+	if info.Type != derivativequeue.TypeWake {
+		return false, nil
+	}
+	var wake derivativequeue.WakePayload
+	if err := json.Unmarshal(info.Payload, &wake); err != nil {
+		return false, err
+	}
+	maximum, match := workEpochs[wake.WorkItemID]
+	return match && wake.DispatchEpoch > 0 && wake.DispatchEpoch <= maximum &&
+		info.ID == fmt.Sprintf("derivative:%s:%d", wake.WorkItemID, wake.DispatchEpoch), nil
+}
+
+func (a *asynqTaskInspector) purgeDerivativeTerminalIDs(
+	ctx context.Context,
+	workEpochs map[string]uint64,
+	legacyIDs map[string]struct{},
+) (int, error) {
+	prefix := "asynq:{" + types.QueueDerivative + "}:"
+	keys := []string{prefix + "completed", prefix + "archived"}
+	deleted := 0
+	for workItemID, maximum := range workEpochs {
+		for first := uint64(1); first <= maximum; first += derivativeTerminalPurgeBatch {
+			last := first + derivativeTerminalPurgeBatch - 1
+			if last > maximum {
+				last = maximum
+			}
+			count, err := derivativeTerminalRangePurgeScript.Run(
+				ctx, a.activeKeys, keys,
+				prefix+"t:", workItemID, first, last,
+			).Int()
+			if err != nil {
+				return deleted, fmt.Errorf("purge derivative wake history work_item=%s epochs=%d-%d: %w", workItemID, first, last, err)
+			}
+			deleted += count
+		}
+	}
+	if len(legacyIDs) == 0 {
+		return deleted, nil
+	}
+	legacy := make([]string, 0, len(legacyIDs))
+	for id := range legacyIDs {
+		legacy = append(legacy, id)
+	}
+	for start := 0; start < len(legacy); start += int(derivativeTerminalPurgeBatch) {
+		end := start + int(derivativeTerminalPurgeBatch)
+		if end > len(legacy) {
+			end = len(legacy)
+		}
+		args := make([]interface{}, 0, end-start+1)
+		args = append(args, prefix+"t:")
+		for _, id := range legacy[start:end] {
+			args = append(args, id)
+		}
+		count, err := derivativeTerminalIDsPurgeScript.Run(ctx, a.activeKeys, keys, args...).Int()
+		if err != nil {
+			return deleted, fmt.Errorf("purge legacy derivative task history: %w", err)
+		}
+		deleted += count
+	}
 	return deleted, nil
 }
 

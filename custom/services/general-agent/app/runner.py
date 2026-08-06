@@ -22,6 +22,12 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 import xml.etree.ElementTree as ET
 
+from .final_delivery import (
+    CLAUDE_SDK_TERMINAL_CONTRACT,
+    ClaudeSDKTerminalCollector,
+    requires_passive_terminal_delivery,
+    uses_claude_sdk_terminal_projection,
+)
 from .schemas import ChatPayload, ChatResult, RunEvent, SidecarArtifact
 
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -234,15 +240,32 @@ def mcp_tool_result(result: dict[str, Any]) -> dict[str, Any]:
         if block is not None:
             content.append(block)
 
+    source_references = result.get("source_references") or []
+    citation_output_contract = str(result.get("citation_output_contract") or "").strip()
+    raw_data = result.get("data") or {}
+    annotated_output = _annotate_evidence_output(str(result.get("output") or ""), source_references)
+    if isinstance(raw_data, dict) and str(raw_data.get("display_type") or "") == "structured_analysis_result":
+        handles = [_canonical_source_handle(source) for source in source_references]
+        handles = [handle for handle in handles if handle]
+        if len(handles) == 1:
+            marker = f"citation_handle_for_this_evidence: {handles[0]}"
+            if marker not in annotated_output:
+                annotated_output = f"{annotated_output.rstrip()}\n{marker}".lstrip()
     summary = {
         "success": success,
-        "output": _truncate_text(str(result.get("output") or "")),
-        "data": result.get("data") or {},
-        "source_references": result.get("source_references") or [],
+        "output": _truncate_text(annotated_output),
+        "source_references": source_references,
+        "data": _attach_evidence_handles(raw_data, source_references),
         "images": image_meta,
     }
     if error:
         summary["error"] = error
+    # Keep the run-scoped terminal reminder as the final text field. Go emits
+    # it after the first citable document/Wiki/web result and keeps emitting it
+    # for later tools, so every Claude SDK agent type sees the same citation
+    # requirement immediately before it decides to finish the run.
+    if citation_output_contract:
+        summary["citation_output_contract"] = citation_output_contract
 
     # Put text first so non-vision models still receive the full structured
     # result, then append actual image blocks for clients that can consume them.
@@ -1199,6 +1222,17 @@ class ArtifactStore:
         return kept
 
 
+FINAL_ANSWER_SOURCE_CITATION_RULE = (
+    'When an evidence-producing tool returned source_references, content must copy each matching '
+    'cite_exactly value (for example <src id="S1" />) verbatim immediately after the factual '
+    'sentence or paragraph it supports. Select that handle by matching the actual words and facts '
+    'in its evidence block to the claim. When one evidence item supports a whole list, select the '
+    'evidence block that contains the listed facts and place its handle once immediately after the '
+    'final list item. An evidence-based final answer is complete '
+    'only when its supported claims carry their matching handles.'
+)
+
+
 def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_analysis_state: dict[str, Any] | None = None):
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -1357,14 +1391,14 @@ def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_an
 
         @tool(
             "final_answer",
-            f"Submit the final user-visible {agent_label} answer. This is mandatory for this agent: do not end with natural-language text directly. When chart output is present, the runtime validates output rules such as placeholders and chart_ids alignment, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
+            f"Submit the final user-visible {agent_label} answer. This is mandatory for this agent: do not end with natural-language text directly. {FINAL_ANSWER_SOURCE_CITATION_RULE} When chart output is present, the runtime validates output rules such as placeholders and chart_ids alignment, but ChartContract/spec consistency notes are non-blocking reference facts for wording.",
             {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Complete final answer in the user's language. Include {{chart:<id>}} placeholders only for charts that should appear in the final answer.",
+                        "description": f"Complete final answer in the user's language. {FINAL_ANSWER_SOURCE_CITATION_RULE} Include {{{{chart:<id>}}}} placeholders only for charts that should appear in the final answer.",
                     },
                     "chart_ids": {
                         "type": "array",
@@ -1416,8 +1450,8 @@ def runtime_summary(payload: ChatPayload) -> str:
         "history_turns": cfg.history_turns,
         "mcp_selection_mode": cfg.mcp_selection_mode,
         "mcp_services": cfg.mcp_services,
-        "skills_enabled": cfg.skills_enabled,
-        "allowed_skills": cfg.allowed_skills,
+        "lightweight_skills_enabled": bool(payload.lightweight_skills),
+        "effective_lightweight_skill_names": [s.name for s in payload.lightweight_skills],
         "professional_skills_enabled": cfg.professional_skills_enabled,
         "allowed_professional_skills": cfg.allowed_professional_skills,
         "materialized_professional_skills": [s.name for s in payload.professional_skills],
@@ -2454,7 +2488,6 @@ def prompt_visible_context(raw: dict[str, Any]) -> dict[str, Any]:
     current_turn = ctx.get("current_turn")
     if isinstance(current_turn, dict):
         current_turn.pop("user_request_verbatim", None)
-        current_turn.pop("selected_chat_skill_context", None)
         current_turn.pop("image_urls", None)
     effective = ctx.get("effective_configuration")
     if isinstance(effective, dict):
@@ -2704,7 +2737,11 @@ def build_system_prompt(
             "block lists local paths. For file inspection, modification, conversion, image/audio handling, or "
             "document-preservation work, use those listed local paths as authoritative originals. If only "
             "<original_input_files_unavailable> is present for a file, continue with WeKnora's extracted attachment "
-            "text, image descriptions, knowledge retrieval, and tools."
+            "text, image descriptions, knowledge retrieval, and tools. A local Read/Bash result is not a citeable "
+            "document fragment. When user-visible text asserts facts drawn from a selected WeKnora knowledge file, "
+            "also use an available WeKnora knowledge-retrieval tool for the relevant passages before writing that "
+            "text, then copy only the returned fragment source handles beside the claims they support. This extra "
+            "retrieval is unnecessary for pure file transformation or delivery statements that make no source-content claims."
         )
     artifact_review_policy = ""
     if payload.runtime_config.agent_type == "document-processing-agent" and payload.enable_artifacts:
@@ -2716,6 +2753,11 @@ def build_system_prompt(
 - For document-processing `.xlsx` artifacts, create_artifact may normalize Excel output styles while registering the final file. If the user's original request explicitly says a style effect must not be forced, pass `excel_style_apply_check` to create_artifact, for example `{"disabled_apply_attributes":["applyBorder"],"reason":"用户明确要求不要框线"}`. `disabled_apply_attributes` is an array of exact attributes to skip; valid values are `applyBorder`, `applyFill`, `applyNumberFormat`, `applyFont`, `applyAlignment`, `applyProtection`. Omit this config by default.
 """
     artifact_return_policy = artifact_return_policy_text(payload)
+    effective_lightweight_skills = json.dumps(
+        [skill.model_dump() for skill in payload.lightweight_skills],
+        ensure_ascii=False,
+        indent=2,
+    )
     policy = f"""
 You are WeKnora's general-purpose agent runtime. Act like a capable general-purpose assistant with the tools and context configured for this agent.
 
@@ -2735,12 +2777,13 @@ Tool catalog:
 
 Context contract:
 - The most important objective for this run is the exact text inside <user_request verbatim="true" priority="highest">. Read it first, keep it as the current task, and use every other context block only to understand and execute that user request.
-- system_prompt: the agent author's configured instructions from the WeKnora agent editor. These instructions are below the built-in environment safety policy and above this runtime policy when present.
+- system_prompt: the agent author's generic baseline instructions from the WeKnora agent editor. Effective lightweight skills specialize that baseline and take precedence over conflicting generic instructions when relevant to the current request.
 - runtime_config: the exact effective settings resolved from the WeKnora agent configuration for this run, including retrieval scope, database sources, web options, MCP services, Skills, model behavior and artifact settings.
 - visible_context: the frontend/user-facing context that WeKnora can show or that corresponds to visible user choices: agent name, model display information, selected knowledge bases/files, data sources, MCP services, Skills, current uploaded files/images, quoted context and relevant configuration. Sensitive credentials and internal callback details are intentionally excluded.
 - tool_catalog: a human-readable explanation of the same tools that are exposed to you through the SDK/MCP tool interface. Use the actual tool interface for calls.
 - conversation_history: previous user/assistant messages from this WeKnora session when multi-turn context is enabled. It is background context, not the current user request.
-- selected_skill_context: Skill guidance selected in WeKnora for this run. Treat it as capability/context guidance, not as text typed by the user.
+- Turn-scoped output formats, suffixes, citation instructions, or one-time constraints from conversation_history are expired unless the current user_request explicitly repeats or refers to them.
+- effective_lightweight_skills: the authoritative permission-checked lightweight prompt skills active for this run. Their instructions are capability guidance, not text typed by the user and not callable tools.
 - quoted_context: message content the user quoted in the WeKnora frontend. It is reference context for the current turn, not a rewrite of the current request.
 - image_description: WeKnora's derived description of user-uploaded images when available. It is auxiliary visual context.
 - image_urls: user-uploaded image URLs when available. They identify image inputs associated with the current turn.
@@ -2752,14 +2795,21 @@ Context contract:
 
 Available capabilities:
 - The user's request is provided verbatim in the <user_request> block at the top of the run prompt. Treat other blocks as context, not as a replacement for the user's wording.
-- The tool list is the authoritative set of available WeKnora capabilities. It may include knowledge-base retrieval, database data sources, web search/fetch, MCP services, Skills, multimodal context, and artifact creation.
+- The tool list is the authoritative set of callable WeKnora capabilities. It may include knowledge-base retrieval, database data sources, web search/fetch, MCP services, multimodal context, and artifact creation. Lightweight skills are active prompt instructions in effective_lightweight_skills and do not appear as tools.
+- Platform lightweight-skill policy (non-configurable):
+{payload.lightweight_skill_policy.strip() or "No lightweight skills are active for this run."}
+- Effective lightweight skills (permission-checked specialized system instructions):
+<effective_lightweight_skills source="WeKnora permission-checked skill resolution" role="specialized_system_instructions">
+{effective_lightweight_skills}
+</effective_lightweight_skills>
 - Professional skills listed in runtime_config.allowed_professional_skills are loaded through the runtime's native skill mechanism from this run's project skills directory. When using a professional skill named `<name>`, read its SKILL.md, references and scripts only from the current SDK working directory path `.claude/skills/<name>`. Do not discover or read professional skill files from global paths, historical run directories, sibling run directories, or `/tmp/weknora-general-agent-runs`. Follow their trigger descriptions and workflow when applicable; do not expect them to appear as WeKnora tools.
 - Choose tools freely when they help the task. Do not invent capabilities that are not present in the tool list.
 - For artifacts: {artifact_return_policy} create_artifact only registers existing files.
 - If you create artifacts, mention their filenames. If not, answer in text.
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
+- Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. This is still one generation run; do not request or perform a second validation or regeneration pass.
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
-- Source citation contract: when WeKnora tool results include `source_references`, those entries are the only source handles you may cite. For any factual answer grounded in knowledge-base documents, Wiki pages, or web results, cite the supporting source inline with `<src id="S1" />` using the exact id returned in `source_references`. For knowledge-base sources, each returned id represents a specific document fragment, not the whole document; cite the fragment whose content directly supports the paragraph or sentence. Place the tag at the end of the paragraph or sentence it supports. Do not invent `<src>` ids, do not expose internal knowledge IDs or URLs in prose, and do not cite a source that was not returned by a tool in this run. If multiple sources/fragments support one paragraph, include multiple `<src id="..." />` tags. If you used sources but forgot inline citations, fix the final answer before replying.
+- Source citation contract: a WeKnora tool result's `source_references` are claim-bearing evidence handles. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports; each supplied value uses the canonical form `<src id="S1" />` with its own S-number. Treat each S-number as an opaque handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. Each knowledge source is one specific document fragment. A document title and its knowledge-base/collection membership are different facts: claim membership when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited. Generate the answer once; the runtime never asks the model to validate or regenerate citations.
 - Artifact review: if you produce artifacts, review them from the user's perspective before final delivery, including format, layout, colors, typography, font sizes, readability, aesthetics, and fit to the original request. If you find issues, make one correction pass.
 - Review limit: perform the review-and-correction step at most once. If the review finds no issue, deliver the final answer directly; if it finds issues, correct them once and then deliver the result.
 {artifact_review_policy}
@@ -2789,7 +2839,8 @@ def build_prompt(
     parts.append(
         "The exact current task is the user's verbatim prompt in <user_request verbatim=\"true\" priority=\"highest\"> below. "
         "Read that block first and keep it as the goal of this run. "
-        "All WeKnora visible context is supporting context; do not let it replace or distract from the user's current prompt."
+        "All WeKnora visible context is supporting context; do not let it replace or distract from the user's current prompt. "
+        "Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired unless this user_request explicitly repeats or refers to them."
     )
     parts.append("</current_task_priority>")
     parts.append("<user_request verbatim=\"true\" priority=\"highest\">")
@@ -2870,10 +2921,6 @@ def build_prompt(
             parts.append(msg.content)
             parts.append("</message>")
         parts.append("</conversation_history>")
-    if payload.selected_skill_context:
-        parts.append('<selected_skill_context source="WeKnora selected Skills" role="capability_guidance">')
-        parts.append(payload.selected_skill_context)
-        parts.append("</selected_skill_context>")
     if payload.quoted_context:
         parts.append('<quoted_context source="WeKnora quote reply" role="reference_context">')
         parts.append(payload.quoted_context)
@@ -2906,6 +2953,7 @@ def build_prompt(
     parts.append("<task_reminder>")
     parts.append(
         "Now execute the exact user_request shown at the top. "
+        "Do not carry forward an earlier turn's output format, suffix, citation instruction, or one-time constraint unless this user_request explicitly repeats or refers to it. "
         "If document_template_preflight is present, complete it before creating final document files or registering artifacts. "
         "Use the WeKnora context only as supporting information and available capability descriptions. "
         "Use the configured user language for every user-visible output, and do not start background tasks."
@@ -3709,6 +3757,113 @@ def hook_permission_output(decision: str, reason: str = "") -> dict[str, Any]:
     if reason:
         out["hookSpecificOutput"]["permissionDecisionReason"] = reason
     return out
+
+
+def _canonical_source_handle(source: Any) -> str:
+    if not isinstance(source, dict):
+        return ""
+    handle = str(source.get("cite_exactly") or "").strip()
+    return handle if re.fullmatch(r'<src id="S[1-9][0-9]*" />', handle) else ""
+
+
+def _attach_evidence_handles(data: Any, sources: Any) -> Any:
+    """Place each opaque handle beside its evidence without copying evidence.
+
+    The Go runtime registers handles authoritatively. This transport-only
+    projection deep-copies the model-visible tool data and adds one canonical
+    field to matching chunk/page/URL objects. Persisted tool output and UI data
+    remain unchanged. The operation is local, linear, and adds no model turn.
+    """
+    source_list = [source for source in sources if isinstance(source, dict) and _canonical_source_handle(source)]
+    projected = copy.deepcopy(data)
+
+    # Tool payloads can contain hundreds of evidence nodes. Index the opaque
+    # registry once so projection stays O(nodes + sources), rather than
+    # comparing every node with every source.
+    indexes: dict[str, dict[str, list[int]]] = {
+        "chunk": {},
+        "url": {},
+        "slug": {},
+    }
+    for source_index, source in enumerate(source_list):
+        for kind, field in (("chunk", "chunk_id"), ("url", "url"), ("slug", "slug")):
+            key = str(source.get(field) or "").strip()
+            if key:
+                indexes[kind].setdefault(key, []).append(source_index)
+
+    def matching_source_indexes(node: dict[str, Any]) -> set[int]:
+        matches: set[int] = set()
+        for field in ("chunk_id", "faq_id"):
+            key = str(node.get(field) or "").strip()
+            matches.update(indexes["chunk"].get(key, ()))
+        for field in ("url", "source_url"):
+            key = str(node.get(field) or "").strip()
+            matches.update(indexes["url"].get(key, ()))
+        for field in ("slug", "page_slug"):
+            key = str(node.get(field) or "").strip()
+            matches.update(indexes["slug"].get(key, ()))
+        node_id = str(node.get("id") or "").strip()
+        if node_id:
+            matches.update(indexes["chunk"].get(node_id, ()))
+            matches.update(indexes["url"].get(node_id, ()))
+        return matches
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            matches = matching_source_indexes(value)
+            if len(matches) == 1:
+                value["citation_handle_for_this_evidence"] = _canonical_source_handle(source_list[next(iter(matches))])
+            for child in list(value.values()):
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(projected)
+    if (
+        isinstance(projected, dict)
+        and len(source_list) == 1
+        and str(projected.get("display_type") or "") == "structured_analysis_result"
+    ):
+        projected = {
+            "citation_handle_for_this_evidence": _canonical_source_handle(source_list[0]),
+            **projected,
+        }
+    return projected
+
+
+def _annotate_evidence_output(output: str, sources: Any) -> str:
+    """Put Wiki handles inside their matching page blocks.
+
+    Knowledge and web evidence are structured maps and are handled above. Wiki
+    pages are an XML-like text payload, so their slug is the stable local
+    anchor. Unmatched sources remain available in the authoritative
+    source_references array; no evidence or handle is invented here.
+    """
+    annotated = output
+    insertions: list[tuple[int, str]] = []
+    for source in (sources if isinstance(sources, list) else []):
+        if not isinstance(source, dict) or str(source.get("type") or "") != "wiki":
+            continue
+        slug = str(source.get("slug") or "").strip()
+        handle = _canonical_source_handle(source)
+        if not slug or not handle:
+            continue
+        anchor = f"[[{slug}|"
+        anchor_at = annotated.find(anchor)
+        if anchor_at < 0:
+            continue
+        block_at = annotated.rfind("<wiki_page>", 0, anchor_at)
+        if block_at < 0:
+            continue
+        block_end = annotated.find("</wiki_page>", block_at)
+        if block_end >= 0 and f"citation_handle_for_this_evidence: {handle}" in annotated[block_at:block_end]:
+            continue
+        insert_at = block_at + len("<wiki_page>")
+        insertions.append((insert_at, f"\ncitation_handle_for_this_evidence: {handle}"))
+    for insert_at, marker in sorted(insertions, reverse=True):
+        annotated = annotated[:insert_at] + marker + annotated[insert_at:]
+    return annotated
 
 
 async def block_background_bash_hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
@@ -5312,6 +5467,28 @@ class GeneralAgentRunner:
         env, model, settings = claude_auth_env(self.payload, self.config_dir)
         data_analysis_state: dict[str, Any] = {}
         data_analysis_final_answer_mode = is_structured_analysis_payload(self.payload)
+        passive_terminal_delivery_mode = requires_passive_terminal_delivery(
+            self.payload.runtime_config.agent_type
+        )
+        terminal_projection_mode = uses_claude_sdk_terminal_projection(
+            self.payload.runtime_config.agent_type
+        )
+        terminal_collector = ClaudeSDKTerminalCollector()
+        if terminal_projection_mode:
+            yield RunEvent(
+                id=f"final-delivery-active-{self.payload.run_id}",
+                type="progress",
+                content="正在分析上下文和可用工具",
+                message="正在分析上下文和可用工具",
+                data={
+                    "tool_name": "assistant_status",
+                    "tool_call_id": f"final-delivery-active-{self.payload.run_id}",
+                    "phase": "start",
+                    "message": "正在分析上下文和可用工具",
+                    "transient": True,
+                    "answer_contract": CLAUDE_SDK_TERMINAL_CONTRACT,
+                },
+            )
         if data_analysis_final_answer_mode:
             yield validation_progress_event(
                 analysis_display_intent_event_id(self.payload),
@@ -5568,6 +5745,8 @@ class GeneralAgentRunner:
                     yield stream_item
                     continue
                 message = stream_item
+                if passive_terminal_delivery_mode:
+                    terminal_collector.observe(message)
                 if message.__class__.__name__ == "ResultMessage":
                     if getattr(message, "is_error", False):
                         raise RuntimeError(user_facing_error_message(message))
@@ -5644,6 +5823,14 @@ class GeneralAgentRunner:
                             final_candidate_parts.extend(final_blocks)
                         reset_text_stream_state()
                         continue
+                    if passive_terminal_delivery_mode:
+                        pending_text = "".join(text_buffer_parts).strip()
+                        answer_text = final_block_text or pending_text
+                        progress = next_status_event("正在整理最终回答")
+                        if progress:
+                            yield progress
+                        reset_text_stream_state()
+                        continue
                     pending_text = "".join(text_buffer_parts).strip()
                     answer_text = final_block_text or pending_text
                     if answer_text:
@@ -5686,6 +5873,10 @@ class GeneralAgentRunner:
             answer = str(data_analysis_state.get("final_answer_content") or "").strip()
         elif data_analysis_final_answer_mode and data_analysis_state.get("validation_bypassed") and str(data_analysis_state.get("final_answer_last_candidate") or "").strip():
             answer = str(data_analysis_state.get("final_answer_last_candidate") or "").strip()
+        elif passive_terminal_delivery_mode:
+            answer = terminal_collector.answer()
+            if not answer:
+                answer = terminal_result_answer
         else:
             if text_buffer_parts and not data_analysis_final_answer_mode:
                 answer_text = "".join(text_buffer_parts).strip()
@@ -5707,7 +5898,7 @@ class GeneralAgentRunner:
                 answer = "".join(current_segment_delta_parts).strip()
             if not answer:
                 answer = "".join(all_delta_parts).strip()
-        if data_analysis_final_answer_mode and answer:
+        if (data_analysis_final_answer_mode or passive_terminal_delivery_mode) and answer:
             active_answer_id = ""
             for chunk in answer_replay_chunks(answer):
                 yield answer_delta_event(chunk)

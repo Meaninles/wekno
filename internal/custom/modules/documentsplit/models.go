@@ -82,27 +82,40 @@ type Part struct {
 	Locator              types.JSON `json:"locator" gorm:"type:jsonb;not null"`
 	Metrics              types.JSON `json:"metrics" gorm:"type:jsonb;not null"`
 	State                PartState  `json:"state" gorm:"type:varchar(24);not null;index"`
-	Attempt              int        `json:"attempt" gorm:"not null;default:0"`
-	LeaseEpoch           int64      `json:"lease_epoch" gorm:"not null;default:0"`
-	LeaseOwner           string     `json:"lease_owner,omitempty" gorm:"type:varchar(160);not null;default:'';index"`
-	LeaseInstanceID      string     `json:"lease_instance_id,omitempty" gorm:"type:varchar(255);not null;default:'';index"`
-	LeaseBootID          string     `json:"lease_boot_id,omitempty" gorm:"type:varchar(64);not null;default:'';index"`
-	LeaseUntil           *time.Time `json:"lease_until,omitempty" gorm:"index"`
-	OutputPath           string     `json:"-" gorm:"type:text;not null;default:''"`
-	OutputSize           int64      `json:"output_size" gorm:"not null;default:0"`
-	OutputSHA256         string     `json:"output_sha256,omitempty" gorm:"type:varchar(64);not null;default:''"`
-	MarkdownChars        int64      `json:"markdown_chars" gorm:"not null;default:0"`
-	DraftChunks          int        `json:"draft_chunks" gorm:"not null;default:0"`
-	StorageBytes         int64      `json:"storage_bytes" gorm:"not null;default:0"`
-	FirstChunkID         string     `json:"first_chunk_id,omitempty" gorm:"type:varchar(36);not null;default:''"`
-	LastChunkID          string     `json:"last_chunk_id,omitempty" gorm:"type:varchar(36);not null;default:''"`
-	ImageMappings        types.JSON `json:"image_mappings,omitempty" gorm:"type:jsonb"`
-	LastError            string     `json:"last_error,omitempty" gorm:"type:text"`
-	LastProgressAt       time.Time  `json:"last_progress_at" gorm:"not null;index"`
-	CompletedAt          *time.Time `json:"completed_at,omitempty"`
-	Version              int64      `json:"version" gorm:"not null;default:1"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	// Attempt counts execution leases for diagnostics only. A worker/process
+	// restart may increase it without consuming the business retry budget.
+	Attempt int `json:"execution_attempts" gorm:"column:attempt;not null;default:0"`
+	// FailureAttempts counts only completed, classified business failures.
+	// Lease expiry, process replacement and dependency deferral never change it.
+	FailureAttempts int `json:"failure_attempts" gorm:"not null;default:0"`
+	// BackpressureEvents remembers provider/infrastructure throttling so the
+	// document resumes with one probe instead of reopening a burst window.
+	BackpressureEvents int `json:"backpressure_events" gorm:"not null;default:0"`
+	// DispatchEpoch fences disposable Redis/Asynq wake-ups independently of
+	// execution leases. A missing or archived wake-up can be replaced without
+	// pretending that the document ran or failed.
+	DispatchEpoch      int64      `json:"dispatch_epoch" gorm:"not null;default:0"`
+	DispatchLeaseUntil *time.Time `json:"dispatch_lease_until,omitempty" gorm:"index"`
+	LeaseEpoch         int64      `json:"lease_epoch" gorm:"not null;default:0"`
+	LeaseOwner         string     `json:"lease_owner,omitempty" gorm:"type:varchar(160);not null;default:'';index"`
+	LeaseInstanceID    string     `json:"lease_instance_id,omitempty" gorm:"type:varchar(255);not null;default:'';index"`
+	LeaseBootID        string     `json:"lease_boot_id,omitempty" gorm:"type:varchar(64);not null;default:'';index"`
+	LeaseUntil         *time.Time `json:"lease_until,omitempty" gorm:"index"`
+	OutputPath         string     `json:"-" gorm:"type:text;not null;default:''"`
+	OutputSize         int64      `json:"output_size" gorm:"not null;default:0"`
+	OutputSHA256       string     `json:"output_sha256,omitempty" gorm:"type:varchar(64);not null;default:''"`
+	MarkdownChars      int64      `json:"markdown_chars" gorm:"not null;default:0"`
+	DraftChunks        int        `json:"draft_chunks" gorm:"not null;default:0"`
+	StorageBytes       int64      `json:"storage_bytes" gorm:"not null;default:0"`
+	FirstChunkID       string     `json:"first_chunk_id,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	LastChunkID        string     `json:"last_chunk_id,omitempty" gorm:"type:varchar(36);not null;default:''"`
+	ImageMappings      types.JSON `json:"image_mappings,omitempty" gorm:"type:jsonb"`
+	LastError          string     `json:"last_error,omitempty" gorm:"type:text"`
+	LastProgressAt     time.Time  `json:"last_progress_at" gorm:"not null;index"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	Version            int64      `json:"version" gorm:"not null;default:1"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 func (Part) TableName() string { return "custom_document_split_parts" }

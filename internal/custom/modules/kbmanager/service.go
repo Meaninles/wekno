@@ -37,9 +37,11 @@ type Service struct {
 	fileResolver     RunFileResolver
 	configurator     *Configurator
 
-	startOnce sync.Once
-	runningMu sync.Mutex
-	running   map[string]bool
+	schedulerMu     sync.Mutex
+	schedulerCancel context.CancelFunc
+	schedulerDone   chan struct{}
+	runningMu       sync.Mutex
+	running         map[string]bool
 }
 
 func NewService(
@@ -75,16 +77,50 @@ func (s *Service) Start() {
 	if s == nil || s.db == nil {
 		return
 	}
-	s.startOnce.Do(func() {
+	s.schedulerMu.Lock()
+	if s.schedulerCancel != nil {
+		s.schedulerMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.schedulerCancel = cancel
+	s.schedulerDone = done
+	s.schedulerMu.Unlock()
+	go func() {
+		defer close(done)
 		s.resumePending()
-		go func() {
-			ticker := time.NewTicker(15 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
 				s.resumePending()
 			}
-		}()
-	})
+		}
+	}()
+}
+
+func (s *Service) Stop() {
+	if s == nil {
+		return
+	}
+	s.schedulerMu.Lock()
+	cancel, done := s.schedulerCancel, s.schedulerDone
+	s.schedulerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+	s.schedulerMu.Lock()
+	if s.schedulerDone == done {
+		s.schedulerCancel, s.schedulerDone = nil, nil
+	}
+	s.schedulerMu.Unlock()
 }
 
 type FileSource struct {

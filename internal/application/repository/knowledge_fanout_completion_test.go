@@ -57,7 +57,7 @@ func newFanoutCompletionRepository(t *testing.T) (*gorm.DB, fanoutCompletionRepo
 	}
 	for _, statement := range []string{
 		`CREATE TABLE IF NOT EXISTS knowledge_tag_relations (knowledge_id TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS knowledge_processing_spans (knowledge_id TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS custom_processing_spans_v2 (knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS custom_document_split_plans (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS custom_document_split_parts (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS wiki_log_entries (tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL)`,
@@ -80,6 +80,25 @@ func newFanoutCompletionRepository(t *testing.T) (*gorm.DB, fanoutCompletionRepo
 		`CREATE TABLE IF NOT EXISTS chunks (
 			tenant_id INTEGER NOT NULL, knowledge_id TEXT NOT NULL,
 			content TEXT NOT NULL DEFAULT '', deleted_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS task_dead_letters (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id INTEGER NOT NULL,
+			task_type TEXT NOT NULL, scope TEXT NOT NULL, scope_id TEXT NOT NULL,
+			related_id TEXT NOT NULL DEFAULT '', payload JSON NOT NULL DEFAULT '{}'
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_work_items (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_provider_calls (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_results (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_queue_workflows (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS task_pending_ops (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +239,25 @@ func TestGeneratedQuestionClaimsRejectSuperficialParaphrasesAcrossBatches(t *tes
 	var count int64
 	require.NoError(t, db.Model(&questiondedup.Claim{}).Count(&count).Error)
 	require.Equal(t, int64(1), count)
+}
+
+func TestGeneratedQuestionClaimsRemainCurrentAfterCoreCompletion(t *testing.T) {
+	db, baseRepo := newFanoutCompletionRepository(t)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusCompleted, 1)
+	repo := baseRepo.(interface {
+		ClaimGeneratedQuestions(
+			context.Context, uint64, string, string, string, []questiondedup.Candidate,
+		) (map[string]string, bool, error)
+	})
+	candidate, ok := questiondedup.Prepare("question_batch[0]:chunk-a:0", "制度规定由哪个部门负责审批？")
+	require.True(t, ok)
+	accepted, current, err := repo.ClaimGeneratedQuestions(
+		context.Background(), 42, "knowledge-1", "kb-1", "generation-1",
+		[]questiondedup.Candidate{candidate},
+	)
+	require.NoError(t, err)
+	require.True(t, current)
+	require.Equal(t, candidate.Question, accepted[candidate.ClaimID])
 }
 
 func insertFanoutKnowledge(t *testing.T, db *gorm.DB, generation, status string, pending int) {
@@ -447,14 +485,14 @@ func TestFinalizeSubtaskGenerationItemDrainsExactlyOnce(t *testing.T) {
 	count, promoted, err = repo.FinalizeSubtaskGenerationItem(
 		ctx, 42, "knowledge-1", "kb-1", "generation-1", "question_batch[0]",
 	)
-	if err != nil || !promoted || count != 0 {
+	if err != nil || promoted || count != 0 {
 		t.Fatalf("final distinct drain = count:%d promoted:%v err:%v", count, promoted, err)
 	}
 	var knowledge types.Knowledge
 	if err := db.Where("id = ?", "knowledge-1").Take(&knowledge).Error; err != nil {
 		t.Fatal(err)
 	}
-	if knowledge.ParseStatus != types.ParseStatusCompleted || knowledge.PendingSubtasksCount != 0 {
+	if knowledge.ParseStatus != types.ParseStatusFinalizing || knowledge.PendingSubtasksCount != 0 {
 		t.Fatalf("knowledge lifecycle = status:%s pending:%d", knowledge.ParseStatus, knowledge.PendingSubtasksCount)
 	}
 }
@@ -462,7 +500,7 @@ func TestFinalizeSubtaskGenerationItemDrainsExactlyOnce(t *testing.T) {
 func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
 	db, repo := newFanoutCompletionRepository(t)
 	const descendants = 12
-	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, descendants)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusCompleted, descendants)
 	ctx := context.Background()
 
 	var promoted atomic.Int32
@@ -498,8 +536,8 @@ func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
 	for err := range errCh {
 		t.Fatal(err)
 	}
-	if got := promoted.Load(); got != 1 {
-		t.Fatalf("promotion winners = %d, want 1", got)
+	if got := promoted.Load(); got != 0 {
+		t.Fatalf("promotion winners = %d, want 0", got)
 	}
 	var knowledge types.Knowledge
 	if err := db.Where("id = ?", "knowledge-1").Take(&knowledge).Error; err != nil {
@@ -521,9 +559,9 @@ func TestFinalizeSubtaskOutcomeAggregatesConcurrentMixedResults(t *testing.T) {
 	}
 }
 
-func TestFinalizeSubtaskOutcomeSettlesBeforeWikiWithoutPrematureCompletion(t *testing.T) {
+func TestFinalizeSubtaskOutcomeAndWikiSettleAfterCoreCompletion(t *testing.T) {
 	db, repo := newFanoutCompletionRepository(t)
-	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusFinalizing, 1)
+	insertFanoutKnowledge(t, db, "generation-1", types.ParseStatusCompleted, 1)
 	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
 		Update("wiki_status", types.WikiStatusPending).Error)
 
@@ -543,7 +581,7 @@ func TestFinalizeSubtaskOutcomeSettlesBeforeWikiWithoutPrematureCompletion(t *te
 
 	var waiting types.Knowledge
 	require.NoError(t, db.Where("id = ?", "knowledge-1").Take(&waiting).Error)
-	require.Equal(t, types.ParseStatusFinalizing, waiting.ParseStatus)
+	require.Equal(t, types.ParseStatusCompleted, waiting.ParseStatus)
 	require.Equal(t, types.EnrichmentStatusCompleted, waiting.EnrichmentStatus)
 	require.Equal(t, types.WikiStatusPending, waiting.WikiStatus)
 
@@ -627,7 +665,7 @@ func TestFinalizeSubtaskOutcomeFirstTerminalDeliveryIsImmutable(t *testing.T) {
 		enrichmentoutcome.StatusCompleted, "",
 	)
 	require.NoError(t, err)
-	require.True(t, promoted)
+	require.False(t, promoted)
 	var knowledge types.Knowledge
 	require.NoError(t, db.Where("id = ?", "knowledge-1").Take(&knowledge).Error)
 	require.Equal(t, types.EnrichmentStatusCompleted, knowledge.EnrichmentStatus)

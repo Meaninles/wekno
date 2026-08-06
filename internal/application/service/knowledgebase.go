@@ -14,6 +14,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbdeletequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
 	"github.com/Tencent/WeKnora/internal/datasource"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
@@ -31,25 +32,26 @@ var ErrInvalidTenantID = errors.New("invalid tenant ID")
 
 // knowledgeBaseService implements the knowledge base service interface
 type knowledgeBaseService struct {
-	repo            interfaces.KnowledgeBaseRepository
-	kgRepo          interfaces.KnowledgeRepository
-	chunkRepo       interfaces.ChunkRepository
-	shareRepo       interfaces.KBShareRepository
-	kbShareService  interfaces.KBShareService
-	modelService    interfaces.ModelService
-	retrieveEngine  interfaces.RetrieveEngineRegistry
-	ownership       retriever.TenantStoreOwnership
-	tenantRepo      interfaces.TenantRepository
-	fileSvc         interfaces.FileService
-	graphEngine     interfaces.RetrieveGraphRepository
-	asynqClient     interfaces.TaskEnqueuer
-	taskInspector   interfaces.TaskInspector
-	dsRepo          interfaces.DataSourceRepository
-	syncLogRepo     interfaces.SyncLogRepository
-	dsScheduler     *datasource.Scheduler
-	kbDeleteQueue   *kbdeletequeue.Coordinator
-	wikiDeleteCoord *wikidelete.Coordinator
-	auxObjects      *knowledgeaux.Registry
+	repo             interfaces.KnowledgeBaseRepository
+	kgRepo           interfaces.KnowledgeRepository
+	chunkRepo        interfaces.ChunkRepository
+	shareRepo        interfaces.KBShareRepository
+	kbShareService   interfaces.KBShareService
+	modelService     interfaces.ModelService
+	retrieveEngine   interfaces.RetrieveEngineRegistry
+	ownership        retriever.TenantStoreOwnership
+	tenantRepo       interfaces.TenantRepository
+	fileSvc          interfaces.FileService
+	graphEngine      interfaces.RetrieveGraphRepository
+	asynqClient      interfaces.TaskEnqueuer
+	taskInspector    interfaces.TaskInspector
+	dsRepo           interfaces.DataSourceRepository
+	syncLogRepo      interfaces.SyncLogRepository
+	dsScheduler      *datasource.Scheduler
+	kbDeleteQueue    *kbdeletequeue.Coordinator
+	wikiDeleteCoord  *wikidelete.Coordinator
+	auxObjects       *knowledgeaux.Registry
+	purgeCoordinator knowledgeDeletionResidueCoordinator
 }
 
 // NewKnowledgeBaseService creates a new knowledge base service
@@ -72,27 +74,29 @@ func NewKnowledgeBaseService(repo interfaces.KnowledgeBaseRepository,
 	kbDeleteQueue *kbdeletequeue.Coordinator,
 	wikiDeleteCoord *wikidelete.Coordinator,
 	auxObjects *knowledgeaux.Registry,
+	purgeCoordinator *knowledgepurge.Coordinator,
 ) interfaces.KnowledgeBaseService {
 	return &knowledgeBaseService{
-		repo:            repo,
-		kgRepo:          kgRepo,
-		chunkRepo:       chunkRepo,
-		shareRepo:       shareRepo,
-		kbShareService:  kbShareService,
-		modelService:    modelService,
-		retrieveEngine:  retrieveEngine,
-		ownership:       ownership,
-		tenantRepo:      tenantRepo,
-		fileSvc:         fileSvc,
-		graphEngine:     graphEngine,
-		asynqClient:     asynqClient,
-		taskInspector:   taskInspector,
-		dsRepo:          dsRepo,
-		syncLogRepo:     syncLogRepo,
-		dsScheduler:     dsScheduler,
-		kbDeleteQueue:   kbDeleteQueue,
-		wikiDeleteCoord: wikiDeleteCoord,
-		auxObjects:      auxObjects,
+		repo:             repo,
+		kgRepo:           kgRepo,
+		chunkRepo:        chunkRepo,
+		shareRepo:        shareRepo,
+		kbShareService:   kbShareService,
+		modelService:     modelService,
+		retrieveEngine:   retrieveEngine,
+		ownership:        ownership,
+		tenantRepo:       tenantRepo,
+		fileSvc:          fileSvc,
+		graphEngine:      graphEngine,
+		asynqClient:      asynqClient,
+		taskInspector:    taskInspector,
+		dsRepo:           dsRepo,
+		syncLogRepo:      syncLogRepo,
+		dsScheduler:      dsScheduler,
+		kbDeleteQueue:    kbDeleteQueue,
+		wikiDeleteCoord:  wikiDeleteCoord,
+		auxObjects:       auxObjects,
+		purgeCoordinator: purgeCoordinator,
 	}
 }
 
@@ -920,6 +924,12 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 	}
 	if !intentExists {
 		if len(knowledgeList) == 0 {
+			if s.purgeCoordinator == nil {
+				return errors.New("KB delete worker: completed-residue coordinator is unavailable")
+			}
+			if err := s.purgeCoordinator.CleanupCompletedKnowledgeBase(ctx, tenantID, kbID); err != nil {
+				return fmt.Errorf("KB delete worker: clean completed duplicate residue: %w", err)
+			}
 			logger.Infof(ctx, "KB delete task is an already-completed duplicate for KB %s", kbID)
 			return nil
 		}
@@ -966,6 +976,12 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 		}
 		if err := quiesceKnowledgeDeletionWithInspector(ctx, s.taskInspector, knowledgeList); err != nil {
 			return fmt.Errorf("KB delete worker: quiesce document lifecycle: %w", err)
+		}
+		if s.purgeCoordinator == nil {
+			return errors.New("KB delete worker: derivative residue coordinator is unavailable")
+		}
+		if err := s.purgeCoordinator.QuiesceDerivativeTasks(ctx, tenantID, kbID, knowledgeIDs); err != nil {
+			return fmt.Errorf("KB delete worker: quiesce derivative tasks: %w", err)
 		}
 
 		imageRepo, ok := s.chunkRepo.(unscopedChunkImageInfoRepository)
@@ -1111,8 +1127,8 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 		// barrier above, so no new terminal record can be published now. Keep
 		// whole-KB deletion aligned with the single-document path by removing
 		// completed/archived Asynq metadata before the durable document
-		// tombstones are finalized. PostgreSQL workflow rows intentionally stay
-		// behind as the authoritative audit trail.
+		// tombstones are finalized. The final database transaction also removes
+		// derivative response payloads and durable workflow execution history.
 		taskHistoryPurger, ok := s.taskInspector.(interfaces.TaskHistoryPurger)
 		if !ok {
 			return errors.New("KB delete worker: terminal task-history purger is unavailable")
@@ -1140,6 +1156,13 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 		// durable worker and failures must not be acknowledged. Auxiliary
 		// planned writes may exist even when their knowledge insert crashed.
 		var cleanupErr error
+		if s.purgeCoordinator == nil {
+			cleanupErr = errors.Join(cleanupErr,
+				errors.New("KB delete worker: derivative residue coordinator is unavailable"))
+		} else {
+			cleanupErr = errors.Join(cleanupErr,
+				s.purgeCoordinator.QuiesceDerivativeTasks(ctx, tenantID, kbID, nil))
+		}
 		if s.auxObjects == nil {
 			cleanupErr = errors.Join(cleanupErr,
 				errors.New("KB delete worker: auxiliary object registry is unavailable"))

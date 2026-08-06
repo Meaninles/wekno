@@ -62,7 +62,7 @@
             <div class="settings-content">
               <div class="content-wrapper" :class="{
                 'content-wrapper--wide': currentSection === 'members',
-                'content-wrapper--full': ['system-global', 'custom-config-center', 'custom-iam-sync', 'custom-admin-governance'].includes(currentSection),
+                'content-wrapper--full': ['system-global', 'custom-capacity-control', 'custom-config-center', 'custom-iam-sync', 'custom-wiki-access', 'custom-admin-governance'].includes(currentSection),
               }">
                 <!-- 角色不允许访问当前 section（deep-link 进来 / 跨租户切换后角色降级）—— 优先于具体 section 渲染。
                      正常导航走 navItems filter 不会到这里，但 watch(navItems) 的 fallback 会在角色降级
@@ -125,12 +125,20 @@
                     <SystemSettings />
                   </div>
 
+                  <div v-if="currentSection === 'custom-capacity-control'" class="section">
+                    <CapacityControlSettings />
+                  </div>
+
                   <div v-if="currentSection === 'custom-config-center'" class="section">
                     <ConfigCenterSettings />
                   </div>
 
                   <div v-if="currentSection === 'custom-iam-sync'" class="section">
                     <IAMSyncSettings />
+                  </div>
+
+                  <div v-if="currentSection === 'custom-wiki-access'" class="section">
+                    <WikiAccessSettings />
                   </div>
 
                   <div v-if="currentSection === 'custom-admin-governance'" class="section">
@@ -196,7 +204,9 @@ import TenantMembers from './TenantMembers.vue'
 import SystemSettings from '@/views/system/SystemSettings.vue'
 import ConfigCenterSettings from '@/custom/modules/configcenter/ConfigCenterSettings.vue'
 import IAMSyncSettings from '@/custom/modules/iam/IAMSyncSettings.vue'
+import WikiAccessSettings from '@/custom/modules/wikiAccess/WikiAccessSettings.vue'
 import SystemAdminGovernance from '@/custom/modules/admin/SystemAdminGovernance.vue'
+import CapacityControlSettings from '@/custom/modules/capacity-control/CapacityControlSettings.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -253,7 +263,7 @@ const SECTION_MIN_ROLE: Record<string, RoleKey> = {
   api: 'owner',
 }
 
-const SYSTEM_ADMIN_SECTIONS = new Set(['system-global', 'custom-config-center', 'custom-iam-sync', 'custom-admin-governance'])
+const SYSTEM_ADMIN_SECTIONS = new Set(['system-global', 'custom-capacity-control', 'custom-config-center', 'custom-iam-sync', 'custom-wiki-access', 'custom-admin-governance'])
 
 const canSeeSection = (key: string): boolean => {
   if (SYSTEM_ADMIN_SECTIONS.has(key)) {
@@ -286,8 +296,10 @@ const navItems = computed(() => {
     { key: 'mcp', icon: 'tools', label: t('settings.mcpService') },
     { key: 'system', icon: 'info-circle', label: t('settings.versionInfo') },
     { key: 'system-global', icon: 'server', label: t('settings.system') },
+    { key: 'custom-capacity-control', icon: 'chart-bubble', label: '容量与调度' },
     { key: 'custom-config-center', icon: 'setting-1', label: '默认配置' },
     { key: 'custom-iam-sync', icon: 'usergroup', label: '组织人员同步' },
+    { key: 'custom-wiki-access', icon: 'book-open', label: 'Wiki 权限' },
     { key: 'custom-admin-governance', icon: 'secured', label: '空间与用户权限' },
     { key: 'userprofile', icon: 'user', label: t('userProfile.title') },
     { key: 'tenant', icon: 'user-circle', label: t('settings.tenantInfo') },
@@ -334,7 +346,7 @@ const navGroups = computed<NavGroup[]>(() => {
     {
       key: 'platform',
       label: t('settings.navGroups.platform'),
-      items: pickItems(['system-global', 'custom-config-center', 'custom-iam-sync', 'custom-admin-governance', 'system']),
+      items: pickItems(['system-global', 'custom-capacity-control', 'custom-config-center', 'custom-iam-sync', 'custom-wiki-access', 'custom-admin-governance', 'system']),
     },
   ].filter((group) => group.items.length > 0)
 })

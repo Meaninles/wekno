@@ -3,8 +3,15 @@ import test from 'node:test'
 import {
   ensureRagPipelineHistoryStream,
   hasRagPipelineToolEvents,
+  shouldRestoreQuickAnswerHistory,
   synthesizeRagPipelineToolEvents,
 } from './rag-pipeline-history.ts'
+
+test('quick-answer history mode is scoped to each answer, not the current session selection', () => {
+  assert.equal(shouldRestoreQuickAnswerHistory({ role: 'assistant', agent_mode: false }), true)
+  assert.equal(shouldRestoreQuickAnswerHistory({ role: 'assistant', agent_mode: true }), false)
+  assert.equal(shouldRestoreQuickAnswerHistory({ role: 'user', agent_mode: false }), false)
+})
 
 test('synthesizeRagPipelineToolEvents builds completed retrieval steps', () => {
   const events = synthesizeRagPipelineToolEvents({
@@ -19,6 +26,16 @@ test('synthesizeRagPipelineToolEvents builds completed retrieval steps', () => {
   assert.equal(events[0].tool_name, 'query_understand')
   assert.equal(events[1].tool_name, 'knowledge_search')
   assert.equal(events[1].tool_data.count, 3)
+})
+
+test('synthesizeRagPipelineToolEvents preserves the original user query', () => {
+  const events = synthesizeRagPipelineToolEvents(
+    { knowledge_references: [{ knowledge_id: 'a' }] },
+    '有哪些制度',
+  )
+
+  assert.deepEqual(events[0].arguments, { query: '有哪些制度' })
+  assert.deepEqual(events[1].arguments, { query: '有哪些制度' })
 })
 
 test('synthesizeRagPipelineToolEvents uses web search for web-only references', () => {

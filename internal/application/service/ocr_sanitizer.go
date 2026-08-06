@@ -5,14 +5,16 @@ import (
 	"strings"
 
 	htmltomd "github.com/JohannesKaufmann/html-to-markdown/v2"
+
+	"github.com/Tencent/WeKnora/internal/custom/modules/ocrstructure"
 )
 
 var (
-	htmlTagPattern       = regexp.MustCompile(`<[^>]+>`)
-	codeBlockPattern     = regexp.MustCompile("(?s)^\\s*```[a-zA-Z]*\\s*\n(.*?)\n\\s*```\\s*$")
-	htmlDocPattern       = regexp.MustCompile(`(?i)^\s*(<\!DOCTYPE|<html|<body|<div|<p[\s>]|<table|<h[1-6][\s>])`)
-	multipleNewlines     = regexp.MustCompile(`\n{3,}`)
-	knownEmptyReplies    = []string{
+	htmlTagPattern    = regexp.MustCompile(`<[^>]+>`)
+	codeBlockPattern  = regexp.MustCompile("(?s)^\\s*```[a-zA-Z]*\\s*\n(.*?)\n\\s*```\\s*$")
+	htmlDocPattern    = regexp.MustCompile(`(?i)^\s*(<\!DOCTYPE|<html|<body|<div|<p[\s>]|<table|<h[1-6][\s>])`)
+	multipleNewlines  = regexp.MustCompile(`\n{3,}`)
+	knownEmptyReplies = []string{
 		"无文字内容",
 		"无法识别",
 		"no text",
@@ -53,6 +55,7 @@ func sanitizeOCRText(raw string) string {
 		return ""
 	}
 
+	text, _ = ocrstructure.TrimEmptyTableTail(text)
 	text = multipleNewlines.ReplaceAllString(text, "\n\n")
 	return strings.TrimSpace(text)
 }

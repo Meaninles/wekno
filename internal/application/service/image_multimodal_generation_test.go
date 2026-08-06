@@ -239,22 +239,22 @@ func TestCaptionIsShortCircuitedAfterOCRFailure(t *testing.T) {
 	requireCaption(true, errors.New("OCR first-token timeout"), false)
 }
 
-func TestTruncatedOCRIsRetainedAsExplicitDegradedOutput(t *testing.T) {
-	partial, accepted := usableTruncatedOCR(
-		"已识别的有效前缀",
-		&vlmguard.Error{Kind: vlmguard.FailureOutputLimit},
-	)
-	if !accepted || partial != "已识别的有效前缀" {
-		t.Fatalf("usableTruncatedOCR() = %q, %t", partial, accepted)
-	}
-
-	for _, err := range []error{
-		&vlmguard.Error{Kind: vlmguard.FailureRunaway},
-		&vlmguard.Error{Kind: vlmguard.FailureIdleTimeout},
-		&vlmguard.Error{Kind: vlmguard.FailureStreamTruncated},
+func TestOnlyOutputLimitAndRunawayTriggerBoundedOCRRecovery(t *testing.T) {
+	for _, kind := range []vlmguard.FailureKind{
+		vlmguard.FailureOutputLimit,
+		vlmguard.FailureRunaway,
 	} {
-		if partial, accepted := usableTruncatedOCR("不应保留", err); accepted || partial != "" {
-			t.Fatalf("usableTruncatedOCR(%v) unexpectedly retained %q", err, partial)
+		if !recoverableOCRFailure(&vlmguard.Error{Kind: kind}) {
+			t.Fatalf("%s should trigger bounded recovery", kind)
+		}
+	}
+	for _, kind := range []vlmguard.FailureKind{
+		vlmguard.FailureIdleTimeout,
+		vlmguard.FailureStreamTruncated,
+		vlmguard.FailureFirstTokenTimeout,
+	} {
+		if recoverableOCRFailure(&vlmguard.Error{Kind: kind}) {
+			t.Fatalf("%s must remain a provider/retry failure", kind)
 		}
 	}
 }

@@ -39,6 +39,13 @@ const (
 	// occupy every generic background worker while waiting for shared model
 	// admission. KB materialization remains on QueueLow.
 	QueueWikiMap = "wiki_map"
+	// QueueDerivative carries summary/finalization work that previously shared
+	// default/low with parse and API-adjacent jobs. Graph and question batches
+	// keep their dedicated lanes but are consumed by the same derivative role.
+	QueueDerivative = "derivative"
+	// QueueWikiControl carries KB-level Wiki wake-ups and reduce/materialize
+	// work. Wiki Map remains separate for document-local fan-out.
+	QueueWikiControl = "wiki_control"
 )
 
 const (

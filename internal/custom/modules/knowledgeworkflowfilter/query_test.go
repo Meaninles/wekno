@@ -32,6 +32,8 @@ func TestApplyMatchesUserVisibleWorkflowStates(t *testing.T) {
 		{"mixed-active-failed", "completed", "failed", "completed", "processing"},
 		{"summary-failed", "completed", "failed", "completed", "completed"},
 		{"graph-question-degraded", "completed", "completed", "degraded", "completed"},
+		{"wiki-degraded", "completed", "completed", "completed", "degraded"},
+		{"hard-failure-with-degraded", "completed", "failed", "degraded", "completed"},
 		{"wiki-failed", "completed", "completed", "completed", "failed"},
 		{"unknown-terminal-is-failed", "completed", "completed", "unexpected", "completed"},
 		{"core-failed", "failed", "failed", "none", "none"},
@@ -57,7 +59,8 @@ func TestApplyMatchesUserVisibleWorkflowStates(t *testing.T) {
 	}{
 		{"pending", []string{"pending"}},
 		{"processing", []string{"core-processing", "finalizing", "wiki-processing", "mixed-active-failed"}},
-		{"failed", []string{"summary-failed", "graph-question-degraded", "wiki-failed", "unknown-terminal-is-failed", "core-failed"}},
+		{"degraded", []string{"graph-question-degraded", "wiki-degraded"}},
+		{"failed", []string{"summary-failed", "hard-failure-with-degraded", "wiki-failed", "unknown-terminal-is-failed", "core-failed"}},
 		{"completed", []string{"complete", "disabled-derivatives-complete", "null-derivatives-complete", "explicit-skips-complete"}},
 		{"cancelled", []string{"cancelled"}},
 		{"cancelling", []string{"cancelling"}},
@@ -78,7 +81,7 @@ func TestApplyMatchesUserVisibleWorkflowStates(t *testing.T) {
 	// failure/completion, as well as states present under "All statuses" but
 	// impossible to select individually.
 	statuses := []string{
-		"pending", "processing", "completed", "failed",
+		"pending", "processing", "completed", "degraded", "failed",
 		"cancelling", "cancelled", "deleting", "draft",
 	}
 	seen := make(map[string]int, len(rows))

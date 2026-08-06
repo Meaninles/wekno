@@ -4,10 +4,18 @@ import { useRoute, useRouter } from "vue-router";
 import { MessagePlugin } from "tdesign-vue-next";
 import {
   batchQueryKnowledge,
+  createKnowledgeBase,
+  deleteKnowledgeBase,
   delKnowledgeDetails,
   listKnowledgeBases,
+  updateKnowledgeBase,
 } from "@/api/knowledge-base";
+import {
+  removeShare,
+  shareKnowledgeBase,
+} from "@/api/organization";
 import { useAuthStore } from "@/stores/auth";
+import { useChatResourcesStore } from "@/stores/chatResources";
 import { useEditorResourcesStore } from "@/stores/editorResources";
 import { useOrganizationStore } from "@/stores/organization";
 import { filterUploadFiles } from "@/views/knowledge/utils/uploadSources";
@@ -20,11 +28,16 @@ import { useSearchFolderBrowser } from "@/custom/modules/knowledgeSearch/useSear
 import { formatFileSize } from "../utils";
 import { downloadKnowledgeNatively } from "../documentDownload";
 import MobileDocumentPreviewSheet from "../components/MobileDocumentPreviewSheet.vue";
+import MobileKnowledgeBaseEditorSheet from "../components/MobileKnowledgeBaseEditorSheet.vue";
+import MobileKnowledgeShareSheet from "../components/MobileKnowledgeShareSheet.vue";
+import { buildQuickKnowledgeBasePayload } from "../knowledgeBaseQuickManage";
 import {
-  knowledgeHasDerivativeFailure,
-  knowledgeIsFullyComplete,
-  knowledgeNeedsStatusPolling,
-} from "@/views/knowledge/wikiStatusRefresh";
+  canShareKnowledgeBase,
+  type MobileKnowledgeShareSpaceRow,
+} from "../knowledgeSharingPolicy";
+import { listMobileKnowledgeShareTargets } from "../knowledgeSharingApi";
+import { resolveMobileKnowledgeWorkflowPresentation } from "../mobileKnowledgeWorkflowStatus";
+import { knowledgeNeedsStatusPolling } from "@/views/knowledge/wikiStatusRefresh";
 import {
   createKnowledgeFolder,
   deleteKnowledgeFolder,
@@ -32,7 +45,6 @@ import {
   listKnowledgeFolderOptions,
   moveKnowledgeDocumentsToFolder,
   searchAccessibleKnowledgeFolderNodes,
-  searchKnowledgeFolderNodes,
   updateKnowledgeFolder,
   uploadKnowledgeFolderFile,
 } from "@/custom/modules/knowledgeFolders/api";
@@ -53,6 +65,7 @@ const DOCUMENT_SEARCH_DEBOUNCE_MS = KNOWLEDGE_DOCUMENT_SEARCH_POLICY.debounceMs;
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
+const chatResources = useChatResourcesStore();
 const editorResources = useEditorResourcesStore();
 const organizationStore = useOrganizationStore();
 
@@ -112,10 +125,23 @@ const documentMoveTarget = ref<KnowledgeFileRow | null>(null);
 const documentMoveFolderId = ref("");
 const documentMoveSubmitting = ref(false);
 const previewItem = ref<KnowledgeFileRow | null>(null);
+const kbEditorVisible = ref(false);
+const kbEditorMode = ref<"create" | "edit">("create");
+const kbEditorSubmitting = ref(false);
+const shareSheetVisible = ref(false);
+const shareSheetLoading = ref(false);
+const shareSheetLoadingMore = ref(false);
+const shareBusyId = ref("");
+const shareRows = ref<MobileKnowledgeShareSpaceRow[]>([]);
+const shareQuery = ref("");
+const sharePage = ref(0);
+const shareHasMore = ref(false);
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let searchRequestGeneration = 0;
+let shareSearchTimer: ReturnType<typeof setTimeout> | null = null;
+let shareRequestGeneration = 0;
 
 const kbList = computed<MobileKnowledgeBase[]>(() =>
   buildMobileKnowledgeCatalog(
@@ -131,6 +157,17 @@ const personalKnowledgeBases = computed(() => kbList.value.filter((item) => item
 const sharedKnowledgeBases = computed(() => kbList.value.filter((item) => item.group === "shared"));
 const selectedKb = computed(() => kbList.value.find((item) => item.id === selectedKbId.value) || null);
 const selectedCanEdit = computed(() => selectedKb.value?.canEditContent === true);
+const canCreateKnowledgeBase = computed(() => authStore.hasRole("contributor"));
+const selectedCanManageKnowledgeBase = computed(() =>
+  selectedKb.value?.canManage === true && selectedKb.value.origin !== "organization",
+);
+const selectedCanShare = computed(() => canShareKnowledgeBase(selectedKb.value, {
+  currentUserId: authStore.currentUserId,
+  currentTenantRole: authStore.currentTenantRole,
+}));
+const showSelectedShareAction = computed(() =>
+  selectedCanShare.value || selectedKb.value?.origin === "organization",
+);
 const hasRunningParse = computed(() => fileList.value.some((item) => knowledgeNeedsStatusPolling(item)));
 const topbarTitle = computed(() =>
   folderBreadcrumbs.value.at(-1)?.name || selectedKb.value?.name || (searchOpen.value ? "搜索" : "知识库"),
@@ -395,9 +432,7 @@ const loadFiles = async () => {
       keyword: detailFilterKeyword.value || undefined,
     };
     const [res, optionsRes]: any[] = await Promise.all([
-      detailFilterKeyword.value
-        ? searchKnowledgeFolderNodes(selectedKbId.value, params)
-        : listKnowledgeFolderNodes(selectedKbId.value, params),
+			listKnowledgeFolderNodes(selectedKbId.value, params),
       listKnowledgeFolderOptions(selectedKbId.value),
     ]);
     const nodes: KnowledgeFolderNode[] = Array.isArray(res?.data) ? res.data : [];
@@ -451,6 +486,7 @@ async function refreshRunningStatuses() {
         const current = fileList.value.find((item) => item.id === next.id);
         if (!current) return;
         current.parse_status = next.parse_status;
+        current.core_status = next.core_status;
         current.summary_status = next.summary_status;
         current.enrichment_status = next.enrichment_status;
         current.wiki_status = next.wiki_status;
@@ -464,26 +500,11 @@ async function refreshRunningStatuses() {
 }
 
 function documentStatusText(item: KnowledgeFileRow) {
-  if (item.parse_status === "pending") return "待解析";
-  if (item.parse_status === "processing") return "解析中";
-  if (item.parse_status === "finalizing") return "整理中";
-  if (item.parse_status === "failed") return "解析失败";
-  if (item.parse_status === "cancelled") return "已取消";
-  if (item.parse_status === "draft") return "草稿";
-  if (knowledgeHasDerivativeFailure(item)) return "衍生处理失败";
-  if (knowledgeNeedsStatusPolling(item)) {
-    if (["pending", "processing"].includes(String(item.summary_status || ""))) return "生成摘要中";
-    return "优化中";
-  }
-  if (knowledgeIsFullyComplete(item)) return "已完成";
-  return item.parse_status || "未知";
+  return resolveMobileKnowledgeWorkflowPresentation(item).label;
 }
 
 function documentStatusClass(item: KnowledgeFileRow) {
-  if (knowledgeIsFullyComplete(item)) return "is-completed";
-  if (item.parse_status === "failed" || knowledgeHasDerivativeFailure(item)) return "is-failed";
-  if (knowledgeNeedsStatusPolling(item)) return "is-running";
-  return "is-muted";
+  return resolveMobileKnowledgeWorkflowPresentation(item).className;
 }
 
 const openKnowledgeBase = (kb: MobileKnowledgeBase) => {
@@ -497,10 +518,231 @@ const openKnowledgeBase = (kb: MobileKnowledgeBase) => {
   });
 };
 
+const openKnowledgeBaseEditor = (mode: "create" | "edit") => {
+  if (mode === "create" && !canCreateKnowledgeBase.value) {
+    MessagePlugin.warning("当前账号没有新建知识库的权限");
+    return;
+  }
+  if (mode === "edit" && !selectedCanManageKnowledgeBase.value) {
+    MessagePlugin.warning("当前账号没有修改该知识库的权限");
+    return;
+  }
+  kbEditorMode.value = mode;
+  kbEditorVisible.value = true;
+};
+
+const refreshKnowledgeBaseData = async () => {
+  chatResources.invalidate("knowledgeBases");
+  if (selectedKbId.value) chatResources.invalidateKnowledgeBaseDetail(selectedKbId.value);
+  await loadKnowledgeBases(true);
+};
+
+const submitKnowledgeBaseEditor = async (form: { name: string; description: string }) => {
+  if (!form.name.trim()) return;
+  kbEditorSubmitting.value = true;
+  try {
+    if (kbEditorMode.value === "create") {
+      await chatResources.ensureModels();
+      const built = buildQuickKnowledgeBasePayload(chatResources.allModels, form);
+      if (!built.payload) {
+        const labels = built.missing.map((item) => item === "Embedding" ? "向量模型" : "问答模型");
+        throw new Error(`缺少可用的${labels.join("、")}，请先联系管理员完成模型配置`);
+      }
+      const result: any = await createKnowledgeBase(built.payload);
+      if (!result?.success || !result?.data?.id) {
+        throw new Error(result?.message || "创建知识库失败");
+      }
+      kbEditorVisible.value = false;
+      chatResources.invalidate("knowledgeBases");
+      await loadKnowledgeBases(true);
+      MessagePlugin.success("知识库创建成功");
+      await router.push({
+        name: "mobile-knowledge",
+        query: { returnTo: returnTo.value, kb: String(result.data.id) },
+      });
+      return;
+    }
+
+    const kb = selectedKb.value;
+    if (!kb || !selectedCanManageKnowledgeBase.value) {
+      throw new Error("该知识库已不可编辑，请刷新后重试");
+    }
+    const result: any = await updateKnowledgeBase(kb.id, {
+      name: form.name.trim(),
+      description: form.description.trim(),
+    });
+    if (result?.success === false) throw new Error(result.message || "保存知识库失败");
+    kbEditorVisible.value = false;
+    await refreshKnowledgeBaseData();
+    MessagePlugin.success("知识库信息已保存");
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "保存知识库失败");
+  } finally {
+    kbEditorSubmitting.value = false;
+  }
+};
+
+const removeSelectedKnowledgeBase = async () => {
+  const kb = selectedKb.value;
+  if (!kb || !selectedCanManageKnowledgeBase.value) return;
+  kbEditorSubmitting.value = true;
+  try {
+    const result: any = await deleteKnowledgeBase(kb.id);
+    if (result?.success === false) throw new Error(result.message || "删除知识库失败");
+    kbEditorVisible.value = false;
+    clearPolling();
+    selectedKbId.value = "";
+    fileList.value = [];
+    chatResources.invalidate("knowledgeBases");
+    chatResources.invalidateKnowledgeBaseDetail(kb.id);
+    await loadKnowledgeBases(true);
+    await router.replace({ name: "mobile-knowledge", query: { returnTo: returnTo.value } });
+    MessagePlugin.success("知识库已删除");
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "删除知识库失败");
+  } finally {
+    kbEditorSubmitting.value = false;
+  }
+};
+
+const shareTargetRoleLabel = (target: {
+  is_owner: boolean;
+  my_role: "admin" | "editor" | "viewer";
+}) => {
+  if (target.is_owner) return "我创建的共享空间";
+  if (target.my_role === "admin") return "我是空间管理员";
+  if (target.my_role === "editor") return "我有共享权限";
+  return "仅可查看";
+};
+
+const loadKnowledgeShareRows = async (kb: MobileKnowledgeBase, reset = false) => {
+  if (!reset && (shareSheetLoading.value || shareSheetLoadingMore.value || !shareHasMore.value)) return;
+  if (reset) {
+    shareRequestGeneration += 1;
+    sharePage.value = 0;
+    shareHasMore.value = false;
+    shareRows.value = [];
+    shareSheetLoading.value = true;
+  } else {
+    shareSheetLoadingMore.value = true;
+  }
+  const generation = shareRequestGeneration;
+  const nextPage = reset ? 1 : sharePage.value + 1;
+  try {
+    const result: any = await listMobileKnowledgeShareTargets(kb.id, {
+      q: shareQuery.value.trim() || undefined,
+      page: nextPage,
+      page_size: 20,
+    });
+    if (generation !== shareRequestGeneration) return;
+    if (!result?.success || !result?.data) {
+      throw new Error(result?.message || "加载共享空间失败");
+    }
+    const incomingRows: MobileKnowledgeShareSpaceRow[] = (result.data.items || []).map((target: any) => ({
+      id: String(target.id),
+      name: String(target.name || "未命名共享空间"),
+      roleLabel: shareTargetRoleLabel(target),
+      owned: target.is_owner === true,
+      shareId: target.share_id || undefined,
+      permission: target.permission || undefined,
+      canRemove: target.can_remove === true,
+    }));
+    if (reset) {
+      shareRows.value = incomingRows;
+    } else {
+      const existing = new Set(shareRows.value.map((row) => row.id));
+      shareRows.value.push(...incomingRows.filter((row) => !existing.has(row.id)));
+    }
+    sharePage.value = Number(result.data.page || nextPage);
+    shareHasMore.value = result.data.has_more === true;
+  } catch (error: any) {
+    if (generation !== shareRequestGeneration) return;
+    if (reset) shareRows.value = [];
+    MessagePlugin.error(error?.message || "加载共享空间失败");
+  } finally {
+    if (generation === shareRequestGeneration) {
+      shareSheetLoading.value = false;
+      shareSheetLoadingMore.value = false;
+    }
+  }
+};
+
+const openKnowledgeShareSheet = async () => {
+  const kb = selectedKb.value;
+  if (!kb || !showSelectedShareAction.value) return;
+  if (shareSearchTimer) clearTimeout(shareSearchTimer);
+  shareQuery.value = "";
+  shareRows.value = [];
+  shareSheetVisible.value = true;
+  await loadKnowledgeShareRows(kb, true);
+};
+
+const searchKnowledgeShareSpaces = (value: string) => {
+  shareQuery.value = value;
+  shareRequestGeneration += 1;
+  if (shareSearchTimer) clearTimeout(shareSearchTimer);
+  shareSearchTimer = setTimeout(() => {
+    const kb = selectedKb.value;
+    if (kb && shareSheetVisible.value) void loadKnowledgeShareRows(kb, true);
+  }, 300);
+};
+
+const loadMoreKnowledgeShareSpaces = () => {
+  const kb = selectedKb.value;
+  if (kb && shareSheetVisible.value) void loadKnowledgeShareRows(kb);
+};
+
+const shareKnowledgeBaseToSpace = async (row: MobileKnowledgeShareSpaceRow) => {
+  const kb = selectedKb.value;
+  if (!kb || kb.origin === "organization") return;
+  if (row.shareId) {
+    MessagePlugin.warning(`该知识库已经共享到「${row.name}」`);
+    return;
+  }
+  shareBusyId.value = row.id;
+  try {
+    const result = await shareKnowledgeBase(kb.id, {
+      organization_id: row.id,
+      permission: "viewer",
+    });
+    if (!result.success) throw new Error(result.message || "共享失败");
+    MessagePlugin.success(`已共享到「${row.name}」`);
+    await refreshKnowledgeBaseData();
+    const current = selectedKb.value;
+    if (current) await loadKnowledgeShareRows(current, true);
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "共享失败");
+  } finally {
+    shareBusyId.value = "";
+  }
+};
+
+const removeKnowledgeBaseFromSpace = async (row: MobileKnowledgeShareSpaceRow) => {
+  const kb = selectedKb.value;
+  if (!kb || !row.shareId || !row.canRemove) return;
+  shareBusyId.value = row.shareId;
+  try {
+    const result = await removeShare(kb.id, row.shareId);
+    if (!result.success) throw new Error(result.message || "取消共享失败");
+    MessagePlugin.success(`已从「${row.name}」取消共享`);
+    await refreshKnowledgeBaseData();
+    if (!kbList.value.some((item) => item.id === kb.id)) {
+      shareSheetVisible.value = false;
+      await router.replace({ name: "mobile-knowledge", query: { returnTo: returnTo.value } });
+      return;
+    }
+    const current = selectedKb.value;
+    if (current) await loadKnowledgeShareRows(current, true);
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || "取消共享失败");
+  } finally {
+    shareBusyId.value = "";
+  }
+};
+
 const openFolder = async (folder: KnowledgeFolder | null) => {
   currentFolderId.value = folder?.id || "";
   nodePage.value = 1;
-  detailFilterKeyword.value = "";
   detailFocusDocumentId.value = "";
   await router.replace({
     name: "mobile-knowledge",
@@ -509,7 +751,7 @@ const openFolder = async (folder: KnowledgeFolder | null) => {
       kb: selectedKbId.value,
       folder_id: currentFolderId.value || undefined,
       knowledge_id: undefined,
-      document_name: undefined,
+			document_name: detailFilterKeyword.value || undefined,
     },
   });
   await loadFiles();
@@ -863,16 +1105,12 @@ const removeFolder = async (folder: KnowledgeFolder) => {
   if (!selectedCanEdit.value || !selectedKbId.value) return;
   const nonEmpty = folder.stats.direct_child_folder_count > 0 || folder.stats.subtree_document_count > 0;
   const message = nonEmpty
-    ? `“${folder.name}”中仍有内容，是否将内容移动到上一级后删除？`
-    : `确定删除空文件夹“${folder.name}”吗？`;
+		? `确定删除“${folder.name}”及其中的全部文档和子文件夹吗？此操作不可撤销。`
+		: `确定删除空文件夹“${folder.name}”吗？`;
   if (!window.confirm(message)) return;
   try {
-    await deleteKnowledgeFolder(
-      selectedKbId.value,
-      folder.id,
-      nonEmpty ? "move_to_parent" : "reject",
-    );
-    MessagePlugin.success("文件夹已删除");
+		await deleteKnowledgeFolder(selectedKbId.value, folder.id);
+		MessagePlugin.success("文件夹删除任务已提交");
     await loadFiles();
   } catch (error: any) {
     MessagePlugin.error(error?.message || "删除文件夹失败");
@@ -909,6 +1147,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   clearPolling();
   cancelSearchRequests();
+  if (shareSearchTimer) clearTimeout(shareSearchTimer);
+  shareRequestGeneration += 1;
 });
 </script>
 
@@ -1091,6 +1331,11 @@ onBeforeUnmount(() => {
     <section v-else-if="!selectedKb" class="catalog-view" data-testid="mobile-kb-catalog">
       <div v-if="loadingKbs" class="catalog-loading">正在加载知识库</div>
       <template v-else>
+        <button v-if="canCreateKnowledgeBase" type="button" class="catalog-create"
+          data-testid="mobile-kb-create" @click="openKnowledgeBaseEditor('create')">
+          <MobileIcon name="plus-circle" />
+          <span>新建知识库</span>
+        </button>
         <section class="kb-group">
           <button type="button" class="group-heading" :aria-expanded="personalExpanded" @click="personalExpanded = !personalExpanded">
             <span>个人知识库</span>
@@ -1149,9 +1394,18 @@ onBeforeUnmount(() => {
 
     <template v-else>
       <section v-if="selectedCanEdit" class="upload-card">
-        <div>
-          <strong>{{ selectedKb.name }}</strong>
-          <span>{{ selectedKb.permissionLabel }}，可管理文件夹和文档</span>
+        <div class="upload-card-header">
+          <div class="upload-card-title">
+            <strong>{{ selectedKb.name }}</strong>
+            <button v-if="selectedCanManageKnowledgeBase" type="button" class="edit-kb-button"
+              aria-label="编辑知识库" data-testid="mobile-kb-edit" @click="openKnowledgeBaseEditor('edit')">
+              <MobileIcon name="edit" />
+            </button>
+          </div>
+          <button v-if="showSelectedShareAction" type="button" class="share-kb-button"
+            aria-label="共享知识库" title="共享" data-testid="mobile-kb-share" @click="openKnowledgeShareSheet">
+            <MobileIcon name="share" />
+          </button>
         </div>
         <div class="upload-actions">
           <button type="button" class="secondary-action" @click="openFolderEditor('create')">
@@ -1180,6 +1434,10 @@ onBeforeUnmount(() => {
           <strong>仅查看</strong>
           <span>你可以查看和下载文档，不能上传或删除。</span>
         </div>
+        <button v-if="showSelectedShareAction" type="button" class="share-kb-button"
+          aria-label="管理知识库共享" title="共享" data-testid="mobile-kb-share" @click="openKnowledgeShareSheet">
+          <MobileIcon name="share" />
+        </button>
       </section>
 
       <section class="doc-section">
@@ -1219,10 +1477,10 @@ onBeforeUnmount(() => {
               <span>{{ folder.stats.subtree_document_count }} 个文档 ·
                 {{ folder.stats.direct_child_folder_count }} 个子文件夹</span>
               <em class="parse-status"
-                :class="folder.stats.abnormal_document_count ? 'is-failed' : (folder.stats.parse_pending_count + folder.stats.parse_running_count + folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count ? 'is-running' : 'is-completed')">
+                :class="folder.stats.abnormal_document_count + folder.stats.failed_document_count ? 'is-failed' : (folder.stats.parse_pending_count + folder.stats.parse_running_count + folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count ? 'is-running' : 'is-completed')">
                 解析 {{ folder.stats.parse_pending_count + folder.stats.parse_running_count }} ·
                 衍生 {{ folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }} ·
-                异常 {{ folder.stats.abnormal_document_count }}
+                异常 {{ folder.stats.abnormal_document_count + folder.stats.failed_document_count }}
               </em>
             </div>
             <div v-if="selectedCanEdit" class="doc-actions folder-actions" @click.stop>
@@ -1254,7 +1512,11 @@ onBeforeUnmount(() => {
                 {{ item.file_type || item.type || 'FILE' }}
                 <template v-if="item.file_size"> · {{ formatFileSize(item.file_size) }}</template>
               </span>
-              <em class="parse-status" :class="documentStatusClass(item)">
+              <em
+                class="parse-status"
+                :class="documentStatusClass(item)"
+                :data-workflow-status="resolveMobileKnowledgeWorkflowPresentation(item).status"
+              >
                 {{ documentStatusText(item) }}
               </em>
             </div>
@@ -1368,6 +1630,33 @@ onBeforeUnmount(() => {
       :item="previewItem"
       @close="previewItem = null"
     />
+    <MobileKnowledgeBaseEditorSheet
+      :visible="kbEditorVisible"
+      :mode="kbEditorMode"
+      :initial-name="kbEditorMode === 'edit' ? selectedKb?.name : ''"
+      :initial-description="kbEditorMode === 'edit' ? String(selectedKb?.description || '') : ''"
+      :submitting="kbEditorSubmitting"
+      :can-delete="kbEditorMode === 'edit' && selectedCanManageKnowledgeBase"
+      @close="kbEditorVisible = false"
+      @submit="submitKnowledgeBaseEditor"
+      @delete="removeSelectedKnowledgeBase"
+    />
+    <MobileKnowledgeShareSheet
+      :visible="shareSheetVisible"
+      :knowledge-base-name="selectedKb?.name || ''"
+      :source-owned="selectedKb?.origin !== 'organization'"
+      :rows="shareRows"
+      :query="shareQuery"
+      :loading="shareSheetLoading"
+      :loading-more="shareSheetLoadingMore"
+      :has-more="shareHasMore"
+      :busy-id="shareBusyId"
+      @close="shareSheetVisible = false"
+      @select="shareKnowledgeBaseToSpace"
+      @remove="removeKnowledgeBaseFromSpace"
+      @search="searchKnowledgeShareSpaces"
+      @load-more="loadMoreKnowledgeShareSpaces"
+    />
   </main>
 </template>
 
@@ -1421,6 +1710,22 @@ onBeforeUnmount(() => {
 
 .catalog-view {
   padding-top: 10px;
+}
+
+.catalog-create {
+  display: flex;
+  width: calc(100% - 24px);
+  min-height: 46px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 0 12px 10px;
+  border: 1px solid #8ed8ac;
+  border-radius: 10px;
+  background: #edfaf3;
+  color: #078f49;
+  font-size: 15px;
+  font-weight: 650;
 }
 
 .catalog-loading,
@@ -1873,12 +2178,32 @@ onBeforeUnmount(() => {
   padding: 14px 12px 12px;
 }
 
-.upload-card > div:first-child,
+.upload-card-header,
 .readonly-card > div {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 4px;
+}
+
+.upload-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: 10px;
+}
+
+.upload-card-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.upload-card-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .upload-card strong,
@@ -1933,6 +2258,35 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
+.upload-card .share-kb-button,
+.readonly-card .share-kb-button {
+  display: grid;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid #bfe8cf;
+  border-radius: 9px;
+  background: #f3faf6;
+  color: #078f49;
+  padding: 0;
+  font-size: 20px;
+}
+
+.upload-card .edit-kb-button {
+  display: grid;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #688078;
+  padding: 0;
+  font-size: 16px;
+}
+
 .upload-card .upload-actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1967,7 +2321,7 @@ onBeforeUnmount(() => {
 
 .readonly-card {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   background: #f8faf9;
@@ -2138,6 +2492,11 @@ onBeforeUnmount(() => {
 .parse-status.is-failed {
   background: #fff0f0;
   color: #bf3636;
+}
+
+.parse-status.is-warning {
+  background: #fff5e5;
+  color: #a35d00;
 }
 
 .parse-status.is-muted {

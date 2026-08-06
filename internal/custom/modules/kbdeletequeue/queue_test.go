@@ -26,8 +26,9 @@ func openQueueTestDB(t *testing.T, withOutbox bool) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(
 		&types.KnowledgeBase{}, &types.Knowledge{},
 		&types.WikiPage{}, &types.WikiFolder{}, &types.WikiPageIssue{}, &types.WikiLogEntry{},
-		&wikilease.Lease{},
+		&wikilease.Lease{}, &types.TaskDeadLetter{},
 	))
+	migrateKBDeleteResidueTables(t, db)
 	if withOutbox {
 		require.NoError(t, db.AutoMigrate(&types.TaskPendingOp{}))
 	}
@@ -47,9 +48,36 @@ func openQueueRaceTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(
 		&types.KnowledgeBase{}, &types.Knowledge{}, &types.TaskPendingOp{},
 		&types.WikiPage{}, &types.WikiFolder{}, &types.WikiPageIssue{}, &types.WikiLogEntry{},
-		&wikilease.Lease{},
+		&wikilease.Lease{}, &types.TaskDeadLetter{},
 	))
+	migrateKBDeleteResidueTables(t, db)
 	return db
+}
+
+func migrateKBDeleteResidueTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS custom_derivative_work_items (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_provider_calls (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_derivative_results (
+			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_queue_workflows (
+			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL,
+			knowledge_base_id TEXT NOT NULL, knowledge_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS custom_document_queue_schedule_groups (
+			tenant_id INTEGER NOT NULL, knowledge_base_id TEXT NOT NULL,
+			PRIMARY KEY (tenant_id, knowledge_base_id)
+		)`,
+	} {
+		require.NoError(t, db.Exec(statement).Error)
+	}
 }
 
 func TestPrepareAtomicallySoftDeletesAndPersistsOneIntent(t *testing.T) {

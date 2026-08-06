@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
@@ -85,6 +86,7 @@ var (
 )
 
 type syncTaskSnapshot struct {
+	taskID   string
 	taskType string
 	payload  []byte
 }
@@ -599,16 +601,104 @@ func (e *SyncTaskExecutor) liveTaskSnapshots() []syncTaskSnapshot {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	tasks := make([]syncTaskSnapshot, 0, len(e.tasks))
-	for _, task := range e.tasks {
+	for taskID, task := range e.tasks {
 		if task == nil {
 			continue
 		}
 		tasks = append(tasks, syncTaskSnapshot{
+			taskID:   taskID,
 			taskType: task.taskType,
 			payload:  append([]byte(nil), task.payload...),
 		})
 	}
 	return tasks
+}
+
+func (e *SyncTaskExecutor) quiesceAndPurgeDerivativeTasks(
+	ctx context.Context,
+	workEpochs map[string]uint64,
+	legacyIDs map[string]struct{},
+) (int, error) {
+	if e == nil {
+		return 0, errors.New("sync task executor: derivative purge backend unavailable")
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, derivativeDeleteQuiesceTimeout)
+	defer cancel()
+	ticker := time.NewTicker(derivativeDeleteQuiescePoll)
+	defer ticker.Stop()
+	emptySnapshots := 0
+	for {
+		live, err := e.cancelDerivativeTasks(workEpochs, legacyIDs)
+		if err != nil {
+			return 0, err
+		}
+		if !live {
+			emptySnapshots++
+			if emptySnapshots >= 2 {
+				break
+			}
+		} else {
+			emptySnapshots = 0
+		}
+		select {
+		case <-waitCtx.Done():
+			return 0, fmt.Errorf("sync task executor: derivative tasks did not quiesce: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+
+	deleted := 0
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	deleteTerminal := func(id string) {
+		removed := false
+		if _, exists := e.retained[id]; exists {
+			delete(e.retained, id)
+			removed = true
+		}
+		if _, exists := e.archived[id]; exists {
+			delete(e.archived, id)
+			removed = true
+		}
+		if removed {
+			deleted++
+		}
+	}
+	for workItemID, maximum := range workEpochs {
+		for epoch := uint64(1); epoch <= maximum; epoch++ {
+			deleteTerminal(fmt.Sprintf("derivative:%s:%d", workItemID, epoch))
+		}
+	}
+	for id := range legacyIDs {
+		deleteTerminal(id)
+	}
+	return deleted, nil
+}
+
+func (e *SyncTaskExecutor) cancelDerivativeTasks(
+	workEpochs map[string]uint64,
+	legacyIDs map[string]struct{},
+) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	live := false
+	for id, task := range e.tasks {
+		if task == nil || !derivativeTaskIDMayMatch(id, workEpochs, legacyIDs) {
+			continue
+		}
+		matches, err := derivativeTaskInfoMatches(&asynq.TaskInfo{
+			ID: id, Type: task.taskType, Payload: task.payload,
+		}, workEpochs, legacyIDs)
+		if err != nil {
+			return false, fmt.Errorf("sync task executor: inspect derivative task %s: %w", id, err)
+		}
+		if !matches {
+			continue
+		}
+		live = true
+		cancelSyncTaskRecord(task, context.Canceled)
+	}
+	return live, nil
 }
 
 func (e *SyncTaskExecutor) cancelTasksForKnowledge(knowledgeID string) (deleted, cancelled int) {
@@ -694,6 +784,7 @@ type SyncTaskParams struct {
 	ImageMultimodal      interfaces.TaskHandler `name:"imageMultimodal"`
 	KnowledgePostProcess interfaces.TaskHandler `name:"knowledgePostProcess"`
 	WikiIngest           interfaces.TaskHandler `name:"wikiIngest"`
+	DerivativeWorker     *derivativequeue.Worker
 }
 
 // RegisterSyncHandlers registers all task handlers on the SyncTaskExecutor.
@@ -722,5 +813,8 @@ func RegisterSyncHandlers(params SyncTaskParams) {
 	params.Executor.RegisterHandler(types.TypeDataSourceSync, background(params.DataSourceService.ProcessSync))
 	params.Executor.RegisterHandler(types.TypeWikiIngest, background(params.WikiIngest.Handle))
 	params.Executor.RegisterHandler(types.TypeKnowledgeTerminalRepair, background(repairer.Handle))
+	if params.DerivativeWorker != nil {
+		params.Executor.RegisterHandler(derivativequeue.TypeWake, background(params.DerivativeWorker.Handle))
+	}
 	logger.Infof(context.Background(), "[SyncTask] All task handlers registered (Lite mode, no Redis)")
 }

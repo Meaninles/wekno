@@ -12,6 +12,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/utils"
@@ -361,7 +362,7 @@ func (b *graphBuilder) BuildGraph(ctx context.Context, chunks []*types.Chunk) er
 	// Concurrently extract entities from each document chunk
 	chunkEntities := make([][]*types.Entity, len(chunks))
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(MaxConcurrentEntityExtractions) // Limit concurrency
+	g.SetLimit(modeladmission.EffectiveChatParallelism(ctx, b.chatModel, MaxConcurrentEntityExtractions))
 
 	for i, chunk := range chunks {
 		i, chunk := i, chunk // Create local variables to avoid closure issues
@@ -435,7 +436,7 @@ func (b *graphBuilder) BuildGraph(ctx context.Context, chunks []*types.Chunk) er
 
 	// extract relationships concurrently
 	relG, relGctx := errgroup.WithContext(ctx)
-	relG.SetLimit(MaxConcurrentRelationExtractions) // use dedicated relationship extraction concurrency limit
+	relG.SetLimit(modeladmission.EffectiveChatParallelism(ctx, b.chatModel, MaxConcurrentRelationExtractions))
 
 	for _, batch := range relationBatches {
 		relG.Go(func() error {
@@ -443,6 +444,9 @@ func (b *graphBuilder) BuildGraph(ctx context.Context, chunks []*types.Chunk) er
 			err := b.extractRelationships(relGctx, batch.batchChunks, batch.relationUseEntities)
 			if err != nil {
 				log.WithError(err).Errorf("Failed to extract relationships for batch %d", batch.batchIndex+1)
+				if isDurableTaskDeferred(err) {
+					return err
+				}
 			}
 			return nil // continue to process other batches even if the current batch fails
 		})
@@ -450,6 +454,9 @@ func (b *graphBuilder) BuildGraph(ctx context.Context, chunks []*types.Chunk) er
 
 	// wait for all relationship extractions to complete
 	if err := relG.Wait(); err != nil {
+		if isDurableTaskDeferred(err) {
+			return fmt.Errorf("relationship extraction deferred: %w", err)
+		}
 		log.WithError(err).Error("Some relationship extraction tasks failed")
 		// but we continue to process the next steps because some relationship extractions are still useful
 	}

@@ -593,6 +593,7 @@ func TestRecoveryCursorReachesOrphanAfterRetainedFirstPage(t *testing.T) {
 	recovery := NewRecoveryWithConfig(testRegistry(db, map[string]*fakeFileService{"local": local}), RecoveryConfig{
 		ScanInterval: time.Minute, ScanTimeout: time.Minute, BackfillTimeout: time.Minute,
 		PendingOwnerGrace: time.Millisecond, FAQEntriesMaxAge: time.Hour, FAQExportMaxAge: time.Hour,
+		BatchSize: 1000,
 	})
 	require.NoError(t, recovery.RecoverNow(context.Background()))
 	require.Empty(t, local.deleted)

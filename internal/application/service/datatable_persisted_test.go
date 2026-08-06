@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
+	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
 	"github.com/Tencent/WeKnora/internal/models/chat"
+	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/require"
@@ -44,6 +47,86 @@ func (*persistedTableChatStub) GetModelID() string   { return "persisted-table-s
 
 type persistedTableEnqueuerStub struct {
 	interfaces.TaskEnqueuer
+}
+
+type dataTableTokenBudgetEmbedder struct {
+	embedding.Embedder
+	maxTokens int
+}
+
+func (e *dataTableTokenBudgetEmbedder) GetMaxInputTokens() int { return e.maxTokens }
+
+func TestBuildDataTableChunksSplitsColumnMetadataWithoutInformationLoss(t *testing.T) {
+	const maxTokens = 100
+	columnDescription := strings.Repeat(
+		"**business_field** (string)\n- Field Meaning: complete metadata must remain searchable.\n\n",
+		24,
+	)
+	resources := &extractionResources{
+		knowledge: &types.Knowledge{
+			ID:                   "knowledge-wide-table",
+			TenantID:             7,
+			KnowledgeBaseID:      "kb-1",
+			ProcessingGeneration: "generation-wide-table",
+		},
+		embeddingModel: &dataTableTokenBudgetEmbedder{maxTokens: maxTokens},
+	}
+
+	chunks := (&DataTableSummaryService{}).buildChunks(
+		resources, "table summary", columnDescription,
+	)
+
+	require.Greater(t, len(chunks), 2)
+	require.Equal(t, types.ChunkTypeTableSummary, chunks[0].ChunkType)
+	maxRunes := chunker.CharsForTokenLimit(maxTokens, chunker.LangChinese)
+	var rebuilt strings.Builder
+	seenIDs := make(map[string]struct{}, len(chunks))
+	for index, generated := range chunks {
+		require.Equal(t, index, generated.ChunkIndex)
+		_, duplicate := seenIDs[generated.ID]
+		require.False(t, duplicate, "generated chunk IDs must be unique")
+		seenIDs[generated.ID] = struct{}{}
+		if index == 0 {
+			continue
+		}
+		require.Equal(t, types.ChunkTypeTableColumn, generated.ChunkType)
+		require.Equal(t, chunks[0].ID, generated.ParentChunkID)
+		require.LessOrEqual(t, utf8.RuneCountInString(generated.Content), maxRunes)
+		require.Equal(t, chunks[index-1].ID, generated.PreChunkID)
+		require.Equal(t, generated.ID, chunks[index-1].NextChunkID)
+		rebuilt.WriteString(generated.Content)
+	}
+	require.Equal(t, columnDescription, rebuilt.String(),
+		"column metadata splitting must preserve every byte in source order")
+}
+
+func TestBuildDataTableChunksSplitsSummaryWithoutInformationLoss(t *testing.T) {
+	const maxTokens = 80
+	summary := strings.Repeat("Complete table purpose and coverage.\n", 40)
+	resources := &extractionResources{
+		knowledge: &types.Knowledge{
+			ID:                   "knowledge-long-summary",
+			TenantID:             7,
+			KnowledgeBaseID:      "kb-1",
+			ProcessingGeneration: "generation-long-summary",
+		},
+		embeddingModel: &dataTableTokenBudgetEmbedder{maxTokens: maxTokens},
+	}
+
+	chunks := (&DataTableSummaryService{}).buildChunks(resources, summary, "short column metadata")
+	maxRunes := chunker.CharsForTokenLimit(maxTokens, chunker.LangChinese)
+	var rebuilt strings.Builder
+	summaryCount := 0
+	for _, generated := range chunks {
+		if generated.ChunkType != types.ChunkTypeTableSummary {
+			continue
+		}
+		summaryCount++
+		require.LessOrEqual(t, utf8.RuneCountInString(generated.Content), maxRunes)
+		rebuilt.WriteString(generated.Content)
+	}
+	require.Greater(t, summaryCount, 1)
+	require.Equal(t, summary, rebuilt.String())
 }
 
 func TestProcessPersistedTableDataSupportsLegacyXLSWithoutDuckDB(t *testing.T) {

@@ -240,10 +240,11 @@ func TestApplyIMCompleteDataToMessage(t *testing.T) {
 	}}
 
 	applyIMCompleteDataToMessage(msg, event.AgentCompleteData{
-		MessageID:       "assistant-1",
-		TotalDurationMs: 1234,
-		KnowledgeRefs:   []interface{}{ref},
-		AgentSteps:      steps,
+		MessageID:                  "assistant-1",
+		TotalDurationMs:            1234,
+		KnowledgeRefs:              []*types.SearchResult{ref},
+		KnowledgeRefsAuthoritative: true,
+		AgentSteps:                 steps,
 	})
 
 	if !msg.IsCompleted {
@@ -260,6 +261,52 @@ func TestApplyIMCompleteDataToMessage(t *testing.T) {
 	}
 }
 
+func TestFilterIMStoredAnswerKeepsOnlyCanonicalCitedReferences(t *testing.T) {
+	msg := &types.Message{
+		KnowledgeReferences: types.References{
+			&types.SearchResult{
+				ID:              "chunk-1",
+				KnowledgeID:     "knowledge-1",
+				KnowledgeBaseID: "kb-1",
+				Content:         "supported",
+				EvidenceContent: "supported",
+				ChunkType:       string(types.ChunkTypeText),
+				Metadata: map[string]string{
+					"citation_id": "S1",
+					"source_type": "knowledge",
+					"chunk_id":    "chunk-1",
+				},
+			},
+			&types.SearchResult{
+				ID:              "chunk-2",
+				KnowledgeID:     "knowledge-1",
+				KnowledgeBaseID: "kb-1",
+				Content:         "unused",
+				EvidenceContent: "unused",
+				ChunkType:       string(types.ChunkTypeText),
+				Metadata: map[string]string{
+					"citation_id": "S2",
+					"source_type": "knowledge",
+					"chunk_id":    "chunk-2",
+				},
+			},
+		},
+	}
+	answer, report := filterIMStoredAnswer(
+		`supported<src id="S1" /> malformed<doc source_id="S2" /> unknown<src id="S9" />`,
+		msg,
+	)
+	if !strings.Contains(answer, `<src id="S1" />`) || strings.Contains(answer, "<doc") || strings.Contains(answer, "S9") {
+		t.Fatalf("stored IM answer was not strictly filtered: %q", answer)
+	}
+	if len(msg.KnowledgeReferences) != 1 || msg.KnowledgeReferences[0].Metadata["citation_id"] != "S1" {
+		t.Fatalf("stored IM refs should contain only the actually cited source: %#v", msg.KnowledgeReferences)
+	}
+	if report.ForbiddenTags != 1 || len(report.UnknownIDs) != 1 || report.UnknownIDs[0] != "S9" {
+		t.Fatalf("unexpected IM citation report: %#v", report)
+	}
+}
+
 func TestPickIMStoredAnswerPrefersFirstNonEmpty(t *testing.T) {
 	got := pickIMStoredAnswer("", "outer", "live", "complete")
 	if got != "outer" {
@@ -271,23 +318,29 @@ func TestPickIMStoredAnswerPrefersFirstNonEmpty(t *testing.T) {
 	}
 }
 
-func TestMergeIMAgentAnswerBuffersUsesLiveThenComplete(t *testing.T) {
+func TestMergeIMAgentAnswerBuffersPrefersCompleteFinal(t *testing.T) {
 	var builder, outer, live strings.Builder
+	builder.WriteString("streamed draft")
+	outer.WriteString("outer draft")
 	live.WriteString("live answer")
 
 	mergeIMAgentAnswerBuffers(&builder, &outer, &live, "complete final")
-	if builder.String() != "live answer" {
-		t.Fatalf("builder = %q, want live answer", builder.String())
+	if builder.String() != "complete final" {
+		t.Fatalf("builder = %q, want complete final", builder.String())
 	}
-	if outer.String() != "live answer" {
-		t.Fatalf("outer = %q, want live answer", outer.String())
+	if outer.String() != "complete final" {
+		t.Fatalf("outer = %q, want complete final", outer.String())
+	}
+	if live.Len() != 0 {
+		t.Fatalf("live answer was not cleared: %q", live.String())
 	}
 
 	builder.Reset()
 	outer.Reset()
 	live.Reset()
-	mergeIMAgentAnswerBuffers(&builder, &outer, &live, "complete final")
-	if builder.String() != "complete final" {
-		t.Fatalf("builder = %q, want complete final", builder.String())
+	live.WriteString("live fallback")
+	mergeIMAgentAnswerBuffers(&builder, &outer, &live, "")
+	if builder.String() != "live fallback" || outer.String() != "live fallback" {
+		t.Fatalf("fallback buffers = (%q, %q), want live fallback", builder.String(), outer.String())
 	}
 }

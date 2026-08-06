@@ -73,10 +73,10 @@ import type { ParserEngineInfo } from '@/api/system';
 import {
   createKnowledgeFolder,
   deleteKnowledgeFolder,
+	getKnowledgeFolderDeleteOperation,
   listKnowledgeFolderNodes,
   listKnowledgeFolderOptions,
   moveKnowledgeDocumentsToFolder,
-  searchKnowledgeFolderNodes,
   updateKnowledgeFolder,
   uploadKnowledgeFolderFile,
   createKnowledgeFolderURL,
@@ -630,8 +630,8 @@ const parseStatusOptions = computed(() => [
   { label: t('knowledgeBase.parseStatusPending'), value: 'pending' },
   { label: t('knowledgeBase.parseStatusProcessing'), value: 'processing' },
   { label: t('knowledgeWorkflowStatus.status.cancelling'), value: 'cancelling' },
-  { label: t('knowledgeWorkflowStatus.status.deleting'), value: 'deleting' },
   { label: t('knowledgeBase.parseStatusCompleted'), value: 'completed' },
+  { label: t('knowledgeWorkflowStatus.status.degraded'), value: 'degraded' },
   { label: t('knowledgeBase.parseStatusFailed'), value: 'failed' },
   { label: t('knowledgeBase.statusCancelled'), value: 'cancelled' },
   { label: t('knowledgeBase.statusDraft'), value: 'draft' },
@@ -955,10 +955,7 @@ const loadKnowledgeFiles = async (kbIdValue: string): Promise<void> => {
     ...filterParams.value,
   };
   try {
-    const keyword = String(params.keyword || '').trim();
-    const result: any = keyword
-      ? await searchKnowledgeFolderNodes(kbIdValue, params)
-      : await listKnowledgeFolderNodes(kbIdValue, params);
+		const result: any = await listKnowledgeFolderNodes(kbIdValue, params);
     if (requestGeneration !== folderListGeneration || !isCurrentKb(kbIdValue)) return;
     const nodes = Array.isArray(result?.data) ? result.data : [];
     folderList.value = nodes
@@ -974,16 +971,6 @@ const loadKnowledgeFiles = async (kbIdValue: string): Promise<void> => {
       return loadKnowledgeFiles(kbIdValue);
     }
     folderBreadcrumbs.value = Array.isArray(result?.breadcrumbs) ? result.breadcrumbs : [];
-    if (keyword && currentFolderId.value) {
-      const currentOption = folderOptions.value.find((option) => option.id === currentFolderId.value);
-      folderBreadcrumbs.value = currentOption
-        ? currentOption.path.split('/').map((name, index, parts) => {
-          const path = parts.slice(0, index + 1).join('/');
-          const option = folderOptions.value.find((candidate) => candidate.path === path);
-          return { id: option?.id || '', name };
-        }).filter((item) => item.id)
-        : [];
-    }
   } catch (error: any) {
     if (requestGeneration !== folderListGeneration) return;
     folderList.value = [];
@@ -1035,7 +1022,6 @@ const folderParentOptions = computed(() => {
 
 const openFolder = async (folder: KnowledgeFolder | null) => {
   currentFolderId.value = folder?.id || '';
-  docSearchKeyword.value = '';
   resetPage();
   clearSelection();
   await router.replace({
@@ -1115,10 +1101,33 @@ const submitFolderDialog = async () => {
   }
 };
 
-const deleteFolderNow = async (folder: KnowledgeFolder, mode: 'reject' | 'move_to_parent') => {
+const monitorFolderDeleteOperation = async (knowledgeBaseId: string, operationId: string) => {
+	for (let attempt = 0; attempt < 120; attempt += 1) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+		try {
+			const result: any = await getKnowledgeFolderDeleteOperation(knowledgeBaseId, operationId);
+			const operation = result?.data;
+			if (operation?.status === 'completed') {
+				if (kbId.value === knowledgeBaseId) {
+					await Promise.all([loadFolderOptions(), loadKnowledgeFiles(knowledgeBaseId)]);
+				}
+				return;
+			}
+			if (operation?.status === 'failed') {
+				MessagePlugin.error(operation.last_error || t('knowledgeFolders.deleteFailed'));
+				return;
+			}
+		} catch {
+			// A transient status read must not undo or duplicate the durable delete.
+		}
+	}
+};
+
+const deleteFolderNow = async (folder: KnowledgeFolder) => {
   if (!kbId.value) return;
-  await deleteKnowledgeFolder(kbId.value, folder.id, mode);
-  MessagePlugin.success(t('knowledgeFolders.deleteSuccess'));
+	const knowledgeBaseId = kbId.value;
+	const result: any = await deleteKnowledgeFolder(knowledgeBaseId, folder.id);
+	MessagePlugin.success(t('knowledgeFolders.deleteSubmitted'));
   if (currentFolderId.value === folder.id) {
     currentFolderId.value = folder.parent_id || '';
     await router.replace({
@@ -1126,7 +1135,10 @@ const deleteFolderNow = async (folder: KnowledgeFolder, mode: 'reject' | 'move_t
     });
   }
   resetPage();
-  await Promise.all([loadFolderOptions(), loadKnowledgeFiles(kbId.value)]);
+	await Promise.all([loadFolderOptions(), loadKnowledgeFiles(knowledgeBaseId)]);
+	if (result?.data?.id) {
+		void monitorFolderDeleteOperation(knowledgeBaseId, result.data.id);
+	}
 };
 
 const confirmDeleteFolder = (folder: KnowledgeFolder) => {
@@ -1134,17 +1146,18 @@ const confirmDeleteFolder = (folder: KnowledgeFolder) => {
   let dialog: ReturnType<typeof DialogPlugin.confirm> | undefined;
   dialog = DialogPlugin.confirm({
     header: t('knowledgeFolders.delete') as string,
-    body: nonEmpty
-      ? t('knowledgeFolders.deleteNonEmpty') as string
-      : `${t('knowledgeFolders.delete')} “${folder.name}”？`,
+		body: t(
+			nonEmpty ? 'knowledgeFolders.deleteNonEmpty' : 'knowledgeFolders.deleteEmpty',
+			{ name: folder.name },
+		) as string,
     confirmBtn: {
-      content: t(nonEmpty ? 'knowledgeFolders.deleteMoveToParent' : 'common.confirm') as string,
+			content: t('knowledgeFolders.deleteAll') as string,
       theme: 'danger',
     },
     cancelBtn: { content: t('common.cancel') as string },
     onConfirm: async () => {
       try {
-        await deleteFolderNow(folder, nonEmpty ? 'move_to_parent' : 'reject');
+				await deleteFolderNow(folder);
         dialog?.destroy();
       } catch (error: any) {
         MessagePlugin.error(error?.message || t('common.operationFailed'));
@@ -1544,18 +1557,23 @@ const pendingKnowledgeId = ref<string | null>(
   (route.query.knowledge_id as string) || null
 );
 
+// Citation links keep the exact fragment coordinate instead of degrading to a
+// whole-document route. DocContent renders this chunk in a highlighted card.
+const citationFocusChunkId = computed(() => {
+  const routedKnowledgeId = typeof route.query.knowledge_id === 'string' ? route.query.knowledge_id : '';
+  const routedChunkId = typeof route.query.chunk_id === 'string' ? route.query.chunk_id : '';
+  return routedKnowledgeId && routedKnowledgeId === details.id ? routedChunkId : '';
+});
+
 const tryAutoOpenDocument = () => {
-  if (!pendingKnowledgeId.value || !cardList.value?.length) return;
+  if (!pendingKnowledgeId.value) return;
   const targetId = pendingKnowledgeId.value;
   pendingKnowledgeId.value = null;
   const card = cardList.value.find((c: KnowledgeCard) => c.id === targetId);
-  if (card) {
-    nextTick(() => openCardDetails(card));
-  } else {
-    nextTick(() => {
-      openCardDetails({ id: targetId } as KnowledgeCard);
-    });
-  }
+  // A cited document may live inside a nested folder and therefore be absent
+  // from the currently loaded root page. The detail API is ID-addressable, so
+  // the deep link must not depend on the visible list containing the document.
+  nextTick(() => openCardDetails(card || ({ id: targetId } as KnowledgeCard)));
 };
 
 // React to later ?knowledge_id= changes on the same KB route (no remount).
@@ -1584,6 +1602,7 @@ const handleOpenKnowledgeEvent = (e: Event) => {
 onMounted(() => {
   loadKnowledgeList();
   editorResources.ensureParserEngines();
+  tryAutoOpenDocument();
 
   window.addEventListener('knowledgeFileUploaded', handleFileUploaded as EventListener);
   window.addEventListener('openURLImportDialog', handleOpenURLImportDialog as EventListener);
@@ -1605,7 +1624,7 @@ watch(() => cardList.value, (newValue) => {
   docListLoading.value = false;
 
   // Auto-open document if navigated with ?knowledge_id=xxx
-  if (pendingKnowledgeId.value && newValue?.length) {
+  if (pendingKnowledgeId.value) {
     tryAutoOpenDocument();
   }
 
@@ -3172,9 +3191,13 @@ async function createNewSession(value: string): Promise<void> {
                                 <span>{{ $t('knowledgeFolders.derivativeTasks') }}</span>
                                 <strong>{{ folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }}</strong>
                               </div>
-                              <div class="folder-status-item is-danger">
+                              <div class="folder-status-item is-warning">
                                 <span>{{ $t('knowledgeFolders.abnormalDocuments') }}</span>
                                 <strong>{{ folder.stats.abnormal_document_count }}</strong>
+                              </div>
+                              <div class="folder-status-item is-danger">
+                                <span>{{ $t('knowledgeFolders.failedDocuments') }}</span>
+                                <strong>{{ folder.stats.failed_document_count }}</strong>
                               </div>
                             </div>
                           </template>
@@ -3527,6 +3550,7 @@ async function createNewSession(value: string): Promise<void> {
 
       <!-- DocContent drawer (shared by documents tab and wiki source refs) -->
       <DocContent ref="docContentRef" :visible="isCardDetails" :details="details" :canEditKB="canEdit"
+        :focusChunkId="citationFocusChunkId"
         @closeDoc="closeDoc" @getDoc="getDoc">
       </DocContent>
     </div>
@@ -4761,6 +4785,10 @@ async function createNewSession(value: string): Promise<void> {
 
   &.is-danger strong {
     color: var(--td-error-color);
+  }
+
+  &.is-warning strong {
+    color: var(--td-warning-color);
   }
 }
 

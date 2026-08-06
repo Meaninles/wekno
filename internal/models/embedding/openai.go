@@ -9,6 +9,8 @@ import (
 	"math"
 	"net/http"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -45,6 +47,64 @@ type OpenAIEmbedResponse struct {
 		Embedding []float32 `json:"embedding"`
 		Index     int       `json:"index"`
 	} `json:"data"`
+}
+
+type embeddingInputDiagnostic struct {
+	Bytes           int
+	Runes           int
+	EstimatedTokens int
+	Language        string
+}
+
+func diagnoseEmbeddingInput(text string) embeddingInputDiagnostic {
+	runes := utf8.RuneCountInString(text)
+	var cjk, latin int
+	for _, r := range text {
+		switch {
+		case unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hangul, r) ||
+			unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r):
+			cjk++
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+			latin++
+		}
+	}
+	language := "mixed"
+	charsPerToken := 3.0
+	if cjk+latin > 0 {
+		cjkRatio := float64(cjk) / float64(cjk+latin)
+		latinRatio := float64(latin) / float64(cjk+latin)
+		switch {
+		case cjkRatio >= 0.15 && latinRatio >= 0.15:
+			language = "mixed"
+		case cjkRatio > 0.3:
+			language = "cjk"
+			charsPerToken = 1.7
+		default:
+			language = "latin"
+			charsPerToken = 4.0
+		}
+	}
+	estimatedTokens := 0
+	if runes > 0 {
+		estimatedTokens = max(1, int(float64(runes)/charsPerToken+0.5))
+	}
+	return embeddingInputDiagnostic{
+		Bytes:           len(text),
+		Runes:           runes,
+		EstimatedTokens: estimatedTokens,
+		Language:        language,
+	}
+}
+
+func embeddingInputPreview(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes]) + "..."
 }
 
 // NewOpenAIEmbedder creates a new OpenAI embedder
@@ -174,7 +234,6 @@ func (e *OpenAIEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 	// 由下方 applyDimension 在客户端做 MRL 截断——对支持 MRL 的模型，客户端截断与服务端降维
 	// 数学等价。supportsDimensionOverride 仍作为 UI 开关（允许配置 dimension），但不再透传服务端。
 
-
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		logger.GetLogger(ctx).Errorf("OpenAIEmbedder EmbedBatch marshal request error: %v", err)
@@ -185,28 +244,34 @@ func (e *OpenAIEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 	logger.GetLogger(ctx).Debugf("OpenAIEmbedder BatchEmbed: model=%s, input_count=%d, truncate_tokens=%d",
 		e.modelName, len(texts), e.truncatePromptTokens)
 
-	// Check for invalid input lengths and log details
-	hasInvalidLength := false
+	// Byte length is not token length: a valid CJK input can exceed 8,192
+	// UTF-8 bytes while remaining far below an 8,192-token model window.
+	// Report rune and conservative token estimates against the configured
+	// provider budget instead of emitting a false INVALID error at 8,192 bytes.
+	emptyInputs := 0
 	for i, text := range texts {
-		textLen := len(text)
-		textPreview := text
-		if len(textPreview) > 200 {
-			textPreview = textPreview[:200] + "..."
-		}
-
-		// Log warning if length is outside valid range [1, 8192]
-		if textLen == 0 || textLen > 8192 {
-			hasInvalidLength = true
-			logger.GetLogger(ctx).Errorf("OpenAIEmbedder BatchEmbed input[%d]: INVALID length=%d (must be [1, 8192]), preview=%s",
-				i, textLen, textPreview)
+		diagnostic := diagnoseEmbeddingInput(text)
+		preview := embeddingInputPreview(text, 200)
+		if diagnostic.Runes == 0 {
+			emptyInputs++
+			logger.GetLogger(ctx).Errorf("OpenAIEmbedder BatchEmbed input[%d]: empty input", i)
+		} else if e.truncatePromptTokens > 0 && diagnostic.EstimatedTokens > e.truncatePromptTokens {
+			logger.GetLogger(ctx).Warnf(
+				"OpenAIEmbedder BatchEmbed input[%d]: estimated_tokens=%d exceeds configured_token_budget=%d (bytes=%d runes=%d language=%s); provider may truncate, preview=%s",
+				i, diagnostic.EstimatedTokens, e.truncatePromptTokens, diagnostic.Bytes,
+				diagnostic.Runes, diagnostic.Language, preview,
+			)
 		} else {
-			logger.GetLogger(ctx).Debugf("OpenAIEmbedder BatchEmbed input[%d]: length=%d, preview=%s",
-				i, textLen, textPreview)
+			logger.GetLogger(ctx).Debugf(
+				"OpenAIEmbedder BatchEmbed input[%d]: bytes=%d runes=%d estimated_tokens=%d configured_token_budget=%d language=%s, preview=%s",
+				i, diagnostic.Bytes, diagnostic.Runes, diagnostic.EstimatedTokens,
+				e.truncatePromptTokens, diagnostic.Language, preview,
+			)
 		}
 	}
 
-	if hasInvalidLength {
-		logger.GetLogger(ctx).Errorf("OpenAIEmbedder BatchEmbed: Found invalid input lengths, this will likely cause API error")
+	if emptyInputs > 0 {
+		logger.GetLogger(ctx).Errorf("OpenAIEmbedder BatchEmbed: found %d empty input(s); provider may reject the request", emptyInputs)
 	}
 
 	// Send request (passing jsonData instead of constructing http.Request)

@@ -1,16 +1,15 @@
 <template>
   <div class="embed-bot-msg" :class="{ 'is-embedded': embeddedMode }">
+    <SourceReferenceHub v-if="session?.is_completed || session?.knowledge_references?.length" ref="sourceReferenceHub" :session="session"
+      :content="answerText" embedded-mode />
+    <CompletedSimpleRunSummary v-if="!session?.isRagMode && !session?.isAgentMode" :message="session as Record<string, any>" />
     <div v-if="session?.isRagMode" class="rag-answer-stack">
       <RagPipelineProgress :session="session" embedded-mode />
-      <SourceReferenceHub v-if="session?.knowledge_references?.length" ref="sourceReferenceHub" :session="session"
-        :content="answerText" embedded-mode />
       <AgentStreamDisplay v-if="session?.isAgentMode" :session="session" :session-id="sessionId" :user-query="userQuery"
         rag-mode :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken"
         :embed-session-sig="embedSessionSig" />
     </div>
     <template v-else>
-      <SourceReferenceHub v-if="session?.knowledge_references?.length" ref="sourceReferenceHub" :session="session"
-        :content="answerText" embedded-mode />
       <AgentStreamDisplay v-if="session?.isAgentMode" :session="session" :session-id="sessionId" :user-query="userQuery"
         :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken"
         :embed-session-sig="embedSessionSig" />
@@ -79,6 +78,9 @@ const AgentStreamDisplay = defineAsyncComponent(
 )
 const SourceReferenceHub = defineAsyncComponent(
   () => import('@/views/chat/components/SourceReferenceHub.vue'),
+)
+const CompletedSimpleRunSummary = defineAsyncComponent(
+  () => import('@/custom/modules/sourcerefs/CompletedSimpleRunSummary.vue'),
 )
 const DeepThink = defineAsyncComponent(
   () => import('@/views/chat/components/deepThink.vue'),

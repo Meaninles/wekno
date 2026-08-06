@@ -298,7 +298,7 @@ const fullStreamText = `
 \`\`\`
 APR = ((Fees + Interest) / Principal) × (365 / Days in Loan Term)
 \`\`\`
-<kb doc="2502.08127v1.pdf" chunk_id="1ecdce8a-f922-4d0c-b124-257ab4634da2" />
+<src id="S1" />
 
 ### 重要性
 

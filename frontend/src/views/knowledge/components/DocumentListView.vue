@@ -245,9 +245,13 @@ const handleFolderAction = (action: 'edit' | 'move' | 'delete', folder: Knowledg
                   <span>{{ t('knowledgeFolders.derivativeTasks') }}</span>
                   <strong>{{ folder.stats.enrichment_pending_task_count + folder.stats.wiki_pending_task_count }}</strong>
                 </div>
-                <div class="folder-status-item is-danger">
+                <div class="folder-status-item is-warning">
                   <span>{{ t('knowledgeFolders.abnormalDocuments') }}</span>
                   <strong>{{ folder.stats.abnormal_document_count }}</strong>
+                </div>
+                <div class="folder-status-item is-danger">
+                  <span>{{ t('knowledgeFolders.failedDocuments') }}</span>
+                  <strong>{{ folder.stats.failed_document_count }}</strong>
                 </div>
               </div>
             </template>
@@ -519,6 +523,10 @@ const handleFolderAction = (action: 'edit' | 'move' | 'delete', folder: Knowledg
 
   &.is-danger strong {
     color: var(--td-error-color);
+  }
+
+  &.is-warning strong {
+    color: var(--td-warning-color);
   }
 }
 

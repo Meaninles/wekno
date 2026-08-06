@@ -1,8 +1,10 @@
-export type SourceReferenceKind = 'knowledge' | 'wiki' | 'web' | 'data_source'
+export type SourceReferenceKind = 'knowledge' | 'wiki' | 'web'
 
 export type SourceReference = {
   id?: string
   content?: string
+  evidence_content?: string
+  matched_content?: string
   knowledge_id?: string
   knowledge_title?: string
   knowledge_filename?: string
@@ -39,17 +41,16 @@ export type SourceReferenceItem = {
 }
 
 const CITATION_ID_RE = /^S(\d+)$/i
-const SRC_TAG_RE = /<src\b([^>]*?)\s*\/?>/gi
-const SRC_ID_ATTR_RE = /\b(?:id|source_id|sourceId)\s*=\s*"([^"]*)"/i
+const SRC_TAG_RE = /<src id="(S[1-9][0-9]*)" \/>/g
 
-export function getSourceReferenceKind(ref: SourceReference): SourceReferenceKind {
+export function getSourceReferenceKind(ref: SourceReference): SourceReferenceKind | '' {
   const metadataType = ref.metadata?.source_type
   if (metadataType === 'wiki') return 'wiki'
   if (metadataType === 'web') return 'web'
-  if (metadataType === 'data_source') return 'data_source'
+  if (metadataType === 'data_source') return ''
   if (ref.chunk_type === 'wiki_page') return 'wiki'
   if (ref.chunk_type === 'web_search') return 'web'
-  if (ref.chunk_type === 'data_source') return 'data_source'
+  if (ref.chunk_type === 'data_source' || ref.chunk_type === 'data_query_result') return ''
   return 'knowledge'
 }
 
@@ -63,11 +64,17 @@ export function buildSourceReferenceItems(
   for (const ref of refs || []) {
     if (!ref) continue
     const type = getSourceReferenceKind(ref)
+    if (!type || !hasExactReferenceIdentity(ref, type)) continue
     const metadata = ref.metadata || {}
     const citationId = metadata.citation_id || ''
     const key = citationId || fallbackSourceKey(ref, type)
     if (!key) continue
-    const fullContent = referenceContent(ref.content || '')
+    // The backend emits an immutable evidence snapshot whose content and exact
+    // location describe the same source unit. Retrieval matched text (including
+    // generated questions) and aggregate model context are intentionally never
+    // presentation fallbacks.
+    const displayContent = ref.evidence_content || ''
+    const fullContent = referenceContent(displayContent)
 
     if (!firstSeen.has(key)) {
       firstSeen.set(key, seenIndex++)
@@ -77,7 +84,7 @@ export function buildSourceReferenceItems(
     if (existing) {
       existing.count += 1
       mergeReferenceContent(existing, fullContent)
-      if (!existing.snippet) existing.snippet = summarizeContent(ref.content || '')
+      if (!existing.snippet) existing.snippet = summarizeContent(displayContent)
       continue
     }
 
@@ -89,8 +96,8 @@ export function buildSourceReferenceItems(
     const chunkIndex = numberValue(ref.chunk_index ?? metadata.chunk_index)
     const startAt = numberValue(ref.start_at ?? metadata.start_at)
     const endAt = numberValue(ref.end_at ?? metadata.end_at)
-    const sourceId = metadata.source_id || stripDataSourceID(ref.id || '')
-    const title = normalizeDisplayText(sourceTitle(ref, type, url, slug, sourceId))
+    const sourceId = metadata.source_id || ''
+    const title = normalizeDisplayText(sourceTitle(ref, type, url, slug))
     const sourceLabel = normalizeDisplayText(sourceLabelFor(ref, type, url))
 
     grouped.set(key, {
@@ -102,7 +109,7 @@ export function buildSourceReferenceItems(
       sourceLabel,
       content: fullContent,
       fragmentCount: fullContent ? 1 : 0,
-      snippet: summarizeContent(ref.content || ''),
+      snippet: summarizeContent(displayContent),
       count: 1,
       icon: iconForSourceType(type),
       url,
@@ -120,7 +127,6 @@ export function buildSourceReferenceItems(
         knowledgeId,
         chunkId,
         slug,
-        sourceId,
       }),
     })
   }
@@ -142,7 +148,6 @@ export function findSourceReferenceItem(
 export function buildCitedSourceReferenceItems(
   refs: SourceReference[] | null | undefined,
   content: string,
-  includeFallback: boolean,
 ): SourceReferenceItem[] {
   const allItems = buildSourceReferenceItems(refs)
   if (!allItems.length) return []
@@ -161,13 +166,7 @@ export function buildCitedSourceReferenceItems(
     seen.add(item.key)
     citedItems.push(item)
   }
-  if (citedItems.length > 0) return renumberSourceItems(citedItems)
-
-  if (!includeFallback || hasLegacyInlineCitation(content)) return []
-  return allItems
-    .filter((item) => item.type !== 'data_source' && item.citationId)
-    .slice(0, 6)
-    .map((item, index) => ({ ...item, number: index + 1 }))
+  return citedItems.length > 0 ? renumberSourceItems(citedItems) : []
 }
 
 export function extractSourceCitationIds(content: string): string[] {
@@ -176,8 +175,7 @@ export function extractSourceCitationIds(content: string): string[] {
   SRC_TAG_RE.lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = SRC_TAG_RE.exec(String(content || ''))) !== null) {
-    const attrMatch = (match[1] || '').match(SRC_ID_ATTR_RE)
-    const id = attrMatch?.[1]?.trim()
+    const id = match[1]
     if (!id || seen.has(id)) continue
     seen.add(id)
     ids.push(id)
@@ -188,8 +186,27 @@ export function extractSourceCitationIds(content: string): string[] {
 export function sourceTypeLabel(type: SourceReferenceKind): string {
   if (type === 'web') return '网页'
   if (type === 'wiki') return 'Wiki'
-  if (type === 'data_source') return '数据源'
   return '知识库文档片段'
+}
+
+/**
+ * Build the same exact target used by IM final-output rendering. Document
+ * citations require a concrete chunk; missing coordinates never downgrade to
+ * a whole-document link.
+ */
+export function buildSourceReferenceHref(item: SourceReferenceItem): string {
+  if (item.type === 'web') return isHttpUrl(item.url) ? item.url : ''
+  if (item.type === 'wiki') {
+    if (!item.knowledgeBaseId || !item.slug) return ''
+    const query = new URLSearchParams({ tab: 'graph', slug: item.slug })
+    return `/platform/knowledge-bases/${encodeURIComponent(item.knowledgeBaseId)}?${query.toString()}`
+  }
+  if (!item.knowledgeBaseId || !item.knowledgeId || !item.chunkId) return ''
+  const query = new URLSearchParams({
+    knowledge_id: item.knowledgeId,
+    chunk_id: item.chunkId,
+  })
+  return `/platform/knowledge-bases/${encodeURIComponent(item.knowledgeBaseId)}?${query.toString()}`
 }
 
 export function hostFromUrl(value?: string): string {
@@ -259,9 +276,6 @@ function fallbackSourceKey(ref: SourceReference, type: SourceReferenceKind): str
     const kbId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
     return `wiki:${kbId}:${slug || ref.knowledge_title || ref.id || ''}`
   }
-  if (type === 'data_source') {
-    return `data_source:${metadata.source_id || stripDataSourceID(ref.id || '') || metadata.source_name || ref.id || ''}`
-  }
   const kbId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
   const knowledgeId = ref.knowledge_id || metadata.knowledge_id || ''
   const chunkId = knowledgeChunkId(ref, type)
@@ -269,7 +283,7 @@ function fallbackSourceKey(ref: SourceReference, type: SourceReferenceKind): str
   return `knowledge:${kbId}:${knowledgeId || ref.knowledge_title || ref.knowledge_filename || ref.id || ''}`
 }
 
-function sourceTitle(ref: SourceReference, type: SourceReferenceKind, url: string, slug: string, sourceId: string): string {
+function sourceTitle(ref: SourceReference, type: SourceReferenceKind, url: string, slug: string): string {
   const metadata = ref.metadata || {}
   return metadata.citation_title
     || metadata.source_name
@@ -278,7 +292,6 @@ function sourceTitle(ref: SourceReference, type: SourceReferenceKind, url: strin
     || ref.knowledge_filename
     || (type === 'wiki' ? slug : '')
     || (type === 'web' ? hostFromUrl(url) || url : '')
-    || (type === 'data_source' ? sourceId : '')
     || ref.id
     || sourceTypeLabel(type)
 }
@@ -287,14 +300,12 @@ function sourceLabelFor(ref: SourceReference, type: SourceReferenceKind, url: st
   const metadata = ref.metadata || {}
   if (type === 'web') return hostFromUrl(url) || metadata.source || '网页'
   if (type === 'wiki') return metadata.knowledge_base_name || 'Wiki'
-  if (type === 'data_source') return metadata.database_type || metadata.source_name || '数据源'
   return metadata.knowledge_base_name || metadata.source_name || '知识库文档片段'
 }
 
 function iconForSourceType(type: SourceReferenceKind): string {
   if (type === 'web') return 'internet'
   if (type === 'wiki') return 'browse'
-  if (type === 'data_source') return 'server'
   return 'file'
 }
 
@@ -306,13 +317,26 @@ function isClickable(
     knowledgeId: string
     chunkId: string
     slug: string
-    sourceId: string
   },
 ): boolean {
   if (type === 'web') return Boolean(info.url)
   if (type === 'wiki') return Boolean(info.knowledgeBaseId && info.slug)
-  if (type === 'data_source') return Boolean(info.sourceId)
-  return Boolean(info.chunkId || info.knowledgeId || info.knowledgeBaseId)
+  return Boolean(info.knowledgeBaseId && info.knowledgeId && info.chunkId)
+}
+
+function hasExactReferenceIdentity(ref: SourceReference, type: SourceReferenceKind): boolean {
+  const metadata = ref.metadata || {}
+  if (type === 'web') {
+    return isHttpUrl(metadata.url || (isHttpUrl(ref.id) ? ref.id : ''))
+  }
+  if (type === 'wiki') {
+    const knowledgeBaseId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
+    const slug = metadata.slug || stripWikiID(ref.id || '')
+    return Boolean(knowledgeBaseId && slug)
+  }
+  const knowledgeBaseId = ref.knowledge_base_id || metadata.knowledge_base_id || ''
+  const knowledgeId = ref.knowledge_id || metadata.knowledge_id || ''
+  return Boolean(knowledgeBaseId && knowledgeId && knowledgeChunkId(ref, type))
 }
 
 function nearestReferenceTarget(candidates: HTMLElement[], origin?: Element | null): HTMLElement | null {
@@ -379,17 +403,6 @@ function numberValue(value: unknown): number | null {
 
 function stripWikiID(value: string): string {
   return value.replace(/^wiki:[^:]*:/, '')
-}
-
-function stripDataSourceID(value: string): string {
-  return value.replace(/^data_source:/, '')
-}
-
-function hasLegacyInlineCitation(content: string): boolean {
-  const text = String(content || '')
-  return /<kb\b([^>]*?)\s*\/?>/i.test(text)
-    || /<web\b([^>]*?)\s*\/?>/i.test(text)
-    || /\[\[([^\]]+)\]\]/.test(text)
 }
 
 function renumberSourceItems(items: SourceReferenceItem[]): SourceReferenceItem[] {

@@ -19,6 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
+	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -27,7 +28,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
-	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -438,7 +438,9 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) (retErr
 			return
 		}
 		if handleErr != nil {
-			s.tracker().FailSpan(ctx, gSpan, "GRAPH_EXTRACT_FAILED", handleErr.Error(), handleErr)
+			if !deferTrackedSpanIfDurableWait(ctx, s.tracker(), gSpan, handleErr, retErr) {
+				s.tracker().FailSpan(ctx, gSpan, "GRAPH_EXTRACT_FAILED", handleErr.Error(), handleErr)
+			}
 		} else {
 			s.tracker().EndSpan(ctx, gSpan, graphOut)
 		}
@@ -728,8 +730,6 @@ type DataTableSummaryService struct {
 	retrieveEngine       interfaces.RetrieveEngineRegistry
 	ownership            retriever.TenantStoreOwnership
 	sqlDB                *sql.DB
-	taskEnqueuer         interfaces.TaskEnqueuer
-	redisClient          *redis.Client
 	splitManager         *documentsplit.Manager
 }
 
@@ -745,8 +745,6 @@ func NewDataTableSummaryService(
 	retrieveEngine interfaces.RetrieveEngineRegistry,
 	ownership retriever.TenantStoreOwnership,
 	sqlDB *sql.DB,
-	taskEnqueuer interfaces.TaskEnqueuer,
-	redisClient *redis.Client,
 	splitManager *documentsplit.Manager,
 ) interfaces.TaskHandler {
 	return &DataTableSummaryService{
@@ -760,15 +758,13 @@ func NewDataTableSummaryService(
 		retrieveEngine:       retrieveEngine,
 		ownership:            ownership,
 		sqlDB:                sqlDB,
-		taskEnqueuer:         taskEnqueuer,
-		redisClient:          redisClient,
 		splitManager:         splitManager,
 	}
 }
 
 // Handle implements the TaskHandler interface for table extraction
 // 整体流程：初始化 -> 准备资源 -> 加载数据 -> 生成摘要 -> 创建索引
-func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) (retErr error) {
+func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) error {
 	// 1. 解析任务并初始化上下文
 	var payload DataTableSummaryPayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
@@ -796,35 +792,6 @@ func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) (re
 		logger.Infof(ctx, "data-table summary: stale generation for %s, skipping", payload.KnowledgeID)
 		return nil
 	}
-	plan, err := processownership.ParseFanoutPlan(knowledge.ProcessingFanout)
-	if err != nil {
-		return fmt.Errorf("load data-table durable fanout plan: %w", err)
-	}
-	completionStore, ok := s.knowledgeRepo.(processownership.DurableFanoutCompletionStore)
-	if !ok || completionStore == nil {
-		return errors.New("data-table summary: durable fanout completion repository is unavailable")
-	}
-	item := processownership.DataTableFanoutItem()
-	done, _, err := processownership.DurableFanoutItemCompleted(
-		ctx, completionStore, s.redisClient, plan, item,
-	)
-	if err != nil {
-		return fmt.Errorf("read durable data-table fan-in completion: %w", err)
-	}
-	if done {
-		return s.replayDataTableFanIn(ctx, payload, plan, completionStore)
-	}
-	skipFanIn := false
-	defer func() {
-		if skipFanIn || isDurableTaskDeferred(retErr) ||
-			(retErr != nil && !isFinalAsynqAttempt(ctx)) {
-			return
-		}
-		if err := s.completeDataTableFanIn(ctx, payload, plan, completionStore); err != nil {
-			retErr = errors.Join(retErr, err)
-		}
-	}()
-
 	logger.Infof(ctx, "Processing table extraction for knowledge: %s", payload.KnowledgeID)
 
 	// 2. 准备所有必需的资源（知识、模型、引擎等）
@@ -843,7 +810,6 @@ func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) (re
 		return fmt.Errorf("revalidate data-table generation: %w", err)
 	}
 	if !current {
-		skipFanIn = true
 		logger.Infof(ctx, "data-table summary: generation changed before chunk write for %s, skipping", payload.KnowledgeID)
 		return nil
 	}
@@ -873,80 +839,10 @@ func (s *DataTableSummaryService) currentDataTableGeneration(
 		knowledge.TenantID == payload.TenantID &&
 		knowledge.KnowledgeBaseID == payload.KnowledgeBaseID &&
 		knowledge.ProcessingGeneration == payload.ProcessingGeneration &&
-		(knowledge.ParseStatus == types.ParseStatusPending || knowledge.ParseStatus == types.ParseStatusProcessing)
+		(knowledge.ParseStatus == types.ParseStatusProcessing ||
+			knowledge.ParseStatus == types.ParseStatusFinalizing ||
+			knowledge.ParseStatus == types.ParseStatusCompleted)
 	return knowledge, current, nil
-}
-
-func (s *DataTableSummaryService) replayDataTableFanIn(
-	ctx context.Context,
-	payload types.DataTableSummaryPayload,
-	plan processownership.FanoutPlan,
-	completionStore processownership.DurableFanoutCompletionStore,
-) error {
-	remaining, err := processownership.DurableFanoutRemaining(
-		ctx, completionStore, s.redisClient, plan,
-	)
-	if err != nil {
-		return fmt.Errorf("replay data-table fan-in: %w", err)
-	}
-	if remaining > 0 {
-		return nil
-	}
-	if err := s.enqueueDataTablePostProcess(payload); err != nil {
-		return fmt.Errorf("replay data-table postprocess enqueue: %w", err)
-	}
-	return processownership.ClearFanIn(
-		ctx, s.redisClient, payload.KnowledgeID, payload.ProcessingGeneration,
-	)
-}
-
-func (s *DataTableSummaryService) completeDataTableFanIn(
-	ctx context.Context,
-	payload types.DataTableSummaryPayload,
-	plan processownership.FanoutPlan,
-	completionStore processownership.DurableFanoutCompletionStore,
-) error {
-	completionCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx), finalizeSubtaskDetachedTimeout,
-	)
-	defer cancel()
-	remaining, _, err := processownership.CompleteDurableFanoutItem(
-		completionCtx,
-		completionStore,
-		s.redisClient,
-		plan,
-		processownership.DataTableFanoutItem(),
-	)
-	if err != nil {
-		return fmt.Errorf("complete data-table fan-in: %w", err)
-	}
-	if remaining > 0 {
-		return nil
-	}
-	if err := s.enqueueDataTablePostProcess(payload); err != nil {
-		return fmt.Errorf("enqueue postprocess after data-table fan-in: %w", err)
-	}
-	if err := processownership.ClearFanIn(
-		completionCtx, s.redisClient, payload.KnowledgeID, payload.ProcessingGeneration,
-	); err != nil {
-		logger.Warnf(ctx, "failed to clear completed data-table fan-in keys for %s: %v",
-			payload.KnowledgeID, err)
-	}
-	return nil
-}
-
-func (s *DataTableSummaryService) enqueueDataTablePostProcess(
-	payload types.DataTableSummaryPayload,
-) error {
-	return processownership.EnqueuePostProcess(s.taskEnqueuer, types.KnowledgePostProcessPayload{
-		TracingContext:       payload.TracingContext,
-		TenantID:             payload.TenantID,
-		KnowledgeID:          payload.KnowledgeID,
-		KnowledgeBaseID:      payload.KnowledgeBaseID,
-		ProcessingGeneration: payload.ProcessingGeneration,
-		Language:             payload.Language,
-		Attempt:              payload.Attempt,
-	})
 }
 
 // extractionResources 封装提取过程所需的所有资源
@@ -1212,46 +1108,120 @@ func (s *DataTableSummaryService) processPersistedTableData(
 	return s.buildChunks(resources, tableDescription, columnDescription), nil
 }
 
-// buildChunks 构建chunk对象
-// tableDescription和columnDescriptions分别生成一个chunk
+// buildChunks constructs the generated table metadata chunks. Summary and
+// column metadata are split against the configured embedding window before
+// persistence, so the retrieval layer never has to truncate their tails. The
+// split is lossless: every original rune belongs to exactly one ordered chunk.
 func (s *DataTableSummaryService) buildChunks(resources *extractionResources, tableDescription string, columnDescription string) []*types.Chunk {
-	chunks := make([]*types.Chunk, 0, 2)
+	summaryParts := splitDataTableGeneratedContent(tableDescription, resources.embeddingModel)
+	columnParts := splitDataTableGeneratedContent(columnDescription, resources.embeddingModel)
+	chunks := make([]*types.Chunk, 0, len(summaryParts)+len(columnParts))
 
-	// 表格摘要chunk
-	summaryChunk := &types.Chunk{
-		ID:                   stableDataTableChunkID(resources.knowledge, "summary"),
-		TenantID:             resources.knowledge.TenantID,
-		KnowledgeID:          resources.knowledge.ID,
-		KnowledgeBaseID:      resources.knowledge.KnowledgeBaseID,
-		Content:              tableDescription,
-		ChunkIndex:           0,
-		IsEnabled:            true,
-		ChunkType:            types.ChunkTypeTableSummary,
-		Status:               int(types.ChunkStatusStored),
-		ProcessingGeneration: resources.knowledge.ProcessingGeneration,
+	var summaryRoot, previous *types.Chunk
+	for index, content := range summaryParts {
+		kind := "summary"
+		if index > 0 {
+			kind = fmt.Sprintf("summary:%06d", index)
+		}
+		summaryChunk := &types.Chunk{
+			ID:                   stableDataTableChunkID(resources.knowledge, kind),
+			TenantID:             resources.knowledge.TenantID,
+			KnowledgeID:          resources.knowledge.ID,
+			KnowledgeBaseID:      resources.knowledge.KnowledgeBaseID,
+			Content:              content,
+			ChunkIndex:           len(chunks),
+			IsEnabled:            true,
+			ChunkType:            types.ChunkTypeTableSummary,
+			Status:               int(types.ChunkStatusStored),
+			ProcessingGeneration: resources.knowledge.ProcessingGeneration,
+		}
+		if summaryRoot == nil {
+			summaryRoot = summaryChunk
+		} else {
+			summaryChunk.ParentChunkID = summaryRoot.ID
+			summaryChunk.PreChunkID = previous.ID
+			previous.NextChunkID = summaryChunk.ID
+		}
+		chunks = append(chunks, summaryChunk)
+		previous = summaryChunk
 	}
-	chunks = append(chunks, summaryChunk)
 
-	// 列描述chunk（所有列的描述合并为一个chunk）
-	columnChunk := &types.Chunk{
-		ID:                   stableDataTableChunkID(resources.knowledge, "columns"),
-		TenantID:             resources.knowledge.TenantID,
-		KnowledgeID:          resources.knowledge.ID,
-		KnowledgeBaseID:      resources.knowledge.KnowledgeBaseID,
-		Content:              columnDescription,
-		ChunkIndex:           1,
-		IsEnabled:            true,
-		ChunkType:            types.ChunkTypeTableColumn,
-		ParentChunkID:        summaryChunk.ID,
-		Status:               int(types.ChunkStatusStored),
-		ProcessingGeneration: resources.knowledge.ProcessingGeneration,
+	for index, content := range columnParts {
+		kind := "columns"
+		if index > 0 {
+			kind = fmt.Sprintf("columns:%06d", index)
+		}
+		columnChunk := &types.Chunk{
+			ID:                   stableDataTableChunkID(resources.knowledge, kind),
+			TenantID:             resources.knowledge.TenantID,
+			KnowledgeID:          resources.knowledge.ID,
+			KnowledgeBaseID:      resources.knowledge.KnowledgeBaseID,
+			Content:              content,
+			ChunkIndex:           len(chunks),
+			IsEnabled:            true,
+			ChunkType:            types.ChunkTypeTableColumn,
+			ParentChunkID:        summaryRoot.ID,
+			Status:               int(types.ChunkStatusStored),
+			ProcessingGeneration: resources.knowledge.ProcessingGeneration,
+			PreChunkID:           previous.ID,
+		}
+		previous.NextChunkID = columnChunk.ID
+		chunks = append(chunks, columnChunk)
+		previous = columnChunk
 	}
-	chunks = append(chunks, columnChunk)
-
-	summaryChunk.NextChunkID = columnChunk.ID
-	columnChunk.PreChunkID = summaryChunk.ID
 
 	return chunks
+}
+
+func splitDataTableGeneratedContent(content string, embedder embedding.Embedder) []string {
+	if content == "" || embedder == nil {
+		return []string{content}
+	}
+	maxTokens := embedding.MaxInputTokens(embedder)
+	if maxTokens <= 0 {
+		return []string{content}
+	}
+	// Use the tightest supported language ratio for the physical parts. A wide
+	// table can mix English field names with Chinese descriptions; sizing from
+	// the aggregate language could make an individual CJK-heavy part exceed the
+	// indexer's own per-part budget and get truncated later.
+	maxRunes := chunker.CharsForTokenLimit(maxTokens, chunker.LangChinese)
+	if maxRunes <= 0 || len([]rune(content)) <= maxRunes {
+		return []string{content}
+	}
+	return splitRunesAtSemanticBoundary(content, maxRunes)
+}
+
+// splitRunesAtSemanticBoundary partitions text without trimming, overlap, or
+// synthetic prefixes. Concatenating the result must reproduce input byte for
+// byte; semantic boundaries only choose where the contiguous slices end.
+func splitRunesAtSemanticBoundary(content string, maxRunes int) []string {
+	if content == "" || maxRunes <= 0 {
+		return []string{content}
+	}
+	runes := []rune(content)
+	if len(runes) <= maxRunes {
+		return []string{content}
+	}
+	parts := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
+	for start := 0; start < len(runes); {
+		end := min(start+maxRunes, len(runes))
+		if end < len(runes) {
+			// Search only the last quarter so a very early newline cannot create
+			// a tiny part and inflate the generated chunk count.
+			floor := start + (maxRunes * 3 / 4)
+			for cursor := end - 1; cursor >= floor; cursor-- {
+				switch runes[cursor] {
+				case '\n', '。', '；', ';':
+					end = cursor + 1
+					cursor = floor - 1
+				}
+			}
+		}
+		parts = append(parts, string(runes[start:end]))
+		start = end
+	}
+	return parts
 }
 
 func stableDataTableChunkID(knowledge *types.Knowledge, kind string) string {
@@ -1300,6 +1270,9 @@ func (s *DataTableSummaryService) indexToVectorDB(
 		logger.Errorf(ctx, "failed to index chunks: %v", err)
 		return err
 	}
+	if err := s.deleteStaleDataTableChunks(ctx, chunks, engine, embedder); err != nil {
+		return err
+	}
 
 	// 更新chunk状态为已索引
 	for _, chunk := range chunks {
@@ -1310,6 +1283,48 @@ func (s *DataTableSummaryService) indexToVectorDB(
 		return err
 	}
 
+	return nil
+}
+
+func (s *DataTableSummaryService) deleteStaleDataTableChunks(
+	ctx context.Context,
+	desired []*types.Chunk,
+	engine *retriever.CompositeRetrieveEngine,
+	embedder embedding.Embedder,
+) error {
+	if len(desired) == 0 {
+		return nil
+	}
+	existing, err := s.chunkService.ListChunksByKnowledgeID(ctx, desired[0].KnowledgeID)
+	if err != nil {
+		return fmt.Errorf("list stale data-table chunks: %w", err)
+	}
+	desiredIDs := make(map[string]struct{}, len(desired))
+	for _, chunk := range desired {
+		desiredIDs[chunk.ID] = struct{}{}
+	}
+	staleIDs := make([]string, 0)
+	for _, chunk := range existing {
+		if chunk == nil || chunk.ProcessingGeneration != desired[0].ProcessingGeneration ||
+			(chunk.ChunkType != types.ChunkTypeTableSummary && chunk.ChunkType != types.ChunkTypeTableColumn) {
+			continue
+		}
+		if _, keep := desiredIDs[chunk.ID]; !keep {
+			staleIDs = append(staleIDs, chunk.ID)
+		}
+	}
+	if len(staleIDs) == 0 {
+		return nil
+	}
+	if err := engine.DeleteBySourceIDList(
+		ctx, staleIDs, embedder.GetDimensions(), types.KnowledgeBaseTypeDocument,
+	); err != nil {
+		return fmt.Errorf("delete stale data-table vector indexes: %w", err)
+	}
+	if err := s.chunkService.DeleteChunks(ctx, staleIDs); err != nil {
+		return fmt.Errorf("delete stale data-table chunks: %w", err)
+	}
+	logger.Infof(ctx, "Deleted %d stale generated data-table chunks", len(staleIDs))
 	return nil
 }
 

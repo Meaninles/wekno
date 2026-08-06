@@ -18,6 +18,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentpreview"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgesearch"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/custom/modules/processownership"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -39,6 +40,23 @@ type KnowledgeHandler struct {
 	agentShareService interfaces.AgentShareService
 	asynqClient       interfaces.TaskEnqueuer
 	spanRepo          repository.KnowledgeSpanRepository
+	spanV2            *processingtrace.Repository
+}
+
+func NewKnowledgeHandlerWithV2(
+	kgService interfaces.KnowledgeService,
+	kbService interfaces.KnowledgeBaseService,
+	kbShareService interfaces.KBShareService,
+	agentShareService interfaces.AgentShareService,
+	asynqClient interfaces.TaskEnqueuer,
+	spanRepo repository.KnowledgeSpanRepository,
+	spanV2 *processingtrace.Repository,
+) *KnowledgeHandler {
+	handler := NewKnowledgeHandler(
+		kgService, kbService, kbShareService, agentShareService, asynqClient, spanRepo,
+	)
+	handler.spanV2 = spanV2
+	return handler
 }
 
 type knowledgePreviewChunkCounter interface {
@@ -712,27 +730,43 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 
 	rows := []types.KnowledgeProcessingSpan{}
 	currentAttempt := 0
-	if h.spanRepo != nil {
+	latestAttempt := 0
+	var nextCursor string
+	if h.spanV2 != nil {
+		latest, lerr := h.spanV2.LatestAttempt(ctx, knowledge.ID)
+		if lerr != nil {
+			logger.Warnf(ctx, "spans V2 LatestAttempt failed for %s: %v", knowledge.ID, lerr)
+		} else {
+			latestAttempt = latest
+		}
 		if requestedAttempt == 0 {
-			latest, lerr := h.spanRepo.LatestAttempt(ctx, knowledge.ID)
-			if lerr != nil {
-				logger.Warnf(ctx, "spans LatestAttempt failed for %s: %v", knowledge.ID, lerr)
-			} else {
-				currentAttempt = latest
-			}
+			currentAttempt = latestAttempt
 		} else {
 			currentAttempt = requestedAttempt
 		}
 		if currentAttempt > 0 {
-			rows, err = h.spanRepo.ListByAttempt(ctx, knowledge.ID, currentAttempt)
-			if err != nil {
-				logger.Warnf(ctx, "spans ListByAttempt failed kid=%s attempt=%d: %v",
-					knowledge.ID, currentAttempt, err)
-				rows = nil
+			limit := 500
+			if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+				if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 {
+					limit = parsed
+				}
+			}
+			var cursor *processingtrace.Cursor
+			if raw := strings.TrimSpace(c.Query("cursor")); raw != "" {
+				cursor = &processingtrace.Cursor{LogicalKey: raw}
+			}
+			page, listErr := h.spanV2.List(ctx, knowledge.ID, currentAttempt, limit, cursor)
+			if listErr != nil {
+				logger.Warnf(ctx, "spans V2 List failed kid=%s attempt=%d: %v",
+					knowledge.ID, currentAttempt, listErr)
+			} else {
+				rows = processingV2Rows(page.Items)
+				if page.NextCursor != nil {
+					nextCursor = page.NextCursor.LogicalKey
+				}
 			}
 		}
 	}
-
 	// Build tree: index by SpanID, then attach to parents. Stages
 	// missing from the DB are synthesized as "pending" placeholders
 	// under a synthetic (or real, if present) root so the timeline
@@ -744,24 +778,64 @@ func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
 	tree, currentStageName, lastErr := buildSpanTree(knowledge.ID, currentAttempt, rows, knowledge.ParseStatus)
 
 	resp := gin.H{
-		"knowledge_id":    knowledge.ID,
-		"parse_status":    knowledge.ParseStatus,
+		"knowledge_id": knowledge.ID,
+		"parse_status": knowledge.ParseStatus,
+		// attempt/latest_attempt are the public parse-run contract used by
+		// the timeline. current_attempt is retained as a compatible alias.
+		"attempt":         currentAttempt,
+		"latest_attempt":  latestAttempt,
 		"current_attempt": currentAttempt,
 		"current_stage":   currentStageName,
 		"trace":           tree,
 	}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
 	if lastErr != nil {
 		resp["last_error"] = gin.H{
-			"stage":       lastErr.Name,
-			"code":        lastErr.ErrorCode,
-			"message":     lastErr.ErrorMessage,
-			"finished_at": lastErr.FinishedAt,
+			"name":          lastErr.Name,
+			"error_code":    lastErr.ErrorCode,
+			"error_message": lastErr.ErrorMessage,
+			"stage":         lastErr.Name,
+			"code":          lastErr.ErrorCode,
+			"message":       lastErr.ErrorMessage,
+			"finished_at":   lastErr.FinishedAt,
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    resp,
 	})
+}
+
+func processingV2Rows(spans []processingtrace.Span) []types.KnowledgeProcessingSpan {
+	rows := make([]types.KnowledgeProcessingSpan, 0, len(spans))
+	spanIDByKey := make(map[string]string, len(spans))
+	for _, span := range spans {
+		spanIDByKey[span.LogicalKey] = span.SpanID
+	}
+	for _, span := range spans {
+		started := span.StartedAt
+		row := types.KnowledgeProcessingSpan{
+			KnowledgeID: span.KnowledgeID, Attempt: span.Attempt,
+			SpanID: span.SpanID, ParentSpanID: spanIDByKey[span.ParentLogicalKey],
+			Name: span.Name, Kind: span.Kind, Status: span.Status,
+			ErrorCode: span.LastErrorCode, ErrorMessage: span.LastErrorMessage,
+			StartedAt: &started, FinishedAt: span.FinishedAt,
+			DurationMs: span.DurationMS, CreatedAt: span.CreatedAt, UpdatedAt: span.UpdatedAt,
+		}
+		if span.InputSummary != "" {
+			_ = json.Unmarshal([]byte(span.InputSummary), &row.Input)
+		}
+		if span.OutputSummary != "" {
+			_ = json.Unmarshal([]byte(span.OutputSummary), &row.Output)
+		}
+		if span.MetadataSummary != "" {
+			_ = json.Unmarshal([]byte(span.MetadataSummary), &row.Metadata)
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // buildSpanTree assembles a flat list of span rows into a parent-child
@@ -915,7 +989,7 @@ func buildSpanTree(knowledgeID string, attempt int, rows []types.KnowledgeProces
 // @Param        keyword       query     string  false  "关键词搜索"
 // @Param        file_type     query     string  false  "文件类型筛选"
 // @Param        parse_status     query     string  false  "核心解析状态筛选"
-// @Param        workflow_status  query     string  false  "完整工作流状态筛选 (pending/processing/cancelling/deleting/completed/failed/cancelled/draft)"
+// @Param        workflow_status  query     string  false  "完整工作流状态筛选 (pending/processing/cancelling/deleting/completed/degraded/failed/cancelled/draft)"
 // @Param        source        query     string  false  "来源/渠道筛选 (web/api/feishu/notion/yuque/wechat/...，或 manual/url 按 type 过滤)"
 // @Param        start_time    query     string  false  "更新时间起点，RFC3339 格式"
 // @Param        end_time      query     string  false  "更新时间终点，RFC3339 格式"

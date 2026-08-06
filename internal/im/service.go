@@ -17,8 +17,12 @@ import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
+	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
 	mcppkg "github.com/Tencent/WeKnora/internal/mcp"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -47,14 +51,14 @@ const (
 	agentCompleteWaitTimeout = 10 * time.Second
 )
 
-// imCitationTagRe matches inline citation tags produced by the agent pipeline.
-// These tags are rendered as interactive UI in the web frontend but are meaningless
-// in IM platforms, so they must be stripped before sending.
-var imCitationTagRe = regexp.MustCompile(`<(?:kb|web)\b[^>]*/?>`)
-
-// stripIMCitationTags removes <kb .../> and <web .../> inline citation tags from s.
+// stripIMCitationTags removes the internal citation protocol before content is
+// sent to IM platforms. The web clients render canonical source handles using
+// message-bound reference metadata; IM clients do not have that renderer.
+//
+// This is intentionally a strict removal operation. It never rewrites malformed
+// tags into canonical citations and never performs a second model request.
 func stripIMCitationTags(s string) string {
-	return imCitationTagRe.ReplaceAllString(s, "")
+	return sourcerefs.StripCitationProtocol(s)
 }
 
 // imageXMLBlockRe matches <image ...>...</image> blocks produced by
@@ -165,10 +169,11 @@ func findIncompleteMarkdownImage(s string) int {
 	return loc[0]
 }
 
-// incompleteXMLTagRe matches the opening of an <image…>, <kb…>, or <web…> tag
-// that reaches the end of the string without a closing '>'.
+// incompleteXMLTagRe matches an XML/citation tag prefix that reaches the end of
+// the current stream chunk. Holding it back prevents partial internal protocol
+// text from briefly leaking into IM clients before cleanIMContent can remove it.
 var incompleteXMLTagRe = regexp.MustCompile(
-	`<(?:image|image_original|image_caption|image_ocr|kb|web)[^>]*$`,
+	`(?i)</?(?:image|image_original|image_caption|image_ocr|src|source|citation|doc|document|kb|wiki|web)\b[^>]*$`,
 )
 
 // findIncompleteXMLTag returns the byte offset of a potentially truncated XML
@@ -196,14 +201,9 @@ func holdbackCutoff(chunk string) int {
 	return cutoff
 }
 
-// formatIMOutboundAnswer strips thinking/tool blocks and applies IM content cleanup.
-func formatIMOutboundAnswer(ctx context.Context, raw string, tenant *types.Tenant, defaultFileSvc interfaces.FileService) string {
-	return cleanIMContent(ctx, FormatIMDisplayContent(raw, StreamDisplayFinal), tenant, defaultFileSvc)
-}
-
 // cleanIMContent applies all IM-specific content transformations:
 //  1. Collapse <image> XML blocks back to plain markdown
-//  2. Strip <kb/> and <web/> citation tags
+//  2. Strip the internal citation protocol (canonical and malformed tags)
 //  3. Rewrite provider:// URLs to HTTP URLs (scheme-aware per tenant config)
 func cleanIMContent(ctx context.Context, content string, tenant *types.Tenant, defaultFileSvc interfaces.FileService) string {
 	content = stripImageXMLTags(content)
@@ -362,6 +362,10 @@ type Service struct {
 	// modelService is used to obtain the chat model for generating smart notification replies.
 	modelService interfaces.ModelService
 
+	// chatQueue provides the per-model, cross-replica IM conversation slots.
+	// Its IM surface is independent from the normal Web conversation counters.
+	chatQueue *chatqueue.Manager
+
 	// oauthManager builds MCP OAuth authorization URLs so IM users can authorize
 	// OAuth-enabled MCP services out-of-band (IM cannot resolve the in-conversation
 	// prompt). May be nil, in which case a generic console hint is shown instead.
@@ -375,6 +379,13 @@ type Service struct {
 	// defaultFileSvc is the process-wide storage backend (STORAGE_TYPE / env).
 	// Used when tenant StorageEngineConfig cannot build a service for the URL scheme.
 	defaultFileSvc interfaces.FileService
+
+	// frontendBaseURL is the externally visible SPA origin used for exact
+	// document-fragment and Wiki citation links in final IM output.
+	frontendBaseURL string
+	// referenceSigner issues the IM-only read capability used by every adapter.
+	// It is never used by normal Web-chat citation navigation.
+	referenceSigner *imoutput.ReferenceSigner
 
 	// cmdRegistry holds all registered slash-commands.
 	cmdRegistry *CommandRegistry
@@ -646,17 +657,26 @@ func createIMAssistantMessagePayload(sessionID, requestID string) *types.Message
 	}
 }
 
-func collectIMKnowledgeReferences(dst *[]*types.SearchResult, refs interface{}) {
-	switch v := refs.(type) {
-	case []*types.SearchResult:
-		*dst = append(*dst, v...)
-	case []interface{}:
-		for _, ref := range v {
-			if sr, ok := ref.(*types.SearchResult); ok {
-				*dst = append(*dst, sr)
+func collectIMKnowledgeReferences(dst *[]*types.SearchResult, refs []*types.SearchResult) {
+	if dst == nil {
+		return
+	}
+	seen := make(map[string]bool, len(*dst)+len(refs))
+	out := make([]*types.SearchResult, 0, len(*dst)+len(refs))
+	for _, group := range [][]*types.SearchResult{*dst, refs} {
+		for _, ref := range group {
+			if ref == nil {
+				continue
 			}
+			key := sourcerefs.CitationKey(ref)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, ref)
 		}
 	}
+	*dst = out
 }
 
 func sanitizeIMAgentSteps(raw interface{}) types.AgentSteps {
@@ -679,16 +699,28 @@ func applyIMCompleteDataToMessage(msg *types.Message, data event.AgentCompleteDa
 	}
 	msg.IsCompleted = true
 	msg.AgentDurationMs = data.TotalDurationMs
-	if len(data.KnowledgeRefs) > 0 {
-		refs := make([]*types.SearchResult, 0, len(data.KnowledgeRefs))
+	if data.KnowledgeRefsAuthoritative {
+		msg.KnowledgeReferences = types.References(data.KnowledgeRefs)
+	} else if len(data.KnowledgeRefs) > 0 {
+		refs := []*types.SearchResult(msg.KnowledgeReferences)
 		collectIMKnowledgeReferences(&refs, data.KnowledgeRefs)
-		if len(refs) > 0 {
-			msg.KnowledgeReferences = types.References(refs)
-		}
+		msg.KnowledgeReferences = types.References(refs)
 	}
 	if steps := sanitizeIMAgentSteps(data.AgentSteps); len(steps) > 0 {
 		msg.AgentSteps = steps
 	}
+}
+
+func filterIMStoredAnswer(answer string, msg *types.Message) (string, sourcerefs.CitationValidationReport) {
+	if msg == nil {
+		return answer, sourcerefs.CitationValidationReport{}
+	}
+	filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(
+		answer,
+		[]*types.SearchResult(msg.KnowledgeReferences),
+	)
+	msg.KnowledgeReferences = types.References(citedRefs)
+	return filtered, report
 }
 
 // waitForIMAgentComplete blocks until EventAgentComplete, ctx cancellation, or timeout.
@@ -714,9 +746,18 @@ func pickIMStoredAnswer(candidates ...string) string {
 	return ""
 }
 
-// mergeIMAgentAnswerBuffers copies optimistic/live answers into persistence buffers
-// when EventAgentFinalAnswer did not populate answerBuilder (e.g. cancel before complete).
+// mergeIMAgentAnswerBuffers makes a non-empty EventAgentComplete.FinalAnswer the
+// authoritative persisted answer. Live/outer buffers are only fallbacks when an
+// agent implementation does not provide a completed final answer.
 func mergeIMAgentAnswerBuffers(answerBuilder, answerOuter, agentLiveAnswer *strings.Builder, completeFinal string) {
+	if strings.TrimSpace(completeFinal) != "" {
+		answerBuilder.Reset()
+		answerBuilder.WriteString(completeFinal)
+		answerOuter.Reset()
+		answerOuter.WriteString(completeFinal)
+		agentLiveAnswer.Reset()
+		return
+	}
 	if answerBuilder.Len() > 0 {
 		return
 	}
@@ -729,9 +770,6 @@ func mergeIMAgentAnswerBuffers(answerBuilder, answerOuter, agentLiveAnswer *stri
 		}
 	case answerOuter.Len() > 0:
 		answerBuilder.WriteString(answerOuter.String())
-	case strings.TrimSpace(completeFinal) != "":
-		answerBuilder.WriteString(completeFinal)
-		answerOuter.WriteString(completeFinal)
 	}
 }
 
@@ -782,6 +820,7 @@ func NewService(
 	knowledgeService interfaces.KnowledgeService,
 	kbService interfaces.KnowledgeBaseService,
 	modelService interfaces.ModelService,
+	chatQueue *chatqueue.Manager,
 	streamManager interfaces.StreamManager,
 	defaultFileSvc interfaces.FileService,
 	oauthManager *mcppkg.OAuthManager,
@@ -800,6 +839,10 @@ func NewService(
 	registry.Register(newClearCommand())
 
 	instanceID := uuid.New().String()
+	frontendBaseURL := strings.TrimSpace(os.Getenv("FRONTEND_BASE_URL"))
+	if appCfg != nil && strings.TrimSpace(appCfg.FrontendBaseURL) != "" {
+		frontendBaseURL = strings.TrimSpace(appCfg.FrontendBaseURL)
+	}
 	s := &Service{
 		db:               db,
 		sessionService:   sessionService,
@@ -809,8 +852,11 @@ func NewService(
 		knowledgeService: knowledgeService,
 		kbService:        kbService,
 		modelService:     modelService,
+		chatQueue:        chatQueue,
 		streamManager:    streamManager,
 		defaultFileSvc:   defaultFileSvc,
+		frontendBaseURL:  frontendBaseURL,
+		referenceSigner:  imoutput.NewReferenceSignerFromEnv(),
 		oauthManager:     oauthManager,
 		cmdRegistry:      registry,
 		channels:         make(map[string]*channelState),
@@ -847,6 +893,36 @@ func NewService(
 	}
 
 	return s
+}
+
+// RenderFinalOutbound is the single final-answer boundary used before every IM
+// adapter. Intermediate streaming frames intentionally do not call it: their
+// canonical tags remain hidden until the stable final replace frame is ready.
+func (s *Service) RenderFinalOutbound(
+	ctx context.Context,
+	raw string,
+	refs []*types.SearchResult,
+	tenant *types.Tenant,
+	platform Platform,
+	streaming bool,
+) imoutput.Result {
+	var tenantID uint64
+	if tenant != nil {
+		tenantID = tenant.ID
+	}
+	result := imoutput.Render(
+		FormatIMDisplayContent(raw, StreamDisplayFinal),
+		refs,
+		imoutput.Options{
+			FrontendBaseURL: s.frontendBaseURL,
+			Platform:        string(platform),
+			Streaming:       streaming,
+			TenantID:        tenantID,
+			ReferenceSigner: s.referenceSigner,
+		},
+	)
+	result.Content = cleanIMContent(ctx, result.Content, tenant, s.defaultFileSvc)
+	return result
 }
 
 // RegisterAdapterFactory registers a factory for creating adapters for a given platform.
@@ -1515,6 +1591,14 @@ func (s *Service) executeQARequest(req *qaRequest) {
 		return
 	}
 
+	chatTicket, admitted := s.acquireIMAnswerSlot(ctx, req)
+	if !admitted {
+		return
+	}
+	if chatTicket != nil {
+		defer chatTicket.Release(context.WithoutCancel(ctx))
+	}
+
 	// NOTE: StreamManager-based stop detection is started inside handleMessageStream /
 	// runQA after the assistant message is created (that's when we have the
 	// sessionID + messageID needed to poll StreamManager).
@@ -1536,14 +1620,20 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	}
 
 	// Non-streaming fallback: collect full answer then send.
-	answer, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.userKey, req.msg.Quote)
+	qaResult, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.userKey, req.msg.Quote)
+	answer := ""
+	var refs []*types.SearchResult
+	if qaResult != nil {
+		answer = qaResult.Answer
+		refs = qaResult.References
+	}
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA failed: %v, sending fallback reply", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
 	reply := &ReplyMessage{
-		Content: formatIMOutboundAnswer(ctx, answer, req.tenant, s.defaultFileSvc),
+		Content: s.RenderFinalOutbound(ctx, answer, refs, req.tenant, req.msg.Platform, false).Content,
 		IsFinal: true,
 	}
 	if err := req.adapter.SendReply(ctx, req.msg, reply); err != nil {
@@ -1553,6 +1643,105 @@ func (s *Service) executeQARequest(req *qaRequest) {
 
 	logger.Infof(ctx, "[IM] Reply sent: channel=%s platform=%s user=%s answer_len=%d",
 		req.channelID, req.msg.Platform, req.msg.UserID, len(answer))
+}
+
+// acquireIMAnswerSlot applies the same model-resource-pool conversation
+// admission used by Web chat, but in an independent Redis surface. The ticket
+// is acquired before selecting streaming/non-streaming or agent type, so every
+// IM adapter and Claude SDK sidecar shares the same capacity contract.
+func (s *Service) acquireIMAnswerSlot(
+	ctx context.Context,
+	req *qaRequest,
+) (sessionhandler.ChatQueueTicket, bool) {
+	if s == nil || s.chatQueue == nil {
+		logger.Errorf(ctx, "[IM] answer admission unavailable")
+		_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{
+			Content: "IM 回答容量服务暂时不可用，请稍后再试。",
+			IsFinal: true,
+		})
+		return nil, false
+	}
+
+	tenantID := req.session.TenantID
+	if effectiveTenantID, ok := types.TenantIDFromContext(ctx); ok && effectiveTenantID != 0 {
+		tenantID = effectiveTenantID
+	}
+	agentModelID, summaryModelID, knowledgeBaseIDs := imAnswerAdmissionHints(req)
+	ticket, rejection, err := s.chatQueue.Admit(ctx, sessionhandler.ChatQueueAdmissionRequest{
+		Surface:          chatqueue.SurfaceIM,
+		TenantID:         tenantID,
+		PrincipalID:      req.userKey,
+		RequestID:        req.msg.MessageID,
+		SessionID:        req.session.ID,
+		SummaryModelID:   summaryModelID,
+		AgentModelID:     agentModelID,
+		KnowledgeBaseIDs: knowledgeBaseIDs,
+	})
+	if err != nil || rejection != nil {
+		message := "当前 IM 回答服务繁忙，请稍后再试。"
+		if rejection != nil && strings.TrimSpace(rejection.Message) != "" {
+			message = rejection.Message
+		}
+		logger.Warnf(ctx, "[IM] answer admission rejected: rejection=%+v err=%v", rejection, err)
+		_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{Content: message, IsFinal: true})
+		return nil, false
+	}
+	if ticket == nil {
+		logger.Errorf(ctx, "[IM] answer admission returned no ticket")
+		_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{
+			Content: "IM 回答容量服务暂时不可用，请稍后再试。",
+			IsFinal: true,
+		})
+		return nil, false
+	}
+	if !ticket.Queued() {
+		return ticket, true
+	}
+
+	_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{
+		Content: "收到，当前 IM 回答正在排队，请稍候 ⏳",
+		IsFinal: true,
+	})
+	if err := ticket.Wait(ctx, nil); err != nil {
+		ticket.Cancel(context.WithoutCancel(ctx))
+		logger.Warnf(ctx, "[IM] answer admission wait failed: %v", err)
+		if !errors.Is(err, context.Canceled) {
+			_ = req.adapter.SendReply(context.WithoutCancel(ctx), req.msg, &ReplyMessage{
+				Content: "IM 回答等待超时，请重新发送。",
+				IsFinal: true,
+			})
+		}
+		return nil, false
+	}
+	return ticket, true
+}
+
+func imAnswerAdmissionHints(req *qaRequest) (string, string, []string) {
+	if req == nil {
+		return "", "", nil
+	}
+	agentModelID := ""
+	knowledgeBaseIDs := []string(nil)
+	if req.agent != nil {
+		agentModelID = strings.TrimSpace(req.agent.Config.ModelID)
+		knowledgeBaseIDs = append(knowledgeBaseIDs, req.agent.Config.KnowledgeBases...)
+	}
+	summaryModelID := ""
+	if req.session != nil && req.session.LastRequestState != nil {
+		// The channel's current agent is authoritative. LastRequestState may
+		// still describe the previous agent while an asynchronous state update
+		// is being persisted, so use it only as a missing-config fallback.
+		if agentModelID == "" {
+			summaryModelID = strings.TrimSpace(req.session.LastRequestState.ModelID)
+		}
+		if len(knowledgeBaseIDs) == 0 {
+			knowledgeBaseIDs = append(
+				knowledgeBaseIDs,
+				req.session.LastRequestState.KnowledgeBaseIDs...,
+			)
+		}
+	}
+	return agentModelID, summaryModelID, knowledgeBaseIDs
 }
 
 // handleCommand executes a slash-command and sends the result back to the user.
@@ -1993,6 +2182,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	// A hard pipeline deadline would kill multi-round agent reasoning prematurely.
 	qaCtx, qaCancel := context.WithCancel(ctx)
 	defer qaCancel()
+	runStartedAt := time.Now()
 
 	useAgent := customAgent != nil && customAgent.IsAgentMode()
 	eventBus := event.NewEventBus()
@@ -2284,7 +2474,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			logger.Debugf(qaCtx, "[IM] QuotedContext set: length=%d", len(req.QuotedContext))
 		}
 		if useAgent {
-			err = s.sessionService.AgentQA(qaCtx, req, eventBus)
+			err = sessionhandler.RunAgentQA(qaCtx, s.sessionService, req, eventBus)
 		} else {
 			err = s.sessionService.KnowledgeQA(qaCtx, req, eventBus)
 		}
@@ -2304,13 +2494,14 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	ticker := time.NewTicker(streamFlushInterval)
 	defer ticker.Stop()
 
+	lastStreamDisplay := ""
 	flush := func() {
 		bufMu.Lock()
 		parts := getStreamParts()
 		agentRunning := useAgent && !agentDone
 		bufMu.Unlock()
 
-		displaySource := FormatIMIntermediateFromParts(parts, agentRunning)
+		displaySource := FormatIMUserVisibleIntermediate(parts, agentRunning, time.Since(runStartedAt))
 		if displaySource == "" {
 			return
 		}
@@ -2320,10 +2511,20 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		}
 
 		display := cleanIMContent(ctx, displaySource, tenant, s.defaultFileSvc)
+		if display == "" || display == lastStreamDisplay {
+			return
+		}
 		if err := streamer.UpdateStreamContent(ctx, msg, streamID, display); err != nil {
 			logger.Warnf(ctx, "[IM] UpdateStreamContent failed: %v", err)
+			return
 		}
+		lastStreamDisplay = display
 	}
+
+	// ReAct and Claude SDK runs receive one immediate, stable waiting frame.
+	// Quick QA has no synthetic timer and therefore remains silent until its
+	// existing retrieval/answer stream produces real content.
+	flush()
 
 loop:
 	for {
@@ -2344,10 +2545,10 @@ loop:
 	bufMu.Lock()
 	parts := getStreamParts()
 	resolvedAnswer := pickIMStoredAnswer(
+		agentCompleteFinalAnswer,
 		answerBuilder.String(),
 		answerOuter.String(),
 		agentLiveAnswer.String(),
-		agentCompleteFinalAnswer,
 	)
 	if parts.Answer == "" {
 		parts.Answer = resolvedAnswer
@@ -2358,14 +2559,29 @@ loop:
 	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	bufMu.Unlock()
 
-	finalDisplay := cleanIMContent(ctx, FormatIMFinalFromParts(parts), tenant, s.defaultFileSvc)
+	answer, citationReport := filterIMStoredAnswer(answer, assistantMsg)
+	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+		logger.Warnf(ctx,
+			"[IM] filtered invalid stored citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
+		)
+	}
+
+	finalDisplay := s.RenderFinalOutbound(
+		ctx,
+		answer,
+		[]*types.SearchResult(assistantMsg.KnowledgeReferences),
+		tenant,
+		msg.Platform,
+		true,
+	).Content
 	if noVisibleContent || finalDisplay == "" {
 		fallback := "抱歉，我暂时无法回答这个问题。"
 		if finalErr != nil {
 			fallback = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 		}
 		finalDisplay = fallback
-		if answer == "" {
+		if strings.TrimSpace(answer) == "" {
 			answer = fallback
 		}
 	}
@@ -2399,17 +2615,32 @@ loop:
 
 // fallbackNonStream is used when streaming initialization fails.
 func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, adapter Adapter, userKey string, tenant *types.Tenant) error {
-	answer, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote)
+	qaResult, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote)
+	answer := ""
+	var refs []*types.SearchResult
+	if qaResult != nil {
+		answer = qaResult.Answer
+		refs = qaResult.References
+	}
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA fallback failed: %v", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
-	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: formatIMOutboundAnswer(ctx, answer, tenant, s.defaultFileSvc), IsFinal: true})
+	return adapter.SendReply(ctx, msg, &ReplyMessage{
+		Content: s.RenderFinalOutbound(ctx, answer, refs, tenant, msg.Platform, false).Content,
+		IsFinal: true,
+	})
+}
+
+type imQAResult struct {
+	Answer     string
+	References []*types.SearchResult
+	MessageID  string
 }
 
 // runQA executes the WeKnora QA pipeline and returns the full answer text.
-func (s *Service) runQA(ctx context.Context, session *types.Session, query string, customAgent *types.CustomAgent, kbIDs []string, userKey string, quote *QuotedMessage) (string, error) {
+func (s *Service) runQA(ctx context.Context, session *types.Session, query string, customAgent *types.CustomAgent, kbIDs []string, userKey string, quote *QuotedMessage) (*imQAResult, error) {
 	// Cancellable context (no hard deadline): each agent round has its own
 	// LLMCallTimeout. The context can still be cancelled by /stop.
 	ctx, cancel := context.WithCancel(ctx)
@@ -2420,6 +2651,7 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	// Thread-safe answer collection
 	var answerMu sync.Mutex
 	var answerBuilder strings.Builder
+	var agentCompleteFinalAnswer string
 	var qaErr error
 	var mcpAuthServices []imMCPAuthService
 	mcpAuthSeen := make(map[string]bool)
@@ -2483,13 +2715,13 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	// Create user message so it appears in conversation history
 	userMsg, err := s.messageService.CreateMessage(ctx, createIMUserMessagePayload(session.ID, query, requestID))
 	if err != nil {
-		return "", fmt.Errorf("create user message: %w", err)
+		return nil, fmt.Errorf("create user message: %w", err)
 	}
 
 	// Create a placeholder assistant message
 	assistantMsg, err := s.messageService.CreateMessage(ctx, createIMAssistantMessagePayload(session.ID, requestID))
 	if err != nil {
-		return "", fmt.Errorf("create assistant message: %w", err)
+		return nil, fmt.Errorf("create assistant message: %w", err)
 	}
 
 	eventBus.On(event.EventAgentReferences, func(ctx context.Context, evt event.Event) error {
@@ -2512,7 +2744,9 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		}
 		answerMu.Lock()
 		applyIMCompleteDataToMessage(assistantMsg, data)
-		if answerBuilder.Len() == 0 && strings.TrimSpace(data.FinalAnswer) != "" {
+		agentCompleteFinalAnswer = data.FinalAnswer
+		if strings.TrimSpace(data.FinalAnswer) != "" {
+			answerBuilder.Reset()
 			answerBuilder.WriteString(data.FinalAnswer)
 		}
 		answerMu.Unlock()
@@ -2540,7 +2774,7 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 			logger.Debugf(ctx, "[IM] QuotedContext set: length=%d", len(req.QuotedContext))
 		}
 		if useAgent {
-			err = s.sessionService.AgentQA(ctx, req, eventBus)
+			err = sessionhandler.RunAgentQA(ctx, s.sessionService, req, eventBus)
 		} else {
 			err = s.sessionService.KnowledgeQA(ctx, req, eventBus)
 		}
@@ -2568,19 +2802,29 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		if updateErr := s.messageService.UpdateMessage(context.WithoutCancel(ctx), assistantMsg); updateErr != nil {
 			logger.Warnf(ctx, "[IM] Failed to update cancelled assistant message: %v", updateErr)
 		}
-		return "", fmt.Errorf("QA cancelled: %w", ctx.Err())
+		return nil, fmt.Errorf("QA cancelled: %w", ctx.Err())
 	}
 
 	answerMu.Lock()
-	answer := answerBuilder.String()
+	answer := pickIMStoredAnswer(agentCompleteFinalAnswer, answerBuilder.String())
 	qaError := qaErr
 	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	answerMu.Unlock()
 
 	if answer == "" && qaError != nil {
-		return "", qaError
+		return nil, qaError
 	}
 	if answer == "" {
+		answer = "抱歉，我暂时无法回答这个问题。"
+	}
+	answer, citationReport := filterIMStoredAnswer(answer, assistantMsg)
+	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+		logger.Warnf(ctx,
+			"[IM] filtered invalid stored citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
+		)
+	}
+	if strings.TrimSpace(answer) == "" {
 		answer = "抱歉，我暂时无法回答这个问题。"
 	}
 	if notice := s.buildIMMCPAuthNotice(ctx, authServices); notice != "" {
@@ -2594,8 +2838,13 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		logger.Warnf(ctx, "[IM] Failed to update assistant message: %v", err)
 	}
 
-	// Return raw answer — callers apply cleanIMContent with the appropriate FileService.
-	return answer, nil
+	// Return the canonical answer and the exact cited evidence snapshots. Every
+	// final IM delivery path passes this pair through RenderFinalOutbound.
+	return &imQAResult{
+		Answer:     answer,
+		References: []*types.SearchResult(assistantMsg.KnowledgeReferences),
+		MessageID:  assistantMsg.ID,
+	}, nil
 }
 
 // ── CRUD operations for IM channels ──

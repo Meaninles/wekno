@@ -87,52 +87,29 @@
                               :checked="formData.indexingStrategy.vectorEnabled"
                               :disabled="isIndexingLocked"
                               class="indexing-check-box"
-                            >{{ $t('knowledgeEditor.indexing.searchTitle') }}</t-checkbox>
-                            <p class="indexing-check-desc">{{ $t('knowledgeEditor.indexing.searchDesc') }}</p>
-                          </div>
-                          <div
-                            class="indexing-check-item"
-                            :class="{ 'is-checked': formData.indexingStrategy.wikiEnabled, 'is-disabled': isIndexingLocked }"
-                            @click="toggleWikiIndexing"
-                          >
-                            <t-checkbox
-                              :checked="formData.indexingStrategy.wikiEnabled"
-                              :disabled="isIndexingLocked"
-                              class="indexing-check-box"
                             >
                               <span class="indexing-check-title">
-                                {{ $t('knowledgeEditor.indexing.wikiTitle') }}
-                                <span class="indexing-new-badge">NEW</span>
+                                {{ $t('knowledgeEditor.indexing.searchTitle') }}
+                                <span class="indexing-recommended-badge">
+                                  {{ $t('knowledgeEditor.indexing.recommended') }}
+                                </span>
                               </span>
                             </t-checkbox>
-                            <p class="indexing-check-desc">{{ $t('knowledgeEditor.indexing.wikiDesc') }}</p>
+                            <p class="indexing-check-desc">{{ $t('knowledgeEditor.indexing.searchDesc') }}</p>
                           </div>
                         </div>
+                        <WikiIndexingDisclosure
+                          :wiki-enabled="formData.indexingStrategy.wikiEnabled"
+                          :locked="isIndexingLocked"
+                          :wiki-available="wikiAccessAllowed"
+                          :resolved-granularity="resolvedGranularity"
+                          :granularity-hint="granularityHint"
+                          @toggle-wiki="toggleWikiIndexing"
+                          @change-granularity="handleGranularityChange"
+                        />
                         <p v-if="isIndexingLocked" class="form-tip locked-tip">
                           {{ $t('knowledgeEditor.indexing.lockedTip') }}
                         </p>
-                      </div>
-
-                      <!-- Wiki 提取粒度 (仅当 Wiki 启用时显示) -->
-                      <div v-if="!isFAQ && formData.indexingStrategy.wikiEnabled" class="form-item">
-                        <label class="form-label">{{ $t('knowledgeEditor.wiki.extractionGranularityLabel') }}</label>
-                        <p class="form-tip">{{ $t('knowledgeEditor.wiki.extractionGranularityTip') }}</p>
-                        <t-radio-group
-                          :value="resolvedGranularity"
-                          class="granularity-radio-group"
-                          @change="handleGranularityChange"
-                        >
-                          <t-radio-button value="focused">
-                            {{ $t('knowledgeEditor.wiki.granularityFocused') }}
-                          </t-radio-button>
-                          <t-radio-button value="standard">
-                            {{ $t('knowledgeEditor.wiki.granularityStandard') }}
-                          </t-radio-button>
-                          <t-radio-button value="exhaustive">
-                            {{ $t('knowledgeEditor.wiki.granularityExhaustive') }}
-                          </t-radio-button>
-                        </t-radio-group>
-                        <p class="form-tip granularity-hint">{{ granularityHint }}</p>
                       </div>
 
                       <div class="form-item" data-guide="kb-create-name">
@@ -413,6 +390,8 @@ import ModelSelector from '@/components/ModelSelector.vue'
 import GraphSettings from './settings/GraphSettings.vue'
 import KBShareSettings from './settings/KBShareSettings.vue'
 import DataSourceSettings from './settings/DataSourceSettings.vue'
+import WikiIndexingDisclosure from '@/custom/modules/wikiActivation/components/WikiIndexingDisclosure.vue'
+import { getCurrentWikiAccess } from '@/custom/modules/wikiAccess/api'
 import { useI18n } from 'vue-i18n'
 
 const uiStore = useUIStore()
@@ -488,6 +467,19 @@ const dsCount = ref(0)
 // that predate per-KB ownership tracking; those KBs have no "owner" and
 // only tenant Admin+ can mutate their share settings.
 const kbCreatorId = ref<string>('')
+// Wiki selection is deny-by-default until the dedicated capability endpoint
+// confirms an explicit per-user grant.
+const wikiAccessAllowed = ref(false)
+
+const loadWikiAccess = async () => {
+  wikiAccessAllowed.value = false
+  try {
+    const response = await getCurrentWikiAccess()
+    wikiAccessAllowed.value = response.data?.wiki_enabled === true
+  } catch (error) {
+    console.error('Failed to load Wiki access permission:', error)
+  }
+}
 
 // Backend gate for /knowledge-bases/:id/shares (POST/PUT/DELETE) is
 // g.OwnedKBOrAdmin(): only the KB creator or tenant Admin+ may mutate
@@ -595,21 +587,30 @@ const kbCreateNeedsEmbedding = computed(() => {
   return Boolean(s?.vectorEnabled || s?.keywordEnabled)
 })
 
+const pickDefaultModel = (type: ModelConfig['type']) => {
+  const list = allModels.value.filter(
+    (m) => m.type === type && (type !== 'KnowledgeQA' || m.workload_scope !== 'derivative_only'),
+  )
+  return list.find((m) => m.is_default) || list[0]
+}
+
 const applyDefaultModelsIfEmpty = () => {
   if (!formData.value || props.mode !== 'create') return
-  const pick = (type: ModelConfig['type']) => {
-    const list = allModels.value.filter(
-      (m) => m.type === type && (type !== 'KnowledgeQA' || m.workload_scope !== 'derivative_only'),
-    )
-    return list.find((m) => m.is_default) || list[0]
-  }
-  const chat = pick('KnowledgeQA')
-  const embedding = pick('Embedding')
+  const chat = pickDefaultModel('KnowledgeQA')
+  const embedding = pickDefaultModel('Embedding')
+  const vllm = pickDefaultModel('VLLM')
   if (!formData.value.modelConfig.llmModelId && chat?.id) {
     formData.value.modelConfig.llmModelId = chat.id
   }
   if (!formData.value.modelConfig.embeddingModelId && embedding?.id) {
     formData.value.modelConfig.embeddingModelId = embedding.id
+  }
+  if (
+    formData.value.multimodalConfig.enabled &&
+    !formData.value.multimodalConfig.vllmModelId &&
+    vllm?.id
+  ) {
+    formData.value.multimodalConfig.vllmModelId = vllm.id
   }
 }
 
@@ -618,14 +619,24 @@ watch(
   (newType, oldType) => {
     if (!formData.value) return
     if (newType === 'faq') {
+      if (props.mode === 'create') {
+        formData.value.multimodalConfig.enabled = false
+        formData.value.multimodalConfig.vllmModelId = ''
+      }
       if (!formData.value.faqConfig) {
         formData.value.faqConfig = { indexMode: 'question_only', questionIndexMode: 'separate' }
       }
       if (!['basic', 'models', 'faq'].includes(currentSection.value)) {
         currentSection.value = 'faq'
       }
-    } else if (oldType === 'faq' && currentSection.value === 'faq') {
-      currentSection.value = 'basic'
+    } else if (oldType === 'faq') {
+      if (props.mode === 'create') {
+        formData.value.multimodalConfig.enabled = true
+        applyDefaultModelsIfEmpty()
+      }
+      if (currentSection.value === 'faq') {
+        currentSection.value = 'basic'
+      }
     }
   }
 )
@@ -662,7 +673,9 @@ const initFormData = (type: 'document' | 'faq' = 'document') => {
     },
     storageProvider: '' as string,
     multimodalConfig: {
-      enabled: false,
+      // Document knowledge bases start with image understanding enabled.
+      // FAQ knowledge bases do not run the document parsing pipeline.
+      enabled: type === 'document',
       vllmModelId: ''
     },
     asrConfig: {
@@ -686,7 +699,7 @@ const initFormData = (type: 'document' | 'faq' = 'document') => {
     },
     questionGenerationConfig: {
       enabled: true,
-      questionCount: 3
+      questionCount: 1
     },
     wikiConfig: {
       synthesisModelId: '',
@@ -795,8 +808,8 @@ const loadKBData = async () => {
         relations: kb.extract_config?.relations || []
       },
       questionGenerationConfig: {
-        enabled: kb.question_generation_config?.enabled || false,
-        questionCount: kb.question_generation_config?.question_count || 3
+        enabled: kb.question_generation_config?.enabled ?? true,
+        questionCount: kb.question_generation_config?.question_count || 1
       },
       wikiConfig: {
         synthesisModelId: kb.wiki_config?.synthesis_model_id || '',
@@ -892,6 +905,7 @@ const toggleVectorIndexing = () => {
 const toggleWikiIndexing = () => {
   if (!formData.value) return
   if (isIndexingLocked.value) return
+  if (!wikiAccessAllowed.value) return
   formData.value.indexingStrategy.wikiEnabled = !formData.value.indexingStrategy.wikiEnabled
 }
 
@@ -930,8 +944,16 @@ const handleParserEngineRulesUpdate = (rules: any[]) => {
 }
 
 const handleMultimodalToggle = () => {
-  if (formData.value && !formData.value.multimodalConfig.enabled) {
+  if (!formData.value) return
+  if (!formData.value.multimodalConfig.enabled) {
     formData.value.multimodalConfig.vllmModelId = ''
+    return
+  }
+  if (!formData.value.multimodalConfig.vllmModelId) {
+    const vllm = pickDefaultModel('VLLM')
+    if (vllm?.id) {
+      formData.value.multimodalConfig.vllmModelId = vllm.id
+    }
   }
 }
 
@@ -1121,7 +1143,7 @@ const buildSubmitData = () => {
   if (formData.value.questionGenerationConfig?.enabled) {
     data.question_generation_config = {
       enabled: true,
-      question_count: formData.value.questionGenerationConfig.questionCount || 3
+      question_count: formData.value.questionGenerationConfig.questionCount || 1
     }
   }
 
@@ -1287,8 +1309,8 @@ const doSubmit = async () => {
           relations: data.extract_config?.relations || []
         },
         questionGeneration: {
-          enabled: data.question_generation_config?.enabled || false,
-          questionCount: data.question_generation_config?.question_count || 3
+          enabled: data.question_generation_config?.enabled ?? true,
+          questionCount: data.question_generation_config?.question_count || 1
         }
       }
 
@@ -1369,6 +1391,7 @@ const resetState = () => {
   loading.value = false
   chunkingDirty.value = false
   kbCreatorId.value = ''
+  wikiAccessAllowed.value = false
 }
 
 // 关闭弹窗
@@ -1391,7 +1414,7 @@ watch(() => props.visible, async (newVal) => {
     }
     
     // 加载模型列表与租户默认存储引擎（创建 KB 时即使用，不依赖是否打开「存储引擎」Tab）
-    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider()])
+    await Promise.all([loadAllModels(), loadTenantDefaultStorageProvider(), loadWikiAccess()])
     
     // 根据模式加载数据
     if (props.mode === 'edit' && props.kbId) {
@@ -1418,6 +1441,7 @@ watch(
   async (visible, previous) => {
     if (!visible && previous && props.visible) {
       await loadAllModels(true)
+      applyDefaultModelsIfEmpty()
     }
   }
 )
@@ -1695,18 +1719,6 @@ watch(
   }
 }
 
-.granularity-radio-group {
-  margin-top: 4px;
-}
-
-.granularity-hint {
-  margin-top: 8px;
-  line-height: 1.6;
-  color: var(--td-text-color-secondary);
-  white-space: normal;
-  word-break: break-word;
-}
-
 .indexing-checks {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -1770,7 +1782,7 @@ watch(
   gap: 6px;
 }
 
-.indexing-new-badge {
+.indexing-recommended-badge {
   display: inline-flex;
   align-items: center;
   padding: 0 6px;
@@ -1779,7 +1791,6 @@ watch(
   font-size: 10px;
   font-weight: 600;
   line-height: 1;
-  letter-spacing: 0.4px;
   color: var(--td-brand-color);
   background: var(--td-brand-color-light);
 }

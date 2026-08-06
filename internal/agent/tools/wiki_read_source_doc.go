@@ -163,16 +163,42 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 	pageSize := 100
 	page := 1
 	if hasRange {
-		page = (params.StartChunkIndex - 1) / pageSize + 1
+		page = (params.StartChunkIndex-1)/pageSize + 1
 	}
 
 	var chunksOutput strings.Builder
+	resultChunks := make([]map[string]interface{}, 0)
 	totalChunks := int64(0)
 	reachedMax := false
 
 	var prevChunk *types.Chunk
 	var forceOutputNext bool
 	outputtedIndices := make(map[int]bool)
+	appendChunk := func(chunk *types.Chunk, content, resultType string) {
+		if chunk == nil {
+			return
+		}
+		fmt.Fprintf(
+			&chunksOutput,
+			`<chunk chunk_id="%s" index="%d" type="%s">`+"\n%s\n</chunk>\n",
+			chunk.ID,
+			chunk.ChunkIndex+1,
+			resultType,
+			content,
+		)
+		resultChunks = append(resultChunks, map[string]interface{}{
+			"chunk_id":          chunk.ID,
+			"knowledge_id":      knowledgeID,
+			"knowledge_base_id": knowledge.KnowledgeBaseID,
+			"knowledge_title":   knowledge.Title,
+			"chunk_index":       chunk.ChunkIndex,
+			"start_at":          chunk.StartAt,
+			"end_at":            chunk.EndAt,
+			"chunk_type":        string(chunk.ChunkType),
+			"content":           content,
+			"source_locator":    chunk.SourceLocator,
+		})
+	}
 
 	for {
 		pagination := &types.Pagination{
@@ -218,7 +244,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 					reachedMax = true
 					break
 				}
-				fmt.Fprintf(&chunksOutput, "<chunk index=\"%d\" type=\"range\">\n%s\n</chunk>\n", chunkNum, chunkContent)
+				appendChunk(c, chunkContent, "range")
 				matchCount++
 				continue
 			}
@@ -237,17 +263,17 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 					// Output previous chunk for context
 					if prevChunk != nil && !outputtedIndices[prevChunk.ChunkIndex] {
 						prevContent := enrichChunkContent(prevChunk)
-						fmt.Fprintf(&chunksOutput, "<chunk index=\"%d\" type=\"context_before\">\n%s\n</chunk>\n", prevChunk.ChunkIndex+1, prevContent)
+						appendChunk(prevChunk, prevContent, "context_before")
 						outputtedIndices[prevChunk.ChunkIndex] = true
 					}
 				}
 
 				if !outputtedIndices[c.ChunkIndex] {
-					matchAttr := ""
+					resultType := "preview"
 					if re != nil {
-						matchAttr = ` type="match"`
+						resultType = "match"
 					}
-					fmt.Fprintf(&chunksOutput, "<chunk index=\"%d\"%s>\n%s\n</chunk>\n", c.ChunkIndex+1, matchAttr, chunkContent)
+					appendChunk(c, chunkContent, resultType)
 					outputtedIndices[c.ChunkIndex] = true
 				}
 
@@ -256,7 +282,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 				}
 			} else if forceOutputNext {
 				if !outputtedIndices[c.ChunkIndex] {
-					fmt.Fprintf(&chunksOutput, "<chunk index=\"%d\" type=\"context_after\">\n%s\n</chunk>\n", c.ChunkIndex+1, chunkContent)
+					appendChunk(c, chunkContent, "context_after")
 					outputtedIndices[c.ChunkIndex] = true
 				}
 				forceOutputNext = false
@@ -293,7 +319,7 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 	}
 
 	sb.WriteString(fmt.Sprintf("<total_chunks>%d</total_chunks>\n</metadata>\n", totalChunks))
-	
+
 	if matchCount > 0 {
 		sb.WriteString(fmt.Sprintf("<chunks count=\"%d\">\n", matchCount))
 		sb.WriteString(chunksOutput.String())
@@ -318,5 +344,16 @@ func (t *wikiReadSourceDocTool) Execute(ctx context.Context, args json.RawMessag
 
 	sb.WriteString("</source_document>")
 
-	return &types.ToolResult{Success: true, Output: sb.String()}, nil
+	return &types.ToolResult{
+		Success: true,
+		Output:  sb.String(),
+		Data: map[string]interface{}{
+			"display_type":      "knowledge_chunks_list",
+			"knowledge_id":      knowledgeID,
+			"knowledge_base_id": knowledge.KnowledgeBaseID,
+			"knowledge_title":   knowledge.Title,
+			"chunks":            resultChunks,
+			"count":             len(resultChunks),
+		},
+	}, nil
 }

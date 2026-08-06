@@ -46,13 +46,6 @@
       />
     </t-tabs>
 
-    <DerivativeControlPanel
-      v-if="authStore.isSystemAdmin && activeTypeFilter === 'derivative'"
-      :tpm="derivativeConfig?.tpm"
-      :saving="savingDerivativeTPM"
-      @save="saveDerivativeTPM"
-    />
-
     <t-loading :loading="loading" size="small" class="model-list-loading">
       <div v-if="!loading && filteredModels.length === 0 && !authStore.hasRole('admin')" class="empty-state">
         <t-empty :description="emptyHint" />
@@ -163,7 +156,6 @@ import { AddIcon, PlayCircleIcon } from 'tdesign-icons-vue-next'
 import { useI18n } from 'vue-i18n'
 import ModelEditorDialog from '@/components/ModelEditorDialog.vue'
 import ModelDebugDrawer from '@/components/ModelDebugDrawer.vue'
-import DerivativeControlPanel from '@/custom/modules/derivative-control/DerivativeControlPanel.vue'
 import { listModels, createModel, updateModel as updateModelAPI, deleteModel as deleteModelAPI, type ModelConfig } from '@/api/model'
 import { useDerivativeModelManagement } from '@/custom/modules/derivative-control/useDerivativeModelManagement'
 import {
@@ -185,13 +177,11 @@ const loading = ref(true)
 const activeTypeFilter = ref<FilterType>('all')
 const {
   config: derivativeConfig,
-  savingTPM: savingDerivativeTPM,
   load: loadDerivativeConfig,
   isPublished: isDerivativePublished,
   isDefault: isDerivativeDefault,
   tagLabel: derivativeTagLabel,
   tagTheme: derivativeTagTheme,
-  saveTPM: saveDerivativeTPM,
   publish: publishDerivative,
   setDefault: setDerivativeDefault,
   test: testDerivative,

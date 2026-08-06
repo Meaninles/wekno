@@ -15,11 +15,13 @@ from unittest import mock
 from PIL import Image
 from ebooklib import epub
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
 from pypdf import PdfReader, PdfWriter
 
 from docreader.proto import docreader_pb2
 from weknora_document_splitter import grpc_adapter
 from weknora_document_splitter import service
+from weknora_document_splitter.xlsx_semantic import inspect_xlsx_semantic_ranges
 
 
 class DocumentSplitterQualityTest(unittest.TestCase):
@@ -55,7 +57,7 @@ class DocumentSplitterQualityTest(unittest.TestCase):
             responses = list(grpc_adapter.split_rpc(iter(frames), ActiveContext()))
             self.assertGreaterEqual(len(responses), 2)
             self.assertEqual(responses[0].WhichOneof("payload"), "header")
-            self.assertGreaterEqual(responses[0].header.part_count, 2)
+            self.assertEqual(responses[0].header.part_count, 1)
             self.assertNotIn(
                 "error",
                 [response.WhichOneof("payload") for response in responses],
@@ -91,6 +93,96 @@ class DocumentSplitterQualityTest(unittest.TestCase):
             finally:
                 parsed.close()
             self.assertEqual(rows.count(("编号", "名称")), 1)
+
+    def test_xlsx_style_only_tail_is_not_a_semantic_column_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "style-only-tail.xlsx"
+            output = root / "parts"
+            output.mkdir()
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["编号", "名称"])
+            for index in range(8):
+                sheet.append([index, f"资产-{index}"])
+            sheet["XFD1"].fill = PatternFill(
+                fill_type="solid", fgColor="FFFF00"
+            )
+            workbook.save(source)
+
+            bounds = inspect_xlsx_semantic_ranges(source)
+            self.assertEqual(bounds[0].raw_max_column, 16_384)
+            self.assertEqual(bounds[0].semantic_max_column, 2)
+            self.assertEqual(bounds[0].style_only_cells, 1)
+
+            parts = service._split_xlsx(
+                source,
+                output,
+                minimum_parts=219,
+                ratio=0.75,
+                policy=service.SplitPolicy(max_parts=10_000),
+            )
+            self.assertEqual(len(parts), 1)
+            self.assertEqual(parts[0].locator["column_end"], 2)
+            self.assertEqual(parts[0].locator["row_start"], 1)
+            self.assertEqual(parts[0].locator["row_end"], 9)
+
+    def test_xlsx_part_limit_is_checked_before_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "preflight.xlsx"
+            output = root / "parts"
+            output.mkdir()
+            workbook = Workbook()
+            sheet = workbook.active
+            for index in range(6):
+                sheet.append([f"row-{index}"])
+            workbook.save(source)
+
+            with mock.patch.dict(service._HARD_BYTES, {"xlsx": 8}):
+                with self.assertRaises(service.SplitFailure) as raised:
+                    service._split_xlsx(
+                        source,
+                        output,
+                        minimum_parts=2,
+                        ratio=0.75,
+                        policy=service.SplitPolicy(max_parts=2),
+                    )
+            self.assertEqual(raised.exception.code, "too_many_parts")
+            self.assertIn("requires 6 parts", str(raised.exception))
+            self.assertEqual(list(output.iterdir()), [])
+
+    def test_xlsx_formula_without_cached_value_preserves_expression(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "formula-no-cache.xlsx"
+            output = root / "parts"
+            output.mkdir()
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["金额", "含税金额"])
+            sheet.append([100, "=A2*1.06"])
+            workbook.save(source)
+
+            cached = load_workbook(source, read_only=True, data_only=True)
+            try:
+                self.assertIsNone(cached.active["B2"].value)
+            finally:
+                cached.close()
+
+            parts = service._split_xlsx(
+                source,
+                output,
+                minimum_parts=2,
+                ratio=0.75,
+                policy=service.SplitPolicy(max_parts=100),
+            )
+            parsed = load_workbook(parts[0].path, read_only=True, data_only=False)
+            try:
+                rows = list(parsed.active.iter_rows(values_only=True))
+            finally:
+                parsed.close()
+            self.assertEqual(rows[1][1], "=A2*1.06")
 
     def test_text_long_line_is_split_without_data_loss(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,7 +255,13 @@ class DocumentSplitterQualityTest(unittest.TestCase):
             first.title = "资产总表"
             first.append(["编号", "部门", "资产名称"])
             for index in range(360):
-                first.append([index, f"部门{index % 7}", f"资产{index}"])
+                first.append(
+                    [
+                        index,
+                        f"部门{index % 7}",
+                        f"资产{index}-" + "业务数据字段" * 40,
+                    ]
+                )
             second = workbook.create_sheet("字段字典")
             second.append(["字段", "含义"])
             for index in range(60):

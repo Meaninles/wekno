@@ -1,0 +1,5 @@
+DROP INDEX IF EXISTS idx_custom_document_split_parts_dispatch_recovery;
+
+ALTER TABLE custom_document_split_parts DROP COLUMN dispatch_lease_until;
+ALTER TABLE custom_document_split_parts DROP COLUMN dispatch_epoch;
+ALTER TABLE custom_document_split_parts DROP COLUMN backpressure_events;

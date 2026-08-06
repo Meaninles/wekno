@@ -32,7 +32,8 @@ func validateEnrichmentGeneration(
 	return knowledge != nil &&
 		knowledge.KnowledgeBaseID == knowledgeBaseID &&
 		knowledge.ProcessingGeneration == processingGeneration &&
-		knowledge.ParseStatus == types.ParseStatusFinalizing, nil
+		(knowledge.ParseStatus == types.ParseStatusFinalizing ||
+			knowledge.ParseStatus == types.ParseStatusCompleted), nil
 }
 
 var errKnowledgeStateFenceConflict = errors.New("knowledge state changed during operation")
@@ -253,7 +254,7 @@ func (s *knowledgeService) updateCurrentEnrichmentColumns(
 		knowledgeID,
 		knowledgeBaseID,
 		processingGeneration,
-		[]string{types.ParseStatusFinalizing},
+		[]string{types.ParseStatusFinalizing, types.ParseStatusCompleted},
 		values,
 	)
 	if err != nil {

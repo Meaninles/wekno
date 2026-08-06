@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/hibiken/asynq"
@@ -261,6 +262,63 @@ func TestMiddleware_CallbackPanicBecomesVisibleError(t *testing.T) {
 	err := wrapper.ProcessTask(context.Background(), asynq.NewTask("any", []byte(`{}`)))
 	if !errors.Is(err, taskErr) || !strings.Contains(err.Error(), "dead-letter callback panicked") {
 		t.Fatalf("middleware error = %v, want original plus visible callback panic", err)
+	}
+}
+
+func TestMiddleware_PermanentSplitFailureDeadLettersAndSkipsRetry(t *testing.T) {
+	repo := &fakeRepo{}
+	callbacks := 0
+	permanent := &documentsplit.RemoteError{
+		Code:      "too_many_parts",
+		Message:   "requires 10770 parts",
+		Retryable: false,
+	}
+	mw := MiddlewareWithCallback(repo, func(_ context.Context, _ *asynq.Task, taskErr error) error {
+		callbacks++
+		if !errors.Is(taskErr, permanent) {
+			t.Fatalf("callback error = %v, want typed permanent error", taskErr)
+		}
+		return nil
+	})
+	wrapper := mw(asynq.HandlerFunc(func(context.Context, *asynq.Task) error {
+		return permanent
+	}))
+	err := wrapper.ProcessTask(
+		context.Background(),
+		asynq.NewTask("knowledge:split:prepare", []byte(`{"knowledge_id":"k-1"}`)),
+	)
+	if !errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("middleware error = %v, want asynq.SkipRetry", err)
+	}
+	if got := repo.rowCount(); got != 1 {
+		t.Fatalf("permanent error dead-letter rows = %d, want 1", got)
+	}
+	if callbacks != 1 {
+		t.Fatalf("permanent error callbacks = %d, want 1", callbacks)
+	}
+}
+
+func TestMiddleware_PermanentSplitFailureRetriesWhenRepairCallbackFails(t *testing.T) {
+	repo := &fakeRepo{}
+	callbackErr := errors.New("repair enqueue failed")
+	permanent := &documentsplit.RemoteError{
+		Code: "too_many_parts", Retryable: false,
+	}
+	mw := MiddlewareWithCallback(repo, func(context.Context, *asynq.Task, error) error {
+		return callbackErr
+	})
+	wrapper := mw(asynq.HandlerFunc(func(context.Context, *asynq.Task) error {
+		return permanent
+	}))
+	err := wrapper.ProcessTask(
+		context.Background(),
+		asynq.NewTask("knowledge:split:prepare", []byte(`{}`)),
+	)
+	if errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("callback failure was acknowledged with SkipRetry: %v", err)
+	}
+	if !errors.Is(err, permanent) || !errors.Is(err, callbackErr) {
+		t.Fatalf("middleware error = %v, want permanent and callback errors", err)
 	}
 }
 

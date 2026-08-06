@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
+	"github.com/Tencent/WeKnora/internal/custom/modules/retrievalfence"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -203,13 +204,28 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 			"group_count":            len(groups),
 		},
 		Metadata: map[string]interface{}{
-			"primary_kb_id":      kb.ID,
-			"primary_kb_type":    string(kb.Type),
-			"embedding_model_id": kb.EmbeddingModelID,
+			"primary_kb_id":       kb.ID,
+			"primary_kb_type":     string(kb.Type),
+			"embedding_model_id":  kb.EmbeddingModelID,
 			"has_query_embedding": len(params.QueryEmbedding) > 0,
 		},
 	})
 	retrieveResults, err := s.retrieveFromStores(retrieveCtx, groups, retriever.EngineAwareNormalizer{})
+	if err == nil {
+		scopes := make([]retrievalfence.Scope, 0, len(kbs))
+		for _, candidate := range kbs {
+			scopes = append(scopes, retrievalfence.Scope{
+				TenantID: candidate.TenantID, KnowledgeBaseID: candidate.ID,
+			})
+		}
+		retrieveResults, err = retrievalfence.Filter(
+			retrieveCtx,
+			retrieveResults,
+			scopes,
+			s.chunkRepo.ListChunksByIDOnly,
+			s.kgRepo.GetKnowledgeBatch,
+		)
+	}
 	retrieveSpan.Finish(langfuse.SummarizeRetrieveOutput(retrieveResults), nil, err)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
@@ -242,7 +258,7 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 	// timeout surfaced as ErrVectorStoreUnavailable) must surface to the
 	// caller rather than be silently converted to a truncated chunk list.
 	deduplicatedChunks, err = s.applyFAQPostProcessing(
-		ctx, kb, deduplicatedChunks, vectorResults, groups, params, matchCount)
+		ctx, kbs, deduplicatedChunks, vectorResults, groups, params, matchCount)
 	if err != nil {
 		return nil, err
 	}

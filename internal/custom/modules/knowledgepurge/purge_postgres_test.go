@@ -1,6 +1,7 @@
 package knowledgepurge
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -40,8 +42,14 @@ func openPurgePostgresDB(t *testing.T) *gorm.DB {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	for _, statement := range []string{
+		`CREATE TABLE knowledge_bases (
+			id VARCHAR(64) PRIMARY KEY, tenant_id BIGINT NOT NULL, deleted_at TIMESTAMPTZ
+		)`,
 		`CREATE TABLE knowledges (
-			id VARCHAR(64) PRIMARY KEY, tenant_id BIGINT NOT NULL
+			id VARCHAR(64) PRIMARY KEY, tenant_id BIGINT NOT NULL,
+			knowledge_base_id VARCHAR(64) NOT NULL DEFAULT '',
+			processing_generation VARCHAR(64) NOT NULL DEFAULT '',
+			deleted_at TIMESTAMPTZ
 		)`,
 		`CREATE TABLE custom_content_cache_entries (
 			tenant_id BIGINT NOT NULL, cache_kind TEXT NOT NULL,
@@ -64,7 +72,7 @@ func openPurgePostgresDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE custom_generated_question_claims (
 			tenant_id BIGINT NOT NULL, knowledge_id VARCHAR(64) NOT NULL
 		)`,
-		`CREATE TABLE knowledge_processing_spans (knowledge_id VARCHAR(64) NOT NULL)`,
+		`CREATE TABLE custom_processing_spans_v2 (knowledge_id VARCHAR(64) NOT NULL)`,
 		`CREATE TABLE custom_document_split_parts (
 			tenant_id BIGINT NOT NULL, knowledge_id VARCHAR(64) NOT NULL
 		)`,
@@ -73,6 +81,31 @@ func openPurgePostgresDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE wiki_log_entries (
 			tenant_id BIGINT NOT NULL, knowledge_id VARCHAR(64) NOT NULL
+		)`,
+		`CREATE TABLE custom_derivative_work_items (
+			id UUID PRIMARY KEY, tenant_id BIGINT NOT NULL,
+			knowledge_base_id VARCHAR(64) NOT NULL, knowledge_id VARCHAR(64) NOT NULL,
+			processing_generation VARCHAR(64) NOT NULL DEFAULT '',
+			dispatch_epoch BIGINT NOT NULL DEFAULT 0, state VARCHAR(32) NOT NULL DEFAULT 'queued',
+			completed_at TIMESTAMPTZ, owner_instance_id VARCHAR(160) NOT NULL DEFAULT '',
+			lease_token VARCHAR(64) NOT NULL DEFAULT '', lease_until TIMESTAMPTZ,
+			dispatch_lease_until TIMESTAMPTZ, last_heartbeat_at TIMESTAMPTZ,
+			version BIGINT NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE custom_derivative_provider_calls (
+			id UUID PRIMARY KEY, work_item_id UUID NOT NULL, response JSONB NOT NULL DEFAULT '{}'
+		)`,
+		`CREATE TABLE custom_derivative_results (
+			id UUID PRIMARY KEY, work_item_id UUID NOT NULL, response_content TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE custom_document_queue_workflows (
+			id VARCHAR(64) PRIMARY KEY, tenant_id BIGINT NOT NULL,
+			knowledge_base_id VARCHAR(64) NOT NULL, knowledge_id VARCHAR(64) NOT NULL,
+			processing_generation VARCHAR(64) NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE custom_document_queue_schedule_groups (
+			tenant_id BIGINT NOT NULL, knowledge_base_id VARCHAR(64) NOT NULL,
+			PRIMARY KEY (tenant_id, knowledge_base_id)
 		)`,
 		`CREATE TABLE embeddings (
 			id BIGSERIAL PRIMARY KEY, source_id TEXT, source_type TEXT,
@@ -87,7 +120,13 @@ func openPurgePostgresDB(t *testing.T) *gorm.DB {
 			id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL,
 			task_type VARCHAR(64) NOT NULL, scope VARCHAR(32) NOT NULL,
 			scope_id VARCHAR(64) NOT NULL, op VARCHAR(32) NOT NULL,
-			dedup_key VARCHAR(128) NOT NULL, payload JSONB NOT NULL DEFAULT '{}'
+			 dedup_key VARCHAR(128) NOT NULL, payload JSONB NOT NULL DEFAULT '{}'
+		)`,
+		`CREATE TABLE task_dead_letters (
+			id BIGSERIAL PRIMARY KEY, tenant_id BIGINT NOT NULL,
+			task_type VARCHAR(64) NOT NULL, scope VARCHAR(32) NOT NULL,
+			scope_id VARCHAR(64) NOT NULL, related_id VARCHAR(64) NOT NULL DEFAULT '',
+			payload JSONB NOT NULL DEFAULT '{}'
 		)`,
 	} {
 		require.NoError(t, db.Exec(statement).Error)
@@ -138,4 +177,43 @@ func TestPostgresDeleteSoftRowArtifactsMatchesProductionEmbeddingSchema(t *testi
 		require.NoError(t, db.Raw(query).Scan(&count).Error, table)
 		require.EqualValues(t, 1, count, table)
 	}
+}
+
+func TestPostgresQuiesceDerivativeTasksUsesProductionCaseUpdate(t *testing.T) {
+	db := openPurgePostgresDB(t)
+	workID := "4f213683-c3cf-4e78-a6c8-54d4a173c3b8"
+	require.NoError(t, db.Exec(`
+		INSERT INTO knowledges
+		  (id, tenant_id, knowledge_base_id, processing_generation)
+		VALUES ('knowledge-1', 7, 'kb-1', 'generation-1')`).Error)
+	require.NoError(t, db.Exec(`
+		INSERT INTO custom_derivative_work_items
+		  (id, tenant_id, knowledge_base_id, knowledge_id, processing_generation,
+		   dispatch_epoch, state, owner_instance_id, lease_token,
+		   lease_until, dispatch_lease_until, last_heartbeat_at)
+		VALUES (?, 7, 'kb-1', 'knowledge-1', 'generation-1',
+		        4, 'provider_running', 'worker-1', 'lease-1', now(), now(), now())`, workID).Error)
+
+	capture := &derivativePurgerCapture{}
+	require.NoError(t, NewCoordinator(db, capture).QuiesceDerivativeTasks(
+		context.Background(), 7, "kb-1", []string{"knowledge-1"},
+	))
+	var state struct {
+		State              string
+		OwnerInstanceID    string
+		LeaseToken         string
+		LeaseUntil         *time.Time
+		DispatchLeaseUntil *time.Time
+		LastHeartbeatAt    *time.Time
+	}
+	require.NoError(t, db.Table("custom_derivative_work_items").Where("id = ?", workID).Take(&state).Error)
+	require.Equal(t, "cancelled", state.State)
+	require.Empty(t, state.OwnerInstanceID)
+	require.Empty(t, state.LeaseToken)
+	require.Nil(t, state.LeaseUntil)
+	require.Nil(t, state.DispatchLeaseUntil)
+	require.Nil(t, state.LastHeartbeatAt)
+	require.Contains(t, capture.targets, interfaces.DerivativeTaskHistoryTarget{
+		WorkItemID: workID, DispatchEpoch: 4,
+	})
 }

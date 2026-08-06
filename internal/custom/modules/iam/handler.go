@@ -251,6 +251,13 @@ func ssoFrontendRedirectFromRequest(r *http.Request, publicOrigin string) (strin
 	if err != nil {
 		return "", err
 	}
+	if rawReturnTo := strings.TrimSpace(r.URL.Query().Get("return_to")); rawReturnTo != "" {
+		returnPath, normalizeErr := normalizeSSOReturnPath(rawReturnTo)
+		if normalizeErr != nil {
+			return "", normalizeErr
+		}
+		return origin + returnPath, nil
+	}
 	isMobile := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("client")), "mobile")
 	if isMobile {
 		return origin + "/mobile/", nil
@@ -264,6 +271,32 @@ func ssoFrontendRedirectFromRequest(r *http.Request, publicOrigin string) (strin
 		return parsed.Scheme + "://" + formatHostPort(host, "5177") + "/", nil
 	}
 	return origin + "/", nil
+}
+
+func normalizeSSOReturnPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("return_to is empty")
+	}
+	if strings.Contains(value, "#") {
+		return "", fmt.Errorf("return_to must not include a fragment")
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil {
+		return "", fmt.Errorf("return_to is invalid: %w", err)
+	}
+	if parsed.IsAbs() || parsed.Host != "" || strings.HasPrefix(value, "//") || parsed.Fragment != "" {
+		return "", fmt.Errorf("return_to must be a same-origin path without a fragment")
+	}
+	allowed := parsed.Path == "/platform" ||
+		strings.HasPrefix(parsed.Path, "/platform/") ||
+		parsed.Path == "/mobile" ||
+		strings.HasPrefix(parsed.Path, "/mobile/") ||
+		strings.HasPrefix(parsed.Path, "/share/chat/")
+	if !allowed {
+		return "", fmt.Errorf("return_to is not an authenticated product path")
+	}
+	return parsed.RequestURI(), nil
 }
 
 func ssoOriginFromRequest(r *http.Request, publicOrigin string) (string, error) {

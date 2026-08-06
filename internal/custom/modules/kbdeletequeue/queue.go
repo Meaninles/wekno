@@ -12,6 +12,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikilease"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -142,6 +143,13 @@ func (c *Coordinator) Complete(ctx context.Context, tenantID uint64, kbID string
 		}
 		if auxiliaryCount != 0 {
 			return fmt.Errorf("KB delete outbox: refusing completion while auxiliary ownership count is %d", auxiliaryCount)
+		}
+		// The document finalizers remove per-document rows. This KB-scoped
+		// sweep consumes the fair-scheduler group and any defensive residue
+		// (including tenant-scoped batch dead letters) in the same transaction
+		// as the durable outbox. A rollback therefore preserves the retry anchor.
+		if err := knowledgepurge.DeleteKnowledgeBaseArtifacts(tx, tenantID, kbID); err != nil {
+			return fmt.Errorf("KB delete outbox: purge KB execution residue: %w", err)
 		}
 
 		if err := tx.Where(

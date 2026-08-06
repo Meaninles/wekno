@@ -168,119 +168,122 @@ func TestQuestionProviderCircuitRejectSkipsEmbeddingAndRetrieveInitialization(t 
 
 func TestParseQuestionBatchResponseKeepsExactChunkMapping(t *testing.T) {
 	inputs := []questionBatchInput{
-		{ChunkIndex: 0, Content: "content zero"},
-		{ChunkIndex: 3, Content: "content three"},
+		{RecordID: "chunk-zero", Content: "content zero"},
+		{RecordID: "chunk-three", Content: "content three"},
 	}
 	raw := "```json\n" +
 		`{"results":[` +
-		`{"chunk_index":0,"questions":["1. 谁负责审批该事项？","谁负责审批该事项？"]},` +
-		`{"chunk_index":3,"questions":["超过期限后应如何处理？","哪些情形属于例外？","额外问题不会被保留？"]}` +
+		`{"record_id":"chunk-zero","questions":["1. 谁负责审批该事项？","谁负责审批该事项？"]},` +
+		`{"record_id":"chunk-three","questions":["超过期限后应如何处理？","哪些情形属于例外？","额外问题不会被保留？"]}` +
 		`]}` +
 		"\n```"
-	result, err := parseQuestionBatchResponse(raw, inputs, 2)
+	report, err := parseQuestionBatchResponse(raw, inputs, 2)
 	require.NoError(t, err)
-	require.Equal(t, []string{"谁负责审批该事项？"}, result[0])
-	require.Equal(t, []string{"超过期限后应如何处理？", "哪些情形属于例外？"}, result[3])
+	require.Equal(t, []string{"谁负责审批该事项？"}, report.Results["chunk-zero"])
+	require.Equal(t, []string{"超过期限后应如何处理？", "哪些情形属于例外？"}, report.Results["chunk-three"])
 }
 
-func TestParseQuestionBatchResponseRejectsUnknownOrDuplicateIndex(t *testing.T) {
-	inputs := []questionBatchInput{{ChunkIndex: 0, Content: "content"}}
-	_, err := parseQuestionBatchResponse(
-		`{"results":[{"chunk_index":9,"questions":["有效问题是什么？"]}]}`,
-		inputs,
-		2,
-	)
-	require.ErrorContains(t, err, "unknown chunk_index")
+func TestQuestionBatchRecordIDIsShortStableAndNonPositional(t *testing.T) {
+	first := questionBatchRecordID("generation-1", "chunk-a")
+	replayed := questionBatchRecordID("generation-1", "chunk-a")
+	otherChunk := questionBatchRecordID("generation-1", "chunk-b")
+	otherGeneration := questionBatchRecordID("generation-2", "chunk-a")
+	require.Equal(t, first, replayed)
+	require.Regexp(t, `^r_[0-9a-f]{16}$`, first)
+	require.NotEqual(t, first, otherChunk)
+	require.NotEqual(t, first, otherGeneration)
+}
 
-	_, err = parseQuestionBatchResponse(
+func TestParseQuestionBatchResponseNormalizesUnknownAndDuplicateRecordIDs(t *testing.T) {
+	inputs := []questionBatchInput{{RecordID: "chunk-zero", Content: "content"}}
+	report, err := parseQuestionBatchResponse(
 		`{"results":[`+
-			`{"chunk_index":0,"questions":["第一个有效问题是什么？"]},`+
-			`{"chunk_index":0,"questions":["第二个有效问题是什么？"]}]}`,
+			`{"record_id":"one-past-end","questions":["不应链接到任何块？"]},`+
+			`{"record_id":"chunk-zero","questions":["第一个有效问题是什么？"]},`+
+			`{"record_id":"chunk-zero","questions":["第二个有效问题是什么？"]}]}`,
 		inputs,
 		2,
 	)
-	require.ErrorContains(t, err, "repeats chunk_index")
+	require.NoError(t, err)
+	require.Equal(t, []string{"one-past-end"}, report.UnknownRecordIDs)
+	require.Equal(t, 1, report.DuplicateRecordCount)
+	require.Equal(t, []string{"第一个有效问题是什么？", "第二个有效问题是什么？"}, report.Results["chunk-zero"])
 }
 
 func TestParseQuestionBatchResponseDistinguishesExplicitEmptyFromOmission(t *testing.T) {
 	inputs := []questionBatchInput{
-		{ChunkIndex: 0, Content: "useful"},
-		{ChunkIndex: 1, Content: "blank form"},
-		{ChunkIndex: 2, Content: "omitted"},
+		{RecordID: "chunk-0", Content: "useful"},
+		{RecordID: "chunk-1", Content: "blank form"},
+		{RecordID: "chunk-2", Content: "omitted"},
 	}
-	result, err := parseQuestionBatchResponse(
+	report, err := parseQuestionBatchResponse(
 		`{"results":[`+
-			`{"chunk_index":0,"questions":["谁负责审批该事项？"]},`+
-			`{"chunk_index":1,"questions":[]}]}`,
+			`{"record_id":"chunk-0","questions":["谁负责审批该事项？"]},`+
+			`{"record_id":"chunk-1","questions":[]}]}`,
 		inputs,
 		2,
 	)
 	require.NoError(t, err)
-	require.Equal(t, []string{"谁负责审批该事项？"}, result[0])
-	require.Contains(t, result, 1)
-	require.Empty(t, result[1])
-	require.NotContains(t, result, 2)
+	require.Equal(t, []string{"谁负责审批该事项？"}, report.Results["chunk-0"])
+	require.Contains(t, report.Results, "chunk-1")
+	require.Empty(t, report.Results["chunk-1"])
+	require.Equal(t, []string{"chunk-2"}, report.MissingRecordIDs)
 }
 
 func TestParseQuestionBatchResponseAcceptsExplicitQuestionObjects(t *testing.T) {
 	inputs := []questionBatchInput{
-		{ChunkIndex: 0, Content: "content zero"},
-		{ChunkIndex: 1, Content: "content one"},
+		{RecordID: "chunk-0", Content: "content zero"},
+		{RecordID: "chunk-1", Content: "content one"},
 	}
-	result, err := parseQuestionBatchResponse(
+	report, err := parseQuestionBatchResponse(
 		`{"results":[`+
-			`{"chunk_index":0,"questions":[{"question":"谁负责审批该事项？","answer":"业务部门"}]},`+
-			`{"chunk_index":1,"questions":["办理时限不得超过多久？",{"text":"哪些情形属于例外？"}]}`+
+			`{"record_id":"chunk-0","questions":[{"question":"谁负责审批该事项？","answer":"业务部门"}]},`+
+			`{"record_id":"chunk-1","questions":["办理时限不得超过多久？",{"text":"哪些情形属于例外？"}]}`+
 			`]}`,
 		inputs,
 		2,
 	)
 	require.NoError(t, err)
-	require.Equal(t, []string{"谁负责审批该事项？"}, result[0])
-	require.Equal(t, []string{"办理时限不得超过多久？", "哪些情形属于例外？"}, result[1])
+	require.Equal(t, []string{"谁负责审批该事项？"}, report.Results["chunk-0"])
+	require.Equal(t, []string{"办理时限不得超过多久？", "哪些情形属于例外？"}, report.Results["chunk-1"])
 }
 
-func TestParseQuestionBatchResponseRejectsAmbiguousQuestionObjects(t *testing.T) {
-	inputs := []questionBatchInput{{ChunkIndex: 0, Content: "content"}}
-	_, err := parseQuestionBatchResponse(
-		`{"results":[{"chunk_index":0,"questions":[`+
-			`{"question":"谁负责审批该事项？","text":"办理时限是多久？"}`+
-			`]}]}`,
-		inputs,
-		2,
-	)
-	require.ErrorContains(t, err, "conflicting text aliases")
-
-	_, err = parseQuestionBatchResponse(
-		`{"results":[{"chunk_index":0,"questions":[{"answer":"业务部门"}]}]}`,
-		inputs,
-		2,
-	)
-	require.ErrorContains(t, err, "must contain")
-}
-
-func TestParseQuestionBatchResponseRecoversCompleteItemsFromTruncatedTail(t *testing.T) {
-	inputs := []questionBatchInput{
-		{ChunkIndex: 0, Content: "content zero"},
-		{ChunkIndex: 1, Content: "content one"},
-	}
-	result, err := parseQuestionBatchResponse(
-		`{"results":[`+
-			`{"chunk_index":0,"questions":["谁负责审批该事项？"]},`+
-			`{"chunk_index":1,"questions":["办理时限不得超过`,
+func TestParseQuestionBatchResponseSkipsAmbiguousQuestionObjects(t *testing.T) {
+	inputs := []questionBatchInput{{RecordID: "chunk-0", Content: "content"}}
+	report, err := parseQuestionBatchResponse(
+		`{"results":[{"record_id":"chunk-0","questions":[`+
+			`{"question":"谁负责审批该事项？","text":"办理时限是多久？"},`+
+			`{"answer":"业务部门"},"谁负责最终复核？"]}]}`,
 		inputs,
 		2,
 	)
 	require.NoError(t, err)
-	require.Equal(t, []string{"谁负责审批该事项？"}, result[0])
-	require.NotContains(t, result, 1)
+	require.Equal(t, 2, report.InvalidQuestionCount)
+	require.Equal(t, []string{"谁负责最终复核？"}, report.Results["chunk-0"])
+}
+
+func TestParseQuestionBatchResponseRecoversCompleteItemsFromTruncatedTail(t *testing.T) {
+	inputs := []questionBatchInput{
+		{RecordID: "chunk-0", Content: "content zero"},
+		{RecordID: "chunk-1", Content: "content one"},
+	}
+	report, err := parseQuestionBatchResponse(
+		`{"results":[`+
+			`{"record_id":"chunk-0","questions":["谁负责审批该事项？"]},`+
+			`{"record_id":"chunk-1","questions":["办理时限不得超过`,
+		inputs,
+		2,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"谁负责审批该事项？"}, report.Results["chunk-0"])
+	require.Equal(t, []string{"chunk-1"}, report.MissingRecordIDs)
 }
 
 func TestGenerateQuestionsBatchUsesOneStructuredModelCall(t *testing.T) {
 	model := &questionBatchChatStub{
 		response: `{"results":[` +
-			`{"chunk_index":0,"questions":["审批职责由谁承担？"]},` +
-			`{"chunk_index":1,"questions":["办理时限不得超过多久？"]}` +
+			`{"record_id":"chunk-0","questions":["审批职责由谁承担？"]},` +
+			`{"record_id":"chunk-1","questions":["办理时限不得超过多久？"]}` +
 			`]}`,
 	}
 	svc := &knowledgeService{config: &config.Config{
@@ -290,12 +293,12 @@ func TestGenerateQuestionsBatchUsesOneStructuredModelCall(t *testing.T) {
 				`{{question_count}} {{doc_name}} {{language}} {{output_instructions}}`,
 		},
 	}}
-	result, err := svc.generateQuestionsBatchWithContext(
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
 		context.Background(),
 		model,
 		[]questionBatchInput{
-			{ChunkIndex: 0, Content: "审批由业务部门负责。"},
-			{ChunkIndex: 1, Content: "办理时限不得超过五个工作日。"},
+			{RecordID: "chunk-0", Content: "审批由业务部门负责。"},
+			{RecordID: "chunk-1", Content: "办理时限不得超过五个工作日。"},
 		},
 		"前置上下文",
 		"后续上下文",
@@ -303,21 +306,23 @@ func TestGenerateQuestionsBatchUsesOneStructuredModelCall(t *testing.T) {
 		2,
 	)
 	require.NoError(t, err)
+	require.Zero(t, coverage.UnresolvedEligible)
 	require.Equal(t, 1, model.calls)
-	require.Equal(t, []string{"审批职责由谁承担？"}, result[0])
-	require.Equal(t, []string{"办理时限不得超过多久？"}, result[1])
+	require.Equal(t, []string{"审批职责由谁承担？"}, result["chunk-0"])
+	require.Equal(t, []string{"办理时限不得超过多久？"}, result["chunk-1"])
 	require.NotNil(t, model.options)
 	require.NotEmpty(t, model.options.Format)
 	require.GreaterOrEqual(t, model.options.MaxTokens, 1024)
 	require.Len(t, model.messages, 1)
-	require.True(t, strings.Contains(model.messages[0].Content, `"chunk_index":0`))
+	require.True(t, strings.Contains(model.messages[0].Content, `"record_id":"chunk-0"`))
+	require.Contains(t, string(model.options.Format), `"enum":["chunk-0","chunk-1"]`)
 	require.True(t, strings.Contains(model.messages[0].Content, "Batch Execution Rules"))
 }
 
 func TestGenerateQuestionsBatchRecoversOnlyOmittedRecordsOnce(t *testing.T) {
 	model := &questionBatchChatStub{responses: []string{
-		`{"results":[{"chunk_index":0,"questions":["审批职责由谁承担？"]}]}`,
-		`{"results":[{"chunk_index":1,"questions":[]}]}`,
+		`{"results":[{"record_id":"chunk-0","questions":["审批职责由谁承担？"]}]}`,
+		`{"results":[{"record_id":"chunk-1","questions":[]}]}`,
 	}}
 	svc := &knowledgeService{config: &config.Config{
 		Conversation: &config.ConversationConfig{
@@ -326,12 +331,12 @@ func TestGenerateQuestionsBatchRecoversOnlyOmittedRecordsOnce(t *testing.T) {
 				`{{question_count}} {{doc_name}} {{language}} {{output_instructions}}`,
 		},
 	}}
-	result, err := svc.generateQuestionsBatchWithContext(
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
 		context.Background(),
 		model,
 		[]questionBatchInput{
-			{ChunkIndex: 0, Content: "审批由业务部门负责。"},
-			{ChunkIndex: 1, Content: "空白表单。"},
+			{RecordID: "chunk-0", Content: "审批由业务部门负责。"},
+			{RecordID: "chunk-1", Content: "空白表单。"},
 		},
 		"",
 		"",
@@ -339,11 +344,12 @@ func TestGenerateQuestionsBatchRecoversOnlyOmittedRecordsOnce(t *testing.T) {
 		2,
 	)
 	require.NoError(t, err)
-	require.Equal(t, 2, model.calls)
-	require.Equal(t, []string{"审批职责由谁承担？"}, result[0])
-	require.Contains(t, result, 1)
-	require.Empty(t, result[1])
-	require.Contains(t, model.messages[0].Content, `"chunk_index":1`)
+	require.Equal(t, 1, model.calls)
+	require.Equal(t, 1, coverage.LowInformation)
+	require.Equal(t, []string{"审批职责由谁承担？"}, result["chunk-0"])
+	require.Contains(t, result, "chunk-1")
+	require.Empty(t, result["chunk-1"])
+	require.Contains(t, model.messages[0].Content, `"record_id":"chunk-1"`)
 }
 
 func TestGenerateQuestionsBatchRepeatedOmissionBecomesSemanticEmpty(t *testing.T) {
@@ -356,19 +362,65 @@ func TestGenerateQuestionsBatchRepeatedOmissionBecomesSemanticEmpty(t *testing.T
 			GenerateQuestionsPrompt: `{{content}} {{output_instructions}}`,
 		},
 	}}
-	result, err := svc.generateQuestionsBatchWithContext(
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
 		context.Background(),
 		model,
-		[]questionBatchInput{{ChunkIndex: 7, Content: "空白模板。"}},
+		[]questionBatchInput{{RecordID: "chunk-7", Content: "空白模板。"}},
 		"",
 		"",
 		"测试制度",
 		1,
 	)
 	require.NoError(t, err)
+	require.Equal(t, 1, model.calls)
+	require.Equal(t, 1, coverage.LowInformation)
+	require.Contains(t, result, "chunk-7")
+	require.Empty(t, result["chunk-7"])
+}
+
+func TestGenerateQuestionsBatchRecoversExplicitEmptySubstantiveRecord(t *testing.T) {
+	model := &questionBatchChatStub{responses: []string{
+		`{"results":[{"record_id":"chunk-8","questions":[]}]}`,
+		`{"results":[{"record_id":"chunk-8","questions":["该制度规定由哪个部门负责审批？"]}]}`,
+	}}
+	svc := &knowledgeService{config: &config.Config{
+		Conversation: &config.ConversationConfig{
+			GenerateQuestionsPrompt: `{{content}} {{output_instructions}}`,
+		},
+	}}
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
+		context.Background(), model,
+		[]questionBatchInput{{RecordID: "chunk-8", Content: "申请材料应当由综合管理部门在三个工作日内完成审批。"}},
+		"", "", "测试制度", 1,
+	)
+	require.NoError(t, err)
 	require.Equal(t, 2, model.calls)
-	require.Contains(t, result, 7)
-	require.Empty(t, result[7])
+	require.Equal(t, 1, coverage.Eligible)
+	require.Equal(t, 1, coverage.Recovered)
+	require.Zero(t, coverage.UnresolvedEligible)
+	require.Equal(t, []string{"该制度规定由哪个部门负责审批？"}, result["chunk-8"])
+	require.Contains(t, model.messages[0].Content, "Coverage Recovery Pass")
+}
+
+func TestGenerateQuestionsBatchMarksSubstantiveRepeatedEmptyUnresolved(t *testing.T) {
+	model := &questionBatchChatStub{responses: []string{
+		`{"results":[{"record_id":"chunk-9","questions":[]}]}`,
+		`{"results":[{"record_id":"chunk-9","questions":[]}]}`,
+	}}
+	svc := &knowledgeService{config: &config.Config{
+		Conversation: &config.ConversationConfig{
+			GenerateQuestionsPrompt: `{{content}} {{output_instructions}}`,
+		},
+	}}
+	result, coverage, err := svc.generateQuestionsBatchWithContext(
+		context.Background(), model,
+		[]questionBatchInput{{RecordID: "chunk-9", Content: "合同金额超过十万元时，应由分管负责人审批。"}},
+		"", "", "测试制度", 1,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, model.calls)
+	require.Equal(t, 1, coverage.UnresolvedEligible)
+	require.Empty(t, result["chunk-9"])
 }
 
 func TestGraphChunkIDBatchesAreBoundedStableAndComplete(t *testing.T) {

@@ -1,12 +1,19 @@
 export const RAG_PIPELINE_TOOL_NAMES = new Set(['query_understand', 'knowledge_search', 'web_search'])
 
 type RagHistoryMessage = {
+  role?: string
+  agent_mode?: boolean
   knowledge_references?: Array<{
     chunk_type?: string
     knowledge_id?: string
     knowledge_title?: string
   }>
   agentEventStream?: Array<Record<string, unknown>>
+}
+
+/** Historical rendering is decided per answer, never by the session's current agent selection. */
+export function shouldRestoreQuickAnswerHistory(item: RagHistoryMessage): boolean {
+  return item.role === 'assistant' && item.agent_mode !== true
 }
 
 export function hasRagPipelineToolEvents(stream: Array<Record<string, unknown>> | undefined): boolean {
@@ -22,6 +29,7 @@ export function hasRagPipelineToolEvents(stream: Array<Record<string, unknown>> 
 
 export function synthesizeRagPipelineToolEvents(
   item: RagHistoryMessage,
+  userQuery = '',
 ): Array<Record<string, unknown>> {
   const refs = item.knowledge_references ?? []
   const kbCounts: Record<string, number> = {}
@@ -43,6 +51,7 @@ export function synthesizeRagPipelineToolEvents(
       type: 'tool_call',
       tool_call_id: 'rag-history-query-understand',
       tool_name: 'query_understand',
+      arguments: userQuery ? { query: userQuery } : undefined,
       pending: false,
       success: true,
     },
@@ -50,6 +59,7 @@ export function synthesizeRagPipelineToolEvents(
       type: 'tool_call',
       tool_call_id: `rag-history-${retrievalToolName}`,
       tool_name: retrievalToolName,
+      arguments: userQuery ? { query: userQuery } : undefined,
       pending: false,
       success: true,
       tool_data: {
@@ -68,7 +78,7 @@ export function ensureRagPipelineHistoryStream(item: RagHistoryMessage & {
   is_completed?: boolean
   isAgentMode?: boolean
   hideContent?: boolean
-}): void {
+}, userQuery = ''): void {
   if (!item.is_completed) return
 
   const stream = Array.isArray(item.agentEventStream)
@@ -82,7 +92,7 @@ export function ensureRagPipelineHistoryStream(item: RagHistoryMessage & {
   Boolean(item.knowledge_references?.length)
   if (!hasRestorablePayload) return
 
-  const synthesized = synthesizeRagPipelineToolEvents(item)
+  const synthesized = synthesizeRagPipelineToolEvents(item, userQuery)
   const preserved = stream.filter((event) => {
     return !(
       event.type === 'tool_call' &&

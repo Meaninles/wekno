@@ -7,6 +7,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/agent/skills"
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -347,6 +348,9 @@ func BuildSystemPromptWithOptions(
 		language = options.Language
 	}
 	basePrompt = renderPromptPlaceholdersWithStatus(template, knowledgeBases, webSearchEnabled, currentTime, language)
+	// Keep citation behavior reusable across every current and future native
+	// agent type, including agents that discover evidence dynamically at run time.
+	basePrompt = sourcerefs.EnsureGenerationContract(basePrompt)
 
 	// Append skills metadata if available (Level 1 - Progressive Disclosure)
 	if options != nil && len(options.SkillsMetadata) > 0 {

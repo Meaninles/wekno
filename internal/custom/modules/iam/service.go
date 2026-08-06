@@ -2348,6 +2348,23 @@ func (s *Service) StartScheduler(ctx context.Context) error {
 	return s.reloadScheduleLocked(ctx)
 }
 
+func (s *Service) StopScheduler() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scheduler != nil {
+		stopCtx := s.scheduler.Stop()
+		select {
+		case <-stopCtx.Done():
+		case <-time.After(5 * time.Second):
+		}
+		s.scheduler = nil
+		s.entryID = 0
+	}
+}
+
 func (s *Service) ReloadSchedule(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

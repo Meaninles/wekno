@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 )
 
 // TestIsTransientLLMError_HTTPStatuses covers the status codes we know
@@ -36,6 +40,20 @@ func TestIsTransientLLMError_HTTPStatuses(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("isTransientLLMError(%q) = %v, want %v", tc.msg, got, tc.want)
 		}
+	}
+}
+
+func TestIsTransientLLMError_TypedGateway403WinsOverNestedStatus(t *testing.T) {
+	err := &modeladmission.ProviderUnavailableError{
+		Kind:       modeladmission.KindChat,
+		RetryAfter: 15 * time.Second,
+		Cause: &chat.HTTPStatusError{
+			StatusCode: 403,
+			Body:       "<!DOCTYPE html><html>ERROR CODE 403</html>",
+		},
+	}
+	if !isTransientLLMError(context.Background(), err) {
+		t.Fatal("typed provider-unavailable 403 must be durably retried")
 	}
 }
 

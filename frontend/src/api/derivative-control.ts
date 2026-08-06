@@ -77,13 +77,6 @@ export async function setDefaultDerivativeModel(modelId: string): Promise<Deriva
   return response.data
 }
 
-export async function updateDerivativeTPM(tpm: number): Promise<number> {
-  const response = await put('/api/v1/custom/derivative-control/tpm', {
-    tpm,
-  }) as unknown as ApiResponse<{ tpm: number }>
-  return response.data.tpm
-}
-
 export async function testDerivativeModel(
   modelId: string,
   prompt = '只回复 OK',

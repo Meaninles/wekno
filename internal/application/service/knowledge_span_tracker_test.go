@@ -13,6 +13,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,55 +21,29 @@ import (
 	"gorm.io/gorm"
 )
 
-// span tracker tests use a real GORM-backed repo against an in-memory
-// SQLite DB. We do this instead of a stub repo because the cascade /
-// LookupStage logic interacts non-trivially with the persistence layer
-// (UPSERT, MAX(attempt), parent IN ...) — a stub would let regressions
-// in those queries slip through.
-//
-// We DDL-define the spans table inline (same content as the repo test's
-// spansTestDDL — kept duplicated rather than exported because a service
-// test crossing into the repository test file's identifiers couples the
-// two too tightly).
-const spanTrackerTestDDL = `
-CREATE TABLE IF NOT EXISTS knowledge_processing_spans (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    knowledge_id    VARCHAR(64) NOT NULL,
-    attempt         INTEGER     NOT NULL DEFAULT 1,
-    span_id         VARCHAR(64) NOT NULL,
-    parent_span_id  VARCHAR(64),
-    name            VARCHAR(64) NOT NULL,
-    kind            VARCHAR(16) NOT NULL,
-    status          VARCHAR(16) NOT NULL,
-    input           TEXT,
-    output          TEXT,
-    metadata        TEXT,
-    error_code      VARCHAR(64),
-    error_message   TEXT,
-    error_detail    TEXT,
-    started_at      DATETIME,
-    finished_at     DATETIME,
-    duration_ms     BIGINT,
-    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (knowledge_id, attempt, span_id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_kpspan_one_root_per_attempt
-    ON knowledge_processing_spans(knowledge_id, attempt)
-    WHERE kind = 'root';
-`
-
 func setupSpanTrackerTest(t *testing.T) (SpanTracker, *gorm.DB) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.Exec(spanTrackerTestDDL).Error)
+	v2 := processingtrace.NewRepository(db)
+	require.NoError(t, v2.Migrate(context.Background()))
 	// Pass nil for the heartbeat db: these tests don't exercise
 	// heartbeat side-effects (those are covered in the housekeeping
 	// suite). Keeping it nil also avoids needing the knowledges
 	// table just to validate span behaviour.
-	repo := repository.NewKnowledgeSpanRepository(db)
+	repo := repository.NewKnowledgeSpanRepositoryWithV2(db, v2)
 	return NewSpanTracker(repo, nil), db
+}
+
+func spanRepoForTest(db *gorm.DB) repository.KnowledgeSpanRepository {
+	return repository.NewKnowledgeSpanRepositoryWithV2(db, processingtrace.NewRepository(db))
+}
+
+func persistPreparedSpanForTest(t *testing.T, tracker SpanTracker, span *Span) {
+	t.Helper()
+	impl, ok := tracker.(*spanTracker)
+	require.True(t, ok)
+	impl.startPreparedSubSpan(context.Background(), span)
 }
 
 func TestSpanTrackerPersistsExecutorIdentityForStagesAndSubspans(t *testing.T) {
@@ -98,16 +73,39 @@ func TestSpanTrackerPersistsExecutorIdentityForStagesAndSubspans(t *testing.T) {
 		nil,
 	)
 	require.NotNil(t, child)
+	persistPreparedSpanForTest(t, tracker, child)
 
-	var rows []types.KnowledgeProcessingSpan
-	require.NoError(t, db.Order("id ASC").Find(&rows).Error)
+	rows, err := spanRepoForTest(db).ListByAttempt(context.Background(), "kid-executor", attempt)
+	require.NoError(t, err)
 	require.Len(t, rows, 3)
-	require.Equal(t, root.SpanID, rows[0].SpanID)
-	require.Equal(t, "worker-cluster-a", rows[0].Metadata[pipelineobs.ExecutorInstanceIDMetadataKey])
-	require.Equal(t, "boot-a", rows[1].Metadata[pipelineobs.ExecutorBootIDMetadataKey])
-	require.Equal(t, "document:process", rows[1].Metadata[pipelineobs.ExecutorTaskTypeMetadataKey])
-	require.Equal(t, "worker-cluster-b", rows[2].Metadata[pipelineobs.ExecutorInstanceIDMetadataKey])
-	require.Equal(t, "question:generation", rows[2].Metadata[pipelineobs.ExecutorTaskTypeMetadataKey])
+	byName := make(map[string]types.KnowledgeProcessingSpan, len(rows))
+	for _, row := range rows {
+		byName[row.Name] = row
+	}
+	require.Equal(t, root.SpanID, byName["knowledge_processing"].SpanID)
+	require.Equal(t, "worker-cluster-a", byName["knowledge_processing"].Metadata[pipelineobs.ExecutorInstanceIDMetadataKey])
+	require.Equal(t, "boot-a", byName[types.StageEmbedding].Metadata[pipelineobs.ExecutorBootIDMetadataKey])
+	require.Equal(t, "document:process", byName[types.StageEmbedding].Metadata[pipelineobs.ExecutorTaskTypeMetadataKey])
+	require.Equal(t, "worker-cluster-b", byName["postprocess.questions.batch[0]"].Metadata[pipelineobs.ExecutorInstanceIDMetadataKey])
+	require.Equal(t, "question:generation", byName["postprocess.questions.batch[0]"].Metadata[pipelineobs.ExecutorTaskTypeMetadataKey])
+}
+
+func TestSpanTrackerDeferralDoesNotPersistBusinessSpan(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-deferred", "")
+	require.NoError(t, err)
+	stage := tracker.BeginStage(ctx, "kid-deferred", attempt, types.StagePostProcess, nil)
+	leaf := tracker.BeginSubSpan(ctx, stage, "postprocess.summary", types.SpanKindSubSpan, nil)
+	child := tracker.BeginSubSpan(ctx, leaf, "provider.call", types.SpanKindGeneration, nil)
+	require.NotNil(t, child)
+
+	tracker.DeferSpan(ctx, leaf, "model_capacity", errors.New("pool busy"))
+
+	var count int64
+	require.NoError(t, db.Table("custom_processing_spans_v2").
+		Where("span_id IN ?", []string{leaf.SpanID, child.SpanID}).Count(&count).Error)
+	require.Zero(t, count, "control-plane wait must produce zero business-span rows")
 }
 
 // TestSpanTracker_OpenAttempt_AllocatesFreshNumbers covers the contract
@@ -132,15 +130,14 @@ func TestSpanTracker_OpenAttempt_AllocatesFreshNumbers(t *testing.T) {
 	// Both roots must persist — a reparse must NOT erase the previous
 	// attempt's history.
 	var count int64
-	require.NoError(t, db.Table("knowledge_processing_spans").
+	require.NoError(t, db.Table("custom_processing_spans_v2").
 		Where("knowledge_id = ? AND kind = 'root'", "kid").
 		Count(&count).Error)
 	assert.Equal(t, int64(2), count, "previous attempt's root must remain after reparse")
 
-	var previous types.KnowledgeProcessingSpan
-	require.NoError(t, db.Where(
-		"knowledge_id = ? AND attempt = ? AND kind = ?", "kid", 1, types.SpanKindRoot,
-	).Take(&previous).Error)
+	previous, err := spanRepoForTest(db).GetSpan(context.Background(), "kid", 1, root1.SpanID)
+	require.NoError(t, err)
+	require.NotNil(t, previous)
 	assert.Equal(t, types.SpanStatusCancelled, previous.Status,
 		"a newer attempt must terminalize a crash-orphaned previous root")
 	assert.Equal(t, "SUPERSEDED_ATTEMPT", previous.ErrorCode)
@@ -154,6 +151,7 @@ func TestSpanTrackerOpenAttemptSupersedesEveryOlderOpenAttempt(t *testing.T) {
 	// Simulate legacy history in which attempt 1 crashed and remained open,
 	// while two later attempts nevertheless reached terminal states. Closing
 	// only max(attempt)-1 would never touch the older orphan.
+	testRepo := spanRepoForTest(db)
 	for _, row := range []*types.KnowledgeProcessingSpan{
 		{
 			KnowledgeID: "kid-old-orphan", Attempt: 1, SpanID: "root-1",
@@ -176,7 +174,7 @@ func TestSpanTrackerOpenAttemptSupersedesEveryOlderOpenAttempt(t *testing.T) {
 			Status: types.SpanStatusFailed, StartedAt: &now, FinishedAt: &now,
 		},
 	} {
-		require.NoError(t, db.Create(row).Error)
+		require.NoError(t, testRepo.Upsert(ctx, row))
 	}
 
 	_, attempt, err := tracker.OpenAttempt(ctx, "kid-old-orphan", "trace-4")
@@ -184,27 +182,31 @@ func TestSpanTrackerOpenAttemptSupersedesEveryOlderOpenAttempt(t *testing.T) {
 	require.Equal(t, 4, attempt)
 
 	var rows []types.KnowledgeProcessingSpan
-	require.NoError(t, db.
-		Where("knowledge_id = ?", "kid-old-orphan").
-		Order("attempt ASC, id ASC").
-		Find(&rows).Error)
+	for currentAttempt := 1; currentAttempt <= 4; currentAttempt++ {
+		attemptRows, listErr := testRepo.ListByAttempt(ctx, "kid-old-orphan", currentAttempt)
+		require.NoError(t, listErr)
+		rows = append(rows, attemptRows...)
+	}
 	require.Len(t, rows, 5)
 
-	byID := make(map[string]types.KnowledgeProcessingSpan, len(rows))
+	byAttemptName := make(map[int]map[string]types.KnowledgeProcessingSpan)
 	for _, row := range rows {
-		byID[row.SpanID] = row
+		if byAttemptName[row.Attempt] == nil {
+			byAttemptName[row.Attempt] = make(map[string]types.KnowledgeProcessingSpan)
+		}
+		byAttemptName[row.Attempt][row.Name] = row
 	}
-	assert.Equal(t, types.SpanStatusCancelled, byID["root-1"].Status)
-	assert.Equal(t, types.SpanStatusCancelled, byID["child-1"].Status)
-	assert.Equal(t, "SUPERSEDED_ATTEMPT", byID["root-1"].ErrorCode)
-	assert.NotNil(t, byID["root-1"].FinishedAt)
-	assert.Equal(t, types.SpanStatusDone, byID["root-2"].Status,
+	assert.Equal(t, types.SpanStatusCancelled, byAttemptName[1]["knowledge_processing"].Status)
+	assert.Equal(t, types.SpanStatusCancelled, byAttemptName[1][types.StageEmbedding].Status)
+	assert.Equal(t, "SUPERSEDED_ATTEMPT", byAttemptName[1]["knowledge_processing"].ErrorCode)
+	assert.NotNil(t, byAttemptName[1]["knowledge_processing"].FinishedAt)
+	assert.Equal(t, types.SpanStatusDone, byAttemptName[2]["knowledge_processing"].Status,
 		"terminal history must remain immutable")
-	assert.Equal(t, types.SpanStatusFailed, byID["root-3"].Status,
+	assert.Equal(t, types.SpanStatusFailed, byAttemptName[3]["knowledge_processing"].Status,
 		"terminal history must remain immutable")
 
 	var liveRoots int64
-	require.NoError(t, db.Model(&types.KnowledgeProcessingSpan{}).
+	require.NoError(t, db.Model(&processingtrace.Span{}).
 		Where("knowledge_id = ? AND kind = ? AND status = ?",
 			"kid-old-orphan", types.SpanKindRoot, types.SpanStatusRunning).
 		Count(&liveRoots).Error)
@@ -251,7 +253,7 @@ func TestSpanTrackerConcurrentOpenAttemptAllocatesUniqueRoots(t *testing.T) {
 		assert.Equal(t, i+1, attempt)
 	}
 
-	var roots []types.KnowledgeProcessingSpan
+	var roots []processingtrace.Span
 	require.NoError(t, db.
 		Where("knowledge_id = ? AND kind = ?", "kid-concurrent-open", types.SpanKindRoot).
 		Order("attempt ASC").
@@ -264,7 +266,7 @@ func TestSpanTrackerConcurrentOpenAttemptAllocatesUniqueRoots(t *testing.T) {
 			continue
 		}
 		assert.Equal(t, types.SpanStatusCancelled, root.Status)
-		assert.Equal(t, "SUPERSEDED_ATTEMPT", root.ErrorCode)
+		assert.Equal(t, "SUPERSEDED_ATTEMPT", root.LastErrorCode)
 	}
 }
 
@@ -297,7 +299,7 @@ func TestSpanTracker_FailSpan_CascadesDownstream(t *testing.T) {
 		Name, Status string
 	}
 	var rows []row
-	require.NoError(t, db.Table("knowledge_processing_spans").
+	require.NoError(t, db.Table("custom_processing_spans_v2").
 		Select("name, status").
 		Where("knowledge_id = ? AND attempt = ?", "kid", attempt).
 		Find(&rows).Error)
@@ -344,6 +346,53 @@ func TestSpanTracker_LookupStage_FindsAcrossProcesses(t *testing.T) {
 	assert.Nil(t, other, "LookupStage(missing) must return nil")
 }
 
+func TestSpanTracker_EndSpanPreservesPersistedSkippedStage(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-skipped-multimodal", "")
+	require.NoError(t, err)
+	multimodal := tracker.BeginStage(ctx, "kid-skipped-multimodal", attempt, types.StageMultimodal, nil)
+	require.NotNil(t, multimodal)
+	tracker.SkipSpan(ctx, multimodal, "no_images")
+
+	// Simulate the post-process worker running in another process: it does not
+	// own the original handle and must rely on the persisted stage state.
+	lookedUp := tracker.LookupStage(ctx, "kid-skipped-multimodal", attempt, types.StageMultimodal)
+	require.NotNil(t, lookedUp)
+	require.Equal(t, types.SpanStatusSkipped, lookedUp.Status)
+	tracker.EndSpan(ctx, lookedUp, types.JSONMap{"terminal_outcomes": 0})
+
+	stored, err := spanRepoForTest(db).GetSpan(ctx, "kid-skipped-multimodal", attempt, lookedUp.SpanID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, types.SpanStatusSkipped, stored.Status)
+	require.Equal(t, "no_images", stored.ErrorMessage)
+	require.Nil(t, stored.Output)
+}
+
+func TestSpanTracker_EndSpanStillCompletesRunningLookup(t *testing.T) {
+	tracker, db := setupSpanTrackerTest(t)
+	ctx := context.Background()
+
+	_, attempt, err := tracker.OpenAttempt(ctx, "kid-running-multimodal", "")
+	require.NoError(t, err)
+	require.NotNil(t, tracker.BeginStage(
+		ctx, "kid-running-multimodal", attempt, types.StageMultimodal, nil,
+	))
+
+	lookedUp := tracker.LookupStage(ctx, "kid-running-multimodal", attempt, types.StageMultimodal)
+	require.NotNil(t, lookedUp)
+	require.Equal(t, types.SpanStatusRunning, lookedUp.Status)
+	tracker.EndSpan(ctx, lookedUp, types.JSONMap{"terminal_outcomes": 1})
+
+	stored, err := spanRepoForTest(db).GetSpan(ctx, "kid-running-multimodal", attempt, lookedUp.SpanID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, types.SpanStatusDone, stored.Status)
+	require.EqualValues(t, 1, stored.Output["terminal_outcomes"])
+}
+
 // TestSpanTracker_BeginSubSpan_HangsUnderParent confirms multimodal /
 // embedding fan-out subspans reference the parent stage's span_id —
 // the structural invariant the buildSpanTree handler walks.
@@ -360,18 +409,20 @@ func TestSpanTracker_BeginSubSpan_HangsUnderParent(t *testing.T) {
 		"image_url": "x",
 	})
 	require.NotNil(t, sub)
+	persistPreparedSpanForTest(t, tracker, sub)
 
 	type row struct {
-		Name, Kind, ParentSpanID string
+		Name, Kind, ParentLogicalKey string
 	}
 	var rows []row
-	require.NoError(t, db.Table("knowledge_processing_spans").
-		Select("name, kind, parent_span_id").
+	require.NoError(t, db.Table("custom_processing_spans_v2").
+		Select("name, kind, parent_logical_key").
 		Where("knowledge_id = ? AND name = ?", "kid", "multimodal.image[0]").
 		Find(&rows).Error)
 	require.Len(t, rows, 1)
 	assert.Equal(t, types.SpanKindGeneration, rows[0].Kind)
-	assert.Equal(t, parent.SpanID, rows[0].ParentSpanID, "subspan must reference parent stage's span_id")
+	assert.Equal(t, processingtrace.LogicalKey(parent.Kind, parent.Name), rows[0].ParentLogicalKey,
+		"subspan must reference the stable parent logical key")
 }
 
 // TestSpanTracker_BeginSubSpan_BoundsLongNames covers identifiers such as
@@ -392,6 +443,7 @@ func TestSpanTracker_BeginSubSpan_BoundsLongNames(t *testing.T) {
 	callerInput := types.JSONMap{"slug": "summary/12345678-1234-1234-1234-1234567890ab"}
 	span := tracker.BeginSubSpan(ctx, parent, originalName, types.SpanKindSubSpan, callerInput)
 	require.NotNil(t, span, "a long name must not turn span tracking into a best-effort write failure")
+	persistPreparedSpanForTest(t, tracker, span)
 
 	expectedName := boundedSpanName(originalName)
 	assert.Equal(t, expectedName, span.Name)
@@ -401,9 +453,9 @@ func TestSpanTracker_BeginSubSpan_BoundsLongNames(t *testing.T) {
 	assert.NotContains(t, callerInput, spanOriginalNameInputKey,
 		"enriching the persisted input must not mutate the caller-owned map")
 
-	var stored types.KnowledgeProcessingSpan
-	require.NoError(t, db.Where("knowledge_id = ? AND span_id = ?", "kid-long-name", span.SpanID).
-		Take(&stored).Error)
+	stored, err := spanRepoForTest(db).GetSpan(ctx, "kid-long-name", attempt, span.SpanID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
 	assert.Equal(t, expectedName, stored.Name)
 	assert.Equal(t, originalName, stored.Input[spanOriginalNameInputKey])
 	assert.Equal(t, callerInput["slug"], stored.Input["slug"])
@@ -434,10 +486,8 @@ func TestBoundedSpanName_DeterministicAndCollisionResistant(t *testing.T) {
 		"already-valid names must retain their historical value exactly")
 }
 
-// TestSpanTracker_BeginSubSpan_LongNameRetrySupersedesCanonicalRow verifies
-// that bounding happens before CancelOpenSpansByName. Otherwise a retry
-// would search for the overlong logical name, miss the bounded running row,
-// and leave duplicate live spans behind.
+// TestSpanTracker_BeginSubSpan_LongNameRetryReusesCanonicalRow verifies that
+// retry/redelivery retains one deterministic logical row.
 func TestSpanTracker_BeginSubSpan_LongNameRetrySupersedesCanonicalRow(t *testing.T) {
 	tracker, db := setupSpanTrackerTest(t)
 	ctx := context.Background()
@@ -450,9 +500,12 @@ func TestSpanTracker_BeginSubSpan_LongNameRetrySupersedesCanonicalRow(t *testing
 	name := "postprocess.wiki.page[concept/" + strings.Repeat("reliability-", 8) + "]"
 	first := tracker.BeginSubSpan(ctx, parent, name, types.SpanKindSubSpan, nil)
 	require.NotNil(t, first)
+	persistPreparedSpanForTest(t, tracker, first)
+	tracker.DeferSpan(ctx, first, "model_capacity", errors.New("busy"))
 	second := tracker.BeginSubSpan(ctx, parent, name, types.SpanKindSubSpan, nil)
 	require.NotNil(t, second)
-	assert.NotEqual(t, first.SpanID, second.SpanID)
+	persistPreparedSpanForTest(t, tracker, second)
+	assert.Equal(t, first.SpanID, second.SpanID)
 
 	type row struct {
 		SpanID string
@@ -460,13 +513,12 @@ func TestSpanTracker_BeginSubSpan_LongNameRetrySupersedesCanonicalRow(t *testing
 		Name   string
 	}
 	var rows []row
-	require.NoError(t, db.Table("knowledge_processing_spans").
+	require.NoError(t, db.Table("custom_processing_spans_v2").
 		Select("span_id, status, name").
 		Where("knowledge_id = ? AND name = ?", "kid-long-retry", boundedSpanName(name)).
-		Order("id ASC").Find(&rows).Error)
-	require.Len(t, rows, 2)
-	assert.Equal(t, types.SpanStatusCancelled, rows[0].Status)
-	assert.Equal(t, types.SpanStatusRunning, rows[1].Status)
+		Order("logical_key ASC").Find(&rows).Error)
+	require.Len(t, rows, 1)
+	assert.Equal(t, types.SpanStatusRunning, rows[0].Status)
 }
 
 // TestSpanTracker_BeginStage_ReentryIsIdempotent guarantees that a second
@@ -497,7 +549,7 @@ func TestSpanTracker_BeginStage_ReentryIsIdempotent(t *testing.T) {
 		SpanID, Status string
 	}
 	var rows []row
-	require.NoError(t, db.Table("knowledge_processing_spans").
+	require.NoError(t, db.Table("custom_processing_spans_v2").
 		Select("span_id, status").
 		Where("knowledge_id = ? AND attempt = ? AND name = ?", "kid", attempt, types.StageDocReader).
 		Find(&rows).Error)
@@ -525,6 +577,7 @@ func TestSpanTracker_FailSpan_CascadesDependentSubspans(t *testing.T) {
 	// be cascade-cancelled.
 	batch := tracker.BeginSubSpan(ctx, embedding, "embedding.batch[0]", types.SpanKindGeneration, nil)
 	require.NotNil(t, batch)
+	persistPreparedSpanForTest(t, tracker, batch)
 
 	tracker.FailSpan(ctx, chunking, "CHUNKING_FAILED", "synthetic", errors.New("boom"))
 
@@ -532,7 +585,7 @@ func TestSpanTracker_FailSpan_CascadesDependentSubspans(t *testing.T) {
 		Name, Status string
 	}
 	var rows []row
-	require.NoError(t, db.Table("knowledge_processing_spans").
+	require.NoError(t, db.Table("custom_processing_spans_v2").
 		Select("name, status").
 		Where("knowledge_id = ?", "kid").
 		Find(&rows).Error)
@@ -556,7 +609,7 @@ func TestSpanTracker_FailSpan_CascadesDependentSubspans(t *testing.T) {
 func TestPostprocessSubspan_AttachesUnderPostProcessStage(t *testing.T) {
 	tracker, db := setupSpanTrackerTest(t)
 	ctx := context.Background()
-	repo := repository.NewKnowledgeSpanRepository(db)
+	repo := spanRepoForTest(db)
 
 	// Set up the parent attempt with a closed postprocess stage — the
 	// async worker must still find it via LookupStage.

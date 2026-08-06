@@ -13,16 +13,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbwritefence"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -42,6 +45,8 @@ const (
 	defaultMaxRetry    = 10
 	defaultMapLimit    = 1000
 )
+
+var errMapDispatchWindowFull = errors.New("wiki Map dispatch window is full")
 
 // Config controls the recovery loop. The defaults intentionally mirror the
 // primary Wiki enqueue path's low queue, ten retries, and two-hour worker
@@ -93,14 +98,15 @@ func (c Config) normalized() Config {
 	return c
 }
 
-// Recovery republishes missing asynq wake-up signals for durable Wiki work.
-// It never mutates task_pending_ops. Multiple application replicas may run a
-// Recovery concurrently: asynq.Unique coalesces their identical KB-scoped
-// signals, and the Wiki worker's active lock remains the processing boundary.
+// Recovery republishes missing KB-control signals and dispatches a bounded
+// number of document Map wake-ups from the PostgreSQL outbox. Multiple
+// replicas may scan concurrently: KB signals are coalesced by Asynq, while
+// Map publication is fenced by a database epoch, lease and pool advisory lock.
 type Recovery struct {
 	db         *gorm.DB
 	enqueuer   interfaces.TaskEnqueuer
 	activeKeys activeKeyChecker
+	admission  *modeladmission.Manager
 	config     Config
 
 	mu     sync.Mutex
@@ -116,6 +122,22 @@ type activeKeyChecker interface {
 // redisClient may be nil so the same module remains usable in Lite mode.
 func NewRecovery(db *gorm.DB, enqueuer interfaces.TaskEnqueuer, redisClient *redis.Client) *Recovery {
 	return NewRecoveryWithConfig(db, enqueuer, redisClient, DefaultConfig())
+}
+
+// NewRecoveryWithAdmission is the production constructor. Focused queue tests
+// keep using NewRecovery and exercise the legacy recovery-only path without a
+// control-plane database; the runtime always uses this constructor so Wiki Map
+// publication is bounded by the same model resource-pool policy as derivative
+// work.
+func NewRecoveryWithAdmission(
+	db *gorm.DB,
+	enqueuer interfaces.TaskEnqueuer,
+	redisClient *redis.Client,
+	admission *modeladmission.Manager,
+) *Recovery {
+	recovery := NewRecovery(db, enqueuer, redisClient)
+	recovery.admission = admission
+	return recovery
 }
 
 // NewRecoveryWithConfig is primarily useful for deterministic tests and for
@@ -230,11 +252,14 @@ type pendingScope struct {
 }
 
 type pendingMapRow struct {
-	ID       int64  `gorm:"column:id"`
-	TenantID uint64 `gorm:"column:tenant_id"`
-	ScopeID  string `gorm:"column:scope_id"`
-	DedupKey string `gorm:"column:dedup_key"`
-	Payload  []byte `gorm:"column:payload"`
+	ID                    int64      `gorm:"column:id"`
+	TenantID              uint64     `gorm:"column:tenant_id"`
+	ScopeID               string     `gorm:"column:scope_id"`
+	DedupKey              string     `gorm:"column:dedup_key"`
+	Payload               []byte     `gorm:"column:payload"`
+	MapResourcePoolID     string     `gorm:"column:map_resource_pool_id"`
+	MapDispatchEpoch      uint64     `gorm:"column:map_dispatch_epoch"`
+	MapDispatchLeaseUntil *time.Time `gorm:"column:map_dispatch_lease_until"`
 }
 
 type pendingMapDocument struct {
@@ -247,6 +272,7 @@ type mapTriggerPayload struct {
 	KnowledgeBaseID      string `json:"knowledge_base_id"`
 	TaskMode             string `json:"task_mode"`
 	MapDedupKey          string `json:"map_dedup_key"`
+	MapDispatchEpoch     uint64 `json:"map_dispatch_epoch,omitempty"`
 	KnowledgeID          string `json:"knowledge_id,omitempty"`
 	ProcessingGeneration string `json:"processing_generation,omitempty"`
 }
@@ -262,7 +288,8 @@ type triggerPayload struct {
 // RecoverNow performs one scan synchronously. It is exported for health
 // checks and tests. Every matching KB is attempted even when another enqueue
 // fails, and errors are joined so callers retain all failed queue identities.
-// The method is read-only with respect to task_pending_ops.
+// In production the Map lane reserves dispatch epochs in task_pending_ops;
+// the KB-control lane remains read-only.
 func (r *Recovery) RecoverNow(ctx context.Context) error {
 	if r == nil {
 		return errors.New("wiki queue recovery: receiver is nil")
@@ -348,11 +375,17 @@ func (r *Recovery) RecoverNow(ctx context.Context) error {
 	return errors.Join(enqueueErrors...)
 }
 
-// recoverPendingMaps republishes document-generation wake-ups whose durable
-// Map output is not ready yet. Multiple replicas may scan the same rows:
-// asynq.Unique coalesces identical payloads and the Map handler owns a second,
-// renewable per-document lease for correctness after uniqueness expiry.
+// recoverPendingMaps dispatches document-generation wake-ups whose durable
+// Map output is not ready yet. Production uses database epochs and leases;
+// the admission-free branch is retained only by focused recovery tests.
 func (r *Recovery) recoverPendingMaps(ctx context.Context) (int, []error) {
+	if r.admission != nil {
+		dispatched, err := r.DispatchMaps(ctx, defaultMapLimit)
+		if err != nil {
+			return dispatched, []error{err}
+		}
+		return dispatched, nil
+	}
 	var rows []pendingMapRow
 	err := r.db.WithContext(ctx).
 		Table("task_pending_ops").
@@ -410,6 +443,399 @@ func (r *Recovery) recoverPendingMaps(ctx context.Context) (int, []error) {
 		))
 	}
 	return recovered, errs
+}
+
+type mapDispatchSetting struct {
+	total int
+	share int
+	lease time.Duration
+	err   error
+}
+
+// DispatchMaps is the latency-sensitive production Wiki Map dispatcher. It
+// turns a globally bounded, weighted share of PostgreSQL rows per resource
+// pool into disposable Asynq wake-ups. Idle derivative capacity is borrowable;
+// the database epoch/lease is the durable publication proof and Redis contains
+// no unbounded copy of the Wiki backlog.
+func (r *Recovery) DispatchMaps(ctx context.Context, limit int) (int, error) {
+	if r == nil || r.db == nil || r.enqueuer == nil || r.admission == nil {
+		return 0, nil
+	}
+	if limit < 1 || limit > defaultMapLimit {
+		limit = defaultMapLimit
+	}
+	now := time.Now().UTC()
+	rows, err := r.listFairMapCandidates(ctx, now, limit)
+	if err != nil {
+		return 0, fmt.Errorf("wiki Map dispatcher: list due rows: %w", err)
+	}
+
+	poolByScope := make(map[string]string)
+	settings := make(map[string]mapDispatchSetting)
+	fullPools := make(map[string]struct{})
+	dispatched := 0
+	var errs []error
+	for _, candidate := range rows {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		scopeKey := fmt.Sprintf("%d\x00%s", candidate.TenantID, candidate.ScopeID)
+		poolID := poolByScope[scopeKey]
+		if poolID == "" {
+			resolved, err := r.resolveMapResourcePool(ctx, candidate)
+			if err != nil {
+				errs = append(errs, fmt.Errorf(
+					"wiki Map dispatcher: resolve row %d route: %w", candidate.ID, err,
+				))
+				continue
+			}
+			poolID = resolved
+			poolByScope[scopeKey] = poolID
+		}
+		if _, full := fullPools[poolID]; full {
+			continue
+		}
+		// Publish the resolved route even when this scan cannot reserve a slot.
+		// The sibling derivative dispatcher can then see queued Wiki demand and
+		// protect the configured weighted share under the common pool lock.
+		if err := r.db.WithContext(ctx).Table("task_pending_ops").
+			Where("id = ? AND map_ready_at IS NULL", candidate.ID).
+			Update("map_resource_pool_id", poolID).Error; err != nil {
+			errs = append(errs, fmt.Errorf(
+				"wiki Map dispatcher: persist row %d route: %w", candidate.ID, err,
+			))
+			continue
+		}
+		candidate.MapResourcePoolID = poolID
+		setting, ok := settings[poolID]
+		if !ok {
+			setting.total, setting.share, setting.lease, setting.err = r.admission.DispatchLimits(
+				ctx, poolID, modeladmission.WorkLaneWikiMap,
+			)
+			settings[poolID] = setting
+		}
+		if setting.err != nil {
+			errs = append(errs, fmt.Errorf(
+				"wiki Map dispatcher: resolve pool %s window: %w", poolID, setting.err,
+			))
+			fullPools[poolID] = struct{}{}
+			continue
+		}
+		reserved, reserveErr := r.reserveMapDispatch(
+			ctx, candidate, poolID, setting.total, setting.share, setting.lease,
+		)
+		if errors.Is(reserveErr, errMapDispatchWindowFull) {
+			fullPools[poolID] = struct{}{}
+			continue
+		}
+		if errors.Is(reserveErr, gorm.ErrRecordNotFound) {
+			continue
+		}
+		if reserveErr != nil {
+			errs = append(errs, fmt.Errorf(
+				"wiki Map dispatcher: reserve row %d: %w", candidate.ID, reserveErr,
+			))
+			continue
+		}
+		if err := r.enqueueReservedMap(reserved); err != nil {
+			_ = r.releaseMapDispatchReservation(
+				context.WithoutCancel(ctx), reserved.ID, reserved.MapDispatchEpoch,
+			)
+			errs = append(errs, fmt.Errorf(
+				"wiki Map dispatcher: publish row %d: %w", reserved.ID, err,
+			))
+			continue
+		}
+		dispatched++
+	}
+	return dispatched, errors.Join(errs...)
+}
+
+// listFairMapCandidates performs the database-side equivalent of a
+// work-conserving round robin across knowledge bases. A global oldest-first
+// LIMIT lets one large/older knowledge base hide every newer one from the
+// dispatcher. Instead, each candidate is ranked by its scope's current
+// reservations plus its position inside that scope. This keeps projected
+// in-flight work balanced without adding an operator setting, while due time
+// and fail_count remain the deterministic tie breakers inside each round.
+func (r *Recovery) listFairMapCandidates(
+	ctx context.Context,
+	now time.Time,
+	limit int,
+) ([]pendingMapRow, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("wiki Map dispatcher: database is nil")
+	}
+	if limit < 1 || limit > defaultMapLimit {
+		limit = defaultMapLimit
+	}
+	const query = `
+WITH active_by_scope AS (
+    SELECT tenant_id, scope_id, COUNT(*) AS active_count
+      FROM task_pending_ops
+     WHERE task_type = ? AND scope = ? AND op = ?
+       AND map_ready_at IS NULL
+       AND map_dispatch_lease_until > ?
+     GROUP BY tenant_id, scope_id
+), due AS (
+    SELECT p.id, p.tenant_id, p.scope_id, p.dedup_key, p.payload,
+           p.map_resource_pool_id, p.map_dispatch_epoch,
+           p.map_dispatch_lease_until, p.fail_count,
+           COALESCE(p.next_attempt_at, p.enqueued_at) AS due_at,
+           COALESCE(a.active_count, 0) AS active_count,
+           ROW_NUMBER() OVER (
+               PARTITION BY p.tenant_id, p.scope_id
+               ORDER BY COALESCE(p.next_attempt_at, p.enqueued_at),
+                        p.fail_count, p.id
+           ) AS scope_rank
+      FROM task_pending_ops AS p
+      LEFT JOIN active_by_scope AS a
+        ON a.tenant_id = p.tenant_id AND a.scope_id = p.scope_id
+     WHERE p.task_type = ? AND p.scope = ? AND p.op = ?
+       AND p.map_ready_at IS NULL
+       AND (p.next_attempt_at IS NULL OR p.next_attempt_at <= ?)
+       AND (p.map_dispatch_lease_until IS NULL OR p.map_dispatch_lease_until <= ?)
+)
+SELECT id, tenant_id, scope_id, dedup_key, payload,
+       map_resource_pool_id, map_dispatch_epoch, map_dispatch_lease_until
+  FROM due
+ ORDER BY active_count + scope_rank ASC, due_at ASC, fail_count ASC, id ASC
+ LIMIT ?`
+	var rows []pendingMapRow
+	err := r.db.WithContext(ctx).Raw(
+		query,
+		types.TypeWikiIngest, wikiTaskScope, "ingest", now,
+		types.TypeWikiIngest, wikiTaskScope, "ingest", now, now,
+		limit,
+	).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *Recovery) resolveMapResourcePool(
+	ctx context.Context,
+	row pendingMapRow,
+) (string, error) {
+	var kb struct {
+		TenantID          uint64
+		DerivativeModelID string
+	}
+	if err := r.db.WithContext(ctx).
+		Table("knowledge_bases").
+		Select("tenant_id, derivative_model_id").
+		Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", row.ScopeID, row.TenantID).
+		Take(&kb).Error; err != nil {
+		return "", err
+	}
+	modelID := strings.TrimSpace(kb.DerivativeModelID)
+	if modelID == "" {
+		var config struct{ DefaultModelID string }
+		if err := r.db.WithContext(ctx).
+			Table("custom_derivative_control_configs").
+			Select("default_model_id").Where("id = 1").Take(&config).Error; err != nil {
+			return "", err
+		}
+		modelID = strings.TrimSpace(config.DefaultModelID)
+	}
+	if modelID == "" {
+		return "", errors.New("no derivative model is configured")
+	}
+	var assignment struct {
+		ModelID       string
+		ModelTenantID uint64
+	}
+	if err := r.db.WithContext(ctx).
+		Table("custom_derivative_model_assignments").
+		Select("model_id, model_tenant_id").Where("model_id = ?", modelID).
+		Take(&assignment).Error; err != nil {
+		return "", err
+	}
+	var model types.Model
+	if err := r.db.WithContext(ctx).
+		Where("id = ? AND tenant_id = ? AND deleted_at IS NULL", assignment.ModelID, assignment.ModelTenantID).
+		Take(&model).Error; err != nil {
+		return "", err
+	}
+	policy, err := r.admission.ResolvePolicy(
+		ctx, modeladmission.SpecForModel(modeladmission.KindDerivative, &model, ""),
+	)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(policy.PoolID) == "" {
+		return "", errors.New("resolved derivative resource pool is empty")
+	}
+	return policy.PoolID, nil
+}
+
+func wikiMapDispatchTaskID(rowID int64, epoch uint64) string {
+	return fmt.Sprintf("wiki-map:%d:%d", rowID, epoch)
+}
+
+func (r *Recovery) reserveMapDispatch(
+	ctx context.Context,
+	candidate pendingMapRow,
+	poolID string,
+	totalWindow int,
+	laneShare int,
+	lease time.Duration,
+) (pendingMapRow, error) {
+	if totalWindow < 1 {
+		return pendingMapRow{}, errMapDispatchWindowFull
+	}
+	if lease <= 0 {
+		lease = 2 * time.Minute
+	}
+	now := time.Now().UTC()
+	var reserved pendingMapRow
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if tx.Dialector.Name() == "postgres" {
+			if err := tx.Exec(
+				"SELECT pg_advisory_xact_lock(?)",
+				modeladmission.DispatchAdvisoryKey(poolID),
+			).Error; err != nil {
+				return err
+			}
+		}
+		var wikiActive int64
+		if err := tx.Table("task_pending_ops").
+			Where(
+				"task_type = ? AND scope = ? AND op = ? AND map_ready_at IS NULL AND map_resource_pool_id = ? AND map_dispatch_lease_until > ?",
+				types.TypeWikiIngest, wikiTaskScope, "ingest", poolID, now,
+			).
+			Count(&wikiActive).Error; err != nil {
+			return err
+		}
+		var wikiCommitDemand int64
+		if err := tx.Table("task_pending_ops").
+			Where(
+				"task_type = ? AND scope = ? AND map_resource_pool_id = ? AND ((op = ? AND map_ready_at IS NOT NULL) OR op <> ?)",
+				types.TypeWikiIngest, wikiTaskScope, poolID, "ingest", "ingest",
+			).
+			Count(&wikiCommitDemand).Error; err != nil {
+			return err
+		}
+		derivativeActive := int64(0)
+		derivativeDemand := int64(0)
+		if tx.Migrator().HasTable("custom_derivative_work_items") {
+			if err := tx.Table("custom_derivative_work_items").Where(
+				`resource_pool_id = ? AND work_kind <> ? AND (
+					state IN ? OR (
+						state IN ? AND dispatch_lease_until IS NOT NULL AND dispatch_lease_until > ?
+					)
+				)`,
+				poolID, "finalizer",
+				[]string{"leased", "admitted", "provider_running", "provider_succeeded", "materializing"},
+				[]string{"queued", "retry_wait"}, now,
+			).Count(&derivativeActive).Error; err != nil {
+				return err
+			}
+			if err := tx.Table("custom_derivative_work_items").Where(
+				"resource_pool_id = ? AND work_kind <> ? AND state IN ? AND next_attempt_at <= ? AND (dispatch_lease_until IS NULL OR dispatch_lease_until <= ?)",
+				poolID, "finalizer", []string{"queued", "retry_wait"}, now, now,
+			).Count(&derivativeDemand).Error; err != nil {
+				return err
+			}
+		}
+		if wikiActive+derivativeActive >= int64(totalWindow) {
+			return errMapDispatchWindowFull
+		}
+		if laneShare > 0 && wikiActive >= int64(laneShare) && derivativeDemand > 0 {
+			return errMapDispatchWindowFull
+		}
+		// Map may borrow every idle Wiki slot, but once a durable commit-ready
+		// row exists it may not occupy the automatically derived commit share.
+		// Redis applies the same rule to actual handlers/provider calls; this
+		// database-side gate prevents the outbox from publishing a Map wave that
+		// is known to be unable to run while materialization is waiting.
+		stageWindow := totalWindow
+		if derivativeDemand > 0 && laneShare > 0 {
+			stageWindow = laneShare
+		}
+		wikiMapLimit, _ := modeladmission.WikiStageShares(stageWindow)
+		if wikiCommitDemand > 0 && wikiMapLimit > 0 && wikiActive >= int64(wikiMapLimit) {
+			return errMapDispatchWindowFull
+		}
+		if err := tx.Table("task_pending_ops").
+			Select("id, tenant_id, scope_id, dedup_key, payload, map_resource_pool_id, map_dispatch_epoch, map_dispatch_lease_until").
+			Where(
+				"id = ? AND tenant_id = ? AND task_type = ? AND scope = ? AND op = ? AND map_ready_at IS NULL",
+				candidate.ID, candidate.TenantID, types.TypeWikiIngest, wikiTaskScope, "ingest",
+			).
+			Where("(next_attempt_at IS NULL OR next_attempt_at <= ?)", now).
+			Where("(map_dispatch_lease_until IS NULL OR map_dispatch_lease_until <= ?)", now).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Take(&reserved).Error; err != nil {
+			return err
+		}
+		reserved.MapDispatchEpoch++
+		reserved.MapResourcePoolID = poolID
+		reserved.MapDispatchLeaseUntil = ptrTime(now.Add(lease))
+		taskID := wikiMapDispatchTaskID(reserved.ID, reserved.MapDispatchEpoch)
+		result := tx.Table("task_pending_ops").Where(
+			"id = ? AND map_dispatch_epoch = ?",
+			reserved.ID, reserved.MapDispatchEpoch-1,
+		).Updates(map[string]any{
+			"map_resource_pool_id":     poolID,
+			"map_dispatch_epoch":       reserved.MapDispatchEpoch,
+			"map_dispatch_task_id":     taskID,
+			"map_dispatch_lease_until": *reserved.MapDispatchLeaseUntil,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
+	return reserved, err
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }
+
+func (r *Recovery) enqueueReservedMap(row pendingMapRow) error {
+	var document pendingMapDocument
+	if err := json.Unmarshal(row.Payload, &document); err != nil {
+		document = pendingMapDocument{}
+	}
+	payload, err := json.Marshal(mapTriggerPayload{
+		TenantID:             row.TenantID,
+		KnowledgeBaseID:      row.ScopeID,
+		TaskMode:             "map",
+		MapDedupKey:          row.DedupKey,
+		MapDispatchEpoch:     row.MapDispatchEpoch,
+		KnowledgeID:          document.KnowledgeID,
+		ProcessingGeneration: document.ProcessingGeneration,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = r.enqueuer.Enqueue(
+		asynq.NewTask(types.TypeWikiIngest, payload),
+		asynq.Queue(types.QueueWikiMap),
+		asynq.TaskID(wikiMapDispatchTaskID(row.ID, row.MapDispatchEpoch)),
+		asynq.MaxRetry(0),
+		asynq.Timeout(r.config.TaskTimeout),
+		asynq.ProcessIn(r.config.ProcessDelay),
+	)
+	if errors.Is(err, asynq.ErrTaskIDConflict) {
+		return nil
+	}
+	return err
+}
+
+func (r *Recovery) releaseMapDispatchReservation(
+	ctx context.Context,
+	rowID int64,
+	epoch uint64,
+) error {
+	return r.db.WithContext(ctx).Table("task_pending_ops").
+		Where("id = ? AND map_dispatch_epoch = ?", rowID, epoch).
+		Updates(map[string]any{
+			"map_dispatch_task_id":     "",
+			"map_dispatch_lease_until": nil,
+		}).Error
 }
 
 func (r *Recovery) enqueueMapIfActive(
@@ -512,7 +938,7 @@ func (r *Recovery) enqueueTrigger(scope pendingScope) error {
 	task := asynq.NewTask(types.TypeWikiIngest, payload)
 	_, err = r.enqueuer.Enqueue(
 		task,
-		asynq.Queue(types.QueueLow),
+		asynq.Queue(types.QueueWikiControl),
 		asynq.MaxRetry(r.config.MaxRetry),
 		asynq.Timeout(r.config.TaskTimeout),
 		asynq.ProcessIn(r.config.ProcessDelay),

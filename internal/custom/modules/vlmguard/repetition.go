@@ -3,6 +3,8 @@ package vlmguard
 import (
 	"strings"
 	"unicode"
+
+	"github.com/Tencent/WeKnora/internal/custom/modules/ocrstructure"
 )
 
 const (
@@ -19,6 +21,9 @@ type repetitionDetector struct {
 
 func (detector *repetitionDetector) Observe(content string) bool {
 	runes := []rune(content)
+	if len(runes) >= 512 && ocrstructure.HasRunawayEmptyTableTail(content) {
+		return true
+	}
 	if len(runes) < runawayMinimumRunes ||
 		len(runes)-detector.lastCheckedRunes < runawayCheckStep {
 		return false

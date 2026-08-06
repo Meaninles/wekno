@@ -15,7 +15,7 @@ metadata:
   labels:
     {{- include "weknora.componentLabels" (dict "component" "general-agent" "context" .) | nindent 4 }}
 spec:
-  replicas: {{ .Values.generalAgent.replicaCount }}
+  replicas: {{ ternary 0 .Values.generalAgent.replicaCount (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended) }}
   selector:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "general-agent" "context" .) | nindent 6 }}
@@ -111,7 +111,7 @@ spec:
           {{- else if eq (.Values.generalAgent.scratch.volumeType | default "emptyDir") "hostPath" }}
           hostPath:
             path: {{ .Values.generalAgent.scratch.hostPath.path | default "/mnt/weknora-data/scratch-general-agent" | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.generalAgent.scratch.hostPath.type | default "DirectoryOrCreate" }}
           {{- else }}
           emptyDir:
             {{- with .Values.generalAgent.scratch.sizeLimit }}
@@ -156,7 +156,7 @@ spec:
       port: {{ .Values.generalAgent.service.port }}
       targetPort: http
       protocol: TCP
-{{- if .Values.generalAgent.podDisruptionBudget.enabled }}
+{{- if and .Values.generalAgent.podDisruptionBudget.enabled (not (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended)) }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -183,7 +183,7 @@ metadata:
   labels:
     {{- include "weknora.componentLabels" (dict "component" "document-processing-agent" "context" .) | nindent 4 }}
 spec:
-  replicas: {{ .Values.documentProcessingAgent.replicaCount }}
+  replicas: {{ ternary 0 .Values.documentProcessingAgent.replicaCount (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended) }}
   selector:
     matchLabels:
       {{- include "weknora.componentSelectorLabels" (dict "component" "document-processing-agent" "context" .) | nindent 6 }}
@@ -279,7 +279,7 @@ spec:
           {{- else if eq (.Values.documentProcessingAgent.scratch.volumeType | default "emptyDir") "hostPath" }}
           hostPath:
             path: {{ .Values.documentProcessingAgent.scratch.hostPath.path | default "/mnt/weknora-data/scratch-docproc-agent" | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.documentProcessingAgent.scratch.hostPath.type | default "DirectoryOrCreate" }}
           {{- else }}
           emptyDir:
             {{- with .Values.documentProcessingAgent.scratch.sizeLimit }}
@@ -324,7 +324,7 @@ spec:
       port: {{ .Values.documentProcessingAgent.service.port }}
       targetPort: http
       protocol: TCP
-{{- if .Values.documentProcessingAgent.podDisruptionBudget.enabled }}
+{{- if and .Values.documentProcessingAgent.podDisruptionBudget.enabled (not (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended)) }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

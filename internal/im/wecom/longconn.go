@@ -106,14 +106,26 @@ type botMixedItem struct {
 	} `json:"image"`
 }
 
-// streamReplyBody is the body for a streaming text reply.
-type streamReplyBody struct {
+// BotStreamReplyBody is the exact body for an intelligent Bot streaming text
+// reply. It is exported so the authenticated read-only preview API serializes
+// the same protocol structure as the production WebSocket sender.
+type BotStreamReplyBody struct {
 	MsgType string `json:"msgtype"`
 	Stream  struct {
 		ID      string `json:"id"`
 		Finish  bool   `json:"finish"`
 		Content string `json:"content"`
 	} `json:"stream"`
+}
+
+// NewBotStreamReplyBody constructs both intermediate replace frames and the
+// final finish frame used by the WeCom Bot protocol.
+func NewBotStreamReplyBody(streamID, content string, finish bool) BotStreamReplyBody {
+	body := BotStreamReplyBody{MsgType: "stream"}
+	body.Stream.ID = streamID
+	body.Stream.Finish = finish
+	body.Stream.Content = content
+	return body
 }
 
 // MessageHandler is called when an IM message is received via long connection.
@@ -233,10 +245,7 @@ func (c *LongConnClient) SendReply(ctx context.Context, incoming *im.IncomingMes
 	// Generate a unique stream ID for this reply
 	streamID := fmt.Sprintf("stream_%d", c.reqSeq.Add(1))
 
-	body := streamReplyBody{MsgType: "stream"}
-	body.Stream.ID = streamID
-	body.Stream.Finish = true
-	body.Stream.Content = reply.Content
+	body := NewBotStreamReplyBody(streamID, reply.Content, true)
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -344,10 +353,7 @@ func (c *LongConnClient) sendStreamFrame(incoming *im.IncomingMessage, streamID,
 		return fmt.Errorf("missing req_id in incoming message extra")
 	}
 
-	body := streamReplyBody{MsgType: "stream"}
-	body.Stream.ID = streamID
-	body.Stream.Finish = finish
-	body.Stream.Content = content
+	body := NewBotStreamReplyBody(streamID, content, finish)
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

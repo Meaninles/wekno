@@ -102,8 +102,46 @@ mermaid.initialize({
     topPadding: 50
   }
 });
-const props = defineProps(["visible", "details", "knowledgeType", "sourceInfo", "canEditKB", "parse_status"]);
+const props = defineProps(["visible", "details", "knowledgeType", "sourceInfo", "canEditKB", "parse_status", "focusChunkId"]);
 const emit = defineEmits(["closeDoc", "getDoc", "questionDeleted"]);
+
+const citationFocusChunk = ref<any | null>(null);
+const citationFocusLoading = ref(false);
+const citationFocusError = ref('');
+let citationFocusRequest = 0;
+
+const loadCitationFocusChunk = async () => {
+  const request = ++citationFocusRequest;
+  const chunkId = String(props.focusChunkId || '').trim();
+  const knowledgeId = String(props.details?.id || '').trim();
+  citationFocusChunk.value = null;
+  citationFocusError.value = '';
+  citationFocusLoading.value = false;
+  if (!props.visible || !chunkId || !knowledgeId) return;
+
+  citationFocusLoading.value = true;
+  try {
+    const response: any = await getChunkByIdOnly(chunkId);
+    if (request !== citationFocusRequest) return;
+    const chunk = response?.data || response || null;
+    if (!chunk || String(chunk.knowledge_id || '') !== knowledgeId) {
+      citationFocusError.value = '没有找到该文档中的引用分片。';
+      return;
+    }
+    citationFocusChunk.value = chunk;
+  } catch {
+    if (request !== citationFocusRequest) return;
+    citationFocusError.value = '引用分片加载失败，请检查当前账号是否有权访问该来源。';
+  } finally {
+    if (request === citationFocusRequest) citationFocusLoading.value = false;
+  }
+};
+
+watch(
+  () => [props.visible, props.details?.id, props.focusChunkId],
+  () => { void loadCitationFocusChunk(); },
+  { immediate: true },
+);
 
 const hasTimelineSpans = ref(false);
 const timelineDrawerVisible = ref(false);
@@ -1305,6 +1343,20 @@ const showNextChunkPage = () => showChunkPage(chunkDisplayPage.value + 1);
             </div>
           </div>
 
+          <div v-if="focusChunkId" class="citation-focus-card" data-testid="citation-focus-chunk">
+            <div class="citation-focus-card__header">
+              <t-icon name="link" size="16px" />
+              <span>正文引用的文档分片</span>
+            </div>
+            <div v-if="citationFocusLoading" class="citation-focus-card__loading">
+              <t-loading size="small" />
+              <span>正在加载引用分片...</span>
+            </div>
+            <div v-else-if="citationFocusError" class="citation-focus-card__error">{{ citationFocusError }}</div>
+            <div v-else-if="citationFocusChunk" class="md-content citation-focus-card__content"
+              v-html="processMarkdown(citationFocusChunk.content || '')"></div>
+          </div>
+
           <!-- 音频播放器（音频文件时固定显示在内容区顶部） -->
           <div v-if="isAudioFile(details.file_type)" class="audio-player-section">
             <div v-if="audioLoading" class="audio-loading">
@@ -1466,6 +1518,37 @@ const showNextChunkPage = () => showChunkPage(chunkDisplayPage.value + 1);
 
 :deep(.t-drawer__header) {
   font-weight: normal;
+}
+
+.citation-focus-card {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--td-brand-color-4);
+  border-radius: 8px;
+  background: var(--td-brand-color-light);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--td-brand-color) 8%, transparent);
+}
+
+.citation-focus-card__header,
+.citation-focus-card__loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.citation-focus-card__header {
+  margin-bottom: 10px;
+  color: var(--td-brand-color);
+  font-weight: 600;
+}
+
+.citation-focus-card__content {
+  margin: 0;
+}
+
+.citation-focus-card__error {
+  color: var(--td-error-color);
+  font-size: 13px;
 }
 
 .doc-drawer-header {

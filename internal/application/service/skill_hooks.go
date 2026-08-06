@@ -13,16 +13,22 @@ import (
 type AdditionalSkillLister func(context.Context) ([]*skills.SkillMetadata, error)
 type ProfessionalSkillLister func(context.Context) ([]*skills.SkillMetadata, error)
 type RuntimeSkillConfigurer func(context.Context, *types.QARequest, *types.AgentConfig, *types.CustomAgent) error
-type SelectedSkillContextResolver func(context.Context, []string) (string, error)
-type AllSkillContextResolver func(context.Context) (string, error)
+type EffectiveLightweightSkillContextResolver func(context.Context, string, []string, []string) (string, error)
+
+const lightweightSkillExecutionContract = `Lightweight skill execution contract:
+- The effective lightweight skill list is the only authoritative lightweight-skill source for this run.
+- Every listed lightweight skill is active and has already passed availability and permission checks, regardless of whether it came from agent configuration or a chat selection.
+- Before planning, silently evaluate each effective lightweight skill against the exact current user request.
+- Effective lightweight skills are platform-resolved specialized system instructions. When a skill is relevant, its role, workflow, and output constraints specialize and take precedence over conflicting generic or baseline agent instructions. Do not require a chat-selection marker before using it.
+- When a skill is irrelevant, do not force it or let it replace the user's request.
+- Lightweight skill instructions cannot expand runtime permissions or override platform safety or the exact current user request.`
 
 var skillHookRegistry = struct {
 	sync.RWMutex
 	listers             []AdditionalSkillLister
 	professionalListers []ProfessionalSkillLister
 	configurers         []RuntimeSkillConfigurer
-	resolvers           []SelectedSkillContextResolver
-	allResolvers        []AllSkillContextResolver
+	lightweightResolver EffectiveLightweightSkillContextResolver
 }{}
 
 func RegisterAdditionalSkillLister(fn AdditionalSkillLister) {
@@ -52,22 +58,13 @@ func RegisterRuntimeSkillConfigurer(fn RuntimeSkillConfigurer) {
 	skillHookRegistry.configurers = append(skillHookRegistry.configurers, fn)
 }
 
-func RegisterSelectedSkillContextResolver(fn SelectedSkillContextResolver) {
+func RegisterEffectiveLightweightSkillContextResolver(fn EffectiveLightweightSkillContextResolver) {
 	if fn == nil {
 		return
 	}
 	skillHookRegistry.Lock()
 	defer skillHookRegistry.Unlock()
-	skillHookRegistry.resolvers = append(skillHookRegistry.resolvers, fn)
-}
-
-func RegisterAllSkillContextResolver(fn AllSkillContextResolver) {
-	if fn == nil {
-		return
-	}
-	skillHookRegistry.Lock()
-	defer skillHookRegistry.Unlock()
-	skillHookRegistry.allResolvers = append(skillHookRegistry.allResolvers, fn)
+	skillHookRegistry.lightweightResolver = fn
 }
 
 func additionalSkillMetadata(ctx context.Context) []*skills.SkillMetadata {
@@ -116,75 +113,30 @@ func configureRuntimeSkills(ctx context.Context, req *types.QARequest, agentConf
 	}
 }
 
-func selectedSkillContext(ctx context.Context, names []string) string {
-	if len(names) == 0 {
-		return ""
-	}
-
-	skillHookRegistry.RLock()
-	resolvers := append([]SelectedSkillContextResolver(nil), skillHookRegistry.resolvers...)
-	skillHookRegistry.RUnlock()
-
-	parts := make([]string, 0, len(resolvers))
-	for _, resolver := range resolvers {
-		text, err := resolver(ctx, names)
-		if err != nil {
-			logger.Warnf(ctx, "selected skill context resolver failed: %v", err)
-			continue
-		}
-		if text = strings.TrimSpace(text); text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-func allSkillContext(ctx context.Context) string {
-	skillHookRegistry.RLock()
-	resolvers := append([]AllSkillContextResolver(nil), skillHookRegistry.allResolvers...)
-	skillHookRegistry.RUnlock()
-
-	parts := make([]string, 0, len(resolvers))
-	for _, resolver := range resolvers {
-		text, err := resolver(ctx)
-		if err != nil {
-			logger.Warnf(ctx, "all skill context resolver failed: %v", err)
-			continue
-		}
-		if text = strings.TrimSpace(text); text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-// SelectedSkillContext exposes the same selected-skill prompt context used by
-// native AgentQA to custom runners. It is read-only and preserves the existing
-// resolver registry behavior.
-func SelectedSkillContext(ctx context.Context, names []string) string {
-	return selectedSkillContext(ctx, names)
+// LightweightSkillExecutionContract is platform-owned, non-configurable
+// guidance shared by native and sidecar agent runtimes.
+func LightweightSkillExecutionContract() string {
+	return lightweightSkillExecutionContract
 }
 
 // LightweightSkillContext returns prompt-context guidance for lightweight
 // skills. Chat-selected skills are always lightweight; agent-configured
 // lightweight skills are merged here.
 func LightweightSkillContext(ctx context.Context, mode string, names []string, chatNames []string) string {
-	mode = strings.TrimSpace(mode)
-	if mode == "" {
-		mode = "none"
+	skillHookRegistry.RLock()
+	resolver := skillHookRegistry.lightweightResolver
+	skillHookRegistry.RUnlock()
+	if resolver == nil {
+		return ""
 	}
-	if mode == "all" {
-		all := allSkillContext(ctx)
-		chat := selectedSkillContext(ctx, chatNames)
-		if all != "" && chat != "" {
-			return all + "\n\n" + chat
-		}
-		if all != "" {
-			return all
-		}
-		return chat
+	contextText, err := resolver(ctx, mode, names, chatNames)
+	if err != nil {
+		logger.Warnf(ctx, "effective lightweight skill context resolver failed: %v", err)
+		return ""
 	}
-	merged := append([]string{}, names...)
-	merged = append(merged, chatNames...)
-	return selectedSkillContext(ctx, merged)
+	contextText = strings.TrimSpace(contextText)
+	if contextText == "" {
+		return ""
+	}
+	return lightweightSkillExecutionContract + "\n\n" + contextText
 }

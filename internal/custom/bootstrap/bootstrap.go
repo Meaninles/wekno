@@ -169,8 +169,13 @@ func NewHandlers(
 		kbShareService,
 		taskEnqueuer,
 	)
+	mobileArtifactRepository := mobiledocument.NewArtifactRepository(
+		db,
+		generalAgentService.ArtifactStore(),
+	)
 	mobileDocumentService := mobiledocument.NewService(
 		knowledgeService,
+		mobileArtifactRepository,
 		mobiledocument.LoadConfigFromEnv(),
 	)
 	mobileKnowledgeService := mobileknowledge.NewService(db)
@@ -202,6 +207,7 @@ func NewHandlers(
 	)
 	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
+	generalAgentService.SetLightweightSkillProvider(skillHubService)
 	generalAgentService.SetProfessionalSkillProvider(skillHubService)
 	derivativeControlService := derivativecontrol.NewService(
 		db,
@@ -341,8 +347,7 @@ func NewHandlers(
 	appservice.RegisterAdditionalSkillLister(skillHubService.AdditionalMetadata)
 	appservice.RegisterProfessionalSkillLister(skillHubService.ProfessionalMetadata)
 	appservice.RegisterRuntimeSkillConfigurer(skillHubService.ConfigureRuntimeSkills)
-	appservice.RegisterSelectedSkillContextResolver(skillHubService.SelectedSkillContext)
-	appservice.RegisterAllSkillContextResolver(skillHubService.AllSkillContext)
+	appservice.RegisterEffectiveLightweightSkillContextResolver(skillHubService.EffectiveLightweightSkillContext)
 	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentDefaultsService.ApplyReferenceModelDefaults)
 	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
@@ -632,6 +637,8 @@ func RegisterPublicRoutes(r *gin.Engine, handlers *Handlers) {
 	if handlers.MobileDocument != nil {
 		r.GET("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
 		r.HEAD("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+		r.GET("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
+		r.HEAD("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
 	}
 	// IM citations use a dedicated capability boundary registered before the
 	// normal Web authentication middleware. No knowledge-base or Wiki API is
@@ -855,6 +862,11 @@ func RegisterRoutes(
 			viewer,
 			knowledgeRead,
 			handlers.MobileDocument.CreateDownloadLink,
+		)
+		mobileDocuments.POST(
+			"/artifacts/:artifact_id/download-link",
+			viewer,
+			handlers.MobileDocument.CreateArtifactDownloadLink,
 		)
 	}
 

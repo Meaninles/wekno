@@ -80,6 +80,9 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 	// when no evidence handles exist, while keeping current-turn precedence and
 	// citation syntax consistent for present and future retrieval paths.
 	systemPrompt = sourcerefs.EnsureGenerationContract(systemPrompt)
+	if skillContext := strings.TrimSpace(chatManage.LightweightSkillContext); skillContext != "" {
+		systemPrompt += "\n\n" + skillContext
+	}
 
 	chatMessages := []chat.Message{
 		{Role: "system", Content: systemPrompt},

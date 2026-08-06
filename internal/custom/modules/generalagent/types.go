@@ -96,8 +96,6 @@ type RuntimeConfigSpec struct {
 	HistoryTurns                int                                    `json:"history_turns"`
 	MCPSelectionMode            string                                 `json:"mcp_selection_mode"`
 	MCPServices                 []string                               `json:"mcp_services"`
-	SkillsEnabled               bool                                   `json:"skills_enabled"`
-	AllowedSkills               []string                               `json:"allowed_skills"`
 	ProfessionalSkillsEnabled   bool                                   `json:"professional_skills_enabled"`
 	AllowedProfessionalSkills   []string                               `json:"allowed_professional_skills"`
 	RetrieveKBOnlyWhenMentioned bool                                   `json:"retrieve_kb_only_when_mentioned"`
@@ -124,6 +122,13 @@ type ProfessionalSkillSpec struct {
 	DisplayName string                      `json:"display_name,omitempty"`
 	Description string                      `json:"description"`
 	Files       []ProfessionalSkillFileSpec `json:"files"`
+}
+
+type LightweightSkillSpec struct {
+	Key          string `json:"key"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Instructions string `json:"instructions"`
 }
 
 type AttachmentSpec struct {
@@ -190,7 +195,8 @@ type ChatPayload struct {
 	ImageURLs               []string                    `json:"image_urls,omitempty"`
 	ImageDescription        string                      `json:"image_description,omitempty"`
 	QuotedContext           string                      `json:"quoted_context,omitempty"`
-	SelectedSkillContext    string                      `json:"selected_skill_context,omitempty"`
+	LightweightSkillPolicy  string                      `json:"lightweight_skill_policy"`
+	LightweightSkills       []LightweightSkillSpec      `json:"lightweight_skills,omitempty"`
 	Attachments             []AttachmentSpec            `json:"attachments,omitempty"`
 	OriginalInputFiles      []OriginalInputFileSpec     `json:"original_input_files,omitempty"`
 	DocumentTemplateContext DocumentTemplateContextSpec `json:"document_template_context,omitempty"`

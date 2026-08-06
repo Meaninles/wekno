@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -48,6 +49,44 @@ func (h *Handler) CreateDownloadLink(c *gin.Context) {
 	})
 }
 
+func (h *Handler) CreateArtifactDownloadLink(c *gin.Context) {
+	artifactID := strings.TrimSpace(c.Param("artifact_id"))
+	if artifactID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "artifact_id is required"})
+		return
+	}
+	tenantID, tenantOK := types.TenantIDFromContext(c.Request.Context())
+	userID, userOK := types.UserIDFromContext(c.Request.Context())
+	if !tenantOK || tenantID == 0 || !userOK || strings.TrimSpace(userID) == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "登录状态无效"})
+		return
+	}
+	downloadURL, expiresAt, err := h.service.IssueArtifact(
+		c.Request.Context(),
+		artifactID,
+		tenantID,
+		userID,
+	)
+	if err != nil {
+		status := http.StatusInternalServerError
+		message := "暂时无法创建下载链接，请稍后重试"
+		if errors.Is(err, ErrArtifactUnavailable) {
+			status = http.StatusNotFound
+			message = "产物文件暂时不可用"
+		}
+		logger.Warnf(c.Request.Context(), "[mobile document] failed to issue artifact download link: %v", err)
+		c.JSON(status, gin.H{"success": false, "message": message})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"url":        downloadURL,
+			"expires_at": expiresAt.Format(timeLayout),
+		},
+	})
+}
+
 func (h *Handler) Download(c *gin.Context) {
 	ctx := c.Request.Context()
 	record, err := h.service.Resolve(ctx, c.Request.URL.Query())
@@ -70,17 +109,11 @@ func (h *Handler) Download(c *gin.Context) {
 	defer reader.Close()
 
 	filename = cleanDownloadFilename(filename)
-	c.Header("Content-Disposition", contentDisposition(filename))
-	c.Header("Content-Type", contentTypeForDownload(filename))
-	c.Header("Content-Description", "File Transfer")
-	c.Header("Content-Transfer-Encoding", "binary")
-	c.Header("Cache-Control", "private, no-store, max-age=0")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-	c.Header("X-Content-Type-Options", "nosniff")
-	if !record.IsManual() && record.FileSize > 0 {
-		c.Header("Content-Length", strconv.FormatInt(record.FileSize, 10))
+	fileSize := record.FileSize
+	if record.IsManual() {
+		fileSize = 0
 	}
+	setDownloadHeaders(c, filename, fileSize)
 	if c.Request.Method == http.MethodHead {
 		c.Status(http.StatusOK)
 		return
@@ -89,6 +122,54 @@ func (h *Handler) Download(c *gin.Context) {
 	c.Status(http.StatusOK)
 	if _, err := io.Copy(c.Writer, reader); err != nil {
 		logger.Warnf(ctx, "[mobile document] failed to stream knowledge file id=%s: %v", record.ID, err)
+	}
+}
+
+func (h *Handler) DownloadArtifact(c *gin.Context) {
+	ctx := c.Request.Context()
+	file, err := h.service.ResolveArtifact(ctx, c.Request.URL.Query())
+	if err != nil {
+		status := http.StatusForbidden
+		if errors.Is(err, ErrExpiredTicket) {
+			status = http.StatusGone
+		}
+		logger.Warnf(ctx, "[mobile document] rejected signed artifact download: %v", err)
+		c.JSON(status, gin.H{"success": false, "message": "下载链接无效或已过期"})
+		return
+	}
+
+	reader, err := h.service.OpenArtifact(ctx, file)
+	if err != nil {
+		logger.Warnf(ctx, "[mobile document] failed to open artifact id=%s: %v", file.ID, err)
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "产物文件暂时不可用"})
+		return
+	}
+	defer reader.Close()
+
+	filename := cleanDownloadFilename(file.FileName)
+	setDownloadHeaders(c, filename, file.FileSize)
+	if c.Request.Method == http.MethodHead {
+		c.Status(http.StatusOK)
+		return
+	}
+
+	c.Status(http.StatusOK)
+	if _, err := io.Copy(c.Writer, reader); err != nil {
+		logger.Warnf(ctx, "[mobile document] failed to stream artifact id=%s: %v", file.ID, err)
+	}
+}
+
+func setDownloadHeaders(c *gin.Context, filename string, fileSize int64) {
+	c.Header("Content-Disposition", contentDisposition(filename))
+	c.Header("Content-Type", contentTypeForDownload(filename))
+	c.Header("Content-Description", "File Transfer")
+	c.Header("Content-Transfer-Encoding", "binary")
+	c.Header("Cache-Control", "private, no-store, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.Header("X-Content-Type-Options", "nosniff")
+	if fileSize > 0 {
+		c.Header("Content-Length", strconv.FormatInt(fileSize, 10))
 	}
 }
 

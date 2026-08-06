@@ -53,6 +53,7 @@ from app.runner import (  # noqa: E402
     prompt_media_reference,
     parse_mcp_tool_response_payload,
     result_message_text,
+    runtime_summary,
     run_data_analysis_judge,
     sanitize_artifact_bytes,
     sdk_tool_progress_event,
@@ -71,6 +72,7 @@ from app.schemas import (  # noqa: E402
     DocumentTemplateContextSpec,
     DocumentTemplateFileSpec,
     LLMConfig,
+    LightweightSkillSpec,
     OriginalInputFileSpec,
     ProfessionalSkillFileSpec,
     ProfessionalSkillSpec,
@@ -1877,7 +1879,6 @@ EOF""",
                 "agent": {"system_prompt": "large duplicated system prompt", "name": "文档处理"},
                 "current_turn": {
                     "user_request_verbatim": "请生成 Word 和 PPT",
-                    "selected_chat_skill_context": "duplicated skill context",
                     "image_urls": ["http://example.test/image.png"],
                 },
                 "effective_configuration": {
@@ -1919,9 +1920,46 @@ EOF""",
         self.assertIn("form a short internal delivery plan", prompt)
         self.assertIn('"runtime_model_id": "model-1"', prompt)
         self.assertNotIn("large duplicated system prompt", prompt)
-        self.assertNotIn("duplicated skill context", prompt)
         self.assertNotIn('"allowed_tools"', prompt)
         self.assertNotIn('"artifact_return_policy"', prompt)
+
+    def test_effective_lightweight_skills_are_the_only_model_visible_skill_source(self):
+        skill = LightweightSkillSpec(
+            key="lightweight:managed:skill-1",
+            name="制度助手",
+            description="制度问答",
+            instructions="回答前先检索制度依据，并按制度流程组织答案。",
+        )
+        payload = ChatPayload(
+            run_id="run-lightweight",
+            session_id="session-lightweight",
+            assistant_message_id="assistant-lightweight",
+            query="差旅报销需要哪些材料？",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+            lightweight_skill_policy=(
+                "Every effective lightweight skill is active regardless of whether it came from agent configuration "
+                "or a chat selection."
+            ),
+            lightweight_skills=[skill],
+            visible_context={"agent": {"name": "通用智能体"}},
+        )
+
+        system_prompt = build_system_prompt(payload)
+        prompt = build_prompt(payload)
+        summary = json.loads(runtime_summary(payload))
+
+        self.assertTrue(summary["lightweight_skills_enabled"])
+        self.assertEqual(summary["effective_lightweight_skill_names"], ["制度助手"])
+        self.assertNotIn("skills_enabled", summary)
+        self.assertNotIn("allowed_skills", summary)
+        self.assertIn("Every effective lightweight skill is active", system_prompt)
+        self.assertEqual(system_prompt.count("<effective_lightweight_skills"), 1)
+        self.assertEqual(system_prompt.count("回答前先检索制度依据，并按制度流程组织答案。"), 1)
+        self.assertNotIn("<effective_lightweight_skills", prompt)
+        self.assertNotIn("selected_chat_skill_names", prompt)
+        self.assertNotIn("configured_lightweight_skill_names", prompt)
 
     def test_build_prompt_omits_inline_base64_image_urls(self):
         inline = "data:image/jpeg;base64," + base64.b64encode(b"x" * 1024).decode("ascii")

@@ -2,14 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-07-26
+## [Unreleased] - 2026-08-06
+
+### Production Alignment
+
+- **CHANGED**: The production app image now runs dedicated API, parse,
+  derivative, Wiki, and maintenance roles. The deployed topology is
+  3/3/2/2/2 with three DocReader, two Agent, two desktop, and two mobile
+  replicas; PostgreSQL remains on the existing `.6` node.
+- **CHANGED**: Production scratch uses per-role/per-Pod hostPath directories
+  below `/mnt/weknora-data/weknora-v2-scratch`; durable files remain in private
+  OBS and no RWX volume is required.
+- **CHANGED**: Model traffic uses the external llmgateway domain and seven
+  centrally distributed models. Qwen ASR 1.7B was removed in favor of
+  Qwen2.5-Omni-7B; the Omni resource-pool limit remains eight.
+- **CHANGED**: The two primary chat pools admit 48 running plus 52 waiting
+  sessions, with 100 total admitted sessions including running work.
+
+### Document and IM Reliability
+
+- **FIXED**: DocReader isolates every parse in its own OS process group and
+  kills the complete child tree on timeout or cancellation, preventing poison
+  PDF/Office files from permanently occupying parser workers.
+- **FIXED**: Desktop and mobile PDF preview now self-host PDF.js worker, CMap,
+  standard-font, WASM, and ICC resources, including JPX/JPEG2000 support and
+  bounded lazy rendering in restricted networks.
+- **FIXED**: WeCom document and Wiki references use signed same-origin,
+  device-aware readers. Natural-language source text and clickable platform
+  citations coexist; mobile original-document preview and fullscreen layout
+  share the protected PDF pipeline.
+- **FIXED**: TDesign icon resources are hosted by the application instead of a
+  public CDN.
 
 ### Document Processing and Reliability
 
-- **NEW**: Durable PostgreSQL-backed, per-document workflow queue. Every app
-  replica executes the complete parse → chunk → index → multimodal →
-  summary/questions/graph/Wiki chain; system-admin `asynq.concurrency` is now
-  the complete-document concurrency per app instance.
+- **NEW**: Durable PostgreSQL-backed, per-document workflow queue. Dedicated
+  parse workers own complete workflows while derivative and Wiki roles converge
+  enabled branches through the same state machine; system-admin
+  `asynq.concurrency` is the complete-document concurrency per parse instance.
 - **NEW**: Stable instance identity, per-boot identity, leases, execution epochs,
   generation fencing, Kubernetes exact-termination verification, controlled
   termination attestation, graceful drain, same-instance restart recovery, and
@@ -28,8 +58,9 @@ All notable changes to this project will be documented in this file.
 
 ### Multi-Replica and Storage
 
-- **NEW**: Production topology for three app/DocReader replicas and two
-  general-agent, document-processing-agent, frontend, and mobile-web replicas.
+- **NEW**: Production topology for three API/parse/DocReader replicas; two
+  derivative, Wiki, maintenance, general-agent, document-processing-agent,
+  frontend, and mobile-web replicas.
 - **NEW**: Private object-store Agent artifact handoff. Development uses MinIO;
   production uses OBS with purpose/deployment/namespace-scoped unique keys,
   size/SHA256 verification, tenant-scoped downloads, and idempotent migration.
@@ -38,8 +69,8 @@ All notable changes to this project will be documented in this file.
   reports, required-object checks, reference rewriting, and final zero-local-
   reference verification.
 - **CHANGED**: Production requires no RWX. Durable source/derived objects and
-  Agent artifacts live in private OBS; app, DocReader, and Agent workspaces use
-  independent disposable RWO local scratch.
+  Agent artifacts live in private OBS; worker, DocReader, and Agent workspaces
+  use independent disposable hostPath scratch directories.
 - **IMPROVED**: Agent services support two replicas without shared run
   directories. Python remains isolated from WeKnora/business databases, MCP,
   and object-store credentials; Go owns tools, authorization, and persistence.

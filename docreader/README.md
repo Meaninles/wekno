@@ -11,13 +11,21 @@ PostgreSQL 管理；DocReader 本地目录只存可丢弃的解析临时文件�
 ```text
 replicas=3
 DOCREADER_GRPC_MAX_WORKERS=4
+DOCREADER_REQUEST_TIMEOUT_SECONDS=600
+DOCREADER_PROCESS_KILL_GRACE_SECONDS=3
 DOCREADER_PDF_RENDER_PARALLELISM=4
 DOCREADER_PDF_RENDER_MAX_WORKERS=1
 DOCREADER_MARKITDOWN_MAX_WORKERS=1
 DOCREADER_ODL_MAX_WORKERS=1
 DOCREADER_GRPC_MAX_FILE_SIZE_MB=50
-scratch=100Gi RWO ephemeral per Pod
+scratch=/mnt/weknora-data/weknora-v2-scratch/docreader/<pod> hostPath
 ```
+
+每个 `Read` / `ReadStream` 请求都由 `IsolatedParseRunner` 放入独立 OS 进程组。请求
+超过 600 秒或调用方取消时，服务会终止整个进程树，并在 3 秒后强制清理仍存活的
+Python、Java、LibreOffice 或原生子进程。一个毒 PDF/Office 文件因此最多占用一个
+有界 worker 窗口，不会把某个副本永久打死。readiness 摘除只阻止新连接，故障处置
+还要确认调用端旧 gRPC 长连接已关闭并重新解析到健康 endpoint。
 
 外部知识源可以大于 50 MiB；app/文档拆分器会把超大文档转换为可独立解析的部分，
 再送入 DocReader。不要通过把单次 gRPC 上限直接提高到 2 GiB 来绕过拆分保护。
@@ -96,6 +104,8 @@ docreader:
 ### gRPC 配置
 
 - `DOCREADER_GRPC_MAX_WORKERS`: gRPC 服务的最大工作线程数（默认：4）
+- `DOCREADER_REQUEST_TIMEOUT_SECONDS`: 单文档解析硬超时（默认：600 秒）；超时会终止解析进程组及其派生进程
+- `DOCREADER_PROCESS_KILL_GRACE_SECONDS`: 解析进程组从 SIGTERM 升级到 SIGKILL 前的等待时间（默认：3 秒）
 - `DOCREADER_GRPC_PORT`: gRPC 服务监听端口（默认：50051）
 - `DOCREADER_HEALTH_GRPC_PORT`: 健康检查 gRPC 服务监听端口（默认：50052，仅绑定容器内 `127.0.0.1`）
 - `DOCREADER_HEALTH_GRPC_MAX_WORKERS`: 健康检查 gRPC 服务工作线程数（默认：2）
@@ -238,7 +248,8 @@ Service 会把新请求送到其余 ready endpoint；已经在退出 Pod 内但�
 ### 5. 临时卷可以用 OBS 或 RWX 吗？
 
 不能把 OBS/S3 挂成 POSIX 解析工作目录。PDF 渲染、Office 转换、OCR 图片和解压
-需要本地随机读写。生产使用每 Pod 独立 100Gi `csi-local-topology` RWO 临时卷；
+需要本地随机读写。当前生产使用
+`/mnt/weknora-data/weknora-v2-scratch/docreader/<pod>` 下的独立 hostPath 临时目录；
 持久原文和衍生对象由 app 写入私有 OBS，不需要 RWX。
 
 ## 服务健康检查
@@ -270,3 +281,6 @@ docker logs WeKnora-docreader
 - 容器名称：WeKnora-docreader
 - 网络：WeKnora-network
 - 重启策略：unless-stopped
+
+当前生产拓扑、资源与发布约束见
+[当前生产实现与部署基线](../docs/custom/当前生产实现与部署基线.md)。

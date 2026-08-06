@@ -11,6 +11,7 @@ npm run dev -- --host 0.0.0.0 --port 5177
 npm run test
 npm run type-check
 npm run build
+npm run build:mobile
 ```
 
 运行代码修改后先停止旧开发服务，再启动新实例，避免 5177 端口仍指向旧代码。
@@ -37,3 +38,15 @@ npm run build
 frontend 是无状态服务，可部署两副本并由 Service/Ingress 负载均衡，不要求粘性
 会话或 RWX。登录态、会话、队列和产物均由后端/持久层管理。验收应确认正常分流、
 停止任一副本后持续可用、恢复后重新加入。
+
+## 本地静态资源与 PDF 预览
+
+生产处于受限网络，前端不能依赖公共 CDN。构建脚本会把 `pdfjs-dist 5.4.624` 的
+worker、CMap、standard fonts、WASM 和 ICC 资源复制到本站 `/pdfjs/`，同时本站托管
+TDesign 图标。Nginx 必须把 `.mjs` 作为 JavaScript 返回。
+
+桌面和移动端 PDF 使用串行懒渲染、像素上限和近邻页驻留控制，支持
+JPX/JPEG2000、JBIG2 及缺省字体资源。修改预览代码后至少验证：小 PDF、复杂/大
+PDF、解析分片、原文档、企业微信内置浏览器、全屏按钮，以及 Network 中不存在公共
+CDN 请求。详见
+[当前生产实现与部署基线](../docs/custom/当前生产实现与部署基线.md)。

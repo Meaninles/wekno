@@ -47,7 +47,7 @@ flowchart TB
     A <--> R["Redis delivery / stream / model admission"]
     A --> O["MinIO / private OBS"]
     A --> N["Neo4j"]
-    A --> L["LiteLLM / model providers"]
+    A --> L["external llmgateway / model providers"]
     G --> A
     P --> A
 ```
@@ -109,17 +109,24 @@ helm install weknora ./helm \
 The repository contains one reviewed profile for the current production CCE:
 
 - [`values-production-ha.yaml`](./values-production-ha.yaml): fixed topology,
-  capacity, OBS namespaces, RWO scratch, ingress limits, PDB and spread.
+  capacity, OBS namespaces, hostPath scratch, ingress limits, PDB and spread.
 - [`deploy/production/values-site.example.yaml`](../deploy/production/values-site.example.yaml):
   copy to a protected workspace and replace SWR namespace/image SHA.
 - [`deploy/production/values-migration.example.yaml`](../deploy/production/values-migration.example.yaml):
   one maintenance app for SQL and legacy-artifact migration.
 
-Target replicas are app/DocReader `3/3`, general-agent/document-processing-agent
-`2/2`, and frontend/mobile-web `2/2`. Every app admits four complete document
-workflows; cluster document capacity is 12. Durable files use private OBS, and
-each app/DocReader/Agent Pod gets its own `csi-local-topology` RWO ephemeral
-scratch volume. No RWX volume is required.
+Current production roles are API/parse-worker `3/3`, derivative/wiki/maintenance
+`2/2/2`, DocReader `3`, general-agent/document-processing-agent `2/2`, and
+frontend/mobile-web `2/2`. Every parse-worker admits four complete document
+workflows; cluster document capacity is 12. Durable files use private OBS. Each
+worker/DocReader/Agent Pod gets an isolated hostPath scratch directory under
+`/mnt/weknora-data/weknora-v2-scratch`; no RWX volume is required.
+
+The current production namespace is not an active Helm release that may be
+adopted with `helm upgrade --install`. Render and validate this chart, then use a
+reviewed, controlled apply. Never use namespace `--prune`, and never remove the
+cluster ingress-nginx/controller. See
+[`docs/custom/当前生产实现与部署基线.md`](../docs/custom/当前生产实现与部署基线.md).
 
 Render and validate:
 
@@ -143,9 +150,10 @@ kubectl diff -f /secure/weknora-production.yaml
 
 The existing production resources are not currently owned by an active Helm
 release. For that environment, **do not run `helm upgrade --install`, do not
-use `--prune`, and do not delete the existing PostgreSQL/Neo4j/Redis/LiteLLM
-Services or PVCs**. Follow the exact backup, drain, single-replica migration,
-`/data/files`→OBS verification, immutable-resource replacement, rollout,
+use `--prune`, and do not delete the existing PostgreSQL/Neo4j/Redis/model-gateway
+Services or PVCs**. The in-cluster LiteLLM Deployment currently carries no
+production model traffic. Follow the exact backup, drain, single-replica migration,
+immutable-resource replacement, rollout,
 acceptance, and rollback sequence in:
 
 1. [`deploy/production/README.md`](../deploy/production/README.md)

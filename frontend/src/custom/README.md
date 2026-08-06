@@ -13,13 +13,13 @@
 | `capacity-control` | 系统管理员独立容量页、有效值/冲突、资源池、模板、绑定和审计 |
 | `knowledgeWorkflowStatus` | 主解析和衍生阶段总状态、悬停明细、准确筛选 |
 | `knowledgeFolders` | 文件夹、分页、渐进加载、搜索和移动 |
-| `documentPreview` | preview policy、大文件安全预览 |
+| `documentPreview` | preview policy、PDF.js 本地 worker/WASM/CMap/字体、懒渲染和大文件安全预览 |
 | `wikiGraph` | 分类列表、搜索、分页、ego 图和中心节点切换 |
 | `wikiActivation` | Wiki 高成本索引能力的二级入口、启用状态提示和提取粒度面板 |
 | `wikiAccess` | Wiki 选择权查询、默认灰态提示和系统管理员按用户授权页 |
 | `generalagent` / `dbanalytics` / `skillhub` | Agent 产物、数据分析和技能 |
 | `iam` / `configcenter` / `authSecurity` | SSO、组织、默认资源和认证安全 |
-| `mobile` / `chatshare` / `sourceReferences` | 移动端多格式文档预览、原生下载、分享和来源展示 |
+| `mobile` / `chatshare` / `sourceReferences` / `imoutput` | 移动端多格式文档预览、企业微信设备内引用、原文档、分享和来源展示 |
 | `scheduledchat` / `sessionState` / `answerfeedback` | 定时任务、会话状态和反馈 |
 
 ## 状态显示约束

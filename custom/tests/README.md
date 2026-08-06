@@ -8,7 +8,7 @@
 | 文档处理集群 | [`document_processing_cluster_e2e/`](./document_processing_cluster_e2e/README.md) | 多实例、完整衍生、排队、竞态、恢复、删除、召回 |
 | 知识库文件夹 | [`knowledge_folders_e2e/`](./knowledge_folders_e2e/README.md) | 分页、搜索、移动、并发和权限 |
 | 模型容量 | `model_capacity_reports/` | DeepSeek V4 Flash 分档并发与 P95 |
-| 生产最终验收 | [`final_acceptance_report.json`](./document_processing_cluster_e2e/final_acceptance_outputs/20260726-0107/final_acceptance_report.json) | 当前综合通过证据 |
+| 历史综合验收 | [`final_acceptance_report.json`](./document_processing_cluster_e2e/final_acceptance_outputs/20260726-0107/final_acceptance_report.json) | 2026-07-26 回归证据；当前生产还必须按生产基线重新验收 |
 
 ## 成功判据
 

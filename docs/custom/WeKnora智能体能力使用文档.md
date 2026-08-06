@@ -276,10 +276,10 @@ Agent 使用知识库前先确认：
 
 ### 14.2 提交
 
-1. Agent 在本地 RWO 目录生成。
-2. 通过内部 artifact upload API 上传 app。
-3. app 校验专用内部 API Key。
-4. app 预留唯一对象键并流式写入。
+1. Agent 在按 Pod 隔离的 hostPath scratch 目录生成。
+2. 通过内部 artifact upload API 上传 API 服务。
+3. API 服务校验专用内部 API Key。
+4. API 服务预留唯一对象键并流式写入。
 5. 校验大小和 SHA256。
 6. 幂等写入 artifact 行。
 7. 返回 artifact ID。
@@ -350,8 +350,8 @@ document-processing-agent        2 副本
 
 | 服务 | request | limit | 临时卷 |
 |---|---:|---:|---:|
-| general-agent | 0.5C/1Gi | 2C/2Gi | 20Gi |
-| document-processing-agent | 1C/1.5Gi | 3C/4Gi | 40Gi |
+| general-agent | 250m/768Mi | 1500m/2Gi | 隔离 hostPath scratch |
+| document-processing-agent | 500m/1280Mi | 2500m/4Gi | 隔离 hostPath scratch |
 
 两个服务部署在 `10.14.201.1/.2` 并按主机名打散。滚动更新
 `maxSurge=0,maxUnavailable=1`。
@@ -377,3 +377,4 @@ document-processing-agent        2 副本
 - [系统介绍说明](./系统介绍说明.md)
 - [系统使用说明](./系统使用说明.md)
 - [当前版本生产更新部署执行手册](./当前版本生产更新部署执行手册.md)
+- [当前生产实现与部署基线](./当前生产实现与部署基线.md)

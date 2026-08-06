@@ -74,6 +74,12 @@ type Hook struct {
 
 func NewCoordinator(params Params) *Coordinator {
 	c := &Coordinator{params: params}
+	if params.KnowledgeAux != nil {
+		c.hooks = append(c.hooks, Hook{
+			Name:  "knowledge-aux-legacy-backfill",
+			Start: params.KnowledgeAux.RunConfiguredBackfill,
+		})
+	}
 	if params.DependencyControl != nil {
 		c.hooks = append(c.hooks, Hook{
 			Name:  "dependency-control",

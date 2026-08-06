@@ -226,6 +226,21 @@ func (r *Recovery) bindingBackfillComplete() bool {
 	return r.backfillComplete
 }
 
+// RunConfiguredBackfill is the maintenance-leader entry point for the
+// explicitly armed legacy ownership migration. The split-role runtime does
+// not start Recovery's independent leader loop, so the maintenance
+// coordinator must call this before it starts ordinary recovery scans.
+func (r *Recovery) RunConfiguredBackfill(ctx context.Context) error {
+	if r == nil {
+		return errors.New("knowledge auxiliary backfill is unavailable")
+	}
+	if !r.config.BackfillEnabled {
+		return nil
+	}
+	_, err := r.RunBackfill(ctx)
+	return err
+}
+
 // RunBackfill uses its own long, configurable timeout and is safe to retry.
 // A timeout/error is never cached as completion; the periodic recovery loop
 // attempts the idempotent batched migration again.

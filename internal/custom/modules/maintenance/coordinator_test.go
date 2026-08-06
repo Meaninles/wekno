@@ -6,8 +6,20 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCoordinatorRegistersKnowledgeAuxBackfillAsFirstLeaderHook(t *testing.T) {
+	recovery := knowledgeaux.NewRecoveryWithConfig(nil, knowledgeaux.RecoveryConfig{
+		BackfillEnabled: false,
+	})
+	coordinator := NewCoordinator(Params{KnowledgeAux: recovery})
+
+	require.NotEmpty(t, coordinator.hooks)
+	require.Equal(t, "knowledge-aux-legacy-backfill", coordinator.hooks[0].Name)
+	require.NoError(t, coordinator.hooks[0].Start(context.Background()))
+}
 
 func TestLeaderHooksStartInOrderAndStopInReverse(t *testing.T) {
 	coordinator := &Coordinator{}

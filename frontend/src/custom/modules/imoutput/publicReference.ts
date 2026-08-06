@@ -48,16 +48,25 @@ export function publicReferenceToken(query: Record<string, RouteQueryValue>): st
 
 export async function loadPublicReference(token: string, signal?: AbortSignal): Promise<PublicReferenceView> {
   if (!token) throw new Error("引用地址缺少访问凭证");
-  const response = await fetch(publicReferenceURL(REFERENCE_DATA_PATH, token), {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    credentials: "omit",
-    cache: "no-store",
-    referrerPolicy: "no-referrer",
-    signal,
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok || !payload?.success || !isPublicReferenceView(payload.data)) {
+  const url = publicReferenceURL(REFERENCE_DATA_PATH, token);
+  let status = 0;
+  let payload: any = null;
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      signal,
+    });
+    status = response.status;
+    payload = await response.json().catch(() => null);
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw error;
+    ({ status, payload } = await loadPublicReferenceWithXHR(url, signal));
+  }
+  if (status < 200 || status >= 300 || !payload?.success || !isPublicReferenceView(payload.data)) {
     throw new Error(String(payload?.message || "引用链接无效或内容已不可用"));
   }
   return payload.data;
@@ -65,13 +74,20 @@ export async function loadPublicReference(token: string, signal?: AbortSignal): 
 
 export async function loadPublicReferenceOriginal(token: string, signal?: AbortSignal): Promise<Blob> {
   if (!token) throw new Error("引用地址缺少访问凭证");
-  const response = await fetch(publicReferenceOriginalURL(token), {
-    method: "GET",
-    credentials: "omit",
-    cache: "no-store",
-    referrerPolicy: "no-referrer",
-    signal,
-  });
+  const url = publicReferenceOriginalURL(token);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw error;
+    return loadPublicReferenceOriginalWithXHR(url, signal);
+  }
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(String(payload?.message || "原文档暂时无法查看"));
@@ -158,6 +174,94 @@ export function wikiPageTypeLabel(type?: string): string {
 function publicReferenceURL(path: string, token: string): string {
   const base = getApiBaseUrl().replace(/\/+$/, "");
   return `${base}${path}?${new URLSearchParams({ token }).toString()}`;
+}
+
+function loadPublicReferenceWithXHR(
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ status: number; payload: any }> {
+  if (signal?.aborted) return Promise.reject(createAbortError());
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const cleanup = bindXHRAbort(request, signal, reject);
+    request.open("GET", url, true);
+    request.setRequestHeader("Accept", "application/json");
+    request.onload = () => {
+      cleanup();
+      let payload: any = null;
+      try {
+        payload = JSON.parse(request.responseText);
+      } catch {
+        payload = null;
+      }
+      resolve({ status: request.status, payload });
+    };
+    request.onerror = () => {
+      cleanup();
+      reject(new Error("引用内容加载失败"));
+    };
+    request.onabort = () => {
+      cleanup();
+      reject(createAbortError());
+    };
+    request.send();
+  });
+}
+
+function loadPublicReferenceOriginalWithXHR(url: string, signal?: AbortSignal): Promise<Blob> {
+  if (signal?.aborted) return Promise.reject(createAbortError());
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const cleanup = bindXHRAbort(request, signal, reject);
+    request.open("GET", url, true);
+    request.responseType = "blob";
+    request.onload = () => {
+      cleanup();
+      if (request.status >= 200 && request.status < 300 && request.response instanceof Blob) {
+        resolve(request.response);
+        return;
+      }
+      reject(new Error("原文档暂时无法查看"));
+    };
+    request.onerror = () => {
+      cleanup();
+      reject(new Error("原文档暂时无法查看"));
+    };
+    request.onabort = () => {
+      cleanup();
+      reject(createAbortError());
+    };
+    request.send();
+  });
+}
+
+function bindXHRAbort(
+  request: XMLHttpRequest,
+  signal: AbortSignal | undefined,
+  reject: (reason?: any) => void,
+): () => void {
+  if (!signal) return () => undefined;
+  const abort = () => {
+    request.abort();
+    reject(createAbortError());
+  };
+  if (signal.aborted) {
+    abort();
+    return () => undefined;
+  }
+  signal.addEventListener("abort", abort, { once: true });
+  return () => signal.removeEventListener("abort", abort);
+}
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { name?: string }).name === "AbortError");
+}
+
+function createAbortError(): Error {
+  if (typeof DOMException === "function") return new DOMException("The operation was aborted", "AbortError");
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 function isPublicReferenceView(value: unknown): value is PublicReferenceView {

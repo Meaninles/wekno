@@ -150,25 +150,25 @@ RUN mkdir -p /data/files && \
 
 # Copy migrate tool from builder stage
 COPY --from=builder /go/bin/migrate /usr/local/bin/
-COPY --from=builder /app/yanyiwu/ /go/pkg/mod/github.com/yanyiwu/
+COPY --chown=appuser:appuser --from=builder /app/yanyiwu/ /go/pkg/mod/github.com/yanyiwu/
 
 # Copy the binary from the builder stage
-COPY --from=builder /app/config ./config
-COPY --from=builder /app/scripts ./scripts
-COPY --from=builder /app/migrations ./migrations
-COPY --from=builder /app/dataset/samples ./dataset/samples
-COPY --from=builder /app/skills/preloaded ./skills/preloaded
-COPY --from=builder /app/skills/professional ./skills/professional
+COPY --chown=appuser:appuser --from=builder /app/config ./config
+COPY --chown=appuser:appuser --from=builder /app/scripts ./scripts
+COPY --chown=appuser:appuser --from=builder /app/migrations ./migrations
+COPY --chown=appuser:appuser --from=builder /app/dataset/samples ./dataset/samples
+COPY --chown=appuser:appuser --from=builder /app/skills/preloaded ./skills/preloaded
+COPY --chown=appuser:appuser --from=builder /app/skills/professional ./skills/professional
 # Keep a read-only backup so bind-mount cannot erase built-in skills
-COPY --from=builder /app/skills/preloaded ./skills/_builtin
-COPY --from=builder /root/.duckdb /home/appuser/.duckdb
-COPY --from=builder /app/WeKnora .
+COPY --chown=appuser:appuser --from=builder /app/skills/preloaded ./skills/_builtin
+COPY --chown=appuser:appuser --from=builder /root/.duckdb /home/appuser/.duckdb
+COPY --chown=appuser:appuser --from=builder /app/WeKnora .
 # Docker sandbox mode talks to the host daemon through docker.sock. Include
 # only the distribution-packaged CLI binary; no daemon or runtime runs in app.
 COPY --from=docker-cli /opt/docker-cli/usr/bin/docker /usr/local/bin/docker
 
 # Copy and make entrypoint script executable
-COPY --from=builder /app/scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
+COPY --chown=appuser:appuser --from=builder /app/scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
 
 # Make scripts executable
 RUN chmod +x ./scripts/*.sh && \

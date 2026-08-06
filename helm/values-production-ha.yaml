@@ -565,6 +565,13 @@ docreader:
   extraEnv:
     - name: DOCREADER_GRPC_MAX_WORKERS
       value: "4"
+    - name: DOCREADER_REQUEST_TIMEOUT_SECONDS
+      # A parser runs in a disposable process group. This hard deadline is
+      # shorter than the app's 30-minute RPC deadline so malformed documents
+      # cannot permanently retain a DocReader worker.
+      value: "600"
+    - name: DOCREADER_PROCESS_KILL_GRACE_SECONDS
+      value: "3"
     - name: DOCREADER_GRPC_MAX_FILE_SIZE_MB
       value: "50"
     - name: DOCREADER_PDF_RENDER_PARALLELISM
@@ -674,6 +681,11 @@ documentProcessingAgent:
 frontend:
   enabled: true
   replicaCount: 2
+  strategy:
+    # There are exactly two stateless-worker nodes. Delete one old pod before
+    # creating its replacement so required host anti-affinity cannot deadlock.
+    maxSurge: 0
+    maxUnavailable: 1
   image:
     repository: weknora-ui-prod
     digest: ""
@@ -699,6 +711,15 @@ frontend:
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: frontend
+              app.kubernetes.io/instance: weknora
+              app.kubernetes.io/name: weknora
+          topologyKey: kubernetes.io/hostname
   nodeSelector:
     weknora.io/stateless-worker: "true"
 

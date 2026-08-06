@@ -53,6 +53,8 @@ class DocReaderConfig:
     grpc_max_file_size_mb: int
     grpc_port: int
     grpc_health_port: int
+    request_timeout_seconds: int
+    process_kill_grace_seconds: int
 
     # Parser
     docx_max_pages: int
@@ -89,6 +91,15 @@ def load_config() -> DocReaderConfig:
     )
     grpc_port = _get_int(["DOCREADER_GRPC_PORT", "PORT"], 50051)
     grpc_health_port = _get_int(["DOCREADER_HEALTH_GRPC_PORT"], 50052)
+    # This deadline is intentionally shorter than the Go client's 30-minute
+    # RPC deadline. It is enforced by killing the isolated parser process, not
+    # merely by returning from the gRPC handler.
+    request_timeout_seconds = max(
+        1, _get_int(["DOCREADER_REQUEST_TIMEOUT_SECONDS"], 600)
+    )
+    process_kill_grace_seconds = max(
+        0, _get_int(["DOCREADER_PROCESS_KILL_GRACE_SECONDS"], 3)
+    )
     docx_max_pages = _get_int(["DOCREADER_DOCX_MAX_PAGES"], 0)
     markitdown_max_workers = _get_int(["DOCREADER_MARKITDOWN_MAX_WORKERS"], 1)
     odl_max_workers = _get_int(["DOCREADER_ODL_MAX_WORKERS"], 1)
@@ -138,6 +149,8 @@ def load_config() -> DocReaderConfig:
         grpc_max_file_size_mb=grpc_max_file_size_mb,
         grpc_port=grpc_port,
         grpc_health_port=grpc_health_port,
+        request_timeout_seconds=request_timeout_seconds,
+        process_kill_grace_seconds=process_kill_grace_seconds,
         docx_max_pages=docx_max_pages,
         markitdown_max_workers=markitdown_max_workers,
         odl_max_workers=odl_max_workers,
@@ -168,6 +181,8 @@ def dump_config(mask_secrets: bool = True) -> Dict[str, Any]:
         "DOCREADER_GRPC_MAX_FILE_SIZE_MB": cfg.grpc_max_file_size_mb,
         "DOCREADER_GRPC_PORT": cfg.grpc_port,
         "DOCREADER_HEALTH_GRPC_PORT": cfg.grpc_health_port,
+        "DOCREADER_REQUEST_TIMEOUT_SECONDS": cfg.request_timeout_seconds,
+        "DOCREADER_PROCESS_KILL_GRACE_SECONDS": cfg.process_kill_grace_seconds,
         "DOCREADER_DOCX_MAX_PAGES": cfg.docx_max_pages,
         "DOCREADER_MARKITDOWN_MAX_WORKERS": cfg.markitdown_max_workers,
         "DOCREADER_ODL_MAX_WORKERS": cfg.odl_max_workers,

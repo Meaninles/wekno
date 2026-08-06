@@ -16,6 +16,8 @@ class DocReaderConfigTest(unittest.TestCase):
         self.assertEqual(cfg.pdf_jpeg_quality, 85)
         self.assertEqual(cfg.grpc_health_port, 50052)
         self.assertEqual(cfg.grpc_health_max_workers, 2)
+        self.assertEqual(cfg.request_timeout_seconds, 600)
+        self.assertEqual(cfg.process_kill_grace_seconds, 3)
 
     def test_loads_parser_concurrency_env(self):
         env = {
@@ -25,6 +27,8 @@ class DocReaderConfigTest(unittest.TestCase):
             "DOCREADER_PDF_RENDER_MAX_WORKERS": "2",
             "DOCREADER_PDF_RENDER_DPI": "180",
             "DOCREADER_PDF_JPEG_QUALITY": "85",
+            "DOCREADER_REQUEST_TIMEOUT_SECONDS": "720",
+            "DOCREADER_PROCESS_KILL_GRACE_SECONDS": "5",
         }
         with patch.dict(os.environ, env):
             cfg = config.load_config()
@@ -35,6 +39,8 @@ class DocReaderConfigTest(unittest.TestCase):
         self.assertEqual(cfg.pdf_jpeg_quality, 85)
         self.assertEqual(cfg.grpc_health_port, 50053)
         self.assertEqual(cfg.grpc_health_max_workers, 3)
+        self.assertEqual(cfg.request_timeout_seconds, 720)
+        self.assertEqual(cfg.process_kill_grace_seconds, 5)
 
     def test_dump_config_includes_parser_limits(self):
         dumped = config.dump_config()
@@ -45,6 +51,8 @@ class DocReaderConfigTest(unittest.TestCase):
         self.assertIn("DOCREADER_PDF_RENDER_MAX_WORKERS", dumped)
         self.assertIn("DOCREADER_PDF_RENDER_DPI", dumped)
         self.assertIn("DOCREADER_PDF_JPEG_QUALITY", dumped)
+        self.assertIn("DOCREADER_REQUEST_TIMEOUT_SECONDS", dumped)
+        self.assertIn("DOCREADER_PROCESS_KILL_GRACE_SECONDS", dumped)
 
 
 if __name__ == "__main__":

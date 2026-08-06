@@ -84,10 +84,11 @@ spec:
             exec:
               command:
                 - grpc_health_probe
-                # Readiness checks the real parser gRPC executor. Liveness
-                # remains on the isolated health port so legitimate long
-                # parses do not cause a restart loop.
-                - -addr=127.0.0.1:50051
+                # Parsing runs in killable process groups with a hard
+                # DocReader-side deadline. Probe the isolated health executor
+                # so four legitimate parses cannot starve readiness and cause
+                # endpoint churn/stale gRPC connections.
+                - -addr=127.0.0.1:{{ .Values.docreader.healthPort }}
                 - -connect-timeout=1s
                 - -rpc-timeout=5s
             {{- toYaml .Values.docreader.readinessProbe | nindent 12 }}

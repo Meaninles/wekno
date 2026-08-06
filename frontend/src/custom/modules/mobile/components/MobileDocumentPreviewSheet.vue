@@ -47,6 +47,7 @@ const chunkRoot = ref<HTMLElement | null>(null);
 let generation = 0;
 let bodyLocked = false;
 let previousBodyOverflow = "";
+let chunkImageObserver: IntersectionObserver | null = null;
 
 const knowledgeID = computed(() =>
   String(detail.value?.id || props.item?.id || props.item?.knowledge_id || "").trim(),
@@ -76,6 +77,9 @@ const fileType = computed(() => {
 
 const fileSize = computed(() =>
   Number(detail.value?.file_size || props.item?.file_size || 0),
+);
+const tenantID = computed(() =>
+  String(detail.value?.tenant_id || props.item?.tenant_id || "").trim(),
 );
 const parseStatus = computed(() =>
   String(detail.value?.parse_status || props.item?.parse_status || ""),
@@ -111,7 +115,33 @@ function unlockBody() {
 
 async function hydrateChunks() {
   await nextTick();
-  await hydrateProtectedFileImages(chunkRoot.value);
+  chunkImageObserver?.disconnect();
+  chunkImageObserver = null;
+  const root = chunkRoot.value;
+  if (!root) return;
+  const cards = Array.from(root.querySelectorAll<HTMLElement>("article"));
+  if (!cards.length) return;
+
+  const hydrateCard = (card: HTMLElement) => {
+    void hydrateProtectedFileImages(card, undefined, tenantID.value);
+  };
+  if (typeof IntersectionObserver === "undefined") {
+    for (const card of cards) await hydrateProtectedFileImages(card, undefined, tenantID.value);
+    return;
+  }
+
+  const scrollRoot = root.closest<HTMLElement>(".mobile-document-preview__body");
+  chunkImageObserver = new IntersectionObserver(
+    (entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        hydrateCard(entry.target as HTMLElement);
+      }
+    },
+    { root: scrollRoot, rootMargin: "100% 0px", threshold: 0.01 },
+  );
+  cards.forEach((card) => chunkImageObserver?.observe(card));
 }
 
 async function loadChunks(page = 1) {
@@ -126,7 +156,6 @@ async function loadChunks(page = 1) {
     chunks.value = Array.isArray(response?.data) ? response.data : [];
     chunkTotal.value = Number(response?.total || chunks.value.length);
     chunkPage.value = Number(response?.page || page);
-    await hydrateChunks();
   } catch (error: any) {
     if (requestGeneration !== generation) return;
     chunkError.value = error?.message || "解析内容加载失败";
@@ -165,6 +194,8 @@ watch(
     const requestGeneration = ++generation;
     detail.value = item ? { ...item } : {};
     chunks.value = [];
+    chunkImageObserver?.disconnect();
+    chunkImageObserver = null;
     chunkTotal.value = 0;
     chunkPage.value = 1;
     chunkError.value = "";
@@ -202,11 +233,17 @@ watch(
   { immediate: true },
 );
 
-watch(renderedChunks, () => {
-  void hydrateChunks();
-}, { flush: "post" });
+watch(
+  [renderedChunks, chunkLoading, viewMode],
+  ([items, loading, mode]) => {
+    if (mode === "chunks" && !loading && items.length) void hydrateChunks();
+  },
+  { flush: "post" },
+);
 
 onBeforeUnmount(() => {
+  chunkImageObserver?.disconnect();
+  chunkImageObserver = null;
   generation += 1;
   unlockBody();
 });
@@ -268,6 +305,7 @@ onBeforeUnmount(() => {
             :chunk-count="chunkTotal"
             :parse-status="parseStatus"
             :active="viewMode === 'original'"
+            :mobile-fit="true"
             @use-chunks="showChunks"
           />
         </section>
@@ -546,6 +584,21 @@ onBeforeUnmount(() => {
 .mobile-rich-content :deep(img) {
   max-width: 100%;
   height: auto;
+}
+
+.mobile-rich-content :deep(img[data-img-loading="1"]) {
+  display: block;
+  width: 100%;
+  min-height: min(68dvh, 620px);
+  border-radius: 6px;
+  background: linear-gradient(100deg, #f1f4f2 20%, #fafcfb 38%, #f1f4f2 56%);
+  background-size: 200% 100%;
+  animation: mobileDocumentImageLoading 1.25s ease-in-out infinite;
+}
+
+@keyframes mobileDocumentImageLoading {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }
 
 .mobile-rich-content :deep(table) {

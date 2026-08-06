@@ -172,6 +172,7 @@ RUN python -m playwright install-deps webkit
 COPY docreader/pyproject.toml docreader/uv.lock ./
 COPY --from=builder /app/docreader docreader
 COPY custom/services/document-splitter/weknora_document_splitter /app/weknora_document_splitter
+COPY custom/services/weknora_docreader_runtime /app/custom/services/weknora_docreader_runtime
 
 # 创建共享临时图片目录
 RUN mkdir -p /tmp/docreader

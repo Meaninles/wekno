@@ -145,6 +145,7 @@ function downloadOriginal() {
               :fileName="documentInfo.file_name || documentInfo.title"
               :fileSize="documentInfo.file_size"
               :active="true"
+              :mobileFit="true"
               :blobLoader="(signal) => loadPublicReferenceOriginal(token, signal)"
             />
           </div>
@@ -290,7 +291,7 @@ function downloadOriginal() {
   background: #fff;
   color: #26372f;
 }
-.mobile-original-preview { min-height: calc(100dvh - 132px); overflow: hidden; border: 1px solid #e0e8e3; border-radius: 14px; background: #fff; }
+.mobile-original-preview { width: 100%; min-width: 0; min-height: calc(100dvh - 132px); overflow: hidden; border: 1px solid #e0e8e3; border-radius: 14px; background: #fff; }
 .mobile-original-preview :deep(.document-preview) { min-height: calc(100dvh - 145px); }
 .mobile-wiki-summary { margin: 0 0 14px; border-left: 3px solid #07c160; color: #405149; font-size: 15px; line-height: 1.8; padding: 13px 15px; }
 

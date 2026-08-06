@@ -430,6 +430,7 @@ function applyHydratedProtectedImage(root: ParentNode, sourceURL: string, blobUR
 export async function hydrateProtectedFileImages(
   root: ParentNode | null | undefined,
   embed?: { channelId: string; token: string },
+  tenantId?: string | number,
 ): Promise<void> {
   if (!root || typeof window === 'undefined') {
     return;
@@ -444,9 +445,17 @@ export async function hydrateProtectedFileImages(
 
   // Embed visitors carry no Bearer/tenant context; route through the
   // embed-scoped file proxy (auth via the Embed header, tenant from the channel).
-  const headers = embed
+  const headers: Record<string, string> = embed
     ? { Authorization: `Embed ${embed.token}` }
     : getProtectedFileRequestHeaders();
+  const explicitTenantId = String(tenantId || '').trim();
+  if (!embed && explicitTenantId) {
+    // Knowledge/chunk routes can resolve a shared or admin-visible document's
+    // effective tenant from its ID. The generic /files proxy cannot, so carry
+    // that already-authorized document tenant explicitly. Auth middleware still
+    // verifies that the caller may access the requested tenant.
+    headers['X-Tenant-ID'] = explicitTenantId;
+  }
 
   await Promise.all(Array.from(images).map(async (img) => {
     const normalizedSourceURL = normalizeProtectedImageElement(img);

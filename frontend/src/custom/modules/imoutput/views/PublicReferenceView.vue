@@ -13,6 +13,7 @@ import {
   wikiPageTypeLabel,
 } from "../publicReference";
 import { renderPublicReferenceMarkdown } from "../publicReferenceMarkdown";
+import { buildMobileReferenceReaderURL, shouldUseMobileReferenceReader } from "../referenceReaderRoute";
 
 const route = useRoute();
 const router = useRouter();
@@ -22,6 +23,12 @@ const reference = ref<PublicReferenceView | null>(null);
 let activeController: AbortController | null = null;
 let referrerMeta: HTMLMetaElement | null = null;
 let previousReferrerContent: string | null = null;
+
+const userAgentData = typeof navigator === "undefined"
+  ? undefined
+  : (navigator as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData;
+const redirectToMobileReader = typeof navigator !== "undefined" &&
+  shouldUseMobileReferenceReader(navigator.userAgent, userAgentData?.mobile === true);
 
 const token = computed(() => publicReferenceToken(route.query));
 const originalMode = computed(() => route.query.view === "original");
@@ -34,9 +41,13 @@ const wikiHtml = computed(() => renderPublicReferenceMarkdown(wiki.value?.conten
 const sourceLocator = computed(() => formatSourceLocator(fragment.value?.source_locator));
 const fileType = computed(() => formatReferenceFileType(documentInfo.value));
 
-watch(token, () => void loadReference(), { immediate: true });
+watch(token, () => void loadReference(), { immediate: !redirectToMobileReader });
 
 onMounted(() => {
+  if (redirectToMobileReader) {
+    window.location.replace(buildMobileReferenceReaderURL(window.location.origin, token.value, String(route.query.view || "")));
+    return;
+  }
   referrerMeta = documentHeadReferrerMeta();
 });
 

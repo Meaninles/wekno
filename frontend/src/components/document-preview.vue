@@ -23,6 +23,10 @@ import {
   evaluatePreviewAdmission,
   unwrapKnowledgePreviewPolicy,
 } from '@/custom/modules/documentPreview/policy';
+import {
+  mountPDFCanvasPreview,
+  type PDFCanvasPreviewSession,
+} from '@/custom/modules/documentPreview/pdfCanvas';
 
 
 const VueOfficePptx = defineAsyncComponent(() => import('@vue-office/pptx'));
@@ -39,12 +43,14 @@ const props = defineProps<{
   chunkCount?: number | string;
   parseStatus?: string;
   blobLoader?: (signal?: AbortSignal) => Promise<Blob>;
+  mobileFit?: boolean;
 }>();
 const emit = defineEmits<{
   (event: 'useChunks'): void;
 }>();
 
 const loading = ref(false);
+const contentRendering = ref(false);
 const error = ref('');
 const previewType = ref<DocumentPreviewType>('unsupported');
 const blobUrl = ref('');
@@ -54,6 +60,7 @@ const markdownHtml = ref('');
 const excelHtml = ref('');
 const pptxData = shallowRef<ArrayBuffer | null>(null);
 const docxContainer = ref<HTMLElement | null>(null);
+const pdfContainer = ref<HTMLElement | null>(null);
 const imageNaturalWidth = ref(0);
 const imageNaturalHeight = ref(0);
 const boundedPreview = ref(false);
@@ -61,6 +68,7 @@ const boundedReason = ref('');
 const textTruncated = ref(false);
 let loadedForId = '';
 let activeController: AbortController | null = null;
+let pdfSession: PDFCanvasPreviewSession | null = null;
 let loadGeneration = 0;
 
 const isFullscreen = ref(false);
@@ -102,8 +110,10 @@ async function renderDocx(blob: Blob) {
     await renderAsync(blob, docxContainer.value, undefined, {
       className: 'docx-preview-wrapper',
       inWrapper: true,
-      ignoreWidth: false,
-      ignoreHeight: false,
+      // Reflow print-sized pages and tables only in the public mobile reader.
+      // Desktop previews retain their print-faithful dimensions.
+      ignoreWidth: props.mobileFit === true,
+      ignoreHeight: props.mobileFit === true,
       ignoreFonts: false,
       breakPages: true,
       ignoreLastRenderedPageBreak: true,
@@ -240,6 +250,7 @@ async function loadPreview() {
   const controller = new AbortController();
   activeController = controller;
   loading.value = true;
+  contentRendering.value = false;
   error.value = '';
   previewType.value = resolveDocumentPreviewType(ft);
 
@@ -284,13 +295,24 @@ async function loadPreview() {
     }
     loadedForId = loadKey;
 
+    // These engines still have an in-browser layout phase after the source
+    // finishes downloading. Keep a loading cover visible until their output
+    // is ready so mobile WebViews never expose a blank document frame.
+    contentRendering.value = ['pdf', 'docx', 'excel', 'text', 'markdown', 'pptx'].includes(previewType.value);
     loading.value = false;
     await nextTick();
     if (generation !== loadGeneration || controller.signal.aborted) return;
 
     switch (previewType.value) {
       case 'pdf': {
-        blobUrl.value = URL.createObjectURL(blob);
+        if (!pdfContainer.value) throw new Error('PDF preview container is unavailable');
+        pdfSession = mountPDFCanvasPreview({
+          blob,
+          container: pdfContainer.value,
+          signal: controller.signal,
+        });
+        await pdfSession.ready;
+        contentRendering.value = false;
         break;
       }
       case 'image': {
@@ -299,6 +321,7 @@ async function loadPreview() {
       }
       case 'docx': {
         await renderDocx(blob);
+        contentRendering.value = false;
         break;
       }
       case 'excel': {
@@ -307,18 +330,21 @@ async function loadPreview() {
           : { blob, truncated: false };
         textTruncated.value = bounded.truncated;
         await renderExcel(bounded.blob, ft);
+        contentRendering.value = false;
         break;
       }
       case 'text': {
         const bounded = boundedTextBlob(blob);
         textTruncated.value = bounded.truncated;
         await renderText(bounded.blob, ft);
+        contentRendering.value = false;
         break;
       }
       case 'markdown': {
         const bounded = boundedTextBlob(blob);
         textTruncated.value = bounded.truncated;
         await renderMarkdown(bounded.blob);
+        contentRendering.value = false;
         break;
       }
       case 'pptx': {
@@ -341,6 +367,7 @@ async function loadPreview() {
       return;
     }
     console.error('Document preview failed:', err);
+    contentRendering.value = false;
     error.value = err?.message || t('preview.loadFailed');
   } finally {
     if (generation === loadGeneration) {
@@ -373,10 +400,22 @@ function cleanup() {
   boundedReason.value = '';
   textTruncated.value = false;
   loading.value = false;
+  contentRendering.value = false;
   loadedForId = '';
   if (docxContainer.value) {
     docxContainer.value.innerHTML = '';
   }
+  pdfSession?.destroy();
+  pdfSession = null;
+}
+
+function onPptxRendered() {
+  contentRendering.value = false;
+}
+
+function onPptxError(reason: any) {
+  contentRendering.value = false;
+  error.value = reason?.message || t('preview.loadFailed');
 }
 
 watch(
@@ -399,23 +438,32 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body" :disabled="!isFullscreen">
-  <div class="document-preview" :class="{ 'is-fullscreen': isFullscreen }">
+  <div
+    class="document-preview"
+    :class="{ 'is-fullscreen': isFullscreen, 'is-mobile-fit': mobileFit }"
+  >
     <!-- Toolbar -->
-    <div class="preview-toolbar" v-if="!loading && !error && !boundedPreview && previewType !== 'unsupported'">
-      <t-space size="small">
-        <t-tooltip :content="isFullscreen ? $t('preview.exitFullscreen') : $t('preview.fullscreen')" placement="bottom">
-          <t-button
-            theme="default"
-            variant="text"
-            shape="square"
-            :aria-label="isFullscreen ? $t('preview.exitFullscreen') : $t('preview.fullscreen')"
-            data-testid="document-preview-fullscreen-toggle"
-            @click="toggleFullscreen"
-          >
-            <template #icon><t-icon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" /></template>
-          </t-button>
-        </t-tooltip>
-      </t-space>
+    <div class="preview-toolbar" v-if="!loading && !contentRendering && !error && !boundedPreview && previewType !== 'unsupported'">
+      <button
+        type="button"
+        class="preview-fullscreen-button"
+        :title="isFullscreen ? $t('preview.exitFullscreen') : $t('preview.fullscreen')"
+        :aria-label="isFullscreen ? $t('preview.exitFullscreen') : $t('preview.fullscreen')"
+        data-testid="document-preview-fullscreen-toggle"
+        @click="toggleFullscreen"
+      >
+        <svg v-if="isFullscreen" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
+        </svg>
+      </button>
+    </div>
+
+    <div v-if="contentRendering" class="preview-rendering-overlay" data-testid="document-preview-rendering">
+      <t-loading size="medium" />
+      <span class="loading-text">{{ $t('preview.loading') }}</span>
     </div>
 
     <!-- Loading -->
@@ -451,8 +499,8 @@ onUnmounted(() => {
     </div>
 
     <!-- PDF -->
-    <div v-else-if="previewType === 'pdf' && blobUrl" class="preview-pdf">
-      <iframe :src="blobUrl" class="pdf-iframe" />
+    <div v-else-if="previewType === 'pdf'" class="preview-pdf">
+      <div ref="pdfContainer" class="pdf-page-list" />
     </div>
 
     <!-- Image -->
@@ -472,7 +520,7 @@ onUnmounted(() => {
 
     <!-- PPTX -->
     <div v-else-if="previewType === 'pptx' && pptxData" class="preview-pptx">
-      <vue-office-pptx :src="pptxData" @rendered="() => {}" @error="(e: any) => { error = e?.message || $t('preview.loadFailed'); }" />
+      <vue-office-pptx :src="pptxData" @rendered="onPptxRendered" @error="onPptxError" />
     </div>
 
     <!-- Excel -->
@@ -545,6 +593,22 @@ onUnmounted(() => {
 .document-preview {
   min-height: 200px;
   position: relative;
+}
+
+.preview-rendering-overlay {
+  position: absolute;
+  z-index: 9;
+  inset: 0;
+  display: flex;
+  min-height: 200px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: @border-radius;
+  background: rgb(255 255 255 / 88%);
+  color: @text-tertiary;
+  backdrop-filter: blur(2px);
 }
 
 .is-fullscreen {
@@ -651,7 +715,15 @@ onUnmounted(() => {
   padding: 60px 20px;
   gap: 12px;
   color: @error-color;
-  p { margin: 0; font-size: 14px; color: @text-secondary; }
+  p {
+    max-width: 100%;
+    margin: 0;
+    color: @text-secondary;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+    text-align: center;
+    word-break: break-word;
+  }
 }
 
 .preview-bounded {
@@ -684,6 +756,126 @@ onUnmounted(() => {
   }
 }
 
+.preview-fullscreen-button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: @text-primary;
+  cursor: pointer;
+  padding: 0;
+
+  &:hover { background: @bg-muted; }
+  &:focus-visible { outline: 2px solid @accent; outline-offset: 1px; }
+
+  svg {
+    width: 21px;
+    height: 21px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.9;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+}
+
+.is-mobile-fit {
+  width: 100%;
+  min-width: 0;
+
+  .preview-toolbar {
+    top: 8px;
+    right: 8px;
+    opacity: 1;
+  }
+
+  &:not(.is-fullscreen) .preview-toolbar {
+    position: relative;
+    top: auto;
+    right: auto;
+    width: max-content;
+    margin: 8px 8px 8px auto;
+  }
+
+  .preview-pdf,
+  .preview-pptx {
+    min-height: min(68dvh, 620px);
+    max-width: 100%;
+  }
+
+  .preview-docx .docx-container,
+  .preview-excel .excel-container,
+  .preview-markdown,
+  .preview-text .code-preview {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  :deep(.docx-preview-wrapper-wrapper) {
+    width: 100%;
+    max-width: 100%;
+    align-items: stretch;
+    overflow-x: hidden;
+    background: #eef1ef;
+    padding: 12px;
+  }
+
+  :deep(.docx-preview-wrapper-wrapper > section.docx-preview-wrapper) {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: 0 !important;
+    margin: 0 0 12px !important;
+    overflow: hidden;
+    padding: 22px 16px !important;
+  }
+
+  :deep(.docx-preview-wrapper-wrapper > section.docx-preview-wrapper:last-child) {
+    margin-bottom: 0 !important;
+  }
+
+  :deep(.docx-preview-wrapper-wrapper article),
+  :deep(.docx-preview-wrapper-wrapper p),
+  :deep(.docx-preview-wrapper-wrapper span),
+  :deep(.docx-preview-wrapper-wrapper table),
+  :deep(.docx-preview-wrapper-wrapper td),
+  :deep(.docx-preview-wrapper-wrapper th) {
+    max-width: 100% !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  :deep(.docx-preview-wrapper-wrapper table) {
+    width: 100% !important;
+    table-layout: fixed;
+  }
+
+  :deep(.docx-preview-wrapper-wrapper col) {
+    width: auto !important;
+  }
+
+  :deep(.vue-office-pptx),
+  :deep(.vue-office-pptx-main),
+  :deep(.pptx-preview-wrapper) {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+}
+
+.is-mobile-fit.is-fullscreen {
+  width: 100%;
+  padding: max(8px, env(safe-area-inset-top)) 0 max(8px, env(safe-area-inset-bottom));
+
+  .preview-toolbar {
+    top: max(10px, env(safe-area-inset-top));
+    right: 10px;
+  }
+
+  :deep(.docx-preview-wrapper-wrapper) { padding-top: 54px; }
+}
+
 .preview-truncated {
   position: sticky;
   top: 0;
@@ -712,11 +904,65 @@ onUnmounted(() => {
   width: 100%;
   height: @preview-max-h;
   min-height: 500px;
-  .pdf-iframe {
+  overflow: auto;
+  border: 1px solid @border-color;
+  border-radius: @border-radius;
+  background: #d9dddb;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+
+  .pdf-page-list {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+  }
+
+  :deep(.pdf-page-slot) {
+    position: relative;
+    display: grid;
     width: 100%;
-    height: 100%;
-    border: none;
-    border-radius: @border-radius;
+    place-items: center;
+    overflow: hidden;
+    background: #fff;
+    box-shadow: 0 1px 5px rgb(28 45 36 / 18%);
+  }
+
+  :deep(.pdf-page-canvas) {
+    display: block;
+    max-width: 100%;
+    height: auto !important;
+    background: #fff;
+  }
+
+  :deep(.pdf-page-status) {
+    position: absolute;
+    z-index: 1;
+    top: 10px;
+    right: 10px;
+    border-radius: 5px;
+    background: rgb(32 46 39 / 72%);
+    color: #fff;
+    font-size: 11px;
+    padding: 4px 7px;
+  }
+
+  :deep(.pdf-page-slot.is-rendered .pdf-page-status) {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s;
+  }
+
+  :deep(.pdf-page-slot.has-error .pdf-page-status) {
+    top: 50%;
+    right: auto;
+    max-width: calc(100% - 32px);
+    background: #a3483b;
+    opacity: 1;
+    transform: translateY(-50%);
+    text-align: center;
   }
 }
 

@@ -13,8 +13,12 @@ const fileTypeMap: Record<string, DocumentPreviewType> = {};
 
 ['pdf'].forEach((t) => { fileTypeMap[t] = 'pdf'; });
 ['docx'].forEach((t) => { fileTypeMap[t] = 'docx'; });
-['pptx', 'ppt'].forEach((t) => { fileTypeMap[t] = 'pptx'; });
-['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'svg'].forEach((t) => { fileTypeMap[t] = 'image'; });
+// The browser renderer only accepts OOXML presentations. Legacy binary PPT
+// files are not ZIP packages and otherwise surface a raw JSZip failure.
+['pptx'].forEach((t) => { fileTypeMap[t] = 'pptx'; });
+// Chromium and WeCom WebViews cannot decode TIFF through an <img>. Keep TIFF
+// downloadable, but report it as unsupported instead of showing a broken image.
+['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].forEach((t) => { fileTypeMap[t] = 'image'; });
 ['xlsx', 'xls', 'csv'].forEach((t) => { fileTypeMap[t] = 'excel'; });
 ['md', 'markdown'].forEach((t) => { fileTypeMap[t] = 'markdown'; });
 [

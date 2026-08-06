@@ -16,10 +16,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ReferenceRedirectPath is the single device-neutral capability URL emitted
-// into IM messages. It is registered before the normal Web authentication
-// middleware and is never used by ordinary Web-chat citations.
+// ReferenceRedirectPath is the backward-compatible device-neutral capability
+// URL used by IM messages delivered before the direct-reader rollout. It is
+// registered before normal Web authentication and remains durable.
 const ReferenceRedirectPath = "/api/v1/custom/im-output/reference"
+
+// ReferenceReaderPath is the same-origin SPA entry emitted into new IM
+// messages. Opening the final reader path directly avoids client-dependent
+// handling of an initial HTTP 302 inside WeCom. The legacy redirect endpoint
+// remains registered so citations already delivered to users keep working.
+const ReferenceReaderPath = "/im-reference"
 
 const (
 	ReferenceDataPath     = ReferenceRedirectPath + "/data"
@@ -54,7 +60,7 @@ func (h *ReferenceHandler) Redirect(c *gin.Context) {
 		return
 	}
 	query := url.Values{"token": []string{token}}
-	destination := "/im-reference?" + query.Encode()
+	destination := ReferenceReaderPath + "?" + query.Encode()
 	if isMobileReferenceRequest(c.Request) {
 		destination = "/mobile/reference?" + query.Encode()
 	}

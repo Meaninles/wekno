@@ -39,9 +39,10 @@ func TestRenderMixedReferencesUsesAnswerOccurrenceOrder(t *testing.T) {
 	if documentCapability.KnowledgeBaseID != "kb-1" || documentCapability.KnowledgeID != "doc-1" || documentCapability.ChunkID != "chunk-1" {
 		t.Fatalf("document capability lost exact chunk: %#v", documentCapability)
 	}
-	if !strings.Contains(result.References[1].Target, ReferenceRedirectPath) ||
-		!strings.Contains(result.References[2].Target, ReferenceRedirectPath) {
-		t.Fatalf("internal references must use the device-neutral IM entry: %#v", result.References)
+	if !strings.Contains(result.References[1].Target, ReferenceReaderPath) ||
+		!strings.Contains(result.References[2].Target, ReferenceReaderPath) ||
+		strings.Contains(result.References[1].Target, ReferenceRedirectPath) {
+		t.Fatalf("internal references must open the same-origin reader directly: %#v", result.References)
 	}
 	if strings.Contains(result.Content, "参考来源") {
 		t.Fatalf("IM output must not append a bottom reference list: %s", result.Content)
@@ -70,7 +71,7 @@ func TestRenderDoesNotEmitRelativeDocumentLinks(t *testing.T) {
 	options := testRenderOptions("wecom", false)
 	options.FrontendBaseURL = ""
 	result := Render("甲。<src id=\"S1\" />", refs, options)
-	if len(result.References) != 0 || strings.Contains(result.Content, ReferenceRedirectPath) {
+	if len(result.References) != 0 || strings.Contains(result.Content, ReferenceReaderPath) {
 		t.Fatalf("relative IM target leaked: %#v content=%s", result.References, result.Content)
 	}
 }

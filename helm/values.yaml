@@ -499,6 +499,12 @@ frontend:
   # -- Number of replicas
   replicaCount: 1
 
+  # -- Rolling update policy. Production with required pod anti-affinity may
+  # need maxSurge=0/maxUnavailable=1 when replicas equal eligible nodes.
+  strategy:
+    maxSurge: 1
+    maxUnavailable: 0
+
   maxFileSizeMB: "50"
   maxKnowledgeSourceFileSizeMB: "2048"
   # Reverse-proxy body ceilings include multipart/Base64 overhead; the UI and
@@ -712,7 +718,7 @@ docreader:
     STORAGE_TYPE: local
 
   # -- Extra parser environment variables, for example
-  # DOCREADER_GRPC_MAX_WORKERS and PDF_PROCESS_CONCURRENCY.
+  # DOCREADER_GRPC_MAX_WORKERS and DOCREADER_REQUEST_TIMEOUT_SECONDS.
   extraEnv: []
 
   # -- Bounded per-pod conversion workspace. Large PDF/Office workloads must

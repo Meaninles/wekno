@@ -21,7 +21,9 @@ COPY --from=build /app/dist-mobile /usr/share/nginx/html/mobile
 COPY nginx.mobile.conf /etc/nginx/templates/default.conf.template
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 
-RUN chmod +x /docker-entrypoint.sh
+RUN sed -i '/application\/javascript/ s/js;/js mjs;/' /etc/nginx/mime.types \
+    && grep -Eq 'application/javascript[[:space:]]+js mjs;' /etc/nginx/mime.types \
+    && chmod +x /docker-entrypoint.sh
 
 ENV MAX_FILE_SIZE_MB=50
 ENV PROXY_MAX_BODY_SIZE_MB=80

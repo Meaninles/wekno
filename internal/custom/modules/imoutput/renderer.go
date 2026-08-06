@@ -149,7 +149,7 @@ func ReferenceTarget(
 			return "", false
 		}
 		query := url.Values{"token": []string{token}}
-		path := ReferenceRedirectPath + "?" + query.Encode()
+		path := ReferenceReaderPath + "?" + query.Encode()
 		return joinFrontendURL(frontendBaseURL, path)
 	case sourcerefs.SourceTypeWiki:
 		if strings.TrimSpace(source.KnowledgeBaseID) == "" || strings.TrimSpace(source.Slug) == "" {
@@ -160,7 +160,7 @@ func ReferenceTarget(
 			return "", false
 		}
 		query := url.Values{"token": []string{token}}
-		path := ReferenceRedirectPath + "?" + query.Encode()
+		path := ReferenceReaderPath + "?" + query.Encode()
 		return joinFrontendURL(frontendBaseURL, path)
 	case sourcerefs.SourceTypeWeb:
 		parsed, err := url.Parse(strings.TrimSpace(source.URL))

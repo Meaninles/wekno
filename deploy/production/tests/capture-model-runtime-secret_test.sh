@@ -13,6 +13,27 @@ export FAKE_KUBE_STATE="${fixture_directory}/state"
 mkdir -p "${FAKE_KUBE_STATE}"
 export PATH="${fixture_directory}:${PATH}"
 
+# Git Bash/WSL on Windows exposes the WinGet binary as jq.exe, while the
+# production script intentionally checks for the Linux command name `jq`.
+# Provide a test-only shim so the same fixture runs on both workstations and
+# Linux release hosts.
+if ! command -v jq >/dev/null 2>&1 && command -v jq.exe >/dev/null 2>&1; then
+  cat >"${fixture_directory}/jq" <<'JQ_SHIM'
+#!/usr/bin/env bash
+arguments=()
+for argument in "$@"; do
+  if [[ "${argument}" == /* && -e "${argument}" ]]; then
+    arguments+=("$(wslpath -w "${argument}")")
+  else
+    arguments+=("${argument}")
+  fi
+done
+set -o pipefail
+jq.exe "${arguments[@]}" | tr -d '\r'
+JQ_SHIM
+  chmod +x "${fixture_directory}/jq"
+fi
+
 model_api_key="test-sensitive-model-key"
 printf '%s' "${model_api_key}" | base64 >"${FAKE_KUBE_STATE}/legacy-key.b64"
 

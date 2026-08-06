@@ -222,12 +222,13 @@ func (e *AgentEngine) executeToolCallsParallel(
 
 	// Append results and emit events in original order
 	for _, toolCall := range results {
-		step.ToolCalls = append(step.ToolCalls, toolCall)
-
 		result := toolCall.Result
 		if result == nil {
 			result = &types.ToolResult{Success: false, Error: "no result"}
+			toolCall.Result = result
 		}
+		e.exposeToolResultReferences(ctx, sessionID, toolCall.Name, result)
+		step.ToolCalls = append(step.ToolCalls, toolCall)
 
 		e.eventBus.Emit(ctx, event.Event{
 			ID:        toolCall.ID + "-tool-result",
@@ -274,7 +275,10 @@ func (e *AgentEngine) executeSingleToolCall(
 	result := toolCall.Result
 	if result == nil {
 		result = &types.ToolResult{Success: false, Error: "no result"}
+		toolCall.Result = result
 	}
+	e.exposeToolResultReferences(ctx, sessionID, toolCall.Name, result)
+	step.ToolCalls[len(step.ToolCalls)-1] = toolCall
 
 	e.eventBus.Emit(ctx, event.Event{
 		ID:        toolCall.ID + "-tool-result",

@@ -63,6 +63,30 @@ func TestSplitWeComMarkdownUsesUTF8ByteLimit(t *testing.T) {
 	}
 }
 
+func TestSplitWeComMarkdownDoesNotBreakCitationLinks(t *testing.T) {
+	link := `[[1](https://knora.example.com/platform/knowledge-bases/kb-1?chunk_id=chunk-1&knowledge_id=doc-1)]`
+	content := strings.Repeat("甲", 655) + "结论" + link + "。后续正文继续说明审批要求。"
+	chunks := SplitApplicationMarkdown(content)
+	if len(chunks) < 2 {
+		t.Fatalf("SplitApplicationMarkdown() returned %d chunk, want multiple", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if len(chunk) > wecomMarkdownMaxBytes {
+			t.Fatalf("chunk %d is %d bytes, limit is %d", i+1, len(chunk), wecomMarkdownMaxBytes)
+		}
+		if strings.Count(chunk, "[") != strings.Count(chunk, "]") || strings.Count(chunk, "](") != strings.Count(chunk, ")") {
+			t.Fatalf("chunk %d contains a split Markdown link: %q", i+1, chunk)
+		}
+	}
+	var reconstructed strings.Builder
+	for i, chunk := range chunks {
+		reconstructed.WriteString(strings.TrimPrefix(chunk, wecomMarkdownPartPrefix(i+1, len(chunks))))
+	}
+	if reconstructed.String() != content {
+		t.Fatal("citation-safe chunks do not reconstruct the original content")
+	}
+}
+
 func TestWebhookSendReplySplitsLongMarkdown(t *testing.T) {
 	var (
 		mu       sync.Mutex

@@ -1,11 +1,12 @@
 package sourcerefs
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -18,13 +19,54 @@ const (
 	SourceTypeData      = "data_source"
 )
 
-var wikiLinkRE = regexp.MustCompile(`\[\[([^\]|\n]+)\|([^\]\n]+)\]\]`)
+// IsSupportedCitationReference is the single inline-citation boundary. The
+// product exposes exactly document fragments, Wiki pages, and web pages;
+// structured data is reported only through retrieval statistics.
+func IsSupportedCitationReference(ref *types.SearchResult) bool {
+	if ref == nil {
+		return false
+	}
+	switch SourceTypeFromRef(ref) {
+	case SourceTypeKnowledge:
+		return (ref.ChunkType == string(types.ChunkTypeText) ||
+			ref.ChunkType == string(types.ChunkTypeFAQ)) &&
+			strings.TrimSpace(firstNonEmpty(ref.KnowledgeBaseID, ref.Metadata["knowledge_base_id"])) != "" &&
+			strings.TrimSpace(firstNonEmpty(ref.KnowledgeID, ref.Metadata["knowledge_id"])) != "" &&
+			knowledgeChunkID(ref) != ""
+	case SourceTypeWiki:
+		return strings.TrimSpace(ref.KnowledgeBaseID) != "" && strings.TrimSpace(ref.Metadata["slug"]) != ""
+	case SourceTypeWeb:
+		rawURL := firstNonEmpty(ref.Metadata["url"], ref.ID)
+		parsed, err := url.Parse(rawURL)
+		scheme := strings.ToLower(parsed.Scheme)
+		return err == nil && parsed.Host != "" && (scheme == "http" || scheme == "https")
+	default:
+		return false
+	}
+}
+
+var (
+	wikiLinkRE    = regexp.MustCompile(`\[\[([^\]|\n]+)\|([^\]\n]+)\]\]`)
+	wikiPageRE    = regexp.MustCompile(`(?s)<wiki_page>.*?</wiki_page>`)
+	wikiKBRE      = regexp.MustCompile(`(?s)<knowledge_base_id>\s*([^<]+?)\s*</knowledge_base_id>`)
+	wikiSummaryRE = regexp.MustCompile(`(?s)<summary>\s*(.*?)\s*</summary>`)
+	wikiContentRE = regexp.MustCompile(`(?s)<content>\s*(.*?)\s*</content>`)
+)
 
 // ExtractFromToolResult normalizes custom agent tool outputs into the existing
 // SearchResult reference shape so the current SSE and message storage pipeline
 // can persist and replay them without a schema migration.
 func ExtractFromToolResult(toolName string, result *types.ToolResult) []*types.SearchResult {
-	if result == nil || !result.Success || result.Data == nil {
+	if result == nil {
+		return nil
+	}
+	if len(result.SourceReferences) > 0 {
+		// An executing tool can expose an internal exact snapshot without
+		// inflating its model/UI payload. This path is authoritative; combining
+		// it with display-oriented snippets would recreate ambiguous references.
+		return uniqueReferences(result.SourceReferences)
+	}
+	if result.Data == nil {
 		return nil
 	}
 
@@ -34,15 +76,17 @@ func ExtractFromToolResult(toolName string, result *types.ToolResult) []*types.S
 
 	switch {
 	case displayType == "web_search_results" || displayType == "web_fetch_results" || name == "web_search" || name == "web_fetch":
-		refs = append(refs, extractWebReferences(result.Data)...)
-	case name == "wiki_search" || name == "wiki_read_page" || strings.HasPrefix(name, "wiki_"):
-		refs = append(refs, extractWikiReferences(result.Data, result.Output)...)
-	case displayType == "db_catalog" || displayType == "db_schema" || displayType == "structured_analysis_result" ||
-		name == "db_catalog" || name == "db_schema" || name == "db_query":
-		refs = append(refs, extractDataSourceReferences(result.Data)...)
+		isFetch := displayType == "web_fetch_results" || name == "web_fetch"
+		refs = append(refs, extractWebReferences(result.Data, isFetch)...)
+	case name == "wiki_read_page":
+		refs = append(refs, extractWikiReferences(result.Output)...)
+	case displayType == "structured_analysis_result" && result.Success:
+		if ref := extractStructuredAnalysisReference(result.Data, result.Output); ref != nil {
+			refs = append(refs, ref)
+		}
 	case displayType == "search_results" || displayType == "grep_results" || displayType == "knowledge_chunks_list" ||
-		displayType == "document_info" || name == "knowledge_search" || name == "search_knowledge" ||
-		name == "grep_chunks" || name == "list_knowledge_chunks" || name == "get_document_info":
+		name == "knowledge_search" || name == "search_knowledge" ||
+		name == "grep_chunks" || name == "list_knowledge_chunks":
 		refs = append(refs, extractKnowledgeReferences(result.Data)...)
 	}
 
@@ -50,30 +94,7 @@ func ExtractFromToolResult(toolName string, result *types.ToolResult) []*types.S
 }
 
 func ReferenceKey(ref *types.SearchResult) string {
-	if ref == nil {
-		return ""
-	}
-	sourceType := sourceTypeFromRef(ref)
-	id := strings.TrimSpace(ref.ID)
-	if id == "" {
-		id = strings.TrimSpace(ref.KnowledgeID)
-	}
-	if id == "" {
-		id = strings.TrimSpace(ref.KnowledgeTitle)
-	}
-	if sourceType == SourceTypeWiki {
-		id = strings.TrimSpace(ref.Metadata["slug"]) + ":" + strings.TrimSpace(ref.KnowledgeBaseID)
-	}
-	if sourceType == SourceTypeWeb {
-		id = firstNonEmpty(ref.Metadata["url"], ref.ID, ref.KnowledgeTitle)
-	}
-	if sourceType == SourceTypeData {
-		id = firstNonEmpty(ref.Metadata["source_id"], ref.ID, ref.KnowledgeTitle)
-	}
-	if id == "" {
-		return ""
-	}
-	return sourceType + ":" + strings.ToLower(id)
+	return CitationKey(ref)
 }
 
 func sourceTypeFromRef(ref *types.SearchResult) string {
@@ -103,32 +124,35 @@ func extractKnowledgeReferences(data map[string]interface{}) []*types.SearchResu
 
 	switch displayType {
 	case "search_results":
-		for _, item := range mapSlice(data["results"]) {
-			refs = append(refs, knowledgeRefFromMap(item, data))
+		for index, item := range mapSlice(data["results"]) {
+			ref := knowledgeRefFromMap(item, data)
+			setToolResultPosition(ref, item, index+1)
+			refs = append(refs, ref)
 		}
 	case "grep_results":
 		chunks := mapSlice(data["chunk_results"])
 		if len(chunks) > 0 {
-			for _, item := range chunks {
-				refs = append(refs, knowledgeRefFromMap(item, data))
+			for index, item := range chunks {
+				ref := knowledgeRefFromMap(item, data)
+				setToolResultPosition(ref, item, index+1)
+				refs = append(refs, ref)
 			}
 			break
 		}
-		for _, item := range mapSlice(data["knowledge_results"]) {
-			refs = append(refs, knowledgeRefFromMap(item, data))
-		}
+		// knowledge_results are document/catalog hits, not claim-bearing
+		// fragments. A follow-up chunk read/search is required before citation.
 	case "knowledge_chunks_list":
 		chunks := mapSlice(data["chunks"])
 		if len(chunks) == 0 {
-			refs = append(refs, knowledgeRefFromMap(data, data))
+			ref := knowledgeRefFromMap(data, data)
+			setToolResultPosition(ref, data, 1)
+			refs = append(refs, ref)
 			break
 		}
-		for _, item := range chunks {
-			refs = append(refs, knowledgeRefFromMap(item, data))
-		}
-	case "document_info":
-		for _, item := range mapSlice(data["documents"]) {
-			refs = append(refs, knowledgeRefFromMap(item, data))
+		for index, item := range chunks {
+			ref := knowledgeRefFromMap(item, data)
+			setToolResultPosition(ref, item, index+1)
+			refs = append(refs, ref)
 		}
 	}
 
@@ -157,7 +181,7 @@ func knowledgeRefFromMap(item map[string]interface{}, parent map[string]interfac
 		stringValue(item["description"]),
 		stringValue(item["faq_question"]),
 	)
-	if id == "" && knowledgeID == "" && title == "" {
+	if id == "" || content == "" {
 		return nil
 	}
 	chunkType := firstNonEmpty(stringValue(item["chunk_type"]), "text")
@@ -168,7 +192,7 @@ func knowledgeRefFromMap(item map[string]interface{}, parent map[string]interfac
 	metadata := map[string]string{
 		"source_type": SourceTypeKnowledge,
 	}
-	copySelectedMetadata(metadata, item, "source_query", "query_type", "knowledge_base_type", "file_name", "file_type", "chunk_count")
+	copySelectedMetadata(metadata, item, "source_query", "query_type", "knowledge_base_type", "knowledge_base_name", "file_name", "file_type", "chunk_count")
 	return &types.SearchResult{
 		ID:                id,
 		Content:           content,
@@ -177,10 +201,25 @@ func knowledgeRefFromMap(item map[string]interface{}, parent map[string]interfac
 		KnowledgeBaseID:   firstNonEmpty(stringValue(item["knowledge_base_id"]), stringValue(parent["knowledge_base_id"])),
 		KnowledgeFilename: firstNonEmpty(stringValue(item["knowledge_filename"]), stringValue(item["file_name"])),
 		ChunkIndex:        intValue(firstNonEmptyValue(item["chunk_index"], item["index"])),
+		StartAt:           intValue(item["start_at"]),
+		EndAt:             intValue(item["end_at"]),
 		Score:             floatValue(item["score"]),
 		ChunkType:         chunkType,
 		Metadata:          metadata,
 		SourceLocator:     jsonValue(item["source_locator"]),
+	}
+}
+
+func setToolResultPosition(ref *types.SearchResult, item map[string]interface{}, fallback int) {
+	if ref == nil {
+		return
+	}
+	position := intValue(firstNonEmptyValue(item["result_index"], item["seq"], item["rank"]))
+	if position <= 0 {
+		position = fallback
+	}
+	if position > 0 {
+		ref.Metadata["tool_result_position"] = fmt.Sprintf("%d", position)
 	}
 }
 
@@ -214,20 +253,31 @@ func jsonValue(value interface{}) types.JSON {
 	return nil
 }
 
-func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
+func extractWebReferences(data map[string]interface{}, isFetch bool) []*types.SearchResult {
 	var refs []*types.SearchResult
-	for _, item := range mapSlice(data["results"]) {
+	for index, item := range mapSlice(data["results"]) {
 		rawURL := stringValue(item["url"])
 		title := firstNonEmpty(stringValue(item["title"]), hostFromURL(rawURL), rawURL)
-		content := firstNonEmpty(stringValue(item["snippet"]), stringValue(item["summary"]), stringValue(item["content"]))
-		if rawURL == "" && title == "" {
+		content := firstNonEmpty(
+			stringValue(item["raw_content"]),
+			stringValue(item["content"]),
+			stringValue(item["snippet"]),
+			stringValue(item["summary"]),
+		)
+		if rawURL == "" || content == "" {
 			continue
 		}
 		metadata := map[string]string{
-			"source_type": SourceTypeWeb,
-			"url":         rawURL,
+			"source_type":         SourceTypeWeb,
+			"url":                 rawURL,
+			MetadataEvidenceLevel: webEvidenceLevel(item, isFetch),
 		}
 		copySelectedMetadata(metadata, item, "source", "published_at", "prompt", "method")
+		position := intValue(firstNonEmptyValue(item["result_index"], item["rank"]))
+		if position <= 0 {
+			position = index + 1
+		}
+		metadata["tool_result_position"] = fmt.Sprintf("%d", position)
 		refs = append(refs, &types.SearchResult{
 			ID:             firstNonEmpty(rawURL, title),
 			Content:        content,
@@ -239,92 +289,144 @@ func extractWebReferences(data map[string]interface{}) []*types.SearchResult {
 	return refs
 }
 
-func extractWikiReferences(data map[string]interface{}, output string) []*types.SearchResult {
-	foundKBs, ok := data["found_kbs"].(map[string]interface{})
-	if !ok {
-		if typed, typedOK := data["found_kbs"].(map[string][]string); typedOK {
-			foundKBs = make(map[string]interface{}, len(typed))
-			for slug, kbIDs := range typed {
-				foundKBs[slug] = kbIDs
-			}
+func webEvidenceLevel(item map[string]interface{}, isFetch bool) string {
+	if strings.TrimSpace(stringValue(item["raw_content"])) != "" {
+		return "full_page"
+	}
+	if isFetch {
+		if strings.TrimSpace(stringValue(item["content"])) != "" {
+			return "fetched_content"
 		}
+		return "fetched_summary"
 	}
-	if len(foundKBs) == 0 {
-		return nil
+	if strings.TrimSpace(stringValue(item["content"])) != "" {
+		return "result_content"
 	}
+	return "search_snippet"
+}
 
-	titleBySlug := wikiTitlesBySlug(output)
-	slugs := make([]string, 0, len(foundKBs))
-	for slug := range foundKBs {
-		slugs = append(slugs, slug)
-	}
-	sort.Strings(slugs)
-
+func extractWikiReferences(output string) []*types.SearchResult {
 	var refs []*types.SearchResult
-	for _, slug := range slugs {
-		kbIDs := stringSlice(foundKBs[slug])
-		if len(kbIDs) == 0 {
-			kbIDs = []string{""}
+	for _, block := range wikiPageRE.FindAllString(output, -1) {
+		link := wikiLinkRE.FindStringSubmatch(block)
+		if len(link) < 3 {
+			continue
 		}
-		title := firstNonEmpty(titleBySlug[slug], slug)
-		for _, kbID := range kbIDs {
-			metadata := map[string]string{
-				"source_type": SourceTypeWiki,
-				"slug":        slug,
-			}
-			if kbID != "" {
-				metadata["knowledge_base_id"] = kbID
-			}
-			refs = append(refs, &types.SearchResult{
-				ID:              "wiki:" + kbID + ":" + slug,
-				Content:         title,
-				KnowledgeTitle:  title,
-				KnowledgeBaseID: kbID,
-				ChunkType:       "wiki_page",
-				Metadata:        metadata,
-			})
+		slug := strings.TrimSpace(link[1])
+		title := strings.TrimSpace(link[2])
+		kbID := firstSubmatch(wikiKBRE, block)
+		summary := firstSubmatch(wikiSummaryRE, block)
+		content := firstSubmatch(wikiContentRE, block)
+		if slug == "" || kbID == "" || strings.TrimSpace(summary+content) == "" {
+			continue
 		}
+		refs = append(refs, &types.SearchResult{
+			ID:              "wiki:" + kbID + ":" + slug,
+			Content:         strings.TrimSpace(summary + "\n\n" + content),
+			KnowledgeTitle:  firstNonEmpty(title, slug),
+			KnowledgeBaseID: kbID,
+			ChunkType:       "wiki_page",
+			Metadata: map[string]string{
+				"source_type":       SourceTypeWiki,
+				"slug":              slug,
+				"knowledge_base_id": kbID,
+			},
+		})
 	}
 	return refs
 }
 
-func extractDataSourceReferences(data map[string]interface{}) []*types.SearchResult {
-	sources := mapSlice(data["sources"])
-	if len(sources) == 0 {
-		if source, ok := data["source"].(map[string]interface{}); ok {
-			sources = []map[string]interface{}{source}
+func extractStructuredAnalysisReference(data map[string]interface{}, output string) *types.SearchResult {
+	query := stringValue(data["query"])
+	rows := data["rows"]
+	if query == "" || sliceLength(rows) == 0 {
+		return nil
+	}
+	snapshot := map[string]interface{}{
+		"query":   query,
+		"columns": data["columns"],
+		"rows":    rows,
+		"limits":  data["limits"],
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil
+	}
+	content := string(raw)
+	if summary := strings.TrimSpace(output); summary != "" {
+		content = summary + "\n\n" + content
+	}
+	sum := sha256.Sum256(raw)
+	evidenceID := fmt.Sprintf("query-%x", sum[:16])
+	analysisType := firstNonEmpty(stringValue(data["analysis_type"]), "table")
+	knowledgeID := ""
+	title := "查询结果"
+	dataSourceKeys := make([]string, 0)
+	dataSourceCount := 0
+	if source, ok := data["source"].(map[string]interface{}); ok {
+		knowledgeID = stringValue(source["knowledge_id"])
+		title = firstNonEmpty(stringValue(source["table_name"]), title)
+		if knowledgeID != "" {
+			dataSourceKeys = append(dataSourceKeys, knowledgeID)
+		}
+		for _, name := range stringSlice(source["source_names"]) {
+			if name = strings.TrimSpace(name); name != "" {
+				dataSourceKeys = append(dataSourceKeys, name)
+			}
+		}
+		dataSourceCount = intValue(source["source_count"])
+	}
+	dataSourceKeys = uniqueStrings(dataSourceKeys)
+	if dataSourceCount < len(dataSourceKeys) {
+		dataSourceCount = len(dataSourceKeys)
+	}
+	metadata := map[string]string{
+		"source_type":     SourceTypeData,
+		"evidence_origin": analysisType + "_query",
+		"query":           query,
+		MetadataChunkID:   evidenceID,
+	}
+	if len(dataSourceKeys) > 0 {
+		if encoded, err := json.Marshal(dataSourceKeys); err == nil {
+			metadata["data_source_keys"] = string(encoded)
 		}
 	}
+	if dataSourceCount > 0 {
+		metadata["data_source_count"] = fmt.Sprintf("%d", dataSourceCount)
+	}
+	return &types.SearchResult{
+		ID:             evidenceID,
+		Content:        content,
+		KnowledgeID:    knowledgeID,
+		KnowledgeTitle: title,
+		ChunkType:      "data_query_result",
+		Metadata:       metadata,
+	}
+}
 
-	var refs []*types.SearchResult
-	for _, item := range sources {
-		sourceID := stringValue(item["id"])
-		name := firstNonEmpty(stringValue(item["name"]), sourceID)
-		if sourceID == "" && name == "" {
+func uniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
 			continue
 		}
-		metadata := map[string]string{
-			"source_type": SourceTypeData,
+		if _, ok := seen[value]; ok {
+			continue
 		}
-		copySelectedMetadata(metadata, item, "id", "name", "type", "description")
-		if sourceID != "" {
-			metadata["source_id"] = sourceID
-		}
-		if name != "" {
-			metadata["source_name"] = name
-		}
-		if dbType := stringValue(item["type"]); dbType != "" {
-			metadata["database_type"] = dbType
-		}
-		refs = append(refs, &types.SearchResult{
-			ID:             "data_source:" + firstNonEmpty(sourceID, name),
-			Content:        stringValue(item["description"]),
-			KnowledgeTitle: name,
-			ChunkType:      "data_source",
-			Metadata:       metadata,
-		})
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
-	return refs
+	return out
+}
+
+func firstSubmatch(re *regexp.Regexp, value string) string {
+	match := re.FindStringSubmatch(value)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
 }
 
 func wikiTitlesBySlug(output string) map[string]string {
@@ -382,6 +484,17 @@ func mapSlice(value interface{}) []map[string]interface{} {
 		}
 		return out
 	}
+}
+
+func sliceLength(value interface{}) int {
+	if value == nil {
+		return 0
+	}
+	v := reflect.ValueOf(value)
+	if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
+		return 0
+	}
+	return v.Len()
 }
 
 func stringSlice(value interface{}) []string {

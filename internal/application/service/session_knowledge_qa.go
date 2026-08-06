@@ -10,6 +10,7 @@ import (
 	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -127,17 +128,15 @@ func (s *sessionService) KnowledgeQA(
 	// Get UserID from context
 	userID, _ := types.UserIDFromContext(ctx)
 	quotedContext := strings.TrimSpace(req.QuotedContext)
-	if skillContext := selectedSkillContext(ctx, req.SkillNames); skillContext != "" {
-		if quotedContext != "" {
-			quotedContext += "\n\n"
-		}
-		quotedContext += skillContext
-		logger.Infof(ctx, "Injected selected skill context for %d skill(s)", len(req.SkillNames))
+	lightweightSkillContext := LightweightSkillContext(ctx, "none", nil, req.SkillNames)
+	if lightweightSkillContext != "" {
+		logger.Infof(ctx, "Added selected lightweight Skill system context for %d skill(s)", len(req.SkillNames))
 	}
 
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
 			Query:                   req.Query,
+			LightweightSkillContext: lightweightSkillContext,
 			SessionID:               req.Session.ID,
 			UserID:                  userID,
 			EnableMemory:            req.EnableMemory,
@@ -702,7 +701,7 @@ func (s *sessionService) KnowledgeQAByEvent(ctx context.Context,
 			chatpipeline.EndQueryUnderstandProgress(stageCtx, chatManage, understandProgress, understandStart, err)
 			understandProgress = nil
 		}
-		if retrievalProgress != nil && eventType == lastRetrievalStage {
+		if retrievalProgress != nil && chatpipeline.ShouldEndRetrievalProgress(eventType, lastRetrievalStage, err) {
 			chatpipeline.EndRetrievalProgress(stageCtx, chatManage, retrievalProgress, retrievalStart, err)
 			retrievalProgress = nil
 		}
@@ -995,10 +994,20 @@ func (s *sessionService) handleModelFallback(ctx context.Context, chatManage *ty
 }
 
 func buildFallbackMessages(chatManage *types.ChatManage, promptContent string) []chat.Message {
-	messages := make([]chat.Message, 0, len(chatManage.History)*2+1)
+	// Some OpenAI-compatible models reject a system message that appears after
+	// conversation history. Keep the shared turn/citation contract first so an
+	// old one-turn suffix or citation instruction cannot become the active task.
+	messages := make([]chat.Message, 0, len(chatManage.History)*2+2)
+	messages = append(messages, chat.Message{
+		Role:    "system",
+		Content: sourcerefs.EnsureGenerationContract(""),
+	})
 	messages = chatpipeline.AppendHistoryMessages(messages, chatManage.History)
 
-	userMsg := chat.Message{Role: "user", Content: promptContent}
+	userMsg := chat.Message{
+		Role:    "user",
+		Content: prioritizeFallbackCurrentTask(chatManage.Query, promptContent),
+	}
 	if chatManage.ChatModelSupportsVision && len(chatManage.Images) > 0 {
 		userMsg.Images = chatManage.Images
 	}
@@ -1006,17 +1015,33 @@ func buildFallbackMessages(chatManage *types.ChatManage, promptContent string) [
 	return append(messages, userMsg)
 }
 
+// prioritizeFallbackCurrentTask gives small and locally hosted models an
+// unambiguous current-turn boundary without another model call. The rendered
+// fallback guidance can contain a long document catalog and conversation
+// history may contain a very salient prior answer, so repeat only the current
+// request before that context and finish with a short priority reminder.
+func prioritizeFallbackCurrentTask(query, promptContent string) string {
+	currentTask := strings.TrimSpace(query)
+	guidance := strings.TrimSpace(promptContent)
+	if currentTask == "" {
+		return guidance
+	}
+	return fmt.Sprintf(
+		"## Current user task (authoritative)\n%s\n\n## Fallback guidance\n%s\n\nAnswer only the current user task above. Use conversation history only when that task explicitly depends on it.",
+		currentTask,
+		guidance,
+	)
+}
+
 // renderFallbackPrompt renders the fallback prompt template with query and image context.
 func (s *sessionService) renderFallbackPrompt(ctx context.Context, chatManage *types.ChatManage) (string, error) {
-	query := chatManage.Query
-	if rq := strings.TrimSpace(chatManage.RewriteQuery); rq != "" {
-		query = rq
-	}
-
 	kbDocuments := s.buildKBDocumentListing(ctx, chatManage)
 
 	result := types.RenderPromptPlaceholders(chatManage.FallbackPrompt, types.PlaceholderValues{
-		"query":        query,
+		// RewriteQuery exists solely to improve retrieval. The response model
+		// must see the verbatim current request, including its output and
+		// citation constraints.
+		"query":        chatManage.Query,
 		"language":     chatManage.Language,
 		"kb_documents": kbDocuments,
 	})
@@ -1149,16 +1174,20 @@ func (s *sessionService) consumeFallbackStream(
 // `references` SSE event. Must run before CHAT_COMPLETION_STREAM so citations
 // arrive while the connection is still open (complete closes the stream).
 func emitKnowledgeReferencesEvent(ctx context.Context, chatManage *types.ChatManage) {
-	if chatManage == nil || chatManage.EventBus == nil || len(chatManage.MergeResult) == 0 {
+	if chatManage == nil || chatManage.EventBus == nil {
 		return
 	}
-	logger.Infof(ctx, "Emitting references event with %d results (pre-answer)", len(chatManage.MergeResult))
+	refs := sourcerefs.CitableReferences(chatManage.CitationResult)
+	if len(refs) == 0 {
+		return
+	}
+	logger.Infof(ctx, "Emitting references event with %d exact evidence fragments (pre-answer)", len(refs))
 	if err := chatManage.EventBus.Emit(ctx, types.Event{
 		ID:        generateEventID("references"),
 		Type:      types.EventType(event.EventAgentReferences),
 		SessionID: chatManage.SessionID,
 		Data: event.AgentReferencesData{
-			References: chatManage.MergeResult,
+			References: refs,
 		},
 	}); err != nil {
 		logger.Errorf(ctx, "Failed to emit references event: %v", err)

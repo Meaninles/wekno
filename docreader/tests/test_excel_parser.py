@@ -326,6 +326,22 @@ class ExcelImageFilterTest(unittest.TestCase):
 
 
 class ExcelParserTest(unittest.TestCase):
+    def test_uncached_formula_is_preserved_as_searchable_source_text(self):
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet["A1"] = "评分公式"
+        sheet["B1"] = '=IF(A2="","",SUM(C2:C4))'
+        sheet["A2"] = "业务值"
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        document = ExcelParser(file_name="formula.xlsx", file_type="xlsx").parse_into_text(
+            buffer.getvalue()
+        )
+
+        self.assertIn("评分公式", document.content)
+        self.assertIn('=IF(A2="","",SUM(C2:C4))', document.content)
+
     def test_parse_phantom_shared_strings_workbook(self):
         document = ExcelParser().parse_into_text(_xlsx_with_phantom_shared_strings())
         self.assertIn("hello", document.content)

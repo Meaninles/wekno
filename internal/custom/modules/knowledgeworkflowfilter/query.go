@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	derivativeSuccess = []string{"", "none", "completed", "done", "skipped"}
-	derivativeActive  = []string{"pending", "processing"}
+	derivativeSuccess           = []string{"", "none", "completed", "done", "skipped"}
+	derivativeSuccessOrDegraded = []string{"", "none", "completed", "done", "skipped", "degraded"}
+	derivativeActive            = []string{"pending", "processing"}
 )
 
 const (
@@ -56,16 +57,38 @@ func Apply(query *gorm.DB, workflowStatus string) *gorm.DB {
 			derivativeSuccess,
 			derivativeSuccess,
 		)
+	case types.EnrichmentStatusDegraded:
+		return query.Where(
+			`knowledges.parse_status = ? AND
+				`+summaryStatusSQL+` NOT IN ? AND
+				`+enrichmentStatusSQL+` NOT IN ? AND
+				`+wikiStatusSQL+` NOT IN ? AND
+				`+summaryStatusSQL+` IN ? AND
+				`+enrichmentStatusSQL+` IN ? AND
+				`+wikiStatusSQL+` IN ? AND (
+					`+summaryStatusSQL+` = ? OR
+					`+enrichmentStatusSQL+` = ? OR
+					`+wikiStatusSQL+` = ?
+				)`,
+			types.ParseStatusCompleted,
+			derivativeActive, derivativeActive, derivativeActive,
+			derivativeSuccessOrDegraded,
+			derivativeSuccessOrDegraded,
+			derivativeSuccessOrDegraded,
+			types.EnrichmentStatusDegraded,
+			types.EnrichmentStatusDegraded,
+			types.WikiStatusDegraded,
+		)
 	case types.ParseStatusFailed:
 		return query.Where(
 			`knowledges.parse_status = ? OR (
 				knowledges.parse_status = ? AND
 				`+summaryStatusSQL+` NOT IN ? AND
 				`+enrichmentStatusSQL+` NOT IN ? AND
-				`+wikiStatusSQL+` NOT IN ? AND NOT (
-					`+summaryStatusSQL+` IN ? AND
-					`+enrichmentStatusSQL+` IN ? AND
-					`+wikiStatusSQL+` IN ?
+				`+wikiStatusSQL+` NOT IN ? AND (
+					`+summaryStatusSQL+` NOT IN ? OR
+					`+enrichmentStatusSQL+` NOT IN ? OR
+					`+wikiStatusSQL+` NOT IN ?
 				)
 			)`,
 			types.ParseStatusFailed,
@@ -73,9 +96,9 @@ func Apply(query *gorm.DB, workflowStatus string) *gorm.DB {
 			derivativeActive,
 			derivativeActive,
 			derivativeActive,
-			derivativeSuccess,
-			derivativeSuccess,
-			derivativeSuccess,
+			derivativeSuccessOrDegraded,
+			derivativeSuccessOrDegraded,
+			derivativeSuccessOrDegraded,
 		)
 	default:
 		// Preserve access to less common raw states (draft/cancelled) without

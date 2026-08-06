@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -92,6 +93,20 @@ func TestWikiToolsInAvailableDefinitions(t *testing.T) {
 	for name, found := range wikiTools {
 		if !found {
 			t.Errorf("Wiki tool %s missing from AvailableToolDefinitions()", name)
+		}
+	}
+}
+
+func TestWikiSearchDescriptionRequiresClaimBearingPageRead(t *testing.T) {
+	tool := NewWikiSearchTool(nil, nil, nil)
+	description := tool.Description()
+	for _, required := range []string{
+		"does NOT return claim-bearing evidence",
+		"call wiki_read_page",
+		"full content and citation handle",
+	} {
+		if !strings.Contains(description, required) {
+			t.Fatalf("wiki_search description is missing %q: %s", required, description)
 		}
 	}
 }

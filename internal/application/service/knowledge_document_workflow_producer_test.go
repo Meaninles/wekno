@@ -47,7 +47,7 @@ func TestAsyncPassagePreparesExactPlanBeforeKnowledgeCommit(t *testing.T) {
 	require.Equal(t, knowledge.ProcessingGeneration, payload.ProcessingGeneration)
 	require.Equal(t, knowledge.ProcessingOwner, payload.ProcessingOwner)
 	require.True(t, payload.EnableQuestionGeneration)
-	require.Equal(t, 7, payload.QuestionCount)
+	require.Equal(t, types.MaxQuestionGenerationCount, payload.QuestionCount)
 }
 
 func TestSynchronousPassageDoesNotCreateDocumentWorkflow(t *testing.T) {

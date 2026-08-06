@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -75,6 +76,13 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 		"language": chatManage.Language,
 		"contexts": chatManage.RenderedContexts,
 	})
+	// Apply the same lightweight contract to every normal-QA turn. It is inert
+	// when no evidence handles exist, while keeping current-turn precedence and
+	// citation syntax consistent for present and future retrieval paths.
+	systemPrompt = sourcerefs.EnsureGenerationContract(systemPrompt)
+	if skillContext := strings.TrimSpace(chatManage.LightweightSkillContext); skillContext != "" {
+		systemPrompt += "\n\n" + skillContext
+	}
 
 	chatMessages := []chat.Message{
 		{Role: "system", Content: systemPrompt},
@@ -98,7 +106,7 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 func AppendHistoryMessages(messages []chat.Message, history []*types.History) []chat.Message {
 	for _, history := range history {
 		messages = append(messages, chat.Message{Role: "user", Content: history.Query})
-		messages = append(messages, chat.Message{Role: "assistant", Content: history.Answer})
+		messages = append(messages, chat.Message{Role: "assistant", Content: sourcerefs.StripCitationProtocol(history.Answer)})
 	}
 	return messages
 }
@@ -125,17 +133,20 @@ func loadAndProcessHistory(
 			h = &types.History{}
 		}
 		if message.Role == "user" {
-			if message.RenderedContent != "" {
-				h.Query = message.RenderedContent
-			} else {
-				h.Query = message.Content
-			}
+			// RenderedContent contains the previous turn's retrieval envelope,
+			// including request-local citation IDs. Replaying it would expose stale
+			// evidence as a new user message and an old S1 could collide with the
+			// current turn's S1. Rebuild history from the original user input only.
+			h.Query = message.Content
 			h.CreateAt = message.CreatedAt
-			if desc := extractImageCaptions(message.Images); desc != "" && message.RenderedContent == "" {
+			if desc := extractImageCaptions(message.Images); desc != "" {
 				h.Query += "\n\n[用户上传图片内容]\n" + desc
 			}
+			if len(message.Attachments) > 0 {
+				h.Query += message.Attachments.BuildPrompt()
+			}
 		} else {
-			h.Answer = regThinkTags.ReplaceAllString(message.Content, "")
+			h.Answer = sourcerefs.StripCitationProtocol(regThinkTags.ReplaceAllString(message.Content, ""))
 			h.KnowledgeReferences = message.KnowledgeReferences
 		}
 		historyMap[message.RequestID] = h

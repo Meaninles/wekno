@@ -279,7 +279,7 @@ import { encryptAuthPassword, getAuthChallenge, type AuthChallenge } from '@/cus
 import { hasPasswordTypeMix } from '@/custom/modules/authSecurity/passwordPolicy'
 import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
-import { consumeShareReturnPath, rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn'
+import { consumeAuthReturnPath, rememberAuthReturnPath } from '@/custom/modules/authreturn/authReturn'
 
 const router = useRouter()
 const route = useRoute()
@@ -288,10 +288,10 @@ const { t, tm } = useI18n()
 const { formatRole, roleIcon } = useRoleLabel()
 const defaultLoginTarget = '/platform/knowledge-bases'
 
-const loginRedirectTarget = () => consumeShareReturnPath(route.query.returnTo) || defaultLoginTarget
+const loginRedirectTarget = () => consumeAuthReturnPath(route.query.returnTo) || defaultLoginTarget
 
-const rememberCurrentShareReturn = () => {
-  rememberShareReturnPath(route.query.returnTo)
+const rememberCurrentAuthReturn = () => {
+  rememberAuthReturnPath(route.query.returnTo)
 }
 
 // Form references
@@ -563,7 +563,7 @@ const handleOIDCLogin = async () => {
       return
     }
 
-    rememberCurrentShareReturn()
+    rememberCurrentAuthReturn()
     window.location.href = authorizationURL
   } catch (error: any) {
     console.error('OIDC 登录跳转失败:', error)
@@ -584,7 +584,7 @@ const handleCustomSSOLogin = async () => {
       return
     }
 
-    rememberCurrentShareReturn()
+    rememberCurrentAuthReturn()
     window.location.href = authorizationURL
   } catch (error: any) {
     console.error('统一身份认证跳转失败:', error)

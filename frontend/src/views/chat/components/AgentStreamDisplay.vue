@@ -133,12 +133,12 @@
                   </div>
 
                   <div
-                    v-if="!event.pending && (event.tool_name === 'search_knowledge' || event.tool_name === 'knowledge_search') && event.tool_data"
+                    v-if="!event.pending && isKnowledgeSearchToolName(event.tool_name) && event.tool_data && getSearchResultsSummary(event)"
                     class="search-results-summary-fixed">
                     <div class="results-summary-text" v-html="getSearchResultsSummary(event)"></div>
                   </div>
 
-                  <div v-if="!event.pending && event.tool_name === 'web_search' && event.tool_data"
+                  <div v-if="!event.pending && isWebSearchToolName(event.tool_name) && event.tool_data"
                     class="search-results-summary-fixed">
                     <div class="results-summary-text"
                       v-html="t('agent.webSearchFound', { count: getResultsCount(event.tool_data) })">
@@ -218,6 +218,10 @@
         'streaming-steps-constrained': !answerEverStarted && !isConversationDone,
         'is-streaming-timeline': showStreamingTimeline
       }">
+      <LiveProcessPreview
+        v-if="showLiveProcessPreview"
+        :items="liveProcessPreviews"
+      />
       <template v-for="(event, index) in displayEvents" :key="getEventKey(event, index)">
         <div v-if="event && event.type" class="event-item" :class="{
           'event-answer': event.type === 'answer',
@@ -379,12 +383,12 @@
                 </div>
 
                 <div
-                  v-if="!event.pending && (event.tool_name === 'search_knowledge' || event.tool_name === 'knowledge_search') && event.tool_data"
+                  v-if="!event.pending && isKnowledgeSearchToolName(event.tool_name) && event.tool_data && getSearchResultsSummary(event)"
                   class="search-results-summary-fixed">
                   <div class="results-summary-text" v-html="getSearchResultsSummary(event)"></div>
                 </div>
 
-                <div v-if="!event.pending && event.tool_name === 'web_search' && event.tool_data"
+                <div v-if="!event.pending && isWebSearchToolName(event.tool_name) && event.tool_data"
                   class="search-results-summary-fixed">
                   <div class="results-summary-text"
                     v-html="t('agent.webSearchFound', { count: getResultsCount(event.tool_data) })">
@@ -538,6 +542,20 @@ import ChatRequestInfoButton from '@/components/ChatRequestInfoButton.vue';
 import ChatCitationFloat from '@/components/ChatCitationFloat.vue';
 import picturePreview from '@/components/picture-preview.vue';
 import AnswerFeedbackButtons from '@/custom/modules/answerfeedback/AnswerFeedbackButtons.vue';
+import LiveProcessPreview from '@/custom/modules/agentstream/LiveProcessPreview.vue';
+import {
+  agentToolCountFromMessage,
+  formatCompletedRunDuration,
+  isSimpleCompletedConversation,
+  isEvidenceRetrievalToolName,
+  retrievalDisplayCount,
+  retrievalStatsFromMessage,
+  usesDataSourceRetrievalUnit,
+} from '@/custom/modules/sourcerefs/retrievalSummary';
+import {
+  readLiveAgentProjection,
+  type LiveAgentProjection,
+} from '@/custom/modules/agentstream/liveProcessPreview';
 import { countGrepDocuments } from '@/utils/grepResultsGroup';
 import { getKnowledgeChunksSummaryHtml } from '@/utils/knowledgeChunksDisplay';
 import { useChatCitationPopover } from '@/composables/useChatCitationPopover';
@@ -559,7 +577,13 @@ import {
 } from '@/utils/security';
 import { unwrapFinalAnswerWrappers, thinkingEqualsAnswer } from '@/utils/finalAnswer';
 import { getAgentToolIconName } from '@/utils/agent-tool-icons';
-import { getQueryText, getWikiPageText } from '@/utils/agent-tool-display';
+import {
+  getKnowledgeSearchSummaryHtml,
+  getQueryText,
+  getWikiPageText,
+  isKnowledgeSearchToolName,
+  isWebSearchToolName,
+} from '@/utils/agent-tool-display';
 import {
   buildManualMarkdown,
   copyTextToClipboard,
@@ -642,6 +666,8 @@ const TOOL_NAME_KEYS: Record<string, string> = {
 
 const getLocalizedToolName = (toolName?: string | null): string => {
   if (!toolName) return t('agent.toolFallback');
+  if (isKnowledgeSearchToolName(toolName)) return t('agentStream.tools.searchKnowledge');
+  if (isWebSearchToolName(toolName)) return t('agentStream.tools.webSearch');
   const key = TOOL_NAME_KEYS[toolName];
   if (key) return t(key);
 
@@ -941,9 +967,20 @@ interface SessionData {
   request_id?: string;
   debugRequest?: Record<string, unknown>;
   isAgentMode?: boolean;
+  agent_mode?: boolean;
+  is_completed?: boolean;
   agentEventStream?: any[];
   tool_results?: any[];
   knowledge_references?: any[];
+  retrieval_stats?: {
+    attempted?: boolean;
+    documents?: number;
+    wiki?: number;
+    web?: number;
+    data_sources?: number;
+    total?: number;
+  };
+  agent_duration_ms?: number;
   answer_feedback?: 'like' | 'dislike' | '';
 }
 
@@ -1005,6 +1042,15 @@ configureMarkedForChatMarkdown();
 
 // Event stream
 const eventStream = computed(() => props.session?.agentEventStream || []);
+const usesClaudeSDKTerminalDelivery = computed(
+  () =>
+    (props.session as unknown as Record<string, unknown>)?._usesClaudeSDKTerminalDelivery ===
+    true,
+);
+const liveProjection = computed<LiveAgentProjection | null>(() =>
+  readLiveAgentProjection(props.session as unknown as Record<string, unknown>),
+);
+const liveProcessPreviews = computed(() => liveProjection.value?.previews || []);
 
 const isRagPipelineToolCallEvent = (event: any): boolean => {
   return Boolean(
@@ -1120,6 +1166,18 @@ const showIntermediateSteps = ref(false);
 // count as "answer started", otherwise the answer-only view would stick after
 // the preamble was retracted.
 const hasAnswerStarted = computed(() => {
+  const projectedAnswer = liveProjection.value?.activeAnswer;
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !props.session?.is_completed &&
+    liveProjection.value
+  ) {
+    return Boolean(
+      projectedAnswer &&
+      projectedAnswer.superseded !== true &&
+      String(projectedAnswer.content || '').trim(),
+    );
+  }
   const stream = eventStream.value;
   if (!stream || !Array.isArray(stream)) return false;
   return stream.some((e: any) => e.type === 'answer' && !e.superseded && e.content && e.content.trim());
@@ -1132,6 +1190,13 @@ const hasAnswerStarted = computed(() => {
 // shrink back to the capped height (which would look like a jump). Once the
 // model starts producing answer-style text, give it full height to breathe.
 const answerEverStarted = computed(() => {
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !props.session?.is_completed &&
+    liveProjection.value
+  ) {
+    return liveProjection.value.answerEverStarted;
+  }
   const stream = eventStream.value;
   if (!stream || !Array.isArray(stream)) return false;
   return stream.some((e: any) => e.type === 'answer' && e.content && e.content.trim());
@@ -1153,6 +1218,12 @@ watch(eventStream, (stream) => {
 
 // Check if conversation is done (based on answer event with done=true or stop event)
 const isConversationDone = computed(() => {
+  if (props.session?.is_completed) return true;
+  const projection = usesClaudeSDKTerminalDelivery.value ? liveProjection.value : null;
+  if (projection?.terminalEvent) return true;
+  if (projection?.activeAnswer?.done === true && projection.activeAnswer.superseded !== true) {
+    return true;
+  }
   const stream = eventStream.value;
   if (!stream || stream.length === 0) {
     return false;
@@ -1188,6 +1259,15 @@ let streamingMermaidRenderTask: Promise<void> | null = null;
 let streamingMermaidRenderId = 0;
 
 const activeAnswerMarkdown = computed(() => {
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    liveProjection.value?.activeAnswer
+  ) {
+    return typeof liveProjection.value.activeAnswer.content === 'string'
+      ? liveProjection.value.activeAnswer.content
+      : '';
+  }
   const stream = eventStream.value;
   if (!stream?.length) return '';
   const source = isConversationDone.value ? buildFullEventList(stream) : stream;
@@ -1199,6 +1279,13 @@ const activeAnswerMarkdown = computed(() => {
 // The answer event whose text is currently streaming. The template renders the
 // smoothed typewriter text for this event and the raw content for any others.
 const activeAnswerEventRef = computed(() => {
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    liveProjection.value?.activeAnswer
+  ) {
+    return liveProjection.value.activeAnswer;
+  }
   const stream = eventStream.value;
   if (!stream?.length) return null;
   const source = isConversationDone.value ? buildFullEventList(stream) : stream;
@@ -1271,10 +1358,18 @@ watch(answerFullyRendered, (ready) => {
 });
 
 // Agent: dots until the turn completes. RAG: pipeline dots before answer; answer stream dots after.
+const showLiveProcessPreview = computed(
+  () =>
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    !props.ragMode &&
+    !shareMode.value,
+);
+
 const showAgentActivityIndicator = computed(() => {
   if (isConversationDone.value) return false;
   if (props.ragMode) return hasAnswerStarted.value || hasNonRagToolEvents.value;
-  return true;
+  return !showLiveProcessPreview.value;
 });
 
 const isStreamingTimelineEvent = (event: any): boolean => {
@@ -1381,27 +1476,47 @@ const reasoningRoundsCount = computed(() => {
   return intermediateEvents.value.filter((e: any) => e.type === 'thinking').length;
 });
 
-const toolCallsCount = computed(() => {
-  if (!hasAnswerStarted.value && !isConversationDone.value) return 0;
-  return intermediateEvents.value.filter((e: any) => e.type === 'tool_call').length;
+const otherToolCallsCount = computed(() => {
+	if (!hasAnswerStarted.value && !isConversationDone.value) return 0;
+	if (isConversationDone.value) {
+		return agentToolCountFromMessage(props.session as Record<string, any>);
+	}
+	return intermediateEvents.value.filter(
+		(e: any) => e.type === 'tool_call' && !isEvidenceRetrievalToolName(e.tool_name)
+	).length;
 });
 
+const retrievalStats = computed(() => retrievalStatsFromMessage(props.session as Record<string, any>));
+
 const intermediateStepsSummary = computed(() => {
-  if (!eventStream.value) {
+  if (!eventStream.value && !isConversationDone.value) {
     return '';
   }
 
   const rounds = reasoningRoundsCount.value;
-  const tools = toolCallsCount.value;
-  const elapsed = agentDurationMs.value;
+  const tools = otherToolCallsCount.value;
+  const elapsed = Number(props.session?.agent_duration_ms) || agentDurationMs.value;
+
+  if (isSimpleCompletedConversation(props.session as Record<string, any>)) {
+    return elapsed > 0
+      ? t('agent.durationSuffix', { duration: formatCompletedRunDuration(elapsed) })
+      : '';
+  }
 
   const parts: string[] = [];
   if (rounds > 0) {
     parts.push(t('agent.reasoningRounds', { rounds }));
   }
-  if (tools > 0) {
-    parts.push(t('agent.toolCalls', { tools }));
+  if (retrievalStats.value) {
+    const isDataSource = usesDataSourceRetrievalUnit(retrievalStats.value);
+    const retrievalCount = retrievalDisplayCount(retrievalStats.value);
+    parts.push(retrievalCount > 0
+      ? t(isDataSource ? 'agent.retrievedDataSources' : 'agent.retrievedDocuments', {
+          count: retrievalCount,
+        })
+      : t(isDataSource ? 'agent.noRetrievedDataSources' : 'agent.noRetrievedDocuments'));
   }
+  parts.push(tools > 0 ? t('agent.toolCalls', { tools }) : t('agent.noToolCalls'));
   // Fallback to a generic step count if neither bucket has anything (shouldn't
   // normally happen once the tree is shown).
   if (parts.length === 0) {
@@ -1409,7 +1524,7 @@ const intermediateStepsSummary = computed(() => {
   }
 
   if (elapsed > 0) {
-    parts.push(t('agent.durationSuffix', { duration: formatDuration(elapsed) }));
+    parts.push(t('agent.durationSuffix', { duration: formatCompletedRunDuration(elapsed) }));
   }
 
   return parts.join(t('agent.stepSummarySeparator'));
@@ -1424,9 +1539,13 @@ const intermediateStepsSummaryHtml = computed(() => {
 // conversation is done. In RAG quick-answer mode, RagPipelineProgress owns the
 // retrieval timeline; keep AgentStreamDisplay for additional tool/skill calls.
 const shouldShowCollapsedSteps = computed(() => {
+  // isAgentMode is also used internally to reuse this renderer for restored
+  // quick-answer pipelines. Tool telemetry belongs only to a real ReAct turn,
+  // whose backend-authoritative per-message flag is agent_mode=true.
+  if (props.ragMode && props.session?.agent_mode !== true) return false
   if (props.ragMode && !hasNonRagToolEvents.value) return false
   const hasSteps = intermediateStepsCount.value > 0;
-  return hasSteps && isConversationDone.value;
+  return isConversationDone.value && (hasSteps || retrievalStats.value !== null);
 });
 
 // Check if event is a "deep thinking" type (either streaming thinking or thinking tool call)
@@ -1812,6 +1931,28 @@ const displayEvents = computed(() => {
     return [];
   }
 
+  // Live runs use the O(1) projection maintained by the stream handler. This
+  // avoids rebuilding the complete event tree for every token while still
+  // keeping approval/OAuth cards actionable and the current answer visible.
+  if (
+    usesClaudeSDKTerminalDelivery.value &&
+    !isConversationDone.value &&
+    liveProjection.value
+  ) {
+    const interactive = liveProjection.value.interactiveEvents.filter(
+      (event: any) => event && event.resolved !== true,
+    );
+    const answer = liveProjection.value.activeAnswer;
+    if (
+      answer &&
+      answer.superseded !== true &&
+      (String(answer.content || '').trim() || answer.done === true)
+    ) {
+      return [...interactive, answer];
+    }
+    return interactive;
+  }
+
   const result = buildFullEventList(stream);
 
   // Quick-answer RAG: pipeline steps and model thinking live in RagPipelineProgress.
@@ -1961,13 +2102,13 @@ const hasResults = (event: any): boolean => {
   const toolName = event.tool_name;
 
   // For knowledge search tools
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+  if (isKnowledgeSearchToolName(toolName)) {
     const count = event.tool_data.results?.length || event.tool_data.count || 0;
     return count > 0;
   }
 
   // For web search tools
-  if (toolName === 'web_search') {
+  if (isWebSearchToolName(toolName)) {
     const count = event.tool_data.results?.length || event.tool_data.count || 0;
     return count > 0;
   }
@@ -2032,7 +2173,7 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
     sourceLabel: el.getAttribute('data-source-label') || sourceTypeLabel(type),
     snippet: '',
     count: 1,
-    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : type === 'data_source' ? 'server' : 'file',
+    icon: type === 'web' ? 'internet' : type === 'wiki' ? 'browse' : 'file',
     url: el.getAttribute('data-url') || '',
     knowledgeBaseId,
     knowledgeId,
@@ -2133,7 +2274,10 @@ const openKnowledgeDocumentInNewTab = () => {
   if (!knowledgeDrawer.value.knowledgeBaseId || !knowledgeDrawer.value.knowledgeId) return;
   router.push({
     path: `/platform/knowledge-bases/${knowledgeDrawer.value.knowledgeBaseId}`,
-    query: { knowledge_id: knowledgeDrawer.value.knowledgeId },
+    query: {
+      knowledge_id: knowledgeDrawer.value.knowledgeId,
+      chunk_id: knowledgeDrawer.value.chunkId || undefined,
+    },
   });
 };
 
@@ -2460,7 +2604,7 @@ const getToolSummary = (event: any): string => {
   const toolData = event.tool_data;
 
   // For search tools, don't return summary here - it will be displayed in SearchResults component
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+  if (isKnowledgeSearchToolName(toolName)) {
     return '';
   } else if (toolName === 'get_document_info') {
     if (toolData?.title) {
@@ -2574,21 +2718,7 @@ function maskIconStyle(src: string, size = 18): Record<string, string> {
 
 // Get search results summary text (returns HTML with colored numbers)
 const getSearchResultsSummary = (event: any): string => {
-  if (!event || !event.tool_data) return '';
-
-  const toolData = event.tool_data;
-  const count = Number(toolData.results?.length ?? toolData.count ?? 0) || 0;
-  if (count === 0) return t('agentStream.search.noResults');
-
-  // Build summary text
-  let summary = '';
-  const kbCount = toolData.kb_counts ? Object.keys(toolData.kb_counts).length : 0;
-  if (kbCount > 0) {
-    summary = t('agentStream.search.foundResultsFromFiles', { count: `<strong>${count}</strong>`, files: `<strong>${kbCount}</strong>` });
-  } else {
-    summary = t('agentStream.search.foundResults', { count: `<strong>${count}</strong>` });
-  }
-  return summary;
+  return getKnowledgeSearchSummaryHtml(t, event?.tool_data);
 };
 
 // Get web search results summary text
@@ -2655,9 +2785,17 @@ const getToolTitle = (event: any): string => {
   }
 
   const toolName = event.tool_name;
-  const isSearchTool = toolName === 'search_knowledge' || toolName === 'knowledge_search' || toolName === 'wiki_search';
-  const isWebSearchTool = toolName === 'web_search';
+  const isSearchTool = isKnowledgeSearchToolName(toolName) || toolName === 'wiki_search';
+  const isWebSearchTool = isWebSearchToolName(toolName);
   const isGrepTool = toolName === 'grep_chunks';
+
+  if (
+    isKnowledgeSearchToolName(toolName) &&
+    event.success === true &&
+    !getKnowledgeSearchSummaryHtml(t, event.tool_data)
+  ) {
+    return t('agentStream.ragPipeline.searchDone');
+  }
 
   // For search tools, use description with query text
   if (isSearchTool) {
@@ -2766,12 +2904,12 @@ const getToolDescription = (event: any): string => {
   const success = event.success === true;
   const toolName = event.tool_name;
 
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+  if (isKnowledgeSearchToolName(toolName)) {
     return success ? t('agentStream.toolStatus.searchKb') : t('agentStream.toolStatus.searchKbFailed');
   } else if (toolName === 'wiki_search' || toolName === 'wiki_read_page') {
     const localizedName = getLocalizedToolName(toolName);
     return success ? localizedName : t('agentStream.toolStatus.calledFailed', { name: localizedName });
-  } else if (toolName === 'web_search') {
+  } else if (isWebSearchToolName(toolName)) {
     return success ? t('agentStream.toolStatus.webSearch') : t('agentStream.toolStatus.webSearchFailed');
   } else if (toolName === 'grep_chunks') {
     return success ? t('agentStream.toolStatus.grepSearch') : t('agentStream.toolStatus.grepSearchFailed');

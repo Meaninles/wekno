@@ -1,0 +1,127 @@
+{{/*
+Dedicated production workers. The API Deployment remains in app.yaml so the
+public Service, HPA, and existing release identity stay stable.
+*/}}
+{{- if and .Values.app.enabled .Values.app.runtimeRoles.enabled }}
+{{- $root := . }}
+{{- $roles := list
+  (dict "name" "parse-worker" "role" "parse-worker" "config" .Values.app.runtimeRoles.parseWorker)
+  (dict "name" "derivative-worker" "role" "derivative-worker" "config" .Values.app.runtimeRoles.derivativeWorker)
+  (dict "name" "wiki-worker" "role" "wiki-worker" "config" .Values.app.runtimeRoles.wikiWorker)
+  (dict "name" "maintenance" "role" "maintenance" "config" .Values.app.runtimeRoles.maintenance)
+}}
+{{- range $item := $roles }}
+{{- if $item.config.enabled }}
+{{- $nodeSelector := $item.config.nodeSelector | default $root.Values.app.nodeSelector }}
+{{- $affinity := $item.config.affinity | default $root.Values.app.affinity }}
+{{- $tolerations := $item.config.tolerations | default $root.Values.app.tolerations }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weknora.fullname" $root }}-{{ $item.name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" $item.name "context" $root) | nindent 4 }}
+spec:
+  replicas: {{ ternary 0 $item.config.replicaCount $root.Values.app.runtimeRoles.startSuspended }}
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 6 }}
+  strategy:
+    {{- toYaml $root.Values.app.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ $root.Values.app.terminationGracePeriodSeconds }}
+      {{- include "weknora.imagePullSecrets" $root | nindent 6 }}
+      serviceAccountName: {{ include "weknora.serviceAccountName" $root }}
+      automountServiceAccountToken: false
+      {{- with $root.Values.app.podSecurityContext | default $root.Values.global.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app
+          image: {{ include "weknora.app.image" $root }}
+          imagePullPolicy: {{ $root.Values.app.image.pullPolicy }}
+          {{- with $root.Values.app.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            {{- include "weknora.appRuntimeEnv" (dict "root" $root "role" $item.role "pool" $item.config "autoMigrate" false) | nindent 12 }}
+          volumeMounts:
+            - name: data-files
+              mountPath: /data/files
+            - name: scratch
+              mountPath: /tmp
+            {{- if $root.Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
+            - name: document-queue-kubernetes-api
+              mountPath: /var/run/secrets/weknora-document-queue-kubernetes
+              readOnly: true
+            {{- end }}
+            {{- with $root.Values.app.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml $item.config.resources | nindent 12 }}
+          {{- with $root.Values.app.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.app.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $root.Values.app.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- include "weknora.appRuntimeVolumes" (dict "root" $root "role" $item.config) | nindent 8 }}
+      {{- with $nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $root.Values.app.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $root.Values.app.topologySpread.maxSkew }}
+          topologyKey: {{ $root.Values.app.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ $root.Values.app.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 14 }}
+      {{- end }}
+      {{- with $tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{- if and (not $root.Values.app.runtimeRoles.startSuspended) (gt (int $item.config.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "weknora.fullname" $root }}-{{ $item.name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "weknora.componentLabels" (dict "component" $item.name "context" $root) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "weknora.componentSelectorLabels" (dict "component" $item.name "context" $root) | nindent 6 }}
+---
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

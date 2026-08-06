@@ -428,13 +428,13 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 
 	part, epoch, err := s.splitManager.ClaimPart(partCtx, payload)
 	if errors.Is(err, documentsplit.ErrStalePart) ||
-		errors.Is(err, documentsplit.ErrPartLeased) {
+		errors.Is(err, documentsplit.ErrPartLeased) ||
+		errors.Is(err, documentsplit.ErrPartDeferred) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	terminalAttempt := part.Attempt >= s.splitManager.Config().MaxRetry
 	leaseCompleted := false
 	defer func() {
 		if leaseCompleted {
@@ -448,32 +448,38 @@ func (s *knowledgeService) ProcessDocumentSplitPart(
 		if releaseCause == nil {
 			releaseCause = documentsplit.ErrStalePart
 		}
-		releaseErr := s.splitManager.ReleasePart(
+		outcome, releaseErr := s.splitManager.ReleasePartWithOutcome(
 			context.WithoutCancel(ctx), part, epoch, releaseCause,
 		)
-		if retErr != nil {
-			retErr = errors.Join(retErr, releaseErr)
-		} else if releaseErr != nil && !errors.Is(releaseErr, documentsplit.ErrLeaseLost) {
-			retErr = releaseErr
+		if releaseErr != nil {
+			if retErr != nil {
+				retErr = errors.Join(retErr, releaseErr)
+			} else if !errors.Is(releaseErr, documentsplit.ErrLeaseLost) {
+				retErr = releaseErr
+			}
+			return
 		}
-		if terminalAttempt && retErr != nil &&
-			!isDurableTaskDeferred(retErr) {
+		if outcome.Terminal && retErr != nil {
 			if knowledge, loadErr := s.repo.GetKnowledgeByID(
 				context.WithoutCancel(ctx), payload.TenantID, payload.KnowledgeID,
 			); loadErr == nil && knowledge != nil &&
 				knowledge.ProcessingGeneration == payload.ProcessingGeneration {
-				retErr = errors.Join(retErr, s.markActiveProcessingFailed(
+				markErr := s.markActiveProcessingFailed(
 					context.WithoutCancel(ctx), knowledge,
 					fmt.Sprintf("physical part %d failed after %d attempts: %v",
-						payload.PartIndex+1, part.Attempt, retErr),
+						payload.PartIndex+1, outcome.FailureAttempts, retErr),
 					"mark terminal document split part failure",
-				))
+				)
+				if markErr != nil {
+					retErr = errors.Join(retErr, markErr)
+					return
+				}
 			}
-			// The durable failure is already visible; ACK this delivery instead
-			// of creating a second terminal transition in generic dead-letter
-			// middleware.
-			retErr = nil
 		}
+		// PostgreSQL now owns the terminal/retry/dependency-wait transition.
+		// ACK the disposable Redis delivery so Asynq retries cannot create a
+		// second, conflicting retry budget.
+		retErr = nil
 	}()
 
 	tenant, err := s.tenantRepo.GetTenantByID(partCtx, payload.TenantID)

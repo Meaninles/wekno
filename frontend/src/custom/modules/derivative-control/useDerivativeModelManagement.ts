@@ -6,7 +6,6 @@ import {
   setDefaultDerivativeModel,
   testDerivativeModel,
   unpublishDerivativeModel,
-  updateDerivativeTPM,
   type DerivativeAdminConfig,
 } from '@/api/derivative-control'
 
@@ -19,7 +18,6 @@ export interface DerivativeCardModel {
 
 export function useDerivativeModelManagement() {
   const config = ref<DerivativeAdminConfig | null>(null)
-  const savingTPM = ref(false)
   const publishedIDs = computed(() =>
     new Set((config.value?.models || []).map(model => model.id)),
   )
@@ -47,19 +45,6 @@ export function useDerivativeModelManagement() {
     if (isDefault(model)) return 'primary'
     if (isPublished(model)) return 'success'
     return 'default'
-  }
-
-  async function saveTPM(tpm: number) {
-    savingTPM.value = true
-    try {
-      const value = await updateDerivativeTPM(tpm)
-      if (config.value) config.value.tpm = value
-      MessagePlugin.success('TPM 已保存')
-    } catch (error: any) {
-      MessagePlugin.error(error?.message || '保存 TPM 失败')
-    } finally {
-      savingTPM.value = false
-    }
   }
 
   async function publish(model: DerivativeCardModel) {
@@ -114,13 +99,11 @@ export function useDerivativeModelManagement() {
 
   return {
     config,
-    savingTPM,
     load,
     isPublished,
     isDefault,
     tagLabel,
     tagTheme,
-    saveTPM,
     publish,
     setDefault,
     test,

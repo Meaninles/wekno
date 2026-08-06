@@ -57,13 +57,34 @@ func (h *Handler) UpdateFolder(c *gin.Context) {
 }
 
 func (h *Handler) DeleteFolder(c *gin.Context) {
-	if err := h.service.DeleteFolder(
-		c.Request.Context(), c.Param("id"), c.Param("folder_id"), c.DefaultQuery("mode", "reject"),
-	); err != nil {
+	op, err := h.service.RequestDeleteFolder(
+		c.Request.Context(), c.Param("id"), c.Param("folder_id"),
+	)
+	if err != nil {
 		h.writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true})
+	c.JSON(http.StatusAccepted, gin.H{"success": true, "data": op})
+}
+
+func (h *Handler) GetDeleteOperation(c *gin.Context) {
+	op, err := h.service.GetDeleteOperation(
+		c.Request.Context(), c.Param("id"), c.Param("operation_id"),
+	)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": op})
+}
+
+func (h *Handler) GetKnowledgeBaseTaskStats(c *gin.Context) {
+	stats, err := h.service.GetKnowledgeBaseTaskStats(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": stats})
 }
 
 func (h *Handler) GetFolder(c *gin.Context) {
@@ -476,10 +497,6 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		c.Error(apperrors.NewValidationError("文件夹层级超过限制"))
 	case errors.Is(err, ErrFolderCycle):
 		c.Error(apperrors.NewValidationError("不能将文件夹移动到自身或其子文件夹中"))
-	case errors.Is(err, ErrFolderNotEmpty):
-		c.Error(apperrors.NewConflictError("文件夹非空，请选择将内容移动到上一级后删除"))
-	case errors.Is(err, ErrFolderDeleteMode):
-		c.Error(apperrors.NewBadRequestError("文件夹删除模式仅支持 reject 或 move_to_parent"))
 	case errors.Is(err, ErrDocumentNotFound):
 		c.Error(apperrors.NewNotFoundError("部分文档不存在或不属于当前知识库"))
 	case errors.Is(err, ErrInvalidPage):

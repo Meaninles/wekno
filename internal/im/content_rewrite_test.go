@@ -21,6 +21,11 @@ func TestStripIMCitationTags(t *testing.T) {
 		{"kb tag", `text <kb id="1" title="doc"/> more`, "text  more"},
 		{"web tag", `see <web url="http://x.com"/> here`, "see  here"},
 		{"multiple", `<kb id="1"/><web url="x"/>text`, "text"},
+		{"canonical source", `claim<src id="S1" /> next`, "claim next"},
+		{"wrong source attribute", `claim<src source_id="S1" /> next`, "claim next"},
+		{"forbidden doc tag", `claim<doc id="S1" /> next`, "claim next"},
+		{"incomplete citation tail", `claim <citation id="S1"`, "claim "},
+		{"citation syntax in code is literal", "`<src id=\"S1\" />`", "`<src id=\"S1\" />`"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -131,6 +136,16 @@ func TestFindIncompleteXMLTag(t *testing.T) {
 		{
 			"incomplete kb tag",
 			`text <kb id="1`,
+			5,
+		},
+		{
+			"incomplete canonical source tag",
+			`text <src id="S1" /`,
+			5,
+		},
+		{
+			"incomplete forbidden doc closing tag",
+			`text </doc`,
 			5,
 		},
 		{

@@ -1,9 +1,11 @@
+import { isKnowledgeSearchToolName, isWebSearchToolName } from './agent-tool-display.ts'
+
 /** TDesign icon names for agent / RAG pipeline tool steps. */
 export function getAgentToolIconName(toolName: string): string {
   if (toolName === 'thinking') {
     return 'ai-search'
   }
-  if (toolName === 'search_knowledge' || toolName === 'knowledge_search') {
+  if (isKnowledgeSearchToolName(toolName)) {
     return 'data-search'
   }
   if (toolName === 'wiki_search') {
@@ -12,7 +14,7 @@ export function getAgentToolIconName(toolName: string): string {
   if (toolName === 'grep_chunks') {
     return 'search'
   }
-  if (toolName === 'web_search') {
+  if (isWebSearchToolName(toolName)) {
     return 'internet'
   }
   if (toolName === 'get_document_info' || toolName === 'list_knowledge_chunks') {

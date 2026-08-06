@@ -16,7 +16,6 @@ from grpc_health.v1.health import HealthServicer
 from docreader.auth import AuthInterceptor, TLSConfigError, load_tls_credentials
 from docreader import config
 from docreader.config import CONFIG
-from docreader.parser import Parser
 from docreader.proto import docreader_pb2_grpc
 from docreader.parser.registry import registry
 from docreader.proto.docreader_pb2 import (
@@ -34,6 +33,7 @@ from weknora_document_splitter.image_normalizer import (
     normalize_image_for_transport,
     normalize_images_for_transport,
 )
+from custom.services.weknora_docreader_runtime import IsolatedParseRunner
 
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
@@ -204,9 +204,13 @@ def _iter_image_refs(images: dict):
 class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
     def __init__(self):
         super().__init__()
-        self.parser = Parser()
+        self.parse_runner = IsolatedParseRunner(
+            timeout_seconds=CONFIG.request_timeout_seconds,
+            kill_grace_seconds=CONFIG.process_kill_grace_seconds,
+            work_root=os.path.join(CONFIG.image_output_dir, "isolated-jobs"),
+        )
 
-    def _parse_request(self, request: ReadRequest):
+    def _parse_request(self, request: ReadRequest, request_id: str, context):
         """Run the parser for a ReadRequest, returning (result, source_desc).
 
         Shared by the unary Read and streaming ReadStream RPCs.
@@ -217,11 +221,13 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
 
         if request.url:
             logger.info("Read(URL): url=%s", request.url)
-            result = self.parser.parse_url(
-                request.url,
-                request.title,
+            result = self.parse_runner.parse_url(
+                request_id=request_id,
+                url=request.url,
+                title=request.title,
                 parser_engine=parser_engine,
                 engine_overrides=engine_overrides,
+                is_active=context.is_active,
             )
             return result, request.url
 
@@ -232,12 +238,14 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
             file_type,
             len(request.file_content),
         )
-        result = self.parser.parse_file(
-            request.file_name,
-            file_type,
-            request.file_content,
+        result = self.parse_runner.parse_file(
+            request_id=request_id,
+            file_name=request.file_name,
+            file_type=file_type,
+            file_content=request.file_content,
             parser_engine=parser_engine,
             engine_overrides=engine_overrides,
+            is_active=context.is_active,
         )
         return result, request.file_name
 
@@ -247,7 +255,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
 
         with request_id_context(request_id):
             try:
-                result, source_desc = self._parse_request(request)
+                result, source_desc = self._parse_request(
+                    request, request_id, context
+                )
 
                 if not result or not result.content:
                     error_msg = f"Failed to parse: {source_desc}"
@@ -290,7 +300,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
         with request_id_context(request_id):
             _c = to_valid_utf8_text
             try:
-                result, source_desc = self._parse_request(request)
+                result, source_desc = self._parse_request(
+                    request, request_id, context
+                )
             except Exception as e:
                 logger.error("Error reading document: %s", e)
                 logger.info("Traceback: %s", traceback.format_exc())

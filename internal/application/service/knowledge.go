@@ -13,9 +13,11 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/enrichmentoutcome"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgeaux"
+	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgepurge"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskretry"
 	"github.com/Tencent/WeKnora/internal/custom/modules/wikidelete"
@@ -47,32 +49,33 @@ var (
 // knowledgeService implements the knowledge service interface
 // service 实现知识服务接口
 type knowledgeService struct {
-	config          *config.Config
-	retrieveEngine  interfaces.RetrieveEngineRegistry
-	ownership       retriever.TenantStoreOwnership
-	repo            interfaces.KnowledgeRepository
-	kbService       interfaces.KnowledgeBaseService
-	tenantRepo      interfaces.TenantRepository
-	tenantService   interfaces.TenantService
-	documentReader  interfaces.DocumentReader
-	chunkService    interfaces.ChunkService
-	chunkRepo       interfaces.ChunkRepository
-	tagRepo         interfaces.KnowledgeTagRepository
-	tagService      interfaces.KnowledgeTagService
-	fileSvc         interfaces.FileService
-	modelService    interfaces.ModelService
-	task            interfaces.TaskEnqueuer
-	taskInspector   interfaces.TaskInspector
-	graphEngine     interfaces.RetrieveGraphRepository
-	redisClient     *redis.Client
-	kbShareService  interfaces.KBShareService
-	imageResolver   *docparser.ImageResolver
-	taskPendingRepo interfaces.TaskPendingOpsRepository
-	wikiDeleteCoord *wikidelete.Coordinator
-	auxObjects      *knowledgeaux.Registry
-	splitManager    *documentsplit.Manager
-	modelAdmission  *modeladmission.Manager
-	contentCache    *contentcache.Store
+	config           *config.Config
+	retrieveEngine   interfaces.RetrieveEngineRegistry
+	ownership        retriever.TenantStoreOwnership
+	repo             interfaces.KnowledgeRepository
+	kbService        interfaces.KnowledgeBaseService
+	tenantRepo       interfaces.TenantRepository
+	tenantService    interfaces.TenantService
+	documentReader   interfaces.DocumentReader
+	chunkService     interfaces.ChunkService
+	chunkRepo        interfaces.ChunkRepository
+	tagRepo          interfaces.KnowledgeTagRepository
+	tagService       interfaces.KnowledgeTagService
+	fileSvc          interfaces.FileService
+	modelService     interfaces.ModelService
+	task             interfaces.TaskEnqueuer
+	taskInspector    interfaces.TaskInspector
+	graphEngine      interfaces.RetrieveGraphRepository
+	redisClient      *redis.Client
+	kbShareService   interfaces.KBShareService
+	imageResolver    *docparser.ImageResolver
+	taskPendingRepo  interfaces.TaskPendingOpsRepository
+	wikiDeleteCoord  *wikidelete.Coordinator
+	auxObjects       *knowledgeaux.Registry
+	splitManager     *documentsplit.Manager
+	modelAdmission   *modeladmission.Manager
+	contentCache     *contentcache.Store
+	purgeCoordinator knowledgeDeletionResidueCoordinator
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -123,38 +126,40 @@ func NewKnowledgeService(
 	splitManager *documentsplit.Manager,
 	modelAdmission *modeladmission.Manager,
 	contentCache *contentcache.Store,
+	purgeCoordinator *knowledgepurge.Coordinator,
 	spanTracker SpanTracker,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
-		config:          config,
-		repo:            repo,
-		kbService:       kbService,
-		tenantRepo:      tenantRepo,
-		tenantService:   tenantService,
-		documentReader:  documentReader,
-		chunkService:    chunkService,
-		chunkRepo:       chunkRepo,
-		tagRepo:         tagRepo,
-		tagService:      tagService,
-		fileSvc:         fileSvc,
-		modelService:    modelService,
-		task:            task,
-		taskInspector:   taskInspector,
-		graphEngine:     graphEngine,
-		retrieveEngine:  retrieveEngine,
-		ownership:       ownership,
-		redisClient:     redisClient,
-		kbShareService:  kbShareService,
-		imageResolver:   imageResolver,
-		wikiRepo:        wikiRepo,
-		wikiService:     wikiService,
-		taskPendingRepo: taskPendingRepo,
-		wikiDeleteCoord: wikiDeleteCoord,
-		auxObjects:      auxObjects,
-		splitManager:    splitManager,
-		modelAdmission:  modelAdmission,
-		contentCache:    contentCache,
-		spanTracker:     spanTracker,
+		config:           config,
+		repo:             repo,
+		kbService:        kbService,
+		tenantRepo:       tenantRepo,
+		tenantService:    tenantService,
+		documentReader:   documentReader,
+		chunkService:     chunkService,
+		chunkRepo:        chunkRepo,
+		tagRepo:          tagRepo,
+		tagService:       tagService,
+		fileSvc:          fileSvc,
+		modelService:     modelService,
+		task:             task,
+		taskInspector:    taskInspector,
+		graphEngine:      graphEngine,
+		retrieveEngine:   retrieveEngine,
+		ownership:        ownership,
+		redisClient:      redisClient,
+		kbShareService:   kbShareService,
+		imageResolver:    imageResolver,
+		wikiRepo:         wikiRepo,
+		wikiService:      wikiService,
+		taskPendingRepo:  taskPendingRepo,
+		wikiDeleteCoord:  wikiDeleteCoord,
+		auxObjects:       auxObjects,
+		splitManager:     splitManager,
+		modelAdmission:   modelAdmission,
+		contentCache:     contentCache,
+		purgeCoordinator: purgeCoordinator,
+		spanTracker:      spanTracker,
 	}, nil
 }
 
@@ -229,6 +234,33 @@ func isDurableTaskDeferred(err error) bool {
 		modeladmission.IsModelWorkDeferred(err)
 }
 
+// deferTrackedSpanIfDurableWait keeps control-plane waits out of the business
+// failure surface. The V2 bridge also uses the task-local provider marker to
+// roll back the speculative real-attempt increment only when no provider call
+// started during this invocation.
+func deferTrackedSpanIfDurableWait(
+	ctx context.Context,
+	tracker SpanTracker,
+	span *Span,
+	errs ...error,
+) bool {
+	if tracker == nil || span == nil {
+		return false
+	}
+	for _, err := range errs {
+		if !isDurableTaskDeferred(err) {
+			continue
+		}
+		reason := "model_or_infrastructure_wait"
+		if errors.Is(err, context.Canceled) {
+			reason = "worker_interrupted"
+		}
+		tracker.DeferSpan(ctx, span, reason, err)
+		return true
+	}
+	return false
+}
+
 // finalizeSubtaskDetachedTimeout bounds the detached decrement so a wedged DB
 // connection can't hang a worker goroutine forever in its terminal defer.
 const finalizeSubtaskDetachedTimeout = 10 * time.Second
@@ -263,6 +295,14 @@ func finalizeSubtaskDetached(
 	degraded bool,
 	superseded, final bool,
 ) error {
+	// A durable derivative work item owns its business outcome until the
+	// non-counted finalizer has observed every PostgreSQL sibling in a
+	// terminal state. Letting the reused native handler decrement here can
+	// clear processing_generation before the durable finalizer is claimed,
+	// making that finalizer cancel itself on its own generation fence.
+	if derivativequeue.IsDurableExecution(ctx) {
+		return nil
+	}
 	// Provider outages are durable backpressure, even when this delivery had
 	// already reached its historical MaxRetry before the shared circuit
 	// opened. Asynq reschedules these errors without spending retry budget, so
@@ -423,6 +463,12 @@ func (s *knowledgeService) failPostprocessSubspan(
 		return
 	}
 	s.tracker().FailSpan(ctx, span, code, msg, err)
+}
+
+func (s *knowledgeService) deferPostprocessSubspanIfNeeded(
+	ctx context.Context, span *Span, errs ...error,
+) bool {
+	return deferTrackedSpanIfDurableWait(ctx, s.tracker(), span, errs...)
 }
 
 // getParserEngineOverridesFromContext returns parser engine overrides from tenant in context (e.g. MinerU endpoint, API key).

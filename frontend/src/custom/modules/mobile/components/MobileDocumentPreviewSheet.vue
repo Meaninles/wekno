@@ -28,6 +28,9 @@ import MobileIcon from "./MobileIcon.vue";
 
 const props = defineProps<{
   item: Record<string, any> | null;
+  sourceKey?: string;
+  blobLoader?: (signal?: AbortSignal) => Promise<Blob>;
+  downloadHandler?: () => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -47,20 +50,34 @@ const chunkRoot = ref<HTMLElement | null>(null);
 let generation = 0;
 let bodyLocked = false;
 let previousBodyOverflow = "";
+let chunkImageObserver: IntersectionObserver | null = null;
 
-const knowledgeID = computed(() =>
-  String(detail.value?.id || props.item?.id || props.item?.knowledge_id || "").trim(),
+const externalSource = computed(() => typeof props.blobLoader === "function");
+const knowledgeID = computed(() => externalSource.value
+  ? ""
+  : String(detail.value?.id || props.item?.id || props.item?.knowledge_id || "").trim(),
+);
+const previewSourceKey = computed(() =>
+  String(props.sourceKey || knowledgeID.value).trim(),
+);
+const chunkPreviewAvailable = computed(() => !externalSource.value && !!knowledgeID.value);
+const downloadAvailable = computed(() =>
+  typeof props.downloadHandler === "function" || !!knowledgeID.value,
 );
 
 const fileName = computed(() =>
   String(
     detail.value?.original_file_name ||
-      detail.value?.file_name ||
-      detail.value?.title ||
-      props.item?.original_file_name ||
-      props.item?.file_name ||
-      props.item?.title ||
-      "知识库文档",
+    detail.value?.file_name ||
+    detail.value?.filename ||
+    detail.value?.display_name ||
+    detail.value?.title ||
+    props.item?.original_file_name ||
+    props.item?.file_name ||
+    props.item?.filename ||
+    props.item?.display_name ||
+    props.item?.title ||
+    "知识库文档",
   ).trim(),
 );
 
@@ -76,6 +93,9 @@ const fileType = computed(() => {
 
 const fileSize = computed(() =>
   Number(detail.value?.file_size || props.item?.file_size || 0),
+);
+const tenantID = computed(() =>
+  String(detail.value?.tenant_id || props.item?.tenant_id || "").trim(),
 );
 const parseStatus = computed(() =>
   String(detail.value?.parse_status || props.item?.parse_status || ""),
@@ -111,7 +131,33 @@ function unlockBody() {
 
 async function hydrateChunks() {
   await nextTick();
-  await hydrateProtectedFileImages(chunkRoot.value);
+  chunkImageObserver?.disconnect();
+  chunkImageObserver = null;
+  const root = chunkRoot.value;
+  if (!root) return;
+  const cards = Array.from(root.querySelectorAll<HTMLElement>("article"));
+  if (!cards.length) return;
+
+  const hydrateCard = (card: HTMLElement) => {
+    void hydrateProtectedFileImages(card, undefined, tenantID.value);
+  };
+  if (typeof IntersectionObserver === "undefined") {
+    for (const card of cards) await hydrateProtectedFileImages(card, undefined, tenantID.value);
+    return;
+  }
+
+  const scrollRoot = root.closest<HTMLElement>(".mobile-document-preview__body");
+  chunkImageObserver = new IntersectionObserver(
+    (entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        hydrateCard(entry.target as HTMLElement);
+      }
+    },
+    { root: scrollRoot, rootMargin: "100% 0px", threshold: 0.01 },
+  );
+  cards.forEach((card) => chunkImageObserver?.observe(card));
 }
 
 async function loadChunks(page = 1) {
@@ -126,7 +172,6 @@ async function loadChunks(page = 1) {
     chunks.value = Array.isArray(response?.data) ? response.data : [];
     chunkTotal.value = Number(response?.total || chunks.value.length);
     chunkPage.value = Number(response?.page || page);
-    await hydrateChunks();
   } catch (error: any) {
     if (requestGeneration !== generation) return;
     chunkError.value = error?.message || "解析内容加载失败";
@@ -149,10 +194,14 @@ async function showChunkPage(page: number) {
 }
 
 async function downloadDocument() {
-  if (!knowledgeID.value || downloading.value) return;
+  if (!downloadAvailable.value || downloading.value) return;
   downloading.value = true;
   try {
-    await downloadKnowledgeNatively(knowledgeID.value);
+    if (props.downloadHandler) {
+      await props.downloadHandler();
+    } else {
+      await downloadKnowledgeNatively(knowledgeID.value);
+    }
   } catch (error: any) {
     MessagePlugin.error(error?.message || "下载失败");
     downloading.value = false;
@@ -165,18 +214,23 @@ watch(
     const requestGeneration = ++generation;
     detail.value = item ? { ...item } : {};
     chunks.value = [];
+    chunkImageObserver?.disconnect();
+    chunkImageObserver = null;
     chunkTotal.value = 0;
     chunkPage.value = 1;
     chunkError.value = "";
     chunkLoading.value = false;
+    detailLoading.value = false;
     downloading.value = false;
     if (!item) {
       unlockBody();
       return;
     }
     lockBody();
-    viewMode.value = previewSupported.value ? "original" : "chunks";
-    if (viewMode.value === "chunks") void loadChunks(1);
+    viewMode.value = previewSupported.value || !chunkPreviewAvailable.value ? "original" : "chunks";
+    if (viewMode.value === "chunks" && chunkPreviewAvailable.value) void loadChunks(1);
+
+    if (externalSource.value) return;
 
     const id = knowledgeID.value;
     if (!id) return;
@@ -188,7 +242,7 @@ watch(
         ...item,
         ...(response?.data || response || {}),
       };
-      if (!previewSupported.value) {
+      if (!previewSupported.value && chunkPreviewAvailable.value) {
         viewMode.value = "chunks";
         if (!chunks.value.length) void loadChunks(1);
       }
@@ -202,11 +256,17 @@ watch(
   { immediate: true },
 );
 
-watch(renderedChunks, () => {
-  void hydrateChunks();
-}, { flush: "post" });
+watch(
+  [renderedChunks, chunkLoading, viewMode],
+  ([items, loading, mode]) => {
+    if (mode === "chunks" && !loading && items.length) void hydrateChunks();
+  },
+  { flush: "post" },
+);
 
 onBeforeUnmount(() => {
+  chunkImageObserver?.disconnect();
+  chunkImageObserver = null;
   generation += 1;
   unlockBody();
 });
@@ -231,7 +291,7 @@ onBeforeUnmount(() => {
           type="button"
           class="download-button"
           :class="{ loading: downloading }"
-          :disabled="downloading || !knowledgeID"
+          :disabled="downloading || !downloadAvailable"
           aria-label="下载文档"
           @click="downloadDocument"
         >
@@ -239,9 +299,13 @@ onBeforeUnmount(() => {
         </button>
       </header>
 
-      <nav class="mobile-document-preview__tabs" aria-label="文档查看方式">
+      <nav
+        v-if="externalSource || previewSupported || chunkPreviewAvailable"
+        class="mobile-document-preview__tabs"
+        aria-label="文档查看方式"
+      >
         <button
-          v-if="previewSupported"
+          v-if="previewSupported || externalSource"
           type="button"
           :class="{ active: viewMode === 'original' }"
           @click="viewMode = 'original'"
@@ -249,6 +313,7 @@ onBeforeUnmount(() => {
           原文预览
         </button>
         <button
+          v-if="chunkPreviewAvailable"
           type="button"
           :class="{ active: viewMode === 'chunks' }"
           @click="showChunks"
@@ -261,13 +326,16 @@ onBeforeUnmount(() => {
       <main class="mobile-document-preview__body">
         <section v-if="viewMode === 'original'" class="mobile-document-preview__original">
           <DocumentPreview
-            :knowledge-id="knowledgeID"
+            :knowledge-id="externalSource ? undefined : knowledgeID"
+            :source-key="previewSourceKey"
             :file-type="fileType"
             :file-name="fileName"
             :file-size="fileSize"
             :chunk-count="chunkTotal"
             :parse-status="parseStatus"
             :active="viewMode === 'original'"
+            :blob-loader="blobLoader"
+            :mobile-fit="true"
             @use-chunks="showChunks"
           />
         </section>
@@ -546,6 +614,21 @@ onBeforeUnmount(() => {
 .mobile-rich-content :deep(img) {
   max-width: 100%;
   height: auto;
+}
+
+.mobile-rich-content :deep(img[data-img-loading="1"]) {
+  display: block;
+  width: 100%;
+  min-height: min(68dvh, 620px);
+  border-radius: 6px;
+  background: linear-gradient(100deg, #f1f4f2 20%, #fafcfb 38%, #f1f4f2 56%);
+  background-size: 200% 100%;
+  animation: mobileDocumentImageLoading 1.25s ease-in-out infinite;
+}
+
+@keyframes mobileDocumentImageLoading {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }
 
 .mobile-rich-content :deep(table) {

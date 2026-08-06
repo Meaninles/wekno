@@ -2704,12 +2704,12 @@ func (s *knowledgeService) buildMovedKnowledgeReparseTask(
 	if knowledge.FilePath != "" {
 		enableMultimodel := targetKB.IsMultimodalEnabled()
 		enableQuestionGeneration := false
-		questionCount := 3
+		questionCount := types.DefaultQuestionGenerationCount
 		if targetKB.QuestionGenerationConfig != nil && targetKB.QuestionGenerationConfig.Enabled {
 			enableQuestionGeneration = true
-			if targetKB.QuestionGenerationConfig.QuestionCount > 0 {
-				questionCount = targetKB.QuestionGenerationConfig.QuestionCount
-			}
+			questionCount = types.NormalizeQuestionGenerationCount(
+				targetKB.QuestionGenerationConfig.QuestionCount,
+			)
 		}
 
 		lang, _ := types.LanguageFromContext(ctx)

@@ -14,9 +14,10 @@ import (
 )
 
 type fanoutTestEnqueuer struct {
-	calls  int
-	failAt int
-	err    error
+	calls     int
+	failAt    int
+	err       error
+	lastQueue string
 }
 
 type countingCompletionStore struct {
@@ -65,12 +66,32 @@ func (s *countingCompletionStore) KnowledgeFanoutCompletionExists(
 	return exists, nil
 }
 
-func (e *fanoutTestEnqueuer) Enqueue(task *asynq.Task, _ ...asynq.Option) (*asynq.TaskInfo, error) {
+func (e *fanoutTestEnqueuer) Enqueue(task *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
 	e.calls++
+	for _, opt := range opts {
+		if opt != nil && opt.Type() == asynq.QueueOpt {
+			e.lastQueue, _ = opt.Value().(string)
+		}
+	}
 	if e.failAt > 0 && e.calls == e.failAt {
 		return nil, e.err
 	}
 	return &asynq.TaskInfo{ID: fmt.Sprintf("task-%d", e.calls), Type: task.Type(), Queue: types.QueueDefault}, nil
+}
+
+func TestEnqueuePostProcessUsesParseOrchestratorQueue(t *testing.T) {
+	enqueuer := &fanoutTestEnqueuer{}
+	err := EnqueuePostProcessContext(context.Background(), enqueuer, types.KnowledgePostProcessPayload{
+		TenantID: 42, KnowledgeID: "knowledge-1", KnowledgeBaseID: "kb-1",
+		ProcessingGeneration: "generation-1", Attempt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enqueuer.lastQueue != types.QueueDefault {
+		t.Fatalf("postprocess queue = %q, want parse/background queue %q",
+			enqueuer.lastQueue, types.QueueDefault)
+	}
 }
 
 func fanoutTestRedis(t *testing.T) *redis.Client {
@@ -100,6 +121,36 @@ func uniqueFanoutPlan() FanoutPlan {
 			{ChunkID: "chunk-1", ImageURL: "local://image-1", Index: 0},
 			{ChunkID: "chunk-2", ImageURL: "local://image-2", Index: 1},
 		},
+	}
+}
+
+func TestDataTableMetadataIsHandoffOnlyAndDoesNotGateCoreFanIn(t *testing.T) {
+	plan := FanoutPlan{
+		Version:              FanoutPlanVersion,
+		TenantID:             42,
+		KnowledgeID:          "table-1",
+		KnowledgeBaseID:      "kb-1",
+		ProcessingGeneration: "generation-1",
+		DataTable: &DataTableFanout{
+			SummaryModel: "model-1", EmbeddingModel: "embedding-1",
+		},
+	}
+	if got := plan.itemCount(); got != 0 {
+		t.Fatalf("core fan-in items = %d, want 0", got)
+	}
+	if plan.containsItem(DataTableFanoutItem()) {
+		t.Fatal("table metadata unexpectedly participates in core fan-in")
+	}
+	raw, err := MarshalFanoutPlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := ParseFanoutPlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.DataTable == nil || restored.DataTable.EmbeddingModel != "embedding-1" {
+		t.Fatal("table derivative handoff was lost while removing the core gate")
 	}
 }
 

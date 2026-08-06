@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // recordingStreamSender records streaming calls for TDD verification.
@@ -54,10 +55,8 @@ func (m *recordingStreamSender) snapshot() (chunks []string, final string, ended
 }
 
 func TestStreamDisplayPipeline_agentScenario_redGreen(t *testing.T) {
-	// Simulates the agent IM stream lifecycle aligned with Web:
-	// 1) intermediate updates show styled thinking + tools
-	// 2) final replace shows answer only (no collapsed think header)
-	rawIntermediate := "<think>\n分析 Civilization VI 问题\n正在调用 搜索关键词...\n搜索关键词\n</think>\n\n"
+	// Simulates the agent IM stream lifecycle aligned with Web: raw thinking
+	// and tool telemetry stay internal while the final replace is answer-only.
 
 	rec := &recordingStreamSender{}
 	ctx := context.Background()
@@ -68,13 +67,17 @@ func TestStreamDisplayPipeline_agentScenario_redGreen(t *testing.T) {
 		t.Fatalf("StartStream: %v", err)
 	}
 
-	intermediate := FormatIMDisplayContent(rawIntermediate, StreamDisplayIntermediate)
+	intermediate := FormatIMUserVisibleIntermediate(IMStreamParts{
+		Mode:           IMStreamModeAgent,
+		AgentInner:     "分析 Civilization VI 问题",
+		AgentToolSteps: []IMToolStep{{ToolName: "grep_chunks", Pending: true}},
+	}, true, 6*time.Second)
 	if err := rec.UpdateStreamContent(ctx, incoming, streamID, intermediate); err != nil {
 		t.Fatalf("UpdateStreamContent intermediate: %v", err)
 	}
 
 	final := FormatIMFinalFromParts(IMStreamParts{
-		Mode: IMStreamModeAgent,
+		Mode:       IMStreamModeAgent,
 		AgentInner: "分析 Civilization VI 问题\n",
 		AgentToolSteps: []IMToolStep{
 			{ToolName: "grep_chunks", Success: true},
@@ -98,6 +101,9 @@ func TestStreamDisplayPipeline_agentScenario_redGreen(t *testing.T) {
 	}
 	if chunks[0] == final {
 		t.Fatal("intermediate update should differ from final answer-only content")
+	}
+	if chunks[0] != "正在处理，请稍候 · 已用 5 秒" {
+		t.Fatalf("agent intermediate content = %q", chunks[0])
 	}
 	if finalized != "《文明6》是回合制策略游戏。" {
 		t.Fatalf("FinalizeStream content = %q", finalized)

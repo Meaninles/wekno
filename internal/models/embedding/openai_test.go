@@ -5,8 +5,34 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestDiagnoseEmbeddingInputDoesNotTreatUTF8BytesAsTokens(t *testing.T) {
+	text := strings.Repeat("制度", 2_000)
+	diagnostic := diagnoseEmbeddingInput(text)
+
+	if diagnostic.Bytes <= 8_192 {
+		t.Fatalf("test input bytes = %d, want > 8192", diagnostic.Bytes)
+	}
+	if diagnostic.EstimatedTokens >= 8_192 {
+		t.Fatalf("estimated tokens = %d, want < 8192", diagnostic.EstimatedTokens)
+	}
+	if diagnostic.Runes != 4_000 {
+		t.Fatalf("runes = %d, want 4000", diagnostic.Runes)
+	}
+}
+
+func TestEmbeddingInputPreviewPreservesValidUTF8(t *testing.T) {
+	preview := embeddingInputPreview(strings.Repeat("列说明", 100), 17)
+	if !strings.HasSuffix(preview, "...") {
+		t.Fatalf("preview missing truncation marker: %q", preview)
+	}
+	if len([]rune(strings.TrimSuffix(preview, "..."))) != 17 {
+		t.Fatalf("preview rune count = %d, want 17", len([]rune(strings.TrimSuffix(preview, "..."))))
+	}
+}
 
 func TestOpenAIEmbedderBatchEmbedOmitsDimensionsByDefault(t *testing.T) {
 	requestBody := captureOpenAIEmbeddingRequest(t, "text-embedding-3-small", 256, false)

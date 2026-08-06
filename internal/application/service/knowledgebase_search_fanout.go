@@ -59,15 +59,14 @@ func (s *knowledgeBaseService) retrieveFromStores(
 
 	timeout := multiStoreRetrieveTimeout()
 
-	var (
-		mu  sync.Mutex
-		all []*types.RetrieveResult
-	)
+	var mu sync.Mutex
+	byGroup := make([][]*types.RetrieveResult, len(groups))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(defaultMultiStoreFanoutLimit)
 
 	for i := range groups {
-		grp := groups[i]
+		groupIndex := i
+		grp := groups[groupIndex]
 		g.Go(func() error {
 			gcCtx, cancel := context.WithTimeout(gctx, timeout)
 			defer cancel()
@@ -81,7 +80,7 @@ func (s *knowledgeBaseService) retrieveFromStores(
 				return fmt.Errorf("store group retrieve: %w", err)
 			}
 			mu.Lock()
-			all = append(all, res...)
+			byGroup[groupIndex] = res
 			mu.Unlock()
 			return nil
 		})
@@ -102,6 +101,10 @@ func (s *knowledgeBaseService) retrieveFromStores(
 		// no internal detail.
 		return nil, apperrors.NewVectorStoreUnavailableError(
 			"vector retrieval failed for one or more bound stores")
+	}
+	all := make([]*types.RetrieveResult, 0)
+	for _, results := range byGroup {
+		all = append(all, results...)
 	}
 
 	// Apply normalizer only when results span >1 distinct engine type.

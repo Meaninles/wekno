@@ -53,8 +53,6 @@ class RuntimeConfigSpec(BaseModel):
     history_turns: int = 0
     mcp_selection_mode: str = ""
     mcp_services: list[str] = Field(default_factory=list)
-    skills_enabled: bool = False
-    allowed_skills: list[str] = Field(default_factory=list)
     professional_skills_enabled: bool = False
     allowed_professional_skills: list[str] = Field(default_factory=list)
     retrieve_kb_only_when_mentioned: bool = False
@@ -81,7 +79,6 @@ class RuntimeConfigSpec(BaseModel):
         "knowledge_ids",
         "db_data_sources",
         "mcp_services",
-        "allowed_skills",
         "allowed_professional_skills",
         mode="before",
     )
@@ -158,6 +155,13 @@ class ProfessionalSkillSpec(BaseModel):
     files: list[ProfessionalSkillFileSpec] = Field(default_factory=list)
 
 
+class LightweightSkillSpec(BaseModel):
+    key: str
+    name: str
+    description: str = ""
+    instructions: str = ""
+
+
 class ChatPayload(BaseModel):
     run_id: str
     tenant_id: int = 0
@@ -171,7 +175,8 @@ class ChatPayload(BaseModel):
     image_urls: list[str] = Field(default_factory=list)
     image_description: str = ""
     quoted_context: str = ""
-    selected_skill_context: str = ""
+    lightweight_skill_policy: str = ""
+    lightweight_skills: list[LightweightSkillSpec] = Field(default_factory=list)
     attachments: list[AttachmentSpec] = Field(default_factory=list)
     original_input_files: list[OriginalInputFileSpec] = Field(default_factory=list)
     document_template_context: DocumentTemplateContextSpec = Field(default_factory=DocumentTemplateContextSpec)
@@ -190,6 +195,7 @@ class ChatPayload(BaseModel):
         "image_urls",
         "attachments",
         "original_input_files",
+        "lightweight_skills",
         "professional_skills",
         "tools",
         mode="before",

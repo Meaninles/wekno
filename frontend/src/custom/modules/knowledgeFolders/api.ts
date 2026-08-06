@@ -2,6 +2,8 @@ import { del, get, post, postUpload, put } from '@/utils/request'
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess'
 import type {
   KnowledgeFolder,
+	KnowledgeBaseTaskStats,
+	KnowledgeFolderDeleteOperation,
   KnowledgeFolderListParams,
   KnowledgeFolderNodePage,
   KnowledgeFolderOption,
@@ -84,11 +86,25 @@ export function updateKnowledgeFolder(
 export function deleteKnowledgeFolder(
   knowledgeBaseId: string,
   folderId: string,
-  mode: 'reject' | 'move_to_parent' = 'reject',
 ) {
-  return del<{ success: boolean }>(
-    `${base(knowledgeBaseId)}/folders/${encodeURIComponent(folderId)}?mode=${mode}`,
+	return del<{ success: boolean; data: KnowledgeFolderDeleteOperation }>(
+		`${base(knowledgeBaseId)}/folders/${encodeURIComponent(folderId)}`,
   )
+}
+
+export function getKnowledgeFolderDeleteOperation(
+	knowledgeBaseId: string,
+	operationId: string,
+) {
+	return get<{ success: boolean; data: KnowledgeFolderDeleteOperation }>(
+		`${base(knowledgeBaseId)}/folder-delete-operations/${encodeURIComponent(operationId)}`,
+	)
+}
+
+export function getKnowledgeBaseTaskStats(knowledgeBaseId: string) {
+	return get<{ success: boolean; data: KnowledgeBaseTaskStats }>(
+		`${base(knowledgeBaseId)}/task-stats`,
+	)
 }
 
 export function moveKnowledgeDocumentsToFolder(

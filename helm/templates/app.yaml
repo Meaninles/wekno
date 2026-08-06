@@ -69,6 +69,63 @@ spec:
               value: "k8s/$(POD_NAMESPACE)/$(POD_UID)"
             - name: CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART
               value: "true"
+            {{- if .Values.app.runtimeRoles.enabled }}
+            # In split-runtime mode this stable Deployment is the only public
+            # API role. Workers are rendered separately and never match the
+            # Service selector below.
+            - name: WEKNORA_RUNTIME_ROLE
+              value: "api"
+            - name: CUSTOM_RUNTIME_ENV
+              value: {{ .Values.app.runtimeRoles.environment | quote }}
+            - name: CUSTOM_RUNTIME_ROLE_ENFORCED
+              value: "true"
+            - name: CUSTOM_DATABASE_POOL_BUDGET_ENFORCED
+              value: "true"
+            - name: CUSTOM_POSTGRES_MAX_CONNECTIONS
+              value: {{ .Values.app.runtimeRoles.postgresMaxConnections | quote }}
+            - name: WEKNORA_REDIS_NAMESPACE
+              value: {{ .Values.app.runtimeRoles.redisNamespace | quote }}
+            - name: CUSTOM_RUNTIME_API_REPLICAS
+              value: {{ .Values.app.replicaCount | quote }}
+            - name: CUSTOM_RUNTIME_PARSE_WORKER_REPLICAS
+              value: {{ ternary (toString .Values.app.runtimeRoles.parseWorker.replicaCount) "0" .Values.app.runtimeRoles.parseWorker.enabled | quote }}
+            - name: CUSTOM_RUNTIME_DERIVATIVE_WORKER_REPLICAS
+              value: {{ ternary (toString .Values.app.runtimeRoles.derivativeWorker.replicaCount) "0" .Values.app.runtimeRoles.derivativeWorker.enabled | quote }}
+            - name: CUSTOM_RUNTIME_WIKI_WORKER_REPLICAS
+              value: {{ ternary (toString .Values.app.runtimeRoles.wikiWorker.replicaCount) "0" .Values.app.runtimeRoles.wikiWorker.enabled | quote }}
+            - name: CUSTOM_RUNTIME_MAINTENANCE_REPLICAS
+              value: {{ ternary (toString .Values.app.runtimeRoles.maintenance.replicaCount) "0" .Values.app.runtimeRoles.maintenance.enabled | quote }}
+            - name: CUSTOM_RUNTIME_MIGRATION_REPLICAS
+              value: {{ ternary "1" "0" .Values.app.runtimeRoles.migration.enabled | quote }}
+            - name: CUSTOM_RUNTIME_API_MAX_OPEN_CONNS
+              value: {{ .Values.app.env.CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS | quote }}
+            - name: CUSTOM_RUNTIME_PARSE_WORKER_MAX_OPEN_CONNS
+              value: {{ .Values.app.runtimeRoles.parseWorker.maxOpenConns | quote }}
+            - name: CUSTOM_RUNTIME_DERIVATIVE_WORKER_MAX_OPEN_CONNS
+              value: {{ .Values.app.runtimeRoles.derivativeWorker.maxOpenConns | quote }}
+            - name: CUSTOM_RUNTIME_WIKI_WORKER_MAX_OPEN_CONNS
+              value: {{ .Values.app.runtimeRoles.wikiWorker.maxOpenConns | quote }}
+            - name: CUSTOM_RUNTIME_MAINTENANCE_MAX_OPEN_CONNS
+              value: {{ .Values.app.runtimeRoles.maintenance.maxOpenConns | quote }}
+            - name: CUSTOM_RUNTIME_MIGRATION_MAX_OPEN_CONNS
+              value: {{ .Values.app.runtimeRoles.migration.maxOpenConns | quote }}
+            # All role Deployments use maxSurge=0 in the production profile,
+            # so rollout does not add another database pool per role.
+            - name: CUSTOM_RUNTIME_API_ROLLING_MAX
+              value: "0"
+            - name: CUSTOM_RUNTIME_PARSE_WORKER_ROLLING_MAX
+              value: "0"
+            - name: CUSTOM_RUNTIME_DERIVATIVE_WORKER_ROLLING_MAX
+              value: "0"
+            - name: CUSTOM_RUNTIME_WIKI_WORKER_ROLLING_MAX
+              value: "0"
+            - name: CUSTOM_RUNTIME_MAINTENANCE_ROLLING_MAX
+              value: "0"
+            - name: CUSTOM_RUNTIME_MIGRATION_ROLLING_MAX
+              value: "0"
+            - name: CUSTOM_AUTO_MIGRATE
+              value: "false"
+            {{- end }}
             {{- if .Values.app.documentQueue.kubernetesRuntimeVerifier.enabled }}
             - name: CUSTOM_DOCUMENT_QUEUE_KUBERNETES_RUNTIME_VERIFIER_ENABLED
               value: "true"
@@ -315,7 +372,7 @@ spec:
           {{- else if eq (.Values.app.scratch.volumeType | default "emptyDir") "hostPath" }}
           hostPath:
             path: {{ .Values.app.scratch.hostPath.path | default "/mnt/weknora-data/scratch-app" | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.app.scratch.hostPath.type | default "DirectoryOrCreate" }}
           {{- else }}
           emptyDir:
             {{- with .Values.app.scratch.sizeLimit }}

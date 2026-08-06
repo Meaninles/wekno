@@ -15,7 +15,8 @@ Wiki、知识图谱、问题生成、多模态和音频处理，并把知识检�
 
 > 当前代码的完整架构、状态语义、生产拓扑和文档地图见
 > [当前实现架构与文档索引](./docs/custom/当前实现架构与文档索引.md)。
-> 生产人员请直接从
+> 当前生产版本、资源和并发的第一权威说明是
+> [当前生产实现与部署基线](./docs/custom/当前生产实现与部署基线.md)。生产人员请从
 > [当前版本生产更新部署执行手册](./docs/custom/当前版本生产更新部署执行手册.md)
 > 开始，不能只使用上游 WeKnora 的部署说明或默认 Helm 值。
 
@@ -102,7 +103,8 @@ flowchart TB
 
 架构的五条硬约束：
 
-1. 每个 app 副本都能完成一份文档的解析、向量化和全部启用衍生阶段。
+1. 同一 app 镜像按 API、parse、derivative、wiki 和 maintenance 角色运行；
+   parse-worker 领取完整文档，衍生角色在同一持久工作流边界内收敛结果。
 2. PostgreSQL 是文档工作流事实来源，Redis 是可重投的投递和集群准入层。
 3. Go app 是权限、租户、工具、MCP、业务数据库和持久化的唯一控制边界。
 4. 生产长期文件全部进入私有 OBS，app/DocReader/Agent 仅使用独立本地临时盘。
@@ -114,8 +116,8 @@ flowchart TB
 flowchart LR
     In["上传 / 重建"] --> WF["PostgreSQL 持久工作流"]
     WF --> Q["Redis / Asynq 投递"]
-    Q --> A1["app-1\n完整文档并发 4"]
-    Q --> A2["app-2\n完整文档并发 4"]
+    Q --> A1["parse-worker-1\n完整文档并发 4"]
+    Q --> A2["parse-worker-2\n完整文档并发 4"]
     Q --> A3["app-3\n完整文档并发 4"]
     A1 --> P["解析→分块→索引→衍生→终态"]
     A2 --> P
@@ -162,20 +164,20 @@ flowchart LR
 
 ### 4. 集群级模型准入
 
-模型和解析器并发通过 Redis 在整个集群共享，不能乘以 app 副本数：
+模型和解析器并发通过 Redis 在整个集群共享，不能乘以 API/worker 副本数：
 
-| 资源 | 集群并发 | 单租户 | 说明 |
-|---|---:|---:|---|
-| Chat | 24 | 12 | 保留 2 个交互槽位 |
-| Embedding | 32 | 16 | 批量向量化 |
-| Rerank | 24 | 12 | 检索重排 |
-| VLM | 4 | 2 | 图片/页面理解 |
-| ASR | 2 | 1 | 音频识别 |
-| Parser | 12 | 4 | 解析准入 |
+| 资源池 | 集群并发 | 交互预留 | 等待 | 单租户/单文档 |
+|---|---:|---:|---:|---:|
+| Qwen3.6-27B | 32 | 28 | 36 | 32 / 2 |
+| DeepSeek-V4-Flash INT8 | 16 | 14 | 16 | 16 / 2 |
+| Qwen3.6-35B-A3B | 32 | 8 | 0 | 32 / 4 |
+| Qwen3-Embedding-8B | 64 | — | — | 32 / 8 |
+| bge-reranker-v2-m3 | 64 | — | — | 64 / 2 |
+| Qwen3-VL-32B | 16 | — | — | 16 / 4 |
+| Qwen2.5-Omni-7B | 8 | — | — | 8 / 2 |
 
-DeepSeek V4 Flash 在 32 并发、每次实际生成 160 token 的容量测试中 32/32 成功，
-P95 5.655 秒；生产 Chat 取 24 保留约 25% 余量。该设置与每 app 的完整文档并发
-是两个不同层级。
+两个主要聊天池合计同时执行 48、等待 52，总接纳 100；100 已包含 48 个执行会话。
+该设置与每个 parse-worker 的完整文档并发是两个不同层级。
 
 ### 5. 无 RWX 存储
 
@@ -184,7 +186,7 @@ P95 5.655 秒；生产 Chat 取 24 保留约 25% 余量。该设置与每 app �
 | 原始知识文件、衍生对象 | MinIO | 私有 OBS |
 | Agent 最终产物 | MinIO | 私有 OBS |
 | Agent 原文件中转 | MinIO 临时唯一前缀 | OBS 临时唯一前缀，生命周期 ≤24h |
-| app/DocReader/Agent 工作区 | 容器/节点本地临时盘 | 每 Pod 独立 `csi-local-topology` RWO |
+| app/DocReader/Agent 工作区 | 容器/节点本地临时盘 | `/mnt/weknora-data/weknora-v2-scratch/<role>` 隔离 hostPath |
 | 状态、chunk、向量、问题、Wiki | PostgreSQL | PostgreSQL/ParadeDB |
 | 实体关系 | Neo4j | Neo4j |
 
@@ -220,18 +222,22 @@ P95 5.655 秒；生产 Chat 取 24 保留约 25% 余量。该设置与每 app �
 
 | 节点 | 规格 | 目标工作负载 |
 |---|---|---|
-| `10.14.201.1` | 8C/32Gi + 500G | app、DocReader、两个 Agent、frontend、mobile-web 各 1 |
-| `10.14.201.2` | 8C/32Gi + 500G | 与 `.1` 相同 |
-| `10.14.201.7` | 8C/32Gi + 迁移后数据盘 | app、DocReader 各 1 |
-| `10.14.201.6` | 8C/16Gi | 保留 PostgreSQL、LiteLLM、Ingress 等 |
+| `10.14.201.1` | 8C/32Gi + 500G | API、parse、derivative、maintenance、DocReader、两个 Agent、Web |
+| `10.14.201.2` | 8C/32Gi + 500G | API、parse、wiki、maintenance、DocReader、两个 Agent、Web |
+| `10.14.201.7` | 8C/32Gi + 数据盘 | API、parse、derivative、wiki、DocReader |
+| `10.14.201.6` | 8C/16Gi | PostgreSQL 和集群基础设施，不新增应用 worker |
 | `10.14.201.54` | 8C/16Gi | 保留 Neo4j、Ingress 等 |
 
 | 组件 | 副本 | request | limit | 临时卷 |
 |---|---:|---:|---:|---:|
-| app | 3 | 1.5C / 3Gi | 4C / 8Gi | 80Gi/Pod |
-| DocReader | 3 | 1.5C / 3Gi | 6C / 10Gi | 100Gi/Pod |
-| general-agent | 2 | 0.5C / 1Gi | 2C / 2Gi | 20Gi/Pod |
-| document-processing-agent | 2 | 1C / 1.5Gi | 3C / 4Gi | 40Gi/Pod |
+| API | 3 | 500m / 1280Mi | 1500m / 3Gi | 无状态 |
+| parse-worker | 3 | 1C / 2Gi | 3C / 5Gi | hostPath scratch |
+| derivative-worker | 2 | 500m / 1Gi | 1500m / 2Gi | hostPath scratch |
+| wiki-worker | 2 | 500m / 1Gi | 1500m / 2Gi | hostPath scratch |
+| maintenance | 2 | 150m / 384Mi | 750m / 1Gi | 无 |
+| DocReader | 3 | 750m / 1Gi | 4C / 4Gi | hostPath scratch |
+| general-agent | 2 | 250m / 768Mi | 1500m / 2Gi | hostPath scratch |
+| document-processing-agent | 2 | 500m / 1280Mi | 2500m / 4Gi | hostPath scratch |
 | frontend | 2 | 0.1C / 128Mi | 0.5C / 512Mi | 无 |
 | mobile-web | 2 | 0.05C / 64Mi | 0.3C / 512Mi | 无 |
 
@@ -253,20 +259,21 @@ P95 5.655 秒；生产 Chat 取 24 保留约 25% 余量。该设置与每 app �
 
 迁移不是简单 `helm upgrade`。执行手册覆盖：
 
-- 现网清单、配置、Secret、PostgreSQL、Neo4j 和 `/data/files` 备份。
+- 现网清单、配置、Secret 和 PostgreSQL 全量/停机增量备份；停机期间不变化的文件
+  不重复备份，回滚继续引用原 OBS 对象。
 - 排空在途文档和 Agent 运行、移除业务入口、建立回滚点。
 - 构建同一 Git SHA 的 app/DocReader/Agent/Web/sandbox 镜像并推送 SWR。
-- 节点标签、本地 500G 数据盘、Everest 本地卷池和真实读写/回收验证。
+- 节点标签、现有数据盘、隔离 hostPath scratch 和真实读写/清理验证。
 - 单迁移 app 串行执行数据库迁移和旧 Agent 产物迁移。
-- 盘点仍被数据库引用的 `/data/files`，上传 OBS，校验大小/SHA256，回填 URI。
-- 验证历史原文、图片和 Agent 产物可由任意 app 鉴权下载后，才释放旧卷。
+- 验证历史原文、图片和 Agent 产物可由任意 API Pod 鉴权下载，且原对象未变化。
 - 部署最终 3/3/2/2/2/2 副本，验证真实分流、故障接管和所有衍生任务。
 - 失败时按数据库/对象/清单的一致回滚点恢复，不能只回滚 Deployment。
 
 ### 当前高可用边界
 
-app、DocReader、Agent 和 Web 层已经多副本，但现有 PostgreSQL、Neo4j、LiteLLM
-仍为单实例，Redis 主从没有自动切换，且集群仍是单 AZ。当前版本解决的是文档执行
+API、worker、DocReader、Agent 和 Web 层已经多副本，但现有 PostgreSQL、Neo4j
+仍为单实例，Redis 主从没有自动切换，外部 llmgateway 是独立依赖，且集群仍是单
+AZ。当前版本解决的是文档执行
 层水平扩展、单 Pod/解析节点故障恢复和无 RWX 文件共享，不能宣称整套系统没有
 单点。
 
@@ -401,6 +408,7 @@ Neo4j、Wiki、对象存储、前端状态和真实召回。当前代表性结�
 
 | 主题 | 入口 |
 |---|---|
+| 当前生产基线 | [当前生产实现与部署基线](./docs/custom/当前生产实现与部署基线.md) |
 | 当前架构与全量索引 | [当前实现架构与文档索引](./docs/custom/当前实现架构与文档索引.md) |
 | 用户操作 | [用户使用指南](./docs/custom/使用指南/用户使用指南.md) |
 | 智能体开发 | [智能体开发指南](./docs/custom/使用指南/智能体开发指南.md) |

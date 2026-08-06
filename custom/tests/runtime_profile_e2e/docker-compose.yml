@@ -1,0 +1,299 @@
+name: weknora-runtime-profile-e2e
+
+x-runtime-common: &runtime-common
+  image: weknora-runtime-profile-e2e:local
+  build:
+    context: ../../..
+    dockerfile: custom/tests/runtime_profile_e2e/Dockerfile
+  working_dir: /workspace
+  env_file:
+    - ../../../.env
+  environment: &runtime-environment
+    GIN_MODE: release
+    CUSTOM_RUNTIME_ENV: production
+    CUSTOM_RUNTIME_ROLE_ENFORCED: "true"
+    CUSTOM_POSTGRES_MAX_CONNECTIONS: "100"
+    CUSTOM_RUNTIME_API_REPLICAS: "3"
+    CUSTOM_RUNTIME_PARSE_WORKER_REPLICAS: "2"
+    CUSTOM_RUNTIME_DERIVATIVE_WORKER_REPLICAS: "2"
+    CUSTOM_RUNTIME_WIKI_WORKER_REPLICAS: "2"
+    CUSTOM_RUNTIME_MAINTENANCE_REPLICAS: "2"
+    CUSTOM_RUNTIME_MIGRATION_REPLICAS: "1"
+    CUSTOM_RUNTIME_ROLLING_CONNECTION_BUDGET: "70"
+    AUTO_MIGRATE: "false"
+    CUSTOM_AUTO_MIGRATE: "false"
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DEV_DOCKER_DB_HOST: postgres
+    DEV_DOCKER_DB_PORT: "5432"
+    REDIS_ADDR: redis:6379
+    DEV_DOCKER_REDIS_ADDR: redis:6379
+    MINIO_ENDPOINT: minio:9000
+    DEV_DOCKER_MINIO_ENDPOINT: minio:9000
+    MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID:-minioadmin}
+    MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY:-minioadmin}
+    MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-weknora-original-inputs}
+    MINIO_PATH_PREFIX: ${MINIO_PATH_PREFIX:-weknora/__weknora_private_knowledge_objects_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+    STORAGE_TYPE: minio
+    MILVUS_ADDRESS: milvus:19530
+    NEO4J_URI: bolt://neo4j:7687
+    QDRANT_HOST: qdrant
+    DOCREADER_TRANSPORT: grpc
+    DUCKDB_SKIP_EXTENSION_LOAD: "true"
+    LOCAL_STORAGE_BASE_DIR: /workspace/.local-data/files
+    CUSTOM_MODEL_ADMISSION_ENABLED: "true"
+    CUSTOM_MODEL_ADMISSION_FAIL_CLOSED: "true"
+    CUSTOM_MODEL_ADMISSION_KEY_PREFIX: "weknora:model-admission:v2:"
+    CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART: "true"
+    CUSTOM_GENERAL_AGENT_URL: http://weknora-custom-general-agent:8091
+    CUSTOM_DOCUMENT_PROCESSING_AGENT_URL: http://weknora-custom-document-processing-agent:8091
+    CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
+    CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL: http://runtime-entry:8080/api/v1/custom/general-agent/internal/tools/call
+    CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL: http://runtime-entry:8080/api/v1/custom/general-agent/internal/artifacts/upload
+    CUSTOM_GENERAL_AGENT_ARTIFACT_STORAGE_PROVIDER: minio
+    CUSTOM_GENERAL_AGENT_ARTIFACT_BUCKET: ${CUSTOM_GENERAL_AGENT_ARTIFACT_BUCKET:-weknora-original-inputs}
+    CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX: ${CUSTOM_GENERAL_AGENT_ARTIFACT_PATH_PREFIX:-weknora/__weknora_private_agent_artifacts_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+    CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_MISSING: "true"
+    CUSTOM_GENERAL_AGENT_ARTIFACT_MIGRATION_ALLOW_INVALID: "true"
+    CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_STORAGE_PROVIDER: minio
+    CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_BUCKET: ${CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_BUCKET:-weknora-original-inputs}
+    CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX: ${CUSTOM_GENERAL_AGENT_ORIGINAL_INPUT_PATH_PREFIX:-weknora/__weknora_claude_sdk_original_inputs_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+    CUSTOM_SKILLHUB_PROFESSIONAL_STORAGE_PROVIDER: minio
+    CUSTOM_SKILLHUB_PROFESSIONAL_BUCKET: ${CUSTOM_SKILLHUB_PROFESSIONAL_BUCKET:-weknora-original-inputs}
+    CUSTOM_SKILLHUB_PROFESSIONAL_PATH_PREFIX: ${CUSTOM_SKILLHUB_PROFESSIONAL_PATH_PREFIX:-weknora/__weknora_private_professional_skills_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
+  volumes:
+    - ../../..:/workspace
+    - weknora-go-mod-cache:/go/pkg/mod:ro
+  networks:
+    - weknora-dev
+  restart: "no"
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+    interval: 5s
+    timeout: 3s
+    retries: 24
+    start_period: 15s
+
+services:
+  migration:
+    <<: *runtime-common
+    container_name: weknora-runtime-migration
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: migration
+      # The local developer database may have native migrations from another
+      # active branch. Keep native schema untouched and run custom migrations
+      # through CUSTOM_AUTO_MIGRATE only.
+      AUTO_MIGRATE: "false"
+      CUSTOM_AUTO_MIGRATE: "true"
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "3"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
+    healthcheck:
+      disable: true
+
+  runtime-api-1:
+    <<: *runtime-common
+    container_name: weknora-runtime-api-1
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: api
+      # Tool calls belong to an in-memory active run on this exact replica.
+      # Bypass the API load balancer for sidecar callbacks.
+      CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL: http://runtime-api-1:8080/api/v1/custom/general-agent/internal/tools/call
+      CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL: http://runtime-api-1:8080/api/v1/custom/general-agent/internal/artifacts/upload
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "6"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
+
+  runtime-api-2:
+    <<: *runtime-common
+    container_name: weknora-runtime-api-2
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: api
+      CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL: http://runtime-api-2:8080/api/v1/custom/general-agent/internal/tools/call
+      CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL: http://runtime-api-2:8080/api/v1/custom/general-agent/internal/artifacts/upload
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "6"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
+
+  runtime-api-3:
+    <<: *runtime-common
+    container_name: weknora-runtime-api-3
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: api
+      CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL: http://runtime-api-3:8080/api/v1/custom/general-agent/internal/tools/call
+      CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL: http://runtime-api-3:8080/api/v1/custom/general-agent/internal/artifacts/upload
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "6"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
+
+  runtime-parse-1:
+    <<: *runtime-common
+    container_name: weknora-runtime-parse-1
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: parse-worker
+      DOCREADER_ADDR: runtime-docreader-entry:50051
+      DEV_DOCKER_DOCREADER_ADDR: runtime-docreader-entry:50051
+      CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: runtime-parse-1
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "5"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
+    depends_on:
+      runtime-docreader-entry:
+        condition: service_started
+
+  runtime-parse-2:
+    <<: *runtime-common
+    container_name: weknora-runtime-parse-2
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: parse-worker
+      DOCREADER_ADDR: runtime-docreader-entry:50051
+      DEV_DOCKER_DOCREADER_ADDR: runtime-docreader-entry:50051
+      CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID: runtime-parse-2
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "5"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
+    depends_on:
+      runtime-docreader-entry:
+        condition: service_started
+      runtime-docreader-2:
+        condition: service_healthy
+
+  runtime-derivative-1:
+    <<: *runtime-common
+    container_name: weknora-runtime-derivative-1
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: derivative-worker
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "4"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
+
+  runtime-derivative-2:
+    <<: *runtime-common
+    container_name: weknora-runtime-derivative-2
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: derivative-worker
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "4"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
+
+  runtime-wiki-1:
+    <<: *runtime-common
+    container_name: weknora-runtime-wiki-1
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: wiki-worker
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "3"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
+
+  runtime-wiki-2:
+    <<: *runtime-common
+    container_name: weknora-runtime-wiki-2
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: wiki-worker
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "3"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
+
+  runtime-maintenance-1:
+    <<: *runtime-common
+    container_name: weknora-runtime-maintenance-1
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: maintenance
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "2"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
+
+  runtime-maintenance-2:
+    <<: *runtime-common
+    container_name: weknora-runtime-maintenance-2
+    environment:
+      <<: *runtime-environment
+      WEKNORA_RUNTIME_ROLE: maintenance
+      CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "2"
+      CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
+
+  runtime-docreader-2:
+    image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
+    container_name: weknora-runtime-docreader-2
+    environment:
+      DOCREADER_IMAGE_OUTPUT_DIR: /tmp/docreader
+      DOCREADER_HEALTH_GRPC_PORT: "50052"
+      DOCREADER_GRPC_MAX_WORKERS: "4"
+    networks:
+      weknora-dev:
+        aliases:
+          - runtime-docreader-2
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=127.0.0.1:50052", "-connect-timeout=1s", "-rpc-timeout=5s"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: "no"
+
+  runtime-docreader-3:
+    image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
+    container_name: weknora-runtime-docreader-3
+    environment:
+      DOCREADER_IMAGE_OUTPUT_DIR: /tmp/docreader
+      DOCREADER_HEALTH_GRPC_PORT: "50052"
+      DOCREADER_GRPC_MAX_WORKERS: "4"
+    networks:
+      weknora-dev:
+        aliases:
+          - runtime-docreader-3
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=127.0.0.1:50052", "-connect-timeout=1s", "-rpc-timeout=5s"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: "no"
+
+  runtime-docreader-entry:
+    image: haproxy:3.2-alpine
+    container_name: weknora-runtime-docreader-entry
+    depends_on:
+      runtime-docreader-2:
+        condition: service_healthy
+      runtime-docreader-3:
+        condition: service_healthy
+    volumes:
+      - ./haproxy-docreader.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      weknora-dev:
+        aliases:
+          - runtime-docreader-entry
+    restart: "no"
+
+  runtime-entry:
+    image: haproxy:3.2-alpine
+    container_name: weknora-runtime-entry
+    depends_on:
+      runtime-api-1:
+        condition: service_healthy
+      runtime-api-2:
+        condition: service_healthy
+      runtime-api-3:
+        condition: service_healthy
+    volumes:
+      - ./haproxy-api.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "8080:8080"
+    networks:
+      weknora-dev:
+        aliases:
+          - runtime-entry
+          - app-dev
+    restart: "no"
+
+networks:
+  weknora-dev:
+    external: true
+    name: weknora_WeKnora-network-dev
+
+volumes:
+  weknora-go-mod-cache:
+    external: true
+    name: weknora_go-mod-cache-dev

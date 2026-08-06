@@ -129,6 +129,7 @@ type workflowDocumentReport struct {
 	EmbeddingRows        int64               `json:"embedding_rows"`
 	CompletedElapsedMS   int64               `json:"completed_elapsed_ms"`
 	FailedSpanNames      []string            `json:"failed_span_names,omitempty"`
+	HistoricalFailures   []string            `json:"historical_failed_span_names,omitempty"`
 	MultimodalSpanMillis []int64             `json:"multimodal_span_ms,omitempty"`
 }
 
@@ -327,7 +328,9 @@ type workflowKnowledgeRow struct {
 }
 
 type workflowSpanRow struct {
+	ID          int64  `gorm:"column:id"`
 	KnowledgeID string `gorm:"column:knowledge_id"`
+	Attempt     int    `gorm:"column:attempt"`
 	Name        string `gorm:"column:name"`
 	Status      string `gorm:"column:status"`
 	Metadata    []byte `gorm:"column:metadata"`
@@ -1000,6 +1003,48 @@ func decodeWorkflowTerminalDiagnostic(row workflowTerminalRow) (map[string]strin
 	return diagnostic, nil
 }
 
+func classifyWorkflowSpanFailures(
+	rows []workflowSpanRow,
+) (map[string][]string, map[string][]string) {
+	historical := make(map[string][]string)
+	latestAttempts := make(map[string]int)
+	latestByName := make(map[string]map[string]workflowSpanRow)
+	for _, row := range rows {
+		if strings.EqualFold(row.Status, types.SpanStatusFailed) {
+			historical[row.KnowledgeID] = append(historical[row.KnowledgeID], row.Name)
+		}
+		if _, exists := latestByName[row.KnowledgeID]; !exists ||
+			row.Attempt > latestAttempts[row.KnowledgeID] {
+			latestAttempts[row.KnowledgeID] = row.Attempt
+			latestByName[row.KnowledgeID] = make(map[string]workflowSpanRow)
+		}
+		if row.Attempt != latestAttempts[row.KnowledgeID] {
+			continue
+		}
+		previous, exists := latestByName[row.KnowledgeID][row.Name]
+		if !exists || row.ID >= previous.ID {
+			// Durable retries deliberately preserve the failed row and open
+			// another row with the same name. The greatest ID in the latest
+			// attempt is the authoritative current result.
+			latestByName[row.KnowledgeID][row.Name] = row
+		}
+	}
+
+	latestFailures := make(map[string][]string)
+	for knowledgeID, spans := range latestByName {
+		for name, row := range spans {
+			if strings.EqualFold(row.Status, types.SpanStatusFailed) {
+				latestFailures[knowledgeID] = append(latestFailures[knowledgeID], name)
+			}
+		}
+		latestFailures[knowledgeID] = uniqueSorted(latestFailures[knowledgeID])
+	}
+	for knowledgeID := range historical {
+		historical[knowledgeID] = uniqueSorted(historical[knowledgeID])
+	}
+	return historical, latestFailures
+}
+
 func inspectWorkflowEvidence(
 	db *gorm.DB,
 	rows []workflowKnowledgeRow,
@@ -1017,9 +1062,9 @@ func inspectWorkflowEvidence(
 
 	var spanRows []workflowSpanRow
 	if err := db.Table("knowledge_processing_spans").
-		Select("knowledge_id, name, status, metadata, COALESCE(duration_ms, 0) AS duration_ms").
+		Select("id, knowledge_id, attempt, name, status, metadata, COALESCE(duration_ms, 0) AS duration_ms").
 		Where("knowledge_id IN ?", knowledgeIDs).
-		Order("knowledge_id, id").
+		Order("knowledge_id, attempt, id").
 		Scan(&spanRows).Error; err != nil {
 		return nil, nil, err
 	}
@@ -1040,7 +1085,7 @@ func inspectWorkflowEvidence(
 		chunksByKnowledge[count.KnowledgeID][count.ChunkType] = count.Count
 	}
 	executorSets := make(map[string]map[string]struct{}, len(rows))
-	failedSpans := make(map[string][]string, len(rows))
+	historicalFailedSpans, latestFailedSpans := classifyWorkflowSpanFailures(spanRows)
 	multimodalMillis := make(map[string][]int64, len(rows))
 	globalExecutors := make(map[string]struct{})
 	for _, span := range spanRows {
@@ -1056,12 +1101,6 @@ func inspectWorkflowEvidence(
 			}
 			executorSets[span.KnowledgeID][span.Name+"\x00"+executor] = struct{}{}
 			globalExecutors[executor] = struct{}{}
-		}
-		if strings.EqualFold(span.Status, "failed") {
-			failedSpans[span.KnowledgeID] = append(
-				failedSpans[span.KnowledgeID],
-				span.Name,
-			)
 		}
 		if strings.Contains(strings.ToLower(span.Name), "multimodal") && span.DurationMS > 0 {
 			multimodalMillis[span.KnowledgeID] = append(
@@ -1091,7 +1130,8 @@ func inspectWorkflowEvidence(
 			sort.Strings(stageExecutors[name])
 		}
 		ownerList := setKeys(owners[knowledgeID])
-		failed := uniqueSorted(failedSpans[knowledgeID])
+		historicalFailures := historicalFailedSpans[knowledgeID]
+		failed := latestFailedSpans[knowledgeID]
 		chunkTypes := chunksByKnowledge[knowledgeID]
 		if chunkTypes == nil {
 			chunkTypes = map[string]int64{}
@@ -1127,6 +1167,7 @@ func inspectWorkflowEvidence(
 			EmbeddingRows:        embeddingRows,
 			CompletedElapsedMS:   completedElapsed[knowledgeID],
 			FailedSpanNames:      failed,
+			HistoricalFailures:   historicalFailures,
 			MultimodalSpanMillis: multimodalMillis[knowledgeID],
 		}
 		documents = append(documents, document)

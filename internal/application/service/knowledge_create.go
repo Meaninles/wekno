@@ -245,10 +245,9 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	if err := s.prepareInitialKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		return nil, err
 	}
-	questionCount := eff.QuestionGenerationConfig.QuestionCount
-	if questionCount <= 0 {
-		questionCount = 3
-	}
+	questionCount := types.NormalizeQuestionGenerationCount(
+		eff.QuestionGenerationConfig.QuestionCount,
+	)
 	lang, _ := types.LanguageFromContext(ctx)
 	queue := documentProcessQueueForReport(guardReport)
 	var prepared *preparedDocumentWorkflow
@@ -418,10 +417,9 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	urlQuestionCount := eff.QuestionGenerationConfig.QuestionCount
-	if urlQuestionCount <= 0 {
-		urlQuestionCount = 3
-	}
+	urlQuestionCount := types.NormalizeQuestionGenerationCount(
+		eff.QuestionGenerationConfig.QuestionCount,
+	)
 	urlLanguage, _ := types.LanguageFromContext(ctx)
 	if err := s.prepareInitialKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		return nil, err
@@ -649,10 +647,9 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	if err != nil {
 		return nil, err
 	}
-	fileURLQuestionCount := eff.QuestionGenerationConfig.QuestionCount
-	if fileURLQuestionCount <= 0 {
-		fileURLQuestionCount = 3
-	}
+	fileURLQuestionCount := types.NormalizeQuestionGenerationCount(
+		eff.QuestionGenerationConfig.QuestionCount,
+	)
 	fileURLLanguage, _ := types.LanguageFromContext(ctx)
 	if err := s.prepareInitialKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		return nil, err
@@ -892,13 +889,13 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 	}
 	applyKnowledgeFolderPlacement(ctx, knowledge)
 	assignNewDocumentProcessingIdentity(knowledge)
-	passageQuestionCount := 3
-	passageQuestionsEnabled := false
+	passageQuestionCount := types.DefaultQuestionGenerationCount
+	passageQuestionsEnabled := true
 	if kb.QuestionGenerationConfig != nil {
 		passageQuestionsEnabled = kb.QuestionGenerationConfig.Enabled
-		if kb.QuestionGenerationConfig.QuestionCount > 0 {
-			passageQuestionCount = kb.QuestionGenerationConfig.QuestionCount
-		}
+		passageQuestionCount = types.NormalizeQuestionGenerationCount(
+			kb.QuestionGenerationConfig.QuestionCount,
+		)
 	}
 	passageLanguage, _ := types.LanguageFromContext(ctx)
 	var prepared *preparedDocumentWorkflow
@@ -1383,10 +1380,9 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	}
 	if eff.QuestionGenerationConfig.Enabled {
 		opts.EnableQuestionGeneration = true
-		opts.QuestionCount = eff.QuestionGenerationConfig.QuestionCount
-		if opts.QuestionCount <= 0 {
-			opts.QuestionCount = 3
-		}
+		opts.QuestionCount = types.NormalizeQuestionGenerationCount(
+			eff.QuestionGenerationConfig.QuestionCount,
+		)
 	}
 
 	if eff.ChunkingConfig.EnableParentChild {

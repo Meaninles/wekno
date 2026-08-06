@@ -1,12 +1,17 @@
+ARG BASE_IMAGE_REGISTRY_ARG=docker.io/library
+
 # =========================
 # 构建阶段（轻量化：仅文档解析 + 图片提取，无 OCR/VLM）
 # =========================
-FROM python:3.10.18-bookworm AS builder
+FROM ${BASE_IMAGE_REGISTRY_ARG}/python:3.10.18-bookworm AS builder
 
-ARG APT_MIRROR=""
-RUN if [ -n "$APT_MIRROR" ]; then \
-        sed -i "s@http://deb.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources && \
-        sed -i "s@http://security.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources; \
+ARG APT_MIRROR_ARG=mirrors.tencent.com
+ARG PIP_INDEX_URL_ARG=https://mirrors.tencent.com/pypi/simple
+ARG GITHUB_PROXY_ARG=""
+ARG UV_VERSION=0.11.32
+RUN if [ -n "$APT_MIRROR_ARG" ]; then \
+        sed -i "s@deb.debian.org@${APT_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources && \
+        sed -i "s@security.debian.org@${APT_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi
 
 WORKDIR /app
@@ -57,7 +62,7 @@ RUN if [ -z "$TARGETARCH" ]; then \
         rm -f /app/${PROTOC_PACKAGE}; \
     else \
         echo "未发现本地protoc安装包，将进行在线安装"; \
-        curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v3.19.4/${PROTOC_PACKAGE} && \
+        curl -LO "${GITHUB_PROXY_ARG}https://github.com/protocolbuffers/protobuf/releases/download/v3.19.4/${PROTOC_PACKAGE}" && \
         unzip -o ${PROTOC_PACKAGE} -d /usr/local && \
         chmod +x /usr/local/bin/protoc && \
         rm -f ${PROTOC_PACKAGE}; \
@@ -65,8 +70,16 @@ RUN if [ -z "$TARGETARCH" ]; then \
 
 # 复制依赖文件
 COPY docreader/pyproject.toml docreader/uv.lock ./
-RUN pip install uv --break-system-packages && \
-    python -m uv sync --locked --no-dev
+# The mirror changes only the download endpoint. --frozen consumes the
+# committed lock verbatim without treating that endpoint override as a
+# request to rewrite uv.lock.
+RUN UV_WHEEL=$(find /app/packages/uv -maxdepth 1 -type f -name "uv-${UV_VERSION}-*.whl" -print -quit 2>/dev/null || true) && \
+    if [ -n "$UV_WHEEL" ]; then \
+        pip install "$UV_WHEEL" --break-system-packages; \
+    else \
+        pip install --index-url "$PIP_INDEX_URL_ARG" "uv==$UV_VERSION" --break-system-packages; \
+    fi && \
+    UV_INDEX_URL="$PIP_INDEX_URL_ARG" python -m uv sync --frozen --no-dev
 
 # 复制源代码和生成脚本
 COPY docreader docreader
@@ -79,12 +92,14 @@ RUN chmod +x docreader/scripts/generate_proto.sh && \
 # =========================
 # 运行阶段（轻量化）
 # =========================
-FROM python:3.10.18-bookworm AS runner
+FROM ${BASE_IMAGE_REGISTRY_ARG}/python:3.10.18-bookworm AS runner
 
-ARG APT_MIRROR=""
-RUN if [ -n "$APT_MIRROR" ]; then \
-        sed -i "s@http://deb.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources && \
-        sed -i "s@http://security.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources; \
+ARG APT_MIRROR_ARG=mirrors.tencent.com
+ARG GITHUB_PROXY_ARG=""
+ARG PLAYWRIGHT_DOWNLOAD_HOST_ARG=https://npmmirror.com/mirrors/playwright
+RUN if [ -n "$APT_MIRROR_ARG" ]; then \
+        sed -i "s@deb.debian.org@${APT_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources && \
+        sed -i "s@security.debian.org@${APT_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi
 
 WORKDIR /app
@@ -114,6 +129,7 @@ RUN apt-get update && apt-get install -y \
 
 # 安装 grpc_health_probe
 ARG TARGETARCH
+COPY packages/ /app/packages/
 # 兼容 BuildKit 和传统构建：如果 TARGETARCH 为空，使用 uname 检测
 RUN if [ -z "$TARGETARCH" ]; then \
         case $(uname -m) in \
@@ -133,8 +149,14 @@ RUN if [ -z "$TARGETARCH" ]; then \
         "arm") ARCH="arm" ;; \
         *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
     esac && \
-    wget -qO/bin/grpc_health_probe https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${ARCH} && \
-    chmod +x /bin/grpc_health_probe
+    PROBE_PACKAGE="grpc_health_probe-linux-${ARCH}" && \
+    if [ -f "/app/packages/${PROBE_PACKAGE}" ]; then \
+        cp "/app/packages/${PROBE_PACKAGE}" /bin/grpc_health_probe; \
+    else \
+        wget -qO/bin/grpc_health_probe "${GITHUB_PROXY_ARG}https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/${PROBE_PACKAGE}"; \
+    fi && \
+    chmod +x /bin/grpc_health_probe && \
+    rm -rf /app/packages
 
 # 从构建阶段复制已安装的依赖和生成的代码
 ENV VIRTUAL_ENV=/app/.venv
@@ -144,12 +166,13 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # 安装 Playwright 浏览器（网页解析）
-RUN python -m playwright install webkit
+RUN PLAYWRIGHT_DOWNLOAD_HOST="$PLAYWRIGHT_DOWNLOAD_HOST_ARG" python -m playwright install webkit
 RUN python -m playwright install-deps webkit
 
 COPY docreader/pyproject.toml docreader/uv.lock ./
 COPY --from=builder /app/docreader docreader
 COPY custom/services/document-splitter/weknora_document_splitter /app/weknora_document_splitter
+COPY custom/services/weknora_docreader_runtime /app/custom/services/weknora_docreader_runtime
 
 # 创建共享临时图片目录
 RUN mkdir -p /tmp/docreader

@@ -22,16 +22,31 @@ import {
   shareImageSrc,
 } from "@/custom/modules/chatshare/media";
 import { splitStructuredChartMarkdown, type StructuredChartInfo } from "@/utils/structuredChartMarkdown";
+import {
+  isDocumentPreviewSupported,
+  normalizePreviewFileType,
+} from "@/utils/documentPreview";
 import MobileResourceRail from "./MobileResourceRail.vue";
 import MobileCitationSheet from "./MobileCitationSheet.vue";
 import MobileSourceDetailSheet from "./MobileSourceDetailSheet.vue";
 import MobileStructuredAnalysisResult from "./MobileStructuredAnalysisResult.vue";
+import MobileDocumentPreviewSheet from "./MobileDocumentPreviewSheet.vue";
 import MobileIcon from "./MobileIcon.vue";
 import picturePreview from "@/components/picture-preview.vue";
 import { renderMobileMarkdown } from "../mobileMarkdown";
+import { downloadArtifactNatively } from "../documentDownload";
 import type { MobileResourceChip } from "../utils";
-import { downloadBlob, formatFileSize } from "../utils";
+import { formatFileSize } from "../utils";
 import type { GeneralAgentArtifactFile, GeneralAgentArtifactsData, StructuredAnalysisData } from "@/types/tool-results";
+import ChatQueueStatusCard from "@/custom/modules/chatqueue/ChatQueueStatusCard.vue";
+import {
+  agentToolCountFromMessage,
+  formatCompletedRunDuration,
+  isSimpleCompletedConversation,
+  retrievalDisplayCount,
+  retrievalStatsFromMessage,
+  usesDataSourceRetrievalUnit,
+} from "@/custom/modules/sourcerefs/retrievalSummary";
 import {
   buildCitedSourceReferenceItems,
   buildSourceReferenceItems,
@@ -48,6 +63,7 @@ const props = defineProps<{
   shareMode?: boolean;
   shareToken?: string;
 }>();
+const emit = defineEmits<{ "cancel-queue": [messageId?: string] }>();
 
 type StructuredAnalysisBlock = {
   display_type: "structured_analysis_result";
@@ -63,6 +79,7 @@ type MobileAnswerSegment =
 const isUser = computed(() => props.message.role === "user");
 const isAssistant = computed(() => props.message.role === "assistant");
 const downloadingArtifactId = ref("");
+const previewArtifact = ref<GeneralAgentArtifactFile | null>(null);
 const artifactVisibleCount = ref(ARTIFACT_PAGE_SIZE);
 const messageBodyRef = ref<HTMLElement | null>(null);
 const reviewImg = ref(false);
@@ -320,7 +337,6 @@ const sourceReferenceItems = computed(() => props.shareMode
   : buildCitedSourceReferenceItems(
     Array.isArray(props.message.knowledge_references) ? props.message.knowledge_references : [],
     answerMarkdown.value,
-    Boolean(props.message.is_completed),
   )
 );
 
@@ -336,6 +352,41 @@ const citationNumberById = computed(() => new Map(
     .filter((item) => item.citationId)
     .map((item) => [item.citationId, item.number] as const),
 ));
+
+const retrievalStats = computed(() => retrievalStatsFromMessage(props.message));
+const simpleConversation = computed(() => isSimpleCompletedConversation(props.message));
+const completedAgentSummary = computed(() => {
+  if (!isAssistant.value || !props.message.is_completed) return "";
+  const stats = retrievalStats.value;
+  const duration = formatCompletedRunDuration(Number(props.message.agent_duration_ms) || 0);
+  if (simpleConversation.value) return duration ? `耗时 ${duration}` : "";
+  if (props.message.agent_mode === true) {
+	const stream = Array.isArray(props.message.agentEventStream) ? props.message.agentEventStream : [];
+	const rounds = stream.filter((event: any) => event?.type === "thinking").length;
+	const tools = agentToolCountFromMessage(props.message);
+    const parts: string[] = [];
+    if (rounds > 0) parts.push(`思考 ${rounds} 轮`);
+    if (stats) {
+      const dataSourceUnit = usesDataSourceRetrievalUnit(stats);
+      const count = retrievalDisplayCount(stats);
+      parts.push(count > 0
+        ? (dataSourceUnit ? `已检索 ${count} 个数据源` : `已检索 ${count} 份文档`)
+        : (dataSourceUnit ? "未检索数据源" : "未检索文档"));
+    }
+	parts.push(tools > 0 ? `调用 ${tools} 次工具` : "未调用工具");
+    if (duration) parts.push(`耗时 ${duration}`);
+    return parts.join(" · ");
+  }
+  if (stats) {
+    const dataSourceUnit = usesDataSourceRetrievalUnit(stats);
+    const count = retrievalDisplayCount(stats);
+    const inspected = count > 0
+      ? (dataSourceUnit ? `已检索 ${count} 个数据源` : `已检索 ${count} 份文档`)
+      : (dataSourceUnit ? "未检索数据源" : "未检索文档");
+    return `检索完成，${inspected}${duration ? `，耗时 ${duration}` : ""}`;
+  }
+  return "";
+});
 
 const answerSplit = computed(() => {
   if (!answerMarkdown.value.trim()) {
@@ -552,10 +603,16 @@ const showMoreArtifacts = () => {
   );
 };
 
+const artifactFileType = (file: GeneralAgentArtifactFile) => {
+  const explicit = normalizePreviewFileType(file.file_type);
+  if (explicit) return explicit;
+  const name = String(file.filename || "");
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? normalizePreviewFileType(name.slice(dot + 1)) : "";
+};
+
 const artifactFileTypeLabel = (file: GeneralAgentArtifactFile) => {
-  const type = String(file.file_type || (file.filename.includes(".") ? file.filename.split(".").pop() : "") || "")
-    .replace(/^\./, "")
-    .toUpperCase();
+  const type = artifactFileType(file).toUpperCase();
   return type || "FILE";
 };
 
@@ -565,14 +622,45 @@ const artifactDownloadUrl = (file: GeneralAgentArtifactFile) => {
   return `/api/v1/custom/general-agent/artifacts/${encodeURIComponent(file.artifact_id)}/download`;
 };
 
-const downloadArtifact = async (file: GeneralAgentArtifactFile) => {
+const canPreviewArtifact = (file: GeneralAgentArtifactFile) =>
+  !!artifactDownloadUrl(file) && isDocumentPreviewSupported(artifactFileType(file));
+
+const openArtifactPreview = (file: GeneralAgentArtifactFile) => {
+  if (!canPreviewArtifact(file)) {
+    MessagePlugin.warning("该文件格式暂不支持在线预览，请下载后查看");
+    return;
+  }
+  previewArtifact.value = file;
+};
+
+const loadArtifactPreviewBlob = async (signal?: AbortSignal): Promise<Blob> => {
+  const file = previewArtifact.value;
+  if (!file) throw new Error("没有可预览的产物");
   const url = artifactDownloadUrl(file);
-  if (!url || downloadingArtifactId.value) return;
+  if (!url) throw new Error("产物下载地址为空");
+  const result = await getDown(url, { signal });
+  return result instanceof Blob ? result : new Blob([result as any]);
+};
+
+const navigateSharedArtifactNatively = (file: GeneralAgentArtifactFile) => {
+  const rawURL = artifactDownloadUrl(file);
+  if (!rawURL) throw new Error("产物下载地址为空");
+  const resolved = new URL(rawURL, window.location.href);
+  if (resolved.origin !== window.location.origin) {
+    throw new Error("产物下载地址无效");
+  }
+  window.location.assign(resolved.toString());
+};
+
+const downloadArtifact = async (file: GeneralAgentArtifactFile) => {
+  if (!artifactDownloadUrl(file) || downloadingArtifactId.value) return;
   downloadingArtifactId.value = file.artifact_id;
   try {
-    const result = await getDown(url);
-    const blob = result instanceof Blob ? result : new Blob([result as any]);
-    downloadBlob(blob, file.filename || "artifact");
+    if (props.shareMode) {
+      navigateSharedArtifactNatively(file);
+    } else {
+      await downloadArtifactNatively(file.artifact_id);
+    }
   } catch (error: any) {
     MessagePlugin.error(error?.message || "下载失败");
   } finally {
@@ -580,7 +668,13 @@ const downloadArtifact = async (file: GeneralAgentArtifactFile) => {
   }
 };
 
+const downloadPreviewArtifact = async () => {
+  if (!previewArtifact.value) return;
+  await downloadArtifact(previewArtifact.value);
+};
+
 const selectedCitationItem = ref<SourceReferenceItem | null>(null);
+const referenceListVisible = ref(false);
 const detailItem = ref<SourceReferenceItem | null>(null);
 const detailHistoryPushed = ref(false);
 
@@ -746,7 +840,7 @@ const sourceItemFromElement = (el: HTMLElement): SourceReferenceItem | null => {
     sourceLabel: el.getAttribute("data-source-label") || sourceTypeLabel(type),
     snippet: "",
     count: 1,
-    icon: type === "web" ? "internet" : type === "wiki" ? "browse" : type === "data_source" ? "server" : "file",
+    icon: type === "web" ? "internet" : type === "wiki" ? "browse" : "file",
     url,
     knowledgeBaseId,
     knowledgeId,
@@ -970,10 +1064,6 @@ const openCitationSource = (item: SourceReferenceItem) => {
     if (item.url) openExternalUrl(item.url);
     return;
   }
-  if (item.type === "data_source") {
-    MessagePlugin.info("移动端暂不支持查看数据源详情");
-    return;
-  }
   detailItem.value = item;
   pushDetailHistory();
 };
@@ -984,6 +1074,11 @@ const isReadonlyJumpTarget = (target: HTMLElement | null) => Boolean(
 
 const closeCitationPreview = () => {
   selectedCitationItem.value = null;
+};
+
+const previewReferenceFromList = (item: SourceReferenceItem) => {
+  referenceListVisible.value = false;
+  selectedCitationItem.value = item;
 };
 
 const closeSourceDetail = () => {
@@ -1042,6 +1137,30 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-else class="assistant-card">
+        <ChatQueueStatusCard
+          v-if="
+            !message.is_completed &&
+            (message.queue_status?.state === 'waiting' ||
+              message.queue_status?.state === 'admitted')
+          "
+          :status="message.queue_status"
+          @cancel="emit('cancel-queue', message.id)"
+        />
+        <button
+          v-if="sourceReferenceItems.length"
+          type="button"
+          class="mobile-reference-summary"
+          @click="referenceListVisible = true"
+        >
+          <MobileIcon name="file" />
+          <span>已引用 {{ sourceReferenceItems.length }} 条参考资料</span>
+          <span class="mobile-reference-summary__arrow">›</span>
+        </button>
+        <div v-else-if="message.is_completed && !simpleConversation" class="mobile-reference-summary is-empty" role="status">
+          <MobileIcon name="file" />
+          <span>未引用参考资料</span>
+        </div>
+        <div v-if="completedAgentSummary" class="mobile-run-summary">{{ completedAgentSummary }}</div>
         <div v-if="shouldShowThinking" class="thinking-card">
           <div class="thinking-title">正在思考</div>
           <div v-if="agentStepPreviews.length" class="thinking-steps">
@@ -1090,16 +1209,27 @@ onBeforeUnmount(() => {
                 <strong>{{ file.filename }}</strong>
                 <span>{{ formatFileSize(file.file_size) || '未知大小' }}</span>
               </div>
-              <button
-                type="button"
-                class="mobile-artifact-file__download"
-                :class="{ loading: downloadingArtifactId === file.artifact_id }"
-                :disabled="downloadingArtifactId === file.artifact_id || !artifactDownloadUrl(file)"
-                :aria-label="`下载${file.filename}`"
-                @click="downloadArtifact(file)"
-              >
-                <MobileIcon name="download" />
-              </button>
+              <div class="mobile-artifact-file__actions">
+                <button
+                  type="button"
+                  class="mobile-artifact-file__action"
+                  :disabled="!canPreviewArtifact(file)"
+                  :aria-label="`预览${file.filename}`"
+                  @click="openArtifactPreview(file)"
+                >
+                  <MobileIcon name="eye" />
+                </button>
+                <button
+                  type="button"
+                  class="mobile-artifact-file__action"
+                  :class="{ loading: downloadingArtifactId === file.artifact_id }"
+                  :disabled="downloadingArtifactId === file.artifact_id || !artifactDownloadUrl(file)"
+                  :aria-label="`下载${file.filename}`"
+                  @click="downloadArtifact(file)"
+                >
+                  <MobileIcon name="download" />
+                </button>
+              </div>
             </div>
             <button
               v-if="hiddenArtifactCount"
@@ -1126,16 +1256,146 @@ onBeforeUnmount(() => {
       @close="closeCitationPreview"
       @open="openCitationSource"
     />
+    <div v-if="referenceListVisible" class="mobile-reference-list-layer" @click.self="referenceListVisible = false">
+      <section class="mobile-reference-list" role="dialog" aria-modal="true" aria-label="全部参考资料">
+        <div class="mobile-reference-list__grip" />
+        <header>
+          <strong>全部参考资料</strong>
+          <button type="button" @click="referenceListVisible = false">关闭</button>
+        </header>
+        <button
+          v-for="item in sourceReferenceItems"
+          :key="item.key"
+          type="button"
+          class="mobile-reference-list__item"
+          @click="previewReferenceFromList(item)"
+        >
+          <span>{{ item.number }}.</span>
+          <div>
+            <strong>{{ item.title }}</strong>
+            <small>{{ sourceTypeLabel(item.type) }}</small>
+          </div>
+        </button>
+      </section>
+    </div>
     <MobileSourceDetailSheet
       v-if="!shareMode"
       :item="detailItem"
       @close="closeSourceDetail"
+    />
+    <MobileDocumentPreviewSheet
+      v-if="previewArtifact"
+      :item="previewArtifact"
+      :source-key="previewArtifact.artifact_id"
+      :blob-loader="loadArtifactPreviewBlob"
+      :download-handler="downloadPreviewArtifact"
+      @close="previewArtifact = null"
     />
     <picturePreview v-if="reviewImg" :reviewImg="reviewImg" :reviewUrl="reviewUrl" @closePreImg="closePreImg" />
   </article>
 </template>
 
 <style scoped>
+.mobile-reference-summary {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: #52645b;
+  padding: 2px 0;
+  font-size: 14px;
+  text-align: left;
+}
+
+.mobile-reference-summary__arrow {
+  margin-left: auto;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.mobile-run-summary {
+  color: #6a7972;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.mobile-reference-list-layer {
+  position: fixed;
+  z-index: 72;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(10, 22, 16, 0.34);
+}
+
+.mobile-reference-list {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 80dvh;
+  overflow-y: auto;
+  border-radius: 20px 20px 0 0;
+  background: #f7f8f8;
+  padding: 10px 14px calc(env(safe-area-inset-bottom) + 14px);
+}
+
+.mobile-reference-list__grip {
+  width: 44px;
+  height: 5px;
+  border-radius: 999px;
+  background: #d6ddd9;
+  margin: 0 auto 14px;
+}
+
+.mobile-reference-list header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.mobile-reference-list header button {
+  border: 0;
+  background: transparent;
+  color: #52645b;
+}
+
+.mobile-reference-list__item {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  border: 0;
+  border-radius: 12px;
+  background: #fff;
+  color: #1b2923;
+  padding: 12px;
+  margin-bottom: 8px;
+  text-align: left;
+}
+
+.mobile-reference-list__item > span {
+  color: #07a557;
+  font-weight: 650;
+}
+
+.mobile-reference-list__item div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mobile-reference-list__item strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-reference-list__item small {
+  color: #7b8982;
+}
+
 .mobile-message {
   display: flex;
   align-items: flex-start;
@@ -1552,7 +1812,7 @@ onBeforeUnmount(() => {
 .mobile-artifact-file {
   display: grid;
   min-width: 0;
-  grid-template-columns: 42px minmax(0, 1fr) 34px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   border: 1px solid #dce8e2;
@@ -1598,7 +1858,13 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.mobile-artifact-file__download {
+.mobile-artifact-file__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mobile-artifact-file__action {
   display: grid;
   width: 32px;
   height: 32px;
@@ -1610,12 +1876,12 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 
-.mobile-artifact-file__download:disabled {
+.mobile-artifact-file__action:disabled {
   color: #a6b6ae;
   border-color: #dfe8e3;
 }
 
-.mobile-artifact-file__download.loading {
+.mobile-artifact-file__action.loading {
   animation: artifactDownloadPulse 0.82s ease-in-out infinite;
 }
 

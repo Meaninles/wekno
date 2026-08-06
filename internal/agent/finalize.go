@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
@@ -22,6 +21,7 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 	state *types.AgentState,
 	sessionID string,
 ) error {
+	e.syncCitationReferences(state)
 	totalToolCalls := countTotalToolCalls(state.RoundSteps)
 	logger.Infof(ctx, "[Agent][FinalAnswer] Synthesizing from %d steps, %d tool calls",
 		len(state.RoundSteps), totalToolCalls)
@@ -85,12 +85,13 @@ User question: %s
 
 Requirements:
 1. Answer based on the actually retrieved content
-2. When citation_sources are provided, cite factual statements inline with <src id="S1" /> using the exact source id. For knowledge-base sources, each id represents a specific document fragment, not the whole document; cite the fragment whose content directly supports the sentence or paragraph. Do not invent source ids and do not expose internal chunk_id or knowledge_id values in the user-facing answer.
+2. When AVAILABLE_CITATIONS are provided, copy the matching cite_exactly value verbatim immediately after each directly supported sentence or paragraph. Each document source is one specific fragment, so choose the fragment that supports the adjacent claim and use a reasonable minimum.
 3. Organize the answer in a structured format
 4. If information is insufficient, honestly state so
 5. IMPORTANT: Respond in the same language as the user's question
 
 Now generate the final answer:`, query)
+	finalPrompt = sourcerefs.PlaceTerminalCitationInstruction(finalPrompt, citationRefs)
 
 	messages = append(messages, chat.Message{
 		Role:    "user",
@@ -102,10 +103,15 @@ Now generate the final answer:`, query)
 	logger.Debugf(ctx, "[Agent][FinalAnswer] AnswerID: %s", answerID)
 	answerDoneEmitted := false
 
+	thinking := false
 	llmResult, err := e.streamLLMToEventBus(
 		ctx,
 		messages,
-		&chat.ChatOptions{Temperature: e.config.Temperature}, // Thinking disabled for final answer synthesis
+		&chat.ChatOptions{
+			Temperature:         e.config.Temperature,
+			MaxCompletionTokens: e.config.MaxCompletionTokens,
+			Thinking:            &thinking,
+		},
 		func(chunk *types.StreamResponse, fullContent string) {
 			// Defensive filter: only emit answer content, skip thinking chunks
 			if chunk.ResponseType == types.ResponseTypeThinking {
@@ -165,11 +171,23 @@ func prepareFinalAnswerCitationContext(state *types.AgentState) (string, []*type
 		return "", nil
 	}
 
-	refs := collectToolSourceReferences(state)
+	refs := state.KnowledgeRefs
+	if len(refs) == 0 {
+		refs = collectToolSourceReferences(state)
+	}
 	if len(refs) == 0 {
 		return "", nil
 	}
-	sourcerefs.AssignCitationIDs(refs)
+	missingHandle := false
+	for _, ref := range refs {
+		if sourcerefs.CitationID(ref) == "" {
+			missingHandle = true
+			break
+		}
+	}
+	if missingHandle {
+		sourcerefs.AssignCitationIDs(refs)
+	}
 	mergeStateKnowledgeReferences(state, refs)
 	return renderFinalAnswerCitationContext(refs), refs
 }
@@ -183,6 +201,9 @@ func collectToolSourceReferences(state *types.AgentState) []*types.SearchResult 
 				continue
 			}
 			for _, ref := range sourcerefs.ExtractFromToolResult(toolCall.Name, toolCall.Result) {
+				if !sourcerefs.IsSupportedCitationReference(ref) {
+					continue
+				}
 				key := sourcerefs.ReferenceKey(ref)
 				if key == "" || seen[key] {
 					continue
@@ -216,42 +237,11 @@ func mergeStateKnowledgeReferences(state *types.AgentState, refs []*types.Search
 }
 
 func renderFinalAnswerCitationContext(refs []*types.SearchResult) string {
-	if len(refs) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	if catalog := sourcerefs.RenderCitationCatalog(refs); catalog != "" {
-		b.WriteString(catalog)
-		b.WriteString("\n")
-	}
-	b.WriteString("<citation_contexts>\n")
-	for _, ref := range refs {
-		if ref == nil {
-			continue
-		}
-		attrs := sourcerefs.ContextCitationAttrs(ref)
-		if attrs == "" {
-			continue
-		}
-		content := strings.TrimSpace(ref.Content)
-		if content == "" {
-			content = strings.TrimSpace(ref.KnowledgeTitle)
-		}
-		if content == "" {
-			continue
-		}
-		b.WriteString(fmt.Sprintf("<context%s>%s</context>\n", attrs, escapeCitationXMLText(content)))
-	}
-	b.WriteString("</citation_contexts>")
-	return b.String()
-}
-
-func escapeCitationXMLText(s string) string {
-	return strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-	).Replace(s)
+	// Every claim-bearing tool result is already present in the final-answer
+	// message list and carries its adjacent canonical handle. Repeating all
+	// evidence here doubled prompt tokens and final-answer latency. The compact
+	// catalog is sufficient to remind the model which opaque handles exist.
+	return sourcerefs.RenderCitationCatalog(refs)
 }
 
 // handleMaxIterations generates a final answer when the agent loop exhausted all iterations
@@ -280,23 +270,30 @@ func (e *AgentEngine) handleMaxIterations(
 func (e *AgentEngine) emitCompletionEvent(
 	ctx context.Context, state *types.AgentState, sessionID, messageID string, startTime time.Time,
 ) {
-	// Convert knowledge refs to interface{} slice for event data
-	knowledgeRefsInterface := make([]interface{}, 0, len(state.KnowledgeRefs))
-	for _, ref := range state.KnowledgeRefs {
-		knowledgeRefsInterface = append(knowledgeRefsInterface, ref)
+	e.syncCitationReferences(state)
+	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
+	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
+		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs)
 	}
-
+	if report.EvidenceAvailableUncited {
+		logger.Warnf(ctx, "[Agent][Citations] final answer omitted all current-turn citation handles: available=%d",
+			report.AvailableCount)
+	}
+	state.FinalAnswer = filteredAnswer
+	state.KnowledgeRefs = citedRefs
 	e.eventBus.Emit(ctx, event.Event{
 		ID:        generateEventID("complete"),
 		Type:      event.EventAgentComplete,
 		SessionID: sessionID,
 		Data: event.AgentCompleteData{
-			FinalAnswer:     state.FinalAnswer,
-			KnowledgeRefs:   knowledgeRefsInterface,
-			AgentSteps:      state.RoundSteps, // Include detailed execution steps for message storage
-			TotalSteps:      len(state.RoundSteps),
-			TotalDurationMs: time.Since(startTime).Milliseconds(),
-			MessageID:       messageID, // Include message ID for proper message update
+			FinalAnswer:                state.FinalAnswer,
+			KnowledgeRefs:              citedRefs,
+			KnowledgeRefsAuthoritative: true,
+			AgentSteps:                 state.RoundSteps, // Include detailed execution steps for message storage
+			TotalSteps:                 len(state.RoundSteps),
+			TotalDurationMs:            time.Since(startTime).Milliseconds(),
+			MessageID:                  messageID, // Include message ID for proper message update
 		},
 	})
 

@@ -22,7 +22,6 @@ const iconFor = (item: SourceReferenceItem | null) => {
   if (!item) return "file";
   if (item.type === "web") return "internet";
   if (item.type === "wiki") return "bookmark";
-  if (item.type === "data_source") return "tools";
   return "file";
 };
 

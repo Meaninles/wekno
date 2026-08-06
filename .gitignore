@@ -28,6 +28,7 @@ desktop.ini
 node_modules/
 /dist/
 /frontend/dist-mobile/
+/frontend/public/pdfjs/
 /build/
 coverage/
 *.coverprofile

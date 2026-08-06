@@ -17,6 +17,7 @@ export interface SharedKnowledgeBaseLike {
   share_id?: unknown
   shared_at?: unknown
   source_tenant_id?: unknown
+  organization_id?: unknown
   [key: string]: unknown
 }
 
@@ -34,6 +35,7 @@ export interface MobileKnowledgeBase extends KnowledgeBaseLike {
   share_id?: string
   shared_at?: string
   source_tenant_id?: unknown
+  organization_id?: string
 }
 
 const ACCESS_RANK: Record<MobileKnowledgeAccess, number> = {
@@ -93,6 +95,7 @@ function makeRow(
           share_id: idOf(shared.share_id) || undefined,
           shared_at: idOf(shared.shared_at) || undefined,
           source_tenant_id: shared.source_tenant_id,
+          organization_id: idOf(shared.organization_id) || undefined,
         }
       : {}),
   }
@@ -208,6 +211,7 @@ export function mergeMobileChatKnowledgeBases(
       share_id: idOf(shared.share_id) || undefined,
       shared_at: idOf(shared.shared_at) || undefined,
       source_tenant_id: shared.source_tenant_id,
+      organization_id: idOf(shared.organization_id) || undefined,
       is_shared: true,
     })
   }

@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
@@ -23,33 +25,39 @@ import (
 // silently truncated chunk list.
 func (s *knowledgeBaseService) applyFAQPostProcessing(
 	ctx context.Context,
-	kb *types.KnowledgeBase,
+	kbs []*types.KnowledgeBase,
 	chunks []*types.IndexWithScore,
 	vectorResults []*types.IndexWithScore,
 	groups []*storeGroup,
 	params types.SearchParams,
 	matchCount int,
 ) ([]*types.IndexWithScore, error) {
-	if kb.Type != types.KnowledgeBaseTypeFAQ {
+	faqScope := faqTenantScope(kbs)
+	if len(faqScope) == 0 {
 		return chunks, nil
 	}
 
 	// Check if we need iterative retrieval for FAQ with separate indexing.
 	// Only use iterative retrieval if we don't have enough unique chunks
 	// after first deduplication.
-	needsIterativeRetrieval := len(chunks) < params.MatchCount && len(vectorResults) == matchCount
+	needsIterativeRetrieval := allKnowledgeBasesFAQ(kbs) &&
+		len(chunks) < params.MatchCount && len(vectorResults) >= matchCount
 	if needsIterativeRetrieval {
 		logger.Info(ctx, "Not enough unique chunks, using iterative retrieval for FAQ")
 		return s.iterativeRetrieveWithDeduplication(
 			ctx,
 			groups,
+			kbs,
 			params.MatchCount,
 			params.QueryText,
 		)
 	}
 
 	// Filter by negative questions if not using iterative retrieval.
-	result := s.filterByNegativeQuestions(ctx, chunks, params.QueryText)
+	result, err := s.filterByNegativeQuestions(ctx, chunks, params.QueryText, kbs)
+	if err != nil {
+		return nil, err
+	}
 	logger.Infof(ctx, "Result count after negative question filtering: %d", len(result))
 	return result, nil
 }
@@ -72,6 +80,7 @@ func (s *knowledgeBaseService) applyFAQPostProcessing(
 // for transient retrieve errors.
 func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Context,
 	groups []*storeGroup,
+	kbs []*types.KnowledgeBase,
 	matchCount int,
 	queryText string,
 ) ([]*types.IndexWithScore, error) {
@@ -86,8 +95,6 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 	filteredOutChunks := make(map[string]struct{})
 
 	queryTextLower := strings.ToLower(strings.TrimSpace(queryText))
-	tenantID := types.MustTenantIDFromContext(ctx)
-
 	for i := 0; i < maxIterations; i++ {
 		// Bump only the per-group TopK. BaseParams is immutable and read
 		// concurrently inside retrieveFromStores; paramsWithTopK rebuilds
@@ -130,23 +137,27 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 		totalRetrieved := len(iterationResults)
 
 		// Collect new chunk IDs that need to be fetched from DB
-		newChunkIDs := make([]string, 0)
+		newResults := make([]*types.IndexWithScore, 0)
 		for _, result := range iterationResults {
 			if _, cached := chunkDataCache[result.ChunkID]; !cached {
 				if _, filtered := filteredOutChunks[result.ChunkID]; !filtered {
-					newChunkIDs = append(newChunkIDs, result.ChunkID)
+					newResults = append(newResults, result)
 				}
 			}
 		}
 
 		// Batch fetch only new chunks
-		if len(newChunkIDs) > 0 {
-			newChunks, err := s.chunkRepo.ListChunksByID(ctx, tenantID, newChunkIDs)
+		if len(newResults) > 0 {
+			newChunks, err := s.loadFAQChunksForResults(ctx, newResults, kbs)
 			if err != nil {
-				logger.Warnf(ctx, "Failed to fetch chunks at iteration %d: %v", i+1, err)
-			} else {
-				for _, chunk := range newChunks {
-					chunkDataCache[chunk.ID] = chunk
+				return nil, fmt.Errorf("load FAQ evidence at iteration %d: %w", i+1, err)
+			}
+			for id, chunk := range newChunks {
+				chunkDataCache[id] = chunk
+			}
+			for _, result := range newResults {
+				if _, ok := newChunks[result.ChunkID]; !ok {
+					filteredOutChunks[result.ChunkID] = struct{}{}
 				}
 			}
 		}
@@ -159,16 +170,22 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 			}
 
 			// Check negative questions using cached data
-			if chunkData, ok := chunkDataCache[result.ChunkID]; ok {
-				if chunkData.ChunkType == types.ChunkTypeFAQ {
-					if meta, err := chunkData.FAQMetadata(); err == nil && meta != nil {
-						if s.matchesNegativeQuestions(queryTextLower, meta.NegativeQuestions) {
-							filteredOutChunks[result.ChunkID] = struct{}{}
-							delete(uniqueChunks, result.ChunkID)
-							continue
-						}
-					}
-				}
+			chunkData, ok := chunkDataCache[result.ChunkID]
+			if !ok || chunkData.ChunkType != types.ChunkTypeFAQ {
+				filteredOutChunks[result.ChunkID] = struct{}{}
+				delete(uniqueChunks, result.ChunkID)
+				continue
+			}
+			meta, metaErr := chunkData.FAQMetadata()
+			if metaErr != nil || meta == nil {
+				filteredOutChunks[result.ChunkID] = struct{}{}
+				delete(uniqueChunks, result.ChunkID)
+				continue
+			}
+			if s.matchesNegativeQuestions(queryTextLower, meta.NegativeQuestions) {
+				filteredOutChunks[result.ChunkID] = struct{}{}
+				delete(uniqueChunks, result.ChunkID)
+				continue
 			}
 
 			// Keep highest score for each chunk
@@ -218,45 +235,33 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 func (s *knowledgeBaseService) filterByNegativeQuestions(ctx context.Context,
 	chunks []*types.IndexWithScore,
 	queryText string,
-) []*types.IndexWithScore {
+	kbs []*types.KnowledgeBase,
+) ([]*types.IndexWithScore, error) {
 	if len(chunks) == 0 {
-		return chunks
+		return chunks, nil
 	}
 
 	queryTextLower := strings.ToLower(strings.TrimSpace(queryText))
 	if queryTextLower == "" {
-		return chunks
+		return chunks, nil
 	}
 
-	tenantID := types.MustTenantIDFromContext(ctx)
-
-	// Collect chunk IDs
-	chunkIDs := make([]string, 0, len(chunks))
-	for _, chunk := range chunks {
-		chunkIDs = append(chunkIDs, chunk.ChunkID)
-	}
-
-	// Batch fetch chunks to get negative questions
-	allChunks, err := s.chunkRepo.ListChunksByID(ctx, tenantID, chunkIDs)
+	chunkMap, err := s.loadFAQChunksForResults(ctx, chunks, kbs)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to fetch chunks for negative question filtering: %v", err)
-		// If we can't fetch chunks, return original results
-		return chunks
+		return nil, fmt.Errorf("load FAQ evidence for negative-question filtering: %w", err)
 	}
-
-	// Build chunk map for quick lookup
-	chunkMap := make(map[string]*types.Chunk, len(allChunks))
-	for _, chunk := range allChunks {
-		chunkMap[chunk.ID] = chunk
-	}
+	faqScope := faqTenantScope(kbs)
 
 	// Filter out chunks that match negative questions
 	filteredChunks := make([]*types.IndexWithScore, 0, len(chunks))
 	for _, chunk := range chunks {
+		if _, isFAQ := faqTenantForResult(chunk, faqScope); !isFAQ {
+			filteredChunks = append(filteredChunks, chunk)
+			continue
+		}
 		chunkData, ok := chunkMap[chunk.ChunkID]
 		if !ok {
-			// If chunk not found, keep it (shouldn't happen, but be safe)
-			filteredChunks = append(filteredChunks, chunk)
+			logger.Warnf(ctx, "Dropping FAQ hit %s because its evidence row is unavailable", chunk.ChunkID)
 			continue
 		}
 
@@ -269,8 +274,7 @@ func (s *knowledgeBaseService) filterByNegativeQuestions(ctx context.Context,
 		// Get FAQ metadata and check negative questions
 		meta, err := chunkData.FAQMetadata()
 		if err != nil || meta == nil {
-			// If we can't parse metadata, keep the chunk
-			filteredChunks = append(filteredChunks, chunk)
+			logger.Warnf(ctx, "Dropping FAQ hit %s because metadata is invalid: %v", chunk.ChunkID, err)
 			continue
 		}
 
@@ -284,7 +288,82 @@ func (s *knowledgeBaseService) filterByNegativeQuestions(ctx context.Context,
 		filteredChunks = append(filteredChunks, chunk)
 	}
 
-	return filteredChunks
+	return filteredChunks, nil
+}
+
+func faqTenantScope(kbs []*types.KnowledgeBase) map[string]uint64 {
+	scope := make(map[string]uint64)
+	for _, kb := range kbs {
+		if kb != nil && kb.Type == types.KnowledgeBaseTypeFAQ {
+			scope[kb.ID] = kb.TenantID
+		}
+	}
+	return scope
+}
+
+func allKnowledgeBasesFAQ(kbs []*types.KnowledgeBase) bool {
+	if len(kbs) == 0 {
+		return false
+	}
+	for _, kb := range kbs {
+		if kb == nil || kb.Type != types.KnowledgeBaseTypeFAQ {
+			return false
+		}
+	}
+	return true
+}
+
+func faqTenantForResult(result *types.IndexWithScore, scope map[string]uint64) (uint64, bool) {
+	if result == nil {
+		return 0, false
+	}
+	if tenantID, ok := scope[result.KnowledgeBaseID]; ok {
+		return tenantID, true
+	}
+	if result.KnowledgeBaseID == "" && len(scope) == 1 {
+		for _, tenantID := range scope {
+			return tenantID, true
+		}
+	}
+	return 0, false
+}
+
+func (s *knowledgeBaseService) loadFAQChunksForResults(
+	ctx context.Context,
+	results []*types.IndexWithScore,
+	kbs []*types.KnowledgeBase,
+) (map[string]*types.Chunk, error) {
+	scope := faqTenantScope(kbs)
+	idsByTenant := make(map[uint64][]string)
+	seen := make(map[string]bool)
+	for _, result := range results {
+		tenantID, ok := faqTenantForResult(result, scope)
+		if !ok || result == nil || result.ChunkID == "" || seen[result.ChunkID] {
+			continue
+		}
+		seen[result.ChunkID] = true
+		idsByTenant[tenantID] = append(idsByTenant[tenantID], result.ChunkID)
+	}
+	tenants := make([]uint64, 0, len(idsByTenant))
+	for tenantID := range idsByTenant {
+		tenants = append(tenants, tenantID)
+	}
+	sort.Slice(tenants, func(i, j int) bool { return tenants[i] < tenants[j] })
+	out := make(map[string]*types.Chunk, len(seen))
+	for _, tenantID := range tenants {
+		ids := idsByTenant[tenantID]
+		sort.Strings(ids)
+		rows, err := s.chunkRepo.ListChunksByID(ctx, tenantID, ids)
+		if err != nil {
+			return nil, err
+		}
+		for _, chunk := range rows {
+			if chunk != nil {
+				out[chunk.ID] = chunk
+			}
+		}
+	}
+	return out, nil
 }
 
 // matchesNegativeQuestions checks if the query text matches any negative questions.

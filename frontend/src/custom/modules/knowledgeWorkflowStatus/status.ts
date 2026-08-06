@@ -1,5 +1,6 @@
 export type KnowledgePollStatus = {
   parse_status?: string
+  core_status?: string
   summary_status?: string
   enrichment_status?: string
   wiki_status?: string
@@ -11,6 +12,7 @@ export type KnowledgeWorkflowStatus =
   | 'cancelling'
   | 'deleting'
   | 'completed'
+  | 'degraded'
   | 'failed'
   | 'cancelled'
   | 'draft'
@@ -180,8 +182,9 @@ export function resolveKnowledgeDetailStatus(
     case 'completed':
     case 'done':
       return 'completed'
-    case 'failed':
     case 'degraded':
+      return 'degraded'
+    case 'failed':
       return 'failed'
     case 'cancelled':
       return 'cancelled'
@@ -234,9 +237,18 @@ export function knowledgeNeedsStatusPolling(item: KnowledgePollStatus): boolean 
 }
 
 export function knowledgeHasDerivativeFailure(item: KnowledgePollStatus): boolean {
+  const statuses = derivativeStatuses(item)
   return item.parse_status === 'completed' &&
-    !derivativeStatuses(item).some((status) => DERIVATIVE_IN_FLIGHT.has(status)) &&
-    !derivativeStatuses(item).every((status) => DERIVATIVE_SUCCESS.has(status))
+    !statuses.some((status) => DERIVATIVE_IN_FLIGHT.has(status)) &&
+    statuses.some((status) => !DERIVATIVE_SUCCESS.has(status) && status !== 'degraded')
+}
+
+export function knowledgeHasDerivativeDegradation(item: KnowledgePollStatus): boolean {
+  const statuses = derivativeStatuses(item)
+  return item.parse_status === 'completed' &&
+    !statuses.some((status) => DERIVATIVE_IN_FLIGHT.has(status)) &&
+    !statuses.some((status) => !DERIVATIVE_SUCCESS.has(status) && status !== 'degraded') &&
+    statuses.some((status) => status === 'degraded')
 }
 
 export function knowledgeIsFullyComplete(item: KnowledgePollStatus): boolean {
@@ -256,6 +268,7 @@ export function resolveKnowledgeWorkflowStatus(
   if (parseStatus === 'pending') return 'pending'
   if (knowledgeNeedsStatusPolling(item)) return 'processing'
   if (knowledgeHasDerivativeFailure(item)) return 'failed'
+  if (knowledgeHasDerivativeDegradation(item)) return 'degraded'
   if (knowledgeIsFullyComplete(item)) return 'completed'
   return 'unknown'
 }
@@ -297,7 +310,7 @@ const SPAN_STATUS: Record<string, KnowledgeWorkflowStatus> = {
   completed: 'completed',
   skipped: 'completed',
   failed: 'failed',
-  degraded: 'failed',
+  degraded: 'degraded',
   cancelled: 'cancelled',
 }
 
@@ -310,7 +323,7 @@ const SPAN_DETAIL_STATUS: Record<string, KnowledgeDetailStatus> = {
   completed: 'completed',
   skipped: 'skipped',
   failed: 'failed',
-  degraded: 'failed',
+  degraded: 'degraded',
   cancelled: 'cancelled',
 }
 
@@ -363,6 +376,7 @@ export function latestSpanGroupStatus(
     return 'processing'
   }
   if (statuses.some((status) => status === 'failed')) return 'failed'
+  if (statuses.some((status) => status === 'degraded')) return 'degraded'
   if (statuses.some((status) => status === 'completed')) return 'completed'
   if (statuses.length > 0 && statuses.every((status) => status === 'cancelled')) return 'cancelled'
   return undefined
@@ -391,6 +405,7 @@ export function latestSpanGroupDetailStatus(
     return 'processing'
   }
   if (statuses.some((status) => status === 'failed')) return 'failed'
+  if (statuses.some((status) => status === 'degraded')) return 'degraded'
   if (statuses.some((status) => status === 'completed')) return 'completed'
   if (statuses.every((status) => status === 'skipped')) return 'skipped'
   if (statuses.every((status) => status === 'cancelled')) return 'cancelled'

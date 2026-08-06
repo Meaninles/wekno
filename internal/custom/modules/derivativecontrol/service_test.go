@@ -205,7 +205,7 @@ func TestDerivativeControlAdminCandidatesFollowActiveTenant(t *testing.T) {
 }
 
 func TestDerivativeControlPublishesSharedEndpointModelAndNeverFallsBack(t *testing.T) {
-	db, service, settings, _, _ := newDerivativeServiceTest(t)
+	db, service, _, _, _ := newDerivativeServiceTest(t)
 	ctx := context.WithValue(context.Background(), types.UserIDContextKey, "system-admin")
 	ctx = context.WithValue(ctx, types.SystemAdminContextKey, true)
 
@@ -284,12 +284,6 @@ func TestDerivativeControlPublishesSharedEndpointModelAndNeverFallsBack(t *testi
 	)
 	require.NoError(t, service.GuardChatModel(ctx, sharedEndpointInteractive))
 
-	value, err := service.UpdateTPM(ctx, 12_345)
-	require.NoError(t, err)
-	require.EqualValues(t, 12_345, value)
-	settings.mu.RLock()
-	require.EqualValues(t, 12_345, settings.tpm)
-	settings.mu.RUnlock()
 }
 
 func TestDerivativeControlRequiresDedicatedScopeAndGuardsRevocation(t *testing.T) {

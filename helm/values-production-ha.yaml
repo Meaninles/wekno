@@ -8,17 +8,18 @@
 #     every app node;
 #   - /app/skills/preloaded on every app node was exported from that exact app
 #     image and passed the per-node checks in the deployment runbook;
-#   - .1/.2/.7 have an Everest local-PV pool backed by their data disks and
-#     the csi-local-topology StorageClass has passed real write/read/reclaim;
+#   - the release scratch directories under
+#     /mnt/weknora-data/weknora-v2-scratch exist on .1/.2/.7;
 #   - the node labels used below exist;
 #   - weknora-agent-internal contains apiKey;
 #   - weknora-model-runtime was captured from the current production app and
 #     contains the existing Anthropic/LiteLLM runtime settings;
-#   - historical /data/files and Agent artifacts have passed the object-store
-#     migration audit.
+#   - the existing OBS configuration and object prefix have been captured and
+#     verified read-only; this release does not migrate or rewrite source files.
 #
-# No RWX storage is used. Durable files go to private OBS; parsing and Agent
-# workspaces use isolated per-Pod local RWO volumes and may be discarded.
+# No RWX storage or CSI provisioning is introduced. Durable source files stay
+# in their current private OBS prefix. Parsing and Agent workspaces are
+# disposable hostPath scratch directories on the three existing app nodes.
 
 global:
   imagePullSecrets:
@@ -31,8 +32,141 @@ serviceAccount:
 app:
   enabled: true
   replicaCount: 3
-  # 80 GiB local scratch per Pod. Replace one Pod at a time so a rollout does
-  # not request a fourth scratch PVC or exceed a 500 GB node data disk.
+  runtimeRoles:
+    enabled: true
+    # render-and-validate-release.sh produces a separate gated manifest with
+    # this overridden to true; the final target remains unsuspended.
+    startSuspended: false
+    environment: production
+    postgresMaxConnections: 100
+    redisNamespace: prod-cce-wk-6a9d12b0
+    parseWorker:
+      enabled: true
+      replicaCount: 3
+      maxOpenConns: 5
+      maxIdleConns: 2
+      scratch:
+        volumeType: hostPath
+        hostPath:
+          path: /mnt/weknora-data/weknora-v2-scratch/parse
+          type: Directory
+      nodeSelector:
+        weknora.io/document-worker: "true"
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+          ephemeral-storage: 256Mi
+        limits:
+          cpu: "3"
+          memory: 5Gi
+          ephemeral-storage: 2Gi
+    derivativeWorker:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 4
+      maxIdleConns: 1
+      scratch:
+        volumeType: hostPath
+        hostPath:
+          path: /mnt/weknora-data/weknora-v2-scratch/derivative
+          type: Directory
+      nodeSelector:
+        weknora.io/document-worker: "true"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: ["10.14.201.1", "10.14.201.7"]
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+          ephemeral-storage: 128Mi
+        limits:
+          cpu: 1500m
+          memory: 2Gi
+          ephemeral-storage: 1Gi
+    wikiWorker:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 4
+      maxIdleConns: 1
+      scratch:
+        volumeType: hostPath
+        hostPath:
+          path: /mnt/weknora-data/weknora-v2-scratch/wiki
+          type: Directory
+      nodeSelector:
+        weknora.io/document-worker: "true"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: ["10.14.201.2", "10.14.201.7"]
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+          ephemeral-storage: 128Mi
+        limits:
+          cpu: 1500m
+          memory: 2Gi
+          ephemeral-storage: 1Gi
+    maintenance:
+      enabled: true
+      replicaCount: 2
+      maxOpenConns: 3
+      maxIdleConns: 1
+      scratch:
+        volumeType: hostPath
+        hostPath:
+          path: /mnt/weknora-data/weknora-v2-scratch/maintenance
+          type: Directory
+      nodeSelector:
+        weknora.io/stateless-worker: "true"
+      resources:
+        requests:
+          cpu: 150m
+          memory: 384Mi
+          ephemeral-storage: 64Mi
+        limits:
+          cpu: 750m
+          memory: 1Gi
+          ephemeral-storage: 512Mi
+    migration:
+      enabled: true
+      render: true
+      # The protected release overlay must replace this for every run.
+      jobNameSuffix: REPLACE_RELEASE_ID
+      maxOpenConns: 3
+      maxIdleConns: 1
+      backoffLimit: 0
+      activeDeadlineSeconds: 7200
+      scratch:
+        volumeType: hostPath
+        hostPath:
+          path: /mnt/weknora-data/weknora-v2-scratch/migration
+          type: Directory
+      nodeSelector:
+        kubernetes.io/hostname: "10.14.201.7"
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+          ephemeral-storage: 256Mi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral-storage: 2Gi
+  # Stop-the-world release: the normal workload starts only after the explicit
+  # migration Job succeeds, so no transient fourth copy is scheduled.
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -55,6 +189,7 @@ app:
     # Mirror this repository to the approved SWR project when push access is
     # granted. The tag must identify the image built from this code state.
     repository: weknora-app-prod
+    digest: ""
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
   sandbox:
@@ -65,26 +200,20 @@ app:
     # pre-pull it on every app node.
     dockerImage: weknora-sandbox-prod:horizontal-objectstore-20260726
   resources:
-    # Test baseline: three cap=4 workers processed 500/500 documents at
-    # ~4.10 docs/s. This request leaves ~3 CPU and ~18 GiB request headroom
-    # on each 8C/32G parsing node while allowing burst CPU to DocReader.
+    # API-only role. CPU-heavy parsing is reserved by parseWorker above.
     requests:
+      cpu: 500m
+      memory: 1280Mi
+      ephemeral-storage: 128Mi
+    limits:
       cpu: 1500m
       memory: 3Gi
       ephemeral-storage: 1Gi
-    limits:
-      cpu: "4"
-      memory: 8Gi
-      ephemeral-storage: 8Gi
   scratch:
-    volumeType: ephemeral
-    ephemeral:
-      storageClassName: csi-local-topology
-      size: 80Gi
-      accessModes:
-        - ReadWriteOnce
-      annotations:
-        everest.io/csi.volume-name-prefix: wk-app-tmp
+    volumeType: hostPath
+    hostPath:
+      path: /mnt/weknora-data/weknora-v2-scratch/api
+      type: Directory
   env:
     GIN_MODE: release
     # WAF terminates public TLS on 443 and forwards HTTP through ELB port 80.
@@ -97,13 +226,16 @@ app:
     LOCAL_STORAGE_BASE_DIR: /data/files
     AUTO_RECOVER_DIRTY: "false"
     STREAM_MANAGER_TYPE: redis
-    CONCURRENCY_POOL_SIZE: "8"
+    # Each parse replica may issue at most 12 embedding batches. Three fixed
+    # replicas therefore stay below the measured 64-way embedding target.
+    CONCURRENCY_POOL_SIZE: "12"
     # Complete document workflows per app instance. The system-admin
     # asynq.concurrency setting is authoritative at runtime.
     WEKNORA_ASYNQ_CONCURRENCY: "4"
-    CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "8"
+    CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "6"
     CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "2"
-    WEKNORA_WIKI_MAP_TASK_CONCURRENCY: "4"
+    # Two Wiki replicas x 6 consumers = the scheduler's 12-task Wiki share.
+    WEKNORA_WIKI_MAP_TASK_CONCURRENCY: "6"
     ENABLE_GRAPH_RAG: "true"
     TZ: Asia/Shanghai
   connections:
@@ -279,6 +411,12 @@ app:
     - name: CUSTOM_DOCUMENT_SPLIT_AUDIO_TIMEOUT_SECONDS
       value: "1800"
 
+    # Five chunks per provider request is the production-tested embedding
+    # request shape. Keep it explicit so role restarts cannot inherit a
+    # different image default.
+    - name: BATCH_EMBED_SIZE
+      value: "5"
+
     # Root-document ownership is durable in PostgreSQL. Heartbeats are only
     # suspicion; takeover also requires lease/boot fencing and, where
     # available, an exact Kubernetes termination proof.
@@ -296,12 +434,29 @@ app:
       value: 120s
     - name: CUSTOM_DOCUMENT_QUEUE_WORKFLOW_TIMEOUT
       value: 48h
+    # Qwen3.6-35B-A3B has 24 background provider slots. Prefetch 2 yields a
+    # 48-task window; derivative:Wiki 3:1 protects 36 derivative tasks and 12
+    # Wiki tasks. Two fixed derivative replicas therefore run 18 consumers each.
     - name: WEKNORA_ASYNQ_TASK_CONCURRENCY
-      value: "16"
+      value: "18"
     # Slow VLM work has a dedicated Asynq server, so poison images cannot
     # occupy the generic background worker pool.
     - name: WEKNORA_MULTIMODAL_TASK_CONCURRENCY
-      value: "2"
+      value: "4"
+    # Stream VLM responses end-to-end so a genuinely stalled request is
+    # distinguishable from a long but progressing OCR/caption generation.
+    - name: VLM_STREAMING_ENABLED
+      value: "true"
+    - name: VLM_FIRST_TOKEN_TIMEOUT_SECONDS
+      value: "180"
+    - name: VLM_STREAM_IDLE_TIMEOUT_SECONDS
+      value: "45"
+    - name: VLM_TOTAL_TIMEOUT_SECONDS
+      value: "360"
+    - name: VLM_OCR_MAX_TOKENS
+      value: "5000"
+    - name: VLM_CAPTION_MAX_TOKENS
+      value: "512"
     - name: CUSTOM_WORK_RETRY_IMAGE_MAX_ATTEMPTS
       value: "10"
     - name: CUSTOM_WORK_RETRY_WIKI_MAX_ATTEMPTS
@@ -316,43 +471,16 @@ app:
     - name: WEKNORA_LLM_CHAT_TIMEOUT_SECONDS
       value: "900"
 
-    # Shared Redis leases make these cluster-wide limits; they must not be
-    # multiplied by the number of app replicas. The DeepSeek V4 Flash route
-    # completed 32/32 concurrent 160-token generations at P95 5.655s; 24 keeps
-    # 25% concurrency headroom for longer prompts/outputs and provider jitter.
+    # Bound models read concurrency/RPM/TPM from the actual-model resource
+    # pools managed by the Capacity Control page. Environment concurrency
+    # values are deliberately absent so they cannot look authoritative while
+    # being shadowed by persisted route policies.
     - name: CUSTOM_MODEL_ADMISSION_ENABLED
       value: "true"
     - name: CUSTOM_MODEL_ADMISSION_FAIL_CLOSED
       value: "true"
     - name: CUSTOM_MODEL_ADMISSION_KEY_PREFIX
       value: "weknora:prod-cce-wk-6a9d12b0:model-admission:v1:"
-    - name: CUSTOM_MODEL_ADMISSION_CHAT_CONCURRENCY
-      value: "24"
-    - name: CUSTOM_MODEL_ADMISSION_CHAT_PER_TENANT
-      value: "12"
-    - name: CUSTOM_MODEL_ADMISSION_INTERACTIVE_RESERVE
-      value: "2"
-    - name: CUSTOM_MODEL_ADMISSION_EMBEDDING_CONCURRENCY
-      value: "32"
-    - name: CUSTOM_MODEL_ADMISSION_EMBEDDING_PER_TENANT
-      value: "16"
-    - name: CUSTOM_MODEL_ADMISSION_RERANK_CONCURRENCY
-      value: "24"
-    - name: CUSTOM_MODEL_ADMISSION_RERANK_PER_TENANT
-      value: "12"
-    - name: CUSTOM_MODEL_ADMISSION_VLM_CONCURRENCY
-      value: "4"
-    - name: CUSTOM_MODEL_ADMISSION_VLM_PER_TENANT
-      value: "2"
-    - name: CUSTOM_MODEL_ADMISSION_ASR_CONCURRENCY
-      value: "2"
-    - name: CUSTOM_MODEL_ADMISSION_ASR_PER_TENANT
-      value: "1"
-    - name: CUSTOM_MODEL_ADMISSION_PARSER_CONCURRENCY
-      value: "12"
-    - name: CUSTOM_MODEL_ADMISSION_PARSER_PER_TENANT
-      value: "4"
-
     # Keep the existing Docker sandbox feature available on every app node.
     # Runs are one-shot (`docker run --rm`), so no session affinity is needed.
     - name: SSRF_WHITELIST_EXTRA
@@ -413,26 +541,23 @@ docreader:
     # Build from this repository so parser and document-splitter fixes match
     # the app. Replace with the approved SWR project path before rendering.
     repository: weknora-docreader-prod
+    digest: ""
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
   resources:
     requests:
-      cpu: 1500m
-      memory: 3Gi
-      ephemeral-storage: 1Gi
+      cpu: 750m
+      memory: 1Gi
+      ephemeral-storage: 256Mi
     limits:
-      cpu: "6"
-      memory: 10Gi
-      ephemeral-storage: 4Gi
+      cpu: "4"
+      memory: 4Gi
+      ephemeral-storage: 2Gi
   scratch:
-    volumeType: ephemeral
-    ephemeral:
-      storageClassName: csi-local-topology
-      size: 100Gi
-      accessModes:
-        - ReadWriteOnce
-      annotations:
-        everest.io/csi.volume-name-prefix: wk-parser-tmp
+    volumeType: hostPath
+    hostPath:
+      path: /mnt/weknora-data/weknora-v2-scratch/docreader
+      type: Directory
   service:
     type: ClusterIP
     port: 50051
@@ -440,6 +565,13 @@ docreader:
   extraEnv:
     - name: DOCREADER_GRPC_MAX_WORKERS
       value: "4"
+    - name: DOCREADER_REQUEST_TIMEOUT_SECONDS
+      # A parser runs in a disposable process group. This hard deadline is
+      # shorter than the app's 30-minute RPC deadline so malformed documents
+      # cannot permanently retain a DocReader worker.
+      value: "600"
+    - name: DOCREADER_PROCESS_KILL_GRACE_SECONDS
+      value: "3"
     - name: DOCREADER_GRPC_MAX_FILE_SIZE_MB
       value: "50"
     - name: DOCREADER_PDF_RENDER_PARALLELISM
@@ -467,6 +599,7 @@ generalAgent:
       maxUnavailable: 1
   image:
     repository: weknora-custom-general-agent
+    digest: ""
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
   apiKeySecret:
@@ -478,20 +611,16 @@ generalAgent:
     apiTimeoutMS: "7200000"
     idleTimeoutMS: "900000"
   scratch:
-    volumeType: ephemeral
-    ephemeral:
-      storageClassName: csi-local-topology
-      size: 20Gi
-      accessModes:
-        - ReadWriteOnce
-      annotations:
-        everest.io/csi.volume-name-prefix: wk-agent-tmp
+    volumeType: hostPath
+    hostPath:
+      path: /mnt/weknora-data/weknora-v2-scratch/general-agent
+      type: Directory
   resources:
     requests:
-      cpu: 500m
-      memory: 1Gi
+      cpu: 250m
+      memory: 768Mi
     limits:
-      cpu: "2"
+      cpu: 1500m
       memory: 2Gi
   topologySpread:
     enabled: true
@@ -515,6 +644,7 @@ documentProcessingAgent:
       maxUnavailable: 1
   image:
     repository: weknora-custom-document-processing-agent
+    digest: ""
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
   apiKeySecret:
@@ -526,20 +656,16 @@ documentProcessingAgent:
     apiTimeoutMS: "7200000"
     idleTimeoutMS: "900000"
   scratch:
-    volumeType: ephemeral
-    ephemeral:
-      storageClassName: csi-local-topology
-      size: 40Gi
-      accessModes:
-        - ReadWriteOnce
-      annotations:
-        everest.io/csi.volume-name-prefix: wk-doc-agent-tmp
+    volumeType: hostPath
+    hostPath:
+      path: /mnt/weknora-data/weknora-v2-scratch/document-agent
+      type: Directory
   resources:
     requests:
-      cpu: "1"
-      memory: 1536Mi
+      cpu: 500m
+      memory: 1280Mi
     limits:
-      cpu: "3"
+      cpu: 2500m
       memory: 4Gi
   topologySpread:
     enabled: true
@@ -555,8 +681,14 @@ documentProcessingAgent:
 frontend:
   enabled: true
   replicaCount: 2
+  strategy:
+    # There are exactly two stateless-worker nodes. Delete one old pod before
+    # creating its replacement so required host anti-affinity cannot deadlock.
+    maxSurge: 0
+    maxUnavailable: 1
   image:
     repository: weknora-ui-prod
+    digest: ""
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
   maxFileSizeMB: "50"
@@ -579,6 +711,15 @@ frontend:
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: frontend
+              app.kubernetes.io/instance: weknora
+              app.kubernetes.io/name: weknora
+          topologyKey: kubernetes.io/hostname
   nodeSelector:
     weknora.io/stateless-worker: "true"
 
@@ -587,6 +728,7 @@ mobileWeb:
   replicaCount: 2
   image:
     repository: weknora-mobile-web
+    digest: ""
     tag: horizontal-objectstore-20260726
     pullPolicy: IfNotPresent
   maxFileSizeMB: "50"
@@ -612,8 +754,9 @@ mobileWeb:
   nodeSelector:
     weknora.io/stateless-worker: "true"
 
-# /data/files is compatibility-only scratch after the verified migration.
-# It must stay nearly empty; all durable files are in OBS.
+# /data/files remains compatibility-only emptyDir scratch. Production already
+# stores live source files in OBS, so this release neither copies nor backs up
+# this directory.
 dataFiles:
   emptyDir:
     sizeLimit: 1Gi
@@ -624,6 +767,18 @@ dataFiles:
 # single points and are explicitly called out in the deployment document.
 postgresql:
   enabled: false
+  # The active Deployment is independently managed. Apply the reviewed
+  # deploy/production/postgres-runtime.strategic-merge.yaml during downtime.
+  resources:
+    requests:
+      cpu: "3"
+      memory: 8Gi
+    limits:
+      cpu: "6"
+      memory: 12Gi
+  sharedMemory:
+    enabled: true
+    sizeLimit: 2Gi
 redis:
   enabled: false
 neo4j:

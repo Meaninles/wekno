@@ -377,12 +377,12 @@ func (r *Recovery) recoverOne(ctx context.Context, candidate *types.Knowledge) (
 			if _, err := ParseExact(current); err != nil {
 				return fmt.Errorf("recheck committed fanout plan: %w", err)
 			}
-			completionStore := r.completionStore
-			if tx.Dialector.Name() == "sqlite" {
-				// Lite deliberately has a one-connection pool, so a base-repository
-				// ledger read from inside this transaction would self-deadlock.
-				completionStore = &transactionCompletionStore{tx: tx}
-			}
+			// Keep all completion-ledger reads/writes on the transaction that owns
+			// the KB/knowledge recheck. This is required both for SQLite's
+			// one-connection Lite pool and for small PostgreSQL maintenance pools:
+			// calling the base repository here would request another connection
+			// while the leader lock and this transaction already occupy the pool.
+			completionStore := &transactionCompletionStore{tx: tx}
 			if err := Replay(ctx, r.enqueuer, r.redisClient, completionStore, current); err != nil {
 				return fmt.Errorf("dispatch durable fanout: %w", err)
 			}

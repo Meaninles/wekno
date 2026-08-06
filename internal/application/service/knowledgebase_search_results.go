@@ -92,22 +92,24 @@ func (s *knowledgeBaseService) processSearchResults(ctx context.Context,
 
 // chunkIndex holds pre-computed lookup structures for processing search results.
 type chunkIndex struct {
-	knowledgeIDs    []string
-	chunkIDs        []string
-	scores          map[string]float64
-	matchTypes      map[string]types.MatchType
-	matchedContents map[string]string
-	processedIDs    map[string]bool // tracks all IDs (chunk + enrichment) to avoid duplicates
+	knowledgeIDs     []string
+	chunkIDs         []string
+	scores           map[string]float64
+	matchTypes       map[string]types.MatchType
+	matchedContents  map[string]string
+	matchedSourceIDs map[string]string
+	processedIDs     map[string]bool // tracks all IDs (chunk + enrichment) to avoid duplicates
 }
 
 // buildChunkIndex collects knowledge/chunk IDs and builds score/matchType maps
 // from the raw retrieval results.
 func (s *knowledgeBaseService) buildChunkIndex(chunks []*types.IndexWithScore) *chunkIndex {
 	idx := &chunkIndex{
-		scores:          make(map[string]float64, len(chunks)),
-		matchTypes:      make(map[string]types.MatchType, len(chunks)),
-		matchedContents: make(map[string]string, len(chunks)),
-		processedIDs:    make(map[string]bool, len(chunks)*2),
+		scores:           make(map[string]float64, len(chunks)),
+		matchTypes:       make(map[string]types.MatchType, len(chunks)),
+		matchedContents:  make(map[string]string, len(chunks)),
+		matchedSourceIDs: make(map[string]string, len(chunks)),
+		processedIDs:     make(map[string]bool, len(chunks)*2),
 	}
 
 	processedKnowledgeIDs := make(map[string]bool)
@@ -116,10 +118,14 @@ func (s *knowledgeBaseService) buildChunkIndex(chunks []*types.IndexWithScore) *
 			idx.knowledgeIDs = append(idx.knowledgeIDs, chunk.KnowledgeID)
 			processedKnowledgeIDs[chunk.KnowledgeID] = true
 		}
+		// Preserve the retrieval pipeline's existing ordering and score semantics.
+		// SourceID is captured only to classify MatchedContent as retrieval
+		// provenance; citation resolution never consumes either field.
 		idx.chunkIDs = append(idx.chunkIDs, chunk.ChunkID)
 		idx.scores[chunk.ChunkID] = chunk.Score
 		idx.matchTypes[chunk.ChunkID] = chunk.MatchType
 		idx.matchedContents[chunk.ChunkID] = chunk.Content
+		idx.matchedSourceIDs[chunk.ChunkID] = chunk.SourceID
 	}
 	return idx
 }
@@ -240,7 +246,9 @@ func (s *knowledgeBaseService) assembleSearchResults(
 		if knowledge, ok := knowledgeMap[chunk.KnowledgeID]; ok {
 			matchType := idx.matchTypes[chunk.ID]
 			matchedContent := idx.matchedContents[chunk.ID]
-			searchResults = append(searchResults, s.buildSearchResult(chunk, knowledge, score, matchType, matchedContent))
+			searchResults = append(searchResults, s.buildSearchResult(
+				chunk, knowledge, score, matchType, matchedContent, idx.matchedSourceIDs[chunk.ID],
+			))
 			addedChunkIDs[chunk.ID] = true
 		} else {
 			logger.Warnf(ctx, "Knowledge not found for chunk: %s, knowledge_id: %s", chunk.ID, chunk.KnowledgeID)
@@ -274,7 +282,9 @@ func (s *knowledgeBaseService) assembleSearchResults(
 					continue
 				}
 				matchedContent := idx.matchedContents[chunkID]
-				searchResults = append(searchResults, s.buildSearchResult(chunk, knowledge, score, matchType, matchedContent))
+				searchResults = append(searchResults, s.buildSearchResult(
+					chunk, knowledge, score, matchType, matchedContent, idx.matchedSourceIDs[chunk.ID],
+				))
 			}
 		}
 	}
@@ -305,6 +315,7 @@ func (s *knowledgeBaseService) buildSearchResult(chunk *types.Chunk,
 	score float64,
 	matchType types.MatchType,
 	matchedContent string,
+	matchedSourceID string,
 ) *types.SearchResult {
 	return &types.SearchResult{
 		ID:                   chunk.ID,
@@ -328,8 +339,32 @@ func (s *knowledgeBaseService) buildSearchResult(chunk *types.Chunk,
 		ChunkMetadata:        chunk.Metadata,
 		SourceLocator:        chunk.SourceLocator,
 		MatchedContent:       matchedContent,
+		MatchedSourceID:      matchedSourceID,
+		MatchOrigin:          retrievalMatchOrigin(chunk, matchedSourceID),
+		SourceTenantID:       chunk.TenantID,
 		KnowledgeBaseID:      knowledge.KnowledgeBaseID,
 	}
+}
+
+func retrievalMatchOrigin(chunk *types.Chunk, matchedSourceID string) string {
+	if chunk == nil {
+		return "auxiliary"
+	}
+	if chunk.ChunkType == types.ChunkTypeFAQ {
+		return "faq_question"
+	}
+	if matchedSourceID == "" || matchedSourceID == chunk.ID {
+		return "chunk_body"
+	}
+	var metadata types.DocumentChunkMetadata
+	if len(chunk.Metadata) > 0 && json.Unmarshal(chunk.Metadata, &metadata) == nil {
+		for _, question := range metadata.GeneratedQuestions {
+			if question.ID == matchedSourceID {
+				return "generated_question"
+			}
+		}
+	}
+	return "auxiliary"
 }
 
 // isSearchableChunk checks if a chunk type should be included in search results.

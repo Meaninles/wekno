@@ -8,7 +8,7 @@ import {
 } from "./index";
 import i18n from '@/i18n'
 import { getApiBaseUrl } from './api-base';
-import { rememberShareReturnPath } from '@/custom/modules/chatshare/authReturn';
+import { rememberAuthReturnPath } from '@/custom/modules/authreturn/authReturn';
 import { mobileSSOEntryForPath } from '@/custom/modules/mobile/authRedirect';
 
 const t = (key: string) => i18n.global.t(key)
@@ -147,7 +147,7 @@ function isEmbedPage(): boolean {
 
 function redirectToLogin() {
   if (typeof window === 'undefined') return;
-  const mobileSSOEntry = mobileSSOEntryForPath(window.location.pathname);
+  const mobileSSOEntry = mobileSSOEntryForPath(window.location.pathname, window.location.search);
   if (mobileSSOEntry) {
     // The mobile shell owns its authentication bootstrap. An expired JWT or
     // refresh token must return to the mobile SSO flow, not the desktop login
@@ -158,7 +158,7 @@ function redirectToLogin() {
   if (window.location.pathname === '/login') return;
   // Embed 渠道用 Embed token 鉴权，匿名访问不应被踢到登录页
   if (isEmbedPage()) return;
-  const returnTo = rememberShareReturnPath(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+  const returnTo = rememberAuthReturnPath(`${window.location.pathname}${window.location.search}${window.location.hash}`);
   window.location.href = returnTo ? `/login?${new URLSearchParams({ returnTo }).toString()}` : '/login';
 }
 

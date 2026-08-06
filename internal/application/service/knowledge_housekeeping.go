@@ -29,6 +29,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/custom/modules/contentcache"
 	"github.com/Tencent/WeKnora/internal/custom/modules/corefanout"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -205,11 +206,9 @@ func (h *HousekeepingService) runSweep(ctx context.Context) {
 			fanoutSkipped)
 	}
 
-	// Sweep B: summary generation has no span heartbeat of its own, so queue
-	// liveness is the authoritative signal. Use the same two-probe protocol as
-	// the document sweep: one scan filters ordinary backlog, a second full scan
-	// immediately before the guarded UPDATE closes active→retry and other
-	// non-snapshot state transitions inside Redis inspection.
+	// Sweep B: PostgreSQL durable work items are the only authority for summary
+	// liveness. Redis/Asynq is a wake-up transport and may legitimately contain
+	// no summary:generation task while custom:derivative:wake is delayed.
 	h.runSummarySweep(ctx, time.Now().Add(-1*time.Hour))
 }
 
@@ -234,43 +233,17 @@ func (h *HousekeepingService) runSummarySweep(ctx context.Context, cutoff time.T
 		return
 	}
 
-	candidates, firstSkipped := h.filterOutSummaryQueued(ctx, candidates)
-	if len(candidates) == 0 {
-		if firstSkipped > 0 {
-			logger.Infof(ctx,
-				"[Housekeeping] %d summary candidate(s) skipped — task queued/running or queue state unavailable",
-				firstSkipped)
-		}
+	stats, err := derivativequeue.ReconcileStaleSummaries(ctx, h.db, candidates, cutoff)
+	if err != nil {
+		// The durable ledger is fail-closed. If it cannot be inspected, preserve
+		// every candidate and retry during the next sweep.
+		logger.Warnf(ctx, "[Housekeeping] durable summary reconciliation failed: %v", err)
 		return
 	}
-
-	// Deliberately repeat the whole batch scan. Asynq exposes each state as a
-	// separate paginated view, not one atomic snapshot; a task can move from
-	// active to retry after that state's page was read. The second observation
-	// makes such a transition visible before any terminal repair is attempted.
-	candidates, secondSkipped := h.filterOutSummaryQueued(ctx, candidates)
-	if firstSkipped+secondSkipped > 0 {
+	if stats.Preserved > 0 || stats.Completed > 0 || stats.Failed > 0 {
 		logger.Infof(ctx,
-			"[Housekeeping] %d summary candidate(s) skipped — task queued/running or queue state unavailable",
-			firstSkipped+secondSkipped)
-	}
-	if len(candidates) == 0 {
-		return
-	}
-
-	ids := make([]string, 0, len(candidates))
-	for _, k := range candidates {
-		ids = append(ids, k.ID)
-	}
-	res := h.db.WithContext(ctx).Model(&types.Knowledge{}).
-		Where("id IN ?", ids).
-		Where("summary_status = ?", types.SummaryStatusProcessing).
-		Where("updated_at < ?", cutoff).
-		Update("summary_status", types.SummaryStatusFailed)
-	if res.Error != nil {
-		logger.Warnf(ctx, "[Housekeeping] summary sweep failed: %v", res.Error)
-	} else if res.RowsAffected > 0 {
-		logger.Infof(ctx, "[Housekeeping] recovered %d stuck summary rows", res.RowsAffected)
+			"[Housekeeping] durable summary reconciliation preserved=%d completed=%d failed=%d",
+			stats.Preserved, stats.Completed, stats.Failed)
 	}
 }
 
@@ -307,10 +280,10 @@ func (h *HousekeepingService) filterByLastSpanActivity(
 	}
 	var beats []spanHeartbeat
 	err := h.db.WithContext(ctx).
-		Table("knowledge_processing_spans").
+		Table("custom_processing_spans_v2").
 		Select("knowledge_id, MAX(updated_at) AS last_seen").
 		Where("knowledge_id IN ?", ids).
-		Where("name NOT LIKE ?", "postprocess.wiki%").
+		Where("logical_key NOT LIKE ?", "wiki:%").
 		Group("knowledge_id").
 		Find(&beats).Error
 	if err != nil {
@@ -653,9 +626,9 @@ func (h *HousekeepingService) guardedRecoveryQuery(
 		Where("COALESCE(knowledges.error_message, '') NOT LIKE ?", knowledgeMoveAttemptEnvelope+"%"+knowledgeMoveAttemptDelimiter+knowledgeMoveRecoveryPrefix+"%").
 		Where(`NOT EXISTS (
 			SELECT 1
-			FROM knowledge_processing_spans AS active_span
+			FROM custom_processing_spans_v2 AS active_span
 			WHERE active_span.knowledge_id = knowledges.id
-			  AND active_span.name NOT LIKE 'postprocess.wiki%'
+			  AND active_span.logical_key NOT LIKE 'wiki:%'
 			  AND active_span.updated_at >= ?
 		)`, cutoff)
 }

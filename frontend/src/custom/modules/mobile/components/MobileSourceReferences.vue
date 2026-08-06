@@ -29,13 +29,12 @@ const summary = computed(() => {
       acc[row.type] += 1;
       return acc;
     },
-    { knowledge: 0, wiki: 0, web: 0, data_source: 0 },
+    { knowledge: 0, wiki: 0, web: 0 },
   );
   const parts: string[] = [];
   if (counts.knowledge) parts.push(`${counts.knowledge}个文档片段`);
   if (counts.wiki) parts.push(`${counts.wiki}个Wiki`);
   if (counts.web) parts.push(`${counts.web}条搜索`);
-  if (counts.data_source) parts.push(`${counts.data_source}个数据源`);
   return parts.length ? `引用了${parts.join("、")}` : `引用了${rows.value.length}个来源`;
 });
 </script>
@@ -116,10 +115,6 @@ const summary = computed(() => {
 
 .source-ref-row.is-wiki .source-ref-row__dot {
   background: #6958d8;
-}
-
-.source-ref-row.is-data_source .source-ref-row__dot {
-  background: #b56d13;
 }
 
 .source-ref-row__title {

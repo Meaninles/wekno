@@ -243,12 +243,9 @@ func stableTaskCompletionProof(
 		return false, false, nil
 	}
 
-	var current struct {
-		PendingSubtasksCount int
-	}
 	if err := db.WithContext(ctx).
 		Model(&types.Knowledge{}).
-		Select("pending_subtasks_count").
+		Select("id").
 		Where(
 			"tenant_id = ? AND id = ? AND knowledge_base_id = ? AND processing_generation = ? AND parse_status IN ?",
 			locator.tenantID,
@@ -257,20 +254,17 @@ func stableTaskCompletionProof(
 			locator.generation,
 			locator.activeStatuses,
 		).
-		Take(&current).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		Take(&struct{ ID string }{}).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return true, true, nil
 	} else if err != nil {
 		return true, false, fmt.Errorf("check stable task generation: %w", err)
 	}
-	// The postprocess receipt proves only that a previous orchestrator reached
-	// its publication boundary. While counted enrichment slots remain, replay
-	// is still required after Redis loss, a terminal leaf task without durable
-	// completion, or a publication bug. Every leaf has a generation-scoped
-	// stable ID and its own PostgreSQL completion proof, so replay cannot create
-	// a second live owner or decrement the counter twice.
-	if locator.ledger == stableCompletionPostProcess && current.PendingSubtasksCount > 0 {
-		return true, false, nil
-	}
+	// A postprocess receipt is the durable publication boundary for the
+	// orchestrator itself. Counted derivative leaves are recovered by their
+	// PostgreSQL work items/outcome ledgers (and Wiki by its durable pending
+	// operations), so pending_subtasks_count must not invalidate this receipt.
+	// Replaying the orchestrator while leaves are merely queued causes repeated
+	// fan-out scans and makes one parse attempt look like many failed retries.
 
 	var count int64
 	switch locator.ledger {

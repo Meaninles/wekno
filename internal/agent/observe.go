@@ -360,12 +360,12 @@ func commonStringPrefix(a, b string) string {
 }
 
 // RenderUserTurnContent builds the user-turn payload for the current LLM call
-// (runtime_context + must_use + query). Used by Execute and finalize paths only;
+// (runtime_context + must_use + current-task envelope). Used by Execute and finalize paths only;
 // not written to rendered_content / history.
 func (e *AgentEngine) RenderUserTurnContent(sessionID, query string) string {
 	runtimeCtx := buildRuntimeContextBlock(sessionID, e.knowledgeBasesInfo, e.selectedDocs)
 	mustUse := buildMustUseBlock(e.pinnedMCPServices, e.pinnedSkills)
-	return composeUserTurnContent(runtimeCtx, mustUse, query)
+	return composeUserTurnContent(runtimeCtx, mustUse, buildCurrentTaskBlocks(query))
 }
 
 func composeUserTurnContent(parts ...string) string {
@@ -376,6 +376,21 @@ func composeUserTurnContent(parts ...string) string {
 		}
 	}
 	return strings.Join(nonEmpty, "\n\n")
+}
+
+// buildCurrentTaskBlocks places the authoritative current request at the tail
+// of the current user message, after all runtime metadata. Conversation history
+// remains available for genuine follow-ups, but cannot silently replace a new
+// topic merely because the previous answer was longer or more detailed.
+//
+// This is shared by every Go ReAct agent (built-in and future custom prompt
+// types). It adds no model call and only a small, constant prompt prefix.
+func buildCurrentTaskBlocks(query string) string {
+	return `<current_task_priority>
+The user_request below is the only active request for this turn. Previous conversation messages are background context. Use them only when this user_request explicitly refers to or depends on them. Do not continue, repeat, search for, or answer an earlier task merely because it appears in history. Derive retrieval queries and the final answer from this user_request, and ensure every cited claim answers it.
+</current_task_priority>
+
+<user_request verbatim="true" priority="highest">` + query + `</user_request>`
 }
 
 // listToolNames returns tool.function names for logging
@@ -544,7 +559,7 @@ func (e *AgentEngine) buildMessagesWithLLMContext(
 	mustUse := buildMustUseBlock(e.pinnedMCPServices, e.pinnedSkills)
 	userMsg := chat.Message{
 		Role:    "user",
-		Content: composeUserTurnContent(runtimeCtx, mustUse, currentQuery),
+		Content: composeUserTurnContent(runtimeCtx, mustUse, buildCurrentTaskBlocks(currentQuery)),
 		Images:  imageURLs,
 	}
 	messages = append(messages, userMsg)

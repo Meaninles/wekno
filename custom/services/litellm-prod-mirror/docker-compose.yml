@@ -1,0 +1,46 @@
+name: weknora-litellm-prod-mirror
+
+services:
+  litellm:
+    # The private production image and this public image both contain LiteLLM
+    # 1.92.0. Pin the public digest so a later main-stable push cannot drift.
+    image: ghcr.io/berriai/litellm@sha256:8d6d3f8b0d19dd723b49f2bcc085cde97831a0dd78cde04972809461a7ea31e7
+    container_name: weknora-litellm-prod-mirror
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    ports:
+      - "127.0.0.1:${LITELLM_LOCAL_PORT:-14000}:4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY}
+      DATABASE_URL: ${LITELLM_DATABASE_URL:?set LITELLM_DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      REDIS_NAMESPACE: litellgw
+      UPSTREAM_KEY_QWEN27B_TOOL: ${UPSTREAM_KEY_QWEN27B_TOOL:?set UPSTREAM_KEY_QWEN27B_TOOL}
+      DRAIN_TOKEN: ${DRAIN_TOKEN:?set DRAIN_TOKEN}
+      LITELLM_MODE: PRODUCTION
+      LITELLM_LOG: INFO
+      STORE_MODEL_IN_DB: "false"
+      NO_PROXY: 127.0.0.1,localhost,postgres,redis,10.0.11.36,10.0.11.37
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./sitecustomize.py:/app/.venv/lib/python3.13/site-packages/sitecustomize.py:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://127.0.0.1:4000/health/liveliness', timeout=5).raise_for_status()"]
+      interval: 15s
+      timeout: 8s
+      retries: 10
+      start_period: 45s
+    networks:
+      default:
+        aliases:
+          # Preserve the hostname already allowed by WeKnora's SSRF policy.
+          - weknora-litellm-deepseek-anthropic-test
+
+networks:
+  default:
+    external: true
+    name: weknora_WeKnora-network-dev

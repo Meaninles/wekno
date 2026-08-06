@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -168,6 +169,160 @@ func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
 	if got := complete.Data["final_answer"]; got != "streamed final answer" {
 		t.Fatalf("complete final_answer = %q, want streamed final answer", got)
 	}
+	refs, ok := complete.Data["knowledge_references"].([]*types.SearchResult)
+	if !ok || len(refs) != 0 {
+		t.Fatalf("complete knowledge_references = %#v, want authoritative empty slice", complete.Data["knowledge_references"])
+	}
+}
+
+func TestHandleCompleteAuthoritativelyFiltersStreamedCitationProtocol(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	ref := &types.SearchResult{
+		ID: "chunk-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+		ChunkType: string(types.ChunkTypeText), Content: "supported claim", EvidenceContent: "supported claim",
+		Metadata: map[string]string{"citation_id": "S1", "chunk_id": "chunk-1", "source_type": sourcerefs.SourceTypeKnowledge},
+	}
+	if err := handler.handleReferences(context.Background(), event.Event{
+		Type: event.EventAgentReferences,
+		Data: event.AgentReferencesData{References: []*types.SearchResult{ref}},
+	}); err != nil {
+		t.Fatalf("handleReferences returned error: %v", err)
+	}
+	raw := `supported claim<src id="S1" /> malformed<doc source_id="S1" />`
+	if err := handler.handleFinalAnswer(context.Background(), event.Event{
+		ID:   "answer-1",
+		Type: event.EventAgentFinalAnswer,
+		Data: event.AgentFinalAnswerData{Content: raw, Done: true},
+	}); err != nil {
+		t.Fatalf("handleFinalAnswer returned error: %v", err)
+	}
+	if err := handler.handleComplete(context.Background(), event.Event{
+		ID:   "complete-1",
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID:                  "assistant-1",
+			FinalAnswer:                raw,
+			KnowledgeRefs:              []*types.SearchResult{ref},
+			KnowledgeRefsAuthoritative: true,
+		},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+
+	want := `supported claim<src id="S1" /> malformed`
+	if msg.Content != want {
+		t.Fatalf("assistant content = %q, want %q", msg.Content, want)
+	}
+	if len(msg.KnowledgeReferences) != 1 || msg.KnowledgeReferences[0].Metadata["citation_id"] != "S1" {
+		t.Fatalf("assistant references = %#v, want cited S1 only", msg.KnowledgeReferences)
+	}
+	complete := stream.events[len(stream.events)-1]
+	if got := complete.Data["final_answer"]; got != want {
+		t.Fatalf("complete final_answer = %q, want filtered authoritative answer %q", got, want)
+	}
+}
+
+func TestHandleCompleteKeepsRetrievedDocumentsSeparateFromCitedFragments(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	if err := handler.handleToolCall(context.Background(), event.Event{
+		Type: event.EventAgentToolCall,
+		Data: event.AgentToolCallData{ToolCallID: "search-1", ToolName: "knowledge_search"},
+	}); err != nil {
+		t.Fatalf("handleToolCall returned error: %v", err)
+	}
+	refs := []*types.SearchResult{
+		{ID: "chunk-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), Content: "claim one", EvidenceContent: "claim one", Metadata: map[string]string{"citation_id": "S1", "chunk_id": "chunk-1", "source_type": sourcerefs.SourceTypeKnowledge}},
+		{ID: "chunk-2", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), Content: "claim two", EvidenceContent: "claim two", Metadata: map[string]string{"citation_id": "S2", "chunk_id": "chunk-2", "source_type": sourcerefs.SourceTypeKnowledge}},
+	}
+	if err := handler.handleReferences(context.Background(), event.Event{
+		Type: event.EventAgentReferences,
+		Data: event.AgentReferencesData{References: refs},
+	}); err != nil {
+		t.Fatalf("handleReferences returned error: %v", err)
+	}
+	answer := `claim one<src id="S1" />`
+	if err := handler.handleComplete(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID:                  "assistant-1",
+			FinalAnswer:                answer,
+			KnowledgeRefs:              refs[:1],
+			KnowledgeRefsAuthoritative: true,
+		},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+
+	if len(msg.KnowledgeReferences) != 1 {
+		t.Fatalf("cited fragment count = %d, want 1", len(msg.KnowledgeReferences))
+	}
+	if got := msg.RetrievalStats; !got.Attempted || got.Documents != 1 || got.Total != 1 {
+		t.Fatalf("retrieval stats = %+v, want one unique document", got)
+	}
+	complete := stream.events[len(stream.events)-1]
+	stats, ok := complete.Data["retrieval_stats"].(types.RetrievalStats)
+	if !ok || stats.Total != 1 {
+		t.Fatalf("completion retrieval_stats = %#v", complete.Data["retrieval_stats"])
+	}
+}
+
+func TestHandleCompletePreservesZeroResultRetrievalAttempt(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	_ = handler.handleToolCall(context.Background(), event.Event{
+		Type: event.EventAgentToolCall,
+		Data: event.AgentToolCallData{ToolCallID: "search-1", ToolName: "knowledge_search"},
+	})
+	if err := handler.handleComplete(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{MessageID: "assistant-1", FinalAnswer: "没有可用资料"},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+	if !msg.RetrievalStats.Attempted || msg.RetrievalStats.Total != 0 {
+		t.Fatalf("retrieval stats = %+v, want attempted zero-result retrieval", msg.RetrievalStats)
+	}
+}
+
+func TestHandleCompleteHonorsAuthoritativePlainChatRetrievalStats(t *testing.T) {
+	stream := &recordingStreamManager{}
+	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
+	handler := NewAgentStreamHandler(
+		context.Background(), "session-1", "assistant-1", "request-1", time.Time{},
+		msg, stream, event.NewEventBus(),
+	)
+	_ = handler.handleToolCall(context.Background(), event.Event{
+		Type: event.EventAgentToolCall,
+		Data: event.AgentToolCallData{ToolCallID: "fixed-pipeline-search", ToolName: "knowledge_search"},
+	})
+	if err := handler.handleComplete(context.Background(), event.Event{
+		Type: event.EventAgentComplete,
+		Data: event.AgentCompleteData{
+			MessageID:                   "assistant-1",
+			FinalAnswer:                 "42",
+			RetrievalStats:              types.RetrievalStats{},
+			RetrievalStatsAuthoritative: true,
+		},
+	}); err != nil {
+		t.Fatalf("handleComplete returned error: %v", err)
+	}
+	if msg.RetrievalStats.Attempted || msg.RetrievalStats.Total != 0 {
+		t.Fatalf("retrieval stats = %+v, want authoritative plain-chat zero state", msg.RetrievalStats)
+	}
 }
 
 func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {
@@ -208,6 +363,49 @@ func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {
 	}
 	if got.Data["tool_name"] != "Bash" || got.Data["tool_call_id"] != "toolu-1" || got.Data["phase"] != "start" {
 		t.Fatalf("stream progress metadata = %#v", got.Data)
+	}
+}
+
+func TestHandleQueueStatusAppendsReplayableEvent(t *testing.T) {
+	stream := &recordingStreamManager{}
+	handler := NewAgentStreamHandler(
+		context.Background(),
+		"session-1",
+		"assistant-1",
+		"request-1",
+		time.Time{},
+		&types.Message{ID: "assistant-1", SessionID: "session-1"},
+		stream,
+		event.NewEventBus(),
+	)
+
+	err := handler.handleQueueStatus(context.Background(), event.Event{
+		ID:   "queue-1",
+		Type: event.EventChatQueueStatus,
+		Data: event.ChatQueueStatusData{
+			State:          "waiting",
+			ModelID:        "model-1",
+			ResourcePoolID: "pool-1",
+			Position:       3,
+			Waiting:        7,
+			Active:         2,
+			MaxConcurrent:  2,
+			MaxWaiting:     20,
+			QueuedAtUnix:   123,
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleQueueStatus returned error: %v", err)
+	}
+	if len(stream.events) != 1 {
+		t.Fatalf("stream events = %d, want 1", len(stream.events))
+	}
+	got := stream.events[0]
+	if got.Type != types.ResponseTypeQueueStatus || got.Done {
+		t.Fatalf("queue stream event = %#v", got)
+	}
+	if got.Data["position"] != int64(3) || got.Data["resource_pool_id"] != "pool-1" {
+		t.Fatalf("queue metadata = %#v", got.Data)
 	}
 }
 

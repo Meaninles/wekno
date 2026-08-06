@@ -60,16 +60,21 @@ func TestPrepareFinalAnswerCitationContextUsesDocumentFragments(t *testing.T) {
 		t.Fatalf("second citation id = %q, want S2", got)
 	}
 	for _, expected := range []string{
-		`granularity="document_fragment"`,
-		`source_id="S1"`,
-		`source_id="S2"`,
-		`chunk_id="chunk-1"`,
-		`chunk_id="chunk-2"`,
-		"第一段文档片段内容。",
-		"第二段文档片段内容。",
+		`cite_exactly=<src id="S1" />`,
+		`cite_exactly=<src id="S2" />`,
 	} {
 		if !strings.Contains(context, expected) {
 			t.Fatalf("citation context missing %q: %s", expected, context)
+		}
+	}
+	for _, duplicatedEvidence := range []string{"[CITATION_EVIDENCE]", "第一段文档片段内容。", "第二段文档片段内容。"} {
+		if strings.Contains(context, duplicatedEvidence) {
+			t.Fatalf("citation context should not duplicate tool evidence %q: %s", duplicatedEvidence, context)
+		}
+	}
+	for _, forbidden := range []string{`<source `, `<context `, `source_id=`, `chunk_id=`} {
+		if strings.Contains(context, forbidden) {
+			t.Fatalf("citation context should not prime alternate citation syntax %q: %s", forbidden, context)
 		}
 	}
 }

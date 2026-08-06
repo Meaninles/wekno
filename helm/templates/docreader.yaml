@@ -14,7 +14,7 @@ metadata:
     {{- include "weknora.componentLabels" (dict "component" "docreader" "context" .) | nindent 4 }}
 spec:
   {{- if not .Values.docreader.autoscaling.enabled }}
-  replicas: {{ .Values.docreader.replicaCount }}
+  replicas: {{ ternary 0 .Values.docreader.replicaCount (and .Values.app.runtimeRoles.enabled .Values.app.runtimeRoles.startSuspended) }}
   {{- end }}
   selector:
     matchLabels:
@@ -79,24 +79,19 @@ spec:
                 - -addr=127.0.0.1:{{ .Values.docreader.healthPort }}
                 - -connect-timeout=1s
                 - -rpc-timeout=5s
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            {{- toYaml .Values.docreader.livenessProbe | nindent 12 }}
           readinessProbe:
             exec:
               command:
                 - grpc_health_probe
-                # Readiness checks the real parser gRPC executor. Liveness
-                # remains on the isolated health port so legitimate long
-                # parses do not cause a restart loop.
-                - -addr=127.0.0.1:50051
+                # Parsing runs in killable process groups with a hard
+                # DocReader-side deadline. Probe the isolated health executor
+                # so four legitimate parses cannot starve readiness and cause
+                # endpoint churn/stale gRPC connections.
+                - -addr=127.0.0.1:{{ .Values.docreader.healthPort }}
                 - -connect-timeout=1s
                 - -rpc-timeout=5s
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 3
+            {{- toYaml .Values.docreader.readinessProbe | nindent 12 }}
       volumes:
         - name: scratch
           {{- if eq (.Values.docreader.scratch.volumeType | default "emptyDir") "ephemeral" }}
@@ -119,7 +114,7 @@ spec:
           {{- else if eq (.Values.docreader.scratch.volumeType | default "emptyDir") "hostPath" }}
           hostPath:
             path: {{ .Values.docreader.scratch.hostPath.path | default "/mnt/weknora-data/scratch-docreader" | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.docreader.scratch.hostPath.type | default "DirectoryOrCreate" }}
           {{- else }}
           emptyDir:
             {{- with .Values.docreader.scratch.sizeLimit }}

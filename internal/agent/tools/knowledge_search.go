@@ -74,6 +74,10 @@ Avoid:
   These should reflect the meaning or topic you want embeddings to capture.
 - knowledge_base_ids (optional): limit the search scope.
 
+When multiple knowledge bases are available and the user names one, resolve
+that name from the system-provided knowledge-base list and pass only its ID in
+knowledge_base_ids. A document title does not prove knowledge-base membership.
+
 ## Output
 Returns chunks ranked by semantic similarity, reranked when applicable.  
 Results represent conceptual relevance, not literal keyword overlap.`,
@@ -293,7 +297,7 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 	// Execute concurrent search using pre-computed search targets
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Starting concurrent search with %d search targets",
 		len(searchTargets))
-	kbTypeMap := t.getKnowledgeBaseTypes(ctx, kbIDs)
+	kbTypeMap, kbNameMap := t.getKnowledgeBaseInfo(ctx, kbIDs)
 
 	allResults := t.concurrentSearchByTargets(ctx, queries, searchTargets,
 		topK, vectorThreshold, keywordThreshold, kbTypeMap)
@@ -326,8 +330,11 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 			len(deduplicatedBeforeRerank), t.rerankThreshold(), queries)
 		rerankedResults, err := t.rerankResults(ctx, rerankQuery, deduplicatedBeforeRerank)
 		if err != nil {
-			logger.Warnf(ctx, "[Tool][KnowledgeSearch] Rerank failed, using original results: %v", err)
-			filteredResults = deduplicatedBeforeRerank
+			logger.Errorf(ctx, "[Tool][KnowledgeSearch] Rerank failed: %v", err)
+			return &types.ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("rerank failed: %v", err),
+			}, err
 		} else {
 			filteredResults = rerankedResults
 			logger.Infof(ctx, "[Tool][KnowledgeSearch] Rerank completed successfully: %d results",
@@ -411,7 +418,7 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 
 	// Build output
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Formatting output with %d final results", len(deduplicatedResults))
-	result, err := t.formatOutput(ctx, deduplicatedResults, kbIDs, queries)
+	result, err := t.formatOutput(ctx, deduplicatedResults, kbIDs, queries, kbNameMap)
 	if err != nil {
 		logger.Errorf(ctx, "[Tool][KnowledgeSearch] Failed to format output: %v", err)
 		return result, err
@@ -420,9 +427,12 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 	return result, nil
 }
 
-// getKnowledgeBaseTypes fetches knowledge base types for the given IDs
-func (t *KnowledgeSearchTool) getKnowledgeBaseTypes(ctx context.Context, kbIDs []string) map[string]string {
+// getKnowledgeBaseInfo fetches model-visible type/name provenance for each KB.
+// Both values come from the same already-required lookup, so adding the name
+// does not add a retrieval or model round trip.
+func (t *KnowledgeSearchTool) getKnowledgeBaseInfo(ctx context.Context, kbIDs []string) (map[string]string, map[string]string) {
 	kbTypeMap := make(map[string]string, len(kbIDs))
+	kbNameMap := make(map[string]string, len(kbIDs))
 
 	for _, kbID := range kbIDs {
 		if kbID == "" {
@@ -439,9 +449,10 @@ func (t *KnowledgeSearchTool) getKnowledgeBaseTypes(ctx context.Context, kbIDs [
 		}
 
 		kbTypeMap[kbID] = kb.Type
+		kbNameMap[kbID] = kb.Name
 	}
 
-	return kbTypeMap
+	return kbTypeMap, kbNameMap
 }
 
 // concurrentSearchByTargets executes hybrid search using pre-computed search targets.
@@ -638,19 +649,6 @@ func (t *KnowledgeSearchTool) rerankResults(
 
 	if t.rerankModel != nil {
 		reranked, err = t.rerankWithModel(ctx, query, results)
-		if err != nil || len(reranked) == 0 {
-			if err != nil {
-				logger.Warnf(ctx, "[Tool][KnowledgeSearch] Rerank model failed, falling back to chat model: %v", err)
-			} else {
-				logger.Warnf(ctx, "[Tool][KnowledgeSearch] Rerank model returned no results above threshold, falling back to chat model")
-			}
-			err = nil
-			if t.chatModel != nil {
-				reranked, err = t.rerankWithLLM(ctx, query, results)
-			} else if len(reranked) == 0 {
-				reranked = results
-			}
-		}
 	} else if t.chatModel != nil {
 		reranked, err = t.rerankWithLLM(ctx, query, results)
 	} else {
@@ -809,13 +807,7 @@ Output only the scores, no explanations or additional text.`,
 			MaxTokens:   maxTokens,
 		})
 		if err != nil {
-			logger.Warnf(ctx, "[Tool][KnowledgeSearch] LLM rerank batch %d-%d failed: %v, using original scores",
-				batchStart+1, batchEnd, err)
-			// Use original scores for this batch on error
-			for i := batchStart; i < batchEnd; i++ {
-				allScores[i] = results[i].Score
-			}
-			continue
+			return nil, fmt.Errorf("LLM rerank batch %d-%d failed: %w", batchStart+1, batchEnd, err)
 		}
 
 		logger.Infof(ctx, "[Tool][KnowledgeSearch] LLM rerank batch %d-%d response: %s",
@@ -824,18 +816,12 @@ Output only the scores, no explanations or additional text.`,
 		// Parse scores from response
 		batchScores, err := t.parseScoresFromResponse(response.Content, len(batch))
 		if err != nil {
-			logger.Warnf(
-				ctx,
-				"[Tool][KnowledgeSearch] Failed to parse LLM scores for batch %d-%d: %v, using original scores",
+			return nil, fmt.Errorf(
+				"parse LLM rerank batch %d-%d: %w",
 				batchStart+1,
 				batchEnd,
 				err,
 			)
-			// Use original scores for this batch on parsing error
-			for i := batchStart; i < batchEnd; i++ {
-				allScores[i] = results[i].Score
-			}
-			continue
 		}
 
 		// Store scores for this batch
@@ -920,18 +906,8 @@ func (t *KnowledgeSearchTool) parseScoresFromResponse(responseText string, expec
 		return nil, fmt.Errorf("no valid scores found in response")
 	}
 
-	// If we got fewer scores than expected, pad with last score or 0.5
-	for len(scores) < expectedCount {
-		if len(scores) > 0 {
-			scores = append(scores, scores[len(scores)-1])
-		} else {
-			scores = append(scores, 0.5)
-		}
-	}
-
-	// Truncate if we got more scores than expected
-	if len(scores) > expectedCount {
-		scores = scores[:expectedCount]
+	if len(scores) != expectedCount {
+		return nil, fmt.Errorf("expected %d scores, got %d", expectedCount, len(scores))
 	}
 
 	return scores, nil
@@ -974,8 +950,6 @@ func (t *KnowledgeSearchTool) rerankThreshold() float64 {
 	return 0.3
 }
 
-const agentRerankFallbackMinScore = 0.15
-
 func filterRerankRankResults(rankResults []rerank.RankResult, threshold float64) []rerank.RankResult {
 	if len(rankResults) == 0 {
 		return nil
@@ -984,17 +958,6 @@ func filterRerankRankResults(rankResults []rerank.RankResult, threshold float64)
 	for _, r := range rankResults {
 		if r.RelevanceScore >= threshold {
 			filtered = append(filtered, r)
-		}
-	}
-	if len(filtered) == 0 {
-		top := rankResults[0]
-		for _, r := range rankResults[1:] {
-			if r.RelevanceScore > top.RelevanceScore {
-				top = r
-			}
-		}
-		if top.RelevanceScore >= agentRerankFallbackMinScore {
-			return []rerank.RankResult{top}
 		}
 	}
 	return filtered
@@ -1103,6 +1066,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 	results []*searchResultWithMeta,
 	kbsToSearch []string,
 	queries []string,
+	kbNameMap map[string]string,
 ) (*types.ToolResult, error) {
 	if len(results) == 0 {
 		data := map[string]interface{}{
@@ -1127,10 +1091,24 @@ func (t *KnowledgeSearchTool) formatOutput(
 		}, nil
 	}
 
+	exactInputs := make([]*types.SearchResult, 0, len(results))
+	for _, result := range results {
+		if result != nil && result.SearchResult != nil {
+			exactInputs = append(exactInputs, result.SearchResult)
+		}
+	}
+	tenantID, _ := types.TenantIDFromContext(ctx)
+	exactReferences, err := sourcerefs.ResolveQuickAnswerEvidence(
+		ctx, t.chunkService.GetRepository(), tenantID, exactInputs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve exact knowledge-search evidence: %w", err)
+	}
+
 	// Count results by KB
 	kbCounts := make(map[string]int)
 	for _, r := range results {
-		kbCounts[r.KnowledgeID]++
+		kbCounts[r.KnowledgeBaseID]++
 	}
 
 	// Format individual results as XML. Tag names are kept in sync with
@@ -1158,6 +1136,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 	knowledgeTitleMap := make(map[string]string)
 
 	for i, result := range results {
+		knowledgeBaseName := kbNameMap[result.KnowledgeBaseID]
 		var faqMeta *types.FAQChunkMetadata
 		if result.KnowledgeBaseType == types.KnowledgeBaseTypeFAQ {
 			meta, err := t.getFAQMetadata(ctx, result.ID, faqMetadataCache)
@@ -1212,23 +1191,25 @@ func (t *KnowledgeSearchTool) formatOutput(
 			// content in context already, so re-emitting it only burns tokens.
 			if isFAQ {
 				ob.WriteString(fmt.Sprintf(
-					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
+					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
 				))
 			} else {
 				ob.WriteString(fmt.Sprintf(
-					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
+					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\" already_seen=\"true\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeID),
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
@@ -1250,23 +1231,25 @@ func (t *KnowledgeSearchTool) formatOutput(
 		} else {
 			if isFAQ {
 				ob.WriteString(fmt.Sprintf(
-					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
+					"<faq rank=\"%d\" faq_id=\"%s\" index=\"%d\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
 				))
 			} else {
 				ob.WriteString(fmt.Sprintf(
-					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
+					"<chunk rank=\"%d\" chunk_id=\"%s\" chunk_index=\"%d\" knowledge_id=\"%s\" knowledge_base_id=\"%s\" knowledge_base_name=\"%s\" knowledge_title=\"%s\" score=\"%.3f\" source_query=\"%s\">\n",
 					i+1,
 					xmlEscape(result.ID),
 					result.ChunkIndex,
 					xmlEscape(result.KnowledgeID),
 					xmlEscape(result.KnowledgeBaseID),
+					xmlEscape(knowledgeBaseName),
 					xmlEscape(result.KnowledgeTitle),
 					result.Score,
 					xmlEscape(result.SourceQuery),
@@ -1289,7 +1272,11 @@ func (t *KnowledgeSearchTool) formatOutput(
 			if snippet != "" {
 				ob.WriteString(fmt.Sprintf("<match_snippet>%s</match_snippet>\n", xmlEscape(snippet)))
 			}
-			ob.WriteString(fmt.Sprintf("<content>%s</content>\n", result.Content))
+			exactModelContent := renderKnowledgeSearchExactEvidence(result, exactReferences)
+			if strings.TrimSpace(exactModelContent) == "" && strings.TrimSpace(result.Content) != "" {
+				return nil, fmt.Errorf("render exact knowledge-search evidence for result %s", result.ID)
+			}
+			ob.WriteString(fmt.Sprintf("<content>%s</content>\n", exactModelContent))
 
 			if result.ImageInfo != "" {
 				var imageInfos []types.ImageInfo
@@ -1320,15 +1307,18 @@ func (t *KnowledgeSearchTool) formatOutput(
 			"content":             result.Content,
 			"knowledge_id":        result.KnowledgeID,
 			"knowledge_title":     result.KnowledgeTitle,
+			"knowledge_base_id":   result.KnowledgeBaseID,
+			"knowledge_base_name": knowledgeBaseName,
 			"match_type":          result.MatchType,
 			"source_query":        result.SourceQuery,
 			"query_type":          result.QueryType,
 			"knowledge_base_type": result.KnowledgeBaseType,
+			"score":               result.Score,
 		})
 
 		last := formattedResults[len(formattedResults)-1]
-		if locator := sourcerefs.ModelSourceLocator(result.SourceLocator); locator != "" {
-			last["source_locator"] = json.RawMessage(locator)
+		if len(result.SourceLocator) > 0 && json.Valid(result.SourceLocator) {
+			last["source_locator"] = json.RawMessage(append([]byte(nil), result.SourceLocator...))
 		}
 
 		if result.ImageInfo != "" {
@@ -1405,10 +1395,57 @@ func (t *KnowledgeSearchTool) formatOutput(
 	}
 
 	return &types.ToolResult{
-		Success: true,
-		Output:  output,
-		Data:    data,
+		Success:          true,
+		Output:           output,
+		Data:             data,
+		SourceReferences: sourcerefs.CitableReferences(exactReferences),
 	}, nil
+}
+
+func renderKnowledgeSearchExactEvidence(
+	result *searchResultWithMeta,
+	exactReferences []*types.SearchResult,
+) string {
+	if result == nil || result.SearchResult == nil {
+		return ""
+	}
+	allowedIDs := make(map[string]struct{}, len(result.SubChunkID)+1)
+	allowedIDs[result.ID] = struct{}{}
+	for _, id := range result.SubChunkID {
+		allowedIDs[id] = struct{}{}
+	}
+	var builder strings.Builder
+	for _, ref := range exactReferences {
+		if ref == nil || ref.KnowledgeID != result.KnowledgeID {
+			continue
+		}
+		matches := false
+		switch {
+		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText):
+			matches = ref.ParentChunkID == result.ParentChunkID
+		case result.ParentChunkID != "" &&
+			(result.ChunkType == string(types.ChunkTypeImageOCR) || result.ChunkType == string(types.ChunkTypeImageCaption)):
+			matches = ref.ID == result.ParentChunkID
+		default:
+			_, matches = allowedIDs[ref.ID]
+		}
+		if !matches || strings.TrimSpace(ref.EvidenceContent) == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		if sourcerefs.IsSupportedCitationReference(ref) {
+			fmt.Fprintf(&builder, "[EXACT_FRAGMENT chunk_id=\"%s\"]\n", ref.ID)
+			builder.WriteString(strings.TrimSpace(ref.EvidenceContent))
+			builder.WriteString("\n[/EXACT_FRAGMENT]")
+		} else {
+			builder.WriteString("[ANALYSIS_CONTEXT]\n")
+			builder.WriteString(strings.TrimSpace(ref.EvidenceContent))
+			builder.WriteString("\n[/ANALYSIS_CONTEXT]")
+		}
+	}
+	return builder.String()
 }
 
 func writeModelSourceLocator(builder *strings.Builder, locator types.JSON) {

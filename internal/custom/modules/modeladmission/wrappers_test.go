@@ -63,6 +63,53 @@ func (c *failingTestChat) ChatStream(
 func (*failingTestChat) GetModelName() string { return "failing-test" }
 func (*failingTestChat) GetModelID() string   { return "failing-test-id" }
 
+func TestEffectiveChatParallelismUsesHotDocumentGrant(t *testing.T) {
+	config := testConfig(Limit{
+		Concurrency: 8, Background: 3, PerTenant: 4, PerDocument: 2,
+	})
+	manager := newManagerWithConfig(nil, config)
+	wrapped := WrapChat(
+		manager,
+		Spec{Kind: KindChat, Domain: "fanout", TenantID: 1},
+		&streamTestChat{},
+	)
+	require.Equal(t, 2, EffectiveChatParallelism(context.Background(), wrapped, 4))
+	require.Equal(t, 1, EffectiveChatParallelism(context.Background(), wrapped, 1))
+	require.Equal(t, 4, EffectiveChatParallelism(context.Background(), &streamTestChat{}, 4))
+}
+
+func TestEffectiveChatLaneParallelismAutomaticallyMatchesHierarchicalGuarantee(t *testing.T) {
+	config := testConfig(Limit{
+		Concurrency: 4, Background: 3, PerTenant: 4, PerDocument: 3,
+	})
+	config.WorkWindowEnabled = true
+	config.DerivativeWeight = 2
+	config.WikiWeight = 1
+	manager := newManagerWithConfig(nil, config)
+	wrapped := WrapChat(
+		manager,
+		Spec{Kind: KindChat, Domain: "lane-fanout", TenantID: 1},
+		&streamTestChat{},
+	)
+
+	// Background=3 protects one provider slot for the Wiki family while
+	// derivative also waits. Map and Commit time-share that one slot, so one
+	// durable task must not fan out beyond one call. Independent tasks can
+	// still fill borrowed global slots through Redis admission.
+	require.Equal(t, 1, EffectiveChatLaneParallelism(
+		context.Background(), wrapped, 4, WorkLaneWikiMap,
+	))
+	require.Equal(t, 1, EffectiveChatLaneParallelism(
+		context.Background(), wrapped, 4, WorkLaneWikiCommit,
+	))
+	require.Equal(t, 2, EffectiveChatLaneParallelism(
+		context.Background(), wrapped, 4, WorkLaneDerivative,
+	))
+	require.Equal(t, 4, EffectiveChatLaneParallelism(
+		context.Background(), &streamTestChat{}, 4, WorkLaneWikiCommit,
+	))
+}
+
 func TestProviderTransportFailureIsTypedWithoutLosingCause(t *testing.T) {
 	config := testConfig(Limit{Concurrency: 1, PerTenant: 1})
 	manager := newManagerWithConfig(nil, config)
@@ -98,6 +145,147 @@ func TestSemanticModelFailureStillConsumesNormalRetryBudget(t *testing.T) {
 	require.False(t, IsProviderUnavailable(err))
 	_, ok := ProviderRetryAfter(err)
 	require.False(t, ok)
+}
+
+func TestAdmissionGrantedHookRunsOnlyAfterCapacityIsAcquired(t *testing.T) {
+	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
+	spec := Spec{Kind: KindChat, Domain: "hook-boundary", TenantID: 1}
+	firstLease, err := manager.Acquire(context.Background(), spec)
+	require.NoError(t, err)
+
+	var calls atomic.Int32
+	ctx := WithAdmissionGrantedHook(context.Background(), func(context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+	wrapped := WrapChat(manager, spec, &streamTestChat{})
+	_, err = wrapped.Chat(ctx, nil, nil)
+	require.Error(t, err)
+	require.Zero(t, calls.Load())
+	require.False(t, ProviderExecutionStarted(ctx))
+
+	firstLease.Release()
+	_, err = wrapped.Chat(ctx, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, calls.Load())
+	require.True(t, ProviderExecutionStarted(ctx))
+}
+
+func TestAdmissionGrantedHookFailureReleasesCapacityWithoutCallingProvider(t *testing.T) {
+	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
+	spec := Spec{Kind: KindChat, Domain: "hook-failure", TenantID: 1}
+	hookErr := errors.New("persist durable provider boundary")
+	ctx := WithAdmissionGrantedHook(context.Background(), func(context.Context) error {
+		return hookErr
+	})
+	wrapped := WrapChat(manager, spec, &streamTestChat{})
+
+	_, err := wrapped.Chat(ctx, nil, nil)
+	require.ErrorIs(t, err, hookErr)
+	require.EqualValues(t, 0, manager.Snapshot().InFlight)
+	require.False(t, ProviderExecutionStarted(ctx))
+}
+
+func TestProviderStartObserverRunsOnlyAfterDurableAdmissionBoundary(t *testing.T) {
+	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
+	spec := Spec{Kind: KindChat, Domain: "provider-start-observer", TenantID: 1}
+	ctx := WithProviderExecutionTracking(context.Background())
+	var durableDone atomic.Bool
+	ctx = WithAdmissionGrantedHook(ctx, func(context.Context) error {
+		durableDone.Store(true)
+		return nil
+	})
+	var observerCalls atomic.Int32
+	require.True(t, RegisterProviderStartObserver(ctx, func(context.Context) {
+		require.True(t, durableDone.Load(), "observer must follow the durable provider-running transition")
+		observerCalls.Add(1)
+	}))
+
+	wrapped := WrapChat(manager, spec, &streamTestChat{})
+	_, err := wrapped.Chat(ctx, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, observerCalls.Load())
+
+	// One logical span may wrap more than one provider call. The observer is a
+	// start boundary, not a per-call counter, and therefore runs exactly once.
+	_, err = wrapped.Chat(ctx, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, observerCalls.Load())
+}
+
+func TestProviderStartObserverDoesNotRunWhenDurableHookFails(t *testing.T) {
+	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
+	ctx := WithProviderExecutionTracking(context.Background())
+	ctx = WithAdmissionGrantedHook(ctx, func(context.Context) error { return errors.New("durable boundary failed") })
+	var observerCalls atomic.Int32
+	require.True(t, RegisterProviderStartObserver(ctx, func(context.Context) { observerCalls.Add(1) }))
+
+	_, err := WrapChat(
+		manager,
+		Spec{Kind: KindChat, Domain: "provider-start-observer-failure", TenantID: 1},
+		&streamTestChat{},
+	).Chat(ctx, nil, nil)
+	require.Error(t, err)
+	require.Zero(t, observerCalls.Load())
+}
+
+func TestNestedProviderTrackingPropagatesUpWithoutContaminatingSibling(t *testing.T) {
+	manager := newManagerWithConfig(nil, testConfig(Limit{Concurrency: 1, PerTenant: 1}))
+	wrapped := WrapChat(
+		manager,
+		Spec{Kind: KindChat, Domain: "nested-tracking", TenantID: 1},
+		&streamTestChat{},
+	)
+	parent := WithProviderExecutionTracking(context.Background())
+	first := WithProviderExecutionTracking(parent)
+	second := WithProviderExecutionTracking(parent)
+
+	_, err := wrapped.Chat(first, nil, nil)
+	require.NoError(t, err)
+	require.True(t, ProviderExecutionStarted(first))
+	require.True(t, ProviderExecutionStarted(parent))
+	require.False(t, ProviderExecutionStarted(second),
+		"a provider call for one Wiki document must not count for its sibling")
+}
+
+func TestTaskWorkLeaseIsReusedByNestedProviderCalls(t *testing.T) {
+	config := testConfig(Limit{
+		Concurrency: 1, Background: 1, PerTenant: 1, PerDocument: 1,
+	})
+	config.WorkWindowEnabled = true
+	config.WorkPrefetchFactor = 1
+	manager := newManagerWithConfig(nil, config)
+	spec := Spec{Kind: KindChat, Domain: "task-window", TenantID: 1}
+	wrapped := WrapChat(manager, spec, &streamTestChat{})
+
+	taskCtx, release, err := AcquireChatTaskWork(
+		WithBackground(context.Background()), wrapped, WorkLaneDerivative,
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, manager.Snapshot().WorkActive)
+
+	// The work window has only one slot. A nested provider call succeeds only
+	// if it reuses the task marker instead of trying to claim a second slot.
+	_, err = wrapped.Chat(taskCtx, nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, manager.Snapshot().WorkActive)
+	require.EqualValues(t, 0, manager.Snapshot().InFlight)
+
+	_, _, err = AcquireChatTaskWork(
+		WithBackground(context.Background()), wrapped, WorkLaneDerivative,
+	)
+	require.ErrorIs(t, err, ErrAdmissionDeferred)
+
+	release()
+	require.EqualValues(t, 0, manager.Snapshot().WorkActive)
+}
+
+func TestAcquireChatTaskWorkIsNoopForUnwrappedModel(t *testing.T) {
+	ctx := context.WithValue(context.Background(), struct{}{}, "preserved")
+	workCtx, release, err := AcquireChatTaskWork(ctx, &streamTestChat{}, WorkLaneWiki)
+	require.NoError(t, err)
+	require.Same(t, ctx, workCtx)
+	release()
 }
 
 func TestChatStreamHoldsAdmissionUntilProducerCloses(t *testing.T) {

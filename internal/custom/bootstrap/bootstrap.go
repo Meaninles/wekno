@@ -19,22 +19,39 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/answerfeedback"
 	"github.com/Tencent/WeKnora/internal/custom/modules/authsecurity"
 	"github.com/Tencent/WeKnora/internal/custom/modules/builtinagentdefaults"
+	"github.com/Tencent/WeKnora/internal/custom/modules/capacitycontrol"
+	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
+	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativecontrol"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
+	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/generalagent"
 	"github.com/Tencent/WeKnora/internal/custom/modules/iam"
+	"github.com/Tencent/WeKnora/internal/custom/modules/imoutput"
+	"github.com/Tencent/WeKnora/internal/custom/modules/impreview"
 	"github.com/Tencent/WeKnora/internal/custom/modules/kbmanager"
 	"github.com/Tencent/WeKnora/internal/custom/modules/knowledgefolders"
+	"github.com/Tencent/WeKnora/internal/custom/modules/maintenance"
 	"github.com/Tencent/WeKnora/internal/custom/modules/mobiledocument"
+	"github.com/Tencent/WeKnora/internal/custom/modules/mobileknowledge"
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
+	"github.com/Tencent/WeKnora/internal/custom/modules/processingtrace"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeinstances"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/custom/modules/scheduledchat"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sessionstate"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/custom/modules/userguide"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiaccess"
+	"github.com/Tencent/WeKnora/internal/custom/modules/wikiqueue"
 	"github.com/Tencent/WeKnora/internal/handler"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
+	imPkg "github.com/Tencent/WeKnora/internal/im"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/middleware"
@@ -58,7 +75,13 @@ type Handlers struct {
 	DocumentQueue        *documentqueue.Handler
 	KnowledgeFolders     *knowledgefolders.Handler
 	MobileDocument       *mobiledocument.Handler
+	MobileKnowledge      *mobileknowledge.Handler
 	DerivativeControl    *derivativecontrol.Handler
+	ModelAdmission       *modeladmission.Handler
+	CapacityControl      *capacitycontrol.Handler
+	IMPreview            *impreview.Handler
+	IMReference          *imoutput.ReferenceHandler
+	WikiAccess           *wikiaccess.Handler
 
 	configCenterService         *configcenter.Service
 	answerFeedbackService       *answerfeedback.Service
@@ -71,16 +94,20 @@ type Handlers struct {
 	kbManagerService            *kbmanager.Service
 	knowledgeFolderService      *knowledgefolders.Service
 	mobileDocumentService       *mobiledocument.Service
+	mobileKnowledgeService      *mobileknowledge.Service
+	imReferenceService          *imoutput.ReferenceService
 	derivativeControlService    *derivativecontrol.Service
 	iamService                  *iam.Service
 	scheduledChatService        *scheduledchat.Service
 	sessionStateService         *sessionstate.Service
 	skillHubService             *skillhub.Service
 	userGuideService            *userguide.Service
+	wikiAccessService           *wikiaccess.Service
 }
 
 func NewHandlers(
 	cfg *config.Config,
+	imService *imPkg.Service,
 	db *gorm.DB,
 	duckdb *sql.DB,
 	redisClient *redis.Client,
@@ -102,14 +129,24 @@ func NewHandlers(
 	documentReader interfaces.DocumentReader,
 	imageResolver *docparser.ImageResolver,
 	documentQueueCoordinator *documentqueue.Coordinator,
+	splitManager *documentsplit.Manager,
 	systemSettingService interfaces.SystemSettingService,
 	auditLogService interfaces.AuditLogService,
 	kbRepository interfaces.KnowledgeBaseRepository,
 	customAgentRepository interfaces.CustomAgentRepository,
+	profile runtimeprofile.Profile,
+	admissionManager *modeladmission.Manager,
+	chatQueueManager *chatqueue.Manager,
+	derivativeQueueRepository *derivativequeue.Repository,
+	processingTraceRepository *processingtrace.Repository,
+	runtimeInstanceRegistry *runtimeinstances.Registry,
+	dependencyControl *dependencycontrol.Service,
+	taskEnqueuer interfaces.TaskEnqueuer,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
 	adminService := customadmin.NewService(db, userService)
+	wikiAccessService := wikiaccess.NewService(db)
 	answerFeedbackService := answerfeedback.NewService(db, answerfeedback.LoadConfigFromEnv())
 	authSecurityService := authsecurity.NewService(db, redisClient, authsecurity.LoadConfigFromEnv())
 	builtinAgentDefaultsService := builtinagentdefaults.NewService(db, customAgentService)
@@ -130,10 +167,23 @@ func NewHandlers(
 		knowledgeService,
 		knowledgeBaseService,
 		kbShareService,
+		taskEnqueuer,
+	)
+	mobileArtifactRepository := mobiledocument.NewArtifactRepository(
+		db,
+		generalAgentService.ArtifactStore(),
 	)
 	mobileDocumentService := mobiledocument.NewService(
 		knowledgeService,
+		mobileArtifactRepository,
 		mobiledocument.LoadConfigFromEnv(),
+	)
+	mobileKnowledgeService := mobileknowledge.NewService(db)
+	imReferenceService := imoutput.NewReferenceService(
+		db,
+		knowledgeService,
+		imoutput.NewReferenceSignerFromEnv(),
+		cfg.FrontendBaseURL,
 	)
 	iamService := iam.NewService(db, userService)
 	iamPublicOrigin, err := iam.LoadPublicOrigin(cfg.FrontendBaseURL)
@@ -157,6 +207,7 @@ func NewHandlers(
 	)
 	sessionStateService := sessionstate.NewService(db)
 	skillHubService := skillhub.NewService(db)
+	generalAgentService.SetLightweightSkillProvider(skillHubService)
 	generalAgentService.SetProfessionalSkillProvider(skillHubService)
 	derivativeControlService := derivativecontrol.NewService(
 		db,
@@ -165,13 +216,42 @@ func NewHandlers(
 		auditLogService,
 		kbRepository,
 		customAgentRepository,
+		admissionManager,
 	)
-	runMaintenance := customMigrationsEnabled()
+	capacityControlService := capacitycontrol.NewService(db, admissionManager)
+	runMaintenance := profile.RunsMigration() && customMigrationsEnabled()
 	if runMaintenance {
+		if err := splitManager.ApplyMigrations(ctx); err != nil {
+			return nil, err
+		}
+		if err := sourcerefs.Migrate(ctx, db); err != nil {
+			return nil, err
+		}
+		if err := runtimeInstanceRegistry.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := dependencyControl.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := admissionManager.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := derivativeControlService.Migrate(ctx); err != nil {
 			return nil, err
 		}
+		if err := derivativeQueueRepository.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := wikiqueue.Migrate(ctx, db); err != nil {
+			return nil, err
+		}
+		if err := processingTraceRepository.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := configCenterService.Migrate(ctx); err != nil {
+			return nil, err
+		}
+		if err := wikiAccessService.Migrate(ctx); err != nil {
 			return nil, err
 		}
 		if err := answerFeedbackService.Migrate(ctx); err != nil {
@@ -253,6 +333,7 @@ func NewHandlers(
 	handler.RegisterCustomRegisterSecurityHook(authSecurityHandler.PrepareRegister)
 	handler.RegisterCustomPasswordChangeSecurityHook(authSecurityHandler.PreparePasswordChange)
 	handler.RegisterCustomPasswordChangeGuardHook(authSecurityHandler.GuardPasswordChange)
+	handler.RegisterCustomKnowledgeBaseWikiSelectionGuard(wikiAccessService.GuardWikiSelection)
 	adminService.SetProvisioner(provisionUser)
 	iamService.SetProvisioner(provisionUser)
 	handler.RegisterCustomPendingOrganizationMemberGrantHook(func(ctx context.Context, req handler.CustomPendingOrganizationMemberGrantRequest) error {
@@ -266,18 +347,19 @@ func NewHandlers(
 	appservice.RegisterAdditionalSkillLister(skillHubService.AdditionalMetadata)
 	appservice.RegisterProfessionalSkillLister(skillHubService.ProfessionalMetadata)
 	appservice.RegisterRuntimeSkillConfigurer(skillHubService.ConfigureRuntimeSkills)
-	appservice.RegisterSelectedSkillContextResolver(skillHubService.SelectedSkillContext)
-	appservice.RegisterAllSkillContextResolver(skillHubService.AllSkillContext)
+	appservice.RegisterEffectiveLightweightSkillContextResolver(skillHubService.EffectiveLightweightSkillContext)
 	appservice.RegisterBuiltinAgentConfigOverlay(builtinAgentDefaultsService.ApplyReferenceModelDefaults)
 	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
 	appservice.RegisterSessionDeletedHook(generalAgentService.DeleteSessionArtifacts)
+	appservice.RegisterKnowledgeDeleteCompletedHook(knowledgeFolderService.OnKnowledgeDeleteCompleted)
 	appservice.RegisterDerivativeChatResolver(derivativeControlService.ResolveChatModel)
 	appservice.RegisterChatModelUsageGuard(derivativeControlService.GuardChatModel)
 	appservice.RegisterModelMutationGuard(derivativeControlService.GuardModelMutation)
 	appservice.RegisterKnowledgeBaseModelPolicy(derivativeControlService.ValidateKnowledgeBase)
 	handler.RegisterMessageClientEnricher(answerFeedbackService.EnrichMessagesForClient)
 	sessionhandler.RegisterAssistantRunSnapshotHook(answerFeedbackService.HandleAssistantRunSnapshot)
+	sessionhandler.RegisterChatQueueAdmissionHook(chatQueueManager.Admit)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeGeneralAgent, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeKnowledgeBaseManager, generalAgentService.Run)
 	sessionhandler.RegisterAgentQARunner(types.AgentTypeDocumentProcessingAgent, generalAgentService.Run)
@@ -370,7 +452,13 @@ func NewHandlers(
 		DocumentQueue:               documentqueue.NewHandler(documentQueueCoordinator),
 		KnowledgeFolders:            knowledgefolders.NewHandler(knowledgeFolderService, knowledgeService),
 		MobileDocument:              mobiledocument.NewHandler(mobileDocumentService),
+		MobileKnowledge:             mobileknowledge.NewHandler(mobileKnowledgeService),
 		DerivativeControl:           derivativecontrol.NewHandler(derivativeControlService, modelService),
+		ModelAdmission:              modeladmission.NewHandler(admissionManager),
+		CapacityControl:             capacitycontrol.NewHandler(capacityControlService),
+		IMPreview:                   impreview.NewHandler(imService, sessionService, messageService, customAgentService, tenantService),
+		IMReference:                 imoutput.NewReferenceHandler(imReferenceService),
+		WikiAccess:                  wikiaccess.NewHandler(wikiAccessService),
 		configCenterService:         configCenterService,
 		answerFeedbackService:       answerFeedbackService,
 		adminService:                adminService,
@@ -382,14 +470,23 @@ func NewHandlers(
 		kbManagerService:            kbManagerService,
 		knowledgeFolderService:      knowledgeFolderService,
 		mobileDocumentService:       mobileDocumentService,
+		mobileKnowledgeService:      mobileKnowledgeService,
+		imReferenceService:          imReferenceService,
 		derivativeControlService:    derivativeControlService,
 		iamService:                  iamService,
 		scheduledChatService:        scheduledChatService,
 		sessionStateService:         sessionStateService,
 		skillHubService:             skillHubService,
 		userGuideService:            userGuideService,
+		wikiAccessService:           wikiAccessService,
 	}, nil
 }
+
+// Initialize forces construction of the custom control plane before any
+// serving or worker loop starts. dig providers are lazy; without this barrier
+// a derivative worker can consume a wake before the package-level model
+// resolver/guards registered by NewHandlers exist.
+func Initialize(*Handlers) {}
 
 // customMigrationsEnabled follows the native AUTO_MIGRATE contract by
 // default. CUSTOM_AUTO_MIGRATE is an explicit escape hatch for deployments
@@ -462,6 +559,67 @@ func StartSchedulers(handlers *Handlers) {
 	}
 }
 
+// StartAPIWorkers starts process-local consumers that receive work directly
+// from API handlers. They are intentionally not leader-elected: every API
+// replica has its own in-memory feedback queue.
+func StartAPIWorkers(handlers *Handlers) {
+	if handlers != nil && handlers.answerFeedbackService != nil {
+		handlers.answerFeedbackService.Start()
+	}
+}
+
+// RegisterMaintenanceSchedulers binds every durable/global scheduler to the
+// same PostgreSQL session-leader token as derivative dispatch and recovery.
+// A standby starts none of these loops; loss of the leader connection stops
+// them before the next election.
+func RegisterMaintenanceSchedulers(
+	handlers *Handlers,
+	coordinator *maintenance.Coordinator,
+) error {
+	if handlers == nil || coordinator == nil {
+		return nil
+	}
+	return coordinator.Register(maintenance.Hook{
+		Name: "custom-schedulers",
+		Start: func(ctx context.Context) error {
+			if handlers.iamService != nil {
+				if err := handlers.iamService.StartScheduler(ctx); err != nil {
+					return fmt.Errorf("start IAM scheduler: %w", err)
+				}
+			}
+			if handlers.scheduledChatService != nil {
+				if err := handlers.scheduledChatService.StartScheduler(ctx); err != nil {
+					if handlers.iamService != nil {
+						handlers.iamService.StopScheduler()
+					}
+					return fmt.Errorf("start scheduled chat scheduler: %w", err)
+				}
+			}
+			if handlers.kbManagerService != nil {
+				handlers.kbManagerService.Start()
+			}
+			if handlers.generalAgentService != nil {
+				handlers.generalAgentService.StartArtifactHousekeeping()
+			}
+			return nil
+		},
+		Stop: func() {
+			if handlers.generalAgentService != nil {
+				handlers.generalAgentService.StopArtifactHousekeeping()
+			}
+			if handlers.kbManagerService != nil {
+				handlers.kbManagerService.Stop()
+			}
+			if handlers.scheduledChatService != nil {
+				handlers.scheduledChatService.StopScheduler()
+			}
+			if handlers.iamService != nil {
+				handlers.iamService.StopScheduler()
+			}
+		},
+	})
+}
+
 func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
 	if embed == nil || handlers == nil || handlers.GeneralAgent == nil {
 		return
@@ -470,14 +628,27 @@ func RegisterEmbedRoutes(embed *gin.RouterGroup, handlers *Handlers) {
 }
 
 // RegisterPublicRoutes registers stateless capability URLs before the global
-// authentication middleware. The authenticated issuer route below performs
-// the tenant and knowledge-base permission checks.
+// authentication middleware. IM capabilities are issued only at the final
+// outbound boundary from references already bound to an authenticated message.
 func RegisterPublicRoutes(r *gin.Engine, handlers *Handlers) {
-	if r == nil || handlers == nil || handlers.MobileDocument == nil {
+	if r == nil || handlers == nil {
 		return
 	}
-	r.GET("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
-	r.HEAD("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+	if handlers.MobileDocument != nil {
+		r.GET("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+		r.HEAD("/api/v1/custom/mobile-documents/download", handlers.MobileDocument.Download)
+		r.GET("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
+		r.HEAD("/api/v1/custom/mobile-documents/artifacts/download", handlers.MobileDocument.DownloadArtifact)
+	}
+	// IM citations use a dedicated capability boundary registered before the
+	// normal Web authentication middleware. No knowledge-base or Wiki API is
+	// made public by these exact routes.
+	if handlers.IMReference != nil {
+		r.GET(imoutput.ReferenceRedirectPath, handlers.IMReference.Redirect)
+		r.GET(imoutput.ReferenceDataPath, handlers.IMReference.Data)
+		r.GET(imoutput.ReferenceOriginalPath, handlers.IMReference.Original)
+		r.HEAD(imoutput.ReferenceOriginalPath, handlers.IMReference.Original)
+	}
 }
 
 func RegisterRoutes(
@@ -496,6 +667,9 @@ func RegisterRoutes(
 	}
 	customPublic := v1.Group("/custom")
 	{
+		if handlers.WikiAccess != nil && viewer != nil {
+			customPublic.GET("/wiki-access/me", viewer, handlers.WikiAccess.GetCurrent)
+		}
 		if handlers.DerivativeControl != nil {
 			customPublic.GET("/derivative-control/status", handlers.DerivativeControl.Status)
 		}
@@ -550,6 +724,14 @@ func RegisterRoutes(
 			adminRoutes.PUT("/users/:id/active", handlers.Admin.SetUserActive)
 		}
 
+		if handlers.WikiAccess != nil {
+			wikiAccessRoutes := custom.Group("/wiki-access")
+			{
+				wikiAccessRoutes.GET("/users", handlers.WikiAccess.SearchUsers)
+				wikiAccessRoutes.PUT("/users/:user_id", handlers.WikiAccess.SetUser)
+			}
+		}
+
 		if handlers.DocumentQueue != nil {
 			documentQueueAdminRoutes := custom.Group("/document-queue")
 			{
@@ -565,8 +747,38 @@ func RegisterRoutes(
 				derivativeRoutes.POST("/models", handlers.DerivativeControl.Publish)
 				derivativeRoutes.DELETE("/models/:model_id", handlers.DerivativeControl.Unpublish)
 				derivativeRoutes.PUT("/default", handlers.DerivativeControl.SetDefault)
-				derivativeRoutes.PUT("/tpm", handlers.DerivativeControl.UpdateTPM)
 				derivativeRoutes.POST("/models/:model_id/test", handlers.DerivativeControl.Test)
+			}
+		}
+
+		if handlers.ModelAdmission != nil {
+			admissionRoutes := custom.Group("/capacity-control")
+			{
+				if handlers.CapacityControl != nil {
+					admissionRoutes.GET("/effective", handlers.CapacityControl.Effective)
+					admissionRoutes.POST("/validate", handlers.CapacityControl.Validate)
+				}
+				admissionRoutes.GET("/resource-pools", handlers.ModelAdmission.ListResourcePools)
+				admissionRoutes.POST("/resource-pools", handlers.ModelAdmission.CreateResourcePool)
+				admissionRoutes.PUT("/resource-pools/:id", handlers.ModelAdmission.UpdateResourcePool)
+				admissionRoutes.POST("/resource-pools/:id/drain", handlers.ModelAdmission.DrainResourcePool)
+				admissionRoutes.POST("/resource-pools/:id/reset", handlers.ModelAdmission.ResetResourcePool)
+				admissionRoutes.DELETE("/resource-pools/:id", handlers.ModelAdmission.DeleteResourcePool)
+				admissionRoutes.GET("/quota-pools", handlers.ModelAdmission.ListQuotaPools)
+				admissionRoutes.POST("/quota-pools", handlers.ModelAdmission.CreateQuotaPool)
+				admissionRoutes.PUT("/quota-pools/:id", handlers.ModelAdmission.UpdateQuotaPool)
+				admissionRoutes.GET("/gateway-pools", handlers.ModelAdmission.ListGatewayPools)
+				admissionRoutes.POST("/gateway-pools", handlers.ModelAdmission.CreateGatewayPool)
+				admissionRoutes.PUT("/gateway-pools/:id", handlers.ModelAdmission.UpdateGatewayPool)
+				admissionRoutes.GET("/bindings", handlers.ModelAdmission.ListBindings)
+				admissionRoutes.PUT("/bindings/:model_id", handlers.ModelAdmission.PutBinding)
+				admissionRoutes.GET("/templates", handlers.ModelAdmission.ListTemplates)
+				admissionRoutes.PUT("/templates/:kind", handlers.ModelAdmission.PutTemplate)
+				admissionRoutes.GET("/scheduler-policy", handlers.ModelAdmission.GetSchedulerPolicy)
+				admissionRoutes.PUT("/scheduler-policy", handlers.ModelAdmission.PutSchedulerPolicy)
+				admissionRoutes.GET("/queue/status", handlers.ModelAdmission.QueueStatus)
+				admissionRoutes.GET("/audits", handlers.ModelAdmission.ListAudits)
+				admissionRoutes.POST("/reconcile", handlers.ModelAdmission.Reconcile)
 			}
 		}
 	}
@@ -575,6 +787,13 @@ func RegisterRoutes(
 		builtinAgentDefaultRoutes := v1.Group("/custom/builtin-agent-defaults", ownedAgentOrAdmin)
 		{
 			builtinAgentDefaultRoutes.POST("/agents/:id/reset", handlers.BuiltinAgentDefaults.Reset)
+		}
+	}
+
+	if handlers.IMPreview != nil && viewer != nil {
+		imOutputRoutes := v1.Group("/custom/im-output", viewer)
+		{
+			imOutputRoutes.POST("/preview", handlers.IMPreview.Preview)
 		}
 	}
 
@@ -621,6 +840,8 @@ func RegisterRoutes(
 		{
 			folders.GET("/nodes", viewer, kbRead, handlers.KnowledgeFolders.ListNodes)
 			folders.GET("/search", viewer, kbRead, handlers.KnowledgeFolders.SearchKnowledgeBase)
+			folders.GET("/task-stats", viewer, kbRead, handlers.KnowledgeFolders.GetKnowledgeBaseTaskStats)
+			folders.GET("/folder-delete-operations/:operation_id", viewer, kbRead, handlers.KnowledgeFolders.GetDeleteOperation)
 			folders.GET("/folders/options", viewer, kbRead, handlers.KnowledgeFolders.ListFolderOptions)
 			folders.GET("/folders/:folder_id", viewer, kbRead, handlers.KnowledgeFolders.GetFolder)
 			folders.POST("/folders", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.CreateFolder)
@@ -641,6 +862,21 @@ func RegisterRoutes(
 			viewer,
 			knowledgeRead,
 			handlers.MobileDocument.CreateDownloadLink,
+		)
+		mobileDocuments.POST(
+			"/artifacts/:artifact_id/download-link",
+			viewer,
+			handlers.MobileDocument.CreateArtifactDownloadLink,
+		)
+	}
+
+	if handlers.MobileKnowledge != nil && viewer != nil && kbRead != nil {
+		mobileKnowledge := v1.Group("/custom/mobile-knowledge/knowledge-bases/:id")
+		mobileKnowledge.GET(
+			"/share-targets",
+			viewer,
+			kbRead,
+			handlers.MobileKnowledge.ListShareTargets,
 		)
 	}
 

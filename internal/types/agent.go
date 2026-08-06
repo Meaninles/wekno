@@ -13,16 +13,17 @@ const DefaultMaxContextTokens = 200000
 // AgentConfig represents the full agent configuration (used at tenant level and runtime)
 // This includes all configuration parameters for agent execution
 type AgentConfig struct {
-	AgentID        string   `json:"agent_id,omitempty"`        // Runtime custom/built-in agent ID
-	AgentTenantID  uint64   `json:"-"`                         // Runtime source tenant for shared custom agents
-	MaxIterations  int      `json:"max_iterations"`            // Maximum number of ReAct iterations
-	AllowedTools   []string `json:"allowed_tools"`             // List of allowed tool names
-	AgentType      string   `json:"agent_type,omitempty"`      // Smart-reasoning preset type
-	Temperature    float64  `json:"temperature"`               // LLM temperature for agent
-	KnowledgeBases []string `json:"knowledge_bases"`           // Accessible knowledge base IDs
-	KnowledgeIDs   []string `json:"knowledge_ids"`             // Accessible knowledge IDs (individual documents)
-	DBDataSources  []string `json:"db_data_sources,omitempty"` // Accessible database analytics source IDs
-	SystemPrompt   string   `json:"system_prompt,omitempty"`   // Unified system prompt (uses web_search_status placeholder for dynamic behavior)
+	AgentID             string   `json:"agent_id,omitempty"`              // Runtime custom/built-in agent ID
+	AgentTenantID       uint64   `json:"-"`                               // Runtime source tenant for shared custom agents
+	MaxIterations       int      `json:"max_iterations"`                  // Maximum number of ReAct iterations
+	AllowedTools        []string `json:"allowed_tools"`                   // List of allowed tool names
+	AgentType           string   `json:"agent_type,omitempty"`            // Smart-reasoning preset type
+	Temperature         float64  `json:"temperature"`                     // LLM temperature for agent
+	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"` // Maximum output tokens for each agent model call
+	KnowledgeBases      []string `json:"knowledge_bases"`                 // Accessible knowledge base IDs
+	KnowledgeIDs        []string `json:"knowledge_ids"`                   // Accessible knowledge IDs (individual documents)
+	DBDataSources       []string `json:"db_data_sources,omitempty"`       // Accessible database analytics source IDs
+	SystemPrompt        string   `json:"system_prompt,omitempty"`         // Unified system prompt (uses web_search_status placeholder for dynamic behavior)
 	// DocumentTemplate is scoped to AgentTypeDocumentProcessingAgent and carries
 	// template requirement/reference files into the Claude SDK sidecar.
 	DocumentTemplate *DocumentTemplateConfig `json:"document_template,omitempty"`
@@ -69,8 +70,9 @@ type AgentConfig struct {
 	AllowedProfessionalSkills []string `json:"allowed_professional_skills,omitempty"`
 
 	// Runtime-only fields (not persisted)
-	RuntimeModelID string `json:"-"` // Chat model ID selected for the current agent run.
-	VLMModelID     string `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
+	RuntimeModelID          string `json:"-"` // Chat model ID selected for the current agent run.
+	VLMModelID              string `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
+	LightweightSkillContext string `json:"-"` // Platform-resolved lightweight Skill system instructions for this run.
 	// Per-request @mention pins (runtime only; injected as <must_use> in the user message).
 	PinnedMCPServiceIDs []string `json:"-"`
 	PinnedSkillNames    []string `json:"-"`
@@ -228,6 +230,13 @@ type ToolResult struct {
 	Data    map[string]interface{} `json:"data,omitempty"`   // Structured data for programmatic use
 	Error   string                 `json:"error,omitempty"`  // Error message if execution failed
 	Images  []string               `json:"images,omitempty"` // Base64 data URIs from tool (e.g. MCP image content)
+
+	// SourceReferences carries authoritative, claim-bearing source snapshots
+	// from a tool to the shared citation registry. It is deliberately excluded
+	// from generic tool JSON: every chat/agent/IM surface receives references
+	// through the dedicated references event and final message projection.
+	// Tools that do not populate it continue through the shared result extractor.
+	SourceReferences []*SearchResult `json:"-"`
 }
 
 // ToolCall represents a single tool invocation within an agent step

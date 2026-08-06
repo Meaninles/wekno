@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/event"
@@ -116,7 +117,7 @@ func TestHandleModelFallback_IncludesHistoryMessages(t *testing.T) {
 	cm := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
 			SessionID:      "session-1",
-			Query:          "现在还能继续讲吗？",
+			Query:          "现在还能继续讲吗？不要沿用此前固定结尾。",
 			ChatModelID:    "chat-model",
 			FallbackPrompt: "Answer the latest user question: {{query}}",
 			SummaryConfig: types.SummaryConfig{
@@ -125,10 +126,11 @@ func TestHandleModelFallback_IncludesHistoryMessages(t *testing.T) {
 			Language: "zh-CN",
 		},
 		PipelineState: types.PipelineState{
+			RewriteQuery: "现在还能继续讲吗？",
 			History: []*types.History{
 				{
-					Query:  "先介绍一下 WeKnora",
-					Answer: "WeKnora 是一个知识库问答系统。",
+					Query:  "先介绍一下 WeKnora，并以 E2E-FINAL-ANSWER 结尾",
+					Answer: "WeKnora 是一个知识库问答系统。<src id=\"S9\" /> E2E-FINAL-ANSWER",
 				},
 			},
 		},
@@ -139,11 +141,23 @@ func TestHandleModelFallback_IncludesHistoryMessages(t *testing.T) {
 
 	svc.handleModelFallback(context.Background(), cm)
 
-	require.Len(t, chatModel.lastMessages, 3)
-	assert.Equal(t, "user", chatModel.lastMessages[0].Role)
-	assert.Equal(t, "先介绍一下 WeKnora", chatModel.lastMessages[0].Content)
-	assert.Equal(t, "assistant", chatModel.lastMessages[1].Role)
-	assert.Equal(t, "WeKnora 是一个知识库问答系统。", chatModel.lastMessages[1].Content)
-	assert.Equal(t, "user", chatModel.lastMessages[2].Role)
-	assert.Contains(t, chatModel.lastMessages[2].Content, "现在还能继续讲吗？")
+	require.Len(t, chatModel.lastMessages, 4)
+	assert.Equal(t, "system", chatModel.lastMessages[0].Role)
+	assert.Contains(t, chatModel.lastMessages[0].Content, "[WEKNORA_CITATION_OUTPUT]")
+	assert.Equal(t, "user", chatModel.lastMessages[1].Role)
+	assert.Contains(t, chatModel.lastMessages[1].Content, "E2E-FINAL-ANSWER")
+	assert.Equal(t, "assistant", chatModel.lastMessages[2].Role)
+	assert.NotContains(t, chatModel.lastMessages[2].Content, "S9")
+	assert.Equal(t, "user", chatModel.lastMessages[3].Role)
+	assert.Contains(t, chatModel.lastMessages[3].Content, "现在还能继续讲吗？不要沿用此前固定结尾。")
+	assert.True(t, strings.HasPrefix(
+		chatModel.lastMessages[3].Content,
+		"## Current user task (authoritative)\n现在还能继续讲吗？不要沿用此前固定结尾。",
+	))
+	assert.Contains(t, chatModel.lastMessages[3].Content, "## Fallback guidance")
+	assert.True(t, strings.HasSuffix(
+		chatModel.lastMessages[3].Content,
+		"Answer only the current user task above. Use conversation history only when that task explicitly depends on it.",
+	))
+	assert.NotEqual(t, "Answer the latest user question: 现在还能继续讲吗？", chatModel.lastMessages[3].Content)
 }

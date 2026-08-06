@@ -37,9 +37,10 @@ const (
 	EventMergeComplete EventType = "merge.complete" // 合并完成
 
 	// Chat completion events
-	EventChatStart    EventType = "chat.start"    // 聊天生成开始
-	EventChatComplete EventType = "chat.complete" // 聊天生成完成
-	EventChatStream   EventType = "chat.stream"   // 聊天流式输出
+	EventChatStart       EventType = "chat.start"        // 聊天生成开始
+	EventChatComplete    EventType = "chat.complete"     // 聊天生成完成
+	EventChatStream      EventType = "chat.stream"       // 聊天流式输出
+	EventChatQueueStatus EventType = "chat.queue_status" // 会话排队状态
 
 	// Agent events
 	EventAgentQuery    EventType = "agent.query"    // Agent 查询开始

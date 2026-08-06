@@ -24,6 +24,26 @@ import (
 	"github.com/hibiken/asynq"
 )
 
+// customKnowledgeBaseWikiSelectionGuard is the narrow native registration
+// point for the custom, deny-by-default per-user Wiki permission module.
+var customKnowledgeBaseWikiSelectionGuard func(context.Context, string) error
+
+// RegisterCustomKnowledgeBaseWikiSelectionGuard lets the custom control plane
+// enforce Wiki selection without embedding permission storage in native code.
+func RegisterCustomKnowledgeBaseWikiSelectionGuard(fn func(context.Context, string) error) {
+	customKnowledgeBaseWikiSelectionGuard = fn
+}
+
+func guardCustomWikiSelection(c *gin.Context) error {
+	if customKnowledgeBaseWikiSelectionGuard == nil {
+		return nil
+	}
+	return customKnowledgeBaseWikiSelectionGuard(
+		c.Request.Context(),
+		c.GetString(types.UserIDContextKey.String()),
+	)
+}
+
 // KnowledgeBaseHandler defines the HTTP handler for knowledge base operations
 type KnowledgeBaseHandler struct {
 	service            interfaces.KnowledgeBaseService
@@ -355,6 +375,16 @@ func (h *KnowledgeBaseHandler) CreateKnowledgeBase(c *gin.Context) {
 		logger.Error(ctx, "Failed to parse request parameters", err)
 		c.Error(apperrors.NewBadRequestError("Invalid request parameters").WithDetails(err.Error()))
 		return
+	}
+	if req.Type == types.KnowledgeBaseTypeWiki || req.IndexingStrategy.WikiEnabled {
+		if err := guardCustomWikiSelection(c); err != nil {
+			if appErr, ok := apperrors.IsAppError(err); ok {
+				c.Error(appErr)
+			} else {
+				c.Error(apperrors.NewForbiddenError("Wiki feature is not available"))
+			}
+			return
+		}
 	}
 	if err := validateExtractConfig(req.ExtractConfig); err != nil {
 		logger.Error(ctx, "Invalid extract configuration", err)
@@ -810,7 +840,7 @@ func (h *KnowledgeBaseHandler) UpdateKnowledgeBase(c *gin.Context) {
 	logger.Info(ctx, "Start updating knowledge base")
 
 	// Validate and get the knowledge base
-	_, id, _, permission, err := h.validateAndGetKnowledgeBase(c)
+	kbBeforeUpdate, id, _, permission, err := h.validateAndGetKnowledgeBase(c)
 	if err != nil {
 		c.Error(err)
 		return
@@ -828,6 +858,19 @@ func (h *KnowledgeBaseHandler) UpdateKnowledgeBase(c *gin.Context) {
 		logger.Error(ctx, "Failed to parse request parameters", err)
 		c.Error(apperrors.NewBadRequestError("Invalid request parameters").WithDetails(err.Error()))
 		return
+	}
+	if req.Config != nil && req.Config.IndexingStrategy != nil &&
+		req.Config.IndexingStrategy.WikiEnabled &&
+		kbBeforeUpdate.Type != types.KnowledgeBaseTypeWiki &&
+		!kbBeforeUpdate.IsWikiEnabled() {
+		if err := guardCustomWikiSelection(c); err != nil {
+			if appErr, ok := apperrors.IsAppError(err); ok {
+				c.Error(appErr)
+			} else {
+				c.Error(apperrors.NewForbiddenError("Wiki feature is not available"))
+			}
+			return
+		}
 	}
 
 	logger.Infof(ctx, "Updating knowledge base, ID: %s, name: %s",

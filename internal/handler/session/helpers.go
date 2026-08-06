@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -210,41 +211,12 @@ func buildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.St
 			response.KnowledgeReferences = refs
 		} else if refs, ok := refsData.([]*types.SearchResult); ok {
 			response.KnowledgeReferences = types.References(refs)
-		} else if refs, ok := refsData.([]interface{}); ok {
-			// Handle case where data was serialized/deserialized (e.g., from Redis)
-			searchResults := make([]*types.SearchResult, 0, len(refs))
-			for _, ref := range refs {
-				if refMap, ok := ref.(map[string]interface{}); ok {
-					sr := &types.SearchResult{
-						ID:                   getString(refMap, "id"),
-						Content:              getString(refMap, "content"),
-						KnowledgeID:          getString(refMap, "knowledge_id"),
-						ChunkIndex:           int(getFloat64(refMap, "chunk_index")),
-						KnowledgeTitle:       getString(refMap, "knowledge_title"),
-						StartAt:              int(getFloat64(refMap, "start_at")),
-						EndAt:                int(getFloat64(refMap, "end_at")),
-						Seq:                  int(getFloat64(refMap, "seq")),
-						Score:                getFloat64(refMap, "score"),
-						ChunkType:            getString(refMap, "chunk_type"),
-						ParentChunkID:        getString(refMap, "parent_chunk_id"),
-						ImageInfo:            getString(refMap, "image_info"),
-						KnowledgeFilename:    getString(refMap, "knowledge_filename"),
-						KnowledgeSource:      getString(refMap, "knowledge_source"),
-						KnowledgeDescription: getString(refMap, "knowledge_description"),
-						KnowledgeBaseID:      getString(refMap, "knowledge_base_id"),
-					}
-					if meta, ok := refMap["metadata"].(map[string]interface{}); ok {
-						sr.Metadata = make(map[string]string, len(meta))
-						for k, v := range meta {
-							if strVal, ok := v.(string); ok {
-								sr.Metadata[k] = strVal
-							}
-						}
-					}
-					searchResults = append(searchResults, sr)
-				}
-			}
-			response.KnowledgeReferences = types.References(searchResults)
+		} else {
+			// Redis and other stream relays deserialize reference payloads into
+			// generic maps. Round-trip through the shared decoder so immutable
+			// evidence content, source locators and future SearchResult fields are
+			// preserved instead of being silently dropped by a hand-written subset.
+			response.KnowledgeReferences = types.References(sourcerefs.DecodeSearchResults(refsData))
 		}
 	}
 
@@ -322,12 +294,40 @@ func (h *Handler) setupStopEventHandler(
 	sessionID string,
 	sessionTenantID uint64,
 	assistantMessage *types.Message,
+	receivedAt time.Time,
 	cancel context.CancelFunc,
 ) {
 	eventBus.On(event.EventStop, func(ctx context.Context, evt event.Event) error {
 		logger.Infof(ctx, "Received stop event, cancelling async operations for session: %s", sessionID)
 		cancel()
-		// Preserve whatever has been streamed so far; do not overwrite Content.
+		assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsFromReferences(
+			[]*types.SearchResult(assistantMessage.KnowledgeReferences),
+			assistantMessage.RetrievalStats.Attempted || sourcerefs.AgentStepsAttemptedRetrieval(assistantMessage.AgentSteps),
+		)
+		assistantMessage.RetrievalStats = sourcerefs.RetrievalStatsForAgentSteps(
+			assistantMessage.RetrievalStats,
+			assistantMessage.AgentSteps,
+		)
+		assistantMessage.AgentToolCount = sourcerefs.AgentToolCallCount(assistantMessage.AgentSteps)
+		if !receivedAt.IsZero() {
+			assistantMessage.AgentDurationMs = time.Since(receivedAt).Milliseconds()
+		}
+		// Preserve whatever has been streamed so far, but apply the same local
+		// citation protocol filter used by normal completion. A stopped stream can
+		// end midway through a tag; persisting that raw tail would reintroduce it
+		// on reload. This never repairs a tag or asks the model to regenerate.
+		filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(
+			assistantMessage.Content,
+			[]*types.SearchResult(assistantMessage.KnowledgeReferences),
+		)
+		assistantMessage.Content = filtered
+		assistantMessage.KnowledgeReferences = types.References(citedRefs)
+		if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
+			logger.Warnf(ctx,
+				"Stopped QA filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+				report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs,
+			)
+		}
 		// Use session's tenant for message update (ctx may have effectiveTenantID when using shared agent).
 		// Use WithoutCancel so the GORM UPDATE survives the upcoming ctx.Done triggered by cancel()/client disconnect.
 		updateCtx := context.WithValue(

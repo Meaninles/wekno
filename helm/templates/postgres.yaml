@@ -65,6 +65,10 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+            {{- if .Values.postgresql.sharedMemory.enabled }}
+            - name: postgres-shm
+              mountPath: /dev/shm
+            {{- end }}
           resources:
             {{- toYaml .Values.postgresql.resources | nindent 12 }}
           livenessProbe:
@@ -95,6 +99,12 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.postgresql.sharedMemory.enabled }}
+        - name: postgres-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.postgresql.sharedMemory.sizeLimit }}
+        {{- end }}
       {{- with .Values.postgresql.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

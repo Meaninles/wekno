@@ -64,13 +64,14 @@ type PipelineRequest struct {
 	IntentPromptOverrides map[string]string `json:"-"`
 
 	// Misc request-scoped config
-	TenantID            uint64 `json:"-"`
-	WebSearchEnabled    bool   `json:"-"`
-	WebSearchProviderID string `json:"-"` // Resolved from agent config or tenant default
-	WebSearchMaxResults int    `json:"-"` // Resolved from agent config or tenant default
-	WebFetchEnabled     bool   `json:"-"` // Auto-fetch full page content for web search results after rerank
-	WebFetchTopN        int    `json:"-"` // Max pages to fetch (default 3)
-	Language            string `json:"-"`
+	TenantID                uint64 `json:"-"`
+	WebSearchEnabled        bool   `json:"-"`
+	WebSearchProviderID     string `json:"-"` // Resolved from agent config or tenant default
+	WebSearchMaxResults     int    `json:"-"` // Resolved from agent config or tenant default
+	WebFetchEnabled         bool   `json:"-"` // Auto-fetch full page content for web search results after rerank
+	WebFetchTopN            int    `json:"-"` // Max pages to fetch (default 3)
+	Language                string `json:"-"`
+	LightweightSkillContext string `json:"-"`
 }
 
 // QueryIntent represents the classified intent of a user query.
@@ -108,9 +109,13 @@ type PipelineState struct {
 	Intent       QueryIntent `json:"intent,omitempty"`
 	History      []*History  `json:"history,omitempty"`
 
-	SearchResult         []*SearchResult   `json:"-"`
-	RerankResult         []*SearchResult   `json:"-"`
-	MergeResult          []*SearchResult   `json:"-"`
+	SearchResult []*SearchResult `json:"-"`
+	RerankResult []*SearchResult `json:"-"`
+	MergeResult  []*SearchResult `json:"-"`
+	// CitationResult contains exact, independently citable evidence units. It is
+	// intentionally separate from MergeResult, whose Content may contain parent,
+	// neighbor or overlap-expanded model context.
+	CitationResult       []*SearchResult   `json:"-"`
 	Entity               []string          `json:"-"`
 	EntityKBIDs          []string          `json:"-"`
 	EntityKnowledge      map[string]string `json:"-"`
@@ -229,6 +234,7 @@ func (c *ChatManage) Clone() *ChatManage {
 			WebFetchEnabled:          c.WebFetchEnabled,
 			WebFetchTopN:             c.WebFetchTopN,
 			Language:                 c.Language,
+			LightweightSkillContext:  c.LightweightSkillContext,
 			IntentPromptOverrides:    maps.Clone(c.IntentPromptOverrides),
 		},
 		PipelineState: PipelineState{

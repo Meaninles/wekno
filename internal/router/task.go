@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/custom/modules/derivativequeue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/documentsplit"
 	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/Tencent/WeKnora/internal/custom/modules/pipelineobs"
+	"github.com/Tencent/WeKnora/internal/custom/modules/runtimeprofile"
 	"github.com/Tencent/WeKnora/internal/custom/modules/taskdefer"
 	"github.com/Tencent/WeKnora/internal/custom/modules/terminalrepair"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -44,6 +46,7 @@ type AsynqTaskParams struct {
 	TaskEnqueuer         interfaces.TaskEnqueuer
 	SpanTracker          service.SpanTracker
 	DocumentQueue        *documentqueue.Coordinator
+	DerivativeWorker     *derivativequeue.Worker
 	Cleaner              interfaces.ResourceCleaner
 }
 
@@ -183,6 +186,7 @@ type AsynqServers struct {
 	Control    *asynq.Server // lifecycle/repair control plane
 	Document   *asynq.Server
 	Part       *asynq.Server
+	Profile    runtimeprofile.Profile
 }
 
 type documentWorkflowRouter interface {
@@ -322,6 +326,7 @@ func documentServerConcurrency(coordinator *documentqueue.Coordinator) int {
 func NewAsynqServers(
 	coordinator *documentqueue.Coordinator,
 	splitManager *documentsplit.Manager,
+	profile runtimeprofile.Profile,
 ) *AsynqServers {
 	opt := getAsynqRedisClientOpt()
 	concurrency := documentServerConcurrency(coordinator)
@@ -333,17 +338,33 @@ func NewAsynqServers(
 	}
 	log.Printf("asynq background server starting with concurrency=%d redis_op_timeout=%dms",
 		backgroundConcurrency, readRedisOpTimeoutMs())
+	normalQueues := map[string]int{
+		types.QueueDefault:       3,
+		types.QueueLow:           1,
+		types.QueueGraph:         1,
+		types.QueueQuestion:      1,
+		types.QueueDerivative:    1,
+		types.QueueDocumentHeavy: 1,
+	}
+	switch profile.Role {
+	case runtimeprofile.RoleParseWorker:
+		normalQueues = map[string]int{
+			types.QueueDefault:       3,
+			types.QueueLow:           1,
+			types.QueueDocumentHeavy: 1,
+		}
+	case runtimeprofile.RoleDerivativeWorker:
+		normalQueues = map[string]int{
+			types.QueueGraph:      1,
+			types.QueueQuestion:   1,
+			types.QueueDerivative: 1,
+		}
+	}
 	normal := asynq.NewServer(
 		opt,
 		asynq.Config{
-			Concurrency: backgroundConcurrency,
-			Queues: map[string]int{
-				types.QueueDefault:       3, // Default priority queue
-				types.QueueLow:           1, // Lowest priority queue
-				types.QueueGraph:         1, // Isolated lane for high-volume slow graph-extraction tasks
-				types.QueueQuestion:      1, // Isolated lane for high-volume slow question-generation tasks
-				types.QueueDocumentHeavy: 1, // legacy in-flight root tasks; new work uses QueueDocument
-			},
+			Concurrency:     backgroundConcurrency,
+			Queues:          normalQueues,
 			RetryDelayFunc:  asynqRetryDelayFunc,
 			IsFailure:       asynqIsFailureFunc,
 			ShutdownTimeout: 30 * time.Second,
@@ -380,7 +401,8 @@ func NewAsynqServers(
 		asynq.Config{
 			Concurrency: wikiMapConcurrency,
 			Queues: map[string]int{
-				types.QueueWikiMap: 1,
+				types.QueueWikiMap:     3,
+				types.QueueWikiControl: 1,
 			},
 			RetryDelayFunc:  asynqRetryDelayFunc,
 			IsFailure:       asynqIsFailureFunc,
@@ -436,8 +458,101 @@ func NewAsynqServers(
 	)
 	return &AsynqServers{
 		Normal: normal, Multimodal: multimodal, WikiMap: wikiMap,
-		Control: control, Document: document, Part: part,
+		Control: control, Document: document, Part: part, Profile: profile,
 	}
+}
+
+func startRoleAsynqServers(
+	servers *AsynqServers,
+	handler asynq.Handler,
+	readiness documentQueueReadiness,
+) error {
+	if servers == nil {
+		return errors.New("asynq servers are unavailable")
+	}
+	if servers.Profile.Role == runtimeprofile.RoleDevAll {
+		return startAsynqServers(
+			servers.Normal,
+			servers.Multimodal,
+			servers.WikiMap,
+			servers.Control,
+			servers.Document,
+			servers.Part,
+			handler,
+			readiness,
+		)
+	}
+
+	selected := make([]struct {
+		name   string
+		server asynqServerLifecycle
+	}, 0, 4)
+	switch servers.Profile.Role {
+	case runtimeprofile.RoleParseWorker:
+		selected = append(selected,
+			struct {
+				name   string
+				server asynqServerLifecycle
+			}{"parse-background", servers.Normal},
+			struct {
+				name   string
+				server asynqServerLifecycle
+			}{"parse-multimodal", servers.Multimodal},
+			struct {
+				name   string
+				server asynqServerLifecycle
+			}{"parse-document", servers.Document},
+			struct {
+				name   string
+				server asynqServerLifecycle
+			}{"parse-part", servers.Part},
+		)
+	case runtimeprofile.RoleDerivativeWorker:
+		selected = append(selected, struct {
+			name   string
+			server asynqServerLifecycle
+		}{"derivative", servers.Normal})
+	case runtimeprofile.RoleWikiWorker:
+		selected = append(selected, struct {
+			name   string
+			server asynqServerLifecycle
+		}{"wiki", servers.WikiMap})
+	case runtimeprofile.RoleMaintenance:
+		selected = append(selected, struct {
+			name   string
+			server asynqServerLifecycle
+		}{"maintenance-control", servers.Control})
+	default:
+		return fmt.Errorf("runtime role %s is not a worker role", servers.Profile.Role)
+	}
+	started := make([]asynqServerLifecycle, 0, len(selected))
+	for _, item := range selected {
+		if item.server == nil {
+			for index := len(started) - 1; index >= 0; index-- {
+				started[index].Shutdown()
+			}
+			return fmt.Errorf("%s asynq server is unavailable", item.name)
+		}
+		if err := item.server.Start(handler); err != nil {
+			for index := len(started) - 1; index >= 0; index-- {
+				started[index].Shutdown()
+			}
+			return fmt.Errorf("start %s asynq server: %w", item.name, err)
+		}
+		started = append(started, item.server)
+	}
+	if servers.Profile.RunsParseWorker() {
+		if readiness == nil {
+			return errors.New("mark document queue ready: coordinator is unavailable")
+		}
+		if err := readiness.MarkReady(context.Background()); err != nil {
+			for index := len(started) - 1; index >= 0; index-- {
+				started[index].Shutdown()
+			}
+			return fmt.Errorf("mark document queue ready: %w", err)
+		}
+	}
+	return nil
 }
 
 func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
@@ -484,7 +599,9 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	mux.Use(taskdefer.Middleware(params.TaskEnqueuer))
 
 	// Register extract handlers - router will dispatch to appropriate handler
-	mux.HandleFunc(types.TypeChunkExtract, params.ChunkExtractor.Handle)
+	if params.Servers == nil || params.Servers.Profile.Role != runtimeprofile.RoleDerivativeWorker {
+		mux.HandleFunc(types.TypeChunkExtract, params.ChunkExtractor.Handle)
+	}
 	mux.HandleFunc(types.TypeDataTableSummary, params.DataTableSummary.Handle)
 
 	// Register document processing handler
@@ -501,10 +618,17 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	mux.HandleFunc(types.TypeFAQImport, params.KnowledgeService.ProcessFAQImport)
 
 	// Register question generation handler
-	mux.HandleFunc(types.TypeQuestionGeneration, params.KnowledgeService.ProcessQuestionGeneration)
+	if params.Servers == nil || params.Servers.Profile.Role != runtimeprofile.RoleDerivativeWorker {
+		mux.HandleFunc(types.TypeQuestionGeneration, params.KnowledgeService.ProcessQuestionGeneration)
+	}
 
 	// Register summary generation handler
-	mux.HandleFunc(types.TypeSummaryGeneration, params.KnowledgeService.ProcessSummaryGeneration)
+	if params.Servers == nil || params.Servers.Profile.Role != runtimeprofile.RoleDerivativeWorker {
+		mux.HandleFunc(types.TypeSummaryGeneration, params.KnowledgeService.ProcessSummaryGeneration)
+	}
+	if params.DerivativeWorker != nil {
+		mux.HandleFunc(derivativequeue.TypeWake, params.DerivativeWorker.Handle)
+	}
 
 	// Register KB clone handler
 	mux.HandleFunc(types.TypeKBClone, params.KnowledgeService.ProcessKBClone)
@@ -542,19 +666,13 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	mux.HandleFunc(types.TypeKnowledgeTerminalRepair, terminalRepairer.Handle)
 	mux.HandleFunc(taskdefer.TypeResume, taskdefer.NewHandler(params.TaskEnqueuer).Handle)
 
-	if params.Servers == nil || params.Servers.Normal == nil || params.Servers.Multimodal == nil ||
-		params.Servers.WikiMap == nil || params.Servers.Control == nil ||
-		params.Servers.Document == nil || params.Servers.Part == nil {
-		return nil, errors.New("could not run asynq servers: background, multimodal, Wiki Map, control, document and part servers are required")
+	if params.Servers == nil {
+		return nil, errors.New("could not run asynq servers: server set is required")
 	}
 	if params.DocumentQueue == nil {
 		return nil, errors.New("could not run asynq servers: document queue coordinator is required")
 	}
-	if err := startAsynqServers(
-		params.Servers.Normal, params.Servers.Multimodal, params.Servers.WikiMap, params.Servers.Control,
-		params.Servers.Document, params.Servers.Part,
-		mux, params.DocumentQueue,
-	); err != nil {
+	if err := startRoleAsynqServers(params.Servers, mux, params.DocumentQueue); err != nil {
 		return nil, fmt.Errorf("could not run asynq servers: %w", err)
 	}
 	if params.Cleaner != nil && params.Servers != nil {

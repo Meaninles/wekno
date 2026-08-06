@@ -73,7 +73,7 @@ test('only reports full completion after every enabled derivative completed', ()
   )
 })
 
-test('treats failed or degraded derivatives as workflow failure', () => {
+test('distinguishes completed degradation from workflow failure', () => {
   assert.equal(
     knowledgeHasDerivativeFailure({
       parse_status: 'completed',
@@ -81,7 +81,7 @@ test('treats failed or degraded derivatives as workflow failure', () => {
       enrichment_status: 'degraded',
       wiki_status: 'completed',
     }),
-    true,
+    false,
   )
   assert.equal(
     knowledgeHasDerivativeFailure({

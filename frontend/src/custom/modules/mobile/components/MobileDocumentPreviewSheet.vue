@@ -28,6 +28,9 @@ import MobileIcon from "./MobileIcon.vue";
 
 const props = defineProps<{
   item: Record<string, any> | null;
+  sourceKey?: string;
+  blobLoader?: (signal?: AbortSignal) => Promise<Blob>;
+  downloadHandler?: () => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -49,19 +52,32 @@ let bodyLocked = false;
 let previousBodyOverflow = "";
 let chunkImageObserver: IntersectionObserver | null = null;
 
-const knowledgeID = computed(() =>
-  String(detail.value?.id || props.item?.id || props.item?.knowledge_id || "").trim(),
+const externalSource = computed(() => typeof props.blobLoader === "function");
+const knowledgeID = computed(() => externalSource.value
+  ? ""
+  : String(detail.value?.id || props.item?.id || props.item?.knowledge_id || "").trim(),
+);
+const previewSourceKey = computed(() =>
+  String(props.sourceKey || knowledgeID.value).trim(),
+);
+const chunkPreviewAvailable = computed(() => !externalSource.value && !!knowledgeID.value);
+const downloadAvailable = computed(() =>
+  typeof props.downloadHandler === "function" || !!knowledgeID.value,
 );
 
 const fileName = computed(() =>
   String(
     detail.value?.original_file_name ||
-      detail.value?.file_name ||
-      detail.value?.title ||
-      props.item?.original_file_name ||
-      props.item?.file_name ||
-      props.item?.title ||
-      "知识库文档",
+    detail.value?.file_name ||
+    detail.value?.filename ||
+    detail.value?.display_name ||
+    detail.value?.title ||
+    props.item?.original_file_name ||
+    props.item?.file_name ||
+    props.item?.filename ||
+    props.item?.display_name ||
+    props.item?.title ||
+    "知识库文档",
   ).trim(),
 );
 
@@ -178,10 +194,14 @@ async function showChunkPage(page: number) {
 }
 
 async function downloadDocument() {
-  if (!knowledgeID.value || downloading.value) return;
+  if (!downloadAvailable.value || downloading.value) return;
   downloading.value = true;
   try {
-    await downloadKnowledgeNatively(knowledgeID.value);
+    if (props.downloadHandler) {
+      await props.downloadHandler();
+    } else {
+      await downloadKnowledgeNatively(knowledgeID.value);
+    }
   } catch (error: any) {
     MessagePlugin.error(error?.message || "下载失败");
     downloading.value = false;
@@ -200,14 +220,17 @@ watch(
     chunkPage.value = 1;
     chunkError.value = "";
     chunkLoading.value = false;
+    detailLoading.value = false;
     downloading.value = false;
     if (!item) {
       unlockBody();
       return;
     }
     lockBody();
-    viewMode.value = previewSupported.value ? "original" : "chunks";
-    if (viewMode.value === "chunks") void loadChunks(1);
+    viewMode.value = previewSupported.value || !chunkPreviewAvailable.value ? "original" : "chunks";
+    if (viewMode.value === "chunks" && chunkPreviewAvailable.value) void loadChunks(1);
+
+    if (externalSource.value) return;
 
     const id = knowledgeID.value;
     if (!id) return;
@@ -219,7 +242,7 @@ watch(
         ...item,
         ...(response?.data || response || {}),
       };
-      if (!previewSupported.value) {
+      if (!previewSupported.value && chunkPreviewAvailable.value) {
         viewMode.value = "chunks";
         if (!chunks.value.length) void loadChunks(1);
       }
@@ -268,7 +291,7 @@ onBeforeUnmount(() => {
           type="button"
           class="download-button"
           :class="{ loading: downloading }"
-          :disabled="downloading || !knowledgeID"
+          :disabled="downloading || !downloadAvailable"
           aria-label="下载文档"
           @click="downloadDocument"
         >
@@ -276,9 +299,13 @@ onBeforeUnmount(() => {
         </button>
       </header>
 
-      <nav class="mobile-document-preview__tabs" aria-label="文档查看方式">
+      <nav
+        v-if="externalSource || previewSupported || chunkPreviewAvailable"
+        class="mobile-document-preview__tabs"
+        aria-label="文档查看方式"
+      >
         <button
-          v-if="previewSupported"
+          v-if="previewSupported || externalSource"
           type="button"
           :class="{ active: viewMode === 'original' }"
           @click="viewMode = 'original'"
@@ -286,6 +313,7 @@ onBeforeUnmount(() => {
           原文预览
         </button>
         <button
+          v-if="chunkPreviewAvailable"
           type="button"
           :class="{ active: viewMode === 'chunks' }"
           @click="showChunks"
@@ -298,13 +326,15 @@ onBeforeUnmount(() => {
       <main class="mobile-document-preview__body">
         <section v-if="viewMode === 'original'" class="mobile-document-preview__original">
           <DocumentPreview
-            :knowledge-id="knowledgeID"
+            :knowledge-id="externalSource ? undefined : knowledgeID"
+            :source-key="previewSourceKey"
             :file-type="fileType"
             :file-name="fileName"
             :file-size="fileSize"
             :chunk-count="chunkTotal"
             :parse-status="parseStatus"
             :active="viewMode === 'original'"
+            :blob-loader="blobLoader"
             :mobile-fit="true"
             @use-chunks="showChunks"
           />

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -102,6 +103,21 @@ func emptyMessages() []chat.Message {
 
 func emptyTools() []chat.Tool {
 	return nil
+}
+
+func TestBuildSystemPromptAppendsLightweightSkillContextAfterAgentBaseline(t *testing.T) {
+	engine := &AgentEngine{
+		config: &types.AgentConfig{
+			LightweightSkillContext: "Lightweight skill execution contract:\n[本轮有效轻量 Skills]\n制度助手：你是茅小规。",
+		},
+		systemPromptTemplate: "Generic agent baseline.",
+	}
+
+	prompt := engine.buildSystemPrompt(context.Background())
+	require.Contains(t, prompt, "Generic agent baseline.")
+	require.Contains(t, prompt, "制度助手：你是茅小规。")
+	require.Less(t, strings.Index(prompt, "Generic agent baseline."), strings.Index(prompt, "制度助手：你是茅小规。"),
+		"platform-resolved lightweight skills must be appended after the generic agent baseline")
 }
 
 // ---------------------------------------------------------------------------

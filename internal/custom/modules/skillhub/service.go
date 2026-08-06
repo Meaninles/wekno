@@ -520,62 +520,6 @@ func (s *Service) ConfigureRuntimeSkills(ctx context.Context, req *types.QAReque
 	return nil
 }
 
-func (s *Service) SelectedSkillContext(ctx context.Context, names []string) (string, error) {
-	names = normalizeNames(names)
-	if len(names) == 0 {
-		return "", nil
-	}
-	accessible, err := s.accessibleByName(ctx)
-	if err != nil {
-		return "", err
-	}
-	preloaded := skills.NewLoader([]string{getPreloadedSkillsDir()})
-	var sections []string
-	for _, name := range names {
-		if item, ok := accessible[name]; ok {
-			sections = append(sections, renderContextSection(item.Name, item.Description, item.Instructions))
-			continue
-		}
-		if skill, err := preloaded.LoadSkillInstructions(name); err == nil && skill != nil {
-			sections = append(sections, renderContextSection(skill.Name, skill.Description, skill.Instructions))
-		}
-	}
-	if len(sections) == 0 {
-		return "", nil
-	}
-	return "[已选择 Skills 上下文]\n" + strings.Join(sections, "\n\n"), nil
-}
-
-func (s *Service) AllSkillContext(ctx context.Context) (string, error) {
-	accessible, err := s.accessibleByName(ctx)
-	if err != nil {
-		return "", err
-	}
-	sections := make([]string, 0, len(accessible))
-	names := make([]string, 0, len(accessible))
-	for name := range accessible {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		item := accessible[name]
-		sections = append(sections, renderContextSection(item.Name, item.Description, item.Instructions))
-	}
-
-	preloaded := skills.NewLoader([]string{getPreloadedSkillsDir()})
-	metadata, _ := preloaded.DiscoverSkills()
-	sort.Slice(metadata, func(i, j int) bool { return metadata[i].Name < metadata[j].Name })
-	for _, meta := range metadata {
-		if skill, err := preloaded.LoadSkillInstructions(meta.Name); err == nil && skill != nil {
-			sections = append(sections, renderContextSection(skill.Name, skill.Description, skill.Instructions))
-		}
-	}
-	if len(sections) == 0 {
-		return "", nil
-	}
-	return "[已选择全部轻量 Skills 上下文]\n" + strings.Join(sections, "\n\n"), nil
-}
-
 func (s *Service) MaterializeAccessible(ctx context.Context, names []string, all bool) (string, []string, error) {
 	accessible, err := s.accessibleByName(ctx)
 	if err != nil {

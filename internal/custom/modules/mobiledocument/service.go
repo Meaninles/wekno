@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	defaultDownloadTTL = 2 * time.Minute
-	minDownloadTTL     = 30 * time.Second
-	maxDownloadTTL     = 10 * time.Minute
-	downloadPath       = "/api/v1/custom/mobile-documents/download"
+	defaultDownloadTTL   = 2 * time.Minute
+	minDownloadTTL       = 30 * time.Second
+	maxDownloadTTL       = 10 * time.Minute
+	downloadPath         = "/api/v1/custom/mobile-documents/download"
+	artifactDownloadPath = "/api/v1/custom/mobile-documents/artifacts/download"
 )
 
 var (
@@ -29,6 +30,7 @@ var (
 	ErrInvalidTicket         = errors.New("invalid mobile document download ticket")
 	ErrExpiredTicket         = errors.New("mobile document download ticket expired")
 	ErrTicketOwnerMismatch   = errors.New("mobile document download ticket owner mismatch")
+	ErrArtifactUnavailable   = errors.New("mobile artifact is unavailable")
 )
 
 type knowledgeFiles interface {
@@ -48,8 +50,17 @@ type Ticket struct {
 	Signature   string
 }
 
+type ArtifactTicket struct {
+	ArtifactID string
+	TenantID   uint64
+	UserID     string
+	ExpiresAt  time.Time
+	Signature  string
+}
+
 type Service struct {
 	knowledge knowledgeFiles
+	artifacts artifactFiles
 	key       []byte
 	ttl       time.Duration
 	now       func() time.Time
@@ -74,17 +85,95 @@ func LoadConfigFromEnv() Config {
 	}
 }
 
-func NewService(knowledge knowledgeFiles, cfg Config) *Service {
+func NewService(knowledge knowledgeFiles, artifacts artifactFiles, cfg Config) *Service {
 	ttl := cfg.TTL
 	if ttl <= 0 {
 		ttl = defaultDownloadTTL
 	}
 	return &Service{
 		knowledge: knowledge,
+		artifacts: artifacts,
 		key:       append([]byte(nil), cfg.SigningKey...),
 		ttl:       ttl,
 		now:       time.Now,
 	}
+}
+
+func (s *Service) IssueArtifact(
+	ctx context.Context,
+	artifactID string,
+	tenantID uint64,
+	userID string,
+) (string, time.Time, error) {
+	if len(s.key) < 16 {
+		return "", time.Time{}, ErrSigningKeyUnavailable
+	}
+	artifactID = strings.TrimSpace(artifactID)
+	userID = strings.TrimSpace(userID)
+	if artifactID == "" || tenantID == 0 || userID == "" || s.artifacts == nil {
+		return "", time.Time{}, ErrArtifactUnavailable
+	}
+	file, err := s.artifacts.GetArtifact(ctx, artifactID, tenantID, userID)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if file == nil || file.ID != artifactID || file.TenantID != tenantID || file.UserID != userID {
+		return "", time.Time{}, ErrArtifactUnavailable
+	}
+
+	expiresAt := s.now().Add(s.ttl).UTC()
+	ticket := ArtifactTicket{
+		ArtifactID: artifactID,
+		TenantID:   tenantID,
+		UserID:     userID,
+		ExpiresAt:  expiresAt,
+	}
+	ticket.Signature = s.signArtifact(ticket)
+
+	query := url.Values{}
+	query.Set("artifact_id", ticket.ArtifactID)
+	query.Set("tenant_id", strconv.FormatUint(ticket.TenantID, 10))
+	query.Set("user_id", ticket.UserID)
+	query.Set("expires", strconv.FormatInt(ticket.ExpiresAt.Unix(), 10))
+	query.Set("sig", ticket.Signature)
+	return artifactDownloadPath + "?" + query.Encode(), expiresAt, nil
+}
+
+func (s *Service) ResolveArtifact(
+	ctx context.Context,
+	values url.Values,
+) (*ArtifactFile, error) {
+	ticket, err := parseArtifactTicket(values)
+	if err != nil {
+		return nil, err
+	}
+	if len(s.key) < 16 || !hmac.Equal([]byte(s.signArtifact(ticket)), []byte(ticket.Signature)) {
+		return nil, ErrInvalidTicket
+	}
+	if s.now().Unix() > ticket.ExpiresAt.Unix() {
+		return nil, ErrExpiredTicket
+	}
+	if s.artifacts == nil {
+		return nil, ErrArtifactUnavailable
+	}
+	file, err := s.artifacts.GetArtifact(ctx, ticket.ArtifactID, ticket.TenantID, ticket.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if file == nil || file.ID != ticket.ArtifactID || file.TenantID != ticket.TenantID || file.UserID != ticket.UserID {
+		return nil, ErrTicketOwnerMismatch
+	}
+	return file, nil
+}
+
+func (s *Service) OpenArtifact(
+	ctx context.Context,
+	file *ArtifactFile,
+) (io.ReadCloser, error) {
+	if s.artifacts == nil || file == nil {
+		return nil, ErrArtifactUnavailable
+	}
+	return s.artifacts.OpenArtifact(ctx, file)
 }
 
 func (s *Service) Issue(ctx context.Context, knowledgeID string) (string, time.Time, error) {
@@ -161,6 +250,19 @@ func (s *Service) sign(ticket Ticket) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+func (s *Service) signArtifact(ticket ArtifactTicket) string {
+	payload := fmt.Sprintf(
+		"artifact-v1\n%s\n%d\n%s\n%d",
+		ticket.ArtifactID,
+		ticket.TenantID,
+		ticket.UserID,
+		ticket.ExpiresAt.Unix(),
+	)
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func parseTicket(values url.Values) (Ticket, error) {
 	knowledgeID := strings.TrimSpace(values.Get("knowledge_id"))
 	tenantID, tenantErr := strconv.ParseUint(strings.TrimSpace(values.Get("tenant_id")), 10, 64)
@@ -180,5 +282,29 @@ func parseTicket(values url.Values) (Ticket, error) {
 		TenantID:    tenantID,
 		ExpiresAt:   time.Unix(expires, 0).UTC(),
 		Signature:   signature,
+	}, nil
+}
+
+func parseArtifactTicket(values url.Values) (ArtifactTicket, error) {
+	artifactID := strings.TrimSpace(values.Get("artifact_id"))
+	tenantID, tenantErr := strconv.ParseUint(strings.TrimSpace(values.Get("tenant_id")), 10, 64)
+	userID := strings.TrimSpace(values.Get("user_id"))
+	expires, expiresErr := strconv.ParseInt(strings.TrimSpace(values.Get("expires")), 10, 64)
+	signature := strings.TrimSpace(values.Get("sig"))
+	if artifactID == "" || tenantErr != nil || tenantID == 0 || userID == "" || expiresErr != nil || expires <= 0 {
+		return ArtifactTicket{}, ErrInvalidTicket
+	}
+	if len(signature) != sha256.Size*2 {
+		return ArtifactTicket{}, ErrInvalidTicket
+	}
+	if _, err := hex.DecodeString(signature); err != nil {
+		return ArtifactTicket{}, ErrInvalidTicket
+	}
+	return ArtifactTicket{
+		ArtifactID: artifactID,
+		TenantID:   tenantID,
+		UserID:     userID,
+		ExpiresAt:  time.Unix(expires, 0).UTC(),
+		Signature:  signature,
 	}, nil
 }

@@ -128,17 +128,15 @@ func (s *sessionService) KnowledgeQA(
 	// Get UserID from context
 	userID, _ := types.UserIDFromContext(ctx)
 	quotedContext := strings.TrimSpace(req.QuotedContext)
-	if skillContext := selectedSkillContext(ctx, req.SkillNames); skillContext != "" {
-		if quotedContext != "" {
-			quotedContext += "\n\n"
-		}
-		quotedContext += skillContext
-		logger.Infof(ctx, "Injected selected skill context for %d skill(s)", len(req.SkillNames))
+	lightweightSkillContext := LightweightSkillContext(ctx, "none", nil, req.SkillNames)
+	if lightweightSkillContext != "" {
+		logger.Infof(ctx, "Added selected lightweight Skill system context for %d skill(s)", len(req.SkillNames))
 	}
 
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
 			Query:                   req.Query,
+			LightweightSkillContext: lightweightSkillContext,
 			SessionID:               req.Session.ID,
 			UserID:                  userID,
 			EnableMemory:            req.EnableMemory,

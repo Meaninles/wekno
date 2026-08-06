@@ -1,6 +1,8 @@
 # AGENTS
 
-本项目位于 `C:\weknora`，Docker Desktop 中后端 `app-dev` 对外端口为 `http://localhost:8080`，前端开发服务位于 `frontend/` 并通过 `http://localhost:5177` 访问。
+本项目位于 `C:\weknora`。本地后端禁止使用单体 `app-dev`，固定使用 `custom/tests/runtime_profile_e2e/docker-compose.yml` 的分角色编排：API 3 个、解析 2 个、衍生任务 2 个、Wiki 2 个、维护 2 个、迁移 1 个（一次性）、DocReader 3 个（基础设施 1 个、运行时 2 个），另有 API 和 DocReader 入口各 1 个；API 入口对外为 `http://localhost:8080`。后端代码修改后，先停止该编排，再执行 `docker compose -p weknora-runtime-profile-e2e -f custom/tests/runtime_profile_e2e/docker-compose.yml build runtime-api-1` 构建共享镜像，并用同一 Compose 文件 `up -d --force-recreate` 拉起全部角色；拉起前必须确保 `docker-compose.dev.yml` 中的 PostgreSQL、Redis、MinIO、Neo4j 和基础 DocReader 已运行。
+
+前端开发服务位于 `frontend/`，通过 `http://localhost:5177` 访问。
 
 本地移动端固定通过 `http://localhost:5177/mobile/` 访问，不使用 `5178` 端口。
 

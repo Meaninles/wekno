@@ -22,15 +22,21 @@ import {
   shareImageSrc,
 } from "@/custom/modules/chatshare/media";
 import { splitStructuredChartMarkdown, type StructuredChartInfo } from "@/utils/structuredChartMarkdown";
+import {
+  isDocumentPreviewSupported,
+  normalizePreviewFileType,
+} from "@/utils/documentPreview";
 import MobileResourceRail from "./MobileResourceRail.vue";
 import MobileCitationSheet from "./MobileCitationSheet.vue";
 import MobileSourceDetailSheet from "./MobileSourceDetailSheet.vue";
 import MobileStructuredAnalysisResult from "./MobileStructuredAnalysisResult.vue";
+import MobileDocumentPreviewSheet from "./MobileDocumentPreviewSheet.vue";
 import MobileIcon from "./MobileIcon.vue";
 import picturePreview from "@/components/picture-preview.vue";
 import { renderMobileMarkdown } from "../mobileMarkdown";
+import { downloadArtifactNatively } from "../documentDownload";
 import type { MobileResourceChip } from "../utils";
-import { downloadBlob, formatFileSize } from "../utils";
+import { formatFileSize } from "../utils";
 import type { GeneralAgentArtifactFile, GeneralAgentArtifactsData, StructuredAnalysisData } from "@/types/tool-results";
 import ChatQueueStatusCard from "@/custom/modules/chatqueue/ChatQueueStatusCard.vue";
 import {
@@ -73,6 +79,7 @@ type MobileAnswerSegment =
 const isUser = computed(() => props.message.role === "user");
 const isAssistant = computed(() => props.message.role === "assistant");
 const downloadingArtifactId = ref("");
+const previewArtifact = ref<GeneralAgentArtifactFile | null>(null);
 const artifactVisibleCount = ref(ARTIFACT_PAGE_SIZE);
 const messageBodyRef = ref<HTMLElement | null>(null);
 const reviewImg = ref(false);
@@ -596,10 +603,16 @@ const showMoreArtifacts = () => {
   );
 };
 
+const artifactFileType = (file: GeneralAgentArtifactFile) => {
+  const explicit = normalizePreviewFileType(file.file_type);
+  if (explicit) return explicit;
+  const name = String(file.filename || "");
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? normalizePreviewFileType(name.slice(dot + 1)) : "";
+};
+
 const artifactFileTypeLabel = (file: GeneralAgentArtifactFile) => {
-  const type = String(file.file_type || (file.filename.includes(".") ? file.filename.split(".").pop() : "") || "")
-    .replace(/^\./, "")
-    .toUpperCase();
+  const type = artifactFileType(file).toUpperCase();
   return type || "FILE";
 };
 
@@ -609,19 +622,55 @@ const artifactDownloadUrl = (file: GeneralAgentArtifactFile) => {
   return `/api/v1/custom/general-agent/artifacts/${encodeURIComponent(file.artifact_id)}/download`;
 };
 
-const downloadArtifact = async (file: GeneralAgentArtifactFile) => {
+const canPreviewArtifact = (file: GeneralAgentArtifactFile) =>
+  !!artifactDownloadUrl(file) && isDocumentPreviewSupported(artifactFileType(file));
+
+const openArtifactPreview = (file: GeneralAgentArtifactFile) => {
+  if (!canPreviewArtifact(file)) {
+    MessagePlugin.warning("该文件格式暂不支持在线预览，请下载后查看");
+    return;
+  }
+  previewArtifact.value = file;
+};
+
+const loadArtifactPreviewBlob = async (signal?: AbortSignal): Promise<Blob> => {
+  const file = previewArtifact.value;
+  if (!file) throw new Error("没有可预览的产物");
   const url = artifactDownloadUrl(file);
-  if (!url || downloadingArtifactId.value) return;
+  if (!url) throw new Error("产物下载地址为空");
+  const result = await getDown(url, { signal });
+  return result instanceof Blob ? result : new Blob([result as any]);
+};
+
+const navigateSharedArtifactNatively = (file: GeneralAgentArtifactFile) => {
+  const rawURL = artifactDownloadUrl(file);
+  if (!rawURL) throw new Error("产物下载地址为空");
+  const resolved = new URL(rawURL, window.location.href);
+  if (resolved.origin !== window.location.origin) {
+    throw new Error("产物下载地址无效");
+  }
+  window.location.assign(resolved.toString());
+};
+
+const downloadArtifact = async (file: GeneralAgentArtifactFile) => {
+  if (!artifactDownloadUrl(file) || downloadingArtifactId.value) return;
   downloadingArtifactId.value = file.artifact_id;
   try {
-    const result = await getDown(url);
-    const blob = result instanceof Blob ? result : new Blob([result as any]);
-    downloadBlob(blob, file.filename || "artifact");
+    if (props.shareMode) {
+      navigateSharedArtifactNatively(file);
+    } else {
+      await downloadArtifactNatively(file.artifact_id);
+    }
   } catch (error: any) {
     MessagePlugin.error(error?.message || "下载失败");
   } finally {
     downloadingArtifactId.value = "";
   }
+};
+
+const downloadPreviewArtifact = async () => {
+  if (!previewArtifact.value) return;
+  await downloadArtifact(previewArtifact.value);
 };
 
 const selectedCitationItem = ref<SourceReferenceItem | null>(null);
@@ -1160,16 +1209,27 @@ onBeforeUnmount(() => {
                 <strong>{{ file.filename }}</strong>
                 <span>{{ formatFileSize(file.file_size) || '未知大小' }}</span>
               </div>
-              <button
-                type="button"
-                class="mobile-artifact-file__download"
-                :class="{ loading: downloadingArtifactId === file.artifact_id }"
-                :disabled="downloadingArtifactId === file.artifact_id || !artifactDownloadUrl(file)"
-                :aria-label="`下载${file.filename}`"
-                @click="downloadArtifact(file)"
-              >
-                <MobileIcon name="download" />
-              </button>
+              <div class="mobile-artifact-file__actions">
+                <button
+                  type="button"
+                  class="mobile-artifact-file__action"
+                  :disabled="!canPreviewArtifact(file)"
+                  :aria-label="`预览${file.filename}`"
+                  @click="openArtifactPreview(file)"
+                >
+                  <MobileIcon name="eye" />
+                </button>
+                <button
+                  type="button"
+                  class="mobile-artifact-file__action"
+                  :class="{ loading: downloadingArtifactId === file.artifact_id }"
+                  :disabled="downloadingArtifactId === file.artifact_id || !artifactDownloadUrl(file)"
+                  :aria-label="`下载${file.filename}`"
+                  @click="downloadArtifact(file)"
+                >
+                  <MobileIcon name="download" />
+                </button>
+              </div>
             </div>
             <button
               v-if="hiddenArtifactCount"
@@ -1222,6 +1282,14 @@ onBeforeUnmount(() => {
       v-if="!shareMode"
       :item="detailItem"
       @close="closeSourceDetail"
+    />
+    <MobileDocumentPreviewSheet
+      v-if="previewArtifact"
+      :item="previewArtifact"
+      :source-key="previewArtifact.artifact_id"
+      :blob-loader="loadArtifactPreviewBlob"
+      :download-handler="downloadPreviewArtifact"
+      @close="previewArtifact = null"
     />
     <picturePreview v-if="reviewImg" :reviewImg="reviewImg" :reviewUrl="reviewUrl" @closePreImg="closePreImg" />
   </article>
@@ -1744,7 +1812,7 @@ onBeforeUnmount(() => {
 .mobile-artifact-file {
   display: grid;
   min-width: 0;
-  grid-template-columns: 42px minmax(0, 1fr) 34px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   border: 1px solid #dce8e2;
@@ -1790,7 +1858,13 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.mobile-artifact-file__download {
+.mobile-artifact-file__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mobile-artifact-file__action {
   display: grid;
   width: 32px;
   height: 32px;
@@ -1802,12 +1876,12 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 
-.mobile-artifact-file__download:disabled {
+.mobile-artifact-file__action:disabled {
   color: #a6b6ae;
   border-color: #dfe8e3;
 }
 
-.mobile-artifact-file__download.loading {
+.mobile-artifact-file__action.loading {
   animation: artifactDownloadPulse 0.82s ease-in-out infinite;
 }
 

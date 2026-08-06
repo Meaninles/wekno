@@ -17,7 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestSelectedSkillContextIncludesSharedUserSkill(t *testing.T) {
+func TestLightweightPackagesIncludesSharedUserSkill(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -64,12 +64,12 @@ func TestSelectedSkillContextIncludesSharedUserSkill(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, targetUser.TenantID)
 	ctx = context.WithValue(ctx, types.UserIDContextKey, targetUser.ID)
-	got, err := svc.SelectedSkillContext(ctx, []string{skill.Name})
+	packages, dropped, err := svc.LightweightPackages(ctx, "selected", []string{skill.Name}, nil)
 	if err != nil {
-		t.Fatalf("SelectedSkillContext returned error: %v", err)
+		t.Fatalf("LightweightPackages returned error: %v", err)
 	}
-	if !strings.Contains(got, "共享 Skill 已生效") {
-		t.Fatalf("selected shared skill context missing instructions:\n%s", got)
+	if len(dropped) != 0 || len(packages) != 1 || !strings.Contains(packages[0].Instructions, "共享 Skill 已生效") {
+		t.Fatalf("shared lightweight skill was not resolved: packages=%+v dropped=%+v", packages, dropped)
 	}
 }
 

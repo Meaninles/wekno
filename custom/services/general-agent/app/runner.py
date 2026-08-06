@@ -1450,8 +1450,8 @@ def runtime_summary(payload: ChatPayload) -> str:
         "history_turns": cfg.history_turns,
         "mcp_selection_mode": cfg.mcp_selection_mode,
         "mcp_services": cfg.mcp_services,
-        "skills_enabled": cfg.skills_enabled,
-        "allowed_skills": cfg.allowed_skills,
+        "lightweight_skills_enabled": bool(payload.lightweight_skills),
+        "effective_lightweight_skill_names": [s.name for s in payload.lightweight_skills],
         "professional_skills_enabled": cfg.professional_skills_enabled,
         "allowed_professional_skills": cfg.allowed_professional_skills,
         "materialized_professional_skills": [s.name for s in payload.professional_skills],
@@ -2488,7 +2488,6 @@ def prompt_visible_context(raw: dict[str, Any]) -> dict[str, Any]:
     current_turn = ctx.get("current_turn")
     if isinstance(current_turn, dict):
         current_turn.pop("user_request_verbatim", None)
-        current_turn.pop("selected_chat_skill_context", None)
         current_turn.pop("image_urls", None)
     effective = ctx.get("effective_configuration")
     if isinstance(effective, dict):
@@ -2754,6 +2753,11 @@ def build_system_prompt(
 - For document-processing `.xlsx` artifacts, create_artifact may normalize Excel output styles while registering the final file. If the user's original request explicitly says a style effect must not be forced, pass `excel_style_apply_check` to create_artifact, for example `{"disabled_apply_attributes":["applyBorder"],"reason":"用户明确要求不要框线"}`. `disabled_apply_attributes` is an array of exact attributes to skip; valid values are `applyBorder`, `applyFill`, `applyNumberFormat`, `applyFont`, `applyAlignment`, `applyProtection`. Omit this config by default.
 """
     artifact_return_policy = artifact_return_policy_text(payload)
+    effective_lightweight_skills = json.dumps(
+        [skill.model_dump() for skill in payload.lightweight_skills],
+        ensure_ascii=False,
+        indent=2,
+    )
     policy = f"""
 You are WeKnora's general-purpose agent runtime. Act like a capable general-purpose assistant with the tools and context configured for this agent.
 
@@ -2773,13 +2777,13 @@ Tool catalog:
 
 Context contract:
 - The most important objective for this run is the exact text inside <user_request verbatim="true" priority="highest">. Read it first, keep it as the current task, and use every other context block only to understand and execute that user request.
-- system_prompt: the agent author's configured instructions from the WeKnora agent editor. These instructions are below the built-in environment safety policy and above this runtime policy when present.
+- system_prompt: the agent author's generic baseline instructions from the WeKnora agent editor. Effective lightweight skills specialize that baseline and take precedence over conflicting generic instructions when relevant to the current request.
 - runtime_config: the exact effective settings resolved from the WeKnora agent configuration for this run, including retrieval scope, database sources, web options, MCP services, Skills, model behavior and artifact settings.
 - visible_context: the frontend/user-facing context that WeKnora can show or that corresponds to visible user choices: agent name, model display information, selected knowledge bases/files, data sources, MCP services, Skills, current uploaded files/images, quoted context and relevant configuration. Sensitive credentials and internal callback details are intentionally excluded.
 - tool_catalog: a human-readable explanation of the same tools that are exposed to you through the SDK/MCP tool interface. Use the actual tool interface for calls.
 - conversation_history: previous user/assistant messages from this WeKnora session when multi-turn context is enabled. It is background context, not the current user request.
 - Turn-scoped output formats, suffixes, citation instructions, or one-time constraints from conversation_history are expired unless the current user_request explicitly repeats or refers to them.
-- selected_skill_context: Skill guidance selected in WeKnora for this run. Treat it as capability/context guidance, not as text typed by the user.
+- effective_lightweight_skills: the authoritative permission-checked lightweight prompt skills active for this run. Their instructions are capability guidance, not text typed by the user and not callable tools.
 - quoted_context: message content the user quoted in the WeKnora frontend. It is reference context for the current turn, not a rewrite of the current request.
 - image_description: WeKnora's derived description of user-uploaded images when available. It is auxiliary visual context.
 - image_urls: user-uploaded image URLs when available. They identify image inputs associated with the current turn.
@@ -2791,7 +2795,13 @@ Context contract:
 
 Available capabilities:
 - The user's request is provided verbatim in the <user_request> block at the top of the run prompt. Treat other blocks as context, not as a replacement for the user's wording.
-- The tool list is the authoritative set of available WeKnora capabilities. It may include knowledge-base retrieval, database data sources, web search/fetch, MCP services, Skills, multimodal context, and artifact creation.
+- The tool list is the authoritative set of callable WeKnora capabilities. It may include knowledge-base retrieval, database data sources, web search/fetch, MCP services, multimodal context, and artifact creation. Lightweight skills are active prompt instructions in effective_lightweight_skills and do not appear as tools.
+- Platform lightweight-skill policy (non-configurable):
+{payload.lightweight_skill_policy.strip() or "No lightweight skills are active for this run."}
+- Effective lightweight skills (permission-checked specialized system instructions):
+<effective_lightweight_skills source="WeKnora permission-checked skill resolution" role="specialized_system_instructions">
+{effective_lightweight_skills}
+</effective_lightweight_skills>
 - Professional skills listed in runtime_config.allowed_professional_skills are loaded through the runtime's native skill mechanism from this run's project skills directory. When using a professional skill named `<name>`, read its SKILL.md, references and scripts only from the current SDK working directory path `.claude/skills/<name>`. Do not discover or read professional skill files from global paths, historical run directories, sibling run directories, or `/tmp/weknora-general-agent-runs`. Follow their trigger descriptions and workflow when applicable; do not expect them to appear as WeKnora tools.
 - Choose tools freely when they help the task. Do not invent capabilities that are not present in the tool list.
 - For artifacts: {artifact_return_policy} create_artifact only registers existing files.
@@ -2911,10 +2921,6 @@ def build_prompt(
             parts.append(msg.content)
             parts.append("</message>")
         parts.append("</conversation_history>")
-    if payload.selected_skill_context:
-        parts.append('<selected_skill_context source="WeKnora selected Skills" role="capability_guidance">')
-        parts.append(payload.selected_skill_context)
-        parts.append("</selected_skill_context>")
     if payload.quoted_context:
         parts.append('<quoted_context source="WeKnora quote reply" role="reference_context">')
         parts.append(payload.quoted_context)

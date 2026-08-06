@@ -41,6 +41,26 @@ func TestPrepareMessagesWithHistoryInjectsSharedCitationContractForEveryTurn(t *
 	}
 }
 
+func TestPrepareMessagesWithHistoryAddsLightweightSkillsToSystemPrompt(t *testing.T) {
+	chatManage := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			Query:                   "question",
+			LightweightSkillContext: "Lightweight skill execution contract:\n[本轮有效轻量 Skills]\n制度助手",
+			SummaryConfig: types.SummaryConfig{
+				Prompt: "Generic assistant baseline.",
+			},
+		},
+		PipelineState: types.PipelineState{UserContent: "question"},
+	}
+	messages := prepareMessagesWithHistory(chatManage)
+	if len(messages) == 0 || !strings.Contains(messages[0].Content, "制度助手") {
+		t.Fatalf("lightweight Skill context missing from system prompt: %#v", messages)
+	}
+	if strings.Contains(messages[len(messages)-1].Content, "制度助手") {
+		t.Fatalf("lightweight Skill context must not be injected as user text: %#v", messages)
+	}
+}
+
 // --- IntoChatMessage tests ---
 
 func TestIntoChatMessage_NoKBRetrieval(t *testing.T) {

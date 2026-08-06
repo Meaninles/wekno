@@ -1,5 +1,6 @@
 import { post } from "@/utils/request";
 import {
+  resolveMobileArtifactDownloadURL,
   resolveMobileDocumentDownloadURL,
   unwrapMobileDocumentDownloadLink,
   type MobileDocumentDownloadLink,
@@ -30,7 +31,32 @@ export async function downloadKnowledgeNatively(
   navigate(url);
 }
 
+export async function requestMobileArtifactDownloadLink(
+  artifactID: string,
+): Promise<MobileDocumentDownloadLink> {
+  const id = String(artifactID || "").trim();
+  if (!id) throw new Error("产物标识为空");
+  const payload = await post(
+    `/api/v1/custom/mobile-documents/artifacts/${encodeURIComponent(id)}/download-link`,
+  );
+  return unwrapMobileDocumentDownloadLink(payload);
+}
+
+export async function downloadArtifactNatively(
+  artifactID: string,
+  navigate: (url: string) => void = (url) => window.location.assign(url),
+): Promise<void> {
+  const link = await requestMobileArtifactDownloadLink(artifactID);
+  const url = resolveMobileArtifactDownloadURL(link.url, window.location.href);
+
+  // Keep the artifact path identical to knowledge downloads in Enterprise
+  // WeChat: the system download process receives a retrievable signed URL,
+  // never a page-local blob: URL.
+  navigate(url);
+}
+
 export {
+  resolveMobileArtifactDownloadURL,
   resolveMobileDocumentDownloadURL,
   unwrapMobileDocumentDownloadLink,
 } from "./documentDownloadLink";

@@ -114,12 +114,16 @@ func (e *AgentEngine) systemPromptOptions(ctx context.Context) *BuildSystemPromp
 }
 
 func (e *AgentEngine) buildSystemPrompt(ctx context.Context) string {
-	return BuildSystemPromptWithOptions(
+	prompt := BuildSystemPromptWithOptions(
 		e.knowledgeBasesInfo,
 		e.config.WebSearchEnabled,
 		e.systemPromptOptions(ctx),
 		e.systemPromptTemplate,
 	)
+	if skillContext := strings.TrimSpace(e.config.LightweightSkillContext); skillContext != "" {
+		prompt += "\n\n" + skillContext
+	}
+	return prompt
 }
 
 // NewAgentEngineWithSkills creates a new agent engine with skills support

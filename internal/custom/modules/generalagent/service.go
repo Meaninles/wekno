@@ -58,7 +58,17 @@ type Service struct {
 	housekeepingMu     sync.Mutex
 	housekeepingCancel context.CancelFunc
 	housekeepingDone   chan struct{}
+	lightweightSkills  lightweightSkillProvider
 	professionalSkills professionalSkillProvider
+}
+
+type lightweightSkillProvider interface {
+	LightweightPackages(
+		context.Context,
+		string,
+		[]string,
+		[]string,
+	) ([]skillhub.LightweightSkillPackage, []skillhub.LightweightSkillDrop, error)
 }
 
 type professionalSkillProvider interface {
@@ -104,6 +114,12 @@ func NewService(
 func (s *Service) SetProfessionalSkillProvider(provider professionalSkillProvider) {
 	if s != nil {
 		s.professionalSkills = provider
+	}
+}
+
+func (s *Service) SetLightweightSkillProvider(provider lightweightSkillProvider) {
+	if s != nil {
+		s.lightweightSkills = provider
 	}
 }
 
@@ -192,7 +208,15 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	}
 	query := s.buildEffectiveQuery(ctx, req)
 	lightMode, lightNames := configuredLightweightSkillSelection(req.CustomAgent)
-	selectedSkillContext := appservice.LightweightSkillContext(ctx, lightMode, lightNames, req.SkillNames)
+	lightweightSkills, lightweightDrops, err := s.lightweightSkillSpecs(ctx, lightMode, lightNames, req.SkillNames)
+	if err != nil {
+		return err
+	}
+	if len(lightweightDrops) > 0 {
+		logger.Warnf(ctx, "general-agent dropped unavailable lightweight skills: %v", lightweightDrops)
+	}
+	logger.Infof(ctx, "general-agent effective lightweight skills: mode=%s configured=%d chat=%d effective=%v",
+		lightMode, len(lightNames), len(req.SkillNames), lightweightSkillNames(lightweightSkills))
 	professionalSkills, err := s.professionalSkillSpecs(
 		ctx,
 		req.CustomAgent,
@@ -240,11 +264,12 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		ImageURLs:               cloneStringSlice(req.ImageURLs),
 		ImageDescription:        req.ImageDescription,
 		QuotedContext:           req.QuotedContext,
-		SelectedSkillContext:    selectedSkillContext,
+		LightweightSkillPolicy:  appservice.LightweightSkillExecutionContract(),
+		LightweightSkills:       lightweightSkills,
 		Attachments:             attachmentSpecs(req.Attachments),
 		OriginalInputFiles:      originalInputFiles,
 		DocumentTemplateContext: documentTemplateContextSpec(ctx, agentConfig),
-		VisibleContext:          s.buildVisibleContext(ctx, req, agentConfig, selectedSkillContext),
+		VisibleContext:          s.buildVisibleContext(ctx, req, agentConfig),
 		ProfessionalSkills:      professionalSkills,
 		Tools:                   runtimeToolSpecs(registry),
 		RuntimeConfig:           runtimeConfigSpec(agentConfig),
@@ -857,6 +882,48 @@ func configuredProfessionalSkillSelection(agent *types.CustomAgent) (string, []s
 	return mode, cloneStringSlice(agent.Config.SelectedProfessionalSkills)
 }
 
+func (s *Service) lightweightSkillSpecs(
+	ctx context.Context,
+	mode string,
+	configured []string,
+	chat []string,
+) ([]LightweightSkillSpec, []skillhub.LightweightSkillDrop, error) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = "none"
+	}
+	if mode != "all" && (mode != "selected" || len(compactStrings(configured)) == 0) && len(compactStrings(chat)) == 0 {
+		return nil, nil, nil
+	}
+	if s.lightweightSkills == nil {
+		return nil, nil, fmt.Errorf("lightweight skill provider is unavailable")
+	}
+	packages, dropped, err := s.lightweightSkills.LightweightPackages(ctx, mode, configured, chat)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve lightweight skills: %w", err)
+	}
+	out := make([]LightweightSkillSpec, 0, len(packages))
+	for _, pkg := range packages {
+		out = append(out, LightweightSkillSpec{
+			Key:          pkg.Key,
+			Name:         pkg.Name,
+			Description:  pkg.Description,
+			Instructions: pkg.Instructions,
+		})
+	}
+	return out, dropped, nil
+}
+
+func lightweightSkillNames(skills []LightweightSkillSpec) []string {
+	out := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		if name := strings.TrimSpace(skill.Name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 func effectiveProfessionalSkillSelection(
 	agent *types.CustomAgent,
 	requested []string,
@@ -947,53 +1014,44 @@ func professionalSkillSpecsContain(skills []ProfessionalSkillSpec, name string) 
 	return false
 }
 
-func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest, config *types.AgentConfig, selectedSkillContext string) map[string]any {
+func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest, config *types.AgentConfig) map[string]any {
 	out := map[string]any{}
 	if req == nil {
 		return out
 	}
 	if req.CustomAgent != nil {
 		out["agent"] = map[string]any{
-			"id":                                  req.CustomAgent.ID,
-			"name":                                req.CustomAgent.Name,
-			"description":                         req.CustomAgent.Description,
-			"avatar":                              req.CustomAgent.Avatar,
-			"is_builtin":                          req.CustomAgent.IsBuiltin,
-			"agent_mode":                          req.CustomAgent.Config.AgentMode,
-			"agent_type":                          req.CustomAgent.Config.AgentType,
-			"system_prompt":                       req.CustomAgent.Config.SystemPrompt,
-			"system_prompt_template_id":           req.CustomAgent.Config.SystemPromptID,
-			"model_id":                            req.CustomAgent.Config.ModelID,
-			"rerank_model_id":                     req.CustomAgent.Config.RerankModelID,
-			"kb_selection_mode":                   req.CustomAgent.Config.KBSelectionMode,
-			"configured_knowledge_base_ids":       cloneStringSlice(req.CustomAgent.Config.KnowledgeBases),
-			"configured_db_data_source_ids":       cloneStringSlice(req.CustomAgent.Config.DBDataSources),
-			"mcp_selection_mode":                  req.CustomAgent.Config.MCPSelectionMode,
-			"configured_mcp_service_ids":          cloneStringSlice(req.CustomAgent.Config.MCPServices),
-			"skills_selection_mode":               req.CustomAgent.Config.SkillsSelectionMode,
-			"configured_selected_skill_names":     cloneStringSlice(req.CustomAgent.Config.SelectedSkills),
-			"lightweight_skills_selection_mode":   req.CustomAgent.Config.LightweightSkillsSelectionMode,
-			"configured_lightweight_skill_names":  cloneStringSlice(req.CustomAgent.Config.SelectedLightweightSkills),
-			"professional_skills_selection_mode":  req.CustomAgent.Config.ProfessionalSkillsSelectionMode,
-			"configured_professional_skill_names": cloneStringSlice(req.CustomAgent.Config.SelectedProfessionalSkills),
-			"image_upload_enabled":                req.CustomAgent.Config.ImageUploadEnabled,
-			"audio_upload_enabled":                req.CustomAgent.Config.AudioUploadEnabled,
-			"supported_file_types":                cloneStringSlice(req.CustomAgent.Config.SupportedFileTypes),
-			"data_analysis_enabled":               req.CustomAgent.Config.DataAnalysisEnabled,
+			"id":                            req.CustomAgent.ID,
+			"name":                          req.CustomAgent.Name,
+			"description":                   req.CustomAgent.Description,
+			"avatar":                        req.CustomAgent.Avatar,
+			"is_builtin":                    req.CustomAgent.IsBuiltin,
+			"agent_mode":                    req.CustomAgent.Config.AgentMode,
+			"agent_type":                    req.CustomAgent.Config.AgentType,
+			"system_prompt":                 req.CustomAgent.Config.SystemPrompt,
+			"system_prompt_template_id":     req.CustomAgent.Config.SystemPromptID,
+			"model_id":                      req.CustomAgent.Config.ModelID,
+			"rerank_model_id":               req.CustomAgent.Config.RerankModelID,
+			"kb_selection_mode":             req.CustomAgent.Config.KBSelectionMode,
+			"configured_knowledge_base_ids": cloneStringSlice(req.CustomAgent.Config.KnowledgeBases),
+			"configured_db_data_source_ids": cloneStringSlice(req.CustomAgent.Config.DBDataSources),
+			"mcp_selection_mode":            req.CustomAgent.Config.MCPSelectionMode,
+			"configured_mcp_service_ids":    cloneStringSlice(req.CustomAgent.Config.MCPServices),
+			"image_upload_enabled":          req.CustomAgent.Config.ImageUploadEnabled,
+			"audio_upload_enabled":          req.CustomAgent.Config.AudioUploadEnabled,
+			"supported_file_types":          cloneStringSlice(req.CustomAgent.Config.SupportedFileTypes),
+			"data_analysis_enabled":         req.CustomAgent.Config.DataAnalysisEnabled,
 		}
 	}
 	out["current_turn"] = map[string]any{
-		"user_request_verbatim":                  req.Query,
-		"quoted_context":                         req.QuotedContext,
-		"image_urls":                             cloneStringSlice(req.ImageURLs),
-		"image_description":                      req.ImageDescription,
-		"attachments":                            attachmentSpecsWithoutContent(req.Attachments),
-		"selected_chat_skill_names":              cloneStringSlice(req.SkillNames),
-		"selected_chat_professional_skill_names": cloneStringSlice(req.ProfessionalSkillNames),
-		"selected_chat_skill_context":            selectedSkillContext,
-		"selected_knowledge_base_ids":            cloneStringSlice(req.KnowledgeBaseIDs),
-		"selected_knowledge_file_ids":            cloneStringSlice(req.KnowledgeIDs),
-		"web_search_requested_in_chat":           req.WebSearchEnabled,
+		"user_request_verbatim":        req.Query,
+		"quoted_context":               req.QuotedContext,
+		"image_urls":                   cloneStringSlice(req.ImageURLs),
+		"image_description":            req.ImageDescription,
+		"attachments":                  attachmentSpecsWithoutContent(req.Attachments),
+		"selected_knowledge_base_ids":  cloneStringSlice(req.KnowledgeBaseIDs),
+		"selected_knowledge_file_ids":  cloneStringSlice(req.KnowledgeIDs),
+		"web_search_requested_in_chat": req.WebSearchEnabled,
 	}
 	if config != nil {
 		out["effective_configuration"] = map[string]any{
@@ -1016,8 +1074,6 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 			"history_turns":                    config.HistoryTurns,
 			"mcp_selection_mode":               config.MCPSelectionMode,
 			"mcp_service_ids":                  cloneStringSlice(config.MCPServices),
-			"skills_enabled":                   config.SkillsEnabled,
-			"allowed_skill_names":              cloneStringSlice(config.AllowedSkills),
 			"professional_skills_enabled":      config.ProfessionalSkillsEnabled,
 			"allowed_professional_skill_names": cloneStringSlice(config.AllowedProfessionalSkills),
 			"retrieve_kb_only_when_mentioned":  config.RetrieveKBOnlyWhenMentioned,
@@ -1467,8 +1523,6 @@ func runtimeConfigSpec(c *types.AgentConfig) RuntimeConfigSpec {
 		HistoryTurns:                c.HistoryTurns,
 		MCPSelectionMode:            c.MCPSelectionMode,
 		MCPServices:                 cloneStringSlice(c.MCPServices),
-		SkillsEnabled:               c.SkillsEnabled,
-		AllowedSkills:               cloneStringSlice(c.AllowedSkills),
 		ProfessionalSkillsEnabled:   c.ProfessionalSkillsEnabled,
 		AllowedProfessionalSkills:   cloneStringSlice(c.AllowedProfessionalSkills),
 		RetrieveKBOnlyWhenMentioned: c.RetrieveKBOnlyWhenMentioned,

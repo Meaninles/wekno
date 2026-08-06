@@ -37,6 +37,12 @@ func (s *sessionService) AgentQA(
 	if err != nil {
 		return err
 	}
+	lightMode, lightNames := lightweightSkillSelection(req.CustomAgent)
+	agentConfig.LightweightSkillContext = LightweightSkillContext(ctx, lightMode, lightNames, req.SkillNames)
+	if agentConfig.LightweightSkillContext != "" {
+		logger.Infof(ctx, "Added lightweight Skill system context (mode=%s, configured=%d, chat=%d)",
+			lightMode, len(lightNames), len(req.SkillNames))
+	}
 	effectiveModelID := agentConfig.RuntimeModelID
 	if effectiveModelID == "" {
 		logger.Warnf(ctx, "No summary model configured for custom agent %s", req.CustomAgent.ID)
@@ -156,12 +162,6 @@ func (s *sessionService) AgentQA(
 	if len(req.Attachments) > 0 {
 		agentQuery += req.Attachments.BuildPrompt()
 		logger.Infof(ctx, "Appended %d attachment(s) to agent query", len(req.Attachments))
-	}
-	lightMode, lightNames := lightweightSkillSelection(req.CustomAgent)
-	if skillContext := LightweightSkillContext(ctx, lightMode, lightNames, req.SkillNames); skillContext != "" {
-		agentQuery = skillContext + "\n\n[用户问题]\n" + agentQuery
-		logger.Infof(ctx, "Prepended lightweight skill context (mode=%s, configured=%d, chat=%d)",
-			lightMode, len(lightNames), len(req.SkillNames))
 	}
 	if agentConfig.AgentType == types.AgentTypeTableAnalysis && agentConfig.TableAnalysisDisplayIntent != nil {
 		agentQuery = tableAnalysisDisplayIntentPromptBlock(agentConfig.TableAnalysisDisplayIntent) + "\n\n" + agentQuery

@@ -70,8 +70,9 @@ type AgentConfig struct {
 	AllowedProfessionalSkills []string `json:"allowed_professional_skills,omitempty"`
 
 	// Runtime-only fields (not persisted)
-	RuntimeModelID string `json:"-"` // Chat model ID selected for the current agent run.
-	VLMModelID     string `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
+	RuntimeModelID          string `json:"-"` // Chat model ID selected for the current agent run.
+	VLMModelID              string `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
+	LightweightSkillContext string `json:"-"` // Platform-resolved lightweight Skill system instructions for this run.
 	// Per-request @mention pins (runtime only; injected as <must_use> in the user message).
 	PinnedMCPServiceIDs []string `json:"-"`
 	PinnedSkillNames    []string `json:"-"`

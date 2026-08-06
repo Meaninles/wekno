@@ -251,9 +251,10 @@
               <div class="card-bottom">
                 <div class="bottom-left">
                   <div class="feature-badges">
-                    <t-tooltip
-                      :content="kb.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : $t('knowledgeEditor.basic.typeDocument')"
-                      placement="top">
+					<KnowledgeTaskOverviewPopup
+						:knowledge-base-id="kb.id"
+						:enabled="(kb.type || 'document') === 'document'"
+						:fallback-content="$t('knowledgeEditor.basic.typeFAQ')">
                       <div class="feature-badge"
                         :class="{ 'type-document': (kb.type || 'document') === 'document', 'type-faq': kb.type === 'faq' }">
                         <t-icon :name="kb.type === 'faq' ? 'chat-bubble-help' : 'folder'" size="14px" />
@@ -261,7 +262,7 @@
                           0) }}</span>
                         <t-icon v-if="kb.isProcessing" name="loading" size="12px" class="processing-icon" />
                       </div>
-                    </t-tooltip>
+					</KnowledgeTaskOverviewPopup>
                     <t-tooltip v-if="kb.extract_config?.enabled" :content="$t('knowledgeList.features.knowledgeGraph')"
                       placement="top">
                       <div class="feature-badge kg">
@@ -325,9 +326,10 @@
               <div class="card-bottom">
                 <div class="bottom-left">
                   <div class="feature-badges">
-                    <t-tooltip
-                      :content="kb.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : $t('knowledgeEditor.basic.typeDocument')"
-                      placement="top">
+					<KnowledgeTaskOverviewPopup
+						:knowledge-base-id="kb.id"
+						:enabled="(kb.type || 'document') === 'document'"
+						:fallback-content="$t('knowledgeEditor.basic.typeFAQ')">
                       <div class="feature-badge"
                         :class="{ 'type-document': (kb.type || 'document') === 'document', 'type-faq': kb.type === 'faq' }">
                         <t-icon :name="kb.type === 'faq' ? 'chat-bubble-help' : 'folder'" size="14px" />
@@ -335,7 +337,7 @@
                           || '-')
                         }}</span>
                       </div>
-                    </t-tooltip>
+					</KnowledgeTaskOverviewPopup>
                     <t-tooltip v-if="kb.extract_config?.enabled" :content="$t('knowledgeList.features.knowledgeGraph')"
                       placement="top">
                       <div class="feature-badge kg">
@@ -474,9 +476,10 @@
               <div class="card-bottom">
                 <div class="bottom-left">
                   <div class="feature-badges">
-                    <t-tooltip
-                      :content="kb.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : $t('knowledgeEditor.basic.typeDocument')"
-                      placement="top">
+					<KnowledgeTaskOverviewPopup
+						:knowledge-base-id="kb.id"
+						:enabled="(kb.type || 'document') === 'document'"
+						:fallback-content="$t('knowledgeEditor.basic.typeFAQ')">
                       <div class="feature-badge"
                         :class="{ 'type-document': (kb.type || 'document') === 'document', 'type-faq': kb.type === 'faq' }">
                         <t-icon :name="kb.type === 'faq' ? 'chat-bubble-help' : 'folder'" size="14px" />
@@ -484,7 +487,7 @@
                           0) }}</span>
                         <t-icon v-if="kb.isProcessing" name="loading" size="12px" class="processing-icon" />
                       </div>
-                    </t-tooltip>
+					</KnowledgeTaskOverviewPopup>
                     <t-tooltip v-if="kb.extract_config?.enabled" :content="$t('knowledgeList.features.knowledgeGraph')"
                       placement="top">
                       <div class="feature-badge kg">
@@ -599,9 +602,10 @@
               <div class="card-bottom">
                 <div class="bottom-left">
                   <div class="feature-badges">
-                    <t-tooltip
-                      :content="shared.knowledge_base.type === 'faq' ? $t('knowledgeEditor.basic.typeFAQ') : $t('knowledgeEditor.basic.typeDocument')"
-                      placement="top">
+					<KnowledgeTaskOverviewPopup
+						:knowledge-base-id="shared.knowledge_base.id"
+						:enabled="(shared.knowledge_base.type || 'document') === 'document'"
+						:fallback-content="$t('knowledgeEditor.basic.typeFAQ')">
                       <div class="feature-badge"
                         :class="{ 'type-document': (shared.knowledge_base.type || 'document') === 'document', 'type-faq': shared.knowledge_base.type === 'faq' }">
                         <t-icon :name="shared.knowledge_base.type === 'faq' ? 'chat-bubble-help' : 'folder'"
@@ -610,7 +614,7 @@
                           (shared.knowledge_base.chunk_count ??
                             '-') : (shared.knowledge_base.knowledge_count ?? '-') }}</span>
                       </div>
-                    </t-tooltip>
+					</KnowledgeTaskOverviewPopup>
                   </div>
                 </div>
               </div>
@@ -794,6 +798,7 @@ import { useListUrlState } from '@/composables/useListUrlState'
 import { useResourcePins } from '@/composables/useResourcePins'
 import InformationSourceTabs from '@/custom/modules/information-source/InformationSourceTabs.vue'
 import DesktopKnowledgeSearchDialog from '@/custom/modules/knowledgeSearch/DesktopKnowledgeSearchDialog.vue'
+import KnowledgeTaskOverviewPopup from '@/custom/modules/knowledgeFolders/components/KnowledgeTaskOverviewPopup.vue'
 
 const router = useRouter()
 const route = useRoute()

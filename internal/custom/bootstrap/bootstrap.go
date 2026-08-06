@@ -141,6 +141,7 @@ func NewHandlers(
 	processingTraceRepository *processingtrace.Repository,
 	runtimeInstanceRegistry *runtimeinstances.Registry,
 	dependencyControl *dependencycontrol.Service,
+	taskEnqueuer interfaces.TaskEnqueuer,
 ) (*Handlers, error) {
 	ctx := context.Background()
 	configCenterService := configcenter.NewService(db)
@@ -166,6 +167,7 @@ func NewHandlers(
 		knowledgeService,
 		knowledgeBaseService,
 		kbShareService,
+		taskEnqueuer,
 	)
 	mobileDocumentService := mobiledocument.NewService(
 		knowledgeService,
@@ -345,6 +347,7 @@ func NewHandlers(
 	appservice.RegisterCustomAgentConfigNormalizer(kbManagerService.Configurator().NormalizeAgentConfig)
 	appservice.RegisterAgentRuntimeConfigHook(kbManagerService.Configurator().ConfigureRuntime)
 	appservice.RegisterSessionDeletedHook(generalAgentService.DeleteSessionArtifacts)
+	appservice.RegisterKnowledgeDeleteCompletedHook(knowledgeFolderService.OnKnowledgeDeleteCompleted)
 	appservice.RegisterDerivativeChatResolver(derivativeControlService.ResolveChatModel)
 	appservice.RegisterChatModelUsageGuard(derivativeControlService.GuardChatModel)
 	appservice.RegisterModelMutationGuard(derivativeControlService.GuardModelMutation)
@@ -830,6 +833,8 @@ func RegisterRoutes(
 		{
 			folders.GET("/nodes", viewer, kbRead, handlers.KnowledgeFolders.ListNodes)
 			folders.GET("/search", viewer, kbRead, handlers.KnowledgeFolders.SearchKnowledgeBase)
+			folders.GET("/task-stats", viewer, kbRead, handlers.KnowledgeFolders.GetKnowledgeBaseTaskStats)
+			folders.GET("/folder-delete-operations/:operation_id", viewer, kbRead, handlers.KnowledgeFolders.GetDeleteOperation)
 			folders.GET("/folders/options", viewer, kbRead, handlers.KnowledgeFolders.ListFolderOptions)
 			folders.GET("/folders/:folder_id", viewer, kbRead, handlers.KnowledgeFolders.GetFolder)
 			folders.POST("/folders", ownedKBOrAdmin, kbWrite, handlers.KnowledgeFolders.CreateFolder)

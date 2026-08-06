@@ -46,6 +46,10 @@
 }
 ```
 
+存在任一文档筛选条件时，文件夹节点不是按文件夹名称独立匹配，而是作为匹配文档的
+祖先路径投影返回。进入这些文件夹后，同一筛选会继续生效，只显示通向匹配文档的
+子文件夹和当前层匹配文档。正在删除的文件夹子树和文档不会出现在列表中。
+
 文件夹统计为异步维护的紧凑计数，包括子树文档、等待/运行解析、衍生/Wiki 待办、
 尚未形成终态失败的异常文档（`abnormal_document_count`），以及用户可见工作流已经
 进入失败终态的文档（`failed_document_count`）；列表请求不会扫描整棵子树。
@@ -97,10 +101,29 @@
 
 禁止移动到自身/子孙、超过深度限制或在同一父级创建规范化同名目录。
 
-### DELETE `/{prefix}/folders/{folder_id}?mode=...`
+### DELETE `/{prefix}/folders/{folder_id}`
 
-- `reject`（默认）：非空则返回 409。
-- `move_to_parent`：把直接内容移到上级后删除文件夹，不删除文档。
+递归删除目标文件夹、全部子文件夹及其中的文档，不会把任何内容移动到上级。接口
+返回 `202` 和持久删除操作；子树会在同一事务内从管理列表隐藏，文档继续复用原生
+`knowledge:list_delete` 清理对象、向量、关系数据与 Wiki，全部文档完成后再删除文件夹元数据。
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "operation-id",
+    "status": "running",
+    "root_folder_id": "folder-id",
+    "total_document_count": 12,
+    "deleted_document_count": 0
+  }
+}
+```
+
+### GET `/{prefix}/folder-delete-operations/{operation_id}`
+
+查询递归删除进度。状态为 `pending`、`running` 或 `completed`；读取 `pending` 操作时
+会安全重试尚未成功的队列投递。
 
 ### GET `/{prefix}/folders/{folder_id}`
 
@@ -109,6 +132,11 @@
 ### GET `/{prefix}/folders/options`
 
 返回轻量文件夹选项树，供移动/上传选择器使用；不包含文档正文。
+
+### GET `/{prefix}/task-stats`
+
+返回整个知识库（包括根目录文档）的任务概况：文档总数、待解析/解析中、衍生与 Wiki
+待办、异常文档和失败文档。知识库卡片仅在悬停文档数量徽标时请求该接口。
 
 ## 移动文档
 

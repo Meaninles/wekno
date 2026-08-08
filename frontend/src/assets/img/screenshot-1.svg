@@ -17,8 +17,8 @@
   <circle cx="120" cy="90" r="120" fill="#10B981" opacity="0.05"/>
   <circle cx="700" cy="520" r="140" fill="#34D399" opacity="0.06"/>
 
-  <text x="64" y="84" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#065F46">Intelligent Document Retrieval</text>
-  <text x="64" y="116" font-family="Arial, sans-serif" font-size="15" fill="#059669">Multimodal parsing &#183; Semantic understanding &#183; Precise locating</text>
+  <text x="64" y="84" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#065F46">智能文档检索</text>
+  <text x="64" y="116" font-family="Arial, sans-serif" font-size="15" fill="#059669">多模态解析 &#183; 语义理解 &#183; 精准定位</text>
 
   <g filter="url(#soft1)">
     <rect x="64" y="148" width="672" height="396" rx="20" fill="#FFFFFF"/>
@@ -28,45 +28,45 @@
   <circle cx="90" cy="172" r="5" fill="#34D399"/>
   <circle cx="108" cy="172" r="5" fill="#6EE7B7"/>
   <circle cx="126" cy="172" r="5" fill="#A7F3D0"/>
-  <text x="400" y="177" font-family="Arial, sans-serif" font-size="12" fill="#10B981" text-anchor="middle">WeKnora &#183; Knowledge Search</text>
+  <text x="400" y="177" font-family="Arial, sans-serif" font-size="12" fill="#10B981" text-anchor="middle">茅台智汇 &#183; 知识检索</text>
 
   <g transform="translate(96, 224)">
     <rect width="608" height="52" rx="12" fill="#F0FDF4" stroke="#A7F3D0" stroke-width="1.5"/>
     <circle cx="30" cy="26" r="9" fill="none" stroke="#10B981" stroke-width="2.5"/>
     <line x1="37" y1="33" x2="44" y2="40" stroke="#10B981" stroke-width="2.5" stroke-linecap="round"/>
-    <text x="60" y="32" font-family="Arial, sans-serif" font-size="15" fill="#9CA3AF">How is liability for breach defined in the contract?</text>
+    <text x="60" y="32" font-family="Arial, sans-serif" font-size="15" fill="#9CA3AF">合同中如何约定违约责任？</text>
     <rect x="500" y="10" width="92" height="32" rx="8" fill="url(#brand1)"/>
-    <text x="546" y="31" font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#FFFFFF" text-anchor="middle">Search</text>
+    <text x="546" y="31" font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#FFFFFF" text-anchor="middle">检索</text>
   </g>
 
   <g transform="translate(96, 300)">
     <rect width="608" height="68" rx="12" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1.5"/>
     <rect x="16" y="14" width="40" height="40" rx="10" fill="#D1FAE5"/>
     <path d="M28 26 H44 M28 34 H44 M28 42 H38" stroke="#059669" stroke-width="2.5" stroke-linecap="round"/>
-    <text x="72" y="30" font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#111827">Purchase Agreement &#183; Clause 7 Liability</text>
-    <text x="72" y="50" font-family="Arial, sans-serif" font-size="12" fill="#6B7280">A breaching party shall pay 20% of the total contract value as penalty...</text>
+    <text x="72" y="30" font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#111827">采购协议 &#183; 第七条违约责任</text>
+    <text x="72" y="50" font-family="Arial, sans-serif" font-size="12" fill="#6B7280">违约方应按合同总额的 20% 支付违约金……</text>
     <rect x="520" y="22" width="72" height="24" rx="12" fill="#ECFDF5"/>
-    <text x="556" y="38" font-family="Arial, sans-serif" font-size="12" font-weight="600" fill="#059669" text-anchor="middle">98% match</text>
+    <text x="556" y="38" font-family="Arial, sans-serif" font-size="12" font-weight="600" fill="#059669" text-anchor="middle">匹配 98%</text>
   </g>
 
   <g transform="translate(96, 380)">
     <rect width="608" height="68" rx="12" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1.5"/>
     <rect x="16" y="14" width="40" height="40" rx="10" fill="#DBEAFE"/>
     <path d="M28 24 h12 v18 h-16 v-14 z" fill="none" stroke="#2563EB" stroke-width="2" stroke-linejoin="round"/>
-    <text x="72" y="30" font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#111827">Addendum.pdf &#183; Page 2</text>
-    <text x="72" y="50" font-family="Arial, sans-serif" font-size="12" fill="#6B7280">The breaching party shall also compensate for the actual losses incurred...</text>
+    <text x="72" y="30" font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#111827">补充协议.pdf &#183; 第 2 页</text>
+    <text x="72" y="50" font-family="Arial, sans-serif" font-size="12" fill="#6B7280">违约方还应赔偿由此造成的实际损失……</text>
     <rect x="520" y="22" width="72" height="24" rx="12" fill="#ECFDF5"/>
-    <text x="556" y="38" font-family="Arial, sans-serif" font-size="12" font-weight="600" fill="#059669" text-anchor="middle">91% match</text>
+    <text x="556" y="38" font-family="Arial, sans-serif" font-size="12" font-weight="600" fill="#059669" text-anchor="middle">匹配 91%</text>
   </g>
 
   <g transform="translate(96, 472)">
-    <text x="0" y="34" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#059669">Formats</text>
+    <text x="0" y="34" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#059669">格式</text>
     <g font-family="Arial, sans-serif" font-size="12" fill="#065F46" text-anchor="middle">
       <rect x="76" y="16" width="60" height="30" rx="15" fill="#ECFDF5"/><text x="106" y="36">PDF</text>
       <rect x="146" y="16" width="64" height="30" rx="15" fill="#ECFDF5"/><text x="178" y="36">Word</text>
       <rect x="220" y="16" width="64" height="30" rx="15" fill="#ECFDF5"/><text x="252" y="36">Excel</text>
-      <rect x="294" y="16" width="66" height="30" rx="15" fill="#ECFDF5"/><text x="327" y="36">Image</text>
-      <rect x="370" y="16" width="66" height="30" rx="15" fill="#ECFDF5"/><text x="403" y="36">Audio</text>
+      <rect x="294" y="16" width="66" height="30" rx="15" fill="#ECFDF5"/><text x="327" y="36">图片</text>
+      <rect x="370" y="16" width="66" height="30" rx="15" fill="#ECFDF5"/><text x="403" y="36">音频</text>
       <rect x="446" y="16" width="92" height="30" rx="15" fill="#ECFDF5"/><text x="492" y="36">Markdown</text>
     </g>
   </g>

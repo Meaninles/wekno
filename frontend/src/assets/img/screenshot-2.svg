@@ -17,8 +17,8 @@
   <circle cx="120" cy="90" r="120" fill="#10B981" opacity="0.05"/>
   <circle cx="700" cy="520" r="140" fill="#34D399" opacity="0.06"/>
 
-  <text x="64" y="84" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#065F46">Hybrid Search Strategy</text>
-  <text x="64" y="116" font-family="Arial, sans-serif" font-size="15" fill="#059669">Keyword + vector semantics + knowledge graph, fused for the best result</text>
+  <text x="64" y="84" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#065F46">混合检索策略</text>
+  <text x="64" y="116" font-family="Arial, sans-serif" font-size="15" fill="#059669">关键词、向量语义与知识图谱融合，获得更优结果</text>
 
   <g filter="url(#soft2)">
     <rect x="64" y="148" width="672" height="396" rx="20" fill="#FFFFFF"/>
@@ -29,13 +29,13 @@
     <rect width="184" height="220" rx="14" fill="#FFFBEB" stroke="#FCD34D" stroke-width="1.5"/>
     <rect width="184" height="48" rx="14" fill="#FEF3C7"/>
     <rect y="34" width="184" height="14" fill="#FEF3C7"/>
-    <text x="92" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">BM25 Keyword</text>
+    <text x="92" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#92400E" text-anchor="middle">BM25 关键词</text>
     <g font-family="Arial, sans-serif" font-size="12.5" fill="#78350F">
-      <rect x="20" y="70" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#FDE68A"/><text x="92" y="90" text-anchor="middle">TF-IDF weights</text>
-      <rect x="20" y="110" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#FDE68A"/><text x="92" y="130" text-anchor="middle">Term frequency</text>
-      <rect x="20" y="150" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#FDE68A"/><text x="92" y="170" text-anchor="middle">Exact match</text>
+      <rect x="20" y="70" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#FDE68A"/><text x="92" y="90" text-anchor="middle">词项权重</text>
+      <rect x="20" y="110" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#FDE68A"/><text x="92" y="130" text-anchor="middle">词频统计</text>
+      <rect x="20" y="150" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#FDE68A"/><text x="92" y="170" text-anchor="middle">精确匹配</text>
     </g>
-    <text x="92" y="206" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#B45309" text-anchor="middle">Strong on terms</text>
+    <text x="92" y="206" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#B45309" text-anchor="middle">擅长词项匹配</text>
   </g>
 
   <!-- Vector -->
@@ -43,13 +43,13 @@
     <rect width="184" height="220" rx="14" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.5"/>
     <rect width="184" height="48" rx="14" fill="#DBEAFE"/>
     <rect y="34" width="184" height="14" fill="#DBEAFE"/>
-    <text x="92" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#1E40AF" text-anchor="middle">Vector Semantic</text>
+    <text x="92" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#1E40AF" text-anchor="middle">向量语义</text>
     <g font-family="Arial, sans-serif" font-size="12.5" fill="#1E3A8A">
-      <rect x="20" y="70" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#BFDBFE"/><text x="92" y="90" text-anchor="middle">Embedding</text>
-      <rect x="20" y="110" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#BFDBFE"/><text x="92" y="130" text-anchor="middle">Cosine similarity</text>
-      <rect x="20" y="150" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#BFDBFE"/><text x="92" y="170" text-anchor="middle">ANN search</text>
+      <rect x="20" y="70" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#BFDBFE"/><text x="92" y="90" text-anchor="middle">向量嵌入</text>
+      <rect x="20" y="110" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#BFDBFE"/><text x="92" y="130" text-anchor="middle">余弦相似度</text>
+      <rect x="20" y="150" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#BFDBFE"/><text x="92" y="170" text-anchor="middle">近邻检索</text>
     </g>
-    <text x="92" y="206" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#2563EB" text-anchor="middle">Understands meaning</text>
+    <text x="92" y="206" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#2563EB" text-anchor="middle">理解语义</text>
   </g>
 
   <!-- Graph -->
@@ -57,13 +57,13 @@
     <rect width="184" height="220" rx="14" fill="#ECFDF5" stroke="#6EE7B7" stroke-width="1.5"/>
     <rect width="184" height="48" rx="14" fill="#D1FAE5"/>
     <rect y="34" width="184" height="14" fill="#D1FAE5"/>
-    <text x="92" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#065F46" text-anchor="middle">Knowledge Graph</text>
+    <text x="92" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#065F46" text-anchor="middle">知识图谱</text>
     <g font-family="Arial, sans-serif" font-size="12.5" fill="#064E3B">
-      <rect x="20" y="70" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#A7F3D0"/><text x="92" y="90" text-anchor="middle">Entity recognition</text>
-      <rect x="20" y="110" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#A7F3D0"/><text x="92" y="130" text-anchor="middle">Relation paths</text>
-      <rect x="20" y="150" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#A7F3D0"/><text x="92" y="170" text-anchor="middle">Subgraph match</text>
+      <rect x="20" y="70" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#A7F3D0"/><text x="92" y="90" text-anchor="middle">实体识别</text>
+      <rect x="20" y="110" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#A7F3D0"/><text x="92" y="130" text-anchor="middle">关系路径</text>
+      <rect x="20" y="150" width="144" height="30" rx="8" fill="#FFFFFF" stroke="#A7F3D0"/><text x="92" y="170" text-anchor="middle">子图匹配</text>
     </g>
-    <text x="92" y="206" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#059669" text-anchor="middle">Reasons over links</text>
+    <text x="92" y="206" font-family="Arial, sans-serif" font-size="13" font-weight="600" fill="#059669" text-anchor="middle">关联推理</text>
   </g>
 
   <g stroke="#10B981" stroke-width="2.5" fill="none" stroke-linecap="round">
@@ -74,7 +74,7 @@
 
   <g transform="translate(220, 478)">
     <rect width="360" height="50" rx="14" fill="url(#brand2)" filter="url(#soft2)"/>
-    <text x="180" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF" text-anchor="middle">RRF fusion ranking -&gt; best result</text>
+    <text x="180" y="31" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF" text-anchor="middle">RRF 融合排序 → 最优结果</text>
   </g>
 
   <defs>

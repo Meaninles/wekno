@@ -10,6 +10,7 @@ import MobileChatMessage from "@/custom/modules/mobile/components/MobileChatMess
 import { getChatShare, type ChatShareView } from "../api";
 import { normalizeMessageArtifacts } from "../media";
 import { artifactDataFor, normalizeChatShareMessage, userQueryFor } from "../message";
+import { BRAND_NAME } from "@/custom/modules/branding";
 
 const route = useRoute();
 const share = ref<ChatShareView | null>(null);
@@ -37,7 +38,7 @@ async function loadShare() {
       throw new Error(resp?.message || "分享内容不存在");
     }
     share.value = resp.data;
-    document.title = `${title.value} - WeKnora`;
+    document.title = `${title.value} - ${BRAND_NAME}`;
   } catch (error: any) {
     errorMessage.value = error?.message || "分享内容加载失败";
     MessagePlugin.error(errorMessage.value);

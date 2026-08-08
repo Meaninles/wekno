@@ -10,13 +10,13 @@ export interface ChunkingSample {
   text: string
 }
 
-const MARKDOWN_SAMPLE = `# WeKnora 知识框架
+const MARKDOWN_SAMPLE = `# 茅台智汇知识平台
 
-WeKnora 是一个基于 LLM 的开源企业知识框架，集 RAG 问答、ReAct 智能体、Wiki 知识图谱于一体。本文介绍其设计动机、架构与典型用法。
+茅台智汇是一个基于大语言模型的企业知识平台，集 RAG 问答、ReAct 智能体、Wiki 知识图谱于一体。本文介绍其设计动机、架构与典型用法。
 
 ## 设计动机
 
-企业内部知识散落在 Confluence、飞书、Notion、Git 仓库等多种系统，传统全文检索难以理解语义，单一 LLM 又缺少可信赖的上下文来源。WeKnora 的目标是：
+企业内部知识散落在 Confluence、飞书、Notion、Git 仓库等多种系统，传统全文检索难以理解语义，单一 LLM 又缺少可信赖的上下文来源。茅台智汇的目标是：
 
 - **多源接入**：把分散内容统一抽取、清洗、向量化
 - **多策略检索**：稠密、稀疏、知识图谱多路召回 + RRF 融合
@@ -60,18 +60,16 @@ WeKnora 是一个基于 LLM 的开源企业知识框架，集 RAG 问答、ReAct
 ### 启动命令
 
 \`\`\`bash
-git clone https://github.com/Tencent/WeKnora && cd WeKnora
 cp .env.example .env       # 修改你的模型与数据库配置
-make dev-start             # 启动 postgres / redis / qdrant
-make dev-app               # 启动后端，热重载
-make dev-frontend          # 启动前端，自动刷新
+docker compose up -d       # 启动所需服务
+npm run dev                # 启动前端开发服务
 \`\`\`
 
 打开浏览器访问 http://localhost:5177 即可。
 
 ## 架构概览
 
-WeKnora 后端采用清晰的分层架构：
+茅台智汇后端采用清晰的分层架构：
 
 \`\`\`
 ┌────────────────────────┐
@@ -109,19 +107,17 @@ Agent 引擎执行经典 ReAct 循环：
 - 故障排查：\`docs/QA.md\`
 - 路线图：\`docs/ROADMAP.md\``
 
-const FAQ_SAMPLE = `# WeKnora 部署与使用 FAQ
+const FAQ_SAMPLE = `# 茅台智汇部署与使用常见问题
 
 本文档汇总社区与内部用户最常问到的问题，按"安装 / 配置 / 检索 / 模型 / 性能"分类。
 
 ## 安装与启动
 
-### Q1: Docker 镜像在哪里下载？
-官方镜像通过 daocloud 加速分发：
+### Q1: 如何启动开发环境？
+确认环境变量配置完成后，通过 Docker Compose 启动依赖服务：
 
 \`\`\`
-docker pull docker.m.daocloud.io/wechatopenai/weknora-app:v0.5.0
-docker pull docker.m.daocloud.io/wechatopenai/weknora-docreader:v0.5.0
-docker pull docker.m.daocloud.io/wechatopenai/weknora-ui:v0.5.0
+docker compose up -d
 \`\`\`
 
 ### Q2: 启动后访问 5177 显示旧界面？

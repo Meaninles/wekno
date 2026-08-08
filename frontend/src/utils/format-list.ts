@@ -1,5 +1,5 @@
 /** Locale-aware conjunction for short UI lists (e.g. missing config items). */
-export function formatLocalizedList(items: string[], locale = 'en-US'): string {
+export function formatLocalizedList(items: string[], locale = 'zh-CN'): string {
   if (items.length === 0) return ''
   if (typeof Intl !== 'undefined' && typeof Intl.ListFormat !== 'undefined') {
     try {

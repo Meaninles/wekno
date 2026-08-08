@@ -262,7 +262,7 @@ const reportIssueURL = computed(() => {
   if (errMsg) {
     const body = [
       '### Environment',
-      `- WeKnora version: ${systemInfo.value?.version || 'unknown'}`,
+      `- 应用版本: ${systemInfo.value?.version || 'unknown'}`,
       `- Commit: ${systemInfo.value?.commit_id || 'unknown'}`,
       `- Frontend version: ${frontendVersion} (${frontendCommit})`,
       `- DB version reported: ${systemInfo.value?.db_version || 'unknown'}`,

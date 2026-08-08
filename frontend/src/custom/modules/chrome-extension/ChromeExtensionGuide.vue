@@ -7,7 +7,7 @@
           <span>返回</span>
         </button>
         <h1>Chrome 插件离线安装指南</h1>
-        <p>按图中红色编号操作：下载、解压、打开开发者模式、加载文件夹、回到 WeKnora 配置。</p>
+        <p>按图中红色编号操作：下载、解压、打开开发者模式、加载文件夹、回到茅台智汇配置。</p>
       </div>
       <div class="guide-actions">
         <t-button theme="primary" @click="downloadChromeExtensionPackage">
@@ -63,7 +63,7 @@
     <section class="guide-notes" aria-label="注意事项">
       <h2>安装限制</h2>
       <p>Chrome 离线安装不能直接选择 zip，也不能在未开启开发者模式时加载插件；如果 Chrome 提示插件来自外部来源，请确认文件夹来自本页下载的插件包。</p>
-      <p>配置会写入当前 Chrome 插件本地配置；如果插件之前配置过其他空间，继续“一键配置”会覆盖为当前 WeKnora 空间。</p>
+      <p>配置会写入当前 Chrome 插件本地配置；如果插件之前配置过其他空间，继续“一键配置”会覆盖为当前智汇空间。</p>
     </section>
   </main>
 </template>
@@ -82,9 +82,9 @@ const steps = [
     no: 1,
     title: '下载插件包',
     desc: '在左下角账号菜单展开“Chrome 插件”，点击“插件下载”。',
-    markers: ['红色 1：点击“插件下载”，浏览器会下载 weknora-chrome-extension.zip。'],
-    result: '完成后：下载目录中出现 weknora-chrome-extension.zip。',
-    caption: '第 1 步：从 WeKnora 直接下载离线插件包。',
+    markers: ['红色 1：点击“插件下载”，浏览器会下载 maotai-zhihui-chrome-extension.zip。'],
+    result: '完成后：下载目录中出现 maotai-zhihui-chrome-extension.zip。',
+    caption: '第 1 步：从茅台智汇直接下载离线插件包。',
     img: '/chrome-extension-guide/step-1-download.png',
   },
   {
@@ -135,11 +135,11 @@ const steps = [
   },
   {
     no: 6,
-    title: '回到 WeKnora 一键配置',
-    desc: '回到 WeKnora，展开“Chrome 插件”，点击“一键配置”。',
-    markers: ['红色 6：点击“一键配置”，WeKnora 会检测插件并写入当前空间配置。'],
+    title: '回到茅台智汇一键配置',
+    desc: '回到茅台智汇，展开“Chrome 插件”，点击“一键配置”。',
+    markers: ['红色 6：点击“一键配置”，智汇会检测插件并写入当前空间配置。'],
     result: '完成后：看到“Chrome 插件已配置到当前空间”的成功提示；如果已有配置，会先提示是否覆盖。',
-    caption: '第 6 步：安装完成后回到 WeKnora 进行当前空间绑定。',
+    caption: '第 6 步：安装完成后回到茅台智汇进行当前空间绑定。',
     img: '/chrome-extension-guide/step-6-configure.png',
   },
 ]

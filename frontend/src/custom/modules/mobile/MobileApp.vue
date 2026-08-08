@@ -172,8 +172,8 @@ onMounted(bootstrap);
     <div class="mobile-shell">
       <RouterView v-if="isPublicReferenceRoute || (!booting && authStore.isLoggedIn)" />
       <div v-else class="mobile-boot">
-        <div class="mobile-boot__mark">W</div>
-        <div class="mobile-boot__title">WeKnora</div>
+        <div class="mobile-boot__mark">智</div>
+        <div class="mobile-boot__title">茅台智汇</div>
         <div class="mobile-boot__status">
           <span>{{ bootMessage }}</span>
           <i />

@@ -10,7 +10,7 @@
         <!-- 展开时：Logo + 搜索/折叠按钮同行 -->
         <div class="logo_row" v-if="!uiStore.sidebarCollapsed">
             <div class="logo_box" @click="router.push('/platform/knowledge-bases')" style="cursor: pointer;">
-                <img class="logo" src="@/assets/img/weknora.png" alt="">
+                <img class="logo" :src="BRAND_LOGO_URL" :alt="BRAND_NAME">
                 <sup v-if="isLiteEdition" class="lite-badge">Lite</sup>
             </div>
             <div class="logo_actions">
@@ -248,6 +248,7 @@ import { useI18n } from 'vue-i18n';
 import { getSystemInfo } from '@/api/system';
 import { INTEGRATION_PREVIEW_ITEMS, INTEGRATION_TAB_MIN_ROLE } from '@/config/integrations';
 import ShareIcon from '@/custom/modules/chatshare/components/ShareIcon.vue';
+import { BRAND_LOGO_URL, BRAND_NAME } from '@/custom/modules/branding';
 
 const chatResources = useChatResourcesStore();
 const integrationPreviewItems = computed(() =>
@@ -1233,8 +1234,11 @@ const onDragHandleMouseDown = (e: MouseEvent) => {
         overflow: hidden;
 
         .logo {
-            width: 128px;
+            // SVG 左侧自带透明留白；用轻微光学校正，让可见的“茅”字
+            // 更接近下方菜单行左缘，而不是只对齐图片外框。
+            width: 132px;
             height: auto;
+            transform: translateX(-10px);
         }
 
         .lite-badge {

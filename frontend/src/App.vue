@@ -18,26 +18,15 @@ import {
   rememberAuthReturnPath,
 } from '@/custom/modules/authreturn/authReturn'
 
-// TDesign locale configs
-import enUSConfig from 'tdesign-vue-next/esm/locale/en_US'
 import zhCNConfig from 'tdesign-vue-next/esm/locale/zh_CN'
-import koKRConfig from 'tdesign-vue-next/esm/locale/ko_KR'
-import ruRUConfig from 'tdesign-vue-next/esm/locale/ru_RU'
 
-const { locale, t, tm } = useI18n()
+const { t, tm } = useI18n()
 const { formatRole, roleIcon } = useRoleLabel()
 const router = useRouter()
 const authStore = useAuthStore()
 const settingsStore = useSettingsStore()
 
-const tdLocaleMap: Record<string, object> = {
-  'en-US': enUSConfig,
-  'zh-CN': zhCNConfig,
-  'ko-KR': koKRConfig,
-  'ru-RU': ruRUConfig,
-}
-
-const tdGlobalConfig = computed(() => tdLocaleMap[locale.value] || enUSConfig)
+const tdGlobalConfig = computed(() => zhCNConfig)
 
 const decodeOIDCResult = (encoded: string) => {
   const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')

@@ -101,7 +101,7 @@ function isSameTenantConfigured(status: ChromeExtensionStatus, tenantId: string)
 export function downloadChromeExtensionPackage() {
   const link = document.createElement('a')
   link.href = WEKNORA_CHROME_EXTENSION_PACKAGE_URL
-  link.download = 'weknora-chrome-extension.zip'
+  link.download = 'maotai-zhihui-chrome-extension.zip'
   document.body.appendChild(link)
   link.click()
   link.remove()

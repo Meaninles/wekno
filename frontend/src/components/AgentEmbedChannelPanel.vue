@@ -240,11 +240,6 @@
             <t-select v-model="form.widget_position" :disabled="!isAdmin" :options="positionOptions" />
           </div>
 
-          <div class="form-item">
-            <label class="form-label">{{ $t('embedPublish.defaultLocale') }}</label>
-            <t-select v-model="form.default_locale" :disabled="!isAdmin" :options="defaultLocaleOptions" />
-            <p class="form-desc">{{ $t('embedPublish.defaultLocaleDesc') }}</p>
-          </div>
 
           <div class="form-item">
             <label class="form-label">{{ $t('embedPublish.primaryColor') }}</label>
@@ -524,7 +519,7 @@ const defaultForm = () => ({
   widget_position: 'bottom-right' as WidgetPosition,
   allow_web_search: false,
   allow_file_upload: false,
-  default_locale: '' as EmbedLocaleTag,
+  default_locale: 'zh-CN' as EmbedLocaleTag,
   webhook_url: '',
   webhook_secret: '',
 })
@@ -544,14 +539,6 @@ const positionOptions = computed(() => ([
 const headerTitleModeOptions = computed(() => ([
   { label: t('embedPublish.headerTitleModeChannel'), value: 'channel' },
   { label: t('embedPublish.headerTitleModeSession'), value: 'session' },
-]))
-
-const defaultLocaleOptions = computed(() => ([
-  { label: t('embedPublish.defaultLocaleBrowser'), value: '' },
-  { label: '简体中文', value: 'zh-CN' },
-  { label: 'English', value: 'en-US' },
-  { label: '한국어', value: 'ko-KR' },
-  { label: 'Русский', value: 'ru-RU' },
 ]))
 
 const channelMenuOptions = (ch: EmbedChannel) => {
@@ -839,7 +826,7 @@ const fillFormFromChannel = (ch: EmbedChannel) => {
     widget_position: (ch.widget_position as WidgetPosition) || 'bottom-right',
     allow_web_search: ch.allow_web_search === true,
     allow_file_upload: ch.allow_file_upload === true,
-    default_locale: (ch.default_locale || '') as EmbedLocaleTag,
+    default_locale: 'zh-CN' as EmbedLocaleTag,
     webhook_url: ch.webhook_url || '',
     webhook_secret: '',
   }
@@ -934,7 +921,7 @@ const saveForm = async () => {
       widget_position: form.value.widget_position,
       allow_web_search: form.value.allow_web_search,
       allow_file_upload: form.value.allow_file_upload,
-      default_locale: form.value.default_locale || '',
+      default_locale: 'zh-CN',
       webhook_url: form.value.webhook_url || '',
       webhook_secret: form.value.webhook_secret || undefined,
       enabled: editingId.value ? editingEnabled.value : true,

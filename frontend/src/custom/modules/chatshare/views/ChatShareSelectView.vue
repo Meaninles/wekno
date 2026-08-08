@@ -15,6 +15,7 @@ import {
 } from "../api";
 import { normalizeMessageArtifacts } from "../media";
 import { artifactDataFor, normalizeChatShareMessage, userQueryFor } from "../message";
+import { BRAND_NAME } from "@/custom/modules/branding";
 
 const route = useRoute();
 const router = useRouter();
@@ -87,7 +88,7 @@ async function loadCandidates() {
       .map((message: any) => messageTurnID(message))
       .filter(Boolean);
     selectedTurnIDs.value = new Set(defaults);
-    document.title = `选择分享内容 - ${resp.data.title || "WeKnora"}`;
+    document.title = `选择分享内容 - ${resp.data.title || BRAND_NAME}`;
   } catch (error: any) {
     errorMessage.value = error?.message || "无法加载对话";
   } finally {

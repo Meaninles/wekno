@@ -475,7 +475,7 @@ func signExternalUserToken(hmacSecret, externalUserID string, tenantID uint64) (
 		SignedString([]byte(hmacSecret))
 }
 
-// Send on each WeKnora API request:
+// Send on each 茅台智汇 API request:
 //   ${headerName}: <JWT from signExternalUserToken>
 // Tenant ID for this workspace: ${tid}`
 })

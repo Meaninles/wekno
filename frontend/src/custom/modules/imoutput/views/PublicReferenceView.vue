@@ -14,6 +14,7 @@ import {
 } from "../publicReference";
 import { renderPublicReferenceMarkdown } from "../publicReferenceMarkdown";
 import { buildMobileReferenceReaderURL, shouldUseMobileReferenceReader } from "../referenceReaderRoute";
+import { BRAND_LOGO_URL, BRAND_NAME } from "@/custom/modules/branding";
 
 const route = useRoute();
 const router = useRouter();
@@ -105,8 +106,8 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
 <template>
   <div class="public-reference-page" data-testid="desktop-public-reference">
     <header class="public-reference-header">
-      <a class="brand" href="/" aria-label="WeKnora 首页">
-        <span>W</span><strong>WEKNORA</strong>
+      <a class="brand" href="/" :aria-label="`${BRAND_NAME}首页`">
+        <img :src="BRAND_LOGO_URL" :alt="BRAND_NAME" />
       </a>
     </header>
 
@@ -198,23 +199,15 @@ function documentHeadReferrerMeta(): HTMLMetaElement {
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
   color: #18261f;
   text-decoration: none;
 }
 
-.brand span {
-  display: grid;
-  width: 31px;
-  height: 31px;
-  place-items: center;
-  border-radius: 8px;
-  background: #07c160;
-  color: white;
-  font-weight: 700;
+.brand img {
+  display: block;
+  width: 128px;
+  height: auto;
 }
-
-.brand strong { font-size: 17px; letter-spacing: .08em; }
 
 .public-reference-main {
   width: min(1120px, calc(100% - 48px));

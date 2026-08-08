@@ -39,7 +39,7 @@ const openKnowledgeManager = () => {
     </header>
 
     <section class="account-card">
-      <div class="account-avatar">W</div>
+      <div class="account-avatar">智</div>
       <div class="account-info">
         <strong>{{ accountDisplayName }}</strong>
       </div>

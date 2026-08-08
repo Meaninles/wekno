@@ -1847,8 +1847,8 @@ onBeforeUnmount(() => {
       <div v-if="isLoadingHistory" class="mobile-empty">正在加载会话</div>
       <template v-else>
         <div v-if="messagesList.length === 0" class="mobile-welcome">
-          <div class="mobile-welcome__mark">W</div>
-          <h1>向 WeKnora 提问</h1>
+          <div class="mobile-welcome__mark">智</div>
+          <h1>向智汇提问</h1>
           <p>可选择智能体、联网、图片、附件、技能、知识库和模型。</p>
         </div>
         <MobileChatMessage
@@ -1913,7 +1913,7 @@ onBeforeUnmount(() => {
           ref="textareaRef"
           v-model="inputValue"
           rows="1"
-          placeholder="向 WeKnora 提问..."
+          placeholder="向智汇提问..."
           @keydown.enter.exact.prevent="sendMessage"
         />
         <button v-if="isReplying" type="button" class="send-button stop" aria-label="停止" @click="stopGenerating">

@@ -94,7 +94,7 @@ function downloadOriginal() {
       <div>
         <strong>{{ originalMode ? '原文档' : reference?.title || '引用来源' }}</strong>
       </div>
-      <span class="brand-mark">W</span>
+      <span class="brand-mark">智</span>
     </header>
 
     <section v-if="loading" class="mobile-reference-state" data-testid="mobile-public-reference-loading">

@@ -13,3 +13,5 @@
 完成修改后重启应用时，必须先关闭此前仍在运行的本应用实例（如有），再启动更新后的实例。
 
 当前为开发环境，二开部分无需兼容旧实现及数据库、存储、配置等兼容性，禁止降级实现。
+
+生产环境向 SWR 推送镜像时，从 Kubernetes `weknora/default-secret` 的 `.dockerconfigjson` 获取当前凭据，并使用独立临时 `DOCKER_CONFIG` 执行 `docker login --password-stdin`；不要使用服务器上可能损坏的默认 Docker 配置。禁止输出或提交实际凭据，推送完成后立即删除临时凭据。

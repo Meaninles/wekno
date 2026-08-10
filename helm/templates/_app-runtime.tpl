@@ -20,6 +20,10 @@ therefore need the same database, object-store, model, and encryption config.
   valueFrom:
     fieldRef:
       fieldPath: metadata.uid
+- name: POD_IP
+  valueFrom:
+    fieldRef:
+      fieldPath: status.podIP
 - name: CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID
   value: "k8s/$(POD_NAMESPACE)/$(POD_UID)"
 - name: CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART
@@ -214,6 +218,8 @@ therefore need the same database, object-store, model, and encryption config.
   value: {{ $root.Values.app.agentIntegration.generalAgentURL | quote }}
 - name: CUSTOM_DOCUMENT_PROCESSING_AGENT_URL
   value: {{ $root.Values.app.agentIntegration.documentProcessingAgentURL | quote }}
+# Active Agent runs are process-local. API-role callbacks use the Pod IP so
+# they cannot be load-balanced onto a different API process.
 - name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
   value: {{ $root.Values.app.agentIntegration.toolCallbackURL | quote }}
 - name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL

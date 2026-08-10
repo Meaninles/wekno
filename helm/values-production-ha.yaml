@@ -275,7 +275,9 @@ app:
     enabled: true
     generalAgentURL: http://weknora-custom-general-agent.weknora.svc.cluster.local:8091
     documentProcessingAgentURL: http://weknora-custom-document-processing-agent.weknora.svc.cluster.local:8091
-    toolCallbackURL: http://app.weknora.svc.cluster.local:8080/api/v1/custom/general-agent/internal/tools/call
+    # Agent run ownership is process-local. Bypass the shared app Service so
+    # every callback returns to the API Pod that created the active run.
+    toolCallbackURL: http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call
     artifactUploadURL: http://app.weknora.svc.cluster.local:8080/api/v1/custom/general-agent/internal/artifacts/upload
     apiKeySecret:
       name: weknora-agent-internal

@@ -90,6 +90,9 @@ allowing apparently healthy pods to corrupt or lose access to uploaded files.
   {{- end }}
 {{- end }}
 {{- if .Values.app.agentIntegration.enabled }}
+  {{- if ne (toString .Values.app.agentIntegration.toolCallbackURL) "http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call" }}
+    {{- fail "Agent tool callbacks must use http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call because active runs are process-local" }}
+  {{- end }}
   {{- $artifactProvider := lower (toString .Values.app.agentIntegration.artifactStorage.provider) }}
   {{- if not (has $artifactProvider (list "minio" "obs")) }}
     {{- fail "app.agentIntegration.artifactStorage.provider must be minio or obs" }}

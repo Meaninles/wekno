@@ -358,7 +358,9 @@ app:
     enabled: false
     generalAgentURL: http://weknora-custom-general-agent:8091
     documentProcessingAgentURL: http://weknora-custom-document-processing-agent:8091
-    toolCallbackURL: http://app:8080/api/v1/custom/general-agent/internal/tools/call
+    # Agent runs are held in the originating API process. Kubernetes expands
+    # POD_IP from the Downward API before the application starts.
+    toolCallbackURL: http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call
     artifactUploadURL: http://app:8080/api/v1/custom/general-agent/internal/artifacts/upload
     apiKeySecret:
       name: general-agent-secret
@@ -400,7 +402,7 @@ app:
   #       name: general-agent-secret
   #       key: apiKey
   # - name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
-  #   value: "http://app:8080/api/v1/custom/general-agent/internal/tools/call"
+  #   value: "http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call"
   # Final artifacts are uploaded to the app's private object-store endpoint
   # before a run is reported complete. Never place their durable root on RWX.
   # - name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL

@@ -55,6 +55,9 @@ EXPECTED_ROLE_ENV = {
         "WEKNORA_WIKI_MAP_TASK_CONCURRENCY": "6",
     },
 }
+EXPECTED_TOOL_CALLBACK_URL = (
+    "http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call"
+)
 
 
 def scalar(document: str, key: str, indent: int = 0) -> str | None:
@@ -105,6 +108,29 @@ def has_env(document: str, name: str, value: str) -> bool:
     ) is not None
 
 
+def validate_agent_callback(document: str, errors: list[str]) -> None:
+    pod_ip = re.search(
+        r'(?m)^\s*- name:\s*POD_IP\s*$\n'
+        r'^\s+valueFrom:\s*$\n'
+        r'^\s+fieldRef:\s*$\n'
+        r'^\s+fieldPath:\s*status\.podIP\s*$',
+        document,
+    )
+    callback = re.search(
+        r'(?m)^\s*- name:\s*CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL\s*$\n'
+        rf'^\s+value:\s*"?{re.escape(EXPECTED_TOOL_CALLBACK_URL)}"?\s*$',
+        document,
+    )
+    if pod_ip is None:
+        errors.append("weknora-app does not inject POD_IP from status.podIP")
+    if callback is None:
+        errors.append(
+            "weknora-app tool callback is not pinned to the originating API Pod"
+        )
+    if pod_ip is not None and callback is not None and pod_ip.start() > callback.start():
+        errors.append("weknora-app defines POD_IP after the callback that expands it")
+
+
 def validate_workloads(
     documents: list[tuple[str, str, str]], mode: str, errors: list[str]
 ) -> None:
@@ -144,6 +170,8 @@ def validate_workloads(
                 errors.append(
                     f"{name} does not pin {env_name}={env_value} from the measured capacity plan"
                 )
+        if name == "weknora-app":
+            validate_agent_callback(document, errors)
 
     pdb_names = {name for kind, name, _ in documents if kind == "PodDisruptionBudget"}
     if mode == "gated":

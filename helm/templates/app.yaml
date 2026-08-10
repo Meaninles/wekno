@@ -62,6 +62,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: CUSTOM_DOCUMENT_QUEUE_INSTANCE_ID
               # A Pod UID survives an in-pod container restart but is never
               # reused by a replacement Pod. This makes same-ID boot adoption
@@ -274,6 +278,8 @@ spec:
               value: {{ .Values.app.agentIntegration.generalAgentURL | quote }}
             - name: CUSTOM_DOCUMENT_PROCESSING_AGENT_URL
               value: {{ .Values.app.agentIntegration.documentProcessingAgentURL | quote }}
+            # Active Agent runs are process-local. The callback must return to
+            # the exact API Pod that created the run, never the shared Service.
             - name: CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL
               value: {{ .Values.app.agentIntegration.toolCallbackURL | quote }}
             - name: CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL

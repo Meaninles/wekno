@@ -267,8 +267,14 @@ and CA Secrets and switch PostgreSQL/Redis to verified TLS rather than using
 | `generalAgent.scratch` | Per-Pod POSIX run workspace | `20Gi` RWO ephemeral |
 | `documentProcessingAgent.replicaCount` | Office document runtime Pods | `2` |
 | `documentProcessingAgent.scratch` | Per-Pod Office/PDF workspace | `40Gi` RWO ephemeral |
+| `app.agentIntegration.toolCallbackURL` | Process-local Agent run callback; must return to the originating API Pod | `http://$(POD_IP):8080/api/v1/custom/general-agent/internal/tools/call` |
 | `app.agentIntegration.artifactStorage.provider` | Durable final artifacts | `obs` |
 | `app.agentIntegration.artifactStorage.pathPrefix` | Private deployment/namespace-scoped artifact root | unique production prefix |
+
+Active Agent runs are also owned by the originating Go API process. `POD_IP`
+is injected before `CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL`, so tool calls
+bypass the shared app Service and return to that exact API Pod. Artifact upload
+continues through the shared Service because it commits durable state.
 
 One SDK run stays in one Agent Pod. Before terminal completion, final artifacts
 are uploaded to the Go internal endpoint and committed to private object

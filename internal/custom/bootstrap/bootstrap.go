@@ -712,6 +712,7 @@ func RegisterRoutes(
 			iamRoutes.PUT("/settings", handlers.IAM.SaveSetting)
 			iamRoutes.POST("/sync", handlers.IAM.RunSync)
 			iamRoutes.GET("/sync-runs", handlers.IAM.ListRuns)
+			iamRoutes.GET("/sync-runs/:id/skipped-records", handlers.IAM.ListSkippedRecords)
 			iamRoutes.GET("/organizations", handlers.IAM.ListOrganizations)
 		}
 

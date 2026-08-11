@@ -59,6 +59,7 @@ export interface IAMSyncRun {
   created_users: number
   updated_users: number
   disabled_users: number
+  skipped_users: number
   started_at: string
   finished_at?: string
   progress?: IAMSyncRunProgress
@@ -70,7 +71,31 @@ export interface IAMSyncRunProgress {
   created_users: number
   updated_users: number
   disabled_users: number
+  skipped_users: number
   last_activity_at?: string
+}
+
+export interface IAMSyncSkippedRecord {
+  id: string
+  run_id: string
+  endpoint: string
+  source_page_number: number
+  source_page_size: number
+  absolute_offset: number
+  http_status: number
+  error_code: string
+  error_name?: string
+  error_message?: string
+  user_readable_reason: string
+  created_at: string
+}
+
+export interface IAMSyncSkippedRecordPage {
+  run: IAMSyncRun
+  records: IAMSyncSkippedRecord[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface IAMOrganizationNode {
@@ -184,6 +209,20 @@ export function runIAMSync(params?: { iam_organization_external_id?: string }): 
 
 export function listIAMSyncRuns(): Promise<{ data: IAMSyncRun[] }> {
   return get('/api/v1/custom/iam/sync-runs')
+}
+
+export function listIAMSyncSkippedRecords(
+  runId: string,
+  params: { page?: number; pageSize?: number } = {},
+): Promise<{ success: boolean; data: IAMSyncSkippedRecordPage; message?: string }> {
+  const search = new URLSearchParams()
+  search.set('page', String(params.page ?? 1))
+  search.set('page_size', String(params.pageSize ?? 20))
+  return get(`/api/v1/custom/iam/sync-runs/${encodeURIComponent(runId)}/skipped-records?${search.toString()}`) as unknown as Promise<{
+    success: boolean
+    data: IAMSyncSkippedRecordPage
+    message?: string
+  }>
 }
 
 export function listIAMOrganizations(params: {

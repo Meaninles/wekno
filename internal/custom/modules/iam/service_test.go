@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"gorm.io/driver/sqlite"
@@ -147,6 +148,222 @@ func TestExtractItemsAcceptsSingleIAMUserObject(t *testing.T) {
 	}
 	if got := iamAccountNameFromItem(items[0]); got != "alice" {
 		t.Fatalf("iamAccountNameFromItem = %q, want alice", got)
+	}
+}
+
+func TestFetchPagedEachSkipsOnlyIsolatedS01017User(t *testing.T) {
+	const (
+		totalSourceRecords = 201
+		brokenOffset       = 19
+	)
+	pageZeroAttempts := 0
+	seenPageSizes := map[int]bool{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != iamAccountFindByPath {
+			http.NotFound(w, r)
+			return
+		}
+		var request struct {
+			Number  int            `json:"number"`
+			Size    int            `json:"size"`
+			Filters map[string]any `json:"filters"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode paged request: %v", err)
+		}
+		if !stringFilterSet(request.Filters["organizationId_in"])["org-1"] {
+			t.Fatalf("filters = %#v, want organizationId_in=org-1", request.Filters)
+		}
+		seenPageSizes[request.Size] = true
+		start := request.Number * request.Size
+		if request.Size == iamSyncPageSize && request.Number == 0 {
+			pageZeroAttempts++
+		}
+		if start <= brokenOffset && brokenOffset < start+request.Size {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"success":false,"errorCode":"IAM_DATA_BROKEN","errorName":"INVALID_SOURCE_RECORD","errorMessage":"人员源记录无法读取."}`))
+			return
+		}
+		if start >= totalSourceRecords {
+			writeTestItems(t, w, nil)
+			return
+		}
+		end := start + request.Size
+		if end > totalSourceRecords {
+			end = totalSourceRecords
+		}
+		items := make([]map[string]any, 0, end-start)
+		for offset := start; offset < end; offset++ {
+			items = append(items, map[string]any{"userId": fmt.Sprintf("user-%d", offset)})
+		}
+		writeTestItems(t, w, items)
+	}))
+	defer server.Close()
+
+	service := &Service{httpClient: server.Client()}
+	var handled []string
+	count, skipped, err := service.fetchPagedEach(
+		context.Background(),
+		&SyncSetting{BaseURL: server.URL},
+		"access-token",
+		iamAccountFindByPath,
+		func(items []map[string]any) error {
+			for _, item := range items {
+				handled = append(handled, firstString(item, "userId"))
+			}
+			return nil
+		},
+		map[string]any{"organizationId_in": []string{"org-1"}},
+	)
+	if err != nil {
+		t.Fatalf("fetchPagedEach returned error: %v", err)
+	}
+	if count != totalSourceRecords-1 || len(handled) != totalSourceRecords-1 {
+		t.Fatalf("processed count = %d, handled = %d, want %d", count, len(handled), totalSourceRecords-1)
+	}
+	for _, userID := range handled {
+		if userID == fmt.Sprintf("user-%d", brokenOffset) {
+			t.Fatalf("broken user %q must not be handled", userID)
+		}
+	}
+	if pageZeroAttempts != 2 {
+		t.Fatalf("200-item page attempts = %d, want one request plus one retry", pageZeroAttempts)
+	}
+	for _, pageSize := range []int{100, 50, 25, 5, 1} {
+		if !seenPageSizes[pageSize] {
+			t.Fatalf("recovery did not use page size %d; seen = %#v", pageSize, seenPageSizes)
+		}
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("len(skipped) = %d, want 1", len(skipped))
+	}
+	record := skipped[0]
+	if record.AbsoluteOffset != brokenOffset || record.SourcePageNumber != 0 || record.SourcePageSize != iamSyncPageSize {
+		t.Fatalf("skipped record location = %#v, want offset %d on original page 0", record, brokenOffset)
+	}
+	if record.HTTPStatus != http.StatusBadRequest || record.ErrorCode != "IAM_DATA_BROKEN" || !strings.Contains(record.UserReadableReason, "继续同步") {
+		t.Fatalf("skipped record reason = %#v", record)
+	}
+}
+
+func TestFetchPagedEachRetryCanRecoverWithoutSplitting(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"errorCode":"S01017","errorName":"RECORD_NOT_EXISTS","errorMessage":"指定的 [用户] 不存在."}`))
+			return
+		}
+		writeTestItems(t, w, []map[string]any{{"userId": "user-1"}})
+	}))
+	defer server.Close()
+
+	service := &Service{httpClient: server.Client()}
+	count, skipped, err := service.fetchPagedEach(context.Background(), &SyncSetting{BaseURL: server.URL}, "token", iamAccountFindByPath, nil)
+	if err != nil {
+		t.Fatalf("fetchPagedEach returned error: %v", err)
+	}
+	if requests != 2 || count != 1 || len(skipped) != 0 {
+		t.Fatalf("requests=%d count=%d skipped=%d, want 2/1/0", requests, count, len(skipped))
+	}
+}
+
+func TestFetchPagedEachDoesNotSkipOtherIAMErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		status int
+		body   string
+	}{
+		{name: "account server error", path: iamAccountFindByPath, status: http.StatusInternalServerError, body: `{"errorCode":"OTHER","errorMessage":"server error"}`},
+		{name: "organization bad data", path: iamOrganizationFindByPath, status: http.StatusBadRequest, body: `{"errorCode":"S01017","errorMessage":"record missing"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			service := &Service{httpClient: server.Client()}
+			count, skipped, err := service.fetchPagedEach(context.Background(), &SyncSetting{BaseURL: server.URL}, "token", tt.path, nil)
+			if err == nil {
+				t.Fatal("fetchPagedEach returned nil error")
+			}
+			if requests != 1 || count != 0 || len(skipped) != 0 {
+				t.Fatalf("requests=%d count=%d skipped=%d, want 1/0/0", requests, count, len(skipped))
+			}
+		})
+	}
+}
+
+func TestFetchPagedEachDoesNotHideWholePageBadRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errorCode":"INVALID_REQUEST","errorMessage":"request cannot be processed"}`))
+	}))
+	defer server.Close()
+
+	service := &Service{httpClient: server.Client()}
+	count, skipped, err := service.fetchPagedEach(context.Background(), &SyncSetting{BaseURL: server.URL}, "token", iamAccountFindByPath, nil)
+	if err == nil {
+		t.Fatal("fetchPagedEach returned nil error for a whole-page bad request")
+	}
+	if count != 0 || len(skipped) != 0 {
+		t.Fatalf("count=%d skipped=%d, want request-level failure without skipped records", count, len(skipped))
+	}
+}
+
+func TestSkippedRecordsPaginationAndPartialSuccess(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&SyncSetting{}, &SyncRun{}, &SyncSkippedRecord{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.Create(&SyncSetting{ID: 1}).Error; err != nil {
+		t.Fatalf("create setting: %v", err)
+	}
+	run := SyncRun{TriggeredBy: "manual", Status: "running", StartedAt: time.Now()}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	service := NewService(db, nil)
+	records := []SyncSkippedRecord{
+		{Endpoint: iamAccountFindByPath, SourcePageSize: 200, AbsoluteOffset: 30, HTTPStatus: 400, ErrorCode: "S01017", UserReadableReason: "测试数据错误，已跳过。"},
+		{Endpoint: iamAccountFindByPath, SourcePageSize: 200, AbsoluteOffset: 10, HTTPStatus: 400, ErrorCode: "S01017", UserReadableReason: "测试数据错误，已跳过。"},
+		{Endpoint: iamAccountFindByPath, SourcePageSize: 200, AbsoluteOffset: 20, HTTPStatus: 400, ErrorCode: "S01017", UserReadableReason: "测试数据错误，已跳过。"},
+	}
+	if err := service.persistSkippedRecords(context.Background(), run.ID, records); err != nil {
+		t.Fatalf("persistSkippedRecords returned error: %v", err)
+	}
+
+	gotRun, page, total, err := service.ListSkippedRecords(context.Background(), run.ID, 2, 1)
+	if err != nil {
+		t.Fatalf("ListSkippedRecords returned error: %v", err)
+	}
+	if gotRun.ID != run.ID || total != 3 || len(page) != 1 || page[0].AbsoluteOffset != 20 {
+		t.Fatalf("run=%s total=%d page=%#v, want second offset 20", gotRun.ID, total, page)
+	}
+
+	service.finishRun(context.Background(), &run, &SyncResult{OrgCount: 2, UserCount: 7, SkippedUsers: 3}, nil)
+	var saved SyncRun
+	if err := db.First(&saved, "id = ?", run.ID).Error; err != nil {
+		t.Fatalf("load saved run: %v", err)
+	}
+	if saved.Status != "partial_success" || saved.SkippedUsers != 3 || !strings.Contains(saved.Message, "跳过了 3 条") {
+		t.Fatalf("saved partial run = %#v", saved)
 	}
 }
 

@@ -96,6 +96,37 @@ func (h *Handler) ListRuns(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": runs})
 }
 
+func (h *Handler) ListSkippedRecords(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+	run, records, total, err := h.service.ListSkippedRecords(
+		c.Request.Context(),
+		c.Param("id"),
+		page,
+		pageSize,
+	)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"run":       run,
+			"records":   records,
+			"total":     total,
+			"page":      page,
+			"page_size": pageSize,
+		},
+	})
+}
+
 func (h *Handler) ListSpaceMemberCandidateOrganizations(c *gin.Context) {
 	spaceID, ok := h.requireSpaceAdmin(c)
 	if !ok {

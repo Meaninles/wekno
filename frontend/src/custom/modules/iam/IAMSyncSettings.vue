@@ -1,29 +1,41 @@
 <template>
   <div class="iam-sync-settings">
-    <div class="section-header">
-      <h2>组织人员同步</h2>
-      <p class="section-description">配置统一身份认证登录与组织人员同步，支持手动同步和定时同步。</p>
-    </div>
+    <IAMSyncSkippedRecords v-if="selectedSkippedRunId" :run-id="selectedSkippedRunId" @back="closeSkippedRecords" />
+    <template v-else>
+      <div class="section-header">
+        <h2>组织人员同步</h2>
+        <p class="section-description">配置统一身份认证登录与组织人员同步，支持手动同步和定时同步。</p>
+      </div>
 
-    <div class="settings-group">
-      <div class="setting-row">
-        <div class="setting-info">
-          <label>同步频率</label>
-          <p class="desc">选择每日或每周指定日期执行同步。</p>
-        </div>
-        <div class="setting-control setting-control--stacked">
-          <t-radio-group v-model="form.schedule_mode">
-            <t-radio-button value="daily">每日</t-radio-button>
-            <t-radio-button value="weekly">每周</t-radio-button>
-          </t-radio-group>
-          <div v-if="form.schedule_mode === 'weekly'" class="weekday-row">
-            <label v-for="day in weekdayOptions" :key="day.value" class="weekday-item">
-              <input v-model="weekdayValues" type="checkbox" :value="day.value" />
-              <span>{{ day.label }}</span>
-            </label>
+      <div class="settings-group">
+        <div class="setting-row">
+          <div class="setting-info">
+            <label>启用定时同步</label>
+            <p class="desc">关闭后仍可手动同步；默认计划为每日 03:10。</p>
+          </div>
+          <div class="setting-control">
+            <t-switch v-model="form.enabled" />
           </div>
         </div>
-      </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <label>同步频率</label>
+            <p class="desc">选择每日或每周指定日期执行同步。</p>
+          </div>
+          <div class="setting-control setting-control--stacked">
+            <t-radio-group v-model="form.schedule_mode">
+              <t-radio-button value="daily">每日</t-radio-button>
+              <t-radio-button value="weekly">每周</t-radio-button>
+            </t-radio-group>
+            <div v-if="form.schedule_mode === 'weekly'" class="weekday-row">
+              <label v-for="day in weekdayOptions" :key="day.value" class="weekday-item">
+                <input v-model="weekdayValues" type="checkbox" :value="day.value" />
+                <span>{{ day.label }}</span>
+              </label>
+            </div>
+          </div>
+        </div>
 
       <div class="setting-row">
         <div class="setting-info">
@@ -78,30 +90,26 @@
         <div v-else class="run-list">
           <div v-for="run in runs" :key="run.id" class="run-item">
             <div class="run-main">
-              <t-tag :theme="run.status === 'success' ? 'success' : run.status === 'failed' ? 'danger' : 'primary'" variant="light">
-                {{ run.status }}
+              <t-tag :theme="runStatusTheme(run.status)" variant="light">
+                {{ runStatusLabel(run.status) }}
               </t-tag>
               <span>{{ formatTime(run.started_at) }}</span>
               <span>{{ run.triggered_by }}</span>
             </div>
             <div class="run-meta">
-              范围 {{ runScopeLabel(run) }}，{{ runCountPrefix(run) }}组织 {{ runStats(run).org_count }}，{{ runCountPrefix(run) }}人员 {{ runStats(run).user_count }}，新建 {{ runStats(run).created_users }}，更新 {{ runStats(run).updated_users }}，禁用 {{ runStats(run).disabled_users }}
+              范围 {{ runScopeLabel(run) }}，{{ runCountPrefix(run) }}组织 {{ runStats(run).org_count }}，{{ runCountPrefix(run) }}人员 {{ runStats(run).user_count }}，新建 {{ runStats(run).created_users }}，更新 {{ runStats(run).updated_users }}，禁用 {{ runStats(run).disabled_users }}，跳过 {{ runStats(run).skipped_users || 0 }}
             </div>
             <div v-if="run.status === 'running' && run.progress?.last_activity_at" class="run-progress-note">
               最近写入 {{ formatTime(run.progress.last_activity_at) }}
             </div>
-            <div v-if="run.message && run.message !== 'ok'" class="run-message">{{ run.message }}</div>
+            <div v-if="run.skipped_users > 0" class="run-skipped-action">
+              <t-button variant="text" size="small" theme="warning" @click="openSkippedRecords(run)">
+                查看跳过记录（{{ run.skipped_users }}）
+                <template #suffix><t-icon name="chevron-right" /></template>
+              </t-button>
+            </div>
+            <div v-if="run.message && run.message !== 'ok'" class="run-message" :class="{ 'run-message--warning': run.status === 'partial_success' }">{{ run.message }}</div>
           </div>
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div class="setting-info">
-          <label>启用定时同步</label>
-          <p class="desc">关闭后仍可手动同步；默认计划为每日 03:10。</p>
-        </div>
-        <div class="setting-control">
-          <t-switch v-model="form.enabled" />
         </div>
       </div>
 
@@ -136,12 +144,14 @@
           <t-input v-model="form.sync_client_secret" type="password" class="setting-input" placeholder="client_secret，留空表示不修改" />
         </div>
       </div>
-    </div>
+      </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, h, onMounted, onUnmounted, reactive, ref, resolveComponent, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import {
   getIAMSyncSetting,
@@ -153,13 +163,17 @@ import {
   type IAMSyncRun,
   type IAMSyncSetting,
 } from '@/api/custom-admin'
+import IAMSyncSkippedRecords from './IAMSyncSkippedRecords.vue'
 
 type IAMOrgTreeNode = {
   value: string
   label: string
   children?: true | IAMOrgTreeNode[]
 }
-type IAMSyncRunCounters = Pick<IAMSyncRun, 'org_count' | 'user_count' | 'created_users' | 'updated_users' | 'disabled_users'>
+type IAMSyncRunCounters = Pick<IAMSyncRun, 'org_count' | 'user_count' | 'created_users' | 'updated_users' | 'disabled_users' | 'skipped_users'>
+
+const route = useRoute()
+const router = useRouter()
 
 const form = reactive<IAMSyncSetting>({
   enabled: false,
@@ -207,11 +221,15 @@ const syncButtonLoading = computed(() => syncing.value || hasRunningRun.value)
 const selectedSyncRootOrgIds = computed(() => selectedLoadedRootOrgValues(syncScopeOrgIds.value, syncOrgTreeData.value))
 const selectedSyncOrgId = computed(() => syncScopeMode.value === 'organization' ? (syncScopePrimaryOrgId.value || selectedSyncRootOrgIds.value[0] || '') : '')
 const syncButtonDisabled = computed(() => syncScopeMode.value === 'organization' && !selectedSyncOrgId.value)
+const selectedSkippedRunId = computed(() => {
+  const value = route.query.iam_sync_run
+  return typeof value === 'string' ? value.trim() : ''
+})
 
 const statusText = computed(() => {
   if (hasRunningRun.value) return '同步任务正在后台运行，可以切换到其他页面继续使用系统。'
   if (!form.last_run_at) return '还没有执行过同步。'
-  return `上次同步：${formatTime(form.last_run_at)}，状态：${form.last_status || '-'}，触发方式：${form.last_run_triggered_by || '-'}`
+  return `上次同步：${formatTime(form.last_run_at)}，状态：${runStatusLabel(form.last_status || '')}，触发方式：${form.last_run_triggered_by || '-'}`
 })
 
 const assignSetting = (setting: IAMSyncSetting) => {
@@ -494,6 +512,38 @@ const runStats = (run: IAMSyncRun): IAMSyncRunCounters => {
 
 const runCountPrefix = (run: IAMSyncRun) => (run.status === 'running' && run.progress ? '已处理' : '')
 
+const runStatusLabel = (status: string) => {
+  if (status === 'success') return '成功'
+  if (status === 'partial_success') return '部分成功'
+  if (status === 'failed') return '失败'
+  if (status === 'running') return '同步中'
+  return status || '-'
+}
+
+const runStatusTheme = (status: string): 'success' | 'warning' | 'danger' | 'primary' | 'default' => {
+  if (status === 'success') return 'success'
+  if (status === 'partial_success') return 'warning'
+  if (status === 'failed') return 'danger'
+  if (status === 'running') return 'primary'
+  return 'default'
+}
+
+const openSkippedRecords = (run: IAMSyncRun) => {
+  void router.replace({
+    query: {
+      ...route.query,
+      section: 'custom-iam-sync',
+      iam_sync_run: run.id,
+    },
+  })
+}
+
+const closeSkippedRecords = () => {
+  const query = { ...route.query }
+  delete query.iam_sync_run
+  void router.replace({ query })
+}
+
 watch(syncScopeMode, (mode) => {
   if (mode === 'organization') loadSyncOrganizationRoots()
 })
@@ -512,8 +562,19 @@ watch(syncScopeOrgIds, (ids, oldIds) => {
 })
 
 onMounted(() => {
-  loadSetting()
-  loadRuns()
+  if (!selectedSkippedRunId.value) {
+    loadSetting()
+    loadRuns()
+  }
+})
+
+watch(selectedSkippedRunId, (runId, previousRunId) => {
+  if (runId) {
+    stopPolling()
+  } else if (previousRunId) {
+    loadSetting()
+    loadRuns()
+  }
 })
 
 onUnmounted(() => {
@@ -527,7 +588,7 @@ onUnmounted(() => {
 }
 
 .section-header {
-  margin-bottom: 32px;
+  margin-bottom: 0;
 
   h2 {
     font-size: 20px;
@@ -731,5 +792,17 @@ onUnmounted(() => {
 
 .run-message {
   color: var(--td-error-color);
+}
+
+.run-message--warning {
+  color: var(--td-warning-color);
+}
+
+.run-skipped-action {
+  margin-top: 4px;
+
+  :deep(.t-button) {
+    padding-left: 0;
+  }
 }
 </style>

@@ -163,19 +163,27 @@ export LANGFUSE_HOST="https://cloud.langfuse.com"
 ./weknora-server
 ```
 
-#### （E）本地开发（`docker-compose.dev.yml` + `go run`）
+#### （E）本地开发（`docker-compose.dev.yml` + runtime profile）
 
-`docker-compose.dev.yml` 只启动基础设施容器（postgres/redis/docreader 等），`app` 走本地 `go run ./cmd/server`。Langfuse 的两种接入方式：
+`docker-compose.dev.yml` 只启动基础设施容器（PostgreSQL/Redis/DocReader 等），本地
+业务后端固定使用 `custom/tests/runtime_profile_e2e/docker-compose.yml` 的分角色
+runtime profile，不通过宿主机 `go run` 或单体 `app-dev` 启动。Langfuse 的两种接入方式：
 
 **E-1) 直连 Langfuse Cloud（dev 最常见）**
 
-无需改任何 compose 文件，本地 shell 导出即可：
+无需改任何 Compose 文件，把变量写入 `.env` 后重新创建 runtime 角色即可：
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxx
+LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+重新加载当前本地 runtime profile：
 
 ```bash
-export LANGFUSE_PUBLIC_KEY="pk-lf-xxxx"
-export LANGFUSE_SECRET_KEY="sk-lf-xxxx"
-export LANGFUSE_HOST="https://cloud.langfuse.com"
-go run ./cmd/server
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml up -d --force-recreate
 ```
 
 **E-2) 本地自建栈调试**
@@ -184,17 +192,20 @@ dev compose 也支持对称的 `langfuse` profile（复用同一个 dev postgres
 
 ```bash
 # 拉起基础设施 + Langfuse 栈
-docker compose -f docker-compose.dev.yml up -d postgres redis docreader
+make dev-start DEV_ARGS="--minio --neo4j"
 docker compose -f docker-compose.dev.yml --profile langfuse up -d
 
 # 浏览器打开 http://localhost:3000 注册并生成 key
 
-# 本地 app 接入（注意是 localhost，不是 langfuse-web，因为 go run 跑在宿主机）
-export LANGFUSE_HOST=http://localhost:3000
-export LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
-export LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
-go run ./cmd/server
+# 将以下变量写入项目根目录 .env，runtime profile 中的 API 角色使用服务名访问
+LANGFUSE_HOST=http://langfuse-web:3000
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
 ```
+
+将这些变量写入 `.env` 后重新创建 runtime profile；API 角色通过开发网络访问
+`langfuse-web:3000`。若 Langfuse 服务和 runtime profile 不在同一 Compose 网络，
+改用可从 API 容器访问的地址。
 
 Dev 相关容器都带 `-dev` 后缀、用独立网络 `WeKnora-network-dev`，和生产 compose **不冲突**。
 

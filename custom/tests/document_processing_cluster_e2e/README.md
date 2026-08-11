@@ -92,6 +92,12 @@ GET /api/v1/custom/document-queue/instances
 
 ## 运行顺序
 
+日常 API/E2E 命令使用本地 runtime profile 的 `http://localhost:8080`；需要在容器内
+运行 Go 合约时使用 `weknora-runtime-api-1`。该容器名来自
+`custom/tests/runtime_profile_e2e/docker-compose.yml`，不是单体开发容器。后文
+`WeKnora-worker-cluster-e2e-a/b` 只属于本目录的专用 chaos compose，不能与本地
+runtime profile 同时作为第三个解析实例运行。
+
 先运行纯单元测试：
 
 ```powershell
@@ -101,7 +107,7 @@ python -m unittest custom.tests.document_processing_cluster_e2e.test_cluster_e2e
 再运行协调器并发契约测试。当前 Windows 主机 Go 环境缺少项目 `pg_query` 的 CGO 生成符号，因此使用开发容器内与应用一致的工具链：
 
 ```powershell
-docker exec WeKnora-app-dev bash -lc `
+docker exec weknora-runtime-api-1 bash -lc `
   'cd /workspace && /usr/local/go/bin/go test -count=1 ./custom/tests/document_processing_cluster_e2e'
 ```
 
@@ -110,7 +116,7 @@ docker exec WeKnora-app-dev bash -lc `
 “两个首次写入事务真正并行”的行为必须由 PostgreSQL 验证；测试会在现有开发库中创建并自动删除一个随机隔离 schema，不接触业务表：
 
 ```powershell
-docker exec -e WEKNORA_DOCUMENT_QUEUE_POSTGRES_CONTRACT=1 WeKnora-app-dev bash -lc `
+docker exec -e WEKNORA_DOCUMENT_QUEUE_POSTGRES_CONTRACT=1 weknora-runtime-api-1 bash -lc `
   'cd /workspace && /usr/local/go/bin/go test -run TestPostgresConcurrentFirstRegistrationConvergesOnOneWorkflow -count=10 ./custom/tests/document_processing_cluster_e2e'
 ```
 
@@ -119,7 +125,7 @@ docker exec -e WEKNORA_DOCUMENT_QUEUE_POSTGRES_CONTRACT=1 WeKnora-app-dev bash -
 遗留 `default/document_heavy` root task 的转发去重使用隔离 Redis DB 验证；默认 DB 15，若该 DB 已存在 `document` 队列测试会安全跳过，可用环境变量选择另一个空 DB：
 
 ```powershell
-docker exec -e WEKNORA_DOCUMENT_QUEUE_REDIS_CONTRACT=1 WeKnora-app-dev bash -lc `
+docker exec -e WEKNORA_DOCUMENT_QUEUE_REDIS_CONTRACT=1 weknora-runtime-api-1 bash -lc `
   'cd /workspace && /usr/local/go/bin/go test -run TestForwardLegacyRootIsIdempotent -count=3 ./internal/custom/modules/documentqueue'
 ```
 
@@ -157,7 +163,7 @@ python custom/tests/document_processing_cluster_e2e/run_e2e.py `
 
 ```powershell
 python custom/tests/document_processing_cluster_e2e/run_durable_failover.py `
-  --go-container WeKnora-app-dev
+  --go-container weknora-runtime-api-1
 ```
 
 专项边界如下：
@@ -180,7 +186,7 @@ python custom/tests/document_processing_cluster_e2e/run_durable_failover.py `
 
 ```powershell
 python custom/tests/document_processing_cluster_e2e/run_durable_failover.py `
-  --go-container WeKnora-app-dev `
+  --go-container weknora-runtime-api-1 `
   --postgres-contract `
   --redis-contract `
   --redis-contract-db 14
@@ -444,12 +450,14 @@ Wiki、多模态和语音识别。
 $env:WEKNORA_E2E_ADMIN_TOKEN='<system-admin-jwt>'
 python custom/tests/document_processing_cluster_e2e/run_multitenant_e2e.py `
   --documents 1000 --principals 8 --knowledge-bases-per-principal 2 `
-  --upload-concurrency 64 --instance-count 3 `
+  --upload-concurrency 64 --instance-count 2 `
   --expected-instance-concurrency 4 `
-  --worker-container WeKnora-app-dev `
-  --worker-container WeKnora-worker-cluster-e2e-a `
-  --worker-container WeKnora-worker-cluster-e2e-b
+  --worker-container weknora-runtime-parse-1 `
+  --worker-container weknora-runtime-parse-2
 ```
+
+上例针对当前本地 runtime profile 的两个解析实例。生产三副本或专用 chaos compose
+的实例数量必须按实际编排另行设置，不能把本地命令的数量直接套用到生产。
 
 脚本的正式压力模式默认仍要求 1000；验证 harness 或按当前综合门禁执行较小样本
 时显式使用 `--allow-small`。报告只保留脱敏后的用户/租户/知识库标识、格式和

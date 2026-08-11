@@ -92,7 +92,7 @@ builtin_models:
 
 #### env 变量怎么进入容器
 
-`docker-compose.yml` 的 `app` 服务已经预置了：
+本地 runtime profile 和完整 Docker Compose 的后端服务都预置了：
 
 ```yaml
 env_file:
@@ -100,7 +100,10 @@ env_file:
     required: false
 ```
 
-意味着把变量值写到项目根目录的 `.env` 文件里，启动时自动透传到容器。**无需**在 `environment:` 块里逐个透传。`required: false` 保证 `.env` 不存在时容器仍可启动（适配上游 fresh clone 场景）。
+意味着把变量值写到项目根目录的 `.env` 文件里，启动时自动透传到容器。**无需**在
+`environment:` 块里逐个透传。`required: false` 保证 `.env` 不存在时容器仍可启动
+（适配上游 fresh clone 场景）。本地开发后端仍必须按[开发指南](./开发指南.md)
+使用固定 runtime profile，不启动单体 `app-dev`。
 
 仓库的 `.env.example` 顶部预留了 **Built-in Models** 注释段，列出 LLM / Embedding / Rerank 的参考变量名作为起点；复制 `.env.example` 为 `.env` 后取消注释并填值即可。变量名由 YAML 自行决定，参考段只是常见样板，不是保留字。
 
@@ -129,13 +132,19 @@ builtin_models:
 
 启动：
 ```bash
-docker compose up -d
+make dev-start DEV_ARGS="--minio --neo4j"
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml build runtime-api-1
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml up -d --force-recreate
 ```
 
 #### 启动后验证
 
 ```bash
-docker compose logs app | grep -E 'Built-in models? config'
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml logs runtime-api-1 | \
+  grep -E 'Built-in models? config'
 ```
 
 会看到类似：
@@ -268,7 +277,8 @@ DELETE FROM models WHERE id = '模型ID';
 2. **租户ID**：内置模型可以属于任意租户，默认 `10000`（与 `tenants_id_seq` 起点一致）
 3. **YAML 与 SQL 并存**：两种方式可以同时使用，loader 只动 `managed_by='yaml'` 的行；通过 SQL 插入的 builtin 行对 loader 完全不可见
 4. **`is_default` 单一保证**：YAML 中将某条 entry 标记 `is_default: true` 时，loader 会先把同 `(tenant_id, type)` 下的其它默认模型置为 `false`，避免 API 路径维护的"每类型一个默认模型"语义被破坏
-5. **重启即生效**：修改 YAML 后 `docker compose restart app` 即可让新配置生效
+5. **重启即生效**：修改 YAML 后按本地 runtime profile 的 down → build → up 顺序
+   重新创建全部后端角色；不要只重启一个旧的单体服务
 6. **加密**：API Key 在 `parameters` JSONB 中以加密形式存储（若 `SYSTEM_AES_KEY` 已配置），未配置时降级为明文兼容路径
 7. **安全性**：前端会自动隐藏内置模型的 API Key 和 Base URL，但数据库中的原始数据仍然存在，请妥善保管数据库访问权限
 8. **解析错误自我保护**：YAML 解析失败时 loader 仅打 warning 并跳过 reconcile，**不会**执行 drift sweep，确保一个手抖的 YAML 改动不会大规模软删既有内置模型

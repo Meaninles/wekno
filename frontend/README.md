@@ -3,6 +3,9 @@
 桌面前端位于本目录，开发入口为 `http://localhost:5177`。当前生产还包含独立的
 `mobile-web` 两副本入口；两者通过 Nginx 代理同一组 app API。
 
+本地移动端不单独占用端口，固定从同一开发服务的
+`http://localhost:5177/mobile/` 访问，不使用 5178。
+
 ## 启动与验证
 
 ```bash

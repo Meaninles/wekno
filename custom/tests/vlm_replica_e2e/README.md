@@ -3,6 +3,10 @@
 该测试启动两个独立的 WeKnora 主服务进程，共享本地 PostgreSQL 和一个隔离的
 Redis DB，两个实例均通过生产同款模型配置直接请求：
 
+这是独立的 VLM 双副本测试编排，不是日常本地 runtime profile。运行普通/稳定性
+场景时，Go runner 在 `weknora-vlm-replica-e2e-a` 容器内执行；运行后台 workflow
+场景前，必须先停止本地 runtime profile，避免额外的解析实例同时消费同一数据库。
+
 ```text
 https://llmgateway.moutai.com.cn/v1 -> Qwen3-VL-32B
 ```
@@ -42,7 +46,7 @@ docker compose -f custom/tests/vlm_replica_e2e/docker-compose.yml up -d
 docker exec `
   -e VLM_E2E_REDIS_DB=8 `
   -e VLM_E2E_KEY_PREFIX=weknora:e2e:vlm-replica: `
-  WeKnora-app-dev bash -lc `
+  weknora-vlm-replica-e2e-a bash -lc `
   'cd /workspace && go run ./custom/tests/vlm_replica_e2e/cmd/e2e -scenario normal'
 ```
 
@@ -52,7 +56,7 @@ docker exec `
 docker exec `
   -e VLM_E2E_REDIS_DB=8 `
   -e VLM_E2E_KEY_PREFIX=weknora:e2e:vlm-replica: `
-  WeKnora-app-dev bash -lc `
+  weknora-vlm-replica-e2e-a bash -lc `
   'cd /workspace && go run ./custom/tests/vlm_replica_e2e/cmd/e2e -scenario stability -rounds 10'
 ```
 
@@ -66,19 +70,25 @@ embedding 行、executor identity、队列原子终态诊断和分布式 VLM 槽
 成功收敛。验收以最新 attempt 中同名 span 的最新一行为准，历史失败仍写入报告，
 但只有最新结果失败才判定工作流失败。
 
-文档工作流的恢复源是共享 PostgreSQL，不是隔离 Redis。运行该场景前必须停止
-`WeKnora-app-dev` 和其他连接同一数据库的文档 worker，避免第三个实例参与；测试
-会严格要求 executor identity 只能是 A/B。runner 直接在 A 中执行：
+文档工作流的恢复源是共享 PostgreSQL，不是隔离 Redis。运行该场景前必须停止本地
+runtime profile 的全部角色和其他连接同一数据库的文档 worker，避免第三个实例
+参与；测试会严格要求 executor identity 只能是 A/B。先执行：
 
 ```powershell
-docker stop -t 30 WeKnora-app-dev
+docker compose -p weknora-runtime-profile-e2e `
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml down
+```
 
+然后 runner 直接在 A 中执行：
+
+```powershell
 docker exec `
   weknora-vlm-replica-e2e-a sh -lc `
   'cd /workspace && /usr/local/go/bin/go run ./custom/tests/vlm_replica_e2e/cmd/e2e -scenario workflow'
 ```
 
-完成后先关闭 A/B、清空专用 Redis DB 8，再恢复主开发容器。
+完成后先关闭 A/B、清空专用 Redis DB 8，再按[开发指南](../../../docs/开发指南.md)
+重新 build/up 本地 runtime profile。不要恢复或启动单体 `app-dev`。
 
 `fault-sequence` 必须只在同时加载 `docker-compose.blackhole.yml` 的容器上执行；
 它会保留 circuit 状态。随后移除 fault compose、重建两个副本并执行

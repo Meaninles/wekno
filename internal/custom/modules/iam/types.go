@@ -206,9 +206,36 @@ type SyncRun struct {
 	CreatedUsers  int              `json:"created_users"`
 	UpdatedUsers  int              `json:"updated_users"`
 	DisabledUsers int              `json:"disabled_users"`
+	SkippedUsers  int              `json:"skipped_users"`
 	CreatedAt     time.Time        `json:"created_at"`
 	UpdatedAt     time.Time        `json:"updated_at"`
 	Progress      *SyncRunProgress `json:"progress,omitempty" gorm:"-"`
+}
+
+type SyncSkippedRecord struct {
+	ID                 string    `json:"id" gorm:"type:varchar(36);primaryKey"`
+	RunID              string    `json:"run_id" gorm:"type:varchar(36);not null;index:idx_custom_iam_sync_skipped_run_offset,priority:1"`
+	Endpoint           string    `json:"endpoint" gorm:"type:varchar(512);not null"`
+	SourcePageNumber   int       `json:"source_page_number" gorm:"not null"`
+	SourcePageSize     int       `json:"source_page_size" gorm:"not null"`
+	AbsoluteOffset     int       `json:"absolute_offset" gorm:"not null;index:idx_custom_iam_sync_skipped_run_offset,priority:2"`
+	HTTPStatus         int       `json:"http_status" gorm:"not null"`
+	ErrorCode          string    `json:"error_code" gorm:"type:varchar(64);not null"`
+	ErrorName          string    `json:"error_name" gorm:"type:varchar(128)"`
+	ErrorMessage       string    `json:"error_message" gorm:"type:text"`
+	UserReadableReason string    `json:"user_readable_reason" gorm:"type:text;not null"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+func (SyncSkippedRecord) TableName() string {
+	return "custom_iam_sync_skipped_records"
+}
+
+func (r *SyncSkippedRecord) BeforeCreate(tx *gorm.DB) error {
+	if r.ID == "" {
+		r.ID = uuid.New().String()
+	}
+	return nil
 }
 
 func (SyncRun) TableName() string {
@@ -228,5 +255,6 @@ type SyncRunProgress struct {
 	CreatedUsers   int        `json:"created_users"`
 	UpdatedUsers   int        `json:"updated_users"`
 	DisabledUsers  int        `json:"disabled_users"`
+	SkippedUsers   int        `json:"skipped_users"`
 	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
 }

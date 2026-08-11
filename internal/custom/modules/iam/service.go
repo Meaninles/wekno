@@ -40,7 +40,10 @@ type Service struct {
 }
 
 const (
-	syncRunTimeout = 30 * time.Minute
+	syncRunTimeout            = 30 * time.Minute
+	iamSyncPageSize           = 200
+	iamAccountFindByPath      = "/bim-server/ext/rest/integration/ExtApiIngtTargetAccountService/findBy"
+	iamOrganizationFindByPath = "/bim-server/ext/rest/integration/ExtApiIngtTargetOrganizationService/findBy"
 	// ASCII "WKIAMSYN". The transaction-scoped lock serializes the
 	// check-and-create section across app Pods without leaving a lease row
 	// behind when a process exits.
@@ -59,6 +62,7 @@ type SyncResult struct {
 	CreatedUsers  int `json:"created_users"`
 	UpdatedUsers  int `json:"updated_users"`
 	DisabledUsers int `json:"disabled_users"`
+	SkippedUsers  int `json:"skipped_users"`
 }
 
 type PendingSpaceMemberGrantInput struct {
@@ -109,7 +113,7 @@ func (s *Service) SetProvisioner(fn func(context.Context, *types.User) error) {
 }
 
 func (s *Service) Migrate(ctx context.Context) error {
-	if err := s.db.WithContext(ctx).AutoMigrate(&SyncSetting{}, &ExternalOrganization{}, &ExternalUser{}, &PendingSpaceMemberGrant{}, &SyncRun{}); err != nil {
+	if err := s.db.WithContext(ctx).AutoMigrate(&SyncSetting{}, &ExternalOrganization{}, &ExternalUser{}, &PendingSpaceMemberGrant{}, &SyncRun{}, &SyncSkippedRecord{}); err != nil {
 		return err
 	}
 	if err := s.db.WithContext(ctx).Exec("ALTER TABLE custom_iam_users DROP COLUMN IF EXISTS email").Error; err != nil {
@@ -211,8 +215,42 @@ func (s *Service) ListRuns(ctx context.Context, limit int) ([]SyncRun, error) {
 		runs[i].CreatedUsers = progress.CreatedUsers
 		runs[i].UpdatedUsers = progress.UpdatedUsers
 		runs[i].DisabledUsers = progress.DisabledUsers
+		runs[i].SkippedUsers = progress.SkippedUsers
 	}
 	return runs, nil
+}
+
+func (s *Service) ListSkippedRecords(ctx context.Context, runID string, page, pageSize int) (*SyncRun, []SyncSkippedRecord, int64, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, nil, 0, fmt.Errorf("sync run id is required")
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+
+	var run SyncRun
+	if err := s.db.WithContext(ctx).First(&run, "id = ?", runID).Error; err != nil {
+		return nil, nil, 0, err
+	}
+
+	query := s.db.WithContext(ctx).Model(&SyncSkippedRecord{}).Where("run_id = ?", runID)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, nil, 0, err
+	}
+	var records []SyncSkippedRecord
+	if err := query.
+		Order("absolute_offset ASC, created_at ASC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&records).Error; err != nil {
+		return nil, nil, 0, err
+	}
+	return &run, records, total, nil
 }
 
 func (s *Service) runningSyncRunProgress(ctx context.Context, run *SyncRun) (*SyncRunProgress, error) {
@@ -237,6 +275,9 @@ func (s *Service) runningSyncRunProgress(ctx context.Context, run *SyncRun) (*Sy
 	if progress.DisabledUsers, err = countQueryRows(s.runningProgressChangedUserQuery(ctx, run, scopeIDs).Where("disabled = ?", true)); err != nil {
 		return nil, err
 	}
+	if progress.SkippedUsers, err = countQueryRows(s.db.WithContext(ctx).Model(&SyncSkippedRecord{}).Where("run_id = ?", run.ID)); err != nil {
+		return nil, err
+	}
 
 	orgLast, err := newestUpdatedAt(s.runningProgressOrganizationQuery(ctx, run, scopeIDs))
 	if err != nil {
@@ -246,7 +287,11 @@ func (s *Service) runningSyncRunProgress(ctx context.Context, run *SyncRun) (*Sy
 	if err != nil {
 		return nil, err
 	}
-	progress.LastActivityAt = newestTime(orgLast, userLast)
+	skippedLast, err := newestCreatedAt(s.db.WithContext(ctx).Model(&SyncSkippedRecord{}).Where("run_id = ?", run.ID))
+	if err != nil {
+		return nil, err
+	}
+	progress.LastActivityAt = newestTime(orgLast, userLast, skippedLast)
 	return progress, nil
 }
 
@@ -337,6 +382,19 @@ func newestUpdatedAt(db *gorm.DB) (*time.Time, error) {
 		return nil, nil
 	}
 	return &row.UpdatedAt, nil
+}
+
+func newestCreatedAt(db *gorm.DB) (*time.Time, error) {
+	var row struct {
+		CreatedAt time.Time `gorm:"column:created_at"`
+	}
+	if err := db.Select("created_at").Order("created_at DESC").Limit(1).Scan(&row).Error; err != nil {
+		return nil, err
+	}
+	if row.CreatedAt.IsZero() {
+		return nil, nil
+	}
+	return &row.CreatedAt, nil
 }
 
 func newestTime(values ...*time.Time) *time.Time {
@@ -1118,7 +1176,7 @@ func (s *Service) executeRun(runID string) {
 		s.finishRun(ctx, &run, nil, err)
 		return
 	}
-	result, syncErr := s.syncOnce(ctx, setting, SyncScope{OrganizationExternalID: run.ScopeOrgID})
+	result, syncErr := s.syncOnceForRun(ctx, setting, run.ID, SyncScope{OrganizationExternalID: run.ScopeOrgID})
 	if syncErr == nil {
 		countCtx, countCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		if err := s.refreshOrganizationSubtreeUserCounts(countCtx); err != nil {
@@ -1137,6 +1195,14 @@ func (s *Service) finishRun(ctx context.Context, run *SyncRun, result *SyncResul
 	}
 	now := time.Now()
 	run.FinishedAt = &now
+	if result != nil {
+		run.OrgCount = result.OrgCount
+		run.UserCount = result.UserCount
+		run.CreatedUsers = result.CreatedUsers
+		run.UpdatedUsers = result.UpdatedUsers
+		run.DisabledUsers = result.DisabledUsers
+		run.SkippedUsers = result.SkippedUsers
+	}
 	if syncErr != nil {
 		run.Status = "failed"
 		run.Message = syncErr.Error()
@@ -1144,13 +1210,13 @@ func (s *Service) finishRun(ctx context.Context, run *SyncRun, result *SyncResul
 		if result == nil {
 			result = &SyncResult{}
 		}
-		run.Status = "success"
-		run.OrgCount = result.OrgCount
-		run.UserCount = result.UserCount
-		run.CreatedUsers = result.CreatedUsers
-		run.UpdatedUsers = result.UpdatedUsers
-		run.DisabledUsers = result.DisabledUsers
-		run.Message = "ok"
+		if result.SkippedUsers > 0 {
+			run.Status = "partial_success"
+			run.Message = fmt.Sprintf("同步已完成，但跳过了 %d 条 IAM 异常人员记录。可打开跳过记录查看具体原因。", result.SkippedUsers)
+		} else {
+			run.Status = "success"
+			run.Message = "ok"
+		}
 	}
 	if err := s.db.WithContext(writeCtx).Save(run).Error; err != nil {
 		logger.Errorf(ctx, "[custom iam] failed to save sync run %s: %v", run.ID, err)
@@ -1468,12 +1534,16 @@ func (s *Service) fetchSSOUserInfo(ctx context.Context, setting *SyncSetting, ac
 }
 
 func (s *Service) syncOnce(ctx context.Context, setting *SyncSetting, scopes ...SyncScope) (*SyncResult, error) {
-	if strings.TrimSpace(setting.BaseURL) == "" || strings.TrimSpace(setting.SyncClientID) == "" || strings.TrimSpace(setting.SyncClientSecret) == "" {
-		return nil, fmt.Errorf("IAM sync base_url, client_id and client_secret are required")
-	}
 	scope := SyncScope{}
 	if len(scopes) > 0 {
 		scope = scopes[0]
+	}
+	return s.syncOnceForRun(ctx, setting, "", scope)
+}
+
+func (s *Service) syncOnceForRun(ctx context.Context, setting *SyncSetting, runID string, scope SyncScope) (*SyncResult, error) {
+	if strings.TrimSpace(setting.BaseURL) == "" || strings.TrimSpace(setting.SyncClientID) == "" || strings.TrimSpace(setting.SyncClientSecret) == "" {
+		return nil, fmt.Errorf("IAM sync base_url, client_id and client_secret are required")
 	}
 	token, err := s.login(ctx, setting)
 	if err != nil {
@@ -1487,46 +1557,50 @@ func (s *Service) syncOnce(ctx context.Context, setting *SyncSetting, scopes ...
 
 	result := &SyncResult{}
 	if strings.TrimSpace(scope.OrganizationExternalID) != "" {
-		return s.syncScopedOrganization(ctx, setting, token, scope, result)
+		return s.syncScopedOrganization(ctx, setting, token, runID, scope, result)
 	}
-	orgCount, err := s.fetchPagedEach(ctx, setting, token, "/bim-server/ext/rest/integration/ExtApiIngtTargetOrganizationService/findBy", func(items []map[string]any) error {
+	orgCount, _, err := s.fetchPagedEach(ctx, setting, token, iamOrganizationFindByPath, func(items []map[string]any) error {
 		return s.upsertOrganizations(ctx, items)
 	})
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	result.OrgCount = orgCount
 
-	userCount, err := s.fetchPagedEach(ctx, setting, token, "/bim-server/ext/rest/integration/ExtApiIngtTargetAccountService/findBy", func(items []map[string]any) error {
+	userCount, skipped, err := s.fetchPagedEach(ctx, setting, token, iamAccountFindByPath, func(items []map[string]any) error {
 		return s.upsertUsers(ctx, items, result)
 	})
-	if err != nil {
-		return nil, err
-	}
 	result.UserCount = userCount
+	if saveErr := s.persistSkippedRecords(ctx, runID, skipped); saveErr != nil {
+		return result, saveErr
+	}
+	result.SkippedUsers += len(skipped)
+	if err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
-func (s *Service) syncScopedOrganization(ctx context.Context, setting *SyncSetting, token string, scope SyncScope, result *SyncResult) (*SyncResult, error) {
+func (s *Service) syncScopedOrganization(ctx context.Context, setting *SyncSetting, token, runID string, scope SyncScope, result *SyncResult) (*SyncResult, error) {
 	rootID := strings.TrimSpace(scope.OrganizationExternalID)
 	if rootID == "" {
 		return result, nil
 	}
 	orgItems, orgScope, err := s.fetchOrganizationSubtree(ctx, setting, token, rootID)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	if len(orgScope) == 0 {
-		return nil, fmt.Errorf("IAM organization %s not found in sync response", rootID)
+		return result, fmt.Errorf("IAM organization %s not found in sync response", rootID)
 	}
 	result.OrgCount = len(orgItems)
 	if err := s.upsertOrganizations(ctx, orgItems); err != nil {
-		return nil, err
+		return result, err
 	}
 
 	orgIDs := sortedScopeIDs(orgScope)
 	for _, batch := range chunkStrings(orgIDs, iamFilterInBatchSize) {
-		_, err = s.fetchPagedEach(ctx, setting, token, "/bim-server/ext/rest/integration/ExtApiIngtTargetAccountService/findBy", func(items []map[string]any) error {
+		_, skipped, fetchErr := s.fetchPagedEach(ctx, setting, token, iamAccountFindByPath, func(items []map[string]any) error {
 			scopedUsers := filterUserItemsByOrganizationScope(items, orgScope)
 			if len(scopedUsers) == 0 {
 				return nil
@@ -1536,8 +1610,12 @@ func (s *Service) syncScopedOrganization(ctx context.Context, setting *SyncSetti
 		}, map[string]any{
 			"organizationId_in": batch,
 		})
-		if err != nil {
-			return nil, err
+		if saveErr := s.persistSkippedRecords(ctx, runID, skipped); saveErr != nil {
+			return result, saveErr
+		}
+		result.SkippedUsers += len(skipped)
+		if fetchErr != nil {
+			return result, fetchErr
 		}
 	}
 	return result, nil
@@ -1734,50 +1812,252 @@ func (s *Service) logout(ctx context.Context, setting *SyncSetting, token string
 
 func (s *Service) fetchPaged(ctx context.Context, setting *SyncSetting, token, path string, filters ...map[string]any) ([]map[string]any, error) {
 	var all []map[string]any
-	_, err := s.fetchPagedEach(ctx, setting, token, path, func(items []map[string]any) error {
+	_, _, err := s.fetchPagedEach(ctx, setting, token, path, func(items []map[string]any) error {
 		all = append(all, items...)
 		return nil
 	}, filters...)
 	return all, err
 }
 
-func (s *Service) fetchPagedEach(ctx context.Context, setting *SyncSetting, token, path string, handle func([]map[string]any) error, filters ...map[string]any) (int, error) {
-	const pageSize = 200
+type iamSyncRequestError struct {
+	Path         string
+	StatusCode   int
+	ResponseBody []byte
+	ErrorCode    string
+	ErrorName    string
+	ErrorMessage string
+}
+
+func (e *iamSyncRequestError) Error() string {
+	return fmt.Sprintf("IAM sync request failed: path=%s status=%d body=%s", e.Path, e.StatusCode, trimForLog(string(e.ResponseBody)))
+}
+
+func parseIAMSyncRequestError(path string, statusCode int, responseBody []byte) error {
+	requestErr := &iamSyncRequestError{
+		Path:         path,
+		StatusCode:   statusCode,
+		ResponseBody: append([]byte(nil), responseBody...),
+	}
+	var payload map[string]any
+	if json.Unmarshal(responseBody, &payload) == nil {
+		requestErr.ErrorCode = firstString(payload, "errorCode", "error_code", "code")
+		requestErr.ErrorName = firstString(payload, "errorName", "error_name")
+		requestErr.ErrorMessage = firstString(payload, "errorMessage", "error_message", "message")
+	}
+	return requestErr
+}
+
+func recoverableIAMIndividualUserError(err error, path string) (*iamSyncRequestError, bool) {
+	if path != iamAccountFindByPath {
+		return nil, false
+	}
+	var requestErr *iamSyncRequestError
+	if !errors.As(err, &requestErr) {
+		return nil, false
+	}
+	// IAM business error codes are not stable. HTTP 400 on the account
+	// paging endpoint is the durable signal that the requested data range
+	// cannot be materialized; authentication, throttling, transport and 5xx
+	// failures must still fail the run instead of being hidden as bad users.
+	return requestErr, requestErr.StatusCode == http.StatusBadRequest
+}
+
+func skippedIAMUserReadableReason(requestErr *iamSyncRequestError) string {
+	detail := strings.TrimSpace(requestErr.ErrorMessage)
+	if detail != "" {
+		return fmt.Sprintf(
+			"IAM 在读取此人员时返回数据错误：“%s”。该条未返回可用于关联或新建用户的身份字段，系统已跳过并继续同步其他人员。",
+			trimForLog(detail),
+		)
+	}
+	return fmt.Sprintf(
+		"IAM 在读取此人员时返回 HTTP %d 数据错误，且未返回可用于关联或新建用户的身份字段。系统已跳过并继续同步其他人员。",
+		requestErr.StatusCode,
+	)
+}
+
+func (s *Service) requestIAMSyncPage(
+	ctx context.Context,
+	setting *SyncSetting,
+	token, path string,
+	pageNumber, pageSize int,
+	filters map[string]any,
+) ([]map[string]any, bool, error) {
+	body := map[string]any{
+		"number": pageNumber,
+		"size":   pageSize,
+	}
+	if len(filters) > 0 {
+		body["filters"] = filters
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, false, err
+	}
+	endpoint := setting.BaseURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("token", token)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	responseBody, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, parseIAMSyncRequestError(path, resp.StatusCode, responseBody)
+	}
+	items, hasMore, err := extractItems(responseBody, pageSize)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse IAM sync response failed: %w", err)
+	}
+	return items, hasMore, nil
+}
+
+func nextIAMRecoveryPageSize(pageSize int) int {
+	switch pageSize {
+	case 200:
+		return 100
+	case 100:
+		return 50
+	case 50:
+		return 25
+	case 25:
+		return 5
+	case 5:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (s *Service) recoverIAMAccountSegment(
+	ctx context.Context,
+	setting *SyncSetting,
+	token, path string,
+	sourcePageNumber, absoluteOffset, pageSize int,
+	filters map[string]any,
+	handle func([]map[string]any) error,
+) (int, []SyncSkippedRecord, error) {
+	items, _, err := s.requestIAMSyncPage(ctx, setting, token, path, absoluteOffset/pageSize, pageSize, filters)
+	if err == nil {
+		if len(items) > 0 && handle != nil {
+			if handleErr := handle(items); handleErr != nil {
+				return 0, nil, handleErr
+			}
+		}
+		return len(items), nil, nil
+	}
+	requestErr, recoverable := recoverableIAMIndividualUserError(err, path)
+	if !recoverable {
+		return 0, nil, err
+	}
+	if pageSize == 1 {
+		return 0, []SyncSkippedRecord{{
+			Endpoint:           path,
+			SourcePageNumber:   sourcePageNumber,
+			SourcePageSize:     iamSyncPageSize,
+			AbsoluteOffset:     absoluteOffset,
+			HTTPStatus:         requestErr.StatusCode,
+			ErrorCode:          requestErr.ErrorCode,
+			ErrorName:          requestErr.ErrorName,
+			ErrorMessage:       requestErr.ErrorMessage,
+			UserReadableReason: skippedIAMUserReadableReason(requestErr),
+		}}, nil
+	}
+
+	childPageSize := nextIAMRecoveryPageSize(pageSize)
+	if childPageSize == 0 || pageSize%childPageSize != 0 {
+		return 0, nil, err
+	}
 	total := 0
+	var skipped []SyncSkippedRecord
+	for childOffset := absoluteOffset; childOffset < absoluteOffset+pageSize; childOffset += childPageSize {
+		count, childSkipped, childErr := s.recoverIAMAccountSegment(
+			ctx, setting, token, path, sourcePageNumber, childOffset, childPageSize, filters, handle,
+		)
+		total += count
+		skipped = append(skipped, childSkipped...)
+		if childErr != nil {
+			return total, skipped, childErr
+		}
+	}
+	return total, skipped, nil
+}
+
+func (s *Service) recoverIAMAccountPage(
+	ctx context.Context,
+	setting *SyncSetting,
+	token, path string,
+	sourcePageNumber int,
+	filters map[string]any,
+	handle func([]map[string]any) error,
+) (int, []SyncSkippedRecord, error) {
+	childPageSize := nextIAMRecoveryPageSize(iamSyncPageSize)
+	total := 0
+	var skipped []SyncSkippedRecord
+	pageOffset := sourcePageNumber * iamSyncPageSize
+	for childOffset := pageOffset; childOffset < pageOffset+iamSyncPageSize; childOffset += childPageSize {
+		count, childSkipped, err := s.recoverIAMAccountSegment(
+			ctx, setting, token, path, sourcePageNumber, childOffset, childPageSize, filters, handle,
+		)
+		total += count
+		skipped = append(skipped, childSkipped...)
+		if err != nil {
+			return total, skipped, err
+		}
+	}
+	return total, skipped, nil
+}
+
+func (s *Service) fetchPagedEach(ctx context.Context, setting *SyncSetting, token, path string, handle func([]map[string]any) error, filters ...map[string]any) (int, []SyncSkippedRecord, error) {
+	total := 0
+	var skipped []SyncSkippedRecord
+	var requestFilters map[string]any
+	if len(filters) > 0 {
+		requestFilters = filters[0]
+	}
 	for page := 0; page < 1000; page++ {
-		body := map[string]any{
-			"number": page,
-			"size":   pageSize,
+		items, hasMore, err := s.requestIAMSyncPage(ctx, setting, token, path, page, iamSyncPageSize, requestFilters)
+		if _, recoverable := recoverableIAMIndividualUserError(err, path); recoverable {
+			// Only the original 200-item request gets one retry. Persistent data
+			// errors are then isolated through 100/50/25/5/1-sized requests.
+			items, hasMore, err = s.requestIAMSyncPage(ctx, setting, token, path, page, iamSyncPageSize, requestFilters)
+			if _, stillRecoverable := recoverableIAMIndividualUserError(err, path); stillRecoverable {
+				count, pageSkipped, recoveryErr := s.recoverIAMAccountPage(
+					ctx, setting, token, path, page, requestFilters, handle,
+				)
+				total += count
+				if recoveryErr != nil {
+					return total, skipped, recoveryErr
+				}
+				// A request-level problem can also surface as HTTP 400. If every
+				// singleton in a complete source page fails, do not silently turn
+				// the whole page into skipped users; preserve the original failure.
+				if len(pageSkipped) >= iamSyncPageSize {
+					return total, skipped, err
+				}
+				skipped = append(skipped, pageSkipped...)
+				if count+len(pageSkipped) < iamSyncPageSize {
+					break
+				}
+				continue
+			}
 		}
-		if len(filters) > 0 && len(filters[0]) > 0 {
-			body["filters"] = filters[0]
-		}
-		raw, _ := json.Marshal(body)
-		endpoint := setting.BaseURL + path
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 		if err != nil {
-			return total, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("token", token)
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := s.httpClient.Do(req)
-		if err != nil {
-			return total, err
-		}
-		responseBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return total, fmt.Errorf("IAM sync request failed: path=%s status=%d body=%s", path, resp.StatusCode, trimForLog(string(responseBody)))
-		}
-		items, hasMore, err := extractItems(responseBody, pageSize)
-		if err != nil {
-			return total, fmt.Errorf("parse IAM sync response failed: %w", err)
+			return total, skipped, err
 		}
 		if len(items) > 0 {
 			if handle != nil {
 				if err := handle(items); err != nil {
-					return total, err
+					return total, skipped, err
 				}
 			}
 			total += len(items)
@@ -1786,7 +2066,18 @@ func (s *Service) fetchPagedEach(ctx context.Context, setting *SyncSetting, toke
 			break
 		}
 	}
-	return total, nil
+	return total, skipped, nil
+}
+
+func (s *Service) persistSkippedRecords(ctx context.Context, runID string, records []SyncSkippedRecord) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || len(records) == 0 {
+		return nil
+	}
+	for i := range records {
+		records[i].RunID = runID
+	}
+	return s.db.WithContext(ctx).CreateInBatches(&records, 100).Error
 }
 
 func (s *Service) upsertOrganizations(ctx context.Context, items []map[string]any) error {

@@ -12,6 +12,9 @@
 
 基于知识库的 RAG 问答，支持 SSE 流式响应。
 
+这三个接口都挂在 `/api/v1` 下，并通过 `Viewer` 认证；可以使用登录态 Bearer
+Token 或 `X-API-Key`。`session_id` 必须是调用者可访问的会话。
+
 **请求参数**：
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -20,11 +23,18 @@
 | `knowledge_base_ids` | string[] | 否 | 知识库 ID 列表 |
 | `knowledge_ids` | string[] | 否 | 知识文件 ID 列表，指定具体文件进行检索 |
 | `agent_id` | string | 否 | 自定义 Agent ID，指定使用的智能体 |
+| `agent_enabled` | bool | 否 | 本次请求是否启用 Agent 模式 |
+| `web_search_enabled` | bool | 否 | 本次请求是否启用网络搜索 |
 | `summary_model_id` | string | 否 | 覆盖默认的摘要模型 ID |
-| `mentioned_items` | object[] | 否 | @提及的知识库和文件列表 |
+| `mcp_service_ids` | string[] | 否 | 本次通过 @提及选择的 MCP 服务 |
+| `skill_names` | string[] | 否 | 本次通过 @提及选择的轻量 Skill |
+| `professional_skill_names` | string[] | 否 | 输入栏选择的专业 Skill 名称 |
+| `tag_ids` | string[] | 否 | 本次 @提及的标签 ID；具体作用域由 `mentioned_items` 提供 |
+| `mentioned_items` | object[] | 否 | @提及的知识库、文件、标签、MCP 或 Skill |
 | `disable_title` | bool | 否 | 是否禁用自动标题生成（默认 false） |
-| `enable_memory` | bool | 否 | 是否启用记忆功能 |
-| `images` | object[] | 否 | 附带的图片（base64 格式），需要 Agent 启用图片上传 |
+| `enable_memory` | bool | 否 | 显式覆盖本次请求的记忆开关；省略时使用当前用户偏好 |
+| `images` | object[] | 否 | 附带的图片，客户端发送 base64 数据 |
+| `attachment_uploads` | object[] | 否 | 附带的文件，客户端发送 base64 数据、文件名和字节数 |
 | `channel` | string | 否 | 来源渠道标识：`web`、`api`、`im`、`browser_extension` |
 
 **请求**:
@@ -71,26 +81,53 @@ Agent 模式支持更智能的问答，包括工具调用、网络搜索、多�
 | `agent_id` | string | 否 | 自定义 Agent ID，指定使用的智能体（支持共享 Agent） |
 | `web_search_enabled` | bool | 否 | 是否启用网络搜索（默认 false） |
 | `summary_model_id` | string | 否 | 覆盖默认的摘要模型 ID |
-| `mentioned_items` | object[] | 否 | @提及的知识库和文件列表 |
+| `mcp_service_ids` | string[] | 否 | 本次选择的 MCP 服务 ID |
+| `skill_names` | string[] | 否 | 本次选择的轻量 Skill 名称 |
+| `professional_skill_names` | string[] | 否 | 本次选择的专业 Skill 名称 |
+| `tag_ids` | string[] | 否 | 本次 @提及的标签 ID |
+| `mentioned_items` | object[] | 否 | @提及的知识库、文件、标签、MCP 或 Skill |
 | `disable_title` | bool | 否 | 是否禁用自动标题生成（默认 false） |
-| `enable_memory` | bool | 否 | 是否启用记忆功能 |
-| `images` | object[] | 否 | 附带的图片（base64 格式），需要 Agent 启用图片上传 |
+| `enable_memory` | bool | 否 | 显式覆盖本次请求的记忆开关；嵌入模式会强制关闭 |
+| `images` | object[] | 否 | 附带的图片，客户端发送 base64 数据 |
+| `attachment_uploads` | object[] | 否 | 附带的文件，客户端发送 base64 数据、文件名和字节数 |
 | `channel` | string | 否 | 来源渠道标识：`web`、`api`、`im`、`browser_extension` |
 
-**mentioned_items 结构**：
+**公共请求字段结构**：
+
+`mentioned_items` 的 `type` 当前支持 `kb`、`file`、`tag`、`mcp`、`skill`。不同类型
+使用的关联字段如下：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | string | 知识库或文件 ID |
+| `id` | string | 被提及对象 ID |
 | `name` | string | 显示名称 |
-| `type` | string | 类型：`kb`（知识库）或 `file`（文件） |
-| `kb_type` | string | 知识库类型：`document` 或 `faq`（仅 `type=kb` 时） |
+| `type` | string | `kb`、`file`、`tag`、`mcp` 或 `skill` |
+| `kb_type` | string | `document` 或 `faq`，用于 `kb` |
+| `kb_id` | string | 文件或标签所属知识库 ID |
+| `kb_name` | string | 文件或标签所属知识库名称 |
+| `service_id` | string | MCP 工具所属服务 ID |
+| `skill_name` | string | 预加载 Agent Skill 名称 |
 
 **images 结构**：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `data` | string | base64 编码的图片数据（`data:image/png;base64,...`） |
+| `url` | string | 服务端保存后的图片 URL；请求时通常不需要填写 |
+| `caption` | string | 服务端完成 VLM 分析后写入的描述；请求时通常不需要填写 |
+
+`attachment_uploads` 结构如下：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `data` | string | Base64 编码的文件内容 |
+| `file_name` | string | 原始文件名 |
+| `file_size` | integer | 文件大小，单位为字节 |
+
+附件大小由 `MAX_FILE_SIZE_MB` 控制，默认是 50 MiB；选择了自定义 Agent 时还会按
+该 Agent 的 `supported_file_types` 校验扩展名。`enable_memory` 省略时使用调用用户
+持久化的 `preferences.enable_memory`，未设置偏好时为关闭；显式传 `true` 或 `false`
+时覆盖该偏好，嵌入模式会强制为 `false`。
 
 **请求**:
 
@@ -149,4 +186,26 @@ data: {"id":"req-001","response_type":"answer","content":"根据查询结果，�
 
 event: message
 data: {"id":"req-001","response_type":"answer","content":"","done":true}
+```
+
+## POST `/knowledge-search` - 直接搜索知识
+
+该接口只执行知识检索，不调用 LLM 总结，响应为 JSON。请求体字段如下：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 搜索文本 |
+| `knowledge_base_id` | string | 否 | 单个知识库 ID，兼容旧调用 |
+| `knowledge_base_ids` | string[] | 否 | 本次搜索的多个知识库 ID |
+| `knowledge_ids` | string[] | 否 | 限定搜索的知识文件 ID |
+
+```bash
+curl --location 'http://localhost:8080/api/v1/knowledge-search' \
+  --header 'X-API-Key: sk-xxxxx' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "query": "彗尾的形状",
+    "knowledge_base_ids": ["kb-00000001"],
+    "knowledge_ids": []
+  }'
 ```

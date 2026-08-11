@@ -2,7 +2,9 @@
 
 [返回目录](./README.md)
 
-会话（Session）是纯粹的对话容器，仅存储基础信息（标题、描述、置顶状态等）。所有与知识库、模型、检索策略相关的配置均在查询时由 Custom Agent 提供，不再存储在会话中。
+会话（Session）是对话容器，存储基础信息（标题、描述、置顶状态等）以及用于前端
+恢复输入区的 `last_request_state`。后者只是上次提问时的 UI 资源快照，不是后端运行
+时配置；真正的知识库、模型、检索策略仍在每次问答请求中由 Agent/请求体决定。
 
 对话分享属于二开扩展能力，接口独立挂载在 `/custom/chat-share/*`，详见 [chat-share.md](./chat-share.md)。
 
@@ -45,6 +47,13 @@ curl --location 'http://localhost:8080/api/v1/sessions' \
 | ------------- | ------ | ---- | -------- |
 | `title`       | string | 否   | 会话标题 |
 | `description` | string | 否   | 会话描述 |
+| `last_request_state` | object | 否 | 新会话页面挂载时恢复输入区资源选择的快照 |
+
+`last_request_state` 可包含 `agent_id`、`agent_source_tenant_id`、`agent_enabled`、
+`model_id`、`knowledge_base_ids`、`knowledge_ids`、`tag_ids`、`mcp_service_ids`、
+`skill_names`、`professional_skill_names`、`mentioned_items` 和
+`web_search_enabled`。会话创建后，成功的 `/knowledge-chat` 或 `/agent-chat` 请求
+也会更新这份快照。
 
 **响应**:
 

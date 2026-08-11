@@ -27,6 +27,7 @@
 | `mobiledocument` | 移动端短时签名下载与企业微信原生文件响应 |
 | `knowledgepurge` / `wikidelete` | 删除时清理关系库、对象、图谱和 Wiki |
 | `artifactstore` / `objectnamespace` / `storagemigration` | 私有对象、唯一前缀、校验和迁移 |
+| `iam` | SSO、组织/人员同步、本地用户映射、定时运行和异常人员跳过记录 |
 
 ## Agent 与企业能力
 
@@ -55,6 +56,9 @@
 - 多副本不得同时执行生产 DDL；正常 app 使用 `AUTO_MIGRATE=false`。
 - `workretry` 统一长耗时模型任务的有限次数策略；真实供应商调用失败计数，准入/断路器拒绝只轮转等待。
 - Python Agent 不直接连接数据库/MCP；工具与产物提交回到 Go。
+- IAM 同步默认不启用定时计划；可按每日或工作日运行，单条可隔离的异常人员记录会
+  进入 `partial_success` 运行并持久化到 `custom_iam_sync_skipped_records`，不影响其余
+  可读取记录继续处理。
 - 生产持久文件进入私有 OBS，本目录实现不得依赖 RWX。
 
 新增模块前先阅读

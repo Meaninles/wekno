@@ -2,20 +2,30 @@
 
 ## 1. 如何查看日志？
 ```bash
-docker compose logs -f app docreader postgres
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml logs -f runtime-api-1
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml logs -f runtime-parse-1
+docker compose -f docker-compose.dev.yml logs -f postgres docreader
 ```
 
 ## 2. 如何启动和停止服务？
 ```bash
-# 启动服务
-./scripts/start_all.sh
+# 先启动 PostgreSQL、Redis、MinIO、Neo4j 和基础 DocReader
+make dev-start DEV_ARGS="--minio --neo4j"
 
-# 停止服务
-./scripts/start_all.sh --stop
+# 启动本地分角色后端
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml up -d --force-recreate
 
-# 清空数据库
-./scripts/start_all.sh --stop && make clean-db
+# 停止本地分角色后端
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml down
 ```
+
+本地后端固定使用上述 runtime profile，不使用单体 `app-dev`、`make dev-app` 或
+`scripts/start_all.sh`。后端代码修改后的停止、共享镜像构建和重新创建顺序见
+[`docs/快速开发模式说明.md`](./快速开发模式说明.md)。
 
 ## 3. 服务启动后无法正常上传文档？
 
@@ -70,11 +80,8 @@ INIT_RERANK_MODEL_API_KEY=your_rerank_model_api_key
 如果多模态功能配置使用的是 MinIO 存储，需要确保 MinIO 镜像已正确启动：
 
 ```bash
-# 启动 MinIO 服务
-docker-compose --profile minio up -d
-
-# 或者启动完整服务（包括 MinIO、Neo4j、Qdrant）
-docker-compose --profile full up -d
+# 本地基础设施由开发编排启动，包含 MinIO 和 Neo4j
+make dev-start DEV_ARGS="--minio --neo4j"
 ```
 
 ### 3. 检查 MinIO Bucket 权限
@@ -91,7 +98,8 @@ docker-compose --profile full up -d
 
 ### 4. 配置 MINIO_PUBLIC_ENDPOINT
 
-在 `docker-compose.yml` 文件中，`MINIO_PUBLIC_ENDPOINT` 变量默认配置为 `http://localhost:9000`。
+在项目 `.env` 和开发 Compose 环境中确认 `MINIO_PUBLIC_ENDPOINT`；本机访问时通常为
+`http://localhost:9000`。
 
 **重要提示**：如果你需要从其他设备或容器访问图片，`localhost` 可能无法正常工作，需要将其替换为本机的实际 IP 地址：
 
@@ -102,13 +110,15 @@ docker-compose --profile full up -d
 
 ### 方案一：关闭 OCR 识别
 
-在 `docker-compose.yml` 文件的 `docreader` 服务中删除 `OCR_BACKEND` 配置，然后重启 docreader 服务
+在 DocReader 的实际运行环境中移除 `OCR_BACKEND` 或改为可用的后端，然后按开发指南
+重新创建 runtime profile 的 DocReader 角色
 
 **注意**：设置为 `no_ocr` 后，文档解析将不会使用 OCR 功能，这可能会影响图片和扫描文档的文字识别效果。
 
 ### 方案二：使用外部 OCR 模型（推荐）
 
-如果需要 OCR 功能，可以使用外部的视觉语言模型（VLM）来替代 PaddleOCR。在 `docker-compose.yml` 文件的 `docreader` 服务中配置：
+如果需要 OCR 功能，可以使用外部的视觉语言模型（VLM）来替代 PaddleOCR。在
+DocReader 的运行环境中配置：
 
 ```yaml
 environment:
@@ -147,10 +157,11 @@ environment:
 2. 确认浏览器没有把 `localhost` 或当前访问域名走代理；如果配置了 PAC，请将 `localhost`、`127.0.0.1` 和实际部署域名加入直连名单。
 3. 强制刷新页面，或直接使用无痕窗口重新登录后再保存一次配置。
 4. 打开浏览器开发者工具的 `Network` 面板，确认保存配置相关请求返回的是最新内容，且没有被代理改写、缓存命中或重定向到其他环境。
-5. 如果是调试模式部署，可尝试重启 `app` 服务后再验证一次：
+5. 如果是本地调试环境，可重新创建 API 角色后再验证一次：
 
 ```bash
-docker compose restart app
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml up -d --force-recreate runtime-api-1 runtime-api-2 runtime-api-3
 ```
 
 如果重启后短时间恢复正常，但再次访问又出现相同现象，仍应优先检查浏览器代理、缓存和多环境串连问题，而不是直接判断为后端配置丢失。

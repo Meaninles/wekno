@@ -17161,6 +17161,9 @@ const docTemplate = `{
                 "agent_id": {
                     "type": "string"
                 },
+                "agent_source_tenant_id": {
+                    "type": "string"
+                },
                 "knowledge_base_ids": {
                     "type": "array",
                     "items": {
@@ -17189,6 +17192,12 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "skill_names": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "professional_skill_names": {
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -20201,6 +20210,13 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "professional_skill_names": {
+                    "description": "Per-request professional Skills selected in the input bar",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "summary_model_id": {
                     "description": "Optional summary model ID for this request (overrides session default)",
                     "type": "string"
@@ -20224,6 +20240,14 @@ const docTemplate = `{
                 "description": {
                     "description": "Description for the session (optional)",
                     "type": "string"
+                },
+                "last_request_state": {
+                    "description": "LastRequestState stores the input-bar state that should be restored when the newly-created session page mounts before the first message is sent.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/github_com_Tencent_WeKnora_internal_types.SessionLastRequestState"
+                        }
+                    ]
                 },
                 "title": {
                     "description": "Title for the session (optional)",

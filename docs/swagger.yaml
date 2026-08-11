@@ -2797,6 +2797,8 @@ definitions:
         type: boolean
       agent_id:
         type: string
+      agent_source_tenant_id:
+        type: string
       knowledge_base_ids:
         items:
           type: string
@@ -2816,6 +2818,10 @@ definitions:
       model_id:
         type: string
       skill_names:
+        items:
+          type: string
+        type: array
+      professional_skill_names:
         items:
           type: string
         type: array
@@ -5015,6 +5021,11 @@ definitions:
         items:
           type: string
         type: array
+      professional_skill_names:
+        description: Per-request professional Skills selected in the input bar
+        items:
+          type: string
+        type: array
       summary_model_id:
         description: Optional summary model ID for this request (overrides session
           default)
@@ -5035,6 +5046,10 @@ definitions:
       description:
         description: Description for the session (optional)
         type: string
+      last_request_state:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.SessionLastRequestState'
+        description: LastRequestState stores the input-bar state that should be restored when the newly-created session page mounts before the first message is sent.
       title:
         description: Title for the session (optional)
         type: string

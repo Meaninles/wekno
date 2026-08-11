@@ -18,7 +18,7 @@
 | `wikiActivation` | Wiki 高成本索引能力的二级入口、启用状态提示和提取粒度面板 |
 | `wikiAccess` | Wiki 选择权查询、默认灰态提示和系统管理员按用户授权页 |
 | `generalagent` / `dbanalytics` / `skillhub` | Agent 产物、数据分析和技能 |
-| `iam` / `configcenter` / `authSecurity` | SSO、组织、默认资源和认证安全 |
+| `iam` / `configcenter` / `authSecurity` | SSO、组织人员同步、同步异常详情、默认资源和认证安全 |
 | `mobile` / `chatshare` / `sourceReferences` / `imoutput` | 移动端多格式文档预览、企业微信设备内引用、原文档、分享和来源展示 |
 | `scheduledchat` / `sessionState` / `answerfeedback` | 定时任务、会话状态和反馈 |
 

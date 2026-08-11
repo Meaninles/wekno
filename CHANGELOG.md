@@ -2,7 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-08-06
+## [Unreleased] - 2026-08-12
+
+### IAM and Platform Administration
+
+- **FIXED**: IAM synchronization can isolate recoverable malformed personnel records,
+  persist their source/error details, continue processing the remaining readable records,
+  and finish as `partial_success` with a paginated skipped-record view.
+- **NEW**: IAM sync administration supports full or organization-descendant scope,
+  daily or weekday schedules, running progress counters, and the
+  `/sync-runs/:id/skipped-records` detail endpoint.
+
+### Branding and Chat Contracts
+
+- **CHANGED**: The user-facing brand is now “茅台智汇”; WeKnora remains the repository,
+  API, and compatibility name. The embed SDK keeps `window.WeKnora` and exposes
+  `window.ZhiHui` as a brand alias.
+- **CHANGED**: Chat request and session-state API documentation now includes professional
+  Skills, file attachments, memory override semantics, mentioned-item types, and
+  persisted `last_request_state`.
+
+### Documentation and Local Development
+
+- **DOC**: Local development and troubleshooting instructions now match the fixed
+  runtime-profile Compose topology: API 3, parse 2, derivative 2, Wiki 2, maintenance 2,
+  one-shot migration 1, runtime DocReader 2 plus the shared infrastructure DocReader.
 
 ### Production Alignment
 

@@ -13,6 +13,9 @@
 Wiki、知识图谱、问题生成、多模态和音频处理，并把知识检索、数据分析、办公文档
 生成、企业身份与多渠道发布统一到同一平台。
 
+用户界面当前品牌为“茅台智汇”；WeKnora 仍是仓库、API 和兼容接口使用的技术名称。
+Embed SDK 同时保留 `window.WeKnora`，并提供 `window.ZhiHui` 品牌别名。
+
 > 当前代码的完整架构、状态语义、生产拓扑和文档地图见
 > [当前实现架构与文档索引](./docs/custom/当前实现架构与文档索引.md)。
 > 当前生产版本、资源和并发的第一权威说明是
@@ -25,7 +28,7 @@ Wiki、知识图谱、问题生成、多模态和音频处理，并把知识检�
 | 服务 | 地址 | 说明 |
 |---|---|---|
 | 桌面前端 | `http://localhost:5177` | `frontend/` 开发服务 |
-| 后端 API | `http://localhost:8080` | Docker Desktop 的 `app-dev` |
+| 后端 API | `http://localhost:8080` | runtime profile 的 `runtime-entry` API 入口 |
 | general-agent | `http://127.0.0.1:8091/health` | 通用/数据/表格智能体旁路运行时 |
 | document-processing-agent | `http://127.0.0.1:8093/health` | Word、Excel、PDF、PPT 处理运行时 |
 | Langfuse | `http://localhost:3000` | 启用对应 profile 后可用 |
@@ -331,30 +334,58 @@ AZ。当前版本解决的是文档执行
 
 ```bash
 cp .env.example .env
-make dev-start
+make dev-start DEV_ARGS="--minio --neo4j"
 ```
 
-按需启用 profile：
+`make dev-start` 负责启动 `docker-compose.dev.yml` 中的基础设施；至少要确保
+PostgreSQL、Redis、MinIO、Neo4j 和基础 DocReader 已运行。若 `.env` 选择了其他
+向量数据库，再按配置启用对应 profile（例如 `--qdrant` 或 `--milvus`）。
+
+后端固定使用分角色 runtime profile，不启动单体 `app-dev`，也不使用
+`make dev-app` 或 `scripts/dev.sh app`：
 
 ```bash
-make dev-start DEV_ARGS="--profile neo4j --profile minio --profile langfuse"
-```
-
-开发后端入口：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d app-dev
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml build runtime-api-1
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml up -d --force-recreate
 curl http://localhost:8080/health
+```
+
+本地 runtime profile 的角色数量与入口如下：
+
+| 角色 | 数量 |
+|---|---:|
+| API | 3 |
+| 解析 worker | 2 |
+| 衍生 worker | 2 |
+| Wiki worker | 2 |
+| maintenance | 2 |
+| migration | 1（一次性） |
+| runtime DocReader | 2 + 1 个入口（另有基础设施 DocReader 1 个） |
+| API 入口 | 1 个 `runtime-entry`，对外 `8080` |
+
+修改后端代码后，先停止该 runtime profile，再构建共享镜像并重新拉起全部角色：
+
+```bash
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml down
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml build runtime-api-1
+docker compose -p weknora-runtime-profile-e2e \
+  -f custom/tests/runtime_profile_e2e/docker-compose.yml up -d --force-recreate
 ```
 
 Agent 旁路服务：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  --profile agent up -d general-agent document-processing-agent
+docker compose -f custom/docker-compose.general-agent.yml up -d --build
 curl http://127.0.0.1:8091/health
 curl http://127.0.0.1:8093/health
 ```
+
+旁路服务接入当前 runtime profile 的开发网络；先启动固定的基础设施和后端角色，
+再按旁路服务 README 启动它们。
 
 前端：
 
@@ -364,13 +395,8 @@ npm ci
 npm run dev -- --host 0.0.0.0 --port 5177
 ```
 
-修改运行代码后，先停止本项目旧实例，再重建受影响容器；不能让旧进程和新容器
-同时占用端口：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml stop <service>
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build <service>
-```
+桌面开发服务同时通过 `http://localhost:5177/mobile/` 提供移动端入口；本地移动端
+不使用 `5178` 端口。
 
 仅修改 Markdown 不影响运行镜像，无需重启业务容器，但仍应检查当前服务健康。
 

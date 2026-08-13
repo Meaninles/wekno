@@ -53,7 +53,7 @@ func SaveImageAttachments(ctx context.Context, fileService interfaces.FileServic
 			return fmt.Errorf("image %d too large (%d bytes, max %d)", i, len(imgBytes), maxImageSize)
 		}
 
-		storedName := fmt.Sprintf("chat-images/%s%s", uuid.New().String(), ext)
+		storedName := uuid.NewString() + ext
 		fileURL, err := fileSvc.SaveBytes(ctx, imgBytes, tenantID, storedName, false)
 		if err != nil {
 			return fmt.Errorf("save image %d: %w", i, err)

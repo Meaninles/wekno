@@ -6,10 +6,58 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/plannedfile"
+	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type strictScheduledImageFileService struct {
+	interfaces.FileService
+	fileNames []string
+}
+
+func (s *strictScheduledImageFileService) SaveBytes(
+	_ context.Context,
+	_ []byte,
+	_ uint64,
+	fileName string,
+	_ bool,
+) (string, error) {
+	if err := plannedfile.ValidateSegment("file name", fileName); err != nil {
+		return "", err
+	}
+	s.fileNames = append(s.fileNames, fileName)
+	return "minio://scheduled-chat/" + fileName, nil
+}
+
+func TestPrepareRequestMediaUsesPlannedFileCompatibleImageName(t *testing.T) {
+	fileService := &strictScheduledImageFileService{}
+	service := &Service{fileService: fileService}
+	agent := &types.CustomAgent{Config: types.CustomAgentConfig{ImageUploadEnabled: true}}
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(42))
+
+	images, imageURLs, _, attachments, err := service.prepareRequestMedia(
+		ctx,
+		agent,
+		"scheduled image test",
+		RequestContext{Images: []sessionhandler.ImageAttachment{{
+			Data: "data:image/png;base64,iVBORw0KGgo=",
+		}}},
+	)
+
+	if err != nil {
+		t.Fatalf("prepareRequestMedia returned error: %v", err)
+	}
+	if len(fileService.fileNames) != 1 || strings.ContainsAny(fileService.fileNames[0], `/\`) {
+		t.Fatalf("scheduled image used an invalid storage file name: %#v", fileService.fileNames)
+	}
+	if len(images) != 1 || images[0].URL == "" || len(imageURLs) != 1 || len(attachments) != 0 {
+		t.Fatalf("unexpected scheduled media result: images=%#v urls=%#v attachments=%#v", images, imageURLs, attachments)
+	}
+}
 
 func TestFilterScheduledAssistantCitationsUsesAuthoritativeCitedReferences(t *testing.T) {
 	message := &types.Message{

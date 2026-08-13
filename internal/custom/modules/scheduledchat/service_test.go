@@ -57,6 +57,9 @@ func TestPrepareRequestMediaUsesPlannedFileCompatibleImageName(t *testing.T) {
 	if len(images) != 1 || images[0].URL == "" || len(imageURLs) != 1 || len(attachments) != 0 {
 		t.Fatalf("unexpected scheduled media result: images=%#v urls=%#v attachments=%#v", images, imageURLs, attachments)
 	}
+	if !strings.HasPrefix(imageURLs[0], "data:image/png;base64,") {
+		t.Fatalf("scheduled model input must use validated request data instead of provider URL: %#v", imageURLs)
+	}
 }
 
 func TestFilterScheduledAssistantCitationsUsesAuthoritativeCitedReferences(t *testing.T) {

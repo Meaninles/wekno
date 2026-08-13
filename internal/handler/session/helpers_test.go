@@ -45,27 +45,59 @@ func TestMergeTagScopesFromRequestIDs_AmbiguousKBIgnored(t *testing.T) {
 	assert.Empty(t, scopes)
 }
 
-func TestExtractImageURLsAndOCRTextPrefersStoredURL(t *testing.T) {
+func TestExtractImageURLsAndOCRTextPrefersValidatedRequestData(t *testing.T) {
 	urls, text := extractImageURLsAndOCRText([]ImageAttachment{
 		{
 			Data:    "data:image/jpeg;base64,very-large-payload",
-			URL:     "local://10002/chat-images/image.jpg",
+			URL:     "minio://private-bucket/10002/exports/image.jpg",
 			Caption: "图片内容描述",
 		},
 	})
 
-	assert.Equal(t, []string{"local://10002/chat-images/image.jpg"}, urls)
+	assert.Equal(t, []string{"data:image/jpeg;base64,very-large-payload"}, urls)
 	assert.Equal(t, "图片内容描述", text)
 }
 
-func TestExtractImageURLsAndOCRTextFallsBackToDataWhenURLMissing(t *testing.T) {
+func TestExtractImageURLsAndOCRTextFallsBackToStoredURLWhenDataMissing(t *testing.T) {
 	urls, text := extractImageURLsAndOCRText([]ImageAttachment{
 		{
-			Data:    "data:image/png;base64,inline",
+			URL:     "local://10002/exports/image.png",
 			Caption: "inline caption",
 		},
 	})
 
-	assert.Equal(t, []string{"data:image/png;base64,inline"}, urls)
+	assert.Equal(t, []string{"local://10002/exports/image.png"}, urls)
 	assert.Equal(t, "inline caption", text)
+}
+
+func TestImageModelInputDoesNotChangePersistedMessageImage(t *testing.T) {
+	images := []ImageAttachment{
+		{
+			Data:    "data:image/png;base64,inline",
+			URL:     "minio://private-bucket/10002/exports/image.png",
+			Caption: "image caption",
+		},
+	}
+
+	urls, caption := extractImageURLsAndOCRText(images)
+	persisted := convertImageAttachments(images)
+
+	assert.Equal(t, []string{"data:image/png;base64,inline"}, urls)
+	assert.Equal(t, "image caption", caption)
+	assert.Equal(t, types.MessageImages{{
+		URL:     "minio://private-bucket/10002/exports/image.png",
+		Caption: "image caption",
+	}}, persisted)
+}
+
+func TestBuildQARequestWithoutImagesIsUnchanged(t *testing.T) {
+	req := (&qaRequestContext{
+		query:            "plain text",
+		session:          &types.Session{},
+		assistantMessage: &types.Message{},
+	}).buildQARequest()
+
+	assert.Equal(t, "plain text", req.Query)
+	assert.Nil(t, req.ImageURLs)
+	assert.Empty(t, req.ImageDescription)
 }

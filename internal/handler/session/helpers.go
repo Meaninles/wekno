@@ -35,10 +35,11 @@ func ConvertImageAttachments(items []ImageAttachment) types.MessageImages {
 }
 
 // extractImageURLsAndOCRText extracts image references and concatenated analysis text.
-// Prefer the server-side storage URL. The raw Data field is a request-only upload
-// payload; passing data: base64 through QARequest can make text-only agent prompts
-// enormous. Vision model adapters can resolve local:// URLs back to bytes when
-// they actually need image input.
+// Prefer the validated request-local data URI for model input. The server-side
+// provider URL (local://, minio://, obs://, etc.) is still persisted on the
+// message for display and lifecycle management, but remote model APIs cannot
+// consume provider-private schemes. Request parsing has already decoded and
+// size-checked Data before this helper is called.
 func extractImageURLsAndOCRText(images []ImageAttachment) (urls []string, ocrText string) {
 	if len(images) == 0 {
 		return nil, ""
@@ -47,10 +48,10 @@ func extractImageURLsAndOCRText(images []ImageAttachment) (urls []string, ocrTex
 	var parts []string
 	for _, img := range images {
 		switch {
-		case img.URL != "":
-			urls = append(urls, img.URL)
 		case img.Data != "":
 			urls = append(urls, img.Data)
+		case img.URL != "":
+			urls = append(urls, img.URL)
 		}
 		if img.Caption != "" {
 			parts = append(parts, img.Caption)

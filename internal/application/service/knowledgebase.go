@@ -1005,6 +1005,7 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 				knowledgeImageInfo[imageInfo.KnowledgeID], imageInfo.ImageInfo,
 			)
 		}
+		knowledgeDerivedPaths := make(map[string][]string, len(knowledgeList))
 		knowledgeObjectPaths := make(map[string][]string, len(knowledgeList))
 		for _, knowledge := range knowledgeList {
 			imageURLs, decodeErr := collectImageURLsStrict(knowledgeImageInfo[knowledge.ID])
@@ -1015,9 +1016,36 @@ func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Tas
 			if decodeErr != nil {
 				return decodeErr
 			}
-			paths := append(imageURLs, metadataPaths...)
+			derivedPaths := uniqueNonEmptyStrings(append(imageURLs, metadataPaths...))
+			knowledgeDerivedPaths[knowledge.ID] = derivedPaths
+			paths := append([]string(nil), derivedPaths...)
 			paths = append(paths, knowledge.FilePath)
 			knowledgeObjectPaths[knowledge.ID] = uniqueNonEmptyStrings(paths)
+		}
+
+		// This barrier must precede every external side effect below. It safely
+		// adopts exact old-generation image paths still referenced by soft-deleted
+		// chunks, while unknown persistent or cross-owner paths continue to fail
+		// closed before vectors, objects, graph data or shares are touched.
+		if s.auxObjects == nil {
+			return errors.New("KB delete worker: auxiliary object registry is unavailable")
+		}
+		for _, knowledge := range knowledgeList {
+			if err := s.auxObjects.PrepareForDelete(
+				ctx,
+				tenantID,
+				kbID,
+				knowledge.ID,
+				payload.StorageProvider,
+				knowledgeDerivedPaths[knowledge.ID],
+				uniqueNonEmptyStrings([]string{knowledge.FilePath}),
+			); err != nil {
+				return fmt.Errorf(
+					"KB delete worker: prepare auxiliary objects for %s: %w",
+					knowledge.ID,
+					err,
+				)
+			}
 		}
 
 		// Step 3: clean external systems.  Keep chunks and knowledge rows intact

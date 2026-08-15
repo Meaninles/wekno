@@ -1300,6 +1300,75 @@ func (r *Registry) PrepareDerivedCleanup(
 	)
 }
 
+// PrepareForDelete is the non-destructive barrier for document and whole-KB
+// deletion. Reparse cleanup consumes ownership after deleting an old
+// generation while its soft-deleted chunks deliberately retain image_info as
+// retry evidence. A later delete must therefore re-adopt only those exact,
+// owner-referenced derived paths before it validates the complete source and
+// derived object set.
+//
+// Delete-complete rows are included during both discovery and final preflight.
+// This is essential for idempotent retries: a path already deleted by an
+// earlier delivery must never be mistaken for a fresh unregistered legacy
+// path and adopted into a second owned row.
+func (r *Registry) PrepareForDelete(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeBaseID string,
+	knowledgeID string,
+	fallbackProvider string,
+	legacyDerivedPaths []string,
+	legacyPersistentPaths []string,
+) error {
+	derivedTargets, err := r.cleanupTargets(
+		ctx,
+		tenantID,
+		knowledgeBaseID,
+		knowledgeID,
+		fallbackProvider,
+		legacyDerivedPaths,
+		false,
+		true,
+	)
+	if err != nil {
+		return err
+	}
+	missingDerivedPaths := make([]string, 0, len(derivedTargets))
+	for _, target := range derivedTargets {
+		if !target.registered {
+			missingDerivedPaths = append(missingDerivedPaths, target.path)
+		}
+	}
+	if err := r.adoptLegacyDerivedCleanupPaths(
+		ctx,
+		tenantID,
+		knowledgeBaseID,
+		knowledgeID,
+		fallbackProvider,
+		missingDerivedPaths,
+	); err != nil {
+		return fmt.Errorf("prepare legacy derived delete batch: %w", err)
+	}
+
+	allLegacyPaths := make([]string, 0, len(legacyDerivedPaths)+len(legacyPersistentPaths))
+	allLegacyPaths = append(allLegacyPaths, legacyDerivedPaths...)
+	allLegacyPaths = append(allLegacyPaths, legacyPersistentPaths...)
+	targets, err := r.cleanupTargets(
+		ctx,
+		tenantID,
+		knowledgeBaseID,
+		knowledgeID,
+		fallbackProvider,
+		allLegacyPaths,
+		true,
+		true,
+	)
+	if err != nil {
+		return err
+	}
+	return r.preflightDeleteTargets(ctx, tenantID, targets)
+}
+
 // PrepareDerivedCleanupWithinMoveFence is the move-scope counterpart. The
 // caller already holds the source/target KB shared fence, so adoption must not
 // attempt to upgrade that parent lock from a second connection.

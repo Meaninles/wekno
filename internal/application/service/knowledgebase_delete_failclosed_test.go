@@ -299,6 +299,20 @@ func TestProcessKBDeleteQuiescenceFailureStopsBeforeExternalCleanup(t *testing.T
 	assert.Zero(t, chunks.deleteCalls)
 }
 
+func TestProcessKBDeleteObjectPreflightFailureStopsBeforeExternalCleanup(t *testing.T) {
+	svc, db, payload, chunks, graph, _, outbox := newKBDeleteWorkerHarness(t)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Update("file_path", "local://7/knowledge-1/unregistered-source.pdf").Error)
+
+	err := svc.ProcessKBDelete(context.Background(), asynq.NewTask(types.TypeKBDelete, payload))
+	require.ErrorIs(t, err, knowledgeaux.ErrBindingMissing)
+	assert.Zero(t, graph.calls)
+	assert.Zero(t, chunks.deleteCalls)
+	exists, inspectErr := outbox.IntentExists(context.Background(), 7, "kb-1", payload)
+	require.NoError(t, inspectErr)
+	assert.True(t, exists)
+}
+
 func TestProcessKBDeleteTaskHistoryPurgeFailureStopsBeforeFinalize(t *testing.T) {
 	svc, db, payload, chunks, _, inspector, outbox := newKBDeleteWorkerHarness(t)
 	purgeErr := errors.New("redis terminal history unavailable")

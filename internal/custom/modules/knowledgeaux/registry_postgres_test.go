@@ -186,6 +186,45 @@ func TestPostgresConcurrentDocumentDeleteRetainsOneCompletionProof(t *testing.T)
 	require.Equal(t, []string{object.Path}, local.deleted)
 }
 
+func TestPostgresMaintenanceReplicasDoNotConsumeKBDeleteOwnership(t *testing.T) {
+	db := openRegistryPostgresTestDB(t)
+	createPostgresOwner(t, db, "knowledge-1", "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/knowledge-1/source.md", "generation-1", KindSourceFile)
+	object.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		tombstoneRegistryKnowledgeBase(t, tx)
+		insertRegistryKBDeleteIntent(t, tx, 7, "delete", "kb-1")
+		return nil
+	}))
+
+	const replicas = 8
+	start := make(chan struct{})
+	results := make(chan error, replicas)
+	for range replicas {
+		go func() {
+			<-start
+			results <- NewRecovery(registry).RecoverNow(context.Background())
+		}()
+	}
+	close(start)
+	for range replicas {
+		require.NoError(t, <-results)
+	}
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+
+	// The ordinary KB-delete path still owns and can consume the proof.
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(), 7, "kb-1", "knowledge-1", "local", []string{object.Path},
+	))
+	require.Equal(t, []string{object.Path}, local.deleted)
+	require.EqualValues(t, 1, countAuxOperation(t, db, operationDeleteComplete))
+}
+
 func TestPostgresSharedCommitFenceAndExclusiveDelete(t *testing.T) {
 	t.Run("two commits on one KB run concurrently", func(t *testing.T) {
 		db := openRegistryPostgresTestDB(t)

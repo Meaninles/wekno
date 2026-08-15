@@ -381,6 +381,21 @@ func (r *Recovery) recoverRow(ctx context.Context, row *types.TaskPendingOp, now
 		if kbErr != nil && !kbMissing {
 			return fmt.Errorf("knowledge auxiliary recovery: lock KB: %w", kbErr)
 		}
+		if kbDeleted {
+			deleting, err := hasKnowledgeBaseDeleteIntentTx(
+				tx, object.TenantID, object.KnowledgeBaseID,
+			)
+			if err != nil {
+				return err
+			}
+			if deleting {
+				// The KB tombstone and exact durable intent committed atomically
+				// under this same parent lock. Leave both the provider object and
+				// its ownership proof to ProcessKBDelete, which turns the proof into
+				// delete_complete before finalizing the document rows.
+				return nil
+			}
+		}
 
 		query := tx.Unscoped().Table("knowledges").
 			Select("id", "tenant_id", "knowledge_base_id", "processing_generation", "parse_status", "last_faq_import_result", "deleted_at").
@@ -463,6 +478,39 @@ type recoveryKnowledgeBase struct {
 	DeletedAt gorm.DeletedAt
 }
 
+type recoveryKnowledgeBaseDeleteIntent struct {
+	TenantID uint64
+	ScopeID  string
+}
+
+// hasKnowledgeBaseDeleteIntentTx is the ownership hand-off between the
+// maintenance recovery loop and whole-KB deletion. Prepare persists the exact
+// outbox row and the KB tombstone in one parent-row-locked transaction. Reading
+// that tuple while holding the same KB lock therefore proves that the delete
+// worker, rather than orphan recovery, owns every remaining auxiliary object.
+func hasKnowledgeBaseDeleteIntentTx(
+	tx *gorm.DB,
+	tenantID uint64,
+	knowledgeBaseID string,
+) (bool, error) {
+	if tx == nil || tenantID == 0 || strings.TrimSpace(knowledgeBaseID) == "" {
+		return false, errors.New("knowledge auxiliary recovery: invalid KB delete intent identity")
+	}
+	var row struct{ ID int64 }
+	result := tx.Model(&types.TaskPendingOp{}).
+		Select("id").
+		Where(
+			"tenant_id = ? AND task_type = ? AND scope = ? AND scope_id = ? AND op = ? AND dedup_key = ?",
+			tenantID, types.TypeKBDelete, types.TaskScopeKnowledgeBase, knowledgeBaseID, "delete", knowledgeBaseID,
+		).
+		Limit(1).
+		Find(&row)
+	if result.Error != nil {
+		return false, fmt.Errorf("knowledge auxiliary recovery: inspect KB delete intent: %w", result.Error)
+	}
+	return result.RowsAffected > 0, nil
+}
+
 type recoveryPreparedRow struct {
 	row     *types.TaskPendingOp
 	object  Object
@@ -537,6 +585,18 @@ func (r *Recovery) prepareRecoveryRows(
 			return nil, fmt.Errorf("knowledge auxiliary recovery: snapshot knowledge bases: %w", err)
 		}
 	}
+	var deleteIntents []recoveryKnowledgeBaseDeleteIntent
+	if len(knowledgeBaseIDs) > 0 {
+		if err := r.registry.db.WithContext(ctx).Model(&types.TaskPendingOp{}).
+			Select("tenant_id", "scope_id").
+			Where(
+				"task_type = ? AND scope = ? AND op = ? AND scope_id IN ? AND dedup_key = scope_id",
+				types.TypeKBDelete, types.TaskScopeKnowledgeBase, "delete", knowledgeBaseIDs,
+			).
+			Find(&deleteIntents).Error; err != nil {
+			return nil, fmt.Errorf("knowledge auxiliary recovery: snapshot KB delete intents: %w", err)
+		}
+	}
 	ownerByID := make(map[string]*recoveryKnowledge, len(owners))
 	for index := range owners {
 		owner := &owners[index]
@@ -547,14 +607,26 @@ func (r *Recovery) prepareRecoveryRows(
 		kb := &knowledgeBases[index]
 		kbByID[recoveryIdentity(kb.TenantID, kb.ID)] = kb
 	}
+	deleteIntentByKB := make(map[string]struct{}, len(deleteIntents))
+	for index := range deleteIntents {
+		intent := &deleteIntents[index]
+		deleteIntentByKB[recoveryIdentity(intent.TenantID, intent.ScopeID)] = struct{}{}
+	}
 	for index := range prepared {
 		item := &prepared[index]
 		if item.err != nil || item.row == nil {
 			continue
 		}
 		object := item.object
-		kb := kbByID[recoveryIdentity(object.TenantID, object.KnowledgeBaseID)]
+		identity := recoveryIdentity(object.TenantID, object.KnowledgeBaseID)
+		kb := kbByID[identity]
 		owner := ownerByID[recoveryIdentity(object.TenantID, object.KnowledgeID)]
+		if _, deleting := deleteIntentByKB[identity]; kb != nil && kb.DeletedAt.Valid && deleting {
+			// Correctness is revalidated under the parent row lock in recoverRow.
+			// This snapshot guard avoids one no-op transaction per object while a
+			// large KB deletion is in progress.
+			continue
+		}
 		item.recover = kb == nil || kb.DeletedAt.Valid ||
 			r.shouldDelete(now, item.row, object, owner)
 	}

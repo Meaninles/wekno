@@ -165,6 +165,33 @@ func createOwner(t *testing.T, db *gorm.DB, status, generation string) *types.Kn
 	return knowledge
 }
 
+func tombstoneRegistryKnowledgeBase(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	now := time.Now().UTC()
+	result := db.Unscoped().Table("knowledge_bases").
+		Where("tenant_id = ? AND id = ? AND deleted_at IS NULL", 7, "kb-1").
+		Updates(map[string]interface{}{"deleted_at": now, "updated_at": now})
+	require.NoError(t, result.Error)
+	require.EqualValues(t, 1, result.RowsAffected)
+}
+
+func insertRegistryKBDeleteIntent(
+	t *testing.T,
+	db *gorm.DB,
+	tenantID uint64,
+	op string,
+	dedupKey string,
+) {
+	t.Helper()
+	require.NoError(t, db.Create(&types.TaskPendingOp{
+		TenantID: tenantID, TaskType: types.TypeKBDelete,
+		Scope: types.TaskScopeKnowledgeBase, ScopeID: "kb-1",
+		Op: op, DedupKey: dedupKey,
+		Payload:    []byte(`{"tenant_id":7,"knowledge_base_id":"kb-1"}`),
+		EnqueuedAt: time.Now().UTC(),
+	}).Error)
+}
+
 func objectFor(path, generation, kind string) Object {
 	provider, err := ProviderForPath(path, "obs")
 	if err != nil {
@@ -374,6 +401,94 @@ func TestRecoveryCleansStaleFAQEntriesAfterPendingTaskCancellation(t *testing.T)
 	require.NoError(t, recovery.RecoverNow(context.Background()))
 	require.Zero(t, countOwnership(t, db))
 	require.Equal(t, []string{"local://7/faq.json"}, local.deleted)
+}
+
+func TestRecoveryDefersTombstonedKnowledgeBaseToDurableDeleteIntent(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-1")
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/knowledge-1/source.pdf", "generation-1", KindSourceFile)
+	object.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), object)
+	require.NoError(t, err)
+
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		tombstoneRegistryKnowledgeBase(t, tx)
+		insertRegistryKBDeleteIntent(t, tx, 7, "delete", "kb-1")
+		return nil
+	}))
+
+	require.NoError(t, NewRecovery(registry).RecoverNow(context.Background()))
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+}
+
+func TestRecoveryRevalidatesDeleteIntentAfterItsSnapshot(t *testing.T) {
+	db := openRegistryTestDB(t)
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	object := objectFor("local://7/knowledge-1/source.pdf", "generation-1", KindSourceFile)
+	object.FallbackProvider = "local"
+	_, err := registry.Reserve(context.Background(), object, true)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.TaskPendingOp{}).Where("task_type = ?", TaskType).
+		Update("enqueued_at", time.Now().Add(-2*time.Hour)).Error)
+
+	var rows []*types.TaskPendingOp
+	require.NoError(t, db.Where("task_type = ?", TaskType).Find(&rows).Error)
+	require.Len(t, rows, 1)
+	recovery := NewRecoveryWithConfig(registry, RecoveryConfig{
+		ScanInterval: time.Hour, ScanTimeout: time.Hour, PendingOwnerGrace: time.Nanosecond,
+		FAQEntriesMaxAge: time.Hour, FAQExportMaxAge: time.Hour,
+	})
+	prepared, err := recovery.prepareRecoveryRows(context.Background(), rows, time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, prepared, 1)
+	require.True(t, prepared[0].recover, "the pre-delete snapshot must consider the stale reservation recoverable")
+
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		tombstoneRegistryKnowledgeBase(t, tx)
+		insertRegistryKBDeleteIntent(t, tx, 7, "delete", "kb-1")
+		return nil
+	}))
+	require.NoError(t, recovery.recoverRow(context.Background(), rows[0], time.Now().UTC()))
+	require.EqualValues(t, 1, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+}
+
+func TestRecoveryStillCleansTombstonedKnowledgeBaseWithoutExactDeleteIntent(t *testing.T) {
+	tests := []struct {
+		name     string
+		tenantID uint64
+		op       string
+		dedupKey string
+	}{
+		{name: "missing intent"},
+		{name: "other tenant", tenantID: 8, op: "delete", dedupKey: "kb-1"},
+		{name: "wrong operation", tenantID: 7, op: "other", dedupKey: "kb-1"},
+		{name: "wrong dedup key", tenantID: 7, op: "delete", dedupKey: "other"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := openRegistryTestDB(t)
+			createOwner(t, db, types.ParseStatusCompleted, "generation-1")
+			local := &fakeFileService{provider: "local", failures: map[string]int{}}
+			registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+			object := objectFor("local://7/knowledge-1/source.pdf", "generation-1", KindSourceFile)
+			object.FallbackProvider = "local"
+			_, err := registry.Register(context.Background(), object)
+			require.NoError(t, err)
+			tombstoneRegistryKnowledgeBase(t, db)
+			if test.op != "" {
+				insertRegistryKBDeleteIntent(t, db, test.tenantID, test.op, test.dedupKey)
+			}
+
+			require.NoError(t, NewRecovery(registry).RecoverNow(context.Background()))
+			require.Zero(t, countOwnership(t, db))
+			require.Equal(t, []string{object.Path}, local.deleted)
+		})
+	}
 }
 
 func TestRecoveryRetainsReferencedFAQExportAndCleansSupersededExport(t *testing.T) {

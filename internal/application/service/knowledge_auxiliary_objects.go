@@ -604,6 +604,26 @@ func (s *knowledgeService) cleanupKnowledgeAuxiliaryForDelete(
 	)
 }
 
+func (s *knowledgeService) prepareKnowledgeAuxiliaryForDelete(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledge *types.Knowledge,
+	legacyDerivedPaths []string,
+) error {
+	if s.auxObjects == nil {
+		return errors.New("prepare knowledge auxiliary objects for delete: registry is unavailable")
+	}
+	return s.auxObjects.PrepareForDelete(
+		ctx,
+		knowledge.TenantID,
+		knowledge.KnowledgeBaseID,
+		knowledge.ID,
+		effectiveAuxiliaryProvider(ctx, kb),
+		uniqueNonEmptyStrings(legacyDerivedPaths),
+		uniqueNonEmptyStrings([]string{knowledge.FilePath}),
+	)
+}
+
 func (s *knowledgeService) auxiliaryFileServiceForPath(
 	ctx context.Context,
 	kb *types.KnowledgeBase,

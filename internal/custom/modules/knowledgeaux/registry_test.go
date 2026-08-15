@@ -572,6 +572,199 @@ func TestRecoveryRetainsFailedDerivedObjectsForPartialWork(t *testing.T) {
 	require.Zero(t, countOwnership(t, db))
 }
 
+func TestPrepareForDeleteAdoptsHistoricalImageAndKeepsRetryIdempotent(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-2")
+	legacyPath := "local://7/knowledge-1/generation-1-image.png"
+	currentPath := "local://7/knowledge-1/generation-2-image.png"
+	sourcePath := "local://7/knowledge-1/source.pdf"
+	createLegacyImageChunk(
+		t, db, "chunk-generation-1", 1101, 7, "kb-1", "knowledge-1", legacyPath, true,
+	)
+	require.NoError(t, db.Unscoped().Model(&types.Chunk{}).
+		Where("id = ?", "chunk-generation-1").
+		Update("processing_generation", "generation-1").Error)
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	for _, object := range []Object{
+		objectFor(currentPath, "generation-2", KindFanoutImage),
+		objectFor(sourcePath, "generation-2", KindSourceFile),
+	} {
+		object.FallbackProvider = "local"
+		_, err := registry.Register(context.Background(), object)
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Updates(map[string]interface{}{
+			"parse_status": types.ParseStatusDeleting,
+			"file_path":    sourcePath,
+		}).Error)
+	tombstoneRegistryKnowledgeBase(t, db)
+	insertRegistryKBDeleteIntent(t, db, 7, "delete", "kb-1")
+
+	require.NoError(t, registry.PrepareForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{legacyPath, currentPath},
+		[]string{sourcePath},
+	))
+	require.EqualValues(t, 3, countOwnership(t, db))
+	require.Empty(t, local.deleted, "delete preparation must not mutate provider data")
+
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{legacyPath, currentPath, sourcePath},
+	))
+	require.EqualValues(t, 3, countAuxOperation(t, db, operationDeleteComplete))
+	require.ElementsMatch(t, []string{legacyPath, currentPath, sourcePath}, local.deleted)
+
+	// A later subsystem failure re-enters both the preparation and destructive
+	// phases. Existing delete-complete rows must remain authoritative: no new
+	// owned row and no second provider delete may be issued.
+	require.NoError(t, registry.PrepareForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{legacyPath, currentPath},
+		[]string{sourcePath},
+	))
+	require.Zero(t, countAuxOperation(t, db, operationOwned))
+	require.NoError(t, registry.CleanupForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{legacyPath, currentPath, sourcePath},
+	))
+	require.ElementsMatch(t, []string{legacyPath, currentPath, sourcePath}, local.deleted)
+}
+
+func TestPrepareForDeleteBatchAdoptsLargeHistoricalImageSet(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-2")
+	legacyPaths := make([]string, 0, 140)
+	for index := 0; index < 140; index++ {
+		path := fmt.Sprintf("local://7/knowledge-1/historical-%03d.png", index)
+		legacyPaths = append(legacyPaths, path)
+		createLegacyImageChunk(
+			t,
+			db,
+			fmt.Sprintf("chunk-historical-%03d", index),
+			int64(2000+index),
+			7,
+			"kb-1",
+			"knowledge-1",
+			path,
+			true,
+		)
+	}
+	sourcePath := "local://7/knowledge-1/source.pdf"
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	source := objectFor(sourcePath, "generation-2", KindSourceFile)
+	source.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), source)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Updates(map[string]interface{}{
+			"parse_status": types.ParseStatusDeleting,
+			"file_path":    sourcePath,
+		}).Error)
+
+	require.NoError(t, registry.PrepareForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		legacyPaths,
+		[]string{sourcePath},
+	))
+	require.EqualValues(t, 141, countOwnership(t, db))
+	require.Empty(t, local.deleted)
+}
+
+func TestPrepareForDeleteBatchRejectsOneCrossOwnerPathWithoutPartialAdoption(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-2")
+	require.NoError(t, db.Create(&types.Knowledge{
+		ID: "knowledge-2", TenantID: 7, KnowledgeBaseID: "kb-1",
+		Type: "file", ParseStatus: types.ParseStatusCompleted,
+		ProcessingGeneration: "generation-other",
+	}).Error)
+	goodPath := "local://7/knowledge-1/good-historical.png"
+	conflictPath := "local://7/knowledge-1/cross-owner-historical.png"
+	createLegacyImageChunk(t, db, "chunk-good-owner", 2201, 7, "kb-1", "knowledge-1", goodPath, true)
+	createLegacyImageChunk(t, db, "chunk-conflict-owner", 2202, 7, "kb-1", "knowledge-1", conflictPath, true)
+	createLegacyImageChunk(t, db, "chunk-conflict-other", 2203, 7, "kb-1", "knowledge-2", conflictPath, false)
+	sourcePath := "local://7/knowledge-1/source.pdf"
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	source := objectFor(sourcePath, "generation-2", KindSourceFile)
+	source.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), source)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Updates(map[string]interface{}{
+			"parse_status": types.ParseStatusDeleting,
+			"file_path":    sourcePath,
+		}).Error)
+
+	err = registry.PrepareForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{goodPath, conflictPath},
+		[]string{sourcePath},
+	)
+	require.ErrorIs(t, err, ErrBindingMismatch)
+	require.EqualValues(t, 1, countOwnership(t, db), "the source row is the only pre-existing ownership")
+	require.Empty(t, local.deleted)
+}
+
+func TestPrepareForDeleteRejectsUnregisteredPersistentPathBeforeProviderMutation(t *testing.T) {
+	db := openRegistryTestDB(t)
+	createOwner(t, db, types.ParseStatusCompleted, "generation-1")
+	currentPath := "local://7/knowledge-1/image.png"
+	unregisteredSource := "local://7/knowledge-1/source.pdf"
+	local := &fakeFileService{provider: "local", failures: map[string]int{}}
+	registry := testRegistry(db, map[string]*fakeFileService{"local": local})
+	current := objectFor(currentPath, "generation-1", KindFanoutImage)
+	current.FallbackProvider = "local"
+	_, err := registry.Register(context.Background(), current)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&types.Knowledge{}).Where("id = ?", "knowledge-1").
+		Updates(map[string]interface{}{
+			"parse_status": types.ParseStatusDeleting,
+			"file_path":    unregisteredSource,
+		}).Error)
+
+	err = registry.PrepareForDelete(
+		context.Background(),
+		7,
+		"kb-1",
+		"knowledge-1",
+		"local",
+		[]string{currentPath},
+		[]string{unregisteredSource},
+	)
+	require.ErrorIs(t, err, ErrBindingMissing)
+	require.Empty(t, local.deleted)
+	require.EqualValues(t, 1, countOwnership(t, db))
+}
+
 func TestDerivedCleanupAndRecoveryNeverDeletePersistentSources(t *testing.T) {
 	db := openRegistryTestDB(t)
 	createOwner(t, db, types.ParseStatusFailed, "generation-1")

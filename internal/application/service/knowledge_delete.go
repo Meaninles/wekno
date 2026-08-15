@@ -900,6 +900,26 @@ func (s *knowledgeService) deleteKnowledgeListExpected(
 	}
 	logger.Infof(ctx, "Prepared %d knowledge entries for durable deletion", len(knowledgeList))
 
+	// Prove the complete object set before any backend is mutated. Reparse
+	// cleanup deliberately leaves soft-deleted chunks as retry evidence after
+	// consuming the old generation's object ledger. PrepareForDelete safely
+	// re-adopts only those exact historical image paths and then validates the
+	// source plus every registered derivative as one fail-closed set.
+	for _, knowledge := range knowledgeList {
+		if err := s.prepareKnowledgeAuxiliaryForDelete(
+			ctx,
+			knowledgeBases[knowledge.KnowledgeBaseID],
+			knowledge,
+			knowledgeAuxiliaryPaths[knowledge.ID],
+		); err != nil {
+			return fmt.Errorf(
+				"knowledge delete batch: prepare auxiliary objects for %s: %w",
+				knowledge.ID,
+				err,
+			)
+		}
+	}
+
 	wg := errgroup.Group{}
 	// 2. Delete knowledge embeddings from vector store
 	wg.Go(func() error {

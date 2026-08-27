@@ -127,6 +127,19 @@ python -m weknora_eval discover --scenario discovery/scenarios/procurement-multi
 
 首轮 36 个有效对话轮次的审核结论、问题族和后续用例拆分建议见 `discovery/findings/procurement-multiturn-discovery-20260827.md`；对应 gitignored 原始产物的校验值见同目录 manifest。
 
+这 36 轮记录已经由 Codex 整理为第一版稳定、分支安全的多轮 DEV 契约：`datasets/multiturn-dev.v1.jsonl`。它包含 4 个 family、12 个 case、57 个轮次，快速问答、RAG 推理、通用智能体各覆盖全部 family；不包含唯一参考答案，也不依赖某次历史错误回答才成立。整理规则、事实时间线和当前能力边界见 `discovery/findings/procurement-multiturn-contract-curation-20260827.md`。
+
+提交的数据集由可审查的确定性编译器生成，并有测试防止生成器与 JSONL 漂移：
+
+```powershell
+Push-Location custom/services/agent-eval
+python -m curation.build_multiturn_dev_v1
+python -m weknora_eval dataset validate --input datasets/multiturn-dev.v1.jsonl
+Pop-Location
+```
+
+这一版全部固定为 `dev`，只用于定位失败和校准契约；不得直接改为 `gate` 或 `sealed_holdout`。后两者必须使用全新的 family、事实组合和证据问题，防止调试集泄漏与过拟合。
+
 ```text
 生产/验收真实对话
   -> quarantine（needs_codex_review=true）
@@ -165,7 +178,7 @@ custom/services/agent-eval/prepare-runner-env.ps1
 
 ## 指标、评分与门禁
 
-硬指标按 case 契约判定，不要求拟合一篇唯一参考答案：必需/禁止事实、证据 anchor、正文引用与持久化 reference 一致性、检索来源下限、必需/禁止/只读工具、多轮引用清零、响应和延迟边界。可选 LLM judge 只给软分和 pairwise 解释，不能覆盖硬失败。
+硬指标按 case 契约判定，不要求拟合一篇唯一参考答案：必需/禁止事实、当前/废弃/待确认状态及其分栏归属、禁止推断与行动边界、决策延期条件、关键主张与正确证据的邻接绑定、证据 anchor、正文引用与持久化 reference 一致性、检索来源下限、必需/禁止/只读工具、工具调用上限、多轮引用清零、响应和延迟边界。可选 LLM judge 只给软分和 pairwise 解释，不能覆盖硬失败。
 
 门禁不计算一个容易掩盖问题的加权总分，而是依次检查：
 
@@ -222,3 +235,5 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 - `weknora_eval/`：数据集、runner、确定性评分、三态门禁和 Langfuse experiment 适配器。
 - `policies/release-gate.v1.json`：发布门禁策略。
 - `datasets/examples.v1.jsonl`：RAG、文档处理和长对话契约示例。
+- `datasets/multiturn-dev.v1.jsonl`：由真实发现记录整理出的三智能体多轮 DEV 契约。
+- `curation/build_multiturn_dev_v1.py`：上述数据集的可审查、确定性编译器。

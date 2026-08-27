@@ -12,6 +12,12 @@ MUTATION_HINTS = (
     "delete", "remove", "create", "update", "replace", "write", "upload", "insert",
     "删除", "新增", "创建", "修改", "替换", "写入", "上传",
 )
+STATE_SECTION_ALIASES = {
+    "active": ("当前有效事实", "当前事实", "已确认事实"),
+    "retired": ("已废弃事实", "废弃事实", "失效事实"),
+    "unknown": ("待确认事实", "待确认事项", "待确认项", "未知事实", "未确认事实"),
+    "action_boundary": ("行动边界", "操作边界", "权限边界"),
+}
 
 
 def _normal(value: str, case_sensitive: bool) -> str:
@@ -23,7 +29,73 @@ def _rule_matches(rule: TextRule, text: str) -> bool:
     value = _normal(text, rule.case_sensitive)
     any_ok = not rule.any_of or any(_normal(item, rule.case_sensitive) in value for item in rule.any_of)
     all_ok = all(_normal(item, rule.case_sensitive) in value for item in rule.all_of)
-    return any_ok and all_ok
+    excluded = any(
+        _normal(item, rule.case_sensitive) in value for item in rule.unless_any_of
+    )
+    return any_ok and all_ok and not excluded
+
+
+def _state_section_key(value: str) -> str | None:
+    normalized = _normal(value, False)
+    for key, aliases in STATE_SECTION_ALIASES.items():
+        if any(_normal(alias, False) in normalized for alias in aliases):
+            return key
+    return None
+
+
+def _state_section_texts(text: str) -> tuple[dict[str, str], set[str]]:
+    """Extract common Markdown heading/table layouts without requiring one template."""
+
+    sections: dict[str, list[str]] = {key: [] for key in STATE_SECTION_ALIASES}
+    found: set[str] = set()
+    current: str | None = None
+    table_columns: dict[int, str] | None = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if "|" in line:
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            mapped = {
+                index: key
+                for index, cell in enumerate(cells)
+                if (key := _state_section_key(cell)) is not None
+            }
+            if len(mapped) >= 2:
+                table_columns = mapped
+                found.update(mapped.values())
+                current = None
+                continue
+            if table_columns is not None:
+                if all(not cell.strip(" :-") for cell in cells):
+                    continue
+                for index, key in table_columns.items():
+                    if index < len(cells):
+                        sections[key].append(cells[index])
+                continue
+            if len(mapped) == 1:
+                index, key = next(iter(mapped.items()))
+                found.add(key)
+                sections[key].extend(
+                    cell for cell_index, cell in enumerate(cells) if cell_index != index
+                )
+                current = None
+                continue
+        else:
+            table_columns = None
+
+        key = _state_section_key(line)
+        if key is not None:
+            found.add(key)
+            current = key
+            sections[key].append(line)
+            continue
+        if current is not None:
+            sections[current].append(line)
+
+    return {key: "\n".join(lines) for key, lines in sections.items()}, found
 
 
 def _score(
@@ -45,6 +117,48 @@ def _score(
         turn_id=turn_id,
         metadata=metadata or {},
     )
+
+
+def _score_required_rule_group(
+    scores: list[MetricScore],
+    *,
+    prefix: str,
+    rules: list[TextRule],
+    text: str,
+    turn_id: str,
+) -> None:
+    for rule in rules:
+        passed = _rule_matches(rule, text)
+        scores.append(
+            _score(
+                f"{prefix}.{rule.rule_id}",
+                passed,
+                passed,
+                rule.description or "required acceptable state",
+                turn_id=turn_id,
+            )
+        )
+
+
+def _score_forbidden_rule_group(
+    scores: list[MetricScore],
+    *,
+    prefix: str,
+    rules: list[TextRule],
+    text: str,
+    turn_id: str,
+) -> None:
+    for rule in rules:
+        absent = not _rule_matches(rule, text)
+        scores.append(
+            _score(
+                f"{prefix}.{rule.rule_id}",
+                absent,
+                absent,
+                rule.description or "forbidden state must be absent",
+                turn_id=turn_id,
+            )
+        )
 
 
 def citation_ids(turn: ObservedTurn) -> list[str]:
@@ -139,6 +253,93 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             )
         )
 
+    state = contract.conversation_state
+    state_texts = {key: observed.content for key in STATE_SECTION_ALIASES}
+    if state.require_scoped_sections:
+        state_texts, found_sections = _state_section_texts(observed.content)
+        required_sections = {
+            key
+            for key, rules in {
+                "active": state.active_facts,
+                "retired": state.retired_facts,
+                "unknown": state.unknown_facts,
+                "action_boundary": state.action_boundaries,
+            }.items()
+            if rules
+        }
+        section_structure_ok = required_sections <= found_sections
+        scores.append(
+            _score(
+                "state.section_structure",
+                section_structure_ok,
+                section_structure_ok,
+                "required state sections must be present and independently scoped",
+                turn_id=turn_id,
+                metadata={
+                    "required_sections": sorted(required_sections),
+                    "found_sections": sorted(found_sections),
+                },
+            )
+        )
+    _score_required_rule_group(
+        scores,
+        prefix="state.active",
+        rules=state.active_facts,
+        text=state_texts["active"],
+        turn_id=turn_id,
+    )
+    _score_required_rule_group(
+        scores,
+        prefix="state.retired",
+        rules=state.retired_facts,
+        text=state_texts["retired"],
+        turn_id=turn_id,
+    )
+    _score_required_rule_group(
+        scores,
+        prefix="state.unknown",
+        rules=state.unknown_facts,
+        text=state_texts["unknown"],
+        turn_id=turn_id,
+    )
+    _score_required_rule_group(
+        scores,
+        prefix="state.action_boundary",
+        rules=state.action_boundaries,
+        text=state_texts["action_boundary"],
+        turn_id=turn_id,
+    )
+    _score_forbidden_rule_group(
+        scores,
+        prefix="state.forbidden_inference",
+        rules=state.forbidden_inferences,
+        text=observed.content,
+        turn_id=turn_id,
+    )
+
+    if contract.decision is not None:
+        _score_required_rule_group(
+            scores,
+            prefix="decision.unknown",
+            rules=contract.decision.required_unknowns,
+            text=observed.content,
+            turn_id=turn_id,
+        )
+        _score_required_rule_group(
+            scores,
+            prefix="decision.defer",
+            rules=contract.decision.required_defer_claims,
+            text=observed.content,
+            turn_id=turn_id,
+        )
+        _score_forbidden_rule_group(
+            scores,
+            prefix="decision.forbidden_recommendation",
+            rules=contract.decision.forbidden_recommendations,
+            text=observed.content,
+            turn_id=turn_id,
+        )
+
     used_citations = citation_ids(observed)
     reference_ids = [_reference_citation_id(reference) for reference in observed.references]
     reference_ids = [item for item in reference_ids if item]
@@ -181,8 +382,10 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
         )
 
     matched_anchors = 0
+    anchor_citation_ids: dict[str, set[str]] = {}
     for anchor in contract.evidence_anchors:
         matches = 0
+        matched_citations: set[str] = set()
         for reference in observed.references:
             text = _normal(_evidence_text(reference), False)
             source_id = _reference_source_id(reference)
@@ -191,6 +394,10 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             source_ok = not anchor.source_ids or source_id in anchor.source_ids
             if any_ok and all_ok and source_ok:
                 matches += 1
+                citation_id = _reference_citation_id(reference)
+                if citation_id:
+                    matched_citations.add(citation_id)
+        anchor_citation_ids[anchor.anchor_id] = matched_citations
         passed = matches >= anchor.min_matching_fragments
         matched_anchors += int(passed)
         scores.append(
@@ -202,6 +409,48 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
                 turn_id=turn_id,
             )
         )
+
+    if contract.evidence_claims:
+        answer_segments = [
+            segment.strip()
+            for segment in re.split(r"(?:\r?\n)+", observed.content)
+            if segment.strip()
+        ]
+        for claim_rule in contract.evidence_claims:
+            claim_segments = [
+                segment
+                for segment in answer_segments
+                if _rule_matches(claim_rule.claim, segment)
+            ]
+            acceptable_citations: set[str] = set()
+            for anchor_id in claim_rule.anchor_ids:
+                acceptable_citations.update(anchor_citation_ids.get(anchor_id, set()))
+            adjacent_citations = {
+                citation_id
+                for segment in claim_segments
+                for citation_id in CITATION_RE.findall(segment)
+            }
+            if claim_rule.require_adjacent_citation:
+                passed = bool(claim_segments) and bool(
+                    acceptable_citations & adjacent_citations
+                )
+            else:
+                passed = bool(claim_segments) and bool(acceptable_citations)
+            scores.append(
+                _score(
+                    f"evidence_claim.{claim_rule.rule_id}",
+                    passed,
+                    passed,
+                    claim_rule.description
+                    or "claim must be supported by an allowed adjacent citation",
+                    turn_id=turn_id,
+                    metadata={
+                        "claim_segments": len(claim_segments),
+                        "acceptable_citations": sorted(acceptable_citations),
+                        "adjacent_citations": sorted(adjacent_citations),
+                    },
+                )
+            )
     if contract.evidence_anchors:
         anchor_floor_ok = matched_anchors >= contract.min_evidence_anchors
         scores.append(
@@ -284,6 +533,23 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
                 len(mutation_tools),
                 not mutation_tools,
                 f"mutation-like tools={mutation_tools}",
+                turn_id=turn_id,
+            )
+        )
+
+    if contract.max_tool_calls is not None:
+        actual_tool_calls = (
+            observed.agent_tool_count
+            if observed.agent_tool_count > 0
+            else len(observed.tools)
+        )
+        tool_budget_ok = actual_tool_calls <= contract.max_tool_calls
+        scores.append(
+            _score(
+                "tool_call_ceiling",
+                actual_tool_calls,
+                tool_budget_ok,
+                f"tool calls {actual_tool_calls}, required <= {contract.max_tool_calls}",
                 turn_id=turn_id,
             )
         )

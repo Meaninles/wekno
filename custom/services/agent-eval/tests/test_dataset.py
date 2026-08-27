@@ -15,6 +15,11 @@ from weknora_eval.models import (
     AgentSelector,
     Capability,
     CaseSpec,
+    ConversationStateContract,
+    DecisionContract,
+    DecisionMode,
+    EvidenceAnchor,
+    EvidenceClaimRule,
     Split,
     TextRule,
     TurnContract,
@@ -171,6 +176,68 @@ class DatasetTests(unittest.TestCase):
                 build_quarantine_from_transcripts(
                     [path], suite="suite", agent_id="fallback-agent"
                 )
+
+    def test_state_only_contract_is_an_executable_deterministic_signal(self) -> None:
+        case = CaseSpec(
+            case_id="state-case",
+            family_id="state-family",
+            suite="suite",
+            split=Split.GATE,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            turns=[
+                TurnSpec(
+                    turn_id="turn-1",
+                    query="audit",
+                    contract=TurnContract(
+                        conversation_state=ConversationStateContract(
+                            active_facts=[
+                                TextRule(rule_id="budget", all_of=["390万元"])
+                            ]
+                        )
+                    ),
+                )
+            ],
+        )
+        self.assertEqual(validate_dataset([case]), [])
+
+    def test_evidence_claim_cannot_reference_an_unknown_anchor(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown anchors"):
+            TurnContract(
+                evidence_anchors=[
+                    EvidenceAnchor(anchor_id="known", all_of=["制度"])
+                ],
+                evidence_claims=[
+                    EvidenceClaimRule(
+                        rule_id="claim",
+                        claim=TextRule(rule_id="claim-text", all_of=["制度"]),
+                        anchor_ids=["missing"],
+                    )
+                ],
+            )
+
+    def test_empty_final_allowed_decision_is_not_an_executable_gate_signal(self) -> None:
+        case = CaseSpec(
+            case_id="empty-decision",
+            family_id="empty-decision-family",
+            suite="suite",
+            split=Split.GATE,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            turns=[
+                TurnSpec(
+                    turn_id="turn-1",
+                    query="decide",
+                    contract=TurnContract(
+                        decision=DecisionContract(mode=DecisionMode.FINAL_ALLOWED)
+                    ),
+                )
+            ],
+        )
+
+        self.assertTrue(
+            any("deterministic hard constraints" in error for error in validate_dataset([case]))
+        )
 
 
 if __name__ == "__main__":

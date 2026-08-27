@@ -115,11 +115,26 @@ def validate_dataset(cases: list[CaseSpec]) -> list[str]:
                     [
                         bool(contract.required_claims),
                         bool(contract.forbidden_claims),
+                        bool(contract.conversation_state.active_facts),
+                        bool(contract.conversation_state.retired_facts),
+                        bool(contract.conversation_state.unknown_facts),
+                        bool(contract.conversation_state.forbidden_inferences),
+                        bool(contract.conversation_state.action_boundaries),
+                        bool(
+                            contract.decision
+                            and (
+                                contract.decision.required_unknowns
+                                or contract.decision.required_defer_claims
+                                or contract.decision.forbidden_recommendations
+                            )
+                        ),
                         bool(contract.evidence_anchors),
+                        bool(contract.evidence_claims),
                         bool(contract.min_retrieved_sources),
                         contract.citation_required,
                         bool(contract.tool_policy.required_tools),
                         bool(contract.tool_policy.forbidden_tools),
+                        contract.max_tool_calls is not None,
                         contract.max_total_latency_ms is not None,
                     ]
                 )

@@ -56,12 +56,65 @@ class TextRule(StrictModel):
     description: str = ""
     any_of: list[str] = Field(default_factory=list)
     all_of: list[str] = Field(default_factory=list)
+    unless_any_of: list[str] = Field(default_factory=list)
     case_sensitive: bool = False
 
     @model_validator(mode="after")
     def require_pattern(self) -> "TextRule":
         if not self.any_of and not self.all_of:
             raise ValueError("text rule requires any_of or all_of")
+        return self
+
+
+class ConversationStateContract(StrictModel):
+    """Deterministic multi-turn state assertions without a single gold answer."""
+
+    active_facts: list[TextRule] = Field(default_factory=list)
+    retired_facts: list[TextRule] = Field(default_factory=list)
+    unknown_facts: list[TextRule] = Field(default_factory=list)
+    forbidden_inferences: list[TextRule] = Field(default_factory=list)
+    action_boundaries: list[TextRule] = Field(default_factory=list)
+    require_scoped_sections: bool = False
+
+    @model_validator(mode="after")
+    def require_unique_rule_ids(self) -> "ConversationStateContract":
+        rules = [
+            *self.active_facts,
+            *self.retired_facts,
+            *self.unknown_facts,
+            *self.forbidden_inferences,
+            *self.action_boundaries,
+        ]
+        rule_ids = [rule.rule_id for rule in rules]
+        if len(rule_ids) != len(set(rule_ids)):
+            raise ValueError("conversation state rule_id must be unique")
+        return self
+
+
+class DecisionMode(str, Enum):
+    DEFER = "defer"
+    COMPARE_ONLY = "compare_only"
+    FINAL_ALLOWED = "final_allowed"
+
+
+class DecisionContract(StrictModel):
+    """Controls whether a turn may advance from analysis to a final decision."""
+
+    mode: DecisionMode
+    required_unknowns: list[TextRule] = Field(default_factory=list)
+    required_defer_claims: list[TextRule] = Field(default_factory=list)
+    forbidden_recommendations: list[TextRule] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_defer_signal(self) -> "DecisionContract":
+        if (
+            self.mode in {DecisionMode.DEFER, DecisionMode.COMPARE_ONLY}
+            and not self.required_defer_claims
+            and not self.forbidden_recommendations
+        ):
+            raise ValueError(
+                "defer/compare_only decision contract requires a deterministic defer or forbidden recommendation rule"
+            )
         return self
 
 
@@ -80,6 +133,22 @@ class EvidenceAnchor(StrictModel):
         return self
 
 
+class EvidenceClaimRule(StrictModel):
+    """Binds one answer claim to one or more acceptable evidence anchors."""
+
+    rule_id: str
+    description: str = ""
+    claim: TextRule
+    anchor_ids: list[str]
+    require_adjacent_citation: bool = True
+
+    @model_validator(mode="after")
+    def require_anchor(self) -> "EvidenceClaimRule":
+        if not self.anchor_ids:
+            raise ValueError("evidence claim requires at least one anchor_id")
+        return self
+
+
 class ToolPolicy(StrictModel):
     read_only: bool = True
     required_tools: list[str] = Field(default_factory=list)
@@ -90,7 +159,12 @@ class ToolPolicy(StrictModel):
 class TurnContract(StrictModel):
     required_claims: list[TextRule] = Field(default_factory=list)
     forbidden_claims: list[TextRule] = Field(default_factory=list)
+    conversation_state: ConversationStateContract = Field(
+        default_factory=ConversationStateContract
+    )
+    decision: DecisionContract | None = None
     evidence_anchors: list[EvidenceAnchor] = Field(default_factory=list)
+    evidence_claims: list[EvidenceClaimRule] = Field(default_factory=list)
     min_evidence_anchors: int = Field(default=0, ge=0)
     citation_required: bool = False
     min_citations: int = Field(default=0, ge=0)
@@ -99,6 +173,7 @@ class TurnContract(StrictModel):
     tool_policy: ToolPolicy = Field(default_factory=ToolPolicy)
     min_response_chars: int = Field(default=1, ge=0)
     max_response_chars: int | None = Field(default=None, ge=1)
+    max_tool_calls: int | None = Field(default=None, ge=0)
     max_total_latency_ms: int | None = Field(default=None, ge=1)
     forbid_stale_citations_without_retrieval: bool = False
     judge_rubric: str | None = None
@@ -107,6 +182,19 @@ class TurnContract(StrictModel):
     def validate_anchor_floor(self) -> "TurnContract":
         if self.min_evidence_anchors > len(self.evidence_anchors):
             raise ValueError("min_evidence_anchors exceeds available anchors")
+        anchor_ids = [anchor.anchor_id for anchor in self.evidence_anchors]
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise ValueError("evidence anchor_id must be unique inside a turn")
+        known_anchor_ids = set(anchor_ids)
+        evidence_claim_ids = [claim.rule_id for claim in self.evidence_claims]
+        if len(evidence_claim_ids) != len(set(evidence_claim_ids)):
+            raise ValueError("evidence claim rule_id must be unique inside a turn")
+        for claim in self.evidence_claims:
+            unknown = sorted(set(claim.anchor_ids) - known_anchor_ids)
+            if unknown:
+                raise ValueError(
+                    f"evidence claim {claim.rule_id} references unknown anchors: {unknown}"
+                )
         if self.citation_required and self.min_citations == 0:
             self.min_citations = 1
         return self

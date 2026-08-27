@@ -44,6 +44,14 @@ func GinMiddleware() gin.HandlerFunc {
 		}
 
 		newCtx, trace := mgr.StartTrace(ctx, opts)
+		if !trace.Recording() {
+			// Keep the unsampled decision in the request context. Model adapters
+			// see it through EnabledFor and bypass all recording work.
+			c.Request = c.Request.WithContext(newCtx)
+			c.Next()
+			trace.Finish(nil, nil)
+			return
+		}
 		c.Request = c.Request.WithContext(newCtx)
 
 		c.Next()

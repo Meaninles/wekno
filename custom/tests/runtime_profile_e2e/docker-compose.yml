@@ -1,16 +1,20 @@
-name: weknora-runtime-profile-e2e
+name: ${WEKNORA_RUNTIME_PROJECT_NAME:-weknora-runtime-profile-e2e}
 
 x-runtime-common: &runtime-common
-  image: weknora-runtime-profile-e2e:local
+  image: ${WEKNORA_RUNTIME_IMAGE:-weknora-runtime-profile-e2e:local}
   build:
     context: ../../..
     dockerfile: custom/tests/runtime_profile_e2e/Dockerfile
+    args:
+      RUNTIME_BASE_IMAGE: ${WEKNORA_RUNTIME_BASE_IMAGE:-weknora-dev-app:local}
   working_dir: /workspace
   env_file:
-    - ../../../.env
+    - ${WEKNORA_RUNTIME_ENV_FILE:-../../../.env}
   environment: &runtime-environment
     GIN_MODE: release
     CUSTOM_RUNTIME_ENV: production
+    CUSTOM_AGENT_EVAL_MODE: ${CUSTOM_AGENT_EVAL_MODE:-production}
+    CUSTOM_AGENT_EVAL_CAPTURE_POLICY: ${CUSTOM_AGENT_EVAL_CAPTURE_POLICY:-metadata}
     CUSTOM_RUNTIME_ROLE_ENFORCED: "true"
     CUSTOM_POSTGRES_MAX_CONNECTIONS: "100"
     CUSTOM_RUNTIME_API_REPLICAS: "3"
@@ -22,22 +26,29 @@ x-runtime-common: &runtime-common
     CUSTOM_RUNTIME_ROLLING_CONNECTION_BUDGET: "70"
     AUTO_MIGRATE: "false"
     CUSTOM_AUTO_MIGRATE: "false"
-    DB_HOST: postgres
+    DB_HOST: ${WEKNORA_RUNTIME_DB_HOST:-postgres}
     DB_PORT: "5432"
-    DEV_DOCKER_DB_HOST: postgres
+    DEV_DOCKER_DB_HOST: ${WEKNORA_RUNTIME_DB_HOST:-postgres}
     DEV_DOCKER_DB_PORT: "5432"
-    REDIS_ADDR: redis:6379
-    DEV_DOCKER_REDIS_ADDR: redis:6379
-    MINIO_ENDPOINT: minio:9000
-    DEV_DOCKER_MINIO_ENDPOINT: minio:9000
+    REDIS_ADDR: ${WEKNORA_RUNTIME_REDIS_ADDR:-redis:6379}
+    DEV_DOCKER_REDIS_ADDR: ${WEKNORA_RUNTIME_REDIS_ADDR:-redis:6379}
+    MINIO_ENDPOINT: ${WEKNORA_RUNTIME_MINIO_ENDPOINT:-minio:9000}
+    DEV_DOCKER_MINIO_ENDPOINT: ${WEKNORA_RUNTIME_MINIO_ENDPOINT:-minio:9000}
     MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY_ID:-minioadmin}
     MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_ACCESS_KEY:-minioadmin}
     MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-weknora-original-inputs}
     MINIO_PATH_PREFIX: ${MINIO_PATH_PREFIX:-weknora/__weknora_private_knowledge_objects_v1__/deployment/dev-local/namespace/74b3d025-5a14-4a6d-b0fc-ff228d0ba98c/}
     STORAGE_TYPE: minio
-    MILVUS_ADDRESS: milvus:19530
-    NEO4J_URI: bolt://neo4j:7687
-    QDRANT_HOST: qdrant
+    MILVUS_ADDRESS: ${WEKNORA_RUNTIME_MILVUS_ADDRESS:-milvus:19530}
+    NEO4J_URI: ${WEKNORA_RUNTIME_NEO4J_URI:-bolt://neo4j:7687}
+    QDRANT_HOST: ${WEKNORA_RUNTIME_QDRANT_HOST:-qdrant}
+    LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+    LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+    LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+    LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-production}
+    LANGFUSE_RELEASE: ${LANGFUSE_RELEASE:-}
+    LANGFUSE_SAMPLE_RATE: ${LANGFUSE_SAMPLE_RATE:-0}
     DOCREADER_TRANSPORT: grpc
     DUCKDB_SKIP_EXTENSION_LOAD: "true"
     LOCAL_STORAGE_BASE_DIR: /workspace/.local-data/files
@@ -45,8 +56,8 @@ x-runtime-common: &runtime-common
     CUSTOM_MODEL_ADMISSION_FAIL_CLOSED: "true"
     CUSTOM_MODEL_ADMISSION_KEY_PREFIX: "weknora:model-admission:v2:"
     CUSTOM_DOCUMENT_QUEUE_TRUST_STABLE_INSTANCE_RESTART: "true"
-    CUSTOM_GENERAL_AGENT_URL: http://weknora-custom-general-agent:8091
-    CUSTOM_DOCUMENT_PROCESSING_AGENT_URL: http://weknora-custom-document-processing-agent:8091
+    CUSTOM_GENERAL_AGENT_URL: ${WEKNORA_RUNTIME_GENERAL_AGENT_URL:-http://weknora-custom-general-agent:8091}
+    CUSTOM_DOCUMENT_PROCESSING_AGENT_URL: ${WEKNORA_RUNTIME_DOCUMENT_PROCESSING_AGENT_URL:-http://weknora-custom-document-processing-agent:8091}
     CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
     CUSTOM_GENERAL_AGENT_TOOL_CALLBACK_URL: http://runtime-entry:8080/api/v1/custom/general-agent/internal/tools/call
     CUSTOM_GENERAL_AGENT_ARTIFACT_UPLOAD_URL: http://runtime-entry:8080/api/v1/custom/general-agent/internal/artifacts/upload
@@ -78,14 +89,14 @@ x-runtime-common: &runtime-common
 services:
   migration:
     <<: *runtime-common
-    container_name: weknora-runtime-migration
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-migration
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: migration
-      # The local developer database may have native migrations from another
-      # active branch. Keep native schema untouched and run custom migrations
-      # through CUSTOM_AUTO_MIGRATE only.
-      AUTO_MIGRATE: "false"
+      # Existing main-worktree databases keep native migrations disabled.
+      # A brand-new isolated eval database opts in exactly once through the
+      # environment override below.
+      AUTO_MIGRATE: ${WEKNORA_RUNTIME_NATIVE_AUTO_MIGRATE:-false}
       CUSTOM_AUTO_MIGRATE: "true"
       CUSTOM_DATABASE_POOL_MAX_OPEN_CONNS: "3"
       CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
@@ -94,7 +105,7 @@ services:
 
   runtime-api-1:
     <<: *runtime-common
-    container_name: weknora-runtime-api-1
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-api-1
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: api
@@ -107,7 +118,7 @@ services:
 
   runtime-api-2:
     <<: *runtime-common
-    container_name: weknora-runtime-api-2
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-api-2
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: api
@@ -118,7 +129,7 @@ services:
 
   runtime-api-3:
     <<: *runtime-common
-    container_name: weknora-runtime-api-3
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-api-3
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: api
@@ -129,7 +140,7 @@ services:
 
   runtime-parse-1:
     <<: *runtime-common
-    container_name: weknora-runtime-parse-1
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-parse-1
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: parse-worker
@@ -144,7 +155,7 @@ services:
 
   runtime-parse-2:
     <<: *runtime-common
-    container_name: weknora-runtime-parse-2
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-parse-2
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: parse-worker
@@ -161,7 +172,7 @@ services:
 
   runtime-derivative-1:
     <<: *runtime-common
-    container_name: weknora-runtime-derivative-1
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-derivative-1
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: derivative-worker
@@ -170,7 +181,7 @@ services:
 
   runtime-derivative-2:
     <<: *runtime-common
-    container_name: weknora-runtime-derivative-2
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-derivative-2
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: derivative-worker
@@ -179,7 +190,7 @@ services:
 
   runtime-wiki-1:
     <<: *runtime-common
-    container_name: weknora-runtime-wiki-1
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-wiki-1
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: wiki-worker
@@ -188,7 +199,7 @@ services:
 
   runtime-wiki-2:
     <<: *runtime-common
-    container_name: weknora-runtime-wiki-2
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-wiki-2
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: wiki-worker
@@ -197,7 +208,7 @@ services:
 
   runtime-maintenance-1:
     <<: *runtime-common
-    container_name: weknora-runtime-maintenance-1
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-maintenance-1
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: maintenance
@@ -206,7 +217,7 @@ services:
 
   runtime-maintenance-2:
     <<: *runtime-common
-    container_name: weknora-runtime-maintenance-2
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-maintenance-2
     environment:
       <<: *runtime-environment
       WEKNORA_RUNTIME_ROLE: maintenance
@@ -214,8 +225,8 @@ services:
       CUSTOM_DATABASE_POOL_MAX_IDLE_CONNS: "1"
 
   runtime-docreader-2:
-    image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
-    container_name: weknora-runtime-docreader-2
+    image: ${WEKNORA_RUNTIME_DOCREADER_IMAGE:-wechatopenai/weknora-docreader:latest}
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-docreader-2
     environment:
       DOCREADER_IMAGE_OUTPUT_DIR: /tmp/docreader
       DOCREADER_HEALTH_GRPC_PORT: "50052"
@@ -233,8 +244,8 @@ services:
     restart: "no"
 
   runtime-docreader-3:
-    image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
-    container_name: weknora-runtime-docreader-3
+    image: ${WEKNORA_RUNTIME_DOCREADER_IMAGE:-wechatopenai/weknora-docreader:latest}
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-docreader-3
     environment:
       DOCREADER_IMAGE_OUTPUT_DIR: /tmp/docreader
       DOCREADER_HEALTH_GRPC_PORT: "50052"
@@ -253,7 +264,7 @@ services:
 
   runtime-docreader-entry:
     image: haproxy:3.2-alpine
-    container_name: weknora-runtime-docreader-entry
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-docreader-entry
     depends_on:
       runtime-docreader-2:
         condition: service_healthy
@@ -265,11 +276,17 @@ services:
       weknora-dev:
         aliases:
           - runtime-docreader-entry
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "50051"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: "no"
 
   runtime-entry:
     image: haproxy:3.2-alpine
-    container_name: weknora-runtime-entry
+    container_name: ${WEKNORA_RUNTIME_CONTAINER_PREFIX:-weknora-runtime}-entry
     depends_on:
       runtime-api-1:
         condition: service_healthy
@@ -280,20 +297,26 @@ services:
     volumes:
       - ./haproxy-api.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
-      - "8080:8080"
+      - "${WEKNORA_RUNTIME_API_PORT:-8080}:8080"
     networks:
       weknora-dev:
         aliases:
           - runtime-entry
           - app-dev
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: "no"
 
 networks:
   weknora-dev:
     external: true
-    name: weknora_WeKnora-network-dev
+    name: ${WEKNORA_RUNTIME_NETWORK_NAME:-weknora_WeKnora-network-dev}
 
 volumes:
   weknora-go-mod-cache:
     external: true
-    name: weknora_go-mod-cache-dev
+    name: ${WEKNORA_RUNTIME_GO_MOD_CACHE_NAME:-weknora_go-mod-cache-dev}

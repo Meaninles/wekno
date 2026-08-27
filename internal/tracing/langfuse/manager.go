@@ -2,31 +2,23 @@ package langfuse
 
 import (
 	"context"
-	"math/rand"
+	"encoding/base64"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
-	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// Manager is the public façade of the langfuse package. A singleton is
-// installed via Init(); callers should treat a nil *Manager as "disabled"
-// and still invoke methods — every public method tolerates a nil receiver.
 type Manager struct {
-	cfg    Config
-	client *client
-
-	queue    chan ingestionEvent
-	done     chan struct{}
-	workerWG sync.WaitGroup
+	cfg      Config
+	provider *sdktrace.TracerProvider
+	tracer   trace.Tracer
 	closed   atomic.Bool
-
-	// rng is used for sampling decisions. Guarded by rngMu because
-	// math/rand.Source isn't goroutine-safe.
-	rngMu sync.Mutex
-	rng   *rand.Rand
 }
 
 var (
@@ -34,152 +26,109 @@ var (
 	global   *Manager
 )
 
-// Init builds a Manager from cfg and installs it as the package-wide
-// singleton. When cfg.Enabled is false this returns a disabled manager that
-// behaves as a no-op for every public method.
 func Init(cfg Config) (*Manager, error) {
+	manager := &Manager{cfg: cfg}
+	if cfg.AgentEval.Warning != "" {
+		logger.Warnf(context.Background(), "[Langfuse] %s", cfg.AgentEval.Warning)
+	}
 	if err := cfg.Validate(); err != nil {
-		return nil, err
+		logger.Warnf(context.Background(), "[Langfuse] disabled after invalid config: %v", err)
+		manager.cfg.Enabled = false
+		installGlobal(manager)
+		return manager, nil
 	}
-	m := &Manager{cfg: cfg}
-	if cfg.Enabled {
-		m.client = newClient(cfg)
-		m.queue = make(chan ingestionEvent, cfg.QueueSize)
-		m.done = make(chan struct{})
-		m.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-		m.workerWG.Add(1)
-		go m.runWorker()
+	if !cfg.Enabled || cfg.SampleRate == 0 {
+		installGlobal(manager)
+		return manager, nil
 	}
-
-	globalMu.Lock()
-	global = m
-	globalMu.Unlock()
-
-	if cfg.Enabled {
-		logger.Infof(context.Background(),
-			"[Langfuse] enabled host=%s flush_at=%d flush_interval=%s sample_rate=%.2f",
-			cfg.Host, cfg.FlushAt, cfg.FlushInterval, cfg.SampleRate,
-		)
+	authorization := "Basic " + base64.StdEncoding.EncodeToString([]byte(cfg.PublicKey+":"+cfg.SecretKey))
+	exporter, err := otlptracehttp.New(
+		context.Background(),
+		otlptracehttp.WithEndpointURL(cfg.OTLPTraceEndpoint()),
+		otlptracehttp.WithHeaders(map[string]string{
+			"Authorization":                authorization,
+			"x-langfuse-ingestion-version": "4",
+		}),
+		otlptracehttp.WithTimeout(cfg.RequestTimeout),
+		otlptracehttp.WithCompression(otlptracehttp.GzipCompression),
+	)
+	if err != nil {
+		logger.Warnf(context.Background(), "[Langfuse] OTLP exporter init failed; recorder disabled: %v", err)
+		manager.cfg.Enabled = false
+		installGlobal(manager)
+		return manager, nil
 	}
-	return m, nil
+	manager = newManagerWithExporter(cfg, exporter)
+	installGlobal(manager)
+	logger.Infof(
+		context.Background(),
+		"[Langfuse] OTLP enabled host=%s mode=%s capture=%s sample_rate=%.3f queue=%d",
+		cfg.Host, cfg.AgentEval.Mode, cfg.AgentEval.CapturePolicy, cfg.SampleRate, cfg.QueueSize,
+	)
+	return manager, nil
 }
 
-// GetManager returns the installed singleton, or nil if Init has not been
-// called. Callers must tolerate a nil return.
+func newManagerWithExporter(cfg Config, exporter sdktrace.SpanExporter) *Manager {
+	res := resource.NewSchemaless(
+		attribute.String("service.name", "weknora"),
+		attribute.String("service.version", cfg.Release),
+		attribute.String("deployment.environment.name", cfg.Environment),
+	)
+	processor := sdktrace.NewBatchSpanProcessor(
+		exporter,
+		sdktrace.WithMaxQueueSize(cfg.QueueSize),
+		sdktrace.WithMaxExportBatchSize(cfg.FlushAt),
+		sdktrace.WithBatchTimeout(cfg.FlushInterval),
+		sdktrace.WithExportTimeout(cfg.RequestTimeout),
+	)
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SampleRate))),
+		sdktrace.WithResource(res),
+		sdktrace.WithSpanProcessor(processor),
+	)
+	return &Manager{
+		cfg:      cfg,
+		provider: provider,
+		tracer:   provider.Tracer("github.com/Tencent/WeKnora/internal/tracing/langfuse"),
+	}
+}
+
+func installGlobal(manager *Manager) {
+	globalMu.Lock()
+	global = manager
+	globalMu.Unlock()
+}
+
 func GetManager() *Manager {
 	globalMu.RLock()
 	defer globalMu.RUnlock()
 	return global
 }
 
-// Enabled reports whether the manager would actually emit events.
 func (m *Manager) Enabled() bool {
-	return m != nil && m.cfg.Enabled && !m.closed.Load()
+	return m != nil && m.cfg.Enabled && m.cfg.SampleRate > 0 && m.provider != nil && !m.closed.Load()
 }
 
-// Shutdown drains pending events, signals the worker to stop and waits for it.
-// Safe to call multiple times.
-func (m *Manager) Shutdown(ctx context.Context) error {
-	if m == nil || !m.cfg.Enabled {
-		return nil
-	}
-	if !m.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-	close(m.done)
-
-	doneCh := make(chan struct{})
-	go func() {
-		m.workerWG.Wait()
-		close(doneCh)
-	}()
-	select {
-	case <-doneCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// enqueue drops silently when either disabled, full or closed. Langfuse is
-// observability, not business logic — back-pressure or failures must never
-// block the request path.
-func (m *Manager) enqueue(ev ingestionEvent) {
-	if !m.Enabled() {
-		return
-	}
-	select {
-	case m.queue <- ev:
-	default:
-		if m.cfg.Debug {
-			logger.Warnf(context.Background(), "[Langfuse] queue full, dropping event type=%s", ev.Type)
-		}
-	}
-}
-
-// sample decides whether to emit based on SampleRate. Sampling is applied once
-// per trace; observations attached to an already-sampled trace are always kept
-// (Langfuse itself would drop orphaned observations anyway).
-func (m *Manager) sample() bool {
+// EnabledFor is the hot-path guard used by model adapters. An unsampled
+// parent is a final decision: adapters must call the business implementation
+// directly instead of rebuilding summaries or wrapping streaming channels.
+func (m *Manager) EnabledFor(ctx context.Context) bool {
 	if !m.Enabled() {
 		return false
 	}
-	if m.cfg.SampleRate >= 1.0 {
-		return true
+	if current, ok := traceFromCtx(ctx); ok && current != nil {
+		return current.Recording()
 	}
-	m.rngMu.Lock()
-	defer m.rngMu.Unlock()
-	return m.rng.Float64() < m.cfg.SampleRate
+	return true
 }
 
-// runWorker batches queued events and flushes them either when the batch
-// reaches FlushAt, when FlushInterval elapses, or when the manager shuts down.
-func (m *Manager) runWorker() {
-	defer m.workerWG.Done()
-	ticker := time.NewTicker(m.cfg.FlushInterval)
-	defer ticker.Stop()
-
-	buf := make([]ingestionEvent, 0, m.cfg.FlushAt)
-	flush := func(reason string) {
-		if len(buf) == 0 {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), m.cfg.RequestTimeout)
-		defer cancel()
-		if err := m.client.ingest(ctx, buf); err != nil && m.cfg.Debug {
-			logger.Warnf(ctx, "[Langfuse] flush (%s) failed: %v", reason, err)
-		}
-		buf = buf[:0]
-	}
-
-	for {
-		select {
-		case ev := <-m.queue:
-			buf = append(buf, ev)
-			if len(buf) >= m.cfg.FlushAt {
-				flush("batch-full")
-			}
-		case <-ticker.C:
-			flush("interval")
-		case <-m.done:
-			// Drain whatever remains in the queue before exiting.
-			for {
-				select {
-				case ev := <-m.queue:
-					buf = append(buf, ev)
-					if len(buf) >= m.cfg.FlushAt {
-						flush("batch-full-on-shutdown")
-					}
-				default:
-					flush("shutdown")
-					return
-				}
-			}
-		}
-	}
+func (m *Manager) CaptureContent() bool {
+	return m != nil && m.Enabled() && m.cfg.CaptureContent()
 }
 
-// newID returns a Langfuse-compatible UUIDv4.
-func newID() string {
-	return uuid.New().String()
+func (m *Manager) Shutdown(ctx context.Context) error {
+	if m == nil || m.provider == nil || !m.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	return m.provider.Shutdown(ctx)
 }

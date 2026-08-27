@@ -10,8 +10,8 @@ import (
 
 // langfuseChat wraps a Chat implementation and emits a Langfuse generation
 // observation for every Chat/ChatStream call, capturing prompt, response and
-// token usage. The wrapper is only installed when the Langfuse manager is
-// enabled, so there is no cost for deployments that don't use Langfuse.
+// token usage. Disabled or unsampled request contexts bypass capture and call
+// the underlying implementation directly.
 type langfuseChat struct {
 	inner Chat
 }
@@ -21,14 +21,18 @@ func (l *langfuseChat) GetModelID() string   { return l.inner.GetModelID() }
 
 func (l *langfuseChat) Chat(ctx context.Context, messages []Message, opts *ChatOptions) (*types.ChatResponse, error) {
 	mgr := langfuse.GetManager()
-	if !mgr.Enabled() {
+	if !mgr.EnabledFor(ctx) {
 		return l.inner.Chat(ctx, messages, opts)
 	}
 
+	input := interface{}(summarizeLangfuseMessages(messages))
+	if mgr.CaptureContent() {
+		input = buildLangfuseMessages(messages)
+	}
 	genCtx, gen := mgr.StartGeneration(ctx, langfuse.GenerationOptions{
 		Name:            "chat.completion",
 		Model:           l.inner.GetModelName(),
-		Input:           buildLangfuseMessages(messages),
+		Input:           input,
 		ModelParameters: buildLangfuseModelParams(opts),
 		Metadata: map[string]interface{}{
 			"model_id":  l.inner.GetModelID(),
@@ -36,6 +40,10 @@ func (l *langfuseChat) Chat(ctx context.Context, messages []Message, opts *ChatO
 			"has_tools": opts != nil && len(opts.Tools) > 0,
 		},
 	})
+	if !gen.Recording() {
+		gen.Finish(nil, nil, nil)
+		return l.inner.Chat(ctx, messages, opts)
+	}
 
 	resp, err := l.inner.Chat(genCtx, messages, opts)
 
@@ -43,9 +51,15 @@ func (l *langfuseChat) Chat(ctx context.Context, messages []Message, opts *ChatO
 	var output interface{}
 	if resp != nil {
 		usage = convertUsage(&resp.Usage)
-		output = buildLangfuseGenerationOutput(
-			resp.Content, resp.ReasoningContent, resp.FinishReason, resp.ToolCalls,
-		)
+		if mgr.CaptureContent() {
+			output = buildLangfuseGenerationOutput(
+				resp.Content, resp.ReasoningContent, resp.FinishReason, resp.ToolCalls,
+			)
+		} else {
+			output = buildLangfuseGenerationSummary(
+				len(resp.Content), len(resp.ReasoningContent), resp.FinishReason, len(resp.ToolCalls),
+			)
+		}
 	}
 	gen.Finish(output, usage, err)
 	return resp, err
@@ -53,14 +67,18 @@ func (l *langfuseChat) Chat(ctx context.Context, messages []Message, opts *ChatO
 
 func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts *ChatOptions) (<-chan types.StreamResponse, error) {
 	mgr := langfuse.GetManager()
-	if !mgr.Enabled() {
+	if !mgr.EnabledFor(ctx) {
 		return l.inner.ChatStream(ctx, messages, opts)
 	}
 
+	input := interface{}(summarizeLangfuseMessages(messages))
+	if mgr.CaptureContent() {
+		input = buildLangfuseMessages(messages)
+	}
 	genCtx, gen := mgr.StartGeneration(ctx, langfuse.GenerationOptions{
 		Name:            "chat.completion.stream",
 		Model:           l.inner.GetModelName(),
-		Input:           buildLangfuseMessages(messages),
+		Input:           input,
 		ModelParameters: buildLangfuseModelParams(opts),
 		Metadata: map[string]interface{}{
 			"model_id":  l.inner.GetModelID(),
@@ -68,6 +86,10 @@ func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts 
 			"has_tools": opts != nil && len(opts.Tools) > 0,
 		},
 	})
+	if !gen.Recording() {
+		gen.Finish(nil, nil, nil)
+		return l.inner.ChatStream(ctx, messages, opts)
+	}
 
 	ch, err := l.inner.ChatStream(genCtx, messages, opts)
 	if err != nil {
@@ -88,6 +110,10 @@ func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts 
 		var toolCalls []types.LLMToolCall
 		var finishReason string
 		var firstToken bool
+		captureContent := mgr.CaptureContent()
+		var contentBytes int
+		var reasoningBytes int
+		var toolCallCount int
 
 		for resp := range ch {
 			if resp.ResponseType == types.ResponseTypeThinking && resp.Content != "" {
@@ -95,20 +121,29 @@ func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts 
 					gen.MarkCompletionStart(time.Now())
 					firstToken = true
 				}
-				reasoningBuf = append(reasoningBuf, resp.Content...)
+				reasoningBytes += len(resp.Content)
+				if captureContent {
+					reasoningBuf = append(reasoningBuf, resp.Content...)
+				}
 			}
 			if resp.ResponseType == types.ResponseTypeAnswer && resp.Content != "" {
 				if !firstToken {
 					gen.MarkCompletionStart(time.Now())
 					firstToken = true
 				}
-				contentBuf = append(contentBuf, resp.Content...)
+				contentBytes += len(resp.Content)
+				if captureContent {
+					contentBuf = append(contentBuf, resp.Content...)
+				}
 			}
 			if resp.Usage != nil {
 				usage = resp.Usage
 			}
 			if len(resp.ToolCalls) > 0 {
-				toolCalls = resp.ToolCalls
+				toolCallCount = len(resp.ToolCalls)
+				if captureContent {
+					toolCalls = resp.ToolCalls
+				}
 			}
 			if resp.FinishReason != "" {
 				finishReason = resp.FinishReason
@@ -116,12 +151,50 @@ func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts 
 			wrapped <- resp
 		}
 
-		output := buildLangfuseGenerationOutput(
-			string(contentBuf), string(reasoningBuf), finishReason, toolCalls,
-		)
+		var output interface{}
+		if captureContent {
+			output = buildLangfuseGenerationOutput(
+				string(contentBuf), string(reasoningBuf), finishReason, toolCalls,
+			)
+		} else {
+			output = buildLangfuseGenerationSummary(
+				contentBytes, reasoningBytes, finishReason, toolCallCount,
+			)
+		}
 		gen.Finish(output, convertUsage(usage), nil)
 	}()
 	return wrapped, nil
+}
+
+func summarizeLangfuseMessages(messages []Message) map[string]interface{} {
+	roles := map[string]int{}
+	contentBytes := 0
+	reasoningBytes := 0
+	toolCalls := 0
+	for _, message := range messages {
+		roles[message.Role]++
+		contentBytes += len(message.Content)
+		reasoningBytes += len(message.ReasoningContent)
+		toolCalls += len(message.ToolCalls)
+	}
+	return map[string]interface{}{
+		"message_count":   len(messages),
+		"roles":           roles,
+		"content_bytes":   contentBytes,
+		"reasoning_bytes": reasoningBytes,
+		"tool_call_count": toolCalls,
+	}
+}
+
+func buildLangfuseGenerationSummary(
+	contentBytes, reasoningBytes int, finishReason string, toolCallCount int,
+) map[string]interface{} {
+	return map[string]interface{}{
+		"content_bytes":   contentBytes,
+		"reasoning_bytes": reasoningBytes,
+		"finish_reason":   finishReason,
+		"tool_call_count": toolCallCount,
+	}
 }
 
 func buildLangfuseMessages(messages []Message) []map[string]interface{} {

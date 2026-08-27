@@ -1,12 +1,12 @@
-name: weknora
+name: ${CUSTOM_GENERAL_AGENT_PROJECT_NAME:-weknora}
 
 services:
   weknora-custom-general-agent:
     build:
       context: ..
       dockerfile: custom/services/general-agent/Dockerfile
-    image: weknora-custom-general-agent:local
-    container_name: weknora-custom-general-agent
+    image: ${CUSTOM_GENERAL_AGENT_IMAGE:-weknora-custom-general-agent:local}
+    container_name: ${CUSTOM_GENERAL_AGENT_CONTAINER_NAME:-weknora-custom-general-agent}
     environment:
       PORT: "8091"
       CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}
@@ -24,8 +24,8 @@ services:
     build:
       context: ..
       dockerfile: custom/services/document-processing-agent/Dockerfile
-    image: weknora-custom-document-processing-agent:local
-    container_name: weknora-custom-document-processing-agent
+    image: ${CUSTOM_DOCUMENT_PROCESSING_AGENT_IMAGE:-weknora-custom-document-processing-agent:local}
+    container_name: ${CUSTOM_DOCUMENT_PROCESSING_AGENT_CONTAINER_NAME:-weknora-custom-document-processing-agent}
     environment:
       PORT: "8091"
       CUSTOM_GENERAL_AGENT_API_KEY: ${CUSTOM_GENERAL_AGENT_API_KEY:-dev-general-agent-key}

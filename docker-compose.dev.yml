@@ -3,7 +3,10 @@ services:
   # 只启动依赖的基础设施服务
   postgres:
     image: paradedb/paradedb:v0.22.2-pg17
-    container_name: WeKnora-postgres-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-postgres-dev
+    # HNSW indexes can exceed Docker's 64 MiB default /dev/shm during
+    # pg_restore. Keep this configurable for smaller development hosts.
+    shm_size: ${POSTGRES_SHM_SIZE:-1gb}
     ports:
       - "${DB_PORT:-5432}:5432"
     environment:
@@ -25,12 +28,12 @@ services:
 
   redis:
     image: redis:7.0-alpine
-    container_name: WeKnora-redis-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-redis-dev
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data_dev:/data
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --maxmemory-policy noeviction
     restart: always
     networks:
       - WeKnora-network-dev
@@ -39,7 +42,7 @@ services:
   # the repo-tracked settings.yml by the searxng entrypoint).
   searxng-init:
     image: busybox:1.36
-    container_name: WeKnora-searxng-init-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-searxng-init-dev
     command: ["sh", "-c", "cp /template/settings.yml /etc/searxng/settings.yml && chmod 0644 /etc/searxng/settings.yml"]
     volumes:
       - ./docker/searxng/settings.yml:/template/settings.yml:ro
@@ -53,7 +56,7 @@ services:
 
   searxng:
     image: searxng/searxng:latest
-    container_name: WeKnora-searxng-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-searxng-dev
     # Local dev: bind to loopback by default; the host-side WeKnora process
     # reaches it at http://127.0.0.1:${SEARXNG_PORT}.
     ports:
@@ -83,7 +86,7 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: WeKnora-minio-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-minio-dev
     ports:
       - "${MINIO_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -106,7 +109,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.16.2
-    container_name: WeKnora-qdrant-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-qdrant-dev
     ports:
       - "${QDRANT_REST_PORT:-6333}:6333"
       - "${QDRANT_PORT:-6334}:6334"
@@ -125,7 +128,7 @@ services:
   # multi-node cluster. See docs/dev/opensearch-integration-test.md.
   opensearch:
     image: opensearchproject/opensearch:3.3.2
-    container_name: WeKnora-opensearch-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-opensearch-dev
     environment:
       - discovery.type=single-node
       # dev only: plain HTTP on :9200, no TLS/auth. The entrypoint script
@@ -160,7 +163,7 @@ services:
   # (depends_on pulls the cluster in automatically).
   opensearch-dashboards:
     image: opensearchproject/opensearch-dashboards:3.3.0
-    container_name: WeKnora-opensearch-dashboards-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-opensearch-dashboards-dev
     environment:
       - OPENSEARCH_HOSTS=["http://opensearch:9200"]
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
@@ -176,7 +179,7 @@ services:
 
   milvus:
     image: milvusdb/milvus:v2.6.11
-    container_name: WeKnora-milvus-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-milvus-dev
     security_opt:
       - seccomp:unconfined
     command: ["milvus", "run", "standalone"]
@@ -205,7 +208,7 @@ services:
 
   neo4j:
     image: neo4j:latest
-    container_name: WeKnora-neo4j-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-neo4j-dev
     volumes:
       - neo4j-data-dev:/data
     environment:
@@ -215,8 +218,8 @@ services:
       - NEO4J_apoc_import_file_use__neo4j__config=true
       - NEO4JLABS_PLUGINS=["apoc"]
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
     restart: always
     networks:
       - WeKnora-network-dev
@@ -227,7 +230,7 @@ services:
   # Sandbox 镜像：仅用于 build/pull，非常驻服务；本地 app 执行 Skills 时按需 docker run 该镜像，用毕即释
   sandbox:
     image: wechatopenai/weknora-sandbox:${WEKNORA_VERSION:-latest}
-    container_name: WeKnora-sandbox-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-sandbox-dev
     build:
       context: .
       dockerfile: docker/Dockerfile.sandbox
@@ -240,8 +243,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.docreader
-    image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
-    container_name: WeKnora-docreader-dev
+    image: ${DOCREADER_IMAGE:-wechatopenai/weknora-docreader:latest}
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-docreader-dev
     ports:
       - "${DOCREADER_PORT:-50051}:50051"
     volumes:
@@ -294,7 +297,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.odl-hybrid
     image: weknora-odl-hybrid:local
-    container_name: WeKnora-odl-hybrid
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-odl-hybrid
     profiles:
       - odl-hybrid
     ports:
@@ -309,9 +312,9 @@ services:
 
   dex:
     image: dexidp/dex:latest
-    container_name: WeKnora-dex-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-dex-dev
     ports:
-      - "5556:5556"
+      - "${DEX_PORT:-5556}:5556"
     volumes:
       - ./misc/dex-config.yaml:/etc/dex/config.yaml
     command: ["dex", "serve", "/etc/dex/config.yaml"]
@@ -336,7 +339,7 @@ services:
   # 复用 dev 已有的 ParadeDB 镜像，不额外拉 postgres 镜像
   langfuse-db-init:
     image: paradedb/paradedb:v0.22.2-pg17
-    container_name: WeKnora-langfuse-db-init-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-langfuse-db-init-dev
     depends_on:
       postgres:
         condition: service_healthy
@@ -368,7 +371,7 @@ services:
 
   langfuse-clickhouse:
     image: clickhouse/clickhouse-server:24.8
-    container_name: WeKnora-langfuse-clickhouse-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-langfuse-clickhouse-dev
     restart: unless-stopped
     user: "101:101"
     environment:
@@ -392,7 +395,7 @@ services:
 
   langfuse-minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
-    container_name: WeKnora-langfuse-minio-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-langfuse-minio-dev
     restart: unless-stopped
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
@@ -417,7 +420,7 @@ services:
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3
-    container_name: WeKnora-langfuse-worker-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-langfuse-worker-dev
     restart: unless-stopped
     depends_on: &langfuse-dev-depends-on
       langfuse-db-init:
@@ -483,7 +486,7 @@ services:
 
   langfuse-web:
     image: langfuse/langfuse:3
-    container_name: WeKnora-langfuse-web-dev
+    container_name: ${WEKNORA_DOCKER_PREFIX:-WeKnora}-langfuse-web-dev
     restart: unless-stopped
     depends_on: *langfuse-dev-depends-on
     ports:
@@ -525,6 +528,7 @@ services:
 networks:
   WeKnora-network-dev:
     driver: bridge
+    name: ${WEKNORA_DEV_NETWORK_NAME:-weknora_WeKnora-network-dev}
 
 volumes:
   postgres-data-dev:

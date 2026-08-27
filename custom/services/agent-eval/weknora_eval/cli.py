@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections import Counter
+from pathlib import Path
+
+from .client import WeKnoraClient
+from .dataset import (
+    DatasetError,
+    build_quarantine_from_transcripts,
+    freeze_dataset,
+    load_jsonl,
+    split_by_family,
+    validate_dataset,
+    write_jsonl,
+)
+from .gates import evaluate_gate, load_policy
+from .judge import judge_case
+from .langfuse_store import publish_dataset, run_langfuse_experiment
+from .models import CaseRun, ExperimentRun, Split, Verdict
+from .report import load_gate, load_run, render_markdown, write_json
+from .runner import EvalRunner
+from .scoring import score_case
+
+
+def _split(value: str) -> Split:
+    try:
+        return Split(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _client(args: argparse.Namespace) -> WeKnoraClient:
+    env_name = args.api_key_env
+    api_key = os.environ.get(env_name, "").strip()
+    if not api_key:
+        raise DatasetError(f"{env_name} is required")
+    return WeKnoraClient(args.base_url, api_key, args.timeout)
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    fingerprint = EvalRunner(_client(args)).doctor()
+    print(json.dumps(fingerprint.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_dataset_build(args: argparse.Namespace) -> int:
+    cases = build_quarantine_from_transcripts(
+        args.transcripts,
+        suite=args.suite,
+        agent_id=args.agent_id,
+        endpoint=args.endpoint,
+    )
+    write_jsonl(args.output, cases)
+    print(f"harvested {len(cases)} quarantined cases into {args.output}")
+    return 0
+
+
+def cmd_dataset_validate(args: argparse.Namespace) -> int:
+    cases = load_jsonl(args.input)
+    errors = validate_dataset(cases)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 2
+    counts = Counter(case.split.value for case in cases)
+    print(json.dumps({"cases": len(cases), "families": len({c.family_id for c in cases}), "splits": counts}, ensure_ascii=False))
+    return 0
+
+
+def cmd_dataset_split(args: argparse.Namespace) -> int:
+    cases = load_jsonl(args.input)
+    split_cases = split_by_family(
+        cases,
+        salt=args.salt,
+        dev_ratio=args.dev_ratio,
+        gate_ratio=args.gate_ratio,
+        holdout_ratio=args.holdout_ratio,
+    )
+    if errors := validate_dataset(split_cases):
+        raise DatasetError("split output invalid: " + "; ".join(errors))
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_jsonl(output_dir / "all.jsonl", split_cases)
+    for split in Split:
+        selected = [case for case in split_cases if case.split == split]
+        if selected:
+            write_jsonl(output_dir / f"{split.value}.jsonl", selected)
+    return 0
+
+
+def cmd_dataset_freeze(args: argparse.Namespace) -> int:
+    cases = load_jsonl(args.input)
+    if errors := validate_dataset(cases):
+        raise DatasetError("dataset invalid: " + "; ".join(errors))
+    manifest = freeze_dataset(cases, [str(Path(args.input))])
+    write_json(args.output, manifest)
+    print(manifest.dataset_sha256)
+    return 0
+
+
+def cmd_dataset_publish(args: argparse.Namespace) -> int:
+    cases = load_jsonl(args.input)
+    if errors := validate_dataset(cases):
+        raise DatasetError("dataset invalid: " + "; ".join(errors))
+    name = publish_dataset(cases, args.name)
+    print(name)
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    unresolved = load_jsonl(args.dataset)
+    if errors := validate_dataset(unresolved):
+        raise DatasetError("dataset invalid: " + "; ".join(errors))
+    cases = load_jsonl(args.dataset, resolve_variables=True)
+    splits = set(args.split or [Split.DEV])
+    if Split.SEALED_HOLDOUT in splits and not args.allow_sealed:
+        raise DatasetError("sealed_holdout requires explicit --allow-sealed")
+    runner = EvalRunner(_client(args))
+    metadata = {"label": args.label} if args.label else {}
+    if args.langfuse_experiment:
+        run = run_langfuse_experiment(
+            cases,
+            runner,
+            selected_splits=splits,
+            name=args.langfuse_experiment,
+            dataset_name=args.langfuse_dataset,
+            max_concurrency=args.max_concurrency,
+        )
+    else:
+        run = runner.run_suite(
+            cases,
+            selected_splits=splits,
+            max_concurrency=args.max_concurrency,
+            metadata=metadata,
+        )
+    # Dataset identity is based on the immutable, unresolved contracts; runtime
+    # environment substitution must not silently create a new dataset version.
+    from .dataset import dataset_sha256
+
+    run = run.model_copy(update={"dataset_sha256": dataset_sha256(unresolved)})
+    write_json(args.output, run)
+    counts = Counter(case.verdict.value for case in run.cases)
+    print(json.dumps({"run_id": run.run_id, "output": args.output, "verdicts": counts}, ensure_ascii=False))
+    return 0 if not counts[Verdict.INVALID.value] else 2
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    cases = load_jsonl(args.dataset)
+    specs = {case.case_id: case for case in cases}
+    run = load_run(args.run)
+    rescored: list[CaseRun] = []
+    for case_run in run.cases:
+        spec = specs.get(case_run.case_id)
+        if spec is None:
+            rescored.append(case_run.model_copy(update={"verdict": Verdict.INVALID, "error": "case missing from dataset"}))
+        else:
+            rescored.append(score_case(spec, case_run))
+    output = run.model_copy(update={"cases": rescored})
+    write_json(args.output, output)
+    return 0
+
+
+def cmd_judge(args: argparse.Namespace) -> int:
+    specs = {case.case_id: case for case in load_jsonl(args.dataset)}
+    run = load_run(args.run)
+    baseline = load_run(args.baseline) if args.baseline else None
+    baseline_by_id = {case.case_id: case for case in baseline.cases} if baseline else {}
+    judged: list[CaseRun] = []
+    for case in run.cases:
+        spec = specs.get(case.case_id)
+        if spec is None:
+            judged.append(case.model_copy(update={"verdict": Verdict.INVALID, "error": "case missing from dataset"}))
+            continue
+        judge_scores = judge_case(spec, case, baseline_by_id.get(case.case_id))
+        judged.append(case.model_copy(update={"scores": [*case.scores, *judge_scores]}))
+    write_json(args.output, run.model_copy(update={"cases": judged}))
+    return 0
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    dataset = load_jsonl(args.dataset)
+    if errors := validate_dataset(dataset):
+        raise DatasetError("dataset invalid: " + "; ".join(errors))
+    candidate = load_run(args.candidate)
+    baseline = load_run(args.baseline) if args.baseline else None
+    result = evaluate_gate(dataset, candidate, load_policy(args.policy), baseline)
+    write_json(args.output, result)
+    print(result.verdict.value)
+    return {Verdict.PASS: 0, Verdict.FAIL: 1, Verdict.INVALID: 2}[result.verdict]
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    run = load_run(args.run)
+    gate = load_gate(args.gate) if args.gate else None
+    target = Path(args.output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_markdown(run, gate), encoding="utf-8", newline="\n")
+    print(str(target))
+    return 0
+
+
+def _api_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--base-url", default=os.environ.get("WEKNORA_BASE_URL", "http://localhost:18080/api/v1"))
+    parser.add_argument("--api-key-env", default="WEKNORA_E2E_TENANT_API_KEY")
+    parser.add_argument("--timeout", type=float, default=600.0)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="weknora-agent-eval")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    doctor = sub.add_parser("doctor", help="verify eval-mode SUT capabilities")
+    _api_args(doctor)
+    doctor.set_defaults(func=cmd_doctor)
+
+    dataset = sub.add_parser("dataset", help="build, validate, split, freeze or publish datasets")
+    dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
+    build = dataset_sub.add_parser("build")
+    build.add_argument("--transcripts", action="append", required=True)
+    build.add_argument("--suite", required=True)
+    build.add_argument("--agent-id", required=True)
+    build.add_argument("--endpoint", choices=["knowledge-chat", "agent-chat"], default="agent-chat")
+    build.add_argument("--output", required=True)
+    build.set_defaults(func=cmd_dataset_build)
+    validate = dataset_sub.add_parser("validate")
+    validate.add_argument("--input", required=True)
+    validate.set_defaults(func=cmd_dataset_validate)
+    split = dataset_sub.add_parser("split")
+    split.add_argument("--input", required=True)
+    split.add_argument("--output-dir", required=True)
+    split.add_argument("--salt", required=True)
+    split.add_argument("--dev-ratio", type=float, default=0.50)
+    split.add_argument("--gate-ratio", type=float, default=0.25)
+    split.add_argument("--holdout-ratio", type=float, default=0.15)
+    split.set_defaults(func=cmd_dataset_split)
+    freeze = dataset_sub.add_parser("freeze")
+    freeze.add_argument("--input", required=True)
+    freeze.add_argument("--output", required=True)
+    freeze.set_defaults(func=cmd_dataset_freeze)
+    publish = dataset_sub.add_parser("publish")
+    publish.add_argument("--input", required=True)
+    publish.add_argument("--name")
+    publish.set_defaults(func=cmd_dataset_publish)
+
+    run = sub.add_parser("run", help="run live WeKnora cases; production mode is refused")
+    _api_args(run)
+    run.add_argument("--dataset", required=True)
+    run.add_argument("--output", required=True)
+    run.add_argument("--split", type=_split, action="append")
+    run.add_argument("--allow-sealed", action="store_true")
+    run.add_argument("--max-concurrency", type=int, default=1)
+    run.add_argument("--label")
+    run.add_argument("--langfuse-experiment")
+    run.add_argument("--langfuse-dataset")
+    run.set_defaults(func=cmd_run)
+
+    score = sub.add_parser("score")
+    score.add_argument("--dataset", required=True)
+    score.add_argument("--run", required=True)
+    score.add_argument("--output", required=True)
+    score.set_defaults(func=cmd_score)
+
+    judge = sub.add_parser("judge")
+    judge.add_argument("--dataset", required=True)
+    judge.add_argument("--run", required=True)
+    judge.add_argument("--baseline")
+    judge.add_argument("--output", required=True)
+    judge.set_defaults(func=cmd_judge)
+
+    gate = sub.add_parser("gate")
+    gate.add_argument("--dataset", required=True)
+    gate.add_argument("--candidate", required=True)
+    gate.add_argument("--baseline")
+    gate.add_argument("--policy", required=True)
+    gate.add_argument("--output", required=True)
+    gate.set_defaults(func=cmd_gate)
+
+    report = sub.add_parser("report")
+    report.add_argument("--run", required=True)
+    report.add_argument("--gate")
+    report.add_argument("--output", required=True)
+    report.set_defaults(func=cmd_report)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return int(args.func(args))
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2

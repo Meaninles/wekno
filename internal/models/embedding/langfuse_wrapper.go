@@ -18,7 +18,7 @@ type langfuseEmbedder struct {
 
 func (l *langfuseEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	mgr := langfuse.GetManager()
-	if !mgr.Enabled() {
+	if !mgr.EnabledFor(ctx) {
 		return l.inner.Embed(ctx, text)
 	}
 	genCtx, gen := mgr.StartGeneration(ctx, langfuse.GenerationOptions{
@@ -30,6 +30,10 @@ func (l *langfuseEmbedder) Embed(ctx context.Context, text string) ([]float32, e
 			"dimensions": l.inner.GetDimensions(),
 		},
 	})
+	if !gen.Recording() {
+		gen.Finish(nil, nil, nil)
+		return l.inner.Embed(ctx, text)
+	}
 	result, err := l.inner.Embed(genCtx, text)
 	usage := approxEmbeddingUsage([]string{text})
 	var out interface{}
@@ -45,7 +49,7 @@ func (l *langfuseEmbedder) Embed(ctx context.Context, text string) ([]float32, e
 
 func (l *langfuseEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]float32, error) {
 	mgr := langfuse.GetManager()
-	if !mgr.Enabled() {
+	if !mgr.EnabledFor(ctx) {
 		return l.inner.BatchEmbed(ctx, texts)
 	}
 	genCtx, gen := mgr.StartGeneration(ctx, langfuse.GenerationOptions{
@@ -61,6 +65,10 @@ func (l *langfuseEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]
 			"batch_size": len(texts),
 		},
 	})
+	if !gen.Recording() {
+		gen.Finish(nil, nil, nil)
+		return l.inner.BatchEmbed(ctx, texts)
+	}
 	result, err := l.inner.BatchEmbed(genCtx, texts)
 	usage := approxEmbeddingUsage(texts)
 	var out interface{}

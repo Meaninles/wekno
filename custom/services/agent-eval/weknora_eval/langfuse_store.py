@@ -56,25 +56,40 @@ def publish_dataset(cases: list[CaseSpec], name: str | None = None) -> str:
         },
     )
     for case in cases:
-        client.create_dataset_item(
-            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{dataset_name}:{case.case_id}")),
-            dataset_name=dataset_name,
-            input={"case": case.model_dump(mode="json")},
-            expected_output={
-                "contract_type": "acceptable-answer-contract",
-                "turns": [
-                    {"turn_id": turn.turn_id, "contract": turn.contract.model_dump(mode="json")}
-                    for turn in case.turns
-                ],
-            },
-            metadata={
-                "case_id": case.case_id,
-                "family_id": case.family_id,
-                "split": case.split.value,
-                "capabilities": [capability.value for capability in case.capabilities],
-                "dataset_sha256": digest,
-            },
-        )
+        for attempt_index in range(1, case.repetitions + 1):
+            client.create_dataset_item(
+                id=str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{dataset_name}:{case.case_id}:attempt-{attempt_index}",
+                    )
+                ),
+                dataset_name=dataset_name,
+                input={
+                    "case": case.model_dump(mode="json"),
+                    "attempt_index": attempt_index,
+                },
+                expected_output={
+                    "contract_type": "acceptable-answer-contract",
+                    "turns": [
+                        {
+                            "turn_id": turn.turn_id,
+                            "contract": turn.contract.model_dump(mode="json"),
+                        }
+                        for turn in case.turns
+                    ],
+                },
+                metadata={
+                    "case_id": case.case_id,
+                    "attempt_index": attempt_index,
+                    "family_id": case.family_id,
+                    "split": case.split.value,
+                    "capabilities": [
+                        capability.value for capability in case.capabilities
+                    ],
+                    "dataset_sha256": digest,
+                },
+            )
     client.flush()
     return dataset_name
 
@@ -96,14 +111,15 @@ def run_langfuse_experiment(
     client = _client()
     dataset = client.get_dataset(published_name)
     lock = threading.Lock()
-    results: dict[str, CaseRun] = {}
+    results: dict[tuple[str, int], CaseRun] = {}
 
     def task(*, item: Any, **_: Any) -> dict[str, Any]:
         payload = item.input if isinstance(item.input, dict) else {}
         spec = CaseSpec.model_validate(payload["case"])
-        case_run = runner.run_case(spec)
+        attempt_index = int(payload.get("attempt_index") or 1)
+        case_run = runner.run_case(spec, attempt_index=attempt_index)
         with lock:
-            results[spec.case_id] = case_run
+            results[(spec.case_id, attempt_index)] = case_run
         return case_run.model_dump(mode="json")
 
     def evaluator(*, output: Any, **_: Any) -> list[dict[str, Any]]:
@@ -145,7 +161,12 @@ def run_langfuse_experiment(
         },
     )
     client.flush()
-    ordered = [results[case.case_id] for case in selected if case.case_id in results]
+    ordered = [
+        results[(case.case_id, attempt_index)]
+        for case in selected
+        for attempt_index in range(1, case.repetitions + 1)
+        if (case.case_id, attempt_index) in results
+    ]
     return ExperimentRun(
         run_id=str(experiment.dataset_run_id or f"run-{uuid.uuid4()}"),
         suite=selected[0].suite,

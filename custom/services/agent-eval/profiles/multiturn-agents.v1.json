@@ -8,9 +8,11 @@
     "display_name": "DeepSeek V4 Flash"
   },
   "execution_contract": {
-    "mode": "codex-led-adaptive-discovery",
+    "mode": "codex-operated-staged-eval",
+    "discovery_mode": "codex-led-adaptive-discovery",
     "max_unreviewed_turns": 1,
-    "formal_scoring_enabled": false,
+    "formal_scoring_enabled": true,
+    "formal_scoring_scope": "frozen dev/gate/sealed datasets only",
     "failed_attempt_policy": "quarantine-and-rollback-request-pair",
     "gold_answer_policy": "observed assistant answers are provenance only, never automatic gold answers"
   },

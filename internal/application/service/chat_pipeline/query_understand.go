@@ -106,6 +106,10 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 	if useImages {
 		userMsg.Images = chatManage.Images
 	}
+	recordEvalPromptLayout(ctx, "rag.query_rewrite_prompt_layout", chatManage, []chat.Message{
+		{Role: "system", Content: systemContent},
+		userMsg,
+	})
 
 	maxTokens := 150
 	if useImages {

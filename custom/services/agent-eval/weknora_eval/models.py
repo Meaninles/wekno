@@ -319,6 +319,7 @@ class GatePolicy(StrictModel):
     forbid_hard_failures: bool = True
     forbid_pass_to_fail_regressions: bool = True
     max_metric_rate_regression: dict[str, float] = Field(default_factory=dict)
+    required_execution_identity_fields: list[str] = Field(default_factory=list)
     max_p95_latency_regression_ratio: float = Field(default=0.15, ge=0)
     max_p95_latency_regression_ms: int = Field(default=500, ge=0)
     require_baseline: bool = True
@@ -349,4 +350,5 @@ class FrozenDatasetManifest(StrictModel):
     family_count: int
     split_counts: dict[str, int]
     source_files: list[str]
+    dependency_sha256: dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)

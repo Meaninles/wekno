@@ -2962,6 +2962,30 @@ def build_prompt(
     return "\n".join(parts)
 
 
+def build_prompt_observation(payload: ChatPayload, rendered_prompt: str) -> dict[str, Any]:
+    if not payload.eval_observability:
+        return {}
+    history_role_counts: dict[str, int] = {}
+    history_role_chars: dict[str, int] = {}
+    for message in payload.history:
+        history_role_counts[message.role] = history_role_counts.get(message.role, 0) + 1
+        history_role_chars[message.role] = history_role_chars.get(message.role, 0) + len(message.content)
+    return {
+        "eval_only": True,
+        "configured_history_rounds": payload.runtime_config.history_turns,
+        "actual_history_messages": len(payload.history),
+        "history_message_count_by_role": history_role_counts,
+        "history_message_chars_by_role": history_role_chars,
+        "current_query_chars": len(payload.query),
+        "system_prompt_chars": len(payload.system_prompt),
+        "quoted_context_chars": len(payload.quoted_context),
+        "attachment_count": len(payload.attachments),
+        "original_input_file_count": len(payload.original_input_files),
+        "tool_count": len(payload.tools),
+        "rendered_prompt_chars": len(rendered_prompt),
+    }
+
+
 def stream_text_delta(message: Any) -> list[str]:
     fragments: list[str] = []
     if message.__class__.__name__ == "StreamEvent":
@@ -5737,6 +5761,7 @@ class GeneralAgentRunner:
             self.original_input_manifest_path,
             self.original_input_failures,
         )
+        prompt_observation = build_prompt_observation(self.payload, prompt)
         options = initial_options
         resume_attempts = 0
         while True:
@@ -5932,6 +5957,7 @@ class GeneralAgentRunner:
                 artifact_dropped_count=self.artifacts.dropped_count,
                 artifact_returned_size=self.artifacts.returned_size,
                 artifact_limit_bytes=ARTIFACT_RETURN_LIMIT_BYTES,
+                prompt_observation=prompt_observation,
             ).model_dump(),
         )
 

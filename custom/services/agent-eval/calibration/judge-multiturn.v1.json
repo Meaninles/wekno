@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "suite_id": "weknora-multiturn-judge-calibration-v1",
+  "minimum_accuracy": 0.875,
+  "items": [
+    {
+      "schema_version": 1,
+      "calibration_id": "citation-pass-paraphrase",
+      "capability": "citation",
+      "contract": {
+        "required": ["公开采购通过采购公告邀请不特定主体"],
+        "evidence_required": true,
+        "acceptable_answer_policy": "meaning and evidence binding, not exact wording"
+      },
+      "candidate": {
+        "answer": "公开采购以采购公告面向不特定的潜在供应商。<src id=\"S1\" />",
+        "evidence": ["第三十三条……公开采购是指采购人以采购公告方式邀请不特定的潜在供应商参与采购项目的方式。"],
+        "tools": ["knowledge_search"],
+        "completed": true
+      },
+      "expected_label": "pass",
+      "rationale": "语义满足且结论与有效证据相邻，措辞不必等同参考答案。",
+      "boundary_kind": "positive"
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "citation-fail-wrong-anchor",
+      "capability": "citation",
+      "contract": {
+        "required": ["货物达到200万元必须公开招标"],
+        "evidence_required": true
+      },
+      "candidate": {
+        "answer": "货物达到200万元必须公开招标。<src id=\"S1\" />",
+        "evidence": ["施工单项合同估算价在400万元（含）以上。"],
+        "tools": ["knowledge_search"],
+        "completed": true
+      },
+      "expected_label": "fail",
+      "rationale": "结论文本正确但引用证据支持的是施工门槛，claim-anchor 绑定失败。",
+      "boundary_kind": "negative"
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "state-pass-current-retired",
+      "capability": "long_context_dialogue",
+      "contract": {
+        "active": ["预算235万元", "日期2027年5月15日"],
+        "retired": ["预算210万元", "日期2027年3月31日"],
+        "sections_required": true
+      },
+      "candidate": {
+        "answer": "当前有效事实：预算235万元；日期2027年5月15日。\n已废弃事实：预算210万元；日期2027年3月31日。",
+        "completed": true
+      },
+      "expected_label": "pass",
+      "rationale": "当前值与废弃值均在正确分区，未要求固定表述。",
+      "boundary_kind": "positive"
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "state-fail-stale-as-active",
+      "capability": "long_context_dialogue",
+      "contract": {
+        "active": ["预算235万元"],
+        "retired": ["预算210万元"],
+        "sections_required": true
+      },
+      "candidate": {
+        "answer": "当前有效事实：预算210万元。\n已废弃事实：无。",
+        "completed": true
+      },
+      "expected_label": "fail",
+      "rationale": "把已废弃事实当成当前事实是硬失败。",
+      "boundary_kind": "negative"
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "decision-pass-defer",
+      "capability": "long_context_dialogue",
+      "contract": {
+        "mode": "compare_only",
+        "required_unknowns": ["标的类别", "立项审批"],
+        "forbidden": ["最终采用某种采购方式"]
+      },
+      "candidate": {
+        "answer": "目前可比较公开询比与竞争谈判，但标的类别和立项审批均待确认，因此暂不作最终选择。",
+        "completed": true
+      },
+      "expected_label": "pass",
+      "rationale": "给出有用比较边界，同时保留未知项并明确暂缓结论。",
+      "boundary_kind": "boundary"
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "decision-fail-premature",
+      "capability": "long_context_dialogue",
+      "contract": {
+        "mode": "defer",
+        "required_unknowns": ["标的类别", "立项审批"],
+        "forbidden": ["最终采用某种采购方式"]
+      },
+      "candidate": {
+        "answer": "虽然标的类别和立项审批尚未确认，最终建议采用公开询比。",
+        "completed": true
+      },
+      "expected_label": "fail",
+      "rationale": "提及未知项不能抵消违反禁止定案的硬约束。",
+      "boundary_kind": "boundary"
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "style-pass-concise",
+      "capability": "rag_retrieval",
+      "contract": {
+        "required": ["邀请采购邀请特定供应商或3家以上潜在供应商"],
+        "evidence_required": false,
+        "acceptable_answer_policy": "concise and complete is acceptable"
+      },
+      "candidate": {
+        "answer": "邀请采购通过采购邀请书，邀请特定供应商或3家以上潜在供应商参与。",
+        "completed": true
+      },
+      "expected_label": "pass",
+      "rationale": "简洁不是失败，关键事实完整。",
+      "boundary_kind": "boundary"
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "execution-invalid-empty",
+      "capability": "long_context_dialogue",
+      "contract": {
+        "required": ["任何可评分回答"]
+      },
+      "candidate": {
+        "answer": "",
+        "completed": false
+      },
+      "expected_label": "invalid",
+      "rationale": "执行未完成且无回答，不应误判为质量失败。",
+      "boundary_kind": "negative"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from .client import WeKnoraClient
+from .calibration import load_calibration, run_judge_calibration
 from .dataset import (
     DatasetError,
     build_quarantine_from_transcripts,
@@ -29,6 +30,7 @@ from .gates import evaluate_gate, load_policy
 from .judge import judge_case
 from .langfuse_store import publish_dataset, run_langfuse_experiment
 from .models import CaseRun, ExperimentRun, Split, Verdict
+from .readiness import assert_ready, evaluate_readiness, file_sha256
 from .report import load_gate, load_run, render_markdown, write_json
 from .runner import EvalRunner
 from .scoring import score_case
@@ -53,6 +55,48 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     fingerprint = EvalRunner(_client(args)).doctor()
     print(json.dumps(fingerprint.model_dump(mode="json"), ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    runner = EvalRunner(_client(args))
+    report = evaluate_readiness(
+        dataset_path=args.dataset,
+        manifest_path=args.manifest,
+        profile_path=args.profiles,
+        policy_path=args.policy,
+        calibration_path=args.calibration,
+        split=args.split,
+        sut=runner.doctor(),
+    )
+    if args.output:
+        write_json(args.output, report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    assert_ready(report)
+    return 0
+
+
+def cmd_calibration_validate(args: argparse.Namespace) -> int:
+    suite = load_calibration(args.input)
+    counts = Counter(item.expected_label for item in suite.items)
+    print(
+        json.dumps(
+            {
+                "suite_id": suite.suite_id,
+                "items": len(suite.items),
+                "expected_labels": counts,
+                "minimum_accuracy": suite.minimum_accuracy,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def cmd_calibration_run(args: argparse.Namespace) -> int:
+    result = run_judge_calibration(load_calibration(args.input))
+    write_json(args.output, result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["passed"] else 1
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
@@ -211,7 +255,17 @@ def cmd_dataset_freeze(args: argparse.Namespace) -> int:
     cases = load_jsonl(args.input)
     if errors := validate_dataset(cases):
         raise DatasetError("dataset invalid: " + "; ".join(errors))
-    manifest = freeze_dataset(cases, [str(Path(args.input))])
+    dependencies: dict[str, str] = {}
+    for value in args.dependency:
+        name, separator, path = value.partition("=")
+        if not separator or not name.strip() or not path.strip():
+            raise DatasetError("--dependency must use name=path")
+        dependencies[name.strip()] = file_sha256(path.strip())
+    manifest = freeze_dataset(
+        cases,
+        [str(Path(args.input))],
+        dependency_sha256=dependencies,
+    )
     write_json(args.output, manifest)
     print(manifest.dataset_sha256)
     return 0
@@ -235,7 +289,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     if Split.SEALED_HOLDOUT in splits and not args.allow_sealed:
         raise DatasetError("sealed_holdout requires explicit --allow-sealed")
     runner = EvalRunner(_client(args))
-    metadata = {"label": args.label} if args.label else {}
+    execution_contract = {
+        "summary_model_id": os.environ.get("AGENT_EVAL_SUMMARY_MODEL_ID", "").strip(),
+        "corpus_version": os.environ.get("AGENT_EVAL_CORPUS_VERSION", "").strip(),
+        "procurement_knowledge_id": os.environ.get(
+            "AGENT_EVAL_PROCUREMENT_KNOWLEDGE_ID", ""
+        ).strip(),
+        "profile_set_sha256": file_sha256(args.profiles) if args.profiles else "",
+    }
+    metadata = {
+        "execution_contract": execution_contract,
+        **({"label": args.label} if args.label else {}),
+    }
     if args.langfuse_experiment:
         run = run_langfuse_experiment(
             cases,
@@ -245,6 +310,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             dataset_name=args.langfuse_dataset,
             max_concurrency=args.max_concurrency,
         )
+        run = run.model_copy(update={"metadata": {**run.metadata, **metadata}})
     else:
         run = runner.run_suite(
             cases,
@@ -332,6 +398,32 @@ def build_parser() -> argparse.ArgumentParser:
     _api_args(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
+    preflight = sub.add_parser(
+        "preflight",
+        help="prove eval readiness without creating sessions or sending chat requests",
+    )
+    _api_args(preflight)
+    preflight.add_argument("--dataset", required=True)
+    preflight.add_argument("--manifest", required=True)
+    preflight.add_argument("--profiles", required=True)
+    preflight.add_argument("--policy", required=True)
+    preflight.add_argument("--calibration", required=True)
+    preflight.add_argument("--split", type=_split, default=Split.GATE)
+    preflight.add_argument("--output")
+    preflight.set_defaults(func=cmd_preflight)
+
+    calibration = sub.add_parser(
+        "calibration", help="validate or explicitly run the frozen judge calibration suite"
+    )
+    calibration_sub = calibration.add_subparsers(dest="calibration_command", required=True)
+    calibration_validate = calibration_sub.add_parser("validate")
+    calibration_validate.add_argument("--input", required=True)
+    calibration_validate.set_defaults(func=cmd_calibration_validate)
+    calibration_run = calibration_sub.add_parser("run")
+    calibration_run.add_argument("--input", required=True)
+    calibration_run.add_argument("--output", required=True)
+    calibration_run.set_defaults(func=cmd_calibration_run)
+
     discover = sub.add_parser(
         "discover",
         help="collect unscored, real multi-turn conversations in the isolated eval environment",
@@ -397,6 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
     freeze = dataset_sub.add_parser("freeze")
     freeze.add_argument("--input", required=True)
     freeze.add_argument("--output", required=True)
+    freeze.add_argument("--dependency", action="append", default=[])
     freeze.set_defaults(func=cmd_dataset_freeze)
     publish = dataset_sub.add_parser("publish")
     publish.add_argument("--input", required=True)
@@ -411,6 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-sealed", action="store_true")
     run.add_argument("--max-concurrency", type=int, default=1)
     run.add_argument("--label")
+    run.add_argument("--profiles")
     run.add_argument("--langfuse-experiment")
     run.add_argument("--langfuse-dataset")
     run.set_defaults(func=cmd_run)

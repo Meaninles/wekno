@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "policy_id": "weknora-three-agent-multiturn-release-gate-v1",
-  "required_splits": ["gate"],
+  "policy_id": "weknora-three-agent-multiturn-sealed-gate-v1",
+  "required_splits": ["sealed_holdout"],
   "required_capabilities": [
     "rag_retrieval",
     "long_context_dialogue",

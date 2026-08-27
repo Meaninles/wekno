@@ -25,6 +25,7 @@ from app.runner import (  # noqa: E402
     block_background_bash_hook,
     build_background_task_resume_prompt,
     build_prompt,
+    build_prompt_observation,
     build_system_prompt,
     claude_auth_env,
     classify_data_analysis_display_intent,
@@ -96,6 +97,34 @@ class ResultMessage:
 
 
 class RunnerProgressTest(unittest.TestCase):
+    def test_prompt_observation_is_disabled_by_default_and_detailed_only_in_eval(self):
+        payload = ChatPayload(
+            run_id="run-eval-observation",
+            session_id="session-eval-observation",
+            assistant_message_id="assistant-eval-observation",
+            query="当前问题",
+            system_prompt="系统提示",
+            history=[
+                ChatHistoryMessage(role="user", content="历史问题"),
+                ChatHistoryMessage(role="assistant", content="历史回答"),
+            ],
+            runtime_config=RuntimeConfigSpec(history_turns=10),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        self.assertEqual(build_prompt_observation(payload, "rendered"), {})
+
+        observed = build_prompt_observation(
+            payload.model_copy(update={"eval_observability": True}),
+            "完整渲染提示",
+        )
+        self.assertTrue(observed["eval_only"])
+        self.assertEqual(observed["configured_history_rounds"], 10)
+        self.assertEqual(observed["actual_history_messages"], 2)
+        self.assertEqual(observed["history_message_count_by_role"], {"user": 1, "assistant": 1})
+        self.assertEqual(observed["rendered_prompt_chars"], 6)
+
     def test_mcp_tool_result_places_handles_beside_chunk_wiki_and_web_evidence(self):
         result = mcp_tool_result(
             {

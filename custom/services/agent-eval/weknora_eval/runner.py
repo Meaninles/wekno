@@ -52,6 +52,10 @@ class EvalRunner:
             )
         if raw.get("recorder_enabled") is not True:
             raise EvalModeRequired("refusing evaluation execution because the OTLP recorder is disabled")
+        if str(raw.get("capture_policy") or "") != "full":
+            raise EvalModeRequired(
+                "refusing evaluation execution because eval mode requires full capture"
+            )
         return SUTFingerprint(
             mode=mode,
             release=str(raw.get("release") or ""),

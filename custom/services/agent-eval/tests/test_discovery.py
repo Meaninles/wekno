@@ -22,7 +22,7 @@ class FailingDiscoveryClient:
         self.deleted: list[str] = []
 
     def capabilities(self) -> dict:
-        return {"mode": "eval", "recorder_enabled": True}
+        return {"mode": "eval", "capture_policy": "full", "recorder_enabled": True}
 
     def create_session(self) -> str:
         return "session-1"

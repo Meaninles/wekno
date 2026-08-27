@@ -183,6 +183,10 @@ services:
       LANGFUSE_RELEASE: ${LANGFUSE_RELEASE:-agent-eval}
     volumes:
       - ./datasets:/workspace/datasets:ro
+      - ./manifests:/workspace/manifests:ro
+      - ./profiles:/workspace/profiles:ro
+      - ./calibration:/workspace/calibration:ro
+      - ./sealed:/workspace/sealed:ro
       - ./artifacts:/workspace/artifacts
       - ./policies:/workspace/policies:ro
     networks:

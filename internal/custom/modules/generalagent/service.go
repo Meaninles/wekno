@@ -23,6 +23,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	modelprovider "github.com/Tencent/WeKnora/internal/models/provider"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
+	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -251,6 +252,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	unregister := registerActiveRun(active)
 	defer unregister()
 
+	history := s.buildHistory(ctx, req, agentConfig)
+	evalObservability := false
+	if manager := langfuse.GetManager(); manager != nil {
+		evalObservability = manager.CaptureContent() && manager.EnabledFor(ctx)
+	}
 	payload := ChatPayload{
 		RunID:                   runID,
 		TenantID:                tenantIDFromContext(ctx),
@@ -260,7 +266,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		AssistantMessageID:      req.AssistantMessageID,
 		Query:                   query,
 		SystemPrompt:            renderSystemPrompt(ctx, agentConfig.ResolveSystemPrompt(agentConfig.WebSearchEnabled), agentConfig.WebSearchEnabled),
-		History:                 s.buildHistory(ctx, req, agentConfig),
+		History:                 history,
 		ImageURLs:               cloneStringSlice(req.ImageURLs),
 		ImageDescription:        req.ImageDescription,
 		QuotedContext:           req.QuotedContext,
@@ -278,6 +284,30 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		ToolCallbackAPIKey:      strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_API_KEY")),
 		ArtifactUploadURL:       artifactUploadURL(),
 		EnableArtifacts:         agentConfig.EnableArtifacts,
+		EvalObservability:       evalObservability,
+	}
+
+	var promptLayoutSpan *langfuse.Span
+	if evalObservability {
+		historyRoleCounts := map[string]int{}
+		historyRoleChars := map[string]int{}
+		for _, message := range history {
+			historyRoleCounts[message.Role]++
+			historyRoleChars[message.Role] += len([]rune(message.Content))
+		}
+		ctx, promptLayoutSpan = langfuse.GetManager().StartSpan(ctx, langfuse.SpanOptions{
+			Name: "general_agent.prompt_layout",
+			Input: map[string]interface{}{
+				"configured_history_rounds": agentConfig.HistoryTurns,
+				"actual_history_messages":   len(history),
+				"history_count_by_role":     historyRoleCounts,
+				"history_chars_by_role":     historyRoleChars,
+				"current_query_chars":       len([]rune(query)),
+				"system_prompt_chars":       len([]rune(payload.SystemPrompt)),
+				"tool_count":                len(payload.Tools),
+			},
+			Metadata: map[string]interface{}{"eval_only": true},
+		})
 	}
 
 	fallbackAnswerID := "general-answer-" + runID
@@ -291,10 +321,24 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
 	})
 	if err != nil {
+		if promptLayoutSpan != nil {
+			promptLayoutSpan.Finish(nil, map[string]interface{}{"eval_only": true}, err)
+		}
 		return err
 	}
 	if result == nil {
-		return fmt.Errorf("智能体最终结果为空")
+		err = fmt.Errorf("智能体最终结果为空")
+		if promptLayoutSpan != nil {
+			promptLayoutSpan.Finish(nil, map[string]interface{}{"eval_only": true}, err)
+		}
+		return err
+	}
+	if promptLayoutSpan != nil {
+		promptLayoutSpan.Finish(
+			result.PromptObservation,
+			map[string]interface{}{"eval_only": true},
+			nil,
+		)
 	}
 	finalAnswer := strings.TrimSpace(result.Answer)
 	if finalAnswer == "" {

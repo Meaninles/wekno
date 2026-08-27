@@ -189,6 +189,7 @@ class ChatPayload(BaseModel):
     tool_callback_api_key: str = ""
     artifact_upload_url: str = ""
     enable_artifacts: bool = False
+    eval_observability: bool = False
 
     @field_validator(
         "history",
@@ -232,6 +233,7 @@ class ChatResult(BaseModel):
     artifact_dropped_count: int = 0
     artifact_returned_size: int = 0
     artifact_limit_bytes: int = 128 * 1024 * 1024
+    prompt_observation: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunEvent(BaseModel):

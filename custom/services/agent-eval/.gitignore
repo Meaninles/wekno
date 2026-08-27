@@ -1,6 +1,8 @@
 artifacts/*
 !artifacts/.gitkeep
 runner.env
+sealed/*
+!sealed/.gitkeep
 .snapshots/
 __pycache__/
 *.pyc

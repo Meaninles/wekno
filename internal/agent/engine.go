@@ -266,6 +266,7 @@ func (e *AgentEngine) Execute(
 
 	// Get tool definitions for function calling
 	tools := e.buildToolsForLLM()
+	recordAgentEvalPromptLayout(ctx, e, messages, tools, systemPrompt, query)
 	toolListStr := strings.Join(listToolNames(tools), ", ")
 	logger.Infof(ctx, "[Agent] Ready: %d messages, %d tools [%s], %d images",
 		len(messages), len(tools), toolListStr, len(imgs))
@@ -302,6 +303,51 @@ func (e *AgentEngine) Execute(
 	})
 	finishAgentSpan(agentSpan, state, nil)
 	return state, nil
+}
+
+// recordAgentEvalPromptLayout adds the long-context measurements needed by the
+// eval loop. Its first guard keeps production requests on the original hot path.
+func recordAgentEvalPromptLayout(
+	ctx context.Context,
+	engine *AgentEngine,
+	messages []chat.Message,
+	tools []chat.Tool,
+	systemPrompt string,
+	query string,
+) {
+	mgr := langfuse.GetManager()
+	if mgr == nil || !mgr.CaptureContent() || !mgr.EnabledFor(ctx) {
+		return
+	}
+	roleMessages := map[string]int{}
+	roleChars := map[string]int{}
+	for _, message := range messages {
+		roleMessages[message.Role]++
+		roleChars[message.Role] += len([]rune(message.Content))
+	}
+	toolSchemaChars := 0
+	for _, tool := range tools {
+		toolSchemaChars += len([]rune(tool.Function.Name))
+		toolSchemaChars += len([]rune(tool.Function.Description))
+		toolSchemaChars += len(tool.Function.Parameters)
+	}
+	observation := map[string]interface{}{
+		"actual_history_messages": max(0, len(messages)-2),
+		"system_prompt_chars":     len([]rune(systemPrompt)),
+		"current_query_chars":     len([]rune(query)),
+		"message_count":           len(messages),
+		"message_count_by_role":   roleMessages,
+		"message_chars_by_role":   roleChars,
+		"estimated_prompt_tokens": engine.tokenEstimator.EstimateMessages(messages),
+		"tool_count":              len(tools),
+		"tool_schema_chars":       toolSchemaChars,
+	}
+	_, span := mgr.StartSpan(ctx, langfuse.SpanOptions{
+		Name:     "agent.prompt_layout",
+		Input:    observation,
+		Metadata: map[string]interface{}{"eval_only": true},
+	})
+	span.Finish(observation, map[string]interface{}{"eval_only": true}, nil)
 }
 
 // finishAgentSpan records the final outcome of an agent execution onto the

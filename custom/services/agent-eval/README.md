@@ -140,6 +140,19 @@ Pop-Location
 
 这一版全部固定为 `dev`，只用于定位失败和校准契约；不得直接改为 `gate` 或 `sealed_holdout`。后两者必须使用全新的 family、事实组合和证据问题，防止调试集泄漏与过拟合。
 
+正式执行前使用 `datasets/multiturn-ready.v1.jsonl`。它把上述 12 个 DEV case 保留为可见调试集，并增加 6 个全新 GATE case：第三十三条公开/邀请采购定义绑定，以及“寒星冷链温控改造”12 轮状态覆盖。GATE 覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；其冻结身份见 `manifests/multiturn-ready.v1.manifest.json`。
+
+sealed holdout 不进入 Git：本机文件为 `sealed/multiturn-holdout.v1.jsonl`，只提交哈希、数量和 split 信息到 `manifests/multiturn-holdout.v1.manifest.json`。普通开发、DEV 和 GATE 都不会挂载其内容到优化输入；只有 Codex 在低频里程碑验收时显式使用 `-AllowSealed`。这不是把某次模型回答藏起来当标准答案，holdout 仍使用可接受答案契约，只把未见业务事实和问题组合隔离出来。
+
+数据分层对应关系如下：
+
+| 层 | 可见性 | 用途 | 是否参与日常调优 |
+|---|---|---|---:|
+| DEV | Git 内可见 | 定位失败、改提示词/召回/历史策略 | 是 |
+| GATE | Git 内可见但冻结 | 与 baseline 配对做提交门禁 | 否，只看是否通过 |
+| sealed holdout | 本机 `sealed/`，Git 忽略 | 低频里程碑泛化验收 | 否 |
+| judge calibration | Git 内固定边界样例 | 校准裁判的 PASS/FAIL/INVALID 区分 | 不评 SUT |
+
 ```text
 生产/验收真实对话
   -> quarantine（needs_codex_review=true）
@@ -190,9 +203,27 @@ custom/services/agent-eval/prepare-runner-env.ps1
 
 业务运行始终 fail-open；发布 gate 始终 fail-closed。这两个失败域完全分开。
 
+## 一键执行前准备（不会运行 Eval）
+
+在 Eval 栈已经启动、Main 栈完全停止后执行：
+
+```powershell
+custom/services/agent-eval/prepare-eval.ps1 -Split gate
+```
+
+该命令只做只读 handshake 与静态校验：重建轻量 runner、校验 JSONL、校验 judge calibration、核对冻结哈希、DeepSeek V4 Flash 精确模型 ID、知识文档/语料变量、三个智能体绑定、历史窗口外 2 轮覆盖、3 次独立重复计划、门禁能力覆盖以及 eval/full recorder。它不会创建 session，不会发送 chat 请求，不会生成 baseline，也不会发布 Langfuse experiment；输出中的 `formal_eval_executed` 必须为 `false`。
+
+sealed holdout 的准备也需要明确授权：
+
+```powershell
+custom/services/agent-eval/prepare-eval.ps1 -Split sealed_holdout -AllowSealed
+```
+
+如果 Main 的 `weknora` 或 `weknora-runtime-profile-e2e` Compose 项目仍有容器运行，准备和正式 eval 都会直接拒绝，避免两套工作树争抢端口、CPU、内存或写错存储。
+
 ## 一次 Eval loop
 
-先启动 Eval 栈；`eval-loop.ps1` 会在首次运行时准备 `runner.env` 并构建轻量 runner。无 baseline 的首次运行只生成实验与报告，不发放发布结论：
+先启动 Eval 栈；`eval-loop.ps1` 会在首次运行时准备 `runner.env` 并构建轻量 runner。必须先让 `prepare-eval.ps1` 返回 READY。无 baseline 的首次正式运行只生成实验与报告，不发放发布结论：
 
 ```powershell
 custom/services/agent-eval/eval-loop.ps1 -Split gate
@@ -210,13 +241,18 @@ custom/services/agent-eval/eval-loop.ps1 `
 
 标准循环是：观察失败簇 → 只在 `dev` 上提出一个可解释改动 → 固定 SUT、模型、语料和配置指纹运行 → 与同数据集 baseline 配对比较 → 通过 `gate` 才保留 → 周期性由 Codex 单独运行 sealed holdout。连续两轮无实质增益、只改善已知措辞、judge 与人工分歧升高或 holdout 退化时立即停止调优并回滚候选，防止无限拟合与过拟合。
 
+正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID 和 profile set 文件哈希。门禁不仅核对 dataset hash 和三次 attempt，还要求 candidate 与 baseline 的这些执行指纹完全一致；代码 commit 可以不同，因为它正是被比较的变量。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
+
+LLM judge 永远只是软指标，不能覆盖确定性硬约束。首次启用 judge 或更换 judge 模型前，先显式运行 `calibration run`，并达到 `calibration/judge-multiturn.v1.json` 的最低准确率；日常准备只执行 `calibration validate`，不会调用 judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
+
 ## 本地验证
 
 ```powershell
 # Python
 Push-Location custom/services/agent-eval
 python -m unittest discover -s tests -v
-python -m weknora_eval dataset validate --input datasets/examples.v1.jsonl
+python -m weknora_eval dataset validate --input datasets/multiturn-ready.v1.jsonl
+python -m weknora_eval calibration validate --input calibration/judge-multiturn.v1.json
 Pop-Location
 
 # Go（Windows 宿主受项目 pg_query/CGO 限制，最终以 Linux runtime 镜像为准）
@@ -231,9 +267,15 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 
 - `stack.ps1`：两工作树互斥切换和固定分角色重建。
 - `seed-from-main.ps1`：容量预检、顺序导出/恢复和物理卷隔离。
-- `eval-loop.ps1`：doctor、validate、freeze、run、可选 judge、gate、report。
-- `weknora_eval/`：数据集、runner、确定性评分、三态门禁和 Langfuse experiment 适配器。
-- `policies/release-gate.v1.json`：发布门禁策略。
+- `prepare-eval.ps1`：只读一键预检；成功也不会创建 session 或发送对话。
+- `eval-loop.ps1`：preflight、run、可选 judge、gate、report。
+- `weknora_eval/`：数据集、校准、readiness、runner、确定性评分、三态门禁和 Langfuse experiment 适配器。
+- `policies/multiturn-release-gate.v1.json`：三智能体多轮 GATE 门禁策略。
+- `policies/multiturn-sealed-gate.v1.json`：低频 sealed holdout 门禁策略。
 - `datasets/examples.v1.jsonl`：RAG、文档处理和长对话契约示例。
 - `datasets/multiturn-dev.v1.jsonl`：由真实发现记录整理出的三智能体多轮 DEV 契约。
+- `datasets/multiturn-ready.v1.jsonl`：冻结的 DEV + GATE 正式数据集。
+- `manifests/`：dataset、profile、policy、judge calibration 的联合冻结哈希。
+- `calibration/judge-multiturn.v1.json`：judge 正例、负例、边界例和 INVALID 校准集。
 - `curation/build_multiturn_dev_v1.py`：上述数据集的可审查、确定性编译器。
+- `curation/build_multiturn_ready_v1.py`：正式 DEV + GATE 数据集编译器。

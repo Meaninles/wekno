@@ -21,7 +21,7 @@ class FakeClient:
         self.mode = mode
 
     def capabilities(self):
-        return {"mode": self.mode, "recorder_enabled": True, "release": "r", "commit": "c", "capabilities": []}
+        return {"mode": self.mode, "capture_policy": "full", "recorder_enabled": True, "release": "r", "commit": "c", "capabilities": []}
 
 
 class RecordingRunner(EvalRunner):
@@ -30,7 +30,7 @@ class RecordingRunner(EvalRunner):
         self.attempts: list[int] = []
 
     def doctor(self) -> SUTFingerprint:
-        return SUTFingerprint(mode="eval", raw={"recorder_enabled": True})
+        return SUTFingerprint(mode="eval", raw={"recorder_enabled": True, "capture_policy": "full"})
 
     def run_case(self, spec: CaseSpec, *, attempt_index: int = 1) -> CaseRun:
         self.attempts.append(attempt_index)

@@ -99,6 +99,7 @@ def evaluate_gate(
     sut_ok = (
         candidate.sut.mode == "eval"
         and candidate.sut.raw.get("recorder_enabled") is True
+        and candidate.sut.raw.get("capture_policy") == "full"
         and not missing_sut_capabilities
     )
     checks.append(
@@ -108,6 +109,7 @@ def evaluate_gate(
             "eval-mode recorder and capabilities verified" if sut_ok else "invalid eval-mode SUT fingerprint",
             mode=candidate.sut.mode,
             recorder_enabled=candidate.sut.raw.get("recorder_enabled"),
+            capture_policy=candidate.sut.raw.get("capture_policy"),
             missing_capabilities=missing_sut_capabilities,
         )
     )
@@ -295,7 +297,52 @@ def evaluate_gate(
         )
     )
 
+    required_identity_fields = set(policy.required_execution_identity_fields)
+    candidate_identity = (
+        candidate.metadata.get("execution_contract")
+        if isinstance(candidate.metadata.get("execution_contract"), dict)
+        else {}
+    )
+    missing_candidate_identity = sorted(
+        field for field in required_identity_fields if not candidate_identity.get(field)
+    )
+    checks.append(
+        _check(
+            "candidate_execution_identity",
+            Verdict.PASS if not missing_candidate_identity else Verdict.INVALID,
+            "candidate model/corpus/profile identity is frozen"
+            if not missing_candidate_identity
+            else "candidate execution identity is incomplete",
+            missing=missing_candidate_identity,
+            identity=candidate_identity,
+        )
+    )
+
     if baseline is not None and candidate_dataset_ok and baseline_dataset_ok:
+        baseline_identity = (
+            baseline.metadata.get("execution_contract")
+            if isinstance(baseline.metadata.get("execution_contract"), dict)
+            else {}
+        )
+        identity_mismatches = {
+            field: {
+                "baseline": baseline_identity.get(field),
+                "candidate": candidate_identity.get(field),
+            }
+            for field in sorted(required_identity_fields)
+            if not baseline_identity.get(field)
+            or baseline_identity.get(field) != candidate_identity.get(field)
+        }
+        checks.append(
+            _check(
+                "paired_execution_identity",
+                Verdict.PASS if not identity_mismatches else Verdict.INVALID,
+                "baseline and candidate use the same model, corpus and agent profiles"
+                if not identity_mismatches
+                else "baseline and candidate execution identities are not comparable",
+                mismatches=identity_mismatches,
+            )
+        )
         baseline_runs = [case for case in baseline.cases if case.case_id in expected_ids]
         baseline_keys = [_run_key(case) for case in baseline_runs]
         duplicate_baseline_keys = sorted(

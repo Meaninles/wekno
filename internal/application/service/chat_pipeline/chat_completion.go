@@ -51,6 +51,7 @@ func (p *PluginChatCompletion) OnEvent(
 		"message_count": len(chatManage.History) + 2,
 	})
 	chatMessages := prepareMessagesWithHistory(chatManage)
+	recordEvalPromptLayout(ctx, "rag.prompt_layout", chatManage, chatMessages)
 
 	// Call the chat model to generate response
 	pipelineInfo(ctx, "Completion", "model_call", map[string]interface{}{

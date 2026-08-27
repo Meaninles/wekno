@@ -216,7 +216,11 @@ def split_by_family(
     return [case.model_copy(update={"split": assigned[case.family_id]}) for case in cases]
 
 
-def freeze_dataset(cases: list[CaseSpec], source_files: list[str]) -> FrozenDatasetManifest:
+def freeze_dataset(
+    cases: list[CaseSpec],
+    source_files: list[str],
+    dependency_sha256: dict[str, str] | None = None,
+) -> FrozenDatasetManifest:
     if errors := validate_dataset(cases):
         raise DatasetError("cannot freeze invalid dataset: " + "; ".join(errors))
     counts = Counter(case.split.value for case in cases)
@@ -227,6 +231,7 @@ def freeze_dataset(cases: list[CaseSpec], source_files: list[str]) -> FrozenData
         family_count=len({case.family_id for case in cases}),
         split_counts=dict(sorted(counts.items())),
         source_files=source_files,
+        dependency_sha256=dict(sorted((dependency_sha256 or {}).items())),
     )
 
 

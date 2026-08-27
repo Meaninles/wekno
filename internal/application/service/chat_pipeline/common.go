@@ -7,11 +7,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
+	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -31,6 +33,53 @@ func pipelineWarn(ctx context.Context, stage, action string, fields map[string]i
 // pipelineError logs pipeline error level entries.
 func pipelineError(ctx context.Context, stage, action string, fields map[string]interface{}) {
 	common.PipelineError(ctx, stage, action, fields)
+}
+
+// recordEvalPromptLayout emits exact prompt/history size diagnostics only when
+// eval mode has explicitly enabled full capture. Production mode returns at the
+// guard and performs no message traversal, serialization, or synchronous I/O.
+func recordEvalPromptLayout(
+	ctx context.Context,
+	name string,
+	chatManage *types.ChatManage,
+	messages []chat.Message,
+) {
+	mgr := langfuse.GetManager()
+	if mgr == nil || !mgr.CaptureContent() || !mgr.EnabledFor(ctx) {
+		return
+	}
+	roleMessages := map[string]int{}
+	roleChars := map[string]int{}
+	for _, message := range messages {
+		roleMessages[message.Role]++
+		roleChars[message.Role] += utf8.RuneCountInString(message.Content)
+	}
+	historyUserChars := 0
+	historyAssistantChars := 0
+	for _, history := range chatManage.History {
+		if history == nil {
+			continue
+		}
+		historyUserChars += utf8.RuneCountInString(history.Query)
+		historyAssistantChars += utf8.RuneCountInString(history.Answer)
+	}
+	observation := map[string]interface{}{
+		"configured_history_rounds": chatManage.MaxRounds,
+		"actual_history_rounds":     len(chatManage.History),
+		"history_user_chars":        historyUserChars,
+		"history_assistant_chars":   historyAssistantChars,
+		"rendered_context_chars":    utf8.RuneCountInString(chatManage.RenderedContexts),
+		"current_user_chars":        utf8.RuneCountInString(chatManage.UserContent),
+		"message_count":             len(messages),
+		"message_count_by_role":     roleMessages,
+		"message_chars_by_role":     roleChars,
+	}
+	_, span := mgr.StartSpan(ctx, langfuse.SpanOptions{
+		Name:     name,
+		Input:    observation,
+		Metadata: map[string]interface{}{"eval_only": true},
+	})
+	span.Finish(observation, map[string]interface{}{"eval_only": true}, nil)
 }
 
 // prepareChatModel shared logic to prepare chat model and options

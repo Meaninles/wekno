@@ -55,6 +55,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	// Prepare base messages without history
 
 	chatMessages := prepareMessagesWithHistory(chatManage)
+	recordEvalPromptLayout(ctx, "rag.prompt_layout", chatManage, chatMessages)
 	pipelineInfo(ctx, "Stream", "messages_ready", map[string]interface{}{
 		"message_count": len(chatMessages),
 		"system_prompt": chatMessages[0].Content,

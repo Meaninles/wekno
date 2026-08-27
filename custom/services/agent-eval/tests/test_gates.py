@@ -80,7 +80,7 @@ def run_for(dataset: list[CaseSpec], run_id: str, case_runs: list[CaseRun]) -> E
         sut=SUTFingerprint(
             mode="eval",
             capabilities=[Capability.RAG_RETRIEVAL.value],
-            raw={"recorder_enabled": True},
+            raw={"recorder_enabled": True, "capture_policy": "full"},
         ),
         cases=case_runs,
     )
@@ -196,6 +196,26 @@ class GateTests(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, Verdict.INVALID)
+
+    def test_required_execution_identity_must_match_baseline(self) -> None:
+        dataset = [spec()]
+        candidate = run_for(dataset, "candidate", [case(Verdict.PASS)])
+        baseline = run_for(dataset, "baseline", [case(Verdict.PASS)])
+        candidate = candidate.model_copy(
+            update={"metadata": {"execution_contract": {"summary_model_id": "model-new"}}}
+        )
+        baseline = baseline.model_copy(
+            update={"metadata": {"execution_contract": {"summary_model_id": "model-old"}}}
+        )
+        policy = self.policy.model_copy(
+            update={"required_execution_identity_fields": ["summary_model_id"]}
+        )
+
+        result = evaluate_gate(dataset, candidate, policy, baseline)
+
+        self.assertEqual(result.verdict, Verdict.INVALID)
+        paired = next(check for check in result.checks if check.name == "paired_execution_identity")
+        self.assertEqual(paired.verdict, Verdict.INVALID)
 
 
 if __name__ == "__main__":

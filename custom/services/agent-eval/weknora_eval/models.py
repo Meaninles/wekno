@@ -126,6 +126,7 @@ class Provenance(StrictModel):
     needs_codex_review: bool = False
     reference_answers: dict[str, str] = Field(default_factory=dict)
     reference_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CaseSpec(StrictModel):
@@ -136,11 +137,13 @@ class CaseSpec(StrictModel):
     split: Split
     enabled: bool = True
     capabilities: list[Capability]
+    agent_profile_id: str | None = None
     agent: AgentSelector
     setup: CaseSetup = Field(default_factory=CaseSetup)
     turns: list[TurnSpec]
     tags: list[str] = Field(default_factory=list)
     corpus_version: str | None = None
+    repetitions: int = Field(default=1, ge=1)
     provenance: Provenance = Field(default_factory=Provenance)
 
     @model_validator(mode="after")
@@ -187,6 +190,8 @@ class CaseRun(StrictModel):
     case_id: str
     family_id: str
     split: Split
+    agent_profile_id: str | None = None
+    attempt_index: int = Field(default=1, ge=1)
     verdict: Verdict
     turns: list[ObservedTurn] = Field(default_factory=list)
     scores: list[MetricScore] = Field(default_factory=list)
@@ -219,6 +224,8 @@ class GatePolicy(StrictModel):
     policy_id: str
     required_splits: list[Split] = Field(default_factory=lambda: [Split.GATE])
     required_capabilities: list[Capability] = Field(default_factory=list)
+    required_agent_profiles: list[str] = Field(default_factory=list)
+    min_repetitions_per_case: int = Field(default=1, ge=1)
     min_case_coverage: float = Field(default=1.0, ge=0, le=1)
     max_invalid_rate: float = Field(default=0.0, ge=0, le=1)
     forbid_hard_failures: bool = True

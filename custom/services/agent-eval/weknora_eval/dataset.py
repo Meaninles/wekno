@@ -99,6 +99,13 @@ def validate_dataset(cases: list[CaseSpec]) -> list[str]:
         family_splits[case.family_id].add(case.split)
         if case.split != Split.QUARANTINE and case.provenance.needs_codex_review:
             errors.append(f"{case.case_id}: unreviewed case must remain in quarantine")
+        if (
+            case.split != Split.QUARANTINE
+            and case.provenance.metadata.get("requires_branch_curation") is True
+        ):
+            errors.append(
+                f"{case.case_id}: adaptive conversation requires branch-safe curation before promotion"
+            )
         if not case.enabled:
             continue
         if case.split != Split.QUARANTINE:
@@ -223,6 +230,27 @@ def _messages_from_transcript(payload: Any) -> list[dict[str, Any]]:
     for key in ("messages", "conversation", "turns"):
         value = payload.get(key)
         if isinstance(value, list):
+            if key == "turns" and any(
+                isinstance(item, dict) and "user_message" in item for item in value
+            ):
+                normalized: list[dict[str, Any]] = []
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized.append(
+                        {
+                            "role": "user",
+                            "content": item.get("user_message") or "",
+                        }
+                    )
+                    normalized.append(
+                        {
+                            "role": "assistant",
+                            "content": item.get("assistant_message") or "",
+                            "references": item.get("references") or [],
+                        }
+                    )
+                return normalized
             return [item for item in value if isinstance(item, dict)]
     return []
 
@@ -282,6 +310,23 @@ def build_quarantine_from_transcripts(
     result: list[CaseSpec] = []
     for source_path in paths:
         for index, payload in enumerate(_load_transcript_payloads(source_path), 1):
+            discovery_turns: list[dict[str, Any]] = []
+            if isinstance(payload, dict) and str(payload.get("profile_id") or "").strip():
+                discovery_turns = [
+                    turn
+                    for turn in payload.get("turns") or []
+                    if isinstance(turn, dict) and "user_message" in turn
+                ]
+                missing_reviews = [
+                    str(turn.get("turn_id") or "<unknown>")
+                    for turn in discovery_turns
+                    if not isinstance(turn.get("human_review"), dict)
+                ]
+                if missing_reviews:
+                    raise DatasetError(
+                        f"{source_path}: adaptive discovery turns must be reviewed before harvest: "
+                        + ", ".join(missing_reviews)
+                    )
             messages = _messages_from_transcript(payload)
             if not messages:
                 continue
@@ -321,6 +366,48 @@ def build_quarantine_from_transcripts(
             if not turns:
                 continue
             short_hash = source_hash[:12]
+            resolved_agent_id = str(payload.get("agent_id") or agent_id) if isinstance(payload, dict) else agent_id
+            resolved_endpoint = str(payload.get("endpoint") or endpoint) if isinstance(payload, dict) else endpoint
+            profile_id = str(payload.get("profile_id") or "") if isinstance(payload, dict) else ""
+            provenance_metadata: dict[str, Any] = {}
+            if isinstance(payload, dict) and profile_id:
+                turn_reviews = {
+                    str(turn.get("turn_id") or ""): {
+                        "disposition": str(turn["human_review"].get("disposition") or ""),
+                        "findings": [
+                            redact_text(str(item))
+                            for item in turn["human_review"].get("findings") or []
+                            if str(item).strip()
+                        ],
+                        "next_action": redact_text(
+                            str(turn["human_review"].get("next_action") or "")
+                        ),
+                        "eligible_as_gold": False,
+                    }
+                    for turn in discovery_turns
+                }
+                rejected_turns = [
+                    turn_id
+                    for turn_id, review in turn_reviews.items()
+                    if review["disposition"] == "rejected_answer"
+                ]
+                finding_turns = [
+                    turn_id
+                    for turn_id, review in turn_reviews.items()
+                    if review["disposition"] == "accepted_with_findings"
+                ]
+                provenance_metadata = {
+                    "discovery_profile_id": profile_id,
+                    "history_turns": int(payload.get("history_turns") or 0),
+                    "invalid_attempt_count": len(payload.get("invalid_attempts") or []),
+                    "source_kind": "adaptive-discovery",
+                    "all_completed_turns_codex_reviewed": True,
+                    "turn_reviews": turn_reviews,
+                    "rejected_answer_turns": rejected_turns,
+                    "accepted_with_findings_turns": finding_turns,
+                    "requires_branch_curation": bool(rejected_turns or finding_turns),
+                    "conversation_validity": "reviewed-observation-only",
+                }
             result.append(
                 CaseSpec(
                     case_id=f"harvest-{short_hash}-{index:03d}",
@@ -329,16 +416,21 @@ def build_quarantine_from_transcripts(
                     split=Split.QUARANTINE,
                     enabled=False,
                     capabilities=[Capability.LONG_CONTEXT_DIALOGUE] if len(turns) > 1 else [Capability.RAG_RETRIEVAL],
-                    agent=AgentSelector(endpoint=endpoint, agent_id=agent_id),
+                    agent=AgentSelector(endpoint=resolved_endpoint, agent_id=resolved_agent_id),
                     setup=CaseSetup(),
                     turns=turns,
-                    tags=["real-conversation", "needs-codex-curation"],
+                    tags=[
+                        "real-conversation",
+                        "needs-codex-curation",
+                        *([f"profile:{profile_id}"] if profile_id else []),
+                    ],
                     provenance=Provenance(
                         source=Path(source_path).name,
                         source_hash=source_hash,
                         needs_codex_review=True,
                         reference_answers=reference_answers,
                         reference_evidence=reference_evidence,
+                        metadata=provenance_metadata,
                     ),
                 )
             )

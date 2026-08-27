@@ -104,6 +104,29 @@ Redis 通过 portable RDB 导出，恢复前清掉目标卷自己的 AOF 目录�
 
 真实历史对话只能自动进入 `quarantine`，旧回答只作为 provenance，不能自动成为“标准答案”。Codex 完成脱敏、事实核验、难例扩展和 acceptable-answer contract 后，才允许晋级。
 
+多轮问题发现采用 Codex 主导的单轮检查点，框架不接受预写的 12 轮对话脚本。scenario 对每个智能体只能定义 1 个真实业务种子问题；`discover` 每次只能执行这一轮或一个经审核的自适应下一轮，不存在批量逃生参数。Codex 必须先核对回答中的当前请求对齐、用户事实、已废弃事实、引用支撑、工具行为、格式约束和会话状态，再决定继续、纠错、重问或状态重同步。
+
+继续会话时必须提供单独的 `--next-turn-file`。该文件只能包含 1 轮，必须指向最新已审核 turn，并记录上轮 disposition、调整策略、理由以及四项显式语义检查：上轮已人工复核、当前问题符合 next action、不依赖未经核实的助手断言、已按用户事实核对状态。若上轮是 `rejected_answer`，框架禁止使用普通 `continue`；必须纠错、重问或重同步。这样脚本只负责可靠执行和留痕，下一问仍由 Codex 根据真实回答生成。
+
+```powershell
+# 首轮：只读取 scenario 中的 seed
+python -m weknora_eval discover --scenario discovery/scenarios/procurement-multiturn-problem-finding.v1.json --profile general-agent --output artifacts/general.json
+
+# Codex 查看回答后记录审核
+python -m weknora_eval discover-review --artifact artifacts/general.json --profile general-agent --turn turn-001 --disposition accepted_with_findings --finding "..." --next-action "..."
+
+# Codex 再编写仅含下一轮的 plan，框架验证关联关系后执行一次
+python -m weknora_eval discover --scenario discovery/scenarios/procurement-multiturn-problem-finding.v1.json --profile general-agent --resume-from artifacts/general.json --next-turn-file discovery/adaptive-turns/general-agent-turn-002.json --output artifacts/general.json
+```
+
+流式错误、上游 403、超时或采集异常单独进入 `invalid_attempts`，用户状态账本回滚，并尽力软删除本次请求对，不能污染下一轮有效历史。失败重试仍使用同一个已审核 plan，不生成后续问题。
+
+每个完成轮次还必须通过 `discover-review` 写入 Codex 审核结论，才能 resume：`accepted_observation`、`accepted_with_findings` 或 `rejected_answer`。三种状态都只是对观察数据可用性的判断，框架固定写入 `eligible_as_gold=false`；回答正确与否不能由模型自己宣布。`rejected_answer` 会保留为失败行为证据，下一问必须显式纠错或重新同步，而不是沿着错误回答自动生成。
+
+三个会话智能体及其历史窗口由 `profiles/multiturn-agents.v1.json` 固定：快速问答为 5 轮、RAG 推理为 10 轮、通用智能体为 10 轮；问题发现至少执行到各自窗口之外 2 轮。当前发现模型固定为 DeepSeek V4 Flash。该 profile 矩阵是 WeKnora 内部智能体差异的配置层，数据集 schema、评分器和门禁仍共用一套实现。
+
+首轮 36 个有效对话轮次的审核结论、问题族和后续用例拆分建议见 `discovery/findings/procurement-multiturn-discovery-20260827.md`；对应 gitignored 原始产物的校验值见同目录 manifest。
+
 ```text
 生产/验收真实对话
   -> quarantine（needs_codex_review=true）
@@ -129,6 +152,10 @@ python -m weknora_eval dataset split --input reviewed.jsonl --output-dir dataset
 python -m weknora_eval dataset validate --input datasets/frozen-v1/all.jsonl
 python -m weknora_eval dataset freeze --input datasets/frozen-v1/all.jsonl --output artifacts/frozen-v1.manifest.json
 ```
+
+`dataset build` 能直接读取 discovery artifact 的 `sessions[].turns[]`；任何未写入 Codex 审核的完成轮次都会让构建失败。它会忽略 `invalid_attempts`，从每个 session 推断真实 `agent_id`/endpoint，把观察到的助手回答放入 `provenance.reference_answers`，并把每轮 disposition、findings、next action、被拒回答和分支整理需求写入 provenance。生成 case 始终为 `enabled=false`、`split=quarantine`、`needs_codex_review=true`，因此错误回答只能作为失败行为证据，不会自动成为训练目标、标准答案或发布门禁标准。
+
+真实自适应对话不能原样晋级为固定 gate：例如后续用户说“你刚才写了 30 台”只在被测回答确实犯过该错误时成立；优化后的智能体若没有犯错，这个固定下一问反而会制造伪失败。只要 provenance 中 `requires_branch_curation=true`，数据校验会硬性禁止进入非 quarantine split。Codex 必须把它整理成不依赖某个错误回答的稳定状态测试，或将其保留为由 Codex 根据当轮回答选择分支的 discovery/actor 用例；清除该标记前需要重新核对整条分支。
 
 示例数据集可通过 `prepare-runner-env.ps1` 从隔离库解析默认模型和指定知识文件，并在 eval-only 握手成功后生成 `runner.env`。租户 API key 只在进程内解密并写入被 Git 忽略的本地文件，不打印到日志；自定义数据集可复制 `runner.env.example` 后改用自己的绑定。数据集只保留 `${ENV}` 占位符，数据集 hash 不受运行时 ID 替换影响。
 

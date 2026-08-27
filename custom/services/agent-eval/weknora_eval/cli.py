@@ -17,6 +17,14 @@ from .dataset import (
     validate_dataset,
     write_jsonl,
 )
+from .discovery import (
+    DiscoveryCollector,
+    assert_discovery_reviewed,
+    load_adaptive_turn_plan,
+    load_discovery_scenario,
+    review_discovery_turn,
+    write_discovery_result,
+)
 from .gates import evaluate_gate, load_policy
 from .judge import judge_case
 from .langfuse_store import publish_dataset, run_langfuse_experiment
@@ -44,6 +52,113 @@ def _client(args: argparse.Namespace) -> WeKnoraClient:
 def cmd_doctor(args: argparse.Namespace) -> int:
     fingerprint = EvalRunner(_client(args)).doctor()
     print(json.dumps(fingerprint.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    scenario = load_discovery_scenario(args.scenario)
+    prior = None
+    adaptive_turns: dict[str, dict] = {}
+    if args.resume_from:
+        with Path(args.resume_from).open("r", encoding="utf-8") as handle:
+            prior = json.load(handle)
+        assert_discovery_reviewed(prior, set(args.profile or []))
+        if len(args.profile or []) != 1:
+            raise DatasetError("resumed discovery requires exactly one --profile")
+        if not args.next_turn_file:
+            raise DatasetError(
+                "resumed discovery requires --next-turn-file authored after reviewing the latest answer"
+            )
+        profile_id = args.profile[0]
+        adaptive_turns[profile_id] = load_adaptive_turn_plan(
+            args.next_turn_file,
+            prior,
+            profile_id=profile_id,
+        )
+    elif args.next_turn_file:
+        raise DatasetError("--next-turn-file is only valid together with --resume-from")
+
+    def progress(profile_id: str, turn_id: str, absolute_turn: int, status: str, result: dict | None) -> None:
+        suffix = ""
+        if result is not None:
+            suffix = f" latency_ms={result.get('total_latency_ms', 0)} error={bool(result.get('error'))}"
+        print(
+            f"DISCOVERY profile={profile_id} turn={turn_id} index={absolute_turn} status={status}{suffix}",
+            flush=True,
+        )
+
+    collected = DiscoveryCollector(_client(args)).collect(
+        scenario,
+        prior=prior,
+        selected_profiles=set(args.profile or []),
+        adaptive_turns=adaptive_turns,
+        progress=progress,
+    )
+    write_discovery_result(args.output, collected)
+    failed = [item["profile_id"] for item in collected["sessions"] if item.get("error")]
+    print(
+        json.dumps(
+            {
+                "discovery_id": collected["discovery_id"],
+                "output": args.output,
+                "sessions": len(collected["sessions"]),
+                "failed_profiles": failed,
+                "formal_eval_executed": False,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 2 if failed else 0
+
+
+def cmd_discover_export(args: argparse.Namespace) -> int:
+    scenario = load_discovery_scenario(args.scenario)
+    collected = DiscoveryCollector(_client(args)).export_existing_session(
+        scenario,
+        profile_id=args.profile,
+        session_id=args.session_id,
+    )
+    write_discovery_result(args.output, collected)
+    print(
+        json.dumps(
+            {
+                "output": args.output,
+                "profile": args.profile,
+                "session_id": args.session_id,
+                "turns": len(collected["sessions"][0]["turns"]),
+                "formal_eval_executed": False,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def cmd_discover_review(args: argparse.Namespace) -> int:
+    target = Path(args.artifact)
+    with target.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    review_discovery_turn(
+        payload,
+        profile_id=args.profile,
+        turn_id=args.turn,
+        disposition=args.disposition,
+        findings=args.finding,
+        next_action=args.next_action,
+    )
+    write_discovery_result(target, payload)
+    print(
+        json.dumps(
+            {
+                "artifact": str(target),
+                "profile": args.profile,
+                "turn": args.turn,
+                "disposition": args.disposition,
+                "formal_eval_executed": False,
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -216,6 +331,48 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="verify eval-mode SUT capabilities")
     _api_args(doctor)
     doctor.set_defaults(func=cmd_doctor)
+
+    discover = sub.add_parser(
+        "discover",
+        help="collect unscored, real multi-turn conversations in the isolated eval environment",
+    )
+    _api_args(discover)
+    discover.add_argument("--scenario", required=True)
+    discover.add_argument("--output", required=True)
+    discover.add_argument("--resume-from")
+    discover.add_argument("--profile", action="append")
+    discover.add_argument(
+        "--next-turn-file",
+        help="single Codex-authored adaptive turn linked to the latest reviewed answer; required when resuming",
+    )
+    discover.set_defaults(func=cmd_discover)
+
+    discover_export = sub.add_parser(
+        "discover-export",
+        help="recover an unscored discovery checkpoint from an existing WeKnora session",
+    )
+    _api_args(discover_export)
+    discover_export.add_argument("--scenario", required=True)
+    discover_export.add_argument("--profile", required=True)
+    discover_export.add_argument("--session-id", required=True)
+    discover_export.add_argument("--output", required=True)
+    discover_export.set_defaults(func=cmd_discover_export)
+
+    discover_review = sub.add_parser(
+        "discover-review",
+        help="record the required Codex quality checkpoint for one completed discovery turn",
+    )
+    discover_review.add_argument("--artifact", required=True)
+    discover_review.add_argument("--profile", required=True)
+    discover_review.add_argument("--turn", required=True)
+    discover_review.add_argument(
+        "--disposition",
+        required=True,
+        choices=["accepted_observation", "accepted_with_findings", "rejected_answer"],
+    )
+    discover_review.add_argument("--finding", action="append", default=[])
+    discover_review.add_argument("--next-action", default="")
+    discover_review.set_defaults(func=cmd_discover_review)
 
     dataset = sub.add_parser("dataset", help="build, validate, split, freeze or publish datasets")
     dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)

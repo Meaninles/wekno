@@ -61,11 +61,13 @@ class EvalRunner:
             raw=raw,
         )
 
-    def run_case(self, spec: CaseSpec) -> CaseRun:
+    def run_case(self, spec: CaseSpec, *, attempt_index: int = 1) -> CaseRun:
         case_run = CaseRun(
             case_id=spec.case_id,
             family_id=spec.family_id,
             split=spec.split,
+            agent_profile_id=spec.agent_profile_id,
+            attempt_index=attempt_index,
             verdict=Verdict.INVALID,
         )
         if not spec.enabled:
@@ -143,16 +145,33 @@ class EvalRunner:
     ) -> ExperimentRun:
         sut = self.doctor()
         selected = [case for case in cases if case.enabled and case.split in selected_splits]
-        results_by_id: dict[str, CaseRun] = {}
+        planned = [
+            (case, attempt_index)
+            for case in selected
+            for attempt_index in range(1, case.repetitions + 1)
+        ]
+        results_by_key: dict[tuple[str, int], CaseRun] = {}
         if max_concurrency <= 1:
-            for case in selected:
-                results_by_id[case.case_id] = self.run_case(case)
+            for case, attempt_index in planned:
+                results_by_key[(case.case_id, attempt_index)] = self.run_case(
+                    case,
+                    attempt_index=attempt_index,
+                )
         else:
             with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
-                futures = {executor.submit(self.run_case, case): case.case_id for case in selected}
+                futures = {
+                    executor.submit(self.run_case, case, attempt_index=attempt_index): (
+                        case.case_id,
+                        attempt_index,
+                    )
+                    for case, attempt_index in planned
+                }
                 for future in as_completed(futures):
-                    results_by_id[futures[future]] = future.result()
-        ordered = [results_by_id[case.case_id] for case in selected]
+                    results_by_key[futures[future]] = future.result()
+        ordered = [
+            results_by_key[(case.case_id, attempt_index)]
+            for case, attempt_index in planned
+        ]
         suites = {case.suite for case in selected}
         suite = next(iter(suites)) if len(suites) == 1 else "mixed"
         return ExperimentRun(

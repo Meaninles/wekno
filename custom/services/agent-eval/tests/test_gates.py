@@ -22,14 +22,16 @@ from weknora_eval.models import (
 )
 
 
-def spec() -> CaseSpec:
+def spec(*, repetitions: int = 1, profile_id: str | None = None) -> CaseSpec:
     return CaseSpec(
         case_id="gate-case",
         family_id="family",
         suite="suite",
         split=Split.GATE,
         capabilities=[Capability.RAG_RETRIEVAL],
+        agent_profile_id=profile_id,
         agent=AgentSelector(agent_id="agent"),
+        repetitions=repetitions,
         turns=[
             TurnSpec(
                 turn_id="turn",
@@ -40,11 +42,19 @@ def spec() -> CaseSpec:
     )
 
 
-def case(verdict: Verdict, latency: int = 100) -> CaseRun:
+def case(
+    verdict: Verdict,
+    latency: int = 100,
+    *,
+    attempt_index: int = 1,
+    profile_id: str | None = None,
+) -> CaseRun:
     return CaseRun(
         case_id="gate-case",
         family_id="family",
         split=Split.GATE,
+        agent_profile_id=profile_id,
+        attempt_index=attempt_index,
         verdict=verdict,
         turns=[
             ObservedTurn(
@@ -61,8 +71,7 @@ def case(verdict: Verdict, latency: int = 100) -> CaseRun:
     )
 
 
-def run(run_id: str, case_run: CaseRun) -> ExperimentRun:
-    dataset = [spec()]
+def run_for(dataset: list[CaseSpec], run_id: str, case_runs: list[CaseRun]) -> ExperimentRun:
     return ExperimentRun(
         run_id=run_id,
         suite="suite",
@@ -73,8 +82,12 @@ def run(run_id: str, case_run: CaseRun) -> ExperimentRun:
             capabilities=[Capability.RAG_RETRIEVAL.value],
             raw={"recorder_enabled": True},
         ),
-        cases=[case_run],
+        cases=case_runs,
     )
+
+
+def run(run_id: str, case_run: CaseRun) -> ExperimentRun:
+    return run_for([spec()], run_id, [case_run])
 
 
 class GateTests(unittest.TestCase):
@@ -111,6 +124,77 @@ class GateTests(unittest.TestCase):
         result = evaluate_gate(
             [spec()], run("candidate", tampered), self.policy, run("baseline", case(Verdict.PASS))
         )
+        self.assertEqual(result.verdict, Verdict.INVALID)
+
+    def test_repeated_sessions_are_paired_by_attempt(self) -> None:
+        dataset = [spec(repetitions=2, profile_id="rag-reasoning")]
+        candidate = run_for(
+            dataset,
+            "candidate",
+            [
+                case(Verdict.PASS, attempt_index=1, profile_id="rag-reasoning"),
+                case(Verdict.PASS, attempt_index=2, profile_id="rag-reasoning"),
+            ],
+        )
+        baseline = run_for(
+            dataset,
+            "baseline",
+            [
+                case(Verdict.PASS, attempt_index=1, profile_id="rag-reasoning"),
+                case(Verdict.PASS, attempt_index=2, profile_id="rag-reasoning"),
+            ],
+        )
+        policy = self.policy.model_copy(
+            update={
+                "min_repetitions_per_case": 2,
+                "required_agent_profiles": ["rag-reasoning"],
+            }
+        )
+
+        result = evaluate_gate(dataset, candidate, policy, baseline)
+
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_missing_repeated_session_is_invalid(self) -> None:
+        dataset = [spec(repetitions=2, profile_id="rag-reasoning")]
+        candidate = run_for(
+            dataset,
+            "candidate",
+            [case(Verdict.PASS, attempt_index=1, profile_id="rag-reasoning")],
+        )
+        baseline = run_for(
+            dataset,
+            "baseline",
+            [
+                case(Verdict.PASS, attempt_index=1, profile_id="rag-reasoning"),
+                case(Verdict.PASS, attempt_index=2, profile_id="rag-reasoning"),
+            ],
+        )
+
+        result = evaluate_gate(dataset, candidate, self.policy, baseline)
+
+        self.assertEqual(result.verdict, Verdict.INVALID)
+
+    def test_required_agent_profile_must_exist_in_dataset(self) -> None:
+        policy = self.policy.model_copy(
+            update={"required_agent_profiles": ["general-agent"]}
+        )
+
+        result = evaluate_gate(
+            [spec(profile_id="rag-reasoning")],
+            run_for(
+                [spec(profile_id="rag-reasoning")],
+                "candidate",
+                [case(Verdict.PASS, profile_id="rag-reasoning")],
+            ),
+            policy,
+            run_for(
+                [spec(profile_id="rag-reasoning")],
+                "baseline",
+                [case(Verdict.PASS, profile_id="rag-reasoning")],
+            ),
+        )
+
         self.assertEqual(result.verdict, Verdict.INVALID)
 
 

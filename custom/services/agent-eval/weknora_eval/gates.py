@@ -51,6 +51,14 @@ def _metric_rates(cases: Iterable[CaseRun]) -> dict[str, float]:
     return {name: sum(items) / len(items) for name, items in values.items() if items}
 
 
+def _run_key(case: CaseRun) -> tuple[str, int]:
+    return case.case_id, case.attempt_index
+
+
+def _key_label(key: tuple[str, int]) -> str:
+    return f"{key[0]}#attempt-{key[1]}"
+
+
 def evaluate_gate(
     dataset: list[CaseSpec],
     candidate: ExperimentRun,
@@ -60,6 +68,11 @@ def evaluate_gate(
     checks: list[GateCheck] = []
     selected = _selected_specs(dataset, policy)
     expected_ids = {case.case_id for case in selected}
+    expected_keys = {
+        (case.case_id, attempt_index)
+        for case in selected
+        for attempt_index in range(1, case.repetitions + 1)
+    }
     expected_dataset_sha256 = dataset_sha256(dataset)
 
     candidate_dataset_ok = candidate.dataset_sha256 == expected_dataset_sha256
@@ -99,42 +112,91 @@ def evaluate_gate(
         )
     )
 
-    if not expected_ids:
+    if not expected_keys:
         checks.append(_check("dataset_selection", Verdict.INVALID, "no enabled cases match required gate splits"))
     else:
         checks.append(
             _check(
                 "dataset_selection",
                 Verdict.PASS,
-                f"selected {len(expected_ids)} gate cases",
+                f"selected {len(expected_ids)} gate cases / {len(expected_keys)} session executions",
                 splits=[split.value for split in policy.required_splits],
             )
         )
 
-    candidate_ids = [case.case_id for case in candidate.cases if case.case_id in expected_ids]
-    duplicate_candidate_ids = sorted(case_id for case_id, count in Counter(candidate_ids).items() if count > 1)
-    raw_candidate_by_id = {case.case_id: case for case in candidate.cases if case.case_id in expected_ids}
-    missing = sorted(expected_ids - set(raw_candidate_by_id))
-    coverage = len(raw_candidate_by_id) / len(expected_ids) if expected_ids else 0.0
-    coverage_ok = not duplicate_candidate_ids and coverage >= policy.min_case_coverage
+    under_repeated = sorted(
+        case.case_id
+        for case in selected
+        if case.repetitions < policy.min_repetitions_per_case
+    )
+    checks.append(
+        _check(
+            "repetition_contract",
+            Verdict.PASS if not under_repeated else Verdict.INVALID,
+            "dataset declares enough independent session repetitions"
+            if not under_repeated
+            else "dataset repetition count is below policy",
+            minimum=policy.min_repetitions_per_case,
+            cases=under_repeated,
+        )
+    )
+
+    dataset_profiles = {case.agent_profile_id for case in selected if case.agent_profile_id}
+    missing_dataset_profiles = sorted(set(policy.required_agent_profiles) - dataset_profiles)
+    checks.append(
+        _check(
+            "dataset_agent_profile_coverage",
+            Verdict.PASS if not missing_dataset_profiles else Verdict.INVALID,
+            "required WeKnora agent profiles are present in the selected dataset"
+            if not missing_dataset_profiles
+            else "selected dataset omits required WeKnora agent profiles",
+            missing=missing_dataset_profiles,
+            covered=sorted(dataset_profiles),
+        )
+    )
+
+    candidate_runs = [case for case in candidate.cases if case.case_id in expected_ids]
+    candidate_keys = [_run_key(case) for case in candidate_runs]
+    duplicate_candidate_keys = sorted(
+        (_key_label(key) for key, count in Counter(candidate_keys).items() if count > 1)
+    )
+    unexpected_candidate_keys = sorted(
+        _key_label(key) for key in set(candidate_keys) - expected_keys
+    )
+    raw_candidate_by_key = {
+        _run_key(case): case
+        for case in candidate_runs
+        if _run_key(case) in expected_keys
+    }
+    missing_keys = expected_keys - set(raw_candidate_by_key)
+    missing = sorted(_key_label(key) for key in missing_keys)
+    coverage = len(raw_candidate_by_key) / len(expected_keys) if expected_keys else 0.0
+    coverage_ok = (
+        not duplicate_candidate_keys
+        and not unexpected_candidate_keys
+        and coverage >= policy.min_case_coverage
+    )
     checks.append(
         _check(
             "case_coverage",
             Verdict.PASS if coverage_ok else Verdict.INVALID,
             f"coverage={coverage:.3f}, required>={policy.min_case_coverage:.3f}",
             missing=missing,
-            duplicates=duplicate_candidate_ids,
+            duplicates=duplicate_candidate_keys,
+            unexpected=unexpected_candidate_keys,
         )
     )
 
     specs_by_id = {case.case_id: case for case in selected}
     artifact_errors: dict[str, list[str]] = {}
-    candidate_by_id: dict[str, CaseRun] = {}
-    for case_id, raw_case in raw_candidate_by_id.items():
-        spec = specs_by_id[case_id]
+    candidate_by_key: dict[tuple[str, int], CaseRun] = {}
+    for key, raw_case in raw_candidate_by_key.items():
+        spec = specs_by_id[key[0]]
         errors: list[str] = []
         if raw_case.family_id != spec.family_id or raw_case.split != spec.split:
             errors.append("family/split mismatch")
+        if raw_case.agent_profile_id != spec.agent_profile_id:
+            errors.append("agent profile mismatch")
         expected_turn_ids = [turn.turn_id for turn in spec.turns]
         actual_turn_ids = [turn.turn_id for turn in raw_case.turns]
         if actual_turn_ids != expected_turn_ids:
@@ -143,8 +205,8 @@ def evaluate_gate(
         if raw_case.verdict != rescored.verdict:
             errors.append(f"stored verdict {raw_case.verdict.value} != recomputed {rescored.verdict.value}")
         if errors:
-            artifact_errors[case_id] = errors
-        candidate_by_id[case_id] = rescored
+            artifact_errors[_key_label(key)] = errors
+        candidate_by_key[key] = rescored
     checks.append(
         _check(
             "candidate_artifact_integrity",
@@ -154,8 +216,14 @@ def evaluate_gate(
         )
     )
 
-    invalid = [case.case_id for case in candidate_by_id.values() if case.verdict == Verdict.INVALID]
-    invalid_rate = len(invalid) / len(candidate_by_id) if candidate_by_id else 1.0
+    invalid = sorted(
+        [*(_key_label(key) for key in missing_keys), *(
+            _key_label(key)
+            for key, case in candidate_by_key.items()
+            if case.verdict == Verdict.INVALID
+        )]
+    )
+    invalid_rate = len(set(invalid)) / len(expected_keys) if expected_keys else 1.0
     invalid_ok = invalid_rate <= policy.max_invalid_rate
     checks.append(
         _check(
@@ -170,7 +238,11 @@ def evaluate_gate(
     covered_capabilities = {
         capability.value
         for case in selected
-        if case.case_id in candidate_by_id and candidate_by_id[case.case_id].verdict != Verdict.INVALID
+        if all(
+            (case.case_id, attempt_index) in candidate_by_key
+            and candidate_by_key[(case.case_id, attempt_index)].verdict != Verdict.INVALID
+            for attempt_index in range(1, case.repetitions + 1)
+        )
         for capability in case.capabilities
     }
     missing_capabilities = sorted(required_capabilities - covered_capabilities)
@@ -184,9 +256,32 @@ def evaluate_gate(
         )
     )
 
+    covered_profiles = {
+        case.agent_profile_id
+        for case in selected
+        if case.agent_profile_id
+        and all(
+            (case.case_id, attempt_index) in candidate_by_key
+            and candidate_by_key[(case.case_id, attempt_index)].verdict != Verdict.INVALID
+            for attempt_index in range(1, case.repetitions + 1)
+        )
+    }
+    missing_profiles = sorted(set(policy.required_agent_profiles) - covered_profiles)
+    checks.append(
+        _check(
+            "agent_profile_coverage",
+            Verdict.PASS if not missing_profiles else Verdict.INVALID,
+            "required WeKnora agents completed every declared session repetition"
+            if not missing_profiles
+            else "required WeKnora agent execution coverage is incomplete",
+            missing=missing_profiles,
+            covered=sorted(covered_profiles),
+        )
+    )
+
     hard_failures = sorted(
-        case.case_id
-        for case in candidate_by_id.values()
+        _key_label(key)
+        for key, case in candidate_by_key.items()
         if case.verdict == Verdict.FAIL
         or any(score.hard and score.passed is False for score in case.scores)
     )
@@ -201,42 +296,53 @@ def evaluate_gate(
     )
 
     if baseline is not None and candidate_dataset_ok and baseline_dataset_ok:
-        baseline_ids = [case.case_id for case in baseline.cases if case.case_id in expected_ids]
-        duplicate_baseline_ids = sorted(case_id for case_id, count in Counter(baseline_ids).items() if count > 1)
-        raw_baseline_by_id = {case.case_id: case for case in baseline.cases if case.case_id in expected_ids}
-        missing_baseline = sorted(expected_ids - set(raw_baseline_by_id))
+        baseline_runs = [case for case in baseline.cases if case.case_id in expected_ids]
+        baseline_keys = [_run_key(case) for case in baseline_runs]
+        duplicate_baseline_keys = sorted(
+            _key_label(key) for key, count in Counter(baseline_keys).items() if count > 1
+        )
+        unexpected_baseline_keys = sorted(_key_label(key) for key in set(baseline_keys) - expected_keys)
+        raw_baseline_by_key = {
+            _run_key(case): case
+            for case in baseline_runs
+            if _run_key(case) in expected_keys
+        }
+        missing_baseline_keys = expected_keys - set(raw_baseline_by_key)
+        missing_baseline = sorted(_key_label(key) for key in missing_baseline_keys)
         baseline_errors: dict[str, list[str]] = {}
-        baseline_by_id: dict[str, CaseRun] = {}
-        for case_id, raw_case in raw_baseline_by_id.items():
-            spec = specs_by_id[case_id]
+        baseline_by_key: dict[tuple[str, int], CaseRun] = {}
+        for key, raw_case in raw_baseline_by_key.items():
+            spec = specs_by_id[key[0]]
             errors: list[str] = []
             if raw_case.family_id != spec.family_id or raw_case.split != spec.split:
                 errors.append("family/split mismatch")
+            if raw_case.agent_profile_id != spec.agent_profile_id:
+                errors.append("agent profile mismatch")
             if [turn.turn_id for turn in raw_case.turns] != [turn.turn_id for turn in spec.turns]:
                 errors.append("turn coverage/order mismatch")
             rescored = score_case(spec, raw_case.model_copy(update={"scores": []}))
             if raw_case.verdict != rescored.verdict:
                 errors.append(f"stored verdict {raw_case.verdict.value} != recomputed {rescored.verdict.value}")
             if errors:
-                baseline_errors[case_id] = errors
-            baseline_by_id[case_id] = rescored
-        if missing_baseline:
+                baseline_errors[_key_label(key)] = errors
+            baseline_by_key[key] = rescored
+        if missing_baseline or duplicate_baseline_keys or unexpected_baseline_keys:
             checks.append(
                 _check(
                     "baseline_coverage",
                     Verdict.INVALID,
-                    "baseline does not cover the paired gate cases",
+                    "baseline does not exactly cover the paired session repetitions",
                     missing=missing_baseline,
-                    duplicates=duplicate_baseline_ids,
+                    duplicates=duplicate_baseline_keys,
+                    unexpected=unexpected_baseline_keys,
                 )
             )
-        elif duplicate_baseline_ids or baseline_errors:
+        elif baseline_errors:
             checks.append(
                 _check(
                     "baseline_artifact_integrity",
                     Verdict.INVALID,
                     "baseline artifact integrity failed",
-                    duplicates=duplicate_baseline_ids,
                     errors=baseline_errors,
                 )
             )
@@ -249,15 +355,13 @@ def evaluate_gate(
                 )
             )
             regressions = sorted(
-                case_id
-                for case_id in expected_ids
-                if baseline_by_id[case_id].verdict == Verdict.PASS
-                and candidate_by_id.get(case_id, CaseRun(
-                    case_id=case_id,
-                    family_id="missing",
-                    split=Split.GATE,
-                    verdict=Verdict.INVALID,
-                )).verdict != Verdict.PASS
+                _key_label(key)
+                for key in expected_keys
+                if baseline_by_key[key].verdict == Verdict.PASS
+                and (
+                    key not in candidate_by_key
+                    or candidate_by_key[key].verdict != Verdict.PASS
+                )
             )
             regression_ok = not policy.forbid_pass_to_fail_regressions or not regressions
             checks.append(
@@ -269,8 +373,8 @@ def evaluate_gate(
                 )
             )
 
-            candidate_rates = _metric_rates(candidate_by_id.values())
-            baseline_rates = _metric_rates(baseline_by_id.values())
+            candidate_rates = _metric_rates(candidate_by_key.values())
+            baseline_rates = _metric_rates(baseline_by_key.values())
             metric_regressions: dict[str, dict[str, float]] = {}
             for metric, tolerance in policy.max_metric_rate_regression.items():
                 if metric not in baseline_rates or metric not in candidate_rates:
@@ -296,10 +400,10 @@ def evaluate_gate(
             )
 
             candidate_p95 = _p95(
-                turn.total_latency_ms for case in candidate_by_id.values() for turn in case.turns
+                turn.total_latency_ms for case in candidate_by_key.values() for turn in case.turns
             )
             baseline_p95 = _p95(
-                turn.total_latency_ms for case in baseline_by_id.values() for turn in case.turns
+                turn.total_latency_ms for case in baseline_by_key.values() for turn in case.turns
             )
             latency_limit = baseline_p95 * (1 + policy.max_p95_latency_regression_ratio) + policy.max_p95_latency_regression_ms
             latency_ok = candidate_p95 <= latency_limit

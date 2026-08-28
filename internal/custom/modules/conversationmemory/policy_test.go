@@ -1018,4 +1018,14 @@ The validation says I need to rewrite the complete answer.
 	if got := StripInternalPlanningPreamble(longRepairLeak); got != expectedRepair {
 		t.Fatalf("multi-paragraph validator narration survived: %q", got)
 	}
+	toolRepairLeak := `I see that all tools are currently returning errors. Let me re-examine the earlier retrieval results.
+
+From the earlier retrieval results, I have the required chunks.
+
+已确认：项目为系统升级服务。
+
+待确认：采购信息能否公开。`
+	if got := StripInternalPlanningPreamble(toolRepairLeak); got != "已确认：项目为系统升级服务。\n\n待确认：采购信息能否公开。" {
+		t.Fatalf("tool-repair narration survived: %q", got)
+	}
 }

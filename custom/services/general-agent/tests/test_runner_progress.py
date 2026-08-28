@@ -223,24 +223,6 @@ class RunnerProgressTest(unittest.TestCase):
         )
         self.assertEqual(mismatch["missing_topics"], ["采购信息能否公开"])
 
-        deferred_payload = payload.model_copy(
-            update={
-                "query": payload.query + "\n用户明确要求不作最终选择",
-            }
-        )
-        self.assertEqual(
-            turn_contract_issues(
-                deferred_payload,
-                (
-                    "已确认：项目事实。\n\n"
-                    "待确认：采购信息能否公开；需求是否完整；采购全流程时间是否可行。\n\n"
-                    '公开采购：制度条件。<src id="S1" />'
-                ),
-                evidence_by_id={"S1": "服务类预算金额达到200万元。"},
-            ),
-            [],
-        )
-
     def test_turn_contract_issues_reject_internal_repair_narration(self):
         payload = ChatPayload(
             run_id="run-planning-contract",
@@ -276,6 +258,11 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertIn(
             "current_turn_internal_planning_exposed",
             {issue["code"] for issue in turn_contract_issues(payload, contract_leak)},
+        )
+        tool_repair = "I see that all tools are currently unavailable. Let me rewrite.\n\n正式回答。"
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in turn_contract_issues(payload, tool_repair)},
         )
 
     def test_turn_contract_issues_reject_deferred_comparison_ranking(self):

@@ -4347,6 +4347,7 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"i've\s+retrieved|i\s+see\s+the\s+issue|"
     r"looking\s+at\s+(?:the\s+returned\s+evidence|the\s+evidence|my\s+earlier\s+answer)|"
     r"the\s+issue\s+might\s+be|the\s+evidence\s+is\s+already|"
+    r"i\s+see\s+that|"
     r"let\s+me\s+(?:think|check)|the\s+validation\s+says|"
     r"(?:好的[，,]?\s*)?.{0,80}runtime_response_contract|"
     r"现在我已获得|根据(?:本|当前)轮检索结果|以下是替换后的答案"
@@ -4703,13 +4704,11 @@ def turn_contract_issues(
             }
         )
     uncertainty_topics = required_uncertainty_topics(query)
-    missing_uncertainties = []
-    if DEFERRED_COMPARISON_CONTRACT_MARKER not in query:
-        missing_uncertainties = uncertainty_topics_without_grounded_citation(
-            value,
-            uncertainty_topics,
-            evidence_by_id or {},
-        )
+    missing_uncertainties = uncertainty_topics_without_grounded_citation(
+        value,
+        uncertainty_topics,
+        evidence_by_id or {},
+    )
     if missing_uncertainties:
         issues.append(
             {

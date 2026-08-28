@@ -1843,7 +1843,7 @@ func StripInternalPlanningPreamble(answer string) string {
 			"let me think", "let me check", "i need to find", "the validation says",
 			"the uncertainty topics are", "actually, looking", "looking more carefully",
 			"i have the retrieval results", "i have retrieved", "i've retrieved",
-			"i see the issue", "looking at my earlier answer", "the issue might be",
+			"i see the issue", "i see that", "looking at my earlier answer", "the issue might be",
 			"looking at the returned evidence", "looking at the evidence",
 			"the evidence is already", "i need to rewrite", "i will rewrite",
 			"the evidence chunk", "the retrieved evidence", "i already retrieved",

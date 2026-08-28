@@ -59,6 +59,83 @@ def _key_label(key: tuple[str, int]) -> str:
     return f"{key[0]}#attempt-{key[1]}"
 
 
+def _matches_prefix(name: str, prefixes: list[str]) -> bool:
+    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def _with_preserved_judge_scores(raw_case: CaseRun, rescored: CaseRun) -> CaseRun:
+    judge_scores = [
+        score for score in raw_case.scores if score.name == "judge.contract_satisfaction"
+    ]
+    return rescored.model_copy(update={"scores": [*rescored.scores, *judge_scores]})
+
+
+def _adjudicate_case(case: CaseRun, policy: GatePolicy) -> tuple[CaseRun, dict[str, object]]:
+    if not policy.require_judge or case.verdict == Verdict.INVALID:
+        return case, {"required": policy.require_judge, "effective": case.verdict.value}
+
+    judge_by_turn = {
+        score.turn_id: score
+        for score in case.scores
+        if score.name == "judge.contract_satisfaction" and score.turn_id
+    }
+    expected_turns = {turn.turn_id for turn in case.turns}
+    missing = sorted(expected_turns - set(judge_by_turn))
+    low_confidence: list[str] = []
+    invalid_judgements: list[str] = []
+    judge_failures: list[str] = []
+    for turn_id, score in judge_by_turn.items():
+        confidence = float(score.metadata.get("confidence", -1))
+        if confidence < policy.min_judge_confidence:
+            low_confidence.append(turn_id)
+        if score.value == "invalid":
+            invalid_judgements.append(turn_id)
+        elif score.value == "fail":
+            judge_failures.append(turn_id)
+
+    failed_hard = [score for score in case.scores if score.hard and score.passed is False]
+    non_reviewable = [
+        score.name
+        for score in failed_hard
+        if not _matches_prefix(score.name, policy.judge_reviewable_metric_prefixes)
+    ]
+    reviewable_turns = {
+        score.turn_id
+        for score in failed_hard
+        if _matches_prefix(score.name, policy.judge_reviewable_metric_prefixes)
+    }
+    reviewable_not_passed = sorted(
+        turn_id
+        for turn_id in reviewable_turns
+        if turn_id not in judge_by_turn or judge_by_turn[turn_id].value != "pass"
+    )
+
+    if missing or low_confidence or invalid_judgements:
+        verdict = Verdict.INVALID
+    elif non_reviewable or judge_failures or reviewable_not_passed:
+        verdict = Verdict.FAIL
+    else:
+        verdict = Verdict.PASS
+    detail: dict[str, object] = {
+        "required": True,
+        "effective": verdict.value,
+        "missing": missing,
+        "low_confidence": sorted(low_confidence),
+        "invalid": sorted(invalid_judgements),
+        "judge_failures": sorted(judge_failures),
+        "non_reviewable_failures": sorted(non_reviewable),
+        "reviewable_not_passed": reviewable_not_passed,
+    }
+    return case.model_copy(update={"verdict": verdict}), detail
+
+
+def _case_pass_rates(cases: dict[tuple[str, int], CaseRun]) -> dict[str, float]:
+    values: dict[str, list[bool]] = defaultdict(list)
+    for (case_id, _), case in cases.items():
+        values[case_id].append(case.verdict == Verdict.PASS)
+    return {case_id: sum(items) / len(items) for case_id, items in values.items()}
+
+
 def evaluate_gate(
     dataset: list[CaseSpec],
     candidate: ExperimentRun,
@@ -208,7 +285,7 @@ def evaluate_gate(
             errors.append(f"stored verdict {raw_case.verdict.value} != recomputed {rescored.verdict.value}")
         if errors:
             artifact_errors[_key_label(key)] = errors
-        candidate_by_key[key] = rescored
+        candidate_by_key[key] = _with_preserved_judge_scores(raw_case, rescored)
     checks.append(
         _check(
             "candidate_artifact_integrity",
@@ -217,6 +294,26 @@ def evaluate_gate(
             errors=artifact_errors,
         )
     )
+
+    adjudication_details: dict[str, dict[str, object]] = {}
+    adjudication_invalid: list[str] = []
+    if policy.require_judge:
+        for key, case in list(candidate_by_key.items()):
+            adjudicated, detail = _adjudicate_case(case, policy)
+            candidate_by_key[key] = adjudicated
+            adjudication_details[_key_label(key)] = detail
+            if adjudicated.verdict == Verdict.INVALID:
+                adjudication_invalid.append(_key_label(key))
+        checks.append(
+            _check(
+                "semantic_adjudication",
+                Verdict.PASS if not adjudication_invalid else Verdict.INVALID,
+                "calibrated judge coverage is complete"
+                if not adjudication_invalid
+                else "judge result is missing, invalid, or below confidence threshold",
+                cases=adjudication_details,
+            )
+        )
 
     invalid = sorted(
         [*(_key_label(key) for key in missing_keys), *(
@@ -284,10 +381,23 @@ def evaluate_gate(
     hard_failures = sorted(
         _key_label(key)
         for key, case in candidate_by_key.items()
-        if case.verdict == Verdict.FAIL
-        or any(score.hard and score.passed is False for score in case.scores)
+        if (
+            policy.forbid_hard_failures
+            and (
+                case.verdict == Verdict.FAIL
+                or any(score.hard and score.passed is False for score in case.scores)
+            )
+        )
+        or any(
+            score.passed is False
+            and _matches_prefix(score.name, policy.critical_metric_prefixes)
+            for score in case.scores
+        )
     )
-    hard_ok = not policy.forbid_hard_failures or not hard_failures
+    # When broad hard-failure blocking is disabled, explicitly critical metrics
+    # are still release blockers.  The collected list already reflects both
+    # policy branches, so its emptiness is the single source of truth.
+    hard_ok = not hard_failures
     checks.append(
         _check(
             "hard_constraints",
@@ -296,6 +406,63 @@ def evaluate_gate(
             cases=hard_failures,
         )
     )
+
+    candidate_pass_rates = _case_pass_rates(candidate_by_key)
+    unstable_cases = {
+        case_id: rate
+        for case_id, rate in sorted(candidate_pass_rates.items())
+        if rate < policy.min_pass_rate_per_case
+    }
+    checks.append(
+        _check(
+            "repetition_pass_rate",
+            Verdict.PASS if not unstable_cases else Verdict.FAIL,
+            "each case meets the minimum repeated-session pass rate"
+            if not unstable_cases
+            else "one or more cases are too unstable across repetitions",
+            minimum=policy.min_pass_rate_per_case,
+            rates=candidate_pass_rates,
+            failures=unstable_cases,
+        )
+    )
+
+    latency_breaches: dict[str, dict[str, float]] = {}
+    for profile in sorted(
+        set(policy.max_p95_latency_ms_by_agent) | set(policy.max_latency_ms_by_agent)
+    ):
+        values = [
+            turn.total_latency_ms
+            for case in candidate_by_key.values()
+            if case.agent_profile_id == profile
+            for turn in case.turns
+        ]
+        if not values:
+            latency_breaches[profile] = {"missing": 1.0}
+            continue
+        p95 = _p95(values)
+        maximum = float(max(values))
+        p95_limit = policy.max_p95_latency_ms_by_agent.get(profile)
+        max_limit = policy.max_latency_ms_by_agent.get(profile)
+        if (p95_limit is not None and p95 > p95_limit) or (
+            max_limit is not None and maximum > max_limit
+        ):
+            latency_breaches[profile] = {
+                "p95_ms": p95,
+                "p95_limit_ms": float(p95_limit or 0),
+                "max_ms": maximum,
+                "max_limit_ms": float(max_limit or 0),
+            }
+    if policy.max_p95_latency_ms_by_agent or policy.max_latency_ms_by_agent:
+        checks.append(
+            _check(
+                "absolute_latency_by_agent",
+                Verdict.PASS if not latency_breaches else Verdict.FAIL,
+                "per-agent absolute latency budgets passed"
+                if not latency_breaches
+                else "per-agent absolute latency budget exceeded",
+                breaches=latency_breaches,
+            )
+        )
 
     required_identity_fields = set(policy.required_execution_identity_fields)
     candidate_identity = (
@@ -317,6 +484,19 @@ def evaluate_gate(
             identity=candidate_identity,
         )
     )
+    if policy.require_clean_framework:
+        clean_framework = candidate_identity.get("framework_worktree_dirty") == "false"
+        checks.append(
+            _check(
+                "clean_eval_framework",
+                Verdict.PASS if clean_framework else Verdict.INVALID,
+                "eval framework was executed from a clean commit"
+                if clean_framework
+                else "formal gate cannot run from a dirty eval framework worktree",
+                framework_commit=candidate_identity.get("framework_commit"),
+                worktree_dirty=candidate_identity.get("framework_worktree_dirty"),
+            )
+        )
 
     if baseline is not None and candidate_dataset_ok and baseline_dataset_ok:
         baseline_identity = (
@@ -372,7 +552,7 @@ def evaluate_gate(
                 errors.append(f"stored verdict {raw_case.verdict.value} != recomputed {rescored.verdict.value}")
             if errors:
                 baseline_errors[_key_label(key)] = errors
-            baseline_by_key[key] = rescored
+            baseline_by_key[key] = _with_preserved_judge_scores(raw_case, rescored)
         if missing_baseline or duplicate_baseline_keys or unexpected_baseline_keys:
             checks.append(
                 _check(
@@ -394,28 +574,66 @@ def evaluate_gate(
                 )
             )
         else:
+            baseline_adjudication_invalid: list[str] = []
+            if policy.require_judge:
+                for key, case in list(baseline_by_key.items()):
+                    adjudicated, _ = _adjudicate_case(case, policy)
+                    baseline_by_key[key] = adjudicated
+                    if adjudicated.verdict == Verdict.INVALID:
+                        baseline_adjudication_invalid.append(_key_label(key))
+            if baseline_adjudication_invalid:
+                checks.append(
+                    _check(
+                        "baseline_semantic_adjudication",
+                        Verdict.INVALID,
+                        "baseline judge result is missing, invalid, or below confidence threshold",
+                        cases=baseline_adjudication_invalid,
+                    )
+                )
             checks.append(
                 _check(
                     "baseline_artifact_integrity",
-                    Verdict.PASS,
-                    "baseline observations deterministically rescored",
+                    Verdict.PASS if not baseline_adjudication_invalid else Verdict.INVALID,
+                    "baseline observations deterministically rescored"
+                    if not baseline_adjudication_invalid
+                    else "baseline semantic adjudication is not comparable",
                 )
             )
-            regressions = sorted(
-                _key_label(key)
-                for key in expected_keys
-                if baseline_by_key[key].verdict == Verdict.PASS
-                and (
-                    key not in candidate_by_key
-                    or candidate_by_key[key].verdict != Verdict.PASS
+            if policy.pair_repetitions_by_attempt:
+                regressions: object = sorted(
+                    _key_label(key)
+                    for key in expected_keys
+                    if baseline_by_key[key].verdict == Verdict.PASS
+                    and (
+                        key not in candidate_by_key
+                        or candidate_by_key[key].verdict != Verdict.PASS
+                    )
                 )
-            )
+            else:
+                baseline_case_rates = _case_pass_rates(baseline_by_key)
+                candidate_case_rates = _case_pass_rates(candidate_by_key)
+                regressions = {
+                    case_id: {
+                        "baseline": baseline_rate,
+                        "candidate": candidate_case_rates.get(case_id, 0.0),
+                        "tolerance": policy.max_case_pass_rate_regression,
+                    }
+                    for case_id, baseline_rate in sorted(baseline_case_rates.items())
+                    if candidate_case_rates.get(case_id, 0.0)
+                    + policy.max_case_pass_rate_regression
+                    < baseline_rate
+                }
             regression_ok = not policy.forbid_pass_to_fail_regressions or not regressions
             checks.append(
                 _check(
                     "paired_non_regression",
                     Verdict.PASS if regression_ok else Verdict.FAIL,
-                    "no baseline PASS regressed" if regression_ok else "baseline PASS cases regressed",
+                    "no baseline PASS rate regressed"
+                    if regression_ok
+                    else "baseline PASS rate regressed",
+                    pairing="attempt"
+                    if policy.pair_repetitions_by_attempt
+                    else "case_pass_rate",
                     cases=regressions,
                 )
             )
@@ -446,21 +664,45 @@ def evaluate_gate(
                 )
             )
 
-            candidate_p95 = _p95(
-                turn.total_latency_ms for case in candidate_by_key.values() for turn in case.turns
+            profiles = sorted(
+                {
+                    case.agent_profile_id or "unassigned"
+                    for case in [*candidate_by_key.values(), *baseline_by_key.values()]
+                }
             )
-            baseline_p95 = _p95(
-                turn.total_latency_ms for case in baseline_by_key.values() for turn in case.turns
-            )
-            latency_limit = baseline_p95 * (1 + policy.max_p95_latency_regression_ratio) + policy.max_p95_latency_regression_ms
-            latency_ok = candidate_p95 <= latency_limit
+            latency_regressions: dict[str, dict[str, float]] = {}
+            for profile in profiles:
+                candidate_p95 = _p95(
+                    turn.total_latency_ms
+                    for case in candidate_by_key.values()
+                    if (case.agent_profile_id or "unassigned") == profile
+                    for turn in case.turns
+                )
+                baseline_p95 = _p95(
+                    turn.total_latency_ms
+                    for case in baseline_by_key.values()
+                    if (case.agent_profile_id or "unassigned") == profile
+                    for turn in case.turns
+                )
+                latency_limit = (
+                    baseline_p95 * (1 + policy.max_p95_latency_regression_ratio)
+                    + policy.max_p95_latency_regression_ms
+                )
+                if candidate_p95 > latency_limit:
+                    latency_regressions[profile] = {
+                        "candidate_p95_ms": candidate_p95,
+                        "baseline_p95_ms": baseline_p95,
+                        "limit_ms": latency_limit,
+                    }
+            latency_ok = not latency_regressions
             checks.append(
                 _check(
                     "latency_non_regression",
                     Verdict.PASS if latency_ok else Verdict.FAIL,
-                    f"candidate p95={candidate_p95:.0f}ms, limit={latency_limit:.0f}ms",
-                    candidate_p95_ms=candidate_p95,
-                    baseline_p95_ms=baseline_p95,
+                    "per-agent p95 latency is within regression budgets"
+                    if latency_ok
+                    else "per-agent p95 latency regression budget exceeded",
+                    regressions=latency_regressions,
                 )
             )
 

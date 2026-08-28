@@ -13,6 +13,15 @@ class JudgeError(RuntimeError):
     pass
 
 
+JUDGE_SYSTEM_PROMPT = (
+    "You are a calibrated evaluator. Return JSON only with key 'turns'. Each item must contain "
+    "turn_id, label (pass|fail|invalid), confidence from 0 to 1, reason, and when baseline is present "
+    "pairwise (candidate_better|equal|baseline_better). Treat stylistic differences as equal when both "
+    "satisfy the contract. Use invalid only when execution is missing, incomplete, or impossible to judge. "
+    "Evidence and hard constraints dominate eloquence."
+)
+
+
 def _post_chat(messages: list[dict[str, str]]) -> dict[str, Any]:
     base_url = os.environ.get("AGENT_EVAL_JUDGE_BASE_URL", "").rstrip("/")
     api_key = os.environ.get("AGENT_EVAL_JUDGE_API_KEY", "").strip()
@@ -64,6 +73,8 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
                 for reference in turn.references
             ],
             "tools": turn.tools,
+            "completed": turn.is_completed,
+            "error": turn.error,
         }
         for turn in case_run.turns
     ]
@@ -83,12 +94,7 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
         [
             {
                 "role": "system",
-                "content": (
-                    "You are a calibrated evaluator. Return JSON only with key 'turns'. Each item must contain "
-                    "turn_id, label (pass|fail|invalid), confidence from 0 to 1, reason, and when baseline is present "
-                    "pairwise (candidate_better|equal|baseline_better). Treat stylistic differences as equal when both "
-                    "satisfy the contract. Evidence and hard constraints dominate eloquence."
-                ),
+                "content": JUDGE_SYSTEM_PROMPT,
             },
             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
         ]

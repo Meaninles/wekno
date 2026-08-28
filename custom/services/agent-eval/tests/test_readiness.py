@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from curation.build_multiturn_ready_v1 import build_cases
 from curation.build_multiturn_ready_v2 import build_cases as build_v2_cases
-from weknora_eval.calibration import load_calibration
+from curation.build_multiturn_ready_v3 import build_cases as build_v3_cases
+from weknora_eval.calibration import load_calibration, run_judge_calibration
 from weknora_eval.dataset import dataset_sha256, load_jsonl, validate_dataset
 from weknora_eval.langfuse_store import publish_dataset
 from weknora_eval.models import Capability, SUTFingerprint, Split
@@ -41,6 +42,9 @@ class ReadinessTests(unittest.TestCase):
             "AGENT_EVAL_SUMMARY_MODEL_ID": "prod-deepseek-v4-flash-int8-chat",
             "AGENT_EVAL_PROCUREMENT_KNOWLEDGE_ID": "knowledge-id",
             "AGENT_EVAL_CORPUS_VERSION": "sha256:corpus",
+            "AGENT_EVAL_JUDGE_BASE_URL": "https://judge.example/v1",
+            "AGENT_EVAL_JUDGE_API_KEY": "test-only",
+            "AGENT_EVAL_JUDGE_MODEL": "judge-model",
         }
 
     def test_committed_ready_dataset_matches_compiler(self) -> None:
@@ -304,6 +308,29 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn("unknown-schedule-parenthetical-redefinition", decision_inferences)
         self.assertIn("no-unsupported-causal-bridge-language", decision_inferences)
 
+    def test_v3_evaluator_revision_is_frozen_and_observation_compatible(self) -> None:
+        committed = load_jsonl(ROOT / "datasets" / "multiturn-ready.v3.jsonl")
+        compiled = build_v3_cases()
+        v2_by_id = {case.case_id: case for case in build_v2_cases()}
+        self.assertEqual(dataset_sha256(committed), dataset_sha256(compiled))
+        self.assertEqual(validate_dataset(committed), [])
+        for case in committed:
+            self.assertEqual(
+                [turn.query for turn in case.turns],
+                [turn.query for turn in v2_by_id[case.case_id].turns],
+            )
+        warehouse = next(
+            case
+            for case in committed
+            if case.family_id == "gate-warehouse-state-supersession-and-detour"
+            and case.agent_profile_id == "general-agent"
+        )
+        final_forbidden = {
+            rule.rule_id
+            for rule in warehouse.turns[-1].contract.conversation_state.forbidden_unknown_facts
+        }
+        self.assertIn("resolved-d-not-unknown-final", final_forbidden)
+
     def test_gate_matrix_is_new_repeated_and_overflows_each_history_window(self) -> None:
         cases = [case for case in build_cases() if case.split == Split.GATE]
         self.assertEqual(len(cases), 6)
@@ -345,6 +372,57 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(report["planned_session_count"], 18)
         self.assertTrue(all(check["passed"] for check in report["checks"]))
 
+    def test_v3_preflight_freezes_evaluator_dependencies(self) -> None:
+        with patch.dict(os.environ, self.env(), clear=False):
+            report = evaluate_readiness(
+                dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
+                manifest_path=ROOT / "manifests" / "multiturn-ready.v3.manifest.json",
+                profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
+                policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
+                calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
+                split=Split.GATE,
+                sut=eval_sut(),
+            )
+        self.assertEqual(report["status"], "READY")
+        frozen = next(
+            check for check in report["checks"] if check["name"] == "frozen_dependencies"
+        )
+        self.assertEqual(
+            set(frozen["data"]["expected"]),
+            {
+                "profiles",
+                "policy",
+                "judge_calibration",
+                "scorer",
+                "gate",
+                "judge",
+                "calibrator",
+            },
+        )
+
+    def test_v3_preflight_fails_before_execution_when_judge_is_unconfigured(self) -> None:
+        env = self.env()
+        env.update(
+            {
+                "AGENT_EVAL_JUDGE_BASE_URL": "",
+                "AGENT_EVAL_JUDGE_API_KEY": "",
+                "AGENT_EVAL_JUDGE_MODEL": "",
+            }
+        )
+        with patch.dict(os.environ, env, clear=False):
+            report = evaluate_readiness(
+                dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
+                manifest_path=ROOT / "manifests" / "multiturn-ready.v3.manifest.json",
+                profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
+                policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
+                calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
+                split=Split.GATE,
+                sut=eval_sut(),
+            )
+        self.assertEqual(report["status"], "NOT_READY")
+        failed = {check["name"] for check in report["checks"] if not check["passed"]}
+        self.assertIn("judge_binding", failed)
+
     def test_preflight_fails_closed_on_model_drift(self) -> None:
         env = self.env()
         env["AGENT_EVAL_SUMMARY_MODEL_ID"] = "wrong-model"
@@ -367,6 +445,56 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(len(suite.items), 8)
         self.assertEqual({item.expected_label for item in suite.items}, {"pass", "fail", "invalid"})
         self.assertEqual({item.boundary_kind for item in suite.items}, {"positive", "negative", "boundary"})
+
+    def test_judge_calibration_uses_the_formal_turn_protocol(self) -> None:
+        suite = load_calibration(ROOT / "calibration" / "judge-multiturn.v1.json")
+        expected = {item.calibration_id: item.expected_label for item in suite.items}
+
+        def fake_post(messages: list[dict[str, str]]) -> dict:
+            import json
+
+            payload = json.loads(messages[1]["content"])
+            turn_id = payload["contracts"][0]["turn_id"]
+            self.assertEqual(payload["candidate"][0]["turn_id"], turn_id)
+            self.assertIn("completed", payload["candidate"][0])
+            return {
+                "turns": [
+                    {
+                        "turn_id": turn_id,
+                        "label": expected[turn_id],
+                        "confidence": 0.99,
+                        "reason": "fixture",
+                    }
+                ]
+            }
+
+        with patch("weknora_eval.calibration._post_chat", side_effect=fake_post):
+            result = run_judge_calibration(suite)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["accuracy"], 1.0)
+
+        def low_confidence_post(messages: list[dict[str, str]]) -> dict:
+            import json
+
+            payload = json.loads(messages[1]["content"])
+            turn_id = payload["contracts"][0]["turn_id"]
+            return {
+                "turns": [
+                    {
+                        "turn_id": turn_id,
+                        "label": expected[turn_id],
+                        "confidence": 0.5,
+                        "reason": "uncertain fixture",
+                    }
+                ]
+            }
+
+        with patch(
+            "weknora_eval.calibration._post_chat", side_effect=low_confidence_post
+        ):
+            uncertain = run_judge_calibration(suite)
+        self.assertEqual(uncertain["accuracy"], 1.0)
+        self.assertFalse(uncertain["passed"])
 
     def test_langfuse_publishes_each_repetition_as_an_independent_item(self) -> None:
         class FakeLangfuse:

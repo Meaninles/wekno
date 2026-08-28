@@ -71,6 +71,24 @@ def case(
     )
 
 
+def with_judge(case_run: CaseRun, label: str, confidence: float = 0.95) -> CaseRun:
+    return case_run.model_copy(
+        update={
+            "scores": [
+                *case_run.scores,
+                MetricScore(
+                    name="judge.contract_satisfaction",
+                    value=label,
+                    passed=label == "pass",
+                    hard=False,
+                    turn_id="turn",
+                    metadata={"confidence": confidence},
+                ),
+            ]
+        }
+    )
+
+
 def run_for(dataset: list[CaseSpec], run_id: str, case_runs: list[CaseRun]) -> ExperimentRun:
     return ExperimentRun(
         run_id=run_id,
@@ -216,6 +234,117 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.INVALID)
         paired = next(check for check in result.checks if check.name == "paired_execution_identity")
         self.assertEqual(paired.verdict, Verdict.INVALID)
+
+    def test_required_judge_missing_or_low_confidence_is_invalid(self) -> None:
+        policy = self.policy.model_copy(update={"require_judge": True})
+        missing = evaluate_gate(
+            [spec()],
+            run("candidate", case(Verdict.PASS)),
+            policy,
+            run("baseline", case(Verdict.PASS)),
+        )
+        self.assertEqual(missing.verdict, Verdict.INVALID)
+
+        low = evaluate_gate(
+            [spec()],
+            run("candidate", with_judge(case(Verdict.PASS), "pass", 0.5)),
+            policy,
+            run("baseline", with_judge(case(Verdict.PASS), "pass", 0.5)),
+        )
+        self.assertEqual(low.verdict, Verdict.INVALID)
+
+    def test_judge_can_override_only_reviewable_semantic_failure(self) -> None:
+        candidate = run(
+            "candidate", with_judge(case(Verdict.FAIL), "pass")
+        )
+        baseline = run(
+            "baseline", with_judge(case(Verdict.PASS), "pass")
+        )
+        reviewable = self.policy.model_copy(
+            update={
+                "require_judge": True,
+                "judge_reviewable_metric_prefixes": ["required_claim"],
+                "forbid_hard_failures": False,
+            }
+        )
+        allowed = evaluate_gate([spec()], candidate, reviewable, baseline)
+        self.assertEqual(allowed.verdict, Verdict.PASS)
+
+        critical = reviewable.model_copy(
+            update={"critical_metric_prefixes": ["required_claim"]}
+        )
+        blocked = evaluate_gate([spec()], candidate, critical, baseline)
+        self.assertEqual(blocked.verdict, Verdict.FAIL)
+
+    def test_judge_can_downgrade_a_deterministic_pass(self) -> None:
+        policy = self.policy.model_copy(
+            update={"require_judge": True, "forbid_hard_failures": False}
+        )
+        candidate = run(
+            "candidate", with_judge(case(Verdict.PASS), "fail")
+        )
+        baseline = run(
+            "baseline", with_judge(case(Verdict.PASS), "pass")
+        )
+        result = evaluate_gate([spec()], candidate, policy, baseline)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_repetition_non_regression_compares_case_rates_not_random_attempts(self) -> None:
+        dataset = [spec(repetitions=3, profile_id="rag-reasoning")]
+        candidate = run_for(
+            dataset,
+            "candidate",
+            [
+                case(Verdict.PASS, attempt_index=1, profile_id="rag-reasoning"),
+                case(Verdict.FAIL, attempt_index=2, profile_id="rag-reasoning"),
+                case(Verdict.PASS, attempt_index=3, profile_id="rag-reasoning"),
+            ],
+        )
+        baseline = run_for(
+            dataset,
+            "baseline",
+            [
+                case(Verdict.FAIL, attempt_index=1, profile_id="rag-reasoning"),
+                case(Verdict.PASS, attempt_index=2, profile_id="rag-reasoning"),
+                case(Verdict.PASS, attempt_index=3, profile_id="rag-reasoning"),
+            ],
+        )
+        policy = self.policy.model_copy(
+            update={
+                "min_repetitions_per_case": 3,
+                "pair_repetitions_by_attempt": False,
+                "min_pass_rate_per_case": 0.66,
+                "forbid_hard_failures": False,
+                "required_agent_profiles": ["rag-reasoning"],
+            }
+        )
+        result = evaluate_gate(dataset, candidate, policy, baseline)
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_absolute_latency_budget_is_per_agent(self) -> None:
+        dataset = [spec(profile_id="quick-answer")]
+        candidate = run_for(
+            dataset,
+            "candidate",
+            [case(Verdict.PASS, latency=200, profile_id="quick-answer")],
+        )
+        baseline = run_for(
+            dataset,
+            "baseline",
+            [case(Verdict.PASS, latency=100, profile_id="quick-answer")],
+        )
+        policy = self.policy.model_copy(
+            update={
+                "required_agent_profiles": ["quick-answer"],
+                "max_latency_ms_by_agent": {"quick-answer": 150},
+                "max_p95_latency_regression_ratio": 2,
+            }
+        )
+        result = evaluate_gate(dataset, candidate, policy, baseline)
+        absolute = next(
+            check for check in result.checks if check.name == "absolute_latency_by_agent"
+        )
+        self.assertEqual(absolute.verdict, Verdict.FAIL)
 
 
 if __name__ == "__main__":

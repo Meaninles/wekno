@@ -20,7 +20,7 @@
 ```text
 Codex
   ├─ 真实对话采样 -> Quarantine -> 去敏/去重/契约化 -> family split/freeze
-  ├─ eval-loop.ps1 -> WeKnora eval API -> deterministic scorer -> optional judge
+  ├─ eval-loop.ps1 -> WeKnora eval API -> deterministic scorer -> calibrated semantic judge
   └─ paired gate (PASS / FAIL / INVALID) -> Markdown/JSON report
                                   │
                                   └─ Langfuse v4：trace、dataset、experiment、score 记录
@@ -140,7 +140,7 @@ Pop-Location
 
 这一版全部固定为 `dev`，只用于定位失败和校准契约；不得直接改为 `gate` 或 `sealed_holdout`。后两者必须使用全新的 family、事实组合和证据问题，防止调试集泄漏与过拟合。
 
-正式执行前使用 `datasets/multiturn-ready.v1.jsonl`。它把上述 12 个 DEV case 保留为可见调试集，并增加 6 个全新 GATE case：第三十三条公开/邀请采购定义绑定，以及“寒星冷链温控改造”12 轮状态覆盖。GATE 覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；其冻结身份见 `manifests/multiturn-ready.v1.manifest.json`。
+正式执行默认使用 `datasets/multiturn-ready.v3.jsonl`。它保留 v2 的全部问题、case ID、split 和重复次数，只修订评分契约：接受已经人工确认的低风险等价表达，区分“明确标注已废弃”与真正的状态复活，并新增真实测试中出现的内部规划泄漏和 D 供应商陈旧状态回归检测。GATE 仍覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；冻结身份见 `manifests/multiturn-ready.v3.manifest.json`。
 
 sealed holdout 不进入 Git：本机文件为 `sealed/multiturn-holdout.v1.jsonl`，只提交哈希、数量和 split 信息到 `manifests/multiturn-holdout.v1.manifest.json`。普通开发、DEV 和 GATE 都不会挂载其内容到优化输入；只有 Codex 在低频里程碑验收时显式使用 `-AllowSealed`。这不是把某次模型回答藏起来当标准答案，holdout 仍使用可接受答案契约，只把未见业务事实和问题组合隔离出来。
 
@@ -167,7 +167,7 @@ sealed holdout 不进入 Git：本机文件为 `sealed/multiturn-holdout.v1.json
 - `dev`：高频调试，可反复看答案。
 - `gate`：提交/发布门禁，可看失败原因但不参与日常提示词拟合。
 - `sealed_holdout`：低频里程碑验收，默认 CLI 拒绝，必须显式 `--allow-sealed`。
-- `grader_calibration`：人工金标，用于校准可选 LLM judge。
+- `grader_calibration`：人工金标，用于校准正式门禁的 LLM Judge。
 - `quarantine`：自动采集但未由 Codex 审核的数据。
 
 构建与冻结命令：
@@ -183,7 +183,7 @@ python -m weknora_eval dataset freeze --input datasets/frozen-v1/all.jsonl --out
 
 真实自适应对话不能原样晋级为固定 gate：例如后续用户说“你刚才写了 30 台”只在被测回答确实犯过该错误时成立；优化后的智能体若没有犯错，这个固定下一问反而会制造伪失败。只要 provenance 中 `requires_branch_curation=true`，数据校验会硬性禁止进入非 quarantine split。Codex 必须把它整理成不依赖某个错误回答的稳定状态测试，或将其保留为由 Codex 根据当轮回答选择分支的 discovery/actor 用例；清除该标记前需要重新核对整条分支。
 
-示例数据集可通过 `prepare-runner-env.ps1` 从隔离库解析默认模型和指定知识文件，并在 eval-only 握手成功后生成 `runner.env`。租户 API key 只在进程内解密并写入被 Git 忽略的本地文件，不打印到日志；自定义数据集可复制 `runner.env.example` 后改用自己的绑定。数据集只保留 `${ENV}` 占位符，数据集 hash 不受运行时 ID 替换影响。
+示例数据集可通过 `prepare-runner-env.ps1` 从隔离库解析 profile 冻结的 DeepSeek V4 Flash、指定知识文件和同一模型的 OpenAI-compatible Judge 连接，并在 eval-only 握手成功后生成 `runner.env`。租户与模型 API key 只在进程内解密并写入被 Git 忽略的本地文件，不打印到日志；脚本不会跟随数据库里后来变更的默认模型，而是按 profile 的精确模型 ID fail-closed。自定义数据集可复制 `runner.env.example` 后改用自己的绑定。数据集只保留 `${ENV}` 占位符，数据集 hash 不受运行时 ID 替换影响。
 
 ```powershell
 custom/services/agent-eval/prepare-runner-env.ps1
@@ -191,15 +191,16 @@ custom/services/agent-eval/prepare-runner-env.ps1
 
 ## 指标、评分与门禁
 
-硬指标按 case 契约判定，不要求拟合一篇唯一参考答案：必需/禁止事实、当前/废弃/待确认状态及其分栏归属、禁止推断与行动边界、决策延期条件、关键主张与正确证据的邻接绑定、证据 anchor、正文引用与持久化 reference 一致性、检索来源下限、必需/禁止/只读工具、工具调用上限、多轮引用清零、响应和延迟边界。可选 LLM judge 只给软分和 pairwise 解释，不能覆盖硬失败。
+确定性指标按 case 契约判定，不要求拟合一篇唯一参考答案：必需/禁止事实、当前/废弃/待确认状态及其分栏归属、禁止推断与行动边界、决策延期条件、关键主张与正确证据的邻接绑定、证据 anchor、正文引用与持久化 reference 一致性、检索来源下限、必需/禁止/只读工具、工具调用上限、多轮引用清零、响应和延迟边界。正式 gate 必须先通过冻结校准集，再由 Judge 复核语义型边界；Judge 只能裁决 policy 明确列出的语义指标，不能覆盖执行、引用证据、工具安全、长度或内部规划泄漏等关键失败。
 
 门禁不计算一个容易掩盖问题的加权总分，而是依次检查：
 
 1. 数据集 hash、case/capability 覆盖与 baseline 完整性；缺失或执行故障为 `INVALID`。
-2. 硬约束；任一失败为 `FAIL`。
-3. 同 case 的 baseline PASS → candidate 非 PASS 回归；为 `FAIL`。
-4. 指定指标通过率与 P95 延迟回归预算。
-5. 任一 `INVALID` 优先得到整体 `INVALID`，不能把“没测成”伪装成质量下降或通过。
+2. 校准 Judge 覆盖率与置信度；缺失、低置信度或无效裁决为 `INVALID`。
+3. 关键约束与每个 case 的三次独立 session 通过率；低于绝对阈值为 `FAIL`。
+4. 按 case 聚合后的 baseline → candidate 通过率回归，而不是把随机的 attempt-1/2/3 强行一一配对。
+5. 指定指标通过率、按智能体的 P95/最大绝对延迟和按智能体的相对延迟回归预算。
+6. 任一 `INVALID` 优先得到整体 `INVALID`，不能把“没测成”伪装成质量下降或通过。
 
 业务运行始终 fail-open；发布 gate 始终 fail-closed。这两个失败域完全分开。
 
@@ -237,13 +238,13 @@ custom/services/agent-eval/eval-loop.ps1 `
   -Baseline /workspace/artifacts/baseline-gate-v1.json
 ```
 
-需要软 judge 时增加 `-Judge`；它要求 `runner.env` 中配置 OpenAI-compatible judge。默认并发为 1，避免模型限流与本机抢占影响结果；调高 `-MaxConcurrency` 前先建立同并发基线。
+无 baseline 的 DEV/探索运行可用 `-Judge` 主动生成语义评分。只要提供 `-Baseline`，脚本就会自动先实时运行冻结的 Judge calibration，未达准确率直接停止；随后用当前冻结契约重算 baseline、重新裁决 baseline，再对 candidate 和同 attempt baseline 做语义复核，因此旧 baseline 不会因缺少 Judge 字段而变成伪 `INVALID`。不能跳过 Judge 后仍获得正式 gate 结论。它要求 `runner.env` 中配置 OpenAI-compatible judge。默认并发为 1，避免模型限流与本机抢占影响结果；调高 `-MaxConcurrency` 前先建立同并发基线。
 
 标准循环是：观察失败簇 → 只在 `dev` 上提出一个可解释改动 → 固定 SUT、模型、语料和配置指纹运行 → 与同数据集 baseline 配对比较 → 通过 `gate` 才保留 → 周期性由 Codex 单独运行 sealed holdout。连续两轮无实质增益、只改善已知措辞、judge 与人工分歧升高或 holdout 退化时立即停止调优并回滚候选，防止无限拟合与过拟合。
 
-正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID 和 profile set 文件哈希。门禁不仅核对 dataset hash 和三次 attempt，还要求 candidate 与 baseline 的这些执行指纹完全一致；代码 commit 可以不同，因为它正是被比较的变量。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
+正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID、profile set 哈希、eval framework commit/dirty 状态、scorer 哈希、Judge 模型、校准集哈希和 Judge prompt 哈希。正式门禁要求 eval framework 来自干净提交，并要求 baseline/candidate 的评测身份一致；被比较的 WeKnora SUT 代码可以不同。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
 
-LLM judge 永远只是软指标，不能覆盖确定性硬约束。首次启用 judge 或更换 judge 模型前，先显式运行 `calibration run`，并达到 `calibration/judge-multiturn.v1.json` 的最低准确率；日常准备只执行 `calibration validate`，不会调用 judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
+LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措辞和语义表达造成的误杀，但不能覆盖关键确定性失败。每次正式 gate 都实时运行 `calibration run`，同时达到 `calibration/judge-multiturn.v1.json` 的最低准确率和逐项最低置信度；日常 preflight 只执行结构校验，不调用 Judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
 
 ## 本地验证
 
@@ -251,7 +252,7 @@ LLM judge 永远只是软指标，不能覆盖确定性硬约束。首次启用 
 # Python
 Push-Location custom/services/agent-eval
 python -m unittest discover -s tests -v
-python -m weknora_eval dataset validate --input datasets/multiturn-ready.v1.jsonl
+python -m weknora_eval dataset validate --input datasets/multiturn-ready.v3.jsonl
 python -m weknora_eval calibration validate --input calibration/judge-multiturn.v1.json
 Pop-Location
 
@@ -268,14 +269,15 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 - `stack.ps1`：两工作树互斥切换和固定分角色重建。
 - `seed-from-main.ps1`：容量预检、顺序导出/恢复和物理卷隔离。
 - `prepare-eval.ps1`：只读一键预检；成功也不会创建 session 或发送对话。
-- `eval-loop.ps1`：preflight、run、可选 judge、gate、report。
+- `eval-loop.ps1`：preflight、实时 Judge 校准、baseline 重算/裁决、run、gate、report。
 - `weknora_eval/`：数据集、校准、readiness、runner、确定性评分、三态门禁和 Langfuse experiment 适配器。
-- `policies/multiturn-release-gate.v1.json`：三智能体多轮 GATE 门禁策略。
+- `policies/multiturn-release-gate.v2.json`：三智能体多轮 GATE 门禁策略。
 - `policies/multiturn-sealed-gate.v1.json`：低频 sealed holdout 门禁策略。
 - `datasets/examples.v1.jsonl`：RAG、文档处理和长对话契约示例。
 - `datasets/multiturn-dev.v1.jsonl`：由真实发现记录整理出的三智能体多轮 DEV 契约。
-- `datasets/multiturn-ready.v1.jsonl`：冻结的 DEV + GATE 正式数据集。
-- `manifests/`：dataset、profile、policy、judge calibration 的联合冻结哈希。
+- `datasets/multiturn-ready.v3.jsonl`：冻结的 DEV + GATE 正式数据集（保持 v2 观察数据兼容）。
+- `manifests/`：dataset、profile、policy、Judge calibration、scorer、gate 和 Judge prompt 的联合冻结哈希。
 - `calibration/judge-multiturn.v1.json`：judge 正例、负例、边界例和 INVALID 校准集。
 - `curation/build_multiturn_dev_v1.py`：上述数据集的可审查、确定性编译器。
 - `curation/build_multiturn_ready_v1.py`：正式 DEV + GATE 数据集编译器。
+- `curation/build_multiturn_ready_v3.py`：保持观察数据兼容的 eval 契约可靠性修订编译器。

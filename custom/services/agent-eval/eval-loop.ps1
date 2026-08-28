@@ -27,26 +27,29 @@ $judgedRun = "/workspace/artifacts/run-$timestamp-judged.json"
 $gateResult = "/workspace/artifacts/gate-$timestamp.json"
 $report = "/workspace/artifacts/report-$timestamp.md"
 $preflight = "/workspace/artifacts/preflight-$timestamp.json"
+$calibrationResult = "/workspace/artifacts/calibration-$timestamp.json"
+$rescoredBaseline = "/workspace/artifacts/baseline-$timestamp-rescored.json"
+$judgedBaseline = "/workspace/artifacts/baseline-$timestamp-judged.json"
 
 if (-not $Dataset) {
     $Dataset = if ($Split -eq "sealed_holdout") {
         "/workspace/sealed/multiturn-holdout.v1.jsonl"
     } else {
-        "/workspace/datasets/multiturn-ready.v2.jsonl"
+        "/workspace/datasets/multiturn-ready.v3.jsonl"
     }
 }
 if (-not $Manifest) {
     $Manifest = if ($Split -eq "sealed_holdout") {
         "/workspace/manifests/multiturn-holdout.v1.manifest.json"
     } else {
-        "/workspace/manifests/multiturn-ready.v2.manifest.json"
+        "/workspace/manifests/multiturn-ready.v3.manifest.json"
     }
 }
 if (-not $Policy) {
     $Policy = if ($Split -eq "sealed_holdout") {
         "/workspace/policies/multiturn-sealed-gate.v1.json"
     } else {
-        "/workspace/policies/multiturn-release-gate.v1.json"
+        "/workspace/policies/multiturn-release-gate.v2.json"
     }
 }
 
@@ -55,11 +58,10 @@ function Invoke-Runner {
         [Parameter(Mandatory)] [string[]]$RunnerArgs,
         [int[]]$AllowedExitCodes = @(0)
     )
-    $output = & docker compose --env-file $mainEnv --env-file $evalEnv `
+    & docker compose --env-file $mainEnv --env-file $evalEnv `
         -p weknora-agent-eval-platform -f $composeFile `
-        run --rm agent-eval-runner @RunnerArgs
+        run --rm agent-eval-runner @RunnerArgs | ForEach-Object { Write-Host $_ }
     $exitCode = $LASTEXITCODE
-    $output | ForEach-Object { Write-Host $_ }
     if ($AllowedExitCodes -notcontains $exitCode) {
         throw "eval runner failed with exit code $exitCode"
     }
@@ -71,6 +73,12 @@ if ($Split -eq "sealed_holdout" -and -not $AllowSealed) {
     throw "sealed_holdout requires the explicit -AllowSealed switch"
 }
 
+$env:AGENT_EVAL_FRAMEWORK_COMMIT = (& git -C $PSScriptRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw "failed to resolve eval framework commit" }
+$dirtyLines = @(& git -C $PSScriptRoot status --porcelain)
+if ($LASTEXITCODE -ne 0) { throw "failed to inspect eval framework worktree" }
+$env:AGENT_EVAL_WORKTREE_DIRTY = if ($dirtyLines.Count -gt 0) { "true" } else { "false" }
+
 foreach ($project in @("weknora", "weknora-runtime-profile-e2e")) {
     $running = @(& docker ps --quiet --filter "label=com.docker.compose.project=$project")
     if ($LASTEXITCODE -ne 0) { throw "failed to inspect Docker project $project" }
@@ -81,7 +89,26 @@ foreach ($project in @("weknora", "weknora-runtime-profile-e2e")) {
 
 & docker version --format "{{.Server.Version}}" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Docker Desktop is not running" }
-if (-not (Test-Path -LiteralPath $runnerEnv)) {
+$prepareRunnerEnv = -not (Test-Path -LiteralPath $runnerEnv)
+if (-not $prepareRunnerEnv) {
+    $runnerValues = @{}
+    Get-Content -LiteralPath $runnerEnv | ForEach-Object {
+        if ($_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+            $runnerValues[$matches[1]] = $matches[2]
+        }
+    }
+    foreach ($requiredJudgeVariable in @(
+        "AGENT_EVAL_JUDGE_BASE_URL",
+        "AGENT_EVAL_JUDGE_API_KEY",
+        "AGENT_EVAL_JUDGE_MODEL"
+    )) {
+        if (-not $runnerValues.ContainsKey($requiredJudgeVariable) -or `
+            [string]::IsNullOrWhiteSpace($runnerValues[$requiredJudgeVariable])) {
+            $prepareRunnerEnv = $true
+        }
+    }
+}
+if ($prepareRunnerEnv) {
     & (Join-Path $PSScriptRoot "prepare-runner-env.ps1")
     if ($LASTEXITCODE -ne 0) { throw "failed to prepare isolated runner.env" }
 }
@@ -112,6 +139,29 @@ if ($PreflightOnly) {
     exit 0
 }
 
+$judgeEnabled = $Judge -or -not [string]::IsNullOrWhiteSpace($Baseline)
+if ($judgeEnabled) {
+    Invoke-Runner -RunnerArgs @(
+        "calibration", "run",
+        "--input", "/workspace/calibration/judge-multiturn.v1.json",
+        "--output", $calibrationResult
+    ) | Out-Null
+}
+
+$gateBaseline = $Baseline
+if ($Baseline -and $judgeEnabled) {
+    Invoke-Runner -RunnerArgs @(
+        "score", "--dataset", $Dataset, "--run", $Baseline,
+        "--output", $rescoredBaseline
+    ) | Out-Null
+    Invoke-Runner -RunnerArgs @(
+        "judge", "--dataset", $Dataset, "--run", $rescoredBaseline,
+        "--calibration-result", $calibrationResult,
+        "--output", $judgedBaseline
+    ) | Out-Null
+    $gateBaseline = $judgedBaseline
+}
+
 $runArgs = @(
     "run", "--dataset", $Dataset, "--output", $rawRun,
     "--split", $Split, "--max-concurrency", [string]$MaxConcurrency,
@@ -133,9 +183,13 @@ if ($PublishToLangfuse) {
 Invoke-Runner -RunnerArgs $runArgs -AllowedExitCodes @(0, 2) | Out-Null
 
 $candidate = $rawRun
-if ($Judge) {
-    $judgeArgs = @("judge", "--dataset", $Dataset, "--run", $rawRun, "--output", $judgedRun)
-    if ($Baseline) { $judgeArgs += @("--baseline", $Baseline) }
+if ($judgeEnabled) {
+    $judgeArgs = @(
+        "judge", "--dataset", $Dataset, "--run", $rawRun,
+        "--calibration-result", $calibrationResult,
+        "--output", $judgedRun
+    )
+    if ($gateBaseline) { $judgeArgs += @("--baseline", $gateBaseline) }
     Invoke-Runner -RunnerArgs $judgeArgs | Out-Null
     $candidate = $judgedRun
 }
@@ -144,7 +198,7 @@ $gateExit = 0
 if ($Baseline) {
     $gateExit = Invoke-Runner -RunnerArgs @(
         "gate", "--dataset", $Dataset, "--candidate", $candidate,
-        "--baseline", $Baseline,
+        "--baseline", $gateBaseline,
         "--policy", $Policy,
         "--output", $gateResult
     ) -AllowedExitCodes @(0, 1, 2)
@@ -157,6 +211,8 @@ if ($Baseline) {
 Write-Host "Candidate: $candidate"
 Write-Host "Dataset manifest: $Manifest"
 Write-Host "Preflight: $preflight"
+if ($judgeEnabled) { Write-Host "Judge calibration: $calibrationResult" }
 Write-Host "Report: $report"
 if ($Baseline) { Write-Host "Gate: $gateResult (exit=$gateExit)" }
+if ($Baseline) { Write-Host "Adjudicated baseline: $gateBaseline" }
 exit $gateExit

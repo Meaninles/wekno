@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from .judge import _post_chat
+from .judge import JUDGE_SYSTEM_PROMPT, _post_chat
 from .models import StrictModel
 
 
@@ -37,6 +38,7 @@ class JudgeCalibrationSuite(StrictModel):
     schema_version: Literal[1] = 1
     suite_id: str
     minimum_accuracy: float = Field(default=0.85, ge=0, le=1)
+    minimum_confidence: float = Field(default=0.85, ge=0, le=1)
     items: list[JudgeCalibrationItem]
 
     @model_validator(mode="after")
@@ -67,28 +69,47 @@ def run_judge_calibration(suite: JudgeCalibrationSuite) -> dict[str, Any]:
             [
                 {
                     "role": "system",
-                    "content": (
-                        "You are a calibrated evaluator. Return JSON only with keys label, confidence and reason. "
-                        "label must be pass, fail or invalid. Hard evidence and state constraints dominate style. "
-                        "Use invalid only when execution is missing, incomplete, or impossible to judge."
-                    ),
+                    "content": JUDGE_SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "contract": item.contract,
-                            "candidate": item.candidate.model_dump(mode="json"),
+                            "task": "Evaluate whether each answer satisfies the acceptable-answer contract. Do not compare against a single reference wording.",
+                            "case_id": item.calibration_id,
+                            "contracts": [
+                                {
+                                    "turn_id": item.calibration_id,
+                                    "query": "frozen judge calibration fixture",
+                                    "contract": item.contract,
+                                }
+                            ],
+                            "candidate": [
+                                {
+                                    "turn_id": item.calibration_id,
+                                    **item.candidate.model_dump(mode="json"),
+                                }
+                            ],
                         },
                         ensure_ascii=False,
                     ),
                 },
             ]
         )
-        label = str(result.get("label") or "")
-        confidence = float(result.get("confidence", -1))
+        result_turns = result.get("turns") if isinstance(result, dict) else None
+        if not isinstance(result_turns, list) or len(result_turns) != 1:
+            raise CalibrationError(
+                f"{item.calibration_id}: judge calibration must return exactly one turn"
+            )
+        row = result_turns[0]
+        if not isinstance(row, dict) or row.get("turn_id") != item.calibration_id:
+            raise CalibrationError(
+                f"{item.calibration_id}: judge calibration turn identity mismatch"
+            )
+        label = str(row.get("label") or "")
+        confidence = float(row.get("confidence", -1))
         if label not in {"pass", "fail", "invalid"} or not 0 <= confidence <= 1:
-            raise CalibrationError(f"{item.calibration_id}: invalid judge payload {result!r}")
+            raise CalibrationError(f"{item.calibration_id}: invalid judge payload {row!r}")
         rows.append(
             {
                 "calibration_id": item.calibration_id,
@@ -96,19 +117,24 @@ def run_judge_calibration(suite: JudgeCalibrationSuite) -> dict[str, Any]:
                 "actual_label": label,
                 "matched": label == item.expected_label,
                 "confidence": confidence,
-                "reason": str(result.get("reason") or ""),
+                "reason": str(row.get("reason") or ""),
             }
         )
     accuracy = sum(row["matched"] for row in rows) / len(rows)
+    minimum_observed_confidence = min(row["confidence"] for row in rows)
     confusion = Counter(
         f"{row['expected_label']}->{row['actual_label']}" for row in rows
     )
     return {
         "schema_version": 1,
         "suite_id": suite.suite_id,
+        "judge_model": os.environ.get("AGENT_EVAL_JUDGE_MODEL", "").strip(),
         "accuracy": accuracy,
         "minimum_accuracy": suite.minimum_accuracy,
-        "passed": accuracy >= suite.minimum_accuracy,
+        "minimum_confidence": suite.minimum_confidence,
+        "minimum_observed_confidence": minimum_observed_confidence,
+        "passed": accuracy >= suite.minimum_accuracy
+        and minimum_observed_confidence >= suite.minimum_confidence,
         "confusion": dict(sorted(confusion.items())),
         "items": rows,
     }

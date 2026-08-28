@@ -339,10 +339,21 @@ class GatePolicy(StrictModel):
     max_invalid_rate: float = Field(default=0.0, ge=0, le=1)
     forbid_hard_failures: bool = True
     forbid_pass_to_fail_regressions: bool = True
+    pair_repetitions_by_attempt: bool = True
+    min_pass_rate_per_case: float = Field(default=1.0, ge=0, le=1)
+    max_case_pass_rate_regression: float = Field(default=0.0, ge=0, le=1)
+    critical_metric_prefixes: list[str] = Field(default_factory=list)
+    require_judge: bool = False
+    min_judge_confidence: float = Field(default=0.85, ge=0, le=1)
+    judge_reviewable_metric_prefixes: list[str] = Field(default_factory=list)
     max_metric_rate_regression: dict[str, float] = Field(default_factory=dict)
+    required_frozen_dependencies: list[str] = Field(default_factory=list)
     required_execution_identity_fields: list[str] = Field(default_factory=list)
+    require_clean_framework: bool = False
     max_p95_latency_regression_ratio: float = Field(default=0.15, ge=0)
     max_p95_latency_regression_ms: int = Field(default=500, ge=0)
+    max_p95_latency_ms_by_agent: dict[str, int] = Field(default_factory=dict)
+    max_latency_ms_by_agent: dict[str, int] = Field(default_factory=dict)
     require_baseline: bool = True
 
 

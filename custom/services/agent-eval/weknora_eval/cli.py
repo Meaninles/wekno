@@ -85,6 +85,7 @@ def cmd_calibration_validate(args: argparse.Namespace) -> int:
                 "items": len(suite.items),
                 "expected_labels": counts,
                 "minimum_accuracy": suite.minimum_accuracy,
+                "minimum_confidence": suite.minimum_confidence,
             },
             ensure_ascii=False,
         )
@@ -94,6 +95,7 @@ def cmd_calibration_validate(args: argparse.Namespace) -> int:
 
 def cmd_calibration_run(args: argparse.Namespace) -> int:
     result = run_judge_calibration(load_calibration(args.input))
+    result["suite_sha256"] = file_sha256(args.input)
     write_json(args.output, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["passed"] else 1
@@ -304,6 +306,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             "AGENT_EVAL_PROCUREMENT_KNOWLEDGE_ID", ""
         ).strip(),
         "profile_set_sha256": file_sha256(args.profiles) if args.profiles else "",
+        "framework_commit": os.environ.get("AGENT_EVAL_FRAMEWORK_COMMIT", "").strip(),
+        "framework_worktree_dirty": os.environ.get(
+            "AGENT_EVAL_WORKTREE_DIRTY", ""
+        ).strip(),
+        "scorer_sha256": file_sha256(Path(__file__).with_name("scoring.py")),
     }
     metadata = {
         "execution_contract": execution_contract,
@@ -349,17 +356,46 @@ def cmd_score(args: argparse.Namespace) -> int:
         if spec is None:
             rescored.append(case_run.model_copy(update={"verdict": Verdict.INVALID, "error": "case missing from dataset"}))
         else:
-            rescored.append(score_case(spec, case_run))
+            deterministic = score_case(spec, case_run)
+            judge_scores = [
+                score
+                for score in case_run.scores
+                if score.name == "judge.contract_satisfaction"
+            ]
+            rescored.append(
+                deterministic.model_copy(
+                    update={"scores": [*deterministic.scores, *judge_scores]}
+                )
+            )
     # Rescoring is also the supported path for a contract-only dataset
     # revision: observations remain immutable, while the output is explicitly
     # rebound to the supplied dataset identity and suite.
     from .dataset import dataset_sha256
 
+    execution_contract = (
+        dict(run.metadata.get("execution_contract"))
+        if isinstance(run.metadata.get("execution_contract"), dict)
+        else {}
+    )
+    execution_contract.update(
+        {
+            "framework_commit": os.environ.get(
+                "AGENT_EVAL_FRAMEWORK_COMMIT",
+                str(execution_contract.get("framework_commit") or ""),
+            ).strip(),
+            "framework_worktree_dirty": os.environ.get(
+                "AGENT_EVAL_WORKTREE_DIRTY",
+                str(execution_contract.get("framework_worktree_dirty") or ""),
+            ).strip(),
+            "scorer_sha256": file_sha256(Path(__file__).with_name("scoring.py")),
+        }
+    )
     output = run.model_copy(
         update={
             "cases": rescored,
             "dataset_sha256": dataset_sha256(cases),
             "suite": cases[0].suite if cases else run.suite,
+            "metadata": {**run.metadata, "execution_contract": execution_contract},
         }
     )
     write_json(args.output, output)
@@ -370,16 +406,69 @@ def cmd_judge(args: argparse.Namespace) -> int:
     specs = {case.case_id: case for case in load_jsonl(args.dataset)}
     run = load_run(args.run)
     baseline = load_run(args.baseline) if args.baseline else None
-    baseline_by_id = {case.case_id: case for case in baseline.cases} if baseline else {}
+    baseline_by_key = (
+        {(case.case_id, case.attempt_index): case for case in baseline.cases}
+        if baseline
+        else {}
+    )
+    calibration: dict[str, object] = {}
+    if args.calibration_result:
+        with Path(args.calibration_result).open("r", encoding="utf-8") as handle:
+            calibration = json.load(handle)
+        if calibration.get("passed") is not True:
+            raise DatasetError("judge calibration did not pass")
+        configured_model = os.environ.get("AGENT_EVAL_JUDGE_MODEL", "").strip()
+        if calibration.get("judge_model") != configured_model:
+            raise DatasetError("judge model differs from the calibrated model")
     judged: list[CaseRun] = []
     for case in run.cases:
         spec = specs.get(case.case_id)
         if spec is None:
             judged.append(case.model_copy(update={"verdict": Verdict.INVALID, "error": "case missing from dataset"}))
             continue
-        judge_scores = judge_case(spec, case, baseline_by_id.get(case.case_id))
-        judged.append(case.model_copy(update={"scores": [*case.scores, *judge_scores]}))
-    write_json(args.output, run.model_copy(update={"cases": judged}))
+        judge_scores = judge_case(
+            spec,
+            case,
+            baseline_by_key.get((case.case_id, case.attempt_index)),
+        )
+        deterministic_scores = [
+            score for score in case.scores if score.name != "judge.contract_satisfaction"
+        ]
+        judged.append(
+            case.model_copy(update={"scores": [*deterministic_scores, *judge_scores]})
+        )
+    execution_contract = (
+        dict(run.metadata.get("execution_contract"))
+        if isinstance(run.metadata.get("execution_contract"), dict)
+        else {}
+    )
+    execution_contract.update(
+        {
+            "judge_model": os.environ.get("AGENT_EVAL_JUDGE_MODEL", "").strip(),
+            "judge_calibration_suite_sha256": str(
+                calibration.get("suite_sha256") or ""
+            ),
+            "judge_prompt_sha256": file_sha256(Path(__file__).with_name("judge.py")),
+        }
+    )
+    judge_metadata = {
+        "calibration_result_sha256": file_sha256(args.calibration_result)
+        if args.calibration_result
+        else "",
+        "accuracy": calibration.get("accuracy"),
+        "minimum_accuracy": calibration.get("minimum_accuracy"),
+    }
+    output = run.model_copy(
+        update={
+            "cases": judged,
+            "metadata": {
+                **run.metadata,
+                "execution_contract": execution_contract,
+                "judge": judge_metadata,
+            },
+        }
+    )
+    write_json(args.output, output)
     return 0
 
 
@@ -546,6 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
     judge.add_argument("--dataset", required=True)
     judge.add_argument("--run", required=True)
     judge.add_argument("--baseline")
+    judge.add_argument("--calibration-result")
     judge.add_argument("--output", required=True)
     judge.set_defaults(func=cmd_judge)
 

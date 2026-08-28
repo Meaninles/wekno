@@ -156,10 +156,17 @@ class EvalRunner:
         ]
         results_by_key: dict[tuple[str, int], CaseRun] = {}
         if max_concurrency <= 1:
-            for case, attempt_index in planned:
-                results_by_key[(case.case_id, attempt_index)] = self.run_case(
+            for index, (case, attempt_index) in enumerate(planned, start=1):
+                result = self.run_case(
                     case,
                     attempt_index=attempt_index,
+                )
+                results_by_key[(case.case_id, attempt_index)] = result
+                print(
+                    f"EVAL_PROGRESS completed={index}/{len(planned)} "
+                    f"case={case.case_id} attempt={attempt_index} "
+                    f"verdict={result.verdict.value}",
+                    flush=True,
                 )
         else:
             with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
@@ -171,7 +178,15 @@ class EvalRunner:
                     for case, attempt_index in planned
                 }
                 for future in as_completed(futures):
-                    results_by_key[futures[future]] = future.result()
+                    key = futures[future]
+                    result = future.result()
+                    results_by_key[key] = result
+                    print(
+                        f"EVAL_PROGRESS completed={len(results_by_key)}/{len(planned)} "
+                        f"case={key[0]} attempt={key[1]} "
+                        f"verdict={result.verdict.value}",
+                        flush=True,
+                    )
         ordered = [
             results_by_key[(case.case_id, attempt_index)]
             for case, attempt_index in planned

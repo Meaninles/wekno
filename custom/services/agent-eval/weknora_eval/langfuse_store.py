@@ -112,6 +112,7 @@ def run_langfuse_experiment(
     dataset = client.get_dataset(published_name)
     lock = threading.Lock()
     results: dict[tuple[str, int], CaseRun] = {}
+    planned_count = sum(case.repetitions for case in selected)
 
     def task(*, item: Any, **_: Any) -> dict[str, Any]:
         payload = item.input if isinstance(item.input, dict) else {}
@@ -120,6 +121,13 @@ def run_langfuse_experiment(
         case_run = runner.run_case(spec, attempt_index=attempt_index)
         with lock:
             results[(spec.case_id, attempt_index)] = case_run
+            completed_count = len(results)
+        print(
+            f"EVAL_PROGRESS completed={completed_count}/{planned_count} "
+            f"case={spec.case_id} attempt={attempt_index} "
+            f"verdict={case_run.verdict.value}",
+            flush=True,
+        )
         return case_run.model_dump(mode="json")
 
     def evaluator(*, output: Any, **_: Any) -> list[dict[str, Any]]:

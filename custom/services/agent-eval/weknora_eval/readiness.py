@@ -114,25 +114,42 @@ def evaluate_readiness(
         manifest_sha256=manifest.get("dataset_sha256"),
     )
 
-    expected_dependencies = {
+    known_dependencies = {
         "profiles": file_sha256(profile_path),
         "policy": file_sha256(policy_path),
         "judge_calibration": file_sha256(calibration_path),
+        "scorer": file_sha256(Path(__file__).with_name("scoring.py")),
+        "gate": file_sha256(Path(__file__).with_name("gates.py")),
+        "judge": file_sha256(Path(__file__).with_name("judge.py")),
+        "calibrator": file_sha256(Path(__file__).with_name("calibration.py")),
+    }
+    required_dependency_names = {
+        "profiles",
+        "policy",
+        "judge_calibration",
+        *policy.required_frozen_dependencies,
+    }
+    unknown_dependency_names = sorted(required_dependency_names - set(known_dependencies))
+    expected_dependencies = {
+        name: known_dependencies[name]
+        for name in sorted(required_dependency_names & set(known_dependencies))
     }
     manifest_dependencies = manifest.get("dependency_sha256")
     dependency_ok = (
-        isinstance(manifest_dependencies, dict)
+        not unknown_dependency_names
+        and isinstance(manifest_dependencies, dict)
         and manifest_dependencies == expected_dependencies
     )
     _check(
         checks,
         "frozen_dependencies",
         dependency_ok,
-        "profile, gate policy and judge calibration hashes match the manifest"
+        "all required dataset and evaluator dependency hashes match the manifest"
         if dependency_ok
         else "a frozen eval dependency changed",
         expected=expected_dependencies,
         manifest=manifest_dependencies,
+        unknown=unknown_dependency_names,
     )
 
     required_model = str((profile_set.get("model") or {}).get("required_model_id") or "").strip()
@@ -145,6 +162,25 @@ def evaluate_readiness(
         "DeepSeek model binding is exact" if model_ok else "runtime model does not match the frozen profile set",
         required_model_id=required_model,
         actual_model_id=actual_model,
+    )
+
+    judge_environment = {
+        name: bool(os.environ.get(name, "").strip())
+        for name in (
+            "AGENT_EVAL_JUDGE_BASE_URL",
+            "AGENT_EVAL_JUDGE_API_KEY",
+            "AGENT_EVAL_JUDGE_MODEL",
+        )
+    }
+    judge_binding_ok = not policy.require_judge or all(judge_environment.values())
+    _check(
+        checks,
+        "judge_binding",
+        judge_binding_ok,
+        "calibrated Judge runtime binding is complete"
+        if judge_binding_ok
+        else "formal gate requires a complete Judge runtime binding",
+        configured=judge_environment,
     )
 
     required_profile_ids = set(policy.required_agent_profiles)

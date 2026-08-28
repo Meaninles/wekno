@@ -22,6 +22,32 @@ STATE_SECTION_ALIASES = {
     "action_boundary": ("行动边界", "操作边界", "权限边界"),
 }
 
+# These groups intentionally cover only low-risk lexical equivalences that
+# repeatedly caused reviewed false negatives. They are not a general synonym
+# dictionary: the contract still owns the semantic claim, while the scorer
+# avoids requiring one exact surface form for that claim.
+TEXT_EQUIVALENCE_GROUPS = (
+    ("可以公开", "可公开"),
+    ("未提供", "没有提供", "尚未提供", "未说明", "未知"),
+    ("废弃", "废止", "作废", "失效"),
+    (
+        "并非不可替代", "不是不可替代", "不再不可替代", "可替代", "不具排他性",
+        "主张不成立", "核验为不成立", "已核验为不成立",
+    ),
+)
+RETIRED_STATUS_TERMS = (
+    "废弃", "废止", "作废", "失效", "不再成立", "不成立", "推翻", "否定", "取代", "替代",
+)
+UNKNOWN_STATUS_TERMS = (
+    "待确认", "待核验", "未核验", "尚未核验", "未经核验", "待核实", "尚未核实",
+    "未知", "未提供", "没有提供", "尚未提供", "未说明",
+)
+INTERNAL_PLANNING_PATTERNS = (
+    re.compile(r"\blet me (?:carefully|re-?examine|verify|think|check|count|rewrite|organize|answer)\b", re.I),
+    re.compile(r"\b(?:stop hook|validation error|output contract|contract says|evidence map|evidence handle|citation handle|current-turn)\b", re.I),
+    re.compile(r"\b(?:final attempt|now the key issue|re-reading|let me read)\b", re.I),
+)
+
 
 def _normal(value: str, case_sensitive: bool) -> str:
     # Contracts describe semantic lexical anchors, not presentation syntax.
@@ -34,14 +60,61 @@ def _normal(value: str, case_sensitive: bool) -> str:
     return collapsed if case_sensitive else collapsed.casefold()
 
 
+def _equivalent_terms(item: str, case_sensitive: bool) -> tuple[str, ...]:
+    probe = _normal(item, case_sensitive)
+    for group in TEXT_EQUIVALENCE_GROUPS:
+        if probe in {_normal(candidate, case_sensitive) for candidate in group}:
+            return group
+    return (item,)
+
+
+def _contains_term(value: str, item: str, case_sensitive: bool) -> bool:
+    return any(
+        _normal(candidate, case_sensitive) in value
+        for candidate in _equivalent_terms(item, case_sensitive)
+    )
+
+
 def _rule_matches(rule: TextRule, text: str) -> bool:
     value = _normal(text, rule.case_sensitive)
-    any_ok = not rule.any_of or any(_normal(item, rule.case_sensitive) in value for item in rule.any_of)
-    all_ok = all(_normal(item, rule.case_sensitive) in value for item in rule.all_of)
+    any_ok = not rule.any_of or any(
+        _contains_term(value, item, rule.case_sensitive) for item in rule.any_of
+    )
+    all_ok = all(_contains_term(value, item, rule.case_sensitive) for item in rule.all_of)
     excluded = any(
-        _normal(item, rule.case_sensitive) in value for item in rule.unless_any_of
+        _contains_term(value, item, rule.case_sensitive) for item in rule.unless_any_of
     )
     return any_ok and all_ok and not excluded
+
+
+def _has_internal_planning_leak(text: str) -> bool:
+    return any(pattern.search(text) for pattern in INTERNAL_PLANNING_PATTERNS)
+
+
+def _lifecycle_contradiction(rule: TextRule, segment: str, lifecycle: str) -> bool:
+    """Detect an actually active stale value, not an explicitly retired/unknown mention."""
+
+    if lifecycle == "action_boundary":
+        return _rule_matches(rule, segment)
+    status_terms = RETIRED_STATUS_TERMS if lifecycle == "retired" else UNKNOWN_STATUS_TERMS
+    normalized_status = {
+        _normal(candidate, rule.case_sensitive)
+        for term in status_terms
+        for candidate in _equivalent_terms(term, rule.case_sensitive)
+    }
+    identity_terms = [
+        term
+        for term in [*rule.all_of, *rule.any_of]
+        if _normal(term, rule.case_sensitive) not in normalized_status
+    ]
+    if not identity_terms:
+        return False
+    value = _normal(segment, rule.case_sensitive)
+    identity_present = all(
+        _contains_term(value, term, rule.case_sensitive) for term in identity_terms
+    )
+    explicitly_scoped = any(term in value for term in normalized_status)
+    return identity_present and not explicitly_scoped
 
 
 def _state_section_key(value: str) -> str | None:
@@ -337,7 +410,10 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             )
         )
     for rule in contract.forbidden_claims:
-        absent = not _rule_matches(rule, observed.content)
+        matched = _rule_matches(rule, observed.content)
+        if rule.rule_id == "no-internal-planning":
+            matched = matched or _has_internal_planning_leak(observed.content)
+        absent = not matched
         scores.append(
             _score(
                 f"forbidden_claim.{rule.rule_id}",
@@ -440,7 +516,10 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
                     for line in state_texts["active"].splitlines()
                     if line.strip()
                 ]
-                clean = not any(_rule_matches(rule, segment) for segment in active_segments)
+                clean = not any(
+                    _lifecycle_contradiction(rule, segment, lifecycle)
+                    for segment in active_segments
+                )
                 scores.append(
                     _score(
                         f"state.lifecycle.{lifecycle}-not-active.{rule.rule_id}",

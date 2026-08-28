@@ -3,6 +3,7 @@ param(
     [string]$KnowledgeTitle = "采购管理办法.docx",
     [string]$PostgresContainer = "WeKnora-agent-eval-postgres-dev",
     [string]$RuntimeContainer = "weknora-agent-eval-runtime-api-1",
+    [string]$ProfilePath = (Join-Path $PSScriptRoot "profiles/multiturn-agents.v1.json"),
     [string]$Output = (Join-Path $PSScriptRoot "runner.env")
 )
 
@@ -46,6 +47,11 @@ function ConvertFrom-StoredSecret {
     return [System.Text.Encoding]::UTF8.GetString($plaintext)
 }
 
+function ConvertFrom-HexUtf8 {
+    param([Parameter(Mandatory)] [string]$Value)
+    return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromHexString($Value))
+}
+
 & docker inspect $PostgresContainer *> $null
 if ($LASTEXITCODE -ne 0) {
     throw "isolated eval PostgreSQL container is unavailable: $PostgresContainer"
@@ -55,23 +61,33 @@ if ($LASTEXITCODE -ne 0) {
     throw "isolated eval runtime container is unavailable: $RuntimeContainer"
 }
 
+$profileSet = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
+$requiredModelID = [string]$profileSet.model.required_model_id
+if ([string]::IsNullOrWhiteSpace($requiredModelID)) {
+    throw "profile set does not declare model.required_model_id"
+}
 $title = Escape-SqlLiteral $KnowledgeTitle
+$requiredModel = Escape-SqlLiteral $requiredModelID
 $sql = @"
 SELECT
   tenant.api_key,
   model.id,
   knowledge.id,
-  COALESCE(NULLIF(knowledge.file_hash, ''), knowledge.id::text)
+  COALESCE(NULLIF(knowledge.file_hash, ''), knowledge.id::text),
+  encode(convert_to(model.parameters->>'base_url', 'UTF8'), 'hex'),
+  encode(convert_to(model.parameters->>'api_key', 'UTF8'), 'hex'),
+  encode(convert_to(model.name, 'UTF8'), 'hex'),
+  model.parameters->>'interface_type'
 FROM knowledges AS knowledge
 JOIN tenants AS tenant ON tenant.id = knowledge.tenant_id
 JOIN LATERAL (
-  SELECT id
+  SELECT id, name, parameters
   FROM models
   WHERE tenant_id = knowledge.tenant_id
+    AND id = '$requiredModel'
     AND type = 'KnowledgeQA'
     AND status = 'active'
     AND deleted_at IS NULL
-  ORDER BY is_default DESC, updated_at DESC
   LIMIT 1
 ) AS model ON true
 WHERE knowledge.title = '$title'
@@ -86,12 +102,16 @@ LIMIT 1;
 
 $row = & docker exec $PostgresContainer psql -U postgres -d WeKnora -At -F "|" -c $sql
 if ($LASTEXITCODE -ne 0) { throw "failed to resolve eval runner bindings" }
-$fields = ([string]$row).Trim().Split("|", 4)
-if ($fields.Count -ne 4 -or @($fields | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+$fields = ([string]$row).Trim().Split("|", 8)
+if ($fields.Count -ne 8 -or @($fields | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
     throw "no complete eval binding found for knowledge title: $KnowledgeTitle"
 }
 
-$storedAPIKey, $modelID, $knowledgeID, $corpusHash = $fields
+$storedAPIKey, $modelID, $knowledgeID, $corpusHash, $hexJudgeBaseURL, `
+    $hexJudgeAPIKey, $hexJudgeModel, $judgeInterface = $fields
+if ($judgeInterface -ne "openai") {
+    throw "required eval model is not OpenAI-compatible: interface_type=$judgeInterface"
+}
 $systemAESKey = [string](& docker exec $RuntimeContainer printenv SYSTEM_AES_KEY)
 if ($LASTEXITCODE -ne 0 -or [System.Text.Encoding]::UTF8.GetByteCount($systemAESKey.Trim()) -ne 32) {
     throw "eval runtime does not expose a valid 32-byte SYSTEM_AES_KEY"
@@ -99,6 +119,16 @@ if ($LASTEXITCODE -ne 0 -or [System.Text.Encoding]::UTF8.GetByteCount($systemAES
 $apiKey = ConvertFrom-StoredSecret `
     -Stored $storedAPIKey `
     -Key ([System.Text.Encoding]::UTF8.GetBytes($systemAESKey.Trim()))
+$judgeBaseURL = (ConvertFrom-HexUtf8 $hexJudgeBaseURL).TrimEnd("/")
+$judgeAPIKey = ConvertFrom-StoredSecret `
+    -Stored (ConvertFrom-HexUtf8 $hexJudgeAPIKey) `
+    -Key ([System.Text.Encoding]::UTF8.GetBytes($systemAESKey.Trim()))
+$judgeModel = ConvertFrom-HexUtf8 $hexJudgeModel
+if ([string]::IsNullOrWhiteSpace($judgeBaseURL) -or `
+    [string]::IsNullOrWhiteSpace($judgeAPIKey) -or `
+    [string]::IsNullOrWhiteSpace($judgeModel)) {
+    throw "required model does not provide a complete OpenAI-compatible judge binding"
+}
 $capabilities = Invoke-RestMethod `
     -Uri "http://localhost:18080/api/v1/custom/agent-eval/capabilities" `
     -Headers @{ "X-API-Key" = $apiKey } `
@@ -113,13 +143,13 @@ $content = @(
     "AGENT_EVAL_SUMMARY_MODEL_ID=$modelID",
     "AGENT_EVAL_PROCUREMENT_KNOWLEDGE_ID=$knowledgeID",
     "AGENT_EVAL_CORPUS_VERSION=sha256:$corpusHash",
-    "AGENT_EVAL_JUDGE_BASE_URL=",
-    "AGENT_EVAL_JUDGE_API_KEY=",
-    "AGENT_EVAL_JUDGE_MODEL=",
+    "AGENT_EVAL_JUDGE_BASE_URL=$judgeBaseURL",
+    "AGENT_EVAL_JUDGE_API_KEY=$judgeAPIKey",
+    "AGENT_EVAL_JUDGE_MODEL=$judgeModel",
     ""
 ) -join "`n"
 
 $outputPath = [System.IO.Path]::GetFullPath($Output)
 [System.IO.File]::WriteAllText($outputPath, $content, [System.Text.UTF8Encoding]::new($false))
-Write-Host "Prepared isolated runner binding: model=$modelID knowledge=$knowledgeID"
-Write-Host "Secret value was written only to $outputPath and was not printed."
+Write-Host "Prepared isolated runner binding: model=$modelID knowledge=$knowledgeID judge_model=$judgeModel"
+Write-Host "Tenant and model secret values were written only to $outputPath and were not printed."

@@ -80,6 +80,72 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_reviewed_low_risk_equivalent_wording_is_accepted(self) -> None:
+        contract = TurnContract(
+            required_claims=[
+                TextRule(rule_id="public", any_of=["可以公开"]),
+                TextRule(rule_id="identity", any_of=["未提供"]),
+            ]
+        )
+        spec = self.spec.model_copy(
+            update={
+                "turns": [self.spec.turns[0].model_copy(update={"contract": contract})]
+            }
+        )
+        observed = ObservedTurn(
+            turn_id="turn-1",
+            session_id="session",
+            content="该信息可公开；用户身份未知。",
+            is_completed=True,
+        )
+        result = score_case(
+            spec,
+            CaseRun(
+                case_id=spec.case_id,
+                family_id=spec.family_id,
+                split=spec.split,
+                verdict=Verdict.INVALID,
+                turns=[observed],
+            ),
+        )
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_internal_planning_heuristic_catches_unlisted_leak(self) -> None:
+        contract = TurnContract(
+            forbidden_claims=[
+                TextRule(rule_id="no-internal-planning", any_of=["Now let me"])
+            ]
+        )
+        spec = self.spec.model_copy(
+            update={
+                "turns": [self.spec.turns[0].model_copy(update={"contract": contract})]
+            }
+        )
+        observed = ObservedTurn(
+            turn_id="turn-1",
+            session_id="session",
+            content="Let me carefully re-examine the output contract before answering.",
+            is_completed=True,
+        )
+        result = score_case(
+            spec,
+            CaseRun(
+                case_id=spec.case_id,
+                family_id=spec.family_id,
+                split=spec.split,
+                verdict=Verdict.INVALID,
+                turns=[observed],
+            ),
+        )
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertTrue(
+            any(
+                score.name == "forbidden_claim.no-internal-planning"
+                and score.passed is False
+                for score in result.scores
+            )
+        )
+
     def test_citation_integrity_is_identifier_based_not_reference_order_based(self) -> None:
         observed = ObservedTurn(
             turn_id="turn-1",
@@ -991,12 +1057,34 @@ class ScoringTests(unittest.TestCase):
                 turns=[duplicated_retired],
             ),
         )
-        self.assertEqual(duplicated_result.verdict, Verdict.FAIL)
+        self.assertEqual(duplicated_result.verdict, Verdict.PASS)
+
+        resurrected_retired = headed_tables.model_copy(
+            update={
+                "content": (
+                    "### 当前有效事实\n390万元；360万元\n"
+                    "### 已废弃事实\n360万元（已废弃）\n"
+                    "### 待确认事实\n采购信息\n"
+                    "### 行动边界\n不得创建"
+                )
+            }
+        )
+        resurrected_result = score_case(
+            spec,
+            CaseRun(
+                case_id=spec.case_id,
+                family_id=spec.family_id,
+                split=spec.split,
+                verdict=Verdict.INVALID,
+                turns=[resurrected_retired],
+            ),
+        )
+        self.assertEqual(resurrected_result.verdict, Verdict.FAIL)
         self.assertTrue(
             any(
                 score.name == "state.lifecycle.retired-not-active.retired"
                 and score.passed is False
-                for score in duplicated_result.scores
+                for score in resurrected_result.scores
             )
         )
 

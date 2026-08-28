@@ -177,7 +177,6 @@ class RunnerProgressTest(unittest.TestCase):
             if issue["code"] == "current_turn_evidence_topics_incomplete"
         )
         self.assertEqual(topic_issue["missing_topics"], ["乙方案"])
-        self.assertEqual(topic_issue["available_direct_citations"], {})
         self.assertEqual(
             turn_contract_issues(
                 payload,
@@ -187,45 +186,6 @@ class RunnerProgressTest(unittest.TestCase):
                     '丙方案：依据三。<src id="S3" />'
                 ),
             ),
-            [],
-        )
-
-    def test_turn_contract_issues_bind_named_items_to_direct_evidence(self):
-        payload = ChatPayload(
-            run_id="run-comparison-binding",
-            session_id="session-comparison-binding",
-            assistant_message_id="assistant-comparison-binding",
-            query=(
-                "比较竞价和竞争谈判并就近引用。\n"
-                "本轮明确要求文档依据或引用。\n"
-                '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["竞价","竞争谈判"]'
-            ),
-            llm=LLMConfig(model_name="test"),
-            tool_callback_url="http://runtime-entry/internal/tools/call",
-        )
-        answer = (
-            '竞价：规格统一。<src id="S2" />\n\n'
-            '竞争谈判：需求复杂。<src id="S2" />'
-        )
-        evidence = {
-            "S1": "竞价适用于采购需求明确、规格型号统一的场景。",
-            "S2": "竞争谈判适用于采购需求复杂或性质特殊的场景。",
-        }
-
-        issue = next(
-            item
-            for item in turn_contract_issues(payload, answer, evidence_by_id=evidence)
-            if item["code"] == "current_turn_evidence_topics_incomplete"
-        )
-        self.assertEqual(issue["missing_topics"], ["竞价"])
-        self.assertEqual(issue["available_direct_citations"], {"竞价": ["S1"]})
-
-        corrected = answer.replace(
-            '竞价：规格统一。<src id="S2" />',
-            '竞价：规格统一。<src id="S1" />',
-        )
-        self.assertEqual(
-            turn_contract_issues(payload, corrected, evidence_by_id=evidence),
             [],
         )
 

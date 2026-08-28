@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/searchutil"
@@ -45,6 +46,158 @@ func RepairAnswerCitations(answer string, refs []*types.SearchResult) string {
 		return attachMissingSentenceEvidence(answer, evidence, 4)
 	}
 	return attachUnambiguousSentenceCitations(answer, evidence, 6)
+}
+
+// RepairNamedTopicCitationBindings fixes a narrow, high-confidence comparison
+// failure without asking the model to regenerate. When one named option's own
+// paragraph has exactly one handle, that handle's evidence does not name the
+// option, and a different current-turn fragment is the unique strong lexical
+// match that does name it, only the opaque handle is replaced. Claim text and
+// the immutable evidence registry are never changed. Ambiguous cases remain
+// untouched so ordinary answers cannot acquire guessed citations.
+func RepairNamedTopicCitationBindings(
+	answer string,
+	topics []string,
+	refs []*types.SearchResult,
+) string {
+	if strings.TrimSpace(answer) == "" || len(topics) < 2 {
+		return answer
+	}
+	evidence := repairEvidence(refs)
+	if len(evidence) == 0 {
+		return answer
+	}
+
+	breaks := paragraphBreakRE.FindAllStringIndex(answer, -1)
+	var builder strings.Builder
+	start := 0
+	for _, boundary := range append(breaks, []int{len(answer), len(answer)}) {
+		paragraph := answer[start:boundary[0]]
+		matchedTopics := namedTopicsInParagraph(paragraph, topics)
+		citationIDs := citationIDsInText(paragraph)
+		if len(matchedTopics) == 1 && len(citationIDs) == 1 {
+			currentID := ""
+			for id := range citationIDs {
+				currentID = id
+			}
+			topic := matchedTopics[0]
+			if !citationEvidenceNamesTopic(currentID, topic, evidence) {
+				if replacementID := strongestNamedTopicEvidence(paragraph, topic, evidence); replacementID != "" && replacementID != currentID {
+					paragraph = replaceCitationID(paragraph, currentID, replacementID)
+				}
+			}
+		}
+		builder.WriteString(paragraph)
+		if boundary[0] < len(answer) {
+			builder.WriteString(answer[boundary[0]:boundary[1]])
+		}
+		start = boundary[1]
+	}
+	return builder.String()
+}
+
+func namedTopicsInParagraph(paragraph string, topics []string) []string {
+	normalizedParagraph := normalizedNamedTopicText(paragraph)
+	seen := make(map[string]struct{}, len(topics))
+	matched := make([]string, 0, 2)
+	for _, topic := range topics {
+		normalizedTopic := normalizedNamedTopicText(topic)
+		if normalizedTopic == "" || !strings.Contains(normalizedParagraph, normalizedTopic) {
+			continue
+		}
+		if _, exists := seen[normalizedTopic]; exists {
+			continue
+		}
+		seen[normalizedTopic] = struct{}{}
+		matched = append(matched, topic)
+	}
+	return matched
+}
+
+func citationEvidenceNamesTopic(id, topic string, refs []citationRepairEvidence) bool {
+	normalizedTopic := normalizedNamedTopicText(topic)
+	for _, ref := range refs {
+		if ref.id == id && strings.Contains(normalizedNamedTopicText(ref.content), normalizedTopic) {
+			return true
+		}
+	}
+	return false
+}
+
+func strongestNamedTopicEvidence(
+	paragraph string,
+	topic string,
+	refs []citationRepairEvidence,
+) string {
+	normalizedTopic := normalizedNamedTopicText(topic)
+	candidates := make([]citationRepairEvidence, 0, len(refs))
+	for _, ref := range refs {
+		if strings.Contains(normalizedNamedTopicText(ref.content), normalizedTopic) {
+			candidates = append(candidates, ref)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	claim := canonicalSourceTagRE.ReplaceAllString(paragraph, "")
+	if id := unambiguousEvidenceForParagraph(claim, candidates); id != "" {
+		return id
+	}
+	claimTokens := repairTokens(claim)
+	if len(claimTokens) < 3 {
+		return ""
+	}
+	type scored struct {
+		id       string
+		shared   int
+		coverage float64
+	}
+	scores := make([]scored, 0, len(candidates))
+	for _, candidate := range candidates {
+		shared := sharedTokenCount(claimTokens, candidate.tokens)
+		if shared < 3 {
+			continue
+		}
+		coverage := float64(shared) / float64(len(claimTokens))
+		scores = append(scores, scored{id: candidate.id, shared: shared, coverage: coverage})
+	}
+	if len(scores) == 0 {
+		return ""
+	}
+	sort.SliceStable(scores, func(i, j int) bool {
+		if scores[i].shared == scores[j].shared {
+			if scores[i].coverage == scores[j].coverage {
+				return citationOrdinal(scores[i].id) < citationOrdinal(scores[j].id)
+			}
+			return scores[i].coverage > scores[j].coverage
+		}
+		return scores[i].shared > scores[j].shared
+	})
+	if len(scores) > 1 && scores[0].shared-scores[1].shared < 2 &&
+		scores[0].coverage-scores[1].coverage < 0.18 {
+		return ""
+	}
+	return scores[0].id
+}
+
+func replaceCitationID(value, currentID, replacementID string) string {
+	return canonicalSourceTagRE.ReplaceAllStringFunc(value, func(tag string) string {
+		match := canonicalSourceTagRE.FindStringSubmatch(tag)
+		if len(match) == 2 && match[1] == currentID {
+			return canonicalCitationTag(replacementID)
+		}
+		return tag
+	})
+}
+
+func normalizedNamedTopicText(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, value)
 }
 
 // relocateTrailingSourceAttributionCitation fixes a common adjacency defect:

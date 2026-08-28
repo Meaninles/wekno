@@ -1419,35 +1419,40 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 // sometimes append a sentence such as "尚未确认……" to an "已确认：" paragraph
 // and then repeat the same items under "待确认：". The meaning is understandable
 // to a person, but downstream consumers can no longer treat the labelled
-// sections as a reliable state machine. This function only removes explicitly
-// uncertain clauses from a confirmed section when the answer also contains a
-// separate unknown section, so it never turns an uncertainty into a fact or
-// drops the only copy of an unknown.
+// sections as a reliable state machine. This function removes explicitly
+// uncertain clauses from a confirmed section. When there is no separate
+// unknown section, it moves (rather than drops) those clauses into a new one,
+// so the only copy of an uncertainty is preserved.
 func NormalizeConfirmedUnknownSections(answer string) string {
 	value := strings.TrimSpace(strings.ReplaceAll(answer, "\r\n", "\n"))
-	if value == "" || !hasUnknownSection(value) {
+	if value == "" {
 		return value
 	}
+	hasSeparateUnknownSection := hasUnknownSection(value)
 	paragraphs := regexp.MustCompile(`\n\s*\n`).Split(value, -1)
 	changed := false
-	for index, paragraph := range paragraphs {
+	out := make([]string, 0, len(paragraphs)+1)
+	for _, paragraph := range paragraphs {
 		if !isConfirmedSectionParagraph(paragraph) {
+			if paragraph = strings.TrimSpace(paragraph); paragraph != "" {
+				out = append(out, paragraph)
+			}
 			continue
 		}
-		cleaned := removeUncertainUnitsFromConfirmedParagraph(paragraph)
+		cleaned, extractedUnknowns := splitUncertainUnitsFromConfirmedParagraph(paragraph)
 		if cleaned != strings.TrimSpace(paragraph) {
-			paragraphs[index] = cleaned
+			changed = true
+		}
+		if cleaned != "" && !isBareConfirmedHeading(cleaned) {
+			out = append(out, cleaned)
+		}
+		if !hasSeparateUnknownSection && len(extractedUnknowns) > 0 {
+			out = append(out, "待确认："+strings.Join(uniqueUncertainItems(extractedUnknowns), "；")+"。")
 			changed = true
 		}
 	}
 	if !changed {
 		return value
-	}
-	out := make([]string, 0, len(paragraphs))
-	for _, paragraph := range paragraphs {
-		if paragraph = strings.TrimSpace(paragraph); paragraph != "" {
-			out = append(out, paragraph)
-		}
 	}
 	return strings.TrimSpace(strings.Join(out, "\n\n"))
 }
@@ -1474,26 +1479,46 @@ func isConfirmedSectionParagraph(paragraph string) bool {
 }
 
 func removeUncertainUnitsFromConfirmedParagraph(paragraph string) string {
+	cleaned, _ := splitUncertainUnitsFromConfirmedParagraph(paragraph)
+	return cleaned
+}
+
+func splitUncertainUnitsFromConfirmedParagraph(paragraph string) (string, []string) {
 	const uncertainMarkers = "待确认|尚未确认|未确认|待核实|尚未核实|未知|未提供"
 	uncertainPattern := regexp.MustCompile(uncertainMarkers)
 	separatorPattern := regexp.MustCompile(`([。！？!?；;]+)`)
 	parts := separatorPattern.Split(strings.TrimSpace(paragraph), -1)
 	separators := separatorPattern.FindAllString(strings.TrimSpace(paragraph), -1)
 	out := make([]string, 0, len(parts)*2)
+	unknowns := make([]string, 0, 4)
 	for index, part := range parts {
 		part = strings.TrimSpace(part)
 		if part != "" {
 			if marker := uncertainPattern.FindStringIndex(part); marker != nil {
-				// Preserve any confirmed text before a trailing uncertainty clause,
-				// for example "预算已确认，尚未确认采购时间".
-				beforeMarker := part[:marker[0]]
-				prefix := strings.TrimSpace(strings.TrimRight(beforeMarker, "，,、 \t"))
-				prefixProbe := strings.TrimSpace(strings.Trim(strings.TrimSpace(prefix), "#*_` "))
-				prefixProbe = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(prefixProbe, "已确认："), "已确认:"))
-				uncertainQuestionOnly := !strings.ContainsAny(beforeMarker, "，,；;。！？!?") &&
-					containsAny(prefixProbe, []string{"是否", "能否"})
-				if prefix != "" && !uncertainQuestionOnly {
-					out = append(out, prefix)
+				beforeMarker := strings.TrimSpace(part[:marker[0]])
+				afterMarker := strings.TrimSpace(part[marker[1]:])
+				confirmedPrefix := strings.TrimSpace(strings.TrimRight(beforeMarker, "，,、 \t"))
+				unknownItem := strings.Trim(afterMarker, "，,、：: \t")
+
+				// A suffix marker such as "采购时间待确认" places the
+				// unknown before the marker. Peel only the last comma-delimited
+				// unit away from the confirmed prefix.
+				if unknownItem == "" && beforeMarker != "" {
+					lastDelimiter := strings.LastIndexAny(beforeMarker, "，,、")
+					if lastDelimiter >= 0 {
+						_, delimiterWidth := utf8.DecodeRuneInString(beforeMarker[lastDelimiter:])
+						unknownItem = strings.TrimSpace(beforeMarker[lastDelimiter+delimiterWidth:])
+						confirmedPrefix = strings.TrimSpace(strings.TrimRight(beforeMarker[:lastDelimiter], "，,、 \t"))
+					} else {
+						unknownItem = confirmedSectionPayload(beforeMarker)
+						confirmedPrefix = ""
+					}
+				}
+				if confirmedPrefix != "" && !isBareConfirmedHeading(confirmedPrefix) {
+					out = append(out, confirmedPrefix)
+				}
+				if unknownItem = strings.Trim(unknownItem, "。！？!?；;，,、 \t"); unknownItem != "" {
+					unknowns = append(unknowns, unknownItem)
 				}
 			} else {
 				out = append(out, part)
@@ -1503,7 +1528,37 @@ func removeUncertainUnitsFromConfirmedParagraph(paragraph string) string {
 			out[len(out)-1] = strings.TrimRight(out[len(out)-1], "。！？!?；;") + separators[index]
 		}
 	}
-	return strings.TrimSpace(strings.Join(out, ""))
+	return strings.TrimSpace(strings.Join(out, "")), unknowns
+}
+
+func confirmedSectionPayload(value string) string {
+	probe := strings.TrimSpace(strings.Trim(strings.TrimSpace(value), "#*_` "))
+	for _, prefix := range []string{"已确认：", "已确认:", "当前有效事实：", "当前有效事实:"} {
+		probe = strings.TrimSpace(strings.TrimPrefix(probe, prefix))
+	}
+	return probe
+}
+
+func isBareConfirmedHeading(value string) bool {
+	return confirmedSectionPayload(value) == ""
+}
+
+func uniqueUncertainItems(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.Trim(item, "。！？!?；;，,、 \t")
+		key := strings.Join(strings.Fields(item), "")
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }
 
 func explicitUnknownUserStatements(statements []string) []string {
@@ -1921,6 +1976,17 @@ func stateAuditSectionHeading(line string) string {
 // delete the same words when they are quoted or discussed later in an answer.
 func StripInternalPlanningPreamble(answer string) string {
 	value := strings.TrimSpace(answer)
+	// Some OpenAI-compatible reasoning providers occasionally include the
+	// hidden-reasoning terminator and everything before it in ResultMessage.
+	// Strip that prefix only when the remaining text begins with a recognized
+	// user-visible answer section.
+	if lower := strings.ToLower(value); strings.Contains(lower, "</think>") {
+		marker := strings.LastIndex(lower, "</think>")
+		tail := strings.TrimSpace(value[marker+len("</think>"):])
+		if tail != "" && substantiveAnswerStart(tail) == 0 {
+			value = tail
+		}
+	}
 	repairPreamble := false
 	for attempts := 0; attempts < 10 && value != ""; attempts++ {
 		if repairPreamble {
@@ -1932,6 +1998,7 @@ func StripInternalPlanningPreamble(answer string) string {
 		first, rest, separated := splitLeadingParagraph(value)
 		probe := strings.ToLower(strings.TrimSpace(strings.Trim(first, "*_#> `")))
 		knownPlanning := containsAnyPrefix(probe, []string{
+			"good, now i have", "good, i now have", "good, now let me",
 			"now i have", "now let me", "let me organize", "let me answer",
 			"let me formulate", "let me summarize", "let me analyse", "let me analyze",
 			"let me think", "let me check", "i need to find", "the validation says",

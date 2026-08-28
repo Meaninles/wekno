@@ -1495,10 +1495,13 @@ def tool_catalog(payload: ChatPayload) -> str:
         desc = re.sub(r"\s+", " ", (spec.description or "").strip())
         if len(desc) > 600:
             desc = desc[:600] + "..."
+        callable_name = f"mcp__weknora__{spec.name}"
         if desc:
-            lines.append(f"- {spec.name} ({source}): {desc}")
+            lines.append(
+                f"- {spec.name} (call exactly as `{callable_name}`; {source}): {desc}"
+            )
         else:
-            lines.append(f"- {spec.name} ({source})")
+            lines.append(f"- {spec.name} (call exactly as `{callable_name}`; {source})")
     if payload.enable_artifacts:
         if payload.runtime_config.agent_type == "document-processing-agent":
             lines.append(
@@ -4448,51 +4451,15 @@ def required_uncertainty_topics(query: str) -> list[str]:
     return topics[:8]
 
 
-def normalized_evidence_topic(value: str) -> str:
-    """Normalize a named item for conservative direct-evidence matching."""
-
-    return re.sub(r"[\s\-_—–·:：/\\（）()《》\[\]]+", "", value or "").lower()
-
-
-def topic_evidence_citations(
-    topics: list[str],
-    evidence_by_id: dict[str, str],
-) -> dict[str, list[str]]:
-    """Return current-turn handles whose evidence directly names each item."""
-
-    matches: dict[str, list[str]] = {}
-    for topic in topics:
-        normalized_topic = normalized_evidence_topic(topic)
-        if not normalized_topic:
-            continue
-        citation_ids = [
-            citation_id
-            for citation_id, evidence in evidence_by_id.items()
-            if normalized_topic in normalized_evidence_topic(evidence)
-        ]
-        if citation_ids:
-            matches[topic] = citation_ids[:4]
-    return matches
-
-
-def evidence_topics_without_adjacent_citation(
-    answer: str,
-    topics: list[str],
-    evidence_by_id: dict[str, str] | None = None,
-) -> list[str]:
-    """Find named comparison items whose own segment lacks direct evidence.
+def evidence_topics_without_adjacent_citation(answer: str, topics: list[str]) -> list[str]:
+    """Find named comparison items whose own answer segment has no handle.
 
     Segment boundaries are the next distinct named topic, rather than the next
     physical line, so a Markdown heading and its following paragraph stay
-    together while a citation from the next option cannot satisfy this one. If
-    the current-turn evidence registry is available, a handle only satisfies an
-    item when that handle's evidence directly names the item. Without a registry
-    the function retains the structural citation-only behavior.
+    together while a citation from the next option cannot satisfy this one.
     """
 
     value = answer or ""
-    evidence_registry = evidence_by_id if isinstance(evidence_by_id, dict) else {}
-    validate_binding = bool(evidence_registry)
     occurrences: list[tuple[int, str]] = []
     for topic in topics:
         start = 0
@@ -4515,18 +4482,7 @@ def evidence_topics_without_adjacent_citation(
                 if position > index and other_topic != topic
             ]
             end = min(following) if following else len(value)
-            segment = value[index:end]
-            citation_ids = re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', segment)
-            if not citation_ids:
-                continue
-            if not validate_binding:
-                cited = True
-                break
-            normalized_topic = normalized_evidence_topic(topic)
-            if any(
-                normalized_topic in normalized_evidence_topic(evidence_registry.get(citation_id, ""))
-                for citation_id in citation_ids
-            ):
+            if CANONICAL_SOURCE_CITATION_RE.search(value[index:end]):
                 cited = True
                 break
         if not cited:
@@ -4739,27 +4695,16 @@ def turn_contract_issues(
             }
         )
     topics = required_evidence_topics(query)
-    evidence_registry = evidence_by_id or {}
-    missing_topics = evidence_topics_without_adjacent_citation(
-        value,
-        topics,
-        evidence_registry,
-    )
+    missing_topics = evidence_topics_without_adjacent_citation(value, topics)
     if missing_topics:
-        available_direct_citations = topic_evidence_citations(
-            missing_topics,
-            evidence_registry,
-        )
         issues.append(
             {
                 "code": "current_turn_evidence_topics_incomplete",
                 "missing_topics": missing_topics,
-                "available_direct_citations": available_direct_citations,
                 "required_action": (
-                    "Rewrite the complete answer so every named comparison item's own short paragraph uses a "
-                    "current-turn citation whose evidence directly names that item. Reuse the provided "
-                    "available_direct_citations handles and rewrite the claim from their evidence; retrieve only "
-                    "when no direct handle is available. Do not let a neighboring item's citation stand in for it."
+                    "Continue retrieval for every missing named comparison item, then rewrite the complete answer. "
+                    "Each item's own short paragraph must contain a current-turn cite_exactly source handle; "
+                    "do not finish with 'not expanded' or let another item's citation stand in for it."
                 ),
             }
         )

@@ -1040,6 +1040,12 @@ From the earlier grep_chunks results:
 	if got := StripInternalPlanningPreamble(observedUnavailableTools); got != "已确认：项目为系统升级服务。\n\n待确认：采购信息能否公开。" {
 		t.Fatalf("unavailable-tool repair narration survived: %q", got)
 	}
+	thinkLeak := `Good, now I have all direct evidence. Let me write the final answer.</think>已确认：项目为系统升级服务。
+
+待确认：采购信息能否公开。`
+	if got := StripInternalPlanningPreamble(thinkLeak); got != "已确认：项目为系统升级服务。\n\n待确认：采购信息能否公开。" {
+		t.Fatalf("reasoning-tag preamble survived: %q", got)
+	}
 }
 
 func TestNormalizeConfirmedUnknownSectionsRemovesDuplicatedUnknownSentence(t *testing.T) {
@@ -1065,8 +1071,9 @@ func TestNormalizeConfirmedUnknownSectionsPreservesConfirmedPrefixAndOnlyUnknown
 		t.Fatalf("confirmed prefix was not preserved: %q", got)
 	}
 
-	withoutUnknownSection := "已确认：预算220万元。尚未确认采购时间。"
-	if got := NormalizeConfirmedUnknownSections(withoutUnknownSection); got != withoutUnknownSection {
-		t.Fatalf("only copy of uncertainty was removed: %q", got)
+	withoutUnknownSection := "已确认：预算220万元；尚未确认采购信息能否公开、需求是否完整、采购全流程时间是否可行。\n\n公开采购：制度条件说明。"
+	wantSeparated := "已确认：预算220万元。\n\n待确认：采购信息能否公开、需求是否完整、采购全流程时间是否可行。\n\n公开采购：制度条件说明。"
+	if got := NormalizeConfirmedUnknownSections(withoutUnknownSection); got != wantSeparated {
+		t.Fatalf("only copy of uncertainty was not moved into its own section: %q", got)
 	}
 }

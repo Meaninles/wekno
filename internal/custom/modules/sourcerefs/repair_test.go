@@ -133,3 +133,56 @@ func TestRepairAnswerCitationsRepairsEvidenceSentencesInsideMixedParagraphs(t *t
 		t.Fatalf("conversation-only fact received a document citation: %q", got)
 	}
 }
+
+func TestRepairNamedTopicCitationBindingsReplacesOnlyUniqueStrongMismatch(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "public", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "公开采购的方式包括公开询比采购、公开竞价采购、公开谈判采购。选择公开采购应满足采购信息可以公开、采购时间允许。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "public", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "auction", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "第三十六条 竞价采购适用于采购需求明确、规格型号同一、货源充足竞争充分、价格稳定或价格形成机制明确，采购标的物以价格竞争为主；或者服务标准要求完整。",
+			Metadata:        map[string]string{MetadataCitationID: "S7", MetadataChunkID: "auction", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "negotiation-tail", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "采购目标总体明确但可以有不同路径和方案实现，采购人需要和供应商通过对话确定采购路径。",
+			Metadata:        map[string]string{MetadataCitationID: "S9", MetadataChunkID: "negotiation-tail", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "竞价：制度条件为采购需求明确、规格型号同一、货源充足竞争充分、价格稳定或价格形成机制明确，以价格竞争为主；或者服务标准要求完整。<src id=\"S9\" />"
+	got := RepairNamedTopicCitationBindings(answer, []string{"公开采购", "询比", "竞价", "竞争谈判"}, refs)
+	if !strings.Contains(got, `<src id="S7" />`) || strings.Contains(got, `<src id="S9" />`) {
+		t.Fatalf("wrong named-topic citation was not conservatively rebound: %q", got)
+	}
+
+	if unchanged := RepairNamedTopicCitationBindings(got, []string{"公开采购", "询比", "竞价", "竞争谈判"}, refs); unchanged != got {
+		t.Fatalf("correct named-topic citation was not idempotent: %q", unchanged)
+	}
+}
+
+func TestRepairNamedTopicCitationBindingsLeavesAmbiguousEvidenceUntouched(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "auction-a", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞价采购适用于采购需求明确、规格型号同一的项目。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "auction-a", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "auction-b", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞价采购适用于采购需求明确、规格型号同一的项目。",
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "auction-b", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "wrong", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞争谈判适用于技术复杂的项目。",
+			Metadata:        map[string]string{MetadataCitationID: "S3", MetadataChunkID: "wrong", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := `竞价：适用于采购需求明确、规格型号同一的项目。<src id="S3" />`
+	if got := RepairNamedTopicCitationBindings(answer, []string{"竞价", "竞争谈判"}, refs); got != answer {
+		t.Fatalf("ambiguous evidence was guessed: %q", got)
+	}
+}

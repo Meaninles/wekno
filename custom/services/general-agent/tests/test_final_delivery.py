@@ -14,7 +14,7 @@ from app.final_delivery import (  # noqa: E402
     uses_claude_sdk_terminal_projection,
 )
 from app.runner import FINAL_ANSWER_SOURCE_CITATION_RULE, runtime_summary, tool_catalog  # noqa: E402
-from app.schemas import ChatPayload, LLMConfig, RuntimeConfigSpec  # noqa: E402
+from app.schemas import ChatPayload, LLMConfig, RuntimeConfigSpec, RuntimeToolSpec  # noqa: E402
 
 
 @dataclass
@@ -83,6 +83,20 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
         structured = self.payload("data-analysis")
         self.assertIn("final_answer", tool_catalog(structured))
         self.assertIn("final_answer", runtime_summary(structured))
+
+    def test_tool_catalog_exposes_exact_sdk_mcp_tool_name(self):
+        payload = self.payload("general-agent")
+        payload.tools = [
+            RuntimeToolSpec(
+                name="grep_chunks",
+                description="Search selected knowledge chunks.",
+                source="knowledge",
+            )
+        ]
+        self.assertIn(
+            "call exactly as `mcp__weknora__grep_chunks`",
+            tool_catalog(payload),
+        )
 
     def test_structured_final_answer_uses_the_shared_source_handle(self):
         self.assertIn("source_references", FINAL_ANSWER_SOURCE_CITATION_RULE)

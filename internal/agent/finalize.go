@@ -297,6 +297,11 @@ func (e *AgentEngine) emitCompletionEvent(
 		e.activeUserStatements...,
 	)
 	state.FinalAnswer = conversationmemory.EnsureDeferredDecisionConclusion(state.FinalAnswer, e.activeQuery)
+	state.FinalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
+		state.FinalAnswer,
+		conversationmemory.RequiredEvidenceTopics(e.activeQuery),
+		state.KnowledgeRefs,
+	)
 	state.FinalAnswer = sourcerefs.RepairAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {

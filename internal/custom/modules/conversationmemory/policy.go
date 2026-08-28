@@ -1337,6 +1337,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		"不选择采购方式", "不得选择采购方式", "不要选择采购方式",
 	})
 	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	lines = trimStateAuditPreamble(lines)
 	retiredAnchors := retiredAuditScalarAnchors(lines)
 	out := make([]string, 0, len(lines))
 	section := ""
@@ -1380,6 +1381,13 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			line = repairExplicitRetiredScalarLine(line, explicitRetiredFacts)
 		}
 		if section == "action_boundary" {
+			if containsAny(line, []string{
+				"只记录", "仅记录", "只更新", "仅更新", "只确认", "仅确认",
+				"不讨论", "不得讨论", "不要讨论", "不选择", "不得选择", "不要选择",
+				"不推断", "不得推断", "不要推断", "不重新检索", "不要重新检索",
+			}) && len(operationBoundaryKinds(line)) == 0 {
+				continue
+			}
 			if !containsAny(originalQuery, []string{"不推断", "不得推断", "不要推断"}) &&
 				containsAny(line, []string{"不推断", "不得推断", "不要推断"}) {
 				line = inferenceScopePattern.ReplaceAllString(line, "")
@@ -1435,7 +1443,17 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
 	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
+	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
+}
+
+func trimStateAuditPreamble(lines []string) []string {
+	for index, line := range lines {
+		if stateAuditSectionHeading(line) != "" {
+			return lines[index:]
+		}
+	}
+	return lines
 }
 
 // normalizeRetiredAuditLine preserves the generated fact verbatim and only
@@ -1788,6 +1806,101 @@ func restoreExplicitRetiredScalarFacts(lines []string, facts []explicitRetiredSc
 		seenFragments[fact.fragment] = true
 	}
 	return lines
+}
+
+func restoreExplicitUnknownFacts(lines, explicitUnknowns, userStatements []string) []string {
+	if len(explicitUnknowns) == 0 {
+		return lines
+	}
+	unknownStart, unknownEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "unknown" && key != "unknown" {
+				unknownEnd = index
+				break
+			}
+			section = key
+			if key == "unknown" && unknownStart < 0 {
+				unknownStart = index + 1
+			}
+		}
+	}
+	if unknownStart < 0 {
+		return lines
+	}
+
+	unknownLines := append([]string(nil), lines[unknownStart:unknownEnd]...)
+	seen := make(map[string]bool)
+	for _, statement := range explicitUnknowns {
+		for _, fragment := range splitUserStateClauses(cleanUserStatementRecord(statement)) {
+			if !containsAny(fragment, []string{
+				"待确认", "待核实", "未提供", "没有提供", "未说明", "未知",
+				"尚未确认", "仍未确认", "未确认", "尚未核验", "未经核验", "未核验",
+			}) || statementHasUnknownUserIdentity(fragment) ||
+				supersededUnknownClaim(fragment, userStatements) {
+				continue
+			}
+			fragment = canonicalUnknownFactFragment(fragment)
+			key := normalizeStateDeltaText(fragment)
+			if key == "" || seen[key] || unknownFactCovered(unknownLines, fragment) {
+				continue
+			}
+			line := "- " + strings.TrimRight(fragment, "。；;，, ")
+			lines = insertString(lines, unknownEnd, line)
+			unknownLines = append(unknownLines, line)
+			unknownEnd++
+			seen[key] = true
+		}
+	}
+	return lines
+}
+
+func splitUserStateClauses(statement string) []string {
+	raw := strings.FieldsFunc(statement, func(r rune) bool {
+		switch r {
+		case '；', ';', '。', '！', '!', '？', '?', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	})
+	out := make([]string, 0, len(raw))
+	for _, fragment := range raw {
+		fragment = strings.TrimSpace(fragment)
+		if fragment == "" {
+			continue
+		}
+		if len(out) > 0 && containsAnyPrefix(fragment, []string{
+			"该说法", "该主张", "该结论", "该信息", "该事实",
+		}) {
+			out[len(out)-1] = strings.TrimSpace(out[len(out)-1]) + "，" + fragment
+			continue
+		}
+		out = append(out, fragment)
+	}
+	return out
+}
+
+func canonicalUnknownFactFragment(fragment string) string {
+	value := strings.TrimSpace(fragment)
+	for _, marker := range []string{"仍未确认", "尚未确认", "未确认"} {
+		value = strings.ReplaceAll(value, marker, "待确认")
+	}
+	return value
+}
+
+func unknownFactCovered(lines []string, fragment string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) {
+			continue
+		}
+		if stateDeltaLineRelevant(trimmed, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRetiredAuditTableHeader(line string) bool {

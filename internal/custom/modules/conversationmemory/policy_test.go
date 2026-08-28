@@ -707,6 +707,73 @@ func TestNormalizeStateAuditSectionsRestoresMissingUserAuthoredRetiredScalar(t *
 	}
 }
 
+func TestNormalizeStateAuditSectionsRestoresMissingExplicitUnknown(t *testing.T) {
+	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	prior := []string{
+		"业务团队确认至少4家供应商可能满足；需求是否完整仍待核实。",
+		"A供应商声称只能由它改造，该说法尚未核验。",
+		"法务和技术核验后确认A并非不可替代。废弃只能A做的前提。",
+		"采购标的最终类别仍未确认；采购信息是否可以公开也仍未确认。",
+	}
+	answer := `### 当前有效事实
+- 至少4家供应商可能满足
+### 已废弃事实
+- 只能A做的前提已废弃
+### 待确认事实
+- 采购标的最终类别：待确认
+- 采购信息是否可以公开：待确认
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	unknown := strings.Split(strings.Split(got, "### 待确认事实")[1], "### 行动边界")[0]
+	if !strings.Contains(unknown, "需求是否完整") || !strings.Contains(unknown, "待核实") {
+		t.Fatalf("missing explicit user unknown was not restored: %s", got)
+	}
+	if strings.Contains(unknown, "A供应商") || strings.Contains(unknown, "尚未核验") {
+		t.Fatalf("a later-resolved unknown was restored: %s", got)
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("explicit unknown restoration is not idempotent:\nfirst: %s\nsecond: %s", got, twice)
+	}
+}
+
+func TestNormalizeStateAuditSectionsDropsAuditPreambleAndTransientBoundaries(t *testing.T) {
+	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。"
+	answer := `好的，我将依据整个会话进行审计，不进行知识库检索，也不选择采购方式。
+
+## 完整状态审计
+
+### 当前有效事实
+- 当前预算390万元
+### 已废弃事实
+- 初始预算360万元已废弃
+### 待确认事实
+- 需求是否完整待核实
+### 行动边界
+| 操作许可/禁令 | 说明 |
+| --- | --- |
+| 文件权限 | 未经授权不得创建或修改文件 |
+| 讨论范围 | 只记录和更新事实 |
+| 采购权限 | 未经授权不得发起采购 |
+| 维护方式 | 只在本对话中维护 |`
+
+	got := NormalizeStateAuditSections(answer, query)
+	if !strings.HasPrefix(got, "### 当前有效事实") {
+		t.Fatalf("state audit preamble was not removed: %s", got)
+	}
+	for _, transient := range []string{"不选择采购方式", "不进行知识库检索", "讨论范围", "只记录和更新事实"} {
+		if strings.Contains(got, transient) {
+			t.Fatalf("transient response scope %q became durable: %s", transient, got)
+		}
+	}
+	for _, durable := range []string{"不得创建或修改文件", "不得发起采购", "只在本对话中维护"} {
+		if !strings.Contains(got, durable) {
+			t.Fatalf("durable boundary %q was removed: %s", durable, got)
+		}
+	}
+}
+
 func TestNormalizeStateAuditSectionsRepairsObservedActionBoundaryTable(t *testing.T) {
 	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为‘当前有效事实’、‘已废弃事实’、‘待确认事实’和‘行动边界’四栏。"
 	answer := `以下是根据整个会话，为您整理的完整状态审计。

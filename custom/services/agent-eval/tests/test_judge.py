@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
+import json
+import os
 import unittest
 from unittest.mock import patch
 
-from weknora_eval.judge import judge_case
+from weknora_eval.judge import _post_chat, judge_case
 from weknora_eval.models import (
     AgentSelector,
     Capability,
@@ -20,6 +23,29 @@ from weknora_eval.models import (
 
 
 class JudgeTests(unittest.TestCase):
+    def test_transient_timeout_is_retried_with_a_bounded_contract(self) -> None:
+        response = io.BytesIO(
+            json.dumps(
+                {"choices": [{"message": {"content": '{"turns": []}'}}]}
+            ).encode("utf-8")
+        )
+        env = {
+            "AGENT_EVAL_JUDGE_BASE_URL": "https://judge.example/v1",
+            "AGENT_EVAL_JUDGE_API_KEY": "test-only",
+            "AGENT_EVAL_JUDGE_MODEL": "judge-x",
+            "AGENT_EVAL_JUDGE_TIMEOUT_SECONDS": "7",
+            "AGENT_EVAL_JUDGE_MAX_ATTEMPTS": "2",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "weknora_eval.judge.urllib.request.urlopen",
+            side_effect=[TimeoutError("slow"), response],
+        ) as urlopen, patch("weknora_eval.judge.time.sleep") as sleep:
+            self.assertEqual(_post_chat([{"role": "user", "content": "x"}]), {"turns": []})
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual([call.kwargs["timeout"] for call in urlopen.call_args_list], [7, 7])
+        sleep.assert_called_once_with(1)
+
     def test_measured_deadline_is_scored_without_calling_semantic_judge(self) -> None:
         spec = CaseSpec(
             case_id="deadline",

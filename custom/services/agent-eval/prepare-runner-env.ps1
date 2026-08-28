@@ -146,6 +146,8 @@ $content = @(
     "AGENT_EVAL_JUDGE_BASE_URL=$judgeBaseURL",
     "AGENT_EVAL_JUDGE_API_KEY=$judgeAPIKey",
     "AGENT_EVAL_JUDGE_MODEL=$judgeModel",
+    "AGENT_EVAL_JUDGE_TIMEOUT_SECONDS=180",
+    "AGENT_EVAL_JUDGE_MAX_ATTEMPTS=2",
     ""
 ) -join "`n"
 

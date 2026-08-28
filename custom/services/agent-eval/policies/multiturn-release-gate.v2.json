@@ -69,6 +69,8 @@
     "judge_model",
     "judge_calibration_suite_sha256",
     "judge_prompt_sha256",
+    "judge_timeout_seconds",
+    "judge_max_attempts",
     "response_deadline_seconds"
   ],
   "require_clean_framework": true,

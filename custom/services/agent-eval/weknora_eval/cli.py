@@ -27,7 +27,7 @@ from .discovery import (
     write_discovery_result,
 )
 from .gates import evaluate_gate, load_policy
-from .judge import judge_case
+from .judge import JudgeError, judge_case, judge_runtime_contract
 from .langfuse_store import publish_dataset, run_langfuse_experiment
 from .models import CaseRun, ExperimentRun, Split, Verdict
 from .readiness import assert_ready, evaluate_readiness, file_sha256
@@ -422,21 +422,63 @@ def cmd_judge(args: argparse.Namespace) -> int:
         if calibration.get("judge_model") != configured_model:
             raise DatasetError("judge model differs from the calibrated model")
     judged: list[CaseRun] = []
-    for case in run.cases:
+    judge_errors: list[dict[str, object]] = []
+    total_cases = len(run.cases)
+    for completed, case in enumerate(run.cases, start=1):
         spec = specs.get(case.case_id)
         if spec is None:
-            judged.append(case.model_copy(update={"verdict": Verdict.INVALID, "error": "case missing from dataset"}))
+            error = "case missing from dataset"
+            judged.append(case.model_copy(update={"verdict": Verdict.INVALID, "error": error}))
+            judge_errors.append(
+                {
+                    "case_id": case.case_id,
+                    "attempt_index": case.attempt_index,
+                    "error": error,
+                }
+            )
+            print(
+                f"JUDGE_PROGRESS completed={completed}/{total_cases} case={case.case_id} "
+                f"attempt={case.attempt_index} verdict=INVALID",
+                flush=True,
+            )
             continue
-        judge_scores = judge_case(
-            spec,
-            case,
-            baseline_by_key.get((case.case_id, case.attempt_index)),
-        )
         deterministic_scores = [
             score for score in case.scores if score.name != "judge.contract_satisfaction"
         ]
-        judged.append(
-            case.model_copy(update={"scores": [*deterministic_scores, *judge_scores]})
+        try:
+            judge_scores = judge_case(
+                spec,
+                case,
+                baseline_by_key.get((case.case_id, case.attempt_index)),
+            )
+        except JudgeError as exc:
+            error = f"judge_error:{exc}"
+            judged.append(
+                case.model_copy(
+                    update={
+                        "verdict": Verdict.INVALID,
+                        "error": error,
+                        "scores": deterministic_scores,
+                    }
+                )
+            )
+            judge_errors.append(
+                {
+                    "case_id": case.case_id,
+                    "attempt_index": case.attempt_index,
+                    "error": error,
+                }
+            )
+            verdict = Verdict.INVALID
+        else:
+            judged.append(
+                case.model_copy(update={"scores": [*deterministic_scores, *judge_scores]})
+            )
+            verdict = case.verdict
+        print(
+            f"JUDGE_PROGRESS completed={completed}/{total_cases} case={case.case_id} "
+            f"attempt={case.attempt_index} verdict={verdict.value}",
+            flush=True,
         )
     execution_contract = (
         dict(run.metadata.get("execution_contract"))
@@ -450,6 +492,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
                 calibration.get("suite_sha256") or ""
             ),
             "judge_prompt_sha256": file_sha256(Path(__file__).with_name("judge.py")),
+            **judge_runtime_contract(),
         }
     )
     judge_metadata = {
@@ -458,6 +501,8 @@ def cmd_judge(args: argparse.Namespace) -> int:
         else "",
         "accuracy": calibration.get("accuracy"),
         "minimum_accuracy": calibration.get("minimum_accuracy"),
+        "error_count": len(judge_errors),
+        "errors": judge_errors,
     }
     output = run.model_copy(
         update={
@@ -470,7 +515,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
         }
     )
     write_json(args.output, output)
-    return 0
+    return 2 if judge_errors else 0
 
 
 def cmd_gate(args: argparse.Namespace) -> int:

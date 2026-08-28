@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from .judge import JUDGE_SYSTEM_PROMPT, _post_chat
+from .judge import JUDGE_SYSTEM_PROMPT, _post_chat, judge_runtime_contract
 from .models import StrictModel, TurnContract
 
 
@@ -156,6 +156,7 @@ def run_judge_calibration(suite: JudgeCalibrationSuite) -> dict[str, Any]:
         "schema_version": 1,
         "suite_id": suite.suite_id,
         "judge_model": os.environ.get("AGENT_EVAL_JUDGE_MODEL", "").strip(),
+        **judge_runtime_contract(),
         "accuracy": accuracy,
         "minimum_accuracy": suite.minimum_accuracy,
         "minimum_confidence": suite.minimum_confidence,

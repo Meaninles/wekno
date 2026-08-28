@@ -185,7 +185,7 @@ if ($Baseline -and $judgeEnabled) {
         "judge", "--dataset", $Dataset, "--run", $rescoredBaseline,
         "--calibration-result", $calibrationResult,
         "--output", $judgedBaseline
-    ) | Out-Null
+    ) -AllowedExitCodes @(0, 2) | Out-Null
     $gateBaseline = $judgedBaseline
 }
 
@@ -218,7 +218,7 @@ if ($judgeEnabled) {
         "--output", $judgedRun
     )
     if ($gateBaseline) { $judgeArgs += @("--baseline", $gateBaseline) }
-    Invoke-Runner -RunnerArgs $judgeArgs | Out-Null
+    Invoke-Runner -RunnerArgs $judgeArgs -AllowedExitCodes @(0, 2) | Out-Null
     $candidate = $judgedRun
 }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -16,6 +17,30 @@ from .models import (
 
 class JudgeError(RuntimeError):
     pass
+
+
+def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise JudgeError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise JudgeError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def judge_runtime_contract() -> dict[str, int]:
+    return {
+        "judge_timeout_seconds": _bounded_env_int(
+            "AGENT_EVAL_JUDGE_TIMEOUT_SECONDS", 180, minimum=1, maximum=600
+        ),
+        "judge_max_attempts": _bounded_env_int(
+            "AGENT_EVAL_JUDGE_MAX_ATTEMPTS", 2, minimum=1, maximum=5
+        ),
+    }
 
 
 JUDGE_SYSTEM_PROMPT = (
@@ -53,23 +78,43 @@ def _post_chat(messages: list[dict[str, str]]) -> dict[str, Any]:
         "messages": messages,
         "response_format": {"type": "json_object"},
     }
-    request = urllib.request.Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:
-            data = json.load(response)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read()[:2000].decode("utf-8", errors="replace")
-        raise JudgeError(f"judge request failed: HTTP {exc.code}: {detail}") from exc
-    try:
-        content = data["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise JudgeError("judge did not return the required JSON object") from exc
+    runtime = judge_runtime_contract()
+    timeout_seconds = runtime["judge_timeout_seconds"]
+    max_attempts = runtime["judge_max_attempts"]
+    retryable_http = {408, 409, 425, 429, 500, 502, 503, 504}
+    for attempt in range(1, max_attempts + 1):
+        request = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                data = json.load(response)
+            content = data["choices"][0]["message"]["content"]
+            return json.loads(content)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read()[:2000].decode("utf-8", errors="replace")
+            if exc.code not in retryable_http or attempt == max_attempts:
+                raise JudgeError(
+                    f"judge request failed after {attempt} attempt(s): HTTP {exc.code}: {detail}"
+                ) from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if attempt == max_attempts:
+                raise JudgeError(
+                    f"judge request failed after {attempt} attempt(s): {type(exc).__name__}: {exc}"
+                ) from exc
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            if attempt == max_attempts:
+                raise JudgeError(
+                    f"judge did not return the required JSON object after {attempt} attempt(s)"
+                ) from exc
+        time.sleep(min(2 ** (attempt - 1), 5))
+    raise JudgeError("judge request exhausted without a result")
 
 
 def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = None) -> list[MetricScore]:

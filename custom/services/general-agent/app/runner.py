@@ -4524,12 +4524,8 @@ def evidence_topics_without_adjacent_citation(answer: str, topics: list[str]) ->
 def direct_condition_evidence(evidence: str, topic: str) -> bool:
     """Check that a source is the named target's condition passage, not a neighbor."""
 
-    compact = re.sub(r"\s+", "", evidence or "").lower()
     target = re.sub(r"\s+", "", topic or "").lower()
-    if not compact or not target:
-        return False
-    topic_positions = [match.start() for match in re.finditer(re.escape(target), compact)]
-    if not topic_positions:
+    if not target:
         return False
     markers = (
         "应同时满足下列条件",
@@ -4541,13 +4537,45 @@ def direct_condition_evidence(evidence: str, topic: str) -> bool:
         "applicableconditions",
         "conditionsinclude",
     )
-    marker_positions = [
-        index
-        for marker in markers
-        for index in [compact.find(marker)]
-        if index >= 0
-    ]
-    return any(abs(topic_at - marker_at) <= 700 for topic_at in topic_positions for marker_at in marker_positions)
+    # Require the target and condition marker in the same sentence. Retrieved
+    # chunks often end method A's definition and begin method B's conditions;
+    # broad whole-chunk proximity incorrectly binds B's list to A.
+    for clause in re.split(r"[。！？!?\r\n]+", evidence or ""):
+        compact = re.sub(r"\s+", "", clause).lower()
+        topic_positions = [match.start() for match in re.finditer(re.escape(target), compact)]
+        if not topic_positions:
+            continue
+        marker_positions = [
+            index
+            for marker in markers
+            for index in [compact.find(marker)]
+            if index >= 0
+        ]
+        if any(abs(topic_at - marker_at) <= 120 for topic_at in topic_positions for marker_at in marker_positions):
+            return True
+    return False
+
+
+def query_requires_direct_condition_evidence(query: str, topics: list[str]) -> bool:
+    """Recognize comparison-condition intent without depending on grep syntax."""
+
+    if len(topics) < 2:
+        return False
+    user_query = (query or "").split(TURN_EXECUTION_CONTRACT_MARKER, 1)[0].lower()
+    return any(
+        marker in user_query
+        for marker in (
+            "适用条件",
+            "适宜条件",
+            "制度条件",
+            "适配点",
+            "会受哪些条件",
+            "条件影响",
+            "applicability",
+            "applicable condition",
+            "conditions affect",
+        )
+    )
 
 
 def condition_topics_without_direct_source(
@@ -4808,8 +4836,7 @@ def turn_contract_issues(
                 ),
             }
         )
-    searches = required_evidence_searches(query)
-    if any("完整适用条件" in search for search in searches):
+    if query_requires_direct_condition_evidence(query, topics):
         missing_direct_conditions = condition_topics_without_direct_source(
             value,
             topics,
@@ -4895,18 +4922,23 @@ def turn_contract_stop_hook_factory(
 
 
 def should_enable_turn_contract_stop_hook(payload: ChatPayload) -> bool:
-    """Enable blocking eval repair only when the turn can actually use tools.
+    """Enable the optional blocking diagnostic only with an explicit opt-in.
 
     Pure state turns intentionally expose no tools and are finalized by the
     shared deterministic conversation-state policy. Asking the model for a
     second generation cannot gather new evidence there and can double the
-    terminal latency. Production remains record-only because eval_observability
-    is false outside explicit eval runs.
+    terminal latency. More importantly, an eval-only second generation changes
+    the SUT being measured and can pull the model back to a stale topic. Normal
+    eval runs therefore observe the production-equivalent first generation;
+    this hook is reserved for bounded diagnosis. Production remains record-only
+    because eval_observability is false outside explicit eval runs.
     """
 
     return bool(
         payload.eval_observability
         and not payload.runtime_config.disable_tools_for_turn
+        and os.getenv("CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR", "0").strip().lower()
+        in {"1", "true", "yes", "on"}
     )
 
 

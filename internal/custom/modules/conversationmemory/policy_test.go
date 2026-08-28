@@ -2,6 +2,7 @@ package conversationmemory
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -1480,6 +1481,79 @@ func TestNarrowFreshEvidenceTopicsStayOnCurrentQuestions(t *testing.T) {
 	}
 }
 
+func TestEvidenceGrepQueriesUseExecutableUserDerivedPatterns(t *testing.T) {
+	query := "比较公开采购、询比、竞价和竞争谈判的适用条件。"
+	searches := EvidenceGrepQueries(query)
+	if len(searches) != 4 {
+		t.Fatalf("expected one grep pattern per topic, got %v", searches)
+	}
+	for _, search := range searches {
+		if strings.Contains(search, " ") {
+			t.Fatalf("grep pattern contains a literal natural-language space: %q", search)
+		}
+		if _, err := regexp.Compile(search); err != nil {
+			t.Fatalf("grep pattern is invalid: %q: %v", search, err)
+		}
+	}
+	competition := searches[len(searches)-1]
+	if !regexp.MustCompile(competition).MatchString("适宜采用公开（邀请）竞争谈判的采购方式") {
+		t.Fatalf("competition pattern did not match the direct clause: %q", competition)
+	}
+}
+
+func TestAugmentEvidenceGrepQueryRepairsFocusedAliasesAndLiteralSpaces(t *testing.T) {
+	query := "依据已选制度比较公开采购、询比、竞价和竞争谈判的适用条件，并就近引用。"
+	runtimeQuery := AppendCurrentTurnDirective(query, query)
+	got := AugmentEvidenceGrepQuery("竞争性谈判 适宜采用 条件", runtimeQuery)
+	if !strings.Contains(got, "竞争.{0,80}谈判") {
+		t.Fatalf("focused alias did not gain an executable target pattern: %q", got)
+	}
+	if strings.Contains(got, "公开.{0,80}采购") {
+		t.Fatalf("focused competition query was unnecessarily broadened: %q", got)
+	}
+	if twice := AugmentEvidenceGrepQuery(got, runtimeQuery); twice != got {
+		t.Fatalf("grep augmentation was not idempotent: %q", twice)
+	}
+}
+
+func TestNormalizeStateDeltaScopeProjectsExplicitUnknownOnlyTurn(t *testing.T) {
+	query := "采购标的最终类别仍未确认；采购信息是否可以公开也仍未确认。只把两项都列为待确认。"
+	answer := "项目为系统升级。\n- 采购标的最终类别：待确认\n- 采购信息是否可以公开：待确认\n- 中标候选人公示期：待确认"
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{"采购标的最终类别", "采购信息是否可以公开", "待确认"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("explicit unknown %q missing: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "系统升级") || strings.Contains(got, "公示期") {
+		t.Fatalf("stale topic survived explicit unknown-only projection: %s", got)
+	}
+}
+
+func TestNormalizeStateDeltaScopeRestoresExplicitCurrentFactsAndActor(t *testing.T) {
+	projectQuery := "建立项目台账：项目代号‘启明星视觉升级’，业务目标是提升缺陷识别率。只确认这些事实。"
+	got := NormalizeStateDeltaScope("已记录项目台账。", projectQuery)
+	for _, expected := range []string{"启明星视觉升级", "提升缺陷识别率"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("explicit current fact %q was not restored: %s", expected, got)
+		}
+	}
+
+	claimQuery := "A供应商声称接口只能由它安全改造。该说法目前只是供应商主张，尚未核验，不得写成事实。"
+	got = NormalizeStateDeltaScope("仅供应商主张，尚未核验。", claimQuery)
+	if !strings.Contains(got, "A供应商") || !strings.Contains(got, "尚未核验") {
+		t.Fatalf("unverified claim actor was not preserved: %s", got)
+	}
+}
+
+func TestNormalizeStateDeltaScopeExpandsSharedScalarUnit(t *testing.T) {
+	query := "预算调整为390万元，360万元及280/80万元构成废弃。只记录当前值和废弃值。"
+	got := NormalizeStateDeltaScope("当前390万元；360万元及280/80万元已废弃。", query)
+	if !strings.Contains(got, "280万元/80万元") {
+		t.Fatalf("shared scalar unit was not expanded: %s", got)
+	}
+}
+
 func TestStateAuditRestoresCompoundRelationshipAndStripsInventedReplacementActor(t *testing.T) {
 	query := "做完整状态审计，分成当前有效事实、已废弃事实、待确认事实、行动边界。"
 	prior := []string{
@@ -1518,5 +1592,48 @@ For the uncertainty topics, I need to inspect the evidence.
 	want := "已确认：项目事实。\n\n待确认：条件待确认。"
 	if got := StripInternalPlanningPreamble(answer); got != want {
 		t.Fatalf("long validator-repair variant survived: %q", got)
+	}
+}
+
+func TestStripInternalPlanningPreambleRemovesMiddleRepairNarration(t *testing.T) {
+	answer := `已确认：项目预算220万元。
+
+I now see the issue clearly. Let me rewrite the answer with the right chunks.
+
+中标候选人公示期不得少于3日。<src id="S1" />`
+	want := "已确认：项目预算220万元。\n\n中标候选人公示期不得少于3日。<src id=\"S1\" />"
+	if got := StripInternalPlanningPreamble(answer); got != want {
+		t.Fatalf("middle repair narration survived: %q", got)
+	}
+}
+
+func TestNormalizeStateAuditGroupsExplicitRetiredCompositionAndDropsTransientScope(t *testing.T) {
+	query := "做完整状态审计，分成当前有效事实、已废弃事实、待确认事实、行动边界。"
+	prior := []string{
+		"初始获批总预算为360万元，其中设备280万元、实施服务80万元。",
+		"财务把预算调整为390万元，其中设备300万元、实施服务90万元。360万元及280/80万元构成从现在起废弃。",
+		"采购标的类别未确认；采购信息能否公开未确认。只把两项都列为待确认。",
+	}
+	answer := `### 当前有效事实
+- 当前预算390万元
+### 已废弃事实
+- 总预算360万元（已废弃）
+- 设备280万元（已废弃）
+- 服务80万元（已废弃）
+### 待确认事实
+- 采购标的类别：待确认
+- 采购信息能否公开：待确认
+- 只把两项都列为待确认
+### 行动边界
+- 无`
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	if !strings.Contains(got, "360万元、280万元、80万元（已废弃）") {
+		t.Fatalf("explicit retired composition was not grouped: %s", got)
+	}
+	if strings.Contains(got, "只把两项") {
+		t.Fatalf("transient response-scope instruction survived audit: %s", got)
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("audit grouping was not idempotent:\n%s", twice)
 	}
 }

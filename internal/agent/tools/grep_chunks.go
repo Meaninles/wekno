@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
@@ -190,6 +191,9 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			Success: false,
 			Error:   "query parameter is required and must be a non-empty regex string",
 		}, fmt.Errorf("missing query parameter")
+	}
+	if meta, ok := ToolExecFromContext(ctx); ok {
+		query = conversationmemory.AugmentEvidenceGrepQuery(query, meta.OriginalUserQuery)
 	}
 
 	// Compile with (?i) prefix for case-insensitive Go-side matching.

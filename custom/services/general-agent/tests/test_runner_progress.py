@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -233,7 +234,7 @@ class RunnerProgressTest(unittest.TestCase):
                 "比较竞价和竞争谈判的适用条件并引用。\n"
                 "本轮明确要求文档依据或引用。\n"
                 '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["竞价","竞争谈判"]\n'
-                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["竞价 完整适用条件 条件列表","竞争谈判 完整适用条件 条件列表"]'
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["竞价","竞争.{0,80}谈判"]'
             ),
             llm=LLMConfig(model_name="test"),
             tool_callback_url="http://runtime-entry/internal/tools/call",
@@ -252,6 +253,16 @@ class RunnerProgressTest(unittest.TestCase):
             if issue["code"] == "current_turn_condition_evidence_not_direct"
         )
         self.assertEqual(issue["missing_topics"], ["竞争谈判"])
+        evidence["S2"] = (
+            "竞争谈判是指采购人与二家以上供应商洽谈的采购方式。"
+            "采购项目满足邀请条件且符合下列特定条件的，适宜采用合作谈判。"
+        )
+        neighboring = next(
+            issue
+            for issue in turn_contract_issues(payload, answer, evidence_by_id=evidence)
+            if issue["code"] == "current_turn_condition_evidence_not_direct"
+        )
+        self.assertEqual(neighboring["missing_topics"], ["竞争谈判"])
         evidence["S2"] = (
             "适宜采用竞争谈判采购方式，且符合下列特定条件之一："
             "只能提出功能性指标；目标可以有不同路径和方案实现。"
@@ -464,18 +475,35 @@ class RunnerProgressTest(unittest.TestCase):
         )
 
         self.assertFalse(should_enable_turn_contract_stop_hook(payload))
-        self.assertTrue(
-            should_enable_turn_contract_stop_hook(
-                payload.model_copy(update={"eval_observability": True})
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}):
+            self.assertTrue(
+                should_enable_turn_contract_stop_hook(
+                    payload.model_copy(update={"eval_observability": True})
+                )
             )
+            state_only = payload.model_copy(
+                update={
+                    "eval_observability": True,
+                    "runtime_config": RuntimeConfigSpec(disable_tools_for_turn=True),
+                }
+            )
+            self.assertFalse(should_enable_turn_contract_stop_hook(state_only))
+
+    def test_turn_contract_stop_hook_is_disabled_in_normal_eval_runs(self):
+        payload = ChatPayload(
+            run_id="run-hook-normal-eval",
+            session_id="session-hook-normal-eval",
+            assistant_message_id="assistant-hook-normal-eval",
+            query="当前问题",
+            runtime_config=RuntimeConfigSpec(disable_tools_for_turn=False),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
         )
-        state_only = payload.model_copy(
-            update={
-                "eval_observability": True,
-                "runtime_config": RuntimeConfigSpec(disable_tools_for_turn=True),
-            }
-        )
-        self.assertFalse(should_enable_turn_contract_stop_hook(state_only))
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR", None)
+            self.assertFalse(should_enable_turn_contract_stop_hook(payload))
 
     def test_fresh_evidence_turn_exposes_no_local_file_tools(self):
         payload = ChatPayload(

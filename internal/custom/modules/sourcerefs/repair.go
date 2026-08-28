@@ -75,7 +75,27 @@ func RepairNamedTopicCitationBindings(
 		paragraph := answer[start:boundary[0]]
 		matchedTopics := namedTopicsInParagraph(paragraph, topics)
 		citationIDs := citationIDsInText(paragraph)
-		if len(matchedTopics) == 1 && len(citationIDs) == 1 {
+		rebuiltCondition := false
+		if len(matchedTopics) == 1 && len(citationIDs) > 1 &&
+			paragraphClaimsApplicabilityConditions(paragraph) {
+			topic := matchedTopics[0]
+			allCitationsDirect := true
+			for id := range citationIDs {
+				if !citationEvidenceSupportsNamedTopicClaim(id, topic, paragraph, evidence) {
+					allCitationsDirect = false
+					break
+				}
+			}
+			if !allCitationsDirect {
+				if replacementID := uniqueNamedTopicConditionEvidence(topic, evidence); replacementID != "" {
+					if excerpt := namedTopicConditionExcerpt(replacementID, topic, evidence); excerpt != "" {
+						paragraph = renderGroundedConditionParagraph(paragraph, topic, excerpt, replacementID)
+						rebuiltCondition = true
+					}
+				}
+			}
+		}
+		if !rebuiltCondition && len(matchedTopics) == 1 && len(citationIDs) == 1 {
 			currentID := ""
 			for id := range citationIDs {
 				currentID = id
@@ -110,6 +130,20 @@ func RepairNamedTopicCitationBindings(
 		start = boundary[1]
 	}
 	return builder.String()
+}
+
+func uniqueNamedTopicConditionEvidence(topic string, refs []citationRepairEvidence) string {
+	match := ""
+	for _, ref := range refs {
+		if !namedTopicConditionEvidence(ref.content, topic) {
+			continue
+		}
+		if match != "" && match != ref.id {
+			return ""
+		}
+		match = ref.id
+	}
+	return match
 }
 
 func namedTopicsInParagraph(paragraph string, topics []string) []string {
@@ -234,22 +268,37 @@ func containsRepairMarker(value string, markers []string) bool {
 }
 
 func namedTopicConditionEvidence(content, topic string) bool {
-	compactContent := normalizedNamedTopicText(content)
 	compactTopic := normalizedNamedTopicText(topic)
-	if compactTopic == "" || !strings.Contains(compactContent, compactTopic) {
+	if compactTopic == "" {
 		return false
 	}
-	topicPositions := allStringIndexes(compactContent, compactTopic)
 	markers := []string{
 		"应同时满足下列条件", "符合下列特定条件之一", "符合下列条件之一",
 		"适宜采用", "适用于", "适用条件", "条件包括", "applicableconditions", "conditionsinclude",
 	}
-	for _, marker := range markers {
-		marker = normalizedNamedTopicText(marker)
-		for _, markerAt := range allStringIndexes(compactContent, marker) {
-			for _, topicAt := range topicPositions {
-				if absInt(markerAt-topicAt) <= 700 {
-					return true
+	// Bind the condition marker and method name inside the same sentence. This
+	// prevents a chunk ending with a definition of method A and beginning the
+	// applicability conditions of neighboring method B from qualifying for A.
+	for _, clause := range strings.FieldsFunc(content, func(r rune) bool {
+		switch r {
+		case '。', '！', '!', '？', '?', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	}) {
+		compactClause := normalizedNamedTopicText(clause)
+		if !strings.Contains(compactClause, compactTopic) {
+			continue
+		}
+		topicPositions := allStringIndexes(compactClause, compactTopic)
+		for _, marker := range markers {
+			marker = normalizedNamedTopicText(marker)
+			for _, markerAt := range allStringIndexes(compactClause, marker) {
+				for _, topicAt := range topicPositions {
+					if absInt(markerAt-topicAt) <= 360 {
+						return true
+					}
 				}
 			}
 		}

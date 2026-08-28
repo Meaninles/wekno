@@ -75,9 +75,23 @@ var internalUserMessageLabelPattern = regexp.MustCompile(
 	`(?i)\b(?:earliest|earlier|latest|recent|current)_user_message_[0-9]+\b`,
 )
 
+var internalPlanningParagraphBreakPattern = regexp.MustCompile(`\n[ \t]*\n+`)
+
 var sharedScalarUnitPattern = regexp.MustCompile(
 	`([0-9０-９]+(?:\.[0-9０-９]+)?)\s*[/／]\s*([0-9０-９]+(?:\.[0-9０-９]+)?)\s*(万元|元|家|个|%|％)`,
 )
+
+var explicitUnknownOnlyListPattern = regexp.MustCompile(
+	`(?:本轮)?\s*(?:只列|仅列)\s*(?:仍)?待确认的(?:[一二三四五六七八九十0-9０-９]+项)?\s*[：:]\s*([^；;。\n]+)`,
+)
+
+var explicitQuotedStateFactPattern = regexp.MustCompile(
+	`^([\p{L}\p{N}_-]{2,24})\s*[‘“"]([^’”"]{1,100})[’”"]$`,
+)
+
+var explicitAssignedStateFactPattern = regexp.MustCompile(`^(.{2,24}?)(?:是|为)(.{1,100})$`)
+
+var explicitUnverifiedClaimPattern = regexp.MustCompile(`^(.{1,24}?)(?:声称|主张)(.{2,100})$`)
 
 var sourceAttributionParentheticalPattern = regexp.MustCompile(
 	`[（(]\s*来源\s*[：:]\s*([^（）()]+?)\s*[）)]`,
@@ -507,6 +521,108 @@ func EvidenceRetrievalQueries(query string) []string {
 	return out
 }
 
+// EvidenceGrepQueries renders the same user-derived targets as bounded POSIX
+// regexes.  grep_chunks applies its query literally, so natural-language
+// strings such as "竞争谈判 完整适用条件" can miss the source merely because the
+// words are not adjacent.  These patterns add no answer term: they only retain
+// distinctive pieces of the user's own named subject in their original order.
+func EvidenceGrepQueries(query string) []string {
+	topics := currentTurnEvidenceTopics(query)
+	if len(topics) < 2 {
+		return nil
+	}
+	out := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		if pattern := evidenceGrepTopicPattern(topic); pattern != "" {
+			out = append(out, pattern)
+		}
+	}
+	return out
+}
+
+// AugmentEvidenceGrepQuery turns a model-issued focused search into an
+// executable regex for the matching current-turn target. If the model names no
+// target, it falls back to a bounded OR over all explicit targets. This runs in
+// the shared grep tool, so native RAG and the general-agent bridge cannot drift.
+func AugmentEvidenceGrepQuery(grepQuery, originalQuery string) string {
+	value := strings.TrimSpace(grepQuery)
+	topics := RequiredEvidenceTopics(originalQuery)
+	if value == "" || len(topics) < 2 {
+		return value
+	}
+	lower := strings.ToLower(value)
+	aliasProbe := strings.ReplaceAll(lower, "性", "")
+	selected := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		pattern := evidenceGrepTopicPattern(topic)
+		if pattern == "" {
+			continue
+		}
+		lowerTopic := strings.ToLower(strings.TrimSpace(topic))
+		if strings.Contains(lower, lowerTopic) || strings.Contains(aliasProbe, lowerTopic) ||
+			strings.Contains(value, pattern) {
+			selected = append(selected, pattern)
+		}
+	}
+	// A focused model query should stay focused. If it names one of the user's
+	// targets, only add that target's executable regex. If it names none, retain
+	// the previous safety net and add every explicit target to a bounded OR.
+	if len(selected) == 0 {
+		for _, topic := range topics {
+			if pattern := evidenceGrepTopicPattern(topic); pattern != "" {
+				selected = append(selected, pattern)
+			}
+		}
+	}
+	for _, pattern := range selected {
+		if strings.Contains(value, pattern) {
+			continue
+		}
+		value += "|" + pattern
+		if len(value) >= 900 {
+			break
+		}
+	}
+	return value
+}
+
+func evidenceGrepTopicPattern(topic string) string {
+	value := strings.TrimSpace(topic)
+	if value == "" {
+		return ""
+	}
+	// Split only connective/question words.  The remaining fragments are all
+	// literal substrings of the user-authored topic.
+	for _, marker := range []string{
+		"如果", "那么", "以及", "并且", "涉及", "并影响", "影响", "至少",
+		"是否", "能否", "可否", "哪些", "哪个", "哪位", "多少", "如何", "怎么", "由",
+	} {
+		value = strings.ReplaceAll(value, marker, "|")
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '|' || r == '，' || r == ',' || r == '；' || r == ';' || r == '、' || unicode.IsSpace(r)
+	})
+	patterns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		runes := []rune(part)
+		if len(runes) < 2 {
+			continue
+		}
+		if len(runes) >= 4 {
+			patterns = append(patterns,
+				regexp.QuoteMeta(string(runes[:2]))+".{0,80}"+regexp.QuoteMeta(string(runes[len(runes)-2:])),
+			)
+		} else {
+			patterns = append(patterns, regexp.QuoteMeta(part))
+		}
+	}
+	if len(patterns) == 0 {
+		return regexp.QuoteMeta(strings.TrimSpace(topic))
+	}
+	return strings.Join(patterns, ".{0,200}")
+}
+
 // FocusEvidenceRewriteQuery removes project-state prose from a multi-target
 // retrieval rewrite while retaining every explicitly named target.  The fixed
 // quick-answer pipeline performs one bounded search, so a compact joined query
@@ -691,7 +807,7 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 			rules += "\n[WEKNORA_REQUIRED_EVIDENCE_TOPICS]" + string(encoded)
 			rules += `
 - 完成回答前逐项核对上述对象：每个对象自己的短段都必须带当前轮检索所得的就近引用；任何一项证据未取得时继续检索，不得以“未展开”代替。`
-			if searches := EvidenceRetrievalQueries(originalQuery); len(searches) == len(topics) {
+			if searches := EvidenceGrepQueries(originalQuery); len(searches) == len(topics) {
 				encodedSearches, _ := json.Marshal(searches)
 				rules += "\n[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]" + string(encodedSearches)
 				rules += `
@@ -1065,6 +1181,9 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	if value == "" || query == "" || !isStrictStateDeltaTurn(query) {
 		return value
 	}
+	if projected := projectExplicitUnknownOnlyList(query); projected != "" {
+		return projected
+	}
 
 	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
 	keep := make([]bool, len(lines))
@@ -1084,7 +1203,8 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 		}
 	}
 	if relevantCount == 0 {
-		return value
+		value = expandSharedScalarUnits(value)
+		return restoreExplicitStateDeltaFacts(value, query)
 	}
 	if tableContent {
 		for index, line := range lines {
@@ -1118,12 +1238,133 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	if containsAny(query, []string{"废弃"}) {
 		result = strings.ReplaceAll(result, "废止", "已废弃")
 	}
-	return result
+	result = expandSharedScalarUnits(result)
+	return restoreExplicitStateDeltaFacts(result, query)
+}
+
+func projectExplicitUnknownOnlyList(query string) string {
+	match := explicitUnknownOnlyListPattern.FindStringSubmatch(query)
+	itemsText := ""
+	if len(match) == 2 {
+		itemsText = match[1]
+	} else if containsAny(query, []string{"只把", "仅把"}) &&
+		containsAny(query, []string{"列为待确认", "列入待确认", "记录为待确认"}) {
+		// The common natural form puts the facts before the scope instruction:
+		// "A仍未确认；B也未确认。只把两项都列为待确认。"
+		// Project those current-turn clauses directly instead of trying to filter a
+		// potentially stale model answer.
+		candidates := make([]string, 0, 4)
+		for _, clause := range splitUserFactFragments(query) {
+			clause = strings.TrimSpace(clause)
+			if containsAny(clause, []string{"待确认", "尚未确认", "仍未确认", "未确认", "待核实", "尚未核验", "未经核验"}) &&
+				!containsAnyPrefix(clause, []string{"只把", "仅把"}) {
+				candidates = append(candidates, clause)
+			}
+		}
+		itemsText = strings.Join(candidates, "、")
+	} else {
+		return ""
+	}
+	items := strings.FieldsFunc(itemsText, func(r rune) bool {
+		return r == '、' || r == '，' || r == ','
+	})
+	out := make([]string, 0, len(items)+1)
+	for _, item := range items {
+		item = strings.TrimSpace(strings.Trim(item, "；;。.!！？? "))
+		if count := utf8.RuneCountInString(item); count < 2 || count > 80 {
+			continue
+		}
+		if containsAny(item, []string{"待确认", "尚未确认", "未确认", "待核实", "尚未核验", "未经核验"}) {
+			out = append(out, "- "+item)
+		} else {
+			out = append(out, "- "+item+"：待确认")
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return "## 待确认\n\n" + strings.Join(out, "\n")
+}
+
+func expandSharedScalarUnits(value string) string {
+	return sharedScalarUnitPattern.ReplaceAllString(value, `${1}${3}/${2}${3}`)
+}
+
+func restoreExplicitStateDeltaFacts(answer, query string) string {
+	result := strings.TrimSpace(answer)
+	normalizedAnswer := normalizeStateDeltaText(result)
+	additions := make([]string, 0, 3)
+	seen := map[string]struct{}{}
+	clauses := strings.FieldsFunc(query, func(r rune) bool {
+		return r == '，' || r == ',' || r == '；' || r == ';' || r == '。' || r == '！' || r == '!' || r == '？' || r == '?'
+	})
+	appendFact := func(label, fact string) {
+		label = strings.TrimSpace(strings.Trim(label, "：: "))
+		fact = strings.TrimSpace(fact)
+		if label == "" || fact == "" || containsAny(label, []string{"只", "仅", "不得", "未经", "不要", "从现在", "其中"}) {
+			return
+		}
+		key := normalizeStateDeltaText(label + fact)
+		if key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		if strings.Contains(normalizedAnswer, normalizeStateDeltaText(fact)) {
+			return
+		}
+		additions = append(additions, "- "+label+"："+fact)
+	}
+	for _, clause := range clauses {
+		clause = strings.TrimSpace(clause)
+		if colon := strings.LastIndexAny(clause, "：:"); colon >= 0 && colon < len(clause)-1 {
+			_, width := utf8.DecodeRuneInString(clause[colon:])
+			clause = strings.TrimSpace(clause[colon+width:])
+		}
+		if match := explicitQuotedStateFactPattern.FindStringSubmatch(clause); len(match) == 3 {
+			appendFact(match[1], match[2])
+			continue
+		}
+		if match := explicitAssignedStateFactPattern.FindStringSubmatch(clause); len(match) == 3 {
+			appendFact(match[1], match[2])
+			continue
+		}
+		if match := explicitUnverifiedClaimPattern.FindStringSubmatch(clause); len(match) == 3 &&
+			containsAny(query, []string{"尚未核验", "未经核验", "未核验", "待核验"}) {
+			actor := strings.TrimSpace(match[1])
+			claim := strings.TrimSpace(match[2])
+			if actor != "" && claim != "" &&
+				(!strings.Contains(normalizedAnswer, normalizeStateDeltaText(actor)) ||
+					!strings.Contains(normalizedAnswer, normalizeStateDeltaText(claim))) {
+				status := "待核验"
+				for _, marker := range []string{"尚未核验", "未经核验", "未核验", "待核验"} {
+					if strings.Contains(query, marker) {
+						status = marker
+						break
+					}
+				}
+				additions = append(additions, "- "+actor+"主张："+claim+"（"+status+"）")
+			}
+		}
+	}
+	if len(additions) == 0 {
+		return result
+	}
+	if result == "" {
+		return strings.Join(additions, "\n")
+	}
+	return result + "\n" + strings.Join(additions, "\n")
 }
 
 func isStrictStateDeltaTurn(query string) bool {
 	if !IsStateOnlyTurn(query) || IsStateAuditTurn(query) {
 		return false
+	}
+	if containsAny(query, []string{"声称", "主张"}) &&
+		containsAny(query, []string{"尚未核验", "未经核验", "未核验", "待核验"}) {
+		return true
 	}
 	return containsAny(strings.ToLower(query), []string{
 		"只记录", "仅记录", "只更新", "仅更新", "只列", "仅列", "只把", "仅把",
@@ -1627,6 +1868,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	}
 	userStatements = append(userStatements, originalQuery)
 	explicitRetiredFacts := explicitRetiredScalarFacts(userStatements)
+	explicitRetiredGroups := explicitRetiredScalarGroups(userStatements)
 	explicitActiveScalars := explicitActiveScalarFacts(userStatements)
 	explicitUnknowns := explicitUnknownUserStatements(userStatements)
 	stripProcurementSelectionScope := containsAny(originalQuery, []string{
@@ -1645,6 +1887,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 				seenActionBoundaryKinds = make(map[string]bool)
 			}
 			out = append(out, line)
+			continue
+		}
+		if transientStateAuditScopeInstruction(line) {
 			continue
 		}
 		if section != "retired" && supersededUnknownClaim(line, userStatements) {
@@ -1746,8 +1991,20 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	out = restoreExplicitNamedRoleFacts(out, userStatements)
 	out = restoreExplicitActiveScalarFacts(out, explicitActiveScalars)
 	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
+	out = restoreExplicitRetiredScalarGroups(out, explicitRetiredGroups)
 	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
+}
+
+func transientStateAuditScopeInstruction(line string) bool {
+	trimmed := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
+	trimmed = strings.Trim(trimmed, "| *_`。；; ")
+	if !containsAnyPrefix(trimmed, []string{
+		"只把", "仅把", "只列", "仅列", "只区分", "仅区分",
+	}) {
+		return false
+	}
+	return containsAny(trimmed, []string{"待确认", "当前值", "废弃值", "状态", "事实", "项"})
 }
 
 func trimStateAuditPreamble(lines []string) []string {
@@ -1923,6 +2180,35 @@ type explicitRetiredScalarFact struct {
 	fragment string
 }
 
+// explicitRetiredScalarGroups preserves user-authored lifecycle grouping. A
+// statement such as "360万元及280/80万元构成废弃" describes one retired
+// budget composition, not three unrelated facts. The group contains only
+// literal scalar anchors from that user statement.
+func explicitRetiredScalarGroups(userStatements []string) [][]string {
+	groups := make([][]string, 0, 2)
+	seen := make(map[string]bool)
+	for _, statement := range userStatements {
+		for _, fragment := range splitUserFactFragments(cleanUserStatementRecord(statement)) {
+			if !containsAny(fragment, []string{"废弃", "作废", "失效"}) {
+				continue
+			}
+			expanded := expandSharedScalarUnits(fragment)
+			anchors := stateAuditAnchorPattern.FindAllString(expanded, -1)
+			anchors = uniqueOrderedStrings(anchors)
+			if len(anchors) < 2 {
+				continue
+			}
+			key := strings.Join(anchors, "\x00")
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			groups = append(groups, anchors)
+		}
+	}
+	return groups
+}
+
 // explicitRetiredScalarFacts links only user-authored lifecycle declarations
 // to an earlier user-authored fact fragment. It never reads assistant answers.
 // This lets the audit correct a copied value such as one component accidentally
@@ -2009,6 +2295,19 @@ func explicitScalarAnchors(fragment string) []string {
 			seen[anchor] = true
 			out = append(out, anchor)
 		}
+	}
+	return out
+}
+
+func uniqueOrderedStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
 	}
 	return out
 }
@@ -2107,6 +2406,56 @@ func restoreExplicitRetiredScalarFacts(lines []string, facts []explicitRetiredSc
 		retiredEnd++
 		retiredText += "\n" + fact.fragment
 		seenFragments[fact.fragment] = true
+	}
+	return lines
+}
+
+func restoreExplicitRetiredScalarGroups(lines []string, groups [][]string) []string {
+	if len(groups) == 0 {
+		return lines
+	}
+	retiredStart, retiredEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "retired" && key != "retired" {
+				retiredEnd = index
+				break
+			}
+			section = key
+			if key == "retired" && retiredStart < 0 {
+				retiredStart = index + 1
+			}
+		}
+	}
+	if retiredStart < 0 {
+		return lines
+	}
+	for _, group := range groups {
+		groupPresent := false
+		for _, line := range lines[retiredStart:retiredEnd] {
+			payload := retiredAuditFactPayload(line)
+			if payload == "" || !containsAny(payload, []string{"废弃", "作废", "失效"}) {
+				continue
+			}
+			allPresent := true
+			for _, anchor := range group {
+				if !strings.Contains(payload, anchor) {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				groupPresent = true
+				break
+			}
+		}
+		if groupPresent {
+			continue
+		}
+		line := "- 同一批原值：" + strings.Join(group, "、") + "（已废弃）"
+		lines = insertString(lines, retiredEnd, line)
+		retiredEnd++
 	}
 	return lines
 }
@@ -2285,7 +2634,7 @@ func restoreExplicitUnknownFacts(lines, explicitUnknowns, userStatements []strin
 	seen := make(map[string]bool)
 	for _, statement := range explicitUnknowns {
 		for _, fragment := range splitUserStateClauses(cleanUserStatementRecord(statement)) {
-			if !containsAny(fragment, []string{
+			if transientStateAuditScopeInstruction(fragment) || !containsAny(fragment, []string{
 				"待确认", "待核实", "未提供", "没有提供", "未说明", "未知",
 				"尚未确认", "仍未确认", "未确认", "尚未核验", "未经核验", "未核验",
 			}) || statementHasUnknownUserIdentity(fragment) ||
@@ -3358,7 +3707,52 @@ func StripInternalPlanningPreamble(answer string) string {
 	if repairPreamble {
 		value = stripLeadingMarkdownDivider(value)
 	}
-	return value
+	return stripStandaloneInternalPlanningParagraphs(value)
+}
+
+// stripStandaloneInternalPlanningParagraphs handles a provider variant where
+// a short, valid state preface is emitted before the model leaks its retrieval
+// narration.  The old leading-only pass cannot see that middle preamble.  We
+// remove only standalone paragraphs with unmistakable execution language and
+// leave quoted/code content and substantive paragraphs untouched.
+func stripStandaloneInternalPlanningParagraphs(value string) string {
+	normalized := strings.ReplaceAll(strings.TrimSpace(value), "\r\n", "\n")
+	if normalized == "" {
+		return ""
+	}
+	parts := internalPlanningParagraphBreakPattern.Split(normalized, -1)
+	if len(parts) < 2 {
+		return normalized
+	}
+	out := make([]string, 0, len(parts))
+	removed := false
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		probe := strings.ToLower(strings.TrimSpace(strings.Trim(trimmed, "*_#` ")))
+		quotedOrCode := strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "```")
+		planning := !quotedOrCode && containsAnyPrefix(probe, []string{
+			"i now see", "now i have", "let me ", "i need to ", "i will rewrite",
+			"the validation ", "the tools ", "from the earlier retrieval", "from the earlier grep",
+			"现在两个问题的证据", "从第一个结果可以看到", "现在我有完整", "现在我已获得",
+			"让我给出最终回答", "让我用", "根据本轮检索结果", "根据当前轮检索结果", "以下是替换后的答案",
+		})
+		planning = planning || (!quotedOrCode &&
+			containsAny(probe, []string{"chunk_id", "cite_exactly", "citation handle"}) &&
+			containsAny(probe, []string{"让我", "let me", "需要确认", "need to"}))
+		if planning {
+			removed = true
+			continue
+		}
+		if removed && (trimmed == "---" || trimmed == "***" || trimmed == "___") {
+			continue
+		}
+		out = append(out, trimmed)
+		removed = false
+	}
+	return strings.TrimSpace(strings.Join(out, "\n\n"))
 }
 
 func substantiveAnswerStart(value string) int {

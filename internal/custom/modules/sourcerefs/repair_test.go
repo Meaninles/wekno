@@ -223,3 +223,37 @@ func TestRepairNamedTopicCitationBindingsFillsExplicitMissingEvidenceOnly(t *tes
 		t.Fatalf("explicit missing-evidence fallback was not grounded: %s", got)
 	}
 }
+
+func TestNamedTopicConditionEvidenceRejectsNeighboringMethodConditions(t *testing.T) {
+	neighbor := "竞争谈判是指采购人与二家以上供应商洽谈确定供应商的采购方式。" +
+		"采购项目满足邀请的采购条件，且符合下列特定条件的，适宜采用合作谈判的采购方式。"
+	if namedTopicConditionEvidence(neighbor, "竞争谈判") {
+		t.Fatal("a definition followed by a neighboring method's conditions was treated as direct evidence")
+	}
+	direct := "采购项目满足公开（邀请）的采购条件，且符合下列特定条件之一的，适宜采用公开（邀请）竞争谈判的采购方式：技术复杂只能提出功能性指标。"
+	if !namedTopicConditionEvidence(direct, "竞争谈判") {
+		t.Fatal("the target method's own condition sentence was rejected")
+	}
+}
+
+func TestRepairNamedTopicCitationBindingsRebuildsMixedConditionCitations(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "definition", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞争谈判是指采购人与二家以上供应商洽谈确定供应商的采购方式。适宜采用合作谈判的采购方式。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "definition", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "conditions", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "采购项目满足公开（邀请）的采购条件，且符合下列特定条件之一的，适宜采用公开（邀请）竞争谈判的采购方式：1.技术复杂，只能提出功能性指标；2.采购目标明确但可以有不同路径和方案实现。",
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "conditions", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "竞争谈判：制度条件为技术复杂、功能性指标或不同路径方案。<src id=\"S2\" />" +
+		"适用于谈判方式的其他采购。<src id=\"S1\" />；该直接条件在本项目中是否成立待确认。"
+	got := RepairNamedTopicCitationBindings(answer, []string{"竞价", "竞争谈判"}, refs)
+	if strings.Contains(got, `<src id="S1" />`) || strings.Contains(got, "适用于谈判方式的其他采购") ||
+		strings.Count(got, `<src id="S2" />`) != 1 || !strings.Contains(got, "功能性指标") {
+		t.Fatalf("mixed condition citations were not rebuilt from the unique direct passage: %s", got)
+	}
+}

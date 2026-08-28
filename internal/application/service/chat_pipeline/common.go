@@ -157,9 +157,19 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 		chatManage.Query,
 		chatManage.DurableUserContext,
 	)
+	priorUserStatements := make([]string, 0, len(chatManage.History)+1)
+	if strings.TrimSpace(chatManage.DurableUserContext) != "" {
+		priorUserStatements = append(priorUserStatements, chatManage.DurableUserContext)
+	}
+	for _, item := range chatManage.History {
+		if item != nil && strings.TrimSpace(item.Query) != "" {
+			priorUserStatements = append(priorUserStatements, item.Query)
+		}
+	}
 	currentContent = conversationmemory.AppendCurrentTurnDirective(
 		currentContent,
 		chatManage.Query,
+		priorUserStatements...,
 	)
 	// Keep the citation-use block terminal even after adding the current-turn
 	// response contract. This preserves the established citation salience rule.

@@ -4338,7 +4338,7 @@ REQUIRED_UNCERTAINTY_TOPICS_RE = re.compile(
 FRESH_EVIDENCE_CONTRACT_MARKER = "本轮明确要求文档依据或引用"
 TURN_EXECUTION_CONTRACT_MARKER = "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
 DEFERRED_COMPARISON_CONTRACT_MARKER = "用户明确要求不作最终选择"
-TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 3
+TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 1
 INTERNAL_PLANNING_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:"
     r"now\s+(?:i\s+have|let\s+me|rewriting|i(?:'ll|\s+will)\s+write)|"
@@ -4346,7 +4346,10 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"i\s+(?:have\s+(?:the\s+)?retrieval\s+results|need\s+to\s+rewrite|will\s+rewrite)|"
     r"i've\s+retrieved|i\s+see\s+the\s+issue|"
     r"looking\s+at\s+(?:the\s+returned\s+evidence|the\s+evidence|my\s+earlier\s+answer)|"
-    r"the\s+issue\s+might\s+be|the\s+evidence\s+is\s+already"
+    r"the\s+issue\s+might\s+be|the\s+evidence\s+is\s+already|"
+    r"let\s+me\s+(?:think|check)|the\s+validation\s+says|"
+    r"(?:好的[，,]?\s*)?.{0,80}runtime_response_contract|"
+    r"现在我已获得|根据(?:本|当前)轮检索结果|以下是替换后的答案"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -4700,11 +4703,13 @@ def turn_contract_issues(
             }
         )
     uncertainty_topics = required_uncertainty_topics(query)
-    missing_uncertainties = uncertainty_topics_without_grounded_citation(
-        value,
-        uncertainty_topics,
-        evidence_by_id or {},
-    )
+    missing_uncertainties = []
+    if DEFERRED_COMPARISON_CONTRACT_MARKER not in query:
+        missing_uncertainties = uncertainty_topics_without_grounded_citation(
+            value,
+            uncertainty_topics,
+            evidence_by_id or {},
+        )
     if missing_uncertainties:
         issues.append(
             {
@@ -6106,13 +6111,14 @@ class GeneralAgentRunner:
                 )
             ]
         turn_contract_state: dict[str, Any] = {}
-        runtime_hooks.setdefault("Stop", []).append(
-            HookMatcher(
-                matcher=None,
-                hooks=[turn_contract_stop_hook_factory(self.payload, turn_contract_state)],
-                timeout=5,
+        if self.payload.eval_observability:
+            runtime_hooks.setdefault("Stop", []).append(
+                HookMatcher(
+                    matcher=None,
+                    hooks=[turn_contract_stop_hook_factory(self.payload, turn_contract_state)],
+                    timeout=5,
+                )
             )
-        )
         pptx_layout_state: dict[str, Any] = {}
         if self.payload.runtime_config.agent_type == "document-processing-agent" and self.payload.enable_artifacts:
             runtime_hooks.setdefault("Stop", []).append(

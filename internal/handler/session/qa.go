@@ -974,6 +974,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				)
 				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
 				answer := conversationmemory.StripInternalPlanningPreamble(streamCtx.assistantMessage.Content)
+				answer = conversationmemory.NormalizeStateDeltaScope(answer, reqCtx.query)
 				answer = conversationmemory.NormalizeExplicitActionBoundaries(
 					answer,
 					reqCtx.query,

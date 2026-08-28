@@ -79,6 +79,27 @@ func TestRepairAnswerCitationsDoesNotDuplicateParagraphSourceAlreadyCitedAtEnd(t
 	}
 }
 
+func TestRepairAnswerCitationsMovesSourceTitleHandleBesideSupportedClaim(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "goods-threshold", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "第三十四条 依法必须招标的重要设备、材料等货物的采购，单项合同估算价在200万元（含）以上的，必须公开招标。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "goods-threshold", "source_type": SourceTypeKnowledge},
+		},
+	}
+	claim := "根据《采购管理办法》第三十四条，依法必须招标的重要设备、材料等货物，单项合同估算价在200万元（含）以上的，必须公开招标。"
+	answer := claim + "\n\n📄《采购管理办法》第三十四条第（一）款第1项第（2）目。<src id=\"S1\" />"
+
+	got := RepairAnswerCitations(answer, refs)
+	if !strings.Contains(got, claim+`<src id="S1" />`) {
+		t.Fatalf("source handle was not moved beside the supported claim: %q", got)
+	}
+	parts := strings.Split(got, "\n\n")
+	if len(parts) != 2 || strings.Contains(parts[1], "<src") {
+		t.Fatalf("source-title paragraph retained the non-adjacent handle: %q", got)
+	}
+}
+
 func TestRepairAnswerCitationsRepairsEvidenceSentencesInsideMixedParagraphs(t *testing.T) {
 	refs := []*types.SearchResult{
 		{

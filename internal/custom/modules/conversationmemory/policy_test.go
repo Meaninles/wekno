@@ -132,6 +132,29 @@ func TestCurrentTurnDirectiveUsesDeltaAndAuditShapes(t *testing.T) {
 	}
 }
 
+func TestCurrentTurnDirectiveCarriesExplicitlyReferencedUserFacts(t *testing.T) {
+	query := "仅基于刚才明确的项目事实和制度，比较询比、竞价、竞争谈判的适配点与风险，不定首选。"
+	prior := []string{
+		"请依据制度解释定义。",
+		"建立项目事实：系统升级服务预算220万元，至少3家供应商可参与，是否可以公开采购、需求是否完整、全流程时间是否可行都尚未确认。只列已确认和待确认。",
+	}
+	got := AppendCurrentTurnDirective(query, query, prior...)
+	for _, expected := range []string{
+		"[WEKNORA_REFERENCED_USER_FACTS_V1]", "系统升级服务", "220万元", "至少3家供应商", "全流程时间是否可行",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("referenced user fact %q missing: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "请依据制度解释定义") {
+		t.Fatalf("an older informational request was copied instead of the recent fact statement: %s", got)
+	}
+	plain := AppendCurrentTurnDirective("普通问题", "继续说明", prior...)
+	if strings.Contains(plain, "WEKNORA_REFERENCED_USER_FACTS") {
+		t.Fatalf("implicit continuation unexpectedly copied historical facts: %s", plain)
+	}
+}
+
 func TestTerminalGenerationDirectiveOnlyTargetsDeferredComparisons(t *testing.T) {
 	query := "依据已选制度只比较公开采购、询比、竞价和竞争谈判，不要给最终建议。"
 	got := TerminalGenerationDirective(query)
@@ -262,6 +285,63 @@ func TestNormalizeExplicitActionBoundariesKeepsDurableForce(t *testing.T) {
 	}
 }
 
+func TestNormalizeExplicitActionBoundariesDoesNotRepeatArchivedRulesOnDelta(t *testing.T) {
+	query := "初始目标日期是2026年11月30日。只记录日期，不推断是否紧急。"
+	archive := "未经我明确授权，不得创建或修改文件，也不得发起采购；只在对话里维护。"
+	answer := `- **初始目标日期**：2026年11月30日
+- **文件权限**：未经我明确授权，不得创建或修改文件
+- **采购权限**：未经我明确授权，不得发起采购
+- **维护方式**：只在本对话中维护`
+
+	got := NormalizeExplicitActionBoundaries(answer, query, archive)
+	if !strings.Contains(got, "2026年11月30日") {
+		t.Fatalf("current delta fact was lost: %s", got)
+	}
+	for _, stale := range []string{"文件权限", "采购权限", "维护方式", "不得创建", "不得发起"} {
+		if strings.Contains(got, stale) {
+			t.Fatalf("archived boundary %q leaked into a narrow delta: %s", stale, got)
+		}
+	}
+}
+
+func TestNormalizeStateDeltaScopeDropsUnrequestedHistoricalLedger(t *testing.T) {
+	query := "初始目标日期是2026年11月30日。只记录日期，不推断是否紧急。"
+	answer := `已更新项目台账。当前确认的事实如下：
+
+- **初始目标日期**：2026年11月30日
+- **当前总预算**：390万元
+- **当前设备预算**：300万元
+- **文件创建/修改**：未经授权不得创建或修改文件
+- **业务目标**：提升缺陷识别率`
+
+	got := NormalizeStateDeltaScope(answer, query)
+	if !strings.Contains(got, "初始目标日期") || !strings.Contains(got, "2026年11月30日") {
+		t.Fatalf("current date was lost: %s", got)
+	}
+	for _, stale := range []string{"390万元", "300万元", "文件创建", "提升缺陷识别率"} {
+		if strings.Contains(got, stale) {
+			t.Fatalf("unrequested historical fact %q survived: %s", stale, got)
+		}
+	}
+}
+
+func TestNormalizeStateDeltaScopeKeepsCurrentAndRetiredValues(t *testing.T) {
+	query := "目标日期调整为2027年1月31日，2026年11月30日从现在起废弃。只更新日期状态。"
+	answer := `- **当前目标日期**：2027年1月31日
+- **废弃目标日期**：2026年11月30日已废弃
+- **当前预算**：390万元`
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{"2027年1月31日", "2026年11月30日", "废弃"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("current-turn value %q was lost: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "390万元") {
+		t.Fatalf("unrequested budget survived: %s", got)
+	}
+}
+
 func TestNormalizeExplicitActionBoundariesRepairsObservedProcurementTable(t *testing.T) {
 	query := "建立项目台账。未经我明确授权，不得创建或修改文件，也不得发起采购；只在对话里维护。"
 	answer := `| 项目 | 当前边界 |
@@ -337,6 +417,15 @@ func TestNormalizeExplicitUserIdentityUnknownKeepsCurrentTurnBoundary(t *testing
 	knownLater := "当前对话用户身份是采购经办人。"
 	if changed := NormalizeExplicitUserIdentityUnknown(answer, "只更新台账。", query, knownLater); changed != answer {
 		t.Fatalf("later explicit identity update was ignored: %s", changed)
+	}
+}
+
+func TestNormalizeExplicitUserIdentityUnknownAcceptsStillNotProvidedWording(t *testing.T) {
+	query := "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。"
+	answer := "- **项目负责人**：周岚"
+	got := NormalizeExplicitUserIdentityUnknown(answer, query)
+	if !strings.Contains(got, "当前对话用户身份未提供") {
+		t.Fatalf("identity boundary with an adverb was not restored: %s", got)
 	}
 }
 
@@ -606,6 +695,47 @@ earlier_user_message_08: 法务和技术核验后确认A并非不可替代，B�
 	}
 }
 
+func TestNormalizeStateAuditSectionsRestoresResolvedEntityFactAndDropsInventedUnknowns(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"D供应商声称现有网关只能由它兼容。该说法只是供应商主张，尚未核验。",
+		"技术组完成核验：D并非不可替代，E、F经适配也能兼容；废弃‘只能D’的前提。",
+		"法务确认采购信息可以公开；立项审批状态仍待确认。",
+		"当前对话用户身份仍未提供。",
+	}
+	answer := `### 当前有效事实
+- 供应商E经适配也能兼容（技术组核验）
+- 供应商F经适配也能兼容（技术组核验）
+### 已废弃事实
+- 只能D的前提已废弃
+### 待确认事项
+- 立项审批状态：待确认
+- 当前对话用户身份：未提供
+- D供应商相关主张虽经核验被推翻，但D是否仍为合格参与方：待确认
+- 温度传感器的具体技术规格和数量：未提供
+- 采购方式：未选择
+### 行动边界
+- 未经授权不得发起采购`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	for _, expected := range []string{"技术组", "D并非不可替代", "E、F经适配也能兼容"} {
+		if !strings.Contains(active, expected) {
+			t.Fatalf("resolved user fact %q was not restored: %s", expected, got)
+		}
+	}
+	for _, invented := range []string{"合格参与方", "具体技术规格", "采购方式：未选择"} {
+		if strings.Contains(got, invented) {
+			t.Fatalf("invented audit unknown %q survived: %s", invented, got)
+		}
+	}
+	for _, expected := range []string{"立项审批状态", "当前对话用户身份"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("explicit user unknown %q was lost: %s", expected, got)
+		}
+	}
+}
+
 func TestNormalizeStateAuditSectionsDropsEmptyActionBoundaryLabels(t *testing.T) {
 	query := "现在做一次完整状态审计，不要选择采购方式。"
 	answer := `### 当前有效事实
@@ -857,5 +987,35 @@ Now I'll write the complete replacement answer.
 乙方案：条件二。<src id="S2" />`
 	if got := StripInternalPlanningPreamble(checklistLeak); got != "甲方案：条件一。<src id=\"S1\" />\n\n乙方案：条件二。<src id=\"S2\" />" {
 		t.Fatalf("leading citation checklist was not removed: %q", got)
+	}
+	observedChineseRepair := `根据本轮检索结果，第三十四条的具体内容及其金额标准已完整获取。以下是替换后的答案：
+
+---
+
+依法必须招标的重要设备、材料等货物达到200万元（含）以上。<src id="S1" />`
+	if got := StripInternalPlanningPreamble(observedChineseRepair); got != "依法必须招标的重要设备、材料等货物达到200万元（含）以上。<src id=\"S1\" />" {
+		t.Fatalf("Chinese retrieval/repair narration survived: %q", got)
+	}
+	observedContractLeak := `好的，理解您的需求。本轮依据 runtime_response_contract 的指令，仅记录状态。
+
+---
+
+项目代号：寒星冷链温控改造`
+	if got := StripInternalPlanningPreamble(observedContractLeak); got != "项目代号：寒星冷链温控改造" {
+		t.Fatalf("runtime contract narration survived: %q", got)
+	}
+	longRepairLeak := `1. "采购信息可以公开" — appears in chunk 22 <src id="S2" />.
+2. "需求是否完整" — appears in chunk 26 <src id="S6" />.
+
+Let me think about this more carefully.
+
+The validation says I need to rewrite the complete answer.
+
+已确认：项目为系统升级服务，预算220万元。
+
+待确认：采购信息能否公开；需求是否完整。`
+	expectedRepair := "已确认：项目为系统升级服务，预算220万元。\n\n待确认：采购信息能否公开；需求是否完整。"
+	if got := StripInternalPlanningPreamble(longRepairLeak); got != expectedRepair {
+		t.Fatalf("multi-paragraph validator narration survived: %q", got)
 	}
 }

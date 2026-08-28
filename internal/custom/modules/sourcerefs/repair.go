@@ -40,10 +40,86 @@ func RepairAnswerCitations(answer string, refs []*types.SearchResult) string {
 	if len(evidence) == 0 {
 		return answer
 	}
+	answer = relocateTrailingSourceAttributionCitation(answer, evidence)
 	if canonicalSourceTagRE.MatchString(answer) {
 		return attachMissingSentenceEvidence(answer, evidence, 4)
 	}
 	return attachUnambiguousSentenceCitations(answer, evidence, 6)
+}
+
+// relocateTrailingSourceAttributionCitation fixes a common adjacency defect:
+// the model writes an evidence-backed claim, then puts the handle only on a
+// following source-title paragraph. The handle is moved only when the previous
+// paragraph is an unambiguous lexical match for that exact current-turn source
+// and the following paragraph is visibly just a source attribution. Claim and
+// source text are otherwise left unchanged.
+func relocateTrailingSourceAttributionCitation(answer string, refs []citationRepairEvidence) string {
+	breaks := paragraphBreakRE.FindAllStringIndex(answer, -1)
+	if len(breaks) == 0 {
+		return answer
+	}
+	paragraphs := make([]string, 0, len(breaks)+1)
+	separators := make([]string, 0, len(breaks))
+	start := 0
+	for _, boundary := range breaks {
+		paragraphs = append(paragraphs, answer[start:boundary[0]])
+		separators = append(separators, answer[boundary[0]:boundary[1]])
+		start = boundary[1]
+	}
+	paragraphs = append(paragraphs, answer[start:])
+
+	for index := 1; index < len(paragraphs); index++ {
+		current := paragraphs[index]
+		if !isSourceAttributionParagraph(current) || canonicalSourceTagRE.MatchString(paragraphs[index-1]) {
+			continue
+		}
+		ids := citationIDsInText(current)
+		if len(ids) != 1 {
+			continue
+		}
+		citationID := ""
+		for id := range ids {
+			citationID = id
+		}
+		if unambiguousEvidenceForParagraph(paragraphs[index-1], refs) != citationID {
+			continue
+		}
+		paragraphs[index-1] = strings.TrimRight(paragraphs[index-1], " \t\r\n") + canonicalCitationTag(citationID)
+		paragraphs[index] = canonicalSourceTagRE.ReplaceAllString(current, "")
+	}
+
+	var builder strings.Builder
+	for index, paragraph := range paragraphs {
+		builder.WriteString(paragraph)
+		if index < len(separators) {
+			builder.WriteString(separators[index])
+		}
+	}
+	return builder.String()
+}
+
+func isSourceAttributionParagraph(value string) bool {
+	probe := strings.TrimSpace(markdownPrefixRE.ReplaceAllString(value, ""))
+	probe = canonicalSourceTagRE.ReplaceAllString(probe, "")
+	probe = strings.TrimSpace(strings.Trim(probe, "*_`#> 📄📚🔗：:。.;；"))
+	if probe == "" {
+		return true
+	}
+	if strings.Contains(probe, "《") && strings.Contains(probe, "》") &&
+		containsSourceAttributionMarker(probe) {
+		return true
+	}
+	return strings.HasPrefix(probe, "来源") || strings.HasPrefix(probe, "出处") ||
+		strings.HasPrefix(strings.ToLower(probe), "source:")
+}
+
+func containsSourceAttributionMarker(value string) bool {
+	for _, marker := range []string{"第", "条", "款", "项", "章", "来源", "出处", "施行", "办法", "制度"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeKnownCitationAliases(answer string, refs []*types.SearchResult) string {

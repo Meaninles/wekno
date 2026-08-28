@@ -190,7 +190,16 @@ func (s *sessionService) AgentQA(
 		req.Query,
 		durableUserContext,
 	)
-	agentQuery = conversationmemory.AppendCurrentTurnDirective(agentQuery, req.Query)
+	priorUserStatements := make([]string, 0, len(llmContext)+1)
+	if strings.TrimSpace(durableUserContext) != "" {
+		priorUserStatements = append(priorUserStatements, durableUserContext)
+	}
+	for _, message := range llmContext {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && strings.TrimSpace(message.Content) != "" {
+			priorUserStatements = append(priorUserStatements, message.Content)
+		}
+	}
+	agentQuery = conversationmemory.AppendCurrentTurnDirective(agentQuery, req.Query, priorUserStatements...)
 
 	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside
 	// the agent engine only; we intentionally do not persist them on user messages

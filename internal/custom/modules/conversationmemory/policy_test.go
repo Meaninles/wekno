@@ -544,6 +544,47 @@ func TestNormalizeStateAuditSectionsHandlesObservedRAGShape(t *testing.T) {
 	}
 }
 
+func TestNormalizeStateAuditSectionsMarksEachRetiredFactExplicitly(t *testing.T) {
+	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	answer := `### 当前有效事实
+- 当前总预算：390万元
+- 当前目标日期：2027年1月31日
+
+### 已废弃事实
+| 项目 | 原值 | 废弃原因 |
+| --- | --- | --- |
+| 初始获批总预算 | 360万元 | 由当前有效事实中的390万元取代 |
+| 初始目标日期 | 2026年11月30日 | 由当前有效日期取代 |
+- 初始设备预算：280万元
+- 初始实施服务预算：80万元（已废弃）
+- 无
+
+### 待确认事实
+- 立项审批状态待确认
+
+### 行动边界
+- 未经授权不得发起采购`
+
+	got := NormalizeStateAuditSections(answer, query)
+	for _, expected := range []string{
+		"| 初始获批总预算 | 360万元 | 由当前有效事实中的390万元取代（已废弃） |",
+		"| 初始目标日期 | 2026年11月30日 | 由当前有效日期取代（已废弃） |",
+		"- 初始设备预算：280万元（已废弃）",
+		"- 初始实施服务预算：80万元（已废弃）",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("retired fact did not receive an explicit lifecycle marker %q: %s", expected, got)
+		}
+	}
+	if !strings.Contains(got, "| 项目 | 原值 | 废弃原因 |") ||
+		!strings.Contains(got, "| --- | --- | --- |") || !strings.Contains(got, "- 无") {
+		t.Fatalf("retired schema or empty sentinel was modified: %s", got)
+	}
+	if twice := NormalizeStateAuditSections(got, query); twice != got {
+		t.Fatalf("retired lifecycle normalization is not idempotent:\nfirst: %s\nsecond: %s", got, twice)
+	}
+}
+
 func TestNormalizeStateAuditSectionsRepairsObservedActionBoundaryTable(t *testing.T) {
 	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为‘当前有效事实’、‘已废弃事实’、‘待确认事实’和‘行动边界’四栏。"
 	answer := `以下是根据整个会话，为您整理的完整状态审计。

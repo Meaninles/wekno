@@ -168,11 +168,11 @@ function Start-EvalStack {
     Invoke-Docker -DockerArgs ($runtimePrefix + @("stop")) -AllowFailure
     Invoke-Docker -DockerArgs ($runtimePrefix + @("build", "runtime-api-1"))
     # Provisioning is fail-closed: serving roles are started only after the
-    # dedicated one-shot migration role exits successfully.
-    Invoke-Docker -DockerArgs ($runtimePrefix + @(
-        "up", "--force-recreate", "--abort-on-container-exit",
-        "--exit-code-from", "migration", "migration"
-    ))
+    # dedicated one-shot migration exits successfully. `compose run --rm`
+    # reliably observes that exit and cleans up the transient container; the
+    # equivalent one-service `up --abort-on-container-exit` can remain attached
+    # after a successful migration on Docker Desktop.
+    Invoke-Docker -DockerArgs ($runtimePrefix + @("run", "--rm", "migration"))
     Invoke-Docker -DockerArgs ($runtimePrefix + @(
         "up", "-d", "--force-recreate", "--wait", "--wait-timeout", "180",
         "runtime-api-1", "runtime-api-2", "runtime-api-3",

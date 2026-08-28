@@ -4773,6 +4773,22 @@ def turn_contract_stop_hook_factory(
     return hook
 
 
+def should_enable_turn_contract_stop_hook(payload: ChatPayload) -> bool:
+    """Enable blocking eval repair only when the turn can actually use tools.
+
+    Pure state turns intentionally expose no tools and are finalized by the
+    shared deterministic conversation-state policy. Asking the model for a
+    second generation cannot gather new evidence there and can double the
+    terminal latency. Production remains record-only because eval_observability
+    is false outside explicit eval runs.
+    """
+
+    return bool(
+        payload.eval_observability
+        and not payload.runtime_config.disable_tools_for_turn
+    )
+
+
 def data_analysis_chart_calls(state: dict[str, Any], payload: ChatPayload | None = None) -> list[dict[str, Any]]:
     calls_key = analysis_query_calls_state_key(payload)
     db_calls = state.get(calls_key) if isinstance(state.get(calls_key), list) else []
@@ -6115,7 +6131,7 @@ class GeneralAgentRunner:
                 )
             ]
         turn_contract_state: dict[str, Any] = {}
-        if self.payload.eval_observability:
+        if should_enable_turn_contract_stop_hook(self.payload):
             runtime_hooks.setdefault("Stop", []).append(
                 HookMatcher(
                     matcher=None,

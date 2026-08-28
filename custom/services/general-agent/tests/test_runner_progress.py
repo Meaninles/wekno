@@ -68,6 +68,7 @@ from app.runner import (  # noqa: E402
     tool_use_fragments,
     turn_contract_issues,
     turn_contract_stop_hook_factory,
+    should_enable_turn_contract_stop_hook,
     should_record_turn_evidence,
     user_facing_error_message,
     validate_pptx_layout_bytes,
@@ -398,6 +399,31 @@ class RunnerProgressTest(unittest.TestCase):
         )
 
         self.assertEqual(claude_sdk_builtin_tools(payload), [])
+
+    def test_turn_contract_stop_hook_is_eval_only_and_skips_state_only_turns(self):
+        payload = ChatPayload(
+            run_id="run-hook-policy",
+            session_id="session-hook-policy",
+            assistant_message_id="assistant-hook-policy",
+            query="当前问题",
+            runtime_config=RuntimeConfigSpec(disable_tools_for_turn=False),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        self.assertFalse(should_enable_turn_contract_stop_hook(payload))
+        self.assertTrue(
+            should_enable_turn_contract_stop_hook(
+                payload.model_copy(update={"eval_observability": True})
+            )
+        )
+        state_only = payload.model_copy(
+            update={
+                "eval_observability": True,
+                "runtime_config": RuntimeConfigSpec(disable_tools_for_turn=True),
+            }
+        )
+        self.assertFalse(should_enable_turn_contract_stop_hook(state_only))
 
     def test_fresh_evidence_turn_exposes_no_local_file_tools(self):
         payload = ChatPayload(

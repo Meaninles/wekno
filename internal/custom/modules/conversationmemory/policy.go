@@ -1298,8 +1298,10 @@ func renderCanonicalBoundaryLine(original, label, statement string) string {
 // NormalizeStateAuditSections enforces lifecycle separation without inventing
 // or reclassifying facts. It removes lines explicitly labelled retired,
 // uncertainty-only parentheticals/lines, and operation-boundary duplicates from
-// an active section. The canonical retired, unknown and boundary sections remain
-// untouched. Unsupported parenthetical source attributions are removed only
+// an active section. In the retired section, it makes the existing lifecycle
+// state explicit on each fact row so machine gates do not have to infer status
+// from a heading or from wording such as "replaced". The canonical unknown and
+// boundary sections remain otherwise untouched. Unsupported parenthetical source attributions are removed only
 // when the same user statement does not bind the displayed scalar/date to that
 // actor. Missing facts remain missing and therefore still fail eval gates; the
 // function cannot manufacture a passing answer.
@@ -1355,6 +1357,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			if isOperationBoundaryLine(line) {
 				continue
 			}
+		}
+		if section == "retired" {
+			line = normalizeRetiredAuditLine(line)
 		}
 		if section == "action_boundary" {
 			if !containsAny(originalQuery, []string{"不推断", "不得推断", "不要推断"}) &&
@@ -1412,6 +1417,69 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
+}
+
+// normalizeRetiredAuditLine preserves the generated fact verbatim and only
+// appends an explicit lifecycle label. Headings, table schemas, separators and
+// empty sentinels are not facts and therefore remain unchanged.
+func normalizeRetiredAuditLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) ||
+		containsAny(trimmed, []string{"已废弃", "废弃", "已作废", "作废", "已失效", "失效"}) {
+		return line
+	}
+
+	plain := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(trimmed, ""))
+	plain = strings.Trim(plain, " 	。.;；,，:：*_`~#()（）[]【】|")
+	switch strings.ToLower(plain) {
+	case "无", "暂无", "没有", "无已废弃事实", "暂无已废弃事实", "none", "n/a":
+		return line
+	}
+
+	isTableRow := strings.Contains(trimmed, "|")
+	if isTableRow && isRetiredAuditTableHeader(trimmed) {
+		return line
+	}
+	isListRow := orderedOrBulletListPrefixPattern.MatchString(trimmed)
+	isFactLikeProse := stateAuditAnchorPattern.MatchString(trimmed) || containsAny(trimmed, []string{
+		"被取代", "被替代", "已替代", "推翻", "旧主张", "旧前提", "原主张", "原前提", "旧值", "原值", "初始",
+	})
+	if !isTableRow && !isListRow && !isFactLikeProse {
+		return line
+	}
+
+	leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	if isTableRow && strings.HasSuffix(trimmed, "|") {
+		body := strings.TrimSpace(strings.TrimSuffix(trimmed, "|"))
+		return leading + strings.TrimRight(body, " \t") + "（已废弃） |"
+	}
+	return strings.TrimRight(line, " \t") + "（已废弃）"
+}
+
+func isRetiredAuditTableHeader(line string) bool {
+	cells := strings.Split(strings.Trim(strings.TrimSpace(line), "|"), "|")
+	meaningful := make([]string, 0, len(cells))
+	for _, cell := range cells {
+		cell = strings.Trim(strings.TrimSpace(cell), "*_` ")
+		if cell != "" {
+			meaningful = append(meaningful, cell)
+		}
+	}
+	if len(meaningful) == 0 {
+		return false
+	}
+	headerCells := map[string]bool{
+		"序号": true, "项目": true, "事项": true, "字段": true, "事实": true, "事实项": true,
+		"已废弃事实": true, "原事实": true, "原值": true, "旧值": true, "初始值": true,
+		"内容": true, "说明": true, "状态": true, "原因": true, "废弃原因": true,
+		"替代事实": true, "当前事实": true, "当前有效事实": true, "当前值": true,
+	}
+	for _, cell := range meaningful {
+		if !headerCells[cell] {
+			return false
+		}
+	}
+	return true
 }
 
 // NormalizeConfirmedUnknownSections keeps lifecycle labels mutually exclusive

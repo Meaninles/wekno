@@ -350,6 +350,8 @@ class GatePolicy(StrictModel):
     required_frozen_dependencies: list[str] = Field(default_factory=list)
     required_execution_identity_fields: list[str] = Field(default_factory=list)
     require_clean_framework: bool = False
+    required_sut_identity_fields: list[str] = Field(default_factory=list)
+    require_clean_sut: bool = False
     max_p95_latency_regression_ratio: float = Field(default=0.15, ge=0)
     max_p95_latency_regression_ms: int = Field(default=500, ge=0)
     max_p95_latency_ms_by_agent: dict[str, int] = Field(default_factory=dict)

@@ -63,6 +63,15 @@ def _matches_prefix(name: str, prefixes: list[str]) -> bool:
     return any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
 
 
+def _sut_identity_value(sut: object, field: str) -> object:
+    if field in {"commit", "release", "environment"}:
+        return getattr(sut, field, None)
+    if field.startswith("raw."):
+        raw = getattr(sut, "raw", {})
+        return raw.get(field.removeprefix("raw.")) if isinstance(raw, dict) else None
+    return None
+
+
 def _with_preserved_judge_scores(raw_case: CaseRun, rescored: CaseRun) -> CaseRun:
     judge_scores = [
         score for score in raw_case.scores if score.name == "judge.contract_satisfaction"
@@ -190,6 +199,49 @@ def evaluate_gate(
             missing_capabilities=missing_sut_capabilities,
         )
     )
+
+    required_sut_identity = set(policy.required_sut_identity_fields)
+    missing_candidate_sut_identity = sorted(
+        field
+        for field in required_sut_identity
+        if not _sut_identity_value(candidate.sut, field)
+    )
+    missing_baseline_sut_identity = sorted(
+        field
+        for field in required_sut_identity
+        if baseline is not None and not _sut_identity_value(baseline.sut, field)
+    )
+    checks.append(
+        _check(
+            "sut_provenance",
+            Verdict.PASS
+            if not missing_candidate_sut_identity and not missing_baseline_sut_identity
+            else Verdict.INVALID,
+            "candidate and baseline SUT provenance are complete"
+            if not missing_candidate_sut_identity and not missing_baseline_sut_identity
+            else "candidate or baseline SUT provenance is incomplete",
+            candidate_missing=missing_candidate_sut_identity,
+            baseline_missing=missing_baseline_sut_identity,
+            candidate_commit=candidate.sut.commit,
+            baseline_commit=baseline.sut.commit if baseline else None,
+        )
+    )
+    if policy.require_clean_sut:
+        candidate_clean = candidate.sut.raw.get("worktree_dirty") == "false"
+        baseline_clean = (
+            baseline is None or baseline.sut.raw.get("worktree_dirty") == "false"
+        )
+        checks.append(
+            _check(
+                "clean_sut_worktrees",
+                Verdict.PASS if candidate_clean and baseline_clean else Verdict.INVALID,
+                "candidate and baseline were executed from clean SUT commits"
+                if candidate_clean and baseline_clean
+                else "formal gate cannot compare a dirty SUT worktree",
+                candidate_dirty=candidate.sut.raw.get("worktree_dirty"),
+                baseline_dirty=baseline.sut.raw.get("worktree_dirty") if baseline else None,
+            )
+        )
 
     if not expected_keys:
         checks.append(_check("dataset_selection", Verdict.INVALID, "no enabled cases match required gate splits"))

@@ -44,7 +44,7 @@ class EvalRunner:
         self.client = client
 
     def doctor(self) -> SUTFingerprint:
-        raw = self.client.capabilities()
+        raw = dict(self.client.capabilities())
         mode = str(raw.get("mode") or "")
         if mode != "eval":
             raise EvalModeRequired(
@@ -56,10 +56,32 @@ class EvalRunner:
             raise EvalModeRequired(
                 "refusing evaluation execution because eval mode requires full capture"
             )
+        reported_commit = str(raw.get("commit") or "").strip()
+        source_commit = os.environ.get("AGENT_EVAL_SUT_COMMIT", "").strip()
+        if reported_commit and source_commit and reported_commit != source_commit:
+            raise EvalModeRequired(
+                "refusing evaluation execution because the running SUT commit "
+                f"{reported_commit!r} differs from the orchestrated source commit {source_commit!r}"
+            )
+        raw.update(
+            {
+                "reported_commit": reported_commit,
+                "source_commit": source_commit,
+                "worktree_dirty": os.environ.get(
+                    "AGENT_EVAL_SUT_WORKTREE_DIRTY", ""
+                ).strip(),
+                "runtime_image_id": os.environ.get(
+                    "AGENT_EVAL_RUNTIME_IMAGE_ID", ""
+                ).strip(),
+                "general_agent_image_id": os.environ.get(
+                    "AGENT_EVAL_GENERAL_AGENT_IMAGE_ID", ""
+                ).strip(),
+            }
+        )
         return SUTFingerprint(
             mode=mode,
             release=str(raw.get("release") or ""),
-            commit=str(raw.get("commit") or ""),
+            commit=reported_commit or source_commit,
             environment=str(raw.get("environment") or ""),
             capabilities=[str(item) for item in raw.get("capabilities") or []],
             raw=raw,

@@ -9,6 +9,9 @@ from unittest.mock import patch
 from curation.build_multiturn_ready_v1 import build_cases
 from curation.build_multiturn_ready_v2 import build_cases as build_v2_cases
 from curation.build_multiturn_ready_v3 import build_cases as build_v3_cases
+from curation.build_multiturn_optimization_dev_v1 import (
+    build_cases as build_optimization_cases,
+)
 from weknora_eval.calibration import load_calibration, run_judge_calibration
 from weknora_eval.dataset import dataset_sha256, load_jsonl, validate_dataset
 from weknora_eval.langfuse_store import publish_dataset
@@ -32,7 +35,13 @@ def eval_sut() -> SUTFingerprint:
             Capability.TOOL_USE.value,
             Capability.CITATION.value,
         ],
-        raw={"recorder_enabled": True, "capture_policy": "full"},
+        raw={
+            "recorder_enabled": True,
+            "capture_policy": "full",
+            "worktree_dirty": "false",
+            "runtime_image_id": "sha256:runtime",
+            "general_agent_image_id": "sha256:general",
+        },
     )
 
 
@@ -331,6 +340,25 @@ class ReadinessTests(unittest.TestCase):
         }
         self.assertIn("resolved-d-not-unknown-final", final_forbidden)
 
+    def test_optimization_dev_is_complete_repeated_and_gate_independent(self) -> None:
+        committed = load_jsonl(
+            ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl"
+        )
+        compiled = build_optimization_cases()
+        source_dev = [case for case in build_v3_cases() if case.split == Split.DEV]
+        self.assertEqual(dataset_sha256(committed), dataset_sha256(compiled))
+        self.assertEqual(validate_dataset(committed), [])
+        self.assertEqual({case.case_id for case in committed}, {case.case_id for case in source_dev})
+        self.assertTrue(all(case.split == Split.DEV for case in committed))
+        self.assertTrue(all(case.repetitions == 3 for case in committed))
+        self.assertTrue(
+            all(case.provenance.metadata["gate_prompt_derived"] is False for case in committed)
+        )
+        self.assertEqual(
+            Counter(case.agent_profile_id for case in committed),
+            Counter({"quick-answer": 4, "rag-reasoning": 4, "general-agent": 4}),
+        )
+
     def test_gate_matrix_is_new_repeated_and_overflows_each_history_window(self) -> None:
         cases = [case for case in build_cases() if case.split == Split.GATE]
         self.assertEqual(len(cases), 6)
@@ -399,6 +427,22 @@ class ReadinessTests(unittest.TestCase):
                 "calibrator",
             },
         )
+
+    def test_optimization_dev_preflight_is_frozen_for_three_by_three_stability(self) -> None:
+        with patch.dict(os.environ, self.env(), clear=False):
+            report = evaluate_readiness(
+                dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
+                manifest_path=ROOT / "manifests" / "multiturn-optimization-dev.v1.manifest.json",
+                profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
+                policy_path=ROOT / "policies" / "multiturn-optimization-gate.v1.json",
+                calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
+                split=Split.DEV,
+                sut=eval_sut(),
+            )
+        self.assertEqual(report["status"], "READY")
+        self.assertEqual(report["case_count"], 12)
+        self.assertEqual(report["planned_session_count"], 36)
+        self.assertTrue(all(check["passed"] for check in report["checks"]))
 
     def test_v3_preflight_fails_before_execution_when_judge_is_unconfigured(self) -> None:
         env = self.env()

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "policy_id": "weknora-three-agent-multiturn-release-gate-v2",
-  "required_splits": ["gate"],
+  "policy_id": "weknora-three-agent-multiturn-optimization-gate-v1",
+  "required_splits": ["dev"],
   "required_capabilities": [
     "rag_retrieval",
     "long_context_dialogue",
@@ -18,7 +18,7 @@
   "forbid_hard_failures": false,
   "forbid_pass_to_fail_regressions": true,
   "pair_repetitions_by_attempt": false,
-  "min_pass_rate_per_case": 0.666666,
+  "min_pass_rate_per_case": 1.0,
   "max_case_pass_rate_regression": 0.0,
   "critical_metric_prefixes": [
     "execution_valid",

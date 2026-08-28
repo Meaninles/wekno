@@ -39,6 +39,29 @@ class ReportTests(unittest.TestCase):
         self.assertIn("forbidden_claim.no-internal-planning", report)
         self.assertIn("| 1 |", report)
 
+    def test_report_exposes_sut_source_and_running_images(self) -> None:
+        dataset = [spec(profile_id="general-agent")]
+        run = run_for(dataset, "candidate", [case(Verdict.PASS)])
+        run = run.model_copy(
+            update={
+                "sut": run.sut.model_copy(
+                    update={
+                        "commit": "source-commit",
+                        "raw": {
+                            **run.sut.raw,
+                            "worktree_dirty": "false",
+                            "runtime_image_id": "sha256:runtime",
+                            "general_agent_image_id": "sha256:general",
+                        },
+                    }
+                )
+            }
+        )
+        report = render_markdown(run)
+        self.assertIn("## SUT provenance", report)
+        self.assertIn("source-commit", report)
+        self.assertIn("sha256:runtime", report)
+
 
 if __name__ == "__main__":
     unittest.main()

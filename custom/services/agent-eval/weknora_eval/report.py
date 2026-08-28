@@ -86,6 +86,25 @@ def render_markdown(run: ExperimentRun, gate: GateResult | None = None) -> str:
         )
         for field, value in sorted(execution_contract.items()):
             lines.append(f"| `{field}` | `{_safe(value)}` |")
+    sut_provenance = {
+        "source_commit": run.sut.commit,
+        "worktree_dirty": run.sut.raw.get("worktree_dirty"),
+        "runtime_image_id": run.sut.raw.get("runtime_image_id"),
+        "general_agent_image_id": run.sut.raw.get("general_agent_image_id"),
+        "reported_commit": run.sut.raw.get("reported_commit"),
+    }
+    if any(value not in (None, "") for value in sut_provenance.values()):
+        lines.extend(
+            [
+                "",
+                "## SUT provenance",
+                "",
+                "| Field | Value |",
+                "|---|---|",
+            ]
+        )
+        for field, value in sut_provenance.items():
+            lines.append(f"| `{field}` | `{_safe(value)}` |")
     if gate is not None:
         lines.extend([f"- Gate: **{gate.verdict.value}** (`{gate.policy_id}`)", ""])
         lines.extend(["## Gate checks", "", "| Check | Verdict | Detail |", "|---|---:|---|"])

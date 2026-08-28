@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from weknora_eval.models import (
     AgentSelector,
@@ -50,8 +51,32 @@ class RunnerTests(unittest.TestCase):
             EvalRunner(FakeClient("production")).doctor()  # type: ignore[arg-type]
 
     def test_eval_mode_is_accepted(self) -> None:
-        fingerprint = EvalRunner(FakeClient("eval")).doctor()  # type: ignore[arg-type]
+        with patch.dict("os.environ", {"AGENT_EVAL_SUT_COMMIT": ""}, clear=False):
+            fingerprint = EvalRunner(FakeClient("eval")).doctor()  # type: ignore[arg-type]
         self.assertEqual(fingerprint.mode, "eval")
+
+    def test_orchestrated_provenance_fills_blank_build_commit(self) -> None:
+        client = FakeClient("eval")
+        client.capabilities = lambda: {  # type: ignore[method-assign]
+            "mode": "eval",
+            "capture_policy": "full",
+            "recorder_enabled": True,
+            "commit": "",
+            "capabilities": [],
+        }
+        with patch.dict(
+            "os.environ",
+            {
+                "AGENT_EVAL_SUT_COMMIT": "source-commit",
+                "AGENT_EVAL_SUT_WORKTREE_DIRTY": "false",
+                "AGENT_EVAL_RUNTIME_IMAGE_ID": "sha256:runtime",
+                "AGENT_EVAL_GENERAL_AGENT_IMAGE_ID": "sha256:general",
+            },
+            clear=False,
+        ):
+            fingerprint = EvalRunner(client).doctor()  # type: ignore[arg-type]
+        self.assertEqual(fingerprint.commit, "source-commit")
+        self.assertEqual(fingerprint.raw["runtime_image_id"], "sha256:runtime")
 
     def test_suite_executes_each_session_repetition(self) -> None:
         case = CaseSpec(

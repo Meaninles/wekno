@@ -73,11 +73,20 @@ if ($Split -eq "sealed_holdout" -and -not $AllowSealed) {
     throw "sealed_holdout requires the explicit -AllowSealed switch"
 }
 
-$env:AGENT_EVAL_FRAMEWORK_COMMIT = (& git -C $PSScriptRoot rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) { throw "failed to resolve eval framework commit" }
-$dirtyLines = @(& git -C $PSScriptRoot status --porcelain)
+$repositoryRoot = (& git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repositoryRoot)) {
+    throw "failed to resolve repository root"
+}
+$env:AGENT_EVAL_FRAMEWORK_COMMIT = (& git -C $repositoryRoot rev-parse "HEAD:custom/services/agent-eval").Trim()
+if ($LASTEXITCODE -ne 0) { throw "failed to resolve eval framework tree identity" }
+$dirtyLines = @(& git -C $repositoryRoot status --porcelain -- custom/services/agent-eval)
 if ($LASTEXITCODE -ne 0) { throw "failed to inspect eval framework worktree" }
 $env:AGENT_EVAL_WORKTREE_DIRTY = if ($dirtyLines.Count -gt 0) { "true" } else { "false" }
+$env:AGENT_EVAL_SUT_COMMIT = (& git -C $repositoryRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw "failed to resolve SUT source commit" }
+$sutDirtyLines = @(& git -C $repositoryRoot status --porcelain)
+if ($LASTEXITCODE -ne 0) { throw "failed to inspect SUT worktree" }
+$env:AGENT_EVAL_SUT_WORKTREE_DIRTY = if ($sutDirtyLines.Count -gt 0) { "true" } else { "false" }
 
 foreach ($project in @("weknora", "weknora-runtime-profile-e2e")) {
     $running = @(& docker ps --quiet --filter "label=com.docker.compose.project=$project")
@@ -89,6 +98,22 @@ foreach ($project in @("weknora", "weknora-runtime-profile-e2e")) {
 
 & docker version --format "{{.Server.Version}}" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Docker Desktop is not running" }
+
+function Get-RunningImageId {
+    param([Parameter(Mandatory)] [string]$ContainerName)
+    $running = (& docker inspect --format "{{.State.Running}}" $ContainerName).Trim()
+    if ($LASTEXITCODE -ne 0 -or $running -ne "true") {
+        throw "required eval container '$ContainerName' is not running"
+    }
+    $imageID = (& docker inspect --format "{{.Image}}" $ContainerName).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($imageID)) {
+        throw "failed to resolve running image for '$ContainerName'"
+    }
+    return $imageID
+}
+
+$env:AGENT_EVAL_RUNTIME_IMAGE_ID = Get-RunningImageId "weknora-agent-eval-runtime-api-1"
+$env:AGENT_EVAL_GENERAL_AGENT_IMAGE_ID = Get-RunningImageId "weknora-agent-eval-general-agent"
 $prepareRunnerEnv = -not (Test-Path -LiteralPath $runnerEnv)
 if (-not $prepareRunnerEnv) {
     $runnerValues = @{}

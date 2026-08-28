@@ -61,6 +61,18 @@ def _selected(cases: list[CaseSpec], split: Split) -> list[CaseSpec]:
     return [case for case in cases if case.enabled and case.split == split]
 
 
+def _sut_identity_value(sut: SUTFingerprint, field: str) -> Any:
+    if field == "commit":
+        return sut.commit
+    if field == "release":
+        return sut.release
+    if field == "environment":
+        return sut.environment
+    if field.startswith("raw."):
+        return sut.raw.get(field.removeprefix("raw."))
+    return None
+
+
 def evaluate_readiness(
     *,
     dataset_path: str | Path,
@@ -296,6 +308,36 @@ def evaluate_readiness(
         capture_policy=sut.raw.get("capture_policy"),
         missing_capabilities=sorted(required_sut_capabilities - actual_sut_capabilities),
     )
+
+    missing_sut_identity = sorted(
+        field
+        for field in policy.required_sut_identity_fields
+        if not _sut_identity_value(sut, field)
+    )
+    _check(
+        checks,
+        "sut_provenance",
+        not missing_sut_identity,
+        "SUT source and running image provenance are complete"
+        if not missing_sut_identity
+        else "SUT provenance is incomplete",
+        missing=missing_sut_identity,
+        commit=sut.commit,
+        runtime_image_id=sut.raw.get("runtime_image_id"),
+        general_agent_image_id=sut.raw.get("general_agent_image_id"),
+    )
+    if policy.require_clean_sut:
+        clean_sut = sut.raw.get("worktree_dirty") == "false"
+        _check(
+            checks,
+            "clean_sut_worktree",
+            clean_sut,
+            "SUT was built and executed from a clean source commit"
+            if clean_sut
+            else "formal evaluation cannot attribute a dirty SUT worktree",
+            commit=sut.commit,
+            worktree_dirty=sut.raw.get("worktree_dirty"),
+        )
 
     unresolved_vars: list[str] = []
     try:

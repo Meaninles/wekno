@@ -142,6 +142,8 @@ Pop-Location
 
 正式执行默认使用 `datasets/multiturn-ready.v3.jsonl`。它保留 v2 的全部问题、case ID、split 和重复次数，只修订评分契约：接受已经人工确认的低风险等价表达，区分“明确标注已废弃”与真正的状态复活，并新增真实测试中出现的内部规划泄漏和 D 供应商陈旧状态回归检测。GATE 仍覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；冻结身份见 `manifests/multiturn-ready.v3.manifest.json`。
 
+智能体改动前的稳定性基线使用 `datasets/multiturn-optimization-dev.v1.jsonl`。它完整复制 v3 中 12 个已审核 DEV case 的问题和契约，不读取、不改写也不派生 GATE/SEALED 文案；只把每个 case 提升到 3 个独立 session，共 36 个 session execution。`policies/multiturn-optimization-gate.v1.json` 要求目标 DEV case 达到 3/3，而发布 GATE 仍保留自己的抗随机门槛。优化集必须在任何智能体改动前冻结，后续不得为了候选答案改变 scorer、Judge、contract 或通过阈值。
+
 sealed holdout 不进入 Git：本机文件为 `sealed/multiturn-holdout.v1.jsonl`，只提交哈希、数量和 split 信息到 `manifests/multiturn-holdout.v1.manifest.json`。普通开发、DEV 和 GATE 都不会挂载其内容到优化输入；只有 Codex 在低频里程碑验收时显式使用 `-AllowSealed`。这不是把某次模型回答藏起来当标准答案，holdout 仍使用可接受答案契约，只把未见业务事实和问题组合隔离出来。
 
 数据分层对应关系如下：
@@ -240,9 +242,21 @@ custom/services/agent-eval/eval-loop.ps1 `
 
 无 baseline 的 DEV/探索运行可用 `-Judge` 主动生成语义评分。只要提供 `-Baseline`，脚本就会自动先实时运行冻结的 Judge calibration，未达准确率直接停止；随后用当前冻结契约重算 baseline、重新裁决 baseline，再对 candidate 和同 attempt baseline 做语义复核，因此旧 baseline 不会因缺少 Judge 字段而变成伪 `INVALID`。不能跳过 Judge 后仍获得正式 gate 结论。它要求 `runner.env` 中配置 OpenAI-compatible judge。默认并发为 1，避免模型限流与本机抢占影响结果；调高 `-MaxConcurrency` 前先建立同并发基线。
 
+改智能体前的完整优化基线命令为：
+
+```powershell
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split dev `
+  -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
+  -Manifest /workspace/manifests/multiturn-optimization-dev.v1.manifest.json `
+  -Policy /workspace/policies/multiturn-optimization-gate.v1.json `
+  -Judge `
+  -MaxConcurrency 1
+```
+
 标准循环是：观察失败簇 → 只在 `dev` 上提出一个可解释改动 → 固定 SUT、模型、语料和配置指纹运行 → 与同数据集 baseline 配对比较 → 通过 `gate` 才保留 → 周期性由 Codex 单独运行 sealed holdout。连续两轮无实质增益、只改善已知措辞、judge 与人工分歧升高或 holdout 退化时立即停止调优并回滚候选，防止无限拟合与过拟合。
 
-正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID、profile set 哈希、eval framework commit/dirty 状态、scorer 哈希、Judge 模型、校准集哈希和 Judge prompt 哈希。正式门禁要求 eval framework 来自干净提交，并要求 baseline/candidate 的评测身份一致；被比较的 WeKnora SUT 代码可以不同。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
+正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID、profile set 哈希、eval 目录自身的 Git tree identity/dirty 状态、scorer 哈希、Judge 模型、校准集哈希和 Judge prompt 哈希。SUT 单独记录源代码 commit、整个工作树 dirty 状态、实际运行的 Go runtime 镜像 ID 和 general-agent 镜像 ID。门禁要求 evaluator 在 baseline/candidate 之间完全一致且两侧 SUT 都来自干净提交，但允许候选 SUT commit 和镜像与 baseline 不同——这正是智能体改动需要比较的变量。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
 
 LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措辞和语义表达造成的误杀，但不能覆盖关键确定性失败。每次正式 gate 都实时运行 `calibration run`，同时达到 `calibration/judge-multiturn.v1.json` 的最低准确率和逐项最低置信度；日常 preflight 只执行结构校验，不调用 Judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
 
@@ -272,12 +286,15 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 - `eval-loop.ps1`：preflight、实时 Judge 校准、baseline 重算/裁决、run、gate、report。
 - `weknora_eval/`：数据集、校准、readiness、runner、确定性评分、三态门禁和 Langfuse experiment 适配器。
 - `policies/multiturn-release-gate.v2.json`：三智能体多轮 GATE 门禁策略。
+- `policies/multiturn-optimization-gate.v1.json`：智能体改动前冻结、目标 case 必须 3/3 的 DEV 优化门禁。
 - `policies/multiturn-sealed-gate.v1.json`：低频 sealed holdout 门禁策略。
 - `datasets/examples.v1.jsonl`：RAG、文档处理和长对话契约示例。
 - `datasets/multiturn-dev.v1.jsonl`：由真实发现记录整理出的三智能体多轮 DEV 契约。
 - `datasets/multiturn-ready.v3.jsonl`：冻结的 DEV + GATE 正式数据集（保持 v2 观察数据兼容）。
+- `datasets/multiturn-optimization-dev.v1.jsonl`：不派生 GATE 文案、每个 DEV case 重复 3 次的优化基线集。
 - `manifests/`：dataset、profile、policy、Judge calibration、scorer、gate 和 Judge prompt 的联合冻结哈希。
 - `calibration/judge-multiturn.v1.json`：judge 正例、负例、边界例和 INVALID 校准集。
 - `curation/build_multiturn_dev_v1.py`：上述数据集的可审查、确定性编译器。
 - `curation/build_multiturn_ready_v1.py`：正式 DEV + GATE 数据集编译器。
 - `curation/build_multiturn_ready_v3.py`：保持观察数据兼容的 eval 契约可靠性修订编译器。
+- `curation/build_multiturn_optimization_dev_v1.py`：在任何智能体改动前冻结完整 DEV 稳定性矩阵。

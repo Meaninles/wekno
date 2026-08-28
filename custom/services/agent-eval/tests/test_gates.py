@@ -235,6 +235,58 @@ class GateTests(unittest.TestCase):
         paired = next(check for check in result.checks if check.name == "paired_execution_identity")
         self.assertEqual(paired.verdict, Verdict.INVALID)
 
+    def test_sut_commits_may_differ_when_provenance_is_complete(self) -> None:
+        dataset = [spec()]
+        candidate = run_for(dataset, "candidate", [case(Verdict.PASS)])
+        baseline = run_for(dataset, "baseline", [case(Verdict.PASS)])
+        candidate = candidate.model_copy(
+            update={
+                "sut": candidate.sut.model_copy(
+                    update={
+                        "commit": "candidate-commit",
+                        "raw": {
+                            **candidate.sut.raw,
+                            "worktree_dirty": "false",
+                            "runtime_image_id": "sha256:runtime-new",
+                            "general_agent_image_id": "sha256:general-new",
+                        },
+                    }
+                )
+            }
+        )
+        baseline = baseline.model_copy(
+            update={
+                "sut": baseline.sut.model_copy(
+                    update={
+                        "commit": "baseline-commit",
+                        "raw": {
+                            **baseline.sut.raw,
+                            "worktree_dirty": "false",
+                            "runtime_image_id": "sha256:runtime-old",
+                            "general_agent_image_id": "sha256:general-old",
+                        },
+                    }
+                )
+            }
+        )
+        policy = self.policy.model_copy(
+            update={
+                "required_sut_identity_fields": [
+                    "commit",
+                    "raw.worktree_dirty",
+                    "raw.runtime_image_id",
+                    "raw.general_agent_image_id",
+                ],
+                "require_clean_sut": True,
+            }
+        )
+
+        result = evaluate_gate(dataset, candidate, policy, baseline)
+
+        self.assertEqual(result.verdict, Verdict.PASS)
+        provenance = next(check for check in result.checks if check.name == "sut_provenance")
+        self.assertEqual(provenance.verdict, Verdict.PASS)
+
     def test_required_judge_missing_or_low_confidence_is_invalid(self) -> None:
         policy = self.policy.model_copy(update={"require_judge": True})
         missing = evaluate_gate(

@@ -46,6 +46,17 @@ def eval_sut() -> SUTFingerprint:
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_runner_compose_forwards_the_frozen_evaluator_identity(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "AGENT_EVAL_FRAMEWORK_SCOPE: ${AGENT_EVAL_FRAMEWORK_SCOPE:-unknown}",
+            compose,
+        )
+        self.assertIn(
+            "AGENT_EVAL_GATE_POLICY_SHA256: ${AGENT_EVAL_GATE_POLICY_SHA256:-unknown}",
+            compose,
+        )
+
     def env(self) -> dict[str, str]:
         return {
             "AGENT_EVAL_SUMMARY_MODEL_ID": "prod-deepseek-v4-flash-int8-chat",

@@ -260,7 +260,7 @@ custom/services/agent-eval/eval-loop.ps1 `
 
 正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID、profile set 哈希、eval 目录自身的 Git tree identity/dirty 状态、scorer 哈希、Judge 模型、校准集哈希和 Judge prompt 哈希。SUT 单独记录源代码 commit、整个工作树 dirty 状态、实际运行的 Go runtime 镜像 ID 和 general-agent 镜像 ID。门禁要求 evaluator 在 baseline/candidate 之间完全一致且两侧 SUT 都来自干净提交，但允许候选 SUT commit 和镜像与 baseline 不同——这正是智能体改动需要比较的变量。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
 
-LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措辞和语义表达造成的误杀，但不能覆盖关键确定性失败。每次正式 gate 都实时运行 `calibration run`，同时达到 `calibration/judge-multiturn.v1.json` 的最低准确率和逐项最低置信度；日常 preflight 只执行结构校验，不调用 Judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
+LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措辞和语义表达造成的误杀，但不能覆盖关键确定性失败。校准样例本身使用与数据集完全一致的 `TurnContract` / `TextRule` 强类型协议和真实问题上下文，禁止用只在校准中成立的简写契约；关键正反例任一错判都会使整次校准失败。每次正式 gate 都实时运行 `calibration run`，同时达到 `calibration/judge-multiturn.v1.json` 的最低准确率和逐项最低置信度；日常 preflight 只执行结构校验，不调用 Judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
 
 ## 本地验证
 

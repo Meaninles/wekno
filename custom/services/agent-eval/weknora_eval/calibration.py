@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from .judge import JUDGE_SYSTEM_PROMPT, _post_chat
-from .models import StrictModel
+from .models import StrictModel, TurnContract
 
 
 class CalibrationError(ValueError):
@@ -27,7 +27,8 @@ class JudgeCalibrationItem(StrictModel):
     schema_version: Literal[1] = 1
     calibration_id: str
     capability: str
-    contract: dict[str, Any]
+    query: str
+    contract: TurnContract
     candidate: CalibrationCandidate
     expected_label: Literal["pass", "fail", "invalid"]
     rationale: str
@@ -55,6 +56,26 @@ class JudgeCalibrationSuite(StrictModel):
         kinds = {item.boundary_kind for item in self.items}
         if kinds != {"positive", "negative", "boundary"}:
             raise ValueError("judge calibration must cover positive, negative and boundary examples")
+        critical = [item for item in self.items if item.critical]
+        if {item.expected_label for item in critical} != {"pass", "fail"}:
+            raise ValueError(
+                "critical judge calibration must include both passing and failing fixtures"
+            )
+        for item in critical:
+            state = item.contract.conversation_state
+            if not any(
+                (
+                    state.active_facts,
+                    state.retired_facts,
+                    state.unknown_facts,
+                    state.forbidden_unknown_facts,
+                    state.forbidden_inferences,
+                    state.action_boundaries,
+                )
+            ):
+                raise ValueError(
+                    f"critical fixture {item.calibration_id} must exercise the formal conversation_state protocol"
+                )
         return self
 
 
@@ -81,8 +102,8 @@ def run_judge_calibration(suite: JudgeCalibrationSuite) -> dict[str, Any]:
                             "contracts": [
                                 {
                                     "turn_id": item.calibration_id,
-                                    "query": "frozen judge calibration fixture",
-                                    "contract": item.contract,
+                                    "query": item.query,
+                                    "contract": item.contract.model_dump(mode="json"),
                                 }
                             ],
                             "candidate": [

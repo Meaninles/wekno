@@ -3,7 +3,7 @@
   "created_at": "2026-08-27T14:55:24.242420+00:00",
   "dataset_sha256": "ef8c13073decd3e6334773d334c94684559a86c183dc7019b4193d96d84fc783",
   "dependency_sha256": {
-    "judge_calibration": "53f97e6c18321ad33f309f581f1ea00ef592afe605b083b35b27ca64e71677b6",
+    "judge_calibration": "97d02759d0adb326c0adb64b8bfa83a63cc729cf8d3a36e93cf4308512986d75",
     "policy": "effc96ccb565e732aa02f50434f01dc0c6bdc74bfb9b1f65b854ceadcbfb5a06",
     "profiles": "9c25204a090a624a31b3bab8281f855c6e4b1385103e0b545822846bc18f1bed"
   },

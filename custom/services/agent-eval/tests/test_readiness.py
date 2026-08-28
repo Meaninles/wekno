@@ -15,7 +15,7 @@ from curation.build_multiturn_optimization_dev_v1 import (
 from weknora_eval.calibration import load_calibration, run_judge_calibration
 from weknora_eval.dataset import dataset_sha256, load_jsonl, validate_dataset
 from weknora_eval.langfuse_store import publish_dataset
-from weknora_eval.models import Capability, SUTFingerprint, Split
+from weknora_eval.models import Capability, SUTFingerprint, Split, TurnContract
 from weknora_eval.readiness import evaluate_readiness
 
 
@@ -496,6 +496,14 @@ class ReadinessTests(unittest.TestCase):
                 "state-pass-owner-and-user-distinct",
             },
         )
+        self.assertTrue(all(isinstance(item.contract, TurnContract) for item in suite.items))
+        for item in suite.items:
+            self.assertTrue(item.query.strip())
+            if not item.critical:
+                continue
+            state = item.contract.conversation_state
+            self.assertTrue(state.active_facts)
+            self.assertTrue(state.unknown_facts)
 
     def test_judge_calibration_uses_the_formal_turn_protocol(self) -> None:
         suite = load_calibration(ROOT / "calibration" / "judge-multiturn.v1.json")
@@ -508,6 +516,10 @@ class ReadinessTests(unittest.TestCase):
             turn_id = payload["contracts"][0]["turn_id"]
             self.assertEqual(payload["candidate"][0]["turn_id"], turn_id)
             self.assertIn("completed", payload["candidate"][0])
+            item = next(item for item in suite.items if item.calibration_id == turn_id)
+            self.assertEqual(payload["contracts"][0]["query"], item.query)
+            self.assertIn("conversation_state", payload["contracts"][0]["contract"])
+            self.assertIn("required_claims", payload["contracts"][0]["contract"])
             return {
                 "turns": [
                     {

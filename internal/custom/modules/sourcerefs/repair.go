@@ -73,7 +73,7 @@ func RepairNamedTopicCitationBindings(
 	start := 0
 	for _, boundary := range append(breaks, []int{len(answer), len(answer)}) {
 		paragraph := answer[start:boundary[0]]
-		matchedTopics := namedTopicsInParagraph(paragraph, topics)
+		matchedTopics := repairTopicsForParagraph(paragraph, topics)
 		citationIDs := citationIDsInText(paragraph)
 		rebuiltCondition := false
 		if len(matchedTopics) == 1 && len(citationIDs) > 1 &&
@@ -130,6 +130,264 @@ func RepairNamedTopicCitationBindings(
 		start = boundary[1]
 	}
 	return builder.String()
+}
+
+// repairTopicsForParagraph prefers the option named at the start of a
+// paragraph. A model may append a cross-option comparison to an otherwise
+// single-option paragraph; treating every later name as paragraph ownership
+// prevented the actual option's bad citation from being repaired.
+func repairTopicsForParagraph(paragraph string, topics []string) []string {
+	lead := ""
+	for _, line := range strings.Split(strings.ReplaceAll(paragraph, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lead = strings.TrimSpace(markdownPrefixRE.ReplaceAllString(line, ""))
+		lead = strings.TrimSpace(strings.Trim(lead, "*_`#> "))
+		break
+	}
+	normalizedLead := normalizedNamedTopicText(lead)
+	leading := make([]string, 0, 2)
+	for _, topic := range topics {
+		normalizedTopic := normalizedNamedTopicText(topic)
+		if normalizedTopic != "" && strings.HasPrefix(normalizedLead, normalizedTopic) {
+			leading = append(leading, topic)
+		}
+	}
+	if len(leading) == 1 {
+		return leading
+	}
+	return namedTopicsInParagraph(paragraph, topics)
+}
+
+// EnsureNamedTopicDefinitions restores a definition explicitly requested for
+// every named comparison option when the generated option paragraph omitted it.
+// The inserted sentence is copied verbatim from a unique current-turn evidence
+// fragment and carries that fragment's immutable citation handle. No domain
+// wording, inferred fact, or model call is introduced.
+func EnsureNamedTopicDefinitions(
+	answer string,
+	topics []string,
+	refs []*types.SearchResult,
+) string {
+	value := strings.TrimSpace(answer)
+	if value == "" || len(topics) < 2 {
+		return value
+	}
+	evidence := repairEvidence(refs)
+	if len(evidence) == 0 {
+		return value
+	}
+
+	type definition struct {
+		text string
+		id   string
+	}
+	missing := make(map[string]definition, len(topics))
+	for _, topic := range topics {
+		if answerHasNamedDefinition(value, topic) {
+			continue
+		}
+		text, id := bestNamedDefinitionEvidence(topic, evidence)
+		if text != "" && id != "" {
+			missing[topic] = definition{text: text, id: id}
+		}
+	}
+	if len(missing) == 0 {
+		return value
+	}
+
+	paragraphs := paragraphBreakRE.Split(value, -1)
+	changed := false
+	for index, paragraph := range paragraphs {
+		matched := repairTopicsForParagraph(paragraph, topics)
+		if len(matched) != 1 {
+			continue
+		}
+		item, exists := missing[matched[0]]
+		if !exists {
+			continue
+		}
+		paragraphs[index] = item.text + canonicalCitationTag(item.id) + " " + strings.TrimSpace(paragraph)
+		delete(missing, matched[0])
+		changed = true
+	}
+	if !changed {
+		return value
+	}
+	return strings.TrimSpace(strings.Join(paragraphs, "\n\n"))
+}
+
+func answerHasNamedDefinition(answer, topic string) bool {
+	for _, paragraph := range paragraphBreakRE.Split(answer, -1) {
+		matched := repairTopicsForParagraph(paragraph, []string{topic})
+		if len(matched) != 1 {
+			continue
+		}
+		probe := normalizedNamedTopicText(paragraph)
+		topicProbe := normalizedNamedTopicText(topic)
+		topicAt := strings.Index(probe, topicProbe)
+		if topicAt < 0 {
+			continue
+		}
+		tail := probe[topicAt+len(topicProbe):]
+		if marker := strings.Index(tail, "是指"); marker >= 0 && marker <= 36 {
+			return true
+		}
+		if marker := strings.Index(tail, "指在"); marker >= 0 && marker <= 36 {
+			return true
+		}
+		if marker := strings.Index(tail, "指采购"); marker >= 0 && marker <= 36 {
+			return true
+		}
+	}
+	return false
+}
+
+func bestNamedDefinitionEvidence(topic string, refs []citationRepairEvidence) (string, string) {
+	topicProbe := normalizedNamedTopicText(topic)
+	bestText, bestID := "", ""
+	bestLength := int(^uint(0) >> 1)
+	seenText := make(map[string]bool)
+	for _, ref := range refs {
+		for _, sentence := range splitClaimSentences(ref.content) {
+			text := strings.TrimSpace(strings.Join(strings.Fields(sentence), " "))
+			probe := normalizedNamedTopicText(text)
+			topicAt := strings.Index(probe, topicProbe)
+			if topicAt < 0 {
+				continue
+			}
+			tail := probe[topicAt+len(topicProbe):]
+			markerAt := strings.Index(tail, "是指")
+			if markerAt < 0 || markerAt > 36 {
+				continue
+			}
+			length := utf8.RuneCountInString(text)
+			if length < 8 || length > 260 || seenText[probe] {
+				continue
+			}
+			seenText[probe] = true
+			if length < bestLength || (length == bestLength && citationOrdinal(ref.id) < citationOrdinal(bestID)) {
+				bestText, bestID, bestLength = text, ref.id, length
+			}
+		}
+	}
+	return bestText, bestID
+}
+
+// RecoverOffTopicNarrowEvidenceAnswer replaces a completely stale answer to an
+// explicitly narrow multi-question evidence turn with short extractive answers
+// from the current-turn evidence registry. It activates only when none of the
+// named current topics is represented in the answer and every topic has a
+// directly matching source sentence; partial or ambiguous cases fail open.
+func RecoverOffTopicNarrowEvidenceAnswer(
+	answer string,
+	topics []string,
+	refs []*types.SearchResult,
+) string {
+	value := strings.TrimSpace(answer)
+	if value == "" || len(topics) < 2 {
+		return value
+	}
+	for _, topic := range topics {
+		if evidenceTextMatchesTopic(value, topic) {
+			return value
+		}
+	}
+	evidence := repairEvidence(refs)
+	if len(evidence) == 0 {
+		return value
+	}
+	lines := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		excerpt, id := bestNarrowTopicEvidence(topic, evidence)
+		if excerpt == "" || id == "" {
+			return value
+		}
+		lines = append(lines, excerpt+canonicalCitationTag(id))
+	}
+	result := strings.TrimSpace(strings.Join(lines, "\n\n"))
+	if utf8.RuneCountInString(result) > 500 {
+		return value
+	}
+	return result
+}
+
+type narrowTopicAnchor struct {
+	prefix string
+	suffix string
+}
+
+func narrowTopicAnchors(topic string) []narrowTopicAnchor {
+	value := strings.TrimSpace(topic)
+	for _, marker := range []string{
+		"如果", "那么", "以及", "并且", "涉及", "并影响", "影响", "至少",
+		"是否", "能否", "可否", "哪些", "哪个", "哪位", "多少", "如何", "怎么", "由",
+	} {
+		value = strings.ReplaceAll(value, marker, "|")
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '|' || r == '，' || r == ',' || r == '；' || r == ';' || r == '、' || unicode.IsSpace(r)
+	})
+	anchors := make([]narrowTopicAnchor, 0, len(parts))
+	for _, part := range parts {
+		probe := normalizedNamedTopicText(part)
+		runes := []rune(probe)
+		if len(runes) < 2 {
+			continue
+		}
+		anchor := narrowTopicAnchor{prefix: string(runes), suffix: string(runes)}
+		if len(runes) >= 4 {
+			anchor.prefix = string(runes[:2])
+			anchor.suffix = string(runes[len(runes)-2:])
+		}
+		anchors = append(anchors, anchor)
+	}
+	return anchors
+}
+
+func evidenceTextMatchesTopic(text, topic string) bool {
+	probe := normalizedNamedTopicText(text)
+	anchors := narrowTopicAnchors(topic)
+	if len(anchors) == 0 {
+		return false
+	}
+	for _, anchor := range anchors {
+		if !strings.Contains(probe, anchor.prefix) || !strings.Contains(probe, anchor.suffix) {
+			return false
+		}
+	}
+	return true
+}
+
+func bestNarrowTopicEvidence(topic string, refs []citationRepairEvidence) (string, string) {
+	bestText, bestID := "", ""
+	bestLength := int(^uint(0) >> 1)
+	seenText := make(map[string]bool)
+	for _, ref := range refs {
+		segments := splitClaimSentences(ref.content)
+		candidates := append([]string{}, segments...)
+		for index := 0; index+1 < len(segments); index++ {
+			candidates = append(candidates, segments[index]+segments[index+1])
+		}
+		for _, candidate := range candidates {
+			text := strings.TrimSpace(strings.Join(strings.Fields(candidate), " "))
+			if !evidenceTextMatchesTopic(text, topic) {
+				continue
+			}
+			probe := normalizedNamedTopicText(text)
+			length := utf8.RuneCountInString(text)
+			if length < 4 || length > 240 || seenText[probe] {
+				continue
+			}
+			seenText[probe] = true
+			if length < bestLength || (length == bestLength && citationOrdinal(ref.id) < citationOrdinal(bestID)) {
+				bestText, bestID, bestLength = text, ref.id, length
+			}
+		}
+	}
+	return bestText, bestID
 }
 
 func uniqueNamedTopicConditionEvidence(topic string, refs []citationRepairEvidence) string {

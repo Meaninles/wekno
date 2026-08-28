@@ -257,3 +257,71 @@ func TestRepairNamedTopicCitationBindingsRebuildsMixedConditionCitations(t *test
 		t.Fatalf("mixed condition citations were not rebuilt from the unique direct passage: %s", got)
 	}
 }
+
+func TestRepairNamedTopicCitationBindingsUsesLeadingTopicWithTrailingComparison(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "wrong", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "公开采购是指面向不特定供应商的采购方式。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "wrong", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "auction", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞价采购符合下列特定条件之一：采购需求明确、规格型号同一；或者服务标准要求完整。",
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "auction", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "竞价：制度条件为需求明确、规格统一；与询比相比允许多次报价。<src id=\"S1\" />"
+	got := RepairNamedTopicCitationBindings(answer, []string{"询比", "竞价", "竞争谈判"}, refs)
+	if !strings.Contains(got, `<src id="S2" />`) || strings.Contains(got, `<src id="S1" />`) {
+		t.Fatalf("leading-topic paragraph was not repaired: %s", got)
+	}
+}
+
+func TestEnsureNamedTopicDefinitionsCopiesOnlyCurrentEvidence(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "definition", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞争谈判是指采购人与二家以上符合资格条件的供应商洽谈确定供应商的采购方式。",
+			Metadata:        map[string]string{MetadataCitationID: "S4", MetadataChunkID: "definition", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "竞争谈判：适用条件包括技术复杂或存在不同实现路径。<src id=\"S5\" />"
+	got := EnsureNamedTopicDefinitions(answer, []string{"询比", "竞争谈判"}, refs)
+	if !strings.Contains(got, "竞争谈判是指采购人与二家以上") || !strings.Contains(got, `<src id="S4" />`) {
+		t.Fatalf("missing named definition was not restored from evidence: %s", got)
+	}
+	if twice := EnsureNamedTopicDefinitions(got, []string{"询比", "竞争谈判"}, refs); twice != got {
+		t.Fatalf("definition coverage was not idempotent: %s", twice)
+	}
+}
+
+func TestRecoverOffTopicNarrowEvidenceAnswerUsesEveryCurrentTopic(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "notice", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "中标候选人公示期不得少于3日。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "notice", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "review", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "异议涉及实质内容并影响候选人排名的，由分管立项和采购部门的公司领导共同批准复核。",
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "review", "source_type": SourceTypeKnowledge},
+		},
+	}
+	topics := []string{"中标候选人公示", "异议涉及实质内容并影响候选人排名"}
+	stale := "询比和竞价的定义如下。"
+	got := RecoverOffTopicNarrowEvidenceAnswer(stale, topics, refs)
+	for _, expected := range []string{"不得少于3日", "分管立项", "采购部门", "公司领导", "S1", "S2"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("narrow evidence recovery lost %q: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "询比") || strings.Contains(got, "竞价") {
+		t.Fatalf("stale answer survived narrow recovery: %s", got)
+	}
+	aligned := "中标候选人公示期不少于3日。<src id=\"S1\" />"
+	if unchanged := RecoverOffTopicNarrowEvidenceAnswer(aligned, topics, refs); unchanged != aligned {
+		t.Fatalf("partially aligned answer was unexpectedly replaced: %s", unchanged)
+	}
+}

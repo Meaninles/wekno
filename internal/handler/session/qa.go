@@ -974,6 +974,14 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				)
 				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
 				answer := conversationmemory.StripInternalPlanningPreamble(streamCtx.assistantMessage.Content)
+				answer = conversationmemory.RemoveRedundantExplicitComparisonSummary(answer, reqCtx.query)
+				if conversationmemory.ShouldIsolateNarrowEvidenceHistory(reqCtx.query) {
+					answer = sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
+						answer,
+						conversationmemory.RequiredEvidenceTopics(reqCtx.query),
+						[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+					)
+				}
 				answer = conversationmemory.NormalizeConfirmedUnknownSections(answer)
 				answer = conversationmemory.NormalizeDeferredComparisonFactSections(
 					answer,
@@ -1009,6 +1017,13 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					conversationmemory.RequiredEvidenceTopics(reqCtx.query),
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
 				)
+				if conversationmemory.RequiresNamedTopicDefinitionCoverage(reqCtx.query) {
+					answer = sourcerefs.EnsureNamedTopicDefinitions(
+						answer,
+						conversationmemory.RequiredEvidenceTopics(reqCtx.query),
+						[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+					)
+				}
 				answer = sourcerefs.RepairAnswerCitations(
 					answer,
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),

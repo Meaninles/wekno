@@ -1479,6 +1479,12 @@ func TestNarrowFreshEvidenceTopicsStayOnCurrentQuestions(t *testing.T) {
 	if strings.Contains(strings.Join(topics, "|"), "询比") || strings.Contains(strings.Join(topics, "|"), "竞价") {
 		t.Fatalf("stale comparison target leaked into narrow questions: %v", topics)
 	}
+	if !ShouldIsolateNarrowEvidenceHistory(query) {
+		t.Fatal("self-contained narrow evidence turn did not isolate expired history")
+	}
+	if ShouldIsolateNarrowEvidenceHistory("只回答上述两个问题并就近引用。") {
+		t.Fatal("history-dependent narrow turn was incorrectly isolated")
+	}
 }
 
 func TestEvidenceGrepQueriesUseExecutableUserDerivedPatterns(t *testing.T) {
@@ -1510,6 +1516,9 @@ func TestAugmentEvidenceGrepQueryRepairsFocusedAliasesAndLiteralSpaces(t *testin
 	}
 	if strings.Contains(got, "公开.{0,80}采购") {
 		t.Fatalf("focused competition query was unnecessarily broadened: %q", got)
+	}
+	if strings.Contains(got, "适宜采用 条件") {
+		t.Fatalf("broad natural-language grep terms survived focused rewrite: %q", got)
 	}
 	if twice := AugmentEvidenceGrepQuery(got, runtimeQuery); twice != got {
 		t.Fatalf("grep augmentation was not idempotent: %q", twice)
@@ -1726,6 +1735,7 @@ func TestStripInternalPlanningPreambleRemovesObservedTerminalNarration(t *testin
 		"好的，所有必要证据都已从当前轮检索获取。现在来回答用户的两个问题。",
 		"用户要求先停止比较，我已有足够证据。让我直接给出答案。",
 		"已获取全部所需证据，现直接回答。",
+		"现在再来确认竞争谈判的定义完整内容（已在前面的chunk中获取）。现在我有完整的证据来回答。",
 	} {
 		answer := preamble + "\n\n中标候选人公示期不少于3日。<src id=\"S1\" />"
 		if got := StripInternalPlanningPreamble(answer); got != "中标候选人公示期不少于3日。<src id=\"S1\" />" {
@@ -1743,6 +1753,40 @@ func TestStripInternalPlanningPreambleRemovesObservedTerminalNarration(t *testin
 	want := "已确认：项目预算220万元。\n\n待上述条件确认后再确定，暂不推荐最终方式。"
 	if got := StripInternalPlanningPreamble(middle); got != want {
 		t.Fatalf("middle retrieval plan survived: %q", got)
+	}
+}
+
+func TestRemoveRedundantExplicitComparisonSummaryKeepsOptionParagraphs(t *testing.T) {
+	query := "请比较询比、竞价和竞争谈判的定义与适用重点，每种方式一段并就近引用。"
+	answer := `询比采购：定义和适用重点。<src id="S1" />
+
+竞价采购：定义和适用重点。<src id="S2" />
+
+竞争谈判：定义和适用重点。<src id="S3" />
+
+三者核心区别在于询比一次报价、竞价多次报价、竞争谈判重在协商。<src id="S1" /><src id="S2" /><src id="S3" />`
+	got := RemoveRedundantExplicitComparisonSummary(answer, query)
+	if strings.Contains(got, "三者核心区别") {
+		t.Fatalf("redundant cross-option summary survived: %s", got)
+	}
+	for _, expected := range []string{"询比采购", "竞价采购", "竞争谈判", "S1", "S2", "S3"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("individual option paragraph lost %q: %s", expected, got)
+		}
+	}
+	if twice := RemoveRedundantExplicitComparisonSummary(got, query); twice != got {
+		t.Fatalf("comparison-summary cleanup was not idempotent:\n%s", twice)
+	}
+}
+
+func TestExpandSharedScalarUnitsHandlesArithmeticShorthand(t *testing.T) {
+	query := "预算改为390万元，360万元及280/80万元从现在起废弃。只记录当前值和废弃值。"
+	answer := "- 当前总预算：390万元\n- 废弃值（360万元/280+80万元）：已废弃"
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{"360万元", "280万元", "80万元", "已废弃"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("shared scalar unit %q was not restored: %s", expected, got)
+		}
 	}
 }
 

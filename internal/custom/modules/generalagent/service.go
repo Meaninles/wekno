@@ -270,6 +270,9 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if conversationmemory.RequiresAuthoritativeUserHistory(req.Query) {
 		history = userOnlyGeneralAgentHistory(history)
 	}
+	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(req.Query) {
+		history = nil
+	}
 	runtimeQuery = conversationmemory.AppendAuditArchive(
 		runtimeQuery,
 		req.Query,
@@ -452,6 +455,14 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 
 	allRefs := active.snapshotSourceReferences()
 	finalAnswer = conversationmemory.StripInternalPlanningPreamble(finalAnswer)
+	finalAnswer = conversationmemory.RemoveRedundantExplicitComparisonSummary(finalAnswer, req.Query)
+	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(req.Query) {
+		finalAnswer = sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
+			finalAnswer,
+			conversationmemory.RequiredEvidenceTopics(req.Query),
+			allRefs,
+		)
+	}
 	finalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(finalAnswer)
 	finalAnswer = conversationmemory.NormalizeDeferredComparisonFactSections(
 		finalAnswer,
@@ -487,6 +498,13 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		conversationmemory.RequiredEvidenceTopics(req.Query),
 		allRefs,
 	)
+	if conversationmemory.RequiresNamedTopicDefinitionCoverage(req.Query) {
+		finalAnswer = sourcerefs.EnsureNamedTopicDefinitions(
+			finalAnswer,
+			conversationmemory.RequiredEvidenceTopics(req.Query),
+			allRefs,
+		)
+	}
 	finalAnswer = sourcerefs.RepairAnswerCitations(finalAnswer, allRefs)
 	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {

@@ -273,6 +273,14 @@ func (e *AgentEngine) emitCompletionEvent(
 ) {
 	e.syncCitationReferences(state)
 	state.FinalAnswer = conversationmemory.StripInternalPlanningPreamble(state.FinalAnswer)
+	state.FinalAnswer = conversationmemory.RemoveRedundantExplicitComparisonSummary(state.FinalAnswer, e.activeQuery)
+	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(e.activeQuery) {
+		state.FinalAnswer = sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
+			state.FinalAnswer,
+			conversationmemory.RequiredEvidenceTopics(e.activeQuery),
+			state.KnowledgeRefs,
+		)
+	}
 	state.FinalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(state.FinalAnswer)
 	state.FinalAnswer = conversationmemory.NormalizeDeferredComparisonFactSections(
 		state.FinalAnswer,
@@ -313,6 +321,13 @@ func (e *AgentEngine) emitCompletionEvent(
 		conversationmemory.RequiredEvidenceTopics(e.activeQuery),
 		state.KnowledgeRefs,
 	)
+	if conversationmemory.RequiresNamedTopicDefinitionCoverage(e.activeQuery) {
+		state.FinalAnswer = sourcerefs.EnsureNamedTopicDefinitions(
+			state.FinalAnswer,
+			conversationmemory.RequiredEvidenceTopics(e.activeQuery),
+			state.KnowledgeRefs,
+		)
+	}
 	state.FinalAnswer = sourcerefs.RepairAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {

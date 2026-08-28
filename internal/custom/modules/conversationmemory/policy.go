@@ -78,7 +78,7 @@ var internalUserMessageLabelPattern = regexp.MustCompile(
 var internalPlanningParagraphBreakPattern = regexp.MustCompile(`\n[ \t]*\n+`)
 
 var sharedScalarUnitPattern = regexp.MustCompile(
-	`([0-9０-９]+(?:\.[0-9０-９]+)?)\s*[/／]\s*([0-9０-９]+(?:\.[0-9０-９]+)?)\s*(万元|元|家|个|%|％)`,
+	`([0-9０-９]+(?:\.[0-9０-９]+)?)\s*[/／+＋]\s*([0-9０-９]+(?:\.[0-9０-９]+)?)\s*(万元|元|家|个|%|％)`,
 )
 
 var explicitUnknownOnlyListPattern = regexp.MustCompile(
@@ -327,6 +327,27 @@ func IsNarrowAnswerTurn(query string) bool {
 	})
 }
 
+// ShouldIsolateNarrowEvidenceHistory identifies a self-contained, explicitly
+// narrow evidence request whose named questions are fully present in the
+// current turn. Historical user prompts are unnecessary for answering it and
+// can pull a long-running agent back to an expired topic. Callers may omit chat
+// history while retaining the selected knowledge scope and current request.
+func ShouldIsolateNarrowEvidenceHistory(query string) bool {
+	if !IsNarrowAnswerTurn(query) || !RequiresFreshEvidenceTurn(query) || ReferencesRecentUserState(query) {
+		return false
+	}
+	return len(narrowAnswerEvidenceTopics(query)) >= 2
+}
+
+// RequiresNamedTopicDefinitionCoverage detects an explicit multi-option
+// definition request. It is kept separate from generic comparison detection so
+// condition-only comparisons do not acquire unrequested definition prose.
+func RequiresNamedTopicDefinitionCoverage(query string) bool {
+	return IsComparisonTurn(query) && containsAny(strings.ToLower(query), []string{
+		"定义", "是什么", "何谓", "define", "definition", "what is",
+	})
+}
+
 // comparisonEvidenceTopics extracts a small, explicit list that follows
 // “比较/对比”. The list is embedded in the trusted turn contract so the
 // sidecar can reject a cited comparison that silently omitted one named item.
@@ -509,7 +530,11 @@ func EvidenceRetrievalQueries(query string) []string {
 		return nil
 	}
 	intent := "直接规定与完整答案"
-	if IsComparisonTurn(query) && containsAny(query, []string{"适用", "适配", "条件", "要求", "重点", "风险", "会受", "影响", "applicable", "condition"}) {
+	conditionIntent := IsComparisonTurn(query) && containsAny(query, []string{"适用", "适配", "条件", "要求", "重点", "风险", "会受", "影响", "applicable", "condition"})
+	definitionIntent := RequiresNamedTopicDefinitionCoverage(query)
+	if conditionIntent && definitionIntent {
+		intent = "定义 完整适用条件 条件列表"
+	} else if conditionIntent {
 		intent = "完整适用条件 条件列表"
 	} else if containsAny(query, []string{"定义", "是什么", "define", "what is"}) {
 		intent = "定义与直接规定"
@@ -564,9 +589,11 @@ func AugmentEvidenceGrepQuery(grepQuery, originalQuery string) string {
 			selected = append(selected, pattern)
 		}
 	}
-	// A focused model query should stay focused. If it names one of the user's
-	// targets, only add that target's executable regex. If it names none, retain
-	// the previous safety net and add every explicit target to a bounded OR.
+	// A focused model query should stay focused. When it names one or more of the
+	// user's explicit targets, execute only those user-derived target patterns;
+	// retaining the model's broad natural-language OR terms can crowd the target
+	// passage out of the bounded grep result. If it names none, use all explicit
+	// targets as the bounded safety net.
 	if len(selected) == 0 {
 		for _, topic := range topics {
 			if pattern := evidenceGrepTopicPattern(topic); pattern != "" {
@@ -574,16 +601,28 @@ func AugmentEvidenceGrepQuery(grepQuery, originalQuery string) string {
 			}
 		}
 	}
-	for _, pattern := range selected {
-		if strings.Contains(value, pattern) {
+	selected = uniqueStrings(selected)
+	if len(selected) == 0 {
+		return value
+	}
+	return strings.Join(selected, "|")
+}
+
+func uniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
 			continue
 		}
-		value += "|" + pattern
-		if len(value) >= 900 {
-			break
+		if _, exists := seen[value]; exists {
+			continue
 		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
-	return value
+	return out
 }
 
 func evidenceGrepTopicPattern(topic string) string {
@@ -796,6 +835,10 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 	if IsComparisonTurn(originalQuery) {
 		rules += `
 - 比较多个备选项时，每个备选项只写一个短段；不要先复述任务、逐字抄录制度、增加未要求的总结表或重复结论，整篇不得超过900个中文字符。`
+	}
+	if RequiresNamedTopicDefinitionCoverage(originalQuery) {
+		rules += `
+- 用户同时要求定义时，每个点名对象的短段必须同时包含“定义”和用户要求的适用/条件维度；定义句与条件句分别使用直接支持它们的当前轮证据并就近引用，不能只写条件而省略定义。`
 	}
 	if RequiresFreshEvidenceTurn(originalQuery) {
 		rules += `
@@ -1195,6 +1238,61 @@ func CompactExplicitOneLineComparison(answer, originalQuery string) string {
 		return value
 	}
 	return result
+}
+
+// RemoveRedundantExplicitComparisonSummary keeps an explicit one-paragraph-per-
+// option response shape. Once every named option already has its own paragraph,
+// a later cross-option recap is redundant and often carries broad citations
+// that no longer bind to a single claim. Only plainly marked recap paragraphs
+// are removed; individual option paragraphs and fact sections are untouched.
+func RemoveRedundantExplicitComparisonSummary(answer, originalQuery string) string {
+	value := strings.TrimSpace(strings.ReplaceAll(answer, "\r\n", "\n"))
+	if value == "" || !IsComparisonTurn(originalQuery) || !containsAny(originalQuery, []string{
+		"每种方式一段", "每个方式一段", "每项一段", "各一段", "逐项一段",
+	}) {
+		return value
+	}
+	topics := currentTurnEvidenceTopics(originalQuery)
+	if len(topics) < 2 {
+		return value
+	}
+	paragraphs := internalPlanningParagraphBreakPattern.Split(value, -1)
+	covered := make(map[string]bool, len(topics))
+	for _, paragraph := range paragraphs {
+		if topic, ok := primaryComparisonParagraphTopic(paragraph, topics); ok &&
+			utf8.RuneCountInString(strings.TrimSpace(paragraph)) > utf8.RuneCountInString(topic)+2 {
+			covered[topic] = true
+		}
+	}
+	if len(covered) != len(topics) {
+		return value
+	}
+
+	out := make([]string, 0, len(paragraphs))
+	removed := false
+	for _, paragraph := range paragraphs {
+		paragraph = strings.TrimSpace(paragraph)
+		if paragraph == "" {
+			continue
+		}
+		matched := 0
+		for _, topic := range topics {
+			if strings.Contains(paragraph, topic) {
+				matched++
+			}
+		}
+		if matched >= 2 && containsAny(paragraph, []string{
+			"两者", "三者", "四者", "共同", "总体", "总的来说", "核心区别", "主要区别", "综合来看", "总结",
+		}) {
+			removed = true
+			continue
+		}
+		out = append(out, paragraph)
+	}
+	if !removed {
+		return value
+	}
+	return strings.TrimSpace(strings.Join(out, "\n\n"))
 }
 
 // primaryComparisonParagraphTopic assigns a generated paragraph to the option
@@ -3964,7 +4062,10 @@ func StripInternalPlanningPreamble(answer string) string {
 			"现在我已获得", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "以下是替换后的答案", "根据当前轮检索结果",
 		})
 		knownPlanning = knownPlanning || (containsAny(probe, []string{"证据", "检索"}) &&
-			containsAny(probe, []string{"现在来回答", "现直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据", "已获取全部"}))
+			containsAny(probe, []string{
+				"现在来回答", "现直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据", "已获取全部",
+				"现在我有完整的证据", "有完整的证据来回答", "已在前面的chunk中获取",
+			}))
 		knownPlanning = knownPlanning || strings.Contains(probe, "runtime_response_contract") ||
 			strings.Contains(probe, "[weknora_current_turn_execution")
 		leadingCitationChecklist := strings.Count(first, "<src id=") >= 2 &&

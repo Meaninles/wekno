@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -37,6 +39,13 @@ func (s *sessionService) AgentQA(
 	if err != nil {
 		return err
 	}
+	agentConfig.MaxCompletionTokens = conversationmemory.BoundCompletionTokens(
+		agentConfig.MaxCompletionTokens,
+		req.Query,
+	)
+	agentConfig.DisableToolsForTurn = conversationmemory.IsStateOnlyTurn(req.Query) &&
+		len(req.Attachments) == 0 && len(req.ImageURLs) == 0 &&
+		strings.TrimSpace(req.QuotedContext) == ""
 	lightMode, lightNames := lightweightSkillSelection(req.CustomAgent)
 	agentConfig.LightweightSkillContext = LightweightSkillContext(ctx, lightMode, lightNames, req.SkillNames)
 	if agentConfig.LightweightSkillContext != "" {
@@ -61,6 +70,9 @@ func (s *sessionService) AgentQA(
 	var rerankModel rerank.Reranker
 	hasKnowledgeSearchTool := false
 	for _, tool := range agentConfig.AllowedTools {
+		if agentConfig.DisableToolsForTurn {
+			break
+		}
 		if tool == tools.ToolKnowledgeSearch {
 			hasKnowledgeSearchTool = true
 			break
@@ -88,21 +100,28 @@ func (s *sessionService) AgentQA(
 	// tried last turn — except final_answer, which is replayed as the trailing
 	// canonical assistant message.
 	var llmContext []chat.Message
+	var durableUserContext string
 	if agentConfig.MultiTurnEnabled {
 		historyTurns := agentConfig.HistoryTurns
 		if historyTurns <= 0 {
 			historyTurns = 5
 		}
-		llmContext, err = LoadAgentHistory(ctx, s.messageRepo, sessionID, historyTurns)
+		llmContext, durableUserContext, err = LoadAgentHistoryWithArchive(ctx, s.messageRepo, sessionID, historyTurns)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to load agent history from DB: %v, continuing without history", err)
 			llmContext = []chat.Message{}
 		}
-		logger.Infof(ctx, "Loaded %d history messages from DB (turns=%d)", len(llmContext), historyTurns)
+		logger.Infof(ctx, "Loaded %d history messages from DB (turns=%d, archive_chars=%d)",
+			len(llmContext), historyTurns, len([]rune(durableUserContext)))
 	} else {
 		logger.Infof(ctx, "Multi-turn disabled for this agent, running without history")
 		llmContext = []chat.Message{}
 	}
+	if conversationmemory.RequiresAuthoritativeUserHistory(req.Query) {
+		llmContext = userOnlyAgentHistory(llmContext)
+		logger.Infof(ctx, "Current turn uses %d authoritative user history messages", len(llmContext))
+	}
+	agentConfig.DurableUserContext = durableUserContext
 
 	if agentConfig.AgentType == types.AgentTypeTableAnalysis {
 		emitTableAnalysisDisplayIntentProgress(ctx, eventBus, sessionID, nil, "start")
@@ -166,6 +185,12 @@ func (s *sessionService) AgentQA(
 	if agentConfig.AgentType == types.AgentTypeTableAnalysis && agentConfig.TableAnalysisDisplayIntent != nil {
 		agentQuery = tableAnalysisDisplayIntentPromptBlock(agentConfig.TableAnalysisDisplayIntent) + "\n\n" + agentQuery
 	}
+	agentQuery = conversationmemory.AppendAuditArchive(
+		agentQuery,
+		req.Query,
+		durableUserContext,
+	)
+	agentQuery = conversationmemory.AppendCurrentTurnDirective(agentQuery, req.Query)
 
 	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside
 	// the agent engine only; we intentionally do not persist them on user messages
@@ -174,7 +199,15 @@ func (s *sessionService) AgentQA(
 	// Execute agent with streaming (asynchronously)
 	// Events will be emitted to EventBus and handled by the Handler layer
 	logger.Info(ctx, "Executing agent with streaming")
-	if _, err := engine.Execute(ctx, sessionID, req.AssistantMessageID, agentQuery, llmContext, agentImageURLs); err != nil {
+	if _, err := engine.ExecuteWithOriginalQuery(
+		ctx,
+		sessionID,
+		req.AssistantMessageID,
+		agentQuery,
+		req.Query,
+		llmContext,
+		agentImageURLs,
+	); err != nil {
 		logger.Errorf(ctx, "Agent execution failed: %v", err)
 		// Emit error event to the EventBus used by this agent
 		eventBus.Emit(ctx, event.Event{

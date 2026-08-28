@@ -7,6 +7,7 @@ import (
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -271,6 +272,30 @@ func (e *AgentEngine) emitCompletionEvent(
 	ctx context.Context, state *types.AgentState, sessionID, messageID string, startTime time.Time,
 ) {
 	e.syncCitationReferences(state)
+	state.FinalAnswer = conversationmemory.StripInternalPlanningPreamble(state.FinalAnswer)
+	beforeBoundaryRepair := state.FinalAnswer
+	state.FinalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
+		state.FinalAnswer,
+		e.activeQuery,
+		e.activeUserStatements...,
+	)
+	if state.FinalAnswer != beforeBoundaryRepair {
+		logger.Infof(ctx, "[Agent][FinalAnswer] repaired explicit action boundaries: before_chars=%d after_chars=%d",
+			len([]rune(beforeBoundaryRepair)), len([]rune(state.FinalAnswer)))
+	}
+	state.FinalAnswer = conversationmemory.NormalizeDeferredComparisonRelationships(state.FinalAnswer, e.activeQuery)
+	state.FinalAnswer = conversationmemory.NormalizeStateAuditSections(
+		state.FinalAnswer,
+		e.activeQuery,
+		e.activeUserStatements...,
+	)
+	state.FinalAnswer = conversationmemory.NormalizeExplicitUserIdentityUnknown(
+		state.FinalAnswer,
+		e.activeQuery,
+		e.activeUserStatements...,
+	)
+	state.FinalAnswer = conversationmemory.EnsureDeferredDecisionConclusion(state.FinalAnswer, e.activeQuery)
+	state.FinalAnswer = sourcerefs.RepairAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
 		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",

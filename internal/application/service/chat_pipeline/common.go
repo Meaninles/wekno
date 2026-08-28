@@ -3,13 +3,13 @@ package chatpipeline
 import (
 	"context"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -103,6 +103,10 @@ func prepareChatModel(ctx context.Context, modelService interfaces.ModelService,
 		PresencePenalty:     chatManage.SummaryConfig.PresencePenalty,
 		Thinking:            chatManage.SummaryConfig.Thinking,
 	}
+	opt.MaxCompletionTokens = conversationmemory.BoundCompletionTokens(
+		opt.MaxCompletionTokens,
+		chatManage.Query,
+	)
 	if opt.Thinking != nil {
 		pipelineInfo(ctx, "Stream", "thinking_option", map[string]interface{}{
 			"enabled": *opt.Thinking,
@@ -129,6 +133,7 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 	// when no evidence handles exist, while keeping current-turn precedence and
 	// citation syntax consistent for present and future retrieval paths.
 	systemPrompt = sourcerefs.EnsureGenerationContract(systemPrompt)
+	systemPrompt = conversationmemory.AppendUserArchive(systemPrompt, chatManage.DurableUserContext)
 	if skillContext := strings.TrimSpace(chatManage.LightweightSkillContext); skillContext != "" {
 		systemPrompt += "\n\n" + skillContext
 	}
@@ -137,11 +142,32 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 		{Role: "system", Content: systemPrompt},
 	}
 
-	chatMessages = AppendHistoryMessages(chatMessages, chatManage.History)
+	if conversationmemory.RequiresAuthoritativeUserHistory(chatManage.Query) {
+		// State audits reconstruct user facts, and fresh-evidence turns must not
+		// reuse a prior answer as if it were current source evidence.
+		chatMessages = AppendUserHistoryMessages(chatMessages, chatManage.History)
+	} else {
+		chatMessages = AppendHistoryMessages(chatMessages, chatManage.History)
+	}
 
 	// Add current user message. Only include images when the chat model supports
 	// vision; non-vision models rely on the text description in UserContent.
-	userMsg := chat.Message{Role: "user", Content: chatManage.UserContent}
+	currentContent := conversationmemory.AppendAuditArchive(
+		chatManage.UserContent,
+		chatManage.Query,
+		chatManage.DurableUserContext,
+	)
+	currentContent = conversationmemory.AppendCurrentTurnDirective(
+		currentContent,
+		chatManage.Query,
+	)
+	// Keep the citation-use block terminal even after adding the current-turn
+	// response contract. This preserves the established citation salience rule.
+	currentContent = sourcerefs.PlaceTerminalCitationInstruction(currentContent, chatManage.CitationResult)
+	userMsg := chat.Message{
+		Role:    "user",
+		Content: currentContent,
+	}
 	if chatManage.ChatModelSupportsVision && len(chatManage.Images) > 0 {
 		userMsg.Images = chatManage.Images
 	}
@@ -154,8 +180,24 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 // History is already filtered and truncated upstream by the load_history plugin.
 func AppendHistoryMessages(messages []chat.Message, history []*types.History) []chat.Message {
 	for _, history := range history {
+		if history == nil {
+			continue
+		}
 		messages = append(messages, chat.Message{Role: "user", Content: history.Query})
 		messages = append(messages, chat.Message{Role: "assistant", Content: sourcerefs.StripCitationProtocol(history.Answer)})
+	}
+	return messages
+}
+
+// AppendUserHistoryMessages replays only authoritative user statements. It is
+// intentionally reserved for explicit state-audit turns; ordinary follow-ups
+// still receive the full conversational exchange.
+func AppendUserHistoryMessages(messages []chat.Message, history []*types.History) []chat.Message {
+	for _, item := range history {
+		if item == nil || strings.TrimSpace(item.Query) == "" {
+			continue
+		}
+		messages = append(messages, chat.Message{Role: "user", Content: item.Query})
 	}
 	return messages
 }
@@ -169,10 +211,10 @@ func loadAndProcessHistory(
 	sessionID string,
 	maxRounds int,
 	fetchCount int,
-) ([]*types.History, error) {
+) ([]*types.History, string, error) {
 	history, err := messageService.GetRecentMessagesBySession(ctx, sessionID, fetchCount)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	historyMap := make(map[string]*types.History)
@@ -209,15 +251,18 @@ func loadAndProcessHistory(
 	}
 
 	sort.Slice(historyList, func(i, j int) bool {
-		return historyList[i].CreateAt.After(historyList[j].CreateAt)
+		return historyList[i].CreateAt.Before(historyList[j].CreateAt)
 	})
 
-	if len(historyList) > maxRounds {
-		historyList = historyList[:maxRounds]
+	queries := make([]string, 0, len(historyList))
+	for _, item := range historyList {
+		queries = append(queries, item.Query)
 	}
-
-	slices.Reverse(historyList)
-	return historyList, nil
+	archive := conversationmemory.BuildUserArchive(queries, maxRounds)
+	if len(historyList) > maxRounds {
+		historyList = historyList[len(historyList)-maxRounds:]
+	}
+	return historyList, archive, nil
 }
 
 // extractImageCaptions concatenates non-empty Caption fields from stored

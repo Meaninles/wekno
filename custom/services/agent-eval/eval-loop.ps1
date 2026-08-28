@@ -6,6 +6,7 @@ param(
     [string]$Manifest = "",
     [string]$Policy = "",
     [string]$Baseline = "",
+    [string[]]$CaseId = @(),
     [int]$MaxConcurrency = 1,
     [bool]$PublishToLangfuse = $true,
     [switch]$Judge,
@@ -31,14 +32,14 @@ if (-not $Dataset) {
     $Dataset = if ($Split -eq "sealed_holdout") {
         "/workspace/sealed/multiturn-holdout.v1.jsonl"
     } else {
-        "/workspace/datasets/multiturn-ready.v1.jsonl"
+        "/workspace/datasets/multiturn-ready.v2.jsonl"
     }
 }
 if (-not $Manifest) {
     $Manifest = if ($Split -eq "sealed_holdout") {
         "/workspace/manifests/multiturn-holdout.v1.manifest.json"
     } else {
-        "/workspace/manifests/multiturn-ready.v1.manifest.json"
+        "/workspace/manifests/multiturn-ready.v2.manifest.json"
     }
 }
 if (-not $Policy) {
@@ -117,11 +118,19 @@ $runArgs = @(
     "--label", "codex-loop-$timestamp",
     "--profiles", "/workspace/profiles/multiturn-agents.v1.json"
 )
+foreach ($selectedCase in $CaseId) {
+    if (-not [string]::IsNullOrWhiteSpace($selectedCase)) {
+        $runArgs += @("--case-id", $selectedCase.Trim())
+    }
+}
 if ($Split -eq "sealed_holdout") { $runArgs += "--allow-sealed" }
 if ($PublishToLangfuse) {
     $runArgs += @("--langfuse-experiment", "codex-$Split-$timestamp")
 }
-Invoke-Runner -RunnerArgs $runArgs | Out-Null
+# `run` returns 2 when one or more cases are INVALID (for example a WAF 403).
+# The raw artifact is still complete and must flow through report/gate so infra
+# failures stay isolated from both the eval loop and the product request path.
+Invoke-Runner -RunnerArgs $runArgs -AllowedExitCodes @(0, 2) | Out-Null
 
 $candidate = $rawRun
 if ($Judge) {

@@ -28,6 +28,7 @@ from app.runner import (  # noqa: E402
     build_prompt_observation,
     build_system_prompt,
     claude_auth_env,
+    claude_sdk_builtin_tools,
     classify_data_analysis_display_intent,
     data_analysis_needs_chart_validation,
     data_analysis_post_tool_hook_factory,
@@ -54,6 +55,7 @@ from app.runner import (  # noqa: E402
     prompt_media_reference,
     parse_mcp_tool_response_payload,
     result_message_text,
+    record_turn_evidence,
     runtime_summary,
     run_data_analysis_judge,
     sanitize_artifact_bytes,
@@ -64,6 +66,9 @@ from app.runner import (  # noqa: E402
     terminal_background_tool_ids,
     tool_result_fragments,
     tool_use_fragments,
+    turn_contract_issues,
+    turn_contract_stop_hook_factory,
+    should_record_turn_evidence,
     user_facing_error_message,
     validate_pptx_layout_bytes,
 )
@@ -97,6 +102,277 @@ class ResultMessage:
 
 
 class RunnerProgressTest(unittest.TestCase):
+    def test_turn_evidence_registry_is_marker_gated_and_bounded(self):
+        self.assertFalse(should_record_turn_evidence("普通知识问答"))
+        self.assertTrue(
+            should_record_turn_evidence(
+                '[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS]["采购信息能否公开"]'
+            )
+        )
+        state = {}
+        record_turn_evidence(
+            state,
+            {
+                "source_references": [
+                    {
+                        "cite_exactly": f'<src id="S{index}" />',
+                        "evidence_content": "证据" * 20_000,
+                    }
+                    for index in range(1, 80)
+                ]
+            },
+        )
+        registry = state["turn_evidence_by_citation_id"]
+        self.assertLessEqual(len(registry), 64)
+        self.assertLessEqual(sum(len(value) for value in registry.values()), 96_000)
+
+    def test_turn_contract_issues_detect_missing_fresh_evidence_and_length(self):
+        payload = ChatPayload(
+            run_id="run-turn-contract",
+            session_id="session-turn-contract",
+            assistant_message_id="assistant-turn-contract",
+            query=(
+                "回答问题。\n本轮明确要求文档依据或引用。\n"
+                "整篇不得超过20个中文字符。"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        issues = turn_contract_issues(payload, "这是一段没有任何来源引用而且明显超过二十个字符的回答。")
+        self.assertEqual(
+            {issue["code"] for issue in issues},
+            {"current_turn_response_too_long", "current_turn_evidence_missing"},
+        )
+        self.assertEqual(
+            turn_contract_issues(payload, '答。<src id="S1" />'),
+            [],
+        )
+
+    def test_turn_contract_issues_require_citation_for_each_named_comparison_item(self):
+        payload = ChatPayload(
+            run_id="run-comparison-contract",
+            session_id="session-comparison-contract",
+            assistant_message_id="assistant-comparison-contract",
+            query=(
+                "比较甲方案、乙方案和丙方案并就近引用。\n"
+                "本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["甲方案","乙方案","丙方案"]'
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        issues = turn_contract_issues(
+            payload,
+            (
+                '甲方案：依据一。<src id="S1" />\n\n'
+                "乙方案：本次未展开。\n\n"
+                '丙方案：依据三。<src id="S3" />'
+            ),
+        )
+        topic_issue = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_evidence_topics_incomplete"
+        )
+        self.assertEqual(topic_issue["missing_topics"], ["乙方案"])
+        self.assertEqual(
+            turn_contract_issues(
+                payload,
+                (
+                    '甲方案：依据一。<src id="S1" />\n\n'
+                    '乙方案：依据二。<src id="S2" />\n\n'
+                    '丙方案：依据三。<src id="S3" />'
+                ),
+            ),
+            [],
+        )
+
+    def test_turn_contract_issues_bind_uncertainties_to_direct_evidence(self):
+        payload = ChatPayload(
+            run_id="run-uncertainty-contract",
+            session_id="session-uncertainty-contract",
+            assistant_message_id="assistant-uncertainty-contract",
+            query=(
+                "比较条件并引用。\n本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS]["采购信息能否公开","需求是否完整","采购全流程时间是否可行"]'
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        answer = (
+            '公开采购：采购信息能否公开待确认。<src id="S1" />\n\n'
+            '询比：需求是否完整待确认。<src id="S2" />\n\n'
+            '公开采购：采购全流程时间是否可行待确认。<src id="S3" />'
+        )
+        evidence = {
+            "S1": "选择公开采购方式应满足采购信息可以公开。",
+            "S2": "采购需求明确时可以采用该方式。",
+            "S3": "选择公开采购方式应满足采购时间允许。",
+        }
+        self.assertEqual(
+            turn_contract_issues(payload, answer, evidence_by_id=evidence),
+            [],
+        )
+        evidence["S1"] = "服务类预算金额达到200万元。"
+        mismatch = next(
+            issue
+            for issue in turn_contract_issues(payload, answer, evidence_by_id=evidence)
+            if issue["code"] == "current_turn_uncertainty_evidence_mismatch"
+        )
+        self.assertEqual(mismatch["missing_topics"], ["采购信息能否公开"])
+
+    def test_turn_contract_issues_reject_internal_repair_narration(self):
+        payload = ChatPayload(
+            run_id="run-planning-contract",
+            session_id="session-planning-contract",
+            assistant_message_id="assistant-planning-contract",
+            query="回答问题。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        issues = turn_contract_issues(
+            payload,
+            "I have the retrieval results already. Let me verify them.\n\n正式回答。",
+        )
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in issues},
+        )
+        checklist = (
+            '- **甲**: <src id="S1" /> (chunk 1)\n'
+            '- **乙**: <src id="S2" /> (chunk 2)\n\n正式回答。'
+        )
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in turn_contract_issues(payload, checklist)},
+        )
+
+    def test_turn_contract_issues_reject_deferred_comparison_ranking(self):
+        payload = ChatPayload(
+            run_id="run-ranking-contract",
+            session_id="session-ranking-contract",
+            assistant_message_id="assistant-ranking-contract",
+            query=(
+                "只比较，不推荐。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]\n"
+                "用户明确要求不作最终选择"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        issues = turn_contract_issues(payload, "竞争谈判：在当前条件下风险最低。")
+        ranking = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_deferred_comparison_ranked"
+        )
+        self.assertEqual(ranking["ranking_terms"], ["风险最低"])
+        ranked = turn_contract_issues(payload, "竞争谈判：适用性反而较高。")
+        self.assertIn(
+            "current_turn_deferred_comparison_ranked",
+            {issue["code"] for issue in ranked},
+        )
+        ranked_higher = turn_contract_issues(payload, "竞争谈判：适用性反而更高。")
+        self.assertIn(
+            "current_turn_deferred_comparison_ranked",
+            {issue["code"] for issue in ranked_higher},
+        )
+        heuristic = turn_contract_issues(payload, "竞价：服务类通常不以价格竞争为主。")
+        self.assertIn(
+            "current_turn_unknown_filled_by_heuristic",
+            {issue["code"] for issue in heuristic},
+        )
+        relation = turn_contract_issues(
+            payload,
+            "询比：收费标准是否统一取决于需求是否完整。",
+        )
+        self.assertIn(
+            "current_turn_unknowns_joined_by_unsupported_relation",
+            {issue["code"] for issue in relation},
+        )
+        self.assertEqual(
+            turn_contract_issues(payload, "竞争谈判：尚不能确认是否适用，暂不推荐采用。"),
+            [],
+        )
+
+    def test_turn_contract_stop_hook_blocks_then_allows_after_repair(self):
+        payload = ChatPayload(
+            run_id="run-turn-contract-hook",
+            session_id="session-turn-contract-hook",
+            assistant_message_id="assistant-turn-contract-hook",
+            query="回答并引用。\n本轮明确要求文档依据或引用。",
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        state = {}
+        hook = turn_contract_stop_hook_factory(payload, state)
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "transcript.jsonl"
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {"role": "assistant", "content": "没有引用的回答。"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            blocked = asyncio.run(hook({"transcript_path": str(transcript)}, None, None))
+            self.assertEqual(blocked.get("decision"), "block")
+            self.assertTrue(blocked.get("suppressOutput"))
+
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": '有据回答。<src id="S3" />',
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                asyncio.run(hook({"transcript_path": str(transcript)}, None, None)),
+                {},
+            )
+
+    def test_state_only_turn_exposes_no_sdk_tools(self):
+        payload = ChatPayload(
+            run_id="run-state-only",
+            session_id="session-state-only",
+            assistant_message_id="assistant-state-only",
+            query="只更新台账",
+            runtime_config=RuntimeConfigSpec(
+                disable_tools_for_turn=True,
+                web_search_enabled=True,
+                claude_sdk_web_search_enabled=True,
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+
+    def test_fresh_evidence_turn_exposes_no_local_file_tools(self):
+        payload = ChatPayload(
+            run_id="run-fresh-evidence",
+            session_id="session-fresh-evidence",
+            assistant_message_id="assistant-fresh-evidence",
+            query="依据已选制度回答。\n本轮明确要求文档依据或引用。",
+            runtime_config=RuntimeConfigSpec(disable_tools_for_turn=False),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+
     def test_prompt_observation_is_disabled_by_default_and_detailed_only_in_eval(self):
         payload = ChatPayload(
             run_id="run-eval-observation",

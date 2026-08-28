@@ -72,6 +72,13 @@ class ConversationStateContract(StrictModel):
     active_facts: list[TextRule] = Field(default_factory=list)
     retired_facts: list[TextRule] = Field(default_factory=list)
     unknown_facts: list[TextRule] = Field(default_factory=list)
+    # This contract extension is omitted when empty so loading an older frozen
+    # dataset does not change its canonical identity merely because the runner
+    # learned a new optional assertion type.
+    forbidden_unknown_facts: list[TextRule] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
     forbidden_inferences: list[TextRule] = Field(default_factory=list)
     action_boundaries: list[TextRule] = Field(default_factory=list)
     require_scoped_sections: bool = False
@@ -82,12 +89,17 @@ class ConversationStateContract(StrictModel):
             *self.active_facts,
             *self.retired_facts,
             *self.unknown_facts,
+            *self.forbidden_unknown_facts,
             *self.forbidden_inferences,
             *self.action_boundaries,
         ]
         rule_ids = [rule.rule_id for rule in rules]
         if len(rule_ids) != len(set(rule_ids)):
             raise ValueError("conversation state rule_id must be unique")
+        if self.forbidden_unknown_facts and not self.require_scoped_sections:
+            raise ValueError(
+                "forbidden_unknown_facts requires independently scoped state sections"
+            )
         return self
 
 
@@ -125,6 +137,10 @@ class EvidenceAnchor(StrictModel):
     all_of: list[str] = Field(default_factory=list)
     source_ids: list[str] = Field(default_factory=list)
     min_matching_fragments: int = Field(default=1, ge=1)
+    # Omit the legacy/default value from canonical serialization.  This keeps
+    # previously frozen datasets byte-for-byte compatible while allowing a
+    # v2 contract to opt an anchor into conditional evaluation with false.
+    required: bool = Field(default=True, exclude_if=lambda value: value is True)
 
     @model_validator(mode="after")
     def require_selector(self) -> "EvidenceAnchor":
@@ -141,6 +157,11 @@ class EvidenceClaimRule(StrictModel):
     claim: TextRule
     anchor_ids: list[str]
     require_adjacent_citation: bool = True
+    require_following_citation: bool = Field(
+        default=False,
+        exclude_if=lambda value: value is False,
+    )
+    required: bool = Field(default=True, exclude_if=lambda value: value is True)
 
     @model_validator(mode="after")
     def require_anchor(self) -> "EvidenceClaimRule":

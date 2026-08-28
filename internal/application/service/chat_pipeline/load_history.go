@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -51,7 +52,13 @@ func (p *PluginLoadHistory) OnEvent(ctx context.Context,
 		"max_rounds": maxRounds,
 	})
 
-	historyList, err := loadAndProcessHistory(ctx, p.messageService, chatManage.SessionID, maxRounds, maxRounds*2+10)
+	historyList, archive, err := loadAndProcessHistory(
+		ctx,
+		p.messageService,
+		chatManage.SessionID,
+		maxRounds,
+		conversationmemory.FetchMessageLimit(maxRounds),
+	)
 	if err != nil {
 		pipelineWarn(ctx, "LoadHistory", "history_fetch", map[string]interface{}{
 			"session_id": chatManage.SessionID,
@@ -61,10 +68,12 @@ func (p *PluginLoadHistory) OnEvent(ctx context.Context,
 	}
 
 	chatManage.History = historyList
+	chatManage.DurableUserContext = archive
 
 	pipelineInfo(ctx, "LoadHistory", "output", map[string]interface{}{
 		"session_id":     chatManage.SessionID,
 		"history_rounds": len(historyList),
+		"archive_chars":  len([]rune(archive)),
 		"max_rounds":     maxRounds,
 	})
 

@@ -1,0 +1,20 @@
+{
+  "case_count": 18,
+  "created_at": "2026-08-28T02:10:32.245602+00:00",
+  "dataset_sha256": "6e6a194552c0fc3b3df8b40142cd0eeaa1191f7b38425379cd0534314b9963f2",
+  "dependency_sha256": {
+    "judge_calibration": "6e54a7d3f67e956288dea3dca6b883053029707aaf1c6c992c2992e8ec884165",
+    "policy": "48f22e8f096b74b28638bba06b50afffedfd4ed348b4316576109b0cb4dd0649",
+    "profiles": "9c25204a090a624a31b3bab8281f855c6e4b1385103e0b545822846bc18f1bed"
+  },
+  "family_count": 6,
+  "schema_version": 1,
+  "source_files": [
+    "datasets\\multiturn-ready.v2.jsonl"
+  ],
+  "split_counts": {
+    "dev": 12,
+    "gate": 6
+  },
+  "suite": "weknora-three-agent-multiturn-ready-v2"
+}

@@ -1,6 +1,7 @@
 package chatretrieval
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -66,6 +67,130 @@ func TestSortSearchResultsIsGloballyDeterministic(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("sorted IDs = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestPromoteExactStructuralMatchesRestoresFilteredArticle(t *testing.T) {
+	article15 := &types.SearchResult{ID: "article-15", Content: "第十五条 采购计划", Score: 0.91}
+	article33 := &types.SearchResult{ID: "article-33", Content: "第三十三条 公开采购通过采购公告邀请不特定供应商", Score: 0.12}
+	got := PromoteExactStructuralMatches(
+		"只根据第三十三条回答",
+		[]*types.SearchResult{article15, article33},
+		[]*types.SearchResult{article15},
+	)
+	if len(got) != 2 || got[0].ID != "article-33" {
+		t.Fatalf("promoted results = %#v, want article-33 first", got)
+	}
+	if got[0].Score != 1.0 || got[0].Metadata["exact_structural_identifier"] != "true" {
+		t.Fatalf("exact candidate not marked/promoted: %#v", got[0])
+	}
+}
+
+func TestPromoteExactStructuralMatchesNormalizesSpacesAndFullWidthDigits(t *testing.T) {
+	article := &types.SearchResult{ID: "article-33", Content: "第33条 正文", Score: 0.2}
+	got := PromoteExactStructuralMatches(
+		"查找第 ３３ 条",
+		[]*types.SearchResult{article},
+		nil,
+	)
+	if len(got) != 1 || got[0].ID != "article-33" {
+		t.Fatalf("full-width exact identifier was not matched: %#v", got)
+	}
+}
+
+func TestPromoteExactStructuralMatchesDoesNotChangeSemanticQuery(t *testing.T) {
+	ranked := []*types.SearchResult{{ID: "existing", Content: "第三十三条", Score: 0.5}}
+	got := PromoteExactStructuralMatches("公开采购如何邀请供应商", ranked, ranked)
+	if len(got) != 1 || got[0].Score != 0.5 || got[0].Metadata != nil {
+		t.Fatalf("non-structural query changed: %#v", got)
+	}
+}
+
+func TestPromoteExplicitCoverageMatchesRestoresEachNamedAspect(t *testing.T) {
+	inquiry := &types.SearchResult{ID: "inquiry", Content: "第三十五条 询比采购适用条件", Score: 0.20}
+	auction := &types.SearchResult{ID: "auction", Content: "第三十六条 竞价采购适用条件", Score: 0.19}
+	negotiation := &types.SearchResult{ID: "negotiation", Content: "第三十七条 竞争谈判适用条件", Score: 0.18}
+	unrelated := &types.SearchResult{ID: "unrelated", Content: "采购项目通用流程", Score: 0.95}
+
+	got := PromoteExplicitCoverageMatches(
+		"比较询比、竞价、竞争谈判的适配点与风险",
+		[]*types.SearchResult{unrelated, inquiry, auction, negotiation},
+		[]*types.SearchResult{unrelated},
+	)
+	seen := map[string]bool{}
+	for _, item := range got {
+		seen[item.ID] = true
+	}
+	for _, id := range []string{"inquiry", "auction", "negotiation", "unrelated"} {
+		if !seen[id] {
+			t.Fatalf("named aspect %q missing from promoted results: %#v", id, got)
+		}
+	}
+}
+
+func TestPromoteExplicitCoverageMatchesIgnoresInstructionWordsAndAllowsModerateDF(t *testing.T) {
+	inquiry := &types.SearchResult{ID: "inquiry", Content: "第三十五条 询比采购，是指一次报价；符合下列适用条件", Score: 0.10}
+	auction := &types.SearchResult{ID: "auction", Content: "第三十六条 竞价采购，是指多次报价；符合下列适用条件", Score: 0.10}
+	negotiation := &types.SearchResult{ID: "negotiation", Content: "第三十七条 竞争谈判，是指协商报价；符合下列适用条件", Score: 0.10}
+	list := &types.SearchResult{ID: "list", Content: "采购方式包括询比采购、竞价采购和竞争谈判", Score: 0.10}
+	generic := &types.SearchResult{ID: "generic", Content: "对文件内容进行具体比较后回答", Score: 0.99}
+	candidates := []*types.SearchResult{generic, list, inquiry, auction, negotiation}
+
+	got := PromoteExplicitCoverageMatches(
+		"请具体比较询比采购、竞价采购和竞争谈判的定义与适用重点，每种一段。",
+		candidates,
+		nil,
+	)
+	seen := map[string]bool{}
+	for _, item := range got {
+		seen[item.ID] = true
+		if topic := item.Metadata["explicit_query_topic"]; topic == "具体" || topic == "比较" {
+			t.Fatalf("instruction word was promoted as a topic: %#v", item)
+		}
+	}
+	for _, id := range []string{"inquiry", "auction", "negotiation"} {
+		if !seen[id] {
+			t.Fatalf("moderately frequent named topic %q was not restored: %#v", id, got)
+		}
+	}
+}
+
+func TestPromoteExplicitCoverageMatchesKeepsExplicitCompoundWithHighSegmentDF(t *testing.T) {
+	inquiry := &types.SearchResult{ID: "inquiry", Content: "第三十五条 询比采购，是指一次性报出不可更改价格", Score: 0.10}
+	auction := &types.SearchResult{ID: "auction", Content: "第三十六条 竞价采购，是指多次竞争报价", Score: 0.10}
+	definition := &types.SearchResult{ID: "negotiation-definition", Content: "第三十七条 竞争谈判是指与二家以上符合资格条件的供应商洽谈", Score: 0.08}
+	conditions := &types.SearchResult{ID: "negotiation-conditions", Content: "竞争谈判适用条件包括技术复杂和不同路径", Score: 0.09}
+	candidates := []*types.SearchResult{inquiry, auction, definition, conditions}
+	// Make the segmented token “谈判” too frequent for the ordinary DF guard.
+	for i := 0; i < 7; i++ {
+		candidates = append(candidates, &types.SearchResult{
+			ID:      "noise-" + strconv.Itoa(i),
+			Content: "通用谈判流程和会议记录",
+			Score:   0.5,
+		})
+	}
+
+	got := PromoteExplicitCoverageMatches(
+		"请依据制度比较询比、竞价和竞争谈判的定义与适用重点，每种一段。",
+		candidates,
+		nil,
+	)
+	seen := map[string]bool{}
+	for _, item := range got {
+		seen[item.ID] = true
+	}
+	for _, id := range []string{"inquiry", "auction", "negotiation-definition"} {
+		if !seen[id] {
+			t.Fatalf("explicit compound aspect %q was not restored: %#v", id, got)
+		}
+	}
+}
+
+func TestPromoteExplicitCoverageMatchesLeavesSingleTopicQueryAlone(t *testing.T) {
+	ranked := []*types.SearchResult{{ID: "existing", Content: "竞价采购", Score: 0.5}}
+	got := PromoteExplicitCoverageMatches("竞价采购是什么", ranked, ranked)
+	if len(got) != 1 || got[0].Score != 0.5 || got[0].Metadata != nil {
+		t.Fatalf("single-topic query changed: %#v", got)
 	}
 }
 

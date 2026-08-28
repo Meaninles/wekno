@@ -163,6 +163,22 @@ class DiscoveryScenarioTests(unittest.TestCase):
         )
         self.assertIsNone(args.next_turn_file)
 
+    def test_live_run_accepts_repeated_focused_case_ids(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "--dataset",
+                "cases.jsonl",
+                "--output",
+                "run.json",
+                "--case-id",
+                "case-a",
+                "--case-id",
+                "case-b",
+            ]
+        )
+        self.assertEqual(args.case_id, ["case-a", "case-b"])
+
     def test_completed_turn_requires_explicit_codex_review_before_resume(self) -> None:
         payload = {
             "sessions": [

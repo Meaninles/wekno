@@ -285,6 +285,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if errors := validate_dataset(unresolved):
         raise DatasetError("dataset invalid: " + "; ".join(errors))
     cases = load_jsonl(args.dataset, resolve_variables=True)
+    if args.case_id:
+        requested = list(dict.fromkeys(args.case_id))
+        known = {case.case_id for case in cases}
+        unknown = sorted(set(requested) - known)
+        if unknown:
+            raise DatasetError("unknown --case-id value(s): " + ", ".join(unknown))
+        selected_ids = set(requested)
+        cases = [case for case in cases if case.case_id in selected_ids]
     splits = set(args.split or [Split.DEV])
     if Split.SEALED_HOLDOUT in splits and not args.allow_sealed:
         raise DatasetError("sealed_holdout requires explicit --allow-sealed")
@@ -331,6 +339,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_score(args: argparse.Namespace) -> int:
     cases = load_jsonl(args.dataset)
+    if errors := validate_dataset(cases):
+        raise DatasetError("dataset invalid: " + "; ".join(errors))
     specs = {case.case_id: case for case in cases}
     run = load_run(args.run)
     rescored: list[CaseRun] = []
@@ -340,7 +350,18 @@ def cmd_score(args: argparse.Namespace) -> int:
             rescored.append(case_run.model_copy(update={"verdict": Verdict.INVALID, "error": "case missing from dataset"}))
         else:
             rescored.append(score_case(spec, case_run))
-    output = run.model_copy(update={"cases": rescored})
+    # Rescoring is also the supported path for a contract-only dataset
+    # revision: observations remain immutable, while the output is explicitly
+    # rebound to the supplied dataset identity and suite.
+    from .dataset import dataset_sha256
+
+    output = run.model_copy(
+        update={
+            "cases": rescored,
+            "dataset_sha256": dataset_sha256(cases),
+            "suite": cases[0].suite if cases else run.suite,
+        }
+    )
     write_json(args.output, output)
     return 0
 
@@ -501,6 +522,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dataset", required=True)
     run.add_argument("--output", required=True)
     run.add_argument("--split", type=_split, action="append")
+    run.add_argument(
+        "--case-id",
+        action="append",
+        default=[],
+        help="run only the selected case id; repeat for focused eval-loop iterations",
+    )
     run.add_argument("--allow-sealed", action="store_true")
     run.add_argument("--max-concurrency", type=int, default=1)
     run.add_argument("--label")

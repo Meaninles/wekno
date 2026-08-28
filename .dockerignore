@@ -80,3 +80,7 @@ fix-docker.sh
 **/.local-data/**
 *local-data*
 *local-data*/**
+
+# Eval observations/reports are mounted into the runner separately and must
+# never inflate the Go runtime build context on each eval-loop iteration.
+custom/services/agent-eval/artifacts/

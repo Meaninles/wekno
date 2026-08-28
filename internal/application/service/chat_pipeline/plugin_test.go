@@ -32,6 +32,9 @@ func TestPrepareMessagesWithHistoryInjectsSharedCitationContractForEveryTurn(t *
 	if !strings.Contains(messages[0].Content, "A prior turn's output format, ending, or citation constraint is inactive") {
 		t.Fatalf("evidence-backed multi-turn answers must not inherit stale turn constraints: %s", messages[0].Content)
 	}
+	if !strings.Contains(messages[len(messages)-1].Content, "[WEKNORA_CURRENT_TURN_EXECUTION_V1]") {
+		t.Fatalf("current-turn execution contract missing: %#v", messages)
+	}
 
 	withoutEvidence := *withEvidence
 	withoutEvidence.RenderedContexts = ""
@@ -58,6 +61,39 @@ func TestPrepareMessagesWithHistoryAddsLightweightSkillsToSystemPrompt(t *testin
 	}
 	if strings.Contains(messages[len(messages)-1].Content, "制度助手") {
 		t.Fatalf("lightweight Skill context must not be injected as user text: %#v", messages)
+	}
+}
+
+func TestPrepareMessagesWithHistoryUsesOnlyUserFactsForStateAudit(t *testing.T) {
+	chatManage := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			Query:         "请做完整状态审计，不要重新检索制度。",
+			SummaryConfig: types.SummaryConfig{Prompt: "Audit the conversation state."},
+		},
+		PipelineState: types.PipelineState{
+			UserContent: "请做完整状态审计，不要重新检索制度。",
+			History: []*types.History{
+				{Query: "预算改为220万元。", Answer: "预算仍是360万元。"},
+				{Query: "项目负责人改为林梅。", Answer: "负责人是王强。"},
+			},
+		},
+	}
+
+	messages := prepareMessagesWithHistory(chatManage)
+	if len(messages) != 4 {
+		t.Fatalf("messages = %d, want system + two prior users + current user: %#v", len(messages), messages)
+	}
+	for _, message := range messages[1:] {
+		if message.Role == "assistant" {
+			t.Fatalf("state audit replayed non-authoritative assistant history: %#v", messages)
+		}
+	}
+	joined := messages[1].Content + messages[2].Content
+	if !strings.Contains(joined, "220万元") || !strings.Contains(joined, "林梅") {
+		t.Fatalf("state audit dropped authoritative user facts: %#v", messages)
+	}
+	if strings.Contains(joined, "360万元") || strings.Contains(joined, "王强") {
+		t.Fatalf("state audit retained stale assistant claims: %#v", messages)
 	}
 }
 

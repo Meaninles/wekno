@@ -15,6 +15,7 @@ var (
 	incompleteTagTailRE  = regexp.MustCompile(`(?is)</?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*$`)
 	canonicalSourceRE    = regexp.MustCompile(`^<src id="(S[1-9][0-9]*)" />$`)
 	canonicalSourceTagRE = regexp.MustCompile(`<src id="(S[1-9][0-9]*)" />`)
+	bareAngleSourceRE    = regexp.MustCompile(`(?i)<\s*S[1-9][0-9]*\s*(?:/\s*)?>`)
 	protectedCodeRE      = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
 	wikiHandleRE         = regexp.MustCompile(`\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]`)
 	markdownListMarkerRE = regexp.MustCompile(`^\s*(?:[-+*]|[0-9]+[.)、])\s+(.+?)\s*$`)
@@ -83,6 +84,14 @@ func FilterAnswerCitations(
 		})
 		segment = incompleteTagTailRE.ReplaceAllStringFunc(segment, func(string) string {
 			report.IncompleteTags++
+			return ""
+		})
+		// Known bare aliases such as <S4> have already been normalized by the
+		// repair pass. Any remaining bare angle handle is unregistered or was
+		// supplied without evidence, so remove the malformed UI markup rather
+		// than exposing it or guessing a source.
+		segment = bareAngleSourceRE.ReplaceAllStringFunc(segment, func(string) string {
+			report.ForbiddenTags++
 			return ""
 		})
 		segment = collapseAdjacentDuplicateCitations(segment, &report)

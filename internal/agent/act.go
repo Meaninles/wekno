@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -24,6 +26,42 @@ import (
 // Langfuse UI for every tool call is noisy. We keep a generous slice so the
 // gist is preserved, and include the original length in metadata.
 const langfuseToolOutputPreview = 4000
+
+// targetedEvidenceRetrievalRedirect prevents a multi-topic comparison from
+// dumping an entire pinned document into the bounded tool-output window. That
+// failure mode is subtle: early chunks remain visible while later named
+// topics are truncated, encouraging one citation to be reused for every item.
+// Exact chunk reads and ordinary single-topic/exhaustive requests are unchanged.
+func targetedEvidenceRetrievalRedirect(
+	toolName string,
+	args map[string]interface{},
+	query string,
+) *types.ToolResult {
+	if toolName != agenttools.ToolListKnowledgeChunks || len(conversationmemory.RequiredEvidenceTopics(query)) < 2 {
+		return nil
+	}
+	stringArg := func(key string) string {
+		value, _ := args[key].(string)
+		return strings.TrimSpace(value)
+	}
+	if stringArg("chunk_id") != "" || stringArg("faq_id") != "" {
+		return nil
+	}
+	knowledgeID := stringArg("knowledge_id")
+	if knowledgeID == "" {
+		return nil
+	}
+	topics := conversationmemory.RequiredEvidenceTopics(query)
+	encodedTopics, _ := json.Marshal(topics)
+	return &types.ToolResult{
+		Success: false,
+		Error: fmt.Sprintf(
+			"Whole-document listing was skipped because this request requires direct evidence for multiple named topics and bounded output could hide later chunks. Use grep_chunks (preferred) or knowledge_search inside knowledge_id %q with one query for each topic in %s, then call list_knowledge_chunks with each exact chunk_id that supports a claim. Do not answer until every named topic has direct evidence.",
+			knowledgeID,
+			string(encodedTopics),
+		),
+	}
+}
 
 func toolExecTimeout(toolName string) time.Duration {
 	return defaultToolExecTimeout
@@ -421,10 +459,14 @@ func (e *AgentEngine) runToolCall(
 	})
 
 	execCtx, toolCancel := context.WithTimeout(toolExecCtx, execTimeout)
-	result, err := e.toolRegistry.ExecuteTool(
-		execCtx, tc.Function.Name,
-		json.RawMessage(tc.Function.Arguments),
-	)
+	result := targetedEvidenceRetrievalRedirect(tc.Function.Name, args, originalUserQuery)
+	var err error
+	if result == nil {
+		result, err = e.toolRegistry.ExecuteTool(
+			execCtx, tc.Function.Name,
+			json.RawMessage(tc.Function.Arguments),
+		)
+	}
 	toolCancel()
 	duration := time.Since(toolCallStartTime).Milliseconds()
 

@@ -50,7 +50,10 @@ func TestNativeAgentNaturalCompletionKeepsCanonicalToolCitation(t *testing.T) {
 }
 
 func TestNativeAgentPlacesTerminalCitationInstructionAtGenerationBoundary(t *testing.T) {
-	engine := &AgentEngine{eventBus: event.NewEventBus()}
+	engine := &AgentEngine{
+		eventBus:    event.NewEventBus(),
+		activeQuery: "依据已选制度只比较公开采购、询比、竞价和竞争谈判，不要给最终建议。",
+	}
 	engine.citationState.reset()
 	result := &types.ToolResult{
 		Success: true,
@@ -72,8 +75,11 @@ func TestNativeAgentPlacesTerminalCitationInstructionAtGenerationBoundary(t *tes
 		{Role: "tool", Content: result.Output, Name: "list_knowledge_chunks"},
 	}
 	prepared := engine.prepareCitationAwareGenerationMessages(original)
-	if !strings.HasSuffix(prepared[len(prepared)-1].Content, sourcerefs.TerminalCitationInstruction()) {
+	if !strings.Contains(prepared[len(prepared)-1].Content, sourcerefs.TerminalCitationInstruction()) {
 		t.Fatalf("terminal citation instruction is not adjacent to generation: %s", prepared[len(prepared)-1].Content)
+	}
+	if !strings.Contains(prepared[len(prepared)-1].Content, "[WEKNORA_TERMINAL_OUTPUT_CHECK]") {
+		t.Fatalf("deferred comparison invariants are not adjacent to generation: %s", prepared[len(prepared)-1].Content)
 	}
 	if strings.Count(prepared[len(prepared)-1].Content, "[CITATION_USE]") != 1 {
 		t.Fatalf("terminal citation instruction was duplicated: %s", prepared[len(prepared)-1].Content)
@@ -85,6 +91,12 @@ func TestNativeAgentPlacesTerminalCitationInstructionAtGenerationBoundary(t *tes
 	preparedAgain := engine.prepareCitationAwareGenerationMessages(prepared)
 	if preparedAgain[len(preparedAgain)-1].Content != prepared[len(prepared)-1].Content {
 		t.Fatalf("generation preparation is not idempotent")
+	}
+
+	engine.activeQuery = "只回答第三十六条定义并引用。"
+	ordinary := engine.prepareCitationAwareGenerationMessages(original)
+	if strings.Contains(ordinary[len(ordinary)-1].Content, "[WEKNORA_TERMINAL_OUTPUT_CHECK]") {
+		t.Fatalf("ordinary evidence turn gained deferred-comparison directive: %#v", ordinary)
 	}
 }
 

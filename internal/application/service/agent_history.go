@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -54,21 +55,36 @@ func LoadAgentHistory(
 	sessionID string,
 	maxRounds int,
 ) ([]chat.Message, error) {
+	history, _, err := LoadAgentHistoryWithArchive(ctx, messageRepo, sessionID, maxRounds)
+	return history, err
+}
+
+// LoadAgentHistoryWithArchive returns the configured recent full turns plus a
+// bounded, user-only archive for completed turns outside that window.
+func LoadAgentHistoryWithArchive(
+	ctx context.Context,
+	messageRepo interfaces.MessageRepository,
+	sessionID string,
+	maxRounds int,
+) ([]chat.Message, string, error) {
 	if maxRounds <= 0 {
-		return []chat.Message{}, nil
+		return []chat.Message{}, "", nil
 	}
 
 	fetchLimit := maxRounds * agentHistoryFetchMultiplier
 	if fetchLimit < agentHistoryFetchMin {
 		fetchLimit = agentHistoryFetchMin
 	}
+	if archiveLimit := conversationmemory.FetchMessageLimit(maxRounds); archiveLimit > fetchLimit {
+		fetchLimit = archiveLimit
+	}
 
 	rows, err := messageRepo.GetRecentMessagesBySession(ctx, sessionID, fetchLimit)
 	if err != nil {
-		return nil, fmt.Errorf("load agent history: %w", err)
+		return nil, "", fmt.Errorf("load agent history: %w", err)
 	}
 	if len(rows) == 0 {
-		return []chat.Message{}, nil
+		return []chat.Message{}, "", nil
 	}
 
 	type pair struct {
@@ -105,6 +121,11 @@ func LoadAgentHistory(
 		return completePairs[i].createdAt.Before(completePairs[j].createdAt)
 	})
 
+	queries := make([]string, 0, len(completePairs))
+	for _, p := range completePairs {
+		queries = append(queries, buildUserHistoryMessage(p.user).Content)
+	}
+	archive := conversationmemory.BuildUserArchive(queries, maxRounds)
 	if len(completePairs) > maxRounds {
 		completePairs = completePairs[len(completePairs)-maxRounds:]
 	}
@@ -114,7 +135,21 @@ func LoadAgentHistory(
 		out = append(out, buildUserHistoryMessage(p.user))
 		out = append(out, buildAssistantHistoryMessages(p.assistant)...)
 	}
-	return out, nil
+	return out, archive, nil
+}
+
+// userOnlyAgentHistory removes prior assistant/tool output when the current
+// request is an explicit state audit. User turns are the source of truth for
+// mutable conversation state; model output is neither evidence nor a durable
+// fact and can contain values superseded by a later correction.
+func userOnlyAgentHistory(messages []chat.Message) []chat.Message {
+	out := make([]chat.Message, 0, len(messages))
+	for _, message := range messages {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			out = append(out, message)
+		}
+	}
+	return out
 }
 
 // buildUserHistoryMessage converts a stored user message into the chat.Message

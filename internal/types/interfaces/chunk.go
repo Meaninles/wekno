@@ -30,6 +30,16 @@ type ChunkRepository interface {
 	ListChunksBySeqID(ctx context.Context, tenantID uint64, seqIDs []int64) ([]*types.Chunk, error)
 	// ListChunksByKnowledgeID lists chunks by knowledge id
 	ListChunksByKnowledgeID(ctx context.Context, tenantID uint64, knowledgeID string) ([]*types.Chunk, error)
+	// ListAdjacentTextChunks returns the nearest text chunks on both sides of a
+	// logical chunk index. Sparse indexes are supported; the repository chooses
+	// neighbours by ordering rather than arithmetic.
+	ListAdjacentTextChunks(
+		ctx context.Context,
+		tenantID uint64,
+		knowledgeID string,
+		chunkIndex int,
+		radius int,
+	) ([]*types.Chunk, error)
 	// ListPagedChunksByKnowledgeID lists paged chunks by knowledge id.
 	// When tagID is non-empty, results are filtered by tag_id.
 	// knowledgeType: "faq" or "manual" - determines sort order and search behavior

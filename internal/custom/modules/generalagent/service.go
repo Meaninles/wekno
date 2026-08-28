@@ -16,6 +16,7 @@ import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/custom/modules/artifactstore"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
@@ -185,6 +186,9 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if err != nil {
 		return err
 	}
+	agentConfig.DisableToolsForTurn = conversationmemory.IsStateOnlyTurn(req.Query) &&
+		len(req.Attachments) == 0 && len(req.ImageURLs) == 0 &&
+		strings.TrimSpace(req.QuotedContext) == ""
 	if blocked, err := s.preflightDataAnalysisSources(ctx, eventBus, req, agentConfig, runID, start); blocked || err != nil {
 		return err
 	}
@@ -208,6 +212,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		return err
 	}
 	query := s.buildEffectiveQuery(ctx, req)
+	runtimeQuery := query
 	lightMode, lightNames := configuredLightweightSkillSelection(req.CustomAgent)
 	lightweightSkills, lightweightDrops, err := s.lightweightSkillSpecs(ctx, lightMode, lightNames, req.SkillNames)
 	if err != nil {
@@ -252,20 +257,41 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	unregister := registerActiveRun(active)
 	defer unregister()
 
-	history := s.buildHistory(ctx, req, agentConfig)
+	history, durableUserContext := s.buildHistory(ctx, req, agentConfig)
+	boundaryUserStatements := make([]string, 0, len(history)+1)
+	if strings.TrimSpace(durableUserContext) != "" {
+		boundaryUserStatements = append(boundaryUserStatements, durableUserContext)
+	}
+	for _, message := range history {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && strings.TrimSpace(message.Content) != "" {
+			boundaryUserStatements = append(boundaryUserStatements, message.Content)
+		}
+	}
+	if conversationmemory.RequiresAuthoritativeUserHistory(req.Query) {
+		history = userOnlyGeneralAgentHistory(history)
+	}
+	runtimeQuery = conversationmemory.AppendAuditArchive(
+		runtimeQuery,
+		req.Query,
+		durableUserContext,
+	)
+	runtimeQuery = conversationmemory.AppendCurrentTurnDirective(runtimeQuery, req.Query)
 	evalObservability := false
 	if manager := langfuse.GetManager(); manager != nil {
 		evalObservability = manager.CaptureContent() && manager.EnabledFor(ctx)
 	}
 	payload := ChatPayload{
-		RunID:                   runID,
-		TenantID:                tenantIDFromContext(ctx),
-		UserID:                  userID,
-		SessionID:               sessionID,
-		RequestID:               req.RequestID,
-		AssistantMessageID:      req.AssistantMessageID,
-		Query:                   query,
-		SystemPrompt:            renderSystemPrompt(ctx, agentConfig.ResolveSystemPrompt(agentConfig.WebSearchEnabled), agentConfig.WebSearchEnabled),
+		RunID:              runID,
+		TenantID:           tenantIDFromContext(ctx),
+		UserID:             userID,
+		SessionID:          sessionID,
+		RequestID:          req.RequestID,
+		AssistantMessageID: req.AssistantMessageID,
+		Query:              runtimeQuery,
+		SystemPrompt: conversationmemory.AppendUserArchive(
+			renderSystemPrompt(ctx, agentConfig.ResolveSystemPrompt(agentConfig.WebSearchEnabled), agentConfig.WebSearchEnabled),
+			durableUserContext,
+		),
 		History:                 history,
 		ImageURLs:               cloneStringSlice(req.ImageURLs),
 		ImageDescription:        req.ImageDescription,
@@ -283,7 +309,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		ToolCallbackURL:         toolCallbackURL(),
 		ToolCallbackAPIKey:      strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_API_KEY")),
 		ArtifactUploadURL:       artifactUploadURL(),
-		EnableArtifacts:         agentConfig.EnableArtifacts,
+		EnableArtifacts:         generalAgentArtifactsEnabled(agentConfig, req.Query),
 		EvalObservability:       evalObservability,
 	}
 
@@ -302,6 +328,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 				"actual_history_messages":   len(history),
 				"history_count_by_role":     historyRoleCounts,
 				"history_chars_by_role":     historyRoleChars,
+				"archive_chars":             len([]rune(durableUserContext)),
 				"current_query_chars":       len([]rune(query)),
 				"system_prompt_chars":       len([]rune(payload.SystemPrompt)),
 				"tool_count":                len(payload.Tools),
@@ -423,6 +450,25 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	}
 
 	allRefs := active.snapshotSourceReferences()
+	finalAnswer = conversationmemory.StripInternalPlanningPreamble(finalAnswer)
+	finalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
+		finalAnswer,
+		req.Query,
+		boundaryUserStatements...,
+	)
+	finalAnswer = conversationmemory.NormalizeDeferredComparisonRelationships(finalAnswer, req.Query)
+	finalAnswer = conversationmemory.NormalizeStateAuditSections(
+		finalAnswer,
+		req.Query,
+		boundaryUserStatements...,
+	)
+	finalAnswer = conversationmemory.NormalizeExplicitUserIdentityUnknown(
+		finalAnswer,
+		req.Query,
+		boundaryUserStatements...,
+	)
+	finalAnswer = conversationmemory.EnsureDeferredDecisionConclusion(finalAnswer, req.Query)
+	finalAnswer = sourcerefs.RepairAnswerCitations(finalAnswer, allRefs)
 	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
 		logger.Warnf(ctx, "general-agent filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
@@ -721,6 +767,9 @@ func stringFromAny(value any) string {
 }
 
 func (s *Service) resolveRerankModel(ctx context.Context, req *types.QARequest, agentConfig *types.AgentConfig) (rerank.Reranker, error) {
+	if agentConfig.DisableToolsForTurn {
+		return nil, nil
+	}
 	for _, tool := range agentConfig.AllowedTools {
 		if tool != agenttools.ToolKnowledgeSearch {
 			continue
@@ -859,47 +908,150 @@ func (s *Service) buildEffectiveQuery(ctx context.Context, req *types.QARequest)
 	return req.Query
 }
 
-func (s *Service) buildHistory(ctx context.Context, req *types.QARequest, config *types.AgentConfig) []ChatHistoryMessage {
+func (s *Service) buildHistory(
+	ctx context.Context,
+	req *types.QARequest,
+	config *types.AgentConfig,
+) ([]ChatHistoryMessage, string) {
 	if s.messageService == nil || !config.MultiTurnEnabled {
-		return nil
+		return nil, ""
 	}
 	turns := config.HistoryTurns
 	if turns <= 0 {
 		turns = 5
 	}
-	msgs, err := s.messageService.GetRecentMessagesBySession(ctx, req.Session.ID, turns*2+4)
+	msgs, err := s.messageService.GetRecentMessagesBySession(
+		ctx,
+		req.Session.ID,
+		conversationmemory.FetchMessageLimit(turns),
+	)
 	if err != nil {
 		logger.Warnf(ctx, "general-agent load history failed: %v", err)
-		return nil
+		return nil, ""
 	}
-	sort.Slice(msgs, func(i, j int) bool {
-		return msgs[i].CreatedAt.Before(msgs[j].CreatedAt)
-	})
-	out := make([]ChatHistoryMessage, 0, len(msgs))
+	return buildGeneralAgentHistory(msgs, turns, req.UserMessageID, req.AssistantMessageID)
+}
+
+func buildGeneralAgentHistory(
+	msgs []*types.Message,
+	turns int,
+	excludedMessageIDs ...string,
+) ([]ChatHistoryMessage, string) {
+	type historyPair struct {
+		user      *types.Message
+		assistant *types.Message
+		createdAt time.Time
+	}
+	excluded := make(map[string]struct{}, len(excludedMessageIDs))
+	for _, id := range excludedMessageIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			excluded[id] = struct{}{}
+		}
+	}
+	pairs := make(map[string]*historyPair)
 	for _, msg := range msgs {
-		if msg == nil || msg.ID == req.AssistantMessageID || msg.ID == req.UserMessageID {
+		if msg == nil {
 			continue
 		}
-		role := strings.TrimSpace(msg.Role)
-		if role != "user" && role != "assistant" {
+		if _, skip := excluded[msg.ID]; skip {
 			continue
 		}
-		content := strings.TrimSpace(msg.Content)
-		if role == "assistant" {
-			content = strings.TrimSpace(sourcerefs.StripCitationProtocol(content))
+		pair := pairs[msg.RequestID]
+		if pair == nil {
+			pair = &historyPair{}
+			pairs[msg.RequestID] = pair
 		}
-		if content == "" {
+		switch strings.TrimSpace(msg.Role) {
+		case "user":
+			pair.user = msg
+			pair.createdAt = msg.CreatedAt
+		case "assistant":
+			pair.assistant = msg
+		}
+	}
+	complete := make([]*historyPair, 0, len(pairs))
+	for _, pair := range pairs {
+		if pair.user == nil || pair.assistant == nil || !pair.assistant.IsCompleted {
 			continue
 		}
+		complete = append(complete, pair)
+	}
+	sort.Slice(complete, func(i, j int) bool {
+		return complete[i].createdAt.Before(complete[j].createdAt)
+	})
+	queries := make([]string, 0, len(complete))
+	for _, pair := range complete {
+		queries = append(queries, strings.TrimSpace(pair.user.Content))
+	}
+	archive := conversationmemory.BuildUserArchive(queries, turns)
+	if len(complete) > turns {
+		complete = complete[len(complete)-turns:]
+	}
+	out := make([]ChatHistoryMessage, 0, len(complete)*2)
+	for _, pair := range complete {
 		out = append(out, ChatHistoryMessage{
-			Role:           role,
-			Content:        content,
-			MentionedItems: append([]types.MentionedItem(nil), msg.MentionedItems...),
-			Images:         imageSpecs(msg.Images),
-			Attachments:    attachmentSpecsWithoutContent(msg.Attachments),
+			Role:           "user",
+			Content:        strings.TrimSpace(pair.user.Content),
+			MentionedItems: append([]types.MentionedItem(nil), pair.user.MentionedItems...),
+			Images:         imageSpecs(pair.user.Images),
+			Attachments:    attachmentSpecsWithoutContent(pair.user.Attachments),
 		})
+		answer := strings.TrimSpace(sourcerefs.StripCitationProtocol(pair.assistant.Content))
+		if answer != "" {
+			out = append(out, ChatHistoryMessage{Role: "assistant", Content: answer})
+		}
+	}
+	return out, archive
+}
+
+// userOnlyGeneralAgentHistory keeps state-audit reconstruction grounded in
+// user-authored facts. Assistant answers remain available on ordinary turns,
+// but are not treated as authoritative state during an explicit audit.
+func userOnlyGeneralAgentHistory(history []ChatHistoryMessage) []ChatHistoryMessage {
+	out := make([]ChatHistoryMessage, 0, len(history))
+	for _, message := range history {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			out = append(out, message)
+		}
 	}
 	return out
+}
+
+// generalAgentArtifactsEnabled separates configured capability from current
+// user intent. A general-purpose agent must not register a selected source file
+// as a new downloadable artifact during an informational or comparison turn.
+// Dedicated artifact-oriented agent types retain their configured behavior.
+func generalAgentArtifactsEnabled(config *types.AgentConfig, query string) bool {
+	if config == nil || !config.EnableArtifacts {
+		return false
+	}
+	if config.AgentType != types.AgentTypeGeneralAgent {
+		return true
+	}
+	value := strings.ToLower(strings.TrimSpace(query))
+	if value == "" || containsAnyString(value, []string{
+		"不要生成文件", "无需生成文件", "不需要生成文件", "不要创建文件", "只要文字", "只需文字",
+		"do not create a file", "text only",
+	}) {
+		return false
+	}
+	artifactTerm := containsAnyString(value, []string{
+		"文件", "文档", "报告", "附件", "表格", "幻灯片", "ppt", "pptx", "word", "docx", "excel", "xlsx", "pdf",
+	})
+	actionTerm := containsAnyString(value, []string{
+		"生成", "创建", "制作", "导出", "保存", "下载", "交付", "输出为", "整理成", "转换成", "转成", "修改", "编辑", "做一份",
+		"generate", "create", "export", "save", "download", "deliver", "convert", "edit",
+	})
+	return (artifactTerm && actionTerm) || containsAnyString(value, []string{"可下载文件", "下载附件"})
+}
+
+func containsAnyString(value string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if strings.Contains(value, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func configuredLightweightSkillSelection(agent *types.CustomAgent) (string, []string) {
@@ -1550,6 +1702,7 @@ func runtimeConfigSpec(c *types.AgentConfig) RuntimeConfigSpec {
 	return RuntimeConfigSpec{
 		AgentID:                     c.AgentID,
 		AgentType:                   c.AgentType,
+		DisableToolsForTurn:         c.DisableToolsForTurn,
 		MaxIterations:               c.MaxIterations,
 		Temperature:                 c.Temperature,
 		Thinking:                    c.Thinking,

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
@@ -972,8 +973,30 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 						),
 				)
 				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
+				answer := conversationmemory.StripInternalPlanningPreamble(streamCtx.assistantMessage.Content)
+				answer = conversationmemory.NormalizeExplicitActionBoundaries(
+					answer,
+					reqCtx.query,
+					data.PriorUserStatements...,
+				)
+				answer = conversationmemory.NormalizeDeferredComparisonRelationships(answer, reqCtx.query)
+				answer = conversationmemory.NormalizeStateAuditSections(
+					answer,
+					reqCtx.query,
+					data.PriorUserStatements...,
+				)
+				answer = conversationmemory.NormalizeExplicitUserIdentityUnknown(
+					answer,
+					reqCtx.query,
+					data.PriorUserStatements...,
+				)
+				answer = conversationmemory.EnsureDeferredDecisionConclusion(answer, reqCtx.query)
+				answer = sourcerefs.RepairAnswerCitations(
+					answer,
+					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+				)
 				filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
-					streamCtx.assistantMessage.Content,
+					answer,
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
 				)
 				if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {

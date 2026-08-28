@@ -72,6 +72,17 @@ func TestFilterAnswerCitationsDropsMalformedOpeningClosingAndIncompleteTags(t *t
 	}
 }
 
+func TestFilterAnswerCitationsRemovesUnregisteredBareAngleHandles(t *testing.T) {
+	answer := `有效。<src id="S1" /> 未注册<S99> 空元素<S98/>`
+	filtered, _, report := FilterAnswerCitations(answer, citationTestRefs())
+	if strings.Contains(filtered, "<S99>") || strings.Contains(filtered, "<S98/>") {
+		t.Fatalf("bare citation aliases leaked to user output: %q", filtered)
+	}
+	if report.ForbiddenTags != 2 {
+		t.Fatalf("bare aliases were not reported: %#v", report)
+	}
+}
+
 func TestFilterAnswerCitationsCollapsesOnlyAdjacentSameEvidence(t *testing.T) {
 	answer := "甲。<src id=\"S1\" /> \n <src id=\"S1\" /><src id=\"S1\" />  <src id=\"S1\" />" +
 		"<src id=\"S2\" />乙。<src id=\"S1\" />丙。<src id=\"S1\" />"

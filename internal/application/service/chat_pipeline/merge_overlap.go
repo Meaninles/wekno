@@ -25,6 +25,18 @@ func (p *PluginMerge) mergeOverlappingChunks(
 	for i := 1; i < len(chunks); i++ {
 		lastChunk := merged[len(merged)-1]
 
+		// Parent chunks are independent retrieval windows and, critically, map
+		// back to different exact-evidence sets. Their document ranges may overlap
+		// at a splitter boundary. Folding them into the first result discards the
+		// later ParentChunkID, so citation resolution can no longer expose facts
+		// that came from the later window. Preserve both windows; ordinary child
+		// and neighbor chunks with the same lineage still merge as before.
+		if lastChunk.ParentChunkID != "" && chunks[i].ParentChunkID != "" &&
+			lastChunk.ParentChunkID != chunks[i].ParentChunkID {
+			merged = append(merged, chunks[i])
+			continue
+		}
+
 		// Non-overlapping: add as a new entry
 		if chunks[i].StartAt > lastChunk.EndAt {
 			merged = append(merged, chunks[i])

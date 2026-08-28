@@ -118,6 +118,7 @@ def validate_dataset(cases: list[CaseSpec]) -> list[str]:
                         bool(contract.conversation_state.active_facts),
                         bool(contract.conversation_state.retired_facts),
                         bool(contract.conversation_state.unknown_facts),
+                        bool(contract.conversation_state.forbidden_unknown_facts),
                         bool(contract.conversation_state.forbidden_inferences),
                         bool(contract.conversation_state.action_boundaries),
                         bool(

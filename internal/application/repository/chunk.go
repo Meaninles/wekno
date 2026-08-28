@@ -192,6 +192,47 @@ func (r *chunkRepository) ListChunksByKnowledgeID(
 	return chunks, nil
 }
 
+// ListAdjacentTextChunks returns up to radius preceding and following text
+// chunks. Two bounded index-friendly queries avoid loading a large document and
+// remain correct when chunk_index values are sparse after re-processing.
+func (r *chunkRepository) ListAdjacentTextChunks(
+	ctx context.Context,
+	tenantID uint64,
+	knowledgeID string,
+	chunkIndex int,
+	radius int,
+) ([]*types.Chunk, error) {
+	if radius <= 0 {
+		return []*types.Chunk{}, nil
+	}
+	status := []int{int(types.ChunkStatusIndexed), int(types.ChunkStatusDefault)}
+	base := func() *gorm.DB {
+		return r.db.WithContext(ctx).
+			Where(
+				"tenant_id = ? AND knowledge_id = ? AND chunk_type = ? AND status IN (?)",
+				tenantID,
+				knowledgeID,
+				types.ChunkTypeText,
+				status,
+			)
+	}
+
+	var before []*types.Chunk
+	if err := base().Where("chunk_index < ?", chunkIndex).
+		Order("chunk_index DESC").Limit(radius).Find(&before).Error; err != nil {
+		return nil, err
+	}
+	var after []*types.Chunk
+	if err := base().Where("chunk_index > ?", chunkIndex).
+		Order("chunk_index ASC").Limit(radius).Find(&after).Error; err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(before)-1; left < right; left, right = left+1, right-1 {
+		before[left], before[right] = before[right], before[left]
+	}
+	return append(before, after...), nil
+}
+
 // ListChunkIDsByKnowledgeIDUnscoped returns stable chunk identities even
 // after the source deletion path soft-deleted the chunk rows. Content is not
 // selected: Wiki retract needs only the IDs to scrub page.chunk_refs.

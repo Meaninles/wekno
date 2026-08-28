@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -71,6 +72,15 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		return ErrModelCall.WithError(errors.New("EventBus is required for streaming"))
 	}
 	eventBus := chatManage.EventBus
+	boundaryUserStatements := make([]string, 0, len(chatManage.History)+1)
+	if archive := strings.TrimSpace(chatManage.DurableUserContext); archive != "" {
+		boundaryUserStatements = append(boundaryUserStatements, archive)
+	}
+	for _, history := range chatManage.History {
+		if history != nil && strings.TrimSpace(history.Query) != "" {
+			boundaryUserStatements = append(boundaryUserStatements, history.Query)
+		}
+	}
 
 	pipelineInfo(ctx, "Stream", "eventbus_ready", map[string]interface{}{
 		"session_id": chatManage.SessionID,
@@ -182,14 +192,18 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 
 				if response.ResponseType == types.ResponseTypeAnswer {
 					closeThinking()
+					finalData := event.AgentFinalAnswerData{
+						Content: response.Content,
+						Done:    response.Done,
+					}
+					if response.Done {
+						finalData.PriorUserStatements = boundaryUserStatements
+					}
 					eventBus.Emit(ctx, types.Event{
 						ID:        answerID,
 						Type:      types.EventType(event.EventAgentFinalAnswer),
 						SessionID: chatManage.SessionID,
-						Data: event.AgentFinalAnswerData{
-							Content: response.Content,
-							Done:    response.Done,
-						},
+						Data:      finalData,
 					})
 				}
 			}

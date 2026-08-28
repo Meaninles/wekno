@@ -36,6 +36,7 @@ class RuntimeToolSpec(BaseModel):
 class RuntimeConfigSpec(BaseModel):
     agent_id: str = ""
     agent_type: str = ""
+    disable_tools_for_turn: bool = False
     max_iterations: int = 10
     temperature: float = 0
     thinking: bool | None = None

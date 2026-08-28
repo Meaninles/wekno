@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from curation.build_multiturn_ready_v1 import build_cases
+from curation.build_multiturn_ready_v2 import build_cases as build_v2_cases
 from weknora_eval.calibration import load_calibration
 from weknora_eval.dataset import dataset_sha256, load_jsonl, validate_dataset
 from weknora_eval.langfuse_store import publish_dataset
@@ -47,6 +48,261 @@ class ReadinessTests(unittest.TestCase):
         compiled = build_cases()
         self.assertEqual(dataset_sha256(committed), dataset_sha256(compiled))
         self.assertEqual(validate_dataset(committed), [])
+
+    def test_v2_contract_revision_is_frozen_and_observation_compatible(self) -> None:
+        committed = load_jsonl(ROOT / "datasets" / "multiturn-ready.v2.jsonl")
+        compiled = build_v2_cases()
+        v1_by_id = {case.case_id: case for case in build_cases()}
+        self.assertEqual(dataset_sha256(committed), dataset_sha256(compiled))
+        self.assertEqual(validate_dataset(committed), [])
+        self.assertEqual(
+            {case.case_id for case in committed},
+            set(v1_by_id),
+            "contract-only revisions keep stable scenario IDs for immutable observation rescoring",
+        )
+        for case in committed:
+            v1 = v1_by_id[case.case_id]
+            self.assertEqual(
+                [turn.query for turn in case.turns],
+                [turn.query for turn in v1.turns],
+            )
+            self.assertEqual(case.repetitions, v1.repetitions)
+            self.assertEqual(case.setup, v1.setup)
+
+        active = next(
+            case
+            for case in committed
+            if case.family_id == "active-retired-state-window-plus-two"
+        )
+        turn7 = active.turns[6].contract.conversation_state
+        self.assertIn("尚未核验", turn7.unknown_facts[0].any_of)
+        self.assertIn("待核实", turn7.unknown_facts[0].any_of)
+        turn8 = active.turns[7].contract.conversation_state
+        self.assertIn("不成立", turn8.retired_facts[0].any_of)
+        turn8_active = {
+            rule.rule_id: rule for rule in turn8.active_facts
+        }
+        self.assertEqual(turn8_active["not-exclusive"].all_of, ["A", "B", "C"])
+        self.assertIn(
+            "不可替代主张：已核验为否",
+            turn8_active["not-exclusive"].any_of,
+        )
+        turn1_boundaries = {
+            rule.rule_id: rule
+            for rule in active.turns[0].contract.conversation_state.action_boundaries
+        }
+        self.assertEqual(turn1_boundaries["no-procurement-action"].all_of, ["采购"])
+        self.assertIn("不予执行", turn1_boundaries["no-procurement-action"].any_of)
+        self.assertEqual(turn1_boundaries["chat-only"].all_of, ["对话"])
+        turn10_legal = {
+            rule.rule_id: rule
+            for rule in active.turns[9].contract.conversation_state.active_facts
+        }
+        self.assertIn("涉密：否", turn10_legal["legal-confirmation-confidentiality"].any_of)
+        self.assertIn("不属应急", turn10_legal["legal-confirmation-urgency"].any_of)
+        self.assertEqual(
+            turn10_legal["legal-confirmation"].all_of,
+            ["不可替代专利"],
+        )
+        self.assertIn("不存在", turn10_legal["legal-confirmation"].any_of)
+        self.assertIn("不可替代专利：否", turn10_legal["legal-confirmation"].any_of)
+        turn12_unknowns = {
+            rule.rule_id: rule
+            for rule in active.turns[11].contract.conversation_state.unknown_facts
+        }
+        self.assertEqual(turn12_unknowns["user"].all_of, ["用户", "身份"])
+        self.assertIn("没有提供", turn12_unknowns["user"].any_of)
+        turn12_active = {
+            rule.rule_id: rule
+            for rule in active.turns[11].contract.conversation_state.active_facts
+        }
+        self.assertIn("supplier-route-result-relationship", turn12_active)
+        self.assertEqual(
+            turn12_active["supplier-route-result-relationship"].all_of,
+            ["技术路线"],
+        )
+        turn12_forbidden = {
+            rule.rule_id: rule
+            for rule in active.turns[
+                11
+            ].contract.conversation_state.forbidden_unknown_facts
+        }
+        self.assertIn("resolved-a-not-unknown", turn12_forbidden)
+        turn12_inferences = {
+            rule.rule_id: rule
+            for rule in active.turns[11].contract.conversation_state.forbidden_inferences
+        }
+        self.assertIn("wrong-current-date-source", turn12_inferences)
+        self.assertIn(
+            "业务团队确认",
+            turn12_inferences["wrong-current-date-source"].any_of,
+        )
+        self.assertIn(
+            "业务调整",
+            turn12_inferences["wrong-current-date-source"].any_of,
+        )
+        self.assertIn("historical-response-scope-persisted", turn12_inferences)
+        self.assertIn(
+            "不推断设备、软件或施工范围",
+            turn12_inferences["historical-response-scope-persisted"].any_of,
+        )
+        self.assertIn(
+            "不得选择采购方式",
+            turn12_inferences["historical-response-scope-persisted"].any_of,
+        )
+
+        alignment = next(
+            case
+            for case in committed
+            if case.family_id == "current-turn-alignment-topic-detour"
+        )
+        for turn_index in (1, 4):
+            unresolved = {
+                rule.rule_id: rule
+                for rule in alignment.turns[
+                    turn_index
+                ].contract.conversation_state.unknown_facts
+            }
+            self.assertEqual(set(unresolved), {"public", "complete", "schedule"})
+            for rule in unresolved.values():
+                self.assertIn("尚未确认", rule.any_of)
+                self.assertNotIn("待确认", rule.all_of)
+        self.assertTrue(
+            alignment.turns[1].contract.conversation_state.require_scoped_sections
+        )
+        self.assertIn(
+            "不定首选",
+            alignment.turns[2].contract.decision.required_defer_claims[0].any_of,
+        )
+        turn3_state = alignment.turns[2].contract.conversation_state
+        self.assertEqual(
+            [rule.rule_id for rule in turn3_state.active_facts],
+            ["known-project-type", "known-budget", "known-suppliers"],
+        )
+        self.assertEqual(
+            [rule.rule_id for rule in turn3_state.unknown_facts],
+            ["public", "complete", "schedule"],
+        )
+        self.assertIn(
+            "unsupported-goods-classification",
+            {rule.rule_id for rule in turn3_state.forbidden_inferences},
+        )
+        self.assertIn(
+            "no-priority-inquiry",
+            {
+                rule.rule_id
+                for rule in alignment.turns[2].contract.decision.forbidden_recommendations
+            },
+        )
+        self.assertIn(
+            "no-ranking-competitive-negotiation",
+            {
+                rule.rule_id
+                for rule in alignment.turns[2].contract.decision.forbidden_recommendations
+            },
+        )
+        review_rule = next(
+            rule
+            for rule in alignment.turns[3].contract.required_claims
+            if rule.rule_id == "review-approval"
+        )
+        self.assertEqual(
+            review_rule.all_of,
+            ["分管立项", "采购部门", "公司领导"],
+        )
+        review_anchor = next(
+            anchor
+            for anchor in alignment.turns[3].contract.evidence_anchors
+            if anchor.anchor_id == "review-approval"
+        )
+        self.assertEqual(
+            review_anchor.all_of,
+            ["分管立项", "采购部门", "公司领导", "复核"],
+        )
+        self.assertEqual(review_anchor.any_of, ["审批", "批准"])
+        publication_rule = next(
+            rule
+            for rule in alignment.turns[3].contract.required_claims
+            if rule.rule_id == "publication-days"
+        )
+        self.assertIn("至少3日", publication_rule.any_of)
+
+        decision = next(
+            case
+            for case in committed
+            if case.family_id == "decision-under-unknowns-procurement-path"
+        )
+        known_ids = {
+            rule.rule_id for rule in decision.turns[0].contract.required_claims
+        }
+        self.assertTrue(
+            {
+                "known-budget",
+                "known-legal-scope",
+                "known-suppliers",
+                "known-nonurgent",
+            }
+            <= known_ids
+        )
+        legal_rule = next(
+            rule
+            for rule in decision.turns[0].contract.required_claims
+            if rule.rule_id == "known-legal-scope"
+        )
+        self.assertIn("依法可不招标", legal_rule.any_of)
+        claims = {
+            claim.rule_id: claim.claim
+            for claim in decision.turns[0].contract.evidence_claims
+        }
+        self.assertEqual(claims["publicity-condition-binding"].all_of, ["信息", "公开"])
+        self.assertIn("允许", claims["public-time-condition-binding"].any_of)
+        decision_rankings = {
+            rule.rule_id: rule
+            for rule in decision.turns[0].contract.decision.forbidden_recommendations
+        }
+        self.assertIn("较适配", decision_rankings["no-ranking-competitive-negotiation"].any_of)
+        self.assertIn("风险最低", decision_rankings["no-ranking-competitive-negotiation"].any_of)
+        self.assertIn("适用性反而较高", decision_rankings["no-ranking-competitive-negotiation"].any_of)
+        self.assertIn("适用性反而更高", decision_rankings["no-ranking-competitive-negotiation"].any_of)
+        self.assertIn(
+            "I have the retrieval results",
+            next(
+                rule
+                for rule in decision.turns[0].contract.forbidden_claims
+                if rule.rule_id == "no-internal-planning"
+            ).any_of,
+        )
+        decision_state = decision.turns[0].contract.conversation_state
+        self.assertTrue(decision_state.require_scoped_sections)
+        self.assertEqual(
+            {rule.rule_id for rule in decision_state.active_facts},
+            {"known-budget", "known-legal-scope", "known-suppliers", "known-nonurgent"},
+        )
+        state_unknowns = {rule.rule_id: rule for rule in decision_state.unknown_facts}
+        decision_unknowns = {
+            rule.rule_id: rule
+            for rule in decision.turns[0].contract.decision.required_unknowns
+        }
+        self.assertEqual(set(state_unknowns), {"public", "complete", "schedule"})
+        self.assertIn("尚未确认", state_unknowns["complete"].any_of)
+        self.assertEqual(state_unknowns, decision_unknowns)
+        decision_inferences = {
+            rule.rule_id
+            for rule in decision_state.forbidden_inferences
+        }
+        self.assertIn("unsupported-standardization", decision_inferences)
+        self.assertIn("unsupported-service-price-competition", decision_inferences)
+        self.assertIn("unsupported-project-heuristic", decision_inferences)
+        self.assertIn("unsupported-goods-classification-generic", decision_inferences)
+        self.assertIn("unsupported-public-demand-condition", decision_inferences)
+        self.assertIn("unknown-demand-implies-negotiation", decision_inferences)
+        self.assertIn("unsupported-forced-invitation-path", decision_inferences)
+        self.assertIn("unsupported-demand-public-competition-bridge", decision_inferences)
+        self.assertIn("unsupported-demand-fee-standard-bridge", decision_inferences)
+        self.assertIn("unsupported-demand-detailed-spec-bridge", decision_inferences)
+        self.assertIn("unknown-demand-parenthetical-redefinition", decision_inferences)
+        self.assertIn("unknown-schedule-parenthetical-redefinition", decision_inferences)
+        self.assertIn("no-unsupported-causal-bridge-language", decision_inferences)
 
     def test_gate_matrix_is_new_repeated_and_overflows_each_history_window(self) -> None:
         cases = [case for case in build_cases() if case.split == Split.GATE]

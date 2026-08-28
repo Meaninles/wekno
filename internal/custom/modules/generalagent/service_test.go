@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
@@ -16,6 +17,97 @@ type recordingProfessionalSkillProvider struct {
 	names []string
 	all   bool
 	calls int
+}
+
+func TestRuntimeConfigSpecCarriesTurnToolSuppression(t *testing.T) {
+	config := &types.AgentConfig{
+		AgentID:             "agent-1",
+		DisableToolsForTurn: true,
+		AllowedTools:        []string{"knowledge_search"},
+	}
+
+	got := runtimeConfigSpec(config)
+	if !got.DisableToolsForTurn {
+		t.Fatal("runtime config dropped turn-level tool suppression")
+	}
+	if len(got.AllowedTools) != 1 {
+		t.Fatalf("configured tool metadata unexpectedly changed: %#v", got.AllowedTools)
+	}
+}
+
+func TestBuildGeneralAgentHistoryKeepsRecentPairsAndArchivesOnlyOlderUsers(t *testing.T) {
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	var messages []*types.Message
+	for index := 1; index <= 7; index++ {
+		requestID := "request-" + string(rune('0'+index))
+		messages = append(messages,
+			&types.Message{
+				ID: requestID + "-user", RequestID: requestID, Role: "user",
+				Content: "user-fact-" + string(rune('0'+index)), CreatedAt: base.Add(time.Duration(index) * time.Minute),
+			},
+			&types.Message{
+				ID: requestID + "-assistant", RequestID: requestID, Role: "assistant",
+				Content: "assistant-inference-" + string(rune('0'+index)), IsCompleted: true,
+				CreatedAt: base.Add(time.Duration(index)*time.Minute + time.Second),
+			},
+		)
+	}
+	messages = append(messages, &types.Message{
+		ID: "in-flight-user", RequestID: "in-flight", Role: "user",
+		Content: "must-not-archive-incomplete", CreatedAt: base.Add(20 * time.Minute),
+	})
+
+	history, archive := buildGeneralAgentHistory(messages, 2)
+	if len(history) != 4 {
+		t.Fatalf("history messages = %d, want two complete Q&A pairs", len(history))
+	}
+	if history[0].Content != "user-fact-6" || history[2].Content != "user-fact-7" {
+		t.Fatalf("recent history is not chronological/newest: %#v", history)
+	}
+	for _, expected := range []string{"user-fact-1", "user-fact-5"} {
+		if !strings.Contains(archive, expected) {
+			t.Fatalf("archive missing %q: %s", expected, archive)
+		}
+	}
+	for _, forbidden := range []string{"user-fact-6", "assistant-inference", "must-not-archive-incomplete"} {
+		if strings.Contains(archive, forbidden) {
+			t.Fatalf("archive contains forbidden value %q: %s", forbidden, archive)
+		}
+	}
+}
+
+func TestUserOnlyGeneralAgentHistoryDropsAssistantClaims(t *testing.T) {
+	history := []ChatHistoryMessage{
+		{Role: "user", Content: "预算改为220万元。"},
+		{Role: "assistant", Content: "预算仍是360万元。"},
+		{Role: "USER", Content: "项目负责人改为林梅。"},
+	}
+
+	got := userOnlyGeneralAgentHistory(history)
+	if len(got) != 2 {
+		t.Fatalf("history messages = %d, want two authoritative user messages: %#v", len(got), got)
+	}
+	if got[0].Content != "预算改为220万元。" || got[1].Content != "项目负责人改为林梅。" {
+		t.Fatalf("unexpected authoritative history: %#v", got)
+	}
+}
+
+func TestGeneralAgentArtifactsRequireCurrentUserDeliveryIntent(t *testing.T) {
+	config := &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent, EnableArtifacts: true}
+	if generalAgentArtifactsEnabled(config, "只比较几种采购方式并就近引用。") {
+		t.Fatal("informational comparison unexpectedly enabled artifact registration")
+	}
+	if !generalAgentArtifactsEnabled(config, "请生成一份可下载的 Word 分析报告。") {
+		t.Fatal("explicit file delivery request did not enable artifact registration")
+	}
+	config.EnableArtifacts = false
+	if generalAgentArtifactsEnabled(config, "请生成 PDF 文件。") {
+		t.Fatal("disabled artifact capability was re-enabled by the query")
+	}
+	config = &types.AgentConfig{AgentType: types.AgentTypeDocumentProcessingAgent, EnableArtifacts: true}
+	if !generalAgentArtifactsEnabled(config, "整理这份材料。") {
+		t.Fatal("dedicated document agent lost its configured artifact capability")
+	}
 }
 
 func (p *recordingProfessionalSkillProvider) ProfessionalPackages(

@@ -2,13 +2,36 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func shouldRetryForFreshEvidence(
+	query string,
+	tools []chat.Tool,
+	response *types.ChatResponse,
+	refs []*types.SearchResult,
+	retries int,
+) bool {
+	if retries >= maxFreshEvidenceSelectionRetries || response == nil ||
+		len(response.ToolCalls) > 0 || strings.TrimSpace(response.Content) == "" ||
+		!conversationmemory.RequiresFreshEvidenceTurn(query) ||
+		sourcerefs.HasCitableReferences(refs) {
+		return false
+	}
+	for _, tool := range tools {
+		if sourcerefs.IsRetrievalToolName(tool.Function.Name) {
+			return true
+		}
+	}
+	return false
+}
 
 // agentCitationState is run-scoped. AgentEngine instances are normally
 // request-scoped, but reset keeps a reused engine from leaking handles across
@@ -106,6 +129,9 @@ func (e *AgentEngine) prepareCitationAwareGenerationMessages(messages []chat.Mes
 	}
 	out := append([]chat.Message(nil), messages...)
 	reminder := sourcerefs.TerminalCitationInstruction()
+	if outputDirective := conversationmemory.TerminalGenerationDirective(e.activeQuery); outputDirective != "" {
+		reminder += "\n\n" + outputDirective
+	}
 	if out[len(out)-1].Role == "user" && out[len(out)-1].Content == reminder {
 		return out
 	}

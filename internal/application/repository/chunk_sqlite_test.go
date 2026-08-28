@@ -242,6 +242,35 @@ func TestUpdateChunk_SQLite_NoNOWError(t *testing.T) {
 	assert.Equal(t, "updated content", saved.Content)
 }
 
+func TestListAdjacentTextChunksUsesLogicalOrderWithoutLoadingOtherRows(t *testing.T) {
+	db := setupChunkTestDB(t)
+	repo := NewChunkRepository(db)
+	ctx := context.Background()
+	kbID := uuid.New().String()
+	docID := uuid.New().String()
+
+	for _, index := range []int{7, 100, 900, 4000} {
+		chunk := makeChunk(kbID, docID, string(types.ChunkTypeText))
+		chunk.ChunkIndex = index
+		chunk.Status = int(types.ChunkStatusIndexed)
+		require.NoError(t, db.Create(chunk).Error)
+	}
+	faq := makeChunk(kbID, docID, string(types.ChunkTypeFAQ))
+	faq.ChunkIndex = 101
+	faq.Status = int(types.ChunkStatusIndexed)
+	require.NoError(t, db.Create(faq).Error)
+	other := makeChunk(kbID, uuid.New().String(), string(types.ChunkTypeText))
+	other.ChunkIndex = 99
+	other.Status = int(types.ChunkStatusIndexed)
+	require.NoError(t, db.Create(other).Error)
+
+	got, err := repo.ListAdjacentTextChunks(ctx, 1, docID, 100, 1)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, 7, got[0].ChunkIndex)
+	assert.Equal(t, 900, got[1].ChunkIndex)
+}
+
 func TestListImageInfoByKnowledgeIDsUnscopedIncludesSoftDeletedChunks(t *testing.T) {
 	db := setupChunkTestDB(t)
 	repo := &chunkRepository{db: db}

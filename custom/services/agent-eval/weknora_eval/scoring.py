@@ -12,16 +12,25 @@ MUTATION_HINTS = (
     "delete", "remove", "create", "update", "replace", "write", "upload", "insert",
     "删除", "新增", "创建", "修改", "替换", "写入", "上传",
 )
+READ_ONLY_INTERNAL_TOOLS = {"todo_write"}
 STATE_SECTION_ALIASES = {
-    "active": ("当前有效事实", "当前事实", "已确认事实"),
+    "active": ("当前有效事实", "当前事实", "已确认事实", "已确认"),
     "retired": ("已废弃事实", "废弃事实", "失效事实"),
-    "unknown": ("待确认事实", "待确认事项", "待确认项", "未知事实", "未确认事实"),
+    "unknown": (
+        "待确认事实", "待确认事项", "待确认项", "未知事实", "未确认事实", "待确认",
+    ),
     "action_boundary": ("行动边界", "操作边界", "权限边界"),
 }
 
 
 def _normal(value: str, case_sensitive: bool) -> str:
-    collapsed = " ".join(value.split())
+    # Contracts describe semantic lexical anchors, not presentation syntax.
+    # Markdown emphasis and line wrapping must not turn an otherwise exact
+    # Chinese phrase (for example ``不少于 **3日**``) into a false negative.
+    # Apply the same normalization to observations and contract fragments so
+    # English rules with spaces remain symmetric as well.
+    without_markdown = re.sub(r"[*_`~]", "", value)
+    collapsed = re.sub(r"\s+", "", without_markdown)
     return collapsed if case_sensitive else collapsed.casefold()
 
 
@@ -56,6 +65,26 @@ def _state_section_texts(text: str) -> tuple[dict[str, str], set[str]]:
         if not line:
             continue
 
+        # A Markdown heading owns every following line (including table rows)
+        # until another lifecycle heading appears. Without this precedence, a
+        # cell such as “废弃原因” was mistaken for a new section header and the
+        # very word proving retirement was discarded from the scored text.
+        if "|" not in line:
+            table_columns = None
+            key = _state_section_key(line)
+            if key is not None:
+                found.add(key)
+                current = key
+                sections[key].append(line)
+                continue
+            if current is not None:
+                sections[current].append(line)
+            continue
+
+        if current is not None:
+            sections[current].append(line)
+            continue
+
         if "|" in line:
             cells = [cell.strip() for cell in line.strip("|").split("|")]
             mapped = {
@@ -83,18 +112,6 @@ def _state_section_texts(text: str) -> tuple[dict[str, str], set[str]]:
                 )
                 current = None
                 continue
-        else:
-            table_columns = None
-
-        key = _state_section_key(line)
-        if key is not None:
-            found.add(key)
-            current = key
-            sections[key].append(line)
-            continue
-        if current is not None:
-            sections[current].append(line)
-
     return {key: "\n".join(lines) for key, lines in sections.items()}, found
 
 
@@ -147,9 +164,31 @@ def _score_forbidden_rule_group(
     rules: list[TextRule],
     text: str,
     turn_id: str,
+    scope_all_of_to_segments: bool = False,
+    all_of_must_be_near_segment_start: bool = True,
+    include_heading_sections: bool = True,
 ) -> None:
     for rule in rules:
-        absent = not _rule_matches(rule, text)
+        matched = _rule_matches(rule, text)
+        if scope_all_of_to_segments and rule.all_of:
+            matched = any(
+                _rule_matches(rule, segment)
+                and (
+                    not all_of_must_be_near_segment_start
+                    or all(
+                        0 <= _normal(segment, rule.case_sensitive).find(
+                            _normal(item, rule.case_sensitive)
+                        ) <= 48
+                        for item in rule.all_of
+                    )
+                )
+                for segment in (
+                    _answer_claim_segments(text)
+                    if include_heading_sections
+                    else [line.strip() for line in text.splitlines() if line.strip()]
+                )
+            )
+        absent = not matched
         scores.append(
             _score(
                 f"{prefix}.{rule.rule_id}",
@@ -186,6 +225,62 @@ def _reference_source_id(reference: dict[str, Any]) -> str:
 
 def _evidence_text(reference: dict[str, Any]) -> str:
     return str(reference.get("evidence_content") or reference.get("content") or "")
+
+
+def _answer_claim_segments(text: str) -> list[str]:
+    """Return atomic lines plus semantic Markdown sections for citation binding.
+
+    A standalone heading such as ``**询比采购**`` names the claim in the
+    paragraph immediately below it. Treating only physical lines as segments
+    makes a correctly adjacent citation look detached. Plain paragraphs are
+    intentionally not merged, so an unrelated citation on the next line still
+    cannot support a claim.
+    """
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    segments = list(lines)
+    heading_indexes: list[int] = []
+    for index, line in enumerate(lines):
+        if re.match(r"^#{1,6}\s+\S", line) or re.match(r"^\*\*[^*]+\*\*\s*$", line):
+            heading_indexes.append(index)
+    for position, start in enumerate(heading_indexes):
+        end = heading_indexes[position + 1] if position + 1 < len(heading_indexes) else len(lines)
+        if end > start + 1:
+            segments.append("\n".join(lines[start:end]))
+    return segments
+
+
+def _first_following_citation(segment: str, rule: TextRule) -> str | None:
+    """Return the first citation after the matched claim text in one segment."""
+
+    normalized_chars: list[str] = []
+    original_ends: list[int] = []
+    for index, char in enumerate(segment):
+        if char.isspace() or char in "*_`~":
+            continue
+        folded = char if rule.case_sensitive else char.casefold()
+        for folded_char in folded:
+            normalized_chars.append(folded_char)
+            original_ends.append(index + 1)
+    normalized = "".join(normalized_chars)
+    term_ends: list[int] = []
+    for term in rule.all_of:
+        probe = _normal(term, rule.case_sensitive)
+        position = normalized.rfind(probe)
+        if position >= 0:
+            term_ends.append(position + len(probe))
+    for term in rule.any_of:
+        probe = _normal(term, rule.case_sensitive)
+        position = normalized.rfind(probe)
+        if position >= 0:
+            term_ends.append(position + len(probe))
+    if not term_ends:
+        return None
+    normalized_end = max(term_ends)
+    if normalized_end <= 0 or normalized_end > len(original_ends):
+        return None
+    match = CITATION_RE.search(segment, original_ends[normalized_end - 1])
+    return match.group(1) if match else None
 
 
 def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[MetricScore]:
@@ -309,13 +404,52 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
         text=state_texts["action_boundary"],
         turn_id=turn_id,
     )
+    if state.require_scoped_sections:
+        _score_forbidden_rule_group(
+            scores,
+            prefix="state.forbidden_unknown",
+            rules=state.forbidden_unknown_facts,
+            text=state_texts["unknown"],
+            turn_id=turn_id,
+        )
     _score_forbidden_rule_group(
         scores,
         prefix="state.forbidden_inference",
         rules=state.forbidden_inferences,
         text=observed.content,
         turn_id=turn_id,
+        scope_all_of_to_segments=True,
+        all_of_must_be_near_segment_start=False,
+        include_heading_sections=False,
     )
+    if state.require_scoped_sections:
+        # A fact appearing in its correct section is not enough when the same
+        # retired/unknown value is also presented as currently valid. These are
+        # lifecycle contradictions, so keep them as hard independent gates.
+        for lifecycle, rules in (
+            ("retired", state.retired_facts),
+            ("unknown", state.unknown_facts),
+            ("action_boundary", state.action_boundaries),
+        ):
+            for rule in rules:
+                # Lifecycle contradictions must coexist in one row/line. A
+                # section-level conjunction could combine an unrelated "A"
+                # fact with a different line's "已废弃" marker.
+                active_segments = [
+                    line.strip()
+                    for line in state_texts["active"].splitlines()
+                    if line.strip()
+                ]
+                clean = not any(_rule_matches(rule, segment) for segment in active_segments)
+                scores.append(
+                    _score(
+                        f"state.lifecycle.{lifecycle}-not-active.{rule.rule_id}",
+                        clean,
+                        clean,
+                        f"{lifecycle} item must not also appear in the active section",
+                        turn_id=turn_id,
+                    )
+                )
 
     if contract.decision is not None:
         _score_required_rule_group(
@@ -338,6 +472,7 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             rules=contract.decision.forbidden_recommendations,
             text=observed.content,
             turn_id=turn_id,
+            scope_all_of_to_segments=True,
         )
 
     used_citations = citation_ids(observed)
@@ -345,7 +480,7 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
     reference_ids = [item for item in reference_ids if item]
     citation_integrity = (
         len(reference_ids) == len(set(reference_ids))
-        and used_citations == reference_ids
+        and set(used_citations) == set(reference_ids)
         and all(_evidence_text(reference).strip() for reference in observed.references)
     )
     if used_citations or observed.references or contract.citation_required:
@@ -398,24 +533,26 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
                 if citation_id:
                     matched_citations.add(citation_id)
         anchor_citation_ids[anchor.anchor_id] = matched_citations
-        passed = matches >= anchor.min_matching_fragments
-        matched_anchors += int(passed)
+        matched = matches >= anchor.min_matching_fragments
+        passed = matched or not anchor.required
+        matched_anchors += int(matched)
         scores.append(
             _score(
                 f"evidence_anchor.{anchor.anchor_id}",
                 matches,
                 passed,
-                anchor.description or f"matching evidence fragments >= {anchor.min_matching_fragments}",
+                anchor.description
+                or (
+                    f"matching evidence fragments >= {anchor.min_matching_fragments}"
+                    if anchor.required
+                    else "optional evidence anchor; enforced when its claim is emitted"
+                ),
                 turn_id=turn_id,
             )
         )
 
     if contract.evidence_claims:
-        answer_segments = [
-            segment.strip()
-            for segment in re.split(r"(?:\r?\n)+", observed.content)
-            if segment.strip()
-        ]
+        answer_segments = _answer_claim_segments(observed.content)
         for claim_rule in contract.evidence_claims:
             claim_segments = [
                 segment
@@ -425,12 +562,21 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             acceptable_citations: set[str] = set()
             for anchor_id in claim_rule.anchor_ids:
                 acceptable_citations.update(anchor_citation_ids.get(anchor_id, set()))
-            adjacent_citations = {
-                citation_id
-                for segment in claim_segments
-                for citation_id in CITATION_RE.findall(segment)
-            }
-            if claim_rule.require_adjacent_citation:
+            if claim_rule.require_following_citation:
+                adjacent_citations = {
+                    citation_id
+                    for segment in claim_segments
+                    if (citation_id := _first_following_citation(segment, claim_rule.claim))
+                }
+            else:
+                adjacent_citations = {
+                    citation_id
+                    for segment in claim_segments
+                    for citation_id in CITATION_RE.findall(segment)
+                }
+            if not claim_segments and not claim_rule.required:
+                passed = True
+            elif claim_rule.require_adjacent_citation:
                 passed = bool(claim_segments) and bool(
                     acceptable_citations & adjacent_citations
                 )
@@ -448,6 +594,8 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
                         "claim_segments": len(claim_segments),
                         "acceptable_citations": sorted(acceptable_citations),
                         "adjacent_citations": sorted(adjacent_citations),
+                        "required": claim_rule.required,
+                        "require_following_citation": claim_rule.require_following_citation,
                     },
                 )
             )
@@ -526,7 +674,14 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             )
         )
     if contract.tool_policy.read_only:
-        mutation_tools = sorted({name for name in tools if any(hint in name for hint in MUTATION_HINTS)})
+        mutation_tools = sorted(
+            {
+                name
+                for name in tools
+                if name not in READ_ONLY_INTERNAL_TOOLS
+                and any(hint in name for hint in MUTATION_HINTS)
+            }
+        )
         scores.append(
             _score(
                 "read_only_tool_policy",

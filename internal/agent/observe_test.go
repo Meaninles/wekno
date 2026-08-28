@@ -165,6 +165,8 @@ func TestBuildRuntimeContextBlock_PinnedDocuments(t *testing.T) {
 	assert.Contains(t, block, `title="Report.pdf"`)
 	assert.Contains(t, block, `file_type="pdf"`)
 	assert.Contains(t, block, "list_knowledge_chunks")
+	assert.Contains(t, block, "one query per topic")
+	assert.Contains(t, block, "bounded tool context")
 	assert.NotContains(t, block, "<must_use>")
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
@@ -18,8 +19,8 @@ var listKnowledgeChunksTool = BaseTool{
 
 ## Use After grep_chunks or knowledge_search:
 - **FAQ hit** (type faq): list_knowledge_chunks(faq_id="<chunk_id from search>") — reads that one FAQ entry with answers from metadata.
-- **Exact document hit (preferred)**: list_knowledge_chunks(chunk_id="<chunk_id from search>") — deep-reads that exact chunk.
-- **Whole document**: list_knowledge_chunks(knowledge_id="<document id>") — pages through all chunks.
+- **Exact document hit (preferred)**: list_knowledge_chunks(chunk_id="<chunk_id from search>") — deep-reads that exact text chunk plus one adjacent text chunk on each side so clauses split at chunk boundaries remain complete.
+- **Whole document (exhaustive review only)**: list_knowledge_chunks(knowledge_id="<document id>") — pages through chunks. For pinpoint questions or multiple named topics, first use grep_chunks or knowledge_search with one query per topic, then deep-read exact chunk_id hits; otherwise bounded tool output can hide later evidence.
 
 ## Parameters (provide exactly one id target):
 - faq_id (optional): FAQ entry ID from grep_chunks / knowledge_search.
@@ -335,49 +336,80 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 	}
 
 	chunks := []*types.Chunk{chunk}
-	if chunk.ImageInfo == "" {
+	if chunk.ChunkType == types.ChunkTypeText {
 		effectiveTenantID := t.searchTargets.GetTenantIDForKB(chunk.KnowledgeBaseID)
 		if effectiveTenantID > 0 {
-			infoMap := searchutil.CollectImageInfoByChunkIDs(ctx, t.chunkService.GetRepository(), effectiveTenantID, []string{chunk.ID})
-			if merged, ok := infoMap[chunk.ID]; ok {
-				chunk.ImageInfo = merged
+			// Clause definitions and their numbered conditions frequently straddle
+			// parser boundaries. Bounded ±1 expansion is enough to restore that
+			// continuity without reading the whole document. Exact-target success
+			// remains fail-open if an optional neighbour query fails.
+			if neighbours, neighbourErr := t.chunkService.GetRepository().ListAdjacentTextChunks(
+				ctx,
+				effectiveTenantID,
+				chunk.KnowledgeID,
+				chunk.ChunkIndex,
+				1,
+			); neighbourErr == nil {
+				chunks = mergeChunkNeighborhood(chunk, neighbours)
+			}
+		}
+	}
+	if len(chunks) > 0 {
+		effectiveTenantID := t.searchTargets.GetTenantIDForKB(chunk.KnowledgeBaseID)
+		if effectiveTenantID > 0 {
+			chunkIDs := make([]string, 0, len(chunks))
+			for _, item := range chunks {
+				chunkIDs = append(chunkIDs, item.ID)
+			}
+			infoMap := searchutil.CollectImageInfoByChunkIDs(ctx, t.chunkService.GetRepository(), effectiveTenantID, chunkIDs)
+			for _, item := range chunks {
+				if item.ImageInfo == "" {
+					if merged, ok := infoMap[item.ID]; ok {
+						item.ImageInfo = merged
+					}
+				}
 			}
 		}
 	}
 
 	knowledgeTitle := t.lookupKnowledgeTitle(ctx, chunk.KnowledgeID)
-	output := t.buildOutput(chunk.KnowledgeID, knowledgeTitle, 1, 1, 0, chunks)
+	output := t.buildOutput(chunk.KnowledgeID, knowledgeTitle, int64(len(chunks)), len(chunks), 0, chunks)
 
-	formattedChunks := []map[string]interface{}{
-		{
-			"seq":               1,
-			"chunk_id":          chunk.ID,
-			"chunk_index":       chunk.ChunkIndex,
-			"content":           chunk.Content,
-			"chunk_type":        chunk.ChunkType,
-			"knowledge_id":      chunk.KnowledgeID,
-			"knowledge_base_id": chunk.KnowledgeBaseID,
-			"start_at":          chunk.StartAt,
-			"end_at":            chunk.EndAt,
-		},
+	formattedChunks := make([]map[string]interface{}, 0, len(chunks))
+	for index, item := range chunks {
+		chunkData := map[string]interface{}{
+			"seq":               index + 1,
+			"chunk_id":          item.ID,
+			"chunk_index":       item.ChunkIndex,
+			"content":           item.Content,
+			"chunk_type":        item.ChunkType,
+			"knowledge_id":      item.KnowledgeID,
+			"knowledge_base_id": item.KnowledgeBaseID,
+			"start_at":          item.StartAt,
+			"end_at":            item.EndAt,
+			"parent_chunk_id":   item.ParentChunkID,
+			"requested_chunk":   item.ID == chunk.ID,
+		}
+		if len(item.SourceLocator) > 0 && json.Valid(item.SourceLocator) {
+			chunkData["source_locator"] = json.RawMessage(append([]byte(nil), item.SourceLocator...))
+		}
+		appendFAQChunkData(chunkData, item)
+		normalizeFAQChunkDataMap(chunkData, item)
+		formattedChunks = append(formattedChunks, chunkData)
 	}
-	if len(chunk.SourceLocator) > 0 && json.Valid(chunk.SourceLocator) {
-		formattedChunks[0]["source_locator"] = json.RawMessage(append([]byte(nil), chunk.SourceLocator...))
-	}
-	appendFAQChunkData(formattedChunks[0], chunk)
-	normalizeFAQChunkDataMap(formattedChunks[0], chunk)
 
 	data := map[string]interface{}{
-		"display_type":    "knowledge_chunks_list",
-		"knowledge_id":    chunk.KnowledgeID,
-		"knowledge_title": knowledgeTitle,
-		"total_chunks":    int64(1),
-		"fetched_chunks":  1,
-		"page":            1,
-		"page_size":       1,
-		"chunks":          formattedChunks,
-		"faq_id":          chunk.ID,
-		"single_chunk":    true,
+		"display_type":      "knowledge_chunks_list",
+		"knowledge_id":      chunk.KnowledgeID,
+		"knowledge_title":   knowledgeTitle,
+		"total_chunks":      int64(len(chunks)),
+		"fetched_chunks":    len(chunks),
+		"page":              1,
+		"page_size":         1,
+		"chunks":            formattedChunks,
+		"faq_id":            chunk.ID,
+		"single_chunk":      len(chunks) == 1,
+		"neighbor_expanded": len(chunks) > 1,
 	}
 	if q := faqStandardQuestion(chunk); q != "" {
 		data["faq_question"] = q
@@ -388,6 +420,28 @@ func (t *ListKnowledgeChunksTool) executeByChunkID(ctx context.Context, chunkID 
 		Output:  output,
 		Data:    data,
 	}, nil
+}
+
+func mergeChunkNeighborhood(target *types.Chunk, neighbours []*types.Chunk) []*types.Chunk {
+	byID := map[string]*types.Chunk{target.ID: target}
+	for _, item := range neighbours {
+		if item == nil || item.ID == "" || item.KnowledgeID != target.KnowledgeID ||
+			item.ChunkType != types.ChunkTypeText {
+			continue
+		}
+		byID[item.ID] = item
+	}
+	out := make([]*types.Chunk, 0, len(byID))
+	for _, item := range byID {
+		out = append(out, item)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].ChunkIndex == out[j].ChunkIndex {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].ChunkIndex < out[j].ChunkIndex
+	})
+	return out
 }
 
 // lookupKnowledgeTitle looks up the title of a knowledge document

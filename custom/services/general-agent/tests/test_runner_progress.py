@@ -264,6 +264,14 @@ class RunnerProgressTest(unittest.TestCase):
             "current_turn_internal_planning_exposed",
             {issue["code"] for issue in turn_contract_issues(payload, tool_repair)},
         )
+        observed_tool_repair = (
+            'The tools are returning "No such tool available" errors. '
+            "However, I already retrieved the evidence.\n\n正式回答。"
+        )
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in turn_contract_issues(payload, observed_tool_repair)},
+        )
 
     def test_turn_contract_issues_reject_deferred_comparison_ranking(self):
         payload = ChatPayload(

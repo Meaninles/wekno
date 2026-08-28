@@ -4348,6 +4348,8 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"looking\s+at\s+(?:the\s+returned\s+evidence|the\s+evidence|my\s+earlier\s+answer)|"
     r"the\s+issue\s+might\s+be|the\s+evidence\s+is\s+already|"
     r"i\s+see\s+that|"
+    r"(?:the\s+)?tools?\s+(?:are\s+returning|returned).{0,80}(?:error|unavailable|no\s+such\s+tool)|"
+    r"from\s+(?:the\s+)?earlier\s+(?:grep|retrieval).{0,80}(?:result|evidence)|"
     r"let\s+me\s+(?:think|check)|the\s+validation\s+says|"
     r"(?:好的[，,]?\s*)?.{0,80}runtime_response_contract|"
     r"现在我已获得|根据(?:本|当前)轮检索结果|以下是替换后的答案"

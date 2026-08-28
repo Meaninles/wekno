@@ -58,6 +58,86 @@ type GrepChunksInput struct {
 	Query string `json:"query,omitempty"`
 }
 
+// compileGrepRankingPatterns preserves the original regex for database recall
+// while splitting only safe, top-level alternation branches for ranking. A
+// branch inside a group/character class or an escaped literal pipe is left
+// untouched. Any compile ambiguity falls back to the already validated query.
+func compileGrepRankingPatterns(query string, fallback *regexp.Regexp) ([]string, []*regexp.Regexp) {
+	parts := splitTopLevelRegexAlternatives(query)
+	if len(parts) < 2 || len(parts) > 8 {
+		return []string{query}, []*regexp.Regexp{fallback}
+	}
+	compiled := make([]*regexp.Regexp, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || len(part) > 160 {
+			return []string{query}, []*regexp.Regexp{fallback}
+		}
+		re, err := regexp.Compile("(?i)(?:" + part + ")")
+		if err != nil {
+			return []string{query}, []*regexp.Regexp{fallback}
+		}
+		compiled = append(compiled, re)
+	}
+	return parts, compiled
+}
+
+func splitTopLevelRegexAlternatives(query string) []string {
+	parts := make([]string, 0, 4)
+	start := 0
+	depth := 0
+	inClass := false
+	escaped := false
+	for index := 0; index < len(query); index++ {
+		char := query[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' {
+			escaped = true
+			continue
+		}
+		if inClass {
+			if char == ']' {
+				inClass = false
+			}
+			continue
+		}
+		switch char {
+		case '[':
+			inClass = true
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case '|':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(query[start:index]))
+				start = index + 1
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return []string{query}
+	}
+	parts = append(parts, strings.TrimSpace(query[start:]))
+	return parts
+}
+
+func grepResultLimit(patternCount int) int {
+	switch {
+	case patternCount >= 4:
+		return 12
+	case patternCount >= 2:
+		return 18
+	default:
+		return 30
+	}
+}
+
 // GrepChunksTool performs regex pattern matching across knowledge base chunks.
 // PostgreSQL: uses the case-insensitive POSIX operator ~*.
 // MySQL/SQLite: falls back to REGEXP.
@@ -124,10 +204,14 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	}
 	queries := []string{query}
 	compiled := []*regexp.Regexp{re}
+	rankingPatterns, rankingCompiled := compileGrepRankingPatterns(query, re)
 
-	// Result count is controlled by the backend, not the caller — keep it
-	// bounded so the LLM context stays small regardless of regex breadth.
-	const limit = 30
+	// Result count is controlled by the backend, not the caller. Multi-topic
+	// alternations get a tighter budget because every result also carries a
+	// citable source fragment; coverage selection below keeps one strong result
+	// per branch before diversity fill, so fewer results improve rather than
+	// reduce useful recall.
+	limit := grepResultLimit(len(rankingCompiled))
 
 	kbTenantMap := t.searchTargets.GetKBTenantMap()
 	fullKBIDs, knowledgeIDs, tagTargets := t.resolveGrepScope()
@@ -136,8 +220,8 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		kbIDsForMeta = t.searchTargets.GetAllKnowledgeBaseIDs()
 	}
 
-	logger.Infof(ctx, "[Tool][GrepChunks] Queries: %v, Limit: %d, fullKBs: %d, knowledgeIDs: %d, tagScopes: %d",
-		queries, limit, len(fullKBIDs), len(knowledgeIDs), len(tagTargets))
+	logger.Infof(ctx, "[Tool][GrepChunks] Queries: %v, RankingPatterns: %v, Limit: %d, fullKBs: %d, knowledgeIDs: %d, tagScopes: %d",
+		queries, rankingPatterns, limit, len(fullKBIDs), len(knowledgeIDs), len(tagTargets))
 
 	results, err := t.searchChunks(ctx, queries, fullKBIDs, knowledgeIDs, tagTargets, kbTenantMap)
 	if err != nil {
@@ -154,36 +238,26 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	logger.Infof(ctx, "[Tool][GrepChunks] After deduplication: %d chunks (from %d)",
 		len(deduplicatedResults), len(results))
 
-	// Score chunks using compiled regex (counts + earliest-position boost).
-	scoredResults := t.scoreChunks(ctx, deduplicatedResults, compiled)
+	// Score top-level alternation branches independently. Treating a packed
+	// `a|b|c` query as one pattern made every matching chunk look equally
+	// covered and let repetitive early clauses crowd out later named topics.
+	scoredResults := t.scoreChunks(ctx, deduplicatedResults, rankingCompiled)
 
-	finalResults := scoredResults
+	diverseResults := scoredResults
 	if len(scoredResults) > 10 {
-		mmrK := len(scoredResults)
-		if limit > 0 && mmrK > limit {
-			mmrK = limit
-		}
+		mmrK := limit
 		logger.Debugf(ctx, "[Tool][GrepChunks] Applying MMR: k=%d, lambda=0.7, input=%d results",
 			mmrK, len(scoredResults))
 		mmrResults := t.applyMMR(ctx, scoredResults, mmrK, 0.7)
 		if len(mmrResults) > 0 {
-			finalResults = mmrResults
-			logger.Infof(ctx, "[Tool][GrepChunks] MMR completed: %d results selected", len(finalResults))
+			diverseResults = mmrResults
+			logger.Infof(ctx, "[Tool][GrepChunks] MMR completed: %d results selected", len(diverseResults))
 		}
 	}
+	finalResults := selectGrepCoverage(scoredResults, diverseResults, rankingCompiled, limit)
 
 	sort.Slice(finalResults, func(i, j int) bool {
-		// Title matches rank above everything else (see chunkWithTitle.TitleMatch).
-		if finalResults[i].TitleMatch != finalResults[j].TitleMatch {
-			return finalResults[i].TitleMatch
-		}
-		if finalResults[i].MatchedPatterns != finalResults[j].MatchedPatterns {
-			return finalResults[i].MatchedPatterns > finalResults[j].MatchedPatterns
-		}
-		if finalResults[i].MatchScore != finalResults[j].MatchScore {
-			return finalResults[i].MatchScore > finalResults[j].MatchScore
-		}
-		return finalResults[i].ChunkIndex < finalResults[j].ChunkIndex
+		return grepResultLess(finalResults[i], finalResults[j])
 	})
 
 	if len(finalResults) > limit {
@@ -221,6 +295,7 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			"knowledge_base_ids": kbIDsForMeta,
 			"limit":              limit,
 			"max_results":        limit, // legacy alias
+			"ranking_patterns":   rankingPatterns,
 			"display_type":       "grep_results",
 		},
 	}, nil
@@ -969,6 +1044,79 @@ func (t *GrepChunksTool) scoreChunks(
 	return scored
 }
 
+// selectGrepCoverage reserves one best candidate for each independently
+// compiled alternation branch, then fills the remaining budget with MMR-diverse
+// results. This prevents a frequent term from consuming every result slot while
+// retaining the existing relevance/diversity behavior for the rest.
+func selectGrepCoverage(
+	scoredResults []chunkWithTitle,
+	diverseResults []chunkWithTitle,
+	patterns []*regexp.Regexp,
+	limit int,
+) []chunkWithTitle {
+	if limit <= 0 || len(scoredResults) == 0 {
+		return nil
+	}
+	selected := make([]chunkWithTitle, 0, min(limit, len(scoredResults)))
+	seen := make(map[string]bool, limit)
+	appendResult := func(result chunkWithTitle) {
+		key := result.ID
+		if key == "" {
+			key = fmt.Sprintf("%s#%d", result.KnowledgeID, result.ChunkIndex)
+		}
+		if len(selected) >= limit || seen[key] {
+			return
+		}
+		seen[key] = true
+		selected = append(selected, result)
+	}
+
+	for _, pattern := range patterns {
+		best := -1
+		for index := range scoredResults {
+			if pattern == nil || (!pattern.MatchString(scoredResults[index].Content) &&
+				!pattern.MatchString(scoredResults[index].KnowledgeTitle)) {
+				continue
+			}
+			if best < 0 || grepResultLess(scoredResults[index], scoredResults[best]) {
+				best = index
+			}
+		}
+		if best >= 0 {
+			appendResult(scoredResults[best])
+		}
+	}
+	for _, result := range diverseResults {
+		appendResult(result)
+	}
+	if len(selected) < limit {
+		remaining := append([]chunkWithTitle(nil), scoredResults...)
+		sort.Slice(remaining, func(i, j int) bool {
+			return grepResultLess(remaining[i], remaining[j])
+		})
+		for _, result := range remaining {
+			appendResult(result)
+		}
+	}
+	return selected
+}
+
+func grepResultLess(left, right chunkWithTitle) bool {
+	if left.TitleMatch != right.TitleMatch {
+		return left.TitleMatch
+	}
+	if left.MatchedPatterns != right.MatchedPatterns {
+		return left.MatchedPatterns > right.MatchedPatterns
+	}
+	if left.MatchScore != right.MatchScore {
+		return left.MatchScore > right.MatchScore
+	}
+	if left.ChunkIndex != right.ChunkIndex {
+		return left.ChunkIndex < right.ChunkIndex
+	}
+	return left.ID < right.ID
+}
+
 // calculateMatchScore counts how many regex patterns match the content and
 // applies a small boost for earlier match positions.
 func (t *GrepChunksTool) calculateMatchScore(content string, compiled []*regexp.Regexp) (float64, int) {
@@ -977,17 +1125,20 @@ func (t *GrepChunksTool) calculateMatchScore(content string, compiled []*regexp.
 	}
 
 	matchCount := 0
+	totalHits := 0
 	earliestPos := len(content)
 
 	for _, re := range compiled {
 		if re == nil {
 			continue
 		}
-		loc := re.FindStringIndex(content)
-		if loc == nil {
+		locations := re.FindAllStringIndex(content, -1)
+		if len(locations) == 0 {
 			continue
 		}
 		matchCount++
+		totalHits += len(locations)
+		loc := locations[0]
 		if loc[0] < earliestPos {
 			earliestPos = loc[0]
 		}
@@ -997,15 +1148,19 @@ func (t *GrepChunksTool) calculateMatchScore(content string, compiled []*regexp.
 		return 0.0, 0
 	}
 
-	baseScore := float64(matchCount) / float64(len(compiled))
+	// Leave headroom for position and frequency. The previous 1.0 base score
+	// made every single-pattern hit tie, so a generic one-line mention ranked
+	// exactly like a clause where the term was central and repeated.
+	baseScore := float64(matchCount) / float64(len(compiled)) * 0.85
 
 	positionBonus := 0.0
 	if earliestPos < len(content) {
 		positionRatio := 1.0 - float64(earliestPos)/float64(len(content))
-		positionBonus = positionRatio * 0.1
+		positionBonus = positionRatio * 0.05
 	}
+	frequencyBonus := math.Min(float64(max(totalHits-matchCount, 0))*0.02, 0.1)
 
-	return math.Min(baseScore+positionBonus, 1.0), matchCount
+	return math.Min(baseScore+positionBonus+frequencyBonus, 1.0), matchCount
 }
 
 // applyMMR applies Maximal Marginal Relevance algorithm to reduce redundancy

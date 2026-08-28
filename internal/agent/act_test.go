@@ -9,7 +9,7 @@ import (
 
 func TestTargetedEvidenceRetrievalRedirectsOnlyWholeDocumentMultiTopicReads(t *testing.T) {
 	query := "[WEKNORA_REQUIRED_EVIDENCE_TOPICS][\"公开采购\",\"询比\",\"竞价\",\"竞争谈判\"]"
-	redirect := targetedEvidenceRetrievalRedirect(
+	redirect := agenttools.TargetedEvidenceRetrievalRedirect(
 		agenttools.ToolListKnowledgeChunks,
 		map[string]interface{}{"knowledge_id": "document-1", "limit": float64(100)},
 		query,
@@ -21,14 +21,14 @@ func TestTargetedEvidenceRetrievalRedirectsOnlyWholeDocumentMultiTopicReads(t *t
 		t.Fatalf("redirect omitted named topics: %s", redirect.Error)
 	}
 
-	if got := targetedEvidenceRetrievalRedirect(
+	if got := agenttools.TargetedEvidenceRetrievalRedirect(
 		agenttools.ToolListKnowledgeChunks,
 		map[string]interface{}{"chunk_id": "chunk-1"},
 		query,
 	); got != nil {
 		t.Fatalf("exact chunk read was redirected: %#v", got)
 	}
-	if got := targetedEvidenceRetrievalRedirect(
+	if got := agenttools.TargetedEvidenceRetrievalRedirect(
 		agenttools.ToolListKnowledgeChunks,
 		map[string]interface{}{"knowledge_id": "document-1"},
 		"只回答一个定义并引用。",

@@ -1028,4 +1028,45 @@ From the earlier retrieval results, I have the required chunks.
 	if got := StripInternalPlanningPreamble(toolRepairLeak); got != "已确认：项目为系统升级服务。\n\n待确认：采购信息能否公开。" {
 		t.Fatalf("tool-repair narration survived: %q", got)
 	}
+	observedUnavailableTools := `The tools are returning "No such tool available" errors. However, I already retrieved all the evidence I need.
+
+From the earlier grep_chunks results:
+
+**公开采购** - chunk 22 <src id="S4" />
+
+已确认：项目为系统升级服务。
+
+待确认：采购信息能否公开。`
+	if got := StripInternalPlanningPreamble(observedUnavailableTools); got != "已确认：项目为系统升级服务。\n\n待确认：采购信息能否公开。" {
+		t.Fatalf("unavailable-tool repair narration survived: %q", got)
+	}
+}
+
+func TestNormalizeConfirmedUnknownSectionsRemovesDuplicatedUnknownSentence(t *testing.T) {
+	answer := `已确认：项目为系统升级服务，预算220万元；至少3家供应商可能参与，不涉密、不应急。尚未确认采购信息能否公开、需求是否完整、采购全流程时间是否可行。
+
+待确认：采购信息能否公开、需求是否完整、采购全流程时间是否可行。
+
+公开采购：制度条件说明。`
+	want := `已确认：项目为系统升级服务，预算220万元；至少3家供应商可能参与，不涉密、不应急。
+
+待确认：采购信息能否公开、需求是否完整、采购全流程时间是否可行。
+
+公开采购：制度条件说明。`
+	if got := NormalizeConfirmedUnknownSections(answer); got != want {
+		t.Fatalf("unknown lifecycle leakage was not removed:\n%s", got)
+	}
+}
+
+func TestNormalizeConfirmedUnknownSectionsPreservesConfirmedPrefixAndOnlyUnknownCopy(t *testing.T) {
+	answer := "**已确认：** 预算220万元，尚未确认采购时间。\n\n**待确认：** 采购时间是否可行。"
+	want := "**已确认：** 预算220万元。\n\n**待确认：** 采购时间是否可行。"
+	if got := NormalizeConfirmedUnknownSections(answer); got != want {
+		t.Fatalf("confirmed prefix was not preserved: %q", got)
+	}
+
+	withoutUnknownSection := "已确认：预算220万元。尚未确认采购时间。"
+	if got := NormalizeConfirmedUnknownSections(withoutUnknownSection); got != withoutUnknownSection {
+		t.Fatalf("only copy of uncertainty was removed: %q", got)
+	}
 }

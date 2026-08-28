@@ -273,6 +273,7 @@ func (e *AgentEngine) emitCompletionEvent(
 ) {
 	e.syncCitationReferences(state)
 	state.FinalAnswer = conversationmemory.StripInternalPlanningPreamble(state.FinalAnswer)
+	state.FinalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(state.FinalAnswer)
 	state.FinalAnswer = conversationmemory.NormalizeStateDeltaScope(state.FinalAnswer, e.activeQuery)
 	beforeBoundaryRepair := state.FinalAnswer
 	state.FinalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(

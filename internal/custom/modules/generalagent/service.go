@@ -276,6 +276,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		durableUserContext,
 	)
 	runtimeQuery = conversationmemory.AppendCurrentTurnDirective(runtimeQuery, req.Query, boundaryUserStatements...)
+	active.runtimeQuery = runtimeQuery
 	evalObservability := false
 	if manager := langfuse.GetManager(); manager != nil {
 		evalObservability = manager.CaptureContent() && manager.EnabledFor(ctx)
@@ -451,6 +452,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 
 	allRefs := active.snapshotSourceReferences()
 	finalAnswer = conversationmemory.StripInternalPlanningPreamble(finalAnswer)
+	finalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(finalAnswer)
 	finalAnswer = conversationmemory.NormalizeStateDeltaScope(finalAnswer, req.Query)
 	finalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
 		finalAnswer,

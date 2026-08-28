@@ -525,6 +525,8 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 		if topics := comparisonUnknownTopics(originalQuery); len(topics) > 1 {
 			encoded, _ := json.Marshal(topics)
 			rules += "\n[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS]" + string(encoded)
+			rules += `
+- 首次检索必须同时覆盖备选项名称和上述每个待确认条件的核心词；对“是否/能否/可行”等问法，检索制度中相应的肯定条件及常见同义表达。只取得备选项定义、金额门槛或相邻条款不算完成，必须继续定位直接包含该条件的分片并使用其真实 chunk_id。`
 			if IsDeferredDecisionTurn(originalQuery) {
 				rules += `
 - 上述用户待确认项只用于独立的“待确认：”事实行。备选项段只写证据原文中的直接条件；除非名称完全相同，否则不得把用户待确认项括注、改名或解释成制度条件。`
@@ -1412,6 +1414,98 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
 }
 
+// NormalizeConfirmedUnknownSections keeps lifecycle labels mutually exclusive
+// in ordinary answers as well as dedicated state-audit turns. Reasoning models
+// sometimes append a sentence such as "尚未确认……" to an "已确认：" paragraph
+// and then repeat the same items under "待确认：". The meaning is understandable
+// to a person, but downstream consumers can no longer treat the labelled
+// sections as a reliable state machine. This function only removes explicitly
+// uncertain clauses from a confirmed section when the answer also contains a
+// separate unknown section, so it never turns an uncertainty into a fact or
+// drops the only copy of an unknown.
+func NormalizeConfirmedUnknownSections(answer string) string {
+	value := strings.TrimSpace(strings.ReplaceAll(answer, "\r\n", "\n"))
+	if value == "" || !hasUnknownSection(value) {
+		return value
+	}
+	paragraphs := regexp.MustCompile(`\n\s*\n`).Split(value, -1)
+	changed := false
+	for index, paragraph := range paragraphs {
+		if !isConfirmedSectionParagraph(paragraph) {
+			continue
+		}
+		cleaned := removeUncertainUnitsFromConfirmedParagraph(paragraph)
+		if cleaned != strings.TrimSpace(paragraph) {
+			paragraphs[index] = cleaned
+			changed = true
+		}
+	}
+	if !changed {
+		return value
+	}
+	out := make([]string, 0, len(paragraphs))
+	for _, paragraph := range paragraphs {
+		if paragraph = strings.TrimSpace(paragraph); paragraph != "" {
+			out = append(out, paragraph)
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, "\n\n"))
+}
+
+func hasUnknownSection(value string) bool {
+	for _, paragraph := range regexp.MustCompile(`\n\s*\n`).Split(value, -1) {
+		probe := strings.TrimSpace(strings.Trim(strings.TrimSpace(paragraph), "#*_` "))
+		if containsAnyPrefix(probe, []string{
+			"待确认：", "待确认:", "尚未确认：", "尚未确认:",
+			"待核实：", "待核实:", "未知：", "未知:",
+			"待确认事实", "待确认事项", "未知事实", "未确认事实",
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+func isConfirmedSectionParagraph(paragraph string) bool {
+	probe := strings.TrimSpace(strings.Trim(strings.TrimSpace(paragraph), "#*_` "))
+	return containsAnyPrefix(probe, []string{
+		"已确认：", "已确认:", "当前有效事实", "当前事实", "已确认事实",
+	})
+}
+
+func removeUncertainUnitsFromConfirmedParagraph(paragraph string) string {
+	const uncertainMarkers = "待确认|尚未确认|未确认|待核实|尚未核实|未知|未提供"
+	uncertainPattern := regexp.MustCompile(uncertainMarkers)
+	separatorPattern := regexp.MustCompile(`([。！？!?；;]+)`)
+	parts := separatorPattern.Split(strings.TrimSpace(paragraph), -1)
+	separators := separatorPattern.FindAllString(strings.TrimSpace(paragraph), -1)
+	out := make([]string, 0, len(parts)*2)
+	for index, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			if marker := uncertainPattern.FindStringIndex(part); marker != nil {
+				// Preserve any confirmed text before a trailing uncertainty clause,
+				// for example "预算已确认，尚未确认采购时间".
+				beforeMarker := part[:marker[0]]
+				prefix := strings.TrimSpace(strings.TrimRight(beforeMarker, "，,、 \t"))
+				prefixProbe := strings.TrimSpace(strings.Trim(strings.TrimSpace(prefix), "#*_` "))
+				prefixProbe = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(prefixProbe, "已确认："), "已确认:"))
+				uncertainQuestionOnly := !strings.ContainsAny(beforeMarker, "，,；;。！？!?") &&
+					containsAny(prefixProbe, []string{"是否", "能否"})
+				if prefix != "" && !uncertainQuestionOnly {
+					out = append(out, prefix)
+				}
+			} else {
+				out = append(out, part)
+			}
+		}
+		if index < len(separators) && len(out) > 0 {
+			out[len(out)-1] = strings.TrimRight(out[len(out)-1], "。！？!?；;") + separators[index]
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, ""))
+}
+
 func explicitUnknownUserStatements(statements []string) []string {
 	result := make([]string, 0, len(statements))
 	for _, statement := range statements {
@@ -1847,6 +1941,8 @@ func StripInternalPlanningPreamble(answer string) string {
 			"looking at the returned evidence", "looking at the evidence",
 			"the evidence is already", "i need to rewrite", "i will rewrite",
 			"the evidence chunk", "the retrieved evidence", "i already retrieved",
+			"the tools are returning", "the tools returned", "tools are returning",
+			"from the earlier grep", "from the earlier retrieval", "from earlier grep",
 			"now rewriting", "now i'll write", "now i will write",
 			"好的，我已获取", "好的，我已经获取", "好的，我现在", "好的，现在我", "好的，现在进行", "好的，现在根据", "好的，根据整个对话", "好的，遵命。我现在", "好的，以下是", "以下是根据整个会话", "遵照您的指令", "现在我已经", "现在我有了", "下面我将", "让我整合",
 			"现在我已获得", "根据本轮检索结果", "以下是替换后的答案", "根据当前轮检索结果",

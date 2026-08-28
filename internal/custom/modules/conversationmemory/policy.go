@@ -1116,6 +1116,158 @@ func NormalizeDeferredComparisonRelationships(answer, originalQuery string) stri
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
+// CompactExplicitOneLineComparison enforces a user's explicit one-line-per-
+// option response shape after generation. It only reuses the answer's existing
+// fact sections, named option text, and citation handles. If any named option
+// lacks a cited condition paragraph, the answer is left untouched so missing
+// evidence remains visible to the normal citation/eval gates.
+func CompactExplicitOneLineComparison(answer, originalQuery string) string {
+	value := strings.TrimSpace(strings.ReplaceAll(answer, "\r\n", "\n"))
+	if value == "" || !IsDeferredDecisionTurn(originalQuery) || !IsComparisonTurn(originalQuery) ||
+		!containsAny(originalQuery, []string{"每种方式一行", "每个方式一行", "各一行", "逐项一行"}) {
+		return value
+	}
+	topics := currentTurnEvidenceTopics(originalQuery)
+	if len(topics) < 2 {
+		return value
+	}
+
+	paragraphs := internalPlanningParagraphBreakPattern.Split(value, -1)
+	confirmed, unknown := "", ""
+	type optionCandidate struct {
+		paragraph string
+		score     int
+	}
+	candidates := make(map[string]optionCandidate, len(topics))
+	for _, paragraph := range paragraphs {
+		paragraph = strings.TrimSpace(paragraph)
+		if paragraph == "" {
+			continue
+		}
+		switch lifecycleSectionHeading(paragraph) {
+		case "active":
+			if confirmed == "" {
+				confirmed = paragraph
+			}
+			continue
+		case "unknown":
+			if unknown == "" {
+				unknown = paragraph
+			}
+			continue
+		}
+		matched := make([]string, 0, 2)
+		for _, topic := range topics {
+			if strings.Contains(paragraph, topic) {
+				matched = append(matched, topic)
+			}
+		}
+		if len(matched) != 1 || !deferredCitationPattern.MatchString(paragraph) {
+			continue
+		}
+		score := 10
+		if containsAny(paragraph, []string{"适宜采用", "适用条件", "适用重点", "制度条件", "条件为", "条件包括"}) {
+			score += 20
+		}
+		if strings.Contains(paragraph, "是指") {
+			score += 2
+		}
+		if previous, exists := candidates[matched[0]]; !exists || score > previous.score ||
+			(score == previous.score && utf8.RuneCountInString(paragraph) > utf8.RuneCountInString(previous.paragraph)) {
+			candidates[matched[0]] = optionCandidate{paragraph: paragraph, score: score}
+		}
+	}
+	if confirmed == "" || unknown == "" {
+		return value
+	}
+
+	out := []string{confirmed, unknown}
+	for _, topic := range topics {
+		candidate, exists := candidates[topic]
+		if !exists {
+			return value
+		}
+		line := compactCitedConditionParagraph(candidate.paragraph, topic)
+		if line == "" || !deferredCitationPattern.MatchString(line) {
+			return value
+		}
+		out = append(out, line)
+	}
+	const conclusion = "待上述条件确认后再确定，暂不推荐最终方式。"
+	out = append(out, conclusion)
+	result := strings.TrimSpace(strings.Join(out, "\n\n"))
+	if utf8.RuneCountInString(result) >= utf8.RuneCountInString(value) {
+		return value
+	}
+	return result
+}
+
+func compactCitedConditionParagraph(paragraph, topic string) string {
+	text := strings.ReplaceAll(paragraph, "\n", " ")
+	text = strings.NewReplacer("**", "", "__", "", "##", "", "📄", " ").Replace(text)
+	text = strings.Join(strings.Fields(text), " ")
+	citations := deferredCitationPattern.FindAllString(text, -1)
+	if len(citations) == 0 {
+		return ""
+	}
+	text = deferredCitationPattern.ReplaceAllString(text, "")
+
+	start := -1
+	markerLength := 0
+	for _, marker := range []string{"适宜采用", "适用条件", "适用重点为", "适用重点", "制度条件为", "制度条件", "条件为", "条件包括"} {
+		if index := strings.Index(text, marker); index >= 0 && (start < 0 || index < start) {
+			start = index
+			markerLength = len(marker)
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	body := strings.TrimSpace(text[start+markerLength:])
+	if colon := strings.IndexAny(body, "：:"); colon >= 0 && colon <= 48 {
+		_, width := utf8.DecodeRuneInString(body[colon:])
+		body = strings.TrimSpace(body[colon+width:])
+	}
+	for _, marker := range []string{"适用重点在于", "引用来源", "适用提示", "来源：", "来源:"} {
+		if index := strings.Index(body, marker); index >= 0 {
+			body = strings.TrimSpace(body[:index])
+		}
+	}
+	if index := strings.Index(body, "《"); index >= 0 {
+		body = strings.TrimSpace(body[:index])
+	}
+	body = strings.Trim(body, "，,；;。 ：:")
+	if body == "" {
+		return ""
+	}
+	body = compactConditionRunes(body, 220)
+	uniqueCitations := make([]string, 0, len(citations))
+	seen := make(map[string]bool, len(citations))
+	for _, citation := range citations {
+		if !seen[citation] {
+			seen[citation] = true
+			uniqueCitations = append(uniqueCitations, citation)
+		}
+	}
+	return topic + "：制度条件为" + body + "。" + strings.Join(uniqueCitations, "") +
+		"；该直接条件在本项目中是否成立待确认。"
+}
+
+func compactConditionRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if limit < 1 || len(runes) <= limit {
+		return strings.Trim(string(runes), "，,；;。 ")
+	}
+	cut := limit
+	for index := limit; index < len(runes) && index <= limit+24; index++ {
+		if strings.ContainsRune("；;。", runes[index]) {
+			cut = index + 1
+			break
+		}
+	}
+	return strings.Trim(string(runes[:cut]), "，,；;。 ") + "…"
+}
+
 func removeDeferredUnknownsFromConfirmedLine(line string, unknownTopics []string) string {
 	confirmed := strings.Index(line, "已确认")
 	if confirmed < 0 || confirmed > 8 || len(unknownTopics) == 0 {
@@ -1181,6 +1333,9 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	if value == "" || query == "" || !isStrictStateDeltaTurn(query) {
 		return value
 	}
+	if projected := projectExplicitConfirmedUnknownSections(query); projected != "" {
+		return projected
+	}
 	if projected := projectExplicitUnknownOnlyList(query); projected != "" {
 		return projected
 	}
@@ -1240,6 +1395,42 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	}
 	result = expandSharedScalarUnits(result)
 	return restoreExplicitStateDeltaFacts(result, query)
+}
+
+// projectExplicitConfirmedUnknownSections renders an explicitly scoped state
+// turn from the current user statement instead of trusting a model-generated
+// table. Both the known prefix and uncertainty list are parsed by the same
+// user-only helpers used for deferred comparisons; no historical assistant
+// text, retrieved evidence, or domain rule can become state through this path.
+func projectExplicitConfirmedUnknownSections(query string) string {
+	if !containsAny(query, []string{"只列", "仅列", "只输出", "仅输出"}) ||
+		!strings.Contains(query, "已确认") || !strings.Contains(query, "待确认") {
+		return ""
+	}
+	known, unknowns := explicitDeferredUserFacts(query)
+	if known == "" || len(unknowns) < 2 {
+		return ""
+	}
+
+	knownLines := make([]string, 0, 4)
+	for _, fragment := range splitUserFactFragments(known) {
+		fragment = strings.TrimSpace(strings.Trim(fragment, "。；;，, "))
+		if count := utf8.RuneCountInString(fragment); count >= 2 && count <= 160 {
+			knownLines = append(knownLines, "- "+fragment)
+		}
+	}
+	unknownLines := make([]string, 0, len(unknowns))
+	for _, topic := range uniqueUncertainItems(unknowns) {
+		topic = strings.TrimSpace(strings.Trim(topic, "。；;，, "))
+		if count := utf8.RuneCountInString(topic); count >= 2 && count <= 80 {
+			unknownLines = append(unknownLines, "- "+topic+"：待确认")
+		}
+	}
+	if len(knownLines) == 0 || len(unknownLines) < 2 {
+		return ""
+	}
+	return "## 已确认\n\n" + strings.Join(knownLines, "\n") +
+		"\n\n## 待确认\n\n" + strings.Join(unknownLines, "\n")
 }
 
 func projectExplicitUnknownOnlyList(query string) string {
@@ -1879,10 +2070,12 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	retiredAnchors := retiredAuditScalarAnchors(lines)
 	out := make([]string, 0, len(lines))
 	section := ""
+	activeTableColumns := 0
 	seenActionBoundaryKinds := make(map[string]bool)
 	for _, line := range lines {
 		if key := stateAuditSectionHeading(line); key != "" {
 			section = key
+			activeTableColumns = 0
 			if key == "action_boundary" {
 				seenActionBoundaryKinds = make(map[string]bool)
 			}
@@ -1896,6 +2089,14 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			continue
 		}
 		if section == "active" {
+			if columns, meaningful := markdownTableShape(line); columns > 0 &&
+				!markdownTableSeparatorPattern.MatchString(strings.TrimSpace(line)) {
+				if activeTableColumns == 0 {
+					activeTableColumns = columns
+				} else if columns < activeTableColumns || (activeTableColumns > 1 && meaningful < 2) {
+					continue
+				}
+			}
 			if activeLineContainsRetiredAuditAnchor(line, retiredAnchors) {
 				continue
 			}
@@ -1994,6 +2195,23 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	out = restoreExplicitRetiredScalarGroups(out, explicitRetiredGroups)
 	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
+}
+
+func markdownTableShape(line string) (columns, meaningful int) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.Contains(trimmed, "|") {
+		return 0, 0
+	}
+	cells := strings.Split(strings.Trim(trimmed, "|"), "|")
+	if len(cells) == 0 {
+		return 0, 0
+	}
+	for _, cell := range cells {
+		if strings.Trim(strings.TrimSpace(cell), "*_` ") != "" {
+			meaningful++
+		}
+	}
+	return len(cells), meaningful
 }
 
 func transientStateAuditScopeInstruction(line string) bool {
@@ -3682,8 +3900,10 @@ func StripInternalPlanningPreamble(answer string) string {
 			"from the earlier grep", "from the earlier retrieval", "from earlier grep",
 			"now rewriting", "now i'll write", "now i will write",
 			"好的，我已获取", "好的，我已经获取", "好的，我现在", "好的，现在我", "好的，现在进行", "好的，现在根据", "好的，根据整个对话", "好的，遵命。我现在", "好的，以下是", "以下是根据整个会话", "遵照您的指令", "现在我已经", "现在我有了", "下面我将", "让我整合",
-			"现在我已获得", "根据本轮检索结果", "以下是替换后的答案", "根据当前轮检索结果",
+			"现在我已获得", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "以下是替换后的答案", "根据当前轮检索结果",
 		})
+		knownPlanning = knownPlanning || (containsAny(probe, []string{"证据", "检索"}) &&
+			containsAny(probe, []string{"现在来回答", "现直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据", "已获取全部"}))
 		knownPlanning = knownPlanning || strings.Contains(probe, "runtime_response_contract") ||
 			strings.Contains(probe, "[weknora_current_turn_execution")
 		leadingCitationChecklist := strings.Count(first, "<src id=") >= 2 &&
@@ -3737,11 +3957,16 @@ func stripStandaloneInternalPlanningParagraphs(value string) string {
 			"i now see", "now i have", "let me ", "i need to ", "i will rewrite",
 			"the validation ", "the tools ", "from the earlier retrieval", "from the earlier grep",
 			"现在两个问题的证据", "从第一个结果可以看到", "现在我有完整", "现在我已获得",
-			"让我给出最终回答", "让我用", "根据本轮检索结果", "根据当前轮检索结果", "以下是替换后的答案",
+			"让我给出最终回答", "让我用", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "根据当前轮检索结果", "以下是替换后的答案",
 		})
 		planning = planning || (!quotedOrCode &&
 			containsAny(probe, []string{"chunk_id", "cite_exactly", "citation handle"}) &&
 			containsAny(probe, []string{"让我", "let me", "需要确认", "need to"}))
+		planning = planning || (!quotedOrCode &&
+			containsAny(probe, []string{"chunk_", "</think>", "let's retrieve", "let’s retrieve"}) &&
+			containsAny(probe, []string{"检索", "retrieve", "verify", "证据", "evidence"}))
+		planning = planning || (!quotedOrCode && containsAny(probe, []string{"证据", "检索"}) &&
+			containsAny(probe, []string{"现在来回答", "现直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据"}))
 		if planning {
 			removed = true
 			continue

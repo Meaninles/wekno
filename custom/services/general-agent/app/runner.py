@@ -54,7 +54,17 @@ def env_float(name: str, default: float) -> float:
 
 def effective_max_turns(payload: ChatPayload) -> int:
     configured = payload.runtime_config.max_iterations
-    return configured if configured > 0 else env_int("CUSTOM_GENERAL_AGENT_MAX_TURNS", 30)
+    maximum = configured if configured > 0 else env_int("CUSTOM_GENERAL_AGENT_MAX_TURNS", 30)
+    # A multi-target evidence request needs one bounded retrieval opportunity
+    # per named target plus a final synthesis turn. Small/default agent limits
+    # otherwise let some OpenAI-compatible reasoning models spend the last turn
+    # describing a pending lookup instead of actually invoking it. This is only
+    # a ceiling reserve: successful runs still stop as soon as they answer.
+    if not payload.runtime_config.disable_tools_for_turn:
+        topic_count = len(required_evidence_topics(payload.query))
+        if topic_count >= 3:
+            maximum = max(maximum, min(18, 6 + topic_count * 3))
+    return maximum
 
 
 def effective_llm_api_timeout_seconds(payload: ChatPayload) -> int:
@@ -2783,6 +2793,7 @@ Runtime configuration:
 
 Execution limits:
 - The runtime is configured with max_turns={max_turns}. This is a hard maximum for the whole run's reasoning/tool-use turns. Plan conservatively, batch tool work when possible, and avoid open-ended searching or repeated repair loops. If the task threatens this limit, stop collecting more data and deliver the best verifiable result available.
+- When the current user_request carries `[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]`, invoke the available read-only retrieval tool for those focused searches before writing answer prose. Batch independent lookups in the first tool-use response when possible. Never spend an assistant turn listing chunk ids, saying that you will retrieve/verify next, or simulating a tool call in natural language; make the actual tool calls, then write one final user-visible answer.
 - The runtime is configured with API_TIMEOUT_MS={llm_timeout_seconds * 1000}, so a single LLM/API call may wait at most {llm_timeout_seconds} seconds. This is a per-call timeout, not total runtime. Keep individual model/API operations efficient and do not assume a longer call can finish.
 - Separate runtime validation LLM judge calls, when used, run with thinking disabled. This does not change the main agent thinking mode, which still follows runtime_config.thinking and the frontend configuration.
 - Never use Bash with run_in_background=true. Run commands in the foreground so the runtime cannot end the assistant turn while work is still running.
@@ -4368,7 +4379,10 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"from\s+(?:the\s+)?earlier\s+(?:grep|retrieval).{0,80}(?:result|evidence)|"
     r"let\s+me\s+(?:think|check)|the\s+validation\s+says|"
     r"(?:好的[，,]?\s*)?.{0,80}runtime_response_contract|"
-    r"现在我已获得|根据(?:本|当前)轮检索结果|以下是替换后的答案"
+    r"现在我已获得|已(?:获取|获得)全部所需证据|"
+    r"用户要求.{0,100}(?:已有足够证据|让我直接给出答案)|"
+    r"(?:好的[，,]?\s*)?[^\n]{0,80}(?:证据|检索)[^\n]{0,80}(?:现在来回答|现直接回答|让我直接给出答案|现在进行深度阅读)|"
+    r"根据(?:本|当前)轮检索结果|以下是替换后的答案"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )

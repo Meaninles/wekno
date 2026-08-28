@@ -1637,3 +1637,124 @@ func TestNormalizeStateAuditGroupsExplicitRetiredCompositionAndDropsTransientSco
 		t.Fatalf("audit grouping was not idempotent:\n%s", twice)
 	}
 }
+
+func TestNormalizeStateDeltaScopeProjectsExplicitConfirmedAndUnknownSections(t *testing.T) {
+	query := "建立项目事实：系统升级服务预算220万元，至少3家供应商可参与，是否可以公开采购、需求是否完整、全流程时间是否可行都尚未确认。只列已确认和待确认，不比较方式，本轮不要检索。"
+	answer := `## 已确认
+| 项目 | 内容 |
+|---|---|
+| 需求是否完整 | 否 |
+
+## 待确认
+- 是否可以公开采购、需求：否完整、全流程时间是否可行都尚未确认`
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{
+		"## 已确认", "系统升级服务预算220万元", "至少3家供应商可参与",
+		"## 待确认", "是否可以公开采购：待确认", "需求是否完整：待确认", "全流程时间是否可行：待确认",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("projected state item %q missing: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "需求：否完整") || strings.Contains(got, "| 项目 |") {
+		t.Fatalf("model-generated malformed state survived projection: %s", got)
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("confirmed/unknown projection was not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeStateAuditDropsIncompleteActiveTableRow(t *testing.T) {
+	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界。"
+	prior := "补充来源：项目负责人是林梅；当前对话用户身份没有提供，不得把用户等同于林梅。"
+	answer := `### 当前有效事实
+| 字段 | 当前状态 | 来源 |
+|---|---|---|
+| 项目负责人 | 林梅 | 用户 |
+| 当前对话用户身份 |
+### 已废弃事实
+- 无
+### 待确认事实
+| 待确认事项 | 当前状态 |
+|---|---|
+| 当前对话用户身份 | 未提供 |
+### 行动边界
+- 不得把用户等同于林梅`
+
+	got := NormalizeStateAuditSections(answer, query, prior)
+	if strings.Count(got, "当前对话用户身份") != 1 || !strings.Contains(got, "| 当前对话用户身份 | 未提供 |") {
+		t.Fatalf("incomplete active row was not removed without harming unknown state: %s", got)
+	}
+	if !strings.Contains(got, "项目负责人 | 林梅") {
+		t.Fatalf("valid active table row was removed: %s", got)
+	}
+}
+
+func TestStripInternalPlanningPreambleRemovesObservedTerminalNarration(t *testing.T) {
+	for _, preamble := range []string{
+		"好的，所有必要证据都已从当前轮检索获取。现在来回答用户的两个问题。",
+		"用户要求先停止比较，我已有足够证据。让我直接给出答案。",
+		"已获取全部所需证据，现直接回答。",
+	} {
+		answer := preamble + "\n\n中标候选人公示期不少于3日。<src id=\"S1\" />"
+		if got := StripInternalPlanningPreamble(answer); got != "中标候选人公示期不少于3日。<src id=\"S1\" />" {
+			t.Fatalf("terminal narration %q survived: %q", preamble, got)
+		}
+	}
+
+	middle := `已确认：项目预算220万元。
+
+1.询比采购适用条件 (chunk_abc)。Let’s retrieve these chunks for完整。
+
+</think>Let's retrieve chunk_29 and verify evidence.</think>
+
+待上述条件确认后再确定，暂不推荐最终方式。`
+	want := "已确认：项目预算220万元。\n\n待上述条件确认后再确定，暂不推荐最终方式。"
+	if got := StripInternalPlanningPreamble(middle); got != want {
+		t.Fatalf("middle retrieval plan survived: %q", got)
+	}
+}
+
+func TestCompactExplicitOneLineComparisonKeepsGroundedOptions(t *testing.T) {
+	query := "仅基于刚才明确的项目事实和制度，比较询比、竞价、竞争谈判的适配点与风险，不定首选。每种方式一行，制度判断就近引用。"
+	answer := `已确认：系统升级服务预算220万元，至少3家供应商可参与。
+
+待确认：是否可以公开采购待确认；需求是否完整待确认；全流程时间是否可行待确认。
+
+## 询比
+
+询比，是指一次报价的方式。适宜采用询比的条件包括采购需求确定、规格统一、货源充足、价格稳定，或行业规范和收费标准统一的服务事项。适用重点在于重复解释。<src id="S2" />
+
+## 竞价
+
+竞价，是指多次报价的方式。适宜采用竞价的条件包括采购需求明确、规格型号同一、价格形成机制明确，或服务标准要求完整。<src id="S5" />
+
+## 竞争谈判
+
+竞争谈判，是指与二家以上供应商洽谈。适宜采用竞争谈判的条件包括只能提出功能性指标、不能确定详细规格，或目标可以有不同路径和方案实现。<src id="S6" />
+
+## 引用来源
+
+制度第三十五条至第三十七条。
+
+待上述条件确认后再确定，暂不推荐最终方式。`
+
+	got := CompactExplicitOneLineComparison(answer, query)
+	if len([]rune(got)) > 900 {
+		t.Fatalf("one-line comparison still exceeds response contract: %d", len([]rune(got)))
+	}
+	for _, expected := range []string{"询比：制度条件为", "竞价：制度条件为", "竞争谈判：制度条件为", "S2", "S5", "S6"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("compacted comparison lost %q: %s", expected, got)
+		}
+	}
+	for _, removed := range []string{"是指", "引用来源", "重复解释"} {
+		if strings.Contains(got, removed) {
+			t.Fatalf("optional comparison prose %q survived: %s", removed, got)
+		}
+	}
+	if twice := CompactExplicitOneLineComparison(got, query); twice != got {
+		t.Fatalf("one-line comparison compaction was not idempotent:\n%s", twice)
+	}
+}

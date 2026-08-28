@@ -1003,6 +1003,12 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					conversationmemory.RequiredEvidenceTopics(reqCtx.query),
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
 				)
+				answer = conversationmemory.CompactExplicitOneLineComparison(answer, reqCtx.query)
+				answer = sourcerefs.RepairNamedTopicCitationBindings(
+					answer,
+					conversationmemory.RequiredEvidenceTopics(reqCtx.query),
+					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+				)
 				answer = sourcerefs.RepairAnswerCitations(
 					answer,
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),

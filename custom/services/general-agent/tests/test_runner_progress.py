@@ -39,6 +39,7 @@ from app.runner import (  # noqa: E402
     data_analysis_stop_hook_factory,
     deterministic_final_validation,
     document_pptx_layout_stop_hook_factory,
+    effective_max_turns,
     forbidden_background_bash_reason,
     is_background_bash_tool_call,
     judge_issues,
@@ -191,6 +192,27 @@ class RunnerProgressTest(unittest.TestCase):
             [],
         )
 
+    def test_multi_target_evidence_turn_gets_bounded_turn_reserve(self):
+        payload = ChatPayload(
+            run_id="run-turn-reserve",
+            session_id="session-turn-reserve",
+            assistant_message_id="assistant-turn-reserve",
+            query=(
+                "比较甲、乙、丙并引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["甲","乙","丙"]'
+            ),
+            runtime_config=RuntimeConfigSpec(max_iterations=10),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        self.assertEqual(effective_max_turns(payload), 15)
+
+        payload.runtime_config.disable_tools_for_turn = True
+        self.assertEqual(effective_max_turns(payload), 10)
+        payload.runtime_config.disable_tools_for_turn = False
+        payload.runtime_config.max_iterations = 20
+        self.assertEqual(effective_max_turns(payload), 20)
+
     def test_turn_contract_issues_bind_uncertainties_to_direct_evidence(self):
         payload = ChatPayload(
             run_id="run-uncertainty-contract",
@@ -336,6 +358,15 @@ class RunnerProgressTest(unittest.TestCase):
             "current_turn_internal_planning_exposed",
             {issue["code"] for issue in turn_contract_issues(payload, there_is_still_issue)},
         )
+        for observed in (
+            "好的，所有必要证据都已从当前轮检索获取。现在来回答用户的两个问题。\n\n正式回答。",
+            "用户要求先停止比较，我已有足够证据。让我直接给出答案。\n\n正式回答。",
+            "已获取全部所需证据，现直接回答。\n\n正式回答。",
+        ):
+            self.assertIn(
+                "current_turn_internal_planning_exposed",
+                {issue["code"] for issue in turn_contract_issues(payload, observed)},
+            )
 
     def test_turn_contract_issues_reject_deferred_comparison_ranking(self):
         payload = ChatPayload(

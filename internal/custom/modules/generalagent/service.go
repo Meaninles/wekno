@@ -481,6 +481,12 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		conversationmemory.RequiredEvidenceTopics(req.Query),
 		allRefs,
 	)
+	finalAnswer = conversationmemory.CompactExplicitOneLineComparison(finalAnswer, req.Query)
+	finalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
+		finalAnswer,
+		conversationmemory.RequiredEvidenceTopics(req.Query),
+		allRefs,
+	)
 	finalAnswer = sourcerefs.RepairAnswerCitations(finalAnswer, allRefs)
 	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {

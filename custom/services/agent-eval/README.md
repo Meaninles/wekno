@@ -329,6 +329,8 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 - `datasets/multiturn-dev.v1.jsonl`：由真实发现记录整理出的三智能体多轮 DEV 契约。
 - `datasets/multiturn-ready.v3.jsonl`：冻结的 DEV + GATE 正式数据集（保持 v2 观察数据兼容）。
 - `datasets/multiturn-optimization-dev.v1.jsonl`：不派生 GATE 文案、每个 DEV case 重复 3 次的优化基线集。
+- `baselines/pre-agent-change.v1.json`：三套正式 baseline、原始观测、门禁自对照、preflight、依赖和 sealed manifest 的机器可校验不可覆盖哈希锁。
+- `baselines/pre-agent-change.v1.md`：改智能体前的有效失败矩阵、Judge 权限边界和固定四级 loop 操作说明。
 - `manifests/`：dataset、profile、policy、Judge calibration、scorer、gate 和 Judge prompt 的联合冻结哈希。
 - `calibration/judge-multiturn.v1.json`：judge 正例、负例、边界例和 INVALID 校准集。
 - `curation/build_multiturn_dev_v1.py`：上述数据集的可审查、确定性编译器。

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from collections import Counter, defaultdict
@@ -16,7 +17,7 @@ from weknora_eval.calibration import load_calibration, run_judge_calibration
 from weknora_eval.dataset import dataset_sha256, load_jsonl, validate_dataset
 from weknora_eval.langfuse_store import publish_dataset
 from weknora_eval.models import Capability, SUTFingerprint, Split, TurnContract
-from weknora_eval.readiness import evaluate_readiness
+from weknora_eval.readiness import evaluate_readiness, file_sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,117 @@ def eval_sut() -> SUTFingerprint:
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_pre_agent_change_lock_matches_committed_dependencies(self) -> None:
+        lock = json.loads(
+            (ROOT / "baselines" / "pre-agent-change.v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(lock["status"], "FROZEN_PRE_AGENT_CHANGE")
+        self.assertFalse(lock["sealed_holdout"]["content_accessed"])
+
+        for section in ("dev", "gate"):
+            dataset = lock[section]["dataset"]
+            dataset_path = ROOT / dataset["path"]
+            self.assertEqual(
+                dataset_sha256(load_jsonl(dataset_path)),
+                dataset["dataset_sha256"],
+            )
+            self.assertEqual(file_sha256(dataset_path), dataset["file_sha256"])
+
+        for baseline_name in ("experiment_baseline", "promotion_baseline"):
+            baseline = lock["dev"][baseline_name]
+            self.assertEqual(
+                file_sha256(ROOT / baseline["policy"]), baseline["policy_sha256"]
+            )
+            self.assertEqual(
+                file_sha256(ROOT / baseline["manifest"]), baseline["manifest_sha256"]
+            )
+
+        release = lock["gate"]["release_baseline"]
+        self.assertEqual(
+            file_sha256(ROOT / release["policy"]), release["policy_sha256"]
+        )
+        self.assertEqual(
+            file_sha256(ROOT / release["manifest"]), release["manifest_sha256"]
+        )
+        self.assertEqual(
+            file_sha256(ROOT / lock["frozen_dependencies"]["profile"]["path"]),
+            lock["frozen_dependencies"]["profile"]["sha256"],
+        )
+        self.assertEqual(
+            file_sha256(ROOT / lock["sealed_holdout"]["manifest"]),
+            lock["sealed_holdout"]["manifest_sha256"],
+        )
+
+        local_artifacts = [
+            (
+                lock["judge_calibration"]["artifact"],
+                lock["judge_calibration"]["sha256"],
+            ),
+            (
+                lock["dev"]["raw_observation"]["path"],
+                lock["dev"]["raw_observation"]["sha256"],
+            ),
+            (
+                lock["dev"]["experiment_baseline"]["path"],
+                lock["dev"]["experiment_baseline"]["sha256"],
+            ),
+            (
+                lock["dev"]["promotion_baseline"]["path"],
+                lock["dev"]["promotion_baseline"]["sha256"],
+            ),
+            (
+                lock["dev"]["self_control"]["gate"],
+                lock["dev"]["self_control"]["gate_sha256"],
+            ),
+            (
+                lock["dev"]["self_control"]["report"],
+                lock["dev"]["self_control"]["report_sha256"],
+            ),
+            (
+                lock["dev"]["promotion_self_control"]["gate"],
+                lock["dev"]["promotion_self_control"]["gate_sha256"],
+            ),
+            (
+                lock["dev"]["promotion_self_control"]["report"],
+                lock["dev"]["promotion_self_control"]["report_sha256"],
+            ),
+            (
+                lock["dev"]["preflight"]["experiment"],
+                lock["dev"]["preflight"]["experiment_sha256"],
+            ),
+            (
+                lock["dev"]["preflight"]["promotion"],
+                lock["dev"]["preflight"]["promotion_sha256"],
+            ),
+            (
+                lock["gate"]["raw_observation"]["path"],
+                lock["gate"]["raw_observation"]["sha256"],
+            ),
+            (
+                lock["gate"]["release_baseline"]["path"],
+                lock["gate"]["release_baseline"]["sha256"],
+            ),
+            (
+                lock["gate"]["self_control"]["gate"],
+                lock["gate"]["self_control"]["gate_sha256"],
+            ),
+            (
+                lock["gate"]["self_control"]["report"],
+                lock["gate"]["self_control"]["report_sha256"],
+            ),
+            (
+                lock["gate"]["preflight"]["path"],
+                lock["gate"]["preflight"]["sha256"],
+            ),
+        ]
+        present = [ROOT / path for path, _ in local_artifacts if (ROOT / path).exists()]
+        if present:
+            self.assertEqual(len(present), len(local_artifacts))
+            for path, expected in local_artifacts:
+                self.assertEqual(file_sha256(ROOT / path), expected)
+
     def test_runner_compose_forwards_the_frozen_evaluator_identity(self) -> None:
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn(

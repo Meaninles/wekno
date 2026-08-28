@@ -650,6 +650,63 @@ func TestNormalizeStateAuditSectionsHidesInternalArchiveRecordLabels(t *testing.
 	}
 }
 
+func TestNormalizeStateAuditSectionsRepairsUserAuthoredRetiredScalarCopy(t *testing.T) {
+	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	prior := []string{
+		"初始获批总预算为360万元，其中设备280万元、实施服务80万元。只更新台账。",
+		"财务把预算调整为390万元，其中设备300万元、实施服务90万元。360万元及280/80万元构成从现在起废弃。",
+	}
+	answer := `### 当前有效事实
+- 当前总预算390万元，设备300万元、实施服务90万元
+### 已废弃事实
+| 项目 | 废弃值 | 废弃原因 |
+| --- | --- | --- |
+| 总预算 | 360万元 | 调整为390万元 |
+| 设备预算 | 80万元 | 调整为300万元 |
+| 实施服务预算 | 80万元 | 调整为90万元 |
+### 待确认事实
+- 无
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	retired := strings.Split(strings.Split(got, "### 已废弃事实")[1], "### 待确认事实")[0]
+	for _, expected := range []string{"总预算（已废弃） | 360万元", "设备预算（已废弃） | 280万元", "实施服务预算（已废弃） | 80万元"} {
+		if !strings.Contains(retired, expected) {
+			t.Fatalf("explicit user-authored retired scalar %q was not repaired: %s", expected, got)
+		}
+	}
+	if strings.Contains(retired, "设备预算（已废弃） | 80万元") {
+		t.Fatalf("cross-component copied value survived retired audit repair: %s", got)
+	}
+}
+
+func TestNormalizeStateAuditSectionsRestoresMissingUserAuthoredRetiredScalar(t *testing.T) {
+	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	prior := []string{
+		"初始获批总预算为360万元，其中设备280万元、实施服务80万元。",
+		"预算调整为390万元。360万元及280/80万元构成从现在起废弃。",
+	}
+	answer := `### 当前有效事实
+- 当前总预算390万元
+### 已废弃事实
+- 初始总预算360万元（已废弃）
+- 实施服务80万元（已废弃）
+### 待确认事实
+- 无
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	retired := strings.Split(strings.Split(got, "### 已废弃事实")[1], "### 待确认事实")[0]
+	if !strings.Contains(retired, "设备280万元") || !strings.Contains(retired, "（已废弃）") {
+		t.Fatalf("missing explicit retired user fact was not restored: %s", got)
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("explicit retired fact restoration is not idempotent:\nfirst: %s\nsecond: %s", got, twice)
+	}
+}
+
 func TestNormalizeStateAuditSectionsRepairsObservedActionBoundaryTable(t *testing.T) {
 	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为‘当前有效事实’、‘已废弃事实’、‘待确认事实’和‘行动边界’四栏。"
 	answer := `以下是根据整个会话，为您整理的完整状态审计。

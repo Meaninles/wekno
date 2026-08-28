@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -72,6 +73,10 @@ var orderedOrBulletListPrefixPattern = regexp.MustCompile(`^\s*(?:[-+*]\s+|[0-9�
 
 var internalUserMessageLabelPattern = regexp.MustCompile(
 	`(?i)\b(?:earliest|earlier|latest|recent|current)_user_message_[0-9]+\b`,
+)
+
+var sharedScalarUnitPattern = regexp.MustCompile(
+	`([0-9０-９]+(?:\.[0-9０-９]+)?)\s*[/／]\s*([0-9０-９]+(?:\.[0-9０-９]+)?)\s*(万元|元|家|个|%|％)`,
 )
 
 var sourceAttributionParentheticalPattern = regexp.MustCompile(
@@ -1326,6 +1331,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		}
 	}
 	userStatements = append(userStatements, originalQuery)
+	explicitRetiredFacts := explicitRetiredScalarFacts(userStatements)
 	explicitUnknowns := explicitUnknownUserStatements(userStatements)
 	stripProcurementSelectionScope := containsAny(originalQuery, []string{
 		"不选择采购方式", "不得选择采购方式", "不要选择采购方式",
@@ -1371,6 +1377,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		}
 		if section == "retired" {
 			line = normalizeRetiredAuditLine(line)
+			line = repairExplicitRetiredScalarLine(line, explicitRetiredFacts)
 		}
 		if section == "action_boundary" {
 			if !containsAny(originalQuery, []string{"不推断", "不得推断", "不要推断"}) &&
@@ -1427,6 +1434,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
+	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
 }
 
@@ -1586,6 +1594,200 @@ func activeLineContainsRetiredAuditAnchor(line string, anchors map[string]bool) 
 		}
 	}
 	return false
+}
+
+type explicitRetiredScalarFact struct {
+	anchor   string
+	subject  string
+	fragment string
+}
+
+// explicitRetiredScalarFacts links only user-authored lifecycle declarations
+// to an earlier user-authored fact fragment. It never reads assistant answers.
+// This lets the audit correct a copied value such as one component accidentally
+// repeating another component, without deriving a value from domain knowledge.
+func explicitRetiredScalarFacts(userStatements []string) []explicitRetiredScalarFact {
+	cleaned := make([]string, 0, len(userStatements))
+	retirementIndex := make(map[string]int)
+	for index, statement := range userStatements {
+		statement = cleanUserStatementRecord(statement)
+		cleaned = append(cleaned, statement)
+		for _, fragment := range splitUserFactFragments(statement) {
+			if !containsAny(fragment, []string{"废弃", "作废", "失效"}) {
+				continue
+			}
+			for _, anchor := range explicitScalarAnchors(fragment) {
+				retirementIndex[anchor] = index
+			}
+		}
+	}
+
+	facts := make([]explicitRetiredScalarFact, 0, len(retirementIndex))
+	for anchor, retiredAt := range retirementIndex {
+		found := explicitRetiredScalarFact{anchor: anchor}
+		for index := retiredAt; index >= 0 && found.subject == ""; index-- {
+			for _, fragment := range splitUserFactFragments(cleaned[index]) {
+				if containsAny(fragment, []string{"废弃", "作废", "失效"}) ||
+					!strings.Contains(fragment, anchor) {
+					continue
+				}
+				subject := scalarFactSubject(fragment, anchor)
+				if utf8.RuneCountInString(subject) < 2 {
+					continue
+				}
+				found.subject = subject
+				found.fragment = cleanRetiredFactFragment(fragment)
+				break
+			}
+		}
+		if found.subject != "" && found.fragment != "" {
+			facts = append(facts, found)
+		}
+	}
+	sort.Slice(facts, func(i, j int) bool {
+		if facts[i].subject == facts[j].subject {
+			return facts[i].anchor < facts[j].anchor
+		}
+		return facts[i].subject < facts[j].subject
+	})
+	return facts
+}
+
+func cleanUserStatementRecord(statement string) string {
+	value := strings.TrimSpace(html.UnescapeString(statement))
+	if match := internalUserMessageLabelPattern.FindStringIndex(value); match != nil && match[0] == 0 {
+		if colon := strings.Index(value, ":"); colon >= 0 {
+			value = strings.TrimSpace(value[colon+1:])
+		}
+	}
+	return value
+}
+
+func splitUserFactFragments(statement string) []string {
+	return strings.FieldsFunc(statement, func(r rune) bool {
+		switch r {
+		case '，', ',', '；', ';', '。', '！', '!', '？', '?', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func explicitScalarAnchors(fragment string) []string {
+	anchors := append([]string(nil), stateAuditAnchorPattern.FindAllString(fragment, -1)...)
+	for _, match := range sharedScalarUnitPattern.FindAllStringSubmatch(fragment, -1) {
+		if len(match) == 4 {
+			anchors = append(anchors, match[1]+match[3], match[2]+match[3])
+		}
+	}
+	seen := make(map[string]bool, len(anchors))
+	out := make([]string, 0, len(anchors))
+	for _, anchor := range anchors {
+		if anchor != "" && !seen[anchor] {
+			seen[anchor] = true
+			out = append(out, anchor)
+		}
+	}
+	return out
+}
+
+func scalarFactSubject(fragment, anchor string) string {
+	index := strings.Index(fragment, anchor)
+	if index < 0 {
+		return ""
+	}
+	prefix := fragment[:index]
+	if delimiter := strings.LastIndexAny(prefix, "、|：:"); delimiter >= 0 {
+		_, width := utf8.DecodeRuneInString(prefix[delimiter:])
+		prefix = prefix[delimiter+width:]
+	}
+	prefix = strings.TrimSpace(strings.Trim(prefix, "*_`~#()（）[]【】 "))
+	for changed := true; changed; {
+		changed = false
+		for _, leading := range []string{"此前", "先前", "其中", "初始获批", "初始", "原定", "原", "旧"} {
+			if strings.HasPrefix(prefix, leading) {
+				prefix = strings.TrimSpace(strings.TrimPrefix(prefix, leading))
+				changed = true
+			}
+		}
+	}
+	for _, suffix := range []string{"调整为", "变更为", "修改为", "改为", "定为", "为", "是"} {
+		if strings.HasSuffix(prefix, suffix) {
+			prefix = strings.TrimSpace(strings.TrimSuffix(prefix, suffix))
+			break
+		}
+	}
+	return normalizeStateDeltaText(prefix)
+}
+
+func cleanRetiredFactFragment(fragment string) string {
+	value := strings.Trim(strings.TrimSpace(fragment), "-*#_`~ ")
+	value = strings.TrimSpace(strings.TrimPrefix(value, "其中"))
+	return strings.TrimRight(value, "。；;，, ")
+}
+
+func repairExplicitRetiredScalarLine(line string, facts []explicitRetiredScalarFact) string {
+	payload := retiredAuditFactPayload(line)
+	if payload == "" {
+		return line
+	}
+	normalizedPayload := normalizeStateDeltaText(payload)
+	for _, expected := range facts {
+		if expected.subject == "" || !strings.Contains(normalizedPayload, expected.subject) ||
+			strings.Contains(payload, expected.anchor) {
+			continue
+		}
+		for _, observed := range facts {
+			if observed.anchor == expected.anchor || !strings.Contains(payload, observed.anchor) ||
+				(observed.subject != "" && strings.Contains(normalizedPayload, observed.subject)) {
+				continue
+			}
+			return strings.Replace(line, observed.anchor, expected.anchor, 1)
+		}
+	}
+	return line
+}
+
+func restoreExplicitRetiredScalarFacts(lines []string, facts []explicitRetiredScalarFact) []string {
+	if len(facts) == 0 {
+		return lines
+	}
+	retiredStart, retiredEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "retired" && key != "retired" {
+				retiredEnd = index
+				break
+			}
+			section = key
+			if key == "retired" && retiredStart < 0 {
+				retiredStart = index + 1
+			}
+		}
+	}
+	if retiredStart < 0 {
+		return lines
+	}
+	retiredText := ""
+	for _, line := range lines[retiredStart:retiredEnd] {
+		if payload := retiredAuditFactPayload(line); payload != "" {
+			retiredText += "\n" + payload
+		}
+	}
+	seenFragments := make(map[string]bool)
+	for _, fact := range facts {
+		if strings.Contains(retiredText, fact.anchor) || seenFragments[fact.fragment] {
+			continue
+		}
+		line := "- " + fact.fragment + "（已废弃）"
+		lines = insertString(lines, retiredEnd, line)
+		retiredEnd++
+		retiredText += "\n" + fact.fragment
+		seenFragments[fact.fragment] = true
+	}
+	return lines
 }
 
 func isRetiredAuditTableHeader(line string) bool {

@@ -7,6 +7,25 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+SUT_RESPONSE_DEADLINE_EXCEEDED = "sut_response_deadline_exceeded"
+SUT_TURN_SKIPPED_AFTER_DEADLINE = "sut_turn_skipped_after_deadline"
+MEASURED_SUT_EXECUTION_ERRORS = {
+    SUT_RESPONSE_DEADLINE_EXCEEDED,
+    SUT_TURN_SKIPPED_AFTER_DEADLINE,
+}
+
+
+def is_measured_sut_execution_error(error: str | None) -> bool:
+    """Return whether an execution failure is a bounded SUT observation.
+
+    A response deadline is a product-quality measurement, not an evaluator or
+    network failure. Keeping the distinction explicit lets a broken baseline
+    remain comparable while WAF, transport and harness failures stay INVALID.
+    """
+
+    return error in MEASURED_SUT_EXECUTION_ERRORS
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

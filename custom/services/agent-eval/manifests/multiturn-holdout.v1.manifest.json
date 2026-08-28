@@ -4,7 +4,7 @@
   "dataset_sha256": "ef8c13073decd3e6334773d334c94684559a86c183dc7019b4193d96d84fc783",
   "dependency_sha256": {
     "judge_calibration": "6e54a7d3f67e956288dea3dca6b883053029707aaf1c6c992c2992e8ec884165",
-    "policy": "1bfeeb3301abbf46f7254e87622b9aa5928ffb6f275210d1845b4131e836c8c0",
+    "policy": "effc96ccb565e732aa02f50434f01dc0c6bdc74bfb9b1f65b854ceadcbfb5a06",
     "profiles": "9c25204a090a624a31b3bab8281f855c6e4b1385103e0b545822846bc18f1bed"
   },
   "family_count": 1,

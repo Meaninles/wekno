@@ -242,6 +242,8 @@ custom/services/agent-eval/eval-loop.ps1 `
 
 无 baseline 的 DEV/探索运行可用 `-Judge` 主动生成语义评分。只要提供 `-Baseline`，脚本就会自动先实时运行冻结的 Judge calibration，未达准确率直接停止；随后用当前冻结契约重算 baseline、重新裁决 baseline，再对 candidate 和同 attempt baseline 做语义复核，因此旧 baseline 不会因缺少 Judge 字段而变成伪 `INVALID`。不能跳过 Judge 后仍获得正式 gate 结论。它要求 `runner.env` 中配置 OpenAI-compatible judge。默认并发为 1，避免模型限流与本机抢占影响结果；调高 `-MaxConcurrency` 前先建立同并发基线。
 
+`eval-loop.ps1` 默认给每个回答 240 秒墙钟总截止时间，可用 `-ResponseDeadlineSeconds` 显式调整。该值会写入 `execution_contract` 并参与 baseline/candidate 身份比对，不能靠放宽超时获得伪提升。持续 SSE 心跳不再能绕过截止时间：超时会关闭当前流、保留已见工具事件，并把当前轮及其后无法继续的轮次记为可复现的 SUT `FAIL`；WAF、网络、记录器和 evaluator 故障仍为 `INVALID`。两者不会互相污染，也都只发生在隔离 Eval 环境。
+
 改智能体前的完整优化基线命令为：
 
 ```powershell

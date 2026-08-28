@@ -4,7 +4,15 @@ import re
 from collections import Counter
 from typing import Any
 
-from .models import CaseRun, CaseSpec, MetricScore, ObservedTurn, TextRule, Verdict
+from .models import (
+    CaseRun,
+    CaseSpec,
+    MetricScore,
+    ObservedTurn,
+    TextRule,
+    Verdict,
+    is_measured_sut_execution_error,
+)
 
 
 CITATION_RE = re.compile(r'<src id="(S[1-9][0-9]*)"\s*/>')
@@ -363,6 +371,7 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
     scores: list[MetricScore] = []
 
     execution_ok = observed.error is None and observed.is_completed and bool(observed.content.strip())
+    measured_sut_failure = is_measured_sut_execution_error(observed.error)
     scores.append(
         _score(
             "execution_valid",
@@ -370,6 +379,7 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             execution_ok,
             "completed persisted assistant response" if execution_ok else (observed.error or "response incomplete or empty"),
             turn_id=turn_id,
+            metadata={"failure_origin": "sut"} if measured_sut_failure else {},
         )
     )
     if not execution_ok:
@@ -818,8 +828,17 @@ def score_case(spec: CaseSpec, case_run: CaseRun) -> CaseRun:
     scores: list[MetricScore] = []
     for index, turn in enumerate(case_run.turns):
         scores.extend(score_turn(spec, index, turn))
-    if any(score.name == "execution_valid" and score.passed is False for score in scores):
-        verdict = Verdict.INVALID
+    execution_failures = [
+        score
+        for score in scores
+        if score.name == "execution_valid" and score.passed is False
+    ]
+    if execution_failures:
+        verdict = (
+            Verdict.FAIL
+            if all(score.metadata.get("failure_origin") == "sut" for score in execution_failures)
+            else Verdict.INVALID
+        )
     elif any(score.hard and score.passed is False for score in scores):
         verdict = Verdict.FAIL
     else:

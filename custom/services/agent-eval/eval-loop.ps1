@@ -8,6 +8,8 @@ param(
     [string]$Baseline = "",
     [string[]]$CaseId = @(),
     [int]$MaxConcurrency = 1,
+    [ValidateRange(1, 3600)]
+    [int]$ResponseDeadlineSeconds = 240,
     [bool]$PublishToLangfuse = $true,
     [switch]$Judge,
     [switch]$AllowSealed,
@@ -190,6 +192,7 @@ if ($Baseline -and $judgeEnabled) {
 $runArgs = @(
     "run", "--dataset", $Dataset, "--output", $rawRun,
     "--split", $Split, "--max-concurrency", [string]$MaxConcurrency,
+    "--timeout", [string]$ResponseDeadlineSeconds,
     "--label", "codex-loop-$timestamp",
     "--profiles", "/workspace/profiles/multiturn-agents.v1.json"
 )

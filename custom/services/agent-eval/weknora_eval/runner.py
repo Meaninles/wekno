@@ -5,7 +5,12 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from .client import WeKnoraClient, event_tool_name, event_type
+from .client import (
+    WeKnoraClient,
+    WeKnoraResponseDeadlineExceeded,
+    event_tool_name,
+    event_type,
+)
 from .dataset import dataset_sha256
 from .models import (
     CaseRun,
@@ -13,6 +18,8 @@ from .models import (
     CaseSpec,
     ExperimentRun,
     ObservedTurn,
+    SUT_RESPONSE_DEADLINE_EXCEEDED,
+    SUT_TURN_SKIPPED_AFTER_DEADLINE,
     SUTFingerprint,
     Split,
     Verdict,
@@ -102,7 +109,7 @@ class EvalRunner:
             session_id = self.client.create_session()
             seen_message_ids: set[str] = set()
             observed_turns: list[ObservedTurn] = []
-            for turn_spec in spec.turns:
+            for turn_index, turn_spec in enumerate(spec.turns):
                 setup = _merge_setup(spec.setup, turn_spec.setup_override)
                 model_id = setup.summary_model_id or os.environ.get("AGENT_EVAL_SUMMARY_MODEL_ID", "").strip()
                 if not model_id:
@@ -120,9 +127,34 @@ class EvalRunner:
                     "disable_title": False,
                     "channel": setup.channel,
                 }
-                events, ttfb_ms, total_latency_ms = self.client.stream(
-                    f"/{spec.agent.endpoint}/{session_id}", payload
-                )
+                try:
+                    events, ttfb_ms, total_latency_ms = self.client.stream(
+                        f"/{spec.agent.endpoint}/{session_id}", payload
+                    )
+                except WeKnoraResponseDeadlineExceeded as exc:
+                    event_tools = [
+                        name for event in exc.events if (name := event_tool_name(event))
+                    ]
+                    observed_turns.append(
+                        ObservedTurn(
+                            turn_id=turn_spec.turn_id,
+                            session_id=session_id,
+                            tools=list(dict.fromkeys(event_tools)),
+                            ttfb_ms=exc.ttfb_ms,
+                            total_latency_ms=exc.total_latency_ms,
+                            event_count=len(exc.events),
+                            error=SUT_RESPONSE_DEADLINE_EXCEEDED,
+                        )
+                    )
+                    observed_turns.extend(
+                        ObservedTurn(
+                            turn_id=remaining.turn_id,
+                            session_id=session_id,
+                            error=SUT_TURN_SKIPPED_AFTER_DEADLINE,
+                        )
+                        for remaining in spec.turns[turn_index + 1 :]
+                    )
+                    break
                 stream_errors = [
                     event for event in events if event_type(event) == "error" and event.get("done") is True
                 ]

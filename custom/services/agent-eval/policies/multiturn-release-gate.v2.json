@@ -68,7 +68,8 @@
     "scorer_sha256",
     "judge_model",
     "judge_calibration_suite_sha256",
-    "judge_prompt_sha256"
+    "judge_prompt_sha256",
+    "response_deadline_seconds"
   ],
   "require_clean_framework": true,
   "required_sut_identity_fields": [

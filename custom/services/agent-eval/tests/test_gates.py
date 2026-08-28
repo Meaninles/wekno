@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from weknora_eval.gates import evaluate_gate
+from weknora_eval.gates import _adjudicate_case, evaluate_gate
 from weknora_eval.dataset import dataset_sha256
 from weknora_eval.models import (
     AgentSelector,
@@ -114,6 +114,45 @@ class GateTests(unittest.TestCase):
             policy_id="policy",
             required_capabilities=[Capability.RAG_RETRIEVAL],
         )
+
+    def test_judge_invalid_does_not_reclassify_measured_sut_deadline(self) -> None:
+        deadline_case = CaseRun(
+            case_id="gate-case",
+            family_id="family",
+            split=Split.GATE,
+            verdict=Verdict.FAIL,
+            turns=[
+                ObservedTurn(
+                    turn_id="turn",
+                    session_id="session",
+                    error="sut_response_deadline_exceeded",
+                )
+            ],
+            scores=[
+                MetricScore(
+                    name="execution_valid",
+                    value=False,
+                    passed=False,
+                    turn_id="turn",
+                    metadata={"failure_origin": "sut"},
+                ),
+                MetricScore(
+                    name="judge.contract_satisfaction",
+                    value="invalid",
+                    passed=False,
+                    hard=False,
+                    turn_id="turn",
+                    metadata={"confidence": 0.1},
+                ),
+            ],
+        )
+        policy = self.policy.model_copy(update={"require_judge": True})
+
+        adjudicated, detail = _adjudicate_case(deadline_case, policy)
+
+        self.assertEqual(adjudicated.verdict, Verdict.FAIL)
+        self.assertEqual(detail["invalid"], [])
+        self.assertEqual(detail["judge_failures"], ["turn"])
 
     def test_pairwise_pass(self) -> None:
         result = evaluate_gate([spec()], run("candidate", case(Verdict.PASS)), self.policy, run("baseline", case(Verdict.PASS)))

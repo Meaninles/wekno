@@ -29,7 +29,8 @@
     "summary_model_id",
     "corpus_version",
     "procurement_knowledge_id",
-    "profile_set_sha256"
+    "profile_set_sha256",
+    "response_deadline_seconds"
   ],
   "max_p95_latency_regression_ratio": 0.15,
   "max_p95_latency_regression_ms": 500,

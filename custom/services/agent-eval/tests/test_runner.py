@@ -3,12 +3,16 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from weknora_eval.client import WeKnoraResponseDeadlineExceeded
 from weknora_eval.models import (
     AgentSelector,
     Capability,
     CaseRun,
+    CaseSetup,
     CaseSpec,
     SUTFingerprint,
+    SUT_RESPONSE_DEADLINE_EXCEEDED,
+    SUT_TURN_SKIPPED_AFTER_DEADLINE,
     Split,
     TurnContract,
     TurnSpec,
@@ -42,6 +46,23 @@ class RecordingRunner(EvalRunner):
             agent_profile_id=spec.agent_profile_id,
             attempt_index=attempt_index,
             verdict=Verdict.PASS,
+        )
+
+
+class DeadlineClient(FakeClient):
+    def __init__(self) -> None:
+        super().__init__("eval")
+
+    def create_session(self) -> str:
+        return "deadline-session"
+
+    def stream(self, _path: str, _payload: dict):
+        raise WeKnoraResponseDeadlineExceeded(
+            "/agent-chat/deadline-session",
+            1.0,
+            [{"response_type": "tool", "tool_name": "list_knowledge_chunks"}],
+            100,
+            1000,
         )
 
 
@@ -97,6 +118,37 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(runner.attempts, [1, 2, 3])
         self.assertEqual([item.attempt_index for item in result.cases], [1, 2, 3])
         self.assertTrue(all(item.agent_profile_id == "general-agent" for item in result.cases))
+
+    def test_sut_deadline_is_a_bounded_fail_and_preserves_turn_coverage(self) -> None:
+        case = CaseSpec(
+            case_id="deadline-case",
+            family_id="deadline-family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent_profile_id="general-agent",
+            agent=AgentSelector(agent_id="builtin-general-agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[
+                TurnSpec(turn_id="turn-1", query="q1", contract=TurnContract()),
+                TurnSpec(turn_id="turn-2", query="q2", contract=TurnContract()),
+            ],
+        )
+
+        result = EvalRunner(DeadlineClient()).run_case(case)
+
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(len(result.turns), 2)
+        self.assertEqual(result.turns[0].error, SUT_RESPONSE_DEADLINE_EXCEEDED)
+        self.assertEqual(result.turns[1].error, SUT_TURN_SKIPPED_AFTER_DEADLINE)
+        self.assertEqual(result.turns[0].tools, ["list_knowledge_chunks"])
+        self.assertTrue(
+            all(
+                score.metadata.get("failure_origin") == "sut"
+                for score in result.scores
+                if score.name == "execution_valid"
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -9,6 +10,25 @@ from typing import Any, Callable
 
 class WeKnoraAPIError(RuntimeError):
     pass
+
+
+class WeKnoraResponseDeadlineExceeded(WeKnoraAPIError):
+    """A valid observation that the SUT did not finish within the wall deadline."""
+
+    def __init__(
+        self,
+        path: str,
+        timeout_seconds: float,
+        events: list[dict[str, Any]],
+        ttfb_ms: int,
+        total_latency_ms: int,
+    ) -> None:
+        super().__init__(
+            f"POST {path} exceeded the {timeout_seconds:g}s total response deadline"
+        )
+        self.events = events
+        self.ttfb_ms = ttfb_ms
+        self.total_latency_ms = total_latency_ms
 
 
 def unwrap_data(value: Any) -> Any:
@@ -26,6 +46,8 @@ def event_tool_name(event: dict[str, Any]) -> str:
 
 class WeKnoraClient:
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0) -> None:
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
@@ -67,35 +89,87 @@ class WeKnoraClient:
             headers=self._headers(stream=True),
         )
         started = time.perf_counter()
+        deadline = started + self.timeout
         first_event_at: float | None = None
         events: list[dict[str, Any]] = []
+
+        def deadline_error() -> WeKnoraResponseDeadlineExceeded:
+            ended = time.perf_counter()
+            first = first_event_at if first_event_at is not None else ended
+            return WeKnoraResponseDeadlineExceeded(
+                path,
+                self.timeout,
+                list(events),
+                round((first - started) * 1000),
+                round((ended - started) * 1000),
+            )
+
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                deadline_expired = threading.Event()
+
+                def expire_response() -> None:
+                    deadline_expired.set()
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+
+                timer = threading.Timer(
+                    max(0.001, deadline - time.perf_counter()), expire_response
+                )
+                timer.daemon = True
+                timer.start()
                 data_lines: list[str] = []
-                while True:
-                    raw = response.readline()
-                    if not raw:
-                        break
-                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                    if line.startswith("data:"):
-                        data_lines.append(line[5:].lstrip())
-                        continue
-                    if line or not data_lines:
-                        continue
-                    payload = "\n".join(data_lines)
-                    data_lines = []
-                    if payload == "[DONE]":
-                        continue
-                    event = json.loads(payload)
-                    if first_event_at is None:
-                        first_event_at = time.perf_counter()
-                    events.append(event)
-                    if on_event is not None:
-                        on_event(event)
+                try:
+                    while True:
+                        remaining = deadline - time.perf_counter()
+                        if remaining <= 0 or deadline_expired.is_set():
+                            raise deadline_error()
+
+                        # urllib's timeout is otherwise only an inactivity
+                        # timeout. Bound the next blocking read by the remaining
+                        # wall-clock budget as well. The timer is a fallback for
+                        # transports that do not expose their socket object.
+                        fp = getattr(response, "fp", None)
+                        raw_stream = getattr(fp, "raw", None)
+                        sock = getattr(raw_stream, "_sock", None)
+                        if sock is not None and callable(getattr(sock, "settimeout", None)):
+                            sock.settimeout(max(0.001, remaining))
+
+                        raw = response.readline()
+                        if not raw:
+                            if deadline_expired.is_set():
+                                raise deadline_error()
+                            break
+                        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                        if line.startswith("data:"):
+                            data_lines.append(line[5:].lstrip())
+                            continue
+                        if line or not data_lines:
+                            continue
+                        payload = "\n".join(data_lines)
+                        data_lines = []
+                        if payload == "[DONE]":
+                            continue
+                        event = json.loads(payload)
+                        if first_event_at is None:
+                            first_event_at = time.perf_counter()
+                        events.append(event)
+                        if on_event is not None:
+                            on_event(event)
+                except (TimeoutError, OSError, ValueError) as exc:
+                    if deadline_expired.is_set() or time.perf_counter() >= deadline:
+                        raise deadline_error() from exc
+                    raise
+                finally:
+                    timer.cancel()
+        except WeKnoraResponseDeadlineExceeded:
+            raise
         except urllib.error.HTTPError as exc:
             detail = exc.read()[:2000].decode("utf-8", errors="replace")
             raise WeKnoraAPIError(f"POST {path} failed: HTTP {exc.code}: {detail}") from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             raise WeKnoraAPIError(f"POST {path} failed: {exc}") from exc
         ended = time.perf_counter()
         first = first_event_at if first_event_at is not None else ended

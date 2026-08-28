@@ -6,7 +6,12 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .models import CaseRun, CaseSpec, MetricScore
+from .models import (
+    CaseRun,
+    CaseSpec,
+    MetricScore,
+    is_measured_sut_execution_error,
+)
 
 
 class JudgeError(RuntimeError):
@@ -90,20 +95,29 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
             {"turn_id": turn.turn_id, "answer": turn.content, "evidence": turn.references}
             for turn in baseline.turns
         ]
-    result = _post_chat(
-        [
-            {
-                "role": "system",
-                "content": JUDGE_SYSTEM_PROMPT,
-            },
-            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-        ]
+    measured_turn_ids = {
+        turn.turn_id
+        for turn in case_run.turns
+        if is_measured_sut_execution_error(turn.error)
+    }
+    semantic_turn_ids = {turn.turn_id for turn in spec.turns} - measured_turn_ids
+    result = (
+        _post_chat(
+            [
+                {
+                    "role": "system",
+                    "content": JUDGE_SYSTEM_PROMPT,
+                },
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            ]
+        )
+        if semantic_turn_ids
+        else {"turns": []}
     )
     scores: list[MetricScore] = []
     rows = result.get("turns") if isinstance(result, dict) else None
     if not isinstance(rows, list):
         raise JudgeError("judge JSON has no turns array")
-    expected_turn_ids = {turn.turn_id for turn in spec.turns}
     returned_turn_ids: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -111,7 +125,9 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
         turn_id = str(row.get("turn_id") or "")
         label = str(row.get("label") or "")
         confidence = float(row.get("confidence", -1))
-        if turn_id not in expected_turn_ids or label not in {"pass", "fail", "invalid"} or not 0 <= confidence <= 1:
+        if turn_id in measured_turn_ids:
+            continue
+        if turn_id not in semantic_turn_ids or label not in {"pass", "fail", "invalid"} or not 0 <= confidence <= 1:
             raise JudgeError(f"invalid judge result row: {row!r}")
         returned_turn_ids.add(turn_id)
         scores.append(
@@ -125,6 +141,30 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
                 metadata={"confidence": confidence, "pairwise": row.get("pairwise")},
             )
         )
-    if returned_turn_ids != expected_turn_ids:
-        raise JudgeError(f"judge turn coverage mismatch: expected={expected_turn_ids}, got={returned_turn_ids}")
+    if returned_turn_ids != semantic_turn_ids:
+        raise JudgeError(f"judge turn coverage mismatch: expected={semantic_turn_ids}, got={returned_turn_ids}")
+
+    baseline_by_turn = {
+        turn.turn_id: turn for turn in baseline.turns
+    } if baseline is not None else {}
+    for turn_id in sorted(measured_turn_ids):
+        paired = baseline_by_turn.get(turn_id)
+        pairwise = None
+        if paired is not None:
+            pairwise = (
+                "equal"
+                if is_measured_sut_execution_error(paired.error)
+                else "baseline_better"
+            )
+        scores.append(
+            MetricScore(
+                name="judge.contract_satisfaction",
+                value="fail",
+                passed=False,
+                hard=False,
+                comment="SUT response deadline is a deterministic execution failure",
+                turn_id=turn_id,
+                metadata={"confidence": 1.0, "pairwise": pairwise, "synthetic": True},
+            )
+        )
     return scores

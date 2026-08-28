@@ -311,6 +311,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "AGENT_EVAL_WORKTREE_DIRTY", ""
         ).strip(),
         "scorer_sha256": file_sha256(Path(__file__).with_name("scoring.py")),
+        "response_deadline_seconds": args.timeout,
     }
     metadata = {
         "execution_contract": execution_contract,

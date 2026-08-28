@@ -94,11 +94,21 @@ def _adjudicate_case(case: CaseRun, policy: GatePolicy) -> tuple[CaseRun, dict[s
     invalid_judgements: list[str] = []
     judge_failures: list[str] = []
     for turn_id, score in judge_by_turn.items():
+        measured_sut_failure = any(
+            deterministic.name == "execution_valid"
+            and deterministic.turn_id == turn_id
+            and deterministic.passed is False
+            and deterministic.metadata.get("failure_origin") == "sut"
+            for deterministic in case.scores
+        )
         confidence = float(score.metadata.get("confidence", -1))
-        if confidence < policy.min_judge_confidence:
+        if confidence < policy.min_judge_confidence and not measured_sut_failure:
             low_confidence.append(turn_id)
         if score.value == "invalid":
-            invalid_judgements.append(turn_id)
+            if measured_sut_failure:
+                judge_failures.append(turn_id)
+            else:
+                invalid_judgements.append(turn_id)
         elif score.value == "fail":
             judge_failures.append(turn_id)
 

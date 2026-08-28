@@ -307,8 +307,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         ).strip(),
         "profile_set_sha256": file_sha256(args.profiles) if args.profiles else "",
         "framework_commit": os.environ.get("AGENT_EVAL_FRAMEWORK_COMMIT", "").strip(),
+        "framework_scope": os.environ.get("AGENT_EVAL_FRAMEWORK_SCOPE", "").strip(),
         "framework_worktree_dirty": os.environ.get(
             "AGENT_EVAL_WORKTREE_DIRTY", ""
+        ).strip(),
+        "gate_policy_sha256": os.environ.get(
+            "AGENT_EVAL_GATE_POLICY_SHA256", ""
         ).strip(),
         "scorer_sha256": file_sha256(Path(__file__).with_name("scoring.py")),
         "response_deadline_seconds": args.timeout,
@@ -384,9 +388,17 @@ def cmd_score(args: argparse.Namespace) -> int:
                 "AGENT_EVAL_FRAMEWORK_COMMIT",
                 str(execution_contract.get("framework_commit") or ""),
             ).strip(),
+            "framework_scope": os.environ.get(
+                "AGENT_EVAL_FRAMEWORK_SCOPE",
+                str(execution_contract.get("framework_scope") or ""),
+            ).strip(),
             "framework_worktree_dirty": os.environ.get(
                 "AGENT_EVAL_WORKTREE_DIRTY",
                 str(execution_contract.get("framework_worktree_dirty") or ""),
+            ).strip(),
+            "gate_policy_sha256": os.environ.get(
+                "AGENT_EVAL_GATE_POLICY_SHA256",
+                str(execution_contract.get("gate_policy_sha256") or ""),
             ).strip(),
             "scorer_sha256": file_sha256(Path(__file__).with_name("scoring.py")),
         }

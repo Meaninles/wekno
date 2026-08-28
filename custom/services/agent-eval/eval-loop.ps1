@@ -79,8 +79,20 @@ $repositoryRoot = (& git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repositoryRoot)) {
     throw "failed to resolve repository root"
 }
-$env:AGENT_EVAL_FRAMEWORK_COMMIT = (& git -C $repositoryRoot rev-parse "HEAD:custom/services/agent-eval").Trim()
+$env:AGENT_EVAL_FRAMEWORK_COMMIT = (& git -C $repositoryRoot rev-parse "HEAD:custom/services/agent-eval/weknora_eval").Trim()
 if ($LASTEXITCODE -ne 0) { throw "failed to resolve eval framework tree identity" }
+$env:AGENT_EVAL_FRAMEWORK_SCOPE = "weknora_eval-tree-v1"
+$policyHostPath = if ($Policy -match '^/workspace/(.+)$') {
+    Join-Path $PSScriptRoot ($matches[1] -replace '/', '\')
+} else {
+    [System.IO.Path]::GetFullPath($Policy)
+}
+if (-not (Test-Path -LiteralPath $policyHostPath)) {
+    throw "failed to resolve gate policy on host: $policyHostPath"
+}
+$env:AGENT_EVAL_GATE_POLICY_SHA256 = (
+    Get-FileHash -LiteralPath $policyHostPath -Algorithm SHA256
+).Hash.ToLowerInvariant()
 $dirtyLines = @(& git -C $repositoryRoot status --porcelain -- custom/services/agent-eval)
 if ($LASTEXITCODE -ne 0) { throw "failed to inspect eval framework worktree" }
 $env:AGENT_EVAL_WORKTREE_DIRTY = if ($dirtyLines.Count -gt 0) { "true" } else { "false" }

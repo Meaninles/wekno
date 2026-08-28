@@ -264,6 +264,8 @@ LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措
 
 正式裁决固定使用 `single-turn-v1` 协议：每次请求只允许携带一个 turn 的契约和回答，与单项校准走同一代码路径，禁止后续回答替早期回答补齐漏项。即便如此，LLM 也无权覆盖可机器验证的 `state.unknown` 必填状态：该指标由含多种可接受表达的 `TextRule` 确定性执行，是不可审查、零回归硬信号；Judge 只处理策略白名单中的语义等价项。Judge 网络调用默认采用单次 180 秒、最多 2 次的有界重试，并把协议与两个参数写入 execution identity。某个 case 在重试后仍失败时，只把该 case 标为 `INVALID`，继续落盘其余裁决并生成 gate/report；它不会改写原始观测，不会把评测基础设施故障记成智能体质量 `FAIL`，也不会向业务请求路径传播异常。
 
+`framework_commit` 固定为 `weknora_eval/` 可执行代码的 Git tree identity，并配合独立的 `gate_policy_sha256`。因此新增报告、基线锁或说明文档不会让候选与基线失去可比性，但评分/裁决代码或门禁策略的任何变化仍会触发身份不一致并失败关闭。
+
 ## 本地验证
 
 ```powershell

@@ -1342,6 +1342,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	}
 	userStatements = append(userStatements, originalQuery)
 	explicitRetiredFacts := explicitRetiredScalarFacts(userStatements)
+	explicitActiveScalars := explicitActiveScalarFacts(userStatements)
 	explicitUnknowns := explicitUnknownUserStatements(userStatements)
 	stripProcurementSelectionScope := containsAny(originalQuery, []string{
 		"不选择采购方式", "不得选择采购方式", "不要选择采购方式",
@@ -1453,6 +1454,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
 	out = restoreExplicitNamedRoleFacts(out, userStatements)
+	out = restoreExplicitActiveScalarFacts(out, explicitActiveScalars)
 	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
 	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
@@ -1815,6 +1817,154 @@ func restoreExplicitRetiredScalarFacts(lines []string, facts []explicitRetiredSc
 		retiredEnd++
 		retiredText += "\n" + fact.fragment
 		seenFragments[fact.fragment] = true
+	}
+	return lines
+}
+
+type explicitActiveScalarFact struct {
+	anchors  []string
+	fragment string
+}
+
+// explicitActiveScalarFacts extracts only scalar/date facts from user-authored
+// state-maintenance turns. Anchors that the user explicitly retired anywhere
+// later in the dialogue are excluded, and document/web questions are excluded
+// by IsStateOnlyTurn. This provides deterministic recall without copying an
+// assistant answer or treating a side-question threshold as project state.
+func explicitActiveScalarFacts(userStatements []string) []explicitActiveScalarFact {
+	retiredAnchors := make(map[string]bool)
+	cleaned := make([]string, 0, len(userStatements))
+	for _, statement := range userStatements {
+		statement = cleanUserStatementRecord(statement)
+		cleaned = append(cleaned, statement)
+		for _, fragment := range splitUserFactFragments(statement) {
+			if !containsAny(fragment, []string{
+				"废弃", "作废", "失效", "被取代", "被替代", "不再有效",
+			}) {
+				continue
+			}
+			for _, anchor := range explicitScalarAnchors(fragment) {
+				retiredAnchors[anchor] = true
+			}
+		}
+	}
+
+	facts := make([]explicitActiveScalarFact, 0, 12)
+	seen := make(map[string]bool)
+	for _, statement := range cleaned {
+		if !IsStateOnlyTurn(statement) || IsStateAuditTurn(statement) {
+			continue
+		}
+		for _, fragment := range splitUserFactFragments(statement) {
+			if containsAny(fragment, []string{
+				"待确认", "待核实", "未提供", "未知", "尚未确认", "仍未确认",
+				"废弃", "作废", "失效", "被取代", "被替代", "不再有效",
+			}) {
+				continue
+			}
+			allAnchors := explicitScalarAnchors(fragment)
+			activeAnchors := make([]string, 0, len(allAnchors))
+			containsRetired := false
+			for _, anchor := range allAnchors {
+				if retiredAnchors[anchor] {
+					containsRetired = true
+					continue
+				}
+				activeAnchors = append(activeAnchors, anchor)
+			}
+			if len(activeAnchors) == 0 {
+				continue
+			}
+			factFragment := cleanActiveScalarFactFragment(fragment, activeAnchors, containsRetired)
+			key := normalizeStateDeltaText(factFragment)
+			if factFragment == "" || key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			facts = append(facts, explicitActiveScalarFact{
+				anchors:  activeAnchors,
+				fragment: factFragment,
+			})
+		}
+	}
+	return facts
+}
+
+func cleanActiveScalarFactFragment(fragment string, activeAnchors []string, containsRetired bool) string {
+	value := strings.Trim(strings.TrimSpace(fragment), "-*#_`~ ")
+	value = strings.TrimSpace(strings.TrimPrefix(value, "其中"))
+	if !containsRetired {
+		return strings.TrimRight(value, "。；;，, ")
+	}
+	// A compact transition such as "预算由360万元调整为390万元" contains
+	// both lifecycle states in one clause. Emit only the subject and current
+	// anchor so the retired value cannot leak back into the active section.
+	if len(activeAnchors) != 1 {
+		return ""
+	}
+	anchor := activeAnchors[0]
+	index := strings.Index(value, anchor)
+	if index < 0 {
+		return ""
+	}
+	prefix := value[:index]
+	for _, marker := range []string{"调整为", "变更为", "修改为", "改为", "更新为", "定为"} {
+		if markerIndex := strings.LastIndex(prefix, marker); markerIndex >= 0 {
+			prefix = prefix[:markerIndex]
+			break
+		}
+	}
+	if markerIndex := strings.LastIndex(prefix, "把"); markerIndex >= 0 {
+		prefix = prefix[markerIndex+len("把"):]
+	}
+	if markerIndex := strings.LastIndex(prefix, "由"); markerIndex >= 0 {
+		prefix = prefix[:markerIndex]
+	}
+	prefix = strings.Trim(strings.TrimSpace(prefix), "：:，,；;*_`~#[]【】 ")
+	if prefix == "" || utf8.RuneCountInString(prefix) > 32 {
+		return ""
+	}
+	return prefix + "：" + anchor
+}
+
+func restoreExplicitActiveScalarFacts(lines []string, facts []explicitActiveScalarFact) []string {
+	if len(facts) == 0 {
+		return lines
+	}
+	activeStart, activeEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "active" && key != "active" {
+				activeEnd = index
+				break
+			}
+			section = key
+			if key == "active" && activeStart < 0 {
+				activeStart = index + 1
+			}
+		}
+	}
+	if activeStart < 0 {
+		return lines
+	}
+
+	activeText := strings.Join(lines[activeStart:activeEnd], "\n")
+	for _, fact := range facts {
+		covered := true
+		for _, anchor := range fact.anchors {
+			if !strings.Contains(activeText, anchor) {
+				covered = false
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		line := "- " + fact.fragment
+		lines = insertString(lines, activeEnd, line)
+		activeEnd++
+		activeText += "\n" + line
 	}
 	return lines
 }

@@ -681,6 +681,66 @@ func TestNormalizeStateAuditSectionsRepairsUserAuthoredRetiredScalarCopy(t *test
 	}
 }
 
+func TestNormalizeStateAuditSectionsRestoresMissingCurrentScalarsOnly(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"初始获批总预算为360万元，其中设备280万元、实施服务80万元。只更新台账。",
+		"财务把预算调整为390万元，其中设备300万元、实施服务90万元。360万元及280/80万元构成从现在起废弃。",
+		"初始目标日期是2026年11月30日。只记录日期。",
+		"目标日期调整为2027年1月31日，2026年11月30日从现在起废弃。",
+		"只根据已选制度回答旁支问题：达到200万元时适用什么规则？",
+	}
+	answer := `### 当前有效事实
+- 项目：启明星视觉升级
+### 已废弃事实
+- 初始总预算：360万元（已废弃）
+- 初始设备预算：280万元（已废弃）
+- 初始实施服务预算：80万元（已废弃）
+- 初始目标日期：2026年11月30日（已废弃）
+### 待确认事项
+- 无
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	for _, expected := range []string{"390万元", "300万元", "90万元", "2027年1月31日"} {
+		if !strings.Contains(active, expected) {
+			t.Fatalf("current user-authored scalar %q was not restored: %s", expected, got)
+		}
+	}
+	for _, forbidden := range []string{"360万元", "280万元", "80万元", "2026年11月30日", "200万元"} {
+		if strings.Contains(active, forbidden) {
+			t.Fatalf("retired or side-question scalar %q leaked into active facts: %s", forbidden, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("active scalar repair was not idempotent: %s", twice)
+	}
+}
+
+func TestNormalizeStateAuditSectionsRestoresCompactScalarTransition(t *testing.T) {
+	query := "现在做一次完整状态审计。"
+	prior := []string{
+		"预算最初为360万元。",
+		"预算由360万元调整为390万元，360万元已废弃。只更新台账。",
+	}
+	answer := `### 当前有效事实
+- 项目：启明星
+### 已废弃事实
+- 预算360万元（已废弃）
+### 待确认事项
+- 无
+### 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	if !strings.Contains(active, "预算：390万元") || strings.Contains(active, "360万元") {
+		t.Fatalf("compact scalar transition was not reconstructed safely: %s", got)
+	}
+}
+
 func TestNormalizeStateAuditSectionsRestoresMissingUserAuthoredRetiredScalar(t *testing.T) {
 	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
 	prior := []string{

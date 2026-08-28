@@ -7,6 +7,7 @@ from typing import Any
 
 from .client import (
     WeKnoraClient,
+    WeKnoraAssistantPersistenceTimeout,
     WeKnoraResponseDeadlineExceeded,
     event_tool_name,
     event_type,
@@ -19,7 +20,10 @@ from .models import (
     ExperimentRun,
     ObservedTurn,
     SUT_RESPONSE_DEADLINE_EXCEEDED,
+    SUT_RESPONSE_INCOMPLETE,
+    SUT_STREAM_ERROR,
     SUT_TURN_SKIPPED_AFTER_DEADLINE,
+    SUT_TURN_SKIPPED_AFTER_FAILURE,
     SUTFingerprint,
     Split,
     Verdict,
@@ -158,16 +162,29 @@ class EvalRunner:
                 stream_errors = [
                     event for event in events if event_type(event) == "error" and event.get("done") is True
                 ]
-                message = self.client.load_completed_assistant(
-                    session_id, exclude_message_ids=seen_message_ids
-                )
+                try:
+                    message = self.client.load_completed_assistant(
+                        session_id, exclude_message_ids=seen_message_ids
+                    )
+                except WeKnoraAssistantPersistenceTimeout:
+                    message = {}
                 message_id = str(message.get("id") or "")
                 if message_id:
                     seen_message_ids.add(message_id)
                 steps = [item for item in message.get("agent_steps") or [] if isinstance(item, dict)]
                 event_tools = [name for event in events if (name := event_tool_name(event))]
                 tools = list(dict.fromkeys([*event_tools, *_tools_from_steps(steps)]))
-                error = str(stream_errors[-1]) if stream_errors else None
+                completed = bool(message.get("is_completed")) and bool(
+                    str(message.get("content") or "").strip()
+                )
+                if completed:
+                    # A tool/model step may emit an error event and then recover.
+                    # The persisted completed answer is the source of truth.
+                    error = None
+                elif stream_errors:
+                    error = f"{SUT_STREAM_ERROR}: {stream_errors[-1]}"
+                else:
+                    error = SUT_RESPONSE_INCOMPLETE
                 observed = ObservedTurn(
                     turn_id=turn_spec.turn_id,
                     session_id=session_id,
@@ -187,6 +204,14 @@ class EvalRunner:
                 )
                 observed_turns.append(observed)
                 if error:
+                    observed_turns.extend(
+                        ObservedTurn(
+                            turn_id=remaining.turn_id,
+                            session_id=session_id,
+                            error=SUT_TURN_SKIPPED_AFTER_FAILURE,
+                        )
+                        for remaining in spec.turns[turn_index + 1 :]
+                    )
                     break
             case_run = case_run.model_copy(update={"turns": observed_turns})
             return score_case(spec, case_run)

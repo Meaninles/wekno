@@ -31,6 +31,10 @@ class WeKnoraResponseDeadlineExceeded(WeKnoraAPIError):
         self.total_latency_ms = total_latency_ms
 
 
+class WeKnoraAssistantPersistenceTimeout(WeKnoraAPIError):
+    """The SUT stream ended but no assistant message became observable."""
+
+
 def unwrap_data(value: Any) -> Any:
     return value.get("data") if isinstance(value, dict) and "data" in value else value
 
@@ -214,5 +218,7 @@ class WeKnoraClient:
             if time.monotonic() >= deadline:
                 if last is not None:
                     return last
-                raise WeKnoraAPIError("no new persisted assistant message")
+                raise WeKnoraAssistantPersistenceTimeout(
+                    "no new persisted assistant message"
+                )
             time.sleep(0.2)

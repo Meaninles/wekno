@@ -8,10 +8,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 SUT_RESPONSE_DEADLINE_EXCEEDED = "sut_response_deadline_exceeded"
+SUT_RESPONSE_INCOMPLETE = "sut_response_incomplete"
+SUT_STREAM_ERROR = "sut_stream_error"
 SUT_TURN_SKIPPED_AFTER_DEADLINE = "sut_turn_skipped_after_deadline"
+SUT_TURN_SKIPPED_AFTER_FAILURE = "sut_turn_skipped_after_failure"
 MEASURED_SUT_EXECUTION_ERRORS = {
     SUT_RESPONSE_DEADLINE_EXCEEDED,
+    SUT_RESPONSE_INCOMPLETE,
+    SUT_STREAM_ERROR,
     SUT_TURN_SKIPPED_AFTER_DEADLINE,
+    SUT_TURN_SKIPPED_AFTER_FAILURE,
 }
 
 
@@ -23,7 +29,12 @@ def is_measured_sut_execution_error(error: str | None) -> bool:
     remain comparable while WAF, transport and harness failures stay INVALID.
     """
 
-    return error in MEASURED_SUT_EXECUTION_ERRORS
+    if error is None:
+        return False
+    return any(
+        error == known or error.startswith(known + ":")
+        for known in MEASURED_SUT_EXECUTION_ERRORS
+    )
 
 
 def utc_now() -> str:

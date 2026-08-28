@@ -66,6 +66,26 @@ class DeadlineClient(FakeClient):
         )
 
 
+class RecoveredStreamClient(FakeClient):
+    def __init__(self, *, completed: bool) -> None:
+        super().__init__("eval")
+        self.completed = completed
+
+    def create_session(self) -> str:
+        return "recovered-session"
+
+    def stream(self, _path: str, _payload: dict):
+        return ([{"response_type": "error", "done": True}], 10, 100)
+
+    def load_completed_assistant(self, _session_id: str, **_kwargs: object):
+        return {
+            "id": "message",
+            "role": "assistant",
+            "content": "recovered answer" if self.completed else "",
+            "is_completed": self.completed,
+        }
+
+
 class RunnerTests(unittest.TestCase):
     def test_production_is_record_only(self) -> None:
         with self.assertRaises(EvalModeRequired):
@@ -149,6 +169,45 @@ class RunnerTests(unittest.TestCase):
                 if score.name == "execution_valid"
             )
         )
+
+    def test_completed_persisted_answer_wins_over_recovered_stream_error(self) -> None:
+        case = CaseSpec(
+            case_id="recovered",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[TurnSpec(turn_id="turn", query="q", contract=TurnContract())],
+        )
+
+        result = EvalRunner(RecoveredStreamClient(completed=True)).run_case(case)
+
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertIsNone(result.turns[0].error)
+
+    def test_incomplete_persisted_answer_is_sut_fail_with_full_turn_coverage(self) -> None:
+        case = CaseSpec(
+            case_id="incomplete",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[
+                TurnSpec(turn_id="turn-1", query="q1", contract=TurnContract()),
+                TurnSpec(turn_id="turn-2", query="q2", contract=TurnContract()),
+            ],
+        )
+
+        result = EvalRunner(RecoveredStreamClient(completed=False)).run_case(case)
+
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(len(result.turns), 2)
+        self.assertTrue(result.turns[0].error.startswith("sut_stream_error:"))
+        self.assertEqual(result.turns[1].error, "sut_turn_skipped_after_failure")
 
 
 if __name__ == "__main__":

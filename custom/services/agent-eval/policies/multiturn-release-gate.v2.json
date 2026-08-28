@@ -50,7 +50,6 @@
     "evidence_anchor_coverage": 0.0,
     "tool_call_ceiling": 0.0,
     "read_only_tool_policy": 0.0,
-    "state.unknown": 0.0,
     "forbidden_claim.no-internal-planning": 0.0
   },
   "required_frozen_dependencies": [

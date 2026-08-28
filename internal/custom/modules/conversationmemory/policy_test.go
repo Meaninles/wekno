@@ -966,6 +966,58 @@ func TestNormalizeStateAuditSectionsRestoresResolvedEntityFactAndDropsInventedUn
 	}
 }
 
+func TestNormalizeStateAuditSectionsRestoresExplicitNamedRoleFact(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。",
+		"项目负责人调整为林梅。当前对话用户身份仍未提供，不得把用户等同于林梅。",
+	}
+	answer := `### 当前有效事实
+- 项目：启明星视觉升级
+### 已废弃事实
+- 无
+### 待确认事项
+- 当前对话用户身份：未提供
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	for _, expected := range []string{"项目负责人", "林梅"} {
+		if !strings.Contains(active, expected) {
+			t.Fatalf("latest explicit named role fact %q was not restored: %s", expected, got)
+		}
+	}
+	if strings.Contains(active, "周岚") || strings.Contains(active, "当前对话用户身份") {
+		t.Fatalf("stale role holder or user identity leaked into active facts: %s", got)
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("named role repair was not idempotent: %s", twice)
+	}
+}
+
+func TestNormalizeStateAuditSectionsDoesNotRestoreUnknownNamedRole(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"项目负责人是周岚。",
+		"项目负责人待确认。",
+	}
+	answer := `### 当前有效事实
+- 项目：寒星冷链温控改造
+### 已废弃事实
+- 无
+### 待确认事项
+- 项目负责人：待确认
+### 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	if strings.Contains(active, "周岚") || strings.Contains(active, "项目负责人") {
+		t.Fatalf("role explicitly returned to unknown was restored as active: %s", got)
+	}
+}
+
 func TestNormalizeStateAuditSectionsDropsEmptyActionBoundaryLabels(t *testing.T) {
 	query := "现在做一次完整状态审计，不要选择采购方式。"
 	answer := `### 当前有效事实

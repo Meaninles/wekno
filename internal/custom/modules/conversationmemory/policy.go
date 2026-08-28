@@ -91,6 +91,16 @@ var sourceActorSplitPattern = regexp.MustCompile(`(?:和|与|及|、|/|，|,)`)
 
 var unresolvedClaimEntityPattern = regexp.MustCompile(`[A-Z][A-Z0-9_-]{0,15}`)
 
+// namedRoleLabels are durable business roles whose explicitly assigned holder
+// can safely be reconstructed from user-authored history during a state audit.
+// Keep the more specific labels before the generic ones so a phrase such as
+// "项目负责人" is not reduced to "负责人".
+var namedRoleLabels = []string{
+	"项目负责人", "业务负责人", "技术负责人", "法务负责人", "采购负责人",
+	"实施负责人", "交付负责人", "项目经理", "采购经办人", "经办人",
+	"责任人", "联系人", "负责人",
+}
+
 var stateDeltaScalarPattern = regexp.MustCompile(
 	`[0-9０-９]+(?:\.[0-9０-９]+)?(?:年[0-9０-９]{1,2}月[0-9０-９]{1,2}日|万元|元|家|个|%|％)?`,
 )
@@ -1442,6 +1452,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
+	out = restoreExplicitNamedRoleFacts(out, userStatements)
 	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
 	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
@@ -2184,6 +2195,148 @@ func resolvedEntityFactCovered(activeText, fact string) bool {
 		}
 	}
 	return true
+}
+
+type explicitNamedRoleFact struct {
+	subject string
+	value   string
+}
+
+// restoreExplicitNamedRoleFacts repairs a model omission using only explicit,
+// user-authored role assignments. It does not infer the current user's identity
+// from a named project role and it honors a later reassignment or an explicit
+// transition back to unknown. This is deliberately limited to durable business
+// roles instead of attempting to copy arbitrary historical prose into the
+// active section.
+func restoreExplicitNamedRoleFacts(lines, userStatements []string) []string {
+	facts := explicitNamedRoleFacts(userStatements)
+	if len(facts) == 0 {
+		return lines
+	}
+
+	activeStart, activeEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "active" && key != "active" {
+				activeEnd = index
+				break
+			}
+			section = key
+			if key == "active" && activeStart < 0 {
+				activeStart = index + 1
+			}
+		}
+	}
+	if activeStart < 0 {
+		return lines
+	}
+
+	activeText := strings.Join(lines[activeStart:activeEnd], "\n")
+	for _, fact := range facts {
+		if namedRoleFactCovered(activeText, fact) {
+			continue
+		}
+		line := "- **" + fact.subject + "**：" + fact.value
+		lines = insertString(lines, activeEnd, line)
+		activeEnd++
+		activeText += "\n" + line
+	}
+	return lines
+}
+
+func explicitNamedRoleFacts(userStatements []string) []explicitNamedRoleFact {
+	latest := make(map[string]explicitNamedRoleFact)
+	for _, statement := range userStatements {
+		for _, fragment := range splitUserFactFragments(cleanUserStatementRecord(statement)) {
+			fact, assigned, cleared := explicitNamedRoleFactFromFragment(fragment)
+			if fact.subject == "" {
+				continue
+			}
+			if cleared {
+				delete(latest, fact.subject)
+				continue
+			}
+			if assigned {
+				latest[fact.subject] = fact
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	facts := make([]explicitNamedRoleFact, 0, len(keys))
+	for _, key := range keys {
+		facts = append(facts, latest[key])
+	}
+	return facts
+}
+
+func explicitNamedRoleFactFromFragment(fragment string) (explicitNamedRoleFact, bool, bool) {
+	value := strings.TrimSpace(fragment)
+	for _, subject := range namedRoleLabels {
+		index := strings.Index(value, subject)
+		if index < 0 {
+			continue
+		}
+		prefix := strings.TrimSpace(value[:index])
+		historical := false
+		for _, marker := range []string{"原", "原任", "前任", "此前", "先前"} {
+			if strings.HasSuffix(prefix, marker) {
+				historical = true
+				break
+			}
+		}
+		if historical {
+			return explicitNamedRoleFact{}, false, false
+		}
+
+		tail := strings.TrimSpace(value[index+len(subject):])
+		assignment := false
+		for _, marker := range []string{"调整为", "变更为", "修改为", "改为", "更新为", "是", "为", "：", ":"} {
+			if strings.HasPrefix(tail, marker) {
+				tail = strings.TrimSpace(strings.TrimPrefix(tail, marker))
+				assignment = true
+				break
+			}
+		}
+		fact := explicitNamedRoleFact{subject: subject}
+		if containsAnyPrefix(tail, []string{
+			"待确认", "待核实", "未提供", "没有提供", "未说明", "未知",
+			"尚未确认", "仍未确认", "未确认", "已废弃", "已作废", "已离任",
+		}) {
+			return fact, false, true
+		}
+		if !assignment || tail == "" {
+			return fact, false, false
+		}
+		if end := strings.IndexAny(tail, "，,；;。！？!?（(\n\r"); end >= 0 {
+			tail = tail[:end]
+		}
+		tail = strings.Trim(strings.TrimSpace(tail), "'\"‘’“”*_`~#[]【】 ")
+		if tail == "" || utf8.RuneCountInString(tail) > 40 || containsAny(tail, []string{
+			"待确认", "待核实", "未提供", "未知", "不得", "不等同", "废弃", "作废",
+		}) {
+			return fact, false, false
+		}
+		fact.value = tail
+		return fact, true, false
+	}
+	return explicitNamedRoleFact{}, false, false
+}
+
+func namedRoleFactCovered(activeText string, fact explicitNamedRoleFact) bool {
+	for _, line := range strings.Split(activeText, "\n") {
+		normalized := normalizeStateDeltaText(line)
+		if strings.Contains(normalized, normalizeStateDeltaText(fact.subject)) &&
+			strings.Contains(normalized, normalizeStateDeltaText(fact.value)) {
+			return true
+		}
+	}
+	return false
 }
 
 func removeUnsupportedSourceParentheticals(line string, userStatements []string) string {

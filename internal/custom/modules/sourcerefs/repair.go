@@ -81,9 +81,25 @@ func RepairNamedTopicCitationBindings(
 				currentID = id
 			}
 			topic := matchedTopics[0]
-			if !citationEvidenceNamesTopic(currentID, topic, evidence) {
+			if !citationEvidenceSupportsNamedTopicClaim(currentID, topic, paragraph, evidence) {
 				if replacementID := strongestNamedTopicEvidence(paragraph, topic, evidence); replacementID != "" && replacementID != currentID {
-					paragraph = replaceCitationID(paragraph, currentID, replacementID)
+					if paragraphClaimsApplicabilityConditions(paragraph) {
+						if excerpt := namedTopicConditionExcerpt(replacementID, topic, evidence); excerpt != "" {
+							paragraph = renderGroundedConditionParagraph(paragraph, topic, excerpt, replacementID)
+						} else {
+							paragraph = replaceCitationID(paragraph, currentID, replacementID)
+						}
+					} else {
+						paragraph = replaceCitationID(paragraph, currentID, replacementID)
+					}
+				}
+			}
+		} else if len(matchedTopics) == 1 && len(citationIDs) == 0 &&
+			paragraphClaimsApplicabilityConditions(paragraph) && paragraphReportsMissingEvidence(paragraph) {
+			topic := matchedTopics[0]
+			if replacementID := strongestNamedTopicEvidence(paragraph, topic, evidence); replacementID != "" {
+				if excerpt := namedTopicConditionExcerpt(replacementID, topic, evidence); excerpt != "" {
+					paragraph = renderGroundedConditionParagraph(paragraph, topic, excerpt, replacementID)
 				}
 			}
 		}
@@ -114,10 +130,17 @@ func namedTopicsInParagraph(paragraph string, topics []string) []string {
 	return matched
 }
 
-func citationEvidenceNamesTopic(id, topic string, refs []citationRepairEvidence) bool {
+func citationEvidenceSupportsNamedTopicClaim(
+	id, topic, paragraph string,
+	refs []citationRepairEvidence,
+) bool {
 	normalizedTopic := normalizedNamedTopicText(topic)
 	for _, ref := range refs {
-		if ref.id == id && strings.Contains(normalizedNamedTopicText(ref.content), normalizedTopic) {
+		if ref.id != id || !strings.Contains(normalizedNamedTopicText(ref.content), normalizedTopic) {
+			continue
+		}
+		if !paragraphClaimsApplicabilityConditions(paragraph) ||
+			namedTopicConditionEvidence(ref.content, topic) {
 			return true
 		}
 	}
@@ -131,13 +154,18 @@ func strongestNamedTopicEvidence(
 ) string {
 	normalizedTopic := normalizedNamedTopicText(topic)
 	candidates := make([]citationRepairEvidence, 0, len(refs))
+	conditionClaim := paragraphClaimsApplicabilityConditions(paragraph)
 	for _, ref := range refs {
-		if strings.Contains(normalizedNamedTopicText(ref.content), normalizedTopic) {
+		if strings.Contains(normalizedNamedTopicText(ref.content), normalizedTopic) &&
+			(!conditionClaim || namedTopicConditionEvidence(ref.content, topic)) {
 			candidates = append(candidates, ref)
 		}
 	}
 	if len(candidates) == 0 {
 		return ""
+	}
+	if conditionClaim && len(candidates) == 1 {
+		return candidates[0].id
 	}
 
 	claim := canonicalSourceTagRE.ReplaceAllString(paragraph, "")
@@ -179,6 +207,170 @@ func strongestNamedTopicEvidence(
 		return ""
 	}
 	return scores[0].id
+}
+
+func paragraphClaimsApplicabilityConditions(paragraph string) bool {
+	return containsRepairMarker(paragraph, []string{
+		"适用条件", "适宜条件", "制度条件", "适用重点", "适配点", "条件为", "条件包括",
+		"applicability", "applicable condition", "conditions include",
+	})
+}
+
+func paragraphReportsMissingEvidence(paragraph string) bool {
+	return containsRepairMarker(paragraph, []string{
+		"未在检索信息中找到", "未在检索结果中找到", "未找到直接", "没有找到直接",
+		"暂无直接", "未取得直接", "not found in the retrieved", "no direct evidence found",
+	})
+}
+
+func containsRepairMarker(value string, markers []string) bool {
+	value = strings.ToLower(value)
+	for _, marker := range markers {
+		if strings.Contains(value, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+func namedTopicConditionEvidence(content, topic string) bool {
+	compactContent := normalizedNamedTopicText(content)
+	compactTopic := normalizedNamedTopicText(topic)
+	if compactTopic == "" || !strings.Contains(compactContent, compactTopic) {
+		return false
+	}
+	topicPositions := allStringIndexes(compactContent, compactTopic)
+	markers := []string{
+		"应同时满足下列条件", "符合下列特定条件之一", "符合下列条件之一",
+		"适宜采用", "适用于", "适用条件", "条件包括", "applicableconditions", "conditionsinclude",
+	}
+	for _, marker := range markers {
+		marker = normalizedNamedTopicText(marker)
+		for _, markerAt := range allStringIndexes(compactContent, marker) {
+			for _, topicAt := range topicPositions {
+				if absInt(markerAt-topicAt) <= 700 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func allStringIndexes(value, target string) []int {
+	if target == "" {
+		return nil
+	}
+	out := make([]int, 0, 2)
+	for start := 0; start < len(value); {
+		index := strings.Index(value[start:], target)
+		if index < 0 {
+			break
+		}
+		index += start
+		out = append(out, index)
+		start = index + len(target)
+	}
+	return out
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func namedTopicConditionExcerpt(id, topic string, refs []citationRepairEvidence) string {
+	for _, ref := range refs {
+		if ref.id != id || !namedTopicConditionEvidence(ref.content, topic) {
+			continue
+		}
+		return conditionExcerpt(ref.content, topic)
+	}
+	return ""
+}
+
+func conditionExcerpt(content, topic string) string {
+	value := strings.Join(strings.Fields(content), " ")
+	lower := strings.ToLower(value)
+	topicAt := strings.Index(lower, strings.ToLower(topic))
+	if topicAt < 0 {
+		return ""
+	}
+	best := -1
+	bestDistance := int(^uint(0) >> 1)
+	for _, marker := range []string{
+		"应同时满足下列条件", "符合下列特定条件之一", "符合下列条件之一",
+		"适宜采用", "适用于", "适用条件", "条件包括",
+	} {
+		for start := 0; start < len(lower); {
+			index := strings.Index(lower[start:], strings.ToLower(marker))
+			if index < 0 {
+				break
+			}
+			index += start
+			distance := absInt(index - topicAt)
+			if distance < bestDistance {
+				best = index
+				bestDistance = distance
+			}
+			start = index + len(marker)
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	start := best
+	if colon := strings.IndexAny(value[start:], "：:"); colon >= 0 && colon <= 80 {
+		colonAt := start + colon
+		_, width := utf8.DecodeRuneInString(value[colonAt:])
+		start = colonAt + width
+	}
+	tail := strings.TrimSpace(value[start:])
+	if tail == "" {
+		return ""
+	}
+	runes := []rune(tail)
+	if len(runes) > 240 {
+		cut := 240
+		for index := 239; index >= 140; index-- {
+			if strings.ContainsRune("；;。", runes[index]) {
+				cut = index + 1
+				break
+			}
+		}
+		tail = string(runes[:cut])
+	}
+	return strings.Trim(strings.TrimSpace(tail), "；;。 ")
+}
+
+func renderGroundedConditionParagraph(paragraph, topic, excerpt, citationID string) string {
+	topicAt := strings.Index(paragraph, topic)
+	if topicAt < 0 {
+		return paragraph
+	}
+	prefixEnd := -1
+	if colon := strings.IndexAny(paragraph[topicAt+len(topic):], "：:"); colon >= 0 && colon <= 24 {
+		colonAt := topicAt + len(topic) + colon
+		_, width := utf8.DecodeRuneInString(paragraph[colonAt:])
+		prefixEnd = colonAt + width
+	}
+	if prefixEnd < 0 || prefixEnd > len(paragraph) {
+		return paragraph
+	}
+	suffix := ""
+	for _, marker := range []string{"；该直接条件", ";该直接条件", "。该直接条件"} {
+		if index := strings.Index(paragraph[prefixEnd:], marker); index >= 0 {
+			suffix = paragraph[prefixEnd+index:]
+			break
+		}
+	}
+	if suffix == "" {
+		suffix = "。"
+	}
+	return strings.TrimRight(paragraph[:prefixEnd], " \t") + "制度直接适用条件包括：" +
+		strings.TrimSpace(excerpt) + canonicalCitationTag(citationID) + suffix
 }
 
 func replaceCitationID(value, currentID, replacementID string) string {

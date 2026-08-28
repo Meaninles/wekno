@@ -453,6 +453,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	allRefs := active.snapshotSourceReferences()
 	finalAnswer = conversationmemory.StripInternalPlanningPreamble(finalAnswer)
 	finalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(finalAnswer)
+	finalAnswer = conversationmemory.NormalizeDeferredComparisonFactSections(
+		finalAnswer,
+		req.Query,
+		boundaryUserStatements...,
+	)
 	finalAnswer = conversationmemory.NormalizeStateDeltaScope(finalAnswer, req.Query)
 	finalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
 		finalAnswer,
@@ -471,6 +476,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		boundaryUserStatements...,
 	)
 	finalAnswer = conversationmemory.EnsureDeferredDecisionConclusion(finalAnswer, req.Query)
+	finalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
+		finalAnswer,
+		conversationmemory.RequiredEvidenceTopics(req.Query),
+		allRefs,
+	)
 	finalAnswer = sourcerefs.RepairAnswerCitations(finalAnswer, allRefs)
 	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {

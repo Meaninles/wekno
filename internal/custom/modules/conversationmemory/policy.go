@@ -83,6 +83,10 @@ var sourceAttributionParentheticalPattern = regexp.MustCompile(
 	`[（(]\s*来源\s*[：:]\s*([^（）()]+?)\s*[）)]`,
 )
 
+var replacementActorPattern = regexp.MustCompile(
+	`被([^|。；;\n]{2,24}?)(调整为|变更为|更新为|修改为)`,
+)
+
 var stateAuditAnchorPattern = regexp.MustCompile(
 	`[0-9０-９]{4}年[0-9０-９]{1,2}月[0-9０-９]{1,2}日|[0-9０-９]+(?:\.[0-9０-９]+)?万元|[0-9０-９]+家`,
 )
@@ -119,7 +123,7 @@ var stateOnlyStrongMarkers = []string{
 }
 
 var stateOnlyDeclarativeMarkers = []string{
-	"调整为", "改为", "从现在起废弃", "已废弃", "待确认", "待核实", "尚未核验",
+	"调整为", "改为", "从现在起废弃", "已废弃", "待确认", "尚未确认", "待核实", "尚未核验",
 	"未经核验", "声称", "补充来源", "完成核验", "核验后确认", "确认至少", "用户身份",
 }
 
@@ -373,35 +377,146 @@ func comparisonEvidenceTopics(query string) []string {
 // from crowding later targets out of the bounded tool-output context.
 func RequiredEvidenceTopics(query string) []string {
 	const marker = "[WEKNORA_REQUIRED_EVIDENCE_TOPICS]"
-	if index := strings.LastIndex(query, marker); index >= 0 {
-		line := query[index+len(marker):]
-		if end := strings.IndexAny(line, "\r\n"); end >= 0 {
-			line = line[:end]
+	if topics := runtimeTopicMarker(query, marker); len(topics) >= 2 {
+		return topics
+	}
+	return currentTurnEvidenceTopics(query)
+}
+
+func runtimeTopicMarker(query, marker string) []string {
+	index := strings.LastIndex(query, marker)
+	if index < 0 {
+		return nil
+	}
+	line := query[index+len(marker):]
+	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+		line = line[:end]
+	}
+	var topics []string
+	if json.Unmarshal([]byte(strings.TrimSpace(line)), &topics) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(topics))
+	seen := map[string]struct{}{}
+	for _, topic := range topics {
+		topic = strings.TrimSpace(topic)
+		if topic == "" {
+			continue
 		}
-		var topics []string
-		if json.Unmarshal([]byte(strings.TrimSpace(line)), &topics) == nil {
-			out := make([]string, 0, len(topics))
-			seen := map[string]struct{}{}
-			for _, topic := range topics {
-				topic = strings.TrimSpace(topic)
-				if topic == "" {
-					continue
-				}
-				if _, exists := seen[topic]; exists {
-					continue
-				}
-				seen[topic] = struct{}{}
-				out = append(out, topic)
-				if len(out) == 8 {
-					break
-				}
-			}
-			if len(out) >= 2 {
-				return out
-			}
+		if _, exists := seen[topic]; exists {
+			continue
+		}
+		seen[topic] = struct{}{}
+		out = append(out, topic)
+		if len(out) == 8 {
+			break
 		}
 	}
-	return comparisonEvidenceTopics(query)
+	return out
+}
+
+// currentTurnEvidenceTopics returns only alternatives or question subjects
+// explicitly named in the active user request.  It deliberately ignores
+// historical turns, so a temporary two-question detour cannot inherit the
+// comparison targets from the preceding answer.
+func currentTurnEvidenceTopics(query string) []string {
+	if topics := comparisonEvidenceTopics(query); len(topics) >= 2 {
+		return topics
+	}
+	return narrowAnswerEvidenceTopics(query)
+}
+
+// narrowAnswerEvidenceTopics extracts the subject before an interrogative
+// word from each explicitly requested question.  These compact subjects are
+// stable across concise answers and retrieval queries while remaining fully
+// derived from user wording rather than an evaluator answer key.
+func narrowAnswerEvidenceTopics(query string) []string {
+	if !IsNarrowAnswerTurn(query) || !RequiresFreshEvidenceTurn(query) {
+		return nil
+	}
+	value := strings.TrimSpace(query)
+	if colon := strings.LastIndexAny(value, "：:"); colon >= 0 && colon < len(value)-1 {
+		_, width := utf8.DecodeRuneInString(value[colon:])
+		value = value[colon+width:]
+	}
+	parts := regexp.MustCompile(`[？?\n]+`).Split(value, -1)
+	seen := map[string]struct{}{}
+	topics := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(strings.Trim(part, "，,；;。.!！ "))
+		for _, prefix := range []string{"如果", "若", "请问", "那么", "并且", "以及"} {
+			part = strings.TrimSpace(strings.TrimPrefix(part, prefix))
+		}
+		if part == "" {
+			continue
+		}
+		if !containsAny(part, []string{"多少", "哪些", "哪个", "哪位", "谁", "何时", "何种", "怎么", "如何", "是否", "能否", "可否"}) {
+			continue
+		}
+		end := len(part)
+		for _, marker := range []string{"至少多少", "多少", "哪些", "哪个", "哪位", "谁", "何时", "何种", "怎么", "如何"} {
+			if index := strings.Index(part, marker); index >= 0 && index < end {
+				end = index
+			}
+		}
+		candidate := strings.TrimSpace(strings.Trim(part[:end], "，,；;：:。.!！ "))
+		candidate = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(candidate, "，由"), ",由"), "由"))
+		if comma := strings.LastIndexAny(candidate, "，,"); comma >= 0 {
+			tail := strings.TrimSpace(candidate[comma+1:])
+			if utf8.RuneCountInString(tail) >= 4 {
+				candidate = tail
+			}
+		}
+		count := utf8.RuneCountInString(candidate)
+		if count < 4 || count > 64 {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		topics = append(topics, candidate)
+		if len(topics) == 8 {
+			break
+		}
+	}
+	if len(topics) < 2 {
+		return nil
+	}
+	return topics
+}
+
+// EvidenceRetrievalQueries supplies one short, user-derived search intent per
+// named target.  It is safe for both prompt guidance and fixed-pipeline query
+// rewriting: no document-specific term or expected answer is introduced.
+func EvidenceRetrievalQueries(query string) []string {
+	topics := currentTurnEvidenceTopics(query)
+	if len(topics) < 2 {
+		return nil
+	}
+	intent := "直接规定与完整答案"
+	if IsComparisonTurn(query) && containsAny(query, []string{"适用", "适配", "条件", "要求", "重点", "风险", "会受", "影响", "applicable", "condition"}) {
+		intent = "完整适用条件 条件列表"
+	} else if containsAny(query, []string{"定义", "是什么", "define", "what is"}) {
+		intent = "定义与直接规定"
+	}
+	out := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		out = append(out, strings.TrimSpace(topic+" "+intent))
+	}
+	return out
+}
+
+// FocusEvidenceRewriteQuery removes project-state prose from a multi-target
+// retrieval rewrite while retaining every explicitly named target.  The fixed
+// quick-answer pipeline performs one bounded search, so a compact joined query
+// gives its reranker the same target coverage contract as tool-using agents.
+func FocusEvidenceRewriteQuery(rewritten, originalQuery string) string {
+	searches := EvidenceRetrievalQueries(originalQuery)
+	if len(searches) < 2 || !RequiresFreshEvidenceTurn(originalQuery) {
+		return strings.TrimSpace(rewritten)
+	}
+	return strings.Join(searches, "；")
 }
 
 // comparisonUnknownTopics extracts the uncertainty clauses explicitly supplied
@@ -419,17 +534,50 @@ func comparisonUnknownTopics(query string) []string {
 			markerLen = len(marker)
 		}
 	}
-	if start < 0 {
+	if start >= 0 {
+		tail := strings.TrimSpace(value[start+markerLen:])
+		if topics := parseUnknownTopicList(tail); len(topics) >= 2 {
+			return topics
+		}
+	}
+
+	// Collective suffix forms are common in real dialogue, for example
+	// “是否公开、需求是否完整、时间是否可行都尚未确认”.  The uncertainty
+	// begins at the first interrogative phrase, not at the trailing state word.
+	markerIndex := -1
+	for _, marker := range []string{"尚未确认", "仍未确认", "均未确认", "都未确认", "待确认", "待核实"} {
+		if index := strings.Index(value, marker); index >= 0 && (markerIndex < 0 || index < markerIndex) {
+			markerIndex = index
+		}
+	}
+	if markerIndex < 0 {
 		return nil
 	}
-	tail := strings.TrimSpace(value[start+markerLen:])
-	end := len(tail)
+	prefix := value[:markerIndex]
+	questionStart := -1
+	for _, marker := range []string{"是否", "能否", "可否", "有没有", "有无"} {
+		if index := strings.Index(prefix, marker); index >= 0 && (questionStart < 0 || index < questionStart) {
+			questionStart = index
+		}
+	}
+	if questionStart < 0 {
+		return nil
+	}
+	candidate := strings.TrimSpace(prefix[questionStart:])
+	candidate = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(candidate, "都"), "均"))
+	return parseUnknownTopicList(candidate)
+}
+
+func parseUnknownTopicList(value string) []string {
+	end := len(value)
 	for _, delimiter := range []string{"。", ".", "\n"} {
-		if index := strings.Index(tail, delimiter); index >= 0 && index < end {
+		if index := strings.Index(value, delimiter); index >= 0 && index < end {
 			end = index
 		}
 	}
-	candidate := strings.TrimSpace(tail[:end])
+	candidate := strings.TrimSpace(value[:end])
+	candidate = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(candidate, "都尚未确认"), "均尚未确认"))
+	candidate = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(candidate, "都未确认"), "均未确认"))
 	if candidate == "" || utf8.RuneCountInString(candidate) > 240 {
 		return nil
 	}
@@ -439,6 +587,9 @@ func comparisonUnknownTopics(query string) []string {
 	seen := map[string]struct{}{}
 	for _, part := range parts {
 		topic := strings.Trim(strings.TrimSpace(part), "：:‘’“”\"'（）()[]【】")
+		for _, suffix := range []string{"都尚未确认", "均尚未确认", "尚未确认", "仍未确认", "未确认", "待确认", "待核实", "都", "均"} {
+			topic = strings.TrimSpace(strings.TrimSuffix(topic, suffix))
+		}
 		count := utf8.RuneCountInString(topic)
 		if count < 2 || count > 60 {
 			continue
@@ -535,11 +686,17 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 - 本轮明确要求文档依据或引用：必须在本轮重新取得可用证据后再回答，不能把历史回答或历史引用当作当前证据；每个制度判断的引用必须紧跟支持它的同一句或同一短段。
 - 同一对象若需要两个不完全重合的证据片段，不得把全部条件压成一个长句后交叉放置引用；按证据片段拆成短句，每个引用只跟随该片段直接支持的条件。
 - 若问题点名多个比较对象或条件，每个对象都必须取得直接包含该判断的证据片段；开头或结尾相邻片段不能代替缺失的中间条件。`
-		if topics := comparisonEvidenceTopics(originalQuery); len(topics) > 1 {
+		if topics := currentTurnEvidenceTopics(originalQuery); len(topics) > 1 {
 			encoded, _ := json.Marshal(topics)
 			rules += "\n[WEKNORA_REQUIRED_EVIDENCE_TOPICS]" + string(encoded)
 			rules += `
 - 完成回答前逐项核对上述对象：每个对象自己的短段都必须带当前轮检索所得的就近引用；任何一项证据未取得时继续检索，不得以“未展开”代替。`
+			if searches := EvidenceRetrievalQueries(originalQuery); len(searches) == len(topics) {
+				encodedSearches, _ := json.Marshal(searches)
+				rules += "\n[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]" + string(encodedSearches)
+				rules += `
+- 每个检索目标使用上述独立短查询，不要用包含全部项目背景的长问题代替。询问适用、适配、条件或风险时，直接证据应是同时包含该对象名称（或紧邻标题）和完整条件列表的分片；仅有定义、金额门槛、评审启动门槛、相邻程序或上位类别不算该对象的适用条件。`
+			}
 		}
 		if topics := comparisonUnknownTopics(originalQuery); len(topics) > 1 {
 			encoded, _ := json.Marshal(topics)
@@ -675,6 +832,130 @@ func EnsureDeferredDecisionConclusion(answer, originalQuery string) string {
 		return value
 	}
 	return value + "\n\n" + conclusion
+}
+
+// NormalizeDeferredComparisonFactSections restores the two user-fact sections
+// required by an explicitly deferred comparison.  It reads only the active
+// user request or the explicitly referenced latest user state statement; no
+// assistant answer, retrieved document, domain rule, or evaluator expectation
+// can become a project fact through this path.
+func NormalizeDeferredComparisonFactSections(
+	answer, originalQuery string,
+	priorUserStatements ...string,
+) string {
+	value := strings.TrimSpace(answer)
+	if value == "" || !IsDeferredDecisionTurn(originalQuery) || !IsComparisonTurn(originalQuery) {
+		return value
+	}
+
+	statement := strings.TrimSpace(originalQuery)
+	if ReferencesRecentUserState(originalQuery) {
+		statement = latestReferencedUserState(priorUserStatements)
+	}
+	known, unknowns := explicitDeferredUserFacts(statement)
+	if known == "" || len(unknowns) < 2 {
+		return value
+	}
+
+	topics := currentTurnEvidenceTopics(originalQuery)
+	body := deferredComparisonOptionBody(value, topics)
+	unknownParts := make([]string, 0, len(unknowns))
+	for _, item := range unknowns {
+		item = strings.Trim(item, "。！？!?；;，,、 \t")
+		if item == "" {
+			continue
+		}
+		if !containsAny(item, []string{"待确认", "待核实", "尚未确认", "未确认"}) {
+			item += "待确认"
+		}
+		unknownParts = append(unknownParts, item)
+	}
+	if len(unknownParts) < 2 {
+		return value
+	}
+
+	facts := "已确认：" + strings.TrimRight(known, "。；;，, ") + "。\n\n" +
+		"待确认：" + strings.Join(uniqueUncertainItems(unknownParts), "；") + "。"
+	if strings.TrimSpace(body) == "" {
+		return facts
+	}
+	return facts + "\n\n" + strings.TrimSpace(body)
+}
+
+func explicitDeferredUserFacts(statement string) (string, []string) {
+	value := cleanUserStatementRecord(statement)
+	if value == "" {
+		return "", nil
+	}
+	unknowns := comparisonUnknownTopics(value)
+	if len(unknowns) < 2 {
+		return "", nil
+	}
+	start := explicitUnknownClauseStart(value)
+	if start < 0 {
+		return "", nil
+	}
+	known := strings.TrimSpace(value[:start])
+	for _, prefix := range []string{
+		"建立项目事实：", "建立项目事实:", "项目事实：", "项目事实:",
+		"已确认事实：", "已确认事实:", "已确认：", "已确认:",
+	} {
+		known = strings.TrimSpace(strings.TrimPrefix(known, prefix))
+	}
+	known = strings.TrimSpace(strings.TrimRight(known, "。；;，,：: \t"))
+	known = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(known, "并且"), "且"))
+	if utf8.RuneCountInString(known) < 4 || utf8.RuneCountInString(known) > 480 {
+		return "", nil
+	}
+	return known, unknowns
+}
+
+func explicitUnknownClauseStart(value string) int {
+	for _, marker := range []string{"尚未确认", "待确认：", "待确认:"} {
+		if index := strings.Index(value, marker); index >= 0 {
+			tail := strings.TrimSpace(value[index+len(marker):])
+			if len(parseUnknownTopicList(tail)) >= 2 {
+				return index
+			}
+		}
+	}
+	markerIndex := -1
+	for _, marker := range []string{"尚未确认", "仍未确认", "均未确认", "都未确认", "待确认", "待核实"} {
+		if index := strings.Index(value, marker); index >= 0 && (markerIndex < 0 || index < markerIndex) {
+			markerIndex = index
+		}
+	}
+	if markerIndex < 0 {
+		return -1
+	}
+	prefix := value[:markerIndex]
+	start := -1
+	for _, marker := range []string{"是否", "能否", "可否", "有没有", "有无"} {
+		if index := strings.Index(prefix, marker); index >= 0 && (start < 0 || index < start) {
+			start = index
+		}
+	}
+	return start
+}
+
+func deferredComparisonOptionBody(value string, topics []string) string {
+	if len(topics) < 2 {
+		return value
+	}
+	paragraphs := regexp.MustCompile(`\n\s*\n`).Split(strings.TrimSpace(value), -1)
+	for index, paragraph := range paragraphs {
+		matches := 0
+		for _, topic := range topics {
+			if strings.Contains(paragraph, topic) {
+				matches++
+			}
+		}
+		if matches == 0 {
+			continue
+		}
+		return strings.TrimSpace(strings.Join(paragraphs[index:], "\n\n"))
+	}
+	return value
 }
 
 // NormalizeDeferredComparisonRelationships removes explanatory relationships
@@ -833,7 +1114,11 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 		out = append(out, strings.TrimRight(line, " \t"))
 		pendingBlank = false
 	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
+	result := strings.TrimSpace(strings.Join(out, "\n"))
+	if containsAny(query, []string{"废弃"}) {
+		result = strings.ReplaceAll(result, "废止", "已废弃")
+	}
+	return result
 }
 
 func isStrictStateDeltaTurn(query string) bool {
@@ -1362,6 +1647,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			out = append(out, line)
 			continue
 		}
+		if section != "retired" && supersededUnknownClaim(line, userStatements) {
+			continue
+		}
 		if section == "active" {
 			if activeLineContainsRetiredAuditAnchor(line, retiredAnchors) {
 				continue
@@ -1390,6 +1678,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		if section == "retired" {
 			line = normalizeRetiredAuditLine(line)
 			line = repairExplicitRetiredScalarLine(line, explicitRetiredFacts)
+			line = removeUnsupportedReplacementActor(line, userStatements)
 		}
 		if section == "action_boundary" {
 			if containsAny(line, []string{
@@ -1453,6 +1742,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
+	out = restoreExplicitCompoundRelationshipFacts(out, userStatements)
 	out = restoreExplicitNamedRoleFacts(out, userStatements)
 	out = restoreExplicitActiveScalarFacts(out, explicitActiveScalars)
 	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
@@ -2106,53 +2396,105 @@ func NormalizeConfirmedUnknownSections(answer string) string {
 		return value
 	}
 	hasSeparateUnknownSection := hasUnknownSection(value)
-	paragraphs := regexp.MustCompile(`\n\s*\n`).Split(value, -1)
+	lines := strings.Split(value, "\n")
 	changed := false
-	out := make([]string, 0, len(paragraphs)+1)
-	for _, paragraph := range paragraphs {
-		if !isConfirmedSectionParagraph(paragraph) {
-			if paragraph = strings.TrimSpace(paragraph); paragraph != "" {
-				out = append(out, paragraph)
-			}
+	out := make([]string, 0, len(lines)+3)
+	section := ""
+	unknownInsertAt := -1
+	extractedUnknowns := make([]string, 0, 4)
+	for _, line := range lines {
+		if heading := lifecycleSectionHeading(line); heading != "" {
+			section = heading
+		}
+		if section != "active" || !containsAny(line, []string{
+			"待确认", "尚未确认", "未确认", "待核实", "尚未核实", "未知", "未提供",
+		}) {
+			out = append(out, strings.TrimRight(line, " \t"))
 			continue
 		}
-		cleaned, extractedUnknowns := splitUncertainUnitsFromConfirmedParagraph(paragraph)
-		if cleaned != strings.TrimSpace(paragraph) {
-			changed = true
+
+		cleaned, unknowns := splitUncertainUnitsFromConfirmedParagraph(line)
+		if len(unknowns) == 0 {
+			out = append(out, strings.TrimRight(line, " \t"))
+			continue
 		}
-		if cleaned != "" && !isBareConfirmedHeading(cleaned) {
-			out = append(out, cleaned)
+		changed = true
+		extractedUnknowns = append(extractedUnknowns, unknowns...)
+		if cleaned != "" {
+			out = append(out, strings.TrimRight(cleaned, " \t"))
 		}
-		if !hasSeparateUnknownSection && len(extractedUnknowns) > 0 {
-			out = append(out, "待确认："+strings.Join(uniqueUncertainItems(extractedUnknowns), "；")+"。")
-			changed = true
+		unknownInsertAt = len(out)
+	}
+	if !hasSeparateUnknownSection && len(extractedUnknowns) > 0 {
+		if unknownInsertAt < 0 || unknownInsertAt > len(out) {
+			unknownInsertAt = len(out)
 		}
+		block := []string{"", "待确认：" + strings.Join(uniqueUncertainItems(extractedUnknowns), "；") + "。", ""}
+		out = append(out, block...)
+		copy(out[unknownInsertAt+len(block):], out[unknownInsertAt:len(out)-len(block)])
+		copy(out[unknownInsertAt:unknownInsertAt+len(block)], block)
+		changed = true
 	}
 	if !changed {
 		return value
 	}
-	return strings.TrimSpace(strings.Join(out, "\n\n"))
+	return strings.TrimSpace(strings.Join(compactBlankLines(out), "\n"))
 }
 
 func hasUnknownSection(value string) bool {
-	for _, paragraph := range regexp.MustCompile(`\n\s*\n`).Split(value, -1) {
-		probe := strings.TrimSpace(strings.Trim(strings.TrimSpace(paragraph), "#*_` "))
-		if containsAnyPrefix(probe, []string{
-			"待确认：", "待确认:", "尚未确认：", "尚未确认:",
-			"待核实：", "待核实:", "未知：", "未知:",
-			"待确认事实", "待确认事项", "未知事实", "未确认事实",
-		}) {
+	for _, line := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
+		if lifecycleSectionHeading(line) == "unknown" {
 			return true
 		}
 	}
 	return false
 }
 
+func lifecycleSectionHeading(line string) string {
+	probe := lifecycleHeadingProbe(line)
+	switch {
+	case containsAnyPrefix(probe, []string{
+		"待确认：", "待确认:", "尚未确认：", "尚未确认:",
+		"待核实：", "待核实:", "未知：", "未知:",
+		"待确认事实", "待确认事项", "待确认项", "未知事实", "未确认事实",
+	}):
+		return "unknown"
+	case containsAnyPrefix(probe, []string{
+		"已废弃事实", "废弃事实", "失效事实", "已废弃：", "已废弃:",
+	}):
+		return "retired"
+	case containsAnyPrefix(probe, []string{"行动边界", "操作边界", "权限边界"}):
+		return "action_boundary"
+	case containsAnyPrefix(probe, []string{
+		"已确认：", "已确认:", "已确认", "当前有效事实", "当前事实", "已确认事实",
+	}):
+		return "active"
+	default:
+		return ""
+	}
+}
+
+func lifecycleHeadingProbe(line string) string {
+	value := strings.TrimSpace(line)
+	value = orderedOrBulletListPrefixPattern.ReplaceAllString(value, "")
+	value = strings.TrimSpace(strings.Trim(value, "#*_`> "))
+	runes := []rune(value)
+	start := 0
+	for start < len(runes) && !unicode.IsLetter(runes[start]) && !unicode.IsNumber(runes[start]) {
+		start++
+	}
+	value = strings.TrimSpace(string(runes[start:]))
+	return strings.TrimSpace(strings.Trim(value, "#*_`> "))
+}
+
 func isConfirmedSectionParagraph(paragraph string) bool {
-	probe := strings.TrimSpace(strings.Trim(strings.TrimSpace(paragraph), "#*_` "))
-	return containsAnyPrefix(probe, []string{
-		"已确认：", "已确认:", "当前有效事实", "当前事实", "已确认事实",
-	})
+	for _, line := range strings.Split(strings.ReplaceAll(paragraph, "\r\n", "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		return lifecycleSectionHeading(line) == "active"
+	}
+	return false
 }
 
 func removeUncertainUnitsFromConfirmedParagraph(paragraph string) string {
@@ -2177,6 +2519,18 @@ func splitUncertainUnitsFromConfirmedParagraph(paragraph string) (string, []stri
 				confirmedPrefix := strings.TrimSpace(strings.TrimRight(beforeMarker, "，,、 \t"))
 				unknownItem := strings.Trim(afterMarker, "，,、：: \t")
 
+				// A labelled collective suffix is entirely uncertain even when
+				// it appears as a list item beneath an “已确认” heading.
+				// Examples: “当前状态：A、B、C均尚未确认” and
+				// “采购信息是否公开：尚未确认”.
+				if unknownItem == "" {
+					collectivePrefix, collectiveUnknown, ok := collectiveUnknownPrefix(beforeMarker)
+					if ok {
+						confirmedPrefix = collectivePrefix
+						unknownItem = collectiveUnknown
+					}
+				}
+
 				// A suffix marker such as "采购时间待确认" places the
 				// unknown before the marker. Peel only the last comma-delimited
 				// unit away from the confirmed prefix.
@@ -2194,7 +2548,7 @@ func splitUncertainUnitsFromConfirmedParagraph(paragraph string) (string, []stri
 				if confirmedPrefix != "" && !isBareConfirmedHeading(confirmedPrefix) {
 					out = append(out, confirmedPrefix)
 				}
-				if unknownItem = strings.Trim(unknownItem, "。！？!?；;，,、 \t"); unknownItem != "" {
+				if unknownItem = cleanUncertainItem(unknownItem); unknownItem != "" {
 					unknowns = append(unknowns, unknownItem)
 				}
 			} else {
@@ -2208,11 +2562,64 @@ func splitUncertainUnitsFromConfirmedParagraph(paragraph string) (string, []stri
 	return strings.TrimSpace(strings.Join(out, "")), unknowns
 }
 
+func collectiveUnknownPrefix(beforeMarker string) (string, string, bool) {
+	value := strings.TrimSpace(beforeMarker)
+	value = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(value, "都"), "均"))
+	colon := strings.IndexAny(value, "：:")
+	if colon >= 0 {
+		colonEnd := colon + 1
+		if strings.HasPrefix(value[colon:], "：") {
+			colonEnd = colon + len("：")
+		}
+		label := lifecycleHeadingProbe(value[:colon])
+		tail := strings.TrimSpace(value[colonEnd:])
+		if containsAny(label, []string{"当前状态", "状态", "待确认", "未确认"}) && tail != "" {
+			return "", tail, true
+		}
+		if tail == "" && containsAny(label, []string{"是否", "能否", "可否", "可行", "完整", "公开"}) {
+			return "", label, true
+		}
+	}
+	if strings.ContainsAny(value, "、，,") && containsAny(value, []string{"是否", "能否", "可否", "可行", "完整", "公开"}) {
+		return "", value, true
+	}
+	return "", "", false
+}
+
+func cleanUncertainItem(value string) string {
+	value = strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(value, ""))
+	value = strings.Trim(value, "。！？!?；;，,、：: \t|*_`#")
+	value = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(value, "都"), "均"))
+	return value
+}
+
+func compactBlankLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	blank := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			if len(out) == 0 || blank {
+				continue
+			}
+			out = append(out, "")
+			blank = true
+			continue
+		}
+		out = append(out, line)
+		blank = false
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
 func confirmedSectionPayload(value string) string {
-	probe := strings.TrimSpace(strings.Trim(strings.TrimSpace(value), "#*_` "))
+	probe := lifecycleHeadingProbe(value)
 	for _, prefix := range []string{"已确认：", "已确认:", "当前有效事实：", "当前有效事实:"} {
 		probe = strings.TrimSpace(strings.TrimPrefix(probe, prefix))
 	}
+	probe = strings.Trim(probe, "：: *_`")
 	return probe
 }
 
@@ -2304,6 +2711,81 @@ func restoreExplicitResolvedEntityFacts(lines, userStatements []string) []string
 		activeText += "\n" + fact
 	}
 	return lines
+}
+
+// restoreExplicitCompoundRelationshipFacts preserves user-authored compound
+// facts whose meaning depends on the relationship between a quantity, a
+// differentiating attribute, and a shared outcome.  Summaries such as “目标
+// 一致” are not treated as equivalent when the user's explicit “different
+// routes can achieve the same result” relationship was lost.
+func restoreExplicitCompoundRelationshipFacts(lines, userStatements []string) []string {
+	activeStart, activeEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "active" && key != "active" {
+				activeEnd = index
+				break
+			}
+			section = key
+			if key == "active" && activeStart < 0 {
+				activeStart = index + 1
+			}
+		}
+	}
+	if activeStart < 0 {
+		return lines
+	}
+
+	activeText := strings.Join(lines[activeStart:activeEnd], "\n")
+	seen := map[string]struct{}{}
+	for _, statement := range userStatements {
+		for _, fact := range explicitCompoundRelationshipFacts(statement) {
+			key := normalizeStateDeltaText(fact)
+			if _, exists := seen[key]; exists || compoundRelationshipFactCovered(activeText, fact) {
+				continue
+			}
+			seen[key] = struct{}{}
+			line := "- " + strings.TrimRight(strings.TrimSpace(fact), "。 ") + "。"
+			lines = insertString(lines, activeEnd, line)
+			activeEnd++
+			activeText += "\n" + line
+		}
+	}
+	return lines
+}
+
+func explicitCompoundRelationshipFacts(statement string) []string {
+	value := cleanUserStatementRecord(statement)
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '；' || r == ';' || r == '。' || r == '！' || r == '!' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, 1)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if len(stateAuditAnchorPattern.FindAllString(part, -1)) == 0 ||
+			!containsAny(part, []string{"技术路线", "实现路径", "实施路径", "解决路径"}) ||
+			!containsAny(part, []string{"实现", "达成"}) ||
+			!containsAny(part, []string{"结果目标", "同一结果", "共同目标", "相同目标"}) {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func compoundRelationshipFactCovered(activeText, fact string) bool {
+	for _, anchor := range stateAuditAnchorPattern.FindAllString(fact, -1) {
+		if !strings.Contains(activeText, anchor) {
+			return false
+		}
+	}
+	for _, marker := range []string{"技术路线", "实现", "结果目标"} {
+		if strings.Contains(fact, marker) && !strings.Contains(activeText, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 func resolvedEntityFact(statement string) string {
@@ -2503,6 +2985,20 @@ func removeUnsupportedSourceParentheticals(line string, userStatements []string)
 	})
 }
 
+func removeUnsupportedReplacementActor(line string, userStatements []string) string {
+	anchors := stateAuditAnchorPattern.FindAllString(line, -1)
+	if len(anchors) == 0 {
+		return line
+	}
+	return replacementActorPattern.ReplaceAllStringFunc(line, func(fragment string) string {
+		match := replacementActorPattern.FindStringSubmatch(fragment)
+		if len(match) != 3 || sourceAttributionSupported(match[1], anchors, userStatements) {
+			return fragment
+		}
+		return match[2]
+	})
+}
+
 func sourceAttributionSupported(source string, anchors, userStatements []string) bool {
 	terms := sourceActorTerms(source)
 	if len(terms) == 0 {
@@ -2550,8 +3046,13 @@ func sourceActorTerms(source string) []string {
 // entity. The chronology and evidence both come from user messages; assistant
 // conclusions cannot trigger the lifecycle transition.
 func supersededUnknownClaim(line string, userStatements []string) bool {
-	if !containsAny(line, []string{"声称", "主张", "说法"}) ||
-		!containsAny(line, []string{"待确认", "待核验", "尚未核验", "未经核验", "未核验"}) {
+	if !containsAny(line, []string{"声称", "主张", "说法"}) {
+		return false
+	}
+	if containsAny(line, []string{
+		"核验后确认", "核验确认", "经核验", "已核验", "不再成立", "不成立",
+		"被推翻", "推翻", "已否定", "并非", "不是", "可替代",
+	}) && !containsAny(line, []string{"待确认", "待核验", "尚未核验", "未经核验", "未核验", "未知", "未提供"}) {
 		return false
 	}
 	anchors := unresolvedClaimEntityPattern.FindAllString(line, -1)
@@ -2771,7 +3272,7 @@ func isOperationBoundaryLine(line string) bool {
 }
 
 func stateAuditSectionHeading(line string) string {
-	value := strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "#*_` "))
+	value := lifecycleHeadingProbe(line)
 	if utf8.RuneCountInString(value) > 32 {
 		return ""
 	}
@@ -2807,7 +3308,7 @@ func StripInternalPlanningPreamble(answer string) string {
 		}
 	}
 	repairPreamble := false
-	for attempts := 0; attempts < 10 && value != ""; attempts++ {
+	for attempts := 0; attempts < 40 && value != ""; attempts++ {
 		if repairPreamble {
 			if start := substantiveAnswerStart(value); start > 0 {
 				value = strings.TrimSpace(value[start:])
@@ -2823,7 +3324,8 @@ func StripInternalPlanningPreamble(answer string) string {
 			"let me think", "let me check", "i need to find", "the validation says",
 			"the uncertainty topics are", "actually, looking", "looking more carefully",
 			"i have the retrieval results", "i have retrieved", "i've retrieved",
-			"i see the issue", "i see that", "looking at my earlier answer", "the issue might be",
+			"i see the issue", "i see that", "i see there", "there's still an issue", "there is still an issue",
+			"for the uncertainty topics", "looking at my earlier answer", "the issue might be",
 			"looking at the returned evidence", "looking at the evidence",
 			"the evidence is already", "i need to rewrite", "i will rewrite",
 			"the evidence chunk", "the retrieved evidence", "i already retrieved",

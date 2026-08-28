@@ -186,3 +186,40 @@ func TestRepairNamedTopicCitationBindingsLeavesAmbiguousEvidenceUntouched(t *tes
 		t.Fatalf("ambiguous evidence was guessed: %q", got)
 	}
 }
+
+func TestRepairNamedTopicCitationBindingsUsesDirectConditionPassage(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "procedure", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞争谈判采购递交文件的供应商有2家及以上即可启动谈判程序。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "procedure", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "conditions", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "适宜采用竞争谈判的采购方式，且符合下列特定条件之一：1.技术复杂，只能提出功能性指标；2.采购目标明确但可以有不同路径和方案实现。",
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "conditions", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "竞争谈判：制度条件为2家以上即可启动谈判程序。<src id=\"S1\" />；该直接条件在本项目中是否成立待确认。"
+	got := RepairNamedTopicCitationBindings(answer, []string{"公开采购", "竞争谈判"}, refs)
+	if !strings.Contains(got, `<src id="S2" />`) || strings.Contains(got, `<src id="S1" />`) ||
+		!strings.Contains(got, "功能性指标") || !strings.Contains(got, "不同路径和方案") {
+		t.Fatalf("procedure evidence was not replaced with the direct condition passage: %s", got)
+	}
+}
+
+func TestRepairNamedTopicCitationBindingsFillsExplicitMissingEvidenceOnly(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "auction", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞价采购符合下列特定条件之一：1.采购需求明确、规格型号同一；2.服务标准要求完整。",
+			Metadata:        map[string]string{MetadataCitationID: "S4", MetadataChunkID: "auction", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "竞价采购：制度条件为未在检索信息中找到直接说明；该直接条件在本项目中是否成立待确认。"
+	got := RepairNamedTopicCitationBindings(answer, []string{"询比采购", "竞价采购"}, refs)
+	if !strings.Contains(got, `<src id="S4" />`) || strings.Contains(got, "未在检索信息中找到") ||
+		!strings.Contains(got, "采购需求明确") {
+		t.Fatalf("explicit missing-evidence fallback was not grounded: %s", got)
+	}
+}

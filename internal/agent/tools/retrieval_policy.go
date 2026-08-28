@@ -35,12 +35,15 @@ func TargetedEvidenceRetrievalRedirect(
 	}
 	topics := conversationmemory.RequiredEvidenceTopics(query)
 	encodedTopics, _ := json.Marshal(topics)
+	searches := conversationmemory.EvidenceRetrievalQueries(query)
+	encodedSearches, _ := json.Marshal(searches)
 	return &types.ToolResult{
 		Success: false,
 		Error: fmt.Sprintf(
-			"Whole-document listing was skipped because this request requires direct evidence for multiple named topics and bounded output could hide later chunks. Use grep_chunks (preferred) or knowledge_search inside knowledge_id %q with one query for each topic in %s (keep each query focused), then call list_knowledge_chunks with each exact chunk_id that supports a claim. Search the user's explicitly unknown conditions as well as the option names. Do not answer until every named topic has direct evidence.",
+			"Whole-document listing was skipped because this request requires direct evidence for multiple named topics and bounded output could hide later chunks. Use grep_chunks (preferred) or knowledge_search inside knowledge_id %q with one query for each topic in %s (keep every query focused). Suggested user-derived queries: %s. Then call list_knowledge_chunks with each exact chunk_id that supports a claim. For applicability questions, a definition, amount threshold, evaluation-start threshold, neighboring procedure, or parent category does not replace the named topic's complete condition passage. Do not answer until every named topic has direct evidence.",
 			knowledgeID,
 			string(encodedTopics),
+			string(encodedSearches),
 		),
 	}
 }

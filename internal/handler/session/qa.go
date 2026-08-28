@@ -975,6 +975,11 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
 				answer := conversationmemory.StripInternalPlanningPreamble(streamCtx.assistantMessage.Content)
 				answer = conversationmemory.NormalizeConfirmedUnknownSections(answer)
+				answer = conversationmemory.NormalizeDeferredComparisonFactSections(
+					answer,
+					reqCtx.query,
+					data.PriorUserStatements...,
+				)
 				answer = conversationmemory.NormalizeStateDeltaScope(answer, reqCtx.query)
 				answer = conversationmemory.NormalizeExplicitActionBoundaries(
 					answer,
@@ -993,6 +998,11 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					data.PriorUserStatements...,
 				)
 				answer = conversationmemory.EnsureDeferredDecisionConclusion(answer, reqCtx.query)
+				answer = sourcerefs.RepairNamedTopicCitationBindings(
+					answer,
+					conversationmemory.RequiredEvidenceTopics(reqCtx.query),
+					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+				)
 				answer = sourcerefs.RepairAnswerCitations(
 					answer,
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),

@@ -2,6 +2,7 @@ package chatpipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -74,6 +75,29 @@ func TestEnforceFreshEvidenceIntentLeavesOrdinaryFollowUpAlone(t *testing.T) {
 	}
 	if cm.Intent != types.IntentFollowUp || cm.RewriteQuery != "当前项目预算" {
 		t.Fatalf("ordinary follow-up changed: %#v", cm.PipelineState)
+	}
+}
+
+func TestEnforceFreshEvidenceIntentFocusesExplicitMultiTargetRewrite(t *testing.T) {
+	cm := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			Query: "项目背景很多。请比较公开采购、询比、竞价和竞争谈判会受哪些条件影响，每项就近引用。",
+		},
+		PipelineState: types.PipelineState{
+			RewriteQuery: "项目背景与采购方式综合分析",
+			Intent:       types.IntentFollowUp,
+		},
+	}
+	if !enforceFreshEvidenceIntent(cm) {
+		t.Fatal("explicit multi-target evidence request was not routed to retrieval")
+	}
+	for _, expected := range []string{"公开采购 完整适用条件", "询比 完整适用条件", "竞价 完整适用条件", "竞争谈判 完整适用条件"} {
+		if !strings.Contains(cm.RewriteQuery, expected) {
+			t.Fatalf("focused rewrite omitted %q: %s", expected, cm.RewriteQuery)
+		}
+	}
+	if strings.Contains(cm.RewriteQuery, "项目背景") {
+		t.Fatalf("project-state prose remained in retrieval-only rewrite: %s", cm.RewriteQuery)
 	}
 }
 

@@ -1233,7 +1233,12 @@ FINAL_ANSWER_SOURCE_CITATION_RULE = (
 )
 
 
-def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_analysis_state: dict[str, Any] | None = None):
+def build_weknora_server(
+    payload: ChatPayload,
+    artifacts: ArtifactStore,
+    data_analysis_state: dict[str, Any] | None = None,
+    turn_contract_state: dict[str, Any] | None = None,
+):
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     sdk_tools = []
@@ -1244,8 +1249,8 @@ def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_an
         async def handler(args, tool_name=spec.name):
             try:
                 result = await asyncio.to_thread(call_tool_callback, payload, tool_name, args or {})
-                if should_record_turn_evidence(payload.query):
-                    record_turn_evidence(data_analysis_state, result)
+                if payload.eval_observability and should_record_turn_evidence(payload.query):
+                    record_turn_evidence(turn_contract_state, result)
                 return mcp_tool_result(result)
             except Exception as exc:
                 return mcp_text({"ok": False, "error": str(exc)}, is_error=True)
@@ -3811,7 +3816,11 @@ MAX_TURN_EVIDENCE_CHARS = 96_000
 def should_record_turn_evidence(query: str) -> bool:
     """Avoid evidence-registry work on ordinary production requests."""
 
-    return "[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS]" in (query or "")
+    value = query or ""
+    return (
+        "[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS]" in value
+        or "[WEKNORA_REQUIRED_EVIDENCE_TOPICS]" in value
+    )
 
 
 def record_turn_evidence(state: dict[str, Any] | None, result: Any) -> None:
@@ -4338,6 +4347,10 @@ REQUIRED_UNCERTAINTY_TOPICS_RE = re.compile(
     r"^\[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS\](\[.*\])\s*$",
     re.MULTILINE,
 )
+REQUIRED_EVIDENCE_SEARCHES_RE = re.compile(
+    r"^\[WEKNORA_REQUIRED_EVIDENCE_SEARCHES\](\[.*\])\s*$",
+    re.MULTILINE,
+)
 FRESH_EVIDENCE_CONTRACT_MARKER = "本轮明确要求文档依据或引用"
 TURN_EXECUTION_CONTRACT_MARKER = "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
 DEFERRED_COMPARISON_CONTRACT_MARKER = "用户明确要求不作最终选择"
@@ -4347,7 +4360,7 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"now\s+(?:i\s+have|let\s+me|rewriting|i(?:'ll|\s+will)\s+write)|"
     r"let\s+me\s+(?:organize|answer|formulate|summarize|analy[sz]e)|"
     r"i\s+(?:have\s+(?:the\s+)?retrieval\s+results|need\s+to\s+rewrite|will\s+rewrite)|"
-    r"i've\s+retrieved|i\s+see\s+the\s+issue|"
+    r"i've\s+retrieved|i\s+see\s+(?:the\s+issue|there(?:'s|\s+is)\s+(?:still\s+)?an?\s+issue)|"
     r"looking\s+at\s+(?:the\s+returned\s+evidence|the\s+evidence|my\s+earlier\s+answer)|"
     r"the\s+issue\s+might\s+be|the\s+evidence\s+is\s+already|"
     r"i\s+see\s+that|"
@@ -4451,6 +4464,24 @@ def required_uncertainty_topics(query: str) -> list[str]:
     return topics[:8]
 
 
+def required_evidence_searches(query: str) -> list[str]:
+    match = REQUIRED_EVIDENCE_SEARCHES_RE.search(query or "")
+    if not match:
+        return []
+    try:
+        value = json.loads(match.group(1))
+    except Exception:
+        return []
+    if not isinstance(value, list):
+        return []
+    searches: list[str] = []
+    for item in value:
+        search = str(item or "").strip()
+        if search and search not in searches:
+            searches.append(search)
+    return searches[:8]
+
+
 def evidence_topics_without_adjacent_citation(answer: str, topics: list[str]) -> list[str]:
     """Find named comparison items whose own answer segment has no handle.
 
@@ -4486,6 +4517,75 @@ def evidence_topics_without_adjacent_citation(answer: str, topics: list[str]) ->
                 cited = True
                 break
         if not cited:
+            missing.append(topic)
+    return missing
+
+
+def direct_condition_evidence(evidence: str, topic: str) -> bool:
+    """Check that a source is the named target's condition passage, not a neighbor."""
+
+    compact = re.sub(r"\s+", "", evidence or "").lower()
+    target = re.sub(r"\s+", "", topic or "").lower()
+    if not compact or not target:
+        return False
+    topic_positions = [match.start() for match in re.finditer(re.escape(target), compact)]
+    if not topic_positions:
+        return False
+    markers = (
+        "应同时满足下列条件",
+        "符合下列特定条件之一",
+        "符合下列条件之一",
+        "适宜采用",
+        "适用条件",
+        "条件包括",
+        "applicableconditions",
+        "conditionsinclude",
+    )
+    marker_positions = [
+        index
+        for marker in markers
+        for index in [compact.find(marker)]
+        if index >= 0
+    ]
+    return any(abs(topic_at - marker_at) <= 700 for topic_at in topic_positions for marker_at in marker_positions)
+
+
+def condition_topics_without_direct_source(
+    answer: str,
+    topics: list[str],
+    evidence_by_id: dict[str, str],
+) -> list[str]:
+    """Require each condition comparison to cite its own complete condition passage."""
+
+    value = answer or ""
+    occurrences: list[tuple[int, str]] = []
+    for topic in topics:
+        start = 0
+        while True:
+            index = value.find(topic, start)
+            if index < 0:
+                break
+            occurrences.append((index, topic))
+            start = index + len(topic)
+    occurrences.sort(key=lambda item: item[0])
+
+    missing: list[str] = []
+    for topic in topics:
+        grounded = False
+        for index, found_topic in occurrences:
+            if found_topic != topic:
+                continue
+            following = [
+                position
+                for position, other_topic in occurrences
+                if position > index and other_topic != topic
+            ]
+            end = min(following) if following else len(value)
+            citation_ids = re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', value[index:end])
+            if any(direct_condition_evidence(evidence_by_id.get(citation_id, ""), topic) for citation_id in citation_ids):
+                grounded = True
+                break
+        if not grounded:
             missing.append(topic)
     return missing
 
@@ -4708,6 +4808,27 @@ def turn_contract_issues(
                 ),
             }
         )
+    searches = required_evidence_searches(query)
+    if any("完整适用条件" in search for search in searches):
+        missing_direct_conditions = condition_topics_without_direct_source(
+            value,
+            topics,
+            evidence_by_id or {},
+        )
+        if missing_direct_conditions:
+            issues.append(
+                {
+                    "code": "current_turn_condition_evidence_not_direct",
+                    "missing_topics": missing_direct_conditions,
+                    "required_action": (
+                        "Continue focused retrieval for each named item using the supplied per-topic search query, "
+                        "then rewrite the complete answer. Cite the passage that names that item and contains its "
+                        "complete applicability-condition introduction/list. A definition, amount threshold, "
+                        "evaluation-start threshold, neighboring procedure, or parent category is not direct "
+                        "condition evidence for that item."
+                    ),
+                }
+            )
     uncertainty_topics = required_uncertainty_topics(query)
     missing_uncertainties = uncertainty_topics_without_grounded_citation(
         value,
@@ -6059,7 +6180,13 @@ class GeneralAgentRunner:
                 )
             data_analysis_state[DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY] = intent
             yield data_analysis_display_intent_progress_event(intent, payload=self.payload)
-        server = build_weknora_server(self.payload, self.artifacts, data_analysis_state)
+        turn_contract_state: dict[str, Any] = {}
+        server = build_weknora_server(
+            self.payload,
+            self.artifacts,
+            data_analysis_state,
+            turn_contract_state,
+        )
         sdk_tools = claude_sdk_builtin_tools(self.payload)
         allowed_tools = [f"mcp__weknora__{t.name}" for t in self.payload.tools]
         allowed_tools.extend(sdk_tools)
@@ -6130,7 +6257,6 @@ class GeneralAgentRunner:
                     timeout=180,
                 )
             ]
-        turn_contract_state: dict[str, Any] = {}
         if should_enable_turn_contract_stop_hook(self.payload):
             runtime_hooks.setdefault("Stop", []).append(
                 HookMatcher(

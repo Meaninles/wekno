@@ -1,6 +1,7 @@
 package conversationmemory
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1417,5 +1418,105 @@ func TestNormalizeConfirmedUnknownSectionsPreservesConfirmedPrefixAndOnlyUnknown
 	wantSeparated := "已确认：预算220万元。\n\n待确认：采购信息能否公开、需求是否完整、采购全流程时间是否可行。\n\n公开采购：制度条件说明。"
 	if got := NormalizeConfirmedUnknownSections(withoutUnknownSection); got != wantSeparated {
 		t.Fatalf("only copy of uncertainty was not moved into its own section: %q", got)
+	}
+}
+
+func TestNormalizeConfirmedUnknownSectionsTracksEmojiHeadingsAcrossParagraphs(t *testing.T) {
+	answer := `## ✅ 已确认
+
+- 项目名称：系统升级服务
+- 预算金额：220万元
+- 当前状态：采购信息是否可公开、需求是否完整、全流程时间是否可行均尚未确认
+
+## ❓ 待确认
+
+- 采购信息是否可公开：尚未确认
+- 需求是否完整：尚未确认
+- 全流程时间是否可行：尚未确认`
+	got := NormalizeConfirmedUnknownSections(answer)
+	confirmed := strings.Split(got, "## ❓ 待确认")[0]
+	if strings.Contains(confirmed, "尚未确认") || strings.Contains(confirmed, "当前状态") {
+		t.Fatalf("emoji confirmed section retained unknown state: %s", got)
+	}
+	for _, expected := range []string{"项目名称", "220万元", "采购信息是否可公开", "需求是否完整", "全流程时间是否可行"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("normalized lifecycle answer lost %q: %s", expected, got)
+		}
+	}
+}
+
+func TestDeferredComparisonRestoresOnlyExplicitUserFactSections(t *testing.T) {
+	prior := "建立项目事实：系统升级服务预算220万元，至少3家供应商可参与，是否可以公开采购、需求是否完整、全流程时间是否可行都尚未确认。只列状态。"
+	query := "仅基于刚才明确的项目事实和制度，比较询比、竞价、竞争谈判的适配点与风险，不定首选。每种方式一行并引用。"
+	answer := `询比：条件一。<src id="S1" />
+
+竞价：条件二。<src id="S2" />
+
+竞争谈判：条件三。<src id="S3" />`
+	got := NormalizeDeferredComparisonFactSections(answer, query, prior)
+	for _, expected := range []string{
+		"已确认：系统升级服务预算220万元，至少3家供应商可参与",
+		"待确认：是否可以公开采购待确认", "需求是否完整待确认", "全流程时间是否可行待确认",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("explicit deferred fact %q was not restored: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "只列状态") {
+		t.Fatalf("response-scope instruction became a project fact: %s", got)
+	}
+}
+
+func TestNarrowFreshEvidenceTopicsStayOnCurrentQuestions(t *testing.T) {
+	query := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
+	directive := AppendCurrentTurnDirective(query, query)
+	topics := RequiredEvidenceTopics(directive)
+	want := []string{"中标候选人公示", "异议涉及实质内容并影响候选人排名"}
+	if !reflect.DeepEqual(topics, want) {
+		t.Fatalf("narrow current questions were not preserved: got=%v want=%v\n%s", topics, want, directive)
+	}
+	if strings.Contains(strings.Join(topics, "|"), "询比") || strings.Contains(strings.Join(topics, "|"), "竞价") {
+		t.Fatalf("stale comparison target leaked into narrow questions: %v", topics)
+	}
+}
+
+func TestStateAuditRestoresCompoundRelationshipAndStripsInventedReplacementActor(t *testing.T) {
+	query := "做完整状态审计，分成当前有效事实、已废弃事实、待确认事实、行动边界。"
+	prior := []string{
+		"业务团队确认至少4家供应商可能满足，技术路线不同但都可能实现同一结果目标；需求是否完整仍待核实。",
+		"初始目标日期是2026年11月30日。",
+		"目标日期调整为2027年1月31日，2026年11月30日从现在起废弃。",
+	}
+	answer := `### 当前有效事实
+- 至少4家供应商可能满足（技术路线不同，目标一致）
+- 目标日期：2027年1月31日
+### 已废弃事实
+| 原事实 | 替代 |
+|---|---|
+| 目标日期2026年11月30日 | 被业务调整为2027年1月31日取代 |
+### 待确认事实
+- 需求是否完整：待核实
+### 行动边界
+- 无`
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	if !strings.Contains(got, "技术路线不同但都可能实现同一结果目标") {
+		t.Fatalf("compound user relationship was not restored: %s", got)
+	}
+	if strings.Contains(got, "被业务调整") || !strings.Contains(got, "调整为2027年1月31日") {
+		t.Fatalf("unsupported replacement actor was not stripped conservatively: %s", got)
+	}
+}
+
+func TestStripInternalPlanningPreambleHandlesThereIsStillIssueVariant(t *testing.T) {
+	answer := `I see there's still an issue. Let me check the citations again.
+
+For the uncertainty topics, I need to inspect the evidence.
+
+已确认：项目事实。
+
+待确认：条件待确认。`
+	want := "已确认：项目事实。\n\n待确认：条件待确认。"
+	if got := StripInternalPlanningPreamble(answer); got != want {
+		t.Fatalf("long validator-repair variant survived: %q", got)
 	}
 }

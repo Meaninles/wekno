@@ -224,6 +224,51 @@ class RunnerProgressTest(unittest.TestCase):
         )
         self.assertEqual(mismatch["missing_topics"], ["采购信息能否公开"])
 
+    def test_turn_contract_issues_require_named_condition_passage(self):
+        payload = ChatPayload(
+            run_id="run-condition-contract",
+            session_id="session-condition-contract",
+            assistant_message_id="assistant-condition-contract",
+            query=(
+                "比较竞价和竞争谈判的适用条件并引用。\n"
+                "本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["竞价","竞争谈判"]\n'
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["竞价 完整适用条件 条件列表","竞争谈判 完整适用条件 条件列表"]'
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        answer = (
+            '竞价：制度条件为需求明确。<src id="S1" />\n\n'
+            '竞争谈判：制度条件为2家即可启动程序。<src id="S2" />'
+        )
+        evidence = {
+            "S1": "竞价采购符合下列特定条件之一：采购需求明确、服务标准要求完整。",
+            "S2": "竞争谈判采购递交文件的供应商有2家及以上即可启动谈判程序。",
+        }
+        issue = next(
+            issue
+            for issue in turn_contract_issues(payload, answer, evidence_by_id=evidence)
+            if issue["code"] == "current_turn_condition_evidence_not_direct"
+        )
+        self.assertEqual(issue["missing_topics"], ["竞争谈判"])
+        evidence["S2"] = (
+            "适宜采用竞争谈判采购方式，且符合下列特定条件之一："
+            "只能提出功能性指标；目标可以有不同路径和方案实现。"
+        )
+        self.assertNotIn(
+            "current_turn_condition_evidence_not_direct",
+            {issue["code"] for issue in turn_contract_issues(payload, answer, evidence_by_id=evidence)},
+        )
+
+    def test_turn_evidence_registry_is_requested_for_named_topics(self):
+        self.assertTrue(
+            should_record_turn_evidence(
+                '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["甲方案","乙方案"]'
+            )
+        )
+        self.assertFalse(should_record_turn_evidence("普通生产问答"))
+
     def test_turn_contract_issues_reject_internal_repair_narration(self):
         payload = ChatPayload(
             run_id="run-planning-contract",
@@ -272,6 +317,13 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertIn(
             "current_turn_internal_planning_exposed",
             {issue["code"] for issue in turn_contract_issues(payload, observed_tool_repair)},
+        )
+        there_is_still_issue = (
+            "I see there's still an issue. Let me check the sources.\n\n正式回答。"
+        )
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in turn_contract_issues(payload, there_is_still_issue)},
         )
 
     def test_turn_contract_issues_reject_deferred_comparison_ranking(self):

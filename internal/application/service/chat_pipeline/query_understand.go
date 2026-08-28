@@ -211,6 +211,10 @@ func enforceFreshEvidenceIntent(chatManage *types.ChatManage) bool {
 	if strings.TrimSpace(chatManage.RewriteQuery) == "" {
 		chatManage.RewriteQuery = chatManage.Query
 	}
+	chatManage.RewriteQuery = conversationmemory.FocusEvidenceRewriteQuery(
+		chatManage.RewriteQuery,
+		chatManage.Query,
+	)
 	changed := chatManage.Intent != types.IntentKBSearch || chatManage.SystemPromptOverride != ""
 	chatManage.Intent = types.IntentKBSearch
 	chatManage.SystemPromptOverride = ""

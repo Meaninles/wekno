@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from .judge import JUDGE_SYSTEM_PROMPT, _post_chat, judge_runtime_contract
+from .judge import judge_runtime_contract, judge_single_turn
 from .models import StrictModel, TurnContract
 
 
@@ -87,47 +87,18 @@ def load_calibration(path: str | Path) -> JudgeCalibrationSuite:
 def run_judge_calibration(suite: JudgeCalibrationSuite) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for item in suite.items:
-        result = _post_chat(
-            [
-                {
-                    "role": "system",
-                    "content": JUDGE_SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "task": "Evaluate whether each answer satisfies the acceptable-answer contract. Do not compare against a single reference wording.",
-                            "case_id": item.calibration_id,
-                            "contracts": [
-                                {
-                                    "turn_id": item.calibration_id,
-                                    "query": item.query,
-                                    "contract": item.contract.model_dump(mode="json"),
-                                }
-                            ],
-                            "candidate": [
-                                {
-                                    "turn_id": item.calibration_id,
-                                    **item.candidate.model_dump(mode="json"),
-                                }
-                            ],
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ]
+        row = judge_single_turn(
+            case_id=item.calibration_id,
+            contract={
+                "turn_id": item.calibration_id,
+                "query": item.query,
+                "contract": item.contract.model_dump(mode="json"),
+            },
+            candidate={
+                "turn_id": item.calibration_id,
+                **item.candidate.model_dump(mode="json"),
+            },
         )
-        result_turns = result.get("turns") if isinstance(result, dict) else None
-        if not isinstance(result_turns, list) or len(result_turns) != 1:
-            raise CalibrationError(
-                f"{item.calibration_id}: judge calibration must return exactly one turn"
-            )
-        row = result_turns[0]
-        if not isinstance(row, dict) or row.get("turn_id") != item.calibration_id:
-            raise CalibrationError(
-                f"{item.calibration_id}: judge calibration turn identity mismatch"
-            )
         label = str(row.get("label") or "")
         confidence = float(row.get("confidence", -1))
         if label not in {"pass", "fail", "invalid"} or not 0 <= confidence <= 1:

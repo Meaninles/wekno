@@ -46,6 +46,65 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual([call.kwargs["timeout"] for call in urlopen.call_args_list], [7, 7])
         sleep.assert_called_once_with(1)
 
+    def test_semantic_turns_are_judged_in_isolation(self) -> None:
+        spec = CaseSpec(
+            case_id="isolated",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            turns=[
+                TurnSpec(turn_id="turn-1", query="q1", contract=TurnContract()),
+                TurnSpec(turn_id="turn-2", query="q2", contract=TurnContract()),
+            ],
+        )
+        run = CaseRun(
+            case_id=spec.case_id,
+            family_id=spec.family_id,
+            split=spec.split,
+            verdict=Verdict.PASS,
+            turns=[
+                ObservedTurn(
+                    turn_id="turn-1",
+                    session_id="session",
+                    content="a1",
+                    is_completed=True,
+                ),
+                ObservedTurn(
+                    turn_id="turn-2",
+                    session_id="session",
+                    content="a2",
+                    is_completed=True,
+                ),
+            ],
+        )
+        seen: list[str] = []
+
+        def fake_post(messages: list[dict[str, str]]) -> dict:
+            payload = json.loads(messages[1]["content"])
+            self.assertEqual(len(payload["contracts"]), 1)
+            self.assertEqual(len(payload["candidate"]), 1)
+            turn_id = payload["contracts"][0]["turn_id"]
+            self.assertEqual(payload["candidate"][0]["turn_id"], turn_id)
+            seen.append(turn_id)
+            return {
+                "turns": [
+                    {
+                        "turn_id": turn_id,
+                        "label": "pass",
+                        "confidence": 0.99,
+                        "reason": "isolated",
+                    }
+                ]
+            }
+
+        with patch("weknora_eval.judge._post_chat", side_effect=fake_post):
+            scores = judge_case(spec, run)
+
+        self.assertEqual(seen, ["turn-1", "turn-2"])
+        self.assertEqual([score.turn_id for score in scores], seen)
+
     def test_measured_deadline_is_scored_without_calling_semantic_judge(self) -> None:
         spec = CaseSpec(
             case_id="deadline",

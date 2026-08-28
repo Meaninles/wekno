@@ -509,51 +509,45 @@ class ReadinessTests(unittest.TestCase):
         suite = load_calibration(ROOT / "calibration" / "judge-multiturn.v1.json")
         expected = {item.calibration_id: item.expected_label for item in suite.items}
 
-        def fake_post(messages: list[dict[str, str]]) -> dict:
-            import json
-
-            payload = json.loads(messages[1]["content"])
-            turn_id = payload["contracts"][0]["turn_id"]
-            self.assertEqual(payload["candidate"][0]["turn_id"], turn_id)
-            self.assertIn("completed", payload["candidate"][0])
+        def fake_single_turn(**payload: object) -> dict:
+            contract = payload["contract"]
+            candidate = payload["candidate"]
+            self.assertIsInstance(contract, dict)
+            self.assertIsInstance(candidate, dict)
+            turn_id = contract["turn_id"]
+            self.assertEqual(candidate["turn_id"], turn_id)
+            self.assertIn("completed", candidate)
             item = next(item for item in suite.items if item.calibration_id == turn_id)
-            self.assertEqual(payload["contracts"][0]["query"], item.query)
-            self.assertIn("conversation_state", payload["contracts"][0]["contract"])
-            self.assertIn("required_claims", payload["contracts"][0]["contract"])
+            self.assertEqual(contract["query"], item.query)
+            self.assertIn("conversation_state", contract["contract"])
+            self.assertIn("required_claims", contract["contract"])
             return {
-                "turns": [
-                    {
-                        "turn_id": turn_id,
-                        "label": expected[turn_id],
-                        "confidence": 0.99,
-                        "reason": "fixture",
-                    }
-                ]
+                "turn_id": turn_id,
+                "label": expected[turn_id],
+                "confidence": 0.99,
+                "reason": "fixture",
             }
 
-        with patch("weknora_eval.calibration._post_chat", side_effect=fake_post):
+        with patch(
+            "weknora_eval.calibration.judge_single_turn",
+            side_effect=fake_single_turn,
+        ):
             result = run_judge_calibration(suite)
         self.assertTrue(result["passed"])
         self.assertEqual(result["accuracy"], 1.0)
 
-        def low_confidence_post(messages: list[dict[str, str]]) -> dict:
-            import json
-
-            payload = json.loads(messages[1]["content"])
-            turn_id = payload["contracts"][0]["turn_id"]
+        def low_confidence_single_turn(**payload: object) -> dict:
+            turn_id = payload["contract"]["turn_id"]
             return {
-                "turns": [
-                    {
-                        "turn_id": turn_id,
-                        "label": expected[turn_id],
-                        "confidence": 0.5,
-                        "reason": "uncertain fixture",
-                    }
-                ]
+                "turn_id": turn_id,
+                "label": expected[turn_id],
+                "confidence": 0.5,
+                "reason": "uncertain fixture",
             }
 
         with patch(
-            "weknora_eval.calibration._post_chat", side_effect=low_confidence_post
+            "weknora_eval.calibration.judge_single_turn",
+            side_effect=low_confidence_single_turn,
         ):
             uncertain = run_judge_calibration(suite)
         self.assertEqual(uncertain["accuracy"], 1.0)
@@ -561,28 +555,21 @@ class ReadinessTests(unittest.TestCase):
 
         critical_id = next(item.calibration_id for item in suite.items if item.critical)
 
-        def critical_mismatch_post(messages: list[dict[str, str]]) -> dict:
-            import json
-
-            payload = json.loads(messages[1]["content"])
-            turn_id = payload["contracts"][0]["turn_id"]
+        def critical_mismatch_single_turn(**payload: object) -> dict:
+            turn_id = payload["contract"]["turn_id"]
             label = expected[turn_id]
             if turn_id == critical_id:
                 label = "pass" if label != "pass" else "fail"
             return {
-                "turns": [
-                    {
-                        "turn_id": turn_id,
-                        "label": label,
-                        "confidence": 0.99,
-                        "reason": "critical fixture",
-                    }
-                ]
+                "turn_id": turn_id,
+                "label": label,
+                "confidence": 0.99,
+                "reason": "critical fixture",
             }
 
         with patch(
-            "weknora_eval.calibration._post_chat",
-            side_effect=critical_mismatch_post,
+            "weknora_eval.calibration.judge_single_turn",
+            side_effect=critical_mismatch_single_turn,
         ):
             critical_failure = run_judge_calibration(suite)
         self.assertFalse(critical_failure["passed"])

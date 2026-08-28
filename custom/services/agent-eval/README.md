@@ -262,7 +262,7 @@ custom/services/agent-eval/eval-loop.ps1 `
 
 LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措辞和语义表达造成的误杀，但不能覆盖关键确定性失败。校准样例本身使用与数据集完全一致的 `TurnContract` / `TextRule` 强类型协议和真实问题上下文，禁止用只在校准中成立的简写契约；关键正反例任一错判都会使整次校准失败。每次正式 gate 都实时运行 `calibration run`，同时达到 `calibration/judge-multiturn.v1.json` 的最低准确率和逐项最低置信度；日常 preflight 只执行结构校验，不调用 Judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
 
-Judge 网络调用默认采用单次 180 秒、最多 2 次的有界重试，并把这两个参数写入 execution identity。某个 case 在重试后仍失败时，只把该 case 标为 `INVALID`，继续落盘其余裁决并生成 gate/report；它不会改写原始观测，不会把评测基础设施故障记成智能体质量 `FAIL`，也不会向业务请求路径传播异常。
+正式裁决固定使用 `single-turn-v1` 协议：每次请求只允许携带一个 turn 的契约和回答，与单项校准走同一代码路径，禁止后续回答替早期回答补齐漏项。Judge 网络调用默认采用单次 180 秒、最多 2 次的有界重试，并把协议与两个参数写入 execution identity。某个 case 在重试后仍失败时，只把该 case 标为 `INVALID`，继续落盘其余裁决并生成 gate/report；它不会改写原始观测，不会把评测基础设施故障记成智能体质量 `FAIL`，也不会向业务请求路径传播异常。
 
 ## 本地验证
 

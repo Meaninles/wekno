@@ -32,8 +32,9 @@ def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> 
     return value
 
 
-def judge_runtime_contract() -> dict[str, int]:
+def judge_runtime_contract() -> dict[str, int | str]:
     return {
+        "judge_protocol": "single-turn-v1",
         "judge_timeout_seconds": _bounded_env_int(
             "AGENT_EVAL_JUDGE_TIMEOUT_SECONDS", 180, minimum=1, maximum=600
         ),
@@ -117,17 +118,55 @@ def _post_chat(messages: list[dict[str, str]]) -> dict[str, Any]:
     raise JudgeError("judge request exhausted without a result")
 
 
+def judge_single_turn(
+    *,
+    case_id: str,
+    contract: dict[str, Any],
+    candidate: dict[str, Any],
+    baseline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Judge one turn in isolation so later answers cannot repair earlier omissions."""
+
+    turn_id = str(contract.get("turn_id") or "")
+    if not turn_id or candidate.get("turn_id") != turn_id:
+        raise JudgeError("single-turn judge payload identity mismatch")
+    prompt: dict[str, Any] = {
+        "task": "Evaluate whether the answer satisfies the acceptable-answer contract. Do not compare against a single reference wording. Judge only this candidate answer; no other turn may supply a missing requirement.",
+        "case_id": case_id,
+        "contracts": [contract],
+        "candidate": [candidate],
+    }
+    if baseline is not None:
+        if baseline.get("turn_id") != turn_id:
+            raise JudgeError("single-turn baseline identity mismatch")
+        prompt["task"] += " Also make a pairwise non-regression comparison against the baseline."
+        prompt["baseline"] = [baseline]
+    result = _post_chat(
+        [
+            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ]
+    )
+    rows = result.get("turns") if isinstance(result, dict) else None
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise JudgeError("single-turn judge must return exactly one turn")
+    row = rows[0]
+    if not isinstance(row, dict) or row.get("turn_id") != turn_id:
+        raise JudgeError("single-turn judge result identity mismatch")
+    return row
+
+
 def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = None) -> list[MetricScore]:
-    contract_payload = [
-        {
+    contract_by_turn = {
+        turn.turn_id: {
             "turn_id": turn.turn_id,
             "query": turn.query,
             "contract": turn.contract.model_dump(mode="json"),
         }
         for turn in spec.turns
-    ]
-    observed = [
-        {
+    }
+    observed_by_turn = {
+        turn.turn_id: {
             "turn_id": turn.turn_id,
             "answer": turn.content,
             "evidence": [
@@ -139,52 +178,48 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
             "error": turn.error,
         }
         for turn in case_run.turns
-    ]
-    prompt: dict[str, Any] = {
-        "task": "Evaluate whether each answer satisfies the acceptable-answer contract. Do not compare against a single reference wording.",
-        "case_id": spec.case_id,
-        "contracts": contract_payload,
-        "candidate": observed,
     }
-    if baseline is not None:
-        prompt["task"] += " Also make a pairwise non-regression comparison against the baseline."
-        prompt["baseline"] = [
-            {"turn_id": turn.turn_id, "answer": turn.content, "evidence": turn.references}
-            for turn in baseline.turns
-        ]
+    baseline_by_turn = {
+        turn.turn_id: {
+            "turn_id": turn.turn_id,
+            "answer": turn.content,
+            "evidence": [
+                str(reference.get("evidence_content") or reference.get("content") or "")
+                for reference in turn.references
+            ],
+            "tools": turn.tools,
+            "completed": turn.is_completed,
+            "error": turn.error,
+        }
+        for turn in baseline.turns
+    } if baseline is not None else {}
     measured_turn_ids = {
         turn.turn_id
         for turn in case_run.turns
         if is_measured_sut_execution_error(turn.error)
     }
     semantic_turn_ids = {turn.turn_id for turn in spec.turns} - measured_turn_ids
-    result = (
-        _post_chat(
-            [
-                {
-                    "role": "system",
-                    "content": JUDGE_SYSTEM_PROMPT,
-                },
-                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-            ]
-        )
-        if semantic_turn_ids
-        else {"turns": []}
-    )
     scores: list[MetricScore] = []
-    rows = result.get("turns") if isinstance(result, dict) else None
-    if not isinstance(rows, list):
-        raise JudgeError("judge JSON has no turns array")
     returned_turn_ids: set[str] = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            raise JudgeError("judge turn is not an object")
-        turn_id = str(row.get("turn_id") or "")
+    for turn_spec in spec.turns:
+        turn_id = turn_spec.turn_id
+        if turn_id not in semantic_turn_ids:
+            continue
+        candidate = observed_by_turn.get(turn_id)
+        if candidate is None:
+            raise JudgeError(f"candidate observation missing turn {turn_id}")
+        paired_baseline = baseline_by_turn.get(turn_id) if baseline is not None else None
+        if baseline is not None and paired_baseline is None:
+            raise JudgeError(f"baseline observation missing turn {turn_id}")
+        row = judge_single_turn(
+            case_id=spec.case_id,
+            contract=contract_by_turn[turn_id],
+            candidate=candidate,
+            baseline=paired_baseline,
+        )
         label = str(row.get("label") or "")
         confidence = float(row.get("confidence", -1))
-        if turn_id in measured_turn_ids:
-            continue
-        if turn_id not in semantic_turn_ids or label not in {"pass", "fail", "invalid"} or not 0 <= confidence <= 1:
+        if label not in {"pass", "fail", "invalid"} or not 0 <= confidence <= 1:
             raise JudgeError(f"invalid judge result row: {row!r}")
         returned_turn_ids.add(turn_id)
         scores.append(
@@ -201,11 +236,11 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
     if returned_turn_ids != semantic_turn_ids:
         raise JudgeError(f"judge turn coverage mismatch: expected={semantic_turn_ids}, got={returned_turn_ids}")
 
-    baseline_by_turn = {
-        turn.turn_id: turn for turn in baseline.turns
-    } if baseline is not None else {}
     for turn_id in sorted(measured_turn_ids):
-        paired = baseline_by_turn.get(turn_id)
+        paired = next(
+            (turn for turn in baseline.turns if turn.turn_id == turn_id),
+            None,
+        ) if baseline is not None else None
         pairwise = None
         if paired is not None:
             pairwise = (

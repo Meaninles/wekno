@@ -367,6 +367,39 @@ class GateTests(unittest.TestCase):
         blocked = evaluate_gate([spec()], candidate, critical, baseline)
         self.assertEqual(blocked.verdict, Verdict.FAIL)
 
+    def test_judge_cannot_override_a_required_unknown_state_omission(self) -> None:
+        deterministic_failure = case(Verdict.FAIL).model_copy(
+            update={
+                "scores": [
+                    MetricScore(
+                        name="state.unknown.user-identity",
+                        value=False,
+                        passed=False,
+                        turn_id="turn",
+                    )
+                ]
+            }
+        )
+        policy = self.policy.model_copy(
+            update={
+                "require_judge": True,
+                "forbid_hard_failures": False,
+                "critical_metric_prefixes": ["state.unknown"],
+                "judge_reviewable_metric_prefixes": ["required_claim"],
+            }
+        )
+
+        adjudicated, detail = _adjudicate_case(
+            with_judge(deterministic_failure, "pass"),
+            policy,
+        )
+
+        self.assertEqual(adjudicated.verdict, Verdict.FAIL)
+        self.assertEqual(
+            detail["non_reviewable_failures"],
+            ["state.unknown.user-identity"],
+        )
+
     def test_judge_can_downgrade_a_deterministic_pass(self) -> None:
         policy = self.policy.model_copy(
             update={"require_judge": True, "forbid_hard_failures": False}

@@ -486,9 +486,16 @@ class ReadinessTests(unittest.TestCase):
 
     def test_judge_calibration_has_all_verdict_and_boundary_classes(self) -> None:
         suite = load_calibration(ROOT / "calibration" / "judge-multiturn.v1.json")
-        self.assertEqual(len(suite.items), 8)
+        self.assertEqual(len(suite.items), 10)
         self.assertEqual({item.expected_label for item in suite.items}, {"pass", "fail", "invalid"})
         self.assertEqual({item.boundary_kind for item in suite.items}, {"positive", "negative", "boundary"})
+        self.assertEqual(
+            {item.calibration_id for item in suite.items if item.critical},
+            {
+                "state-fail-required-unknown-omitted",
+                "state-pass-owner-and-user-distinct",
+            },
+        )
 
     def test_judge_calibration_uses_the_formal_turn_protocol(self) -> None:
         suite = load_calibration(ROOT / "calibration" / "judge-multiturn.v1.json")
@@ -539,6 +546,35 @@ class ReadinessTests(unittest.TestCase):
             uncertain = run_judge_calibration(suite)
         self.assertEqual(uncertain["accuracy"], 1.0)
         self.assertFalse(uncertain["passed"])
+
+        critical_id = next(item.calibration_id for item in suite.items if item.critical)
+
+        def critical_mismatch_post(messages: list[dict[str, str]]) -> dict:
+            import json
+
+            payload = json.loads(messages[1]["content"])
+            turn_id = payload["contracts"][0]["turn_id"]
+            label = expected[turn_id]
+            if turn_id == critical_id:
+                label = "pass" if label != "pass" else "fail"
+            return {
+                "turns": [
+                    {
+                        "turn_id": turn_id,
+                        "label": label,
+                        "confidence": 0.99,
+                        "reason": "critical fixture",
+                    }
+                ]
+            }
+
+        with patch(
+            "weknora_eval.calibration._post_chat",
+            side_effect=critical_mismatch_post,
+        ):
+            critical_failure = run_judge_calibration(suite)
+        self.assertFalse(critical_failure["passed"])
+        self.assertEqual(critical_failure["critical_mismatches"], [critical_id])
 
     def test_langfuse_publishes_each_repetition_as_an_independent_item(self) -> None:
         class FakeLangfuse:

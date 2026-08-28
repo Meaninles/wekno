@@ -32,6 +32,7 @@ class JudgeCalibrationItem(StrictModel):
     expected_label: Literal["pass", "fail", "invalid"]
     rationale: str
     boundary_kind: Literal["positive", "negative", "boundary"]
+    critical: bool = False
 
 
 class JudgeCalibrationSuite(StrictModel):
@@ -122,6 +123,11 @@ def run_judge_calibration(suite: JudgeCalibrationSuite) -> dict[str, Any]:
         )
     accuracy = sum(row["matched"] for row in rows) / len(rows)
     minimum_observed_confidence = min(row["confidence"] for row in rows)
+    critical_mismatches = sorted(
+        item.calibration_id
+        for item, row in zip(suite.items, rows, strict=True)
+        if item.critical and not row["matched"]
+    )
     confusion = Counter(
         f"{row['expected_label']}->{row['actual_label']}" for row in rows
     )
@@ -134,7 +140,9 @@ def run_judge_calibration(suite: JudgeCalibrationSuite) -> dict[str, Any]:
         "minimum_confidence": suite.minimum_confidence,
         "minimum_observed_confidence": minimum_observed_confidence,
         "passed": accuracy >= suite.minimum_accuracy
-        and minimum_observed_confidence >= suite.minimum_confidence,
+        and minimum_observed_confidence >= suite.minimum_confidence
+        and not critical_mismatches,
+        "critical_mismatches": critical_mismatches,
         "confusion": dict(sorted(confusion.items())),
         "items": rows,
     }

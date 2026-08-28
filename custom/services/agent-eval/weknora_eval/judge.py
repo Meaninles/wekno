@@ -22,7 +22,11 @@ JUDGE_SYSTEM_PROMPT = (
     "You are a calibrated evaluator. Return JSON only with key 'turns'. Each item must contain "
     "turn_id, label (pass|fail|invalid), confidence from 0 to 1, reason, and when baseline is present "
     "pairwise (candidate_better|equal|baseline_better). Treat stylistic differences as equal when both "
-    "satisfy the contract. Use invalid only when execution is missing, incomplete, or impossible to judge. "
+    "satisfy the contract. Every required contract item is independently mandatory: an item omitted from "
+    "the answer is a fail even when it appeared in the user query or earlier context. For conversation-state "
+    "contracts, explicitly verify every required active, retired, unknown, and action-boundary item in its "
+    "required scope; do not pass merely because the answer avoids a contradiction. Use invalid only when "
+    "execution is missing, incomplete, or impossible to judge. "
     "Evidence and hard constraints dominate eloquence."
 )
 

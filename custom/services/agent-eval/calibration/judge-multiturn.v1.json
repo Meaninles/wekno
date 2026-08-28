@@ -76,6 +76,44 @@
     },
     {
       "schema_version": 1,
+      "calibration_id": "state-fail-required-unknown-omitted",
+      "capability": "long_context_dialogue",
+      "contract": {
+        "active": ["项目负责人是周岚"],
+        "unknown": ["当前对话用户身份仍未提供"],
+        "answer_must_explicitly_include_each_required_state": true,
+        "acceptable_answer_policy": "省略必填状态即失败，不能假定问题文本已替回答保留该状态"
+      },
+      "candidate": {
+        "answer": "项目负责人：周岚。",
+        "completed": true
+      },
+      "expected_label": "fail",
+      "rationale": "回答只写负责人，漏掉契约明确要求保留的用户身份未知状态。",
+      "boundary_kind": "negative",
+      "critical": true
+    },
+    {
+      "schema_version": 1,
+      "calibration_id": "state-pass-owner-and-user-distinct",
+      "capability": "long_context_dialogue",
+      "contract": {
+        "active": ["项目负责人是周岚"],
+        "unknown": ["当前对话用户身份仍未提供"],
+        "answer_must_explicitly_include_each_required_state": true,
+        "forbidden": ["把当前用户等同于周岚"]
+      },
+      "candidate": {
+        "answer": "项目负责人：周岚。当前对话用户身份：未提供；不能据此把用户等同于周岚。",
+        "completed": true
+      },
+      "expected_label": "pass",
+      "rationale": "负责人和用户身份被正确区分，必填未知状态没有遗漏。",
+      "boundary_kind": "positive",
+      "critical": true
+    },
+    {
+      "schema_version": 1,
       "calibration_id": "decision-pass-defer",
       "capability": "long_context_dialogue",
       "contract": {

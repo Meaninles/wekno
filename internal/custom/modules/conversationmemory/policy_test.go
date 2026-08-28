@@ -1691,6 +1691,36 @@ func TestNormalizeStateAuditDropsIncompleteActiveTableRow(t *testing.T) {
 	}
 }
 
+func TestNormalizeStateAuditDropsHistoricalEpistemicInstructionFromActiveFacts(t *testing.T) {
+	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	prior := "建立项目台账：项目代号启明星视觉升级，业务目标是提升缺陷识别率。只确认这些事实，不推断设备、软件或施工范围。"
+	answer := `### 当前有效事实
+| 编号 | 事实描述 | 来源 |
+|---|---|---|
+| 1 | 项目代号：启明星视觉升级 | 用户 |
+| 2 | 业务目标：提升缺陷识别率 | 用户 |
+| 3 | 不推断设备、软件或施工范围 | 用户 |
+### 已废弃事实
+- 无
+### 待确认事实
+- 无
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query, prior)
+	if strings.Contains(got, "不推断设备") {
+		t.Fatalf("historical epistemic instruction survived as active fact: %s", got)
+	}
+	for _, expected := range []string{"启明星视觉升级", "提升缺陷识别率", "仅在对话中维护"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("valid state item %q was removed: %s", expected, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior); twice != got {
+		t.Fatalf("epistemic-instruction cleanup was not idempotent:\n%s", twice)
+	}
+}
+
 func TestStripInternalPlanningPreambleRemovesObservedTerminalNarration(t *testing.T) {
 	for _, preamble := range []string{
 		"好的，所有必要证据都已从当前轮检索获取。现在来回答用户的两个问题。",
@@ -1756,5 +1786,44 @@ func TestCompactExplicitOneLineComparisonKeepsGroundedOptions(t *testing.T) {
 	}
 	if twice := CompactExplicitOneLineComparison(got, query); twice != got {
 		t.Fatalf("one-line comparison compaction was not idempotent:\n%s", twice)
+	}
+}
+
+func TestCompactExplicitOneLineComparisonUsesLeadingTopicDespiteTrailingCrossComparison(t *testing.T) {
+	query := "仅基于刚才明确的项目事实和制度，比较询比、竞价、竞争谈判的适配点与风险，不定首选。每种方式一行，制度判断就近引用。"
+	answer := `已确认：系统升级服务预算220万元，至少3家供应商可参与。
+
+待确认：是否可以公开采购待确认；需求是否完整待确认；全流程时间是否可行待确认。
+
+## 询比采购
+
+询比采购，是指一次报价的方式。适用重点为采购需求确定、规格统一、货源充足、价格稳定，或收费标准统一的服务事项。<src id="S2" />
+
+## 竞价采购
+
+竞价采购，是指多次竞争报价的方式。适用重点为采购需求明确、规格型号同一、价格形成机制明确，或服务标准要求完整。<src id="S5" />竞价的核心特征是多次报价，询比和竞价都要求多家供应商。
+
+## 竞争谈判
+
+竞争谈判，是指与符合条件的供应商洽谈。适用重点为只能提出功能性指标、不能确定详细规格，或目标可以有不同路径和方案实现。<src id="S6" />竞争谈判的优势在于充分沟通。此外，询比和竞价采用不同报价机制。<src id="S8" />
+
+待上述条件确认后再确定，暂不推荐最终方式。`
+
+	got := CompactExplicitOneLineComparison(answer, query)
+	if len([]rune(got)) > 900 {
+		t.Fatalf("cross-comparison compaction still exceeds one-line response shape: %d\n%s", len([]rune(got)), got)
+	}
+	for _, expected := range []string{"询比：制度条件为", "竞价：制度条件为", "竞争谈判：制度条件为", "S2", "S5", "S6"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("cross-comparison compaction lost %q: %s", expected, got)
+		}
+	}
+	for _, removed := range []string{"核心特征", "优势在于", "此外"} {
+		if strings.Contains(got, removed) {
+			t.Fatalf("optional trailing comparison %q survived: %s", removed, got)
+		}
+	}
+	if twice := CompactExplicitOneLineComparison(got, query); twice != got {
+		t.Fatalf("cross-comparison compaction was not idempotent:\n%s", twice)
 	}
 }

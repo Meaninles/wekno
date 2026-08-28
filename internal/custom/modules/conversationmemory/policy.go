@@ -1156,13 +1156,8 @@ func CompactExplicitOneLineComparison(answer, originalQuery string) string {
 			}
 			continue
 		}
-		matched := make([]string, 0, 2)
-		for _, topic := range topics {
-			if strings.Contains(paragraph, topic) {
-				matched = append(matched, topic)
-			}
-		}
-		if len(matched) != 1 || !deferredCitationPattern.MatchString(paragraph) {
+		topic, matched := primaryComparisonParagraphTopic(paragraph, topics)
+		if !matched || !deferredCitationPattern.MatchString(paragraph) {
 			continue
 		}
 		score := 10
@@ -1172,9 +1167,9 @@ func CompactExplicitOneLineComparison(answer, originalQuery string) string {
 		if strings.Contains(paragraph, "是指") {
 			score += 2
 		}
-		if previous, exists := candidates[matched[0]]; !exists || score > previous.score ||
+		if previous, exists := candidates[topic]; !exists || score > previous.score ||
 			(score == previous.score && utf8.RuneCountInString(paragraph) > utf8.RuneCountInString(previous.paragraph)) {
-			candidates[matched[0]] = optionCandidate{paragraph: paragraph, score: score}
+			candidates[topic] = optionCandidate{paragraph: paragraph, score: score}
 		}
 	}
 	if confirmed == "" || unknown == "" {
@@ -1200,6 +1195,49 @@ func CompactExplicitOneLineComparison(answer, originalQuery string) string {
 		return value
 	}
 	return result
+}
+
+// primaryComparisonParagraphTopic assigns a generated paragraph to the option
+// it actually starts with. Models often add a trailing cross-option sentence
+// (for example, "A and B both require ...") after an otherwise valid option
+// paragraph. Counting every option name in the whole paragraph made the
+// one-line compactor fail open in that common shape. The leading clause remains
+// authoritative; ambiguous paragraphs still require a single topic overall.
+func primaryComparisonParagraphTopic(paragraph string, topics []string) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(paragraph, "\r\n", "\n"), "\n")
+	lead := ""
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lead = lifecycleHeadingProbe(line)
+			break
+		}
+	}
+	if lead != "" {
+		if end := strings.IndexAny(lead, "：:，,。；;（）() "); end >= 0 {
+			lead = strings.TrimSpace(lead[:end])
+		}
+		matches := make([]string, 0, 2)
+		for _, topic := range topics {
+			if strings.Contains(lead, topic) {
+				matches = append(matches, topic)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0], true
+		}
+	}
+
+	matches := make([]string, 0, 2)
+	for _, topic := range topics {
+		if strings.Contains(paragraph, topic) {
+			matches = append(matches, topic)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return "", false
 }
 
 func compactCitedConditionParagraph(paragraph, topic string) string {
@@ -1228,7 +1266,11 @@ func compactCitedConditionParagraph(paragraph, topic string) string {
 		_, width := utf8.DecodeRuneInString(body[colon:])
 		body = strings.TrimSpace(body[colon+width:])
 	}
-	for _, marker := range []string{"适用重点在于", "引用来源", "适用提示", "来源：", "来源:"} {
+	for _, marker := range []string{
+		"适用重点在于", "引用来源", "适用提示", "核心特征", "优势在于",
+		"此外，", "此外,", "另外，", "另外,", "相较于", "相比",
+		"来源：", "来源:",
+	} {
 		if index := strings.Index(body, marker); index >= 0 {
 			body = strings.TrimSpace(body[:index])
 		}
@@ -1240,7 +1282,7 @@ func compactCitedConditionParagraph(paragraph, topic string) string {
 	if body == "" {
 		return ""
 	}
-	body = compactConditionRunes(body, 220)
+	body = compactConditionRunes(body, 180)
 	uniqueCitations := make([]string, 0, len(citations))
 	seen := make(map[string]bool, len(citations))
 	for _, citation := range citations {
@@ -2100,6 +2142,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			if activeLineContainsRetiredAuditAnchor(line, retiredAnchors) {
 				continue
 			}
+			if isEpistemicStateInstructionLine(line) {
+				continue
+			}
 			line = removeUnsupportedSourceParentheticals(line, userStatements)
 			unresolvedClaim := containsAny(line, []string{"声称", "主张", "说法"}) &&
 				containsAny(line, []string{"未经核验", "尚未核验", "待核验", "未核验"})
@@ -2195,6 +2240,22 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	out = restoreExplicitRetiredScalarGroups(out, explicitRetiredGroups)
 	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
+}
+
+// isEpistemicStateInstructionLine identifies user instructions about how the
+// assistant must reason or report. Such instructions remain enforceable, but
+// they are not business facts and therefore must not be persisted in a
+// "current active facts" section during a full state audit.
+func isEpistemicStateInstructionLine(line string) bool {
+	probe := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
+	probe = strings.Trim(probe, "| *_`。；; ")
+	if containsAny(probe, []string{
+		"不推断", "不得推断", "不要推断", "不可推断", "不作推断",
+		"不得写成事实", "不要写成事实", "不可写成事实",
+	}) {
+		return true
+	}
+	return containsAny(probe, []string{"只确认这些事实", "仅确认这些事实", "只确认上述事实", "仅确认上述事实"})
 }
 
 func markdownTableShape(line string) (columns, meaningful int) {

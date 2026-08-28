@@ -70,6 +70,10 @@ var tableSequenceCellPattern = regexp.MustCompile(`^[0-9０-９]+$`)
 
 var orderedOrBulletListPrefixPattern = regexp.MustCompile(`^\s*(?:[-+*]\s+|[0-9０-９]+[.)、]\s*)`)
 
+var internalUserMessageLabelPattern = regexp.MustCompile(
+	`(?i)\b(?:earliest|earlier|latest|recent|current)_user_message_[0-9]+\b`,
+)
+
 var sourceAttributionParentheticalPattern = regexp.MustCompile(
 	`[（(]\s*来源\s*[：:]\s*([^（）()]+?)\s*[）)]`,
 )
@@ -1310,6 +1314,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	if value == "" || !IsStateAuditTurn(originalQuery) || !IsStateOnlyTurn(originalQuery) {
 		return value
 	}
+	// Archive record identifiers are prompt-internal provenance, not user-facing
+	// source names. Keep the attribution while removing the implementation label.
+	value = internalUserMessageLabelPattern.ReplaceAllString(value, "此前用户消息")
 	userStatements := make([]string, 0, len(priorUserStatements)+1)
 	for _, statement := range priorUserStatements {
 		for _, line := range strings.Split(strings.ReplaceAll(statement, "\r\n", "\n"), "\n") {
@@ -1324,6 +1331,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		"不选择采购方式", "不得选择采购方式", "不要选择采购方式",
 	})
 	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	retiredAnchors := retiredAuditScalarAnchors(lines)
 	out := make([]string, 0, len(lines))
 	section := ""
 	seenActionBoundaryKinds := make(map[string]bool)
@@ -1337,6 +1345,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			continue
 		}
 		if section == "active" {
+			if activeLineContainsRetiredAuditAnchor(line, retiredAnchors) {
+				continue
+			}
 			line = removeUnsupportedSourceParentheticals(line, userStatements)
 			unresolvedClaim := containsAny(line, []string{"声称", "主张", "说法"}) &&
 				containsAny(line, []string{"未经核验", "尚未核验", "待核验", "未核验"})
@@ -1424,8 +1435,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 // empty sentinels are not facts and therefore remain unchanged.
 func normalizeRetiredAuditLine(line string) string {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) ||
-		containsAny(trimmed, []string{"已废弃", "废弃", "已作废", "作废", "已失效", "失效"}) {
+	if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) {
 		return line
 	}
 
@@ -1440,6 +1450,24 @@ func normalizeRetiredAuditLine(line string) string {
 	if isTableRow && isRetiredAuditTableHeader(trimmed) {
 		return line
 	}
+	if isTableRow {
+		parts := strings.Split(line, "|")
+		factIndex := retiredAuditTableFactCellIndex(parts)
+		if factIndex < 0 || containsAny(parts[factIndex], []string{
+			"已废弃", "废弃", "已作废", "作废", "已失效", "失效",
+		}) {
+			return line
+		}
+		leftTrimmed := strings.TrimLeft(parts[factIndex], " \t")
+		leading := parts[factIndex][:len(parts[factIndex])-len(leftTrimmed)]
+		core := strings.TrimRight(leftTrimmed, " \t")
+		trailing := leftTrimmed[len(core):]
+		parts[factIndex] = leading + core + "（已废弃）" + trailing
+		return strings.Join(parts, "|")
+	}
+	if containsAny(trimmed, []string{"已废弃", "废弃", "已作废", "作废", "已失效", "失效"}) {
+		return line
+	}
 	isListRow := orderedOrBulletListPrefixPattern.MatchString(trimmed)
 	isFactLikeProse := stateAuditAnchorPattern.MatchString(trimmed) || containsAny(trimmed, []string{
 		"被取代", "被替代", "已替代", "推翻", "旧主张", "旧前提", "原主张", "原前提", "旧值", "原值", "初始",
@@ -1448,12 +1476,116 @@ func normalizeRetiredAuditLine(line string) string {
 		return line
 	}
 
-	leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-	if isTableRow && strings.HasSuffix(trimmed, "|") {
-		body := strings.TrimSpace(strings.TrimSuffix(trimmed, "|"))
-		return leading + strings.TrimRight(body, " \t") + "（已废弃） |"
-	}
 	return strings.TrimRight(line, " \t") + "（已废弃）"
+}
+
+func retiredAuditTableFactCellIndex(parts []string) int {
+	meaningful := make([]int, 0, len(parts))
+	for index, cell := range parts {
+		if strings.TrimSpace(cell) != "" {
+			meaningful = append(meaningful, index)
+		}
+	}
+	if len(meaningful) == 0 {
+		return -1
+	}
+	if tableSequenceCellPattern.MatchString(strings.TrimSpace(parts[meaningful[0]])) {
+		if len(meaningful) < 2 {
+			return -1
+		}
+		return meaningful[1]
+	}
+	return meaningful[0]
+}
+
+// retiredAuditScalarAnchors reads only fact cells/rows from the answer's own
+// retired section. Replacement-reason cells are excluded so a new active value
+// mentioned as the successor can never be mistaken for a retired value.
+func retiredAuditScalarAnchors(lines []string) map[string]bool {
+	anchors := make(map[string]bool)
+	section := ""
+	for _, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			section = key
+			continue
+		}
+		if section != "retired" {
+			continue
+		}
+		payload := retiredAuditFactPayload(line)
+		for _, anchor := range stateAuditAnchorPattern.FindAllString(payload, -1) {
+			anchors[anchor] = true
+		}
+	}
+	return anchors
+}
+
+func retiredAuditFactPayload(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) ||
+		isRetiredAuditTableHeader(trimmed) {
+		return ""
+	}
+	if !strings.Contains(trimmed, "|") {
+		if !orderedOrBulletListPrefixPattern.MatchString(trimmed) {
+			return ""
+		}
+		return trimRetiredReplacementReason(trimmed)
+	}
+
+	parts := strings.Split(line, "|")
+	meaningful := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			meaningful = append(meaningful, part)
+		}
+	}
+	if len(meaningful) == 0 {
+		return ""
+	}
+	start := 0
+	if tableSequenceCellPattern.MatchString(meaningful[0]) {
+		start = 1
+	}
+	if start >= len(meaningful) {
+		return ""
+	}
+	end := len(meaningful)
+	if end-start > 1 && containsAny(meaningful[end-1], []string{
+		"原因", "取代", "替代", "推翻", "调整为", "变更为",
+	}) {
+		end--
+	}
+	return trimRetiredReplacementReason(strings.Join(meaningful[start:end], " "))
+}
+
+func trimRetiredReplacementReason(value string) string {
+	end := len(value)
+	for _, marker := range []string{
+		"。由", "；由", ";由", "，由", ",由", "（由", "(由", "由当前", "由新",
+		"被当前", "被新", "。被", "；被", ";被", "，被", ",被", "（被", "(被",
+	} {
+		if index := strings.Index(value, marker); index >= 0 && index < end {
+			end = index
+		}
+	}
+	return strings.TrimSpace(value[:end])
+}
+
+func activeLineContainsRetiredAuditAnchor(line string, anchors map[string]bool) bool {
+	if len(anchors) == 0 || !containsAny(line, []string{
+		"初始", "旧预算", "旧日期", "旧值", "原预算", "原日期", "原值", "原定",
+		"此前", "先前", "当前",
+	}) {
+		return false
+	}
+	for anchor := range anchors {
+		if strings.Contains(line, anchor) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRetiredAuditTableHeader(line string) bool {
@@ -1469,9 +1601,10 @@ func isRetiredAuditTableHeader(line string) bool {
 		return false
 	}
 	headerCells := map[string]bool{
-		"序号": true, "项目": true, "事项": true, "字段": true, "事实": true, "事实项": true,
+		"序号": true, "编号": true, "项目": true, "事项": true, "字段": true, "事实": true, "事实项": true,
 		"已废弃事实": true, "原事实": true, "原值": true, "旧值": true, "初始值": true,
 		"内容": true, "说明": true, "状态": true, "原因": true, "废弃原因": true,
+		"废弃原因/替代": true, "废弃原因或替代": true, "原因/替代": true, "原因/替代事实": true,
 		"替代事实": true, "当前事实": true, "当前有效事实": true, "当前值": true,
 	}
 	for _, cell := range meaningful {

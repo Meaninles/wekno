@@ -567,8 +567,8 @@ func TestNormalizeStateAuditSectionsMarksEachRetiredFactExplicitly(t *testing.T)
 
 	got := NormalizeStateAuditSections(answer, query)
 	for _, expected := range []string{
-		"| 初始获批总预算 | 360万元 | 由当前有效事实中的390万元取代（已废弃） |",
-		"| 初始目标日期 | 2026年11月30日 | 由当前有效日期取代（已废弃） |",
+		"| 初始获批总预算（已废弃） | 360万元 | 由当前有效事实中的390万元取代 |",
+		"| 初始目标日期（已废弃） | 2026年11月30日 | 由当前有效日期取代 |",
 		"- 初始设备预算：280万元（已废弃）",
 		"- 初始实施服务预算：80万元（已废弃）",
 	} {
@@ -582,6 +582,71 @@ func TestNormalizeStateAuditSectionsMarksEachRetiredFactExplicitly(t *testing.T)
 	}
 	if twice := NormalizeStateAuditSections(got, query); twice != got {
 		t.Fatalf("retired lifecycle normalization is not idempotent:\nfirst: %s\nsecond: %s", got, twice)
+	}
+}
+
+func TestNormalizeRetiredAuditLinePreservesNumberedTableSchema(t *testing.T) {
+	header := "| 编号 | 已废弃事实 | 废弃原因/替代 |"
+	if got := normalizeRetiredAuditLine(header); got != header {
+		t.Fatalf("numbered retired table header was modified: %s", got)
+	}
+	row := "| 1 | 初始目标日期为2026年11月30日 | 被当前日期取代 |"
+	want := "| 1 | 初始目标日期为2026年11月30日（已废弃） | 被当前日期取代 |"
+	if got := normalizeRetiredAuditLine(row); got != want {
+		t.Fatalf("numbered retired fact cell was not marked: %s", got)
+	}
+}
+
+func TestNormalizeStateAuditSectionsRemovesRetiredScalarsFromActiveFacts(t *testing.T) {
+	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	answer := `### 当前有效事实
+- 初始获批总预算：360万元（其中设备280万元、实施服务80万元）
+- 当前总预算：390万元（其中设备300万元、实施服务90万元）
+- 初始目标日期：2026年11月30日
+- 当前目标日期：2027年1月31日
+
+### 已废弃事实
+- 初始获批总预算：360万元（其中设备280万元、实施服务80万元）。由当前预算390万元取代。
+- 初始目标日期：2026年11月30日。由当前日期2027年1月31日取代。
+
+### 待确认事实
+- 用户身份未提供
+
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	for _, stale := range []string{"360万元", "280万元", "80万元", "2026年11月30日"} {
+		if strings.Contains(active, stale) {
+			t.Fatalf("retired scalar %q survived in active facts: %s", stale, got)
+		}
+	}
+	for _, current := range []string{"390万元", "300万元", "90万元", "2027年1月31日"} {
+		if !strings.Contains(active, current) {
+			t.Fatalf("current scalar %q was removed with the retired facts: %s", current, got)
+		}
+	}
+}
+
+func TestNormalizeStateAuditSectionsHidesInternalArchiveRecordLabels(t *testing.T) {
+	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	answer := `### 当前有效事实
+- 法务和技术核验后确认A并非不可替代
+- 来源说明：项目代号来自 earliest_user_message_01，负责人来自 earlier_user_message_11
+### 已废弃事实
+- A供应商只能由它实施的旧主张已废弃
+### 待确认事实
+- 用户身份未提供
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query)
+	if strings.Contains(got, "user_message_") || strings.Count(got, "此前用户消息") != 2 {
+		t.Fatalf("internal archive labels leaked into the audit answer: %s", got)
+	}
+	if !strings.Contains(got, "A并非不可替代") {
+		t.Fatalf("valid resolved active fact was lost: %s", got)
 	}
 }
 

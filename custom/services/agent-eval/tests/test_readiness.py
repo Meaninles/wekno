@@ -444,6 +444,24 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(report["planned_session_count"], 36)
         self.assertTrue(all(check["passed"] for check in report["checks"]))
 
+    def test_experiment_preflight_uses_the_same_frozen_dev_matrix(self) -> None:
+        with patch.dict(os.environ, self.env(), clear=False):
+            report = evaluate_readiness(
+                dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
+                manifest_path=ROOT
+                / "manifests"
+                / "multiturn-optimization-dev-experiment.v1.manifest.json",
+                profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
+                policy_path=ROOT / "policies" / "multiturn-experiment-gate.v1.json",
+                calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
+                split=Split.DEV,
+                sut=eval_sut(),
+            )
+        self.assertEqual(report["status"], "READY")
+        self.assertEqual(report["case_count"], 12)
+        self.assertEqual(report["planned_session_count"], 36)
+        self.assertTrue(all(check["passed"] for check in report["checks"]))
+
     def test_v3_preflight_fails_before_execution_when_judge_is_unconfigured(self) -> None:
         env = self.env()
         env.update(

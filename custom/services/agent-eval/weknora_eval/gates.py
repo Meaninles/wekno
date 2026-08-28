@@ -42,13 +42,16 @@ def _selected_specs(dataset: list[CaseSpec], policy: GatePolicy) -> list[CaseSpe
     return [case for case in dataset if case.enabled and case.split in required]
 
 
-def _metric_rates(cases: Iterable[CaseRun]) -> dict[str, float]:
-    values: dict[str, list[bool]] = defaultdict(list)
-    for case in cases:
-        for score in case.scores:
-            if score.passed is not None:
-                values[score.name].append(score.passed)
-    return {name: sum(items) / len(items) for name, items in values.items() if items}
+def _metric_rate_for_prefix(cases: Iterable[CaseRun], prefix: str) -> float | None:
+    values = [
+        score.passed
+        for case in cases
+        for score in case.scores
+        if score.passed is not None and _matches_prefix(score.name, [prefix])
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _run_key(case: CaseRun) -> tuple[str, int]:
@@ -700,21 +703,52 @@ def evaluate_gate(
                 )
             )
 
-            candidate_rates = _metric_rates(candidate_by_key.values())
-            baseline_rates = _metric_rates(baseline_by_key.values())
+            baseline_case_rates = _case_pass_rates(baseline_by_key)
+            candidate_case_rates = _case_pass_rates(candidate_by_key)
+            improved_cases = {
+                case_id: {
+                    "baseline": baseline_rate,
+                    "candidate": candidate_case_rates.get(case_id, 0.0),
+                }
+                for case_id, baseline_rate in sorted(baseline_case_rates.items())
+                if candidate_case_rates.get(case_id, 0.0) > baseline_rate
+            }
+            if policy.min_improved_case_count:
+                improvement_ok = (
+                    len(improved_cases) >= policy.min_improved_case_count
+                )
+                checks.append(
+                    _check(
+                        "minimum_case_improvement",
+                        Verdict.PASS if improvement_ok else Verdict.FAIL,
+                        "candidate improves enough case-level repetition rates"
+                        if improvement_ok
+                        else "candidate has no sufficient case-level improvement",
+                        minimum=policy.min_improved_case_count,
+                        count=len(improved_cases),
+                        cases=improved_cases,
+                    )
+                )
+
             metric_regressions: dict[str, dict[str, float]] = {}
             for metric, tolerance in policy.max_metric_rate_regression.items():
-                if metric not in baseline_rates or metric not in candidate_rates:
+                baseline_rate = _metric_rate_for_prefix(
+                    baseline_by_key.values(), metric
+                )
+                candidate_rate = _metric_rate_for_prefix(
+                    candidate_by_key.values(), metric
+                )
+                if baseline_rate is None or candidate_rate is None:
                     metric_regressions[metric] = {
-                        "baseline": baseline_rates.get(metric, -1.0),
-                        "candidate": candidate_rates.get(metric, -1.0),
+                        "baseline": baseline_rate if baseline_rate is not None else -1.0,
+                        "candidate": candidate_rate if candidate_rate is not None else -1.0,
                         "tolerance": tolerance,
                     }
                     continue
-                if candidate_rates[metric] + tolerance < baseline_rates[metric]:
+                if candidate_rate + tolerance < baseline_rate:
                     metric_regressions[metric] = {
-                        "baseline": baseline_rates[metric],
-                        "candidate": candidate_rates[metric],
+                        "baseline": baseline_rate,
+                        "candidate": candidate_rate,
                         "tolerance": tolerance,
                     }
             checks.append(

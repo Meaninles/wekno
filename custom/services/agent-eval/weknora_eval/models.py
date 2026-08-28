@@ -371,6 +371,7 @@ class GatePolicy(StrictModel):
     forbid_pass_to_fail_regressions: bool = True
     pair_repetitions_by_attempt: bool = True
     min_pass_rate_per_case: float = Field(default=1.0, ge=0, le=1)
+    min_improved_case_count: int = Field(default=0, ge=0)
     max_case_pass_rate_regression: float = Field(default=0.0, ge=0, le=1)
     critical_metric_prefixes: list[str] = Field(default_factory=list)
     require_judge: bool = False
@@ -387,6 +388,12 @@ class GatePolicy(StrictModel):
     max_p95_latency_ms_by_agent: dict[str, int] = Field(default_factory=dict)
     max_latency_ms_by_agent: dict[str, int] = Field(default_factory=dict)
     require_baseline: bool = True
+
+    @model_validator(mode="after")
+    def improvement_requires_baseline(self) -> "GatePolicy":
+        if self.min_improved_case_count and not self.require_baseline:
+            raise ValueError("min_improved_case_count requires a paired baseline")
+        return self
 
 
 class GateCheck(StrictModel):

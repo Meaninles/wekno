@@ -142,7 +142,7 @@ Pop-Location
 
 正式执行默认使用 `datasets/multiturn-ready.v3.jsonl`。它保留 v2 的全部问题、case ID、split 和重复次数，只修订评分契约：接受已经人工确认的低风险等价表达，区分“明确标注已废弃”与真正的状态复活，并新增真实测试中出现的内部规划泄漏和 D 供应商陈旧状态回归检测。GATE 仍覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；冻结身份见 `manifests/multiturn-ready.v3.manifest.json`。
 
-智能体改动前的稳定性基线使用 `datasets/multiturn-optimization-dev.v1.jsonl`。它完整复制 v3 中 12 个已审核 DEV case 的问题和契约，不读取、不改写也不派生 GATE/SEALED 文案；只把每个 case 提升到 3 个独立 session，共 36 个 session execution。`policies/multiturn-optimization-gate.v1.json` 要求目标 DEV case 达到 3/3，而发布 GATE 仍保留自己的抗随机门槛。优化集必须在任何智能体改动前冻结，后续不得为了候选答案改变 scorer、Judge、contract 或通过阈值。
+智能体改动前的稳定性基线使用 `datasets/multiturn-optimization-dev.v1.jsonl`。它完整复制 v3 中 12 个已审核 DEV case 的问题和契约，不读取、不改写也不派生 GATE/SEALED 文案；只把每个 case 提升到 3 个独立 session，共 36 个 session execution。同一数据集绑定两级门禁：`policies/multiturn-experiment-gate.v1.json` 用于单变量实验，要求至少一个 case 的重复通过率严格提升且 case、指标族和延迟都不回退；`policies/multiturn-optimization-gate.v1.json` 用于 DEV 晋级，要求全部目标 case 达到 3/3。发布 GATE 仍保留独立的 2/3 抗随机门槛。优化集必须在任何智能体改动前冻结，后续不得为了候选答案改变 scorer、Judge、contract 或通过阈值。
 
 sealed holdout 不进入 Git：本机文件为 `sealed/multiturn-holdout.v1.jsonl`，只提交哈希、数量和 split 信息到 `manifests/multiturn-holdout.v1.manifest.json`。普通开发、DEV 和 GATE 都不会挂载其内容到优化输入；只有 Codex 在低频里程碑验收时显式使用 `-AllowSealed`。这不是把某次模型回答藏起来当标准答案，holdout 仍使用可接受答案契约，只把未见业务事实和问题组合隔离出来。
 
@@ -199,9 +199,9 @@ custom/services/agent-eval/prepare-runner-env.ps1
 
 1. 数据集 hash、case/capability 覆盖与 baseline 完整性；缺失或执行故障为 `INVALID`。
 2. 校准 Judge 覆盖率与置信度；缺失、低置信度或无效裁决为 `INVALID`。
-3. 关键约束与每个 case 的三次独立 session 通过率；低于绝对阈值为 `FAIL`。
-4. 按 case 聚合后的 baseline → candidate 通过率回归，而不是把随机的 attempt-1/2/3 强行一一配对。
-5. 指定指标通过率、按智能体的 P95/最大绝对延迟和按智能体的相对延迟回归预算。
+3. 关键约束与每个 case 的三次独立 session 通过率；低于当前阶段的绝对阈值为 `FAIL`。
+4. 按 case 聚合后的 baseline → candidate 通过率回归，而不是把随机的 attempt-1/2/3 强行一一配对；实验阶段还要求至少一个 case 严格改善，原样重跑不能伪装成收益。
+5. 指定指标族通过率、按智能体的 P95/最大绝对延迟和按智能体的相对延迟回归预算。指标族按前缀聚合，例如 `state.unknown` 覆盖所有具体未知项。
 6. 任一 `INVALID` 优先得到整体 `INVALID`，不能把“没测成”伪装成质量下降或通过。
 
 业务运行始终 fail-open；发布 gate 始终 fail-closed。这两个失败域完全分开。
@@ -256,7 +256,37 @@ custom/services/agent-eval/eval-loop.ps1 `
   -MaxConcurrency 1
 ```
 
-标准循环是：观察失败簇 → 只在 `dev` 上提出一个可解释改动 → 固定 SUT、模型、语料和配置指纹运行 → 与同数据集 baseline 配对比较 → 通过 `gate` 才保留 → 周期性由 Codex 单独运行 sealed holdout。连续两轮无实质增益、只改善已知措辞、judge 与人工分歧升高或 holdout 退化时立即停止调优并回滚候选，防止无限拟合与过拟合。
+正式修改智能体时使用四级循环，不能跳级：
+
+1. 聚焦诊断：只选一个失败簇和一个可解释变量，以 `-CaseId` 无 baseline 运行；结果只用于定位，不产生门禁结论。
+2. 全量 DEV 实验门禁：恢复 12 case × 3 session 的完整矩阵，与当前 champion 配对；必须至少改善一个 case，任何 case 通过率、受保护指标族或 P95 延迟回退都会失败。通过后该 judged artifact 才能成为下一轮 champion。
+3. DEV 晋级门禁：使用 `multiturn-optimization-gate.v1.json` 全量复测，全部 case 必须 3/3，才允许进入未参与调优的 GATE。
+4. 发布与泛化：GATE 要求每 case 至少 2/3 且零关键失败；sealed holdout 只由 Codex 在低频里程碑显式运行，内容不进入日常调优上下文。
+
+聚焦诊断示例：
+
+```powershell
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split dev `
+  -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
+  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1.manifest.json `
+  -Policy /workspace/policies/multiturn-experiment-gate.v1.json `
+  -CaseId <case-id> `
+  -Judge
+```
+
+全量单变量实验门禁示例：
+
+```powershell
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split dev `
+  -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
+  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1.manifest.json `
+  -Policy /workspace/policies/multiturn-experiment-gate.v1.json `
+  -Baseline /workspace/artifacts/baseline-pre-agent-change-dev-experiment.v1.json
+```
+
+标准循环是：观察失败簇 → 只提出一个改动 → 聚焦验证机制是否命中 → 全量 DEV 与 champion 比较 → 通过实验门禁才保留 → 达到 3/3 后晋级 GATE → 低频 sealed holdout。连续两轮没有 case 级实质增益、只改善已知措辞、Judge 与确定性指标分歧升高或 holdout 退化时立即停止并回滚候选，防止无限拟合与过拟合。固定的 pre-agent baseline 永不覆盖；champion 只保存“从哪个已通过 artifact 晋级”的链条。
 
 正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID、profile set 哈希、eval 目录自身的 Git tree identity/dirty 状态、scorer 哈希、Judge 模型、校准集哈希和 Judge prompt 哈希。SUT 单独记录源代码 commit、整个工作树 dirty 状态、实际运行的 Go runtime 镜像 ID 和 general-agent 镜像 ID。门禁要求 evaluator 在 baseline/candidate 之间完全一致且两侧 SUT 都来自干净提交，但允许候选 SUT commit 和镜像与 baseline 不同——这正是智能体改动需要比较的变量。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
 
@@ -292,6 +322,7 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 - `eval-loop.ps1`：preflight、实时 Judge 校准、baseline 重算/裁决、run、gate、report。
 - `weknora_eval/`：数据集、校准、readiness、runner、确定性评分、三态门禁和 Langfuse experiment 适配器。
 - `policies/multiturn-release-gate.v2.json`：三智能体多轮 GATE 门禁策略。
+- `policies/multiturn-experiment-gate.v1.json`：单变量候选至少改善一个 case、同时禁止 case/指标族/延迟回退的 DEV 实验门禁。
 - `policies/multiturn-optimization-gate.v1.json`：智能体改动前冻结、目标 case 必须 3/3 的 DEV 优化门禁。
 - `policies/multiturn-sealed-gate.v1.json`：低频 sealed holdout 门禁策略。
 - `datasets/examples.v1.jsonl`：RAG、文档处理和长对话契约示例。

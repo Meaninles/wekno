@@ -9,6 +9,7 @@ from weknora_eval.models import (
     Capability,
     CaseRun,
     CaseSpec,
+    ConversationStateContract,
     ExperimentRun,
     GatePolicy,
     MetricScore,
@@ -444,6 +445,113 @@ class GateTests(unittest.TestCase):
         )
         result = evaluate_gate(dataset, candidate, policy, baseline)
         self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_experiment_gate_requires_a_real_case_rate_improvement(self) -> None:
+        policy = self.policy.model_copy(
+            update={
+                "forbid_hard_failures": False,
+                "pair_repetitions_by_attempt": False,
+                "min_pass_rate_per_case": 0.0,
+                "min_improved_case_count": 1,
+            }
+        )
+
+        unchanged = evaluate_gate(
+            [spec()],
+            run("candidate", case(Verdict.FAIL)),
+            policy,
+            run("baseline", case(Verdict.FAIL)),
+        )
+        self.assertEqual(unchanged.verdict, Verdict.FAIL)
+        unchanged_check = next(
+            check for check in unchanged.checks
+            if check.name == "minimum_case_improvement"
+        )
+        self.assertEqual(unchanged_check.verdict, Verdict.FAIL)
+
+        improved = evaluate_gate(
+            [spec()],
+            run("candidate", case(Verdict.PASS)),
+            policy,
+            run("baseline", case(Verdict.FAIL)),
+        )
+        self.assertEqual(improved.verdict, Verdict.PASS)
+        improved_check = next(
+            check for check in improved.checks
+            if check.name == "minimum_case_improvement"
+        )
+        self.assertEqual(improved_check.details["count"], 1)
+
+    def test_metric_non_regression_matches_a_metric_family_prefix(self) -> None:
+        state_spec = spec().model_copy(
+            update={
+                "turns": [
+                    TurnSpec(
+                        turn_id="turn",
+                        query="Which state is still unknown?",
+                        contract=TurnContract(
+                            conversation_state=ConversationStateContract(
+                                unknown_facts=[
+                                    TextRule(
+                                        rule_id="owner",
+                                        any_of=["owner unknown"],
+                                    )
+                                ]
+                            )
+                        ),
+                    )
+                ]
+            }
+        )
+
+        def state_case(content: str, verdict: Verdict) -> CaseRun:
+            return CaseRun(
+                case_id="gate-case",
+                family_id="family",
+                split=Split.GATE,
+                verdict=verdict,
+                turns=[
+                    ObservedTurn(
+                        turn_id="turn",
+                        session_id="s",
+                        content=content,
+                        is_completed=True,
+                        total_latency_ms=100,
+                    )
+                ],
+            )
+
+        policy = self.policy.model_copy(
+            update={
+                "forbid_hard_failures": False,
+                "forbid_pass_to_fail_regressions": False,
+                "min_pass_rate_per_case": 0.0,
+                "max_metric_rate_regression": {"state.unknown": 0.0},
+            }
+        )
+        baseline = run_for(
+            [state_spec], "baseline", [state_case("owner unknown", Verdict.PASS)]
+        )
+
+        unchanged = evaluate_gate([state_spec], baseline, policy, baseline)
+        metric_check = next(
+            check for check in unchanged.checks if check.name == "metric_non_regression"
+        )
+        self.assertEqual(metric_check.verdict, Verdict.PASS)
+
+        regressed = evaluate_gate(
+            [state_spec],
+            run_for(
+                [state_spec], "candidate", [state_case("not provided", Verdict.FAIL)]
+            ),
+            policy,
+            baseline,
+        )
+        metric_check = next(
+            check for check in regressed.checks if check.name == "metric_non_regression"
+        )
+        self.assertEqual(metric_check.verdict, Verdict.FAIL)
+        self.assertIn("state.unknown", metric_check.details["regressions"])
 
     def test_absolute_latency_budget_is_per_agent(self) -> None:
         dataset = [spec(profile_id="quick-answer")]

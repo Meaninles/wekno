@@ -80,7 +80,7 @@ var internalUserMessageLabelPattern = regexp.MustCompile(
 )
 
 var internalConversationLocatorPattern = regexp.MustCompile(
-	`(?i)(?:[，,、]\s*)?(?:historical|历史消息\s*[0-9０-９]+(?:\s*[、,，]\s*[0-9０-９]+)*|对话轮次\s*[0-9０-９]+(?:\s*[、,，]\s*[0-9０-９]+)*)`,
+	`(?i)(?:[，,、]\s*)?(?:historical|历史消息\s*[0-9０-９]+(?:\s*[、,，]\s*[0-9０-９]+)*|对话轮次\s*[0-9０-９]+(?:\s*[、,，]\s*[0-9０-９]+)*|用户\s*首次\s*(?:声明|说明|确认|记录)|(?:用户\s*)?第\s*[0-9０-９零〇一二三四五六七八九十百千万两]+\s*轮(?:\s*(?:消息|声明|说明|确认|记录|回答))?)`,
 )
 
 var emptyParentheticalPattern = regexp.MustCompile(`（\s*）|\(\s*\)`)
@@ -1679,6 +1679,10 @@ func restoreExplicitRetiredScalarDeltaMarkers(answer, query string) string {
 
 func answerHasTrailingRetiredMarker(answer, anchor string) bool {
 	for _, line := range strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n") {
+		// Expand compact shared-unit notation for matching only. This lets an
+		// anchor such as 160万元 be found in "160/50万元" without rewriting the
+		// user's visible wording.
+		line = expandSharedScalarUnits(line)
 		for start := 0; start < len(line); {
 			index := strings.Index(line[start:], anchor)
 			if index < 0 {
@@ -1686,6 +1690,12 @@ func answerHasTrailingRetiredMarker(answer, anchor string) bool {
 			}
 			index += start
 			tail := line[index+len(anchor):]
+			// A lifecycle marker after another scalar belongs to the compact
+			// group or the later scalar, not necessarily to this anchor. Limit
+			// the binding scope so every earlier scalar must be marked itself.
+			if next := stateAuditAnchorPattern.FindStringIndex(tail); next != nil {
+				tail = tail[:next[0]]
+			}
 			if containsAny(tail, []string{"已废弃", "废弃", "已作废", "作废", "已失效", "失效"}) {
 				return true
 			}
@@ -2784,7 +2794,8 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			}
 			selectionScopeLine := containsAny(line, []string{
 				"不选择采购方式", "不得选择采购方式", "不要选择采购方式", "禁止选择采购方式",
-			})
+			}) || (strings.Contains(line, "选择") && strings.Contains(line, "采购方式") &&
+				containsAny(line, []string{"不得", "不要", "不可", "不能", "不应", "禁止"}))
 			if stripProcurementSelectionScope && selectionScopeLine &&
 				len(operationBoundaryKinds(line)) == 0 {
 				continue
@@ -3458,15 +3469,18 @@ func restoreExplicitRetiredScalarFacts(lines []string, facts []explicitRetiredSc
 			retiredText += "\n" + payload
 		}
 	}
+	normalizedRetiredText := normalizeStateDeltaText(retiredText)
 	seenFragments := make(map[string]bool)
 	for _, fact := range facts {
-		if strings.Contains(retiredText, fact.anchor) || seenFragments[fact.fragment] {
+		if strings.Contains(normalizedRetiredText, normalizeStateDeltaText(fact.anchor)) ||
+			seenFragments[fact.fragment] {
 			continue
 		}
 		line := "- " + fact.fragment + "（已废弃）"
 		lines = insertString(lines, retiredEnd, line)
 		retiredEnd++
 		retiredText += "\n" + fact.fragment
+		normalizedRetiredText = normalizeStateDeltaText(retiredText)
 		seenFragments[fact.fragment] = true
 	}
 	return lines
@@ -3500,9 +3514,10 @@ func restoreExplicitRetiredScalarGroups(lines []string, groups [][]string) []str
 			if payload == "" || !containsAny(payload, []string{"废弃", "作废", "失效"}) {
 				continue
 			}
+			normalizedPayload := normalizeStateDeltaText(payload)
 			allPresent := true
 			for _, anchor := range group {
-				if !strings.Contains(payload, anchor) {
+				if !strings.Contains(normalizedPayload, normalizeStateDeltaText(anchor)) {
 					allPresent = false
 					break
 				}
@@ -3651,10 +3666,11 @@ func restoreExplicitActiveScalarFacts(lines []string, facts []explicitActiveScal
 	}
 
 	activeText := strings.Join(lines[activeStart:activeEnd], "\n")
+	normalizedActiveText := normalizeStateDeltaText(activeText)
 	for _, fact := range facts {
 		covered := true
 		for _, anchor := range fact.anchors {
-			if !strings.Contains(activeText, anchor) {
+			if !strings.Contains(normalizedActiveText, normalizeStateDeltaText(anchor)) {
 				covered = false
 				break
 			}
@@ -3666,6 +3682,7 @@ func restoreExplicitActiveScalarFacts(lines []string, facts []explicitActiveScal
 		lines = insertString(lines, activeEnd, line)
 		activeEnd++
 		activeText += "\n" + line
+		normalizedActiveText = normalizeStateDeltaText(activeText)
 	}
 	return lines
 }

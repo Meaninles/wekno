@@ -455,6 +455,21 @@ func TestNormalizeStateDeltaScopeMarksEachCompactRetiredScalar(t *testing.T) {
 	}
 }
 
+func TestNormalizeStateDeltaScopeDoesNotBorrowRetiredMarkerAcrossScalars(t *testing.T) {
+	query := "财务批复把预算改为235万元，其中设备175万元、平台服务60万元；210万元和160/50构成废弃。"
+	answer := "- 批复后预算：235万元\n- 设备预算：175万元\n- 平台服务预算：60万元\n- 废弃预算：原210万元及对应的160/50万元构成废弃"
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, retired := range []string{"210万元（已废弃）", "160万元（已废弃）"} {
+		if !strings.Contains(got, retired) {
+			t.Fatalf("group-level suffix was incorrectly borrowed by %q: %s", retired, got)
+		}
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("scalar binding repair was not idempotent:\n%s", twice)
+	}
+}
+
 func TestNormalizeExplicitActionBoundariesRepairsObservedProcurementTable(t *testing.T) {
 	query := "建立项目台账。未经我明确授权，不得创建或修改文件，也不得发起采购；只在对话里维护。"
 	answer := `| 项目 | 当前边界 |
@@ -2465,6 +2480,66 @@ func TestNormalizeStateAuditSectionsRebuildsAtomicUnknownsAndSources(t *testing.
 	}
 	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
 		t.Fatalf("atomic audit normalization was not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段；不重新检索，也不选择采购方式。"
+	prior := []string{
+		"项目代号是寒星冷链温控改造，目标是降低仓储温差。未经授权不得创建或修改文件，也不得发起采购。",
+		"初始预算是210万元，其中设备160万元、平台服务50万元。",
+		"财务批复把预算改为235万元，其中设备175万元、平台服务60万元；210万元和160/50构成废弃。",
+		"项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。",
+		"初始验收日期记为2027年3月31日。",
+		"验收日期调整为2027年5月15日，2027年3月31日从现在起废弃。",
+		"已确认范围包含温度传感器和监控平台；是否包含仓库布线施工仍待确认。",
+		"D供应商声称现有网关只能由它兼容。该说法只是供应商主张，尚未核验，不得写成排他事实。",
+		"技术组完成核验：D并非不可替代，E、F经适配也能兼容；废弃‘只能D’的前提。",
+		"法务确认采购信息可以公开；立项审批状态仍待确认。",
+	}
+	answer := `## 当前有效事实
+- 项目代号：寒星冷链温控改造（用户首次声明）
+- 预算：总预算 235 万元，其中设备 175 万元、平台服务 60 万元（用户第 2 轮声明）
+- D兼容性核验：D并非不可替代，E、F经适配也能兼容（技术组完成核验，用户第8轮声明）（来源：技术组）
+## 已废弃事实
+- 原预算（用户第1轮）：总预算 210 万元，设备 160 万元、平台服务 50 万元——被第2轮财务批复取代（已废弃）
+- 原验收日期：2027 年 3 月 31 日——被第5轮调整取代（已废弃）
+- D供应商“只能由它兼容”的主张——被技术组核验推翻（已废弃）
+## 待确认事项
+- 当前对话用户身份未提供
+- 是否包含仓库布线施工待确认
+- 立项审批状态待确认
+## 行动边界
+- 仅在对话内维护，未经授权不得创建或修改文件
+- 未经授权不得发起采购
+- 不得因第9轮回答的金额门槛直接选择采购方式`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	for _, internal := range []string{"用户首次声明", "用户第", "第1轮", "第2轮", "第5轮", "第8轮", "第9轮"} {
+		if strings.Contains(got, internal) {
+			t.Fatalf("turn provenance %q survived: %s", internal, got)
+		}
+	}
+	active := strings.Split(strings.Split(got, "## 当前有效事实")[1], "## 已废弃事实")[0]
+	for _, scalar := range []string{"235", "175", "60"} {
+		if strings.Count(active, scalar) != 1 {
+			t.Fatalf("spaced active scalar %q was duplicated: %s", scalar, got)
+		}
+	}
+	retired := strings.Split(strings.Split(got, "## 已废弃事实")[1], "## 待确认事项")[0]
+	for _, scalar := range []string{"210", "160", "50"} {
+		if strings.Count(retired, scalar) != 1 {
+			t.Fatalf("spaced retired scalar %q was duplicated: %s", scalar, got)
+		}
+	}
+	if strings.Contains(got, "选择采购方式") {
+		t.Fatalf("transient procurement-selection instruction survived: %s", got)
+	}
+	if !strings.Contains(got, "来源：技术组") || !strings.Contains(got, "未经授权不得发起采购") {
+		t.Fatalf("business source or operation boundary was lost: %s", got)
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("audit cleanup was not idempotent:\n%s", twice)
 	}
 }
 

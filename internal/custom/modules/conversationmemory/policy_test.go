@@ -1340,6 +1340,12 @@ Now I'll write the complete replacement answer.
 	if got := StripInternalPlanningPreamble(observedChineseRepair); got != "依法必须招标的重要设备、材料等货物达到200万元（含）以上。<src id=\"S1\" />" {
 		t.Fatalf("Chinese retrieval/repair narration survived: %q", got)
 	}
+	observedChineseRetrieval := `我的检索已返回足够证据。以下直接回答问题：
+
+中标候选人公示期应不少于3日。<src id="S1" />`
+	if got := StripInternalPlanningPreamble(observedChineseRetrieval); got != `中标候选人公示期应不少于3日。<src id="S1" />` {
+		t.Fatalf("Chinese retrieval preamble survived: %q", got)
+	}
 	observedContractLeak := `好的，理解您的需求。本轮依据 runtime_response_contract 的指令，仅记录状态。
 
 ---

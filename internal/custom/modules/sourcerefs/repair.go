@@ -162,7 +162,8 @@ func repairTopicsForParagraph(paragraph string, topics []string) []string {
 }
 
 // EnsureNamedTopicDefinitions restores a definition explicitly requested for
-// every named comparison option when the generated option paragraph omitted it.
+// every named comparison option when the generated option paragraph omitted it
+// or the model omitted that option's paragraph entirely.
 // The inserted sentence is copied verbatim from a unique current-turn evidence
 // fragment and carries that fragment's immutable citation handle. No domain
 // wording, inferred fact, or model call is introduced.
@@ -211,6 +212,21 @@ func EnsureNamedTopicDefinitions(
 		}
 		paragraphs[index] = item.text + canonicalCitationTag(item.id) + " " + strings.TrimSpace(paragraph)
 		delete(missing, matched[0])
+		changed = true
+	}
+	// A model can retrieve every requested option and still stop after writing
+	// only the first one or two paragraphs.  There is no paragraph into which
+	// the loop above can insert the missing definition, so append one compact,
+	// extractive paragraph per remaining explicit topic in the user's order.
+	// Each sentence still comes verbatim from current-turn evidence and carries
+	// its immutable handle; topics without such evidence remain untouched.
+	for _, topic := range topics {
+		item, exists := missing[topic]
+		if !exists {
+			continue
+		}
+		paragraphs = append(paragraphs, item.text+canonicalCitationTag(item.id))
+		delete(missing, topic)
 		changed = true
 	}
 	if !changed {

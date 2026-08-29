@@ -323,6 +323,29 @@ func TestEnsureNamedTopicDefinitionsCopiesOnlyCurrentEvidence(t *testing.T) {
 	}
 }
 
+func TestEnsureNamedTopicDefinitionsAppendsEntirelyMissingOption(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "inquiry", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "第三十五条 询比采购，是指在采购需求确定的条件下依照既定规则一次性报出不可更改价格，经评审确定供应商的采购方式。",
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "inquiry", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "negotiation", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "第三十七条 竞争谈判是指采购人与二家以上符合资格条件的供应商洽谈确定供应商的采购方式。",
+			Metadata:        map[string]string{MetadataCitationID: "S6", MetadataChunkID: "negotiation", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "询比采购是指在采购需求确定后一次性报价的采购方式。<src id=\"S2\" />"
+	got := EnsureNamedTopicDefinitions(answer, []string{"询比采购", "竞争谈判"}, refs)
+	if !strings.Contains(got, "竞争谈判是指采购人与二家以上") || !strings.Contains(got, `<src id="S6" />`) {
+		t.Fatalf("entirely missing option was not restored from current evidence: %s", got)
+	}
+	if twice := EnsureNamedTopicDefinitions(got, []string{"询比采购", "竞争谈判"}, refs); twice != got {
+		t.Fatalf("missing-option restoration was not idempotent: %s", twice)
+	}
+}
+
 func TestRecoverOffTopicNarrowEvidenceAnswerUsesEveryCurrentTopic(t *testing.T) {
 	refs := []*types.SearchResult{
 		{

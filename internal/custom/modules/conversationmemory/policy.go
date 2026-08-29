@@ -4076,7 +4076,7 @@ func StripInternalPlanningPreamble(answer string) string {
 		})
 		knownPlanning = knownPlanning || (containsAny(probe, []string{"证据", "检索"}) &&
 			containsAny(probe, []string{
-				"现在来回答", "现直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据", "已获取全部",
+				"现在来回答", "现直接回答", "以下直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据", "已获取全部",
 				"现在我有完整的证据", "有完整的证据来回答", "已在前面的chunk中获取",
 			}))
 		knownPlanning = knownPlanning || strings.Contains(probe, "runtime_response_contract") ||
@@ -4141,7 +4141,7 @@ func stripStandaloneInternalPlanningParagraphs(value string) string {
 			containsAny(probe, []string{"chunk_", "</think>", "let's retrieve", "let’s retrieve"}) &&
 			containsAny(probe, []string{"检索", "retrieve", "verify", "证据", "evidence"}))
 		planning = planning || (!quotedOrCode && containsAny(probe, []string{"证据", "检索"}) &&
-			containsAny(probe, []string{"现在来回答", "现直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据"}))
+			containsAny(probe, []string{"现在来回答", "现直接回答", "以下直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据"}))
 		if planning {
 			removed = true
 			continue

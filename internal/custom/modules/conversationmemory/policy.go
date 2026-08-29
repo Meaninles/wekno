@@ -1540,6 +1540,10 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 		if trimmed == "" {
 			continue
 		}
+		if transientStateDeltaScopeEcho(trimmed) ||
+			(hasExplicitUnknownState(query) && danglingGenericUnknownValueLine(trimmed)) {
+			continue
+		}
 		if isEpistemicStateInstructionLine(trimmed) {
 			line = stripStateDeltaEpistemicInstruction(line)
 			trimmed = strings.TrimSpace(line)
@@ -1604,6 +1608,48 @@ func stripStateDeltaEpistemicInstruction(line string) string {
 		"| ；", "| ", "| ;", "| ", "| ，", "| ", "| ,", "| ",
 	).Replace(value)
 	return strings.TrimRight(value, " \t，,；;")
+}
+
+func transientStateDeltaScopeEcho(line string) bool {
+	probe := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
+	probe = strings.Trim(probe, "-+| *_`。；; ")
+	if containsAnyPrefix(probe, []string{
+		"只记录", "仅记录", "只更新", "仅更新", "只确认", "仅确认", "只列", "仅列",
+	}) {
+		return true
+	}
+	return containsAny(probe, []string{"不因", "不要因为", "不得因为"}) &&
+		containsAny(probe, []string{"选择采购方式", "选采购方式", "确定采购方式"})
+}
+
+func danglingGenericUnknownValueLine(line string) bool {
+	probe := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
+	probe = strings.Trim(probe, "-+| *_`")
+	colon := strings.LastIndexAny(probe, "：:")
+	if colon < 0 {
+		return false
+	}
+	_, width := utf8.DecodeRuneInString(probe[colon:])
+	label := strings.Trim(probe[:colon], " #*_`。；;，, ")
+	if !containsAnyExactString(label, []string{"待确认", "待核实", "未知", "未确认"}) {
+		return false
+	}
+	tail := strings.Trim(probe[colon+width:], " \t。.;；,，*_`~()（）[]【】")
+	switch tail {
+	case "", "仍", "尚", "待", "未", "仍为", "尚为", "仍是", "尚是":
+		return true
+	default:
+		return false
+	}
+}
+
+func containsAnyExactString(value string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // projectExplicitSourceUpdate preserves a current user turn whose purpose is
@@ -1734,6 +1780,7 @@ func restoreExplicitStateDeltaFacts(answer, query string) string {
 	result := strings.TrimSpace(answer)
 	normalizedAnswer := normalizeStateDeltaText(result)
 	additions := make([]string, 0, 3)
+	stateLines := strings.Split(strings.ReplaceAll(result, "\r\n", "\n"), "\n")
 	seen := map[string]struct{}{}
 	clauses := strings.FieldsFunc(query, func(r rune) bool {
 		return r == '，' || r == ',' || r == '；' || r == ';' || r == '。' || r == '！' || r == '!' || r == '？' || r == '?'
@@ -1761,12 +1808,25 @@ func restoreExplicitStateDeltaFacts(answer, query string) string {
 	}
 	for _, clause := range clauses {
 		clause = strings.TrimSpace(clause)
-		if isEpistemicStateInstructionLine(clause) {
+		if isEpistemicStateInstructionLine(clause) || transientStateDeltaScopeEcho(clause) {
 			continue
 		}
 		if colon := strings.LastIndexAny(clause, "：:"); colon >= 0 && colon < len(clause)-1 {
 			_, width := utf8.DecodeRuneInString(clause[colon:])
 			clause = strings.TrimSpace(clause[colon+width:])
+		}
+		if hasExplicitUnknownState(clause) {
+			fact := strings.TrimRight(canonicalUnknownFactFragment(clause), "。；;，, ")
+			key := normalizeStateDeltaText(fact)
+			if fact != "" && key != "" && !unknownFactCovered(stateLines, fact) {
+				if _, exists := seen[key]; !exists {
+					line := "- " + fact
+					additions = append(additions, line)
+					stateLines = append(stateLines, line)
+					seen[key] = struct{}{}
+				}
+			}
+			continue
 		}
 		if match := explicitQuotedStateFactPattern.FindStringSubmatch(clause); len(match) == 3 {
 			appendFact(match[1], match[2])
@@ -3425,7 +3485,9 @@ func splitUserStateClauses(statement string) []string {
 
 func canonicalUnknownFactFragment(fragment string) string {
 	value := strings.TrimSpace(fragment)
-	for _, marker := range []string{"仍未确认", "尚未确认", "未确认"} {
+	for _, marker := range []string{
+		"仍待确认", "尚待确认", "仍未确认", "尚未确认", "未确认",
+	} {
 		value = strings.ReplaceAll(value, marker, "待确认")
 	}
 	return value

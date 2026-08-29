@@ -2346,3 +2346,31 @@ func TestStateAuditCanonicalizesMixedLifecycleUnknownRow(t *testing.T) {
 		t.Fatalf("mixed lifecycle unknown normalization is not idempotent:\n%s", twice)
 	}
 }
+
+func TestNormalizeStateDeltaScopeRestoresExplicitUnknownSubject(t *testing.T) {
+	query := "回到寒星项目：法务确认采购信息可以公开；立项审批状态仍待确认。只更新台账，不因为刚才的金额门槛直接选采购方式。"
+	answer := `- **法务确认**：采购信息可以公开
+- **项目**：寒星冷链温控改造
+
+### 待确认
+
+待确认：仍。
+
+- 仅更新台账，不因金额门槛直接选择采购方式
+- 不因：刚才的金额门槛直接选采购方式`
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{"法务确认", "采购信息可以公开", "立项审批状态", "待确认"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("current-turn state %q is missing: %s", expected, got)
+		}
+	}
+	for _, forbidden := range []string{"待确认：仍", "仅更新台账", "刚才的金额门槛", "选择采购方式"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("scope or dangling state %q survived: %s", forbidden, got)
+		}
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("explicit unknown delta normalization is not idempotent:\n%s", twice)
+	}
+}

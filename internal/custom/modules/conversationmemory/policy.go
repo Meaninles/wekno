@@ -85,6 +85,12 @@ var internalConversationLocatorPattern = regexp.MustCompile(
 
 var emptyParentheticalPattern = regexp.MustCompile(`（\s*）|\(\s*\)`)
 
+var namedEntityEnumerationParentheticalPattern = regexp.MustCompile(
+	`（\s*[A-Z][A-Z0-9_-]*(?:\s*[、,，]\s*[A-Z][A-Z0-9_-]*)+(?:等)?\s*）|\(\s*[A-Z][A-Z0-9_-]*(?:\s*[,，]\s*[A-Z][A-Z0-9_-]*)+(?:等)?\s*\)`,
+)
+
+var supplierCountAnchorPattern = regexp.MustCompile(`[0-9０-９]+家`)
+
 var internalPlanningParagraphBreakPattern = regexp.MustCompile(`\n[ \t]*\n+`)
 
 var sharedScalarUnitPattern = regexp.MustCompile(
@@ -2379,6 +2385,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 				continue
 			}
 			line = removeUnsupportedSourceParentheticals(line, userStatements)
+			line = removeUnsupportedNamedEntityEnumeration(line, userStatements)
 			unresolvedClaim := containsAny(line, []string{"声称", "主张", "说法"}) &&
 				containsAny(line, []string{"未经核验", "尚未核验", "待核验", "未核验"})
 			if unresolvedClaim {
@@ -4011,6 +4018,39 @@ func removeUnsupportedSourceParentheticals(line string, userStatements []string)
 		match := sourceAttributionParentheticalPattern.FindStringSubmatch(parenthetical)
 		if len(match) != 2 || sourceAttributionSupported(match[1], anchors, userStatements) {
 			return parenthetical
+		}
+		return ""
+	})
+}
+
+// removeUnsupportedNamedEntityEnumeration drops a model-added supplier list
+// beside an explicit count unless the same user-authored statement binds the
+// count and every named entity. Facts learned in later, unrelated turns must
+// not be spliced into the earlier count claim.
+func removeUnsupportedNamedEntityEnumeration(line string, userStatements []string) string {
+	anchors := supplierCountAnchorPattern.FindAllString(line, -1)
+	if len(anchors) == 0 {
+		return line
+	}
+	return namedEntityEnumerationParentheticalPattern.ReplaceAllStringFunc(line, func(fragment string) string {
+		entities := unresolvedClaimEntityPattern.FindAllString(fragment, -1)
+		if len(entities) < 2 {
+			return fragment
+		}
+		for _, statement := range userStatements {
+			if !containsAny(statement, anchors) {
+				continue
+			}
+			supported := true
+			for _, entity := range entities {
+				if !strings.Contains(statement, entity) {
+					supported = false
+					break
+				}
+			}
+			if supported {
+				return fragment
+			}
 		}
 		return ""
 	})

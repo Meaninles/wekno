@@ -1746,6 +1746,39 @@ func TestStateAuditDropsResponseScopeUnknownAndInternalLocators(t *testing.T) {
 	}
 }
 
+func TestStateAuditDropsUnsupportedSupplierEnumerationFromCountFact(t *testing.T) {
+	query := "现在做一次完整状态审计，分成当前有效事实、已废弃事实、待确认事实、行动边界。"
+	prior := []string{
+		"业务和技术团队确认至少4家供应商可能满足，技术路线不同但都可能实现同一结果目标。",
+		"法务和技术核验后确认A并非不可替代，B、C通过适配也能满足。",
+	}
+	answer := `### 当前有效事实
+| 项目 | 内容 |
+|---|---|
+| 供应商情况 | 至少4家供应商（A、B、C等）可能满足，技术路线不同但都可能实现同一结果目标 |
+| A供应商核验结论 | A并非不可替代，B、C通过适配也能满足 |
+### 已废弃事实
+- A供应商“只能A做”的前提已废弃
+### 待确认事实
+- 无
+### 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	if strings.Contains(active, "（A、B、C等）") {
+		t.Fatalf("unsupported supplier enumeration survived: %s", got)
+	}
+	for _, expected := range []string{"至少4家供应商", "A并非不可替代", "B、C通过适配也能满足"} {
+		if !strings.Contains(active, expected) {
+			t.Fatalf("supported state %q was lost: %s", expected, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("supplier enumeration cleanup was not idempotent:\n%s", twice)
+	}
+}
+
 func TestStateAuditRestoresDurableIdentityAndRelocatesObservedLifecycleText(t *testing.T) {
 	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
 	prior := []string{

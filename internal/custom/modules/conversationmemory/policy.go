@@ -525,7 +525,11 @@ func narrowAnswerEvidenceTopics(query string) []string {
 // named target.  It is safe for both prompt guidance and fixed-pipeline query
 // rewriting: no document-specific term or expected answer is introduced.
 func EvidenceRetrievalQueries(query string) []string {
-	topics := currentTurnEvidenceTopics(query)
+	// The runtime query may already carry the immutable current-turn topic
+	// contract appended by AppendCurrentTurnDirective.  Reuse that contract
+	// instead of reparsing the surrounding archive/prompt text, which can hide
+	// an otherwise self-contained pair of questions from retrieval.
+	topics := RequiredEvidenceTopics(query)
 	if len(topics) < 2 {
 		return nil
 	}
@@ -552,7 +556,7 @@ func EvidenceRetrievalQueries(query string) []string {
 // words are not adjacent.  These patterns add no answer term: they only retain
 // distinctive pieces of the user's own named subject in their original order.
 func EvidenceGrepQueries(query string) []string {
-	topics := currentTurnEvidenceTopics(query)
+	topics := RequiredEvidenceTopics(query)
 	if len(topics) < 2 {
 		return nil
 	}
@@ -659,7 +663,16 @@ func evidenceGrepTopicPattern(topic string) string {
 	if len(patterns) == 0 {
 		return regexp.QuoteMeta(strings.TrimSpace(topic))
 	}
-	return strings.Join(patterns, ".{0,200}")
+	full := strings.Join(patterns, ".{0,200}")
+	// In policy prose, the user's framing noun can legitimately differ from
+	// the document's noun (for example, "异议" versus "质疑投诉事项") while the
+	// remaining condition and consequence are verbatim.  Keep the full pattern
+	// first, then add a bounded fallback that may omit only that first framing
+	// fragment.  Two-fragment targets stay strict to avoid broad searches.
+	if len(patterns) >= 3 {
+		return full + "|" + strings.Join(patterns[1:], ".{0,200}")
+	}
+	return full
 }
 
 // FocusEvidenceRewriteQuery removes project-state prose from a multi-target

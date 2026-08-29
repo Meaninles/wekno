@@ -1505,6 +1505,22 @@ func TestEvidenceGrepQueriesUseExecutableUserDerivedPatterns(t *testing.T) {
 	if !regexp.MustCompile(competition).MatchString("适宜采用公开（邀请）竞争谈判的采购方式") {
 		t.Fatalf("competition pattern did not match the direct clause: %q", competition)
 	}
+
+	narrow := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
+	runtimeQuery := AppendCurrentTurnDirective(narrow, narrow)
+	retrievals := EvidenceRetrievalQueries(runtimeQuery)
+	if len(retrievals) != 2 || !strings.Contains(retrievals[0], "中标候选人公示") ||
+		!strings.Contains(retrievals[1], "候选人排名") {
+		t.Fatalf("runtime topic contract was not reused for retrieval: %v", retrievals)
+	}
+	grepQueries := EvidenceGrepQueries(runtimeQuery)
+	if len(grepQueries) != 2 {
+		t.Fatalf("runtime topic contract did not produce two grep queries: %v", grepQueries)
+	}
+	sourceWording := "质疑投诉事项涉及评审结果实质性内容并影响中标候选人排名的，由分管立项和采购部门的公司领导共同批准复核。"
+	if !regexp.MustCompile(grepQueries[1]).MatchString(sourceWording) {
+		t.Fatalf("bounded framing-word fallback did not match source wording: %q", grepQueries[1])
+	}
 }
 
 func TestAugmentEvidenceGrepQueryRepairsFocusedAliasesAndLiteralSpaces(t *testing.T) {
@@ -1552,6 +1568,24 @@ func TestNormalizeStateDeltaScopeRestoresExplicitCurrentFactsAndActor(t *testing
 	got = NormalizeStateDeltaScope("仅供应商主张，尚未核验。", claimQuery)
 	if !strings.Contains(got, "A供应商") || !strings.Contains(got, "尚未核验") {
 		t.Fatalf("unverified claim actor was not preserved: %s", got)
+	}
+
+	projectWithBoundaries := "建立项目台账：项目代号‘启明星视觉升级’，业务目标是提升缺陷识别率。未经我明确授权，不得创建或修改文件，也不得发起采购；只在对话里维护。只确认这些事实，不推断设备、软件或施工范围。"
+	observed := "- **文件权限**：未经我明确授权，不得创建或修改文件\n- **业务目标**：提升缺陷识别率\n- **授权范围**：未经我明确授权，不得创建或修改文件，不得发起采购；仅在对话中维护\n- **下一步操作**：未授权执行任何操作，等待进一步指令"
+	got = NormalizeStateDeltaScope(observed, projectWithBoundaries)
+	if !strings.Contains(got, "项目代号") || !strings.Contains(got, "启明星视觉升级") {
+		t.Fatalf("project code was not restored from the full state turn: %s", got)
+	}
+	got = NormalizeConfirmedUnknownSections(observed)
+	got = NormalizeDeferredComparisonFactSections(got, projectWithBoundaries)
+	got = NormalizeStateDeltaScope(got, projectWithBoundaries)
+	got = NormalizeExplicitActionBoundaries(got, projectWithBoundaries)
+	got = NormalizeDeferredComparisonRelationships(got, projectWithBoundaries)
+	got = NormalizeStateAuditSections(got, projectWithBoundaries)
+	got = NormalizeExplicitUserIdentityUnknown(got, projectWithBoundaries)
+	got = EnsureDeferredDecisionConclusion(got, projectWithBoundaries)
+	if !strings.Contains(got, "项目代号") || !strings.Contains(got, "启明星视觉升级") {
+		t.Fatalf("project code was lost by the completion normalizer chain: %s", got)
 	}
 }
 

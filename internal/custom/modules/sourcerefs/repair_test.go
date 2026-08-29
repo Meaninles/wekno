@@ -208,6 +208,33 @@ func TestRepairNamedTopicCitationBindingsUsesDirectConditionPassage(t *testing.T
 	}
 }
 
+func TestRepairNamedTopicCitationBindingsPrefersFocusedSameDocumentConditionChunk(t *testing.T) {
+	direct := "选择公开采购方式应同时满足下列条件：1.采购信息可以公开；2.采购标的具有竞争条件；3.采购时间允许；4.采购成本合理。"
+	refs := []*types.SearchResult{
+		{
+			ID: "focused", KnowledgeID: "procurement-policy", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: direct,
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "focused", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "aggregate", KnowledgeID: "procurement-policy", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: strings.Repeat("采购管理通则与流程说明。", 40) + direct + strings.Repeat("其他采购方式和审批流程。", 40),
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "aggregate", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "wrong", KnowledgeID: "procurement-policy", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "竞价采购适用于采购需求明确、规格型号同一且以价格竞争为主的项目。",
+			Metadata:        map[string]string{MetadataCitationID: "S8", MetadataChunkID: "wrong", "source_type": SourceTypeKnowledge},
+		},
+	}
+	answer := "公开采购：制度条件为采购信息可以公开、标的具有竞争条件、采购时间允许且采购成本合理。<src id=\"S8\" />；该直接条件在本项目中是否成立待确认。"
+	got := RepairNamedTopicCitationBindings(answer, []string{"公开采购", "询比", "竞价", "竞争谈判"}, refs)
+	if !strings.Contains(got, `<src id="S1" />`) || strings.Contains(got, `<src id="S8" />`) ||
+		!strings.Contains(got, "采购标的具有竞争条件") {
+		t.Fatalf("focused condition chunk was not selected over its aggregate copy: %s", got)
+	}
+}
+
 func TestRepairNamedTopicCitationBindingsFillsExplicitMissingEvidenceOnly(t *testing.T) {
 	refs := []*types.SearchResult{
 		{
@@ -305,7 +332,7 @@ func TestRecoverOffTopicNarrowEvidenceAnswerUsesEveryCurrentTopic(t *testing.T) 
 		},
 		{
 			ID: "review", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
-			EvidenceContent: "异议涉及实质内容并影响候选人排名的，由分管立项和采购部门的公司领导共同批准复核。",
+			EvidenceContent: "质疑投诉事项涉及评审结果实质性内容并影响中标候选人排名的，由分管立项和采购部门的公司领导共同批准复核。",
 			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "review", "source_type": SourceTypeKnowledge},
 		},
 	}

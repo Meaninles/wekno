@@ -353,8 +353,23 @@ func evidenceTextMatchesTopic(text, topic string) bool {
 	if len(anchors) == 0 {
 		return false
 	}
-	for _, anchor := range anchors {
-		if !strings.Contains(probe, anchor.prefix) || !strings.Contains(probe, anchor.suffix) {
+	matched := make([]bool, len(anchors))
+	for index, anchor := range anchors {
+		matched[index] = strings.Contains(probe, anchor.prefix) && strings.Contains(probe, anchor.suffix)
+	}
+	for _, ok := range matched {
+		if !ok {
+			// Match the retrieval fallback: with at least three independent
+			// anchors, only the first framing noun may differ.  Every condition
+			// and consequence anchor must still be present in the same excerpt.
+			if len(matched) >= 3 && !matched[0] {
+				for _, remainderOK := range matched[1:] {
+					if !remainderOK {
+						return false
+					}
+				}
+				return true
+			}
 			return false
 		}
 	}
@@ -459,6 +474,15 @@ func strongestNamedTopicEvidence(
 	if conditionClaim && len(candidates) == 1 {
 		return candidates[0].id
 	}
+	if conditionClaim {
+		// grep/search can register both a focused chunk and an aggregate parent
+		// chunk for the same physical passage.  They are not conflicting sources.
+		// Prefer the uniquely shortest fragment only when every longer candidate
+		// is from that same document and contains the focused condition excerpt.
+		if id := focusedSameKnowledgeConditionEvidence(topic, candidates); id != "" {
+			return id
+		}
+	}
 
 	claim := canonicalSourceTagRE.ReplaceAllString(paragraph, "")
 	if id := unambiguousEvidenceForParagraph(claim, candidates); id != "" {
@@ -499,6 +523,42 @@ func strongestNamedTopicEvidence(
 		return ""
 	}
 	return scores[0].id
+}
+
+func focusedSameKnowledgeConditionEvidence(topic string, candidates []citationRepairEvidence) string {
+	if len(candidates) < 2 {
+		return ""
+	}
+	knowledgeID := strings.TrimSpace(candidates[0].knowledgeID)
+	if knowledgeID == "" {
+		return ""
+	}
+	ordered := append([]citationRepairEvidence(nil), candidates...)
+	for _, candidate := range ordered[1:] {
+		if strings.TrimSpace(candidate.knowledgeID) != knowledgeID {
+			return ""
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].contentRunes == ordered[j].contentRunes {
+			return citationOrdinal(ordered[i].id) < citationOrdinal(ordered[j].id)
+		}
+		return ordered[i].contentRunes < ordered[j].contentRunes
+	})
+	// Equal-size fragments remain genuinely ambiguous; do not choose by handle.
+	if ordered[0].contentRunes <= 0 || ordered[0].contentRunes == ordered[1].contentRunes {
+		return ""
+	}
+	focusedExcerpt := normalizedNamedTopicText(conditionExcerpt(ordered[0].content, topic))
+	if utf8.RuneCountInString(focusedExcerpt) < 12 {
+		return ""
+	}
+	for _, candidate := range ordered[1:] {
+		if !strings.Contains(normalizedNamedTopicText(candidate.content), focusedExcerpt) {
+			return ""
+		}
+	}
+	return ordered[0].id
 }
 
 func paragraphClaimsApplicabilityConditions(paragraph string) bool {
@@ -804,9 +864,11 @@ func normalizeKnownCitationAliases(answer string, refs []*types.SearchResult) st
 }
 
 type citationRepairEvidence struct {
-	id      string
-	content string
-	tokens  map[string]struct{}
+	id           string
+	knowledgeID  string
+	content      string
+	contentRunes int
+	tokens       map[string]struct{}
 }
 
 func repairEvidence(refs []*types.SearchResult) []citationRepairEvidence {
@@ -823,10 +885,13 @@ func repairEvidence(refs []*types.SearchResult) []citationRepairEvidence {
 			continue
 		}
 		seen[key] = struct{}{}
+		normalizedContent := normalizedRepairText(content)
 		result = append(result, citationRepairEvidence{
-			id:      id,
-			content: normalizedRepairText(content),
-			tokens:  repairTokens(content),
+			id:           id,
+			knowledgeID:  strings.TrimSpace(ref.KnowledgeID),
+			content:      normalizedContent,
+			contentRunes: utf8.RuneCountInString(normalizedContent),
+			tokens:       repairTokens(content),
 		})
 	}
 	sort.SliceStable(result, func(i, j int) bool {

@@ -1533,6 +1533,7 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	// adds a fact nor interprets a non-empty value.
 	if IsStateOnlyTurn(query) {
 		value = removeEmptyStateDeltaListLines(value)
+		value = restoreExplicitRetiredScalarDeltaMarkers(value, query)
 		if value == "" {
 			return value
 		}
@@ -1641,6 +1642,57 @@ func isEmptyStateDeltaListLine(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	return orderedOrBulletListPrefixPattern.MatchString(trimmed) &&
 		lifecycleSectionHeading(line) == "" && isEmptyActionBoundaryListLine(line)
+}
+
+// restoreExplicitRetiredScalarDeltaMarkers keeps every scalar retired by the
+// current user statement atomic. A generated group label such as “废弃值：
+// 210、160、50” is readable, but downstream consumers may bind the lifecycle
+// only to the first item. Missing per-value markers are appended from the
+// current user-authored lifecycle clause; current values are never inferred.
+func restoreExplicitRetiredScalarDeltaMarkers(answer, query string) string {
+	if answer == "" || query == "" || IsStateAuditTurn(query) {
+		return answer
+	}
+	anchors := make([]string, 0, 4)
+	for _, fragment := range splitUserFactFragments(cleanUserStatementRecord(query)) {
+		if !containsAny(fragment, []string{"废弃", "作废", "失效"}) {
+			continue
+		}
+		anchors = append(anchors, explicitLifecycleScalarAnchors(fragment)...)
+	}
+	anchors = uniqueOrderedStrings(anchors)
+	if len(anchors) == 0 {
+		return answer
+	}
+	additions := make([]string, 0, len(anchors))
+	for _, anchor := range anchors {
+		if answerHasTrailingRetiredMarker(answer, anchor) {
+			continue
+		}
+		additions = append(additions, "- "+anchor+"（已废弃）")
+	}
+	if len(additions) == 0 {
+		return answer
+	}
+	return strings.TrimSpace(answer) + "\n" + strings.Join(additions, "\n")
+}
+
+func answerHasTrailingRetiredMarker(answer, anchor string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n") {
+		for start := 0; start < len(line); {
+			index := strings.Index(line[start:], anchor)
+			if index < 0 {
+				break
+			}
+			index += start
+			tail := line[index+len(anchor):]
+			if containsAny(tail, []string{"已废弃", "废弃", "已作废", "作废", "已失效", "失效"}) {
+				return true
+			}
+			start = index + len(anchor)
+		}
+	}
+	return false
 }
 
 func stripStateDeltaEpistemicInstruction(line string) string {
@@ -2777,6 +2829,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
+	out = ensureResolvedEntitySourceAttributions(out, userStatements)
 	out = restoreExplicitDurableLabelFacts(out, userStatements)
 	out = restoreExplicitCompoundRelationshipFacts(out, userStatements)
 	out = restoreExplicitNamedRoleFacts(out, userStatements)
@@ -2784,6 +2837,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
 	out = restoreExplicitRetiredScalarGroups(out, explicitRetiredGroups)
 	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
+	out = canonicalizeStateAuditUnknownSection(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
 }
 
@@ -2794,6 +2848,17 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 func isEpistemicStateInstructionLine(line string) bool {
 	probe := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
 	probe = strings.Trim(probe, "| *_`。；; ")
+	if strings.Contains(probe, "用户") && containsAny(probe, []string{"身份", "当前对话用户"}) &&
+		containsAny(probe, []string{"不得等同", "不能等同", "不可等同", "不要等同", "不得视为", "不能视为", "不可视为"}) {
+		// Preserve a substantive fact whose trailing parenthetical merely states
+		// the identity boundary; the parenthetical is stripped later while the
+		// leading role assignment remains active.
+		if open := strings.IndexAny(probe, "（("); open > 0 &&
+			strings.Trim(probe[:open], "| *_`。；;，, ") != "" {
+			return false
+		}
+		return true
+	}
 	if containsAny(probe, []string{
 		"不推断", "不得推断", "不要推断", "不可推断", "不作推断",
 		"不得写成事实", "不要写成事实", "不可写成事实",
@@ -2997,9 +3062,7 @@ func normalizeRetiredAuditLine(line string) string {
 	if isTableRow {
 		parts := strings.Split(line, "|")
 		factIndex := retiredAuditTableFactCellIndex(parts)
-		if factIndex < 0 || containsAny(parts[factIndex], []string{
-			"已废弃", "废弃", "已作废", "作废", "已失效", "失效",
-		}) {
+		if factIndex < 0 || hasAtomicRetiredStatus(parts[factIndex]) {
 			return line
 		}
 		leftTrimmed := strings.TrimLeft(parts[factIndex], " \t")
@@ -3009,7 +3072,7 @@ func normalizeRetiredAuditLine(line string) string {
 		parts[factIndex] = leading + core + "（已废弃）" + trailing
 		return strings.Join(parts, "|")
 	}
-	if containsAny(trimmed, []string{"已废弃", "废弃", "已作废", "作废", "已失效", "失效"}) {
+	if hasAtomicRetiredStatus(trimmed) {
 		return line
 	}
 	isListRow := orderedOrBulletListPrefixPattern.MatchString(trimmed)
@@ -3021,6 +3084,29 @@ func normalizeRetiredAuditLine(line string) string {
 	}
 
 	return strings.TrimRight(line, " \t") + "（已废弃）"
+}
+
+func hasAtomicRetiredStatus(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if containsAny(trimmed, []string{
+		"（已废弃）", "(已废弃)", "（已作废）", "(已作废)",
+		"（已失效）", "(已失效)",
+	}) {
+		return true
+	}
+	trimmed = strings.TrimRight(trimmed, "。.;；,，*_`~ ")
+	return containsAnySuffix(trimmed, []string{
+		"已废弃", "已作废", "已失效", "明确废弃", "明确作废", "明确失效",
+	})
+}
+
+func containsAnySuffix(value string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if strings.HasSuffix(value, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func retiredAuditTableFactCellIndex(parts []string) int {
@@ -3632,6 +3718,85 @@ func restoreExplicitUnknownFacts(lines, explicitUnknowns, userStatements []strin
 	return lines
 }
 
+// canonicalizeStateAuditUnknownSection rebuilds only the unknown section from
+// user-authored unresolved facts. Generated tables can merge several unknowns,
+// an epistemic instruction, and a stale lifecycle note into one malformed row.
+// An audit is safer as one atomic bullet per still-unresolved user fact. Active
+// and retired sections are untouched, and resolved unknowns remain excluded by
+// the same chronological supersession check used by restoration.
+func canonicalizeStateAuditUnknownSection(
+	lines, explicitUnknowns, userStatements []string,
+) []string {
+	facts := explicitAuditUnknownFacts(explicitUnknowns, userStatements)
+	if len(facts) == 0 {
+		return lines
+	}
+	heading, end := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "unknown" && key != "unknown" {
+				end = index
+				break
+			}
+			section = key
+			if key == "unknown" && heading < 0 {
+				heading = index
+			}
+		}
+	}
+	if heading < 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines)+len(facts))
+	out = append(out, lines[:heading+1]...)
+	out = append(out, "")
+	for _, fact := range facts {
+		out = append(out, "- "+fact)
+	}
+	if end < len(lines) {
+		out = append(out, "")
+		out = append(out, lines[end:]...)
+	}
+	return compactBlankLines(out)
+}
+
+func explicitAuditUnknownFacts(explicitUnknowns, userStatements []string) []string {
+	out := make([]string, 0, 6)
+	seen := make(map[string]bool)
+	for _, statement := range explicitUnknowns {
+		for _, fragment := range splitUserStateClauses(cleanUserStatementRecord(statement)) {
+			fragment = strings.TrimSpace(fragment)
+			if !hasExplicitUnknownState(fragment) || transientStateAuditScopeInstruction(fragment) ||
+				supersededUnknownClaim(fragment, userStatements) {
+				continue
+			}
+			fact := ""
+			if statementHasUnknownUserIdentity(fragment) {
+				fact = "当前对话用户身份未提供"
+			} else {
+				fact = canonicalUnknownFactFragment(fragment)
+				for _, marker := range []string{
+					"，不得", ",不得", "，不要", ",不要", "，不能", ",不能", "，不可", ",不可",
+				} {
+					if index := strings.Index(fact, marker); index >= 0 {
+						fact = fact[:index]
+						break
+					}
+				}
+				fact = strings.TrimRight(strings.TrimSpace(fact), "。；;，, ")
+			}
+			key := explicitUnknownSubject(fact)
+			if fact == "" || key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, fact)
+		}
+	}
+	return out
+}
+
 func splitUserStateClauses(statement string) []string {
 	raw := strings.FieldsFunc(statement, func(r rune) bool {
 		switch r {
@@ -4066,6 +4231,58 @@ func restoreExplicitResolvedEntityFacts(lines, userStatements []string) []string
 		lines = insertString(lines, activeEnd, "- "+fact)
 		activeEnd++
 		activeText += "\n" + fact
+	}
+	return lines
+}
+
+// ensureResolvedEntitySourceAttributions makes the confirming actor explicit
+// on a resolved compound fact. The actor is parsed only from the same user
+// statement that contains the resolution (for example, “技术组完成核验”), so
+// no adjacent person or assistant-generated attribution can be promoted.
+func ensureResolvedEntitySourceAttributions(lines, userStatements []string) []string {
+	type sourcedResolution struct {
+		actor string
+		fact  string
+	}
+	resolutions := make([]sourcedResolution, 0, 2)
+	for _, statement := range userStatements {
+		value := cleanUserStatementRecord(statement)
+		fact := resolvedEntityFact(value)
+		if fact == "" {
+			continue
+		}
+		actor := ""
+		for _, marker := range []string{"完成核验", "核验后确认", "核验确认", "经核验确认"} {
+			if index := strings.Index(value, marker); index > 0 {
+				actor = strings.Trim(value[:index], "。；;，,：: *_`#")
+				break
+			}
+		}
+		if count := utf8.RuneCountInString(actor); count < 2 || count > 24 {
+			continue
+		}
+		resolutions = append(resolutions, sourcedResolution{actor: actor, fact: fact})
+	}
+	if len(resolutions) == 0 {
+		return lines
+	}
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			section = key
+			continue
+		}
+		if section != "active" || strings.Contains(line, "|") {
+			continue
+		}
+		for _, resolution := range resolutions {
+			if !resolvedEntityFactCovered(line, resolution.fact) ||
+				containsAny(line, []string{"来源：" + resolution.actor, "来源:" + resolution.actor}) {
+				continue
+			}
+			lines[index] = strings.TrimRight(line, " \t。") + "（来源：" + resolution.actor + "）"
+			break
+		}
 	}
 	return lines
 }

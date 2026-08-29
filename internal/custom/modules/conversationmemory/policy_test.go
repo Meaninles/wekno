@@ -435,6 +435,26 @@ func TestNormalizeStateDeltaScopeKeepsCurrentAndRetiredValues(t *testing.T) {
 	}
 }
 
+func TestNormalizeStateDeltaScopeMarksEachCompactRetiredScalar(t *testing.T) {
+	query := "财务批复把预算改为235万元，其中设备175万元、平台服务60万元；210万元和160/50构成废弃。"
+	answer := "- **预算**：235万元（覆盖原有210万元）\n- **其中设备**：175万元（覆盖原有160万元）\n- **其中平台服务**：60万元（覆盖原有50万元）\n- **废弃值**：210万元、设备160万元、平台服务50万元"
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, retired := range []string{"210万元（已废弃）", "160万元（已废弃）", "50万元（已废弃）"} {
+		if !strings.Contains(got, retired) {
+			t.Fatalf("retired scalar %q was not atomic: %s", retired, got)
+		}
+	}
+	for _, current := range []string{"235万元", "175万元", "60万元"} {
+		if !strings.Contains(got, current) {
+			t.Fatalf("current scalar %q was lost: %s", current, got)
+		}
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("retired scalar repair was not idempotent:\n%s", twice)
+	}
+}
+
 func TestNormalizeExplicitActionBoundariesRepairsObservedProcurementTable(t *testing.T) {
 	query := "建立项目台账。未经我明确授权，不得创建或修改文件，也不得发起采购；只在对话里维护。"
 	answer := `| 项目 | 当前边界 |
@@ -1105,8 +1125,8 @@ func TestAuditFinalizationRestoresObservedTwoColumnIdentityUnknown(t *testing.T)
 
 	got := NormalizeStateAuditSections(answer, query, prior)
 	got = NormalizeExplicitUserIdentityUnknown(got, query, prior)
-	if !strings.Contains(got, "| 当前对话用户身份 | 未提供 |") {
-		t.Fatalf("two-column audit lost explicit unknown identity: %s", got)
+	if !strings.Contains(got, "- 当前对话用户身份未提供") {
+		t.Fatalf("canonical audit lost explicit unknown identity: %s", got)
 	}
 	unknown := strings.Split(strings.Split(got, "### 三、待确认事实")[1], "### 四、行动边界")[0]
 	if !strings.Contains(unknown, "当前对话用户身份") {
@@ -2140,7 +2160,7 @@ func TestNormalizeStateAuditDropsIncompleteActiveTableRow(t *testing.T) {
 - 不得把用户等同于林梅`
 
 	got := NormalizeStateAuditSections(answer, query, prior)
-	if strings.Count(got, "当前对话用户身份") != 1 || !strings.Contains(got, "| 当前对话用户身份 | 未提供 |") {
+	if strings.Count(got, "当前对话用户身份") != 1 || !strings.Contains(got, "- 当前对话用户身份未提供") {
 		t.Fatalf("incomplete active row was not removed without harming unknown state: %s", got)
 	}
 	if !strings.Contains(got, "项目负责人 | 林梅") {
@@ -2399,6 +2419,52 @@ func TestNormalizeStateAuditSectionsHandlesCompactRetirementAndUnknownPlaceholde
 	}
 	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
 		t.Fatalf("state audit normalization is not idempotent:\nfirst: %s\nsecond: %s", got, twice)
+	}
+}
+
+func TestNormalizeStateAuditSectionsRebuildsAtomicUnknownsAndSources(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。",
+		"已确认范围包含温度传感器和监控平台；是否包含仓库布线施工仍待确认。只区分已确认和待确认。",
+		"D供应商声称现有网关只能由它兼容。该说法只是供应商主张，尚未核验，不得写成排他事实。",
+		"技术组完成核验：D并非不可替代，E、F经适配也能兼容；废弃‘只能D’的前提。",
+		"法务确认采购信息可以公开；立项审批状态仍待确认。只更新台账。",
+	}
+	answer := `### 当前有效事实
+- 技术组完成核验：D并非不可替代，E、F经适配也能兼容。
+### 已废弃事实
+- D供应商“只能由它兼容”的主张（技术组核验后认定该前提废弃；D并非不可替代）
+### 待确认事项
+待确认：事项；仓库布线施工是否包含在范围内；移至已废弃）；立项审批状态；不得把用户等同于周岚。
+- 当前对话用户身份未提供
+### 行动边界
+- 未经授权不得创建或修改文件
+- 当前对话用户身份与项目负责人周岚不得等同`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	got = NormalizeExplicitUserIdentityUnknown(got, query, prior...)
+	active := strings.Split(strings.Split(got, "### 当前有效事实")[1], "### 已废弃事实")[0]
+	if !strings.Contains(active, "来源：技术组") {
+		t.Fatalf("explicit resolution actor was not made unambiguous: %s", got)
+	}
+	retired := strings.Split(strings.Split(got, "### 已废弃事实")[1], "### 待确认事项")[0]
+	if !strings.Contains(retired, "D供应商") || !strings.Contains(retired, "（已废弃）") {
+		t.Fatalf("retired supplier premise lacks an atomic status: %s", got)
+	}
+	unknown := strings.Split(strings.Split(got, "### 待确认事项")[1], "### 行动边界")[0]
+	for _, expected := range []string{"仓库布线施工", "待确认", "立项审批状态", "当前对话用户身份未提供"} {
+		if !strings.Contains(unknown, expected) {
+			t.Fatalf("canonical unknown section lost %q: %s", expected, got)
+		}
+	}
+	for _, artifact := range []string{"移至已废弃", "不得把用户等同", "不得等同"} {
+		if strings.Contains(got, artifact) {
+			t.Fatalf("epistemic/malformed artifact %q survived: %s", artifact, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("atomic audit normalization was not idempotent:\n%s", twice)
 	}
 }
 

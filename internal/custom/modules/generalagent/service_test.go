@@ -119,6 +119,46 @@ func TestApplyGeneralAgentHistoryPolicyKeepsArchiveForHistoryDependentAudit(t *t
 	}
 }
 
+func TestRecoverNarrowEvidenceMaxTurnAnswerUsesCollectedCurrentTurnEvidence(t *testing.T) {
+	query := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
+	refs := []*types.SearchResult{
+		{
+			ID: "notice", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "采购人应及时发起中标候选人公示，中标候选人公示期应不少于3日（日历日）。",
+			Metadata: map[string]string{
+				"citation_id": "S1", "chunk_id": "notice", "source_type": "knowledge",
+			},
+		},
+		{
+			ID: "review", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "质疑投诉涉及实质性内容并影响中标候选人排名的，由分管立项和采购部门的公司领导共同审批。",
+			Metadata: map[string]string{
+				"citation_id": "S2", "chunk_id": "review", "source_type": "knowledge",
+			},
+		},
+	}
+
+	got, ok := recoverNarrowEvidenceMaxTurnAnswer(
+		errors.New("任务过于复杂，请将任务拆分为具体子任务逐个执行，或提高智能体最大迭代次数"),
+		query,
+		refs,
+	)
+	if !ok {
+		t.Fatal("complete current-turn evidence did not recover max-turn failure")
+	}
+	for _, expected := range []string{"不少于3日", "分管立项", "采购部门", `<src id="S1" />`, `<src id="S2" />`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("recovered answer lost %q: %s", expected, got)
+		}
+	}
+	if _, ok := recoverNarrowEvidenceMaxTurnAnswer(errors.New("upstream timeout"), query, refs); ok {
+		t.Fatal("non-max-turn error was incorrectly recovered")
+	}
+	if _, ok := recoverNarrowEvidenceMaxTurnAnswer(errors.New("error_max_turns"), query, refs[:1]); ok {
+		t.Fatal("incomplete evidence set was incorrectly recovered")
+	}
+}
+
 func TestGeneralAgentArtifactsRequireCurrentUserDeliveryIntent(t *testing.T) {
 	config := &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent, EnableArtifacts: true}
 	if generalAgentArtifactsEnabled(config, "只比较几种采购方式并就近引用。") {

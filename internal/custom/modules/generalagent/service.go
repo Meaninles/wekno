@@ -350,11 +350,18 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		// locally filtered answer without any validation/regeneration request.
 		s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
 	})
+	allRefs := active.snapshotSourceReferences()
 	if err != nil {
-		if promptLayoutSpan != nil {
-			promptLayoutSpan.Finish(nil, map[string]interface{}{"eval_only": true}, err)
+		if recovered, ok := recoverNarrowEvidenceMaxTurnAnswer(err, req.Query, allRefs); ok {
+			logger.Warnf(ctx, "general-agent recovered max-turn narrow evidence answer from %d current-turn references", len(allRefs))
+			result = &ChatResult{RunID: runID, Answer: recovered}
+			err = nil
+		} else {
+			if promptLayoutSpan != nil {
+				promptLayoutSpan.Finish(nil, map[string]interface{}{"eval_only": true}, err)
+			}
+			return err
 		}
-		return err
 	}
 	if result == nil {
 		err = fmt.Errorf("智能体最终结果为空")
@@ -452,7 +459,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		})
 	}
 
-	allRefs := active.snapshotSourceReferences()
 	finalAnswer = conversationmemory.StripInternalPlanningPreamble(finalAnswer)
 	finalAnswer = conversationmemory.RemoveRedundantExplicitComparisonSummary(finalAnswer, req.Query)
 	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(req.Query) {
@@ -507,6 +513,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		)
 	}
 	finalAnswer = sourcerefs.RepairAnswerCitations(finalAnswer, allRefs)
+	finalAnswer = conversationmemory.StripDeferredComparisonFactCitations(finalAnswer, req.Query)
 	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
 		logger.Warnf(ctx, "general-agent filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
@@ -535,6 +542,40 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		},
 	})
 	return nil
+}
+
+// recoverNarrowEvidenceMaxTurnAnswer turns a model-loop exhaustion into a
+// bounded extractive answer only when the active request is a self-contained
+// evidence question and every requested topic can be recovered from evidence
+// already returned during this turn. It adds no model or tool call and fails
+// closed for every other runtime error or incomplete evidence set.
+func recoverNarrowEvidenceMaxTurnAnswer(
+	runErr error,
+	query string,
+	refs []*types.SearchResult,
+) (string, bool) {
+	if runErr == nil || !conversationmemory.ShouldIsolateNarrowEvidenceHistory(query) || len(refs) == 0 {
+		return "", false
+	}
+	errorText := strings.TrimSpace(runErr.Error())
+	lowered := strings.ToLower(errorText)
+	if !strings.Contains(errorText, "最大迭代次数") &&
+		!strings.Contains(lowered, "max_turn") &&
+		!strings.Contains(lowered, "max turns") &&
+		!strings.Contains(lowered, "maxturns") &&
+		!strings.Contains(lowered, "turncount") {
+		return "", false
+	}
+	recovered := sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
+		errorText,
+		conversationmemory.RequiredEvidenceTopics(query),
+		refs,
+		query,
+	)
+	if recovered == "" || recovered == errorText || !strings.Contains(recovered, `<src id="S`) {
+		return "", false
+	}
+	return recovered, true
 }
 
 func applyGeneralAgentHistoryPolicy(

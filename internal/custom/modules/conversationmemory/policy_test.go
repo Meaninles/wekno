@@ -1863,6 +1863,27 @@ func TestNarrowFreshEvidenceTopicsStayOnCurrentQuestions(t *testing.T) {
 	}
 }
 
+func TestStripDeferredComparisonFactCitationsKeepsOnlyEvidenceClaimsCited(t *testing.T) {
+	query := "仅基于刚才明确的项目事实和制度，比较询比、竞价、竞争谈判的适配点与风险，不定首选。每种方式一行，制度判断就近引用。"
+	answer := "已确认：系统升级服务预算220万元。\n\n" +
+		"待确认：是否可以公开采购待确认；<src id=\"S3\" />需求是否完整待确认；全流程时间是否可行待确认。\n\n" +
+		"询比：制度条件为需求明确。<src id=\"S2\" />\n\n" +
+		"竞价：制度条件为价格竞争。<src id=\"S5\" />"
+
+	got := StripDeferredComparisonFactCitations(answer, query)
+	if strings.Contains(strings.Split(got, "\n\n")[1], "<src") {
+		t.Fatalf("user-authored pending facts retained a document citation: %s", got)
+	}
+	for _, expected := range []string{`<src id="S2" />`, `<src id="S5" />`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("option evidence citation %q was removed: %s", expected, got)
+		}
+	}
+	if twice := StripDeferredComparisonFactCitations(got, query); twice != got {
+		t.Fatalf("fact citation stripping is not idempotent: %s", twice)
+	}
+}
+
 func TestSingleFocusedEvidenceDetourIsolatesExpiredLedgerHistory(t *testing.T) {
 	query := "先暂停台账，只根据已选《采购管理办法》第三十四条回答一个旁支问题：依法必须招标的重要设备、材料等货物，达到什么单项合同估算价必须公开招标？答案写明金额并紧邻系统有效引用。"
 	if !IsNarrowAnswerTurn(query) {

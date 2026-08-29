@@ -51,6 +51,8 @@ var unsupportedBridgeParentheticalPattern = regexp.MustCompile(
 	`（[^（）]*(?:影响|取决于|意味着|等同|关联|因此符合)[^（）]*）|\([^()]*(?:影响|取决于|意味着|等同|关联|因此符合)[^()]*\)`,
 )
 
+var deferredFactExtraSpacesPattern = regexp.MustCompile(`[ \t]{2,}`)
+
 var resolvedQuotedClaimLabelPattern = regexp.MustCompile(
 	`([\p{L}\p{N}_-]{1,24})(?:“[^”]+”|"[^"]+")(?:的)?(?:主张|说法|前提)`,
 )
@@ -1239,6 +1241,30 @@ func NormalizeDeferredComparisonFactSections(
 		return facts
 	}
 	return facts + "\n\n" + strings.TrimSpace(body)
+}
+
+// StripDeferredComparisonFactCitations keeps the reconstructed 已确认/待确认
+// sections as user-authored state rather than document-backed claims. A later
+// local citation-repair pass may otherwise attach a policy fragment merely
+// because it shares a phrase such as “公开采购”, inflating citation counts and
+// falsely attributing the user's unresolved project facts to the document.
+func StripDeferredComparisonFactCitations(answer, originalQuery string) string {
+	value := strings.TrimSpace(answer)
+	if value == "" || !IsDeferredDecisionTurn(originalQuery) || !IsComparisonTurn(originalQuery) {
+		return value
+	}
+	lines := strings.Split(value, "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "已确认：") && !strings.HasPrefix(trimmed, "已确认:") &&
+			!strings.HasPrefix(trimmed, "待确认：") && !strings.HasPrefix(trimmed, "待确认:") {
+			continue
+		}
+		line = deferredCitationPattern.ReplaceAllString(line, "")
+		line = deferredFactExtraSpacesPattern.ReplaceAllString(line, " ")
+		lines[index] = strings.TrimRight(line, " \t")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func explicitDeferredUserFacts(statement string) (string, []string) {

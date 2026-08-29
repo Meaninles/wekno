@@ -1217,7 +1217,7 @@ func CompactExplicitOneLineComparison(answer, originalQuery string) string {
 			continue
 		}
 		score := 10
-		if containsAny(paragraph, []string{"适宜采用", "适用条件", "适用重点", "制度条件", "条件为", "条件包括"}) {
+		if containsAny(paragraph, []string{"适宜采用", "适用于", "适用条件", "适用重点", "制度条件", "条件为", "条件包括"}) {
 			score += 20
 		}
 		if strings.Contains(paragraph, "是指") {
@@ -1363,7 +1363,7 @@ func compactCitedConditionParagraph(paragraph, topic string) string {
 
 	start := -1
 	markerLength := 0
-	for _, marker := range []string{"适宜采用", "适用条件", "适用重点为", "适用重点", "制度条件为", "制度条件", "条件为", "条件包括"} {
+	for _, marker := range []string{"适宜采用", "适用于", "适用条件", "适用重点为", "适用重点", "制度条件为", "制度条件", "条件为", "条件包括"} {
 		if index := strings.Index(text, marker); index >= 0 && (start < 0 || index < start) {
 			start = index
 			markerLength = len(marker)
@@ -1378,7 +1378,7 @@ func compactCitedConditionParagraph(paragraph, topic string) string {
 		body = strings.TrimSpace(body[colon+width:])
 	}
 	for _, marker := range []string{
-		"适用重点在于", "引用来源", "适用提示", "核心特征", "优势在于",
+		"适用重点在于", "适用关键在于", "适用关键", "引用来源", "适用提示", "核心特征", "优势在于",
 		"此外，", "此外,", "另外，", "另外,", "相较于", "相比",
 		"来源：", "来源:",
 	} {
@@ -1483,7 +1483,13 @@ func BoundCompletionTokens(configured int, originalQuery string) int {
 func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	value := strings.TrimSpace(answer)
 	query := strings.TrimSpace(originalQuery)
-	if value == "" || query == "" || !isStrictStateDeltaTurn(query) {
+	if value == "" || query == "" {
+		return value
+	}
+	if projected := projectExplicitSourceUpdate(query); projected != "" {
+		return projected
+	}
+	if !isStrictStateDeltaTurn(query) {
 		return value
 	}
 	if projected := projectExplicitConfirmedUnknownSections(query); projected != "" {
@@ -1548,6 +1554,46 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	}
 	result = expandSharedScalarUnits(result)
 	return restoreExplicitStateDeltaFacts(result, query)
+}
+
+// projectExplicitSourceUpdate preserves a current user turn whose purpose is
+// to bind already-known state to named confirmation sources. Returning the
+// user's own clauses avoids a model retaining a fact while silently dropping
+// its actor (for example, keeping "不涉密" but losing "由法务确认").
+// It is intentionally limited to explicit source-update state turns.
+func projectExplicitSourceUpdate(query string) string {
+	if !IsStateOnlyTurn(query) {
+		return ""
+	}
+	markerAt, markerLength := -1, 0
+	for _, marker := range []string{"补充来源", "来源补充"} {
+		if index := strings.Index(query, marker); index >= 0 && (markerAt < 0 || index < markerAt) {
+			markerAt, markerLength = index, len(marker)
+		}
+	}
+	if markerAt < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(query[markerAt+markerLength:])
+	value = strings.TrimLeft(value, "：: \t")
+	lines := make([]string, 0, 4)
+	for _, clause := range splitUserStateClauses(value) {
+		clause = strings.TrimSpace(strings.Trim(clause, "。；; "))
+		if clause == "" || utf8.RuneCountInString(clause) > 240 ||
+			containsAnyPrefix(clause, []string{"只记录", "仅记录", "只更新", "仅更新", "只列", "仅列"}) {
+			continue
+		}
+		if !containsAny(clause, []string{
+			"确认", "来源", "负责人", "责任人", "经办人", "联系人", "用户身份", "用户等同",
+		}) {
+			continue
+		}
+		lines = append(lines, "- "+clause)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 // projectExplicitConfirmedUnknownSections renders an explicitly scoped state
@@ -1859,6 +1905,7 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 			enable: []string{
 				"只在对话里维护", "仅在对话里维护", "只在对话中维护", "仅在对话中维护",
 				"只在本对话里维护", "仅在本对话里维护", "只在本对话中维护", "仅在本对话中维护",
+				"只在当前对话里维护", "仅在当前对话里维护", "只在当前对话中维护", "仅在当前对话中维护",
 				"只在对话内维护", "仅在对话内维护",
 			},
 			revoke: []string{
@@ -1867,8 +1914,8 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 				"允许持久化", "可以持久化", "允许创建文件", "可以创建文件",
 				"改为文件维护", "保存到文件", "写入文件维护",
 			},
-			mentions:  []string{"只在对话", "仅在对话", "对话内维护", "维护方式"},
-			durable:   []string{"只在对话", "仅在对话", "对话内维护"},
+			mentions:  []string{"只在对话", "仅在对话", "只在当前对话", "仅在当前对话", "对话内维护", "维护方式"},
+			durable:   []string{"只在对话", "仅在对话", "只在当前对话", "仅在当前对话", "对话内维护"},
 			label:     "维护方式",
 			operation: "只在本对话中维护",
 		},
@@ -2267,7 +2314,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			line = uncertainParentheticalPattern.ReplaceAllString(line, "")
 			line = retiredActiveSuffixPattern.ReplaceAllString(line, "")
 			probe := strings.ToLower(line)
-			if containsAny(probe, []string{"已废弃", "已作废", "从现在起废弃", "被取代", "已被替代"}) {
+			if containsAny(probe, []string{
+				"已废弃", "已作废", "从现在起废弃", "被取代", "已被替代", "已被推翻", "被推翻",
+			}) {
 				continue
 			}
 			if containsAny(strings.ToLower(line), []string{"待确认", "待核实", "未提供", "未知", "尚未确认", "尚未核实"}) {
@@ -2344,6 +2393,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
+	out = restoreExplicitDurableLabelFacts(out, userStatements)
 	out = restoreExplicitCompoundRelationshipFacts(out, userStatements)
 	out = restoreExplicitNamedRoleFacts(out, userStatements)
 	out = restoreExplicitActiveScalarFacts(out, explicitActiveScalars)
@@ -3452,6 +3502,93 @@ func restoreExplicitResolvedEntityFacts(lines, userStatements []string) []string
 	return lines
 }
 
+type explicitDurableLabelFact struct {
+	label string
+	value string
+}
+
+// restoreExplicitDurableLabelFacts reconstructs a deliberately small set of
+// project identity fields from user-authored history. These string facts have
+// no numeric anchor, so scalar restoration cannot recover them after they fall
+// outside the model's recent-history window. The allowlist prevents arbitrary
+// historical prose or assistant inferences from becoming durable state.
+func restoreExplicitDurableLabelFacts(lines, userStatements []string) []string {
+	facts := explicitDurableLabelFacts(userStatements)
+	if len(facts) == 0 {
+		return lines
+	}
+	activeStart, activeEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "active" && key != "active" {
+				activeEnd = index
+				break
+			}
+			section = key
+			if key == "active" && activeStart < 0 {
+				activeStart = index + 1
+			}
+		}
+	}
+	if activeStart < 0 {
+		return lines
+	}
+
+	activeText := strings.Join(lines[activeStart:activeEnd], "\n")
+	for _, fact := range facts {
+		if strings.Contains(normalizeStateDeltaText(activeText), normalizeStateDeltaText(fact.value)) {
+			continue
+		}
+		line := "- **" + fact.label + "**：" + fact.value
+		lines = insertString(lines, activeEnd, line)
+		activeEnd++
+		activeText += "\n" + line
+	}
+	return lines
+}
+
+func explicitDurableLabelFacts(userStatements []string) []explicitDurableLabelFact {
+	labels := []string{"项目代号", "项目名称", "业务目标", "项目目标"}
+	allowed := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		allowed[label] = true
+	}
+	latest := make(map[string]string, len(labels))
+	for _, statement := range userStatements {
+		for _, fragment := range splitUserFactFragments(cleanUserStatementRecord(statement)) {
+			fragment = strings.TrimSpace(fragment)
+			if colon := strings.LastIndexAny(fragment, "：:"); colon >= 0 && colon < len(fragment)-1 {
+				_, width := utf8.DecodeRuneInString(fragment[colon:])
+				fragment = strings.TrimSpace(fragment[colon+width:])
+			}
+			label, factValue := "", ""
+			if match := explicitQuotedStateFactPattern.FindStringSubmatch(fragment); len(match) == 3 {
+				label, factValue = strings.TrimSpace(match[1]), strings.TrimSpace(match[2])
+			} else if match := explicitAssignedStateFactPattern.FindStringSubmatch(fragment); len(match) == 3 {
+				label, factValue = strings.TrimSpace(match[1]), strings.TrimSpace(match[2])
+			}
+			if !allowed[label] {
+				continue
+			}
+			if factValue == "" || utf8.RuneCountInString(factValue) > 100 || containsAny(factValue, []string{
+				"待确认", "待核实", "未提供", "未知", "废弃", "作废", "不得", "不要", "只确认", "仅确认",
+			}) {
+				delete(latest, label)
+				continue
+			}
+			latest[label] = strings.Trim(factValue, "'\"‘’“”*_`~#[]【】 ")
+		}
+	}
+	out := make([]explicitDurableLabelFact, 0, len(latest))
+	for _, label := range labels {
+		if value := strings.TrimSpace(latest[label]); value != "" {
+			out = append(out, explicitDurableLabelFact{label: label, value: value})
+		}
+	}
+	return out
+}
+
 // restoreExplicitCompoundRelationshipFacts preserves user-authored compound
 // facts whose meaning depends on the relationship between a quantity, a
 // differentiating attribute, and a shared outcome.  Summaries such as “目标
@@ -3871,6 +4008,7 @@ func operationBoundaryKinds(line string) []string {
 	if containsAny(probe, []string{
 		"仅在对话中维护", "只在对话中维护", "仅在本对话中维护", "只在本对话中维护",
 		"仅在对话里维护", "只在对话里维护", "仅在本对话里维护", "只在本对话里维护",
+		"仅在当前对话中维护", "只在当前对话中维护", "仅在当前对话里维护", "只在当前对话里维护",
 		"对话内维护",
 	}) {
 		kinds = append(kinds, "chat-only")
@@ -3965,7 +4103,7 @@ func markdownTableSeparator(cells int) string {
 
 func normalizeResolvedClaimActiveLine(line string) string {
 	normalized := resolvedQuotedClaimLabelPattern.ReplaceAllString(line, "${1}当前核验结论")
-	if normalized == line || !containsAny(normalized, []string{"不成立", "被推翻", "已否定"}) {
+	if !containsAny(normalized, []string{"不成立", "被推翻", "已否定"}) {
 		return normalized
 	}
 	if strings.Contains(normalized, "|") {
@@ -3974,27 +4112,24 @@ func normalizeResolvedClaimActiveLine(line string) string {
 			if !containsAny(cell, []string{"不成立", "被推翻", "已否定"}) {
 				continue
 			}
-			if delimiter := strings.IndexAny(cell, "；;"); delimiter >= 0 {
-				delimiterEnd := delimiter + 1
-				if strings.HasPrefix(cell[delimiter:], "；") {
-					delimiterEnd = delimiter + len("；")
+			if delimiter := strings.IndexAny(cell, "；;。"); delimiter >= 0 {
+				_, width := utf8.DecodeRuneInString(cell[delimiter:])
+				tail := strings.TrimSpace(cell[delimiter+width:])
+				if tail != "" {
+					cells[index] = " " + tail + " "
 				}
-				cells[index] = " " + strings.TrimSpace(cell[delimiterEnd:]) + " "
 			}
 		}
 		return strings.Join(cells, "|")
 	}
-	if delimiter := strings.IndexAny(normalized, "；;"); delimiter >= 0 {
+	if delimiter := strings.IndexAny(normalized, "；;。"); delimiter >= 0 {
 		if colon := strings.IndexAny(normalized, "：:"); colon >= 0 && colon < delimiter {
-			colonEnd := colon + 1
-			if strings.HasPrefix(normalized[colon:], "：") {
-				colonEnd = colon + len("：")
+			_, colonWidth := utf8.DecodeRuneInString(normalized[colon:])
+			_, delimiterWidth := utf8.DecodeRuneInString(normalized[delimiter:])
+			tail := strings.TrimSpace(normalized[delimiter+delimiterWidth:])
+			if tail != "" {
+				return normalized[:colon+colonWidth] + tail
 			}
-			delimiterEnd := delimiter + 1
-			if strings.HasPrefix(normalized[delimiter:], "；") {
-				delimiterEnd = delimiter + len("；")
-			}
-			return normalized[:colonEnd] + strings.TrimSpace(normalized[delimiterEnd:])
 		}
 	}
 	return normalized
@@ -4007,6 +4142,7 @@ func isOperationBoundaryLine(line string) bool {
 		"不得创建/修改文件", "不得发起采购", "仅在对话中维护", "只在对话中维护",
 		"仅在本对话中维护", "只在本对话中维护", "仅在对话里维护", "只在对话里维护",
 		"仅在本对话里维护", "只在本对话里维护", "对话内维护",
+		"仅在当前对话中维护", "只在当前对话中维护", "仅在当前对话里维护", "只在当前对话里维护",
 	})
 }
 

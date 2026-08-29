@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBuildUserArchiveKeepsOnlyTurnsOutsideRecentWindow(t *testing.T) {
@@ -1595,6 +1596,23 @@ func TestNormalizeStateDeltaScopeRestoresExplicitCurrentFactsAndActor(t *testing
 	}
 }
 
+func TestNormalizeStateDeltaScopeProjectsExplicitSourceBindings(t *testing.T) {
+	query := "补充来源：项目负责人是林梅；不涉密、不应急由法务确认，4家方案可行由业务和技术团队确认。当前对话用户身份没有提供，不得把用户等同于林梅。"
+	answer := "- **项目负责人**：林梅\n- **项目涉密/应急状态**：不涉密、不应急\n- **采购方案可行性**：4家方案可行"
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{
+		"项目负责人是林梅", "不涉密、不应急由法务确认", "4家方案可行由业务和技术团队确认",
+		"当前对话用户身份没有提供", "不得把用户等同于林梅",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("source update lost %q: %s", expected, got)
+		}
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("source update projection was not idempotent: %s", twice)
+	}
+}
+
 func TestNormalizeStateDeltaScopeExpandsSharedScalarUnit(t *testing.T) {
 	query := "预算调整为390万元，360万元及280/80万元构成废弃。只记录当前值和废弃值。"
 	got := NormalizeStateDeltaScope("当前390万元；360万元及280/80万元已废弃。", query)
@@ -1627,6 +1645,44 @@ func TestStateAuditRestoresCompoundRelationshipAndStripsInventedReplacementActor
 	}
 	if strings.Contains(got, "被业务调整") || !strings.Contains(got, "调整为2027年1月31日") {
 		t.Fatalf("unsupported replacement actor was not stripped conservatively: %s", got)
+	}
+}
+
+func TestStateAuditRestoresDurableIdentityAndRelocatesObservedLifecycleText(t *testing.T) {
+	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	prior := []string{
+		"建立项目台账：项目代号‘启明星视觉升级’，业务目标是提升缺陷识别率。未经我明确授权，不得创建或修改文件，也不得发起采购；只在对话里维护。",
+		"A供应商声称接口只能由它安全改造。该说法目前只是供应商主张，尚未核验。",
+		"法务和技术核验后确认A并非不可替代，B、C通过适配也能满足。废弃‘只能A做’这一前提。",
+	}
+	answer := `### 当前有效事实
+| 项目 | 当前状态 |
+|---|---|
+| A供应商当前核验结论 | 已被推翻。法务和技术团队核验后确认A并非不可替代，B、C通过适配也能满足 |
+| 维护范围 | 仅在当前对话中维护台账 |
+### 已废弃事实
+- A供应商“只能A做”前提已废弃
+### 待确认事实
+- 无
+### 行动边界
+- 未经我明确授权，不得创建或修改文件
+- 未经我明确授权，不得发起采购`
+	got := NormalizeExplicitActionBoundaries(answer, query, prior...)
+	got = NormalizeStateAuditSections(got, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	for _, expected := range []string{"启明星视觉升级", "提升缺陷识别率", "A并非不可替代", "B、C通过适配也能满足"} {
+		if !strings.Contains(active, expected) {
+			t.Fatalf("active audit lost %q: %s", expected, got)
+		}
+	}
+	for _, misplaced := range []string{"已被推翻", "仅在当前对话中维护"} {
+		if strings.Contains(active, misplaced) {
+			t.Fatalf("lifecycle text %q remained active: %s", misplaced, got)
+		}
+	}
+	boundary := strings.Split(got, "### 行动边界")[1]
+	if !strings.Contains(boundary, "只在本对话中维护") {
+		t.Fatalf("chat-only boundary was not restored canonically: %s", got)
 	}
 }
 
@@ -1870,6 +1926,32 @@ func TestCompactExplicitOneLineComparisonKeepsGroundedOptions(t *testing.T) {
 	}
 	if twice := CompactExplicitOneLineComparison(got, query); twice != got {
 		t.Fatalf("one-line comparison compaction was not idempotent:\n%s", twice)
+	}
+}
+
+func TestCompactExplicitOneLineComparisonRecognizesApplicableToWording(t *testing.T) {
+	query := "仅基于刚才明确的项目事实和制度，比较询比、竞价、竞争谈判的适配点与风险，不定首选。每种方式一行，制度判断就近引用。"
+	answer := `已确认：系统升级服务预算220万元，至少3家供应商可参与。
+
+待确认：是否可以公开采购待确认；需求是否完整待确认；全流程时间是否可行待确认。
+
+询比采购，是指一次性报价的方式。适用于技术和尺寸规格标准统一、货源充足、价格稳定的事项。<src id="S2" />适用关键在于重复说明。
+
+竞价采购，是指多次报价的方式。适用于采购需求明确、规格型号同一、价格形成机制明确的事项。<src id="S5" />适用关键在于重复说明。
+
+竞争谈判，是指与二家以上供应商洽谈。适用条件包括只能提出功能性指标，或存在不同路径和方案。<src id="S6" />适用关键在于重复说明。
+
+核心区分：三者报价与沟通机制不同。
+
+待上述条件确认后再确定，暂不推荐最终方式。`
+	got := CompactExplicitOneLineComparison(answer, query)
+	if utf8.RuneCountInString(got) >= utf8.RuneCountInString(answer) || utf8.RuneCountInString(got) > 900 {
+		t.Fatalf("applicable-to comparison was not compacted: %d\n%s", utf8.RuneCountInString(got), got)
+	}
+	for _, expected := range []string{"询比：制度条件为", "竞价：制度条件为", "竞争谈判：制度条件为", "S2", "S5", "S6"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("compacted applicable-to answer lost %q: %s", expected, got)
+		}
 	}
 }
 

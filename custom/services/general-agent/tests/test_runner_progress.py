@@ -195,6 +195,48 @@ class RunnerProgressTest(unittest.TestCase):
             [],
         )
 
+    def test_turn_contract_issues_require_grounded_quantitative_answer(self):
+        payload = ChatPayload(
+            run_id="run-quantitative-contract",
+            session_id="session-quantitative-contract",
+            assistant_message_id="assistant-quantitative-contract",
+            query=(
+                "临时只回答两个制度问题：中标候选人公示至少多少日？"
+                "如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？\n"
+                "本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["中标候选人公示","异议涉及实质内容并影响候选人排名"]'
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        neighboring = (
+            '预成交供应商在中标候选人公示后未发生否决情形的，予以公告。<src id="S1" />\n\n'
+            '异议涉及实质内容并影响候选人排名的，由分管立项和采购部门领导批准。<src id="S2" />'
+        )
+        evidence = {
+            "S1": "预成交供应商在中标候选人公示后未发生否决情形的，予以公告。",
+            "S2": "异议涉及实质内容并影响候选人排名的，由分管立项和采购部门领导批准。",
+        }
+        issue = next(
+            item
+            for item in turn_contract_issues(payload, neighboring, evidence_by_id=evidence)
+            if item["code"] == "current_turn_evidence_quantitative_incomplete"
+        )
+        self.assertEqual(issue["missing_topics"], ["中标候选人公示"])
+
+        grounded = (
+            '中标候选人公示期应不少于3日（日历日）。<src id="S3" />\n\n'
+            '异议涉及实质内容并影响候选人排名的，由分管立项和采购部门领导批准。<src id="S2" />'
+        )
+        evidence["S3"] = "中标候选人公示期应不少于3日（日历日）。"
+        self.assertNotIn(
+            "current_turn_evidence_quantitative_incomplete",
+            {
+                item["code"]
+                for item in turn_contract_issues(payload, grounded, evidence_by_id=evidence)
+            },
+        )
+
     def test_multi_target_evidence_turn_gets_bounded_turn_reserve(self):
         payload = ChatPayload(
             run_id="run-turn-reserve",

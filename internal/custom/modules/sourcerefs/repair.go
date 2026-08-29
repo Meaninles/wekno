@@ -504,10 +504,25 @@ func RecoverOffTopicNarrowEvidenceAnswer(
 	answer string,
 	topics []string,
 	refs []*types.SearchResult,
+	originalQuery ...string,
 ) string {
 	value := strings.TrimSpace(answer)
 	if value == "" || len(topics) == 0 {
 		return value
+	}
+	query := ""
+	if len(originalQuery) > 0 {
+		query = originalQuery[0]
+	}
+	quantitativeIncomplete := false
+	if query != "" {
+		for _, topic := range topics {
+			if unit := narrowQuantitativeQuestionUnit(query, topic); unit != "" &&
+				!answerContainsNarrowQuantitativeClaim(value, topic, unit) {
+				quantitativeIncomplete = true
+				break
+			}
+		}
 	}
 	aligned := false
 	for _, topic := range topics {
@@ -516,7 +531,7 @@ func RecoverOffTopicNarrowEvidenceAnswer(
 			break
 		}
 	}
-	if aligned && (len(topics) != 1 || utf8.RuneCountInString(value) <= 500) {
+	if aligned && !quantitativeIncomplete && (len(topics) != 1 || utf8.RuneCountInString(value) <= 500) {
 		return value
 	}
 	evidence := repairEvidence(refs)
@@ -525,7 +540,7 @@ func RecoverOffTopicNarrowEvidenceAnswer(
 	}
 	lines := make([]string, 0, len(topics))
 	for _, topic := range topics {
-		excerpt, id := bestNarrowTopicEvidence(topic, evidence)
+		excerpt, id := bestNarrowTopicEvidenceForQuestion(topic, query, evidence)
 		if excerpt == "" || id == "" {
 			return value
 		}
@@ -601,9 +616,18 @@ func evidenceTextMatchesTopic(text, topic string) bool {
 }
 
 func bestNarrowTopicEvidence(topic string, refs []citationRepairEvidence) (string, string) {
+	return bestNarrowTopicEvidenceForQuestion(topic, "", refs)
+}
+
+func bestNarrowTopicEvidenceForQuestion(
+	topic string,
+	query string,
+	refs []citationRepairEvidence,
+) (string, string) {
 	bestText, bestID := "", ""
 	bestLength := int(^uint(0) >> 1)
 	seenText := make(map[string]bool)
+	unit := narrowQuantitativeQuestionUnit(query, topic)
 	for _, ref := range refs {
 		segments := splitClaimSentences(ref.content)
 		candidates := append([]string{}, segments...)
@@ -612,7 +636,8 @@ func bestNarrowTopicEvidence(topic string, refs []citationRepairEvidence) (strin
 		}
 		for _, candidate := range candidates {
 			text := strings.TrimSpace(strings.Join(strings.Fields(candidate), " "))
-			if !evidenceTextMatchesTopic(text, topic) {
+			if !evidenceTextMatchesTopic(text, topic) ||
+				(unit != "" && !containsNumberWithUnit(text, unit)) {
 				continue
 			}
 			probe := normalizedNamedTopicText(text)
@@ -627,6 +652,56 @@ func bestNarrowTopicEvidence(topic string, refs []citationRepairEvidence) (strin
 		}
 	}
 	return bestText, bestID
+}
+
+func narrowQuantitativeQuestionUnit(query, topic string) string {
+	value := query
+	if index := strings.Index(value, "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"); index >= 0 {
+		value = value[:index]
+	}
+	for _, clause := range regexp.MustCompile(`[？?\n]+`).Split(value, -1) {
+		topicAt := strings.Index(clause, topic)
+		if topicAt < 0 {
+			continue
+		}
+		tail := clause[topicAt+len(topic):]
+		questionAt := strings.Index(tail, "多少")
+		if questionAt < 0 {
+			continue
+		}
+		unitTail := strings.TrimSpace(tail[questionAt+len("多少"):])
+		unitRunes := make([]rune, 0, 8)
+		for _, r := range unitTail {
+			if unicode.IsSpace(r) || strings.ContainsRune("，,；;。.!！?？：:、（）()[]【】", r) || !unicode.IsLetter(r) {
+				break
+			}
+			unitRunes = append(unitRunes, r)
+			if len(unitRunes) == 8 {
+				break
+			}
+		}
+		return strings.TrimPrefix(strings.TrimSpace(string(unitRunes)), "个")
+	}
+	return ""
+}
+
+func containsNumberWithUnit(value, unit string) bool {
+	unit = strings.TrimSpace(unit)
+	if unit == "" {
+		return false
+	}
+	compact := strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "", "*", "", "_", "").Replace(value)
+	pattern := `[0-9０-９一二三四五六七八九十百千万两]+.{0,6}` + regexp.QuoteMeta(unit)
+	return regexp.MustCompile(pattern).MatchString(compact)
+}
+
+func answerContainsNarrowQuantitativeClaim(answer, topic, unit string) bool {
+	for _, paragraph := range paragraphBreakRE.Split(answer, -1) {
+		if evidenceTextMatchesTopic(paragraph, topic) && containsNumberWithUnit(paragraph, unit) {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueNamedTopicConditionEvidence(topic string, refs []citationRepairEvidence) string {

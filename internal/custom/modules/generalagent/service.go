@@ -461,6 +461,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 			finalAnswer,
 			conversationmemory.RequiredEvidenceTopics(req.Query),
 			allRefs,
+			req.Query,
 		)
 	}
 	finalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(finalAnswer)

@@ -577,19 +577,26 @@ func EvidenceRetrievalQueries(query string) []string {
 	if len(topics) < 2 {
 		return nil
 	}
+	intentQuery := query
+	if index := strings.Index(intentQuery, "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"); index >= 0 {
+		intentQuery = intentQuery[:index]
+	}
 	intent := "直接规定与完整答案"
-	conditionIntent := IsComparisonTurn(query) && containsAny(query, []string{"适用", "适配", "条件", "要求", "重点", "风险", "会受", "影响", "applicable", "condition"})
-	definitionIntent := RequiresNamedTopicDefinitionCoverage(query)
+	conditionIntent := IsComparisonTurn(intentQuery) && containsAny(intentQuery, []string{
+		"适用", "适配", "条件", "要求", "重点", "风险", "会受", "条件影响", "applicable", "condition",
+	})
+	definitionIntent := RequiresNamedTopicDefinitionCoverage(intentQuery)
 	if conditionIntent && definitionIntent {
 		intent = "定义 完整适用条件 条件列表"
 	} else if conditionIntent {
 		intent = "完整适用条件 条件列表"
-	} else if containsAny(query, []string{"定义", "是什么", "define", "what is"}) {
+	} else if containsAny(intentQuery, []string{"定义", "是什么", "define", "what is"}) {
 		intent = "定义与直接规定"
 	}
 	out := make([]string, 0, len(topics))
 	for _, topic := range topics {
-		out = append(out, strings.TrimSpace(topic+" "+intent))
+		qualifier, _ := narrowQuantitativeQuestionQualifier(query, topic)
+		out = append(out, strings.TrimSpace(strings.Join(nonEmptyStrings(topic, qualifier, intent), " ")))
 	}
 	return out
 }
@@ -606,7 +613,7 @@ func EvidenceGrepQueries(query string) []string {
 	}
 	out := make([]string, 0, len(topics))
 	for _, topic := range topics {
-		if pattern := evidenceGrepTopicPattern(topic); pattern != "" {
+		if pattern := evidenceGrepTopicPatternForQuery(topic, query); pattern != "" {
 			out = append(out, pattern)
 		}
 	}
@@ -627,7 +634,7 @@ func AugmentEvidenceGrepQuery(grepQuery, originalQuery string) string {
 	aliasProbe := strings.ReplaceAll(lower, "性", "")
 	selected := make([]string, 0, len(topics))
 	for _, topic := range topics {
-		pattern := evidenceGrepTopicPattern(topic)
+		pattern := evidenceGrepTopicPatternForQuery(topic, originalQuery)
 		if pattern == "" {
 			continue
 		}
@@ -644,7 +651,7 @@ func AugmentEvidenceGrepQuery(grepQuery, originalQuery string) string {
 	// targets as the bounded safety net.
 	if len(selected) == 0 {
 		for _, topic := range topics {
-			if pattern := evidenceGrepTopicPattern(topic); pattern != "" {
+			if pattern := evidenceGrepTopicPatternForQuery(topic, originalQuery); pattern != "" {
 				selected = append(selected, pattern)
 			}
 		}
@@ -717,6 +724,83 @@ func evidenceGrepTopicPattern(topic string) string {
 		return full + "|" + strings.Join(patterns[1:], ".{0,200}")
 	}
 	return full
+}
+
+// evidenceGrepTopicPatternForQuery keeps the stable subject pattern while
+// adding a user-authored quantitative unit when the question asks "多少".
+// This distinguishes the requested numeric rule from nearby prose that merely
+// repeats the same subject.  The number itself is deliberately not known or
+// encoded here: retrieval must still obtain it from the selected source.
+func evidenceGrepTopicPatternForQuery(topic, query string) string {
+	base := evidenceGrepTopicPattern(topic)
+	if base == "" {
+		return ""
+	}
+	_, unit := narrowQuantitativeQuestionQualifier(query, topic)
+	if unit == "" {
+		return base
+	}
+	return "(?:" + base + `).{0,200}[0-9０-９一二三四五六七八九十百千万两]+.{0,8}` + regexp.QuoteMeta(unit)
+}
+
+// narrowQuantitativeQuestionQualifier extracts only the interrogative phrase
+// and unit written by the user (for example, "至少多少日").  It never derives
+// the numeric answer and ignores runtime-contract text appended after the
+// original request.
+func narrowQuantitativeQuestionQualifier(query, topic string) (string, string) {
+	value := query
+	if index := strings.Index(value, "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"); index >= 0 {
+		value = value[:index]
+	}
+	for _, clause := range regexp.MustCompile(`[？?\n]+`).Split(value, -1) {
+		topicAt := strings.Index(clause, topic)
+		if topicAt < 0 {
+			continue
+		}
+		tail := clause[topicAt+len(topic):]
+		questionAt := strings.Index(tail, "多少")
+		if questionAt < 0 {
+			continue
+		}
+		unitTail := strings.TrimSpace(tail[questionAt+len("多少"):])
+		unitRunes := make([]rune, 0, 8)
+		for _, r := range unitTail {
+			if unicode.IsSpace(r) || strings.ContainsRune("，,；;。.!！?？：:、（）()[]【】", r) {
+				break
+			}
+			if !unicode.IsLetter(r) {
+				break
+			}
+			unitRunes = append(unitRunes, r)
+			if len(unitRunes) == 8 {
+				break
+			}
+		}
+		unit := strings.TrimPrefix(strings.TrimSpace(string(unitRunes)), "个")
+		if unit == "" {
+			continue
+		}
+		qualifierStart := questionAt
+		for _, prefix := range []string{"至少", "至多", "最少", "最多"} {
+			if strings.HasSuffix(tail[:questionAt], prefix) {
+				qualifierStart = questionAt - len(prefix)
+				break
+			}
+		}
+		qualifier := strings.TrimSpace(tail[qualifierStart : questionAt+len("多少")+len(string(unitRunes))])
+		return qualifier, unit
+	}
+	return "", ""
+}
+
+func nonEmptyStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 // FocusEvidenceRewriteQuery removes project-state prose from a multi-target
@@ -1191,8 +1275,8 @@ func NormalizeDeferredComparisonRelationships(answer, originalQuery string) stri
 	lines := strings.Split(value, "\n")
 	for index, line := range lines {
 		line = removeDeferredUnknownsFromConfirmedLine(line, unknownTopics)
-		citation := deferredCitationPattern.FindStringIndex(line)
-		if citation == nil {
+		citations := deferredCitationPattern.FindAllStringIndex(line, -1)
+		if len(citations) == 0 {
 			lines[index] = line
 			continue
 		}
@@ -1203,10 +1287,17 @@ func NormalizeDeferredComparisonRelationships(answer, originalQuery string) stri
 			)
 			line = parenthetical.ReplaceAllString(line, topic)
 		}
-		citation = deferredCitationPattern.FindStringIndex(line)
-		if citation == nil {
+		citations = deferredCitationPattern.FindAllStringIndex(line, -1)
+		if len(citations) == 0 {
 			continue
 		}
+		// A single option paragraph may legitimately need more than one
+		// evidence fragment: for example, one citation for its definition and
+		// another for its applicability conditions.  Truncating at the first
+		// handle discarded every later supported clause.  Keep the complete
+		// citation-bearing prefix and neutralize only the explanatory suffix
+		// that follows the final handle.
+		citation := citations[len(citations)-1]
 		suffix := line[citation[1]:]
 		if containsAny(suffix, []string{"待确认", "待核实", "尚未确认", "未确认"}) {
 			line = strings.TrimSpace(line[:citation[1]]) + "；该直接条件在本项目中是否成立待确认。"
@@ -5245,7 +5336,7 @@ func explicitResolvedExclusiveEntities(userStatements []string) map[string]bool 
 // restoreExplicitResolvedEntityFacts after this row is removed.
 func incompleteResolvedEntityConclusionLine(line string, resolvedEntities map[string]bool) bool {
 	if len(resolvedEntities) == 0 || !containsAny(line, []string{
-		"核验结论", "独家性", "不可替代性", "供应商地位", "供应商主张",
+		"核验结论", "独家性", "不可替代性", "供应商地位", "供应商主张", "供应商说法",
 	}) || containsAny(line, []string{
 		"并非不可替代", "不是不可替代", "不再不可替代", "可替代", "不具排他性",
 		"主张不成立", "核验为不成立", "已核验为不成立", "推翻", "否定",

@@ -1226,6 +1226,39 @@ func TestNormalizeStateAuditSectionsRemovesQuotedRetiredClaimFromActiveLabel(t *
 	}
 }
 
+func TestNormalizeStateAuditSectionsRemovesResolvedSupplierClaimRowFromActive(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"A供应商声称接口只能由它安全改造。该说法尚未核验。",
+		"法务和技术核验后确认A并非不可替代，B、C通过适配也能满足；废弃‘只能A’的前提。",
+	}
+	answer := `## 当前有效事实
+| 事实 | 详情 |
+|---|---|
+| 供应商说法 | A供应商声称接口只能由它安全改造 |
+| 供应商替代性 | 法务和技术核验后确认A并非不可替代，B、C通过适配也能满足 |
+## 已废弃事实
+- A供应商排他性主张：废弃（不再成立）
+## 待确认事项
+- 无
+## 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "## 已废弃事实")[0]
+	if strings.Contains(active, "接口只能由它安全改造") {
+		t.Fatalf("resolved supplier claim survived as an active row: %s", got)
+	}
+	for _, expected := range []string{"A并非不可替代", "B", "C"} {
+		if !strings.Contains(active, expected) {
+			t.Fatalf("current replacement fact %q was lost: %s", expected, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("resolved supplier row removal is not idempotent:\n%s", twice)
+	}
+}
+
 func TestAuditFinalizationRestoresObservedTwoColumnIdentityUnknown(t *testing.T) {
 	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。"
 	prior := "补充来源：项目负责人是林梅。当前对话用户身份没有提供，不得把用户等同于林梅。"
@@ -1520,6 +1553,21 @@ func TestNormalizeDeferredComparisonRelationshipsRemovesOnlyBridgeParenthetical(
 	}
 	if got := NormalizeDeferredComparisonRelationships(answer, "请解释影响规格统一性的因素。"); got != answer {
 		t.Fatalf("ordinary answer was normalized: %s", got)
+	}
+
+	multiEvidence := `已确认：项目事实。
+
+待确认：需求是否完整待确认；时间是否可行待确认。
+
+竞争谈判：制度条件为采购人与二家以上供应商洽谈<src id="S7" />，适宜情形包括技术复杂或存在不同实现路径<src id="S6" />；该条件在本项目中是否成立待确认。`
+	multiGot := NormalizeDeferredComparisonRelationships(multiEvidence, query)
+	for _, expected := range []string{"技术复杂", "不同实现路径", `<src id="S7" />`, `<src id="S6" />`} {
+		if !strings.Contains(multiGot, expected) {
+			t.Fatalf("later directly cited condition %q was truncated: %s", expected, multiGot)
+		}
+	}
+	if strings.Count(multiGot, "该直接条件在本项目中是否成立待确认。") != 1 {
+		t.Fatalf("multi-evidence suffix was not neutralized once: %s", multiGot)
 	}
 }
 
@@ -1856,9 +1904,20 @@ func TestEvidenceGrepQueriesUseExecutableUserDerivedPatterns(t *testing.T) {
 		!strings.Contains(retrievals[1], "候选人排名") {
 		t.Fatalf("runtime topic contract was not reused for retrieval: %v", retrievals)
 	}
+	if !strings.Contains(retrievals[0], "至少多少日") || strings.Contains(retrievals[0], "适用条件") {
+		t.Fatalf("quantitative question was broadened into an applicability search: %v", retrievals)
+	}
 	grepQueries := EvidenceGrepQueries(runtimeQuery)
 	if len(grepQueries) != 2 {
 		t.Fatalf("runtime topic contract did not produce two grep queries: %v", grepQueries)
+	}
+	publicationRule := "中标候选人公示期应不少于3日（日历日）。"
+	if !regexp.MustCompile(grepQueries[0]).MatchString(publicationRule) {
+		t.Fatalf("quantitative grep pattern missed the directly requested rule: %q", grepQueries[0])
+	}
+	neighboringProcedure := "预成交供应商在中标候选人公示后未发生否决情形的，予以公告。"
+	if regexp.MustCompile(grepQueries[0]).MatchString(neighboringProcedure) {
+		t.Fatalf("quantitative grep pattern retained an answerless neighboring procedure: %q", grepQueries[0])
 	}
 	sourceWording := "质疑投诉事项涉及评审结果实质性内容并影响中标候选人排名的，由分管立项和采购部门的公司领导共同批准复核。"
 	if !regexp.MustCompile(grepQueries[1]).MatchString(sourceWording) {

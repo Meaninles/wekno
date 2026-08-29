@@ -4572,6 +4572,105 @@ def evidence_topics_without_adjacent_citation(answer: str, topics: list[str]) ->
     return missing
 
 
+def narrow_quantitative_questions(query: str, topics: list[str]) -> dict[str, str]:
+    """Return user-authored units for named questions that ask ``多少``.
+
+    The numeric answer is intentionally absent from this contract.  The unit is
+    enough to distinguish a requested duration/amount/count rule from a nearby
+    paragraph that merely repeats the same subject.
+    """
+
+    user_query = (query or "").split(TURN_EXECUTION_CONTRACT_MARKER, 1)[0]
+    questions: dict[str, str] = {}
+    for clause in re.split(r"[？?\n]+", user_query):
+        for topic in topics:
+            topic_at = clause.find(topic)
+            if topic_at < 0:
+                continue
+            tail = clause[topic_at + len(topic):]
+            marker_at = tail.find("多少")
+            if marker_at < 0:
+                continue
+            match = re.match(r"\s*([个]?[A-Za-z\u4e00-\u9fff]{1,8})", tail[marker_at + len("多少"):])
+            if not match:
+                continue
+            unit = match.group(1).strip().removeprefix("个")
+            if unit:
+                questions[topic] = unit
+    return questions
+
+
+def contains_number_with_unit(value: str, unit: str) -> bool:
+    compact = re.sub(r"[\s*_]", "", value or "")
+    return bool(
+        re.search(
+            rf"[0-9０-９一二三四五六七八九十百千万两]+.{{0,6}}{re.escape(unit)}",
+            compact,
+        )
+    )
+
+
+def compact_topic_match(value: str, topic: str) -> bool:
+    compact_value = re.sub(r"\s+", "", value or "").lower()
+    compact_topic = re.sub(r"\s+", "", topic or "").lower()
+    if not compact_topic:
+        return False
+    if compact_topic in compact_value:
+        return True
+    return len(compact_topic) >= 4 and compact_topic[:2] in compact_value and compact_topic[-2:] in compact_value
+
+
+def quantitative_topics_without_grounded_answer(
+    answer: str,
+    query: str,
+    topics: list[str],
+    evidence_by_id: dict[str, str],
+) -> list[str]:
+    """Require a numeric answer and directly matching current-turn evidence."""
+
+    questions = narrow_quantitative_questions(query, topics)
+    if not questions:
+        return []
+    value = answer or ""
+    occurrences: list[tuple[int, str]] = []
+    for topic in topics:
+        start = 0
+        while True:
+            index = value.find(topic, start)
+            if index < 0:
+                break
+            occurrences.append((index, topic))
+            start = index + len(topic)
+    occurrences.sort(key=lambda item: item[0])
+
+    missing: list[str] = []
+    for topic, unit in questions.items():
+        grounded = False
+        for index, found_topic in occurrences:
+            if found_topic != topic:
+                continue
+            following = [
+                position
+                for position, other_topic in occurrences
+                if position > index and other_topic != topic
+            ]
+            end = min(following) if following else len(value)
+            segment = value[index:end]
+            if not contains_number_with_unit(segment, unit):
+                continue
+            citation_ids = re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', segment)
+            if any(
+                compact_topic_match(evidence_by_id.get(citation_id, ""), topic)
+                and contains_number_with_unit(evidence_by_id.get(citation_id, ""), unit)
+                for citation_id in citation_ids
+            ):
+                grounded = True
+                break
+        if not grounded:
+            missing.append(topic)
+    return missing
+
+
 def direct_condition_evidence(evidence: str, topic: str) -> bool:
     """Check that a source is the named target's condition passage, not a neighbor."""
 
@@ -4899,6 +4998,26 @@ def turn_contract_issues(
                     "Continue retrieval for every missing named comparison item, then rewrite the complete answer. "
                     "Each item's own short paragraph must contain a current-turn cite_exactly source handle; "
                     "do not finish with 'not expanded' or let another item's citation stand in for it."
+                ),
+            }
+        )
+
+    missing_quantitative = quantitative_topics_without_grounded_answer(
+        value,
+        query,
+        topics,
+        evidence_by_id or {},
+    )
+    if missing_quantitative:
+        issues.append(
+            {
+                "code": "current_turn_evidence_quantitative_incomplete",
+                "missing_topics": missing_quantitative,
+                "required_action": (
+                    "Continue focused retrieval for every missing quantitative question, then rewrite the complete "
+                    "answer. State the requested number and user-authored unit beside a current-turn citation whose "
+                    "evidence contains that same subject and numeric rule. A neighboring procedure that merely "
+                    "mentions the subject is not an answer."
                 ),
             }
         )

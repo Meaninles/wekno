@@ -460,6 +460,43 @@ func TestRecoverOffTopicNarrowEvidenceAnswerUsesEveryCurrentTopic(t *testing.T) 
 	}
 }
 
+func TestRecoverOffTopicNarrowEvidenceAnswerRepairsMissingQuantitativeResult(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "neighbor", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "预成交供应商在中标候选人公示后未发生否决情形的，予以公告并发出通知书。",
+			Metadata:        map[string]string{MetadataCitationID: "S1", MetadataChunkID: "neighbor", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "notice", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "采购人应及时发起中标候选人公示，中标候选人公示期应不少于3日（日历日）。",
+			Metadata:        map[string]string{MetadataCitationID: "S3", MetadataChunkID: "notice", "source_type": SourceTypeKnowledge},
+		},
+		{
+			ID: "review", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "质疑投诉事项涉及评审结果实质性内容并影响中标候选人排名的，由分管立项和采购部门的公司领导共同批准复核。",
+			Metadata:        map[string]string{MetadataCitationID: "S2", MetadataChunkID: "review", "source_type": SourceTypeKnowledge},
+		},
+	}
+	topics := []string{"中标候选人公示", "异议涉及实质内容并影响候选人排名"}
+	query := "临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
+	answer := "预成交供应商在中标候选人公示后未发生否决情形的，予以公告。<src id=\"S1\" />\n\n" +
+		"涉及实质内容并影响中标候选人排名的，由分管立项和采购部门的公司领导共同批准。<src id=\"S2\" />"
+
+	got := RecoverOffTopicNarrowEvidenceAnswer(answer, topics, refs, query)
+	for _, expected := range []string{"不少于3日", `<src id="S3" />`, "分管立项", "采购部门", `<src id="S2" />`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("quantitative narrow recovery lost %q: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "未发生否决情形") {
+		t.Fatalf("answerless neighboring procedure survived quantitative recovery: %s", got)
+	}
+	if twice := RecoverOffTopicNarrowEvidenceAnswer(got, topics, refs, query); twice != got {
+		t.Fatalf("quantitative narrow recovery is not idempotent: %s", twice)
+	}
+}
+
 func TestRecoverOffTopicNarrowEvidenceAnswerRemovesSingleQuestionHistoryDrift(t *testing.T) {
 	refs := []*types.SearchResult{
 		{

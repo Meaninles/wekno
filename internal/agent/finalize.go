@@ -279,6 +279,7 @@ func (e *AgentEngine) emitCompletionEvent(
 			state.FinalAnswer,
 			conversationmemory.RequiredEvidenceTopics(e.activeQuery),
 			state.KnowledgeRefs,
+			e.activeQuery,
 		)
 	}
 	state.FinalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(state.FinalAnswer)

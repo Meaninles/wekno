@@ -980,6 +980,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 						answer,
 						conversationmemory.RequiredEvidenceTopics(reqCtx.query),
 						[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
+						reqCtx.query,
 					)
 				}
 				answer = conversationmemory.NormalizeConfirmedUnknownSections(answer)

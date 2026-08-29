@@ -463,7 +463,11 @@ def cmd_judge(args: argparse.Namespace) -> int:
                 case,
                 baseline_by_key.get((case.case_id, case.attempt_index)),
             )
-        except JudgeError as exc:
+        # urllib may surface peer disconnects as ConnectionError subclasses
+        # (for example http.client.RemoteDisconnected) instead of URLError.
+        # Keep transport failures case-local so one evaluator outage cannot
+        # abort the artifact or escape into the product request path.
+        except (JudgeError, ConnectionError) as exc:
             error = f"judge_error:{exc}"
             judged.append(
                 case.model_copy(

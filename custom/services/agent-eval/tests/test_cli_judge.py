@@ -136,6 +136,52 @@ class JudgeCliTests(unittest.TestCase):
                 judged.metadata["judge"]["errors"][0]["attempt_index"], 1
             )
 
+    def test_peer_disconnect_is_invalid_and_does_not_abort_artifact(self) -> None:
+        dataset = [spec(repetitions=2)]
+        candidate = run_for(
+            dataset,
+            "candidate",
+            [case(Verdict.PASS, attempt_index=1), case(Verdict.PASS, attempt_index=2)],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset_path = root / "dataset.jsonl"
+            candidate_path = root / "candidate.json"
+            output_path = root / "judged.json"
+            write_jsonl(dataset_path, dataset)
+            write_json(candidate_path, candidate)
+
+            passed = [
+                MetricScore(
+                    name="judge.contract_satisfaction",
+                    value="pass",
+                    passed=True,
+                    hard=False,
+                    turn_id="turn",
+                    metadata={"confidence": 0.99},
+                )
+            ]
+            args = argparse.Namespace(
+                dataset=str(dataset_path),
+                run=str(candidate_path),
+                baseline=None,
+                calibration_result=None,
+                output=str(output_path),
+            )
+            with patch.dict(os.environ, {"AGENT_EVAL_JUDGE_MODEL": "judge-x"}), patch(
+                "weknora_eval.cli.judge_case",
+                side_effect=[ConnectionResetError("peer reset"), passed],
+            ):
+                self.assertEqual(cmd_judge(args), 2)
+
+            judged = load_run(output_path)
+            self.assertEqual(
+                [item.verdict for item in judged.cases],
+                [Verdict.INVALID, Verdict.PASS],
+            )
+            self.assertIn("judge_error:peer reset", judged.cases[0].error or "")
+            self.assertEqual(judged.metadata["judge"]["error_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

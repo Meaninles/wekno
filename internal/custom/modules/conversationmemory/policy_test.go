@@ -328,6 +328,24 @@ func TestNormalizeStateDeltaScopeDropsUnrequestedHistoricalLedger(t *testing.T) 
 	}
 }
 
+func TestNormalizeStateDeltaScopeDropsEpistemicInstructionArtifact(t *testing.T) {
+	query := "初始目标日期是2026年11月30日。只记录日期，不推断是否紧急。"
+	answer := "- **初始目标日期**：2026年11月30日\n- 不推断：否紧急"
+
+	got := NormalizeStateDeltaScope(answer, query)
+	if !strings.Contains(got, "2026年11月30日") {
+		t.Fatalf("explicit date was lost: %s", got)
+	}
+	for _, artifact := range []string{"不推断", "否紧急"} {
+		if strings.Contains(got, artifact) {
+			t.Fatalf("epistemic instruction artifact %q survived: %s", artifact, got)
+		}
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("epistemic instruction cleanup was not idempotent: %s", twice)
+	}
+}
+
 func TestNormalizeStateDeltaScopeKeepsCurrentAndRetiredValues(t *testing.T) {
 	query := "目标日期调整为2027年1月31日，2026年11月30日从现在起废弃。只更新日期状态。"
 	answer := `- **当前目标日期**：2027年1月31日

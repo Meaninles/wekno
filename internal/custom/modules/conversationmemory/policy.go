@@ -1512,6 +1512,9 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 		if trimmed == "" {
 			continue
 		}
+		if isEpistemicStateInstructionLine(trimmed) {
+			continue
+		}
 		if isRequestedStateDeltaHeading(trimmed, query) || stateDeltaLineRelevant(trimmed, query) {
 			keep[index] = true
 			relevantCount++
@@ -1695,7 +1698,9 @@ func restoreExplicitStateDeltaFacts(answer, query string) string {
 	appendFact := func(label, fact string) {
 		label = strings.TrimSpace(strings.Trim(label, "：: "))
 		fact = strings.TrimSpace(fact)
-		if label == "" || fact == "" || containsAny(label, []string{"只", "仅", "不得", "未经", "不要", "从现在", "其中"}) {
+		if label == "" || fact == "" || containsAny(label, []string{
+			"只", "仅", "不得", "未经", "不要", "不推断", "不得推断", "不要推断", "从现在", "其中",
+		}) {
 			return
 		}
 		key := normalizeStateDeltaText(label + fact)
@@ -1713,6 +1718,9 @@ func restoreExplicitStateDeltaFacts(answer, query string) string {
 	}
 	for _, clause := range clauses {
 		clause = strings.TrimSpace(clause)
+		if isEpistemicStateInstructionLine(clause) {
+			continue
+		}
 		if colon := strings.LastIndexAny(clause, "：:"); colon >= 0 && colon < len(clause)-1 {
 			_, width := utf8.DecodeRuneInString(clause[colon:])
 			clause = strings.TrimSpace(clause[colon+width:])

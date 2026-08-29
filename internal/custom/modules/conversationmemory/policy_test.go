@@ -379,7 +379,7 @@ func TestNormalizeStateDeltaScopeDropsEmptyGeneratedLabelsOnDeclarativeTurns(t *
 		{
 			query:  "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。",
 			answer: "- 项目负责人：周岚\n- 当前对话用户身份：未提供，不得将用户等同于周岚\n- 持续有效禁令（原样保留）：",
-			keep:   "当前对话用户身份：未提供",
+			keep:   "当前对话用户身份未提供",
 			drop:   "持续有效禁令",
 		},
 		{
@@ -530,6 +530,28 @@ func TestNormalizeStateDeltaScopeProjectsConfirmedAndUnknownUpdate(t *testing.T)
 	}
 	if twice := NormalizeStateDeltaScope(got, query); twice != got {
 		t.Fatalf("confirmed/unknown projection was not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeStateDeltaScopeProjectsRoleWithoutInferringUserIdentity(t *testing.T) {
+	query := "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。只更新台账。"
+	answer := "## 当前有效事实\n- 项目负责人是周岚\n- 当前对话用户身份仍\n\n待确认：不得把用户等同于周岚；事项；维持上一轮已有记录不变。"
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{
+		"## 当前有效事实", "项目负责人：周岚", "## 待确认事项（未知）", "当前对话用户身份未提供",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("role/identity projection lost %q: %s", expected, got)
+		}
+	}
+	for _, malformed := range []string{"身份仍", "不得把用户等同", "维持上一轮"} {
+		if strings.Contains(got, malformed) {
+			t.Fatalf("malformed or epistemic text %q survived: %s", malformed, got)
+		}
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("role/identity projection was not idempotent:\n%s", twice)
 	}
 }
 
@@ -2529,7 +2551,7 @@ func TestNormalizeStateAuditSectionsRebuildsAtomicUnknownsAndSources(t *testing.
 		t.Fatalf("explicit resolution actor was not made unambiguous: %s", got)
 	}
 	retired := strings.Split(strings.Split(got, "### 已废弃事实")[1], "### 待确认事项")[0]
-	if !strings.Contains(retired, "D供应商") || !strings.Contains(retired, "（已废弃）") {
+	if !strings.Contains(retired, "D供应商") || !strings.Contains(retired, "：已废弃") {
 		t.Fatalf("retired supplier premise lacks an atomic status: %s", got)
 	}
 	unknown := strings.Split(strings.Split(got, "### 待确认事项")[1], "### 行动边界")[0]
@@ -2566,11 +2588,12 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 - 项目代号：寒星冷链温控改造（用户首次声明）
 - 预算：总预算 235 万元，其中设备 175 万元、平台服务 60 万元（用户第 2 轮声明）
 - D兼容性核验：D并非不可替代，E、F经适配也能兼容（技术组完成核验，用户第8轮声明）（来源：技术组）
-## 已废弃事实
+## ❌ 已废弃事实
 - 原预算（用户第1轮）：总预算 210 万元，设备 160 万元、平台服务 50 万元——被第2轮财务批复取代（已废弃）
 - 原验收日期：2027 年 3 月 31 日——被第5轮调整取代（已废弃）
 - D供应商“只能由它兼容”的主张——被技术组核验推翻（已废弃）
 - 采购信息不可公开：未明确状态→法务确认可以公开后废弃（已废弃）
+- 旧版《采购管理办法》范围（已废弃）
 ## 待确认事项
 - 当前对话用户身份未提供
 - 是否包含仓库布线施工待确认
@@ -2602,12 +2625,12 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 	if strings.Contains(got, "选择采购方式") {
 		t.Fatalf("transient procurement-selection instruction survived: %s", got)
 	}
-	for _, artifact := range []string{"采购信息不可公开", "等同于周岚"} {
+	for _, artifact := range []string{"采购信息不可公开", "旧版《采购管理办法》", "等同于周岚", "❌"} {
 		if strings.Contains(got, artifact) {
 			t.Fatalf("unsupported or duplicate audit artifact %q survived: %s", artifact, got)
 		}
 	}
-	if !strings.Contains(got, "D供应商排他性主张（已废弃）") {
+	if !strings.Contains(got, "D供应商排他性主张：已废弃") {
 		t.Fatalf("resolved supplier premise was not canonicalized: %s", got)
 	}
 	if !strings.Contains(got, "来源：技术组") || !strings.Contains(got, "未经授权不得发起采购") {

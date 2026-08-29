@@ -121,6 +121,10 @@ var sourceAttributionParentheticalPattern = regexp.MustCompile(
 	`[（(]\s*来源\s*[：:]\s*([^（）()]+?)\s*[）)]`,
 )
 
+var internalUserSourceParentheticalPattern = regexp.MustCompile(
+	`[（(]\s*来源\s*[：:][^（）()]*(?:用户消息|此前用户消息|最近轮次|当前轮次)[^（）()]*[）)]`,
+)
+
 var replacementActorPattern = regexp.MustCompile(
 	`被([^|。；;\n]{2,24}?)(调整为|变更为|更新为|修改为)`,
 )
@@ -1541,6 +1545,9 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	if projected := projectExplicitSourceUpdate(query); projected != "" {
 		return projected
 	}
+	if projected := projectExplicitRoleIdentityDelta(query); projected != "" {
+		return projected
+	}
 	if projected := projectExplicitScalarStateDelta(query); projected != "" {
 		return projected
 	}
@@ -1900,6 +1907,26 @@ func projectExplicitConfirmedUnknownUpdate(query string) string {
 	for _, fact := range unknown {
 		out = append(out, "- "+fact)
 	}
+	return strings.Join(out, "\n")
+}
+
+// projectExplicitRoleIdentityDelta keeps a named business role distinct from
+// the unknown current-user identity. Both values come from the current user
+// statement; the non-equivalence instruction itself is not persisted as a
+// business fact or an action boundary.
+func projectExplicitRoleIdentityDelta(query string) string {
+	if !statementHasUnknownUserIdentity(query) {
+		return ""
+	}
+	roles := explicitNamedRoleFacts([]string{query})
+	if len(roles) == 0 {
+		return ""
+	}
+	out := []string{"## 当前有效事实", ""}
+	for _, role := range roles {
+		out = append(out, "- "+role.subject+"："+role.value)
+	}
+	out = append(out, "", "## 待确认事项（未知）", "", "- 当前对话用户身份未提供")
 	return strings.Join(out, "\n")
 }
 
@@ -2777,6 +2804,8 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	// source names. Keep the attribution while removing the implementation label.
 	value = internalUserMessageLabelPattern.ReplaceAllString(value, "此前用户消息")
 	value = stripInternalConversationLocators(value)
+	value = internalUserSourceParentheticalPattern.ReplaceAllString(value, "")
+	value = emptyParentheticalPattern.ReplaceAllString(value, "")
 	userStatements := make([]string, 0, len(priorUserStatements)+1)
 	for _, statement := range priorUserStatements {
 		for _, line := range strings.Split(strings.ReplaceAll(statement, "\r\n", "\n"), "\n") {
@@ -2809,7 +2838,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			if key == "action_boundary" {
 				seenActionBoundaryKinds = make(map[string]bool)
 			}
-			out = append(out, line)
+			out = append(out, canonicalStateAuditHeading(line, key))
 			continue
 		}
 		if transientStateAuditScopeInstruction(line) {
@@ -2868,6 +2897,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			}
 		}
 		if section == "retired" {
+			if !retiredAuditLineSupportedByUserLifecycle(line, userStatements) {
+				continue
+			}
 			if isRetiredUnknownPlaceholder(line) {
 				continue
 			}
@@ -3160,6 +3192,28 @@ func trimStateAuditPreamble(lines []string) []string {
 	return lines
 }
 
+func canonicalStateAuditHeading(line, section string) string {
+	_ = section
+	trimmed := strings.TrimSpace(line)
+	level := 0
+	for level < len(trimmed) && trimmed[level] == '#' {
+		level++
+	}
+	if level == 0 {
+		return line
+	}
+	payload := strings.TrimSpace(trimmed[level:])
+	runes := []rune(payload)
+	start := 0
+	for start < len(runes) && !unicode.IsLetter(runes[start]) && !unicode.IsNumber(runes[start]) {
+		start++
+	}
+	if start == len(runes) {
+		return line
+	}
+	return strings.Repeat("#", level) + " " + strings.TrimSpace(string(runes[start:]))
+}
+
 // normalizeRetiredAuditLine preserves the generated fact verbatim and only
 // appends an explicit lifecycle label. Headings, table schemas, separators and
 // empty sentinels are not facts and therefore remain unchanged.
@@ -3219,6 +3273,63 @@ func isRetiredUnknownPlaceholder(line string) bool {
 	return containsAny(trimmed, []string{
 		"未明确状态", "状态未明确", "没有明确状态", "此前未明确", "原状态未知", "此前未知",
 	})
+}
+
+// retiredAuditLineSupportedByUserLifecycle prevents a document/evidence
+// detour from becoming project state merely because the model placed it in an
+// audit's retired section. Filtering is enabled only when the user archive
+// contains explicit lifecycle declarations; otherwise the function remains
+// conservative and preserves the generated audit.
+func retiredAuditLineSupportedByUserLifecycle(line string, userStatements []string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) ||
+		isRetiredAuditTableHeader(trimmed) {
+		return true
+	}
+	plain := strings.Trim(orderedOrBulletListPrefixPattern.ReplaceAllString(trimmed, ""),
+		" \t。.;；,，:：*_`~#()（）[]【】|")
+	if containsAny(strings.ToLower(plain), []string{"无", "暂无", "没有", "none", "n/a"}) &&
+		utf8.RuneCountInString(plain) <= 12 {
+		return true
+	}
+
+	lifecycleFragments := make([]string, 0, 6)
+	for _, statement := range userStatements {
+		if IsStateAuditTurn(statement) {
+			continue
+		}
+		for _, fragment := range splitUserFactFragments(cleanUserStatementRecord(statement)) {
+			if containsAny(fragment, []string{
+				"废弃", "作废", "失效", "被取代", "被替代", "不再有效", "推翻", "否定",
+			}) {
+				lifecycleFragments = append(lifecycleFragments, fragment)
+			}
+		}
+	}
+	if len(lifecycleFragments) == 0 {
+		return true
+	}
+	lineAnchors := stateAuditAnchorPattern.FindAllString(expandSharedScalarUnits(line), -1)
+	for _, fragment := range lifecycleFragments {
+		fragmentAnchors := explicitLifecycleScalarAnchors(fragment)
+		for _, anchor := range lineAnchors {
+			for _, fragmentAnchor := range fragmentAnchors {
+				if anchor == fragmentAnchor {
+					return true
+				}
+			}
+		}
+		supportSubject := strings.NewReplacer(
+			"已废弃", "", "废弃", "", "已作废", "", "作废", "",
+			"已失效", "", "失效", "", "被取代", "", "被替代", "",
+			"不再有效", "", "推翻", "", "否定", "", "从现在起", "",
+		).Replace(fragment)
+		supportSubject = strings.Trim(supportSubject, " \t。.;；,，:：*_`~#()（）[]【】'\"‘’“”")
+		if supportSubject != "" && stateDeltaLineRelevant(line, supportSubject) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasAtomicRetiredStatus(value string) bool {
@@ -3705,7 +3816,7 @@ func canonicalizeRetiredExclusiveClaims(lines, entities []string) []string {
 			if seen[entity] {
 				continue
 			}
-			out = append(out, "- "+entity+"供应商排他性主张（已废弃）")
+			out = append(out, "- "+entity+"供应商排他性主张：已废弃")
 			seen[entity] = true
 		}
 	}
@@ -3736,7 +3847,7 @@ func canonicalizeRetiredExclusiveClaims(lines, entities []string) []string {
 			continue
 		}
 		if !seen[matched] {
-			out = append(out, "- "+matched+"供应商排他性主张（已废弃）")
+			out = append(out, "- "+matched+"供应商排他性主张：已废弃")
 			seen[matched] = true
 		}
 	}
@@ -4502,11 +4613,12 @@ func ensureResolvedEntitySourceAttributions(lines, userStatements []string) []st
 			continue
 		}
 		for _, resolution := range resolutions {
-			if !resolvedEntityFactCovered(line, resolution.fact) ||
-				containsAny(line, []string{"来源：" + resolution.actor, "来源:" + resolution.actor}) {
+			if !resolvedEntityFactCovered(line, resolution.fact) {
 				continue
 			}
-			lines[index] = strings.TrimRight(line, " \t。") + "（来源：" + resolution.actor + "）"
+			leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			fact := strings.TrimRight(strings.TrimSpace(resolution.fact), "。 ")
+			lines[index] = leading + "- " + fact + "（来源：" + resolution.actor + "）"
 			break
 		}
 	}

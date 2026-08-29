@@ -630,17 +630,13 @@ func AugmentEvidenceGrepQuery(grepQuery, originalQuery string) string {
 	if value == "" || len(topics) < 2 {
 		return value
 	}
-	lower := strings.ToLower(value)
-	aliasProbe := strings.ReplaceAll(lower, "性", "")
 	selected := make([]string, 0, len(topics))
 	for _, topic := range topics {
 		pattern := evidenceGrepTopicPatternForQuery(topic, originalQuery)
 		if pattern == "" {
 			continue
 		}
-		lowerTopic := strings.ToLower(strings.TrimSpace(topic))
-		if strings.Contains(lower, lowerTopic) || strings.Contains(aliasProbe, lowerTopic) ||
-			strings.Contains(value, pattern) {
+		if evidenceQueryTargetsTopic(value, topic, originalQuery) {
 			selected = append(selected, pattern)
 		}
 	}
@@ -661,6 +657,69 @@ func AugmentEvidenceGrepQuery(grepQuery, originalQuery string) string {
 		return value
 	}
 	return strings.Join(selected, "|")
+}
+
+// AlignEvidenceRetrievalQueries keeps model-authored semantic searches on the
+// immutable current-turn evidence contract. It is intentionally limited to a
+// fresh, multi-topic evidence turn: ordinary searches and history-dependent
+// follow-ups retain the model's original queries. A query that clearly names a
+// current target stays focused on that target; a query that names only an
+// expired topic is replaced by the current user-derived targets. No expected
+// answer or document-only term is introduced.
+func AlignEvidenceRetrievalQueries(queries []string, originalQuery string) []string {
+	cleaned := uniqueStrings(queries)
+	topics := RequiredEvidenceTopics(originalQuery)
+	if len(cleaned) == 0 || len(topics) < 2 || !RequiresFreshEvidenceTurn(originalQuery) {
+		return cleaned
+	}
+
+	canonical := EvidenceRetrievalQueries(originalQuery)
+	if len(canonical) != len(topics) {
+		return cleaned
+	}
+	selected := make([]string, 0, len(topics))
+	for index, topic := range topics {
+		for _, query := range cleaned {
+			if evidenceQueryTargetsTopic(query, topic, originalQuery) {
+				selected = append(selected, canonical[index])
+				break
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return canonical
+	}
+	return uniqueStrings(selected)
+}
+
+// evidenceQueryTargetsTopic recognizes both natural-language search intents
+// and executable regexes derived from a topic. Quantitative grep queries often
+// omit the non-capturing wrapper added by evidenceGrepTopicPatternForQuery; the
+// stable base-pattern check prevents such focused queries from being widened
+// back to every current-turn target.
+func evidenceQueryTargetsTopic(value, topic, originalQuery string) bool {
+	value = strings.TrimSpace(value)
+	topic = strings.TrimSpace(topic)
+	if value == "" || topic == "" {
+		return false
+	}
+	lower := strings.ToLower(value)
+	lowerTopic := strings.ToLower(topic)
+	if strings.Contains(lower, lowerTopic) ||
+		strings.Contains(strings.ReplaceAll(lower, "性", ""), strings.ReplaceAll(lowerTopic, "性", "")) {
+		return true
+	}
+	basePattern := evidenceGrepTopicPattern(topic)
+	fullPattern := evidenceGrepTopicPatternForQuery(topic, originalQuery)
+	if (basePattern != "" && strings.Contains(value, basePattern)) ||
+		(fullPattern != "" && strings.Contains(value, fullPattern)) {
+		return true
+	}
+	if basePattern == "" {
+		return false
+	}
+	compiled, err := regexp.Compile("(?i)(?:" + basePattern + ")")
+	return err == nil && compiled.MatchString(value)
 }
 
 func uniqueStrings(values []string) []string {

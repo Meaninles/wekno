@@ -1943,6 +1943,55 @@ func TestAugmentEvidenceGrepQueryRepairsFocusedAliasesAndLiteralSpaces(t *testin
 	}
 }
 
+func TestAugmentEvidenceGrepQueryKeepsQuantitativeCurrentTopicFocused(t *testing.T) {
+	query := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
+	runtimeQuery := AppendCurrentTurnDirective(query, query)
+
+	publication := AugmentEvidenceGrepQuery(
+		`中标.{0,80}公示.{0,200}[0-9０-９一二三四五六七八九十百千万两]+.{0,8}日`,
+		runtimeQuery,
+	)
+	if !strings.Contains(publication, "中标.{0,80}公示") {
+		t.Fatalf("quantitative publication query lost its target: %q", publication)
+	}
+	if strings.Contains(publication, "候选.{0,80}排名") {
+		t.Fatalf("focused publication query was broadened to review evidence: %q", publication)
+	}
+
+	review := AugmentEvidenceGrepQuery("异议涉及实质内容并影响候选人排名", runtimeQuery)
+	if !strings.Contains(review, "候选.{0,80}排名") {
+		t.Fatalf("review query lost its target: %q", review)
+	}
+	if strings.Contains(review, "中标.{0,80}公示") {
+		t.Fatalf("focused review query was broadened to publication evidence: %q", review)
+	}
+}
+
+func TestAlignEvidenceRetrievalQueriesUsesOnlyCurrentTurnTargets(t *testing.T) {
+	query := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
+	runtimeQuery := AppendCurrentTurnDirective(query, query)
+	canonical := EvidenceRetrievalQueries(runtimeQuery)
+
+	stale := AlignEvidenceRetrievalQueries([]string{
+		"询比采购的定义和适用条件",
+		"竞价采购的定义和适用条件",
+		"竞争谈判的定义和适用条件",
+	}, runtimeQuery)
+	if !reflect.DeepEqual(stale, canonical) {
+		t.Fatalf("stale semantic searches were not replaced by current targets: got=%v want=%v", stale, canonical)
+	}
+
+	focused := AlignEvidenceRetrievalQueries([]string{"中标候选人公示期至少多少日"}, runtimeQuery)
+	if len(focused) != 1 || focused[0] != canonical[0] {
+		t.Fatalf("focused semantic search was unnecessarily broadened: got=%v want=%v", focused, canonical[:1])
+	}
+
+	ordinary := []string{"RAG 的主要原理", "向量检索如何工作"}
+	if got := AlignEvidenceRetrievalQueries(ordinary, "解释 RAG 的主要原理。"); !reflect.DeepEqual(got, ordinary) {
+		t.Fatalf("ordinary semantic search was rewritten: got=%v want=%v", got, ordinary)
+	}
+}
+
 func TestNormalizeStateDeltaScopeProjectsExplicitUnknownOnlyTurn(t *testing.T) {
 	query := "采购标的最终类别仍未确认；采购信息是否可以公开也仍未确认。只把两项都列为待确认。"
 	answer := "项目为系统升级。\n- 采购标的最终类别：待确认\n- 采购信息是否可以公开：待确认\n- 中标候选人公示期：待确认"

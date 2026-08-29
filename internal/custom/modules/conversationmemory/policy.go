@@ -2537,6 +2537,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			if !auditUnknownLineSupported(line, explicitUnknowns) {
 				continue
 			}
+			line = canonicalizeAuditUnknownLine(line, explicitUnknowns)
 		}
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
@@ -2653,8 +2654,53 @@ func stripDanglingExplicitUnknownProjection(line string, explicitUnknowns []stri
 }
 
 func isEmptyExplicitUnknownProjection(line string, explicitUnknowns []string) bool {
-	return explicitUnknownProjectionRelevant(line, explicitUnknowns) &&
-		isEmptyActionBoundaryListLine(line)
+	if !explicitUnknownProjectionRelevant(line, explicitUnknowns) {
+		return false
+	}
+	if isEmptyActionBoundaryListLine(line) {
+		return true
+	}
+	// Streaming providers occasionally terminate an unresolved-state value
+	// after a leading adverb (for example "布线施工：仍"). That fragment is
+	// neither an active fact nor a usable unknown, so remove it from the active
+	// section; the complete user-authored unknown is restored below.
+	if colon := strings.LastIndexAny(line, "：:"); colon >= 0 {
+		_, width := utf8.DecodeRuneInString(line[colon:])
+		tail := strings.Trim(line[colon+width:], " \t。.;；,，*_`~()（）[]【】")
+		switch tail {
+		case "仍", "尚", "待", "未", "仍为", "尚为", "仍是", "尚是":
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalizeAuditUnknownLine keeps an unknown row atomic. A generated row
+// may repeat an active premise before its unknown conclusion (for example,
+// "已确认范围……，布线施工仍待确认"). Besides being verbose, that mixes two
+// lifecycle states in one row and can confuse downstream section consumers.
+// Replace only with the matching current user-authored unknown clause.
+func canonicalizeAuditUnknownLine(line string, explicitUnknowns []string) string {
+	if strings.Contains(line, "|") || !containsAny(line, []string{
+		"已确认", "当前有效事实", "当前事实", "已确认事实",
+	}) {
+		return line
+	}
+	for _, statement := range explicitUnknowns {
+		for _, fragment := range splitUserStateClauses(cleanUserStatementRecord(statement)) {
+			if !hasExplicitUnknownState(fragment) || statementHasUnknownUserIdentity(fragment) ||
+				!sameExplicitUnknownSubject(line, fragment) {
+				continue
+			}
+			fragment = strings.TrimRight(canonicalUnknownFactFragment(fragment), "。；;，, ")
+			if fragment == "" {
+				return line
+			}
+			leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			return leading + "- " + fragment
+		}
+	}
+	return line
 }
 
 func transientStateAuditScopeInstruction(line string) bool {

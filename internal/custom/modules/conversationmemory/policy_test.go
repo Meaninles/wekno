@@ -2282,3 +2282,67 @@ func TestNormalizeExplicitUserIdentityUnknownDoesNotPolluteUnrelatedDelta(t *tes
 		t.Fatalf("historical identity unknown polluted an unrelated state delta: %s", got)
 	}
 }
+
+func TestStateAuditRemovesTruncatedUnknownProjectionsFromActive(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"已确认范围包含温度传感器和监控平台；是否包含仓库布线施工仍待确认。",
+		"法务确认采购信息可以公开；立项审批状态仍待确认。",
+	}
+	answer := `## 当前有效事实
+- **已确认范围**：温度传感器和监控平台
+- **是否包含仓库布线施工**：仍
+- **立项审批状态**：仍
+## 已废弃事实
+- 无
+## 待确认事项
+- 仓库布线施工仍待确认
+- 立项审批状态仍待确认
+## 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(strings.Split(got, "## 当前有效事实")[1], "## 已废弃事实")[0]
+	for _, forbidden := range []string{"仓库布线施工", "立项审批"} {
+		if strings.Contains(active, forbidden) {
+			t.Fatalf("truncated unknown %q survived in active facts: %s", forbidden, got)
+		}
+	}
+	unknown := strings.Split(strings.Split(got, "## 待确认事项")[1], "## 行动边界")[0]
+	for _, expected := range []string{"仓库布线施工", "待确认", "立项审批"} {
+		if !strings.Contains(unknown, expected) {
+			t.Fatalf("complete unknown %q was not preserved: %s", expected, got)
+		}
+	}
+}
+
+func TestStateAuditCanonicalizesMixedLifecycleUnknownRow(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"已确认范围包含温度传感器和监控平台；是否包含仓库布线施工仍待确认。",
+		"当前对话用户身份仍未提供，不得把用户等同于周岚。",
+	}
+	answer := `## 当前有效事实
+- **已确认范围**：温度传感器和监控平台
+## 已废弃事实
+- 无
+## 待确认事项
+- **仓库布线施工是否包含在项目范围内**——已确认范围包含温度传感器和监控平台，是否包含仓库布线施工仍待确认（来源：用户）
+- **当前对话用户身份**——当前对话用户身份仍未提供
+## 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	unknown := strings.Split(strings.Split(got, "## 待确认事项")[1], "## 行动边界")[0]
+	if strings.Contains(unknown, "已确认范围") {
+		t.Fatalf("active premise remained embedded in unknown row: %s", got)
+	}
+	for _, expected := range []string{"仓库布线施工", "待确认", "当前对话用户身份", "未提供"} {
+		if !strings.Contains(unknown, expected) {
+			t.Fatalf("canonical unknown %q is missing: %s", expected, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("mixed lifecycle unknown normalization is not idempotent:\n%s", twice)
+	}
+}

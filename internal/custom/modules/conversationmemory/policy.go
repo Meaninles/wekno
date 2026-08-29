@@ -122,7 +122,7 @@ var sourceAttributionParentheticalPattern = regexp.MustCompile(
 )
 
 var internalUserSourceParentheticalPattern = regexp.MustCompile(
-	`[（(]\s*来源\s*[：:][^（）()]*(?:用户消息|此前用户消息|最近轮次|当前轮次)[^（）()]*[）)]`,
+	`[（(]\s*(?:(?:来源\s*[：:]\s*)?用户(?:消息|初始|首次|第[^（）()]{0,12}轮|建立|提供|确认|指定|调整|声明|转述)[^（）()]*|由用户[^（）()]*)[）)]`,
 )
 
 var replacementActorPattern = regexp.MustCompile(
@@ -2982,6 +2982,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	out = restoreExplicitActiveScalarFacts(out, explicitActiveScalars)
 	out = restoreExplicitRetiredScalarFacts(out, explicitRetiredFacts)
 	out = restoreExplicitRetiredScalarGroups(out, explicitRetiredGroups)
+	out = removeRedundantExplicitScalarSummaryLines(out, explicitActiveScalars, explicitRetiredFacts)
 	out = restoreExplicitUnknownFacts(out, explicitUnknowns, userStatements)
 	out = canonicalizeStateAuditUnknownSection(out, explicitUnknowns, userStatements)
 	return strings.TrimSpace(strings.Join(ensureActionBoundaryTableSeparators(out), "\n"))
@@ -3640,7 +3641,7 @@ func scalarFactSubject(fragment, anchor string) string {
 			}
 		}
 	}
-	for _, suffix := range []string{"调整为", "变更为", "修改为", "改为", "定为", "为", "是"} {
+	for _, suffix := range []string{"调整为", "变更为", "修改为", "改为", "记为", "定为", "为", "是"} {
 		if strings.HasSuffix(prefix, suffix) {
 			prefix = strings.TrimSpace(strings.TrimSuffix(prefix, suffix))
 			break
@@ -3698,25 +3699,23 @@ func restoreExplicitRetiredScalarFacts(lines []string, facts []explicitRetiredSc
 	if retiredStart < 0 {
 		return lines
 	}
-	retiredText := ""
-	for _, line := range lines[retiredStart:retiredEnd] {
-		if payload := retiredAuditFactPayload(line); payload != "" {
-			retiredText += "\n" + payload
-		}
-	}
-	normalizedRetiredText := normalizeStateDeltaText(retiredText)
-	seenFragments := make(map[string]bool)
+	allAnchors := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		if strings.Contains(normalizedRetiredText, normalizeStateDeltaText(fact.anchor)) ||
-			seenFragments[fact.fragment] {
+		allAnchors = append(allAnchors, fact.anchor)
+	}
+	allAnchors = uniqueOrderedStrings(allAnchors)
+	seenAnchors := make(map[string]bool)
+	for _, fact := range facts {
+		if explicitScalarFactCoveredAtomically(
+			lines[retiredStart:retiredEnd], []string{fact.anchor}, allAnchors,
+		) ||
+			seenAnchors[fact.anchor] {
 			continue
 		}
-		line := "- " + fact.fragment + "（已废弃）"
+		line := "- " + canonicalScalarFactFragment(fact.fragment, fact.anchor, true) + "（已废弃）"
 		lines = insertString(lines, retiredEnd, line)
 		retiredEnd++
-		retiredText += "\n" + fact.fragment
-		normalizedRetiredText = normalizeStateDeltaText(retiredText)
-		seenFragments[fact.fragment] = true
+		seenAnchors[fact.anchor] = true
 	}
 	return lines
 }
@@ -3743,22 +3742,10 @@ func restoreExplicitRetiredScalarGroups(lines []string, groups [][]string) []str
 		return lines
 	}
 	for _, group := range groups {
-		groupPresent := false
-		for _, line := range lines[retiredStart:retiredEnd] {
-			payload := retiredAuditFactPayload(line)
-			if payload == "" || !containsAny(payload, []string{"废弃", "作废", "失效"}) {
-				continue
-			}
-			normalizedPayload := normalizeStateDeltaText(payload)
-			allPresent := true
-			for _, anchor := range group {
-				if !strings.Contains(normalizedPayload, normalizeStateDeltaText(anchor)) {
-					allPresent = false
-					break
-				}
-			}
-			if allPresent {
-				groupPresent = true
+		groupPresent := true
+		for _, anchor := range group {
+			if !explicitScalarAnchorCovered(lines[retiredStart:retiredEnd], anchor) {
+				groupPresent = false
 				break
 			}
 		}
@@ -3816,7 +3803,7 @@ func canonicalizeRetiredExclusiveClaims(lines, entities []string) []string {
 			if seen[entity] {
 				continue
 			}
-			out = append(out, "- "+entity+"供应商排他性主张：已废弃")
+			out = append(out, "- "+entity+"供应商排他性主张：废弃（不再成立）")
 			seen[entity] = true
 		}
 	}
@@ -3847,7 +3834,7 @@ func canonicalizeRetiredExclusiveClaims(lines, entities []string) []string {
 			continue
 		}
 		if !seen[matched] {
-			out = append(out, "- "+matched+"供应商排他性主张：已废弃")
+			out = append(out, "- "+matched+"供应商排他性主张：废弃（不再成立）")
 			seen[matched] = true
 		}
 	}
@@ -3985,26 +3972,171 @@ func restoreExplicitActiveScalarFacts(lines []string, facts []explicitActiveScal
 		return lines
 	}
 
-	activeText := strings.Join(lines[activeStart:activeEnd], "\n")
-	normalizedActiveText := normalizeStateDeltaText(activeText)
+	allAnchors := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		covered := true
+		allAnchors = append(allAnchors, fact.anchors...)
+	}
+	allAnchors = uniqueOrderedStrings(allAnchors)
+	for _, fact := range facts {
 		for _, anchor := range fact.anchors {
-			if !strings.Contains(normalizedActiveText, normalizeStateDeltaText(anchor)) {
+			if explicitScalarFactCoveredAtomically(
+				lines[activeStart:activeEnd], []string{anchor}, allAnchors,
+			) {
+				continue
+			}
+			line := "- " + canonicalScalarFactFragment(fact.fragment, anchor, false)
+			lines = insertString(lines, activeEnd, line)
+			activeEnd++
+		}
+	}
+	return lines
+}
+
+func canonicalScalarFactFragment(fragment, anchor string, retired bool) string {
+	subject := scalarFactSubject(expandSharedScalarUnits(fragment), anchor)
+	if subject == "" {
+		if index := strings.Index(expandSharedScalarUnits(fragment), anchor); index > 0 {
+			subject = strings.Trim(
+				expandSharedScalarUnits(fragment)[:index],
+				" \t。.;；,，:：*_`~#()（）[]【】",
+			)
+		}
+	}
+	subject = strings.ReplaceAll(subject, "把", "")
+	subject = strings.TrimSpace(strings.TrimSuffix(subject, "记"))
+	if subject == "" || utf8.RuneCountInString(subject) > 32 {
+		subject = "数值"
+	}
+	if retired && !containsAnyPrefix(subject, []string{"原", "旧", "初始"}) {
+		subject = "原" + subject
+	}
+	return subject + "：" + anchor
+}
+
+// explicitScalarFactCoveredAtomically requires a user-authored scalar fact to
+// appear on a row that does not also carry unrelated scalar facts. This keeps
+// final ledgers machine-readable and prevents a truncated compound row from
+// making several independent values look present merely by substring overlap.
+func explicitScalarFactCoveredAtomically(lines, required, allAnchors []string) bool {
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" || stateAuditSectionHeading(line) != "" ||
+			markdownTableSeparatorPattern.MatchString(strings.TrimSpace(line)) {
+			continue
+		}
+		hits := explicitScalarAnchorHits(line, allAnchors)
+		if len(hits) > len(required) {
+			continue
+		}
+		covered := true
+		for _, anchor := range required {
+			if !hits[anchor] {
 				covered = false
 				break
 			}
 		}
 		if covered {
+			return true
+		}
+	}
+	return false
+}
+
+func explicitScalarAnchorCovered(lines []string, anchor string) bool {
+	for _, line := range lines {
+		if explicitScalarAnchorHits(line, []string{anchor})[anchor] {
+			return true
+		}
+	}
+	return false
+}
+
+func explicitScalarAnchorHits(line string, candidates []string) map[string]bool {
+	observed := explicitScalarAnchors(normalizeStateDeltaText(expandSharedScalarUnits(line)))
+	hits := make(map[string]bool, len(observed))
+	for _, actual := range observed {
+		actual = normalizeStateDeltaText(actual)
+		for _, candidate := range candidates {
+			if actual == normalizeStateDeltaText(candidate) {
+				hits[candidate] = true
+			}
+		}
+	}
+	return hits
+}
+
+// removeRedundantExplicitScalarSummaryLines drops only a compound summary row
+// after every scalar on that row is already represented by its own atomic row
+// in the same lifecycle section. Tables are preserved because removing a row
+// there could change their schema. No scalar or lifecycle state is discarded.
+func removeRedundantExplicitScalarSummaryLines(
+	lines []string,
+	activeFacts []explicitActiveScalarFact,
+	retiredFacts []explicitRetiredScalarFact,
+) []string {
+	activeAnchors := make([]string, 0, len(activeFacts))
+	for _, fact := range activeFacts {
+		activeAnchors = append(activeAnchors, fact.anchors...)
+	}
+	activeAnchors = uniqueOrderedStrings(activeAnchors)
+	retiredAnchors := make([]string, 0, len(retiredFacts))
+	for _, fact := range retiredFacts {
+		retiredAnchors = append(retiredAnchors, fact.anchor)
+	}
+	retiredAnchors = uniqueOrderedStrings(retiredAnchors)
+	if len(activeAnchors) == 0 && len(retiredAnchors) == 0 {
+		return lines
+	}
+
+	sections := make([]string, len(lines))
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			section = key
+		}
+		sections[index] = section
+	}
+	out := make([]string, 0, len(lines))
+	for index, line := range lines {
+		section = sections[index]
+		anchors := activeAnchors
+		if section == "retired" {
+			anchors = retiredAnchors
+		} else if section != "active" {
+			out = append(out, line)
 			continue
 		}
-		line := "- " + fact.fragment
-		lines = insertString(lines, activeEnd, line)
-		activeEnd++
-		activeText += "\n" + line
-		normalizedActiveText = normalizeStateDeltaText(activeText)
+		if strings.Contains(line, "|") {
+			out = append(out, line)
+			continue
+		}
+		hits := explicitScalarAnchorHits(line, anchors)
+		if len(hits) < 2 {
+			out = append(out, line)
+			continue
+		}
+		allAtomic := true
+		for anchor := range hits {
+			coveredElsewhere := false
+			for otherIndex, otherLine := range lines {
+				if otherIndex == index || sections[otherIndex] != section || strings.Contains(otherLine, "|") {
+					continue
+				}
+				otherHits := explicitScalarAnchorHits(otherLine, anchors)
+				if len(otherHits) == 1 && otherHits[anchor] {
+					coveredElsewhere = true
+					break
+				}
+			}
+			if !coveredElsewhere {
+				allAtomic = false
+				break
+			}
+		}
+		if !allAtomic {
+			out = append(out, line)
+		}
 	}
-	return lines
+	return compactBlankLines(out)
 }
 
 func restoreExplicitUnknownFacts(lines, explicitUnknowns, userStatements []string) []string {
@@ -4578,8 +4710,9 @@ func restoreExplicitResolvedEntityFacts(lines, userStatements []string) []string
 // no adjacent person or assistant-generated attribution can be promoted.
 func ensureResolvedEntitySourceAttributions(lines, userStatements []string) []string {
 	type sourcedResolution struct {
-		actor string
-		fact  string
+		actor       string
+		fact        string
+		atomicFacts []string
 	}
 	resolutions := make([]sourcedResolution, 0, 2)
 	for _, statement := range userStatements {
@@ -4598,31 +4731,125 @@ func ensureResolvedEntitySourceAttributions(lines, userStatements []string) []st
 		if count := utf8.RuneCountInString(actor); count < 2 || count > 24 {
 			continue
 		}
-		resolutions = append(resolutions, sourcedResolution{actor: actor, fact: fact})
+		atomicFacts := atomicResolvedEntityFacts(value, actor)
+		if len(atomicFacts) == 0 {
+			continue
+		}
+		resolutions = append(resolutions, sourcedResolution{
+			actor: actor, fact: fact, atomicFacts: atomicFacts,
+		})
 	}
 	if len(resolutions) == 0 {
 		return lines
 	}
+	out := make([]string, 0, len(lines)+len(resolutions)*2)
+	emitted := make(map[string]bool, len(resolutions))
+	activeText := ""
+	activeSection := false
+	for _, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			activeSection = key == "active"
+			continue
+		}
+		if activeSection {
+			activeText += "\n" + line
+		}
+	}
+	normalizedActiveText := normalizeStateDeltaText(activeText)
+	for _, resolution := range resolutions {
+		complete := true
+		for _, fact := range resolution.atomicFacts {
+			if !strings.Contains(normalizedActiveText, normalizeStateDeltaText(fact)) {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			emitted[resolution.fact] = true
+		}
+	}
 	section := ""
-	for index, line := range lines {
+	for _, line := range lines {
 		if key := stateAuditSectionHeading(line); key != "" {
 			section = key
+			out = append(out, line)
 			continue
 		}
 		if section != "active" || strings.Contains(line, "|") {
+			out = append(out, line)
 			continue
 		}
+		replaced := false
 		for _, resolution := range resolutions {
-			if !resolvedEntityFactCovered(line, resolution.fact) {
+			if emitted[resolution.fact] || !resolvedEntityFactCovered(line, resolution.fact) {
 				continue
 			}
-			leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-			fact := strings.TrimRight(strings.TrimSpace(resolution.fact), "。 ")
-			lines[index] = leading + "- " + fact + "（来源：" + resolution.actor + "）"
+			for _, fact := range resolution.atomicFacts {
+				out = append(out, "- "+fact+"（来源："+resolution.actor+"）")
+			}
+			emitted[resolution.fact] = true
+			replaced = true
+			break
+		}
+		if !replaced {
+			out = append(out, line)
+		}
+	}
+	return compactBlankLines(out)
+}
+
+// atomicResolvedEntityFacts turns one user-authored compound verification into
+// one source row and one conclusion row per entity. This keeps the relationship
+// explicit while preventing a Judge or downstream parser from treating a
+// comma-joined D/E/F statement as a single partially covered fact.
+func atomicResolvedEntityFacts(statement, actor string) []string {
+	value := cleanUserStatementRecord(statement)
+	marker := ""
+	markerIndex := -1
+	for _, candidate := range []string{"完成核验", "核验后确认", "核验确认", "经核验确认"} {
+		if index := strings.Index(value, candidate); index > 0 {
+			marker = candidate
+			markerIndex = index
 			break
 		}
 	}
-	return lines
+	if markerIndex < 0 {
+		return nil
+	}
+	body := strings.TrimLeft(strings.TrimSpace(value[markerIndex+len(marker):]), "：: ")
+	for _, delimiter := range []string{"；废弃", ";废弃", "。废弃", "，废弃", ",废弃"} {
+		if index := strings.Index(body, delimiter); index >= 0 {
+			body = strings.TrimSpace(body[:index])
+			break
+		}
+	}
+	primaryMatch := resolvedExclusiveEntityPattern.FindStringSubmatch(body)
+	if len(primaryMatch) != 2 {
+		return nil
+	}
+	primary := primaryMatch[1]
+	out := []string{"核验主体：" + actor, primary + "并非不可替代"}
+
+	adaptation := ""
+	for _, candidate := range []string{
+		"经适配也能兼容", "通过适配也能满足", "经适配也能满足",
+		"通过适配也可满足", "经适配也可兼容", "经适配可兼容",
+	} {
+		if strings.Contains(body, candidate) {
+			adaptation = candidate
+			break
+		}
+	}
+	if adaptation == "" {
+		return out
+	}
+	for _, entity := range uniqueOrderedStrings(unresolvedClaimEntityPattern.FindAllString(body, -1)) {
+		if entity == primary {
+			continue
+		}
+		out = append(out, entity+adaptation)
+	}
+	return out
 }
 
 func replacePartiallyCoveredResolvedEntityFact(

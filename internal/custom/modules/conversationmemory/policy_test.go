@@ -1059,7 +1059,7 @@ func TestNormalizeStateAuditSectionsRestoresMissingUserAuthoredRetiredScalar(t *
 
 	got := NormalizeStateAuditSections(answer, query, prior...)
 	retired := strings.Split(strings.Split(got, "### 已废弃事实")[1], "### 待确认事实")[0]
-	if !strings.Contains(retired, "设备280万元") || !strings.Contains(retired, "（已废弃）") {
+	if !strings.Contains(retired, "原设备：280万元（已废弃）") {
 		t.Fatalf("missing explicit retired user fact was not restored: %s", got)
 	}
 	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
@@ -1309,7 +1309,9 @@ func TestNormalizeStateAuditSectionsRestoresResolvedEntityFactAndDropsInventedUn
 
 	got := NormalizeStateAuditSections(answer, query, prior...)
 	active := strings.Split(got, "### 已废弃事实")[0]
-	for _, expected := range []string{"技术组", "D并非不可替代", "E、F经适配也能兼容"} {
+	for _, expected := range []string{
+		"核验主体：技术组", "D并非不可替代", "E经适配也能兼容", "F经适配也能兼容",
+	} {
 		if !strings.Contains(active, expected) {
 			t.Fatalf("resolved user fact %q was not restored: %s", expected, got)
 		}
@@ -2077,7 +2079,9 @@ func TestStateAuditReplacesIncompleteResolvedEntityConclusionRow(t *testing.T) {
 	if strings.Contains(active, "A供应商关于当前核验结论") {
 		t.Fatalf("incomplete resolved-entity row survived: %s", got)
 	}
-	for _, expected := range []string{"A并非不可替代", "B、C通过适配也能满足", "法务和技术核验"} {
+	for _, expected := range []string{
+		"核验主体：法务和技术", "A并非不可替代", "B通过适配也能满足", "C通过适配也能满足",
+	} {
 		if !strings.Contains(active, expected) {
 			t.Fatalf("complete user-authored resolution %q was not restored: %s", expected, got)
 		}
@@ -2182,8 +2186,13 @@ func TestNormalizeStateAuditGroupsExplicitRetiredCompositionAndDropsTransientSco
 ### 行动边界
 - 无`
 	got := NormalizeStateAuditSections(answer, query, prior...)
-	if !strings.Contains(got, "360万元、280万元、80万元（已废弃）") {
-		t.Fatalf("explicit retired composition was not grouped: %s", got)
+	for _, expected := range []string{"360万元", "280万元", "80万元"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("explicit retired scalar %q was not preserved atomically: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "同一批原值") {
+		t.Fatalf("redundant retired composition summary survived: %s", got)
 	}
 	if strings.Contains(got, "只把两项") {
 		t.Fatalf("transient response-scope instruction survived audit: %s", got)
@@ -2516,7 +2525,7 @@ func TestNormalizeStateAuditSectionsHandlesCompactRetirementAndUnknownPlaceholde
 			t.Fatalf("canonical unknown %q was not restored: %s", expected, got)
 		}
 	}
-	if strings.Count(active, "并非不可替代") != 1 || !strings.Contains(active, "技术组完成核验") {
+	if strings.Count(active, "并非不可替代") != 1 || !strings.Contains(active, "核验主体：技术组") {
 		t.Fatalf("partially covered resolved fact was duplicated instead of repaired: %s", got)
 	}
 	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
@@ -2551,7 +2560,7 @@ func TestNormalizeStateAuditSectionsRebuildsAtomicUnknownsAndSources(t *testing.
 		t.Fatalf("explicit resolution actor was not made unambiguous: %s", got)
 	}
 	retired := strings.Split(strings.Split(got, "### 已废弃事实")[1], "### 待确认事项")[0]
-	if !strings.Contains(retired, "D供应商") || !strings.Contains(retired, "：已废弃") {
+	if !strings.Contains(retired, "D供应商") || !strings.Contains(retired, "：废弃（不再成立）") {
 		t.Fatalf("retired supplier premise lacks an atomic status: %s", got)
 	}
 	unknown := strings.Split(strings.Split(got, "### 待确认事项")[1], "### 行动边界")[0]
@@ -2616,6 +2625,14 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 			t.Fatalf("spaced active scalar %q was duplicated: %s", scalar, got)
 		}
 	}
+	for _, atomic := range []string{
+		"- 财务批复预算：235万元", "- 设备：175万元", "- 平台服务：60万元",
+		"- 核验主体：技术组", "- D并非不可替代", "- E经适配也能兼容", "- F经适配也能兼容",
+	} {
+		if !strings.Contains(active, atomic) {
+			t.Fatalf("atomic active fact %q is missing: %s", atomic, got)
+		}
+	}
 	retired := strings.Split(strings.Split(got, "## 已废弃事实")[1], "## 待确认事项")[0]
 	for _, scalar := range []string{"210", "160", "50"} {
 		if strings.Count(retired, scalar) != 1 {
@@ -2625,12 +2642,14 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 	if strings.Contains(got, "选择采购方式") {
 		t.Fatalf("transient procurement-selection instruction survived: %s", got)
 	}
-	for _, artifact := range []string{"采购信息不可公开", "旧版《采购管理办法》", "等同于周岚", "❌"} {
+	for _, artifact := range []string{
+		"采购信息不可公开", "旧版《采购管理办法》", "等同于周岚", "❌", "来源：用户", "同一批原值",
+	} {
 		if strings.Contains(got, artifact) {
 			t.Fatalf("unsupported or duplicate audit artifact %q survived: %s", artifact, got)
 		}
 	}
-	if !strings.Contains(got, "D供应商排他性主张：已废弃") {
+	if !strings.Contains(got, "D供应商排他性主张：废弃（不再成立）") {
 		t.Fatalf("resolved supplier premise was not canonicalized: %s", got)
 	}
 	if !strings.Contains(got, "来源：技术组") || !strings.Contains(got, "未经授权不得发起采购") {

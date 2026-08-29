@@ -2505,6 +2505,7 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 - 原预算（用户第1轮）：总预算 210 万元，设备 160 万元、平台服务 50 万元——被第2轮财务批复取代（已废弃）
 - 原验收日期：2027 年 3 月 31 日——被第5轮调整取代（已废弃）
 - D供应商“只能由它兼容”的主张——被技术组核验推翻（已废弃）
+- 采购信息不可公开：未明确状态→法务确认可以公开后废弃（已废弃）
 ## 待确认事项
 - 当前对话用户身份未提供
 - 是否包含仓库布线施工待确认
@@ -2512,6 +2513,7 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 ## 行动边界
 - 仅在对话内维护，未经授权不得创建或修改文件
 - 未经授权不得发起采购
+- 不得把当前对话用户等同于周岚
 - 不得因第9轮回答的金额门槛直接选择采购方式`
 
 	got := NormalizeStateAuditSections(answer, query, prior...)
@@ -2534,6 +2536,14 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 	}
 	if strings.Contains(got, "选择采购方式") {
 		t.Fatalf("transient procurement-selection instruction survived: %s", got)
+	}
+	for _, artifact := range []string{"采购信息不可公开", "等同于周岚"} {
+		if strings.Contains(got, artifact) {
+			t.Fatalf("unsupported or duplicate audit artifact %q survived: %s", artifact, got)
+		}
+	}
+	if !strings.Contains(got, "D供应商排他性主张（已废弃）") {
+		t.Fatalf("resolved supplier premise was not canonicalized: %s", got)
 	}
 	if !strings.Contains(got, "来源：技术组") || !strings.Contains(got, "未经授权不得发起采购") {
 		t.Fatalf("business source or operation boundary was lost: %s", got)

@@ -2769,6 +2769,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			}
 		}
 		if section == "retired" {
+			if isRetiredUnknownPlaceholder(line) {
+				continue
+			}
 			line = normalizeRetiredAuditLine(line)
 			line = repairExplicitRetiredScalarLine(line, explicitRetiredFacts)
 			line = removeUnsupportedReplacementActor(line, userStatements)
@@ -2839,6 +2842,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		}
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
+	out = canonicalizeRetiredExclusiveClaims(out, explicitRetiredExclusiveEntities(userStatements))
 	out = restoreExplicitResolvedEntityFacts(out, userStatements)
 	out = ensureResolvedEntitySourceAttributions(out, userStatements)
 	out = restoreExplicitDurableLabelFacts(out, userStatements)
@@ -2859,13 +2863,20 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 func isEpistemicStateInstructionLine(line string) bool {
 	probe := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
 	probe = strings.Trim(probe, "| *_`。；; ")
-	if strings.Contains(probe, "用户") && containsAny(probe, []string{"身份", "当前对话用户"}) &&
-		containsAny(probe, []string{"不得等同", "不能等同", "不可等同", "不要等同", "不得视为", "不能视为", "不可视为"}) {
+	identityBoundary := strings.Contains(probe, "用户") &&
+		containsAny(probe, []string{"身份", "当前对话用户"}) &&
+		(containsAny(probe, []string{
+			"不得等同", "不能等同", "不可等同", "不要等同", "不得视为", "不能视为", "不可视为",
+		}) || (strings.Contains(probe, "等同") && containsAny(probe, []string{
+			"不得", "不能", "不可", "不要", "不应", "禁止",
+		})))
+	if identityBoundary {
 		// Preserve a substantive fact whose trailing parenthetical merely states
 		// the identity boundary; the parenthetical is stripped later while the
 		// leading role assignment remains active.
 		if open := strings.IndexAny(probe, "（("); open > 0 &&
-			strings.Trim(probe[:open], "| *_`。；;，, ") != "" {
+			strings.Trim(probe[:open], "| *_`。；;，, ") != "" &&
+			!strings.Contains(probe[:open], "等同") {
 			return false
 		}
 		return true
@@ -3095,6 +3106,20 @@ func normalizeRetiredAuditLine(line string) string {
 	}
 
 	return strings.TrimRight(line, " \t") + "（已废弃）"
+}
+
+// isRetiredUnknownPlaceholder removes a category error rather than a business
+// fact: an earlier lack of information cannot become a retired negative fact
+// when a later user statement supplies the value. The concrete confirmed fact
+// remains in the active section.
+func isRetiredUnknownPlaceholder(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) {
+		return false
+	}
+	return containsAny(trimmed, []string{
+		"未明确状态", "状态未明确", "没有明确状态", "此前未明确", "原状态未知", "此前未知",
+	})
 }
 
 func hasAtomicRetiredStatus(value string) bool {
@@ -3535,6 +3560,91 @@ func restoreExplicitRetiredScalarGroups(lines []string, groups [][]string) []str
 		retiredEnd++
 	}
 	return lines
+}
+
+// explicitRetiredExclusiveEntities returns only exclusivity claims that were
+// both made and later resolved in user-authored history. This prevents a model
+// from inventing a retired supplier premise merely because a resolution names
+// a supplier.
+func explicitRetiredExclusiveEntities(userStatements []string) []string {
+	resolved := explicitResolvedExclusiveEntities(userStatements)
+	seen := make(map[string]bool)
+	for _, statement := range userStatements {
+		value := cleanUserStatementRecord(statement)
+		if !containsAny(value, []string{"声称", "主张", "说法"}) ||
+			!containsAny(value, []string{"只能", "不可替代", "排他", "独家"}) {
+			continue
+		}
+		for entity := range resolved {
+			if strings.Contains(value, entity) {
+				seen[entity] = true
+			}
+		}
+	}
+	entities := make([]string, 0, len(seen))
+	for entity := range seen {
+		entities = append(entities, entity)
+	}
+	sort.Strings(entities)
+	return entities
+}
+
+// canonicalizeRetiredExclusiveClaims renders a resolved supplier exclusivity
+// claim as one short atomic lifecycle fact. Long generated explanations often
+// attach “废弃” to the replacement clause instead of the old premise, which is
+// ambiguous to both people and automated consumers.
+func canonicalizeRetiredExclusiveClaims(lines, entities []string) []string {
+	if len(entities) == 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines)+len(entities))
+	seen := make(map[string]bool, len(entities))
+	section := ""
+	foundRetiredSection := false
+	appendMissing := func() {
+		for _, entity := range entities {
+			if seen[entity] {
+				continue
+			}
+			out = append(out, "- "+entity+"供应商排他性主张（已废弃）")
+			seen[entity] = true
+		}
+	}
+	for _, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "retired" && key != "retired" {
+				appendMissing()
+			}
+			section = key
+			if key == "retired" {
+				foundRetiredSection = true
+			}
+			out = append(out, line)
+			continue
+		}
+		matched := ""
+		if section == "retired" && !markdownTableSeparatorPattern.MatchString(strings.TrimSpace(line)) &&
+			containsAny(line, []string{"只能", "不可替代", "排他", "独家", "声称", "主张", "前提"}) {
+			for _, entity := range entities {
+				if strings.Contains(line, entity) {
+					matched = entity
+					break
+				}
+			}
+		}
+		if matched == "" {
+			out = append(out, line)
+			continue
+		}
+		if !seen[matched] {
+			out = append(out, "- "+matched+"供应商排他性主张（已废弃）")
+			seen[matched] = true
+		}
+	}
+	if foundRetiredSection && section == "retired" {
+		appendMissing()
+	}
+	return compactBlankLines(out)
 }
 
 type explicitActiveScalarFact struct {

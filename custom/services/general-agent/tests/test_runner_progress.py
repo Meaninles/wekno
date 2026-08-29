@@ -28,6 +28,7 @@ from app.runner import (  # noqa: E402
     build_prompt,
     build_prompt_observation,
     build_system_prompt,
+    build_turn_contract_runtime_repair_prompt,
     claude_auth_env,
     claude_sdk_builtin_tools,
     classify_data_analysis_display_intent,
@@ -70,6 +71,7 @@ from app.runner import (  # noqa: E402
     tool_use_fragments,
     turn_contract_issues,
     turn_contract_stop_hook_factory,
+    should_enable_turn_contract_runtime_repair,
     should_enable_turn_contract_stop_hook,
     should_record_turn_evidence,
     user_facing_error_message,
@@ -565,6 +567,11 @@ class RunnerProgressTest(unittest.TestCase):
                     payload.model_copy(update={"eval_observability": True})
                 )
             )
+            self.assertTrue(
+                should_enable_turn_contract_runtime_repair(
+                    payload.model_copy(update={"eval_observability": True})
+                )
+            )
             state_only = payload.model_copy(
                 update={
                     "eval_observability": True,
@@ -572,6 +579,68 @@ class RunnerProgressTest(unittest.TestCase):
                 }
             )
             self.assertFalse(should_enable_turn_contract_stop_hook(state_only))
+            self.assertFalse(should_enable_turn_contract_runtime_repair(state_only))
+
+    def test_turn_contract_runtime_repair_prompt_requires_real_adaptive_retrieval(self):
+        payload = ChatPayload(
+            run_id="run-runtime-repair",
+            session_id="session-runtime-repair",
+            assistant_message_id="assistant-runtime-repair",
+            query=(
+                "依据制度回答。\n"
+                "本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["公开招标 金额门槛"]'
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+            ),
+            tools=[RuntimeToolSpec(name="knowledge_search")],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        issues = turn_contract_issues(payload, "200 万元。", evidence_by_id={})
+
+        prompt = build_turn_contract_runtime_repair_prompt(
+            payload,
+            issues,
+            1,
+            has_current_turn_evidence=False,
+        )
+
+        self.assertIn("SAME current user request", prompt)
+        self.assertIn("MUST make a real call", prompt)
+        self.assertIn("knowledge_search", prompt)
+        self.assertIn("公开招标 金额门槛", prompt)
+        self.assertIn("current_turn_evidence_missing", prompt)
+        self.assertIn("only the complete user-visible replacement", prompt)
+
+    def test_eval_system_prompt_allows_only_runtime_authorized_single_repair(self):
+        payload = ChatPayload(
+            run_id="run-runtime-repair-system",
+            session_id="session-runtime-repair-system",
+            assistant_message_id="assistant-runtime-repair-system",
+            query="依据制度回答。\n本轮明确要求文档依据或引用。",
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+            ),
+            tools=[RuntimeToolSpec(name="knowledge_search")],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}):
+            prompt = build_system_prompt(payload)
+
+        self.assertIn("eval runtime may resume this same SDK session exactly once", prompt)
+        self.assertIn("single bounded current-turn repair", prompt)
+        self.assertNotIn(
+            "Generate the answer once; the runtime never asks the model to validate or regenerate citations.",
+            prompt,
+        )
 
     def test_turn_contract_stop_hook_is_disabled_in_normal_eval_runs(self):
         payload = ChatPayload(

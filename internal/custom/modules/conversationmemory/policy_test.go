@@ -1779,6 +1779,38 @@ func TestStateAuditDropsUnsupportedSupplierEnumerationFromCountFact(t *testing.T
 	}
 }
 
+func TestStateAuditReplacesIncompleteResolvedEntityConclusionRow(t *testing.T) {
+	query := "现在做一次完整状态审计，分成当前有效事实、已废弃事实、待确认事实、行动边界。"
+	prior := []string{
+		"A供应商声称接口只能由它安全改造，该说法尚未核验。",
+		"法务和技术核验后确认A并非不可替代，B、C通过适配也能满足。废弃‘只能A做’这一前提。",
+	}
+	answer := `### 当前有效事实
+| 条目 | 状态 |
+|---|---|
+| A供应商关于当前核验结论 | B、C通过适配也能满足 |
+### 已废弃事实
+- A供应商“只能A做”的前提已废弃
+### 待确认事实
+- 无
+### 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	if strings.Contains(active, "A供应商关于当前核验结论") {
+		t.Fatalf("incomplete resolved-entity row survived: %s", got)
+	}
+	for _, expected := range []string{"A并非不可替代", "B、C通过适配也能满足", "法务和技术核验"} {
+		if !strings.Contains(active, expected) {
+			t.Fatalf("complete user-authored resolution %q was not restored: %s", expected, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("resolved-entity row repair was not idempotent:\n%s", twice)
+	}
+}
+
 func TestStateAuditRestoresDurableIdentityAndRelocatesObservedLifecycleText(t *testing.T) {
 	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
 	prior := []string{

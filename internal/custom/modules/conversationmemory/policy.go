@@ -2392,6 +2392,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 				continue
 			}
 			line = normalizeResolvedClaimActiveLine(line)
+			if incompleteResolvedEntityConclusionLine(line, resolvedExclusiveEntities) {
+				continue
+			}
 			if unsupportedResolvedEntityAvailabilityLine(line, resolvedExclusiveEntities, userStatements) {
 				continue
 			}
@@ -3822,6 +3825,28 @@ func explicitResolvedExclusiveEntities(userStatements []string) map[string]bool 
 		}
 	}
 	return result
+}
+
+// incompleteResolvedEntityConclusionLine identifies a generated row whose
+// label promises a resolved supplier conclusion while its value omits the
+// resolution itself. Keeping such a row forces consumers to join it with an
+// unrelated later line. The complete user-authored resolution is restored by
+// restoreExplicitResolvedEntityFacts after this row is removed.
+func incompleteResolvedEntityConclusionLine(line string, resolvedEntities map[string]bool) bool {
+	if len(resolvedEntities) == 0 || !containsAny(line, []string{
+		"核验结论", "独家性", "不可替代性", "供应商地位", "供应商主张",
+	}) || containsAny(line, []string{
+		"并非不可替代", "不是不可替代", "不再不可替代", "可替代", "不具排他性",
+		"主张不成立", "核验为不成立", "已核验为不成立", "推翻", "否定",
+	}) {
+		return false
+	}
+	for entity := range resolvedEntities {
+		if strings.Contains(line, entity) {
+			return true
+		}
+	}
+	return false
 }
 
 // unsupportedResolvedEntityAvailabilityLine removes a model inference that a

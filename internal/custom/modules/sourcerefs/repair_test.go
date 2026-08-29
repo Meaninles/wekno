@@ -3,6 +3,7 @@ package sourcerefs
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -456,6 +457,34 @@ func TestRecoverOffTopicNarrowEvidenceAnswerUsesEveryCurrentTopic(t *testing.T) 
 	aligned := "中标候选人公示期不少于3日。<src id=\"S1\" />"
 	if unchanged := RecoverOffTopicNarrowEvidenceAnswer(aligned, topics, refs); unchanged != aligned {
 		t.Fatalf("partially aligned answer was unexpectedly replaced: %s", unchanged)
+	}
+}
+
+func TestRecoverOffTopicNarrowEvidenceAnswerRemovesSingleQuestionHistoryDrift(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "goods-threshold", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "依法必须进行招标的工程建设项目中，重要设备、材料等货物的采购，单项合同估算价在200万元（含）以上的，必须公开招标。",
+			Metadata: map[string]string{
+				MetadataCitationID: "S3", MetadataChunkID: "goods-threshold", "source_type": SourceTypeKnowledge,
+			},
+		},
+	}
+	topic := "依法必须招标的重要设备、材料等货物，达到"
+	answer := "根据第三十四条，重要设备、材料等货物达到200万元（含）以上必须公开招标。<src id=\"S3\" />\n\n---\n\n" +
+		strings.Repeat("现在恢复此前项目台账，重复历史预算、日期、范围和供应商状态。", 20)
+
+	got := RecoverOffTopicNarrowEvidenceAnswer(answer, []string{topic}, refs)
+	for _, expected := range []string{"重要设备", "材料等货物", "200万元", "必须公开招标", `<src id="S3" />`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("focused evidence recovery lost %q: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "恢复此前项目台账") || utf8.RuneCountInString(got) > 500 {
+		t.Fatalf("historical topic drift survived focused recovery: %s", got)
+	}
+	if twice := RecoverOffTopicNarrowEvidenceAnswer(got, []string{topic}, refs); twice != got {
+		t.Fatalf("single-question recovery was not idempotent: %s", twice)
 	}
 }
 

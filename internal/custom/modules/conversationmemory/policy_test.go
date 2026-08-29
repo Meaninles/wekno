@@ -1670,6 +1670,21 @@ func TestNarrowFreshEvidenceTopicsStayOnCurrentQuestions(t *testing.T) {
 	}
 }
 
+func TestSingleFocusedEvidenceDetourIsolatesExpiredLedgerHistory(t *testing.T) {
+	query := "先暂停台账，只根据已选《采购管理办法》第三十四条回答一个旁支问题：依法必须招标的重要设备、材料等货物，达到什么单项合同估算价必须公开招标？答案写明金额并紧邻系统有效引用。"
+	if !IsNarrowAnswerTurn(query) {
+		t.Fatal("source-constrained side question was not recognized as a narrow answer turn")
+	}
+	if !ShouldIsolateNarrowEvidenceHistory(query) {
+		t.Fatal("self-contained single evidence detour retained expired ledger history")
+	}
+	topics := RequiredEvidenceTopics(query)
+	if len(topics) != 1 || !strings.Contains(topics[0], "重要设备") ||
+		!strings.Contains(topics[0], "材料等货物") {
+		t.Fatalf("single evidence topic was not derived from the current question: %v", topics)
+	}
+}
+
 func TestEvidenceGrepQueriesUseExecutableUserDerivedPatterns(t *testing.T) {
 	query := "比较公开采购、询比、竞价和竞争谈判的适用条件。"
 	searches := EvidenceGrepQueries(query)

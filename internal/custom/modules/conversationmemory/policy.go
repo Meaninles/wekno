@@ -354,9 +354,16 @@ func IsComparisonTurn(query string) bool {
 // than a hidden eval limit, so the same concise-output contract applies in
 // ordinary WeKnora conversations.
 func IsNarrowAnswerTurn(query string) bool {
-	return containsAny(strings.ToLower(strings.TrimSpace(query)), []string{
+	value := strings.ToLower(strings.TrimSpace(query))
+	if containsAny(value, []string{
 		"只回答", "仅回答", "只答", "仅答", "仅需回答", "answer only",
-	})
+	}) {
+		return true
+	}
+	// A user may express the same boundary by constraining both the source and
+	// the answering action, e.g. “只根据已选制度回答一个旁支问题”.
+	return containsAny(value, []string{"只根据", "仅根据", "只依据", "仅依据"}) &&
+		containsAny(value, []string{"回答", "答复", "作答"})
 }
 
 // ShouldIsolateNarrowEvidenceHistory identifies a self-contained, explicitly
@@ -368,7 +375,7 @@ func ShouldIsolateNarrowEvidenceHistory(query string) bool {
 	if !IsNarrowAnswerTurn(query) || !RequiresFreshEvidenceTurn(query) || ReferencesRecentUserState(query) {
 		return false
 	}
-	return len(narrowAnswerEvidenceTopics(query)) >= 2
+	return len(narrowAnswerEvidenceTopics(query)) >= 1
 }
 
 // RequiresNamedTopicDefinitionCoverage detects an explicit multi-option
@@ -517,11 +524,11 @@ func narrowAnswerEvidenceTopics(query string) []string {
 		if part == "" {
 			continue
 		}
-		if !containsAny(part, []string{"多少", "哪些", "哪个", "哪位", "谁", "何时", "何种", "怎么", "如何", "是否", "能否", "可否"}) {
+		if !containsAny(part, []string{"多少", "什么", "哪些", "哪个", "哪位", "谁", "何时", "何种", "怎么", "如何", "是否", "能否", "可否"}) {
 			continue
 		}
 		end := len(part)
-		for _, marker := range []string{"至少多少", "多少", "哪些", "哪个", "哪位", "谁", "何时", "何种", "怎么", "如何"} {
+		for _, marker := range []string{"至少多少", "多少", "什么", "哪些", "哪个", "哪位", "谁", "何时", "何种", "怎么", "如何"} {
 			if index := strings.Index(part, marker); index >= 0 && index < end {
 				end = index
 			}
@@ -529,7 +536,8 @@ func narrowAnswerEvidenceTopics(query string) []string {
 		candidate := strings.TrimSpace(strings.Trim(part[:end], "，,；;：:。.!！ "))
 		candidate = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(candidate, "，由"), ",由"), "由"))
 		if comma := strings.LastIndexAny(candidate, "，,"); comma >= 0 {
-			tail := strings.TrimSpace(candidate[comma+1:])
+			_, width := utf8.DecodeRuneInString(candidate[comma:])
+			tail := strings.TrimSpace(candidate[comma+width:])
 			if utf8.RuneCountInString(tail) >= 4 {
 				candidate = tail
 			}
@@ -547,7 +555,7 @@ func narrowAnswerEvidenceTopics(query string) []string {
 			break
 		}
 	}
-	if len(topics) < 2 {
+	if len(topics) < 1 {
 		return nil
 	}
 	return topics
@@ -1558,7 +1566,8 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 		if isEpistemicStateInstructionLine(trimmed) {
 			line = stripStateDeltaEpistemicInstruction(line)
 			trimmed = strings.TrimSpace(line)
-			if strings.Trim(trimmed, "-*| _`。；;，,：: ") == "" {
+			if strings.Trim(trimmed, "-*| _`。；;，,：: ") == "" ||
+				isEmptyStateDeltaListLine(line) {
 				continue
 			}
 			lines[index] = line
@@ -1616,9 +1625,7 @@ func removeEmptyStateDeltaListLines(answer string) string {
 	out := make([]string, 0, len(lines))
 	changed := false
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if orderedOrBulletListPrefixPattern.MatchString(trimmed) &&
-			lifecycleSectionHeading(line) == "" && isEmptyActionBoundaryListLine(line) {
+		if isEmptyStateDeltaListLine(line) {
 			changed = true
 			continue
 		}
@@ -1628,6 +1635,12 @@ func removeEmptyStateDeltaListLines(answer string) string {
 		return strings.TrimSpace(answer)
 	}
 	return strings.TrimSpace(strings.Join(compactBlankLines(out), "\n"))
+}
+
+func isEmptyStateDeltaListLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return orderedOrBulletListPrefixPattern.MatchString(trimmed) &&
+		lifecycleSectionHeading(line) == "" && isEmptyActionBoundaryListLine(line)
 }
 
 func stripStateDeltaEpistemicInstruction(line string) string {

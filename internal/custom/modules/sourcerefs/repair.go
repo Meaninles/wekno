@@ -494,24 +494,30 @@ func bestNamedDefinitionEvidence(topic string, refs []citationRepairEvidence) (s
 	return bestText, bestID
 }
 
-// RecoverOffTopicNarrowEvidenceAnswer replaces a completely stale answer to an
-// explicitly narrow multi-question evidence turn with short extractive answers
-// from the current-turn evidence registry. It activates only when none of the
-// named current topics is represented in the answer and every topic has a
-// directly matching source sentence; partial or ambiguous cases fail open.
+// RecoverOffTopicNarrowEvidenceAnswer replaces a stale answer to an explicitly
+// narrow evidence turn with short extractive answers from the current-turn
+// evidence registry. Multi-question turns still fail open when any requested
+// topic is already present. A single-question turn is also recovered when the
+// answer starts correctly but then drifts back into a long historical topic;
+// the replacement is allowed only when current evidence directly matches it.
 func RecoverOffTopicNarrowEvidenceAnswer(
 	answer string,
 	topics []string,
 	refs []*types.SearchResult,
 ) string {
 	value := strings.TrimSpace(answer)
-	if value == "" || len(topics) < 2 {
+	if value == "" || len(topics) == 0 {
 		return value
 	}
+	aligned := false
 	for _, topic := range topics {
 		if evidenceTextMatchesTopic(value, topic) {
-			return value
+			aligned = true
+			break
 		}
+	}
+	if aligned && (len(topics) != 1 || utf8.RuneCountInString(value) <= 500) {
+		return value
 	}
 	evidence := repairEvidence(refs)
 	if len(evidence) == 0 {
@@ -540,7 +546,7 @@ type narrowTopicAnchor struct {
 func narrowTopicAnchors(topic string) []narrowTopicAnchor {
 	value := strings.TrimSpace(topic)
 	for _, marker := range []string{
-		"如果", "那么", "以及", "并且", "涉及", "并影响", "影响", "至少",
+		"如果", "那么", "以及", "并且", "涉及", "并影响", "影响", "至少", "达到",
 		"是否", "能否", "可否", "哪些", "哪个", "哪位", "多少", "如何", "怎么", "由",
 	} {
 		value = strings.ReplaceAll(value, marker, "|")

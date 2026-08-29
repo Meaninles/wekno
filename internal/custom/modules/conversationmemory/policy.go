@@ -2626,14 +2626,100 @@ func NormalizeExplicitResolvedEntityDelta(answer, originalQuery string) string {
 		return value
 	}
 	fact := resolvedEntityFact(query)
-	if fact == "" || resolvedEntityFactCovered(value, fact) {
+	if fact == "" {
 		return value
 	}
-	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
-	if replacePartiallyCoveredResolvedEntityFact(lines, 0, len(lines), fact) {
-		return strings.TrimSpace(strings.Join(lines, "\n"))
+	if !resolvedEntityFactCovered(value, fact) {
+		lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+		if replacePartiallyCoveredResolvedEntityFact(lines, 0, len(lines), fact) {
+			value = strings.TrimSpace(strings.Join(lines, "\n"))
+		} else {
+			value = strings.TrimSpace(value + "\n- " + fact)
+		}
 	}
-	return strings.TrimSpace(value + "\n- " + fact)
+	return ensureExplicitRetiredExclusiveDelta(value, query)
+}
+
+// ensureExplicitRetiredExclusiveDelta keeps both sides of an explicitly
+// resolved lifecycle transition in the current response. A model may report
+// only the new verification (for example, "D并非不可替代") even though the
+// same user turn also explicitly retires the old "只能D" premise. The entity,
+// lifecycle instruction and replacement fact must all occur in the current
+// user turn; no historical or assistant-authored claim is promoted here.
+func ensureExplicitRetiredExclusiveDelta(answer, query string) string {
+	entities := explicitRetiredExclusiveDeltaEntities(query)
+	if len(entities) == 0 {
+		return answer
+	}
+	lines := strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n")
+	missing := make([]string, 0, len(entities))
+	for _, entity := range entities {
+		covered := false
+		for _, line := range lines {
+			if strings.Contains(line, entity) &&
+				containsAny(line, []string{"废弃", "作废", "失效", "不再成立", "推翻", "否定"}) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			missing = append(missing, "- "+entity+"供应商排他性主张：废弃（不再成立）")
+		}
+	}
+	if len(missing) == 0 {
+		return answer
+	}
+
+	retiredStart, retiredEnd := -1, len(lines)
+	section := ""
+	for index, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			if section == "retired" && key != "retired" {
+				retiredEnd = index
+				break
+			}
+			section = key
+			if key == "retired" && retiredStart < 0 {
+				retiredStart = index + 1
+			}
+		}
+	}
+	if retiredStart < 0 {
+		lines = append(compactBlankLines(lines), "", "## 已废弃事实", "")
+		lines = append(lines, missing...)
+		return strings.TrimSpace(strings.Join(compactBlankLines(lines), "\n"))
+	}
+	for _, line := range missing {
+		lines = insertString(lines, retiredEnd, line)
+		retiredEnd++
+	}
+	return strings.TrimSpace(strings.Join(compactBlankLines(lines), "\n"))
+}
+
+func explicitRetiredExclusiveDeltaEntities(query string) []string {
+	resolved := explicitResolvedExclusiveEntities([]string{query})
+	if len(resolved) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, clause := range splitUserStateClauses(cleanUserStatementRecord(query)) {
+		if !containsAny(clause, []string{"废弃", "作废", "失效", "不再成立", "推翻", "否定"}) ||
+			containsAny(clause, []string{"不废弃", "不要废弃", "不得废弃", "不能废弃", "暂不废弃"}) ||
+			!containsAny(clause, []string{"只能", "不可替代", "排他", "独家", "主张", "前提"}) {
+			continue
+		}
+		for entity := range resolved {
+			if strings.Contains(clause, entity) {
+				seen[entity] = true
+			}
+		}
+	}
+	entities := make([]string, 0, len(seen))
+	for entity := range seen {
+		entities = append(entities, entity)
+	}
+	sort.Strings(entities)
+	return entities
 }
 
 func appendUnknownIdentityToAudit(lines []string) []string {

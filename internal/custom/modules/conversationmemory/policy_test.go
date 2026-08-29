@@ -729,6 +729,28 @@ func TestNormalizeExplicitResolvedEntityDeltaRestoresCurrentUserFact(t *testing.
 	}
 }
 
+func TestNormalizeExplicitResolvedEntityDeltaRestoresRetiredPremise(t *testing.T) {
+	query := "技术组完成核验：D并非不可替代，E、F经适配也能兼容；废弃‘只能D’的前提。"
+	answer := `## 当前有效事实
+
+- 技术组完成核验：D并非不可替代，E、F经适配也能兼容`
+
+	got := NormalizeExplicitResolvedEntityDelta(answer, query)
+	if !strings.Contains(got, "## 已废弃事实") ||
+		!strings.Contains(got, "D供应商排他性主张：废弃（不再成立）") {
+		t.Fatalf("explicitly retired premise was not restored: %s", got)
+	}
+	if twice := NormalizeExplicitResolvedEntityDelta(got, query); twice != got {
+		t.Fatalf("retired premise restoration is not idempotent:\n%s", twice)
+	}
+
+	withoutRetirement := "技术组完成核验：D并非不可替代，E、F经适配也能兼容。"
+	got = NormalizeExplicitResolvedEntityDelta(answer, withoutRetirement)
+	if strings.Contains(got, "已废弃事实") {
+		t.Fatalf("retired premise was invented without an explicit lifecycle update: %s", got)
+	}
+}
+
 func TestNormalizeExplicitUserIdentityUnknownUsesAuditUnknownTable(t *testing.T) {
 	query := "现在做一次完整状态审计。"
 	archive := "当前对话用户身份未提供。"

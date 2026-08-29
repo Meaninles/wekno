@@ -12,6 +12,7 @@ from weknora_eval.models import (
     Capability,
     CaseRun,
     CaseSpec,
+    MetricScore,
     ObservedTurn,
     Split,
     SUT_RESPONSE_DEADLINE_EXCEEDED,
@@ -55,8 +56,16 @@ class JudgeTests(unittest.TestCase):
             capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
             agent=AgentSelector(agent_id="agent"),
             turns=[
-                TurnSpec(turn_id="turn-1", query="q1", contract=TurnContract()),
-                TurnSpec(turn_id="turn-2", query="q2", contract=TurnContract()),
+                TurnSpec(
+                    turn_id="turn-1",
+                    query="q1",
+                    contract=TurnContract(judge_rubric="semantic review"),
+                ),
+                TurnSpec(
+                    turn_id="turn-2",
+                    query="q2",
+                    contract=TurnContract(judge_rubric="semantic review"),
+                ),
             ],
         )
         run = CaseRun(
@@ -78,6 +87,16 @@ class JudgeTests(unittest.TestCase):
                     is_completed=True,
                 ),
             ],
+            scores=[
+                MetricScore(
+                    name="required_claim.semantic",
+                    value=1,
+                    passed=True,
+                    hard=True,
+                    turn_id=turn_id,
+                )
+                for turn_id in ("turn-1", "turn-2")
+            ],
         )
         seen: list[str] = []
 
@@ -87,6 +106,7 @@ class JudgeTests(unittest.TestCase):
             self.assertEqual(len(payload["candidate"]), 1)
             turn_id = payload["contracts"][0]["turn_id"]
             self.assertEqual(payload["candidate"][0]["turn_id"], turn_id)
+            self.assertTrue(payload["candidate"][0]["deterministic_checks"][0]["passed"])
             seen.append(turn_id)
             return {
                 "turns": [
@@ -104,6 +124,49 @@ class JudgeTests(unittest.TestCase):
 
         self.assertEqual(seen, ["turn-1", "turn-2"])
         self.assertEqual([score.turn_id for score in scores], seen)
+
+    def test_deterministic_pass_without_rubric_skips_remote_judge(self) -> None:
+        spec = CaseSpec(
+            case_id="deterministic",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            turns=[TurnSpec(turn_id="turn-1", query="q1", contract=TurnContract())],
+        )
+        run = CaseRun(
+            case_id=spec.case_id,
+            family_id=spec.family_id,
+            split=spec.split,
+            verdict=Verdict.PASS,
+            turns=[
+                ObservedTurn(
+                    turn_id="turn-1",
+                    session_id="session",
+                    content="a1",
+                    is_completed=True,
+                )
+            ],
+            scores=[
+                MetricScore(
+                    name="execution_valid",
+                    value=1,
+                    passed=True,
+                    hard=True,
+                    turn_id="turn-1",
+                )
+            ],
+        )
+
+        with patch("weknora_eval.judge.judge_single_turn") as remote_judge:
+            scores = judge_case(spec, run)
+
+        remote_judge.assert_not_called()
+        self.assertEqual(len(scores), 1)
+        self.assertTrue(scores[0].passed)
+        self.assertTrue(scores[0].metadata["synthetic"])
+        self.assertFalse(scores[0].metadata["semantic_rubric"])
 
     def test_measured_deadline_is_scored_without_calling_semantic_judge(self) -> None:
         spec = CaseSpec(

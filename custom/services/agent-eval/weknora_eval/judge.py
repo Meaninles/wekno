@@ -34,7 +34,7 @@ def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> 
 
 def judge_runtime_contract() -> dict[str, int | str]:
     return {
-        "judge_protocol": "single-turn-v1",
+        "judge_protocol": "single-turn-v2",
         "judge_timeout_seconds": _bounded_env_int(
             "AGENT_EVAL_JUDGE_TIMEOUT_SECONDS", 180, minimum=1, maximum=600
         ),
@@ -61,7 +61,11 @@ JUDGE_SYSTEM_PROMPT = (
     "the answer asserts the prohibited meaning. Explicitly audit every conversation-state rule; never pass "
     "merely because the answer avoids a contradiction. Use invalid only when execution is missing, incomplete, "
     "or impossible to judge. "
-    "Evidence and hard constraints dominate eloquence."
+    "Candidate payloads may include deterministic_checks produced by the frozen scorer. A passing "
+    "deterministic check establishes literal presence, section placement, citation, tool, execution, and "
+    "length facts; do not claim such an item is missing. Judge only semantic meaning, contradictions, and "
+    "the explicit judge_rubric beyond those established facts. Keep each reason concise, make the label "
+    "consistent with the reason, and treat evidence and hard constraints as more important than eloquence."
 )
 
 
@@ -176,6 +180,18 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
             "tools": turn.tools,
             "completed": turn.is_completed,
             "error": turn.error,
+            "deterministic_checks": [
+                {
+                    "name": score.name,
+                    "passed": score.passed,
+                    "hard": score.hard,
+                    "comment": score.comment,
+                }
+                for score in case_run.scores
+                if score.turn_id == turn.turn_id
+                and score.name != "judge.contract_satisfaction"
+                and score.passed is not None
+            ],
         }
         for turn in case_run.turns
     }
@@ -190,6 +206,18 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
             "tools": turn.tools,
             "completed": turn.is_completed,
             "error": turn.error,
+            "deterministic_checks": [
+                {
+                    "name": score.name,
+                    "passed": score.passed,
+                    "hard": score.hard,
+                    "comment": score.comment,
+                }
+                for score in baseline.scores
+                if score.turn_id == turn.turn_id
+                and score.name != "judge.contract_satisfaction"
+                and score.passed is not None
+            ],
         }
         for turn in baseline.turns
     } if baseline is not None else {}
@@ -211,6 +239,38 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
         paired_baseline = baseline_by_turn.get(turn_id) if baseline is not None else None
         if baseline is not None and paired_baseline is None:
             raise JudgeError(f"baseline observation missing turn {turn_id}")
+        deterministic_checks = candidate.get("deterministic_checks") or []
+        has_hard_failure = any(
+            check.get("hard") is True and check.get("passed") is False
+            for check in deterministic_checks
+        )
+        if deterministic_checks and not turn_spec.contract.judge_rubric and not has_hard_failure:
+            pairwise = None
+            if paired_baseline is not None:
+                baseline_checks = paired_baseline.get("deterministic_checks") or []
+                baseline_hard_failure = any(
+                    check.get("hard") is True and check.get("passed") is False
+                    for check in baseline_checks
+                )
+                pairwise = "candidate_better" if baseline_hard_failure else "equal"
+            returned_turn_ids.add(turn_id)
+            scores.append(
+                MetricScore(
+                    name="judge.contract_satisfaction",
+                    value="pass",
+                    passed=True,
+                    hard=False,
+                    comment="frozen deterministic contract passed; no semantic judge rubric declared",
+                    turn_id=turn_id,
+                    metadata={
+                        "confidence": 1.0,
+                        "pairwise": pairwise,
+                        "synthetic": True,
+                        "semantic_rubric": False,
+                    },
+                )
+            )
+            continue
         row = judge_single_turn(
             case_id=spec.case_id,
             contract=contract_by_turn[turn_id],

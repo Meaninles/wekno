@@ -523,11 +523,13 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(report["planned_session_count"], 18)
         self.assertTrue(all(check["passed"] for check in report["checks"]))
 
-    def test_v3_preflight_freezes_evaluator_dependencies(self) -> None:
+    def test_v3_evaluator_v2_preflight_freezes_evaluator_dependencies(self) -> None:
         with patch.dict(os.environ, self.env(), clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
-                manifest_path=ROOT / "manifests" / "multiturn-ready.v3.manifest.json",
+                manifest_path=ROOT
+                / "manifests"
+                / "multiturn-ready.v3-evaluator-v2.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
@@ -551,11 +553,30 @@ class ReadinessTests(unittest.TestCase):
             },
         )
 
+    def test_v3_evaluator_v1_manifest_fails_closed_after_protocol_upgrade(self) -> None:
+        with patch.dict(os.environ, self.env(), clear=False):
+            report = evaluate_readiness(
+                dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
+                manifest_path=ROOT / "manifests" / "multiturn-ready.v3.manifest.json",
+                profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
+                policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
+                calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
+                split=Split.GATE,
+                sut=eval_sut(),
+            )
+        self.assertEqual(report["status"], "NOT_READY")
+        frozen = next(
+            check for check in report["checks"] if check["name"] == "frozen_dependencies"
+        )
+        self.assertFalse(frozen["passed"])
+
     def test_optimization_dev_preflight_is_frozen_for_three_by_three_stability(self) -> None:
         with patch.dict(os.environ, self.env(), clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
-                manifest_path=ROOT / "manifests" / "multiturn-optimization-dev.v1.manifest.json",
+                manifest_path=ROOT
+                / "manifests"
+                / "multiturn-optimization-dev.v1-evaluator-v2.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-optimization-gate.v1.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
@@ -573,7 +594,7 @@ class ReadinessTests(unittest.TestCase):
                 dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
                 manifest_path=ROOT
                 / "manifests"
-                / "multiturn-optimization-dev-experiment.v1.manifest.json",
+                / "multiturn-optimization-dev-experiment.v1-evaluator-v2.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-experiment-gate.v1.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
@@ -597,7 +618,9 @@ class ReadinessTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
-                manifest_path=ROOT / "manifests" / "multiturn-ready.v3.manifest.json",
+                manifest_path=ROOT
+                / "manifests"
+                / "multiturn-ready.v3-evaluator-v2.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",

@@ -487,6 +487,30 @@ func TestNormalizeExplicitUserIdentityUnknownAcceptsStillNotProvidedWording(t *t
 	}
 }
 
+func TestNormalizeExplicitUserIdentityUnknownCanonicalizesPossessiveSubject(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。"
+	answer := `## 当前有效事实
+- 项目负责人：周岚
+## 已废弃事实
+- 无
+## 待确认事项
+- 当前对话用户的身份（用户明确声明“仍未提供”）
+## 行动边界
+- 仅在对话内维护`
+
+	got := NormalizeExplicitUserIdentityUnknown(answer, query, prior)
+	if !strings.Contains(got, "当前对话用户身份") || strings.Contains(got, "用户的身份") {
+		t.Fatalf("possessive identity subject was not canonicalized: %s", got)
+	}
+	if !strings.Contains(got, "未提供") {
+		t.Fatalf("identity unknown state was lost: %s", got)
+	}
+	if twice := NormalizeExplicitUserIdentityUnknown(got, query, prior); twice != got {
+		t.Fatalf("possessive identity normalization is not idempotent:\n%s", twice)
+	}
+}
+
 func TestNormalizeExplicitUserIdentityUnknownCanonicalizesDetachedIdentityLabel(t *testing.T) {
 	query := "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。"
 	answer := "- **项目负责人**：周岚\n- **当前对话用户**：未知（未提供身份信息，不得等同周岚）"

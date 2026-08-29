@@ -2177,7 +2177,11 @@ func NormalizeExplicitUserIdentityUnknown(answer, originalQuery string, priorUse
 			knownIndex = index
 		}
 	}
-	if unknownIndex < 0 || knownIndex > unknownIndex || answerHasUnknownUserIdentity(value) {
+	if unknownIndex < 0 || knownIndex > unknownIndex {
+		return value
+	}
+	value = canonicalizeUnknownUserIdentitySubject(value)
+	if answerHasUnknownUserIdentity(value) {
 		return value
 	}
 
@@ -2188,6 +2192,22 @@ func NormalizeExplicitUserIdentityUnknown(answer, originalQuery string, priorUse
 		lines = append(lines, "- **用户身份**：当前对话用户身份未提供")
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// canonicalizeUnknownUserIdentitySubject keeps the stable state-field token
+// `用户身份` even when a model inserts the possessive particle, for example
+// `当前对话用户的身份仍未提供`. The meaning is unchanged, but the canonical
+// field lets all three agent pipelines and downstream state consumers match
+// the same schema without fuzzy interpretation.
+func canonicalizeUnknownUserIdentitySubject(answer string) string {
+	lines := strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n")
+	for index, line := range lines {
+		if strings.Contains(line, "用户的身份") &&
+			containsAny(line, []string{"未提供", "没有提供", "未说明", "未知", "待确认", "待核实"}) {
+			lines[index] = strings.ReplaceAll(line, "用户的身份", "用户身份")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func statementHasUnknownUserIdentity(statement string) bool {

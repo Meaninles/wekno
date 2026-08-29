@@ -1518,6 +1518,17 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	if value == "" || query == "" {
 		return value
 	}
+	// Empty list labels are a streaming/generation artifact rather than a
+	// conversation fact (for example, "- 工期推断：").  Remove them for every
+	// state-only turn, including declarative updates that do not use a strict
+	// "只记录" marker.  This cleanup is deliberately structural: it neither
+	// adds a fact nor interprets a non-empty value.
+	if IsStateOnlyTurn(query) {
+		value = removeEmptyStateDeltaListLines(value)
+		if value == "" {
+			return value
+		}
+	}
 	if projected := projectExplicitSourceUpdate(query); projected != "" {
 		return projected
 	}
@@ -1600,6 +1611,25 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	return restoreExplicitStateDeltaFacts(result, query)
 }
 
+func removeEmptyStateDeltaListLines(answer string) string {
+	lines := strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if orderedOrBulletListPrefixPattern.MatchString(trimmed) &&
+			lifecycleSectionHeading(line) == "" && isEmptyActionBoundaryListLine(line) {
+			changed = true
+			continue
+		}
+		out = append(out, strings.TrimRight(line, " \t"))
+	}
+	if !changed {
+		return strings.TrimSpace(answer)
+	}
+	return strings.TrimSpace(strings.Join(compactBlankLines(out), "\n"))
+}
+
 func stripStateDeltaEpistemicInstruction(line string) string {
 	value := epistemicParentheticalPattern.ReplaceAllString(line, "")
 	value = inferenceScopePattern.ReplaceAllString(value, "")
@@ -1615,6 +1645,7 @@ func transientStateDeltaScopeEcho(line string) bool {
 	probe = strings.Trim(probe, "-+| *_`。；; ")
 	if containsAnyPrefix(probe, []string{
 		"只记录", "仅记录", "只更新", "仅更新", "只确认", "仅确认", "只列", "仅列",
+		"只区分", "仅区分",
 	}) {
 		return true
 	}
@@ -1698,12 +1729,15 @@ func projectExplicitSourceUpdate(query string) string {
 // user-only helpers used for deferred comparisons; no historical assistant
 // text, retrieved evidence, or domain rule can become state through this path.
 func projectExplicitConfirmedUnknownSections(query string) string {
-	if !containsAny(query, []string{"只列", "仅列", "只输出", "仅输出"}) ||
+	if !containsAny(query, []string{"只列", "仅列", "只输出", "仅输出", "只区分", "仅区分"}) ||
 		!strings.Contains(query, "已确认") || !strings.Contains(query, "待确认") {
 		return ""
 	}
 	known, unknowns := explicitDeferredUserFacts(query)
-	if known == "" || len(unknowns) < 2 {
+	if known == "" || len(unknowns) == 0 {
+		known, unknowns = explicitConfirmedUnknownDeltaFacts(query)
+	}
+	if known == "" || len(unknowns) == 0 {
 		return ""
 	}
 
@@ -1718,14 +1752,88 @@ func projectExplicitConfirmedUnknownSections(query string) string {
 	for _, topic := range uniqueUncertainItems(unknowns) {
 		topic = strings.TrimSpace(strings.Trim(topic, "。；;，, "))
 		if count := utf8.RuneCountInString(topic); count >= 2 && count <= 80 {
-			unknownLines = append(unknownLines, "- "+topic+"：待确认")
+			if hasExplicitUnknownState(topic) {
+				unknownLines = append(unknownLines, "- "+topic)
+			} else {
+				unknownLines = append(unknownLines, "- "+topic+"：待确认")
+			}
 		}
 	}
-	if len(knownLines) == 0 || len(unknownLines) < 2 {
+	if len(knownLines) == 0 || len(unknownLines) == 0 {
 		return ""
 	}
 	return "## 已确认\n\n" + strings.Join(knownLines, "\n") +
 		"\n\n## 待确认\n\n" + strings.Join(unknownLines, "\n")
+}
+
+// explicitConfirmedUnknownDeltaFacts extracts a narrowly scoped known/unknown
+// split directly from the current user statement.  It is the single-unknown
+// counterpart of explicitDeferredUserFacts: response-shape instructions are
+// ignored, and every returned phrase remains user-authored.
+func explicitConfirmedUnknownDeltaFacts(query string) (string, []string) {
+	knownParts := make([]string, 0, 2)
+	unknowns := make([]string, 0, 2)
+	for _, clause := range splitUserStateClauses(cleanUserStatementRecord(query)) {
+		clause = strings.TrimSpace(strings.Trim(clause, "。；;，, "))
+		if clause == "" || transientStateAuditScopeInstruction(clause) ||
+			transientStateDeltaScopeEcho(clause) {
+			continue
+		}
+		if hasExplicitUnknownState(clause) {
+			unknown := canonicalExplicitUnknownDeltaFragment(clause)
+			if unknown != "" {
+				unknowns = append(unknowns, unknown)
+			}
+			continue
+		}
+		if strings.Contains(clause, "已确认") {
+			known := canonicalExplicitConfirmedDeltaFragment(clause)
+			if known != "" {
+				knownParts = append(knownParts, known)
+			}
+		}
+	}
+	return strings.Join(uniqueOrderedStrings(knownParts), "；"), uniqueOrderedStrings(unknowns)
+}
+
+func canonicalExplicitConfirmedDeltaFragment(clause string) string {
+	value := strings.TrimSpace(clause)
+	for _, prefix := range []string{
+		"已确认范围包含", "已确认范围包括", "已确认范围是", "已确认范围为",
+	} {
+		if strings.HasPrefix(value, prefix) {
+			payload := strings.TrimSpace(strings.TrimPrefix(value, prefix))
+			payload = strings.TrimLeft(payload, "：: ")
+			if payload != "" {
+				return "范围：" + payload
+			}
+		}
+	}
+	for _, prefix := range []string{"已确认事实：", "已确认事实:", "已确认：", "已确认:"} {
+		if strings.HasPrefix(value, prefix) {
+			value = strings.TrimSpace(strings.TrimPrefix(value, prefix))
+			break
+		}
+	}
+	return strings.Trim(value, "。；;，,：: ")
+}
+
+func canonicalExplicitUnknownDeltaFragment(clause string) string {
+	value := strings.TrimSpace(clause)
+	for _, marker := range []string{
+		"仍待确认", "尚待确认", "仍未确认", "尚未确认", "均未确认", "都未确认",
+		"待确认", "未确认", "待核实", "尚未核实", "仍未核实", "未核实",
+	} {
+		if strings.HasSuffix(value, marker) {
+			value = strings.TrimSpace(strings.TrimSuffix(value, marker))
+			break
+		}
+	}
+	value = strings.TrimRight(value, "也且并仍尚。；;，,：: ")
+	if value == "" || utf8.RuneCountInString(value) > 160 {
+		return ""
+	}
+	return value + "：待确认"
 }
 
 func projectExplicitUnknownOnlyList(query string) string {
@@ -2181,6 +2289,9 @@ func NormalizeExplicitUserIdentityUnknown(answer, originalQuery string, priorUse
 		return value
 	}
 	value = canonicalizeUnknownUserIdentitySubject(value)
+	if IsStateAuditTurn(query) {
+		value = removeUnsupportedActiveUserIdentity(value)
+	}
 	if answerHasUnknownUserIdentity(value) {
 		return value
 	}
@@ -2208,6 +2319,29 @@ func canonicalizeUnknownUserIdentitySubject(answer string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// removeUnsupportedActiveUserIdentity removes a generated known-identity row
+// from the active section when the authoritative user history says that the
+// current user's identity is still unknown. It deliberately touches only a
+// dedicated identity row; project-owner or other person facts remain intact.
+func removeUnsupportedActiveUserIdentity(answer string) string {
+	lines := strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n")
+	section := ""
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if key := stateAuditSectionHeading(line); key != "" {
+			section = key
+			out = append(out, line)
+			continue
+		}
+		if section == "active" && strings.Contains(line, "用户身份") &&
+			!containsAny(line, []string{"负责人", "责任人", "经办人", "联系人"}) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 func statementHasUnknownUserIdentity(statement string) bool {

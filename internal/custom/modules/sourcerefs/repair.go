@@ -160,6 +160,7 @@ func RepairNamedTopicCitationBindings(
 	if len(evidence) == 0 {
 		return answer
 	}
+	answer = relocateUnscopedNamedTopicCitation(answer, topics, evidence)
 
 	breaks := paragraphBreakRE.FindAllStringIndex(answer, -1)
 	var builder strings.Builder
@@ -221,6 +222,114 @@ func RepairNamedTopicCitationBindings(
 			builder.WriteString(answer[boundary[0]:boundary[1]])
 		}
 		start = boundary[1]
+	}
+	return builder.String()
+}
+
+// relocateUnscopedNamedTopicCitation repairs a bounded definition-layout
+// failure without increasing the citation count. A model may spend a shared
+// evidence handle on a source-only preface (for example, "according to article
+// 33") while one explicitly requested option paragraph remains uncited. When
+// that same immutable fragment is the unique direct definition evidence for
+// the missing option, move the preface handle to that option paragraph.
+func relocateUnscopedNamedTopicCitation(
+	answer string,
+	topics []string,
+	refs []citationRepairEvidence,
+) string {
+	breaks := paragraphBreakRE.FindAllStringIndex(answer, -1)
+	paragraphs := make([]string, 0, len(breaks)+1)
+	separators := make([]string, 0, len(breaks))
+	start := 0
+	for _, boundary := range breaks {
+		paragraphs = append(paragraphs, answer[start:boundary[0]])
+		separators = append(separators, answer[boundary[0]:boundary[1]])
+		start = boundary[1]
+	}
+	paragraphs = append(paragraphs, answer[start:])
+
+	for targetIndex, paragraph := range paragraphs {
+		matched := repairTopicsForParagraph(paragraph, topics)
+		if len(matched) != 1 || canonicalSourceTagRE.MatchString(paragraph) {
+			continue
+		}
+		citationID := uniqueNamedDefinitionEvidenceForParagraph(matched[0], paragraph, refs)
+		if citationID == "" {
+			continue
+		}
+		for donorIndex, donor := range paragraphs {
+			if donorIndex == targetIndex || !isSourceAttributionParagraph(donor) ||
+				len(repairTopicsForParagraph(donor, topics)) != 0 {
+				continue
+			}
+			if _, present := citationIDsInText(donor)[citationID]; !present {
+				continue
+			}
+			paragraphs[donorIndex] = removeCitationID(donor, citationID)
+			paragraphs[targetIndex] = strings.TrimRight(paragraph, " \t\r\n") +
+				canonicalCitationTag(citationID)
+			return joinRepairParagraphs(paragraphs, separators)
+		}
+	}
+	return answer
+}
+
+func uniqueNamedDefinitionEvidenceForParagraph(
+	topic string,
+	paragraph string,
+	refs []citationRepairEvidence,
+) string {
+	topicProbe := normalizedNamedTopicText(topic)
+	claimTokens := repairTokens(canonicalSourceTagRE.ReplaceAllString(paragraph, ""))
+	match := ""
+	for _, ref := range refs {
+		contentProbe := normalizedNamedTopicText(ref.content)
+		if !strings.Contains(contentProbe, topicProbe) ||
+			!namedDefinitionEvidence(ref.content, topic) ||
+			sharedTokenCount(claimTokens, ref.tokens) < 3 {
+			continue
+		}
+		if match != "" && match != ref.id {
+			return ""
+		}
+		match = ref.id
+	}
+	return match
+}
+
+func namedDefinitionEvidence(content, topic string) bool {
+	topicProbe := normalizedNamedTopicText(topic)
+	for _, sentence := range splitClaimSentences(content) {
+		probe := normalizedNamedTopicText(sentence)
+		topicAt := strings.Index(probe, topicProbe)
+		if topicAt < 0 {
+			continue
+		}
+		tail := probe[topicAt+len(topicProbe):]
+		if marker := strings.Index(tail, "是指"); marker >= 0 && marker <= 36 {
+			return true
+		}
+	}
+	return false
+}
+
+func removeCitationID(value, citationID string) string {
+	return canonicalSourceTagRE.ReplaceAllStringFunc(value, func(tag string) string {
+		match := canonicalSourceTagRE.FindStringSubmatch(tag)
+		if len(match) == 2 && match[1] == citationID {
+			return ""
+		}
+		return tag
+	})
+}
+
+func joinRepairParagraphs(paragraphs, separators []string) string {
+	var builder strings.Builder
+	for index, paragraph := range paragraphs {
+		builder.WriteString(paragraph)
+		if index < len(separators) {
+			builder.WriteString(separators[index])
+		}
 	}
 	return builder.String()
 }
@@ -928,6 +1037,20 @@ func isSourceAttributionParagraph(value string) bool {
 	}
 	if strings.Contains(probe, "《") && strings.Contains(probe, "》") &&
 		containsSourceAttributionMarker(probe) {
+		// A claim paragraph may end with an inline source title. It is not a
+		// source-only paragraph, and treating it as one can rotate citations
+		// backward across neighboring option definitions. Keep short prefixes
+		// such as "根据" or "来源：" eligible, but reject substantive prose
+		// before the first document title.
+		if titleAt := strings.Index(probe, "《"); titleAt > 0 {
+			prefix := strings.Trim(strings.TrimSpace(probe[:titleAt]), "*_`#> 📄📚🔗：:。.;；")
+			if utf8.RuneCountInString(prefix) > 12 &&
+				!strings.HasPrefix(prefix, "来源") &&
+				!strings.HasPrefix(prefix, "出处") &&
+				!strings.HasPrefix(strings.ToLower(prefix), "source") {
+				return false
+			}
+		}
 		return true
 	}
 	return strings.HasPrefix(probe, "来源") || strings.HasPrefix(probe, "出处") ||

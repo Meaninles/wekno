@@ -368,6 +368,40 @@ func TestNormalizeStateDeltaScopeDropsEpistemicInstructionArtifact(t *testing.T)
 	}
 }
 
+func TestNormalizeStateDeltaScopeDropsEmptyGeneratedLabelsOnDeclarativeTurns(t *testing.T) {
+	tests := []struct {
+		query  string
+		answer string
+		keep   string
+		drop   string
+	}{
+		{
+			query:  "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。",
+			answer: "- 项目负责人：周岚\n- 当前对话用户身份：未提供，不得将用户等同于周岚\n- 持续有效禁令（原样保留）：",
+			keep:   "当前对话用户身份：未提供",
+			drop:   "持续有效禁令",
+		},
+		{
+			query:  "初始验收日期记为2027年3月31日，只记录日期，不推断工期是否紧张。",
+			answer: "- **初始验收日期**：2027年3月31日\n- **工期推断**：",
+			keep:   "2027年3月31日",
+			drop:   "工期推断",
+		},
+	}
+	for _, test := range tests {
+		got := NormalizeStateDeltaScope(test.answer, test.query)
+		if !strings.Contains(got, test.keep) {
+			t.Fatalf("valid state was lost: %s", got)
+		}
+		if strings.Contains(got, test.drop) {
+			t.Fatalf("empty generated label %q survived: %s", test.drop, got)
+		}
+		if twice := NormalizeStateDeltaScope(got, test.query); twice != got {
+			t.Fatalf("empty-label cleanup was not idempotent: %s", twice)
+		}
+	}
+}
+
 func TestNormalizeStateDeltaScopeAnnotatesObservedUnverifiedClaim(t *testing.T) {
 	query := "A供应商声称接口只能由它安全改造。该说法目前只是供应商主张，尚未核验，不得写成事实。"
 	answer := `| 状态项 | 内容 |
@@ -508,6 +542,36 @@ func TestNormalizeExplicitUserIdentityUnknownCanonicalizesPossessiveSubject(t *t
 	}
 	if twice := NormalizeExplicitUserIdentityUnknown(got, query, prior); twice != got {
 		t.Fatalf("possessive identity normalization is not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeExplicitUserIdentityUnknownRemovesActiveKnownProjection(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。"
+	answer := `## 当前有效事实
+- 项目负责人：周岚
+- 用户身份：当前对话用户
+## 已废弃事实
+- 无
+## 待确认事项
+- 当前对话用户身份未提供
+## 行动边界
+- 仅在对话内维护`
+
+	got := NormalizeExplicitUserIdentityUnknown(answer, query, prior)
+	active := strings.Split(strings.Split(got, "## 当前有效事实")[1], "## 已废弃事实")[0]
+	if strings.Contains(active, "用户身份") {
+		t.Fatalf("unsupported known identity remained active: %s", got)
+	}
+	if !strings.Contains(active, "项目负责人：周岚") {
+		t.Fatalf("project-owner fact was removed with identity projection: %s", got)
+	}
+	unknown := strings.Split(strings.Split(got, "## 待确认事项")[1], "## 行动边界")[0]
+	if !strings.Contains(unknown, "当前对话用户身份未提供") {
+		t.Fatalf("authoritative identity unknown was lost: %s", got)
+	}
+	if twice := NormalizeExplicitUserIdentityUnknown(got, query, prior); twice != got {
+		t.Fatalf("active identity projection cleanup is not idempotent:\n%s", twice)
 	}
 }
 
@@ -2015,6 +2079,30 @@ func TestNormalizeStateDeltaScopeProjectsExplicitConfirmedAndUnknownSections(t *
 	}
 	if twice := NormalizeStateDeltaScope(got, query); twice != got {
 		t.Fatalf("confirmed/unknown projection was not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeStateDeltaScopeProjectsSingleExplicitUnknownSection(t *testing.T) {
+	query := "已确认范围包含温度传感器和监控平台；是否包含仓库布线施工仍待确认。只区分已确认和待确认。"
+	answers := []string{
+		"**已确认：**\n- 温度传感器\n- 监控平台\n\n- 仓库布线施工\n- 是否包含仓库布线施工待确认\n- 只区分已确认和待确认",
+		"- **已确认范围**：温度传感器、监控平台\n\n待确认：范围**：仓库布线施工。\n- 只区分已确认和待确认",
+		"**已确认**\n- 温度传感器\n- 监控平台\n\n**待确认**\n- 仓库布线施工\n- 是否包含仓库布线施工待确认\n- 只区分已确认和待确认",
+	}
+	want := "## 已确认\n\n- 范围：温度传感器和监控平台\n\n## 待确认\n\n- 是否包含仓库布线施工：待确认"
+	for _, answer := range answers {
+		got := NormalizeStateDeltaScope(answer, query)
+		if got != want {
+			t.Fatalf("single-unknown projection mismatch:\nwant:\n%s\n\ngot:\n%s", want, got)
+		}
+		for _, artifact := range []string{"只区分", "范围**", "- 仓库布线施工\n"} {
+			if strings.Contains(got, artifact) {
+				t.Fatalf("malformed model artifact %q survived: %s", artifact, got)
+			}
+		}
+		if twice := NormalizeStateDeltaScope(got, query); twice != got {
+			t.Fatalf("single-unknown projection was not idempotent:\n%s", twice)
+		}
 	}
 }
 

@@ -188,6 +188,64 @@ func TestRepairNamedTopicCitationBindingsReplacesOnlyUniqueStrongMismatch(t *tes
 	}
 }
 
+func TestRepairNamedTopicCitationBindingsMovesSharedDefinitionCitation(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "definitions", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "第三十三条 采购方式按照是否邀请特定供应商参与采购项目分为公开采购和邀请采购两类。公开采购是指采购人以采购公告方式邀请不特定的潜在供应商参与采购项目的方式；邀请采购是指采购人发出采购邀请书邀请特定的供应商或3家以上的潜在供应商参与采购项目的方式。",
+			Metadata: map[string]string{
+				MetadataCitationID: "S1", MetadataChunkID: "definitions", "source_type": SourceTypeKnowledge,
+			},
+		},
+	}
+	answer := "根据《采购管理办法》第三十三条：<src id=\"S1\" />\n\n" +
+		"**公开采购**——采购人以**采购公告**方式邀请**不特定**的潜在供应商参与采购项目。📄《采购管理办法》第六章第三十三条。<src id=\"S1\" />\n\n" +
+		"**邀请采购**——采购人发出**采购邀请书**邀请**特定的供应商或3家以上的潜在供应商**参与采购项目。📄《采购管理办法》第六章第三十三条。"
+	evidence := repairEvidence(refs)
+	if !namedDefinitionEvidence(evidence[0].content, "邀请采购") {
+		t.Fatal("shared source was not recognized as direct invitation-procurement definition evidence")
+	}
+	if id := uniqueNamedDefinitionEvidenceForParagraph("邀请采购", strings.Split(answer, "\n\n")[2], evidence); id != "S1" {
+		t.Fatalf("shared definition evidence was not uniquely matched, got %q", id)
+	}
+	if donor := strings.Split(answer, "\n\n")[0]; !isSourceAttributionParagraph(donor) ||
+		len(repairTopicsForParagraph(donor, []string{"公开采购", "邀请采购"})) != 0 {
+		t.Fatalf("source-only donor paragraph was not recognized: %q", donor)
+	}
+	paragraphs := strings.Split(answer, "\n\n")
+	if gotTopics := repairTopicsForParagraph(paragraphs[2], []string{"公开采购", "邀请采购"}); len(gotTopics) != 1 || gotTopics[0] != "邀请采购" || canonicalSourceTagRE.MatchString(paragraphs[2]) {
+		t.Fatalf("uncited invitation paragraph was not recognized: topics=%v paragraph=%q", gotTopics, paragraphs[2])
+	}
+	if _, present := citationIDsInText(paragraphs[0])["S1"]; !present {
+		t.Fatalf("source-only donor did not expose S1: %q", paragraphs[0])
+	}
+	if isSourceAttributionParagraph(paragraphs[1]) || isSourceAttributionParagraph(paragraphs[2]) {
+		t.Fatal("substantive definition with an inline source title was misclassified as source-only")
+	}
+	if relocated := relocateUnscopedNamedTopicCitation(answer, []string{"公开采购", "邀请采购"}, evidence); relocated == answer {
+		t.Fatalf("direct shared-definition relocation did not change the answer")
+	}
+
+	got := RepairNamedTopicCitationBindings(answer, []string{"公开采购", "邀请采购"}, refs)
+	if !strings.Contains(strings.Split(got, "\n\n")[2], `<src id="S1" />`) {
+		t.Fatalf("named-topic pass lost the relocated definition citation: %s", got)
+	}
+	got = RepairAnswerCitations(got, refs)
+	paragraphs = strings.Split(got, "\n\n")
+	if !strings.Contains(paragraphs[2], `<src id="S1" />`) {
+		t.Fatalf("shared evidence was not attached to the second definition: %s", got)
+	}
+	if strings.Contains(paragraphs[0], `<src id="S1" />`) {
+		t.Fatalf("unscoped source-preface citation was not moved: %s", got)
+	}
+	if strings.Count(got, `<src id="S1" />`) != 2 {
+		t.Fatalf("citation relocation changed the bounded citation count: %s", got)
+	}
+	if twice := RepairNamedTopicCitationBindings(got, []string{"公开采购", "邀请采购"}, refs); twice != got {
+		t.Fatalf("shared definition citation relocation is not idempotent: %s", twice)
+	}
+}
+
 func TestRepairNamedTopicCitationBindingsLeavesAmbiguousEvidenceUntouched(t *testing.T) {
 	refs := []*types.SearchResult{
 		{

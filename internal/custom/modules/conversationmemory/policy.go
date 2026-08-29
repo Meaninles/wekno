@@ -35,6 +35,10 @@ var uncertainParentheticalPattern = regexp.MustCompile(
 	`（[^（）]*(?:待确认|待核实|未提供|未知|尚未)[^（）]*）|\([^()]*(?:待确认|待核实|未提供|未知|尚未)[^()]*\)`,
 )
 
+var epistemicParentheticalPattern = regexp.MustCompile(
+	`（[^（）]*(?:不推断|不得推断|不要推断|不可推断|不作推断)[^（）]*）|\([^()]*(?:不推断|不得推断|不要推断|不可推断|不作推断)[^()]*\)`,
+)
+
 var retiredParentheticalPattern = regexp.MustCompile(
 	`（[^（）]*(?:废弃|作废|旧值|被取代|被替代)[^（）]*）|\([^()]*(?:废弃|作废|旧值|被取代|被替代)[^()]*\)`,
 )
@@ -75,6 +79,12 @@ var internalUserMessageLabelPattern = regexp.MustCompile(
 	`(?i)\b(?:earliest|earlier|latest|recent|current)_user_message_[0-9]+\b`,
 )
 
+var internalConversationLocatorPattern = regexp.MustCompile(
+	`(?i)(?:[，,、]\s*)?(?:historical|历史消息\s*[0-9０-９]+(?:\s*[、,，]\s*[0-9０-９]+)*|对话轮次\s*[0-9０-９]+(?:\s*[、,，]\s*[0-9０-９]+)*)`,
+)
+
+var emptyParentheticalPattern = regexp.MustCompile(`（\s*）|\(\s*\)`)
+
 var internalPlanningParagraphBreakPattern = regexp.MustCompile(`\n[ \t]*\n+`)
 
 var sharedScalarUnitPattern = regexp.MustCompile(
@@ -99,6 +109,10 @@ var sourceAttributionParentheticalPattern = regexp.MustCompile(
 
 var replacementActorPattern = regexp.MustCompile(
 	`被([^|。；;\n]{2,24}?)(调整为|变更为|更新为|修改为)`,
+)
+
+var possessiveReplacementActorPattern = regexp.MustCompile(
+	`被([^|。；;\n]{2,24}?)(调整|变更|更新|修改)的([^|。；;\n]{1,80}?)(取代|替代)`,
 )
 
 var stateAuditAnchorPattern = regexp.MustCompile(
@@ -1513,7 +1527,12 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 			continue
 		}
 		if isEpistemicStateInstructionLine(trimmed) {
-			continue
+			line = stripStateDeltaEpistemicInstruction(line)
+			trimmed = strings.TrimSpace(line)
+			if strings.Trim(trimmed, "-*| _`。；;，,：: ") == "" {
+				continue
+			}
+			lines[index] = line
 		}
 		if isRequestedStateDeltaHeading(trimmed, query) || stateDeltaLineRelevant(trimmed, query) {
 			keep[index] = true
@@ -1561,6 +1580,16 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	}
 	result = expandSharedScalarUnits(result)
 	return restoreExplicitStateDeltaFacts(result, query)
+}
+
+func stripStateDeltaEpistemicInstruction(line string) string {
+	value := epistemicParentheticalPattern.ReplaceAllString(line, "")
+	value = inferenceScopePattern.ReplaceAllString(value, "")
+	value = strings.NewReplacer(
+		"- ；", "- ", "- ;", "- ", "- ，", "- ", "- ,", "- ",
+		"| ；", "| ", "| ;", "| ", "| ，", "| ", "| ,", "| ",
+	).Replace(value)
+	return strings.TrimRight(value, " \t，,；;")
 }
 
 // projectExplicitSourceUpdate preserves a current user turn whose purpose is
@@ -1737,17 +1766,20 @@ func restoreExplicitStateDeltaFacts(answer, query string) string {
 			containsAny(query, []string{"尚未核验", "未经核验", "未核验", "待核验"}) {
 			actor := strings.TrimSpace(match[1])
 			claim := strings.TrimSpace(match[2])
-			if actor != "" && claim != "" &&
-				(!strings.Contains(normalizedAnswer, normalizeStateDeltaText(actor)) ||
-					!strings.Contains(normalizedAnswer, normalizeStateDeltaText(claim))) {
-				status := "待核验"
-				for _, marker := range []string{"尚未核验", "未经核验", "未核验", "待核验"} {
-					if strings.Contains(query, marker) {
-						status = marker
-						break
-					}
+			if actor != "" && claim != "" {
+				status := explicitUnverifiedStatus(query)
+				actorPresent := strings.Contains(normalizedAnswer, normalizeStateDeltaText(actor))
+				claimPresent := strings.Contains(normalizedAnswer, normalizeStateDeltaText(claim))
+				if actorPresent && claimPresent && !containsAny(result, []string{
+					"尚未核验", "未经核验", "未核验", "待核验",
+				}) {
+					result = annotateExplicitUnverifiedClaim(result, actor, claim, status)
+					normalizedAnswer = normalizeStateDeltaText(result)
+					continue
 				}
-				additions = append(additions, "- "+actor+"主张："+claim+"（"+status+"）")
+				if !actorPresent || !claimPresent {
+					additions = append(additions, "- "+actor+"主张："+claim+"（"+status+"）")
+				}
 			}
 		}
 	}
@@ -1758,6 +1790,35 @@ func restoreExplicitStateDeltaFacts(answer, query string) string {
 		return strings.Join(additions, "\n")
 	}
 	return result + "\n" + strings.Join(additions, "\n")
+}
+
+func explicitUnverifiedStatus(query string) string {
+	for _, marker := range []string{"尚未核验", "未经核验", "未核验", "待核验"} {
+		if strings.Contains(query, marker) {
+			return marker
+		}
+	}
+	return "待核验"
+}
+
+func annotateExplicitUnverifiedClaim(answer, actor, claim, status string) string {
+	lines := strings.Split(answer, "\n")
+	actorKey := normalizeStateDeltaText(actor)
+	claimKey := normalizeStateDeltaText(claim)
+	for index, line := range lines {
+		normalized := normalizeStateDeltaText(line)
+		if strings.Contains(normalized, actorKey) && strings.Contains(normalized, claimKey) {
+			line = strings.TrimRight(line, " \t")
+			if strings.HasSuffix(line, "|") {
+				line = strings.TrimRight(strings.TrimSuffix(line, "|"), " \t") + "（" + status + "） |"
+			} else {
+				line += "（" + status + "）"
+			}
+			lines[index] = line
+			return strings.Join(lines, "\n")
+		}
+	}
+	return answer
 }
 
 func isStrictStateDeltaTurn(query string) bool {
@@ -2261,6 +2322,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	// Archive record identifiers are prompt-internal provenance, not user-facing
 	// source names. Keep the attribution while removing the implementation label.
 	value = internalUserMessageLabelPattern.ReplaceAllString(value, "此前用户消息")
+	value = stripInternalConversationLocators(value)
 	userStatements := make([]string, 0, len(priorUserStatements)+1)
 	for _, statement := range priorUserStatements {
 		for _, line := range strings.Split(strings.ReplaceAll(statement, "\r\n", "\n"), "\n") {
@@ -2455,12 +2517,27 @@ func markdownTableShape(line string) (columns, meaningful int) {
 func transientStateAuditScopeInstruction(line string) bool {
 	trimmed := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
 	trimmed = strings.Trim(trimmed, "| *_`。；; ")
+	if containsAny(trimmed, []string{
+		"不讨论采购方式", "不得讨论采购方式", "不要讨论采购方式",
+		"不选择采购方式", "不得选择采购方式", "不要选择采购方式", "禁止选择采购方式",
+	}) {
+		return true
+	}
 	if !containsAnyPrefix(trimmed, []string{
 		"只把", "仅把", "只列", "仅列", "只区分", "仅区分",
 	}) {
 		return false
 	}
 	return containsAny(trimmed, []string{"待确认", "当前值", "废弃值", "状态", "事实", "项"})
+}
+
+func stripInternalConversationLocators(value string) string {
+	value = internalConversationLocatorPattern.ReplaceAllString(value, "")
+	value = emptyParentheticalPattern.ReplaceAllString(value, "")
+	value = strings.NewReplacer(
+		"（，", "（", "（,", "（", "(，", "(", "(,", "(",
+	).Replace(value)
+	return value
 }
 
 func trimStateAuditPreamble(lines []string) []string {
@@ -3944,12 +4021,19 @@ func removeUnsupportedReplacementActor(line string, userStatements []string) str
 	if len(anchors) == 0 {
 		return line
 	}
-	return replacementActorPattern.ReplaceAllStringFunc(line, func(fragment string) string {
+	line = replacementActorPattern.ReplaceAllStringFunc(line, func(fragment string) string {
 		match := replacementActorPattern.FindStringSubmatch(fragment)
 		if len(match) != 3 || sourceAttributionSupported(match[1], anchors, userStatements) {
 			return fragment
 		}
 		return match[2]
+	})
+	return possessiveReplacementActorPattern.ReplaceAllStringFunc(line, func(fragment string) string {
+		match := possessiveReplacementActorPattern.FindStringSubmatch(fragment)
+		if len(match) != 5 || sourceAttributionSupported(match[1], anchors, userStatements) {
+			return fragment
+		}
+		return "被" + match[3] + match[4]
 	})
 }
 

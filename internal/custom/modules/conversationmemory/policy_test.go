@@ -330,19 +330,39 @@ func TestNormalizeStateDeltaScopeDropsUnrequestedHistoricalLedger(t *testing.T) 
 
 func TestNormalizeStateDeltaScopeDropsEpistemicInstructionArtifact(t *testing.T) {
 	query := "初始目标日期是2026年11月30日。只记录日期，不推断是否紧急。"
-	answer := "- **初始目标日期**：2026年11月30日\n- 不推断：否紧急"
-
-	got := NormalizeStateDeltaScope(answer, query)
-	if !strings.Contains(got, "2026年11月30日") {
-		t.Fatalf("explicit date was lost: %s", got)
+	answers := []string{
+		"- **初始目标日期**：2026年11月30日\n- 不推断：否紧急",
+		"- **初始目标日期**：2026年11月30日（不推断是否紧急）",
+		"- **初始目标日期**：2026年11月30日；不推断是否紧急",
 	}
-	for _, artifact := range []string{"不推断", "否紧急"} {
-		if strings.Contains(got, artifact) {
-			t.Fatalf("epistemic instruction artifact %q survived: %s", artifact, got)
+	for _, answer := range answers {
+		got := NormalizeStateDeltaScope(answer, query)
+		if !strings.Contains(got, "2026年11月30日") {
+			t.Fatalf("explicit date was lost from %q: %s", answer, got)
+		}
+		for _, artifact := range []string{"不推断", "否紧急"} {
+			if strings.Contains(got, artifact) {
+				t.Fatalf("epistemic instruction artifact %q survived: %s", artifact, got)
+			}
+		}
+		if twice := NormalizeStateDeltaScope(got, query); twice != got {
+			t.Fatalf("epistemic instruction cleanup was not idempotent: %s", twice)
 		}
 	}
+}
+
+func TestNormalizeStateDeltaScopeAnnotatesObservedUnverifiedClaim(t *testing.T) {
+	query := "A供应商声称接口只能由它安全改造。该说法目前只是供应商主张，尚未核验，不得写成事实。"
+	answer := `| 状态项 | 内容 |
+|--------|------|
+| A供应商的声称 | A供应商声称接口只能由它安全改造 |`
+
+	got := NormalizeStateDeltaScope(answer, query)
+	if !strings.Contains(got, "A供应商声称接口只能由它安全改造（尚未核验）") {
+		t.Fatalf("unverified status was not attached to the explicit claim: %s", got)
+	}
 	if twice := NormalizeStateDeltaScope(got, query); twice != got {
-		t.Fatalf("epistemic instruction cleanup was not idempotent: %s", twice)
+		t.Fatalf("unverified status repair was not idempotent: %s", twice)
 	}
 }
 
@@ -1663,6 +1683,66 @@ func TestStateAuditRestoresCompoundRelationshipAndStripsInventedReplacementActor
 	}
 	if strings.Contains(got, "被业务调整") || !strings.Contains(got, "调整为2027年1月31日") {
 		t.Fatalf("unsupported replacement actor was not stripped conservatively: %s", got)
+	}
+}
+
+func TestStateAuditStripsInventedPossessiveReplacementActor(t *testing.T) {
+	query := "做完整状态审计，分成当前有效事实、已废弃事实、待确认事实、行动边界。"
+	prior := []string{
+		"初始目标日期是2026年11月30日。",
+		"目标日期调整为2027年1月31日，2026年11月30日从现在起废弃。",
+	}
+	answer := `### 当前有效事实
+- 当前目标日期：2027年1月31日
+### 已废弃事实
+| 原事实 | 替代 |
+|---|---|
+| 初始目标日期2026年11月30日 | 已被业务调整的2027年1月31日取代 |
+### 待确认事实
+- 无
+### 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	if strings.Contains(got, "业务调整") || !strings.Contains(got, "被2027年1月31日取代") {
+		t.Fatalf("invented possessive replacement actor was not stripped: %s", got)
+	}
+}
+
+func TestStateAuditDropsResponseScopeUnknownAndInternalLocators(t *testing.T) {
+	query := "现在做一次完整状态审计，不要重新检索制度，也不要选择采购方式。"
+	prior := []string{
+		"需求是否完整仍待核实。",
+		"采购标的最终类别仍未确认。只把这一项列为待确认。",
+	}
+	answer := `### 当前有效事实
+| 事实 | 来源 |
+|---|---|
+| 项目代号启明星视觉升级 | 用户（historical） |
+| 当前预算390万元 | 财务（用户转述，历史消息2） |
+### 已废弃事实
+- 初始预算360万元（已废弃，用户明确废弃（对话轮次2））
+### 待确认事实
+| 事项 | 说明 |
+|---|---|
+| 需求是否完整 | 仍待核实（对话轮次5） |
+| 当前尚未确定选择哪种采购方式 | 用户一直要求不讨论采购方式，未进入选择程序 |
+### 行动边界
+- 仅在对话中维护`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	for _, internal := range []string{"historical", "历史消息", "对话轮次", "不讨论采购方式", "选择哪种采购方式"} {
+		if strings.Contains(got, internal) {
+			t.Fatalf("internal or transient text %q survived: %s", internal, got)
+		}
+	}
+	for _, expected := range []string{"启明星视觉升级", "390万元", "360万元", "需求是否完整", "仅在对话中维护"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("business state %q was lost: %s", expected, got)
+		}
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("scope and locator cleanup was not idempotent:\n%s", twice)
 	}
 }
 

@@ -100,6 +100,31 @@ func TestRepairAnswerCitationsMovesSourceTitleHandleBesideSupportedClaim(t *test
 	}
 }
 
+func TestRepairAnswerCitationsMovesQuestionHandleToSupportedAnswer(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "publication-period", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "中标候选人公示期应不少于3日。",
+			Metadata:        map[string]string{MetadataCitationID: "S3", MetadataChunkID: "publication-period", "source_type": SourceTypeKnowledge},
+		},
+	}
+	question := `**1. 中标候选人公示至少多少日？**<src id="S3" />`
+	claim := "中标候选人公示期应不少于 **3日（日历日）**。"
+	answer := question + "\n\n" + claim + "📄《采购管理办法》成交供应商公示条款。"
+
+	got := RepairAnswerCitations(answer, refs)
+	parts := strings.Split(got, "\n\n")
+	if len(parts) != 2 || strings.Contains(parts[0], "<src") {
+		t.Fatalf("question retained a non-claim citation: %q", got)
+	}
+	if !strings.Contains(parts[1], claim+`<src id="S3" />`) {
+		t.Fatalf("question citation was not moved beside the supported answer: %q", got)
+	}
+	if twice := RepairAnswerCitations(got, refs); twice != got {
+		t.Fatalf("question citation repair was not idempotent: %q", twice)
+	}
+}
+
 func TestRepairAnswerCitationsRepairsEvidenceSentencesInsideMixedParagraphs(t *testing.T) {
 	refs := []*types.SearchResult{
 		{

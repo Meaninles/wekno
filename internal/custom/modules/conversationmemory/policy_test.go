@@ -1655,11 +1655,19 @@ func TestStateAuditRestoresDurableIdentityAndRelocatesObservedLifecycleText(t *t
 		"A供应商声称接口只能由它安全改造。该说法目前只是供应商主张，尚未核验。",
 		"法务和技术核验后确认A并非不可替代，B、C通过适配也能满足。废弃‘只能A做’这一前提。",
 	}
+	entities := explicitResolvedExclusiveEntities(prior)
+	if !entities["A"] {
+		t.Fatalf("resolved exclusivity subject was not recognized: %#v", entities)
+	}
+	if !unsupportedResolvedEntityAvailabilityLine("- A供应商可满足（来源：业务和技术团队核验）", entities, prior) {
+		t.Fatal("unsupported standalone availability was not recognized")
+	}
 	answer := `### 当前有效事实
 | 项目 | 当前状态 |
 |---|---|
 | A供应商当前核验结论 | 已被推翻。法务和技术团队核验后确认A并非不可替代，B、C通过适配也能满足 |
 | 维护范围 | 仅在当前对话中维护台账 |
+- A供应商可满足（来源：业务和技术团队核验）
 ### 已废弃事实
 - A供应商“只能A做”前提已废弃
 ### 待确认事实
@@ -1679,6 +1687,9 @@ func TestStateAuditRestoresDurableIdentityAndRelocatesObservedLifecycleText(t *t
 		if strings.Contains(active, misplaced) {
 			t.Fatalf("lifecycle text %q remained active: %s", misplaced, got)
 		}
+	}
+	if strings.Contains(active, "A供应商可满足") {
+		t.Fatalf("unsupported availability inferred from a resolved exclusivity claim: %s", got)
 	}
 	boundary := strings.Split(got, "### 行动边界")[1]
 	if !strings.Contains(boundary, "只在本对话中维护") {

@@ -42,10 +42,72 @@ func RepairAnswerCitations(answer string, refs []*types.SearchResult) string {
 		return answer
 	}
 	answer = relocateTrailingSourceAttributionCitation(answer, evidence)
+	answer = relocateQuestionCitationToSupportedAnswer(answer, evidence)
 	if canonicalSourceTagRE.MatchString(answer) {
 		return attachMissingSentenceEvidence(answer, evidence, 4)
 	}
 	return attachUnambiguousSentenceCitations(answer, evidence, 6)
+}
+
+// relocateQuestionCitationToSupportedAnswer handles a citation placed after a
+// restated question while the immediately following answer sentence contains
+// the actual evidence-backed claim. It moves (rather than copies) the handle,
+// and only when that sentence has a unique lexical match to the same immutable
+// current-turn evidence fragment.
+func relocateQuestionCitationToSupportedAnswer(answer string, refs []citationRepairEvidence) string {
+	paragraphs := paragraphBreakRE.Split(answer, -1)
+	changed := false
+	for index := 0; index+1 < len(paragraphs); index++ {
+		question := paragraphs[index]
+		ids := citationIDsInText(question)
+		if len(ids) != 1 {
+			continue
+		}
+		withoutCitation := canonicalSourceTagRE.ReplaceAllString(question, "")
+		if !strings.ContainsAny(withoutCitation, "？?") {
+			continue
+		}
+		id := ""
+		for candidate := range ids {
+			id = candidate
+		}
+		repaired, ok := attachCitationToUniqueSupportedSentence(paragraphs[index+1], id, refs)
+		if !ok {
+			continue
+		}
+		paragraphs[index] = strings.TrimRight(withoutCitation, " \t")
+		paragraphs[index+1] = repaired
+		changed = true
+	}
+	if !changed {
+		return answer
+	}
+	return strings.Join(paragraphs, "\n\n")
+}
+
+func attachCitationToUniqueSupportedSentence(
+	paragraph, citationID string,
+	refs []citationRepairEvidence,
+) (string, bool) {
+	if strings.TrimSpace(paragraph) == "" || citationID == "" || canonicalSourceTagRE.MatchString(paragraph) {
+		return paragraph, false
+	}
+	segments := splitClaimSentences(paragraph)
+	matched := -1
+	for index, segment := range segments {
+		if canonicalSourceTagRE.MatchString(segment) || unambiguousEvidenceForParagraph(segment, refs) != citationID {
+			continue
+		}
+		if matched >= 0 {
+			return paragraph, false
+		}
+		matched = index
+	}
+	if matched < 0 {
+		return paragraph, false
+	}
+	segments[matched] = strings.TrimRight(segments[matched], " \t") + canonicalCitationTag(citationID)
+	return strings.Join(segments, ""), true
 }
 
 // RepairNamedTopicCitationBindings fixes a narrow, high-confidence comparison

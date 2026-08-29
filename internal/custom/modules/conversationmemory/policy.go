@@ -109,6 +109,10 @@ var sourceActorSplitPattern = regexp.MustCompile(`(?:和|与|及|、|/|，|,)`)
 
 var unresolvedClaimEntityPattern = regexp.MustCompile(`[A-Z][A-Z0-9_-]{0,15}`)
 
+var resolvedExclusiveEntityPattern = regexp.MustCompile(
+	`([A-Z][A-Z0-9_-]{0,15})(?:供应商)?并非不可替代`,
+)
+
 // namedRoleLabels are durable business roles whose explicitly assigned holder
 // can safely be reconstructed from user-authored history during a state audit.
 // Keep the more specific labels before the generic ones so a phrase such as
@@ -2262,6 +2266,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 	explicitRetiredGroups := explicitRetiredScalarGroups(userStatements)
 	explicitActiveScalars := explicitActiveScalarFacts(userStatements)
 	explicitUnknowns := explicitUnknownUserStatements(userStatements)
+	resolvedExclusiveEntities := explicitResolvedExclusiveEntities(userStatements)
 	stripProcurementSelectionScope := containsAny(originalQuery, []string{
 		"不选择采购方式", "不得选择采购方式", "不要选择采购方式",
 	})
@@ -2310,6 +2315,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 				continue
 			}
 			line = normalizeResolvedClaimActiveLine(line)
+			if unsupportedResolvedEntityAvailabilityLine(line, resolvedExclusiveEntities, userStatements) {
+				continue
+			}
 			line = retiredParentheticalPattern.ReplaceAllString(line, "")
 			line = uncertainParentheticalPattern.ReplaceAllString(line, "")
 			line = retiredActiveSuffixPattern.ReplaceAllString(line, "")
@@ -3703,6 +3711,68 @@ func resolvedEntityFactCovered(activeText, fact string) bool {
 		}
 	}
 	return true
+}
+
+// explicitResolvedExclusiveEntities returns only the subject of a user-authored
+// resolution such as "A并非不可替代". Alternative entities mentioned later in
+// the same sentence are deliberately excluded.
+func explicitResolvedExclusiveEntities(userStatements []string) map[string]bool {
+	result := make(map[string]bool)
+	for _, statement := range userStatements {
+		value := cleanUserStatementRecord(statement)
+		if !containsAny(value, []string{"完成核验", "核验后确认", "核验确认", "经核验确认"}) {
+			continue
+		}
+		for _, match := range resolvedExclusiveEntityPattern.FindAllStringSubmatch(value, -1) {
+			if len(match) == 2 {
+				result[match[1]] = true
+			}
+		}
+	}
+	return result
+}
+
+// unsupportedResolvedEntityAvailabilityLine removes a model inference that a
+// supplier named only in a now-resolved exclusivity claim is independently
+// confirmed as capable. The verified resolution (for example, that the vendor
+// is not irreplaceable and alternatives can satisfy the need) remains active;
+// a standalone "A can satisfy" row is kept only when the user separately said
+// so as a confirmed fact.
+func unsupportedResolvedEntityAvailabilityLine(
+	line string,
+	resolvedEntities map[string]bool,
+	userStatements []string,
+) bool {
+	if len(resolvedEntities) == 0 || !containsAny(line, []string{
+		"可满足", "可以满足", "能够满足", "能满足", "满足需求",
+	}) || containsAny(line, []string{
+		"并非不可替代", "不是不可替代", "不再不可替代", "可替代性", "主张",
+		"核验后确认", "经核验", "核验结论", "不成立", "推翻",
+	}) {
+		return false
+	}
+	probe := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
+	probe = strings.TrimLeft(probe, "| *_`")
+	for entity := range resolvedEntities {
+		if !strings.HasPrefix(probe, entity) {
+			continue
+		}
+		confirmed := false
+		for _, statement := range userStatements {
+			value := cleanUserStatementRecord(statement)
+			if !strings.Contains(value, entity) || !containsAny(value, []string{
+				"可满足", "可以满足", "能够满足", "能满足", "满足需求",
+			}) || containsAny(value, []string{
+				"声称", "主张", "说法", "未经核验", "尚未核验", "待核验", "未核验", "并非不可替代",
+			}) {
+				continue
+			}
+			confirmed = true
+			break
+		}
+		return !confirmed
+	}
+	return false
 }
 
 type explicitNamedRoleFact struct {

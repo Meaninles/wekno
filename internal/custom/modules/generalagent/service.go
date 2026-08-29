@@ -258,6 +258,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	defer unregister()
 
 	history, durableUserContext := s.buildHistory(ctx, req, agentConfig)
+	history, durableUserContext = applyGeneralAgentHistoryPolicy(
+		req.Query,
+		history,
+		durableUserContext,
+	)
 	boundaryUserStatements := make([]string, 0, len(history)+1)
 	if strings.TrimSpace(durableUserContext) != "" {
 		boundaryUserStatements = append(boundaryUserStatements, durableUserContext)
@@ -266,12 +271,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && strings.TrimSpace(message.Content) != "" {
 			boundaryUserStatements = append(boundaryUserStatements, message.Content)
 		}
-	}
-	if conversationmemory.RequiresAuthoritativeUserHistory(req.Query) {
-		history = userOnlyGeneralAgentHistory(history)
-	}
-	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(req.Query) {
-		history = nil
 	}
 	runtimeQuery = conversationmemory.AppendAuditArchive(
 		runtimeQuery,
@@ -536,6 +535,25 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		},
 	})
 	return nil
+}
+
+func applyGeneralAgentHistoryPolicy(
+	query string,
+	history []ChatHistoryMessage,
+	durableUserContext string,
+) ([]ChatHistoryMessage, string) {
+	if conversationmemory.RequiresAuthoritativeUserHistory(query) {
+		history = userOnlyGeneralAgentHistory(history)
+	}
+	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(query) {
+		// A self-contained evidence detour must not retain either recent Q&A or
+		// the older user-only archive. Keeping the archive while dropping recent
+		// history still exposes retired topics in the system prompt and can send
+		// a tool-using model back into a search loop after it has already gathered
+		// the evidence requested by the current turn.
+		return nil, ""
+	}
+	return history, durableUserContext
 }
 
 func (s *Service) preflightDataAnalysisSources(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, config *types.AgentConfig, runID string, start time.Time) (bool, error) {

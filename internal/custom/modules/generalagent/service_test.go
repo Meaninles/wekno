@@ -92,6 +92,33 @@ func TestUserOnlyGeneralAgentHistoryDropsAssistantClaims(t *testing.T) {
 	}
 }
 
+func TestApplyGeneralAgentHistoryPolicyClearsEveryHistoryChannelForNarrowEvidence(t *testing.T) {
+	history := []ChatHistoryMessage{
+		{Role: "user", Content: "比较询比、竞价和竞争谈判。"},
+		{Role: "assistant", Content: "历史比较回答。"},
+	}
+	archive := "earlier_user_message_01: 继续比较询比、竞价和竞争谈判。"
+	query := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
+
+	gotHistory, gotArchive := applyGeneralAgentHistoryPolicy(query, history, archive)
+	if len(gotHistory) != 0 || gotArchive != "" {
+		t.Fatalf("self-contained evidence turn retained stale context: history=%#v archive=%q", gotHistory, gotArchive)
+	}
+}
+
+func TestApplyGeneralAgentHistoryPolicyKeepsArchiveForHistoryDependentAudit(t *testing.T) {
+	history := []ChatHistoryMessage{
+		{Role: "user", Content: "预算改为220万元。"},
+		{Role: "assistant", Content: "预算仍是旧值。"},
+	}
+	archive := "earlier_user_message_01: 项目代号启明星。"
+
+	gotHistory, gotArchive := applyGeneralAgentHistoryPolicy("请做状态审计，列出当前事实和已废弃事实。", history, archive)
+	if len(gotHistory) != 1 || gotHistory[0].Role != "user" || gotArchive != archive {
+		t.Fatalf("history-dependent audit lost authoritative user context: history=%#v archive=%q", gotHistory, gotArchive)
+	}
+}
+
 func TestGeneralAgentArtifactsRequireCurrentUserDeliveryIntent(t *testing.T) {
 	config := &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent, EnableArtifacts: true}
 	if generalAgentArtifactsEnabled(config, "只比较几种采购方式并就近引用。") {

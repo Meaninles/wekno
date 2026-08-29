@@ -86,6 +86,28 @@ class RecoveredStreamClient(FakeClient):
         }
 
 
+class PersistedRuntimeErrorClient(FakeClient):
+    def __init__(self) -> None:
+        super().__init__("eval")
+
+    def create_session(self) -> str:
+        return "runtime-error-session"
+
+    def stream(self, _path: str, _payload: dict):
+        return ([], 10, 100)
+
+    def load_completed_assistant(self, _session_id: str, **_kwargs: object):
+        return {
+            "id": "message",
+            "role": "assistant",
+            "content": (
+                "ResultMessage(subtype='success', is_error=True, "
+                "result='API Error: context window exceeded')"
+            ),
+            "is_completed": True,
+        }
+
+
 class RunnerTests(unittest.TestCase):
     def test_production_is_record_only(self) -> None:
         with self.assertRaises(EvalModeRequired):
@@ -208,6 +230,23 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(result.turns), 2)
         self.assertTrue(result.turns[0].error.startswith("sut_stream_error:"))
         self.assertEqual(result.turns[1].error, "sut_turn_skipped_after_failure")
+
+    def test_persisted_runtime_error_payload_cannot_masquerade_as_answer(self) -> None:
+        case = CaseSpec(
+            case_id="runtime-error",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[TurnSpec(turn_id="turn", query="q", contract=TurnContract())],
+        )
+
+        result = EvalRunner(PersistedRuntimeErrorClient()).run_case(case)
+
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertTrue(result.turns[0].error.startswith("sut_stream_error:"))
 
 
 if __name__ == "__main__":

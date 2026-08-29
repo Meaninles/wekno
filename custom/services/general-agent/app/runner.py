@@ -62,8 +62,14 @@ def effective_max_turns(payload: ChatPayload) -> int:
     # a ceiling reserve: successful runs still stop as soon as they answer.
     if not payload.runtime_config.disable_tools_for_turn:
         topic_count = len(required_evidence_topics(payload.query))
-        if topic_count >= 3:
-            maximum = max(maximum, min(18, 6 + topic_count * 3))
+        if topic_count >= 2:
+            # The trusted contract already supplies one focused lookup per
+            # target. Give small configured limits enough room to collect and
+            # synthesize those results, while also capping accidentally huge
+            # agent settings (for example 100) so a drifted model cannot spend
+            # dozens of turns re-searching retired topics and retransmitting
+            # an ever-growing tool transcript.
+            maximum = min(18, 6 + topic_count * 3)
     return maximum
 
 
@@ -89,6 +95,13 @@ def claude_auth_env(payload: ChatPayload, config_dir: Path) -> tuple[dict[str, s
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         "API_TIMEOUT_MS": api_timeout_ms,
         "CLAUDE_CODE_MAX_RETRIES": os.getenv("CUSTOM_GENERAL_AGENT_CLAUDE_MAX_RETRIES", "2"),
+        # The bundled SDK otherwise reserves 32k output tokens on every call.
+        # An 8k configurable ceiling is ample for an agent step or final answer
+        # and leaves real context headroom on OpenAI-compatible gateways whose
+        # advertised and enforced context windows can differ.
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(
+            env_int("CUSTOM_GENERAL_AGENT_CLAUDE_MAX_OUTPUT_TOKENS", 8192)
+        ),
         "CLAUDE_ENABLE_STREAM_WATCHDOG": "1",
         "CLAUDE_STREAM_IDLE_TIMEOUT_MS": os.getenv("CUSTOM_GENERAL_AGENT_CLAUDE_IDLE_TIMEOUT_MS", "900000"),
         "CLAUDE_AGENT_SDK_CLIENT_APP": "weknora-general-agent/1.0",

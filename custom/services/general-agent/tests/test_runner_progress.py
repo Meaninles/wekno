@@ -256,7 +256,14 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(effective_max_turns(payload), 10)
         payload.runtime_config.disable_tools_for_turn = False
         payload.runtime_config.max_iterations = 20
-        self.assertEqual(effective_max_turns(payload), 20)
+        self.assertEqual(effective_max_turns(payload), 15)
+
+        payload.query = (
+            "回答甲、乙并引用。\n"
+            '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["甲","乙"]'
+        )
+        payload.runtime_config.max_iterations = 100
+        self.assertEqual(effective_max_turns(payload), 12)
 
     def test_turn_contract_issues_bind_uncertainties_to_direct_evidence(self):
         payload = ChatPayload(
@@ -973,7 +980,26 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-test")
         self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-test")
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://gateway")
+        self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "8192")
         self.assertIsNone(settings)
+
+    def test_claude_auth_env_allows_bounded_output_override(self):
+        payload = ChatPayload(
+            run_id="run-auth-output-limit",
+            session_id="session-auth-output-limit",
+            assistant_message_id="assistant-auth-output-limit",
+            query="hello",
+            llm=LLMConfig(model_name="claude-test", api_key="sk-test"),
+            tool_callback_url="http://app-dev:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"CUSTOM_GENERAL_AGENT_CLAUDE_MAX_OUTPUT_TOKENS": "4096"},
+        ):
+            env, _, _ = claude_auth_env(payload, Path("/tmp/claude-config"))
+
+        self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "4096")
 
     def test_claude_auth_env_maps_no_api_key_to_helper_settings(self):
         payload = ChatPayload(

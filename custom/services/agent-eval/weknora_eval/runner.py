@@ -174,22 +174,28 @@ class EvalRunner:
                 steps = [item for item in message.get("agent_steps") or [] if isinstance(item, dict)]
                 event_tools = [name for event in events if (name := event_tool_name(event))]
                 tools = list(dict.fromkeys([*event_tools, *_tools_from_steps(steps)]))
-                completed = bool(message.get("is_completed")) and bool(
-                    str(message.get("content") or "").strip()
-                )
-                if completed:
+                content = str(message.get("content") or "")
+                completed = bool(message.get("is_completed")) and bool(content.strip())
+                normalized_content = content.lstrip()
+                persisted_runtime_error = (
+                    normalized_content.startswith("ResultMessage(")
+                    and "is_error=True" in normalized_content
+                ) or normalized_content.startswith("API Error:")
+                if completed and not persisted_runtime_error:
                     # A tool/model step may emit an error event and then recover.
                     # The persisted completed answer is the source of truth.
                     error = None
                 elif stream_errors:
                     error = f"{SUT_STREAM_ERROR}: {stream_errors[-1]}"
+                elif persisted_runtime_error:
+                    error = f"{SUT_STREAM_ERROR}: persisted runtime error payload"
                 else:
                     error = SUT_RESPONSE_INCOMPLETE
                 observed = ObservedTurn(
                     turn_id=turn_spec.turn_id,
                     session_id=session_id,
                     message_id=message_id,
-                    content=str(message.get("content") or ""),
+                    content=content,
                     references=[item for item in message.get("knowledge_references") or [] if isinstance(item, dict)],
                     retrieval_stats=message.get("retrieval_stats") if isinstance(message.get("retrieval_stats"), dict) else {},
                     tools=tools,

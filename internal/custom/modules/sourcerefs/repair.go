@@ -44,9 +44,40 @@ func RepairAnswerCitations(answer string, refs []*types.SearchResult) string {
 	answer = relocateTrailingSourceAttributionCitation(answer, evidence)
 	answer = relocateQuestionCitationToSupportedAnswer(answer, evidence)
 	if canonicalSourceTagRE.MatchString(answer) {
-		return attachMissingSentenceEvidence(answer, evidence, 4)
+		answer = attachMissingSentenceEvidence(answer, evidence, 4)
+		return attachUnambiguousUncitedParagraphCitations(answer, evidence, 4)
 	}
 	return attachUnambiguousSentenceCitations(answer, evidence, 6)
+}
+
+// attachUnambiguousUncitedParagraphCitations covers a mixed answer in which
+// one paragraph is cited correctly while another independent claim paragraph
+// omits its handle. Existing cited paragraphs are left untouched (so a
+// paragraph-end citation is not duplicated); only a wholly uncited paragraph
+// with one unambiguous lexical evidence match may receive a handle.
+func attachUnambiguousUncitedParagraphCitations(
+	answer string, refs []citationRepairEvidence, limit int,
+) string {
+	breaks := paragraphBreakRE.FindAllStringIndex(answer, -1)
+	var builder strings.Builder
+	start := 0
+	added := 0
+	for _, boundary := range append(breaks, []int{len(answer), len(answer)}) {
+		paragraph := answer[start:boundary[0]]
+		if added < limit && !canonicalSourceTagRE.MatchString(paragraph) &&
+			!isSourceAttributionParagraph(paragraph) {
+			before := len(canonicalSourceTagRE.FindAllString(paragraph, -1))
+			paragraph = attachUnambiguousSentenceCitations(paragraph, refs, limit-added)
+			after := len(canonicalSourceTagRE.FindAllString(paragraph, -1))
+			added += after - before
+		}
+		builder.WriteString(paragraph)
+		if boundary[0] < len(answer) {
+			builder.WriteString(answer[boundary[0]:boundary[1]])
+		}
+		start = boundary[1]
+	}
+	return builder.String()
 }
 
 // relocateQuestionCitationToSupportedAnswer handles a citation placed after a

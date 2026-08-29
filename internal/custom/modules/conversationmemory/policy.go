@@ -97,6 +97,14 @@ var sharedScalarUnitPattern = regexp.MustCompile(
 	`([0-9０-９]+(?:\.[0-9０-９]+)?)\s*[/／+＋]\s*([0-9０-９]+(?:\.[0-9０-９]+)?)\s*(万元|元|家|个|%|％)`,
 )
 
+var inheritedLifecycleScalarUnitPattern = regexp.MustCompile(
+	`([0-9０-９]+(?:\.[0-9０-９]+)?)\s*(万元|元|家|个|%|％)\s*(?:和|与|及|、|，|,)\s*([0-9０-９]+(?:\.[0-9０-９]+)?)\s*[/／+＋]\s*([0-9０-９]+(?:\.[0-9０-９]+)?)`,
+)
+
+var bareStateAuditOrdinalHeadingPattern = regexp.MustCompile(
+	`^\s*(#{1,6})\s*(?:第\s*)?([一二三四1-4１-４])\s*[、.．:：-]?\s*$`,
+)
+
 var explicitUnknownOnlyListPattern = regexp.MustCompile(
 	`(?:本轮)?\s*(?:只列|仅列)\s*(?:仍)?待确认的(?:[一二三四五六七八九十0-9０-９]+项)?\s*[：:]\s*([^；;。\n]+)`,
 )
@@ -2073,6 +2081,14 @@ func NormalizeExplicitUserIdentityUnknown(answer, originalQuery string, priorUse
 	if value == "" || query == "" || !IsStateOnlyTurn(query) {
 		return value
 	}
+	// A prior unknown identity remains part of a full audit, but it must not be
+	// repeated on every unrelated delta update. Doing so makes a response about
+	// a date or scope appear to answer a different question and bloats long
+	// conversations. A non-audit turn receives this repair only when that turn
+	// itself mentions the identity boundary.
+	if !IsStateAuditTurn(query) && !statementHasUnknownUserIdentity(query) {
+		return value
+	}
 
 	sources := make([]string, 0, len(priorUserStatements)+1)
 	for _, statement := range priorUserStatements {
@@ -2347,6 +2363,7 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 		"不选择采购方式", "不得选择采购方式", "不要选择采购方式",
 	})
 	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	lines = normalizeBareStateAuditOrdinalHeadings(lines)
 	lines = trimStateAuditPreamble(lines)
 	retiredAnchors := retiredAuditScalarAnchors(lines)
 	out := make([]string, 0, len(lines))
@@ -2370,6 +2387,10 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			continue
 		}
 		if section == "active" {
+			line = stripDanglingExplicitUnknownProjection(line, explicitUnknowns)
+			if isEmptyExplicitUnknownProjection(line, explicitUnknowns) {
+				continue
+			}
 			if columns, meaningful := markdownTableShape(line); columns > 0 &&
 				!markdownTableSeparatorPattern.MatchString(strings.TrimSpace(line)) {
 				if activeTableColumns == 0 {
@@ -2420,6 +2441,9 @@ func NormalizeStateAuditSections(answer, originalQuery string, priorUserStatemen
 			line = removeUnsupportedReplacementActor(line, userStatements)
 		}
 		if section == "action_boundary" {
+			if isEpistemicStateInstructionLine(line) && len(operationBoundaryKinds(line)) == 0 {
+				continue
+			}
 			if containsAny(line, []string{
 				"只记录", "仅记录", "只更新", "仅更新", "只确认", "仅确认",
 				"不讨论", "不得讨论", "不要讨论", "不选择", "不得选择", "不要选择",
@@ -2501,6 +2525,8 @@ func isEpistemicStateInstructionLine(line string) bool {
 	if containsAny(probe, []string{
 		"不推断", "不得推断", "不要推断", "不可推断", "不作推断",
 		"不得写成事实", "不要写成事实", "不可写成事实",
+		"不得把用户等同", "不要把用户等同", "不可把用户等同",
+		"不得将用户等同", "不要将用户等同", "不可将用户等同",
 	}) {
 		return true
 	}
@@ -2524,12 +2550,84 @@ func markdownTableShape(line string) (columns, meaningful int) {
 	return len(cells), meaningful
 }
 
+func normalizeBareStateAuditOrdinalHeadings(lines []string) []string {
+	for index, line := range lines {
+		match := bareStateAuditOrdinalHeadingPattern.FindStringSubmatch(line)
+		if len(match) != 3 {
+			continue
+		}
+		label := ""
+		switch match[2] {
+		case "一", "1", "１":
+			label = "当前有效事实"
+		case "二", "2", "２":
+			label = "已废弃事实"
+		case "三", "3", "３":
+			label = "待确认事项"
+		case "四", "4", "４":
+			label = "行动边界"
+		}
+		if label != "" {
+			lines[index] = match[1] + " " + label
+		}
+	}
+	return lines
+}
+
+func hasExplicitUnknownState(value string) bool {
+	return containsAny(value, []string{
+		"待确认", "待核实", "未提供", "没有提供", "未说明", "未知",
+		"尚未确认", "仍未确认", "未确认", "尚未核验", "未经核验", "未核验",
+	})
+}
+
+func explicitUnknownProjectionRelevant(line string, explicitUnknowns []string) bool {
+	for _, statement := range explicitUnknowns {
+		for _, fragment := range splitUserStateClauses(cleanUserStatementRecord(statement)) {
+			if !hasExplicitUnknownState(fragment) ||
+				(statementHasUnknownUserIdentity(fragment) && !strings.Contains(line, "身份")) {
+				continue
+			}
+			if sameExplicitUnknownSubject(line, fragment) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stripDanglingExplicitUnknownProjection removes only an unfinished
+// parenthetical copied onto an otherwise valid active fact, for example
+// "项目负责人：林梅（用户身份". The unknown is restored in its canonical
+// section later; the valid active prefix is retained.
+func stripDanglingExplicitUnknownProjection(line string, explicitUnknowns []string) string {
+	type delimiter struct{ open, close string }
+	best := -1
+	for _, pair := range []delimiter{{"（", "）"}, {"(", ")"}} {
+		if index := strings.LastIndex(line, pair.open); index >= 0 &&
+			!strings.Contains(line[index+len(pair.open):], pair.close) &&
+			explicitUnknownProjectionRelevant(line[index+len(pair.open):], explicitUnknowns) && index > best {
+			best = index
+		}
+	}
+	if best < 0 {
+		return line
+	}
+	return strings.TrimRight(line[:best], " \t")
+}
+
+func isEmptyExplicitUnknownProjection(line string, explicitUnknowns []string) bool {
+	return explicitUnknownProjectionRelevant(line, explicitUnknowns) &&
+		isEmptyActionBoundaryListLine(line)
+}
+
 func transientStateAuditScopeInstruction(line string) bool {
 	trimmed := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
 	trimmed = strings.Trim(trimmed, "| *_`。；; ")
 	if containsAny(trimmed, []string{
 		"不讨论采购方式", "不得讨论采购方式", "不要讨论采购方式",
 		"不选择采购方式", "不得选择采购方式", "不要选择采购方式", "禁止选择采购方式",
+		"不执行任何操作", "不得执行任何操作", "不要执行任何操作",
 	}) {
 		return true
 	}
@@ -2735,9 +2833,7 @@ func explicitRetiredScalarGroups(userStatements []string) [][]string {
 			if !containsAny(fragment, []string{"废弃", "作废", "失效"}) {
 				continue
 			}
-			expanded := expandSharedScalarUnits(fragment)
-			anchors := stateAuditAnchorPattern.FindAllString(expanded, -1)
-			anchors = uniqueOrderedStrings(anchors)
+			anchors := explicitLifecycleScalarAnchors(fragment)
 			if len(anchors) < 2 {
 				continue
 			}
@@ -2766,7 +2862,7 @@ func explicitRetiredScalarFacts(userStatements []string) []explicitRetiredScalar
 			if !containsAny(fragment, []string{"废弃", "作废", "失效"}) {
 				continue
 			}
-			for _, anchor := range explicitScalarAnchors(fragment) {
+			for _, anchor := range explicitLifecycleScalarAnchors(fragment) {
 				retirementIndex[anchor] = index
 			}
 		}
@@ -2840,6 +2936,26 @@ func explicitScalarAnchors(fragment string) []string {
 		}
 	}
 	return out
+}
+
+// explicitLifecycleScalarAnchors expands compact retirement wording such as
+// "300万元和220/80构成废弃". The explicitly written unit on the leading
+// scalar applies to the slash-separated values in the same lifecycle clause.
+// This is used only for explicit retire/replace declarations, never for
+// ordinary numeric prose.
+func explicitLifecycleScalarAnchors(fragment string) []string {
+	anchors := stateAuditAnchorPattern.FindAllString(expandSharedScalarUnits(fragment), -1)
+	for _, match := range inheritedLifecycleScalarUnitPattern.FindAllStringSubmatch(fragment, -1) {
+		if len(match) != 5 {
+			continue
+		}
+		anchors = append(anchors,
+			match[1]+match[2],
+			match[3]+match[2],
+			match[4]+match[2],
+		)
+	}
+	return uniqueOrderedStrings(anchors)
 }
 
 func uniqueOrderedStrings(values []string) []string {
@@ -3025,7 +3141,7 @@ func explicitActiveScalarFacts(userStatements []string) []explicitActiveScalarFa
 			}) {
 				continue
 			}
-			for _, anchor := range explicitScalarAnchors(fragment) {
+			for _, anchor := range explicitLifecycleScalarAnchors(fragment) {
 				retiredAnchors[anchor] = true
 			}
 		}
@@ -3239,7 +3355,7 @@ func unknownFactCovered(lines []string, fragment string) bool {
 		if trimmed == "" || markdownTableSeparatorPattern.MatchString(trimmed) {
 			continue
 		}
-		if stateDeltaLineRelevant(trimmed, fragment) {
+		if hasExplicitUnknownState(trimmed) && sameExplicitUnknownSubject(trimmed, fragment) {
 			return true
 		}
 	}
@@ -3566,12 +3682,38 @@ func auditUnknownLineSupported(line string, explicitUnknowns []string) bool {
 	if strings.Trim(trimmed, "-*| #。.;；,，:：_`") == "无" {
 		return true
 	}
+	if !hasExplicitUnknownState(trimmed) {
+		return false
+	}
 	for _, statement := range explicitUnknowns {
-		if stateDeltaLineRelevant(trimmed, statement) {
-			return true
+		for _, fragment := range splitUserStateClauses(cleanUserStatementRecord(statement)) {
+			if hasExplicitUnknownState(fragment) && sameExplicitUnknownSubject(trimmed, fragment) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func explicitUnknownSubject(value string) string {
+	value = strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(value, ""))
+	value = strings.NewReplacer(
+		"仍待确认", "", "尚待确认", "", "仍未确认", "", "尚未确认", "",
+		"待确认", "", "待核实", "", "仍未提供", "", "尚未提供", "",
+		"没有提供", "", "未提供", "", "未说明", "", "尚未核验", "",
+		"未经核验", "", "未核验", "", "未知", "", "当前状态", "", "状态", "",
+	).Replace(value)
+	return normalizeStateDeltaText(strings.Trim(value, "-*| #。.;；,，:：_`()（）[]【】"))
+}
+
+func sameExplicitUnknownSubject(left, right string) bool {
+	left = explicitUnknownSubject(left)
+	right = explicitUnknownSubject(right)
+	if utf8.RuneCountInString(left) < 2 || utf8.RuneCountInString(right) < 2 {
+		return false
+	}
+	return strings.Contains(left, right) || strings.Contains(right, left) ||
+		stateDeltaLineRelevant(left, right)
 }
 
 func restoreExplicitResolvedEntityFacts(lines, userStatements []string) []string {
@@ -3598,11 +3740,51 @@ func restoreExplicitResolvedEntityFacts(lines, userStatements []string) []string
 		if fact == "" || resolvedEntityFactCovered(activeText, fact) {
 			continue
 		}
+		if replacePartiallyCoveredResolvedEntityFact(lines, activeStart, activeEnd, fact) {
+			activeText = strings.Join(lines[activeStart:activeEnd], "\n")
+			continue
+		}
 		lines = insertString(lines, activeEnd, "- "+fact)
 		activeEnd++
 		activeText += "\n" + fact
 	}
 	return lines
+}
+
+func replacePartiallyCoveredResolvedEntityFact(
+	lines []string, activeStart, activeEnd int, fact string,
+) bool {
+	entities := uniqueOrderedStrings(unresolvedClaimEntityPattern.FindAllString(fact, -1))
+	if len(entities) < 2 || !strings.Contains(fact, "并非不可替代") {
+		return false
+	}
+	for index := activeStart; index < activeEnd && index < len(lines); index++ {
+		line := lines[index]
+		if strings.Contains(line, "|") || !strings.Contains(line, "并非不可替代") {
+			continue
+		}
+		covered := true
+		for _, entity := range entities {
+			if !strings.Contains(line, entity) {
+				covered = false
+				break
+			}
+		}
+		if !covered {
+			continue
+		}
+		leading := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		trimmed := strings.TrimLeft(line, " \t")
+		for _, prefix := range []string{"- ", "* ", "+ "} {
+			if strings.HasPrefix(trimmed, prefix) {
+				lines[index] = leading + prefix + fact
+				return true
+			}
+		}
+		lines[index] = leading + "- " + fact
+		return true
+	}
+	return false
 }
 
 type explicitDurableLabelFact struct {

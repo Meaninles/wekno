@@ -2167,3 +2167,68 @@ func TestCompactExplicitOneLineComparisonUsesLeadingTopicDespiteTrailingCrossCom
 		t.Fatalf("cross-comparison compaction was not idempotent:\n%s", twice)
 	}
 }
+
+func TestNormalizeStateAuditSectionsHandlesCompactRetirementAndUnknownPlaceholders(t *testing.T) {
+	query := "现在做最终台账审计，分成当前有效事实、已废弃事实、待确认事项、行动边界四段。"
+	prior := []string{
+		"初始预算300万元，其中设备220万元、平台服务80万元。",
+		"财务批复把预算改为420万元，其中设备310万元、平台服务110万元；300万元和220/80构成废弃。",
+		"项目负责人是林梅。当前对话用户身份仍未提供，不得把用户等同于林梅。",
+		"已确认范围包含温控主机和监控平台；是否包含机房配电施工仍待确认。",
+		"立项审批状态仍待确认。",
+		"技术组完成核验：Q并非不可替代，R、S经适配也能兼容。",
+	}
+	answer := `### 当前有效事实
+- 预算：420万元（设备310万元、平台服务110万元）
+- 项目负责人：林梅（用户身份
+- 机房配电施工：
+- 技术核验结论：Q并非不可替代，R、S经适配也能兼容
+
+### 已废弃事实
+- 初始预算300万元已废弃
+
+### 三
+- 机房配电施工是否包含在范围内
+- 立项审批状态：仍
+- 当前对话用户身份：
+
+### 行动边界
+- 未经授权不得创建或修改文件`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	got = NormalizeExplicitUserIdentityUnknown(got, query, prior...)
+	active := strings.Split(got, "### 已废弃事实")[0]
+	unknown := strings.Split(strings.Split(got, "### 待确认事项")[1], "### 行动边界")[0]
+	retired := strings.Split(strings.Split(got, "### 已废弃事实")[1], "### 待确认事项")[0]
+
+	for _, stale := range []string{"220万元", "80万元", "机房配电施工", "用户身份"} {
+		if strings.Contains(active, stale) {
+			t.Fatalf("retired or unknown projection %q leaked into active facts: %s", stale, got)
+		}
+	}
+	for _, expected := range []string{"300万元", "220万元", "80万元", "已废弃"} {
+		if !strings.Contains(retired, expected) {
+			t.Fatalf("compact retired scalar %q was not preserved: %s", expected, got)
+		}
+	}
+	for _, expected := range []string{"机房配电施工", "待确认", "立项审批", "当前对话用户身份", "未提供"} {
+		if !strings.Contains(unknown, expected) {
+			t.Fatalf("canonical unknown %q was not restored: %s", expected, got)
+		}
+	}
+	if strings.Count(active, "并非不可替代") != 1 || !strings.Contains(active, "技术组完成核验") {
+		t.Fatalf("partially covered resolved fact was duplicated instead of repaired: %s", got)
+	}
+	if twice := NormalizeStateAuditSections(got, query, prior...); twice != got {
+		t.Fatalf("state audit normalization is not idempotent:\nfirst: %s\nsecond: %s", got, twice)
+	}
+}
+
+func TestNormalizeExplicitUserIdentityUnknownDoesNotPolluteUnrelatedDelta(t *testing.T) {
+	answer := "- 验收日期：2028年6月30日"
+	query := "验收日期调整为2028年6月30日。"
+	prior := "当前对话用户身份仍未提供。"
+	if got := NormalizeExplicitUserIdentityUnknown(answer, query, prior); got != answer {
+		t.Fatalf("historical identity unknown polluted an unrelated state delta: %s", got)
+	}
+}

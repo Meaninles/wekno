@@ -400,3 +400,25 @@ func TestRecoverOffTopicNarrowEvidenceAnswerUsesEveryCurrentTopic(t *testing.T) 
 		t.Fatalf("partially aligned answer was unexpectedly replaced: %s", unchanged)
 	}
 }
+
+func TestRepairAnswerCitationsCitesIndependentUncitedParagraphFromSameEvidence(t *testing.T) {
+	refs := []*types.SearchResult{
+		{
+			ID: "public-invited", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
+			EvidenceContent: "公开采购是采购人以采购公告邀请不特定的潜在供应商参与采购项目。邀请采购是采购人以采购邀请书邀请特定的供应商或三家以上潜在供应商参与采购项目。",
+			Metadata: map[string]string{
+				MetadataCitationID: "S1", MetadataChunkID: "public-invited", "source_type": SourceTypeKnowledge,
+			},
+		},
+	}
+	answer := "公开采购以采购公告邀请不特定的潜在供应商参与。<src id=\"S1\" />\n\n" +
+		"邀请采购以采购邀请书邀请特定的供应商或三家以上潜在供应商参与。"
+
+	got := RepairAnswerCitations(answer, refs)
+	if strings.Count(got, `<src id="S1" />`) != 2 {
+		t.Fatalf("independent claim paragraph did not receive its adjacent citation: %q", got)
+	}
+	if !strings.Contains(got, `三家以上潜在供应商参与。<src id="S1" />`) {
+		t.Fatalf("citation was not placed beside the independent invited claim: %q", got)
+	}
+}

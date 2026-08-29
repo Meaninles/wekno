@@ -440,7 +440,7 @@ func TestNormalizeStateDeltaScopeMarksEachCompactRetiredScalar(t *testing.T) {
 	answer := "- **预算**：235万元（覆盖原有210万元）\n- **其中设备**：175万元（覆盖原有160万元）\n- **其中平台服务**：60万元（覆盖原有50万元）\n- **废弃值**：210万元、设备160万元、平台服务50万元"
 
 	got := NormalizeStateDeltaScope(answer, query)
-	for _, retired := range []string{"210万元（已废弃）", "160万元（已废弃）", "50万元（已废弃）"} {
+	for _, retired := range []string{"210万元（废弃）", "160万元（废弃）", "50万元（废弃）"} {
 		if !strings.Contains(got, retired) {
 			t.Fatalf("retired scalar %q was not atomic: %s", retired, got)
 		}
@@ -460,13 +460,76 @@ func TestNormalizeStateDeltaScopeDoesNotBorrowRetiredMarkerAcrossScalars(t *test
 	answer := "- 批复后预算：235万元\n- 设备预算：175万元\n- 平台服务预算：60万元\n- 废弃预算：原210万元及对应的160/50万元构成废弃"
 
 	got := NormalizeStateDeltaScope(answer, query)
-	for _, retired := range []string{"210万元（已废弃）", "160万元（已废弃）"} {
+	for _, retired := range []string{"210万元（废弃）", "160万元（废弃）"} {
 		if !strings.Contains(got, retired) {
 			t.Fatalf("group-level suffix was incorrectly borrowed by %q: %s", retired, got)
 		}
 	}
 	if twice := NormalizeStateDeltaScope(got, query); twice != got {
 		t.Fatalf("scalar binding repair was not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeStateDeltaScopeProjectsAtomicScalarLifecycle(t *testing.T) {
+	query := "验收日期调整为2027年5月15日，2027年3月31日从现在起废弃。"
+	answer := "- **验收日期（新）**：2027 年 5 月 15 日\n- **验收日期（废弃）**：2027 年 3 月 31 日"
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{
+		"## 当前有效事实", "2027年5月15日", "## 已废弃事实", "2027年3月31日（废弃）",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("canonical scalar lifecycle lost %q: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "2027 年") {
+		t.Fatalf("scalar unit/date components remained detached: %s", got)
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("scalar lifecycle projection was not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeStateDeltaScopeRestoresUnitsDetachedIntoTableHeader(t *testing.T) {
+	query := "初始预算是210万元，其中设备160万元、平台服务50万元。只记录预算，不讨论采购方式。"
+	answer := `**初始预算：** 210 万元
+
+| 预算科目 | 金额（万元） |
+|---|---|
+| 设备 | 160 |
+| 平台服务 | 50 |`
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{"210万元", "160万元", "50万元"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("table-detached unit %q was not restored: %s", expected, got)
+		}
+	}
+	if !strings.Contains(got, "## 当前有效事实") {
+		t.Fatalf("canonical active scope was not explicit: %s", got)
+	}
+}
+
+func TestNormalizeStateDeltaScopeProjectsConfirmedAndUnknownUpdate(t *testing.T) {
+	query := "回到寒星项目：法务确认采购信息可以公开；立项审批状态仍待确认。只更新台账，不因为刚才的金额门槛直接选采购方式。"
+	answer := "- **采购信息可公开**：法务已确认\n- **立项审批状态**：待确认"
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{
+		"台账已更新", "## 当前有效事实", "法务确认采购信息可以公开",
+		"## 待确认事项（未知）", "立项审批状态：待确认",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("confirmed/unknown projection lost %q: %s", expected, got)
+		}
+	}
+	for _, forbidden := range []string{"金额门槛", "采购方式"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("transient decision instruction %q leaked: %s", forbidden, got)
+		}
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("confirmed/unknown projection was not idempotent:\n%s", twice)
 	}
 }
 
@@ -1843,8 +1906,10 @@ func TestNormalizeStateDeltaScopeProjectsExplicitSourceBindings(t *testing.T) {
 func TestNormalizeStateDeltaScopeExpandsSharedScalarUnit(t *testing.T) {
 	query := "预算调整为390万元，360万元及280/80万元构成废弃。只记录当前值和废弃值。"
 	got := NormalizeStateDeltaScope("当前390万元；360万元及280/80万元已废弃。", query)
-	if !strings.Contains(got, "280万元/80万元") {
-		t.Fatalf("shared scalar unit was not expanded: %s", got)
+	for _, expected := range []string{"280万元（废弃）", "80万元（废弃）"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("shared scalar unit %q was not expanded atomically: %s", expected, got)
+		}
 	}
 }
 

@@ -1541,8 +1541,14 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	if projected := projectExplicitSourceUpdate(query); projected != "" {
 		return projected
 	}
+	if projected := projectExplicitScalarStateDelta(query); projected != "" {
+		return projected
+	}
 	if !isStrictStateDeltaTurn(query) {
 		return value
+	}
+	if projected := projectExplicitConfirmedUnknownUpdate(query); projected != "" {
+		return projected
 	}
 	if projected := projectExplicitConfirmedUnknownSections(query); projected != "" {
 		return projected
@@ -1847,6 +1853,99 @@ func projectExplicitConfirmedUnknownSections(query string) string {
 	}
 	return "## 已确认\n\n" + strings.Join(knownLines, "\n") +
 		"\n\n## 待确认\n\n" + strings.Join(unknownLines, "\n")
+}
+
+// projectExplicitConfirmedUnknownUpdate canonicalizes a strictly scoped ledger
+// update that contains both a user-confirmed fact and an unresolved fact. It
+// uses only clauses from the current user message, making the state classes
+// explicit without copying model wording or pulling facts from history.
+func projectExplicitConfirmedUnknownUpdate(query string) string {
+	if !hasExplicitUnknownState(query) ||
+		!containsAny(query, []string{"确认", "批复", "核验"}) ||
+		!containsAny(query, []string{"只更新", "仅更新", "只记录", "仅记录"}) {
+		return ""
+	}
+	known := make([]string, 0, 2)
+	unknown := make([]string, 0, 2)
+	for _, clause := range splitUserStateClauses(cleanUserStatementRecord(query)) {
+		clause = strings.TrimSpace(strings.Trim(clause, "。；;，, "))
+		if clause == "" || transientStateAuditScopeInstruction(clause) ||
+			transientStateDeltaScopeEcho(clause) || isEpistemicStateInstructionLine(clause) {
+			continue
+		}
+		if colon := strings.LastIndexAny(clause, "：:"); colon >= 0 && colon < len(clause)-1 {
+			_, width := utf8.DecodeRuneInString(clause[colon:])
+			clause = strings.TrimSpace(clause[colon+width:])
+		}
+		if hasExplicitUnknownState(clause) {
+			if fact := canonicalExplicitUnknownDeltaFragment(clause); fact != "" {
+				unknown = append(unknown, fact)
+			}
+			continue
+		}
+		if containsAny(clause, []string{"确认", "批复", "核验"}) {
+			known = append(known, strings.TrimRight(clause, "。；;，, "))
+		}
+	}
+	known = uniqueOrderedStrings(known)
+	unknown = uniqueOrderedStrings(unknown)
+	if len(known) == 0 || len(unknown) == 0 {
+		return ""
+	}
+	out := []string{"台账已更新。", "", "## 当前有效事实", ""}
+	for _, fact := range known {
+		out = append(out, "- "+fact)
+	}
+	out = append(out, "", "## 待确认事项（未知）", "")
+	for _, fact := range unknown {
+		out = append(out, "- "+fact)
+	}
+	return strings.Join(out, "\n")
+}
+
+// projectExplicitScalarStateDelta renders a strict numeric/date ledger update
+// from the current user-authored statement. This prevents a generated table
+// header such as “金额（万元）” from separating a value from its unit, and it
+// makes every retired scalar independently lifecycle-bound.
+func projectExplicitScalarStateDelta(query string) string {
+	// Mixed known/unknown updates need the dedicated projector below so the
+	// uncertainty class is never dropped merely because the known clause also
+	// contains a scalar.
+	if hasExplicitUnknownState(query) {
+		return ""
+	}
+	activeFacts := explicitActiveScalarFacts([]string{query})
+	if len(activeFacts) == 0 {
+		return ""
+	}
+	retired := make([]string, 0, 4)
+	for _, fragment := range splitUserFactFragments(cleanUserStatementRecord(query)) {
+		if !containsAny(fragment, []string{
+			"废弃", "作废", "失效", "被取代", "被替代", "不再有效",
+		}) {
+			continue
+		}
+		retired = append(retired, explicitLifecycleScalarAnchors(fragment)...)
+	}
+	retired = uniqueOrderedStrings(retired)
+
+	out := []string{"## 当前有效事实", ""}
+	for _, fact := range activeFacts {
+		fragment := expandSharedScalarUnits(strings.TrimRight(strings.TrimSpace(fact.fragment), "。；;，, "))
+		if fragment != "" {
+			out = append(out, "- "+fragment)
+		}
+	}
+	if len(out) == 2 {
+		return ""
+	}
+	if len(retired) > 0 {
+		out = append(out, "", "## 已废弃事实", "")
+		for _, anchor := range retired {
+			out = append(out, "- "+anchor+"（废弃）")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // explicitConfirmedUnknownDeltaFacts extracts a narrowly scoped known/unknown

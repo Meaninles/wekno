@@ -470,6 +470,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		boundaryUserStatements...,
 	)
 	finalAnswer = conversationmemory.NormalizeStateDeltaScope(finalAnswer, req.Query)
+	finalAnswer = conversationmemory.NormalizeExplicitResolvedEntityDelta(finalAnswer, req.Query)
 	finalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
 		finalAnswer,
 		req.Query,

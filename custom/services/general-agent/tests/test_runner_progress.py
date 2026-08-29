@@ -85,6 +85,7 @@ from app.schemas import (  # noqa: E402
     OriginalInputFileSpec,
     ProfessionalSkillFileSpec,
     ProfessionalSkillSpec,
+    RuntimeToolSpec,
     RuntimeConfigSpec,
     SidecarArtifact,
 )
@@ -302,6 +303,57 @@ class RunnerProgressTest(unittest.TestCase):
         )
         self.assertFalse(should_record_turn_evidence("普通生产问答"))
 
+    def test_turn_evidence_registry_is_requested_for_single_fresh_evidence_turn(self):
+        self.assertTrue(should_record_turn_evidence("本轮明确要求文档依据或引用"))
+
+    def test_turn_contract_rejects_unregistered_source_handle_in_eval_validation(self):
+        payload = ChatPayload(
+            run_id="run-unregistered-source",
+            session_id="session-unregistered-source",
+            assistant_message_id="assistant-unregistered-source",
+            query="依据已选制度回答。\n本轮明确要求文档依据或引用。",
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        issues = turn_contract_issues(
+            payload,
+            '未经检索的回答。<src id="S9" />',
+            evidence_by_id={},
+        )
+        self.assertIn(
+            "current_turn_evidence_handle_unverified",
+            {issue["code"] for issue in issues},
+        )
+        self.assertEqual(
+            turn_contract_issues(
+                payload,
+                '当前轮证据回答。<src id="S9" />',
+                evidence_by_id={"S9": "当前轮证据"},
+            ),
+            [],
+        )
+
+    def test_fresh_evidence_precondition_is_adjacent_to_current_request(self):
+        payload = ChatPayload(
+            run_id="run-fresh-evidence-prompt",
+            session_id="session-fresh-evidence-prompt",
+            assistant_message_id="assistant-fresh-evidence-prompt",
+            query="依据已选制度回答。\n本轮明确要求文档依据或引用。",
+            tools=[
+                RuntimeToolSpec(
+                    name="grep_chunks",
+                    description="检索知识分片",
+                    parameters={"type": "object", "properties": {}},
+                )
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        prompt = build_prompt(payload)
+        self.assertIn("binding_turn_precondition", prompt)
+        self.assertIn("Available retrieval tools: grep_chunks", prompt)
+        self.assertLess(prompt.index("<required_evidence_action"), prompt.index("<weknora_context>"))
+
     def test_turn_contract_issues_reject_internal_repair_narration(self):
         payload = ChatPayload(
             run_id="run-planning-contract",
@@ -456,6 +508,7 @@ class RunnerProgressTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            state["turn_evidence_by_citation_id"] = {"S3": "当前轮检索证据"}
             self.assertEqual(
                 asyncio.run(hook({"transcript_path": str(transcript)}, None, None)),
                 {},

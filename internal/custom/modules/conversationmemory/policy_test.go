@@ -288,6 +288,23 @@ func TestNormalizeExplicitActionBoundariesKeepsDurableForce(t *testing.T) {
 	}
 }
 
+func TestNormalizeExplicitActionBoundariesCanonicalizesSplitProcurementPredicate(t *testing.T) {
+	query := "建立业务台账。未经授权不得发起采购，只在对话内维护。"
+	answer := `- **采购发起**：未经授权，不发起
+- **维护方式**：只在对话内维护`
+
+	got := NormalizeExplicitActionBoundaries(answer, query)
+	if !strings.Contains(got, "未经授权，不得发起采购") {
+		t.Fatalf("split procurement predicate was not canonicalized: %s", got)
+	}
+	if strings.Contains(got, "采购发起**：未经授权，不发起") {
+		t.Fatalf("ambiguous split predicate survived: %s", got)
+	}
+	if twice := NormalizeExplicitActionBoundaries(got, query); twice != got {
+		t.Fatalf("procurement boundary normalization is not idempotent:\n%s", twice)
+	}
+}
+
 func TestNormalizeExplicitActionBoundariesDoesNotRepeatArchivedRulesOnDelta(t *testing.T) {
 	query := "初始目标日期是2026年11月30日。只记录日期，不推断是否紧急。"
 	archive := "未经我明确授权，不得创建或修改文件，也不得发起采购；只在对话里维护。"
@@ -467,6 +484,39 @@ func TestNormalizeExplicitUserIdentityUnknownAcceptsStillNotProvidedWording(t *t
 	got := NormalizeExplicitUserIdentityUnknown(answer, query)
 	if !strings.Contains(got, "当前对话用户身份未提供") {
 		t.Fatalf("identity boundary with an adverb was not restored: %s", got)
+	}
+}
+
+func TestNormalizeExplicitUserIdentityUnknownCanonicalizesDetachedIdentityLabel(t *testing.T) {
+	query := "项目负责人是周岚。当前对话用户身份仍未提供，不得把用户等同于周岚。"
+	answer := "- **项目负责人**：周岚\n- **当前对话用户**：未知（未提供身份信息，不得等同周岚）"
+
+	got := NormalizeExplicitUserIdentityUnknown(answer, query)
+	if !strings.Contains(got, "**用户身份**：当前对话用户身份未提供") {
+		t.Fatalf("canonical user identity field was not restored: %s", got)
+	}
+	if twice := NormalizeExplicitUserIdentityUnknown(got, query); twice != got {
+		t.Fatalf("identity field normalization is not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeExplicitResolvedEntityDeltaRestoresCurrentUserFact(t *testing.T) {
+	query := "技术组完成核验：D并非不可替代，E、F经适配也能兼容；废弃‘只能D’的前提。"
+	answer := `- D供应商对现有网关的兼容性主张：已核验为不实
+- E、F供应商经适配后也能兼容现有网关
+- “只能由D兼容”的前提：废弃`
+
+	got := NormalizeExplicitResolvedEntityDelta(answer, query)
+	for _, expected := range []string{"技术组完成核验", "D并非不可替代", "E、F经适配也能兼容"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("resolved entity fact %q was not restored: %s", expected, got)
+		}
+	}
+	if twice := NormalizeExplicitResolvedEntityDelta(got, query); twice != got {
+		t.Fatalf("resolved entity delta normalization is not idempotent:\n%s", twice)
+	}
+	if changed := NormalizeExplicitResolvedEntityDelta(answer, "解释D供应商的兼容方案。"); changed != answer {
+		t.Fatalf("non-state answer was rewritten: %s", changed)
 	}
 }
 

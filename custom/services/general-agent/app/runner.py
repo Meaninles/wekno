@@ -2875,6 +2875,26 @@ def build_prompt(
     parts.append("<user_request verbatim=\"true\" priority=\"highest\">")
     parts.append(payload.query)
     parts.append("</user_request>")
+    if FRESH_EVIDENCE_CONTRACT_MARKER in (payload.query or ""):
+        evidence_tool_names = [
+            spec.name
+            for spec in payload.tools
+            if any(
+                marker in spec.name.lower()
+                for marker in ("knowledge", "chunk", "wiki", "web_search", "web_fetch")
+            )
+        ]
+        parts.append('<required_evidence_action source="WeKnora runtime" role="binding_turn_precondition">')
+        parts.append(
+            "This turn requires current, citeable WeKnora evidence. Before drafting any answer text, call at least "
+            "one available read-only WeKnora retrieval tool for the exact question. Conversation history, model "
+            "memory, and locally prepared original files cannot satisfy this citation precondition. Finish only "
+            "after a successful current-turn tool result returns source_references, and copy only its cite_exactly "
+            "handle immediately beside the supported claim."
+        )
+        if evidence_tool_names:
+            parts.append("Available retrieval tools: " + ", ".join(evidence_tool_names))
+        parts.append("</required_evidence_action>")
     if is_structured_analysis_payload(payload) and isinstance(data_analysis_display_intent, dict):
         intent = normalize_data_analysis_display_intent(data_analysis_display_intent)
         intent_tag = analysis_display_intent_tag(payload)
@@ -3829,7 +3849,8 @@ def should_record_turn_evidence(query: str) -> bool:
 
     value = query or ""
     return (
-        "[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS]" in value
+        FRESH_EVIDENCE_CONTRACT_MARKER in value
+        or "[WEKNORA_REQUIRED_UNCERTAINTY_TOPICS]" in value
         or "[WEKNORA_REQUIRED_EVIDENCE_TOPICS]" in value
     )
 
@@ -4838,6 +4859,21 @@ def turn_contract_issues(
                 ),
             }
         )
+    elif FRESH_EVIDENCE_CONTRACT_MARKER in query and evidence_by_id is not None:
+        cited_ids = set(re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', value))
+        unverified_ids = sorted(cited_ids.difference(evidence_by_id))
+        if unverified_ids:
+            issues.append(
+                {
+                    "code": "current_turn_evidence_handle_unverified",
+                    "unverified_ids": unverified_ids,
+                    "required_action": (
+                        "Do not invent or reuse source handles. Call an available WeKnora knowledge-retrieval "
+                        "tool for the current question, then copy only a cite_exactly handle returned by that "
+                        "current tool result beside the claim it supports."
+                    ),
+                }
+            )
     topics = required_evidence_topics(query)
     missing_topics = evidence_topics_without_adjacent_citation(value, topics)
     if missing_topics:

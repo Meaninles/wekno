@@ -1981,10 +1981,19 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 			operation: "不得创建或修改文件",
 		},
 		{
-			enable:    []string{"不得发起采购", "不得启动采购", "不发起采购", "不启动采购"},
-			revoke:    []string{"允许发起采购", "允许启动采购", "可以发起采购", "可以启动采购", "授权发起采购", "授权启动采购", "不再禁止发起采购", "不再禁止启动采购"},
-			mentions:  []string{"发起采购", "启动采购", "发起任何采购", "启动任何采购", "采购发起", "采购权限"},
-			durable:   []string{"不得发起", "不得启动", "不发起", "不启动", "不会发起", "不会启动", "不予执行"},
+			enable:   []string{"不得发起采购", "不得启动采购", "不发起采购", "不启动采购"},
+			revoke:   []string{"允许发起采购", "允许启动采购", "可以发起采购", "可以启动采购", "授权发起采购", "授权启动采购", "不再禁止发起采购", "不再禁止启动采购"},
+			mentions: []string{"发起采购", "启动采购", "发起任何采购", "启动任何采购", "采购发起", "采购权限"},
+			// Keep the operation and its object contiguous. A model response such
+			// as "采购发起：不发起" is understandable to a reader, but loses
+			// the durable proposition when consumed as a state fact. It must be
+			// rendered as the canonical "不得发起采购" form below.
+			durable: []string{
+				"不得发起采购", "不得启动采购", "不发起采购", "不启动采购",
+				"不会发起采购", "不会启动采购",
+				"不得发起任何采购", "不得启动任何采购", "不发起任何采购", "不启动任何采购",
+				"不会发起任何采购", "不会启动任何采购",
+			},
 			label:     "采购权限",
 			operation: "不得发起采购",
 		},
@@ -2131,12 +2140,39 @@ func statementHasUnknownUserIdentity(statement string) bool {
 
 func answerHasUnknownUserIdentity(answer string) bool {
 	for _, line := range strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n") {
-		if strings.Contains(line, "用户") && strings.Contains(line, "身份") &&
+		// Require the subject itself to be explicit. "当前对话用户：未知
+		// （未提供身份信息）" does not preserve the stable `用户身份` field
+		// and is easy for downstream state consumers to misclassify.
+		hasIdentitySubject := strings.Contains(line, "用户身份") || strings.Contains(line, "用户的身份")
+		if hasIdentitySubject &&
 			containsAny(line, []string{"未提供", "没有提供", "未说明", "未知", "待确认", "待核实"}) {
 			return true
 		}
 	}
 	return false
+}
+
+// NormalizeExplicitResolvedEntityDelta preserves a compound entity resolution
+// explicitly authored in the current user turn. Models sometimes paraphrase
+// the old claim and the alternatives but omit the decisive relation (for
+// example, "D并非不可替代") or the confirming actor. This repair copies only
+// the bounded fact parsed from the current user message; it never restores an
+// assistant assertion or manufactures a conclusion from historical context.
+func NormalizeExplicitResolvedEntityDelta(answer, originalQuery string) string {
+	value := strings.TrimSpace(answer)
+	query := strings.TrimSpace(originalQuery)
+	if value == "" || query == "" || !IsStateOnlyTurn(query) || IsStateAuditTurn(query) {
+		return value
+	}
+	fact := resolvedEntityFact(query)
+	if fact == "" || resolvedEntityFactCovered(value, fact) {
+		return value
+	}
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	if replacePartiallyCoveredResolvedEntityFact(lines, 0, len(lines), fact) {
+		return strings.TrimSpace(strings.Join(lines, "\n"))
+	}
+	return strings.TrimSpace(value + "\n- " + fact)
 }
 
 func appendUnknownIdentityToAudit(lines []string) []string {

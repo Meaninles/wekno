@@ -288,6 +288,7 @@ func (e *AgentEngine) emitCompletionEvent(
 		e.activeUserStatements...,
 	)
 	state.FinalAnswer = conversationmemory.NormalizeStateDeltaScope(state.FinalAnswer, e.activeQuery)
+	state.FinalAnswer = conversationmemory.NormalizeExplicitResolvedEntityDelta(state.FinalAnswer, e.activeQuery)
 	beforeBoundaryRepair := state.FinalAnswer
 	state.FinalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
 		state.FinalAnswer,

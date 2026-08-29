@@ -1542,6 +1542,9 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 			return value
 		}
 	}
+	if projected := projectExplicitLedgerInitialization(query); projected != "" {
+		return projected
+	}
 	if projected := projectExplicitSourceUpdate(query); projected != "" {
 		return projected
 	}
@@ -1632,6 +1635,41 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	}
 	result = expandSharedScalarUnits(result)
 	return restoreExplicitStateDeltaFacts(result, query)
+}
+
+// projectExplicitLedgerInitialization keeps an explicit first-turn ledger
+// establishment bounded to the business facts and operation limits supplied by
+// the user. It prevents a generative agent from inventing a long questionnaire
+// or placeholder rows before those fields have ever been introduced.
+func projectExplicitLedgerInitialization(query string) string {
+	if !IsStateOnlyTurn(query) || IsStateAuditTurn(query) ||
+		!containsAny(query, []string{
+			"建立项目台账", "建立业务台账", "初始化项目台账", "初始化业务台账",
+		}) {
+		return ""
+	}
+	facts := explicitDurableLabelFacts([]string{query})
+	if len(facts) == 0 {
+		return ""
+	}
+	out := []string{"## 当前有效事实", ""}
+	for _, fact := range facts {
+		out = append(out, "- "+fact.label+"："+fact.value)
+	}
+	if kinds := operationBoundaryKinds(query); len(kinds) > 0 {
+		out = append(out, "", "## 行动边界", "")
+		for _, kind := range kinds {
+			switch kind {
+			case "file-write":
+				out = append(out, "- 未经授权不得创建或修改文件")
+			case "procurement":
+				out = append(out, "- 未经授权不得发起采购")
+			case "chat-only":
+				out = append(out, "- 只在对话内维护台账")
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func removeEmptyStateDeltaListLines(answer string) string {
@@ -4935,7 +4973,8 @@ func restoreExplicitDurableLabelFacts(lines, userStatements []string) []string {
 }
 
 func explicitDurableLabelFacts(userStatements []string) []explicitDurableLabelFact {
-	labels := []string{"项目代号", "项目名称", "业务目标", "项目目标"}
+	labels := []string{"项目代号", "项目名称", "业务目标", "项目目标", "目标"}
+	canonicalLabel := map[string]string{"目标": "项目目标"}
 	allowed := make(map[string]bool, len(labels))
 	for _, label := range labels {
 		allowed[label] = true
@@ -4957,6 +4996,9 @@ func explicitDurableLabelFacts(userStatements []string) []explicitDurableLabelFa
 			if !allowed[label] {
 				continue
 			}
+			if canonical := canonicalLabel[label]; canonical != "" {
+				label = canonical
+			}
 			if factValue == "" || utf8.RuneCountInString(factValue) > 100 || containsAny(factValue, []string{
 				"待确认", "待核实", "未提供", "未知", "废弃", "作废", "不得", "不要", "只确认", "仅确认",
 			}) {
@@ -4967,7 +5009,7 @@ func explicitDurableLabelFacts(userStatements []string) []explicitDurableLabelFa
 		}
 	}
 	out := make([]explicitDurableLabelFact, 0, len(latest))
-	for _, label := range labels {
+	for _, label := range []string{"项目代号", "项目名称", "业务目标", "项目目标"} {
 		if value := strings.TrimSpace(latest[label]); value != "" {
 			out = append(out, explicitDurableLabelFact{label: label, value: value})
 		}

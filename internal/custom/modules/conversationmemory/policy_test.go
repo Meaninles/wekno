@@ -1910,6 +1910,44 @@ func TestNormalizeStateDeltaScopeRestoresExplicitCurrentFactsAndActor(t *testing
 	}
 }
 
+func TestNormalizeStateDeltaScopeProjectsLedgerInitializationWithoutInventedFields(t *testing.T) {
+	query := "建立业务台账：项目代号‘寒星冷链温控改造’，目标是降低仓储温差。未经授权不得创建或修改文件，也不得发起采购，只在对话内维护。"
+	answer := `## 业务台账
+| 字段 | 状态 |
+|---|---|
+| 项目代号 | 寒星冷链温控改造 |
+| 项目目标 | 降低仓储温差 |
+| 台账建立日期 | 2026-08-29 |
+
+### 待补充信息
+- 项目归口部门
+- 当前温差基线
+- 目标温差指标
+- 涉及仓库范围
+- 采购需求`
+
+	got := NormalizeStateDeltaScope(answer, query)
+	for _, expected := range []string{
+		"项目代号：寒星冷链温控改造", "项目目标：降低仓储温差",
+		"未经授权不得创建或修改文件", "未经授权不得发起采购", "只在对话内维护台账",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("ledger initialization lost %q: %s", expected, got)
+		}
+	}
+	for _, invented := range []string{"待补充信息", "项目归口部门", "温差基线", "采购需求"} {
+		if strings.Contains(got, invented) {
+			t.Fatalf("invented initialization field %q survived: %s", invented, got)
+		}
+	}
+	if len([]rune(got)) > 550 {
+		t.Fatalf("canonical initialization exceeded response budget: %d", len([]rune(got)))
+	}
+	if twice := NormalizeStateDeltaScope(got, query); twice != got {
+		t.Fatalf("ledger initialization is not idempotent:\n%s", twice)
+	}
+}
+
 func TestNormalizeStateDeltaScopeProjectsExplicitSourceBindings(t *testing.T) {
 	query := "补充来源：项目负责人是林梅；不涉密、不应急由法务确认，4家方案可行由业务和技术团队确认。当前对话用户身份没有提供，不得把用户等同于林梅。"
 	answer := "- **项目负责人**：林梅\n- **项目涉密/应急状态**：不涉密、不应急\n- **采购方案可行性**：4家方案可行"
@@ -2626,6 +2664,7 @@ func TestNormalizeStateAuditSectionsStripsTurnProvenanceAndSpacedDuplicates(t *t
 		}
 	}
 	for _, atomic := range []string{
+		"- **项目目标**：降低仓储温差",
 		"- 财务批复预算：235万元", "- 设备：175万元", "- 平台服务：60万元",
 		"- 核验主体：技术组", "- D并非不可替代", "- E经适配也能兼容", "- F经适配也能兼容",
 	} {

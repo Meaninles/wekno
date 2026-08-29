@@ -1656,11 +1656,19 @@ func stripStateDeltaEpistemicInstruction(line string) string {
 func transientStateDeltaScopeEcho(line string) bool {
 	probe := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(strings.TrimSpace(line), ""))
 	probe = strings.Trim(probe, "-+| *_`。；; ")
-	if containsAnyPrefix(probe, []string{
-		"只记录", "仅记录", "只更新", "仅更新", "只确认", "仅确认", "只列", "仅列",
-		"只区分", "仅区分",
-	}) {
-		return true
+	candidates := []string{probe}
+	if colon := strings.LastIndexAny(probe, "：:"); colon >= 0 {
+		_, width := utf8.DecodeRuneInString(probe[colon:])
+		candidates = append(candidates, strings.TrimSpace(probe[colon+width:]))
+	}
+	for _, candidate := range candidates {
+		candidate = strings.Trim(candidate, "-+| *_`。；; ")
+		if containsAnyPrefix(candidate, []string{
+			"只记录", "仅记录", "只更新", "仅更新", "只确认", "仅确认", "只列", "仅列",
+			"只区分", "仅区分",
+		}) {
+			return true
+		}
 	}
 	return containsAny(probe, []string{"不因", "不要因为", "不得因为"}) &&
 		containsAny(probe, []string{"选择采购方式", "选采购方式", "确定采购方式"})

@@ -351,13 +351,14 @@ func TestNormalizeStateDeltaScopeDropsEpistemicInstructionArtifact(t *testing.T)
 		"- **初始目标日期**：2026年11月30日\n- 不推断：否紧急",
 		"- **初始目标日期**：2026年11月30日（不推断是否紧急）",
 		"- **初始目标日期**：2026年11月30日；不推断是否紧急",
+		"- **初始目标日期**：2026年11月30日\n- **状态**：仅记录日期",
 	}
 	for _, answer := range answers {
 		got := NormalizeStateDeltaScope(answer, query)
 		if !strings.Contains(got, "2026年11月30日") {
 			t.Fatalf("explicit date was lost from %q: %s", answer, got)
 		}
-		for _, artifact := range []string{"不推断", "否紧急"} {
+		for _, artifact := range []string{"不推断", "否紧急", "仅记录日期"} {
 			if strings.Contains(got, artifact) {
 				t.Fatalf("epistemic instruction artifact %q survived: %s", artifact, got)
 			}

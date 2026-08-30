@@ -3957,6 +3957,19 @@ def _canonical_source_handle(source: Any) -> str:
 TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY = "turn_evidence_by_citation_id"
 MAX_TURN_EVIDENCE_REFERENCES = 64
 MAX_TURN_EVIDENCE_CHARS = 96_000
+TURN_EVIDENCE_TEXT_FIELDS = (
+    "evidence_content",
+    "content",
+    "snippet",
+    "text",
+    "match_snippet",
+)
+TURN_EVIDENCE_LOCATOR_FIELDS = {
+    "chunk": ("chunk_id", "faq_id"),
+    "slug": ("slug", "page_slug"),
+    "url": ("url", "source_url"),
+    "position": ("result_position", "result_index", "rank", "position"),
+}
 
 
 def should_record_turn_evidence(query: str) -> bool:
@@ -3970,32 +3983,112 @@ def should_record_turn_evidence(query: str) -> bool:
     )
 
 
+def _turn_evidence_text(node: dict[str, Any]) -> str:
+    for field in TURN_EVIDENCE_TEXT_FIELDS:
+        candidate = str(node.get(field) or "").strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+def _turn_evidence_locator_values(node: dict[str, Any]) -> set[tuple[str, str]]:
+    values: set[tuple[str, str]] = set()
+    for kind, fields in TURN_EVIDENCE_LOCATOR_FIELDS.items():
+        for field in fields:
+            value = str(node.get(field) or "").strip()
+            if value:
+                values.add((kind, value))
+
+    # Some tools keep the physical document coordinate in a nested locator.
+    # Parse only its stable scalar keys; arbitrary metadata must never be used
+    # to join a citation to unrelated text.
+    locator = node.get("source_locator")
+    if isinstance(locator, str):
+        try:
+            locator = json.loads(locator)
+        except Exception:
+            locator = None
+    if isinstance(locator, dict):
+        for kind, fields in TURN_EVIDENCE_LOCATOR_FIELDS.items():
+            for field in fields:
+                value = str(locator.get(field) or "").strip()
+                if value:
+                    values.add((kind, value))
+    return values
+
+
+def _index_turn_evidence(data: Any) -> tuple[dict[tuple[str, str], list[str]], list[str]]:
+    """Index evidence bodies from the same trusted tool callback.
+
+    CitationSource intentionally contains only stable metadata. Knowledge,
+    Wiki and web tools keep the actual text in sibling result data, so eval
+    bookkeeping must join the two projections rather than assuming the source
+    metadata duplicates the body.
+    """
+
+    by_locator: dict[tuple[str, str], list[str]] = {}
+    candidates: list[str] = []
+
+    def add_candidate(text: str) -> None:
+        if text and text not in candidates:
+            candidates.append(text)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            evidence = _turn_evidence_text(value)
+            if evidence:
+                add_candidate(evidence)
+                for locator in _turn_evidence_locator_values(value):
+                    bucket = by_locator.setdefault(locator, [])
+                    if evidence not in bucket:
+                        bucket.append(evidence)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(data)
+    return by_locator, candidates
+
+
 def record_turn_evidence(state: dict[str, Any] | None, result: Any) -> None:
     """Keep a bounded run-local handle-to-evidence map for final grounding checks."""
 
     if state is None or not isinstance(result, dict):
         return
+    sources = [
+        source
+        for source in (result.get("source_references") or [])
+        if isinstance(source, dict)
+    ]
+    evidence_by_locator, evidence_candidates = _index_turn_evidence(result.get("data"))
     registry = state.setdefault(TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY, {})
     if not isinstance(registry, dict):
         registry = {}
         state[TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY] = registry
     current_chars = sum(len(str(value)) for value in registry.values())
-    for source in result.get("source_references") or []:
+    for source in sources:
         if len(registry) >= MAX_TURN_EVIDENCE_REFERENCES or current_chars >= MAX_TURN_EVIDENCE_CHARS:
             break
         handle = _canonical_source_handle(source)
         match = re.fullmatch(r'<src id="(S[1-9][0-9]*)" />', handle)
-        if not match or not isinstance(source, dict):
+        if not match:
             continue
-        # The bridge commonly exposes the same fragment through both
-        # evidence_content and content. Keep the first authoritative projection
-        # instead of duplicating it in the repair context and token budget.
-        evidence = ""
-        for field in ("evidence_content", "content", "snippet", "text"):
-            candidate = str(source.get(field) or "").strip()
-            if candidate:
-                evidence = candidate
-                break
+        evidence = _turn_evidence_text(source)
+        if not evidence:
+            matches: list[str] = []
+            for locator in _turn_evidence_locator_values(source):
+                for candidate in evidence_by_locator.get(locator, []):
+                    if candidate not in matches:
+                        matches.append(candidate)
+            if len(matches) == 1:
+                evidence = matches[0]
+            elif len(sources) == 1 and len(evidence_candidates) == 1:
+                # A few single-result tools have no stable locator. The
+                # one-to-one fallback is safe only when neither side is
+                # ambiguous inside this exact callback.
+                evidence = evidence_candidates[0]
         if evidence:
             citation_id = match.group(1)
             remaining = MAX_TURN_EVIDENCE_CHARS - current_chars
@@ -4627,7 +4720,10 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"(?:好的[，,]?\s*)?[^\n]{0,80}(?:证据|检索)[^\n]{0,80}(?:现在来回答|现直接回答|让我直接给出答案|现在进行深度阅读)|"
     r"根据(?:本|当前)轮检索结果|以下是替换后的答案|"
     r"本轮(?:检索|工具)(?:调用)?已(?:达|达到|用完|耗尽).{0,40}(?:上限|限制|预算)|"
-    r"未能获取.{0,60}(?:当前轮次|本轮).{0,40}(?:引用|证据)"
+    r"未能获取.{0,60}(?:当前轮次|本轮).{0,40}(?:引用|证据)|"
+    r"[^\n]{0,160}(?:current_turn_evidence|violations_to_fix)|"
+    r"[^\n]{0,80}(?:本轮|当前轮次)(?:的)?证据(?:集)?为空|"
+    r"[^\n]{0,80}需要先调用.{0,40}(?:知识)?检索工具"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -5901,11 +5997,11 @@ async def run_turn_contract_isolated_rewrite(
     """Compile one clean terminal answer outside the tool-using transcript."""
 
     context = {
-        "current_user_request": original_query_without_runtime_contract(payload.query),
-        "prior_user_messages": compact_turn_contract_user_history(payload),
-        "trusted_runtime_response_contract": runtime_response_contract_text(payload.query),
-        "violations_to_fix": issues,
-        "current_turn_evidence": compact_turn_contract_evidence(
+        "当前请求": original_query_without_runtime_contract(payload.query),
+        "仅用于指代解析的用户历史": compact_turn_contract_user_history(payload),
+        "可信回答约束": runtime_response_contract_text(payload.query),
+        "需修复的结构问题": issues,
+        "可引用依据": compact_turn_contract_evidence(
             payload.query,
             issues,
             evidence_by_id,
@@ -5914,16 +6010,17 @@ async def run_turn_contract_isolated_rewrite(
     system = (
         "你是 WeKnora 的终稿编译器，只负责把当前请求、用户历史事实和本轮证据整理成最终回答。"
         "不得调用工具，不得补充证据中没有的产品事实，不得采用历史助手回答作为事实。"
-        "只输出给用户看的最终正文，不输出思考、计划、检索过程、校验信息或修改说明。"
+        "只输出给用户看的最终正文，不输出思考、计划、检索过程、校验信息、修改说明或任何上下文字段名。"
     )
     prompt = (
-        "请重写一份完整、直接、可独立阅读的最终回答，并修复 violations_to_fix。\n"
-        "事实只能来自 current_turn_evidence；每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
-        "不得编造或改写引用句柄。current_turn_evidence 非空时，不得声称本轮证据为空、未检索或仍需检索；"
+        "请重写一份完整、直接、可独立阅读的最终回答，并修复上下文列出的结构问题。\n"
+        "事实只能来自可引用依据；每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
+        "不得编造或改写引用句柄。可引用依据非空时，不得声称本轮证据为空、未检索或仍需检索；"
         "若某个具体事实确实没有直接证据，只对该事实简短标明未知或缺口，不要叙述检索过程。"
         "不得输出引用占位符、检索诊断、工具名、分片标识或类似‘需要引用’的编辑备注。\n"
-        "逐项覆盖 current_user_request 点名的对象与代码标识，保留用户明确的行动边界和篇幅限制。"
-        "prior_user_messages 仅用于解析当前请求明确指代的旧目标和持续边界。\n"
+        "逐项覆盖当前请求点名的对象与代码标识，保留用户明确的行动边界和篇幅限制。"
+        "用户历史仅用于解析当前请求明确指代的旧目标和持续边界。"
+        "Context 中的所有字段名都属于内部结构，最终答案不得引用或提及这些字段名。\n"
         "返回且仅返回最终 Markdown 正文。\n\nContext:\n"
         + json.dumps(context, ensure_ascii=False)
     )

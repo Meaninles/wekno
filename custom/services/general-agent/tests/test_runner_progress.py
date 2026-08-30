@@ -138,6 +138,50 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertLessEqual(len(registry), 64)
         self.assertLessEqual(sum(len(value) for value in registry.values()), 96_000)
 
+    def test_turn_evidence_registry_joins_source_metadata_to_result_data(self):
+        state = {}
+
+        record_turn_evidence(
+            state,
+            {
+                "source_references": [
+                    {
+                        "cite_exactly": '<src id="S1" />',
+                        "chunk_id": "chunk-1",
+                        "result_position": 1,
+                    },
+                    {
+                        "cite_exactly": '<src id="S2" />',
+                        "chunk_id": "chunk-2",
+                        "result_position": 2,
+                    },
+                ],
+                "data": {
+                    "display_type": "search_results",
+                    "results": [
+                        {
+                            "result_index": 1,
+                            "chunk_id": "chunk-1",
+                            "content": "轻量 Skill 通过提示词或上下文片段注入。",
+                        },
+                        {
+                            "result_index": 2,
+                            "chunk_id": "chunk-2",
+                            "content": "专业 Skill 通过独立运行时提供复杂能力。",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(
+            state["turn_evidence_by_citation_id"],
+            {
+                "S1": "轻量 Skill 通过提示词或上下文片段注入。",
+                "S2": "专业 Skill 通过独立运行时提供复杂能力。",
+            },
+        )
+
     def test_turn_contract_evidence_packet_is_relevant_and_deduplicated(self):
         query = (
             "`execute_skill_script`和`read_skill`有什么区别？\n"
@@ -228,6 +272,8 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertNotIn("不可信的旧助手结论", captured["prompt"])
         self.assertNotIn("旧草稿只写了read_skill", captured["prompt"])
         self.assertNotIn('"rejected_draft"', captured["prompt"])
+        self.assertIn('"可引用依据"', captured["prompt"])
+        self.assertNotIn('"current_turn_evidence"', captured["prompt"])
 
     def test_turn_contract_detects_chinese_retrieval_budget_narration(self):
         payload = ChatPayload(
@@ -242,6 +288,26 @@ class RunnerProgressTest(unittest.TestCase):
         issues = turn_contract_issues(
             payload,
             "本轮检索调用已达上限，下面根据已有结果回答。",
+        )
+
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in issues},
+        )
+
+    def test_turn_contract_detects_internal_rewrite_field_leak(self):
+        payload = ChatPayload(
+            run_id="run-rewrite-field-leak",
+            session_id="session-rewrite-field-leak",
+            assistant_message_id="assistant-rewrite-field-leak",
+            query="回答当前问题。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        issues = turn_contract_issues(
+            payload,
+            "原因：current_turn_evidence 为空，violations_to_fix 要求先检索。",
         )
 
         self.assertIn(
@@ -973,9 +1039,20 @@ class RunnerProgressTest(unittest.TestCase):
             "source_references": [
                 {
                     "cite_exactly": '<src id="S1" />',
-                    "evidence_content": "当前机制按需加载相关内容。",
+                    "chunk_id": "chunk-1",
+                    "result_position": 1,
                 }
-            ]
+            ],
+            "data": {
+                "display_type": "search_results",
+                "results": [
+                    {
+                        "result_index": 1,
+                        "chunk_id": "chunk-1",
+                        "content": "当前机制按需加载相关内容。",
+                    }
+                ],
+            },
         }
 
         with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(

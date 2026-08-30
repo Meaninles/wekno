@@ -430,6 +430,13 @@ func TestUserFacingAgentErrorMessageMapsMaxTurnsAndTimeout(t *testing.T) {
 		t.Fatalf("internal model diagnostics leaked to user-facing error: %q", incompatible)
 	}
 
+	constraintFailure := userFacingAgentErrorMessage(errors.New(
+		"Eval terminal response remained mechanically invalid after bounded repair",
+	))
+	if constraintFailure != "智能体未能生成满足当前请求约束的完整回答，请重试" {
+		t.Fatalf("constraint failure message = %q", constraintFailure)
+	}
+
 	for _, transportErr := range []string{
 		"unexpected EOF",
 		"read tcp 10.0.0.1:1234: connection reset by peer",

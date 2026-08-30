@@ -383,6 +383,8 @@ class ScoringTests(unittest.TestCase):
             "I'll start by searching for the relevant interface.</think>",
             "The retrieval budget is exhausted. I need to use earlier evidence.",
             "From the earlier successful tool results, I have two sources.",
+            "本轮检索已达到调用上限，我将使用之前的结果。",
+            "未能获取当前轮次所需引用，下面按已有信息回答。",
         ):
             with self.subTest(leak=leak):
                 leaked = observed.model_copy(update={"content": leak})

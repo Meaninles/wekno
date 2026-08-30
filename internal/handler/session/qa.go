@@ -1443,6 +1443,10 @@ func userFacingAgentErrorMessage(err error) string {
 	if strings.Contains(lower, "content block is not a text block") {
 		return "模型服务返回了不兼容的响应格式，请重试或切换模型"
 	}
+	if strings.Contains(raw, "智能体未能生成满足当前请求约束的完整回答") ||
+		strings.Contains(lower, "terminal response remained mechanically invalid") {
+		return "智能体未能生成满足当前请求约束的完整回答，请重试"
+	}
 	return raw
 }
 

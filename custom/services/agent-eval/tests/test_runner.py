@@ -108,6 +108,25 @@ class PersistedRuntimeErrorClient(FakeClient):
         }
 
 
+class TerminalStreamErrorClient(RecoveredStreamClient):
+    def __init__(self) -> None:
+        super().__init__(completed=True)
+
+    def stream(self, _path: str, _payload: dict):
+        return (
+            [
+                {
+                    "response_type": "error",
+                    "done": True,
+                    "content": "智能体未能生成满足当前请求约束的完整回答，请重试",
+                    "data": {"stage": "custom_agent_execution"},
+                }
+            ],
+            10,
+            100,
+        )
+
+
 class RunnerTests(unittest.TestCase):
     def test_production_is_record_only(self) -> None:
         with self.assertRaises(EvalModeRequired):
@@ -244,6 +263,23 @@ class RunnerTests(unittest.TestCase):
         )
 
         result = EvalRunner(PersistedRuntimeErrorClient()).run_case(case)
+
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertTrue(result.turns[0].error.startswith("sut_stream_error:"))
+
+    def test_terminal_staged_stream_error_cannot_masquerade_as_completed_answer(self) -> None:
+        case = CaseSpec(
+            case_id="terminal-runtime-error",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[TurnSpec(turn_id="turn", query="q", contract=TurnContract())],
+        )
+
+        result = EvalRunner(TerminalStreamErrorClient()).run_case(case)
 
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertTrue(result.turns[0].error.startswith("sut_stream_error:"))

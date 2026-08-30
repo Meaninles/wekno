@@ -212,6 +212,22 @@ func TestSelectedKnowledgeEvidenceDirectiveIsScopedAndBounded(t *testing.T) {
 	}
 }
 
+func TestSelectedKnowledgeEvidenceDirectiveCarriesNamedComparisonTargets(t *testing.T) {
+	query := "比较轻量Skill、预加载运行时Skill和专业Skill的适用场景，不确定的实现细节要标注。"
+	got := AppendSelectedKnowledgeEvidenceDirective(query, query, true)
+	for _, expected := range []string{
+		"[WEKNORA_REQUIRED_EVIDENCE_TOPICS]",
+		"轻量Skill",
+		"预加载运行时Skill",
+		"专业Skill",
+		"每个对象都必须独立覆盖",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("selected-knowledge named target %q missing: %s", expected, got)
+		}
+	}
+}
+
 func TestTerminalGenerationDirectiveCarriesFinalLengthAndDeferredRules(t *testing.T) {
 	query := "依据已选制度只比较公开采购、询比、竞价和竞争谈判，不要给最终建议。"
 	got := TerminalGenerationDirective(query)
@@ -345,6 +361,18 @@ func TestNormalizeExplicitActionBoundariesKeepsDurableForce(t *testing.T) {
 	}
 	if unrelated := "请说明本轮是否执行了采购。"; NormalizeExplicitActionBoundaries(answer, unrelated) != answer {
 		t.Fatal("non-state informational answer was rewritten")
+	}
+}
+
+func TestNormalizeExplicitActionBoundariesResolvesEllipticalSkillInstallBan(t *testing.T) {
+	query := "团队想找一个用于制作PPT的Skill。请给出查找步骤，不要假装已经找到了具体Skill，也不要安装。"
+	answer := "可以先按名称搜索，再由用户用明确名称或ID确认目标。"
+	got := NormalizeExplicitActionBoundaries(answer, query)
+	if !strings.Contains(got, "不得安装Skill") {
+		t.Fatalf("elliptical Skill install prohibition was lost: %s", got)
+	}
+	if twice := NormalizeExplicitActionBoundaries(got, query); twice != got {
+		t.Fatalf("elliptical Skill boundary repair was not idempotent: %s", twice)
 	}
 }
 

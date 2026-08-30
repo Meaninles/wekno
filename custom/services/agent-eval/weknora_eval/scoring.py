@@ -100,6 +100,8 @@ INTERNAL_PLANNING_PATTERNS = (
     re.compile(r"\b(?:since\s+)?i(?:'ve| have) exhausted.{0,80}(?:retrieval|tool|calls?|budget)\b", re.I),
     re.compile(r"\bthe (?:retrieval|tool|search) budget is exhausted\b", re.I),
     re.compile(r"\bfrom the earlier (?:successful )?(?:tool|retrieval|knowledge[_ -]?search).{0,80}(?:results?|output|evidence)\b", re.I),
+    re.compile(r"本轮(?:检索|工具)(?:调用)?已(?:达|达到|用完|耗尽).{0,40}(?:上限|限制|预算)", re.I),
+    re.compile(r"未能获取.{0,60}(?:当前轮次|本轮).{0,40}(?:引用|证据)", re.I),
 )
 
 NEGATED_ACTION_PREFIXES = ("不会", "不得", "不要", "未", "不")

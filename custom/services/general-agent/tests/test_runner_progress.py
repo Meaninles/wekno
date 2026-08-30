@@ -32,6 +32,7 @@ from app.runner import (  # noqa: E402
     claude_auth_env,
     claude_sdk_builtin_tools,
     classify_data_analysis_display_intent,
+    compact_turn_contract_evidence,
     data_analysis_needs_chart_validation,
     data_analysis_post_tool_hook_factory,
     data_analysis_pre_tool_hook_factory,
@@ -63,6 +64,7 @@ from app.runner import (  # noqa: E402
     retrieval_tool_budget,
     runtime_summary,
     run_data_analysis_judge,
+    run_turn_contract_isolated_rewrite,
     sanitize_artifact_bytes,
     sdk_tool_progress_event,
     sdk_tool_progress,
@@ -72,6 +74,7 @@ from app.runner import (  # noqa: E402
     tool_result_fragments,
     tool_use_fragments,
     turn_contract_issues,
+    turn_contract_needs_retrieval,
     turn_contract_stop_hook_factory,
     should_enable_turn_contract_runtime_repair,
     should_enable_turn_contract_stop_hook,
@@ -133,6 +136,115 @@ class RunnerProgressTest(unittest.TestCase):
         registry = state["turn_evidence_by_citation_id"]
         self.assertLessEqual(len(registry), 64)
         self.assertLessEqual(sum(len(value) for value in registry.values()), 96_000)
+
+    def test_turn_contract_evidence_packet_is_relevant_and_deduplicated(self):
+        query = (
+            "`execute_skill_script`和`read_skill`有什么区别？\n"
+            "本轮明确要求文档依据或引用。\n"
+            "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+        )
+        issues = [
+            {
+                "code": "current_turn_evidence_named_identifiers_incomplete",
+                "missing_identifiers": ["execute_skill_script"],
+            }
+        ]
+        evidence = {
+            "S1": "无关的部署端口说明。",
+            "S2": "read_skill读取指令；execute_skill_script在沙箱中执行脚本。",
+            "S3": "read_skill读取指令；execute_skill_script在沙箱中执行脚本。",
+        }
+
+        packet = compact_turn_contract_evidence(query, issues, evidence)
+
+        self.assertEqual(packet[0]["cite_exactly"], '<src id="S2" />')
+        self.assertEqual(len(packet), 2)
+        self.assertFalse(turn_contract_needs_retrieval(issues, evidence))
+        self.assertTrue(turn_contract_needs_retrieval(issues, {}))
+
+    def test_isolated_turn_contract_rewrite_has_no_tools_or_assistant_history(self):
+        captured = {}
+
+        class Options:
+            def __init__(self, **kwargs):
+                captured["options"] = kwargs
+
+        async def fake_query(*, prompt, options):
+            captured["prompt"] = prompt
+            captured["instance"] = options
+            yield ResultMessage(
+                result=(
+                    "`read_skill`读取Skill内容；`execute_skill_script`在获得授权后才执行脚本。"
+                    '<src id="S2" />\n\n行动边界：当前不执行脚本。'
+                )
+            )
+
+        payload = ChatPayload(
+            run_id="run-isolated-rewrite",
+            session_id="session-isolated-rewrite",
+            assistant_message_id="assistant-isolated-rewrite",
+            query=(
+                "`execute_skill_script`和`read_skill`有什么区别？当前没有执行授权。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "<runtime_response_contract>[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+                "不得超过600个中文字符。</runtime_response_contract>"
+            ),
+            history=[
+                ChatHistoryMessage(role="user", content="最早目标是制作培训说明。"),
+                ChatHistoryMessage(role="assistant", content="不可信的旧助手结论。"),
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        issues = [
+            {
+                "code": "current_turn_evidence_named_identifiers_incomplete",
+                "missing_identifiers": ["execute_skill_script"],
+                "required_action": "覆盖两个标识。",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            answer = asyncio.run(
+                run_turn_contract_isolated_rewrite(
+                    payload,
+                    issues,
+                    {"S2": "read_skill读取内容，execute_skill_script在沙箱中执行脚本。"},
+                    "旧草稿只写了read_skill。",
+                    fake_query,
+                    Options,
+                    {},
+                    "test",
+                    None,
+                    Path(tmp),
+                )
+            )
+
+        self.assertIn("execute_skill_script", answer)
+        self.assertEqual(captured["options"]["tools"], [])
+        self.assertEqual(captured["options"]["allowed_tools"], [])
+        self.assertIn("最早目标是制作培训说明", captured["prompt"])
+        self.assertNotIn("不可信的旧助手结论", captured["prompt"])
+
+    def test_turn_contract_detects_chinese_retrieval_budget_narration(self):
+        payload = ChatPayload(
+            run_id="run-planning-leak-cn",
+            session_id="session-planning-leak-cn",
+            assistant_message_id="assistant-planning-leak-cn",
+            query="回答当前问题。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        issues = turn_contract_issues(
+            payload,
+            "本轮检索调用已达上限，下面根据已有结果回答。",
+        )
+
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in issues},
+        )
 
     def test_turn_contract_issues_detect_missing_fresh_evidence_and_length(self):
         payload = ChatPayload(
@@ -853,8 +965,8 @@ class RunnerProgressTest(unittest.TestCase):
         with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}):
             prompt = build_system_prompt(payload)
 
-        self.assertIn("eval runtime may resume this same SDK session up to 2 times", prompt)
-        self.assertIn("bounded current-turn repairs", prompt)
+        self.assertIn("eval runtime may resume this same SDK session once", prompt)
+        self.assertIn("one tool-free terminal rewrite", prompt)
         self.assertNotIn(
             "Generate the answer once; the runtime never asks the model to validate or regenerate citations.",
             prompt,

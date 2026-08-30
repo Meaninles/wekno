@@ -2812,15 +2812,16 @@ def build_system_prompt(
     )
     eval_runtime_repair_enabled = should_enable_turn_contract_runtime_repair(payload)
     terminal_generation_policy = (
-        f"The eval runtime may resume this same SDK session up to {TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS} times when its deterministic current-turn "
-        "contract rejects the terminal draft. If that trusted runtime continuation appears, follow it and return "
-        "a complete replacement; do not self-initiate any other validation or regeneration pass."
+        "The eval runtime may resume this same SDK session once to obtain missing evidence when its deterministic "
+        "current-turn contract rejects the terminal draft. If that trusted continuation appears, follow it and "
+        "return a complete replacement. The runtime may independently compile one tool-free terminal rewrite; "
+        "do not self-initiate any other validation or regeneration pass."
         if eval_runtime_repair_enabled
         else "This is still one generation run; do not request or perform a second validation or regeneration pass."
     )
     citation_generation_policy = (
         "Generate the answer in one pass unless the trusted eval runtime explicitly resumes this same SDK session "
-        "for one of its bounded current-turn repairs."
+        "once to obtain missing current-turn evidence."
         if eval_runtime_repair_enabled
         else "Generate the answer once; the runtime never asks the model to validate or regenerate citations."
     )
@@ -3986,11 +3987,15 @@ def record_turn_evidence(state: dict[str, Any] | None, result: Any) -> None:
         match = re.fullmatch(r'<src id="(S[1-9][0-9]*)" />', handle)
         if not match or not isinstance(source, dict):
             continue
-        evidence = "\n".join(
-            str(source.get(field) or "").strip()
-            for field in ("evidence_content", "content", "snippet", "text")
-            if str(source.get(field) or "").strip()
-        )
+        # The bridge commonly exposes the same fragment through both
+        # evidence_content and content. Keep the first authoritative projection
+        # instead of duplicating it in the repair context and token budget.
+        evidence = ""
+        for field in ("evidence_content", "content", "snippet", "text"):
+            candidate = str(source.get(field) or "").strip()
+            if candidate:
+                evidence = candidate
+                break
         if evidence:
             citation_id = match.group(1)
             remaining = MAX_TURN_EVIDENCE_CHARS - current_chars
@@ -4584,11 +4589,15 @@ REQUIRED_EVIDENCE_SEARCHES_RE = re.compile(
 FRESH_EVIDENCE_CONTRACT_MARKER = "本轮明确要求文档依据或引用"
 TURN_EXECUTION_CONTRACT_MARKER = "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
 DEFERRED_COMPARISON_CONTRACT_MARKER = "用户明确要求不作最终选择"
-# Eval mode may spend two bounded continuations on a terminal-contract repair.
-# Production never enables this path, so ordinary requests remain single-pass.
-# A second attempt is useful for provider outputs that acknowledge the first
-# repair request but still return an overlong or partially grounded draft.
+# Eval mode may spend at most one same-session continuation to obtain evidence,
+# followed by one isolated, tool-free terminal rewrite. Production never enables
+# this path, so ordinary requests remain single-pass. Keeping the rewrite out of
+# the already large agent transcript prevents a rejected draft, tool diagnostics
+# and repeated retrieval results from crowding the actual answer out of context.
 TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 2
+TURN_CONTRACT_MAX_RETRIEVAL_REPAIR_ATTEMPTS = 1
+TURN_CONTRACT_MAX_ISOLATED_REWRITE_ATTEMPTS = 1
+TURN_CONTRACT_FAILURE_USER_MESSAGE = "智能体未能生成满足当前请求约束的完整回答，请重试"
 INTERNAL_PLANNING_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:"
     r"now\s+(?:i\s+have|let\s+me|rewriting|i(?:'ll|\s+will)\s+write)|"
@@ -4616,7 +4625,9 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"现在我有完整的证据来回答|"
     r"用户要求.{0,100}(?:已有足够证据|让我直接给出答案)|"
     r"(?:好的[，,]?\s*)?[^\n]{0,80}(?:证据|检索)[^\n]{0,80}(?:现在来回答|现直接回答|让我直接给出答案|现在进行深度阅读)|"
-    r"根据(?:本|当前)轮检索结果|以下是替换后的答案"
+    r"根据(?:本|当前)轮检索结果|以下是替换后的答案|"
+    r"本轮(?:检索|工具)(?:调用)?已(?:达|达到|用完|耗尽).{0,40}(?:上限|限制|预算)|"
+    r"未能获取.{0,60}(?:当前轮次|本轮).{0,40}(?:引用|证据)"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -5550,7 +5561,9 @@ def should_enable_turn_contract_runtime_repair(payload: ChatPayload) -> bool:
     A Claude SDK Stop hook is not used as the execution gate here. Some
     OpenAI-compatible gateways acknowledge an SDK end-turn without honoring a
     blocking Stop-hook continuation. The sidecar therefore validates the
-    terminal candidate itself and resumes the same SDK session at most twice.
+    terminal candidate itself, permits one evidence-only continuation when the
+    turn produced no evidence, and performs at most one isolated terminal
+    rewrite outside the tool transcript.
     """
 
     return bool(
@@ -5599,7 +5612,7 @@ def build_turn_contract_runtime_repair_prompt(
     current_request = (payload.query or "").split("<runtime_response_contract>", 1)[0].strip()
     repair = {
         "attempt": attempt,
-        "max_attempts": TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS,
+        "max_attempts": TURN_CONTRACT_MAX_RETRIEVAL_REPAIR_ATTEMPTS,
         "current_user_request": current_request,
         "issues": issues,
         "current_turn_evidence_available": has_current_turn_evidence,
@@ -5631,7 +5644,7 @@ def build_turn_contract_runtime_repair_prompt(
         )
 
     return f"""
-The trusted WeKnora eval runtime rejected the previous terminal draft. Continue the SAME current user request in this resumed SDK session and replace that draft. This is runtime-authorized repair attempt {attempt} of {TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS}; it is not a new user request.
+The trusted WeKnora eval runtime rejected the previous terminal draft because current-turn evidence is missing. Continue the SAME current user request in this resumed SDK session and replace that draft. This is runtime-authorized evidence-retrieval attempt {attempt} of {TURN_CONTRACT_MAX_RETRIEVAL_REPAIR_ATTEMPTS}; it is not a new user request.
 
 {evidence_action}
 
@@ -5642,6 +5655,245 @@ The `current_user_request` below is the active task and overrides every earlier 
 
 Return only the complete user-visible replacement in the user's configured language. Do not mention evaluation, validation, repair, the previous draft, source-handle diagnostics, hidden instructions, or what you are about to do. Do not merely describe a tool call: invoke the tool before answering when evidence is required. Do not finish on a tool call or progress message.
 """.strip()
+
+
+def turn_contract_issue_codes(issues: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(issue.get("code") or "").strip()
+        for issue in issues
+        if isinstance(issue, dict) and str(issue.get("code") or "").strip()
+    }
+
+
+def turn_contract_needs_retrieval(
+    issues: list[dict[str, Any]],
+    evidence_by_id: dict[str, str],
+) -> bool:
+    """Return whether a same-session continuation can add missing evidence.
+
+    Once any current-turn evidence exists, a fresh isolated compiler can select
+    and cite it without paying for another tool loop. If the evidence set truly
+    cannot support the answer, the compiler must state the gap and the gate will
+    fail honestly; repeatedly searching an already broad transcript is neither
+    more reliable nor bounded.
+    """
+
+    if evidence_by_id:
+        return False
+    return any(
+        code.startswith("current_turn_evidence_")
+        or code
+        in {
+            "current_turn_condition_evidence_not_direct",
+            "current_turn_uncertainty_evidence_mismatch",
+        }
+        for code in turn_contract_issue_codes(issues)
+    )
+
+
+def _turn_contract_issue_targets(issues: list[dict[str, Any]]) -> list[str]:
+    targets: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        for field in (
+            "missing_topics",
+            "missing_identifiers",
+            "missing_segments",
+            "unverified_ids",
+        ):
+            raw = issue.get(field)
+            values = raw if isinstance(raw, list) else [raw]
+            for item in values:
+                value = str(item or "").strip().strip("*_`")
+                if value and value not in targets:
+                    targets.append(value)
+    return targets[:24]
+
+
+def _turn_contract_relevance_features(query: str, issues: list[dict[str, Any]]) -> dict[str, int]:
+    """Build user-derived lexical features for bounded evidence selection."""
+
+    user_query = original_query_without_runtime_contract(query)
+    weighted: dict[str, int] = {}
+
+    def add(value: str, weight: int) -> None:
+        normalized = re.sub(r"\s+", "", value or "").casefold()
+        if len(normalized) >= 2:
+            weighted[normalized] = max(weighted.get(normalized, 0), weight)
+
+    for target in [
+        *_turn_contract_issue_targets(issues),
+        *required_evidence_topics(query),
+        *required_inline_identifiers(query),
+    ]:
+        add(target, 120)
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_.\-/]{1,95}", user_query):
+        add(token, 30)
+    for run in re.findall(r"[\u3400-\u9fff]{2,40}", user_query):
+        # Chinese has no whitespace token boundary. Short n-grams rank evidence
+        # using only words present in the user request, without an answer key.
+        for width, weight in ((4, 8), (3, 5), (2, 2)):
+            for index in range(max(0, len(run) - width + 1)):
+                add(run[index : index + width], weight)
+    return weighted
+
+
+def compact_turn_contract_evidence(
+    query: str,
+    issues: list[dict[str, Any]],
+    evidence_by_id: dict[str, str],
+    rejected_draft: str = "",
+    *,
+    max_references: int = 12,
+    max_chars_per_reference: int = 1600,
+    max_total_chars: int = 16_000,
+) -> list[dict[str, str]]:
+    """Select a small, deduplicated evidence packet for the isolated rewrite."""
+
+    features = _turn_contract_relevance_features(query, issues)
+    cited_ids = set(re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', rejected_draft or ""))
+    ranked: list[tuple[int, int, str, str]] = []
+    seen_evidence: set[str] = set()
+    for index, (citation_id, raw_evidence) in enumerate(evidence_by_id.items()):
+        if not re.fullmatch(r"S[1-9][0-9]*", str(citation_id)):
+            continue
+        evidence = re.sub(r"\s+", " ", str(raw_evidence or "")).strip()
+        if not evidence:
+            continue
+        dedupe_key = hashlib.sha256(evidence.casefold().encode("utf-8")).hexdigest()
+        if dedupe_key in seen_evidence:
+            continue
+        seen_evidence.add(dedupe_key)
+        normalized = re.sub(r"\s+", "", evidence).casefold()
+        score = sum(weight for feature, weight in features.items() if feature in normalized)
+        if citation_id in cited_ids:
+            score += 40
+        ranked.append((score, -index, citation_id, evidence))
+
+    ranked.sort(reverse=True)
+    selected: list[dict[str, str]] = []
+    total = 0
+    for _score, _negative_index, citation_id, evidence in ranked:
+        remaining = max_total_chars - total
+        if remaining <= 0 or len(selected) >= max_references:
+            break
+        bounded = evidence[: min(max_chars_per_reference, remaining)].strip()
+        if not bounded:
+            continue
+        selected.append(
+            {
+                "cite_exactly": f'<src id="{citation_id}" />',
+                "evidence": bounded,
+            }
+        )
+        total += len(bounded)
+    return selected
+
+
+def compact_turn_contract_user_history(
+    payload: ChatPayload,
+    *,
+    max_messages: int = 12,
+    max_chars_per_message: int = 800,
+    max_total_chars: int = 6000,
+) -> list[str]:
+    """Retain user-authored goals and boundaries without replaying model text."""
+
+    result: list[str] = []
+    total = 0
+    user_messages = [
+        str(message.content or "").strip()
+        for message in payload.history
+        if str(message.role or "").strip().lower() == "user"
+        and str(message.content or "").strip()
+    ][-max_messages:]
+    for message in user_messages:
+        remaining = max_total_chars - total
+        if remaining <= 0:
+            break
+        bounded = message[: min(max_chars_per_message, remaining)].strip()
+        if bounded:
+            result.append(bounded)
+            total += len(bounded)
+    return result
+
+
+def runtime_response_contract_text(query: str) -> str:
+    value = query or ""
+    marker = "<runtime_response_contract>"
+    index = value.find(marker)
+    return value[index : index + 10_000].strip() if index >= 0 else ""
+
+
+async def run_turn_contract_isolated_rewrite(
+    payload: ChatPayload,
+    issues: list[dict[str, Any]],
+    evidence_by_id: dict[str, str],
+    rejected_draft: str,
+    query_fn: Callable[..., Any],
+    options_cls: Any,
+    env: dict[str, str],
+    model: str,
+    settings: str | None,
+    run_dir: Path,
+) -> str:
+    """Compile one clean terminal answer outside the tool-using transcript."""
+
+    context = {
+        "current_user_request": original_query_without_runtime_contract(payload.query),
+        "prior_user_messages": compact_turn_contract_user_history(payload),
+        "trusted_runtime_response_contract": runtime_response_contract_text(payload.query),
+        "rejected_draft": (rejected_draft or "")[:6000],
+        "violations_to_fix": issues,
+        "current_turn_evidence": compact_turn_contract_evidence(
+            payload.query,
+            issues,
+            evidence_by_id,
+            rejected_draft,
+        ),
+    }
+    system = (
+        "你是 WeKnora 的终稿编译器，只负责把当前请求、用户历史事实和本轮证据整理成最终回答。"
+        "不得调用工具，不得补充证据中没有的产品事实，不得采用历史助手回答作为事实。"
+        "只输出给用户看的最终正文，不输出思考、计划、检索过程、校验信息或修改说明。"
+    )
+    prompt = (
+        "请重写一份完整、直接、可独立阅读的最终回答，并修复 violations_to_fix。\n"
+        "事实只能来自 current_turn_evidence；每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
+        "不得编造或改写引用句柄。若证据不足，简短标明未知或缺口，不要叙述检索过程。\n"
+        "逐项覆盖 current_user_request 点名的对象与代码标识，保留用户明确的行动边界和篇幅限制。"
+        "prior_user_messages 仅用于解析当前请求明确指代的旧目标和持续边界。\n"
+        "返回且仅返回最终 Markdown 正文。\n\nContext:\n"
+        + json.dumps(context, ensure_ascii=False)
+    )
+    rewrite_options = options_cls(
+        cwd=str(run_dir),
+        env=env,
+        settings=settings,
+        system_prompt=system,
+        setting_sources=[],
+        tools=[],
+        allowed_tools=[],
+        permission_mode="dontAsk",
+        include_partial_messages=False,
+        hooks={},
+        max_turns=1,
+        model=model or None,
+        thinking=llm_judge_thinking_config(),
+    )
+    answer = ""
+    parts: list[str] = []
+    async for message in query_fn(prompt=prompt, options=rewrite_options):
+        if getattr(message, "is_error", False):
+            raise RuntimeError("isolated terminal rewrite failed")
+        result_text = result_message_text(message)
+        if result_text:
+            answer = result_text
+        blocks = final_text_blocks(message)
+        if blocks:
+            parts = blocks
+    return (answer or "".join(parts)).strip()
 
 
 def data_analysis_chart_calls(state: dict[str, Any], payload: ChatPayload | None = None) -> list[dict[str, Any]]:
@@ -7152,6 +7404,8 @@ class GeneralAgentRunner:
         options = initial_options
         resume_attempts = 0
         turn_contract_runtime_repair_attempts = 0
+        turn_contract_isolated_rewrite_attempts = 0
+        turn_contract_rewritten_answer = ""
         turn_contract_runtime_repair_enabled = (
             should_enable_turn_contract_runtime_repair(self.payload)
         )
@@ -7284,12 +7538,14 @@ class GeneralAgentRunner:
                     turn_contract_state["last_turn_contract_issues"] = contract_issues
                     if (
                         contract_issues
+                        and turn_contract_needs_retrieval(contract_issues, evidence_by_id)
                         and turn_contract_runtime_repair_attempts
-                        < TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS
+                        < TURN_CONTRACT_MAX_RETRIEVAL_REPAIR_ATTEMPTS
                     ):
                         turn_contract_runtime_repair_attempts += 1
                         turn_contract_state["turn_contract_attempts"] = (
                             turn_contract_runtime_repair_attempts
+                            + turn_contract_isolated_rewrite_attempts
                         )
                         yield RunEvent(
                             type="progress",
@@ -7329,6 +7585,60 @@ class GeneralAgentRunner:
                         active_answer_id = ""
                         reset_text_stream_state()
                         continue
+                    if (
+                        contract_issues
+                        and turn_contract_isolated_rewrite_attempts
+                        < TURN_CONTRACT_MAX_ISOLATED_REWRITE_ATTEMPTS
+                    ):
+                        turn_contract_isolated_rewrite_attempts += 1
+                        turn_contract_state["turn_contract_attempts"] = (
+                            turn_contract_runtime_repair_attempts
+                            + turn_contract_isolated_rewrite_attempts
+                        )
+                        yield RunEvent(
+                            type="progress",
+                            content="正在整理可核验的最终回答",
+                            message="正在整理可核验的最终回答",
+                            data={
+                                "tool_name": "assistant_status",
+                                "tool_call_id": "turn-contract-isolated-rewrite",
+                                "phase": "start",
+                                "message": "正在整理可核验的最终回答",
+                                "transient": True,
+                                "rewrite_attempt": turn_contract_isolated_rewrite_attempts,
+                                "issue_codes": sorted(turn_contract_issue_codes(contract_issues)),
+                            },
+                        )
+                        try:
+                            rewritten = await run_turn_contract_isolated_rewrite(
+                                self.payload,
+                                contract_issues,
+                                evidence_by_id,
+                                contract_candidate,
+                                query,
+                                ClaudeAgentOptions,
+                                env,
+                                model,
+                                settings,
+                                self.run_dir,
+                            )
+                        except Exception:
+                            rewritten = ""
+                        if rewritten:
+                            turn_contract_rewritten_answer = rewritten
+                            terminal_result_answer = rewritten
+                            final_candidate_parts = [rewritten]
+                            current_segment_delta_parts = []
+                            all_delta_parts.clear()
+                            active_answer_id = ""
+                            reset_text_stream_state()
+                            contract_candidate = rewritten
+                            contract_issues = turn_contract_issues(
+                                self.payload,
+                                rewritten,
+                                evidence_by_id=evidence_by_id,
+                            )
+                            turn_contract_state["last_turn_contract_issues"] = contract_issues
                     if contract_issues:
                         turn_contract_state["turn_contract_validation_bypassed"] = True
                         mechanical_failures = {
@@ -7342,13 +7652,15 @@ class GeneralAgentRunner:
                             if isinstance(issue, dict)
                         }
                         if final_codes.intersection(mechanical_failures):
-                            # Eval fails closed after both bounded continuations
-                            # instead of persisting a runaway/provider scratch
-                            # response as if it were a valid business answer.
-                            raise RuntimeError(
-                                "Eval terminal response remained mechanically invalid after bounded repair"
-                            )
-                    elif turn_contract_runtime_repair_attempts:
+                            # Fail as an execution error with a stable user-safe
+                            # message. The eval client records the terminal SSE
+                            # error and stops this contaminated session instead
+                            # of scoring the message as a completed answer.
+                            raise RuntimeError(TURN_CONTRACT_FAILURE_USER_MESSAGE)
+                    elif (
+                        turn_contract_runtime_repair_attempts
+                        or turn_contract_isolated_rewrite_attempts
+                    ):
                         turn_contract_state["turn_contract_runtime_repaired"] = True
                 break
             resume_attempts += 1
@@ -7380,6 +7692,9 @@ class GeneralAgentRunner:
             prompt_observation["turn_contract_runtime_repair_attempts"] = (
                 turn_contract_runtime_repair_attempts
             )
+            prompt_observation["turn_contract_isolated_rewrite_attempts"] = (
+                turn_contract_isolated_rewrite_attempts
+            )
             prompt_observation["turn_contract_runtime_repaired"] = bool(
                 turn_contract_state.get("turn_contract_runtime_repaired")
             )
@@ -7402,6 +7717,8 @@ class GeneralAgentRunner:
             answer = str(data_analysis_state.get("final_answer_content") or "").strip()
         elif data_analysis_final_answer_mode and data_analysis_state.get("validation_bypassed") and str(data_analysis_state.get("final_answer_last_candidate") or "").strip():
             answer = str(data_analysis_state.get("final_answer_last_candidate") or "").strip()
+        elif turn_contract_rewritten_answer:
+            answer = turn_contract_rewritten_answer
         elif passive_terminal_delivery_mode:
             answer = terminal_collector.answer()
             if not answer:
@@ -7427,7 +7744,11 @@ class GeneralAgentRunner:
                 answer = "".join(current_segment_delta_parts).strip()
             if not answer:
                 answer = "".join(all_delta_parts).strip()
-        if (data_analysis_final_answer_mode or passive_terminal_delivery_mode) and answer:
+        if (
+            data_analysis_final_answer_mode
+            or passive_terminal_delivery_mode
+            or bool(turn_contract_rewritten_answer)
+        ) and answer:
             active_answer_id = ""
             for chunk in answer_replay_chunks(answer):
                 yield answer_delta_event(chunk)

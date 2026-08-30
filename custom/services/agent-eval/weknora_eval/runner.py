@@ -162,6 +162,12 @@ class EvalRunner:
                 stream_errors = [
                     event for event in events if event_type(event) == "error" and event.get("done") is True
                 ]
+                terminal_stream_errors = [
+                    event
+                    for event in stream_errors
+                    if isinstance(event.get("data"), dict)
+                    and bool(str(event["data"].get("stage") or "").strip())
+                ]
                 try:
                     message = self.client.load_completed_assistant(
                         session_id, exclude_message_ids=seen_message_ids
@@ -181,7 +187,14 @@ class EvalRunner:
                     normalized_content.startswith("ResultMessage(")
                     and "is_error=True" in normalized_content
                 ) or normalized_content.startswith("API Error:")
-                if completed and not persisted_runtime_error:
+                if terminal_stream_errors:
+                    # WeKnora's top-level execution errors carry a stage and
+                    # terminate the SSE stream. The handler may still persist a
+                    # completed assistant row containing a user-facing error;
+                    # that row is not a recovered business answer and must not
+                    # masquerade as one in the eval artifact.
+                    error = f"{SUT_STREAM_ERROR}: {terminal_stream_errors[-1]}"
+                elif completed and not persisted_runtime_error:
                     # A tool/model step may emit an error event and then recover.
                     # The persisted completed answer is the source of truth.
                     error = None

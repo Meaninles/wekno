@@ -1048,6 +1048,12 @@ func AppendSelectedKnowledgeEvidenceDirective(content, originalQuery string, has
 本轮明确要求文档依据或引用：用户已经选择了知识范围，当前请求中的知识性结论必须以本轮重新取得的可引用证据为准。
 - 先用当前问题的一次聚焦检索取得最小充分证据；只有关键对象仍缺证据时再做一次补充检索，不枚举整个知识库，不把历史回答当作本轮证据。
 - 最终回答只保留直接支持结论的最少引用；证据不足时明确说明缺口，不凭模型记忆补成产品事实。`
+	if topics := currentTurnEvidenceTopics(originalQuery); len(topics) > 1 {
+		encoded, _ := json.Marshal(topics)
+		block += "\n[WEKNORA_REQUIRED_EVIDENCE_TOPICS]" + string(encoded)
+		block += `
+- 用户点名的每个对象都必须独立覆盖，并在它自己的短段或结构化行内放置直接支持该对象的本轮引用。`
+	}
 	value := strings.TrimSpace(content)
 	if value == "" {
 		return block
@@ -2697,6 +2703,7 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 		revoke    []string
 		mentions  []string
 		durable   []string
+		context   []string
 		label     string
 		operation string
 	}
@@ -2800,6 +2807,7 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 			enable: []string{
 				"不得安装Skill", "不要安装Skill", "不安装Skill", "不会安装Skill",
 				"不得安装 Skill", "不要安装 Skill", "不安装 Skill", "不会安装 Skill",
+				"不得安装", "不要安装", "不安装", "不会安装",
 			},
 			revoke: []string{
 				"允许安装Skill", "可以安装Skill", "授权安装Skill", "允许安装 Skill", "可以安装 Skill",
@@ -2807,6 +2815,7 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 			},
 			mentions:  []string{"安装Skill", "安装 Skill", "Skill安装", "Skill 安装"},
 			durable:   []string{"不得安装", "不要安装", "不安装", "不会安装", "未安装"},
+			context:   []string{"Skill", "skill", "技能"},
 			label:     "Skill安装权限",
 			operation: "不得安装Skill",
 		},
@@ -2856,7 +2865,8 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 	if !stateOnly && !explicitBoundaryRequest {
 		hasCurrentBoundary := false
 		for _, rule := range boundaries {
-			if containsAny(query, rule.enable) || containsAny(query, rule.revoke) {
+			contextMatches := len(rule.context) == 0 || containsAny(userContext, rule.context)
+			if contextMatches && (containsAny(query, rule.enable) || containsAny(query, rule.revoke)) {
 				hasCurrentBoundary = true
 				break
 			}
@@ -2869,6 +2879,9 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
 	stateAudit := IsStateAuditTurn(query)
 	for _, rule := range boundaries {
+		if len(rule.context) > 0 && !containsAny(userContext, rule.context) {
+			continue
+		}
 		currentTurnScope := stateAudit || explicitBoundaryRequest || containsAny(query, rule.enable) ||
 			containsAny(query, rule.revoke) || (stateOnly && containsAny(query, rule.mentions))
 		if !currentTurnScope {

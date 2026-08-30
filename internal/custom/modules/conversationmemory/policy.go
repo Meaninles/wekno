@@ -352,10 +352,12 @@ func IsComparisonTurn(query string) bool {
 	}
 	negativeProbe := strings.NewReplacer(
 		"不要再比较", "", "不要比较", "", "不再比较", "", "不比较", "",
+		"不要区分", "", "无需区分", "", "不必区分", "",
 		"停止采购方式比较", "", "停止比较", "", "stop comparing", "",
 	).Replace(value)
 	return containsAny(negativeProbe, []string{
-		"请比较", "比较", "对比", "分别说明", "compare", "comparison",
+		"请比较", "比较", "对比", "区分", "辨析", "分别说明", "分别解释",
+		"compare", "comparison", "distinguish", "differentiate",
 	})
 }
 
@@ -393,6 +395,19 @@ func ShouldIsolateNarrowEvidenceHistory(query string) bool {
 	return len(narrowAnswerEvidenceTopics(query)) >= 1
 }
 
+// ShouldIsolateSelfContainedEvidenceHistory identifies a multi-topic evidence
+// request that fully names its own subjects and does not ask to reuse prior
+// conversation state.  Omitting history for this one run prevents an older
+// user topic from becoming the model's goal while preserving normal long-turn
+// continuity whenever the current request explicitly refers back to it.
+func ShouldIsolateSelfContainedEvidenceHistory(query string) bool {
+	if !RequiresFreshEvidenceTurn(query) || ReferencesConversationHistory(query) {
+		return false
+	}
+	topics := currentTurnEvidenceTopics(query)
+	return len(topics) >= 2 && (IsComparisonTurn(query) || IsSynthesisTurn(query))
+}
+
 // RequiresNamedTopicDefinitionCoverage detects an explicit multi-option
 // definition request. It is kept separate from generic comparison detection so
 // condition-only comparisons do not acquire unrequested definition prose.
@@ -410,7 +425,7 @@ func comparisonEvidenceTopics(query string) []string {
 	value := strings.TrimSpace(query)
 	start := -1
 	markerLen := 0
-	for _, marker := range []string{"比较", "对比"} {
+	for _, marker := range []string{"比较", "对比", "区分", "辨析"} {
 		if index := strings.LastIndex(value, marker); index > start {
 			start = index
 			markerLen = len(marker)
@@ -450,6 +465,68 @@ func comparisonEvidenceTopics(query string) []string {
 			continue
 		}
 		seen[topic] = struct{}{}
+		topics = append(topics, topic)
+		if len(topics) == 8 {
+			break
+		}
+	}
+	if len(topics) < 2 {
+		return nil
+	}
+	return topics
+}
+
+// synthesisEvidenceTopics extracts the explicitly enumerated sections from a
+// self-contained synthesis request such as “总结中包含 A、B，以及 C”.  These
+// user-authored labels are useful retrieval targets, but execution/permission
+// sections are deliberately excluded because they come from conversation
+// state rather than knowledge evidence.
+func synthesisEvidenceTopics(query string) []string {
+	if !IsSynthesisTurn(query) || !RequiresFreshEvidenceTurn(query) {
+		return nil
+	}
+	value := strings.TrimSpace(query)
+	start := -1
+	markerLen := 0
+	for _, marker := range []string{"包含", "包括", "涵盖"} {
+		if index := strings.LastIndex(value, marker); index > start {
+			start = index
+			markerLen = len(marker)
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	tail := strings.TrimSpace(value[start+markerLen:])
+	if end := strings.IndexAny(tail, "。；;！？!?\n"); end >= 0 {
+		tail = tail[:end]
+	}
+	if utf8.RuneCountInString(tail) > 240 {
+		return nil
+	}
+	splitter := regexp.MustCompile(`\s*(?:、|，\s*(?:以及|并包括|还包括)|,\s*(?:and|plus)\s+)\s*`)
+	parts := splitter.Split(tail, -1)
+	topics := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		topic := strings.Trim(strings.TrimSpace(part), "：:‘’“”\"'（）()[]【】` ")
+		for _, prefix := range []string{"以及", "并包括", "还包括", "当前"} {
+			topic = strings.TrimSpace(strings.TrimPrefix(topic, prefix))
+		}
+		if topic == "" || containsAny(topic, []string{
+			"行动边界", "操作边界", "权限边界", "执行边界", "不执行任何操作",
+		}) {
+			continue
+		}
+		count := utf8.RuneCountInString(topic)
+		if count < 3 || count > 64 {
+			continue
+		}
+		key := strings.ToLower(topic)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		topics = append(topics, topic)
 		if len(topics) == 8 {
 			break
@@ -510,6 +587,9 @@ func runtimeTopicMarker(query, marker string) []string {
 // comparison targets from the preceding answer.
 func currentTurnEvidenceTopics(query string) []string {
 	if topics := comparisonEvidenceTopics(query); len(topics) >= 2 {
+		return topics
+	}
+	if topics := synthesisEvidenceTopics(query); len(topics) >= 2 {
 		return topics
 	}
 	return narrowAnswerEvidenceTopics(query)
@@ -1255,6 +1335,22 @@ func ReferencesRecentUserState(query string) bool {
 	})
 }
 
+// ReferencesConversationHistory recognizes explicit anaphora that makes prior
+// user messages part of the current task.  It is intentionally conservative:
+// ordinary continuation words such as “还要” do not keep an unrelated topic,
+// while requests to restore, continue, consolidate, or use earlier content do.
+func ReferencesConversationHistory(query string) bool {
+	if ReferencesRecentUserState(query) {
+		return true
+	}
+	value := strings.ToLower(strings.TrimSpace(query))
+	return containsAny(value, []string{
+		"刚才", "之前", "前面", "前文", "上文", "上述", "前述", "最早", "历史",
+		"恢复", "回到", "继续上次", "沿用", "基于此前", "根据此前", "结合此前",
+		"earlier", "previous", "above", "history", "restore", "resume", "continue the prior",
+	})
+}
+
 func latestReferencedUserState(statements []string) string {
 	for index := len(statements) - 1; index >= 0; index-- {
 		statement := strings.TrimSpace(statements[index])
@@ -1285,7 +1381,8 @@ func TerminalGenerationDirective(query string) string {
 		parts = append(parts, fmt.Sprintf(`[WEKNORA_TERMINAL_RESPONSE_CHECK]
 现在只生成当前请求的最终答案，不得回答历史问题，也不得输出检索、校验或整理过程。
 - 整篇不得超过%d个中文字符；使用满足当前请求的最短完整表达。
-- 保留用户点名的对象、必要结论和直接支持结论的最少就近引用；删除前言、任务复述、来源汇总、重复表格、重复结论及未要求的分支。`, limit))
+- 保留用户点名的对象、必要结论和直接支持结论的最少就近引用；每个点名主题优先只保留一个覆盖该结论的引用，同一事实不得重复引用。
+- 删除前言、任务复述、来源汇总、重复表格、重复结论及未要求的分支。`, limit))
 	}
 	if IsDeferredDecisionTurn(query) && IsComparisonTurn(query) {
 		parts = append(parts, `[WEKNORA_TERMINAL_OUTPUT_CHECK]
@@ -6371,7 +6468,8 @@ func StripInternalPlanningPreamble(answer string) string {
 			"good, now i have", "good, i now have", "good, now let me",
 			"now i have", "now let me", "let me organize", "let me answer",
 			"let me formulate", "let me summarize", "let me analyse", "let me analyze",
-			"let me think", "let me check", "i need to find", "the validation says",
+			"let me think", "let me check", "i'll check the output", "i will check the output",
+			"looking back at the actual tool results", "i need to find", "the validation says",
 			"the uncertainty topics are", "actually, looking", "looking more carefully",
 			"i have the retrieval results", "i have retrieved", "i've retrieved",
 			"i see the issue", "i see that", "i see there", "there's still an issue", "there is still an issue",
@@ -6385,6 +6483,15 @@ func StripInternalPlanningPreamble(answer string) string {
 			"好的，我已获取", "好的，我已经获取", "好的，我现在", "好的，现在我", "好的，现在进行", "好的，现在根据", "好的，根据整个对话", "好的，遵命。我现在", "好的，以下是", "以下是根据整个会话", "遵照您的指令", "现在我已经", "现在我有了", "下面我将", "让我整合",
 			"现在我已获得", "现在我已阅读", "我已深入阅读", "我已经深入阅读", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "以下是替换后的答案", "根据当前轮检索结果",
 		})
+		if repairPreamble {
+			knownPlanning = knownPlanning || containsAnyPrefix(probe, []string{
+				"the chunk (", "the chunk ", "let me pick out", "the content clearly states",
+				"the knowledge_search call returned", "the knowledge search call returned",
+				"but the validation", "let me do a fresh", "wait, i cannot", "i'll call ",
+				"i will call ", "but i know that", "since i've exhausted", "since i have exhausted",
+				"actually, my earlier", "those are valid", "i need to make one more",
+			})
+		}
 		knownPlanning = knownPlanning || (containsAny(probe, []string{"证据", "检索"}) &&
 			containsAny(probe, []string{
 				"现在来回答", "现直接回答", "以下直接回答", "让我直接给出答案", "现在进行深度阅读", "已有足够证据", "已获取全部",
@@ -6441,7 +6548,10 @@ func stripStandaloneInternalPlanningParagraphs(value string) string {
 		quotedOrCode := strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "```")
 		planning := !quotedOrCode && containsAnyPrefix(probe, []string{
 			"i now see", "now i have", "let me ", "i need to ", "i will rewrite",
+			"i'll check the output", "i will check the output", "looking back at the actual tool results",
 			"the validation ", "the tools ", "from the earlier retrieval", "from the earlier grep",
+			"the knowledge_search call returned", "the knowledge search call returned",
+			"since i've exhausted", "since i have exhausted", "wait, i cannot", "i'll call ",
 			"现在两个问题的证据", "从第一个结果可以看到", "现在我有完整", "现在我已获得", "现在我已阅读", "我已深入阅读", "我已经深入阅读",
 			"让我给出最终回答", "让我用", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "根据当前轮检索结果", "以下是替换后的答案",
 		})

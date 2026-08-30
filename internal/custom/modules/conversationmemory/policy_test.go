@@ -174,6 +174,31 @@ func TestSourceConstrainedExplanationIsANarrowCurrentTurn(t *testing.T) {
 	}
 }
 
+func TestSelfContainedDistinctionAndSynthesisExposeEvidenceTopics(t *testing.T) {
+	distinction := "团队需要区分甲方案、乙方案和丙方案。请按适用任务解释三者并给出引用。"
+	if !IsComparisonTurn(distinction) {
+		t.Fatal("区分多个对象未被识别为比较请求")
+	}
+	if got, want := RequiredEvidenceTopics(distinction), []string{"甲方案", "乙方案", "丙方案"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("distinction topics = %#v, want %#v", got, want)
+	}
+	if !ShouldIsolateSelfContainedEvidenceHistory(distinction) {
+		t.Fatal("self-contained distinction retained unrelated history")
+	}
+
+	synthesis := "生成最终提纲，包含能力分类、渐进式加载、读取与执行的区别、三种模式的选用原则，以及当前行动边界。需要知识依据的段落给出引用。"
+	if got, want := RequiredEvidenceTopics(synthesis), []string{"能力分类", "渐进式加载", "读取与执行的区别", "三种模式的选用原则"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("synthesis topics = %#v, want %#v", got, want)
+	}
+	if !ShouldIsolateSelfContainedEvidenceHistory(synthesis) {
+		t.Fatal("self-contained synthesis retained unrelated history")
+	}
+	restore := "恢复最早的目标，生成最终提纲，包含能力分类、渐进式加载和三种模式，并给出引用。"
+	if ShouldIsolateSelfContainedEvidenceHistory(restore) {
+		t.Fatal("history-dependent restoration request lost its conversation history")
+	}
+}
+
 func TestSelectedKnowledgeEvidenceDirectiveIsScopedAndBounded(t *testing.T) {
 	query := "比较三类Skill的适用场景，不确定的实现细节要标注。"
 	got := AppendSelectedKnowledgeEvidenceDirective(query, query, true)
@@ -209,6 +234,7 @@ func TestTerminalGenerationDirectiveCarriesFinalLengthAndDeferredRules(t *testin
 		"[WEKNORA_TERMINAL_RESPONSE_CHECK]",
 		"不得超过700个中文字符",
 		"不得回答历史问题",
+		"同一事实不得重复引用",
 		"[WEKNORA_TERMINAL_OUTPUT_CHECK]",
 		"每个未知项都保持未知",
 		"第二段必须另起一段并以“待确认：”开头",
@@ -2665,6 +2691,26 @@ func TestStripInternalPlanningPreambleRemovesObservedTerminalNarration(t *testin
 	want := "已确认：项目预算220万元。\n\n待上述条件确认后再确定，暂不推荐最终方式。"
 	if got := StripInternalPlanningPreamble(middle); got != want {
 		t.Fatalf("middle retrieval plan survived: %q", got)
+	}
+
+	toolNarration := `Looking back at the actual tool results from this turn, the retrieval call returned the needed passages.
+
+The chunk (ID: example) contains the relevant descriptions.
+
+Let me pick out the exact content.
+
+The content clearly states:
+- 甲方案适合稳定问答
+- 乙方案适合多步任务
+
+Since I've exhausted the retrieval budget, I need to produce the best answer possible.
+
+**甲方案**：适合稳定问答。<src id="S1" />
+
+**乙方案**：适合多步任务。<src id="S2" />`
+	wantToolAnswer := "**甲方案**：适合稳定问答。<src id=\"S1\" />\n\n**乙方案**：适合多步任务。<src id=\"S2\" />"
+	if got := StripInternalPlanningPreamble(toolNarration); got != wantToolAnswer {
+		t.Fatalf("tool-result planning narration survived: %q", got)
 	}
 }
 

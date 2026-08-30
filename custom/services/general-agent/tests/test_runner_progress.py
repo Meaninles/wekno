@@ -479,6 +479,9 @@ class RunnerProgressTest(unittest.TestCase):
             "好的，所有必要证据都已从当前轮检索获取。现在来回答用户的两个问题。\n\n正式回答。",
             "用户要求先停止比较，我已有足够证据。让我直接给出答案。\n\n正式回答。",
             "已获取全部所需证据，现直接回答。\n\n正式回答。",
+            "Looking back at the actual tool results from this turn, I need to extract the evidence.\n\n正式回答。",
+            "I'll check the output file for the search results.\n\n正式回答。",
+            "Since I've exhausted the retrieval budget, I need to produce the best answer possible.\n\n正式回答。",
         ):
             self.assertIn(
                 "current_turn_internal_planning_exposed",
@@ -2307,6 +2310,9 @@ EOF""",
         self.assertIn("Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired", prompt)
         self.assertIn("Do not carry forward an earlier turn's output format", prompt)
         self.assertLess(prompt.index("回答当前问题"), prompt.index("OLD-MARKER"))
+        self.assertGreater(prompt.rindex("回答当前问题"), prompt.rindex("OLD-MARKER"))
+        self.assertTrue(prompt.rstrip().endswith("</current_request_checkpoint>"))
+        self.assertIn("Answer this current request only", prompt)
 
     def test_build_system_prompt_prepends_builtin_environment_safety_policy(self):
         for agent_type in ("general-agent", "document-processing-agent", "data-analysis", "table-analysis"):

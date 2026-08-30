@@ -106,6 +106,26 @@ func TestApplyGeneralAgentHistoryPolicyClearsEveryHistoryChannelForNarrowEvidenc
 	}
 }
 
+func TestApplyGeneralAgentHistoryPolicyIsolatesOnlySelfContainedMultiTopicEvidence(t *testing.T) {
+	history := []ChatHistoryMessage{
+		{Role: "user", Content: "上一轮讨论另一个管理入口。"},
+		{Role: "assistant", Content: "上一轮管理入口回答。"},
+	}
+	archive := "earlier_user_message_01: 更早的无关主题。"
+	query := "团队需要区分甲方案、乙方案和丙方案。请按适用任务解释三者并给出引用。"
+
+	gotHistory, gotArchive := applyGeneralAgentHistoryPolicy(query, history, archive)
+	if len(gotHistory) != 0 || gotArchive != "" {
+		t.Fatalf("self-contained distinction retained stale context: history=%#v archive=%q", gotHistory, gotArchive)
+	}
+
+	restore := "恢复最早的讨论，生成最终提纲，包含甲方案、乙方案和丙方案，并给出引用。"
+	gotHistory, gotArchive = applyGeneralAgentHistoryPolicy(restore, history, archive)
+	if len(gotHistory) != 1 || gotHistory[0].Role != "user" || gotArchive != archive {
+		t.Fatalf("history-dependent synthesis lost user context: history=%#v archive=%q", gotHistory, gotArchive)
+	}
+}
+
 func TestApplyGeneralAgentHistoryPolicyKeepsArchiveForHistoryDependentAudit(t *testing.T) {
 	history := []ChatHistoryMessage{
 		{Role: "user", Content: "预算改为220万元。"},

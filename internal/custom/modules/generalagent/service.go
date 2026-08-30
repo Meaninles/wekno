@@ -599,6 +599,9 @@ func applyGeneralAgentHistoryPolicy(
 	if conversationmemory.RequiresAuthoritativeUserHistory(query) {
 		history = userOnlyGeneralAgentHistory(history)
 	}
+	if conversationmemory.ShouldIsolateSelfContainedEvidenceHistory(query) {
+		return nil, ""
+	}
 	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(query) {
 		// A self-contained evidence detour must not retain either recent Q&A or
 		// the older user-only archive. Keeping the archive while dropping recent

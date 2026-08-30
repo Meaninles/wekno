@@ -4666,6 +4666,14 @@ def transcript_latest_assistant_answer(transcript_path: str) -> str:
 
 
 CANONICAL_SOURCE_CITATION_RE = re.compile(r'<src id="S[1-9][0-9]*"\s*/>')
+CODE_WRAPPED_SOURCE_CITATION_RE = re.compile(
+    r'(?<!`)`\s*(<src id="(S[1-9][0-9]*)"\s*/>)\s*`(?!`)'
+)
+CITATION_SYNTAX_EXPLANATION_RE = re.compile(
+    r"(?:cite_exactly|引用(?:句柄|标签|语法|格式)|"
+    r"(?:source|citation)\s+(?:handle|tag|syntax|format))",
+    re.IGNORECASE,
+)
 TURN_RESPONSE_MAX_CHARS_RE = re.compile(r"不得超过\s*([1-9][0-9]{1,4})\s*个(?:中文)?字符")
 REQUIRED_EVIDENCE_TOPICS_RE = re.compile(
     r"^\[WEKNORA_REQUIRED_EVIDENCE_TOPICS\](\[.*\])\s*$",
@@ -4683,7 +4691,7 @@ FRESH_EVIDENCE_CONTRACT_MARKER = "本轮明确要求文档依据或引用"
 TURN_EXECUTION_CONTRACT_MARKER = "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
 DEFERRED_COMPARISON_CONTRACT_MARKER = "用户明确要求不作最终选择"
 # Eval mode may spend at most one same-session continuation to obtain evidence,
-# followed by one isolated, tool-free terminal rewrite. Production never enables
+# followed by bounded isolated, tool-free terminal rewrites. Production never enables
 # this path, so ordinary requests remain single-pass. Keeping the rewrite out of
 # the already large agent transcript prevents a rejected draft, tool diagnostics
 # and repeated retrieval results from crowding the actual answer out of context.
@@ -4713,6 +4721,7 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"the\s+evidence\s+situation\s+is|i\s+cannot\s+make\s+more\s+tool\s+calls|"
     r"let\s+me\s+(?:think|check)|the\s+validation\s+says|"
     r"(?:好的[，,]?\s*)?.{0,80}runtime_response_contract|"
+    r"现在我已(?:检索|查询|搜索|查找)(?:了)?(?:当前)?(?:知识库|资料|文档)|"
     r"现在我已获得|已(?:获取|获得)全部所需证据|"
     r"现在再来确认.{0,100}(?:已在前面的chunk中获取|现在我有完整的证据)|"
     r"现在我有完整的证据来回答|"
@@ -4727,6 +4736,50 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+def normalize_known_source_citation_markup(
+    answer: str,
+    evidence_by_id: dict[str, str] | None,
+) -> str:
+    """Expose known source handles that a model accidentally formatted as code.
+
+    The Go citation projector intentionally ignores Markdown code because code
+    examples can contain source-handle syntax.  In an opted-in Eval run we can
+    safely unwrap an exact, current-turn handle while preserving fenced examples,
+    unknown handles and prose that explicitly explains citation syntax.
+    """
+
+    value = answer or ""
+    known_ids = {
+        str(citation_id)
+        for citation_id in (evidence_by_id or {})
+        if re.fullmatch(r"S[1-9][0-9]*", str(citation_id))
+    }
+    if not value or not known_ids:
+        return value
+
+    fence_starts = [
+        match.start()
+        for match in re.finditer(r"(?m)^[ \t]*(?:```|~~~)", value)
+    ]
+
+    def replacement(match: re.Match[str]) -> str:
+        citation_id = match.group(2)
+        if citation_id not in known_ids:
+            return match.group(0)
+        if sum(start < match.start() for start in fence_starts) % 2:
+            return match.group(0)
+        line_start = value.rfind("\n", 0, match.start()) + 1
+        line_end = value.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(value)
+        local_context = value[line_start:line_end]
+        if CITATION_SYNTAX_EXPLANATION_RE.search(local_context):
+            return match.group(0)
+        return f'<src id="{citation_id}" />'
+
+    return CODE_WRAPPED_SOURCE_CITATION_RE.sub(replacement, value)
 DEFERRED_RANKING_TERMS = (
     "风险最低",
     "风险较低",
@@ -4840,6 +4893,49 @@ def required_evidence_searches(query: str) -> list[str]:
 INLINE_IDENTIFIER_RE = re.compile(r"`([^`\r\n]{1,96})`")
 STRUCTURED_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)(.+?)\s*$")
 MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
+USER_NAMED_SET_INTENT_RE = re.compile(
+    r"(?:选用原则|选择原则|选用|选择|适用|分别|各自|比较|对比|区别|汇总|总结|提纲|"
+    r"selection|choose|compare|difference|outline|summary)",
+    re.IGNORECASE,
+)
+USER_NAMED_SET_VERB_RE = re.compile(
+    r"(?:区分|比较|对比|包括|包含|分为|分别是|列出|"
+    r"distinguish|compare|include|contain|consist\s+of|list)\s*[:：]?\s*(.+)$",
+    re.IGNORECASE,
+)
+USER_NAMED_SET_TRAILING_RE = re.compile(
+    r"(?:的)?(?:适用任务|适用场景|选用原则|选择原则|区别|差异|优缺点|特点|分别是什么)$",
+    re.IGNORECASE,
+)
+USER_NAMED_SET_SUBJECTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("智能体", ("智能体", "agent")),
+    ("Skill", ("skill", "技能")),
+    ("工具", ("工具", "tool")),
+)
+USER_NAMED_SET_COUNTS = {
+    "2": 2,
+    "二": 2,
+    "两": 2,
+    "two": 2,
+    "3": 3,
+    "三": 3,
+    "three": 3,
+    "4": 4,
+    "四": 4,
+    "four": 4,
+    "5": 5,
+    "五": 5,
+    "five": 5,
+    "6": 6,
+    "六": 6,
+    "six": 6,
+    "7": 7,
+    "七": 7,
+    "seven": 7,
+    "8": 8,
+    "八": 8,
+    "eight": 8,
+}
 
 
 def required_inline_identifiers(query: str) -> list[str]:
@@ -4885,6 +4981,153 @@ def required_inline_identifiers(query: str) -> list[str]:
 def missing_inline_identifiers(answer: str, identifiers: list[str]) -> list[str]:
     value = (answer or "").casefold()
     return [identifier for identifier in identifiers if identifier.casefold() not in value]
+
+
+def _current_user_referenced_set_specs(query: str) -> list[tuple[str, tuple[str, ...], int | None]]:
+    """Identify aggregate sets that the current request refers back to."""
+
+    value = original_query_without_runtime_contract(query)
+    lowered = value.casefold()
+    if not USER_NAMED_SET_INTENT_RE.search(lowered):
+        return []
+
+    specs: list[tuple[str, tuple[str, ...], int | None]] = []
+    for subject, aliases in USER_NAMED_SET_SUBJECTS:
+        alias_pattern = "(?:" + "|".join(re.escape(alias) for alias in aliases) + ")"
+        if not re.search(alias_pattern, lowered, re.IGNORECASE):
+            continue
+        count_match = re.search(
+            rf"(?P<count>[2-8二两三四五六七八]|two|three|four|five|six|seven|eight)"
+            rf"\s*(?:(?:种|类|个)\s*[^，,。！？!?；;\n]{{0,12}}{alias_pattern}|\s+{alias_pattern}s?)",
+            lowered,
+            re.IGNORECASE,
+        )
+        pronoun_match = re.search(
+            rf"(?:这些|上述|前述|前面提到的|之前提到的|刚才提到的|"
+            rf"these|those|above|previously\s+mentioned)\s*[^，,。！？!?；;\n]{{0,12}}{alias_pattern}",
+            lowered,
+            re.IGNORECASE,
+        )
+        if not count_match and not pronoun_match:
+            continue
+        expected_count = (
+            USER_NAMED_SET_COUNTS.get(count_match.group("count").casefold())
+            if count_match
+            else None
+        )
+        specs.append((subject, aliases, expected_count))
+    return specs
+
+
+def _named_items_from_user_clause(
+    clause: str,
+    aliases: tuple[str, ...],
+    expected_count: int | None,
+) -> list[str]:
+    """Extract one explicit enumeration without inferring names from semantics."""
+
+    lowered = clause.casefold()
+    if not any(alias.casefold() in lowered for alias in aliases):
+        return []
+
+    tails: list[str] = []
+    verb_match = USER_NAMED_SET_VERB_RE.search(clause)
+    if verb_match:
+        prefix = clause[max(0, verb_match.start() - 4):verb_match.start()]
+        if not re.search(r"(?:不要|不必|无需|禁止)\s*$", prefix):
+            tails.append(verb_match.group(1))
+    colon_parts = re.split(r"[:：]", clause, maxsplit=1)
+    if len(colon_parts) == 2 and any(alias.casefold() in colon_parts[0].casefold() for alias in aliases):
+        tails.append(colon_parts[1])
+
+    for raw_tail in tails:
+        tail = re.split(
+            r"[，,](?=(?:并且?|同时|然后|后续|但|其中|对应|用于|以便|请))",
+            raw_tail,
+            maxsplit=1,
+        )[0]
+        raw_items = re.split(r"\s*(?:、|，|,|以及|和|与|及)\s*", tail)
+        items: list[str] = []
+        seen: set[str] = set()
+        for raw_item in raw_items:
+            item = raw_item.strip().strip("`*_#'\"“”‘’()（）[]【】<>《》")
+            item = USER_NAMED_SET_TRAILING_RE.sub("", item).strip()
+            canonical = item.casefold()
+            if (
+                len(item) < 2
+                or len(item) > 48
+                or canonical in {"什么", "哪些", "哪几种", "what", "which"}
+                or canonical in seen
+            ):
+                continue
+            items.append(item)
+            seen.add(canonical)
+        if 2 <= len(items) <= 8 and (expected_count is None or len(items) == expected_count):
+            return items
+    return []
+
+
+def referenced_user_named_sets(payload: ChatPayload) -> list[dict[str, Any]]:
+    """Resolve current aggregate references from prior user messages only.
+
+    Assistant text is deliberately excluded: a wrong earlier answer must never
+    become the expected set for a later turn.  The newest explicit user-authored
+    enumeration wins independently for each referenced subject.
+    """
+
+    specs = _current_user_referenced_set_specs(payload.query or "")
+    if not specs:
+        return []
+    user_messages = [
+        original_query_without_runtime_contract(str(message.content or ""))
+        for message in payload.history
+        if str(message.role or "").strip().lower() == "user"
+        and str(message.content or "").strip()
+    ]
+    resolved: list[dict[str, Any]] = []
+    for subject, aliases, expected_count in specs:
+        for message in reversed(user_messages):
+            clauses = [
+                clause.strip()
+                for clause in re.split(r"[。！？!?；;\r\n]+", message)
+                if clause.strip()
+            ]
+            items = next(
+                (
+                    found
+                    for clause in reversed(clauses)
+                    if (found := _named_items_from_user_clause(clause, aliases, expected_count))
+                ),
+                [],
+            )
+            if items:
+                resolved.append({"subject": subject, "items": items})
+                break
+    return resolved
+
+
+def referenced_user_named_items(payload: ChatPayload) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for named_set in referenced_user_named_sets(payload):
+        for raw_item in named_set.get("items") or []:
+            item = str(raw_item or "").strip()
+            canonical = item.casefold()
+            if item and canonical not in seen:
+                items.append(item)
+                seen.add(canonical)
+    return items
+
+
+def missing_referenced_user_named_items(answer: str, items: list[str]) -> list[str]:
+    """Match user-authored names while allowing harmless display variants."""
+
+    def normalized(value: str) -> str:
+        compact = re.sub(r"[\s*_`\-]+", "", value or "").casefold()
+        return compact.replace("技能", "skill")
+
+    normalized_answer = normalized(answer)
+    return [item for item in items if normalized(item) not in normalized_answer]
 
 
 def query_requests_structured_evidence_coverage(query: str) -> bool:
@@ -5381,7 +5624,7 @@ def turn_contract_issues(
     """Return deterministic violations of the trusted current-turn contract."""
 
     query = payload.query or ""
-    value = (answer or "").strip()
+    value = normalize_known_source_citation_markup(answer, evidence_by_id).strip()
     if not value:
         if TURN_EXECUTION_CONTRACT_MARKER not in query:
             return []
@@ -5523,6 +5766,25 @@ def turn_contract_issues(
             }
         )
 
+    referenced_items = (
+        referenced_user_named_items(payload)
+        if TURN_EXECUTION_CONTRACT_MARKER in query
+        else []
+    )
+    missing_referenced_items = missing_referenced_user_named_items(value, referenced_items)
+    if missing_referenced_items:
+        issues.append(
+            {
+                "code": "current_turn_referenced_user_items_incomplete",
+                "missing_identifiers": missing_referenced_items,
+                "required_action": (
+                    "Rewrite the complete answer and preserve every member of the latest explicit set named by the "
+                    "user that the current request refers to. Use those user-authored names rather than substituting "
+                    "a neighboring category found in retrieval or an earlier assistant answer."
+                ),
+            }
+        )
+
     missing_structured_claims = (
         structured_factual_segments_without_citation(value)
         if query_requests_structured_evidence_coverage(query)
@@ -5658,8 +5920,8 @@ def should_enable_turn_contract_runtime_repair(payload: ChatPayload) -> bool:
     OpenAI-compatible gateways acknowledge an SDK end-turn without honoring a
     blocking Stop-hook continuation. The sidecar therefore validates the
     terminal candidate itself, permits one evidence-only continuation when the
-    turn produced no evidence, and performs at most one isolated terminal
-    rewrite outside the tool transcript.
+    turn produced no evidence, and performs bounded isolated terminal rewrites
+    outside the tool transcript.
     """
 
     return bool(
@@ -6028,6 +6290,7 @@ async def run_turn_contract_isolated_rewrite(
 ) -> str:
     """Compile one clean terminal answer outside the tool-using transcript."""
 
+    referenced_named_sets = referenced_user_named_sets(payload)
     context = {
         "当前请求": original_query_without_runtime_contract(payload.query),
         "仅用于指代解析的用户历史": compact_turn_contract_user_history(payload),
@@ -6039,6 +6302,8 @@ async def run_turn_contract_isolated_rewrite(
             evidence_by_id,
         ),
     }
+    if referenced_named_sets:
+        context["当前请求所指代的用户原始命名集合"] = referenced_named_sets
     system = (
         "你是 WeKnora 的终稿编译器，只负责把当前请求、用户历史事实和本轮证据整理成最终回答。"
         "不得调用工具，不得补充证据中没有的产品事实，不得采用历史助手回答作为事实。"
@@ -6058,11 +6323,13 @@ async def run_turn_contract_isolated_rewrite(
         "请重写一份完整、直接、可独立阅读的最终回答，并修复上下文列出的结构问题。\n"
         + length_instruction
         + "事实只能来自可引用依据；每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
+        "cite_exactly 是最终输出标记，不是代码：必须原样裸写，不得放进反引号、引号、括号或代码块。"
         "不得编造或改写引用句柄。可引用依据非空时，不得声称本轮证据为空、未检索或仍需检索；"
         "若某个具体事实确实没有直接证据，只对该事实简短标明未知或缺口，不要叙述检索过程。"
         "不得输出引用占位符、检索诊断、工具名、分片标识或类似‘需要引用’的编辑备注。\n"
         "逐项覆盖当前请求点名的对象与代码标识，保留用户明确的行动边界和篇幅限制。"
-        "用户历史仅用于解析当前请求明确指代的旧目标和持续边界。"
+        "用户历史仅用于解析当前请求明确指代的旧目标和持续边界；若提供了用户原始命名集合，"
+        "必须逐项保留其中的名称，不得用检索结果中的相邻类别替换。"
         "Context 中的所有字段名都属于内部结构，最终答案不得引用或提及这些字段名。\n"
         "返回且仅返回最终 Markdown 正文。\n\nContext:\n"
         + json.dumps(context, ensure_ascii=False)
@@ -7730,6 +7997,13 @@ class GeneralAgentRunner:
                     evidence_by_id = turn_contract_state.get(TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY)
                     if not isinstance(evidence_by_id, dict):
                         evidence_by_id = {}
+                    normalized_candidate = normalize_known_source_citation_markup(
+                        contract_candidate,
+                        evidence_by_id,
+                    )
+                    if normalized_candidate != contract_candidate:
+                        turn_contract_state["turn_contract_citation_markup_normalized"] = True
+                        contract_candidate = normalized_candidate
                     contract_issues = turn_contract_issues(
                         self.payload,
                         contract_candidate,
@@ -7842,6 +8116,13 @@ class GeneralAgentRunner:
                         except Exception:
                             rewritten = ""
                         if rewritten:
+                            normalized_rewrite = normalize_known_source_citation_markup(
+                                rewritten,
+                                evidence_by_id,
+                            )
+                            if normalized_rewrite != rewritten:
+                                turn_contract_state["turn_contract_citation_markup_normalized"] = True
+                                rewritten = normalized_rewrite
                             turn_contract_rewritten_answer = rewritten
                             terminal_result_answer = rewritten
                             final_candidate_parts = [rewritten]
@@ -7981,6 +8262,23 @@ class GeneralAgentRunner:
                 answer = "".join(current_segment_delta_parts).strip()
             if not answer:
                 answer = "".join(all_delta_parts).strip()
+        if turn_contract_runtime_repair_enabled and answer:
+            final_evidence_by_id = turn_contract_state.get(
+                TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY
+            )
+            if not isinstance(final_evidence_by_id, dict):
+                final_evidence_by_id = {}
+            normalized_answer = normalize_known_source_citation_markup(
+                answer,
+                final_evidence_by_id,
+            )
+            if normalized_answer != answer:
+                turn_contract_state["turn_contract_citation_markup_normalized"] = True
+                answer = normalized_answer
+        if prompt_observation:
+            prompt_observation["turn_contract_citation_markup_normalized"] = bool(
+                turn_contract_state.get("turn_contract_citation_markup_normalized")
+            )
         if (
             data_analysis_final_answer_mode
             or passive_terminal_delivery_mode

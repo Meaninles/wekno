@@ -47,6 +47,7 @@ from app.runner import (  # noqa: E402
     judge_issues,
     materialize_professional_skills,
     mcp_tool_result,
+    normalize_known_source_citation_markup,
     normalize_professional_skill_path,
     original_input_files_xml,
     original_input_failures_xml,
@@ -60,6 +61,7 @@ from app.runner import (  # noqa: E402
     parse_mcp_tool_response_payload,
     result_message_text,
     record_turn_evidence,
+    referenced_user_named_sets,
     retrieval_budget_pre_tool_hook_factory,
     retrieval_tool_budget,
     runtime_summary,
@@ -277,6 +279,119 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertNotIn('"current_turn_evidence"', captured["prompt"])
         self.assertNotIn("准备继续检索", captured["prompt"])
         self.assertIn("不超过 480 个字符为目标", captured["prompt"])
+        self.assertIn("不得放进反引号、引号、括号或代码块", captured["prompt"])
+
+    def test_known_code_wrapped_source_handles_are_unwrapped_without_changing_examples(self):
+        answer = (
+            '事实一。`<src id="S1" />`\n'
+            '未知句柄。`<src id="S9" />`\n'
+            '引用格式示例：`<src id="S2" />`\n'
+            '```text\n`<src id="S3" />`\n```'
+        )
+
+        normalized = normalize_known_source_citation_markup(
+            answer,
+            {"S1": "证据一", "S2": "证据二", "S3": "证据三"},
+        )
+
+        self.assertIn('事实一。<src id="S1" />', normalized)
+        self.assertIn('未知句柄。`<src id="S9" />`', normalized)
+        self.assertIn('引用格式示例：`<src id="S2" />`', normalized)
+        self.assertIn('```text\n`<src id="S3" />`\n```', normalized)
+
+    def test_turn_contract_preserves_user_named_sets_across_long_history(self):
+        history = [
+            ChatHistoryMessage(
+                role="user",
+                content="比较轻量Skill、预加载运行时Skill和专业Skill的适用场景。",
+            ),
+            ChatHistoryMessage(
+                role="assistant",
+                content="错误旧回答把三类写成内置、外置和临时Skill。",
+            ),
+            ChatHistoryMessage(
+                role="user",
+                content="团队还要区分快速问答、RAG推理和通用智能体。请解释三者。",
+            ),
+            ChatHistoryMessage(
+                role="assistant",
+                content="错误旧回答列成快速问答、简单对话和通用智能体。",
+            ),
+        ]
+        payload = ChatPayload(
+            run_id="run-user-set-reference",
+            session_id="session-user-set-reference",
+            assistant_message_id="assistant-user-set-reference",
+            query=(
+                "生成最终提纲，包含三类Skill和三种内置智能体的选用原则。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            history=history,
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        self.assertEqual(
+            referenced_user_named_sets(payload),
+            [
+                {"subject": "智能体", "items": ["快速问答", "RAG推理", "通用智能体"]},
+                {
+                    "subject": "Skill",
+                    "items": ["轻量Skill", "预加载运行时Skill", "专业Skill"],
+                },
+            ],
+        )
+        issues = turn_contract_issues(
+            payload,
+            "轻量技能、预加载运行时技能、专业技能；快速问答、简单对话、通用智能体。",
+        )
+        referent_issue = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_referenced_user_items_incomplete"
+        )
+        self.assertEqual(referent_issue["missing_identifiers"], ["RAG推理"])
+        self.assertEqual(
+            turn_contract_issues(
+                payload,
+                "轻量技能、预加载运行时技能、专业技能；快速问答、RAG 推理、通用智能体。",
+            ),
+            [],
+        )
+
+    def test_user_named_set_resolution_ignores_assistant_only_and_unrelated_history(self):
+        assistant_only = ChatPayload(
+            run_id="run-assistant-set",
+            session_id="session-assistant-set",
+            assistant_message_id="assistant-assistant-set",
+            query="汇总三种内置智能体。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+            history=[
+                ChatHistoryMessage(
+                    role="assistant",
+                    content="三种智能体是快速问答、错误类别和通用智能体。",
+                )
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        self.assertEqual(referenced_user_named_sets(assistant_only), [])
+        self.assertNotIn(
+            "current_turn_referenced_user_items_incomplete",
+            {issue["code"] for issue in turn_contract_issues(assistant_only, "概括说明。")},
+        )
+
+        unrelated = assistant_only.model_copy(
+            update={
+                "query": "解释数据库连接池。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+                "history": [
+                    ChatHistoryMessage(
+                        role="user",
+                        content="区分快速问答、RAG推理和通用智能体。",
+                    )
+                ],
+            }
+        )
+        self.assertEqual(referenced_user_named_sets(unrelated), [])
 
     def test_turn_contract_detects_chinese_retrieval_budget_narration(self):
         payload = ChatPayload(
@@ -296,6 +411,14 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertIn(
             "current_turn_internal_planning_exposed",
             {issue["code"] for issue in issues},
+        )
+        retrieved = turn_contract_issues(
+            payload,
+            "现在我已检索了知识库。下面直接回答用户问题。",
+        )
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in retrieved},
         )
 
     def test_turn_contract_detects_internal_rewrite_field_leak(self):

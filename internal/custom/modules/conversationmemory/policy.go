@@ -32,7 +32,7 @@ var exactExternalReferencePattern = regexp.MustCompile(
 )
 
 var uncertainParentheticalPattern = regexp.MustCompile(
-	`（[^（）]*(?:待确认|待核实|未提供|未知|尚未)[^（）]*）|\([^()]*(?:待确认|待核实|未提供|未知|尚未)[^()]*\)`,
+	`（[^（）]*(?:待确认|待核实|待确定|未确定|未提供|未知|尚未)[^（）]*）|\([^()]*(?:待确认|待核实|待确定|未确定|未提供|未知|尚未)[^()]*\)`,
 )
 
 var epistemicParentheticalPattern = regexp.MustCompile(
@@ -362,14 +362,19 @@ func IsComparisonTurn(query string) bool {
 func IsNarrowAnswerTurn(query string) bool {
 	value := strings.ToLower(strings.TrimSpace(query))
 	if containsAny(value, []string{
-		"只回答", "仅回答", "只答", "仅答", "仅需回答", "answer only",
+		"只回答", "仅回答", "只答", "仅答", "仅需回答", "只写", "仅写", "answer only",
 	}) {
 		return true
 	}
 	// A user may express the same boundary by constraining both the source and
-	// the answering action, e.g. “只根据已选制度回答一个旁支问题”.
+	// the answering action, e.g. “只根据已选制度回答一个旁支问题”.  Chinese
+	// users commonly use 说明/列出/概括 instead of the literal verb 回答; those
+	// verbs carry the same current-turn scope and must not leave stale history
+	// authoritative merely because of a surface-form difference.
 	return containsAny(value, []string{"只根据", "仅根据", "只依据", "仅依据"}) &&
-		containsAny(value, []string{"回答", "答复", "作答"})
+		containsAny(value, []string{
+			"回答", "答复", "作答", "说明", "列出", "写出", "概括", "总结", "介绍", "解释",
+		})
 }
 
 // ShouldIsolateNarrowEvidenceHistory identifies a self-contained, explicitly
@@ -985,6 +990,126 @@ func RequiresFreshEvidenceTurn(query string) bool {
 	})
 }
 
+// MentionsKnowledgeScope reports an explicit user reference to a knowledge
+// base, document, policy, source or citation.  Callers use it to respect an
+// agent's "retrieve only when mentioned" setting.
+func MentionsKnowledgeScope(query string) bool {
+	return containsAny(strings.ToLower(strings.TrimSpace(query)), []string{
+		"知识库", "已选文档", "当前文档", "文档中", "资料中", "制度", "条款", "依据", "引用",
+		"来源", "knowledge base", "selected document", "documentation", "according to", "citation", "source",
+	})
+}
+
+// RequiresSelectedKnowledgeEvidenceTurn identifies a substantive information
+// request whose answer should be grounded in the knowledge scope already
+// selected by the user or agent configuration.  It deliberately excludes
+// state-only, creative and explicitly no-retrieval turns.  The caller still
+// decides whether a selected knowledge scope actually exists; this function
+// never invents or broadens that scope.
+func RequiresSelectedKnowledgeEvidenceTurn(query string) bool {
+	value := strings.ToLower(strings.TrimSpace(query))
+	if value == "" || IsStateOnlyTurn(value) {
+		return false
+	}
+	if containsAny(value, []string{
+		"不要检索", "无需检索", "不需要检索", "不必检索", "不要查知识库", "无需查知识库",
+		"只根据对话", "仅根据对话", "without retrieval", "do not retrieve",
+	}) {
+		return false
+	}
+	if RequiresFreshEvidenceTurn(value) {
+		return true
+	}
+	return containsAny(value, []string{
+		"知识库", "已选文档", "当前文档", "制度", "条款", "产品能力", "资料中", "文档中",
+		"是什么", "有哪些", "分别是什么", "说明", "解释", "比较", "对比", "区别", "定义",
+		"适用场景", "适用任务", "机制", "原则", "条件", "流程", "范围", "管理入口", "接口",
+		"according to", "knowledge base", "documentation", "compare", "explain", "what is",
+	})
+}
+
+// AppendSelectedKnowledgeEvidenceDirective makes a selected-knowledge turn
+// retrieve current, citeable evidence instead of treating an older assistant
+// answer as evidence.  The directive is runtime-only and is added only by a
+// caller that has already verified the effective knowledge scope is non-empty.
+// It intentionally contains the same stable marker consumed by the general
+// agent sidecar's bounded evidence precondition.
+func AppendSelectedKnowledgeEvidenceDirective(content, originalQuery string, hasSelectedKnowledge bool) string {
+	if !hasSelectedKnowledge || !RequiresSelectedKnowledgeEvidenceTurn(originalQuery) ||
+		RequiresFreshEvidenceTurn(originalQuery) {
+		return strings.TrimSpace(content)
+	}
+	block := `[WEKNORA_SELECTED_KNOWLEDGE_EVIDENCE_V1]
+本轮明确要求文档依据或引用：用户已经选择了知识范围，当前请求中的知识性结论必须以本轮重新取得的可引用证据为准。
+- 先用当前问题的一次聚焦检索取得最小充分证据；只有关键对象仍缺证据时再做一次补充检索，不枚举整个知识库，不把历史回答当作本轮证据。
+- 最终回答只保留直接支持结论的最少引用；证据不足时明确说明缺口，不凭模型记忆补成产品事实。`
+	value := strings.TrimSpace(content)
+	if value == "" {
+		return block
+	}
+	return value + "\n\n<runtime_selected_knowledge_contract>\n" + block +
+		"\n</runtime_selected_knowledge_contract>"
+}
+
+// IsSynthesisTurn recognizes a request for a final or consolidated deliverable.
+// Such answers need more room than a focused lookup, but still benefit from an
+// explicit upper bound so long conversations do not produce a second full
+// transcript, duplicated source inventory, or repeated conclusion tables.
+func IsSynthesisTurn(query string) bool {
+	value := strings.ToLower(strings.TrimSpace(query))
+	return containsAny(value, []string{
+		"最终", "完整", "汇总", "总览", "总结", "提纲", "清单", "报告", "方案", "审计",
+		"final", "complete", "consolidated", "summary", "outline", "checklist", "report",
+	})
+}
+
+func currentTurnResponseLimit(query string) int {
+	switch {
+	case IsDeferredDecisionTurn(query) && IsComparisonTurn(query):
+		return 700
+	case IsNarrowAnswerTurn(query):
+		return 500
+	case IsStateAuditTurn(query) && IsStateOnlyTurn(query):
+		return 900
+	case IsStateOnlyTurn(query):
+		return 500
+	case userRequestsExpandedResponse(query):
+		return 0
+	case IsComparisonTurn(query):
+		return 900
+	case IsSynthesisTurn(query):
+		return 1600
+	case RequiresFreshEvidenceTurn(query):
+		return 900
+	case hasExplicitActionBoundaryInstruction(query):
+		return 600
+	case RequiresSelectedKnowledgeEvidenceTurn(query):
+		return 900
+	default:
+		return 0
+	}
+}
+
+func userRequestsExpandedResponse(query string) bool {
+	return containsAny(strings.ToLower(query), []string{
+		"详细展开", "尽量详细", "尽可能详细", "详尽", "长篇", "全文", "逐章", "逐节",
+		"不少于1000字", "不少于2000字", "不少于3000字", "以上字数",
+		"in detail", "detailed", "long-form", "at least 1000 words",
+	})
+}
+
+func hasExplicitActionBoundaryInstruction(query string) bool {
+	value := strings.ToLower(strings.TrimSpace(query))
+	return containsAny(value, []string{
+		"不执行", "不要执行", "不得执行", "不会执行", "没有执行授权", "尚未获得执行授权",
+		"不创建", "不要创建", "不得创建", "不会创建", "不修改", "不要修改", "不得修改", "不会修改",
+		"不发送", "不要发送", "不得发送", "不替我发送", "不要替我发送", "不代我发送", "不要代我发送",
+		"不安装", "不要安装", "不得安装", "不会安装", "不新增", "不要新增", "不得新增",
+		"不删除", "不要删除", "不得删除", "不进行新增、修改或删除",
+		"do not execute", "do not create", "do not modify", "do not send", "do not install", "read only",
+	})
+}
+
 // RequiresAuthoritativeUserHistory identifies turns where replaying a prior
 // model answer can directly undermine the current task. State audits rebuild
 // mutable facts from user statements, while fresh-evidence turns must retrieve
@@ -1028,15 +1153,15 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 - 若当前消息要求分别列出“已确认”和“待确认”，必须使用两个独立栏目并把每项只放在正确栏目；不得把待确认项列在已确认标题之下。
 - 保留来源主体和不确定性；较新的明确更新覆盖冲突的旧值。`
 	default:
-		rules = `直接、简洁地回答当前请求。只回答本轮所问内容，不延伸到旧话题或外部建议。不要暴露规划过程或工具叙述。保留精确的文档/条款标识，并只使用足以支持所问结论的最小证据集。`
+		rules = `直接、简洁地回答当前请求。只回答本轮所问内容，不延伸到旧话题或外部建议。不要暴露规划过程或工具叙述。保留精确的文档/条款标识，并只使用足以支持所问结论的最小证据集。用户在当前消息中点名的对象、字段和产品名称必须逐项覆盖并尽量原样书写；历史话题不得替代任何当前点名对象。`
 	}
 	if IsNarrowAnswerTurn(originalQuery) {
 		rules += `
-- 用户明确要求只回答点名的问题：每个问题只给一次直接结论及其必要依据，不增加总标题、重复释义、引用来源汇总、适用提示或额外分支；整篇不得超过500个中文字符。`
+- 用户明确要求只回答点名的问题：每个问题只给一次直接结论及其必要依据，不增加总标题、重复释义、引用来源汇总、适用提示或额外分支。`
 	}
 	if IsComparisonTurn(originalQuery) {
 		rules += `
-- 比较多个备选项时，每个备选项只写一个短段；不要先复述任务、逐字抄录制度、增加未要求的总结表或重复结论，整篇不得超过900个中文字符。`
+- 比较多个备选项时，每个备选项只写一个短段；不要先复述任务、逐字抄录制度、增加未要求的总结表或重复结论。`
 	}
 	if RequiresNamedTopicDefinitionCoverage(originalQuery) {
 		rules += `
@@ -1073,6 +1198,10 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 			}
 		}
 	}
+	if hasExplicitActionBoundaryInstruction(originalQuery) {
+		rules += `
+- 当前消息含有明确的行动禁令或授权边界：在回答中用一个简短“行动边界”句保留其持续含义，例如“不得执行/创建/修改/发送/安装”，不能只写成“尚未执行”或用能力介绍暗示已经采取行动。只保留用户实际声明的禁令，不扩大禁止范围。`
+	}
 	if IsDeferredDecisionTurn(originalQuery) && IsComparisonTurn(originalQuery) {
 		rules += `
 - 用户明确要求不作最终选择：只比较，不排名、不推荐、不暗示首选。
@@ -1087,7 +1216,12 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 - 每个备选项段固定采用“名称：制度条件为……<就近引用>；该直接条件在本项目中是否成立待确认。”这一中性结构。不要把项目事实或一个待确认项改写成制度条件。
 - 不得把某个具体备选项、子类型或相邻条款的条件转移成更宽泛类别的前提；任何“因某条件而不满足/不具备某选项”的判断都必须由该选项自己的直接证据支持。
 - 不要输出前言、总标题、序号、项目符号、分隔线、表格、二级条件清单、邀请/公开等额外分支、制度原文复述或重复总结。
-- 整篇不得超过700个中文字符；最后一句必须原样写明“待上述条件确认后再确定，暂不推荐最终方式”。`
+- 最后一句必须原样写明“待上述条件确认后再确定，暂不推荐最终方式”。`
+	}
+	limit := currentTurnResponseLimit(originalQuery)
+	if limit > 0 {
+		rules += fmt.Sprintf(`
+- 回答必须采用满足当前请求所需的最短完整表达，整篇不得超过%d个中文字符。优先删除前言、任务复述、来源汇总、重复表格、重复结论和未被请求的分支，不能通过删除用户点名的事实、对象或必要引用来凑长度。`, limit)
 	}
 	if ReferencesRecentUserState(originalQuery) {
 		if statement := latestReferencedUserState(priorUserStatements); statement != "" {
@@ -2533,9 +2667,10 @@ func stateDeltaStopGram(value string) bool {
 func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserStatements ...string) string {
 	value := strings.TrimSpace(answer)
 	query := strings.TrimSpace(originalQuery)
-	if value == "" || query == "" || !IsStateOnlyTurn(query) {
+	if value == "" || query == "" {
 		return value
 	}
+	stateOnly := IsStateOnlyTurn(query)
 	sources := make([]string, 0, len(priorUserStatements)+1)
 	for _, statement := range priorUserStatements {
 		if statement = strings.TrimSpace(statement); statement != "" {
@@ -2557,6 +2692,9 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 		{
 			enable: []string{
 				"不得创建或修改文件", "不得创建/修改文件", "不得创建文件", "不得修改文件",
+				"不要创建或修改文件", "不要创建/修改文件", "不要创建文件", "不要修改文件",
+				"不创建或修改文件", "不创建/修改文件", "不创建文件", "不修改文件",
+				"不会创建或修改文件", "不会创建/修改文件", "不会创建文件", "不会修改文件",
 			},
 			revoke: []string{
 				"允许创建或修改文件", "允许创建/修改文件", "可以创建或修改文件", "可以创建/修改文件",
@@ -2567,9 +2705,32 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 				"创建/修改文件", "创建或修改文件", "创建文件", "修改文件", "文件创建", "文件修改",
 				"创建/修改任何文件", "创建或修改任何文件", "创建任何文件", "修改任何文件",
 			},
-			durable:   []string{"不得创建", "不得修改", "不创建", "不修改", "不会创建", "不会修改", "不予执行"},
+			durable: []string{
+				"不得创建", "不得修改", "不要创建", "不要修改", "不创建", "不修改",
+				"不会创建", "不会修改", "未创建", "未修改", "不予执行",
+			},
 			label:     "文件权限",
 			operation: "不得创建或修改文件",
+		},
+		{
+			enable: []string{
+				"不得发送材料", "不要发送材料", "不发送材料", "不会发送材料",
+				"不要替我发送材料", "不得替我发送材料", "不替我发送材料",
+				"不要代我发送材料", "不得代我发送材料", "不代我发送材料",
+			},
+			revoke: []string{
+				"允许发送材料", "可以发送材料", "授权发送材料", "允许替我发送材料",
+				"可以替我发送材料", "授权替我发送材料", "不再禁止发送材料",
+			},
+			mentions: []string{
+				"发送材料", "发送任何材料", "替我发送", "代我发送", "替您发送", "代您发送",
+			},
+			durable: []string{
+				"不得发送", "不要发送", "不发送", "不会发送", "未发送",
+				"不得替", "不要替", "不替", "不会替", "不得代", "不要代", "不代", "不会代",
+			},
+			label:     "发送权限",
+			operation: "不得发送材料",
 		},
 		{
 			enable:   []string{"不得发起采购", "不得启动采购", "不发起采购", "不启动采购"},
@@ -2590,6 +2751,75 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 		},
 		{
 			enable: []string{
+				"不执行任何操作", "不要执行任何操作", "不得执行任何操作", "不会执行任何操作",
+				"不进行任何操作", "不要进行任何操作", "不得进行任何操作",
+			},
+			revoke: []string{
+				"允许执行操作", "可以执行操作", "授权执行操作", "允许进行操作", "可以进行操作",
+			},
+			mentions:  []string{"执行任何操作", "进行任何操作", "任何操作", "操作执行", "行动边界"},
+			durable:   []string{"不得执行", "不要执行", "不执行", "不会执行", "不得进行", "不要进行", "不进行"},
+			label:     "操作权限",
+			operation: "不得执行任何操作",
+		},
+		{
+			enable: []string{
+				"不得执行工具", "不要执行工具", "不执行工具", "不会执行工具", "只解释读取边界，不执行工具",
+			},
+			revoke:    []string{"允许执行工具", "可以执行工具", "授权执行工具", "不再禁止执行工具"},
+			mentions:  []string{"执行工具", "工具执行", "调用工具"},
+			durable:   []string{"不得执行", "不要执行", "不执行", "不会执行", "不调用工具", "仅解释", "只解释"},
+			label:     "工具权限",
+			operation: "不得执行工具",
+		},
+		{
+			enable: []string{
+				"不得执行脚本", "不要执行脚本", "不执行脚本", "不会执行脚本",
+				"当前没有执行授权", "没有执行授权", "尚未获得执行授权",
+			},
+			revoke:    []string{"允许执行脚本", "可以执行脚本", "授权执行脚本", "已获得执行授权", "不再禁止执行脚本"},
+			mentions:  []string{"执行脚本", "脚本执行", "执行授权"},
+			durable:   []string{"不得执行", "不要执行", "不执行", "不会执行", "没有执行授权", "尚未获得执行授权"},
+			label:     "脚本权限",
+			operation: "不得执行脚本",
+		},
+		{
+			enable: []string{
+				"不得安装Skill", "不要安装Skill", "不安装Skill", "不会安装Skill",
+				"不得安装 Skill", "不要安装 Skill", "不安装 Skill", "不会安装 Skill",
+			},
+			revoke: []string{
+				"允许安装Skill", "可以安装Skill", "授权安装Skill", "允许安装 Skill", "可以安装 Skill",
+				"不再禁止安装Skill", "不再禁止安装 Skill",
+			},
+			mentions:  []string{"安装Skill", "安装 Skill", "Skill安装", "Skill 安装"},
+			durable:   []string{"不得安装", "不要安装", "不安装", "不会安装", "未安装"},
+			label:     "Skill安装权限",
+			operation: "不得安装Skill",
+		},
+		{
+			enable: []string{
+				"不进行新增、修改或删除", "不要进行新增、修改或删除", "不得进行新增、修改或删除",
+				"不新增、修改或删除", "不要新增、修改或删除", "不得新增、修改或删除",
+				"不新增、不修改、不删除Skill", "不新增、不修改、不删除 Skill",
+			},
+			revoke: []string{
+				"允许新增、修改或删除Skill", "可以新增、修改或删除Skill", "授权新增、修改或删除Skill",
+				"允许新增、修改或删除 Skill", "可以新增、修改或删除 Skill",
+			},
+			mentions: []string{
+				"新增、修改或删除", "新增/修改/删除", "新增Skill", "修改Skill", "删除Skill",
+				"新增 Skill", "修改 Skill", "删除 Skill",
+			},
+			durable: []string{
+				"不得新增", "不要新增", "不新增", "不会新增", "不得修改", "不要修改", "不修改", "不会修改",
+				"不得删除", "不要删除", "不删除", "不会删除", "不进行新增、修改或删除",
+			},
+			label:     "Skill变更权限",
+			operation: "不得新增、修改或删除Skill",
+		},
+		{
+			enable: []string{
 				"只在对话里维护", "仅在对话里维护", "只在对话中维护", "仅在对话中维护",
 				"只在本对话里维护", "仅在本对话里维护", "只在本对话中维护", "仅在本对话中维护",
 				"只在当前对话里维护", "仅在当前对话里维护", "只在当前对话中维护", "仅在当前对话中维护",
@@ -2607,23 +2837,38 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 			operation: "只在本对话中维护",
 		},
 	}
+	explicitBoundaryRequest := containsAny(query, []string{
+		"行动边界", "操作边界", "权限边界", "所有边界", "既有边界", "原有边界", "复述边界", "当前边界",
+	})
+	if !stateOnly && !explicitBoundaryRequest {
+		hasCurrentBoundary := false
+		for _, rule := range boundaries {
+			if containsAny(query, rule.enable) || containsAny(query, rule.revoke) {
+				hasCurrentBoundary = true
+				break
+			}
+		}
+		if !hasCurrentBoundary {
+			return value
+		}
+	}
 
 	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
 	stateAudit := IsStateAuditTurn(query)
 	for _, rule := range boundaries {
-		currentTurnScope := stateAudit || containsAny(query, rule.enable) || containsAny(query, rule.revoke) ||
-			containsAny(query, rule.mentions) || containsAny(query, []string{
-			"行动边界", "操作边界", "权限边界", "所有边界", "既有边界", "原有边界",
-		})
+		currentTurnScope := stateAudit || explicitBoundaryRequest || containsAny(query, rule.enable) ||
+			containsAny(query, rule.revoke) || (stateOnly && containsAny(query, rule.mentions))
 		if !currentTurnScope {
-			filtered := lines[:0]
-			for _, line := range lines {
-				if containsAny(line, rule.mentions) {
-					continue
+			if stateOnly {
+				filtered := lines[:0]
+				for _, line := range lines {
+					if containsAny(line, rule.mentions) {
+						continue
+					}
+					filtered = append(filtered, line)
 				}
-				filtered = append(filtered, line)
+				lines = filtered
 			}
-			lines = filtered
 			continue
 		}
 		enabled, activationStart := explicitBoundaryEnabled(userContext, rule.enable, rule.revoke)
@@ -2660,6 +2905,13 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 				found = true
 				continue
 			}
+			// Do not replace an entire business acknowledgement merely because
+			// its trailing clause paraphrases an action boundary. Keep the mixed
+			// line and append the canonical boundary separately; dedicated table
+			// rows and bullet rows remain safe to canonicalize in place.
+			if boundaryLineHasSubstantivePrefix(line, rule.mentions) {
+				continue
+			}
 			lines[index] = renderCanonicalBoundaryLine(line, rule.label, statement)
 			found = true
 		}
@@ -2668,6 +2920,27 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 		}
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func boundaryLineHasSubstantivePrefix(line string, mentions []string) bool {
+	if strings.Contains(line, "|") {
+		return false
+	}
+	earliest := -1
+	for _, mention := range mentions {
+		if index := strings.Index(line, mention); index >= 0 && (earliest < 0 || index < earliest) {
+			earliest = index
+		}
+	}
+	if earliest <= 0 {
+		return false
+	}
+	prefix := strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(line[:earliest], ""))
+	prefix = strings.Trim(prefix, "*_`# ")
+	if prefix == "" {
+		return false
+	}
+	return strings.ContainsAny(prefix, "。！？!?；;")
 }
 
 // NormalizeExplicitUserIdentityUnknown preserves an identity boundary stated
@@ -3367,7 +3640,8 @@ func normalizeBareStateAuditOrdinalHeadings(lines []string) []string {
 
 func hasExplicitUnknownState(value string) bool {
 	return containsAny(value, []string{
-		"待确认", "待核实", "未提供", "没有提供", "未说明", "未知",
+		"待确认", "待核实", "待确定", "未确定", "未提供", "没有提供", "未说明", "未知",
+		"尚待确定", "仍待确定", "尚未确定", "仍未确定",
 		"尚未确认", "仍未确认", "未确认", "尚未核验", "未经核验", "未核验",
 	})
 }
@@ -4596,6 +4870,7 @@ func canonicalUnknownFactFragment(fragment string) string {
 	value := strings.TrimSpace(fragment)
 	for _, marker := range []string{
 		"仍待确认", "尚待确认", "仍未确认", "尚未确认", "未确认",
+		"仍待确定", "尚待确定", "待确定", "仍未确定", "尚未确定", "未确定",
 	} {
 		value = strings.ReplaceAll(value, marker, "待确认")
 	}
@@ -4764,7 +5039,7 @@ func removeUncertainUnitsFromConfirmedParagraph(paragraph string) string {
 }
 
 func splitUncertainUnitsFromConfirmedParagraph(paragraph string) (string, []string) {
-	const uncertainMarkers = "待确认|尚未确认|未确认|待核实|尚未核实|未知|未提供"
+	const uncertainMarkers = "待确认|尚未确认|未确认|待确定|尚未确定|未确定|待核实|尚未核实|未知|未提供"
 	uncertainPattern := regexp.MustCompile(uncertainMarkers)
 	separatorPattern := regexp.MustCompile(`([。！？!?；;]+)`)
 	parts := separatorPattern.Split(strings.TrimSpace(paragraph), -1)
@@ -4914,7 +5189,8 @@ func explicitUnknownUserStatements(statements []string) []string {
 			continue
 		}
 		if containsAny(statement, []string{
-			"待确认", "待核实", "未提供", "没有提供", "未说明", "未知",
+			"待确认", "待核实", "待确定", "未确定", "未提供", "没有提供", "未说明", "未知",
+			"尚待确定", "仍待确定", "尚未确定", "仍未确定",
 			"尚未核验", "未经核验", "未核验",
 		}) {
 			result = append(result, statement)
@@ -4952,6 +5228,7 @@ func explicitUnknownSubject(value string) string {
 	value = strings.TrimSpace(orderedOrBulletListPrefixPattern.ReplaceAllString(value, ""))
 	value = strings.NewReplacer(
 		"仍待确认", "", "尚待确认", "", "仍未确认", "", "尚未确认", "",
+		"仍待确定", "", "尚待确定", "", "待确定", "", "仍未确定", "", "尚未确定", "", "未确定", "",
 		"待确认", "", "待核实", "", "仍未提供", "", "尚未提供", "",
 		"没有提供", "", "未提供", "", "未说明", "", "尚未核验", "",
 		"未经核验", "", "未核验", "", "未知", "", "当前状态", "", "状态", "",

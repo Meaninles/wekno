@@ -70,6 +70,13 @@ def effective_max_turns(payload: ChatPayload) -> int:
             # dozens of turns re-searching retired topics and retransmitting
             # an ever-growing tool transcript.
             maximum = min(18, 6 + topic_count * 3)
+        elif FRESH_EVIDENCE_CONTRACT_MARKER in (payload.query or ""):
+            # A focused selected-knowledge question should normally need one
+            # retrieval plus one synthesis.  Keep a small reserve for a single
+            # refinement, but do not let a stale conversation topic turn into
+            # an inventory/list-all-chunks loop.  This bounds tool latency in
+            # both ordinary and eval runs without adding a second model pass.
+            maximum = min(maximum, 8)
     return maximum
 
 
@@ -2917,7 +2924,11 @@ def build_prompt(
             "one available read-only WeKnora retrieval tool for the exact question. Conversation history, model "
             "memory, and locally prepared original files cannot satisfy this citation precondition. Finish only "
             "after a successful current-turn tool result returns source_references, and copy only its cite_exactly "
-            "handle immediately beside the supported claim."
+            "handle immediately beside the supported claim. Start with one focused semantic search for the exact "
+            "current request; do not enumerate the whole knowledge base or list chunks as a substitute for search. "
+            "Make at most one refinement when a named object still lacks evidence, unless the trusted current-turn "
+            "contract explicitly lists several independent required evidence searches. Once the minimum sufficient "
+            "evidence is present, stop using tools and answer the current request."
         )
         if evidence_tool_names:
             parts.append("Available retrieval tools: " + ", ".join(evidence_tool_names))

@@ -22,6 +22,15 @@ def file_sha256(path: str | Path) -> str:
         with source.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
         return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    if source.suffix.lower() in {
+        ".jsonl", ".md", ".py", ".ps1", ".txt", ".toml", ".yaml", ".yml",
+    }:
+        # Git may materialize the same committed text as LF on Linux and CRLF
+        # on Windows. Eval identity must describe semantic source bytes, not
+        # the checkout platform, otherwise a clean Windows worktree fails a
+        # manifest frozen on Linux before any session runs.
+        payload = source.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        return hashlib.sha256(payload).hexdigest()
     digest = hashlib.sha256()
     with source.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):

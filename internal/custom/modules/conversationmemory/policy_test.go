@@ -158,6 +158,50 @@ func TestCurrentTurnDirectiveCarriesExplicitlyReferencedUserFacts(t *testing.T) 
 	}
 }
 
+func TestSourceConstrainedExplanationIsANarrowCurrentTurn(t *testing.T) {
+	query := "只依据当前知识库说明三类Skill分别是什么，名称要完整，并给出引用。"
+	if !IsNarrowAnswerTurn(query) {
+		t.Fatal("source-constrained explanation was not recognized as a narrow turn")
+	}
+	if !ShouldIsolateNarrowEvidenceHistory(query) {
+		t.Fatal("self-contained source-constrained explanation retained stale history")
+	}
+	directive := AppendCurrentTurnDirective(query, query)
+	for _, expected := range []string{"历史话题不得替代", "整篇不得超过500个中文字符"} {
+		if !strings.Contains(directive, expected) {
+			t.Fatalf("current-turn focus rule %q missing: %s", expected, directive)
+		}
+	}
+}
+
+func TestSelectedKnowledgeEvidenceDirectiveIsScopedAndBounded(t *testing.T) {
+	query := "比较三类Skill的适用场景，不确定的实现细节要标注。"
+	got := AppendSelectedKnowledgeEvidenceDirective(query, query, true)
+	for _, expected := range []string{
+		"[WEKNORA_SELECTED_KNOWLEDGE_EVIDENCE_V1]",
+		"本轮明确要求文档依据或引用",
+		"一次聚焦检索",
+		"最少引用",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("selected-knowledge evidence contract %q missing: %s", expected, got)
+		}
+	}
+	if duplicate := AppendSelectedKnowledgeEvidenceDirective(query, "请给出引用。", true); duplicate != query {
+		t.Fatalf("explicit evidence turn received a duplicate runtime contract: %s", duplicate)
+	}
+	if noScope := AppendSelectedKnowledgeEvidenceDirective(query, query, false); noScope != query {
+		t.Fatalf("unselected knowledge scope was broadened: %s", noScope)
+	}
+	if noRetrieval := AppendSelectedKnowledgeEvidenceDirective(
+		"只根据对话回答，不要检索知识库。",
+		"只根据对话回答，不要检索知识库。",
+		true,
+	); noRetrieval != "只根据对话回答，不要检索知识库。" {
+		t.Fatalf("explicit no-retrieval request was overridden: %s", noRetrieval)
+	}
+}
+
 func TestTerminalGenerationDirectiveOnlyTargetsDeferredComparisons(t *testing.T) {
 	query := "依据已选制度只比较公开采购、询比、竞价和竞争谈判，不要给最终建议。"
 	got := TerminalGenerationDirective(query)
@@ -302,6 +346,39 @@ func TestNormalizeExplicitActionBoundariesCanonicalizesSplitProcurementPredicate
 	}
 	if twice := NormalizeExplicitActionBoundaries(got, query); twice != got {
 		t.Fatalf("procurement boundary normalization is not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeExplicitActionBoundariesCoversSendAndNonStateExecution(t *testing.T) {
+	initial := "建立任务卡。未经明确授权不要创建或修改文件，也不要替我发送材料。只确认任务。"
+	answer := "任务卡已记录；未创建或修改任何文件，也不会替您发送材料。"
+	got := NormalizeExplicitActionBoundaries(answer, initial)
+	for _, expected := range []string{"不得创建或修改文件", "不会替您发送材料"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("explicit operation boundary %q missing: %s", expected, got)
+		}
+	}
+	auditAnswer := "### 当前有效事实\n- 任务卡已建立\n### 已废弃事实\n- 无\n### 待确认事实\n- 无\n### 行动边界\n- 无"
+	audited := NormalizeExplicitActionBoundaries(auditAnswer, "做完整状态审计并列出行动边界。", initial)
+	for _, expected := range []string{"不得创建或修改文件", "不得发送材料"} {
+		if !strings.Contains(audited, expected) {
+			t.Fatalf("archived operation boundary %q was not restored: %s", expected, audited)
+		}
+	}
+
+	explanation := "`read_skill`读取Skill说明供理解。"
+	explainQuery := "`read_skill`在这个机制里做什么？只解释读取边界，不执行工具。"
+	explained := NormalizeExplicitActionBoundaries(explanation, explainQuery)
+	if !strings.Contains(explained, "不得执行工具") || !strings.Contains(explained, "read_skill") {
+		t.Fatalf("non-state execution boundary was not appended without destroying the answer: %s", explained)
+	}
+
+	management := "专业Skill接口支持列出和查看能力；本轮不进行新增、修改或删除。"
+	managementQuery := "只列明确支持的管理能力，不进行新增、修改或删除。"
+	managed := NormalizeExplicitActionBoundaries(management, managementQuery)
+	if !strings.Contains(managed, "支持列出和查看能力") ||
+		!strings.Contains(managed, "不进行新增、修改或删除") {
+		t.Fatalf("skill mutation boundary damaged the informational answer: %s", managed)
 	}
 }
 
@@ -2326,6 +2403,29 @@ func TestStateAuditRestoresDurableIdentityAndRelocatesObservedLifecycleText(t *t
 	boundary := strings.Split(got, "### 行动边界")[1]
 	if !strings.Contains(boundary, "只在本对话中维护") {
 		t.Fatalf("chat-only boundary was not restored canonically: %s", got)
+	}
+}
+
+func TestStateAuditRestoresExplicitUndeterminedFact(t *testing.T) {
+	query := "现在做一次完整状态审计，分为当前有效事实、已废弃事实、待确认事实和行动边界四栏。"
+	prior := []string{
+		"业务牵头人记为林岚；审批人尚未确定。只更新人员字段。",
+	}
+	answer := `### 当前有效事实
+- 业务牵头人：林岚
+### 已废弃事实
+- 无
+### 待确认事实
+- 无
+### 行动边界
+- 无`
+
+	got := NormalizeStateAuditSections(answer, query, prior...)
+	if !strings.Contains(got, "审批人待确认") {
+		t.Fatalf("explicit 尚未确定 fact was not restored as unknown: %s", got)
+	}
+	if strings.Contains(strings.Split(got, "### 待确认事实")[0], "审批人") {
+		t.Fatalf("undetermined approver leaked into an active lifecycle section: %s", got)
 	}
 }
 

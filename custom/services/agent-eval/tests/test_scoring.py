@@ -110,6 +110,100 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_action_state_and_product_alias_equivalences_are_semantic(self) -> None:
+        contract = TurnContract(
+            required_claims=[
+                TextRule(
+                    rule_id="agents",
+                    all_of=["快速问答", "RAG推理", "通用智能体"],
+                )
+            ],
+            conversation_state=ConversationStateContract(
+                active_facts=[
+                    TextRule(rule_id="security", all_of=["数据安全", "影响评估"]),
+                ],
+                unknown_facts=[
+                    TextRule(rule_id="approver", all_of=["审批人"], any_of=["待确认"]),
+                ],
+                action_boundaries=[
+                    TextRule(rule_id="send", any_of=["不发送"]),
+                ],
+            ),
+        )
+        spec = self.spec.model_copy(
+            update={
+                "turns": [self.spec.turns[0].model_copy(update={"contract": contract})]
+            }
+        )
+        observed = ObservedTurn(
+            turn_id="turn-1",
+            session_id="session",
+            content=(
+                "快速问答、智能推理和通用智能体各有适用任务；"
+                "数据安全影响已确认需要评估；审批人尚未确定；不会替您发送材料。"
+            ),
+            is_completed=True,
+        )
+        result = score_case(
+            spec,
+            CaseRun(
+                case_id=spec.case_id,
+                family_id=spec.family_id,
+                split=spec.split,
+                verdict=Verdict.INVALID,
+                turns=[observed],
+            ),
+        )
+        self.assertEqual(result.verdict, Verdict.PASS)
+
+    def test_forbidden_examples_inside_explicit_absence_are_not_assertions(self) -> None:
+        contract = TurnContract(
+            forbidden_claims=[
+                TextRule(
+                    rule_id="no-invented-level",
+                    any_of=["一级变更", "重大变更", "一般变更"],
+                )
+            ]
+        )
+        spec = self.spec.model_copy(
+            update={
+                "turns": [self.spec.turns[0].model_copy(update={"contract": contract})]
+            }
+        )
+
+        denied = ObservedTurn(
+            turn_id="turn-1",
+            session_id="session",
+            content="知识库无变更等级划分（如重大变更、一般变更），运维一级变更分类也不适用。",
+            is_completed=True,
+        )
+        denied_result = score_case(
+            spec,
+            CaseRun(
+                case_id=spec.case_id,
+                family_id=spec.family_id,
+                split=spec.split,
+                verdict=Verdict.INVALID,
+                turns=[denied],
+            ),
+        )
+        self.assertEqual(denied_result.verdict, Verdict.PASS)
+
+        asserted = denied.model_copy(
+            update={"content": "制度未规定其他级别；本项目按重大变更处理。"}
+        )
+        asserted_result = score_case(
+            spec,
+            CaseRun(
+                case_id=spec.case_id,
+                family_id=spec.family_id,
+                split=spec.split,
+                verdict=Verdict.INVALID,
+                turns=[asserted],
+            ),
+        )
+        self.assertEqual(asserted_result.verdict, Verdict.FAIL)
+
     def test_internal_planning_heuristic_catches_unlisted_leak(self) -> None:
         contract = TurnContract(
             forbidden_claims=[

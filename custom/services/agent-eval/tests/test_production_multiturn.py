@@ -72,9 +72,9 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
         for stage, policy_name in pairs.items():
             manifest = json.loads(
                 (
-                    ROOT
-                    / "manifests"
-                    / f"production-multiturn-ready.v1-{stage}.manifest.json"
+                     ROOT
+                     / "manifests"
+                     / f"production-multiturn-ready.v1-{stage}-evaluator-v3.manifest.json"
                 ).read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["dataset_sha256"], digest)
@@ -85,6 +85,14 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
             self.assertEqual(
                 manifest["dependency_sha256"]["profiles"],
                 file_sha256(ROOT / "profiles" / "production-derived-multiturn.v1.json"),
+            )
+            self.assertEqual(
+                manifest["dependency_sha256"]["scorer"],
+                file_sha256(ROOT / "weknora_eval" / "scoring.py"),
+            )
+            self.assertEqual(
+                manifest["dependency_sha256"]["judge"],
+                file_sha256(ROOT / "weknora_eval" / "judge.py"),
             )
 
             policy = json.loads(
@@ -101,12 +109,20 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
             )
 
     def test_sealed_manifest_exposes_identity_not_prompts(self) -> None:
-        manifest_path = ROOT / "manifests" / "production-multiturn-holdout.v1.manifest.json"
+        manifest_path = (
+            ROOT
+            / "manifests"
+            / "production-multiturn-holdout.v1-evaluator-v3.manifest.json"
+        )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["case_count"], 3)
         self.assertEqual(manifest["family_count"], 3)
         self.assertEqual(manifest["split_counts"], {"sealed_holdout": 3})
         self.assertNotIn("turns", manifest)
+        self.assertEqual(
+            manifest["dependency_sha256"]["scorer"],
+            file_sha256(ROOT / "weknora_eval" / "scoring.py"),
+        )
 
         sealed_path = ROOT / "sealed" / "production-multiturn-holdout.v1.jsonl"
         if sealed_path.exists():

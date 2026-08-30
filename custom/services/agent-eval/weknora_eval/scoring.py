@@ -36,12 +36,33 @@ STATE_SECTION_ALIASES = {
 # avoids requiring one exact surface form for that claim.
 TEXT_EQUIVALENCE_GROUPS = (
     ("可以公开", "可公开"),
-    ("未提供", "没有提供", "尚未提供", "未说明", "未知"),
+    (
+        "未提供", "没有提供", "尚未提供", "未说明", "未知", "待确认", "未确认",
+        "尚未确认", "待确定", "未确定", "尚未确定",
+    ),
     ("废弃", "废止", "作废", "失效"),
+    ("不发送", "不会发送", "不得发送", "不要发送", "未发送"),
+    ("不创建", "不会创建", "不得创建", "不要创建", "未创建"),
+    ("不修改", "不会修改", "不得修改", "不要修改", "未修改"),
+    ("不执行", "不会执行", "不得执行", "不要执行", "未执行", "仅解释", "只解释"),
+    ("不安装", "不会安装", "不得安装", "不要安装", "未安装"),
+    ("不新增", "不会新增", "不得新增", "不要新增", "未新增"),
+    ("不删除", "不会删除", "不得删除", "不要删除", "未删除"),
+    ("RAG推理", "智能推理"),
     (
         "并非不可替代", "不是不可替代", "不再不可替代", "可替代", "不具排他性",
         "主张不成立", "核验为不成立", "已核验为不成立",
     ),
+)
+COMPOUND_ACTION_SUFFIXES = (
+    "评估", "审批", "审核", "确认", "核验", "验证", "检查", "执行", "处理", "更新",
+    "发送", "创建", "修改", "安装", "新增", "删除",
+)
+NEGATION_SCOPE_RE = re.compile(
+    r"(?:没有|并无|尚无|无|不存在|未规定|未划分|未采用|未提供|不适用|并非|不是|不得|不要|不会|不能|不应|缺少|缺乏)"
+)
+POST_NEGATION_SCOPE_RE = re.compile(
+    r"(?:不存在|不适用|未规定|未采用|没有依据|无依据|并无依据)"
 )
 RETIRED_STATUS_TERMS = (
     "废弃", "废止", "作废", "失效", "不再成立", "不成立", "推翻", "否定", "取代", "替代",
@@ -77,10 +98,26 @@ def _equivalent_terms(item: str, case_sensitive: bool) -> tuple[str, ...]:
 
 
 def _contains_term(value: str, item: str, case_sensitive: bool) -> bool:
-    return any(
-        _normal(candidate, case_sensitive) in value
-        for candidate in _equivalent_terms(item, case_sensitive)
-    )
+    for candidate in _equivalent_terms(item, case_sensitive):
+        probe = _normal(candidate, case_sensitive)
+        if probe in value:
+            return True
+        # Chinese contracts often name a compact predicate (for example
+        # “影响评估”), while a natural answer inserts a status between its
+        # object and action (“影响已确认需要评估”).  Accept only a short ordered
+        # expansion with a reviewed action suffix; this is compositional and
+        # does not turn the scorer into a broad synonym or fuzzy matcher.
+        for suffix in COMPOUND_ACTION_SUFFIXES:
+            normalized_suffix = _normal(suffix, case_sensitive)
+            if not probe.endswith(normalized_suffix):
+                continue
+            prefix = probe[: -len(normalized_suffix)]
+            if len(prefix) >= 2 and re.search(
+                re.escape(prefix) + r".{0,12}" + re.escape(normalized_suffix),
+                value,
+            ):
+                return True
+    return False
 
 
 def _rule_matches(rule: TextRule, text: str) -> bool:
@@ -93,6 +130,52 @@ def _rule_matches(rule: TextRule, text: str) -> bool:
         _contains_term(value, item, rule.case_sensitive) for item in rule.unless_any_of
     )
     return any_ok and all_ok and not excluded
+
+
+def _term_has_unnegated_occurrence(text: str, item: str, case_sensitive: bool) -> bool:
+    value = _normal(text, case_sensitive)
+    for candidate in _equivalent_terms(item, case_sensitive):
+        probe = _normal(candidate, case_sensitive)
+        start = 0
+        while probe and (index := value.find(probe, start)) >= 0:
+            prefix = value[max(0, index - 24):index]
+            # Negation must be in the same compact clause. A punctuation mark
+            # closes its scope so “未规定X；Y必须……” still catches Y.
+            clause_prefix = re.split(r"[。！？!?；;]", prefix)[-1]
+            suffix = value[index + len(probe):index + len(probe) + 16]
+            clause_suffix = re.split(r"[。！？!?；;]", suffix)[0]
+            if not NEGATION_SCOPE_RE.search(clause_prefix) and not POST_NEGATION_SCOPE_RE.search(clause_suffix):
+                return True
+            start = index + len(probe)
+    return False
+
+
+def _rule_asserted(rule: TextRule, text: str) -> bool:
+    """Match a prohibited assertion while ignoring an explicit local denial.
+
+    This is used only by forbidden-rule groups. Required facts remain strict,
+    and an unnegated second occurrence still fails even when an earlier clause
+    says the same term is absent.
+    """
+
+    if not _rule_matches(rule, text):
+        return False
+    if rule.unless_any_of and any(
+        _contains_term(_normal(text, rule.case_sensitive), item, rule.case_sensitive)
+        for item in rule.unless_any_of
+    ):
+        return False
+    if rule.all_of and not all(
+        _term_has_unnegated_occurrence(text, item, rule.case_sensitive)
+        for item in rule.all_of
+    ):
+        return False
+    if rule.any_of and not any(
+        _term_has_unnegated_occurrence(text, item, rule.case_sensitive)
+        for item in rule.any_of
+    ):
+        return False
+    return True
 
 
 def _has_internal_planning_leak(text: str) -> bool:
@@ -250,10 +333,10 @@ def _score_forbidden_rule_group(
     include_heading_sections: bool = True,
 ) -> None:
     for rule in rules:
-        matched = _rule_matches(rule, text)
+        matched = _rule_asserted(rule, text)
         if scope_all_of_to_segments and rule.all_of:
             matched = any(
-                _rule_matches(rule, segment)
+                _rule_asserted(rule, segment)
                 and (
                     not all_of_must_be_near_segment_start
                     or all(
@@ -420,7 +503,7 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             )
         )
     for rule in contract.forbidden_claims:
-        matched = _rule_matches(rule, observed.content)
+        matched = _rule_asserted(rule, observed.content)
         if rule.rule_id == "no-internal-planning":
             matched = matched or _has_internal_planning_leak(observed.content)
         absent = not matched

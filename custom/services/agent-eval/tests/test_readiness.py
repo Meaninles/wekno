@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -47,6 +48,15 @@ def eval_sut() -> SUTFingerprint:
 
 
 class ReadinessTests(unittest.TestCase):
+    def test_text_dependency_hash_is_cross_platform_line_ending_invariant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lf = root / "lf.py"
+            crlf = root / "crlf.py"
+            lf.write_bytes(b"first\nsecond\n")
+            crlf.write_bytes(b"first\r\nsecond\r\n")
+            self.assertEqual(file_sha256(lf), file_sha256(crlf))
+
     def test_pre_agent_change_lock_matches_committed_dependencies(self) -> None:
         lock = json.loads(
             (ROOT / "baselines" / "pre-agent-change.v1.json").read_text(
@@ -523,13 +533,13 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(report["planned_session_count"], 18)
         self.assertTrue(all(check["passed"] for check in report["checks"]))
 
-    def test_v3_evaluator_v2_preflight_freezes_evaluator_dependencies(self) -> None:
+    def test_v3_evaluator_v3_preflight_freezes_evaluator_dependencies(self) -> None:
         with patch.dict(os.environ, self.env(), clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
                 manifest_path=ROOT
                 / "manifests"
-                / "multiturn-ready.v3-evaluator-v2.manifest.json",
+                / "multiturn-ready.v3-evaluator-v3.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
@@ -553,11 +563,13 @@ class ReadinessTests(unittest.TestCase):
             },
         )
 
-    def test_v3_evaluator_v1_manifest_fails_closed_after_protocol_upgrade(self) -> None:
+    def test_v3_evaluator_v2_manifest_fails_closed_after_protocol_upgrade(self) -> None:
         with patch.dict(os.environ, self.env(), clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
-                manifest_path=ROOT / "manifests" / "multiturn-ready.v3.manifest.json",
+                manifest_path=ROOT
+                / "manifests"
+                / "multiturn-ready.v3-evaluator-v2.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
@@ -576,7 +588,7 @@ class ReadinessTests(unittest.TestCase):
                 dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
                 manifest_path=ROOT
                 / "manifests"
-                / "multiturn-optimization-dev.v1-evaluator-v2.manifest.json",
+                / "multiturn-optimization-dev.v1-evaluator-v3.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-optimization-gate.v1.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
@@ -594,7 +606,7 @@ class ReadinessTests(unittest.TestCase):
                 dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
                 manifest_path=ROOT
                 / "manifests"
-                / "multiturn-optimization-dev-experiment.v1-evaluator-v2.manifest.json",
+                / "multiturn-optimization-dev-experiment.v1-evaluator-v3.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-experiment-gate.v1.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
@@ -620,7 +632,7 @@ class ReadinessTests(unittest.TestCase):
                 dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
                 manifest_path=ROOT
                 / "manifests"
-                / "multiturn-ready.v3-evaluator-v2.manifest.json",
+                / "multiturn-ready.v3-evaluator-v3.manifest.json",
                 profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
                 policy_path=ROOT / "policies" / "multiturn-release-gate.v2.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",

@@ -277,6 +277,18 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		req.Query,
 		durableUserContext,
 	)
+	hasSelectedKnowledge := len(compactStrings(req.KnowledgeBaseIDs)) > 0 ||
+		len(compactStrings(req.KnowledgeIDs)) > 0 ||
+		len(compactStrings(agentConfig.KnowledgeBases)) > 0 ||
+		len(compactStrings(agentConfig.KnowledgeIDs)) > 0
+	if agentConfig.RetrieveKBOnlyWhenMentioned && !conversationmemory.MentionsKnowledgeScope(req.Query) {
+		hasSelectedKnowledge = false
+	}
+	runtimeQuery = conversationmemory.AppendSelectedKnowledgeEvidenceDirective(
+		runtimeQuery,
+		req.Query,
+		hasSelectedKnowledge,
+	)
 	runtimeQuery = conversationmemory.AppendCurrentTurnDirective(runtimeQuery, req.Query, boundaryUserStatements...)
 	active.runtimeQuery = runtimeQuery
 	evalObservability := false

@@ -265,6 +265,10 @@ class RunnerProgressTest(unittest.TestCase):
         payload.runtime_config.max_iterations = 100
         self.assertEqual(effective_max_turns(payload), 12)
 
+        payload.query = "解释当前知识库中的机制。\n本轮明确要求文档依据或引用。"
+        payload.runtime_config.max_iterations = 30
+        self.assertEqual(effective_max_turns(payload), 8)
+
     def test_turn_contract_issues_bind_uncertainties_to_direct_evidence(self):
         payload = ChatPayload(
             run_id="run-uncertainty-contract",
@@ -403,6 +407,8 @@ class RunnerProgressTest(unittest.TestCase):
         prompt = build_prompt(payload)
         self.assertIn("binding_turn_precondition", prompt)
         self.assertIn("Available retrieval tools: grep_chunks", prompt)
+        self.assertIn("one focused semantic search", prompt)
+        self.assertIn("do not enumerate the whole knowledge base", prompt)
         self.assertLess(prompt.index("<required_evidence_action"), prompt.index("<weknora_context>"))
 
     def test_turn_contract_issues_reject_internal_repair_narration(self):

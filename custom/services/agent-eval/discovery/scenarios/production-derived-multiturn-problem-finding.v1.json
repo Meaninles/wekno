@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "scenario_id": "production-derived-multiturn-problem-finding-v1",
+  "phase": "problem-finding",
+  "model_id": "${AGENT_EVAL_SUMMARY_MODEL_ID}",
+  "knowledge_ids": [],
+  "description": "Codex-led adaptive discovery seeded from real production business patterns. Exactly one reviewed turn may be added at a time; the scenario is not a fixed future script.",
+  "sessions": [
+    {
+      "profile_id": "quick-answer",
+      "display_name": "快速问答",
+      "agent_id": "builtin-quick-answer",
+      "agent_type": "rag-qa",
+      "endpoint": "knowledge-chat",
+      "history_turns": 5,
+      "minimum_turns": 7,
+      "knowledge_base_ids": [],
+      "knowledge_ids": [],
+      "business_goal": "维护一个无知识库的真实业务任务卡，检查状态更新、废弃值和行动边界能否跨越5轮窗口。",
+      "coverage_goals": [
+        "最早业务目标跨窗保留",
+        "当前值与废弃值分离",
+        "未知事实不被补写",
+        "不执行文件或外部发送操作"
+      ],
+      "turns": [
+        {
+          "turn_id": "turn-001",
+          "purpose": "建立只在早期出现的业务目标和全会话行动边界。",
+          "user_message": "在对话里建立季度经营分析任务卡：项目代号‘晨星经营复盘’，目标是找出三项可落地的降本措施。未经明确授权不要创建或修改文件，也不要替我发送材料。只确认任务，不推断措施内容。",
+          "state_updates": [
+            {"key": "project", "operation": "set", "value": "晨星经营复盘", "class": "durable"},
+            {"key": "goal", "operation": "set", "value": "找出三项可落地的降本措施", "class": "durable"},
+            {"key": "action_boundary", "operation": "set", "value": "不创建或修改文件，不发送材料", "class": "durable"}
+          ]
+        }
+      ]
+    },
+    {
+      "profile_id": "rag-reasoning",
+      "display_name": "RAG推理",
+      "agent_id": "builtin-smart-reasoning",
+      "agent_type": "rag-qa",
+      "endpoint": "agent-chat",
+      "history_turns": 10,
+      "minimum_turns": 12,
+      "knowledge_base_ids": ["${AGENT_EVAL_KB_DIGITAL_POLICIES_ID}"],
+      "knowledge_ids": [],
+      "business_goal": "在一个数字化制度知识库内纠正制度来源，形成建设阶段变更流程并跨越10轮历史窗口。",
+      "coverage_goals": [
+        "建设阶段与运维阶段来源纠正",
+        "无依据变更等级拒绝",
+        "变更影响评估和联合审批召回",
+        "材料更新与测试证据引用",
+        "跨窗恢复项目状态"
+      ],
+      "turns": [
+        {
+          "turn_id": "turn-001",
+          "purpose": "检验模糊问题下的来源选择与证据校准。",
+          "user_message": "只依据当前知识库回答：信息化系统在建设阶段发生需求变更时，应先做什么、由哪些环节确认？不要套用投产后的运维变更制度，并给出引用。",
+          "state_updates": [
+            {"key": "lifecycle", "operation": "set", "value": "项目建设阶段", "class": "durable"},
+            {"key": "source_boundary", "operation": "set", "value": "排除投产后的运维变更制度", "class": "durable"}
+          ]
+        }
+      ]
+    },
+    {
+      "profile_id": "general-agent",
+      "display_name": "通用智能体",
+      "agent_id": "builtin-general-agent",
+      "agent_type": "general-agent",
+      "endpoint": "agent-chat",
+      "history_turns": 10,
+      "minimum_turns": 12,
+      "knowledge_base_ids": ["${AGENT_EVAL_KB_WEKNORA_GUIDE_ID}"],
+      "knowledge_ids": [],
+      "business_goal": "为业务团队形成WeKnora与Skill入门说明，同时验证序号指代安全和工具执行边界。",
+      "coverage_goals": [
+        "知识库证据召回",
+        "三类Skill区分",
+        "渐进式披露与工具职责",
+        "不依赖上轮排序的目标选择",
+        "无授权不安装、不执行、不写文件",
+        "跨窗恢复最早培训目标"
+      ],
+      "turns": [
+        {
+          "turn_id": "turn-001",
+          "purpose": "建立培训目标和不可执行操作的持久边界。",
+          "user_message": "我准备给业务团队做WeKnora入门说明。先概括它能解决哪些知识问答和智能体场景，并给出知识库引用；不要安装Skill、执行脚本或修改文件。",
+          "state_updates": [
+            {"key": "goal", "operation": "set", "value": "WeKnora业务团队入门说明", "class": "durable"},
+            {"key": "action_boundary", "operation": "set", "value": "不安装Skill、不执行脚本、不修改文件", "class": "durable"}
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -5,6 +5,7 @@ param(
     [string]$Dataset = "",
     [string]$Manifest = "",
     [string]$Policy = "",
+    [string]$Profiles = "/workspace/profiles/multiturn-agents.v1.json",
     [string]$Baseline = "",
     [string[]]$CaseId = @(),
     [int]$MaxConcurrency = 1,
@@ -164,7 +165,7 @@ Invoke-Runner -RunnerArgs @(
     "preflight",
     "--dataset", $Dataset,
     "--manifest", $Manifest,
-    "--profiles", "/workspace/profiles/multiturn-agents.v1.json",
+    "--profiles", $Profiles,
     "--policy", $Policy,
     "--calibration", "/workspace/calibration/judge-multiturn.v1.json",
     "--split", $Split,
@@ -206,7 +207,7 @@ $runArgs = @(
     "--split", $Split, "--max-concurrency", [string]$MaxConcurrency,
     "--timeout", [string]$ResponseDeadlineSeconds,
     "--label", "codex-loop-$timestamp",
-    "--profiles", "/workspace/profiles/multiturn-agents.v1.json"
+    "--profiles", $Profiles
 )
 foreach ($selectedCase in $CaseId) {
     if (-not [string]::IsNullOrWhiteSpace($selectedCase)) {

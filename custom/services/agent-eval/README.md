@@ -300,6 +300,14 @@ LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措
 
 ## 本地验证
 
+生产只读真实对话、隔离知识库、DEV/GATE/SEALED 数据分层和三智能体多轮门禁的当前实现见 `PRODUCTION-DERIVED-MULTITURN.md`。在不发送任何问答请求的前提下，一键核对知识库与 release 预检：
+
+```powershell
+custom/services/agent-eval/prepare-production-multiturn-eval.ps1
+```
+
+该路径固定使用 `profiles/production-derived-multiturn.v1.json` 和 DeepSeek V4 Flash；知识场景只选择一个知识库，绝不直接选择文档。
+
 ```powershell
 # Python
 Push-Location custom/services/agent-eval

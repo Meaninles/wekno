@@ -305,6 +305,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         "procurement_knowledge_id": os.environ.get(
             "AGENT_EVAL_PROCUREMENT_KNOWLEDGE_ID", ""
         ).strip(),
+        "production_corpus_version": os.environ.get(
+            "AGENT_EVAL_PRODUCTION_CORPUS_VERSION", ""
+        ).strip(),
+        "kb_bindings_sha256": os.environ.get(
+            "AGENT_EVAL_KB_BINDINGS_SHA256", ""
+        ).strip(),
         "profile_set_sha256": file_sha256(args.profiles) if args.profiles else "",
         "framework_commit": os.environ.get("AGENT_EVAL_FRAMEWORK_COMMIT", "").strip(),
         "framework_scope": os.environ.get("AGENT_EVAL_FRAMEWORK_SCOPE", "").strip(),

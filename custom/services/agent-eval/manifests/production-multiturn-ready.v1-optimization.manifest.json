@@ -1,0 +1,24 @@
+{
+  "case_count": 6,
+  "created_at": "2026-08-30T06:56:28.158448+00:00",
+  "dataset_sha256": "475b561f2e4168a27c4a31c4fb252bc8e2975c2b337e72010dfddefbb5c115ff",
+  "dependency_sha256": {
+    "calibrator": "efd2654b4bc079cb5491c6f5caab0c55abdd614a21b5529a77b53e04baad0de9",
+    "gate": "c7a906853ff7f27d407263a672fc1522e96a8da9a3d80921eb3e5e078113c9a9",
+    "judge": "1005062466c34cc677a293804c52c12ff11b019bec699609b55e96502b5ff08b",
+    "judge_calibration": "97d02759d0adb326c0adb64b8bfa83a63cc729cf8d3a36e93cf4308512986d75",
+    "policy": "2ff5c9efc7410ea0a021b214ca93623e8e4410a47d853a3ff164cbabbee20d8c",
+    "profiles": "477828a0faaf7f6963272dd043571791a0e5fe8d9d34ee06d9b1c0b696439fcf",
+    "scorer": "2a843adc471ac4f148ca5a91f5b0275fcaf67b84060ebde994dcaa0e721612c9"
+  },
+  "family_count": 6,
+  "schema_version": 1,
+  "source_files": [
+    "datasets\\production-multiturn-ready.v1.jsonl"
+  ],
+  "split_counts": {
+    "dev": 3,
+    "gate": 3
+  },
+  "suite": "weknora-production-derived-multiturn-v1"
+}

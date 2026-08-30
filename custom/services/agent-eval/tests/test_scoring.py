@@ -110,6 +110,71 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_hidden_citation_ceiling_is_informational_but_explicit_ceiling_is_hard(self) -> None:
+        contract = TurnContract(max_citations=1)
+        observed = ObservedTurn(
+            turn_id="turn-1",
+            session_id="session",
+            content='甲。<src id="S1" />乙。<src id="S2" />',
+            references=[
+                {
+                    "id": "chunk-1",
+                    "evidence_content": "甲。",
+                    "metadata": {"citation_id": "S1", "chunk_id": "chunk-1"},
+                },
+                {
+                    "id": "chunk-2",
+                    "evidence_content": "乙。",
+                    "metadata": {"citation_id": "S2", "chunk_id": "chunk-2"},
+                },
+            ],
+            is_completed=True,
+        )
+
+        implicit_spec = self.spec.model_copy(
+            update={
+                "turns": [
+                    TurnSpec(turn_id="turn-1", query="给出必要引用。", contract=contract)
+                ]
+            }
+        )
+        implicit = score_case(
+            implicit_spec,
+            CaseRun(
+                case_id=implicit_spec.case_id,
+                family_id=implicit_spec.family_id,
+                split=implicit_spec.split,
+                verdict=Verdict.INVALID,
+                turns=[observed],
+            ),
+        )
+        implicit_ceiling = next(score for score in implicit.scores if score.name == "citation_maximum")
+        self.assertFalse(implicit_ceiling.passed)
+        self.assertFalse(implicit_ceiling.hard)
+        self.assertEqual(implicit.verdict, Verdict.PASS)
+
+        explicit_spec = implicit_spec.model_copy(
+            update={
+                "turns": [
+                    TurnSpec(turn_id="turn-1", query="引用最多一个。", contract=contract)
+                ]
+            }
+        )
+        explicit = score_case(
+            explicit_spec,
+            CaseRun(
+                case_id=explicit_spec.case_id,
+                family_id=explicit_spec.family_id,
+                split=explicit_spec.split,
+                verdict=Verdict.INVALID,
+                turns=[observed],
+            ),
+        )
+        explicit_ceiling = next(score for score in explicit.scores if score.name == "citation_maximum")
+        self.assertFalse(explicit_ceiling.passed)
+        self.assertTrue(explicit_ceiling.hard)
+        self.assertEqual(explicit.verdict, Verdict.FAIL)
+
     def test_action_state_and_product_alias_equivalences_are_semantic(self) -> None:
         contract = TurnContract(
             required_claims=[

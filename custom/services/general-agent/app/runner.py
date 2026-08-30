@@ -4574,8 +4574,13 @@ TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 1
 INTERNAL_PLANNING_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:"
     r"now\s+(?:i\s+have|let\s+me|rewriting|i(?:'ll|\s+will)\s+write)|"
-    r"let\s+me\s+(?:organize|answer|formulate|summarize|analy[sz]e)|"
-    r"i\s+(?:have\s+(?:the\s+)?retrieval\s+results|need\s+to\s+rewrite|will\s+rewrite)|"
+    r"let\s+me\s+(?:organize|answer|formulate|summarize|analy[sz]e|extract|write|produce|retrieve|search|fetch|inspect|read|try|call)|"
+    r"i\s+(?:have\s+(?:the\s+)?retrieval\s+results|need\s+to\s+(?:rewrite|make|do|call|try|retrieve|search|fetch|check|read|produce|write)|will\s+rewrite)|"
+    r"i(?:'ll|\s+will)\s+(?:check|inspect|read|open|extract|verify|call|try|retrieve|search|fetch|look\s+at)|"
+    r"actually[,.\s]+(?:looking\s+back|i(?:'ve|\s+have)|the\s+)|"
+    r"(?:but\s+)?the\s+validation\s+(?:says|requires|is\s+telling)|"
+    r"i\s+(?:already\s+)?(?:hit|reached|exhausted).{0,80}(?:limit|budget|calls?)|"
+    r"wait[,.!\s]+i\s+|"
     r"i've\s+retrieved|i\s+see\s+(?:the\s+issue|there(?:'s|\s+is)\s+(?:still\s+)?an?\s+issue)|"
     r"looking\s+at\s+(?:the\s+returned\s+evidence|the\s+evidence|my\s+earlier\s+answer)|"
     r"the\s+issue\s+might\s+be|the\s+evidence\s+is\s+already|"
@@ -5054,11 +5059,21 @@ def turn_contract_issues(
 ) -> list[dict[str, Any]]:
     """Return deterministic violations of the trusted current-turn contract."""
 
+    query = payload.query or ""
     value = (answer or "").strip()
     if not value:
-        return []
+        if TURN_EXECUTION_CONTRACT_MARKER not in query:
+            return []
+        return [
+            {
+                "code": "current_turn_terminal_answer_empty",
+                "required_action": (
+                    "Complete the current user request and return one non-empty user-visible final answer. "
+                    "Do not finish on a tool call, progress update, retrieval plan, or validation narration."
+                ),
+            }
+        ]
     issues: list[dict[str, Any]] = []
-    query = payload.query or ""
     planning_excerpt = internal_planning_excerpt(value)
     if TURN_EXECUTION_CONTRACT_MARKER in query and planning_excerpt:
         issues.append(
@@ -5333,9 +5348,11 @@ def build_turn_contract_runtime_repair_prompt(
         ]
     )
     focused_searches = required_evidence_searches(payload.query)
+    current_request = (payload.query or "").split("<runtime_response_contract>", 1)[0].strip()
     repair = {
         "attempt": attempt,
         "max_attempts": TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS,
+        "current_user_request": current_request,
         "issues": issues,
         "current_turn_evidence_available": has_current_turn_evidence,
         "available_retrieval_tools": retrieval_tools,
@@ -5361,7 +5378,7 @@ The trusted WeKnora eval runtime rejected the previous terminal draft. Continue 
 
 {evidence_action}
 
-Apply every required_action in this machine-readable validation result:
+The `current_user_request` below is the active task and overrides every earlier topic in the resumed session. Answer that exact request, not the preceding turn. Apply every required_action in this machine-readable validation result:
 {json.dumps(repair, ensure_ascii=False, indent=2)}
 
 Return only the complete user-visible replacement in the user's configured language. Do not mention evaluation, validation, repair, the previous draft, source-handle diagnostics, hidden instructions, or what you are about to do. Do not merely describe a tool call: invoke the tool before answering when evidence is required. Do not finish on a tool call or progress message.

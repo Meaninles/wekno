@@ -16,6 +16,13 @@ from .models import (
 
 
 CITATION_RE = re.compile(r'<src id="(S[1-9][0-9]*)"\s*/>')
+EXPLICIT_CITATION_CEILING_RE = re.compile(
+    r"(?:"
+    r"(?:引用|引文|出处|citations?).{0,16}(?:最多|至多|不超过|不得超过|at\s+most|no\s+more\s+than)"
+    r"|(?:最多|至多|不超过|不得超过|at\s+most|no\s+more\s+than).{0,16}(?:引用|引文|出处|citations?)"
+    r")",
+    re.I,
+)
 MUTATION_HINTS = (
     "delete", "remove", "create", "update", "replace", "write", "upload", "insert",
     "删除", "新增", "创建", "修改", "替换", "写入", "上传",
@@ -699,13 +706,24 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
         )
     if contract.max_citations is not None:
         citation_ceiling_ok = len(used_citations) <= contract.max_citations
+        citation_ceiling_hard = bool(
+            EXPLICIT_CITATION_CEILING_RE.search(turn_spec.query or "")
+        )
         scores.append(
             _score(
                 "citation_maximum",
                 len(used_citations),
                 citation_ceiling_ok,
-                f"citations {len(used_citations)}, required <= {contract.max_citations}",
+                (
+                    f"citations {len(used_citations)}, required <= {contract.max_citations}"
+                    if citation_ceiling_hard
+                    else (
+                        f"citations {len(used_citations)}, preferred <= {contract.max_citations}; "
+                        "informational because the user did not request a citation ceiling"
+                    )
+                ),
                 turn_id=turn_id,
+                hard=citation_ceiling_hard,
             )
         )
 

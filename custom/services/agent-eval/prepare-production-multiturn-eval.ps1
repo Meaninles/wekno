@@ -29,23 +29,23 @@ $common = @{
 switch ($Stage) {
     "experiment" {
         $common.Split = "dev"
-        $common.Manifest = "/workspace/manifests/production-multiturn-ready.v1-experiment-evaluator-v4.manifest.json"
+        $common.Manifest = "/workspace/manifests/production-multiturn-ready.v1-experiment-evaluator-v5.manifest.json"
         $common.Policy = "/workspace/policies/production-multiturn-experiment-gate.v1.json"
     }
     "optimization" {
         $common.Split = "dev"
-        $common.Manifest = "/workspace/manifests/production-multiturn-ready.v1-optimization-evaluator-v4.manifest.json"
+        $common.Manifest = "/workspace/manifests/production-multiturn-ready.v1-optimization-evaluator-v5.manifest.json"
         $common.Policy = "/workspace/policies/production-multiturn-optimization-gate.v1.json"
     }
     "release" {
         $common.Split = "gate"
-        $common.Manifest = "/workspace/manifests/production-multiturn-ready.v1-release-evaluator-v4.manifest.json"
+        $common.Manifest = "/workspace/manifests/production-multiturn-ready.v1-release-evaluator-v5.manifest.json"
         $common.Policy = "/workspace/policies/production-multiturn-release-gate.v1.json"
     }
     "sealed" {
         $common.Split = "sealed_holdout"
         $common.Dataset = "/workspace/sealed/production-multiturn-holdout.v1.jsonl"
-        $common.Manifest = "/workspace/manifests/production-multiturn-holdout.v1-evaluator-v4.manifest.json"
+        $common.Manifest = "/workspace/manifests/production-multiturn-holdout.v1-evaluator-v5.manifest.json"
         $common.Policy = "/workspace/policies/production-multiturn-sealed-gate.v1.json"
         $common.AllowSealed = $true
     }

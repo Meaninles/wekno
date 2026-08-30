@@ -133,6 +133,16 @@ func TestCurrentTurnDirectiveUsesDeltaAndAuditShapes(t *testing.T) {
 		strings.Contains(comparison, "每项待确认条件都必须在相关备选项短段中被说明") {
 		t.Fatalf("comparison evidence topics missing: %s", comparison)
 	}
+	distinction := AppendCurrentTurnDirective(
+		"区分",
+		"请依据已选知识库区分快速问答、RAG推理和通用智能体的适用任务，并给出引用。",
+	)
+	if !strings.Contains(distinction, `[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["快速问答","RAG推理","通用智能体"]`) {
+		t.Fatalf("distinction did not carry current named topics: %s", distinction)
+	}
+	if IsComparisonTurn("这里只说明共同能力，不区分三种模式。") {
+		t.Fatal("negated distinction was incorrectly classified as a comparison")
+	}
 }
 
 func TestCurrentTurnDirectiveCarriesExplicitlyReferencedUserFacts(t *testing.T) {

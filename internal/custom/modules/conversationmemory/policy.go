@@ -352,10 +352,11 @@ func IsComparisonTurn(query string) bool {
 	}
 	negativeProbe := strings.NewReplacer(
 		"不要再比较", "", "不要比较", "", "不再比较", "", "不比较", "",
+		"不要再区分", "", "不要区分", "", "无需区分", "", "不再区分", "", "不区分", "",
 		"停止采购方式比较", "", "停止比较", "", "stop comparing", "",
 	).Replace(value)
 	return containsAny(negativeProbe, []string{
-		"请比较", "比较", "对比", "分别说明", "compare", "comparison",
+		"请比较", "比较", "对比", "区分", "分别说明", "compare", "comparison",
 	})
 }
 
@@ -403,14 +404,14 @@ func RequiresNamedTopicDefinitionCoverage(query string) bool {
 }
 
 // comparisonEvidenceTopics extracts a small, explicit list that follows
-// “比较/对比”. The list is embedded in the trusted turn contract so the
+// “比较/对比/区分”. The list is embedded in the trusted turn contract so the
 // sidecar can reject a cited comparison that silently omitted one named item.
 // Ambiguous prose deliberately returns nil and falls back to prompt guidance.
 func comparisonEvidenceTopics(query string) []string {
 	value := strings.TrimSpace(query)
 	start := -1
 	markerLen := 0
-	for _, marker := range []string{"比较", "对比"} {
+	for _, marker := range []string{"比较", "对比", "区分"} {
 		if index := strings.LastIndex(value, marker); index > start {
 			start = index
 			markerLen = len(marker)

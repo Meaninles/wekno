@@ -485,6 +485,34 @@ class RunnerProgressTest(unittest.TestCase):
                 {issue["code"] for issue in turn_contract_issues(payload, observed)},
             )
 
+        for operational in (
+            "I'll check the output file for the search results.\n\n正式回答。",
+            "Actually, looking back at the tool results, I need to make one more retrieval call.",
+            "The validation says I need fresh evidence. Let me extract it.",
+            "I already hit the 4-call limit. Wait, I cannot fetch another result.",
+        ):
+            self.assertIn(
+                "current_turn_internal_planning_exposed",
+                {issue["code"] for issue in turn_contract_issues(payload, operational)},
+            )
+
+    def test_turn_contract_issues_reject_empty_terminal_completion(self):
+        payload = ChatPayload(
+            run_id="run-empty-contract",
+            session_id="session-empty-contract",
+            assistant_message_id="assistant-empty-contract",
+            query="回答当前问题。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        self.assertEqual(
+            [issue["code"] for issue in turn_contract_issues(payload, "")],
+            ["current_turn_terminal_answer_empty"],
+        )
+        plain = payload.model_copy(update={"query": "普通问题"})
+        self.assertEqual(turn_contract_issues(plain, ""), [])
+
     def test_turn_contract_issues_reject_deferred_comparison_ranking(self):
         payload = ChatPayload(
             run_id="run-ranking-contract",
@@ -673,6 +701,8 @@ class RunnerProgressTest(unittest.TestCase):
         )
 
         self.assertIn("SAME current user request", prompt)
+        self.assertIn('"current_user_request": "依据制度回答。', prompt)
+        self.assertIn("overrides every earlier topic", prompt)
         self.assertIn("MUST make a real call", prompt)
         self.assertIn("knowledge_search", prompt)
         self.assertIn("公开招标 金额门槛", prompt)

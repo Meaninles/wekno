@@ -1,0 +1,23 @@
+{
+  "case_count": 12,
+  "created_at": "2026-08-30T16:30:34.002340+00:00",
+  "dataset_sha256": "eb95889a83cce70cfe2daf9beb80041028e2b4baf2f2ab524d6c608143e8f2fe",
+  "dependency_sha256": {
+    "calibrator": "efd2654b4bc079cb5491c6f5caab0c55abdd614a21b5529a77b53e04baad0de9",
+    "gate": "c7a906853ff7f27d407263a672fc1522e96a8da9a3d80921eb3e5e078113c9a9",
+    "judge": "c1fbc9d579f86f38cfab9bab411730bd77cf254e14aa497646e36659b20f8529",
+    "judge_calibration": "97d02759d0adb326c0adb64b8bfa83a63cc729cf8d3a36e93cf4308512986d75",
+    "policy": "a47b376f1f35a0d23f12856eb622aaaee35b961a176e192c3ff325d6d7334d1f",
+    "profiles": "9c25204a090a624a31b3bab8281f855c6e4b1385103e0b545822846bc18f1bed",
+    "scorer": "a7485b62c73abe0cdb669f704e3da1076dceccc5ddac2cdba367eab4c17c430a"
+  },
+  "family_count": 4,
+  "schema_version": 1,
+  "source_files": [
+    "datasets\\multiturn-optimization-dev.v1.jsonl"
+  ],
+  "split_counts": {
+    "dev": 12
+  },
+  "suite": "weknora-three-agent-multiturn-optimization-dev-v1"
+}

@@ -84,6 +84,23 @@ INTERNAL_PLANNING_PATTERNS = (
     re.compile(r"\blet me (?:carefully|re-?examine|verify|think|check|count|rewrite|organize|answer)\b", re.I),
     re.compile(r"\b(?:stop hook|validation error|output contract|contract says|evidence map|evidence handle|citation handle|current-turn)\b", re.I),
     re.compile(r"\b(?:final attempt|now the key issue|re-reading|let me read)\b", re.I),
+    re.compile(r"</?think(?:ing)?>", re.I),
+    re.compile(r"\bi(?:'ll| will) start by (?:searching|checking|retrieving|calling)\b", re.I),
+    re.compile(r"\b(?:since\s+)?i(?:'ve| have) exhausted.{0,80}(?:retrieval|tool|calls?|budget)\b", re.I),
+    re.compile(r"\bthe (?:retrieval|tool|search) budget is exhausted\b", re.I),
+    re.compile(r"\bfrom the earlier (?:successful )?(?:tool|retrieval|knowledge[_ -]?search).{0,80}(?:results?|output|evidence)\b", re.I),
+)
+
+NEGATED_ACTION_PREFIXES = ("不会", "不得", "不要", "未", "不")
+NEGATED_ACTION_TARGETS = (
+    "发送", "创建", "修改", "执行", "安装", "新增", "删除", "写入", "上传",
+)
+NEGATED_ACTION_BRIDGE_RE = re.compile(
+    r"(?:(?:实际|主动|自行|直接|擅自|再次?|立即|现在|本次|本轮|替你|替您|"
+    r"为你|为您|帮你|帮您|帮助你|帮助您|代为|进行|去|会|将|予以|"
+    r"搜索|查找|发送|创建|修改|执行|安装|新增|删除|写入|上传|任何|相关|具体|"
+    r"操作|工具|脚本|文件|内容|skill|技能|、|，|,|或|和|及|以及))*",
+    re.I,
 )
 
 
@@ -130,6 +147,38 @@ def _contains_term(value: str, item: str, case_sensitive: bool) -> bool:
         probe = _normal(candidate, case_sensitive)
         if probe in value:
             return True
+        # A single Chinese negation commonly scopes a coordinated list of
+        # actions ("不实际执行搜索或安装").  Treat that as the same boundary as
+        # "不安装", but only when the bridge is composed of reviewed action,
+        # adverb and conjunction tokens.  This deliberately rejects semantic
+        # reversals such as "不阻止用户安装".
+        negated_action_candidate = False
+        for negation in NEGATED_ACTION_PREFIXES:
+            normalized_negation = _normal(negation, case_sensitive)
+            if not probe.startswith(normalized_negation):
+                continue
+            target = probe[len(normalized_negation):]
+            if target not in {
+                _normal(action, case_sensitive) for action in NEGATED_ACTION_TARGETS
+            }:
+                continue
+            negated_action_candidate = True
+            target_start = 0
+            while target and (target_index := value.find(target, target_start)) >= 0:
+                prefix_start = max(0, target_index - 32)
+                prefix = value[prefix_start:target_index]
+                negation_index = prefix.rfind(normalized_negation)
+                if negation_index >= 0:
+                    bridge = prefix[negation_index + len(normalized_negation):]
+                    if NEGATED_ACTION_BRIDGE_RE.fullmatch(bridge):
+                        return True
+                target_start = target_index + len(target)
+            break
+        if negated_action_candidate:
+            # The generic compact-predicate expansion below is intentionally
+            # too broad for a negation: ``不.{0,12}安装`` would accept the
+            # semantic opposite “不会阻止用户安装”.
+            continue
         # Chinese contracts often name a compact predicate (for example
         # “影响评估”), while a natural answer inserts a status between its
         # object and action (“影响已确认需要评估”).  Accept only a short ordered
@@ -732,17 +781,43 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
     for anchor in contract.evidence_anchors:
         matches = 0
         matched_citations: set[str] = set()
+        eligible_references: list[tuple[str, str]] = []
         for reference in observed.references:
             text = _normal(_evidence_text(reference), False)
             source_id = _reference_source_id(reference)
+            citation_id = _reference_citation_id(reference)
+            source_ok = not anchor.source_ids or source_id in anchor.source_ids
+            if source_ok:
+                eligible_references.append((text, citation_id))
             any_ok = not anchor.any_of or any(_normal(item, False) in text for item in anchor.any_of)
             all_ok = all(_normal(item, False) in text for item in anchor.all_of)
-            source_ok = not anchor.source_ids or source_id in anchor.source_ids
             if any_ok and all_ok and source_ok:
                 matches += 1
-                citation_id = _reference_citation_id(reference)
                 if citation_id:
                     matched_citations.add(citation_id)
+        match_scope = "fragment"
+        # Chunking must not make a correctly grounded multi-part claim fail
+        # merely because its required concepts land in adjacent references.
+        # Keep min_matching_fragments strict when it is greater than one; for
+        # the common one-anchor contract, allow the eligible evidence set to
+        # cover all_of collectively while any_of still requires a real hit.
+        if matches < anchor.min_matching_fragments and anchor.min_matching_fragments == 1:
+            aggregate_text = "\n".join(text for text, _ in eligible_references)
+            aggregate_any_ok = not anchor.any_of or any(
+                _normal(item, False) in aggregate_text for item in anchor.any_of
+            )
+            aggregate_all_ok = all(
+                _normal(item, False) in aggregate_text for item in anchor.all_of
+            )
+            if aggregate_any_ok and aggregate_all_ok and eligible_references:
+                matches = 1
+                match_scope = "aggregate"
+                required_terms = [*anchor.all_of, *anchor.any_of]
+                for text, citation_id in eligible_references:
+                    if citation_id and any(
+                        _normal(item, False) in text for item in required_terms
+                    ):
+                        matched_citations.add(citation_id)
         anchor_citation_ids[anchor.anchor_id] = matched_citations
         matched = matches >= anchor.min_matching_fragments
         passed = matched or not anchor.required
@@ -759,6 +834,10 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
                     else "optional evidence anchor; enforced when its claim is emitted"
                 ),
                 turn_id=turn_id,
+                metadata={
+                    "match_scope": match_scope,
+                    "matched_citation_ids": sorted(matched_citations),
+                },
             )
         )
 

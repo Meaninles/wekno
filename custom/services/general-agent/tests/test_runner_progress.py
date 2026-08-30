@@ -490,11 +490,46 @@ class RunnerProgressTest(unittest.TestCase):
             "Actually, looking back at the tool results, I need to make one more retrieval call.",
             "The validation says I need fresh evidence. Let me extract it.",
             "I already hit the 4-call limit. Wait, I cannot fetch another result.",
+            "From the earlier successful tool results in this session, I have two source handles.",
+            "I've exhausted all 5 retrieval calls for this turn. Let me organize the evidence.",
+            "Since I've exhausted the retrieval budget, I must proceed with what I have.",
+            "The retrieval budget is exhausted. I need to use the evidence already returned.",
+            "I'll start by searching for the relevant management interface.",
+            "先搜索。</think>现在回答。",
         ):
             self.assertIn(
                 "current_turn_internal_planning_exposed",
                 {issue["code"] for issue in turn_contract_issues(payload, operational)},
             )
+
+    def test_repair_prompt_for_planning_leak_requires_direct_user_visible_answer(self):
+        payload = ChatPayload(
+            run_id="run-planning-repair",
+            session_id="session-planning-repair",
+            assistant_message_id="assistant-planning-repair",
+            query=(
+                "比较三个方案，并给出引用。\n"
+                "<runtime_response_contract>\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]\n"
+                "</runtime_response_contract>"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        prompt = build_turn_contract_runtime_repair_prompt(
+            payload,
+            [
+                {
+                    "code": "current_turn_internal_planning_exposed",
+                    "required_action": "Rewrite as user-visible content only.",
+                }
+            ],
+            1,
+            has_current_turn_evidence=True,
+        )
+        self.assertIn('"current_user_request": "比较三个方案，并给出引用。"', prompt)
+        self.assertIn("Start the replacement directly with the requested answer", prompt)
+        self.assertIn("Never discuss retrieval/tool budgets", prompt)
 
     def test_turn_contract_issues_reject_empty_terminal_completion(self):
         payload = ChatPayload(

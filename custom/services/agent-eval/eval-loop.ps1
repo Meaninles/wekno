@@ -45,7 +45,7 @@ if (-not $Manifest) {
     $Manifest = if ($Split -eq "sealed_holdout") {
         "/workspace/manifests/multiturn-holdout.v1.manifest.json"
     } else {
-        "/workspace/manifests/multiturn-ready.v3-evaluator-v5.manifest.json"
+        "/workspace/manifests/multiturn-ready.v3-evaluator-v6.manifest.json"
     }
 }
 if (-not $Policy) {

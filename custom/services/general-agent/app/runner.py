@@ -4577,16 +4577,20 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"let\s+me\s+(?:organize|answer|formulate|summarize|analy[sz]e|extract|write|produce|retrieve|search|fetch|inspect|read|try|call)|"
     r"i\s+(?:have\s+(?:the\s+)?retrieval\s+results|need\s+to\s+(?:rewrite|make|do|call|try|retrieve|search|fetch|check|read|produce|write)|will\s+rewrite)|"
     r"i(?:'ll|\s+will)\s+(?:check|inspect|read|open|extract|verify|call|try|retrieve|search|fetch|look\s+at)|"
+    r"i(?:'ll|\s+will)\s+start\s+by\s+(?:check|inspect|read|extract|verify|call|retrieve|search|fetch)|"
     r"actually[,.\s]+(?:looking\s+back|i(?:'ve|\s+have)|the\s+)|"
     r"(?:but\s+)?the\s+validation\s+(?:says|requires|is\s+telling)|"
-    r"i\s+(?:already\s+)?(?:hit|reached|exhausted).{0,80}(?:limit|budget|calls?)|"
+    r"(?:since\s+)?i(?:'ve|\s+have|\s+)?\s*(?:already\s+)?(?:hit|reached|exhausted).{0,80}(?:limit|budget|calls?|retrieval)|"
+    r"the\s+(?:retrieval|tool|search)\s+budget\s+is\s+exhausted|"
     r"wait[,.!\s]+i\s+|"
     r"i've\s+retrieved|i\s+see\s+(?:the\s+issue|there(?:'s|\s+is)\s+(?:still\s+)?an?\s+issue)|"
     r"looking\s+at\s+(?:the\s+returned\s+evidence|the\s+evidence|my\s+earlier\s+answer)|"
     r"the\s+issue\s+might\s+be|the\s+evidence\s+is\s+already|"
     r"i\s+see\s+that|"
     r"(?:the\s+)?tools?\s+(?:are\s+returning|returned).{0,80}(?:error|unavailable|no\s+such\s+tool)|"
-    r"from\s+(?:the\s+)?earlier\s+(?:grep|retrieval).{0,80}(?:result|evidence)|"
+    r"from\s+(?:the\s+)?earlier\s+(?:(?:successful\s+)?tool|grep|retrieval|knowledge[_ -]?search).{0,80}(?:result|output|evidence)|"
+    r"(?:source\s+references?|sources?)\s+with\s+(?:citation\s+)?handles?|"
+    r"the\s+evidence\s+situation\s+is|i\s+cannot\s+make\s+more\s+tool\s+calls|"
     r"let\s+me\s+(?:think|check)|the\s+validation\s+says|"
     r"(?:好的[，,]?\s*)?.{0,80}runtime_response_contract|"
     r"现在我已获得|已(?:获取|获得)全部所需证据|"
@@ -5014,6 +5018,13 @@ def internal_planning_excerpt(answer: str) -> str:
     """Return a short excerpt when user-visible output contains repair narration."""
 
     value = (answer or "").strip()
+    think_tag = re.search(r"</?think(?:ing)?>", value[:2400], re.IGNORECASE)
+    if think_tag:
+        line_start = value.rfind("\n", 0, think_tag.start()) + 1
+        line_end = value.find("\n", think_tag.end())
+        if line_end < 0:
+            line_end = min(len(value), think_tag.end() + 240)
+        return value[line_start:line_end].strip()[:240]
     match = INTERNAL_PLANNING_LINE_RE.search(value[:2400])
     if match:
         line_end = value.find("\n", match.start())
@@ -5372,11 +5383,22 @@ def build_turn_contract_runtime_repair_prompt(
             "additional focused retrieval calls required by the issues. Copy only current-turn cite_exactly handles "
             "beside the claims they directly support."
         )
+    presentation_action = ""
+    if "current_turn_internal_planning_exposed" in issue_codes:
+        presentation_action = (
+            "Treat every word of the rejected draft as non-user-visible scratch work. Start the replacement directly "
+            "with the requested answer. Never discuss retrieval/tool budgets, tool names or results, chunks, source "
+            "handles, citation diagnostics, saved outputs, contracts, reasoning, or the act of composing the answer. "
+            "If the available evidence cannot support a requested fact, state that user-facing limitation briefly "
+            "instead of narrating how retrieval failed."
+        )
 
     return f"""
 The trusted WeKnora eval runtime rejected the previous terminal draft. Continue the SAME current user request in this resumed SDK session and replace that draft. This is the one runtime-authorized repair attempt; it is not a new user request.
 
 {evidence_action}
+
+{presentation_action}
 
 The `current_user_request` below is the active task and overrides every earlier topic in the resumed session. Answer that exact request, not the preceding turn. Apply every required_action in this machine-readable validation result:
 {json.dumps(repair, ensure_ascii=False, indent=2)}

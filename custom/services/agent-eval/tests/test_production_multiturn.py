@@ -74,7 +74,7 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
                 (
                      ROOT
                      / "manifests"
-                     / f"production-multiturn-ready.v1-{stage}-evaluator-v5.manifest.json"
+                     / f"production-multiturn-ready.v1-{stage}-evaluator-v6.manifest.json"
                 ).read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["dataset_sha256"], digest)
@@ -112,7 +112,7 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
         manifest_path = (
             ROOT
             / "manifests"
-            / "production-multiturn-holdout.v1-evaluator-v5.manifest.json"
+            / "production-multiturn-holdout.v1-evaluator-v6.manifest.json"
         )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["case_count"], 3)

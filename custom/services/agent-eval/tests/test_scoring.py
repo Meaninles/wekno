@@ -221,6 +221,43 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_action_boundary_accepts_coordinated_negation_without_semantic_reversal(self) -> None:
+        contract = TurnContract(
+            conversation_state=ConversationStateContract(
+                action_boundaries=[
+                    TextRule(rule_id="no-install", any_of=["不安装"]),
+                ]
+            )
+        )
+        spec = self.spec.model_copy(
+            update={"turns": [self.spec.turns[0].model_copy(update={"contract": contract})]}
+        )
+
+        def verdict(answer: str) -> Verdict:
+            return score_case(
+                spec,
+                CaseRun(
+                    case_id=spec.case_id,
+                    family_id=spec.family_id,
+                    split=spec.split,
+                    verdict=Verdict.INVALID,
+                    turns=[
+                        ObservedTurn(
+                            turn_id="turn-1",
+                            session_id="session",
+                            content=answer,
+                            is_completed=True,
+                        )
+                    ],
+                ),
+            ).verdict
+
+        self.assertEqual(
+            verdict("行动边界：不实际执行搜索或安装任何 Skill。"),
+            Verdict.PASS,
+        )
+        self.assertEqual(verdict("系统不会阻止用户安装该 Skill。"), Verdict.FAIL)
+
     def test_state_scope_accepts_presentation_colon_and_containment_paraphrase(self) -> None:
         contract = TurnContract(
             conversation_state=ConversationStateContract(
@@ -341,6 +378,82 @@ class ScoringTests(unittest.TestCase):
                 for score in result.scores
             )
         )
+
+        for leak in (
+            "I'll start by searching for the relevant interface.</think>",
+            "The retrieval budget is exhausted. I need to use earlier evidence.",
+            "From the earlier successful tool results, I have two sources.",
+        ):
+            with self.subTest(leak=leak):
+                leaked = observed.model_copy(update={"content": leak})
+                leaked_result = score_case(
+                    spec,
+                    CaseRun(
+                        case_id=spec.case_id,
+                        family_id=spec.family_id,
+                        split=spec.split,
+                        verdict=Verdict.INVALID,
+                        turns=[leaked],
+                    ),
+                )
+                self.assertEqual(leaked_result.verdict, Verdict.FAIL)
+
+    def test_evidence_anchor_all_of_can_be_covered_across_valid_references(self) -> None:
+        contract = TurnContract(
+            required_claims=[
+                TextRule(rule_id="types", all_of=["轻量", "预加载", "专业"]),
+            ],
+            evidence_anchors=[
+                EvidenceAnchor(
+                    anchor_id="types-evidence",
+                    all_of=["轻量", "预加载", "专业"],
+                )
+            ],
+            min_evidence_anchors=1,
+            citation_required=True,
+            min_citations=1,
+        )
+        spec = self.spec.model_copy(
+            update={"turns": [self.spec.turns[0].model_copy(update={"contract": contract})]}
+        )
+
+        def scored(references: list[dict[str, object]]):
+            return score_case(
+                spec,
+                CaseRun(
+                    case_id=spec.case_id,
+                    family_id=spec.family_id,
+                    split=spec.split,
+                    verdict=Verdict.INVALID,
+                    turns=[
+                        ObservedTurn(
+                            turn_id="turn-1",
+                            session_id="session",
+                            content=(
+                                '轻量、预加载、专业三类分别说明。'
+                                '<src id="S1" /><src id="S2" /><src id="S3" />'
+                            ),
+                            references=references,
+                            retrieval_stats={"documents": 1, "total": len(references)},
+                            is_completed=True,
+                        )
+                    ],
+                ),
+            )
+
+        references = [
+            {"id": "light", "evidence_content": "轻量技能", "metadata": {"citation_id": "S1"}},
+            {"id": "runtime", "evidence_content": "预加载运行时技能", "metadata": {"citation_id": "S2"}},
+            {"id": "professional", "evidence_content": "专业技能", "metadata": {"citation_id": "S3"}},
+        ]
+        result = scored(references)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        anchor = next(score for score in result.scores if score.name == "evidence_anchor.types-evidence")
+        self.assertEqual(anchor.metadata["match_scope"], "aggregate")
+        self.assertEqual(anchor.metadata["matched_citation_ids"], ["S1", "S2", "S3"])
+
+        incomplete = scored(references[:2])
+        self.assertEqual(incomplete.verdict, Verdict.FAIL)
 
     def test_citation_integrity_is_identifier_based_not_reference_order_based(self) -> None:
         observed = ObservedTurn(

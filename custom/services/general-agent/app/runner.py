@@ -96,23 +96,7 @@ def query_requests_broad_synthesis(query: str) -> bool:
 
 def query_requests_comparison(query: str) -> bool:
     value = original_query_without_runtime_contract(query).lower()
-    return any(
-        marker in value
-        for marker in (
-            "比较",
-            "对比",
-            "区别",
-            "区分",
-            "辨析",
-            "差异",
-            "分别解释",
-            "compare",
-            "distinguish",
-            "differentiate",
-            "versus",
-            " vs ",
-        )
-    )
+    return any(marker in value for marker in ("比较", "对比", "区别", "差异", "compare", "versus", " vs "))
 
 
 def effective_max_turns(payload: ChatPayload) -> int:
@@ -3124,29 +3108,6 @@ def build_prompt(
         "Use the configured user language for every user-visible output, and do not start background tasks."
     )
     parts.append("</task_reminder>")
-    # Long conversations place a large history block after the first copy of
-    # the request. Repeat only the user-authored current request at the final
-    # recency position so an older topic cannot become the run goal. Runtime
-    # contracts remain in the authoritative first block and system policy.
-    current_request = original_query_without_runtime_contract(payload.query) or payload.query
-    parts.append('<current_request_checkpoint source="current chat input" priority="highest">')
-    parts.append(current_request)
-    topics = required_evidence_topics(payload.query)
-    if topics:
-        parts.append(
-            "Named evidence subjects from this current request: "
-            + json.dumps(topics, ensure_ascii=False)
-        )
-        searches = required_evidence_searches(payload.query)
-        if searches:
-            parts.append(
-                "Use these bounded current-request search intents when evidence is still missing: "
-                + json.dumps(searches, ensure_ascii=False)
-            )
-    parts.append(
-        "Answer this current request only. Return user-visible content, not retrieval, validation, or planning narration."
-    )
-    parts.append("</current_request_checkpoint>")
     return "\n".join(parts)
 
 
@@ -4613,8 +4574,6 @@ TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 1
 INTERNAL_PLANNING_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:"
     r"now\s+(?:i\s+have|let\s+me|rewriting|i(?:'ll|\s+will)\s+write)|"
-    r"i(?:'ll|\s+will)\s+check\s+the\s+output|"
-    r"looking\s+back\s+at\s+the\s+actual\s+tool\s+results|"
     r"let\s+me\s+(?:organize|answer|formulate|summarize|analy[sz]e)|"
     r"i\s+(?:have\s+(?:the\s+)?retrieval\s+results|need\s+to\s+rewrite|will\s+rewrite)|"
     r"i've\s+retrieved|i\s+see\s+(?:the\s+issue|there(?:'s|\s+is)\s+(?:still\s+)?an?\s+issue)|"
@@ -4623,9 +4582,7 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r"i\s+see\s+that|"
     r"(?:the\s+)?tools?\s+(?:are\s+returning|returned).{0,80}(?:error|unavailable|no\s+such\s+tool)|"
     r"from\s+(?:the\s+)?earlier\s+(?:grep|retrieval).{0,80}(?:result|evidence)|"
-    r"let\s+me\s+(?:think|check)|the\s+validation\s+says|but\s+the\s+validation|"
-    r"the\s+knowledge[_\s-]?search\s+call\s+returned|"
-    r"since\s+i(?:'ve|\s+have)\s+exhausted|wait,?\s+i\s+cannot|"
+    r"let\s+me\s+(?:think|check)|the\s+validation\s+says|"
     r"(?:好的[，,]?\s*)?.{0,80}runtime_response_contract|"
     r"现在我已获得|已(?:获取|获得)全部所需证据|"
     r"现在再来确认.{0,100}(?:已在前面的chunk中获取|现在我有完整的证据)|"

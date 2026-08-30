@@ -246,6 +246,7 @@ class RunnerProgressTest(unittest.TestCase):
                 "code": "current_turn_evidence_named_identifiers_incomplete",
                 "missing_identifiers": ["execute_skill_script"],
                 "required_action": "覆盖两个标识。",
+                "excerpt": "current_turn_evidence 为空，准备继续检索。",
             }
         ]
 
@@ -274,6 +275,8 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertNotIn('"rejected_draft"', captured["prompt"])
         self.assertIn('"可引用依据"', captured["prompt"])
         self.assertNotIn('"current_turn_evidence"', captured["prompt"])
+        self.assertNotIn("准备继续检索", captured["prompt"])
+        self.assertIn("不超过 480 个字符为目标", captured["prompt"])
 
     def test_turn_contract_detects_chinese_retrieval_budget_narration(self):
         payload = ChatPayload(
@@ -1822,7 +1825,7 @@ EOF""",
             llm=LLMConfig(model_name="test"),
             tool_callback_url="http://runtime-entry/internal/tools/call",
         )
-        self.assertEqual(retrieval_tool_budget(synthesis), 8)
+        self.assertEqual(retrieval_tool_budget(synthesis), 5)
 
         synthesis.query = (
             "回答多个主题。\n本轮明确要求文档依据或引用。\n"

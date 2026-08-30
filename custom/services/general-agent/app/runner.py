@@ -4262,9 +4262,9 @@ def retrieval_tool_budget(payload: ChatPayload) -> int:
     if topics:
         return min(8, max(4, len(topics) + 2))
     if query_requests_broad_synthesis(payload.query):
-        return 8
+        return 5
     if query_requests_comparison(payload.query):
-        return 6
+        return 5
     return 4
 
 
@@ -4689,7 +4689,7 @@ DEFERRED_COMPARISON_CONTRACT_MARKER = "用户明确要求不作最终选择"
 # and repeated retrieval results from crowding the actual answer out of context.
 TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 2
 TURN_CONTRACT_MAX_RETRIEVAL_REPAIR_ATTEMPTS = 1
-TURN_CONTRACT_MAX_ISOLATED_REWRITE_ATTEMPTS = 1
+TURN_CONTRACT_MAX_ISOLATED_REWRITE_ATTEMPTS = 2
 TURN_CONTRACT_FAILURE_USER_MESSAGE = "智能体未能生成满足当前请求约束的完整回答，请重试"
 INTERNAL_PLANNING_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:"
@@ -5901,9 +5901,9 @@ def compact_turn_contract_evidence(
     evidence_by_id: dict[str, str],
     rejected_draft: str = "",
     *,
-    max_references: int = 12,
-    max_chars_per_reference: int = 1600,
-    max_total_chars: int = 16_000,
+    max_references: int = 8,
+    max_chars_per_reference: int = 1400,
+    max_total_chars: int = 10_000,
 ) -> list[dict[str, str]]:
     """Select a small, deduplicated evidence packet for the isolated rewrite."""
 
@@ -5945,6 +5945,38 @@ def compact_turn_contract_evidence(
         )
         total += len(bounded)
     return selected
+
+
+def compact_turn_contract_rewrite_issues(
+    issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep repair requirements without replaying rejected answer fragments."""
+
+    field_labels = {
+        "missing_topics": "需覆盖主题",
+        "missing_identifiers": "需覆盖标识",
+        "missing_segments": "需补直接引用的条目",
+        "unverified_ids": "不得使用的未核验引用",
+        "ranking_terms": "需移除的排序表达",
+        "heuristic_terms": "需移除的假设表达",
+        "relation_terms": "需移除的无依据关系表达",
+        "maximum_chars": "硬性字符上限",
+    }
+    compacted: list[dict[str, Any]] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        item: dict[str, Any] = {}
+        required_action = str(issue.get("required_action") or "").strip()
+        if required_action:
+            item["修复要求"] = required_action
+        for field, label in field_labels.items():
+            value = issue.get(field)
+            if value not in (None, "", []):
+                item[label] = value
+        if item:
+            compacted.append(item)
+    return compacted
 
 
 def compact_turn_contract_user_history(
@@ -6000,7 +6032,7 @@ async def run_turn_contract_isolated_rewrite(
         "当前请求": original_query_without_runtime_contract(payload.query),
         "仅用于指代解析的用户历史": compact_turn_contract_user_history(payload),
         "可信回答约束": runtime_response_contract_text(payload.query),
-        "需修复的结构问题": issues,
+        "需修复的结构问题": compact_turn_contract_rewrite_issues(issues),
         "可引用依据": compact_turn_contract_evidence(
             payload.query,
             issues,
@@ -6012,9 +6044,20 @@ async def run_turn_contract_isolated_rewrite(
         "不得调用工具，不得补充证据中没有的产品事实，不得采用历史助手回答作为事实。"
         "只输出给用户看的最终正文，不输出思考、计划、检索过程、校验信息、修改说明或任何上下文字段名。"
     )
+    maximum_match = TURN_RESPONSE_MAX_CHARS_RE.search(payload.query or "")
+    length_instruction = ""
+    if maximum_match:
+        hard_maximum = int(maximum_match.group(1))
+        target_maximum = max(80, int(hard_maximum * 0.8))
+        length_instruction = (
+            f"最终全文（包括 Markdown 和引用句柄）硬性不得超过 {hard_maximum} 个字符；"
+            f"请以不超过 {target_maximum} 个字符为目标预留余量。"
+            "若篇幅紧张，用每个必答点一条最短事实句加直接引用，删除标题、背景和重复说明。\n"
+        )
     prompt = (
         "请重写一份完整、直接、可独立阅读的最终回答，并修复上下文列出的结构问题。\n"
-        "事实只能来自可引用依据；每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
+        + length_instruction
+        + "事实只能来自可引用依据；每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
         "不得编造或改写引用句柄。可引用依据非空时，不得声称本轮证据为空、未检索或仍需检索；"
         "若某个具体事实确实没有直接证据，只对该事实简短标明未知或缺口，不要叙述检索过程。"
         "不得输出引用占位符、检索诊断、工具名、分片标识或类似‘需要引用’的编辑备注。\n"
@@ -7759,7 +7802,7 @@ class GeneralAgentRunner:
                             active_answer_id = ""
                             reset_text_stream_state()
                             continue
-                    if (
+                    while (
                         contract_issues
                         and turn_contract_isolated_rewrite_attempts
                         < TURN_CONTRACT_MAX_ISOLATED_REWRITE_ATTEMPTS
@@ -7830,6 +7873,20 @@ class GeneralAgentRunner:
                             # message. The eval client records the terminal SSE
                             # error and stops this contaminated session instead
                             # of scoring the message as a completed answer.
+                            yield RunEvent(
+                                type="progress",
+                                content="最终回答未通过机械约束检查",
+                                message="最终回答未通过机械约束检查",
+                                data={
+                                    "tool_name": "assistant_status",
+                                    "tool_call_id": "turn-contract-final-validation",
+                                    "phase": "error",
+                                    "message": "最终回答未通过机械约束检查",
+                                    "transient": True,
+                                    "issue_codes": sorted(final_codes),
+                                    "rewrite_attempts": turn_contract_isolated_rewrite_attempts,
+                                },
+                            )
                             raise RuntimeError(TURN_CONTRACT_FAILURE_USER_MESSAGE)
                     elif (
                         turn_contract_runtime_repair_attempts

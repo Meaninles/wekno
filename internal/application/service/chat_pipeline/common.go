@@ -174,6 +174,9 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 	// Keep the citation-use block terminal even after adding the current-turn
 	// response contract. This preserves the established citation salience rule.
 	currentContent = sourcerefs.PlaceTerminalCitationInstruction(currentContent, chatManage.CitationResult)
+	if outputDirective := conversationmemory.TerminalGenerationDirective(chatManage.Query); outputDirective != "" {
+		currentContent += "\n\n" + outputDirective
+	}
 	userMsg := chat.Message{
 		Role:    "user",
 		Content: currentContent,

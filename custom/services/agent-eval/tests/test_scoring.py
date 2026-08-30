@@ -156,6 +156,43 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_state_scope_accepts_presentation_colon_and_containment_paraphrase(self) -> None:
+        contract = TurnContract(
+            conversation_state=ConversationStateContract(
+                active_facts=[
+                    TextRule(
+                        rule_id="scope",
+                        all_of=["流程", "费用分析", "不包含硬件采购"],
+                    )
+                ]
+            )
+        )
+        spec = self.spec.model_copy(
+            update={"turns": [self.spec.turns[0].model_copy(update={"contract": contract})]}
+        )
+        for answer in (
+            "已确认范围：流程、费用分析；不包含：硬件采购。",
+            "分析范围为流程和费用分析（不含硬件采购）。",
+        ):
+            with self.subTest(answer=answer):
+                observed = ObservedTurn(
+                    turn_id="turn-1",
+                    session_id="session",
+                    content=answer,
+                    is_completed=True,
+                )
+                result = score_case(
+                    spec,
+                    CaseRun(
+                        case_id=spec.case_id,
+                        family_id=spec.family_id,
+                        split=spec.split,
+                        verdict=Verdict.INVALID,
+                        turns=[observed],
+                    ),
+                )
+                self.assertEqual(result.verdict, Verdict.PASS)
+
     def test_forbidden_examples_inside_explicit_absence_are_not_assertions(self) -> None:
         contract = TurnContract(
             forbidden_claims=[

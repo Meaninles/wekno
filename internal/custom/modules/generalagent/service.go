@@ -494,6 +494,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		req.Query,
 		boundaryUserStatements...,
 	)
+	finalAnswer = conversationmemory.NormalizeExplicitRequestedUnknownFields(finalAnswer, req.Query)
 	finalAnswer = conversationmemory.NormalizeDeferredComparisonRelationships(finalAnswer, req.Query)
 	finalAnswer = conversationmemory.NormalizeStateAuditSections(
 		finalAnswer,

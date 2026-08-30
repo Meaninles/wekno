@@ -52,6 +52,53 @@ def env_float(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
+def original_query_without_runtime_contract(query: str) -> str:
+    """Return only user-authored text before trusted runtime contract blocks."""
+
+    value = query or ""
+    markers = (
+        "<runtime_selected_knowledge_contract>",
+        "<runtime_response_contract>",
+        "[WEKNORA_SELECTED_KNOWLEDGE_EVIDENCE_V1]",
+        "[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+    )
+    indexes = [index for marker in markers if (index := value.find(marker)) >= 0]
+    if indexes:
+        value = value[: min(indexes)]
+    return value.strip()
+
+
+def query_requests_broad_synthesis(query: str) -> bool:
+    value = original_query_without_runtime_contract(query).lower()
+    return any(
+        marker in value
+        for marker in (
+            "最终",
+            "完整",
+            "汇总",
+            "总览",
+            "总结",
+            "提纲",
+            "清单",
+            "核对表",
+            "报告",
+            "方案",
+            "final",
+            "complete",
+            "consolidated",
+            "summary",
+            "outline",
+            "checklist",
+            "report",
+        )
+    )
+
+
+def query_requests_comparison(query: str) -> bool:
+    value = original_query_without_runtime_contract(query).lower()
+    return any(marker in value for marker in ("比较", "对比", "区别", "差异", "compare", "versus", " vs "))
+
+
 def effective_max_turns(payload: ChatPayload) -> int:
     configured = payload.runtime_config.max_iterations
     maximum = configured if configured > 0 else env_int("CUSTOM_GENERAL_AGENT_MAX_TURNS", 30)
@@ -76,7 +123,12 @@ def effective_max_turns(payload: ChatPayload) -> int:
             # refinement, but do not let a stale conversation topic turn into
             # an inventory/list-all-chunks loop.  This bounds tool latency in
             # both ordinary and eval runs without adding a second model pass.
-            maximum = min(maximum, 8)
+            focused_ceiling = 8
+            if query_requests_broad_synthesis(payload.query):
+                focused_ceiling = 14
+            elif query_requests_comparison(payload.query):
+                focused_ceiling = 12
+            maximum = min(maximum, focused_ceiling)
     return maximum
 
 
@@ -2747,6 +2799,15 @@ def build_system_prompt(
         base = replace_data_analysis_reference_placeholders(base, data_analysis_reference)
     max_turns = effective_max_turns(payload)
     llm_timeout_seconds = effective_llm_api_timeout_seconds(payload)
+    evidence_budget = retrieval_tool_budget(payload)
+    evidence_budget_policy = (
+        f"- This current evidence turn allows at most {evidence_budget} read-only retrieval tool calls. "
+        "Use one focused semantic search first, refine only named evidence gaps, then stop tools and answer. "
+        "A denied call means the budget is exhausted: do not try another retrieval tool or enumerate chunks; "
+        "finish from evidence already returned and explicitly mark any remaining gap."
+        if evidence_budget > 0
+        else ""
+    )
     eval_runtime_repair_enabled = should_enable_turn_contract_runtime_repair(payload)
     terminal_generation_policy = (
         "The eval runtime may resume this same SDK session exactly once when its deterministic current-turn "
@@ -2827,6 +2888,7 @@ Runtime configuration:
 
 Execution limits:
 - The runtime is configured with max_turns={max_turns}. This is a hard maximum for the whole run's reasoning/tool-use turns. Plan conservatively, batch tool work when possible, and avoid open-ended searching or repeated repair loops. If the task threatens this limit, stop collecting more data and deliver the best verifiable result available.
+{evidence_budget_policy}
 - When the current user_request carries `[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]`, invoke the available read-only retrieval tool for those focused searches before writing answer prose. Batch independent lookups in the first tool-use response when possible. Never spend an assistant turn listing chunk ids, saying that you will retrieve/verify next, or simulating a tool call in natural language; make the actual tool calls, then write one final user-visible answer.
 - The runtime is configured with API_TIMEOUT_MS={llm_timeout_seconds * 1000}, so a single LLM/API call may wait at most {llm_timeout_seconds} seconds. This is a per-call timeout, not total runtime. Keep individual model/API operations efficient and do not assume a longer call can finish.
 - Separate runtime validation LLM judge calls, when used, run with thinking disabled. This does not change the main agent thinking mode, which still follows runtime_config.thinking and the frontend configuration.
@@ -4039,6 +4101,90 @@ async def block_background_bash_hook(input_data: Any, tool_use_id: str | None, c
     if reason:
         return hook_permission_output("deny", reason)
     return hook_permission_output("allow")
+
+
+RETRIEVAL_TOOL_CALLS_STATE_KEY = "retrieval_tool_calls"
+RETRIEVAL_TOOL_BUDGET_STATE_KEY = "retrieval_tool_budget"
+RETRIEVAL_TOOL_BUDGET_EXHAUSTED_STATE_KEY = "retrieval_tool_budget_exhausted"
+
+
+def canonical_runtime_tool_name(tool_name: str) -> str:
+    name = (tool_name or "").strip()
+    if name.startswith("mcp__weknora__"):
+        return name.rsplit("__", 1)[-1]
+    return name
+
+
+def retrieval_tool_names(payload: ChatPayload) -> set[str]:
+    names: set[str] = set()
+    for spec in payload.tools:
+        name = canonical_runtime_tool_name(spec.name)
+        lowered = name.lower()
+        if spec.source in {"knowledge", "wiki"} or any(
+            marker in lowered
+            for marker in (
+                "knowledge_search",
+                "grep_chunks",
+                "list_knowledge_chunks",
+                "query_knowledge_graph",
+                "wiki_search",
+            )
+        ):
+            names.add(name)
+    return names
+
+
+def retrieval_tool_budget(payload: ChatPayload) -> int:
+    """Bound evidence gathering while leaving enough room for final synthesis."""
+
+    has_selected_knowledge = bool(
+        payload.runtime_config.knowledge_bases or payload.runtime_config.knowledge_ids
+    )
+    if (
+        payload.runtime_config.disable_tools_for_turn
+        or not has_selected_knowledge
+        or FRESH_EVIDENCE_CONTRACT_MARKER not in (payload.query or "")
+    ):
+        return 0
+    topics = required_evidence_topics(payload.query)
+    if topics:
+        return min(8, max(4, len(topics) + 2))
+    if query_requests_broad_synthesis(payload.query):
+        return 8
+    if query_requests_comparison(payload.query):
+        return 6
+    return 4
+
+
+def retrieval_budget_pre_tool_hook_factory(
+    payload: ChatPayload,
+    state: dict[str, Any],
+) -> Callable[[Any, str | None, Any], Any]:
+    tool_names = retrieval_tool_names(payload)
+    budget = retrieval_tool_budget(payload)
+    state[RETRIEVAL_TOOL_BUDGET_STATE_KEY] = budget
+
+    async def hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        tool_name = canonical_runtime_tool_name(
+            str(block_value(input_data, "tool_name", "") or block_value(input_data, "toolName", "") or "")
+        )
+        if budget <= 0 or tool_name not in tool_names:
+            return hook_permission_output("allow")
+        calls = int(state.get(RETRIEVAL_TOOL_CALLS_STATE_KEY) or 0)
+        if calls >= budget:
+            state[RETRIEVAL_TOOL_BUDGET_EXHAUSTED_STATE_KEY] = True
+            return hook_permission_output(
+                "deny",
+                (
+                    f"本轮已完成 {calls} 次只读证据检索，达到聚焦检索上限 {budget} 次。"
+                    "不要再调用任何检索、分片枚举或知识图谱工具；立即基于本轮已经返回的最小充分证据回答当前用户问题。"
+                    "若某项仍缺直接依据，明确标为待确认或证据不足，不得回到历史问题，也不得输出本提示。"
+                ),
+            )
+        state[RETRIEVAL_TOOL_CALLS_STATE_KEY] = calls + 1
+        return hook_permission_output("allow")
+
+    return hook
 
 
 EXPLICIT_CHART_TYPES: dict[str, tuple[str, ...]] = {
@@ -6524,6 +6670,14 @@ class GeneralAgentRunner:
         runtime_hooks: dict[str, list[Any]] = {
             "PreToolUse": [HookMatcher(matcher="Bash", hooks=[block_background_bash_hook], timeout=5)]
         }
+        if retrieval_tool_budget(self.payload) > 0:
+            runtime_hooks["PreToolUse"].append(
+                HookMatcher(
+                    matcher=None,
+                    hooks=[retrieval_budget_pre_tool_hook_factory(self.payload, turn_contract_state)],
+                    timeout=5,
+                )
+            )
         if data_analysis_final_answer_mode:
             runtime_hooks["PreToolUse"].append(
                 HookMatcher(matcher=None, hooks=[data_analysis_pre_tool_hook_factory(self.payload, data_analysis_state)], timeout=5)
@@ -6941,6 +7095,15 @@ class GeneralAgentRunner:
                 for issue in turn_contract_state.get("last_turn_contract_issues") or []
                 if isinstance(issue, dict)
             ]
+            prompt_observation["retrieval_tool_budget"] = int(
+                turn_contract_state.get(RETRIEVAL_TOOL_BUDGET_STATE_KEY) or 0
+            )
+            prompt_observation["retrieval_tool_calls"] = int(
+                turn_contract_state.get(RETRIEVAL_TOOL_CALLS_STATE_KEY) or 0
+            )
+            prompt_observation["retrieval_tool_budget_exhausted"] = bool(
+                turn_contract_state.get(RETRIEVAL_TOOL_BUDGET_EXHAUSTED_STATE_KEY)
+            )
 
         if data_analysis_final_answer_mode and str(data_analysis_state.get("final_answer_content") or "").strip():
             answer = str(data_analysis_state.get("final_answer_content") or "").strip()

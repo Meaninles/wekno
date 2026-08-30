@@ -202,10 +202,13 @@ func TestSelectedKnowledgeEvidenceDirectiveIsScopedAndBounded(t *testing.T) {
 	}
 }
 
-func TestTerminalGenerationDirectiveOnlyTargetsDeferredComparisons(t *testing.T) {
+func TestTerminalGenerationDirectiveCarriesFinalLengthAndDeferredRules(t *testing.T) {
 	query := "依据已选制度只比较公开采购、询比、竞价和竞争谈判，不要给最终建议。"
 	got := TerminalGenerationDirective(query)
 	for _, want := range []string{
+		"[WEKNORA_TERMINAL_RESPONSE_CHECK]",
+		"不得超过700个中文字符",
+		"不得回答历史问题",
 		"[WEKNORA_TERMINAL_OUTPUT_CHECK]",
 		"每个未知项都保持未知",
 		"第二段必须另起一段并以“待确认：”开头",
@@ -219,8 +222,11 @@ func TestTerminalGenerationDirectiveOnlyTargetsDeferredComparisons(t *testing.T)
 			t.Fatalf("terminal directive missing %q: %s", want, got)
 		}
 	}
-	if got := TerminalGenerationDirective("只回答第三十六条定义并引用。"); got != "" {
-		t.Fatalf("ordinary request gained terminal directive: %s", got)
+	if got := TerminalGenerationDirective("只回答第三十六条定义并引用。"); !strings.Contains(got, "不得超过500个中文字符") || strings.Contains(got, "TERMINAL_OUTPUT_CHECK") {
+		t.Fatalf("narrow request has wrong terminal directive: %s", got)
+	}
+	if got := TerminalGenerationDirective("介绍一下这个概念。"); got != "" {
+		t.Fatalf("unbounded ordinary request gained terminal directive: %s", got)
 	}
 }
 
@@ -379,6 +385,44 @@ func TestNormalizeExplicitActionBoundariesCoversSendAndNonStateExecution(t *test
 	if !strings.Contains(managed, "支持列出和查看能力") ||
 		!strings.Contains(managed, "不进行新增、修改或删除") {
 		t.Fatalf("skill mutation boundary damaged the informational answer: %s", managed)
+	}
+}
+
+func TestNormalizeExplicitActionBoundariesPreservesBusinessTables(t *testing.T) {
+	query := "比较三类Skill的适用场景；当前没有脚本执行授权。"
+	answer := `| 类型 | 机制 | 适用场景 |
+| --- | --- | --- |
+| 脚本Skill | 需要执行脚本来完成处理 | 受控自动化 |
+| 轻量Skill | 提示词注入 | 写作约束 |`
+
+	got := NormalizeExplicitActionBoundaries(answer, query)
+	if !strings.Contains(got, "| 脚本Skill | 需要执行脚本来完成处理 | 受控自动化 |") {
+		t.Fatalf("business table row was replaced by a permission row: %s", got)
+	}
+	if !strings.Contains(got, "- **脚本权限**：不得执行脚本") {
+		t.Fatalf("canonical action boundary was not appended separately: %s", got)
+	}
+	if strings.Contains(got, "| 脚本权限 | 不得执行脚本 |") {
+		t.Fatalf("two-column permission row corrupted the business table: %s", got)
+	}
+	if twice := NormalizeExplicitActionBoundaries(got, query); twice != got {
+		t.Fatalf("business-table boundary repair is not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeExplicitRequestedUnknownFieldsUsesCurrentUserField(t *testing.T) {
+	query := "请复述边界和仍需用户确认的目标Skill名称。"
+	answer := "团队尚未锁定具体目标 Skill 名称，请先从搜索结果中确认完整名称。"
+
+	got := NormalizeExplicitRequestedUnknownFields(answer, query)
+	if !strings.Contains(got, "**目标Skill名称**：待确认") {
+		t.Fatalf("explicitly requested unknown field was not canonicalized: %s", got)
+	}
+	if twice := NormalizeExplicitRequestedUnknownFields(got, query); twice != got {
+		t.Fatalf("requested unknown normalization is not idempotent:\n%s", twice)
+	}
+	if changed := NormalizeExplicitRequestedUnknownFields(answer, "请介绍如何选择Skill。"); changed != answer {
+		t.Fatalf("ordinary informational answer was rewritten: %s", changed)
 	}
 }
 

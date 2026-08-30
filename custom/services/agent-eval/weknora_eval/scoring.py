@@ -38,7 +38,8 @@ TEXT_EQUIVALENCE_GROUPS = (
     ("可以公开", "可公开"),
     (
         "未提供", "没有提供", "尚未提供", "未说明", "未知", "待确认", "未确认",
-        "尚未确认", "待确定", "未确定", "尚未确定",
+        "尚未确认", "待确定", "未确定", "尚未确定", "未锁定", "尚未锁定",
+        "未找到", "尚未找到", "需用户确认", "需要用户确认",
     ),
     ("废弃", "废止", "作废", "失效"),
     ("不发送", "不会发送", "不得发送", "不要发送", "未发送"),
@@ -54,6 +55,7 @@ TEXT_EQUIVALENCE_GROUPS = (
         "主张不成立", "核验为不成立", "已核验为不成立",
     ),
 )
+NEGATED_MEMBERSHIP_PREFIXES = ("不包含", "不包括", "不含")
 COMPOUND_ACTION_SUFFIXES = (
     "评估", "审批", "审核", "确认", "核验", "验证", "检查", "执行", "处理", "更新",
     "发送", "创建", "修改", "安装", "新增", "删除",
@@ -85,16 +87,35 @@ def _normal(value: str, case_sensitive: bool) -> str:
     # Apply the same normalization to observations and contract fragments so
     # English rules with spaces remain symmetric as well.
     without_markdown = re.sub(r"[*_`~]", "", value)
-    collapsed = re.sub(r"\s+", "", without_markdown)
+    # A colon commonly separates a state label/predicate from its value
+    # (``不包含：硬件采购``). It has no semantic force and must not make an
+    # otherwise contiguous Chinese contract phrase fail.
+    without_presentation_colons = re.sub(r"[:：]", "", without_markdown)
+    collapsed = re.sub(r"\s+", "", without_presentation_colons)
     return collapsed if case_sensitive else collapsed.casefold()
 
 
 def _equivalent_terms(item: str, case_sensitive: bool) -> tuple[str, ...]:
     probe = _normal(item, case_sensitive)
+    terms: tuple[str, ...] = (item,)
     for group in TEXT_EQUIVALENCE_GROUPS:
         if probe in {_normal(candidate, case_sensitive) for candidate in group}:
-            return group
-    return (item,)
+            terms = group
+            break
+    expanded: list[str] = []
+    for term in terms:
+        normalized = _normal(term, case_sensitive)
+        expanded.append(normalized)
+        for prefix in NEGATED_MEMBERSHIP_PREFIXES:
+            normalized_prefix = _normal(prefix, case_sensitive)
+            if normalized.startswith(normalized_prefix):
+                suffix = normalized[len(normalized_prefix):]
+                expanded.extend(
+                    _normal(alternative, case_sensitive) + suffix
+                    for alternative in NEGATED_MEMBERSHIP_PREFIXES
+                )
+                break
+    return tuple(dict.fromkeys(expanded))
 
 
 def _contains_term(value: str, item: str, case_sensitive: bool) -> bool:

@@ -59,6 +59,8 @@ from app.runner import (  # noqa: E402
     parse_mcp_tool_response_payload,
     result_message_text,
     record_turn_evidence,
+    retrieval_budget_pre_tool_hook_factory,
+    retrieval_tool_budget,
     runtime_summary,
     run_data_analysis_judge,
     sanitize_artifact_bytes,
@@ -268,6 +270,12 @@ class RunnerProgressTest(unittest.TestCase):
         payload.query = "解释当前知识库中的机制。\n本轮明确要求文档依据或引用。"
         payload.runtime_config.max_iterations = 30
         self.assertEqual(effective_max_turns(payload), 8)
+
+        payload.query = "形成最终培训提纲。\n本轮明确要求文档依据或引用。"
+        self.assertEqual(effective_max_turns(payload), 14)
+
+        payload.query = "比较三类机制。\n本轮明确要求文档依据或引用。"
+        self.assertEqual(effective_max_turns(payload), 12)
 
     def test_turn_contract_issues_bind_uncertainties_to_direct_evidence(self):
         payload = ChatPayload(
@@ -1355,6 +1363,78 @@ EOF""",
         )
 
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_retrieval_budget_hook_stops_repeated_chunk_enumeration(self):
+        payload = ChatPayload(
+            run_id="run-retrieval-budget",
+            session_id="session-retrieval-budget",
+            assistant_message_id="assistant-retrieval-budget",
+            query="解释当前知识库中的机制。\n本轮明确要求文档依据或引用。",
+            tools=[
+                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+                RuntimeToolSpec(name="grep_chunks", source="knowledge"),
+                RuntimeToolSpec(name="list_knowledge_chunks", source="knowledge"),
+                RuntimeToolSpec(name="read_skill", source="skill"),
+            ],
+            runtime_config=RuntimeConfigSpec(max_iterations=30, knowledge_bases=["kb-1"]),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        state = {}
+        hook = retrieval_budget_pre_tool_hook_factory(payload, state)
+        self.assertEqual(retrieval_tool_budget(payload), 4)
+
+        for index, name in enumerate(
+            ("knowledge_search", "grep_chunks", "list_knowledge_chunks", "grep_chunks"),
+            start=1,
+        ):
+            output = asyncio.run(
+                hook(
+                    {"tool_name": f"mcp__weknora__{name}", "tool_input": {}},
+                    f"toolu_{index}",
+                    {},
+                )
+            )
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+
+        denied = asyncio.run(
+            hook(
+                {"tool_name": "mcp__weknora__knowledge_search", "tool_input": {}},
+                "toolu_5",
+                {},
+            )
+        )
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("立即基于本轮已经返回", denied["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(state["retrieval_tool_calls"], 4)
+        self.assertTrue(state["retrieval_tool_budget_exhausted"])
+
+        unrelated = asyncio.run(
+            hook(
+                {"tool_name": "mcp__weknora__read_skill", "tool_input": {}},
+                "toolu_6",
+                {},
+            )
+        )
+        self.assertEqual(unrelated["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_retrieval_budget_scales_for_synthesis_and_named_topics(self):
+        synthesis = ChatPayload(
+            run_id="run-synthesis-budget",
+            session_id="session-synthesis-budget",
+            assistant_message_id="assistant-synthesis-budget",
+            query="形成最终培训提纲。\n本轮明确要求文档依据或引用。",
+            runtime_config=RuntimeConfigSpec(max_iterations=30, knowledge_bases=["kb-1"]),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        self.assertEqual(retrieval_tool_budget(synthesis), 8)
+
+        synthesis.query = (
+            "回答多个主题。\n本轮明确要求文档依据或引用。\n"
+            '[WEKNORA_REQUIRED_EVIDENCE_TOPICS]["甲","乙","丙","丁"]'
+        )
+        self.assertEqual(retrieval_tool_budget(synthesis), 6)
 
     def test_data_analysis_pre_tool_hook_enforces_chart_intent_but_not_table_intent(self):
         payload = ChatPayload(

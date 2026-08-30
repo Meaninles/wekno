@@ -111,6 +111,10 @@ var explicitUnknownOnlyListPattern = regexp.MustCompile(
 	`(?:本轮)?\s*(?:只列|仅列)\s*(?:仍)?待确认的(?:[一二三四五六七八九十0-9０-９]+项)?\s*[：:]\s*([^；;。\n]+)`,
 )
 
+var requestedUnknownFieldPattern = regexp.MustCompile(
+	`(?:仍需|尚需|还需)用户确认的\s*([^，,。；;：:\n？?]{1,40})`,
+)
+
 var explicitQuotedStateFactPattern = regexp.MustCompile(
 	`^([\p{L}\p{N}_-]{2,24})\s*[‘“"]([^’”"]{1,100})[’”"]$`,
 )
@@ -1273,13 +1277,18 @@ func boundedRuntimeData(value string, maxRunes int) string {
 
 // TerminalGenerationDirective repeats only high-risk semantic invariants
 // after tool results. Some OpenAI-compatible models otherwise over-focus on
-// the terminal citation reminder and lose the comparison rules attached to
-// the original user turn. Ordinary requests receive no additional text.
+// the terminal citation reminder and lose the current request's response
+// length or comparison rules. Unbounded ordinary requests receive no text.
 func TerminalGenerationDirective(query string) string {
-	if !IsDeferredDecisionTurn(query) || !IsComparisonTurn(query) {
-		return ""
+	parts := make([]string, 0, 2)
+	if limit := currentTurnResponseLimit(query); limit > 0 {
+		parts = append(parts, fmt.Sprintf(`[WEKNORA_TERMINAL_RESPONSE_CHECK]
+现在只生成当前请求的最终答案，不得回答历史问题，也不得输出检索、校验或整理过程。
+- 整篇不得超过%d个中文字符；使用满足当前请求的最短完整表达。
+- 保留用户点名的对象、必要结论和直接支持结论的最少就近引用；删除前言、任务复述、来源汇总、重复表格、重复结论及未要求的分支。`, limit))
 	}
-	return `[WEKNORA_TERMINAL_OUTPUT_CHECK]
+	if IsDeferredDecisionTurn(query) && IsComparisonTurn(query) {
+		parts = append(parts, `[WEKNORA_TERMINAL_OUTPUT_CHECK]
 输出最终答案前必须逐项执行以下约束：
 - 用户列出的每个未知项都保持未知，且只集中写在“待确认”事实行；不得把未知项写成不满足条件、已知项目特征，或另一备选项的支持信号。
 - 第一段必须以“已确认：”开头，第二段必须另起一段并以“待确认：”开头；不得用“尚未确认”附在“已确认”段内替代第二段。
@@ -1288,7 +1297,9 @@ func TerminalGenerationDirective(query string) string {
 - 条件只归属于直接证据明确写出的备选项；子类型或相邻条款不得定义更宽泛的选项。
 - 相邻概念必须分开。正文禁止使用“影响、直接影响、取决于、意味着、等同于、因此符合、关联”等桥接词；不要解释一个未知项和另一个制度条件之间的关系。
 - 禁止行业经验词（包括“通常、一般、往往”）、排序、隐性推荐以及强行推导邀请或公开路径。
-- 保留指定的延期结论；只输出答案，不得输出本检查表或任何检索、校验、修复叙述。`
+- 保留指定的延期结论；只输出答案，不得输出本检查表或任何检索、校验、修复叙述。`)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // AppendAuditArchive repeats the bounded user-only archive immediately beside
@@ -2776,6 +2787,7 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 			enable: []string{
 				"不得执行脚本", "不要执行脚本", "不执行脚本", "不会执行脚本",
 				"当前没有执行授权", "没有执行授权", "尚未获得执行授权",
+				"当前没有脚本执行授权", "没有脚本执行授权", "尚未获得脚本执行授权",
 			},
 			revoke:    []string{"允许执行脚本", "可以执行脚本", "授权执行脚本", "已获得执行授权", "不再禁止执行脚本"},
 			mentions:  []string{"执行脚本", "脚本执行", "执行授权"},
@@ -2924,6 +2936,26 @@ func NormalizeExplicitActionBoundaries(answer, originalQuery string, priorUserSt
 
 func boundaryLineHasSubstantivePrefix(line string, mentions []string) bool {
 	if strings.Contains(line, "|") {
+		cells := strings.Split(strings.Trim(strings.TrimSpace(line), "|"), "|")
+		meaningful := make([]string, 0, len(cells))
+		for _, cell := range cells {
+			if cell = strings.TrimSpace(cell); cell != "" {
+				meaningful = append(meaningful, cell)
+			}
+		}
+		// A mention inside a business/comparison table is substantive content,
+		// not an action-boundary row. Replacing it with the canonical two-cell
+		// permission shape corrupts the table and can delete the user's requested
+		// comparison. Only dedicated one/two-column permission rows are safe to
+		// canonicalize in place; wider rows get a separate boundary bullet.
+		if len(meaningful) > 2 {
+			return true
+		}
+		if len(meaningful) == 2 &&
+			!containsAny(meaningful[0], []string{"权限", "边界", "维护方式", "采购发起", "操作执行"}) &&
+			!tableSequenceCellPattern.MatchString(meaningful[0]) {
+			return true
+		}
 		return false
 	}
 	earliest := -1
@@ -2941,6 +2973,58 @@ func boundaryLineHasSubstantivePrefix(line string, mentions []string) bool {
 		return false
 	}
 	return strings.ContainsAny(prefix, "。！？!?；;")
+}
+
+// NormalizeExplicitRequestedUnknownFields gives a stable lifecycle value to a
+// field that the current user explicitly labels as still requiring their
+// confirmation. It does not infer unknowns from domain content or history: the
+// field name and its unknown state both come from the current user request.
+// This keeps semantically correct phrases such as "the team has not locked a
+// name" machine-readable without constraining the answer to an eval-specific
+// product or noun.
+func NormalizeExplicitRequestedUnknownFields(answer, originalQuery string) string {
+	value := strings.TrimSpace(answer)
+	query := strings.TrimSpace(originalQuery)
+	if value == "" || query == "" {
+		return value
+	}
+	matches := requestedUnknownFieldPattern.FindAllStringSubmatch(query, -1)
+	if len(matches) == 0 {
+		return value
+	}
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		field := strings.TrimSpace(strings.Trim(match[1], "*`_'\"“”‘’ "))
+		if field == "" {
+			continue
+		}
+		fieldProbe := compactStateFieldProbe(field)
+		canonical := false
+		for _, line := range lines {
+			if strings.Contains(compactStateFieldProbe(line), fieldProbe) &&
+				containsAny(line, []string{"待确认", "未知", "未提供", "未确定", "待核实"}) {
+				canonical = true
+				break
+			}
+		}
+		if !canonical {
+			lines = append(lines, "- **"+field+"**：待确认")
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func compactStateFieldProbe(value string) string {
+	value = strings.ToLower(value)
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || strings.ContainsRune("*_`#：:|[]【】()（）-", r) {
+			return -1
+		}
+		return r
+	}, value)
 }
 
 // NormalizeExplicitUserIdentityUnknown preserves an identity boundary stated
@@ -6299,7 +6383,7 @@ func StripInternalPlanningPreamble(answer string) string {
 			"from the earlier grep", "from the earlier retrieval", "from earlier grep",
 			"now rewriting", "now i'll write", "now i will write",
 			"好的，我已获取", "好的，我已经获取", "好的，我现在", "好的，现在我", "好的，现在进行", "好的，现在根据", "好的，根据整个对话", "好的，遵命。我现在", "好的，以下是", "以下是根据整个会话", "遵照您的指令", "现在我已经", "现在我有了", "下面我将", "让我整合",
-			"现在我已获得", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "以下是替换后的答案", "根据当前轮检索结果",
+			"现在我已获得", "现在我已阅读", "我已深入阅读", "我已经深入阅读", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "以下是替换后的答案", "根据当前轮检索结果",
 		})
 		knownPlanning = knownPlanning || (containsAny(probe, []string{"证据", "检索"}) &&
 			containsAny(probe, []string{
@@ -6358,7 +6442,7 @@ func stripStandaloneInternalPlanningParagraphs(value string) string {
 		planning := !quotedOrCode && containsAnyPrefix(probe, []string{
 			"i now see", "now i have", "let me ", "i need to ", "i will rewrite",
 			"the validation ", "the tools ", "from the earlier retrieval", "from the earlier grep",
-			"现在两个问题的证据", "从第一个结果可以看到", "现在我有完整", "现在我已获得",
+			"现在两个问题的证据", "从第一个结果可以看到", "现在我有完整", "现在我已获得", "现在我已阅读", "我已深入阅读", "我已经深入阅读",
 			"让我给出最终回答", "让我用", "已获取全部所需证据", "已获得全部所需证据", "根据本轮检索结果", "根据当前轮检索结果", "以下是替换后的答案",
 		})
 		planning = planning || (!quotedOrCode &&

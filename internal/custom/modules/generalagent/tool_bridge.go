@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -214,6 +215,9 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 	citationOutputContract := ""
 	if run.hasCitableEvidence() {
 		citationOutputContract = sourcerefs.TerminalCitationInstruction()
+		if outputDirective := conversationmemory.TerminalGenerationDirective(run.originalUserQuery); outputDirective != "" {
+			citationOutputContract += "\n\n" + outputDirective
+		}
 	}
 	return &ToolCallResponse{
 		Success:                result.Success,

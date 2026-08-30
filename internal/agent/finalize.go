@@ -93,6 +93,9 @@ Requirements:
 
 Now generate the final answer:`, query)
 	finalPrompt = sourcerefs.PlaceTerminalCitationInstruction(finalPrompt, citationRefs)
+	if outputDirective := conversationmemory.TerminalGenerationDirective(query); outputDirective != "" {
+		finalPrompt += "\n\n" + outputDirective
+	}
 
 	messages = append(messages, chat.Message{
 		Role:    "user",
@@ -296,6 +299,7 @@ func (e *AgentEngine) emitCompletionEvent(
 		e.activeQuery,
 		e.activeUserStatements...,
 	)
+	state.FinalAnswer = conversationmemory.NormalizeExplicitRequestedUnknownFields(state.FinalAnswer, e.activeQuery)
 	if state.FinalAnswer != beforeBoundaryRepair {
 		logger.Infof(ctx, "[Agent][FinalAnswer] repaired explicit action boundaries: before_chars=%d after_chars=%d",
 			len([]rune(beforeBoundaryRepair)), len([]rune(state.FinalAnswer)))

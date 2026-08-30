@@ -995,6 +995,7 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 					reqCtx.query,
 					data.PriorUserStatements...,
 				)
+				answer = conversationmemory.NormalizeExplicitRequestedUnknownFields(answer, reqCtx.query)
 				answer = conversationmemory.NormalizeDeferredComparisonRelationships(answer, reqCtx.query)
 				answer = conversationmemory.NormalizeStateAuditSections(
 					answer,

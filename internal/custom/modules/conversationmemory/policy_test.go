@@ -177,10 +177,43 @@ func TestSourceConstrainedExplanationIsANarrowCurrentTurn(t *testing.T) {
 		t.Fatal("self-contained source-constrained explanation retained stale history")
 	}
 	directive := AppendCurrentTurnDirective(query, query)
-	for _, expected := range []string{"历史话题不得替代", "整篇不得超过500个中文字符"} {
+	for _, expected := range []string{
+		"历史话题不得替代", "整篇不得超过500个中文字符",
+		"[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]", "三类Skill",
+	} {
 		if !strings.Contains(directive, expected) {
 			t.Fatalf("current-turn focus rule %q missing: %s", expected, directive)
 		}
+	}
+	searches := RequiredEvidenceSearches(directive)
+	if len(searches) != 1 || strings.Contains(searches[0], "当前知识库") || strings.Contains(searches[0], "引用") {
+		t.Fatalf("source and citation instructions leaked into semantic search: %v", searches)
+	}
+}
+
+func TestEvidenceSearchPlanCoversSingleTopicAndSynthesisSections(t *testing.T) {
+	singleQuery := "`read_skill`在这个机制里做什么？只解释读取边界，不执行工具，并给出引用。"
+	single := AppendCurrentTurnDirective(singleQuery, singleQuery)
+	singleSearches := RequiredEvidenceSearches(single)
+	if len(singleSearches) != 1 || !strings.Contains(singleSearches[0], "read_skill") ||
+		strings.Contains(singleSearches[0], "不执行工具") || strings.Contains(singleSearches[0], "引用") {
+		t.Fatalf("single-topic search was not focused on user evidence intent: %v", singleSearches)
+	}
+
+	synthesisQuery := "生成最终培训提纲：包含三类Skill、渐进式披露、`read_skill`与`execute_skill_script`区别、三种内置智能体的选用原则，以及当前行动边界。需要知识依据的段落给出引用，不执行任何操作。"
+	synthesis := AppendCurrentTurnDirective(synthesisQuery, synthesisQuery)
+	searches := RequiredEvidenceSearches(synthesis)
+	if len(searches) != 4 {
+		t.Fatalf("synthesis did not produce one search per factual section: %v", searches)
+	}
+	joined := strings.Join(searches, "|")
+	for _, expected := range []string{"三类Skill", "渐进式披露", "read_skill", "execute_skill_script", "三种内置智能体"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("synthesis search omitted %q: %v", expected, searches)
+		}
+	}
+	if strings.Contains(joined, "行动边界") || strings.Contains(joined, "不执行任何操作") {
+		t.Fatalf("operation boundary leaked into evidence search plan: %v", searches)
 	}
 }
 
@@ -445,6 +478,29 @@ func TestNormalizeExplicitActionBoundariesPreservesBusinessTables(t *testing.T) 
 	}
 	if twice := NormalizeExplicitActionBoundaries(got, query); twice != got {
 		t.Fatalf("business-table boundary repair is not idempotent:\n%s", twice)
+	}
+}
+
+func TestNormalizeExplicitActionBoundariesPreservesBusinessExplanationRows(t *testing.T) {
+	query := "说明`execute_skill_script`和`read_skill`的区别；当前没有执行授权。"
+	answer := `- 轻量Skill：适合无需执行脚本的提示约束。
+- read_skill负责读取说明，execute_skill_script用于执行脚本任务。`
+
+	got := NormalizeExplicitActionBoundaries(answer, query)
+	for _, expected := range []string{
+		"轻量Skill：适合无需执行脚本的提示约束",
+		"read_skill负责读取说明，execute_skill_script用于执行脚本任务",
+		"- **脚本权限**：不得执行脚本",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("business explanation %q was lost during boundary normalization: %s", expected, got)
+		}
+	}
+	if strings.Count(got, "**脚本权限**") != 1 {
+		t.Fatalf("canonical script boundary was duplicated: %s", got)
+	}
+	if twice := NormalizeExplicitActionBoundaries(got, query); twice != got {
+		t.Fatalf("business explanation boundary repair is not idempotent:\n%s", twice)
 	}
 }
 

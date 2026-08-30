@@ -64,6 +64,7 @@ from app.runner import (  # noqa: E402
     retrieval_tool_budget,
     runtime_summary,
     run_data_analysis_judge,
+    run_eval_focused_evidence_retrieval,
     run_turn_contract_isolated_rewrite,
     sanitize_artifact_bytes,
     sdk_tool_progress_event,
@@ -225,6 +226,8 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(captured["options"]["allowed_tools"], [])
         self.assertIn("最早目标是制作培训说明", captured["prompt"])
         self.assertNotIn("不可信的旧助手结论", captured["prompt"])
+        self.assertNotIn("旧草稿只写了read_skill", captured["prompt"])
+        self.assertNotIn('"rejected_draft"', captured["prompt"])
 
     def test_turn_contract_detects_chinese_retrieval_budget_narration(self):
         payload = ChatPayload(
@@ -945,6 +948,53 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertIn("公开招标 金额门槛", prompt)
         self.assertIn("current_turn_evidence_missing", prompt)
         self.assertIn("only the complete user-visible replacement", prompt)
+
+    def test_eval_focused_evidence_retrieval_is_bounded_and_records_sources(self):
+        payload = ChatPayload(
+            run_id="run-focused-retrieval",
+            session_id="session-focused-retrieval",
+            assistant_message_id="assistant-focused-retrieval",
+            query=(
+                "解释当前机制。\n本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["当前机制如何工作"]'
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+                knowledge_bases=["kb-1"],
+            ),
+            tools=[RuntimeToolSpec(name="knowledge_search", source="knowledge")],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        state = {"retrieval_tool_budget": 4, "retrieval_tool_calls": 1}
+        result = {
+            "source_references": [
+                {
+                    "cite_exactly": '<src id="S1" />',
+                    "evidence_content": "当前机制按需加载相关内容。",
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(
+            "app.runner.call_tool_callback",
+            return_value=result,
+        ) as callback:
+            recovered = asyncio.run(run_eval_focused_evidence_retrieval(payload, state))
+
+        self.assertTrue(recovered)
+        callback.assert_called_once_with(
+            payload,
+            "knowledge_search",
+            {"queries": ["当前机制如何工作"]},
+        )
+        self.assertEqual(state["retrieval_tool_calls"], 2)
+        self.assertEqual(
+            state["turn_evidence_by_citation_id"]["S1"],
+            "当前机制按需加载相关内容。",
+        )
 
     def test_eval_system_prompt_allows_only_runtime_authorized_bounded_repairs(self):
         payload = ChatPayload(

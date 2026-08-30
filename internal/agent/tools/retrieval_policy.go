@@ -9,17 +9,18 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// TargetedEvidenceRetrievalRedirect prevents a multi-topic comparison from
-// dumping a whole pinned document into the bounded model context. Both the
-// native ReAct engine and the general-agent sidecar bridge use this policy so
-// they cannot diverge. Exact chunk reads and genuine exhaustive-review turns
-// remain unchanged.
+// TargetedEvidenceRetrievalRedirect prevents a pinpoint or structured
+// evidence request from dumping a whole pinned document into the bounded model
+// context. Both the native ReAct engine and the general-agent sidecar bridge
+// use this policy so they cannot diverge. Exact chunk reads and genuine
+// exhaustive-review turns remain unchanged.
 func TargetedEvidenceRetrievalRedirect(
 	toolName string,
 	args map[string]interface{},
 	query string,
 ) *types.ToolResult {
-	if toolName != ToolListKnowledgeChunks || len(conversationmemory.RequiredEvidenceTopics(query)) < 2 {
+	searches := conversationmemory.RequiredEvidenceSearches(query)
+	if toolName != ToolListKnowledgeChunks || len(searches) == 0 || exhaustiveEvidenceReviewTurn(query) {
 		return nil
 	}
 	stringArg := func(key string) string {
@@ -33,17 +34,26 @@ func TargetedEvidenceRetrievalRedirect(
 	if knowledgeID == "" {
 		return nil
 	}
-	topics := conversationmemory.RequiredEvidenceTopics(query)
-	encodedTopics, _ := json.Marshal(topics)
-	searches := conversationmemory.EvidenceRetrievalQueries(query)
 	encodedSearches, _ := json.Marshal(searches)
 	return &types.ToolResult{
 		Success: false,
 		Error: fmt.Sprintf(
-			"Whole-document listing was skipped because this request requires direct evidence for multiple named topics and bounded output could hide later chunks. Use grep_chunks (preferred) or knowledge_search inside knowledge_id %q with one query for each topic in %s (keep every query focused). Suggested user-derived queries: %s. Then call list_knowledge_chunks with each exact chunk_id that supports a claim. For applicability questions, a definition, amount threshold, evaluation-start threshold, neighboring procedure, or parent category does not replace the named topic's complete condition passage. Do not answer until every named topic has direct evidence.",
-			knowledgeID,
-			string(encodedTopics),
+			"Whole-document listing was skipped because this request has focused evidence targets and bounded output could hide the relevant fragments. Use knowledge_search first inside the selected knowledge scope with these user-derived semantic queries: %s. Use grep_chunks only for a literal term when semantic search is insufficient. Then call list_knowledge_chunks with an exact chunk_id only when a supporting fragment needs deeper reading. Do not answer a requested factual section until it has direct evidence. knowledge_id=%q.",
 			string(encodedSearches),
+			knowledgeID,
 		),
 	}
+}
+
+func exhaustiveEvidenceReviewTurn(query string) bool {
+	value := strings.ToLower(query)
+	for _, marker := range []string{
+		"全文阅读", "完整阅读", "通读全文", "逐章阅读", "逐节阅读", "逐条审查", "全文审查", "全量导出",
+		"read the entire", "review the entire", "full-document review", "exhaustive review",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }

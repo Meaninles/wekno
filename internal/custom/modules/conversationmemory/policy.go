@@ -577,22 +577,157 @@ func narrowAnswerEvidenceTopics(query string) []string {
 	return topics
 }
 
-// EvidenceRetrievalQueries supplies one short, user-derived search intent per
-// named target.  It is safe for both prompt guidance and fixed-pipeline query
-// rewriting: no document-specific term or expected answer is introduced.
+// RequiredEvidenceSearches returns the immutable, user-derived semantic search
+// intents carried by the runtime contract. Keeping this parser next to the
+// producer lets every agent pipeline consume exactly the same bounded plan.
+func RequiredEvidenceSearches(query string) []string {
+	const marker = "[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]"
+	searches := runtimeTopicMarker(query, marker)
+	if len(searches) > 5 {
+		searches = searches[:5]
+	}
+	return searches
+}
+
+// evidenceUserQuery removes trusted runtime suffixes before deriving search
+// text. Search intents must come only from the active user message, never from
+// an appended instruction block or earlier conversation turns.
+func evidenceUserQuery(query string) string {
+	value := strings.TrimSpace(query)
+	for _, marker := range []string{
+		"<runtime_selected_knowledge_contract>",
+		"<runtime_response_contract>",
+		"[WEKNORA_SELECTED_KNOWLEDGE_EVIDENCE_V1]",
+		"[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+	} {
+		if index := strings.Index(value, marker); index >= 0 {
+			value = value[:index]
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+// cleanEvidenceSearchIntent removes response-format, citation and operation
+// boundary clauses while preserving the user's factual subject and question.
+// It deliberately performs no domain expansion and introduces no answer term.
+func cleanEvidenceSearchIntent(query string) string {
+	value := evidenceUserQuery(query)
+	value = strings.NewReplacer(
+		"只依据当前知识库", "", "仅依据当前知识库", "",
+		"只根据当前知识库", "", "仅根据当前知识库", "",
+		"只依据已选知识库", "", "仅依据已选知识库", "",
+		"只根据已选知识库", "", "仅根据已选知识库", "",
+		"并给出引用", "", "并提供引用", "", "给出引用", "", "提供引用", "",
+		"每个判断就近引用", "", "每个结论就近引用", "", "逐条引用", "", "就近引用", "",
+		"，不执行工具", "", ",不执行工具", "", "，不要执行工具", "", ",不要执行工具", "",
+		"，不得执行工具", "", ",不得执行工具", "", "，不执行脚本", "", ",不执行脚本", "",
+		"，不执行任何操作", "", ",不执行任何操作", "", "，不进行任何操作", "", ",不进行任何操作", "",
+		"，不进行新增、修改或删除", "", ",不进行新增、修改或删除", "",
+		"，当前没有执行授权", "", ",当前没有执行授权", "", "，尚未获得执行授权", "", ",尚未获得执行授权", "",
+		"with citations", "", "with citation", "", "and cite sources", "",
+	).Replace(value)
+
+	parts := regexp.MustCompile(`[。！？!?；;\n]+`).Split(value, -1)
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(strings.TrimSpace(part), "，,：:。.!！?？；; ")
+		lower := strings.ToLower(part)
+		if part == "" {
+			continue
+		}
+		// These clauses constrain execution or presentation, not the facts to
+		// retrieve. A factual comparison that happens to mention an executable
+		// tool does not start with one of these boundary forms and is retained.
+		if containsAny(lower, []string{
+			"不执行任何", "不要执行任何", "不得执行任何", "不进行任何操作",
+			"不创建或修改", "不要创建或修改", "不得创建或修改",
+			"不进行新增、修改或删除", "不要新增", "不得新增", "不安装", "不要安装", "不得安装",
+			"当前没有执行授权", "尚未获得执行授权", "没有执行授权",
+			"不要扩展成", "不把推测写成", "不作产品承诺", "不要假装",
+			"do not execute", "do not install", "do not create", "read only",
+		}) && !containsAny(lower, []string{"区别", "比较", "对比", "机制", "作用", "何时", "什么时候"}) {
+			continue
+		}
+		if containsAny(lower, []string{"需要知识依据的段落", "需要引用的段落", "引用格式", "引用数量"}) {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	value = strings.Join(kept, "；")
+	value = strings.Trim(strings.TrimSpace(value), "，,：:。.!！?？；; ")
+	if utf8.RuneCountInString(value) > 180 {
+		value = string([]rune(value)[:180])
+	}
+	return strings.TrimSpace(value)
+}
+
+// synthesisEvidenceItems extracts the factual sections the user explicitly
+// enumerated after “包含/包括/涵盖/覆盖”. Operational boundaries are kept for
+// answer shaping elsewhere, but are not sent to document retrieval.
+func synthesisEvidenceItems(query string) []string {
+	value := evidenceUserQuery(query)
+	start := -1
+	markerLen := 0
+	for _, marker := range []string{"包含", "包括", "涵盖", "覆盖"} {
+		if index := strings.LastIndex(value, marker); index > start {
+			start = index
+			markerLen = len(marker)
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	tail := value[start+markerLen:]
+	if end := strings.IndexAny(tail, "。.!！?？\n"); end >= 0 {
+		tail = tail[:end]
+	}
+	parts := regexp.MustCompile(`\s*(?:、|；|;|，以及|,\s*and\s+|\s+and\s+|以及)\s*`).Split(tail, -1)
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		part = strings.Trim(strings.TrimSpace(part), "，,：:‘’“”\"'（）()[]【】。.!！?？；; ")
+		part = strings.TrimPrefix(part, "以及")
+		part = strings.TrimSpace(part)
+		if part == "" || containsAny(strings.ToLower(part), []string{
+			"行动边界", "操作边界", "权限边界", "不执行任何操作", "不创建或修改", "不安装",
+			"action boundary", "permission boundary",
+		}) {
+			continue
+		}
+		count := utf8.RuneCountInString(part)
+		if count < 2 || count > 80 {
+			continue
+		}
+		key := strings.ToLower(part)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, part)
+		if len(out) == 5 {
+			break
+		}
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
+}
+
+// EvidenceRetrievalQueries supplies short, user-derived semantic intents for
+// named comparisons, enumerated synthesis sections, and single-topic evidence
+// questions. It is safe for prompt guidance and fixed-pipeline rewriting: no
+// document-specific term or expected answer is introduced.
 func EvidenceRetrievalQueries(query string) []string {
+	if searches := RequiredEvidenceSearches(query); len(searches) > 0 {
+		return searches
+	}
 	// The runtime query may already carry the immutable current-turn topic
 	// contract appended by AppendCurrentTurnDirective.  Reuse that contract
 	// instead of reparsing the surrounding archive/prompt text, which can hide
 	// an otherwise self-contained pair of questions from retrieval.
 	topics := RequiredEvidenceTopics(query)
-	if len(topics) < 2 {
-		return nil
-	}
-	intentQuery := query
-	if index := strings.Index(intentQuery, "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"); index >= 0 {
-		intentQuery = intentQuery[:index]
-	}
+	intentQuery := evidenceUserQuery(query)
 	intent := "直接规定与完整答案"
 	conditionIntent := IsComparisonTurn(intentQuery) && containsAny(intentQuery, []string{
 		"适用", "适配", "条件", "要求", "重点", "风险", "会受", "条件影响", "applicable", "condition",
@@ -605,12 +740,25 @@ func EvidenceRetrievalQueries(query string) []string {
 	} else if containsAny(intentQuery, []string{"定义", "是什么", "define", "what is"}) {
 		intent = "定义与直接规定"
 	}
-	out := make([]string, 0, len(topics))
-	for _, topic := range topics {
-		qualifier, _ := narrowQuantitativeQuestionQualifier(query, topic)
-		out = append(out, strings.TrimSpace(strings.Join(nonEmptyStrings(topic, qualifier, intent), " ")))
+	if len(topics) > 0 {
+		out := make([]string, 0, len(topics))
+		for _, topic := range topics {
+			semanticTopic := cleanEvidenceSearchIntent(topic)
+			if semanticTopic == "" {
+				semanticTopic = topic
+			}
+			qualifier, _ := narrowQuantitativeQuestionQualifier(query, topic)
+			out = append(out, strings.TrimSpace(strings.Join(nonEmptyStrings(semanticTopic, qualifier, intent), " ")))
+		}
+		return out
 	}
-	return out
+	if items := synthesisEvidenceItems(intentQuery); len(items) > 0 {
+		return items
+	}
+	if focused := cleanEvidenceSearchIntent(intentQuery); focused != "" {
+		return []string{focused}
+	}
+	return nil
 }
 
 // EvidenceGrepQueries renders the same user-derived targets as bounded POSIX
@@ -1054,6 +1202,12 @@ func AppendSelectedKnowledgeEvidenceDirective(content, originalQuery string, has
 		block += `
 - 用户点名的每个对象都必须独立覆盖，并在它自己的短段或结构化行内放置直接支持该对象的本轮引用。`
 	}
+	if searches := EvidenceRetrievalQueries(originalQuery); len(searches) > 0 {
+		encoded, _ := json.Marshal(searches)
+		block += "\n[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]" + string(encoded)
+		block += `
+- 优先把上述自然语言意图作为 knowledge_search（Wiki 场景使用 wiki_search）的独立查询；不要先枚举整篇文档。`
+	}
 	value := strings.TrimSpace(content)
 	if value == "" {
 		return block
@@ -1183,17 +1337,19 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 - 本轮明确要求文档依据或引用：必须在本轮重新取得可用证据后再回答，不能把历史回答或历史引用当作当前证据；每个制度判断的引用必须紧跟支持它的同一句或同一短段。
 - 同一对象若需要两个不完全重合的证据片段，不得把全部条件压成一个长句后交叉放置引用；按证据片段拆成短句，每个引用只跟随该片段直接支持的条件。
 - 若问题点名多个比较对象或条件，每个对象都必须取得直接包含该判断的证据片段；开头或结尾相邻片段不能代替缺失的中间条件。`
+		if searches := EvidenceRetrievalQueries(originalQuery); len(searches) > 0 {
+			encodedSearches, _ := json.Marshal(searches)
+			rules += "\n[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]" + string(encodedSearches)
+			rules += `
+- 优先把上述自然语言意图作为 knowledge_search（Wiki 场景使用 wiki_search）的独立查询；不要先枚举整篇文档。综合请求应逐项覆盖这些检索意图，单主题请求取得最小充分证据后立即回答。`
+		}
 		if topics := currentTurnEvidenceTopics(originalQuery); len(topics) > 1 {
 			encoded, _ := json.Marshal(topics)
 			rules += "\n[WEKNORA_REQUIRED_EVIDENCE_TOPICS]" + string(encoded)
 			rules += `
 - 完成回答前逐项核对上述对象：每个对象自己的短段都必须带当前轮检索所得的就近引用；任何一项证据未取得时继续检索，不得以“未展开”代替。`
-			if searches := EvidenceGrepQueries(originalQuery); len(searches) == len(topics) {
-				encodedSearches, _ := json.Marshal(searches)
-				rules += "\n[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]" + string(encodedSearches)
-				rules += `
-- 每个检索目标使用上述独立短查询，不要用包含全部项目背景的长问题代替。询问适用、适配、条件或风险时，直接证据应是同时包含该对象名称（或紧邻标题）和完整条件列表的分片；仅有定义、金额门槛、评审启动门槛、相邻程序或上位类别不算该对象的适用条件。`
-			}
+			rules += `
+- 每个检索目标使用独立短查询，不要用包含全部项目背景的长问题代替。询问适用、适配、条件或风险时，直接证据应是同时包含该对象名称（或紧邻标题）和完整条件列表的分片；仅有定义、金额门槛、评审启动门槛、相邻程序或上位类别不算该对象的适用条件。`
 		}
 		if topics := comparisonUnknownTopics(originalQuery); len(topics) > 1 {
 			encoded, _ := json.Marshal(topics)
@@ -2986,7 +3142,27 @@ func boundaryLineHasSubstantivePrefix(line string, mentions []string) bool {
 	if prefix == "" {
 		return false
 	}
-	return strings.ContainsAny(prefix, "。！？!?；;")
+	// Strip the small vocabulary that can occur before the operation in a
+	// dedicated permission row (for example “脚本权限：当前没有执行授权”).
+	// Anything meaningful that remains is business/explanatory content and
+	// must not be replaced merely because it later mentions an operation.
+	residual := strings.NewReplacer(
+		"文件权限", "", "发送权限", "", "采购权限", "", "采购发起", "",
+		"操作权限", "", "工具权限", "", "脚本权限", "", "Skill安装权限", "",
+		"Skill变更权限", "", "维护方式", "", "行动边界", "", "操作边界", "", "权限边界", "",
+		"未经用户明确授权", "", "未经明确授权", "", "未经授权", "",
+		"尚未获得", "", "未获得", "", "当前没有", "", "目前没有", "", "没有", "",
+		"当前", "", "目前", "", "本轮", "", "仍然", "", "依然", "", "尚", "",
+		"不得", "", "不要", "", "不会", "", "未", "", "不", "", "仅", "", "只", "",
+		"权限", "", "授权", "",
+	).Replace(prefix)
+	residual = strings.Trim(residual, "*_`# ：:，,。.!！?？；;（）()[]【】 ")
+	if residual == "" {
+		return false
+	}
+	return strings.ContainsAny(prefix, "：:，,。！？!?；;") ||
+		utf8.RuneCountInString(residual) >= 3 ||
+		regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{2,}`).MatchString(residual)
 }
 
 // NormalizeExplicitRequestedUnknownFields gives a stable lifecycle value to a

@@ -274,8 +274,84 @@ class RunnerProgressTest(unittest.TestCase):
         payload.query = "形成最终培训提纲。\n本轮明确要求文档依据或引用。"
         self.assertEqual(effective_max_turns(payload), 14)
 
+        payload.query = "概括当前知识库能解决的场景。\n本轮明确要求文档依据或引用。"
+        self.assertEqual(effective_max_turns(payload), 14)
+
         payload.query = "比较三类机制。\n本轮明确要求文档依据或引用。"
         self.assertEqual(effective_max_turns(payload), 12)
+
+    def test_turn_contract_requires_named_identifiers_and_structured_item_citations(self):
+        payload = ChatPayload(
+            run_id="run-structured-evidence",
+            session_id="session-structured-evidence",
+            assistant_message_id="assistant-structured-evidence",
+            query=(
+                "`execute_action`和`read_action`有什么区别？说明三类能力并引用。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        answer = (
+            '1. **轻量能力**：说明一。\n'
+            '2. **预加载能力**：说明二。<src id="S1" />\n'
+            '3. **专业能力**：说明三。\n\n'
+            '`read_action`只读。<src id="S2" />'
+        )
+        issues = turn_contract_issues(payload, answer, evidence_by_id={"S1": "x", "S2": "y"})
+        by_code = {issue["code"]: issue for issue in issues}
+        self.assertEqual(
+            by_code["current_turn_evidence_named_identifiers_incomplete"]["missing_identifiers"],
+            ["execute_action"],
+        )
+        self.assertEqual(
+            by_code["current_turn_evidence_structured_claims_incomplete"]["missing_segments"],
+            ["轻量能力", "专业能力"],
+        )
+
+        complete = (
+            '1. **轻量能力**：说明一。<src id="S1" />\n'
+            '2. **预加载能力**：说明二。<src id="S1" />\n'
+            '3. **专业能力**：说明三。<src id="S1" />\n\n'
+            '`read_action`只读，`execute_action`执行。<src id="S2" />'
+        )
+        codes = {
+            issue["code"]
+            for issue in turn_contract_issues(
+                payload,
+                complete,
+                evidence_by_id={"S1": "x", "S2": "y"},
+            )
+        }
+        self.assertNotIn("current_turn_evidence_named_identifiers_incomplete", codes)
+        self.assertNotIn("current_turn_evidence_structured_claims_incomplete", codes)
+
+    def test_structured_evidence_ignores_table_header_and_action_boundary(self):
+        payload = ChatPayload(
+            run_id="run-table-evidence",
+            session_id="session-table-evidence",
+            assistant_message_id="assistant-table-evidence",
+            query=(
+                "形成带引用的汇总表。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        answer = (
+            "| 类型 | 适用场景 |\n|---|---|\n"
+            '| 快速问答 | 事实检索。<src id="S1" /> |\n'
+            "| 通用智能体 | 混合任务。 |\n\n"
+            "- **行动边界**：不执行任何操作。"
+        )
+        issue = next(
+            item
+            for item in turn_contract_issues(payload, answer, evidence_by_id={"S1": "x"})
+            if item["code"] == "current_turn_evidence_structured_claims_incomplete"
+        )
+        self.assertEqual(issue["missing_segments"], ["通用智能体"])
 
     def test_turn_contract_issues_bind_uncertainties_to_direct_evidence(self):
         payload = ChatPayload(
@@ -596,7 +672,7 @@ class RunnerProgressTest(unittest.TestCase):
             [],
         )
 
-    def test_turn_contract_stop_hook_blocks_then_allows_after_repair(self):
+    def test_turn_contract_stop_hook_blocks_twice_then_bypasses(self):
         payload = ChatPayload(
             run_id="run-turn-contract-hook",
             session_id="session-turn-contract-hook",
@@ -647,6 +723,20 @@ class RunnerProgressTest(unittest.TestCase):
                     {
                         "type": "assistant",
                         "message": {"role": "assistant", "content": "第二次仍然没有引用。"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            second_block = asyncio.run(hook({"transcript_path": str(transcript)}, None, None))
+            self.assertEqual(second_block.get("decision"), "block")
+            self.assertTrue(second_block.get("suppressOutput"))
+
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {"role": "assistant", "content": "第三次仍然没有引用。"},
                     },
                     ensure_ascii=False,
                 ),
@@ -744,7 +834,7 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertIn("current_turn_evidence_missing", prompt)
         self.assertIn("only the complete user-visible replacement", prompt)
 
-    def test_eval_system_prompt_allows_only_runtime_authorized_single_repair(self):
+    def test_eval_system_prompt_allows_only_runtime_authorized_bounded_repairs(self):
         payload = ChatPayload(
             run_id="run-runtime-repair-system",
             session_id="session-runtime-repair-system",
@@ -763,8 +853,8 @@ class RunnerProgressTest(unittest.TestCase):
         with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}):
             prompt = build_system_prompt(payload)
 
-        self.assertIn("eval runtime may resume this same SDK session exactly once", prompt)
-        self.assertIn("single bounded current-turn repair", prompt)
+        self.assertIn("eval runtime may resume this same SDK session up to 2 times", prompt)
+        self.assertIn("bounded current-turn repairs", prompt)
         self.assertNotIn(
             "Generate the answer once; the runtime never asks the model to validate or regenerate citations.",
             prompt,
@@ -2344,6 +2434,7 @@ EOF""",
         self.assertIn("user's original verbatim request", prompt)
         self.assertIn("Copy the matching `cite_exactly` value verbatim", prompt)
         self.assertIn('each supplied value uses the canonical form `<src id="S1" />`', prompt)
+        self.assertIn("every supported row/item", prompt)
         self.assertNotIn("Never use another citation", prompt)
         self.assertIn("Generate the answer once", prompt)
         self.assertIn("never asks the model to validate or regenerate citations", prompt)

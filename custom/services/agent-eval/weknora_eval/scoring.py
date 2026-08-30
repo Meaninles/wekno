@@ -28,6 +28,17 @@ MUTATION_HINTS = (
     "删除", "新增", "创建", "修改", "替换", "写入", "上传",
 )
 READ_ONLY_INTERNAL_TOOLS = {"todo_write"}
+
+
+def _canonical_tool_name(name: str) -> str:
+    """Collapse runtime aliases such as mcp__server__tool to the tool name."""
+
+    value = (name or "").strip().casefold()
+    if value.startswith("mcp__") and "__" in value[5:]:
+        return value.rsplit("__", 1)[-1]
+    return value
+
+
 STATE_SECTION_ALIASES = {
     "active": ("当前有效事实", "当前事实", "已确认事实", "已确认"),
     "retired": ("已废弃事实", "废弃事实", "失效事实"),
@@ -927,32 +938,34 @@ def score_turn(spec: CaseSpec, turn_index: int, observed: ObservedTurn) -> list[
             )
         )
 
-    tools = [name.casefold() for name in observed.tools]
+    tools = [_canonical_tool_name(name) for name in observed.tools]
     tool_counts = Counter(tools)
     for required in contract.tool_policy.required_tools:
-        passed = required.casefold() in tool_counts
+        required_name = _canonical_tool_name(required)
+        passed = required_name in tool_counts
         scores.append(
             _score(
                 f"required_tool.{required}",
-                tool_counts[required.casefold()],
+                tool_counts[required_name],
                 passed,
                 "required tool invoked",
                 turn_id=turn_id,
             )
         )
     for forbidden in contract.tool_policy.forbidden_tools:
-        passed = forbidden.casefold() not in tool_counts
+        forbidden_name = _canonical_tool_name(forbidden)
+        passed = forbidden_name not in tool_counts
         scores.append(
             _score(
                 f"forbidden_tool.{forbidden}",
-                tool_counts[forbidden.casefold()],
+                tool_counts[forbidden_name],
                 passed,
                 "forbidden tool not invoked",
                 turn_id=turn_id,
             )
         )
     if contract.tool_policy.allowed_tools:
-        allowed = {name.casefold() for name in contract.tool_policy.allowed_tools}
+        allowed = {_canonical_tool_name(name) for name in contract.tool_policy.allowed_tools}
         unexpected = sorted({name for name in tools if name not in allowed})
         scores.append(
             _score(

@@ -78,6 +78,7 @@ def query_requests_broad_synthesis(query: str) -> bool:
             "汇总",
             "总览",
             "总结",
+            "概括",
             "提纲",
             "清单",
             "核对表",
@@ -87,6 +88,7 @@ def query_requests_broad_synthesis(query: str) -> bool:
             "complete",
             "consolidated",
             "summary",
+            "overview",
             "outline",
             "checklist",
             "report",
@@ -2810,7 +2812,7 @@ def build_system_prompt(
     )
     eval_runtime_repair_enabled = should_enable_turn_contract_runtime_repair(payload)
     terminal_generation_policy = (
-        "The eval runtime may resume this same SDK session exactly once when its deterministic current-turn "
+        f"The eval runtime may resume this same SDK session up to {TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS} times when its deterministic current-turn "
         "contract rejects the terminal draft. If that trusted runtime continuation appears, follow it and return "
         "a complete replacement; do not self-initiate any other validation or regeneration pass."
         if eval_runtime_repair_enabled
@@ -2818,7 +2820,7 @@ def build_system_prompt(
     )
     citation_generation_policy = (
         "Generate the answer in one pass unless the trusted eval runtime explicitly resumes this same SDK session "
-        "for its single bounded current-turn repair."
+        "for one of its bounded current-turn repairs."
         if eval_runtime_repair_enabled
         else "Generate the answer once; the runtime never asks the model to validate or regenerate citations."
     )
@@ -2934,7 +2936,7 @@ Available capabilities:
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
 - Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. {terminal_generation_policy}
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
-- Source citation contract: a WeKnora tool result's `source_references` are claim-bearing evidence handles. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports; each supplied value uses the canonical form `<src id="S1" />` with its own S-number. Treat each S-number as an opaque handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. Each knowledge source is one specific document fragment. A document title and its knowledge-base/collection membership are different facts: claim membership when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited. {citation_generation_policy}
+- Source citation contract: a WeKnora tool result's `source_references` are claim-bearing evidence handles. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports; each supplied value uses the canonical form `<src id="S1" />` with its own S-number. Treat each S-number as an opaque handle and select it by matching the actual words and facts in its evidence block to the claim. A short inline list inside one sentence may use one matching handle after that sentence. In a Markdown list or table whose rows make distinct factual claims, put a matching handle in every supported row/item; repeat the same handle when one evidence fragment directly supports several rows. An evidence-based final answer is complete only when its supported claims carry their matching handles. Each knowledge source is one specific document fragment. A document title and its knowledge-base/collection membership are different facts: claim membership when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited. {citation_generation_policy}
 - Artifact review: if you produce artifacts, review them from the user's perspective before final delivery, including format, layout, colors, typography, font sizes, readability, aesthetics, and fit to the original request. If you find issues, make one correction pass.
 - Review limit: perform the review-and-correction step at most once. If the review finds no issue, deliver the final answer directly; if it finds issues, correct them once and then deliver the result.
 {artifact_review_policy}
@@ -2992,6 +2994,18 @@ def build_prompt(
             "contract explicitly lists several independent required evidence searches. Once the minimum sufficient "
             "evidence is present, stop using tools and answer the current request."
         )
+        parts.append(
+            "If the answer uses a factual list or table, every data row/item must carry a directly supporting "
+            "current-turn cite_exactly handle in that same row/item. A citation on only one neighboring item, a "
+            "heading, or a trailing source summary does not support the rest of the structured set."
+        )
+        if query_requests_broad_synthesis(payload.query):
+            parts.append(
+                "This is a broad synthesis request. Identify the distinct factual sections explicitly requested by "
+                "the current user, retrieve each section as a separate focused semantic intent, and stop after one "
+                "direct evidence fragment per section. Do not let one well-covered document or topic crowd every "
+                "later section out of the bounded retrieval context."
+            )
         if evidence_tool_names:
             parts.append("Available retrieval tools: " + ", ".join(evidence_tool_names))
         parts.append("</required_evidence_action>")
@@ -4570,7 +4584,11 @@ REQUIRED_EVIDENCE_SEARCHES_RE = re.compile(
 FRESH_EVIDENCE_CONTRACT_MARKER = "本轮明确要求文档依据或引用"
 TURN_EXECUTION_CONTRACT_MARKER = "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
 DEFERRED_COMPARISON_CONTRACT_MARKER = "用户明确要求不作最终选择"
-TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 1
+# Eval mode may spend two bounded continuations on a terminal-contract repair.
+# Production never enables this path, so ordinary requests remain single-pass.
+# A second attempt is useful for provider outputs that acknowledge the first
+# repair request but still return an overlong or partially grounded draft.
+TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 2
 INTERNAL_PLANNING_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:"
     r"now\s+(?:i\s+have|let\s+me|rewriting|i(?:'ll|\s+will)\s+write)|"
@@ -4710,6 +4728,191 @@ def required_evidence_searches(query: str) -> list[str]:
         if search and search not in searches:
             searches.append(search)
     return searches[:8]
+
+
+INLINE_IDENTIFIER_RE = re.compile(r"`([^`\r\n]{1,96})`")
+STRUCTURED_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)(.+?)\s*$")
+MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
+
+
+def required_inline_identifiers(query: str) -> list[str]:
+    """Return code-like identifiers explicitly central to the current ask.
+
+    Backticks alone are not enough: a user may include an incidental example
+    or path. Requiring coverage only for definition/comparison/explanation
+    intent keeps this contract derived from the active request and avoids an
+    evaluator-specific answer key.
+    """
+
+    user_query = original_query_without_runtime_contract(query)
+    lowered = user_query.lower()
+    if not any(
+        marker in lowered
+        for marker in (
+            "区别",
+            "比较",
+            "对比",
+            "分别",
+            "做什么",
+            "作用",
+            "解释",
+            "说明",
+            "difference",
+            "compare",
+            "explain",
+            "what does",
+        )
+    ):
+        return []
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for match in INLINE_IDENTIFIER_RE.finditer(user_query):
+        identifier = match.group(1).strip()
+        canonical = identifier.casefold()
+        if identifier and canonical not in seen:
+            identifiers.append(identifier)
+            seen.add(canonical)
+    return identifiers[:8]
+
+
+def missing_inline_identifiers(answer: str, identifiers: list[str]) -> list[str]:
+    value = (answer or "").casefold()
+    return [identifier for identifier in identifiers if identifier.casefold() not in value]
+
+
+def query_requests_structured_evidence_coverage(query: str) -> bool:
+    """Recognize an explicit user request for a multi-item factual set."""
+
+    value = original_query_without_runtime_contract(query).lower()
+    return any(
+        marker in value
+        for marker in (
+            "分别",
+            "哪些",
+            "哪几",
+            "类型",
+            "种类",
+            "列出",
+            "列表",
+            "表格",
+            "清单",
+            "提纲",
+            "汇总",
+            "总览",
+            "概括",
+            "比较",
+            "对比",
+            "区别",
+            "types",
+            "list",
+            "table",
+            "outline",
+            "overview",
+            "compare",
+            "difference",
+        )
+    )
+
+
+def structured_factual_segments(answer: str) -> list[tuple[str, str]]:
+    """Extract user-visible factual rows/items that need adjacent evidence.
+
+    The extractor intentionally understands only explicit Markdown structure.
+    It does not infer expected facts. Table headers and rows that merely state
+    an action/permission boundary are excluded, while factual rows mentioning
+    a non-execution boundary (for example a read-only API) remain eligible.
+    """
+
+    lines = (answer or "").splitlines()
+    segments: list[tuple[str, str]] = []
+
+    # Each bullet/numbered item owns its continuation lines until the next
+    # structural boundary, so a citation on the following wrapped line counts.
+    index = 0
+    while index < len(lines):
+        match = STRUCTURED_LIST_ITEM_RE.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        parts = [match.group(1).strip()]
+        cursor = index + 1
+        while cursor < len(lines):
+            if STRUCTURED_LIST_ITEM_RE.match(lines[cursor]):
+                break
+            if lines[cursor].lstrip().startswith(("#", "|")):
+                break
+            if not lines[cursor].strip():
+                break
+            parts.append(lines[cursor].strip())
+            cursor += 1
+        text = " ".join(part for part in parts if part).strip()
+        label = re.split(r"(?:\s+[—–-]\s+|[：:])", text, maxsplit=1)[0]
+        label = label.strip().strip("*_`").strip()
+        if text and not any(
+            marker in label.casefold()
+            for marker in (
+                "行动边界",
+                "操作边界",
+                "执行条件",
+                "执行权限",
+                "操作权限",
+                "工具权限",
+                "脚本权限",
+                "skill变更权限",
+            )
+        ):
+            segments.append((label[:96] or text[:96], text))
+        index = max(cursor, index + 1)
+
+    # Treat the first non-separator row in every contiguous table as a header;
+    # every subsequent data row is an independent factual claim segment.
+    index = 0
+    while index < len(lines):
+        if not (lines[index].strip().startswith("|") and lines[index].strip().endswith("|")):
+            index += 1
+            continue
+        table_rows: list[list[str]] = []
+        while index < len(lines):
+            line = lines[index].strip()
+            if not (line.startswith("|") and line.endswith("|")):
+                break
+            table_rows.append([cell.strip() for cell in line[1:-1].split("|")])
+            index += 1
+        data_started = False
+        for cells in table_rows:
+            if not cells or all(not cell for cell in cells):
+                continue
+            if all(MARKDOWN_TABLE_SEPARATOR_RE.fullmatch(cell or "") for cell in cells):
+                data_started = True
+                continue
+            if not data_started:
+                # Header without a standard separator is still not a fact row.
+                data_started = True
+                continue
+            text = " | ".join(cells).strip()
+            label = cells[0].strip().strip("*_`").strip() if cells else ""
+            if text and not any(
+                marker in label.casefold()
+                for marker in ("行动边界", "操作边界", "权限")
+            ):
+                segments.append((label[:96] or text[:96], text))
+    return segments
+
+
+def structured_factual_segments_without_citation(answer: str) -> list[str]:
+    segments = structured_factual_segments(answer)
+    # One isolated bullet is often presentation rather than enumeration. The
+    # rule activates only when the answer itself presents two or more factual
+    # rows/items as a structured set.
+    if len(segments) < 2:
+        return []
+    missing: list[str] = []
+    for label, text in segments:
+        if CANONICAL_SOURCE_CITATION_RE.search(text):
+            continue
+        if label and label not in missing:
+            missing.append(label)
+    return missing[:8]
 
 
 def evidence_topics_without_adjacent_citation(answer: str, topics: list[str]) -> list[str]:
@@ -5198,6 +5401,40 @@ def turn_contract_issues(
             }
         )
 
+    identifiers = required_inline_identifiers(query)
+    missing_identifiers = missing_inline_identifiers(value, identifiers)
+    if FRESH_EVIDENCE_CONTRACT_MARKER in query and missing_identifiers:
+        issues.append(
+            {
+                "code": "current_turn_evidence_named_identifiers_incomplete",
+                "missing_identifiers": missing_identifiers,
+                "required_action": (
+                    "Rewrite the complete answer and explicitly cover every code-like identifier named in the "
+                    "current user request. Preserve each identifier verbatim, explain its requested role or "
+                    "difference, and place directly supporting current-turn citations beside those claims."
+                ),
+            }
+        )
+
+    missing_structured_claims = (
+        structured_factual_segments_without_citation(value)
+        if query_requests_structured_evidence_coverage(query)
+        else []
+    )
+    if FRESH_EVIDENCE_CONTRACT_MARKER in query and missing_structured_claims:
+        issues.append(
+            {
+                "code": "current_turn_evidence_structured_claims_incomplete",
+                "missing_segments": missing_structured_claims,
+                "required_action": (
+                    "Continue focused retrieval for every uncited factual list item or table row, then rewrite the "
+                    "complete answer. Every factual row/item must contain its own current-turn cite_exactly handle; "
+                    "a citation on a neighboring item, heading, or trailing source summary cannot support the set. "
+                    "User-provided action boundaries do not need document citations."
+                ),
+            }
+        )
+
     missing_quantitative = quantitative_topics_without_grounded_answer(
         value,
         query,
@@ -5303,7 +5540,7 @@ def turn_contract_stop_hook_factory(
 
 
 def should_enable_turn_contract_runtime_repair(payload: ChatPayload) -> bool:
-    """Enable one bounded repair continuation only in explicitly opted-in eval runs.
+    """Enable bounded repair continuations only in explicitly opted-in eval runs.
 
     Production payloads never set eval_observability, so they remain record-only:
     no extra model call, retrieval, hook, or blocking decision is added. Pure
@@ -5313,7 +5550,7 @@ def should_enable_turn_contract_runtime_repair(payload: ChatPayload) -> bool:
     A Claude SDK Stop hook is not used as the execution gate here. Some
     OpenAI-compatible gateways acknowledge an SDK end-turn without honoring a
     blocking Stop-hook continuation. The sidecar therefore validates the
-    terminal candidate itself and, at most once, resumes the same SDK session.
+    terminal candidate itself and resumes the same SDK session at most twice.
     """
 
     return bool(
@@ -5394,7 +5631,7 @@ def build_turn_contract_runtime_repair_prompt(
         )
 
     return f"""
-The trusted WeKnora eval runtime rejected the previous terminal draft. Continue the SAME current user request in this resumed SDK session and replace that draft. This is the one runtime-authorized repair attempt; it is not a new user request.
+The trusted WeKnora eval runtime rejected the previous terminal draft. Continue the SAME current user request in this resumed SDK session and replace that draft. This is runtime-authorized repair attempt {attempt} of {TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS}; it is not a new user request.
 
 {evidence_action}
 
@@ -7094,6 +7331,23 @@ class GeneralAgentRunner:
                         continue
                     if contract_issues:
                         turn_contract_state["turn_contract_validation_bypassed"] = True
+                        mechanical_failures = {
+                            "current_turn_terminal_answer_empty",
+                            "current_turn_response_too_long",
+                            "current_turn_internal_planning_exposed",
+                        }
+                        final_codes = {
+                            str(issue.get("code") or "")
+                            for issue in contract_issues
+                            if isinstance(issue, dict)
+                        }
+                        if final_codes.intersection(mechanical_failures):
+                            # Eval fails closed after both bounded continuations
+                            # instead of persisting a runaway/provider scratch
+                            # response as if it were a valid business answer.
+                            raise RuntimeError(
+                                "Eval terminal response remained mechanically invalid after bounded repair"
+                            )
                     elif turn_contract_runtime_repair_attempts:
                         turn_contract_state["turn_contract_runtime_repaired"] = True
                 break

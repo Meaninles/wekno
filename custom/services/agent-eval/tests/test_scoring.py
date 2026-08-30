@@ -582,6 +582,21 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(result.verdict, Verdict.PASS)
 
+        mcp_internal_todo = internal_todo.model_copy(
+            update={"tools": ["mcp__weknora__todo_write"]}
+        )
+        mcp_result = score_case(
+            spec,
+            CaseRun(
+                case_id=spec.case_id,
+                family_id=spec.family_id,
+                split=spec.split,
+                verdict=Verdict.INVALID,
+                turns=[mcp_internal_todo],
+            ),
+        )
+        self.assertEqual(mcp_result.verdict, Verdict.PASS)
+
         file_write = internal_todo.model_copy(update={"tools": ["file_write"]})
         write_result = score_case(
             spec,

@@ -95,7 +95,7 @@ Now generate the final answer:`, query)
 	finalPrompt = sourcerefs.PlaceTerminalCitationInstruction(finalPrompt, citationRefs)
 	if outputDirective := conversationmemory.TerminalGenerationDirectiveWithLimit(
 		query,
-		e.evalMaxResponseChars,
+		e.evalResponseLimit(),
 	); outputDirective != "" {
 		finalPrompt += "\n\n" + outputDirective
 	}

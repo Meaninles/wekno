@@ -39,6 +39,7 @@ func (s *sessionService) AgentQA(
 	if err != nil {
 		return err
 	}
+	agentConfig.EvalMaxResponseChars = req.EvalMaxResponseChars
 	agentConfig.MaxCompletionTokens = conversationmemory.BoundCompletionTokens(
 		agentConfig.MaxCompletionTokens,
 		req.Query,
@@ -154,7 +155,6 @@ func (s *sessionService) AgentQA(
 		logger.Errorf(ctx, "Failed to create agent engine: %v", err)
 		return err
 	}
-	engine.SetEvalResponseLimit(req.EvalMaxResponseChars)
 
 	// Route image data based on agent model's vision capability
 	var agentModelSupportsVision bool

@@ -131,7 +131,7 @@ func (e *AgentEngine) prepareCitationAwareGenerationMessages(messages []chat.Mes
 	reminder := sourcerefs.TerminalCitationInstruction()
 	if outputDirective := conversationmemory.TerminalGenerationDirectiveWithLimit(
 		e.activeQuery,
-		e.evalMaxResponseChars,
+		e.evalResponseLimit(),
 	); outputDirective != "" {
 		reminder += "\n\n" + outputDirective
 	}

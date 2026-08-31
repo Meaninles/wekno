@@ -396,7 +396,9 @@ class RunnerProgressTest(unittest.TestCase):
     def test_known_code_wrapped_source_handles_are_unwrapped_without_changing_examples(self):
         answer = (
             '事实一。`<src id="S1" />`\n'
+            '事实二。`<src id="S1" /><src id="S2" />`\n'
             '未知句柄。`<src id="S9" />`\n'
+            '混合未知句柄。`<src id="S1" /><src id="S9" />`\n'
             '引用格式示例：`<src id="S2" />`\n'
             '```text\n`<src id="S3" />`\n```'
         )
@@ -407,7 +409,9 @@ class RunnerProgressTest(unittest.TestCase):
         )
 
         self.assertIn('事实一。<src id="S1" />', normalized)
+        self.assertIn('事实二。<src id="S1" /><src id="S2" />', normalized)
         self.assertIn('未知句柄。`<src id="S9" />`', normalized)
+        self.assertIn('混合未知句柄。`<src id="S1" /><src id="S9" />`', normalized)
         self.assertIn('引用格式示例：`<src id="S2" />`', normalized)
         self.assertIn('```text\n`<src id="S3" />`\n```', normalized)
 

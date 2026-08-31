@@ -4682,7 +4682,8 @@ def transcript_latest_assistant_answer(transcript_path: str) -> str:
 
 CANONICAL_SOURCE_CITATION_RE = re.compile(r'<src id="S[1-9][0-9]*"\s*/>')
 CODE_WRAPPED_SOURCE_CITATION_RE = re.compile(
-    r'(?<!`)`\s*(<src id="(S[1-9][0-9]*)"\s*/>)\s*`(?!`)'
+    r'(?<!`)`(?P<body>\s*<src id="S[1-9][0-9]*"\s*/>'
+    r'(?:\s*[,，、;；]?\s*<src id="S[1-9][0-9]*"\s*/>)*\s*)`(?!`)'
 )
 CITATION_SYNTAX_EXPLANATION_RE = re.compile(
     r"(?:cite_exactly|引用(?:句柄|标签|语法|格式)|"
@@ -4812,8 +4813,9 @@ def normalize_known_source_citation_markup(
     ]
 
     def replacement(match: re.Match[str]) -> str:
-        citation_id = match.group(2)
-        if citation_id not in known_ids:
+        body = match.group("body")
+        citation_ids = re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', body)
+        if not citation_ids or any(citation_id not in known_ids for citation_id in citation_ids):
             return match.group(0)
         if sum(start < match.start() for start in fence_starts) % 2:
             return match.group(0)
@@ -4824,7 +4826,7 @@ def normalize_known_source_citation_markup(
         local_context = value[line_start:line_end]
         if CITATION_SYNTAX_EXPLANATION_RE.search(local_context):
             return match.group(0)
-        return f'<src id="{citation_id}" />'
+        return body.strip()
 
     return CODE_WRAPPED_SOURCE_CITATION_RE.sub(replacement, value)
 DEFERRED_RANKING_TERMS = (

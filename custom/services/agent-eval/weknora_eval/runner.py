@@ -131,6 +131,10 @@ class EvalRunner:
                     "disable_title": False,
                     "channel": setup.channel,
                 }
+                if turn_spec.contract.max_response_chars is not None:
+                    payload["eval_response_contract"] = {
+                        "max_response_chars": turn_spec.contract.max_response_chars,
+                    }
                 try:
                     events, ttfb_ms, total_latency_ms = self.client.stream(
                         f"/{spec.agent.endpoint}/{session_id}", payload

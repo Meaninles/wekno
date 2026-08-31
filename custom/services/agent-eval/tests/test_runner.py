@@ -127,7 +127,58 @@ class TerminalStreamErrorClient(RecoveredStreamClient):
         )
 
 
+class PayloadRecordingClient(FakeClient):
+    def __init__(self) -> None:
+        super().__init__("eval")
+        self.payloads: list[dict] = []
+
+    def create_session(self) -> str:
+        return "payload-session"
+
+    def stream(self, _path: str, payload: dict):
+        self.payloads.append(payload)
+        return ([], 10, 100)
+
+    def load_completed_assistant(self, _session_id: str, **_kwargs: object):
+        return {
+            "id": "message",
+            "role": "assistant",
+            "content": "bounded answer",
+            "is_completed": True,
+        }
+
+
 class RunnerTests(unittest.TestCase):
+    def test_runner_sends_only_presentation_limit_to_sut(self) -> None:
+        client = PayloadRecordingClient()
+        case = CaseSpec(
+            case_id="shape-contract",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[
+                TurnSpec(
+                    turn_id="turn",
+                    query="q",
+                    contract=TurnContract(max_response_chars=321),
+                )
+            ],
+        )
+
+        EvalRunner(client).run_case(case)
+
+        self.assertEqual(
+            client.payloads[0]["eval_response_contract"],
+            {"max_response_chars": 321},
+        )
+        self.assertEqual(
+            set(client.payloads[0]["eval_response_contract"]),
+            {"max_response_chars"},
+        )
+
     def test_production_is_record_only(self) -> None:
         with self.assertRaises(EvalModeRequired):
             EvalRunner(FakeClient("production")).doctor()  # type: ignore[arg-type]

@@ -246,6 +246,8 @@ custom/services/agent-eval/eval-loop.ps1 `
 
 `eval-loop.ps1` 默认给每个回答 240 秒墙钟总截止时间，可用 `-ResponseDeadlineSeconds` 显式调整。该值会写入 `execution_contract` 并参与 baseline/candidate 身份比对，不能靠放宽超时获得伪提升。持续 SSE 心跳不再能绕过截止时间：超时、流结束后无完整持久化回答，以及由此跳过的后续轮次都会记为可复现的 SUT `FAIL`；如果流中某一步报错但最终完整回答已经持久化，则以最终回答为准继续评分。WAF、HTTP/网络、记录器和 evaluator 故障仍为 `INVALID`。两者不会互相污染，也都只发生在隔离 Eval 环境。
 
+每轮 `max_response_chars` 同时作为受信任的输出形态契约传给隔离 SUT，否则它只参与事后评分会形成不可执行的隐藏要求。下发对象严格只有字符上限，不包含 required claims、evidence anchors、Judge rubric、参考答案或评分关键词；后端仅在 `eval + full capture` 时接受，原始用户消息仍按原文入库。生产模式即使收到该字段也会忽略，不增加模型调用、校验或阻塞路径。
+
 改智能体前的完整优化基线命令为：
 
 ```powershell

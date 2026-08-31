@@ -7,6 +7,7 @@ import (
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/agentresponse"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
@@ -338,6 +339,25 @@ func (e *AgentEngine) emitCompletionEvent(
 		)
 	}
 	state.FinalAnswer = sourcerefs.RepairAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
+	if limit := e.evalResponseLimit(); limit > 0 {
+		repair := agentresponse.RepairResponse(ctx, e.chatModel, agentresponse.ResponseRepairRequest{
+			MaxResponseChars:    limit,
+			MaxCompletionTokens: e.config.MaxCompletionTokens,
+			Query:               e.activeQuery,
+			UserStatements:      e.activeUserStatements,
+			Draft:               state.FinalAnswer,
+			References:          state.KnowledgeRefs,
+			RequireCitation:     conversationmemory.RequiresFreshEvidenceTurn(e.activeQuery),
+		})
+		if repair.Repaired {
+			logger.Infof(ctx, "[Agent][EvalRepair] accepted terminal rewrite: attempts=%d chars=%d",
+				repair.Attempts, len([]rune(repair.Answer)))
+			state.FinalAnswer = repair.Answer
+		} else if repair.Attempted {
+			logger.Warnf(ctx, "[Agent][EvalRepair] kept original answer after bounded repair: attempts=%d issues=%v error=%s",
+				repair.Attempts, repair.Issues, repair.LastError)
+		}
+	}
 	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
 		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",

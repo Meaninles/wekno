@@ -93,7 +93,10 @@ Requirements:
 
 Now generate the final answer:`, query)
 	finalPrompt = sourcerefs.PlaceTerminalCitationInstruction(finalPrompt, citationRefs)
-	if outputDirective := conversationmemory.TerminalGenerationDirective(query); outputDirective != "" {
+	if outputDirective := conversationmemory.TerminalGenerationDirectiveWithLimit(
+		query,
+		e.evalMaxResponseChars,
+	); outputDirective != "" {
 		finalPrompt += "\n\n" + outputDirective
 	}
 

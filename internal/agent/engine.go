@@ -56,6 +56,7 @@ type AgentEngine struct {
 	citationState        agentCitationState        // Stable source handles for this execution
 	activeQuery          string                    // Original current user query for deterministic response-shape finalization
 	activeUserStatements []string                  // User-only archive plus recent user turns, in chronological order
+	evalMaxResponseChars int                       // Trusted full-Eval response-shape limit; zero in production.
 }
 
 // ImageDescriberFunc generates a text description of an image.
@@ -106,6 +107,15 @@ func NewAgentEngine(
 func (e *AgentEngine) SetPinnedMentions(mcpServices []*PinnedMCPServiceInfo, skills []*PinnedSkillInfo) {
 	e.pinnedMCPServices = mcpServices
 	e.pinnedSkills = skills
+}
+
+// SetEvalResponseLimit installs a request-scoped presentation contract that
+// has already been authorized by the HTTP Eval boundary. It is intentionally
+// absent from persisted agent configuration and remains zero in production.
+func (e *AgentEngine) SetEvalResponseLimit(maxResponseChars int) {
+	if maxResponseChars > 0 {
+		e.evalMaxResponseChars = maxResponseChars
+	}
 }
 
 func (e *AgentEngine) systemPromptOptions(ctx context.Context) *BuildSystemPromptOptions {

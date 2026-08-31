@@ -1287,6 +1287,18 @@ func RequiresAuthoritativeUserHistory(query string) bool {
 // to the current request, where long system prompts cannot obscure it. The
 // block is runtime-only: callers keep persisting the original user message.
 func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatements ...string) string {
+	return AppendCurrentTurnDirectiveWithLimit(content, originalQuery, 0, priorUserStatements...)
+}
+
+// AppendCurrentTurnDirectiveWithLimit applies a trusted request-scoped output
+// limit when one is supplied by the full Eval runtime. The limit changes only
+// response shape; semantic expectations and scoring rules are never injected.
+// A zero limit preserves the ordinary query-derived production behavior.
+func AppendCurrentTurnDirectiveWithLimit(
+	content, originalQuery string,
+	explicitMaxResponseChars int,
+	priorUserStatements ...string,
+) string {
 	var rules string
 	switch {
 	case IsStateAuditTurn(originalQuery) && IsStateOnlyTurn(originalQuery):
@@ -1386,9 +1398,18 @@ func AppendCurrentTurnDirective(content, originalQuery string, priorUserStatemen
 - 最后一句必须原样写明“待上述条件确认后再确定，暂不推荐最终方式”。`
 	}
 	limit := currentTurnResponseLimit(originalQuery)
+	strictEvalLimit := explicitMaxResponseChars > 0
+	if strictEvalLimit {
+		limit = explicitMaxResponseChars
+	}
 	if limit > 0 {
 		rules += fmt.Sprintf(`
 - 回答必须采用满足当前请求所需的最短完整表达，整篇不得超过%d个中文字符。优先删除前言、任务复述、来源汇总、重复表格、重复结论和未被请求的分支，不能通过删除用户点名的事实、对象或必要引用来凑长度。`, limit)
+		if strictEvalLimit {
+			target := max(80, limit*4/5)
+			rules += fmt.Sprintf(`
+- 这是当前请求的硬性输出契约，字符数包含 Markdown 和引用标记；请以不超过%d个字符为目标预留余量。若内容较多，优先使用短句或紧凑列表，并在动笔前分配篇幅；禁止依赖生成后的生硬截断。`, target)
+		}
 	}
 	if ReferencesRecentUserState(originalQuery) {
 		if statement := latestReferencedUserState(priorUserStatements); statement != "" {
@@ -1443,12 +1464,28 @@ func boundedRuntimeData(value string, maxRunes int) string {
 // the terminal citation reminder and lose the current request's response
 // length or comparison rules. Unbounded ordinary requests receive no text.
 func TerminalGenerationDirective(query string) string {
+	return TerminalGenerationDirectiveWithLimit(query, 0)
+}
+
+// TerminalGenerationDirectiveWithLimit repeats the same trusted Eval-only
+// response limit at the final generation boundary. A zero value keeps the
+// ordinary query-derived policy used outside Eval.
+func TerminalGenerationDirectiveWithLimit(query string, explicitMaxResponseChars int) string {
 	parts := make([]string, 0, 2)
-	if limit := currentTurnResponseLimit(query); limit > 0 {
+	limit := currentTurnResponseLimit(query)
+	strictEvalLimit := explicitMaxResponseChars > 0
+	if strictEvalLimit {
+		limit = explicitMaxResponseChars
+	}
+	if limit > 0 {
+		targetLine := ""
+		if strictEvalLimit {
+			targetLine = fmt.Sprintf("\n- 字符数包含 Markdown 和引用标记；以不超过%d个字符为目标预留余量，不得依赖截断。", max(80, limit*4/5))
+		}
 		parts = append(parts, fmt.Sprintf(`[WEKNORA_TERMINAL_RESPONSE_CHECK]
 现在只生成当前请求的最终答案，不得回答历史问题，也不得输出检索、校验或整理过程。
 - 整篇不得超过%d个中文字符；使用满足当前请求的最短完整表达。
-- 保留用户点名的对象、必要结论和直接支持结论的最少就近引用；删除前言、任务复述、来源汇总、重复表格、重复结论及未要求的分支。`, limit))
+- 保留用户点名的对象、必要结论和直接支持结论的最少就近引用；删除前言、任务复述、来源汇总、重复表格、重复结论及未要求的分支。%s`, limit, targetLine))
 	}
 	if IsDeferredDecisionTurn(query) && IsComparisonTurn(query) {
 		parts = append(parts, `[WEKNORA_TERMINAL_OUTPUT_CHECK]

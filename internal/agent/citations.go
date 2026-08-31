@@ -129,7 +129,10 @@ func (e *AgentEngine) prepareCitationAwareGenerationMessages(messages []chat.Mes
 	}
 	out := append([]chat.Message(nil), messages...)
 	reminder := sourcerefs.TerminalCitationInstruction()
-	if outputDirective := conversationmemory.TerminalGenerationDirective(e.activeQuery); outputDirective != "" {
+	if outputDirective := conversationmemory.TerminalGenerationDirectiveWithLimit(
+		e.activeQuery,
+		e.evalMaxResponseChars,
+	); outputDirective != "" {
 		reminder += "\n\n" + outputDirective
 	}
 	if out[len(out)-1].Role == "user" && out[len(out)-1].Content == reminder {

@@ -289,6 +289,35 @@ func TestTerminalGenerationDirectiveCarriesFinalLengthAndDeferredRules(t *testin
 	}
 }
 
+func TestExplicitEvalResponseLimitOverridesHeuristicWithoutChangingSemantics(t *testing.T) {
+	query := "输出最终交付清单，保留必要引用。"
+	directive := AppendCurrentTurnDirectiveWithLimit(query, query, 1200)
+	for _, want := range []string{
+		"不得超过1200个中文字符",
+		"不超过960个字符为目标",
+		"字符数包含 Markdown 和引用标记",
+		"禁止依赖生成后的生硬截断",
+	} {
+		if !strings.Contains(directive, want) {
+			t.Fatalf("explicit Eval response rule missing %q: %s", want, directive)
+		}
+	}
+	if strings.Contains(directive, "不得超过1600个中文字符") {
+		t.Fatalf("query-derived heuristic conflicted with explicit Eval limit: %s", directive)
+	}
+
+	terminal := TerminalGenerationDirectiveWithLimit(query, 1800)
+	if !strings.Contains(terminal, "不得超过1800个中文字符") ||
+		!strings.Contains(terminal, "不超过1440个字符为目标") {
+		t.Fatalf("terminal Eval response rule was not repeated exactly: %s", terminal)
+	}
+
+	ordinary := AppendCurrentTurnDirective(query, query)
+	if !strings.Contains(ordinary, "不得超过1600个中文字符") || strings.Contains(ordinary, "硬性输出契约") {
+		t.Fatalf("ordinary response policy changed unexpectedly: %s", ordinary)
+	}
+}
+
 func TestRequiredEvidenceTopicsPrefersTrustedRuntimeMarker(t *testing.T) {
 	query := "比较错误甲和错误乙。\n[WEKNORA_REQUIRED_EVIDENCE_TOPICS][\"公开采购\",\"询比\",\"竞价\",\"竞争谈判\"]\n- 后续比较规则"
 	got := RequiredEvidenceTopics(query)

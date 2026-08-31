@@ -154,6 +154,7 @@ func (s *sessionService) AgentQA(
 		logger.Errorf(ctx, "Failed to create agent engine: %v", err)
 		return err
 	}
+	engine.SetEvalResponseLimit(req.EvalMaxResponseChars)
 
 	// Route image data based on agent model's vision capability
 	var agentModelSupportsVision bool
@@ -199,7 +200,12 @@ func (s *sessionService) AgentQA(
 			priorUserStatements = append(priorUserStatements, message.Content)
 		}
 	}
-	agentQuery = conversationmemory.AppendCurrentTurnDirective(agentQuery, req.Query, priorUserStatements...)
+	agentQuery = conversationmemory.AppendCurrentTurnDirectiveWithLimit(
+		agentQuery,
+		req.Query,
+		req.EvalMaxResponseChars,
+		priorUserStatements...,
+	)
 
 	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside
 	// the agent engine only; we intentionally do not persist them on user messages

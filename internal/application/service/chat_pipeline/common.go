@@ -166,15 +166,19 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 			priorUserStatements = append(priorUserStatements, item.Query)
 		}
 	}
-	currentContent = conversationmemory.AppendCurrentTurnDirective(
+	currentContent = conversationmemory.AppendCurrentTurnDirectiveWithLimit(
 		currentContent,
 		chatManage.Query,
+		chatManage.EvalMaxResponseChars,
 		priorUserStatements...,
 	)
 	// Keep the citation-use block terminal even after adding the current-turn
 	// response contract. This preserves the established citation salience rule.
 	currentContent = sourcerefs.PlaceTerminalCitationInstruction(currentContent, chatManage.CitationResult)
-	if outputDirective := conversationmemory.TerminalGenerationDirective(chatManage.Query); outputDirective != "" {
+	if outputDirective := conversationmemory.TerminalGenerationDirectiveWithLimit(
+		chatManage.Query,
+		chatManage.EvalMaxResponseChars,
+	); outputDirective != "" {
 		currentContent += "\n\n" + outputDirective
 	}
 	userMsg := chat.Message{

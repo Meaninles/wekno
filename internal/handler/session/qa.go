@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/errors"
@@ -50,6 +51,7 @@ type qaRequestContext struct {
 	attachments            types.MessageAttachments  // Processed file attachments
 	originalInputFiles     []types.OriginalInputFile // Runtime-only original file descriptors for Claude SDK agents
 	chatQueueTicket        ChatQueueTicket           // Conversation-level model-pool admission lease
+	evalMaxResponseChars   int                       // Trusted full-Eval presentation constraint; zero in production.
 
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
@@ -102,6 +104,7 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 		EnableMemory:           rc.enableMemory,
 		Attachments:            rc.attachments,
 		OriginalInputFiles:     append([]types.OriginalInputFile(nil), rc.originalInputFiles...),
+		EvalMaxResponseChars:   rc.evalMaxResponseChars,
 	}
 }
 
@@ -138,6 +141,11 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 	if request.Query == "" {
 		logger.Error(ctx, "Query content is empty")
 		return nil, nil, errors.NewBadRequestError("Query content cannot be empty")
+	}
+	evalMaxResponseChars, err := agenteval.LoadConfigFromEnv().ResponseMaxChars(request.EvalResponseContract)
+	if err != nil {
+		logger.Errorf(ctx, "[%s] Invalid Eval response contract: %v", logPrefix, err)
+		return nil, nil, errors.NewBadRequestError(err.Error())
 	}
 
 	// SSRF protection: strip client-supplied URL/Caption fields from image attachments.
@@ -392,6 +400,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		channel:                request.Channel,
 		attachments:            processedAttachments,
 		originalInputFiles:     originalInputFiles,
+		evalMaxResponseChars:   evalMaxResponseChars,
 		reqAgentEnabled:        request.AgentEnabled,
 		reqAgentID:             request.AgentID,
 	}

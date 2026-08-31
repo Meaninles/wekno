@@ -136,6 +136,7 @@ func (s *sessionService) KnowledgeQA(
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
 			Query:                   req.Query,
+			EvalMaxResponseChars:    req.EvalMaxResponseChars,
 			LightweightSkillContext: lightweightSkillContext,
 			SessionID:               req.Session.ID,
 			UserID:                  userID,

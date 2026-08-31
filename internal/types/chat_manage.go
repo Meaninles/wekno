@@ -9,6 +9,8 @@ type PipelineRequest struct {
 	Query        string `json:"query,omitempty"`
 	EnableMemory bool   `json:"enable_memory"`
 	MaxRounds    int    `json:"max_rounds"`
+	// EvalMaxResponseChars is runtime-only and zero in production.
+	EvalMaxResponseChars int `json:"-"`
 
 	// Knowledge base retrieval parameters
 	KnowledgeBaseIDs []string      `json:"knowledge_base_ids"`
@@ -200,6 +202,7 @@ func (c *ChatManage) Clone() *ChatManage {
 			UserID:                   c.UserID,
 			EnableMemory:             c.EnableMemory,
 			MaxRounds:                c.MaxRounds,
+			EvalMaxResponseChars:     c.EvalMaxResponseChars,
 			KnowledgeBaseIDs:         knowledgeBaseIDs,
 			KnowledgeIDs:             knowledgeIDs,
 			SearchTargets:            searchTargets,

@@ -289,7 +289,12 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		req.Query,
 		hasSelectedKnowledge,
 	)
-	runtimeQuery = conversationmemory.AppendCurrentTurnDirective(runtimeQuery, req.Query, boundaryUserStatements...)
+	runtimeQuery = conversationmemory.AppendCurrentTurnDirectiveWithLimit(
+		runtimeQuery,
+		req.Query,
+		req.EvalMaxResponseChars,
+		boundaryUserStatements...,
+	)
 	active.runtimeQuery = runtimeQuery
 	evalObservability := false
 	if manager := langfuse.GetManager(); manager != nil {

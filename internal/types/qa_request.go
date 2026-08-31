@@ -24,6 +24,9 @@ type QARequest struct {
 	QuotedContext          string              // Quoted message content from IM quote-reply (appended at LLM prompt stage, not used for retrieval)
 	Attachments            MessageAttachments  // File attachments (processed and ready for prompt injection)
 	OriginalInputFiles     []OriginalInputFile // Runtime-only original file descriptors for Claude SDK agents
+	// EvalMaxResponseChars is a trusted, presentation-only Eval constraint.
+	// The HTTP boundary leaves it at zero outside full Eval mode.
+	EvalMaxResponseChars int
 }
 
 const (

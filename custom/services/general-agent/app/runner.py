@@ -4937,6 +4937,278 @@ USER_NAMED_SET_COUNTS = {
     "eight": 8,
 }
 
+EXPLICIT_NAMED_SET_COMPLETENESS_RE = re.compile(
+    r"(?:名称[^，,。！？!?；;\r\n]{0,12}完整|完整[^，,。！？!?；;\r\n]{0,12}名称|"
+    r"分别是什么|分别有哪些|各自是什么|列出[^，,。！？!?；;\r\n]{0,20}(?:全部|所有|完整)[^，,。！？!?；;\r\n]{0,8}名称|"
+    r"all\s+(?:names|types)|complete\s+(?:names|list)|what\s+are\s+(?:the\s+)?(?:types|names))",
+    re.IGNORECASE,
+)
+GENERIC_NAMED_SET_PLACEHOLDER_RE = re.compile(
+    r"(?:未知|未定义|未命名|未给出|未说明|信息缺口|缺少名称|名称缺失|待确认|无法确认|没有名称|"
+    r"unknown|undefined|unnamed|not\s+(?:given|specified|defined))",
+    re.IGNORECASE,
+)
+GENERIC_ORDINAL_SET_MEMBER_RE = re.compile(
+    r"^(?:第\s*)?(?:[1-8一二两三四五六七八]|one|two|three|four|five|six|seven|eight)\s*"
+    r"(?:类|种|个|st|nd|rd|th|type|category)?\s*(?:skill|技能|智能体|agent|工具|tool)(?:名称)?$",
+    re.IGNORECASE,
+)
+
+NEGATIVE_ACTION_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("安装", ("安装",)),
+    ("执行", ("执行", "运行", "调用")),
+    ("新增", ("新增", "添加", "创建")),
+    ("修改", ("修改", "更新", "编辑")),
+    ("删除", ("删除", "移除")),
+    ("导入", ("导入",)),
+    ("下载", ("下载",)),
+    ("上传", ("上传",)),
+    ("发送", ("发送", "发布")),
+)
+NEGATIVE_ACTION_MARKER_RE = re.compile(
+    r"(?:不要|不得|禁止|无需|无须|不能|不可|不应|不许|不允许|不会|不再|不进行|不予|没有|未获|未经|无权)",
+    re.IGNORECASE,
+)
+NEGATIVE_ACTION_UMBRELLA_RE = re.compile(
+    r"(?:不要|不得|禁止|无需|无须|不能|不可|不应|不许|不允许|不会|不再|不进行|不予|没有|未获|未经|无权|无|不)"
+    r"[^，,。！？!?；;\r\n]{0,8}(?:任何|一切|相关)?(?:操作|动作)",
+    re.IGNORECASE,
+)
+NEGATIVE_MUTATION_UMBRELLA_RE = re.compile(
+    r"(?:不要|不得|禁止|无需|无须|不能|不可|不应|不许|不允许|不会|不再|不进行|不予|没有|未获|未经|无权|无|不)"
+    r"[^，,。！？!?；;\r\n]{0,8}(?:任何|一切|相关)?(?:变更|改动)",
+    re.IGNORECASE,
+)
+MUTATING_ACTIONS = {"安装", "新增", "修改", "删除", "导入", "下载", "上传", "发送"}
+
+
+def _action_scope_clauses(value: str) -> list[str]:
+    clauses: list[str] = []
+    for sentence in re.split(r"[。！？!?；;\r\n]+", value or ""):
+        clauses.extend(
+            part
+            for part in re.split(r"[，,](?=(?:但|但是|不过|而|可以|允许))", sentence)
+            if part.strip()
+        )
+    return clauses
+
+
+def _has_negative_action_context(prefix: str, suffix: str) -> bool:
+    action_pattern = "(?:" + "|".join(
+        re.escape(alias)
+        for _canonical, aliases in NEGATIVE_ACTION_ALIASES
+        for alias in aliases
+    ) + ")"
+    marker_matches = list(NEGATIVE_ACTION_MARKER_RE.finditer(prefix))
+    if marker_matches:
+        tail = prefix[marker_matches[-1].end() :].strip()
+        if not tail or re.fullmatch(
+            rf"(?:(?:仍然|再|继续|进行|实际|直接|擅自|任何|相关|这些|上述)\s*)*"
+            rf"(?:{action_pattern}(?:\s*(?:、|，|,|或|和|与|及)\s*{action_pattern})*"
+            rf"\s*(?:、|，|,|或|和|与|及)?\s*)?",
+            tail,
+            re.IGNORECASE,
+        ):
+            return True
+    if re.search(r"(?:不|无)\s*$", prefix):
+        return True
+    if re.search(
+        rf"(?:不|无)(?:进行)?\s*{action_pattern}(?:\s*(?:、|，|,|或|和|与|及)\s*{action_pattern})*"
+        rf"\s*(?:、|，|,|或|和|与|及)?\s*$",
+        prefix,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"(?:没有|无|未获|未经)[^，,。！？!?；;]{0,8}授权|不在[^，,。！？!?；;]{0,8}范围",
+            suffix,
+            re.IGNORECASE,
+        )
+    )
+
+
+def requested_named_set_requirements(query: str) -> list[dict[str, Any]]:
+    """Return only explicit, count-bearing requests for a complete named set.
+
+    The expected cardinality and subject come from the current user text.  No
+    member name is inferred here, which keeps the contract reusable across
+    different WeKnora knowledge bases and prevents an evaluator answer key from
+    leaking into runtime behavior.
+    """
+
+    value = original_query_without_runtime_contract(query)
+    if not EXPLICIT_NAMED_SET_COMPLETENESS_RE.search(value):
+        return []
+    requirements: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    count_pattern = r"[2-8二两三四五六七八]|two|three|four|five|six|seven|eight"
+    for subject, aliases in USER_NAMED_SET_SUBJECTS:
+        alias_pattern = "(?:" + "|".join(re.escape(alias) for alias in aliases) + ")"
+        pattern = re.compile(
+            rf"(?<!第)(?P<count>{count_pattern})\s*(?:(?:种|类|个)\s*)?"
+            rf"(?P<subject>{alias_pattern})(?:s)?",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(value):
+            expected_count = USER_NAMED_SET_COUNTS.get(match.group("count").casefold())
+            if not expected_count or (subject, expected_count) in seen:
+                continue
+            seen.add((subject, expected_count))
+            requirements.append(
+                {
+                    "subject": subject,
+                    "aliases": aliases,
+                    "expected_count": expected_count,
+                    "search_target": f"{match.group(0).strip()} 完整名称",
+                }
+            )
+    return requirements[:4]
+
+
+def _valid_named_set_member(label: str, aliases: tuple[str, ...]) -> str:
+    value = CANONICAL_SOURCE_CITATION_RE.sub("", label or "")
+    value = value.strip().strip("*_`#'\"“”‘’()（）[]【】<>《》").strip()
+    if (
+        not value
+        or len(value) > 96
+        or GENERIC_NAMED_SET_PLACEHOLDER_RE.search(value)
+        or re.search(r"[/\\]|\.(?:md|ya?ml|json|toml|py|js|ts|sh|txt)$", value, re.IGNORECASE)
+    ):
+        return ""
+    lowered = value.casefold()
+    if not any(alias.casefold() in lowered for alias in aliases):
+        return ""
+    normalized_label = re.sub(r"[\s*_`\-()（）]+", "", lowered)
+    if GENERIC_ORDINAL_SET_MEMBER_RE.fullmatch(normalized_label):
+        return ""
+    return value
+
+
+def named_set_answer_members(answer: str, aliases: tuple[str, ...]) -> list[str]:
+    """Extract explicit member names from structured rows or an enumeration."""
+
+    members: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        member = _valid_named_set_member(raw, aliases)
+        canonical = normalized_grounding_text(member)
+        if member and canonical not in seen:
+            members.append(member)
+            seen.add(canonical)
+
+    for label, text in structured_factual_segments(answer):
+        add(label)
+        emphasized = re.match(
+            r"\s*(?:\*\*|__)(?P<label>[^*_<>{}\r\n]{2,96})(?:\*\*|__)\s*(?:[：:—–-]|$)",
+            text,
+        )
+        if emphasized:
+            add(emphasized.group("label"))
+
+    for clause in re.split(r"[。！？!?；;\r\n]+", answer or ""):
+        match = re.search(r"(?:分别是|包括|包含|分为)\s*[:：]?\s*(.+)$", clause, re.IGNORECASE)
+        if not match:
+            continue
+        prefix = clause[: match.start()]
+        alias_pattern = "(?:" + "|".join(re.escape(alias) for alias in aliases) + ")"
+        if not re.search(
+            rf"(?:[2-8二两三四五六七八]|two|three|four|five|six|seven|eight)\s*"
+            rf"(?:(?:种|类|个)\s*)?{alias_pattern}(?:s)?",
+            prefix,
+            re.IGNORECASE,
+        ):
+            continue
+        tail = CANONICAL_SOURCE_CITATION_RE.sub("", match.group(1))
+        for raw in re.split(r"\s*(?:、|，|,|以及|和|与|及)\s*", tail):
+            add(re.split(r"[：:]", raw, maxsplit=1)[0])
+    return members[:12]
+
+
+def named_set_cardinality_issues(answer: str, query: str) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for requirement in requested_named_set_requirements(query):
+        members = named_set_answer_members(answer, tuple(requirement["aliases"]))
+        expected_count = int(requirement["expected_count"])
+        if len(members) >= expected_count:
+            continue
+        subject = str(requirement["subject"])
+        issues.append(
+            {
+                "code": "current_turn_named_set_cardinality_incomplete",
+                "set_subject": subject,
+                "expected_count": expected_count,
+                "actual_count": len(members),
+                "search_targets": [str(requirement["search_target"])],
+                "required_action": (
+                    f"The current request explicitly asks for {expected_count} complete, distinct {subject} names. "
+                    "Obtain evidence for the complete set and rewrite it with one real name per member. Ordinal "
+                    "placeholders such as 'the third type', unknown/undefined labels, and duplicated aliases do not "
+                    "count as names. Do not infer the missing member from an earlier assistant answer."
+                ),
+            }
+        )
+    return issues
+
+
+def required_negative_actions(query: str) -> list[str]:
+    """Extract explicit current-turn prohibitions for stateful actions."""
+
+    value = original_query_without_runtime_contract(query)
+    required: list[str] = []
+    for clause in _action_scope_clauses(value):
+        matches: list[tuple[int, int, str]] = []
+        for canonical, aliases in NEGATIVE_ACTION_ALIASES:
+            for alias in aliases:
+                for match in re.finditer(re.escape(alias), clause, re.IGNORECASE):
+                    prefix = clause[max(0, match.start() - 24) : match.start()]
+                    suffix = clause[match.end() : min(len(clause), match.end() + 14)]
+                    if _has_negative_action_context(prefix, suffix):
+                        matches.append((match.start(), match.end(), canonical))
+        # “执行安装/执行删除” describes the specific action, not two
+        # independent boundaries. Preserve only the more specific one.
+        specific_starts = [
+            start
+            for start, _end, canonical in matches
+            if canonical != "执行"
+        ]
+        for start, end, canonical in matches:
+            if canonical == "执行" and any(start <= other <= end + 4 for other in specific_starts):
+                continue
+            if canonical not in required:
+                required.append(canonical)
+    return required
+
+
+def missing_negative_actions(answer: str, required_actions: list[str]) -> list[str]:
+    if not required_actions or NEGATIVE_ACTION_UMBRELLA_RE.search(answer or ""):
+        return []
+    mutation_covered = bool(NEGATIVE_MUTATION_UMBRELLA_RE.search(answer or ""))
+    missing: list[str] = []
+    for canonical in required_actions:
+        if mutation_covered and canonical in MUTATING_ACTIONS:
+            continue
+        aliases = next(
+            aliases for name, aliases in NEGATIVE_ACTION_ALIASES if name == canonical
+        )
+        covered = False
+        for clause in _action_scope_clauses(answer or ""):
+            for alias in aliases:
+                for match in re.finditer(re.escape(alias), clause, re.IGNORECASE):
+                    prefix = clause[max(0, match.start() - 24) : match.start()]
+                    suffix = clause[match.end() : min(len(clause), match.end() + 16)]
+                    if _has_negative_action_context(prefix, suffix):
+                        covered = True
+                        break
+                if covered:
+                    break
+            if covered:
+                break
+        if not covered:
+            missing.append(canonical)
+    return missing
+
 
 def required_inline_identifiers(query: str) -> list[str]:
     """Return code-like identifiers explicitly central to the current ask.
@@ -5930,6 +6202,28 @@ def turn_contract_issues(
             }
         )
 
+    if TURN_EXECUTION_CONTRACT_MARKER in query:
+        issues.extend(named_set_cardinality_issues(value, query))
+
+    required_boundaries = (
+        required_negative_actions(query)
+        if TURN_EXECUTION_CONTRACT_MARKER in query
+        else []
+    )
+    missing_boundaries = missing_negative_actions(value, required_boundaries)
+    if missing_boundaries:
+        issues.append(
+            {
+                "code": "current_turn_action_boundary_missing",
+                "missing_actions": missing_boundaries,
+                "required_action": (
+                    "Rewrite the complete answer and explicitly preserve every negative action boundary stated in "
+                    "the current user request. State that the listed actions will not be performed; a refusal, "
+                    "evidence limitation, or omission does not preserve the boundary by itself."
+                ),
+            }
+        )
+
     grounding_targets = (
         current_query_grounding_targets(query)
         if FRESH_EVIDENCE_CONTRACT_MARKER in query
@@ -6122,6 +6416,7 @@ def build_turn_contract_runtime_repair_prompt(
         code.startswith("current_turn_evidence_")
         or code in {
             "current_turn_condition_evidence_not_direct",
+            "current_turn_named_set_cardinality_incomplete",
             "current_turn_uncertainty_evidence_mismatch",
         }
         for code in issue_codes
@@ -6206,6 +6501,9 @@ def turn_contract_needs_retrieval(
     budget still prevents repeated searching.
     """
 
+    issue_codes = turn_contract_issue_codes(issues)
+    if "current_turn_named_set_cardinality_incomplete" in issue_codes:
+        return True
     if evidence_by_id:
         grounding_issues = [
             issue
@@ -6265,10 +6563,19 @@ async def run_eval_focused_evidence_retrieval(
         state[RETRIEVAL_TOOL_BUDGET_EXHAUSTED_STATE_KEY] = calls >= budget > 0
         return False
 
+    direct_grounding_issues = [
+        issue
+        for issue in (issues or [])
+        if isinstance(issue, dict)
+        and str(issue.get("code") or "") == "current_turn_evidence_focus_ungrounded"
+    ]
+    direct_grounding_targets = _turn_contract_issue_targets(direct_grounding_issues)
     preferred: list[tuple[int, RuntimeToolSpec, str]] = []
     for spec in payload.tools:
         canonical = canonical_runtime_tool_name(spec.name).lower()
-        if canonical == "knowledge_search":
+        if canonical == "grep_chunks" and direct_grounding_targets:
+            preferred.append((-1, spec, canonical))
+        elif canonical == "knowledge_search":
             preferred.append((0, spec, canonical))
         elif canonical == "wiki_search":
             preferred.append((1, spec, canonical))
@@ -6276,7 +6583,11 @@ async def run_eval_focused_evidence_retrieval(
         return False
     _, spec, canonical = sorted(preferred, key=lambda item: item[0])[0]
 
-    if canonical == "knowledge_search":
+    if canonical == "grep_chunks":
+        arguments = {
+            "query": "|".join(re.escape(target) for target in direct_grounding_targets[:8])
+        }
+    elif canonical == "knowledge_search":
         arguments: dict[str, Any] = {"queries": searches[:5]}
     else:
         # wiki_search exposes one semantic query. Keep it bounded and entirely
@@ -6313,6 +6624,7 @@ def _turn_contract_issue_targets(issues: list[dict[str, Any]]) -> list[str]:
             "missing_topics",
             "missing_identifiers",
             "missing_segments",
+            "search_targets",
             "unverified_ids",
         ):
             raw = issue.get(field)
@@ -6418,6 +6730,10 @@ def compact_turn_contract_rewrite_issues(
         "ranking_terms": "需移除的排序表达",
         "heuristic_terms": "需移除的假设表达",
         "relation_terms": "需移除的无依据关系表达",
+        "missing_actions": "必须保留的禁止动作",
+        "set_subject": "完整集合主题",
+        "expected_count": "完整集合应有成员数",
+        "actual_count": "当前识别到的有效成员数",
         "maximum_chars": "硬性字符上限",
     }
     compacted: list[dict[str, Any]] = []
@@ -6518,7 +6834,8 @@ async def run_turn_contract_isolated_rewrite(
     prompt = (
         "请重写一份完整、直接、可独立阅读的最终回答，并修复上下文列出的结构问题。\n"
         + length_instruction
-        + "事实只能来自可引用依据；每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
+        + "产品或知识事实只能来自可引用依据；当前请求中的目标、格式要求和行动边界可直接复述。"
+        "每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
         "cite_exactly 是最终输出标记，不是代码：必须原样裸写，不得放进反引号、引号、括号或代码块。"
         "不得编造或改写引用句柄。可引用依据非空时，不得声称本轮证据为空、未检索或仍需检索；"
         "若某个具体事实确实没有直接证据，只对该事实简短标明未知或缺口，不要叙述检索过程。"

@@ -280,6 +280,7 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertNotIn("准备继续检索", captured["prompt"])
         self.assertIn("不超过 480 个字符为目标", captured["prompt"])
         self.assertIn("不得放进反引号、引号、括号或代码块", captured["prompt"])
+        self.assertIn("当前请求中的目标、格式要求和行动边界可直接复述", captured["prompt"])
 
     def test_known_code_wrapped_source_handles_are_unwrapped_without_changing_examples(self):
         answer = (
@@ -392,6 +393,130 @@ class RunnerProgressTest(unittest.TestCase):
             }
         )
         self.assertEqual(referenced_user_named_sets(unrelated), [])
+
+    def test_turn_contract_requires_complete_counted_named_set_without_answer_key(self):
+        payload = ChatPayload(
+            run_id="run-counted-set",
+            session_id="session-counted-set",
+            assistant_message_id="assistant-counted-set",
+            query=(
+                "只依据当前知识库说明WeKnora的三类Skill分别是什么，名称要完整，并给出引用。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        incomplete = (
+            '- **轻量Skill**：第一类。<src id="S1" />\n'
+            '- **预加载运行时Skill**：第二类。<src id="S1" />\n'
+            '- **第三类Skill**：文档未给出名称。<src id="S1" />'
+        )
+        issues = turn_contract_issues(
+            payload,
+            incomplete,
+            evidence_by_id={"S1": "当前项目中技能分为三类。"},
+        )
+        cardinality = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_named_set_cardinality_incomplete"
+        )
+        self.assertEqual(cardinality["set_subject"], "Skill")
+        self.assertEqual(cardinality["expected_count"], 3)
+        self.assertEqual(cardinality["actual_count"], 2)
+        self.assertEqual(cardinality["search_targets"], ["三类Skill 完整名称"])
+        self.assertTrue(turn_contract_needs_retrieval(issues, {"S1": "技能分为三类。"}))
+
+        complete = (
+            "三类Skill分别是轻量Skill、预加载运行时Skill和专业Skill。"
+            '<src id="S1" />'
+        )
+        self.assertNotIn(
+            "current_turn_named_set_cardinality_incomplete",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    complete,
+                    evidence_by_id={"S1": "三类Skill的完整名称。"},
+                )
+            },
+        )
+        complete_rows = (
+            '1. **轻量Skill**——说明。<src id="S1" />\n'
+            '2. **预加载运行时Skill**——说明。<src id="S1" />\n'
+            '3. **专业Skill**——说明。<src id="S1" />'
+        )
+        self.assertNotIn(
+            "current_turn_named_set_cardinality_incomplete",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    complete_rows,
+                    evidence_by_id={"S1": "三类Skill的完整名称。"},
+                )
+            },
+        )
+
+    def test_turn_contract_preserves_explicit_negative_action_boundaries(self):
+        payload = ChatPayload(
+            run_id="run-action-boundary",
+            session_id="session-action-boundary",
+            assistant_message_id="assistant-action-boundary",
+            query=(
+                "请说明用户怎样用明确名称或ID确认目标，仍然不要执行安装。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        issue = next(
+            issue
+            for issue in turn_contract_issues(payload, "请使用完整名称或唯一ID确认目标。")
+            if issue["code"] == "current_turn_action_boundary_missing"
+        )
+        self.assertEqual(issue["missing_actions"], ["安装"])
+        self.assertNotIn(
+            "current_turn_action_boundary_missing",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    "请使用完整名称或唯一ID确认目标；本轮不安装。",
+                )
+            },
+        )
+
+        coordinated = payload.model_copy(
+            update={
+                "query": (
+                    "只说明方案，不进行新增、修改或删除，也不创建文件。\n"
+                    "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+                )
+            }
+        )
+        self.assertNotIn(
+            "current_turn_action_boundary_missing",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(coordinated, "仅说明方案，不做任何变更。")
+            },
+        )
+
+        uncertain = payload.model_copy(
+            update={
+                "query": (
+                    "不能确定是否需要安装，请先解释依赖。\n"
+                    "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+                )
+            }
+        )
+        self.assertNotIn(
+            "current_turn_action_boundary_missing",
+            {issue["code"] for issue in turn_contract_issues(uncertain, "需要先确认依赖。")},
+        )
 
     def test_turn_contract_rejects_neighboring_evidence_for_named_current_concept(self):
         progressive = ChatPayload(
@@ -1354,6 +1479,125 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(
             state["turn_evidence_by_citation_id"]["S2"],
             "原生运行时技能通过 read_skill 读取内容。",
+        )
+
+    def test_eval_focused_retrieval_prefers_exact_grep_for_direct_grounding(self):
+        payload = ChatPayload(
+            run_id="run-focused-grep",
+            session_id="session-focused-grep",
+            assistant_message_id="assistant-focused-grep",
+            query=(
+                "解释Skill的渐进式披露机制，并给出引用。\n"
+                "本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["Skill分层加载"]\n'
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+                knowledge_bases=["kb-1"],
+            ),
+            tools=[
+                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+                RuntimeToolSpec(name="grep_chunks", source="knowledge"),
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        state = {
+            "retrieval_tool_budget": 4,
+            "retrieval_tool_calls": 1,
+            "turn_evidence_by_citation_id": {"S1": "相邻的技能层级说明。"},
+        }
+        issues = [
+            {
+                "code": "current_turn_evidence_focus_ungrounded",
+                "missing_topics": ["渐进式披露"],
+            }
+        ]
+        result = {
+            "source_references": [
+                {
+                    "cite_exactly": '<src id="S2" />',
+                    "evidence_content": "技能遵循渐进式披露，只在需要时加载下一层。",
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(
+            "app.runner.call_tool_callback",
+            return_value=result,
+        ) as callback:
+            recovered = asyncio.run(
+                run_eval_focused_evidence_retrieval(payload, state, issues)
+            )
+
+        self.assertTrue(recovered)
+        callback.assert_called_once_with(
+            payload,
+            "grep_chunks",
+            {"query": "渐进式披露"},
+        )
+
+    def test_eval_counted_set_repair_uses_semantic_search_not_literal_grep(self):
+        payload = ChatPayload(
+            run_id="run-counted-set-search",
+            session_id="session-counted-set-search",
+            assistant_message_id="assistant-counted-set-search",
+            query=(
+                "列出三类Skill的完整名称。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["三类Skill"]\n'
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+                knowledge_bases=["kb-1"],
+            ),
+            tools=[
+                RuntimeToolSpec(name="grep_chunks", source="knowledge"),
+                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        state = {
+            "retrieval_tool_budget": 4,
+            "retrieval_tool_calls": 1,
+            "turn_evidence_by_citation_id": {"S1": "技能分为三类。"},
+        }
+        issues = [
+            {
+                "code": "current_turn_named_set_cardinality_incomplete",
+                "search_targets": ["三类Skill 完整名称"],
+                "expected_count": 3,
+                "actual_count": 2,
+            }
+        ]
+        result = {
+            "source_references": [
+                {
+                    "cite_exactly": '<src id="S2" />',
+                    "evidence_content": "三类技能的完整名称与说明。",
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(
+            "app.runner.call_tool_callback",
+            return_value=result,
+        ) as callback:
+            recovered = asyncio.run(
+                run_eval_focused_evidence_retrieval(payload, state, issues)
+            )
+
+        self.assertTrue(recovered)
+        callback.assert_called_once_with(
+            payload,
+            "knowledge_search",
+            {"queries": ["三类Skill 完整名称", "三类Skill"]},
         )
 
     def test_eval_system_prompt_allows_only_runtime_authorized_bounded_repairs(self):

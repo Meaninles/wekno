@@ -393,6 +393,101 @@ class RunnerProgressTest(unittest.TestCase):
         )
         self.assertEqual(referenced_user_named_sets(unrelated), [])
 
+    def test_turn_contract_rejects_neighboring_evidence_for_named_current_concept(self):
+        progressive = ChatPayload(
+            run_id="run-progressive-grounding",
+            session_id="session-progressive-grounding",
+            assistant_message_id="assistant-progressive-grounding",
+            query=(
+                "解释Skill的渐进式披露机制，重点说明为什么不用一次塞满上下文，并给出引用。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        neighboring = "渐进式披露会按需加载内容。<src id=\"S2\" />"
+        issues = turn_contract_issues(
+            progressive,
+            neighboring,
+            evidence_by_id={"S2": "professional_skills_selection_mode 可选 all 或 selected。"},
+        )
+        focus_issue = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_evidence_focus_ungrounded"
+        )
+        self.assertEqual(focus_issue["missing_topics"], ["渐进式披露"])
+        self.assertNotIn(
+            "current_turn_evidence_focus_ungrounded",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    progressive,
+                    "渐进式披露会按需加载内容。<src id=\"S1\" />",
+                    evidence_by_id={"S1": "技能遵循渐进式披露，只在需要时读取详细指令。"},
+                )
+            },
+        )
+
+        read_skill = progressive.model_copy(
+            update={
+                "query": (
+                    "`read_skill`在这个机制里做什么？只解释读取边界，并给出引用。\n"
+                    "本轮明确要求文档依据或引用。\n"
+                    "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+                )
+            }
+        )
+        read_issues = turn_contract_issues(
+            read_skill,
+            "`read_skill`按需读取技能内容。<src id=\"S3\" />",
+            evidence_by_id={"S3": "技能内容会按需加载。"},
+        )
+        self.assertIn(
+            "current_turn_evidence_focus_ungrounded",
+            {issue["code"] for issue in read_issues},
+        )
+
+    def test_turn_contract_detects_previous_turn_answer_drift_from_active_focus(self):
+        payload = ChatPayload(
+            run_id="run-current-focus",
+            session_id="session-current-focus",
+            assistant_message_id="assistant-current-focus",
+            query=(
+                "专业Skill的管理入口或接口范围是什么？只列明确支持的管理能力。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            history=[
+                ChatHistoryMessage(
+                    role="user",
+                    content="`execute_skill_script`和`read_skill`有什么区别？",
+                )
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        issues = turn_contract_issues(
+            payload,
+            "`read_skill`只读取，`execute_skill_script`才执行。",
+        )
+        focus_issue = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_request_focus_incomplete"
+        )
+        self.assertEqual(focus_issue["missing_identifiers"], ["专业Skill", "管理", "接口"])
+        self.assertNotIn(
+            "current_turn_request_focus_incomplete",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    "专业技能的管理接口支持导入、更新和删除。",
+                )
+            },
+        )
+
     def test_turn_contract_detects_chinese_retrieval_budget_narration(self):
         payload = ChatPayload(
             run_id="run-planning-leak-cn",
@@ -1197,6 +1292,68 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(
             state["turn_evidence_by_citation_id"]["S1"],
             "当前机制按需加载相关内容。",
+        )
+
+    def test_eval_focused_retrieval_replaces_neighboring_evidence_for_explicit_target(self):
+        payload = ChatPayload(
+            run_id="run-focused-retrieval-neighbor",
+            session_id="session-focused-retrieval-neighbor",
+            assistant_message_id="assistant-focused-retrieval-neighbor",
+            query=(
+                "`read_skill`在这个机制里做什么？\n"
+                "本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["read_skill读取边界"]\n'
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+                knowledge_bases=["kb-1"],
+            ),
+            tools=[RuntimeToolSpec(name="knowledge_search", source="knowledge")],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        state = {
+            "retrieval_tool_budget": 4,
+            "retrieval_tool_calls": 1,
+            "turn_evidence_by_citation_id": {"S1": "相邻的渐进式披露说明。"},
+        }
+        issues = [
+            {
+                "code": "current_turn_evidence_focus_ungrounded",
+                "missing_topics": ["read_skill"],
+            }
+        ]
+        result = {
+            "source_references": [
+                {
+                    "cite_exactly": '<src id="S2" />',
+                    "evidence_content": "原生运行时技能通过 read_skill 读取内容。",
+                }
+            ]
+        }
+
+        self.assertTrue(turn_contract_needs_retrieval(issues, state["turn_evidence_by_citation_id"]))
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(
+            "app.runner.call_tool_callback",
+            return_value=result,
+        ) as callback:
+            recovered = asyncio.run(
+                run_eval_focused_evidence_retrieval(payload, state, issues)
+            )
+
+        self.assertTrue(recovered)
+        callback.assert_called_once_with(
+            payload,
+            "knowledge_search",
+            {"queries": ["read_skill", "read_skill读取边界"]},
+        )
+        self.assertFalse(turn_contract_needs_retrieval(issues, state["turn_evidence_by_citation_id"]))
+        self.assertEqual(
+            state["turn_evidence_by_citation_id"]["S2"],
+            "原生运行时技能通过 read_skill 读取内容。",
         )
 
     def test_eval_system_prompt_allows_only_runtime_authorized_bounded_repairs(self):

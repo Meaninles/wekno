@@ -5130,6 +5130,134 @@ def missing_referenced_user_named_items(answer: str, items: list[str]) -> list[s
     return [item for item in items if normalized(item) not in normalized_answer]
 
 
+def normalized_grounding_text(value: str) -> str:
+    compact = re.sub(r"[\s*_`\-]+", "", value or "").casefold()
+    return compact.replace("技能", "skill")
+
+
+def current_query_grounding_targets(query: str) -> list[str]:
+    """Return explicit concepts whose cited evidence must name the same concept."""
+
+    value = original_query_without_runtime_contract(query)
+    targets = list(required_inline_identifiers(query))
+    for match in re.finditer(
+        r"(?:解释|说明|介绍|阐述)\s*([^，,。！？!?；;\r\n]{2,64})",
+        value,
+        re.IGNORECASE,
+    ):
+        phrase = match.group(1).strip()
+        if "的" in phrase:
+            phrase = phrase.rsplit("的", 1)[-1].strip()
+        concept = re.sub(r"(?:机制|原理|概念|作用|流程)$", "", phrase).strip()
+        if concept != phrase and 2 <= len(concept) <= 40:
+            targets.append(concept)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for target in targets:
+        canonical = normalized_grounding_text(target)
+        if canonical and canonical not in seen:
+            unique.append(target)
+            seen.add(canonical)
+    return unique[:8]
+
+
+def current_query_subject_aspect_focus(query: str) -> list[dict[str, Any]]:
+    """Extract explicit ``subject 的 aspect 是什么`` focus from the active query."""
+
+    value = original_query_without_runtime_contract(query)
+    result: list[dict[str, Any]] = []
+    for clause in re.split(r"[。！？!?；;\r\n]+", value):
+        match = re.search(
+            r"(?P<subject>[^，,：:\s]{2,40}?)的(?P<aspect>[^，,：:]{2,40}?)(?:是什么|有哪些|有何)$",
+            clause.strip(),
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        subject = match.group("subject").strip().strip("`*_#'\"“”‘’()（）[]【】")
+        subject = re.sub(r"^(?:请|请问|说明|解释|介绍|只列|仅列)+", "", subject).strip()
+        subject_probe = subject.casefold()
+        if not any(
+            alias.casefold() in subject_probe
+            for _name, aliases in USER_NAMED_SET_SUBJECTS
+            for alias in aliases
+        ):
+            continue
+        aspect_terms: list[str] = []
+        for raw_part in re.split(r"(?:或|和|与|及|/)", match.group("aspect")):
+            part = raw_part.strip()
+            previous = ""
+            while part != previous:
+                previous = part
+                part = re.sub(r"(?:范围|入口|能力|内容|信息|情况|方式)$", "", part).strip()
+            if len(part) >= 2 and part not in aspect_terms:
+                aspect_terms.append(part)
+        if aspect_terms:
+            result.append({"subject": subject, "aspects": aspect_terms[:6]})
+    return result[:4]
+
+
+def current_query_focus_missing(answer: str, query: str) -> list[str]:
+    value = normalized_grounding_text(answer)
+    missing: list[str] = []
+    for focus in current_query_subject_aspect_focus(query):
+        subject = str(focus.get("subject") or "").strip()
+        aspects = [str(item or "").strip() for item in focus.get("aspects") or []]
+        if subject and normalized_grounding_text(subject) not in value:
+            missing.append(subject)
+        if aspects and not any(normalized_grounding_text(item) in value for item in aspects):
+            missing.extend(aspects)
+    return list(dict.fromkeys(item for item in missing if item))[:8]
+
+
+def grounding_targets_without_direct_citation(
+    answer: str,
+    targets: list[str],
+    evidence_by_id: dict[str, str],
+) -> list[str]:
+    """Require a named concept and its citation to share directly matching evidence."""
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", answer or "") if part.strip()]
+    missing: list[str] = []
+    for target in targets:
+        normalized_target = normalized_grounding_text(target)
+        if not normalized_target:
+            continue
+        grounded = False
+        for index, paragraph in enumerate(paragraphs):
+            if normalized_target not in normalized_grounding_text(paragraph):
+                continue
+            segment = paragraph
+            if (
+                index + 1 < len(paragraphs)
+                and (paragraph.lstrip().startswith("#") or len(paragraph) <= 80)
+            ):
+                segment += "\n\n" + paragraphs[index + 1]
+            citation_ids = re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', segment)
+            if any(
+                normalized_target
+                in normalized_grounding_text(evidence_by_id.get(citation_id, ""))
+                for citation_id in citation_ids
+            ):
+                grounded = True
+                break
+        if not grounded:
+            missing.append(target)
+    return missing
+
+
+def evidence_contains_issue_targets(
+    evidence_by_id: dict[str, str],
+    targets: list[str],
+) -> bool:
+    evidence = [normalized_grounding_text(value) for value in evidence_by_id.values()]
+    return bool(targets) and all(
+        any(normalized_grounding_text(target) in item for item in evidence)
+        for target in targets
+        if normalized_grounding_text(target)
+    )
+
+
 def query_requests_structured_evidence_coverage(query: str) -> bool:
     """Recognize an explicit user request for a multi-item factual set."""
 
@@ -5785,6 +5913,47 @@ def turn_contract_issues(
             }
         )
 
+    missing_current_focus = (
+        current_query_focus_missing(value, query)
+        if TURN_EXECUTION_CONTRACT_MARKER in query
+        else []
+    )
+    if missing_current_focus:
+        issues.append(
+            {
+                "code": "current_turn_request_focus_incomplete",
+                "missing_identifiers": missing_current_focus,
+                "required_action": (
+                    "Rewrite the complete answer for the active user request, not the preceding turn. Preserve the "
+                    "current request's named subject and at least one of its explicitly requested aspect terms."
+                ),
+            }
+        )
+
+    grounding_targets = (
+        current_query_grounding_targets(query)
+        if FRESH_EVIDENCE_CONTRACT_MARKER in query
+        and TURN_EXECUTION_CONTRACT_MARKER in query
+        else []
+    )
+    missing_grounding_targets = grounding_targets_without_direct_citation(
+        value,
+        grounding_targets,
+        evidence_by_id or {},
+    )
+    if missing_grounding_targets:
+        issues.append(
+            {
+                "code": "current_turn_evidence_focus_ungrounded",
+                "missing_topics": missing_grounding_targets,
+                "required_action": (
+                    "Obtain direct current-turn evidence for every explicitly named concept, then rewrite the complete "
+                    "answer. The paragraph that explains a concept must cite a source fragment that itself names that "
+                    "same concept; a neighboring feature, configuration field, or related category is not sufficient."
+                ),
+            }
+        )
+
     missing_structured_claims = (
         structured_factual_segments_without_citation(value)
         if query_requests_structured_evidence_coverage(query)
@@ -5920,8 +6089,9 @@ def should_enable_turn_contract_runtime_repair(payload: ChatPayload) -> bool:
     OpenAI-compatible gateways acknowledge an SDK end-turn without honoring a
     blocking Stop-hook continuation. The sidecar therefore validates the
     terminal candidate itself, permits one evidence-only continuation when the
-    turn produced no evidence, and performs bounded isolated terminal rewrites
-    outside the tool transcript.
+    turn produced no evidence or only neighboring evidence for an explicit
+    concept, and performs bounded isolated terminal rewrites outside the tool
+    transcript.
     """
 
     return bool(
@@ -6029,15 +6199,25 @@ def turn_contract_needs_retrieval(
 ) -> bool:
     """Return whether a same-session continuation can add missing evidence.
 
-    Once any current-turn evidence exists, a fresh isolated compiler can select
-    and cite it without paying for another tool loop. If the evidence set truly
-    cannot support the answer, the compiler must state the gap and the gate will
-    fail honestly; repeatedly searching an already broad transcript is neither
-    more reliable nor bounded.
+    A fresh isolated compiler normally reuses current-turn evidence without
+    paying for another tool loop. One exception is a user-named concept for
+    which none of the returned fragments contains that concept: one remaining
+    read-only repair call may replace the neighboring evidence. The outer repair
+    budget still prevents repeated searching.
     """
 
     if evidence_by_id:
-        return False
+        grounding_issues = [
+            issue
+            for issue in issues
+            if isinstance(issue, dict)
+            and str(issue.get("code") or "") == "current_turn_evidence_focus_ungrounded"
+        ]
+        grounding_targets = _turn_contract_issue_targets(grounding_issues)
+        return bool(grounding_targets) and not evidence_contains_issue_targets(
+            evidence_by_id,
+            grounding_targets,
+        )
     return any(
         code.startswith("current_turn_evidence_")
         or code
@@ -6052,23 +6232,32 @@ def turn_contract_needs_retrieval(
 async def run_eval_focused_evidence_retrieval(
     payload: ChatPayload,
     state: dict[str, Any],
+    issues: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Perform one bounded read-only evidence rescue for an eval-only repair.
 
-    The query plan is generated by the trusted Go runtime exclusively from the
+    The query plan and any missing concept are derived exclusively from the
     active user request. Production never enables this function. A direct
     callback avoids replaying a rejected draft and a large tool transcript into
-    the same model session merely to obtain the first citeable fragment.
+    the same model session merely to obtain a missing citeable fragment.
     """
 
     if not should_enable_turn_contract_runtime_repair(payload):
         return False
-    searches = required_evidence_searches(payload.query)
+    issue_targets = _turn_contract_issue_targets(issues or [])
+    searches: list[str] = []
+    for search in [*issue_targets, *required_evidence_searches(payload.query)]:
+        value = str(search or "").strip()
+        if value and value not in searches:
+            searches.append(value)
     if not searches:
         return False
     registry = state.get(TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY)
-    if isinstance(registry, dict) and registry:
+    if not isinstance(registry, dict):
+        registry = {}
+    if registry and not turn_contract_needs_retrieval(issues or [], registry):
         return False
+    registry_before = dict(registry)
 
     budget = int(state.get(RETRIEVAL_TOOL_BUDGET_STATE_KEY) or retrieval_tool_budget(payload))
     calls = int(state.get(RETRIEVAL_TOOL_CALLS_STATE_KEY) or 0)
@@ -6103,7 +6292,14 @@ async def run_eval_focused_evidence_retrieval(
         return False
     record_turn_evidence(state, result)
     registry = state.get(TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY)
-    recovered = isinstance(registry, dict) and bool(registry)
+    recovered = (
+        isinstance(registry, dict)
+        and bool(registry)
+        and (
+            registry != registry_before
+            or evidence_contains_issue_targets(registry, issue_targets)
+        )
+    )
     state["eval_focused_retrieval_recovered"] = recovered
     return recovered
 
@@ -8041,6 +8237,7 @@ class GeneralAgentRunner:
                         recovered = await run_eval_focused_evidence_retrieval(
                             self.payload,
                             turn_contract_state,
+                            contract_issues,
                         )
                         if recovered:
                             refreshed = turn_contract_state.get(

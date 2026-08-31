@@ -5860,6 +5860,73 @@ def grounding_targets_without_direct_citation(
     return missing
 
 
+def referenced_user_named_set_evidence_issues(
+    payload: ChatPayload,
+    answer: str,
+    evidence_by_id: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Require direct evidence for a user-named set reused in a synthesis.
+
+    The expected members come only from earlier user messages. When the active
+    turn requires knowledge evidence and reuses that set, at least one citation
+    in the set's answer section must point to a fragment naming a real member.
+    This rejects unrelated neighboring citations without inventing an answer
+    key or requiring every user-authored label to match a document synonym.
+    """
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", answer or "") if part.strip()]
+    issues: list[dict[str, Any]] = []
+    for named_set in referenced_user_named_sets(payload):
+        subject = str(named_set.get("subject") or "").strip()
+        items = [
+            str(item or "").strip()
+            for item in named_set.get("items") or []
+            if str(item or "").strip()
+        ]
+        if len(items) < 2:
+            continue
+        normalized_items = [
+            normalized_grounding_text(_named_set_member_support_term(item))
+            for item in items
+        ]
+        section_citation_ids: list[str] = []
+        for paragraph in paragraphs:
+            normalized_paragraph = normalized_grounding_text(paragraph)
+            if not any(item and item in normalized_paragraph for item in normalized_items):
+                continue
+            section_citation_ids.extend(
+                re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', paragraph)
+            )
+        direct_ids = [
+            citation_id
+            for citation_id in dict.fromkeys(section_citation_ids)
+            if any(
+                item
+                and item in normalized_grounding_text(evidence_by_id.get(citation_id, ""))
+                for item in normalized_items
+            )
+        ]
+        if direct_ids:
+            continue
+        issues.append(
+            {
+                "code": "current_turn_evidence_referenced_set_ungrounded",
+                "set_subject": subject,
+                "expected_count": len(items),
+                "missing_topics": items,
+                "search_targets": [f"{'、'.join(items)} {subject}选用原则"],
+                "section_citation_ids": list(dict.fromkeys(section_citation_ids))[:16],
+                "required_action": (
+                    "Retrieve direct current-turn evidence for the user-named set, then rewrite its section. "
+                    "At least one citation in that section must point to a source fragment that itself names a "
+                    "real member of the set; an unrelated skill, sharing, configuration, or neighboring fragment "
+                    "does not support the set. Preserve the user-authored member names."
+                ),
+            }
+        )
+    return issues
+
+
 def evidence_contains_issue_targets(
     evidence_by_id: dict[str, str],
     targets: list[str],
@@ -6735,6 +6802,18 @@ def turn_contract_issues(
             }
         )
 
+    if (
+        FRESH_EVIDENCE_CONTRACT_MARKER in query
+        and TURN_EXECUTION_CONTRACT_MARKER in query
+    ):
+        issues.extend(
+            referenced_user_named_set_evidence_issues(
+                payload,
+                value,
+                evidence_by_id or {},
+            )
+        )
+
     missing_structured_claims = (
         structured_factual_segments_without_citation(value)
         if query_requests_structured_evidence_coverage(query)
@@ -7032,6 +7111,7 @@ def turn_contract_needs_retrieval(
             and str(issue.get("code") or "")
             in {
                 "current_turn_condition_evidence_not_direct",
+                "current_turn_evidence_referenced_set_ungrounded",
                 "current_turn_evidence_quantitative_incomplete",
                 "current_turn_uncertainty_evidence_mismatch",
             }
@@ -7049,6 +7129,7 @@ def turn_contract_needs_retrieval(
             and str(issue.get("code") or "")
             in {
                 "current_turn_evidence_focus_ungrounded",
+                "current_turn_evidence_referenced_set_ungrounded",
                 "current_turn_evidence_named_identifiers_incomplete",
                 "current_turn_evidence_structured_claims_incomplete",
                 "current_turn_evidence_topics_incomplete",
@@ -7164,19 +7245,40 @@ async def run_eval_focused_evidence_retrieval(
         issue
         for issue in (issues or [])
         if isinstance(issue, dict)
-        and str(issue.get("code") or "") == "current_turn_evidence_focus_ungrounded"
+        and str(issue.get("code") or "")
+        in {
+            "current_turn_evidence_focus_ungrounded",
+            "current_turn_evidence_referenced_set_ungrounded",
+        }
     ]
-    direct_grounding_targets = _turn_contract_issue_targets(direct_grounding_issues)
+    direct_grounding_targets: list[str] = []
+    for issue in direct_grounding_issues:
+        raw_targets = issue.get("missing_topics") or issue.get("search_targets") or []
+        values = raw_targets if isinstance(raw_targets, list) else [raw_targets]
+        for raw_target in values:
+            target = str(raw_target or "").strip().strip("*_`")
+            if target and target not in direct_grounding_targets:
+                direct_grounding_targets.append(target)
+    direct_grounding_targets = direct_grounding_targets[:8]
+    exact_referenced_set_gap = any(
+        isinstance(issue, dict)
+        and str(issue.get("code") or "")
+        == "current_turn_evidence_referenced_set_ungrounded"
+        for issue in (issues or [])
+    )
     counted_set_deep_read = _counted_set_deep_read_arguments(issues or [], state)
     preferred: list[tuple[int, RuntimeToolSpec, str]] = []
     for spec in payload.tools:
         canonical = canonical_runtime_tool_name(spec.name).lower()
         if canonical == "list_knowledge_chunks" and counted_set_deep_read:
             preferred.append((-2, spec, canonical))
-        elif canonical == "grep_chunks" and len(direct_grounding_targets) == 1:
+        elif canonical == "grep_chunks" and (
+            len(direct_grounding_targets) == 1 or exact_referenced_set_gap
+        ):
             # The validator can name one exact missing concept here. Literal
             # chunk grep is citeable and avoids another semantic search landing
-            # on the same neighboring fragment.
+            # on the same neighboring fragment. A user-authored named set is
+            # likewise exact even when it contains several member labels.
             preferred.append((-1, spec, canonical))
         elif canonical == "knowledge_search":
             preferred.append((0, spec, canonical))

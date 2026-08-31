@@ -63,6 +63,7 @@ from app.runner import (  # noqa: E402
     parse_mcp_tool_response_payload,
     result_message_text,
     record_turn_evidence,
+    referenced_user_named_set_evidence_issues,
     referenced_user_named_sets,
     retrieval_budget_pre_tool_hook_factory,
     retrieval_tool_budget,
@@ -471,6 +472,65 @@ class RunnerProgressTest(unittest.TestCase):
             turn_contract_issues(
                 payload,
                 "轻量技能、预加载运行时技能、专业技能；快速问答、RAG 推理、通用智能体。",
+            ),
+            [],
+        )
+
+    def test_referenced_user_named_set_requires_direct_section_evidence(self):
+        payload = ChatPayload(
+            run_id="run-referenced-set-grounding",
+            session_id="session-referenced-set-grounding",
+            assistant_message_id="assistant-referenced-set-grounding",
+            query=(
+                "生成最终提纲，包含三种内置智能体的选用原则。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            history=[
+                ChatHistoryMessage(
+                    role="user",
+                    content="请区分快速问答、RAG推理和通用智能体。",
+                )
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        answer = (
+            "**三种内置智能体选用原则**\n"
+            "- 快速问答：直接问答。\n"
+            "- RAG推理：复杂检索。<src id=\"S1\" />\n"
+            "- 通用智能体：工具协作。<src id=\"S2\" />"
+        )
+
+        issues = referenced_user_named_set_evidence_issues(
+            payload,
+            answer,
+            {"S1": "共享空间只读说明。", "S2": "专业Skill按需加载。"},
+        )
+        self.assertEqual(
+            [issue["code"] for issue in issues],
+            ["current_turn_evidence_referenced_set_ungrounded"],
+        )
+        self.assertIn(
+            "current_turn_evidence_referenced_set_ungrounded",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    answer,
+                    evidence_by_id={"S1": "共享空间只读说明。", "S2": "专业Skill按需加载。"},
+                )
+            },
+        )
+        self.assertEqual(
+            issues[0]["missing_topics"],
+            ["快速问答", "RAG推理", "通用智能体"],
+        )
+        self.assertEqual(
+            referenced_user_named_set_evidence_issues(
+                payload,
+                answer + ' <src id="S3" />',
+                {"S1": "共享空间只读说明。", "S2": "专业Skill按需加载。", "S3": "快速问答适合直接问答。"},
             ),
             [],
         )
@@ -2015,6 +2075,65 @@ class RunnerProgressTest(unittest.TestCase):
             payload,
             "grep_chunks",
             {"query": "渐进式披露"},
+        )
+
+    def test_eval_referenced_named_set_repair_greps_user_authored_members(self):
+        payload = ChatPayload(
+            run_id="run-referenced-set-grep",
+            session_id="session-referenced-set-grep",
+            assistant_message_id="assistant-referenced-set-grep",
+            query=(
+                "生成三种内置智能体的选用原则。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+                knowledge_bases=["kb-1"],
+            ),
+            tools=[
+                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+                RuntimeToolSpec(name="grep_chunks", source="knowledge"),
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        state = {
+            "retrieval_tool_budget": 4,
+            "retrieval_tool_calls": 1,
+            "turn_evidence_by_citation_id": {"S1": "相邻的共享空间说明。"},
+        }
+        issues = [
+            {
+                "code": "current_turn_evidence_referenced_set_ungrounded",
+                "missing_topics": ["快速问答", "RAG推理", "通用智能体"],
+                "search_targets": ["快速问答、RAG推理、通用智能体 智能体选用原则"],
+            }
+        ]
+        result = {
+            "source_references": [
+                {
+                    "cite_exactly": '<src id="S2" />',
+                    "evidence_content": "快速问答适合直接回答明确问题。",
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(
+            "app.runner.call_tool_callback",
+            return_value=result,
+        ) as callback:
+            recovered = asyncio.run(
+                run_eval_focused_evidence_retrieval(payload, state, issues)
+            )
+
+        self.assertTrue(recovered)
+        callback.assert_called_once_with(
+            payload,
+            "grep_chunks",
+            {"query": "快速问答|RAG推理|通用智能体"},
         )
 
     def test_eval_counted_set_repair_uses_semantic_search_not_literal_grep(self):

@@ -3955,6 +3955,7 @@ def _canonical_source_handle(source: Any) -> str:
 
 
 TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY = "turn_evidence_by_citation_id"
+TURN_EVIDENCE_LOCATORS_BY_CITATION_ID_STATE_KEY = "turn_evidence_locators_by_citation_id"
 MAX_TURN_EVIDENCE_REFERENCES = 64
 MAX_TURN_EVIDENCE_CHARS = 96_000
 TURN_EVIDENCE_TEXT_FIELDS = (
@@ -4067,6 +4068,13 @@ def record_turn_evidence(state: dict[str, Any] | None, result: Any) -> None:
     if not isinstance(registry, dict):
         registry = {}
         state[TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY] = registry
+    locator_registry = state.setdefault(
+        TURN_EVIDENCE_LOCATORS_BY_CITATION_ID_STATE_KEY,
+        {},
+    )
+    if not isinstance(locator_registry, dict):
+        locator_registry = {}
+        state[TURN_EVIDENCE_LOCATORS_BY_CITATION_ID_STATE_KEY] = locator_registry
     current_chars = sum(len(str(value)) for value in registry.values())
     for source in sources:
         if len(registry) >= MAX_TURN_EVIDENCE_REFERENCES or current_chars >= MAX_TURN_EVIDENCE_CHARS:
@@ -4075,6 +4083,14 @@ def record_turn_evidence(state: dict[str, Any] | None, result: Any) -> None:
         match = re.fullmatch(r'<src id="(S[1-9][0-9]*)" />', handle)
         if not match:
             continue
+        citation_id = match.group(1)
+        locator = {
+            field: str(source.get(field) or "").strip()
+            for field in ("chunk_id", "faq_id", "knowledge_id", "knowledge_base_id")
+            if str(source.get(field) or "").strip()
+        }
+        if locator:
+            locator_registry[citation_id] = locator
         evidence = _turn_evidence_text(source)
         if not evidence:
             matches: list[str] = []
@@ -4090,7 +4106,6 @@ def record_turn_evidence(state: dict[str, Any] | None, result: Any) -> None:
                 # ambiguous inside this exact callback.
                 evidence = evidence_candidates[0]
         if evidence:
-            citation_id = match.group(1)
             remaining = MAX_TURN_EVIDENCE_CHARS - current_chars
             bounded = evidence[: min(24_000, max(0, remaining))]
             if not bounded:
@@ -5068,7 +5083,7 @@ def requested_named_set_requirements(query: str) -> list[dict[str, Any]]:
 
 def _valid_named_set_member(label: str, aliases: tuple[str, ...]) -> str:
     value = CANONICAL_SOURCE_CITATION_RE.sub("", label or "")
-    value = value.strip().strip("*_`#'\"“”‘’()（）[]【】<>《》").strip()
+    value = value.strip().strip("*_`#'\"“”‘’<>《》").strip()
     if (
         not value
         or len(value) > 96
@@ -5150,6 +5165,222 @@ def named_set_cardinality_issues(answer: str, query: str) -> list[dict[str, Any]
             }
         )
     return issues
+
+
+def _named_set_subject_aliases(subject: str) -> tuple[str, ...]:
+    return next(
+        (aliases for name, aliases in USER_NAMED_SET_SUBJECTS if name == subject),
+        (subject,),
+    )
+
+
+def evidence_states_counted_subject(text: str, subject: str, expected_count: int) -> bool:
+    """Check for an explicit taxonomy cardinality without knowing its members."""
+
+    value = normalized_grounding_text(text)
+    count_tokens = [
+        token
+        for token, count in USER_NAMED_SET_COUNTS.items()
+        if count == expected_count
+    ]
+    aliases = {
+        normalized_grounding_text(alias)
+        for alias in _named_set_subject_aliases(subject)
+        if normalized_grounding_text(alias)
+    }
+    for alias in aliases:
+        alias_re = re.escape(alias)
+        for token in count_tokens:
+            token_re = re.escape(token.casefold())
+            if re.search(
+                rf"{token_re}(?:(?:类|种|个)|types?(?:of)?)?[^，,。！？!?；;\r\n]{{0,8}}{alias_re}",
+                value,
+                re.IGNORECASE,
+            ):
+                return True
+            if re.search(
+                rf"{alias_re}[^，,。！？!?；;\r\n]{{0,28}}"
+                rf"(?:分为|分成|划分为|共有|包括|包含|dividedinto|consistsof|has)"
+                rf"[^，,。！？!?；;\r\n]{{0,8}}{token_re}(?:类|种|个|types?)?",
+                value,
+                re.IGNORECASE,
+            ):
+                return True
+    return False
+
+
+def _named_set_member_support_term(member: str) -> str:
+    value = re.sub(r"[（(][^）)]*[）)]", "", member or "").strip()
+    value = re.sub(r"^(?:第?\s*[1-8一二两三四五六七八]+\s*[.)、]?\s*)", "", value)
+    return normalized_grounding_text(value)
+
+
+def named_set_grounding_issues(
+    answer: str,
+    query: str,
+    evidence_by_id: dict[str, str],
+    evidence_locators_by_id: dict[str, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Require a counted taxonomy to come from one coherent source document.
+
+    This rule does not know the expected member names. It verifies that the
+    answer cites evidence explicitly declaring the requested cardinality and
+    that every proposed member is supported within that taxonomy's document.
+    One adjacent chunk may hold the last row, so same-document evidence is
+    accepted even when a single fragment stops at a chunk boundary.
+    """
+
+    cited_ids = list(dict.fromkeys(re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', answer or "")))
+    locators = evidence_locators_by_id or {}
+    issues: list[dict[str, Any]] = []
+    for requirement in requested_named_set_requirements(query):
+        subject = str(requirement["subject"])
+        expected_count = int(requirement["expected_count"])
+        members = named_set_answer_members(answer, tuple(requirement["aliases"]))
+        if len(members) < expected_count:
+            continue
+        classification_ids = [
+            citation_id
+            for citation_id in cited_ids
+            if evidence_states_counted_subject(
+                evidence_by_id.get(citation_id, ""),
+                subject,
+                expected_count,
+            )
+        ]
+        best_allowed_ids: list[str] = []
+        best_unsupported = list(members)
+        for classification_id in classification_ids:
+            knowledge_id = str(
+                (locators.get(classification_id) or {}).get("knowledge_id") or ""
+            ).strip()
+            if knowledge_id:
+                allowed_ids = [
+                    citation_id
+                    for citation_id, evidence in evidence_by_id.items()
+                    if evidence
+                    and str((locators.get(citation_id) or {}).get("knowledge_id") or "").strip()
+                    == knowledge_id
+                ]
+            else:
+                # Older artifacts may not carry source locators. Preserve a
+                # strict fallback: the classifying fragment must name all but
+                # at most one member, and every member needs cited evidence.
+                classification_text = normalized_grounding_text(
+                    evidence_by_id.get(classification_id, "")
+                )
+                overlap = sum(
+                    1
+                    for member in members
+                    if _named_set_member_support_term(member) in classification_text
+                )
+                if overlap < max(1, expected_count - 1):
+                    continue
+                allowed_ids = cited_ids
+            unsupported = [
+                member
+                for member in members
+                if not any(
+                    _named_set_member_support_term(member)
+                    in normalized_grounding_text(evidence_by_id.get(citation_id, ""))
+                    for citation_id in allowed_ids
+                )
+            ]
+            if len(unsupported) < len(best_unsupported):
+                best_unsupported = unsupported
+                best_allowed_ids = allowed_ids
+            if not unsupported:
+                break
+        if classification_ids and not best_unsupported:
+            continue
+        issues.append(
+            {
+                "code": "current_turn_named_set_grounding_incoherent",
+                "set_subject": subject,
+                "expected_count": expected_count,
+                "classification_evidence_ids": classification_ids,
+                "allowed_set_evidence_ids": best_allowed_ids[:16],
+                "unsupported_members": best_unsupported[:8],
+                "search_targets": [str(requirement["search_target"])],
+                "required_action": (
+                    "Rebuild the complete named set from one coherent taxonomy source. Cite a fragment that "
+                    "explicitly states the requested subject and member count, and use only that source document "
+                    "and its adjacent chunks for the member names. Do not combine an unrelated integration, package, "
+                    "feature, or similarly named object from another document just to reach the requested count."
+                ),
+            }
+        )
+    return issues
+
+
+PROCEDURE_REQUEST_RE = re.compile(
+    r"(?:步骤|流程|怎么做|如何做|怎样做|操作指引|办理办法|step(?:s)?|procedure|workflow)",
+    re.IGNORECASE,
+)
+
+
+def procedural_answer_step_count(answer: str) -> int:
+    structural = len(
+        re.findall(r"(?m)^\s*(?:[-*+]\s+|\d{1,3}[.)、]\s+)", answer or "")
+    )
+    transitions = {
+        match.group(0).casefold()
+        for match in re.finditer(
+            r"(?:首先|其次|然后|接着|最后|第一步|第二步|第三步|先|再|first|next|then|finally)",
+            answer or "",
+            re.IGNORECASE,
+        )
+    }
+    return max(structural, len(transitions))
+
+
+def requested_procedure_issue(answer: str, query: str) -> dict[str, Any] | None:
+    user_query = original_query_without_runtime_contract(query)
+    if not PROCEDURE_REQUEST_RE.search(user_query) or procedural_answer_step_count(answer) >= 2:
+        return None
+    return {
+        "code": "current_turn_requested_procedure_missing",
+        "actual_count": procedural_answer_step_count(answer),
+        "expected_count": 2,
+        "search_targets": [f"{user_query[:240]} 操作步骤"],
+        "required_action": (
+            "The current request asks for a procedure. Replace a refusal, evidence disclaimer, or high-level summary "
+            "with at least two concrete, ordered, read-only steps that carry out the requested method. Preserve every "
+            "user action boundary and do not claim that any external action has already been performed."
+        ),
+    }
+
+
+def current_query_goal_phrases(query: str) -> list[str]:
+    value = original_query_without_runtime_contract(query)
+    phrases: list[str] = []
+    for match in re.finditer(
+        r"(?:恢复|回到|围绕|保持|延续)\s*(?:最早|最初|初始|原始|一开始)?的?\s*"
+        r"(?P<goal>[^，,。！？!?；;：:\r\n]{2,48}?)(?:目标|主题|目的)",
+        value,
+        re.IGNORECASE,
+    ):
+        goal = match.group("goal").strip().strip("`*_#'\"“”‘’()（）[]【】")
+        if goal and goal not in phrases:
+            phrases.append(goal)
+    return phrases[:4]
+
+
+def missing_current_goal_phrases(answer: str, query: str) -> list[str]:
+    normalized_answer = normalized_grounding_text(answer)
+    missing: list[str] = []
+    for phrase in current_query_goal_phrases(query):
+        normalized_phrase = normalized_grounding_text(phrase)
+        if normalized_phrase in normalized_answer:
+            continue
+        mixed_tokens = [
+            normalized_grounding_text(token)
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_.-]*|[\u3400-\u9fff]{2,}", phrase)
+        ]
+        if len(mixed_tokens) >= 2 and all(token in normalized_answer for token in mixed_tokens):
+            continue
+        missing.append(phrase)
+    return missing
 
 
 def required_negative_actions(query: str) -> list[str]:
@@ -6020,6 +6251,7 @@ def turn_contract_issues(
     payload: ChatPayload,
     answer: str,
     evidence_by_id: dict[str, str] | None = None,
+    evidence_locators_by_id: dict[str, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return deterministic violations of the trusted current-turn contract."""
 
@@ -6204,6 +6436,44 @@ def turn_contract_issues(
 
     if TURN_EXECUTION_CONTRACT_MARKER in query:
         issues.extend(named_set_cardinality_issues(value, query))
+    if (
+        TURN_EXECUTION_CONTRACT_MARKER in query
+        and FRESH_EVIDENCE_CONTRACT_MARKER in query
+    ):
+        issues.extend(
+            named_set_grounding_issues(
+                value,
+                query,
+                evidence_by_id or {},
+                evidence_locators_by_id,
+            )
+        )
+
+    procedure_issue = (
+        requested_procedure_issue(value, query)
+        if TURN_EXECUTION_CONTRACT_MARKER in query
+        else None
+    )
+    if procedure_issue:
+        issues.append(procedure_issue)
+
+    missing_goals = (
+        missing_current_goal_phrases(value, query)
+        if TURN_EXECUTION_CONTRACT_MARKER in query
+        else []
+    )
+    if missing_goals:
+        issues.append(
+            {
+                "code": "current_turn_explicit_goal_missing",
+                "missing_goal_phrases": missing_goals,
+                "required_action": (
+                    "Rewrite the complete answer and explicitly preserve every goal or theme that the current user "
+                    "asks to restore, continue, or return to. Use the goal phrase from the current request; do not "
+                    "replace it with only the component checklist."
+                ),
+            }
+        )
 
     required_boundaries = (
         required_negative_actions(query)
@@ -6339,7 +6609,17 @@ def turn_contract_stop_hook_factory(
         evidence_by_id = state.get(TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY)
         if not isinstance(evidence_by_id, dict):
             evidence_by_id = {}
-        issues = turn_contract_issues(payload, answer, evidence_by_id=evidence_by_id)
+        evidence_locators_by_id = state.get(
+            TURN_EVIDENCE_LOCATORS_BY_CITATION_ID_STATE_KEY
+        )
+        if not isinstance(evidence_locators_by_id, dict):
+            evidence_locators_by_id = {}
+        issues = turn_contract_issues(
+            payload,
+            answer,
+            evidence_by_id=evidence_by_id,
+            evidence_locators_by_id=evidence_locators_by_id,
+        )
         if not issues:
             return {}
 
@@ -6417,6 +6697,8 @@ def build_turn_contract_runtime_repair_prompt(
         or code in {
             "current_turn_condition_evidence_not_direct",
             "current_turn_named_set_cardinality_incomplete",
+            "current_turn_named_set_grounding_incoherent",
+            "current_turn_requested_procedure_missing",
             "current_turn_uncertainty_evidence_mismatch",
         }
         for code in issue_codes
@@ -6502,7 +6784,12 @@ def turn_contract_needs_retrieval(
     """
 
     issue_codes = turn_contract_issue_codes(issues)
-    if "current_turn_named_set_cardinality_incomplete" in issue_codes:
+    if issue_codes.intersection(
+        {
+            "current_turn_named_set_cardinality_incomplete",
+            "current_turn_named_set_grounding_incoherent",
+        }
+    ):
         return True
     if evidence_by_id:
         grounding_issues = [
@@ -6521,10 +6808,58 @@ def turn_contract_needs_retrieval(
         or code
         in {
             "current_turn_condition_evidence_not_direct",
+            "current_turn_named_set_cardinality_incomplete",
+            "current_turn_named_set_grounding_incoherent",
+            "current_turn_requested_procedure_missing",
             "current_turn_uncertainty_evidence_mismatch",
         }
         for code in turn_contract_issue_codes(issues)
     )
+
+
+def _counted_set_deep_read_arguments(
+    issues: list[dict[str, Any]],
+    state: dict[str, Any],
+) -> dict[str, str] | None:
+    registry = state.get(TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY)
+    locators = state.get(TURN_EVIDENCE_LOCATORS_BY_CITATION_ID_STATE_KEY)
+    if not isinstance(registry, dict) or not isinstance(locators, dict):
+        return None
+    for issue in issues:
+        if not isinstance(issue, dict) or str(issue.get("code") or "") not in {
+            "current_turn_named_set_cardinality_incomplete",
+            "current_turn_named_set_grounding_incoherent",
+        }:
+            continue
+        subject = str(issue.get("set_subject") or "").strip()
+        try:
+            expected_count = int(issue.get("expected_count") or 0)
+        except (TypeError, ValueError):
+            expected_count = 0
+        preferred_ids = [
+            str(item or "").strip()
+            for item in issue.get("classification_evidence_ids") or []
+            if str(item or "").strip()
+        ]
+        candidate_ids = preferred_ids + [
+            citation_id
+            for citation_id, evidence in registry.items()
+            if citation_id not in preferred_ids
+            and subject
+            and expected_count > 0
+            and evidence_states_counted_subject(evidence, subject, expected_count)
+        ]
+        for citation_id in candidate_ids:
+            locator = locators.get(citation_id)
+            if not isinstance(locator, dict):
+                continue
+            chunk_id = str(locator.get("chunk_id") or "").strip()
+            faq_id = str(locator.get("faq_id") or "").strip()
+            if chunk_id:
+                return {"chunk_id": chunk_id}
+            if faq_id:
+                return {"faq_id": faq_id}
+    return None
 
 
 async def run_eval_focused_evidence_retrieval(
@@ -6570,10 +6905,13 @@ async def run_eval_focused_evidence_retrieval(
         and str(issue.get("code") or "") == "current_turn_evidence_focus_ungrounded"
     ]
     direct_grounding_targets = _turn_contract_issue_targets(direct_grounding_issues)
+    counted_set_deep_read = _counted_set_deep_read_arguments(issues or [], state)
     preferred: list[tuple[int, RuntimeToolSpec, str]] = []
     for spec in payload.tools:
         canonical = canonical_runtime_tool_name(spec.name).lower()
-        if canonical == "grep_chunks" and direct_grounding_targets:
+        if canonical == "list_knowledge_chunks" and counted_set_deep_read:
+            preferred.append((-2, spec, canonical))
+        elif canonical == "grep_chunks" and direct_grounding_targets:
             preferred.append((-1, spec, canonical))
         elif canonical == "knowledge_search":
             preferred.append((0, spec, canonical))
@@ -6583,7 +6921,9 @@ async def run_eval_focused_evidence_retrieval(
         return False
     _, spec, canonical = sorted(preferred, key=lambda item: item[0])[0]
 
-    if canonical == "grep_chunks":
+    if canonical == "list_knowledge_chunks":
+        arguments = counted_set_deep_read or {}
+    elif canonical == "grep_chunks":
         arguments = {
             "query": "|".join(re.escape(target) for target in direct_grounding_targets[:8])
         }
@@ -6678,6 +7018,13 @@ def compact_turn_contract_evidence(
     """Select a small, deduplicated evidence packet for the isolated rewrite."""
 
     features = _turn_contract_relevance_features(query, issues)
+    preferred_set_ids = {
+        str(citation_id or "").strip()
+        for issue in issues
+        if isinstance(issue, dict)
+        for citation_id in issue.get("allowed_set_evidence_ids") or []
+        if str(citation_id or "").strip()
+    }
     cited_ids = set(re.findall(r'<src id="(S[1-9][0-9]*)"\s*/>', rejected_draft or ""))
     ranked: list[tuple[int, int, str, str]] = []
     seen_evidence: set[str] = set()
@@ -6695,6 +7042,8 @@ def compact_turn_contract_evidence(
         score = sum(weight for feature, weight in features.items() if feature in normalized)
         if citation_id in cited_ids:
             score += 40
+        if citation_id in preferred_set_ids:
+            score += 300
         ranked.append((score, -index, citation_id, evidence))
 
     ranked.sort(reverse=True)
@@ -6734,6 +7083,10 @@ def compact_turn_contract_rewrite_issues(
         "set_subject": "完整集合主题",
         "expected_count": "完整集合应有成员数",
         "actual_count": "当前识别到的有效成员数",
+        "classification_evidence_ids": "声明集合数量的依据",
+        "allowed_set_evidence_ids": "同一分类文档内可用的依据",
+        "unsupported_members": "需移除或重新核验的成员",
+        "missing_goal_phrases": "必须恢复的目标或主题",
         "maximum_chars": "硬性字符上限",
     }
     compacted: list[dict[str, Any]] = []
@@ -6835,6 +7188,7 @@ async def run_turn_contract_isolated_rewrite(
         "请重写一份完整、直接、可独立阅读的最终回答，并修复上下文列出的结构问题。\n"
         + length_instruction
         + "产品或知识事实只能来自可引用依据；当前请求中的目标、格式要求和行动边界可直接复述。"
+        "不涉及产品事实的通用只读步骤可以基于当前请求组织，不得用证据不足的拒答替代用户明确要求的步骤。"
         "每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
         "cite_exactly 是最终输出标记，不是代码：必须原样裸写，不得放进反引号、引号、括号或代码块。"
         "不得编造或改写引用句柄。可引用依据非空时，不得声称本轮证据为空、未检索或仍需检索；"
@@ -8510,6 +8864,11 @@ class GeneralAgentRunner:
                     evidence_by_id = turn_contract_state.get(TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY)
                     if not isinstance(evidence_by_id, dict):
                         evidence_by_id = {}
+                    evidence_locators_by_id = turn_contract_state.get(
+                        TURN_EVIDENCE_LOCATORS_BY_CITATION_ID_STATE_KEY
+                    )
+                    if not isinstance(evidence_locators_by_id, dict):
+                        evidence_locators_by_id = {}
                     normalized_candidate = normalize_known_source_citation_markup(
                         contract_candidate,
                         evidence_by_id,
@@ -8521,6 +8880,7 @@ class GeneralAgentRunner:
                         self.payload,
                         contract_candidate,
                         evidence_by_id=evidence_by_id,
+                        evidence_locators_by_id=evidence_locators_by_id,
                     )
                     turn_contract_state["last_turn_contract_issues"] = contract_issues
                     if (
@@ -8562,10 +8922,16 @@ class GeneralAgentRunner:
                             )
                             if isinstance(refreshed, dict):
                                 evidence_by_id = refreshed
+                            refreshed_locators = turn_contract_state.get(
+                                TURN_EVIDENCE_LOCATORS_BY_CITATION_ID_STATE_KEY
+                            )
+                            if isinstance(refreshed_locators, dict):
+                                evidence_locators_by_id = refreshed_locators
                             contract_issues = turn_contract_issues(
                                 self.payload,
                                 contract_candidate,
                                 evidence_by_id=evidence_by_id,
+                                evidence_locators_by_id=evidence_locators_by_id,
                             )
                             turn_contract_state["last_turn_contract_issues"] = contract_issues
                         else:
@@ -8649,6 +9015,7 @@ class GeneralAgentRunner:
                                 self.payload,
                                 rewritten,
                                 evidence_by_id=evidence_by_id,
+                                evidence_locators_by_id=evidence_locators_by_id,
                             )
                             turn_contract_state["last_turn_contract_issues"] = contract_issues
                     if contract_issues:

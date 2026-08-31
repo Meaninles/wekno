@@ -183,6 +183,13 @@ class RunnerProgressTest(unittest.TestCase):
                 "S2": "专业 Skill 通过独立运行时提供复杂能力。",
             },
         )
+        self.assertEqual(
+            state["turn_evidence_locators_by_citation_id"],
+            {
+                "S1": {"chunk_id": "chunk-1"},
+                "S2": {"chunk_id": "chunk-2"},
+            },
+        )
 
     def test_turn_contract_evidence_packet_is_relevant_and_deduplicated(self):
         query = (
@@ -516,6 +523,130 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertNotIn(
             "current_turn_action_boundary_missing",
             {issue["code"] for issue in turn_contract_issues(uncertain, "需要先确认依赖。")},
+        )
+
+    def test_counted_named_set_must_come_from_one_taxonomy_document(self):
+        payload = ChatPayload(
+            run_id="run-coherent-taxonomy",
+            session_id="session-coherent-taxonomy",
+            assistant_message_id="assistant-coherent-taxonomy",
+            query=(
+                "列出三类工具的完整名称，并给出引用。\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        evidence = {
+            "S1": "当前工具分为三类：导入工具、导出工具，第三类见下一分块。",
+            "S2": "同一分类表的下一行是审计工具。",
+            "S3": "另一份集成文档介绍外部集成工具。",
+        }
+        locators = {
+            "S1": {"knowledge_id": "taxonomy-doc", "chunk_id": "chunk-1"},
+            "S2": {"knowledge_id": "taxonomy-doc", "chunk_id": "chunk-2"},
+            "S3": {"knowledge_id": "integration-doc", "chunk_id": "chunk-3"},
+        }
+        wrong = (
+            '- **导入工具**：说明。<src id="S1" />\n'
+            '- **导出工具**：说明。<src id="S1" />\n'
+            '- **外部集成工具**：说明。<src id="S3" />'
+        )
+        issues = turn_contract_issues(
+            payload,
+            wrong,
+            evidence_by_id=evidence,
+            evidence_locators_by_id=locators,
+        )
+        coherence = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_named_set_grounding_incoherent"
+        )
+        self.assertEqual(coherence["classification_evidence_ids"], ["S1"])
+        self.assertEqual(coherence["allowed_set_evidence_ids"], ["S1", "S2"])
+        self.assertEqual(coherence["unsupported_members"], ["外部集成工具"])
+
+        correct = (
+            '- **导入工具**：说明。<src id="S1" />\n'
+            '- **导出工具**：说明。<src id="S1" />\n'
+            '- **审计工具**：说明。<src id="S2" />'
+        )
+        self.assertNotIn(
+            "current_turn_named_set_grounding_incoherent",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    correct,
+                    evidence_by_id=evidence,
+                    evidence_locators_by_id=locators,
+                )
+            },
+        )
+
+    def test_turn_contract_requires_requested_procedure_instead_of_refusal(self):
+        payload = ChatPayload(
+            run_id="run-procedure",
+            session_id="session-procedure",
+            assistant_message_id="assistant-procedure",
+            query=(
+                "请给出查找备份方案并判断是否适用的步骤，不要执行恢复。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        issues = turn_contract_issues(
+            payload,
+            "目前资料不足，无法提供查找步骤或判断依据；不会执行恢复。",
+        )
+        procedure = next(
+            issue
+            for issue in issues
+            if issue["code"] == "current_turn_requested_procedure_missing"
+        )
+        self.assertEqual(procedure["expected_count"], 2)
+        self.assertEqual(procedure["actual_count"], 0)
+        self.assertNotIn(
+            "current_turn_requested_procedure_missing",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    "1. 查找候选备份并核对时间。\n2. 判断范围和依赖是否匹配；不执行恢复。",
+                )
+            },
+        )
+
+    def test_turn_contract_preserves_goal_phrase_named_by_current_request(self):
+        payload = ChatPayload(
+            run_id="run-goal-phrase",
+            session_id="session-goal-phrase",
+            assistant_message_id="assistant-goal-phrase",
+            query=(
+                "生成最终提纲：恢复最早的Orion平台入门目标，并汇总组件。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        issue = next(
+            issue
+            for issue in turn_contract_issues(payload, "## 组件汇总\n- 网关\n- 存储")
+            if issue["code"] == "current_turn_explicit_goal_missing"
+        )
+        self.assertEqual(issue["missing_goal_phrases"], ["Orion平台入门"])
+        self.assertNotIn(
+            "current_turn_explicit_goal_missing",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    "## Orion 平台入门提纲\n- 网关\n- 存储",
+                )
+            },
         )
 
     def test_turn_contract_rejects_neighboring_evidence_for_named_current_concept(self):
@@ -1598,6 +1729,81 @@ class RunnerProgressTest(unittest.TestCase):
             payload,
             "knowledge_search",
             {"queries": ["三类Skill 完整名称", "三类Skill"]},
+        )
+
+    def test_eval_counted_set_repair_deep_reads_the_classification_chunk(self):
+        payload = ChatPayload(
+            run_id="run-counted-set-deep-read",
+            session_id="session-counted-set-deep-read",
+            assistant_message_id="assistant-counted-set-deep-read",
+            query=(
+                "列出三类工具的完整名称。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["三类工具"]\n'
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+                knowledge_bases=["kb-1"],
+            ),
+            tools=[
+                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+                RuntimeToolSpec(name="list_knowledge_chunks", source="knowledge"),
+            ],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        state = {
+            "retrieval_tool_budget": 4,
+            "retrieval_tool_calls": 1,
+            "turn_evidence_by_citation_id": {
+                "S1": "当前工具分为三类：导入工具、导出工具。"
+            },
+            "turn_evidence_locators_by_citation_id": {
+                "S1": {
+                    "chunk_id": "taxonomy-chunk",
+                    "knowledge_id": "taxonomy-doc",
+                }
+            },
+        }
+        issues = [
+            {
+                "code": "current_turn_named_set_grounding_incoherent",
+                "set_subject": "工具",
+                "expected_count": 3,
+                "classification_evidence_ids": ["S1"],
+                "search_targets": ["三类工具 完整名称"],
+            }
+        ]
+        result = {
+            "source_references": [
+                {
+                    "cite_exactly": '<src id="S2" />',
+                    "chunk_id": "taxonomy-next",
+                    "knowledge_id": "taxonomy-doc",
+                    "evidence_content": "分类表下一行是审计工具。",
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(
+            "app.runner.call_tool_callback",
+            return_value=result,
+        ) as callback:
+            recovered = asyncio.run(
+                run_eval_focused_evidence_retrieval(payload, state, issues)
+            )
+
+        self.assertTrue(recovered)
+        callback.assert_called_once_with(
+            payload,
+            "list_knowledge_chunks",
+            {"chunk_id": "taxonomy-chunk"},
+        )
+        self.assertEqual(
+            state["turn_evidence_locators_by_citation_id"]["S2"]["knowledge_id"],
+            "taxonomy-doc",
         )
 
     def test_eval_system_prompt_allows_only_runtime_authorized_bounded_repairs(self):

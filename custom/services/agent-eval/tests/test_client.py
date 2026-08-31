@@ -7,6 +7,7 @@ from unittest.mock import patch
 from weknora_eval.client import (
     WeKnoraClient,
     WeKnoraResponseDeadlineExceeded,
+    streamed_production_candidate,
 )
 
 
@@ -46,6 +47,44 @@ class FakeStreamResponse:
 
 
 class ClientTests(unittest.TestCase):
+    def test_streamed_candidate_matches_active_answer_segments(self) -> None:
+        events = [
+            {"id": "draft", "response_type": "answer", "content": "I will check."},
+            {
+                "response_type": "tool_call",
+                "data": {"tool_name": "knowledge_search", "preserve_answer": False},
+            },
+            {"id": "final", "response_type": "answer", "content": "Grounded "},
+            {"id": "final", "response_type": "answer", "content": "answer."},
+            {
+                "response_type": "tool_call",
+                "data": {"tool_name": "create_artifact", "preserve_answer": True},
+            },
+            {
+                "response_type": "complete",
+                "data": {"final_answer": "a different hidden rewrite"},
+            },
+        ]
+
+        self.assertEqual(
+            streamed_production_candidate(events),
+            "Grounded answer.",
+        )
+
+    def test_completion_is_fallback_only_when_no_answer_event_exists(self) -> None:
+        self.assertEqual(
+            streamed_production_candidate(
+                [
+                    {
+                        "response_type": "complete",
+                        "data": {"final_answer": "fallback"},
+                    }
+                ]
+            ),
+            "fallback",
+        )
+        self.assertIsNone(streamed_production_candidate([]))
+
     def test_stream_timeout_is_a_total_wall_deadline_not_idle_timeout(self) -> None:
         clock = [0.0]
         response = FakeStreamResponse(clock)

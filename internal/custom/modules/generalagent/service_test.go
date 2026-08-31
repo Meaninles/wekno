@@ -19,22 +19,6 @@ type recordingProfessionalSkillProvider struct {
 	calls int
 }
 
-func TestRuntimeConfigSpecCarriesTurnToolSuppression(t *testing.T) {
-	config := &types.AgentConfig{
-		AgentID:             "agent-1",
-		DisableToolsForTurn: true,
-		AllowedTools:        []string{"knowledge_search"},
-	}
-
-	got := runtimeConfigSpec(config)
-	if !got.DisableToolsForTurn {
-		t.Fatal("runtime config dropped turn-level tool suppression")
-	}
-	if len(got.AllowedTools) != 1 {
-		t.Fatalf("configured tool metadata unexpectedly changed: %#v", got.AllowedTools)
-	}
-}
-
 func TestBuildGeneralAgentHistoryKeepsRecentPairsAndArchivesOnlyOlderUsers(t *testing.T) {
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 	var messages []*types.Message
@@ -73,107 +57,6 @@ func TestBuildGeneralAgentHistoryKeepsRecentPairsAndArchivesOnlyOlderUsers(t *te
 		if strings.Contains(archive, forbidden) {
 			t.Fatalf("archive contains forbidden value %q: %s", forbidden, archive)
 		}
-	}
-}
-
-func TestUserOnlyGeneralAgentHistoryDropsAssistantClaims(t *testing.T) {
-	history := []ChatHistoryMessage{
-		{Role: "user", Content: "预算改为220万元。"},
-		{Role: "assistant", Content: "预算仍是360万元。"},
-		{Role: "USER", Content: "项目负责人改为林梅。"},
-	}
-
-	got := userOnlyGeneralAgentHistory(history)
-	if len(got) != 2 {
-		t.Fatalf("history messages = %d, want two authoritative user messages: %#v", len(got), got)
-	}
-	if got[0].Content != "预算改为220万元。" || got[1].Content != "项目负责人改为林梅。" {
-		t.Fatalf("unexpected authoritative history: %#v", got)
-	}
-}
-
-func TestApplyGeneralAgentHistoryPolicyClearsEveryHistoryChannelForNarrowEvidence(t *testing.T) {
-	history := []ChatHistoryMessage{
-		{Role: "user", Content: "比较询比、竞价和竞争谈判。"},
-		{Role: "assistant", Content: "历史比较回答。"},
-	}
-	archive := "earlier_user_message_01: 继续比较询比、竞价和竞争谈判。"
-	query := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
-
-	gotHistory, gotArchive := applyGeneralAgentHistoryPolicy(query, history, archive)
-	if len(gotHistory) != 0 || gotArchive != "" {
-		t.Fatalf("self-contained evidence turn retained stale context: history=%#v archive=%q", gotHistory, gotArchive)
-	}
-}
-
-func TestApplyGeneralAgentHistoryPolicyKeepsArchiveForHistoryDependentAudit(t *testing.T) {
-	history := []ChatHistoryMessage{
-		{Role: "user", Content: "预算改为220万元。"},
-		{Role: "assistant", Content: "预算仍是旧值。"},
-	}
-	archive := "earlier_user_message_01: 项目代号启明星。"
-
-	gotHistory, gotArchive := applyGeneralAgentHistoryPolicy("请做状态审计，列出当前事实和已废弃事实。", history, archive)
-	if len(gotHistory) != 1 || gotHistory[0].Role != "user" || gotArchive != archive {
-		t.Fatalf("history-dependent audit lost authoritative user context: history=%#v archive=%q", gotHistory, gotArchive)
-	}
-}
-
-func TestRecoverNarrowEvidenceMaxTurnAnswerUsesCollectedCurrentTurnEvidence(t *testing.T) {
-	query := "先停止采购方式比较，临时只回答两个制度问题：中标候选人公示至少多少日？如果异议涉及实质内容并影响候选人排名，由哪些分管公司领导批准复核？每个结论就近引用。"
-	refs := []*types.SearchResult{
-		{
-			ID: "notice", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
-			EvidenceContent: "采购人应及时发起中标候选人公示，中标候选人公示期应不少于3日（日历日）。",
-			Metadata: map[string]string{
-				"citation_id": "S1", "chunk_id": "notice", "source_type": "knowledge",
-			},
-		},
-		{
-			ID: "review", KnowledgeID: "doc", KnowledgeBaseID: "kb", ChunkType: string(types.ChunkTypeText),
-			EvidenceContent: "质疑投诉涉及实质性内容并影响中标候选人排名的，由分管立项和采购部门的公司领导共同审批。",
-			Metadata: map[string]string{
-				"citation_id": "S2", "chunk_id": "review", "source_type": "knowledge",
-			},
-		},
-	}
-
-	got, ok := recoverNarrowEvidenceMaxTurnAnswer(
-		errors.New("任务过于复杂，请将任务拆分为具体子任务逐个执行，或提高智能体最大迭代次数"),
-		query,
-		refs,
-	)
-	if !ok {
-		t.Fatal("complete current-turn evidence did not recover max-turn failure")
-	}
-	for _, expected := range []string{"不少于3日", "分管立项", "采购部门", `<src id="S1" />`, `<src id="S2" />`} {
-		if !strings.Contains(got, expected) {
-			t.Fatalf("recovered answer lost %q: %s", expected, got)
-		}
-	}
-	if _, ok := recoverNarrowEvidenceMaxTurnAnswer(errors.New("upstream timeout"), query, refs); ok {
-		t.Fatal("non-max-turn error was incorrectly recovered")
-	}
-	if _, ok := recoverNarrowEvidenceMaxTurnAnswer(errors.New("error_max_turns"), query, refs[:1]); ok {
-		t.Fatal("incomplete evidence set was incorrectly recovered")
-	}
-}
-
-func TestGeneralAgentArtifactsRequireCurrentUserDeliveryIntent(t *testing.T) {
-	config := &types.AgentConfig{AgentType: types.AgentTypeGeneralAgent, EnableArtifacts: true}
-	if generalAgentArtifactsEnabled(config, "只比较几种采购方式并就近引用。") {
-		t.Fatal("informational comparison unexpectedly enabled artifact registration")
-	}
-	if !generalAgentArtifactsEnabled(config, "请生成一份可下载的 Word 分析报告。") {
-		t.Fatal("explicit file delivery request did not enable artifact registration")
-	}
-	config.EnableArtifacts = false
-	if generalAgentArtifactsEnabled(config, "请生成 PDF 文件。") {
-		t.Fatal("disabled artifact capability was re-enabled by the query")
-	}
-	config = &types.AgentConfig{AgentType: types.AgentTypeDocumentProcessingAgent, EnableArtifacts: true}
-	if !generalAgentArtifactsEnabled(config, "整理这份材料。") {
-		t.Fatal("dedicated document agent lost its configured artifact capability")
 	}
 }
 

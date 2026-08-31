@@ -533,7 +533,7 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(report["planned_session_count"], 18)
         self.assertTrue(all(check["passed"] for check in report["checks"]))
 
-    def test_v3_evaluator_v9_preflight_freezes_evaluator_dependencies(self) -> None:
+    def test_historical_v10_manifest_fails_closed_after_dual_track_upgrade(self) -> None:
         with patch.dict(os.environ, self.env(), clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-ready.v3.jsonl",
@@ -546,21 +546,14 @@ class ReadinessTests(unittest.TestCase):
                 split=Split.GATE,
                 sut=eval_sut(),
             )
-        self.assertEqual(report["status"], "READY")
+        self.assertEqual(report["status"], "NOT_READY")
         frozen = next(
             check for check in report["checks"] if check["name"] == "frozen_dependencies"
         )
-        self.assertEqual(
-            set(frozen["data"]["expected"]),
-            {
-                "profiles",
-                "policy",
-                "judge_calibration",
-                "scorer",
-                "gate",
-                "judge",
-                "calibrator",
-            },
+        self.assertFalse(frozen["passed"])
+        self.assertNotEqual(
+            frozen["data"]["expected"]["scorer"],
+            frozen["data"]["manifest"]["scorer"],
         )
 
     def test_v3_evaluator_v8_manifest_fails_closed_after_action_semantics_upgrade(self) -> None:
@@ -628,7 +621,7 @@ class ReadinessTests(unittest.TestCase):
         )
         self.assertFalse(frozen["passed"])
 
-    def test_optimization_dev_preflight_is_frozen_for_three_by_three_stability(self) -> None:
+    def test_historical_optimization_manifest_fails_closed_after_upgrade(self) -> None:
         with patch.dict(os.environ, self.env(), clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
@@ -641,12 +634,15 @@ class ReadinessTests(unittest.TestCase):
                 split=Split.DEV,
                 sut=eval_sut(),
             )
-        self.assertEqual(report["status"], "READY")
+        self.assertEqual(report["status"], "NOT_READY")
         self.assertEqual(report["case_count"], 12)
         self.assertEqual(report["planned_session_count"], 36)
-        self.assertTrue(all(check["passed"] for check in report["checks"]))
+        frozen = next(
+            check for check in report["checks"] if check["name"] == "frozen_dependencies"
+        )
+        self.assertFalse(frozen["passed"])
 
-    def test_experiment_preflight_uses_the_same_frozen_dev_matrix(self) -> None:
+    def test_historical_experiment_manifest_fails_closed_after_upgrade(self) -> None:
         with patch.dict(os.environ, self.env(), clear=False):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-optimization-dev.v1.jsonl",
@@ -659,10 +655,13 @@ class ReadinessTests(unittest.TestCase):
                 split=Split.DEV,
                 sut=eval_sut(),
             )
-        self.assertEqual(report["status"], "READY")
+        self.assertEqual(report["status"], "NOT_READY")
         self.assertEqual(report["case_count"], 12)
         self.assertEqual(report["planned_session_count"], 36)
-        self.assertTrue(all(check["passed"] for check in report["checks"]))
+        frozen = next(
+            check for check in report["checks"] if check["name"] == "frozen_dependencies"
+        )
+        self.assertFalse(frozen["passed"])
 
     def test_v3_preflight_fails_before_execution_when_judge_is_unconfigured(self) -> None:
         env = self.env()

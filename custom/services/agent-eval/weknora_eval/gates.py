@@ -6,18 +6,22 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
+from .codex_review import review_for_track, validate_codex_review
 from .dataset import dataset_sha256
 from .models import (
+    AnswerTrack,
     CaseRun,
     CaseSpec,
     ExperimentRun,
     GateCheck,
     GatePolicy,
     GateResult,
+    GateKind,
+    ReviewMode,
     Split,
     Verdict,
 )
-from .scoring import score_case
+from .scoring import project_case_to_answer_track, score_case
 
 
 def load_policy(path: str | Path) -> GatePolicy:
@@ -75,11 +79,157 @@ def _sut_identity_value(sut: object, field: str) -> object:
     return None
 
 
+def _identity_field_present(identity: dict[str, object], field: str) -> bool:
+    """Identity booleans may legitimately be false (assistance disabled)."""
+
+    if field not in identity:
+        return False
+    value = identity[field]
+    return value is not None and value != "" and value != [] and value != {}
+
+
 def _with_preserved_judge_scores(raw_case: CaseRun, rescored: CaseRun) -> CaseRun:
     judge_scores = [
         score for score in raw_case.scores if score.name == "judge.contract_satisfaction"
     ]
     return rescored.model_copy(update={"scores": [*rescored.scores, *judge_scores]})
+
+
+def _stored_track_case(case: CaseRun, answer_track: AnswerTrack) -> CaseRun:
+    projected = project_case_to_answer_track(case, answer_track)
+    if answer_track == AnswerTrack.PRODUCTION_CANDIDATE:
+        return projected.model_copy(
+            update={
+                "verdict": case.production_verdict or case.verdict,
+                "scores": case.production_scores or case.scores,
+            }
+        )
+    if answer_track == AnswerTrack.EVAL_ASSISTED_ANSWER:
+        return projected.model_copy(
+            update={
+                "verdict": case.eval_assisted_verdict or Verdict.INVALID,
+                "scores": case.eval_assisted_scores,
+            }
+        )
+    return projected.model_copy(update={"verdict": case.verdict, "scores": case.scores})
+
+
+def _review_repair_only_pass(case: CaseRun) -> bool:
+    production_review = case.production_codex_review
+    assisted_review = case.eval_assisted_codex_review
+    if production_review is not None and assisted_review is not None:
+        return (
+            production_review.verdict != Verdict.PASS
+            and assisted_review.verdict == Verdict.PASS
+        )
+    return case.repair_only_pass or (
+        case.production_verdict is not None
+        and case.production_verdict != Verdict.PASS
+        and case.eval_assisted_verdict == Verdict.PASS
+    )
+
+
+def _repair_dependency_stats(cases: Iterable[CaseRun]) -> dict[str, float | int]:
+    case_list = list(cases)
+    turns = [turn for case in case_list for turn in case.turns]
+    triggered = [turn for turn in turns if turn.repair.triggered]
+    successful = [turn for turn in triggered if turn.repair.succeeded]
+    repair_only = [
+        case
+        for case in case_list
+        if _review_repair_only_pass(case)
+    ]
+    turn_count = len(turns)
+    trigger_count = len(triggered)
+    case_count = len(case_list)
+    return {
+        "turn_count": turn_count,
+        "case_count": case_count,
+        "repair_trigger_count": trigger_count,
+        "repair_success_count": len(successful),
+        "repair_only_pass_count": len(repair_only),
+        "repair_trigger_rate": trigger_count / turn_count if turn_count else 0.0,
+        "repair_success_rate": len(successful) / trigger_count if trigger_count else 0.0,
+        "repair_only_pass_rate": len(repair_only) / case_count if case_count else 0.0,
+        "average_repair_attempts": (
+            sum(turn.repair.attempts for turn in triggered) / trigger_count
+            if trigger_count
+            else 0.0
+        ),
+        "added_model_calls": sum(turn.repair.added_model_calls for turn in turns),
+        "added_tool_calls": sum(turn.repair.added_tool_calls for turn in turns),
+        "added_latency_ms": sum(turn.repair.added_latency_ms for turn in turns),
+        "added_model_calls_per_turn": (
+            sum(turn.repair.added_model_calls for turn in turns) / turn_count
+            if turn_count
+            else 0.0
+        ),
+        "added_tool_calls_per_turn": (
+            sum(turn.repair.added_tool_calls for turn in turns) / turn_count
+            if turn_count
+            else 0.0
+        ),
+        "average_added_latency_ms": (
+            sum(turn.repair.added_latency_ms for turn in triggered) / trigger_count
+            if trigger_count
+            else 0.0
+        ),
+    }
+
+
+def _repair_dependency_check(
+    candidate_cases: Iterable[CaseRun],
+    policy: GatePolicy,
+    baseline_cases: Iterable[CaseRun] | None,
+) -> GateCheck:
+    candidate_stats = _repair_dependency_stats(candidate_cases)
+    baseline_stats = (
+        _repair_dependency_stats(baseline_cases)
+        if baseline_cases is not None
+        else None
+    )
+    failures: dict[str, object] = {}
+    thresholds = {
+        "repair_trigger_rate": policy.max_repair_trigger_rate,
+        "repair_only_pass_rate": policy.max_repair_only_pass_rate,
+        "average_repair_attempts": policy.max_average_repair_attempts,
+        "added_model_calls_per_turn": policy.max_added_model_calls_per_turn,
+        "added_tool_calls_per_turn": policy.max_added_tool_calls_per_turn,
+        "average_added_latency_ms": policy.max_average_added_latency_ms,
+    }
+    for metric, limit in thresholds.items():
+        value = float(candidate_stats[metric])
+        if limit is not None and value > limit:
+            failures[metric] = {"candidate": value, "maximum": limit}
+    if policy.forbid_repair_dependency_regression:
+        if baseline_stats is None:
+            failures["baseline"] = "repair dependency regression requires a baseline"
+        else:
+            for metric in (
+                "repair_trigger_rate",
+                "repair_only_pass_rate",
+                "average_repair_attempts",
+                "added_model_calls_per_turn",
+                "added_tool_calls_per_turn",
+                "average_added_latency_ms",
+            ):
+                candidate_value = float(candidate_stats[metric])
+                baseline_value = float(baseline_stats[metric])
+                if candidate_value > baseline_value:
+                    failures[f"regression.{metric}"] = {
+                        "candidate": candidate_value,
+                        "baseline": baseline_value,
+                    }
+    return _check(
+        "repair_dependency",
+        Verdict.PASS if not failures else Verdict.FAIL,
+        "repair dependency is reported and within policy"
+        if not failures
+        else "repair dependency exceeded policy or regressed",
+        candidate=candidate_stats,
+        baseline=baseline_stats,
+        failures=failures,
+    )
 
 
 def _adjudicate_case(case: CaseRun, policy: GatePolicy) -> tuple[CaseRun, dict[str, object]]:
@@ -151,6 +301,44 @@ def _adjudicate_case(case: CaseRun, policy: GatePolicy) -> tuple[CaseRun, dict[s
     return case.model_copy(update={"verdict": verdict}), detail
 
 
+def _adjudicate_codex_review(
+    spec: CaseSpec,
+    case: CaseRun,
+    policy: GatePolicy,
+) -> tuple[CaseRun, dict[str, object]]:
+    errors: list[str] = []
+    if spec.review_mode != ReviewMode.CODEX_CONVERSATION:
+        errors.append("dataset case is not declared for Codex conversation review")
+    errors.extend(
+        validate_codex_review(
+            spec,
+            case,
+            policy.answer_track,
+            policy.required_codex_review_dimensions,
+        )
+    )
+    review = review_for_track(case, policy.answer_track)
+    if errors or review is None:
+        return (
+            case.model_copy(update={"verdict": Verdict.INVALID}),
+            {"valid": False, "errors": errors},
+        )
+    return (
+        case.model_copy(update={"verdict": review.verdict}),
+        {
+            "valid": True,
+            "verdict": review.verdict.value,
+            "summary": review.summary,
+            "dimensions": {
+                name: item.rating.value
+                for name, item in review.dimensions.items()
+            },
+            "findings": review.findings,
+            "critical_findings": review.critical_findings,
+        },
+    )
+
+
 def _case_pass_rates(cases: dict[tuple[str, int], CaseRun]) -> dict[str, float]:
     values: dict[str, list[bool]] = defaultdict(list)
     for (case_id, _), case in cases.items():
@@ -165,7 +353,54 @@ def evaluate_gate(
     baseline: ExperimentRun | None = None,
 ) -> GateResult:
     checks: list[GateCheck] = []
+    expected_track = {
+        GateKind.PRODUCTION_RELEASE: AnswerTrack.PRODUCTION_CANDIDATE,
+        GateKind.EVAL_OPTIMIZATION: AnswerTrack.EVAL_ASSISTED_ANSWER,
+    }.get(policy.gate_kind)
+    track_ok = expected_track is None or policy.answer_track == expected_track
+    checks.append(
+        _check(
+            "answer_track_contract",
+            Verdict.PASS if track_ok else Verdict.INVALID,
+            f"gate scores only {policy.answer_track.value}"
+            if track_ok
+            else f"{policy.gate_kind.value} requires {expected_track.value}",
+            gate_kind=policy.gate_kind.value,
+            answer_track=policy.answer_track.value,
+        )
+    )
     selected = _selected_specs(dataset, policy)
+    required_splits = set(policy.required_splits)
+    dataset_splits = {case.split for case in dataset if case.enabled}
+    candidate_splits = set(candidate.splits)
+    baseline_splits = set(baseline.splits) if baseline is not None else required_splits
+    missing_dataset_splits = sorted(
+        split.value for split in required_splits - dataset_splits
+    )
+    missing_candidate_splits = sorted(
+        split.value for split in required_splits - candidate_splits
+    )
+    missing_baseline_splits = sorted(
+        split.value for split in required_splits - baseline_splits
+    )
+    split_coverage_ok = not (
+        missing_dataset_splits
+        or missing_candidate_splits
+        or missing_baseline_splits
+    )
+    checks.append(
+        _check(
+            "required_split_coverage",
+            Verdict.PASS if split_coverage_ok else Verdict.INVALID,
+            "every required formal split is present in the dataset and run artifacts"
+            if split_coverage_ok
+            else "one or more required formal splits are absent",
+            required=sorted(split.value for split in required_splits),
+            dataset_missing=missing_dataset_splits,
+            candidate_missing=missing_candidate_splits,
+            baseline_missing=missing_baseline_splits,
+        )
+    )
     expected_ids = {case.case_id for case in selected}
     expected_keys = {
         (case.case_id, attempt_index)
@@ -345,12 +580,31 @@ def evaluate_gate(
         actual_turn_ids = [turn.turn_id for turn in raw_case.turns]
         if actual_turn_ids != expected_turn_ids:
             errors.append("turn coverage/order mismatch")
-        rescored = score_case(spec, raw_case.model_copy(update={"scores": []}))
-        if raw_case.verdict != rescored.verdict:
-            errors.append(f"stored verdict {raw_case.verdict.value} != recomputed {rescored.verdict.value}")
+        if policy.require_production_surface_equivalence:
+            divergent_turns = sorted(
+                turn.turn_id
+                for turn in raw_case.turns
+                if turn.error is None
+                and turn.is_completed
+                and turn.production_surface_equivalent is not True
+            )
+            if divergent_turns:
+                errors.append(
+                    "SSE/persisted production candidate equivalence is unproven "
+                    "or false for turns: " + ", ".join(divergent_turns)
+                )
+        tracked_case = _stored_track_case(raw_case, policy.answer_track)
+        if tracked_case.error and not raw_case.error:
+            errors.append(tracked_case.error)
+        rescored = score_case(spec, tracked_case.model_copy(update={"scores": []}))
+        if tracked_case.verdict != rescored.verdict:
+            errors.append(
+                f"stored {policy.answer_track.value} verdict "
+                f"{tracked_case.verdict.value} != recomputed {rescored.verdict.value}"
+            )
         if errors:
             artifact_errors[_key_label(key)] = errors
-        candidate_by_key[key] = _with_preserved_judge_scores(raw_case, rescored)
+        candidate_by_key[key] = _with_preserved_judge_scores(tracked_case, rescored)
     checks.append(
         _check(
             "candidate_artifact_integrity",
@@ -377,6 +631,66 @@ def evaluate_gate(
                 if not adjudication_invalid
                 else "judge result is missing, invalid, or below confidence threshold",
                 cases=adjudication_details,
+            )
+        )
+
+    codex_review_details: dict[str, dict[str, object]] = {}
+    codex_review_invalid: list[str] = []
+    if policy.require_codex_review:
+        for key, case in list(candidate_by_key.items()):
+            reviewed, detail = _adjudicate_codex_review(
+                specs_by_id[key[0]], case, policy
+            )
+            candidate_by_key[key] = reviewed
+            codex_review_details[_key_label(key)] = detail
+            if reviewed.verdict == Verdict.INVALID:
+                codex_review_invalid.append(_key_label(key))
+        checks.append(
+            _check(
+                "codex_conversation_review",
+                Verdict.PASS if not codex_review_invalid else Verdict.INVALID,
+                "every complete conversation has an exact-track Codex review"
+                if not codex_review_invalid
+                else "Codex review is missing, stale, or incomplete",
+                minimum_standard="materially correct and useful; minor issues allowed",
+                cases=codex_review_details,
+            )
+        )
+
+    dual_track_review_details: dict[str, dict[str, object]] = {}
+    dual_track_review_invalid: list[str] = []
+    if policy.require_dual_track_codex_review:
+        for key, case in list(candidate_by_key.items()):
+            track_errors = {
+                track.value: validate_codex_review(
+                    specs_by_id[key[0]],
+                    case,
+                    track,
+                    policy.required_codex_review_dimensions,
+                )
+                for track in (
+                    AnswerTrack.PRODUCTION_CANDIDATE,
+                    AnswerTrack.EVAL_ASSISTED_ANSWER,
+                )
+            }
+            track_errors = {
+                track: errors for track, errors in track_errors.items() if errors
+            }
+            dual_track_review_details[_key_label(key)] = {
+                "valid": not track_errors,
+                "errors": track_errors,
+            }
+            if track_errors:
+                candidate_by_key[key] = case.model_copy(update={"verdict": Verdict.INVALID})
+                dual_track_review_invalid.append(_key_label(key))
+        checks.append(
+            _check(
+                "dual_track_codex_review",
+                Verdict.PASS if not dual_track_review_invalid else Verdict.INVALID,
+                "production and assisted tracks both have exact-conversation Codex reviews"
+                if not dual_track_review_invalid
+                else "repair dependency cannot use missing or stale track reviews",
+                cases=dual_track_review_details,
             )
         )
 
@@ -536,7 +850,9 @@ def evaluate_gate(
         else {}
     )
     missing_candidate_identity = sorted(
-        field for field in required_identity_fields if not candidate_identity.get(field)
+        field
+        for field in required_identity_fields
+        if not _identity_field_present(candidate_identity, field)
     )
     checks.append(
         _check(
@@ -563,6 +879,7 @@ def evaluate_gate(
             )
         )
 
+    raw_baseline_for_repair: list[CaseRun] = []
     if baseline is not None and candidate_dataset_ok and baseline_dataset_ok:
         baseline_identity = (
             baseline.metadata.get("execution_contract")
@@ -575,7 +892,7 @@ def evaluate_gate(
                 "candidate": candidate_identity.get(field),
             }
             for field in sorted(required_identity_fields)
-            if not baseline_identity.get(field)
+            if not _identity_field_present(baseline_identity, field)
             or baseline_identity.get(field) != candidate_identity.get(field)
         }
         checks.append(
@@ -599,6 +916,7 @@ def evaluate_gate(
             for case in baseline_runs
             if _run_key(case) in expected_keys
         }
+        raw_baseline_for_repair = list(raw_baseline_by_key.values())
         missing_baseline_keys = expected_keys - set(raw_baseline_by_key)
         missing_baseline = sorted(_key_label(key) for key in missing_baseline_keys)
         baseline_errors: dict[str, list[str]] = {}
@@ -612,12 +930,31 @@ def evaluate_gate(
                 errors.append("agent profile mismatch")
             if [turn.turn_id for turn in raw_case.turns] != [turn.turn_id for turn in spec.turns]:
                 errors.append("turn coverage/order mismatch")
-            rescored = score_case(spec, raw_case.model_copy(update={"scores": []}))
-            if raw_case.verdict != rescored.verdict:
-                errors.append(f"stored verdict {raw_case.verdict.value} != recomputed {rescored.verdict.value}")
+            if policy.require_production_surface_equivalence:
+                divergent_turns = sorted(
+                    turn.turn_id
+                    for turn in raw_case.turns
+                    if turn.error is None
+                    and turn.is_completed
+                    and turn.production_surface_equivalent is not True
+                )
+                if divergent_turns:
+                    errors.append(
+                        "SSE/persisted production candidate equivalence is unproven "
+                        "or false for turns: " + ", ".join(divergent_turns)
+                    )
+            tracked_case = _stored_track_case(raw_case, policy.answer_track)
+            if tracked_case.error and not raw_case.error:
+                errors.append(tracked_case.error)
+            rescored = score_case(spec, tracked_case.model_copy(update={"scores": []}))
+            if tracked_case.verdict != rescored.verdict:
+                errors.append(
+                    f"stored {policy.answer_track.value} verdict "
+                    f"{tracked_case.verdict.value} != recomputed {rescored.verdict.value}"
+                )
             if errors:
                 baseline_errors[_key_label(key)] = errors
-            baseline_by_key[key] = _with_preserved_judge_scores(raw_case, rescored)
+            baseline_by_key[key] = _with_preserved_judge_scores(tracked_case, rescored)
         if missing_baseline or duplicate_baseline_keys or unexpected_baseline_keys:
             checks.append(
                 _check(
@@ -646,6 +983,75 @@ def evaluate_gate(
                     baseline_by_key[key] = adjudicated
                     if adjudicated.verdict == Verdict.INVALID:
                         baseline_adjudication_invalid.append(_key_label(key))
+            baseline_codex_details: dict[str, dict[str, object]] = {}
+            if policy.require_codex_review:
+                for key, case in list(baseline_by_key.items()):
+                    reviewed, detail = _adjudicate_codex_review(
+                        specs_by_id[key[0]], case, policy
+                    )
+                    baseline_by_key[key] = reviewed
+                    baseline_codex_details[_key_label(key)] = detail
+                    if reviewed.verdict == Verdict.INVALID:
+                        baseline_adjudication_invalid.append(_key_label(key))
+                checks.append(
+                    _check(
+                        "baseline_codex_conversation_review",
+                        Verdict.PASS
+                        if not baseline_adjudication_invalid
+                        else Verdict.INVALID,
+                        "baseline conversations have comparable Codex reviews"
+                        if not baseline_adjudication_invalid
+                        else "baseline Codex review is missing, stale, or incomplete",
+                        cases=baseline_codex_details,
+                    )
+                )
+            if policy.require_dual_track_codex_review:
+                baseline_dual_details: dict[str, dict[str, object]] = {}
+                for key, case in list(baseline_by_key.items()):
+                    track_errors = {
+                        track.value: validate_codex_review(
+                            specs_by_id[key[0]],
+                            case,
+                            track,
+                            policy.required_codex_review_dimensions,
+                        )
+                        for track in (
+                            AnswerTrack.PRODUCTION_CANDIDATE,
+                            AnswerTrack.EVAL_ASSISTED_ANSWER,
+                        )
+                    }
+                    track_errors = {
+                        track: errors
+                        for track, errors in track_errors.items()
+                        if errors
+                    }
+                    baseline_dual_details[_key_label(key)] = {
+                        "valid": not track_errors,
+                        "errors": track_errors,
+                    }
+                    if track_errors:
+                        baseline_by_key[key] = case.model_copy(
+                            update={"verdict": Verdict.INVALID}
+                        )
+                        baseline_adjudication_invalid.append(_key_label(key))
+                checks.append(
+                    _check(
+                        "baseline_dual_track_codex_review",
+                        Verdict.PASS
+                        if not any(
+                            not detail["valid"]
+                            for detail in baseline_dual_details.values()
+                        )
+                        else Verdict.INVALID,
+                        "baseline production and assisted tracks have comparable Codex reviews"
+                        if not any(
+                            not detail["valid"]
+                            for detail in baseline_dual_details.values()
+                        )
+                        else "baseline repair dependency reviews are incomplete or stale",
+                        cases=baseline_dual_details,
+                    )
+                )
             if baseline_adjudication_invalid:
                 checks.append(
                     _check(
@@ -689,16 +1095,24 @@ def evaluate_gate(
                     < baseline_rate
                 }
             regression_ok = not policy.forbid_pass_to_fail_regressions or not regressions
+            if not policy.forbid_pass_to_fail_regressions:
+                regression_comment = (
+                    "Codex-reviewed baseline deltas are reported; the absolute "
+                    "repetition standard decides quality"
+                )
+            elif regression_ok:
+                regression_comment = "no baseline PASS rate regressed"
+            else:
+                regression_comment = "baseline PASS rate regressed"
             checks.append(
                 _check(
                     "paired_non_regression",
                     Verdict.PASS if regression_ok else Verdict.FAIL,
-                    "no baseline PASS rate regressed"
-                    if regression_ok
-                    else "baseline PASS rate regressed",
+                    regression_comment,
                     pairing="attempt"
                     if policy.pair_repetitions_by_attempt
                     else "case_pass_rate",
+                    blocking=policy.forbid_pass_to_fail_regressions,
                     cases=regressions,
                 )
             )
@@ -802,6 +1216,32 @@ def evaluate_gate(
                 )
             )
 
+    if policy.gate_kind != GateKind.LEGACY:
+        checks.append(
+            _repair_dependency_check(
+                raw_candidate_by_key.values(),
+                policy,
+                raw_baseline_for_repair if baseline is not None else None,
+            )
+        )
+
+    if policy.gate_kind == GateKind.PRODUCTION_RELEASE:
+        repair_only_cases = sorted(
+            _key_label(key)
+            for key, case in raw_candidate_by_key.items()
+            if _review_repair_only_pass(case)
+        )
+        checks.append(
+            _check(
+                "eval_assistance_cannot_rescue_release",
+                Verdict.PASS,
+                "repair-only successes are reported but never substituted for "
+                "production-candidate Codex verdicts",
+                cases=repair_only_cases,
+                counted_as_production_pass=False,
+            )
+        )
+
     if any(check.verdict == Verdict.INVALID for check in checks):
         verdict = Verdict.INVALID
     elif any(check.verdict == Verdict.FAIL for check in checks):
@@ -814,4 +1254,6 @@ def evaluate_gate(
         baseline_run_id=baseline.run_id if baseline else None,
         verdict=verdict,
         checks=checks,
+        gate_kind=policy.gate_kind,
+        answer_track=policy.answer_track,
     )

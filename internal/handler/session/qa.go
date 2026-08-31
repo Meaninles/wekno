@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
@@ -51,7 +49,6 @@ type qaRequestContext struct {
 	attachments            types.MessageAttachments  // Processed file attachments
 	originalInputFiles     []types.OriginalInputFile // Runtime-only original file descriptors for Claude SDK agents
 	chatQueueTicket        ChatQueueTicket           // Conversation-level model-pool admission lease
-	evalMaxResponseChars   int                       // Trusted full-Eval presentation constraint; zero in production.
 
 	// Snapshot of the request fields needed to persist the input-bar state
 	// for session restoration. Kept verbatim from the request so we record
@@ -104,7 +101,6 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 		EnableMemory:           rc.enableMemory,
 		Attachments:            rc.attachments,
 		OriginalInputFiles:     append([]types.OriginalInputFile(nil), rc.originalInputFiles...),
-		EvalMaxResponseChars:   rc.evalMaxResponseChars,
 	}
 }
 
@@ -142,12 +138,6 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		logger.Error(ctx, "Query content is empty")
 		return nil, nil, errors.NewBadRequestError("Query content cannot be empty")
 	}
-	evalMaxResponseChars, err := agenteval.LoadConfigFromEnv().ResponseMaxChars(request.EvalResponseContract)
-	if err != nil {
-		logger.Errorf(ctx, "[%s] Invalid Eval response contract: %v", logPrefix, err)
-		return nil, nil, errors.NewBadRequestError(err.Error())
-	}
-
 	// SSRF protection: strip client-supplied URL/Caption fields from image attachments.
 	// The URL field must only be populated server-side by saveImageAttachments; an
 	// attacker could inject internal network URLs to trigger SSRF via the LLM provider.
@@ -400,7 +390,6 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		channel:                request.Channel,
 		attachments:            processedAttachments,
 		originalInputFiles:     originalInputFiles,
-		evalMaxResponseChars:   evalMaxResponseChars,
 		reqAgentEnabled:        request.AgentEnabled,
 		reqAgentID:             request.AgentID,
 	}
@@ -549,6 +538,18 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext) *sseStreamContext {
 		assistantMessage: reqCtx.assistantMessage,
 	}
 
+	// Subscribe the canonical stream accumulator before wiring stop handling so
+	// an interrupted request can persist the exact answer bytes already emitted.
+	streamHandler := h.setupStreamHandler(
+		asyncCtx,
+		reqCtx.sessionID,
+		reqCtx.assistantMessage.ID,
+		reqCtx.requestID,
+		reqCtx.receivedAt,
+		reqCtx.assistantMessage,
+		eventBus,
+	)
+
 	// Setup stop event handler
 	h.setupStopEventHandler(
 		eventBus,
@@ -557,6 +558,7 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext) *sseStreamContext {
 		reqCtx.assistantMessage,
 		reqCtx.receivedAt,
 		cancel,
+		streamHandler,
 	)
 
 	// Watch for stop events independently of the client SSE connection so a
@@ -569,10 +571,6 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext) *sseStreamContext {
 	// connection-independent context derived from baseCtx so it survives the
 	// client disconnect.
 	h.startStopWatcher(logger.CloneContext(baseCtx), reqCtx.sessionID, reqCtx.assistantMessage.ID, eventBus)
-
-	// Setup stream handler
-	h.setupStreamHandler(asyncCtx, reqCtx.sessionID, reqCtx.assistantMessage.ID,
-		reqCtx.requestID, reqCtx.receivedAt, reqCtx.assistantMessage, eventBus)
 
 	return streamCtx
 }
@@ -982,70 +980,13 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 						),
 				)
 				streamCtx.assistantMessage.AgentDurationMs = time.Since(reqCtx.receivedAt).Milliseconds()
-				answer := conversationmemory.StripInternalPlanningPreamble(streamCtx.assistantMessage.Content)
-				answer = conversationmemory.RemoveRedundantExplicitComparisonSummary(answer, reqCtx.query)
-				if conversationmemory.ShouldIsolateNarrowEvidenceHistory(reqCtx.query) {
-					answer = sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
-						answer,
-						conversationmemory.RequiredEvidenceTopics(reqCtx.query),
-						[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-						reqCtx.query,
-					)
-				}
-				answer = conversationmemory.NormalizeConfirmedUnknownSections(answer)
-				answer = conversationmemory.NormalizeDeferredComparisonFactSections(
-					answer,
-					reqCtx.query,
-					data.PriorUserStatements...,
-				)
-				answer = conversationmemory.NormalizeStateDeltaScope(answer, reqCtx.query)
-				answer = conversationmemory.NormalizeExplicitActionBoundaries(
-					answer,
-					reqCtx.query,
-					data.PriorUserStatements...,
-				)
-				answer = conversationmemory.NormalizeExplicitRequestedUnknownFields(answer, reqCtx.query)
-				answer = conversationmemory.NormalizeDeferredComparisonRelationships(answer, reqCtx.query)
-				answer = conversationmemory.NormalizeStateAuditSections(
-					answer,
-					reqCtx.query,
-					data.PriorUserStatements...,
-				)
-				answer = conversationmemory.NormalizeExplicitUserIdentityUnknown(
-					answer,
-					reqCtx.query,
-					data.PriorUserStatements...,
-				)
-				answer = conversationmemory.EnsureDeferredDecisionConclusion(answer, reqCtx.query)
-				answer = sourcerefs.RepairNamedTopicCitationBindings(
-					answer,
-					conversationmemory.RequiredEvidenceTopics(reqCtx.query),
-					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-				)
-				answer = conversationmemory.CompactExplicitOneLineComparison(answer, reqCtx.query)
-				answer = sourcerefs.RepairNamedTopicCitationBindings(
-					answer,
-					conversationmemory.RequiredEvidenceTopics(reqCtx.query),
-					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-				)
-				if conversationmemory.RequiresNamedTopicDefinitionCoverage(reqCtx.query) {
-					answer = sourcerefs.EnsureNamedTopicDefinitions(
-						answer,
-						conversationmemory.RequiredEvidenceTopics(reqCtx.query),
-						[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-					)
-				}
-				answer = sourcerefs.RepairAnswerCitations(
-					answer,
-					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
-				)
-				filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
-					answer,
+				_, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(
+					streamCtx.assistantMessage.Content,
 					[]*types.SearchResult(streamCtx.assistantMessage.KnowledgeReferences),
 				)
 				if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
 					logger.Warnf(streamCtx.asyncCtx,
-						"Knowledge QA filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+						"Knowledge QA observed invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
 						citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs,
 					)
 				}
@@ -1055,7 +996,9 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 						citationReport.AvailableCount,
 					)
 				}
-				streamCtx.assistantMessage.Content = filteredAnswer
+				// The exact accumulated SSE text is the production candidate.
+				// Completion-time citation accounting may narrow references, but
+				// must never rewrite the answer stored for history replay.
 				streamCtx.assistantMessage.KnowledgeReferences = types.References(citedRefs)
 				streamCtx.assistantMessage.RetrievalStats.SimpleConversation =
 					len(citedRefs) == 0 && !sourcerefs.HasConfiguredEvidenceScope(
@@ -1451,10 +1394,6 @@ func userFacingAgentErrorMessage(err error) string {
 	}
 	if strings.Contains(lower, "content block is not a text block") {
 		return "模型服务返回了不兼容的响应格式，请重试或切换模型"
-	}
-	if strings.Contains(raw, "智能体未能生成满足当前请求约束的完整回答") ||
-		strings.Contains(lower, "terminal response remained mechanically invalid") {
-		return "智能体未能生成满足当前请求约束的完整回答，请重试"
 	}
 	return raw
 }

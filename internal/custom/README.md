@@ -33,7 +33,7 @@
 
 | 模块组 | 模块 |
 |---|---|
-| Agent | `generalagent`（普通问答/比较轮不会注册产物，只有当前用户明确要求文件交付才开放通用智能体产物能力）、`builtinagentdefaults`、`kbmanager`、`chatretrieval`（显式多项覆盖召回与父块证据谱系保护）、`conversationmemory`（三类会话智能体共享的窗口外用户事实归档、当前轮优先和状态覆盖策略；状态审计及明确重新取证轮只回放用户原话）、`agentresponse`（仅可信 Eval 请求启用的有界、无工具终稿修复；生产记录模式零调用，失败保持原答案） |
+| Agent | `generalagent`（普通问答/比较轮不会注册产物，只有当前用户明确要求文件交付才开放通用智能体产物能力）、`builtinagentdefaults`、`kbmanager`、`chatretrieval`（显式多项覆盖召回与父块证据谱系保护）、`conversationmemory`（三类会话智能体共享的窗口外用户事实归档、当前轮优先和状态覆盖策略；所有事实只取自用户原文或真实检索证据） |
 | 数据和技能 | `dbanalytics`、`skillhub`、`scheduledchat` |
 | 身份与治理 | `iam`、`authsecurity`、`admin`、`configcenter`、`wikiaccess`、`connectiontls` |
 | 协作 | `chatshare`、`sessionstate`、`answerfeedback`、`sourcerefs`（已注册来源别名规范化与零引用时的保守证据补全）、`imoutput`、`impreview`；正文制度条款与平台可点击引用共存 |

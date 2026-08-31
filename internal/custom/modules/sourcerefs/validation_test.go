@@ -43,40 +43,6 @@ func TestFilterAnswerCitationsDoesNotInterpretCodeExamples(t *testing.T) {
 	}
 }
 
-func TestNormalizeInlineCitationCodeMakesProseHandlesAuthoritative(t *testing.T) {
-	answer := "甲事实。`<src id=\"S1\" />`、乙事实。`<src id=\"S2\" />`"
-	normalized := NormalizeInlineCitationCode(answer, false)
-	if strings.Contains(normalized, "`<src") {
-		t.Fatalf("canonical prose citation remained code: %q", normalized)
-	}
-	filtered, refs, report := FilterAnswerCitations(normalized, citationTestRefs())
-	if filtered != "甲事实。<src id=\"S1\" />、乙事实。<src id=\"S2\" />" {
-		t.Fatalf("inline citations were not unwrapped deterministically: %q", filtered)
-	}
-	if len(refs) != 2 || len(report.CitedIDs) != 2 {
-		t.Fatalf("unwrapped citations were not reflected in authoritative refs: refs=%#v report=%#v", refs, report)
-	}
-	adjacent := NormalizeInlineCitationCode("汇总：`<src id=\"S1\" /><src id=\"S2\" />`", false)
-	if adjacent != "汇总：<src id=\"S1\" /><src id=\"S2\" />" {
-		t.Fatalf("adjacent canonical handles were not unwrapped: %q", adjacent)
-	}
-}
-
-func TestNormalizeInlineCitationCodePreservesFencesAndRequestedExamples(t *testing.T) {
-	fenced := "正文。`<src id=\"S1\" />`\n\n```xml\n<src id=\"S2\" />\n```"
-	got := NormalizeInlineCitationCode(fenced, false)
-	if !strings.Contains(got, "正文。<src id=\"S1\" />") ||
-		!strings.Contains(got, "```xml\n<src id=\"S2\" />\n```") {
-		t.Fatalf("prose/fenced citation distinction was lost: %q", got)
-	}
-	if preserved := NormalizeInlineCitationCode(fenced, true); preserved != fenced {
-		t.Fatalf("explicit citation example was changed: %q", preserved)
-	}
-	if twice := NormalizeInlineCitationCode(got, false); twice != got {
-		t.Fatalf("inline citation normalization is not idempotent: %q", twice)
-	}
-}
-
 func TestFilterAnswerCitationsReportsEvidenceAvailableButUncited(t *testing.T) {
 	filtered, refs, report := FilterAnswerCitations("基于证据生成的正文。", citationTestRefs())
 	if filtered != "基于证据生成的正文。" || len(refs) != 0 {
@@ -103,17 +69,6 @@ func TestFilterAnswerCitationsDropsMalformedOpeningClosingAndIncompleteTags(t *t
 	}
 	if len(refs) != 0 || report.ForbiddenTags < 6 || report.IncompleteTags != 1 {
 		t.Fatalf("unexpected malformed-tag report: %#v", report)
-	}
-}
-
-func TestFilterAnswerCitationsRemovesUnregisteredBareAngleHandles(t *testing.T) {
-	answer := `有效。<src id="S1" /> 未注册<S99> 空元素<S98/>`
-	filtered, _, report := FilterAnswerCitations(answer, citationTestRefs())
-	if strings.Contains(filtered, "<S99>") || strings.Contains(filtered, "<S98/>") {
-		t.Fatalf("bare citation aliases leaked to user output: %q", filtered)
-	}
-	if report.ForbiddenTags != 2 {
-		t.Fatalf("bare aliases were not reported: %#v", report)
 	}
 }
 

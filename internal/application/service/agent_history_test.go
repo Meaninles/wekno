@@ -11,20 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestUserOnlyAgentHistoryDropsAssistantAndToolClaims(t *testing.T) {
-	history := []chat.Message{
-		{Role: "user", Content: "预算改为220万元。"},
-		{Role: "assistant", Content: "预算仍是360万元。"},
-		{Role: "tool", Content: "stale tool observation"},
-		{Role: "USER", Content: "项目负责人改为林梅。"},
-	}
-
-	got := userOnlyAgentHistory(history)
-	require.Len(t, got, 2)
-	assert.Equal(t, "预算改为220万元。", got[0].Content)
-	assert.Equal(t, "项目负责人改为林梅。", got[1].Content)
-}
-
 // Request-local evidence envelopes must not be replayed into later turns.
 func TestBuildUserHistoryMessage_IgnoresRenderedEvidence(t *testing.T) {
 	msg := &types.Message{

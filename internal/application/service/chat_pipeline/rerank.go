@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -56,17 +55,6 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 		return next()
 	}
 	if chatManage.RerankModelID == "" {
-		query := chatManage.Query + "\n" + chatManage.RewriteQuery
-		chatManage.SearchResult = chatretrieval.PromoteExactStructuralMatches(
-			query,
-			chatManage.SearchResult,
-			chatManage.SearchResult,
-		)
-		chatManage.SearchResult = chatretrieval.PromoteExplicitCoverageMatches(
-			query,
-			chatManage.SearchResult,
-			chatManage.SearchResult,
-		)
 		pipelineWarn(ctx, "Rerank", "skip", map[string]interface{}{
 			"reason": "empty_model_id",
 		})
@@ -221,17 +209,6 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 		sr.Score = compositeScore(sr, modelScore, base)
 		reranked = append(reranked, sr)
 	}
-	query := chatManage.Query + "\n" + chatManage.RewriteQuery
-	reranked = chatretrieval.PromoteExactStructuralMatches(
-		query,
-		chatManage.SearchResult,
-		reranked,
-	)
-	reranked = chatretrieval.PromoteExplicitCoverageMatches(
-		query,
-		chatManage.SearchResult,
-		reranked,
-	)
 	final := applyMMR(ctx, reranked, chatManage, min(len(reranked), max(1, chatManage.RerankTopK)), 0.7)
 	chatManage.RerankResult = final
 

@@ -67,6 +67,33 @@ class Verdict(str, Enum):
     INVALID = "INVALID"
 
 
+class AnswerTrack(str, Enum):
+    """The immutable answer surface selected for scoring."""
+
+    PRODUCTION_CANDIDATE = "production_candidate"
+    EVAL_ASSISTED_ANSWER = "eval_assisted_answer"
+    LEGACY_CONTENT = "legacy_content"
+
+
+class GateKind(str, Enum):
+    LEGACY = "legacy"
+    PRODUCTION_RELEASE = "production_release"
+    EVAL_OPTIMIZATION = "eval_optimization"
+    REPAIR_DEPENDENCY = "repair_dependency"
+
+
+class ReviewMode(str, Enum):
+    CONTRACT = "contract"
+    CODEX_CONVERSATION = "codex_conversation"
+
+
+class ReviewRating(str, Enum):
+    ACCEPTABLE = "acceptable"
+    MINOR_ISSUE = "minor_issue"
+    MAJOR_ISSUE = "major_issue"
+    NOT_APPLICABLE = "not_applicable"
+
+
 class AgentSelector(StrictModel):
     endpoint: Literal["knowledge-chat", "agent-chat"] = "agent-chat"
     agent_id: str
@@ -284,6 +311,10 @@ class CaseSpec(StrictModel):
     corpus_version: str | None = None
     repetitions: int = Field(default=1, ge=1)
     provenance: Provenance = Field(default_factory=Provenance)
+    review_mode: ReviewMode = Field(
+        default=ReviewMode.CONTRACT,
+        exclude_if=lambda value: value == ReviewMode.CONTRACT,
+    )
 
     @model_validator(mode="after")
     def validate_case(self) -> "CaseSpec":
@@ -295,6 +326,28 @@ class CaseSpec(StrictModel):
         if self.split != Split.QUARANTINE and self.provenance.needs_codex_review:
             raise ValueError("unreviewed cases must remain in quarantine")
         return self
+
+
+class AnswerSnapshot(StrictModel):
+    """One answer surface and the evidence registry visible to its scorer."""
+
+    content: str = ""
+    references: list[dict[str, Any]] = Field(default_factory=list)
+    retrieval_stats: dict[str, Any] = Field(default_factory=dict)
+
+
+class RepairTrace(StrictModel):
+    """Eval-only work performed after the persisted production response."""
+
+    triggered: bool = False
+    succeeded: bool = False
+    repair_types: list[str] = Field(default_factory=list)
+    attempts: int = Field(default=0, ge=0)
+    failure_reason: str = ""
+    trigger_reasons: list[str] = Field(default_factory=list)
+    added_model_calls: int = Field(default=0, ge=0)
+    added_tool_calls: int = Field(default=0, ge=0)
+    added_latency_ms: int = Field(default=0, ge=0)
 
 
 class ObservedTurn(StrictModel):
@@ -313,6 +366,17 @@ class ObservedTurn(StrictModel):
     total_latency_ms: int = 0
     event_count: int = 0
     error: str | None = None
+    # Independent replay of the answer events received over SSE.  The runner
+    # compares it with the subsequently loaded assistant row so formal gates
+    # can reject split-brain user/history surfaces without rewriting either.
+    streamed_content: str | None = None
+    production_surface_equivalent: bool | None = None
+    # content/references remain the backwards-compatible production surface.
+    # New artifacts also carry explicit immutable snapshots so a gate cannot
+    # silently substitute an Eval rewrite for what users and history received.
+    production_candidate: AnswerSnapshot | None = None
+    eval_assisted_answer: AnswerSnapshot | None = None
+    repair: RepairTrace = Field(default_factory=RepairTrace)
 
 
 class MetricScore(StrictModel):
@@ -325,6 +389,55 @@ class MetricScore(StrictModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CodexDimensionReview(StrictModel):
+    rating: ReviewRating
+    comment: str = Field(min_length=1)
+    evidence_turn_ids: list[str] = Field(default_factory=list)
+
+
+class CodexConversationReview(StrictModel):
+    """Manual Codex assessment bound to one exact complete conversation."""
+
+    schema_version: Literal[1] = 1
+    reviewer: Literal["codex"] = "codex"
+    answer_track: AnswerTrack
+    case_id: str
+    attempt_index: int = Field(ge=1)
+    review_basis_sha256: str = Field(min_length=64, max_length=64)
+    rubric_version: Literal["codex-conversation-minimum-v1"] = (
+        "codex-conversation-minimum-v1"
+    )
+    verdict: Verdict
+    summary: str = Field(min_length=1)
+    dimensions: dict[str, CodexDimensionReview]
+    strengths: list[str] = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
+    critical_findings: list[str] = Field(default_factory=list)
+    reviewed_at: str = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def acceptable_means_no_material_defect(self) -> "CodexConversationReview":
+        if not self.dimensions:
+            raise ValueError("Codex conversation review requires dimension findings")
+        if self.verdict == Verdict.PASS:
+            if self.critical_findings:
+                raise ValueError("acceptable review cannot contain critical findings")
+            if any(
+                item.rating == ReviewRating.MAJOR_ISSUE
+                for item in self.dimensions.values()
+            ):
+                raise ValueError("acceptable review cannot contain a major issue")
+        if self.verdict == Verdict.FAIL and not self.critical_findings:
+            if not any(
+                item.rating == ReviewRating.MAJOR_ISSUE
+                for item in self.dimensions.values()
+            ):
+                raise ValueError(
+                    "failing review requires a major issue or critical finding"
+                )
+        return self
+
+
 class CaseRun(StrictModel):
     case_id: str
     family_id: str
@@ -335,6 +448,17 @@ class CaseRun(StrictModel):
     turns: list[ObservedTurn] = Field(default_factory=list)
     scores: list[MetricScore] = Field(default_factory=list)
     error: str | None = None
+    production_verdict: Verdict | None = None
+    production_scores: list[MetricScore] = Field(default_factory=list)
+    eval_assisted_verdict: Verdict | None = None
+    eval_assisted_scores: list[MetricScore] = Field(default_factory=list)
+    repair_only_pass: bool = False
+    production_codex_review: CodexConversationReview | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    eval_assisted_codex_review: CodexConversationReview | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class SUTFingerprint(StrictModel):
@@ -347,7 +471,7 @@ class SUTFingerprint(StrictModel):
 
 
 class ExperimentRun(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     run_id: str
     suite: str
     dataset_sha256: str
@@ -359,8 +483,10 @@ class ExperimentRun(StrictModel):
 
 
 class GatePolicy(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     policy_id: str
+    gate_kind: GateKind = GateKind.LEGACY
+    answer_track: AnswerTrack = AnswerTrack.LEGACY_CONTENT
     required_splits: list[Split] = Field(default_factory=lambda: [Split.GATE])
     required_capabilities: list[Capability] = Field(default_factory=list)
     required_agent_profiles: list[str] = Field(default_factory=list)
@@ -388,11 +514,40 @@ class GatePolicy(StrictModel):
     max_p95_latency_ms_by_agent: dict[str, int] = Field(default_factory=dict)
     max_latency_ms_by_agent: dict[str, int] = Field(default_factory=dict)
     require_baseline: bool = True
+    max_repair_trigger_rate: float | None = Field(default=None, ge=0, le=1)
+    max_repair_only_pass_rate: float | None = Field(default=None, ge=0, le=1)
+    max_average_repair_attempts: float | None = Field(default=None, ge=0)
+    max_added_model_calls_per_turn: float | None = Field(default=None, ge=0)
+    max_added_tool_calls_per_turn: float | None = Field(default=None, ge=0)
+    max_average_added_latency_ms: float | None = Field(default=None, ge=0)
+    forbid_repair_dependency_regression: bool = False
+    require_codex_review: bool = False
+    require_dual_track_codex_review: bool = False
+    required_codex_review_dimensions: list[str] = Field(default_factory=list)
+    require_production_surface_equivalence: bool = False
 
     @model_validator(mode="after")
     def improvement_requires_baseline(self) -> "GatePolicy":
         if self.min_improved_case_count and not self.require_baseline:
             raise ValueError("min_improved_case_count requires a paired baseline")
+        if (
+            self.gate_kind == GateKind.PRODUCTION_RELEASE
+            and self.answer_track != AnswerTrack.PRODUCTION_CANDIDATE
+        ):
+            raise ValueError("production release gate must score production_candidate")
+        if (
+            self.gate_kind == GateKind.EVAL_OPTIMIZATION
+            and self.answer_track != AnswerTrack.EVAL_ASSISTED_ANSWER
+        ):
+            raise ValueError("eval optimization gate must score eval_assisted_answer")
+        if self.gate_kind == GateKind.REPAIR_DEPENDENCY and self.schema_version < 2:
+            raise ValueError("repair dependency gate requires schema_version 2")
+        if self.require_codex_review and not self.required_codex_review_dimensions:
+            raise ValueError("Codex review gate requires review dimensions")
+        if self.require_dual_track_codex_review and not self.require_codex_review:
+            raise ValueError(
+                "dual-track Codex review requires primary Codex review adjudication"
+            )
         return self
 
 
@@ -404,12 +559,14 @@ class GateCheck(StrictModel):
 
 
 class GateResult(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     policy_id: str
     candidate_run_id: str
     baseline_run_id: str | None = None
     verdict: Verdict
     checks: list[GateCheck]
+    gate_kind: GateKind = GateKind.LEGACY
+    answer_track: AnswerTrack = AnswerTrack.LEGACY_CONTENT
     created_at: str = Field(default_factory=utc_now)
 
 

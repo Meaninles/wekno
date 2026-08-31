@@ -1,7 +1,6 @@
 package session
 
 import (
-	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -74,10 +73,6 @@ type CreateKnowledgeQARequest struct {
 	Images            []ImageAttachment  `json:"images"`                       // Attached images for multimodal chat
 	AttachmentUploads []AttachmentUpload `json:"attachment_uploads,omitempty"` // Attached files (documents, audio, etc.)
 	Channel           string             `json:"channel"`                      // Source channel: "web", "api", "im", etc.
-	// EvalResponseContract is accepted only by a server running in full Eval
-	// mode. Production ignores it, and the contract is never persisted as part
-	// of the user's message.
-	EvalResponseContract *agenteval.ResponseContract `json:"eval_response_contract,omitempty"`
 }
 
 // AttachmentUpload represents a file attachment upload from the client

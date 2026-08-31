@@ -103,10 +103,6 @@ func prepareChatModel(ctx context.Context, modelService interfaces.ModelService,
 		PresencePenalty:     chatManage.SummaryConfig.PresencePenalty,
 		Thinking:            chatManage.SummaryConfig.Thinking,
 	}
-	opt.MaxCompletionTokens = conversationmemory.BoundCompletionTokens(
-		opt.MaxCompletionTokens,
-		chatManage.Query,
-	)
 	if opt.Thinking != nil {
 		pipelineInfo(ctx, "Stream", "thinking_option", map[string]interface{}{
 			"enabled": *opt.Thinking,
@@ -142,43 +138,19 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 		{Role: "system", Content: systemPrompt},
 	}
 
-	if conversationmemory.RequiresAuthoritativeUserHistory(chatManage.Query) {
-		// State audits reconstruct user facts, and fresh-evidence turns must not
-		// reuse a prior answer as if it were current source evidence.
-		chatMessages = AppendUserHistoryMessages(chatMessages, chatManage.History)
-	} else {
-		chatMessages = AppendHistoryMessages(chatMessages, chatManage.History)
-	}
+	chatMessages = AppendHistoryMessages(chatMessages, chatManage.History)
 
 	// Add current user message. Only include images when the chat model supports
 	// vision; non-vision models rely on the text description in UserContent.
-	currentContent := conversationmemory.AppendAuditArchive(
-		chatManage.UserContent,
-		chatManage.Query,
-		chatManage.DurableUserContext,
-	)
-	priorUserStatements := make([]string, 0, len(chatManage.History)+1)
-	if strings.TrimSpace(chatManage.DurableUserContext) != "" {
-		priorUserStatements = append(priorUserStatements, chatManage.DurableUserContext)
-	}
-	for _, item := range chatManage.History {
-		if item != nil && strings.TrimSpace(item.Query) != "" {
-			priorUserStatements = append(priorUserStatements, item.Query)
-		}
-	}
-	currentContent = conversationmemory.AppendCurrentTurnDirectiveWithLimit(
+	currentContent := chatManage.UserContent
+	currentContent = conversationmemory.AppendCurrentTurnDirective(
 		currentContent,
 		chatManage.Query,
-		chatManage.EvalMaxResponseChars,
-		priorUserStatements...,
 	)
-	// Keep the citation-use block terminal even after adding the current-turn
-	// response contract. This preserves the established citation salience rule.
+	// Keep the citation-use block terminal after the current-turn semantic
+	// directive. This preserves the established citation salience rule.
 	currentContent = sourcerefs.PlaceTerminalCitationInstruction(currentContent, chatManage.CitationResult)
-	if outputDirective := conversationmemory.TerminalGenerationDirectiveWithLimit(
-		chatManage.Query,
-		chatManage.EvalMaxResponseChars,
-	); outputDirective != "" {
+	if outputDirective := conversationmemory.TerminalGenerationDirective(); outputDirective != "" {
 		currentContent += "\n\n" + outputDirective
 	}
 	userMsg := chat.Message{
@@ -202,19 +174,6 @@ func AppendHistoryMessages(messages []chat.Message, history []*types.History) []
 		}
 		messages = append(messages, chat.Message{Role: "user", Content: history.Query})
 		messages = append(messages, chat.Message{Role: "assistant", Content: sourcerefs.StripCitationProtocol(history.Answer)})
-	}
-	return messages
-}
-
-// AppendUserHistoryMessages replays only authoritative user statements. It is
-// intentionally reserved for explicit state-audit turns; ordinary follow-ups
-// still receive the full conversational exchange.
-func AppendUserHistoryMessages(messages []chat.Message, history []*types.History) []chat.Message {
-	for _, item := range history {
-		if item == nil || strings.TrimSpace(item.Query) == "" {
-			continue
-		}
-		messages = append(messages, chat.Message{Role: "user", Content: item.Query})
 	}
 	return messages
 }

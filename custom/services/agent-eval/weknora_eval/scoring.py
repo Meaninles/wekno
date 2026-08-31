@@ -5,6 +5,7 @@ from collections import Counter
 from typing import Any
 
 from .models import (
+    AnswerTrack,
     CaseRun,
     CaseSpec,
     MetricScore,
@@ -1075,3 +1076,69 @@ def score_case(spec: CaseSpec, case_run: CaseRun) -> CaseRun:
     else:
         verdict = Verdict.PASS
     return case_run.model_copy(update={"scores": scores, "verdict": verdict})
+
+
+def project_case_to_answer_track(
+    case_run: CaseRun,
+    answer_track: AnswerTrack,
+) -> CaseRun:
+    """Project a dual-track artifact onto one immutable scoring surface."""
+
+    if answer_track == AnswerTrack.LEGACY_CONTENT:
+        # Historical schema-v1 artifacts have no explicit snapshots.  Keep
+        # their already-frozen deterministic scores intact so old runs remain
+        # judgeable and reproducible.  New gates never select this surface.
+        return case_run.model_copy(deep=True)
+
+    projected_turns: list[ObservedTurn] = []
+    for turn in case_run.turns:
+        snapshot = (
+            turn.production_candidate
+            if answer_track == AnswerTrack.PRODUCTION_CANDIDATE
+            else turn.eval_assisted_answer
+        )
+        if snapshot is None:
+            return case_run.model_copy(
+                update={
+                    "scores": [],
+                    "verdict": Verdict.INVALID,
+                    "error": f"missing {answer_track.value} snapshot for {turn.turn_id}",
+                }
+            )
+        projected_turns.append(
+            turn.model_copy(
+                update={
+                    "content": snapshot.content,
+                    "references": snapshot.references,
+                    "retrieval_stats": snapshot.retrieval_stats,
+                }
+            )
+        )
+    return case_run.model_copy(
+        update={"turns": projected_turns, "scores": [], "error": case_run.error}
+    )
+
+
+def score_case_tracks(spec: CaseSpec, case_run: CaseRun) -> CaseRun:
+    """Score both answer tracks while keeping the legacy surface production-only."""
+
+    production = score_case(
+        spec,
+        project_case_to_answer_track(case_run, AnswerTrack.PRODUCTION_CANDIDATE),
+    )
+    assisted = score_case(
+        spec,
+        project_case_to_answer_track(case_run, AnswerTrack.EVAL_ASSISTED_ANSWER),
+    )
+    repair_only_pass = (
+        production.verdict != Verdict.PASS and assisted.verdict == Verdict.PASS
+    )
+    return production.model_copy(
+        update={
+            "production_verdict": production.verdict,
+            "production_scores": production.scores,
+            "eval_assisted_verdict": assisted.verdict,
+            "eval_assisted_scores": assisted.scores,
+            "repair_only_pass": repair_only_pass,
+        }
+    )

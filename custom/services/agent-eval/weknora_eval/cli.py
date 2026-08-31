@@ -9,9 +9,16 @@ from pathlib import Path
 
 from .client import WeKnoraClient
 from .calibration import load_calibration, run_judge_calibration
+from .codex_review import (
+    CODEX_MINIMUM_STANDARD,
+    attach_codex_review,
+    build_codex_review,
+    build_codex_review_packet,
+)
 from .dataset import (
     DatasetError,
     build_quarantine_from_transcripts,
+    dataset_sha256,
     freeze_dataset,
     load_jsonl,
     split_by_family,
@@ -29,11 +36,11 @@ from .discovery import (
 from .gates import evaluate_gate, load_policy
 from .judge import JudgeError, judge_case, judge_runtime_contract
 from .langfuse_store import publish_dataset, run_langfuse_experiment
-from .models import CaseRun, ExperimentRun, Split, Verdict
+from .models import AnswerTrack, CaseRun, ExperimentRun, Split, Verdict
 from .readiness import assert_ready, evaluate_readiness, file_sha256
 from .report import load_gate, load_run, render_markdown, write_json
 from .runner import EvalRunner
-from .scoring import score_case
+from .scoring import score_case, score_case_tracks
 
 
 def _split(value: str) -> Split:
@@ -302,9 +309,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     execution_contract = {
         "summary_model_id": os.environ.get("AGENT_EVAL_SUMMARY_MODEL_ID", "").strip(),
         "corpus_version": os.environ.get("AGENT_EVAL_CORPUS_VERSION", "").strip(),
-        "procurement_knowledge_id": os.environ.get(
-            "AGENT_EVAL_PROCUREMENT_KNOWLEDGE_ID", ""
-        ).strip(),
         "production_corpus_version": os.environ.get(
             "AGENT_EVAL_PRODUCTION_CORPUS_VERSION", ""
         ).strip(),
@@ -321,6 +325,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             "AGENT_EVAL_GATE_POLICY_SHA256", ""
         ).strip(),
         "scorer_sha256": file_sha256(Path(__file__).with_name("scoring.py")),
+        "evaluator_schema_version": 2,
+        "answer_tracks": [
+            AnswerTrack.PRODUCTION_CANDIDATE.value,
+            AnswerTrack.EVAL_ASSISTED_ANSWER.value,
+        ],
+        "production_answer_source": "persisted_completed_assistant_message",
+        "codex_review_rubric_version": "codex-conversation-minimum-v1",
+        "eval_assistance_enabled": os.environ.get(
+            "AGENT_EVAL_ASSIST_ENABLED", "0"
+        ).strip().lower()
+        in {"1", "true", "yes", "on"},
+        "eval_assist_max_attempts": int(
+            os.environ.get("AGENT_EVAL_ASSIST_MAX_ATTEMPTS", "2")
+        ),
         "response_deadline_seconds": args.timeout,
     }
     metadata = {
@@ -367,17 +385,49 @@ def cmd_score(args: argparse.Namespace) -> int:
         if spec is None:
             rescored.append(case_run.model_copy(update={"verdict": Verdict.INVALID, "error": "case missing from dataset"}))
         else:
-            deterministic = score_case(spec, case_run)
-            judge_scores = [
-                score
-                for score in case_run.scores
-                if score.name == "judge.contract_satisfaction"
-            ]
-            rescored.append(
-                deterministic.model_copy(
-                    update={"scores": [*deterministic.scores, *judge_scores]}
+            if all(
+                turn.production_candidate is not None
+                and turn.eval_assisted_answer is not None
+                for turn in case_run.turns
+            ):
+                deterministic = score_case_tracks(spec, case_run)
+                production_judge = [
+                    score
+                    for score in case_run.production_scores
+                    if score.name == "judge.contract_satisfaction"
+                ]
+                assisted_judge = [
+                    score
+                    for score in case_run.eval_assisted_scores
+                    if score.name == "judge.contract_satisfaction"
+                ]
+                rescored.append(
+                    deterministic.model_copy(
+                        update={
+                            "scores": [*deterministic.scores, *production_judge],
+                            "production_scores": [
+                                *deterministic.production_scores,
+                                *production_judge,
+                            ],
+                            "eval_assisted_scores": [
+                                *deterministic.eval_assisted_scores,
+                                *assisted_judge,
+                            ],
+                        }
+                    )
                 )
-            )
+            else:
+                deterministic = score_case(spec, case_run)
+                judge_scores = [
+                    score
+                    for score in case_run.scores
+                    if score.name == "judge.contract_satisfaction"
+                ]
+                rescored.append(
+                    deterministic.model_copy(
+                        update={"scores": [*deterministic.scores, *judge_scores]}
+                    )
+                )
     # Rescoring is also the supported path for a contract-only dataset
     # revision: observations remain immutable, while the output is explicitly
     # rebound to the supplied dataset identity and suite.
@@ -422,6 +472,12 @@ def cmd_score(args: argparse.Namespace) -> int:
 
 
 def cmd_judge(args: argparse.Namespace) -> int:
+    # Direct unit/library callers created before dual-track artifacts do not
+    # carry the new argparse field.  Preserve that historical entry point;
+    # the CLI parser itself always supplies an explicit value.
+    answer_track = AnswerTrack(
+        getattr(args, "answer_track", AnswerTrack.LEGACY_CONTENT.value)
+    )
     specs = {case.case_id: case for case in load_jsonl(args.dataset)}
     run = load_run(args.run)
     baseline = load_run(args.baseline) if args.baseline else None
@@ -460,30 +516,62 @@ def cmd_judge(args: argparse.Namespace) -> int:
                 flush=True,
             )
             continue
+        source_scores = (
+            case.production_scores or case.scores
+            if answer_track == AnswerTrack.PRODUCTION_CANDIDATE
+            else case.eval_assisted_scores
+            if answer_track == AnswerTrack.EVAL_ASSISTED_ANSWER
+            else case.scores
+        )
         deterministic_scores = [
-            score for score in case.scores if score.name != "judge.contract_satisfaction"
+            score
+            for score in source_scores
+            if score.name != "judge.contract_satisfaction"
         ]
         try:
-            judge_scores = judge_case(
-                spec,
-                case,
-                baseline_by_key.get((case.case_id, case.attempt_index)),
-            )
+            paired = baseline_by_key.get((case.case_id, case.attempt_index))
+            if answer_track == AnswerTrack.LEGACY_CONTENT:
+                # Preserve the historical callable contract for schema-v1
+                # artifacts and integrations that monkeypatch judge_case.
+                judge_scores = judge_case(spec, case, paired)
+            else:
+                judge_scores = judge_case(
+                    spec,
+                    case,
+                    paired,
+                    answer_track=answer_track,
+                )
         # urllib may surface peer disconnects as ConnectionError subclasses
         # (for example http.client.RemoteDisconnected) instead of URLError.
         # Keep transport failures case-local so one evaluator outage cannot
         # abort the artifact or escape into the product request path.
         except (JudgeError, ConnectionError) as exc:
             error = f"judge_error:{exc}"
-            judged.append(
-                case.model_copy(
-                    update={
-                        "verdict": Verdict.INVALID,
-                        "error": error,
-                        "scores": deterministic_scores,
-                    }
+            if answer_track == AnswerTrack.EVAL_ASSISTED_ANSWER:
+                judged.append(
+                    case.model_copy(
+                        update={"eval_assisted_scores": deterministic_scores}
+                    )
                 )
-            )
+            elif answer_track == AnswerTrack.PRODUCTION_CANDIDATE:
+                judged.append(
+                    case.model_copy(
+                        update={
+                            "scores": deterministic_scores,
+                            "production_scores": deterministic_scores,
+                        }
+                    )
+                )
+            else:
+                judged.append(
+                    case.model_copy(
+                        update={
+                            "verdict": Verdict.INVALID,
+                            "error": error,
+                            "scores": deterministic_scores,
+                        }
+                    )
+                )
             judge_errors.append(
                 {
                     "case_id": case.case_id,
@@ -493,9 +581,22 @@ def cmd_judge(args: argparse.Namespace) -> int:
             )
             verdict = Verdict.INVALID
         else:
-            judged.append(
-                case.model_copy(update={"scores": [*deterministic_scores, *judge_scores]})
-            )
+            track_scores = [*deterministic_scores, *judge_scores]
+            if answer_track == AnswerTrack.EVAL_ASSISTED_ANSWER:
+                judged.append(
+                    case.model_copy(update={"eval_assisted_scores": track_scores})
+                )
+            elif answer_track == AnswerTrack.PRODUCTION_CANDIDATE:
+                judged.append(
+                    case.model_copy(
+                        update={
+                            "scores": track_scores,
+                            "production_scores": track_scores,
+                        }
+                    )
+                )
+            else:
+                judged.append(case.model_copy(update={"scores": track_scores}))
             verdict = case.verdict
         print(
             f"JUDGE_PROGRESS completed={completed}/{total_cases} case={case.case_id} "
@@ -518,6 +619,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
         }
     )
     judge_metadata = {
+        "answer_track": answer_track.value,
         "calibration_result_sha256": file_sha256(args.calibration_result)
         if args.calibration_result
         else "",
@@ -550,6 +652,102 @@ def cmd_gate(args: argparse.Namespace) -> int:
     write_json(args.output, result)
     print(result.verdict.value)
     return {Verdict.PASS: 0, Verdict.FAIL: 1, Verdict.INVALID: 2}[result.verdict]
+
+
+def cmd_codex_review_apply(args: argparse.Namespace) -> int:
+    dataset = load_jsonl(args.dataset)
+    if errors := validate_dataset(dataset):
+        raise DatasetError("dataset invalid: " + "; ".join(errors))
+    specs = {case.case_id: case for case in dataset}
+    run = load_run(args.run)
+    if run.dataset_sha256 != dataset_sha256(dataset):
+        raise DatasetError(
+            "run artifact does not match the supplied dataset; refusing stale review apply"
+        )
+    with Path(args.reviews).open("r", encoding="utf-8") as handle:
+        review_document = json.load(handle)
+    rows = review_document.get("reviews") if isinstance(review_document, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise DatasetError("Codex review document requires a non-empty reviews list")
+    indexed = {
+        (case.case_id, case.attempt_index): case
+        for case in run.cases
+    }
+    seen: set[tuple[str, int, str]] = set()
+    for raw in rows:
+        if not isinstance(raw, dict):
+            raise DatasetError("each Codex review must be an object")
+        case_id = str(raw.get("case_id") or "")
+        attempt_index = int(raw.get("attempt_index") or 0)
+        answer_track = str(raw.get("answer_track") or "")
+        review_key = (case_id, attempt_index, answer_track)
+        if review_key in seen:
+            raise DatasetError(f"duplicate Codex review: {review_key}")
+        seen.add(review_key)
+        case_run = indexed.get((case_id, attempt_index))
+        spec = specs.get(case_id)
+        if case_run is None or spec is None:
+            raise DatasetError(f"review target not found: {case_id}#{attempt_index}")
+        review = build_codex_review(spec, case_run, raw)
+        indexed[(case_id, attempt_index)] = attach_codex_review(case_run, review)
+    ordered = [indexed[(case.case_id, case.attempt_index)] for case in run.cases]
+    metadata = {
+        **run.metadata,
+        "codex_review": {
+            "rubric_version": "codex-conversation-minimum-v1",
+            "minimum_standard": CODEX_MINIMUM_STANDARD,
+            "applied_review_count": len(rows),
+        },
+    }
+    write_json(
+        args.output,
+        run.model_copy(update={"cases": ordered, "metadata": metadata}),
+    )
+    return 0
+
+
+def cmd_codex_review_export(args: argparse.Namespace) -> int:
+    dataset = load_jsonl(args.dataset)
+    if errors := validate_dataset(dataset):
+        raise DatasetError("dataset invalid: " + "; ".join(errors))
+    run = load_run(args.run)
+    expected_dataset_sha256 = dataset_sha256(dataset)
+    if run.dataset_sha256 != expected_dataset_sha256:
+        raise DatasetError(
+            "run artifact does not match the supplied dataset; refusing stale review export"
+        )
+    answer_track = AnswerTrack(args.answer_track)
+    if answer_track == AnswerTrack.LEGACY_CONTENT:
+        raise DatasetError("Codex review export requires an explicit dual-track answer")
+    selected_splits = set(args.split or run.splits)
+    specs = {case.case_id: case for case in dataset}
+    packets: list[dict[str, object]] = []
+    for case_run in run.cases:
+        spec = specs.get(case_run.case_id)
+        if spec is None:
+            raise DatasetError(
+                f"run case is absent from dataset: {case_run.case_id}"
+            )
+        if spec.split not in selected_splits:
+            continue
+        packets.append(
+            build_codex_review_packet(spec, case_run, answer_track)
+        )
+    if not packets:
+        raise DatasetError("no run conversations match the requested review splits")
+    write_json(
+        args.output,
+        {
+            "schema_version": 1,
+            "rubric_version": "codex-conversation-minimum-v1",
+            "minimum_standard": CODEX_MINIMUM_STANDARD,
+            "answer_track": answer_track.value,
+            "review_count": len(packets),
+            "reviews": packets,
+        },
+    )
+    print(len(packets))
+    return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -704,8 +902,41 @@ def build_parser() -> argparse.ArgumentParser:
     judge.add_argument("--run", required=True)
     judge.add_argument("--baseline")
     judge.add_argument("--calibration-result")
+    judge.add_argument(
+        "--answer-track",
+        choices=[item.value for item in AnswerTrack],
+        default=AnswerTrack.LEGACY_CONTENT.value,
+    )
     judge.add_argument("--output", required=True)
     judge.set_defaults(func=cmd_judge)
+
+    codex_review_export = sub.add_parser(
+        "codex-review-export",
+        help="export exact complete conversations for per-dialogue Codex review",
+    )
+    codex_review_export.add_argument("--dataset", required=True)
+    codex_review_export.add_argument("--run", required=True)
+    codex_review_export.add_argument(
+        "--answer-track",
+        choices=[
+            AnswerTrack.PRODUCTION_CANDIDATE.value,
+            AnswerTrack.EVAL_ASSISTED_ANSWER.value,
+        ],
+        required=True,
+    )
+    codex_review_export.add_argument("--split", action="append", type=_split)
+    codex_review_export.add_argument("--output", required=True)
+    codex_review_export.set_defaults(func=cmd_codex_review_export)
+
+    codex_review = sub.add_parser(
+        "codex-review-apply",
+        help="bind Codex-authored whole-conversation reviews to an exact run artifact",
+    )
+    codex_review.add_argument("--dataset", required=True)
+    codex_review.add_argument("--run", required=True)
+    codex_review.add_argument("--reviews", required=True)
+    codex_review.add_argument("--output", required=True)
+    codex_review.set_defaults(func=cmd_codex_review_apply)
 
     gate = sub.add_parser("gate")
     gate.add_argument("--dataset", required=True)

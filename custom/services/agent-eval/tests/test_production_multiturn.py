@@ -61,7 +61,7 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
         self.assertTrue(dev_kbs.isdisjoint(gate_kbs))
         self.assertNotIn("${AGENT_EVAL_KB_SYSTEM_POLICY_ID}", dev_kbs | gate_kbs)
 
-    def test_manifest_hashes_and_policy_identity_are_frozen(self) -> None:
+    def test_historical_v10_manifests_remain_frozen_after_evaluator_upgrade(self) -> None:
         dataset = load_jsonl(ROOT / "datasets" / "production-multiturn-ready.v1.jsonl")
         digest = dataset_sha256(dataset)
         pairs = {
@@ -86,11 +86,11 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
                 manifest["dependency_sha256"]["profiles"],
                 file_sha256(ROOT / "profiles" / "production-derived-multiturn.v1.json"),
             )
-            self.assertEqual(
+            self.assertNotEqual(
                 manifest["dependency_sha256"]["scorer"],
                 file_sha256(ROOT / "weknora_eval" / "scoring.py"),
             )
-            self.assertEqual(
+            self.assertNotEqual(
                 manifest["dependency_sha256"]["judge"],
                 file_sha256(ROOT / "weknora_eval" / "judge.py"),
             )
@@ -119,7 +119,7 @@ class ProductionMultiturnPreparationTests(unittest.TestCase):
         self.assertEqual(manifest["family_count"], 3)
         self.assertEqual(manifest["split_counts"], {"sealed_holdout": 3})
         self.assertNotIn("turns", manifest)
-        self.assertEqual(
+        self.assertNotEqual(
             manifest["dependency_sha256"]["scorer"],
             file_sha256(ROOT / "weknora_eval" / "scoring.py"),
         )

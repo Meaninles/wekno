@@ -32,8 +32,8 @@ func TestPrepareMessagesWithHistoryInjectsSharedCitationContractForEveryTurn(t *
 	if !strings.Contains(messages[0].Content, "A prior turn's output format, ending, or citation constraint is inactive") {
 		t.Fatalf("evidence-backed multi-turn answers must not inherit stale turn constraints: %s", messages[0].Content)
 	}
-	if !strings.Contains(messages[len(messages)-1].Content, "[WEKNORA_CURRENT_TURN_EXECUTION_V1]") {
-		t.Fatalf("current-turn execution contract missing: %#v", messages)
+	if !strings.Contains(messages[len(messages)-1].Content, "[WEKNORA_CURRENT_TURN_SEMANTICS_V2]") {
+		t.Fatalf("domain-neutral current-turn context missing: %#v", messages)
 	}
 
 	withoutEvidence := *withEvidence
@@ -64,7 +64,7 @@ func TestPrepareMessagesWithHistoryAddsLightweightSkillsToSystemPrompt(t *testin
 	}
 }
 
-func TestPrepareMessagesWithHistoryUsesOnlyUserFactsForStateAudit(t *testing.T) {
+func TestPrepareMessagesWithHistoryDoesNotPhraseFilterNormalHistory(t *testing.T) {
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
 			Query:         "请做完整状态审计，不要重新检索制度。",
@@ -80,20 +80,22 @@ func TestPrepareMessagesWithHistoryUsesOnlyUserFactsForStateAudit(t *testing.T) 
 	}
 
 	messages := prepareMessagesWithHistory(chatManage)
-	if len(messages) != 4 {
-		t.Fatalf("messages = %d, want system + two prior users + current user: %#v", len(messages), messages)
+	if len(messages) != 6 {
+		t.Fatalf("messages = %d, want system + two complete prior turns + current user: %#v", len(messages), messages)
 	}
-	for _, message := range messages[1:] {
-		if message.Role == "assistant" {
-			t.Fatalf("state audit replayed non-authoritative assistant history: %#v", messages)
-		}
+	roles := make([]string, 0, len(messages))
+	for _, message := range messages {
+		roles = append(roles, message.Role)
 	}
-	joined := messages[1].Content + messages[2].Content
+	if strings.Join(roles, ",") != "system,user,assistant,user,assistant,user" {
+		t.Fatalf("state-shaped words changed normal history replay: %#v", roles)
+	}
+	joined := messages[1].Content + messages[3].Content
 	if !strings.Contains(joined, "220万元") || !strings.Contains(joined, "林梅") {
-		t.Fatalf("state audit dropped authoritative user facts: %#v", messages)
+		t.Fatalf("normal history dropped user facts: %#v", messages)
 	}
-	if strings.Contains(joined, "360万元") || strings.Contains(joined, "王强") {
-		t.Fatalf("state audit retained stale assistant claims: %#v", messages)
+	if !strings.Contains(messages[2].Content, "360万元") || !strings.Contains(messages[4].Content, "王强") {
+		t.Fatalf("phrase classifier removed assistant dialogue context: %#v", messages)
 	}
 }
 

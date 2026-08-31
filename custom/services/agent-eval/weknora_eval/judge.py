@@ -8,11 +8,13 @@ import urllib.request
 from typing import Any
 
 from .models import (
+    AnswerTrack,
     CaseRun,
     CaseSpec,
     MetricScore,
     is_measured_sut_execution_error,
 )
+from .scoring import project_case_to_answer_track
 
 
 class JudgeError(RuntimeError):
@@ -165,7 +167,28 @@ def judge_single_turn(
     return row
 
 
-def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = None) -> list[MetricScore]:
+def judge_case(
+    spec: CaseSpec,
+    case_run: CaseRun,
+    baseline: CaseRun | None = None,
+    *,
+    answer_track: AnswerTrack = AnswerTrack.LEGACY_CONTENT,
+) -> list[MetricScore]:
+    case_run = project_case_to_answer_track(case_run, answer_track)
+    if answer_track == AnswerTrack.PRODUCTION_CANDIDATE:
+        case_run = case_run.model_copy(
+            update={"scores": case_run.production_scores or case_run.scores}
+        )
+    elif answer_track == AnswerTrack.EVAL_ASSISTED_ANSWER:
+        case_run = case_run.model_copy(update={"scores": case_run.eval_assisted_scores})
+    if baseline is not None:
+        baseline = project_case_to_answer_track(baseline, answer_track)
+        if answer_track == AnswerTrack.PRODUCTION_CANDIDATE:
+            baseline = baseline.model_copy(
+                update={"scores": baseline.production_scores or baseline.scores}
+            )
+        elif answer_track == AnswerTrack.EVAL_ASSISTED_ANSWER:
+            baseline = baseline.model_copy(update={"scores": baseline.eval_assisted_scores})
     contract_by_turn = {
         turn.turn_id: {
             "turn_id": turn.turn_id,
@@ -272,6 +295,7 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
                         "pairwise": pairwise,
                         "synthetic": True,
                         "semantic_rubric": False,
+                        "answer_track": answer_track.value,
                     },
                 )
             )
@@ -295,7 +319,11 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
                 hard=False,
                 comment=str(row.get("reason") or ""),
                 turn_id=turn_id,
-                metadata={"confidence": confidence, "pairwise": row.get("pairwise")},
+                metadata={
+                    "confidence": confidence,
+                    "pairwise": row.get("pairwise"),
+                    "answer_track": answer_track.value,
+                },
             )
         )
     if returned_turn_ids != semantic_turn_ids:
@@ -321,7 +349,12 @@ def judge_case(spec: CaseSpec, case_run: CaseRun, baseline: CaseRun | None = Non
                 hard=False,
                 comment="SUT response deadline is a deterministic execution failure",
                 turn_id=turn_id,
-                metadata={"confidence": 1.0, "pairwise": pairwise, "synthetic": True},
+                metadata={
+                    "confidence": 1.0,
+                    "pairwise": pairwise,
+                    "synthetic": True,
+                    "answer_track": answer_track.value,
+                },
             )
         )
     return scores

@@ -421,14 +421,10 @@ func (e *AgentEngine) runToolCall(
 	})
 
 	execCtx, toolCancel := context.WithTimeout(toolExecCtx, execTimeout)
-	result := agenttools.TargetedEvidenceRetrievalRedirect(tc.Function.Name, args, originalUserQuery)
-	var err error
-	if result == nil {
-		result, err = e.toolRegistry.ExecuteTool(
-			execCtx, tc.Function.Name,
-			json.RawMessage(tc.Function.Arguments),
-		)
-	}
+	result, err := e.toolRegistry.ExecuteTool(
+		execCtx, tc.Function.Name,
+		json.RawMessage(tc.Function.Arguments),
+	)
 	toolCancel()
 	duration := time.Since(toolCallStartTime).Milliseconds()
 

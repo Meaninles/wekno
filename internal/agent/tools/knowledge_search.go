@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/config"
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -231,9 +230,6 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 			Success: false,
 			Error:   "queries parameter is required",
 		}, fmt.Errorf("no queries provided")
-	}
-	if meta, ok := ToolExecFromContext(ctx); ok {
-		queries = conversationmemory.AlignEvidenceRetrievalQueries(queries, meta.OriginalUserQuery)
 	}
 
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Queries: %v", queries)

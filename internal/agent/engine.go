@@ -23,10 +23,7 @@ import (
 
 // langfuseQueryPreview caps the query length we ship as the agent.execute
 // span input — long quoted-context queries can be many KB of prose.
-const (
-	langfuseQueryPreview             = 2000
-	maxFreshEvidenceSelectionRetries = 1
-)
+const langfuseQueryPreview = 2000
 
 // AgentEngine is the core engine for running ReAct agents.
 //
@@ -54,8 +51,6 @@ type AgentEngine struct {
 	lastUsage            types.TokenUsage          // Token usage from the most recent LLM call
 	lastSentMsgCount     int                       // Number of messages sent in the most recent LLM call
 	citationState        agentCitationState        // Stable source handles for this execution
-	activeQuery          string                    // Original current user query for deterministic response-shape finalization
-	activeUserStatements []string                  // User-only archive plus recent user turns, in chronological order
 }
 
 // ImageDescriberFunc generates a text description of an image.
@@ -106,13 +101,6 @@ func NewAgentEngine(
 func (e *AgentEngine) SetPinnedMentions(mcpServices []*PinnedMCPServiceInfo, skills []*PinnedSkillInfo) {
 	e.pinnedMCPServices = mcpServices
 	e.pinnedSkills = skills
-}
-
-func (e *AgentEngine) evalResponseLimit() int {
-	if e == nil || e.config == nil {
-		return 0
-	}
-	return e.config.EvalMaxResponseChars
 }
 
 func (e *AgentEngine) systemPromptOptions(ctx context.Context) *BuildSystemPromptOptions {
@@ -209,45 +197,9 @@ func (e *AgentEngine) Execute(
 	llmContext []chat.Message,
 	imageURLs ...[]string,
 ) (*types.AgentState, error) {
-	return e.execute(ctx, sessionID, messageID, query, query, llmContext, imageURLs...)
-}
-
-// ExecuteWithOriginalQuery keeps the user's current message separate from the
-// runtime query decorated with audit archives, attachments and response
-// contracts. Generation consumes runtimeQuery, while deterministic policy
-// checks must inspect only originalQuery; otherwise words inside our own
-// directives (for example "引用" or "不推断") can change turn classification.
-func (e *AgentEngine) ExecuteWithOriginalQuery(
-	ctx context.Context,
-	sessionID, messageID, runtimeQuery, originalQuery string,
-	llmContext []chat.Message,
-	imageURLs ...[]string,
-) (*types.AgentState, error) {
-	if strings.TrimSpace(originalQuery) == "" {
-		originalQuery = runtimeQuery
-	}
-	return e.execute(ctx, sessionID, messageID, runtimeQuery, originalQuery, llmContext, imageURLs...)
-}
-
-func (e *AgentEngine) execute(
-	ctx context.Context,
-	sessionID, messageID, query, originalQuery string,
-	llmContext []chat.Message,
-	imageURLs ...[]string,
-) (*types.AgentState, error) {
 	e.citationState.reset()
-	e.activeQuery = originalQuery
-	e.activeUserStatements = e.activeUserStatements[:0]
-	if archive := strings.TrimSpace(e.config.DurableUserContext); archive != "" {
-		e.activeUserStatements = append(e.activeUserStatements, archive)
-	}
-	for _, message := range llmContext {
-		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && strings.TrimSpace(message.Content) != "" {
-			e.activeUserStatements = append(e.activeUserStatements, message.Content)
-		}
-	}
-	logger.Infof(ctx, "[Agent] Starting execution: session=%s, message=%s, query_len=%d, original_query_len=%d, state_only=%t, context_msgs=%d",
-		sessionID, messageID, len(query), len(originalQuery), conversationmemory.IsStateOnlyTurn(originalQuery), len(llmContext))
+	logger.Infof(ctx, "[Agent] Starting execution: session=%s, message=%s, query_len=%d, context_msgs=%d",
+		sessionID, messageID, len(query), len(llmContext))
 	// Ensure tools are cleaned up after execution
 	defer e.toolRegistry.Cleanup(ctx)
 
@@ -474,7 +426,6 @@ func (e *AgentEngine) executeLoop(
 	defer emitCompletion()
 
 	emptyRetries := 0
-	freshEvidenceRetries := 0
 	consecutiveSameContent := 0
 	lastResponseContent := ""
 loop:
@@ -500,7 +451,7 @@ loop:
 		// every exit path (break/continue/next) without having to sprinkle
 		// manual finish calls throughout the many branches below.
 		outcome, iterErr := e.runReActIteration(ctx, state, &messages, tools,
-			sessionID, messageID, query, &emptyRetries, &freshEvidenceRetries,
+			sessionID, messageID, query, &emptyRetries,
 			&consecutiveSameContent, &lastResponseContent)
 		if iterErr != nil {
 			return state, iterErr
@@ -556,7 +507,7 @@ func (e *AgentEngine) runReActIteration(
 	messagesPtr *[]chat.Message,
 	tools []chat.Tool,
 	sessionID, assistantMessageID, query string,
-	emptyRetries, freshEvidenceRetries, consecutiveSameContent *int,
+	emptyRetries, consecutiveSameContent *int,
 	lastResponseContent *string,
 ) (outcome iterOutcome, retErr error) {
 	roundStart := time.Now()
@@ -722,17 +673,6 @@ func (e *AgentEngine) runReActIteration(
 			state.IsComplete = true
 			state.RoundSteps = append(state.RoundSteps, verdict.step)
 			return iterOutcomeBreak, nil
-		}
-		if shouldRetryForFreshEvidence(e.activeQuery, tools, response, e.citationState.snapshot(), *freshEvidenceRetries) {
-			*freshEvidenceRetries++
-			logger.Warnf(ctx, "[Agent][Round-%d] Explicit evidence request stopped without retrieval; retrying tool selection (%d/%d)",
-				round, *freshEvidenceRetries, maxFreshEvidenceSelectionRetries)
-			state.RoundSteps = append(state.RoundSteps, verdict.step)
-			*messagesPtr = append(*messagesPtr, chat.Message{
-				Role:    "user",
-				Content: `当前请求明确要求依据或引用，但本轮尚未取得任何可引用证据。不要凭记忆回答，也不要自行编造 <src> 编号。下一步必须先调用可用的知识检索工具；若问题包含多个命名对象，应逐项检索并取得每项的直接证据，然后再生成答案。`,
-			})
-			return iterOutcomeNext, nil
 		}
 		state.FinalAnswer = verdict.finalAnswer
 		state.IsComplete = true

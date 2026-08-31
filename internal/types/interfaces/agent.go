@@ -29,14 +29,6 @@ type AgentEngine interface {
 		llmContext []chat.Message,
 		imageURLs ...[]string,
 	) (*types.AgentState, error)
-	// ExecuteWithOriginalQuery separates the exact current user message from
-	// runtime-only prompt decoration used for generation.
-	ExecuteWithOriginalQuery(
-		ctx context.Context,
-		sessionID, messageID, runtimeQuery, originalQuery string,
-		llmContext []chat.Message,
-		imageURLs ...[]string,
-	) (*types.AgentState, error)
 }
 
 // AgentToolRegistry is the subset of the native tool registry needed by

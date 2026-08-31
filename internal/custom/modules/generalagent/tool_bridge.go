@@ -31,7 +31,6 @@ type activeRun struct {
 	requestID          string
 	userID             string
 	originalUserQuery  string
-	runtimeQuery       string
 	toolExecTimeout    time.Duration
 
 	mu       sync.Mutex
@@ -178,11 +177,7 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 		execCtx = cancelCtx
 	}
 
-	result := agenttools.TargetedEvidenceRetrievalRedirect(req.ToolName, args, run.runtimeQuery)
-	var err error
-	if result == nil {
-		result, err = run.registry.ExecuteTool(execCtx, req.ToolName, req.Arguments)
-	}
+	result, err := run.registry.ExecuteTool(execCtx, req.ToolName, req.Arguments)
 	durationMs := time.Since(start).Milliseconds()
 	if result == nil {
 		result = &types.ToolResult{Success: false, Error: "tool returned no result"}
@@ -215,7 +210,7 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 	citationOutputContract := ""
 	if run.hasCitableEvidence() {
 		citationOutputContract = sourcerefs.TerminalCitationInstruction()
-		if outputDirective := conversationmemory.TerminalGenerationDirective(run.originalUserQuery); outputDirective != "" {
+		if outputDirective := conversationmemory.TerminalGenerationDirective(); outputDirective != "" {
 			citationOutputContract += "\n\n" + outputDirective
 		}
 	}

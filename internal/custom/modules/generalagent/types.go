@@ -79,7 +79,6 @@ type RuntimeToolSpec struct {
 type RuntimeConfigSpec struct {
 	AgentID                     string                                 `json:"agent_id"`
 	AgentType                   string                                 `json:"agent_type"`
-	DisableToolsForTurn         bool                                   `json:"disable_tools_for_turn"`
 	MaxIterations               int                                    `json:"max_iterations"`
 	Temperature                 float64                                `json:"temperature"`
 	Thinking                    *bool                                  `json:"thinking,omitempty"`

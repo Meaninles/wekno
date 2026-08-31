@@ -60,36 +60,13 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
 	chatManage.RewriteQuery = chatManage.Query
-	stateOnly := conversationmemory.IsStateOnlyTurn(chatManage.Query) &&
-		len(chatManage.Attachments) == 0 && len(chatManage.Images) == 0 &&
-		strings.TrimSpace(chatManage.QuotedContext) == ""
-	if stateOnly {
-		chatManage.Intent = types.IntentFollowUp
-	}
 
 	hasImages := len(chatManage.Images) > 0
 	needRewrite := chatManage.EnableRewrite
-	if stateOnly {
-		if p.config != nil && p.config.Conversation != nil {
-			applyIntentPromptOverride(chatManage, p.config.Conversation.IntentSystemPrompts)
-		}
-		pipelineInfo(ctx, "QueryUnderstand", "skip", map[string]interface{}{
-			"session_id": chatManage.SessionID,
-			"reason":     "deterministic_conversation_state_only",
-			"intent":     chatManage.Intent,
-		})
-		return next()
-	}
 	if !needRewrite && !hasImages {
-		freshEvidenceOverride := enforceFreshEvidenceIntent(chatManage)
-		reason := "rewrite_disabled_no_images"
-		if freshEvidenceOverride {
-			reason = "rewrite_disabled_explicit_fresh_evidence_request"
-		}
 		pipelineInfo(ctx, "QueryUnderstand", "skip", map[string]interface{}{
 			"session_id": chatManage.SessionID,
-			"reason":     reason,
-			"intent":     chatManage.Intent,
+			"reason":     "rewrite_disabled_no_images",
 		})
 		return next()
 	}
@@ -160,18 +137,6 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 
 	// --- Parse structured output ---
 	p.parseOutput(chatManage, response.Content)
-	// A citation/document-evidence request cannot safely inherit a model's
-	// follow-up classification.  Citation handles are response-local, so
-	// answering from conversation history would produce either stale-looking
-	// prose or no system-valid citations at all.  Keep the useful rewritten
-	// query, but deterministically route the current turn through KB retrieval.
-	if enforceFreshEvidenceIntent(chatManage) {
-		pipelineInfo(ctx, "QueryUnderstand", "intent_override", map[string]interface{}{
-			"session_id": chatManage.SessionID,
-			"reason":     "explicit_fresh_evidence_request",
-			"intent":     chatManage.Intent,
-		})
-	}
 	// Persist image description asynchronously — this DB write does not affect
 	// the current pipeline result, so it can run in the background.
 	if chatManage.ImageDescription != "" && chatManage.UserMessageID != "" {
@@ -197,28 +162,6 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 		"original_output":     response.Content,
 	})
 	return next()
-}
-
-// enforceFreshEvidenceIntent is deliberately narrow: it only overrides an
-// explicit current-turn request for citations or selected-document evidence.
-// Ordinary follow-ups retain the classifier result and therefore do not incur
-// an additional retrieval.  This is normal request routing, not eval-only
-// instrumentation.
-func enforceFreshEvidenceIntent(chatManage *types.ChatManage) bool {
-	if chatManage == nil || !conversationmemory.RequiresFreshEvidenceTurn(chatManage.Query) {
-		return false
-	}
-	if strings.TrimSpace(chatManage.RewriteQuery) == "" {
-		chatManage.RewriteQuery = chatManage.Query
-	}
-	chatManage.RewriteQuery = conversationmemory.FocusEvidenceRewriteQuery(
-		chatManage.RewriteQuery,
-		chatManage.Query,
-	)
-	changed := chatManage.Intent != types.IntentKBSearch || chatManage.SystemPromptOverride != ""
-	chatManage.Intent = types.IntentKBSearch
-	chatManage.SystemPromptOverride = ""
-	return changed
 }
 
 // updateUserMessageImageCaption writes the generated ImageDescription back to

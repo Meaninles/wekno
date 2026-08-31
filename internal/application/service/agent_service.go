@@ -495,10 +495,7 @@ func (s *agentService) registerTools(
 	//     that would error at runtime.
 	//   - Legacy agents without AllowedTools fall back to DefaultAllowedTools().
 	var allowedTools []string
-	if config.DisableToolsForTurn {
-		allowedTools = []string{}
-		logger.Infof(ctx, "Tools disabled for deterministic conversation-state turn")
-	} else if len(config.AllowedTools) > 0 {
+	if len(config.AllowedTools) > 0 {
 		allowedTools = make([]string, len(config.AllowedTools))
 		copy(allowedTools, config.AllowedTools)
 		logger.Infof(ctx, "Using custom allowed tools from config: %v", allowedTools)
@@ -588,7 +585,7 @@ func (s *agentService) registerTools(
 	}
 
 	// If web search is enabled, add web_search to allowedTools
-	if config.WebSearchEnabled && !config.DisableToolsForTurn {
+	if config.WebSearchEnabled {
 		allowedTools = append(allowedTools, tools.ToolWebSearch)
 		if config.WebFetchEnabled {
 			allowedTools = append(allowedTools, tools.ToolWebFetch)

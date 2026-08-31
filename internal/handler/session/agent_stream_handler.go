@@ -74,6 +74,15 @@ func (h *AgentStreamHandler) composeFinalAnswer() string {
 	return b.String()
 }
 
+// productionCandidate returns the exact active answer aggregation represented
+// by the SSE answer segments. It is used by the stop path before a completion
+// event exists; no validation, trimming, or regeneration is applied here.
+func (h *AgentStreamHandler) productionCandidate() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.finalAnswer
+}
+
 // NewAgentStreamHandler creates a new handler for agent SSE streaming
 func NewAgentStreamHandler(
 	ctx context.Context,
@@ -694,18 +703,21 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		} else if len(data.KnowledgeRefs) > 0 {
 			availableRefs = mergeCitationReferences(availableRefs, data.KnowledgeRefs)
 		}
-		finalAnswer := data.FinalAnswer
+		// The accumulated answer stream is the production candidate. A completion
+		// payload is only a fallback for runtimes that emitted no answer events;
+		// it must never silently replace text the user already received.
+		finalAnswer := h.finalAnswer
 		if finalAnswer == "" {
-			finalAnswer = h.finalAnswer
+			finalAnswer = data.FinalAnswer
 		}
-		filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(finalAnswer, availableRefs)
+		_, citedRefs, report := sourcerefs.FilterAnswerCitations(finalAnswer, availableRefs)
 		if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
 			logger.GetLogger(h.ctx).Warnf(
-				"Filtered invalid completion citations: forbidden=%d incomplete=%d unknown=%v",
+				"Observed invalid completion citations: forbidden=%d incomplete=%d unknown=%v",
 				report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs,
 			)
 		}
-		h.assistantMessage.Content = filteredAnswer
+		h.assistantMessage.Content = finalAnswer
 		h.knowledgeRefs = citedRefs
 		h.assistantMessage.KnowledgeReferences = types.References(citedRefs)
 

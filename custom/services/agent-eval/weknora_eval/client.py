@@ -48,6 +48,51 @@ def event_tool_name(event: dict[str, Any]) -> str:
     return str(event.get("tool_name") or data.get("tool_name") or "").strip()
 
 
+def streamed_production_candidate(events: list[dict[str, Any]]) -> str | None:
+    """Reconstruct the user-visible answer surface from canonical SSE events.
+
+    Answer fragments are accumulated by event id. A later non-preserving tool
+    call supersedes earlier answer fragments in the same way as WeKnora's
+    stream handler; post-answer artifact calls explicitly preserve them. The
+    completion payload is used only when no answer fragment was emitted.
+    ``None`` means the supplied event list cannot prove an SSE answer surface.
+    """
+
+    segments: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    completion_fallback: str | None = None
+    saw_answer = False
+    for event in events:
+        kind = event_type(event)
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if kind == "answer":
+            saw_answer = True
+            event_id = str(
+                event.get("id") or data.get("event_id") or f"answer-{len(segments)}"
+            )
+            index = positions.get(event_id)
+            if index is None:
+                index = len(segments)
+                positions[event_id] = index
+                segments.append({"content": "", "superseded": False})
+            segments[index]["content"] += str(event.get("content") or "")
+        elif kind == "tool_call" and not bool(data.get("preserve_answer")):
+            for segment in segments:
+                if segment["content"]:
+                    segment["superseded"] = True
+        elif kind == "complete":
+            value = data.get("final_answer")
+            if isinstance(value, str):
+                completion_fallback = value
+    if saw_answer:
+        return "".join(
+            str(segment["content"])
+            for segment in segments
+            if not segment["superseded"]
+        )
+    return completion_fallback
+
+
 class WeKnoraClient:
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0) -> None:
         if timeout <= 0:
@@ -190,6 +235,30 @@ class WeKnoraClient:
         if not isinstance(payload, dict) or not payload.get("id"):
             raise WeKnoraAPIError("session create response has no id")
         return str(payload["id"])
+
+    def search_knowledge(
+        self,
+        query: str,
+        *,
+        knowledge_base_ids: list[str],
+        knowledge_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """Run one read-only retrieval without creating a conversation turn."""
+
+        payload = unwrap_data(
+            self.request(
+                "POST",
+                "/knowledge-search",
+                {
+                    "query": query,
+                    "knowledge_base_ids": knowledge_base_ids,
+                    "knowledge_ids": knowledge_ids,
+                },
+            )
+        )
+        if not isinstance(payload, list):
+            raise WeKnoraAPIError("knowledge search returned a non-list payload")
+        return [item for item in payload if isinstance(item, dict)]
 
     def load_completed_assistant(
         self,

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
@@ -58,6 +57,8 @@ Use this to locate candidate chunks by exact identifiers, error codes, product n
 type GrepChunksInput struct {
 	Query string `json:"query,omitempty"`
 }
+
+const grepChunksResultLimit = 30
 
 // compileGrepRankingPatterns preserves the original regex for database recall
 // while splitting only safe, top-level alternation branches for ranking. A
@@ -128,17 +129,6 @@ func splitTopLevelRegexAlternatives(query string) []string {
 	return parts
 }
 
-func grepResultLimit(patternCount int) int {
-	switch {
-	case patternCount >= 4:
-		return 12
-	case patternCount >= 2:
-		return 18
-	default:
-		return 30
-	}
-}
-
 // GrepChunksTool performs regex pattern matching across knowledge base chunks.
 // PostgreSQL: uses the case-insensitive POSIX operator ~*.
 // MySQL/SQLite: falls back to REGEXP.
@@ -192,10 +182,6 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 			Error:   "query parameter is required and must be a non-empty regex string",
 		}, fmt.Errorf("missing query parameter")
 	}
-	if meta, ok := ToolExecFromContext(ctx); ok {
-		query = conversationmemory.AugmentEvidenceGrepQuery(query, meta.OriginalUserQuery)
-	}
-
 	// Compile with (?i) prefix for case-insensitive Go-side matching.
 	// Compilation also validates the regex syntax before we send it to the DB.
 	re, err := regexp.Compile("(?i)" + query)
@@ -210,12 +196,10 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	compiled := []*regexp.Regexp{re}
 	rankingPatterns, rankingCompiled := compileGrepRankingPatterns(query, re)
 
-	// Result count is controlled by the backend, not the caller. Multi-topic
-	// alternations get a tighter budget because every result also carries a
-	// citable source fragment; coverage selection below keeps one strong result
-	// per branch before diversity fill, so fewer results improve rather than
-	// reduce useful recall.
-	limit := grepResultLimit(len(rankingCompiled))
+	// Preserve the established production result budget. Coverage selection
+	// below changes which results occupy that budget, not the amount of context
+	// or the maximum result count exposed to the model.
+	limit := grepChunksResultLimit
 
 	kbTenantMap := t.searchTargets.GetKBTenantMap()
 	fullKBIDs, knowledgeIDs, tagTargets := t.resolveGrepScope()

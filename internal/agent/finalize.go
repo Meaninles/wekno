@@ -3,11 +3,11 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
-	"github.com/Tencent/WeKnora/internal/custom/modules/agentresponse"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
@@ -94,10 +94,7 @@ Requirements:
 
 Now generate the final answer:`, query)
 	finalPrompt = sourcerefs.PlaceTerminalCitationInstruction(finalPrompt, citationRefs)
-	if outputDirective := conversationmemory.TerminalGenerationDirectiveWithLimit(
-		query,
-		e.evalResponseLimit(),
-	); outputDirective != "" {
+	if outputDirective := conversationmemory.TerminalGenerationDirective(); outputDirective != "" {
 		finalPrompt += "\n\n" + outputDirective
 	}
 
@@ -110,6 +107,7 @@ Now generate the final answer:`, query)
 	answerID := generateEventID("answer")
 	logger.Debugf(ctx, "[Agent][FinalAnswer] AnswerID: %s", answerID)
 	answerDoneEmitted := false
+	var streamedAnswer strings.Builder
 
 	thinking := false
 	llmResult, err := e.streamLLMToEventBus(
@@ -126,6 +124,7 @@ Now generate the final answer:`, query)
 				return
 			}
 			if chunk.Content != "" {
+				streamedAnswer.WriteString(chunk.Content)
 				logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting answer chunk: %d chars", len(chunk.Content))
 				e.eventBus.Emit(ctx, event.Event{
 					ID:        answerID,
@@ -163,8 +162,13 @@ Now generate the final answer:`, query)
 		})
 	}
 
-	// Safety net: strip any residual <think> blocks that may have leaked through
-	fullAnswer := agenttools.StripThinkBlocks(llmResult.Content)
+	// The emitted answer aggregation is the production candidate. Only runtimes
+	// that emitted no answer chunk use the non-stream result as a fallback; the
+	// handler will then emit that same fallback before persistence.
+	fullAnswer := streamedAnswer.String()
+	if fullAnswer == "" {
+		fullAnswer = agenttools.StripThinkBlocks(llmResult.Content)
+	}
 	logger.Infof(ctx, "[Agent][FinalAnswer] Final answer generated: %d characters", len(fullAnswer))
 	common.PipelineInfo(ctx, "Agent", "final_answer_done", map[string]interface{}{
 		"session_id": sessionID,
@@ -279,102 +283,18 @@ func (e *AgentEngine) emitCompletionEvent(
 	ctx context.Context, state *types.AgentState, sessionID, messageID string, startTime time.Time,
 ) {
 	e.syncCitationReferences(state)
-	state.FinalAnswer = conversationmemory.StripInternalPlanningPreamble(state.FinalAnswer)
-	state.FinalAnswer = conversationmemory.RemoveRedundantExplicitComparisonSummary(state.FinalAnswer, e.activeQuery)
-	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(e.activeQuery) {
-		state.FinalAnswer = sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
-			state.FinalAnswer,
-			conversationmemory.RequiredEvidenceTopics(e.activeQuery),
-			state.KnowledgeRefs,
-			e.activeQuery,
-		)
-	}
-	state.FinalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(state.FinalAnswer)
-	state.FinalAnswer = conversationmemory.NormalizeDeferredComparisonFactSections(
-		state.FinalAnswer,
-		e.activeQuery,
-		e.activeUserStatements...,
-	)
-	state.FinalAnswer = conversationmemory.NormalizeStateDeltaScope(state.FinalAnswer, e.activeQuery)
-	state.FinalAnswer = conversationmemory.NormalizeExplicitResolvedEntityDelta(state.FinalAnswer, e.activeQuery)
-	beforeBoundaryRepair := state.FinalAnswer
-	state.FinalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
-		state.FinalAnswer,
-		e.activeQuery,
-		e.activeUserStatements...,
-	)
-	state.FinalAnswer = conversationmemory.NormalizeExplicitRequestedUnknownFields(state.FinalAnswer, e.activeQuery)
-	if state.FinalAnswer != beforeBoundaryRepair {
-		logger.Infof(ctx, "[Agent][FinalAnswer] repaired explicit action boundaries: before_chars=%d after_chars=%d",
-			len([]rune(beforeBoundaryRepair)), len([]rune(state.FinalAnswer)))
-	}
-	state.FinalAnswer = conversationmemory.NormalizeDeferredComparisonRelationships(state.FinalAnswer, e.activeQuery)
-	state.FinalAnswer = conversationmemory.NormalizeStateAuditSections(
-		state.FinalAnswer,
-		e.activeQuery,
-		e.activeUserStatements...,
-	)
-	state.FinalAnswer = conversationmemory.NormalizeExplicitUserIdentityUnknown(
-		state.FinalAnswer,
-		e.activeQuery,
-		e.activeUserStatements...,
-	)
-	state.FinalAnswer = conversationmemory.EnsureDeferredDecisionConclusion(state.FinalAnswer, e.activeQuery)
-	state.FinalAnswer = conversationmemory.NormalizeNegativeCategoryExamples(state.FinalAnswer, e.activeQuery)
-	preserveCitationExamples := conversationmemory.RequestsCitationSyntaxExample(e.activeQuery)
-	state.FinalAnswer = sourcerefs.NormalizeInlineCitationCode(state.FinalAnswer, preserveCitationExamples)
-	state.FinalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
-		state.FinalAnswer,
-		conversationmemory.RequiredEvidenceTopics(e.activeQuery),
-		state.KnowledgeRefs,
-	)
-	state.FinalAnswer = conversationmemory.CompactExplicitOneLineComparison(state.FinalAnswer, e.activeQuery)
-	state.FinalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
-		state.FinalAnswer,
-		conversationmemory.RequiredEvidenceTopics(e.activeQuery),
-		state.KnowledgeRefs,
-	)
-	if conversationmemory.RequiresNamedTopicDefinitionCoverage(e.activeQuery) {
-		state.FinalAnswer = sourcerefs.EnsureNamedTopicDefinitions(
-			state.FinalAnswer,
-			conversationmemory.RequiredEvidenceTopics(e.activeQuery),
-			state.KnowledgeRefs,
-		)
-	}
-	state.FinalAnswer = sourcerefs.RepairAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
-	if limit := e.evalResponseLimit(); limit > 0 {
-		repair := agentresponse.RepairResponse(ctx, e.chatModel, agentresponse.ResponseRepairRequest{
-			MaxResponseChars:    limit,
-			MaxCompletionTokens: e.config.MaxCompletionTokens,
-			Query:               e.activeQuery,
-			UserStatements:      e.activeUserStatements,
-			Draft:               state.FinalAnswer,
-			References:          state.KnowledgeRefs,
-			RequireCitation:     conversationmemory.RequiresFreshEvidenceTurn(e.activeQuery),
-		})
-		if repair.Repaired {
-			logger.Infof(ctx, "[Agent][EvalRepair] accepted terminal rewrite: attempts=%d chars=%d",
-				repair.Attempts, len([]rune(repair.Answer)))
-			state.FinalAnswer = repair.Answer
-		} else if repair.Attempted {
-			logger.Warnf(ctx, "[Agent][EvalRepair] kept original answer after bounded repair: attempts=%d issues=%v error=%s",
-				repair.Attempts, repair.Issues, repair.LastError)
-		}
-	}
-	// Eval-only terminal rewriting is allowed to change prose, so reapply the
-	// deterministic user-authored boundary before citation accounting.
-	state.FinalAnswer = conversationmemory.NormalizeNegativeCategoryExamples(state.FinalAnswer, e.activeQuery)
-	state.FinalAnswer = sourcerefs.NormalizeInlineCitationCode(state.FinalAnswer, preserveCitationExamples)
-	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
+	// The exact text already streamed to the user is the immutable production
+	// candidate. Completion-time citation accounting may narrow the reference
+	// registry, but must not rewrite that text before persistence/history replay.
+	_, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
-		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+		logger.Warnf(ctx, "[Agent][Citations] observed invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
 			report.ForbiddenTags, report.IncompleteTags, report.UnknownIDs)
 	}
 	if report.EvidenceAvailableUncited {
 		logger.Warnf(ctx, "[Agent][Citations] final answer omitted all current-turn citation handles: available=%d",
 			report.AvailableCount)
 	}
-	state.FinalAnswer = filteredAnswer
 	state.KnowledgeRefs = citedRefs
 	e.eventBus.Emit(ctx, event.Event{
 		ID:        generateEventID("complete"),

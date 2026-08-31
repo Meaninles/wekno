@@ -123,7 +123,11 @@ func LoadAgentHistoryWithArchive(
 
 	queries := make([]string, 0, len(completePairs))
 	for _, p := range completePairs {
-		queries = append(queries, buildUserHistoryMessage(p.user).Content)
+		// The durable archive is deliberately narrower than recent multimodal
+		// history: only the persisted user-authored text may become a long-lived
+		// conversation fact. Derived captions and attachment prompts remain in the
+		// normal recent window and are never relabelled as user quotations.
+		queries = append(queries, p.user.Content)
 	}
 	archive := conversationmemory.BuildUserArchive(queries, maxRounds)
 	if len(completePairs) > maxRounds {
@@ -136,20 +140,6 @@ func LoadAgentHistoryWithArchive(
 		out = append(out, buildAssistantHistoryMessages(p.assistant)...)
 	}
 	return out, archive, nil
-}
-
-// userOnlyAgentHistory removes prior assistant/tool output when the current
-// request is an explicit state audit. User turns are the source of truth for
-// mutable conversation state; model output is neither evidence nor a durable
-// fact and can contain values superseded by a later correction.
-func userOnlyAgentHistory(messages []chat.Message) []chat.Message {
-	out := make([]chat.Message, 0, len(messages))
-	for _, message := range messages {
-		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
-			out = append(out, message)
-		}
-	}
-	return out
 }
 
 // buildUserHistoryMessage converts a stored user message into the chat.Message

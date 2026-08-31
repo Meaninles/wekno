@@ -5,15 +5,18 @@ from unittest.mock import patch
 
 from weknora_eval.client import WeKnoraResponseDeadlineExceeded
 from weknora_eval.models import (
+    AnswerSnapshot,
     AgentSelector,
     Capability,
     CaseRun,
     CaseSetup,
     CaseSpec,
+    RepairTrace,
     SUTFingerprint,
     SUT_RESPONSE_DEADLINE_EXCEEDED,
     SUT_TURN_SKIPPED_AFTER_DEADLINE,
     Split,
+    TextRule,
     TurnContract,
     TurnSpec,
     Verdict,
@@ -137,7 +140,21 @@ class PayloadRecordingClient(FakeClient):
 
     def stream(self, _path: str, payload: dict):
         self.payloads.append(payload)
-        return ([], 10, 100)
+        return (
+            [
+                {
+                    "id": "answer-1",
+                    "response_type": "answer",
+                    "content": "bounded answer",
+                },
+                {
+                    "response_type": "complete",
+                    "data": {"final_answer": "bounded answer"},
+                },
+            ],
+            10,
+            100,
+        )
 
     def load_completed_assistant(self, _session_id: str, **_kwargs: object):
         return {
@@ -148,8 +165,66 @@ class PayloadRecordingClient(FakeClient):
         }
 
 
+class PassingAssistant:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def assist(self, **kwargs: object):
+        self.calls.append(kwargs)
+        return (
+            AnswerSnapshot(content="general improvement"),
+            RepairTrace(
+                triggered=True,
+                succeeded=True,
+                repair_types=["terminal_rewrite"],
+                attempts=1,
+                added_model_calls=1,
+                added_latency_ms=12,
+            ),
+        )
+
+
+class DivergentSurfaceClient(PayloadRecordingClient):
+    def stream(self, _path: str, payload: dict):
+        self.payloads.append(payload)
+        return (
+            [
+                {
+                    "id": "answer-1",
+                    "response_type": "answer",
+                    "content": "SSE-only answer",
+                },
+                {
+                    "response_type": "complete",
+                    "data": {"final_answer": "bounded answer"},
+                },
+            ],
+            10,
+            100,
+        )
+
+
 class RunnerTests(unittest.TestCase):
-    def test_runner_sends_only_presentation_limit_to_sut(self) -> None:
+    def test_runner_records_surface_divergence_without_rewriting_either_copy(self) -> None:
+        case = CaseSpec(
+            case_id="surface-divergence",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[TurnSpec(turn_id="turn", query="q", contract=TurnContract())],
+        )
+
+        result = EvalRunner(DivergentSurfaceClient()).run_case(case)
+
+        observed = result.turns[0]
+        self.assertEqual(observed.streamed_content, "SSE-only answer")
+        self.assertEqual(observed.production_candidate.content, "bounded answer")
+        self.assertFalse(observed.production_surface_equivalent)
+
+    def test_runner_never_sends_eval_contract_to_sut(self) -> None:
         client = PayloadRecordingClient()
         case = CaseSpec(
             case_id="shape-contract",
@@ -168,16 +243,55 @@ class RunnerTests(unittest.TestCase):
             ],
         )
 
-        EvalRunner(client).run_case(case)
+        result = EvalRunner(client).run_case(case)
 
-        self.assertEqual(
-            client.payloads[0]["eval_response_contract"],
-            {"max_response_chars": 321},
+        self.assertNotIn("eval_response_contract", client.payloads[0])
+        observed = result.turns[0]
+        self.assertEqual(observed.content, "bounded answer")
+        self.assertEqual(observed.production_candidate.content, "bounded answer")
+        self.assertEqual(observed.eval_assisted_answer.content, "bounded answer")
+        self.assertEqual(observed.streamed_content, "bounded answer")
+        self.assertTrue(observed.production_surface_equivalent)
+
+    def test_runner_persists_production_and_records_assisted_track_separately(self) -> None:
+        client = PayloadRecordingClient()
+        assistant = PassingAssistant()
+        case = CaseSpec(
+            case_id="dual-track",
+            family_id="family",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(summary_model_id="model"),
+            turns=[
+                TurnSpec(
+                    turn_id="turn",
+                    query="Improve this generally.",
+                    contract=TurnContract(
+                        required_claims=[
+                            TextRule(rule_id="improvement", any_of=["general improvement"])
+                        ]
+                    ),
+                )
+            ],
         )
+
+        result = EvalRunner(client, assistant=assistant).run_case(case)
+
+        self.assertEqual(len(assistant.calls), 1)
+        self.assertTrue(assistant.calls[0]["force"])
+        observed = result.turns[0]
+        self.assertEqual(observed.content, "bounded answer")
+        self.assertEqual(observed.production_candidate.content, "bounded answer")
         self.assertEqual(
-            set(client.payloads[0]["eval_response_contract"]),
-            {"max_response_chars"},
+            observed.eval_assisted_answer.content, "general improvement"
         )
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(result.production_verdict, Verdict.FAIL)
+        self.assertEqual(result.eval_assisted_verdict, Verdict.PASS)
+        self.assertTrue(result.repair_only_pass)
+        self.assertTrue(observed.repair.triggered)
 
     def test_production_is_record_only(self) -> None:
         with self.assertRaises(EvalModeRequired):

@@ -120,7 +120,7 @@ func TestHandleToolCallSupersedesPreambleByDefault(t *testing.T) {
 	}
 }
 
-func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
+func TestHandleCompletePersistsExactStreamedProductionCandidate(t *testing.T) {
 	stream := &recordingStreamManager{}
 	msg := &types.Message{
 		ID:        "assistant-1",
@@ -150,7 +150,7 @@ func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
 		Type: event.EventAgentComplete,
 		Data: event.AgentCompleteData{
 			MessageID:   "assistant-1",
-			FinalAnswer: "streamed final answer",
+			FinalAnswer: "different completion payload that must not replace the stream",
 		},
 	}); err != nil {
 		t.Fatalf("handleComplete returned error: %v", err)
@@ -175,7 +175,7 @@ func TestHandleCompleteReplacesExistingAssistantContent(t *testing.T) {
 	}
 }
 
-func TestHandleCompleteAuthoritativelyFiltersStreamedCitationProtocol(t *testing.T) {
+func TestHandleCompleteReportsButDoesNotRewriteStreamedCitationProtocol(t *testing.T) {
 	stream := &recordingStreamManager{}
 	msg := &types.Message{ID: "assistant-1", SessionID: "session-1"}
 	handler := NewAgentStreamHandler(
@@ -214,7 +214,7 @@ func TestHandleCompleteAuthoritativelyFiltersStreamedCitationProtocol(t *testing
 		t.Fatalf("handleComplete returned error: %v", err)
 	}
 
-	want := `supported claim<src id="S1" /> malformed`
+	want := raw
 	if msg.Content != want {
 		t.Fatalf("assistant content = %q, want %q", msg.Content, want)
 	}
@@ -223,7 +223,7 @@ func TestHandleCompleteAuthoritativelyFiltersStreamedCitationProtocol(t *testing
 	}
 	complete := stream.events[len(stream.events)-1]
 	if got := complete.Data["final_answer"]; got != want {
-		t.Fatalf("complete final_answer = %q, want filtered authoritative answer %q", got, want)
+		t.Fatalf("complete final_answer = %q, want exact streamed answer %q", got, want)
 	}
 }
 
@@ -428,13 +428,6 @@ func TestUserFacingAgentErrorMessageMapsMaxTurnsAndTimeout(t *testing.T) {
 	}
 	if strings.Contains(incompatible, "model_usage") {
 		t.Fatalf("internal model diagnostics leaked to user-facing error: %q", incompatible)
-	}
-
-	constraintFailure := userFacingAgentErrorMessage(errors.New(
-		"Eval terminal response remained mechanically invalid after bounded repair",
-	))
-	if constraintFailure != "智能体未能生成满足当前请求约束的完整回答，请重试" {
-		t.Fatalf("constraint failure message = %q", constraintFailure)
 	}
 
 	for _, transportErr := range []string{

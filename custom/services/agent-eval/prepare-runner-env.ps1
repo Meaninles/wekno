@@ -1,9 +1,12 @@
 [CmdletBinding()]
 param(
-    [string]$KnowledgeTitle = "采购管理办法.docx",
+    # Optional historical fixture. Current v2 preparation resolves the tenant
+    # from the frozen model and does not depend on any named document.
+    [string]$KnowledgeTitle = "",
     [string]$PostgresContainer = "WeKnora-agent-eval-postgres-dev",
     [string]$RuntimeContainer = "weknora-agent-eval-runtime-api-1",
-    [string]$ProfilePath = (Join-Path $PSScriptRoot "profiles/multiturn-agents.v1.json"),
+    [string]$ProfilePath = (Join-Path $PSScriptRoot "profiles/unseen-capability-matrix.v1.json"),
+    [string]$ApiBaseUrl = "http://localhost:18080",
     [string]$Output = (Join-Path $PSScriptRoot "runner.env")
 )
 
@@ -66,9 +69,32 @@ $requiredModelID = [string]$profileSet.model.required_model_id
 if ([string]::IsNullOrWhiteSpace($requiredModelID)) {
     throw "profile set does not declare model.required_model_id"
 }
-$title = Escape-SqlLiteral $KnowledgeTitle
 $requiredModel = Escape-SqlLiteral $requiredModelID
-$sql = @"
+$sql = if ([string]::IsNullOrWhiteSpace($KnowledgeTitle)) {
+    @"
+SELECT
+  tenant.api_key,
+  model.id,
+  '',
+  '',
+  encode(convert_to(model.parameters->>'base_url', 'UTF8'), 'hex'),
+  encode(convert_to(model.parameters->>'api_key', 'UTF8'), 'hex'),
+  encode(convert_to(model.name, 'UTF8'), 'hex'),
+  model.parameters->>'interface_type'
+FROM models AS model
+JOIN tenants AS tenant ON tenant.id = model.tenant_id
+WHERE model.id = '$requiredModel'
+  AND model.type = 'KnowledgeQA'
+  AND model.status = 'active'
+  AND model.deleted_at IS NULL
+  AND tenant.api_key IS NOT NULL
+  AND tenant.api_key <> ''
+ORDER BY model.updated_at DESC
+LIMIT 1;
+"@
+} else {
+    $title = Escape-SqlLiteral $KnowledgeTitle
+    @"
 SELECT
   tenant.api_key,
   model.id,
@@ -99,12 +125,24 @@ WHERE knowledge.title = '$title'
 ORDER BY knowledge.updated_at DESC
 LIMIT 1;
 "@
+}
 
 $row = & docker exec $PostgresContainer psql -U postgres -d WeKnora -At -F "|" -c $sql
 if ($LASTEXITCODE -ne 0) { throw "failed to resolve eval runner bindings" }
 $fields = ([string]$row).Trim().Split("|", 8)
-if ($fields.Count -ne 8 -or @($fields | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
-    throw "no complete eval binding found for knowledge title: $KnowledgeTitle"
+$requiredFieldIndexes = @(0, 1, 4, 5, 6, 7)
+$missingRequiredFields = @(
+    $requiredFieldIndexes | Where-Object {
+        $fields.Count -le $_ -or [string]::IsNullOrWhiteSpace($fields[$_])
+    }
+)
+if ($fields.Count -ne 8 -or $missingRequiredFields.Count -gt 0) {
+    $scope = if ([string]::IsNullOrWhiteSpace($KnowledgeTitle)) {
+        "frozen model: $requiredModelID"
+    } else {
+        "historical knowledge title: $KnowledgeTitle"
+    }
+    throw "no complete eval binding found for $scope"
 }
 
 $storedAPIKey, $modelID, $knowledgeID, $corpusHash, $hexJudgeBaseURL, `
@@ -130,19 +168,36 @@ if ([string]::IsNullOrWhiteSpace($judgeBaseURL) -or `
     throw "required model does not provide a complete OpenAI-compatible judge binding"
 }
 $capabilities = Invoke-RestMethod `
-    -Uri "http://localhost:18080/api/v1/custom/agent-eval/capabilities" `
+    -Uri "$($ApiBaseUrl.TrimEnd('/'))/api/v1/custom/agent-eval/capabilities" `
     -Headers @{ "X-API-Key" = $apiKey } `
     -TimeoutSec 10
 if ($capabilities.data.mode -ne "eval" -or $capabilities.data.recorder_enabled -ne $true) {
     throw "refusing to prepare runner.env: target did not pass the eval-only handshake"
 }
 
+$corpusVersion = if ([string]::IsNullOrWhiteSpace($knowledgeID)) {
+    "unbound-unseen-corpus"
+} else {
+    "sha256:$corpusHash"
+}
 $content = @(
     "# Generated from the physically isolated eval database; do not commit.",
     "WEKNORA_E2E_TENANT_API_KEY=$apiKey",
     "AGENT_EVAL_SUMMARY_MODEL_ID=$modelID",
     "AGENT_EVAL_PROCUREMENT_KNOWLEDGE_ID=$knowledgeID",
-    "AGENT_EVAL_CORPUS_VERSION=sha256:$corpusHash",
+    "AGENT_EVAL_CORPUS_VERSION=$corpusVersion",
+    "AGENT_EVAL_KB_BINDINGS_SHA256=",
+    "AGENT_EVAL_KB_UNSEEN_PRODUCT_MANUAL_ID=",
+    "AGENT_EVAL_KB_UNSEEN_PROJECT_HANDBOOK_ID=",
+    "AGENT_EVAL_KB_UNSEEN_IT_RUNBOOK_ID=",
+    "AGENT_EVAL_KB_UNSEEN_GOVERNANCE_POLICY_ID=",
+    "AGENT_EVAL_ASSIST_ENABLED=0",
+    "AGENT_EVAL_ASSIST_BASE_URL=$judgeBaseURL",
+    "AGENT_EVAL_ASSIST_API_KEY=$judgeAPIKey",
+    "AGENT_EVAL_ASSIST_MODEL=$judgeModel",
+    "AGENT_EVAL_ASSIST_TIMEOUT_SECONDS=120",
+    "AGENT_EVAL_ASSIST_MAX_ATTEMPTS=2",
+    "# Historical Judge bindings; current v2 quality decisions are authored by Codex.",
     "AGENT_EVAL_JUDGE_BASE_URL=$judgeBaseURL",
     "AGENT_EVAL_JUDGE_API_KEY=$judgeAPIKey",
     "AGENT_EVAL_JUDGE_MODEL=$judgeModel",
@@ -153,5 +208,5 @@ $content = @(
 
 $outputPath = [System.IO.Path]::GetFullPath($Output)
 [System.IO.File]::WriteAllText($outputPath, $content, [System.Text.UTF8Encoding]::new($false))
-Write-Host "Prepared isolated runner binding: model=$modelID knowledge=$knowledgeID judge_model=$judgeModel"
+Write-Host "Prepared isolated runner binding: model=$modelID fixed_knowledge=$(-not [string]::IsNullOrWhiteSpace($knowledgeID))"
 Write-Host "Tenant and model secret values were written only to $outputPath and were not printed."

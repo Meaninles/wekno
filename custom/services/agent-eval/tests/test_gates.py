@@ -5,6 +5,8 @@ import unittest
 from weknora_eval.gates import _adjudicate_case, evaluate_gate
 from weknora_eval.dataset import dataset_sha256
 from weknora_eval.models import (
+    AnswerSnapshot,
+    AnswerTrack,
     AgentSelector,
     Capability,
     CaseRun,
@@ -12,8 +14,10 @@ from weknora_eval.models import (
     ConversationStateContract,
     ExperimentRun,
     GatePolicy,
+    GateKind,
     MetricScore,
     ObservedTurn,
+    RepairTrace,
     SUTFingerprint,
     Split,
     TextRule,
@@ -21,6 +25,7 @@ from weknora_eval.models import (
     TurnSpec,
     Verdict,
 )
+from weknora_eval.scoring import score_case_tracks
 
 
 def spec(*, repetitions: int = 1, profile_id: str | None = None) -> CaseSpec:
@@ -577,6 +582,213 @@ class GateTests(unittest.TestCase):
             check for check in result.checks if check.name == "absolute_latency_by_agent"
         )
         self.assertEqual(absolute.verdict, Verdict.FAIL)
+
+    def test_eval_assisted_pass_cannot_rescue_production_release(self) -> None:
+        dataset = [spec()]
+        dual = score_case_tracks(
+            dataset[0],
+            CaseRun(
+                case_id="gate-case",
+                family_id="family",
+                split=Split.GATE,
+                verdict=Verdict.INVALID,
+                turns=[
+                    ObservedTurn(
+                        turn_id="turn",
+                        session_id="session",
+                        content="wrong",
+                        is_completed=True,
+                        production_candidate=AnswerSnapshot(content="wrong"),
+                        eval_assisted_answer=AnswerSnapshot(content="a"),
+                        repair=RepairTrace(
+                            triggered=True,
+                            succeeded=True,
+                            repair_types=["terminal_rewrite"],
+                            attempts=1,
+                            added_model_calls=1,
+                            added_latency_ms=25,
+                        ),
+                    )
+                ],
+            ),
+        )
+        self.assertEqual(dual.production_verdict, Verdict.FAIL)
+        self.assertEqual(dual.eval_assisted_verdict, Verdict.PASS)
+        self.assertTrue(dual.repair_only_pass)
+        artifact = run_for(dataset, "candidate", [dual])
+
+        production_policy = GatePolicy(
+            schema_version=2,
+            policy_id="production-v2",
+            gate_kind=GateKind.PRODUCTION_RELEASE,
+            answer_track=AnswerTrack.PRODUCTION_CANDIDATE,
+            required_capabilities=[Capability.RAG_RETRIEVAL],
+            require_baseline=False,
+            forbid_hard_failures=False,
+            forbid_pass_to_fail_regressions=False,
+            min_pass_rate_per_case=1,
+            max_repair_only_pass_rate=1,
+        )
+        production_result = evaluate_gate(
+            dataset, artifact, production_policy, None
+        )
+
+        self.assertEqual(production_result.verdict, Verdict.FAIL)
+        repetition = next(
+            check
+            for check in production_result.checks
+            if check.name == "repetition_pass_rate"
+        )
+        self.assertEqual(repetition.verdict, Verdict.FAIL)
+        rescue = next(
+            check
+            for check in production_result.checks
+            if check.name == "eval_assistance_cannot_rescue_release"
+        )
+        self.assertEqual(rescue.verdict, Verdict.PASS)
+        self.assertEqual(rescue.details["cases"], ["gate-case#attempt-1"])
+        self.assertFalse(rescue.details["counted_as_production_pass"])
+
+        eval_policy = GatePolicy(
+            schema_version=2,
+            policy_id="eval-v2",
+            gate_kind=GateKind.EVAL_OPTIMIZATION,
+            answer_track=AnswerTrack.EVAL_ASSISTED_ANSWER,
+            required_capabilities=[Capability.RAG_RETRIEVAL],
+            require_baseline=False,
+            forbid_pass_to_fail_regressions=False,
+            max_repair_trigger_rate=1,
+            max_repair_only_pass_rate=1,
+            max_average_repair_attempts=1,
+            max_added_model_calls_per_turn=1,
+        )
+        eval_result = evaluate_gate(dataset, artifact, eval_policy, None)
+
+        self.assertEqual(eval_result.verdict, Verdict.PASS)
+        dependency = next(
+            check for check in eval_result.checks if check.name == "repair_dependency"
+        )
+        self.assertEqual(dependency.details["candidate"]["repair_trigger_rate"], 1)
+        self.assertEqual(dependency.details["candidate"]["repair_success_rate"], 1)
+        self.assertEqual(dependency.details["candidate"]["repair_only_pass_rate"], 1)
+        self.assertEqual(dependency.details["candidate"]["added_model_calls"], 1)
+        self.assertEqual(dependency.details["candidate"]["added_latency_ms"], 25)
+
+    def test_production_gate_fails_closed_without_production_snapshot(self) -> None:
+        dataset = [spec()]
+        legacy = case(Verdict.PASS)
+        policy = GatePolicy(
+            schema_version=2,
+            policy_id="production-v2",
+            gate_kind=GateKind.PRODUCTION_RELEASE,
+            answer_track=AnswerTrack.PRODUCTION_CANDIDATE,
+            required_capabilities=[Capability.RAG_RETRIEVAL],
+            require_baseline=False,
+            forbid_pass_to_fail_regressions=False,
+        )
+
+        result = evaluate_gate(
+            dataset, run_for(dataset, "candidate", [legacy]), policy, None
+        )
+
+        self.assertEqual(result.verdict, Verdict.INVALID)
+        integrity = next(
+            check
+            for check in result.checks
+            if check.name == "candidate_artifact_integrity"
+        )
+        self.assertIn(
+            "missing production_candidate snapshot for turn",
+            integrity.details["errors"]["gate-case#attempt-1"],
+        )
+
+    def test_required_production_surface_equivalence_is_mechanical_integrity(self) -> None:
+        divergent = case(Verdict.PASS).model_copy(
+            update={
+                "turns": [
+                    case(Verdict.PASS).turns[0].model_copy(
+                        update={
+                            "streamed_content": "SSE answer",
+                            "production_surface_equivalent": False,
+                        }
+                    )
+                ]
+            }
+        )
+        policy = self.policy.model_copy(
+            update={"require_production_surface_equivalence": True}
+        )
+
+        result = evaluate_gate(
+            [spec()],
+            run("candidate", divergent),
+            policy,
+            run("baseline", case(Verdict.PASS).model_copy(
+                update={
+                    "turns": [
+                        case(Verdict.PASS).turns[0].model_copy(
+                            update={
+                                "streamed_content": "a",
+                                "production_surface_equivalent": True,
+                            }
+                        )
+                    ]
+                }
+            )),
+        )
+
+        self.assertEqual(result.verdict, Verdict.INVALID)
+        integrity = next(
+            check
+            for check in result.checks
+            if check.name == "candidate_artifact_integrity"
+        )
+        self.assertIn(
+            "SSE/persisted production candidate equivalence is unproven or false",
+            integrity.details["errors"]["gate-case#attempt-1"][0],
+        )
+
+    def test_required_formal_split_cannot_be_omitted(self) -> None:
+        production_policy = self.policy.model_copy(
+            update={
+                "schema_version": 2,
+                "policy_id": "production-v2",
+                "gate_kind": GateKind.PRODUCTION_RELEASE,
+                "answer_track": AnswerTrack.PRODUCTION_CANDIDATE,
+                "required_splits": [Split.GATE, Split.SEALED_HOLDOUT],
+                "require_baseline": False,
+            }
+        )
+        production_case = case(Verdict.PASS).model_copy(
+            update={
+                "production_verdict": Verdict.PASS,
+                "production_scores": case(Verdict.PASS).scores,
+                "turns": [
+                    case(Verdict.PASS).turns[0].model_copy(
+                        update={
+                            "production_candidate": AnswerSnapshot(content="a")
+                        }
+                    )
+                ],
+            }
+        )
+
+        result = evaluate_gate(
+            [spec()],
+            run_for([spec()], "candidate", [production_case]),
+            production_policy,
+            None,
+        )
+
+        self.assertEqual(result.verdict, Verdict.INVALID)
+        coverage = next(
+            check
+            for check in result.checks
+            if check.name == "required_split_coverage"
+        )
+        self.assertEqual(coverage.verdict, Verdict.INVALID)
+        self.assertEqual(coverage.details["dataset_missing"], ["sealed_holdout"])
+        self.assertEqual(coverage.details["candidate_missing"], ["sealed_holdout"])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,37 @@
 
 这套框架只评测本项目内的 WeKnora 智能体，覆盖 RAG 召回与引用、文档处理、工具安全和超多轮长上下文。它不把 WeKnora 变成“裁判”：WeKnora 只作为被测系统（SUT）、记录器和隔离实验环境；数据集策划、运行、分析、改进决策和 sealed holdout 由 Codex 执行。
 
+> 当前新实验与发布结论使用 [ANTI-OVERFITTING-AUDIT-v2.md](ANTI-OVERFITTING-AUDIT-v2.md)
+> 中的双轨产物和 Codex 完整对话审核。下文的 v1/v10 contract、确定性 scorer 和
+> Judge 流程保留用于历史结果复现，不得作为新 v2 生产质量结论。v2 允许轻微
+> 表达/格式问题，三次独立会话至少两次由 Codex 判断“实质正确且有用”即可；固定
+> 短语和 required claims 只作为诊断，不再决定质量 PASS。
+
+## 当前 v2 工作流
+
+1. runner 原样保存 `production_candidate`，可选地另存 Eval-only
+   `eval_assisted_answer`；两条轨道各有引用、分数和修复成本。
+2. 分别导出两条轨道的完整对话，由 Codex 逐个审核；审核包不含 contract、参考
+   答案、required claims 或 Judge 反馈。
+3. 将审核结果按完整对话 SHA 绑定回 run artifact，再运行版本化 gate。
+
+首次运行未见分布矩阵前，用独立 fixture 创建四个隔离知识库并更新本地、已忽略的
+`runner.env`；脚本不会输出 API key：
+
+```powershell
+custom/services/agent-eval/prepare-unseen-capability-kbs.ps1
+```
+
+```powershell
+python -m weknora_eval codex-review-export --dataset <dataset.jsonl> --run <run.json> --answer-track production_candidate --output <production-review.json>
+python -m weknora_eval codex-review-export --dataset <dataset.jsonl> --run <run.json> --answer-track eval_assisted_answer --output <assisted-review.json>
+python -m weknora_eval codex-review-apply --dataset <dataset.jsonl> --run <run.json> --reviews <completed-reviews.json> --output <reviewed-run.json>
+python -m weknora_eval gate --dataset <dataset.jsonl> --candidate <reviewed-run.json> --baseline <reviewed-baseline.json> --policy policies/production-multiturn-release-gate.v2.json --output <gate.json>
+```
+
+正式 production gate 同时要求 `gate` 与 `sealed_holdout`。sealed 正文不存在或未由
+Codex 低频授权执行时，结果必须是 `INVALID/NOT_READY`，不能用可见矩阵补齐。
+
 ## 设计边界
 
 | 维度 | production | eval |
@@ -20,8 +51,9 @@
 ```text
 Codex
   ├─ 真实对话采样 -> Quarantine -> 去敏/去重/契约化 -> family split/freeze
-  ├─ eval-loop.ps1 -> WeKnora eval API -> deterministic scorer -> calibrated semantic judge
-  └─ paired gate (PASS / FAIL / INVALID) -> Markdown/JSON report
+  ├─ eval-loop.ps1 -> WeKnora eval API -> production / assisted 双轨产物
+  ├─ Codex 逐个审核完整对话 -> 绑定 exact-track SHA-256 verdict
+  └─ 客观完整性/隔离/性能检查 + Codex 质量结论 -> Markdown/JSON report
                                   │
                                   └─ Langfuse v4：trace、dataset、experiment、score 记录
 ```
@@ -140,6 +172,8 @@ Pop-Location
 
 这一版全部固定为 `dev`，只用于定位失败和校准契约；不得直接改为 `gate` 或 `sealed_holdout`。后两者必须使用全新的 family、事实组合和证据问题，防止调试集泄漏与过拟合。
 
+### 历史 v1/v10 冻结资产（仅用于复现旧结果）
+
 正式执行默认使用 `datasets/multiturn-ready.v3.jsonl`。它保留 v2 的全部问题、case ID、split 和重复次数，只修订评分契约：接受已经人工确认的低风险等价表达，区分“明确标注已废弃”与真正的状态复活，并新增真实测试中出现的内部规划泄漏和 D 供应商陈旧状态回归检测。GATE 仍覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；当前评测器冻结身份见 `manifests/multiturn-ready.v3-evaluator-v10.manifest.json`。evaluator v5 把未出现在用户请求中的引用数量上限降为可观测软指标；evaluator v6 允许一个多要点证据锚点由多个有效引用共同覆盖，并扩充内部规划泄漏检测；evaluator v7 把 MCP 运行时别名规范化为原始工具名，避免将内部 `todo_write` 误判为业务写操作；evaluator v8 补充中文检索预算和当前轮证据失败等内部规划泄漏，并把带执行阶段的终止 SSE 错误固定识别为 SUT 失败，禁止持久化错误文案伪装成业务答案；evaluator v9 在保持语义反转保护的前提下，将“替用户/为用户发送”纳入否定动作的受控等价表达；evaluator v10 仅在禁词前的紧邻谓词位置识别裸“不”否定（如“不等同于”），避免把明确否认误判为违规，同时仍会捕获后续独立的肯定断言。引用完整性、缺失要点、来源范围和真正的行动越界仍是硬约束。旧 manifest 均保留为不可变历史记录并在依赖变化后 fail closed。
 
 Evaluator v2 仍对每个观测轮生成完整 Judge 覆盖，但只在 turn 声明了 `judge_rubric`，或冻结确定性评分发现硬失败需要语义复核时调用远程 LLM。没有语义 rubric 且全部机械契约已通过的轮次生成可审计的 synthetic PASS；rubric 轮会把确定性检查一并交给 Judge，禁止其再次臆测“字符串缺失、栏目缺失或工具违规”。这减少了无意义的 LLM 调用和自相矛盾误判，同时保留 Judge 对关系发明、错误归类和可复核边界的降级权。协议身份为 `single-turn-v2`，v1 manifest 在当前代码下必须 fail-closed，而不是被原地改写。
@@ -193,112 +227,82 @@ python -m weknora_eval dataset freeze --input datasets/frozen-v1/all.jsonl --out
 custom/services/agent-eval/prepare-runner-env.ps1
 ```
 
-## 指标、评分与门禁
+## 当前 v2 质量判断与客观门禁
 
-确定性指标按 case 契约判定，不要求拟合一篇唯一参考答案：必需/禁止事实、当前/废弃/待确认状态及其分栏归属、禁止推断与行动边界、决策延期条件、关键主张与正确证据的邻接绑定、证据 anchor、正文引用与持久化 reference 一致性、检索来源下限、必需/禁止/只读工具、工具调用上限、多轮引用清零、响应和延迟边界。正式 gate 必须先通过冻结校准集，再由 Judge 复核语义型边界；Judge 只能裁决 policy 明确列出的语义指标，不能覆盖执行、引用证据、工具安全、长度或内部规划泄漏等关键失败。校准集包含“必填状态被省略”和“负责人/当前用户必须分离”的关键样例；关键样例任一错判都会让整次校准失败，即使总准确率仍超过阈值，防止 Judge 用流畅但不完整的回答覆盖确定性失败。
+回答“是否足够好”的唯一裁决者是 Codex：逐个读取一段完整对话，只判断用户的真实任务是否被实质完成、事实是否有依据、上下文状态是否正确、引用是否归属正确、行动边界是否守住以及表达是否可用。`minor_issue` 允许 PASS；只有影响核心任务的 `major_issue` 或 critical finding 才能 FAIL。三次独立会话中至少两次 PASS 即达到当前最低要求，不追求每次措辞和格式都完美。
 
-门禁不计算一个容易掩盖问题的加权总分，而是依次检查：
+确定性 scorer 继续保存为诊断信息和 Eval assistance 的可解释触发信号，但 v2 policy 不把任何固定词、required claim、栏目形态或 Judge 分数列为质量否决项。gate 只对以下客观事实 fail closed：
 
-1. 数据集 hash、case/capability 覆盖与 baseline 完整性；缺失或执行故障为 `INVALID`。
-2. 校准 Judge 覆盖率与置信度；缺失、低置信度或无效裁决为 `INVALID`。
-3. 关键约束与每个 case 的三次独立 session 通过率；低于当前阶段的绝对阈值为 `FAIL`。
-4. 按 case 聚合后的 baseline → candidate 通过率回归，而不是把随机的 attempt-1/2/3 强行一一配对；实验阶段还要求至少一个 case 严格改善，原样重跑不能伪装成收益。
-5. 指定指标族通过率、按智能体的 P95/最大绝对延迟和按智能体的相对延迟回归预算。指标族按前缀聚合，例如 `state.unknown` 覆盖所有具体未知项。
-6. 任一 `INVALID` 优先得到整体 `INVALID`，不能把“没测成”伪装成质量下降或通过。
+1. 数据集/依赖哈希、split、case、三智能体与重复次数是否完整。
+2. Codex 审核是否覆盖每段完整对话、答案轨道是否正确、审核 SHA 是否仍与答案一致。
+3. `production_candidate` 是否与 SSE、数据库持久化和历史加载逐字一致。
+4. production 与 Eval assistance 是否隔离；assisted PASS 永远不替代 production FAIL。
+5. 运行身份、基线可比性、每智能体 P95/最大延迟和修复依赖是否未恶化。
 
-业务运行始终 fail-open；发布 gate 始终 fail-closed。这两个失败域完全分开。
+任一完整性故障得到 `INVALID`，Codex 判断质量不足得到 `FAIL`。业务运行始终 fail-open；发布 gate 始终 fail-closed，这两个失败域完全分开。历史 v1/v10 的 deterministic/Judge 规则仍可用旧 manifest 复现，但不再给新实验发放质量结论。
 
 ## 一键执行前准备（不会运行 Eval）
 
-在 Eval 栈已经启动、Main 栈完全停止后执行：
+在隔离 Eval 栈已经启动、Main 栈完全停止后，先创建/校验四个未见分布知识库；脚本只更新被 Git 忽略的 `runner.env`，不会打印凭据：
 
 ```powershell
-custom/services/agent-eval/prepare-eval.ps1 -Split gate
+custom/services/agent-eval/prepare-unseen-capability-kbs.ps1
 ```
 
-该命令只做只读 handshake 与静态校验：重建轻量 runner、校验 JSONL、校验 judge calibration、核对冻结哈希、DeepSeek V4 Flash 精确模型 ID、知识文档/语料变量、三个智能体绑定、历史窗口外 2 轮覆盖、3 次独立重复计划、门禁能力覆盖以及 eval/full recorder。它不会创建 session，不会发送 chat 请求，不会生成 baseline，也不会发布 Langfuse experiment；输出中的 `formal_eval_executed` 必须为 `false`。
-
-sealed holdout 的准备也需要明确授权：
+随后运行当前 v2 preflight：
 
 ```powershell
-custom/services/agent-eval/prepare-eval.ps1 -Split sealed_holdout -AllowSealed
+custom/services/agent-eval/eval-loop.ps1 -Split dev -PreflightOnly
+```
+
+它只执行 handshake 与静态校验：冻结哈希、模型和语料绑定、三智能体矩阵、12 轮以上窗口溢出、3 次独立重复、eval/full recorder、运行镜像身份和 clean-worktree provenance；不会创建 session 或发送 chat 请求。正式 production preflight 必须同时准备 `gate` 与 sealed 数据，sealed 仍需显式授权：
+
+```powershell
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split gate,sealed_holdout `
+  -AllowSealed `
+  -PreflightOnly
 ```
 
 如果 Main 的 `weknora` 或 `weknora-runtime-profile-e2e` Compose 项目仍有容器运行，准备和正式 eval 都会直接拒绝，避免两套工作树争抢端口、CPU、内存或写错存储。
 
-## 一次 Eval loop
+## 一次 v2 Eval loop
 
-先启动 Eval 栈；`eval-loop.ps1` 会在首次运行时准备 `runner.env` 并构建轻量 runner。必须先让 `prepare-eval.ps1` 返回 READY。无 baseline 的首次正式运行只生成实验与报告，不发放发布结论：
-
-```powershell
-custom/services/agent-eval/eval-loop.ps1 -Split gate
-```
-
-Codex 审核首轮结果、数据集冻结清单和人工抽样后，才将一个合格 run 固化为 baseline。之后每轮执行配对门禁：
+第一阶段只执行三智能体对话并导出两条答案轨道的 Codex 审核包，不自动调用 Judge，也不发放质量结论：
 
 ```powershell
-custom/services/agent-eval/eval-loop.ps1 `
-  -Split gate `
-  -Baseline /workspace/artifacts/baseline-gate-v1.json
+custom/services/agent-eval/eval-loop.ps1 -Split dev
 ```
 
-无 baseline 的 DEV/探索运行可用 `-Judge` 主动生成语义评分。只要提供 `-Baseline`，脚本就会自动先实时运行冻结的 Judge calibration，未达准确率直接停止；随后用当前冻结契约重算 baseline、重新裁决 baseline，再对 candidate 和同 attempt baseline 做语义复核，因此旧 baseline 不会因缺少 Judge 字段而变成伪 `INVALID`。不能跳过 Judge 后仍获得正式 gate 结论。它要求 `runner.env` 中配置 OpenAI-compatible judge。默认并发为 1，避免模型限流与本机抢占影响结果；调高 `-MaxConcurrency` 前先建立同并发基线。
+脚本默认运行未见分布矩阵，单 case 三个独立 session，并分别生成 `production_candidate` 与 `eval_assisted_answer` 的完整对话审核包。默认 assistance 关闭，两条轨道相同；只有显式传入 `-EnableEvalAssistance` 才允许外部 runner 做一次补充检索和最多两次改写，且结果永不写回 SUT。
 
-`eval-loop.ps1` 默认给每个回答 240 秒墙钟总截止时间，可用 `-ResponseDeadlineSeconds` 显式调整。该值会写入 `execution_contract` 并参与 baseline/candidate 身份比对，不能靠放宽超时获得伪提升。持续 SSE 心跳不再能绕过截止时间：超时、流结束后无完整持久化回答，以及由此跳过的后续轮次都会记为可复现的 SUT `FAIL`；如果流中某一步报错但最终完整回答已经持久化，则以最终回答为准继续评分。WAF、HTTP/网络、记录器和 evaluator 故障仍为 `INVALID`。两者不会互相污染，也都只发生在隔离 Eval 环境。
-
-每轮 `max_response_chars` 同时作为受信任的输出形态契约传给隔离 SUT，否则它只参与事后评分会形成不可执行的隐藏要求。下发对象严格只有字符上限，不包含 required claims、evidence anchors、Judge rubric、参考答案或评分关键词；后端仅在 `eval + full capture` 时接受，原始用户消息仍按原文入库。生产模式即使收到该字段也会忽略，不增加模型调用、校验或阻塞路径。
-
-改智能体前的完整优化基线命令为：
+Codex 必须逐个填写导出包中的 verdict、六个维度、依据轮次和 findings。审核只能看到用户原始消息、选定答案轨道、真实引用与工具观测；包中没有 contract、required claims、参考答案或 Judge 反馈。完成后对原 run 绑定审核，不重新跑一组不同答案：
 
 ```powershell
 custom/services/agent-eval/eval-loop.ps1 `
   -Split dev `
-  -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
-  -Manifest /workspace/manifests/multiturn-optimization-dev.v1-evaluator-v10.manifest.json `
-  -Policy /workspace/policies/multiturn-optimization-gate.v1.json `
-  -Judge `
-  -MaxConcurrency 1
+  -Run /workspace/artifacts/run-<timestamp>.json `
+  -CodexReview `
+    /workspace/artifacts/codex-review-<timestamp>-production.completed.json, `
+    /workspace/artifacts/codex-review-<timestamp>-assisted.completed.json `
+  -Baseline /workspace/artifacts/reviewed-baseline-dev.json
 ```
 
-正式修改智能体时使用四级循环，不能跳级：
+没有 `-CodexReview` 时脚本明确输出 `WAITING_FOR_CODEX_REVIEW`；有审核但没有 reviewed baseline 时只生成报告，不伪造 gate。baseline 也必须来自相同数据、相同模型/语料/框架配置并完成同轨 Codex 审核。答案或引用发生任何变化后，审核 SHA 不匹配，gate 直接 `INVALID`。
 
-1. 聚焦诊断：只选一个失败簇和一个可解释变量，以 `-CaseId` 无 baseline 运行；结果只用于定位，不产生门禁结论。
-2. 全量 DEV 实验门禁：恢复 12 case × 3 session 的完整矩阵，与当前 champion 配对；必须至少改善一个 case，任何 case 通过率、受保护指标族或 P95 延迟回退都会失败。通过后该 judged artifact 才能成为下一轮 champion。
-3. DEV 晋级门禁：使用 `multiturn-optimization-gate.v1.json` 全量复测，全部 case 必须 3/3，才允许进入未参与调优的 GATE。
-4. 发布与泛化：GATE 要求每 case 至少 2/3 且零关键失败；sealed holdout 只由 Codex 在低频里程碑显式运行，内容不进入日常调优上下文。
+production gate 只能读取 production 审核，Eval optimization gate 只能读取 assisted 审核。每个 case 的三次会话至少两次由 Codex 判断“实质正确且有用”即可；固定短语诊断、单项分数或某一次采样失败不会被提升为新的质量规则。延迟、SSE/持久化一致性、运行身份、覆盖和修复依赖仍作为客观底线单独检查。
 
-聚焦诊断示例：
+正式 production 运行必须把 `gate` 与独立 sealed family 放在同一冻结候选中，并显式授权 sealed。当前仓库不包含 sealed 正文，所以日常可见矩阵最多形成 DEV/GATE 证据，不能自行宣布 production PASS：
 
 ```powershell
 custom/services/agent-eval/eval-loop.ps1 `
-  -Split dev `
-  -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
-  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1-evaluator-v10.manifest.json `
-  -Policy /workspace/policies/multiturn-experiment-gate.v1.json `
-  -CaseId <case-id> `
-  -Judge
+  -Split gate,sealed_holdout `
+  -Dataset /workspace/sealed/<frozen-production-suite>.jsonl `
+  -Manifest /workspace/manifests/<frozen-production-suite>.manifest.json `
+  -AllowSealed
 ```
 
-全量单变量实验门禁示例：
-
-```powershell
-custom/services/agent-eval/eval-loop.ps1 `
-  -Split dev `
-  -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
-  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1-evaluator-v10.manifest.json `
-  -Policy /workspace/policies/multiturn-experiment-gate.v1.json `
-  -Baseline /workspace/artifacts/baseline-pre-agent-change-dev-experiment.v1.json
-```
-
-标准循环是：观察失败簇 → 只提出一个改动 → 聚焦验证机制是否命中 → 全量 DEV 与 champion 比较 → 通过实验门禁才保留 → 达到 3/3 后晋级 GATE → 低频 sealed holdout。连续两轮没有 case 级实质增益、只改善已知措辞、Judge 与确定性指标分歧升高或 holdout 退化时立即停止并回滚候选，防止无限拟合与过拟合。固定的 pre-agent baseline 永不覆盖；champion 只保存“从哪个已通过 artifact 晋级”的链条。
-
-正式 run artifact 会写入 `summary_model_id`、`corpus_version`、知识文档 ID、profile set 哈希、eval 目录自身的 Git tree identity/dirty 状态、scorer 哈希、Judge 模型、校准集哈希和 Judge prompt 哈希。SUT 单独记录源代码 commit、整个工作树 dirty 状态、实际运行的 Go runtime 镜像 ID 和 general-agent 镜像 ID。门禁要求 evaluator 在 baseline/candidate 之间完全一致且两侧 SUT 都来自干净提交，但允许候选 SUT commit 和镜像与 baseline 不同——这正是智能体改动需要比较的变量。Langfuse 发布模式下，每个 `case × attempt` 都是独立 dataset item，不会把声明的 3 次重复悄悄压成 1 次。
-
-LLM Judge 的权力由 gate policy 白名单约束。它可以消除可接受措辞和语义表达造成的误杀，但不能覆盖关键确定性失败。校准样例本身使用与数据集完全一致的 `TurnContract` / `TextRule` 强类型协议和真实问题上下文，禁止用只在校准中成立的简写契约；关键正反例任一错判都会使整次校准失败。每次正式 gate 都实时运行 `calibration run`，同时达到 `calibration/judge-multiturn.v1.json` 的最低准确率和逐项最低置信度；日常 preflight 只执行结构校验，不调用 Judge。这样避免把“最优回答”误写成唯一措辞，也避免裁判漂移驱动无限拟合。
-
-正式裁决固定使用 `single-turn-v2` 协议：每次请求只允许携带一个 turn 的契约和回答，与单项校准走同一代码路径，禁止后续回答替早期回答补齐漏项。即便如此，LLM 也无权覆盖可机器验证的 `state.unknown` 必填状态：该指标由含多种可接受表达的 `TextRule` 确定性执行，是不可审查、零回归硬信号；Judge 只处理策略白名单中的语义等价项。Judge 网络调用默认采用单次 180 秒、最多 2 次的有界重试，并把协议与两个参数写入 execution identity。某个 case 在重试后仍失败时，只把该 case 标为 `INVALID`，继续落盘其余裁决并生成 gate/report；它不会改写原始观测，不会把评测基础设施故障记成智能体质量 `FAIL`，也不会向业务请求路径传播异常。
-
-`framework_commit` 固定为 `weknora_eval/` 可执行代码的 Git tree identity，并配合独立的 `gate_policy_sha256`。因此新增报告、基线锁或说明文档不会让候选与基线失去可比性，但评分/裁决代码或门禁策略的任何变化仍会触发身份不一致并失败关闭。
+`framework_commit`、policy/scorer/Codex rubric 哈希、答案轨道、模型/语料/profile、SUT commit 与实际运行镜像都会进入产物身份。正式 gate 要求 evaluator 与 SUT 都来自干净提交；修改 policy、scorer、审核 rubric 或回答后，旧审核和旧 baseline 不能静默复用。
 
 ## 本地验证
 
@@ -330,9 +334,19 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 
 - `stack.ps1`：两工作树互斥切换和固定分角色重建。
 - `seed-from-main.ps1`：容量预检、顺序导出/恢复和物理卷隔离。
-- `prepare-eval.ps1`：只读一键预检；成功也不会创建 session 或发送对话。
-- `eval-loop.ps1`：preflight、实时 Judge 校准、baseline 重算/裁决、run、gate、report。
-- `weknora_eval/`：数据集、校准、readiness、runner、确定性评分、三态门禁和 Langfuse experiment 适配器。
+- `prepare-unseen-capability-kbs.ps1`：幂等创建四个独立未见分布知识库并冻结绑定。
+- `eval-loop.ps1`：v2 preflight、双轨 run、Codex 审核导出/绑定、gate 与 report；不自动 Judge。
+- `weknora_eval/codex_review.py`：完整对话、exact-track、SHA 绑定的 Codex 最低质量标准。
+- `policies/production-multiturn-release-gate.v2.json`：只读 production candidate 的发布策略。
+- `policies/eval-optimization-gate.v2.json`：只读 assisted answer 的恢复能力策略。
+- `policies/repair-dependency-gate.v1.json`：修复触发、成功、repair-only、调用与延迟依赖策略。
+- `datasets/unseen-capability-matrix.v1.jsonl`：7 个跨领域、12 轮、三智能体、每 case 三次的能力矩阵。
+- `ANTI-OVERFITTING-AUDIT-v2.md`：整改分类、双轨边界、验收证据和剩余风险。
+
+以下文件只用于复现历史 v1/v10 结果，不参与当前质量结论：
+
+- `prepare-eval.ps1`、Judge calibration 与旧 `multiturn-*` policy/manifest。
+- `weknora_eval/` 中的旧 contract scorer/Judge 命令仍可读取历史产物，但 v2 policy 不让其决定语义 PASS。
 - `policies/multiturn-release-gate.v2.json`：三智能体多轮 GATE 门禁策略。
 - `policies/multiturn-experiment-gate.v1.json`：单变量候选至少改善一个 case、同时禁止 case/指标族/延迟回退的 DEV 实验门禁。
 - `policies/multiturn-optimization-gate.v1.json`：智能体改动前冻结、目标 case 必须 3/3 的 DEV 优化门禁。

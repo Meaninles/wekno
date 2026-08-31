@@ -15,6 +15,7 @@ from .models import (
     CaseSpec,
     FrozenDatasetManifest,
     Provenance,
+    ReviewMode,
     Split,
     TurnContract,
     TurnSpec,
@@ -139,6 +140,11 @@ def validate_dataset(cases: list[CaseSpec]) -> list[str]:
                         contract.max_total_latency_ms is not None,
                     ]
                 )
+                if case.review_mode == ReviewMode.CODEX_CONVERSATION:
+                    # Quality is decided from the complete conversation by a
+                    # hash-bound Codex review. Execution, citation registry,
+                    # tool safety and track integrity remain mechanical gates.
+                    continue
                 if deterministic_signal_count == 0 and case.split in {Split.GATE, Split.SEALED_HOLDOUT}:
                     errors.append(
                         f"{case.case_id}/{turn.turn_id}: release-gated split requires deterministic hard constraints"

@@ -131,7 +131,7 @@ func TestBuildSystemPromptAppendsDurableUserContextWithoutReplacingBaseline(t *t
 	prompt := engine.buildSystemPrompt(context.Background())
 	require.Contains(t, prompt, "Full native RAG baseline.")
 	require.Contains(t, prompt, "project foundation")
-	require.Contains(t, prompt, "WEKNORA_DIALOGUE_CONTINUITY_V1")
+	require.Contains(t, prompt, "WEKNORA_DIALOGUE_CONTINUITY_V2")
 	require.Less(t, strings.Index(prompt, "Full native RAG baseline."), strings.Index(prompt, "project foundation"))
 }
 

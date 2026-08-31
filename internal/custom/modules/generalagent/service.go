@@ -186,9 +186,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if err != nil {
 		return err
 	}
-	agentConfig.DisableToolsForTurn = conversationmemory.IsStateOnlyTurn(req.Query) &&
-		len(req.Attachments) == 0 && len(req.ImageURLs) == 0 &&
-		strings.TrimSpace(req.QuotedContext) == ""
 	if blocked, err := s.preflightDataAnalysisSources(ctx, eventBus, req, agentConfig, runID, start); blocked || err != nil {
 		return err
 	}
@@ -258,44 +255,10 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	defer unregister()
 
 	history, durableUserContext := s.buildHistory(ctx, req, agentConfig)
-	history, durableUserContext = applyGeneralAgentHistoryPolicy(
-		req.Query,
-		history,
-		durableUserContext,
-	)
-	boundaryUserStatements := make([]string, 0, len(history)+1)
-	if strings.TrimSpace(durableUserContext) != "" {
-		boundaryUserStatements = append(boundaryUserStatements, durableUserContext)
-	}
-	for _, message := range history {
-		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && strings.TrimSpace(message.Content) != "" {
-			boundaryUserStatements = append(boundaryUserStatements, message.Content)
-		}
-	}
-	runtimeQuery = conversationmemory.AppendAuditArchive(
+	runtimeQuery = conversationmemory.AppendCurrentTurnDirective(
 		runtimeQuery,
 		req.Query,
-		durableUserContext,
 	)
-	hasSelectedKnowledge := len(compactStrings(req.KnowledgeBaseIDs)) > 0 ||
-		len(compactStrings(req.KnowledgeIDs)) > 0 ||
-		len(compactStrings(agentConfig.KnowledgeBases)) > 0 ||
-		len(compactStrings(agentConfig.KnowledgeIDs)) > 0
-	if agentConfig.RetrieveKBOnlyWhenMentioned && !conversationmemory.MentionsKnowledgeScope(req.Query) {
-		hasSelectedKnowledge = false
-	}
-	runtimeQuery = conversationmemory.AppendSelectedKnowledgeEvidenceDirective(
-		runtimeQuery,
-		req.Query,
-		hasSelectedKnowledge,
-	)
-	runtimeQuery = conversationmemory.AppendCurrentTurnDirectiveWithLimit(
-		runtimeQuery,
-		req.Query,
-		req.EvalMaxResponseChars,
-		boundaryUserStatements...,
-	)
-	active.runtimeQuery = runtimeQuery
 	evalObservability := false
 	if manager := langfuse.GetManager(); manager != nil {
 		evalObservability = manager.CaptureContent() && manager.EnabledFor(ctx)
@@ -329,7 +292,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		ToolCallbackURL:         toolCallbackURL(),
 		ToolCallbackAPIKey:      strings.TrimSpace(os.Getenv("CUSTOM_GENERAL_AGENT_API_KEY")),
 		ArtifactUploadURL:       artifactUploadURL(),
-		EnableArtifacts:         generalAgentArtifactsEnabled(agentConfig, req.Query),
+		EnableArtifacts:         agentConfig.EnableArtifacts,
 		EvalObservability:       evalObservability,
 	}
 
@@ -363,22 +326,16 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	var streamed strings.Builder
 	result, err := sidecarClient.ChatStream(ctx, payload, func(evt StreamEvent) {
 		// Stream answer deltas immediately. Canonical <src> handles are valid
-		// user-visible output; completion later publishes the authoritative,
-		// locally filtered answer without any validation/regeneration request.
+		// user-visible output; completion later publishes this exact aggregation
+		// without any validation/regeneration rewrite.
 		s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
 	})
 	allRefs := active.snapshotSourceReferences()
 	if err != nil {
-		if recovered, ok := recoverNarrowEvidenceMaxTurnAnswer(err, req.Query, allRefs); ok {
-			logger.Warnf(ctx, "general-agent recovered max-turn narrow evidence answer from %d current-turn references", len(allRefs))
-			result = &ChatResult{RunID: runID, Answer: recovered}
-			err = nil
-		} else {
-			if promptLayoutSpan != nil {
-				promptLayoutSpan.Finish(nil, map[string]interface{}{"eval_only": true}, err)
-			}
-			return err
+		if promptLayoutSpan != nil {
+			promptLayoutSpan.Finish(nil, map[string]interface{}{"eval_only": true}, err)
 		}
+		return err
 	}
 	if result == nil {
 		err = fmt.Errorf("智能体最终结果为空")
@@ -394,9 +351,9 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 			nil,
 		)
 	}
-	finalAnswer := strings.TrimSpace(result.Answer)
+	finalAnswer := streamed.String()
 	if finalAnswer == "" {
-		finalAnswer = strings.TrimSpace(streamed.String())
+		finalAnswer = result.Answer
 	}
 	if streamed.Len() == 0 && finalAnswer != "" {
 		lastAnswerID = fallbackAnswerID
@@ -476,72 +433,18 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		})
 	}
 
-	finalAnswer = conversationmemory.StripInternalPlanningPreamble(finalAnswer)
-	finalAnswer = conversationmemory.RemoveRedundantExplicitComparisonSummary(finalAnswer, req.Query)
-	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(req.Query) {
-		finalAnswer = sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
-			finalAnswer,
-			conversationmemory.RequiredEvidenceTopics(req.Query),
-			allRefs,
-			req.Query,
-		)
-	}
-	finalAnswer = conversationmemory.NormalizeConfirmedUnknownSections(finalAnswer)
-	finalAnswer = conversationmemory.NormalizeDeferredComparisonFactSections(
-		finalAnswer,
-		req.Query,
-		boundaryUserStatements...,
-	)
-	finalAnswer = conversationmemory.NormalizeStateDeltaScope(finalAnswer, req.Query)
-	finalAnswer = conversationmemory.NormalizeExplicitResolvedEntityDelta(finalAnswer, req.Query)
-	finalAnswer = conversationmemory.NormalizeExplicitActionBoundaries(
-		finalAnswer,
-		req.Query,
-		boundaryUserStatements...,
-	)
-	finalAnswer = conversationmemory.NormalizeExplicitRequestedUnknownFields(finalAnswer, req.Query)
-	finalAnswer = conversationmemory.NormalizeDeferredComparisonRelationships(finalAnswer, req.Query)
-	finalAnswer = conversationmemory.NormalizeStateAuditSections(
-		finalAnswer,
-		req.Query,
-		boundaryUserStatements...,
-	)
-	finalAnswer = conversationmemory.NormalizeExplicitUserIdentityUnknown(
-		finalAnswer,
-		req.Query,
-		boundaryUserStatements...,
-	)
-	finalAnswer = conversationmemory.EnsureDeferredDecisionConclusion(finalAnswer, req.Query)
-	finalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
-		finalAnswer,
-		conversationmemory.RequiredEvidenceTopics(req.Query),
-		allRefs,
-	)
-	finalAnswer = conversationmemory.CompactExplicitOneLineComparison(finalAnswer, req.Query)
-	finalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
-		finalAnswer,
-		conversationmemory.RequiredEvidenceTopics(req.Query),
-		allRefs,
-	)
-	if conversationmemory.RequiresNamedTopicDefinitionCoverage(req.Query) {
-		finalAnswer = sourcerefs.EnsureNamedTopicDefinitions(
-			finalAnswer,
-			conversationmemory.RequiredEvidenceTopics(req.Query),
-			allRefs,
-		)
-	}
-	finalAnswer = sourcerefs.RepairAnswerCitations(finalAnswer, allRefs)
-	finalAnswer = conversationmemory.StripDeferredComparisonFactCitations(finalAnswer, req.Query)
-	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
+	_, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
-		logger.Warnf(ctx, "general-agent filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
+		logger.Warnf(ctx, "general-agent observed invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
 			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
 	}
 	if citationReport.EvidenceAvailableUncited {
 		logger.Warnf(ctx, "general-agent final answer omitted all current-turn citation handles: available=%d",
 			citationReport.AvailableCount)
 	}
-	finalAnswer = filteredAnswer
+	// finalAnswer is the exact user-visible sidecar stream aggregation. Citation
+	// accounting may narrow the persisted reference registry, but never changes
+	// the production candidate after it has been streamed.
 	steps := active.snapshotSteps(finalAnswer)
 	eventBus.Emit(ctx, event.Event{
 		Type:      event.EventAgentComplete,
@@ -560,59 +463,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		},
 	})
 	return nil
-}
-
-// recoverNarrowEvidenceMaxTurnAnswer turns a model-loop exhaustion into a
-// bounded extractive answer only when the active request is a self-contained
-// evidence question and every requested topic can be recovered from evidence
-// already returned during this turn. It adds no model or tool call and fails
-// closed for every other runtime error or incomplete evidence set.
-func recoverNarrowEvidenceMaxTurnAnswer(
-	runErr error,
-	query string,
-	refs []*types.SearchResult,
-) (string, bool) {
-	if runErr == nil || !conversationmemory.ShouldIsolateNarrowEvidenceHistory(query) || len(refs) == 0 {
-		return "", false
-	}
-	errorText := strings.TrimSpace(runErr.Error())
-	lowered := strings.ToLower(errorText)
-	if !strings.Contains(errorText, "最大迭代次数") &&
-		!strings.Contains(lowered, "max_turn") &&
-		!strings.Contains(lowered, "max turns") &&
-		!strings.Contains(lowered, "maxturns") &&
-		!strings.Contains(lowered, "turncount") {
-		return "", false
-	}
-	recovered := sourcerefs.RecoverOffTopicNarrowEvidenceAnswer(
-		errorText,
-		conversationmemory.RequiredEvidenceTopics(query),
-		refs,
-		query,
-	)
-	if recovered == "" || recovered == errorText || !strings.Contains(recovered, `<src id="S`) {
-		return "", false
-	}
-	return recovered, true
-}
-
-func applyGeneralAgentHistoryPolicy(
-	query string,
-	history []ChatHistoryMessage,
-	durableUserContext string,
-) ([]ChatHistoryMessage, string) {
-	if conversationmemory.RequiresAuthoritativeUserHistory(query) {
-		history = userOnlyGeneralAgentHistory(history)
-	}
-	if conversationmemory.ShouldIsolateNarrowEvidenceHistory(query) {
-		// A self-contained evidence detour must not retain either recent Q&A or
-		// the older user-only archive. Keeping the archive while dropping recent
-		// history still exposes retired topics in the system prompt and can send
-		// a tool-using model back into a search loop after it has already gathered
-		// the evidence requested by the current turn.
-		return nil, ""
-	}
-	return history, durableUserContext
 }
 
 func (s *Service) preflightDataAnalysisSources(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, config *types.AgentConfig, runID string, start time.Time) (bool, error) {
@@ -883,9 +733,6 @@ func stringFromAny(value any) string {
 }
 
 func (s *Service) resolveRerankModel(ctx context.Context, req *types.QARequest, agentConfig *types.AgentConfig) (rerank.Reranker, error) {
-	if agentConfig.DisableToolsForTurn {
-		return nil, nil
-	}
 	for _, tool := range agentConfig.AllowedTools {
 		if tool != agenttools.ToolKnowledgeSearch {
 			continue
@@ -1118,56 +965,6 @@ func buildGeneralAgentHistory(
 		}
 	}
 	return out, archive
-}
-
-// userOnlyGeneralAgentHistory keeps state-audit reconstruction grounded in
-// user-authored facts. Assistant answers remain available on ordinary turns,
-// but are not treated as authoritative state during an explicit audit.
-func userOnlyGeneralAgentHistory(history []ChatHistoryMessage) []ChatHistoryMessage {
-	out := make([]ChatHistoryMessage, 0, len(history))
-	for _, message := range history {
-		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
-			out = append(out, message)
-		}
-	}
-	return out
-}
-
-// generalAgentArtifactsEnabled separates configured capability from current
-// user intent. A general-purpose agent must not register a selected source file
-// as a new downloadable artifact during an informational or comparison turn.
-// Dedicated artifact-oriented agent types retain their configured behavior.
-func generalAgentArtifactsEnabled(config *types.AgentConfig, query string) bool {
-	if config == nil || !config.EnableArtifacts {
-		return false
-	}
-	if config.AgentType != types.AgentTypeGeneralAgent {
-		return true
-	}
-	value := strings.ToLower(strings.TrimSpace(query))
-	if value == "" || containsAnyString(value, []string{
-		"不要生成文件", "无需生成文件", "不需要生成文件", "不要创建文件", "只要文字", "只需文字",
-		"do not create a file", "text only",
-	}) {
-		return false
-	}
-	artifactTerm := containsAnyString(value, []string{
-		"文件", "文档", "报告", "附件", "表格", "幻灯片", "ppt", "pptx", "word", "docx", "excel", "xlsx", "pdf",
-	})
-	actionTerm := containsAnyString(value, []string{
-		"生成", "创建", "制作", "导出", "保存", "下载", "交付", "输出为", "整理成", "转换成", "转成", "修改", "编辑", "做一份",
-		"generate", "create", "export", "save", "download", "deliver", "convert", "edit",
-	})
-	return (artifactTerm && actionTerm) || containsAnyString(value, []string{"可下载文件", "下载附件"})
-}
-
-func containsAnyString(value string, candidates []string) bool {
-	for _, candidate := range candidates {
-		if strings.Contains(value, candidate) {
-			return true
-		}
-	}
-	return false
 }
 
 func configuredLightweightSkillSelection(agent *types.CustomAgent) (string, []string) {
@@ -1818,7 +1615,6 @@ func runtimeConfigSpec(c *types.AgentConfig) RuntimeConfigSpec {
 	return RuntimeConfigSpec{
 		AgentID:                     c.AgentID,
 		AgentType:                   c.AgentType,
-		DisableToolsForTurn:         c.DisableToolsForTurn,
 		MaxIterations:               c.MaxIterations,
 		Temperature:                 c.Temperature,
 		Thinking:                    c.Thinking,

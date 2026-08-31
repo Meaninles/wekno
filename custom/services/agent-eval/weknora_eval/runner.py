@@ -5,20 +5,25 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from .assistance import BoundedEvalAssistant, EvalAssistant, EvalAssistantConfig
 from .client import (
     WeKnoraClient,
     WeKnoraAssistantPersistenceTimeout,
     WeKnoraResponseDeadlineExceeded,
     event_tool_name,
     event_type,
+    streamed_production_candidate,
 )
 from .dataset import dataset_sha256
 from .models import (
+    AnswerSnapshot,
     CaseRun,
     CaseSetup,
     CaseSpec,
     ExperimentRun,
     ObservedTurn,
+    RepairTrace,
+    ReviewMode,
     SUT_RESPONSE_DEADLINE_EXCEEDED,
     SUT_RESPONSE_INCOMPLETE,
     SUT_STREAM_ERROR,
@@ -28,7 +33,7 @@ from .models import (
     Split,
     Verdict,
 )
-from .scoring import score_case
+from .scoring import score_case, score_case_tracks
 
 
 class EvalModeRequired(RuntimeError):
@@ -51,8 +56,20 @@ def _tools_from_steps(steps: list[dict[str, Any]]) -> list[str]:
 
 
 class EvalRunner:
-    def __init__(self, client: WeKnoraClient) -> None:
+    def __init__(
+        self,
+        client: WeKnoraClient,
+        assistant: EvalAssistant | None = None,
+    ) -> None:
         self.client = client
+        if assistant is None:
+            assistant_config = EvalAssistantConfig.from_env()
+            assistant = (
+                BoundedEvalAssistant(client, assistant_config)
+                if assistant_config is not None
+                else None
+            )
+        self.assistant = assistant
 
     def doctor(self) -> SUTFingerprint:
         raw = dict(self.client.capabilities())
@@ -131,10 +148,6 @@ class EvalRunner:
                     "disable_title": False,
                     "channel": setup.channel,
                 }
-                if turn_spec.contract.max_response_chars is not None:
-                    payload["eval_response_contract"] = {
-                        "max_response_chars": turn_spec.contract.max_response_chars,
-                    }
                 try:
                     events, ttfb_ms, total_latency_ms = self.client.stream(
                         f"/{spec.agent.endpoint}/{session_id}", payload
@@ -152,6 +165,8 @@ class EvalRunner:
                             total_latency_ms=exc.total_latency_ms,
                             event_count=len(exc.events),
                             error=SUT_RESPONSE_DEADLINE_EXCEEDED,
+                            production_candidate=AnswerSnapshot(),
+                            eval_assisted_answer=AnswerSnapshot(),
                         )
                     )
                     observed_turns.extend(
@@ -159,6 +174,8 @@ class EvalRunner:
                             turn_id=remaining.turn_id,
                             session_id=session_id,
                             error=SUT_TURN_SKIPPED_AFTER_DEADLINE,
+                            production_candidate=AnswerSnapshot(),
+                            eval_assisted_answer=AnswerSnapshot(),
                         )
                         for remaining in spec.turns[turn_index + 1 :]
                     )
@@ -166,6 +183,7 @@ class EvalRunner:
                 stream_errors = [
                     event for event in events if event_type(event) == "error" and event.get("done") is True
                 ]
+                streamed_content = streamed_production_candidate(events)
                 terminal_stream_errors = [
                     event
                     for event in stream_errors
@@ -224,6 +242,38 @@ class EvalRunner:
                     total_latency_ms=total_latency_ms,
                     event_count=len(events),
                     error=error,
+                    streamed_content=streamed_content,
+                    production_surface_equivalent=(
+                        streamed_content == content
+                        if streamed_content is not None and completed
+                        else None
+                    ),
+                    production_candidate=AnswerSnapshot(
+                        content=content,
+                        references=[
+                            item
+                            for item in message.get("knowledge_references") or []
+                            if isinstance(item, dict)
+                        ],
+                        retrieval_stats=(
+                            message.get("retrieval_stats")
+                            if isinstance(message.get("retrieval_stats"), dict)
+                            else {}
+                        ),
+                    ),
+                    eval_assisted_answer=AnswerSnapshot(
+                        content=content,
+                        references=[
+                            item
+                            for item in message.get("knowledge_references") or []
+                            if isinstance(item, dict)
+                        ],
+                        retrieval_stats=(
+                            message.get("retrieval_stats")
+                            if isinstance(message.get("retrieval_stats"), dict)
+                            else {}
+                        ),
+                    ),
                 )
                 observed_turns.append(observed)
                 if error:
@@ -232,12 +282,67 @@ class EvalRunner:
                             turn_id=remaining.turn_id,
                             session_id=session_id,
                             error=SUT_TURN_SKIPPED_AFTER_FAILURE,
+                            production_candidate=AnswerSnapshot(),
+                            eval_assisted_answer=AnswerSnapshot(),
                         )
                         for remaining in spec.turns[turn_index + 1 :]
                     )
                     break
             case_run = case_run.model_copy(update={"turns": observed_turns})
-            return score_case(spec, case_run)
+            production_scored = score_case(spec, case_run)
+            if self.assistant is not None and not case_run.error:
+                assisted_turns: list[ObservedTurn] = []
+                for turn_index, observed in enumerate(observed_turns):
+                    production = observed.production_candidate or AnswerSnapshot(
+                        content=observed.content,
+                        references=observed.references,
+                        retrieval_stats=observed.retrieval_stats,
+                    )
+                    hard_failure = any(
+                        score.turn_id == observed.turn_id
+                        and score.hard
+                        and score.passed is False
+                        for score in production_scored.scores
+                    ) and spec.review_mode != ReviewMode.CODEX_CONVERSATION
+                    if observed.error or not production.content.strip():
+                        assisted_turns.append(observed)
+                        continue
+                    setup = _merge_setup(
+                        spec.setup,
+                        spec.turns[turn_index].setup_override,
+                    )
+                    try:
+                        assisted, trace = self.assistant.assist(
+                            query=spec.turns[turn_index].query,
+                            prior_user_statements=[
+                                item.query for item in spec.turns[:turn_index]
+                            ],
+                            setup=setup,
+                            production=production,
+                            max_response_chars=spec.turns[
+                                turn_index
+                            ].contract.max_response_chars,
+                            force=hard_failure,
+                        )
+                    except Exception as exc:
+                        assisted = production
+                        trace = RepairTrace(
+                            triggered=True,
+                            failure_reason=(
+                                "Eval assistance failed open: "
+                                f"{type(exc).__name__}: {exc}"
+                            ),
+                        )
+                    assisted_turns.append(
+                        observed.model_copy(
+                            update={
+                                "eval_assisted_answer": assisted,
+                                "repair": trace,
+                            }
+                        )
+                    )
+                case_run = case_run.model_copy(update={"turns": assisted_turns})
+            return score_case_tracks(spec, case_run)
         except Exception as exc:
             return case_run.model_copy(update={"error": str(exc), "verdict": Verdict.INVALID})
 

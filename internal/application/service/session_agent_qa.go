@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
@@ -39,14 +38,6 @@ func (s *sessionService) AgentQA(
 	if err != nil {
 		return err
 	}
-	agentConfig.EvalMaxResponseChars = req.EvalMaxResponseChars
-	agentConfig.MaxCompletionTokens = conversationmemory.BoundCompletionTokens(
-		agentConfig.MaxCompletionTokens,
-		req.Query,
-	)
-	agentConfig.DisableToolsForTurn = conversationmemory.IsStateOnlyTurn(req.Query) &&
-		len(req.Attachments) == 0 && len(req.ImageURLs) == 0 &&
-		strings.TrimSpace(req.QuotedContext) == ""
 	lightMode, lightNames := lightweightSkillSelection(req.CustomAgent)
 	agentConfig.LightweightSkillContext = LightweightSkillContext(ctx, lightMode, lightNames, req.SkillNames)
 	if agentConfig.LightweightSkillContext != "" {
@@ -71,9 +62,6 @@ func (s *sessionService) AgentQA(
 	var rerankModel rerank.Reranker
 	hasKnowledgeSearchTool := false
 	for _, tool := range agentConfig.AllowedTools {
-		if agentConfig.DisableToolsForTurn {
-			break
-		}
 		if tool == tools.ToolKnowledgeSearch {
 			hasKnowledgeSearchTool = true
 			break
@@ -117,10 +105,6 @@ func (s *sessionService) AgentQA(
 	} else {
 		logger.Infof(ctx, "Multi-turn disabled for this agent, running without history")
 		llmContext = []chat.Message{}
-	}
-	if conversationmemory.RequiresAuthoritativeUserHistory(req.Query) {
-		llmContext = userOnlyAgentHistory(llmContext)
-		logger.Infof(ctx, "Current turn uses %d authoritative user history messages", len(llmContext))
 	}
 	agentConfig.DurableUserContext = durableUserContext
 
@@ -186,25 +170,9 @@ func (s *sessionService) AgentQA(
 	if agentConfig.AgentType == types.AgentTypeTableAnalysis && agentConfig.TableAnalysisDisplayIntent != nil {
 		agentQuery = tableAnalysisDisplayIntentPromptBlock(agentConfig.TableAnalysisDisplayIntent) + "\n\n" + agentQuery
 	}
-	agentQuery = conversationmemory.AppendAuditArchive(
+	agentQuery = conversationmemory.AppendCurrentTurnDirective(
 		agentQuery,
 		req.Query,
-		durableUserContext,
-	)
-	priorUserStatements := make([]string, 0, len(llmContext)+1)
-	if strings.TrimSpace(durableUserContext) != "" {
-		priorUserStatements = append(priorUserStatements, durableUserContext)
-	}
-	for _, message := range llmContext {
-		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && strings.TrimSpace(message.Content) != "" {
-			priorUserStatements = append(priorUserStatements, message.Content)
-		}
-	}
-	agentQuery = conversationmemory.AppendCurrentTurnDirectiveWithLimit(
-		agentQuery,
-		req.Query,
-		req.EvalMaxResponseChars,
-		priorUserStatements...,
 	)
 
 	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside
@@ -214,12 +182,11 @@ func (s *sessionService) AgentQA(
 	// Execute agent with streaming (asynchronously)
 	// Events will be emitted to EventBus and handled by the Handler layer
 	logger.Info(ctx, "Executing agent with streaming")
-	if _, err := engine.ExecuteWithOriginalQuery(
+	if _, err := engine.Execute(
 		ctx,
 		sessionID,
 		req.AssistantMessageID,
 		agentQuery,
-		req.Query,
 		llmContext,
 		agentImageURLs,
 	); err != nil {

@@ -140,7 +140,7 @@ Pop-Location
 
 这一版全部固定为 `dev`，只用于定位失败和校准契约；不得直接改为 `gate` 或 `sealed_holdout`。后两者必须使用全新的 family、事实组合和证据问题，防止调试集泄漏与过拟合。
 
-正式执行默认使用 `datasets/multiturn-ready.v3.jsonl`。它保留 v2 的全部问题、case ID、split 和重复次数，只修订评分契约：接受已经人工确认的低风险等价表达，区分“明确标注已废弃”与真正的状态复活，并新增真实测试中出现的内部规划泄漏和 D 供应商陈旧状态回归检测。GATE 仍覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；当前评测器冻结身份见 `manifests/multiturn-ready.v3-evaluator-v8.manifest.json`。evaluator v5 把未出现在用户请求中的引用数量上限降为可观测软指标；evaluator v6 允许一个多要点证据锚点由多个有效引用共同覆盖，并扩充内部规划泄漏检测；evaluator v7 把 MCP 运行时别名规范化为原始工具名，避免将内部 `todo_write` 误判为业务写操作；evaluator v8 补充中文检索预算和当前轮证据失败等内部规划泄漏，并把带执行阶段的终止 SSE 错误固定识别为 SUT 失败，禁止持久化错误文案伪装成业务答案。引用完整性、缺失要点、来源范围和真正的行动越界仍是硬约束。旧 manifest 均保留为不可变历史记录并在依赖变化后 fail closed。
+正式执行默认使用 `datasets/multiturn-ready.v3.jsonl`。它保留 v2 的全部问题、case ID、split 和重复次数，只修订评分契约：接受已经人工确认的低风险等价表达，区分“明确标注已废弃”与真正的状态复活，并新增真实测试中出现的内部规划泄漏和 D 供应商陈旧状态回归检测。GATE 仍覆盖三个智能体，每个 case 固定执行 3 个独立 session，总计 18 个 session execution；当前评测器冻结身份见 `manifests/multiturn-ready.v3-evaluator-v9.manifest.json`。evaluator v5 把未出现在用户请求中的引用数量上限降为可观测软指标；evaluator v6 允许一个多要点证据锚点由多个有效引用共同覆盖，并扩充内部规划泄漏检测；evaluator v7 把 MCP 运行时别名规范化为原始工具名，避免将内部 `todo_write` 误判为业务写操作；evaluator v8 补充中文检索预算和当前轮证据失败等内部规划泄漏，并把带执行阶段的终止 SSE 错误固定识别为 SUT 失败，禁止持久化错误文案伪装成业务答案；evaluator v9 在保持语义反转保护的前提下，将“替用户/为用户发送”纳入否定动作的受控等价表达，消除行动边界的字面匹配假阴性。引用完整性、缺失要点、来源范围和真正的行动越界仍是硬约束。旧 manifest 均保留为不可变历史记录并在依赖变化后 fail closed。
 
 Evaluator v2 仍对每个观测轮生成完整 Judge 覆盖，但只在 turn 声明了 `judge_rubric`，或冻结确定性评分发现硬失败需要语义复核时调用远程 LLM。没有语义 rubric 且全部机械契约已通过的轮次生成可审计的 synthetic PASS；rubric 轮会把确定性检查一并交给 Judge，禁止其再次臆测“字符串缺失、栏目缺失或工具违规”。这减少了无意义的 LLM 调用和自相矛盾误判，同时保留 Judge 对关系发明、错误归类和可复核边界的降级权。协议身份为 `single-turn-v2`，v1 manifest 在当前代码下必须 fail-closed，而不是被原地改写。
 
@@ -252,7 +252,7 @@ custom/services/agent-eval/eval-loop.ps1 `
 custom/services/agent-eval/eval-loop.ps1 `
   -Split dev `
   -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
-  -Manifest /workspace/manifests/multiturn-optimization-dev.v1-evaluator-v8.manifest.json `
+  -Manifest /workspace/manifests/multiturn-optimization-dev.v1-evaluator-v9.manifest.json `
   -Policy /workspace/policies/multiturn-optimization-gate.v1.json `
   -Judge `
   -MaxConcurrency 1
@@ -271,7 +271,7 @@ custom/services/agent-eval/eval-loop.ps1 `
 custom/services/agent-eval/eval-loop.ps1 `
   -Split dev `
   -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
-  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1-evaluator-v8.manifest.json `
+  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1-evaluator-v9.manifest.json `
   -Policy /workspace/policies/multiturn-experiment-gate.v1.json `
   -CaseId <case-id> `
   -Judge
@@ -283,7 +283,7 @@ custom/services/agent-eval/eval-loop.ps1 `
 custom/services/agent-eval/eval-loop.ps1 `
   -Split dev `
   -Dataset /workspace/datasets/multiturn-optimization-dev.v1.jsonl `
-  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1-evaluator-v8.manifest.json `
+  -Manifest /workspace/manifests/multiturn-optimization-dev-experiment.v1-evaluator-v9.manifest.json `
   -Policy /workspace/policies/multiturn-experiment-gate.v1.json `
   -Baseline /workspace/artifacts/baseline-pre-agent-change-dev-experiment.v1.json
 ```

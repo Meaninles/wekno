@@ -70,6 +70,7 @@ from app.runner import (  # noqa: E402
     run_data_analysis_judge,
     run_eval_focused_evidence_retrieval,
     run_turn_contract_isolated_rewrite,
+    required_current_turn_output_scopes,
     sanitize_artifact_bytes,
     sdk_tool_progress_event,
     sdk_tool_progress,
@@ -81,6 +82,7 @@ from app.runner import (  # noqa: E402
     turn_contract_issues,
     turn_contract_needs_retrieval,
     turn_contract_stop_hook_factory,
+    should_enable_eval_turn_contract_stabilization,
     should_enable_turn_contract_runtime_repair,
     should_enable_turn_contract_stop_hook,
     should_record_turn_evidence,
@@ -1035,6 +1037,50 @@ class RunnerProgressTest(unittest.TestCase):
             {issue["code"] for issue in turn_contract_issues(payload, stabilized)},
         )
 
+    def test_eval_candidate_stabilizer_preserves_current_output_only_scope(self):
+        payload = ChatPayload(
+            run_id="run-output-scope-stabilizer",
+            session_id="session-output-scope-stabilizer",
+            assistant_message_id="assistant-output-scope-stabilizer",
+            query=(
+                "行动边界更新：本次只产出培训说明，不安装Skill、不执行脚本、"
+                "不创建或修改任何文件。请复述边界。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            runtime_config=RuntimeConfigSpec(disable_tools_for_turn=True),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+
+        self.assertEqual(required_current_turn_output_scopes(payload.query), ["培训说明"])
+        stabilized = stabilize_turn_contract_candidate(
+            payload,
+            "不会安装Skill、不执行脚本、不创建或修改任何文件。",
+        )
+        self.assertIn("交付范围：本次只产出培训说明。", stabilized)
+        self.assertEqual(stabilize_turn_contract_candidate(payload, stabilized), stabilized)
+
+    def test_output_scope_stabilization_is_eval_only_but_allows_state_only_turns(self):
+        payload = ChatPayload(
+            run_id="run-output-scope-policy",
+            session_id="session-output-scope-policy",
+            assistant_message_id="assistant-output-scope-policy",
+            query="本轮仅输出核对清单。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+            runtime_config=RuntimeConfigSpec(disable_tools_for_turn=True),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}):
+            self.assertTrue(should_enable_eval_turn_contract_stabilization(payload))
+            self.assertFalse(should_enable_turn_contract_runtime_repair(payload))
+            self.assertFalse(
+                should_enable_eval_turn_contract_stabilization(
+                    payload.model_copy(update={"eval_observability": False})
+                )
+            )
+
     def test_grounding_targets_include_explicit_subject_and_requested_aspects(self):
         query = (
             "专业Skill的管理入口或接口范围是什么？\n"
@@ -1908,7 +1954,7 @@ class RunnerProgressTest(unittest.TestCase):
             "原生运行时技能通过 read_skill 读取内容。",
         )
 
-    def test_eval_focused_retrieval_prefers_citeable_semantic_search_for_direct_grounding(self):
+    def test_eval_focused_retrieval_prefers_citeable_exact_grep_for_one_direct_target(self):
         payload = ChatPayload(
             run_id="run-focused-grep",
             session_id="session-focused-grep",
@@ -1963,8 +2009,8 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertTrue(recovered)
         callback.assert_called_once_with(
             payload,
-            "knowledge_search",
-            {"queries": ["渐进式披露", "Skill分层加载"]},
+            "grep_chunks",
+            {"query": "渐进式披露"},
         )
 
     def test_eval_counted_set_repair_uses_semantic_search_not_literal_grep(self):

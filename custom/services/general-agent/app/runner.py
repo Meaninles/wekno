@@ -5027,6 +5027,34 @@ NEGATIVE_MUTATION_UMBRELLA_RE = re.compile(
     re.IGNORECASE,
 )
 MUTATING_ACTIONS = {"安装", "新增", "修改", "删除", "导入", "下载", "上传", "发送"}
+CURRENT_TURN_OUTPUT_SCOPE_CN_RE = re.compile(
+    r"(?:(?:本次|本轮|当前(?:轮次)?|这次)\s*)?(?:只|仅)\s*"
+    r"(?:允许\s*)?(?:产出|输出|提供|交付|生成|撰写)\s*"
+    r"(?P<scope>[^，,。！？!?；;\r\n]{1,80})",
+    re.IGNORECASE,
+)
+CURRENT_TURN_OUTPUT_SCOPE_EN_RES = (
+    re.compile(
+        r"(?:(?:for\s+)?(?:this|the\s+current)\s+(?:turn|request)[:,]?\s*)?"
+        r"only\s+(?:produce|output|provide|deliver|generate|write)\s+"
+        r"(?P<scope>[^,.;!?\r\n]{1,80})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:(?:for\s+)?(?:this|the\s+current)\s+(?:turn|request)[:,]?\s*)?"
+        r"(?:produce|output|provide|deliver|generate|write)\s+only\s+"
+        r"(?P<scope>[^,.;!?\r\n]{1,80})",
+        re.IGNORECASE,
+    ),
+)
+OUTPUT_SCOPE_BOUNDARY_RE = re.compile(
+    r"\s*(?:(?:并且|而且|且|而)\s*)?(?:不要|不得|禁止|无需|无须|不能|不可|不应|不许|不允许|不会|不再|不进行)",
+    re.IGNORECASE,
+)
+OUTPUT_SCOPE_ASSERTION_RE = re.compile(
+    r"(?:只|仅|仅限|限于|交付范围|输出范围|产出范围|delivery\s+scope|output\s+scope|only)",
+    re.IGNORECASE,
+)
 
 
 def _action_scope_clauses(value: str) -> list[str]:
@@ -5412,6 +5440,49 @@ def missing_current_goal_phrases(answer: str, query: str) -> list[str]:
         if len(mixed_tokens) >= 2 and all(token in normalized_answer for token in mixed_tokens):
             continue
         missing.append(phrase)
+    return missing
+
+
+def required_current_turn_output_scopes(query: str) -> list[str]:
+    """Extract an explicit user-authored, output-only scope for this turn.
+
+    This is intentionally narrower than general intent extraction. It covers
+    only phrases that explicitly say to *only* produce/output/deliver an item,
+    so a normal request such as "write a summary" does not become a synthetic
+    exclusivity constraint.
+    """
+
+    value = original_query_without_runtime_contract(query)
+    scopes: list[str] = []
+    matches = list(CURRENT_TURN_OUTPUT_SCOPE_CN_RE.finditer(value))
+    for pattern in CURRENT_TURN_OUTPUT_SCOPE_EN_RES:
+        matches.extend(pattern.finditer(value))
+    for match in sorted(matches, key=lambda item: item.start()):
+        scope = OUTPUT_SCOPE_BOUNDARY_RE.split(match.group("scope"), maxsplit=1)[0]
+        scope = scope.strip().strip("`*_#'\"“”‘’()（）[]【】")
+        if scope and scope not in scopes:
+            scopes.append(scope)
+    return scopes[:4]
+
+
+def missing_current_turn_output_scopes(answer: str, scopes: list[str]) -> list[str]:
+    """Return output-only scopes not explicitly preserved in the answer."""
+
+    missing: list[str] = []
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"[。！？!?；;\r\n]+", answer or "")
+        if clause.strip()
+    ]
+    for scope in scopes:
+        normalized_scope = normalized_grounding_text(scope)
+        if any(
+            normalized_scope in normalized_grounding_text(clause)
+            and OUTPUT_SCOPE_ASSERTION_RE.search(clause)
+            for clause in clauses
+        ):
+            continue
+        missing.append(scope)
     return missing
 
 
@@ -6318,6 +6389,13 @@ def stabilize_turn_contract_candidate(payload: ChatPayload, answer: str) -> str:
     missing_goals = missing_current_goal_phrases(value, payload.query)
     if missing_goals:
         value = "目标：" + "；".join(missing_goals) + "。\n\n" + value
+    missing_output_scopes = missing_current_turn_output_scopes(
+        value,
+        required_current_turn_output_scopes(payload.query),
+    )
+    if missing_output_scopes:
+        scope = "；".join(missing_output_scopes)
+        value = value.rstrip() + f"\n\n交付范围：本次只产出{scope}。"
     missing_actions = missing_negative_actions(
         value,
         required_negative_actions(payload.query),
@@ -6813,6 +6891,22 @@ def should_enable_turn_contract_runtime_repair(payload: ChatPayload) -> bool:
     )
 
 
+def should_enable_eval_turn_contract_stabilization(payload: ChatPayload) -> bool:
+    """Enable deterministic normalization for all explicitly opted-in Eval turns.
+
+    Unlike model/tool repair, this also covers state-only turns. It uses only
+    constraints copied from the current request and never runs for production
+    payloads, preserving production's record-only behavior.
+    """
+
+    return bool(
+        payload.eval_observability
+        and TURN_EXECUTION_CONTRACT_MARKER in (payload.query or "")
+        and os.getenv("CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR", "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+
 def should_enable_turn_contract_stop_hook(payload: ChatPayload) -> bool:
     """Backward-compatible policy alias for isolated hook unit tests."""
 
@@ -7077,14 +7171,18 @@ async def run_eval_focused_evidence_retrieval(
         canonical = canonical_runtime_tool_name(spec.name).lower()
         if canonical == "list_knowledge_chunks" and counted_set_deep_read:
             preferred.append((-2, spec, canonical))
+        elif canonical == "grep_chunks" and len(direct_grounding_targets) == 1:
+            # The validator can name one exact missing concept here. Literal
+            # chunk grep is citeable and avoids another semantic search landing
+            # on the same neighboring fragment.
+            preferred.append((-1, spec, canonical))
         elif canonical == "knowledge_search":
             preferred.append((0, spec, canonical))
         elif canonical == "wiki_search":
             preferred.append((1, spec, canonical))
         elif canonical == "grep_chunks" and direct_grounding_targets:
-            # grep summaries are useful for discovery but may not carry a
-            # citeable chunk handle. Prefer semantic retrieval whenever it is
-            # available, and keep grep as a bounded fallback.
+            # Multiple gaps are normally better handled by one semantic batch;
+            # keep literal grep as the bounded fallback in that case.
             preferred.append((2, spec, canonical))
     if not preferred:
         return False
@@ -8939,6 +9037,9 @@ class GeneralAgentRunner:
         turn_contract_runtime_repair_enabled = (
             should_enable_turn_contract_runtime_repair(self.payload)
         )
+        turn_contract_candidate_stabilization_enabled = (
+            should_enable_eval_turn_contract_stabilization(self.payload)
+        )
         while True:
             async for stream_item in multiplex_query_events(prompt, options):
                 if isinstance(stream_item, RunEvent):
@@ -9347,7 +9448,7 @@ class GeneralAgentRunner:
                 answer = "".join(current_segment_delta_parts).strip()
             if not answer:
                 answer = "".join(all_delta_parts).strip()
-        if turn_contract_runtime_repair_enabled and answer:
+        if turn_contract_candidate_stabilization_enabled and answer:
             stabilized_answer = stabilize_turn_contract_candidate(
                 self.payload,
                 answer,
@@ -9374,6 +9475,9 @@ class GeneralAgentRunner:
             )
             prompt_observation["turn_contract_candidate_stabilized"] = bool(
                 turn_contract_state.get("turn_contract_candidate_stabilized")
+            )
+            prompt_observation["turn_contract_candidate_stabilization_enabled"] = (
+                turn_contract_candidate_stabilization_enabled
             )
             prompt_observation["eval_focused_retrieval_used_reserved_call"] = bool(
                 turn_contract_state.get("eval_focused_retrieval_used_reserved_call")

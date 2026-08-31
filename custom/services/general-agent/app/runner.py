@@ -5339,13 +5339,18 @@ def named_set_grounding_issues(
                 if overlap < max(1, expected_count - 1):
                     continue
                 allowed_ids = cited_ids
+            cited_allowed_ids = [
+                citation_id
+                for citation_id in cited_ids
+                if citation_id in allowed_ids
+            ]
             unsupported = [
                 member
                 for member in members
                 if not any(
                     _named_set_member_support_term(member)
                     in normalized_grounding_text(evidence_by_id.get(citation_id, ""))
-                    for citation_id in allowed_ids
+                    for citation_id in cited_allowed_ids
                 )
             ]
             if len(unsupported) < len(best_unsupported):
@@ -5367,8 +5372,10 @@ def named_set_grounding_issues(
                 "required_action": (
                     "Rebuild the complete named set from one coherent taxonomy source. Cite a fragment that "
                     "explicitly states the requested subject and member count, and use only that source document "
-                    "and its adjacent chunks for the member names. Do not combine an unrelated integration, package, "
-                    "feature, or similarly named object from another document just to reach the requested count."
+                    "and its adjacent chunks for the member names. Every fragment that supplies a member name must "
+                    "also be cited in the final answer; retrieving an adjacent chunk without citing it is not "
+                    "grounding. Do not combine an unrelated integration, package, feature, or similarly named object "
+                    "from another document just to reach the requested count."
                 ),
             }
         )

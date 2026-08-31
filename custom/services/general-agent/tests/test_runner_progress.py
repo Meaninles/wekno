@@ -736,6 +736,24 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(coherence["allowed_set_evidence_ids"], ["S1", "S2"])
         self.assertEqual(coherence["unsupported_members"], ["外部集成工具"])
 
+        uncited_adjacent = (
+            '- **导入工具**：说明。<src id="S1" />\n'
+            '- **导出工具**：说明。<src id="S1" />\n'
+            '- **审计工具**：说明。<src id="S1" />'
+        )
+        uncited_issue = next(
+            issue
+            for issue in turn_contract_issues(
+                payload,
+                uncited_adjacent,
+                evidence_by_id=evidence,
+                evidence_locators_by_id=locators,
+            )
+            if issue["code"] == "current_turn_named_set_grounding_incoherent"
+        )
+        self.assertEqual(uncited_issue["allowed_set_evidence_ids"], ["S1", "S2"])
+        self.assertEqual(uncited_issue["unsupported_members"], ["审计工具"])
+
         correct = (
             '- **导入工具**：说明。<src id="S1" />\n'
             '- **导出工具**：说明。<src id="S1" />\n'

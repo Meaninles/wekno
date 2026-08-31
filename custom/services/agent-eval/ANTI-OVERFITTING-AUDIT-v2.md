@@ -153,3 +153,104 @@ runner 按相同公开投影重放 SSE，再与历史 API 读取的助手正文�
 3 次稳定性、四个新知识库的召回质量、Linux 容器集成测试、相对 baseline 的 P95
 延迟和 sealed holdout。任一项缺失时，最终结论必须写为“不适合进入生产”，不能
 通过改 scorer、阈值、参考答案或移除失败指标掩盖。
+
+## 八、2026-09-01 正式可见矩阵实测
+
+本次候选运行 ID 为 `run-03f45b16-2838-47cf-89ea-79b40d1060f0`，对应产物：
+
+- `artifacts/run-20260901-032346-reviewed.json`
+- `artifacts/codex-review-20260901-032346-production.completed.json`
+- `artifacts/codex-review-20260901-032346-assisted.completed.json`
+- `artifacts/gate-20260901-032346-production-v3.json`
+- `artifacts/gate-20260901-032346-eval-optimization-v3.json`
+- `artifacts/gate-20260901-032346-repair-dependency-v2.json`
+- `artifacts/report-20260901-032346-final.md`
+
+Codex 按完整 12 轮对话逐个审核 21 个 production conversation 和 21 个 assisted
+conversation。小的措辞、格式和完整性问题允许以 `minor_issue` 通过；错误事实、
+旧状态复活、错误来源、行动越界和未完成核心请求才作为 `major_issue`。结果为：
+
+| 轨道 | PASS | FAIL | 说明 |
+|---|---:|---:|---|
+| production candidate | 4 | 17 | 生产真实可见答案 |
+| eval assisted | 5 | 16 | 仅 Eval 外部有限修复 |
+
+唯一 repair-only PASS 是 `unseen-dev-quick-hr` 第 2 次运行：生产第 4 轮发生大段
+重复退化，Codex 判 production FAIL；Eval 改写去除退化后判 assisted PASS。报告将
+该项明确标为 `Repair-only pass=yes`，production verdict 仍为 FAIL。这一真实样本和
+`test_assisted_codex_pass_cannot_rescue_production_codex_failure` 回归测试共同证明：
+修复答案不能挽救生产门禁。
+
+### 三类门禁结果
+
+| 门禁 | 结果 | 独立失败原因 |
+|---|---|---|
+| production release v3 | `INVALID/NOT_READY` | 缺少 sealed holdout 和冻结 baseline；4 个可见 gate case 的 production 重复通过率分别为 0/3、1/3、1/3、1/3，均低于 2/3；general-agent gate P95 169,212ms、最大 240,054ms，超过 120,000/180,000ms 上限 |
+| eval optimization v3 | `INVALID/NOT_READY` | 缺少冻结 baseline；assisted 轨中 quick HR 为 2/3，RAG product 与 general project 均为 0/3，重复稳定性失败 |
+| repair dependency v2 | `INVALID/NOT_READY` | 缺少用于判断“不得恶化”的冻结 baseline；当前依赖数据完整报告且不被当作生产质量 |
+
+三个 gate 都成功校验 42 份审核的对话哈希、答案轨道和六个维度；production gate
+的 `answer_track_contract` 明确为 `production_candidate`，并且
+`eval_assistance_cannot_rescue_release` 为 PASS、`counted_as_production_pass=false`。
+门禁没有修改参考答案、required claims、Judge 或 scorer，也没有降低 2/3 重复标准、
+延迟上限或 sealed/baseline 要求。
+
+### 修复依赖与答案表面
+
+全 21 个 case、252 轮范围内：
+
+- repair trigger rate：9/252（3.6%）
+- repair success rate：9/9（100%）
+- repair-only pass rate：1/21（4.8%）
+- average repair attempts：1.00
+- added model calls：9
+- added tool calls：0
+- added latency：16,056ms（每次平均 1,784ms）
+
+全部 242 个完成轮次均证明 `complete.data.final_answer` 的公开 SSE 投影与持久化/
+历史加载一致。其余 10 轮均来自同一个 general-agent session：第 3 轮
+`sut_response_deadline_exceeded`，后续 9 轮被明确标为 skipped；框架没有把缺失答案
+伪装成表面一致。
+
+### 修改前后客观对比
+
+对比前一轮 `run-20260901-013110.json` 与当前 v3 运行：
+
+| 指标 | 前一轮 | 当前 | 变化 |
+|---|---:|---:|---:|
+| 不完整/错误轮次 | 55 | 10 | -45 |
+| 无法证明 production surface 一致的轮次 | 107 | 10 | -97 |
+| quick IT 完成轮次 | 0/36 | 36/36 | +36 |
+| general project 完成轮次 | 28/36 | 36/36 | +8 |
+| repair trigger / success | 10 / 9 | 9 / 9 | 触发减少且全部成功 |
+| repair attempts / model calls | 11 / 11 | 9 / 9 | 各减少 2 |
+| repair added latency | 28,093ms | 16,056ms | -12,037ms |
+
+前后 `surface` 统计不是严格同口径：旧 runner 没有按正式前端的
+`complete.data.final_answer` 投影公开终态，当前 v3 已修正。因此该表只证明框架和
+传输故障减少，不能冒充语义质量的配对 baseline。旧运行也没有完成同一套 Codex
+整段审核，所以这里不声称 production 语义通过率相对旧版本提升。
+
+### 剩余失败与生产结论
+
+人工整段审核识别出的主要剩余失败是：
+
+1. 把知识问答或概念示例升级成已经发生的业务事实，例如“询问校准方法”变成
+   “校准已完成”、补偿券语义分析变成客户提案。
+2. 为满足模板完整性而补写用户没有提供的负责人、申请人、复核日期、网络事件或
+   恢复条件。
+3. 最终摘要事实值正确但来源轮次错标，或把手册限定场景扩张成更广的业务规则。
+4. 明确“不要检索”时仍调用检索工具，以及“只列范围”时输出跨话题内容。
+5. 通用智能体仍有一次 240 秒截止超时，且整体 gate 延迟超过发布上限。
+6. 多轮暴露内部分析式独白，虽有些对话仍可按 `minor_issue` 通过，但生产表达需继续
+   收敛。
+
+运行时代码静态扫描未发现 `case_id`、可见 case 名称、固定知识库/文档名、参考答案、
+required claims 或 Judge feedback 分支。当前失败来自模型通用状态与证据行为，不能
+再用场景短语补丁处理。
+
+**最终结论：本候选不适合进入生产。** 原因不是固定短语评分器，而是 Codex 完整
+对话审核下的生产重复稳定性不足、通用智能体超时/延迟超限，以及 sealed holdout
+和冻结 baseline 尚未完成。后续应针对“助理推断不得升级为事实、精确来源归属、
+跨话题隔离和通用智能体时延”做领域无关改进，再用新的不可覆盖产物重跑；不得围绕
+上述可见 case 增加专用短语或固定答案分支。

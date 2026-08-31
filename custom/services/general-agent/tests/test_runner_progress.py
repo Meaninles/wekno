@@ -792,6 +792,65 @@ class RunnerProgressTest(unittest.TestCase):
             {issue["code"] for issue in issues},
         )
 
+    def test_turn_contract_detects_raw_retrieval_fields_in_end_user_answer(self):
+        payload = ChatPayload(
+            run_id="run-retrieval-field-leak",
+            session_id="session-retrieval-field-leak",
+            assistant_message_id="assistant-retrieval-field-leak",
+            query=(
+                "搜索结果有多个时，请说明怎样用明确名称或ID确认目标。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        leaked = turn_contract_issues(
+            payload,
+            (
+                "可先看文档名称（knowledge_title）和文档ID（knowledge_id），"
+                "再用chunk_id与chunk_index定位片段。"
+            ),
+        )
+        self.assertIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in leaked},
+        )
+        self.assertNotIn(
+            "current_turn_internal_planning_exposed",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    "请按文档名称、文档ID和片段位置确认目标，不要依赖排序。",
+                )
+            },
+        )
+
+    def test_turn_contract_allows_explicit_retrieval_api_schema_question(self):
+        payload = ChatPayload(
+            run_id="run-retrieval-schema-question",
+            session_id="session-retrieval-schema-question",
+            assistant_message_id="assistant-retrieval-schema-question",
+            query=(
+                "解释检索API响应中的knowledge_id和chunk_id字段。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        self.assertNotIn(
+            "current_turn_internal_planning_exposed",
+            {
+                issue["code"]
+                for issue in turn_contract_issues(
+                    payload,
+                    "knowledge_id标识文档，chunk_id标识文档中的检索片段。",
+                )
+            },
+        )
+
     def test_turn_contract_issues_detect_missing_fresh_evidence_and_length(self):
         payload = ChatPayload(
             run_id="run-turn-contract",

@@ -4751,6 +4751,22 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
+INTERNAL_RETRIEVAL_FIELD_RE = re.compile(
+    r"\b(?:"
+    r"chunk_id|chunk_index|parent_chunk_id|sub_chunk_id|"
+    r"knowledge_id|knowledge_base_id|knowledge_title|knowledge_filename|"
+    r"faq_id|source_locator|source_references|cite_exactly|citation_id|evidence_map"
+    r")\b",
+    re.IGNORECASE,
+)
+INTERNAL_RETRIEVAL_DEVELOPER_INTENT_RE = re.compile(
+    r"(?:API|SDK|SSE|JSON|schema|接口|字段|参数|响应(?:结构|格式)|事件|代码|开发)",
+    re.IGNORECASE,
+)
+INTERNAL_RETRIEVAL_SUBJECT_RE = re.compile(
+    r"(?:检索|搜索|引用|reference|knowledge|chunk|source)",
+    re.IGNORECASE,
+)
 
 
 def normalize_known_source_citation_markup(
@@ -6198,7 +6214,40 @@ def uncertainty_topics_without_grounded_citation(
     return missing
 
 
-def internal_planning_excerpt(answer: str) -> str:
+def internal_retrieval_field_excerpt(answer: str, query: str = "") -> str:
+    """Find raw retrieval schema fields in ordinary user-facing answers.
+
+    The same fields are legitimate when a developer explicitly asks about the
+    retrieval API or names the field itself.  Ordinary end-user requests should
+    receive stable concepts such as "文档名称"、"文档ID" and "片段位置" instead
+    of backend field names that can change with the tool implementation.
+    """
+
+    value = answer or ""
+    request = original_query_without_runtime_contract(query or "")
+    developer_schema_request = bool(
+        INTERNAL_RETRIEVAL_DEVELOPER_INTENT_RE.search(request)
+        and INTERNAL_RETRIEVAL_SUBJECT_RE.search(request)
+    )
+    for match in INTERNAL_RETRIEVAL_FIELD_RE.finditer(value[:4000]):
+        token = match.group(0)
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
+            request,
+            re.IGNORECASE,
+        ):
+            continue
+        if developer_schema_request:
+            continue
+        line_start = value.rfind("\n", 0, match.start()) + 1
+        line_end = value.find("\n", match.end())
+        if line_end < 0:
+            line_end = min(len(value), match.end() + 240)
+        return value[line_start:line_end].strip()[:240]
+    return ""
+
+
+def internal_planning_excerpt(answer: str, query: str = "") -> str:
     """Return a short excerpt when user-visible output contains repair narration."""
 
     value = (answer or "").strip()
@@ -6215,6 +6264,9 @@ def internal_planning_excerpt(answer: str) -> str:
         if line_end < 0:
             line_end = min(len(value), match.start() + 240)
         return value[match.start():line_end].strip()[:240]
+    retrieval_field_excerpt = internal_retrieval_field_excerpt(value, query)
+    if retrieval_field_excerpt:
+        return retrieval_field_excerpt
     first_paragraph = re.split(r"\n\s*\n", value, maxsplit=1)[0]
     if (
         first_paragraph.count('<src id="') >= 2
@@ -6270,15 +6322,17 @@ def turn_contract_issues(
             }
         ]
     issues: list[dict[str, Any]] = []
-    planning_excerpt = internal_planning_excerpt(value)
+    planning_excerpt = internal_planning_excerpt(value, query)
     if TURN_EXECUTION_CONTRACT_MARKER in query and planning_excerpt:
         issues.append(
             {
                 "code": "current_turn_internal_planning_exposed",
                 "excerpt": planning_excerpt,
                 "required_action": (
-                    "Rewrite the complete answer as user-visible content only. Remove retrieval checklists, chunk IDs, "
-                    "citation diagnostics, validation/repair narration, and statements about what you will write."
+                    "Rewrite the complete answer as user-visible content only. Remove retrieval checklists, raw backend "
+                    "field names, chunk IDs, citation diagnostics, validation/repair narration, and statements about "
+                    "what you will write. Preserve any requested selection method using user-facing terms such as "
+                    "document name, document ID, and passage location."
                 ),
             }
         )

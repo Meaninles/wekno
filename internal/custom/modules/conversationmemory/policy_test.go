@@ -84,6 +84,115 @@ func TestStateOnlyClassificationSeparatesLedgerFromEvidenceRequests(t *testing.T
 	}
 }
 
+func TestStateOnlyClassificationRecognizesDeclarativeQuestionShapedFields(t *testing.T) {
+	stateQueries := []string{
+		"交付窗口定为2027年4月18日；是否需要延期尚未判断，不要推断进度风险。",
+		"接口会处理客户联系人资料，因此隐私影响已确认需要评估；是否涉及特殊类别数据仍待合规团队确认。",
+	}
+	for _, query := range stateQueries {
+		if !IsStateOnlyTurn(query) {
+			t.Fatalf("declarative known/unknown update was treated as a question: %q", query)
+		}
+	}
+	question := "交付窗口定为2027年4月18日，请问是否需要延期？"
+	if IsStateOnlyTurn(question) {
+		t.Fatalf("actual question was treated as a state update: %q", question)
+	}
+}
+
+func TestNormalizeStateDeltaScopeRestoresDeclarativeKnownAndUnknownFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		query  string
+		answer string
+		want   []string
+	}{
+		{
+			name:   "date and unresolved schedule field",
+			query:  "交付窗口定为2027年4月18日；是否需要延期尚未判断，不要推断进度风险。",
+			answer: "已记录交付窗口。",
+			want:   []string{"2027年4月18日", "是否需要延期", "待确认"},
+		},
+		{
+			name:   "scalar lifecycle and exact approval field",
+			query:  "订阅额度从48万元调整为52万元；48万元从现在起废弃。审批状态仍然未知。",
+			answer: "待确认：变更申请状态。",
+			want:   []string{"52万元", "48万元（废弃）", "审批状态", "未知"},
+		},
+		{
+			name:   "ordered impact assessment and actor-bound unknown",
+			query:  "接口会处理客户联系人资料，因此隐私影响已确认需要评估；是否涉及特殊类别数据仍待合规团队确认。",
+			answer: "接口处理联系人资料，需要评估隐私影响。",
+			want:   []string{"隐私影响已确认需要评估", "是否涉及特殊类别数据仍待合规团队确认"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := NormalizeStateDeltaScope(test.answer, test.query)
+			for _, want := range test.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("state fact %q was not preserved: %s", want, got)
+				}
+			}
+			if twice := NormalizeStateDeltaScope(got, test.query); twice != got {
+				t.Fatalf("state repair is not idempotent:\n%s", twice)
+			}
+		})
+	}
+}
+
+func TestNegativeInformationBoundaryRemovesInventedCategoryMembers(t *testing.T) {
+	query := "资料库没有风险等级依据，不要引用任何风险等级。"
+	answer := "资料库未区分高/中/低风险等级。"
+	got := NormalizeNegativeCategoryExamples(answer, query)
+	for _, invented := range []string{"高/中/低", "高风险", "中风险", "低风险"} {
+		if strings.Contains(got, invented) {
+			t.Fatalf("invented negative example %q survived: %s", invented, got)
+		}
+	}
+	if !strings.Contains(got, "未提供该分类依据") {
+		t.Fatalf("negative information boundary was lost: %s", got)
+	}
+	if twice := NormalizeNegativeCategoryExamples(got, query); twice != got {
+		t.Fatalf("negative-category normalization is not idempotent: %s", twice)
+	}
+	if unchanged := NormalizeNegativeCategoryExamples(answer, "请概括风险管理章节。"); unchanged != answer {
+		t.Fatalf("answer changed without a user-authored negative boundary: %s", unchanged)
+	}
+}
+
+func TestNegativeAndStateBoundariesReachGenerationChecks(t *testing.T) {
+	negativeQuery := "知识库未规定处置级别，不要引用任何处置级别。"
+	directive := AppendCurrentTurnDirective(negativeQuery, negativeQuery)
+	terminal := TerminalGenerationDirective(negativeQuery)
+	for _, value := range []string{directive, terminal} {
+		if !strings.Contains(value, "处置级别") || !strings.Contains(value, "不得自行列举") && !strings.Contains(value, "不要自行列举") {
+			t.Fatalf("negative boundary did not reach generation contract: %s", value)
+		}
+	}
+
+	stateQuery := "交付日定为2027年6月2日；是否延期尚未判断。"
+	stateTerminal := TerminalGenerationDirective(stateQuery)
+	for _, want := range []string{"WEKNORA_TERMINAL_STATE_DELTA_CHECK", "字段名", "尚未判断"} {
+		if !strings.Contains(stateTerminal, want) {
+			t.Fatalf("state invariant %q missing from terminal check: %s", want, stateTerminal)
+		}
+	}
+}
+
+func TestRequestsCitationSyntaxExampleIsNarrow(t *testing.T) {
+	for _, query := range []string{"请展示引用格式。", "What is the citation syntax?", "src 标签怎么写？"} {
+		if !RequestsCitationSyntaxExample(query) {
+			t.Fatalf("explicit syntax request not recognized: %q", query)
+		}
+	}
+	for _, query := range []string{"请引用知识库回答。", "做一次来源校验。", "每个结论就近引用。"} {
+		if RequestsCitationSyntaxExample(query) {
+			t.Fatalf("ordinary evidence request was treated as a syntax example: %q", query)
+		}
+	}
+}
+
 func TestCurrentTurnDirectiveUsesDeltaAndAuditShapes(t *testing.T) {
 	delta := AppendCurrentTurnDirective("预算改为390万元。", "只更新台账。")
 	if !strings.Contains(delta, "最多六个短行") || !strings.Contains(delta, "不调用任何工具") ||

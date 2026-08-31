@@ -16,7 +16,9 @@ var (
 	canonicalSourceRE    = regexp.MustCompile(`^<src id="(S[1-9][0-9]*)" />$`)
 	canonicalSourceTagRE = regexp.MustCompile(`<src id="(S[1-9][0-9]*)" />`)
 	bareAngleSourceRE    = regexp.MustCompile(`(?i)<\s*S[1-9][0-9]*\s*(?:/\s*)?>`)
+	protectedFenceRE     = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~")
 	protectedCodeRE      = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
+	inlineCitationCodeRE = regexp.MustCompile("`\\s*((?:<src id=\\\"S[1-9][0-9]*\\\" />\\s*)+)`")
 	wikiHandleRE         = regexp.MustCompile(`\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]`)
 	markdownListMarkerRE = regexp.MustCompile(`^\s*(?:[-+*]|[0-9]+[.)、])\s+(.+?)\s*$`)
 )
@@ -34,6 +36,27 @@ type CitationValidationReport struct {
 	RelocatedListCitations   int      `json:"relocated_list_citations,omitempty"`
 	CompletedListCitations   int      `json:"completed_list_citations,omitempty"`
 	UnsupportedListCitations int      `json:"unsupported_list_citations,omitempty"`
+}
+
+// NormalizeInlineCitationCode unwraps canonical citation handles that a model
+// accidentally enclosed in an inline Markdown code span. A handle used as
+// ordinary prose evidence must participate in the same validation and
+// reference accounting as an unquoted handle. Fenced examples remain literal,
+// and callers can preserve all examples when the user explicitly requested
+// citation syntax.
+func NormalizeInlineCitationCode(answer string, preserveExamples bool) string {
+	if strings.TrimSpace(answer) == "" || preserveExamples {
+		return answer
+	}
+	return transformOutsideMarkdownFences(answer, func(segment string) string {
+		return inlineCitationCodeRE.ReplaceAllStringFunc(segment, func(value string) string {
+			match := inlineCitationCodeRE.FindStringSubmatch(value)
+			if len(match) != 2 {
+				return value
+			}
+			return strings.TrimSpace(match[1])
+		})
+	})
 }
 
 // FilterAnswerCitations keeps only canonical, registry-backed <src id="Sx" />
@@ -436,6 +459,26 @@ func transformOutsideMarkdownCode(content string, transform func(string) string)
 		return content
 	}
 	indices := protectedCodeRE.FindAllStringIndex(content, -1)
+	if len(indices) == 0 {
+		return transform(content)
+	}
+	var out strings.Builder
+	out.Grow(len(content))
+	start := 0
+	for _, index := range indices {
+		out.WriteString(transform(content[start:index[0]]))
+		out.WriteString(content[index[0]:index[1]])
+		start = index[1]
+	}
+	out.WriteString(transform(content[start:]))
+	return out.String()
+}
+
+func transformOutsideMarkdownFences(content string, transform func(string) string) string {
+	if content == "" || transform == nil {
+		return content
+	}
+	indices := protectedFenceRE.FindAllStringIndex(content, -1)
 	if len(indices) == 0 {
 		return transform(content)
 	}

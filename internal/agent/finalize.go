@@ -320,6 +320,9 @@ func (e *AgentEngine) emitCompletionEvent(
 		e.activeUserStatements...,
 	)
 	state.FinalAnswer = conversationmemory.EnsureDeferredDecisionConclusion(state.FinalAnswer, e.activeQuery)
+	state.FinalAnswer = conversationmemory.NormalizeNegativeCategoryExamples(state.FinalAnswer, e.activeQuery)
+	preserveCitationExamples := conversationmemory.RequestsCitationSyntaxExample(e.activeQuery)
+	state.FinalAnswer = sourcerefs.NormalizeInlineCitationCode(state.FinalAnswer, preserveCitationExamples)
 	state.FinalAnswer = sourcerefs.RepairNamedTopicCitationBindings(
 		state.FinalAnswer,
 		conversationmemory.RequiredEvidenceTopics(e.activeQuery),
@@ -358,6 +361,10 @@ func (e *AgentEngine) emitCompletionEvent(
 				repair.Attempts, repair.Issues, repair.LastError)
 		}
 	}
+	// Eval-only terminal rewriting is allowed to change prose, so reapply the
+	// deterministic user-authored boundary before citation accounting.
+	state.FinalAnswer = conversationmemory.NormalizeNegativeCategoryExamples(state.FinalAnswer, e.activeQuery)
+	state.FinalAnswer = sourcerefs.NormalizeInlineCitationCode(state.FinalAnswer, preserveCitationExamples)
 	filteredAnswer, citedRefs, report := sourcerefs.FilterAnswerCitations(state.FinalAnswer, state.KnowledgeRefs)
 	if report.ForbiddenTags > 0 || report.IncompleteTags > 0 || len(report.UnknownIDs) > 0 {
 		logger.Warnf(ctx, "[Agent][Citations] filtered invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",

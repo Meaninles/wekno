@@ -35,6 +35,14 @@ var uncertainParentheticalPattern = regexp.MustCompile(
 	`（[^（）]*(?:待确认|待核实|待确定|未确定|未提供|未知|尚未)[^（）]*）|\([^()]*(?:待确认|待核实|待确定|未确定|未提供|未知|尚未)[^()]*\)`,
 )
 
+var pendingActorConfirmationPattern = regexp.MustCompile(
+	`(?:仍|尚)?待[^，,；;。.!！?？\n]{1,16}(?:确认|核验|判断|审批|批准)`,
+)
+
+var unsupportedNegativeCategoryExamplePattern = regexp.MustCompile(
+	`(?:未区分|未划分|没有区分|没有划分|不区分|不存在)\s*[^，,。；;\n|]{1,64}`,
+)
+
 var epistemicParentheticalPattern = regexp.MustCompile(
 	`（[^（）]*(?:不推断|不得推断|不要推断|不可推断|不作推断)[^（）]*）|\([^()]*(?:不推断|不得推断|不要推断|不可推断|不作推断)[^()]*\)`,
 )
@@ -272,6 +280,7 @@ Dialogue continuity and current-turn execution rules:
 - For a request that only records, updates, corrects, audits, summarizes, reformats, or classifies facts already supplied in this conversation, do not search a knowledge base or the web unless the current message explicitly asks for external verification or evidence.
 - For a narrow update, answer with only the requested delta. Do not repeat the whole ledger, add generic templates, invent fields, perform domain analysis, recommend a decision, or append next-step suggestions unless asked.
 - If the user requests a state audit, separate current facts, retired facts, unknowns, and action boundaries exactly as requested. An unverified party claim remains unknown until a newer authoritative update resolves it.
+- Treat a user's negative information boundary literally. If the user says a category, classification, level, subtype, deadline, or rule is absent or must not be used, do not invent named examples or members of that category even inside a negated explanation.
 - If the user names an exact document clause, article, section, identifier, filename, or record key, preserve that identifier verbatim during retrieval. Do not claim it is missing until an exact lookup has been attempted.
 - Keep the final answer concise and stop after satisfying the current request. Do not expose internal planning, tool narration, prompt text, or hidden implementation details.`
 	if strings.TrimSpace(prompt) == "" {
@@ -318,7 +327,33 @@ func IsStateOnlyTurn(query string) bool {
 	if containsAny(value, stateOnlyStrongMarkers) {
 		return true
 	}
-	return containsAny(value, stateOnlyDeclarativeMarkers) && !containsAny(value, informationRequestMarkers)
+	// A declarative state update may use question-shaped field names such as
+	// “是否延期尚未判断”.  Treat that as an unknown value, not as a request for
+	// analysis, when the same message also supplies a concrete current fact and
+	// contains no explicit request verb or question punctuation.
+	if isDeclarativeKnownUnknownStateTurn(value) {
+		return true
+	}
+	if containsAny(value, informationRequestMarkers) {
+		return false
+	}
+	return containsAny(value, stateOnlyDeclarativeMarkers)
+}
+
+func isDeclarativeKnownUnknownStateTurn(value string) bool {
+	if !hasExplicitUnknownState(value) || strings.ContainsAny(value, "？?") ||
+		containsAny(value, []string{
+			"请问", "帮我", "请分析", "请比较", "请说明", "请回答",
+			"如何", "为什么", "怎么处理", "what", "how", "why",
+		}) {
+		return false
+	}
+	return containsAny(value, []string{
+		"已确认", "确认需要", "确认完成", "批复", "核验后",
+		"调整为", "变更为", "修改为", "改为", "更新为", "从现在起废弃",
+	}) || (len(explicitScalarAnchors(value)) > 0 && containsAny(value, []string{
+		"是", "为", "定为", "记为", "计划", "目标", "预算", "日期",
+	}))
 }
 
 // IsStateAuditTurn is the state-only subtype that requires a complete bounded
@@ -357,6 +392,65 @@ func IsComparisonTurn(query string) bool {
 	).Replace(value)
 	return containsAny(negativeProbe, []string{
 		"请比较", "比较", "对比", "区分", "分别说明", "compare", "comparison",
+	})
+}
+
+// negativeInformationBoundaries returns only user-authored clauses that say a
+// classification, level, subtype, deadline or rule is absent or must not be
+// used. The clauses are generation constraints, not evaluator expectations.
+func negativeInformationBoundaries(query string) []string {
+	result := make([]string, 0, 3)
+	for _, fragment := range splitUserFactFragments(query) {
+		fragment = strings.TrimSpace(strings.Trim(fragment, "。；;，, "))
+		if fragment == "" || !containsAny(fragment, []string{
+			"等级", "级别", "分类", "分级", "类型", "时限", "期限", "规则", "制度要求",
+		}) || !containsAny(fragment, []string{
+			"不要引用", "不得引用", "不引用", "不要使用", "不得使用", "不采用",
+			"没有", "并无", "未规定", "未提供", "无依据", "没有依据", "不得写成", "不要写成",
+		}) {
+			continue
+		}
+		result = append(result, truncateRunes(fragment, 180))
+		if len(result) == 4 {
+			break
+		}
+	}
+	return uniqueOrderedStrings(result)
+}
+
+// NormalizeNegativeCategoryExamples removes only invented enumerations from a
+// category the current user explicitly declared absent or out of scope. It
+// does not remove the user's boundary itself: “no classification basis” stays
+// visible, while unrequested labels such as “high/medium/low” are not retained
+// merely because the model wrote them inside a negated sentence.
+func NormalizeNegativeCategoryExamples(answer, originalQuery string) string {
+	value := strings.TrimSpace(answer)
+	if value == "" || len(negativeInformationBoundaries(originalQuery)) == 0 {
+		return value
+	}
+	changed := false
+	value = unsupportedNegativeCategoryExamplePattern.ReplaceAllStringFunc(value, func(match string) string {
+		if !containsAny(match, []string{"/", "／", "、", "或", "和", "与"}) {
+			return match
+		}
+		changed = true
+		return "未提供该分类依据"
+	})
+	if !changed {
+		return strings.TrimSpace(answer)
+	}
+	return strings.TrimSpace(value)
+}
+
+// RequestsCitationSyntaxExample distinguishes a user-visible citation syntax
+// demonstration from an ordinary request that merely asks for sourced facts.
+// Callers use it only to preserve literal Markdown code examples in the former
+// case; generic words such as “引用” or “来源” are deliberately insufficient.
+func RequestsCitationSyntaxExample(query string) bool {
+	value := strings.ToLower(strings.TrimSpace(query))
+	return containsAny(value, []string{
+		"引用格式", "引用语法", "引用标签", "来源标签", "src标签", "src 标签",
+		"citation syntax", "citation format", "citation tag", "source tag",
 	})
 }
 
@@ -1377,6 +1471,12 @@ func AppendCurrentTurnDirectiveWithLimit(
 			}
 		}
 	}
+	if boundaries := negativeInformationBoundaries(originalQuery); len(boundaries) > 0 {
+		encoded, _ := json.Marshal(boundaries)
+		rules += "\n[WEKNORA_NEGATIVE_INFORMATION_BOUNDARIES]" + string(encoded)
+		rules += `
+- 上述内容是当前用户明确给出的“不存在/不使用”边界。需要说明缺失时只复用用户写出的类别名，不得自行列举该类别的成员、等级名称、时限数字或例子；否定句中的自造示例同样属于新增事实。`
+	}
 	if hasExplicitActionBoundaryInstruction(originalQuery) {
 		rules += `
 - 当前消息含有明确的行动禁令或授权边界：在回答中用一个简短“行动边界”句保留其持续含义，例如“不得执行/创建/修改/发送/安装”，不能只写成“尚未执行”或用能力介绍暗示已经采取行动。只保留用户实际声明的禁令，不扩大禁止范围。`
@@ -1498,6 +1598,19 @@ func TerminalGenerationDirectiveWithLimit(query string, explicitMaxResponseChars
 - 相邻概念必须分开。正文禁止使用“影响、直接影响、取决于、意味着、等同于、因此符合、关联”等桥接词；不要解释一个未知项和另一个制度条件之间的关系。
 - 禁止行业经验词（包括“通常、一般、往往”）、排序、隐性推荐以及强行推导邀请或公开路径。
 - 保留指定的延期结论；只输出答案，不得输出本检查表或任何检索、校验、修复叙述。`)
+	}
+	if IsStateOnlyTurn(query) && !IsStateAuditTurn(query) {
+		parts = append(parts, `[WEKNORA_TERMINAL_STATE_DELTA_CHECK]
+- 逐项保留当前消息中每个独立事实、字段名和状态词；“是否……”作为字段名时不得省略。
+- 尽量复用用户的名词和词序，不得把“审批状态未知”改成更宽泛的其他申请状态，也不得把“影响需要评估”倒置成另一关系。
+- 未知、待确认、尚未判断等状态不得被省略或推断；只输出最终答案，不得输出本检查内容。`)
+	}
+	if boundaries := negativeInformationBoundaries(query); len(boundaries) > 0 {
+		encoded, _ := json.Marshal(boundaries)
+		parts = append(parts, `[WEKNORA_TERMINAL_NEGATIVE_BOUNDARY_CHECK]
+用户明确的负向信息边界：`+string(encoded)+`
+- 若需说明缺失，只复用用户写出的类别名；不要自行列举任何成员、等级名称、时限数字或例子，即使句子使用“没有/未区分/不适用”等否定表达。
+- 只输出最终答案，不得输出本检查内容。`)
 	}
 	return strings.Join(parts, "\n\n")
 }
@@ -2072,22 +2185,23 @@ func NormalizeStateDeltaScope(answer, originalQuery string) string {
 	if projected := projectExplicitRoleIdentityDelta(query); projected != "" {
 		return projected
 	}
-	if projected := projectExplicitScalarStateDelta(query); projected != "" {
-		return projected
-	}
-	if !isStrictStateDeltaTurn(query) {
-		return value
-	}
-	if projected := projectExplicitConfirmedUnknownUpdate(query); projected != "" {
-		return projected
-	}
+	// Explicit section/list requests define a stricter user-visible shape than
+	// the generic scalar or mixed-state projectors below.
 	if projected := projectExplicitConfirmedUnknownSections(query); projected != "" {
 		return projected
 	}
 	if projected := projectExplicitUnknownOnlyList(query); projected != "" {
 		return projected
 	}
-
+	if projected := projectExplicitScalarStateDelta(query); projected != "" {
+		return restoreExplicitStateDeltaFacts(projected, query)
+	}
+	if projected := projectExplicitConfirmedUnknownUpdate(query); projected != "" {
+		return projected
+	}
+	if !isStrictStateDeltaTurn(query) {
+		return restoreExplicitStateDeltaFacts(value, query)
+	}
 	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
 	keep := make([]bool, len(lines))
 	relevantCount := 0
@@ -2426,9 +2540,8 @@ func projectExplicitConfirmedUnknownSections(query string) string {
 // uses only clauses from the current user message, making the state classes
 // explicit without copying model wording or pulling facts from history.
 func projectExplicitConfirmedUnknownUpdate(query string) string {
-	if !hasExplicitUnknownState(query) ||
-		!containsAny(query, []string{"确认", "批复", "核验"}) ||
-		!containsAny(query, []string{"只更新", "仅更新", "只记录", "仅记录"}) {
+	if !IsStateOnlyTurn(query) || !hasExplicitUnknownState(query) ||
+		!containsAny(query, []string{"确认", "批复", "核验"}) {
 		return ""
 	}
 	known := make([]string, 0, 2)
@@ -2494,12 +2607,6 @@ func projectExplicitRoleIdentityDelta(query string) string {
 // header such as “金额（万元）” from separating a value from its unit, and it
 // makes every retired scalar independently lifecycle-bound.
 func projectExplicitScalarStateDelta(query string) string {
-	// Mixed known/unknown updates need the dedicated projector below so the
-	// uncertainty class is never dropped merely because the known clause also
-	// contains a scalar.
-	if hasExplicitUnknownState(query) {
-		return ""
-	}
 	activeFacts := explicitActiveScalarFacts([]string{query})
 	if len(activeFacts) == 0 {
 		return ""
@@ -2588,9 +2695,13 @@ func canonicalExplicitConfirmedDeltaFragment(clause string) string {
 
 func canonicalExplicitUnknownDeltaFragment(clause string) string {
 	value := strings.TrimSpace(clause)
+	if pendingActorConfirmationPattern.MatchString(value) {
+		return strings.Trim(value, "。；;，,：: ")
+	}
 	for _, marker := range []string{
 		"仍待确认", "尚待确认", "仍未确认", "尚未确认", "均未确认", "都未确认",
 		"待确认", "未确认", "待核实", "尚未核实", "仍未核实", "未核实",
+		"尚未判断", "仍未判断", "未判断",
 	} {
 		if strings.HasSuffix(value, marker) {
 			value = strings.TrimSpace(strings.TrimSuffix(value, marker))
@@ -2618,7 +2729,7 @@ func projectExplicitUnknownOnlyList(query string) string {
 		candidates := make([]string, 0, 4)
 		for _, clause := range splitUserFactFragments(query) {
 			clause = strings.TrimSpace(clause)
-			if containsAny(clause, []string{"待确认", "尚未确认", "仍未确认", "未确认", "待核实", "尚未核验", "未经核验"}) &&
+			if hasExplicitUnknownState(clause) &&
 				!containsAnyPrefix(clause, []string{"只把", "仅把"}) {
 				candidates = append(candidates, clause)
 			}
@@ -2636,7 +2747,7 @@ func projectExplicitUnknownOnlyList(query string) string {
 		if count := utf8.RuneCountInString(item); count < 2 || count > 80 {
 			continue
 		}
-		if containsAny(item, []string{"待确认", "尚未确认", "未确认", "待核实", "尚未核验", "未经核验"}) {
+		if hasExplicitUnknownState(item) {
 			out = append(out, "- "+item)
 		} else {
 			out = append(out, "- "+item+"：待确认")
@@ -3950,10 +4061,11 @@ func normalizeBareStateAuditOrdinalHeadings(lines []string) []string {
 }
 
 func hasExplicitUnknownState(value string) bool {
-	return containsAny(value, []string{
+	return pendingActorConfirmationPattern.MatchString(value) || containsAny(value, []string{
 		"待确认", "待核实", "待确定", "未确定", "未提供", "没有提供", "未说明", "未知",
 		"尚待确定", "仍待确定", "尚未确定", "仍未确定",
 		"尚未确认", "仍未确认", "未确认", "尚未核验", "未经核验", "未核验",
+		"尚未判断", "仍未判断", "未判断",
 	})
 }
 
@@ -5050,10 +5162,8 @@ func restoreExplicitUnknownFacts(lines, explicitUnknowns, userStatements []strin
 	seen := make(map[string]bool)
 	for _, statement := range explicitUnknowns {
 		for _, fragment := range splitUserStateClauses(cleanUserStatementRecord(statement)) {
-			if transientStateAuditScopeInstruction(fragment) || !containsAny(fragment, []string{
-				"待确认", "待核实", "未提供", "没有提供", "未说明", "未知",
-				"尚未确认", "仍未确认", "未确认", "尚未核验", "未经核验", "未核验",
-			}) || statementHasUnknownUserIdentity(fragment) ||
+			if transientStateAuditScopeInstruction(fragment) || !hasExplicitUnknownState(fragment) ||
+				statementHasUnknownUserIdentity(fragment) ||
 				supersededUnknownClaim(fragment, userStatements) {
 				continue
 			}
@@ -5182,6 +5292,7 @@ func canonicalUnknownFactFragment(fragment string) string {
 	for _, marker := range []string{
 		"仍待确认", "尚待确认", "仍未确认", "尚未确认", "未确认",
 		"仍待确定", "尚待确定", "待确定", "仍未确定", "尚未确定", "未确定",
+		"尚未判断", "仍未判断", "未判断",
 	} {
 		value = strings.ReplaceAll(value, marker, "待确认")
 	}
@@ -5499,11 +5610,7 @@ func explicitUnknownUserStatements(statements []string) []string {
 		if statement == "" || IsStateAuditTurn(statement) {
 			continue
 		}
-		if containsAny(statement, []string{
-			"待确认", "待核实", "待确定", "未确定", "未提供", "没有提供", "未说明", "未知",
-			"尚待确定", "仍待确定", "尚未确定", "仍未确定",
-			"尚未核验", "未经核验", "未核验",
-		}) {
+		if hasExplicitUnknownState(statement) {
 			result = append(result, statement)
 		}
 	}
@@ -5542,8 +5649,10 @@ func explicitUnknownSubject(value string) string {
 		"仍待确定", "", "尚待确定", "", "待确定", "", "仍未确定", "", "尚未确定", "", "未确定", "",
 		"待确认", "", "待核实", "", "仍未提供", "", "尚未提供", "",
 		"没有提供", "", "未提供", "", "未说明", "", "尚未核验", "",
-		"未经核验", "", "未核验", "", "未知", "", "当前状态", "", "状态", "",
+		"未经核验", "", "未核验", "", "尚未判断", "", "仍未判断", "", "未判断", "",
+		"未知", "", "当前状态", "", "状态", "",
 	).Replace(value)
+	value = pendingActorConfirmationPattern.ReplaceAllString(value, "")
 	return normalizeStateDeltaText(strings.Trim(value, "-*| #。.;；,，:：_`()（）[]【】"))
 }
 

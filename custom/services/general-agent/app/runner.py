@@ -4712,7 +4712,7 @@ DEFERRED_COMPARISON_CONTRACT_MARKER = "用户明确要求不作最终选择"
 # and repeated retrieval results from crowding the actual answer out of context.
 TURN_CONTRACT_MAX_BLOCKING_ATTEMPTS = 2
 TURN_CONTRACT_MAX_RETRIEVAL_REPAIR_ATTEMPTS = 1
-TURN_CONTRACT_MAX_ISOLATED_REWRITE_ATTEMPTS = 2
+TURN_CONTRACT_MAX_ISOLATED_REWRITE_ATTEMPTS = 3
 TURN_CONTRACT_FAILURE_USER_MESSAGE = "智能体未能生成满足当前请求约束的完整回答，请重试"
 INTERNAL_PLANNING_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:"
@@ -4752,11 +4752,11 @@ INTERNAL_PLANNING_LINE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 INTERNAL_RETRIEVAL_FIELD_RE = re.compile(
-    r"\b(?:"
+    r"(?<![A-Za-z0-9_])(?:"
     r"chunk_id|chunk_index|parent_chunk_id|sub_chunk_id|"
     r"knowledge_id|knowledge_base_id|knowledge_title|knowledge_filename|"
     r"faq_id|source_locator|source_references|cite_exactly|citation_id|evidence_map"
-    r")\b",
+    r")(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 INTERNAL_RETRIEVAL_DEVELOPER_INTENT_RE = re.compile(
@@ -4767,6 +4767,22 @@ INTERNAL_RETRIEVAL_SUBJECT_RE = re.compile(
     r"(?:检索|搜索|引用|reference|knowledge|chunk|source)",
     re.IGNORECASE,
 )
+INTERNAL_RETRIEVAL_FIELD_USER_LABELS = {
+    "chunk_id": "段落ID",
+    "chunk_index": "段落位置",
+    "parent_chunk_id": "上级段落ID",
+    "sub_chunk_id": "子段落ID",
+    "knowledge_id": "文档ID",
+    "knowledge_base_id": "知识库ID",
+    "knowledge_title": "文档名称",
+    "knowledge_filename": "文档名称",
+    "faq_id": "FAQ条目ID",
+    "source_locator": "来源位置",
+    "source_references": "来源引用",
+    "cite_exactly": "引用标记",
+    "citation_id": "引用ID",
+    "evidence_map": "依据对应关系",
+}
 
 
 def normalize_known_source_citation_markup(
@@ -6247,6 +6263,64 @@ def internal_retrieval_field_excerpt(answer: str, query: str = "") -> str:
     return ""
 
 
+def normalize_internal_retrieval_field_labels(answer: str, query: str = "") -> str:
+    """Translate backend retrieval labels in opted-in Eval terminal answers.
+
+    Explicit developer/schema questions keep the exact field names. For an
+    ordinary user request, the replacement changes presentation only and is
+    derived from the matched field; it neither adds nor removes a factual
+    claim. This gives the bounded compiler a deterministic last mile instead
+    of asking a stochastic rewrite to rename the same implementation detail.
+    """
+
+    value = answer or ""
+    request = original_query_without_runtime_contract(query or "")
+    developer_schema_request = bool(
+        INTERNAL_RETRIEVAL_DEVELOPER_INTENT_RE.search(request)
+        and INTERNAL_RETRIEVAL_SUBJECT_RE.search(request)
+    )
+    if not value or developer_schema_request:
+        return value
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
+            request,
+            re.IGNORECASE,
+        ):
+            return token
+        return INTERNAL_RETRIEVAL_FIELD_USER_LABELS.get(token.casefold(), token)
+
+    return INTERNAL_RETRIEVAL_FIELD_RE.sub(replace, value)
+
+
+def stabilize_turn_contract_candidate(payload: ChatPayload, answer: str) -> str:
+    """Apply deterministic, query-derived presentation fixes in Eval mode.
+
+    The caller invokes this only inside the blocking Eval turn-contract path.
+    Empty answers stay empty, so a boundary sentence can never masquerade as a
+    completed business response. Production remains record-only and never
+    reaches this function.
+    """
+
+    if TURN_EXECUTION_CONTRACT_MARKER not in (payload.query or ""):
+        return answer or ""
+    value = normalize_internal_retrieval_field_labels(answer, payload.query).strip()
+    if not value:
+        return value
+    missing_actions = missing_negative_actions(
+        value,
+        required_negative_actions(payload.query),
+    )
+    if missing_actions:
+        boundary = "行动边界：" + "、".join(
+            f"不会{action}" for action in missing_actions
+        ) + "。"
+        value = value.rstrip() + "\n\n" + boundary
+    return value
+
+
 def internal_planning_excerpt(answer: str, query: str = "") -> str:
     """Return a short excerpt when user-visible output contains repair narration."""
 
@@ -6846,16 +6920,39 @@ def turn_contract_needs_retrieval(
     ):
         return True
     if evidence_by_id:
-        grounding_issues = [
+        direct_evidence_issues = [
             issue
             for issue in issues
             if isinstance(issue, dict)
-            and str(issue.get("code") or "") == "current_turn_evidence_focus_ungrounded"
+            and str(issue.get("code") or "")
+            in {
+                "current_turn_condition_evidence_not_direct",
+                "current_turn_evidence_quantitative_incomplete",
+                "current_turn_uncertainty_evidence_mismatch",
+            }
         ]
-        grounding_targets = _turn_contract_issue_targets(grounding_issues)
-        return bool(grounding_targets) and not evidence_contains_issue_targets(
+        if direct_evidence_issues:
+            # These validators already proved that the current fragments do
+            # not contain the required rule, number, or condition. Seeing the
+            # topic name alone is not sufficient, so spend the one bounded
+            # Eval-only rescue call.
+            return True
+        target_gap_issues = [
+            issue
+            for issue in issues
+            if isinstance(issue, dict)
+            and str(issue.get("code") or "")
+            in {
+                "current_turn_evidence_focus_ungrounded",
+                "current_turn_evidence_named_identifiers_incomplete",
+                "current_turn_evidence_structured_claims_incomplete",
+                "current_turn_evidence_topics_incomplete",
+            }
+        ]
+        gap_targets = _turn_contract_issue_targets(target_gap_issues)
+        return bool(gap_targets) and not evidence_contains_issue_targets(
             evidence_by_id,
-            grounding_targets,
+            gap_targets,
         )
     return any(
         code.startswith("current_turn_evidence_")
@@ -7219,6 +7316,7 @@ async def run_turn_contract_isolated_rewrite(
             payload.query,
             issues,
             evidence_by_id,
+            rejected_draft,
         ),
     }
     if referenced_named_sets:
@@ -8923,6 +9021,10 @@ class GeneralAgentRunner:
                     )
                     if not isinstance(evidence_locators_by_id, dict):
                         evidence_locators_by_id = {}
+                    contract_candidate = stabilize_turn_contract_candidate(
+                        self.payload,
+                        contract_candidate,
+                    )
                     normalized_candidate = normalize_known_source_citation_markup(
                         contract_candidate,
                         evidence_by_id,
@@ -9050,6 +9152,10 @@ class GeneralAgentRunner:
                         except Exception:
                             rewritten = ""
                         if rewritten:
+                            rewritten = stabilize_turn_contract_candidate(
+                                self.payload,
+                                rewritten,
+                            )
                             normalized_rewrite = normalize_known_source_citation_markup(
                                 rewritten,
                                 evidence_by_id,

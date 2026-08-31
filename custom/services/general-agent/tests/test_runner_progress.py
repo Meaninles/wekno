@@ -48,6 +48,7 @@ from app.runner import (  # noqa: E402
     materialize_professional_skills,
     mcp_tool_result,
     normalize_known_source_citation_markup,
+    normalize_internal_retrieval_field_labels,
     normalize_professional_skill_path,
     original_input_files_xml,
     original_input_failures_xml,
@@ -82,6 +83,7 @@ from app.runner import (  # noqa: E402
     should_enable_turn_contract_runtime_repair,
     should_enable_turn_contract_stop_hook,
     should_record_turn_evidence,
+    stabilize_turn_contract_candidate,
     user_facing_error_message,
     validate_pptx_layout_bytes,
 )
@@ -216,6 +218,46 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertFalse(turn_contract_needs_retrieval(issues, evidence))
         self.assertTrue(turn_contract_needs_retrieval(issues, {}))
 
+    def test_turn_contract_retrieves_missing_structured_evidence_despite_neighbors(self):
+        issues = [
+            {
+                "code": "current_turn_evidence_structured_claims_incomplete",
+                "missing_segments": ["快速问答", "RAG推理", "通用智能体"],
+            }
+        ]
+
+        self.assertTrue(
+            turn_contract_needs_retrieval(
+                issues,
+                {"S1": "Skill通过渐进式披露按需加载内容。"},
+            )
+        )
+        self.assertFalse(
+            turn_contract_needs_retrieval(
+                issues,
+                {
+                    "S1": "快速问答适合直接问答。",
+                    "S2": "RAG推理面向检索推理。",
+                    "S3": "通用智能体面向综合任务。",
+                },
+            )
+        )
+
+    def test_turn_contract_retrieves_when_existing_condition_evidence_is_not_direct(self):
+        issues = [
+            {
+                "code": "current_turn_condition_evidence_not_direct",
+                "missing_topics": ["方案甲"],
+            }
+        ]
+
+        self.assertTrue(
+            turn_contract_needs_retrieval(
+                issues,
+                {"S1": "方案甲的定义，但没有用户所问的适用条件。"},
+            )
+        )
+
     def test_isolated_turn_contract_rewrite_has_no_tools_or_assistant_history(self):
         captured = {}
 
@@ -260,12 +302,17 @@ class RunnerProgressTest(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
+            evidence = {
+                f"S{index}": f"无关依据{index}。"
+                for index in range(1, 10)
+            }
+            evidence["S2"] = "read_skill读取内容，execute_skill_script在沙箱中执行脚本。"
             answer = asyncio.run(
                 run_turn_contract_isolated_rewrite(
                     payload,
                     issues,
-                    {"S2": "read_skill读取内容，execute_skill_script在沙箱中执行脚本。"},
-                    "旧草稿只写了read_skill。",
+                    evidence,
+                    '旧草稿只写了read_skill。<src id="S9" />',
                     fake_query,
                     Options,
                     {},
@@ -283,6 +330,7 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertNotIn("旧草稿只写了read_skill", captured["prompt"])
         self.assertNotIn('"rejected_draft"', captured["prompt"])
         self.assertIn('"可引用依据"', captured["prompt"])
+        self.assertIn('<src id=\\"S9\\" />', captured["prompt"])
         self.assertNotIn('"current_turn_evidence"', captured["prompt"])
         self.assertNotIn("准备继续检索", captured["prompt"])
         self.assertIn("不超过 480 个字符为目标", captured["prompt"])
@@ -849,6 +897,67 @@ class RunnerProgressTest(unittest.TestCase):
                     "knowledge_id标识文档，chunk_id标识文档中的检索片段。",
                 )
             },
+        )
+
+    def test_eval_candidate_stabilizer_uses_user_facing_fields_and_action_boundary(self):
+        payload = ChatPayload(
+            run_id="run-candidate-stabilizer",
+            session_id="session-candidate-stabilizer",
+            assistant_message_id="assistant-candidate-stabilizer",
+            query=(
+                "说明怎样确认搜索目标，但不要安装。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        stabilized = stabilize_turn_contract_candidate(
+            payload,
+            "按knowledge_title和knowledge_id确认，再看chunk_index。",
+        )
+
+        self.assertNotIn("knowledge_title", stabilized)
+        self.assertNotIn("knowledge_id", stabilized)
+        self.assertNotIn("chunk_index", stabilized)
+        self.assertIn("文档名称", stabilized)
+        self.assertIn("文档ID", stabilized)
+        self.assertIn("段落位置", stabilized)
+        self.assertIn("行动边界：不会安装。", stabilized)
+        self.assertNotIn(
+            "current_turn_internal_planning_exposed",
+            {issue["code"] for issue in turn_contract_issues(payload, stabilized)},
+        )
+        self.assertNotIn(
+            "current_turn_action_boundary_missing",
+            {issue["code"] for issue in turn_contract_issues(payload, stabilized)},
+        )
+
+    def test_eval_candidate_stabilizer_preserves_schema_queries_empty_and_production(self):
+        schema_query = (
+            "解释检索API响应中的knowledge_id字段。\n"
+            "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+        )
+        self.assertEqual(
+            normalize_internal_retrieval_field_labels(
+                "knowledge_id标识文档。",
+                schema_query,
+            ),
+            "knowledge_id标识文档。",
+        )
+        eval_payload = ChatPayload(
+            run_id="run-empty-stabilizer",
+            session_id="session-empty-stabilizer",
+            assistant_message_id="assistant-empty-stabilizer",
+            query="不要执行。\n[WEKNORA_CURRENT_TURN_EXECUTION_V1]",
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        self.assertEqual(stabilize_turn_contract_candidate(eval_payload, ""), "")
+        production_payload = eval_payload.model_copy(update={"query": "不要执行。"})
+        production_answer = "保留knowledge_id原样。"
+        self.assertEqual(
+            stabilize_turn_contract_candidate(production_payload, production_answer),
+            production_answer,
         )
 
     def test_turn_contract_issues_detect_missing_fresh_evidence_and_length(self):

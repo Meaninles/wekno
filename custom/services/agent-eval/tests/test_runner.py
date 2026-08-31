@@ -205,7 +205,7 @@ class DivergentSurfaceClient(PayloadRecordingClient):
 
 
 class RunnerTests(unittest.TestCase):
-    def test_runner_records_surface_divergence_without_rewriting_either_copy(self) -> None:
+    def test_runner_uses_complete_event_as_the_public_sse_surface(self) -> None:
         case = CaseSpec(
             case_id="surface-divergence",
             family_id="family",
@@ -220,9 +220,9 @@ class RunnerTests(unittest.TestCase):
         result = EvalRunner(DivergentSurfaceClient()).run_case(case)
 
         observed = result.turns[0]
-        self.assertEqual(observed.streamed_content, "SSE-only answer")
+        self.assertEqual(observed.streamed_content, "bounded answer")
         self.assertEqual(observed.production_candidate.content, "bounded answer")
-        self.assertFalse(observed.production_surface_equivalent)
+        self.assertTrue(observed.production_surface_equivalent)
 
     def test_runner_never_sends_eval_contract_to_sut(self) -> None:
         client = PayloadRecordingClient()

@@ -77,6 +77,13 @@ func ResolveQuickAnswerEvidence(
 			addChunkID(result.ParentChunkID)
 			continue
 		}
+		if result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeSummary) {
+			// Document summaries are derived retrieval aids, not claim-bearing
+			// evidence. Resolve them back to the exact source text chunk instead
+			// of failing the whole answer or citing generated summary prose.
+			addChunkID(result.ParentChunkID)
+			continue
+		}
 		// A direct, unmerged SearchResult.Content is already the DB chunk body.
 		// Only overlap/neighbor membership needs a batched reread. This keeps the
 		// common quick-answer path free of an unnecessary database round trip.
@@ -178,6 +185,10 @@ func ResolveQuickAnswerEvidence(
 		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText):
 			chunks = childrenByParent[result.ParentChunkID]
 		case result.ParentChunkID != "" && isImageChunkType(result.ChunkType):
+			if chunk := chunkMap[result.ParentChunkID]; chunk != nil {
+				chunks = []*types.Chunk{chunk}
+			}
+		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeSummary):
 			if chunk := chunkMap[result.ParentChunkID]; chunk != nil {
 				chunks = []*types.Chunk{chunk}
 			}

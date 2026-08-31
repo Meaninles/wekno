@@ -50,21 +50,21 @@ if ($PreflightOnly -and -not [string]::IsNullOrWhiteSpace($Run)) {
 
 if (-not $Policy) {
     $Policy = if ($Split.Count -eq 1 -and $Split[0] -eq "dev") {
-        "/workspace/policies/eval-optimization-gate.v2.json"
+        "/workspace/policies/eval-optimization-gate.v3.json"
     } else {
-        "/workspace/policies/production-multiturn-release-gate.v2.json"
+        "/workspace/policies/production-multiturn-release-gate.v3.json"
     }
 }
 if (-not $Manifest) {
     $Manifest = switch (Split-Path -Leaf $Policy) {
-        "eval-optimization-gate.v2.json" {
-            "/workspace/manifests/unseen-capability-matrix.v1-eval-optimization-v2.manifest.json"
+        "eval-optimization-gate.v3.json" {
+            "/workspace/manifests/unseen-capability-matrix.v1-eval-optimization-v3.manifest.json"
         }
-        "production-multiturn-release-gate.v2.json" {
-            "/workspace/manifests/unseen-capability-matrix.v1-production-release-v2.manifest.json"
+        "production-multiturn-release-gate.v3.json" {
+            "/workspace/manifests/unseen-capability-matrix.v1-production-release-v3.manifest.json"
         }
-        "repair-dependency-gate.v1.json" {
-            "/workspace/manifests/unseen-capability-matrix.v1-repair-dependency-v1.manifest.json"
+        "repair-dependency-gate.v2.json" {
+            "/workspace/manifests/unseen-capability-matrix.v1-repair-dependency-v2.manifest.json"
         }
         default {
             throw "a custom Policy requires an explicit frozen Manifest"

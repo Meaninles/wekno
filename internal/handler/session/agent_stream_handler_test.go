@@ -120,6 +120,62 @@ func TestHandleToolCallSupersedesPreambleByDefault(t *testing.T) {
 	}
 }
 
+func TestHandleFinalAnswerStartsNewStreamSegmentWhenProviderReusesIDAfterTool(t *testing.T) {
+	stream := &recordingStreamManager{}
+	handler := NewAgentStreamHandler(
+		context.Background(),
+		"session-1",
+		"assistant-1",
+		"request-1",
+		time.Time{},
+		&types.Message{ID: "assistant-1", SessionID: "session-1"},
+		stream,
+		event.NewEventBus(),
+	)
+
+	sharedID := "provider-request-1"
+	if err := handler.handleFinalAnswer(context.Background(), event.Event{
+		ID: sharedID, Type: event.EventAgentFinalAnswer,
+		Data: event.AgentFinalAnswerData{Content: "let me search", Done: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.handleToolCall(context.Background(), event.Event{
+		ID: sharedID, Type: event.EventAgentToolCall,
+		Data: event.AgentToolCallData{ToolCallID: "search-1", ToolName: "knowledge_search"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.handleFinalAnswer(context.Background(), event.Event{
+		ID: sharedID, Type: event.EventAgentFinalAnswer,
+		Data: event.AgentFinalAnswerData{Content: "grounded answer", Done: false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.handleFinalAnswer(context.Background(), event.Event{
+		ID: sharedID, Type: event.EventAgentFinalAnswer,
+		Data: event.AgentFinalAnswerData{Done: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if handler.finalAnswer != "grounded answer" {
+		t.Fatalf("finalAnswer = %q, want only the post-tool answer", handler.finalAnswer)
+	}
+	var answerIDs []string
+	for _, streamed := range stream.events {
+		if streamed.Type == types.ResponseTypeAnswer {
+			answerIDs = append(answerIDs, streamed.ID)
+		}
+	}
+	if len(answerIDs) != 3 {
+		t.Fatalf("answer event IDs = %v, want preamble plus final chunks", answerIDs)
+	}
+	if answerIDs[0] == answerIDs[1] || answerIDs[1] != answerIDs[2] {
+		t.Fatalf("answer event IDs = %v, want a new stable ID after the tool call", answerIDs)
+	}
+}
+
 func TestHandleCompletePersistsExactStreamedProductionCandidate(t *testing.T) {
 	stream := &recordingStreamManager{}
 	msg := &types.Message{

@@ -1,4 +1,4 @@
-# WeKnora 三智能体防过拟合整改审计（v2）
+# WeKnora 三智能体防过拟合整改审计（v3，文件名沿用历史入口）
 
 更新时间：2026-09-01
 适用分支：`codex/agent-eval-loop`
@@ -11,7 +11,7 @@
 逐个审核完整对话；表达、格式或局部完整性的小瑕疵可以标为 `minor_issue` 并
 通过，只有影响核心任务的 `major_issue` 或 `critical finding` 才判失败。
 
-确定性评分仍保留为诊断信号，但 v2 质量策略的
+确定性评分仍保留为诊断信号，但 v3 质量策略的
 `critical_metric_prefixes=[]`、`max_metric_rate_regression={}` 且
 `require_judge=false`，所以固定词命中与否不能决定发布。硬检查只覆盖不能靠主观
 判断放宽的产物完整性和运行风险：数据/代码哈希、split 与智能体覆盖、独立重复、
@@ -52,11 +52,11 @@ Codex 审核包只包含用户原始轮次和选定的观测答案轨道，并�
 包中不包含 turn contract、required claims、reference answers、Judge rubric、Judge
 反馈或另一条答案轨道。答案变化后旧审核会因 hash 不一致而失效。
 
-## 三、v2 门禁设计
+## 三、v3 门禁设计
 
 ### Production release gate
 
-策略：`policies/production-multiturn-release-gate.v2.json`
+策略：`policies/production-multiturn-release-gate.v3.json`
 
 - 只选择 `production_candidate`，并要求每个完整对话有独立 Codex 审核。
 - 每个 case 运行 3 次，至少 2 次达到“实质正确且有用”的最低标准；不要求
@@ -70,7 +70,7 @@ Codex 审核包只包含用户原始轮次和选定的观测答案轨道，并�
 
 ### Eval optimization gate
 
-策略：`policies/eval-optimization-gate.v2.json`
+策略：`policies/eval-optimization-gate.v3.json`
 
 - 只选择 `eval_assisted_answer`，同样由 Codex 逐个完整对话判断。
 - 用来判断有限检索或改写能否恢复失败，不等同于生产质量。
@@ -78,7 +78,7 @@ Codex 审核包只包含用户原始轮次和选定的观测答案轨道，并�
 
 ### Repair dependency gate
 
-策略：`policies/repair-dependency-gate.v1.json`
+策略：`policies/repair-dependency-gate.v2.json`
 
 报告并比较：trigger rate、success rate、repair-only pass rate、average attempts、
 added model/tool calls、added latency。该 gate 是运行成本与依赖风险检查，不替代
@@ -130,10 +130,11 @@ DEV、GATE、sealed holdout 与 grader calibration 按 family 隔离。调优期
 - 不持久化 Eval contract、评分、修复或内部验证信息；
 - Eval full-content 只有 `mode=eval + capture=full` 时才开启。
 
-SSE 流中的有效 answer segment 是 production candidate。completion payload 只能在
-没有任何 answer event 时作为 fallback；停止请求也持久化已经发送的精确字节。
-Eval runner 独立重放 SSE answer events，再与历史 API 读取的助手正文逐字比较；正式
-v2 gate 对不相等或无法证明相等的完成轮次判 `INVALID`。
+production candidate 是前端对完整 SSE 的最终公开投影：工具调用会废弃临时 answer
+segment，`complete.data.final_answer` 与正式前端一样作为最终可见正文；缺少 complete
+时才从仍有效的 answer segment 重建。停止请求仍持久化已经发送的精确字节。Eval
+runner 按相同公开投影重放 SSE，再与历史 API 读取的助手正文逐字比较；正式 v3 gate
+对不相等或无法证明相等的完成轮次判 `INVALID`。
 
 ## 七、验收证据与剩余风险
 
@@ -141,7 +142,7 @@ v2 gate 对不相等或无法证明相等的完成轮次判 `INVALID`。
 
 - production FAIL + assisted PASS 时，production gate 仍按 production Codex
   结论失败；repair-only 只报告、不计为 production PASS。
-- 固定短语诊断失败但 Codex 判断完整对话实质合格且仅有 minor issue 时，v2 gate
+- 固定短语诊断失败但 Codex 判断完整对话实质合格且仅有 minor issue 时，v3 gate
   可以通过。
 - 缺失、过期、轨道错误或维度不完整的 Codex 审核 fail closed。
 - 双轨正文、引用、分数、修复原因/次数/成本可同时在产物与报告中查看。

@@ -47,7 +47,7 @@ class FakeStreamResponse:
 
 
 class ClientTests(unittest.TestCase):
-    def test_streamed_candidate_matches_active_answer_segments(self) -> None:
+    def test_streamed_candidate_matches_frontend_complete_projection(self) -> None:
         events = [
             {"id": "draft", "response_type": "answer", "content": "I will check."},
             {
@@ -68,20 +68,26 @@ class ClientTests(unittest.TestCase):
 
         self.assertEqual(
             streamed_production_candidate(events),
-            "Grounded answer.",
+            "a different hidden rewrite",
         )
 
-    def test_completion_is_fallback_only_when_no_answer_event_exists(self) -> None:
+    def test_completion_is_authoritative_even_when_provider_reuses_answer_id(self) -> None:
         self.assertEqual(
             streamed_production_candidate(
                 [
+                    {"id": "same", "response_type": "answer", "content": "draft"},
+                    {
+                        "response_type": "tool_call",
+                        "data": {"tool_name": "knowledge_search", "preserve_answer": False},
+                    },
+                    {"id": "same", "response_type": "answer", "content": "final"},
                     {
                         "response_type": "complete",
-                        "data": {"final_answer": "fallback"},
+                        "data": {"final_answer": "final"},
                     }
                 ]
             ),
-            "fallback",
+            "final",
         )
         self.assertIsNone(streamed_production_candidate([]))
 

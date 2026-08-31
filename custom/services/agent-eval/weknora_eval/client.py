@@ -54,8 +54,10 @@ def streamed_production_candidate(events: list[dict[str, Any]]) -> str | None:
     Answer fragments are accumulated by event id. A later non-preserving tool
     call supersedes earlier answer fragments in the same way as WeKnora's
     stream handler; post-answer artifact calls explicitly preserve them. The
-    completion payload is used only when no answer fragment was emitted.
-    ``None`` means the supplied event list cannot prove an SSE answer surface.
+    The web client treats ``complete.data.final_answer`` as the authoritative
+    final visible surface, replacing transient/superseded answer fragments.
+    Mirror that public behavior exactly. ``None`` means the supplied event list
+    cannot prove an SSE answer surface.
     """
 
     segments: list[dict[str, Any]] = []
@@ -84,13 +86,15 @@ def streamed_production_candidate(events: list[dict[str, Any]]) -> str | None:
             value = data.get("final_answer")
             if isinstance(value, str):
                 completion_fallback = value
+    if completion_fallback is not None:
+        return completion_fallback
     if saw_answer:
         return "".join(
             str(segment["content"])
             for segment in segments
             if not segment["superseded"]
         )
-    return completion_fallback
+    return None
 
 
 class WeKnoraClient:

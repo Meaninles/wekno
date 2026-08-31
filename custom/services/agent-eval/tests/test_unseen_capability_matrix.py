@@ -151,19 +151,19 @@ class UnseenCapabilityMatrixTests(unittest.TestCase):
         for anchor in ("Orion", "Sev-2", "2,000", "Northstar"):
             self.assertIn(anchor, rendered)
 
-    def test_v2_manifests_freeze_codex_and_dual_track_dependencies(self) -> None:
+    def test_v3_manifests_freeze_codex_and_dual_track_dependencies(self) -> None:
         policy_and_manifest = (
             (
-                "production-multiturn-release-gate.v2.json",
-                "unseen-capability-matrix.v1-production-release-v2.manifest.json",
+                "production-multiturn-release-gate.v3.json",
+                "unseen-capability-matrix.v1-production-release-v3.manifest.json",
             ),
             (
-                "eval-optimization-gate.v2.json",
-                "unseen-capability-matrix.v1-eval-optimization-v2.manifest.json",
+                "eval-optimization-gate.v3.json",
+                "unseen-capability-matrix.v1-eval-optimization-v3.manifest.json",
             ),
             (
-                "repair-dependency-gate.v1.json",
-                "unseen-capability-matrix.v1-repair-dependency-v1.manifest.json",
+                "repair-dependency-gate.v2.json",
+                "unseen-capability-matrix.v1-repair-dependency-v2.manifest.json",
             ),
         )
         dependency_paths = {
@@ -194,6 +194,22 @@ class UnseenCapabilityMatrixTests(unittest.TestCase):
                         name: file_sha256(path)
                         for name, path in sorted(expected_paths.items())
                     },
+                )
+
+    def test_v2_manifests_remain_frozen_for_historical_reproduction(self) -> None:
+        historical = (
+            "unseen-capability-matrix.v1-production-release-v2.manifest.json",
+            "unseen-capability-matrix.v1-eval-optimization-v2.manifest.json",
+            "unseen-capability-matrix.v1-repair-dependency-v1.manifest.json",
+        )
+        for manifest_name in historical:
+            with self.subTest(manifest=manifest_name):
+                manifest = json.loads(
+                    (ROOT / "manifests" / manifest_name).read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    manifest["dependency_sha256"]["client"],
+                    "e424b83f466c225668b6208d12b6f5a3daf7b87752830ef17cdeb287335cc1dd",
                 )
 
 

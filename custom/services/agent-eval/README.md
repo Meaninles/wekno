@@ -27,7 +27,7 @@ custom/services/agent-eval/prepare-unseen-capability-kbs.ps1
 python -m weknora_eval codex-review-export --dataset <dataset.jsonl> --run <run.json> --answer-track production_candidate --output <production-review.json>
 python -m weknora_eval codex-review-export --dataset <dataset.jsonl> --run <run.json> --answer-track eval_assisted_answer --output <assisted-review.json>
 python -m weknora_eval codex-review-apply --dataset <dataset.jsonl> --run <run.json> --reviews <completed-reviews.json> --output <reviewed-run.json>
-python -m weknora_eval gate --dataset <dataset.jsonl> --candidate <reviewed-run.json> --baseline <reviewed-baseline.json> --policy policies/production-multiturn-release-gate.v2.json --output <gate.json>
+python -m weknora_eval gate --dataset <dataset.jsonl> --candidate <reviewed-run.json> --baseline <reviewed-baseline.json> --policy policies/production-multiturn-release-gate.v3.json --output <gate.json>
 ```
 
 正式 production gate 同时要求 `gate` 与 `sealed_holdout`。sealed 正文不存在或未由
@@ -249,7 +249,7 @@ custom/services/agent-eval/prepare-runner-env.ps1
 custom/services/agent-eval/prepare-unseen-capability-kbs.ps1
 ```
 
-随后运行当前 v2 preflight：
+随后运行当前 v3 preflight：
 
 ```powershell
 custom/services/agent-eval/eval-loop.ps1 -Split dev -PreflightOnly
@@ -335,18 +335,19 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 - `stack.ps1`：两工作树互斥切换和固定分角色重建。
 - `seed-from-main.ps1`：容量预检、顺序导出/恢复和物理卷隔离。
 - `prepare-unseen-capability-kbs.ps1`：幂等创建四个独立未见分布知识库并冻结绑定。
-- `eval-loop.ps1`：v2 preflight、双轨 run、Codex 审核导出/绑定、gate 与 report；不自动 Judge。
+- `eval-loop.ps1`：v3 preflight、双轨 run、Codex 审核导出/绑定、gate 与 report；不自动 Judge。
 - `weknora_eval/codex_review.py`：完整对话、exact-track、SHA 绑定的 Codex 最低质量标准。
-- `policies/production-multiturn-release-gate.v2.json`：只读 production candidate 的发布策略。
-- `policies/eval-optimization-gate.v2.json`：只读 assisted answer 的恢复能力策略。
-- `policies/repair-dependency-gate.v1.json`：修复触发、成功、repair-only、调用与延迟依赖策略。
+- `policies/production-multiturn-release-gate.v3.json`：只读 production candidate 的当前发布策略。
+- `policies/eval-optimization-gate.v3.json`：只读 assisted answer 的当前恢复能力策略。
+- `policies/repair-dependency-gate.v2.json`：修复触发、成功、repair-only、调用与延迟依赖策略。
 - `datasets/unseen-capability-matrix.v1.jsonl`：7 个跨领域、12 轮、三智能体、每 case 三次的能力矩阵。
 - `ANTI-OVERFITTING-AUDIT-v2.md`：整改分类、双轨边界、验收证据和剩余风险。
 
 以下文件只用于复现历史 v1/v10 结果，不参与当前质量结论：
 
 - `prepare-eval.ps1`、Judge calibration 与旧 `multiturn-*` policy/manifest。
-- `weknora_eval/` 中的旧 contract scorer/Judge 命令仍可读取历史产物，但 v2 policy 不让其决定语义 PASS。
+- `weknora_eval/` 中的旧 contract scorer/Judge 命令仍可读取历史产物，但当前 policy 不让其决定语义 PASS。
+- `policies/production-multiturn-release-gate.v2.json`、`policies/eval-optimization-gate.v2.json`、`policies/repair-dependency-gate.v1.json` 及对应 manifest 固定复现 complete-event 投影修正前的历史运行。
 - `policies/multiturn-release-gate.v2.json`：三智能体多轮 GATE 门禁策略。
 - `policies/multiturn-experiment-gate.v1.json`：单变量候选至少改善一个 case、同时禁止 case/指标族/延迟回退的 DEV 实验门禁。
 - `policies/multiturn-optimization-gate.v1.json`：智能体改动前冻结、目标 case 必须 3/3 的 DEV 优化门禁。

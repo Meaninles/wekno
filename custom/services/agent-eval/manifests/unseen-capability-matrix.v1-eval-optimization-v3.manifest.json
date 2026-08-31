@@ -1,0 +1,27 @@
+{
+  "case_count": 7,
+  "created_at": "2026-08-31T19:16:42.402144+00:00",
+  "dataset_sha256": "247d54a615e9270ba6211f045f7efe8dc23a1affd958bd56191654b9b692bd04",
+  "dependency_sha256": {
+    "assistance": "3bd23d36ec833f7bf0250407de2b2a9764029b1e837c6366b2248ca86dedf455",
+    "client": "503648b198832fc7d0010fdddb371643f425a63a9e675336ebbe6341aa3ff923",
+    "codex_review": "275074be0d428e58d5f38bf9287927bb44907ba6c9fe34e38698a8e7070857df",
+    "gate": "d2e609a90b378bf2bc4c2acd04f53b8bbd4952e8b23f682c8e4d238a2246eacb",
+    "judge_calibration": "97d02759d0adb326c0adb64b8bfa83a63cc729cf8d3a36e93cf4308512986d75",
+    "models": "8742c3ac55d181edd1b140f9182905f6d8604a5ff9d5231ac44d9ece01978a0c",
+    "policy": "ab262ae93aa3cf52102fa600e33aec786eae54645a2e0c160db977bcc32513da",
+    "profiles": "42dbd5f9225fddeb863fb462f7b6a4bae1e2782272d4e7f3e7c6706c3160148e",
+    "runner": "4168b7b243cb38a918cd5deaa12745dc0c56620e6ea47e0c9fdafeaf7dcf6ddf",
+    "scorer": "40ffd4c34e743c786dc251dee5ffc60a48d1485e95336de19e815a512df79539"
+  },
+  "family_count": 7,
+  "schema_version": 1,
+  "source_files": [
+    "datasets\\unseen-capability-matrix.v1.jsonl"
+  ],
+  "split_counts": {
+    "dev": 3,
+    "gate": 4
+  },
+  "suite": "weknora-unseen-capability-matrix-v1"
+}

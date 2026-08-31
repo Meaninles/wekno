@@ -46,20 +46,51 @@ type AgentStreamHandler struct {
 // tools; tracking segments separately lets us exclude that preamble from the
 // persisted assistant message instead of leaking it into the final answer.
 type answerSegment struct {
-	id         string
+	sourceID   string
+	streamID   string
 	content    string
 	superseded bool
 }
 
-// findAnswerSegment returns the segment for an answer event ID, or nil.
+// findActiveAnswerSegment returns the current non-superseded segment for an
+// upstream answer event ID. Some providers reuse one request/event ID across
+// multiple ReAct rounds, so a superseded segment must never be reopened.
 // Callers must hold h.mu.
-func (h *AgentStreamHandler) findAnswerSegment(id string) *answerSegment {
-	for _, seg := range h.answerSegments {
-		if seg.id == id {
+func (h *AgentStreamHandler) findActiveAnswerSegment(sourceID string) *answerSegment {
+	for i := len(h.answerSegments) - 1; i >= 0; i-- {
+		seg := h.answerSegments[i]
+		if seg.sourceID == sourceID && !seg.superseded {
 			return seg
 		}
 	}
 	return nil
+}
+
+// startAnswerSegment creates a frontend-stable event identity. The first
+// answer round preserves the provider ID; later rounds get a suffix when the
+// provider reuses that ID after a tool call.
+// Callers must hold h.mu.
+func (h *AgentStreamHandler) startAnswerSegment(sourceID string) *answerSegment {
+	if strings.TrimSpace(sourceID) == "" {
+		sourceID = "answer"
+	}
+	streamID := sourceID
+	for suffix := 2; ; suffix++ {
+		used := false
+		for _, existing := range h.answerSegments {
+			if existing.streamID == streamID {
+				used = true
+				break
+			}
+		}
+		if !used {
+			break
+		}
+		streamID = fmt.Sprintf("%s-answer-%d", sourceID, suffix)
+	}
+	segment := &answerSegment{sourceID: sourceID, streamID: streamID}
+	h.answerSegments = append(h.answerSegments, segment)
+	return segment
 }
 
 // composeFinalAnswer rebuilds the persisted answer from all non-superseded
@@ -523,10 +554,19 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
 	}
 
 	h.mu.Lock()
+	sourceID := evt.ID
+	if strings.TrimSpace(sourceID) == "" {
+		sourceID = "answer"
+	}
+	segment := h.findActiveAnswerSegment(sourceID)
+	if segment == nil {
+		segment = h.startAnswerSegment(sourceID)
+	}
+	streamID := segment.streamID
 
 	// Track start time on first chunk
-	if _, exists := h.eventStartTimes[evt.ID]; !exists {
-		h.eventStartTimes[evt.ID] = time.Now()
+	if _, exists := h.eventStartTimes[streamID]; !exists {
+		h.eventStartTimes[streamID] = time.Now()
 	}
 
 	// Emit a one-shot TTFB log the first time *any* answer chunk reaches
@@ -541,14 +581,10 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
 	}
 
 	// Accumulate final answer locally for assistant message (database). Track
-	// per event ID so a later supersede can subtract this segment's content.
+	// per active stream ID so a later supersede can subtract this segment's
+	// content even when the provider reuses one source event ID across rounds.
 	if data.Content != "" {
-		seg := h.findAnswerSegment(evt.ID)
-		if seg == nil {
-			seg = &answerSegment{id: evt.ID}
-			h.answerSegments = append(h.answerSegments, seg)
-		}
-		seg.content += data.Content
+		segment.content += data.Content
 		h.finalAnswer = h.composeFinalAnswer()
 	}
 	if data.IsFallback {
@@ -558,17 +594,17 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
 	// Calculate duration if done
 	var metadata map[string]interface{}
 	if data.Done {
-		startTime := h.eventStartTimes[evt.ID]
+		startTime := h.eventStartTimes[streamID]
 		duration := time.Since(startTime)
 		metadata = map[string]interface{}{
-			"event_id":     evt.ID,
+			"event_id":     streamID,
 			"duration_ms":  duration.Milliseconds(),
 			"completed_at": time.Now().Unix(),
 		}
-		delete(h.eventStartTimes, evt.ID)
+		delete(h.eventStartTimes, streamID)
 	} else {
 		metadata = map[string]interface{}{
-			"event_id": evt.ID,
+			"event_id": streamID,
 		}
 	}
 	if data.IsFallback {
@@ -578,7 +614,7 @@ func (h *AgentStreamHandler) handleFinalAnswer(ctx context.Context, evt event.Ev
 
 	// Append this chunk to stream (frontend will accumulate by event ID)
 	if err := h.streamManager.AppendEvent(h.ctx, h.sessionID, h.assistantMessageID, interfaces.StreamEvent{
-		ID:        evt.ID,
+		ID:        streamID,
 		Type:      types.ResponseTypeAnswer,
 		Content:   data.Content, // Just this chunk
 		Done:      data.Done,

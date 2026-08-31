@@ -150,3 +150,28 @@ func TestResolveQuickAnswerEvidenceMapsImageHitToTextFragment(t *testing.T) {
 		t.Fatalf("image hit was not mapped to the readable text fragment: %#v", refs)
 	}
 }
+
+func TestResolveQuickAnswerEvidenceMapsGeneratedSummaryToParentText(t *testing.T) {
+	repo := &exactEvidenceRepoStub{byID: map[string]*types.Chunk{
+		"text-1": {
+			ID: "text-1", TenantID: 7, KnowledgeID: "doc-1",
+			ChunkType: types.ChunkTypeText, Content: "Sev-2 首次确认时限为十五分钟。",
+		},
+	}}
+	summary := &types.SearchResult{
+		ID: "summary-1", Content: "模型生成的文档摘要，不得直接作为证据。",
+		ParentChunkID: "text-1", KnowledgeID: "doc-1",
+		ChunkType: string(types.ChunkTypeSummary), SourceTenantID: 7,
+	}
+
+	refs, err := ResolveQuickAnswerEvidence(context.Background(), repo, 7, []*types.SearchResult{summary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0].ID != "text-1" || refs[0].EvidenceContent != repo.byID["text-1"].Content {
+		t.Fatalf("summary evidence = %#v, want exact parent text", refs)
+	}
+	if refs[0].Content == summary.Content {
+		t.Fatalf("generated summary leaked into evidence: %#v", refs[0])
+	}
+}

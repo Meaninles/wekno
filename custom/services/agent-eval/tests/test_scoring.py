@@ -347,6 +347,49 @@ class ScoringTests(unittest.TestCase):
         )
         self.assertEqual(asserted_result.verdict, Verdict.FAIL)
 
+    def test_forbidden_predicate_ignores_direct_denial_but_catches_later_assertion(self) -> None:
+        contract = TurnContract(
+            conversation_state=ConversationStateContract(
+                forbidden_inferences=[
+                    TextRule(
+                        rule_id="review-is-approval",
+                        any_of=["等同于最终批准"],
+                    )
+                ]
+            )
+        )
+        spec = self.spec.model_copy(
+            update={"turns": [self.spec.turns[0].model_copy(update={"contract": contract})]}
+        )
+
+        def verdict(content: str) -> Verdict:
+            return score_case(
+                spec,
+                CaseRun(
+                    case_id=spec.case_id,
+                    family_id=spec.family_id,
+                    split=spec.split,
+                    verdict=Verdict.INVALID,
+                    turns=[
+                        ObservedTurn(
+                            turn_id="turn-1",
+                            session_id="session",
+                            content=content,
+                            is_completed=True,
+                        )
+                    ],
+                ),
+            ).verdict
+
+        self.assertEqual(
+            verdict("技术审查完成不等同于最终批准，两者是独立状态。"),
+            Verdict.PASS,
+        )
+        self.assertEqual(
+            verdict("技术审查不等同于最终批准；本项目仍等同于最终批准。"),
+            Verdict.FAIL,
+        )
+
     def test_internal_planning_heuristic_catches_unlisted_leak(self) -> None:
         contract = TurnContract(
             forbidden_claims=[

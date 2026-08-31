@@ -81,6 +81,15 @@ COMPOUND_ACTION_SUFFIXES = (
 NEGATION_SCOPE_RE = re.compile(
     r"(?:没有|并无|尚无|无|不存在|未规定|未划分|未采用|未提供|不适用|并非|不是|不得|不要|不会|不能|不应|缺少|缺乏)"
 )
+# Bare ``不`` is too broad to search anywhere in a clause, but it is an
+# unambiguous predicate negation when it appears immediately before the
+# forbidden phrase (for example ``不等同于最终批准``).  Keep this separate from
+# NEGATION_SCOPE_RE so an unrelated ``不`` earlier in the clause cannot hide a
+# later prohibited assertion.  The negative lookbehind avoids treating common
+# double-negation endings such as ``不得不`` and ``不能不`` as denials.
+DIRECT_NEGATION_SCOPE_RE = re.compile(
+    r"(?<![得能会是])不(?:再|一定|必然|直接|当然)?$"
+)
 POST_NEGATION_SCOPE_RE = re.compile(
     r"(?:不存在|不适用|未规定|未采用|没有依据|无依据|并无依据)"
 )
@@ -235,7 +244,12 @@ def _term_has_unnegated_occurrence(text: str, item: str, case_sensitive: bool) -
             clause_prefix = re.split(r"[。！？!?；;]", prefix)[-1]
             suffix = value[index + len(probe):index + len(probe) + 16]
             clause_suffix = re.split(r"[。！？!?；;]", suffix)[0]
-            if not NEGATION_SCOPE_RE.search(clause_prefix) and not POST_NEGATION_SCOPE_RE.search(clause_suffix):
+            locally_denied = (
+                NEGATION_SCOPE_RE.search(clause_prefix) is not None
+                or DIRECT_NEGATION_SCOPE_RE.search(clause_prefix) is not None
+                or POST_NEGATION_SCOPE_RE.search(clause_suffix) is not None
+            )
+            if not locally_denied:
                 return True
             start = index + len(probe)
     return False

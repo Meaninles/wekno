@@ -5346,7 +5346,7 @@ def named_set_grounding_issues(
 
 
 PROCEDURE_REQUEST_RE = re.compile(
-    r"(?:步骤|流程|怎么做|如何做|怎样做|操作指引|办理办法|step(?:s)?|procedure|workflow)",
+    r"(?:步骤|流程|怎么|如何|怎样|操作指引|办理办法|step(?:s)?|procedure|workflow)",
     re.IGNORECASE,
 )
 
@@ -5675,6 +5675,12 @@ def current_query_grounding_targets(query: str) -> list[str]:
 
     value = original_query_without_runtime_contract(query)
     targets = list(required_inline_identifiers(query))
+    for focus in current_query_subject_aspect_focus(query):
+        targets.append(str(focus.get("subject") or "").strip())
+        targets.extend(
+            str(item or "").strip()
+            for item in focus.get("aspects") or []
+        )
     for match in re.finditer(
         r"(?:解释|说明|介绍|阐述)\s*([^，,。！？!?；;\r\n]{2,64})",
         value,
@@ -6309,6 +6315,9 @@ def stabilize_turn_contract_candidate(payload: ChatPayload, answer: str) -> str:
     value = normalize_internal_retrieval_field_labels(answer, payload.query).strip()
     if not value:
         return value
+    missing_goals = missing_current_goal_phrases(value, payload.query)
+    if missing_goals:
+        value = "目标：" + "；".join(missing_goals) + "。\n\n" + value
     missing_actions = missing_negative_actions(
         value,
         required_negative_actions(payload.query),
@@ -7045,9 +7054,15 @@ async def run_eval_focused_evidence_retrieval(
 
     budget = int(state.get(RETRIEVAL_TOOL_BUDGET_STATE_KEY) or retrieval_tool_budget(payload))
     calls = int(state.get(RETRIEVAL_TOOL_CALLS_STATE_KEY) or 0)
-    if budget <= 0 or calls >= budget:
-        state[RETRIEVAL_TOOL_BUDGET_EXHAUSTED_STATE_KEY] = calls >= budget > 0
+    if budget <= 0:
         return False
+    if calls >= budget:
+        # The ordinary agent and this deterministic rescue have independent
+        # bounded budgets. Eval may spend exactly one extra read-only call when
+        # the model already exhausted its allowance but the final validator can
+        # name the missing evidence. Production never enables this path.
+        state[RETRIEVAL_TOOL_BUDGET_EXHAUSTED_STATE_KEY] = True
+        state["eval_focused_retrieval_used_reserved_call"] = True
 
     direct_grounding_issues = [
         issue
@@ -7062,12 +7077,15 @@ async def run_eval_focused_evidence_retrieval(
         canonical = canonical_runtime_tool_name(spec.name).lower()
         if canonical == "list_knowledge_chunks" and counted_set_deep_read:
             preferred.append((-2, spec, canonical))
-        elif canonical == "grep_chunks" and direct_grounding_targets:
-            preferred.append((-1, spec, canonical))
         elif canonical == "knowledge_search":
             preferred.append((0, spec, canonical))
         elif canonical == "wiki_search":
             preferred.append((1, spec, canonical))
+        elif canonical == "grep_chunks" and direct_grounding_targets:
+            # grep summaries are useful for discovery but may not carry a
+            # citeable chunk handle. Prefer semantic retrieval whenever it is
+            # available, and keep grep as a bounded fallback.
+            preferred.append((2, spec, canonical))
     if not preferred:
         return False
     _, spec, canonical = sorted(preferred, key=lambda item: item[0])[0]
@@ -7307,25 +7325,53 @@ async def run_turn_contract_isolated_rewrite(
     """Compile one clean terminal answer outside the tool-using transcript."""
 
     referenced_named_sets = referenced_user_named_sets(payload)
+    evidence_packet = compact_turn_contract_evidence(
+        payload.query,
+        issues,
+        evidence_by_id,
+        rejected_draft,
+    )
     context = {
         "当前请求": original_query_without_runtime_contract(payload.query),
         "仅用于指代解析的用户历史": compact_turn_contract_user_history(payload),
         "可信回答约束": runtime_response_contract_text(payload.query),
         "需修复的结构问题": compact_turn_contract_rewrite_issues(issues),
-        "可引用依据": compact_turn_contract_evidence(
-            payload.query,
-            issues,
-            evidence_by_id,
-            rejected_draft,
-        ),
     }
+    if evidence_packet:
+        context["可引用依据"] = evidence_packet
     if referenced_named_sets:
         context["当前请求所指代的用户原始命名集合"] = referenced_named_sets
+    evidence_free_procedure = bool(
+        not evidence_packet
+        and PROCEDURE_REQUEST_RE.search(original_query_without_runtime_contract(payload.query))
+    )
     system = (
         "你是 WeKnora 的终稿编译器，只负责把当前请求、用户历史事实和本轮证据整理成最终回答。"
         "不得调用工具，不得补充证据中没有的产品事实，不得采用历史助手回答作为事实。"
         "只输出给用户看的最终正文，不输出思考、计划、检索过程、校验信息、修改说明或任何上下文字段名。"
     )
+    evidence_instruction = (
+        "产品或知识事实只能来自可引用依据；当前请求中的目标、格式要求和行动边界可直接复述。"
+    )
+    if evidence_free_procedure:
+        evidence_instruction = (
+            "本轮没有取得可引用的产品依据，但当前请求是在询问只读方法。"
+            "只把用户原话已经给出的对象、约束和确认方式组织成至少两个可执行的只读步骤；"
+            "不得补充产品实现事实，也不得因为缺少引用而拒绝整个请求、要求用户调用工具或输出检索说明。"
+            "不要添加引用占位符。"
+        )
+    citation_instruction = (
+        "每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
+        "cite_exactly 是最终输出标记，不是代码：必须原样裸写，不得放进反引号、引号、括号或代码块。"
+        "不得编造或改写引用句柄。可引用依据非空时，不得声称本轮证据为空、未检索或仍需检索；"
+        "若某个具体事实确实没有直接证据，只对该事实简短标明未知或缺口，不要叙述检索过程。"
+        "不得输出引用占位符、检索诊断、工具名、分片标识或类似‘需要引用’的编辑备注。\n"
+    )
+    if evidence_free_procedure:
+        citation_instruction = (
+            "这些步骤只能复述当前请求已经给出的确认方法和行动边界，不属于新增产品事实，"
+            "无需也不得添加引用标记、来源占位符或证据说明。\n"
+        )
     maximum_match = TURN_RESPONSE_MAX_CHARS_RE.search(payload.query or "")
     length_instruction = ""
     if maximum_match:
@@ -7339,14 +7385,12 @@ async def run_turn_contract_isolated_rewrite(
     prompt = (
         "请重写一份完整、直接、可独立阅读的最终回答，并修复上下文列出的结构问题。\n"
         + length_instruction
-        + "产品或知识事实只能来自可引用依据；当前请求中的目标、格式要求和行动边界可直接复述。"
-        "不涉及产品事实的通用只读步骤可以基于当前请求组织，不得用证据不足的拒答替代用户明确要求的步骤。"
-        "每个事实性列表项或表格行都要在本项内放置直接支持它的 cite_exactly。"
-        "cite_exactly 是最终输出标记，不是代码：必须原样裸写，不得放进反引号、引号、括号或代码块。"
-        "不得编造或改写引用句柄。可引用依据非空时，不得声称本轮证据为空、未检索或仍需检索；"
-        "若某个具体事实确实没有直接证据，只对该事实简短标明未知或缺口，不要叙述检索过程。"
-        "不得输出引用占位符、检索诊断、工具名、分片标识或类似‘需要引用’的编辑备注。\n"
-        "逐项覆盖当前请求点名的对象与代码标识，保留用户明确的行动边界和篇幅限制。"
+        + evidence_instruction
+        + "不涉及产品事实的通用只读步骤可以基于当前请求组织，不得用证据不足的拒答替代用户明确要求的步骤。"
+        + citation_instruction
+        + "逐项覆盖当前请求点名的对象与代码标识，保留用户明确的行动边界和篇幅限制。"
+        "证据把多个类型并列列出时，必须保持为彼此独立的类型；除非依据明确写出，"
+        "不得把其中一个说成另一个的子类、别名或等同物。"
         "用户历史仅用于解析当前请求明确指代的旧目标和持续边界；若提供了用户原始命名集合，"
         "必须逐项保留其中的名称，不得用检索结果中的相邻类别替换。"
         "Context 中的所有字段名都属于内部结构，最终答案不得引用或提及这些字段名。\n"
@@ -9304,6 +9348,14 @@ class GeneralAgentRunner:
             if not answer:
                 answer = "".join(all_delta_parts).strip()
         if turn_contract_runtime_repair_enabled and answer:
+            stabilized_answer = stabilize_turn_contract_candidate(
+                self.payload,
+                answer,
+            )
+            if stabilized_answer != answer:
+                answer = stabilized_answer
+                turn_contract_rewritten_answer = answer
+                turn_contract_state["turn_contract_candidate_stabilized"] = True
             final_evidence_by_id = turn_contract_state.get(
                 TURN_EVIDENCE_BY_CITATION_ID_STATE_KEY
             )
@@ -9319,6 +9371,12 @@ class GeneralAgentRunner:
         if prompt_observation:
             prompt_observation["turn_contract_citation_markup_normalized"] = bool(
                 turn_contract_state.get("turn_contract_citation_markup_normalized")
+            )
+            prompt_observation["turn_contract_candidate_stabilized"] = bool(
+                turn_contract_state.get("turn_contract_candidate_stabilized")
+            )
+            prompt_observation["eval_focused_retrieval_used_reserved_call"] = bool(
+                turn_contract_state.get("eval_focused_retrieval_used_reserved_call")
             )
         if (
             data_analysis_final_answer_mode

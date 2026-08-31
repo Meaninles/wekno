@@ -33,6 +33,7 @@ from app.runner import (  # noqa: E402
     claude_sdk_builtin_tools,
     classify_data_analysis_display_intent,
     compact_turn_contract_evidence,
+    current_query_grounding_targets,
     data_analysis_needs_chart_validation,
     data_analysis_post_tool_hook_factory,
     data_analysis_pre_tool_hook_factory,
@@ -336,6 +337,59 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertIn("不超过 480 个字符为目标", captured["prompt"])
         self.assertIn("不得放进反引号、引号、括号或代码块", captured["prompt"])
         self.assertIn("当前请求中的目标、格式要求和行动边界可直接复述", captured["prompt"])
+        self.assertIn("不得把其中一个说成另一个的子类、别名或等同物", captured["prompt"])
+
+    def test_isolated_rewrite_answers_evidence_free_user_derived_procedure(self):
+        captured = {}
+
+        class Options:
+            def __init__(self, **kwargs):
+                captured["options"] = kwargs
+
+        async def fake_query(*, prompt, options):
+            captured["prompt"] = prompt
+            yield ResultMessage(result="1. 按名称确认。\n2. 按ID复核。\n\n行动边界：不会安装。")
+
+        payload = ChatPayload(
+            run_id="run-evidence-free-procedure",
+            session_id="session-evidence-free-procedure",
+            assistant_message_id="assistant-evidence-free-procedure",
+            query=(
+                "搜索结果有多个时，怎样用明确名称或ID确认目标？不要安装。\n"
+                "[WEKNORA_SELECTED_KNOWLEDGE_EVIDENCE_V1]\n"
+                "本轮明确要求文档依据或引用。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        issues = [
+            {"code": "current_turn_evidence_missing"},
+            {"code": "current_turn_requested_procedure_missing"},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            answer = asyncio.run(
+                run_turn_contract_isolated_rewrite(
+                    payload,
+                    issues,
+                    {},
+                    "可引用依据为空，无法回答。",
+                    fake_query,
+                    Options,
+                    {},
+                    "test",
+                    None,
+                    Path(tmp),
+                )
+            )
+
+        self.assertIn("按名称确认", answer)
+        self.assertNotIn('"可引用依据"', captured["prompt"])
+        self.assertIn("至少两个可执行的只读步骤", captured["prompt"])
+        self.assertIn("不得因为缺少引用而拒绝整个请求", captured["prompt"])
+        self.assertIn("不要添加引用占位符", captured["prompt"])
+        self.assertNotIn("每个事实性列表项或表格行都要", captured["prompt"])
 
     def test_known_code_wrapped_source_handles_are_unwrapped_without_changing_examples(self):
         answer = (
@@ -958,6 +1012,39 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(
             stabilize_turn_contract_candidate(production_payload, production_answer),
             production_answer,
+        )
+
+    def test_eval_candidate_stabilizer_restores_explicit_current_goal(self):
+        payload = ChatPayload(
+            run_id="run-goal-stabilizer",
+            session_id="session-goal-stabilizer",
+            assistant_message_id="assistant-goal-stabilizer",
+            query=(
+                "生成最终提纲，恢复最早的WeKnora入门目标。\n"
+                "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+            ),
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+
+        stabilized = stabilize_turn_contract_candidate(payload, "最终培训提纲正文。")
+
+        self.assertTrue(stabilized.startswith("目标：WeKnora入门。"))
+        self.assertNotIn(
+            "current_turn_explicit_goal_missing",
+            {issue["code"] for issue in turn_contract_issues(payload, stabilized)},
+        )
+
+    def test_grounding_targets_include_explicit_subject_and_requested_aspects(self):
+        query = (
+            "专业Skill的管理入口或接口范围是什么？\n"
+            "本轮明确要求文档依据或引用。\n"
+            "[WEKNORA_CURRENT_TURN_EXECUTION_V1]"
+        )
+
+        self.assertEqual(
+            current_query_grounding_targets(query),
+            ["专业Skill", "管理", "接口"],
         )
 
     def test_turn_contract_issues_detect_missing_fresh_evidence_and_length(self):
@@ -1718,6 +1805,47 @@ class RunnerProgressTest(unittest.TestCase):
             "当前机制按需加载相关内容。",
         )
 
+    def test_eval_focused_retrieval_has_one_reserved_call_after_agent_budget(self):
+        payload = ChatPayload(
+            run_id="run-focused-reserved",
+            session_id="session-focused-reserved",
+            assistant_message_id="assistant-focused-reserved",
+            query=(
+                "解释目标概念。\n本轮明确要求文档依据或引用。\n"
+                '[WEKNORA_REQUIRED_EVIDENCE_SEARCHES]["目标概念"]'
+            ),
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                disable_tools_for_turn=False,
+                knowledge_bases=["kb-1"],
+            ),
+            tools=[RuntimeToolSpec(name="knowledge_search", source="knowledge")],
+            llm=LLMConfig(model_name="test"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+            eval_observability=True,
+        )
+        state = {"retrieval_tool_budget": 2, "retrieval_tool_calls": 2}
+        result = {
+            "source_references": [
+                {
+                    "cite_exactly": '<src id="S1" />',
+                    "evidence_content": "目标概念的直接依据。",
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {"CUSTOM_GENERAL_AGENT_EVAL_BLOCKING_REPAIR": "1"}), patch(
+            "app.runner.call_tool_callback",
+            return_value=result,
+        ) as callback:
+            recovered = asyncio.run(run_eval_focused_evidence_retrieval(payload, state))
+
+        self.assertTrue(recovered)
+        callback.assert_called_once()
+        self.assertEqual(state["retrieval_tool_calls"], 3)
+        self.assertTrue(state["retrieval_tool_budget_exhausted"])
+        self.assertTrue(state["eval_focused_retrieval_used_reserved_call"])
+
     def test_eval_focused_retrieval_replaces_neighboring_evidence_for_explicit_target(self):
         payload = ChatPayload(
             run_id="run-focused-retrieval-neighbor",
@@ -1780,7 +1908,7 @@ class RunnerProgressTest(unittest.TestCase):
             "原生运行时技能通过 read_skill 读取内容。",
         )
 
-    def test_eval_focused_retrieval_prefers_exact_grep_for_direct_grounding(self):
+    def test_eval_focused_retrieval_prefers_citeable_semantic_search_for_direct_grounding(self):
         payload = ChatPayload(
             run_id="run-focused-grep",
             session_id="session-focused-grep",
@@ -1835,8 +1963,8 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertTrue(recovered)
         callback.assert_called_once_with(
             payload,
-            "grep_chunks",
-            {"query": "渐进式披露"},
+            "knowledge_search",
+            {"queries": ["渐进式披露", "Skill分层加载"]},
         )
 
     def test_eval_counted_set_repair_uses_semantic_search_not_literal_grep(self):

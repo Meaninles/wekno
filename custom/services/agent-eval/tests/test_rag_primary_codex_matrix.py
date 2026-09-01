@@ -238,10 +238,12 @@ class RagPrimaryCodexMatrixTest(unittest.TestCase):
             for name, path in sorted(dependency_paths.items())
         }
         # v1 is the immutable evidence package for full-flow #2.  Its frozen
-        # orchestration hash intentionally stays bound to that historical run;
-        # current orchestration changes are frozen by v2 instead of rewriting
-        # the old manifest and making the earlier result unreproducible.
-        expected["orchestration"] = manifest["dependency_sha256"]["orchestration"]
+        # orchestration and readiness hashes intentionally stay bound to that
+        # historical run; current framework changes are frozen by v2 instead
+        # of rewriting the old manifest and making the earlier result
+        # unreproducible.
+        for dependency in ("orchestration", "readiness"):
+            expected[dependency] = manifest["dependency_sha256"][dependency]
         self.assertEqual(manifest["dependency_sha256"], expected)
 
 

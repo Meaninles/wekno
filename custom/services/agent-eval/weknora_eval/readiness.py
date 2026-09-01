@@ -82,6 +82,55 @@ def _sut_identity_value(sut: SUTFingerprint, field: str) -> Any:
     return None
 
 
+def _declared_dependency_hashes(
+    *,
+    eval_root: Path,
+    manifest: dict[str, Any],
+    reserved_names: set[str],
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve versioned, manifest-declared files without a corpus-name registry.
+
+    Historical manifests continue to use the built-in dependency names below.
+    New suites can freeze independent corpora (or other read-only inputs) by
+    declaring a relative path, so adding a business domain never requires an
+    evaluator code branch. Paths are confined to the mounted eval artifact root
+    and built-in names cannot be shadowed.
+    """
+
+    declarations = manifest.get("dependency_files")
+    if declarations is None:
+        return {}, []
+    if not isinstance(declarations, dict):
+        return {}, ["dependency_files must be an object"]
+
+    root = eval_root.resolve()
+    resolved: dict[str, str] = {}
+    errors: list[str] = []
+    for raw_name, raw_path in sorted(declarations.items(), key=lambda item: str(item[0])):
+        name = str(raw_name).strip()
+        if not name:
+            errors.append("dependency name must not be empty")
+            continue
+        if name in reserved_names:
+            errors.append(f"declared dependency cannot override built-in name: {name}")
+            continue
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            errors.append(f"declared dependency path must be a non-empty string: {name}")
+            continue
+
+        candidate = (root / raw_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            errors.append(f"declared dependency escapes eval root: {name}")
+            continue
+        if not candidate.is_file():
+            errors.append(f"declared dependency file does not exist: {name}")
+            continue
+        resolved[name] = file_sha256(candidate)
+    return resolved, errors
+
+
 def evaluate_readiness(
     *,
     dataset_path: str | Path,
@@ -188,6 +237,12 @@ def evaluate_readiness(
             / "remote-onboarding-handbook.v1.md"
         ),
     }
+    declared_dependencies, declared_dependency_errors = _declared_dependency_hashes(
+        eval_root=eval_root,
+        manifest=manifest,
+        reserved_names=set(known_dependencies),
+    )
+    known_dependencies.update(declared_dependencies)
     required_dependency_names = {
         "profiles",
         "policy",
@@ -202,6 +257,7 @@ def evaluate_readiness(
     manifest_dependencies = manifest.get("dependency_sha256")
     dependency_ok = (
         not unknown_dependency_names
+        and not declared_dependency_errors
         and isinstance(manifest_dependencies, dict)
         and manifest_dependencies == expected_dependencies
     )
@@ -215,6 +271,7 @@ def evaluate_readiness(
         expected=expected_dependencies,
         manifest=manifest_dependencies,
         unknown=unknown_dependency_names,
+        declaration_errors=declared_dependency_errors,
     )
 
     required_model = str((profile_set.get("model") or {}).get("required_model_id") or "").strip()

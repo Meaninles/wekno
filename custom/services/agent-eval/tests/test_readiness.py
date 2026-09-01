@@ -18,7 +18,11 @@ from weknora_eval.calibration import load_calibration, run_judge_calibration
 from weknora_eval.dataset import dataset_sha256, load_jsonl, validate_dataset
 from weknora_eval.langfuse_store import publish_dataset
 from weknora_eval.models import Capability, SUTFingerprint, Split, TurnContract
-from weknora_eval.readiness import evaluate_readiness, file_sha256
+from weknora_eval.readiness import (
+    _declared_dependency_hashes,
+    evaluate_readiness,
+    file_sha256,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +60,43 @@ class ReadinessTests(unittest.TestCase):
             lf.write_bytes(b"first\nsecond\n")
             crlf.write_bytes(b"first\r\nsecond\r\n")
             self.assertEqual(file_sha256(lf), file_sha256(crlf))
+
+    def test_manifest_can_declare_a_new_frozen_corpus_without_code_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus = root / "fixtures" / "new-domain.md"
+            corpus.parent.mkdir(parents=True)
+            corpus.write_text("independent corpus\n", encoding="utf-8")
+            expected_hash = file_sha256(corpus)
+            hashes, errors = _declared_dependency_hashes(
+                eval_root=root,
+                manifest={"dependency_files": {"corpus_new_domain": "fixtures/new-domain.md"}},
+                reserved_names={"policy"},
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(hashes, {"corpus_new_domain": expected_hash})
+
+    def test_manifest_declared_dependencies_reject_escape_and_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root.parent / f"{root.name}-outside-eval-dependency.md"
+            outside.write_text("outside\n", encoding="utf-8")
+            try:
+                hashes, errors = _declared_dependency_hashes(
+                    eval_root=root,
+                    manifest={
+                        "dependency_files": {
+                            "policy": "inside.md",
+                            "corpus_escape": "../outside-eval-dependency.md",
+                        }
+                    },
+                    reserved_names={"policy"},
+                )
+            finally:
+                outside.unlink(missing_ok=True)
+        self.assertEqual(hashes, {})
+        self.assertTrue(any("override built-in" in error for error in errors))
+        self.assertTrue(any("escapes eval root" in error for error in errors))
 
     def test_pre_agent_change_lock_matches_committed_dependencies(self) -> None:
         lock = json.loads(

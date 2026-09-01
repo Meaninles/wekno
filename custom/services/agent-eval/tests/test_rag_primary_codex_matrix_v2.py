@@ -103,6 +103,15 @@ class RagPrimaryCodexMatrixV2Test(unittest.TestCase):
         if not manifest_path.exists():
             self.skipTest("manifest is generated after v2 files are final")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["dependency_files"],
+            {
+                "corpus_support": (
+                    "fixtures/regression-corpora/"
+                    "customer-device-support-handbook.v1.md"
+                )
+            },
+        )
         dependencies = {
             "profiles": ROOT / "profiles" / "rag-primary-codex-matrix.v2.json",
             "judge_calibration": ROOT / "calibration" / "judge-multiturn.v1.json",

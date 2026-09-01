@@ -145,12 +145,15 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 	for _, required := range []string{
 		"Decompose compound user statements into atomic propositions",
 		"Retire only propositions that are logically incompatible",
-		"A count, outcome (including zero), missing record, lack of evidence",
+		"A count, outcome (including zero), missing record, or request",
+		`"P was not stated, shown, or proven"`,
+		"neither establishes not-P",
 		"conversational plausibility of asking whether or why",
 		"A document schema, example, suggested placeholder, or earlier assistant-generated field is not conversation state",
 		"Drafts, plans, templates, and sample text",
 		"Honor the requested count and form",
 		"Preserve the exact actor, action, object, destination, and turn scope",
+		"response-method constraint scoped to one answer",
 		"operation boundary remains active until the user explicitly revokes",
 		"does not create a new task/object",
 		"synonymous unresolved labels and paraphrases as the same semantic state",
@@ -179,6 +182,7 @@ func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttrib
 		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
 		"exclude dialogue bookkeeping, output formatting, and user-state fields",
 		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
+		"text saying P was not stated, shown, or proven leaves P unknown",
 		"semantically equivalent unresolved labels as one state",
 		"not externally persisted",
 		"do not by themselves establish a concrete object's lifecycle status",
@@ -196,11 +200,13 @@ func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *
 		"when it does not exist, emit no citation handle",
 		"do not present earlier retrieval as current evidence",
 		"question about whether/why an action should happen establishes neither lifecycle direction",
+		"Text saying P was not stated, shown, or proven leaves P unknown",
+		"one-answer formatting, language, citation, or no-tool constraint expires",
 		"Treat synonymous unresolved labels as one state",
 		"dialogue content without proving an external write",
 		"does not establish a concrete object's lifecycle",
 		"Honor requested count/form",
-		"Changing a task attribute or plan alternative does not expire its operation boundaries",
+		"Changing a task attribute or plan alternative does not expire its ongoing operation boundaries",
 		"report operations only when user text or verified current-turn tool results establish their outcome",
 	} {
 		if !strings.Contains(directive, required) {
@@ -250,6 +256,8 @@ func TestCompleteUserSourceLedgerSeparatesAuthorityFromAssistantContext(t *testi
 		`authority="user_authored_only"`,
 		"locate the user fragment that supplies it",
 		"change one field adopts only that user-authored change",
+		"keeps P unknown and does not establish not-P",
+		"One-answer response-method constraints expire",
 	} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("source ledger block missing %q: %s", want, block)

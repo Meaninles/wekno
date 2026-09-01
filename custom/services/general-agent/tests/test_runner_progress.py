@@ -1572,6 +1572,8 @@ EOF""",
         self.assertIn("keep intent classification, chain-of-thought, self-talk", prompt)
         self.assertIn("Historical assistant outputs are non-authoritative commentary", prompt)
         self.assertIn("Preserve epistemic modality", prompt)
+        self.assertIn('"P was not stated, shown, or proven"', prompt)
+        self.assertIn("neither establishes not-P", prompt)
         self.assertIn("A count or outcome (including zero)", prompt)
         self.assertIn("equivalent unresolved expressions", prompt)
         self.assertIn("Distinguish conversation content from external persistence", prompt)
@@ -1581,6 +1583,7 @@ EOF""",
         self.assertIn("A document schema, retrieved example, placeholder", prompt)
         self.assertIn("Drafts, plans, templates, and sample text", prompt)
         self.assertIn("Preserve its exact actor, action, object, destination, modality, and turn scope", prompt)
+        self.assertIn("A one-answer response-method constraint", prompt)
         self.assertIn("operation boundary remains active until the user explicitly revokes", prompt)
         self.assertIn("Source and action honesty", prompt)
         self.assertIn("Citation freshness", prompt)
@@ -1634,8 +1637,10 @@ EOF""",
             "retire only what the newer user text actually conflicts with",
             "exact actor, action, object, destination, modality, and turn scope",
             "requested output scope as an exclusion boundary",
+            "Text saying P was not stated, shown, or proven leaves P unknown",
             "Counts and outcomes, including zero",
-            "Keep operation boundaries active for the same task",
+            "response-method constraint scoped to one answer",
+            "Keep ongoing external-operation boundaries active for the same task",
             "Questions about whether or why an action should happen establish neither occurred nor not-occurred",
             "Attribute facts only to exact visible user source IDs",
             "does not expire its operation boundaries",

@@ -236,6 +236,9 @@ foreach ($groupName in $groups.Keys) {
         $kbID = New-EvalKnowledgeBase -Name ([string]$group.name) -Description "Codex unseen capability corpus v1; sha256:$corpusHash"
         $existing = Get-AllKnowledgeBases
     } else {
+        if (-not ([string]$matches[0].description).Contains("sha256:$corpusHash")) {
+            throw "existing unseen knowledge base was built from a different frozen corpus: $($group.name)"
+        }
         $kbID = [string]$matches[0].id
     }
     $documents = @(Get-Knowledges -KnowledgeBaseID $kbID)

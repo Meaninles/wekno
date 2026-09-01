@@ -87,6 +87,12 @@ $sourceHash = (Get-FileHash -LiteralPath $fixtureItem.FullName -Algorithm SHA256
 $existing = @((Invoke-EvalApi -Method GET -Path "/api/v1/knowledge-bases?page=1&page_size=200").data |
     Where-Object { [string]$_.name -eq $knowledgeBaseName })
 if ($existing.Count -gt 1) { throw "multiple fresh regression knowledge bases use the frozen name" }
+if (
+    $existing.Count -eq 1 -and
+    -not ([string]$existing[0].description).Contains("sha256:$sourceHash")
+) {
+    throw "existing fresh regression knowledge base was built from a different frozen fixture"
+}
 
 if ($existing.Count -eq 0) {
     $body = [ordered]@{

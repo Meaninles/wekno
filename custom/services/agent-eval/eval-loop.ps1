@@ -104,6 +104,38 @@ function Read-RunnerEnvironment {
     return $values
 }
 
+function Set-RunnerEnvironmentValues {
+    param(
+        [Parameter(Mandatory)] [Collections.IDictionary]$Updates
+    )
+    if (-not (Test-Path -LiteralPath $runnerEnv)) {
+        throw "runner.env is missing: $runnerEnv"
+    }
+    $lines = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($line in Get-Content -LiteralPath $runnerEnv) {
+        if ($line -match '^(?<key>[A-Za-z_][A-Za-z0-9_]*)=') {
+            $key = $Matches.key
+            if ($Updates.Contains($key)) {
+                $lines.Add("$key=$($Updates[$key])")
+                [void]$seen.Add($key)
+                continue
+            }
+        }
+        $lines.Add($line)
+    }
+    foreach ($key in $Updates.Keys) {
+        if (-not $seen.Contains([string]$key)) {
+            $lines.Add("$key=$($Updates[$key])")
+        }
+    }
+    [IO.File]::WriteAllText(
+        [IO.Path]::GetFullPath($runnerEnv),
+        (($lines -join [Environment]::NewLine) + [Environment]::NewLine),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 $repositoryRoot = (& git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repositoryRoot)) {
     throw "failed to resolve repository root"
@@ -174,8 +206,13 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         -not $runnerValues.ContainsKey("AGENT_EVAL_SUMMARY_MODEL_ID") -or
         [string]::IsNullOrWhiteSpace($runnerValues["AGENT_EVAL_SUMMARY_MODEL_ID"])
     ) {
+        $profileHostPath = if ($Profiles -match '^/workspace/(.+)$') {
+            Join-Path $PSScriptRoot ($matches[1] -replace '/', '\')
+        } else {
+            [System.IO.Path]::GetFullPath($Profiles)
+        }
         & (Join-Path $PSScriptRoot "prepare-runner-env.ps1") -ProfilePath (
-            Join-Path $PSScriptRoot "profiles/unseen-capability-matrix.v1.json"
+            $profileHostPath
         )
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare isolated runner.env" }
         $runnerValues = Read-RunnerEnvironment
@@ -189,6 +226,7 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
     if (-not (Test-Path -LiteralPath $datasetHostPath)) {
         throw "failed to resolve dataset on host: $datasetHostPath"
     }
+    $datasetText = [IO.File]::ReadAllText($datasetHostPath, [Text.Encoding]::UTF8)
     $datasetRows = @(
         Get-Content -LiteralPath $datasetHostPath |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
@@ -208,22 +246,31 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         $runnerValues = Read-RunnerEnvironment
     }
 
-    $datasetUsesUnseenCorpus = (Split-Path -Leaf $Dataset) -match '^unseen-capability-matrix\.v[0-9]+\.jsonl$'
+    # Corpus preparation follows the frozen dataset's explicit environment
+    # references, not its filename. A versioned matrix may intentionally mix
+    # multiple independent KB families.
+    $datasetUsesUnseenCorpus = $datasetText -match '\$\{AGENT_EVAL_KB_UNSEEN_[A-Z0-9_]+\}'
     if ($datasetUsesUnseenCorpus) {
         & (Join-Path $PSScriptRoot "prepare-unseen-capability-kbs.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare unseen capability knowledge bases" }
     }
-    $datasetUsesSemanticRoutingCorpus = (Split-Path -Leaf $Dataset) -eq "semantic-routing-regression.v1.jsonl"
+    $datasetUsesSemanticRoutingCorpus = $datasetText.Contains(
+        '${AGENT_EVAL_KB_SEMANTIC_ROUTING_FACILITIES_ID}'
+    )
     if ($datasetUsesSemanticRoutingCorpus) {
         & (Join-Path $PSScriptRoot "prepare-semantic-routing-regression-kb.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare semantic-routing regression knowledge base" }
     }
-    $datasetUsesFreshGeneralization = (Split-Path -Leaf $Dataset) -eq "fresh-generalization-regression.v1.jsonl"
+    $datasetUsesFreshGeneralization = $datasetText.Contains(
+        '${AGENT_EVAL_KB_FRESH_GENERALIZATION_MEDIA_ID}'
+    )
     if ($datasetUsesFreshGeneralization) {
         & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare fresh-generalization knowledge base" }
     }
-    $datasetUsesPostChangeCanary = (Split-Path -Leaf $Dataset) -eq "post-change-evidence-canary.v1.jsonl"
+    $datasetUsesPostChangeCanary = $datasetText.Contains(
+        '${AGENT_EVAL_KB_POST_CHANGE_LAB_ID}'
+    )
     if ($datasetUsesPostChangeCanary) {
         & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
             -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/lab-sample-handoff.v1.md") `
@@ -233,6 +280,132 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -UploadName "lab-sample-handoff.v1.md" `
             -CorpusVersion "helix-lab-handoff-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare post-change evidence canary knowledge base" }
+    }
+    $datasetUsesRagPrimaryHR = $datasetText.Contains(
+        '${AGENT_EVAL_KB_RAG_PRIMARY_HR_ID}'
+    )
+    if ($datasetUsesRagPrimaryHR) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/remote-onboarding-handbook.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/rag-primary-hr-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_RAG_PRIMARY_HR_ID" `
+            -KnowledgeBaseName "Eval回归-Alder远程入职手册-v1" `
+            -UploadName "remote-onboarding-handbook.v1.md" `
+            -CorpusVersion "alder-remote-onboarding-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary HR knowledge base" }
+    }
+
+    # Bind the execution identity to every KB selected by this dataset. Each
+    # individual preparation script records its own binding; this aggregate
+    # prevents a mixed-corpus run from being identified only by the last one.
+    $runnerValues = Read-RunnerEnvironment
+    $datasetKbEnvironmentKeys = @(
+        [regex]::Matches(
+            $datasetText,
+            '\$\{(?<name>AGENT_EVAL_KB_[A-Z0-9_]+)\}'
+        ) |
+            ForEach-Object { $_.Groups['name'].Value } |
+            Sort-Object -Unique
+    )
+    if ($datasetKbEnvironmentKeys.Count -gt 0) {
+        $bindingLines = [Collections.Generic.List[string]]::new()
+        foreach ($key in $datasetKbEnvironmentKeys) {
+            if (
+                -not $runnerValues.ContainsKey($key) -or
+                [string]::IsNullOrWhiteSpace([string]$runnerValues[$key])
+            ) {
+                throw "dataset KB binding is unresolved: $key"
+            }
+            $bindingLines.Add("$key=$($runnerValues[$key])")
+        }
+        $bindingArtifactPaths = [Collections.Generic.List[string]]::new()
+        if ($datasetUsesUnseenCorpus) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/unseen-capability-kb-bindings.v1.json")
+            )
+        }
+        if ($datasetUsesSemanticRoutingCorpus) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/semantic-routing-regression-kb-binding.v1.json")
+            )
+        }
+        if ($datasetUsesFreshGeneralization) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/fresh-generalization-kb-binding.v1.json")
+            )
+        }
+        if ($datasetUsesPostChangeCanary) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/post-change-evidence-canary-kb-binding.v1.json")
+            )
+        }
+        if ($datasetUsesRagPrimaryHR) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/rag-primary-hr-kb-binding.v1.json")
+            )
+        }
+        foreach ($bindingArtifactPath in $bindingArtifactPaths) {
+            if (-not (Test-Path -LiteralPath $bindingArtifactPath)) {
+                throw "prepared KB binding artifact is missing: $bindingArtifactPath"
+            }
+            $bindingArtifact = Get-Content -Raw -LiteralPath $bindingArtifactPath |
+                ConvertFrom-Json
+            $identityProperty = $bindingArtifact.PSObject.Properties[
+                'binding_identity_sha256'
+            ]
+            $stableBindingIdentity = if ($null -eq $identityProperty) {
+                ""
+            } else {
+                [string]$identityProperty.Value
+            }
+            if ([string]::IsNullOrWhiteSpace($stableBindingIdentity)) {
+                $bindingEnvironment = [string]$bindingArtifact.environment_variable
+                $bindingKnowledgeBaseID = [string]$bindingArtifact.knowledge_base_id
+                $bindingSourceHash = [string]$bindingArtifact.source_sha256
+                if (
+                    [string]::IsNullOrWhiteSpace($bindingEnvironment) -or
+                    [string]::IsNullOrWhiteSpace($bindingKnowledgeBaseID) -or
+                    [string]::IsNullOrWhiteSpace($bindingSourceHash)
+                ) {
+                    throw "KB binding artifact lacks a stable source identity: $bindingArtifactPath"
+                }
+                $stableBindingIdentity = (
+                    "$bindingEnvironment|$bindingKnowledgeBaseID|$bindingSourceHash"
+                )
+            }
+            $bindingLines.Add(
+                "artifact:$([IO.Path]::GetFileName($bindingArtifactPath))=$stableBindingIdentity"
+            )
+        }
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try {
+            $combinedBindingHash = [Convert]::ToHexString(
+                $hasher.ComputeHash(
+                    [Text.Encoding]::UTF8.GetBytes($bindingLines -join "`n")
+                )
+            ).ToLowerInvariant()
+        } finally {
+            $hasher.Dispose()
+        }
+        $declaredCorpusVersions = @(
+            $datasetRows |
+                ForEach-Object { [string]$_.corpus_version } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -notmatch '^\$\{'
+                } |
+                Sort-Object -Unique
+        )
+        $aggregateUpdates = [ordered]@{
+            AGENT_EVAL_KB_BINDINGS_SHA256 = $combinedBindingHash
+        }
+        if ($declaredCorpusVersions.Count -eq 1) {
+            $aggregateUpdates['AGENT_EVAL_CORPUS_VERSION'] = $declaredCorpusVersions[0]
+        } elseif ($declaredCorpusVersions.Count -gt 1) {
+            throw "dataset declares multiple corpus versions; use one aggregate corpus identity"
+        }
+        Set-RunnerEnvironmentValues -Updates $aggregateUpdates
+        $runnerValues = Read-RunnerEnvironment
     }
 }
 

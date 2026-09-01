@@ -302,6 +302,40 @@ custom/services/agent-eval/eval-loop.ps1 `
 `eval-loop.ps1` 会在每次相关运行前校验对应隔离知识库，并刷新语料版本和知识绑定
 哈希，避免 `runner.env` 中上一次数据集的身份残留污染本次产物。
 
+### RAG 主发布矩阵（当前候选）
+
+`rag-primary-codex-matrix.v1` 是当前三智能体生产候选的主要质量证据。它不再让无
+知识库场景占主导，而是为每个 case 显式选择且只选择一个真实知识库：Atlas IT
+运行手册、Orion 产品手册、差旅治理制度、Northstar 项目手册、Meridian 场地手册、
+Helix 实验室规程和 Alder 远程入职手册。7 个 case 覆盖快速问答、RAG 推理和通用
+智能体，每个 12–13 轮并独立重复 3 次，共 21 段完整会话、258 个问答轮次。
+
+数据集中所有 turn 的 required claims、forbidden claims、固定状态字段、证据关键词、
+引用数量、答案长度/形态、Judge rubric 和参考答案均为空。语义 PASS/FAIL 只由 Codex
+阅读整段 production conversation 后给出：小的细节、措辞、格式或非关键遗漏仍可
+PASS，只有影响核心任务的事实、证据、状态、来源、行动边界或可用性问题才 FAIL。
+机器检查只验证数据/语料/框架身份、运行完整性、三智能体与重复覆盖、审核轨道哈希、
+SSE/持久化一致和 Eval 隔离，不把诊断分数变成语义门禁。
+
+准备与执行使用同一个入口；脚本按数据集中的环境变量引用准备所有语料，并把每个
+知识库、文档和冻结 fixture 的稳定身份聚合进 `kb_bindings_sha256`：
+
+```powershell
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split gate `
+  -Dataset /workspace/datasets/rag-primary-codex-matrix.v1.jsonl `
+  -Manifest /workspace/manifests/rag-primary-codex-matrix.v1.manifest.json `
+  -Policy /workspace/policies/rag-primary-codex-release-gate.v1.json `
+  -Profiles /workspace/profiles/rag-primary-codex-matrix.v1.json `
+  -MaxConcurrency 3 `
+  -EnableEvalAssistance
+```
+
+该 production release policy 只读取 `production_candidate` 的 Codex 结论，三次中
+至少两次达到可用标准即可；`eval_assisted_answer` 只用于解释有限修复能力，即使它
+PASS 也不能挽救 production FAIL。修复率、调用量和新增耗时完整报告，但不通过固定
+阈值替 Codex 判断答案质量。
+
 终态协议与提示词再次修改后，新增 `post-prompt-lab-handover.v1`。它不是把既有
 问题替换名词，而是重新组合了未决状态同义表达、规则与对象生命周期分离、聊天内容
 与外部持久化分离、话题切换、来源摘录、英文改写和工具边界，共 14 轮、2 个独立

@@ -135,11 +135,14 @@ def evaluate_readiness(
         manifest_sha256=manifest.get("dataset_sha256"),
     )
 
+    eval_root = Path(__file__).resolve().parents[1]
     known_dependencies = {
         "profiles": file_sha256(profile_path),
         "policy": file_sha256(policy_path),
         "judge_calibration": file_sha256(calibration_path),
         "models": file_sha256(Path(__file__).with_name("models.py")),
+        "cli": file_sha256(Path(__file__).with_name("cli.py")),
+        "readiness": file_sha256(Path(__file__)),
         "runner": file_sha256(Path(__file__).with_name("runner.py")),
         "assistance": file_sha256(Path(__file__).with_name("assistance.py")),
         "codex_review": file_sha256(Path(__file__).with_name("codex_review.py")),
@@ -148,6 +151,37 @@ def evaluate_readiness(
         "gate": file_sha256(Path(__file__).with_name("gates.py")),
         "judge": file_sha256(Path(__file__).with_name("judge.py")),
         "calibrator": file_sha256(Path(__file__).with_name("calibration.py")),
+        "orchestration": file_sha256(eval_root / "eval-loop.ps1"),
+        "corpus_unseen_product": file_sha256(
+            eval_root / "fixtures" / "unseen-corpora" / "product-orion-manual.v1.md"
+        ),
+        "corpus_unseen_project": file_sha256(
+            eval_root / "fixtures" / "unseen-corpora" / "project-delivery-handbook.v1.md"
+        ),
+        "corpus_unseen_it": file_sha256(
+            eval_root / "fixtures" / "unseen-corpora" / "it-operations-runbook.v1.md"
+        ),
+        "corpus_unseen_policy": file_sha256(
+            eval_root / "fixtures" / "unseen-corpora" / "governance-expense-policy.v1.md"
+        ),
+        "corpus_facilities": file_sha256(
+            eval_root
+            / "fixtures"
+            / "regression-corpora"
+            / "facilities-access-playbook.v1.md"
+        ),
+        "corpus_lab": file_sha256(
+            eval_root
+            / "fixtures"
+            / "regression-corpora"
+            / "lab-sample-handoff.v1.md"
+        ),
+        "corpus_hr": file_sha256(
+            eval_root
+            / "fixtures"
+            / "regression-corpora"
+            / "remote-onboarding-handbook.v1.md"
+        ),
     }
     required_dependency_names = {
         "profiles",

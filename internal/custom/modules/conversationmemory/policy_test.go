@@ -146,11 +146,15 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 		"Decompose compound user statements into atomic propositions",
 		"Retire only propositions that are logically incompatible",
 		"A count, outcome (including zero), missing record, lack of evidence",
+		"conversational plausibility of asking whether or why",
 		"A document schema, example, suggested placeholder, or earlier assistant-generated field is not conversation state",
 		"Drafts, plans, templates, and sample text",
+		"Honor the requested count and form",
 		"Preserve the exact actor, action, object, destination, and turn scope",
 		"operation boundary remains active until the user explicitly revokes",
+		"does not create a new task/object",
 		"Never say that you searched, retrieved, read, verified, saved, sent, updated",
+		"If the exact ID is unavailable or uncertain",
 		"Obey an explicit current-turn output-language request",
 		"never expose intent classification, hidden reasoning, planning, self-talk",
 	} {
@@ -163,9 +167,10 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttribution(t *testing.T) {
 	contract := EnsureQueryUnderstandingContract("")
 	for _, required := range []string{
-		"mixed request combines dialogue-state work with any claim that needs external evidence",
-		"choose the relevant retrieval intent for the whole turn",
-		"Asking only to quote or attribute the user's own messages remains conversation_state",
+		`JSON "evidence_need" field MUST be exactly "none", "knowledge_base", or "web"`,
+		"For a mixed request, preserve the primary semantic intent",
+		"set evidence_need to the required external source",
+		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
 		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
 	} {
 		if !strings.Contains(contract, required) {
@@ -179,7 +184,9 @@ func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *
 	for _, required := range []string{
 		"when it does not exist, emit no citation handle",
 		"do not present earlier retrieval as current evidence",
-		"A count, zero outcome, absent record, or analysis request does not establish lifecycle state",
+		"question about whether/why an action should happen establishes neither lifecycle direction",
+		"Honor requested count/form",
+		"Changing a task attribute or plan alternative does not expire its operation boundaries",
 		"report operations only when user text or verified current-turn tool results establish their outcome",
 	} {
 		if !strings.Contains(directive, required) {

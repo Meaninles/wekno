@@ -53,6 +53,18 @@ func TestEffectiveThinkingOptionOnlyDisablesDialogueStateTurns(t *testing.T) {
 	if got := effectiveThinkingOption(conversation); got == nil || *got {
 		t.Fatalf("conversation-state thinking = %v, want explicit false", got)
 	}
+	mixed := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			KnowledgeBaseIDs: []string{"kb-other-domain"},
+			SummaryConfig:    types.SummaryConfig{Thinking: &enabled},
+		},
+		PipelineState: types.PipelineState{
+			Intent: types.IntentConversation, EvidenceNeed: types.EvidenceNeedKnowledgeBase,
+		},
+	}
+	if got := effectiveThinkingOption(mixed); got == nil || !*got {
+		t.Fatalf("mixed evidence-seeking thinking = %v, want configured true", got)
+	}
 
 	knowledge := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Thinking: &enabled}},
@@ -77,6 +89,18 @@ func TestEffectiveTemperatureOnlyCapsDialogueStateTurns(t *testing.T) {
 	conversation.SummaryConfig.Temperature = 0.1
 	if got := effectiveTemperature(conversation); got != 0.1 {
 		t.Fatalf("low configured temperature = %v, want 0.1", got)
+	}
+	mixed := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			KnowledgeBaseIDs: []string{"kb-other-domain"},
+			SummaryConfig:    types.SummaryConfig{Temperature: 0.8},
+		},
+		PipelineState: types.PipelineState{
+			Intent: types.IntentConversation, EvidenceNeed: types.EvidenceNeedKnowledgeBase,
+		},
+	}
+	if got := effectiveTemperature(mixed); got != 0.8 {
+		t.Fatalf("mixed evidence-seeking temperature = %v, want configured 0.8", got)
 	}
 	knowledge := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Temperature: 0.8}},

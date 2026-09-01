@@ -93,6 +93,19 @@ const (
 	IntentClarification QueryIntent = "clarification"
 )
 
+// EvidenceNeed records whether the current turn needs a source outside the
+// user-authored dialogue. It is deliberately independent from QueryIntent: a
+// single request may update dialogue state and also ask for fresh evidence.
+// The empty value preserves the legacy intent-only routing contract for custom
+// rewrite prompts that have not adopted this field yet.
+type EvidenceNeed string
+
+const (
+	EvidenceNeedNone          EvidenceNeed = "none"
+	EvidenceNeedKnowledgeBase EvidenceNeed = "knowledge_base"
+	EvidenceNeedWeb           EvidenceNeed = "web"
+)
+
 // NeedsKBRetrieval returns true when the intent requires knowledge base search.
 // The zero value (empty string) is treated as needing retrieval for safety.
 // Note: IntentWebSearch is NOT included — use ChatManage.NeedsRetrieval()
@@ -109,10 +122,11 @@ func (i QueryIntent) NeedsKBRetrieval() bool {
 // PipelineState holds mutable intermediate data that plugins read and write
 // as the pipeline progresses.
 type PipelineState struct {
-	RewriteQuery       string      `json:"rewrite_query,omitempty"`
-	Intent             QueryIntent `json:"intent,omitempty"`
-	History            []*History  `json:"history,omitempty"`
-	DurableUserContext string      `json:"-"`
+	RewriteQuery       string       `json:"rewrite_query,omitempty"`
+	Intent             QueryIntent  `json:"intent,omitempty"`
+	EvidenceNeed       EvidenceNeed `json:"evidence_need,omitempty"`
+	History            []*History   `json:"history,omitempty"`
+	DurableUserContext string       `json:"-"`
 
 	SearchResult []*SearchResult `json:"-"`
 	RerankResult []*SearchResult `json:"-"`
@@ -192,10 +206,22 @@ func (c *ChatManage) NeedsRetrieval() bool {
 	if c == nil {
 		return false
 	}
+	// Explicit retrieval intents remain authoritative for compatibility and
+	// fail-safe behavior. EvidenceNeed adds the previously unrepresentable mixed
+	// case; it never suppresses retrieval requested by an existing intent.
 	if c.Intent == IntentWebSearch {
 		return c.WebSearchEnabled
 	}
-	return c.Intent.NeedsKBRetrieval() && c.HasKnowledgeTargets()
+	if c.Intent.NeedsKBRetrieval() {
+		return c.HasKnowledgeTargets()
+	}
+	switch c.EvidenceNeed {
+	case EvidenceNeedKnowledgeBase:
+		return c.HasKnowledgeTargets()
+	case EvidenceNeedWeb:
+		return c.WebSearchEnabled
+	}
+	return false
 }
 
 // Clone creates a deep copy of the ChatManage object.
@@ -283,6 +309,7 @@ func (c *ChatManage) Clone() *ChatManage {
 		PipelineState: PipelineState{
 			RewriteQuery:         c.RewriteQuery,
 			Intent:               c.Intent,
+			EvidenceNeed:         c.EvidenceNeed,
 			DurableUserContext:   c.DurableUserContext,
 			ImageDescription:     c.ImageDescription,
 			QuotedContext:        c.QuotedContext,

@@ -121,7 +121,7 @@ func effectiveTemperature(chatManage *types.ChatManage) float64 {
 		return 0
 	}
 	configured := chatManage.SummaryConfig.Temperature
-	if chatManage.Intent == types.IntentConversation && configured > 0.2 {
+	if chatManage.Intent == types.IntentConversation && !chatManage.NeedsRetrieval() && configured > 0.2 {
 		return 0.2
 	}
 	return configured
@@ -133,7 +133,7 @@ func effectiveTemperature(chatManage *types.ChatManage) float64 {
 // in user-authored text, and disabling thinking reduces latency and the chance
 // that internal state-selection narration leaks into the user-visible answer.
 func effectiveThinkingOption(chatManage *types.ChatManage) *bool {
-	if chatManage != nil && chatManage.Intent == types.IntentConversation {
+	if chatManage != nil && chatManage.Intent == types.IntentConversation && !chatManage.NeedsRetrieval() {
 		disabled := false
 		return &disabled
 	}

@@ -54,12 +54,45 @@ func TestChatManageNeedsRetrievalRequiresConcreteSource(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "conversation state never retrieves despite source",
+			name: "dialogue-only conversation state skips retrieval despite source",
 			cm: &ChatManage{
 				PipelineRequest: PipelineRequest{KnowledgeBaseIDs: []string{"kb-any-domain"}},
-				PipelineState:   PipelineState{Intent: IntentConversation},
+				PipelineState: PipelineState{
+					Intent:       IntentConversation,
+					EvidenceNeed: EvidenceNeedNone,
+				},
 			},
 			want: false,
+		},
+		{
+			name: "mixed conversation state retrieves requested KB evidence",
+			cm: &ChatManage{
+				PipelineRequest: PipelineRequest{KnowledgeBaseIDs: []string{"kb-unseen-domain"}},
+				PipelineState: PipelineState{
+					Intent:       IntentConversation,
+					EvidenceNeed: EvidenceNeedKnowledgeBase,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "mixed conversation state does not manufacture a KB source",
+			cm: &ChatManage{PipelineState: PipelineState{
+				Intent:       IntentConversation,
+				EvidenceNeed: EvidenceNeedKnowledgeBase,
+			}},
+			want: false,
+		},
+		{
+			name: "legacy explicit KB intent remains authoritative over none signal",
+			cm: &ChatManage{
+				PipelineRequest: PipelineRequest{KnowledgeBaseIDs: []string{"kb-any-domain"}},
+				PipelineState: PipelineState{
+					Intent:       IntentKBSearch,
+					EvidenceNeed: EvidenceNeedNone,
+				},
+			},
+			want: true,
 		},
 		{
 			name: "web intent follows web availability",

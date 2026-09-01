@@ -83,9 +83,14 @@ func TestGeneralAgentPromptDoesNotInventFileIntent(t *testing.T) {
 	}
 	for _, required := range []string{
 		"counts and outcomes (including zero)",
+		"pragmatic reasonableness of the question",
 		"Use only user-authored facts and real current-turn evidence in drafts",
+		"honor requested count/form",
+		"role duties, contact routes, commitments",
 		"Never claim that an operation was performed or did not occur",
 		"operation boundary remains active",
+		"does not create a new task",
+		"without inventing or guessing the ID",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("general agent prompt is missing %q", required)
@@ -103,7 +108,11 @@ func TestDialogueStateIntentPromptIsGenericAndTerminal(t *testing.T) {
 		"retire only incompatible propositions",
 		"Missing information remains unknown or pending",
 		"A count or outcome (including zero)",
+		"Do not infer lifecycle from conversational plausibility",
 		"Drafts, plans, templates, and sample text",
+		"honor the requested count/form",
+		"does not create a new task/object",
+		"quote the user text without an ID",
 		"Preserve the exact actor, action, object, destination, modality, and turn scope",
 		"operation boundary remains active",
 		"Never claim that you searched, retrieved, read, verified, saved, sent, updated",
@@ -123,5 +132,34 @@ func TestDialogueStateIntentPromptIsGenericAndTerminal(t *testing.T) {
 	}
 	if strings.Contains(content, "ALWAYS respond in {{language}}") {
 		t.Error("intent prompts still override an explicit current-turn language request")
+	}
+}
+
+func TestDefaultRewriteSeparatesSemanticIntentFromEvidenceNeed(t *testing.T) {
+	content := loadPromptTemplateFileForPolicyTest(t, "rewrite.yaml")
+	section := promptTemplateSection(t, content, `  - id: "default_rewrite"`, `  - id: "standard_rewrite"`)
+
+	for _, required := range []string{
+		"Independently classify `evidence_need`",
+		"`none`",
+		"`knowledge_base`",
+		"`web`",
+		`intent="conversation_state"`,
+		`evidence_need="knowledge_base"`,
+		`"evidence_need":"string"`,
+	} {
+		if !strings.Contains(section, required) {
+			t.Errorf("default rewrite prompt is missing %q", required)
+		}
+	}
+	for _, line := range strings.Split(section, "\n") {
+		if strings.Contains(line, "Output: {") && !strings.Contains(line, `"evidence_need"`) {
+			t.Errorf("rewrite example omits evidence_need: %s", line)
+		}
+	}
+	for _, forbidden := range []string{"temporary access card", "case_id", "required_claim", "reference_answer"} {
+		if strings.Contains(strings.ToLower(section), forbidden) {
+			t.Errorf("default rewrite prompt contains scenario/Eval term %q", forbidden)
+		}
 	}
 }

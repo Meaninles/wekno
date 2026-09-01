@@ -26,9 +26,10 @@ type PluginQueryUnderstand struct {
 var rewriteImageSepPattern = regexp.MustCompile(`(?s)^(.*?)\s*\n?---\n(.*)$`)
 
 type queryUnderstandOutput struct {
-	RewriteQuery     string            `json:"rewrite_query"`
-	Intent           types.QueryIntent `json:"intent"`
-	ImageDescription string            `json:"image_description"`
+	RewriteQuery     string             `json:"rewrite_query"`
+	Intent           types.QueryIntent  `json:"intent"`
+	EvidenceNeed     types.EvidenceNeed `json:"evidence_need"`
+	ImageDescription string             `json:"image_description"`
 }
 
 // NewPluginQueryUnderstand creates a new query-understanding plugin instance
@@ -157,6 +158,7 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 		"session_id":          chatManage.SessionID,
 		"rewrite_query":       chatManage.RewriteQuery,
 		"intent":              chatManage.Intent,
+		"evidence_need":       chatManage.EvidenceNeed,
 		"has_image_desc":      chatManage.ImageDescription != "",
 		"has_prompt_override": chatManage.SystemPromptOverride != "",
 		"original_output":     response.Content,
@@ -332,7 +334,8 @@ func (p *PluginQueryUnderstand) buildPrompts(chatManage *types.ChatManage, histo
 // parseOutput extracts the rewritten query, intent classification, and optional
 // image description from the model's structured JSON output.
 //
-// Expected format: {"rewrite_query":"...","intent":"kb_search","image_description":"..."}
+// Expected format:
+// {"rewrite_query":"...","intent":"kb_search","evidence_need":"knowledge_base","image_description":"..."}
 func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw string) {
 	content := strings.TrimSpace(raw)
 	if content == "" {
@@ -344,6 +347,7 @@ func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw st
 			chatManage.RewriteQuery = rewrite
 		}
 		chatManage.Intent = output.Intent
+		chatManage.EvidenceNeed = output.EvidenceNeed
 		chatManage.ImageDescription = strings.TrimSpace(output.ImageDescription)
 		return
 	}
@@ -392,6 +396,11 @@ func parseStructuredQueryOutputJSON(content string) (queryUnderstandOutput, bool
 	intentStr := strings.TrimSpace(firstStringField(obj, "intent"))
 	if intentStr != "" {
 		out.Intent = types.QueryIntent(intentStr)
+	}
+	evidenceNeed := strings.TrimSpace(firstStringField(obj,
+		"evidence_need", "external_evidence_need", "evidence_source"))
+	if evidenceNeed != "" {
+		out.EvidenceNeed = types.EvidenceNeed(evidenceNeed)
 	}
 
 	desc := strings.TrimSpace(firstStringField(obj,
@@ -444,6 +453,14 @@ func mergeImageDescAndOCR(desc, ocr string) (string, bool) {
 // true when a non-empty override was applied.
 func applyIntentPromptOverride(chatManage *types.ChatManage, globalPrompts map[string]string) bool {
 	intentKey := string(chatManage.Intent)
+	// A mixed dialogue-state + evidence request may have no configured source.
+	// In that case use the existing source-unavailable response contract instead
+	// of pretending the dialogue-only prompt can satisfy the evidence portion.
+	if chatManage.EvidenceNeed == types.EvidenceNeedKnowledgeBase && !chatManage.HasKnowledgeTargets() {
+		intentKey = string(types.IntentKBSearch)
+	} else if chatManage.EvidenceNeed == types.EvidenceNeedWeb && !chatManage.WebSearchEnabled {
+		intentKey = string(types.IntentWebSearch)
+	}
 	if raw, ok := chatManage.IntentPromptOverrides[intentKey]; ok && strings.TrimSpace(raw) != "" {
 		chatManage.SystemPromptOverride = raw
 	}

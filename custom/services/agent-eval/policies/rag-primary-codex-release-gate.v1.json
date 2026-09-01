@@ -30,7 +30,7 @@
   "max_metric_rate_regression": {},
   "required_frozen_dependencies": [
     "models", "cli", "readiness", "runner", "assistance", "codex_review", "client", "scorer", "gate",
-    "orchestration", "corpus_unseen_product", "corpus_unseen_project",
+    "orchestration", "compose", "corpus_unseen_product", "corpus_unseen_project",
     "corpus_unseen_it", "corpus_unseen_policy", "corpus_facilities",
     "corpus_lab", "corpus_hr"
   ],

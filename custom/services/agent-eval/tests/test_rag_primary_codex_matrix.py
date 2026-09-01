@@ -220,6 +220,7 @@ class RagPrimaryCodexMatrixTest(unittest.TestCase):
             "gate": ROOT / "weknora_eval" / "gates.py",
             "policy": ROOT / "policies" / "rag-primary-codex-release-gate.v1.json",
             "orchestration": ROOT / "eval-loop.ps1",
+            "compose": ROOT / "docker-compose.yml",
             "corpus_unseen_product": ROOT / "fixtures" / "unseen-corpora" / "product-orion-manual.v1.md",
             "corpus_unseen_project": ROOT / "fixtures" / "unseen-corpora" / "project-delivery-handbook.v1.md",
             "corpus_unseen_it": ROOT / "fixtures" / "unseen-corpora" / "it-operations-runbook.v1.md",

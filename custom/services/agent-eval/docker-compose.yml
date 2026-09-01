@@ -190,6 +190,8 @@ services:
       AGENT_EVAL_RUNTIME_IMAGE_ID: ${AGENT_EVAL_RUNTIME_IMAGE_ID:-}
       AGENT_EVAL_GENERAL_AGENT_IMAGE_ID: ${AGENT_EVAL_GENERAL_AGENT_IMAGE_ID:-}
     volumes:
+      - ./eval-loop.ps1:/workspace/eval-loop.ps1:ro
+      - ./fixtures:/workspace/fixtures:ro
       - ./datasets:/workspace/datasets:ro
       - ./manifests:/workspace/manifests:ro
       - ./profiles:/workspace/profiles:ro

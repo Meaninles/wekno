@@ -156,6 +156,7 @@ def evaluate_readiness(
         "judge": file_sha256(Path(__file__).with_name("judge.py")),
         "calibrator": file_sha256(Path(__file__).with_name("calibration.py")),
         "orchestration": file_sha256(eval_root / "eval-loop.ps1"),
+        "compose": file_sha256(eval_root / "docker-compose.yml"),
         "corpus_unseen_product": file_sha256(
             eval_root / "fixtures" / "unseen-corpora" / "product-orion-manual.v1.md"
         ),

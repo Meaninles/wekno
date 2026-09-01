@@ -178,6 +178,8 @@ class ReadinessTests(unittest.TestCase):
             "AGENT_EVAL_GATE_POLICY_SHA256: ${AGENT_EVAL_GATE_POLICY_SHA256:-unknown}",
             compose,
         )
+        self.assertIn("./eval-loop.ps1:/workspace/eval-loop.ps1:ro", compose)
+        self.assertIn("./fixtures:/workspace/fixtures:ro", compose)
 
     def env(self) -> dict[str, str]:
         return {

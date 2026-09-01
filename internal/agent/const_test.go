@@ -24,3 +24,19 @@ func TestLLMRetryDelayHonorsProviderCooldown(t *testing.T) {
 		t.Fatalf("llmRetryDelay() = %s, want 15s", got)
 	}
 }
+
+func TestIsTransientErrorRecognizesTypedCircuitCooldown(t *testing.T) {
+	err := &modeladmission.CircuitOpenError{
+		Kind:       modeladmission.KindChat,
+		RetryAfter: 48 * time.Second,
+	}
+	if !isTransientError(err) {
+		t.Fatal("typed circuit cooldown must be retryable")
+	}
+}
+
+func TestIsTransientErrorRejectsPermanentFailure(t *testing.T) {
+	if isTransientError(errors.New("invalid model configuration")) {
+		t.Fatal("permanent configuration failure must not be retryable")
+	}
+}

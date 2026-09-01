@@ -56,6 +56,13 @@ func isTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Provider/admission errors carry a typed cooldown even when their human
+	// readable message does not contain one of the legacy transport markers
+	// below (for example, "model provider circuit open").  Treat the typed
+	// signal as authoritative so callLLMWithRetry can actually honor it.
+	if _, ok := modeladmission.ModelRetryAfter(err); ok {
+		return true
+	}
 	errStr := strings.ToLower(err.Error())
 	for _, marker := range transientErrorMarkers {
 		if strings.Contains(errStr, marker) {

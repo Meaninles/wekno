@@ -42,11 +42,12 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 		return next()
 	}
 	pipelineInfo(ctx, "Rerank", "input", map[string]interface{}{
-		"session_id":    chatManage.SessionID,
-		"candidate_cnt": len(chatManage.SearchResult),
-		"rerank_model":  chatManage.RerankModelID,
-		"rerank_thresh": chatManage.RerankThreshold,
-		"rewrite_query": chatManage.RewriteQuery,
+		"session_id":     chatManage.SessionID,
+		"candidate_cnt":  len(chatManage.SearchResult),
+		"rerank_model":   chatManage.RerankModelID,
+		"rerank_thresh":  chatManage.RerankThreshold,
+		"rewrite_query":  chatManage.RewriteQuery,
+		"evidence_query": chatManage.RetrievalQuery(),
 	})
 	if len(chatManage.SearchResult) == 0 {
 		pipelineInfo(ctx, "Rerank", "skip", map[string]interface{}{
@@ -103,7 +104,7 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 	rerankCtx, rerankSpan := mgr.StartSpan(ctx, langfuse.SpanOptions{
 		Name: "rerank",
 		Input: map[string]interface{}{
-			"query":             chatManage.RewriteQuery,
+			"query":             chatManage.RetrievalQuery(),
 			"candidate_count":   len(candidatesToRerank),
 			"direct_load_count": len(directLoadResults),
 			"rerank_model_id":   chatManage.RerankModelID,
@@ -140,7 +141,7 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 		// lower threshold both adds latency and admits evidence that the owner
 		// explicitly configured the model to reject.
 		var rerankErr error
-		rerankResp, rerankErr = p.rerank(ctx, chatManage, rerankModel, chatManage.RewriteQuery, passages, candidatesToRerank)
+		rerankResp, rerankErr = p.rerank(ctx, chatManage, rerankModel, chatManage.RetrievalQuery(), passages, candidatesToRerank)
 
 		if rerankErr != nil {
 			pipelineError(ctx, "Rerank", "api_error", map[string]interface{}{

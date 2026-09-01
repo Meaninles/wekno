@@ -168,9 +168,11 @@ func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttrib
 	contract := EnsureQueryUnderstandingContract("")
 	for _, required := range []string{
 		`JSON "evidence_need" field MUST be exactly "none", "knowledge_base", or "web"`,
+		`JSON "evidence_query" field is the source-facing question`,
 		"For a mixed request, preserve the primary semantic intent",
 		"set evidence_need to the required external source",
 		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
+		"exclude dialogue bookkeeping, output formatting, and user-state fields",
 		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
 	} {
 		if !strings.Contains(contract, required) {

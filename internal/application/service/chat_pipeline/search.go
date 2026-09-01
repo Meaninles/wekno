@@ -3,7 +3,6 @@ package chatpipeline
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/config"
@@ -75,6 +74,7 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 	pipelineInfo(ctx, "Search", "input", map[string]interface{}{
 		"session_id":     chatManage.SessionID,
 		"rewrite_query":  chatManage.RewriteQuery,
+		"evidence_query": chatManage.RetrievalQuery(),
 		"search_targets": len(chatManage.SearchTargets),
 		"tenant_id":      chatManage.TenantID,
 		"web_enabled":    chatManage.WebSearchEnabled,
@@ -313,7 +313,7 @@ func (p *PluginSearch) searchByTargets(
 		return nil
 	}
 
-	queryText := strings.TrimSpace(chatManage.RewriteQuery)
+	queryText := chatManage.RetrievalQuery()
 
 	// Batch-fetch KB records to determine embedding model grouping.
 	// On failure, all targets fall into an empty-key group and HybridSearch
@@ -647,11 +647,11 @@ func (p *PluginSearch) searchWebIfEnabled(ctx context.Context, chatManage *types
 		Name: "web_search",
 		Input: map[string]interface{}{
 			"provider_id": providerID,
-			"query":       chatManage.RewriteQuery,
+			"query":       chatManage.RetrievalQuery(),
 			"max_results": webConfig.MaxResults,
 		},
 	})
-	webResults, err := p.webSearchService.Search(webCtx, providerID, webConfig, chatManage.RewriteQuery)
+	webResults, err := p.webSearchService.Search(webCtx, providerID, webConfig, chatManage.RetrievalQuery())
 	webSpan.Finish(map[string]interface{}{
 		"hit_count": len(webResults),
 	}, nil, err)

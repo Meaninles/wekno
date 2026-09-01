@@ -111,3 +111,34 @@ func TestChatManageNeedsRetrievalRequiresConcreteSource(t *testing.T) {
 		})
 	}
 }
+
+func TestRetrievalQuerySeparatesEvidenceFromMixedTurn(t *testing.T) {
+	tests := []struct {
+		name string
+		cm   *ChatManage
+		want string
+	}{
+		{
+			name: "mixed turn uses evidence-only query",
+			cm: &ChatManage{PipelineState: PipelineState{
+				RewriteQuery:  "summarize the current owner and cite the retention policy",
+				EvidenceQuery: "retention policy for the current owner",
+			}},
+			want: "retention policy for the current owner",
+		},
+		{
+			name: "legacy output falls back to rewrite query",
+			cm: &ChatManage{PipelineState: PipelineState{
+				RewriteQuery: "legacy knowledge question",
+			}},
+			want: "legacy knowledge question",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.cm.RetrievalQuery(); got != test.want {
+				t.Fatalf("RetrievalQuery() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

@@ -83,8 +83,8 @@ func BeginRetrievalProgress(ctx context.Context, chatManage *types.ChatManage) *
 	toolName := retrievalProgressToolName(chatManage)
 	toolCallID := uuid.New().String()
 	args := map[string]any{}
-	if chatManage.RewriteQuery != "" {
-		args["query"] = chatManage.RewriteQuery
+	if query := chatManage.RetrievalQuery(); query != "" {
+		args["query"] = query
 	} else if chatManage.Query != "" {
 		args["query"] = chatManage.Query
 	}

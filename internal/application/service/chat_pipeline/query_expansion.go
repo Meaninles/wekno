@@ -103,7 +103,7 @@ func (p *PluginSearch) runQueryExpansion(ctx context.Context, chatManage *types.
 // expandQueries generates query variants locally without LLM to improve keyword recall.
 // Uses simple techniques: word reordering, stopword removal, key phrase extraction.
 func (p *PluginSearch) expandQueries(ctx context.Context, chatManage *types.ChatManage) []string {
-	query := strings.TrimSpace(chatManage.RewriteQuery)
+	query := chatManage.RetrievalQuery()
 	if query == "" {
 		return nil
 	}

@@ -24,7 +24,7 @@ func TestQueryUnderstandResponseSchemaRequiresIndependentEvidenceNeed(t *testing
 	for _, field := range schema.Required {
 		required[field] = true
 	}
-	for _, field := range []string{"rewrite_query", "intent", "evidence_need", "image_description"} {
+	for _, field := range []string{"rewrite_query", "evidence_query", "intent", "evidence_need", "image_description"} {
 		if !required[field] {
 			t.Fatalf("query-understand response schema does not require %q", field)
 		}
@@ -34,6 +34,7 @@ func TestQueryUnderstandResponseSchemaRequiresIndependentEvidenceNeed(t *testing
 func TestParseStructuredQueryOutputConversationStateIsNonRetrieval(t *testing.T) {
 	parsed, ok := parseStructuredQueryOutput(`{
 		"rewrite_query":"update only the supplied owner and keep the date pending",
+		"evidence_query":"",
 		"intent":"conversation_state",
 		"evidence_need":"none",
 		"image_description":""
@@ -58,6 +59,7 @@ func TestParseStructuredQueryOutputConversationStateIsNonRetrieval(t *testing.T)
 func TestParseStructuredQueryOutputMixedStateActivatesExistingKB(t *testing.T) {
 	parsed, ok := parseStructuredQueryOutput(`{
 		"rewrite_query":"summarize the confirmed owner and cite the governing policy",
+		"evidence_query":"governing policy for the confirmed owner",
 		"intent":"conversation_state",
 		"evidence_need":"knowledge_base",
 		"image_description":""
@@ -74,6 +76,10 @@ func TestParseStructuredQueryOutputMixedStateActivatesExistingKB(t *testing.T) {
 	if !cm.NeedsRetrieval() {
 		t.Fatal("mixed state/evidence request must activate an available KB")
 	}
+	cm.EvidenceQuery = parsed.EvidenceQuery
+	if got := cm.RetrievalQuery(); got != "governing policy for the confirmed owner" {
+		t.Fatalf("retrieval query = %q, want evidence-only query", got)
+	}
 }
 
 func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.T) {
@@ -81,12 +87,14 @@ func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.
 	for _, required := range []string{
 		`JSON "intent" field MUST be exactly "conversation_state"`,
 		`JSON "evidence_need" field MUST be exactly "none", "knowledge_base", or "web"`,
+		`JSON "evidence_query" field is the source-facing question`,
 		`"conversation_state" has priority over "chitchat"`,
 		"Questions, examples, hypotheticals",
 		`evidence_need determines whether that same turn also retrieves`,
 		"does not claim that every such turn creates durable state",
 		`conversation-only state or transformation task must use evidence_need "none"`,
 		"external portion of a mixed request still require the appropriate evidence_need",
+		"source-facing evidence_query",
 		"For a mixed request, preserve the primary semantic intent",
 		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
 		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",

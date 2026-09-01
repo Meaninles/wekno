@@ -29,22 +29,24 @@ var rewriteImageSepPattern = regexp.MustCompile(`(?s)^(.*?)\s*\n?---\n(.*)$`)
 // Besides enabling JSON-object mode where the provider supports it, the shared
 // chat adapter places this schema at the end of the current user message. That
 // makes the runtime contract authoritative even when a persisted custom/builtin
-// rewrite prompt still contains an older three-field example. It does not add a
+// rewrite prompt still contains an older schema example. It does not add a
 // model call or inspect any Eval data.
 var queryUnderstandResponseFormat = json.RawMessage(`{
   "type": "object",
   "properties": {
     "rewrite_query": {"type": "string"},
+    "evidence_query": {"type": "string"},
     "intent": {"type": "string"},
     "evidence_need": {"type": "string", "enum": ["none", "knowledge_base", "web"]},
     "image_description": {"type": "string"}
   },
-  "required": ["rewrite_query", "intent", "evidence_need", "image_description"],
+  "required": ["rewrite_query", "evidence_query", "intent", "evidence_need", "image_description"],
   "additionalProperties": false
 }`)
 
 type queryUnderstandOutput struct {
 	RewriteQuery     string             `json:"rewrite_query"`
+	EvidenceQuery    string             `json:"evidence_query"`
 	Intent           types.QueryIntent  `json:"intent"`
 	EvidenceNeed     types.EvidenceNeed `json:"evidence_need"`
 	ImageDescription string             `json:"image_description"`
@@ -79,6 +81,7 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
 	chatManage.RewriteQuery = chatManage.Query
+	chatManage.EvidenceQuery = chatManage.Query
 
 	hasImages := len(chatManage.Images) > 0
 	needRewrite := chatManage.EnableRewrite
@@ -176,6 +179,7 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 	pipelineInfo(ctx, "QueryUnderstand", "output", map[string]interface{}{
 		"session_id":          chatManage.SessionID,
 		"rewrite_query":       chatManage.RewriteQuery,
+		"evidence_query":      chatManage.EvidenceQuery,
 		"intent":              chatManage.Intent,
 		"evidence_need":       chatManage.EvidenceNeed,
 		"has_image_desc":      chatManage.ImageDescription != "",
@@ -354,7 +358,7 @@ func (p *PluginQueryUnderstand) buildPrompts(chatManage *types.ChatManage, histo
 // image description from the model's structured JSON output.
 //
 // Expected format:
-// {"rewrite_query":"...","intent":"kb_search","evidence_need":"knowledge_base","image_description":"..."}
+// {"rewrite_query":"...","evidence_query":"...","intent":"kb_search","evidence_need":"knowledge_base","image_description":"..."}
 func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw string) {
 	content := strings.TrimSpace(raw)
 	if content == "" {
@@ -365,6 +369,7 @@ func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw st
 		if rewrite := strings.TrimSpace(output.RewriteQuery); rewrite != "" {
 			chatManage.RewriteQuery = rewrite
 		}
+		chatManage.EvidenceQuery = strings.TrimSpace(output.EvidenceQuery)
 		chatManage.Intent = output.Intent
 		chatManage.EvidenceNeed = output.EvidenceNeed
 		chatManage.ImageDescription = strings.TrimSpace(output.ImageDescription)
@@ -410,6 +415,8 @@ func parseStructuredQueryOutputJSON(content string) (queryUnderstandOutput, bool
 	out := queryUnderstandOutput{
 		RewriteQuery: strings.TrimSpace(firstStringField(obj,
 			"rewrite_query", "rewritten_query", "query", "question")),
+		EvidenceQuery: strings.TrimSpace(firstStringField(obj,
+			"evidence_query", "retrieval_query", "search_query")),
 	}
 
 	intentStr := strings.TrimSpace(firstStringField(obj, "intent"))

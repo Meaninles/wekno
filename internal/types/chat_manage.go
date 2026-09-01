@@ -123,6 +123,7 @@ func (i QueryIntent) NeedsKBRetrieval() bool {
 // as the pipeline progresses.
 type PipelineState struct {
 	RewriteQuery       string       `json:"rewrite_query,omitempty"`
+	EvidenceQuery      string       `json:"evidence_query,omitempty"`
 	Intent             QueryIntent  `json:"intent,omitempty"`
 	EvidenceNeed       EvidenceNeed `json:"evidence_need,omitempty"`
 	History            []*History   `json:"history,omitempty"`
@@ -224,6 +225,21 @@ func (c *ChatManage) NeedsRetrieval() bool {
 	return false
 }
 
+// RetrievalQuery returns the source-facing query for search and reranking.
+// Mixed turns can contain both dialogue-state work and an external evidence
+// question; keeping that evidence question separate prevents state-management
+// wording from diluting retrieval relevance. Legacy/custom rewrite outputs
+// remain compatible because an empty EvidenceQuery falls back to RewriteQuery.
+func (c *ChatManage) RetrievalQuery() string {
+	if c == nil {
+		return ""
+	}
+	if query := strings.TrimSpace(c.EvidenceQuery); query != "" {
+		return query
+	}
+	return strings.TrimSpace(c.RewriteQuery)
+}
+
 // Clone creates a deep copy of the ChatManage object.
 // PipelineContext fields (EventBus, MessageID, etc.) are NOT copied because they
 // are per-execution handles that should not be shared across clones.
@@ -308,6 +324,7 @@ func (c *ChatManage) Clone() *ChatManage {
 		},
 		PipelineState: PipelineState{
 			RewriteQuery:         c.RewriteQuery,
+			EvidenceQuery:        c.EvidenceQuery,
 			Intent:               c.Intent,
 			EvidenceNeed:         c.EvidenceNeed,
 			DurableUserContext:   c.DurableUserContext,

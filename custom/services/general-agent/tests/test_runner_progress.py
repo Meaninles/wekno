@@ -1559,6 +1559,9 @@ EOF""",
         self.assertIn("do not request or perform a second validation or regeneration pass", prompt)
         self.assertIn("Tool authority and minimality", prompt)
         self.assertIn("answer directly without retrieval, thinking/planning tools", prompt)
+        self.assertIn("file/downloadable deliverable", prompt)
+        self.assertIn("Availability is not intent", prompt)
+        self.assertIn("keep intent classification, chain-of-thought, self-talk", prompt)
         self.assertIn("Historical assistant outputs are non-authoritative commentary", prompt)
         self.assertIn("Preserve epistemic modality", prompt)
         self.assertNotIn("local self-review of citation", prompt)
@@ -1581,6 +1584,8 @@ EOF""",
         prompt = build_prompt(payload)
 
         self.assertIn("Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired", prompt)
+        self.assertIn("Interpret action verbs together with their object and destination", prompt)
+        self.assertIn("does not authorize a filesystem artifact", prompt)
         self.assertIn("Do not carry forward an earlier turn's output format", prompt)
         self.assertLess(prompt.index("回答当前问题"), prompt.index("OLD-MARKER"))
 

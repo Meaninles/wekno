@@ -121,6 +121,12 @@ $policyHostPath = if ($Policy -match '^/workspace/(.+)$') {
 if (-not (Test-Path -LiteralPath $policyHostPath)) {
     throw "failed to resolve gate policy on host: $policyHostPath"
 }
+$policyConfig = Get-Content -Raw -LiteralPath $policyHostPath | ConvertFrom-Json
+$policyRequiresBaseline = if ($null -eq $policyConfig.require_baseline) {
+    $true
+} else {
+    [bool]$policyConfig.require_baseline
+}
 $env:AGENT_EVAL_GATE_POLICY_SHA256 = (
     Get-FileHash -LiteralPath $policyHostPath -Algorithm SHA256
 ).Hash.ToLowerInvariant()
@@ -191,6 +197,14 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
     if ($datasetUsesUnseenCorpus -and $unseenMissing.Count -gt 0) {
         & (Join-Path $PSScriptRoot "prepare-unseen-capability-kbs.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare unseen capability knowledge bases" }
+    }
+    $datasetUsesSemanticRoutingCorpus = (Split-Path -Leaf $Dataset) -eq "semantic-routing-regression.v1.jsonl"
+    $semanticRoutingVariable = "AGENT_EVAL_KB_SEMANTIC_ROUTING_FACILITIES_ID"
+    $semanticRoutingMissing = -not $runnerValues.ContainsKey($semanticRoutingVariable) -or
+        [string]::IsNullOrWhiteSpace($runnerValues[$semanticRoutingVariable])
+    if ($datasetUsesSemanticRoutingCorpus -and $semanticRoutingMissing) {
+        & (Join-Path $PSScriptRoot "prepare-semantic-routing-regression-kb.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare semantic-routing regression knowledge base" }
     }
 }
 
@@ -287,16 +301,19 @@ $gateExit = 0
 if ($CodexReview.Count -eq 0) {
     Invoke-Runner -RunnerArgs @("report", "--run", $candidate, "--output", $report) | Out-Null
     Write-Warning "WAITING_FOR_CODEX_REVIEW: no quality verdict was issued."
-} elseif ([string]::IsNullOrWhiteSpace($Baseline)) {
+} elseif ([string]::IsNullOrWhiteSpace($Baseline) -and $policyRequiresBaseline) {
     Invoke-Runner -RunnerArgs @("report", "--run", $candidate, "--output", $report) | Out-Null
     Write-Warning "Codex reviews were attached, but no paired reviewed baseline was supplied; no gate verdict was issued."
 } else {
-    $gateExit = Invoke-Runner -RunnerArgs @(
+    $gateArgs = @(
         "gate", "--dataset", $Dataset, "--candidate", $candidate,
-        "--baseline", $Baseline,
         "--policy", $Policy,
         "--output", $gateResult
-    ) -AllowedExitCodes @(0, 1, 2)
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Baseline)) {
+        $gateArgs += @("--baseline", $Baseline)
+    }
+    $gateExit = Invoke-Runner -RunnerArgs $gateArgs -AllowedExitCodes @(0, 1, 2)
     Invoke-Runner -RunnerArgs @(
         "report", "--run", $candidate, "--gate", $gateResult, "--output", $report
     ) | Out-Null
@@ -307,7 +324,7 @@ Write-Host "Production Codex review packet: $productionReviewPacket"
 Write-Host "Eval-assisted Codex review packet: $assistedReviewPacket"
 Write-Host "Dataset manifest: $Manifest"
 Write-Host "Report: $report"
-if (-not [string]::IsNullOrWhiteSpace($Baseline) -and $CodexReview.Count -gt 0) {
+if ($CodexReview.Count -gt 0 -and (-not $policyRequiresBaseline -or -not [string]::IsNullOrWhiteSpace($Baseline))) {
     Write-Host "Gate: $gateResult (exit=$gateExit)"
 }
 exit $gateExit

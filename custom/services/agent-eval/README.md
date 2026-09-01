@@ -243,6 +243,26 @@ custom/services/agent-eval/prepare-runner-env.ps1
 
 ## 一键执行前准备（不会运行 Eval）
 
+### 修改后独立语义路由回归
+
+`datasets/semantic-routing-regression.v1.jsonl` 是提示词与状态边界修改后的独立回归集，不改写原有 DEV、GATE 或 sealed holdout。它使用单独的 Meridian 场地手册语料，覆盖三个智能体、每个 12 轮、3 次独立会话，成对验证“对话内状态/内容处理不调用检索或文件工具”和“否定表达出现在知识问题中时仍正常检索引用”。语义质量仅由 Codex 完整对话审核决定；机械契约只记录工具、引用、答案轨道与持久化完整性。
+
+准备独立知识库并执行：
+
+```powershell
+custom/services/agent-eval/prepare-semantic-routing-regression-kb.ps1
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split dev `
+  -Dataset /workspace/datasets/semantic-routing-regression.v1.jsonl `
+  -Manifest /workspace/manifests/semantic-routing-regression.v1-production-gate.manifest.json `
+  -Policy /workspace/policies/semantic-routing-regression-gate.v1.json `
+  -Profiles /workspace/profiles/semantic-routing-regression.v1.json `
+  -MaxConcurrency 3 `
+  -EnableEvalAssistance
+```
+
+首轮只导出 production/assisted 两份 Codex 审核包；逐对话填写并绑定答案轨道哈希后，以 `-Run` 和两份 `-CodexReview` 重新进入无基线回归门禁。该门禁只评 `production_candidate`，assisted 通过不能挽救 production 失败。
+
 在隔离 Eval 栈已经启动、Main 栈完全停止后，先创建/校验四个未见分布知识库；脚本只更新被 Git 忽略的 `runner.env`，不会打印凭据：
 
 ```powershell

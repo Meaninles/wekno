@@ -1360,7 +1360,9 @@ def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_an
 
         @tool(
             "create_artifact",
-            "Register an existing file as a WeKnora artifact. It does not create or convert files. "
+            "Register an existing file as a WeKnora artifact only when the exact current user_request explicitly asks for a file/downloadable deliverable or inherently requires file-byte transformation. "
+            "A request to record, update, draft, plan, summarize, or change content is not file authorization unless the user identifies a file or external destination. "
+            "It does not create or convert files. "
             + artifact_return_policy_text(payload),
             {
                 "type": "object",
@@ -2815,6 +2817,7 @@ Available capabilities:
 - If you create artifacts, mention their filenames. If not, answer in text.
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
 - Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. This is still one generation run; do not request or perform a second validation or regeneration pass.
+- Final output hygiene: keep intent classification, chain-of-thought, self-talk, tool planning, and self-review internal. Start the final answer directly with useful user-facing content; routine tool use does not need narrated planning.
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
 - Source citation contract: a WeKnora tool result's `source_references` are claim-bearing evidence handles. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports; each supplied value uses the canonical form `<src id="S1" />` with its own S-number. Treat each S-number as an opaque handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. Each knowledge source is one specific document fragment. A document title and its knowledge-base/collection membership are different facts: claim membership when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited. Generate the answer once; the runtime never asks the model to validate or regenerate citations.
 - Artifact review: if you produce artifacts, review them from the user's perspective before final delivery, including format, layout, colors, typography, font sizes, readability, aesthetics, and fit to the original request. If you find issues, make one correction pass.
@@ -2864,7 +2867,9 @@ def build_prompt(
         "The exact current task is the user's verbatim prompt in <user_request verbatim=\"true\" priority=\"highest\"> below. "
         "Read that block first and keep it as the goal of this run. "
         "All WeKnora visible context is supporting context; do not let it replace or distract from the user's current prompt. "
-        "Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired unless this user_request explicitly repeats or refers to them."
+        "Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired unless this user_request explicitly repeats or refers to them. "
+        "Default to a direct chat answer. Interpret action verbs together with their object and destination: changing, recording, or drafting content in the conversation does not authorize a filesystem artifact or an external-system mutation. "
+        "Use retrieval only when this exact request needs external evidence, and use operation tools only when this exact request semantically authorizes the corresponding operation."
     )
     parts.append("</current_task_priority>")
     parts.append(

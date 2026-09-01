@@ -521,7 +521,7 @@ class ReadinessTests(unittest.TestCase):
             report = evaluate_readiness(
                 dataset_path=ROOT / "datasets" / "multiturn-ready.v1.jsonl",
                 manifest_path=ROOT / "manifests" / "multiturn-ready.v1.manifest.json",
-                profile_path=ROOT / "profiles" / "multiturn-agents.v1.json",
+                profile_path=str(ROOT / "profiles" / "multiturn-agents.v1.json"),
                 policy_path=ROOT / "policies" / "multiturn-release-gate.v1.json",
                 calibration_path=ROOT / "calibration" / "judge-multiturn.v1.json",
                 split=Split.GATE,

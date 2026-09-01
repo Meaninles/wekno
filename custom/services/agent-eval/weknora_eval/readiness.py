@@ -139,7 +139,7 @@ def evaluate_readiness(
     # datasets, profiles, orchestration and fixtures are mounted at /workspace.
     # Derive the artifact root from the caller-supplied profile path so the
     # same dependency registry works in both local tests and the runner image.
-    eval_root = profile_path.resolve().parent.parent
+    eval_root = Path(profile_path).resolve().parent.parent
     known_dependencies = {
         "profiles": file_sha256(profile_path),
         "policy": file_sha256(policy_path),

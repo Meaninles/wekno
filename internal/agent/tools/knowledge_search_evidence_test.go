@@ -36,8 +36,8 @@ func TestRenderKnowledgeSearchExactEvidenceMapsSummaryToExactParent(t *testing.T
 		Content: "generated summary must not be used as evidence",
 	}}
 	refs := []*types.SearchResult{
-		{ID: "other", KnowledgeID: "doc-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "other text"},
-		{ID: "text-1", KnowledgeID: "doc-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "authoritative parent text"},
+		{ID: "other", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "other text"},
+		{ID: "text-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "authoritative parent text"},
 	}
 
 	output := renderKnowledgeSearchExactEvidence(result, refs)

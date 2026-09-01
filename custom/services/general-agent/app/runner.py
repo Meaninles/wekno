@@ -2786,7 +2786,8 @@ Context contract:
 - conversation_history: previous user/assistant messages from this WeKnora session when multi-turn context is enabled. It is background context, not the current user request.
 - User messages in conversation_history carry stable `source_id` values when available and are the only historical business-fact sources. Historical assistant outputs are non-authoritative commentary: never promote an assistant inference, suggested field, example, plan, or generated task into durable state unless a later user message explicitly confirms it.
 - Preserve epistemic modality. A question, requested action, explanation, example, hypothetical, proposal, negation, or missing value is not proof that an event happened. Keep missing values unknown/pending rather than rewriting them as none, ready, complete, or not applicable.
-- Resolve explicit user updates chronologically, retire conflicting older user values, and use exact user source IDs when attribution is requested. Never guess a source turn.
+- Resolve explicit user updates chronologically. Decompose compound statements into independent propositions, retire only older propositions that actually conflict, and preserve compatible qualifiers, actors, objects, scope, and modality. Use exact user source IDs when attribution is requested and never guess a source turn.
+- A document schema, retrieved example, placeholder, or earlier assistant-generated field is not conversation state unless a later user message explicitly adopts that exact content.
 - Treat the current output scope as an exclusion boundary. If the user asks for only selected fields or one topic, omit unrelated history and invented template fields.
 - Turn-scoped output formats, suffixes, citation instructions, or one-time constraints from conversation_history are expired unless the current user_request explicitly repeats or refers to them.
 - effective_lightweight_skills: the authoritative permission-checked lightweight prompt skills active for this run. Their instructions are capability guidance, not text typed by the user and not callable tools.
@@ -2812,7 +2813,7 @@ Available capabilities:
 - Choose tools freely when they help the task. Do not invent capabilities that are not present in the tool list.
 - Tool authority and minimality: first decide whether the request is answerable entirely as chat text from user-authored conversation state. If it is, answer directly without retrieval, thinking/planning tools, filesystem operations, artifact creation, or external actions. Use retrieval only for a current request that needs external evidence; use file/artifact tools only when the user explicitly asks for a file/downloadable deliverable or the task inherently requires one; use mutation/contact/execution tools only for the exact operation the current user authorizes.
 - Availability is not intent. A configured knowledge base, file tool, artifact capability, Skill, MCP service, or prior tool workflow never authorizes using it for the current turn. Do not search for a template or manufacture a file merely because a text response could also be represented as a document.
-- An action boundary constrains operations and never becomes an affirmative request. Distinguish changing proposal content from modifying a file or external system, and never report an operation as completed unless its actual tool call succeeded.
+- An action boundary constrains operations and never becomes an affirmative request. Preserve its exact actor, action, object, destination, modality, and turn scope. Distinguish changing proposal content from modifying a file or external system, and never report an operation as completed unless its actual tool call succeeded.
 - For artifacts: {artifact_return_policy} create_artifact only registers existing files.
 - If you create artifacts, mention their filenames. If not, answer in text.
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
@@ -2994,9 +2995,13 @@ def build_prompt(
     parts.append(
         "Now execute the exact user_request shown at the top. "
         "Do not carry forward an earlier turn's output format, suffix, citation instruction, or one-time constraint unless this user_request explicitly repeats or refers to it. "
+        "If this is a dialogue-only task, answer only from user-authored messages: configured knowledge, document schemas, examples, placeholders, and earlier assistant suggestions are not conversation facts and do not justify a tool call. "
+        "For state updates, split compound statements into independent propositions, retire only what the newer user text actually conflicts with, keep unknown values pending, and preserve each action boundary's exact actor, action, object, destination, modality, and turn scope. "
+        "Treat the requested output scope as an exclusion boundary, so unrelated history and unrequested template fields stay out of the answer. "
         "If document_template_preflight is present, complete it before creating final document files or registering artifacts. "
         "Use the WeKnora context only as supporting information and available capability descriptions. "
-        "Use the configured user language for every user-visible output, and do not start background tasks."
+        "Use the language explicitly requested in the current user_request; otherwise use the configured user language. "
+        "Return only the direct user-visible answer without intent analysis, self-talk, planning, or protocol narration, and do not start background tasks."
     )
     parts.append("</task_reminder>")
     return "\n".join(parts)

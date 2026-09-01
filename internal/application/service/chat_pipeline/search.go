@@ -64,7 +64,7 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
 	// Check if we have search targets or web search enabled
-	hasKBTargets := len(chatManage.SearchTargets) > 0 || len(chatManage.KnowledgeBaseIDs) > 0 || len(chatManage.KnowledgeIDs) > 0
+	hasKBTargets := chatManage.HasKnowledgeTargets()
 	if !hasKBTargets && !chatManage.WebSearchEnabled {
 		pipelineError(ctx, "Search", "kb_not_found", map[string]interface{}{
 			"session_id": chatManage.SessionID,

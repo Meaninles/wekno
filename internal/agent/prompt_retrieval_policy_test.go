@@ -8,18 +8,23 @@ import (
 	"testing"
 )
 
-func loadAgentPromptTemplateForPolicyTest(t *testing.T) string {
+func loadPromptTemplateFileForPolicyTest(t *testing.T, name string) string {
 	t.Helper()
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot resolve prompt policy test location")
 	}
-	path := filepath.Join(filepath.Dir(filename), "..", "..", "config", "prompt_templates", "agent_system_prompt.yaml")
+	path := filepath.Join(filepath.Dir(filename), "..", "..", "config", "prompt_templates", name)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read agent prompt templates: %v", err)
+		t.Fatalf("read %s: %v", name, err)
 	}
 	return string(data)
+}
+
+func loadAgentPromptTemplateForPolicyTest(t *testing.T) string {
+	t.Helper()
+	return loadPromptTemplateFileForPolicyTest(t, "agent_system_prompt.yaml")
 }
 
 func promptTemplateSection(t *testing.T, content, start, end string) string {
@@ -45,6 +50,10 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"answer directly without retrieval or tools",
 		"If the request needs external or domain evidence",
 		"A knowledge question does not become conversation-only merely because it quotes a negative action phrase",
+		"Decompose compound user updates into independent propositions",
+		"Retrieved rules, document schemas, example fields, and placeholders are evidence about their source, not conversation state",
+		"Preserve its actor, action, object, destination, modality, and turn scope",
+		"Follow an explicit output-language request in the current turn",
 		"Never expose intent classification, chain-of-thought, self-talk, tool planning, or process narration",
 	} {
 		if !strings.Contains(section, required) {
@@ -65,5 +74,34 @@ func TestGeneralAgentPromptDoesNotInventFileIntent(t *testing.T) {
 	}
 	if strings.Contains(section, "when a file is the best deliverable") {
 		t.Error("general agent prompt still lets the model invent artifact intent")
+	}
+}
+
+func TestDialogueStateIntentPromptIsGenericAndTerminal(t *testing.T) {
+	content := loadPromptTemplateFileForPolicyTest(t, "intent_prompts.yaml")
+	section := promptTemplateSection(t, content, `  - id: "conversation_state"`, `  - id: "kb_search"`)
+
+	for _, required := range []string{
+		"Only exact user-authored messages are factual sources",
+		"Decompose compound statements into atomic propositions",
+		"retire only incompatible propositions",
+		"Missing information remains unknown or pending",
+		"Preserve the exact actor, action, object, destination, modality, and turn scope",
+		"current user explicitly requests a different output language",
+		"Do not expose intent analysis, chain-of-thought, self-talk",
+	} {
+		if !strings.Contains(section, required) {
+			t.Errorf("conversation-state prompt is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"case_id", "required_claim", "reference_answer", "采购", "培训", "茅台",
+	} {
+		if strings.Contains(strings.ToLower(section), strings.ToLower(forbidden)) {
+			t.Errorf("conversation-state prompt contains scenario/Eval term %q", forbidden)
+		}
+	}
+	if strings.Contains(content, "ALWAYS respond in {{language}}") {
+		t.Error("intent prompts still override an explicit current-turn language request")
 	}
 }

@@ -23,14 +23,14 @@ func (b *recordingEventBus) Emit(_ context.Context, evt types.Event) error {
 }
 
 func TestIsConsolidatedRetrievalStage(t *testing.T) {
-	cm := &types.ChatManage{}
+	cm := &types.ChatManage{PipelineRequest: types.PipelineRequest{KnowledgeBaseIDs: []string{"kb-test"}}}
 	assert.True(t, IsConsolidatedRetrievalStage(types.CHUNK_SEARCH_PARALLEL, cm))
 	assert.False(t, IsConsolidatedRetrievalStage(types.QUERY_UNDERSTAND, cm))
 	assert.False(t, IsConsolidatedRetrievalStage(types.LOAD_HISTORY, cm))
 }
 
 func TestLastConsolidatedRetrievalStage(t *testing.T) {
-	cm := &types.ChatManage{}
+	cm := &types.ChatManage{PipelineRequest: types.PipelineRequest{KnowledgeBaseIDs: []string{"kb-test"}}}
 	pipeline := []types.EventType{
 		types.LOAD_HISTORY,
 		types.QUERY_UNDERSTAND,

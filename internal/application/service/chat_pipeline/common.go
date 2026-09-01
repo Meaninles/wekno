@@ -101,7 +101,7 @@ func prepareChatModel(ctx context.Context, modelService interfaces.ModelService,
 		MaxCompletionTokens: chatManage.SummaryConfig.MaxCompletionTokens,
 		FrequencyPenalty:    chatManage.SummaryConfig.FrequencyPenalty,
 		PresencePenalty:     chatManage.SummaryConfig.PresencePenalty,
-		Thinking:            chatManage.SummaryConfig.Thinking,
+		Thinking:            effectiveThinkingOption(chatManage),
 	}
 	if opt.Thinking != nil {
 		pipelineInfo(ctx, "Stream", "thinking_option", map[string]interface{}{
@@ -110,6 +110,22 @@ func prepareChatModel(ctx context.Context, modelService interfaces.ModelService,
 	}
 
 	return chatModel, opt, nil
+}
+
+// effectiveThinkingOption keeps the configured model behavior for ordinary
+// knowledge and conversational requests, but avoids a separate reasoning trace
+// for dialogue-state transformations. Those turns are already fully grounded
+// in user-authored text, and disabling thinking reduces latency and the chance
+// that internal state-selection narration leaks into the user-visible answer.
+func effectiveThinkingOption(chatManage *types.ChatManage) *bool {
+	if chatManage != nil && chatManage.Intent == types.IntentConversation {
+		disabled := false
+		return &disabled
+	}
+	if chatManage == nil {
+		return nil
+	}
+	return chatManage.SummaryConfig.Thinking
 }
 
 // prepareMessagesWithHistory prepare complete messages including history.

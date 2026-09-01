@@ -1564,6 +1564,9 @@ EOF""",
         self.assertIn("keep intent classification, chain-of-thought, self-talk", prompt)
         self.assertIn("Historical assistant outputs are non-authoritative commentary", prompt)
         self.assertIn("Preserve epistemic modality", prompt)
+        self.assertIn("Decompose compound statements into independent propositions", prompt)
+        self.assertIn("A document schema, retrieved example, placeholder", prompt)
+        self.assertIn("Preserve its exact actor, action, object, destination, modality, and turn scope", prompt)
         self.assertNotIn("local self-review of citation", prompt)
         self.assertNotIn("<doc source_id=", prompt)
 
@@ -1588,6 +1591,38 @@ EOF""",
         self.assertIn("does not authorize a filesystem artifact", prompt)
         self.assertIn("Do not carry forward an earlier turn's output format", prompt)
         self.assertLess(prompt.index("回答当前问题"), prompt.index("OLD-MARKER"))
+
+    def test_build_prompt_reasserts_domain_neutral_dialogue_state_contract_at_end(self):
+        payload = ChatPayload(
+            run_id="run-generic-state",
+            session_id="session-generic-state",
+            assistant_message_id="assistant-generic-state",
+            query="In English, keep the owner pending and revise the proposal text, but do not modify a file.",
+            history=[
+                ChatHistoryMessage(role="user", content="The owner has not been assigned."),
+                ChatHistoryMessage(role="assistant", content="Suggested template field: approval date."),
+            ],
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        prompt = build_prompt(payload)
+        reminder = prompt[prompt.index("<task_reminder>") :]
+
+        for required in (
+            "answer only from user-authored messages",
+            "document schemas, examples, placeholders, and earlier assistant suggestions are not conversation facts",
+            "split compound statements into independent propositions",
+            "retire only what the newer user text actually conflicts with",
+            "exact actor, action, object, destination, modality, and turn scope",
+            "requested output scope as an exclusion boundary",
+            "language explicitly requested in the current user_request",
+            "without intent analysis, self-talk, planning, or protocol narration",
+        ):
+            self.assertIn(required, reminder)
+
+        for forbidden in ("case_id", "required_claim", "reference_answer", "采购", "培训"):
+            self.assertNotIn(forbidden, reminder)
 
     def test_build_prompt_uses_stable_user_sources_and_marks_assistant_history(self):
         payload = ChatPayload(

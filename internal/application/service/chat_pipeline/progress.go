@@ -231,9 +231,7 @@ func retrievalProgressToolName(chatManage *types.ChatManage) string {
 	if chatManage == nil {
 		return retrievalProgressTool
 	}
-	hasKnowledgeTargets := len(chatManage.SearchTargets) > 0 ||
-		len(chatManage.KnowledgeBaseIDs) > 0 ||
-		len(chatManage.KnowledgeIDs) > 0
+	hasKnowledgeTargets := chatManage.HasKnowledgeTargets()
 	if !hasKnowledgeTargets && chatManage.WebSearchEnabled {
 		return webRetrievalProgressTool
 	}

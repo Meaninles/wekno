@@ -44,6 +44,28 @@ func TestPrepareMessagesWithHistoryInjectsSharedCitationContractForEveryTurn(t *
 	}
 }
 
+func TestEffectiveThinkingOptionOnlyDisablesDialogueStateTurns(t *testing.T) {
+	enabled := true
+	conversation := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Thinking: &enabled}},
+		PipelineState:   types.PipelineState{Intent: types.IntentConversation},
+	}
+	if got := effectiveThinkingOption(conversation); got == nil || *got {
+		t.Fatalf("conversation-state thinking = %v, want explicit false", got)
+	}
+
+	knowledge := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Thinking: &enabled}},
+		PipelineState:   types.PipelineState{Intent: types.IntentKBSearch},
+	}
+	if got := effectiveThinkingOption(knowledge); got != &enabled && (got == nil || !*got) {
+		t.Fatalf("knowledge thinking = %v, want configured true", got)
+	}
+	if got := effectiveThinkingOption(nil); got != nil {
+		t.Fatalf("nil chat manage thinking = %v, want nil", got)
+	}
+}
+
 func TestPrepareMessagesWithHistoryAddsLightweightSkillsToSystemPrompt(t *testing.T) {
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
@@ -131,7 +153,8 @@ func TestIntoChatMessage_NoKBRetrieval(t *testing.T) {
 func TestIntoChatMessage_WithMergeResults(t *testing.T) {
 	cm := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{
-			Query: "test query",
+			Query:            "test query",
+			KnowledgeBaseIDs: []string{"kb-test"},
 			SummaryConfig: types.SummaryConfig{
 				ContextTemplate: "Question: {{query}}\n\nReferences:\n{{contexts}}",
 			},

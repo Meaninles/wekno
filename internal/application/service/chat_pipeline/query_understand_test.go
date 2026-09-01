@@ -29,9 +29,14 @@ func TestParseStructuredQueryOutputConversationStateIsNonRetrieval(t *testing.T)
 func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.T) {
 	prompt := conversationmemory.EnsureQueryUnderstandingContract("base")
 	for _, required := range []string{
+		`JSON "intent" field MUST be exactly "conversation_state"`,
+		`"conversation_state" has priority over "chitchat"`,
 		"Questions, examples, hypotheticals",
+		`"conversation_state" is a non-retrieval routing label`,
+		"does not claim that every such turn creates durable state",
 		"conversation-only state or transformation task",
 		"ordinary knowledge question still requires retrieval",
+		`Use "chitchat" only for social or casual conversation`,
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("query-understanding contract missing %q: %s", required, prompt)

@@ -138,6 +138,22 @@ func TestGenerationContractsAreIdempotentAndDomainNeutral(t *testing.T) {
 	}
 }
 
+func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) {
+	contract := EnsureGenerationContract("")
+	for _, required := range []string{
+		"Decompose compound user statements into atomic propositions",
+		"Retire only propositions that are logically incompatible",
+		"A document schema, example, suggested placeholder, or earlier assistant-generated field is not conversation state",
+		"Preserve the exact actor, action, object, destination, and turn scope",
+		"Obey an explicit current-turn output-language request",
+		"never expose intent classification, hidden reasoning, planning, self-talk",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Fatalf("generation contract missing %q: %s", required, contract)
+		}
+	}
+}
+
 func TestUserLedgerAvoidsDuplicatingSourceLabelledRecentTurns(t *testing.T) {
 	archive := BuildUserArchive([]string{"foundation", "recent update", "latest correction"}, 2)
 	for _, want := range []string{

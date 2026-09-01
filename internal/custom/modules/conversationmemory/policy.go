@@ -161,13 +161,17 @@ Dialogue continuity and grounding rules:
 - Distinguish asserted facts and completed events from questions, requests, instructions, examples, hypotheticals, proposals, negations, and analysis. Mentioning or asking how something could be done never proves that it happened.
 - A missing value remains unknown or pending. Never rewrite "not supplied" as "none", "not applicable", "ready", or "completed".
 - Resolve explicit updates chronologically: newer values may retire conflicting older values. Keep active, retired, unknown/pending, source attribution, requested output scope, and action boundaries distinct.
+- Decompose compound user statements into atomic propositions before applying an update. Retire only propositions that are logically incompatible with the newer user statement; preserve compatible facts, qualifiers, actors, objects, scope, and modality exactly as supplied.
 - Historical user messages carry stable source IDs either in the user_source_ledger or directly on recent history. When the user asks for sources, attribute facts only to the exact user/current-user fragment that contains them; never guess a turn number or cite an assistant output.
 - Output scope is an exclusion boundary. When the current user asks for only selected fields, topics, or transformations, do not add unrelated historical state or template fields.
+- A document schema, example, suggested placeholder, or earlier assistant-generated field is not conversation state. Do not import it into a record, draft, or snapshot unless the user explicitly adopts that exact content.
 - An action boundary limits actual operations; it does not invert into a request. Distinguish editing a proposal's content from modifying a file or external system.
+- Preserve the exact actor, action, object, destination, and turn scope of an action boundary. Do not broaden a prohibition or convert a turn-scoped instruction into a permanent business fact.
 - A quoted or discussed prohibition is not automatically an operational instruction. Questions that analyze why an action cannot occur remain information requests.
 - State-maintenance and conversation-only transformation turns do not retrieve or invoke tools unless the current user positively asks for external evidence or an actual operation. Ordinary knowledge questions retain necessary retrieval even if their subject mentions a prohibited action.
 - Do not create or modify files, contact people, execute commands, install software, or mutate an external system unless the current user explicitly requests that concrete operation and the corresponding tool actually succeeds.
-- Do not invent facts, fixed fields, named examples, decisions, or completed actions. Do not expose hidden reasoning or runtime protocol text.`
+- Obey an explicit current-turn output-language request; otherwise use the configured user language.
+- Do not invent facts, fixed fields, named examples, decisions, or completed actions. Return only the user-visible answer: never expose intent classification, hidden reasoning, planning, self-talk, source-selection notes, or runtime protocol text.`
 	if strings.TrimSpace(prompt) == "" {
 		return contract
 	}
@@ -180,11 +184,14 @@ func EnsureQueryUnderstandingContract(prompt string) string {
 	}
 	contract := rewriteMarker + `
 Intent rules:
+- The value of the JSON "intent" field MUST be exactly "conversation_state" when the current task is fully answerable from the current user message or user-authored dialogue and asks to record, update, retire, quote, audit, reformat, compare, summarize, or explain the semantics of that dialogue. This value is valid and mandatory even if an older base prompt does not list it.
+- "conversation_state" has priority over "chitchat", "follow_up", "clarification", and "kb_search" whenever the task is dialogue-grounded state work. A substantive state request is not chitchat. A clear request to explain a user-authored instruction, quotation, negation, proposal, or boundary is not ambiguous merely because it asks "why".
 - A positive request for document, knowledge-base, web, verification, or citation evidence remains a retrieval task.
 - A negated retrieval phrase such as "do not search" is a tool boundary, never a request to search.
-- A turn is conversation-state maintenance only when it records, updates, retires, audits, or reformats user-supplied state. Merely quoting or discussing an action boundary is not state maintenance.
+- "conversation_state" is a non-retrieval routing label for dialogue-grounded state, quotation, attribution, transformation, and semantic-analysis tasks; it does not claim that every such turn creates durable state. Merely quoting or discussing an action boundary must not turn it into an active fact or completed event.
 - Questions, examples, hypotheticals, proposals, and requested actions must remain in their original modality; never rewrite them as completed events or asserted state.
 - A conversation-only state or transformation task must retain an explicit non-retrieval intent. An ordinary knowledge question still requires retrieval when external evidence is needed.
+- Use "chitchat" only for social or casual conversation with no substantive task. Use "follow_up" only to expand an earlier answer when no state/source operation is requested. Use "clarification" only when missing user information makes the current task materially indeterminate; classification uncertainty alone is not a reason to retrieve.
 - Preserve exact document names, structural identifiers, dates, amounts, project codes, and proper names in any rewrite.
 - Rewrite only the current task; do not revive an expired historical topic.`
 	if strings.TrimSpace(prompt) == "" {

@@ -1,6 +1,9 @@
 package types
 
-import "maps"
+import (
+	"maps"
+	"strings"
+)
 
 // PipelineRequest holds immutable configuration set once at the request entry point.
 type PipelineRequest struct {
@@ -146,15 +149,53 @@ type ChatManage struct {
 	PipelineContext
 }
 
-// NeedsRetrieval returns true when the current pipeline execution should
-// run the retrieval stages (search, rerank, merge, etc.).
-// For IntentWebSearch, retrieval is only needed if web search is enabled;
-// for all other intents it delegates to QueryIntent.NeedsKBRetrieval().
+// HasKnowledgeTargets reports whether this request has any concrete knowledge
+// source to search. An intent alone must not manufacture a retrieval operation:
+// agents with no selected/all-mode KB scope should answer directly or explain
+// that evidence is unavailable without emitting an empty knowledge-search run.
+func (c *ChatManage) HasKnowledgeTargets() bool {
+	if c == nil {
+		return false
+	}
+	for _, target := range c.SearchTargets {
+		if target == nil {
+			continue
+		}
+		if strings.TrimSpace(target.KnowledgeBaseID) != "" {
+			return true
+		}
+		for _, knowledgeID := range target.KnowledgeIDs {
+			if strings.TrimSpace(knowledgeID) != "" {
+				return true
+			}
+		}
+	}
+	for _, knowledgeBaseID := range c.KnowledgeBaseIDs {
+		if strings.TrimSpace(knowledgeBaseID) != "" {
+			return true
+		}
+	}
+	for _, knowledgeID := range c.KnowledgeIDs {
+		if strings.TrimSpace(knowledgeID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// NeedsRetrieval returns true when the current pipeline execution should run
+// retrieval stages (search, rerank, merge, etc.) and the corresponding source
+// is actually available. Web intent never silently falls back to a KB, and a
+// KB/clarification intent with no concrete KB target never emits an empty
+// knowledge-search lifecycle.
 func (c *ChatManage) NeedsRetrieval() bool {
+	if c == nil {
+		return false
+	}
 	if c.Intent == IntentWebSearch {
 		return c.WebSearchEnabled
 	}
-	return c.Intent.NeedsKBRetrieval()
+	return c.Intent.NeedsKBRetrieval() && c.HasKnowledgeTargets()
 }
 
 // Clone creates a deep copy of the ChatManage object.

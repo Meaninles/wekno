@@ -168,6 +168,8 @@ func TestEnsureGenerationContractIsSharedAndIdempotent(t *testing.T) {
 		!strings.Contains(got, `Copy the matching cite_exactly value verbatim`) ||
 		!strings.Contains(got, `Treat each S-number as an opaque evidence handle`) ||
 		!strings.Contains(got, `A prior turn's output format, ending, or citation constraint is inactive`) ||
+		!strings.Contains(got, `when the current turn contains no AVAILABLE_CITATIONS or source_references, emit no <src> tag`) ||
+		!strings.Contains(got, `Never invent, guess, or reuse a handle from conversation history`) ||
 		!strings.Contains(got, `each paragraph containing substantive evidence-derived facts`) {
 		t.Fatalf("generation contract missing canonical positive instruction: %s", got)
 	}

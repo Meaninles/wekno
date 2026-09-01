@@ -36,6 +36,9 @@ func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.
 		"does not claim that every such turn creates durable state",
 		"conversation-only state or transformation task",
 		"ordinary knowledge question still requires retrieval",
+		"mixed request combines dialogue-state work with any claim that needs external evidence",
+		"Asking only to quote or attribute the user's own messages remains conversation_state",
+		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
 		`Use "chitchat" only for social or casual conversation`,
 	} {
 		if !strings.Contains(prompt, required) {

@@ -145,13 +145,45 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 	for _, required := range []string{
 		"Decompose compound user statements into atomic propositions",
 		"Retire only propositions that are logically incompatible",
+		"A count, outcome (including zero), missing record, lack of evidence",
 		"A document schema, example, suggested placeholder, or earlier assistant-generated field is not conversation state",
+		"Drafts, plans, templates, and sample text",
 		"Preserve the exact actor, action, object, destination, and turn scope",
+		"operation boundary remains active until the user explicitly revokes",
+		"Never say that you searched, retrieved, read, verified, saved, sent, updated",
 		"Obey an explicit current-turn output-language request",
 		"never expose intent classification, hidden reasoning, planning, self-talk",
 	} {
 		if !strings.Contains(contract, required) {
 			t.Fatalf("generation contract missing %q: %s", required, contract)
+		}
+	}
+}
+
+func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttribution(t *testing.T) {
+	contract := EnsureQueryUnderstandingContract("")
+	for _, required := range []string{
+		"mixed request combines dialogue-state work with any claim that needs external evidence",
+		"choose the relevant retrieval intent for the whole turn",
+		"Asking only to quote or attribute the user's own messages remains conversation_state",
+		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
+	} {
+		if !strings.Contains(contract, required) {
+			t.Fatalf("query-understanding contract missing %q: %s", required, contract)
+		}
+	}
+}
+
+func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *testing.T) {
+	directive := TerminalGenerationDirective()
+	for _, required := range []string{
+		"when it does not exist, emit no citation handle",
+		"do not present earlier retrieval as current evidence",
+		"A count, zero outcome, absent record, or analysis request does not establish lifecycle state",
+		"report operations only when user text or verified current-turn tool results establish their outcome",
+	} {
+		if !strings.Contains(directive, required) {
+			t.Fatalf("terminal directive missing %q: %s", required, directive)
 		}
 	}
 }

@@ -1564,9 +1564,14 @@ EOF""",
         self.assertIn("keep intent classification, chain-of-thought, self-talk", prompt)
         self.assertIn("Historical assistant outputs are non-authoritative commentary", prompt)
         self.assertIn("Preserve epistemic modality", prompt)
+        self.assertIn("A count or outcome (including zero)", prompt)
         self.assertIn("Decompose compound statements into independent propositions", prompt)
         self.assertIn("A document schema, retrieved example, placeholder", prompt)
+        self.assertIn("Drafts, plans, templates, and sample text", prompt)
         self.assertIn("Preserve its exact actor, action, object, destination, modality, and turn scope", prompt)
+        self.assertIn("operation boundary remains active until the user explicitly revokes", prompt)
+        self.assertIn("Source and action honesty", prompt)
+        self.assertIn("Citation freshness", prompt)
         self.assertNotIn("local self-review of citation", prompt)
         self.assertNotIn("<doc source_id=", prompt)
 
@@ -1587,6 +1592,7 @@ EOF""",
         prompt = build_prompt(payload)
 
         self.assertIn("Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired", prompt)
+        self.assertIn("This expiry rule does not revoke an operation boundary", prompt)
         self.assertIn("Interpret action verbs together with their object and destination", prompt)
         self.assertIn("does not authorize a filesystem artifact", prompt)
         self.assertIn("Do not carry forward an earlier turn's output format", prompt)
@@ -1616,6 +1622,10 @@ EOF""",
             "retire only what the newer user text actually conflicts with",
             "exact actor, action, object, destination, modality, and turn scope",
             "requested output scope as an exclusion boundary",
+            "Counts and outcomes, including zero",
+            "Keep operation boundaries active for the same task",
+            "Drafts and summaries must omit unsupported operational details",
+            "Claim a search, retrieval, read, save, send, update, or other operation only when a matching current-turn result establishes it",
             "language explicitly requested in the current user_request",
             "without intent analysis, self-talk, planning, or protocol narration",
         ):

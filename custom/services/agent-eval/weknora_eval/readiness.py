@@ -135,7 +135,11 @@ def evaluate_readiness(
         manifest_sha256=manifest.get("dataset_sha256"),
     )
 
-    eval_root = Path(__file__).resolve().parents[1]
+    # The evaluator package is copied to /app in its container while frozen
+    # datasets, profiles, orchestration and fixtures are mounted at /workspace.
+    # Derive the artifact root from the caller-supplied profile path so the
+    # same dependency registry works in both local tests and the runner image.
+    eval_root = profile_path.resolve().parent.parent
     known_dependencies = {
         "profiles": file_sha256(profile_path),
         "policy": file_sha256(policy_path),

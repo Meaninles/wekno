@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,28 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/agenteval"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
+
+type blockingFailureExporter struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *blockingFailureExporter) ExportSpans(ctx context.Context, _ []sdktrace.ReadOnlySpan) error {
+	select {
+	case e.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-e.release:
+		return errors.New("injected recorder failure")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *blockingFailureExporter) Shutdown(context.Context) error { return nil }
 
 func TestOTLPHTTPExporterUsesV4EndpointAndNeverBlocksBusiness(t *testing.T) {
 	var mu sync.Mutex
@@ -75,5 +97,46 @@ func TestInvalidRecorderConfigFailsOpen(t *testing.T) {
 	})
 	if err != nil || manager.Enabled() {
 		t.Fatalf("invalid recorder must return disabled manager without app error: manager=%#v err=%v", manager, err)
+	}
+}
+
+func TestBlockedFailingExporterCannotDelayOrChangeBusinessResult(t *testing.T) {
+	exporter := &blockingFailureExporter{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	cfg := testConfig(false)
+	cfg.QueueSize = 4
+	cfg.FlushAt = 1
+	cfg.FlushInterval = time.Hour
+	cfg.RequestTimeout = 2 * time.Second
+	manager := newManagerWithExporter(cfg, exporter)
+
+	startedAt := time.Now()
+	answer, status := func() (string, int) {
+		_, span := manager.StartTrace(context.Background(), TraceOptions{Name: "business-request"})
+		span.Finish("canonical-production-answer", nil)
+		return "canonical-production-answer", http.StatusOK
+	}()
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		close(exporter.release)
+		t.Fatalf("business path waited for recorder export: %s", elapsed)
+	}
+	if answer != "canonical-production-answer" || status != http.StatusOK {
+		close(exporter.release)
+		t.Fatalf("recorder changed business result: answer=%q status=%d", answer, status)
+	}
+
+	select {
+	case <-exporter.started:
+	case <-time.After(time.Second):
+		close(exporter.release)
+		t.Fatal("recorder export was not attempted")
+	}
+	close(exporter.release)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

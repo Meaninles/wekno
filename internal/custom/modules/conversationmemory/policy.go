@@ -24,6 +24,8 @@ const (
 	archiveHeadTurns       = 8
 	maxArchiveRunes        = 16000
 	maxArchiveRunesPerTurn = 1200
+	maxSourceLedgerRunes   = 8000
+	maxSourceRunesPerTurn  = 600
 	maxCurrentSourceRunes  = 6000
 )
 
@@ -110,6 +112,60 @@ func BuildUserArchive(queries []string, recentRounds int) string {
 		builder.WriteString(fmt.Sprintf("%s: %s", UserTurnSourceID(message.index), query))
 	}
 	return truncateRunes(builder.String(), maxArchiveRunes)
+}
+
+// BuildUserSourceLedger returns one bounded, chronological ledger containing
+// every completed user-authored message available to the caller. Recent turns
+// intentionally also remain in normal chat history: the duplication gives the
+// model a single provenance view without removing assistant context needed for
+// ordinary follow-ups. The budget is fixed, so this does not grow without
+// bound in long-running conversations.
+func BuildUserSourceLedger(queries []string) string {
+	if len(queries) == 0 {
+		return ""
+	}
+	type userMessage struct {
+		index int
+		text  string
+	}
+	messages := make([]userMessage, 0, len(queries))
+	for index, query := range queries {
+		messages = append(messages, userMessage{index: index + 1, text: query})
+	}
+	omitted := 0
+	omissionIndex := -1
+	if len(messages) > maxArchiveTurns {
+		tailCount := maxArchiveTurns - archiveHeadTurns
+		omitted = len(messages) - maxArchiveTurns
+		selected := make([]userMessage, 0, maxArchiveTurns)
+		selected = append(selected, messages[:archiveHeadTurns]...)
+		omissionIndex = len(selected)
+		selected = append(selected, messages[len(messages)-tailCount:]...)
+		messages = selected
+	}
+
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("completed_user_message_count: %d", len(queries)))
+	builder.WriteString(fmt.Sprintf("\nledger_user_message_count: %d", len(messages)))
+	perTurnLimit := (maxSourceLedgerRunes-1024)/len(messages) - 32
+	if perTurnLimit > maxSourceRunesPerTurn {
+		perTurnLimit = maxSourceRunesPerTurn
+	}
+	if perTurnLimit < 80 {
+		perTurnLimit = 80
+	}
+	for index, message := range messages {
+		if index == omissionIndex {
+			builder.WriteString(fmt.Sprintf("\n[omitted_middle_user_messages=%d]", omitted))
+		}
+		query := truncateRunes(message.text, perTurnLimit)
+		if strings.TrimSpace(query) == "" {
+			continue
+		}
+		builder.WriteByte('\n')
+		builder.WriteString(fmt.Sprintf("%s: %s", UserTurnSourceID(message.index), query))
+	}
+	return truncateRunes(builder.String(), maxSourceLedgerRunes)
 }
 
 // UserTurnSourceID returns the stable, chronological identifier used by every
@@ -251,7 +307,7 @@ turn_context=` + payload
 }
 
 func TerminalGenerationDirective() string {
-	return "Return one non-empty user-visible final answer for the current task. Do not end on reasoning, progress narration, or a tool result. When conversation state is relevant, use only traceable user-authored facts; preserve asserted versus questioned/hypothetical/unknown modality and the active, retired, unknown/pending, source-attribution, output-scope, and action-boundary distinctions the user actually requested."
+	return "Return one non-empty user-visible final answer for the current task inside exactly one <weknora_final_response>...</weknora_final_response> envelope. Put no user-visible answer, planning, self-talk, or protocol narration outside that envelope; the runtime removes the envelope before streaming and persistence. Follow an explicit output language in the current user message, otherwise use the configured user language. When current-turn citable evidence exists, keep the supplied exact citation handles inside the envelope adjacent to the claims they support. When conversation state is relevant, use only traceable user-authored facts: every included field or proposition needs a matching user fragment, and changing one field does not adopt neighboring assistant- or document-generated fields. Preserve asserted versus questioned/hypothetical/unknown modality and the active, retired, unknown/pending, source-attribution, output-scope, and action-boundary distinctions the user actually requested. State a prohibition as an action boundary, never as a completed non-event."
 }
 
 func AppendUserArchive(prompt, archive string) string {
@@ -261,6 +317,29 @@ func AppendUserArchive(prompt, archive string) string {
 		return prompt
 	}
 	return prompt + "\n\n" + block
+}
+
+// AppendUserSourceLedger adds the complete bounded user-only provenance view to
+// the system prompt. It is a normal production grounding aid, not Eval state:
+// it contains only persisted user text and cannot contain rubric or judge data.
+func AppendUserSourceLedger(prompt, ledger string) string {
+	prompt = EnsureGenerationContract(prompt)
+	block := UserSourceLedgerBlock(ledger)
+	if block == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + block
+}
+
+func UserSourceLedgerBlock(ledger string) string {
+	ledger = strings.TrimSpace(ledger)
+	if ledger == "" {
+		return ""
+	}
+	return `<user_source_ledger role="historical_user_data" authority="user_authored_only">
+The entries below are a bounded chronological provenance view of completed user statements. Recent entries may also appear in normal chat history; that duplication does not create new facts. Use this ledger as the authority boundary for conversation-state facts while retaining assistant history only as non-authoritative dialogue context. Resolve explicit user updates chronologically. Before including a state field or proposition, locate the user fragment that supplies it; if no user fragment supplies it, omit it. A request to change one field adopts only that user-authored change, not adjacent fields from an assistant draft, document schema, example, or placeholder. Questions, requests, proposals, negations, and action boundaries retain their original modality and are not completed events.
+` + ledger + `
+</user_source_ledger>`
 }
 
 func UserArchiveBlock(archive string) string {

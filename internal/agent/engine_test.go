@@ -302,6 +302,68 @@ func TestStreamThinkingToEventBus_RoutesReasoningAndAnswerSeparately(t *testing.
 	assert.NotEmpty(t, resp.AnswerEventID, "AnswerEventID must identify the live answer stream")
 }
 
+func TestStreamThinkingToEventBus_ProjectsOnlyEnvelopedTerminalAnswer(t *testing.T) {
+	mock := &mockChat{
+		responses: []mockResponse{{chunks: []types.StreamResponse{
+			{ResponseType: types.ResponseTypeAnswer, Content: "I should inspect the user sources first.\n<weknora_"},
+			{ResponseType: types.ResponseTypeAnswer, Content: "final_response>Direct answer"},
+			{ResponseType: types.ResponseTypeAnswer, Content: " only.</weknora_final_response>private post-check", Done: true, FinishReason: "stop"},
+		}}},
+	}
+
+	engine := newTestEngine(t, mock)
+	var answers string
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			answers += data.Content
+		}
+		return nil
+	})
+
+	resp, err := engine.streamThinkingToEventBus(
+		context.Background(), emptyMessages(), emptyTools(), 0, "sess-1",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "Direct answer only.", answers)
+	assert.Equal(t, answers, resp.Content)
+	assert.NotContains(t, answers, "inspect")
+	assert.NotContains(t, answers, "post-check")
+}
+
+func TestStreamThinkingToEventBus_DoesNotFlushToolPreambleAfterToolEvent(t *testing.T) {
+	mock := &mockChat{
+		responses: []mockResponse{{chunks: []types.StreamResponse{
+			{ResponseType: types.ResponseTypeAnswer, Content: "I will search first."},
+			{
+				ResponseType: types.ResponseTypeToolCall,
+				ToolCalls: []types.LLMToolCall{{
+					ID: "call-1", Type: "function",
+					Function: types.FunctionCall{Name: "lookup", Arguments: `{}`},
+				}},
+				Done: true, FinishReason: "tool_calls",
+			},
+		}}},
+	}
+
+	engine := newTestEngine(t, mock)
+	var answers string
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			answers += data.Content
+		}
+		return nil
+	})
+
+	resp, err := engine.streamThinkingToEventBus(
+		context.Background(), emptyMessages(), emptyTools(), 0, "sess-1",
+	)
+	require.NoError(t, err)
+	assert.Empty(t, answers)
+	assert.False(t, resp.AnswerStreamed)
+	assert.Equal(t, "I will search first.", resp.Content)
+	require.Len(t, resp.ToolCalls, 1)
+}
+
 // TestStreamThinkingToEventBus_SplitsInlineThinkBlock verifies that models which
 // embed reasoning inline as <think>…</think> in the content channel still have
 // their reasoning routed to thought events and only the real answer streamed to

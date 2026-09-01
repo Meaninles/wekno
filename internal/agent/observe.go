@@ -10,6 +10,7 @@ import (
 	agenttoken "github.com/Tencent/WeKnora/internal/agent/token"
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -387,11 +388,15 @@ func composeUserTurnContent(parts ...string) string {
 // This is shared by every Go ReAct agent (built-in and future custom prompt
 // types). It adds no model call and only a small, constant prompt prefix.
 func buildCurrentTaskBlocks(query string) string {
-	return `<current_task_priority>
+	content := `<current_task_priority>
 The user_request below is the only active request for this turn. Previous conversation messages are background context. Use them only when this user_request explicitly refers to or depends on them. Do not continue, repeat, search for, or answer an earlier task merely because it appears in history. Derive retrieval queries and the final answer from this user_request, and ensure every cited claim answers it.
 </current_task_priority>
 
 <user_request verbatim="true" priority="highest">` + query + `</user_request>`
+	if directive := conversationmemory.TerminalGenerationDirective(); directive != "" {
+		content += "\n\n" + directive
+	}
+	return content
 }
 
 // listToolNames returns tool.function names for logging

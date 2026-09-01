@@ -125,6 +125,39 @@ Now generate the final answer:`, query)
 	logger.Debugf(ctx, "[Agent][FinalAnswer] AnswerID: %s", answerID)
 	answerDoneEmitted := false
 	var streamedAnswer strings.Builder
+	projector := conversationmemory.NewTerminalAnswerProjector()
+	emitAnswer := func(content string) {
+		if content == "" {
+			return
+		}
+		streamedAnswer.WriteString(content)
+		logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting answer chunk: %d chars", len(content))
+		e.eventBus.Emit(ctx, event.Event{
+			ID:        answerID,
+			Type:      event.EventAgentFinalAnswer,
+			SessionID: sessionID,
+			Data: event.AgentFinalAnswerData{
+				Content: content,
+				Done:    false,
+			},
+		})
+	}
+	finishAnswer := func() {
+		if answerDoneEmitted {
+			return
+		}
+		emitAnswer(projector.Flush())
+		e.eventBus.Emit(ctx, event.Event{
+			ID:        answerID,
+			Type:      event.EventAgentFinalAnswer,
+			SessionID: sessionID,
+			Data: event.AgentFinalAnswerData{
+				Content: "",
+				Done:    true,
+			},
+		})
+		answerDoneEmitted = true
+	}
 
 	thinking := false
 	llmResult, err := e.streamLLMToEventBus(
@@ -141,20 +174,10 @@ Now generate the final answer:`, query)
 				return
 			}
 			if chunk.Content != "" {
-				streamedAnswer.WriteString(chunk.Content)
-				logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting answer chunk: %d chars", len(chunk.Content))
-				e.eventBus.Emit(ctx, event.Event{
-					ID:        answerID,
-					Type:      event.EventAgentFinalAnswer,
-					SessionID: sessionID,
-					Data: event.AgentFinalAnswerData{
-						Content: chunk.Content,
-						Done:    chunk.Done,
-					},
-				})
-				if chunk.Done {
-					answerDoneEmitted = true
-				}
+				emitAnswer(projector.Feed(chunk.Content))
+			}
+			if chunk.Done {
+				finishAnswer()
 			}
 		},
 	)
@@ -167,24 +190,16 @@ Now generate the final answer:`, query)
 		return err
 	}
 
-	if !answerDoneEmitted {
-		e.eventBus.Emit(ctx, event.Event{
-			ID:        answerID,
-			Type:      event.EventAgentFinalAnswer,
-			SessionID: sessionID,
-			Data: event.AgentFinalAnswerData{
-				Content: "",
-				Done:    true,
-			},
-		})
-	}
+	finishAnswer()
 
 	// The emitted answer aggregation is the production candidate. Only runtimes
 	// that emitted no answer chunk use the non-stream result as a fallback; the
 	// handler will then emit that same fallback before persistence.
 	fullAnswer := streamedAnswer.String()
 	if fullAnswer == "" {
-		fullAnswer = agenttools.StripThinkBlocks(llmResult.Content)
+		fullAnswer = conversationmemory.ProjectTerminalAnswer(
+			agenttools.StripThinkBlocks(llmResult.Content),
+		)
 	}
 	logger.Infof(ctx, "[Agent][FinalAnswer] Final answer generated: %d characters", len(fullAnswer))
 	common.PipelineInfo(ctx, "Agent", "final_answer_done", map[string]interface{}{

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -108,6 +109,8 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		thinkingID := fmt.Sprintf("%s-thinking", uuid.New().String()[:8])
 		answerID := fmt.Sprintf("%s-answer", uuid.New().String()[:8])
 		thinkingOpen := false
+		answerDone := false
+		projector := conversationmemory.NewTerminalAnswerProjector()
 
 		closeThinking := func() {
 			if !thinkingOpen {
@@ -123,6 +126,32 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 			})
 			thinkingOpen = false
 		}
+		emitAnswer := func(content string, done bool) {
+			if answerDone {
+				return
+			}
+			eventBus.Emit(ctx, types.Event{
+				ID:        answerID,
+				Type:      types.EventType(event.EventAgentFinalAnswer),
+				SessionID: chatManage.SessionID,
+				Data: event.AgentFinalAnswerData{
+					Content: content,
+					Done:    done,
+				},
+			})
+			if done {
+				answerDone = true
+			}
+		}
+		finishAnswer := func() {
+			if answerDone {
+				return
+			}
+			if content := projector.Flush(); content != "" {
+				emitAnswer(content, false)
+			}
+			emitAnswer("", true)
+		}
 
 		for {
 			select {
@@ -136,6 +165,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 			case response, ok := <-responseChan:
 				if !ok {
 					closeThinking()
+					finishAnswer()
 					pipelineInfo(ctx, "Stream", "channel_close", map[string]interface{}{
 						"session_id": chatManage.SessionID,
 					})
@@ -181,15 +211,12 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 
 				if response.ResponseType == types.ResponseTypeAnswer {
 					closeThinking()
-					eventBus.Emit(ctx, types.Event{
-						ID:        answerID,
-						Type:      types.EventType(event.EventAgentFinalAnswer),
-						SessionID: chatManage.SessionID,
-						Data: event.AgentFinalAnswerData{
-							Content: response.Content,
-							Done:    response.Done,
-						},
-					})
+					if content := projector.Feed(response.Content); content != "" {
+						emitAnswer(content, false)
+					}
+					if response.Done {
+						finishAnswer()
+					}
 				}
 			}
 		}

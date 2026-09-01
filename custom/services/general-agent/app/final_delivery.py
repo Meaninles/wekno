@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-CLAUDE_SDK_TERMINAL_CONTRACT = "claude-sdk-terminal-v1"
+CLAUDE_SDK_TERMINAL_CONTRACT = "claude-sdk-terminal-v2"
+TERMINAL_ANSWER_OPEN = "<weknora_final_response>"
+TERMINAL_ANSWER_CLOSE = "</weknora_final_response>"
 
 CLAUDE_SDK_AGENT_TYPES = frozenset(
     {
@@ -39,6 +41,25 @@ def requires_passive_terminal_delivery(agent_type: str) -> bool:
 
 def canonical_answer(content: Any) -> str:
     return str(content or "").strip()
+
+
+def project_terminal_answer(content: Any) -> str:
+    """Remove the model-only answer envelope without adding a repair turn.
+
+    Providers that ignore the contract fail open to their normal terminal text.
+    When the envelope is present, any planning or self-talk around it remains
+    private and only its body can reach SSE, persistence, or later history.
+    """
+
+    raw = str(content or "")
+    start = raw.find(TERMINAL_ANSWER_OPEN)
+    if start < 0:
+        return raw.strip()
+    body = raw[start + len(TERMINAL_ANSWER_OPEN) :]
+    end = body.find(TERMINAL_ANSWER_CLOSE)
+    if end >= 0:
+        body = body[:end]
+    return body.strip()
 
 
 def _value(block: Any, name: str, default: Any = None) -> Any:
@@ -147,5 +168,5 @@ class ClaudeSDKTerminalCollector:
         # providers that omit the optional result field. Mismatches are
         # diagnostic only and never trigger a second model response.
         if self.terminal_result:
-            return self.terminal_result
-        return self.candidate_answer()
+            return project_terminal_answer(self.terminal_result)
+        return project_terminal_answer(self.candidate_answer())

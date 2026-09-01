@@ -60,9 +60,10 @@ func LoadAgentHistory(
 }
 
 // LoadAgentHistoryWithArchive returns the configured recent full turns plus a
-// bounded, user-only source ledger for older completed turns in the indexed
-// read. Recent user statements carry their source IDs directly in normal
-// history, avoiding duplicate prompt content.
+// bounded, user-only source ledger for all completed turns in the indexed read.
+// Recent user statements intentionally appear in both views: normal history
+// preserves dialogue flow while the ledger gives state synthesis one explicit
+// provenance boundary independent of assistant output.
 func LoadAgentHistoryWithArchive(
 	ctx context.Context,
 	messageRepo interfaces.MessageRepository,
@@ -135,7 +136,7 @@ func LoadAgentHistoryWithArchive(
 		// normal recent window and are never relabelled as user quotations.
 		queries = append(queries, p.user.Content)
 	}
-	archive := conversationmemory.BuildUserArchive(queries, maxRounds)
+	archive := conversationmemory.BuildUserSourceLedger(queries)
 	if len(completePairs) > maxRounds {
 		completePairs = completePairs[len(completePairs)-maxRounds:]
 	}

@@ -19,7 +19,7 @@ type recordingProfessionalSkillProvider struct {
 	calls int
 }
 
-func TestBuildGeneralAgentHistoryKeepsRecentPairsAndArchivesOnlyOlderUserSources(t *testing.T) {
+func TestBuildGeneralAgentHistoryKeepsRecentPairsAndBuildsCompleteUserLedger(t *testing.T) {
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 	var messages []*types.Message
 	for index := 1; index <= 7; index++ {
@@ -55,14 +55,14 @@ func TestBuildGeneralAgentHistoryKeepsRecentPairsAndArchivesOnlyOlderUserSources
 		!strings.Contains(history[1].Content, `authority="non_source"`) {
 		t.Fatalf("historical assistant answer was not marked non-authoritative: %#v", history[1])
 	}
-	for _, expected := range []string{"user-fact-1", "user-fact-5"} {
+	for _, expected := range []string{"user-fact-1", "user-fact-5", "user-fact-6", "user-fact-7"} {
 		if !strings.Contains(archive, expected) {
-			t.Fatalf("archive missing %q: %s", expected, archive)
+			t.Fatalf("user ledger missing %q: %s", expected, archive)
 		}
 	}
-	for _, forbidden := range []string{"user-fact-6", "user-fact-7", "assistant-inference", "must-not-archive-incomplete"} {
+	for _, forbidden := range []string{"assistant-inference", "must-not-archive-incomplete"} {
 		if strings.Contains(archive, forbidden) {
-			t.Fatalf("archive contains forbidden value %q: %s", forbidden, archive)
+			t.Fatalf("user ledger contains forbidden value %q: %s", forbidden, archive)
 		}
 	}
 }

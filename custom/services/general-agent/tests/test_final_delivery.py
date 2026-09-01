@@ -10,6 +10,9 @@ sys.path.insert(0, str(ROOT))
 from app.final_delivery import (  # noqa: E402
     CLAUDE_SDK_TERMINAL_CONTRACT,
     ClaudeSDKTerminalCollector,
+    TERMINAL_ANSWER_CLOSE,
+    TERMINAL_ANSWER_OPEN,
+    project_terminal_answer,
     requires_passive_terminal_delivery,
     uses_claude_sdk_terminal_projection,
 )
@@ -73,7 +76,16 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
             self.assertFalse(requires_passive_terminal_delivery(agent_type), agent_type)
             self.assertFalse(uses_claude_sdk_terminal_projection(agent_type), agent_type)
 
-        self.assertEqual(CLAUDE_SDK_TERMINAL_CONTRACT, "claude-sdk-terminal-v1")
+        self.assertEqual(CLAUDE_SDK_TERMINAL_CONTRACT, "claude-sdk-terminal-v2")
+
+    def test_terminal_projection_hides_reasoning_around_envelope(self):
+        raw = (
+            "I should compare the sources first.\n"
+            f"{TERMINAL_ANSWER_OPEN}\nDirect user answer.\n{TERMINAL_ANSWER_CLOSE}"
+            "\nInternal post-check."
+        )
+        self.assertEqual(project_terminal_answer(raw), "Direct user answer.")
+        self.assertEqual(project_terminal_answer(" plain provider fallback "), "plain provider fallback")
 
     def test_passive_delivery_does_not_add_model_visible_final_answer_tool(self):
         general = self.payload("general-agent")
@@ -177,6 +189,25 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
         self.assertTrue(collector.frozen)
         self.assertFalse(collector.assistant_matches_result)
         self.assertEqual(collector.answer(), "SDK权威最终回答")
+
+    def test_success_result_projects_only_enveloped_answer(self):
+        collector = ClaudeSDKTerminalCollector()
+        collector.observe(
+            AssistantMessage(
+                content=[TextBlock("private notes")],
+                message_id="msg-final",
+                uuid="callback-final",
+            )
+        )
+        collector.observe(
+            ResultMessage(
+                "先梳理来源。"
+                f"{TERMINAL_ANSWER_OPEN}只展示这句。{TERMINAL_ANSWER_CLOSE}"
+                "再检查一次。"
+            )
+        )
+
+        self.assertEqual(collector.answer(), "只展示这句。")
 
     def test_success_result_without_result_field_uses_terminal_assistant_text(self):
         collector = ClaudeSDKTerminalCollector()

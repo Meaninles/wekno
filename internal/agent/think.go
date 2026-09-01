@@ -8,6 +8,7 @@ import (
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -147,8 +148,10 @@ func (e *AgentEngine) streamThinkingToEventBus(
 	//   - answerStreamed records that user-facing answer text was sent live to
 	//     the final-answer area, so the natural-stop branch only emits Done.
 	splitter := agenttools.NewThinkStreamSplitter()
+	projector := conversationmemory.NewTerminalAnswerProjector()
 	thinkingOpen := false
 	answerStreamed := false
+	var projectedAnswer strings.Builder
 
 	emitThought := func(content string, done bool) {
 		if content == "" && !done {
@@ -191,6 +194,7 @@ func (e *AgentEngine) streamThinkingToEventBus(
 		}
 		closeThinking()
 		answerStreamed = true
+		projectedAnswer.WriteString(content)
 		emittedEventTypes["final_answer_chunk"]++
 		e.eventBus.Emit(ctx, event.Event{
 			ID:        answerID,
@@ -277,7 +281,7 @@ func (e *AgentEngine) streamThinkingToEventBus(
 					thinkingOpen = true
 					emitThought(thinkPart, false)
 				}
-				emitAnswer(answerPart)
+				emitAnswer(projector.Feed(answerPart))
 			}
 			if chunk.Done {
 				thinkPart, answerPart := splitter.Flush()
@@ -285,7 +289,7 @@ func (e *AgentEngine) streamThinkingToEventBus(
 					thinkingOpen = true
 					emitThought(thinkPart, false)
 				}
-				emitAnswer(answerPart)
+				emitAnswer(projector.Feed(answerPart))
 				closeThinking()
 			}
 		},
@@ -299,7 +303,25 @@ func (e *AgentEngine) streamThinkingToEventBus(
 	logger.Infof(ctx, "[Agent][Thinking] Iteration-%d completed: content=%d chars, tool_calls=%d, emitted_events=%v",
 		iteration+1, len(llmResult.Content), len(llmResult.ToolCalls), emittedEventTypes)
 
+	// A no-envelope response is buffered until we know whether this round calls
+	// a tool. That prevents a tool-use preamble from arriving in the answer area
+	// after the tool event that would normally retract it. Terminal rounds fail
+	// open to their complete plain text; operational rounds keep that text only
+	// in AgentStep history.
+	if len(llmResult.ToolCalls) == 0 {
+		emitAnswer(projector.Flush())
+	} else {
+		_ = projector.Flush()
+	}
+	closeThinking()
 	fullContent := agenttools.StripThinkBlocks(llmResult.Content)
+	if len(llmResult.ToolCalls) == 0 && projectedAnswer.Len() > 0 {
+		fullContent = projectedAnswer.String()
+	} else if len(llmResult.ToolCalls) == 0 {
+		fullContent = conversationmemory.ProjectTerminalAnswer(
+			fullContent,
+		)
+	}
 
 	// Use actual finish_reason from LLM stream instead of hardcoding "stop".
 	// Fallback to "stop" when the stream did not report a finish_reason

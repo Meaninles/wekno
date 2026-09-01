@@ -1,8 +1,10 @@
 package conversationmemory
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestCurrentTurnContextPreservesCrossDomainAndAdversarialUserText(t *testing.T) {
@@ -171,6 +173,60 @@ func TestUserLedgerAvoidsDuplicatingSourceLabelledRecentTurns(t *testing.T) {
 	block := UserArchiveBlock(archive)
 	if !strings.Contains(block, "user_source_ledger") || strings.Contains(block, "older_than_recent_history") {
 		t.Fatalf("unexpected ledger wrapper: %s", block)
+	}
+}
+
+func TestCompleteUserSourceLedgerSeparatesAuthorityFromAssistantContext(t *testing.T) {
+	ledger := BuildUserSourceLedger([]string{
+		"owner unknown",
+		"coordinator is Lin but Lin is not the owner",
+		"owner is now Priya",
+	})
+	for _, want := range []string{
+		"completed_user_message_count: 3",
+		"ledger_user_message_count: 3",
+		"user_turn_001: owner unknown",
+		"user_turn_003: owner is now Priya",
+	} {
+		if !strings.Contains(ledger, want) {
+			t.Fatalf("complete ledger missing %q: %s", want, ledger)
+		}
+	}
+	block := UserSourceLedgerBlock(ledger)
+	for _, want := range []string{
+		`authority="user_authored_only"`,
+		"locate the user fragment that supplies it",
+		"change one field adopts only that user-authored change",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("source ledger block missing %q: %s", want, block)
+		}
+	}
+}
+
+func TestCompleteUserSourceLedgerIsBoundedAndKeepsFoundationsAndLatestUpdates(t *testing.T) {
+	queries := make([]string, 70)
+	for index := range queries {
+		queries[index] = fmt.Sprintf("user-fact-%02d %s", index+1, strings.Repeat("x", 900))
+	}
+
+	ledger := BuildUserSourceLedger(queries)
+	if got := utf8.RuneCountInString(ledger); got > maxSourceLedgerRunes {
+		t.Fatalf("source ledger has %d runes, want <= %d", got, maxSourceLedgerRunes)
+	}
+	for _, want := range []string{
+		"completed_user_message_count: 70",
+		"ledger_user_message_count: 48",
+		"user_turn_001: user-fact-01",
+		"[omitted_middle_user_messages=22]",
+		"user_turn_070: user-fact-70",
+	} {
+		if !strings.Contains(ledger, want) {
+			t.Fatalf("bounded ledger missing %q", want)
+		}
+	}
+	if strings.Contains(ledger, "user_turn_009: user-fact-09") {
+		t.Fatalf("bounded ledger unexpectedly retained an omitted middle turn")
 	}
 }
 

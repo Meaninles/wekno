@@ -10,6 +10,7 @@ import (
 	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatretrieval"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -1026,11 +1027,15 @@ func prioritizeFallbackCurrentTask(query, promptContent string) string {
 	if currentTask == "" {
 		return guidance
 	}
-	return fmt.Sprintf(
+	content := fmt.Sprintf(
 		"## Current user task (authoritative)\n%s\n\n## Fallback guidance\n%s\n\nAnswer only the current user task above. Use conversation history only when that task explicitly depends on it.",
 		currentTask,
 		guidance,
 	)
+	if directive := conversationmemory.TerminalGenerationDirective(); directive != "" {
+		content += "\n\n" + directive
+	}
+	return content
 }
 
 // renderFallbackPrompt renders the fallback prompt template with query and image context.
@@ -1135,26 +1140,38 @@ func (s *sessionService) consumeFallbackStream(
 	eventBus := chatManage.EventBus
 	var finalContent string
 	streamCompleted := false
+	projector := conversationmemory.NewTerminalAnswerProjector()
+	emitProjected := func(content string, done bool) {
+		if content != "" {
+			finalContent += content
+		}
+		if err := eventBus.Emit(ctx, types.Event{
+			ID:        fallbackID,
+			Type:      types.EventType(event.EventAgentFinalAnswer),
+			SessionID: chatManage.SessionID,
+			Data: event.AgentFinalAnswerData{
+				Content:    content,
+				Done:       done,
+				IsFallback: true,
+			},
+		}); err != nil {
+			logger.Errorf(ctx, "Failed to emit fallback answer chunk event: %v", err)
+		}
+	}
 
 	for response := range responseChan {
 		// Emit event for each answer chunk
 		if response.ResponseType == types.ResponseTypeAnswer {
-			finalContent += response.Content
-			if err := eventBus.Emit(ctx, types.Event{
-				ID:        fallbackID,
-				Type:      types.EventType(event.EventAgentFinalAnswer),
-				SessionID: chatManage.SessionID,
-				Data: event.AgentFinalAnswerData{
-					Content:    response.Content,
-					Done:       response.Done,
-					IsFallback: true,
-				},
-			}); err != nil {
-				logger.Errorf(ctx, "Failed to emit fallback answer chunk event: %v", err)
+			if content := projector.Feed(response.Content); content != "" {
+				emitProjected(content, false)
 			}
 
 			// Update ChatResponse with final content when done
 			if response.Done {
+				if content := projector.Flush(); content != "" {
+					emitProjected(content, false)
+				}
+				emitProjected("", true)
 				chatManage.ChatResponse = &types.ChatResponse{Content: finalContent}
 				streamCompleted = true
 				logger.Infof(ctx, "Fallback streaming response completed")

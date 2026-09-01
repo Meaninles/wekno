@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/models/asr"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -155,9 +156,42 @@ func TestHandleModelFallback_IncludesHistoryMessages(t *testing.T) {
 		"## Current user task (authoritative)\n现在还能继续讲吗？不要沿用此前固定结尾。",
 	))
 	assert.Contains(t, chatModel.lastMessages[3].Content, "## Fallback guidance")
-	assert.True(t, strings.HasSuffix(
-		chatModel.lastMessages[3].Content,
-		"Answer only the current user task above. Use conversation history only when that task explicitly depends on it.",
-	))
+	assert.Contains(t, chatModel.lastMessages[3].Content,
+		"Answer only the current user task above. Use conversation history only when that task explicitly depends on it.")
+	assert.True(t, strings.HasSuffix(chatModel.lastMessages[3].Content,
+		conversationmemory.TerminalGenerationDirective()))
 	assert.NotEqual(t, "Answer the latest user question: 现在还能继续讲吗？", chatModel.lastMessages[3].Content)
+}
+
+func TestConsumeFallbackStreamProjectsSameProductionAnswerToEventsAndState(t *testing.T) {
+	bus := event.NewEventBus()
+	cm := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{SessionID: "session-projection"},
+		PipelineContext: types.PipelineContext{EventBus: bus.AsEventBusInterface()},
+	}
+	var streamed string
+	var done int
+	bus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentFinalAnswerData)
+		require.True(t, ok)
+		streamed += data.Content
+		if data.Done {
+			done++
+		}
+		return nil
+	})
+	responses := make(chan types.StreamResponse, 3)
+	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "private analysis\n<weknora_"}
+	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "final_response>Visible fallback answer.</weknora_final_response>hidden"}
+	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Done: true}
+	close(responses)
+
+	(&sessionService{}).consumeFallbackStream(context.Background(), cm, responses)
+
+	require.NotNil(t, cm.ChatResponse)
+	assert.Equal(t, "Visible fallback answer.", streamed)
+	assert.Equal(t, streamed, cm.ChatResponse.Content)
+	assert.Equal(t, 1, done)
+	assert.NotContains(t, streamed, "private")
+	assert.NotContains(t, streamed, "weknora_final_response")
 }

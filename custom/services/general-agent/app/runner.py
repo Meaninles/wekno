@@ -25,6 +25,8 @@ import xml.etree.ElementTree as ET
 from .final_delivery import (
     CLAUDE_SDK_TERMINAL_CONTRACT,
     ClaudeSDKTerminalCollector,
+    TERMINAL_ANSWER_CLOSE,
+    TERMINAL_ANSWER_OPEN,
     requires_passive_terminal_delivery,
     uses_claude_sdk_terminal_projection,
 )
@@ -2760,6 +2762,16 @@ def build_system_prompt(
         ensure_ascii=False,
         indent=2,
     )
+    passive_terminal_contract = ""
+    if requires_passive_terminal_delivery(payload.runtime_config.agent_type):
+        passive_terminal_contract = (
+            f"\n- Final-answer projection: put the complete user-visible answer inside exactly one "
+            f"`{TERMINAL_ANSWER_OPEN}...{TERMINAL_ANSWER_CLOSE}` envelope. Keep planning, self-talk, "
+            "tool narration and protocol text outside it; the runtime exposes only the envelope body. "
+            "The envelope must be non-empty and use the language explicitly requested by the current user, "
+            "otherwise the configured user language. This is formatting within the same SDK run and must not "
+            "trigger another model, validation or repair pass."
+        )
     policy = f"""
 You are WeKnora's general-purpose agent runtime. Act like a capable general-purpose assistant with the tools and context configured for this agent.
 
@@ -2818,6 +2830,7 @@ Available capabilities:
 - If you create artifacts, mention their filenames. If not, answer in text.
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
 - Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. This is still one generation run; do not request or perform a second validation or regeneration pass.
+{passive_terminal_contract}
 - Final output hygiene: keep intent classification, chain-of-thought, self-talk, tool planning, and self-review internal. Start the final answer directly with useful user-facing content; routine tool use does not need narrated planning.
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
 - Source citation contract: a WeKnora tool result's `source_references` are claim-bearing evidence handles. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports; each supplied value uses the canonical form `<src id="S1" />` with its own S-number. Treat each S-number as an opaque handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. Each knowledge source is one specific document fragment. A document title and its knowledge-base/collection membership are different facts: claim membership when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited. Generate the answer once; the runtime never asks the model to validate or regenerate citations.
@@ -2864,6 +2877,12 @@ def build_prompt(
     parts: list[str] = []
     current_source_id = current_user_turn_source_id(payload)
     parts.append("<current_task_priority>")
+    terminal_reminder = ""
+    if requires_passive_terminal_delivery(payload.runtime_config.agent_type):
+        terminal_reminder = (
+            f" Put the complete direct answer inside exactly one {TERMINAL_ANSWER_OPEN}..."
+            f"{TERMINAL_ANSWER_CLOSE} envelope; keep private reasoning and narration outside it."
+        )
     parts.append(
         "The exact current task is the user's verbatim prompt in <user_request verbatim=\"true\" priority=\"highest\"> below. "
         "Read that block first and keep it as the goal of this run. "
@@ -3002,6 +3021,7 @@ def build_prompt(
         "Use the WeKnora context only as supporting information and available capability descriptions. "
         "Use the language explicitly requested in the current user_request; otherwise use the configured user language. "
         "Return only the direct user-visible answer without intent analysis, self-talk, planning, or protocol narration, and do not start background tasks."
+        + terminal_reminder
     )
     parts.append("</task_reminder>")
     return "\n".join(parts)

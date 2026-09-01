@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/assert"
@@ -226,6 +227,7 @@ func TestRenderUserTurnContent_IncludesScopeBlocks(t *testing.T) {
 	assert.Contains(t, out, "<runtime_context")
 	assert.Contains(t, out, "<must_use>")
 	assert.Contains(t, out, `<user_request verbatim="true" priority="highest">hello</user_request>`)
+	assert.Contains(t, out, "<weknora_final_response>")
 	assert.Contains(t, out, "Previous conversation messages are background context")
 	assert.Greater(t, strings.Index(out, "<user_request"), strings.Index(out, "<runtime_context"))
 }
@@ -249,10 +251,10 @@ func TestBuildMessagesWithLLMContext_CurrentTurnRemainsAuthoritative(t *testing.
 	assert.Equal(t, "long old procurement answer", messages[2].Content)
 	assert.Contains(t, messages[3].Content, "new reserve-fund question")
 	assert.NotContains(t, messages[3].Content, "old procurement question")
-	assert.True(t, strings.HasSuffix(
-		messages[3].Content,
-		`<user_request verbatim="true" priority="highest">new reserve-fund question</user_request>`,
-	))
+	assert.Contains(t, messages[3].Content,
+		`<user_request verbatim="true" priority="highest">new reserve-fund question</user_request>`)
+	assert.True(t, strings.HasSuffix(messages[3].Content,
+		conversationmemory.TerminalGenerationDirective()))
 }
 
 func TestBuildMustUseBlock_MultiWordServicePrefix(t *testing.T) {

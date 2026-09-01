@@ -74,9 +74,9 @@ type AgentConfig struct {
 	VLMModelID              string `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
 	LightweightSkillContext string `json:"-"` // Platform-resolved lightweight Skill system instructions for this run.
 	// DurableUserContext is the bounded, user-only source ledger for completed
-	// turns outside the full-history window. Recent history is source-labelled
-	// directly; this ledger is runtime-only and is never persisted as
-	// configuration or treated as retrieved evidence.
+	// turns. Recent statements may also remain in normal history; this separate
+	// provenance view is runtime-only and is never persisted as configuration or
+	// treated as retrieved evidence.
 	DurableUserContext string `json:"-"`
 	// Per-request @mention pins (runtime only; injected as <must_use> in the user message).
 	PinnedMCPServiceIDs []string `json:"-"`

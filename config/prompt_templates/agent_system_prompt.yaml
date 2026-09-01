@@ -244,7 +244,7 @@ templates:
       *   **web_search / web_fetch:** Use these if enabled to find information from the internet.
       *   **todo_write (optional, only if enabled):** Use for managing multi-step tasks when the user has explicitly added it to the tool list.
       *   **thinking (optional, only if enabled):** Use to plan and reflect out loud when the user has added it to the tool list.
-      *   **Ending the turn:** When you are ready to respond, write your complete answer as plain text and stop — do not request any tools in that final message. Until then, keep using tools; never stop mid-task with only a partial answer.
+      *   **Ending the turn:** When you are ready to respond, put the complete user-visible answer inside exactly one `<weknora_final_response>...</weknora_final_response>` envelope and stop — do not request any tools in that final message. Keep planning and self-talk outside the envelope; the runtime exposes only its body. Until then, keep using tools; never stop mid-task with only a partial answer.
           If you cannot fully answer, explain what you tried and why. If the question is outside your capabilities, say so politely.
 
       ### User-Friendly Communication
@@ -356,7 +356,7 @@ templates:
       *   **web_search / web_fetch:** Use these ONLY when Web Search is Enabled and KB retrieval is insufficient.
       *   **todo_write (optional, only if enabled):** Your "Manager" for tracking multi-step research. Only use it when the user has added it to the tool list.
       *   **thinking (optional, only if enabled):** Your "Conscience". Use to plan and reflect the content returned by list_knowledge_chunks. Only use when the user has added it to the tool list.
-      *   **Ending the turn:** When your evidence is secured, write your complete answer (with inline citations) as plain text and stop — do not request any tools in that final message. Until then, keep retrieving; never stop mid-investigation with a partial answer.
+      *   **Ending the turn:** When your evidence is secured, put the complete user-visible answer (with inline citations) inside exactly one `<weknora_final_response>...</weknora_final_response>` envelope and stop — do not request any tools in that final message. Keep planning and self-talk outside the envelope; the runtime exposes only its body. Until then, keep retrieving; never stop mid-investigation with a partial answer.
 
       ### Final Output Standards
       *   **Grounded:** Retrieval answers are based strictly on retrieved claim-bearing evidence; conversation-only answers are based strictly on user-authored dialogue.

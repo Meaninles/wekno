@@ -94,7 +94,7 @@ func prepareChatModel(ctx context.Context, modelService interfaces.ModelService,
 	}
 
 	opt := &chat.ChatOptions{
-		Temperature:         chatManage.SummaryConfig.Temperature,
+		Temperature:         effectiveTemperature(chatManage),
 		TopP:                chatManage.SummaryConfig.TopP,
 		Seed:                chatManage.SummaryConfig.Seed,
 		MaxTokens:           chatManage.SummaryConfig.MaxTokens,
@@ -110,6 +110,21 @@ func prepareChatModel(ctx context.Context, modelService interfaces.ModelService,
 	}
 
 	return chatModel, opt, nil
+}
+
+// effectiveTemperature keeps open-ended and evidence-seeking turns on their
+// configured sampling policy while making dialogue-state transformations
+// stable across repeated runs. This changes no prompt, model call, or tool
+// decision and is independent of any domain or dataset wording.
+func effectiveTemperature(chatManage *types.ChatManage) float64 {
+	if chatManage == nil {
+		return 0
+	}
+	configured := chatManage.SummaryConfig.Temperature
+	if chatManage.Intent == types.IntentConversation && configured > 0.2 {
+		return 0.2
+	}
+	return configured
 }
 
 // effectiveThinkingOption keeps the configured model behavior for ordinary
@@ -145,7 +160,7 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 	// when no evidence handles exist, while keeping current-turn precedence and
 	// citation syntax consistent for present and future retrieval paths.
 	systemPrompt = sourcerefs.EnsureGenerationContract(systemPrompt)
-	systemPrompt = conversationmemory.AppendUserArchive(systemPrompt, chatManage.DurableUserContext)
+	systemPrompt = conversationmemory.AppendUserSourceLedger(systemPrompt, chatManage.DurableUserContext)
 	if skillContext := strings.TrimSpace(chatManage.LightweightSkillContext); skillContext != "" {
 		systemPrompt += "\n\n" + skillContext
 	}
@@ -265,7 +280,7 @@ func loadAndProcessHistory(
 		item.SourceID = conversationmemory.UserTurnSourceID(index + 1)
 		queries = append(queries, item.SourceQuery)
 	}
-	archive := conversationmemory.BuildUserArchive(queries, maxRounds)
+	archive := conversationmemory.BuildUserSourceLedger(queries)
 	if len(historyList) > maxRounds {
 		historyList = historyList[len(historyList)-maxRounds:]
 	}

@@ -302,7 +302,7 @@ func (p *PluginQueryUnderstand) buildPrompts(chatManage *types.ChatManage, histo
 	}
 
 	conversationText := formatConversationHistory(historyList)
-	if archiveBlock := conversationmemory.UserArchiveBlock(chatManage.DurableUserContext); archiveBlock != "" {
+	if archiveBlock := conversationmemory.UserSourceLedgerBlock(chatManage.DurableUserContext); archiveBlock != "" {
 		conversationText = archiveBlock + "\n" + conversationText
 	}
 	systemPrompt = conversationmemory.EnsureQueryUnderstandingContract(systemPrompt)

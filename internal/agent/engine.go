@@ -124,7 +124,7 @@ func (e *AgentEngine) buildSystemPrompt(ctx context.Context) string {
 	if skillContext := strings.TrimSpace(e.config.LightweightSkillContext); skillContext != "" {
 		prompt += "\n\n" + skillContext
 	}
-	return conversationmemory.AppendUserArchive(prompt, e.config.DurableUserContext)
+	return conversationmemory.AppendUserSourceLedger(prompt, e.config.DurableUserContext)
 }
 
 // NewAgentEngineWithSkills creates a new agent engine with skills support

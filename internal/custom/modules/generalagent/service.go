@@ -269,7 +269,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		// platform continuity rules in the system prompt instead of appending
 		// hidden protocol text to the highest-priority user request.
 		Query: query,
-		SystemPrompt: conversationmemory.AppendUserArchive(
+		SystemPrompt: conversationmemory.AppendUserSourceLedger(
 			renderSystemPrompt(ctx, agentConfig.ResolveSystemPrompt(agentConfig.WebSearchEnabled), agentConfig.WebSearchEnabled),
 			durableUserContext,
 		),
@@ -948,7 +948,7 @@ func buildGeneralAgentHistory(
 	for _, pair := range complete {
 		queries = append(queries, strings.TrimSpace(pair.user.Content))
 	}
-	archive := conversationmemory.BuildUserArchive(queries, turns)
+	archive := conversationmemory.BuildUserSourceLedger(queries)
 	if len(complete) > turns {
 		complete = complete[len(complete)-turns:]
 	}

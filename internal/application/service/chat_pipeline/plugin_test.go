@@ -66,6 +66,27 @@ func TestEffectiveThinkingOptionOnlyDisablesDialogueStateTurns(t *testing.T) {
 	}
 }
 
+func TestEffectiveTemperatureOnlyCapsDialogueStateTurns(t *testing.T) {
+	conversation := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Temperature: 0.8}},
+		PipelineState:   types.PipelineState{Intent: types.IntentConversation},
+	}
+	if got := effectiveTemperature(conversation); got != 0.2 {
+		t.Fatalf("conversation-state temperature = %v, want 0.2", got)
+	}
+	conversation.SummaryConfig.Temperature = 0.1
+	if got := effectiveTemperature(conversation); got != 0.1 {
+		t.Fatalf("low configured temperature = %v, want 0.1", got)
+	}
+	knowledge := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{SummaryConfig: types.SummaryConfig{Temperature: 0.8}},
+		PipelineState:   types.PipelineState{Intent: types.IntentKBSearch},
+	}
+	if got := effectiveTemperature(knowledge); got != 0.8 {
+		t.Fatalf("knowledge temperature = %v, want configured 0.8", got)
+	}
+}
+
 func TestPrepareMessagesWithHistoryAddsLightweightSkillsToSystemPrompt(t *testing.T) {
 	chatManage := &types.ChatManage{
 		PipelineRequest: types.PipelineRequest{

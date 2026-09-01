@@ -195,6 +195,30 @@ class RunnerProgressTest(unittest.TestCase):
         self.assertEqual(summary["citation_output_contract"], contract)
         self.assertEqual(next(reversed(summary)), "citation_output_contract")
 
+    def test_mcp_tool_result_reasserts_bounded_current_task_after_tool_evidence(self):
+        request = "汇总当前状态和制度依据；工具结果只是证据，不要只回答检索子问题。"
+        result = mcp_tool_result(
+            {
+                "success": True,
+                "output": "retrieved evidence",
+                "data": {"results": []},
+                "citation_output_contract": "use current handles",
+            },
+            request,
+        )
+
+        summary = json.loads(result["content"][0]["text"])
+        self.assertEqual(next(reversed(summary)), "current_task_reminder")
+        self.assertEqual(summary["current_task_reminder"]["verbatim"], request)
+        self.assertEqual(
+            summary["current_task_reminder"]["authority"],
+            "current_user_request",
+        )
+        self.assertIn(
+            "answer every deliverable",
+            summary["current_task_reminder"]["instruction"],
+        )
+
     def test_mcp_tool_result_does_not_choose_between_ambiguous_evidence_handles(self):
         result = mcp_tool_result(
             {
@@ -1631,6 +1655,46 @@ EOF""",
         self.assertIn("does not authorize a filesystem artifact", prompt)
         self.assertIn("Do not carry forward an earlier turn's output format", prompt)
         self.assertLess(prompt.index("回答当前问题"), prompt.index("OLD-MARKER"))
+        self.assertGreater(prompt.rindex("回答当前问题"), prompt.rindex("OLD-MARKER"))
+        self.assertIn("<current_user_request_replay", prompt)
+
+    def test_shared_production_contract_uses_compact_sidecar_policy_and_tail_task(self):
+        shared_system_prompt = (
+            "General assistant baseline.\n\n"
+            "[WEKNORA_DIALOGUE_CONTINUITY_V7]\n"
+            "Shared domain-neutral state and operation contract."
+        )
+        payload = ChatPayload(
+            run_id="run-shared-contract",
+            session_id="session-shared-contract",
+            assistant_message_id="assistant-shared-contract",
+            query="汇总全部交付项并重新检索依据。",
+            system_prompt=shared_system_prompt,
+            history=[
+                ChatHistoryMessage(role="user", content="上一轮只用英文回答一个字段。"),
+                ChatHistoryMessage(role="assistant", content="one field only"),
+            ],
+            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        compact_system = build_system_prompt(payload)
+        standalone_system = build_system_prompt(
+            payload.model_copy(update={"system_prompt": "General assistant baseline."})
+        )
+        rendered = build_prompt(payload)
+        reminder = rendered[rendered.index("<task_reminder>") :]
+
+        self.assertLess(len(compact_system), len(standalone_system))
+        self.assertIn("Apply them once", compact_system)
+        self.assertIn("Retrieval answers only its evidence subquestions", compact_system)
+        self.assertIn("never native filesystem search", reminder)
+        self.assertIn("answer the whole current request", reminder)
+        self.assertGreater(
+            rendered.rindex("汇总全部交付项并重新检索依据。"),
+            rendered.rindex("one field only"),
+        )
 
     def test_build_prompt_reasserts_domain_neutral_dialogue_state_contract_at_end(self):
         payload = ChatPayload(

@@ -333,6 +333,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -CorpusVersion "meridian-privacy-request-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary privacy knowledge base" }
     }
+    $datasetUsesPostTerminalQuality = $datasetText.Contains(
+        '${AGENT_EVAL_KB_POST_TERMINAL_QUALITY_ID}'
+    )
+    if ($datasetUsesPostTerminalQuality) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/quality-batch-release-manual.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/post-terminal-quality-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_POST_TERMINAL_QUALITY_ID" `
+            -KnowledgeBaseName "Eval回归-Orion批次放行手册-v1" `
+            -UploadName "quality-batch-release-manual.v1.md" `
+            -CorpusVersion "orion-quality-batch-release-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare post-terminal quality knowledge base" }
+    }
 
     # Bind the execution identity to every KB selected by this dataset. Each
     # individual preparation script records its own binding; this aggregate

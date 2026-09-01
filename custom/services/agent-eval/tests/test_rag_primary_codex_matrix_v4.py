@@ -163,8 +163,20 @@ class RagPrimaryCodexMatrixV4Test(unittest.TestCase):
             "corpus_privacy": ROOT / "fixtures" / "regression-corpora" / "privacy-request-handbook.v1.md",
         }
         self.assertEqual(manifest["dataset_sha256"], dataset_sha256(self.committed))
+        # V4 is the immutable identity of full-flow run #5. The subsequently
+        # added post-terminal regression changed only orchestration so V4 must
+        # now fail closed rather than being silently re-frozen in place. The
+        # new regression has its own versioned manifest.
+        current_orchestration = file_sha256(dependencies["orchestration"])
+        self.assertNotEqual(
+            manifest["dependency_sha256"]["orchestration"],
+            current_orchestration,
+        )
+        dependencies.pop("orchestration")
+        frozen_dependencies = dict(manifest["dependency_sha256"])
+        frozen_dependencies.pop("orchestration")
         self.assertEqual(
-            manifest["dependency_sha256"],
+            frozen_dependencies,
             {name: file_sha256(path) for name, path in sorted(dependencies.items())},
         )
 

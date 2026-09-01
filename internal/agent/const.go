@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/modeladmission"
 	"github.com/google/uuid"
 )
 
@@ -62,6 +63,20 @@ func isTransientError(err error) bool {
 		}
 	}
 	return false
+}
+
+// llmRetryDelay keeps ordinary transient retries short while respecting a
+// typed provider/admission cooldown. Retrying before that cooldown expires is
+// guaranteed to hit the same open circuit and wastes the bounded retry budget.
+func llmRetryDelay(err error, retry int) time.Duration {
+	if retry < 1 {
+		retry = 1
+	}
+	delay := time.Duration(retry) * time.Second
+	if hinted, ok := modeladmission.ModelRetryAfter(err); ok && hinted > delay {
+		delay = hinted
+	}
+	return delay
 }
 
 // getLLMCallTimeout returns the configured LLM call timeout, falling back to default.

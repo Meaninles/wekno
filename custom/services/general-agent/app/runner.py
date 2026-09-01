@@ -5378,6 +5378,44 @@ MCP_TOOL_PROGRESS: dict[str, dict[str, str]] = {
 
 MAX_TURNS_USER_MESSAGE = "任务过于复杂，请将任务拆分为具体子任务逐个执行，或提高智能体最大迭代次数"
 TIMEOUT_USER_MESSAGE = "任务耗时过长，请将任务拆分为具体子任务逐个执行，或提高智能体LLM调用超时时间"
+PROVIDER_TRANSPORT_RETRY_MARKERS = (
+    "unable to connect to api",
+    "unknown_certificate_verification_error",
+    "unexpected_eof",
+    "unexpected eof",
+    "connection reset",
+    "connection refused",
+    "temporarily unavailable",
+    "service unavailable",
+)
+
+
+def provider_transport_retries() -> int:
+    raw = str(os.getenv("CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES", "2") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 2
+    return min(max(value, 0), 3)
+
+
+def raw_sdk_error_text(error: Any) -> str:
+    parts: list[str] = []
+    if error is not None:
+        parts.append(str(error))
+    for attr in ("subtype", "stop_reason", "result", "api_error_status"):
+        value = getattr(error, attr, None)
+        if value is not None:
+            parts.append(str(value))
+    errors = getattr(error, "errors", None)
+    if isinstance(errors, list):
+        parts.extend(str(item) for item in errors if item is not None)
+    return " ".join(parts).strip()
+
+
+def is_retryable_provider_transport_error(error: Any) -> bool:
+    lowered = raw_sdk_error_text(error).lower()
+    return any(marker in lowered for marker in PROVIDER_TRANSPORT_RETRY_MARKERS)
 
 
 def sdk_tool_progress(tool_name: str, phase: str) -> str:
@@ -5408,20 +5446,7 @@ def sdk_tool_progress_event(tool_name: str, phase: str, tool_call_id: str = "") 
 
 
 def user_facing_error_message(error: Any) -> str:
-    parts: list[str] = []
-    if isinstance(error, BaseException):
-        parts.append(str(error))
-    elif error is not None:
-        parts.append(str(error))
-    for attr in ("subtype", "stop_reason", "result", "api_error_status"):
-        value = getattr(error, attr, None)
-        if value is not None:
-            parts.append(str(value))
-    errors = getattr(error, "errors", None)
-    if isinstance(errors, list):
-        parts.extend(str(item) for item in errors if item is not None)
-
-    raw = " ".join(parts).strip()
+    raw = raw_sdk_error_text(error)
     lowered = raw.lower()
     if any(token in lowered for token in ("max_turn", "max turns", "maxturns", "turncount")):
         return MAX_TURNS_USER_MESSAGE
@@ -5842,7 +5867,9 @@ class GeneralAgentRunner:
         prompt_observation = build_prompt_observation(self.payload, prompt)
         options = initial_options
         resume_attempts = 0
+        provider_retry_attempts = 0
         while True:
+            provider_retry_requested = False
             async for stream_item in multiplex_query_events(prompt, options):
                 if isinstance(stream_item, RunEvent):
                     yield stream_item
@@ -5852,6 +5879,17 @@ class GeneralAgentRunner:
                     terminal_collector.observe(message)
                 if message.__class__.__name__ == "ResultMessage":
                     if getattr(message, "is_error", False):
+                        can_retry_transport = (
+                            is_retryable_provider_transport_error(message)
+                            and provider_retry_attempts < provider_transport_retries()
+                            and not tools_seen
+                            and not sdk_tool_calls
+                            and not pending_background_tool_ids
+                            and not all_delta_parts
+                        )
+                        if can_retry_transport:
+                            provider_retry_requested = True
+                            break
                         raise RuntimeError(user_facing_error_message(message))
                     result_text = result_message_text(message)
                     if result_text:
@@ -5948,6 +5986,29 @@ class GeneralAgentRunner:
                             final_candidate_parts.append(answer_text)
                     reset_text_stream_state()
 
+            if provider_retry_requested:
+                provider_retry_attempts += 1
+                retry_delay = min(2 ** (provider_retry_attempts - 1), 5)
+                yield validation_progress_event(
+                    f"provider-transport-retry-{self.payload.run_id}-{provider_retry_attempts}",
+                    "provider_transport_retry",
+                    "模型连接暂时异常，正在重试",
+                    phase="start",
+                    stage="retry",
+                    transient=True,
+                )
+                await asyncio.sleep(retry_delay)
+                terminal_collector = ClaudeSDKTerminalCollector()
+                terminal_result_answer = ""
+                all_delta_parts = []
+                current_segment_delta_parts = []
+                final_candidate_parts = []
+                text_buffer_parts = []
+                active_answer_id = ""
+                active_status_id = ""
+                sdk_session_id = str(uuid.uuid4())
+                options = replace(initial_options, session_id=sdk_session_id, resume=None)
+                continue
             if not pending_background_tool_ids:
                 break
             resume_attempts += 1

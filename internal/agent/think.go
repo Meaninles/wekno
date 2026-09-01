@@ -402,10 +402,21 @@ func (e *AgentEngine) callLLMWithRetry(
 	if err != nil && isTransientError(err) {
 		// Retry transient errors (timeout, rate limit, server errors) up to maxLLMRetries times
 		for retry := 1; retry <= maxLLMRetries; retry++ {
-			retryDelay := time.Duration(retry) * time.Second
+			retryDelay := llmRetryDelay(err, retry)
 			logger.Warnf(ctx, "[Agent][Round-%d] LLM transient error (attempt %d/%d), retrying in %v: %v",
 				round, retry, maxLLMRetries, retryDelay, err)
-			time.Sleep(retryDelay)
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
 
 			response, err = e.streamThinkingToEventBus(ctx, messages, tools, iteration, sessionID)
 			if err == nil || !isTransientError(err) {

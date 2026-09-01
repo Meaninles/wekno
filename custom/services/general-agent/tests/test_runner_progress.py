@@ -5,9 +5,11 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,7 @@ from app.runner import (  # noqa: E402
     data_analysis_post_tool_hook_factory,
     data_analysis_pre_tool_hook_factory,
     DATA_ANALYSIS_DISPLAY_INTENT_STATE_KEY,
+    GeneralAgentRunner,
     data_analysis_final_answer_pre_tool_hook_factory,
     data_analysis_stop_hook_factory,
     deterministic_final_validation,
@@ -61,6 +64,9 @@ from app.runner import (  # noqa: E402
     sdk_tool_progress,
     message_stop_reason,
     message_uses_tools,
+    is_retryable_provider_transport_error,
+    provider_transport_retries,
+    raw_sdk_error_text,
     terminal_background_tool_ids,
     tool_result_fragments,
     tool_use_fragments,
@@ -89,11 +95,12 @@ class Message:
 
 
 class ResultMessage:
-    def __init__(self, subtype="", stop_reason="", result="", errors=None):
+    def __init__(self, subtype="", stop_reason="", result="", errors=None, is_error=False):
         self.subtype = subtype
         self.stop_reason = stop_reason
         self.result = result
         self.errors = errors
+        self.is_error = is_error
 
 
 class RunnerProgressTest(unittest.TestCase):
@@ -2348,6 +2355,97 @@ EOF""",
         msg = ResultMessage(result="API request timed out after API_TIMEOUT_MS")
 
         self.assertEqual(user_facing_error_message(msg), TIMEOUT_USER_MESSAGE)
+
+    def test_provider_transport_retry_only_matches_connectivity_failures(self):
+        transient = ResultMessage(
+            result="API Error: Unable to connect to API (UNKNOWN_CERTIFICATE_VERIFICATION_ERROR)",
+            is_error=True,
+        )
+        semantic = ResultMessage(result="invalid tool arguments", is_error=True)
+
+        self.assertTrue(is_retryable_provider_transport_error(transient))
+        self.assertFalse(is_retryable_provider_transport_error(semantic))
+        self.assertIn("Unable to connect", raw_sdk_error_text(transient))
+
+    def test_provider_transport_retry_budget_is_bounded(self):
+        previous = os.environ.get("CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES")
+        try:
+            os.environ["CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES"] = "99"
+            self.assertEqual(provider_transport_retries(), 3)
+            os.environ["CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES"] = "0"
+            self.assertEqual(provider_transport_retries(), 0)
+        finally:
+            if previous is None:
+                os.environ.pop("CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES", None)
+            else:
+                os.environ["CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES"] = previous
+
+    def test_general_agent_retries_pre_output_transport_failure(self):
+        calls = 0
+
+        class FakeOptions:
+            def __init__(self, **kwargs):
+                self.values = kwargs
+
+        class FakeHookMatcher:
+            def __init__(self, **kwargs):
+                self.values = kwargs
+
+        def fake_tool(*_args, **_kwargs):
+            return lambda function: function
+
+        def fake_replace(options, **changes):
+            return FakeOptions(**(options.values | changes))
+
+        async def fake_query(prompt, options):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield ResultMessage(
+                    result="API Error: Unable to connect to API (UNKNOWN_CERTIFICATE_VERIFICATION_ERROR)",
+                    is_error=True,
+                )
+                return
+            yield Message([{"type": "text", "text": "连接恢复后的回答"}])
+            yield ResultMessage(result="连接恢复后的回答", is_error=False)
+
+        async def no_wait(_delay):
+            return None
+
+        async def collect(runner):
+            return [event async for event in runner.run()]
+
+        payload = ChatPayload(
+            run_id="transport-retry-run",
+            session_id="transport-retry-session",
+            assistant_message_id="transport-retry-message",
+            query="总结当前状态",
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            tool_callback_url="http://runtime-entry/internal/tools/call",
+        )
+        fake_sdk = types.SimpleNamespace(
+            ClaudeAgentOptions=FakeOptions,
+            HookMatcher=FakeHookMatcher,
+            query=fake_query,
+            create_sdk_mcp_server=lambda *_args, **_kwargs: {},
+            tool=fake_tool,
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            sys.modules, {"claude_agent_sdk": fake_sdk}
+        ), mock.patch("app.runner.asyncio.sleep", new=no_wait), mock.patch(
+            "app.runner.replace", new=fake_replace
+        ):
+            events = asyncio.run(collect(GeneralAgentRunner(Path(tmp), payload)))
+
+        self.assertEqual(calls, 2)
+        retry_events = [
+            event for event in events
+            if event.type == "progress" and event.data.get("tool_name") == "provider_transport_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        result = next(event for event in events if event.type == "result")
+        self.assertEqual(result.data["answer"], "连接恢复后的回答")
 
     def test_result_message_text_uses_terminal_sdk_answer(self):
         msg = ResultMessage(result="  完整的最终回答  ")

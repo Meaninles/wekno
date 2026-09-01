@@ -208,14 +208,6 @@ func (s *Service) Repair(ctx context.Context, task *asynq.Task, taskErr error) e
 			fmt.Sprintf("multimodal.image[%d]", id.ImageIndex),
 			errText,
 		)
-	case types.TypeDataTableSummary:
-		return s.repairCoreFanout(
-			ctx,
-			id,
-			processownership.DataTableFanoutItem(),
-			"datatable.summary",
-			errText,
-		)
 	default:
 		return nil
 	}
@@ -234,8 +226,7 @@ func RepairableTaskType(taskType string) bool {
 		types.TypeSummaryGeneration,
 		types.TypeQuestionGeneration,
 		types.TypeChunkExtract,
-		types.TypeImageMultimodal,
-		types.TypeDataTableSummary:
+		types.TypeImageMultimodal:
 		return true
 	default:
 		return false

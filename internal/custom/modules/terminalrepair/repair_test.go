@@ -258,7 +258,7 @@ func TestRepairDerivesStableEnrichmentItems(t *testing.T) {
 	}
 }
 
-func TestRepairCompletesImageAndDataTableFanInThenEnqueuesPostProcess(t *testing.T) {
+func TestRepairCompletesImageFanInBeforeDerivativeDataTable(t *testing.T) {
 	plan := processownership.FanoutPlan{
 		Version:              processownership.FanoutPlanVersion,
 		TenantID:             1,
@@ -287,21 +287,26 @@ func TestRepairCompletesImageAndDataTableFanInThenEnqueuesPostProcess(t *testing
 	if err := svc.Repair(context.Background(), taskWithPayload(t, types.TypeImageMultimodal, image), errors.New("vlm failed")); err != nil {
 		t.Fatalf("image Repair() error = %v", err)
 	}
-	if len(enqueuer.ordered) != 0 {
-		t.Fatalf("postprocess enqueued before all fanout completed: %d", len(enqueuer.ordered))
+	if len(enqueuer.ordered) != 1 || enqueuer.ordered[0].Type() != types.TypeKnowledgePostProcess {
+		t.Fatalf("enqueued tasks = %#v, want one postprocess task after core image fan-in", enqueuer.ordered)
 	}
+	// Data-table metadata is derivative outbox work in current generations. It
+	// must neither hold the core parse fan-in open nor enter terminal repair.
 	table := types.DataTableSummaryPayload{TenantID: 1, KnowledgeID: "k", KnowledgeBaseID: "kb", ProcessingGeneration: "g"}
 	if err := svc.Repair(context.Background(), taskWithPayload(t, types.TypeDataTableSummary, table), errors.New("table failed")); err != nil {
-		t.Fatalf("data-table Repair() error = %v", err)
+		t.Fatalf("obsolete data-table Repair() must be a no-op, got %v", err)
 	}
-	if len(enqueuer.ordered) != 1 || enqueuer.ordered[0].Type() != types.TypeKnowledgePostProcess {
-		t.Fatalf("enqueued tasks = %#v, want one postprocess task", enqueuer.ordered)
+	if RepairableTaskType(types.TypeDataTableSummary) {
+		t.Fatal("data-table derivative work must not be scheduled through terminal repair")
+	}
+	if len(enqueuer.ordered) != 1 {
+		t.Fatalf("obsolete data-table repair changed core fan-in: %d tasks", len(enqueuer.ordered))
 	}
 	if repo.outcomes["multimodal.image[0]"] != enrichmentoutcome.StatusFailed {
 		t.Fatalf("image terminal outcome = %q, want failed", repo.outcomes["multimodal.image[0]"])
 	}
-	if repo.outcomes["datatable.summary"] != enrichmentoutcome.StatusFailed {
-		t.Fatalf("data-table terminal outcome = %q, want failed", repo.outcomes["datatable.summary"])
+	if _, exists := repo.outcomes["datatable.summary"]; exists {
+		t.Fatal("obsolete terminal repair must not write a derivative data-table outcome")
 	}
 }
 

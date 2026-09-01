@@ -1566,6 +1566,9 @@ EOF""",
         self.assertIn("Do not request or perform a semantic validation/regeneration pass", prompt)
         self.assertIn("runtime alone may retry once", prompt)
         self.assertIn("Tool authority and minimality", prompt)
+        self.assertIn("Source-aware tool routing", prompt)
+        self.assertIn("start with one `knowledge_search` call", prompt)
+        self.assertIn("never use Read, Grep, Glob, LS or Bash to look for them", prompt)
         self.assertIn("answer directly without retrieval, thinking/planning tools", prompt)
         self.assertIn("file/downloadable deliverable", prompt)
         self.assertIn("Availability is not intent", prompt)
@@ -1643,6 +1646,9 @@ EOF""",
             "Treat actor identity, role assignment, business action, and action outcome as separate facts",
             "current speaker is not an unstated business actor",
             "identifiers are not descriptions, people are not outcomes",
+            "same object, field, value, and modality",
+            "schemas supply field names but no instance values",
+            "request to repeat a fact is not its original source",
             "retire only what the newer user text actually conflicts with",
             "exact actor, action, object, destination, modality, and turn scope",
             "requested output scope as an exclusion boundary",
@@ -1657,6 +1663,9 @@ EOF""",
             "role duties, contact routes, commitments",
             "Claim a search, retrieval, read, save, send, update, or other operation only when a matching current-turn result establishes it",
             "Never call a tool to test, reject, or demonstrate that it is unnecessary",
+            "normally start with one knowledge_search call",
+            "Never search the SDK working directory with Read, Grep, Glob, LS, or Bash",
+            "answer this current user_request rather than an earlier question",
             "language explicitly requested in the current user_request",
             "without intent analysis, self-talk, planning, or protocol narration",
         ):

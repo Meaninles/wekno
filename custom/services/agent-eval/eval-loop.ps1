@@ -307,6 +307,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -CorpusVersion "northstar-customer-device-support-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary customer-support knowledge base" }
     }
+    $datasetUsesRagPrimaryEditorial = $datasetText.Contains(
+        '${AGENT_EVAL_KB_RAG_PRIMARY_EDITORIAL_ID}'
+    )
+    if ($datasetUsesRagPrimaryEditorial) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/editorial-release-handbook.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/rag-primary-editorial-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_RAG_PRIMARY_EDITORIAL_ID" `
+            -KnowledgeBaseName "Eval回归-Juniper编辑发布手册-v1" `
+            -UploadName "editorial-release-handbook.v1.md" `
+            -CorpusVersion "juniper-editorial-release-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary editorial knowledge base" }
+    }
 
     # Bind the execution identity to every KB selected by this dataset. Each
     # individual preparation script records its own binding; this aggregate
@@ -360,6 +373,11 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         if ($datasetUsesRagPrimarySupport) {
             $bindingArtifactPaths.Add(
                 (Join-Path $PSScriptRoot "artifacts/rag-primary-support-kb-binding.v1.json")
+            )
+        }
+        if ($datasetUsesRagPrimaryEditorial) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/rag-primary-editorial-kb-binding.v1.json")
             )
         }
         foreach ($bindingArtifactPath in $bindingArtifactPaths) {

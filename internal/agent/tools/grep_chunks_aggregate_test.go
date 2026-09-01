@@ -75,3 +75,28 @@ func TestBuildGrepSourceReferencesUsesPhysicalChunkBody(t *testing.T) {
 		t.Fatalf("grep source identity/provenance is invalid: %#v", refs[0])
 	}
 }
+
+func TestBuildGrepSourceReferencesNeverCitesGeneratedSummary(t *testing.T) {
+	compiled := []*regexp.Regexp{regexp.MustCompile(`approval`)}
+	results := []chunkWithTitle{
+		{
+			Chunk: types.Chunk{
+				ID: "generated-summary", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+				ChunkType: types.ChunkTypeSummary, Content: "approval is complete",
+			},
+			KnowledgeTitle: "handbook.md",
+		},
+		{
+			Chunk: types.Chunk{
+				ID: "physical-text", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+				ChunkType: types.ChunkTypeText, Content: "approval requires two independent checks",
+			},
+			KnowledgeTitle: "handbook.md",
+		},
+	}
+
+	refs := buildGrepSourceReferences(results, compiled)
+	if len(refs) != 1 || refs[0].ID != "physical-text" {
+		t.Fatalf("generated summary became literal grep evidence: %#v", refs)
+	}
+}

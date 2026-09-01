@@ -302,6 +302,11 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 func buildGrepSourceReferences(results []chunkWithTitle, compiled []*regexp.Regexp) []*types.SearchResult {
 	refs := make([]*types.SearchResult, 0, len(results))
 	for _, result := range results {
+		if result.ChunkType == types.ChunkTypeSummary {
+			// A generated summary may locate a document, but it is not literal
+			// grep evidence and must never receive a claim-bearing citation.
+			continue
+		}
 		content := result.Content
 		if result.ChunkType == types.ChunkTypeFAQ {
 			content = extractChunkMatchSnippet(&result.Chunk, compiled)
@@ -494,6 +499,11 @@ func (t *GrepChunksTool) searchChunks(
 			"knowledges.title as knowledge_title").
 		Joins("JOIN knowledges ON chunks.knowledge_id = knowledges.id").
 		Where("chunks.is_enabled = ?", true).
+		// grep_chunks promises literal, claim-bearing source text. Generated
+		// summaries remain semantic-search locators, but are not exact text from
+		// the document and therefore must not compete with their physical parent
+		// or intermittently create uncitable grep results.
+		Where("chunks.chunk_type <> ?", types.ChunkTypeSummary).
 		Where("chunks.deleted_at IS NULL").
 		Where("knowledges.deleted_at IS NULL")
 

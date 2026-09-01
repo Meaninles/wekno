@@ -704,9 +704,6 @@ func sidecarProgressDataFromEvent(evt StreamEvent) sidecarProgressData {
 	if out.ToolCallID == "" {
 		out.ToolCallID = fmt.Sprintf("agent-progress-%d", time.Now().UnixNano())
 	}
-	if out.ToolName == "" {
-		out.ToolName = "general_agent_progress"
-	}
 	if out.Phase == "" {
 		out.Phase = "start"
 	}

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/event"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
@@ -100,17 +102,14 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		"session_id": chatManage.SessionID,
 	})
 
-	// Start goroutine to consume channel and emit events directly.
-	// reasoning_content is routed to EventAgentThought (SSE response_type=thinking)
-	// and plain answer text to EventAgentFinalAnswer, matching the Agent pipeline.
-	// The goroutine monitors ctx.Done() to avoid leaking when the context is cancelled
-	// and the upstream channel is not closed promptly.
+	// Start goroutine to consume the channel. Reasoning remains live, while the
+	// terminal answer is buffered until a protocol-only integrity check succeeds.
+	// This keeps SSE, persistence, and later history on one production candidate.
 	go func() {
 		thinkingID := fmt.Sprintf("%s-thinking", uuid.New().String()[:8])
 		answerID := fmt.Sprintf("%s-answer", uuid.New().String()[:8])
 		thinkingOpen := false
 		answerDone := false
-		projector := conversationmemory.NewTerminalAnswerProjector()
 
 		closeThinking := func() {
 			if !thinkingOpen {
@@ -143,83 +142,103 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 				answerDone = true
 			}
 		}
-		finishAnswer := func() {
-			if answerDone {
-				return
-			}
-			if content := projector.Flush(); content != "" {
-				emitAnswer(content, false)
-			}
-			emitAnswer("", true)
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				closeThinking()
-				pipelineInfo(ctx, "Stream", "context_cancelled", map[string]interface{}{
-					"session_id": chatManage.SessionID,
-				})
-				return
-
-			case response, ok := <-responseChan:
-				if !ok {
+		collectTerminal := func(stream <-chan types.StreamResponse) (string, bool) {
+			projector := conversationmemory.NewTerminalAnswerProjector()
+			var candidate strings.Builder
+			for {
+				select {
+				case <-ctx.Done():
 					closeThinking()
-					finishAnswer()
-					pipelineInfo(ctx, "Stream", "channel_close", map[string]interface{}{
-						"session_id": chatManage.SessionID,
-					})
-					return
-				}
-
-				if response.ResponseType == types.ResponseTypeError {
-					pipelineError(ctx, "Stream", "stream_error", map[string]interface{}{
-						"session_id": chatManage.SessionID,
-						"error":      response.Content,
-					})
-					eventBus.Emit(ctx, types.Event{
-						ID:        fmt.Sprintf("%s-error", uuid.New().String()[:8]),
-						Type:      types.EventType(event.EventError),
-						SessionID: chatManage.SessionID,
-						Data: event.ErrorData{
-							Error:     response.Content,
-							Stage:     "chat_completion_stream",
-							SessionID: chatManage.SessionID,
-						},
-					})
-					continue
-				}
-
-				if response.ResponseType == types.ResponseTypeThinking {
-					if response.Content != "" {
-						thinkingOpen = true
+					return "", false
+				case response, ok := <-stream:
+					if !ok {
+						closeThinking()
+						candidate.WriteString(projector.Flush())
+						return candidate.String(), false
+					}
+					if response.ResponseType == types.ResponseTypeError {
+						pipelineError(ctx, "Stream", "stream_error", map[string]interface{}{
+							"session_id": chatManage.SessionID,
+							"error":      response.Content,
+						})
 						eventBus.Emit(ctx, types.Event{
-							ID:        thinkingID,
-							Type:      types.EventType(event.EventAgentThought),
+							ID:        fmt.Sprintf("%s-error", uuid.New().String()[:8]),
+							Type:      types.EventType(event.EventError),
 							SessionID: chatManage.SessionID,
-							Data: event.AgentThoughtData{
-								Content: response.Content,
-								Done:    false,
+							Data: event.ErrorData{
+								Error:     response.Content,
+								Stage:     "chat_completion_stream",
+								SessionID: chatManage.SessionID,
 							},
 						})
+						continue
 					}
-					if response.Done {
+					if response.ResponseType == types.ResponseTypeThinking {
+						if response.Content != "" {
+							thinkingOpen = true
+							eventBus.Emit(ctx, types.Event{
+								ID:        thinkingID,
+								Type:      types.EventType(event.EventAgentThought),
+								SessionID: chatManage.SessionID,
+								Data: event.AgentThoughtData{
+									Content: response.Content,
+									Done:    false,
+								},
+							})
+						}
+						if response.Done {
+							closeThinking()
+						}
+						continue
+					}
+					if response.ResponseType == types.ResponseTypeAnswer {
 						closeThinking()
-					}
-					continue
-				}
-
-				if response.ResponseType == types.ResponseTypeAnswer {
-					closeThinking()
-					if content := projector.Feed(response.Content); content != "" {
-						emitAnswer(content, false)
-					}
-					if response.Done {
-						finishAnswer()
+						candidate.WriteString(projector.Feed(response.Content))
+						if response.Done {
+							candidate.WriteString(projector.Flush())
+							return candidate.String(), true
+						}
 					}
 				}
 			}
 		}
+
+		answer, completed := collectTerminal(responseChan)
+		if ctx.Err() != nil {
+			pipelineInfo(ctx, "Stream", "context_cancelled", map[string]interface{}{
+				"session_id": chatManage.SessionID,
+			})
+			return
+		}
+		if reason := conversationmemory.TerminalAnswerIntegrityReason(answer); reason != "" {
+			pipelineInfo(ctx, "Stream", "terminal_answer_integrity_retry", map[string]interface{}{
+				"session_id": chatManage.SessionID,
+				"reason":     reason,
+				"attempt":    1,
+			})
+			retryMessages := append([]chat.Message(nil), chatMessages...)
+			last := len(retryMessages) - 1
+			retryMessages[last].Content += "\n\n" + conversationmemory.TerminalIntegrityRetryDirective()
+			retryStream, retryErr := chatModel.ChatStream(ctx, retryMessages, opt)
+			if retryErr == nil && retryStream != nil {
+				repaired, retryCompleted := collectTerminal(retryStream)
+				if conversationmemory.TerminalAnswerIntegrityReason(repaired) == "" {
+					answer = repaired
+					completed = retryCompleted
+				} else {
+					answer = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
+				}
+			} else {
+				answer = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
+			}
+		}
+		emitAnswer(answer, false)
+		emitAnswer("", true)
+		pipelineInfo(ctx, "Stream", "terminal_answer_done", map[string]interface{}{
+			"session_id":       chatManage.SessionID,
+			"stream_completed": completed,
+			"answer_len":       len(answer),
+		})
 	}()
 
 	return next()

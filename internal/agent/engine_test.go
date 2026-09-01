@@ -440,6 +440,95 @@ func TestExecuteLoop_NaturalStop_DoesNotDuplicateAnswer(t *testing.T) {
 	assert.GreaterOrEqual(t, doneCount, 1, "a Done marker must close the answer stream")
 }
 
+func TestExecuteLoop_CorruptTerminalRetriesOnceWithoutTools(t *testing.T) {
+	mock := &mockChat{responses: []mockResponse{
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "Useful prefix <weknora_final_placeholder>",
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "<weknora_final_response>Recovered answer.</weknora_final_response>",
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+	}}
+	engine := newTestEngine(t, mock)
+	var answerContent string
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			answerContent += data.Content
+		}
+		return nil
+	})
+	tools := []chat.Tool{{
+		Type: "function",
+		Function: chat.FunctionDef{
+			Name:       "lookup",
+			Parameters: []byte(`{"type":"object"}`),
+		},
+	}}
+	state := &types.AgentState{}
+
+	_, err := engine.executeLoop(
+		context.Background(), state, "test query", emptyMessages(), tools, "sess-1", "msg-1",
+	)
+
+	require.NoError(t, err)
+	require.Len(t, mock.options, 2)
+	assert.Len(t, mock.options[0].Tools, 1)
+	assert.Empty(t, mock.options[1].Tools, "integrity retry must not expose tools")
+	require.Len(t, mock.messages, 2)
+	assert.Contains(t, mock.messages[1][len(mock.messages[1])-1].Content, "transport-level output-integrity")
+	assert.True(t, state.IsComplete)
+	assert.Equal(t, "Recovered answer.", state.FinalAnswer)
+	assert.Equal(t, state.FinalAnswer, answerContent)
+	assert.NotContains(t, answerContent, "placeholder")
+}
+
+func TestExecuteLoop_CorruptIntegrityRetryFallsBackWithoutProtocolLeak(t *testing.T) {
+	mock := &mockChat{responses: []mockResponse{
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      strings.Repeat("的。", 80),
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "<src id 'S1' />",
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+	}}
+	engine := newTestEngine(t, mock)
+	var answerContent string
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			answerContent += data.Content
+		}
+		return nil
+	})
+	state := &types.AgentState{}
+
+	_, err := engine.executeLoop(
+		context.Background(), state, "test query", emptyMessages(), emptyTools(), "sess-1", "msg-1",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, mock.callCount)
+	assert.True(t, state.IsComplete)
+	assert.Contains(t, []string{
+		"The response could not be generated reliably. Please try again.",
+		"本次回答未能可靠生成，请重试。",
+	}, state.FinalAnswer)
+	assert.Equal(t, state.FinalAnswer, answerContent)
+	assert.NotContains(t, answerContent, "<src")
+	assert.NotContains(t, answerContent, "weknora")
+}
+
 func TestStreamFinalAnswerToEventBus_EmitsDoneWhenProviderEndsWithEmptyChunk(t *testing.T) {
 	mock := &mockChat{
 		responses: []mockResponse{
@@ -497,4 +586,40 @@ func TestStreamFinalAnswerToEventBus_PreservesConversationContext(t *testing.T) 
 	require.GreaterOrEqual(t, len(mock.messages[0]), len(contextMessages)+1)
 	assert.Equal(t, contextMessages, mock.messages[0][:len(contextMessages)])
 	assert.Contains(t, mock.messages[0][len(mock.messages[0])-1].Content, "conversation context")
+}
+
+func TestStreamFinalAnswerToEventBus_RetriesCorruptSynthesisBeforeEmission(t *testing.T) {
+	mock := &mockChat{responses: []mockResponse{
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "</weknora_final_placeholder>",
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "<weknora_final_response>Stable synthesis.</weknora_final_response>",
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+	}}
+	engine := newTestEngine(t, mock)
+	state := &types.AgentState{}
+	var answerContent string
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			answerContent += data.Content
+		}
+		return nil
+	})
+
+	err := engine.streamFinalAnswerToEventBus(
+		context.Background(), "test query", state, "sess-1", emptyMessages(),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, mock.callCount)
+	assert.Equal(t, "Stable synthesis.", state.FinalAnswer)
+	assert.Equal(t, state.FinalAnswer, answerContent)
+	assert.NotContains(t, answerContent, "placeholder")
 }

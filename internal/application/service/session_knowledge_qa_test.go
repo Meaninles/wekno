@@ -195,3 +195,56 @@ func TestConsumeFallbackStreamProjectsSameProductionAnswerToEventsAndState(t *te
 	assert.NotContains(t, streamed, "private")
 	assert.NotContains(t, streamed, "weknora_final_response")
 }
+
+func TestConsumeFallbackStreamUsesSameFixedCandidateWhenStreamClosesEarly(t *testing.T) {
+	bus := event.NewEventBus()
+	cm := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			SessionID:        "session-early-close",
+			FallbackResponse: "  fixed fallback  ",
+		},
+		PipelineContext: types.PipelineContext{EventBus: bus.AsEventBusInterface()},
+	}
+	var streamed string
+	bus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentFinalAnswerData)
+		require.True(t, ok)
+		streamed += data.Content
+		return nil
+	})
+	responses := make(chan types.StreamResponse, 1)
+	responses <- types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "partial"}
+	close(responses)
+
+	(&sessionService{}).consumeFallbackStream(context.Background(), cm, responses)
+
+	require.NotNil(t, cm.ChatResponse)
+	assert.Equal(t, "fixed fallback", streamed)
+	assert.Equal(t, streamed, cm.ChatResponse.Content)
+}
+
+func TestHandleFixedFallbackHidesProtocolCorruptionFromEventsAndState(t *testing.T) {
+	bus := event.NewEventBus()
+	cm := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			SessionID:        "session-corrupt-fixed-fallback",
+			FallbackResponse: "<weknora_final_placeholder>",
+			Language:         "zh-CN",
+		},
+		PipelineContext: types.PipelineContext{EventBus: bus.AsEventBusInterface()},
+	}
+	var streamed string
+	bus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentFinalAnswerData)
+		require.True(t, ok)
+		streamed += data.Content
+		return nil
+	})
+
+	(&sessionService{}).handleFixedFallback(context.Background(), cm)
+
+	require.NotNil(t, cm.ChatResponse)
+	assert.Equal(t, "本次回答未能可靠生成，请重试。", streamed)
+	assert.Equal(t, streamed, cm.ChatResponse.Content)
+	assert.NotContains(t, streamed, "weknora")
+}

@@ -14,6 +14,7 @@ from app.final_delivery import (  # noqa: E402
     TERMINAL_ANSWER_OPEN,
     project_terminal_answer,
     requires_passive_terminal_delivery,
+    terminal_answer_integrity_reason,
     uses_claude_sdk_terminal_projection,
 )
 from app.runner import FINAL_ANSWER_SOURCE_CITATION_RULE, runtime_summary, tool_catalog  # noqa: E402
@@ -86,6 +87,21 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
         )
         self.assertEqual(project_terminal_answer(raw), "Direct user answer.")
         self.assertEqual(project_terminal_answer(" plain provider fallback "), "plain provider fallback")
+
+    def test_integrity_check_is_protocol_only_and_domain_independent(self):
+        cases = {
+            "": "empty_terminal_answer",
+            "Useful prefix </weknora_final_placeholder>": "terminal_protocol_residue",
+            "Supported claim <src id 'S1' />": "malformed_source_handle",
+            "的。" * 80: "degenerate_repetition",
+            "Now read the source " + "to get the full text " * 3: "degenerate_repetition",
+            'Supported.<src id="S7" />': "",
+            "Retry once, retry twice, then report the evidence.": "",
+            "| Field | Value |\n| --- | --- |\n| owner | pending |\n| date | pending |": "",
+        }
+        for answer, expected in cases.items():
+            with self.subTest(answer=answer[:40]):
+                self.assertEqual(terminal_answer_integrity_reason(answer), expected)
 
     def test_passive_delivery_does_not_add_model_visible_final_answer_tool(self):
         general = self.payload("general-agent")
@@ -189,6 +205,22 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
         self.assertTrue(collector.frozen)
         self.assertFalse(collector.assistant_matches_result)
         self.assertEqual(collector.answer(), "SDK权威最终回答")
+        self.assertEqual(collector.answer_source, "result")
+
+    def test_corrupt_result_uses_valid_passive_assistant_candidate(self):
+        collector = ClaudeSDKTerminalCollector()
+        collector.observe(
+            AssistantMessage(
+                content=[TextBlock("这是完整、可读的最终回答。")],
+                message_id="msg-final",
+                uuid="callback-final",
+            )
+        )
+        collector.observe(ResultMessage("的。" * 80))
+
+        self.assertEqual(collector.answer(), "这是完整、可读的最终回答。")
+        self.assertEqual(collector.answer_source, "assistant_candidate")
+        self.assertEqual(collector.answer_integrity_reason, "")
 
     def test_success_result_projects_only_enveloped_answer(self):
         collector = ClaudeSDKTerminalCollector()

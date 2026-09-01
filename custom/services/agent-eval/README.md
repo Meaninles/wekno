@@ -302,6 +302,27 @@ custom/services/agent-eval/eval-loop.ps1 `
 `eval-loop.ps1` 会在每次相关运行前校验对应隔离知识库，并刷新语料版本和知识绑定
 哈希，避免 `runner.env` 中上一次数据集的身份残留污染本次产物。
 
+终态协议与提示词再次修改后，新增 `post-prompt-lab-handover.v1`。它不是把既有
+问题替换名词，而是重新组合了未决状态同义表达、规则与对象生命周期分离、聊天内容
+与外部持久化分离、话题切换、来源摘录、英文改写和工具边界，共 14 轮、2 个独立
+session。用例不含 required claims、参考答案、Judge rubric 或固定字段答案；语义质量
+只由 Codex 阅读整段对话后判断是否达到可接受水平：
+
+```powershell
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split dev `
+  -Dataset /workspace/datasets/post-prompt-lab-handover.v1.jsonl `
+  -Manifest /workspace/manifests/post-prompt-lab-handover.v1.manifest.json `
+  -Policy /workspace/policies/post-prompt-lab-handover-gate.v1.json `
+  -Profiles /workspace/profiles/post-prompt-lab-handover.v1.json `
+  -MaxConcurrency 2 `
+  -EnableEvalAssistance
+```
+
+一键脚本现在会读取数据集声明：只要包含
+`knowledge_selection_mode=none`，每次运行都从当前生产智能体配置重新生成 Eval 隔离
+clone，并且只把知识选择改为 `none`。因此新提示词或运行配置不会被陈旧 clone 掩盖。
+
 在隔离 Eval 栈已经启动、Main 栈完全停止后，先创建/校验四个未见分布知识库；脚本只更新被 Git 忽略的 `runner.env`，不会打印凭据：
 
 ```powershell
@@ -399,7 +420,9 @@ docker compose --env-file C:/weknora/.env --env-file custom/services/agent-eval/
 - `policies/production-multiturn-release-gate.v3.json`：只读 production candidate 的当前发布策略。
 - `policies/eval-optimization-gate.v3.json`：只读 assisted answer 的当前恢复能力策略。
 - `policies/repair-dependency-gate.v2.json`：修复触发、成功、repair-only、调用与延迟依赖策略。
-- `datasets/unseen-capability-matrix.v1.jsonl`：7 个跨领域、12 轮、三智能体、每 case 三次的能力矩阵。
+- `datasets/unseen-capability-matrix.v1.jsonl`：7 个跨领域、12 轮、三智能体、每 case 三次的历史能力矩阵；保留不改以复现旧结果，其中空知识库请求不能作为真实无知识库证据。
+- `datasets/unseen-capability-matrix.v2.jsonl`：保持 v1 问题文本不变，只将每个知识边界显式升级为 `explicit` 或真实 `none` clone。`unseen-capability-visible-readiness-gate.v1` 由 Codex 逐个完整对话判断 dev+gate 是否达到 2/3；它不读取 sealed holdout，也不能替代正式 production release gate。
+- `datasets/post-prompt-lab-handover.v1.jsonl`：提示词修改后新造的 14 轮 RAG 无知识库反例回归，2 次独立运行，语义只由 Codex 整段审核。
 - `ANTI-OVERFITTING-AUDIT-v2.md`：整改分类、双轨边界、验收证据和剩余风险。
 
 以下文件只用于复现历史 v1/v10 结果，不参与当前质量结论：

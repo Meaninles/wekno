@@ -98,6 +98,9 @@ func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.
 		"For a mixed request, preserve the primary semantic intent",
 		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
 		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
+		"semantically equivalent unresolved labels as one state",
+		"not externally persisted",
+		"do not by themselves establish a concrete object's lifecycle status",
 		`Use "chitchat" only for social or casual conversation`,
 	} {
 		if !strings.Contains(prompt, required) {

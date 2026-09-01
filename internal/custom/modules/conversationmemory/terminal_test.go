@@ -1,6 +1,9 @@
 package conversationmemory
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestProjectTerminalAnswer(t *testing.T) {
 	tests := []struct {
@@ -16,6 +19,31 @@ func TestProjectTerminalAnswer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ProjectTerminalAnswer(tt.raw); got != tt.want {
 				t.Fatalf("ProjectTerminalAnswer() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTerminalAnswerIntegrityReasonRejectsOnlyProtocolLevelCorruption(t *testing.T) {
+	tests := []struct {
+		name   string
+		answer string
+		want   string
+	}{
+		{name: "empty", answer: "  ", want: "empty_terminal_answer"},
+		{name: "protocol residue", answer: "Useful prefix </weknora_final_placeholder>", want: "terminal_protocol_residue"},
+		{name: "malformed source", answer: `Supported claim <src id 'S1' />`, want: "malformed_source_handle"},
+		{name: "repeated short unit", answer: strings.Repeat("的。", 80), want: "degenerate_repetition"},
+		{name: "repeated phrase", answer: "Now read the source " + strings.Repeat("to get the full text ", 3), want: "degenerate_repetition"},
+		{name: "canonical citation", answer: `A concise supported claim.<src id="S12" />`, want: ""},
+		{name: "normal repetition", answer: "Retry once, retry twice, then report the final outcome with evidence.", want: ""},
+		{name: "markdown table", answer: "| Field | Value |\n| --- | --- |\n| owner | pending |\n| date | pending |\n| source | user |", want: ""},
+		{name: "code with repeated syntax", answer: "```go\nif ready { run() }\nif pending { wait() }\nif failed { report() }\n```", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TerminalAnswerIntegrityReason(tt.answer); got != tt.want {
+				t.Fatalf("TerminalAnswerIntegrityReason() = %q, want %q", got, tt.want)
 			}
 		})
 	}

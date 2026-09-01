@@ -931,7 +931,10 @@ func (s *sessionService) handleFallbackResponse(ctx context.Context, chatManage 
 
 // handleFixedFallback handles fixed fallback response
 func (s *sessionService) handleFixedFallback(ctx context.Context, chatManage *types.ChatManage) {
-	fallbackContent := chatManage.FallbackResponse
+	fallbackContent := strings.TrimSpace(chatManage.FallbackResponse)
+	if conversationmemory.TerminalAnswerIntegrityReason(fallbackContent) != "" {
+		fallbackContent = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
+	}
 	chatManage.ChatResponse = &types.ChatResponse{Content: fallbackContent}
 	s.emitFallbackAnswer(ctx, chatManage, fallbackContent)
 }
@@ -1141,6 +1144,7 @@ func (s *sessionService) consumeFallbackStream(
 	var finalContent string
 	streamCompleted := false
 	projector := conversationmemory.NewTerminalAnswerProjector()
+	var projected strings.Builder
 	emitProjected := func(content string, done bool) {
 		if content != "" {
 			finalContent += content
@@ -1160,17 +1164,22 @@ func (s *sessionService) consumeFallbackStream(
 	}
 
 	for response := range responseChan {
-		// Emit event for each answer chunk
+		// Buffer the model fallback until its terminal protocol integrity is
+		// known, keeping the final SSE surface equal to persisted history.
 		if response.ResponseType == types.ResponseTypeAnswer {
-			if content := projector.Feed(response.Content); content != "" {
-				emitProjected(content, false)
-			}
+			projected.WriteString(projector.Feed(response.Content))
 
 			// Update ChatResponse with final content when done
 			if response.Done {
-				if content := projector.Flush(); content != "" {
-					emitProjected(content, false)
+				projected.WriteString(projector.Flush())
+				candidate := projected.String()
+				if conversationmemory.TerminalAnswerIntegrityReason(candidate) != "" {
+					candidate = strings.TrimSpace(chatManage.FallbackResponse)
+					if conversationmemory.TerminalAnswerIntegrityReason(candidate) != "" {
+						candidate = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
+					}
 				}
+				emitProjected(candidate, false)
 				emitProjected("", true)
 				chatManage.ChatResponse = &types.ChatResponse{Content: finalContent}
 				streamCompleted = true
@@ -1183,7 +1192,7 @@ func (s *sessionService) consumeFallbackStream(
 	// If channel closed without Done=true, emit final event with fixed response
 	if !streamCompleted {
 		logger.Warnf(ctx, "Fallback stream closed without completion, emitting final event with fixed response")
-		s.emitFallbackAnswer(ctx, chatManage, chatManage.FallbackResponse)
+		s.handleFixedFallback(ctx, chatManage)
 	}
 }
 

@@ -153,6 +153,11 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 		"Preserve the exact actor, action, object, destination, and turn scope",
 		"operation boundary remains active until the user explicitly revokes",
 		"does not create a new task/object",
+		"synonymous unresolved labels and paraphrases as the same semantic state",
+		"Distinguish conversation content from external persistence",
+		"does not establish the current lifecycle of a particular incident",
+		"stays local to that discussion",
+		"user source restriction",
 		"Never say that you searched, retrieved, read, verified, saved, sent, updated",
 		"If the exact ID is unavailable or uncertain",
 		"Obey an explicit current-turn output-language request",
@@ -174,6 +179,10 @@ func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttrib
 		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
 		"exclude dialogue bookkeeping, output formatting, and user-state fields",
 		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
+		"semantically equivalent unresolved labels as one state",
+		"not externally persisted",
+		"do not by themselves establish a concrete object's lifecycle status",
+		"must not become state or an operational boundary",
 	} {
 		if !strings.Contains(contract, required) {
 			t.Fatalf("query-understanding contract missing %q: %s", required, contract)
@@ -187,6 +196,9 @@ func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *
 		"when it does not exist, emit no citation handle",
 		"do not present earlier retrieval as current evidence",
 		"question about whether/why an action should happen establishes neither lifecycle direction",
+		"Treat synonymous unresolved labels as one state",
+		"dialogue content without proving an external write",
+		"does not establish a concrete object's lifecycle",
 		"Honor requested count/form",
 		"Changing a task attribute or plan alternative does not expire its operation boundaries",
 		"report operations only when user text or verified current-turn tool results establish their outcome",

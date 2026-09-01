@@ -123,64 +123,42 @@ Now generate the final answer:`, query)
 	// Generate a single ID for this entire final answer stream
 	answerID := generateEventID("answer")
 	logger.Debugf(ctx, "[Agent][FinalAnswer] AnswerID: %s", answerID)
-	answerDoneEmitted := false
-	var streamedAnswer strings.Builder
-	projector := conversationmemory.NewTerminalAnswerProjector()
-	emitAnswer := func(content string) {
-		if content == "" {
-			return
-		}
-		streamedAnswer.WriteString(content)
-		logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting answer chunk: %d chars", len(content))
-		e.eventBus.Emit(ctx, event.Event{
-			ID:        answerID,
-			Type:      event.EventAgentFinalAnswer,
-			SessionID: sessionID,
-			Data: event.AgentFinalAnswerData{
-				Content: content,
-				Done:    false,
-			},
-		})
+	thinking := false
+	answerOptions := &chat.ChatOptions{
+		Temperature:         e.config.Temperature,
+		MaxCompletionTokens: e.config.MaxCompletionTokens,
+		Thinking:            &thinking,
 	}
-	finishAnswer := func() {
-		if answerDoneEmitted {
-			return
-		}
-		emitAnswer(projector.Flush())
-		e.eventBus.Emit(ctx, event.Event{
-			ID:        answerID,
-			Type:      event.EventAgentFinalAnswer,
-			SessionID: sessionID,
-			Data: event.AgentFinalAnswerData{
-				Content: "",
-				Done:    true,
+	generateCandidate := func(candidateMessages []chat.Message) (string, error) {
+		projector := conversationmemory.NewTerminalAnswerProjector()
+		var projected strings.Builder
+		llmResult, err := e.streamLLMToEventBus(
+			ctx,
+			candidateMessages,
+			answerOptions,
+			func(chunk *types.StreamResponse, fullContent string) {
+				if chunk.ResponseType == types.ResponseTypeThinking {
+					return
+				}
+				if chunk.Content != "" {
+					projected.WriteString(projector.Feed(chunk.Content))
+				}
 			},
-		})
-		answerDoneEmitted = true
+		)
+		if err != nil {
+			return "", err
+		}
+		projected.WriteString(projector.Flush())
+		answer := strings.TrimSpace(projected.String())
+		if answer == "" {
+			answer = conversationmemory.ProjectTerminalAnswer(
+				agenttools.StripThinkBlocks(llmResult.Content),
+			)
+		}
+		return answer, nil
 	}
 
-	thinking := false
-	llmResult, err := e.streamLLMToEventBus(
-		ctx,
-		messages,
-		&chat.ChatOptions{
-			Temperature:         e.config.Temperature,
-			MaxCompletionTokens: e.config.MaxCompletionTokens,
-			Thinking:            &thinking,
-		},
-		func(chunk *types.StreamResponse, fullContent string) {
-			// Defensive filter: only emit answer content, skip thinking chunks
-			if chunk.ResponseType == types.ResponseTypeThinking {
-				return
-			}
-			if chunk.Content != "" {
-				emitAnswer(projector.Feed(chunk.Content))
-			}
-			if chunk.Done {
-				finishAnswer()
-			}
-		},
-	)
+	fullAnswer, err := generateCandidate(messages)
 	if err != nil {
 		logger.Errorf(ctx, "[Agent][FinalAnswer] Final answer generation failed: %v", err)
 		common.PipelineError(ctx, "Agent", "final_answer_stream_failed", map[string]interface{}{
@@ -189,18 +167,47 @@ Now generate the final answer:`, query)
 		})
 		return err
 	}
-
-	finishAnswer()
-
-	// The emitted answer aggregation is the production candidate. Only runtimes
-	// that emitted no answer chunk use the non-stream result as a fallback; the
-	// handler will then emit that same fallback before persistence.
-	fullAnswer := streamedAnswer.String()
-	if fullAnswer == "" {
-		fullAnswer = conversationmemory.ProjectTerminalAnswer(
-			agenttools.StripThinkBlocks(llmResult.Content),
-		)
+	if reason := conversationmemory.TerminalAnswerIntegrityReason(fullAnswer); reason != "" {
+		logger.Warnf(ctx, "[Agent][FinalAnswer] Terminal answer integrity failure (%s), retrying once", reason)
+		common.PipelineWarn(ctx, "Agent", "final_answer_integrity_retry", map[string]interface{}{
+			"session_id": sessionID,
+			"reason":     reason,
+			"attempt":    1,
+		})
+		retryMessages := append([]chat.Message(nil), messages...)
+		retryMessages = append(retryMessages, chat.Message{
+			Role:    "user",
+			Content: conversationmemory.TerminalIntegrityRetryDirective(),
+		})
+		retryMessages = agenttools.SanitizeMessages(retryMessages)
+		repaired, retryErr := generateCandidate(retryMessages)
+		if retryErr == nil && conversationmemory.TerminalAnswerIntegrityReason(repaired) == "" {
+			fullAnswer = repaired
+		} else {
+			fullAnswer = conversationmemory.TerminalIntegrityFallback(
+				types.LanguageNameFromContext(ctx),
+			)
+		}
 	}
+
+	logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting validated answer: %d chars", len(fullAnswer))
+	e.eventBus.Emit(ctx, event.Event{
+		ID:        answerID,
+		Type:      event.EventAgentFinalAnswer,
+		SessionID: sessionID,
+		Data: event.AgentFinalAnswerData{
+			Content: fullAnswer,
+			Done:    false,
+		},
+	})
+	e.eventBus.Emit(ctx, event.Event{
+		ID:        answerID,
+		Type:      event.EventAgentFinalAnswer,
+		SessionID: sessionID,
+		Data: event.AgentFinalAnswerData{
+			Done: true,
+		},
+	})
 	logger.Infof(ctx, "[Agent][FinalAnswer] Final answer generated: %d characters", len(fullAnswer))
 	common.PipelineInfo(ctx, "Agent", "final_answer_done", map[string]interface{}{
 		"session_id": sessionID,

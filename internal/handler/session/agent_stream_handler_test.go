@@ -422,6 +422,45 @@ func TestHandleAgentProgressAppendsVisibleProgressEvent(t *testing.T) {
 	}
 }
 
+func TestHandleAgentStatusProgressOmitsToolNameFromSSE(t *testing.T) {
+	stream := &recordingStreamManager{}
+	handler := NewAgentStreamHandler(
+		context.Background(),
+		"session-1",
+		"assistant-1",
+		"request-1",
+		time.Time{},
+		&types.Message{ID: "assistant-1", SessionID: "session-1"},
+		stream,
+		event.NewEventBus(),
+	)
+
+	if err := handler.handleAgentProgress(context.Background(), event.Event{
+		ID:   "status-1",
+		Type: event.EventAgentProgress,
+		Data: event.AgentProgressData{
+			Content:    "正在整理最终回答",
+			ToolCallID: "status-1",
+			Phase:      "start",
+			Transient:  true,
+			Metadata:   map[string]interface{}{"progress_kind": "assistant_status"},
+		},
+	}); err != nil {
+		t.Fatalf("handleAgentProgress returned error: %v", err)
+	}
+
+	if len(stream.events) != 1 {
+		t.Fatalf("stream events = %d, want 1", len(stream.events))
+	}
+	got := stream.events[0]
+	if _, exists := got.Data["tool_name"]; exists {
+		t.Fatalf("status progress leaked tool_name into SSE: %#v", got.Data)
+	}
+	if got.Data["progress_kind"] != "assistant_status" || got.Data["tool_call_id"] != "status-1" {
+		t.Fatalf("status progress metadata = %#v", got.Data)
+	}
+}
+
 func TestHandleQueueStatusAppendsReplayableEvent(t *testing.T) {
 	stream := &recordingStreamManager{}
 	handler := NewAgentStreamHandler(

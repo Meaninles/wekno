@@ -451,3 +451,33 @@ func TestEmitSidecarProgressUsesAgentProgress(t *testing.T) {
 		t.Fatalf("progress metadata not preserved: %#v", data.Metadata)
 	}
 }
+
+func TestEmitSidecarStatusProgressDoesNotBecomeATool(t *testing.T) {
+	svc := &Service{}
+	bus := event.NewEventBus()
+	var got event.AgentProgressData
+	bus.On(event.EventAgentProgress, func(ctx context.Context, evt event.Event) error {
+		got, _ = evt.Data.(event.AgentProgressData)
+		return nil
+	})
+
+	var streamed strings.Builder
+	lastID := ""
+	lastDone := false
+	svc.emitSidecarEvent(context.Background(), bus, "session-1", "fallback-answer", StreamEvent{
+		ID:      "status-1",
+		Type:    "progress",
+		Content: "正在整理最终回答",
+		Data:    []byte(`{"progress_kind":"assistant_status","progress_id":"status-1","phase":"start","transient":true}`),
+	}, &streamed, &lastID, &lastDone, nil)
+
+	if got.ToolName != "" {
+		t.Fatalf("status progress tool name = %q, want empty", got.ToolName)
+	}
+	if got.ToolCallID != "status-1" || !got.Transient {
+		t.Fatalf("status progress metadata not preserved: %+v", got)
+	}
+	if got.Metadata["progress_kind"] != "assistant_status" {
+		t.Fatalf("progress kind = %#v", got.Metadata["progress_kind"])
+	}
+}

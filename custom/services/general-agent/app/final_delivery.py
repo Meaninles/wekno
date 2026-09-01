@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 
 CLAUDE_SDK_TERMINAL_CONTRACT = "claude-sdk-terminal-v2"
 TERMINAL_ANSWER_OPEN = "<weknora_final_response>"
 TERMINAL_ANSWER_CLOSE = "</weknora_final_response>"
+TERMINAL_CITATION_PATTERN = re.compile(r'<src\s+id="S[1-9][0-9]*"\s*/>')
 
 CLAUDE_SDK_AGENT_TYPES = frozenset(
     {
@@ -62,6 +64,52 @@ def project_terminal_answer(content: Any) -> str:
     return body.strip()
 
 
+def terminal_answer_integrity_reason(content: Any) -> str:
+    """Return a protocol-only failure reason, never a semantic judgment."""
+
+    answer = canonical_answer(content)
+    if not answer:
+        return "empty_terminal_answer"
+    lowered = answer.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "<weknora_",
+            "</weknora_",
+            "weknora_final_placeholder",
+        )
+    ):
+        return "terminal_protocol_residue"
+    without_valid_citations = TERMINAL_CITATION_PATTERN.sub("", answer)
+    if "<src" in without_valid_citations.lower():
+        return "malformed_source_handle"
+    compact = "".join(answer.split())
+    if _has_dominant_consecutive_repeat(compact):
+        return "degenerate_repetition"
+    return ""
+
+
+def _has_dominant_consecutive_repeat(value: str) -> bool:
+    if len(value) < 24:
+        return False
+    for unit in range(1, min(64, len(value) // 3) + 1):
+        required_repeats = 3 if unit >= 10 else 4 if unit >= 4 else 8
+        for start in range(0, len(value) - unit * required_repeats + 1):
+            fragment = value[start : start + unit]
+            if unit >= 4 and len({char.casefold() for char in fragment if char.isalnum()}) < 2:
+                continue
+            repeats = 1
+            while (
+                start + (repeats + 1) * unit <= len(value)
+                and value[start + repeats * unit : start + (repeats + 1) * unit]
+                == fragment
+            ):
+                repeats += 1
+            if repeats >= required_repeats and repeats * unit * 2 >= len(value):
+                return True
+    return False
+
+
 def _value(block: Any, name: str, default: Any = None) -> Any:
     if isinstance(block, dict):
         return block.get(name, default)
@@ -94,6 +142,8 @@ class ClaudeSDKTerminalCollector:
     terminal_seen: bool = False
     frozen: bool = False
     assistant_matches_result: bool | None = None
+    answer_integrity_reason: str = ""
+    answer_source: str = ""
 
     def observe(self, message: Any) -> None:
         message_type = message.__class__.__name__
@@ -163,10 +213,22 @@ class ClaudeSDKTerminalCollector:
         return canonical_answer("".join(self.candidates.values()))
 
     def answer(self) -> str:
-        # ResultMessage.result is authoritative on a normal SDK completion.
-        # A candidate fallback keeps an otherwise normal answer visible on
-        # providers that omit the optional result field. Mismatches are
-        # diagnostic only and never trigger a second model response.
-        if self.terminal_result:
-            return project_terminal_answer(self.terminal_result)
-        return project_terminal_answer(self.candidate_answer())
+        # ResultMessage.result remains authoritative when it is usable. Some
+        # compatibility gateways occasionally corrupt only that aggregate while
+        # the final text-only AssistantMessage is intact, so prefer that passive
+        # candidate before asking the provider for another model turn.
+        result_answer = project_terminal_answer(self.terminal_result)
+        candidate_answer = project_terminal_answer(self.candidate_answer())
+        for source, answer in (
+            ("result", result_answer),
+            ("assistant_candidate", candidate_answer),
+        ):
+            reason = terminal_answer_integrity_reason(answer)
+            if answer and not reason:
+                self.answer_integrity_reason = ""
+                self.answer_source = source
+                return answer
+        selected = result_answer or candidate_answer
+        self.answer_integrity_reason = terminal_answer_integrity_reason(selected)
+        self.answer_source = "result" if result_answer else "assistant_candidate"
+        return selected

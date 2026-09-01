@@ -181,7 +181,34 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         $runnerValues = Read-RunnerEnvironment
     }
 
-    $datasetUsesUnseenCorpus = (Split-Path -Leaf $Dataset) -eq "unseen-capability-matrix.v1.jsonl"
+    $datasetHostPath = if ($Dataset -match '^/workspace/(.+)$') {
+        Join-Path $PSScriptRoot ($matches[1] -replace '/', '\')
+    } else {
+        [System.IO.Path]::GetFullPath($Dataset)
+    }
+    if (-not (Test-Path -LiteralPath $datasetHostPath)) {
+        throw "failed to resolve dataset on host: $datasetHostPath"
+    }
+    $datasetRows = @(
+        Get-Content -LiteralPath $datasetHostPath |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_ | ConvertFrom-Json }
+    )
+    $datasetNeedsNoKBProfiles = @(
+        $datasetRows | Where-Object {
+            [string]$_.setup.knowledge_selection_mode -eq "none"
+        }
+    ).Count -gt 0
+    if ($datasetNeedsNoKBProfiles) {
+        # Re-copy the current production agent configuration on every relevant
+        # run. Only the knowledge-selection boundary changes, so stale Eval
+        # clones cannot hide a production prompt/configuration update.
+        & (Join-Path $PSScriptRoot "prepare-no-kb-agent-profiles.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare Eval no-KB agent profiles" }
+        $runnerValues = Read-RunnerEnvironment
+    }
+
+    $datasetUsesUnseenCorpus = (Split-Path -Leaf $Dataset) -match '^unseen-capability-matrix\.v[0-9]+\.jsonl$'
     if ($datasetUsesUnseenCorpus) {
         & (Join-Path $PSScriptRoot "prepare-unseen-capability-kbs.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare unseen capability knowledge bases" }
@@ -193,21 +220,6 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
     }
     $datasetUsesFreshGeneralization = (Split-Path -Leaf $Dataset) -eq "fresh-generalization-regression.v1.jsonl"
     if ($datasetUsesFreshGeneralization) {
-        $noKBVariables = @(
-            "AGENT_EVAL_AGENT_QUICK_NO_KB_ID",
-            "AGENT_EVAL_AGENT_RAG_NO_KB_ID",
-            "AGENT_EVAL_AGENT_GENERAL_NO_KB_ID"
-        )
-        $noKBMissing = @(
-            $noKBVariables | Where-Object {
-                -not $runnerValues.ContainsKey($_) -or
-                [string]::IsNullOrWhiteSpace($runnerValues[$_])
-            }
-        )
-        if ($noKBMissing.Count -gt 0) {
-            & (Join-Path $PSScriptRoot "prepare-no-kb-agent-profiles.ps1")
-            if ($LASTEXITCODE -ne 0) { throw "failed to prepare Eval no-KB agent profiles" }
-        }
         & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare fresh-generalization knowledge base" }
     }

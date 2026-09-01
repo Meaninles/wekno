@@ -145,13 +145,14 @@ func (e *AgentEngine) streamThinkingToEventBus(
 	//   - splitter separates inline <think>…</think> reasoning from answer text
 	//     in the plain `content` channel (models that don't use reasoning_content).
 	//   - thinkingOpen tracks whether the thought stream still needs a Done marker.
-	//   - answerStreamed records that user-facing answer text was sent live to
-	//     the final-answer area, so the natural-stop branch only emits Done.
+	//   - candidateAnswer buffers terminal text until the complete response can
+	//     pass a protocol-only integrity check. Tool progress and reasoning still
+	//     stream live; only the final answer waits for provider completion.
 	splitter := agenttools.NewThinkStreamSplitter()
 	projector := conversationmemory.NewTerminalAnswerProjector()
 	thinkingOpen := false
 	answerStreamed := false
-	var projectedAnswer strings.Builder
+	var candidateAnswer strings.Builder
 
 	emitThought := func(content string, done bool) {
 		if content == "" && !done {
@@ -194,7 +195,6 @@ func (e *AgentEngine) streamThinkingToEventBus(
 		}
 		closeThinking()
 		answerStreamed = true
-		projectedAnswer.WriteString(content)
 		emittedEventTypes["final_answer_chunk"]++
 		e.eventBus.Emit(ctx, event.Event{
 			ID:        answerID,
@@ -269,19 +269,17 @@ func (e *AgentEngine) streamThinkingToEventBus(
 				return
 			}
 
-			// Plain content channel. Streamed live to the answer area
-			// (optimistically rendered as the final answer). If the round turns
-			// out to call tools, this was a preamble; the subsequent tool-call
-			// events let the UI retract it from the answer area and relocate it
-			// into the steps. Split out any inline <think> reasoning so it goes
-			// to the thought area instead.
+			// Plain content channel. Buffer it until the completed response proves
+			// this is a terminal, protocol-valid answer. Tool-use preambles stay in
+			// AgentStep history and never enter the answer surface. Split inline
+			// <think> reasoning into the thought area while it is still live.
 			if chunk.Content != "" {
 				thinkPart, answerPart := splitter.Feed(chunk.Content)
 				if thinkPart != "" {
 					thinkingOpen = true
 					emitThought(thinkPart, false)
 				}
-				emitAnswer(projector.Feed(answerPart))
+				candidateAnswer.WriteString(projector.Feed(answerPart))
 			}
 			if chunk.Done {
 				thinkPart, answerPart := splitter.Flush()
@@ -289,7 +287,7 @@ func (e *AgentEngine) streamThinkingToEventBus(
 					thinkingOpen = true
 					emitThought(thinkPart, false)
 				}
-				emitAnswer(projector.Feed(answerPart))
+				candidateAnswer.WriteString(projector.Feed(answerPart))
 				closeThinking()
 			}
 		},
@@ -309,18 +307,30 @@ func (e *AgentEngine) streamThinkingToEventBus(
 	// open to their complete plain text; operational rounds keep that text only
 	// in AgentStep history.
 	if len(llmResult.ToolCalls) == 0 {
-		emitAnswer(projector.Flush())
+		candidateAnswer.WriteString(projector.Flush())
 	} else {
 		_ = projector.Flush()
 	}
 	closeThinking()
 	fullContent := agenttools.StripThinkBlocks(llmResult.Content)
-	if len(llmResult.ToolCalls) == 0 && projectedAnswer.Len() > 0 {
-		fullContent = projectedAnswer.String()
+	if len(llmResult.ToolCalls) == 0 && candidateAnswer.Len() > 0 {
+		fullContent = candidateAnswer.String()
 	} else if len(llmResult.ToolCalls) == 0 {
 		fullContent = conversationmemory.ProjectTerminalAnswer(
 			fullContent,
 		)
+	}
+	if len(llmResult.ToolCalls) == 0 {
+		if reason := conversationmemory.TerminalAnswerIntegrityReason(fullContent); reason == "" {
+			emitAnswer(fullContent)
+		} else {
+			logger.Warnf(ctx, "[Agent][Thinking] Iteration-%d withheld terminal answer: %s",
+				iteration+1, reason)
+			common.PipelineWarn(ctx, "Agent", "terminal_answer_integrity_failed", map[string]interface{}{
+				"iteration": iteration,
+				"reason":    reason,
+			})
+		}
 	}
 
 	// Use actual finish_reason from LLM stream instead of hardcoding "stop".
@@ -421,6 +431,44 @@ func (e *AgentEngine) callLLMWithRetry(
 			response, err = e.streamThinkingToEventBus(ctx, messages, tools, iteration, sessionID)
 			if err == nil || !isTransientError(err) {
 				break
+			}
+		}
+	}
+	if err == nil && response != nil && len(response.ToolCalls) == 0 &&
+		strings.TrimSpace(response.Content) != "" {
+		if reason := conversationmemory.TerminalAnswerIntegrityReason(response.Content); reason != "" {
+			logger.Warnf(ctx, "[Agent][Round-%d] Terminal answer integrity failure (%s), retrying once without tools",
+				round, reason)
+			common.PipelineWarn(ctx, "Agent", "terminal_answer_integrity_retry", map[string]interface{}{
+				"iteration": iteration,
+				"reason":    reason,
+				"attempt":   1,
+			})
+			retryMessages := append([]chat.Message(nil), messages...)
+			retryMessages = append(retryMessages, chat.Message{
+				Role:    "user",
+				Content: conversationmemory.TerminalIntegrityRetryDirective(),
+			})
+			retryMessages = agenttools.SanitizeMessages(retryMessages)
+			response, err = e.streamThinkingToEventBus(ctx, retryMessages, nil, iteration, sessionID)
+			if err != nil || response == nil || len(response.ToolCalls) > 0 ||
+				conversationmemory.TerminalAnswerIntegrityReason(response.Content) != "" {
+				failureReason := "terminal_integrity_retry_failed"
+				if err != nil {
+					failureReason = err.Error()
+				} else if response != nil && len(response.ToolCalls) > 0 {
+					failureReason = "terminal_integrity_retry_requested_tool"
+				} else if response != nil {
+					failureReason = conversationmemory.TerminalAnswerIntegrityReason(response.Content)
+				}
+				logger.Errorf(ctx, "[Agent][Round-%d] Terminal answer retry unusable: %s", round, failureReason)
+				response = &types.ChatResponse{
+					Content: conversationmemory.TerminalIntegrityFallback(
+						types.LanguageNameFromContext(ctx),
+					),
+					FinishReason: "stop",
+				}
+				err = nil
 			}
 		}
 	}

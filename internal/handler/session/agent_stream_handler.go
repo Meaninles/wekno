@@ -249,9 +249,6 @@ func (h *AgentStreamHandler) handleAgentProgress(ctx context.Context, evt event.
 		return nil
 	}
 	toolName := strings.TrimSpace(data.ToolName)
-	if toolName == "" {
-		toolName = "general_agent_progress"
-	}
 	toolCallID := strings.TrimSpace(data.ToolCallID)
 	if toolCallID == "" {
 		toolCallID = strings.TrimSpace(evt.ID)
@@ -265,13 +262,15 @@ func (h *AgentStreamHandler) handleAgentProgress(ctx context.Context, evt event.
 	}
 	done := data.Done || phase == "success" || phase == "error"
 	metadata := map[string]interface{}{
-		"tool_name":    toolName,
 		"tool_call_id": toolCallID,
 		"progress_id":  "agent_progress:" + toolCallID,
 		"message":      content,
 		"phase":        phase,
 		"success":      phase != "error",
 		"transient":    data.Transient,
+	}
+	if toolName != "" {
+		metadata["tool_name"] = toolName
 	}
 	for key, value := range data.Metadata {
 		if key == "" {

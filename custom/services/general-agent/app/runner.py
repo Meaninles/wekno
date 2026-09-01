@@ -28,6 +28,7 @@ from .final_delivery import (
     TERMINAL_ANSWER_CLOSE,
     TERMINAL_ANSWER_OPEN,
     requires_passive_terminal_delivery,
+    terminal_answer_integrity_reason,
     uses_claude_sdk_terminal_projection,
 )
 from .schemas import ChatPayload, ChatResult, RunEvent, SidecarArtifact
@@ -2769,8 +2770,9 @@ def build_system_prompt(
             f"`{TERMINAL_ANSWER_OPEN}...{TERMINAL_ANSWER_CLOSE}` envelope. Keep planning, self-talk, "
             "tool narration and protocol text outside it; the runtime exposes only the envelope body. "
             "The envelope must be non-empty and use the language explicitly requested by the current user, "
-            "otherwise the configured user language. This is formatting within the same SDK run and must not "
-            "trigger another model, validation or repair pass."
+            "otherwise the configured user language. Do not initiate a validation or repair pass yourself. "
+            "The runtime may transparently retry once only when transport-level corruption makes the terminal "
+            "text unusable; it never scores or rewrites the answer's business semantics."
         )
     policy = f"""
 You are WeKnora's general-purpose agent runtime. Act like a capable general-purpose assistant with the tools and context configured for this agent.
@@ -2800,10 +2802,14 @@ Context contract:
 - Preserve epistemic modality. A question, requested action, explanation, example, hypothetical, proposal, negation, or missing value is not proof that an event happened. Keep missing values unknown/pending rather than rewriting them as none, ready, complete, or not applicable.
 - A count or outcome (including zero), an absent record, lack of evidence, or a request to analyze a lifecycle condition does not establish whether an action started, stopped, completed, failed, or never occurred. Keep unasserted lifecycle state unknown.
 - A question about whether or why an action should or should not happen does not establish either occurred or not-occurred. Never infer lifecycle from the pragmatic reasonableness of asking it.
+- Treat equivalent unresolved expressions across language, word order and formality as one semantic state. Rephrasing pending/unknown does not create a second fact or resolve the first; only an explicit determinate update does.
+- Distinguish conversation content from external persistence. An explicitly adopted field, notice wording or plan item remains active dialogue state without a file/database/ticket write; never claim that an external write occurred without a successful tool result.
+- A rule, threshold, SLA, schema, assigned supporting role, recommendation, hypothetical or explanatory question does not establish the lifecycle of a concrete object and must not be carried into its state unless the user explicitly adopts it.
 - Resolve explicit user updates chronologically. Decompose compound statements into independent propositions, retire only older propositions that actually conflict, and preserve compatible qualifiers, actors, objects, scope, and modality. Use exact user source IDs when attribution is requested and never guess a source turn.
 - A document schema, retrieved example, placeholder, or earlier assistant-generated field is not conversation state unless a later user message explicitly adopts that exact content.
 - Drafts, plans, templates, and sample text may create wording and neutral connective prose, but must honor the requested count/form and omit or visibly placeholder unsupported operational details. Do not invent a duration, quantity, recipient, lifecycle state, actor, role duty, destination, channel, contact route, commitment, or completed step for completeness.
 - Treat the current output scope as an exclusion boundary. If the user asks for only selected fields or one topic, omit unrelated history and invented template fields.
+- A hypothetical, example, recommendation or explanatory action stays local to that discussion. Do not add it to a named object's state or action boundaries unless the user explicitly adopts it for that object.
 - Turn-scoped output formats, suffixes, citation instructions, or one-time constraints from conversation_history are expired unless the current user_request explicitly repeats or refers to them.
 - effective_lightweight_skills: the authoritative permission-checked lightweight prompt skills active for this run. Their instructions are capability guidance, not text typed by the user and not callable tools.
 - quoted_context: message content the user quoted in the WeKnora frontend. It is reference context for the current turn, not a rewrite of the current request.
@@ -2831,12 +2837,13 @@ Available capabilities:
 - An action boundary constrains operations and never becomes an affirmative request. Preserve its exact actor, action, object, destination, modality, and turn scope. Distinguish changing proposal content from modifying a file or external system, and never report an operation as completed unless its actual tool call succeeded.
 - Within the same continuing task or object, an operation boundary remains active until the user explicitly revokes, narrows, or supersedes it. A later request to edit, draft, calculate, or discuss content does not authorize a file, artifact, message, command, retrieval, or external-system action.
 - Changing an attribute, value, location, owner, version, plan alternative, or draft does not create a new task/object and does not expire its operation boundaries.
+- A user-declared source restriction such as dialogue-only or no external lookup governs its stated task/scope. Configured tools and a previous retrieval workflow do not override it; a later positive evidence request may supersede it only for that later question.
 - Source and action honesty: never say you searched, retrieved, found, read, verified, saved, sent, updated, or otherwise performed an operation unless matching current-turn evidence or a successful tool result establishes it. Never claim an operation did not occur merely from silence or a prohibition; report only user-stated boundaries and verified current-turn outcomes.
 - For attribution, copy only a source_id visibly attached to the exact user message that asserted the claim. If the exact ID is unavailable or uncertain, quote the user text without an ID; never guess an ordinal or attribute an older fact to a later request/assistant recap.
 - For artifacts: {artifact_return_policy} create_artifact only registers existing files.
 - If you create artifacts, mention their filenames. If not, answer in text.
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
-- Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. This is still one generation run; do not request or perform a second validation or regeneration pass.
+- Terminal answer contract: after the last tool result, always finish this same run with a non-empty user-visible answer that addresses the current user_request. Never end the run on a tool call, tool result, progress narration, or hidden reasoning alone. If available evidence is insufficient, state that limitation directly in the final answer without inventing facts or citations. Do not request or perform a semantic validation/regeneration pass; the runtime alone may retry once when protocol residue or degenerate transport output makes the terminal text unusable.
 {passive_terminal_contract}
 - Final output hygiene: keep intent classification, chain-of-thought, self-talk, tool planning, and self-review internal. Start the final answer directly with useful user-facing content; routine tool use does not need narrated planning.
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
@@ -5389,6 +5396,15 @@ PROVIDER_TRANSPORT_RETRY_MARKERS = (
     "service unavailable",
 )
 
+TERMINAL_INTEGRITY_RETRY_PROMPT = (
+    "The previous terminal response was not shown because it contained a transport-level "
+    "output-integrity failure. Produce one fresh, self-contained final answer to the same "
+    "current user request using only this session's existing conversation and tool evidence. "
+    "Do not call any tool or describe this retry. Do not repeat protocol markers, planning, or "
+    "self-talk. Return the complete user-visible answer inside exactly one "
+    f"{TERMINAL_ANSWER_OPEN}...{TERMINAL_ANSWER_CLOSE} envelope."
+)
+
 
 def provider_transport_retries() -> int:
     raw = str(os.getenv("CUSTOM_GENERAL_AGENT_TRANSPORT_RETRIES", "2") or "").strip()
@@ -5397,6 +5413,21 @@ def provider_transport_retries() -> int:
     except ValueError:
         value = 2
     return min(max(value, 0), 3)
+
+
+def terminal_integrity_retries() -> int:
+    raw = str(os.getenv("CUSTOM_GENERAL_AGENT_TERMINAL_INTEGRITY_RETRIES", "1") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 1
+    return min(max(value, 0), 1)
+
+
+def terminal_integrity_fallback(query: str) -> str:
+    if re.search(r"[\u3400-\u9fff]", query or ""):
+        return "本次回答未能可靠生成，请重试。"
+    return "The response could not be generated reliably. Please try again."
 
 
 def raw_sdk_error_text(error: Any) -> str:
@@ -5608,8 +5639,8 @@ class GeneralAgentRunner:
                 content="正在分析上下文和可用工具",
                 message="正在分析上下文和可用工具",
                 data={
-                    "tool_name": "assistant_status",
-                    "tool_call_id": f"final-delivery-active-{self.payload.run_id}",
+                    "progress_kind": "assistant_status",
+                    "progress_id": f"final-delivery-active-{self.payload.run_id}",
                     "phase": "start",
                     "message": "正在分析上下文和可用工具",
                     "transient": True,
@@ -5790,8 +5821,8 @@ class GeneralAgentRunner:
                 content=text,
                 message=text,
                 data={
-                    "tool_name": "assistant_status",
-                    "tool_call_id": active_status_id,
+                    "progress_kind": "assistant_status",
+                    "progress_id": active_status_id,
                     "phase": "start",
                     "message": text,
                     "transient": True,
@@ -6062,6 +6093,69 @@ class GeneralAgentRunner:
                 answer = "".join(current_segment_delta_parts).strip()
             if not answer:
                 answer = "".join(all_delta_parts).strip()
+        terminal_retry_attempts = 0
+        if passive_terminal_delivery_mode:
+            integrity_reason = terminal_answer_integrity_reason(answer)
+            if integrity_reason and terminal_integrity_retries() > 0:
+                terminal_retry_attempts = 1
+                yield RunEvent(
+                    id=f"terminal-integrity-retry-{self.payload.run_id}",
+                    type="progress",
+                    content="正在重新整理最终回答",
+                    message="正在重新整理最终回答",
+                    data={
+                        "progress_kind": "assistant_status",
+                        "progress_id": f"terminal-integrity-retry-{self.payload.run_id}",
+                        "phase": "start",
+                        "message": "正在重新整理最终回答",
+                        "transient": True,
+                    },
+                )
+                repair_collector = ClaudeSDKTerminalCollector()
+                repair_options = replace(
+                    initial_options,
+                    session_id=None,
+                    resume=sdk_session_id,
+                    tools=[],
+                    mcp_servers={},
+                    strict_mcp_config=False,
+                    allowed_tools=[],
+                    hooks={},
+                    skills=[],
+                    max_turns=1,
+                )
+                try:
+                    async for stream_item in multiplex_query_events(
+                        TERMINAL_INTEGRITY_RETRY_PROMPT,
+                        repair_options,
+                    ):
+                        if isinstance(stream_item, RunEvent):
+                            yield stream_item
+                            continue
+                        message = stream_item
+                        if tool_use_fragments(message):
+                            raise RuntimeError("terminal integrity retry requested a tool")
+                        repair_collector.observe(message)
+                        if message.__class__.__name__ == "ResultMessage" and getattr(
+                            message, "is_error", False
+                        ):
+                            raise RuntimeError(user_facing_error_message(message))
+                    repaired_answer = repair_collector.answer()
+                    repaired_reason = terminal_answer_integrity_reason(repaired_answer)
+                    if repaired_reason:
+                        raise RuntimeError(f"terminal integrity retry failed: {repaired_reason}")
+                    answer = repaired_answer
+                except Exception:
+                    answer = terminal_integrity_fallback(query)
+            elif integrity_reason:
+                answer = terminal_integrity_fallback(query)
+            if self.payload.eval_observability:
+                prompt_observation["terminal_answer_integrity"] = {
+                    "retry_attempts": terminal_retry_attempts,
+                    "initial_failure_reason": integrity_reason,
+                    "final_failure_reason": terminal_answer_integrity_reason(answer),
+                    "answer_source": terminal_collector.answer_source,
+                }
         if (data_analysis_final_answer_mode or passive_terminal_delivery_mode) and answer:
             active_answer_id = ""
             for chunk in answer_replay_chunks(answer):

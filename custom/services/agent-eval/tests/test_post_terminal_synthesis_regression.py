@@ -150,6 +150,7 @@ class PostTerminalSynthesisRegressionTest(unittest.TestCase):
             "client": ROOT / "weknora_eval" / "client.py",
             "scorer": ROOT / "weknora_eval" / "scoring.py",
             "gate": ROOT / "weknora_eval" / "gates.py",
+            "judge_calibration": ROOT / "calibration" / "judge-multiturn.v1.json",
             "orchestration": ROOT / "eval-loop.ps1",
             "compose": ROOT / "docker-compose.yml",
             "policy": ROOT / "policies" / "post-terminal-synthesis-codex-gate.v1.json",

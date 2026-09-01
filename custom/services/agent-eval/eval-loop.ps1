@@ -294,6 +294,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -CorpusVersion "alder-remote-onboarding-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary HR knowledge base" }
     }
+    $datasetUsesRagPrimarySupport = $datasetText.Contains(
+        '${AGENT_EVAL_KB_RAG_PRIMARY_SUPPORT_ID}'
+    )
+    if ($datasetUsesRagPrimarySupport) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/customer-device-support-handbook.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/rag-primary-support-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_RAG_PRIMARY_SUPPORT_ID" `
+            -KnowledgeBaseName "Eval回归-Northstar设备支持手册-v1" `
+            -UploadName "customer-device-support-handbook.v1.md" `
+            -CorpusVersion "northstar-customer-device-support-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary customer-support knowledge base" }
+    }
 
     # Bind the execution identity to every KB selected by this dataset. Each
     # individual preparation script records its own binding; this aggregate
@@ -342,6 +355,11 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         if ($datasetUsesRagPrimaryHR) {
             $bindingArtifactPaths.Add(
                 (Join-Path $PSScriptRoot "artifacts/rag-primary-hr-kb-binding.v1.json")
+            )
+        }
+        if ($datasetUsesRagPrimarySupport) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/rag-primary-support-kb-binding.v1.json")
             )
         }
         foreach ($bindingArtifactPath in $bindingArtifactPaths) {

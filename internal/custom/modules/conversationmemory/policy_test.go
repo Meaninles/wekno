@@ -159,6 +159,10 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 		"synonymous unresolved labels and paraphrases as the same semantic state",
 		"Distinguish conversation content from external persistence",
 		"does not establish the current lifecycle of a particular incident",
+		"Naming or assigning a person to a role does not prove",
+		"Do not infer an unstated applicant, owner, assignee, customer, or operator",
+		"An identifier is not a description",
+		"Keep hypothetical and counterfactual analysis explicitly hypothetical",
 		"stays local to that discussion",
 		"user source restriction",
 		"Never say that you searched, retrieved, read, verified, saved, sent, updated",
@@ -187,6 +191,8 @@ func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttrib
 		"not externally persisted",
 		"do not by themselves establish a concrete object's lifecycle status",
 		"must not become state or an operational boundary",
+		"Do not rewrite an assignment as approval/completion",
+		"Identifiers cannot fill descriptions",
 	} {
 		if !strings.Contains(contract, required) {
 			t.Fatalf("query-understanding contract missing %q: %s", required, contract)
@@ -205,6 +211,9 @@ func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *
 		"Treat synonymous unresolved labels as one state",
 		"dialogue content without proving an external write",
 		"does not establish a concrete object's lifecycle",
+		"Naming or assigning an actor does not prove",
+		"the current speaker is not an unstated applicant",
+		"an identifier is not a description",
 		"Honor requested count/form",
 		"Changing a task attribute or plan alternative does not expire its ongoing operation boundaries",
 		"report operations only when user text or verified current-turn tool results establish their outcome",
@@ -256,6 +265,8 @@ func TestCompleteUserSourceLedgerSeparatesAuthorityFromAssistantContext(t *testi
 		`authority="user_authored_only"`,
 		"locate the user fragment that supplies it",
 		"change one field adopts only that user-authored change",
+		"an assignment is not a completed action",
+		"the current speaker is not an unstated business actor",
 		"keeps P unknown and does not establish not-P",
 		"One-answer response-method constraints expire",
 	} {

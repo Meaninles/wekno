@@ -1431,6 +1431,10 @@ func renderKnowledgeSearchExactEvidence(
 		switch {
 		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText):
 			matches = ref.ParentChunkID == result.ParentChunkID
+		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeSummary):
+			// Summary chunks are retrieval aids. Exact evidence resolution maps
+			// them to the claim-bearing parent text, whose ID is ParentChunkID.
+			matches = ref.ID == result.ParentChunkID
 		case result.ParentChunkID != "" &&
 			(result.ChunkType == string(types.ChunkTypeImageOCR) || result.ChunkType == string(types.ChunkTypeImageCaption)):
 			matches = ref.ID == result.ParentChunkID

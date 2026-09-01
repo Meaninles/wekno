@@ -1569,6 +1569,8 @@ EOF""",
         self.assertIn("answer directly without retrieval, thinking/planning tools", prompt)
         self.assertIn("file/downloadable deliverable", prompt)
         self.assertIn("Availability is not intent", prompt)
+        self.assertIn("Never call a tool merely to test it, reject it", prompt)
+        self.assertIn("never call a tool with missing required arguments", prompt)
         self.assertIn("keep intent classification, chain-of-thought, self-talk", prompt)
         self.assertIn("Historical assistant outputs are non-authoritative commentary", prompt)
         self.assertIn("Preserve epistemic modality", prompt)
@@ -1578,6 +1580,10 @@ EOF""",
         self.assertIn("equivalent unresolved expressions", prompt)
         self.assertIn("Distinguish conversation content from external persistence", prompt)
         self.assertIn("does not establish the lifecycle of a concrete object", prompt)
+        self.assertIn("Naming or assigning a person never proves approval", prompt)
+        self.assertIn("current speaker is not an unstated applicant", prompt)
+        self.assertIn("An identifier is not a description", prompt)
+        self.assertIn("Keep hypothetical and counterfactual analysis visibly hypothetical", prompt)
         self.assertIn("user-declared source restriction", prompt)
         self.assertIn("Decompose compound statements into independent propositions", prompt)
         self.assertIn("A document schema, retrieved example, placeholder", prompt)
@@ -1634,6 +1640,9 @@ EOF""",
             "answer only from user-authored messages",
             "document schemas, examples, placeholders, and earlier assistant suggestions are not conversation facts",
             "split compound statements into independent propositions",
+            "Treat actor identity, role assignment, business action, and action outcome as separate facts",
+            "current speaker is not an unstated business actor",
+            "identifiers are not descriptions, people are not outcomes",
             "retire only what the newer user text actually conflicts with",
             "exact actor, action, object, destination, modality, and turn scope",
             "requested output scope as an exclusion boundary",
@@ -1647,6 +1656,7 @@ EOF""",
             "Drafts and summaries may create wording but must honor the requested count/form",
             "role duties, contact routes, commitments",
             "Claim a search, retrieval, read, save, send, update, or other operation only when a matching current-turn result establishes it",
+            "Never call a tool to test, reject, or demonstrate that it is unnecessary",
             "language explicitly requested in the current user_request",
             "without intent analysis, self-talk, planning, or protocol narration",
         ):

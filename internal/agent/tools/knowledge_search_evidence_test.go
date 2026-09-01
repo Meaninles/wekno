@@ -28,3 +28,24 @@ func TestRenderKnowledgeSearchExactEvidenceSplitsAggregateParent(t *testing.T) {
 		t.Fatalf("aggregate parent survived exact evidence rendering: %s", output)
 	}
 }
+
+func TestRenderKnowledgeSearchExactEvidenceMapsSummaryToExactParent(t *testing.T) {
+	result := &searchResultWithMeta{SearchResult: &types.SearchResult{
+		ID: "summary-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
+		ChunkType: string(types.ChunkTypeSummary), ParentChunkID: "text-1",
+		Content: "generated summary must not be used as evidence",
+	}}
+	refs := []*types.SearchResult{
+		{ID: "other", KnowledgeID: "doc-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "other text"},
+		{ID: "text-1", KnowledgeID: "doc-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "authoritative parent text"},
+	}
+
+	output := renderKnowledgeSearchExactEvidence(result, refs)
+	if !strings.Contains(output, `[EXACT_FRAGMENT chunk_id="text-1"]`) ||
+		!strings.Contains(output, "authoritative parent text") {
+		t.Fatalf("summary parent evidence is not model-visible: %s", output)
+	}
+	if strings.Contains(output, "generated summary") || strings.Contains(output, "other text") {
+		t.Fatalf("non-parent text leaked into exact evidence: %s", output)
+	}
+}

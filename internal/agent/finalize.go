@@ -22,6 +22,7 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 	query string,
 	state *types.AgentState,
 	sessionID string,
+	contextMessages ...[]chat.Message,
 ) error {
 	e.syncCitationReferences(state)
 	totalToolCalls := countTotalToolCalls(state.RoundSteps)
@@ -34,9 +35,20 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		"tool_results": totalToolCalls,
 	})
 
-	// Build messages with all context
-	systemPrompt := e.buildSystemPrompt(ctx)
-	userTurn := e.RenderUserTurnContent(sessionID, query)
+	// Preserve the exact bounded conversation context used by the ReAct loop.
+	// Final synthesis is a continuation of that turn, not a new one: rebuilding
+	// only system + current query here would discard the user-authored state that
+	// a long-context answer may need. The variadic argument keeps direct callers
+	// and recovery paths that do not have a snapshot backwards-compatible.
+	var messages []chat.Message
+	if len(contextMessages) > 0 && len(contextMessages[0]) > 0 {
+		messages = append([]chat.Message(nil), contextMessages[0]...)
+	} else {
+		messages = []chat.Message{
+			{Role: "system", Content: e.buildSystemPrompt(ctx)},
+			{Role: "user", Content: e.RenderUserTurnContent(sessionID, query)},
+		}
+	}
 	citationContext, citationRefs := prepareFinalAnswerCitationContext(state)
 	if len(citationRefs) > 0 {
 		e.eventBus.Emit(ctx, event.Event{
@@ -49,23 +61,28 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		})
 	}
 
-	messages := []chat.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userTurn},
-	}
-
-	// Add all tool call results as context
+	// Direct callers without a loop snapshot still need the accumulated tool
+	// evidence. Loop callers already have correctly paired assistant/tool
+	// messages, so duplicating them as synthetic user claims would weaken role
+	// provenance and waste context.
 	toolResultCount := 0
-	for stepIdx, step := range state.RoundSteps {
-		for toolIdx, toolCall := range step.ToolCalls {
-			toolResultCount++
-			messages = append(messages, chat.Message{
-				Role:    "user",
-				Content: fmt.Sprintf("Tool %s returned: %s", toolCall.Name, toolCall.Result.Output),
-			})
-			logger.Debugf(ctx, "[Agent][FinalAnswer] Added tool result [Step-%d][Tool-%d]: %s (output: %d chars)",
-				stepIdx+1, toolIdx+1, toolCall.Name, len(toolCall.Result.Output))
+	if len(contextMessages) == 0 || len(contextMessages[0]) == 0 {
+		for stepIdx, step := range state.RoundSteps {
+			for toolIdx, toolCall := range step.ToolCalls {
+				if toolCall.Result == nil {
+					continue
+				}
+				toolResultCount++
+				messages = append(messages, chat.Message{
+					Role:    "user",
+					Content: fmt.Sprintf("Tool %s returned: %s", toolCall.Name, toolCall.Result.Output),
+				})
+				logger.Debugf(ctx, "[Agent][FinalAnswer] Added tool result [Step-%d][Tool-%d]: %s (output: %d chars)",
+					stepIdx+1, toolIdx+1, toolCall.Name, len(toolCall.Result.Output))
+			}
 		}
+	} else {
+		toolResultCount = totalToolCalls
 	}
 
 	if citationContext != "" {
@@ -81,12 +98,12 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		len(messages), toolResultCount)
 
 	// Add final answer prompt
-	finalPrompt := fmt.Sprintf(`Based on the above tool call results, generate a complete answer for the user's question.
+	finalPrompt := fmt.Sprintf(`Based on the conversation context and any tool call results above, generate a complete answer for the user's current question.
 
 User question: %s
 
 Requirements:
-1. Answer based on the actually retrieved content
+1. For conversation state, use only user-authored facts and preserve questions, requests, proposals, hypotheticals, negations, and unknown values as such. For external claims, use actually retrieved evidence.
 2. When AVAILABLE_CITATIONS are provided, copy the matching cite_exactly value verbatim immediately after each directly supported sentence or paragraph. Each document source is one specific fragment, so choose the fragment that supports the adjacent claim and use a reasonable minimum.
 3. Organize the answer in a structured format
 4. If information is insufficient, honestly state so
@@ -260,6 +277,7 @@ func renderFinalAnswerCitationContext(refs []*types.SearchResult) string {
 // without the LLM producing a natural stop. It marks state.IsComplete = true.
 func (e *AgentEngine) handleMaxIterations(
 	ctx context.Context, query string, state *types.AgentState, sessionID string,
+	contextMessages ...[]chat.Message,
 ) {
 	logger.Info(ctx, "Reached max iterations, generating final answer")
 	common.PipelineWarn(ctx, "Agent", "max_iterations_reached", map[string]interface{}{
@@ -268,7 +286,7 @@ func (e *AgentEngine) handleMaxIterations(
 	})
 
 	// Stream final answer generation through EventBus
-	if err := e.streamFinalAnswerToEventBus(ctx, query, state, sessionID); err != nil {
+	if err := e.streamFinalAnswerToEventBus(ctx, query, state, sessionID, contextMessages...); err != nil {
 		logger.Errorf(ctx, "Failed to synthesize final answer: %v", err)
 		common.PipelineError(ctx, "Agent", "final_answer_failed", map[string]interface{}{
 			"error": err.Error(),

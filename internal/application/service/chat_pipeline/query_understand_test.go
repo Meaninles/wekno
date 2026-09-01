@@ -1,10 +1,43 @@
 package chatpipeline
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestParseStructuredQueryOutputConversationStateIsNonRetrieval(t *testing.T) {
+	parsed, ok := parseStructuredQueryOutput(`{
+		"rewrite_query":"update only the supplied owner and keep the date pending",
+		"intent":"conversation_state",
+		"image_description":""
+	}`)
+	if !ok {
+		t.Fatal("conversation-state output did not parse")
+	}
+	if parsed.Intent != types.IntentConversation {
+		t.Fatalf("intent = %q, want %q", parsed.Intent, types.IntentConversation)
+	}
+	cm := &types.ChatManage{PipelineState: types.PipelineState{Intent: parsed.Intent}}
+	if cm.NeedsRetrieval() {
+		t.Fatal("conversation-state intent must not activate retrieval")
+	}
+}
+
+func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.T) {
+	prompt := conversationmemory.EnsureQueryUnderstandingContract("base")
+	for _, required := range []string{
+		"Questions, examples, hypotheticals",
+		"conversation-only state or transformation task",
+		"ordinary knowledge question still requires retrieval",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("query-understanding contract missing %q: %s", required, prompt)
+		}
+	}
+}
 
 func TestApplyIntentPromptOverride_AgentOverrideWins(t *testing.T) {
 	cm := &types.ChatManage{

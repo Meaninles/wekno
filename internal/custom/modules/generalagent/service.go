@@ -209,7 +209,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		return err
 	}
 	query := s.buildEffectiveQuery(ctx, req)
-	runtimeQuery := query
 	lightMode, lightNames := configuredLightweightSkillSelection(req.CustomAgent)
 	lightweightSkills, lightweightDrops, err := s.lightweightSkillSpecs(ctx, lightMode, lightNames, req.SkillNames)
 	if err != nil {
@@ -255,10 +254,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	defer unregister()
 
 	history, durableUserContext := s.buildHistory(ctx, req, agentConfig)
-	runtimeQuery = conversationmemory.AppendCurrentTurnDirective(
-		runtimeQuery,
-		req.Query,
-	)
 	evalObservability := false
 	if manager := langfuse.GetManager(); manager != nil {
 		evalObservability = manager.CaptureContent() && manager.EnabledFor(ctx)
@@ -270,7 +265,10 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		SessionID:          sessionID,
 		RequestID:          req.RequestID,
 		AssistantMessageID: req.AssistantMessageID,
-		Query:              runtimeQuery,
+		// The sidecar's <user_request> is documented as verbatim user text. Keep
+		// platform continuity rules in the system prompt instead of appending
+		// hidden protocol text to the highest-priority user request.
+		Query: query,
 		SystemPrompt: conversationmemory.AppendUserArchive(
 			renderSystemPrompt(ctx, agentConfig.ResolveSystemPrompt(agentConfig.WebSearchEnabled), agentConfig.WebSearchEnabled),
 			durableUserContext,
@@ -904,6 +902,7 @@ func buildGeneralAgentHistory(
 		user      *types.Message
 		assistant *types.Message
 		createdAt time.Time
+		ordinal   int
 	}
 	excluded := make(map[string]struct{}, len(excludedMessageIDs))
 	for _, id := range excludedMessageIDs {
@@ -942,6 +941,9 @@ func buildGeneralAgentHistory(
 	sort.Slice(complete, func(i, j int) bool {
 		return complete[i].createdAt.Before(complete[j].createdAt)
 	})
+	for index, pair := range complete {
+		pair.ordinal = index + 1
+	}
 	queries := make([]string, 0, len(complete))
 	for _, pair := range complete {
 		queries = append(queries, strings.TrimSpace(pair.user.Content))
@@ -952,16 +954,22 @@ func buildGeneralAgentHistory(
 	}
 	out := make([]ChatHistoryMessage, 0, len(complete)*2)
 	for _, pair := range complete {
+		userSourceID := conversationmemory.UserTurnSourceID(pair.ordinal)
 		out = append(out, ChatHistoryMessage{
 			Role:           "user",
 			Content:        strings.TrimSpace(pair.user.Content),
+			SourceID:       userSourceID,
 			MentionedItems: append([]types.MentionedItem(nil), pair.user.MentionedItems...),
 			Images:         imageSpecs(pair.user.Images),
 			Attachments:    attachmentSpecsWithoutContent(pair.user.Attachments),
 		})
 		answer := strings.TrimSpace(sourcerefs.StripCitationProtocol(pair.assistant.Content))
 		if answer != "" {
-			out = append(out, ChatHistoryMessage{Role: "assistant", Content: answer})
+			out = append(out, ChatHistoryMessage{
+				Role:     "assistant",
+				Content:  conversationmemory.HistoricalAssistantOutput(answer),
+				SourceID: "assistant_after_" + userSourceID,
+			})
 		}
 	}
 	return out, archive

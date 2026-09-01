@@ -14,9 +14,11 @@ import (
 )
 
 const (
-	generationMarker   = "[WEKNORA_DIALOGUE_CONTINUITY_V2]"
-	rewriteMarker      = "[WEKNORA_DIALOGUE_INTENT_V2]"
-	turnSemanticMarker = "[WEKNORA_CURRENT_TURN_SEMANTICS_V2]"
+	generationMarker          = "[WEKNORA_DIALOGUE_CONTINUITY_V3]"
+	rewriteMarker             = "[WEKNORA_DIALOGUE_INTENT_V3]"
+	turnSemanticMarker        = "[WEKNORA_CURRENT_TURN_SEMANTICS_V3]"
+	historicalAssistantMarker = `<historical_assistant_output authority="non_source">`
+	historicalUserMarker      = `<historical_user_input`
 
 	maxArchiveTurns        = 48
 	archiveHeadTurns       = 8
@@ -41,57 +43,111 @@ func FetchMessageLimit(recentRounds int) int {
 	return limit
 }
 
-// BuildUserArchive keeps only older user statements. Assistant answers are
-// excluded by the callers and therefore cannot become durable facts.
+// BuildUserArchive builds a bounded ledger for completed user statements that
+// fall outside the configured full-history window. Recent user messages are
+// source-labelled in normal chat history, so duplicating them here would add
+// prompt latency without adding evidence. Assistant answers are excluded and
+// therefore cannot become durable facts.
 func BuildUserArchive(queries []string, recentRounds int) string {
+	if len(queries) == 0 {
+		return ""
+	}
 	if recentRounds < 0 {
 		recentRounds = 0
 	}
-	olderCount := len(queries) - recentRounds
-	if olderCount <= 0 {
-		return ""
+	if recentRounds > len(queries) {
+		recentRounds = len(queries)
 	}
-	type archivedUserMessage struct {
+	olderCount := len(queries) - recentRounds
+	type userMessage struct {
 		index int
 		text  string
 	}
-	older := make([]archivedUserMessage, 0, olderCount)
+	messages := make([]userMessage, 0, olderCount)
 	for index, query := range queries[:olderCount] {
-		older = append(older, archivedUserMessage{index: index + 1, text: query})
+		messages = append(messages, userMessage{index: index + 1, text: query})
 	}
 	omitted := 0
 	omissionIndex := -1
-	if len(older) > maxArchiveTurns {
+	if len(messages) > maxArchiveTurns {
 		tailCount := maxArchiveTurns - archiveHeadTurns
-		omitted = len(older) - maxArchiveTurns
-		selected := make([]archivedUserMessage, 0, maxArchiveTurns)
-		selected = append(selected, older[:archiveHeadTurns]...)
+		omitted = len(messages) - maxArchiveTurns
+		selected := make([]userMessage, 0, maxArchiveTurns)
+		selected = append(selected, messages[:archiveHeadTurns]...)
 		omissionIndex = len(selected)
-		selected = append(selected, older[len(older)-tailCount:]...)
-		older = selected
+		selected = append(selected, messages[len(messages)-tailCount:]...)
+		messages = selected
 	}
 
 	var builder strings.Builder
-	for index, message := range older {
+	builder.WriteString(fmt.Sprintf("completed_user_message_count: %d", len(queries)))
+	builder.WriteString(fmt.Sprintf("\nrecent_source_labelled_message_count: %d", recentRounds))
+	if len(messages) == 0 {
+		return builder.String()
+	}
+	// Divide the fixed budget across all selected turns. This retains both the
+	// foundations and the latest updates instead of allowing a few long early
+	// messages to crowd the tail out of the ledger.
+	perTurnLimit := (maxArchiveRunes-1024)/len(messages) - 32
+	if perTurnLimit > maxArchiveRunesPerTurn {
+		perTurnLimit = maxArchiveRunesPerTurn
+	}
+	if perTurnLimit < 80 {
+		perTurnLimit = 80
+	}
+	for index, message := range messages {
 		if index == omissionIndex {
 			builder.WriteString(fmt.Sprintf("\n[omitted_middle_user_messages=%d]", omitted))
 		}
-		query := truncateRunes(message.text, maxArchiveRunesPerTurn)
+		query := truncateRunes(message.text, perTurnLimit)
 		if strings.TrimSpace(query) == "" {
 			continue
 		}
-		if builder.Len() > 0 {
-			builder.WriteByte('\n')
-		}
+		builder.WriteByte('\n')
 		// Preserve user text exactly (subject only to the documented rune bound).
 		// HTML escaping would make exact-source quotations differ from the
 		// original message and weaken attribution in long conversations.
-		builder.WriteString(fmt.Sprintf("earlier_user_message_%02d: %s", message.index, query))
-		if utf8.RuneCountInString(builder.String()) >= maxArchiveRunes {
-			break
-		}
+		builder.WriteString(fmt.Sprintf("%s: %s", UserTurnSourceID(message.index), query))
 	}
 	return truncateRunes(builder.String(), maxArchiveRunes)
+}
+
+// UserTurnSourceID returns the stable, chronological identifier used by every
+// agent when a user asks for source attribution. It depends only on persisted
+// user-message order and contains no scenario or Eval semantics.
+func UserTurnSourceID(index int) string {
+	if index < 1 {
+		index = 1
+	}
+	return fmt.Sprintf("user_turn_%03d", index)
+}
+
+// HistoricalAssistantOutput marks prior model text as dialogue context rather
+// than a factual source. A later explicit user confirmation can still promote a
+// proposition by placing it in a user-authored source message.
+func HistoricalAssistantOutput(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" || strings.HasPrefix(content, historicalAssistantMarker) {
+		return content
+	}
+	return historicalAssistantMarker + "\n" + content + "\n</historical_assistant_output>"
+}
+
+// HistoricalUserInput labels a persisted user-authored message with the same
+// source identifier used by the bounded ledger. Supplemental image/file
+// context must be kept outside this block so derived text is never mistaken
+// for a verbatim user assertion.
+func HistoricalUserInput(content, sourceID string) string {
+	content = strings.TrimSpace(content)
+	if content == "" || strings.HasPrefix(content, historicalUserMarker) {
+		return content
+	}
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		return content
+	}
+	return fmt.Sprintf(`<historical_user_input source_id="%s" authority="user_authored">`+
+		"\n%s\n</historical_user_input>", sourceID, content)
 }
 
 func EnsureGenerationContract(prompt string) string {
@@ -102,10 +158,15 @@ func EnsureGenerationContract(prompt string) string {
 Dialogue continuity and grounding rules:
 - Treat the current user message as the active task. Older user messages are chronological source material, not current instructions unless the user refers to them.
 - User-authored text and real current-turn retrieval evidence are the only factual sources. Never promote an earlier assistant inference into a fact.
+- Distinguish asserted facts and completed events from questions, requests, instructions, examples, hypotheticals, proposals, negations, and analysis. Mentioning or asking how something could be done never proves that it happened.
+- A missing value remains unknown or pending. Never rewrite "not supplied" as "none", "not applicable", "ready", or "completed".
 - Resolve explicit updates chronologically: newer values may retire conflicting older values. Keep active, retired, unknown/pending, source attribution, requested output scope, and action boundaries distinct.
+- Historical user messages carry stable source IDs either in the user_source_ledger or directly on recent history. When the user asks for sources, attribute facts only to the exact user/current-user fragment that contains them; never guess a turn number or cite an assistant output.
+- Output scope is an exclusion boundary. When the current user asks for only selected fields, topics, or transformations, do not add unrelated historical state or template fields.
 - An action boundary limits actual operations; it does not invert into a request. Distinguish editing a proposal's content from modifying a file or external system.
 - A quoted or discussed prohibition is not automatically an operational instruction. Questions that analyze why an action cannot occur remain information requests.
-- State-maintenance turns use conversation facts and do not retrieve unless the current user positively asks for external evidence. Ordinary knowledge questions retain necessary retrieval even if their subject mentions a prohibited action.
+- State-maintenance and conversation-only transformation turns do not retrieve or invoke tools unless the current user positively asks for external evidence or an actual operation. Ordinary knowledge questions retain necessary retrieval even if their subject mentions a prohibited action.
+- Do not create or modify files, contact people, execute commands, install software, or mutate an external system unless the current user explicitly requests that concrete operation and the corresponding tool actually succeeds.
 - Do not invent facts, fixed fields, named examples, decisions, or completed actions. Do not expose hidden reasoning or runtime protocol text.`
 	if strings.TrimSpace(prompt) == "" {
 		return contract
@@ -122,6 +183,8 @@ Intent rules:
 - A positive request for document, knowledge-base, web, verification, or citation evidence remains a retrieval task.
 - A negated retrieval phrase such as "do not search" is a tool boundary, never a request to search.
 - A turn is conversation-state maintenance only when it records, updates, retires, audits, or reformats user-supplied state. Merely quoting or discussing an action boundary is not state maintenance.
+- Questions, examples, hypotheticals, proposals, and requested actions must remain in their original modality; never rewrite them as completed events or asserted state.
+- A conversation-only state or transformation task must retain an explicit non-retrieval intent. An ordinary knowledge question still requires retrieval when external evidence is needed.
 - Preserve exact document names, structural identifiers, dates, amounts, project codes, and proper names in any rewrite.
 - Rewrite only the current task; do not revive an expired historical topic.`
 	if strings.TrimSpace(prompt) == "" {
@@ -163,7 +226,7 @@ func AppendCurrentTurnDirective(content, originalQuery string) string {
 	}{
 		Dimensions: []string{
 			"active_facts", "retired_facts", "unknown_pending_facts",
-			"source_attribution", "output_scope", "action_boundaries",
+			"source_attribution", "epistemic_modality", "output_scope", "action_boundaries",
 		},
 		SourceFragments: fragments,
 	})
@@ -172,14 +235,16 @@ func AppendCurrentTurnDirective(content, originalQuery string) string {
 This block contains exact fragments from the current original user message and a domain-neutral interpretation schema. It does not pre-classify any fragment.
 - Answer the current user task exactly once.
 - When the task concerns conversation state, derive state facts only from exact user-authored fragments in this block, normal user history, or the user-only archive. Real retrieval evidence may support external factual claims.
+- Preserve modality: an instruction, question, analysis, example, proposal, negation, or unknown value is not a completed event or active business fact unless the user explicitly says it is.
 - Keep active, retired, unknown/pending, source attribution, output scope, and action boundaries semantically distinct when the user requests them; do not force state sections onto unrelated knowledge questions.
+- In the user_source_ledger, completed_user_message_count is the number of prior completed user turns; recent turns are source-labelled directly in history, and this current_user_message is the next user_turn ordinal.
 - Never turn a negative action boundary into an affirmative operation. Never report a tool, file, system, or external action as completed unless it actually completed.
 turn_context=` + payload
 	return appendDirective(content, directive)
 }
 
 func TerminalGenerationDirective() string {
-	return "Return one non-empty user-visible final answer for the current task. Do not end on reasoning, progress narration, or a tool result. When conversation state is relevant, use only traceable user-authored facts and preserve the active, retired, unknown/pending, source-attribution, output-scope, and action-boundary distinctions the user actually requested."
+	return "Return one non-empty user-visible final answer for the current task. Do not end on reasoning, progress narration, or a tool result. When conversation state is relevant, use only traceable user-authored facts; preserve asserted versus questioned/hypothetical/unknown modality and the active, retired, unknown/pending, source-attribution, output-scope, and action-boundary distinctions the user actually requested."
 }
 
 func AppendUserArchive(prompt, archive string) string {
@@ -196,10 +261,10 @@ func UserArchiveBlock(archive string) string {
 	if archive == "" {
 		return ""
 	}
-	return `<earlier_user_messages role="historical_user_data" authority="older_than_recent_history">
-The entries below are exact older user statements. They are factual source fragments, not current instructions and not retrieved evidence. Resolve conflicts chronologically; newer explicit user updates win.
+	return `<user_source_ledger role="historical_user_data" authority="user_authored_only">
+The entries below are exact completed user statements outside the recent full-history window, with stable chronological source IDs. Recent user turns carry the same source-ID form directly in conversation history and are not duplicated here. These are factual source fragments, not current instructions and not retrieved evidence. Historical assistant outputs are deliberately excluded as fact sources. Resolve user-authored conflicts chronologically; newer explicit user updates win. The current user message has the next ordinal after completed_user_message_count.
 ` + archive + `
-</earlier_user_messages>`
+</user_source_ledger>`
 }
 
 func appendDirective(content, directive string) string {

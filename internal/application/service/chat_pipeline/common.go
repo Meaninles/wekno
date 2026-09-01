@@ -172,8 +172,18 @@ func AppendHistoryMessages(messages []chat.Message, history []*types.History) []
 		if history == nil {
 			continue
 		}
-		messages = append(messages, chat.Message{Role: "user", Content: history.Query})
-		messages = append(messages, chat.Message{Role: "assistant", Content: sourcerefs.StripCitationProtocol(history.Answer)})
+		userContent := history.Query
+		if history.SourceQuery != "" {
+			userContent = conversationmemory.HistoricalUserInput(history.SourceQuery, history.SourceID) +
+				history.SupplementalContext
+		}
+		messages = append(messages, chat.Message{Role: "user", Content: userContent})
+		messages = append(messages, chat.Message{
+			Role: "assistant",
+			Content: conversationmemory.HistoricalAssistantOutput(
+				sourcerefs.StripCitationProtocol(history.Answer),
+			),
+		})
 	}
 	return messages
 }
@@ -204,14 +214,18 @@ func loadAndProcessHistory(
 			// including request-local citation IDs. Replaying it would expose stale
 			// evidence as a new user message and an old S1 could collide with the
 			// current turn's S1. Rebuild history from the original user input only.
+			h.SourceQuery = message.Content
 			h.Query = message.Content
 			h.CreateAt = message.CreatedAt
 			if desc := extractImageCaptions(message.Images); desc != "" {
-				h.Query += "\n\n[用户上传图片内容]\n" + desc
+				h.SupplementalContext += "\n\n<derived_image_context authority=\"model_derived_not_verbatim_user_text\">\n" +
+					desc + "\n</derived_image_context>"
 			}
 			if len(message.Attachments) > 0 {
-				h.Query += message.Attachments.BuildPrompt()
+				h.SupplementalContext += "\n\n<uploaded_file_context authority=\"user_supplied_file_evidence_not_chat_assertion\">" +
+					message.Attachments.BuildPrompt() + "</uploaded_file_context>"
 			}
+			h.Query += h.SupplementalContext
 		} else {
 			h.Answer = sourcerefs.StripCitationProtocol(regThinkTags.ReplaceAllString(message.Content, ""))
 			h.KnowledgeReferences = message.KnowledgeReferences
@@ -231,8 +245,9 @@ func loadAndProcessHistory(
 	})
 
 	queries := make([]string, 0, len(historyList))
-	for _, item := range historyList {
-		queries = append(queries, item.Query)
+	for index, item := range historyList {
+		item.SourceID = conversationmemory.UserTurnSourceID(index + 1)
+		queries = append(queries, item.SourceQuery)
 	}
 	archive := conversationmemory.BuildUserArchive(queries, maxRounds)
 	if len(historyList) > maxRounds {

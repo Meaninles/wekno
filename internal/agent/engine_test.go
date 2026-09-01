@@ -27,9 +27,10 @@ type mockChat struct {
 	responses []mockResponse
 	callCount int
 	options   []*chat.ChatOptions
+	messages  [][]chat.Message
 }
 
-func (m *mockChat) ChatStream(_ context.Context, _ []chat.Message, opts *chat.ChatOptions) (<-chan types.StreamResponse, error) {
+func (m *mockChat) ChatStream(_ context.Context, messages []chat.Message, opts *chat.ChatOptions) (<-chan types.StreamResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.callCount >= len(m.responses) {
@@ -37,6 +38,7 @@ func (m *mockChat) ChatStream(_ context.Context, _ []chat.Message, opts *chat.Ch
 	}
 	resp := m.responses[m.callCount]
 	m.callCount++
+	m.messages = append(m.messages, append([]chat.Message(nil), messages...))
 	if opts == nil {
 		m.options = append(m.options, nil)
 	} else {
@@ -131,7 +133,7 @@ func TestBuildSystemPromptAppendsDurableUserContextWithoutReplacingBaseline(t *t
 	prompt := engine.buildSystemPrompt(context.Background())
 	require.Contains(t, prompt, "Full native RAG baseline.")
 	require.Contains(t, prompt, "project foundation")
-	require.Contains(t, prompt, "WEKNORA_DIALOGUE_CONTINUITY_V2")
+	require.Contains(t, prompt, "WEKNORA_DIALOGUE_CONTINUITY_V3")
 	require.Less(t, strings.Index(prompt, "Full native RAG baseline."), strings.Index(prompt, "project foundation"))
 }
 
@@ -409,4 +411,28 @@ func TestStreamFinalAnswerToEventBus_EmitsDoneWhenProviderEndsWithEmptyChunk(t *
 	assert.Empty(t, finalAnswerEvents[1].Content)
 	assert.True(t, finalAnswerEvents[1].Done)
 	assert.Equal(t, "final answer", state.FinalAnswer)
+}
+
+func TestStreamFinalAnswerToEventBus_PreservesConversationContext(t *testing.T) {
+	mock := &mockChat{responses: []mockResponse{{chunks: []types.StreamResponse{
+		{ResponseType: types.ResponseTypeAnswer, Content: "current state", Done: true, FinishReason: "stop"},
+	}}}}
+	engine := newTestEngine(t, mock)
+	state := &types.AgentState{}
+	contextMessages := []chat.Message{
+		{Role: "system", Content: "system contract"},
+		{Role: "user", Content: "owner is Lin"},
+		{Role: "assistant", Content: "historical response"},
+		{Role: "user", Content: "what is the owner now?"},
+	}
+
+	err := engine.streamFinalAnswerToEventBus(
+		context.Background(), "what is the owner now?", state, "sess-1", contextMessages,
+	)
+
+	require.NoError(t, err)
+	require.Len(t, mock.messages, 1)
+	require.GreaterOrEqual(t, len(mock.messages[0]), len(contextMessages)+1)
+	assert.Equal(t, contextMessages, mock.messages[0][:len(contextMessages)])
+	assert.Contains(t, mock.messages[0][len(mock.messages[0])-1].Content, "conversation context")
 }

@@ -18,6 +18,9 @@ import (
 // Used for tracking conversation context and history
 type History struct {
 	Query               string     // User query text
+	SourceQuery         string     // Verbatim persisted user text, excluding derived attachment/image context
+	SupplementalContext string     // Explicitly labelled derived image or uploaded-file context
+	SourceID            string     // Stable chronological user-turn identifier within the indexed history
 	Answer              string     // System response text
 	CreateAt            time.Time  // When this history entry was created
 	KnowledgeReferences References // Knowledge references used in the answer

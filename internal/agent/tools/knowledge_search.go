@@ -26,6 +26,14 @@ var knowledgeSearchTool = BaseTool{
 
 This tool uses embeddings to understand the user's query and find semantically similar content across knowledge base chunks.
 
+## Invocation boundary
+Call this tool only when the current request needs knowledge-base evidence. Do
+not call it for conversation-state updates, source quoting, or reformatting that
+can be completed solely from user-authored dialogue. Honor an explicit
+no-retrieval boundary. Conversely, a knowledge question may still require this
+tool when it merely quotes or discusses a prohibited action; decide from the
+semantic task, not isolated negative words.
+
 ## Purpose
 Designed for high-level understanding tasks, such as:
 - conceptual explanations

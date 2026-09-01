@@ -83,6 +83,7 @@ const (
 	IntentGreeting      QueryIntent = "greeting"
 	IntentChitchat      QueryIntent = "chitchat"
 	IntentFollowUp      QueryIntent = "follow_up"
+	IntentConversation  QueryIntent = "conversation_state"
 	IntentImageOnly     QueryIntent = "image_only"
 	IntentDocOnly       QueryIntent = "doc_only"
 	IntentSummarize     QueryIntent = "summarize"
@@ -95,7 +96,7 @@ const (
 // which also considers the WebSearchEnabled flag.
 func (i QueryIntent) NeedsKBRetrieval() bool {
 	switch i {
-	case IntentKBSearch, IntentClarification, IntentSummarize, "":
+	case IntentKBSearch, IntentClarification, "":
 		return true
 	default:
 		return false

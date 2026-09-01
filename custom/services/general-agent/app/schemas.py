@@ -138,6 +138,7 @@ class ImageSpec(BaseModel):
 class ChatHistoryMessage(BaseModel):
     role: str
     content: str
+    source_id: str = ""
     mentioned_items: list[dict[str, Any]] = Field(default_factory=list)
     images: list[ImageSpec] = Field(default_factory=list)
     attachments: list[AttachmentSpec] = Field(default_factory=list)

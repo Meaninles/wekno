@@ -32,7 +32,7 @@ func TestPrepareMessagesWithHistoryInjectsSharedCitationContractForEveryTurn(t *
 	if !strings.Contains(messages[0].Content, "A prior turn's output format, ending, or citation constraint is inactive") {
 		t.Fatalf("evidence-backed multi-turn answers must not inherit stale turn constraints: %s", messages[0].Content)
 	}
-	if !strings.Contains(messages[len(messages)-1].Content, "[WEKNORA_CURRENT_TURN_SEMANTICS_V2]") {
+	if !strings.Contains(messages[len(messages)-1].Content, "[WEKNORA_CURRENT_TURN_SEMANTICS_V3]") {
 		t.Fatalf("domain-neutral current-turn context missing: %#v", messages)
 	}
 

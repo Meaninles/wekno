@@ -23,7 +23,9 @@ func TestBuildUserHistoryMessage_IgnoresRenderedEvidence(t *testing.T) {
 	}
 	got := buildUserHistoryMessage(msg)
 	assert.Equal(t, "user", got.Role)
-	assert.Equal(t, "what about the chart?\n\n[用户上传图片内容]\na bar chart", got.Content)
+	assert.Contains(t, got.Content, "what about the chart?")
+	assert.Contains(t, got.Content, `authority="model_derived_not_verbatim_user_text"`)
+	assert.Contains(t, got.Content, "a bar chart")
 	assert.NotContains(t, got.Content, "[augmented]")
 }
 
@@ -38,7 +40,23 @@ func TestBuildUserHistoryMessage_FallsBackToContentWithCaptions(t *testing.T) {
 	}
 	got := buildUserHistoryMessage(msg)
 	assert.Equal(t, "user", got.Role)
-	assert.Equal(t, "look at this\n\n[用户上传图片内容]\na bar chart\na pie chart", got.Content)
+	assert.Contains(t, got.Content, "look at this")
+	assert.Contains(t, got.Content, `authority="model_derived_not_verbatim_user_text"`)
+	assert.Contains(t, got.Content, "a bar chart\na pie chart")
+}
+
+func TestBuildUserHistoryMessage_LabelsVerbatimSourceSeparately(t *testing.T) {
+	msg := &types.Message{
+		Role:    "user",
+		Content: "the owner is Lin",
+		Images:  types.MessageImages{{Caption: "diagram suggests a different owner"}},
+	}
+
+	got := buildUserHistoryMessage(msg, "user_turn_007")
+
+	assert.Contains(t, got.Content, `<historical_user_input source_id="user_turn_007" authority="user_authored">`)
+	assert.Contains(t, got.Content, "the owner is Lin")
+	assert.Contains(t, got.Content, `authority="model_derived_not_verbatim_user_text"`)
 }
 
 // TestBuildUserHistoryMessage_AppendsAttachmentsWhenNoRenderedContent covers
@@ -64,6 +82,7 @@ func TestBuildUserHistoryMessage_AppendsAttachmentsWhenNoRenderedContent(t *test
 	assert.Contains(t, got.Content, "summarize this")
 	assert.Contains(t, got.Content, `<attachment index="1" name="report.pdf">`)
 	assert.Contains(t, got.Content, "hello world")
+	assert.Contains(t, got.Content, `authority="user_supplied_file_evidence_not_chat_assertion"`)
 }
 
 func TestBuildUserHistoryMessage_RenderedContentDoesNotReplaceCanonicalAttachment(t *testing.T) {
@@ -96,7 +115,8 @@ func TestBuildAssistantHistoryMessages_NaturalFinishEmitsSingleAnswer(t *testing
 	got := buildAssistantHistoryMessages(msg)
 	if assert.Len(t, got, 1) {
 		assert.Equal(t, "assistant", got[0].Role)
-		assert.Equal(t, "Hello, nice to meet you!", got[0].Content)
+		assert.Contains(t, got[0].Content, `authority="non_source"`)
+		assert.Contains(t, got[0].Content, "Hello, nice to meet you!")
 		assert.Empty(t, got[0].ToolCalls)
 	}
 }
@@ -111,7 +131,8 @@ func TestBuildAssistantHistoryMessages_StripsThinkBlocks(t *testing.T) {
 	}
 	got := buildAssistantHistoryMessages(msg)
 	if assert.Len(t, got, 1) {
-		assert.Equal(t, "The answer is 42.", got[0].Content)
+		assert.Contains(t, got[0].Content, "The answer is 42.")
+		assert.NotContains(t, got[0].Content, "plotting")
 	}
 }
 
@@ -174,7 +195,8 @@ func TestBuildAssistantHistoryMessages_ToolCallsExpandIntoOpenAIShape(t *testing
 	assert.Equal(t, "doc A, doc B, doc C", got[1].Content)
 	// 3. canonical final answer (final_answer tool call itself was filtered)
 	assert.Equal(t, "assistant", got[2].Role)
-	assert.Equal(t, "Found 3 matches in the docs.", got[2].Content)
+	assert.Contains(t, got[2].Content, "Found 3 matches in the docs.")
+	assert.Contains(t, got[2].Content, `authority="non_source"`)
 	assert.Empty(t, got[2].ToolCalls)
 }
 

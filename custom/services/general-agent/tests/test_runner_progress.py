@@ -1557,6 +1557,10 @@ EOF""",
         self.assertIn("after the last tool result, always finish this same run", prompt)
         self.assertIn("Never end the run on a tool call, tool result", prompt)
         self.assertIn("do not request or perform a second validation or regeneration pass", prompt)
+        self.assertIn("Tool authority and minimality", prompt)
+        self.assertIn("answer directly without retrieval, thinking/planning tools", prompt)
+        self.assertIn("Historical assistant outputs are non-authoritative commentary", prompt)
+        self.assertIn("Preserve epistemic modality", prompt)
         self.assertNotIn("local self-review of citation", prompt)
         self.assertNotIn("<doc source_id=", prompt)
 
@@ -1579,6 +1583,40 @@ EOF""",
         self.assertIn("Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired", prompt)
         self.assertIn("Do not carry forward an earlier turn's output format", prompt)
         self.assertLess(prompt.index("回答当前问题"), prompt.index("OLD-MARKER"))
+
+    def test_build_prompt_uses_stable_user_sources_and_marks_assistant_history(self):
+        payload = ChatPayload(
+            run_id="run-source-ledger",
+            session_id="session-source-ledger",
+            assistant_message_id="assistant-source-ledger",
+            query="只汇总当前状态",
+            history=[
+                ChatHistoryMessage(
+                    role="user",
+                    content="负责人是Lin",
+                    source_id="user_turn_006",
+                ),
+                ChatHistoryMessage(
+                    role="assistant",
+                    content="可能还需要一个复核日期",
+                    source_id="assistant_after_user_turn_006",
+                ),
+            ],
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/api/v1/custom/general-agent/internal/tools/call",
+        )
+
+        prompt = build_prompt(payload)
+
+        self.assertIn('source_id="user_turn_007" authority="current_user"', prompt)
+        self.assertIn(
+            '<message role="user" source_id="user_turn_006" authority="user_authored_fact_source">',
+            prompt,
+        )
+        self.assertIn(
+            'source_id="assistant_after_user_turn_006" authority="non_factual_unless_later_user_confirmed"',
+            prompt,
+        )
 
     def test_build_system_prompt_prepends_builtin_environment_safety_policy(self):
         for agent_type in ("general-agent", "document-processing-agent", "data-analysis", "table-analysis"):

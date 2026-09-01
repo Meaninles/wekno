@@ -60,7 +60,9 @@ func LoadAgentHistory(
 }
 
 // LoadAgentHistoryWithArchive returns the configured recent full turns plus a
-// bounded, user-only archive for completed turns outside that window.
+// bounded, user-only source ledger for older completed turns in the indexed
+// read. Recent user statements carry their source IDs directly in normal
+// history, avoiding duplicate prompt content.
 func LoadAgentHistoryWithArchive(
 	ctx context.Context,
 	messageRepo interfaces.MessageRepository,
@@ -91,6 +93,7 @@ func LoadAgentHistoryWithArchive(
 		user      *types.Message
 		assistant *types.Message
 		createdAt time.Time
+		ordinal   int
 	}
 	pairs := make(map[string]*pair)
 	for _, msg := range rows {
@@ -120,6 +123,9 @@ func LoadAgentHistoryWithArchive(
 	sort.Slice(completePairs, func(i, j int) bool {
 		return completePairs[i].createdAt.Before(completePairs[j].createdAt)
 	})
+	for index, p := range completePairs {
+		p.ordinal = index + 1
+	}
 
 	queries := make([]string, 0, len(completePairs))
 	for _, p := range completePairs {
@@ -136,7 +142,7 @@ func LoadAgentHistoryWithArchive(
 
 	out := make([]chat.Message, 0, len(completePairs)*4)
 	for _, p := range completePairs {
-		out = append(out, buildUserHistoryMessage(p.user))
+		out = append(out, buildUserHistoryMessage(p.user, conversationmemory.UserTurnSourceID(p.ordinal)))
 		out = append(out, buildAssistantHistoryMessages(p.assistant)...)
 	}
 	return out, archive, nil
@@ -147,13 +153,19 @@ func LoadAgentHistoryWithArchive(
 // RenderedContent contains a prior turn's evidence envelope and request-local
 // citation IDs, which must never become evidence for a later turn. Image and
 // attachment context is reconstructed from its canonical stored fields.
-func buildUserHistoryMessage(m *types.Message) chat.Message {
-	content := m.Content
+func buildUserHistoryMessage(m *types.Message, sourceID ...string) chat.Message {
+	id := ""
+	if len(sourceID) > 0 {
+		id = sourceID[0]
+	}
+	content := conversationmemory.HistoricalUserInput(m.Content, id)
 	if captions := extractImageCaptionsFromMessage(m.Images); captions != "" {
-		content += "\n\n[用户上传图片内容]\n" + captions
+		content += "\n\n<derived_image_context authority=\"model_derived_not_verbatim_user_text\">\n" +
+			captions + "\n</derived_image_context>"
 	}
 	if len(m.Attachments) > 0 {
-		content += m.Attachments.BuildPrompt()
+		content += "\n\n<uploaded_file_context authority=\"user_supplied_file_evidence_not_chat_assertion\">" +
+			m.Attachments.BuildPrompt() + "</uploaded_file_context>"
 	}
 	return chat.Message{Role: "user", Content: content}
 }
@@ -206,7 +218,10 @@ func buildAssistantHistoryMessages(m *types.Message) []chat.Message {
 	finalContent = sourcerefs.StripCitationProtocol(finalContent)
 	finalContent = strings.TrimSpace(finalContent)
 	if finalContent != "" {
-		msgs = append(msgs, chat.Message{Role: "assistant", Content: finalContent})
+		msgs = append(msgs, chat.Message{
+			Role:    "assistant",
+			Content: conversationmemory.HistoricalAssistantOutput(finalContent),
+		})
 	}
 	return msgs
 }

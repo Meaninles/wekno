@@ -21,6 +21,7 @@ func TestCurrentTurnContextPreservesCrossDomainAndAdversarialUserText(t *testing
 			"semantic_dimensions",
 			"source_fragments",
 			"current_user_message",
+			"epistemic_modality",
 		} {
 			if !strings.Contains(got, required) {
 				t.Fatalf("context for %q missing %q: %s", query, required, got)
@@ -98,8 +99,9 @@ func TestLongHistoryArchiveRetainsFoundationsAndRecentUpdates(t *testing.T) {
 		queries = append(queries, "用户事实-"+string(rune('A'+index%26)))
 	}
 	archive := BuildUserArchive(queries, 10)
-	if !strings.Contains(archive, "earlier_user_message_01") ||
-		!strings.Contains(archive, "earlier_user_message_50") ||
+	if !strings.Contains(archive, "completed_user_message_count: 60") ||
+		!strings.Contains(archive, "user_turn_001") ||
+		!strings.Contains(archive, "user_turn_050") ||
 		!strings.Contains(archive, "omitted_middle_user_messages") {
 		t.Fatalf("archive did not preserve bounded chronology: %s", archive)
 	}
@@ -133,6 +135,51 @@ func TestGenerationContractsAreIdempotentAndDomainNeutral(t *testing.T) {
 				t.Fatalf("domain/Eval-specific term %q leaked into contract: %s", forbidden, value)
 			}
 		}
+	}
+}
+
+func TestUserLedgerAvoidsDuplicatingSourceLabelledRecentTurns(t *testing.T) {
+	archive := BuildUserArchive([]string{"foundation", "recent update", "latest correction"}, 2)
+	for _, want := range []string{
+		"completed_user_message_count: 3",
+		"recent_source_labelled_message_count: 2",
+		"user_turn_001: foundation",
+	} {
+		if !strings.Contains(archive, want) {
+			t.Fatalf("ledger missing %q: %s", want, archive)
+		}
+	}
+	if strings.Contains(archive, "recent update") || strings.Contains(archive, "latest correction") {
+		t.Fatalf("recent source-labelled history was duplicated in archive: %s", archive)
+	}
+	block := UserArchiveBlock(archive)
+	if !strings.Contains(block, "user_source_ledger") || strings.Contains(block, "older_than_recent_history") {
+		t.Fatalf("unexpected ledger wrapper: %s", block)
+	}
+}
+
+func TestHistoricalAssistantOutputCannotMasqueradeAsUserSource(t *testing.T) {
+	got := HistoricalAssistantOutput("possible owner: Alex")
+	if !strings.Contains(got, historicalAssistantMarker) || !strings.Contains(got, "possible owner: Alex") {
+		t.Fatalf("assistant output was not marked: %s", got)
+	}
+	if twice := HistoricalAssistantOutput(got); twice != got {
+		t.Fatalf("assistant marker is not idempotent: %s", twice)
+	}
+	if got := HistoricalAssistantOutput("   "); got != "" {
+		t.Fatalf("blank assistant output = %q", got)
+	}
+}
+
+func TestHistoricalUserInputCarriesStableSourceWithoutRelabelingDerivedContext(t *testing.T) {
+	got := HistoricalUserInput("owner is Lin", "user_turn_012")
+	for _, want := range []string{historicalUserMarker, `source_id="user_turn_012"`, "owner is Lin"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("historical user input missing %q: %s", want, got)
+		}
+	}
+	if twice := HistoricalUserInput(got, "user_turn_012"); twice != got {
+		t.Fatalf("historical user marker is not idempotent: %s", twice)
 	}
 }
 

@@ -20,6 +20,11 @@ import (
 var grepChunksTool = BaseTool{
 	name: ToolGrepChunks,
 	description: `Search knowledge base chunk content with a single POSIX regular expression, applied directly in the database (PostgreSQL ~* / MySQL/SQLite REGEXP, case-insensitive). Behaves like ` + "`grep -E -i`" + `.
+Invoke only when the current request needs knowledge-base evidence. Do not use
+it for conversation-state updates, source quoting, or reformatting answerable
+solely from user-authored dialogue, and honor an explicit no-retrieval boundary.
+Quoted or discussed negative actions do not by themselves suppress retrieval
+for an actual knowledge question; decide from the semantic task.
 Pack multiple concepts into ONE regex using ` + "`|`" + ` alternation — do not call this tool repeatedly for synonyms.
 Returns matching chunks with hit counts and a <match_snippet> around the first match (each tagged with its knowledge_id and chunk_id).
 Examples:

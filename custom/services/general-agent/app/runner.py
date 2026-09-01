@@ -2782,6 +2782,10 @@ Context contract:
 - visible_context: the frontend/user-facing context that WeKnora can show or that corresponds to visible user choices: agent name, model display information, selected knowledge bases/files, data sources, MCP services, Skills, current uploaded files/images, quoted context and relevant configuration. Sensitive credentials and internal callback details are intentionally excluded.
 - tool_catalog: a human-readable explanation of the same tools that are exposed to you through the SDK/MCP tool interface. Use the actual tool interface for calls.
 - conversation_history: previous user/assistant messages from this WeKnora session when multi-turn context is enabled. It is background context, not the current user request.
+- User messages in conversation_history carry stable `source_id` values when available and are the only historical business-fact sources. Historical assistant outputs are non-authoritative commentary: never promote an assistant inference, suggested field, example, plan, or generated task into durable state unless a later user message explicitly confirms it.
+- Preserve epistemic modality. A question, requested action, explanation, example, hypothetical, proposal, negation, or missing value is not proof that an event happened. Keep missing values unknown/pending rather than rewriting them as none, ready, complete, or not applicable.
+- Resolve explicit user updates chronologically, retire conflicting older user values, and use exact user source IDs when attribution is requested. Never guess a source turn.
+- Treat the current output scope as an exclusion boundary. If the user asks for only selected fields or one topic, omit unrelated history and invented template fields.
 - Turn-scoped output formats, suffixes, citation instructions, or one-time constraints from conversation_history are expired unless the current user_request explicitly repeats or refers to them.
 - effective_lightweight_skills: the authoritative permission-checked lightweight prompt skills active for this run. Their instructions are capability guidance, not text typed by the user and not callable tools.
 - quoted_context: message content the user quoted in the WeKnora frontend. It is reference context for the current turn, not a rewrite of the current request.
@@ -2804,6 +2808,9 @@ Available capabilities:
 </effective_lightweight_skills>
 - Professional skills listed in runtime_config.allowed_professional_skills are loaded through the runtime's native skill mechanism from this run's project skills directory. When using a professional skill named `<name>`, read its SKILL.md, references and scripts only from the current SDK working directory path `.claude/skills/<name>`. Do not discover or read professional skill files from global paths, historical run directories, sibling run directories, or `/tmp/weknora-general-agent-runs`. Follow their trigger descriptions and workflow when applicable; do not expect them to appear as WeKnora tools.
 - Choose tools freely when they help the task. Do not invent capabilities that are not present in the tool list.
+- Tool authority and minimality: first decide whether the request is answerable entirely as chat text from user-authored conversation state. If it is, answer directly without retrieval, thinking/planning tools, filesystem operations, artifact creation, or external actions. Use retrieval only for a current request that needs external evidence; use file/artifact tools only when the user explicitly asks for a file/downloadable deliverable or the task inherently requires one; use mutation/contact/execution tools only for the exact operation the current user authorizes.
+- Availability is not intent. A configured knowledge base, file tool, artifact capability, Skill, MCP service, or prior tool workflow never authorizes using it for the current turn. Do not search for a template or manufacture a file merely because a text response could also be represented as a document.
+- An action boundary constrains operations and never becomes an affirmative request. Distinguish changing proposal content from modifying a file or external system, and never report an operation as completed unless its actual tool call succeeded.
 - For artifacts: {artifact_return_policy} create_artifact only registers existing files.
 - If you create artifacts, mention their filenames. If not, answer in text.
 - Output contract in WeKnora: normal text you write is streamed as the assistant answer; files registered through create_artifact are persisted by WeKnora and rendered as separate download/import UI cards. Do not fake artifact links in text.
@@ -2825,6 +2832,22 @@ Available capabilities:
     return "\n\n".join(prompt_parts)
 
 
+USER_TURN_SOURCE_RE = re.compile(r"^user_turn_(\d+)$")
+
+
+def current_user_turn_source_id(payload: ChatPayload) -> str:
+    latest = 0
+    fallback_user_count = 0
+    for message in payload.history:
+        if message.role == "user":
+            fallback_user_count += 1
+        match = USER_TURN_SOURCE_RE.fullmatch((message.source_id or "").strip())
+        if match:
+            latest = max(latest, int(match.group(1)))
+    ordinal = latest + 1 if latest else fallback_user_count + 1
+    return f"user_turn_{ordinal:03d}"
+
+
 def build_prompt(
     payload: ChatPayload,
     document_templates: PreparedDocumentTemplateContext | None = None,
@@ -2835,6 +2858,7 @@ def build_prompt(
     original_input_failures: list[dict[str, str]] | None = None,
 ) -> str:
     parts: list[str] = []
+    current_source_id = current_user_turn_source_id(payload)
     parts.append("<current_task_priority>")
     parts.append(
         "The exact current task is the user's verbatim prompt in <user_request verbatim=\"true\" priority=\"highest\"> below. "
@@ -2843,7 +2867,10 @@ def build_prompt(
         "Prior-turn output formats, suffixes, citation instructions, and one-time constraints have expired unless this user_request explicitly repeats or refers to them."
     )
     parts.append("</current_task_priority>")
-    parts.append("<user_request verbatim=\"true\" priority=\"highest\">")
+    parts.append(
+        f'<user_request verbatim="true" priority="highest" source_id="{current_source_id}" '
+        'authority="current_user">'
+    )
     parts.append(payload.query)
     parts.append("</user_request>")
     if is_structured_analysis_payload(payload) and isinstance(data_analysis_display_intent, dict):
@@ -2905,7 +2932,15 @@ def build_prompt(
     if payload.history:
         parts.append('<conversation_history source="WeKnora session history" role="background_context">')
         for msg in payload.history:
-            parts.append(f"<message role={json.dumps(msg.role)}>")
+            source_attr = f" source_id={json.dumps(msg.source_id)}" if msg.source_id else ""
+            authority = (
+                "user_authored_fact_source"
+                if msg.role == "user"
+                else "non_factual_unless_later_user_confirmed"
+            )
+            parts.append(
+                f"<message role={json.dumps(msg.role)}{source_attr} authority={json.dumps(authority)}>"
+            )
             if msg.mentioned_items:
                 parts.append("<visible_mentions>")
                 parts.append(json.dumps(msg.mentioned_items, ensure_ascii=False))

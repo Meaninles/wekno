@@ -1,0 +1,41 @@
+{
+  "case_count": 6,
+  "created_at": "2026-09-01T22:43:24.767435+00:00",
+  "dataset_sha256": "a4fcc75db711ec2316aaf8a0d2aa93876c1c7f850f8b39d3fc1fac444f40e064",
+  "dependency_files": {
+    "corpus_editorial": "fixtures/regression-corpora/editorial-release-handbook.v1.md",
+    "corpus_privacy": "fixtures/regression-corpora/privacy-request-handbook.v1.md",
+    "corpus_support": "fixtures/regression-corpora/customer-device-support-handbook.v1.md"
+  },
+  "dependency_sha256": {
+    "assistance": "3bd23d36ec833f7bf0250407de2b2a9764029b1e837c6366b2248ca86dedf455",
+    "cli": "7c36af57ae5328b2aac4e7c5159e8d0268168df2830e5f4e03d4894622d46938",
+    "client": "e60c9a510a2f2b28f79d61d319e40d4bd1701c14fbbc7a4c402df200b88b3cdc",
+    "codex_review": "275074be0d428e58d5f38bf9287927bb44907ba6c9fe34e38698a8e7070857df",
+    "compose": "b89b2e221a769c7b2fcbc803cbf137145e82cbd9793ec44c700a8343da2ddc3c",
+    "corpus_editorial": "3da07551c4e05d0d7e9ad1679b6c820e8aeabcbbd75290807c21b100f13ab04f",
+    "corpus_facilities": "4f33a900006f3bf09e423edcd7618d64a440dbe3e41ce1f200eae777b18e6f5c",
+    "corpus_hr": "61eaccd880c8edb169117908156d24fc1a28011baebafe3a55faaa8ca7c7c223",
+    "corpus_privacy": "ddbb934a853e9b53b965bb4b1bd921f0db4eda234d86681fcacc4db03d9de4c7",
+    "corpus_support": "ab77d98c9bb2cff7038552a403d42cae11f355521f1c54abcefa13782d974055",
+    "corpus_unseen_project": "6d4e4b3707be626375f93a1b1e341051668ae314b64299b88c8c81f2e18d338b",
+    "gate": "d2e609a90b378bf2bc4c2acd04f53b8bbd4952e8b23f682c8e4d238a2246eacb",
+    "judge_calibration": "97d02759d0adb326c0adb64b8bfa83a63cc729cf8d3a36e93cf4308512986d75",
+    "models": "1503852093c27c74edf32d16743d5f99730798ad9c8aa7cf64d219a68a610f8b",
+    "orchestration": "d7bfdbe1fae205a5302f02b8533185e6643b284315f9aab7b82ea6a8db6780f6",
+    "policy": "174b4b8599a8ed51554ab86d0cc4099fc50aedccb962d237c6398b0f2ba80ad3",
+    "profiles": "62a7d07beb1695ad4f6119d4dc0974e4092ae682d8c011d5a5b68022ce163d81",
+    "readiness": "db86a960875c24ade3bc14752a87b6eaa45f9fac58a0d0dc539d75a2b84db247",
+    "runner": "ad4859d3fb8ebceebdff00f85c57d5ad8ff5231d15a6af7da6216db224b42e2f",
+    "scorer": "40ffd4c34e743c786dc251dee5ffc60a48d1485e95336de19e815a512df79539"
+  },
+  "family_count": 6,
+  "schema_version": 1,
+  "source_files": [
+    "datasets\\general-agent-post-salience-regression.v1.jsonl"
+  ],
+  "split_counts": {
+    "gate": 6
+  },
+  "suite": "weknora-general-agent-post-salience-regression-v1"
+}

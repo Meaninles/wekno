@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "policy_id": "weknora-general-agent-post-salience-codex-gate-v1",
+  "gate_kind": "production_release",
+  "answer_track": "production_candidate",
+  "required_splits": ["gate"],
+  "required_capabilities": ["rag_retrieval", "long_context_dialogue", "citation", "tool_use"],
+  "required_agent_profiles": ["general-agent"],
+  "min_repetitions_per_case": 3,
+  "min_case_coverage": 1.0,
+  "max_invalid_rate": 0.0,
+  "forbid_hard_failures": false,
+  "forbid_pass_to_fail_regressions": false,
+  "pair_repetitions_by_attempt": false,
+  "min_pass_rate_per_case": 0.666666,
+  "max_case_pass_rate_regression": 1.0,
+  "critical_metric_prefixes": [],
+  "require_judge": false,
+  "require_codex_review": true,
+  "require_dual_track_codex_review": true,
+  "require_production_surface_equivalence": true,
+  "required_codex_review_dimensions": [
+    "task_fulfillment", "factual_grounding", "conversation_state",
+    "source_attribution", "action_boundary", "communication_quality"
+  ],
+  "max_metric_rate_regression": {},
+  "required_frozen_dependencies": [
+    "models", "cli", "readiness", "runner", "assistance", "codex_review", "client", "scorer", "gate",
+    "orchestration", "compose", "corpus_unseen_project", "corpus_facilities", "corpus_hr",
+    "corpus_support", "corpus_editorial", "corpus_privacy"
+  ],
+  "required_execution_identity_fields": [
+    "summary_model_id", "corpus_version", "kb_bindings_sha256",
+    "profile_set_sha256", "framework_commit", "framework_scope",
+    "framework_worktree_dirty", "gate_policy_sha256", "scorer_sha256",
+    "evaluator_schema_version", "answer_tracks", "production_answer_source",
+    "codex_review_rubric_version", "eval_assistance_enabled",
+    "eval_assist_max_attempts", "response_deadline_seconds"
+  ],
+  "require_clean_framework": true,
+  "required_sut_identity_fields": [
+    "commit", "raw.worktree_dirty", "raw.runtime_image_id", "raw.general_agent_image_id"
+  ],
+  "require_clean_sut": true,
+  "require_baseline": false
+}

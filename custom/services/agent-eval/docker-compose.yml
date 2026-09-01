@@ -191,6 +191,7 @@ services:
       AGENT_EVAL_GENERAL_AGENT_IMAGE_ID: ${AGENT_EVAL_GENERAL_AGENT_IMAGE_ID:-}
     volumes:
       - ./eval-loop.ps1:/workspace/eval-loop.ps1:ro
+      - ./docker-compose.yml:/workspace/docker-compose.yml:ro
       - ./fixtures:/workspace/fixtures:ro
       - ./datasets:/workspace/datasets:ro
       - ./manifests:/workspace/manifests:ro

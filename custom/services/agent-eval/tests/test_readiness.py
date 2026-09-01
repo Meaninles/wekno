@@ -179,6 +179,7 @@ class ReadinessTests(unittest.TestCase):
             compose,
         )
         self.assertIn("./eval-loop.ps1:/workspace/eval-loop.ps1:ro", compose)
+        self.assertIn("./docker-compose.yml:/workspace/docker-compose.yml:ro", compose)
         self.assertIn("./fixtures:/workspace/fixtures:ro", compose)
 
     def env(self) -> dict[str, str]:

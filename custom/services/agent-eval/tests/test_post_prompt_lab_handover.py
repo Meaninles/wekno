@@ -31,6 +31,7 @@ class PostPromptLabHandoverTest(unittest.TestCase):
         self.assertEqual(len(self.case.turns), 14)
         self.assertEqual(self.case.repetitions, 2)
         self.assertEqual(self.case.review_mode, ReviewMode.CODEX_CONVERSATION)
+        self.assertEqual(self.case.provenance.metadata["configured_history_turns"], 10)
         self.assertTrue(self.case.provenance.metadata["created_after_prompt_change"])
         self.assertEqual(self.case.provenance.reference_answers, {})
 

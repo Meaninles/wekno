@@ -120,6 +120,7 @@ def build_cases() -> list[CaseSpec]:
             needs_codex_review=False,
             reference_answers={},
             metadata={
+                "configured_history_turns": 10,
                 "created_after_prompt_change": True,
                 "design_basis": "cross-capability-composition-not-noun-substitution",
                 "sealed_holdout_used": False,

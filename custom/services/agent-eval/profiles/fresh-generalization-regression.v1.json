@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "profile_set_id": "weknora-fresh-generalization-regression-v1",
+  "scope": "Post-prompt regression across one newly seeded KB and genuine no-KB clones of all three production runtime modes.",
+  "model": {
+    "environment_variable": "AGENT_EVAL_SUMMARY_MODEL_ID",
+    "required_model_id": "prod-deepseek-v4-flash-int8-chat",
+    "display_name": "DeepSeek V4 Flash"
+  },
+  "execution_contract": {
+    "formal_scoring_scope": "new visible cases created after the terminal-projection change; sealed holdout is not read",
+    "knowledge_selection": "every case declares explicit or none; the runner verifies the selected agent runtime config before creating a session",
+    "prompt_injection": "no rubric, required claim, reference answer, judge feedback or Eval repair contract is sent to the SUT",
+    "answer_tracks": "production candidate is persisted and release-scored; Eval assistance is artifact-only"
+  },
+  "profiles": [
+    {
+      "profile_id": "quick-answer",
+      "display_name": "快速问答",
+      "agent_id": "builtin-quick-answer",
+      "agent_ids_by_knowledge_selection": {
+        "explicit": "builtin-quick-answer",
+        "none": "${AGENT_EVAL_AGENT_QUICK_NO_KB_ID}"
+      },
+      "agent_type": "rag-qa",
+      "endpoint": "knowledge-chat",
+      "configured_history_turns": 5
+    },
+    {
+      "profile_id": "rag-reasoning",
+      "display_name": "RAG推理",
+      "agent_id": "builtin-smart-reasoning",
+      "agent_ids_by_knowledge_selection": {
+        "none": "${AGENT_EVAL_AGENT_RAG_NO_KB_ID}"
+      },
+      "agent_type": "rag-qa",
+      "endpoint": "agent-chat",
+      "configured_history_turns": 10
+    },
+    {
+      "profile_id": "general-agent",
+      "display_name": "通用智能体",
+      "agent_id": "builtin-general-agent",
+      "agent_ids_by_knowledge_selection": {
+        "none": "${AGENT_EVAL_AGENT_GENERAL_NO_KB_ID}"
+      },
+      "agent_type": "general-agent",
+      "endpoint": "agent-chat",
+      "configured_history_turns": 10
+    }
+  ]
+}

@@ -231,7 +231,13 @@ def evaluate_readiness(
             binding_errors.append(f"{case.case_id}: unknown agent_profile_id")
             continue
         expected = {
-            "agent_id": str(profile.get("agent_id") or ""),
+            "agent_id": str(
+                (
+                    profile.get("agent_ids_by_knowledge_selection") or {}
+                ).get(case.setup.knowledge_selection_mode.value)
+                or profile.get("agent_id")
+                or ""
+            ),
             "agent_type": str(profile.get("agent_type") or ""),
             "endpoint": str(profile.get("endpoint") or ""),
         }

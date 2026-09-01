@@ -240,6 +240,12 @@ class WeKnoraClient:
             raise WeKnoraAPIError("session create response has no id")
         return str(payload["id"])
 
+    def get_agent(self, agent_id: str) -> dict[str, Any]:
+        payload = unwrap_data(self.request("GET", f"/agents/{agent_id}"))
+        if not isinstance(payload, dict) or str(payload.get("id") or "") != agent_id:
+            raise WeKnoraAPIError(f"agent lookup returned an invalid payload for {agent_id}")
+        return payload
+
     def search_knowledge(
         self,
         query: str,

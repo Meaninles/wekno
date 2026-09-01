@@ -11,6 +11,7 @@ from weknora_eval.models import (
     CaseRun,
     CaseSetup,
     CaseSpec,
+    KnowledgeSelectionMode,
     RepairTrace,
     SUTFingerprint,
     SUT_RESPONSE_DEADLINE_EXCEEDED,
@@ -165,6 +166,24 @@ class PayloadRecordingClient(FakeClient):
         }
 
 
+class KnowledgeSelectionClient(PayloadRecordingClient):
+    def __init__(self, *, runtime_mode: str, configured_kbs: list[str] | None = None) -> None:
+        super().__init__()
+        self.runtime_mode = runtime_mode
+        self.configured_kbs = configured_kbs or []
+        self.agent_lookups: list[str] = []
+
+    def get_agent(self, agent_id: str):
+        self.agent_lookups.append(agent_id)
+        return {
+            "id": agent_id,
+            "config": {
+                "kb_selection_mode": self.runtime_mode,
+                "knowledge_bases": self.configured_kbs,
+            },
+        }
+
+
 class PassingAssistant:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -205,6 +224,57 @@ class DivergentSurfaceClient(PayloadRecordingClient):
 
 
 class RunnerTests(unittest.TestCase):
+    @staticmethod
+    def _knowledge_selection_case(mode: KnowledgeSelectionMode) -> CaseSpec:
+        kb_ids = ["kb-selected"] if mode == KnowledgeSelectionMode.EXPLICIT else []
+        return CaseSpec(
+            case_id=f"knowledge-selection-{mode.value}",
+            family_id="knowledge-selection",
+            suite="suite",
+            split=Split.DEV,
+            capabilities=[Capability.LONG_CONTEXT_DIALOGUE],
+            agent=AgentSelector(agent_id="agent"),
+            setup=CaseSetup(
+                knowledge_base_ids=kb_ids,
+                knowledge_selection_mode=mode,
+                summary_model_id="model",
+            ),
+            turns=[TurnSpec(turn_id="turn", query="q", contract=TurnContract())],
+        )
+
+    def test_no_kb_contract_accepts_only_a_runtime_none_agent(self) -> None:
+        client = KnowledgeSelectionClient(runtime_mode="none")
+
+        result = EvalRunner(client).run_case(
+            self._knowledge_selection_case(KnowledgeSelectionMode.NONE)
+        )
+
+        self.assertNotEqual(result.verdict, Verdict.INVALID)
+        self.assertEqual(client.agent_lookups, ["agent"])
+        self.assertEqual(client.payloads[0]["knowledge_base_ids"], [])
+
+    def test_no_kb_contract_rejects_agent_default_all_before_session_creation(self) -> None:
+        client = KnowledgeSelectionClient(runtime_mode="all")
+
+        result = EvalRunner(client).run_case(
+            self._knowledge_selection_case(KnowledgeSelectionMode.NONE)
+        )
+
+        self.assertEqual(result.verdict, Verdict.INVALID)
+        self.assertIn("kb_selection_mode=none", result.error)
+        self.assertEqual(client.payloads, [])
+
+    def test_explicit_kb_contract_rejects_runtime_none_agent(self) -> None:
+        client = KnowledgeSelectionClient(runtime_mode="none")
+
+        result = EvalRunner(client).run_case(
+            self._knowledge_selection_case(KnowledgeSelectionMode.EXPLICIT)
+        )
+
+        self.assertEqual(result.verdict, Verdict.INVALID)
+        self.assertIn("cannot use an agent", result.error)
+        self.assertEqual(client.payloads, [])
+
     def test_runner_uses_complete_event_as_the_public_sse_surface(self) -> None:
         case = CaseSpec(
             case_id="surface-divergence",

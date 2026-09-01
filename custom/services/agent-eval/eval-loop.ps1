@@ -58,13 +58,13 @@ if (-not $Policy) {
 if (-not $Manifest) {
     $Manifest = switch (Split-Path -Leaf $Policy) {
         "eval-optimization-gate.v3.json" {
-            "/workspace/manifests/unseen-capability-matrix.v1-eval-optimization-v3.manifest.json"
+            "/workspace/manifests/unseen-capability-matrix.v1-eval-optimization-v4.manifest.json"
         }
         "production-multiturn-release-gate.v3.json" {
-            "/workspace/manifests/unseen-capability-matrix.v1-production-release-v3.manifest.json"
+            "/workspace/manifests/unseen-capability-matrix.v1-production-release-v4.manifest.json"
         }
         "repair-dependency-gate.v2.json" {
-            "/workspace/manifests/unseen-capability-matrix.v1-repair-dependency-v2.manifest.json"
+            "/workspace/manifests/unseen-capability-matrix.v1-repair-dependency-v3.manifest.json"
         }
         default {
             throw "a custom Policy requires an explicit frozen Manifest"
@@ -205,6 +205,31 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
     if ($datasetUsesSemanticRoutingCorpus -and $semanticRoutingMissing) {
         & (Join-Path $PSScriptRoot "prepare-semantic-routing-regression-kb.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare semantic-routing regression knowledge base" }
+    }
+    $datasetUsesFreshGeneralization = (Split-Path -Leaf $Dataset) -eq "fresh-generalization-regression.v1.jsonl"
+    if ($datasetUsesFreshGeneralization) {
+        $noKBVariables = @(
+            "AGENT_EVAL_AGENT_QUICK_NO_KB_ID",
+            "AGENT_EVAL_AGENT_RAG_NO_KB_ID",
+            "AGENT_EVAL_AGENT_GENERAL_NO_KB_ID"
+        )
+        $noKBMissing = @(
+            $noKBVariables | Where-Object {
+                -not $runnerValues.ContainsKey($_) -or
+                [string]::IsNullOrWhiteSpace($runnerValues[$_])
+            }
+        )
+        if ($noKBMissing.Count -gt 0) {
+            & (Join-Path $PSScriptRoot "prepare-no-kb-agent-profiles.ps1")
+            if ($LASTEXITCODE -ne 0) { throw "failed to prepare Eval no-KB agent profiles" }
+        }
+        $freshKBVariable = "AGENT_EVAL_KB_FRESH_GENERALIZATION_MEDIA_ID"
+        $freshKBMissing = -not $runnerValues.ContainsKey($freshKBVariable) -or
+            [string]::IsNullOrWhiteSpace($runnerValues[$freshKBVariable])
+        if ($freshKBMissing) {
+            & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1")
+            if ($LASTEXITCODE -ne 0) { throw "failed to prepare fresh-generalization knowledge base" }
+        }
     }
 }
 

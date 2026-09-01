@@ -247,6 +247,8 @@ custom/services/agent-eval/prepare-runner-env.ps1
 
 `datasets/semantic-routing-regression.v1.jsonl` 是提示词与状态边界修改后的独立回归集，不改写原有 DEV、GATE 或 sealed holdout。它使用单独的 Meridian 场地手册语料，覆盖三个智能体、每个 12 轮、3 次独立会话，成对验证“对话内状态/内容处理不调用检索或文件工具”和“否定表达出现在知识问题中时仍正常检索引用”。语义质量仅由 Codex 完整对话审核决定；机械契约只记录工具、引用、答案轨道与持久化完整性。
 
+该 v1 文件保留用于历史复现，但其中 quick case 的空 `knowledge_base_ids` 不能再作为“无知识库”证据：内置智能体的 `kb_selection_mode=all` 会在请求没有显式目标时回退到租户全部知识库。当前框架要求新用例显式声明 `knowledge_selection_mode=explicit|none`；runner 会在创建 session 前读取真实 agent 配置，`none` 只有绑定到 `kb_selection_mode=none` 且绑定知识库为空的同运行模式 Eval clone 才有效。旧数据仍按 `agent_default` 原样加载，不会被静默改写。
+
 准备独立知识库并执行：
 
 ```powershell
@@ -254,7 +256,7 @@ custom/services/agent-eval/prepare-semantic-routing-regression-kb.ps1
 custom/services/agent-eval/eval-loop.ps1 `
   -Split dev `
   -Dataset /workspace/datasets/semantic-routing-regression.v1.jsonl `
-  -Manifest /workspace/manifests/semantic-routing-regression.v1-production-gate.manifest.json `
+  -Manifest /workspace/manifests/semantic-routing-regression.v1-production-gate-evaluator-v2.manifest.json `
   -Policy /workspace/policies/semantic-routing-regression-gate.v1.json `
   -Profiles /workspace/profiles/semantic-routing-regression.v1.json `
   -MaxConcurrency 3 `
@@ -262,6 +264,24 @@ custom/services/agent-eval/eval-loop.ps1 `
 ```
 
 首轮只导出 production/assisted 两份 Codex 审核包；逐对话填写并绑定答案轨道哈希后，以 `-Run` 和两份 `-CodexReview` 重新进入无基线回归门禁。该门禁只评 `production_candidate`，assisted 通过不能挽救 production 失败。
+
+### 提示词修改后的全新回归
+
+`datasets/fresh-generalization-regression.v1.jsonl` 在终态投影修改完成后才创建，不读取 sealed holdout，也不复制 Meridian、采购或 Skill 用例。它包含四个 13 轮 case、每 case 三次独立会话：快速问答分别使用新建的 Northbank 音频交付知识库和真实无知识库配置，RAG 推理、通用智能体使用真实无知识库配置；领域另覆盖社区菜园、用户研究和展览彩排。三个无知识库智能体只在隔离 Eval 租户创建，除知识选择为 `none` 外复制完整生产配置，不改变生产内置智能体。
+
+```powershell
+custom/services/agent-eval/prepare-no-kb-agent-profiles.ps1
+custom/services/agent-eval/prepare-fresh-generalization-kb.ps1
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split dev `
+  -Dataset /workspace/datasets/fresh-generalization-regression.v1.jsonl `
+  -Manifest /workspace/manifests/fresh-generalization-regression.v1-production-gate.manifest.json `
+  -Policy /workspace/policies/fresh-generalization-regression-gate.v1.json `
+  -Profiles /workspace/profiles/fresh-generalization-regression.v1.json `
+  -MaxConcurrency 3
+```
+
+这组用例没有 required claims、参考答案、Judge rubric 或固定状态字段评分；Codex 逐段审核“足够好”即可，三次中至少两次通过。机械门禁仍要求三智能体/全部 case 完整、SSE 与持久化一致、知识选择真实、双轨隔离、无无效会话并满足延迟上限。
 
 在隔离 Eval 栈已经启动、Main 栈完全停止后，先创建/校验四个未见分布知识库；脚本只更新被 Git 忽略的 `runner.env`，不会打印凭据：
 

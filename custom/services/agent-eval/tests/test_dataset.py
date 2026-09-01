@@ -14,12 +14,14 @@ from weknora_eval.dataset import (
 from weknora_eval.models import (
     AgentSelector,
     Capability,
+    CaseSetup,
     CaseSpec,
     ConversationStateContract,
     DecisionContract,
     DecisionMode,
     EvidenceAnchor,
     EvidenceClaimRule,
+    KnowledgeSelectionMode,
     Split,
     TextRule,
     TurnContract,
@@ -48,6 +50,20 @@ def make_case(case_id: str, family_id: str) -> CaseSpec:
 
 
 class DatasetTests(unittest.TestCase):
+    def test_knowledge_selection_contract_rejects_false_no_kb_and_empty_explicit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "none forbids"):
+            CaseSetup(
+                knowledge_base_ids=["kb"],
+                knowledge_selection_mode=KnowledgeSelectionMode.NONE,
+            )
+        with self.assertRaisesRegex(ValueError, "explicit requires"):
+            CaseSetup(knowledge_selection_mode=KnowledgeSelectionMode.EXPLICIT)
+
+    def test_historical_agent_default_does_not_change_serialized_identity(self) -> None:
+        payload = CaseSetup().model_dump(mode="json")
+
+        self.assertNotIn("knowledge_selection_mode", payload)
+
     def test_family_split_is_deterministic_and_has_no_leakage(self) -> None:
         cases = [make_case(f"case-{i}-{j}", f"family-{i}") for i in range(8) for j in range(2)]
         first = split_by_family(cases, salt="stable")

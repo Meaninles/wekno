@@ -136,6 +136,20 @@ segment，`complete.data.final_answer` 与正式前端一样作为最终可见�
 runner 按相同公开投影重放 SSE，再与历史 API 读取的助手正文逐字比较；正式 v3 gate
 对不相等或无法证明相等的完成轮次判 `INVALID`。
 
+2026-09-01 的追加审计发现，历史数据把空 `knowledge_base_ids` 标注为 no-KB，
+但三个内置智能体均配置为 `kb_selection_mode=all`；后端在没有显式目标时会回退到
+租户全部知识库。因此旧运行仍可复现，但不再被当作无知识库覆盖证据。新框架加入
+显式 `knowledge_selection_mode`：`explicit` 必须携带 KB/文档目标，`none` 禁止目标，
+且 runner 会在创建对话前从 API 校验实际 agent 必须为 `kb_selection_mode=none`、
+绑定 KB 为空。隔离 Eval 租户中的三个 clone 复制对应内置 agent 的完整配置，只改
+这两个知识选择字段；生产内置配置、普通会话和 main 基线均不修改。
+
+新增 `fresh-generalization-regression.v1` 作为提示词修改后的独立回归：一个全新
+Northbank 音频交付知识库用例，加上快速问答、RAG 推理、通用智能体各一个真实
+no-KB 用例；四个 case 均为 13 轮、3 次独立运行，覆盖社区、研究与展览等新领域。
+它不含参考答案、required claims、Judge rubric 或可注入 SUT 的评分反馈，语义结论
+仍由 Codex 对完整对话逐一判断。
+
 ## 七、验收证据与剩余风险
 
 自动化测试覆盖以下关键性质：

@@ -21,6 +21,7 @@ from .models import (
     CaseSetup,
     CaseSpec,
     ExperimentRun,
+    KnowledgeSelectionMode,
     ObservedTurn,
     RepairTrace,
     ReviewMode,
@@ -70,6 +71,42 @@ class EvalRunner:
                 else None
             )
         self.assistant = assistant
+
+    def _assert_knowledge_selection(self, spec: CaseSpec) -> None:
+        """Fail closed when the runtime agent contradicts the Eval KB contract."""
+
+        setups = [
+            _merge_setup(spec.setup, turn.setup_override)
+            for turn in spec.turns
+        ]
+        constrained = {
+            setup.knowledge_selection_mode
+            for setup in setups
+            if setup.knowledge_selection_mode != KnowledgeSelectionMode.AGENT_DEFAULT
+        }
+        if not constrained:
+            return
+
+        agent = self.client.get_agent(spec.agent.agent_id)
+        config = agent.get("config")
+        if not isinstance(config, dict):
+            raise EvalModeRequired(
+                f"agent {spec.agent.agent_id!r} has no inspectable runtime config"
+            )
+        runtime_mode = str(config.get("kb_selection_mode") or "").strip()
+        configured_kbs = [str(item) for item in config.get("knowledge_bases") or []]
+
+        if KnowledgeSelectionMode.NONE in constrained:
+            if runtime_mode != "none" or configured_kbs:
+                raise EvalModeRequired(
+                    "knowledge_selection_mode=none requires an agent configured with "
+                    "kb_selection_mode=none and no bound knowledge bases"
+                )
+        if KnowledgeSelectionMode.EXPLICIT in constrained and runtime_mode == "none":
+            raise EvalModeRequired(
+                "knowledge_selection_mode=explicit cannot use an agent configured with "
+                "kb_selection_mode=none"
+            )
 
     def doctor(self) -> SUTFingerprint:
         raw = dict(self.client.capabilities())
@@ -127,6 +164,7 @@ class EvalRunner:
         if not spec.enabled:
             return case_run.model_copy(update={"error": "case disabled"})
         try:
+            self._assert_knowledge_selection(spec)
             session_id = self.client.create_session()
             seen_message_ids: set[str] = set()
             observed_turns: list[ObservedTurn] = []

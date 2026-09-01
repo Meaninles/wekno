@@ -94,6 +94,19 @@ class ReviewRating(str, Enum):
     NOT_APPLICABLE = "not_applicable"
 
 
+class KnowledgeSelectionMode(str, Enum):
+    """The knowledge boundary an Eval case intends to exercise.
+
+    ``agent_default`` preserves historical datasets. New release evidence must
+    use ``explicit`` or ``none`` so an empty request cannot be mislabeled as a
+    no-knowledge-base run when the selected agent falls back to all tenant KBs.
+    """
+
+    AGENT_DEFAULT = "agent_default"
+    EXPLICIT = "explicit"
+    NONE = "none"
+
+
 class AgentSelector(StrictModel):
     endpoint: Literal["knowledge-chat", "agent-chat"] = "agent-chat"
     agent_id: str
@@ -103,9 +116,22 @@ class AgentSelector(StrictModel):
 class CaseSetup(StrictModel):
     knowledge_base_ids: list[str] = Field(default_factory=list)
     knowledge_ids: list[str] = Field(default_factory=list)
+    knowledge_selection_mode: KnowledgeSelectionMode = Field(
+        default=KnowledgeSelectionMode.AGENT_DEFAULT,
+        exclude_if=lambda value: value == KnowledgeSelectionMode.AGENT_DEFAULT,
+    )
     web_search_enabled: bool = False
     summary_model_id: str | None = None
     channel: str = "agent-eval"
+
+    @model_validator(mode="after")
+    def require_consistent_knowledge_selection(self) -> "CaseSetup":
+        has_explicit_targets = bool(self.knowledge_base_ids or self.knowledge_ids)
+        if self.knowledge_selection_mode == KnowledgeSelectionMode.NONE and has_explicit_targets:
+            raise ValueError("knowledge_selection_mode=none forbids KB/document targets")
+        if self.knowledge_selection_mode == KnowledgeSelectionMode.EXPLICIT and not has_explicit_targets:
+            raise ValueError("knowledge_selection_mode=explicit requires a KB/document target")
+        return self
 
 
 class TextRule(StrictModel):

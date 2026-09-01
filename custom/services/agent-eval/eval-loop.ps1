@@ -320,6 +320,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -CorpusVersion "juniper-editorial-release-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary editorial knowledge base" }
     }
+    $datasetUsesRagPrimaryPrivacy = $datasetText.Contains(
+        '${AGENT_EVAL_KB_RAG_PRIMARY_PRIVACY_ID}'
+    )
+    if ($datasetUsesRagPrimaryPrivacy) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/privacy-request-handbook.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/rag-primary-privacy-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_RAG_PRIMARY_PRIVACY_ID" `
+            -KnowledgeBaseName "Eval回归-Meridian隐私请求手册-v1" `
+            -UploadName "privacy-request-handbook.v1.md" `
+            -CorpusVersion "meridian-privacy-request-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary privacy knowledge base" }
+    }
 
     # Bind the execution identity to every KB selected by this dataset. Each
     # individual preparation script records its own binding; this aggregate
@@ -378,6 +391,11 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         if ($datasetUsesRagPrimaryEditorial) {
             $bindingArtifactPaths.Add(
                 (Join-Path $PSScriptRoot "artifacts/rag-primary-editorial-kb-binding.v1.json")
+            )
+        }
+        if ($datasetUsesRagPrimaryPrivacy) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/rag-primary-privacy-kb-binding.v1.json")
             )
         }
         foreach ($bindingArtifactPath in $bindingArtifactPaths) {

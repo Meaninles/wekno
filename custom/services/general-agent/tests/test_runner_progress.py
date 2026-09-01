@@ -29,6 +29,7 @@ from app.runner import (  # noqa: E402
     build_prompt,
     build_prompt_observation,
     build_system_prompt,
+    build_weknora_server,
     claude_auth_env,
     classify_data_analysis_display_intent,
     data_analysis_needs_chart_validation,
@@ -67,6 +68,7 @@ from app.runner import (  # noqa: E402
     is_retryable_provider_transport_error,
     provider_transport_retries,
     raw_sdk_error_text,
+    require_current_turn_operation_authorization,
     terminal_background_tool_ids,
     tool_result_fragments,
     tool_use_fragments,
@@ -1596,6 +1598,14 @@ EOF""",
         self.assertIn("operation boundary remains active until the user explicitly revokes", prompt)
         self.assertIn("Source and action honesty", prompt)
         self.assertIn("Citation freshness", prompt)
+        self.assertIn("Require logical entailment rather than plausible completion", prompt)
+        self.assertIn("Preserve grammatical argument slots", prompt)
+        self.assertIn("Treat enumerated conditions, stages, roles, fields, and formats as closed", prompt)
+        self.assertIn("even when no earlier assistant-created draft", prompt)
+        self.assertIn("File-operation proof", prompt)
+        self.assertIn("authorization_quote", prompt)
+        self.assertIn("Citation closure", prompt)
+        self.assertIn("Plain text such as S1/S2", prompt)
         self.assertNotIn("local self-review of citation", prompt)
         self.assertNotIn("<doc source_id=", prompt)
 
@@ -1649,6 +1659,9 @@ EOF""",
             "same object, field, value, and modality",
             "schemas supply field names but no instance values",
             "request to repeat a fact is not its original source",
+            "Require entailment rather than plausibility",
+            "A does not prove B keeps B unknown",
+            "Preserve grammatical slots",
             "retire only what the newer user text actually conflicts with",
             "exact actor, action, object, destination, modality, and turn scope",
             "requested output scope as an exclusion boundary",
@@ -1662,10 +1675,13 @@ EOF""",
             "Drafts and summaries may create wording but must honor the requested count/form",
             "role duties, contact routes, commitments",
             "Claim a search, retrieval, read, save, send, update, or other operation only when a matching current-turn result establishes it",
+            "requested chat draft, note, checklist, summary, handoff, report, or final version remains chat text",
+            "identify the verbatim current-user authorization phrase",
             "Never call a tool to test, reject, or demonstrate that it is unnecessary",
             "normally start with one knowledge_search call",
             "Never search the SDK working directory with Read, Grep, Glob, LS, or Bash",
             "answer this current user_request rather than an earlier question",
+            "actual canonical citation handles returned by this turn",
             "language explicitly requested in the current user_request",
             "without intent analysis, self-talk, planning, or protocol narration",
         ):
@@ -1673,6 +1689,75 @@ EOF""",
 
         for forbidden in ("case_id", "required_claim", "reference_answer", "采购", "培训"):
             self.assertNotIn(forbidden, reminder)
+
+    def test_current_turn_operation_authorization_requires_verbatim_provenance(self):
+        examples = (
+            ("请生成一个可下载的 PDF 文件。", "生成一个可下载的 PDF 文件"),
+            ("Please create the spreadsheet file and attach it.", "create the spreadsheet file"),
+            ("Haz un archivo CSV descargable, por favor.", "Haz un archivo CSV descargable"),
+        )
+        for request, quote in examples:
+            with self.subTest(request=request):
+                self.assertEqual(
+                    require_current_turn_operation_authorization(request, quote),
+                    quote,
+                )
+
+    def test_current_turn_operation_authorization_rejects_missing_or_invented_quote(self):
+        request = "只在聊天里修改方案，不要修改文件。"
+        for quote in ("", "请修改文件", "上一轮让我创建文件"):
+            with self.subTest(quote=quote):
+                with self.assertRaises(RuntimeError):
+                    require_current_turn_operation_authorization(request, quote)
+
+    def test_general_agent_artifact_tool_requires_current_turn_authorization_quote(self):
+        captured = {}
+
+        def fake_tool(name, description, schema):
+            def decorator(handler):
+                captured[name] = {
+                    "description": description,
+                    "schema": schema,
+                    "handler": handler,
+                }
+                return handler
+
+            return decorator
+
+        fake_sdk = types.SimpleNamespace(
+            tool=fake_tool,
+            create_sdk_mcp_server=lambda name, version, tools: {
+                "name": name,
+                "version": version,
+                "tools": tools,
+            },
+        )
+        payload = ChatPayload(
+            run_id="run-artifact-authority",
+            session_id="session-artifact-authority",
+            assistant_message_id="assistant-artifact-authority",
+            query="只在聊天里给我一段摘要，不要写文件。",
+            enable_artifacts=True,
+            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir), payload)
+            with mock.patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
+                build_weknora_server(payload, store)
+
+        artifact_tool = captured["create_artifact"]
+        self.assertIn("authorization_quote", artifact_tool["schema"]["required"])
+        self.assertIn("exact current-user phrase", artifact_tool["description"])
+        result = asyncio.run(
+            artifact_tool["handler"](
+                {"filename": "summary.txt", "file_path": "summary.txt"}
+            )
+        )
+        self.assertTrue(result["is_error"])
+        self.assertIn("authorization quote is required", result["content"][0]["text"])
 
     def test_build_prompt_uses_stable_user_sources_and_marks_assistant_history(self):
         payload = ChatPayload(

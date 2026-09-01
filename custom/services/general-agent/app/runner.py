@@ -383,6 +383,24 @@ def safe_filename(name: str) -> str:
     return name[:180]
 
 
+def require_current_turn_operation_authorization(current_request: str, quote: str) -> str:
+    """Bind a general-agent file delivery to verbatim current-turn authority.
+
+    This intentionally does not classify phrases, languages, domains, or Eval
+    cases.  The model must supply the positive authorizing fragment and the
+    runtime only verifies provenance: the fragment must occur verbatim in the
+    exact current user request.  Negative/hypothetical semantics remain the
+    model's responsibility under the system and tool contracts.
+    """
+
+    candidate = (quote or "").strip()
+    if not candidate:
+        raise RuntimeError("current-turn operation authorization quote is required")
+    if candidate not in (current_request or ""):
+        raise RuntimeError("operation authorization quote is not verbatim current-user text")
+    return candidate
+
+
 def normalized_ext(filename: str) -> str:
     ext = Path(filename).suffix.lower().lstrip(".")
     return ext
@@ -1361,25 +1379,54 @@ def build_weknora_server(payload: ChatPayload, artifacts: ArtifactStore, data_an
         sdk_tools.append(create_artifact)
     elif payload.enable_artifacts:
 
+        general_artifact_authorization_required = payload.runtime_config.agent_type == "general-agent"
+        general_artifact_authorization_contract = (
+            " For a general-agent run, authorization_quote is mandatory and must copy verbatim the exact "
+            "current-user phrase that positively requests this file/downloadable deliverable or file-byte "
+            "transformation. A history phrase, inferred deliverable, generic answer/report/draft request, "
+            "negative phrase, hypothetical, or external-operation prohibition is invalid. If no qualifying "
+            "current-turn quote exists, do not call this tool or any native file-writing tool."
+            if general_artifact_authorization_required
+            else ""
+        )
+        create_artifact_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "User-facing output filename."},
+                "file_path": {"type": "string", "description": "Path to an existing file in the current SDK working directory. Relative paths are resolved from the SDK working directory. The runtime copies the file bytes exactly."},
+                "content_type": {"type": "string", "description": "Optional MIME type; usually omit so the runtime picks the correct type."},
+            },
+            "required": ["filename", "file_path"],
+            "additionalProperties": False,
+        }
+        if general_artifact_authorization_required:
+            create_artifact_schema["properties"]["authorization_quote"] = {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Verbatim substring of the exact current user_request that positively authorizes creating "
+                    "this file/downloadable artifact. Do not use history, paraphrase, negation, hypotheticals, "
+                    "or a generic request for chat text."
+                ),
+            }
+            create_artifact_schema["required"].append("authorization_quote")
+
         @tool(
             "create_artifact",
             "Register an existing file as a WeKnora artifact only when the exact current user_request explicitly asks for a file/downloadable deliverable or inherently requires file-byte transformation. "
             "A request to record, update, draft, plan, summarize, or change content is not file authorization unless the user identifies a file or external destination. "
             "A negative, quoted, hypothetical, or explanatory mention of creating/modifying a file is not authorization. Never call this tool to show that no file is needed, and never call it without both required non-empty arguments. It does not create or convert files. "
+            + general_artifact_authorization_contract
             + artifact_return_policy_text(payload),
-            {
-                "type": "object",
-                "properties": {
-                    "filename": {"type": "string", "description": "User-facing output filename."},
-                    "file_path": {"type": "string", "description": "Path to an existing file in the current SDK working directory. Relative paths are resolved from the SDK working directory. The runtime copies the file bytes exactly."},
-                    "content_type": {"type": "string", "description": "Optional MIME type; usually omit so the runtime picks the correct type."},
-                },
-                "required": ["filename", "file_path"],
-                "additionalProperties": False,
-            },
+            create_artifact_schema,
         )
         async def create_artifact(args):
             try:
+                if general_artifact_authorization_required:
+                    require_current_turn_operation_authorization(
+                        payload.query,
+                        str(args.get("authorization_quote") or ""),
+                    )
                 filename = safe_filename(args.get("filename") or "")
                 if not filename:
                     raise RuntimeError("filename is required")
@@ -2809,10 +2856,13 @@ Context contract:
 - Bind actor identity, role assignment, business action and action outcome independently. Naming or assigning a person never proves approval, review, execution, sending or completion; the current speaker is not an unstated applicant, owner, customer, assignee or operator.
 - Bind every value only to its exact sourced field and business object. An identifier is not a description, a person is not an action outcome, and a related-project, policy, example, hypothetical or neighboring-record fact does not populate the active object without explicit adoption.
 - Before finalizing a state record, draft or summary, internally check every concrete value, actor, role, lifecycle polarity, outcome and source against an exact fragment asserting the same object, field, value and modality. If no such fragment exists, omit it or label it unknown/not supplied. A schema supplies a field name but no instance value; one role cannot fill another; a later request to repeat a fact is not its original source unless it reasserts the value.
+- Require logical entailment rather than plausible completion. A requirement, permission, approval, assignment, prerequisite, or multi-step procedure does not prove any neighboring step, record, side effect, or outcome. "A does not prove/imply B" leaves B unknown; it never establishes not-B, incomplete-B, or a missing-B status. Treat enumerated conditions, stages, roles, fields, and formats as closed to additions not stated by the source.
+- Preserve grammatical argument slots before applying business meaning. If user text says an actor, owner, customer, requester, or field is not supplied, only that identity/field is unknown; it does not say that the absent actor supplied no documents, evidence, values, or actions. Never transfer a predicate into an adjacent field or clause.
 - Keep hypothetical and counterfactual analysis visibly hypothetical and local to that answer. Never persist its assumed conditions, predicted effects, sample values or recommendations as active/retired facts unless the user later adopts them.
 - Resolve explicit user updates chronologically. Decompose compound statements into independent propositions, retire only older propositions that actually conflict, and preserve compatible qualifiers, actors, objects, scope, and modality. Use exact user source IDs when attribution is requested and never guess a source turn.
 - A document schema, retrieved example, placeholder, or earlier assistant-generated field is not conversation state unless a later user message explicitly adopts that exact content.
 - Drafts, plans, templates, and sample text may create wording and neutral connective prose, but must honor the requested count/form and omit or visibly placeholder unsupported operational details. Do not invent a duration, quantity, recipient, lifecycle state, actor, role duty, destination, channel, contact route, commitment, or completed step for completeness.
+- If the user asks to create or revise conversation wording, do that text transformation directly even when no earlier assistant-created draft, note, checklist, or summary exists. Do not ask for an external object merely because its label was mentioned, and do not materialize a file or artifact unless the exact current request positively asks for that concrete deliverable.
 - Treat the current output scope as an exclusion boundary. If the user asks for only selected fields or one topic, omit unrelated history and invented template fields.
 - A hypothetical, example, recommendation or explanatory action stays local to that discussion. Do not add it to a named object's state or action boundaries unless the user explicitly adopts it for that object.
 - Turn-scoped output formats, suffixes, citation instructions, or one-time constraints from conversation_history are expired unless the current user_request explicitly repeats or refers to them.
@@ -2839,6 +2889,7 @@ Available capabilities:
 - Professional skills listed in runtime_config.allowed_professional_skills are loaded through the runtime's native skill mechanism from this run's project skills directory. When using a professional skill named `<name>`, read its SKILL.md, references and scripts only from the current SDK working directory path `.claude/skills/<name>`. Do not discover or read professional skill files from global paths, historical run directories, sibling run directories, or `/tmp/weknora-general-agent-runs`. Follow their trigger descriptions and workflow when applicable; do not expect them to appear as WeKnora tools.
 - Choose tools freely when they help the task. Do not invent capabilities that are not present in the tool list.
 - Tool authority and minimality: first decide whether the request is answerable entirely as chat text from user-authored conversation state. If it is, answer directly without retrieval, thinking/planning tools, filesystem operations, artifact creation, or external actions. Use retrieval only for a current request that needs external evidence; use file/artifact tools only when the user explicitly asks for a file/downloadable deliverable or the task inherently requires one; use mutation/contact/execution tools only for the exact operation the current user authorizes.
+- File-operation proof: before Write, Edit, MultiEdit, a file-mutating Bash command, or create_artifact, locate a verbatim phrase in the exact current user_request that positively authorizes that file/output operation. If there is no such current-turn phrase, those tools are forbidden for this turn even if artifact capability is enabled, a filename seems useful, or an earlier turn mentioned a file. General-agent create_artifact additionally requires this verbatim phrase in authorization_quote. Never use a negative, hypothetical, quoted, inferred, or historical fragment as authorization.
 - Source-aware tool routing: use WeKnora knowledge tools for facts and rules from a selected knowledge base. For an ordinary semantic question, start with one `knowledge_search` call using the exact current evidence question; use `grep_chunks` plus a targeted chunk read only for literal identifiers/phrases or when semantic search lacks the needed evidence. Do not call both paths after one already supplies sufficient claim-bearing evidence. Knowledge-base documents are not files in the SDK working directory, so never use Read, Grep, Glob, LS or Bash to look for them. Use native file tools only for prepared/uploaded local files, professional-skill resources, or an explicitly requested file deliverable. After sufficient evidence is available, stop searching and answer the exact current user_request.
 - Availability is not intent. A configured knowledge base, file tool, artifact capability, Skill, MCP service, or prior tool workflow never authorizes using it for the current turn. Do not search for a template or manufacture a file merely because a text response could also be represented as a document.
 - Never call a tool merely to test it, reject it, demonstrate that it is unnecessary, or recover from a request already answerable in chat. A negative or quoted mention of an operation is not authorization for that operation; never call a tool with missing required arguments.
@@ -2857,6 +2908,7 @@ Available capabilities:
 - Final self-review: before producing the final answer, compare your answer and any deliverables against the user's original verbatim request. If they do not satisfy the request, correct them before replying.
 - Source citation contract: a WeKnora tool result's `source_references` are claim-bearing evidence handles. Copy the matching `cite_exactly` value verbatim immediately after the sentence or paragraph it directly supports; each supplied value uses the canonical form `<src id="S1" />` with its own S-number. Treat each S-number as an opaque handle and select it by matching the actual words and facts in its evidence block to the claim. When one evidence item supports a whole list, select the evidence block that contains the listed facts and place its handle once immediately after the final list item. An evidence-based final answer is complete only when its supported claims carry their matching handles. Each knowledge source is one specific document fragment. A document title and its knowledge-base/collection membership are different facts: claim membership when the current source reference exposes `knowledge_base_name`, or the current scope contains exactly one named collection. Give each paragraph containing substantive evidence-derived facts at least one matching handle, use the minimum sufficient handles, and leave pure framing, analysis, transitions, and unsupported text uncited. Generate the answer once; the runtime never asks the model to validate or regenerate citations.
 - Citation freshness: source handles are request-local. If no current-turn `source_references` are present, emit no `<src>` tag and do not present a prior turn's retrieval as current evidence. Never invent, guess, or reuse a handle from conversation history.
+- Citation closure: when the exact current user_request asks to verify/retrieve and cite external rules, do not finish until the answer contains matching canonical `<src id="S..." />` handles from this turn beside the supported claims. Plain text such as S1/S2, a document title, or a source section name is not a citation. If the first retrieval has no claim-bearing handle, use one appropriate alternate WeKnora knowledge path once or state the evidence limitation.
 - Artifact review: if you produce artifacts, review them from the user's perspective before final delivery, including format, layout, colors, typography, font sizes, readability, aesthetics, and fit to the original request. If you find issues, make one correction pass.
 - Review limit: perform the review-and-correction step at most once. If the review finds no issue, deliver the final answer directly; if it finds issues, correct them once and then deliver the result.
 {artifact_review_policy}
@@ -3042,14 +3094,17 @@ def build_prompt(
         "For state updates, split compound statements into independent propositions, retire only what the newer user text actually conflicts with, keep unknown values pending, and preserve each action boundary's exact actor, action, object, destination, modality, and turn scope. "
         "Treat actor identity, role assignment, business action, and action outcome as separate facts: naming or assigning someone does not prove an approval, review, execution, sending, or completion, and the current speaker is not an unstated business actor. Bind every value only to its sourced field and object; identifiers are not descriptions, people are not outcomes, and related-topic or hypothetical facts do not populate the active object. "
         "Before outputting any concrete state value, actor, role, lifecycle polarity, outcome, or source ID, locate an exact user fragment or current evidence asserting the same object, field, value, and modality. If none exists, omit it or label it unknown/not supplied; schemas supply field names but no instance values, roles do not fill neighboring roles, and a request to repeat a fact is not its original source unless it reasserts the value. "
+        "Require entailment rather than plausibility: a requirement, permission, approval, assignment, prerequisite, or procedure does not prove adjacent steps or outcomes; wording that A does not prove B keeps B unknown and never proves not-B or incomplete-B. Preserve grammatical slots: a missing actor/customer/field marks only that identity or field unknown and says nothing about evidence or actions the absent actor supplied. "
         "Text saying P was not stated, shown, or proven leaves P unknown and never establishes not-P; only exact user text or real evidence resolves either polarity. Counts and outcomes, including zero, absent records, and analysis requests do not establish unasserted lifecycle state. "
         "A response-method constraint scoped to one answer, including no-tool or output-format instructions, expires with that answer and is not a durable business boundary. Keep ongoing external-operation boundaries active for the same task until the user explicitly changes them, and do not treat a content edit as authorization for a tool or artifact. "
         "Questions about whether or why an action should happen establish neither occurred nor not-occurred. Attribute facts only to exact visible user source IDs; if an ID is uncertain, quote without guessing it. "
         "Changing a task attribute, value, location, owner, version, plan alternative, or draft does not expire its operation boundaries. "
         "Drafts and summaries may create wording but must honor the requested count/form and omit or visibly placeholder unsupported quantities, duration, recipients, role duties, contact routes, commitments, and outcomes. Claim a search, retrieval, read, save, send, update, or other operation only when a matching current-turn result establishes it. "
+        "A requested chat draft, note, checklist, summary, handoff, report, or final version remains chat text unless the exact current request positively asks for a file/downloadable deliverable or external destination; fulfill the text directly even if no earlier draft exists. Before any file-writing or artifact call, identify the verbatim current-user authorization phrase; if none exists, do not call it. "
         "Treat the requested output scope as an exclusion boundary, so unrelated history and unrequested template fields stay out of the answer. "
         "Never call a tool to test, reject, or demonstrate that it is unnecessary; negative or quoted operation language is not authorization, and tools with missing required arguments must not be called. "
         "For selected-knowledge-base facts, use only WeKnora knowledge tools: normally start with one knowledge_search call, and use grep_chunks plus a targeted chunk read only for literal lookup or when semantic search lacks evidence. Never search the SDK working directory with Read, Grep, Glob, LS, or Bash for knowledge-base content. After sufficient evidence is available, stop searching and answer this current user_request rather than an earlier question or the retrieval query. "
+        "When this current request explicitly asks for fresh citations, the final answer must contain actual canonical citation handles returned by this turn beside the supported rules; plain S1/S2 prose labels do not count. "
         "If document_template_preflight is present, complete it before creating final document files or registering artifacts. "
         "Use the WeKnora context only as supporting information and available capability descriptions. "
         "Use the language explicitly requested in the current user_request; otherwise use the configured user language. "

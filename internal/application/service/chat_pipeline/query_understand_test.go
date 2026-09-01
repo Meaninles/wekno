@@ -1,12 +1,35 @@
 package chatpipeline
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestQueryUnderstandResponseSchemaRequiresIndependentEvidenceNeed(t *testing.T) {
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(queryUnderstandResponseFormat, &schema); err != nil {
+		t.Fatalf("query-understand response schema is invalid: %v", err)
+	}
+	if _, ok := schema.Properties["evidence_need"]; !ok {
+		t.Fatal("query-understand response schema omits evidence_need")
+	}
+	required := make(map[string]bool, len(schema.Required))
+	for _, field := range schema.Required {
+		required[field] = true
+	}
+	for _, field := range []string{"rewrite_query", "intent", "evidence_need", "image_description"} {
+		if !required[field] {
+			t.Fatalf("query-understand response schema does not require %q", field)
+		}
+	}
+}
 
 func TestParseStructuredQueryOutputConversationStateIsNonRetrieval(t *testing.T) {
 	parsed, ok := parseStructuredQueryOutput(`{

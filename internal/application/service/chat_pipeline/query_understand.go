@@ -25,6 +25,24 @@ type PluginQueryUnderstand struct {
 
 var rewriteImageSepPattern = regexp.MustCompile(`(?s)^(.*?)\s*\n?---\n(.*)$`)
 
+// queryUnderstandResponseFormat is attached to the existing rewrite request.
+// Besides enabling JSON-object mode where the provider supports it, the shared
+// chat adapter places this schema at the end of the current user message. That
+// makes the runtime contract authoritative even when a persisted custom/builtin
+// rewrite prompt still contains an older three-field example. It does not add a
+// model call or inspect any Eval data.
+var queryUnderstandResponseFormat = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "rewrite_query": {"type": "string"},
+    "intent": {"type": "string"},
+    "evidence_need": {"type": "string", "enum": ["none", "knowledge_base", "web"]},
+    "image_description": {"type": "string"}
+  },
+  "required": ["rewrite_query", "intent", "evidence_need", "image_description"],
+  "additionalProperties": false
+}`)
+
 type queryUnderstandOutput struct {
 	RewriteQuery     string             `json:"rewrite_query"`
 	Intent           types.QueryIntent  `json:"intent"`
@@ -127,6 +145,7 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 		Temperature:         0.3,
 		MaxCompletionTokens: maxTokens,
 		Thinking:            &thinking,
+		Format:              queryUnderstandResponseFormat,
 	})
 	if err != nil {
 		pipelineError(ctx, "QueryUnderstand", "model_call", map[string]interface{}{

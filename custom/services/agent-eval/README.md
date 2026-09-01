@@ -283,6 +283,25 @@ custom/services/agent-eval/eval-loop.ps1 `
 
 这组用例没有 required claims、参考答案、Judge rubric 或固定状态字段评分；Codex 逐段审核“足够好”即可，三次中至少两次通过。机械门禁仍要求三智能体/全部 case 完整、SSE 与持久化一致、知识选择真实、双轨隔离、无无效会话并满足延迟上限。
 
+在 `evidence_query` 与任务改写分离完成后，又创建了一个不参与调优的单次能力回归：
+`post-change-evidence-canary.v1` 使用全新的 Helix 实验室样本交接规程，采用 10 轮而非
+既有 13 轮结构，连续验证混合状态/文档请求、否定知识问答、属性更新后的行动边界、
+零计数的生命周期不确定性、用户原文来源和严格一句英文草稿。它同样不包含语义
+答案规则，由 Codex 审核三次完整会话：
+
+```powershell
+custom/services/agent-eval/eval-loop.ps1 `
+  -Split dev `
+  -Dataset /workspace/datasets/post-change-evidence-canary.v1.jsonl `
+  -Manifest /workspace/manifests/post-change-evidence-canary.v1.manifest.json `
+  -Policy /workspace/policies/post-change-evidence-canary-gate.v1.json `
+  -Profiles /workspace/profiles/post-change-evidence-canary.v1.json `
+  -MaxConcurrency 3
+```
+
+`eval-loop.ps1` 会在每次相关运行前校验对应隔离知识库，并刷新语料版本和知识绑定
+哈希，避免 `runner.env` 中上一次数据集的身份残留污染本次产物。
+
 在隔离 Eval 栈已经启动、Main 栈完全停止后，先创建/校验四个未见分布知识库；脚本只更新被 Git 忽略的 `runner.env`，不会打印凭据：
 
 ```powershell

@@ -4,15 +4,16 @@ param(
     [string]$RunnerEnv = (Join-Path $PSScriptRoot "runner.env"),
     [string]$Fixture = (Join-Path $PSScriptRoot "fixtures/regression-corpora/audio-release-handbook.v1.md"),
     [string]$BindingOutput = (Join-Path $PSScriptRoot "artifacts/fresh-generalization-kb-binding.v1.json"),
+    [string]$EnvironmentKey = "AGENT_EVAL_KB_FRESH_GENERALIZATION_MEDIA_ID",
+    [string]$KnowledgeBaseName = "Eval回归-Northbank音频交付手册-v1",
+    [string]$UploadName = "audio-release-handbook.v1.md",
+    [string]$CorpusVersion = "northbank-audio-release-v1",
     [ValidateRange(60, 3600)] [int]$ParseTimeoutSeconds = 1200,
     [ValidateRange(2, 60)] [int]$PollSeconds = 5
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-$environmentKey = "AGENT_EVAL_KB_FRESH_GENERALIZATION_MEDIA_ID"
-$knowledgeBaseName = "Eval回归-Northbank音频交付手册-v1"
-$uploadName = "audio-release-handbook.v1.md"
 $nl = [Environment]::NewLine
 
 function Read-EnvFile {
@@ -150,13 +151,28 @@ do {
     }
 } until ($ready)
 
-Set-EnvValue -Path $RunnerEnv -Key $environmentKey -Value $knowledgeBaseID
+$document = $documents[0]
+$identity = "$EnvironmentKey|$knowledgeBaseID|$($document.id)|$sourceHash"
+$hasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $bindingHash = [Convert]::ToHexString(
+        $hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))
+    ).ToLowerInvariant()
+} finally {
+    $hasher.Dispose()
+}
+Set-EnvValue -Path $RunnerEnv -Key $EnvironmentKey -Value $knowledgeBaseID
+Set-EnvValue -Path $RunnerEnv -Key "AGENT_EVAL_CORPUS_VERSION" -Value $CorpusVersion
+Set-EnvValue -Path $RunnerEnv -Key "AGENT_EVAL_KB_BINDINGS_SHA256" -Value $bindingHash
 $binding = [ordered]@{
     schema_version = 1
-    environment_variable = $environmentKey
+    corpus_version = $CorpusVersion
+    binding_identity_sha256 = $bindingHash
+    environment_variable = $EnvironmentKey
     knowledge_base_id = $knowledgeBaseID
-    name = $knowledgeBaseName
-    source_file = $uploadName
+    knowledge_id = [string]$document.id
+    name = $KnowledgeBaseName
+    source_file = $UploadName
     source_sha256 = $sourceHash
     source_size = [long]$fixtureItem.Length
 }
@@ -165,5 +181,5 @@ $binding = [ordered]@{
     (($binding | ConvertTo-Json -Depth 10) + [Environment]::NewLine),
     [Text.UTF8Encoding]::new($false)
 )
-Write-Host "Fresh-generalization regression KB is ready: $knowledgeBaseName"
+Write-Host "Regression KB is ready: $KnowledgeBaseName"
 Write-Host "Binding artifact: $BindingOutput"

@@ -181,28 +181,13 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         $runnerValues = Read-RunnerEnvironment
     }
 
-    $unseenVariables = @(
-        "AGENT_EVAL_KB_UNSEEN_PRODUCT_MANUAL_ID",
-        "AGENT_EVAL_KB_UNSEEN_PROJECT_HANDBOOK_ID",
-        "AGENT_EVAL_KB_UNSEEN_IT_RUNBOOK_ID",
-        "AGENT_EVAL_KB_UNSEEN_GOVERNANCE_POLICY_ID"
-    )
     $datasetUsesUnseenCorpus = (Split-Path -Leaf $Dataset) -eq "unseen-capability-matrix.v1.jsonl"
-    $unseenMissing = @(
-        $unseenVariables | Where-Object {
-            -not $runnerValues.ContainsKey($_) -or
-            [string]::IsNullOrWhiteSpace($runnerValues[$_])
-        }
-    )
-    if ($datasetUsesUnseenCorpus -and $unseenMissing.Count -gt 0) {
+    if ($datasetUsesUnseenCorpus) {
         & (Join-Path $PSScriptRoot "prepare-unseen-capability-kbs.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare unseen capability knowledge bases" }
     }
     $datasetUsesSemanticRoutingCorpus = (Split-Path -Leaf $Dataset) -eq "semantic-routing-regression.v1.jsonl"
-    $semanticRoutingVariable = "AGENT_EVAL_KB_SEMANTIC_ROUTING_FACILITIES_ID"
-    $semanticRoutingMissing = -not $runnerValues.ContainsKey($semanticRoutingVariable) -or
-        [string]::IsNullOrWhiteSpace($runnerValues[$semanticRoutingVariable])
-    if ($datasetUsesSemanticRoutingCorpus -and $semanticRoutingMissing) {
+    if ($datasetUsesSemanticRoutingCorpus) {
         & (Join-Path $PSScriptRoot "prepare-semantic-routing-regression-kb.ps1")
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare semantic-routing regression knowledge base" }
     }
@@ -223,13 +208,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             & (Join-Path $PSScriptRoot "prepare-no-kb-agent-profiles.ps1")
             if ($LASTEXITCODE -ne 0) { throw "failed to prepare Eval no-KB agent profiles" }
         }
-        $freshKBVariable = "AGENT_EVAL_KB_FRESH_GENERALIZATION_MEDIA_ID"
-        $freshKBMissing = -not $runnerValues.ContainsKey($freshKBVariable) -or
-            [string]::IsNullOrWhiteSpace($runnerValues[$freshKBVariable])
-        if ($freshKBMissing) {
-            & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1")
-            if ($LASTEXITCODE -ne 0) { throw "failed to prepare fresh-generalization knowledge base" }
-        }
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare fresh-generalization knowledge base" }
+    }
+    $datasetUsesPostChangeCanary = (Split-Path -Leaf $Dataset) -eq "post-change-evidence-canary.v1.jsonl"
+    if ($datasetUsesPostChangeCanary) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/lab-sample-handoff.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/post-change-evidence-canary-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_POST_CHANGE_LAB_ID" `
+            -KnowledgeBaseName "Eval回归-Helix样本交接规程-v1" `
+            -UploadName "lab-sample-handoff.v1.md" `
+            -CorpusVersion "helix-lab-handoff-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare post-change evidence canary knowledge base" }
     }
 }
 

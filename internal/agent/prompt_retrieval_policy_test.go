@@ -53,7 +53,7 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"mixed requests where even one requested claim needs document/domain evidence or an external citation",
 		"Asking only to quote or attribute the user's own messages does not retrieve",
 		"A count or outcome (including zero), missing record, or lack of evidence",
-		"Drafts, plans, templates, and sample text must not fill missing operational facts",
+		"Drafts, plans, templates, and sample text may create wording, but must honor requested count/form and not fill missing operational facts",
 		"Decompose compound user updates into independent propositions",
 		"Retrieved rules, document schemas, example fields, and placeholders are evidence about their source, not conversation state",
 		"Preserve its actor, action, object, destination, modality, and turn scope",
@@ -61,6 +61,7 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"Never say you searched, retrieved, read, verified, saved, sent, updated",
 		"Follow an explicit output-language request in the current turn",
 		"Never expose intent classification, chain-of-thought, self-talk, tool planning, or process narration",
+		"Include each requested fact, boundary, source, or external rule once",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("progressive RAG prompt is missing %q", required)
@@ -86,6 +87,7 @@ func TestGeneralAgentPromptDoesNotInventFileIntent(t *testing.T) {
 		"pragmatic reasonableness of the question",
 		"Use only user-authored facts and real current-turn evidence in drafts",
 		"honor requested count/form",
+		"Include each requested fact, boundary, source, or external rule once",
 		"role duties, contact routes, commitments",
 		"Never claim that an operation was performed or did not occur",
 		"operation boundary remains active",
@@ -111,6 +113,7 @@ func TestDialogueStateIntentPromptIsGenericAndTerminal(t *testing.T) {
 		"Do not infer lifecycle from conversational plausibility",
 		"Drafts, plans, templates, and sample text",
 		"honor the requested count/form",
+		"include each requested fact, boundary, source, or external rule once",
 		"does not create a new task/object",
 		"quote the user text without an ID",
 		"Preserve the exact actor, action, object, destination, modality, and turn scope",

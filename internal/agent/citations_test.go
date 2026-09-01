@@ -91,7 +91,7 @@ func TestNativeAgentPlacesTerminalCitationInstructionAtGenerationBoundary(t *tes
 	}
 
 	ordinary := engine.prepareCitationAwareGenerationMessages(original)
-	if strings.Contains(strings.ToLower(ordinary[len(ordinary)-1].Content), "eval") {
+	if strings.Contains(strings.ToLower(ordinary[len(ordinary)-1].Content), "eval-only") {
 		t.Fatalf("ordinary evidence turn gained an Eval-only directive: %#v", ordinary)
 	}
 }

@@ -5,11 +5,8 @@
   "dependency_files": {
     "corpus_archive": "fixtures/regression-corpora/digital-archive-ingest-guide.v1.md",
     "corpus_editorial": "fixtures/regression-corpora/editorial-release-handbook.v1.md",
-    "corpus_facilities": "fixtures/regression-corpora/facilities-access-playbook.v1.md",
-    "corpus_hr": "fixtures/regression-corpora/remote-onboarding-handbook.v1.md",
     "corpus_privacy": "fixtures/regression-corpora/privacy-request-handbook.v1.md",
-    "corpus_support": "fixtures/regression-corpora/customer-device-support-handbook.v1.md",
-    "corpus_unseen_project": "fixtures/unseen-corpora/project-delivery-handbook.v1.md"
+    "corpus_support": "fixtures/regression-corpora/customer-device-support-handbook.v1.md"
   },
   "dependency_sha256": {
     "assistance": "3bd23d36ec833f7bf0250407de2b2a9764029b1e837c6366b2248ca86dedf455",

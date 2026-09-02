@@ -263,6 +263,9 @@ func NewHandlers(
 		if err := authSecurityService.Migrate(ctx); err != nil {
 			return nil, err
 		}
+		if err := builtinAgentDefaultsService.Migrate(ctx); err != nil {
+			return nil, err
+		}
 		if err := dbAnalyticsService.Migrate(ctx); err != nil {
 			return nil, err
 		}

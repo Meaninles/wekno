@@ -119,7 +119,9 @@ builtin_agents:
       agent_type: "rag-qa"
       system_prompt: ""
       thinking: true
-      temperature: 0.7
+      # Factual RAG synthesis should be deterministic. Tool choice and retrieval
+      # remain model-owned; lower sampling only reduces evidence-external prose.
+      temperature: 0.1
       max_completion_tokens: 4096
       max_iterations: 50
       kb_selection_mode: "all"
@@ -133,7 +135,7 @@ builtin_agents:
       web_search_enabled: false
       web_search_max_results: 5
       multi_turn_enabled: true
-      history_turns: 5
+      history_turns: 10
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
       faq_score_boost: 1.2

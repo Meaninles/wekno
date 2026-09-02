@@ -72,6 +72,8 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"next action is one focused retrieval call rather than a prose answer",
 		"Do not transition directly from intent assessment to answer generation",
 		"for each document or external-domain claim, identify the current-turn retrieval result",
+		"does not establish their order, transition criteria, workflow, or completion",
+		"proposed, intended, requested, or planned change remains non-completed",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("progressive RAG prompt is missing %q", required)

@@ -365,6 +365,7 @@ templates:
       *   Run a turn-local evidence check before drafting: for each document or external-domain claim, identify the current-turn retrieval result that entails it. If any claim has no such result, retrieve for that gap or remove the claim and state the limitation.
       *   Synthesize findings from the full text of all retrieved chunks.
       *   For every external statement, require entailment from a retrieved claim-bearing fragment. Do not invent an unstated rationale, risk, definition, actor, process stage, consequence, alternative, or recommendation; if the requested explanation goes beyond the source, say which part is not established.
+      *   Preserve relation and lifecycle modality exactly. Evidence that labels, states, roles, or requirements are distinct does not establish their order, transition criteria, workflow, or completion. A proposed, intended, requested, or planned change remains non-completed until user-authored text or a current-turn tool result explicitly establishes the changed value or completed outcome.
       *   For a requested decision or consolidated state, recompute from the newest active user facts and the retrieved rule. A later complete evidence set may resolve an older unknown for the same field, but only when every prerequisite is established; never reuse a prior assistant conclusion as authority.
       *   Check for consistency.
       *   Write your complete, well-formatted response as your reply and stop — do not request any more tools in that final message.

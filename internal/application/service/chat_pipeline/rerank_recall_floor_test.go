@@ -8,8 +8,8 @@ import (
 
 func TestRetainRerankRecallFloorIsDomainIndependent(t *testing.T) {
 	input := []rerank.RankResult{
-		{Index: 2, RelevanceScore: 0.91},
 		{Index: 1, RelevanceScore: 0.22},
+		{Index: 2, RelevanceScore: 0.91},
 		{Index: 0, RelevanceScore: 0.11},
 		{Index: 3, RelevanceScore: 0.04},
 	}
@@ -28,7 +28,7 @@ func TestRetainRerankRecallFloorIsDomainIndependent(t *testing.T) {
 	}
 }
 
-func TestRetainRerankRecallFloorKeepsThresholdMatchesBeyondFloor(t *testing.T) {
+func TestRetainRerankRecallFloorNormalizesProviderOrderBeforeFloor(t *testing.T) {
 	input := []rerank.RankResult{
 		{Index: 0, RelevanceScore: 0.95},
 		{Index: 1, RelevanceScore: 0.20},
@@ -40,8 +40,13 @@ func TestRetainRerankRecallFloorKeepsThresholdMatchesBeyondFloor(t *testing.T) {
 	if !floorApplied {
 		t.Fatal("expected below-threshold candidates inside the recall floor")
 	}
-	if len(got) != 4 || got[3].Index != 3 {
-		t.Fatalf("threshold-qualified candidate outside floor was lost: %#v", got)
+	if len(got) != 3 {
+		t.Fatalf("expected two threshold matches plus one recall-floor candidate: %#v", got)
+	}
+	for index, wantCandidate := range []int{0, 3, 1} {
+		if got[index].Index != wantCandidate {
+			t.Fatalf("rank %d candidate=%d, want %d", index, got[index].Index, wantCandidate)
+		}
 	}
 }
 

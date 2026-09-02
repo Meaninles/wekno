@@ -949,7 +949,10 @@ func (t *KnowledgeSearchTool) rerankWithModel(
 }
 
 func (t *KnowledgeSearchTool) rerankThreshold() float64 {
-	if t.agentConfig != nil && t.agentConfig.RerankThreshold > 0 {
+	// An agent-level zero is an explicit "no absolute cutoff" setting. Do not
+	// silently replace it with a global/default threshold: doing so makes the
+	// same configured agent lose recall depending on unrelated tenant settings.
+	if t.agentConfig != nil {
 		return t.agentConfig.RerankThreshold
 	}
 	if t.config != nil && t.config.Conversation != nil && t.config.Conversation.RerankThreshold > 0 {
@@ -958,17 +961,45 @@ func (t *KnowledgeSearchTool) rerankThreshold() float64 {
 	return 0.3
 }
 
-func filterRerankRankResults(rankResults []rerank.RankResult, threshold float64) []rerank.RankResult {
-	if len(rankResults) == 0 {
+// retainKnowledgeSearchRecallFloor combines the configured absolute score
+// cutoff with a small rank-based recall floor. Reranker score calibration
+// varies across models, languages, and document styles; the second or third
+// best passage can be useful evidence even when its absolute score is below a
+// threshold calibrated elsewhere. This uses only the reranker's ordering and
+// candidate validity -- never query text, document phrases, domains, or Eval
+// data. The later configured TopK and MMR stages still bound final context.
+func retainKnowledgeSearchRecallFloor(
+	rankResults []rerank.RankResult,
+	candidateCount int,
+	threshold float64,
+) []rerank.RankResult {
+	if candidateCount <= 0 || len(rankResults) == 0 {
 		return nil
 	}
-	filtered := make([]rerank.RankResult, 0, len(rankResults))
-	for _, r := range rankResults {
-		if r.RelevanceScore >= threshold {
-			filtered = append(filtered, r)
+	ordered := append([]rerank.RankResult(nil), rankResults...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].RelevanceScore > ordered[j].RelevanceScore
+	})
+
+	recallFloor := min(3, candidateCount)
+	retained := make([]rerank.RankResult, 0, len(ordered))
+	seen := make(map[int]struct{}, candidateCount)
+	validRank := 0
+	for _, result := range ordered {
+		if result.Index < 0 || result.Index >= candidateCount {
+			continue
 		}
+		if _, exists := seen[result.Index]; exists {
+			continue
+		}
+		seen[result.Index] = struct{}{}
+		validRank++
+		if validRank > recallFloor && result.RelevanceScore < threshold {
+			continue
+		}
+		retained = append(retained, result)
 	}
-	return filtered
+	return retained
 }
 
 func (t *KnowledgeSearchTool) applyModelRerankScores(
@@ -976,7 +1007,7 @@ func (t *KnowledgeSearchTool) applyModelRerankScores(
 	rankResults []rerank.RankResult,
 	threshold float64,
 ) []*searchResultWithMeta {
-	filtered := filterRerankRankResults(rankResults, threshold)
+	filtered := retainKnowledgeSearchRecallFloor(rankResults, len(originals), threshold)
 	out := make([]*searchResultWithMeta, 0, len(filtered))
 	for _, rr := range filtered {
 		if rr.Index < 0 || rr.Index >= len(originals) {

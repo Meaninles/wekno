@@ -63,6 +63,10 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"Include each requested fact, boundary, source, or external rule once",
 		"Choose the single retrieval method most likely to answer the request",
 		"Absence from one result is not proof that the source lacks the fact",
+		"navigation/search result without a canonical citation handle is not citable",
+		"bound or selected knowledge source only makes retrieval available",
+		"external statement, require entailment from a retrieved claim-bearing fragment",
+		"recompute from the newest active user facts",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("progressive RAG prompt is missing %q", required)
@@ -91,7 +95,13 @@ func TestGeneralAgentPromptDoesNotInventFileIntent(t *testing.T) {
 		"Include each requested fact, boundary, source, or external rule once",
 		"role duties, contact routes, commitments",
 		"Never claim that an operation was performed or did not occur",
+		"permission and scope information, not an audit record",
+		"positive or negative outcome needs its own source",
+		"Keep knowledge synthesis inside the retrieved evidence boundary",
+		"recompute it from the newest active user facts",
 		"operation boundary remains active",
+		"would be incomplete without durable bytes",
+		"never a phrase match",
 		"does not create a new task",
 		"without inventing or guessing the ID",
 		"JSON/YAML/Markdown/code representation is chat content",

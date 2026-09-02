@@ -323,9 +323,15 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	lastAnswerDone := false
 	var streamed strings.Builder
 	result, err := sidecarClient.ChatStream(ctx, payload, func(evt StreamEvent) {
-		// Stream answer deltas immediately. Canonical <src> handles are valid
-		// user-visible output; completion later publishes this exact aggregation
-		// without any validation/regeneration rewrite.
+		// Keep tool/thinking/progress events live, but hold the terminal answer
+		// until its citation protocol can be checked against the references
+		// actually registered in this run. The sidecar normally emits one terminal
+		// answer block, so this adds no model/retrieval work and lets SSE, storage,
+		// and history share one byte-identical production candidate.
+		if evt.Type == "answer_delta" {
+			captureSidecarAnswerEvent(fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone)
+			return
+		}
 		s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
 	})
 	allRefs := active.snapshotSourceReferences()
@@ -353,31 +359,19 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if finalAnswer == "" {
 		finalAnswer = result.Answer
 	}
-	if streamed.Len() == 0 && finalAnswer != "" {
+	if lastAnswerID == "" {
 		lastAnswerID = fallbackAnswerID
-		lastAnswerDone = false
-		eventBus.Emit(ctx, event.Event{
-			ID:        fallbackAnswerID,
-			Type:      event.EventAgentFinalAnswer,
-			SessionID: sessionID,
-			RequestID: req.RequestID,
-			Data: event.AgentFinalAnswerData{
-				Content: finalAnswer,
-				Done:    false,
-			},
-		})
 	}
-	if lastAnswerID != "" && !lastAnswerDone {
-		eventBus.Emit(ctx, event.Event{
-			ID:        lastAnswerID,
-			Type:      event.EventAgentFinalAnswer,
-			SessionID: sessionID,
-			RequestID: req.RequestID,
-			Data: event.AgentFinalAnswerData{
-				Content: "",
-				Done:    true,
-			},
-		})
+	finalAnswer, citedRefs, citationReport := emitSidecarProductionCandidate(
+		ctx, eventBus, sessionID, req.RequestID, lastAnswerID, finalAnswer, allRefs,
+	)
+	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+		logger.Warnf(ctx, "general-agent filtered invalid terminal citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
+	}
+	if citationReport.EvidenceAvailableUncited {
+		logger.Warnf(ctx, "general-agent final answer omitted all current-turn citation handles: available=%d",
+			citationReport.AvailableCount)
 	}
 
 	artifactResults, err := s.persistArtifacts(ctx, sidecarClient, result.RunID, req, result.Artifacts)
@@ -431,18 +425,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		})
 	}
 
-	_, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
-	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
-		logger.Warnf(ctx, "general-agent observed invalid citation protocol: forbidden=%d incomplete=%d unknown=%v",
-			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
-	}
-	if citationReport.EvidenceAvailableUncited {
-		logger.Warnf(ctx, "general-agent final answer omitted all current-turn citation handles: available=%d",
-			citationReport.AvailableCount)
-	}
-	// finalAnswer is the exact user-visible sidecar stream aggregation. Citation
-	// accounting may narrow the persisted reference registry, but never changes
-	// the production candidate after it has been streamed.
+	// finalAnswer and citedRefs are the exact pair already emitted above.
 	steps := active.snapshotSteps(finalAnswer)
 	eventBus.Emit(ctx, event.Event{
 		Type:      event.EventAgentComplete,
@@ -596,21 +579,68 @@ func unavailableIssues(result *dbanalytics.SourceAvailabilityResult) []dbanalyti
 	return result.Unavailable
 }
 
+func captureSidecarAnswerEvent(
+	fallbackAnswerID string,
+	evt StreamEvent,
+	streamed *strings.Builder,
+	lastAnswerID *string,
+	lastAnswerDone *bool,
+) {
+	answerID := strings.TrimSpace(evt.ID)
+	if answerID == "" {
+		answerID = fallbackAnswerID
+	}
+	if streamed != nil && evt.Content != "" {
+		streamed.WriteString(evt.Content)
+	}
+	if lastAnswerID != nil {
+		*lastAnswerID = answerID
+	}
+	if lastAnswerDone != nil {
+		*lastAnswerDone = evt.Done
+	}
+}
+
+func emitSidecarProductionCandidate(
+	ctx context.Context,
+	eventBus *event.EventBus,
+	sessionID string,
+	requestID string,
+	answerID string,
+	answer string,
+	availableRefs []*types.SearchResult,
+) (string, []*types.SearchResult, sourcerefs.CitationValidationReport) {
+	filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(answer, availableRefs)
+	filtered = strings.TrimSpace(filtered)
+	eventBus.Emit(ctx, event.Event{
+		ID:        answerID,
+		Type:      event.EventAgentFinalAnswer,
+		SessionID: sessionID,
+		RequestID: requestID,
+		Data: event.AgentFinalAnswerData{
+			Content: filtered,
+			Done:    false,
+		},
+	})
+	eventBus.Emit(ctx, event.Event{
+		ID:        answerID,
+		Type:      event.EventAgentFinalAnswer,
+		SessionID: sessionID,
+		RequestID: requestID,
+		Data: event.AgentFinalAnswerData{
+			Done: true,
+		},
+	})
+	return filtered, citedRefs, report
+}
+
 func (s *Service) emitSidecarEvent(ctx context.Context, eventBus *event.EventBus, sessionID, fallbackAnswerID string, evt StreamEvent, streamed *strings.Builder, lastAnswerID *string, lastAnswerDone *bool, active *activeRun) {
 	switch evt.Type {
 	case "answer_delta":
-		answerID := strings.TrimSpace(evt.ID)
-		if answerID == "" {
-			answerID = fallbackAnswerID
-		}
-		if evt.Content != "" {
-			streamed.WriteString(evt.Content)
-		}
-		if lastAnswerID != nil {
-			*lastAnswerID = answerID
-		}
-		if lastAnswerDone != nil {
-			*lastAnswerDone = evt.Done
+		captureSidecarAnswerEvent(fallbackAnswerID, evt, streamed, lastAnswerID, lastAnswerDone)
+		answerID := fallbackAnswerID
+		if lastAnswerID != nil && strings.TrimSpace(*lastAnswerID) != "" {
+			answerID = *lastAnswerID
 		}
 		eventBus.Emit(ctx, event.Event{
 			ID:        answerID,

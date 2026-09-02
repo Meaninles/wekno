@@ -1646,6 +1646,9 @@ EOF""",
         self.assertIn("Source and action honesty", prompt)
         self.assertIn("Citation freshness", prompt)
         self.assertIn("Require logical entailment rather than plausible completion", prompt)
+        self.assertIn("selected or configured knowledge source only makes retrieval available", prompt)
+        self.assertIn("recompute it from the newest active user facts", prompt)
+        self.assertIn("within what the retrieved evidence entails", prompt)
         self.assertIn("Preserve grammatical argument slots", prompt)
         self.assertIn("Treat enumerated conditions, stages, roles, fields, and formats as closed", prompt)
         self.assertIn("even when no earlier assistant-created draft", prompt)
@@ -1685,7 +1688,7 @@ EOF""",
     def test_shared_production_contract_uses_compact_sidecar_policy_and_tail_task(self):
         shared_system_prompt = (
             "General assistant baseline.\n\n"
-            "[WEKNORA_DIALOGUE_CONTINUITY_V10]\n"
+            "[WEKNORA_DIALOGUE_CONTINUITY_V12]\n"
             "Shared domain-neutral state and operation contract."
         )
         payload = ChatPayload(
@@ -1771,6 +1774,8 @@ EOF""",
             "Claim a search, retrieval, read, save, send, update, or other operation only when a matching current-turn result establishes it",
             "Use semantic judgment over the complete current task",
             "Tool availability never proves that a call is useful",
+            "operation boundary as permission/scope rather than an audit outcome",
+            "would be incomplete without durable bytes or an existing-file operation",
             "Never call a tool to test, reject, or demonstrate that it is unnecessary",
             "normally start with mcp__weknora__knowledge_search",
             "Never call the unprefixed names knowledge_search",
@@ -1959,12 +1964,17 @@ EOF""",
         artifact_tool = captured["create_artifact"]
         self.assertEqual(
             artifact_tool["schema"]["required"],
-            ["filename", "file_path"],
+            ["filename", "file_path", "delivery_basis"],
+        )
+        self.assertEqual(
+            artifact_tool["schema"]["properties"]["delivery_basis"]["enum"],
+            ["durable_output", "existing_file_operation"],
         )
         self.assertNotIn("authorization_quote", artifact_tool["schema"]["properties"])
         self.assertNotIn("verbatim", artifact_tool["description"].lower())
         self.assertIn("durable/downloadable file bytes", artifact_tool["description"])
         self.assertIn("ordinary chat content", artifact_tool["description"])
+        self.assertIn("would be incomplete as a chat response", artifact_tool["description"])
         self.assertIn("never write a file merely", artifact_tool["description"].lower())
 
         disabled_payload = payload.model_copy(update={"enable_artifacts": False})

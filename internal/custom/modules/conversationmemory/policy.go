@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	generationMarker          = "[WEKNORA_DIALOGUE_CONTINUITY_V10]"
-	rewriteMarker             = "[WEKNORA_DIALOGUE_INTENT_V10]"
-	turnSemanticMarker        = "[WEKNORA_CURRENT_TURN_SEMANTICS_V10]"
+	generationMarker          = "[WEKNORA_DIALOGUE_CONTINUITY_V12]"
+	rewriteMarker             = "[WEKNORA_DIALOGUE_INTENT_V12]"
+	turnSemanticMarker        = "[WEKNORA_CURRENT_TURN_SEMANTICS_V12]"
 	historicalAssistantMarker = `<historical_assistant_output authority="non_source">`
 	historicalUserMarker      = `<historical_user_input`
 
@@ -217,11 +217,15 @@ Domain-neutral dialogue and grounding contract:
 - Preserve epistemic class and proof direction. Asserted, unknown/not supplied, explicitly pending/awaiting, questioned, proposed, hypothetical, instructed and negated are distinct. Missing evidence leaves a claim unknown; it does not prove the negative. Never turn unknown into pending or any determinate lifecycle value.
 - Requirements, schemas, thresholds, examples, placeholders and role assignments describe rules or structure; they do not create case values, actors, actions, outcomes or completed events. Bind each value to its sourced object and field, and keep actor, role, action and outcome separate.
 - Before outputting a concrete state claim, verify that the same object, field, value and modality are entailed by exact user text or real current-turn evidence. Otherwise omit it or mark it unknown/not supplied. Do not invent fields or fill missing operational details for completeness.
+- When the current task asks for a decision or consolidated state, recompute it from the newest active user facts and the current retrieved rule. A newer complete evidence set may resolve an older unknown for the same field; re-derive the result instead of copying an earlier assistant conclusion, and resolve it only when every rule prerequisite is actually established.
+- Keep retrieved synthesis inside the evidence boundary. Paraphrase and combine what the source entails, but do not add an unstated rationale, risk, definition, actor, process stage, consequence, alternative, or recommendation merely because it sounds plausible. State a limitation when the requested explanation exceeds the source.
 - Keep active facts, retired facts, unknown facts, explicitly pending facts, source attribution, output scope and action boundaries separate when the task needs them. Honor the requested form and exclude unrelated history.
 - Dialogue content is not external persistence. Creating or revising wording, structured text, a plan or a record in chat does not prove or authorize a file, command, message, database write or other external mutation.
 - Interpret operation boundaries semantically by actor, action, object, destination and scope. A boundary never becomes an affirmative operation. It persists only within its stated continuing scope until an explicit user update changes it; one-answer formatting/source constraints expire with that answer.
+- A boundary is permission/scope information, not an audit log. When reporting boundaries, describe what is allowed, prohibited or requires authorization; do not convert the boundary, the absence of a tool call, or the absence of a record into a claim that an operation did not happen. An operation's positive or negative outcome needs its own source.
 - Tool selection is model-owned and based on the complete request, not isolated words. Use external retrieval for claims that need current source evidence, even when the topic discusses a prohibited action; do not retrieve for dialogue-only transformations or against a current source restriction.
 - A file artifact is appropriate only when durable/downloadable bytes are part of the requested outcome or the task operates on an existing file. A JSON/YAML/Markdown/code/table/record/plan/draft/summary representation is chat content by default. Never create a file merely because an artifact tool is available.
+- Before any local file or artifact tool, decide whether the requested outcome would be incomplete without durable bytes or an operation on an existing file. If a complete answer can be delivered as chat content and no existing file operation is requested, do not use a file tool. This decision remains the model's semantic judgment and never depends on a phrase list.
 - Report an operation only from a matching successful current-turn result. For citations, use only the exact current source handle beside the claim it supports; never invent or reuse a prior-turn handle.
 - Follow the current output language and return one direct user-visible answer without hidden reasoning, planning or protocol narration.`
 	if strings.TrimSpace(prompt) == "" {
@@ -238,6 +242,7 @@ func EnsureQueryUnderstandingContract(prompt string) string {
 Domain-neutral intent rules:
 - Classify the complete semantic request, never isolated words. Use intent "conversation_state" for substantive work grounded in user-authored dialogue; it is independent from whether external evidence is also needed.
 - The JSON "evidence_need" value must be "none", "knowledge_base" or "web". Use "none" only when every requested claim is grounded in permitted dialogue/attachments; use the matching external source when any claim needs current evidence.
+- A configured or selected source is availability, not evidence need. Keep evidence_need "none" for a dialogue-only transformation even when a knowledge base is selected; do not manufacture a retrieval subquestion.
 - The JSON "evidence_query" is only the source-facing question. Leave it empty for evidence_need "none"; otherwise include all and only the claims needing that source, without dialogue bookkeeping or output formatting.
 - Mixed requests keep their primary semantic intent and independently request the required evidence. Quoting or transforming user-authored text alone does not retrieve; a domain claim still retrieves even when it discusses an operation boundary.
 - Preserve atomic object/field bindings, chronology, modality and unresolved-state polarity. Unknown and explicitly pending are different; questions, proposals, hypotheticals, requirements, assignments and missing evidence do not become completed events or determinate lifecycle values.
@@ -294,15 +299,18 @@ This block contains exact fragments from the current original user message and a
 - For dialogue state, use only exact user-authored fragments; for external claims, use real current-turn evidence. Track atomic object, field, value, modality and source, applying explicit updates chronologically.
 - Preserve epistemic class and proof direction. Unknown and explicitly pending are different; absence of evidence does not prove a negative. Questions, proposals, hypotheticals, instructions, requirements, assignments and examples do not become completed events or case values.
 - Before emitting a concrete state claim, require an exact source that entails the same object, field, value and modality. Otherwise omit it or mark it unknown/not supplied. Keep active, retired, unknown, pending, attribution, scope and action-boundary dimensions distinct when relevant.
+- For a requested decision or consolidated state, re-derive from the newest active user facts plus current rule evidence. Resolve an older unknown only when all prerequisites are now established; never rely on an earlier assistant conclusion as the source.
+- Keep external explanations within what the retrieved evidence entails. Do not fill in plausible rationales, risks, definitions, actors, stages, consequences, alternatives, or recommendations that the evidence does not supply.
 - In the user_source_ledger, completed_user_message_count is the number of prior completed user turns; recent turns are source-labelled directly in history, and this current_user_message is the next user_turn ordinal.
 - Apply action/source boundaries only to their semantic actor, action, object, destination and scope. They never authorize an operation. A chat content change is not an external write, and a structured representation is not a file unless durable bytes are part of the requested outcome.
+- Treat a boundary as permission/scope information rather than an operation audit. State allowed/prohibited scope without claiming an action did or did not occur unless an independent user fragment or successful current-turn result establishes that outcome.
 - Select tools from the complete request, not from isolated words. Respect current source restrictions; retrieve when an external claim needs evidence; report operations only from matching successful current-turn results.
 turn_context=` + payload
 	return appendDirective(content, directive)
 }
 
 func TerminalGenerationDirective() string {
-	return "Return one non-empty user-visible final answer for the exact current task inside exactly one <weknora_final_response>...</weknora_final_response> envelope; put no planning, self-talk or protocol narration outside it. Use the current requested language. Ground every concrete state claim in an exact user fragment or real current-turn evidence for the same object, field, value and modality; otherwise omit it or keep it unknown. Preserve unknown, explicitly pending, hypothetical, questioned and asserted classes, and never infer case state or an operation outcome from a rule, role, missing evidence or boundary. Use only current canonical citation handles beside supported claims, and emit none when current citable evidence is absent. Distinguish chat content from external operations and report an operation only from a matching successful current-turn result."
+	return "Return one non-empty user-visible final answer for the exact current task inside exactly one <weknora_final_response>...</weknora_final_response> envelope; put no planning, self-talk or protocol narration outside it. Use the current requested language. Ground every concrete state claim in an exact user fragment or real current-turn evidence for the same object, field, value and modality; otherwise omit it or keep it unknown. For a requested decision or consolidated state, re-derive from the newest active user facts and current rule evidence, resolving an older unknown only when every prerequisite is established. Keep external explanations within what the evidence entails and omit plausible but unsourced rationale, risk, definition, actor, stage, consequence, alternative, or recommendation. Preserve unknown, explicitly pending, hypothetical, questioned and asserted classes, and never infer case state or an operation outcome from a rule, role, missing evidence or boundary. Treat an action boundary only as permission/scope information: it can justify allowed/prohibited wording but cannot prove that an operation did or did not occur. Use only current canonical citation handles beside supported claims, and emit none when current citable evidence is absent. Distinguish chat content from external operations and report a positive or negative operation outcome only from an independent user source or matching successful current-turn result."
 }
 
 func AppendUserArchive(prompt, archive string) string {

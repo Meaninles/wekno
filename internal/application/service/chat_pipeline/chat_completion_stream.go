@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -231,6 +232,21 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 			} else {
 				answer = conversationmemory.TerminalIntegrityFallback(chatManage.Language)
 			}
+		}
+		// Citation markup is a transport protocol, not answer semantics. Validate
+		// it before the single production candidate is emitted so SSE, database
+		// persistence, and history replay receive identical bytes. Unsupported or
+		// prior-turn handles are removed; no claim text is rewritten and no model
+		// call is added.
+		answer, _, citationReport := sourcerefs.FilterAnswerCitations(answer, chatManage.CitationResult)
+		answer = strings.TrimSpace(answer)
+		if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+			pipelineInfo(ctx, "Stream", "terminal_citation_protocol_filtered", map[string]interface{}{
+				"session_id": chatManage.SessionID,
+				"forbidden":  citationReport.ForbiddenTags,
+				"incomplete": citationReport.IncompleteTags,
+				"unknown":    citationReport.UnknownIDs,
+			})
 		}
 		emitAnswer(answer, false)
 		emitAnswer("", true)

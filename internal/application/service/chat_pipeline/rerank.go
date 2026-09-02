@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/models/rerank"
@@ -396,6 +397,13 @@ func retainRerankRecallFloor(
 	if candidateCount <= 0 || len(results) == 0 {
 		return nil, false
 	}
+	// Providers are expected to return ranked rows, but not every compatible
+	// endpoint guarantees response order. Normalize by score before applying a
+	// rank floor so provider serialization order cannot decide recall.
+	ordered := append([]rerank.RankResult(nil), results...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].RelevanceScore > ordered[j].RelevanceScore
+	})
 	recallFloor := 3
 	if topK > 0 && topK < recallFloor {
 		recallFloor = topK
@@ -404,11 +412,11 @@ func retainRerankRecallFloor(
 		recallFloor = candidateCount
 	}
 
-	retained := make([]rerank.RankResult, 0, min(len(results), max(recallFloor, topK)))
-	seenIndices := make(map[int]struct{}, len(results))
+	retained := make([]rerank.RankResult, 0, min(len(ordered), max(recallFloor, topK)))
+	seenIndices := make(map[int]struct{}, len(ordered))
 	validRank := 0
 	floorApplied := false
-	for _, result := range results {
+	for _, result := range ordered {
 		if result.Index < 0 || result.Index >= candidateCount {
 			continue
 		}

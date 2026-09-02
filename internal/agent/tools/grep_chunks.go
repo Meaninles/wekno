@@ -605,10 +605,11 @@ func (t *GrepChunksTool) formatOutput(
 	}
 
 	b.WriteString(
-		"<deep_read_instruction>For an exact document hit, call list_knowledge_chunks with its chunk_id. " +
+		"<deep_read_instruction>Grep is a navigation step. A displayed snippet without a current canonical citation_handle_for_this_evidence is not claim-bearing citation evidence. " +
+			"For an exact document hit, call list_knowledge_chunks with its chunk_id before citing it. " +
 			"chunk_index is a logical chunk ordinal, never a page, sheet row, source line, JSON item, image frame, or audio time. " +
 			"Never convert chunk_index into offset; knowledge_id paging uses the returned next_offset. " +
-			"For source citations use source_locator and record keys in the content only.</deep_read_instruction>\n",
+			"Use only the canonical citation handle returned beside claim-bearing physical content; never reuse a prior-turn handle.</deep_read_instruction>\n",
 	)
 	for _, r := range results {
 		counts := countRegexHits(r.Content, compiled, queries)

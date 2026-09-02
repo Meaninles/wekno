@@ -150,11 +150,17 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 		"Missing evidence leaves a claim unknown",
 		"Requirements, schemas, thresholds, examples, placeholders and role assignments",
 		"same object, field, value and modality",
+		"recompute it from the newest active user facts",
+		"retrieved synthesis inside the evidence boundary",
 		"active facts, retired facts, unknown facts, explicitly pending facts",
 		"Dialogue content is not external persistence",
 		"actor, action, object, destination and scope",
+		"permission/scope information, not an audit log",
+		"absence of a tool call",
 		"Tool selection is model-owned",
 		"representation is chat content by default",
+		"would be incomplete without durable bytes",
+		"never depends on a phrase list",
 		"matching successful current-turn result",
 	} {
 		if !strings.Contains(contract, required) {
@@ -172,6 +178,8 @@ func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttrib
 		"Classify the complete semantic request, never isolated words",
 		`intent "conversation_state"`,
 		`"none", "knowledge_base" or "web"`,
+		"configured or selected source is availability, not evidence need",
+		`evidence_need "none" for a dialogue-only transformation`,
 		`JSON "evidence_query" is only the source-facing question`,
 		"Mixed requests keep their primary semantic intent",
 		"Unknown and explicitly pending are different",
@@ -192,10 +200,14 @@ func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *
 	for _, required := range []string{
 		"exact current task",
 		"same object, field, value and modality",
+		"re-derive from the newest active user facts",
+		"external explanations within what the evidence entails",
 		"unknown, explicitly pending, hypothetical, questioned and asserted classes",
 		"current canonical citation handles",
+		"permission/scope information",
+		"cannot prove that an operation did or did not occur",
 		"Distinguish chat content from external operations",
-		"matching successful current-turn result",
+		"independent user source or matching successful current-turn result",
 	} {
 		if !strings.Contains(directive, required) {
 			t.Fatalf("terminal directive missing %q: %s", required, directive)

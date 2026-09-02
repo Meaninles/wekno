@@ -189,6 +189,18 @@ Now generate the final answer:`, query)
 			)
 		}
 	}
+	// Canonical citation tags are a machine protocol. Filter unsupported,
+	// malformed, or prior-turn handles before the production candidate is sent
+	// anywhere, while leaving all claim text untouched. This keeps SSE,
+	// persistence, and history replay byte-equivalent without an extra model
+	// call or any Eval-only rewrite.
+	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(fullAnswer, citationRefs)
+	fullAnswer = strings.TrimSpace(filteredAnswer)
+	state.KnowledgeRefs = citedRefs
+	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
+		logger.Warnf(ctx, "[Agent][Citations] filtered invalid terminal citation protocol: forbidden=%d incomplete=%d unknown=%v",
+			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
+	}
 
 	logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting validated answer: %d chars", len(fullAnswer))
 	e.eventBus.Emit(ctx, event.Event{

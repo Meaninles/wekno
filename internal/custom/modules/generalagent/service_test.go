@@ -9,6 +9,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -408,6 +409,46 @@ func TestEmitSidecarAnswerUsesSegmentIDAndDone(t *testing.T) {
 	}
 	if !data.Done {
 		t.Fatalf("done event Done = false, want true")
+	}
+}
+
+func TestEmitSidecarProductionCandidateFiltersUnsupportedCitationsBeforeSSE(t *testing.T) {
+	bus := event.NewEventBus()
+	var got []event.AgentFinalAnswerData
+	bus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
+		data, _ := evt.Data.(event.AgentFinalAnswerData)
+		got = append(got, data)
+		return nil
+	})
+	ref := &types.SearchResult{
+		ID:              "chunk-1",
+		Content:         "supported fact",
+		EvidenceContent: "supported fact",
+		KnowledgeID:     "knowledge-1",
+		KnowledgeBaseID: "kb-1",
+		KnowledgeTitle:  "manual.md",
+		ChunkType:       string(types.ChunkTypeText),
+	}
+	sourcerefs.AssignCitationIDs([]*types.SearchResult{ref})
+
+	filtered, cited, report := emitSidecarProductionCandidate(
+		context.Background(),
+		bus,
+		"session-1",
+		"request-1",
+		"answer-1",
+		`supported <src id="S1" /> stale <src id="S9" />`,
+		[]*types.SearchResult{ref},
+	)
+
+	if filtered != `supported <src id="S1" /> stale` {
+		t.Fatalf("filtered = %q", filtered)
+	}
+	if len(cited) != 1 || len(report.UnknownIDs) != 1 || report.UnknownIDs[0] != "S9" {
+		t.Fatalf("citation result = cited:%d report:%+v", len(cited), report)
+	}
+	if len(got) != 2 || got[0].Content != filtered || got[0].Done || !got[1].Done || got[1].Content != "" {
+		t.Fatalf("SSE candidate mismatch: %+v", got)
 	}
 }
 

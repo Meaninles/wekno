@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "profile_set_id": "weknora-general-agent-release-candidate-regression-v1",
+  "scope": "Final targeted production verification for the general agent across six frozen RAG dialogues and one newly authored independent RAG distribution.",
+  "model": {
+    "environment_variable": "AGENT_EVAL_SUMMARY_MODEL_ID",
+    "required_model_id": "prod-deepseek-v4-flash-int8-chat",
+    "display_name": "DeepSeek V4 Flash"
+  },
+  "execution_contract": {
+    "formal_scoring_scope": "six question-preserving RAG conversations plus one new post-change digital-archive conversation; sealed holdout is not mounted, read, or inspected",
+    "knowledge_selection": "every case selects exactly one explicit independent knowledge base",
+    "quality_adjudication": "Codex reads every complete conversation and tolerates minor detail, wording, formatting, and structure issues; only material task, grounding, state, source, action, latency, or communication failures fail",
+    "hard_semantic_rules": "none: no required claims, fixed phrases, reference answers, citation counts, answer shapes, Judge rubric, or dataset feedback",
+    "decision_policy": "each repetition receives an independent whole-conversation Codex verdict; each case requires at least two acceptable repetitions",
+    "prompt_injection": "no rubric, required claim, reference answer, Judge feedback, Codex review, or Eval repair contract is sent to the SUT",
+    "answer_tracks": "the persisted production candidate is release-scored; Eval assistance remains artifact-only and cannot rescue the production gate"
+  },
+  "profiles": [
+    {
+      "profile_id": "general-agent",
+      "display_name": "通用智能体",
+      "agent_id": "builtin-general-agent",
+      "agent_ids_by_knowledge_selection": {"explicit": "builtin-general-agent"},
+      "agent_type": "general-agent",
+      "endpoint": "agent-chat",
+      "configured_history_turns": 10
+    }
+  ]
+}

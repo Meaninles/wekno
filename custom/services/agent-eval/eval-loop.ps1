@@ -346,6 +346,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -CorpusVersion "orion-quality-batch-release-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare post-terminal quality knowledge base" }
     }
+    $datasetUsesReleaseCandidateArchive = $datasetText.Contains(
+        '${AGENT_EVAL_KB_RELEASE_CANDIDATE_ARCHIVE_ID}'
+    )
+    if ($datasetUsesReleaseCandidateArchive) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/digital-archive-ingest-guide.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/release-candidate-archive-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_RELEASE_CANDIDATE_ARCHIVE_ID" `
+            -KnowledgeBaseName "Eval回归-Solace数字档案入库指南-v1" `
+            -UploadName "digital-archive-ingest-guide.v1.md" `
+            -CorpusVersion "solace-digital-archive-ingest-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare release-candidate archive knowledge base" }
+    }
 
     # Bind the execution identity to every KB selected by this dataset. Each
     # individual preparation script records its own binding; this aggregate

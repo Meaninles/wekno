@@ -86,6 +86,8 @@ def terminal_answer_integrity_reason(content: Any) -> str:
     compact = "".join(answer.split())
     if _has_dominant_consecutive_repeat(compact):
         return "degenerate_repetition"
+    if _has_degenerate_layout(answer):
+        return "degenerate_layout"
     return ""
 
 
@@ -108,6 +110,36 @@ def _has_dominant_consecutive_repeat(value: str) -> bool:
             if repeats >= required_repeats and repeats * unit * 2 >= len(value):
                 return True
     return False
+
+
+def _has_degenerate_layout(value: str) -> bool:
+    """Detect transport-corrupted padding/markup without judging semantics.
+
+    A compatibility gateway can occasionally return hundreds of Markdown
+    separators and large whitespace runs around a few broken token fragments.
+    Normal prose, tables, code blocks, and intentionally sparse formatting do
+    not contain several forty-character horizontal padding runs or dozens of
+    formatting-only lines, so this remains a narrow transport integrity check.
+    """
+
+    if len(value) < 300:
+        return False
+    if len(re.findall(r"[ \t]{40,}", value)) >= 3:
+        return True
+    nonempty = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(nonempty) < 24:
+        return False
+    formatting_only = sum(
+        1
+        for line in nonempty
+        if not re.search(r"[A-Za-z0-9\u3400-\u9fff]", line)
+    )
+    meaningful = sum(
+        1
+        for line in nonempty
+        if len(re.findall(r"[A-Za-z0-9\u3400-\u9fff]", line)) >= 3
+    )
+    return formatting_only >= 12 and formatting_only * 2 >= len(nonempty) and meaningful * 3 < len(nonempty)
 
 
 def _value(block: Any, name: str, default: Any = None) -> Any:

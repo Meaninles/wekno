@@ -95,9 +95,20 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
             "Supported claim <src id 'S1' />": "malformed_source_handle",
             "的。" * 80: "degenerate_repetition",
             "Now read the source " + "to get the full text " * 3: "degenerate_repetition",
+            (
+                "## Result\n\n---\n" +
+                "** status" + (" " * 80) + "broken\n" +
+                ("---\n**\n\n" * 14) +
+                (" " * 80) + "fragment\n" +
+                (" " * 80) + "tail"
+            ): "degenerate_layout",
             'Supported.<src id="S7" />': "",
             "Retry once, retry twice, then report the evidence.": "",
             "| Field | Value |\n| --- | --- |\n| owner | pending |\n| date | pending |": "",
+            (
+                "## Long but valid report\n\n" +
+                "\n".join(f"- Item {index}: supported explanation." for index in range(30))
+            ): "",
         }
         for answer, expected in cases.items():
             with self.subTest(answer=answer[:40]):

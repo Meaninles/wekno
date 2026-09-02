@@ -31,7 +31,10 @@ from app.runner import (  # noqa: E402
     build_system_prompt,
     build_weknora_server,
     claude_auth_env,
+    claude_sdk_builtin_tools,
     classify_data_analysis_display_intent,
+    current_turn_file_deliverable_requested,
+    current_turn_local_execution_requested,
     data_analysis_needs_chart_validation,
     data_analysis_post_tool_hook_factory,
     data_analysis_pre_tool_hook_factory,
@@ -66,10 +69,12 @@ from app.runner import (  # noqa: E402
     message_stop_reason,
     message_uses_tools,
     is_retryable_provider_transport_error,
+    effective_weknora_tool_specs,
     provider_transport_retries,
     raw_sdk_error_text,
     require_current_turn_operation_authorization,
     terminal_background_tool_ids,
+    terminal_integrity_fallback_for_payload,
     tool_result_fragments,
     tool_use_fragments,
     user_facing_error_message,
@@ -78,6 +83,7 @@ from app.runner import (  # noqa: E402
 from app.schemas import (  # noqa: E402
     ChatPayload,
     ChatHistoryMessage,
+    AttachmentSpec,
     DocumentTemplateContextSpec,
     DocumentTemplateFileSpec,
     LLMConfig,
@@ -86,6 +92,7 @@ from app.schemas import (  # noqa: E402
     ProfessionalSkillFileSpec,
     ProfessionalSkillSpec,
     RuntimeConfigSpec,
+    RuntimeToolSpec,
     SidecarArtifact,
 )
 
@@ -106,6 +113,24 @@ class ResultMessage:
 
 
 class RunnerProgressTest(unittest.TestCase):
+    def test_terminal_integrity_fallback_uses_payload_query_language(self):
+        base = dict(
+            run_id="run-terminal-fallback",
+            session_id="session-terminal-fallback",
+            assistant_message_id="assistant-terminal-fallback",
+            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+        self.assertEqual(
+            terminal_integrity_fallback_for_payload(ChatPayload(query="请重试", **base)),
+            "本次回答未能可靠生成，请重试。",
+        )
+        self.assertEqual(
+            terminal_integrity_fallback_for_payload(ChatPayload(query="Please retry", **base)),
+            "The response could not be generated reliably. Please try again.",
+        )
+
     def test_prompt_observation_is_disabled_by_default_and_detailed_only_in_eval(self):
         payload = ChatPayload(
             run_id="run-eval-observation",
@@ -1769,12 +1794,49 @@ EOF""",
 
     def test_current_turn_operation_authorization_rejects_missing_or_invented_quote(self):
         request = "只在聊天里修改方案，不要修改文件。"
-        for quote in ("", "请修改文件", "上一轮让我创建文件"):
+        for quote in ("", "请修改文件", "上一轮让我创建文件", "不要修改文件"):
             with self.subTest(quote=quote):
                 with self.assertRaises(RuntimeError):
                     require_current_turn_operation_authorization(request, quote)
 
-    def test_general_agent_artifact_tool_requires_current_turn_authorization_quote(self):
+    def test_file_and_execution_capability_detection_is_cross_language_and_rejects_meta_negatives(self):
+        positive_files = (
+            "请生成一个可下载的 PDF 文件。",
+            "Please create the spreadsheet file and attach it.",
+            "Haz un archivo CSV descargable, por favor.",
+            "分析这些数据，并导出为 report.xlsx。",
+        )
+        negative_files = (
+            "分析为什么不能执行导出。",
+            "不要生成 PDF。",
+            "修改方案，但不要修改文件。",
+            "包含‘不安装’的知识问答，解释即可。",
+            "What does ‘create a file’ mean?",
+            "Si tuvieras que crear un archivo, ¿cómo lo harías?",
+        )
+        for request in positive_files:
+            with self.subTest(request=request):
+                self.assertTrue(current_turn_file_deliverable_requested(request))
+        for request in negative_files:
+            with self.subTest(request=request):
+                self.assertFalse(current_turn_file_deliverable_requested(request))
+
+        for request in (
+            "运行这个 Python 脚本。",
+            "Please execute the shell command.",
+            "Ejecuta este script.",
+        ):
+            with self.subTest(request=request):
+                self.assertTrue(current_turn_local_execution_requested(request))
+        for request in (
+            "分析为什么不能执行命令。",
+            "Do not run the script; explain it.",
+            "No ejecutes el comando.",
+        ):
+            with self.subTest(request=request):
+                self.assertFalse(current_turn_local_execution_requested(request))
+
+    def test_general_agent_negative_file_request_does_not_expose_artifact_or_local_tools(self):
         captured = {}
 
         def fake_tool(name, description, schema):
@@ -1812,6 +1874,47 @@ EOF""",
             with mock.patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
                 build_weknora_server(payload, store)
 
+        self.assertNotIn("create_artifact", captured)
+        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+
+    def test_general_agent_positive_file_request_exposes_guarded_artifact_tool(self):
+        captured = {}
+
+        def fake_tool(name, description, schema):
+            def decorator(handler):
+                captured[name] = {
+                    "description": description,
+                    "schema": schema,
+                    "handler": handler,
+                }
+                return handler
+
+            return decorator
+
+        fake_sdk = types.SimpleNamespace(
+            tool=fake_tool,
+            create_sdk_mcp_server=lambda name, version, tools: {
+                "name": name,
+                "version": version,
+                "tools": tools,
+            },
+        )
+        payload = ChatPayload(
+            run_id="run-artifact-authority-positive",
+            session_id="session-artifact-authority-positive",
+            assistant_message_id="assistant-artifact-authority-positive",
+            query="请生成一个可下载的 PDF 文件。",
+            enable_artifacts=True,
+            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir), payload)
+            with mock.patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
+                build_weknora_server(payload, store)
+
         artifact_tool = captured["create_artifact"]
         self.assertIn("authorization_quote", artifact_tool["schema"]["required"])
         self.assertIn("exact current-user phrase", artifact_tool["description"])
@@ -1822,6 +1925,65 @@ EOF""",
         )
         self.assertTrue(result["is_error"])
         self.assertIn("authorization quote is required", result["content"][0]["text"])
+
+    def test_read_only_kb_mode_hides_planning_tools_but_keeps_retrieval(self):
+        payload = ChatPayload(
+            run_id="run-kb-tool-scope",
+            session_id="session-kb-tool-scope",
+            assistant_message_id="assistant-kb-tool-scope",
+            query="查知识库并给引用。",
+            enable_artifacts=True,
+            tools=[
+                RuntimeToolSpec(name="thinking"),
+                RuntimeToolSpec(name="todo_write"),
+                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+                RuntimeToolSpec(name="grep_chunks", source="knowledge"),
+            ],
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                knowledge_bases=["kb-unseen"],
+            ),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+
+        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+        self.assertEqual(
+            [spec.name for spec in effective_weknora_tool_specs(payload)],
+            ["knowledge_search", "grep_chunks"],
+        )
+
+    def test_explicit_file_or_execution_request_restores_only_needed_local_capability(self):
+        base = dict(
+            run_id="run-local-capability",
+            session_id="session-local-capability",
+            assistant_message_id="assistant-local-capability",
+            enable_artifacts=True,
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                knowledge_bases=["kb-unseen"],
+            ),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+        file_payload = ChatPayload(query="Create a downloadable PDF file.", **base)
+        self.assertEqual(
+            claude_sdk_builtin_tools(file_payload),
+            ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"],
+        )
+
+        execution_payload = ChatPayload(query="Run this shell command.", **base)
+        self.assertEqual(claude_sdk_builtin_tools(execution_payload), ["Bash"])
+
+        attachment_payload = ChatPayload(
+            query="Summarize the attached document in chat.",
+            attachments=[AttachmentSpec(file_name="manual.pdf", content="extracted")],
+            **base,
+        )
+        self.assertEqual(
+            claude_sdk_builtin_tools(attachment_payload),
+            ["Read", "Glob", "Grep", "LS"],
+        )
 
     def test_build_prompt_uses_stable_user_sources_and_marks_assistant_history(self):
         payload = ChatPayload(

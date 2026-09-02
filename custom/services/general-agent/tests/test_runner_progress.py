@@ -70,6 +70,7 @@ from app.runner import (  # noqa: E402
     message_uses_tools,
     is_retryable_provider_transport_error,
     effective_weknora_tool_specs,
+    effective_professional_skill_names,
     provider_transport_retries,
     raw_sdk_error_text,
     require_current_turn_operation_authorization,
@@ -1686,7 +1687,7 @@ EOF""",
     def test_shared_production_contract_uses_compact_sidecar_policy_and_tail_task(self):
         shared_system_prompt = (
             "General assistant baseline.\n\n"
-            "[WEKNORA_DIALOGUE_CONTINUITY_V7]\n"
+            "[WEKNORA_DIALOGUE_CONTINUITY_V8]\n"
             "Shared domain-neutral state and operation contract."
         )
         payload = ChatPayload(
@@ -1714,8 +1715,12 @@ EOF""",
         self.assertLess(len(compact_system), len(standalone_system))
         self.assertIn("Apply them once", compact_system)
         self.assertIn("Retrieval answers only its evidence subquestions", compact_system)
+        self.assertIn("State-polarity lock", compact_system)
+        self.assertIn("does not prohibit producing the requested chat text", compact_system)
         self.assertIn("never native filesystem search", reminder)
         self.assertIn("answer the whole current request", reminder)
+        self.assertIn("state-polarity lock", reminder)
+        self.assertIn("negative boundaries on files, records, messages, or execution do not block chat text", reminder)
         self.assertGreater(
             rendered.rindex("汇总全部交付项并重新检索依据。"),
             rendered.rindex("one field only"),
@@ -1949,8 +1954,98 @@ EOF""",
 
         self.assertEqual(claude_sdk_builtin_tools(payload), [])
         self.assertEqual(
+            effective_professional_skill_names(payload, ["unseen-research-skill"]),
+            [],
+        )
+        self.assertEqual(
             [spec.name for spec in effective_weknora_tool_specs(payload)],
             ["knowledge_search", "grep_chunks"],
+        )
+
+    def test_configured_professional_skills_do_not_escape_ordinary_kb_read_only_mode(self):
+        payload = ChatPayload(
+            run_id="run-kb-default-skills",
+            session_id="session-kb-default-skills",
+            assistant_message_id="assistant-kb-default-skills",
+            query="查知识库并说明适用规则。",
+            enable_artifacts=True,
+            professional_skills=[
+                ProfessionalSkillSpec(
+                    name="unseen-research-skill",
+                    display_name="Unseen Research",
+                    description="A configured research workflow.",
+                )
+            ],
+            tools=[
+                RuntimeToolSpec(name="thinking"),
+                RuntimeToolSpec(name="todo_write"),
+                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+            ],
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                knowledge_bases=["kb-cross-domain"],
+            ),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+
+        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+        self.assertEqual(
+            [spec.name for spec in effective_weknora_tool_specs(payload)],
+            ["knowledge_search"],
+        )
+
+        named = payload.model_copy(
+            update={"query": "Use Unseen Research for this investigation."}
+        )
+        self.assertEqual(
+            claude_sdk_builtin_tools(named),
+            ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"],
+        )
+        self.assertEqual(
+            effective_professional_skill_names(named, ["unseen-research-skill"]),
+            ["unseen-research-skill"],
+        )
+
+    def test_selected_knowledge_original_is_not_user_local_file_authority(self):
+        payload = ChatPayload(
+            run_id="run-kb-original",
+            session_id="session-kb-original",
+            assistant_message_id="assistant-kb-original",
+            query="Summarize the selected knowledge base with citations.",
+            original_input_files=[
+                OriginalInputFileSpec(
+                    id="knowledge-original",
+                    source="weknora_selected_knowledge_original",
+                    role="selected_knowledge_original_file",
+                    file_name="manual.pdf",
+                )
+            ],
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                knowledge_ids=["knowledge-unseen"],
+            ),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+
+        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+
+        uploaded = payload.model_copy(
+            update={
+                "original_input_files": [
+                    OriginalInputFileSpec(
+                        id="chat-original",
+                        source="weknora_chat_upload_original",
+                        role="user_uploaded_original_file",
+                        file_name="manual.pdf",
+                    )
+                ]
+            }
+        )
+        self.assertEqual(
+            claude_sdk_builtin_tools(uploaded),
+            ["Read", "Glob", "Grep", "LS"],
         )
 
     def test_explicit_file_or_execution_request_restores_only_needed_local_capability(self):

@@ -144,6 +144,9 @@ func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) 
 	contract := EnsureGenerationContract("")
 	for _, required := range []string{
 		"Decompose compound user statements into atomic propositions",
+		"Apply a state-polarity lock",
+		"Never convert that uncertainty into pending, not-started, incomplete, not-executed",
+		"policy-required field for which no case value was supplied",
 		"Retire only propositions that are logically incompatible",
 		"A count, outcome (including zero), missing record, or request",
 		`"P was not stated, shown, or proven"`,
@@ -220,6 +223,8 @@ func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *
 	directive := TerminalGenerationDirective()
 	for _, required := range []string{
 		"When current evidence does not exist, emit no citation handle",
+		"Apply a state-polarity lock",
+		"negative external-operation boundaries do not block requested chat text",
 		"instead of presenting earlier retrieval as current evidence",
 		"question about whether/why an action should happen establishes neither lifecycle direction",
 		"Text saying P was not stated, shown, or proven leaves P unknown",

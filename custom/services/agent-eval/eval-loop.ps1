@@ -424,6 +424,11 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
                 (Join-Path $PSScriptRoot "artifacts/rag-primary-privacy-kb-binding.v1.json")
             )
         }
+        if ($datasetUsesReleaseCandidateArchive) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/release-candidate-archive-kb-binding.v1.json")
+            )
+        }
         foreach ($bindingArtifactPath in $bindingArtifactPaths) {
             if (-not (Test-Path -LiteralPath $bindingArtifactPath)) {
                 throw "prepared KB binding artifact is missing: $bindingArtifactPath"

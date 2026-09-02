@@ -1,7 +1,7 @@
 {
   "case_count": 7,
   "created_at": "2026-09-02T01:08:20.2111943+00:00",
-  "dataset_sha256": "3ea52c2459b23efdc3e085240f058ddb3d63abe7275fd13668dbe47a856462be",
+  "dataset_sha256": "c7486279c48bac496e3c37e8973e1a33eb5cc9ed759745a90e38461a873e090e",
   "dependency_files": {
     "corpus_archive": "fixtures/regression-corpora/digital-archive-ingest-guide.v1.md",
     "corpus_editorial": "fixtures/regression-corpora/editorial-release-handbook.v1.md",
@@ -27,7 +27,7 @@
     "gate": "d2e609a90b378bf2bc4c2acd04f53b8bbd4952e8b23f682c8e4d238a2246eacb",
     "judge_calibration": "97d02759d0adb326c0adb64b8bfa83a63cc729cf8d3a36e93cf4308512986d75",
     "models": "1503852093c27c74edf32d16743d5f99730798ad9c8aa7cf64d219a68a610f8b",
-    "orchestration": "6cd55276de6d9d241248c4907e4c21ad93454f84b32aecc2af3248e1762cb56e",
+    "orchestration": "b4f7a8b124d445813c2685b832d82f107efbae4ab3bf8577ed847b128b8647d7",
     "policy": "5ef12d3f0f26a886a5b59f96c0e2ccc357a485999625b5124e01a865b94190ca",
     "profiles": "266e98482fea972bab875da2c7a847443cc5c92b9635ff254fbe602d51f77ff1",
     "readiness": "db86a960875c24ade3bc14752a87b6eaa45f9fac58a0d0dc539d75a2b84db247",

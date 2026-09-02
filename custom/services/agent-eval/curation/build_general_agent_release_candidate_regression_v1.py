@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - direct script execution
 
 
 SUITE = "weknora-general-agent-release-candidate-regression-v1"
-CORPUS_VERSION = "solace-digital-archive-ingest-v1"
+CORPUS_VERSION = "general-agent-release-candidate-rag-corpora-v1"
 KB_ID = "${AGENT_EVAL_KB_RELEASE_CANDIDATE_ARCHIVE_ID}"
 EXPECTED_CASE_COUNT = 7
 
@@ -63,6 +63,7 @@ def _retarget_frozen_case(case: CaseSpec) -> CaseSpec:
     return case.model_copy(
         update={
             "suite": SUITE,
+            "corpus_version": CORPUS_VERSION,
             "provenance": case.provenance.model_copy(
                 update={
                     "source": "post-salience-question-preserving-release-candidate-regression",

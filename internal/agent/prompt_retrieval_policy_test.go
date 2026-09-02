@@ -67,6 +67,11 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"bound or selected knowledge source only makes retrieval available",
 		"external statement, require entailment from a retrieved claim-bearing fragment",
 		"recompute from the newest active user facts",
+		"Turn-Local Evidence Invariant",
+		"current turn already contains a successful retrieval result",
+		"next action is one focused retrieval call rather than a prose answer",
+		"Do not transition directly from intent assessment to answer generation",
+		"for each document or external-domain claim, identify the current-turn retrieval result",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("progressive RAG prompt is missing %q", required)

@@ -85,23 +85,14 @@ func TestParseStructuredQueryOutputMixedStateActivatesExistingKB(t *testing.T) {
 func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.T) {
 	prompt := conversationmemory.EnsureQueryUnderstandingContract("base")
 	for _, required := range []string{
-		`JSON "intent" field MUST be exactly "conversation_state"`,
-		`JSON "evidence_need" field MUST be exactly "none", "knowledge_base", or "web"`,
-		`JSON "evidence_query" field is the source-facing question`,
-		`"conversation_state" has priority over "chitchat"`,
-		"Questions, examples, hypotheticals",
-		`evidence_need determines whether that same turn also retrieves`,
-		"does not claim that every such turn creates durable state",
-		`conversation-only state or transformation task must use evidence_need "none"`,
-		"external portion of a mixed request still require the appropriate evidence_need",
-		"source-facing evidence_query",
-		"For a mixed request, preserve the primary semantic intent",
-		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
-		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
-		"semantically equivalent unresolved labels as one state",
-		"not externally persisted",
-		"do not by themselves establish a concrete object's lifecycle status",
-		`Use "chitchat" only for social or casual conversation`,
+		"complete semantic request, never isolated words",
+		`intent "conversation_state"`,
+		`"none", "knowledge_base" or "web"`,
+		`JSON "evidence_query" is only the source-facing question`,
+		"Mixed requests keep their primary semantic intent",
+		"Unknown and explicitly pending are different",
+		"boundary, not an affirmative request",
+		"Preserve exact identifiers, names, dates and amounts",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("query-understanding contract missing %q: %s", required, prompt)

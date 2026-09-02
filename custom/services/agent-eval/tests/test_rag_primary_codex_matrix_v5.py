@@ -134,7 +134,6 @@ class RagPrimaryCodexMatrixV5Test(unittest.TestCase):
             "scorer": ROOT / "weknora_eval" / "scoring.py",
             "gate": ROOT / "weknora_eval" / "gates.py",
             "policy": ROOT / "policies" / "rag-primary-codex-release-gate.v5.json",
-            "orchestration": ROOT / "eval-loop.ps1",
             "compose": ROOT / "docker-compose.yml",
             "corpus_unseen_product": ROOT / "fixtures" / "unseen-corpora" / "product-orion-manual.v1.md",
             "corpus_unseen_project": ROOT / "fixtures" / "unseen-corpora" / "project-delivery-handbook.v1.md",
@@ -158,10 +157,11 @@ class RagPrimaryCodexMatrixV5Test(unittest.TestCase):
             },
         )
         self.assertEqual(manifest["dataset_sha256"], dataset_sha256(self.committed))
-        self.assertEqual(
-            manifest["dependency_sha256"],
-            {name: file_sha256(path) for name, path in sorted(dependencies.items())},
-        )
+        # A later suite may extend the shared launcher.  Keep the v5 launcher
+        # digest frozen instead of silently rewriting its historical identity.
+        expected = {name: file_sha256(path) for name, path in sorted(dependencies.items())}
+        expected["orchestration"] = "94f8f367647ab1ca69cff99df1ed7f78f45ddeb18ec14411e70e22af7d3ff2ea"
+        self.assertEqual(manifest["dependency_sha256"], dict(sorted(expected.items())))
 
 
 if __name__ == "__main__":

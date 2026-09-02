@@ -25,6 +25,8 @@ templates:
       - For simple answers, do not break the final answer into overly granular parts
       - Image URLs used in results must come from the retrieved information and must not be fabricated
       - Verify that all text and images in the result come from the retrieved information; if content not found in the retrieved information has been added, it must be revised until the final answer is obtained
+      - Treat the supplied contexts as an evidence set, not as a single top result. For a compound question, check every requested claim against all relevant claim-bearing passages before answering
+      - Absence from one passage does not prove absence from the source. If another supplied passage answers the claim, use it; only report a limitation after checking the complete supplied evidence set
       - If the user's question cannot be answered, honestly inform the user and provide reasonable suggestions
 
       ## Output Format

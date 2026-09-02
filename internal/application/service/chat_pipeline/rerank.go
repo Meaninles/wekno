@@ -157,6 +157,12 @@ func (p *PluginRerank) OnEvent(ctx context.Context,
 			return ErrRerank.WithError(rerankErr)
 		}
 		rawRerankResp = append([]rerank.RankResult(nil), rerankResp...)
+		rerankResp, thresholdDegraded = retainRerankRecallFloor(
+			rerankResp,
+			len(candidatesToRerank),
+			chatManage.RerankThreshold,
+			chatManage.RerankTopK,
+		)
 	}
 
 	pipelineInfo(ctx, "Rerank", "model_response", map[string]interface{}{
@@ -370,18 +376,57 @@ func (p *PluginRerank) rerank(ctx context.Context,
 		})
 	}
 
-	// Filter results based on threshold
-	rankFilter := []rerank.RankResult{}
-	for _, result := range rerankResp {
-		if result.Index < 0 || result.Index >= len(candidates) {
-			continue
-		}
-		if result.RelevanceScore >= chatManage.RerankThreshold {
-			rankFilter = append(rankFilter, result)
-		}
+	return rerankResp, nil
+}
+
+// retainRerankRecallFloor combines the configured absolute score threshold with
+// a small, bounded rank-based recall floor. Reranker score calibration varies
+// across models, languages and document styles; treating one absolute value as
+// the only admission path can discard a model's second- or third-ranked passage
+// even though the passage is useful claim-bearing evidence. The rank floor uses
+// only the reranker's ordering, never query terms, document phrases, domains or
+// Eval data, and it adds no retrieval/model call. The downstream TopK and MMR
+// stages still bound context size and remove redundant candidates.
+func retainRerankRecallFloor(
+	results []rerank.RankResult,
+	candidateCount int,
+	threshold float64,
+	topK int,
+) ([]rerank.RankResult, bool) {
+	if candidateCount <= 0 || len(results) == 0 {
+		return nil, false
+	}
+	recallFloor := 3
+	if topK > 0 && topK < recallFloor {
+		recallFloor = topK
+	}
+	if recallFloor > candidateCount {
+		recallFloor = candidateCount
 	}
 
-	return rankFilter, nil
+	retained := make([]rerank.RankResult, 0, min(len(results), max(recallFloor, topK)))
+	seenIndices := make(map[int]struct{}, len(results))
+	validRank := 0
+	floorApplied := false
+	for _, result := range results {
+		if result.Index < 0 || result.Index >= candidateCount {
+			continue
+		}
+		if _, exists := seenIndices[result.Index]; exists {
+			continue
+		}
+		seenIndices[result.Index] = struct{}{}
+		validRank++
+		withinFloor := validRank <= recallFloor
+		if result.RelevanceScore < threshold && !withinFloor {
+			continue
+		}
+		if result.RelevanceScore < threshold {
+			floorApplied = true
+		}
+		retained = append(retained, result)
+	}
+	return retained, floorApplied
 }
 
 // ensureMetadata ensures the metadata is not nil

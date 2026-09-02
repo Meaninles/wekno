@@ -346,6 +346,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -CorpusVersion "rivermark-water-quality-incident-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary water-quality knowledge base" }
     }
+    $datasetUsesRagPrimaryObservatory = $datasetText.Contains(
+        '${AGENT_EVAL_KB_RAG_PRIMARY_OBSERVATORY_ID}'
+    )
+    if ($datasetUsesRagPrimaryObservatory) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/observatory-night-operations-guide.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/rag-primary-observatory-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_RAG_PRIMARY_OBSERVATORY_ID" `
+            -KnowledgeBaseName "Eval回归-Vesper天文台夜间运行指南-v1" `
+            -UploadName "observatory-night-operations-guide.v1.md" `
+            -CorpusVersion "vesper-observatory-night-operations-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary observatory knowledge base" }
+    }
     $datasetUsesPostTerminalQuality = $datasetText.Contains(
         '${AGENT_EVAL_KB_POST_TERMINAL_QUALITY_ID}'
     )

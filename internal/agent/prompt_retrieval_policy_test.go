@@ -49,19 +49,20 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"If the request is conversation-only",
 		"answer directly without retrieval or tools",
 		"If the request needs external or domain evidence",
-		"A knowledge question does not become conversation-only merely because it quotes a negative action phrase",
+		"A domain question still retrieves when it needs source evidence",
 		"mixed requests where even one requested claim needs document/domain evidence or an external citation",
 		"Asking only to quote or attribute the user's own messages does not retrieve",
-		"A count or outcome (including zero), missing record, or lack of evidence",
-		"Drafts, plans, templates, and sample text may create wording, but must honor requested count/form and not fill missing operational facts",
-		"Decompose compound user updates into independent propositions",
-		"Retrieved rules, document schemas, example fields, and placeholders are evidence about their source, not conversation state",
-		"Preserve its actor, action, object, destination, modality, and turn scope",
-		"keep an operation boundary active until the user explicitly revokes",
+		"atomic object/field/value/modality/source propositions",
+		"unknown and explicitly pending as different classes",
+		"Assistant text, retrieved schemas, examples and placeholders do not populate a case",
+		"Chat wording and structured representations remain dialogue content",
+		"semantic actor, action, object, destination and scope",
 		"Never say you searched, retrieved, read, verified, saved, sent, updated",
 		"Follow an explicit output-language request in the current turn",
 		"Never expose intent classification, chain-of-thought, self-talk, tool planning, or process narration",
 		"Include each requested fact, boundary, source, or external rule once",
+		"Choose the single retrieval method most likely to answer the request",
+		"Absence from one result is not proof that the source lacks the fact",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("progressive RAG prompt is missing %q", required)
@@ -76,8 +77,8 @@ func TestGeneralAgentPromptDoesNotInventFileIntent(t *testing.T) {
 	content := loadAgentPromptTemplateForPolicyTest(t)
 	section := promptTemplateSection(t, content, `  - id: "general_claude_agent"`, `  - id: "knowledge_base_manager_agent"`)
 
-	if !strings.Contains(section, "only when the current user explicitly requests a file/downloadable deliverable") {
-		t.Error("general agent prompt does not require current-turn file intent")
+	if !strings.Contains(section, "only when durable/downloadable bytes are part of the requested outcome") {
+		t.Error("general agent prompt does not require semantic file-delivery intent")
 	}
 	if strings.Contains(section, "when a file is the best deliverable") {
 		t.Error("general agent prompt still lets the model invent artifact intent")
@@ -93,9 +94,27 @@ func TestGeneralAgentPromptDoesNotInventFileIntent(t *testing.T) {
 		"operation boundary remains active",
 		"does not create a new task",
 		"without inventing or guessing the ID",
+		"JSON/YAML/Markdown/code representation is chat content",
+		"Never create a file merely to make artifact registration applicable",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("general agent prompt is missing %q", required)
+		}
+	}
+}
+
+func TestQuickAnswerPromptChecksClaimCoverageAcrossEvidenceSet(t *testing.T) {
+	content := loadPromptTemplateFileForPolicyTest(t, "system_prompt.yaml")
+	section := promptTemplateSection(t, content, `  - id: "default_kb"`, `  - id: "expert_assistant"`)
+
+	for _, required := range []string{
+		"contexts as an evidence set",
+		"check every requested claim",
+		"Absence from one passage does not prove absence from the source",
+		"complete supplied evidence set",
+	} {
+		if !strings.Contains(section, required) {
+			t.Errorf("quick-answer prompt is missing %q", required)
 		}
 	}
 }

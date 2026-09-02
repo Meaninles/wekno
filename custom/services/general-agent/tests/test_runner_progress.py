@@ -1685,7 +1685,7 @@ EOF""",
     def test_shared_production_contract_uses_compact_sidecar_policy_and_tail_task(self):
         shared_system_prompt = (
             "General assistant baseline.\n\n"
-            "[WEKNORA_DIALOGUE_CONTINUITY_V9]\n"
+            "[WEKNORA_DIALOGUE_CONTINUITY_V10]\n"
             "Shared domain-neutral state and operation contract."
         )
         payload = ChatPayload(
@@ -1963,6 +1963,9 @@ EOF""",
         )
         self.assertNotIn("authorization_quote", artifact_tool["schema"]["properties"])
         self.assertNotIn("verbatim", artifact_tool["description"].lower())
+        self.assertIn("durable/downloadable file bytes", artifact_tool["description"])
+        self.assertIn("ordinary chat content", artifact_tool["description"])
+        self.assertIn("never write a file merely", artifact_tool["description"].lower())
 
         disabled_payload = payload.model_copy(update={"enable_artifacts": False})
         disabled_captured = {}

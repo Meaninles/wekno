@@ -144,112 +144,65 @@ func TestGenerationContractsAreIdempotentAndDomainNeutral(t *testing.T) {
 func TestGenerationContractPreservesAtomicStateAndExactBoundaries(t *testing.T) {
 	contract := EnsureGenerationContract("")
 	for _, required := range []string{
-		"Decompose compound user statements into atomic propositions",
-		"Apply a state-polarity lock",
-		"Never convert that uncertainty into pending, not-started, incomplete, not-executed",
-		"policy-required field for which no case value was supplied",
-		"Retire only propositions that are logically incompatible",
-		"A count, outcome (including zero), missing record, or request",
-		`"P was not stated, shown, or proven"`,
-		"neither establishes not-P",
-		"conversational plausibility of asking whether or why",
-		"A document schema, example, suggested placeholder, or earlier assistant-generated field is not conversation state",
-		"Drafts, plans, templates, and sample text",
-		"Honor the requested count and form",
-		"even if an earlier assistant did not materialize a named draft",
-		"Preserve the exact actor, action, object, destination, and turn scope",
-		"response-method constraint scoped to one answer",
-		"operation boundary remains active until the user explicitly revokes",
-		"does not create a new task/object",
-		"Unknown/not supplied and pending/awaiting are different states",
-		"Pending may appear only when the user or trustworthy evidence explicitly chose a pending value",
-		"Distinguish conversation content from external persistence",
-		"does not establish the current lifecycle of a particular incident",
-		"Naming or assigning a person to a role does not prove",
-		"Do not infer an unstated applicant, owner, assignee, customer, or operator",
-		"An identifier is not a description",
-		"perform an internal claim-ledger check",
-		"same object, field, value, and modality",
-		"A schema can supply a field name but never its instance value",
-		"later request to repeat an existing value is not that value's origin",
-		"Require entailment, not mere compatibility",
-		`"A does not prove/imply B" leaves B unknown`,
-		"Preserve grammatical argument slots",
-		"closed to unsupported additions",
-		"Keep hypothetical and counterfactual analysis explicitly hypothetical",
-		"stays local to that discussion",
-		"user source restriction",
-		"Never say that you searched, retrieved, read, verified, saved, sent, updated",
-		"positive authorization in the exact current user request",
-		"Plain labels such as S1/S2",
-		"If the exact ID is unavailable or uncertain",
-		"Obey an explicit current-turn output-language request",
-		"never expose intent classification, hidden reasoning, planning, self-talk",
+		"object, field, value, modality and source",
+		"retire only older propositions that truly conflict",
+		"unknown/not supplied, explicitly pending/awaiting",
+		"Missing evidence leaves a claim unknown",
+		"Requirements, schemas, thresholds, examples, placeholders and role assignments",
+		"same object, field, value and modality",
+		"active facts, retired facts, unknown facts, explicitly pending facts",
+		"Dialogue content is not external persistence",
+		"actor, action, object, destination and scope",
+		"Tool selection is model-owned",
+		"representation is chat content by default",
+		"matching successful current-turn result",
 	} {
 		if !strings.Contains(contract, required) {
 			t.Fatalf("generation contract missing %q: %s", required, contract)
 		}
+	}
+	if utf8.RuneCountInString(contract) > 5000 {
+		t.Fatalf("generation contract regressed into an over-specified phrase catalog: %d runes", utf8.RuneCountInString(contract))
 	}
 }
 
 func TestQueryUnderstandingContractRoutesMixedEvidenceWithoutConfusingUserAttribution(t *testing.T) {
 	contract := EnsureQueryUnderstandingContract("")
 	for _, required := range []string{
-		`JSON "evidence_need" field MUST be exactly "none", "knowledge_base", or "web"`,
-		`JSON "evidence_query" field is the source-facing question`,
-		"For a mixed request, preserve the primary semantic intent",
-		"set evidence_need to the required external source",
-		"why an operational action is allowed, blocked, risky, or conditional",
-		`set evidence_need to "knowledge_base" even when the request uses negative wording`,
-		`Asking only to quote or attribute the user's own messages uses evidence_need "none"`,
-		"exclude dialogue bookkeeping, output formatting, and user-state fields",
-		"Counts, outcomes (including zero), absent records, and analytical questions do not establish lifecycle state",
-		"text saying P was not stated, shown, or proven leaves P unknown",
-		"Unknown/not supplied must not become pending/awaiting",
-		"explicitly pending value must not become not-started or incomplete",
-		"not externally persisted",
-		"do not by themselves establish a concrete object's lifecycle status",
-		"must not become state or an operational boundary",
-		"Do not rewrite an assignment as approval/completion",
-		"Require entailment rather than compatibility",
-		`"A does not prove B" leaves B unknown`,
-		"Preserve grammatical slots",
-		"Identifiers cannot fill descriptions",
+		"Classify the complete semantic request, never isolated words",
+		`intent "conversation_state"`,
+		`"none", "knowledge_base" or "web"`,
+		`JSON "evidence_query" is only the source-facing question`,
+		"Mixed requests keep their primary semantic intent",
+		"Unknown and explicitly pending are different",
+		"boundary, not an affirmative request",
+		"Preserve exact identifiers, names, dates and amounts",
 	} {
 		if !strings.Contains(contract, required) {
 			t.Fatalf("query-understanding contract missing %q: %s", required, contract)
 		}
+	}
+	if utf8.RuneCountInString(contract) > 2500 {
+		t.Fatalf("query-understanding contract regressed into phrase rules: %d runes", utf8.RuneCountInString(contract))
 	}
 }
 
 func TestTerminalDirectiveRequiresFreshCitationsAndVerifiedOperationOutcomes(t *testing.T) {
 	directive := TerminalGenerationDirective()
 	for _, required := range []string{
-		"When current evidence does not exist, emit no citation handle",
-		"Apply a state-polarity lock",
-		"negative external-operation boundaries do not block requested chat text",
-		"instead of presenting earlier retrieval as current evidence",
-		"question about whether/why an action should happen establishes neither lifecycle direction",
-		"Text saying P was not stated, shown, or proven leaves P unknown",
-		"one-answer formatting, language, citation, or no-tool constraint expires",
-		"never merge unknown/not supplied with pending/awaiting",
-		"dialogue content without proving an external write",
-		"does not establish a concrete object's lifecycle",
-		"Naming or assigning an actor does not prove",
-		"Require entailment, not compatibility",
-		"Preserve grammatical slots",
-		"plain S1/S2 labels are not enough",
-		"the current speaker is not an unstated applicant",
-		"an identifier is not a description",
-		"same object, field, value, and modality",
-		"A schema supplies field names but no instance values",
-		"Honor requested count/form",
-		"Changing a task attribute or plan alternative does not expire its ongoing operation boundaries",
-		"report operations only when user text or verified current-turn tool results establish their outcome",
+		"exact current task",
+		"same object, field, value and modality",
+		"unknown, explicitly pending, hypothetical, questioned and asserted classes",
+		"current canonical citation handles",
+		"Distinguish chat content from external operations",
+		"matching successful current-turn result",
 	} {
 		if !strings.Contains(directive, required) {
 			t.Fatalf("terminal directive missing %q: %s", required, directive)
 		}
+	}
+	if utf8.RuneCountInString(directive) > 1800 {
+		t.Fatalf("terminal directive is too repetitive: %d runes", utf8.RuneCountInString(directive))
 	}
 }
 
@@ -292,17 +245,11 @@ func TestCompleteUserSourceLedgerSeparatesAuthorityFromAssistantContext(t *testi
 	block := UserSourceLedgerBlock(ledger)
 	for _, want := range []string{
 		`authority="user_authored_only"`,
-		"locate the exact user fragment that asserts",
-		"change one field adopts only that user-authored change",
-		"same object, field, value, and modality",
-		"A schema supplies a field name but no instance value",
-		"later request to repeat an existing value is not that value's origin",
-		"Require logical entailment rather than compatibility",
-		"Preserve grammatical slots",
-		"an assignment is not a completed action",
-		"the current speaker is not an unstated business actor",
-		"keeps P unknown and does not establish not-P",
-		"One-answer response-method constraints expire",
+		"factual authority for dialogue state",
+		"Resolve explicit updates by object and field",
+		"preserve each statement's modality",
+		"never fill a missing value or operation outcome",
+		"schema, role, example, question or absence of evidence",
 	} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("source ledger block missing %q: %s", want, block)

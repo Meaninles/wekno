@@ -33,8 +33,6 @@ from app.runner import (  # noqa: E402
     claude_auth_env,
     claude_sdk_builtin_tools,
     classify_data_analysis_display_intent,
-    current_turn_file_deliverable_requested,
-    current_turn_local_execution_requested,
     data_analysis_needs_chart_validation,
     data_analysis_post_tool_hook_factory,
     data_analysis_pre_tool_hook_factory,
@@ -73,7 +71,6 @@ from app.runner import (  # noqa: E402
     effective_professional_skill_names,
     provider_transport_retries,
     raw_sdk_error_text,
-    require_current_turn_operation_authorization,
     terminal_background_tool_ids,
     terminal_integrity_fallback_for_payload,
     tool_result_fragments,
@@ -1617,12 +1614,12 @@ EOF""",
         self.assertIn("Never end the run on a tool call, tool result", prompt)
         self.assertIn("Do not request or perform a semantic validation/regeneration pass", prompt)
         self.assertIn("runtime alone may retry once", prompt)
-        self.assertIn("Tool authority and minimality", prompt)
+        self.assertIn("Model-owned tool selection", prompt)
         self.assertIn("Source-aware tool routing", prompt)
-        self.assertIn("start with one `knowledge_search` call", prompt)
+        self.assertIn("start with one `mcp__weknora__knowledge_search` call", prompt)
+        self.assertIn("Never invoke unprefixed aliases", prompt)
         self.assertIn("never use Read, Grep, Glob, LS or Bash to look for them", prompt)
-        self.assertIn("answer directly without retrieval, thinking/planning tools", prompt)
-        self.assertIn("file/downloadable deliverable", prompt)
+        self.assertIn("Answer directly when dialogue context is sufficient", prompt)
         self.assertIn("Availability is not intent", prompt)
         self.assertIn("Never call a tool merely to test it, reject it", prompt)
         self.assertIn("never call a tool with missing required arguments", prompt)
@@ -1632,7 +1629,7 @@ EOF""",
         self.assertIn('"P was not stated, shown, or proven"', prompt)
         self.assertIn("neither establishes not-P", prompt)
         self.assertIn("A count or outcome (including zero)", prompt)
-        self.assertIn("equivalent unresolved expressions", prompt)
+        self.assertIn("unknown/not supplied and pending/awaiting are distinct", prompt)
         self.assertIn("Distinguish conversation content from external persistence", prompt)
         self.assertIn("does not establish the lifecycle of a concrete object", prompt)
         self.assertIn("Naming or assigning a person never proves approval", prompt)
@@ -1652,8 +1649,9 @@ EOF""",
         self.assertIn("Preserve grammatical argument slots", prompt)
         self.assertIn("Treat enumerated conditions, stages, roles, fields, and formats as closed", prompt)
         self.assertIn("even when no earlier assistant-created draft", prompt)
-        self.assertIn("File-operation proof", prompt)
-        self.assertIn("authorization_quote", prompt)
+        self.assertIn("Model-owned tool selection", prompt)
+        self.assertIn("exposed catalog is stable for the effective runtime configuration", prompt)
+        self.assertNotIn("authorization_quote", prompt)
         self.assertIn("Citation closure", prompt)
         self.assertIn("Plain text such as S1/S2", prompt)
         self.assertNotIn("local self-review of citation", prompt)
@@ -1687,7 +1685,7 @@ EOF""",
     def test_shared_production_contract_uses_compact_sidecar_policy_and_tail_task(self):
         shared_system_prompt = (
             "General assistant baseline.\n\n"
-            "[WEKNORA_DIALOGUE_CONTINUITY_V8]\n"
+            "[WEKNORA_DIALOGUE_CONTINUITY_V9]\n"
             "Shared domain-neutral state and operation contract."
         )
         payload = ChatPayload(
@@ -1716,11 +1714,13 @@ EOF""",
         self.assertIn("Apply them once", compact_system)
         self.assertIn("Retrieval answers only its evidence subquestions", compact_system)
         self.assertIn("State-polarity lock", compact_system)
+        self.assertIn("pending/awaiting may appear only when the source explicitly chose it", compact_system)
         self.assertIn("does not prohibit producing the requested chat text", compact_system)
         self.assertIn("never native filesystem search", reminder)
         self.assertIn("answer the whole current request", reminder)
-        self.assertIn("state-polarity lock", reminder)
-        self.assertIn("negative boundaries on files, records, messages, or execution do not block chat text", reminder)
+        self.assertIn("reproduce the newest source label without normalization", reminder)
+        self.assertIn("unknown/not supplied must stay unknown/not supplied", reminder)
+        self.assertIn("call only tools that materially contribute to the requested outcome", reminder)
         self.assertGreater(
             rendered.rindex("汇总全部交付项并重新检索依据。"),
             rendered.rindex("one field only"),
@@ -1769,10 +1769,11 @@ EOF""",
             "Drafts and summaries may create wording but must honor the requested count/form",
             "role duties, contact routes, commitments",
             "Claim a search, retrieval, read, save, send, update, or other operation only when a matching current-turn result establishes it",
-            "requested chat draft, note, checklist, summary, handoff, report, or final version remains chat text",
-            "identify the verbatim current-user authorization phrase",
+            "Use semantic judgment over the complete current task",
+            "Tool availability never proves that a call is useful",
             "Never call a tool to test, reject, or demonstrate that it is unnecessary",
-            "normally start with one knowledge_search call",
+            "normally start with mcp__weknora__knowledge_search",
+            "Never call the unprefixed names knowledge_search",
             "Never search the SDK working directory with Read, Grep, Glob, LS, or Bash",
             "answer this current user_request rather than an earlier question",
             "actual canonical citation handles returned by this turn",
@@ -1784,105 +1785,140 @@ EOF""",
         for forbidden in ("case_id", "required_claim", "reference_answer", "采购", "培训"):
             self.assertNotIn(forbidden, reminder)
 
-    def test_current_turn_operation_authorization_requires_verbatim_provenance(self):
-        examples = (
-            ("请生成一个可下载的 PDF 文件。", "生成一个可下载的 PDF 文件"),
-            ("Please create the spreadsheet file and attach it.", "create the spreadsheet file"),
-            ("Haz un archivo CSV descargable, por favor.", "Haz un archivo CSV descargable"),
+    def test_configured_tool_catalog_is_query_invariant(self):
+        runtime_tools = [
+            RuntimeToolSpec(name="thinking"),
+            RuntimeToolSpec(name="todo_write"),
+            RuntimeToolSpec(name="knowledge_search", source="knowledge"),
+            RuntimeToolSpec(name="grep_chunks", source="knowledge"),
+        ]
+        skill = ProfessionalSkillSpec(
+            name="configured-skill",
+            display_name="Configured Skill",
+            description="A permission-checked configured workflow.",
         )
-        for request, quote in examples:
-            with self.subTest(request=request):
-                self.assertEqual(
-                    require_current_turn_operation_authorization(request, quote),
-                    quote,
-                )
-
-    def test_current_turn_operation_authorization_rejects_missing_or_invented_quote(self):
-        request = "只在聊天里修改方案，不要修改文件。"
-        for quote in ("", "请修改文件", "上一轮让我创建文件", "不要修改文件"):
-            with self.subTest(quote=quote):
-                with self.assertRaises(RuntimeError):
-                    require_current_turn_operation_authorization(request, quote)
-
-    def test_file_and_execution_capability_detection_is_cross_language_and_rejects_meta_negatives(self):
-        positive_files = (
-            "请生成一个可下载的 PDF 文件。",
-            "Please create the spreadsheet file and attach it.",
-            "Haz un archivo CSV descargable, por favor.",
-            "分析这些数据，并导出为 report.xlsx。",
-        )
-        negative_files = (
-            "分析为什么不能执行导出。",
-            "不要生成 PDF。",
-            "修改方案，但不要修改文件。",
-            "包含‘不安装’的知识问答，解释即可。",
-            "What does ‘create a file’ mean?",
-            "Si tuvieras que crear un archivo, ¿cómo lo harías?",
-        )
-        for request in positive_files:
-            with self.subTest(request=request):
-                self.assertTrue(current_turn_file_deliverable_requested(request))
-        for request in negative_files:
-            with self.subTest(request=request):
-                self.assertFalse(current_turn_file_deliverable_requested(request))
-
-        for request in (
-            "运行这个 Python 脚本。",
-            "Please execute the shell command.",
-            "Ejecuta este script.",
-        ):
-            with self.subTest(request=request):
-                self.assertTrue(current_turn_local_execution_requested(request))
-        for request in (
-            "分析为什么不能执行命令。",
-            "Do not run the script; explain it.",
-            "No ejecutes el comando.",
-        ):
-            with self.subTest(request=request):
-                self.assertFalse(current_turn_local_execution_requested(request))
-
-    def test_general_agent_negative_file_request_does_not_expose_artifact_or_local_tools(self):
-        captured = {}
-
-        def fake_tool(name, description, schema):
-            def decorator(handler):
-                captured[name] = {
-                    "description": description,
-                    "schema": schema,
-                    "handler": handler,
-                }
-                return handler
-
-            return decorator
-
-        fake_sdk = types.SimpleNamespace(
-            tool=fake_tool,
-            create_sdk_mcp_server=lambda name, version, tools: {
-                "name": name,
-                "version": version,
-                "tools": tools,
-            },
-        )
-        payload = ChatPayload(
-            run_id="run-artifact-authority",
-            session_id="session-artifact-authority",
-            assistant_message_id="assistant-artifact-authority",
-            query="只在聊天里给我一段摘要，不要写文件。",
+        base = dict(
+            run_id="run-static-catalog",
+            session_id="session-static-catalog",
+            assistant_message_id="assistant-static-catalog",
             enable_artifacts=True,
-            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            professional_skills=[skill],
+            tools=runtime_tools,
+            runtime_config=RuntimeConfigSpec(
+                agent_type="general-agent",
+                allowed_tools=[spec.name for spec in runtime_tools],
+                knowledge_bases=["kb-configured"],
+                professional_skills_enabled=True,
+                allowed_professional_skills=[skill.name],
+            ),
             llm=LLMConfig(model_name="claude-test", api_key="test-key"),
             tool_callback_url="http://runtime-entry:8080/internal/tools/call",
         )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = ArtifactStore(Path(temp_dir), payload)
-            with mock.patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
-                build_weknora_server(payload, store)
+        snapshots = []
+        for index, query in enumerate(
+            ("opaque-alpha-01", "opaque-beta-02", "Ω-结构-03", "", "line-a\nline-b")
+        ):
+            payload = ChatPayload(
+                query=query,
+                **{
+                    **base,
+                    "run_id": f"run-static-catalog-{index}",
+                    "session_id": f"session-static-catalog-{index}",
+                    "assistant_message_id": f"assistant-static-catalog-{index}",
+                },
+            )
+            snapshots.append(
+                (
+                    claude_sdk_builtin_tools(payload),
+                    [spec.name for spec in effective_weknora_tool_specs(payload)],
+                    effective_professional_skill_names(payload, [skill.name]),
+                )
+            )
 
-        self.assertNotIn("create_artifact", captured)
-        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+        self.assertTrue(all(snapshot == snapshots[0] for snapshot in snapshots))
+        self.assertEqual(
+            snapshots[0][0],
+            ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"],
+        )
+        self.assertEqual(
+            snapshots[0][1],
+            ["thinking", "todo_write", "knowledge_search", "grep_chunks"],
+        )
+        self.assertEqual(snapshots[0][2], ["configured-skill"])
 
-    def test_general_agent_positive_file_request_exposes_guarded_artifact_tool(self):
+    def test_native_tool_catalog_is_stable_across_mounted_resources(self):
+        base = dict(
+            run_id="run-config-catalog",
+            session_id="session-config-catalog",
+            assistant_message_id="assistant-config-catalog",
+            query="opaque-request",
+            runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
+            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
+            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        )
+        plain = ChatPayload(**base)
+        full_workspace = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"]
+        self.assertEqual(claude_sdk_builtin_tools(plain), full_workspace)
+
+        selected_knowledge_original = plain.model_copy(
+            update={
+                "original_input_files": [
+                    OriginalInputFileSpec(
+                        id="knowledge-original",
+                        source="weknora_selected_knowledge_original",
+                        role="selected_knowledge_original_file",
+                        file_name="source.bin",
+                    )
+                ]
+            }
+        )
+        self.assertEqual(claude_sdk_builtin_tools(selected_knowledge_original), full_workspace)
+
+        uploaded = plain.model_copy(
+            update={
+                "original_input_files": [
+                    OriginalInputFileSpec(
+                        id="user-original",
+                        source="weknora_chat_upload_original",
+                        role="user_uploaded_original_file",
+                        file_name="source.bin",
+                    )
+                ]
+            }
+        )
+        self.assertEqual(claude_sdk_builtin_tools(uploaded), full_workspace)
+
+        artifacts = plain.model_copy(update={"enable_artifacts": True})
+        self.assertEqual(claude_sdk_builtin_tools(artifacts), full_workspace)
+
+        skills = plain.model_copy(
+            update={
+                "professional_skills": [
+                    ProfessionalSkillSpec(
+                        name="configured-skill",
+                        display_name="Configured Skill",
+                    )
+                ]
+            }
+        )
+        self.assertEqual(claude_sdk_builtin_tools(skills), full_workspace)
+
+        web = plain.model_copy(
+            update={
+                "runtime_config": RuntimeConfigSpec(
+                    agent_type="general-agent",
+                    web_search_enabled=True,
+                    claude_sdk_web_search_enabled=True,
+                )
+            }
+        )
+        self.assertEqual(
+            claude_sdk_builtin_tools(web),
+            [*full_workspace, "WebSearch", "WebFetch"],
+        )
+
+    def test_general_agent_artifact_tool_is_configuration_driven(self):
         captured = {}
 
         def fake_tool(name, description, schema):
@@ -1905,10 +1941,10 @@ EOF""",
             },
         )
         payload = ChatPayload(
-            run_id="run-artifact-authority-positive",
-            session_id="session-artifact-authority-positive",
-            assistant_message_id="assistant-artifact-authority-positive",
-            query="请生成一个可下载的 PDF 文件。",
+            run_id="run-configured-artifact",
+            session_id="session-configured-artifact",
+            assistant_message_id="assistant-configured-artifact",
+            query="opaque-request",
             enable_artifacts=True,
             runtime_config=RuntimeConfigSpec(agent_type="general-agent"),
             llm=LLMConfig(model_name="claude-test", api_key="test-key"),
@@ -1921,165 +1957,59 @@ EOF""",
                 build_weknora_server(payload, store)
 
         artifact_tool = captured["create_artifact"]
-        self.assertIn("authorization_quote", artifact_tool["schema"]["required"])
-        self.assertIn("exact current-user phrase", artifact_tool["description"])
-        result = asyncio.run(
-            artifact_tool["handler"](
-                {"filename": "summary.txt", "file_path": "summary.txt"}
-            )
-        )
-        self.assertTrue(result["is_error"])
-        self.assertIn("authorization quote is required", result["content"][0]["text"])
-
-    def test_read_only_kb_mode_hides_planning_tools_but_keeps_retrieval(self):
-        payload = ChatPayload(
-            run_id="run-kb-tool-scope",
-            session_id="session-kb-tool-scope",
-            assistant_message_id="assistant-kb-tool-scope",
-            query="查知识库并给引用。",
-            enable_artifacts=True,
-            tools=[
-                RuntimeToolSpec(name="thinking"),
-                RuntimeToolSpec(name="todo_write"),
-                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
-                RuntimeToolSpec(name="grep_chunks", source="knowledge"),
-            ],
-            runtime_config=RuntimeConfigSpec(
-                agent_type="general-agent",
-                knowledge_bases=["kb-unseen"],
-            ),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
-        )
-
-        self.assertEqual(claude_sdk_builtin_tools(payload), [])
         self.assertEqual(
-            effective_professional_skill_names(payload, ["unseen-research-skill"]),
-            [],
+            artifact_tool["schema"]["required"],
+            ["filename", "file_path"],
         )
-        self.assertEqual(
-            [spec.name for spec in effective_weknora_tool_specs(payload)],
-            ["knowledge_search", "grep_chunks"],
-        )
+        self.assertNotIn("authorization_quote", artifact_tool["schema"]["properties"])
+        self.assertNotIn("verbatim", artifact_tool["description"].lower())
 
-    def test_configured_professional_skills_do_not_escape_ordinary_kb_read_only_mode(self):
-        payload = ChatPayload(
-            run_id="run-kb-default-skills",
-            session_id="session-kb-default-skills",
-            assistant_message_id="assistant-kb-default-skills",
-            query="查知识库并说明适用规则。",
-            enable_artifacts=True,
-            professional_skills=[
-                ProfessionalSkillSpec(
-                    name="unseen-research-skill",
-                    display_name="Unseen Research",
-                    description="A configured research workflow.",
-                )
-            ],
-            tools=[
-                RuntimeToolSpec(name="thinking"),
-                RuntimeToolSpec(name="todo_write"),
-                RuntimeToolSpec(name="knowledge_search", source="knowledge"),
-            ],
-            runtime_config=RuntimeConfigSpec(
-                agent_type="general-agent",
-                knowledge_bases=["kb-cross-domain"],
-            ),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
-        )
+        disabled_payload = payload.model_copy(update={"enable_artifacts": False})
+        disabled_captured = {}
 
-        self.assertEqual(claude_sdk_builtin_tools(payload), [])
-        self.assertEqual(
-            [spec.name for spec in effective_weknora_tool_specs(payload)],
-            ["knowledge_search"],
-        )
+        def disabled_tool(name, description, schema):
+            def decorator(handler):
+                disabled_captured[name] = True
+                return handler
 
-        named = payload.model_copy(
-            update={"query": "Use Unseen Research for this investigation."}
-        )
-        self.assertEqual(
-            claude_sdk_builtin_tools(named),
-            ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"],
-        )
-        self.assertEqual(
-            effective_professional_skill_names(named, ["unseen-research-skill"]),
-            ["unseen-research-skill"],
-        )
+            return decorator
 
-    def test_selected_knowledge_original_is_not_user_local_file_authority(self):
-        payload = ChatPayload(
-            run_id="run-kb-original",
-            session_id="session-kb-original",
-            assistant_message_id="assistant-kb-original",
-            query="Summarize the selected knowledge base with citations.",
-            original_input_files=[
-                OriginalInputFileSpec(
-                    id="knowledge-original",
-                    source="weknora_selected_knowledge_original",
-                    role="selected_knowledge_original_file",
-                    file_name="manual.pdf",
-                )
-            ],
-            runtime_config=RuntimeConfigSpec(
-                agent_type="general-agent",
-                knowledge_ids=["knowledge-unseen"],
-            ),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
+        disabled_sdk = types.SimpleNamespace(
+            tool=disabled_tool,
+            create_sdk_mcp_server=lambda name, version, tools: {
+                "name": name,
+                "version": version,
+                "tools": tools,
+            },
         )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir), disabled_payload)
+            with mock.patch.dict(sys.modules, {"claude_agent_sdk": disabled_sdk}):
+                build_weknora_server(disabled_payload, store)
+        self.assertNotIn("create_artifact", disabled_captured)
 
-        self.assertEqual(claude_sdk_builtin_tools(payload), [])
+    def test_tool_catalog_implementation_does_not_read_user_query(self):
+        import inspect
+        import app.runner as runner_module
 
-        uploaded = payload.model_copy(
-            update={
-                "original_input_files": [
-                    OriginalInputFileSpec(
-                        id="chat-original",
-                        source="weknora_chat_upload_original",
-                        role="user_uploaded_original_file",
-                        file_name="manual.pdf",
-                    )
-                ]
-            }
+        functions = (
+            runner_module.claude_sdk_builtin_tools,
+            runner_module.effective_weknora_tool_specs,
+            runner_module.effective_professional_skill_names,
+            runner_module.general_agent_artifact_capability_enabled,
         )
-        self.assertEqual(
-            claude_sdk_builtin_tools(uploaded),
-            ["Read", "Glob", "Grep", "LS"],
-        )
-
-    def test_explicit_file_or_execution_request_restores_only_needed_local_capability(self):
-        base = dict(
-            run_id="run-local-capability",
-            session_id="session-local-capability",
-            assistant_message_id="assistant-local-capability",
-            enable_artifacts=True,
-            runtime_config=RuntimeConfigSpec(
-                agent_type="general-agent",
-                knowledge_bases=["kb-unseen"],
-            ),
-            llm=LLMConfig(model_name="claude-test", api_key="test-key"),
-            tool_callback_url="http://runtime-entry:8080/internal/tools/call",
-        )
-        file_payload = ChatPayload(query="Create a downloadable PDF file.", **base)
-        self.assertEqual(
-            claude_sdk_builtin_tools(file_payload),
-            ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"],
-        )
-
-        execution_payload = ChatPayload(query="Run this shell command.", **base)
-        self.assertEqual(claude_sdk_builtin_tools(execution_payload), ["Bash"])
-
-        attachment_payload = ChatPayload(
-            query="Summarize the attached document in chat.",
-            attachments=[AttachmentSpec(file_name="manual.pdf", content="extracted")],
-            **base,
-        )
-        self.assertEqual(
-            claude_sdk_builtin_tools(attachment_payload),
-            ["Read", "Glob", "Grep", "LS"],
-        )
-
+        source = "\n".join(inspect.getsource(function) for function in functions)
+        self.assertNotIn("payload.query", source)
+        for removed_name in (
+            "CAPABILITY_CLAUSE_SPLIT_RE",
+            "CAPABILITY_NEGATION_RE",
+            "current_turn_file_deliverable_requested",
+            "current_turn_local_execution_requested",
+            "general_agent_has_local_input_context",
+            "general_agent_read_only_knowledge_mode",
+            "require_current_turn_operation_authorization",
+        ):
+            self.assertFalse(hasattr(runner_module, removed_name), removed_name)
     def test_build_prompt_uses_stable_user_sources_and_marks_assistant_history(self):
         payload = ChatPayload(
             run_id="run-source-ledger",

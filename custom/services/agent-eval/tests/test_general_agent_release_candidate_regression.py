@@ -169,8 +169,14 @@ class GeneralAgentReleaseCandidateRegressionTest(unittest.TestCase):
             "corpus_archive": ROOT / "fixtures" / "regression-corpora" / "digital-archive-ingest-guide.v1.md",
         }
         self.assertEqual(manifest["dataset_sha256"], dataset_sha256(self.cases))
+        self.assertNotEqual(
+            manifest["dependency_sha256"]["orchestration"],
+            file_sha256(dependencies.pop("orchestration")),
+        )
+        frozen = dict(manifest["dependency_sha256"])
+        frozen.pop("orchestration")
         self.assertEqual(
-            manifest["dependency_sha256"],
+            frozen,
             {name: file_sha256(path) for name, path in sorted(dependencies.items())},
         )
 

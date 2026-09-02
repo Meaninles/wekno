@@ -333,6 +333,19 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
             -CorpusVersion "meridian-privacy-request-v1"
         if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary privacy knowledge base" }
     }
+    $datasetUsesRagPrimaryWater = $datasetText.Contains(
+        '${AGENT_EVAL_KB_RAG_PRIMARY_WATER_ID}'
+    )
+    if ($datasetUsesRagPrimaryWater) {
+        & (Join-Path $PSScriptRoot "prepare-fresh-generalization-kb.ps1") `
+            -Fixture (Join-Path $PSScriptRoot "fixtures/regression-corpora/water-quality-incident-guide.v1.md") `
+            -BindingOutput (Join-Path $PSScriptRoot "artifacts/rag-primary-water-kb-binding.v1.json") `
+            -EnvironmentKey "AGENT_EVAL_KB_RAG_PRIMARY_WATER_ID" `
+            -KnowledgeBaseName "Eval回归-Rivermark水质事件指南-v1" `
+            -UploadName "water-quality-incident-guide.v1.md" `
+            -CorpusVersion "rivermark-water-quality-incident-v1"
+        if ($LASTEXITCODE -ne 0) { throw "failed to prepare RAG-primary water-quality knowledge base" }
+    }
     $datasetUsesPostTerminalQuality = $datasetText.Contains(
         '${AGENT_EVAL_KB_POST_TERMINAL_QUALITY_ID}'
     )
@@ -422,6 +435,11 @@ if ([string]::IsNullOrWhiteSpace($Run)) {
         if ($datasetUsesRagPrimaryPrivacy) {
             $bindingArtifactPaths.Add(
                 (Join-Path $PSScriptRoot "artifacts/rag-primary-privacy-kb-binding.v1.json")
+            )
+        }
+        if ($datasetUsesRagPrimaryWater) {
+            $bindingArtifactPaths.Add(
+                (Join-Path $PSScriptRoot "artifacts/rag-primary-water-kb-binding.v1.json")
             )
         }
         if ($datasetUsesReleaseCandidateArchive) {

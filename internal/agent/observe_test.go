@@ -167,6 +167,9 @@ func TestBuildRuntimeContextBlock_PinnedDocuments(t *testing.T) {
 	assert.Contains(t, block, `file_type="pdf"`)
 	assert.Contains(t, block, "list_knowledge_chunks")
 	assert.Contains(t, block, "targeted grep_chunks")
+	assert.Contains(t, block, "complete claim-bearing content with a current citation handle as sufficient")
+	assert.Contains(t, block, "load an exact chunk_id only for")
+	assert.NotContains(t, block, "then deep-read exact chunk_id hits")
 	assert.Contains(t, block, "bounded tool context")
 	assert.NotContains(t, block, "<must_use>")
 }

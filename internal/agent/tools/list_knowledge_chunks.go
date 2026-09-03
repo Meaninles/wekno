@@ -17,10 +17,11 @@ var listKnowledgeChunksTool = BaseTool{
 	name: ToolListKnowledgeChunks,
 	description: `Retrieve full chunk content for a document or a single FAQ entry.
 
-## Use After grep_chunks or knowledge_search:
-- **FAQ hit** (type faq): list_knowledge_chunks(faq_id="<chunk_id from search>") — reads that one FAQ entry with answers from metadata.
-- **Exact document hit (preferred)**: list_knowledge_chunks(chunk_id="<chunk_id from search>") — deep-reads that exact text chunk plus one adjacent text chunk on each side so clauses split at chunk boundaries remain complete.
-- **Whole document (exhaustive review only)**: list_knowledge_chunks(knowledge_id="<document id>") — pages through chunks. For pinpoint questions or multiple named topics, first use a targeted grep_chunks or knowledge_search query, then deep-read exact chunk_id hits; otherwise bounded tool output can hide later evidence.
+## Use to complete insufficient grep_chunks or knowledge_search evidence:
+- Do not call this tool when a search result already contains complete claim-bearing content plus a current canonical citation handle.
+- **Incomplete FAQ hit** (type faq): list_knowledge_chunks(faq_id="<chunk_id from search>") — reads that one FAQ entry with answers from metadata.
+- **Incomplete document hit**: list_knowledge_chunks(chunk_id="<chunk_id from search>") — loads that exact text chunk plus one adjacent text chunk on each side when the search result is truncated, catalog-only, ambiguous, handle-less, or needs exact surrounding context.
+- **Whole document (exhaustive review only)**: list_knowledge_chunks(knowledge_id="<document id>") — pages through chunks. For pinpoint questions or multiple named topics, first use a targeted grep_chunks or knowledge_search query, then load only evidence gaps; otherwise bounded tool output can hide later evidence.
 
 ## Parameters (provide exactly one id target):
 - faq_id (optional): FAQ entry ID from grep_chunks / knowledge_search.

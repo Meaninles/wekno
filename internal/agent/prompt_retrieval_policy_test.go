@@ -62,8 +62,8 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"Never expose intent classification, chain-of-thought, self-talk, tool planning, or process narration",
 		"Include each requested fact, boundary, source, or external rule once",
 		"Choose the single retrieval method most likely to answer the request",
-		"Mandatory Deep Read",
-		"Do not rely on search snippets alone",
+		"Evidence Sufficiency",
+		"need not be fetched again",
 		"Absence from one result is not proof that the source lacks the fact",
 		"navigation/search result without a canonical citation handle is not citable",
 		"bound or selected knowledge source only makes retrieval available",
@@ -83,6 +83,14 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 	}
 	if strings.Contains(section, "Otherwise, proceed to retrieval") {
 		t.Error("progressive RAG prompt still contains the unconditional retrieval branch")
+	}
+	for _, forbidden := range []string{
+		"Mandatory Deep Read",
+		"Whenever grep_chunks or knowledge_search returns matches, you **MUST** read full content",
+	} {
+		if strings.Contains(section, forbidden) {
+			t.Errorf("progressive RAG prompt still contains unconditional deep-read guidance %q", forbidden)
+		}
 	}
 }
 

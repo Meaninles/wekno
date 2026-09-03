@@ -39,6 +39,8 @@ const (
 	ToolWikiUpdateIssue   = "wiki_update_issue"
 )
 
+const retrievalEvidenceSufficiencyInstruction = "A result containing complete claim-bearing physical content and a current canonical citation_handle_for_this_evidence is directly citable and need not be fetched again. Call list_knowledge_chunks only when evidence is truncated, catalog-only, ambiguous, lacks a current citation handle, or needs an exact quote, table, or surrounding context; never re-read complete evidence."
+
 // AvailableTool defines a simple tool metadata used by settings APIs.
 type AvailableTool struct {
 	Name        string `json:"name"`

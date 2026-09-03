@@ -264,7 +264,7 @@ func buildRuntimeContextBlock(
 		}
 		sb.WriteString("  </pinned_documents>\n")
 		sb.WriteString("  <note>The pinned-document set above is authoritative for THIS turn. ")
-		sb.WriteString("Keep retrieval inside these documents. For a pinpoint question or multiple named topics, use a targeted grep_chunks or knowledge_search query, then deep-read exact chunk_id hits. ")
+		sb.WriteString("Keep retrieval inside these documents. For a pinpoint question or multiple named topics, use a targeted grep_chunks or knowledge_search query. Treat complete claim-bearing content with a current citation handle as sufficient; load an exact chunk_id only for a truncated, catalog-only, ambiguous, handle-less, or context-dependent evidence gap. ")
 		sb.WriteString("Use list_knowledge_chunks with a knowledge_id only for a genuinely exhaustive sequential review; a whole-document dump can exceed the bounded tool context and hide later evidence. ")
 		sb.WriteString("If an earlier turn analysed a different document, do NOT reuse that analysis — re-query against the current scope.</note>\n")
 	}

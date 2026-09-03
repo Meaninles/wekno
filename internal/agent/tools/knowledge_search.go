@@ -1157,10 +1157,10 @@ func (t *KnowledgeSearchTool) formatOutput(
 	var ob strings.Builder
 	ob.WriteString(fmt.Sprintf("<search_results count=\"%d\">\n", len(results)))
 	ob.WriteString(
-		"<deep_read_instruction>For an exact document hit, call list_knowledge_chunks with its chunk_id. " +
+		"<evidence_sufficiency_instruction>" + retrievalEvidenceSufficiencyInstruction + " " +
 			"chunk_index is a logical chunk ordinal, never a page, sheet row, source line, JSON item, image frame, or audio time. " +
 			"Never convert chunk_index into offset; knowledge_id paging uses the returned next_offset. " +
-			"For source citations use source_locator and record keys in the content only.</deep_read_instruction>\n",
+			"For source citations use source_locator and record keys in the content only.</evidence_sufficiency_instruction>\n",
 	)
 	for _, q := range queries {
 		ob.WriteString(fmt.Sprintf("<query>%s</query>\n", xmlEscape(q)))

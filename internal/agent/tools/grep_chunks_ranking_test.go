@@ -2,10 +2,49 @@ package tools
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
 )
+
+func TestRetrievalToolDescriptionsUseEvidenceSufficiency(t *testing.T) {
+	for name, description := range map[string]string{
+		ToolGrepChunks:          grepChunksTool.description,
+		ToolListKnowledgeChunks: listKnowledgeChunksTool.description,
+	} {
+		if !strings.Contains(description, "complete claim-bearing content") ||
+			!strings.Contains(description, "current canonical citation handle") {
+			t.Fatalf("%s description does not recognize sufficient search evidence: %s", name, description)
+		}
+		for _, forbidden := range []string{"Deep read after grep", "then deep-read exact chunk_id hits"} {
+			if strings.Contains(description, forbidden) {
+				t.Fatalf("%s description still contains unconditional deep-read guidance %q", name, forbidden)
+			}
+		}
+	}
+}
+
+func TestRetrievalResultsUseSharedEvidenceSufficiencyInstruction(t *testing.T) {
+	for _, required := range []string{
+		"complete claim-bearing physical content",
+		"directly citable and need not be fetched again",
+		"only when evidence is truncated",
+		"never re-read complete evidence",
+	} {
+		if !strings.Contains(retrievalEvidenceSufficiencyInstruction, required) {
+			t.Fatalf("shared retrieval instruction omitted %q: %s", required, retrievalEvidenceSufficiencyInstruction)
+		}
+	}
+	for _, forbidden := range []string{
+		"For an exact document hit, call list_knowledge_chunks",
+		"before citing it",
+	} {
+		if strings.Contains(retrievalEvidenceSufficiencyInstruction, forbidden) {
+			t.Fatalf("shared retrieval instruction still contains unconditional deep-read guidance %q", forbidden)
+		}
+	}
+}
 
 func TestCompileGrepRankingPatternsSplitsOnlyTopLevelAlternation(t *testing.T) {
 	query := `onboarding|incident(?:response|review)|gamma\|delta|calibration|model[|]variant`

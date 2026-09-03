@@ -35,9 +35,10 @@ Examples:
 IMPORTANT — JSON escaping: every backslash in a regex MUST be written as \\ inside the JSON tool arguments (e.g. to search for literal "C++" write "C\\+\\+", NOT "C\+\+"; for "\d+" write "\\d+"). Plain "\+" / "\d" etc. are invalid JSON escapes and will fail to parse.
 Use this to locate candidate chunks by exact identifiers, error codes, product names, or recurring terms.
 
-## Deep read after grep:
-- **FAQ hit** (chunk type faq): call list_knowledge_chunks with **faq_id** from the grep result (NOT the parent knowledge_id).
-- **Document hit (preferred)**: call list_knowledge_chunks with the exact **chunk_id** from the grep result, so the cited evidence remains local to the matching claim.
+## Evidence completion after grep:
+- A result containing complete claim-bearing content and a current canonical citation handle is already citable; do not fetch it again.
+- **Incomplete FAQ hit** (chunk type faq): call list_knowledge_chunks with **faq_id** from the grep result (NOT the parent knowledge_id).
+- **Incomplete document hit**: call list_knowledge_chunks with the exact **chunk_id** when the result is truncated, catalog-only, ambiguous, lacks a current citation handle, or needs neighboring context or exact quote/table text.
 - Use **knowledge_id** only when the user actually asks to read or paginate the whole document; do not load every chunk merely to verify one matching provision.
 - Use get_document_info with **knowledge_ids** only for document-level metadata, not for claim-bearing content.`,
 	schema: json.RawMessage(`{
@@ -614,11 +615,11 @@ func (t *GrepChunksTool) formatOutput(
 	}
 
 	b.WriteString(
-		"<deep_read_instruction>Grep is a navigation step. A displayed snippet without a current canonical citation_handle_for_this_evidence is not claim-bearing citation evidence. " +
-			"For an exact document hit, call list_knowledge_chunks with its chunk_id before citing it. " +
+		"<evidence_sufficiency_instruction>" + retrievalEvidenceSufficiencyInstruction + " " +
+			"A displayed grep snippet without a current canonical citation_handle_for_this_evidence is navigation context, not claim-bearing citation evidence. " +
 			"chunk_index is a logical chunk ordinal, never a page, sheet row, source line, JSON item, image frame, or audio time. " +
 			"Never convert chunk_index into offset; knowledge_id paging uses the returned next_offset. " +
-			"Use only the canonical citation handle returned beside claim-bearing physical content; never reuse a prior-turn handle.</deep_read_instruction>\n",
+			"Use only the canonical citation handle returned beside claim-bearing physical content; never reuse a prior-turn handle.</evidence_sufficiency_instruction>\n",
 	)
 	for _, r := range results {
 		counts := countRegexHits(r.Content, compiled, queries)

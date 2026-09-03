@@ -27,8 +27,26 @@ func TestCompileGrepRankingPatternsCrossDomainComparisonQuery(t *testing.T) {
 	if len(parts) != 6 || len(compiled) != 6 {
 		t.Fatalf("ranking branches = %v (%d compiled), want 6", parts, len(compiled))
 	}
-	if grepChunksResultLimit != 30 {
-		t.Fatalf("multi-topic ranking changed the established result limit: %d", grepChunksResultLimit)
+	if limit := grepResultLimit(len(compiled)); limit != 12 {
+		t.Fatalf("multi-topic result limit = %d, want 12", limit)
+	}
+}
+
+func TestGrepResultLimitScalesWithQueryBreadth(t *testing.T) {
+	tests := []struct {
+		patterns int
+		want     int
+	}{
+		{patterns: 1, want: 30},
+		{patterns: 2, want: 18},
+		{patterns: 3, want: 18},
+		{patterns: 4, want: 12},
+		{patterns: 8, want: 12},
+	}
+	for _, test := range tests {
+		if got := grepResultLimit(test.patterns); got != test.want {
+			t.Fatalf("grepResultLimit(%d) = %d, want %d", test.patterns, got, test.want)
+		}
 	}
 }
 

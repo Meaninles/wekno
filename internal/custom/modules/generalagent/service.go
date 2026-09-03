@@ -610,6 +610,7 @@ func emitSidecarProductionCandidate(
 	answer string,
 	availableRefs []*types.SearchResult,
 ) (string, []*types.SearchResult, sourcerefs.CitationValidationReport) {
+	answer = sourcerefs.RepairAnswerCitations(answer, availableRefs)
 	filtered, citedRefs, report := sourcerefs.FilterAnswerCitations(answer, availableRefs)
 	filtered = strings.TrimSpace(filtered)
 	eventBus.Emit(ctx, event.Event{

@@ -63,7 +63,16 @@ type GrepChunksInput struct {
 	Query string `json:"query,omitempty"`
 }
 
-const grepChunksResultLimit = 30
+func grepResultLimit(patternCount int) int {
+	switch {
+	case patternCount >= 4:
+		return 12
+	case patternCount >= 2:
+		return 18
+	default:
+		return 30
+	}
+}
 
 // compileGrepRankingPatterns preserves the original regex for database recall
 // while splitting only safe, top-level alternation branches for ranking. A
@@ -204,7 +213,7 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	// Preserve the established production result budget. Coverage selection
 	// below changes which results occupy that budget, not the amount of context
 	// or the maximum result count exposed to the model.
-	limit := grepChunksResultLimit
+	limit := grepResultLimit(len(rankingCompiled))
 
 	kbTenantMap := t.searchTargets.GetKBTenantMap()
 	fullKBIDs, knowledgeIDs, tagTargets := t.resolveGrepScope()

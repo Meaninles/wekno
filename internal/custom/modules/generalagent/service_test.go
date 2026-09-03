@@ -452,6 +452,38 @@ func TestEmitSidecarProductionCandidateFiltersUnsupportedCitationsBeforeSSE(t *t
 	}
 }
 
+func TestEmitSidecarProductionCandidateRepairsMissingCitationBeforeSSE(t *testing.T) {
+	bus := event.NewEventBus()
+	var got []event.AgentFinalAnswerData
+	bus.On(event.EventAgentFinalAnswer, func(ctx context.Context, evt event.Event) error {
+		data, _ := evt.Data.(event.AgentFinalAnswerData)
+		got = append(got, data)
+		return nil
+	})
+	ref := &types.SearchResult{
+		ID: "retention", Content: "The audit service retains immutable security logs for ninety days after each completed operation.",
+		EvidenceContent: "The audit service retains immutable security logs for ninety days after each completed operation.",
+		KnowledgeID:     "security-manual", KnowledgeBaseID: "kb-security", KnowledgeTitle: "安全手册.md",
+		ChunkType: string(types.ChunkTypeText),
+	}
+	sourcerefs.AssignCitationIDs([]*types.SearchResult{ref})
+
+	answer, cited, report := emitSidecarProductionCandidate(
+		context.Background(), bus, "session-2", "request-2", "answer-2",
+		"The audit service retains immutable security logs for ninety days after each completed operation.", []*types.SearchResult{ref},
+	)
+
+	if answer != `The audit service retains immutable security logs for ninety days after each completed operation.<src id="S1" />` {
+		t.Fatalf("production answer did not receive the unambiguous current-turn citation: %q", answer)
+	}
+	if len(cited) != 1 || report.EvidenceAvailableUncited {
+		t.Fatalf("citation result = cited:%d report:%+v", len(cited), report)
+	}
+	if len(got) != 2 || got[0].Content != answer || got[0].Done || !got[1].Done {
+		t.Fatalf("SSE did not receive the repaired production candidate: %+v", got)
+	}
+}
+
 func TestEmitSidecarProgressUsesAgentProgress(t *testing.T) {
 	svc := &Service{}
 	bus := event.NewEventBus()

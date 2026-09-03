@@ -194,6 +194,7 @@ Now generate the final answer:`, query)
 	// anywhere, while leaving all claim text untouched. This keeps SSE,
 	// persistence, and history replay byte-equivalent without an extra model
 	// call or any Eval-only rewrite.
+	fullAnswer = sourcerefs.RepairAnswerCitations(fullAnswer, citationRefs)
 	filteredAnswer, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(fullAnswer, citationRefs)
 	fullAnswer = strings.TrimSpace(filteredAnswer)
 	state.KnowledgeRefs = citedRefs

@@ -62,6 +62,8 @@ func TestProgressiveRAGPromptRoutesByEvidenceNeed(t *testing.T) {
 		"Never expose intent classification, chain-of-thought, self-talk, tool planning, or process narration",
 		"Include each requested fact, boundary, source, or external rule once",
 		"Choose the single retrieval method most likely to answer the request",
+		"Mandatory Deep Read",
+		"Do not rely on search snippets alone",
 		"Absence from one result is not proof that the source lacks the fact",
 		"navigation/search result without a canonical citation handle is not citable",
 		"bound or selected knowledge source only makes retrieval available",

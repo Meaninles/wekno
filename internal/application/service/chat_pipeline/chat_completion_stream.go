@@ -238,6 +238,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		// persistence, and history replay receive identical bytes. Unsupported or
 		// prior-turn handles are removed; no claim text is rewritten and no model
 		// call is added.
+		answer = sourcerefs.RepairAnswerCitations(answer, chatManage.CitationResult)
 		answer, _, citationReport := sourcerefs.FilterAnswerCitations(answer, chatManage.CitationResult)
 		answer = strings.TrimSpace(answer)
 		if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {

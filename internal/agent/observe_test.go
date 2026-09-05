@@ -88,9 +88,9 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 			Timestamp: time.Now(),
 		}
 
-		out := engine.appendToolResults(nil, step)
+		out := engine.appendToolResults(nil, step, "answer the current question")
 
-		require.Len(t, out, 2, "expect one assistant + one tool message")
+		require.Len(t, out, 3, "expect assistant + tool + current-task reminder")
 		assert.Equal(t, "assistant", out[0].Role)
 		assert.Equal(t, "I will call search.", out[0].Content)
 		assert.Equal(t, "Detailed chain of thought from MiMo/DeepSeek.", out[0].ReasoningContent,
@@ -103,6 +103,10 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 
 		assert.Equal(t, "tool", out[1].Role)
 		assert.Equal(t, "result text", out[1].Content)
+		assert.Equal(t, "user", out[2].Role)
+		assert.Contains(t, out[2].Content, "answer the current question")
+		assert.Contains(t, out[2].Content, "assert(P) permits P")
+		assert.Contains(t, out[2].Content, "evidence, not a replacement task")
 	})
 
 	t.Run("reasoning_content alone produces an assistant message", func(t *testing.T) {
@@ -115,7 +119,7 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 			Timestamp:        time.Now(),
 		}
 
-		out := engine.appendToolResults(nil, step)
+		out := engine.appendToolResults(nil, step, "current task")
 
 		require.Len(t, out, 1)
 		assert.Equal(t, "assistant", out[0].Role)
@@ -126,7 +130,7 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 
 	t.Run("step without thought/tool_calls/reasoning produces no assistant message", func(t *testing.T) {
 		step := types.AgentStep{Iteration: 0, Timestamp: time.Now()}
-		out := engine.appendToolResults(nil, step)
+		out := engine.appendToolResults(nil, step, "current task")
 		assert.Empty(t, out, "empty steps must not inject empty assistant messages")
 	})
 
@@ -141,13 +145,36 @@ func TestAppendToolResults_PreservesReasoningContent(t *testing.T) {
 			ReasoningContent: "thinking",
 			Timestamp:        time.Now(),
 		}
-		out := engine.appendToolResults(prior, step)
+		out := engine.appendToolResults(prior, step, "current task")
 		require.Len(t, out, 3)
 		assert.Equal(t, "system", out[0].Role)
 		assert.Equal(t, "user", out[1].Role)
 		assert.Equal(t, "assistant", out[2].Role)
 		assert.Equal(t, "thinking", out[2].ReasoningContent)
 	})
+}
+
+func TestAppendToolResults_ReanchorsVerbatimCurrentTaskWithoutClassifyingIt(t *testing.T) {
+	engine := &AgentEngine{}
+	query := "Analyze why the operation is prohibited; do not say it was rejected."
+	step := types.AgentStep{
+		ToolCalls: []types.ToolCall{{
+			ID:   "call_1",
+			Name: "knowledge_search",
+			Result: &types.ToolResult{
+				Success: true,
+				Output:  "evidence",
+			},
+		}},
+	}
+
+	out := engine.appendToolResults(nil, step, query)
+	require.Len(t, out, 3)
+	reminder := out[2].Content
+	assert.Contains(t, reminder, query)
+	assert.Contains(t, reminder, "constrain(output, P) permits neither polarity")
+	assert.NotContains(t, reminder, "case_id")
+	assert.NotContains(t, reminder, "rejected\":true")
 }
 
 func TestBuildRuntimeContextBlock_PinnedDocuments(t *testing.T) {
@@ -172,6 +199,8 @@ func TestBuildRuntimeContextBlock_PinnedDocuments(t *testing.T) {
 	assert.NotContains(t, block, "then deep-read exact chunk_id hits")
 	assert.Contains(t, block, "bounded tool context")
 	assert.NotContains(t, block, "<must_use>")
+	assert.NotContains(t, block, "runtime_observed_at")
+	assert.NotContains(t, block, "<current_time>")
 }
 
 func TestBuildMustUseBlock_MCPAndSkills(t *testing.T) {
@@ -230,7 +259,9 @@ func TestRenderUserTurnContent_IncludesScopeBlocks(t *testing.T) {
 	assert.Contains(t, out, "<runtime_context")
 	assert.Contains(t, out, "<must_use>")
 	assert.Contains(t, out, `<user_request verbatim="true" priority="highest">hello</user_request>`)
-	assert.Contains(t, out, "<weknora_final_response>")
+	assert.Contains(t, out, conversationmemory.TerminalAnswerOpen)
+	assert.Contains(t, out, "no final-answer or final-response tool exists")
+	assert.NotContains(t, out, "inside exactly one <weknora_final_response>")
 	assert.Contains(t, out, "Previous conversation messages are background context")
 	assert.Greater(t, strings.Index(out, "<user_request"), strings.Index(out, "<runtime_context"))
 }
@@ -258,6 +289,23 @@ func TestBuildMessagesWithLLMContext_CurrentTurnRemainsAuthoritative(t *testing.
 		`<user_request verbatim="true" priority="highest">new reserve-fund question</user_request>`)
 	assert.True(t, strings.HasSuffix(messages[3].Content,
 		conversationmemory.TerminalGenerationDirective()))
+}
+
+func TestBuildMessagesWithLLMContext_SeparatesExactTaskFromRuntimeAugmentation(t *testing.T) {
+	engine := &AgentEngine{config: &types.AgentConfig{}}
+	engine.SetCurrentUserRequest("write exactly two sentences")
+	augmented := "write exactly two sentences\n\n[derived attachment text]\n\n" +
+		conversationmemory.AppendCurrentTurnDirective("", "write exactly two sentences")
+
+	messages := engine.buildMessagesWithLLMContext("system", augmented, "session-1", nil, nil)
+	require.Len(t, messages, 2)
+	content := messages[1].Content
+	assert.Contains(t, content, "[derived attachment text]")
+	assert.Contains(t, content, "WEKNORA_CURRENT_TURN_SEMANTICS_V15")
+	assert.Contains(t, content,
+		`<user_request verbatim="true" priority="highest">write exactly two sentences</user_request>`)
+	assert.NotContains(t, content,
+		`<user_request verbatim="true" priority="highest">write exactly two sentences\n\n[derived attachment text]`)
 }
 
 func TestBuildMustUseBlock_MultiWordServicePrefix(t *testing.T) {

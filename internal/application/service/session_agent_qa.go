@@ -95,7 +95,7 @@ func (s *sessionService) AgentQA(
 		if historyTurns <= 0 {
 			historyTurns = 5
 		}
-		llmContext, durableUserContext, err = LoadAgentHistoryWithArchive(ctx, s.messageRepo, sessionID, historyTurns)
+		llmContext, durableUserContext, err = LoadAgentHistoryWithArchive(ctx, s.messageRepo, sessionID, historyTurns, req.UserMessageID, req.AssistantMessageID)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to load agent history from DB: %v, continuing without history", err)
 			llmContext = []chat.Message{}
@@ -174,6 +174,7 @@ func (s *sessionService) AgentQA(
 		agentQuery,
 		req.Query,
 	)
+	engine.SetCurrentUserRequest(req.Query)
 
 	// Scope envelopes (runtime_context / must_use) are injected per LLM call inside
 	// the agent engine only; we intentionally do not persist them on user messages

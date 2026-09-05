@@ -3,8 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,9 +22,9 @@ import (
 
 var knowledgeSearchTool = BaseTool{
 	name: ToolKnowledgeSearch,
-	description: `Semantic/vector search tool for retrieving knowledge by meaning, intent, and conceptual relevance.
+	description: `Primary hybrid knowledge-base search for retrieving evidence by semantic meaning and lexical relevance.
 
-This tool uses embeddings to understand the user's query and find semantically similar content across knowledge base chunks.
+This tool combines vector and keyword retrieval, then reranks the candidates. It is the default first retrieval route for ordinary knowledge questions, including procedures, definitions, named objects, exact identifiers, and FAQ-style questions.
 
 ## Invocation boundary
 Call this tool only when the current request needs knowledge-base evidence. Do
@@ -34,52 +34,13 @@ no-retrieval boundary. Conversely, a knowledge question may still require this
 tool when it merely quotes or discusses a prohibited action; decide from the
 semantic task, not isolated negative words.
 
-## Purpose
-Designed for high-level understanding tasks, such as:
-- conceptual explanations
-- topic overviews
-- reasoning-based information needs
-- contextual or intent-driven retrieval
-- queries that cannot be answered with literal keyword matching
-
-The tool searches by MEANING rather than exact text. It identifies chunks that are conceptually relevant even when the wording differs.
-
-## What the Tool Does NOT Do
-- Does NOT perform exact keyword matching
-- Does NOT search for specific named entities
-- Should NOT be used for literal lookup tasks
-- Should NOT receive long raw text or user messages as queries
-- Should NOT be used to locate specific strings or error codes
-
-For literal/keyword/entity search, another tool should be used.
-
 ## Required Input Behavior
-"queries" must contain **1–5 short, well-formed semantic questions or conceptual statements** that clearly express the meaning the model is trying to retrieve.
+"queries" must contain **1–5 concise, well-formed natural-language evidence needs**. Preserve exact names, identifiers, versions, error codes, or quoted phrases when they are material to the request; do not replace them with broader concepts. Avoid unprocessed long messages, redundant paraphrases, or disconnected keyword lists.
 
-Each query should represent a **concept, idea, topic, explanation, or intent**, such as:
-- abstract topics
-- definitions
-- mechanisms
-- best practices
-- comparisons
-- how/why questions
-
-Avoid:
-- keyword lists
-- raw text from user messages
-- full paragraphs
-- unprocessed input
-
-## Examples of valid query shapes (not content):
-- "What is the main idea of..."
-- "How does X work in general?"
-- "Explain the purpose of..."
-- "What are the key principles behind..."
-- "Overview of ..."
+One focused call is normally enough. Use literal chunk grep or a document read only when this hybrid result is truncated, catalog-only, ambiguous, or lacks a specifically requested exact detail. Do not repeat equivalent searches after sufficient claim-bearing evidence is available.
 
 ## Parameters
-- queries (required): 1–5 semantic questions or conceptual statements.
-  These should reflect the meaning or topic you want embeddings to capture.
+- queries (required): 1–5 concise natural-language evidence questions.
 - knowledge_base_ids (optional): limit the search scope.
 
 When multiple knowledge bases are available and the user names one, resolve
@@ -87,8 +48,7 @@ that name from the system-provided knowledge-base list and pass only its ID in
 knowledge_base_ids. A document title does not prove knowledge-base membership.
 
 ## Output
-Returns chunks ranked by semantic similarity, reranked when applicable.  
-Results represent conceptual relevance, not literal keyword overlap.`,
+Returns hybrid-retrieved chunks ranked by relevance and reranked when applicable.`,
 	schema: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -307,9 +267,12 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 		len(searchTargets))
 	kbTypeMap, kbNameMap := t.getKnowledgeBaseInfo(ctx, kbIDs)
 
-	allResults := t.concurrentSearchByTargets(ctx, queries, searchTargets,
+	allResults, searchErr := t.concurrentSearchByTargets(ctx, queries, searchTargets,
 		topK, vectorThreshold, keywordThreshold, kbTypeMap)
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Concurrent search completed: %d raw results", len(allResults))
+	if searchErr != nil && len(allResults) == 0 {
+		return &types.ToolResult{Success: false, Error: "Knowledge retrieval failed: " + searchErr.Error()}, searchErr
+	}
 
 	// Note: HybridSearch now uses RRF (Reciprocal Rank Fusion) which produces normalized scores
 	// RRF scores are in range [0, ~0.033] (max when rank=1 on both sides: 2/(60+1))
@@ -353,52 +316,18 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 		filteredResults = deduplicatedBeforeRerank
 	}
 
-	// Apply MMR (Maximal Marginal Relevance) to reduce redundancy and improve diversity
-	// Note: composite scoring is already applied inside rerankResults
-	if len(filteredResults) > 0 {
-		// Calculate k for MMR: embedding_top_k controls recall size while
-		// rerank_top_k controls the final post-rerank context size.
-		mmrK := len(filteredResults)
-		if rerankTopK > 0 && mmrK > rerankTopK {
-			mmrK = rerankTopK
-		}
-		if mmrK < 1 {
-			mmrK = 1
-		}
-		// Apply MMR with lambda=0.7 (balance between relevance and diversity)
-		logger.Debugf(
-			ctx,
-			"[Tool][KnowledgeSearch] Applying MMR: k=%d, lambda=0.7, input=%d results",
-			mmrK,
-			len(filteredResults),
-		)
-		mmrResults := t.applyMMR(ctx, filteredResults, mmrK, 0.7)
-		if len(mmrResults) > 0 {
-			filteredResults = mmrResults
-			logger.Infof(ctx, "[Tool][KnowledgeSearch] MMR completed: %d results selected", len(filteredResults))
-		} else {
-			logger.Warnf(ctx, "[Tool][KnowledgeSearch] MMR returned no results, using original results")
-		}
-	}
-
-	// Note: minScore filter is skipped because HybridSearch now uses RRF scores
-	// RRF scores are in range [0, ~0.033], not [0, 1], so old thresholds don't apply
-	// Threshold filtering is already done inside HybridSearch before RRF fusion
-
-	// Final deduplication after rerank (in case rerank changed scores/order but duplicates remain)
-	logger.Debugf(ctx, "[Tool][KnowledgeSearch] Final deduplication after rerank...")
-	deduplicatedResults := t.deduplicateResults(filteredResults)
-	logger.Infof(ctx, "[Tool][KnowledgeSearch] After final deduplication: %d results (from %d)",
-		len(deduplicatedResults), len(filteredResults))
-
-	// Sort results by score (descending)
-	sort.Slice(deduplicatedResults, func(i, j int) bool {
+	// One ranking policy: retrieval order without a reranker, model relevance
+	// with a reranker. Identity dedup already ran before reranking.
+	deduplicatedResults := filteredResults
+	sort.SliceStable(deduplicatedResults, func(i, j int) bool {
 		if deduplicatedResults[i].Score != deduplicatedResults[j].Score {
 			return deduplicatedResults[i].Score > deduplicatedResults[j].Score
 		}
-		// If scores are equal, sort by knowledge ID for consistency
-		return deduplicatedResults[i].KnowledgeID < deduplicatedResults[j].KnowledgeID
+		return searchResultIdentity(deduplicatedResults[i]) < searchResultIdentity(deduplicatedResults[j])
 	})
+	if rerankTopK > 0 && len(deduplicatedResults) > rerankTopK {
+		deduplicatedResults = deduplicatedResults[:rerankTopK]
+	}
 
 	// Log all ranked results (including lower ranks for rerank debugging)
 	if len(deduplicatedResults) > 0 {
@@ -430,6 +359,14 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 	if err != nil {
 		logger.Errorf(ctx, "[Tool][KnowledgeSearch] Failed to format output: %v", err)
 		return result, err
+	}
+	if result.Data != nil {
+		result.Data["retrieval_status"] = "complete"
+		if searchErr != nil {
+			result.Data["retrieval_status"] = "partial"
+			result.Data["retrieval_error"] = searchErr.Error()
+			result.Output = "Retrieval is incomplete: " + searchErr.Error() + ". Available evidence follows; unavailable sources cannot be treated as having no answer.\n\n" + result.Output
+		}
 	}
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Output: %s", result.Output)
 	return result, nil
@@ -474,7 +411,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 	topK int,
 	vectorThreshold, keywordThreshold float64,
 	kbTypeMap map[string]string,
-) []*searchResultWithMeta {
+) ([]*searchResultWithMeta, error) {
 	// Batch-fetch KB records for embedding model grouping
 	kbIDs := searchTargets.GetAllKnowledgeBaseIDs()
 	var kbList []*types.KnowledgeBase
@@ -516,7 +453,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 	}
 	if len(filteredTargets) == 0 {
 		logger.Infof(ctx, "[Tool][KnowledgeSearch] No searchable KBs in scope (all wiki/graph-only); skipping retrieval")
-		return nil
+		return nil, nil
 	}
 	searchTargets = filteredTargets
 
@@ -532,6 +469,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	allResults := make([]*searchResultWithMeta, 0)
+	var failures []error
 
 	for _, query := range queries {
 		q := query
@@ -580,6 +518,9 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 						kbResults, err := t.knowledgeBaseService.HybridSearch(ctx, fullKBIDs[0], searchParams)
 						if err != nil {
 							logger.Warnf(ctx, "[Tool][KnowledgeSearch] Combined search failed for KBs %v: %v", fullKBIDs, err)
+							mu.Lock()
+							failures = append(failures, fmt.Errorf("knowledge bases %v: %w", fullKBIDs, err))
+							mu.Unlock()
 							return
 						}
 						mu.Lock()
@@ -614,6 +555,9 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 						kbResults, err := t.knowledgeBaseService.HybridSearch(ctx, st.KnowledgeBaseID, searchParams)
 						if err != nil {
 							logger.Warnf(ctx, "[Tool][KnowledgeSearch] Failed to search KB %s: %v", st.KnowledgeBaseID, err)
+							mu.Lock()
+							failures = append(failures, fmt.Errorf("knowledge base %s: %w", st.KnowledgeBaseID, err))
+							mu.Unlock()
 							return
 						}
 						mu.Lock()
@@ -635,12 +579,12 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 		}
 	}
 	wg.Wait()
-	return allResults
+	return allResults, errors.Join(failures...)
 }
 
 // rerankResults applies reranking to all search results (including FAQ entries)
 // using the rerank model or LLM fallback, then filters by threshold and applies
-// composite scoring so MMR/sorting uses a single score scale.
+// one relevance scale.
 func (t *KnowledgeSearchTool) rerankResults(
 	ctx context.Context,
 	query string,
@@ -961,14 +905,8 @@ func (t *KnowledgeSearchTool) rerankThreshold() float64 {
 	return 0.3
 }
 
-// retainKnowledgeSearchRecallFloor combines the configured absolute score
-// cutoff with a small rank-based recall floor. Reranker score calibration
-// varies across models, languages, and document styles; the second or third
-// best passage can be useful evidence even when its absolute score is below a
-// threshold calibrated elsewhere. This uses only the reranker's ordering and
-// candidate validity -- never query text, document phrases, domains, or Eval
-// data. The later configured TopK and MMR stages still bound final context.
-func retainKnowledgeSearchRecallFloor(
+// filterKnowledgeSearchScores applies the configured relevance cutoff exactly.
+func filterKnowledgeSearchScores(
 	rankResults []rerank.RankResult,
 	candidateCount int,
 	threshold float64,
@@ -981,10 +919,8 @@ func retainKnowledgeSearchRecallFloor(
 		return ordered[i].RelevanceScore > ordered[j].RelevanceScore
 	})
 
-	recallFloor := min(3, candidateCount)
 	retained := make([]rerank.RankResult, 0, len(ordered))
 	seen := make(map[int]struct{}, candidateCount)
-	validRank := 0
 	for _, result := range ordered {
 		if result.Index < 0 || result.Index >= candidateCount {
 			continue
@@ -993,8 +929,7 @@ func retainKnowledgeSearchRecallFloor(
 			continue
 		}
 		seen[result.Index] = struct{}{}
-		validRank++
-		if validRank > recallFloor && result.RelevanceScore < threshold {
+		if result.RelevanceScore < threshold {
 			continue
 		}
 		retained = append(retained, result)
@@ -1007,16 +942,19 @@ func (t *KnowledgeSearchTool) applyModelRerankScores(
 	rankResults []rerank.RankResult,
 	threshold float64,
 ) []*searchResultWithMeta {
-	filtered := retainKnowledgeSearchRecallFloor(rankResults, len(originals), threshold)
+	filtered := filterKnowledgeSearchScores(rankResults, len(originals), threshold)
 	out := make([]*searchResultWithMeta, 0, len(filtered))
 	for _, rr := range filtered {
 		if rr.Index < 0 || rr.Index >= len(originals) {
 			continue
 		}
 		newResult := *originals[rr.Index]
-		baseScore := newResult.Score
-		modelScore := rr.RelevanceScore
-		newResult.Score = t.compositeScore(&newResult, modelScore, baseScore)
+		copyOfSource := *newResult.SearchResult
+		newResult.SearchResult = &copyOfSource
+		newResult.Score = rr.RelevanceScore
+		if t.faqPriorityEnabled() && newResult.KnowledgeBaseType == types.KnowledgeBaseTypeFAQ {
+			newResult.Score *= t.faqScoreBoost()
+		}
 		out = append(out, &newResult)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -1025,78 +963,36 @@ func (t *KnowledgeSearchTool) applyModelRerankScores(
 	return out
 }
 
-// deduplicateResults removes duplicate chunks, keeping the highest score
-// Uses multiple keys (ID, parent chunk ID, knowledge+index) and content signature for deduplication
+// deduplicateResults combines only identical evidence identities. Distinct
+// children and documents retain their own provenance, regardless of content.
 func (t *KnowledgeSearchTool) deduplicateResults(results []*searchResultWithMeta) []*searchResultWithMeta {
-	seen := make(map[string]bool)
-	contentSig := make(map[string]bool)
-	uniqueResults := make([]*searchResultWithMeta, 0)
-
+	byID := make(map[string]*searchResultWithMeta)
 	for _, r := range results {
-		// Build multiple keys for deduplication
-		keys := []string{r.ID}
-		if r.ParentChunkID != "" {
-			keys = append(keys, "parent:"+r.ParentChunkID)
-		}
-		if r.KnowledgeID != "" {
-			keys = append(keys, fmt.Sprintf("kb:%s#%d", r.KnowledgeID, r.ChunkIndex))
-		}
-
-		// Check if any key is already seen
-		dup := false
-		for _, k := range keys {
-			if seen[k] {
-				dup = true
-				break
-			}
-		}
-		if dup {
+		if r == nil || r.SearchResult == nil {
 			continue
 		}
-
-		// Check content signature for near-duplicate content
-		sig := t.buildContentSignature(r.Content)
-		if sig != "" {
-			if contentSig[sig] {
-				continue
-			}
-			contentSig[sig] = true
-		}
-
-		// Mark all keys as seen
-		for _, k := range keys {
-			seen[k] = true
-		}
-
-		uniqueResults = append(uniqueResults, r)
-	}
-
-	// If we have duplicates by ID but different scores, keep the highest score
-	// This handles cases where the same chunk appears multiple times with different scores
-	seenByID := make(map[string]*searchResultWithMeta)
-	for _, r := range uniqueResults {
-		if existing, ok := seenByID[r.ID]; ok {
-			// Keep the result with higher score
-			if r.Score > existing.Score {
-				seenByID[r.ID] = r
-			}
-		} else {
-			seenByID[r.ID] = r
+		key := searchResultIdentity(r)
+		if old, ok := byID[key]; !ok || r.Score > old.Score || (r.Score == old.Score && r.SourceQuery < old.SourceQuery) {
+			byID[key] = r
 		}
 	}
-
-	// Convert back to slice
-	deduplicated := make([]*searchResultWithMeta, 0, len(seenByID))
-	for _, r := range seenByID {
-		deduplicated = append(deduplicated, r)
+	out := make([]*searchResultWithMeta, 0, len(byID))
+	for _, r := range byID {
+		out = append(out, r)
 	}
-
-	return deduplicated
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		return searchResultIdentity(out[i]) < searchResultIdentity(out[j])
+	})
+	return out
 }
-
-// buildContentSignature creates a normalized signature for content to detect near-duplicates
-func (t *KnowledgeSearchTool) buildContentSignature(content string) string {
-	return searchutil.BuildContentSignature(content)
+func searchResultIdentity(r *searchResultWithMeta) string {
+	if r.ID != "" {
+		return r.KnowledgeBaseID + ":" + r.KnowledgeID + ":" + r.ID
+	}
+	return fmt.Sprintf("%s:%s:%d:%d:%d:%s", r.KnowledgeBaseID, r.KnowledgeID, r.ChunkIndex, r.StartAt, r.EndAt, r.Content)
 }
 
 // formatOutput formats the search results for display
@@ -1460,7 +1356,7 @@ func renderKnowledgeSearchExactEvidence(
 		}
 		matches := false
 		switch {
-		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText):
+		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText) && len(result.SubChunkID) > 0:
 			matches = ref.ParentChunkID == result.ParentChunkID
 		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeSummary):
 			// Summary chunks are retrieval aids. Exact evidence resolution maps
@@ -1506,87 +1402,75 @@ type chunkRange struct {
 	end   int
 }
 
-// getEnrichedPassage 合并Content和ImageInfo的文本内容
+// getEnrichedPassage builds the same evidence-rich rerank passage shape used by
+// quick-answer search. SearchResult metadata is already returned by the hybrid
+// search, so this improves semantic ranking without another database, model, or
+// retrieval call. In particular, a matched FAQ wording or a generated document
+// question must not be discarded before reranking.
 func (t *KnowledgeSearchTool) getEnrichedPassage(ctx context.Context, result *types.SearchResult) string {
-	if result.ImageInfo == "" {
-		return result.Content
+	if result == nil {
+		return ""
 	}
+	combinedText := result.Content
+	enrichments := make([]string, 0)
+	appendEnrichment := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.Contains(combinedText, value) {
+			return
+		}
+		for _, existing := range enrichments {
+			if strings.Contains(existing, value) {
+				return
+			}
+		}
+		enrichments = append(enrichments, label+value)
+	}
+
+	appendEnrichment("Matched text: ", result.MatchedContent)
 
 	// 解析ImageInfo
-	var imageInfos []types.ImageInfo
-	err := json.Unmarshal([]byte(result.ImageInfo), &imageInfos)
-	if err != nil {
-		logger.Warnf(ctx, "[Tool][KnowledgeSearch] Failed to parse image info: %v", err)
-		return result.Content
-	}
-
-	if len(imageInfos) == 0 {
-		return result.Content
-	}
-
-	// 提取所有图片的描述和OCR文本
-	var imageTexts []string
-	for _, img := range imageInfos {
-		if img.Caption != "" {
-			imageTexts = append(imageTexts, fmt.Sprintf("Image Caption: %s", img.Caption))
-		}
-		if img.OCRText != "" {
-			imageTexts = append(imageTexts, fmt.Sprintf("Image Text: %s", img.OCRText))
+	if result.ImageInfo != "" {
+		var imageInfos []types.ImageInfo
+		if err := json.Unmarshal([]byte(result.ImageInfo), &imageInfos); err != nil {
+			logger.Warnf(ctx, "[Tool][KnowledgeSearch] Failed to parse image info: %v", err)
+		} else {
+			for _, img := range imageInfos {
+				appendEnrichment("Image Caption: ", img.Caption)
+				appendEnrichment("Image Text: ", img.OCRText)
+			}
 		}
 	}
 
-	if len(imageTexts) == 0 {
-		return result.Content
+	if len(result.ChunkMetadata) > 0 {
+		var documentMeta types.DocumentChunkMetadata
+		if err := json.Unmarshal(result.ChunkMetadata, &documentMeta); err == nil {
+			for _, question := range documentMeta.GetQuestionStrings() {
+				appendEnrichment("Related question: ", question)
+			}
+		}
+		var faqMeta types.FAQChunkMetadata
+		if err := json.Unmarshal(result.ChunkMetadata, &faqMeta); err == nil {
+			appendEnrichment("FAQ question: ", faqMeta.StandardQuestion)
+			for _, question := range faqMeta.SimilarQuestions {
+				appendEnrichment("Equivalent question: ", question)
+			}
+			for _, answer := range faqMeta.Answers {
+				appendEnrichment("FAQ answer: ", answer)
+			}
+		}
 	}
 
-	// 组合内容和图片信息
-	combinedText := result.Content
-	if combinedText != "" {
-		combinedText += "\n\n"
+	if len(enrichments) > 0 {
+		if combinedText != "" {
+			combinedText += "\n\n"
+		}
+		combinedText += strings.Join(enrichments, "\n")
 	}
-	combinedText += strings.Join(imageTexts, "\n")
 
-	logger.Debugf(ctx, "[Tool][KnowledgeSearch] Enriched passage: content_len=%d, image_texts=%d",
-		len(result.Content), len(imageTexts))
+	logger.Debugf(ctx, "[Tool][KnowledgeSearch] Enriched passage: content_len=%d, enrichments=%d",
+		len(result.Content), len(enrichments))
 
 	return combinedText
-}
-
-// compositeScore calculates a composite score considering multiple factors
-func (t *KnowledgeSearchTool) compositeScore(
-	result *searchResultWithMeta,
-	modelScore, baseScore float64,
-) float64 {
-	// Source weight: web_search results get slightly lower weight
-	sourceWeight := 1.0
-	if strings.ToLower(result.KnowledgeSource) == "web_search" {
-		sourceWeight = 0.95
-	}
-
-	// Position prior: slightly favor chunks earlier in the document
-	positionPrior := 1.0
-	if result.StartAt >= 0 && result.EndAt > result.StartAt {
-		// Calculate position ratio and apply small boost for earlier positions
-		positionRatio := 1.0 - float64(result.StartAt)/float64(result.EndAt+1)
-		positionPrior += t.clampFloat(positionRatio, -0.05, 0.05)
-	}
-
-	// Composite formula: weighted combination of model score, base score, and source weight
-	composite := 0.6*modelScore + 0.3*baseScore + 0.1*sourceWeight
-	composite *= positionPrior
-	if t.faqPriorityEnabled() && result.KnowledgeBaseType == types.KnowledgeBaseTypeFAQ {
-		composite *= t.faqScoreBoost()
-	}
-
-	// Clamp to [0, 1]
-	if composite < 0 {
-		composite = 0
-	}
-	if composite > 1 {
-		composite = 1
-	}
-
-	return composite
 }
 
 func (t *KnowledgeSearchTool) faqPriorityEnabled() bool {
@@ -1609,93 +1493,6 @@ func (t *KnowledgeSearchTool) faqDirectAnswerThreshold() float64 {
 
 func (t *KnowledgeSearchTool) faqDirectAnswerRecommended(score float64) bool {
 	return t.faqPriorityEnabled() && score >= t.faqDirectAnswerThreshold()
-}
-
-// clampFloat clamps a float value to the specified range
-func (t *KnowledgeSearchTool) clampFloat(v, minV, maxV float64) float64 {
-	return searchutil.ClampFloat(v, minV, maxV)
-}
-
-// applyMMR applies Maximal Marginal Relevance algorithm to reduce redundancy
-func (t *KnowledgeSearchTool) applyMMR(
-	ctx context.Context,
-	results []*searchResultWithMeta,
-	k int,
-	lambda float64,
-) []*searchResultWithMeta {
-	if k <= 0 || len(results) == 0 {
-		return nil
-	}
-
-	logger.Infof(ctx, "[Tool][KnowledgeSearch] Applying MMR: lambda=%.2f, k=%d, candidates=%d",
-		lambda, k, len(results))
-
-	selected := make([]*searchResultWithMeta, 0, k)
-	candidates := make([]*searchResultWithMeta, len(results))
-	copy(candidates, results)
-
-	// Pre-compute token sets for all candidates
-	tokenSets := make([]map[string]struct{}, len(candidates))
-	for i, r := range candidates {
-		tokenSets[i] = t.tokenizeSimple(t.getEnrichedPassage(ctx, r.SearchResult))
-	}
-
-	// MMR selection loop
-	for len(selected) < k && len(candidates) > 0 {
-		bestIdx := 0
-		bestScore := -1.0
-
-		for i, r := range candidates {
-			relevance := r.Score
-			redundancy := 0.0
-
-			// Calculate maximum redundancy with already selected results
-			for _, s := range selected {
-				selectedTokens := t.tokenizeSimple(t.getEnrichedPassage(ctx, s.SearchResult))
-				redundancy = math.Max(redundancy, t.jaccard(tokenSets[i], selectedTokens))
-			}
-
-			// MMR score: balance relevance and diversity
-			mmr := lambda*relevance - (1.0-lambda)*redundancy
-			if mmr > bestScore {
-				bestScore = mmr
-				bestIdx = i
-			}
-		}
-
-		// Add best candidate to selected and remove from candidates
-		selected = append(selected, candidates[bestIdx])
-		candidates = append(candidates[:bestIdx], candidates[bestIdx+1:]...)
-		// Remove corresponding token set
-		tokenSets = append(tokenSets[:bestIdx], tokenSets[bestIdx+1:]...)
-	}
-
-	// Compute average redundancy among selected results
-	avgRed := 0.0
-	if len(selected) > 1 {
-		pairs := 0
-		for i := 0; i < len(selected); i++ {
-			for j := i + 1; j < len(selected); j++ {
-				si := t.tokenizeSimple(t.getEnrichedPassage(ctx, selected[i].SearchResult))
-				sj := t.tokenizeSimple(t.getEnrichedPassage(ctx, selected[j].SearchResult))
-				avgRed += t.jaccard(si, sj)
-				pairs++
-			}
-		}
-		if pairs > 0 {
-			avgRed /= float64(pairs)
-		}
-	}
-
-	logger.Infof(ctx, "[Tool][KnowledgeSearch] MMR completed: selected=%d, avg_redundancy=%.4f",
-		len(selected), avgRed)
-
-	return selected
-}
-
-// tokenizeSimple tokenizes text into a set of words (simple whitespace-based)
-func (t *KnowledgeSearchTool) tokenizeSimple(text string) map[string]struct{} {
-	return searchutil.TokenizeSimple(text)
 }
 
 // extractSnippetForQueries tries to produce a short contextual snippet around
@@ -1754,9 +1551,4 @@ func extractSnippetForQueries(content string, queries []string) string {
 		snippet = strings.ReplaceAll(snippet, "  ", " ")
 	}
 	return "... " + strings.TrimSpace(snippet) + " ..."
-}
-
-// jaccard calculates Jaccard similarity between two token sets
-func (t *KnowledgeSearchTool) jaccard(a, b map[string]struct{}) float64 {
-	return searchutil.Jaccard(a, b)
 }

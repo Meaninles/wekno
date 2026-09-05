@@ -3,7 +3,6 @@ package chatpipeline
 import (
 	"context"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -209,6 +208,9 @@ func AppendHistoryMessages(messages []chat.Message, history []*types.History) []
 				history.SupplementalContext
 		}
 		messages = append(messages, chat.Message{Role: "user", Content: userContent})
+		if strings.TrimSpace(history.Answer) == "" {
+			continue
+		}
 		messages = append(messages, chat.Message{
 			Role: "assistant",
 			Content: conversationmemory.HistoricalAssistantOutput(
@@ -228,61 +230,30 @@ func loadAndProcessHistory(
 	sessionID string,
 	maxRounds int,
 	fetchCount int,
+	excludedIDs ...string,
 ) ([]*types.History, string, error) {
 	history, err := messageService.GetRecentMessagesBySession(ctx, sessionID, fetchCount)
 	if err != nil {
 		return nil, "", err
 	}
 
-	historyMap := make(map[string]*types.History)
-	for _, message := range history {
-		h, ok := historyMap[message.RequestID]
-		if !ok {
-			h = &types.History{}
+	turns, archive := conversationmemory.BuildHistory(history, maxRounds, excludedIDs...)
+	historyList := make([]*types.History, 0, len(turns))
+	for _, turn := range turns {
+		message := turn.User
+		h := &types.History{SourceID: turn.SourceID, SourceQuery: message.Content, Query: message.Content, CreateAt: message.CreatedAt}
+		if desc := extractImageCaptions(message.Images); desc != "" {
+			h.SupplementalContext += "\n\n<derived_image_context authority=\"model_derived_not_verbatim_user_text\">\n" + desc + "\n</derived_image_context>"
 		}
-		if message.Role == "user" {
-			// RenderedContent contains the previous turn's retrieval envelope,
-			// including request-local citation IDs. Replaying it would expose stale
-			// evidence as a new user message and an old S1 could collide with the
-			// current turn's S1. Rebuild history from the original user input only.
-			h.SourceQuery = message.Content
-			h.Query = message.Content
-			h.CreateAt = message.CreatedAt
-			if desc := extractImageCaptions(message.Images); desc != "" {
-				h.SupplementalContext += "\n\n<derived_image_context authority=\"model_derived_not_verbatim_user_text\">\n" +
-					desc + "\n</derived_image_context>"
-			}
-			if len(message.Attachments) > 0 {
-				h.SupplementalContext += "\n\n<uploaded_file_context authority=\"user_supplied_file_evidence_not_chat_assertion\">" +
-					message.Attachments.BuildPrompt() + "</uploaded_file_context>"
-			}
-			h.Query += h.SupplementalContext
-		} else {
-			h.Answer = sourcerefs.StripCitationProtocol(regThinkTags.ReplaceAllString(message.Content, ""))
-			h.KnowledgeReferences = message.KnowledgeReferences
+		if len(message.Attachments) > 0 {
+			h.SupplementalContext += "\n\n<uploaded_file_context authority=\"user_supplied_file_evidence_not_chat_assertion\">" + message.Attachments.BuildPrompt() + "</uploaded_file_context>"
 		}
-		historyMap[message.RequestID] = h
-	}
-
-	historyList := make([]*types.History, 0, len(historyMap))
-	for _, h := range historyMap {
-		if h.Answer != "" && h.Query != "" {
-			historyList = append(historyList, h)
+		h.Query += h.SupplementalContext
+		if turn.Assistant != nil {
+			h.Answer = sourcerefs.StripCitationProtocol(regThinkTags.ReplaceAllString(turn.Assistant.Content, ""))
+			h.KnowledgeReferences = turn.Assistant.KnowledgeReferences
 		}
-	}
-
-	sort.Slice(historyList, func(i, j int) bool {
-		return historyList[i].CreateAt.Before(historyList[j].CreateAt)
-	})
-
-	queries := make([]string, 0, len(historyList))
-	for index, item := range historyList {
-		item.SourceID = conversationmemory.UserTurnSourceID(index + 1)
-		queries = append(queries, item.SourceQuery)
-	}
-	archive := conversationmemory.BuildUserSourceLedger(queries)
-	if len(historyList) > maxRounds {
-		historyList = historyList[len(historyList)-maxRounds:]
+		historyList = append(historyList, h)
 	}
 	return historyList, archive, nil
 }

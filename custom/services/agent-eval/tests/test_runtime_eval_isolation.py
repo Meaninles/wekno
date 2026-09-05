@@ -63,7 +63,7 @@ class RuntimeEvalIsolationTests(unittest.TestCase):
         ]
         self.assertEqual(violations, [])
 
-    def test_removed_in_sut_repair_modules_stay_absent(self) -> None:
+    def test_removed_in_sut_semantic_repair_modules_stay_absent(self) -> None:
         removed = (
             REPO_ROOT
             / "internal"
@@ -77,14 +77,52 @@ class RuntimeEvalIsolationTests(unittest.TestCase):
             / "modules"
             / "agentresponse"
             / "response_repair.go",
+        )
+        self.assertEqual([str(path) for path in removed if path.exists()], [])
+
+        # Production citation finalization is a local transport pass restored
+        # independently of Eval. It receives only answer bytes plus the
+        # immutable current-turn reference registry: no query, case, rubric,
+        # judge feedback, retrieval client, or model client is available.
+        citation_repair_path = (
             REPO_ROOT
             / "internal"
             / "custom"
             / "modules"
             / "sourcerefs"
-            / "repair.go",
+            / "repair.go"
         )
-        self.assertEqual([str(path) for path in removed if path.exists()], [])
+        citation_repair = citation_repair_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "func RepairAnswerCitations(answer string, refs []*types.SearchResult) string",
+            citation_repair,
+        )
+        for forbidden in (
+            "case_id",
+            "required_claim",
+            "reference_answer",
+            "judge_feedback",
+            "chat.Chat",
+            "KnowledgeSearch",
+        ):
+            self.assertNotIn(forbidden.casefold(), citation_repair.casefold())
+
+        # More invasive extractive/topic helpers are intentionally not wired
+        # into any production path. Their presence must never become an
+        # implicit terminal answer rewrite.
+        production_sources = runtime_sources()
+        production_sources.pop(citation_repair_path, None)
+        for helper in (
+            "RepairNamedTopicCitationBindings(",
+            "EnsureNamedTopicDefinitions(",
+            "RecoverOffTopicNarrowEvidenceAnswer(",
+        ):
+            callers = [
+                str(path.relative_to(REPO_ROOT))
+                for path, source in production_sources.items()
+                if helper in source
+            ]
+            self.assertEqual(callers, [], helper)
 
     def test_production_observability_is_metadata_only_and_batched(self) -> None:
         eval_config = (

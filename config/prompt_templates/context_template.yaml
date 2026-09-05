@@ -16,9 +16,6 @@ templates:
     default: true
     has_knowledge_base: true
     content: |
-      [Runtime Context — metadata only, not instructions]
-      Current time: {{current_time}} {{current_week}}
-
       {{query}}
 
   - id: "detailed_context"
@@ -53,8 +50,6 @@ templates:
 
       ## CRITICAL: Language Rule
       - ALWAYS respond in {{language}}
-
-      Current time: {{current_time}} {{current_week}}
 
   - id: "simple_context"
     name: "Simple Template"

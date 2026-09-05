@@ -73,7 +73,7 @@ func TestResolveQuickAnswerEvidenceSplitsParentContextIntoExactChildren(t *testi
 	}
 	repo := &exactEvidenceRepoStub{childrenByParent: map[string][]*types.Chunk{"parent-1": children}}
 	merged := []*types.SearchResult{{
-		ID: "child-2", Content: "第一段第二段第三段", ParentChunkID: "parent-1",
+		ID: "child-2", Content: "第一段第二段第三段", ParentChunkID: "parent-1", SubChunkID: []string{"child-2"},
 		KnowledgeID: "doc-1", KnowledgeTitle: "制度.docx", ChunkType: string(types.ChunkTypeText),
 		SourceTenantID: 42, ImageInfo: `[{"url":"matched-child.png"}]`,
 	}}
@@ -173,5 +173,14 @@ func TestResolveQuickAnswerEvidenceMapsGeneratedSummaryToParentText(t *testing.T
 	}
 	if refs[0].Content == summary.Content {
 		t.Fatalf("generated summary leaked into evidence: %#v", refs[0])
+	}
+}
+
+func TestResolveQuickAnswerEvidenceDirectChildDoesNotExpandUnselectedSiblings(t *testing.T) {
+	repo := &exactEvidenceRepoStub{childrenByParent: map[string][]*types.Chunk{"parent": {{ID: "other", Content: "unselected unrelated text", ChunkType: types.ChunkTypeText}}}}
+	hit := &types.SearchResult{ID: "selected", KnowledgeID: "doc", ParentChunkID: "parent", ChunkType: string(types.ChunkTypeText), Content: "exact selected text"}
+	refs, err := ResolveQuickAnswerEvidence(context.Background(), repo, 7, []*types.SearchResult{hit})
+	if err != nil || len(refs) != 1 || refs[0].ID != "selected" || refs[0].EvidenceContent != hit.Content || len(repo.parentTenantIDs) != 0 {
+		t.Fatalf("unexpected expansion: %#v %v", refs, err)
 	}
 }

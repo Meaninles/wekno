@@ -32,6 +32,14 @@ func TestRepairAnswerCitationsNormalizesOnlyKnownPlainAliasesOutsideCode(t *test
 	}
 }
 
+func TestRepairAnswerCitationsNormalizesParenthesizedSrcAliasOnlyForKnownCurrentHandle(t *testing.T) {
+	answer := "已验证（src id=\"S9\"），未知来源保持（src id=\"S99\"），示例代码保持 `(src id=\"S9\")`."
+	want := "已验证<src id=\"S9\" />，未知来源保持（src id=\"S99\"），示例代码保持 `(src id=\"S9\")`."
+	if got := RepairAnswerCitations(answer, repairTestRefs()); got != want {
+		t.Fatalf("citation alias normalization = %q, want %q", got, want)
+	}
+}
+
 func TestRepairAnswerCitationsAttachesExactUnambiguousEvidence(t *testing.T) {
 	answer := "## 竞价采购\n\n竞价采购，是指在买方市场条件下，征集3家以上供应商，采购人对供应商多次竞争报价进行比较，最后确定价格最优的供应商的一种采购方式。"
 	got := RepairAnswerCitations(answer, repairTestRefs())

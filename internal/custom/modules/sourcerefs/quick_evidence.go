@@ -63,7 +63,7 @@ func ResolveQuickAnswerEvidence(
 		if sourceTenantID == 0 {
 			sourceTenantID = tenantID
 		}
-		if result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText) {
+		if result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText) && len(result.SubChunkID) > 0 {
 			if _, exists := seenParent[result.ParentChunkID]; !exists {
 				seenParent[result.ParentChunkID] = struct{}{}
 				parentIDsByTenant[sourceTenantID] = append(parentIDsByTenant[sourceTenantID], result.ParentChunkID)
@@ -182,7 +182,7 @@ func ResolveQuickAnswerEvidence(
 
 		var chunks []*types.Chunk
 		switch {
-		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText):
+		case result.ParentChunkID != "" && result.ChunkType == string(types.ChunkTypeText) && len(result.SubChunkID) > 0:
 			chunks = childrenByParent[result.ParentChunkID]
 		case result.ParentChunkID != "" && isImageChunkType(result.ChunkType):
 			if chunk := chunkMap[result.ParentChunkID]; chunk != nil {
@@ -212,7 +212,7 @@ func ResolveQuickAnswerEvidence(
 			// knowledgebase_search_results. This path also keeps direct-load/FAQ
 			// evidence working in isolated unit tests. Any parent/merged result was
 			// handled above and is never allowed to fall back to aggregate content.
-			if result.ParentChunkID == "" && len(result.SubChunkID) == 0 && strings.TrimSpace(result.Content) != "" {
+			if len(result.SubChunkID) == 0 && (result.ParentChunkID == "" || result.ChunkType == string(types.ChunkTypeText)) && strings.TrimSpace(result.Content) != "" {
 				appendEvidence(exactSnapshotFromResult(result))
 				continue
 			}

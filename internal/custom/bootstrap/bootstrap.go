@@ -24,6 +24,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatqueue"
 	"github.com/Tencent/WeKnora/internal/custom/modules/chatshare"
 	"github.com/Tencent/WeKnora/internal/custom/modules/configcenter"
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/dependencycontrol"
 	"github.com/Tencent/WeKnora/internal/custom/modules/derivativecontrol"
@@ -386,6 +387,9 @@ func NewHandlers(
 		return false
 	})
 	appservice.RegisterRuntimeToolRegistrar(func(ctx context.Context, registry *agenttools.ToolRegistry, config *types.AgentConfig, sessionID string) error {
+		if config != nil && config.MultiTurnEnabled && sessionID != "" {
+			registry.RegisterTool(&conversationmemory.ReadTool{DB: db, SessionID: sessionID})
+		}
 		if config != nil && config.AgentType == types.AgentTypeKnowledgeBaseManager && config.KnowledgeManagement != nil {
 			allowed := make(map[string]bool, len(config.AllowedTools))
 			for _, toolName := range config.AllowedTools {

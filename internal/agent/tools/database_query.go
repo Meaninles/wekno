@@ -14,7 +14,7 @@ import (
 
 var databaseQueryTool = BaseTool{
 	name: ToolDatabaseQuery,
-	description: `Execute SQL queries to retrieve information from the database.
+	description: `Query WeKnora knowledge catalog metadata: knowledge_bases, knowledges and chunks only. This database contains document metadata and extracted text, not the tables of bound external MySQL/PostgreSQL business data sources. For external business records use db_catalog, db_schema and db_query.
 
 ## Security Features
 - Automatic tenant_id injection: All queries are automatically filtered by the logged-in user's tenant_id

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
@@ -94,6 +95,20 @@ func (e *AgentEngine) syncCitationReferences(state *types.AgentState) []*types.S
 		state.KnowledgeRefs = refs
 	}
 	return state.KnowledgeRefs
+}
+
+// finalizeCurrentTurnCitationProtocol applies the same local citation
+// normalization to natural-stop answers and synthesized fallback answers.
+// It never changes claim text, retrieves evidence, or calls a model. Handles
+// not backed by this turn's immutable registry are removed before the answer
+// reaches SSE, persistence, or future history.
+func (e *AgentEngine) finalizeCurrentTurnCitationProtocol(
+	answer string,
+) (string, sourcerefs.CitationValidationReport) {
+	refs := e.citationState.snapshot()
+	repaired := sourcerefs.RepairAnswerCitations(answer, refs)
+	filtered, _, report := sourcerefs.FilterAnswerCitations(repaired, refs)
+	return strings.TrimSpace(filtered), report
 }
 
 // prepareCitationAwareGenerationMessages places the current-turn terminal

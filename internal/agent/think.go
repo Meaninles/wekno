@@ -9,6 +9,7 @@ import (
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
+	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -23,6 +24,28 @@ type streamLLMResult struct {
 	Usage            *types.TokenUsage
 	FinishReason     string // actual finish_reason from LLM (captured from last stream chunk)
 	StreamError      string // error message from stream (e.g., timeout), kept separate from Content
+}
+
+func normalizedFinishReason(reason string) string {
+	return strings.ToLower(strings.TrimSpace(reason))
+}
+
+func isSuccessfulTerminalFinishReason(reason string) bool {
+	switch normalizedFinishReason(reason) {
+	case "stop", "end_turn":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOutputLimitFinishReason(reason string) bool {
+	switch normalizedFinishReason(reason) {
+	case "length", "max_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 // streamLLMToEventBus streams LLM response through EventBus (generic method)
@@ -297,6 +320,13 @@ func (e *AgentEngine) streamThinkingToEventBus(
 		return nil, err
 	}
 
+	// Use the provider's actual finish reason. A few compatible providers omit
+	// it on an otherwise complete stream, so retain the historical stop fallback.
+	finishReason := llmResult.FinishReason
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+
 	// Emit diagnostics: helps identify when answer content went to "thought" vs "final_answer" events
 	logger.Infof(ctx, "[Agent][Thinking] Iteration-%d completed: content=%d chars, tool_calls=%d, emitted_events=%v",
 		iteration+1, len(llmResult.Content), len(llmResult.ToolCalls), emittedEventTypes)
@@ -320,7 +350,17 @@ func (e *AgentEngine) streamThinkingToEventBus(
 			fullContent,
 		)
 	}
-	if len(llmResult.ToolCalls) == 0 {
+	if len(llmResult.ToolCalls) == 0 && isSuccessfulTerminalFinishReason(finishReason) {
+		// Natural-stop answers previously bypassed the citation finalization used
+		// by forced synthesis. Validate the request-local protocol before the
+		// first answer event so SSE, persistence, and history stay identical.
+		var citationReport sourcerefs.CitationValidationReport
+		fullContent, citationReport = e.finalizeCurrentTurnCitationProtocol(fullContent)
+		if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 ||
+			len(citationReport.UnknownIDs) > 0 {
+			logger.Warnf(ctx, "[Agent][Citations] filtered invalid natural-stop citation protocol: forbidden=%d incomplete=%d unknown=%v",
+				citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
+		}
 		if reason := conversationmemory.TerminalAnswerIntegrityReason(fullContent); reason == "" {
 			emitAnswer(fullContent)
 		} else {
@@ -331,14 +371,9 @@ func (e *AgentEngine) streamThinkingToEventBus(
 				"reason":    reason,
 			})
 		}
-	}
-
-	// Use actual finish_reason from LLM stream instead of hardcoding "stop".
-	// Fallback to "stop" when the stream did not report a finish_reason
-	// (e.g., certain Ollama models or providers that omit the field).
-	finishReason := llmResult.FinishReason
-	if finishReason == "" {
-		finishReason = "stop"
+	} else if len(llmResult.ToolCalls) == 0 && strings.TrimSpace(fullContent) != "" {
+		logger.Warnf(ctx, "[Agent][Thinking] Iteration-%d withheld non-terminal answer: finish_reason=%s",
+			iteration+1, finishReason)
 	}
 
 	resp := &types.ChatResponse{
@@ -435,6 +470,42 @@ func (e *AgentEngine) callLLMWithRetry(
 		}
 	}
 	if err == nil && response != nil && len(response.ToolCalls) == 0 &&
+		isOutputLimitFinishReason(response.FinishReason) {
+		state.TerminalRecoveryReason = "output_limit"
+		state.TerminalRecoveryAttempts++
+		logger.Warnf(ctx, "[Agent][Round-%d] Provider output limit reached; replacing partial draft once without tools", round)
+		common.PipelineWarn(ctx, "Agent", "terminal_output_limit_retry", map[string]interface{}{
+			"iteration":     iteration,
+			"finish_reason": response.FinishReason,
+			"attempt":       state.TerminalRecoveryAttempts,
+		})
+		retryMessages := append([]chat.Message(nil), messages...)
+		retryMessages = append(retryMessages, chat.Message{
+			Role:    "user",
+			Content: conversationmemory.TerminalOutputLimitRetryDirective(),
+		})
+		retryMessages = agenttools.SanitizeMessages(retryMessages)
+		response, err = e.streamThinkingToEventBus(ctx, retryMessages, nil, iteration, sessionID)
+		if err != nil || response == nil || len(response.ToolCalls) > 0 ||
+			!isSuccessfulTerminalFinishReason(response.FinishReason) {
+			state.TerminalRecoveryFailed = true
+			failureReason := "terminal_output_limit_retry_failed"
+			if err != nil {
+				failureReason = err.Error()
+			} else if response != nil {
+				failureReason = "terminal_output_limit_retry_finish_" + normalizedFinishReason(response.FinishReason)
+			}
+			logger.Errorf(ctx, "[Agent][Round-%d] Output-limit retry unusable: %s", round, failureReason)
+			response = &types.ChatResponse{
+				Content: conversationmemory.TerminalIntegrityFallback(
+					types.LanguageNameFromContext(ctx),
+				),
+				FinishReason: "stop",
+			}
+			err = nil
+		}
+	}
+	if err == nil && response != nil && len(response.ToolCalls) == 0 &&
 		strings.TrimSpace(response.Content) != "" {
 		if reason := conversationmemory.TerminalAnswerIntegrityReason(response.Content); reason != "" {
 			logger.Warnf(ctx, "[Agent][Round-%d] Terminal answer integrity failure (%s), retrying once without tools",
@@ -498,6 +569,9 @@ func (e *AgentEngine) callLLMWithRetry(
 		}
 
 		return nil, fmt.Errorf("LLM call failed: %w", err)
+	}
+	if response != nil {
+		state.TerminalFinishReason = response.FinishReason
 	}
 
 	common.PipelineInfo(ctx, "Agent", "think_result", map[string]interface{}{

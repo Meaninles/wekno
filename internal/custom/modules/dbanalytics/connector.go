@@ -23,6 +23,7 @@ type Connector interface {
 	DescribeTable(ctx context.Context, cfg SourceConfig, ref TableRef, timeout time.Duration) (*TableProfile, error)
 	SampleRows(ctx context.Context, cfg SourceConfig, ref TableRef, limit int, timeout time.Duration) ([]map[string]any, error)
 	QueryRows(ctx context.Context, cfg SourceConfig, ref TableRef, limit int, timeout time.Duration) ([]ColumnInfo, []map[string]any, error)
+	StreamRows(ctx context.Context, cfg SourceConfig, ref TableRef, timeout time.Duration, consume func(map[string]any) error) error
 	QuoteTable(ref TableRef) string
 }
 
@@ -720,4 +721,53 @@ func intFromAny(v any) int {
 	default:
 		return 0
 	}
+}
+
+// StreamRows reads a complete table with bounded client memory. The consumer must
+// finish successfully before a query may report complete aggregate results.
+func (c mysqlConnector) StreamRows(ctx context.Context, cfg SourceConfig, ref TableRef, timeout time.Duration, consume func(map[string]any) error) error {
+	return streamSourceRows(ctx, c, cfg, ref, timeout, consume)
+}
+func (c postgresConnector) StreamRows(ctx context.Context, cfg SourceConfig, ref TableRef, timeout time.Duration, consume func(map[string]any) error) error {
+	return streamSourceRows(ctx, c, cfg, ref, timeout, consume)
+}
+func streamSourceRows(ctx context.Context, connector Connector, cfg SourceConfig, ref TableRef, timeout time.Duration, consume func(map[string]any) error) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	db, err := openConnectorDB(ctx, connector.Type(), cfg, timeout)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, "SELECT * FROM "+connector.QuoteTable(ref))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	names, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	values := make([]any, len(names))
+	ptrs := make([]any, len(names))
+	for i := range values {
+		ptrs[i] = &values[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		row := make(map[string]any, len(names))
+		for i, name := range names {
+			value := values[i]
+			if b, ok := value.([]byte); ok {
+				value = string(b)
+			}
+			row[name] = value
+		}
+		if err := consume(row); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/models/chat"
@@ -75,7 +76,8 @@ func TestNativeAgentPlacesTerminalCitationInstructionAtGenerationBoundary(t *tes
 	if !strings.Contains(prepared[len(prepared)-1].Content, sourcerefs.TerminalCitationInstruction()) {
 		t.Fatalf("terminal citation instruction is not adjacent to generation: %s", prepared[len(prepared)-1].Content)
 	}
-	if !strings.Contains(prepared[len(prepared)-1].Content, "Return one non-empty user-visible final answer") {
+	if !strings.Contains(prepared[len(prepared)-1].Content, "Write one complete answer for the exact current task") ||
+		!strings.Contains(prepared[len(prepared)-1].Content, conversationmemory.TerminalAnswerOpen) {
 		t.Fatalf("generic terminal completion directive is not adjacent to generation: %s", prepared[len(prepared)-1].Content)
 	}
 	if strings.Count(prepared[len(prepared)-1].Content, "[CITATION_USE]") != 1 {
@@ -103,5 +105,46 @@ func TestNativeAgentDoesNotAddTerminalCitationInstructionWithoutEvidence(t *test
 	prepared := engine.prepareCitationAwareGenerationMessages(messages)
 	if prepared[0].Content != "你好" || strings.Contains(prepared[0].Content, "[CITATION_USE]") {
 		t.Fatalf("no-evidence conversation was changed: %#v", prepared)
+	}
+}
+
+func TestNativeAgentFinalizesNaturalStopCitationsBeforeDelivery(t *testing.T) {
+	engine := &AgentEngine{eventBus: event.NewEventBus()}
+	engine.citationState.reset()
+	result := &types.ToolResult{
+		Success: true,
+		Data: map[string]interface{}{
+			"display_type": "search_results",
+			"results": []map[string]interface{}{{
+				"chunk_id": "chunk-1", "knowledge_id": "doc-1",
+				"knowledge_base_id": "kb-1", "content": "发布前必须完成验证。",
+			}},
+		},
+	}
+	engine.exposeToolResultReferences(context.Background(), "session-1", "knowledge_search", result)
+
+	answer, report := engine.finalizeCurrentTurnCitationProtocol(
+		`发布前必须完成验证。（S1） 不相关的旧标签<src id="S9" />`,
+	)
+	if answer != `发布前必须完成验证。<src id="S1" /> 不相关的旧标签` {
+		t.Fatalf("finalized answer = %q", answer)
+	}
+	if len(report.UnknownIDs) != 1 || report.UnknownIDs[0] != "S9" {
+		t.Fatalf("unknown citation report = %#v", report)
+	}
+}
+
+func TestNativeAgentRemovesHistoricalHandleWhenCurrentTurnHasNoEvidence(t *testing.T) {
+	engine := &AgentEngine{}
+	engine.citationState.reset()
+
+	answer, report := engine.finalizeCurrentTurnCitationProtocol(
+		`对话事实不应沿用旧引用。<src id="S3" />`,
+	)
+	if answer != "对话事实不应沿用旧引用。" {
+		t.Fatalf("historical handle was not removed: %q", answer)
+	}
+	if len(report.UnknownIDs) != 1 || report.UnknownIDs[0] != "S3" {
+		t.Fatalf("unknown citation report = %#v", report)
 	}
 }

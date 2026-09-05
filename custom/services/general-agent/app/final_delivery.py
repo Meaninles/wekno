@@ -6,10 +6,27 @@ import re
 from typing import Any
 
 
-CLAUDE_SDK_TERMINAL_CONTRACT = "claude-sdk-terminal-v2"
-TERMINAL_ANSWER_OPEN = "<weknora_final_response>"
-TERMINAL_ANSWER_CLOSE = "</weknora_final_response>"
+CLAUDE_SDK_TERMINAL_CONTRACT = "claude-sdk-terminal-v3"
+TERMINAL_ANSWER_OPEN = "<<<WEKNORA_USER_VISIBLE>>>"
+TERMINAL_ANSWER_CLOSE = "<<<WEKNORA_USER_VISIBLE_END>>>"
+LEGACY_TERMINAL_ANSWER_OPEN = "<weknora_final_response>"
+LEGACY_TERMINAL_ANSWER_CLOSE = "</weknora_final_response>"
 TERMINAL_CITATION_PATTERN = re.compile(r'<src\s+id="S[1-9][0-9]*"\s*/>')
+TERMINAL_BINDING_PATTERN = re.compile(
+    r'<!--\s*weknora-run-binding:([A-Za-z0-9._-]{1,128})\s*-->',
+    re.IGNORECASE,
+)
+TERMINAL_PROTOCOL_COMMENT_PATTERN = re.compile(
+    r'<!--\s*/?\s*weknora[_-]final[_-](?:response|answer)\s*-->',
+    re.IGNORECASE,
+)
+PRIVATE_CONTEXT_TAG_PATTERN = re.compile(
+    r"(?is)</?(?:historical_(?:assistant_output|user_input)|user_source_ledger|user_request|current_task_priority)\b[^>]*>"
+)
+GENERIC_FINAL_ENVELOPE_PATTERN = re.compile(
+    r'(?is)^\s*<((?:weknora|provider|gateway)[_.:-]final[_-](?:response|answer))\b[^>]*>'
+    r'(.*?)</\1\s*>\s*$',
+)
 
 CLAUDE_SDK_AGENT_TYPES = frozenset(
     {
@@ -21,17 +38,7 @@ CLAUDE_SDK_AGENT_TYPES = frozenset(
     }
 )
 
-# Structured analysis already has its own model-visible final_answer tool and
-# chart validation contract. The passive collector is intentionally limited to
-# Claude SDK agents that previously ended with normal assistant text.
-PASSIVE_TERMINAL_AGENT_TYPES = frozenset(
-    {
-        "general-agent",
-        "knowledge-base-manager",
-        "document-processing-agent",
-    }
-)
-
+PASSIVE_TERMINAL_AGENT_TYPES = CLAUDE_SDK_AGENT_TYPES
 
 def uses_claude_sdk_terminal_projection(agent_type: str) -> bool:
     return (agent_type or "").strip() in CLAUDE_SDK_AGENT_TYPES
@@ -45,6 +52,25 @@ def canonical_answer(content: Any) -> str:
     return str(content or "").strip()
 
 
+def terminal_binding_marker(binding: str) -> str:
+    value = str(binding or "").strip()
+    if not value or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+        return ""
+    return f"<!-- weknora-run-binding:{value} -->"
+
+
+def terminal_binding_integrity_reason(content: Any, expected_binding: str) -> str:
+    expected = str(expected_binding or "").strip()
+    if not expected:
+        return ""
+    matches = TERMINAL_BINDING_PATTERN.findall(str(content or ""))
+    if not matches:
+        return "terminal_binding_missing"
+    if len(matches) != 1 or matches[0] != expected:
+        return "terminal_binding_mismatch"
+    return ""
+
+
 def project_terminal_answer(content: Any) -> str:
     """Remove the model-only answer envelope without adding a repair turn.
 
@@ -56,11 +82,30 @@ def project_terminal_answer(content: Any) -> str:
     raw = str(content or "")
     start = raw.find(TERMINAL_ANSWER_OPEN)
     if start < 0:
-        return raw.strip()
-    body = raw[start + len(TERMINAL_ANSWER_OPEN) :]
-    end = body.find(TERMINAL_ANSWER_CLOSE)
-    if end >= 0:
-        body = body[:end]
+        legacy_start = raw.find(LEGACY_TERMINAL_ANSWER_OPEN)
+        if legacy_start >= 0:
+            body = raw[legacy_start + len(LEGACY_TERMINAL_ANSWER_OPEN) :]
+            legacy_end = body.find(LEGACY_TERMINAL_ANSWER_CLOSE)
+            if legacy_end >= 0:
+                body = body[:legacy_end]
+        else:
+            # Compatibility gateways occasionally alter only the retired XML
+            # wrapper namespace while preserving a valid complete response.
+            generic = GENERIC_FINAL_ENVELOPE_PATTERN.fullmatch(raw)
+            body = generic.group(2) if generic else raw
+    else:
+        body = raw[start + len(TERMINAL_ANSWER_OPEN) :]
+        end = body.find(TERMINAL_ANSWER_CLOSE)
+        if end >= 0:
+            body = body[:end]
+    body = TERMINAL_BINDING_PATTERN.sub("", body, count=1)
+    # A few OpenAI-compatible gateways have rendered the private envelope as
+    # an HTML comment.  It carries no user content, so remove it structurally
+    # instead of leaking protocol text into chat/history.
+    body = TERMINAL_PROTOCOL_COMMENT_PATTERN.sub("", body)
+    private_context = PRIVATE_CONTEXT_TAG_PATTERN.search(body)
+    if private_context:
+        body = body[: private_context.start()]
     return body.strip()
 
 
@@ -74,8 +119,18 @@ def terminal_answer_integrity_reason(content: Any) -> str:
     if any(
         marker in lowered
         for marker in (
+            TERMINAL_ANSWER_OPEN.lower(),
+            TERMINAL_ANSWER_CLOSE.lower(),
             "<weknora_",
             "</weknora_",
+            "<historical_",
+            "</historical_",
+            "<user_source_ledger",
+            "</user_source_ledger",
+            "<user_request",
+            "</user_request",
+            "<current_task_priority",
+            "</current_task_priority",
             "weknora_final_placeholder",
         )
     ):
@@ -176,6 +231,7 @@ class ClaudeSDKTerminalCollector:
     assistant_matches_result: bool | None = None
     answer_integrity_reason: str = ""
     answer_source: str = ""
+    expected_binding: str = ""
 
     def observe(self, message: Any) -> None:
         message_type = message.__class__.__name__
@@ -249,18 +305,90 @@ class ClaudeSDKTerminalCollector:
         # compatibility gateways occasionally corrupt only that aggregate while
         # the final text-only AssistantMessage is intact, so prefer that passive
         # candidate before asking the provider for another model turn.
-        result_answer = project_terminal_answer(self.terminal_result)
-        candidate_answer = project_terminal_answer(self.candidate_answer())
-        for source, answer in (
-            ("result", result_answer),
-            ("assistant_candidate", candidate_answer),
+        result_raw = self.terminal_result
+        candidate_raw = self.candidate_answer()
+        binding_mismatch = any(
+            terminal_binding_integrity_reason(raw, self.expected_binding)
+            == "terminal_binding_mismatch"
+            for raw in (result_raw, candidate_raw)
+            if raw
+        )
+        if binding_mismatch:
+            self.answer_integrity_reason = "terminal_binding_mismatch"
+            self.answer_source = "result" if result_raw else "assistant_candidate"
+            return ""
+        for source, raw in (
+            ("result", result_raw),
+            ("assistant_candidate", candidate_raw),
         ):
+            binding_reason = terminal_binding_integrity_reason(raw, self.expected_binding)
+            # The provider end_turn closes the answer. The optional close
+            # delimiter only excludes trailing text when it is present.
+            if self.expected_binding and (binding_reason or TERMINAL_ANSWER_OPEN not in raw):
+                continue
+            answer = project_terminal_answer(raw)
             reason = terminal_answer_integrity_reason(answer)
             if answer and not reason:
                 self.answer_integrity_reason = ""
                 self.answer_source = source
                 return answer
-        selected = result_answer or candidate_answer
-        self.answer_integrity_reason = terminal_answer_integrity_reason(selected)
-        self.answer_source = "result" if result_answer else "assistant_candidate"
+
+        # The SDK stream itself owns this request. A successful provider result
+        # need not reproduce an application marker to be deliverable. Reject an
+        # explicitly different binding above, but do not turn optional framing
+        # into a new model call or discard the provider's completed answer.
+        if self.frozen:
+            for source, raw in (("native_result", result_raw), ("native_assistant", candidate_raw)):
+                answer = project_terminal_answer(raw)
+                if answer and not terminal_answer_integrity_reason(answer):
+                    self.answer_integrity_reason = ""
+                    self.answer_source = source
+                    return answer
+
+        selected_raw = result_raw or candidate_raw
+        selected = project_terminal_answer(selected_raw)
+        if self.expected_binding:
+            self.answer_integrity_reason = "terminal_binding_missing"
+        else:
+            self.answer_integrity_reason = terminal_answer_integrity_reason(selected)
+        self.answer_source = "result" if result_raw else "assistant_candidate"
+        # An incomplete response cannot be promoted to a completed answer.
+        if self.answer_integrity_reason in {"terminal_binding_missing", "terminal_binding_mismatch"}:
+            return ""
         return selected
+
+
+class TerminalTextStream:
+    """Project only the bound terminal text, including markers split across deltas."""
+    def __init__(self, binding: str) -> None:
+        self.binding = terminal_binding_marker(binding)
+        self.pending = ""
+        self.opened = False
+        self.closed = False
+        self.started = False
+
+    def push(self, delta: str, final: bool = False) -> str:
+        if self.closed:
+            return ""
+        self.pending += delta
+        if not self.opened:
+            start = self.pending.find(TERMINAL_ANSWER_OPEN)
+            if start < 0 or self.binding not in self.pending[:start]:
+                return ""
+            self.pending = self.pending[start + len(TERMINAL_ANSWER_OPEN):]
+            self.opened = True
+        end = self.pending.find(TERMINAL_ANSWER_CLOSE)
+        if end >= 0:
+            self.pending = self.pending[:end]
+            final = True
+            self.closed = True
+        # Withhold a possible closing-marker prefix and trailing whitespace.
+        keep = 0 if final else len(TERMINAL_ANSWER_CLOSE) - 1
+        split = max(0, len(self.pending) - keep)
+        candidate = self.pending[:split].rstrip()
+        self.pending = self.pending[len(candidate):]
+        if not self.started:
+            candidate = candidate.lstrip()
+        if candidate:
+            self.started = True
+        return candidate

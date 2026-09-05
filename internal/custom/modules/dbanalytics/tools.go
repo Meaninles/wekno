@@ -35,8 +35,7 @@ func NewCatalogTool(service *Service, scope ToolScope) *CatalogTool {
 		BaseTool: agenttools.NewBaseTool(
 			ToolDBCatalog,
 			`Find relevant MySQL/PostgreSQL analysis tables and columns by business terms.
-Use this before writing SQL. Match the user's question against table names, column names, field descriptions and sample values.
-This tool is part of the hidden reasoning workflow: use it to infer table/field business meaning before querying.`,
+Returns authorized table identifiers and metadata. Use it when the required table or field is not yet known.`,
 			utils.GenerateSchema[CatalogInput](),
 		),
 		service: service,
@@ -49,7 +48,7 @@ func NewSchemaTool(service *Service, scope ToolScope) *SchemaTool {
 		BaseTool: agenttools.NewBaseTool(
 			ToolDBSchema,
 			`Get full schema, field descriptions, semantic types, sample values and SQL table names for bound MySQL/PostgreSQL data sources.
-Always call this before db_query. First infer the business meaning of tables and fields from descriptions and samples, then write SQL.
+Use this when the fields, types or business meaning needed for the query are not already known.
 Pass table_names as the sql_table_name values returned by db_catalog. source_id is optional and should usually be omitted.
 Do not expose this intermediate semantic inference in the final answer unless the user asks.`,
 			utils.GenerateSchema[SchemaInput](),
@@ -64,7 +63,7 @@ func NewQueryTool(service *Service, scope ToolScope, allowChart bool) *QueryTool
 		BaseTool: agenttools.NewBaseTool(
 			ToolDBQuery,
 			`Execute a read-only SQL analysis query over authorized MySQL/PostgreSQL data source tables.
-The query is executed by DuckDB after source tables are materialized, so write DuckDB-compatible SQL rather than source-database-specific SQL.
+The query is executed by DuckDB over complete source tables. The output row limit never truncates input to aggregates. Write DuckDB-compatible SQL.
 Use only SQL table names returned by db_catalog/db_schema. Use SELECT only, aggregate before returning raw rows, and add filters/limits.
 Do not use compound queries: UNION, UNION ALL, INTERSECT, or EXCEPT are rejected by SQL validation.
 source_id is optional; omit it unless you intentionally want to restrict the query to one source_id returned by db_catalog/db_schema.

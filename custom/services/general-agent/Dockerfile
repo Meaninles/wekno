@@ -20,7 +20,7 @@ RUN set -eux; \
     if [ -n "$APT_MIRROR_ARG" ]; then \
         sed -i "s@deb.debian.org@${APT_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi; \
-    packages="ca-certificates curl wget git zip unzip jq file procps nodejs npm libltdl7 libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-draw-nogui pandoc poppler-utils qpdf ghostscript fontconfig fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei"; \
+    packages="ca-certificates curl wget git zip unzip jq file procps nodejs npm libltdl7 libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-draw-nogui libreoffice-impress-nogui pandoc poppler-utils qpdf ghostscript fontconfig fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei"; \
     for attempt in 1 2 3 4 5; do \
         apt-get -o Acquire::Retries=5 update; \
         if apt-get -o Acquire::Retries=5 install -y --no-install-recommends $packages; then \

@@ -129,7 +129,7 @@ Now generate the final answer:`, query)
 		MaxCompletionTokens: e.config.MaxCompletionTokens,
 		Thinking:            &thinking,
 	}
-	generateCandidate := func(candidateMessages []chat.Message) (string, error) {
+	generateCandidate := func(candidateMessages []chat.Message) (string, string, error) {
 		projector := conversationmemory.NewTerminalAnswerProjector()
 		var projected strings.Builder
 		llmResult, err := e.streamLLMToEventBus(
@@ -146,7 +146,7 @@ Now generate the final answer:`, query)
 			},
 		)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		projected.WriteString(projector.Flush())
 		answer := strings.TrimSpace(projected.String())
@@ -155,10 +155,14 @@ Now generate the final answer:`, query)
 				agenttools.StripThinkBlocks(llmResult.Content),
 			)
 		}
-		return answer, nil
+		finishReason := llmResult.FinishReason
+		if finishReason == "" {
+			finishReason = "stop"
+		}
+		return answer, finishReason, nil
 	}
 
-	fullAnswer, err := generateCandidate(messages)
+	fullAnswer, finishReason, err := generateCandidate(messages)
 	if err != nil {
 		logger.Errorf(ctx, "[Agent][FinalAnswer] Final answer generation failed: %v", err)
 		common.PipelineError(ctx, "Agent", "final_answer_stream_failed", map[string]interface{}{
@@ -166,6 +170,37 @@ Now generate the final answer:`, query)
 			"error":      err.Error(),
 		})
 		return err
+	}
+	state.TerminalFinishReason = finishReason
+	if isOutputLimitFinishReason(finishReason) {
+		state.TerminalRecoveryReason = "output_limit"
+		state.TerminalRecoveryAttempts++
+		logger.Warnf(ctx, "[Agent][FinalAnswer] Provider output limit reached; replacing partial synthesis once")
+		common.PipelineWarn(ctx, "Agent", "final_answer_output_limit_retry", map[string]interface{}{
+			"session_id":    sessionID,
+			"finish_reason": finishReason,
+			"attempt":       state.TerminalRecoveryAttempts,
+		})
+		retryMessages := append([]chat.Message(nil), messages...)
+		retryMessages = append(retryMessages, chat.Message{
+			Role:    "user",
+			Content: conversationmemory.TerminalOutputLimitRetryDirective(),
+		})
+		retryMessages = agenttools.SanitizeMessages(retryMessages)
+		replacement, retryFinishReason, retryErr := generateCandidate(retryMessages)
+		if retryErr == nil && isSuccessfulTerminalFinishReason(retryFinishReason) &&
+			conversationmemory.TerminalAnswerIntegrityReason(replacement) == "" {
+			fullAnswer = replacement
+			finishReason = retryFinishReason
+			state.TerminalFinishReason = retryFinishReason
+		} else {
+			state.TerminalRecoveryFailed = true
+			fullAnswer = conversationmemory.TerminalIntegrityFallback(
+				types.LanguageNameFromContext(ctx),
+			)
+			finishReason = "stop"
+			state.TerminalFinishReason = finishReason
+		}
 	}
 	if reason := conversationmemory.TerminalAnswerIntegrityReason(fullAnswer); reason != "" {
 		logger.Warnf(ctx, "[Agent][FinalAnswer] Terminal answer integrity failure (%s), retrying once", reason)
@@ -180,9 +215,11 @@ Now generate the final answer:`, query)
 			Content: conversationmemory.TerminalIntegrityRetryDirective(),
 		})
 		retryMessages = agenttools.SanitizeMessages(retryMessages)
-		repaired, retryErr := generateCandidate(retryMessages)
-		if retryErr == nil && conversationmemory.TerminalAnswerIntegrityReason(repaired) == "" {
+		repaired, retryFinishReason, retryErr := generateCandidate(retryMessages)
+		if retryErr == nil && isSuccessfulTerminalFinishReason(retryFinishReason) &&
+			conversationmemory.TerminalAnswerIntegrityReason(repaired) == "" {
 			fullAnswer = repaired
+			state.TerminalFinishReason = retryFinishReason
 		} else {
 			fullAnswer = conversationmemory.TerminalIntegrityFallback(
 				types.LanguageNameFromContext(ctx),
@@ -349,6 +386,18 @@ func (e *AgentEngine) emitCompletionEvent(
 			report.AvailableCount)
 	}
 	state.KnowledgeRefs = citedRefs
+	completionExtra := map[string]interface{}{}
+	if state.TerminalFinishReason != "" {
+		completionExtra["terminal_finish_reason"] = state.TerminalFinishReason
+	}
+	if state.TerminalRecoveryReason != "" {
+		completionExtra["terminal_recovery_reason"] = state.TerminalRecoveryReason
+		completionExtra["terminal_recovery_attempts"] = state.TerminalRecoveryAttempts
+		completionExtra["terminal_recovery_failed"] = state.TerminalRecoveryFailed
+	}
+	if len(completionExtra) == 0 {
+		completionExtra = nil
+	}
 	e.eventBus.Emit(ctx, event.Event{
 		ID:        generateEventID("complete"),
 		Type:      event.EventAgentComplete,
@@ -361,6 +410,7 @@ func (e *AgentEngine) emitCompletionEvent(
 			TotalSteps:                 len(state.RoundSteps),
 			TotalDurationMs:            time.Since(startTime).Milliseconds(),
 			MessageID:                  messageID, // Include message ID for proper message update
+			Extra:                      completionExtra,
 		},
 	})
 

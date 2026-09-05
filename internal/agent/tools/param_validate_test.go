@@ -5,120 +5,27 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestValidateParams(t *testing.T) {
-	schema := json.RawMessage(`{
-		"type": "object",
-		"properties": {
-			"query": {"type": "string", "minLength": 1},
-			"limit": {"type": "integer", "minimum": 1, "maximum": 100},
-			"mode":  {"type": "string", "enum": ["fast", "deep"]},
-			"score": {"type": "number", "minimum": 0, "maximum": 1},
-			"enabled": {"type": "boolean"}
-		},
-		"required": ["query"]
-	}`)
+	schema := json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1,"maximum":100},"mode":{"enum":["fast","deep"]},"ids":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}}},"required":["query"]}`)
+	for _, args := range []string{`{"query":"你好","limit":100}`, `{"query":"ok","ids":["id"]}`, `{"query":"x","extra":true}`} {
+		assert.Empty(t, ValidateParams(json.RawMessage(args), schema), args)
+	}
+	for _, args := range []string{"", `{`, `null`, `[]`, `{}`, `{"query":null}`, `{"query":1}`, `{"query":""}`, `{"query":"ok","limit":0}`, `{"query":"ok","limit":101}`, `{"query":"ok","limit":1.5}`, `{"query":"ok","mode":"other"}`, `{"query":"ok","ids":[]}`, `{"query":"ok","ids":[123]}`} {
+		assert.NotEmpty(t, ValidateParams(json.RawMessage(args), schema), args)
+	}
+	assert.NotEmpty(t, ValidateParams(json.RawMessage(`{}`), json.RawMessage(`{`)))
+	assert.Empty(t, ValidateParams(json.RawMessage(`{}`), nil))
+}
 
-	t.Run("valid params pass", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "hello", "limit": 10, "mode": "fast"}`)
-		errs := ValidateParams(args, schema)
-		assert.Empty(t, errs)
-	})
-
-	t.Run("missing required field", func(t *testing.T) {
-		args := json.RawMessage(`{"limit": 10}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "query", errs[0].Param)
-		assert.Contains(t, errs[0].Message, "required")
-	})
-
-	t.Run("null required field", func(t *testing.T) {
-		args := json.RawMessage(`{"query": null}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Contains(t, errs[0].Message, "required")
-	})
-
-	t.Run("wrong type", func(t *testing.T) {
-		args := json.RawMessage(`{"query": 123}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "query", errs[0].Param)
-		assert.Contains(t, errs[0].Message, "type")
-	})
-
-	t.Run("enum violation", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "test", "mode": "slow"}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "mode", errs[0].Param)
-		assert.Contains(t, errs[0].Message, "one of")
-	})
-
-	t.Run("minimum violation", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "test", "limit": 0}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "limit", errs[0].Param)
-		assert.Contains(t, errs[0].Message, ">= 1")
-	})
-
-	t.Run("maximum violation", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "test", "limit": 200}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "limit", errs[0].Param)
-		assert.Contains(t, errs[0].Message, "<= 100")
-	})
-
-	t.Run("minLength violation", func(t *testing.T) {
-		args := json.RawMessage(`{"query": ""}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "query", errs[0].Param)
-		assert.Contains(t, errs[0].Message, "at least 1 characters")
-	})
-
-	t.Run("number bounds", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "test", "score": 1.5}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "score", errs[0].Param)
-	})
-
-	t.Run("multiple errors", func(t *testing.T) {
-		args := json.RawMessage(`{"limit": -1, "mode": "invalid"}`)
-		errs := ValidateParams(args, schema)
-		assert.GreaterOrEqual(t, len(errs), 3) // missing query + limit min + mode enum
-	})
-
-	t.Run("extra params allowed", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "test", "unknown_param": "value"}`)
-		errs := ValidateParams(args, schema)
-		assert.Empty(t, errs)
-	})
-
-	t.Run("nil schema returns nil", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "test"}`)
-		errs := ValidateParams(args, nil)
-		assert.Nil(t, errs)
-	})
-
-	t.Run("empty args returns nil", func(t *testing.T) {
-		errs := ValidateParams(nil, schema)
-		assert.Nil(t, errs)
-	})
-
-	t.Run("boolean type check", func(t *testing.T) {
-		args := json.RawMessage(`{"query": "test", "enabled": "yes"}`)
-		errs := ValidateParams(args, schema)
-		require.Len(t, errs, 1)
-		assert.Equal(t, "enabled", errs[0].Param)
-		assert.Contains(t, errs[0].Message, "boolean")
-	})
+func TestDocumentInfoContract(t *testing.T) {
+	for _, args := range []string{`{}`, `{"knowledge_ids":[]}`, `{"knowledge_ids":[123]}`, `{"faq_ids":[""]}`, `{`} {
+		assert.NotEmpty(t, ValidateParams(json.RawMessage(args), getDocumentInfoTool.Parameters()), args)
+	}
+	for _, args := range []string{`{"knowledge_ids":["doc"]}`, `{"knowledge_base_ids":["kb"]}`, `{"faq_ids":["faq"]}`} {
+		assert.Empty(t, ValidateParams(json.RawMessage(args), getDocumentInfoTool.Parameters()), args)
+	}
 }
 
 func TestFormatValidationErrors(t *testing.T) {

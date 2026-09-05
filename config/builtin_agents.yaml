@@ -25,10 +25,17 @@ builtin_agents:
     config:
       agent_mode: "quick-answer"
       system_prompt_id: "default_kb"
-      thinking: true
+      # Quick Answer already has a separate query-understanding and retrieval
+      # pipeline. A second free-form reasoning stream increased latency and
+      # transport exposure without adding source evidence.
+      thinking: false
       context_template_id: "default_context"
-      temperature: 0.7
-      max_completion_tokens: 4096
+      # Factual answers should be stable across repeated runs. Retrieval and
+      # answer selection remain semantic/model-owned; lower sampling only
+      # reduces evidence-external variation.
+      temperature: 0.0
+      # Leave enough provider output room for a complete compound answer.
+      max_completion_tokens: 8192
       web_search_enabled: false
       web_search_max_results: 5
       multi_turn_enabled: true
@@ -41,7 +48,9 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 5
+      # Retain broader same-call evidence coverage for compound document questions.
+      # This changes neither tool-call count nor retrieval routing.
+      rerank_top_k: 8
       rerank_threshold: 0.3
       enable_query_expansion: true
       enable_rewrite: true
@@ -86,6 +95,8 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
+      # Retain broader same-call evidence coverage for compound document questions.
+      # This changes neither tool-call count nor retrieval routing.
       rerank_top_k: 5
       rerank_threshold: 0.3
       enable_query_expansion: true
@@ -121,8 +132,9 @@ builtin_agents:
       thinking: true
       # Factual RAG synthesis should be deterministic. Tool choice and retrieval
       # remain model-owned; lower sampling only reduces evidence-external prose.
-      temperature: 0.1
-      max_completion_tokens: 4096
+      temperature: 0.0
+      # DeepSeek reasoning and the visible answer share the output budget.
+      max_completion_tokens: 8192
       max_iterations: 50
       kb_selection_mode: "all"
       retrieve_kb_only_when_mentioned: false
@@ -142,7 +154,9 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 5
+      # Retain broader same-call evidence coverage for compound document questions.
+      # This changes neither tool-call count nor retrieval routing.
+      rerank_top_k: 8
       rerank_threshold: 0.3
 
   - id: "builtin-data-analyst"
@@ -282,10 +296,13 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "general-agent"
       system_prompt_id: "general_claude_agent"
-      thinking: true
-      temperature: 0.5
+      # The Claude-SDK loop already provides multi-step tool planning. Adaptive
+      # extended thinking on every step inflated latency and encouraged extra
+      # tool cycles for ordinary RAG questions without improving evidence.
+      thinking: false
+      temperature: 0.0
       max_completion_tokens: 8192
-      max_iterations: 100
+      max_iterations: 18
       llm_call_timeout: 600
       kb_selection_mode: "all"
       retrieve_kb_only_when_mentioned: false
@@ -295,8 +312,6 @@ builtin_agents:
         - "anysearch-skill"
         - "find-skill-skillhub"
       allowed_tools:
-        - "thinking"
-        - "todo_write"
         - "knowledge_search"
         - "grep_chunks"
         - "list_knowledge_chunks"
@@ -325,7 +340,9 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 5
+      # Retain broader same-call evidence coverage for compound document questions.
+      # This changes neither tool-call count nor retrieval routing.
+      rerank_top_k: 8
       rerank_threshold: 0.3
 
   - id: "builtin-document-processing"

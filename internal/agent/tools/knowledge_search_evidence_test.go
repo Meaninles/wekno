@@ -11,7 +11,7 @@ func TestRenderKnowledgeSearchExactEvidenceSplitsAggregateParent(t *testing.T) {
 	result := &searchResultWithMeta{SearchResult: &types.SearchResult{
 		ID: "child-2", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1",
 		ChunkType: string(types.ChunkTypeText), ParentChunkID: "parent-1",
-		Content: "第一段第二段第三段",
+		Content: "第一段第二段第三段", SubChunkID: []string{"child-2"},
 	}}
 	refs := []*types.SearchResult{
 		{ID: "child-1", KnowledgeID: "doc-1", KnowledgeBaseID: "kb-1", ParentChunkID: "parent-1", ChunkType: string(types.ChunkTypeText), EvidenceContent: "第一段"},

@@ -133,7 +133,7 @@ func TestBuildSystemPromptAppendsDurableUserContextWithoutReplacingBaseline(t *t
 	prompt := engine.buildSystemPrompt(context.Background())
 	require.Contains(t, prompt, "Full native RAG baseline.")
 	require.Contains(t, prompt, "project foundation")
-	require.Contains(t, prompt, "WEKNORA_DIALOGUE_CONTINUITY_V12")
+	require.Contains(t, prompt, "WEKNORA_DIALOGUE_CONTINUITY_V15")
 	require.Less(t, strings.Index(prompt, "Full native RAG baseline."), strings.Index(prompt, "project foundation"))
 }
 
@@ -257,6 +257,83 @@ func TestStreamThinkingToEventBus_PropagatesFinishReason(t *testing.T) {
 			assert.Equal(t, tt.wantReason, resp.FinishReason)
 		})
 	}
+}
+
+func TestStreamThinkingToEventBus_WithholdsOutputLimitedDraft(t *testing.T) {
+	mock := &mockChat{responses: []mockResponse{{chunks: []types.StreamResponse{{
+		ResponseType: types.ResponseTypeAnswer,
+		Content:      "This sentence is cut off because",
+		Done:         true,
+		FinishReason: "length",
+	}}}}}
+	engine := newTestEngine(t, mock)
+	var streamed string
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			streamed += data.Content
+		}
+		return nil
+	})
+
+	resp, err := engine.streamThinkingToEventBus(
+		context.Background(), emptyMessages(), emptyTools(), 0, "sess-length",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "length", resp.FinishReason)
+	assert.Equal(t, "This sentence is cut off because", resp.Content)
+	assert.False(t, resp.AnswerStreamed)
+	assert.Empty(t, streamed, "a provider-truncated draft must never reach the answer stream")
+}
+
+func TestExecuteLoop_OutputLimitRetriesOnceWithoutTools(t *testing.T) {
+	mock := &mockChat{responses: []mockResponse{
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "Partial answer that ends",
+			Done:         true,
+			FinishReason: "length",
+		}}},
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "<weknora_final_response>Complete concise answer.</weknora_final_response>",
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+	}}
+	engine := newTestEngine(t, mock)
+	var streamed string
+	var completion event.AgentCompleteData
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			streamed += data.Content
+		}
+		return nil
+	})
+	engine.eventBus.On(event.EventAgentComplete, func(_ context.Context, evt event.Event) error {
+		completion, _ = evt.Data.(event.AgentCompleteData)
+		return nil
+	})
+	tools := []chat.Tool{{Type: "function", Function: chat.FunctionDef{Name: "lookup"}}}
+	state := &types.AgentState{}
+
+	_, err := engine.executeLoop(
+		context.Background(), state, "test query", emptyMessages(), tools, "sess-length", "msg-length",
+	)
+
+	require.NoError(t, err)
+	require.Len(t, mock.options, 2)
+	assert.Len(t, mock.options[0].Tools, 1)
+	assert.Empty(t, mock.options[1].Tools)
+	assert.Contains(t, mock.messages[1][len(mock.messages[1])-1].Content, "provider output limit")
+	assert.Equal(t, "Complete concise answer.", state.FinalAnswer)
+	assert.Equal(t, state.FinalAnswer, streamed)
+	assert.NotContains(t, streamed, "Partial answer")
+	assert.Equal(t, "output_limit", state.TerminalRecoveryReason)
+	assert.Equal(t, 1, state.TerminalRecoveryAttempts)
+	assert.Equal(t, "stop", state.TerminalFinishReason)
+	require.NotNil(t, completion.Extra)
+	assert.Equal(t, "output_limit", completion.Extra["terminal_recovery_reason"])
 }
 
 // TestStreamThinkingToEventBus_RoutesReasoningAndAnswerSeparately is the
@@ -622,4 +699,42 @@ func TestStreamFinalAnswerToEventBus_RetriesCorruptSynthesisBeforeEmission(t *te
 	assert.Equal(t, "Stable synthesis.", state.FinalAnswer)
 	assert.Equal(t, state.FinalAnswer, answerContent)
 	assert.NotContains(t, answerContent, "placeholder")
+}
+
+func TestStreamFinalAnswerToEventBus_ReplacesOutputLimitedSynthesisBeforeEmission(t *testing.T) {
+	mock := &mockChat{responses: []mockResponse{
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "A synthesis that stops in the middle of",
+			Done:         true,
+			FinishReason: "max_tokens",
+		}}},
+		{chunks: []types.StreamResponse{{
+			ResponseType: types.ResponseTypeAnswer,
+			Content:      "<weknora_final_response>Bounded complete synthesis.</weknora_final_response>",
+			Done:         true,
+			FinishReason: "stop",
+		}}},
+	}}
+	engine := newTestEngine(t, mock)
+	state := &types.AgentState{}
+	var streamed string
+	engine.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		if data, ok := evt.Data.(event.AgentFinalAnswerData); ok {
+			streamed += data.Content
+		}
+		return nil
+	})
+
+	err := engine.streamFinalAnswerToEventBus(
+		context.Background(), "test query", state, "sess-length", emptyMessages(),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, mock.callCount)
+	assert.Equal(t, "Bounded complete synthesis.", state.FinalAnswer)
+	assert.Equal(t, state.FinalAnswer, streamed)
+	assert.NotContains(t, streamed, "stops in the middle")
+	assert.Equal(t, "output_limit", state.TerminalRecoveryReason)
+	assert.Equal(t, 1, state.TerminalRecoveryAttempts)
 }

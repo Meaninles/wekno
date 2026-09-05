@@ -58,6 +58,7 @@ func (p *PluginLoadHistory) OnEvent(ctx context.Context,
 		chatManage.SessionID,
 		maxRounds,
 		conversationmemory.FetchMessageLimit(maxRounds),
+		chatManage.UserMessageID, chatManage.MessageID,
 	)
 	if err != nil {
 		pipelineWarn(ctx, "LoadHistory", "history_fetch", map[string]interface{}{

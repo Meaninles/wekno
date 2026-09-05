@@ -4,15 +4,14 @@ This file is prepared inside the Claude SDK working directory for WeKnora data-a
 
 ## Core Principles
 
-1. For database data-analysis, use `db_catalog`, then `db_schema`, then `db_query`. For CSV/Excel table-analysis, locate the file, call `table_schema`, then call `table_analysis`.
+1. For database data-analysis, use `db_catalog` or `db_schema` when metadata is needed, then execute `db_query`. For CSV/Excel table-analysis, locate the file, call `table_schema`, then call `table_analysis`.
 2. For chat charts, use the structured query tool output: `db_query` for database sources, `table_analysis` for CSV/Excel sources. Do not create PNG, SVG, HTML, ASCII bar charts, Markdown code-block charts, or other chart artifact files unless the user explicitly asks for a downloadable/report artifact.
 3. Keep SQL and chart generation simple and inspectable. Prefer one well-aggregated query per chart or insight over a long script that is hard to debug.
 4. ChartContract/spec and validation notes are reference facts for wording and debugging. They are not a hard gate and are not a whitelist of every business insight you may discuss. Extra conclusions are allowed when they are supported by query rows.
 5. Put each `{{chart:<id>}}` immediately after the paragraph explaining that chart. Do not gather all chart placeholders at the end.
 6. Default chart text should be Chinese: titles, axis labels, legends, derived labels, and tooltip labels. Original English data values may remain English.
-7. Before final delivery, call `final_answer` with the complete visible answer in `content`; include only chart ids that are actually explained. When `content` contains `{{chart:<id>}}` placeholders, set `chart_ids` to exactly those ids in the same display order and do not declare ids that are not referenced.
-
-For structured-analysis runs, the runtime injects a display-intent block before the main agent runs. Treat `chart_requested` as the authority for chart output.
+7. Finish with ordinary assistant text. Include only `{{chart:<id>}}` handles returned by query tools, beside their explanations. There is no final-answer tool or separate display-intent classifier.
+8. Choose `chart_requested` and chart type from the user's actual task in the main tool call. Query results and source mappings supply evidence; successful source reads are required before reporting full aggregates.
 
 For CSV/Excel table-analysis, write SELECT-only DuckDB SQL. Validation and execution use DuckDB semantics, so tolerant casts such as `TRY_CAST(value AS INTEGER)` are valid when converting text-loaded CSV/Excel values.
 
@@ -20,7 +19,7 @@ For CSV/Excel table-analysis, `table_schema` may expose an original-file cell ev
 
 For irregular CSV/Excel files, first inspect `cell_table_name`, then normalize the evidence into a result table suitable for analysis or ECharts. You may use `VALUES`, `UNION ALL`, CTEs, CASE expressions and aggregates for this normalization. The runtime intentionally lets your LLM judgment handle messy spreadsheet layout instead of forcing all output columns to be mechanically derived by SQL.
 
-For table-analysis chart result calls, you must author `source_mapping` yourself in the `table_analysis` input. The backend does not generate this JSON. It only receives it, forwards it, lightly inspects referenced cells when obvious cell refs are present, and provides it to the final LLM judge. The template below is weak guidance only; the runtime does not enforce this exact shape.
+For table-analysis chart result calls, you must author `source_mapping` yourself in the `table_analysis` input. The backend does not generate this JSON. It only receives it, forwards it, lightly inspects referenced cells when obvious cell refs are present, and returns it with query evidence. The template below is weak guidance only; the runtime does not enforce this exact shape.
 
 Weak `source_mapping` template:
 
@@ -51,7 +50,7 @@ Weak `source_mapping` template:
 }
 ```
 
-`db_query` and `table_analysis` share the same visible result-budget contract: analytical SQL is wrapped by the tool with an outer `LIMIT` using `limits.max_rows` (default 1000), and `limits.truncated=true` means the returned row count reached that limit, so more rows may exist. Do not treat `truncated=true` as an exact total count. There is no table-analysis-specific SQL timeout rule in the prompt; keep queries efficient through aggregation, filters, and sensible detail-row limits.
+`db_query` and `table_analysis` share the same visible result-budget contract: analytical SQL is wrapped by the tool with an outer `LIMIT` using `limits.max_rows` (default 1000), and `limits.truncated=true` marks a clipped result set; database aggregation reads complete source tables before applying the display limit. Do not treat `truncated=true` as an exact total count. There is no table-analysis-specific SQL timeout rule in the prompt; keep queries efficient through aggregation, filters, and sensible detail-row limits.
 
 ## Chart Planning
 
@@ -149,8 +148,8 @@ Bad because the chart placeholders are not close to their explanations.
 
 If final validation reports an issue:
 
-- Missing or wrong chart placeholder: revise `final_answer.content`; do not rerun SQL unless the chart itself is wrong.
-- Chart id mismatch: make `final_answer.chart_ids` exactly match the `{{chart:<id>}}` placeholders in `content`, in display order.
+- Missing or wrong chart placeholder: revise the final answer; do not rerun SQL unless the chart itself is wrong.
+- Chart id mismatch: use only the chart handle returned by the corresponding successful query.
 - ChartContract/spec validation note: treat it as reference only. Revise wording or rerun the structured query tool only when the visible answer would be misleading or the query result cannot support the conclusion.
 - Extra/superseded charts: omit their placeholders and do not mention them.
 - Explicit-only chart violation: use a default chart type unless the user named that exact chart type.

@@ -23,7 +23,7 @@ import (
 
 const defaultOriginalInputMaxBytes int64 = 200 * 1024 * 1024
 
-func (s *Service) originalInputFileSpecs(ctx context.Context, req *types.QARequest, runID string) []OriginalInputFileSpec {
+func (s *Service) originalInputFileSpecs(ctx context.Context, req *types.QARequest, runID string) ([]OriginalInputFileSpec, error) {
 	out := make([]OriginalInputFileSpec, 0, len(req.OriginalInputFiles)+len(req.KnowledgeIDs))
 	for _, item := range req.OriginalInputFiles {
 		spec, err := originalInputFileSpecFromRuntime(item)
@@ -44,7 +44,33 @@ func (s *Service) originalInputFileSpecs(ctx context.Context, req *types.QAReque
 		}
 		out = append(out, spec)
 	}
-	return out
+	if req.Session != nil && req.CustomAgent != nil && req.CustomAgent.Config.MultiTurnEnabled && s.db != nil && s.artifactStore != nil {
+		userID, _ := types.UserIDFromContext(ctx)
+		var rows []Artifact
+		err := s.db.WithContext(ctx).Where("tenant_id = ? AND user_id = ? AND session_id = ? AND storage_state = ?", tenantIDFromContext(ctx), userID, req.Session.ID, artifactStorageStateReady).Order("created_at DESC, id DESC").Find(&rows).Error
+		if err != nil {
+			return nil, fmt.Errorf("load conversation artifact manifest: %w", err)
+		} else {
+			seen := make(map[string]bool)
+			for _, input := range out {
+				seen[input.FileName] = true
+			}
+			for _, row := range rows {
+				if seen[row.FileName] {
+					continue
+				}
+				seen[row.FileName] = true
+				downloadURL, err := s.artifactStore.DownloadURL(ctx, row.FilePath)
+				if err != nil {
+					return nil, fmt.Errorf("restore conversation artifact %s: %w", row.ID, err)
+				}
+				// StorageURL is intentionally absent: this is a persistent delivered
+				// version, not a disposable original-input transfer object.
+				out = append(out, OriginalInputFileSpec{ID: row.ID, Source: "conversation_artifact", Role: "previously_delivered_version", FileName: row.FileName, FileType: row.FileType, FileSize: row.FileSize, SHA256: row.SHA256, DownloadURL: downloadURL})
+			}
+		}
+	}
+	return out, nil
 }
 
 func originalInputFileSpecFromRuntime(item types.OriginalInputFile) (OriginalInputFileSpec, error) {

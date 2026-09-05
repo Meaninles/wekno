@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -21,9 +20,8 @@ import (
 )
 
 type Service struct {
-	db              *gorm.DB
-	duckdb          *sql.DB
-	schemaReasoning sync.Map
+	db     *gorm.DB
+	duckdb *sql.DB
 }
 
 type sourceShareMigration struct {
@@ -620,7 +618,7 @@ func (s *Service) CreateSource(ctx context.Context, tenantID uint64, userID stri
 	src := &Source{
 		TenantID: tenantID, Name: strings.TrimSpace(req.Name), Description: strings.TrimSpace(req.Description),
 		Type: req.Type, Status: SourceStatusActive, QueryMode: req.QueryMode, MaxRows: req.MaxRows,
-		MaxScanRows: req.MaxScanRows, TimeoutSeconds: req.TimeoutSeconds, CreatedBy: userID,
+		TimeoutSeconds: req.TimeoutSeconds, CreatedBy: userID,
 	}
 	if err := src.SetConfig(req.Config); err != nil {
 		return nil, err
@@ -662,9 +660,6 @@ func normalizeSourceRequest(req *CreateSourceRequest) {
 	if req.MaxRows <= 0 {
 		req.MaxRows = 1000
 	}
-	if req.MaxScanRows <= 0 {
-		req.MaxScanRows = 50000
-	}
 	if req.TimeoutSeconds <= 0 {
 		req.TimeoutSeconds = 30
 	}
@@ -703,9 +698,6 @@ func (s *Service) UpdateSource(ctx context.Context, tenantID uint64, id string, 
 	}
 	if req.MaxRows > 0 {
 		updates["max_rows"] = req.MaxRows
-	}
-	if req.MaxScanRows > 0 {
-		updates["max_scan_rows"] = req.MaxScanRows
 	}
 	if req.TimeoutSeconds > 0 {
 		updates["timeout_seconds"] = req.TimeoutSeconds
@@ -1274,7 +1266,6 @@ func (s *Service) Schema(ctx context.Context, scope ToolScope, input SchemaInput
 			"description": table.Description, "row_estimate": table.RowEstimate, "columns": cols,
 		})
 	}
-	s.markSchemaReasoning(scope, selectedTables)
 	return map[string]any{
 		"display_type":     "db_schema",
 		"tables":           outTables,
@@ -1325,9 +1316,6 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 	if strings.TrimSpace(input.SQL) == "" {
 		return nil, fmt.Errorf("sql is required")
 	}
-	if err := s.requireSchemaReasoning(scope); err != nil {
-		return nil, err
-	}
 	sources, tables, err := s.loadEnabledTables(ctx, scope, input.SourceID)
 	if err != nil {
 		return nil, err
@@ -1357,22 +1345,39 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 		referencedNames = parseResult.TableNames
 	}
 	queryTables := tablesReferencedBySQL(tables, referencedNames, normalizedSQL)
-	if err := s.requireSchemaReasoningForTables(scope, queryTables); err != nil {
-		return nil, err
-	}
 
+	var timeout time.Duration
+	for _, table := range queryTables {
+		if d := sourceTimeout(sources[table.SourceID].TimeoutSeconds); timeout == 0 || d < timeout {
+			timeout = d
+		}
+	}
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if s.duckdb == nil {
+		return nil, fmt.Errorf("analysis database is not initialized")
+	}
 	conn, err := s.duckdb.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open duckdb connection: %w", err)
 	}
 	defer conn.Close()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, table := range queryTables {
+			_, _ = conn.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS "+quoteDuckIdent(table.VirtualName))
+		}
+	}()
 
 	limitTables := queryTables
 	if len(limitTables) == 0 {
 		limitTables = tables
 	}
 	maxRows := effectiveMaxRows(sources, limitTables)
-	maxScanRows := effectiveMaxScanRows(sources, limitTables)
 	for _, table := range queryTables {
 		src := sources[table.SourceID]
 		cfg, err := src.ParseConfig()
@@ -1383,11 +1388,11 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 		if err != nil {
 			return nil, err
 		}
-		if err := s.materializeTable(ctx, conn, sourceConn, src, cfg, table, maxScanRows); err != nil {
+		if err := s.materializeTable(ctx, conn, sourceConn, src, cfg, table); err != nil {
 			return nil, err
 		}
 	}
-	querySQL := limitOuterQuery(normalizedSQL, maxRows)
+	querySQL := limitOuterQuery(normalizedSQL, maxRows+1)
 	rows, err := conn.QueryContext(ctx, querySQL)
 	if err != nil {
 		return nil, withDuckDBSQLHint(fmt.Errorf("query execution failed: %w", err))
@@ -1396,6 +1401,10 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 	cols, resultRows, err := scanRowsToMaps(rows)
 	if err != nil {
 		return nil, err
+	}
+	truncated := len(resultRows) > maxRows
+	if truncated {
+		resultRows = resultRows[:maxRows]
 	}
 	chartRequested := input.ChartRequested && allowChart
 	chart := inferChartSpec(cols, resultRows, input.PreferredChart, chartRequested, chartHintsFromInput(input))
@@ -1427,11 +1436,11 @@ func (s *Service) executeQuery(ctx context.Context, scope ToolScope, input Query
 		"row_count":       len(resultRows),
 		"chart_requested": chartRequested,
 		"chart":           chart,
-		"limits":          map[string]any{"max_rows": maxRows, "max_scan_rows": maxScanRows, "truncated": len(resultRows) >= maxRows},
+		"limits":          map[string]any{"max_rows": maxRows, "source_complete": true, "truncated": truncated},
 	}, nil
 }
 
-func (s *Service) materializeTable(ctx context.Context, conn *sql.Conn, sourceConn Connector, src Source, cfg SourceConfig, table SourceTable, limit int) error {
+func (s *Service) materializeTable(ctx context.Context, conn *sql.Conn, sourceConn Connector, src Source, cfg SourceConfig, table SourceTable) error {
 	cols := table.Columns
 	if len(cols) == 0 {
 		if err := s.db.WithContext(ctx).Where("tenant_id = ? AND table_id = ?", table.TenantID, table.ID).Order("ordinal ASC").Find(&cols).Error; err != nil {
@@ -1439,10 +1448,6 @@ func (s *Service) materializeTable(ctx context.Context, conn *sql.Conn, sourceCo
 		}
 	}
 	ref := TableRef{SchemaName: table.SchemaName, TableName: table.PhysicalName, VirtualName: table.VirtualName}
-	_, rows, err := sourceConn.QueryRows(ctx, cfg, ref, limit, sourceTimeout(src.TimeoutSeconds))
-	if err != nil {
-		return fmt.Errorf("load source table %s: %w", table.VirtualName, err)
-	}
 	columnDefs := make([]string, 0, len(cols))
 	for _, col := range cols {
 		if isHiddenColumn(col) {
@@ -1472,77 +1477,46 @@ func (s *Service) materializeTable(ctx context.Context, conn *sql.Conn, sourceCo
 		placeholders[i] = "?"
 		colNames[i] = quoteDuckIdent(col.ColumnName)
 	}
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", quoteDuckIdent(table.VirtualName), strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
-	for _, row := range rows {
-		values := make([]any, len(visibleCols))
-		for i, col := range visibleCols {
-			values[i] = materializedColumnValue(col, row[col.ColumnName])
-		}
-		if _, err := conn.ExecContext(ctx, insertSQL, values...); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Service) schemaReasoningKey(scope ToolScope) string {
-	sourceTenantID := scope.SourceTenantID
-	if sourceTenantID == 0 {
-		sourceTenantID = scope.TenantID
-	}
-	sourceIDs := uniqueStrings(scope.SourceIDs)
-	sort.Strings(sourceIDs)
-	return fmt.Sprintf("%s:%d:%s", scope.SessionID, sourceTenantID, strings.Join(sourceIDs, ","))
-}
-
-func (s *Service) schemaReasoningTableKey(scope ToolScope, tableName string) string {
-	return s.schemaReasoningKey(scope) + ":table:" + strings.ToLower(strings.TrimSpace(tableName))
-}
-
-func (s *Service) markSchemaReasoning(scope ToolScope, tables []SourceTable) {
-	if scope.SessionID == "" || len(tables) == 0 {
-		return
-	}
-	s.schemaReasoning.Store(s.schemaReasoningKey(scope), true)
-	for _, table := range tables {
-		if strings.TrimSpace(table.VirtualName) == "" {
-			continue
-		}
-		s.schemaReasoning.Store(s.schemaReasoningTableKey(scope, table.VirtualName), true)
-	}
-}
-
-func (s *Service) requireSchemaReasoning(scope ToolScope) error {
-	if scope.SessionID == "" {
-		return nil
-	}
-	if _, ok := s.schemaReasoning.Load(s.schemaReasoningKey(scope)); ok {
-		return nil
-	}
-	return fmt.Errorf("call db_schema first to infer table and field business meaning before db_query")
-}
-
-func (s *Service) requireSchemaReasoningForTables(scope ToolScope, tables []SourceTable) error {
-	if err := s.requireSchemaReasoning(scope); err != nil {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if scope.SessionID == "" || len(tables) == 0 {
+	defer tx.Rollback()
+	// Bound memory and statement parameters, never the rows used in a calculation.
+	batchSize := min(500, max(1, 30000/len(visibleCols)))
+	prefix := fmt.Sprintf("INSERT INTO %s (%s) VALUES ", quoteDuckIdent(table.VirtualName), strings.Join(colNames, ", "))
+	rowSQL := "(" + strings.Join(placeholders, ", ") + ")"
+	values := make([]any, 0, batchSize*len(visibleCols))
+	batchRows := 0
+	flush := func() error {
+		if batchRows == 0 {
+			return nil
+		}
+		statement := prefix + strings.TrimSuffix(strings.Repeat(rowSQL+",", batchRows), ",")
+		if _, err := tx.ExecContext(ctx, statement, values...); err != nil {
+			return err
+		}
+		values = values[:0]
+		batchRows = 0
 		return nil
 	}
-	missing := make([]string, 0)
-	for _, table := range tables {
-		if strings.TrimSpace(table.VirtualName) == "" {
-			continue
+	err = sourceConn.StreamRows(ctx, cfg, ref, sourceTimeout(src.TimeoutSeconds), func(row map[string]any) error {
+		for _, col := range visibleCols {
+			values = append(values, materializedColumnValue(col, row[col.ColumnName]))
 		}
-		if _, ok := s.schemaReasoning.Load(s.schemaReasoningTableKey(scope, table.VirtualName)); !ok {
-			missing = append(missing, table.VirtualName)
+		batchRows++
+		if batchRows == batchSize {
+			return flush()
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("load complete source table %s: %w", table.VirtualName, err)
 	}
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		return fmt.Errorf("call db_schema for table(s) %s before db_query to infer table and field business meaning", strings.Join(missing, ", "))
+	if err := flush(); err != nil {
+		return err
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Service) loadEnabledTables(ctx context.Context, scope ToolScope, requestedSourceID string) (map[string]Source, []SourceTable, error) {
@@ -2044,16 +2018,6 @@ func effectiveMaxRows(sources map[string]Source, tables []SourceTable) int {
 	for _, table := range tables {
 		if src, ok := sources[table.SourceID]; ok && src.MaxRows > 0 && src.MaxRows < maxRows {
 			maxRows = src.MaxRows
-		}
-	}
-	return maxRows
-}
-
-func effectiveMaxScanRows(sources map[string]Source, tables []SourceTable) int {
-	maxRows := 50000
-	for _, table := range tables {
-		if src, ok := sources[table.SourceID]; ok && src.MaxScanRows > 0 && src.MaxScanRows < maxRows {
-			maxRows = src.MaxScanRows
 		}
 	}
 	return maxRows

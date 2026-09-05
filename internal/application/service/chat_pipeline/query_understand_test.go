@@ -2,6 +2,7 @@ package chatpipeline
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,8 +12,10 @@ import (
 
 func TestQueryUnderstandResponseSchemaRequiresIndependentEvidenceNeed(t *testing.T) {
 	var schema struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-		Required   []string                   `json:"required"`
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+		Required []string `json:"required"`
 	}
 	if err := json.Unmarshal(queryUnderstandResponseFormat, &schema); err != nil {
 		t.Fatalf("query-understand response schema is invalid: %v", err)
@@ -24,10 +27,20 @@ func TestQueryUnderstandResponseSchemaRequiresIndependentEvidenceNeed(t *testing
 	for _, field := range schema.Required {
 		required[field] = true
 	}
-	for _, field := range []string{"rewrite_query", "evidence_query", "intent", "evidence_need", "image_description"} {
+	for _, field := range []string{"rewrite_query", "evidence_query", "evidence_queries", "intent", "evidence_need", "image_description"} {
 		if !required[field] {
 			t.Fatalf("query-understand response schema does not require %q", field)
 		}
+		if strings.TrimSpace(schema.Properties[field].Description) == "" {
+			t.Fatalf("query-understand response schema does not explain %q", field)
+		}
+	}
+	if !strings.Contains(string(queryUnderstandResponseFormat), "identity-bearing object names") ||
+		!strings.Contains(string(queryUnderstandResponseFormat), "never generalize them into a broader topic") {
+		t.Fatal("structured rewrite schema must preserve retrieval object identity and requested attributes")
+	}
+	if description := schema.Properties["evidence_need"].Description; !strings.Contains(strings.ToLower(description), "prior assistant") {
+		t.Fatalf("evidence_need does not describe historical assistant authority: %q", description)
 	}
 }
 
@@ -60,6 +73,7 @@ func TestParseStructuredQueryOutputMixedStateActivatesExistingKB(t *testing.T) {
 	parsed, ok := parseStructuredQueryOutput(`{
 		"rewrite_query":"summarize the confirmed owner and cite the governing policy",
 		"evidence_query":"governing policy for the confirmed owner",
+		"evidence_queries":["governing policy for the confirmed owner"],
 		"intent":"conversation_state",
 		"evidence_need":"knowledge_base",
 		"image_description":""
@@ -82,17 +96,34 @@ func TestParseStructuredQueryOutputMixedStateActivatesExistingKB(t *testing.T) {
 	}
 }
 
+func TestParseStructuredQueryOutputKeepsIndependentEvidenceQuestions(t *testing.T) {
+	parsed, ok := parseStructuredQueryOutput(`{
+		"rewrite_query":"answer two unrelated document questions",
+		"evidence_query":"product alpha limits; policy beta retention",
+		"evidence_queries":["product alpha limits","policy beta retention"," PRODUCT ALPHA LIMITS "],
+		"intent":"kb_search",
+		"evidence_need":"knowledge_base",
+		"image_description":""
+	}`)
+	if !ok {
+		t.Fatal("compound evidence output did not parse")
+	}
+	want := []string{"product alpha limits", "policy beta retention"}
+	if !slices.Equal(parsed.EvidenceQueries, want) {
+		t.Fatalf("evidence queries = %#v, want %#v", parsed.EvidenceQueries, want)
+	}
+}
+
 func TestQueryUnderstandingContractKeepsModalityAndRetrievalBoundary(t *testing.T) {
 	prompt := conversationmemory.EnsureQueryUnderstandingContract("base")
 	for _, required := range []string{
-		"complete semantic request, never isolated words",
-		`intent "conversation_state"`,
-		`"none", "knowledge_base" or "web"`,
-		`JSON "evidence_query" is only the source-facing question`,
-		"Mixed requests keep their primary semantic intent",
-		"Unknown and explicitly pending are different",
-		"boundary, not an affirmative request",
-		"Preserve exact identifiers, names, dates and amounts",
+		"Decompose the complete requested output into propositions",
+		`evidence_need="none" only when every requested proposition`,
+		"primary intent is conversation_state",
+		"historical_assistant_output has no factual authority",
+		"Source availability does not create evidence need",
+		"evidence_query is the complete source-facing question",
+		"Unknown, pending, proposed, questioned, hypothetical, negated and completed are distinct",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("query-understanding contract missing %q: %s", required, prompt)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"net/http"
 	"runtime"
 	"strings"
@@ -1144,6 +1145,13 @@ func (h *Handler) executeQA(reqCtx *qaRequestContext, mode qaMode, generateTitle
 		}
 
 		if serviceErr != nil {
+			// An interrupted or failed alternate runtime still owns a complete
+			// execution trace. Preserve it before the common message finalizer.
+			if trace, ok := serviceErr.(interface{ AgentExecutionSteps() []types.AgentStep }); ok {
+				steps := agenttools.SanitizeAgentStepsForStorage(trace.AgentExecutionSteps())
+				streamCtx.assistantMessage.AgentSteps = types.AgentSteps(steps)
+				streamCtx.assistantMessage.AgentToolCount = sourcerefs.AgentToolCallCount(streamCtx.assistantMessage.AgentSteps)
+			}
 			// A user-requested stop cancels asyncCtx, which surfaces here as a
 			// context cancellation. That is an expected outcome, not a failure:
 			// the stop event already notifies the client, so don't emit a

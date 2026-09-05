@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Tencent/WeKnora/internal/custom/modules/dbanalytics"
 	"github.com/Tencent/WeKnora/internal/custom/modules/skillhub"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
@@ -42,21 +41,21 @@ func TestBuildGeneralAgentHistoryKeepsRecentPairsAndBuildsCompleteUserLedger(t *
 		Content: "must-not-archive-incomplete", CreatedAt: base.Add(20 * time.Minute),
 	})
 
-	history, archive := buildGeneralAgentHistory(messages, 2)
+	history, archive := buildGeneralAgentHistory(messages, 2, "in-flight-user")
 	if len(history) != 4 {
 		t.Fatalf("history messages = %d, want two complete Q&A pairs", len(history))
 	}
 	if history[0].Content != "user-fact-6" || history[2].Content != "user-fact-7" {
 		t.Fatalf("recent history is not chronological/newest: %#v", history)
 	}
-	if history[0].SourceID != "user_turn_006" || history[2].SourceID != "user_turn_007" {
+	if history[0].SourceID != "user_message_request-6-user" || history[2].SourceID != "user_message_request-7-user" {
 		t.Fatalf("recent user source IDs are not stable: %#v", history)
 	}
-	if history[1].SourceID != "assistant_after_user_turn_006" ||
+	if history[1].SourceID != "assistant_after_user_message_request-6-user" ||
 		!strings.Contains(history[1].Content, `authority="non_source"`) {
 		t.Fatalf("historical assistant answer was not marked non-authoritative: %#v", history[1])
 	}
-	for _, expected := range []string{"user-fact-1", "user-fact-5", "user-fact-6", "user-fact-7"} {
+	for _, expected := range []string{"user-fact-1", "user-fact-5"} {
 		if !strings.Contains(archive, expected) {
 			t.Fatalf("user ledger missing %q: %s", expected, archive)
 		}
@@ -178,26 +177,6 @@ func TestBuildArtifactToolResultSerializesArtifactsAsMapList(t *testing.T) {
 	}
 	if got := artifacts[0]["filename"]; got != "report.pdf" {
 		t.Fatalf("filename = %v, want report.pdf", got)
-	}
-}
-
-func TestUnavailableDataSourceAnswerFormatsFixedMessages(t *testing.T) {
-	if got := unavailableDataSourceAnswer(nil); got != "当前无可用数据源" {
-		t.Fatalf("answer = %q, want fixed no-source message", got)
-	}
-
-	got := unavailableDataSourceAnswer(&dbanalytics.SourceAvailabilityResult{
-		Unavailable: []dbanalytics.SourceAvailabilityIssue{
-			{ID: "src-1", Name: "订单库", Error: "连接测试失败：dial tcp timeout"},
-			{ID: "src-2", Name: "客户库", Error: "账号权限校验失败：只读权限不足"},
-		},
-	})
-	if !strings.Contains(got, "已配置数据源订单库、客户库不可用，报错如下：") {
-		t.Fatalf("answer header = %q", got)
-	}
-	if !strings.Contains(got, "订单库：连接测试失败：dial tcp timeout") ||
-		!strings.Contains(got, "客户库：账号权限校验失败：只读权限不足") {
-		t.Fatalf("answer missing per-source errors: %q", got)
 	}
 }
 

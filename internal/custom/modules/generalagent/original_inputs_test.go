@@ -26,7 +26,10 @@ func TestOriginalInputFileSpecsIgnoresKnowledgeBaseIDs(t *testing.T) {
 		KnowledgeBaseIDs: []string{"kb-selected-as-whole"},
 	}
 
-	got := svc.originalInputFileSpecs(context.Background(), req, "run-1")
+	got, err := svc.originalInputFileSpecs(context.Background(), req, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 1 {
 		t.Fatalf("originalInputFileSpecs length = %d, want only the runtime upload", len(got))
 	}
@@ -45,7 +48,10 @@ func TestOriginalInputFileSpecsSelectedKnowledgeIDRequiresKnowledgeService(t *te
 		KnowledgeIDs:     []string{"knowledge-file-selected"},
 	}
 
-	got := svc.originalInputFileSpecs(context.Background(), req, "run-1")
+	got, err := svc.originalInputFileSpecs(context.Background(), req, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 0 {
 		t.Fatalf("originalInputFileSpecs length = %d, want 0 when selected knowledge file cannot be materialized", len(got))
 	}

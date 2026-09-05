@@ -15,9 +15,10 @@ from app.final_delivery import (  # noqa: E402
     project_terminal_answer,
     requires_passive_terminal_delivery,
     terminal_answer_integrity_reason,
+    terminal_binding_marker,
     uses_claude_sdk_terminal_projection,
 )
-from app.runner import FINAL_ANSWER_SOURCE_CITATION_RULE, runtime_summary, tool_catalog  # noqa: E402
+from app.runner import FINAL_ANSWER_SOURCE_CITATION_RULE  # noqa: E402
 from app.schemas import ChatPayload, LLMConfig, RuntimeConfigSpec  # noqa: E402
 
 
@@ -70,14 +71,14 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
             self.assertTrue(uses_claude_sdk_terminal_projection(agent_type), agent_type)
 
         for agent_type in ("data-analysis", "table-analysis"):
-            self.assertFalse(requires_passive_terminal_delivery(agent_type), agent_type)
+            self.assertTrue(requires_passive_terminal_delivery(agent_type), agent_type)
             self.assertTrue(uses_claude_sdk_terminal_projection(agent_type), agent_type)
 
         for agent_type in ("rag-qa", "wiki-qa", "custom", ""):
             self.assertFalse(requires_passive_terminal_delivery(agent_type), agent_type)
             self.assertFalse(uses_claude_sdk_terminal_projection(agent_type), agent_type)
 
-        self.assertEqual(CLAUDE_SDK_TERMINAL_CONTRACT, "claude-sdk-terminal-v2")
+        self.assertEqual(CLAUDE_SDK_TERMINAL_CONTRACT, "claude-sdk-terminal-v3")
 
     def test_terminal_projection_hides_reasoning_around_envelope(self):
         raw = (
@@ -87,6 +88,101 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
         )
         self.assertEqual(project_terminal_answer(raw), "Direct user answer.")
         self.assertEqual(project_terminal_answer(" plain provider fallback "), "plain provider fallback")
+
+    def test_projection_strips_binding_and_whole_compatibility_wrapper(self):
+        marker = terminal_binding_marker("run-42")
+        self.assertEqual(
+            project_terminal_answer(
+                f"{marker}{TERMINAL_ANSWER_OPEN}Bound answer.{TERMINAL_ANSWER_CLOSE}"
+            ),
+            "Bound answer.",
+        )
+        self.assertEqual(
+            project_terminal_answer(
+                "<provider_final_response>Compatibility answer.</provider_final_response>"
+            ),
+            "Compatibility answer.",
+        )
+        self.assertEqual(
+            project_terminal_answer(
+                "<!-- weknora_final_response -->\nCompatibility answer without XML wrapper."
+            ),
+            "Compatibility answer without XML wrapper.",
+        )
+
+    def test_projection_preserves_user_defined_final_answer_xml(self):
+        value = "<business_final_answer>Visible XML payload.</business_final_answer>"
+        self.assertEqual(project_terminal_answer(value), value)
+
+    def test_projection_removes_private_history_trailer(self):
+        raw = (
+            f"{TERMINAL_ANSWER_OPEN}Visible answer.\n"
+            "</historical_assistant_output>private residue"
+        )
+        self.assertEqual(project_terminal_answer(raw), "Visible answer.")
+        self.assertEqual(
+            terminal_answer_integrity_reason("Visible answer.</user_source_ledger>"),
+            "terminal_protocol_residue",
+        )
+        self.assertEqual(
+            project_terminal_answer(f"{TERMINAL_ANSWER_OPEN}Visible.</user_request>"),
+            "Visible.",
+        )
+
+    def test_collector_rejects_an_answer_bound_to_another_concurrent_run(self):
+        collector = ClaudeSDKTerminalCollector(expected_binding="run-current")
+        collector.observe(
+            ResultMessage(
+                f"{TERMINAL_ANSWER_OPEN}"
+                f"{terminal_binding_marker('run-other')}Wrong conversation."
+                f"{TERMINAL_ANSWER_CLOSE}"
+            )
+        )
+
+        self.assertEqual(collector.answer(), "")
+        self.assertEqual(collector.answer_integrity_reason, "terminal_binding_mismatch")
+
+    def test_collector_accepts_only_the_matching_run_binding(self):
+        collector = ClaudeSDKTerminalCollector(expected_binding="run-current")
+        collector.observe(
+            ResultMessage(
+                f"{TERMINAL_ANSWER_OPEN}"
+                f"{terminal_binding_marker('run-current')}Correct conversation."
+                f"{TERMINAL_ANSWER_CLOSE}"
+            )
+        )
+
+        self.assertEqual(collector.answer(), "Correct conversation.")
+        self.assertEqual(collector.answer_integrity_reason, "")
+
+    def test_successful_current_sdk_result_does_not_require_application_markers(self):
+        collector = ClaudeSDKTerminalCollector(expected_binding="run-current")
+        collector.observe(ResultMessage("Complete answer without a private marker."))
+
+        self.assertEqual(collector.answer(), "Complete answer without a private marker.")
+        self.assertEqual(collector.answer_integrity_reason, "")
+        self.assertEqual(collector.answer_source, "native_result")
+
+    def test_provider_end_turn_closes_bound_answer_without_optional_end_marker(self):
+        collector = ClaudeSDKTerminalCollector(expected_binding="run-current")
+        collector.observe(ResultMessage(
+            f"{terminal_binding_marker('run-current')}{TERMINAL_ANSWER_OPEN}Complete answer."
+        ))
+        self.assertEqual(collector.answer(), "Complete answer.")
+        self.assertEqual(collector.answer_integrity_reason, "")
+
+    def test_unbound_partial_stream_is_not_accepted_without_success_result(self):
+        collector = ClaudeSDKTerminalCollector(expected_binding="run-current")
+        collector.observe(
+            AssistantMessage(
+                content=[TextBlock("Partial answer")],
+                message_id="msg-partial",
+                uuid="callback-partial",
+            )
+        )
+
+        self.assertEqual(collector.answer(), "")
+        self.assertEqual(collector.answer_integrity_reason, "terminal_binding_missing")
 
     def test_integrity_check_is_protocol_only_and_domain_independent(self):
         cases = {
@@ -114,14 +210,6 @@ class ClaudeSDKTerminalCollectorTest(unittest.TestCase):
             with self.subTest(answer=answer[:40]):
                 self.assertEqual(terminal_answer_integrity_reason(answer), expected)
 
-    def test_passive_delivery_does_not_add_model_visible_final_answer_tool(self):
-        general = self.payload("general-agent")
-        self.assertNotIn("final_answer", tool_catalog(general))
-        self.assertNotIn("final_answer", runtime_summary(general))
-
-        structured = self.payload("data-analysis")
-        self.assertIn("final_answer", tool_catalog(structured))
-        self.assertIn("final_answer", runtime_summary(structured))
 
     def test_structured_final_answer_uses_the_shared_source_handle(self):
         self.assertIn("source_references", FINAL_ANSWER_SOURCE_CITATION_RULE)

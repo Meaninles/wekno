@@ -27,6 +27,17 @@ func (s *sessionService) KnowledgeQA(
 	req *types.QARequest,
 	eventBus *event.EventBus,
 ) error {
+	// Knowledge profiles use the shared tool loop: the answering model selects
+	// retrieval directly, instead of a serial rewrite/classification model.
+	if req.CustomAgent != nil && req.CustomAgent.Config.AgentMode == types.AgentModeQuickAnswer && req.CustomAgent.ID != types.BuiltinSimpleChatID {
+		requestCopy := *req
+		agentCopy := *req.CustomAgent
+		if len(agentCopy.Config.AllowedTools) == 0 {
+			agentCopy.Config.AllowedTools = []string{tools.ToolKnowledgeSearch, tools.ToolGrepChunks, tools.ToolListKnowledgeChunks, tools.ToolGetDocumentInfo, tools.ToolQueryKnowledgeGraph}
+		}
+		requestCopy.CustomAgent = &agentCopy
+		return s.AgentQA(ctx, &requestCopy, eventBus)
+	}
 	logger.Infof(
 		ctx,
 		"Knowledge base question answering parameters, session ID: %s, query: %s, webSearchEnabled: %v, enableMemory: %v",

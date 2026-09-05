@@ -34,19 +34,21 @@ var rewriteImageSepPattern = regexp.MustCompile(`(?s)^(.*?)\s*\n?---\n(.*)$`)
 var queryUnderstandResponseFormat = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "rewrite_query": {"type": "string"},
-    "evidence_query": {"type": "string"},
-    "intent": {"type": "string"},
-    "evidence_need": {"type": "string", "enum": ["none", "knowledge_base", "web"]},
-    "image_description": {"type": "string"}
+    "rewrite_query": {"type": "string", "description": "The complete current user task rewritten without changing its requested deliverables, entities, values, modality, language, or scope. An instruction controlling whether P may be stated is not evidence for P or not-P."},
+    "evidence_query": {"type": "string", "description": "The complete source-facing question for every requested proposition requiring current external evidence, including external claims found only in prior assistant output. Preserve all identity-bearing object names, versions, identifiers, requested attributes, and disambiguating qualifiers from the current request or its resolved follow-up referent; never generalize them into a broader topic. Empty exactly when evidence_need is none."},
+    "evidence_queries": {"type": "array", "description": "Semantic decomposition of evidence_query into independent, self-contained source questions. Use one entry for a single evidence subject and one entry per distinct subject or unrelated claim group for a compound request. Preserve identity and requested attributes in every entry. Empty exactly when evidence_need is none.", "items": {"type": "string"}, "maxItems": 8},
+    "intent": {"type": "string", "description": "The primary semantic task type. A mixed dialogue-state and evidence request keeps its semantic intent while evidence_need independently activates retrieval."},
+    "evidence_need": {"type": "string", "enum": ["none", "knowledge_base", "web"], "description": "Classify every requested output proposition by authority. Use none when all premises and requested conclusions are transformations of user-authored dialogue/current attachments, even if their topic is a business action. Use the matching source if any requested proposition needs an outside rule, verification, citation, or other current external evidence. Prior assistant text and prior citation handles are never evidence."},
+    "image_description": {"type": "string", "description": "Description or OCR of current attached images only; empty when no image evidence is present."}
   },
-  "required": ["rewrite_query", "evidence_query", "intent", "evidence_need", "image_description"],
+  "required": ["rewrite_query", "evidence_query", "evidence_queries", "intent", "evidence_need", "image_description"],
   "additionalProperties": false
 }`)
 
 type queryUnderstandOutput struct {
 	RewriteQuery     string             `json:"rewrite_query"`
 	EvidenceQuery    string             `json:"evidence_query"`
+	EvidenceQueries  []string           `json:"evidence_queries"`
 	Intent           types.QueryIntent  `json:"intent"`
 	EvidenceNeed     types.EvidenceNeed `json:"evidence_need"`
 	ImageDescription string             `json:"image_description"`
@@ -134,7 +136,11 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 		userMsg,
 	})
 
-	maxTokens := 150
+	// The structured object can contain a compound source-facing question. A
+	// 150-token cap intermittently truncated valid JSON on long multi-turn
+	// requests, silently falling back to legacy routing. Keep this as the same
+	// single classifier call while giving its fixed schema enough output room.
+	maxTokens := 500
 	if useImages {
 		maxTokens = 500
 	}
@@ -145,7 +151,9 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 		{Role: "system", Content: systemContent},
 		userMsg,
 	}, &chat.ChatOptions{
-		Temperature:         0.3,
+		// Intent routing should be repeatable for identical semantic inputs. This
+		// call classifies the whole request; it is not a creative generation step.
+		Temperature:         0,
 		MaxCompletionTokens: maxTokens,
 		Thinking:            &thinking,
 		Format:              queryUnderstandResponseFormat,
@@ -235,6 +243,7 @@ func (p *PluginQueryUnderstand) loadHistory(ctx context.Context, chatManage *typ
 		chatManage.SessionID,
 		maxRounds,
 		conversationmemory.FetchMessageLimit(maxRounds),
+		chatManage.UserMessageID, chatManage.MessageID,
 	)
 	if err != nil {
 		pipelineWarn(ctx, "QueryUnderstand", "history_fetch", map[string]interface{}{
@@ -358,7 +367,7 @@ func (p *PluginQueryUnderstand) buildPrompts(chatManage *types.ChatManage, histo
 // image description from the model's structured JSON output.
 //
 // Expected format:
-// {"rewrite_query":"...","evidence_query":"...","intent":"kb_search","evidence_need":"knowledge_base","image_description":"..."}
+// {"rewrite_query":"...","evidence_query":"...","evidence_queries":["..."],"intent":"kb_search","evidence_need":"knowledge_base","image_description":"..."}
 func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw string) {
 	content := strings.TrimSpace(raw)
 	if content == "" {
@@ -370,6 +379,7 @@ func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw st
 			chatManage.RewriteQuery = rewrite
 		}
 		chatManage.EvidenceQuery = strings.TrimSpace(output.EvidenceQuery)
+		chatManage.EvidenceQueries = append([]string(nil), output.EvidenceQueries...)
 		chatManage.Intent = output.Intent
 		chatManage.EvidenceNeed = output.EvidenceNeed
 		chatManage.ImageDescription = strings.TrimSpace(output.ImageDescription)
@@ -418,6 +428,7 @@ func parseStructuredQueryOutputJSON(content string) (queryUnderstandOutput, bool
 		EvidenceQuery: strings.TrimSpace(firstStringField(obj,
 			"evidence_query", "retrieval_query", "search_query")),
 	}
+	out.EvidenceQueries = stringSliceField(obj, "evidence_queries", "retrieval_queries", "search_queries")
 
 	intentStr := strings.TrimSpace(firstStringField(obj, "intent"))
 	if intentStr != "" {
@@ -439,6 +450,38 @@ func parseStructuredQueryOutputJSON(content string) (queryUnderstandOutput, bool
 	}
 
 	return out, true
+}
+
+func stringSliceField(obj map[string]json.RawMessage, keys ...string) []string {
+	for _, key := range keys {
+		raw, ok := obj[key]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		var values []string
+		if err := json.Unmarshal(raw, &values); err != nil {
+			continue
+		}
+		seen := make(map[string]struct{}, len(values))
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			key := strings.ToLower(value)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, value)
+			if len(result) == 8 {
+				break
+			}
+		}
+		return result
+	}
+	return nil
 }
 
 func firstStringField(obj map[string]json.RawMessage, keys ...string) string {

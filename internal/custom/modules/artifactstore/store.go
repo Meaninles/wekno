@@ -274,6 +274,14 @@ func (s *Store) Open(ctx context.Context, filePath string) (io.ReadCloser, error
 	return s.service.GetFile(ctx, filePath)
 }
 
+// DownloadURL issues a signed URL only for an owned private artifact object.
+func (s *Store) DownloadURL(ctx context.Context, filePath string) (string, error) {
+	if !s.Owns(filePath) {
+		return "", fmt.Errorf("artifact path is outside the private object namespace")
+	}
+	return s.service.GetFileURL(ctx, filePath)
+}
+
 func (s *Store) Delete(ctx context.Context, filePath string) error {
 	if !s.Owns(filePath) {
 		return fmt.Errorf("artifact path is outside the private object namespace")

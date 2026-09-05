@@ -124,6 +124,7 @@ func (i QueryIntent) NeedsKBRetrieval() bool {
 type PipelineState struct {
 	RewriteQuery       string       `json:"rewrite_query,omitempty"`
 	EvidenceQuery      string       `json:"evidence_query,omitempty"`
+	EvidenceQueries    []string     `json:"evidence_queries,omitempty"`
 	Intent             QueryIntent  `json:"intent,omitempty"`
 	EvidenceNeed       EvidenceNeed `json:"evidence_need,omitempty"`
 	History            []*History   `json:"history,omitempty"`
@@ -237,7 +238,45 @@ func (c *ChatManage) RetrievalQuery() string {
 	if query := strings.TrimSpace(c.EvidenceQuery); query != "" {
 		return query
 	}
+	if queries := c.RetrievalQueries(); len(queries) > 0 {
+		return strings.Join(queries, "; ")
+	}
 	return strings.TrimSpace(c.RewriteQuery)
+}
+
+// RetrievalQueries returns model-decomposed, source-facing subquestions for
+// compound evidence requests. The existing single query remains the fallback
+// for older providers and custom prompts. No lexical/domain heuristic is used:
+// decomposition belongs to the same semantic query-understanding call that
+// already decides evidence need.
+func (c *ChatManage) RetrievalQueries() []string {
+	if c == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(c.EvidenceQueries))
+	queries := make([]string, 0, len(c.EvidenceQueries))
+	for _, raw := range c.EvidenceQueries {
+		query := strings.TrimSpace(raw)
+		if query == "" {
+			continue
+		}
+		key := strings.ToLower(query)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		queries = append(queries, query)
+	}
+	if len(queries) > 0 {
+		return queries
+	}
+	if query := strings.TrimSpace(c.EvidenceQuery); query != "" {
+		return []string{query}
+	}
+	if query := strings.TrimSpace(c.RewriteQuery); query != "" {
+		return []string{query}
+	}
+	return nil
 }
 
 // Clone creates a deep copy of the ChatManage object.
@@ -325,6 +364,7 @@ func (c *ChatManage) Clone() *ChatManage {
 		PipelineState: PipelineState{
 			RewriteQuery:         c.RewriteQuery,
 			EvidenceQuery:        c.EvidenceQuery,
+			EvidenceQueries:      append([]string(nil), c.EvidenceQueries...),
 			Intent:               c.Intent,
 			EvidenceNeed:         c.EvidenceNeed,
 			DurableUserContext:   c.DurableUserContext,

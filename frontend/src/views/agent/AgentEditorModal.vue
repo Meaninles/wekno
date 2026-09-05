@@ -736,8 +736,8 @@
                       </div>
                     </div>
 
-                    <!-- 温度 -->
-                    <div class="setting-row">
+                    <!-- 温度：Claude SDK 未提供采样温度参数 -->
+                    <div v-if="!isGeneralRuntimeAgent && !isFixedAnalysisAgent" class="setting-row">
                       <div class="setting-info">
                         <label>{{ $t('agent.editor.temperature') }}</label>
                         <p class="desc">{{ $t('agentEditor.desc.temperature') }}</p>

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
-	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
 	"github.com/Tencent/WeKnora/internal/custom/modules/sourcerefs"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -134,6 +133,9 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 	if args == nil {
 		args = map[string]any{}
 	}
+	if req.ToolName == "inspect_image" {
+		args = imageTransportAuditArgs(args)
+	}
 
 	iteration := run.allocateIteration()
 	run.eventBus.Emit(run.ctx, event.Event{
@@ -210,9 +212,7 @@ func executeRuntimeTool(httpCtx context.Context, req ToolCallRequest) (*ToolCall
 	citationOutputContract := ""
 	if run.hasCitableEvidence() {
 		citationOutputContract = sourcerefs.TerminalCitationInstruction()
-		if outputDirective := conversationmemory.TerminalGenerationDirective(); outputDirective != "" {
-			citationOutputContract += "\n\n" + outputDirective
-		}
+
 	}
 	return &ToolCallResponse{
 		Success:                result.Success,
@@ -379,12 +379,24 @@ func (r *activeRun) recordProgressStatus(id, name, phase, message string, metada
 	if !rec.startedAt.IsZero() {
 		durationMs = time.Since(rec.startedAt).Milliseconds()
 	}
+	args, _ := metadata["arguments"].(map[string]any)
+	if metadata["origin"] == "sdk" {
+		if output, ok := metadata["output"].(string); ok {
+			result.Output = output
+			if !success {
+				result.Error = output
+			}
+		}
+		if measured, ok := metadata["duration_ms"].(float64); ok {
+			durationMs = int64(measured)
+		}
+	}
 	r.steps = append(r.steps, types.AgentStep{
 		Iteration: rec.iteration,
 		ToolCalls: []types.ToolCall{{
 			ID:       id,
 			Name:     rec.toolName,
-			Args:     map[string]interface{}{},
+			Args:     args,
 			Result:   result,
 			Duration: durationMs,
 		}},

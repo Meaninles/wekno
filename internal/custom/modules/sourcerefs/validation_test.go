@@ -58,6 +58,47 @@ func TestFilterAnswerCitationsReportsEvidenceAvailableButUncited(t *testing.T) {
 	}
 }
 
+func TestFilterAnswerCitationsMovesHandlesOutsideURLsWithoutChangingTargets(t *testing.T) {
+	answer := "应用入口：[打开控制台](https://portal.example.net/apps/view?id=42<src id=\"S1\" />)\n" +
+		"备用入口：https://docs.example.net/guide#access<src id=\"S2\" />"
+	filtered, refs, report := FilterAnswerCitations(answer, citationTestRefs())
+
+	if !strings.Contains(filtered, `[打开控制台](https://portal.example.net/apps/view?id=42)<src id="S1" />`) {
+		t.Fatalf("citation still corrupts Markdown target: %q", filtered)
+	}
+	if !strings.Contains(filtered, `https://docs.example.net/guide#access <src id="S2" />`) {
+		t.Fatalf("citation still concatenates with bare URL: %q", filtered)
+	}
+	if len(refs) != 2 || report.RelocatedURLCitations != 2 {
+		t.Fatalf("unexpected references/report: refs=%#v report=%#v", refs, report)
+	}
+}
+
+func TestFilterAnswerCitationsRejoinsURLSplitByAHandle(t *testing.T) {
+	answer := "主入口：[控制台](https://portal.example.net/open? <src id=\"S1\" />tenant=blue&view=summary)\n" +
+		"备用入口：https://docs.example.net/guide?lang= <src id=\"S2\" />zh-CN#start"
+	filtered, refs, report := FilterAnswerCitations(answer, citationTestRefs())
+
+	if !strings.Contains(filtered, `[控制台](https://portal.example.net/open?tenant=blue&view=summary)<src id="S1" />`) {
+		t.Fatalf("citation still splits Markdown URL: %q", filtered)
+	}
+	if !strings.Contains(filtered, `https://docs.example.net/guide?lang=zh-CN#start <src id="S2" />`) {
+		t.Fatalf("citation still splits bare URL: %q", filtered)
+	}
+	if len(refs) != 2 || report.RelocatedURLCitations != 2 {
+		t.Fatalf("unexpected references/report: refs=%#v report=%#v", refs, report)
+	}
+}
+
+func TestFilterAnswerCitationsDoesNotRewriteURLExamplesInsideCode(t *testing.T) {
+	answer := "`[example](https://host.invalid/path<src id=\"S1\" />)`\n\n" +
+		"```md\nhttps://host.invalid/raw<src id=\"S2\" />\n```"
+	filtered, refs, report := FilterAnswerCitations(answer, citationTestRefs())
+	if filtered != answer || len(refs) != 0 || report.RelocatedURLCitations != 0 {
+		t.Fatalf("code example changed: filtered=%q refs=%#v report=%#v", filtered, refs, report)
+	}
+}
+
 func TestFilterAnswerCitationsDropsMalformedOpeningClosingAndIncompleteTags(t *testing.T) {
 	answer := `甲。<src id="S1"></src>乙。</doc><source id="S1" /><document source_id="S2" />` +
 		`无空格。<src id="S1"/> 多余空格。<src  id="S1" />丙。<src id="S1"`

@@ -57,7 +57,6 @@ type Source struct {
 	ErrorMessage   string         `json:"error_message" gorm:"type:text"`
 	QueryMode      string         `json:"query_mode" gorm:"type:varchar(32);not null;default:'live'"`
 	MaxRows        int            `json:"max_rows" gorm:"not null;default:1000"`
-	MaxScanRows    int            `json:"max_scan_rows" gorm:"not null;default:50000"`
 	TimeoutSeconds int            `json:"timeout_seconds" gorm:"not null;default:30"`
 	CreatedBy      string         `json:"created_by" gorm:"type:varchar(36)"`
 	CreatedAt      time.Time      `json:"created_at"`
@@ -81,9 +80,6 @@ func (s *Source) BeforeCreate(tx *gorm.DB) error {
 	}
 	if s.MaxRows <= 0 {
 		s.MaxRows = 1000
-	}
-	if s.MaxScanRows <= 0 {
-		s.MaxScanRows = 50000
 	}
 	if s.TimeoutSeconds <= 0 {
 		s.TimeoutSeconds = 30
@@ -136,7 +132,6 @@ func (s *Source) Response(includeConfig bool) SourceResponse {
 		ErrorMessage:   s.ErrorMessage,
 		QueryMode:      s.QueryMode,
 		MaxRows:        s.MaxRows,
-		MaxScanRows:    s.MaxScanRows,
 		TimeoutSeconds: s.TimeoutSeconds,
 		CreatedBy:      s.CreatedBy,
 		CreatedAt:      s.CreatedAt,
@@ -165,7 +160,6 @@ type SourceResponse struct {
 	ErrorMessage   string       `json:"error_message,omitempty"`
 	QueryMode      string       `json:"query_mode"`
 	MaxRows        int          `json:"max_rows"`
-	MaxScanRows    int          `json:"max_scan_rows"`
 	TimeoutSeconds int          `json:"timeout_seconds"`
 	CreatedBy      string       `json:"created_by,omitempty"`
 	CreatedAt      time.Time    `json:"created_at"`
@@ -372,7 +366,6 @@ type CreateSourceRequest struct {
 	Config         SourceConfig `json:"config" binding:"required"`
 	QueryMode      string       `json:"query_mode"`
 	MaxRows        int          `json:"max_rows"`
-	MaxScanRows    int          `json:"max_scan_rows"`
 	TimeoutSeconds int          `json:"timeout_seconds"`
 }
 
@@ -388,7 +381,6 @@ type UpdateSourceRequest struct {
 	Config         *SourceConfig `json:"config"`
 	QueryMode      string        `json:"query_mode"`
 	MaxRows        int           `json:"max_rows"`
-	MaxScanRows    int           `json:"max_scan_rows"`
 	TimeoutSeconds int           `json:"timeout_seconds"`
 }
 

@@ -1,6 +1,9 @@
 package types
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestQueryIntentRetrievalBoundary(t *testing.T) {
 	tests := []struct {
@@ -140,5 +143,25 @@ func TestRetrievalQuerySeparatesEvidenceFromMixedTurn(t *testing.T) {
 				t.Fatalf("RetrievalQuery() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRetrievalQueriesUseModelDecompositionWithoutDroppingCompatibility(t *testing.T) {
+	cm := &ChatManage{PipelineState: PipelineState{
+		RewriteQuery:    "full mixed task",
+		EvidenceQuery:   "combined source question",
+		EvidenceQueries: []string{"  first independent source question ", "second independent source question", "FIRST INDEPENDENT SOURCE QUESTION", ""},
+	}}
+	want := []string{"first independent source question", "second independent source question"}
+	if got := cm.RetrievalQueries(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("RetrievalQueries() = %#v, want %#v", got, want)
+	}
+	if got := cm.RetrievalQuery(); got != "combined source question" {
+		t.Fatalf("RetrievalQuery() = %q, want combined compatibility query", got)
+	}
+
+	legacy := &ChatManage{PipelineState: PipelineState{EvidenceQuery: "legacy evidence query"}}
+	if got := legacy.RetrievalQueries(); !reflect.DeepEqual(got, []string{"legacy evidence query"}) {
+		t.Fatalf("legacy RetrievalQueries() = %#v", got)
 	}
 }

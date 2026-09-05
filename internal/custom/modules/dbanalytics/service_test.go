@@ -382,7 +382,6 @@ func TestListSharedSourcesAppliesOrganizationAndTenantRoleCaps(t *testing.T) {
 		Status:         SourceStatusActive,
 		QueryMode:      QueryModeLive,
 		MaxRows:        1000,
-		MaxScanRows:    50000,
 		TimeoutSeconds: 30,
 	}
 	if err := svc.db.WithContext(ctx).Create(src).Error; err != nil {
@@ -418,7 +417,6 @@ func TestShareSourceRejectsAdminPermission(t *testing.T) {
 		Status:         SourceStatusActive,
 		QueryMode:      QueryModeLive,
 		MaxRows:        1000,
-		MaxScanRows:    50000,
 		TimeoutSeconds: 30,
 	}
 	if err := svc.db.WithContext(ctx).Create(src).Error; err != nil {
@@ -441,7 +439,6 @@ func TestOrganizationSourcesIncludeDatabaseSourcesFromSharedAgent(t *testing.T) 
 		Status:         SourceStatusActive,
 		QueryMode:      QueryModeLive,
 		MaxRows:        1000,
-		MaxScanRows:    50000,
 		TimeoutSeconds: 30,
 	}
 	agent := &wktypes.CustomAgent{
@@ -505,7 +502,6 @@ func TestCatalogUsesSourceTenantForSharedAgentBoundSources(t *testing.T) {
 		Status:         SourceStatusActive,
 		QueryMode:      QueryModeLive,
 		MaxRows:        1000,
-		MaxScanRows:    50000,
 		TimeoutSeconds: 30,
 	}
 	table := &SourceTable{
@@ -556,7 +552,7 @@ func TestCatalogUsesSourceTenantForSharedAgentBoundSources(t *testing.T) {
 	}
 }
 
-func TestDBQueryRequiresSchemaReasoningForRuntimeSessions(t *testing.T) {
+func TestDBQueryReportsSourceFailureWithoutSchemaPrecondition(t *testing.T) {
 	svc, ctx := newDBAnalyticsSharingTestService(t)
 
 	_, err := svc.ExecuteQuery(ctx, ToolScope{
@@ -565,66 +561,7 @@ func TestDBQueryRequiresSchemaReasoningForRuntimeSessions(t *testing.T) {
 		SessionID:      "session-1",
 		SourceIDs:      []string{"source-1"},
 	}, QueryInput{SQL: "SELECT 1"}, true)
-	if err == nil || !strings.Contains(err.Error(), "db_schema") {
-		t.Fatalf("ExecuteQuery error = %v, want db_schema requirement", err)
-	}
-}
-
-func TestDBQueryRequiresSchemaForReferencedTables(t *testing.T) {
-	svc, ctx := newDBAnalyticsSharingTestService(t)
-	src := &Source{
-		ID:             "source-1",
-		TenantID:       1,
-		Name:           "Orders Warehouse",
-		Type:           SourceTypePostgres,
-		Status:         SourceStatusActive,
-		QueryMode:      QueryModeLive,
-		MaxRows:        1000,
-		MaxScanRows:    50000,
-		TimeoutSeconds: 30,
-	}
-	orders := &SourceTable{
-		ID:           "orders-table",
-		TenantID:     1,
-		SourceID:     src.ID,
-		SchemaName:   "public",
-		PhysicalName: "orders",
-		ObjectType:   "table",
-		VirtualName:  "orders_v",
-		Enabled:      true,
-	}
-	customers := &SourceTable{
-		ID:           "customers-table",
-		TenantID:     1,
-		SourceID:     src.ID,
-		SchemaName:   "public",
-		PhysicalName: "customers",
-		ObjectType:   "table",
-		VirtualName:  "customers_v",
-		Enabled:      true,
-	}
-	columns := []*SourceColumn{
-		{ID: "orders-id", TenantID: 1, SourceID: src.ID, TableID: orders.ID, ColumnName: "id", DataType: "integer", Ordinal: 1},
-		{ID: "customers-id", TenantID: 1, SourceID: src.ID, TableID: customers.ID, ColumnName: "id", DataType: "integer", Ordinal: 1},
-	}
-	for _, row := range []any{src, orders, customers, columns[0], columns[1]} {
-		if err := svc.db.WithContext(ctx).Create(row).Error; err != nil {
-			t.Fatalf("seed schema reasoning rows: %v", err)
-		}
-	}
-
-	scope := ToolScope{
-		TenantID:       1,
-		SourceTenantID: 1,
-		SessionID:      "session-1",
-		SourceIDs:      []string{src.ID},
-	}
-	if _, err := svc.Schema(ctx, scope, SchemaInput{TableNames: []string{orders.VirtualName}}); err != nil {
-		t.Fatalf("schema orders table: %v", err)
-	}
-
-	_, err := svc.ExecuteQuery(ctx, scope, QueryInput{SQL: "SELECT COUNT(*) AS n FROM customers_v"}, true)
-	if err == nil || !strings.Contains(err.Error(), "db_schema") || !strings.Contains(err.Error(), customers.VirtualName) {
-		t.Fatalf("ExecuteQuery error = %v, want referenced table schema requirement", err)
+	if err == nil || strings.Contains(err.Error(), "db_schema") || !strings.Contains(err.Error(), "no active database sources") {
+		t.Fatalf("ExecuteQuery error = %v, want actual source availability failure", err)
 	}
 }

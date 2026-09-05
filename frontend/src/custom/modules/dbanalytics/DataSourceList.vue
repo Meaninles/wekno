@@ -238,9 +238,7 @@
           <t-form-item label="最大返回行数">
             <t-input-number v-model="sourceForm.max_rows" :min="1" :max="10000" />
           </t-form-item>
-          <t-form-item label="单表最大扫描行数">
-            <t-input-number v-model="sourceForm.max_scan_rows" :min="100" :max="500000" />
-          </t-form-item>
+
           <t-form-item label="查询超时（秒）">
             <t-input-number v-model="sourceForm.timeout_seconds" :min="3" :max="120" />
           </t-form-item>
@@ -375,7 +373,6 @@ const sourceForm = reactive<CreateDatabaseSourceRequest>({
   },
   query_mode: 'live',
   max_rows: 1000,
-  max_scan_rows: 50000,
   timeout_seconds: 30,
 });
 
@@ -521,7 +518,6 @@ function resetForm(type: DatabaseSourceType = 'postgres') {
   };
   sourceForm.query_mode = 'live';
   sourceForm.max_rows = 1000;
-  sourceForm.max_scan_rows = 50000;
   sourceForm.timeout_seconds = 30;
 }
 
@@ -593,7 +589,6 @@ function openEditDialog() {
     ssl_mode: activeSource.value.config?.ssl_mode || (activeSource.value.type === 'postgres' ? 'disable' : ''),
   };
   sourceForm.max_rows = activeSource.value.max_rows;
-  sourceForm.max_scan_rows = activeSource.value.max_scan_rows;
   sourceForm.timeout_seconds = activeSource.value.timeout_seconds;
   dialogVisible.value = true;
 }

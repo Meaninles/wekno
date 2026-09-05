@@ -61,12 +61,13 @@ type ArtifactResult struct {
 }
 
 type LLMConfig struct {
-	ModelName    string `json:"model_name"`
-	BaseURL      string `json:"base_url"`
-	APIKey       string `json:"api_key,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	AuthType     string `json:"auth_type,omitempty"`
-	APIKeyHelper string `json:"api_key_helper,omitempty"`
+	SupportsVision bool   `json:"supports_vision"`
+	ModelName      string `json:"model_name"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	AuthType       string `json:"auth_type,omitempty"`
+	APIKeyHelper   string `json:"api_key_helper,omitempty"`
 }
 
 type RuntimeToolSpec struct {
@@ -189,6 +190,7 @@ type ChatPayload struct {
 	UserID                  string                      `json:"user_id"`
 	SessionID               string                      `json:"session_id"`
 	RequestID               string                      `json:"request_id"`
+	UserMessageID           string                      `json:"user_message_id"`
 	AssistantMessageID      string                      `json:"assistant_message_id"`
 	Query                   string                      `json:"query"`
 	SystemPrompt            string                      `json:"system_prompt"`

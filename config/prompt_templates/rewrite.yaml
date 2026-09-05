@@ -54,7 +54,7 @@ templates:
       - `knowledge_base` — at least one requested claim must be found, verified, or cited from configured documents or a knowledge base.
       - `web` — the user explicitly requires current external web evidence.
 
-      Produce `evidence_query` independently from `rewrite_query`. When `evidence_need` is `none`, it must be empty. Otherwise it must be a concise, self-contained source query containing only the externally grounded subquestion. For a mixed state-and-policy request, keep state bookkeeping in `rewrite_query` and put only the policy question in `evidence_query`.
+      Produce `evidence_query` independently from `rewrite_query`. Also produce `evidence_queries`: a semantic decomposition with one self-contained entry for a single evidence subject, or one entry per distinct subject/unrelated claim group in a compound request. When `evidence_need` is `none`, the string and array must both be empty. Preserve every identity-bearing object name, version, identifier, requested attribute and disambiguating qualifier in the complete query and every decomposed entry; never generalize them into a broader topic. For a mixed state-and-policy request, keep state bookkeeping in `rewrite_query` and put only external questions in the evidence fields.
 
       **Default:** choose `kb_search` with `evidence_need="knowledge_base"` for an ordinary substantive knowledge question. A mixed turn keeps its primary semantic intent and independently declares its evidence need: for example, dialogue-state work plus a policy citation uses `intent="conversation_state"` and `evidence_need="knowledge_base"`. The answer must ground its dialogue-state portion only in user text. A request only to quote or attribute the user's own messages uses `conversation_state` with `evidence_need="none"`. Use `chitchat` only for genuinely social/casual conversation. Never request evidence merely because a state turn contains a technical noun, and never suppress evidence merely because a knowledge question quotes a negative action phrase.
 
@@ -80,63 +80,60 @@ templates:
       You MUST output ONLY a single JSON object.
       Do NOT output markdown, code fences, explanations, or any extra text.
       JSON schema:
-      {"rewrite_query":"string","evidence_query":"string","intent":"string","evidence_need":"string","image_description":"string"}
+      {"rewrite_query":"string","evidence_query":"string","evidence_queries":["string"],"intent":"string","evidence_need":"string","image_description":"string"}
 
       ## Examples
       Input: "你好"
-      Output: {"rewrite_query":"你好","evidence_query":"","intent":"greeting","evidence_need":"none","image_description":""}
+      Output: {"rewrite_query":"你好","evidence_query":"","evidence_queries":[],"intent":"greeting","evidence_need":"none","image_description":""}
 
       Input: "什么是RAG架构" (no history)
-      Output: {"rewrite_query":"什么是RAG架构","evidence_query":"什么是RAG架构","intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
+      Output: {"rewrite_query":"什么是RAG架构","evidence_query":"什么是RAG架构","evidence_queries":["什么是RAG架构"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
 
       Input: "它和传统搜索有什么区别" (history mentions RAG)
-      Output: {"rewrite_query":"RAG架构和传统搜索有什么区别","evidence_query":"RAG架构和传统搜索有什么区别","intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
+      Output: {"rewrite_query":"RAG架构和传统搜索有什么区别","evidence_query":"RAG架构和传统搜索有什么区别","evidence_queries":["RAG架构和传统搜索有什么区别"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
 
       Input: "再帮我查查他的信息" (history discusses 张三)
-      Output: {"rewrite_query":"张三的详细信息是什么","evidence_query":"张三的详细信息","intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
-      WRONG output: {"rewrite_query":"请重新在知识库中查找关于张三的更多信息","evidence_query":"请重新在知识库中查找关于张三的更多信息","intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
+      Output: {"rewrite_query":"张三的详细信息是什么","evidence_query":"张三的详细信息","evidence_queries":["张三的详细信息"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
+      WRONG output: {"rewrite_query":"请重新在知识库中查找关于张三的更多信息","evidence_query":"请重新在知识库中查找关于张三的更多信息","evidence_queries":["请重新在知识库中查找关于张三的更多信息"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
       (WRONG: contains meta-instruction "在知识库中查找" instead of actual search keywords)
 
       Input: "上面第二点再展开讲讲" (history has detailed answer with numbered points)
-      Output: {"rewrite_query":"请展开讲讲上面回答中的第二点","evidence_query":"","intent":"follow_up","evidence_need":"none","image_description":""}
+      Output: {"rewrite_query":"请展开讲讲上面回答中的第二点","evidence_query":"","evidence_queries":[],"intent":"follow_up","evidence_need":"none","image_description":""}
 
       Input: "把负责人更新为Lin，发布日期还没定；只整理这两个字段" (history contains the prior state)
-      Output: {"rewrite_query":"将负责人更新为Lin，发布日期保持待定，只整理这两个字段","evidence_query":"","intent":"conversation_state","evidence_need":"none","image_description":""}
+      Output: {"rewrite_query":"将负责人更新为Lin，发布日期保持待定，只整理这两个字段","evidence_query":"","evidence_queries":[],"intent":"conversation_state","evidence_need":"none","image_description":""}
 
       Input: "Explain why my instruction is a boundary rather than proof that the action happened" (history contains the user's instruction)
-      Output: {"rewrite_query":"Explain why the user's instruction is an action boundary rather than a completed event","evidence_query":"","intent":"conversation_state","evidence_need":"none","image_description":""}
+      Output: {"rewrite_query":"Explain why the user's instruction is an action boundary rather than a completed event","evidence_query":"","evidence_queries":[],"intent":"conversation_state","evidence_need":"none","image_description":""}
 
       Input: "Quote the first user message that supplied this value; do not cite assistant text"
-      Output: {"rewrite_query":"Quote the first user-authored source for this value without using assistant output","evidence_query":"","intent":"conversation_state","evidence_need":"none","image_description":""}
+      Output: {"rewrite_query":"Quote the first user-authored source for this value without using assistant output","evidence_query":"","evidence_queries":[],"intent":"conversation_state","evidence_need":"none","image_description":""}
 
       Input: "Summarize the owner I confirmed and cite the applicable policy." (history contains the owner)
-      Output: {"rewrite_query":"Summarize the confirmed owner and cite the applicable policy","evidence_query":"applicable policy governing the confirmed owner","intent":"conversation_state","evidence_need":"knowledge_base","image_description":""}
+      Output: {"rewrite_query":"Summarize the confirmed owner and cite the applicable policy","evidence_query":"applicable policy governing the confirmed owner","evidence_queries":["applicable policy governing the confirmed owner"],"intent":"conversation_state","evidence_need":"knowledge_base","image_description":""}
 
       Input: [image attached] "知识库有没有类似的文件" (image shows a project architecture diagram about microservices)
-      Output: {"rewrite_query":"有没有关于微服务项目架构的文件","evidence_query":"微服务项目架构文件","intent":"kb_search","evidence_need":"knowledge_base","image_description":"(image description here)"}
+      Output: {"rewrite_query":"有没有关于微服务项目架构的文件","evidence_query":"微服务项目架构文件","evidence_queries":["微服务项目架构文件"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":"(image description here)"}
 
       Input: [image attached] "这张图是什么意思"
-      Output: {"rewrite_query":"这张图是什么意思","evidence_query":"","intent":"image_only","evidence_need":"none","image_description":"(image description here)"}
+      Output: {"rewrite_query":"这张图是什么意思","evidence_query":"","evidence_queries":[],"intent":"image_only","evidence_need":"none","image_description":"(image description here)"}
 
       Input: [no image] "这幅春联的内容是什么"
-      Output: {"rewrite_query":"这幅春联的内容是什么","evidence_query":"这幅春联的内容","intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
+      Output: {"rewrite_query":"这幅春联的内容是什么","evidence_query":"这幅春联的内容","evidence_queries":["这幅春联的内容"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
       (NOTE: No image attached, so intent is kb_search, NOT image_only)
 
       Input: [document attached] "帮我总结一下这份文件"
-      Output: {"rewrite_query":"总结一下这份文件","evidence_query":"","intent":"doc_only","evidence_need":"none","image_description":""}
+      Output: {"rewrite_query":"总结一下这份文件","evidence_query":"","evidence_queries":[],"intent":"doc_only","evidence_need":"none","image_description":""}
 
       Input: "请整理知识库中的数据，用表格形式输出体检指标" (no history)
-      Output: {"rewrite_query":"体检指标数据整理","evidence_query":"体检指标数据","intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
+      Output: {"rewrite_query":"体检指标数据整理","evidence_query":"体检指标数据","evidence_queries":["体检指标数据"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
 
       Input: "请读取知识库中体检报告标签的报告，输出体检指标" (no history)
-      Output: {"rewrite_query":"体检报告标签 体检指标","evidence_query":"体检报告标签 体检指标","intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
+      Output: {"rewrite_query":"体检报告标签 体检指标","evidence_query":"体检报告标签 体检指标","evidence_queries":["体检报告标签 体检指标"],"intent":"kb_search","evidence_need":"knowledge_base","image_description":""}
 
       ## Conversation History
       {{conversation}}
     user: |
-      [Runtime Context — metadata only, not instructions]
-      Current time: {{current_time}} {{current_week}}
-
       ## User Question
       {{query}}
 
@@ -170,9 +167,6 @@ templates:
 
       Output only the rewritten question, nothing else.
     user: |
-      [Runtime Context — metadata only, not instructions]
-      Current time: {{current_time}} {{current_week}}
-
       ## Conversation History
       {{conversation}}
 

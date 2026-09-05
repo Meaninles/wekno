@@ -1,6 +1,9 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/config"
@@ -8,65 +11,70 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-func TestApplyModelRerankScores_usesBoundedRankRecallFloor(t *testing.T) {
+func TestGetEnrichedPassageUsesRequestIndependentSearchMetadata(t *testing.T) {
 	t.Parallel()
-	tool := &KnowledgeSearchTool{
-		config: &config.Config{
-			Conversation: &config.ConversationConfig{RerankThreshold: 0.3},
-		},
+	tool := &KnowledgeSearchTool{}
+	faqMetadata, err := json.Marshal(types.FAQChunkMetadata{
+		StandardQuestion:  "How is a temporary access badge requested?",
+		SimilarQuestions:  []string{"What is the visitor badge workflow?"},
+		NegativeQuestions: []string{"How do I disable every badge?"},
+		Answers:           []string{"Submit the host and visit window through the access portal."},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	originals := []*searchResultWithMeta{
-		{
-			SearchResult:      &types.SearchResult{ID: "faq-1", Content: "Q: WeKnora", Score: 0.011},
-			KnowledgeBaseType: types.KnowledgeBaseTypeFAQ,
-		},
-		{
-			SearchResult: &types.SearchResult{ID: "doc-1", Content: "swimming club", Score: 0.02},
-		},
-		{SearchResult: &types.SearchResult{ID: "doc-2", Content: "supporting passage", Score: 0.015}},
-		{SearchResult: &types.SearchResult{ID: "doc-3", Content: "irrelevant tail", Score: 0.01}},
+	passage := tool.getEnrichedPassage(context.Background(), &types.SearchResult{
+		Content:        "Access service FAQ entry.",
+		MatchedContent: "Need a short-term badge for a guest",
+		ChunkMetadata:  types.JSON(faqMetadata),
+	})
+	for _, want := range []string{
+		"Need a short-term badge for a guest",
+		"How is a temporary access badge requested?",
+		"What is the visitor badge workflow?",
+		"Submit the host and visit window through the access portal.",
+	} {
+		if !strings.Contains(passage, want) {
+			t.Fatalf("enriched passage omitted %q: %s", want, passage)
+		}
 	}
-	rankResults := []rerank.RankResult{
-		{Index: 0, RelevanceScore: 0.05},
-		{Index: 1, RelevanceScore: 0.9},
-		{Index: 2, RelevanceScore: 0.2},
-		{Index: 3, RelevanceScore: 0.01},
+	if strings.Contains(passage, "disable every badge") {
+		t.Fatalf("negative FAQ examples must not become positive rerank evidence: %s", passage)
 	}
-	out := tool.applyModelRerankScores(originals, rankResults, 0.3)
-	if len(out) != 3 {
-		t.Fatalf("expected the bounded top-three recall floor, got %#v", out)
+
+	documentMetadata, err := json.Marshal(types.DocumentChunkMetadata{
+		GeneratedQuestions: []types.GeneratedQuestion{{Question: "Where is the rollback owner recorded?"}},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	seen := map[string]bool{}
-	for _, result := range out {
-		seen[result.ID] = true
-	}
-	if !seen["doc-1"] || !seen["doc-2"] || !seen["faq-1"] || seen["doc-3"] {
-		t.Fatalf("unexpected recall-floor membership: %#v", seen)
-	}
-	if out[0].Score <= 0.02 {
-		t.Fatalf("composite score should exceed raw retrieval score, got %.4f", out[0].Score)
+	documentPassage := tool.getEnrichedPassage(context.Background(), &types.SearchResult{
+		Content:       "Release checklist section.",
+		ChunkMetadata: types.JSON(documentMetadata),
+	})
+	if !strings.Contains(documentPassage, "Where is the rollback owner recorded?") {
+		t.Fatalf("generated document question was omitted: %s", documentPassage)
 	}
 }
 
-func TestRetainKnowledgeSearchRecallFloorIsQueryIndependentAndValidatesIndices(t *testing.T) {
-	t.Parallel()
-	input := []rerank.RankResult{
-		{Index: 4, RelevanceScore: 1},
-		{Index: 1, RelevanceScore: 0.28},
-		{Index: 1, RelevanceScore: 0.27},
-		{Index: 0, RelevanceScore: 0.18},
-		{Index: 2, RelevanceScore: 0.08},
-		{Index: -1, RelevanceScore: 1},
-		{Index: 3, RelevanceScore: 0.01},
+func TestApplyModelRerankScoresUsesConfiguredCutoffAndPreservesInput(t *testing.T) {
+	tool := &KnowledgeSearchTool{}
+	originals := []*searchResultWithMeta{{SearchResult: &types.SearchResult{ID: "a", Score: .01}}, {SearchResult: &types.SearchResult{ID: "b", Score: .02}}}
+	out := tool.applyModelRerankScores(originals, []rerank.RankResult{{Index: 0, RelevanceScore: .1}, {Index: 1, RelevanceScore: .9}}, .5)
+	if len(out) != 1 || out[0].ID != "b" || out[0].Score != .9 {
+		t.Fatalf("wrong relevance filter: %#v", out)
 	}
-	got := retainKnowledgeSearchRecallFloor(input, 4, 0.3)
-	if len(got) != 3 {
-		t.Fatalf("got %d results, want bounded top-three: %#v", len(got), got)
+	if originals[1].Score != .02 {
+		t.Fatal("reranking mutated retrieval scores")
 	}
-	for i, want := range []int{1, 0, 2} {
-		if got[i].Index != want {
-			t.Fatalf("rank %d index=%d, want %d", i, got[i].Index, want)
-		}
+}
+func TestFilterKnowledgeSearchScores(t *testing.T) {
+	input := []rerank.RankResult{{Index: 4, RelevanceScore: 1}, {Index: 1, RelevanceScore: .28}, {Index: 1, RelevanceScore: .27}, {Index: 0, RelevanceScore: .18}, {Index: -1, RelevanceScore: 1}}
+	if got := filterKnowledgeSearchScores(input, 2, .3); len(got) != 0 {
+		t.Fatal(got)
+	}
+	if got := filterKnowledgeSearchScores(input, 2, 0); len(got) != 2 || got[0].Index != 1 || got[1].Index != 0 {
+		t.Fatal(got)
 	}
 }
 

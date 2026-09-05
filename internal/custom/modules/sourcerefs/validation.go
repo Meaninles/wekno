@@ -11,13 +11,17 @@ import (
 )
 
 var (
-	citationLikeTagRE    = regexp.MustCompile(`(?i)</?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*>`)
-	incompleteTagTailRE  = regexp.MustCompile(`(?is)</?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*$`)
-	canonicalSourceRE    = regexp.MustCompile(`^<src id="(S[1-9][0-9]*)" />$`)
-	canonicalSourceTagRE = regexp.MustCompile(`<src id="(S[1-9][0-9]*)" />`)
-	protectedCodeRE      = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
-	wikiHandleRE         = regexp.MustCompile(`\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]`)
-	markdownListMarkerRE = regexp.MustCompile(`^\s*(?:[-+*]|[0-9]+[.)、])\s+(.+?)\s*$`)
+	citationLikeTagRE             = regexp.MustCompile(`(?i)</?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*>`)
+	incompleteTagTailRE           = regexp.MustCompile(`(?is)</?(?:src|source|citation|doc|document|kb|wiki|web)\b[^>]*$`)
+	canonicalSourceRE             = regexp.MustCompile(`^<src id="(S[1-9][0-9]*)" />$`)
+	canonicalSourceTagRE          = regexp.MustCompile(`<src id="(S[1-9][0-9]*)" />`)
+	protectedCodeRE               = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
+	wikiHandleRE                  = regexp.MustCompile(`\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]`)
+	markdownListMarkerRE          = regexp.MustCompile(`^\s*(?:[-+*]|[0-9]+[.)、])\s+(.+?)\s*$`)
+	markdownDestinationCitationRE = regexp.MustCompile(`(\]\([^\)\r\n]*?)[ \t]*((?:<src id="S[1-9][0-9]*" />[ \t]*)+)(\))`)
+	markdownEmbeddedURLCitationRE  = regexp.MustCompile(`(?i)(\]\(https?://[^\s<>()]*?)[ \t]*((?:<src id="S[1-9][0-9]*" />[ \t]*)+)[ \t]*([A-Za-z0-9][A-Za-z0-9._~:/?#@!$&'+,;=%-]*)(\))`)
+	embeddedURLCitationRE          = regexp.MustCompile(`(?i)(https?://[^\s<>()]*?)[ \t]*((?:<src id="S[1-9][0-9]*" />[ \t]*)+)[ \t]*([A-Za-z0-9][A-Za-z0-9._~:/?#@!$&'+,;=%-]*)`)
+	bareURLCitationRE             = regexp.MustCompile(`(?i)(https?://[^\s<>()]+)((?:<src id="S[1-9][0-9]*" />[ \t]*)+)`)
 )
 
 // CitationValidationReport records deterministic protocol filtering. It is
@@ -33,6 +37,7 @@ type CitationValidationReport struct {
 	RelocatedListCitations   int      `json:"relocated_list_citations,omitempty"`
 	CompletedListCitations   int      `json:"completed_list_citations,omitempty"`
 	UnsupportedListCitations int      `json:"unsupported_list_citations,omitempty"`
+	RelocatedURLCitations    int      `json:"relocated_url_citations,omitempty"`
 }
 
 // FilterAnswerCitations keeps only canonical, registry-backed <src id="Sx" />
@@ -60,6 +65,7 @@ func FilterAnswerCitations(
 	seenCited := make(map[string]bool)
 	seenUnknown := make(map[string]bool)
 	filtered := transformOutsideMarkdownCode(answer, func(segment string) string {
+		segment = normalizeURLCitationPlacement(segment, &report)
 		segment = normalizeMarkdownListCitations(segment, byID, &report)
 		segment = citationLikeTagRE.ReplaceAllStringFunc(segment, func(tag string) string {
 			match := canonicalSourceRE.FindStringSubmatch(tag)
@@ -108,6 +114,55 @@ func FilterAnswerCitations(
 	}
 	report.EvidenceAvailableUncited = report.AvailableCount > 0 && len(report.CitedIDs) == 0 && strings.TrimSpace(filtered) != ""
 	return filtered, citedRefs, report
+}
+
+// normalizeURLCitationPlacement repairs only Markdown/URL structure. A model
+// can place a valid source handle before a link destination's closing ')' or
+// concatenate it directly to a bare URL, causing the citation markup to become
+// part of the clickable target. Move the same opaque handle outside the target;
+// never change the URL, claim text, source ID, or evidence registry.
+func normalizeURLCitationPlacement(segment string, report *CitationValidationReport) string {
+	segment = markdownEmbeddedURLCitationRE.ReplaceAllStringFunc(segment, func(value string) string {
+		match := markdownEmbeddedURLCitationRE.FindStringSubmatch(value)
+		if len(match) != 5 {
+			return value
+		}
+		if report != nil {
+			report.RelocatedURLCitations += len(canonicalSourceTagRE.FindAllString(match[2], -1))
+		}
+		return strings.TrimRight(match[1], " \t") + match[3] + match[4] + strings.TrimSpace(match[2])
+	})
+	segment = embeddedURLCitationRE.ReplaceAllStringFunc(segment, func(value string) string {
+		match := embeddedURLCitationRE.FindStringSubmatch(value)
+		if len(match) != 4 {
+			return value
+		}
+		if report != nil {
+			report.RelocatedURLCitations += len(canonicalSourceTagRE.FindAllString(match[2], -1))
+		}
+		return strings.TrimRight(match[1], " \t") + match[3] + " " + strings.TrimSpace(match[2])
+	})
+	segment = markdownDestinationCitationRE.ReplaceAllStringFunc(segment, func(value string) string {
+		match := markdownDestinationCitationRE.FindStringSubmatch(value)
+		if len(match) != 4 {
+			return value
+		}
+		if report != nil {
+			report.RelocatedURLCitations += len(canonicalSourceTagRE.FindAllString(match[2], -1))
+		}
+		return strings.TrimRight(match[1], " \t") + match[3] + strings.TrimSpace(match[2])
+	})
+	segment = bareURLCitationRE.ReplaceAllStringFunc(segment, func(value string) string {
+		match := bareURLCitationRE.FindStringSubmatch(value)
+		if len(match) != 3 {
+			return value
+		}
+		if report != nil {
+			report.RelocatedURLCitations += len(canonicalSourceTagRE.FindAllString(match[2], -1))
+		}
+		return match[1] + " " + strings.TrimSpace(match[2])
+	})
+	return segment
 }
 
 // normalizeMarkdownListCitations handles the one structural placement case

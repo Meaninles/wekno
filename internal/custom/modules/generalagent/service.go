@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -161,7 +160,7 @@ func (s *Service) ArtifactStore() *artifactstore.Store {
 	return s.artifactStore
 }
 
-func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
+func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) (runErr error) {
 	if req == nil || req.CustomAgent == nil {
 		return errors.New("通用智能体需要有效的智能体配置")
 	}
@@ -186,9 +185,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	if err != nil {
 		return err
 	}
-	if blocked, err := s.preflightDataAnalysisSources(ctx, eventBus, req, agentConfig, runID, start); blocked || err != nil {
-		return err
-	}
 	sidecarClient := s.clientForAgentType(agentConfig.AgentType)
 	chatModel, err := s.modelService.GetChatModel(ctx, agentConfig.RuntimeModelID)
 	if err != nil {
@@ -203,6 +199,9 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		return err
 	}
 	defer registry.Cleanup(ctx)
+	if agentConfig.EnableArtifacts && strings.TrimSpace(agentConfig.VLMModelID) != "" {
+		registry = &visionRegistry{AgentToolRegistry: registry, models: s.modelService, modelID: agentConfig.VLMModelID}
+	}
 
 	llm, err := s.resolveLLMConfig(ctx, agentConfig)
 	if err != nil {
@@ -229,7 +228,10 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	}
 	agentConfig.ProfessionalSkillsEnabled = len(professionalSkills) > 0
 	agentConfig.AllowedProfessionalSkills = professionalSkillNames(professionalSkills)
-	originalInputFiles := s.originalInputFileSpecs(ctx, req, runID)
+	originalInputFiles, err := s.originalInputFileSpecs(ctx, req, runID)
+	if err != nil {
+		return err
+	}
 	for _, item := range originalInputFiles {
 		if storageURL := strings.TrimSpace(item.StorageURL); storageURL != "" {
 			originalInputStorageURLs[storageURL] = struct{}{}
@@ -252,6 +254,11 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	}
 	unregister := registerActiveRun(active)
 	defer unregister()
+	defer func() {
+		if runErr != nil {
+			runErr = &executionError{cause: runErr, steps: active.snapshotSteps("")}
+		}
+	}()
 
 	history, durableUserContext := s.buildHistory(ctx, req, agentConfig)
 	evalObservability := false
@@ -265,6 +272,7 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		SessionID:          sessionID,
 		RequestID:          req.RequestID,
 		AssistantMessageID: req.AssistantMessageID,
+		UserMessageID:      req.UserMessageID,
 		// The sidecar's <user_request> is documented as verbatim user text. Keep
 		// platform continuity rules in the system prompt instead of appending
 		// hidden protocol text to the highest-priority user request.
@@ -322,14 +330,13 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 	lastAnswerID := ""
 	lastAnswerDone := false
 	var streamed strings.Builder
+	projection := &answerStream{refs: active.snapshotSourceReferences, emit: func(text string) {
+		eventBus.Emit(ctx, event.Event{ID: fallbackAnswerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID, RequestID: req.RequestID, Data: event.AgentFinalAnswerData{Content: text}})
+	}}
 	result, err := sidecarClient.ChatStream(ctx, payload, func(evt StreamEvent) {
-		// Keep tool/thinking/progress events live, but hold the terminal answer
-		// until its citation protocol can be checked against the references
-		// actually registered in this run. The sidecar normally emits one terminal
-		// answer block, so this adds no model/retrieval work and lets SSE, storage,
-		// and history share one byte-identical production candidate.
 		if evt.Type == "answer_delta" {
 			captureSidecarAnswerEvent(fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone)
+			projection.push(evt.Content, evt.Done)
 			return
 		}
 		s.emitSidecarEvent(ctx, eventBus, sessionID, fallbackAnswerID, evt, &streamed, &lastAnswerID, &lastAnswerDone, active)
@@ -355,24 +362,17 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 			nil,
 		)
 	}
-	finalAnswer := streamed.String()
-	if finalAnswer == "" {
-		finalAnswer = result.Answer
+	if streamed.Len() == 0 {
+		projection.push(result.Answer, true)
+	} else {
+		projection.push("", true)
 	}
-	if lastAnswerID == "" {
-		lastAnswerID = fallbackAnswerID
-	}
-	finalAnswer, citedRefs, citationReport := emitSidecarProductionCandidate(
-		ctx, eventBus, sessionID, req.RequestID, lastAnswerID, finalAnswer, allRefs,
-	)
-	if citationReport.ForbiddenTags > 0 || citationReport.IncompleteTags > 0 || len(citationReport.UnknownIDs) > 0 {
-		logger.Warnf(ctx, "general-agent filtered invalid terminal citation protocol: forbidden=%d incomplete=%d unknown=%v",
-			citationReport.ForbiddenTags, citationReport.IncompleteTags, citationReport.UnknownIDs)
-	}
+	finalAnswer := projection.output.String()
+	_, citedRefs, citationReport := sourcerefs.FilterAnswerCitations(finalAnswer, allRefs)
 	if citationReport.EvidenceAvailableUncited {
-		logger.Warnf(ctx, "general-agent final answer omitted all current-turn citation handles: available=%d",
-			citationReport.AvailableCount)
+		logger.Warnf(ctx, "general-agent answer omitted all current source handles: %d available", len(allRefs))
 	}
+	eventBus.Emit(ctx, event.Event{ID: fallbackAnswerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID, RequestID: req.RequestID, Data: event.AgentFinalAnswerData{Done: true}})
 
 	artifactResults, err := s.persistArtifacts(ctx, sidecarClient, result.RunID, req, result.Artifacts)
 	if err != nil {
@@ -444,139 +444,6 @@ func (s *Service) Run(ctx context.Context, req *types.QARequest, eventBus *event
 		},
 	})
 	return nil
-}
-
-func (s *Service) preflightDataAnalysisSources(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, config *types.AgentConfig, runID string, start time.Time) (bool, error) {
-	if req == nil || config == nil || config.AgentType != types.AgentTypeDataAnalysis {
-		return false, nil
-	}
-	progressID := "data-source-preflight-" + runID
-	emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "正在检查数据源可用性", "start", false, nil)
-	if s.dbAnalytics == nil {
-		answer := "当前无可用数据源"
-		emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "数据源可用性检查完成：当前无可用数据源", "success", true, map[string]interface{}{"available": false})
-		emitGeneralAgentPreflightAnswer(ctx, eventBus, req, runID, answer, start)
-		return true, nil
-	}
-	scope := dbanalytics.ToolScope{
-		AgentID:        config.AgentID,
-		AgentType:      config.AgentType,
-		SessionID:      req.Session.ID,
-		TenantID:       tenantIDFromContext(ctx),
-		TenantRole:     types.TenantRoleFromContext(ctx),
-		SourceTenantID: config.AgentTenantID,
-		SourceIDs:      append([]string(nil), config.DBDataSources...),
-	}
-	result, err := s.dbAnalytics.CheckSourceAvailability(ctx, scope)
-	if err != nil {
-		return false, err
-	}
-	if result != nil && len(result.Available) > 0 {
-		emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "数据源可用性检查通过", "success", true, map[string]interface{}{
-			"available":         true,
-			"available_sources": result.Available,
-			"unavailable":       result.Unavailable,
-		})
-		return false, nil
-	}
-	answer := unavailableDataSourceAnswer(result)
-	emitGeneralAgentProgress(ctx, eventBus, req, progressID, "data_source_availability_check", "数据源可用性检查完成：当前无可用数据源", "success", true, map[string]interface{}{
-		"available":   false,
-		"unavailable": unavailableIssues(result),
-	})
-	emitGeneralAgentPreflightAnswer(ctx, eventBus, req, runID, answer, start)
-	return true, nil
-}
-
-func emitGeneralAgentProgress(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, id, toolName, content, phase string, done bool, metadata map[string]interface{}) {
-	if eventBus == nil || req == nil {
-		return
-	}
-	eventBus.Emit(ctx, event.Event{
-		ID:        id,
-		Type:      event.EventAgentProgress,
-		SessionID: req.Session.ID,
-		RequestID: req.RequestID,
-		Data: event.AgentProgressData{
-			Content:    content,
-			ToolName:   toolName,
-			ToolCallID: id,
-			Phase:      phase,
-			Done:       done,
-			Metadata:   metadata,
-		},
-	})
-}
-
-func emitGeneralAgentPreflightAnswer(ctx context.Context, eventBus *event.EventBus, req *types.QARequest, runID, answer string, start time.Time) {
-	if eventBus == nil || req == nil {
-		return
-	}
-	answerID := "data-source-preflight-answer-" + runID
-	eventBus.Emit(ctx, event.Event{
-		ID:        answerID,
-		Type:      event.EventAgentFinalAnswer,
-		SessionID: req.Session.ID,
-		RequestID: req.RequestID,
-		Data: event.AgentFinalAnswerData{
-			Content: answer,
-			Done:    false,
-		},
-	})
-	eventBus.Emit(ctx, event.Event{
-		ID:        answerID,
-		Type:      event.EventAgentFinalAnswer,
-		SessionID: req.Session.ID,
-		RequestID: req.RequestID,
-		Data: event.AgentFinalAnswerData{
-			Content: "",
-			Done:    true,
-		},
-	})
-	eventBus.Emit(ctx, event.Event{
-		Type:      event.EventAgentComplete,
-		SessionID: req.Session.ID,
-		RequestID: req.RequestID,
-		Data: event.AgentCompleteData{
-			SessionID:       req.Session.ID,
-			FinalAnswer:     answer,
-			TotalDurationMs: time.Since(start).Milliseconds(),
-			MessageID:       req.AssistantMessageID,
-			RequestID:       req.RequestID,
-		},
-	})
-}
-
-func unavailableDataSourceAnswer(result *dbanalytics.SourceAvailabilityResult) string {
-	issues := unavailableIssues(result)
-	if len(issues) == 0 {
-		return "当前无可用数据源"
-	}
-	names := make([]string, 0, len(issues))
-	lines := make([]string, 0, len(issues))
-	for _, issue := range issues {
-		name := strings.TrimSpace(issue.Name)
-		if name == "" {
-			name = strings.TrimSpace(issue.ID)
-		}
-		if name == "" {
-			name = "未命名数据源"
-		}
-		errText := strings.TrimSpace(issue.Error)
-		if errText == "" {
-			errText = "未知错误"
-		}
-		names = append(names, name)
-		lines = append(lines, fmt.Sprintf("%s：%s", name, errText))
-	}
-	return fmt.Sprintf("已配置数据源%s不可用，报错如下：\n%s", strings.Join(names, "、"), strings.Join(lines, "\n"))
-}
-
-func unavailableIssues(result *dbanalytics.SourceAvailabilityResult) []dbanalytics.SourceAvailabilityIssue {
-	if result == nil {
-		return nil
-	}
-	return result.Unavailable
 }
 
 func captureSidecarAnswerEvent(
@@ -801,10 +668,11 @@ func generalClaudeLLMConfigFromModel(model *types.Model) (*LLMConfig, error) {
 		return nil, errors.New("通用智能体需要对话模型")
 	}
 	out := &LLMConfig{
-		ModelName: strings.TrimSpace(model.Name),
-		BaseURL:   strings.TrimSpace(model.Parameters.BaseURL),
-		APIKey:    strings.TrimSpace(model.Parameters.APIKey),
-		Provider:  strings.TrimSpace(model.Parameters.Provider),
+		SupportsVision: model.Parameters.SupportsVision,
+		ModelName:      strings.TrimSpace(model.Name),
+		BaseURL:        strings.TrimSpace(model.Parameters.BaseURL),
+		APIKey:         strings.TrimSpace(model.Parameters.APIKey),
+		Provider:       strings.TrimSpace(model.Parameters.Provider),
 	}
 	if remoteModel := strings.TrimSpace(model.Parameters.ExtraConfig["remote_model_name"]); remoteModel != "" {
 		out.ModelName = remoteModel
@@ -926,72 +794,22 @@ func buildGeneralAgentHistory(
 	turns int,
 	excludedMessageIDs ...string,
 ) ([]ChatHistoryMessage, string) {
-	type historyPair struct {
-		user      *types.Message
-		assistant *types.Message
-		createdAt time.Time
-		ordinal   int
-	}
-	excluded := make(map[string]struct{}, len(excludedMessageIDs))
-	for _, id := range excludedMessageIDs {
-		if id = strings.TrimSpace(id); id != "" {
-			excluded[id] = struct{}{}
-		}
-	}
-	pairs := make(map[string]*historyPair)
-	for _, msg := range msgs {
-		if msg == nil {
-			continue
-		}
-		if _, skip := excluded[msg.ID]; skip {
-			continue
-		}
-		pair := pairs[msg.RequestID]
-		if pair == nil {
-			pair = &historyPair{}
-			pairs[msg.RequestID] = pair
-		}
-		switch strings.TrimSpace(msg.Role) {
-		case "user":
-			pair.user = msg
-			pair.createdAt = msg.CreatedAt
-		case "assistant":
-			pair.assistant = msg
-		}
-	}
-	complete := make([]*historyPair, 0, len(pairs))
-	for _, pair := range pairs {
-		if pair.user == nil || pair.assistant == nil || !pair.assistant.IsCompleted {
-			continue
-		}
-		complete = append(complete, pair)
-	}
-	sort.Slice(complete, func(i, j int) bool {
-		return complete[i].createdAt.Before(complete[j].createdAt)
-	})
-	for index, pair := range complete {
-		pair.ordinal = index + 1
-	}
-	queries := make([]string, 0, len(complete))
-	for _, pair := range complete {
-		queries = append(queries, strings.TrimSpace(pair.user.Content))
-	}
-	archive := conversationmemory.BuildUserSourceLedger(queries)
-	if len(complete) > turns {
-		complete = complete[len(complete)-turns:]
-	}
-	out := make([]ChatHistoryMessage, 0, len(complete)*2)
-	for _, pair := range complete {
-		userSourceID := conversationmemory.UserTurnSourceID(pair.ordinal)
+	turnsInContext, archive := conversationmemory.BuildHistory(msgs, turns, excludedMessageIDs...)
+	out := make([]ChatHistoryMessage, 0, len(turnsInContext)*2)
+	for _, pair := range turnsInContext {
+		userSourceID := pair.SourceID
 		out = append(out, ChatHistoryMessage{
 			Role:           "user",
-			Content:        strings.TrimSpace(pair.user.Content),
+			Content:        strings.TrimSpace(pair.User.Content),
 			SourceID:       userSourceID,
-			MentionedItems: append([]types.MentionedItem(nil), pair.user.MentionedItems...),
-			Images:         imageSpecs(pair.user.Images),
-			Attachments:    attachmentSpecsWithoutContent(pair.user.Attachments),
+			MentionedItems: append([]types.MentionedItem(nil), pair.User.MentionedItems...),
+			Images:         imageSpecs(pair.User.Images),
+			Attachments:    attachmentSpecsWithoutContent(pair.User.Attachments),
 		})
-		answer := strings.TrimSpace(sourcerefs.StripCitationProtocol(pair.assistant.Content))
+		if pair.Assistant == nil {
+			continue
+		}
+		answer := strings.TrimSpace(sourcerefs.StripCitationProtocol(pair.Assistant.Content))
 		if answer != "" {
 			out = append(out, ChatHistoryMessage{
 				Role:     "assistant",
@@ -1173,7 +991,6 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 			"is_builtin":                    req.CustomAgent.IsBuiltin,
 			"agent_mode":                    req.CustomAgent.Config.AgentMode,
 			"agent_type":                    req.CustomAgent.Config.AgentType,
-			"system_prompt":                 req.CustomAgent.Config.SystemPrompt,
 			"system_prompt_template_id":     req.CustomAgent.Config.SystemPromptID,
 			"model_id":                      req.CustomAgent.Config.ModelID,
 			"rerank_model_id":               req.CustomAgent.Config.RerankModelID,
@@ -1189,7 +1006,6 @@ func (s *Service) buildVisibleContext(ctx context.Context, req *types.QARequest,
 		}
 	}
 	out["current_turn"] = map[string]any{
-		"user_request_verbatim":        req.Query,
 		"quoted_context":               req.QuotedContext,
 		"image_urls":                   cloneStringSlice(req.ImageURLs),
 		"image_description":            req.ImageDescription,
@@ -1262,7 +1078,6 @@ type visibleDBSource struct {
 	Status         string `json:"status"`
 	QueryMode      string `json:"query_mode"`
 	MaxRows        int    `json:"max_rows"`
-	MaxScanRows    int    `json:"max_scan_rows"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
@@ -1437,7 +1252,6 @@ func orderVisibleDBSources(ids []string, rows []visibleDBSource) []map[string]an
 			"status":          row.Status,
 			"query_mode":      row.QueryMode,
 			"max_rows":        row.MaxRows,
-			"max_scan_rows":   row.MaxScanRows,
 			"timeout_seconds": row.TimeoutSeconds,
 		})
 	}

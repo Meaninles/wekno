@@ -12,11 +12,12 @@ import (
 )
 
 var (
-	plainCitationAliasRE = regexp.MustCompile(`[\(（\[【]\s*(S[1-9][0-9]*)\s*[\)）\]】]`)
-	angleCitationAliasRE = regexp.MustCompile(`<\s*(S[1-9][0-9]*)\s*(?:/\s*)?>`)
-	srcCitationAliasRE   = regexp.MustCompile(`(?i)<\s*src\s+id\s*=\s*["'](S[1-9][0-9]*)["']\s*/?\s*>`)
-	paragraphBreakRE     = regexp.MustCompile(`\r?\n[ \t]*\r?\n+`)
-	markdownPrefixRE     = regexp.MustCompile(`(?m)^\s*(?:#{1,6}\s+|[-+*>]\s+|[0-9]+[.)、]\s+)`)
+	plainCitationAliasRE            = regexp.MustCompile(`[\(（\[【]\s*(S[1-9][0-9]*)\s*[\)）\]】]`)
+	parenthesizedSrcCitationAliasRE = regexp.MustCompile(`(?i)[\(（\[【]\s*src\s+id\s*=\s*["']?(S[1-9][0-9]*)["']?\s*[\)）\]】]`)
+	angleCitationAliasRE            = regexp.MustCompile(`<\s*(S[1-9][0-9]*)\s*(?:/\s*)?>`)
+	srcCitationAliasRE              = regexp.MustCompile(`(?i)<\s*src\s+id\s*=\s*["'](S[1-9][0-9]*)["']\s*/?\s*>`)
+	paragraphBreakRE                = regexp.MustCompile(`\r?\n[ \t]*\r?\n+`)
+	markdownPrefixRE                = regexp.MustCompile(`(?m)^\s*(?:#{1,6}\s+|[-+*>]\s+|[0-9]+[.)、]\s+)`)
 )
 
 var repairTokenStopwords = map[string]struct{}{
@@ -450,13 +451,7 @@ func answerHasNamedDefinition(answer, topic string) bool {
 			continue
 		}
 		tail := probe[topicAt+len(topicProbe):]
-		if marker := strings.Index(tail, "是指"); marker >= 0 && marker <= 36 {
-			return true
-		}
-		if marker := strings.Index(tail, "指在"); marker >= 0 && marker <= 36 {
-			return true
-		}
-		if marker := strings.Index(tail, "指采购"); marker >= 0 && marker <= 36 {
+		if marker := definitionMarkerIndex(tail); marker >= 0 && marker <= 36 {
 			return true
 		}
 	}
@@ -477,7 +472,7 @@ func bestNamedDefinitionEvidence(topic string, refs []citationRepairEvidence) (s
 				continue
 			}
 			tail := probe[topicAt+len(topicProbe):]
-			markerAt := strings.Index(tail, "是指")
+			markerAt := definitionMarkerIndex(tail)
 			if markerAt < 0 || markerAt > 36 {
 				continue
 			}
@@ -492,6 +487,16 @@ func bestNamedDefinitionEvidence(topic string, refs []citationRepairEvidence) (s
 		}
 	}
 	return bestText, bestID
+}
+
+// definitionMarkerIndex recognizes the grammatical definition relation after
+// a named topic without enumerating any business noun. Prefer the complete
+// copular form and fall back to the generic Chinese definition verb.
+func definitionMarkerIndex(value string) int {
+	if index := strings.Index(value, "是指"); index >= 0 {
+		return index
+	}
+	return strings.Index(value, "指")
 }
 
 // RecoverOffTopicNarrowEvidenceAnswer replaces a stale answer to an explicitly
@@ -1171,6 +1176,7 @@ func normalizeKnownCitationAliases(answer string, refs []*types.SearchResult) st
 			})
 		}
 		segment = normalize(plainCitationAliasRE, segment)
+		segment = normalize(parenthesizedSrcCitationAliasRE, segment)
 		segment = normalize(angleCitationAliasRE, segment)
 		return normalize(srcCitationAliasRE, segment)
 	})

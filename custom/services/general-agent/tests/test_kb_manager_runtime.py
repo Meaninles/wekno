@@ -14,7 +14,6 @@ from app.runner import (  # noqa: E402
     BUILTIN_KNOWLEDGE_MANAGER_SYSTEM_PROMPT,
     build_system_prompt,
     prepare_knowledge_manager_workspace,
-    runtime_summary,
 )
 from app.schemas import ChatPayload, LLMConfig, RuntimeConfigSpec  # noqa: E402
 
@@ -62,14 +61,6 @@ class KnowledgeManagerRuntimeTest(unittest.TestCase):
         self.assertIn("do not automatically call `kb_mutation_status`", prompt)
         self.assertIn('Distinguish "document added" from "processing completed"', prompt)
 
-    def test_runtime_summary_exposes_only_effective_management_scope(self):
-        summary = json.loads(runtime_summary(manager_payload()))
-        scope = summary["knowledge_management"]
-        self.assertTrue(scope["explicit_selection"])
-        self.assertEqual(scope["documents"], {"doc-a": "kb-a"})
-        self.assertEqual(scope["whole_knowledge_base_ids"], [])
-        self.assertNotIn("source_id", json.dumps(scope))
-        self.assertNotIn("storage_url", json.dumps(scope))
 
     def test_artifact_count_is_unlimited_only_for_manager(self):
         with tempfile.TemporaryDirectory() as tmp:

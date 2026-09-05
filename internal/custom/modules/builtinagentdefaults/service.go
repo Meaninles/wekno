@@ -199,8 +199,6 @@ func (s *Service) Reset(ctx context.Context, id string) (*types.CustomAgent, err
 	}
 
 	resetAgent.EnsureDefaults()
-	enableThinking := true
-	resetAgent.Config.Thinking = &enableThinking
 	if err := types.NormalizeCustomAgentDocumentTemplateConfig(&resetAgent.Config); err != nil {
 		return nil, err
 	}
@@ -245,9 +243,6 @@ func mergeResetConfig(defaultConfig, currentConfig types.CustomAgentConfig) type
 	cfg.MCPSelectionMode = currentConfig.MCPSelectionMode
 	cfg.MCPServices = cloneStringSlice(currentConfig.MCPServices)
 	cfg.MCPAuthWaitTimeout = currentConfig.MCPAuthWaitTimeout
-
-	enableThinking := true
-	cfg.Thinking = &enableThinking
 
 	return cfg
 }

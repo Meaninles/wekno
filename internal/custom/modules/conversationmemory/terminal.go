@@ -7,17 +7,49 @@ import (
 )
 
 const (
-	TerminalAnswerOpen  = "<weknora_final_response>"
-	TerminalAnswerClose = "</weknora_final_response>"
+	// TerminalAnswerOpen is a passive text delimiter, deliberately not an XML
+	// element or tool-like name. Models may reason before it; only text after it
+	// is eligible for SSE and persistence. It adds no model or retrieval call.
+	TerminalAnswerOpen  = "<<<WEKNORA_USER_VISIBLE>>>"
+	TerminalAnswerClose = "<<<WEKNORA_USER_VISIBLE_END>>>"
+
+	legacyTerminalAnswerOpen  = "<weknora_final_response>"
+	legacyTerminalAnswerClose = "</weknora_final_response>"
 )
 
 var terminalCitationPattern = regexp.MustCompile(`<src\s+id="S[1-9][0-9]*"\s*/>`)
+
+// privateContextBoundaries are runtime-owned prompt/history namespaces, never
+// user content. Compatibility providers can occasionally echo one after the
+// visible answer. Treat the first such prefix as a transport boundary so it
+// cannot enter SSE, persistence, or the next turn's history. These are
+// protocol identifiers rather than domain/user-language keywords.
+var privateContextBoundaries = []string{
+	"<historical_assistant_output",
+	"</historical_assistant_output",
+	"<historical_user_input",
+	"</historical_user_input",
+	"<user_source_ledger",
+	"</user_source_ledger",
+	"<user_request",
+	"</user_request",
+	"<current_task_priority",
+	"</current_task_priority",
+}
 
 // TerminalIntegrityRetryDirective asks for a fresh terminal rendering using
 // only already available context/evidence and explicitly disables tools. It is
 // a production reliability instruction, not an Eval repair or semantic judge.
 func TerminalIntegrityRetryDirective() string {
-	return "The previous terminal response was not shown because it contained a transport-level output-integrity failure. Produce one fresh, self-contained final answer to the same current user request using only the existing conversation and current-turn tool evidence. Do not call any tool or describe this retry. Do not repeat protocol markers, planning, or self-talk. Return the complete user-visible answer inside exactly one <weknora_final_response>...</weknora_final_response> envelope."
+	return "The previous terminal response was not shown because it contained a transport-level output-integrity failure. Produce one fresh, self-contained final answer to the same current user request using only the existing conversation and current-turn tool evidence. Do not call any tool or describe this retry. Keep planning and self-talk before the private text delimiter, then output exactly " + TerminalAnswerOpen + " once followed immediately by only the complete user-visible answer. The delimiter is text, not a tool."
+}
+
+// TerminalOutputLimitRetryDirective asks the model to replace a provider-
+// truncated draft with one bounded, complete answer. The draft is never exposed
+// to the user and the retry cannot retrieve more evidence or call a tool. This
+// is provider-failure recovery on the production path, not an Eval rewrite.
+func TerminalOutputLimitRetryDirective() string {
+	return "The previous draft reached the provider output limit and was not shown. Produce one concise, self-contained and complete final answer to the same current user request using only the existing conversation and current-turn tool evidence. Prioritize the direct result and essential supporting details so the answer ends cleanly within the available space. Do not call any tool, add unsupported facts, mention this retry, or continue the cut-off draft. Output exactly " + TerminalAnswerOpen + " once followed immediately by only the complete user-visible answer. The delimiter is text, not a tool."
 }
 
 // TerminalIntegrityFallback is used only after the single integrity retry also
@@ -43,13 +75,28 @@ func TerminalAnswerIntegrityReason(answer string) string {
 
 	lower := strings.ToLower(trimmed)
 	for _, marker := range []string{
+		strings.ToLower(TerminalAnswerOpen),
+		strings.ToLower(TerminalAnswerClose),
 		"<weknora_",
 		"</weknora_",
+		"<historical_",
+		"</historical_",
+		"<user_source_ledger",
+		"</user_source_ledger",
+		"<user_request",
+		"</user_request",
+		"<current_task_priority",
+		"</current_task_priority",
 		"weknora_final_placeholder",
+		"｜dsml｜",
+		"|dsml|",
 	} {
 		if strings.Contains(lower, marker) {
 			return "terminal_protocol_residue"
 		}
+	}
+	if hasFinalEnvelopeTag(trimmed) {
+		return "terminal_protocol_residue"
 	}
 
 	// A source handle is model/runtime protocol, not ordinary markup. If the
@@ -143,9 +190,97 @@ func ProjectTerminalAnswer(raw string) string {
 		if end := strings.Index(content, TerminalAnswerClose); end >= 0 {
 			content = content[:end]
 		}
-		return strings.TrimSpace(content)
+		return cleanTerminalContent(content)
 	}
-	return strings.TrimSpace(raw)
+	if start := strings.Index(raw, legacyTerminalAnswerOpen); start >= 0 {
+		content := raw[start+len(legacyTerminalAnswerOpen):]
+		if end := strings.Index(content, legacyTerminalAnswerClose); end >= 0 {
+			content = content[:end]
+		}
+		return cleanTerminalContent(content)
+	}
+	if content, ok := projectWholeFinalEnvelope(raw); ok {
+		return cleanTerminalContent(content)
+	}
+	return cleanTerminalContent(raw)
+}
+
+func cleanTerminalContent(content string) string {
+	if end, ok := terminalBoundaryIndex(content, privateContextBoundaries); ok {
+		content = content[:end]
+	}
+	return strings.TrimSpace(content)
+}
+
+// projectWholeFinalEnvelope handles compatibility gateways that preserve a
+// whole-response final-answer wrapper but alter its private namespace. The
+// structural check requires one matching outer element and never scans or
+// rewrites ordinary prose, Markdown, or embedded code.
+func projectWholeFinalEnvelope(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "<") {
+		return "", false
+	}
+	openEnd := strings.IndexByte(trimmed, '>')
+	if openEnd <= 1 {
+		return "", false
+	}
+	openFields := strings.Fields(strings.TrimSpace(trimmed[1:openEnd]))
+	if len(openFields) == 0 || !isFinalEnvelopeTag(openFields[0]) {
+		return "", false
+	}
+	name := openFields[0]
+	closeTag := "</" + name + ">"
+	if !strings.HasSuffix(trimmed, closeTag) {
+		return "", false
+	}
+	return strings.TrimSpace(trimmed[openEnd+1 : len(trimmed)-len(closeTag)]), true
+}
+
+func hasFinalEnvelopeTag(value string) bool {
+	lower := strings.ToLower(value)
+	for cursor := 0; cursor < len(lower); {
+		start := strings.IndexByte(lower[cursor:], '<')
+		if start < 0 {
+			return false
+		}
+		start += cursor + 1
+		if start < len(lower) && lower[start] == '/' {
+			start++
+		}
+		end := start
+		for end < len(lower) {
+			ch := lower[end]
+			if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.' || ch == ':' {
+				end++
+				continue
+			}
+			break
+		}
+		if end > start && isFinalEnvelopeTag(lower[start:end]) {
+			return true
+		}
+		cursor = start
+		if cursor >= len(lower) {
+			return false
+		}
+	}
+	return false
+}
+
+func isFinalEnvelopeTag(name string) bool {
+	normalized := strings.NewReplacer("-", "_", ".", "_", ":", "_").Replace(strings.ToLower(strings.TrimSpace(name)))
+	// Compatibility projection is deliberately limited to transport-owned
+	// namespaces. A user may legitimately request or discuss an XML element
+	// such as <business_final_answer>; that is answer content, not protocol.
+	switch normalized {
+	case "weknora_final_response", "weknora_final_answer",
+		"provider_final_response", "provider_final_answer",
+		"gateway_final_response", "gateway_final_answer":
+		return true
+	default:
+		return false
+	}
 }
 
 // TerminalAnswerProjector incrementally exposes only content inside the
@@ -198,7 +333,7 @@ func (p *TerminalAnswerProjector) Flush() string {
 	}
 	p.finished = true
 	if !p.opened {
-		fallback := strings.TrimSpace(p.raw.String())
+		fallback := ProjectTerminalAnswer(p.raw.String())
 		p.answer.WriteString(fallback)
 		return fallback
 	}
@@ -222,7 +357,8 @@ func (p *TerminalAnswerProjector) drain(flush bool) string {
 		return ""
 	}
 	content := ""
-	if end := strings.Index(p.pending, TerminalAnswerClose); end >= 0 {
+	boundaries := append([]string{TerminalAnswerClose}, privateContextBoundaries...)
+	if end, ok := terminalBoundaryIndex(p.pending, boundaries); ok {
 		content = p.pending[:end]
 		p.pending = ""
 		p.closed = true
@@ -230,7 +366,12 @@ func (p *TerminalAnswerProjector) drain(flush bool) string {
 		content = p.pending
 		p.pending = ""
 	} else {
-		hold := terminalMarkerSuffixLength(p.pending, TerminalAnswerClose)
+		hold := 0
+		for _, marker := range boundaries {
+			if suffix := terminalMarkerSuffixLength(p.pending, marker); suffix > hold {
+				hold = suffix
+			}
+		}
 		content = p.pending[:len(p.pending)-hold]
 		p.pending = p.pending[len(p.pending)-hold:]
 	}
@@ -270,13 +411,26 @@ found:
 	return out
 }
 
+func terminalBoundaryIndex(value string, markers []string) (int, bool) {
+	lower := strings.ToLower(value)
+	first := -1
+	for _, marker := range markers {
+		if index := strings.Index(lower, strings.ToLower(marker)); index >= 0 && (first < 0 || index < first) {
+			first = index
+		}
+	}
+	return first, first >= 0
+}
+
 func terminalMarkerSuffixLength(value, marker string) int {
+	lowerValue := strings.ToLower(value)
+	lowerMarker := strings.ToLower(marker)
 	limit := len(marker) - 1
 	if len(value) < limit {
 		limit = len(value)
 	}
 	for size := limit; size > 0; size-- {
-		if strings.HasSuffix(value, marker[:size]) {
+		if strings.HasSuffix(lowerValue, lowerMarker[:size]) {
 			return size
 		}
 	}

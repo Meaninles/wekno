@@ -18,6 +18,7 @@ def empty_dict_when_none(value: Any) -> Any:
 
 
 class LLMConfig(BaseModel):
+    supports_vision: bool = False
     model_name: str
     base_url: str = ""
     api_key: str = ""
@@ -169,6 +170,7 @@ class ChatPayload(BaseModel):
     user_id: str = ""
     session_id: str
     request_id: str = ""
+    user_message_id: str = ""
     assistant_message_id: str
     query: str
     system_prompt: str = ""

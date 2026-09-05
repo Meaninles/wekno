@@ -24,7 +24,6 @@ export interface DatabaseSource {
   error_message?: string;
   query_mode: 'live' | 'snapshot';
   max_rows: number;
-  max_scan_rows: number;
   timeout_seconds: number;
   created_by?: string;
   created_at?: string;
@@ -117,7 +116,6 @@ export interface CreateDatabaseSourceRequest {
   config: DatabaseSourceConfig;
   query_mode?: 'live' | 'snapshot';
   max_rows?: number;
-  max_scan_rows?: number;
   timeout_seconds?: number;
 }
 

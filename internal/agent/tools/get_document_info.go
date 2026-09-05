@@ -48,20 +48,24 @@ Do not use when:
 - faq_ids: individual FAQ entries. Returns the standard question and answers, not the container title.`,
 	schema: json.RawMessage(`{
   "type": "object",
+  "anyOf": [{"required":["knowledge_ids"]}, {"required":["knowledge_base_ids"]}, {"required":["faq_ids"]}],
   "properties": {
     "knowledge_ids": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
       "description": "Document/knowledge IDs for regular documents"
     },
     "knowledge_base_ids": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
       "description": "Knowledge-base IDs already in scope. For their content, use knowledge_search or wiki_search instead."
     },
     "faq_ids": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
       "description": "FAQ entry IDs (= chunk_id from grep_chunks). Use instead of knowledge_ids for a single FAQ Q&A."
     }
   }
@@ -69,7 +73,7 @@ Do not use when:
 }
 
 // GetDocumentInfoInput defines the input parameters for get document info tool.
-// Either knowledge_ids or faq_ids may be provided (at least one); both are optional in the schema.
+// At least one non-empty ID array is required by both schema and executor.
 type GetDocumentInfoInput struct {
 	KnowledgeIDs     []string `json:"knowledge_ids,omitempty"`
 	KnowledgeBaseIDs []string `json:"knowledge_base_ids,omitempty"`

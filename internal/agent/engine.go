@@ -51,6 +51,7 @@ type AgentEngine struct {
 	lastUsage            types.TokenUsage          // Token usage from the most recent LLM call
 	lastSentMsgCount     int                       // Number of messages sent in the most recent LLM call
 	citationState        agentCitationState        // Stable source handles for this execution
+	currentUserRequest   string                    // Exact current chat input, excluding runtime augmentation
 }
 
 // ImageDescriberFunc generates a text description of an image.
@@ -172,6 +173,21 @@ func (e *AgentEngine) SetSkillsManager(manager *skills.Manager) {
 	e.skillsManager = manager
 }
 
+// SetCurrentUserRequest keeps the exact user-authored task separate from
+// attachment/runtime augmentation. The model still receives all augmented
+// current-turn content, while recency anchors and terminal synthesis repeat
+// only the user's actual request. No semantic classification is performed.
+func (e *AgentEngine) SetCurrentUserRequest(request string) {
+	e.currentUserRequest = strings.TrimSpace(request)
+}
+
+func (e *AgentEngine) activeUserRequest(fallback string) string {
+	if request := strings.TrimSpace(e.currentUserRequest); request != "" {
+		return request
+	}
+	return strings.TrimSpace(fallback)
+}
+
 // GetSkillsManager returns the skills manager
 func (e *AgentEngine) GetSkillsManager() *skills.Manager {
 	return e.skillsManager
@@ -264,10 +280,11 @@ func (e *AgentEngine) Execute(
 		imgs = imageURLs[0]
 	}
 	messages := e.buildMessagesWithLLMContext(systemPrompt, query, sessionID, llmContext, imgs)
+	currentRequest := e.activeUserRequest(query)
 
 	// Get tool definitions for function calling
 	tools := e.buildToolsForLLM()
-	recordAgentEvalPromptLayout(ctx, e, messages, tools, systemPrompt, query)
+	recordAgentEvalPromptLayout(ctx, e, messages, tools, systemPrompt, currentRequest)
 	toolListStr := strings.Join(listToolNames(tools), ", ")
 	logger.Infof(ctx, "[Agent] Ready: %d messages, %d tools [%s], %d images",
 		len(messages), len(tools), toolListStr, len(imgs))
@@ -277,7 +294,7 @@ func (e *AgentEngine) Execute(
 		"tools":      toolListStr,
 	})
 
-	_, err := e.executeLoop(ctx, state, query, messages, tools, sessionID, messageID)
+	_, err := e.executeLoop(ctx, state, currentRequest, messages, tools, sessionID, messageID)
 	if err != nil {
 		logger.Errorf(ctx, "[Agent] Execution failed: %v", err)
 		e.eventBus.Emit(ctx, event.Event{
@@ -612,9 +629,17 @@ func (e *AgentEngine) runReActIteration(
 		if *consecutiveSameContent >= maxRepeatedResponseRounds {
 			logger.Warnf(ctx, "[Agent][Round-%d] Detected stuck loop: same content repeated %d times (finish=%s), stopping",
 				round, *consecutiveSameContent+1, response.FinishReason)
-			state.FinalAnswer = response.Content
-			state.IsComplete = true
-			return iterOutcomeBreak, nil
+			// Never promote a provider-truncated or otherwise non-terminal draft to
+			// the persisted production answer. Successful terminal responses are
+			// normally handled below; this branch is only a defensive guard.
+			if isSuccessfulTerminalFinishReason(response.FinishReason) {
+				state.FinalAnswer = response.Content
+				state.IsComplete = true
+				return iterOutcomeBreak, nil
+			}
+			return iterOutcomeNext, fmt.Errorf(
+				"repeated non-terminal model response (finish_reason=%s)", response.FinishReason,
+			)
 		}
 	} else {
 		*consecutiveSameContent = 0
@@ -697,7 +722,7 @@ func (e *AgentEngine) runReActIteration(
 
 	// 4. Observe: Add tool results to messages and write to context
 	state.RoundSteps = append(state.RoundSteps, step)
-	*messagesPtr = e.appendToolResults(*messagesPtr, step)
+	*messagesPtr = e.appendToolResults(*messagesPtr, step, query)
 	common.PipelineInfo(ctx, "Agent", "round_end", map[string]interface{}{
 		"iteration":   state.CurrentRound,
 		"round":       round,

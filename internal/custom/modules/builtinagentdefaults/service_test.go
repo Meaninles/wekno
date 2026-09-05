@@ -37,8 +37,8 @@ func TestMergeResetConfigPreservesRuntimeBindings(t *testing.T) {
 
 	got := mergeResetConfig(defaultConfig, currentConfig)
 
-	if got.Thinking == nil || *got.Thinking != true {
-		t.Fatalf("thinking should be forced to true, got %#v", got.Thinking)
+	if got.Thinking == nil || *got.Thinking != false {
+		t.Fatalf("thinking should follow the builtin default, got %#v", got.Thinking)
 	}
 	if got.ModelID != "current-model" || got.RerankModelID != "current-rerank" {
 		t.Fatalf("model bindings were not preserved: %#v", got)

@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
-	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/custom/modules/conversationmemory"
@@ -43,7 +41,7 @@ var agentHistoryThinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
 //  3. A final assistant message with the canonical answer (msg.Content with
 //     <think> blocks stripped).
 //
-// Turns lacking either user or assistant content are skipped. The newest
+// User messages survive interrupted assistant executions. The newest
 // maxRounds turns are returned in chronological order.
 //
 // DB is treated as the single source of truth — there is no Redis/in-memory
@@ -59,16 +57,13 @@ func LoadAgentHistory(
 	return history, err
 }
 
-// LoadAgentHistoryWithArchive returns the configured recent full turns plus a
-// bounded, user-only source ledger for all completed turns in the indexed read.
-// Recent user statements intentionally appear in both views: normal history
-// preserves dialogue flow while the ledger gives state synthesis one explicit
-// provenance boundary independent of assistant output.
+// LoadAgentHistoryWithArchive adapts the shared context selection to native model messages.
 func LoadAgentHistoryWithArchive(
 	ctx context.Context,
 	messageRepo interfaces.MessageRepository,
 	sessionID string,
 	maxRounds int,
+	excludedIDs ...string,
 ) ([]chat.Message, string, error) {
 	if maxRounds <= 0 {
 		return []chat.Message{}, "", nil
@@ -90,61 +85,13 @@ func LoadAgentHistoryWithArchive(
 		return []chat.Message{}, "", nil
 	}
 
-	type pair struct {
-		user      *types.Message
-		assistant *types.Message
-		createdAt time.Time
-		ordinal   int
-	}
-	pairs := make(map[string]*pair)
-	for _, msg := range rows {
-		p, ok := pairs[msg.RequestID]
-		if !ok {
-			p = &pair{}
-			pairs[msg.RequestID] = p
+	turns, archive := conversationmemory.BuildHistory(rows, maxRounds, excludedIDs...)
+	out := make([]chat.Message, 0, len(turns)*2)
+	for _, turn := range turns {
+		out = append(out, buildUserHistoryMessage(turn.User, turn.SourceID))
+		if turn.Assistant != nil {
+			out = append(out, buildAssistantHistoryMessages(turn.Assistant)...)
 		}
-		switch msg.Role {
-		case "user":
-			p.user = msg
-			if p.createdAt.IsZero() || msg.CreatedAt.Before(p.createdAt) {
-				p.createdAt = msg.CreatedAt
-			}
-		case "assistant":
-			p.assistant = msg
-		}
-	}
-
-	completePairs := make([]*pair, 0, len(pairs))
-	for _, p := range pairs {
-		if p.user != nil && p.assistant != nil && p.assistant.IsCompleted {
-			completePairs = append(completePairs, p)
-		}
-	}
-
-	sort.Slice(completePairs, func(i, j int) bool {
-		return completePairs[i].createdAt.Before(completePairs[j].createdAt)
-	})
-	for index, p := range completePairs {
-		p.ordinal = index + 1
-	}
-
-	queries := make([]string, 0, len(completePairs))
-	for _, p := range completePairs {
-		// The durable archive is deliberately narrower than recent multimodal
-		// history: only the persisted user-authored text may become a long-lived
-		// conversation fact. Derived captions and attachment prompts remain in the
-		// normal recent window and are never relabelled as user quotations.
-		queries = append(queries, p.user.Content)
-	}
-	archive := conversationmemory.BuildUserSourceLedger(queries)
-	if len(completePairs) > maxRounds {
-		completePairs = completePairs[len(completePairs)-maxRounds:]
-	}
-
-	out := make([]chat.Message, 0, len(completePairs)*4)
-	for _, p := range completePairs {
-		out = append(out, buildUserHistoryMessage(p.user, conversationmemory.UserTurnSourceID(p.ordinal)))
-		out = append(out, buildAssistantHistoryMessages(p.assistant)...)
 	}
 	return out, archive, nil
 }

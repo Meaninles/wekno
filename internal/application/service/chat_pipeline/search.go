@@ -300,20 +300,57 @@ func logSearchScoreSample(ctx context.Context, action string, results []*types.S
 	}
 }
 
-// searchByTargets performs KB searches using pre-computed SearchTargets.
-// Targets sharing the same underlying embedding model (identified by model
-// name + endpoint, not just model ID) are grouped so the query embedding is
-// computed once per model AND all full-KB targets in a group are combined into
-// a single retrieval call, reducing both embedding API calls and DB round-trips.
+// searchByTargets performs one retrieval per model-decomposed evidence
+// subquestion, concurrently, then deduplicates the union. A single-subject
+// request remains exactly one retrieval; compound requests gain coverage
+// without an extra LLM call or any domain/keyword split rules.
 func (p *PluginSearch) searchByTargets(
 	ctx context.Context,
 	chatManage *types.ChatManage,
 ) []*types.SearchResult {
+	queries := chatManage.RetrievalQueries()
+	if len(queries) <= 1 {
+		query := chatManage.RetrievalQuery()
+		if len(queries) == 1 {
+			query = queries[0]
+		}
+		return p.searchByTargetsForQuery(ctx, chatManage, query)
+	}
+
+	pipelineInfo(ctx, "Search", "compound_query_plan", map[string]interface{}{
+		"session_id":  chatManage.SessionID,
+		"query_count": len(queries),
+	})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	all := make([]*types.SearchResult, 0, len(queries)*chatManage.EmbeddingTopK)
+	for _, query := range queries {
+		wg.Add(1)
+		go func(query string) {
+			defer wg.Done()
+			found := p.searchByTargetsForQuery(ctx, chatManage, query)
+			mu.Lock()
+			all = append(all, found...)
+			mu.Unlock()
+		}(query)
+	}
+	wg.Wait()
+	return removeDuplicateResults(all)
+}
+
+// searchByTargetsForQuery performs KB searches using pre-computed SearchTargets.
+// Targets sharing the same underlying embedding model (identified by model
+// name + endpoint, not just model ID) are grouped so the query embedding is
+// computed once per model AND all full-KB targets in a group are combined into
+// a single retrieval call, reducing both embedding API calls and DB round-trips.
+func (p *PluginSearch) searchByTargetsForQuery(
+	ctx context.Context,
+	chatManage *types.ChatManage,
+	queryText string,
+) []*types.SearchResult {
 	if len(chatManage.SearchTargets) == 0 {
 		return nil
 	}
-
-	queryText := chatManage.RetrievalQuery()
 
 	// Batch-fetch KB records to determine embedding model grouping.
 	// On failure, all targets fall into an empty-key group and HybridSearch
